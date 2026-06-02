@@ -13,7 +13,7 @@ artifact.
 
 ## Evidence
 
-`src/os/posix/dynlib_sffi.spl` declares:
+Earlier investigation looked at `src/os/posix/dynlib_sffi.spl` declarations:
 
 ```simple
 extern fn rt_dyncall_0(fn_ptr: i64) -> i64
@@ -22,10 +22,11 @@ extern fn rt_dyncall_1(fn_ptr: i64, arg0: i64) -> i64
 extern fn rt_dyncall_6(fn_ptr: i64, arg0: i64, arg1: i64, arg2: i64, arg3: i64, arg4: i64, arg5: i64) -> i64
 ```
 
-`src/compiler_rust/runtime/src/value/sffi/dyncall.rs` now implements these
-externs for process-callable `i64` ABI functions. The SMF registry path still
-needs executable mapping evidence before the GUI probe can use those function
-pointers safely.
+Those `rt_dyncall_*` externs are not the GUI release-lane solution. Current
+release evidence uses the Simple SFFI dynamic API (`spl_dlopen`, `spl_dlsym`,
+`spl_dlclose`, `spl_wffi_call_i64`) from the probe path. The SMF registry path
+still needs executable mapping evidence before registry virtual addresses can be
+used directly, so registry-only symbols remain non-acceptance evidence.
 
 ## Current Probe Behavior
 
@@ -107,10 +108,12 @@ SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/unit/lib/gui/pure
 The probe now supports a real SMF artifact path on the host:
 
 - `src/app/gui_perf/smf_wrap_host_dynlib.spl` wraps a host `.so`/`.dylib` in a
-  role-2 SMF envelope through `rt_file_wrap_smf_dynlib`.
+  role-2 SMF envelope using Simple code in
+  `src/app/gui_perf/smf_dynlib_artifact.spl`.
 - `src/app/gui_perf/smf_dynlib_probe_core.spl` extracts the native library stub
-  through `rt_file_extract_smf_dynlib`, opens it with `spl_dlopen`, resolves
-  `gui_dynlib_hot_probe_tick`, and samples `spl_wffi_call_i64` in the hot loop.
+  from the SMF envelope using Simple parsing/copying, writes a verified cache
+  file, opens it with `spl_dlopen`, resolves `gui_dynlib_hot_probe_tick`, and
+  samples `spl_wffi_call_i64` in the hot loop.
 
 Current Linux host evidence:
 
@@ -133,3 +136,33 @@ existing compile error in `runtime/src/value/pty.rs`:
 ```text
 cannot find function `rt_pty_write` in this scope
 ```
+
+## Update: 2026-06-02 release-lane evidence state
+
+Linux now has repeatable e2e evidence through
+`src/app/gui_perf/linux_smf_dynlib_e2e_gate.spl` and
+`test/system/gui/linux_smf_dynlib_e2e_gate_system_spec.spl`. The gate builds
+`build/gui/libpure_gui_hot.so`, wraps it into `build/gui/pure_gui_hot.smf`,
+extracts the SMF payload, calls it through SFFI, and requires:
+
+```text
+loader=smf_dynlib dynload=smf_dynlib host_dynload=sffi call_source=dynlib_symbol_call pass=true threshold_us=1000
+```
+
+The Linux gate is regression evidence for the pure Simple SMF wrap/extract/SFFI
+path. It does not close this bug because the acceptance target is macOS arm64.
+
+`test/system/gui/macos_smf_dynlib_release_gate_system_spec.spl` now runs the
+macOS release gate as system evidence. On macOS it requires
+`GUI_MAC_SMF_DYNLIB_RELEASE_GATE status=pass`; on non-mac hosts it accepts only
+the explicit `requires-macos-arm64` skip/fail output so Linux CI cannot claim
+mac release evidence.
+
+`test/unit/lib/gui/pure_gui_release_lane_spec.spl` guards the mac and Linux SMF
+evidence entrypoints against WM, Simple Web, BrowserWindow, WebRenderer,
+WebRenderRequest, HostCompositor, native GUI runtime externs, legacy
+`rt_file_wrap_smf_dynlib` / `rt_file_extract_smf_dynlib`, and `rt_dyncall`.
+
+Remaining blocker: run the macOS release gate on real macOS arm64 and record a
+passing transcript whose `GUI_DYNLIB_PERF` row reports the SMF/SFFI hot-call
+path with `p99_us < 1000`.
