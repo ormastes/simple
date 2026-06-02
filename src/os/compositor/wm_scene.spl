@@ -25,6 +25,7 @@ struct WmSceneVisualQualityReport:
     passed: bool
     theme_configured: bool
     round_scrollbars: bool
+    round_icon_converter: bool
     contrast_ratio_x100: i64
     color_checked: bool
     bounded_layout: bool
@@ -86,6 +87,11 @@ fn modern_wm_scene_theme_config() -> WmSceneModernThemeConfig:
         reduced_motion_ms: 80,
         can_disable_motion: true
     )
+
+fn wm_scene_icon_kind(icon: text) -> text:
+    if icon.starts_with("/") or icon.starts_with("data:") or icon.starts_with("http://") or icon.starts_with("https://"):
+        return "square-to-round"
+    "glyph-to-round"
 
 fn _wm_min_i32(a: i32, b: i32) -> i32:
     if a < b: a else: b
@@ -221,7 +227,7 @@ fn shared_wm_scene_to_chromed_wm_scene(scene: SharedWmScene, taskbar: TaskbarMod
             w: 56,
             h: chrome.taskbar.height,
             color: 0xFF2563EBu32,
-            text: app.app_id
+            text: "{app.app_id}|{app.icon}"
         ))
         pin_i = pin_i + 1
     var run_i = 0
@@ -234,7 +240,7 @@ fn shared_wm_scene_to_chromed_wm_scene(scene: SharedWmScene, taskbar: TaskbarMod
             w: 56,
             h: chrome.taskbar.height,
             color: 0xFF475569u32,
-            text: running.window_id
+            text: "{running.window_id}|{running.app_id}"
         ))
         run_i = run_i + 1
     val base = shared_wm_scene_to_wm_scene(scene)
@@ -268,6 +274,7 @@ fn wm_scene_visual_quality_report(scene: WmSceneSpec) -> WmSceneVisualQualityRep
     val config = modern_wm_scene_theme_config()
     val theme_configured = _scene_theme_configured(html, config)
     val round_scrollbars = _scene_round_scrollbars_configured(html, config)
+    val round_icon_converter = _scene_round_icon_converter_configured(html)
     val contrast_ratio_x100 = _scene_contrast_ratio_x100(_scene_background_color(scene), 0xFFFFFFFFu32)
     val color_checked = contrast_ratio_x100 >= 450 and html.contains("color:white")
     var bounded_layout = scene.width > 0 and scene.height > 0
@@ -276,8 +283,10 @@ fn wm_scene_visual_quality_report(scene: WmSceneSpec) -> WmSceneVisualQualityRep
     var min_overview_card_width_px = 0
     var min_touch_target_height_px = 0
     var rounded_surface_count: i64 = 0
-    var motion_affordance_count = 0
     var has_control_center = false
+    var has_desktop_widgets = false
+    var has_window_overview = false
+    var has_snap_preview = false
     for elem in scene.elements:
         if elem.x < 0 or elem.y < 0 or elem.w < 0 or elem.h < 0:
             bounded_layout = false
@@ -285,23 +294,25 @@ fn wm_scene_visual_quality_report(scene: WmSceneSpec) -> WmSceneVisualQualityRep
             bounded_layout = false
         if elem.kind == "control_center":
             has_control_center = true
-            motion_affordance_count = motion_affordance_count + 1
-            max_control_center_width_px = elem.w
+            if elem.w > max_control_center_width_px:
+                max_control_center_width_px = elem.w
             if elem.w > 320:
                 bounded_layout = false
             rounded_surface_count = rounded_surface_count + 1
         elif elem.kind == "desktop_widgets":
-            motion_affordance_count = motion_affordance_count + 1
-            max_desktop_widget_width_px = elem.w
+            has_desktop_widgets = true
+            if elem.w > max_desktop_widget_width_px:
+                max_desktop_widget_width_px = elem.w
             if elem.w > 260:
                 bounded_layout = false
             rounded_surface_count = rounded_surface_count + 1
         elif elem.kind == "window_overview":
-            motion_affordance_count = motion_affordance_count + 1
-            min_overview_card_width_px = 180
+            has_window_overview = true
+            if min_overview_card_width_px == 0 or elem.w < min_overview_card_width_px:
+                min_overview_card_width_px = elem.w
             rounded_surface_count = rounded_surface_count + 1
         elif elem.kind == "snap_preview":
-            motion_affordance_count = motion_affordance_count + 1
+            has_snap_preview = true
             rounded_surface_count = rounded_surface_count + 1
         elif elem.kind == "taskbar":
             rounded_surface_count = rounded_surface_count + 1
@@ -310,13 +321,15 @@ fn wm_scene_visual_quality_report(scene: WmSceneSpec) -> WmSceneVisualQualityRep
     if has_control_center:
         min_touch_target_height_px = _scene_touch_target_height_px(html)
     val translucent_surfaces = html.contains("backdrop-filter:blur") and html.contains("rgba(") and html.contains("linear-gradient")
-    val motion_can_disable = motion_affordance_count >= 4 and html.contains("data-motion-can-disable='true'") and html.contains("body[data-motion-mode='off']") and html.contains("animation:none!important")
-    val reduced_motion_duration_ms = if motion_affordance_count >= 4 and html.contains("data-reduced-motion-duration-ms='80'") and html.contains("animation-duration:80ms"): 80 else: 0
-    val passed = theme_configured and round_scrollbars and color_checked and bounded_layout and translucent_surfaces and rounded_surface_count >= 4 and max_control_center_width_px <= 320 and max_desktop_widget_width_px <= 260 and min_overview_card_width_px >= 180 and min_touch_target_height_px >= 36 and motion_can_disable and reduced_motion_duration_ms == 80
+    val has_all_motion_affordances = has_control_center and has_desktop_widgets and has_window_overview and has_snap_preview
+    val motion_can_disable = has_all_motion_affordances and html.contains("data-motion-can-disable='true'") and html.contains("body[data-motion-mode='off']") and html.contains("animation:none!important")
+    val reduced_motion_duration_ms = if has_all_motion_affordances and html.contains("data-reduced-motion-duration-ms='80'") and html.contains("animation-duration:80ms"): 80 else: 0
+    val passed = theme_configured and round_scrollbars and round_icon_converter and color_checked and bounded_layout and translucent_surfaces and rounded_surface_count >= 4 and max_control_center_width_px <= 320 and max_desktop_widget_width_px <= 260 and min_overview_card_width_px >= 180 and min_touch_target_height_px >= 44 and motion_can_disable and reduced_motion_duration_ms == 80
     WmSceneVisualQualityReport(
         passed: passed,
         theme_configured: theme_configured,
         round_scrollbars: round_scrollbars,
+        round_icon_converter: round_icon_converter,
         contrast_ratio_x100: contrast_ratio_x100,
         color_checked: color_checked,
         bounded_layout: bounded_layout,
@@ -339,7 +352,7 @@ fn scene_to_html(scene: WmSceneSpec) -> text:
         if elem.kind == "desktop_chrome":
             body = body + "<div class='desktop' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'></div>"
         elif elem.kind == "decoration":
-            body = body + "<div class='bar' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'><span class='traffic traffic-close'></span><span class='traffic traffic-min'></span><span class='traffic traffic-max'></span><span class='bar-icon'>S</span><span class='bar-title'>{elem.text}</span><span class='bar-command'>{elem.text}</span><span class='bar-context'>workspace</span></div>"
+            body = body + "<div class='bar' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'><span class='traffic traffic-close'></span><span class='traffic traffic-min'></span><span class='traffic traffic-max'></span>" + _scene_round_icon_html("bar-icon", elem.text) + "<span class='bar-title'>{elem.text}</span><span class='bar-command'>{elem.text}</span><span class='bar-context'>workspace</span></div>"
         elif elem.kind == "glass_panel":
             body = body + "<div class='glass' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'></div>"
         elif elem.kind == "motion_window":
@@ -352,13 +365,15 @@ fn scene_to_html(scene: WmSceneSpec) -> text:
         elif elem.kind == "command_clock":
             body = body + "<div class='command-clock' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'>{elem.text}</div>"
         elif elem.kind == "command_icon":
-            body = body + "<div class='command-icon' data-target='{elem.text}' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'></div>"
+            body = body + "<div class='command-icon' data-target='{elem.text}' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'>" + _scene_round_icon_html("command-round-icon", elem.text) + "</div>"
         elif elem.kind == "taskbar":
             body = body + "<div class='taskbar' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'></div>"
         elif elem.kind == "taskbar_launcher":
-            body = body + "<button class='taskbar-launcher' data-app='{elem.text}' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'>{elem.text}</button>"
+            val icon = _scene_icon_data(elem.text)
+            body = body + "<button class='taskbar-launcher' data-app='{icon.id}' data-icon-normalized='{icon.kind}' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'>" + _scene_round_icon_html("taskbar-round-icon", icon.source) + "<span>{icon.id}</span></button>"
         elif elem.kind == "taskbar_running":
-            body = body + "<button class='taskbar-running' data-window='{elem.text}' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'>{elem.text}</button>"
+            val icon = _scene_icon_data(elem.text)
+            body = body + "<button class='taskbar-running' data-window='{icon.id}' data-icon-normalized='{icon.kind}' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'>" + _scene_round_icon_html("taskbar-round-icon", icon.source) + "<span>{icon.id}</span></button>"
         elif elem.kind == "desktop_widgets":
             body = body + "<section class='desktop-widgets' aria-label='Desktop widgets' data-motion-scope='desktop-widgets' data-motion-mode='standard' data-reduced-motion-duration-ms='80' data-motion-can-disable='true' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'><div class='desktop-widget'><span>Clock</span><strong>09:41</strong></div><div class='desktop-widget'><span>Motion</span><strong>Standard</strong></div><div class='desktop-widget'><span>Workspace</span><strong>1</strong></div></section>"
         elif elem.kind == "control_center":
@@ -373,18 +388,20 @@ fn scene_to_html(scene: WmSceneSpec) -> text:
     ".glass{{position:absolute;background:linear-gradient(180deg,rgba(255,255,255,.16),rgba(255,255,255,.06));border:1px solid rgba(255,255,255,.16);border-top:0;border-radius:0 0 18px 18px;backdrop-filter:blur(18px) saturate(170%);box-shadow:0 22px 60px rgba(0,0,0,.34)}}" +
     ".bar{{position:absolute;display:grid;grid-template-columns:12px 12px 12px 18px minmax(64px,.8fr) minmax(96px,1fr) auto;gap:7px;align-items:center;background:linear-gradient(180deg,rgba(255,255,255,.18),rgba(255,255,255,.07));color:white;font:600 12px system-ui;padding:0 12px;box-sizing:border-box;overflow:hidden;border:1px solid rgba(255,255,255,.18);border-bottom:0;border-radius:18px 18px 0 0;backdrop-filter:blur(20px) saturate(170%)}}" +
     ".traffic{{width:12px;height:12px;border-radius:999px;box-shadow:inset 0 0 0 1px rgba(0,0,0,.18),0 1px 4px rgba(0,0,0,.24)}}.traffic-close{{background:#ff5f57}}.traffic-min{{background:#ffbd2e}}.traffic-max{{background:#28c840}}" +
-    ".bar-icon{{width:18px;height:18px;border-radius:999px;display:grid;place-items:center;background:linear-gradient(135deg,#2563eb,rgba(255,255,255,.22));font-size:10px;overflow:hidden}}.bar-title{{min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}}.bar-command{{height:22px;border-radius:999px;padding:0 10px;display:flex;align-items:center;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);color:#dbeafe;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}}.bar-context{{height:22px;border-radius:999px;padding:0 10px;display:flex;align-items:center;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.10);color:#cbd5e1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}}" +
+    ".bar-icon{{width:18px;height:18px;font-size:10px}}.bar-title{{min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}}.bar-command{{height:22px;border-radius:999px;padding:0 10px;display:flex;align-items:center;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);color:#dbeafe;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}}.bar-context{{height:22px;border-radius:999px;padding:0 10px;display:flex;align-items:center;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.10);color:#cbd5e1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}}" +
+    ".round-icon{{border-radius:999px;display:inline-grid;place-items:center;overflow:hidden;background:linear-gradient(135deg,#2563eb,rgba(255,255,255,.22));color:white;font-weight:800;box-shadow:inset 0 1px 0 rgba(255,255,255,.22),0 2px 8px rgba(0,0,0,.22);clip-path:circle(50% at 50% 50%)}}.round-icon.icon-normalized-square .icon-image-placeholder{{width:100%;height:100%;border-radius:inherit;background:linear-gradient(135deg,rgba(255,255,255,.28),rgba(37,99,235,.72));object-fit:cover}}.round-icon .icon-glyph{{line-height:1}}" +
     ".wm-scrollable,.glass,.window-overview,.control-center{{scrollbar-width:thin;scrollbar-color:rgba(96,165,250,.58) transparent}}.wm-scrollable::-webkit-scrollbar,.glass::-webkit-scrollbar,.window-overview::-webkit-scrollbar,.control-center::-webkit-scrollbar{{width:10px;height:10px}}.wm-scrollable::-webkit-scrollbar-track,.glass::-webkit-scrollbar-track,.window-overview::-webkit-scrollbar-track,.control-center::-webkit-scrollbar-track{{background:transparent}}.wm-scrollable::-webkit-scrollbar-thumb,.glass::-webkit-scrollbar-thumb,.window-overview::-webkit-scrollbar-thumb,.control-center::-webkit-scrollbar-thumb{{background:linear-gradient(180deg,rgba(96,165,250,.62),rgba(255,255,255,.18));border:3px solid transparent;background-clip:padding-box;border-radius:999px}}.wm-scrollable::-webkit-scrollbar-thumb:hover{{background:#2563eb}}" +
     ".motion-window{{position:absolute;border-radius:18px;background:linear-gradient(180deg,rgba(255,255,255,.18),rgba(255,255,255,.06));border:1px solid rgba(255,255,255,.16);backdrop-filter:blur(18px) saturate(170%);box-shadow:0 22px 60px rgba(0,0,0,.34);overflow:hidden}}.motion-title{{position:absolute;left:14px;top:10px;color:white;font:600 12px system-ui}}.wm-window-opening,.wm-window-restoring{{opacity:1}}.wm-window-closing,.wm-window-minimizing{{opacity:.72}}.wm-window-focused{{box-shadow:0 24px 70px rgba(37,99,235,.32)}}" +
     ".label{{position:absolute;color:white;font:600 12px system-ui;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}}" +
     ".command-lane{{position:absolute;background:linear-gradient(180deg,rgba(255,255,255,.10),rgba(255,255,255,.04));border-bottom:1px solid rgba(255,255,255,.10);backdrop-filter:blur(18px)}}" +
     ".command-clock{{position:absolute;color:white;font:600 12px system-ui;display:flex;align-items:center;justify-content:center}}" +
-    ".command-icon{{position:absolute;background:#e5e7eb;border-radius:999px;transform:scale(.35)}}" +
+    ".command-icon{{position:absolute;display:grid;place-items:center}}.command-round-icon{{width:18px;height:18px;font-size:9px}}" +
     ".taskbar{{position:absolute;background:linear-gradient(180deg,rgba(255,255,255,.16),rgba(255,255,255,.06));border:1px solid rgba(255,255,255,.16);border-radius:999px;box-shadow:0 18px 48px rgba(0,0,0,.30);backdrop-filter:blur(24px) saturate(170%)}}" +
-    ".taskbar-launcher,.taskbar-running{{position:absolute;border:0;color:white;font:600 11px system-ui;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;border-radius:999px}}" +
+    ".taskbar-launcher,.taskbar-running{{position:absolute;border:0;color:white;font:600 11px system-ui;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;border-radius:999px;display:grid;place-items:center;gap:2px;padding:4px}}" +
+    ".taskbar-round-icon{{width:26px;height:26px;font-size:11px}}" +
     ".taskbar-launcher{{background:#2563eb}}.taskbar-running{{background:#475569}}" +
     ".desktop-widgets{{position:absolute;display:grid;gap:8px;max-width:260px;pointer-events:none;animation:wm-widget-float 240ms cubic-bezier(.2,.8,.2,1) both}}.desktop-widget{{border-radius:14px;background:linear-gradient(180deg,rgba(255,255,255,.14),rgba(255,255,255,.06));border:1px solid rgba(255,255,255,.14);box-shadow:0 14px 34px rgba(0,0,0,.22);backdrop-filter:blur(20px) saturate(170%);color:white;font:600 12px system-ui;padding:8px 10px;display:flex;align-items:center;justify-content:space-between;min-height:26px}}" +
-    ".control-center{{position:absolute;display:grid;grid-template-columns:1fr 1fr;gap:8px;max-width:320px;border-radius:18px;background:linear-gradient(180deg,rgba(15,23,42,.88),rgba(15,23,42,.68));border:1px solid rgba(255,255,255,.16);box-shadow:0 22px 70px rgba(0,0,0,.36);backdrop-filter:blur(24px) saturate(170%);padding:12px;box-sizing:border-box;animation:wm-control-in 180ms cubic-bezier(.2,.8,.2,1) both}}.control-center button{{min-height:36px;border:1px solid rgba(255,255,255,.12);border-radius:12px;background:rgba(255,255,255,.08);color:white;font:600 11px system-ui}}" +
+    ".control-center{{position:absolute;display:grid;grid-template-columns:1fr 1fr;gap:8px;max-width:320px;border-radius:18px;background:linear-gradient(180deg,rgba(15,23,42,.88),rgba(15,23,42,.68));border:1px solid rgba(255,255,255,.16);box-shadow:0 22px 70px rgba(0,0,0,.36);backdrop-filter:blur(24px) saturate(170%);padding:12px;box-sizing:border-box;animation:wm-control-in 180ms cubic-bezier(.2,.8,.2,1) both}}.control-center button{{min-height:44px;border:1px solid rgba(255,255,255,.12);border-radius:12px;background:rgba(255,255,255,.08);color:white;font:600 11px system-ui}}" +
     ".window-overview{{position:absolute;border-radius:22px;background:rgba(2,6,23,.66);border:1px solid rgba(255,255,255,.14);box-shadow:0 30px 90px rgba(0,0,0,.42);backdrop-filter:blur(28px) saturate(160%);padding:18px;box-sizing:border-box;animation:wm-overview-in 200ms cubic-bezier(.2,.8,.2,1) both}}.overview-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px}}.overview-card{{min-height:112px;border:1px solid rgba(255,255,255,.16);border-radius:16px;background:linear-gradient(180deg,rgba(255,255,255,.14),rgba(255,255,255,.06));color:white;text-align:left;padding:12px;display:grid;gap:8px}}.overview-card.active{{box-shadow:0 0 0 2px rgba(37,99,235,.55)}}.overview-icon{{width:28px;height:28px;border-radius:999px;display:grid;place-items:center;background:#2563eb}}.overview-title,.overview-meta{{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}}" +
     ".snap-preview{{position:absolute;border-radius:20px;border:1px solid rgba(96,165,250,.72);background:rgba(37,99,235,.18);box-shadow:0 0 0 1px rgba(255,255,255,.10) inset,0 18px 48px rgba(37,99,235,.22);pointer-events:none;animation:wm-snap-pulse 900ms ease-in-out infinite}}" +
     "@keyframes wm-widget-float{{from{{opacity:0;transform:translateY(10px) scale(.98)}}to{{opacity:1;transform:translateY(0) scale(1)}}}}@keyframes wm-control-in{{from{{opacity:0;transform:translateY(-8px) scale(.98)}}to{{opacity:1;transform:translateY(0) scale(1)}}}}@keyframes wm-overview-in{{from{{opacity:0;transform:scale(.98)}}to{{opacity:1;transform:scale(1)}}}}@keyframes wm-snap-pulse{{0%,100%{{opacity:.76}}50%{{opacity:1}}}}" +
@@ -400,6 +417,28 @@ class _SceneMotionData:
     duration_ms: text
     reduced_duration_ms: text
     can_disable: text
+
+class _SceneIconData:
+    id: text
+    source: text
+    kind: text
+
+fn _scene_icon_data(blob: text) -> _SceneIconData:
+    val parts = blob.split("|")
+    var id = blob
+    var source = blob
+    if parts.len() > 0:
+        id = parts[0]
+    if parts.len() > 1:
+        source = parts[1]
+    _SceneIconData(id: id, source: source, kind: wm_scene_icon_kind(source))
+
+fn _scene_round_icon_html(class_name: text, source: text) -> text:
+    val kind = wm_scene_icon_kind(source)
+    val glyph = if source.len() > 0: source.substring(0, 1) else: "S"
+    if kind == "square-to-round":
+        return "<span class='round-icon {class_name} icon-normalized-square' data-icon-normalized='square-to-round' data-icon-source='{source}'><span class='icon-image-placeholder'></span></span>"
+    "<span class='round-icon {class_name} icon-glyph-to-round' data-icon-normalized='glyph-to-round' data-icon-source='{source}'><span class='icon-glyph'>{glyph}</span></span>"
 
 fn _scene_motion_data(blob: text) -> _SceneMotionData:
     val parts = blob.split("|")
@@ -430,8 +469,8 @@ fn _scene_background_color(scene: WmSceneSpec) -> u32:
     0xFF0F172Au32
 
 fn _scene_touch_target_height_px(html: text) -> i32:
-    if html.contains(".control-center button{{min-height:36px"):
-        return 36
+    if html.contains(".control-center button{{min-height:44px"):
+        return 44
     0
 
 fn _scene_theme_configured(html: text, config: WmSceneModernThemeConfig) -> bool:
@@ -467,6 +506,16 @@ fn _scene_round_scrollbars_configured(html: text, config: WmSceneModernThemeConf
     html.contains("::-webkit-scrollbar-thumb") and
     html.contains("background-clip:padding-box") and
     html.contains("border-radius:999px")
+
+fn _scene_round_icon_converter_configured(html: text) -> bool:
+    html.contains("class='round-icon") and
+    html.contains("data-icon-normalized='square-to-round'") and
+    html.contains("data-icon-normalized='glyph-to-round'") and
+    html.contains("icon-normalized-square") and
+    html.contains("icon-glyph-to-round") and
+    html.contains("icon-image-placeholder") and
+    html.contains("icon-glyph") and
+    html.contains("clip-path:circle(50% at 50% 50%)")
 
 fn _scene_contrast_ratio_x100(a: u32, b: u32) -> i64:
     val la = _scene_relative_luminance_x1000(a)

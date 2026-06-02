@@ -605,7 +605,7 @@ expect(bounded_affordances).to_equal(4)
    - Expected: report.max_control_center_width_px equals `320`
    - Expected: report.max_desktop_widget_width_px equals `260`
    - Expected: report.min_overview_card_width_px equals `180`
-   - Expected: report.min_touch_target_height_px equals `36`
+   - Expected: report.min_touch_target_height_px equals `44`
    - Expected: report.reduced_motion_duration_ms equals `80`
 
 
@@ -635,7 +635,7 @@ expect(report.rounded_surface_count).to_be_greater_than(3)
 expect(report.max_control_center_width_px).to_equal(320)
 expect(report.max_desktop_widget_width_px).to_equal(260)
 expect(report.min_overview_card_width_px).to_equal(180)
-expect(report.min_touch_target_height_px).to_equal(36)
+expect(report.min_touch_target_height_px).to_equal(44)
 expect(report.motion_can_disable)
 expect(report.reduced_motion_duration_ms).to_equal(80)
 ```
@@ -717,6 +717,108 @@ expect(report.min_touch_target_height_px).to_equal(0)
 
 </details>
 
+#### fails visual quality when duplicate affordances hide a missing affordance kind
+
+1. SceneElement
+
+2. SceneElement
+
+3. SceneElement
+
+4. SceneElement
+
+5. SceneElement
+
+6. expect not
+
+7. expect not
+   - Expected: report.reduced_motion_duration_ms equals `0`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val scene = WmSceneSpec(
+    name: "duplicate_affordance_scene",
+    width: 800,
+    height: 600,
+    elements: [
+        SceneElement(kind: "desktop_chrome", x: 0, y: 0, w: 800, h: 600, color: 0xFF101418u32, text: ""),
+        SceneElement(kind: "control_center", x: 460, y: 60, w: 260, h: 180, color: 0xDD111827u32, text: "controls"),
+        SceneElement(kind: "window_overview", x: 80, y: 90, w: 220, h: 120, color: 0xDD020617u32, text: "overview"),
+        SceneElement(kind: "snap_preview", x: 320, y: 80, w: 160, h: 180, color: 0x552563EBu32, text: "left"),
+        SceneElement(kind: "snap_preview", x: 500, y: 280, w: 160, h: 180, color: 0x552563EBu32, text: "right")
+    ]
+)
+val report = wm_scene_visual_quality_report(scene)
+
+expect_not(report.passed)
+expect_not(report.motion_can_disable)
+expect(report.reduced_motion_duration_ms).to_equal(0)
+```
+
+</details>
+
+#### reports true max widths and actual overview width for malformed affordances
+
+1. SceneElement
+
+2. SceneElement
+
+3. SceneElement
+
+4. SceneElement
+
+5. SceneElement
+
+6. SceneElement
+
+7. SceneElement
+
+8. expect not
+
+9. expect not
+   - Expected: report.max_control_center_width_px equals `340`
+   - Expected: report.max_desktop_widget_width_px equals `280`
+   - Expected: report.min_overview_card_width_px equals `120`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 21 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val scene = WmSceneSpec(
+    name: "malformed_affordance_scene",
+    width: 900,
+    height: 640,
+    elements: [
+        SceneElement(kind: "desktop_chrome", x: 0, y: 0, w: 900, h: 640, color: 0xFF101418u32, text: ""),
+        SceneElement(kind: "control_center", x: 520, y: 60, w: 280, h: 180, color: 0xDD111827u32, text: "controls"),
+        SceneElement(kind: "control_center", x: 520, y: 260, w: 340, h: 180, color: 0xDD111827u32, text: "wide controls"),
+        SceneElement(kind: "desktop_widgets", x: 40, y: 70, w: 220, h: 140, color: 0xCC111827u32, text: "widgets"),
+        SceneElement(kind: "desktop_widgets", x: 40, y: 230, w: 280, h: 140, color: 0xCC111827u32, text: "wide widgets"),
+        SceneElement(kind: "window_overview", x: 340, y: 120, w: 120, h: 120, color: 0xDD020617u32, text: "narrow overview"),
+        SceneElement(kind: "snap_preview", x: 620, y: 60, w: 160, h: 180, color: 0x552563EBu32, text: "right")
+    ]
+)
+val report = wm_scene_visual_quality_report(scene)
+
+expect_not(report.passed)
+expect_not(report.bounded_layout)
+expect(report.max_control_center_width_px).to_equal(340)
+expect(report.max_desktop_widget_width_px).to_equal(280)
+expect(report.min_overview_card_width_px).to_equal(120)
+```
+
+</details>
+
 ### WmScene — lifecycle motion projection
 
 #### projects host-neutral lifecycle motion classes into inspectable HTML
@@ -787,8 +889,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 26 |
-| Active scenarios | 26 |
+| Total scenarios | 28 |
+| Active scenarios | 28 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
