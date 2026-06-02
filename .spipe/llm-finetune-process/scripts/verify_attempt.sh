@@ -7,6 +7,8 @@ Usage: verify_attempt.sh <attempt-record.sdn>
 
 Checks that an LLM fine-tune attempt record contains evidence fields needed by
 SPipe verification. This is a structural gate, not a model quality evaluator.
+When the separated SPipe CLI is available, this script delegates to
+`spipe fine-tune-verify`.
 USAGE
 }
 
@@ -47,14 +49,30 @@ for key in \
   attempt_id \
   goal \
   research_doc \
+  feature_option \
+  nfr_option \
+  selection_doc \
+  requirements_doc \
+  nfr_doc \
+  plan_doc \
+  architecture_doc \
+  design_doc \
+  candidate_model \
   base_model \
   base_model_reason \
+  download_command \
+  cache_path \
   method \
   training_script \
+  training_command \
+  model_artifact \
   eval_command \
   metrics \
+  target \
   result \
-  status
+  status \
+  app_target \
+  handoff_doc
 do
   require_nonempty "$key" || status=1
 done

@@ -908,6 +908,13 @@ function normalizeOption(value) {
   return match ? match[1].toUpperCase() : "";
 }
 
+function normalizeOptionList(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return [];
+  const matches = [...raw.matchAll(/[A-Za-z]/g)].map((match) => match[0].toUpperCase());
+  return [...new Set(matches)];
+}
+
 function optionHeadings(path) {
   if (!existsSync(path)) return [];
   const content = readFileSync(path, "utf8");
@@ -925,13 +932,18 @@ function selectedOptionBlock(path, option) {
   const match = content.match(header);
   if (!match || match.index === undefined) return null;
   const rest = content.slice(match.index);
-  const next = rest.slice(match[0].length).search(/\n## Option [A-Z]:/);
+  const next = rest.slice(match[0].length).search(/\n## (Option [A-Z]:|Selection Needed)/);
   const block = next === -1 ? rest : rest.slice(0, match[0].length + next);
   return {
     letter,
     title: match[1].trim(),
     block: block.trimEnd()
   };
+}
+
+function selectedOptionBlocks(path, options) {
+  const letters = normalizeOptionList(options);
+  return letters.map((letter) => selectedOptionBlock(path, letter));
 }
 
 function commandFineTuneOptions() {
@@ -948,16 +960,19 @@ function commandFineTuneOptions() {
   }
 }
 
-function writeSelectedDoc(path, title, sourceRel, selected, selectedBy, notes) {
+function writeSelectedDoc(path, title, sourceRel, selectedItems, selectedBy, notes) {
   mkdirSync(dirname(path), { recursive: true });
+  const selected = Array.isArray(selectedItems) ? selectedItems : [selectedItems];
+  const selectedLine = selected.map((item) => `Option ${item.letter}: ${item.title}`).join(" -> ");
+  const body = selected.map((item) => item.block).join("\n\n");
   writeFileSync(path, `# ${title}
 
-Selected option: Option ${selected.letter}: ${selected.title}
+Selected option: ${selectedLine}
 Selected by: ${selectedBy}
 Source options: ${sourceRel}
 Notes: ${notes || ""}
 
-${selected.block}
+${body}
 `);
 }
 
@@ -973,14 +988,14 @@ function commandFineTuneSelectRequirements(args) {
   const hostRoot = process.cwd();
   const featureOptionsPath = join(hostRoot, featureOptionsRel);
   const nfrOptionsPath = join(hostRoot, nfrOptionsRel);
-  const featureSelected = selectedOptionBlock(featureOptionsPath, featureOptionArg);
-  const nfrSelected = selectedOptionBlock(nfrOptionsPath, nfrOptionArg);
-  if (!featureSelected) {
+  const featureSelected = selectedOptionBlocks(featureOptionsPath, featureOptionArg);
+  const nfrSelected = selectedOptionBlocks(nfrOptionsPath, nfrOptionArg);
+  if (!featureSelected.length || featureSelected.some((item) => !item)) {
     console.error(`spipe fine-tune-select-requirements: feature option not found: ${featureOptionArg}`);
     process.exitCode = 1;
     return;
   }
-  if (!nfrSelected) {
+  if (!nfrSelected.length || nfrSelected.some((item) => !item)) {
     console.error(`spipe fine-tune-select-requirements: nfr option not found: ${nfrOptionArg}`);
     process.exitCode = 1;
     return;
@@ -990,7 +1005,14 @@ function commandFineTuneSelectRequirements(args) {
   writeSelectedDoc(join(hostRoot, nfrRequirementsRel), "SPipe LLM Fine-Tune Process NFR Requirements", nfrOptionsRel, nfrSelected, selectedBy, notes);
   rmSync(featureOptionsPath, { force: true });
   rmSync(nfrOptionsPath, { force: true });
-  commandFineTuneRecordRequirements([attemptId, `Option ${featureSelected.letter}`, `Option ${nfrSelected.letter}`, selectedBy, featureRequirementsRel, notes]);
+  commandFineTuneRecordRequirements([
+    attemptId,
+    featureSelected.map((item) => `Option ${item.letter}`).join(" -> "),
+    nfrSelected.map((item) => `Option ${item.letter}`).join(" + "),
+    selectedBy,
+    featureRequirementsRel,
+    notes
+  ]);
   console.log(featureRequirementsRel);
   console.log(nfrRequirementsRel);
 }
@@ -1219,6 +1241,7 @@ function registryValueForAttempt(root, fileName, attemptId, key) {
   if (!existsSync(path)) return "";
   const lines = readFileSync(path, "utf8").split(/\r?\n/);
   let inAttempt = false;
+  let latest = "";
   for (const line of lines) {
     const attemptMatch = line.match(/^\s*-\s*attempt_id:\s*"([^"]*)"\s*$/);
     if (attemptMatch) {
@@ -1227,10 +1250,10 @@ function registryValueForAttempt(root, fileName, attemptId, key) {
     }
     if (inAttempt) {
       const valueMatch = line.match(new RegExp(`^\\s*${key}:\\s*"([^"]*)"\\s*$`));
-      if (valueMatch) return valueMatch[1];
+      if (valueMatch) latest = valueMatch[1];
     }
   }
-  return "";
+  return latest;
 }
 
 function commandFineTuneReady(args) {
@@ -1327,22 +1350,24 @@ function registryBlockForAttempt(root, fileName, attemptId) {
   const path = join(root, fileName);
   if (!existsSync(path)) return "";
   const lines = readFileSync(path, "utf8").split(/\r?\n/);
-  const out = [];
+  let out = [];
+  let latest = [];
   let inAttempt = false;
   for (const line of lines) {
     const attemptMatch = line.match(/^(\s*)-\s*attempt_id:\s*"([^"]*)"\s*$/);
     if (attemptMatch) {
-      if (inAttempt) break;
+      if (inAttempt) latest = out;
       inAttempt = attemptMatch[2] === attemptId;
+      out = [];
       if (inAttempt) out.push(line);
       continue;
     }
     if (inAttempt) {
-      if (/^\s*-\s*attempt_id:\s*/.test(line)) break;
       out.push(line);
     }
   }
-  return out.join("\n").trimEnd();
+  if (inAttempt) latest = out;
+  return latest.join("\n").trimEnd();
 }
 
 function commandFineTuneReport(args) {

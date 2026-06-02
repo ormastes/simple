@@ -21,6 +21,7 @@ function Require-File($Path) {
 Require-File ".codex\skills\sp_dev\SKILL.md"
 Require-File ".claude\agents\spipe\dev.md"
 Require-File ".claude\skills\spipe.md"
+Require-File "scripts\check-spipe-submodule-gitlinks.ps1"
 
 if (Test-Path -LiteralPath ".codex\skills\dev") {
     if ($Mode -eq "--apply") {
@@ -49,5 +50,7 @@ if ($content -notmatch [regex]::Escape(".claude/agents/spipe/dev.md")) {
 if ($content -notmatch [regex]::Escape(".claude/skills/spipe.md")) {
     Fail "sp_dev skill must link to .claude/skills/spipe.md"
 }
+
+& powershell -ExecutionPolicy Bypass -File "scripts\check-spipe-submodule-gitlinks.ps1" --check | Out-Null
 
 Write-Output "STATUS: PASS spipe-dev-command wiring"

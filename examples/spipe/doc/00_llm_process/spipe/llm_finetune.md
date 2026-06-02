@@ -16,6 +16,9 @@ stores concrete attempts under its `.spipe/` directory.
 7. Verify quality and performance.
 8. If performance is not proper, classify the failure and retry implementation,
    data research, model selection, tuning method selection, or another approach.
+9. Before handoff, file any remaining retry, verification, safety, or deployment
+   work in the host TODO/feature-request tracker instead of leaving it only in
+   chat history.
 
 ## Required Evidence
 
@@ -113,6 +116,14 @@ attempt requested by verification.
 Use `spipe fine-tune-app-handoff <attempt_id>` to print the app/server handoff,
 model, training, evaluation, decision, and retune evidence as a compact
 verification artifact.
+
+## Failed Verification Handoff
+
+If an artifact exists but misses the target eval, do not mark the attempt
+accepted. Record the eval and a retry decision, create or name the next attempt,
+and file concrete TODO/feature-request entries for the remaining work. For
+medical or otherwise high-risk models, include safety, license/distribution,
+latency/RSS, fallback, and rollback evidence before any production-ready handoff.
 
 ## Process Doc Link
 

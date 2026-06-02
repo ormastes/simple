@@ -36,8 +36,16 @@ Verify a filled attempt record:
 .spipe/llm-finetune-process/scripts/verify_attempt.sh .spipe/llm-finetune-process/attempts/<attempt_id>.sdn
 ```
 
+The verifier delegates to `spipe fine-tune-verify` when the separated SPipe CLI
+is available. Its fallback path checks the same full evidence shape: research,
+data, requirement selection, process docs, model research, base model, tuning,
+training artifact, evaluation, decision, and app/server handoff.
+
 The checked-in `attempts/llm_backed_app_server_dry_run.sdn` record exercises the
-retry loop without claiming that a model has been trained.
+retry loop with existing MedGemma Korean evidence. It records the best available
+artifact found locally, but does not claim production readiness because the
+artifact missed the target eval threshold. The linked retry attempt
+`llm_backed_app_server_dry_run_retry1` owns the fixed-format/data-quality retry.
 
 Record data-download evidence:
 
@@ -194,9 +202,11 @@ Print the next phase required before real training/use:
 node .spipe/spipe_project/cli/spipe.js fine-tune-next <attempt_id>
 ```
 
-The dry-run attempt is expected to fail `fine-tune-ready` until requirements,
-base model, real tuning method, model artifact, and accepted decision evidence
-are recorded.
+An attempt is expected to fail `fine-tune-ready` until it has an accepted
+decision backed by target-reaching eval evidence. When the best available model
+artifact misses target, record the failure, create a retry attempt, and file the
+remaining work in `doc/08_tracking/todo/todo_db.sdn` and
+`doc/08_tracking/feature_request/` before handoff.
 
 Generate a consolidated handoff report:
 

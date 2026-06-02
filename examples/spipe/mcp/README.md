@@ -8,6 +8,9 @@ Tools:
 - `spipe_info`
 - `spipe_experts`
 - `spipe_read_doc`
+- `spipe_fine_tune_guide`
+- `spipe_fine_tune_model_guide`
+- `spipe_fine_tune_template`
 
 Resource:
 

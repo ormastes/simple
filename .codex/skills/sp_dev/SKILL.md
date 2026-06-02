@@ -39,3 +39,11 @@ Run `sh scripts/install-spipe-dev-command.shs --check` on Unix-like hosts, or
 `powershell -ExecutionPolicy Bypass -File scripts\install-spipe-dev-command.ps1 --check`
 on Windows, to verify that this repository still routes Codex development
 through `/sp_dev` and does not carry a separate `/dev` skill.
+
+## LLM Fine-Tune Handoff
+
+For SPipe LLM-backed app/server work, use the fine-tune registry commands under
+`.spipe/llm-finetune-process/`. If an artifact exists but misses its target eval,
+record the failed eval, create or link the retry attempt, and file remaining
+retry/verification/safety/deployment work in `doc/08_tracking/todo/todo_db.sdn`
+and `doc/08_tracking/feature_request/` before reporting the handoff state.

@@ -35,6 +35,23 @@ such as `.spipe/doc`, `.spipe/spipe_project`, `.spipe/spipe`, and
 When installed as an npm-style package, the binaries are `spipe` and
 `spipe-mcp`.
 
+The CLI also owns the reusable LLM fine-tune process. It can initialize host
+attempt registries, record data downloads, model research, base-model choice,
+tuning method, training script, eval results, retry decisions, and app/server
+handoff evidence:
+
+```sh
+node cli/spipe.js fine-tune-init
+node cli/spipe.js fine-tune-options
+node cli/spipe.js fine-tune-next <attempt_id>
+node cli/spipe.js fine-tune-report <attempt_id>
+node cli/spipe.js fine-tune-verify <record.sdn>
+```
+
+Final requirement generation remains user-gated. Use
+`fine-tune-select-requirements` only after the user chooses one feature option
+and one NFR option.
+
 ## Build Check
 
 Run the package layout check before publishing or updating a host submodule
@@ -42,6 +59,13 @@ pointer:
 
 ```sh
 sh scripts/build.sh
+```
+
+Host repositories that mount SPipe as submodules should also keep the parent
+index entries as gitlinks. In the Simple host, run:
+
+```sh
+sh scripts/check-spipe-submodule-gitlinks.shs --check
 ```
 
 ## Host Setup

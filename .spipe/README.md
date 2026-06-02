@@ -22,6 +22,13 @@ Run `sh scripts/setup-spipe-submodule.shs` to initialize both SPipe submodules,
 refresh `.spipe/spipe_project`, `.spipe/doc`, and the top-level common process
 links, then recreate the configured doc-root process links.
 
+Run `sh scripts/check-spipe-submodule-gitlinks.shs --check` to verify that
+`.spipe/spipe` and `examples/spipe` are parent gitlinks. Use `--repair` if a
+recursive `git add examples/spipe` accidentally cached submodule files.
+On Windows, use
+`powershell -ExecutionPolicy Bypass -File scripts\check-spipe-submodule-gitlinks.ps1 --check`
+or `--repair`.
+
 Run `node .spipe/spipe_project/cli/spipe.js doctor .` to verify the host mount
 links and reusable process surfaces.
 

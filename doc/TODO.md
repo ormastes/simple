@@ -1,8 +1,8 @@
 # TODO List
 
 **Generated:** 2026-05-30
-**Total:** 4 items | **Open:** 4 | **Blocked:** 0 | **Stale:** 0
-**Database:** `doc/todo/todo_db.sdn`
+**Total:** 7 items | **Open:** 7 | **Blocked:** 0 | **Stale:** 0
+**Database:** `doc/08_tracking/todo/todo_db.sdn`
 
 ## Statistics
 
@@ -11,6 +11,7 @@
 | Area | Count | P0 | P1 | P2 | P3 | Blocked |
 |------|-------|----|----|----|----|---------|
 | runtime | 2 | 0 | 1 | 1 | 0 | 0 |
+| spipe | 3 | 0 | 3 | 0 | 0 | 0 |
 | stdlib | 1 | 0 | 0 | 1 | 0 | 0 |
 | ui | 1 | 0 | 0 | 1 | 0 | 0 |
 
@@ -19,7 +20,7 @@
 | Priority | Count | Open | Blocked | Stale |
 |----------|-------|------|---------|-------|
 | P0 (critical) | 0 | 0 | 0 | 0 |
-| P1 (high) | 1 | 1 | 0 | 0 |
+| P1 (high) | 4 | 4 | 0 | 0 |
 | P2 (medium) | 3 | 3 | 0 | 0 |
 | P3 (low) | 0 | 0 | 0 | 0 |
 
@@ -29,6 +30,23 @@
 
 - **#1** [runtime][P1] A real GPU framebuffer readback is not available under
   - File: `./src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl:229`
+  - Status: open
+
+### spipe
+
+- **#4** [spipe][P1] Run MedGemma fixed-format/data-quality retry for llm_backed_app_server_dry_run_retry1
+  - File: `.spipe/llm-finetune-process/attempts/llm_backed_app_server_dry_run_retry1.sdn:1`
+  - Issue: `FR-SPIPE-LLM-0001`
+  - Status: open
+
+- **#5** [spipe][P1] Verify MedGemma retry reaches target_accuracy>=90.0 on 604 samples before acceptance
+  - File: `.spipe/llm-finetune-process/eval_results.sdn:1`
+  - Issue: `FR-SPIPE-LLM-0002`
+  - Status: open
+
+- **#6** [spipe][P1] Add medical safety and deployment evidence before treating MedGemma artifact as production-ready
+  - File: `.spipe/llm-finetune-process/app_handoffs.sdn:1`
+  - Issue: `FR-SPIPE-LLM-0003`
   - Status: open
 
 
@@ -77,3 +95,4 @@
 - `loader` - SMF loader
 - `pkg` - Package manager
 - `doc` - Documentation, specs, guides
+- `spipe` - SPipe workflow, retry, and LLM fine-tune process tracking

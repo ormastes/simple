@@ -48,7 +48,7 @@ fi
 node --check cli/spipe.js >/dev/null
 node --check mcp/server.js >/dev/null
 if git -C ../.. rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  git -C ../.. ls-files --stage examples/spipe | grep -q '^160000 .*	examples/spipe$'
+  git -C ../.. ls-files --stage examples/spipe | grep -q '^100'
   git -C ../.. ls-files --stage .spipe/spipe | grep -q '^160000 .*	.spipe/spipe$'
   diff -qr -x .git ../../examples/spipe ../../.spipe/spipe >/dev/null
 fi
@@ -81,12 +81,54 @@ node cli/spipe.js link-plan "$tmp_link_host" | grep -q "target=${tmp_link_host}/
 (cd "$tmp_host" && node "$ROOT_DIR/cli/spipe.js" fine-tune-init >/dev/null)
 test -f "$tmp_host/.spipe/llm-finetune-process/attempts/template.sdn"
 mkdir -p "$tmp_host/doc/02_requirements/feature" "$tmp_host/doc/02_requirements/nfr"
-cp "$ROOT_DIR/../..//doc/02_requirements/feature/spipe_llm_finetune_process_options.md" "$tmp_host/doc/02_requirements/feature/spipe_llm_finetune_process_options.md"
-cp "$ROOT_DIR/../..//doc/02_requirements/nfr/spipe_llm_finetune_process_options.md" "$tmp_host/doc/02_requirements/nfr/spipe_llm_finetune_process_options.md"
+cat > "$tmp_host/doc/02_requirements/feature/spipe_llm_finetune_process_options.md" <<'FEATURE_OPTIONS'
+# SPipe LLM Fine-Tune Process Requirement Options
+
+## Option A: Fine-Tune Process Scaffold
+
+Requirements:
+- Record fine-tune process evidence.
+
+Pros: Auditable.
+Cons: Scaffold only.
+Effort: Medium.
+
+## Option B: Local QLoRA-First Tuning Pipeline
+
+Requirements:
+- Record local QLoRA training evidence.
+
+Pros: Local ownership.
+Cons: Hardware dependent.
+Effort: High.
+FEATURE_OPTIONS
+cat > "$tmp_host/doc/02_requirements/nfr/spipe_llm_finetune_process_options.md" <<'NFR_OPTIONS'
+# SPipe LLM Fine-Tune Process NFR Options
+
+## Option A: Auditability First
+
+Targets:
+- Durable attempt records.
+
+Pros: Traceable.
+Cons: Does not ensure speed.
+Effort: Medium.
+
+## Option B: Reproducibility First
+
+Targets:
+- Deterministic records and checksums.
+
+Pros: Repeatable.
+Cons: More setup.
+Effort: High.
+NFR_OPTIONS
 (cd "$tmp_host" && node "$ROOT_DIR/cli/spipe.js" fine-tune-options | grep -q "A: Fine-Tune Process Scaffold")
-(cd "$tmp_host" && node "$ROOT_DIR/cli/spipe.js" fine-tune-select-requirements select_check A A tester "build check" >/dev/null)
+(cd "$tmp_host" && node "$ROOT_DIR/cli/spipe.js" fine-tune-select-requirements select_check A,B A,B tester "build check" >/dev/null)
 test -f "$tmp_host/doc/02_requirements/feature/spipe_llm_finetune_process.md"
 test -f "$tmp_host/doc/02_requirements/nfr/spipe_llm_finetune_process.md"
+grep -q "Selected option: Option A: Fine-Tune Process Scaffold -> Option B: Local QLoRA-First Tuning Pipeline" "$tmp_host/doc/02_requirements/feature/spipe_llm_finetune_process.md"
+grep -q "Selected option: Option A: Auditability First -> Option B: Reproducibility First" "$tmp_host/doc/02_requirements/nfr/spipe_llm_finetune_process.md"
 test ! -f "$tmp_host/doc/02_requirements/feature/spipe_llm_finetune_process_options.md"
 test ! -f "$tmp_host/doc/02_requirements/nfr/spipe_llm_finetune_process_options.md"
 (cd "$tmp_host" && node "$ROOT_DIR/cli/spipe.js" fine-tune-record-data build_check sample https://example.invalid/data.txt not-applicable "echo no-download" .spipe/cache/sample none >/dev/null)

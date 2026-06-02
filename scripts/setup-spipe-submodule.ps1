@@ -12,9 +12,13 @@ $ExampleDir = Join-Path $RootDir "examples\spipe"
 
 Set-Location $RootDir
 if ($DryRun) {
-    Write-Output "would_init_submodules .spipe/spipe examples/spipe"
+    Write-Output "would_init_submodules .spipe/spipe"
 } else {
-    git submodule update --init --recursive -- .spipe/spipe examples/spipe
+    git submodule update --init --recursive -- .spipe/spipe
+}
+
+if (-not $DryRun) {
+    & powershell -ExecutionPolicy Bypass -File "scripts\check-spipe-submodule-gitlinks.ps1" --repair | Out-Null
 }
 
 $SpPipeDir = Join-Path $RootDir ".spipe"
