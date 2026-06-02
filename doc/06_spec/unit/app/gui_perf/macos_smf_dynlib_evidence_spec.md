@@ -79,7 +79,7 @@ expect(gui_mac_smf_dynlib_probe_command_with_host(paths, "macos-arm64", "Apple M
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -89,6 +89,11 @@ val wrong_role = good.replace("smf_role=2", "smf_role=1")
 val wrong_arch = good.replace("arch=3", "arch=1")
 val no_dynlib = good.replace("embedded_dynlib=true", "embedded_dynlib=false")
 val wrong_symbol = good.replace("symbol=gui_dynlib_hot_probe_tick", "symbol=other")
+val missing_sha = good.replace(" sha256=abc", "")
+val duplicate_sha = good + " sha256=def"
+val missing_size = good.replace(" size=4096", "")
+val zero_size = good.replace("size=4096", "size=0")
+val nonnumeric_size = good.replace("size=4096", "size=abc")
 val duplicate_status = good + " status=missing"
 expect(gui_mac_smf_dynlib_accepts_contract_row(good)).to_equal(true)
 expect(gui_mac_smf_dynlib_accepts_contract_row(missing)).to_equal(false)
@@ -96,6 +101,11 @@ expect(gui_mac_smf_dynlib_accepts_contract_row(wrong_role)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_contract_row(wrong_arch)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_contract_row(no_dynlib)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_contract_row(wrong_symbol)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_contract_row(missing_sha)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_contract_row(duplicate_sha)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_contract_row(missing_size)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_contract_row(zero_size)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_contract_row(nonnumeric_size)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_contract_row(duplicate_status)).to_equal(false)
 expect(gui_mac_smf_dynlib_select_stdout_row("warning before row\n" + good + "\n", "GUI_SMF_ARTIFACT_CONTRACT")).to_equal(good)
 expect(gui_mac_smf_dynlib_select_stdout_row(good + "\n" + good, "GUI_SMF_ARTIFACT_CONTRACT")).to_equal("")
@@ -168,7 +178,7 @@ expect(gui_mac_smf_dynlib_accepts_qemu_loader_parity_row(duplicate_callable)).to
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 70 lines folded for reproduction.
+Runnable source: 92 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -194,6 +204,14 @@ val loose_threshold = good.replace("threshold_us=1000", "threshold_us=5000")
 val over_threshold = good.replace("p99_us=1", "p99_us=1000")
 val inconsistent_pass = good.replace("p99_us=1", "p99_us=2500")
 val nonnumeric_p99 = good.replace("p99_us=1", "p99_us=abc")
+val missing_warmup = good.replace(" warmup=16", "")
+val zero_warmup = good.replace("warmup=16", "warmup=0")
+val missing_p50 = good.replace(" p50_us=1", "")
+val missing_p95 = good.replace(" p95_us=1", "")
+val missing_max = good.replace(" max_us=1", "")
+val p95_under_p50 = good.replace("p50_us=1 p95_us=1", "p50_us=2 p95_us=1")
+val p99_under_p95 = good.replace("p95_us=1 p99_us=1", "p95_us=2 p99_us=1")
+val max_under_p99 = good.replace("p99_us=1 max_us=1", "p99_us=2 max_us=1")
 val non_empty_error = good.replace("error=", "error=p99-over-threshold")
 val duplicate_loader = good + " loader=host_dynlib"
 val duplicate_dynload = good + " dynload=native"
@@ -207,8 +225,14 @@ val duplicate_expected_samples = good + " expected_samples=64"
 expect(gui_mac_smf_dynlib_row_value(good, "loader")).to_equal("smf_dynlib")
 expect(gui_mac_smf_dynlib_row_key_count(duplicate_loader, "loader")).to_equal(2)
 expect(gui_mac_smf_dynlib_row_i64(good, "p99_us")).to_equal(1i64)
+expect(gui_mac_smf_dynlib_row_has_unsigned_decimal(good, "p99_us")).to_equal(true)
+expect(gui_mac_smf_dynlib_row_unsigned_i64(good, "p99_us")).to_equal(1i64)
+expect(gui_mac_smf_dynlib_row_unsigned_i64(nonnumeric_p99, "p99_us")).to_equal(-1i64)
 expect(gui_mac_smf_dynlib_unsigned_decimal_token("212")).to_equal(true)
 expect(gui_mac_smf_dynlib_unsigned_decimal_token("abc")).to_equal(false)
+expect(gui_mac_smf_dynlib_probe_metrics_valid(good)).to_equal(true)
+expect(gui_mac_smf_dynlib_probe_metrics_valid(measured)).to_equal(true)
+expect(gui_mac_smf_dynlib_probe_metrics_valid(p99_under_p95)).to_equal(false)
 expect(gui_mac_smf_dynlib_row_has_one_i64(duplicate_p99, "p99_us")).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(good)).to_equal(true)
 expect(gui_mac_smf_dynlib_accepts_probe_row(measured)).to_equal(true)
@@ -232,6 +256,14 @@ expect(gui_mac_smf_dynlib_accepts_probe_row(loose_threshold)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(over_threshold)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(inconsistent_pass)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(nonnumeric_p99)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_probe_row(missing_warmup)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_probe_row(zero_warmup)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_probe_row(missing_p50)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_probe_row(missing_p95)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_probe_row(missing_max)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_probe_row(p95_under_p50)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_probe_row(p99_under_p95)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_probe_row(max_under_p99)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(non_empty_error)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(duplicate_loader)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(duplicate_dynload)).to_equal(false)
