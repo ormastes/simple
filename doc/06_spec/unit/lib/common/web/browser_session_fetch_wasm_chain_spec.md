@@ -528,6 +528,39 @@ match result:
 
 </details>
 
+#### joins and reverses Uint8Array values in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `1-4-255-7:7,255,4,1:7/255/4/1`
+
+3. Err
+   - Expected: "unexpected uint8 join reverse js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var b = new Uint8Array(4); b[0] = 1; b[1] = 260; b[2] = -1; b[3] = 7; var before = b.join('-'); var returned = b.reverse(); before + ':' + b.join(',') + ':' + returned.join('/')")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("1-4-255-7:7,255,4,1:7/255/4/1")
+    Err(err):
+        expect("unexpected uint8 join reverse js error: {err}").to_equal("")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -547,8 +580,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

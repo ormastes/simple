@@ -1638,3 +1638,22 @@ API conformance remained `213/213`. The generated scenario manual was refreshed
 with the existing docgen stub warning. This closes
 `doc/08_tracking/bug/browser_session_uint8array_search_dispatch.md` while
 leaving broader typed-array prototype parity in the JS/WebEngine/WASM lane open.
+
+BrowserSession Uint8Array join/reverse continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/runtime.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl src/lib/nogc_sync_mut/js/engine/interpreter_eval.spl test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession typed-array prototype coverage now includes bounded
+`Uint8Array.join` and `reverse` in addition to `fill`, `includes`, and
+`indexOf`. The browser script scenario proves byte normalization for direct
+indexed writes (`260 -> 4`, `-1 -> 255`), separator handling, in-place reverse
+mutation, and the returned typed-array object's usability through
+`1-4-255-7:7,255,4,1:7/255/4/1`. Focused checks passed, the fetch/WASM chain
+spec passed `9/9`, the native WASM host spec passed `107/107`, and Node API
+conformance remained `213/213`. The generated scenario manual was refreshed
+with the existing docgen stub warning. Broader typed-array prototype parity
+remains open.
