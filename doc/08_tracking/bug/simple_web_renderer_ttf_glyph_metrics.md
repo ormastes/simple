@@ -468,6 +468,23 @@ argument as top-y and does not apply that `bearing_y` field as if it were a
 top bearing; browser-compatible text placement should continue to use
 `layout_text()` positions.
 
+## Production Probe Follow-up - 2026-06-02
+
+The focused `site_0_google` production renderer branch was probed with the
+shared `FontRenderer` layered over the current blue block using the existing
+famous-site paint runs. Without `libspl_fonts.so`, the vector/bitmap fallback
+painted 527 of 1612 expected ink pixels but regressed the strict production
+probe from `2717` to `3113` different pixels. After rebuilding
+`src/compiler_rust/spl_fonts` and placing `libspl_fonts.so` under `build/lib`,
+the TrueType path painted 1176 of 1612 expected ink pixels but worsened the
+exact-pixel gate further to `3696`.
+
+This confirms that simply enabling the current grayscale TTF/vector glyph path
+in production is not Chrome-compatible compositing. The production probe was
+restored to the bounded block-only artifact (`2717` different pixels) and must
+stay fail-closed until the renderer has a Chrome-like antialiasing, gamma/LCD,
+and background-compositing model that improves the strict pixel bound.
+
 ## Current Resolution
 
 The latest renderer audit resolves the tracked corpus pixel blocker. The

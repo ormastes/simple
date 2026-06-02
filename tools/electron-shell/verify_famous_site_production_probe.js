@@ -282,6 +282,7 @@ let result = {
   report: path.relative(root, reportPath),
   baseline: path.relative(root, baselinePath),
   rendererMode: "",
+  productionRenderStrategy: "",
   exact: false,
   accepted: false,
   divergent: false,
@@ -359,6 +360,7 @@ if (!fs.existsSync(reportPath)) {
   const chromePath = path.join(root, chromeRel);
   const simplePath = path.join(root, simpleRel);
   result.rendererMode = matchText(text, /renderer_mode:\s*"([^"]+)"/);
+  result.productionRenderStrategy = matchText(text, /production_render_strategy:\s*"([^"]+)"/);
   result.exact = parseBool(text, /exact:\s*(true|false)/);
   result.accepted = parseBool(text, /accepted:\s*(true|false)/);
   result.differentPixels = parseIntField(text, /different_pixels:\s*([0-9]+)/);
@@ -401,6 +403,7 @@ if (!fs.existsSync(reportPath)) {
   result.chromeGlyphCompositingParity = result.parityStatus === "exact";
   result.promotionRequiredDifferentPixels = result.parityStatus === "exact" ? 0 : result.differentPixels;
   if (result.rendererMode !== "production") failures.push("report is not renderer_mode production");
+  if (result.productionRenderStrategy !== "famous_site_block_only_pending_glyph_compositing") failures.push("missing or unexpected production render strategy");
   if (!simpleRel.endsWith("/simple.production.ppm")) failures.push("simple_ppm does not use production artifact path");
   if (!result.divergent) failures.push("production probe is not divergent");
   if (!result.reportFresh) failures.push("production report is stale or PPM parse failed");

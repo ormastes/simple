@@ -28,14 +28,20 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   The famous-site corpus system spec passes 37/37; production pixels remain
   divergent (`differentPixels: 2717`) and are tracked as the next glyph paint
   and compositing blocker. Direct bitmap glyph paint routes were probed and
-  fail closed because they regress the strict different-pixel bound; the next
-  implementation slice needs Chrome-like antialias/proportional glyph paint
-  before replacing the rectangle-only production corpus path. The text painter
-  now exposes calibrated famous-site paint runs so production paint can consume
-  the shared wrapping/width/y-position model without duplicating font metrics.
+  fail closed because they regress the strict different-pixel bound. A follow-up
+  shared `FontRenderer`/`libspl_fonts` production overlay also failed closed:
+  fallback glyphs raised the focused production delta to `3113`, and TrueType
+  glyphs raised it to `3696`, even though they painted more expected ink. The
+  next implementation slice needs Chrome-like antialias/gamma/LCD compositing,
+  not another raw glyph overlay, before replacing the rectangle-only production
+  corpus path. The text painter now exposes calibrated famous-site paint runs
+  so production paint can consume the shared wrapping/width/y-position model
+  without duplicating font metrics.
   The focused production verifier now reads its strict current-difference bound
-  from the checked-in sample baseline and independently recomputes PPM pixels,
-  while still reporting
+  from the checked-in sample baseline, requires the production report to declare
+  `production_render_strategy:
+  "famous_site_block_only_pending_glyph_compositing"`, and independently
+  recomputes PPM pixels, while still reporting
   `chromeGlyphCompositingParity=false` until exact pixels reach zero.
 - 8K color/image Option A is selected and documented: lazy packed 8K surfaces,
   CIELAB as the semantic color space, XYZ as the connection space, and fail-
@@ -153,9 +159,10 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   as its checked-in regression bound. Current `site_0_google` evidence passes
   only as bounded divergent evidence with `differentPixels=2717`,
   `computedDifferentPixels=2717`, `maxDifferentPixels=2717`,
-  `boundedDivergenceOnly=true`, and `chromeGlyphCompositingParity=false`; a
-  missing baseline, text-line ink corruption, and residual-pixel corruption all
-  fail closed.
+  `boundedDivergenceOnly=true`, `chromeGlyphCompositingParity=false`, and
+  `productionRenderStrategy="famous_site_block_only_pending_glyph_compositing"`;
+  a missing baseline, missing/unexpected render strategy, text-line ink
+  corruption, and residual-pixel corruption all fail closed.
 - `doc/09_report/chrome_production_glyph_paint_probe_2026-06-01.md`:
   fail-closed production glyph paint probe showing generic layout and Engine2D
   bitmap glyph routes regress the strict `site_0_google` different-pixel bound.
