@@ -174,6 +174,39 @@ match session.take_pending_request():
 
 </details>
 
+#### routes invalid WebAssembly.compile results through catch in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `invalid:invalid-wasm-header:8:0`
+
+3. Err
+   - Expected: "unexpected wasm compile catch js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var out = ''; WebAssembly.compile('0061736d00000000').catch(function(err) { out = err.status + ':' + err.error; }); var valid = WebAssembly.compile('0061736d01000000'); valid.then(function(module) { out = out + ':' + module.byteLength + ':' + module.sectionCount; }); out")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("invalid:invalid-wasm-header:8:0")
+    Err(err):
+        expect("unexpected wasm compile catch js error: {err}").to_equal("")
+```
+
+</details>
+
 #### chains compiled WebAssembly modules into instantiate
 
 1. var session = BrowserSession new
@@ -1405,8 +1438,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 34 |
-| Active scenarios | 34 |
+| Total scenarios | 35 |
+| Active scenarios | 35 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
