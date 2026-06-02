@@ -2862,6 +2862,25 @@ expect(_eval_str("var finished = 'no'; var w = require('stream').Writable(); w.o
 
 </details>
 
+#### destroys bounded writable streams deterministically
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var w = require('stream').Writable(); typeof w.destroy")).to_equal("function")
+expect(_eval_str("var w = require('stream').Writable(); w.write('abc'); w.destroy(); w.destroyed + ':' + w.closed + ':' + w.writable + ':' + w.writableLength")).to_equal("true:true:false:0")
+expect(_eval_str("var seen = 0; var w = require('stream').Writable(); w.on('close', () => { seen = seen + 1; }); w.destroy(); w.destroy(); seen + ':' + w.closeEmitted + ':' + w.closeListenerCount")).to_equal("1:true:1")
+expect(_eval_str("var seen = 0; var w = require('stream').Writable(); w.once('close', () => { seen = seen + 1; }); w.destroy(); w.destroy(); seen + ':' + w.listenerCount('close')")).to_equal("1:0")
+expect(_eval_str("var w = require('stream').Writable(); w.destroy(); var r = w.write('late'); r.status + ':' + r.error + ':' + w.bytesWritten")).to_equal("denied:stream-destroyed:0")
+expect(_eval_str("var w = require('stream').Writable(); w.destroy(); w.end()")).to_equal("false")
+```
+
+</details>
+
 #### caches stream module state across repeated require calls
 
 <details>
@@ -4196,8 +4215,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 269 |
-| Active scenarios | 269 |
+| Total scenarios | 270 |
+| Active scenarios | 270 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
