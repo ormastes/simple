@@ -1674,3 +1674,20 @@ positive start, negative start normalization, and missing-byte behavior with
 the native WASM host spec passed `107/107`, and Node API conformance remained
 `213/213`. The generated scenario manual was refreshed with the existing docgen
 stub warning. Broader typed-array prototype parity remains open.
+
+BrowserSession Uint8Array toString continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/runtime.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl src/lib/nogc_sync_mut/js/engine/interpreter_eval.spl test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession typed-array prototype coverage now includes bounded
+`Uint8Array.toString` by routing the method through comma-separated typed-array
+`join` semantics. The browser script scenario proves byte normalization and
+default stringification through `1,4,255,7:1|4|255|7`. Focused checks passed,
+the fetch/WASM chain spec passed `11/11`, the native WASM host spec passed
+`107/107`, and Node API conformance remained `213/213`. The generated scenario
+manual was refreshed with the existing docgen stub warning. Broader typed-array
+prototype parity remains open.
