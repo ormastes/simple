@@ -133,11 +133,13 @@ expect(_has_forbidden_release_dependency("use std.sffi.dynamic.{spl_dlopen, spl_
 
 4.  expect release clean
 
+5.  expect release clean
+
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -145,6 +147,7 @@ _expect_release_clean("src/app/gui_perf/macos_smf_dynlib_evidence_core.spl")
 _expect_release_clean("src/app/gui_perf/macos_smf_dynlib_evidence.spl")
 _expect_release_clean("src/app/gui_perf/macos_smf_dynlib_transcript_check.spl")
 _expect_release_clean("src/app/gui_perf/macos_smf_dynlib_release_gate.spl")
+_expect_release_clean("src/app/gui_perf/linux_smf_dynlib_e2e_gate.spl")
 ```
 
 </details>
