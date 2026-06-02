@@ -2476,6 +2476,22 @@ expect(_eval_str("var seen = 0; var r = require('stream').Readable.from(['a','b'
 
 </details>
 
+#### reports bounded readable option metadata
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var r = require('stream').Readable.from(['a']); r.readableHighWaterMark + ':' + r.readableObjectMode + ':' + r.readableEncoding")).to_equal("16384:false:")
+expect(_eval_str("var opts = {}; opts.highWaterMark = 7; opts.objectMode = true; var r = require('stream').Readable.from(['a'], opts); r.readableHighWaterMark + ':' + r.readableObjectMode")).to_equal("7:true")
+expect(_eval_str("var opts = {}; opts.highWaterMark = 0; var r = require('stream').Readable.from(['a'], opts); r.readableHighWaterMark")).to_equal("1")
+```
+
+</details>
+
 #### tracks bounded readable pause and resume flow state
 
 <details>
@@ -4288,8 +4304,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 274 |
-| Active scenarios | 274 |
+| Total scenarios | 275 |
+| Active scenarios | 275 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

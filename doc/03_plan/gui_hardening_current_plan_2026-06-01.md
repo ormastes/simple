@@ -267,10 +267,12 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   drained automatically on `resume()`. Bounded `unpipe()` now clears pending
   pipe destinations before resume. Bounded readable `destroy()` now closes
   readable state, clears pending pipe state, and idempotently emits `close`.
-  Bounded writable streams now also expose Node-style writable lifecycle
-  aliases, `writableNeedDrain`, `writableCorked`, `cork()`/`uncork()`, and
-  option metadata for `objectMode`, `defaultEncoding`, and `decodeStrings`.
-  Current focused checks pass `node_api_conformance_spec.spl` `274/274` and
+  Bounded readable streams now report `Readable.from` high-water mark, object
+  mode, and encoding metadata. Bounded writable streams now also expose
+  Node-style writable lifecycle aliases, `writableNeedDrain`, `writableCorked`,
+  `cork()`/`uncork()`, and option metadata for `objectMode`,
+  `defaultEncoding`, and `decodeStrings`.
+  Current focused checks pass `node_api_conformance_spec.spl` `275/275` and
   `node_process_next_tick_spec.spl` `2/2`; missing and invalid process grants
   remain rejected, and explicit in-memory CommonJS source grants now execute
   `exports.*` assignments plus `module.exports = ...` replacements with cache
@@ -397,9 +399,9 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   paused-stream availability, and ended/destroyed-stream suppression. Bounded
   readable pipes now stop on writable high-water pressure, leave remaining
   chunks buffered, and resume the remembered destination after pressure clears.
-  Bounded writable lifecycle aliases, need-drain state, cork/uncork state, and
-  option metadata for object mode, default encoding, and decodeStrings are
-  covered.
+  Bounded readable option metadata and bounded writable lifecycle aliases,
+  need-drain state, cork/uncork state, and option metadata for object mode,
+  default encoding, and decodeStrings are covered.
   Full flow control, `for await` syntax support, broader stream scheduling, and
   broader event-loop phases remain open.
   Bounded `setInterval` rescheduling across explicit timer drains,
