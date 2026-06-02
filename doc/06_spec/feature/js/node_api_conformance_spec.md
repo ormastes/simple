@@ -2294,6 +2294,22 @@ expect(_eval_str("var r = require('stream').Readable.from(['a','b']); var it = r
 
 </details>
 
+#### emits bounded readable end after async iterator exhaustion
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var seen = 0; var r = require('stream').Readable.from(['a']); r.on('end', () => { seen = seen + 1; }); var it = r.streamAsyncIterator(); it.next(); it.next(); seen + ':' + r.endEmitted + ':' + r.readableLength")).to_equal("1:true:0")
+expect(_eval_str("var seen = 0; var r = require('stream').Readable.from(['a']); r.once('end', () => { seen = seen + 1; }); var it = r.streamAsyncIterator(); it.next(); it.next(); it.next(); seen + ':' + r.listenerCount('end') + ':' + r.endEmitted")).to_equal("1:0:true")
+expect(_eval_str("var seen = 0; var r = require('stream').Readable.from(['a','b']); r.on('end', () => { seen = seen + 1; }); var it = r.streamAsyncIterator(); it.next(); seen + ':' + r.endEmitted + ':' + r.readableLength")).to_equal("0:false:1")
+```
+
+</details>
+
 #### exposes bounded Symbol asyncIterator key
 
 <details>
@@ -2327,11 +2343,12 @@ expect(_eval_str("typeof require('stream').Readable.from(['a'])[Symbol.asyncIter
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_eval_str("var r = require('stream').Readable.from(['a','b']); var it = r[Symbol.asyncIterator](); it.next().value")).to_equal("a")
+expect(_eval_str("var seen = 0; var r = require('stream').Readable.from(['a']); r.on('end', () => { seen = seen + 1; }); var it = r[Symbol.asyncIterator](); it.next(); it.next(); seen + ':' + r.endEmitted")).to_equal("1:true")
 ```
 
 </details>
@@ -3526,8 +3543,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 230 |
-| Active scenarios | 230 |
+| Total scenarios | 231 |
+| Active scenarios | 231 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
