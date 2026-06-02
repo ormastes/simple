@@ -389,8 +389,11 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   `end`, including once-listener cleanup and paused pending-pipe resume
   delivery. Bounded readable end-state now sets `readableEnded=true` and
   `readable=false` across data, pipe, async-iterator, and direct read EOF
-  exhaustion. Full flow control, `for await` syntax support, broader stream
-  scheduling, and broader event-loop phases remain open.
+  exhaustion. Bounded readable availability events now notify `readable`
+  listeners once while buffered chunks remain, including once-listener cleanup,
+  paused-stream availability, and ended/destroyed-stream suppression. Full flow
+  control, `for await` syntax support, broader stream scheduling, and broader
+  event-loop phases remain open.
   Bounded `setInterval` rescheduling across explicit timer drains,
   `clearInterval` from inside an interval callback, and nextTick-before-timer
   phase priority are covered. Broader event-loop phases, host I/O integration,
@@ -2514,3 +2517,23 @@ passed, the Node API conformance suite passes `228/228`, BrowserSession
 fetch/WASM and native WASM host regressions remain `36/36` and `107/107`, and
 the broad `src/lib` check passed with the existing `447` warning profile. Full
 stream flow control, async scheduling, and host I/O integration remain open.
+
+CommonJS/Node bounded readable availability continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/interpreter_native.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+
+Bounded readable streams now emit a deterministic `readable` availability
+signal when listeners attach while buffered chunks remain. The implementation
+sets `readableNotified=true`, records whether the availability event emitted,
+cleans up one-shot readable listeners through the existing EventEmitter path,
+reports availability while paused, and suppresses notifications after direct
+EOF or `destroy()`. Focused checks passed, the Node API conformance suite
+passes `233/233`, BrowserSession fetch/WASM and native WASM host regressions
+remain `36/36` and `107/107`, and the broad `src/lib` check passed with the
+existing `447` warning profile. Full stream flow control, async scheduling,
+`for await` syntax, and host I/O integration remain open.

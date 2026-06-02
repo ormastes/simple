@@ -2069,6 +2069,24 @@ expect(_eval_str("var r = require('stream').Readable.from(['a']); r.pause(); r.r
 
 </details>
 
+#### emits bounded readable availability events
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var seen = 0; var r = require('stream').Readable.from(['a','b']); r.on('readable', () => { seen = r.readableLength; }); seen + ':' + r.readableNotified + ':' + r.readableAvailableEmitted")).to_equal("2:true:true")
+expect(_eval_str("var seen = 0; var r = require('stream').Readable.from(['a']); r.once('readable', () => { seen = seen + 1; }); seen + ':' + r.listenerCount('readable') + ':' + r.readableNotified")).to_equal("1:0:true")
+expect(_eval_str("var seen = 0; var r = require('stream').Readable.from(['a']); r.read(); r.read(); r.on('readable', () => { seen = seen + 1; }); seen + ':' + r.readableEnded + ':' + r.readable")).to_equal("0:true:false")
+expect(_eval_str("var seen = 0; var r = require('stream').Readable.from(['a']); r.pause(); r.on('readable', () => { seen = r.readableLength; }); seen + ':' + r.isPaused() + ':' + r.readableNotified")).to_equal("1:true:true")
+expect(_eval_str("var seen = 0; var r = require('stream').Readable.from(['a']); r.destroy(); r.on('readable', () => { seen = seen + 1; }); seen + ':' + r.destroyed + ':' + r.readableLength")).to_equal("0:true:0")
+```
+
+</details>
+
 #### tracks bounded stream Writable writes and end state
 
 <details>
@@ -3564,8 +3582,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 232 |
-| Active scenarios | 232 |
+| Total scenarios | 233 |
+| Active scenarios | 233 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

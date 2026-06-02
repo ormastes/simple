@@ -1807,6 +1807,7 @@ impl JsInterpreter:
         self.set_object_property(readable_id, "closed", JsValue.Boolean(v: false))
         self.set_object_property(readable_id, "closeEmitted", JsValue.Boolean(v: false))
         self.set_object_property(readable_id, "endEmitted", JsValue.Boolean(v: false))
+        self.set_object_property(readable_id, "readableNotified", JsValue.Boolean(v: false))
         self.set_object_property(readable_id, "__simple_stream_pending_pipe_dest", JsValue.Number(v: -1.0))
         self.set_object_property(readable_id, "__simple_stream_cursor", JsValue.Number(v: 0.0))
         self.set_object_property(readable_id, "__simple_stream_next_chunk", JsValue.String(v: first_chunk))
@@ -2001,6 +2002,35 @@ impl JsInterpreter:
             JsValue.Boolean(v): self.set_object_property(readable_id, "closeEmitted", JsValue.Boolean(v: v))
             _:
                 self.set_object_property(readable_id, "closeEmitted", JsValue.Boolean(v: false))
+        this_val
+
+    me _native_node_stream_readable_emit_readable(this_val: JsValue) -> JsValue:
+        val readable_id = _get_obj_id(this_val)
+        if readable_id < 0:
+            return this_val
+        if to_boolean(self.get_object_property(readable_id, "destroyed")):
+            return this_val
+        if to_boolean(self.get_object_property(readable_id, "readableNotified")):
+            return this_val
+        match self.get_object_property(readable_id, "readable"):
+            JsValue.Boolean(v):
+                if not v:
+                    return this_val
+            _:
+                return this_val
+        var length = 0
+        match self.get_object_property(readable_id, "readableLength"):
+            JsValue.Number(v): length = f64_to_i64(v)
+            _:
+                pass_dn
+        if length <= 0:
+            return this_val
+        self.set_object_property(readable_id, "readableNotified", JsValue.Boolean(v: true))
+        val emit_result = self._native_node_event_emitter_emit(this_val, [JsValue.String(v: "readable")])
+        match emit_result:
+            JsValue.Boolean(v): self.set_object_property(readable_id, "readableAvailableEmitted", JsValue.Boolean(v: v))
+            _:
+                self.set_object_property(readable_id, "readableAvailableEmitted", JsValue.Boolean(v: false))
         this_val
 
     me _native_node_stream_readable_drain_data(this_val: JsValue) -> JsValue:
@@ -2284,6 +2314,8 @@ impl JsInterpreter:
                         val ignored_data_result = self._native_node_stream_readable_drain_data(this_val)
                 _:
                     pass_dn
+        if event_name == "readable":
+            val ignored_readable_result = self._native_node_stream_readable_emit_readable(this_val)
         this_val
 
     me _native_node_event_emitter_emit(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
