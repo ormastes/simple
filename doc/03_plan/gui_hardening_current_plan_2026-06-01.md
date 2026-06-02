@@ -1527,3 +1527,22 @@ marks the host GTK GL exact-scene baseline as
 The focused system spec passes `1/1` and the mirrored manual was generated. This
 improves release evidence clarity without claiming the guest-side QEMU/GTK perf
 harness is wired.
+
+Web WM snap assist and desktop widget continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/app/ui.web/html.spl src/app/ui.web/wm_quality_contract.spl src/os/desktop/modern_wm_readiness.spl test/unit/app/ui/web_wm_modern_shell_spec.spl test/unit/os/desktop/modern_wm_readiness_spec.spl`
+- `node --check src/app/ui.web/wm.js`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/app/ui/web_wm_modern_shell_spec.spl --mode=interpreter --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/os/desktop/modern_wm_readiness_spec.spl --mode=interpreter --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/unit/app/ui/web_wm_modern_shell_spec.spl test/unit/os/desktop/modern_wm_readiness_spec.spl --output doc/06_spec`
+
+The modern Web WM now has snap-assist evidence and runtime behavior: dragging
+near left, right, or top edges shows a rounded translucent `.wm-snap-preview`
+and sends the existing move/resize commands with snapped half/full bounds. The
+same shell now exposes desktop widgets for clock, motion, and workspace state,
+with a command-palette toggle and reduced/off motion coverage. The Web WM
+quality report and combined modern-readiness report now carry
+`snap_assist_ready` and `desktop_widgets_ready`; the Web WM spec passes `5/5`
+and the readiness spec passes `2/2`. This advances the Engine2D/Web WM shell
+lane without claiming production Chrome pixel parity or guest QEMU/GTK perf is
+complete.

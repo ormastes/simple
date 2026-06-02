@@ -25,7 +25,7 @@ Verifies the first modern Simple Web WM slice at the contract level.
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 34 lines folded for reproduction.
+Runnable source: 47 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -38,7 +38,20 @@ expect(html).to_contain("@keyframes wm-window-open")
 expect(html).to_contain("@keyframes wm-window-close")
 expect(html).to_contain("@keyframes wm-window-minimize")
 expect(html).to_contain("@keyframes widget-pop-in")
+expect(html).to_contain("@keyframes wm-widget-float")
 expect(html).to_contain("@keyframes wm-bg-drift")
+expect(html).to_contain("@keyframes wm-snap-pulse")
+expect(html).to_contain(".wm-snap-preview")
+expect(html).to_contain(".wm-snap-preview.active")
+expect(html).to_contain("data-snap-zone=left")
+expect(html).to_contain("data-snap-zone=right")
+expect(html).to_contain("data-snap-zone=full")
+expect(html).to_contain(".wm-desktop-widgets")
+expect(html).to_contain(".wm-desktop-widgets.collapsed")
+expect(html).to_contain(".wm-desktop-widget")
+expect(html).to_contain(".wm-desktop-widget-label")
+expect(html).to_contain(".wm-desktop-widget-value")
+expect(html).to_contain(".wm-desktop-widget-meta")
 expect(html).to_contain("prefers-reduced-motion")
 expect(html).to_contain("data-wm-motion=reduced")
 expect(html).to_contain("data-wm-motion=off")
@@ -72,7 +85,7 @@ expect(html).to_contain("border-radius: 999px")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 49 lines folded for reproduction.
+Runnable source: 60 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -110,6 +123,17 @@ expect(js).to_contain("square-to-round")
 expect(js).to_contain("glyph-to-round")
 expect(js).to_contain("_makeTitleInput")
 expect(js).to_contain("_markWindowLifecycle")
+expect(js).to_contain("_ensureSnapPreview")
+expect(js).to_contain("_detectSnapZone")
+expect(js).to_contain("_snapRectForZone")
+expect(js).to_contain("_applySnapPreview")
+expect(js).to_contain("_clearSnapPreview")
+expect(js).to_contain("snap_zone")
+expect(js).to_contain("_ensureDesktopWidgets")
+expect(js).to_contain("_makeDesktopWidget")
+expect(js).to_contain("_toggleDesktopWidgets")
+expect(js).to_contain("Toggle desktop widgets")
+expect(js).to_contain("wm-desktop-widget")
 expect(js).to_contain("wm-titlebar-icon")
 expect(js).to_contain("wm-command-bar")
 expect(js).to_contain("wm-btn-")
@@ -134,7 +158,7 @@ expect(retained).to_contain("Maximize window")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -143,6 +167,14 @@ expect(preview).to_contain("data-preview=\"modern-wm\"")
 expect(preview).to_contain("data-wm-motion=\"standard\"")
 expect(preview).to_contain("wm-window focused opening")
 expect(preview).to_contain("wm-window restoring")
+expect(preview).to_contain("wm-snap-preview active")
+expect(preview).to_contain("data-snap-zone=\"right\"")
+expect(preview).to_contain("aria-hidden=\"true\"")
+expect(preview).to_contain("wm-desktop-widgets")
+expect(preview).to_contain("wm-widget-clock")
+expect(preview).to_contain("wm-widget-system")
+expect(preview).to_contain("wm-widget-workspace")
+expect(preview).to_contain("aria-label=\"Desktop widgets\"")
 expect(preview).to_contain("wm-traffic-lights")
 expect(preview).to_contain("wm-title-input wm-command-bar")
 expect(preview).to_contain("wm-command-palette")
@@ -172,7 +204,7 @@ expect(preview).to_contain("contrast_ratio_x100=450")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -189,6 +221,7 @@ expect(report).to_contain("wm_modern_preview")
 expect(report).to_contain("path=build/simple_wm_modern_preview.html")
 expect(report).to_contain("command_palette=true")
 expect(report).to_contain("normalized_icons=true")
+expect(report).to_contain("desktop_widgets=true")
 ```
 
 </details>
@@ -198,7 +231,7 @@ expect(report).to_contain("normalized_icons=true")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -232,11 +265,15 @@ expect(report.command_palette_ready)
 expect(report.title_input_ready)
 expect(report.visual_layering_ready)
 expect(report.accessible_controls_ready)
+expect(report.snap_assist_ready)
+expect(report.desktop_widgets_ready)
 expect(wm_theme_quality_summary("glass_dark")).to_contain("status=pass")
 expect(wm_theme_quality_summary("glass_dark")).to_contain("contrast_ratio_x100=")
 expect(wm_theme_quality_summary("glass_dark")).to_contain("titlebar_height_px=38")
 expect(wm_theme_quality_summary("glass_dark")).to_contain("visual_layering_ready=true")
 expect(wm_theme_quality_summary("glass_dark")).to_contain("accessible_controls_ready=true")
+expect(wm_theme_quality_summary("glass_dark")).to_contain("snap_assist_ready=true")
+expect(wm_theme_quality_summary("glass_dark")).to_contain("desktop_widgets_ready=true")
 ```
 
 </details>
@@ -250,3 +287,4 @@ expect(wm_theme_quality_summary("glass_dark")).to_contain("accessible_controls_r
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+

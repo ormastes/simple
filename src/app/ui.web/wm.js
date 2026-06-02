@@ -62,6 +62,9 @@ class SimpleWindowManager {
     this._commandPaletteList = null;
     this._commandPaletteItems = [];
     this._commandPaletteActiveIndex = 0;
+    this._snapPreview = null;
+    this._lastSnapZone = '';
+    this._desktopWidgets = null;
 
     this._applyMotionPreference(options.motion || '');
     window.simpleWmSetMotion = (preference) => this.setMotionPreference(preference);
@@ -85,10 +88,12 @@ class SimpleWindowManager {
         window.simpleUI.notifyWmReady();
       }
       await this._loadRenderer(false);
+      this._ensureDesktopWidgets();
       return;
     }
     await this._loadRenderer(this.transport !== 'electron-ipc');
     this._bindGlobalEvents();
+    this._ensureDesktopWidgets();
     if (window.simpleUI && window.simpleUI.onNativeWindowEvent) {
       window.simpleUI.onNativeWindowEvent((msg) => this._handleNativeWindowEvent(msg || {}));
     }
@@ -431,6 +436,7 @@ class SimpleWindowManager {
   _commandPaletteCommands() {
     return [
       { label: 'Open Simple IDE', shortcut: 'Enter', icon: 'I', action: () => this._sendLaunch('simple.ide') },
+      { label: 'Toggle desktop widgets', shortcut: 'Cmd W', icon: 'W', action: () => this._toggleDesktopWidgets() },
       { label: 'Set motion: standard', shortcut: 'Cmd 1', icon: 'S', action: () => this.setMotionPreference('standard') },
       { label: 'Set motion: reduced', shortcut: 'Cmd 2', icon: 'M', action: () => this.setMotionPreference('reduced') },
       { label: 'Set motion: off', shortcut: 'Cmd 3', icon: 'O', action: () => this.setMotionPreference('off') }
@@ -605,6 +611,57 @@ class SimpleWindowManager {
       icon.appendChild(glyph);
     }
     return icon;
+  }
+
+  _ensureDesktopWidgets() {
+    if (this._desktopWidgets && this._desktopWidgets.isConnected) return this._desktopWidgets;
+    if (!this.desktop) return null;
+    const shelf = document.createElement('section');
+    shelf.className = 'wm-desktop-widgets';
+    shelf.setAttribute('aria-label', 'Desktop widgets');
+    shelf.addEventListener('pointerdown', (event) => event.stopPropagation());
+    shelf.addEventListener('mousedown', (event) => event.stopPropagation());
+    shelf.appendChild(this._makeDesktopWidget('wm-widget-clock', 'Local', this._desktopClockLabel(), 'Clock'));
+    shelf.appendChild(this._makeDesktopWidget('wm-widget-system', 'Motion', this._normalizeMotionPreference(this._readMotionPreference()), 'Settings'));
+    shelf.appendChild(this._makeDesktopWidget('wm-widget-workspace', 'Workspace', 'Simple WM', 'Active'));
+    this.desktop.appendChild(shelf);
+    this._desktopWidgets = shelf;
+    return shelf;
+  }
+
+  _makeDesktopWidget(kind, label, value, meta) {
+    const widget = document.createElement('article');
+    widget.className = `wm-desktop-widget ${kind}`;
+    widget.setAttribute('role', 'group');
+    widget.setAttribute('aria-label', `${label} widget`);
+    const labelEl = document.createElement('span');
+    labelEl.className = 'wm-desktop-widget-label';
+    labelEl.textContent = label;
+    const valueEl = document.createElement('strong');
+    valueEl.className = 'wm-desktop-widget-value';
+    valueEl.textContent = value;
+    const metaEl = document.createElement('span');
+    metaEl.className = 'wm-desktop-widget-meta';
+    metaEl.textContent = meta;
+    widget.appendChild(labelEl);
+    widget.appendChild(valueEl);
+    widget.appendChild(metaEl);
+    return widget;
+  }
+
+  _desktopClockLabel() {
+    try {
+      return new Intl.DateTimeFormat([], { hour: '2-digit', minute: '2-digit' }).format(new Date());
+    } catch (_) {
+      return '09:41';
+    }
+  }
+
+  _toggleDesktopWidgets() {
+    const shelf = this._ensureDesktopWidgets();
+    if (!shelf) return false;
+    shelf.classList.toggle('collapsed');
+    return !shelf.classList.contains('collapsed');
   }
 
   _isImageIcon(value) {
@@ -1109,6 +1166,67 @@ class SimpleWindowManager {
       clearTimeout(this.resizeState.timer);
       this.resizeState = null;
     }
+    this._clearSnapPreview();
+  }
+
+  _ensureSnapPreview() {
+    if (this._snapPreview && this._snapPreview.isConnected) return this._snapPreview;
+    if (!this.desktop) return null;
+    const preview = document.createElement('div');
+    preview.className = 'wm-snap-preview';
+    preview.setAttribute('aria-hidden', 'true');
+    this.desktop.appendChild(preview);
+    this._snapPreview = preview;
+    return preview;
+  }
+
+  _detectSnapZone(e) {
+    if (!this.desktop) return '';
+    const r = this.desktop.getBoundingClientRect();
+    const x = e.clientX - r.left;
+    const y = e.clientY - r.top;
+    const threshold = 34;
+    if (y <= threshold) return 'full';
+    if (x <= threshold) return 'left';
+    if (x >= r.width - threshold) return 'right';
+    return '';
+  }
+
+  _snapRectForZone(zone) {
+    if (!this.desktop || !zone) return null;
+    const r = this.desktop.getBoundingClientRect();
+    const gap = 10;
+    const taskbarReserve = 68;
+    const height = Math.max(240, Math.round(r.height - taskbarReserve - gap * 2));
+    const halfWidth = Math.max(300, Math.round((r.width - gap * 3) / 2));
+    if (zone === 'left') return { x: gap, y: gap, w: halfWidth, h: height };
+    if (zone === 'right') return { x: Math.round(r.width - halfWidth - gap), y: gap, w: halfWidth, h: height };
+    if (zone === 'full') return { x: gap, y: gap, w: Math.max(420, Math.round(r.width - gap * 2)), h: height };
+    return null;
+  }
+
+  _applySnapPreview(zone) {
+    const preview = this._ensureSnapPreview();
+    const rect = this._snapRectForZone(zone);
+    if (!preview || !rect) {
+      this._clearSnapPreview();
+      return;
+    }
+    preview.dataset.snapZone = zone;
+    preview.style.left = `${rect.x}px`;
+    preview.style.top = `${rect.y}px`;
+    preview.style.width = `${rect.w}px`;
+    preview.style.height = `${rect.h}px`;
+    preview.classList.add('active');
+    this._lastSnapZone = zone;
+  }
+
+  _clearSnapPreview() {
+    if (this._snapPreview) {
+      this._snapPreview.classList.remove('active');
+      this._snapPreview.dataset.snapZone = '';
+    }
+    this._lastSnapZone = '';
   }
 
   // -------------------------------------------------------------------------
@@ -1168,6 +1286,9 @@ class SimpleWindowManager {
       const dy = e.clientY - ds.startY;
       const nextX = ds.origLeft + dx;
       const nextY = ds.origTop + dy;
+      const snapZone = this._detectSnapZone(e);
+      if (snapZone) this._applySnapPreview(snapZone);
+      else this._clearSnapPreview();
       if (ds.isElectronWindow) {
         this._electronMoveWindow(ds.surfaceId, Math.round(nextX), Math.round(nextY));
       } else if (ds.ghostEl) {
@@ -1201,10 +1322,16 @@ class SimpleWindowManager {
       const ds = this.dragState;
       const dx = e.clientX - ds.startX;
       const dy = e.clientY - ds.startY;
-      const newX = ds.origLeft + dx;
-      const newY = ds.origTop  + dy;
+      var newX = ds.origLeft + dx;
+      var newY = ds.origTop  + dy;
+      var snappedRect = this._snapRectForZone(this._detectSnapZone(e) || this._lastSnapZone);
+      if (snappedRect) {
+        newX = snappedRect.x;
+        newY = snappedRect.y;
+      }
       if (this.transport === 'electron-ipc' && this._electronWindows.has(ds.surfaceId)) {
         this._electronMoveWindow(ds.surfaceId, Math.round(newX), Math.round(newY));
+        if (snappedRect) this._electronResizeWindow(ds.surfaceId, snappedRect.w, snappedRect.h);
       }
       // Send authoritative move request; server will reconcile and patch back.
       // window_id_hint is a HINT only; server resolves via UiWindowSurfaceRegistry.
@@ -1214,7 +1341,17 @@ class SimpleWindowManager {
         x: Math.round(newX),
         y: Math.round(newY)
       });
+      if (snappedRect) {
+        this._sendWindowCmd('resize', {
+          window_id_hint: ds.surfaceId,
+          ...(ds.isElectronWindow ? { source: HOST_NATIVE_EVENT_SOURCE } : {}),
+          w: snappedRect.w,
+          h: snappedRect.h,
+          snap_zone: this._lastSnapZone || this._detectSnapZone(e)
+        });
+      }
       if (ds.ghostEl) ds.ghostEl.remove();
+      this._clearSnapPreview();
       clearTimeout(ds.timer);
       this.dragState = null;
     }
