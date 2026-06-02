@@ -1924,3 +1924,21 @@ passed `12/12`, the native WASM host spec passed `107/107`, and Node API
 conformance remained `213/213`. The generated scenario manual was refreshed
 with the existing docgen stub warning. Broader typed-array prototype parity
 remains open.
+
+BrowserSession Uint8Array sort continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/interpreter_eval.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession typed-array prototype coverage now includes bounded default
+`Uint8Array.sort` behavior. The browser script scenario proves normalized byte
+ordering, in-place mutation, same returned typed-array usability through
+`toString`/`at`, and numeric ascending output with
+`1,4,7,255:1,4,7,255:1:255`. Focused checks passed, the fetch/WASM chain spec
+passed `25/25`, the native WASM host spec passed `107/107`, and Node API
+conformance remained `213/213`. The generated scenario manual was refreshed
+with the existing docgen warnings. Comparator sorting, broader typed-array
+prototype parity, and production GUI pixel parity remain open.
