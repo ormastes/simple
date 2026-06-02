@@ -1254,6 +1254,39 @@ match result:
 
 </details>
 
+#### reads signed ArrayBuffer bytes through DataView in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `-1:255:-2:65534:-32768:32768:255,254,255,128,0,0`
+
+3. Err
+   - Expected: "unexpected signed dataview js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var buffer = new ArrayBuffer(6); var view = new DataView(buffer); view.setInt8(0, -1); view.setInt16(1, -2, true); view.setInt16(3, -32768, false); var bytes = new Uint8Array(buffer); view.getInt8(0) + ':' + view.getUint8(0) + ':' + view.getInt16(1, true) + ':' + view.getUint16(1, true) + ':' + view.getInt16(3, false) + ':' + view.getUint16(3, false) + ':' + bytes.toString()")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("-1:255:-2:65534:-32768:32768:255,254,255,128,0,0")
+    Err(err):
+        expect("unexpected signed dataview js error: {err}").to_equal("")
+```
+
+</details>
+
 #### shares WebAssembly Memory buffer bytes with typed array views in browser scripts
 
 1. var session = BrowserSession new
@@ -1306,8 +1339,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 31 |
-| Active scenarios | 31 |
+| Total scenarios | 32 |
+| Active scenarios | 32 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
