@@ -1630,6 +1630,22 @@ expect(_eval_str_with_process("node", "require('child_process').spawn('git', ['s
 
 </details>
 
+#### reports bounded child_process spawn metadata
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_process("node", "var child = require('child_process').spawn('node', ['--version']); child.exitCode + ':' + child.signal + ':' + child.stdout + ':' + child.stderr + ':' + child.argvLength")).to_equal("0::::1")
+expect(_eval_str("var child = require('node:child_process').spawn('node', ['--version']); child.exitCode + ':' + child.signal + ':' + child.stdout + ':' + child.stderr + ':' + child.pid")).to_equal("-1::::-1")
+expect(_eval_str_with_process("node", "require('child_process').spawn('node --version').exitCode")).to_equal("-1")
+```
+
+</details>
+
 #### resolves net and http request APIs as fail-closed network APIs
 
 <details>
@@ -3305,8 +3321,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 216 |
-| Active scenarios | 216 |
+| Total scenarios | 217 |
+| Active scenarios | 217 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -246,13 +246,15 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   `doc/06_spec/feature/js/node_process_next_tick_spec.md`: focused Node
   evidence proving `process.nextTick` and `require('process').nextTick`
   callbacks run on `drain_due_timers(0)` and mutate runtime globals, plus
-  explicit process capability grants for `child_process.spawn`. Current focused
-  checks pass `node_api_conformance_spec.spl` `177/177` and
-  `node_process_next_tick_spec.spl` `2/2`; missing and invalid process grants
-  remain rejected, and explicit in-memory CommonJS source grants now execute
-  `exports.*` assignments plus `module.exports = ...` replacements with cache
-  identity, slash-bearing specifier coverage, and bounded `/node_modules`
-  index/package-main resolution over granted in-memory files.
+  explicit process capability grants for `child_process.spawn`. A follow-up
+  bounded metadata slice now reports `exitCode`, `signal`, `stdout`, `stderr`,
+  `argvLength`, and `pid` on allowed and denied spawn results without host
+  process I/O. Current focused checks pass `node_api_conformance_spec.spl`
+  `217/217` and `node_process_next_tick_spec.spl` `2/2`; missing and invalid
+  process grants remain rejected, and explicit in-memory CommonJS source grants
+  now execute `exports.*` assignments plus `module.exports = ...` replacements
+  with cache identity, slash-bearing specifier coverage, and bounded
+  `/node_modules` index/package-main resolution over granted in-memory files.
 - `doc/09_report/budgeted_simple_web_engine2d_scene_matrix_settings_inspector_2026-06-01.md`:
   current Engine2D Node/Bun/Electron budgeted exact-bitmap matrix including
   settings-inspector-tree.
