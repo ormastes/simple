@@ -1846,6 +1846,23 @@ expect(_eval_str_with_network("http://api.example.com:8080", "var req = require(
 
 </details>
 
+#### rejects bounded http request writes after terminal state
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.writeRejected + ':' + req.writeRejectReason")).to_equal("false:")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.end(); var r = req.write('late'); r.status + ':' + r.error + ':' + req.writeRejected + ':' + req.writeRejectReason")).to_equal("denied:request-ended:true:request-ended")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.abort(); var r = req.write('late'); r.status + ':' + r.error + ':' + req.writeRejected + ':' + req.writeRejectReason")).to_equal("denied:request-aborted:true:request-aborted")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.write('ok'); req.end(); req.write('late'); req.bodyBytes + ':' + req.bodyChunks")).to_equal("2:1")
+```
+
+</details>
+
 #### tracks bounded http request headers
 
 <details>
@@ -3769,8 +3786,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 244 |
-| Active scenarios | 244 |
+| Total scenarios | 245 |
+| Active scenarios | 245 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
