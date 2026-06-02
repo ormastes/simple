@@ -10,12 +10,16 @@
 # GUI renderer restart smoke timeout on hosts without matching devices.
 
 use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.backend_cpu.{CpuBackend}
 use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.gc_async_mut.gpu.engine2d.color.{rgb}
+use std.gc_async_mut.gpu.engine2d.backend_probe.{BackendStatus}
+use std.gc_async_mut.gpu.engine2d.simd_provider.{reset_simd_hits, simd_hit_counts}
+use std.nogc_sync_mut.env.platform.{is_macos}
 
 fn quick_lifecycle_backends() -> [text]:
-    ["software", "cpu"]
+    ["software", "cpu_simd", "cpu"]
 
 describe "Engine2D Backend Lifecycle Smoke":
 
@@ -24,13 +28,17 @@ describe "Engine2D Backend Lifecycle Smoke":
         it "returns at least software and cpu":
             val backends = quick_lifecycle_backends()
             var has_software = false
+            var has_cpu_simd = false
             var has_cpu = false
             for b in backends:
                 if b == "software":
                     has_software = true
+                if b == "cpu_simd":
+                    has_cpu_simd = true
                 if b == "cpu":
                     has_cpu = true
             expect(has_software).to_equal(true)
+            expect(has_cpu_simd).to_equal(true)
             expect(has_cpu).to_equal(true)
 
         it "returns a non-empty list":
@@ -97,3 +105,32 @@ describe "Engine2D Backend Lifecycle Smoke":
             expect(e3.init(32, 32)).to_equal(true)
             expect(e3.width()).to_equal(32)
             e3.shutdown()
+
+    context "Engine2D explicit backend selection":
+
+        it "cpu_simd is a first-class strict backend alias":
+            val probe = Engine2D.probe_backend(16, 16, "cpu_simd")
+            expect(probe.status).to_equal(BackendStatus.Initialized)
+            expect(probe.selected_name).to_equal("cpu_simd")
+
+        it "simd_cpu alias renders through the CPU SIMD surface":
+            reset_simd_hits()
+            var engine = Engine2D.create_with_backend(16, 16, "simd_cpu")
+            engine.clear(rgb(1, 2, 3))
+            engine.draw_rect_filled(2, 2, 4, 4, rgb(10, 20, 30))
+            engine.present()
+            val pixels = engine.read_pixels()
+            val hits = simd_hit_counts()
+            expect(engine.backend_name()).to_equal("cpu_simd")
+            expect(pixels.len()).to_equal(256)
+            expect(pixels[2 * 16 + 2]).to_equal(rgb(10, 20, 30))
+            expect(hits.fill_hits).to_be_greater_than(0)
+            engine.shutdown()
+
+        it "metal strict probe does not silently fall back to cpu":
+            val probe = Engine2D.probe_backend(16, 16, "metal")
+            if is_macos():
+                expect(probe.selected_name).to_equal("metal")
+            else:
+                expect(probe.status).to_equal(BackendStatus.Unavailable)
+                expect(probe.selected_name).to_equal("metal")

@@ -3,7 +3,7 @@
 # High-level entry point that auto-selects the best available rendering
 # backend and delegates all drawing operations to it.
 #
-# Backend priority: cuda > vulkan > opengl > software > cpu
+# Backend priority: cuda > rocm > metal > qualcomm > vulkan > opengl > intel > webgpu > software > cpu_simd > cpu
 #
 # Usage:
 #   use std.gpu.engine2d.engine.{Engine2D}
@@ -65,6 +65,7 @@ class Engine2D:
     w: i32
     h: i32
     pacing: FramePacingCounters
+    selected_backend_name: text
 
     # ========================================================================
     # Constructors
@@ -92,7 +93,7 @@ class Engine2D:
         Args:
             width: Framebuffer width in pixels
             height: Framebuffer height in pixels
-            backend_name: One of "cuda", "vulkan", "opengl", "software", "cpu", "baremetal"
+            backend_name: One of "cuda", "vulkan", "opengl", "software", "cpu_simd", "simd_cpu", "cpu", "baremetal"
 
         Returns:
             Initialized Engine2D (falls back to cpu on failure)
@@ -103,56 +104,61 @@ class Engine2D:
         if backend_name == "cuda":
             var cuda = CudaBackend.create()
             if cuda.init(width, height):
-                return Engine2D(backend: cuda, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters())
+                return Engine2D(backend: cuda, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cuda")
 
         if backend_name == "vulkan":
             var vulkan = VulkanBackend.create()
             if vulkan.init(width, height):
-                return Engine2D(backend: vulkan, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters())
+                return Engine2D(backend: vulkan, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "vulkan")
 
         if backend_name == "opengl":
             var opengl = OpenGLBackend.create()
             if opengl.init(width, height):
-                return Engine2D(backend: opengl, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters())
+                return Engine2D(backend: opengl, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "opengl")
 
         if backend_name == "metal":
             var metal = MetalBackend.create()
             if metal.init(width, height):
-                return Engine2D(backend: metal, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters())
+                return Engine2D(backend: metal, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "metal")
 
         if backend_name == "rocm":
             var rocm = RocmBackend.create()
             if rocm.init(width, height):
-                return Engine2D(backend: rocm, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters())
+                return Engine2D(backend: rocm, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "rocm")
 
         if backend_name == "intel":
             var intel = IntelBackend.create()
             if intel.init(width, height):
-                return Engine2D(backend: intel, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters())
+                return Engine2D(backend: intel, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "intel")
 
         if backend_name == "qualcomm":
             var qualcomm = QualcommBackend.create()
             if qualcomm.init(width, height):
-                return Engine2D(backend: qualcomm, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters())
+                return Engine2D(backend: qualcomm, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "qualcomm")
 
         if backend_name == "webgpu":
             var webgpu = WebGpuBackend.create()
             if webgpu.init(width, height):
-                return Engine2D(backend: webgpu, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters())
+                return Engine2D(backend: webgpu, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "webgpu")
 
         if backend_name == "software":
             var sw = SoftwareBackend.create()
             if sw.init(width, height):
-                return Engine2D(backend: sw, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters())
+                return Engine2D(backend: sw, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software")
 
         # Note: "baremetal" is NOT auto-detected. It requires a pre-initialized
         # FramebufferDriver and must be created via create_with_baremetal_backend().
         # If requested here by name, fall through to CPU fallback.
 
+        if backend_name == "cpu_simd" or backend_name == "simd_cpu":
+            var cpu_simd = CpuBackend.create()
+            cpu_simd.init(width, height)
+            return Engine2D(backend: cpu_simd, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cpu_simd")
+
         # Fallback: CPU backend always succeeds
         var cpu = CpuBackend.create()
         cpu.init(width, height)
-        Engine2D(backend: cpu, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters())
+        Engine2D(backend: cpu, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cpu")
 
     static fn create_with_baremetal_backend(backend: BaremetalBackend) -> Engine2D:
         """Create engine with a pre-initialized BaremetalBackend.
@@ -176,11 +182,11 @@ class Engine2D:
         remains an unused placeholder on this path, so it must not allocate
         or initialize any pixel buffer.
         """
-        Engine2D(backend: backend, baremetal_backend: Some(backend), virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters())
+        Engine2D(backend: backend, baremetal_backend: Some(backend), virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "baremetal")
 
     static fn create_with_virtio_gpu_backend(backend: VirtioGpuBackend) -> Engine2D:
         """Create engine with a pre-initialized VirtioGpuBackend."""
-        Engine2D(backend: backend, baremetal_backend: nil, virtio_gpu_backend: Some(backend), w: backend.w, h: backend.h, pacing: make_frame_pacing_counters())
+        Engine2D(backend: backend, baremetal_backend: nil, virtio_gpu_backend: Some(backend), w: backend.w, h: backend.h, pacing: make_frame_pacing_counters(), selected_backend_name: "virtio_gpu")
 
     static fn create_with_backend_strict(width: i32, height: i32, backend_name: text) -> Result<Engine2D, BackendProbeResult>:
         """Create engine with a specific backend, returning diagnostics on failure.
@@ -233,6 +239,9 @@ class Engine2D:
 
         if backend_name == "cpu":
             return BackendProbeResult.success("cpu", "CPU always available")
+
+        if backend_name == "cpu_simd" or backend_name == "simd_cpu":
+            return BackendProbeResult.success("cpu_simd", "SIMD-backed CPU renderer always available")
 
         BackendProbeResult.unavailable(backend_name, "Unknown backend: " + backend_name)
 
@@ -352,8 +361,11 @@ class Engine2D:
                 available.push("qualcomm")
                 qualcomm.shutdown()
 
-        # Software and CPU are always available
+        # Software and CPU lanes are always available. cpu_simd is an explicit
+        # alias for the SIMD-instrumented CpuBackend so samples can request the
+        # CPU SIMD path without relying on the generic "cpu" name.
         available.push("software")
+        available.push("cpu_simd")
         available.push("cpu")
 
         available
@@ -385,11 +397,17 @@ class Engine2D:
     fn backend_name() -> text:
         """Get the name of the active backend."""
         if val Some(vg) = self.virtio_gpu_backend:
-            vg.name()
+            if self.selected_backend_name != "":
+                return self.selected_backend_name
+            return vg.name()
         elif val Some(bm) = self.baremetal_backend:
-            bm.name()
+            if self.selected_backend_name != "":
+                return self.selected_backend_name
+            return bm.name()
         else:
-            self.backend.name()
+            if self.selected_backend_name != "":
+                return self.selected_backend_name
+            return self.backend.name()
 
     fn width() -> i32:
         self.w

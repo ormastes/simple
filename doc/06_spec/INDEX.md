@@ -12,8 +12,9 @@
 
 ---
 
-## Hardware & OS (1 features)
+## Other (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Ssh Session Shell Specification](unit/os/apps/sshd/ssh_session_shell_spec.md) | Auto-generated | N/A | 6 | 0% | 0 lines |
+| [Engine2d Backend Specification](integration/rendering/engine2d_backend_spec.md) | Auto-generated | N/A | 11 | 0% | 0 lines |
+
