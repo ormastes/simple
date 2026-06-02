@@ -2039,6 +2039,22 @@ expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; 
 
 </details>
 
+#### reports bounded http response headers
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); saved.httpVersion + ':' + saved.headerCount + ':' + saved.headerNames")).to_equal("1.1:3:content-type,content-length,x-simple-runtime")
+expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); saved.headers['content-type'] + ':' + saved.headers['content-length']")).to_equal("text/plain:16")
+expect(_eval_str_with_network("http://api.example.com:8080", "var seen = 'no'; var req = require('http').request('http://api.example.com:8080'); req.on('response', (res) => { seen = res.headers['x-simple-runtime']; }); req.end(); seen")).to_equal("bounded")
+```
+
+</details>
+
 #### resolves Express-like http server creation as fail-closed network API
 
 <details>
@@ -3704,8 +3720,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 240 |
-| Active scenarios | 240 |
+| Total scenarios | 241 |
+| Active scenarios | 241 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

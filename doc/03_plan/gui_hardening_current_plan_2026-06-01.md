@@ -432,8 +432,9 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   Real host response delivery and streaming remain open.
   Bounded synthetic response `data` and `end` events are delivered after the
   response callback or request `response` listener registers response listeners,
-  with deterministic response completion state and listener counts. Real
-  response streaming and event-loop ordering remain open.
+  with deterministic response completion state, listener counts, and synthetic
+  response header metadata. Real response streaming and event-loop ordering
+  remain open.
 - Generated GUI WASM: move widget-matrix-specific state patterns into shared
   per-widget state helpers and cover additional generated apps.
 - Live Electron: maintain the passing ten-scene Node/Bun/Electron exact-bitmap
@@ -2718,3 +2719,22 @@ while keeping listener delivery flags separate through `dataDelivered` and
 `36/36` and `107/107`, and the broad `src/lib` check passed with the existing
 `447` warning profile. Real response streaming, broader event-loop ordering,
 and host network I/O remain open.
+
+CommonJS/Node bounded HTTP response header continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/interpreter_native.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+
+Bounded synthetic HTTP responses now expose deterministic response metadata
+through both callback and request `response` listener paths: `httpVersion=1.1`,
+`headerCount=3`, stable `headerNames`, and a lower-case `headers` object with
+`content-type`, `content-length`, and `x-simple-runtime`. Focused checks
+passed, the Node API conformance suite passes `241/241`, BrowserSession
+fetch/WASM and native WASM host regressions remain `36/36` and `107/107`, and
+the broad `src/lib` check passed with the existing `447` warning profile. Real
+response streaming, broader event-loop ordering, and host network I/O remain
+open.
