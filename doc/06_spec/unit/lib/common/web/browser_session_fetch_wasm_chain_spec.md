@@ -2376,6 +2376,39 @@ match result:
 
 </details>
 
+#### dispatches remaining DataView prototype helpers with call and apply in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `4:-2:-3:4,254,255,255,255,255,253,0`
+
+3. Err
+   - Expected: "unexpected remaining dataview prototype dispatch js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var buffer = new ArrayBuffer(8); var view = new DataView(buffer); DataView.prototype.setUint8.call(view, 0, 260); DataView.prototype.setInt16.apply(view, [1, -2, true]); DataView.prototype.setInt32.call(view, 3, -3, false); var bytes = new Uint8Array(buffer); DataView.prototype.getUint8.apply(view, [0]) + ':' + DataView.prototype.getInt16.call(view, 1, true) + ':' + DataView.prototype.getInt32.apply(view, [3, false]) + ':' + bytes.toString()")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("4:-2:-3:4,254,255,255,255,255,253,0")
+    Err(err):
+        expect("unexpected remaining dataview prototype dispatch js error: {err}").to_equal("")
+```
+
+</details>
+
 #### reads signed ArrayBuffer bytes through DataView in browser scripts
 
 1. var session = BrowserSession new
@@ -2527,8 +2560,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 68 |
-| Active scenarios | 68 |
+| Total scenarios | 69 |
+| Active scenarios | 69 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
