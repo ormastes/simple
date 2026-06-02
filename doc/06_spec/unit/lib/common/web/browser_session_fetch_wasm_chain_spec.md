@@ -891,6 +891,39 @@ match result:
 
 </details>
 
+#### constructs Uint8Array values from varargs in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `4,255,7:3:4:255:0:`
+
+3. Err
+   - Expected: "unexpected uint8 of js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var made = Uint8Array.of(260, -1, 7); var empty = Uint8Array.of(); made.toString() + ':' + made.length + ':' + made.at(0) + ':' + made.at(1) + ':' + empty.length + ':' + empty.toString()")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("4,255,7:3:4:255:0:")
+    Err(err):
+        expect("unexpected uint8 of js error: {err}").to_equal("")
+```
+
+</details>
+
 #### maps Uint8Array values into a new coerced array in browser scripts
 
 1. var session = BrowserSession new
@@ -1273,8 +1306,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 30 |
-| Active scenarios | 30 |
+| Total scenarios | 31 |
+| Active scenarios | 31 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
