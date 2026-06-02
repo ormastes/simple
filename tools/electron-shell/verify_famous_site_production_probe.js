@@ -9,6 +9,7 @@ const sample = sampleArg ? sampleArg.slice("--sample=".length) : "site_0_google"
 const dropAcceptancePolicyFlagsForTest = process.argv.includes("--drop-acceptance-policy-flags-for-test");
 const corruptTextLineInkForTest = process.argv.includes("--corrupt-text-line-ink-for-test");
 const dropTextLineInkDifferenceForTest = process.argv.includes("--drop-text-line-ink-difference-for-test");
+const hideResidualDifferenceForTest = process.argv.includes("--hide-residual-difference-for-test");
 const maxDifferentPixels = sample === "site_0_google" ? 2717 : 6000;
 const dir = path.join(root, "test", "baselines", "famous_site_corpus", sample);
 const reportPath = path.join(dir, "report.production.sdn");
@@ -75,6 +76,42 @@ function compareTextLineInk(layoutLines, inkLines) {
     if (ink.regionName !== `line_${i}`) detail.regionNamesSequential = false;
     if (ink.differentPixels <= 0) detail.allLinesHaveDifferences = false;
     if (ink.chromeExactBlackPixels <= 0) detail.allLinesHaveChromeBlackPixels = false;
+  }
+  return detail;
+}
+
+function pixelInLineInkRegion(x, y, inkLines) {
+  for (const line of inkLines) {
+    if (x >= line.x && x < line.x + line.width && y >= line.y && y < line.y + 18) return true;
+  }
+  return false;
+}
+
+function residualDifferenceDetails(chromePath, simplePath, inkLines) {
+  const chrome = parsePpm(chromePath);
+  const simple = parsePpm(simplePath);
+  const detail = {
+    count: 0,
+    first: null
+  };
+  if (!chrome || !simple || chrome.width !== simple.width || chrome.height !== simple.height) return detail;
+  for (let y = 0; y < chrome.height; y += 1) {
+    for (let x = 0; x < chrome.width; x += 1) {
+      if (pixelInLineInkRegion(x, y, inkLines)) continue;
+      const c = pixelAt(chrome, x, y);
+      const s = pixelAt(simple, x, y);
+      if (c[0] === s[0] && c[1] === s[1] && c[2] === s[2]) continue;
+      detail.count += 1;
+      if (!detail.first) {
+        detail.first = {
+          x,
+          y,
+          chrome: { r: c[0], g: c[1], b: c[2] },
+          simple: { r: s[0], g: s[1], b: s[2] },
+          delta: { r: c[0] - s[0], g: c[1] - s[1], b: c[2] - s[2] }
+        };
+      }
+    }
   }
   return detail;
 }
@@ -226,6 +263,10 @@ let result = {
     allLinesHaveDifferences: false,
     allLinesHaveChromeBlackPixels: false
   },
+  residualDifference: {
+    count: 0,
+    first: null
+  },
   textInkDelta: {
     divBoxDifferentPixels: 0,
     divBoxChromeExactBlackPixels: 0,
@@ -282,8 +323,10 @@ if (!fs.existsSync(reportPath)) {
   result.hasTextLineInkDelta = text.includes("text_line_ink_delta:");
   result.hasExactAcceptancePolicyFlags = text.includes("acceptance_policy_flags: (exact_required: true perceptual_diagnostic_only: true tolerance_acceptance_allowed: false)");
   result.textLineInkDeltaCount = parseIntField(text, /text_line_ink_delta:\s*\(text_line_ink_delta count:\s*([0-9]+)/);
-  result.textLineInkDetails = compareTextLineInk(parseSimpleLayoutLineWidths(text), parseTextLineInkEntries(text));
+  const textLineInkEntries = parseTextLineInkEntries(text);
+  result.textLineInkDetails = compareTextLineInk(parseSimpleLayoutLineWidths(text), textLineInkEntries);
   result.textLineInkDetails.unexplainedDifferentPixels = result.differentPixels - result.textLineInkDetails.differentPixelsTotal;
+  result.residualDifference = hideResidualDifferenceForTest ? { count: 0, first: null } : residualDifferenceDetails(chromePath, simplePath, textLineInkEntries);
   result.textInkDelta.divBoxDifferentPixels = parseIntField(text, /div_box:\s*\(region[^\)]*different_pixels:\s*([0-9]+)/);
   result.textInkDelta.divBoxChromeExactBlackPixels = parseIntField(text, /div_box:\s*\(region[^\)]*chrome_exact_black_pixels:\s*([0-9]+)/);
   result.textInkDelta.divBoxSimpleBackgroundMismatchPixels = parseIntField(text, /div_box:\s*\(region[^\)]*simple_background_mismatch_pixels:\s*([0-9]+)/);
@@ -318,6 +361,8 @@ if (!fs.existsSync(reportPath)) {
   if (result.hasTextLineInkDelta && !result.textLineInkDetails.allLinesHaveChromeBlackPixels) failures.push("per-line text ink entries did not report Chrome glyph pixels for every line");
   if (result.hasTextLineInkDelta && result.textLineInkDetails.unexplainedDifferentPixels < 0) failures.push("per-line text ink differences exceed production divergence");
   if (result.hasTextLineInkDelta && result.textLineInkDetails.unexplainedDifferentPixels > 1) failures.push("per-line text ink diagnostics do not account for production divergence");
+  if (result.hasTextLineInkDelta && result.residualDifference.count !== result.textLineInkDetails.unexplainedDifferentPixels) failures.push("residual pixel diagnostics do not match unexplained production divergence");
+  if (result.hasTextLineInkDelta && result.textLineInkDetails.unexplainedDifferentPixels > 0 && !result.residualDifference.first) failures.push("residual pixel diagnostics did not report the first residual pixel");
   if (result.hasTextInkDelta && result.textInkDelta.divBoxChromeExactBlackPixels <= 0) failures.push("text ink delta did not report div-box exact black glyph pixels");
   if (result.hasTextInkDelta && result.textInkDelta.overflowChromeExactBlackPixels <= 0) failures.push("text ink delta did not report overflow exact black glyph pixels");
   if (result.hasTextInkDelta && result.textInkDelta.divBoxSimpleBackgroundMismatchPixels <= 0) failures.push("text ink delta did not report div-box background mismatches");

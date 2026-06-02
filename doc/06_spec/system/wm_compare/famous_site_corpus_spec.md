@@ -505,12 +505,34 @@ expect(result.0).to_contain("per-line text ink diagnostics do not account for pr
 
 </details>
 
+#### fails the production probe gate when residual pixel diagnostics are hidden
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val tool_path = "tools/electron-shell/verify_famous_site_production_probe.js"
+expect(rt_file_exists(tool_path)).to_equal(true)
+expect(rt_file_exists(famous_site_sample_production_report_sdn_path("site_0_google"))).to_equal(true)
+val result = rt_process_run_timeout("node", [tool_path, "--sample=site_0_google", "--hide-residual-difference-for-test"], 10000)
+expect(result.2).to_equal(1)
+expect(result.0).to_contain("\"status\": \"FAIL\"")
+expect(result.0).to_contain("\"unexplainedDifferentPixels\": 1")
+expect(result.0).to_contain("\"count\": 0")
+expect(result.0).to_contain("residual pixel diagnostics do not match unexplained production divergence")
+```
+
+</details>
+
 #### passes the production probe gate for the focused production artifact
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 43 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -541,6 +563,13 @@ expect(result.0).to_contain("\"textLineInkDeltaCount\": 4")
 expect(result.0).to_contain("\"detailCount\": 4")
 expect(result.0).to_contain("\"differentPixelsTotal\": 2716")
 expect(result.0).to_contain("\"unexplainedDifferentPixels\": 1")
+expect(result.0).to_contain("\"residualDifference\"")
+expect(result.0).to_contain("\"count\": 1")
+expect(result.0).to_contain("\"first\"")
+expect(result.0).to_contain("\"x\": 7")
+expect(result.0).to_contain("\"y\": 67")
+expect(result.0).to_contain("\"g\": -8")
+expect(result.0).to_contain("\"b\": -40")
 expect(result.0).to_contain("\"textMatchesLayout\": true")
 expect(result.0).to_contain("\"widthMatchesLayout\": true")
 expect(result.0).to_contain("\"regionNamesSequential\": true")
@@ -1059,9 +1088,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 40 |
-| Active scenarios | 40 |
+| Total scenarios | 41 |
+| Active scenarios | 41 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
-

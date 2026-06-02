@@ -5,16 +5,15 @@
 ## Quick Stats
 
 - **Total Features:** 1
-- **Complete Documentation:** 0 (0%)
-- **Stubs Remaining:** 1
-- **Total Lines:** 0
-- **Warnings:** 1
+- **Complete Documentation:** 1 (100%)
+- **Stubs Remaining:** 0
+- **Total Lines:** 2
+- **Warnings:** 7
 
 ---
 
-## Other (1 features)
+## Hardware & OS (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Famous Site Corpus Specification](system/wm_compare/famous_site_corpus_spec.md) | Auto-generated | N/A | 40 | 0% | 0 lines |
-
+| [Modern Wm Readiness Specification](unit/os/desktop/modern_wm_readiness_spec.md) | Minimal | N/A | 2 | 20% | 2 lines |

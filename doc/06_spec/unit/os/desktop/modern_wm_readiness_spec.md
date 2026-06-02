@@ -24,7 +24,7 @@ Verifies one combined readiness report for the modern Web WM, SimpleOS
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -37,6 +37,19 @@ expect(report.lifecycle_motion_ready)
 expect(report.rendered_motion_ready)
 expect(report.color_checked)
 expect(report.contrast_ratio_x100).to_be_greater_than(449)
+expect(report.size_layout_configured)
+expect(report.titlebar_height_px).to_equal(38)
+expect(report.window_min_width_px).to_equal(200)
+expect(report.window_min_height_px).to_equal(120)
+expect(report.title_input_min_width_px).to_equal(140)
+expect(report.taskbar_icon_size_px).to_equal(26)
+expect(report.command_palette_ready)
+expect(report.title_input_ready)
+expect(report.visual_layering_ready)
+expect(report.motion_verbosity_control)
+expect(report.round_icon_converter)
+expect(report.round_scrollbars)
+expect(report.translucent_shell)
 expect(report.notes[0]).to_equal("modern WM readiness passed")
 ```
 
@@ -47,7 +60,7 @@ expect(report.notes[0]).to_equal("modern WM readiness passed")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -61,6 +74,18 @@ expect(summary).to_contain("lifecycle=true")
 expect(summary).to_contain("rendered_motion=true")
 expect(summary).to_contain("color_checked=true")
 expect(summary).to_contain("contrast_ratio_x100=")
+expect(summary).to_contain("size_layout=true")
+expect(summary).to_contain("titlebar=38px")
+expect(summary).to_contain("window_min=200x120")
+expect(summary).to_contain("title_input=140px")
+expect(summary).to_contain("taskbar_icon=26px")
+expect(summary).to_contain("command_palette=true")
+expect(summary).to_contain("title_input_ready=true")
+expect(summary).to_contain("visual_layering=true")
+expect(summary).to_contain("motion_control=true")
+expect(summary).to_contain("round_icons=true")
+expect(summary).to_contain("round_scrollbars=true")
+expect(summary).to_contain("translucent=true")
 ```
 
 </details>

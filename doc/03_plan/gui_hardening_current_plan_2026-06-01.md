@@ -1391,3 +1391,51 @@ check passed, `macos_smf_dynlib_evidence_spec.spl` passed `12/12`, and the
 mirrored manual includes rejection scenarios for mismatched pass-row hash and
 size. This strengthens release evidence identity without claiming live
 guest-side QEMU/GTK execution.
+
+Production Chrome residual-pixel diagnostics continuation:
+
+- `node tools/electron-shell/verify_famous_site_production_probe.js --sample=site_0_google`
+- `node tools/electron-shell/verify_famous_site_production_probe.js --sample=site_0_google --hide-residual-difference-for-test`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check test/system/wm_compare/famous_site_corpus_spec.spl src/app/wm_compare/site_corpus_compat.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/system/wm_compare/famous_site_corpus_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/system/wm_compare/famous_site_corpus_spec.spl --output doc/06_spec`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+The production probe now accounts for the one residual pixel outside the
+per-line text ink regions. The normal `site_0_google` verifier passed with
+`differentPixels=2717`, text-line `differentPixelsTotal=2716`,
+`unexplainedDifferentPixels=1`, and `residualDifference.count=1`; the first
+residual pixel is `(7,67)`, Chrome RGB `(255,247,215)`, Simple RGB
+`(255,255,255)`, delta `(0,-8,-40)`. The
+`--hide-residual-difference-for-test` mutation fails closed when residual
+diagnostics are hidden. The focused system spec passes `41/41`, and the mirrored
+manual was refreshed. This advances Chrome parity diagnostics without closing
+the production glyph/compositing divergence.
+
+Modern WM readiness surface-field continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check test/system/wm_compare/famous_site_corpus_spec.spl src/app/wm_compare/site_corpus_compat.spl src/os/desktop/modern_wm_readiness.spl test/unit/os/desktop/modern_wm_readiness_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/os/desktop/modern_wm_readiness_spec.spl --mode=interpreter --clean --format json`
+
+The modern WM readiness report now surfaces the GUI hardening sub-gates already
+computed by the Web WM contract: size/layout, titlebar/window/title-input
+dimensions, taskbar icon size, command palette readiness, visual layering,
+motion verbosity control, round icon conversion, round scrollbars, and
+translucent shell readiness. The focused check passed and the modern WM
+readiness spec passes `2/2`. This keeps release evidence readable without
+claiming the unresolved production Chrome pixel divergence is fixed.
+
+Modern WM readiness metric continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/desktop/modern_wm_readiness.spl test/unit/os/desktop/modern_wm_readiness_spec.spl`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/unit/os/desktop/modern_wm_readiness_spec.spl --mode=interpreter --clean`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple run src/app/spipe_docgen/main.spl test/unit/os/desktop/modern_wm_readiness_spec.spl --output doc/06_spec`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+The combined readiness report now carries the Web WM quality dimensions used by
+release evidence instead of only aggregate booleans: size layout, titlebar,
+minimum window, title input, taskbar icon metrics, command palette/title input
+readiness, visual layering, motion control, round icons, round scrollbars, and
+translucent shell readiness. The focused readiness spec asserts those fields and
+summary markers; the spec passes `2/2`, checks pass, and the mirrored manual was
+refreshed with existing short-doc warnings.
