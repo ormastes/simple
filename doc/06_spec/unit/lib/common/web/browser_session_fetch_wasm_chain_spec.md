@@ -759,6 +759,39 @@ match result:
 
 </details>
 
+#### dispatches Uint8Array prototype mutating and search helpers with call and apply in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `0-4-4-4-0:true:2:0,4,4,4,0:0,4,0,4,0:4`
+
+3. Err
+   - Expected: "unexpected uint8 prototype helper dispatch js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var b = new Uint8Array(5); Uint8Array.prototype.fill.call(b, 260, 1, 4); var search = Uint8Array.prototype.includes.call(b, 4) + ':' + Uint8Array.prototype.indexOf.apply(b, [4, 2]); var joined = Uint8Array.prototype.join.call(b, '-'); var reversed = Uint8Array.prototype.reverse.call(b); var reversedJoin = reversed.join(','); var copied = Uint8Array.prototype.copyWithin.apply(b, [1, -2]); joined + ':' + search + ':' + reversedJoin + ':' + b.join(',') + ':' + copied.at(1)")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("0-4-4-4-0:true:2:0,4,4,4,0:0,4,0,4,0:4")
+    Err(err):
+        expect("unexpected uint8 prototype helper dispatch js error: {err}").to_equal("")
+```
+
+</details>
+
 #### checks Uint8Array values with callback predicates in browser scripts
 
 1. var session = BrowserSession new
@@ -2131,8 +2164,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 56 |
-| Active scenarios | 56 |
+| Total scenarios | 57 |
+| Active scenarios | 57 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

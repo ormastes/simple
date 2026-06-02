@@ -313,7 +313,7 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   `doc/06_spec/system/app/browser/feature/webgpu_js_wasm_simple_spec.md`:
   JS/WebEngine/WASM BrowserSession evidence. Current focused checks pass the
   WebGPU/JS/WASM system spec `106/106`, the native WASM host spec `107/107`,
-  and the fetch-to-WASM chain spec `56/56`. The coverage includes secure WebGPU
+  and the fetch-to-WASM chain spec `57/57`. The coverage includes secure WebGPU
   globals, fetched `arrayBuffer()` to `WebAssembly.instantiate`, compile
   thenables, bounded WASM exports, traps, table/global metadata, imported
   function binding, and `Uint8Array`/`DataView` access to WebAssembly.Memory.
@@ -362,7 +362,9 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   value, index, and receiver arguments. Bounded
   `Uint8Array.prototype.forEach.call` and `forEach.apply` now dispatch callback
   side effects with value, index, and receiver arguments and return
-  `undefined`.
+  `undefined`. Bounded `Uint8Array.prototype.fill.call`, `includes.call`,
+  `indexOf.apply`, `join.call`, `reverse.call`, and `copyWithin.apply` now
+  dispatch through the generic helper path for browser-script typed arrays.
 
 ## Related Docs
 
@@ -3373,6 +3375,19 @@ receiver arguments, and both dispatch forms return `undefined`. The focused
 fetch/WASM chain spec now passes `56/56`; broader typed-array/DataView
 prototype parity, general `Function.prototype.call/apply` dispatch, and full
 browser/WASM semantics remain open.
+
+BrowserSession Uint8Array prototype helper call/apply continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession scripts now dispatch bounded non-callback `Uint8Array.prototype`
+helpers through `call` and `apply`: `fill`, `includes`, `indexOf`, `join`,
+`reverse`, and `copyWithin`. The focused fetch/WASM chain spec now passes
+`57/57`; broader typed-array/DataView prototype parity, general
+`Function.prototype.call/apply` dispatch, and full browser/WASM semantics remain
+open.
 
 BrowserSession Uint8Array prototype sort apply continuation:
 
