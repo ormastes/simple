@@ -602,58 +602,11 @@ fn stub_make_string(s: &str) -> i64 {
 }
 
 // -- File I/O stubs --
-
-#[no_mangle]
-pub extern "C" fn rt_file_size(path: i64) -> i64 {
-    if let Some(p) = stub_extract_path(path) {
-        std::fs::metadata(&p).map(|m| m.len() as i64).unwrap_or(0)
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn rt_file_delete(path: i64) -> i64 {
-    if let Some(p) = stub_extract_path(path) {
-        if std::fs::remove_file(&p).is_ok() {
-            1
-        } else {
-            0
-        }
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn rt_file_lock(_path: i64) -> i64 {
-    1
-} // no-op success
-
-#[no_mangle]
-pub extern "C" fn rt_file_unlock(_path: i64) -> i64 {
-    1
-} // no-op success
-
-#[no_mangle]
-pub extern "C" fn rt_file_hash_sha256(path: i64) -> i64 {
-    // Simple hash using DefaultHasher (same as interpreter implementation)
-    if let Some(p) = stub_extract_path(path) {
-        if let Ok(content) = std::fs::read(&p) {
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-            let mut hasher = DefaultHasher::new();
-            content.hash(&mut hasher);
-            let hash = hasher.finish();
-            let hex = format!("{:016x}", hash);
-            stub_make_string(&hex)
-        } else {
-            stub_make_string("")
-        }
-    } else {
-        stub_make_string("")
-    }
-}
+//
+// `rt_file_size`, `rt_file_delete`, `rt_file_lock`, `rt_file_unlock`, and
+// `rt_file_hash_sha256` are provided by the bundled `simple-runtime` and are
+// NOT redefined here (duplicate symbols fail the macOS link). Only shims the
+// runtime lacks remain below.
 
 #[no_mangle]
 pub extern "C" fn rt_file_atomic_write(path: i64, content: i64) -> i64 {
@@ -670,11 +623,10 @@ pub extern "C" fn rt_file_atomic_write(path: i64, content: i64) -> i64 {
 }
 
 // -- Process/System stubs --
-
-#[no_mangle]
-pub extern "C" fn rt_getpid() -> i64 {
-    std::process::id() as i64
-}
+//
+// `rt_getpid`, `rt_thread_available_parallelism`, and `spl_thread_cpu_count`
+// are provided by the bundled `simple-runtime` (duplicate symbols fail the
+// macOS link), so they are not redefined here.
 
 #[no_mangle]
 pub extern "C" fn rt_hostname() -> i64 {
@@ -686,16 +638,6 @@ pub extern "C" fn rt_system_cpu_count() -> i64 {
     std::thread::available_parallelism()
         .map(|n| n.get() as i64)
         .unwrap_or(1)
-}
-
-#[no_mangle]
-pub extern "C" fn rt_thread_available_parallelism() -> i64 {
-    rt_system_cpu_count()
-}
-
-#[no_mangle]
-pub extern "C" fn spl_thread_cpu_count() -> i64 {
-    rt_system_cpu_count()
 }
 
 #[no_mangle]
@@ -727,22 +669,9 @@ pub extern "C" fn rt_time_now_monotonic_ms() -> i64 {
 }
 
 // -- Builtins --
-
-#[no_mangle]
-pub extern "C" fn sys_get_args() -> i64 {
-    // Return runtime array of CLI args
-    let arr = rt_array_new_impl(16);
-    for arg in std::env::args() {
-        let s = stub_make_string(&arg);
-        rt_array_push_impl(arr, to_rv(s));
-    }
-    from_rv(arr)
-}
-
-#[no_mangle]
-pub extern "C" fn sys_exit(code: i64) -> i64 {
-    std::process::exit(code as i32);
-}
+//
+// `sys_get_args` and `sys_exit` are provided by the bundled `simple-runtime`
+// (duplicate symbols fail the macOS link), so they are not redefined here.
 
 // NOTE: Do NOT export a raw `exit` symbol — it overrides libc's exit()
 // and causes infinite recursion with std::process::exit(). The Simple
@@ -984,19 +913,10 @@ pub extern "C" fn to_string(val: i64) -> i64 {
 }
 
 // -- Compiler backend stubs --
-
-#[no_mangle]
-pub extern "C" fn rt_compile_to_llvm_ir(_source: i64) -> i64 {
-    stub_make_string("")
-}
-#[no_mangle]
-pub extern "C" fn rt_compile_to_native(_source: i64, _output: i64) -> i64 {
-    0
-}
-#[no_mangle]
-pub extern "C" fn rt_compile_to_native_with_opt(_source: i64, _output: i64, _opt_level: i64) -> i64 {
-    0
-}
+//
+// `rt_compile_to_llvm_ir`, `rt_compile_to_native`, and
+// `rt_compile_to_native_with_opt` are provided by the bundled `simple-runtime`
+// (duplicate symbols fail the macOS link), so they are not redefined here.
 
 /// Execute a native binary with arguments and timeout.
 ///
@@ -1111,68 +1031,20 @@ pub extern "C" fn rt_set_concurrent_backend(_backend: i64) -> i64 {
 }
 
 // -- Stdio stubs --
-
-#[no_mangle]
-pub extern "C" fn stdout_write(data: i64) -> i64 {
-    use std::io::Write;
-    if let Some(s) = stub_extract_path(data) {
-        let _ = std::io::stdout().write_all(s.as_bytes());
-    }
-    0
-}
+//
+// The bundled C runtime (`simple-runtime`, archived into this same
+// `libsimple_native_all.a`) already exports the stdio entry points
+// (`stdout_write`, `rt_stdout_write`, `rt_stdout_flush`, `stderr_write`,
+// `stderr_flush`, `rt_stderr_write`, `rt_stderr_flush`, `stdin_read_char`).
+// Redefining them here produced duplicate-symbol link failures on macOS
+// (whose `ld` has no `--allow-multiple-definition`). Only `stdout_flush`,
+// which the runtime does NOT provide, is defined here.
 
 #[no_mangle]
 pub extern "C" fn stdout_flush() -> i64 {
     use std::io::Write;
     let _ = std::io::stdout().flush();
     0
-}
-
-#[no_mangle]
-pub extern "C" fn rt_stdout_write(data: i64) -> i64 {
-    stdout_write(data)
-}
-
-#[no_mangle]
-pub extern "C" fn rt_stdout_flush() -> i64 {
-    stdout_flush()
-}
-
-#[no_mangle]
-pub extern "C" fn stderr_write(data: i64) -> i64 {
-    use std::io::Write;
-    if let Some(s) = stub_extract_path(data) {
-        let _ = std::io::stderr().write_all(s.as_bytes());
-    }
-    0
-}
-
-#[no_mangle]
-pub extern "C" fn stderr_flush() -> i64 {
-    use std::io::Write;
-    let _ = std::io::stderr().flush();
-    0
-}
-
-#[no_mangle]
-pub extern "C" fn rt_stderr_write(data: i64) -> i64 {
-    stderr_write(data)
-}
-
-#[no_mangle]
-pub extern "C" fn rt_stderr_flush() -> i64 {
-    stderr_flush()
-}
-
-#[no_mangle]
-pub extern "C" fn stdin_read_char() -> i64 {
-    use std::io::Read;
-    let mut buf = [0u8; 1];
-    match std::io::stdin().read(&mut buf) {
-        Ok(0) => stub_make_string(""),
-        Ok(_) => stub_make_string(&String::from_utf8_lossy(&buf)),
-        Err(_) => stub_make_string(""),
-    }
 }
 
 // -- Memory stubs --
@@ -1347,7 +1219,15 @@ pub extern "C" fn native_fs_rename(src: i64, dst: i64) -> i64 {
 }
 #[no_mangle]
 pub extern "C" fn native_fs_remove_file(path: i64) -> i64 {
-    rt_file_delete(path)
+    if let Some(p) = stub_extract_path(path) {
+        if std::fs::remove_file(&p).is_ok() {
+            1
+        } else {
+            0
+        }
+    } else {
+        0
+    }
 }
 #[no_mangle]
 pub extern "C" fn native_fs_remove_dir(path: i64) -> i64 {

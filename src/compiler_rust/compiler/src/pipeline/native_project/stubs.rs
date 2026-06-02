@@ -732,7 +732,9 @@ pub(crate) fn generate_stub_object(
             }
 
             if let Some(real_fn) = resolve_defined_suffix_alias(sym, &defined) {
-                asm_code.push_str(&format!(".weak {0}\n{0}:\n  {1} {2}\n\n", sym, jmp_prefix, real_fn));
+                // Use the platform-aware trampoline emitter so macOS gets
+                // `.weak_definition` (its assembler rejects GNU `.weak`).
+                asm_code.push_str(&plat_config.generate_builtin_trampoline_asm(sym, jmp_prefix, &real_fn));
                 continue;
             }
 
