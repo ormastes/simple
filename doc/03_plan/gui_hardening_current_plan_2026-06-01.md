@@ -313,7 +313,7 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   `doc/06_spec/system/app/browser/feature/webgpu_js_wasm_simple_spec.md`:
   JS/WebEngine/WASM BrowserSession evidence. Current focused checks pass the
   WebGPU/JS/WASM system spec `106/106`, the native WASM host spec `107/107`,
-  and the fetch-to-WASM chain spec `69/69`. The coverage includes secure WebGPU
+  and the fetch-to-WASM chain spec `70/70`. The coverage includes secure WebGPU
   globals, fetched `arrayBuffer()` to `WebAssembly.instantiate`, compile
   thenables, bounded WASM exports, traps, table/global metadata, imported
   function binding, and `Uint8Array`/`DataView` access to WebAssembly.Memory.
@@ -362,7 +362,8 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   objects with numeric keys and `length`.
   Bounded `Uint8Array.prototype.sort.call` now also honors comparator callbacks
   through the same byte-normalized callback sort path as direct typed-array
-  calls. Bounded `Uint8Array.prototype.map.call` now dispatches callback-based
+  calls, and comparator `sort.apply` now dispatches through the same indexed
+  argument path. Bounded `Uint8Array.prototype.map.call` now dispatches callback-based
   typed-array mapping with value, index, and receiver arguments. Bounded
   `Uint8Array.prototype.filter.call` now dispatches callback-based typed-array
   filtering with receiver-visible source bytes and coerced result storage.
@@ -3604,6 +3605,21 @@ returned receiver identity. The focused fetch/WASM chain spec now passes
 `47/47`; broader typed-array/DataView prototype parity, general
 `Function.prototype.call/apply` dispatch, and full browser/WASM semantics remain
 open.
+
+BrowserSession Uint8Array prototype comparator sort apply continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession scripts now dispatch bounded
+`Uint8Array.prototype.sort.apply(bytes, [compareFn])` with the same comparator
+callback semantics as direct `bytes.sort(compareFn)` and prototype `sort.call`.
+The scenario proves descending numeric byte order, normalized byte values,
+indexed apply argument expansion, in-place mutation, and returned receiver
+identity. The focused fetch/WASM chain spec now passes `70/70`; broader
+typed-array/DataView prototype parity, general `Function.prototype.call/apply`
+dispatch, and full browser/WASM semantics remain open.
 
 BrowserSession Uint8Array prototype map dispatch continuation:
 
