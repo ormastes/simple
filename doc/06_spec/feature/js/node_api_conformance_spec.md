@@ -2084,6 +2084,22 @@ expect(_eval_str("var w = require('stream').Writable(); w.write('ok'); w.end(); 
 
 </details>
 
+#### tracks bounded writable high-water backpressure
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var opts = {}; opts.highWaterMark = 4; var w = require('stream').Writable(opts); w.writableHighWaterMark")).to_equal("4")
+expect(_eval_str("var opts = {}; opts.highWaterMark = 4; var w = require('stream').Writable(opts); w.write('abc').status + ':' + w.writableLength + ':' + w.backpressure")).to_equal("ok:3:false")
+expect(_eval_str("var opts = {}; opts.highWaterMark = 3; var w = require('stream').Writable(opts); w.write('ab'); var result = w.write('c'); result.status + ':' + result.ok + ':' + result.writableLength + ':' + w.backpressure + ':' + w.bytesWritten")).to_equal("backpressure:false:3:true:3")
+```
+
+</details>
+
 #### pipes bounded readable chunks into writable destinations
 
 <details>
@@ -2097,6 +2113,20 @@ expect(_eval_str("var s = require('stream'); var r = s.Readable.from(['abc']); v
 expect(_eval_str("var s = require('stream'); var r = s.Readable.from(['abc']); var w = s.Writable(); r.pipe(w); w.bytesWritten")).to_equal("3")
 expect(_eval_str("var s = require('stream'); var r = s.Readable.from(['ab','cde']); var w = s.Writable(); r.pipe(w); w.bytesWritten")).to_equal("5")
 expect(_eval_str("var s = require('stream'); var r = s.Readable.from(['ab','cde']); var w = s.Writable(); r.pipe(w); w.lastChunk")).to_equal("cde")
+```
+
+</details>
+
+#### propagates bounded pipe backpressure to writable destinations
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var opts = {}; opts.highWaterMark = 4; var s = require('stream'); var r = s.Readable.from(['ab','cde']); var w = s.Writable(opts); r.pipe(w); w.writableLength + ':' + w.backpressure")).to_equal("5:true")
 ```
 
 </details>
@@ -3366,8 +3396,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 220 |
-| Active scenarios | 220 |
+| Total scenarios | 222 |
+| Active scenarios | 222 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

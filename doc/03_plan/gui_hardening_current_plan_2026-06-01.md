@@ -257,12 +257,15 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   nextTick callbacks scheduled during the drain. A bounded terminal grant now
   lets `readline.createInterface` return allowed deterministic terminal state,
   invoke `question` callbacks with the granted answer, and close without host
-  terminal I/O. Current focused checks pass `node_api_conformance_spec.spl`
-  `220/220` and `node_process_next_tick_spec.spl` `2/2`; missing and invalid
-  process grants remain rejected, and explicit in-memory CommonJS source grants
-  now execute `exports.*` assignments plus `module.exports = ...` replacements
-  with cache identity, slash-bearing specifier coverage, and bounded
-  `/node_modules` index/package-main resolution over granted in-memory files.
+  terminal I/O. Bounded writable streams now honor `highWaterMark`, track
+  `writableHighWaterMark`, cumulative `writableLength`/`bytesWritten`, and set
+  write/pipe backpressure state when the high-water mark is reached. Current
+  focused checks pass `node_api_conformance_spec.spl` `222/222` and
+  `node_process_next_tick_spec.spl` `2/2`; missing and invalid process grants
+  remain rejected, and explicit in-memory CommonJS source grants now execute
+  `exports.*` assignments plus `module.exports = ...` replacements with cache
+  identity, slash-bearing specifier coverage, and bounded `/node_modules`
+  index/package-main resolution over granted in-memory files.
 - `doc/09_report/budgeted_simple_web_engine2d_scene_matrix_settings_inspector_2026-06-01.md`:
   current Engine2D Node/Bun/Electron budgeted exact-bitmap matrix including
   settings-inspector-tree.
@@ -360,8 +363,9 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   through `end()` with callback invocation. Bounded write-after-end pressure
   signaling is covered. A deterministic `streamAsyncIterator().next()` subset
   consumes bounded readable chunks and reports exhaustion, and readable streams
-  now expose the same iterator through the `Symbol.asyncIterator` key. Full
-  pressure propagation/flow control, `for await` syntax support, broader stream
+  now expose the same iterator through the `Symbol.asyncIterator` key. Bounded
+  writable high-water pressure and pipe-to-writable pressure propagation are
+  covered. Full flow control, `for await` syntax support, broader stream
   scheduling, and broader event-loop phases remain open.
   Bounded `setInterval` rescheduling across explicit timer drains,
   `clearInterval` from inside an interval callback, and nextTick-before-timer
@@ -2261,3 +2265,22 @@ passed, the Node API conformance suite passes `220/220`, BrowserSession
 fetch/WASM and native WASM host regressions remain `36/36` and `107/107`, and
 the broad `src/lib` check passed with the existing `447` warning profile. Real
 terminal I/O, TTY streams, and event-loop integration remain open.
+
+CommonJS/Node bounded stream high-water pressure continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/interpreter_native.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+
+Bounded `Writable(opts)` now honors `highWaterMark`, tracks
+`writableHighWaterMark`, cumulative `writableLength`, cumulative
+`bytesWritten`, and sets `backpressure` plus result status when writes reach
+the high-water mark. `Readable.pipe(Writable)` now propagates destination
+length and backpressure after bounded chunk transfer. Focused checks passed,
+the Node API conformance suite passes `222/222`, BrowserSession fetch/WASM and
+native WASM host regressions remain `36/36` and `107/107`, and the broad
+`src/lib` check passed with the existing `447` warning profile. Full stream
+flow control, async scheduling, and host I/O integration remain open.
