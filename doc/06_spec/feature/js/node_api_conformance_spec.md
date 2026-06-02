@@ -2164,6 +2164,21 @@ expect(_eval_str("var s = require('stream'); var r = s.Readable.from(['abc']); v
 
 </details>
 
+#### resumes bounded pending pipe drains
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var s = require('stream'); var r = s.Readable.from(['abc']); var w = s.Writable(); r.pause(); r.pipe(w); r.resume(); r.readableLength + ':' + w.bytesWritten + ':' + r.pipePaused + ':' + r.pipeResumed")).to_equal("0:3:false:true")
+expect(_eval_str("var s = require('stream'); var r = s.Readable.from(['ab','cde']); var w = s.Writable(); r.pause(); r.pipe(w); r.resume(); w.lastChunk + ':' + w.bytesWritten")).to_equal("cde:5")
+```
+
+</details>
+
 #### propagates bounded pipe backpressure to writable destinations
 
 <details>
@@ -3443,8 +3458,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 225 |
-| Active scenarios | 225 |
+| Total scenarios | 226 |
+| Active scenarios | 226 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
