@@ -2013,6 +2013,39 @@ match result:
 
 </details>
 
+#### dispatches ordinary function bind with receiver and partial arguments in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `19:5,7,9:function`
+
+3. Err
+   - Expected: "unexpected ordinary function bind js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script('var add = function(a, b, c) { return this.base + a + b + c; }; var bound = add.bind({ base: 10 }, 2); var bytes = new Uint8Array(3); bytes[0] = 1; bytes[1] = 2; bytes[2] = 3; var mapper = function(v, i) { return this.offset + v + i; }.bind({ offset: 4 }); var mapped = bytes.map(mapper); bound(3, 4) + ":" + mapped.toString() + ":" + typeof bound')
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("19:5,7,9:function")
+    Err(err):
+        expect("unexpected ordinary function bind js error: {err}").to_equal("")
+```
+
+</details>
+
 #### dispatches Uint8Array prototype helpers with call and apply in browser scripts
 
 1. var session = BrowserSession new
@@ -2296,8 +2329,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 61 |
-| Active scenarios | 61 |
+| Total scenarios | 62 |
+| Active scenarios | 62 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

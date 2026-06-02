@@ -860,6 +860,30 @@ impl JsInterpreter:
                     apply_args_general = self._indexed_arg_values(apply_args_val)
                 return self._invoke_function_with_this(apply_fn_id, apply_args_general, env, apply_this)
 
+        if is_member and member_method == "bind":
+            val bind_fn_val = self.eval_expression(member_obj_expr, env)?
+            val bind_fn_id = _get_fn_id(bind_fn_val)
+            if bind_fn_id >= 0:
+                var bind_this = JsValue.Undefined
+                if args.len() > 0:
+                    bind_this = self.eval_expression(args.get(0), env)?
+                val bound_args_id = self.create_object()
+                var bind_arg_i = 1
+                var bind_out_i = 0
+                while bind_arg_i < args.len():
+                    val bound_arg_value = self.eval_expression(args.get(bind_arg_i), env)?
+                    self.set_object_property(bound_args_id, bind_out_i.to_text(), bound_arg_value)
+                    bind_arg_i = bind_arg_i + 1
+                    bind_out_i = bind_out_i + 1
+                self.set_object_property(bound_args_id, "length", JsValue.Number(v: bind_out_i.to_f64()))
+                val bound_fn_id = self.functions.len()
+                self.functions.push(JsFunction(name: "__bound__", params: [], body: [], closure_env: env, is_arrow: false))
+                self.bound_function_ids.push(bound_fn_id)
+                self.bound_function_target_ids.push(bind_fn_id)
+                self.bound_function_this_values.push(bind_this)
+                self.bound_function_arg_array_ids.push(bound_args_id)
+                return Ok(JsValue.Function(id: bound_fn_id))
+
         # Object.keys / Object.values / Object.entries
         if is_member and member_method == "keys":
             val callee_obj_name = self.ident_name(member_obj_expr)
@@ -1132,6 +1156,11 @@ impl JsInterpreter:
         match callee_val:
             JsValue.Function(fn_id):
                 if fn_id >= 0 and fn_id < self.functions.len():
+                    var bound_direct_i = 0
+                    while bound_direct_i < self.bound_function_ids.len():
+                        if self.bound_function_ids.get(bound_direct_i) == fn_id:
+                            return self._invoke_function_with_this(fn_id, arg_vals, env, this_val_for_call)
+                        bound_direct_i = bound_direct_i + 1
                     # Check if this function index maps to a native function
                     var ni = 0
                     while ni < self.native_id_map.len():
