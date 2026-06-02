@@ -1945,6 +1945,23 @@ expect(_eval_str_with_network("http://api.example.com:8080", "var req = require(
 
 </details>
 
+#### rejects bounded http header mutation after sealed request state
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.headerMutationRejected + ':' + req.headerMutationRejectReason")).to_equal("false:")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.setHeader('Accept', 'json'); req.flushHeaders(); req.setHeader('Accept', 'text'); req.getHeader('accept') + ':' + req.headerMutationRejected + ':' + req.headerMutationRejectReason")).to_equal("json:true:headers-flushed")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.setHeader('Accept', 'json'); req.end(); req.removeHeader('accept'); req.hasHeader('accept') + ':' + req.headerMutationRejectReason")).to_equal("true:request-ended")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.setHeader('Accept', 'json'); req.abort(); req.setHeader('Authorization', 'token'); req.headerCount + ':' + req.headerMutationRejectReason")).to_equal("1:request-aborted")
+```
+
+</details>
+
 #### tracks bounded http request end and abort state
 
 <details>
@@ -3786,8 +3803,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 245 |
-| Active scenarios | 245 |
+| Total scenarios | 246 |
+| Active scenarios | 246 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
