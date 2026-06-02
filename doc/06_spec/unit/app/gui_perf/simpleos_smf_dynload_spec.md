@@ -32,7 +32,7 @@ symbols, wrong architectures, and missing artifact bytes fail closed.
 
 The expected passing row starts with `GUI_SIMPLEOS_SMF_DYNLOAD
 status=simpleos-dynload-pass` and includes
-`symbol=gui_dynlib_hot_probe_tick`, `loader=simpleos_smf_dynload`,
+`symbol=gui_dynlib_hot_probe_tick`, `loader=smf_dynlib`,
 `adapter=simpleos-framebuffer-virtio`, and `pass=true`.
 
 **Requirements:** N/A
@@ -52,7 +52,7 @@ status=simpleos-dynload-pass` and includes
 
 3. Probe the SMF envelope through the SimpleOS dynload registry
    - Expected: evidence.pass is true
-   - Expected: evidence.loader equals `simpleos_smf_dynload`
+   - Expected: evidence.loader equals `smf_dynlib`
    - Expected: evidence.symbol_addr equals `0x400010`
    - Expected: evidence.process_callable is true
 
@@ -70,7 +70,7 @@ dylib_registry_reset_for_test()
 val smf = gui_smf_wrap_native_library(_elf64_with_gui_hot_dynsym(), 3u8)
 val evidence = gui_simpleos_smf_dynload_probe("build/gui/pure_gui_hot.smf", smf, "gui_dynlib_hot_probe_tick")
 expect(evidence.pass).to_equal(true)
-expect(evidence.loader).to_equal("simpleos_smf_dynload")
+expect(evidence.loader).to_equal("smf_dynlib")
 expect(evidence.symbol_addr).to_equal(0x400010)
 expect(evidence.process_callable).to_equal(true)
 val row = gui_simpleos_smf_dynload_row(evidence)

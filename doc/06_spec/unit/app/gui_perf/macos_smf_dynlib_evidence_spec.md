@@ -139,11 +139,11 @@ Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val good = "GUI_QEMU_ARM64_SMF_LOADER_PARITY status=loader-contract-pass artifact=build/gui/pure_gui_hot.smf smf_role=2 arch=3 embedded_dynlib=true symbol=gui_dynlib_hot_probe_tick loader=simpleos_smf_dynload adapter=simpleos-framebuffer-virtio command_count=4 dirty_regions=4 dynload_pass=true process_callable=true live_qemu=false reason=simpleos-dynload-artifact-reaches-pure-gui-adapter"
+val good = "GUI_QEMU_ARM64_SMF_LOADER_PARITY status=loader-contract-pass artifact=build/gui/pure_gui_hot.smf smf_role=2 arch=3 embedded_dynlib=true symbol=gui_dynlib_hot_probe_tick loader=smf_dynlib adapter=simpleos-framebuffer-virtio command_count=4 dirty_regions=4 dynload_pass=true process_callable=true live_qemu=false reason=smf-dynlib-artifact-reaches-pure-gui-adapter"
 val fail = good.replace("status=loader-contract-pass", "status=loader-contract-fail")
 val wrong_arch = good.replace("arch=3", "arch=1")
 val wrong_symbol = good.replace("symbol=gui_dynlib_hot_probe_tick", "symbol=other_symbol")
-val wrong_loader = good.replace("loader=simpleos_smf_dynload", "loader=artifact_contract_only")
+val wrong_loader = good.replace("loader=smf_dynlib", "loader=artifact_contract_only")
 val no_dynload = good.replace("dynload_pass=true", "dynload_pass=false")
 val no_callable = good.replace("process_callable=true", "process_callable=false")
 val live = good.replace("live_qemu=false", "live_qemu=true")
@@ -168,11 +168,12 @@ expect(gui_mac_smf_dynlib_accepts_qemu_loader_parity_row(duplicate_callable)).to
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 62 lines folded for reproduction.
+Runnable source: 64 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val good = "GUI_DYNLIB_PERF artifact=build/gui/pure_gui_hot.smf dynlib_path=build/gui/pure_gui_hot.smf.extracted.dylib host_os=macos host_arch=arm64 host_profile=macos-arm64 host_cpu=Apple_M3 loader=smf_dynlib dynload=smf_dynlib host_dynload=sffi symbol=gui_dynlib_hot_probe_tick call_source=dynlib_symbol_call samples=128 expected_samples=128 warmup=16 p50_us=1 p95_us=1 p99_us=1 max_us=1 threshold_us=1000 pass=true error="
+val wrong_artifact = good.replace("artifact=build/gui/pure_gui_hot.smf", "artifact=build/gui/other.smf")
 val host = good.replace("loader=smf_dynlib", "loader=host_dynlib")
 val host_sffi_diagnostic = good.replace("loader=smf_dynlib dynload=smf_dynlib", "loader=host_dynlib dynload=host_dynlib_diagnostic")
 val native_dynload = good.replace("dynload=smf_dynlib", "dynload=native")
@@ -206,6 +207,7 @@ expect(gui_mac_smf_dynlib_row_key_count(duplicate_loader, "loader")).to_equal(2)
 expect(gui_mac_smf_dynlib_row_i64(good, "p99_us")).to_equal(1i64)
 expect(gui_mac_smf_dynlib_row_has_one_i64(duplicate_p99, "p99_us")).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(good)).to_equal(true)
+expect(gui_mac_smf_dynlib_accepts_probe_row(wrong_artifact)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(host)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(host_sffi_diagnostic)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(native_dynload)).to_equal(false)
@@ -284,13 +286,13 @@ expect(gui_mac_smf_dynlib_accepts_pass_row(row + " status=skip")).to_equal(false
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val contract = "GUI_SMF_ARTIFACT_CONTRACT status=pass artifact=build/gui/pure_gui_hot.smf sha256=abc size=4096 smf_role=2 arch=3 embedded_dynlib=true symbol=gui_dynlib_hot_probe_tick qemu_status=not-run qemu_reason=live-qemu-not-executed macos_status=not-run macos_reason=requires-macos-arm64"
 val qemu = "GUI_QEMU_ARM64_SMF_PARITY status=contract-pass artifact=build/gui/pure_gui_hot.smf smf_role=2 arch=3 embedded_dynlib=true symbol=gui_dynlib_hot_probe_tick adapter=simpleos-framebuffer-virtio command_count=4 dirty_regions=4 same_artifact_contract=true live_qemu=false reason=same-smf-artifact-reaches-pure-gui-adapter"
-val loader = "GUI_QEMU_ARM64_SMF_LOADER_PARITY status=loader-contract-pass artifact=build/gui/pure_gui_hot.smf smf_role=2 arch=3 embedded_dynlib=true symbol=gui_dynlib_hot_probe_tick loader=simpleos_smf_dynload adapter=simpleos-framebuffer-virtio command_count=4 dirty_regions=4 dynload_pass=true process_callable=true live_qemu=false reason=simpleos-dynload-artifact-reaches-pure-gui-adapter"
+val loader = "GUI_QEMU_ARM64_SMF_LOADER_PARITY status=loader-contract-pass artifact=build/gui/pure_gui_hot.smf smf_role=2 arch=3 embedded_dynlib=true symbol=gui_dynlib_hot_probe_tick loader=smf_dynlib adapter=simpleos-framebuffer-virtio command_count=4 dirty_regions=4 dynload_pass=true process_callable=true live_qemu=false reason=smf-dynlib-artifact-reaches-pure-gui-adapter"
 val probe = "GUI_DYNLIB_PERF artifact=build/gui/pure_gui_hot.smf dynlib_path=build/gui/pure_gui_hot.smf.extracted.dylib host_os=macos host_arch=arm64 host_profile=macos-arm64 host_cpu=Apple_M3 loader=smf_dynlib dynload=smf_dynlib host_dynload=sffi symbol=gui_dynlib_hot_probe_tick call_source=dynlib_symbol_call samples=128 expected_samples=128 warmup=16 p50_us=1 p95_us=1 p99_us=1 max_us=1 threshold_us=1000 pass=true error="
 val pass_row = gui_mac_smf_dynlib_pass_row("macos", "arm64", "macos-arm64", "Apple_M3", "build/gui/pure_gui_hot.smf")
 val full = contract + "\n" + qemu + "\n" + loader + "\n" + probe + "\n" + pass_row
@@ -300,6 +302,7 @@ expect(gui_mac_smf_dynlib_accepts_transcript(contract + "\n" + qemu + "\n" + pro
 expect(gui_mac_smf_dynlib_transcript_check_row(contract + "\n" + qemu + "\n" + probe + "\n" + pass_row)).to_contain("status=fail")
 expect(gui_mac_smf_dynlib_accepts_transcript(contract + "\n" + loader + "\n" + qemu + "\n" + probe + "\n" + pass_row)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_transcript(full.replace("call_source=dynlib_symbol_call", "call_source=direct_simple"))).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_transcript(full.replace("artifact=build/gui/pure_gui_hot.smf", "artifact=build/gui/other.smf"))).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_transcript(full.replace("dynload=smf_dynlib", "dynload=native"))).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_transcript(full.replace("host_dynload=sffi", "host_dynload=native"))).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_transcript(full.replace("loader=smf_dynlib dynload=smf_dynlib", "loader=host_dynlib dynload=host_dynlib_diagnostic"))).to_equal(false)

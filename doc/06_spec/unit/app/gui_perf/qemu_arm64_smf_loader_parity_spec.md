@@ -25,7 +25,7 @@ parity row.
 ## Examples
 
 A passing row starts with `GUI_QEMU_ARM64_SMF_LOADER_PARITY
-status=loader-contract-pass` and includes `loader=simpleos_smf_dynload`,
+status=loader-contract-pass` and includes `loader=smf_dynlib`,
 `adapter=simpleos-framebuffer-virtio`, `dynload_pass=true`, and `live_qemu=false`.
 
 **Requirements:** N/A
@@ -41,7 +41,7 @@ status=loader-contract-pass` and includes `loader=simpleos_smf_dynload`,
 
 1. Pair passing SimpleOS dynload evidence with a representative GUI command batch
    - Expected: parity.status equals `loader-contract-pass`
-   - Expected: parity.loader equals `simpleos_smf_dynload`
+   - Expected: parity.loader equals `smf_dynlib`
    - Expected: parity.dynload_pass is true
 
 2. Emit the loader-backed QEMU parity evidence row
@@ -56,7 +56,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val parity = gui_qemu_arm64_smf_loader_parity(_good_dynload_evidence(), _representative_batch())
 expect(parity.status).to_equal("loader-contract-pass")
-expect(parity.loader).to_equal("simpleos_smf_dynload")
+expect(parity.loader).to_equal("smf_dynlib")
 expect(parity.dynload_pass).to_equal(true)
 val row = gui_qemu_arm64_smf_loader_parity_row(parity)
 expect(row).to_contain("GUI_QEMU_ARM64_SMF_LOADER_PARITY")
@@ -114,7 +114,7 @@ val wrong_status = GuiSimpleOsSmfDynloadEvidence(
     arch_code: 3,
     embedded_dynlib: true,
     symbol_name: "gui_dynlib_hot_probe_tick",
-    loader: "simpleos_smf_dynload",
+    loader: "smf_dynlib",
     adapter: "simpleos-framebuffer-virtio",
     handle: 1,
     symbol_addr: 0x400010,
@@ -130,7 +130,7 @@ val wrong_adapter = GuiSimpleOsSmfDynloadEvidence(
     arch_code: 3,
     embedded_dynlib: true,
     symbol_name: "gui_dynlib_hot_probe_tick",
-    loader: "simpleos_smf_dynload",
+    loader: "smf_dynlib",
     adapter: "host-dynlib",
     handle: 1,
     symbol_addr: 0x400010,
@@ -146,7 +146,7 @@ val not_callable = GuiSimpleOsSmfDynloadEvidence(
     arch_code: 3,
     embedded_dynlib: true,
     symbol_name: "gui_dynlib_hot_probe_tick",
-    loader: "simpleos_smf_dynload",
+    loader: "smf_dynlib",
     adapter: "simpleos-framebuffer-virtio",
     handle: 1,
     symbol_addr: 0x400010,
@@ -163,7 +163,7 @@ expect(gui_qemu_arm64_smf_loader_parity(not_callable, _representative_batch()).s
 
 1. Keep dynload evidence valid but remove the GUI command batch
    - Expected: parity.status equals `loader-contract-fail`
-   - Expected: parity.reason equals `missing-simpleos-dynload-or-command-batch`
+   - Expected: parity.reason equals `missing-smf-dynlib-or-command-batch`
 
 
 <details>
@@ -175,7 +175,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val parity = gui_qemu_arm64_smf_loader_parity(_good_dynload_evidence(), gui_empty_batch())
 expect(parity.status).to_equal("loader-contract-fail")
-expect(parity.reason).to_equal("missing-simpleos-dynload-or-command-batch")
+expect(parity.reason).to_equal("missing-smf-dynlib-or-command-batch")
 ```
 
 </details>
