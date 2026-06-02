@@ -2100,6 +2100,22 @@ expect(_eval_str("var opts = {}; opts.highWaterMark = 3; var w = require('stream
 
 </details>
 
+#### emits bounded writable drain when end clears backpressure
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var opts = {}; opts.highWaterMark = 3; var seen = 'no'; var w = require('stream').Writable(opts); w.on('drain', () => { seen = w.writableLength + ':' + w.backpressure; }); w.write('abc'); w.end(); seen + ':' + w.drainEmitted + ':' + w.drainListenerCount")).to_equal("0:false:true:1")
+expect(_eval_str("var opts = {}; opts.highWaterMark = 2; var seen = 0; var w = require('stream').Writable(opts); w.once('drain', () => { seen = seen + 1; }); w.write('ab'); w.end(); w.end(); seen + ':' + w.listenerCount('drain')")).to_equal("1:0")
+expect(_eval_str("var opts = {}; opts.highWaterMark = 9; var seen = 'no'; var w = require('stream').Writable(opts); w.on('drain', () => { seen = 'yes'; }); w.write('ab'); w.end(); seen + ':' + w.drainEmitted + ':' + w.backpressure")).to_equal("no:false:false")
+```
+
+</details>
+
 #### pipes bounded readable chunks into writable destinations
 
 <details>
@@ -3396,8 +3412,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 222 |
-| Active scenarios | 222 |
+| Total scenarios | 223 |
+| Active scenarios | 223 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
