@@ -399,6 +399,10 @@ expect_not(html.contains("Hidden"))
    - Expected: elem.y equals `0`
    - Expected: elem.h equals `32`
    - Expected: elem.text equals `09:41`
+   - Expected: elem.w equals `260`
+   - Expected: elem.w equals `320`
+   - Expected: elem.w equals `720`
+   - Expected: elem.text equals `right`
    - Expected: right_icons equals `2`
    - Expected: launchers equals `2`
    - Expected: running equals `1`
@@ -407,7 +411,7 @@ expect_not(html.contains("Hidden"))
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 43 lines folded for reproduction.
+Runnable source: 73 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -426,6 +430,10 @@ var right_icons = 0
 var launchers = 0
 var running = 0
 var has_window_bar = false
+var has_widgets = false
+var has_control_center = false
+var has_overview = false
+var has_snap_preview = false
 for elem in scene.elements:
     if elem.kind == "command_lane":
         has_command = true
@@ -442,6 +450,18 @@ for elem in scene.elements:
         running = running + 1
     elif elem.kind == "decoration":
         has_window_bar = true
+    elif elem.kind == "desktop_widgets":
+        has_widgets = true
+        expect(elem.w).to_equal(260)
+    elif elem.kind == "control_center":
+        has_control_center = true
+        expect(elem.w).to_equal(320)
+    elif elem.kind == "window_overview":
+        has_overview = true
+        expect(elem.w).to_equal(720)
+    elif elem.kind == "snap_preview":
+        has_snap_preview = true
+        expect(elem.text).to_equal("right")
 
 expect(has_command)
 expect(has_clock)
@@ -449,11 +469,61 @@ expect(right_icons).to_equal(2)
 expect(launchers).to_equal(2)
 expect(running).to_equal(1)
 expect(has_window_bar)
+expect(has_widgets)
+expect(has_control_center)
+expect(has_overview)
+expect(has_snap_preview)
 expect(html).to_contain("class='command-lane'")
 expect(html).to_contain("data-app='terminal'")
 expect(html).to_contain("data-window='win1'")
 expect(html).to_contain("traffic-close")
 expect(html).to_contain("bar-command")
+expect(html).to_contain("aria-label='Desktop widgets'")
+expect(html).to_contain("class='desktop-widget'")
+expect(html).to_contain("aria-label='WM control center'")
+expect(html).to_contain("Standard motion")
+expect(html).to_contain("Motion off")
+expect(html).to_contain("aria-label='Window overview'")
+expect(html).to_contain("class='overview-card active'")
+expect(html).to_contain("class='snap-preview active'")
+expect(html).to_contain("data-snap-zone='right'")
+expect(html).to_contain("repeat(auto-fit,minmax(180px,1fr))")
+```
+
+</details>
+
+#### keeps modern chromed affordances bounded on compact scenes
+
+1. var manager = WindowManager new
+
+2. var registry = UiWindowSurfaceRegistry new
+   - Expected: bounded_affordances equals `4`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var manager = WindowManager.new()
+var registry = UiWindowSurfaceRegistry.new()
+val shared = shared_wm_scene_from_window_manager(manager, registry, 240, 180)
+val scene = shared_wm_scene_to_chromed_wm_scene(shared, _shared_taskbar(), 1000, "09:41", 1)
+
+var bounded_affordances = 0
+for elem in scene.elements:
+    if elem.kind == "desktop_widgets" or elem.kind == "control_center" or elem.kind == "window_overview" or elem.kind == "snap_preview":
+        bounded_affordances = bounded_affordances + 1
+        expect(elem.x).to_be_greater_than(-1)
+        expect(elem.y).to_be_greater_than(-1)
+        expect(elem.w).to_be_greater_than(-1)
+        expect(elem.h).to_be_greater_than(-1)
+        expect(elem.x + elem.w).to_be_less_than(scene.width + 1)
+        expect(elem.y + elem.h).to_be_less_than(scene.height + 1)
+
+expect(bounded_affordances).to_equal(4)
 ```
 
 </details>
@@ -528,8 +598,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 21 |
-| Active scenarios | 21 |
+| Total scenarios | 22 |
+| Active scenarios | 22 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

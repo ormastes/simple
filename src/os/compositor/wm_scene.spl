@@ -21,6 +21,15 @@ class WmSceneSpec:
     height: i32
     elements: [SceneElement]
 
+fn _wm_min_i32(a: i32, b: i32) -> i32:
+    if a < b: a else: b
+
+fn _wm_max_i32(a: i32, b: i32) -> i32:
+    if a > b: a else: b
+
+fn _wm_fit_dim(available: i32, preferred: i32) -> i32:
+    _wm_max_i32(0, _wm_min_i32(available, preferred))
+
 fn standard_wm_scene(width: i32, height: i32) -> WmSceneSpec:
     val panel_w = if width > 180: width - 160 else: width
     val panel_h = if height > 160: height - 140 else: height
@@ -94,11 +103,32 @@ fn shared_wm_scene_to_chromed_wm_scene(scene: SharedWmScene, taskbar: TaskbarMod
     var clock_x = scene.width - (right_icon_count * 32) - 72
     if clock_x < 0:
         clock_x = 0
+    val side_panel_y = _wm_min_i32(chrome.command_lane.height + 16, _wm_max_i32(0, scene.height - 1))
+    val side_panel_available_w = _wm_max_i32(0, scene.width - 32)
+    val side_panel_available_h = _wm_max_i32(0, scene.height - side_panel_y - 16)
+    val widget_w = _wm_fit_dim(side_panel_available_w, 260)
+    val widget_h = _wm_fit_dim(side_panel_available_h, 116)
+    val widget_x = _wm_max_i32(0, scene.width - widget_w - 16)
+    val control_w = _wm_fit_dim(side_panel_available_w, 320)
+    val control_h = _wm_fit_dim(side_panel_available_h, 164)
+    val control_x = _wm_max_i32(0, scene.width - control_w - 16)
+    val overview_x = if scene.width > 80: 40 else: 0
+    val overview_y = if scene.height > 160: 72 else: _wm_min_i32(chrome.command_lane.height + 4, _wm_max_i32(0, scene.height - 1))
+    val overview_w = _wm_fit_dim(scene.width - (overview_x * 2), scene.width)
+    val overview_h = _wm_fit_dim(scene.height - overview_y - chrome.taskbar.height - 8, scene.height)
+    val snap_x = _wm_min_i32(scene.width / 2 + 6, _wm_max_i32(0, scene.width - 1))
+    val snap_y = _wm_min_i32(chrome.command_lane.height + 10, _wm_max_i32(0, scene.height - 1))
+    val snap_w = _wm_fit_dim(scene.width - snap_x - 10, scene.width / 2 - 16)
+    val snap_h = _wm_fit_dim(scene.height - snap_y - chrome.taskbar.height - 10, scene.height)
     var elements: [SceneElement] = [
         SceneElement(kind: "desktop_chrome", x: 0, y: 0, w: scene.width, h: scene.height, color: 0xFF101418u32, text: ""),
         SceneElement(kind: "command_lane", x: chrome.command_lane.x, y: chrome.command_lane.y, w: chrome.command_lane.width, h: chrome.command_lane.height, color: 0xFF111827u32, text: ""),
         SceneElement(kind: "command_clock", x: clock_x, y: chrome.command_lane.y, w: 72, h: chrome.command_lane.height, color: 0xFFFFFFFFu32, text: clock_label),
-        SceneElement(kind: "taskbar", x: chrome.taskbar.x, y: chrome.taskbar.y, w: chrome.taskbar.width, h: chrome.taskbar.height, color: 0xCC111827u32, text: "")
+        SceneElement(kind: "taskbar", x: chrome.taskbar.x, y: chrome.taskbar.y, w: chrome.taskbar.width, h: chrome.taskbar.height, color: 0xCC111827u32, text: ""),
+        SceneElement(kind: "desktop_widgets", x: widget_x, y: side_panel_y, w: widget_w, h: widget_h, color: 0xCC111827u32, text: "Clock|Motion|Workspace"),
+        SceneElement(kind: "control_center", x: control_x, y: side_panel_y, w: control_w, h: control_h, color: 0xDD111827u32, text: "Motion|Widgets|Overview"),
+        SceneElement(kind: "window_overview", x: overview_x, y: overview_y, w: overview_w, h: overview_h, color: 0xDD020617u32, text: "Window overview"),
+        SceneElement(kind: "snap_preview", x: snap_x, y: snap_y, w: snap_w, h: snap_h, color: 0x552563EBu32, text: "right")
     ]
     var icon_i = 0
     while icon_i < right_icon_count:
@@ -195,6 +225,14 @@ fn scene_to_html(scene: WmSceneSpec) -> text:
             body = body + "<button class='taskbar-launcher' data-app='{elem.text}' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'>{elem.text}</button>"
         elif elem.kind == "taskbar_running":
             body = body + "<button class='taskbar-running' data-window='{elem.text}' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'>{elem.text}</button>"
+        elif elem.kind == "desktop_widgets":
+            body = body + "<section class='desktop-widgets' aria-label='Desktop widgets' data-motion-scope='desktop-widgets' data-motion-mode='standard' data-reduced-motion-duration-ms='80' data-motion-can-disable='true' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'><div class='desktop-widget'><span>Clock</span><strong>09:41</strong></div><div class='desktop-widget'><span>Motion</span><strong>Standard</strong></div><div class='desktop-widget'><span>Workspace</span><strong>1</strong></div></section>"
+        elif elem.kind == "control_center":
+            body = body + "<section class='control-center' aria-label='WM control center' data-motion-scope='control-center' data-motion-mode='standard' data-reduced-motion-duration-ms='80' data-motion-can-disable='true' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'><button data-motion-choice='standard'>Standard motion</button><button data-motion-choice='reduced'>Reduced motion</button><button data-motion-choice='off'>Motion off</button><button>Desktop widgets</button><button>Window overview</button></section>"
+        elif elem.kind == "window_overview":
+            body = body + "<section class='window-overview' aria-label='Window overview' data-motion-scope='window-overview' data-motion-mode='standard' data-reduced-motion-duration-ms='80' data-motion-can-disable='true' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'><div class='overview-grid'><button class='overview-card active'><span class='overview-icon'>S</span><span class='overview-title'>{elem.text}</span><span class='overview-meta'>focused</span></button></div></section>"
+        elif elem.kind == "snap_preview":
+            body = body + "<div class='snap-preview active' data-snap-zone='{elem.text}' data-motion-scope='snap-preview' data-motion-mode='standard' data-reduced-motion-duration-ms='80' data-motion-can-disable='true' aria-hidden='true' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'></div>"
     "<!DOCTYPE html><html><head><style>" +
     "body{{margin:0;width:" + w + "px;height:" + h + "px;background:#0f172a}}" +
     ".desktop{{position:absolute;background:radial-gradient(circle at 18% 22%,rgba(37,99,235,.28),transparent 28%),radial-gradient(circle at 78% 72%,rgba(20,184,166,.18),transparent 26%),#0f172a}}" +
@@ -210,7 +248,14 @@ fn scene_to_html(scene: WmSceneSpec) -> text:
     ".taskbar{{position:absolute;background:linear-gradient(180deg,rgba(255,255,255,.16),rgba(255,255,255,.06));border:1px solid rgba(255,255,255,.16);border-radius:999px;box-shadow:0 18px 48px rgba(0,0,0,.30);backdrop-filter:blur(24px) saturate(170%)}}" +
     ".taskbar-launcher,.taskbar-running{{position:absolute;border:0;color:white;font:600 11px system-ui;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;border-radius:999px}}" +
     ".taskbar-launcher{{background:#2563eb}}.taskbar-running{{background:#475569}}" +
-    "</style></head><body data-modern-wm='true' data-width='" + w + "' data-height='" + h + "'>" +
+    ".desktop-widgets{{position:absolute;display:grid;gap:8px;max-width:260px;pointer-events:none;animation:wm-widget-float 240ms cubic-bezier(.2,.8,.2,1) both}}.desktop-widget{{border-radius:14px;background:linear-gradient(180deg,rgba(255,255,255,.14),rgba(255,255,255,.06));border:1px solid rgba(255,255,255,.14);box-shadow:0 14px 34px rgba(0,0,0,.22);backdrop-filter:blur(20px) saturate(170%);color:white;font:600 12px system-ui;padding:8px 10px;display:flex;align-items:center;justify-content:space-between;min-height:26px}}" +
+    ".control-center{{position:absolute;display:grid;grid-template-columns:1fr 1fr;gap:8px;max-width:320px;border-radius:18px;background:linear-gradient(180deg,rgba(15,23,42,.88),rgba(15,23,42,.68));border:1px solid rgba(255,255,255,.16);box-shadow:0 22px 70px rgba(0,0,0,.36);backdrop-filter:blur(24px) saturate(170%);padding:12px;box-sizing:border-box;animation:wm-control-in 180ms cubic-bezier(.2,.8,.2,1) both}}.control-center button{{min-height:36px;border:1px solid rgba(255,255,255,.12);border-radius:12px;background:rgba(255,255,255,.08);color:white;font:600 11px system-ui}}" +
+    ".window-overview{{position:absolute;border-radius:22px;background:rgba(2,6,23,.66);border:1px solid rgba(255,255,255,.14);box-shadow:0 30px 90px rgba(0,0,0,.42);backdrop-filter:blur(28px) saturate(160%);padding:18px;box-sizing:border-box;animation:wm-overview-in 200ms cubic-bezier(.2,.8,.2,1) both}}.overview-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px}}.overview-card{{min-height:112px;border:1px solid rgba(255,255,255,.16);border-radius:16px;background:linear-gradient(180deg,rgba(255,255,255,.14),rgba(255,255,255,.06));color:white;text-align:left;padding:12px;display:grid;gap:8px}}.overview-card.active{{box-shadow:0 0 0 2px rgba(37,99,235,.55)}}.overview-icon{{width:28px;height:28px;border-radius:999px;display:grid;place-items:center;background:#2563eb}}.overview-title,.overview-meta{{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}}" +
+    ".snap-preview{{position:absolute;border-radius:20px;border:1px solid rgba(96,165,250,.72);background:rgba(37,99,235,.18);box-shadow:0 0 0 1px rgba(255,255,255,.10) inset,0 18px 48px rgba(37,99,235,.22);pointer-events:none;animation:wm-snap-pulse 900ms ease-in-out infinite}}" +
+    "@keyframes wm-widget-float{{from{{opacity:0;transform:translateY(10px) scale(.98)}}to{{opacity:1;transform:translateY(0) scale(1)}}}}@keyframes wm-control-in{{from{{opacity:0;transform:translateY(-8px) scale(.98)}}to{{opacity:1;transform:translateY(0) scale(1)}}}}@keyframes wm-overview-in{{from{{opacity:0;transform:scale(.98)}}to{{opacity:1;transform:scale(1)}}}}@keyframes wm-snap-pulse{{0%,100%{{opacity:.76}}50%{{opacity:1}}}}" +
+    "@media (prefers-reduced-motion: reduce){{.desktop-widgets,.control-center,.window-overview,.snap-preview{{animation-duration:80ms;animation-iteration-count:1}}}}" +
+    "body[data-motion-mode='reduced'] .desktop-widgets,body[data-motion-mode='reduced'] .control-center,body[data-motion-mode='reduced'] .window-overview,body[data-motion-mode='reduced'] .snap-preview{{animation-duration:80ms;animation-iteration-count:1}}body[data-motion-mode='off'] .desktop-widgets,body[data-motion-mode='off'] .control-center,body[data-motion-mode='off'] .window-overview,body[data-motion-mode='off'] .snap-preview{{animation:none!important;transition:none!important}}" +
+    "</style></head><body data-modern-wm='true' data-motion-mode='standard' data-motion-can-disable='true' data-width='" + w + "' data-height='" + h + "'>" +
     body + "</body></html>"
 
 class _SceneMotionData:

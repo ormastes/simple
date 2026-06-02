@@ -2,10 +2,11 @@
 
 use app.ui.web.wm_quality_contract.{wm_theme_quality_report}
 use os.compositor.wm_action_applier.{WmLifecycleWindowState, wm_lifecycle_motion_contract}
-use os.compositor.wm_scene.{lifecycle_windows_to_motion_wm_scene, scene_to_html}
+use os.compositor.wm_scene.{lifecycle_windows_to_motion_wm_scene, scene_to_html, shared_wm_scene_to_chromed_wm_scene}
 use os.desktop.dock.{Dock, DockItem, dock_item_modern_icon_kind, modern_dock_metrics}
 use os.desktop.taskbar_shell.{build_taskbar_shell_tree, modern_desktop_affordance_contract, modern_taskbar_shell_contract}
 use common.ui.taskbar_model.{AppRef, TaskbarModel, TrayItem, WindowRef}
+use common.ui.window_scene.{SharedWmScene, SharedWmWindow}
 use std.window_protocol.geometry.{Px}
 
 struct ModernWmReadinessReport:
@@ -17,6 +18,7 @@ struct ModernWmReadinessReport:
     os_affordances_ready: bool
     lifecycle_motion_ready: bool
     rendered_motion_ready: bool
+    rendered_affordances_ready: bool
     color_checked: bool
     contrast_ratio_x100: i64
     size_layout_configured: bool
@@ -52,7 +54,8 @@ fn modern_wm_readiness_report(theme: text) -> ModernWmReadinessReport:
     val affordances_ready = _os_affordances_ready()
     val lifecycle_ready = _lifecycle_motion_ready()
     val rendered_ready = _rendered_motion_ready()
-    val passed = web.passed and dock_ready and taskbar_ready and affordances_ready and lifecycle_ready and rendered_ready
+    val rendered_affordances_ready = _rendered_affordances_ready()
+    val passed = web.passed and dock_ready and taskbar_ready and affordances_ready and lifecycle_ready and rendered_ready and rendered_affordances_ready
     ModernWmReadinessReport(
         theme: theme,
         passed: passed,
@@ -62,6 +65,7 @@ fn modern_wm_readiness_report(theme: text) -> ModernWmReadinessReport:
         os_affordances_ready: affordances_ready,
         lifecycle_motion_ready: lifecycle_ready,
         rendered_motion_ready: rendered_ready,
+        rendered_affordances_ready: rendered_affordances_ready,
         color_checked: web.color_checked,
         contrast_ratio_x100: web.contrast_ratio_x100,
         size_layout_configured: web.size_layout_configured,
@@ -94,7 +98,7 @@ fn modern_wm_readiness_report(theme: text) -> ModernWmReadinessReport:
 fn modern_wm_readiness_summary(theme: text) -> text:
     val r = modern_wm_readiness_report(theme)
     val status = if r.passed: "pass" else: "fail"
-    "modern_wm_readiness theme={r.theme} status={status} web={r.web_quality_ready} dock={r.os_dock_ready} taskbar={r.os_taskbar_ready} os_affordances={r.os_affordances_ready} lifecycle={r.lifecycle_motion_ready} rendered_motion={r.rendered_motion_ready} color_checked={r.color_checked} contrast_ratio_x100={r.contrast_ratio_x100} size_layout={r.size_layout_configured} responsive_layout={r.responsive_layout_ready} titlebar={r.titlebar_height_px}px window_min={r.window_min_width_px}x{r.window_min_height_px} title_input={r.title_input_min_width_px}px taskbar_icon={r.taskbar_icon_size_px}px command_palette_max={r.command_palette_max_width_px}px control_center_max={r.control_center_max_width_px}px desktop_widget_max={r.desktop_widget_max_width_px}px overview_card_min={r.overview_card_min_width_px}px touch_target_min={r.touch_target_min_height_px}px command_palette={r.command_palette_ready} title_input_ready={r.title_input_ready} visual_layering={r.visual_layering_ready} motion_control={r.motion_verbosity_control} round_icons={r.round_icon_converter} round_scrollbars={r.round_scrollbars} translucent={r.translucent_shell} accessible_controls={r.accessible_controls_ready} snap_assist={r.snap_assist_ready} desktop_widgets={r.desktop_widgets_ready} window_overview={r.window_overview_ready} control_center={r.control_center_ready}"
+    "modern_wm_readiness theme={r.theme} status={status} web={r.web_quality_ready} dock={r.os_dock_ready} taskbar={r.os_taskbar_ready} os_affordances={r.os_affordances_ready} lifecycle={r.lifecycle_motion_ready} rendered_motion={r.rendered_motion_ready} rendered_affordances={r.rendered_affordances_ready} color_checked={r.color_checked} contrast_ratio_x100={r.contrast_ratio_x100} size_layout={r.size_layout_configured} responsive_layout={r.responsive_layout_ready} titlebar={r.titlebar_height_px}px window_min={r.window_min_width_px}x{r.window_min_height_px} title_input={r.title_input_min_width_px}px taskbar_icon={r.taskbar_icon_size_px}px command_palette_max={r.command_palette_max_width_px}px control_center_max={r.control_center_max_width_px}px desktop_widget_max={r.desktop_widget_max_width_px}px overview_card_min={r.overview_card_min_width_px}px touch_target_min={r.touch_target_min_height_px}px command_palette={r.command_palette_ready} title_input_ready={r.title_input_ready} visual_layering={r.visual_layering_ready} motion_control={r.motion_verbosity_control} round_icons={r.round_icon_converter} round_scrollbars={r.round_scrollbars} translucent={r.translucent_shell} accessible_controls={r.accessible_controls_ready} snap_assist={r.snap_assist_ready} desktop_widgets={r.desktop_widgets_ready} window_overview={r.window_overview_ready} control_center={r.control_center_ready}"
 
 fn _os_dock_ready() -> bool:
     val metrics = modern_dock_metrics()
@@ -133,6 +137,11 @@ fn _rendered_motion_ready() -> bool:
     val html = scene_to_html(lifecycle_windows_to_motion_wm_scene(windows, "restore", 640, 480))
     html.contains("motion-window") and html.contains("data-motion-phase='restoring'") and html.contains("data-motion-class='wm-window-restoring'") and html.contains("data-motion-can-disable='true'")
 
+fn _rendered_affordances_ready() -> bool:
+    val scene = shared_wm_scene_to_chromed_wm_scene(_readiness_shared_scene(), _readiness_taskbar_model(), 1000, "09:41", 2)
+    val html = scene_to_html(scene)
+    html.contains("aria-label='Desktop widgets'") and html.contains("class='desktop-widget'") and html.contains("aria-label='WM control center'") and html.contains("Standard motion") and html.contains("Motion off") and html.contains("aria-label='Window overview'") and html.contains("class='overview-card active'") and html.contains("class='snap-preview active'") and html.contains("data-snap-zone='right'") and html.contains("repeat(auto-fit,minmax(180px,1fr))")
+
 fn _readiness_taskbar_model() -> TaskbarModel:
     TaskbarModel(
         pinned: [
@@ -149,6 +158,16 @@ fn _readiness_taskbar_model() -> TaskbarModel:
 
 fn _readiness_window(minimized: bool) -> WmLifecycleWindowState:
     WmLifecycleWindowState(id: if minimized: 2 else: 1, owner_port: 11, title: if minimized: "Hidden" else: "Active", x: 20, y: 60, w: 220, h: 160, content: "", process_id: 1, app_id: "/readiness", minimized: minimized, focused: not minimized)
+
+fn _readiness_shared_scene() -> SharedWmScene:
+    SharedWmScene(
+        width: 800,
+        height: 600,
+        backend: "simpleos",
+        windows: [
+            SharedWmWindow(surface_id: "surf1", window_id: "win1", surface_kind: "simple_web", process_id: 1u64, app_id: "terminal", title: "Terminal", x: 20, y: 40, width: 300, height: 200, tree: nil, html: "", minimized: false, focused: true, z_index: 1)
+        ]
+    )
 
 fn _modern_wm_notes(passed: bool, contrast_ratio_x100: i64) -> [text]:
     var notes: [text] = []
