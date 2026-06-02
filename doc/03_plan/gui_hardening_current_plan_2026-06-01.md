@@ -3784,3 +3784,17 @@ mutated in place, and the return value remains `undefined`. The focused
 fetch/WASM chain spec now passes `72/72`; broader typed-array/DataView prototype
 parity, general `Function.prototype.call/apply` dispatch, and full
 browser/WASM semantics remain open.
+
+BrowserSession Uint8Array prototype fill edge apply dispatch continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession scripts now dispatch bounded `Uint8Array.prototype.fill.apply`
+against a browser-script typed array. The apply argument array carries the fill
+value plus negative start/end bounds, byte coercion writes the expected range,
+and the helper returns the original receiver. The focused fetch/WASM chain spec
+now passes `73/73`; broader typed-array/DataView prototype parity, general
+`Function.prototype.call/apply` dispatch, and full browser/WASM semantics remain
+open.

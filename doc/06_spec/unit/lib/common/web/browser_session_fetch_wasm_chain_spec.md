@@ -792,6 +792,39 @@ match result:
 
 </details>
 
+#### dispatches Uint8Array prototype fill edge ranges with apply
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `1,254,254,254,5,6:true:254`
+
+3. Err
+   - Expected: "unexpected uint8 fill edge apply dispatch js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var b = new Uint8Array(6); b[0] = 1; b[1] = 2; b[2] = 3; b[3] = 4; b[4] = 5; b[5] = 6; var returned = Uint8Array.prototype.fill.apply(b, [-2, -5, -2]); b.toString() + ':' + (returned === b) + ':' + returned.at(3)")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("1,254,254,254,5,6:true:254")
+    Err(err):
+        expect("unexpected uint8 fill edge apply dispatch js error: {err}").to_equal("")
+```
+
+</details>
+
 #### dispatches Uint8Array prototype copyWithin edge ranges with call and apply
 
 1. var session = BrowserSession new
@@ -2659,8 +2692,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 72 |
-| Active scenarios | 72 |
+| Total scenarios | 73 |
+| Active scenarios | 73 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
