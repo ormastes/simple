@@ -409,15 +409,24 @@ html,body{margin:0;padding:0;width:${width}px;height:${height}px;overflow:hidden
 <script>window.__simpleExactBitmapReady=true;</script>`;
 }
 
+function isSimpleWebEngine2DScene() {
+  return scene === "simple-web-engine2d-image-taskbar-command" || scene === "simple-web-engine2d-two-block-content" || scene === "simple-web-engine2d-wide-card-content" || scene === "simple-web-engine2d-split-pane-status-list" || scene === "simple-web-engine2d-toolbar-modal-grid" || scene === "simple-web-engine2d-dashboard-command-list" || scene === "simple-web-engine2d-form-sidebar-validation" || scene === "simple-web-engine2d-settings-inspector-tree" || scene === "simple-web-engine2d-media-gallery-command" || scene === "simple-web-engine2d-report-table-command";
+}
+
 function fixtureHtml() {
   if (htmlPath) {
     return htmlFileFixtureHtml();
   }
+  // Render the REAL scene HTML/CSS for simple-web-engine2d-* scenes so Chromium
+  // actually lays it out, even when an expected-ARGB path is supplied. The
+  // expected ARGB is then used ONLY as the comparison reference (loadExpectedArgb),
+  // not as the render source — otherwise Chromium would just redraw Simple's own
+  // pixels and the "parity" would be a tautology.
+  if (isSimpleWebEngine2DScene()) {
+    return simpleWebEngine2DFixtureHtml();
+  }
   if (expectedArgbPath) {
     return expectedArgbCanvasHtml();
-  }
-  if (scene === "simple-web-engine2d-image-taskbar-command" || scene === "simple-web-engine2d-two-block-content" || scene === "simple-web-engine2d-wide-card-content" || scene === "simple-web-engine2d-split-pane-status-list" || scene === "simple-web-engine2d-toolbar-modal-grid" || scene === "simple-web-engine2d-dashboard-command-list" || scene === "simple-web-engine2d-form-sidebar-validation" || scene === "simple-web-engine2d-settings-inspector-tree" || scene === "simple-web-engine2d-media-gallery-command" || scene === "simple-web-engine2d-report-table-command") {
-    return simpleWebEngine2DFixtureHtml();
   }
   return exactFixtureHtml();
 }
