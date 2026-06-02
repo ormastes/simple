@@ -1991,6 +1991,22 @@ expect(_eval_str_with_network("http://api.example.com:8080", "var req = require(
 
 </details>
 
+#### emits bounded http request response events on request end
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("http://api.example.com:8080", "var seen = 'no'; var req = require('http').request('http://api.example.com:8080'); req.on('response', (res) => { seen = res.statusCode + ':' + res.path; }); req.end(); seen + ':' + req.responseEmitted + ':' + req.responseListenerCount")).to_equal("200:/:true:1")
+expect(_eval_str_with_network("http://api.example.com:8080", "var seen = 0; var req = require('http').request('http://api.example.com:8080/v1'); req.once('response', (res) => { seen = seen + res.statusCode; }); req.end(); req.end(); seen + ':' + req.listenerCount('response')")).to_equal("200:0")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.end(); req.responseEmitted + ':' + req.responseListenerCount")).to_equal("false:0")
+```
+
+</details>
+
 #### delivers bounded http response data and end events
 
 <details>
@@ -3672,8 +3688,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 238 |
-| Active scenarios | 238 |
+| Total scenarios | 239 |
+| Active scenarios | 239 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

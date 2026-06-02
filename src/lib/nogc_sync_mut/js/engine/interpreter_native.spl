@@ -1200,6 +1200,8 @@ impl JsInterpreter:
             self.set_object_property(result_id, "requestEnded", JsValue.Boolean(v: false))
             self.set_object_property(result_id, "aborted", JsValue.Boolean(v: false))
             self.set_object_property(result_id, "responseDelivered", JsValue.Boolean(v: false))
+            self.set_object_property(result_id, "responseEmitted", JsValue.Boolean(v: false))
+            self.set_object_property(result_id, "responseListenerCount", JsValue.Number(v: 0.0))
             self.set_object_property(result_id, "finishEmitted", JsValue.Boolean(v: false))
             self.set_object_property(result_id, "finishListenerCount", JsValue.Number(v: 0.0))
             self.set_object_property(result_id, "abortEmitted", JsValue.Boolean(v: false))
@@ -1426,8 +1428,14 @@ impl JsInterpreter:
                 JsValue.Boolean(v): self.set_object_property(request_id, "finishEmitted", JsValue.Boolean(v: v))
                 _:
                     self.set_object_property(request_id, "finishEmitted", JsValue.Boolean(v: false))
+        var response_count = 0
+        match self.get_object_property(request_id, "__simple_node_event_count_response"):
+            JsValue.Number(v): response_count = f64_to_i64(v)
+            _:
+                pass_dn
+        self.set_object_property(request_id, "responseListenerCount", JsValue.Number(v: response_count.to_f64()))
         val callback_id = _get_fn_id(self.get_object_property(request_id, "__simple_http_response_callback"))
-        if callback_id >= 0:
+        if callback_id >= 0 or response_count > 0:
             val response_id = self.create_object()
             val response_url = self.get_object_property(request_id, "target")
             val response_method = self.get_object_property(request_id, "method")
@@ -1443,7 +1451,14 @@ impl JsInterpreter:
             self._define_method_on(response_id, "on", NATIVE_NODE_EVENT_EMITTER_ON)
             self._define_method_on(response_id, "once", NATIVE_NODE_EVENT_EMITTER_ONCE)
             self._define_method_on(response_id, "listenerCount", NATIVE_NODE_EVENT_EMITTER_LISTENER_COUNT)
-            val ignored_callback_result = self._invoke_promise_callback(callback_id, [JsValue.Object(id: response_id)])
+            if callback_id >= 0:
+                val ignored_callback_result = self._invoke_promise_callback(callback_id, [JsValue.Object(id: response_id)])
+            if response_count > 0:
+                val response_result = self._native_node_event_emitter_emit(this_val, [JsValue.String(v: "response"), JsValue.Object(id: response_id)])
+                match response_result:
+                    JsValue.Boolean(v): self.set_object_property(request_id, "responseEmitted", JsValue.Boolean(v: v))
+                    _:
+                        self.set_object_property(request_id, "responseEmitted", JsValue.Boolean(v: false))
             val response_body = self.get_object_property(response_id, "body")
             self._native_node_http_response_emit(response_id, "data", [response_body])
             self._native_node_http_response_emit(response_id, "end", [])
