@@ -1747,6 +1747,24 @@ fetch/WASM chain spec passed `17/17`, the native WASM host spec passed
 manual was refreshed with the existing docgen stub warning. Broader typed-array
 prototype parity remains open.
 
+BrowserSession Uint8Array map continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/interpreter_eval.spl test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession typed-array prototype coverage now includes bounded
+`Uint8Array.map` with callback value, index, and typed-array receiver
+arguments. The browser script scenario proves normalized source byte reads,
+result byte coercion, a new mapped typed array, source immutability, `length`,
+`at`, and `toString` behavior with `8,255,16:4,255,7:3:255`. Focused checks
+passed, the fetch/WASM chain spec passed `18/18`, the native WASM host spec
+passed `107/107`, and Node API conformance remained `213/213`. The generated
+scenario manual was refreshed with the existing docgen warning. Broader
+typed-array prototype parity and production GUI pixel parity remain open.
+
 BrowserSession Uint8Array lastIndexOf continuation:
 
 - `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/runtime.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl src/lib/nogc_sync_mut/js/engine/interpreter_eval.spl test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
