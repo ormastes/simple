@@ -7,15 +7,20 @@ cd "$ROOT_DIR"
 BUILD_DIR="${BUILD_DIR:-build/tmp/macos_gui_live_window_evidence}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/macos_gui_live_window_evidence_$(date -u +%F).md}"
 SAMPLE_SPL="${MACOS_GUI_LIVE_WINDOW_SAMPLE:-examples/ui/web_engine2d_gui.spl}"
+SIMPLE_BIN="${SIMPLE_BIN:-src/compiler_rust/target/release/simple}"
 CAPTURE_PNG="$BUILD_DIR/simplegui-window.png"
 CAPTURE_BMP="$BUILD_DIR/simplegui-window.bmp"
 EVIDENCE_ENV="$BUILD_DIR/evidence.env"
 LAUNCH_LOG="$BUILD_DIR/launch.log"
 WINDOW_INFO="$BUILD_DIR/window.env"
 TIMEOUT_SECS="${MACOS_GUI_LIVE_WINDOW_TIMEOUT_SECS:-45}"
+SIMPLE_GUI_DYNLIB_ARTIFACT="${SIMPLE_GUI_DYNLIB_ARTIFACT:-build/gui/pure_gui_hot.smf}"
+gui_smf_artifact_contract_out="$BUILD_DIR/gui-smf-artifact-contract.out"
+gui_smf_artifact_contract_row="GUI_SMF_ARTIFACT_CONTRACT status=missing artifact=$SIMPLE_GUI_DYNLIB_ARTIFACT sha256= size=0 smf_role=-1 arch=0 embedded_dynlib=false symbol=${SIMPLE_GUI_DYNLIB_SYMBOL:-gui_dynlib_hot_probe_tick} qemu_status=not-run qemu_reason=live-qemu-not-executed macos_status=not-run macos_reason=requires-macos-arm64"
+gui_smf_artifact_contract_status=missing
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
-rm -f "$CAPTURE_PNG" "$CAPTURE_BMP" "$EVIDENCE_ENV" "$LAUNCH_LOG" "$WINDOW_INFO" "$REPORT_PATH"
+rm -f "$CAPTURE_PNG" "$CAPTURE_BMP" "$EVIDENCE_ENV" "$LAUNCH_LOG" "$WINDOW_INFO" "$REPORT_PATH" "$gui_smf_artifact_contract_out"
 
 append_env() {
     env_key="$1"
@@ -51,8 +56,41 @@ write_report() {
     {
         echo "# macOS GUI Live Window Evidence"
         echo
+        echo "- GUI SMF artifact contract status: $gui_smf_artifact_contract_status"
+        echo "- GUI SMF artifact contract row: $gui_smf_artifact_contract_row"
+        echo "- GUI SMF artifact contract scope: contract-only; does not promote live macOS window evidence"
+        echo
+        echo "## Raw Evidence"
+        echo
         sed 's/^/- /' "$EVIDENCE_ENV"
+        if [ -f "$gui_smf_artifact_contract_out" ]; then
+            echo
+            echo "## GUI SMF Artifact Contract Output"
+            sed 's/^/- /' "$gui_smf_artifact_contract_out"
+        fi
     } >"$REPORT_PATH"
+}
+
+run_gui_smf_artifact_contract() {
+    if [ -n "$SIMPLE_GUI_DYNLIB_ARTIFACT" ]; then
+        set +e
+        SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SIMPLE_BIN" run src/app/gui_perf/smf_artifact_contract.spl --mode=interpreter --clean >"$gui_smf_artifact_contract_out" 2>&1
+        set -e
+        gui_smf_artifact_contract_row="$(sed -n '/^GUI_SMF_ARTIFACT_CONTRACT /p' "$gui_smf_artifact_contract_out" | tail -n 1)"
+        if [ -z "$gui_smf_artifact_contract_row" ]; then
+            gui_smf_artifact_contract_row="GUI_SMF_ARTIFACT_CONTRACT status=fail artifact=${SIMPLE_GUI_DYNLIB_ARTIFACT:-} sha256= size=0 smf_role=-1 arch=0 embedded_dynlib=false symbol=${SIMPLE_GUI_DYNLIB_SYMBOL:-gui_dynlib_hot_probe_tick} qemu_status=not-run qemu_reason=live-qemu-not-executed macos_status=not-run macos_reason=requires-macos-arm64"
+        fi
+        gui_smf_artifact_contract_status="$(printf '%s\n' "$gui_smf_artifact_contract_row" | sed -n 's/^GUI_SMF_ARTIFACT_CONTRACT status=\([^ ]*\).*/\1/p' | tail -n 1)"
+        if [ -z "$gui_smf_artifact_contract_status" ]; then
+            gui_smf_artifact_contract_status=fail
+        fi
+    fi
+}
+
+mark_gui_smf_macos_pass_if_ready() {
+    if [ "$gui_smf_artifact_contract_status" = pass ]; then
+        gui_smf_artifact_contract_row="$(printf '%s\n' "$gui_smf_artifact_contract_row" | sed 's/ macos_status=[^ ]*/ macos_status=pass/; s/ macos_reason=[^ ]*/ macos_reason=live-macos-window-artifact-verified/')"
+    fi
 }
 
 emit_skip() {
@@ -73,6 +111,8 @@ emit_skip() {
     append_env "macos_gui_live_window_evidence_non_background_ratio" "0.000000"
     append_env "macos_gui_live_window_evidence_release_gate" "live-macos-window-visual-proof"
     append_env "macos_gui_live_window_evidence_release_gate_status" "not-satisfied"
+    append_env "macos_gui_live_window_evidence_gui_smf_artifact_contract_status" "$gui_smf_artifact_contract_status"
+    append_env "macos_gui_live_window_evidence_gui_smf_artifact_contract_row" "$gui_smf_artifact_contract_row"
     append_env "macos_gui_live_window_evidence_report_path" "$REPORT_PATH"
     write_report
     cat "$EVIDENCE_ENV"
@@ -97,6 +137,8 @@ emit_fail() {
     append_env "macos_gui_live_window_evidence_non_background_ratio" "0.000000"
     append_env "macos_gui_live_window_evidence_release_gate" "live-macos-window-visual-proof"
     append_env "macos_gui_live_window_evidence_release_gate_status" "not-satisfied"
+    append_env "macos_gui_live_window_evidence_gui_smf_artifact_contract_status" "$gui_smf_artifact_contract_status"
+    append_env "macos_gui_live_window_evidence_gui_smf_artifact_contract_row" "$gui_smf_artifact_contract_row"
     append_env "macos_gui_live_window_evidence_report_path" "$REPORT_PATH"
     write_report
     cat "$EVIDENCE_ENV"
@@ -107,6 +149,8 @@ cleanup_macos_app() {
     osascript -e 'tell application "SimpleGui" to quit' >/dev/null 2>&1 || true
     pkill -x SimpleGui >/dev/null 2>&1 || true
 }
+
+run_gui_smf_artifact_contract
 
 if [ "$(uname -s)" != "Darwin" ]; then
     emit_skip
@@ -238,6 +282,9 @@ append_env "macos_gui_live_window_evidence_non_background_pixels" "$non_backgrou
 append_env "macos_gui_live_window_evidence_non_background_ratio" "$non_background_ratio"
 append_env "macos_gui_live_window_evidence_release_gate" "live-macos-window-visual-proof"
 append_env "macos_gui_live_window_evidence_release_gate_status" "satisfied"
+mark_gui_smf_macos_pass_if_ready
+append_env "macos_gui_live_window_evidence_gui_smf_artifact_contract_status" "$gui_smf_artifact_contract_status"
+append_env "macos_gui_live_window_evidence_gui_smf_artifact_contract_row" "$gui_smf_artifact_contract_row"
 append_env "macos_gui_live_window_evidence_report_path" "$REPORT_PATH"
 
 write_report
