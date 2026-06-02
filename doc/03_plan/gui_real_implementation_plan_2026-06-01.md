@@ -127,6 +127,60 @@ the evidence.
 - Treat QEMU ARM64 as artifact portability evidence. Its performance target is
   reported separately unless the user later selects a strict QEMU NFR.
 
+## Renderer And Shell Comparison
+
+This comparison decides what can be release evidence for the real GUI
+implementation and what remains renderer, browser, or shell compatibility
+coverage.
+
+### CPU-Backed 2D Versus Vulkan-Backed 2D
+
+CPU/software Engine2D remains the canonical deterministic pixel reference:
+`doc/06_spec/integration/rendering/engine2d_backend_spec.md` and
+`doc/06_spec/integration/rendering/backend_screenshot_compare_spec.md` cover
+exact screenshot comparison. Vulkan Engine2D remains an accelerated
+presentation candidate only after parity evidence such as
+`doc/06_spec/integration/rendering/engine2d_cpu_vulkan_parity_spec.md` and
+`doc/09_report/vulkan_engine2d_readback_2026-05-31.md` proves zero mismatches
+and no blur/tolerance use. Vulkan must not be used to hide GUI-library latency;
+the hot metric stays event ingress to SMF/dynlib command-batch emission.
+
+### Web Rendering Library With Node.js
+
+Node.js is useful as a repeatable JavaScript bitmap baseline, but it is not the
+real GUI implementation target. The current Node.js Engine2D lane
+(`scripts/check-node-simple-web-engine2d-bitmap-evidence.shs`) is the valid
+current web-renderer comparison lane. The older generic
+`scripts/check-node-web-render-bitmap-evidence.shs` lane is stale until its
+Simple fixture segfault is fixed and rerun.
+
+### Pure Simple Web Rendering
+
+Pure Simple Web Engine2D evidence, including
+`doc/09_report/simple_web_engine2d_js_bitmap_evidence_2026-06-02.md` and
+`doc/09_report/layered_simple_gui_web_engine2d_bitmap_evidence_2026-06-02.md`,
+is renderer parity and regression evidence only. It proves Simple-owned
+rendering can match web-compatible pixels, but WebRenderer/HTML layout remains
+excluded from the pure GUI SMF/dynlib release path.
+
+### GUI Rendering With Electron Or Tauri
+
+Electron and Tauri are shell technologies. Electron provides Chromium/Node
+browser-shell capture coverage through the Electron bitmap scripts. Tauri
+provides optional adapter context through `tools/tauri-shell/` and
+`doc/05_design/tauri_simple_integration_status_2026-03-23.md`, but its current
+perf comparison is stale until `test/perf/tauri_equiv/tauri_reference/Cargo.toml`
+is restored and the `args_get` workflow failure is fixed. Neither shell counts
+as proof of the pure GUI SMF/dynlib release path.
+
+### Resulting Priority Order
+
+1. Pure Simple GUI library loaded from SMF/dynlib: release path.
+2. CPU/software Engine2D: deterministic pixel reference.
+3. Vulkan Engine2D: accelerated candidate after CPU parity and readback proof.
+4. Pure Simple Web Engine2D plus Node/Bun/Electron: renderer parity only.
+5. Tauri/Electron shells: optional adapter/capture lanes only.
+
 ## Implementation Phases
 
 ### Phase 1 - Pure GUI Library Boundary
