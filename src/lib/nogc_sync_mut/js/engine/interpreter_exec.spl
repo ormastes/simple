@@ -437,6 +437,51 @@ impl JsInterpreter:
                     i = i + 1
                     if should_exit:
                         break
+            JsValue.Object(id):
+                var is_readable_stream = false
+                match self.get_object_property(id, "readable"):
+                    JsValue.Boolean(v): is_readable_stream = v
+                    _:
+                        pass_dn
+                if is_readable_stream:
+                    var length = 0
+                    match self.get_object_property(id, "readableLength"):
+                        JsValue.Number(v): length = f64_to_i64(v)
+                        _:
+                            pass_dn
+                    var cursor = 0
+                    match self.get_object_property(id, "__simple_stream_cursor"):
+                        JsValue.Number(v): cursor = f64_to_i64(v)
+                        _:
+                            pass_dn
+                    var i = 0
+                    while i < length:
+                        val chunk_key = "__simple_stream_chunk_" + (cursor + i).to_text()
+                        val elem_val = self.get_object_property(id, chunk_key)
+                        val iter_env = self.env_stack.create_env(env)
+                        self.env_stack.define_var(iter_env, binding, elem_val)
+                        i = i + 1
+                        var bi = 0
+                        val blen = body.len()
+                        while bi < blen:
+                            result = self.exec_statement(body.get(bi), iter_env)?
+                            if self.control_return or self.control_thrown:
+                                should_exit = true
+                                break
+                            if self.control_break:
+                                self.control_break = false
+                                should_exit = true
+                                break
+                            if self.control_continue:
+                                self.control_continue = false
+                                break
+                            bi = bi + 1
+                        if should_exit:
+                            break
+                    self.set_object_property(id, "__simple_stream_cursor", JsValue.Number(v: (cursor + i).to_f64()))
+                    self.set_object_property(id, "readableLength", JsValue.Number(v: (length - i).to_f64()))
+                else:
+                    self.logger.warn("for...of requires an iterable")
             _:
                 self.logger.warn("for...of requires an iterable")
         Ok(result)
