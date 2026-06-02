@@ -741,6 +741,8 @@ impl JsInterpreter:
                     while call_ai < args.len():
                         call_args.push(self.eval_expression(args.get(call_ai), env)?)
                         call_ai = call_ai + 1
+                    if uint8_method == "sort":
+                        return self._dispatch_uint8_array_sort_method(dst_val, call_args, env)
                     return Ok(self._dispatch_uint8_array_prototype_method(uint8_method, dst_val, call_args))
             val data_view_method = self._data_view_prototype_method_name(member_obj_expr)
             if data_view_method != "":
@@ -760,6 +762,8 @@ impl JsInterpreter:
                     val dst_val = self.eval_expression(args.get(0), env)?
                     val args_val = self.eval_expression(args.get(1), env)?
                     val apply_args = self._indexed_arg_values(args_val)
+                    if uint8_method_apply == "sort":
+                        return self._dispatch_uint8_array_sort_method(dst_val, apply_args, env)
                     return Ok(self._dispatch_uint8_array_prototype_method(uint8_method_apply, dst_val, apply_args))
             val data_view_method_apply = self._data_view_prototype_method_name(member_obj_expr)
             if data_view_method_apply != "":
@@ -1311,6 +1315,45 @@ impl JsInterpreter:
         if method_name == "entries":
             return self._native_uint8_array_iterator(this_val, "entries")
         JsValue.Undefined
+
+    me _dispatch_uint8_array_sort_method(this_val: JsValue, arg_vals: [JsValue], env: i64) -> BrowserResult<JsValue>:
+        var compare_fn_id = -1
+        if arg_vals.len() > 0:
+            match arg_vals.get(0):
+                JsValue.Function(fn_id):
+                    compare_fn_id = fn_id
+                _:
+                    pass_dn
+        if compare_fn_id >= 0:
+            val typed_id = _get_obj_id(this_val)
+            if typed_id >= 0:
+                val sort_len = self._native_uint8_array_length(typed_id)
+                var sort_bytes: [i64] = []
+                var sort_read_i = 0
+                while sort_read_i < sort_len:
+                    sort_bytes.push(self._native_uint8_array_normalized_byte(self._native_uint8_array_byte_at(typed_id, sort_read_i)))
+                    sort_read_i = sort_read_i + 1
+                var sort_outer = 1
+                while sort_outer < sort_bytes.len():
+                    val current_byte = sort_bytes.get(sort_outer)
+                    var sort_inner = sort_outer - 1
+                    var keep_moving = true
+                    while sort_inner >= 0 and keep_moving:
+                        val left_byte = sort_bytes.get(sort_inner)
+                        val cmp = self._invoke_function(compare_fn_id, [JsValue.Number(v: left_byte.to_f64()), JsValue.Number(v: current_byte.to_f64())], env)?
+                        if to_number(cmp) > 0.0:
+                            sort_bytes[sort_inner + 1] = left_byte
+                            sort_inner = sort_inner - 1
+                        else:
+                            keep_moving = false
+                    sort_bytes[sort_inner + 1] = current_byte
+                    sort_outer = sort_outer + 1
+                var sort_write_i = 0
+                while sort_write_i < sort_bytes.len():
+                    self.set_object_property(typed_id, sort_write_i.to_text(), JsValue.Number(v: sort_bytes.get(sort_write_i).to_f64()))
+                    sort_write_i = sort_write_i + 1
+                return Ok(this_val)
+        Ok(self._native_uint8_array_sort(this_val))
 
     me _dispatch_data_view_prototype_method(method_name: text, this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
         if method_name == "getInt8":
