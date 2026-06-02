@@ -2862,6 +2862,24 @@ expect(_eval_str("var finished = 'no'; var w = require('stream').Writable(); w.o
 
 </details>
 
+#### removes bounded writable stream listeners
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var w = require('stream').Writable(); typeof w.addListener + ':' + typeof w.removeListener + ':' + typeof w.off + ':' + typeof w.removeAllListeners + ':' + typeof w.listeners")).to_equal("function:function:function:function:function")
+expect(_eval_str("var seen = 'no'; var w = require('stream').Writable(); var cb = () => { seen = 'finish'; }; w.on('finish', cb); w.removeListener('finish', cb); w.end(); seen + ':' + w.listenerCount('finish') + ':' + w.finishEmitted")).to_equal("no:0:false")
+expect(_eval_str("var seen = 'no'; var w = require('stream').Writable(); var cb = () => { seen = 'close'; }; w.on('close', cb); w.off('close', cb); w.destroy(); seen + ':' + w.listenerCount('close') + ':' + w.closeEmitted")).to_equal("no:0:false")
+expect(_eval_str("var w = require('stream').Writable(); var cb = () => 1; w.on('finish', cb); w.listeners('finish').length")).to_equal("1")
+expect(_eval_str("var w = require('stream').Writable(); var cb = () => 1; w.on('finish', cb); w.removeAllListeners('finish'); w.listeners('finish').length")).to_equal("0")
+```
+
+</details>
+
 #### destroys bounded writable streams deterministically
 
 <details>
@@ -4215,8 +4233,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 270 |
-| Active scenarios | 270 |
+| Total scenarios | 271 |
+| Active scenarios | 271 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
