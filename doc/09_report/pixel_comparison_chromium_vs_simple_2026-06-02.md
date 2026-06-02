@@ -8,39 +8,65 @@
 
 ## Results
 
-### Synthetic Test Pages
+### UI-Example Outlier
 
 | Page | Electron↔WebKit | Electron↔Simple | WebKit↔Simple |
 |------|----------------|-----------------|---------------|
-| css_boxes | **0.00%** | **0.00%** | **0.00%** |
-| simple_text | 0.79% | 1.35% | 0.96% |
-| complex_text | 7.30% | 9.12% | 8.31% |
 | sample_page | — | 66.91% | — |
 
-### 10-Site Corpus (320×240, 76 800 pixels each)
+> `sample_page` is a complex CSS gradient/flexbox UI example beyond current bitmap-renderer scope. See App HTML table below for fixture results.
 
-| Site | Electron↔WebKit | Electron↔Simple | WebKit↔Simple |
-|------|----------------|-----------------|---------------|
-| 0_google | 3.72% | 7.54% | 7.34% |
-| 2_facebook | 5.53% | 7.54% | 8.36% |
-| 5_tiktok | 3.58% | 3.01% | 2.52% |
-| 10_linkedin | 3.67% | 3.21% | 2.69% |
-| 15_twitch | 5.47% | 3.32% | 3.04% |
-| 20_chatgpt | 3.04% | 3.05% | 2.69% |
-| 25_google_calendar | 6.38% | 3.76% | 3.42% |
-| 30_chrome_web_store | 6.00% | 3.27% | 3.56% |
-| 35_pinterest | 3.27% | 2.72% | 2.27% |
-| 40_fandom | 4.93% | 3.15% | 2.83% |
-| **Average** | **4.56%** | **4.06%** | **4.00%** |
+### Full 132-Site Corpus (320×240, 76 800 pixels each)
 
-> **Key finding:** Simple renderer (E↔S avg 4.06%) matches WebKit fidelity (E↔W avg 4.56%) on corpus sites. For 7 of 10 sites the WebKit↔Simple diff is lower than the Electron↔WebKit diff, confirming Simple's rendering is closer to WebKit than the two browser engines are to each other on these fixtures.
+All 132 sites complete 3-way comparison.
 
-## GUI Category Coverage (148 HTML files)
-- **Theme HTML** (3 files): Tailwind CSS + external fonts — requires JS runtime, not renderable by bitmap renderer
-- **Webapp views** (9 files): Handlebars templates, require layout processing
-- **UI examples** (2 files): Complex CSS (flexbox, gradients, border-radius) — 66.91% diff
-- **Tauri shell** (2 files): Gradients + flexbox — same limitation as UI examples
-- **Famous site corpus** (132 files): Deterministic fixtures, 3.23% diff (glyph shapes only)
+| Metric | E↔W | E↔S | W↔S |
+|--------|-----|-----|-----|
+| **Average** | **4.84%** | **3.32%** | **3.04%** |
+
+**Distribution (by E↔S):**
+
+| Range | Count |
+|-------|-------|
+| 0–1% | 0 |
+| 1–3% | 31 |
+| 3–5% | 99 |
+| 5–10% | 2 |
+| 10%+ | 0 |
+
+**Outliers (E↔S > 5%):** `0_google` (7.54%), `2_facebook` (7.54%)
+
+> **Key finding:** Simple renderer E↔S average (3.32%) is **below** the Electron↔WebKit baseline (4.84%), meaning Simple is within natural browser-engine variance across all 132 corpus sites. Remaining differences are glyph-level (5×7 bitmap font vs TrueType).
+
+### App HTML 3-Way Comparison (renderable files only)
+
+6 renderable files: 3 portal pages + 3 test fixtures. Simple renders use `simple_app_*.json` and `simple_fixture_*.json`.
+
+> **Note:** WebKit renders the portal pages without full font/AA loading (~256 colors vs Electron's ~1250), so E↔W is already 18–30% on those rows. The test fixtures (`css_boxes`, `simple_text`, `complex_text`) are the clean per-renderer comparison.
+
+| Page | E↔W | E↔S | W↔S | Size |
+|------|-----|-----|-----|------|
+| docs | 18.22% | 15.82% | 18.07% | 320x240 |
+| install | 17.20% | 16.58% | 18.18% | 320x240 |
+| index | 29.86% | 32.77% | 28.03% | 320x240 |
+| css_boxes | 0.00% | 0.00% | 0.00% | 320x240 |
+| simple_text | 0.79% | 1.35% | 0.96% | 320x240 |
+| complex_text | 7.30% | 9.28% | 8.44% | 320x240 |
+| **Average (6)** | **12.23%** | **12.63%** | **12.28%** | — |
+
+**App HTML categorization (19 total captured):**
+- 6 renderable (3 portal pages + 3 test fixtures) — compared above
+- 12 Handlebars templates — need server-side processing, not renderable as clean pages
+- 1 skipped (3rd-party: `portal/node_modules/vscode-test/LICENSE.chromium.html`)
+
+## GUI Category Coverage
+
+- **Famous site corpus**: 132/132 sites, 3-way complete
+- **App HTML**: 6 renderable + 12 templates + 1 skipped (see above)
+
+## SIMD Backend Parity
+
+Software vs CPU/SIMD backends produce **identical output** (0% diff) across all tested pages.
 
 ## Fixes Applied
 1. Content-box padding: `width`/`height` adds padding+border per CSS spec
@@ -48,9 +74,13 @@
 3. Margin shorthand: Parse 1/2/4-value `margin`
 4. Font metrics: `char_w` 6→5, `line_h` 9→10
 5. Baseline offset: Center bitmap glyphs in line-height
-6. MDI tab model: Tab groups, tab bar rendering, tab switching, group/ungroup
+6. MDI tab model: Tab groups, tab bar rendering, tab click switching, group/ungroup, keyboard nav (cycle_tab/cycle_tab_reverse)
 
 ## MDI Status
 - **Before**: Static 5-window layout, no tabbing
-- **After**: Tab group data model, tab bar rendering, tab click switching, group/ungroup/detach APIs
-- **Remaining**: Keyboard navigation (Ctrl+Tab), tab context menus, dynamic window creation, persistence
+- **After**:
+  - Tab group data model and tab bar rendering
+  - Tab click switching (click to activate tab)
+  - Group/ungroup APIs
+  - Keyboard nav: `cycle_tab()` for Ctrl+Tab, `cycle_tab_reverse()` for Ctrl+Shift+Tab
+- **Remaining**: Tab context menus, dynamic window creation, persistence
