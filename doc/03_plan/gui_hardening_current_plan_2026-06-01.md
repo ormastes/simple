@@ -313,7 +313,7 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   `doc/06_spec/system/app/browser/feature/webgpu_js_wasm_simple_spec.md`:
   JS/WebEngine/WASM BrowserSession evidence. Current focused checks pass the
   WebGPU/JS/WASM system spec `106/106`, the native WASM host spec `107/107`,
-  and the fetch-to-WASM chain spec `59/59`. The coverage includes secure WebGPU
+  and the fetch-to-WASM chain spec `60/60`. The coverage includes secure WebGPU
   globals, fetched `arrayBuffer()` to `WebAssembly.instantiate`, compile
   thenables, bounded WASM exports, traps, table/global metadata, imported
   function binding, and `Uint8Array`/`DataView` access to WebAssembly.Memory.
@@ -344,6 +344,8 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   Bounded `ArrayBuffer.prototype.slice` now dispatches through direct calls plus
   `call`/`apply`, copies bytes into independent buffers, and keeps sliced views
   isolated from later source mutations.
+  Ordinary browser-script functions now dispatch bounded `call` and `apply`
+  with explicit receiver binding and indexed apply arguments.
   Bounded `Uint8Array.prototype.sort.call` now also honors comparator callbacks
   through the same byte-normalized callback sort path as direct typed-array
   calls. Bounded `Uint8Array.prototype.map.call` now dispatches callback-based
@@ -3421,6 +3423,18 @@ buffers after source mutation, and typed-array views over sliced buffers. The
 focused fetch/WASM chain spec now passes `59/59`; broader typed-array/DataView
 prototype parity, general `Function.prototype.call/apply` dispatch, and full
 browser/WASM semantics remain open.
+
+BrowserSession ordinary function call/apply continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/interpreter_eval.spl src/lib/nogc_sync_mut/js/engine/interpreter_string_methods.spl test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession scripts now dispatch ordinary browser-script function `call` and
+`apply` with explicit receiver binding. The scenario proves receiver property
+reads through `this`, positional `call` arguments, and indexed array arguments
+for `apply`. The focused fetch/WASM chain spec now passes `60/60`; broader
+Function prototype behavior and full browser/WASM semantics remain open.
 
 BrowserSession Uint8Array prototype sort apply continuation:
 

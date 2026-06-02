@@ -1947,6 +1947,39 @@ match result:
 
 </details>
 
+#### dispatches ordinary function call and apply with explicit receivers in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `15:29`
+
+3. Err
+   - Expected: "unexpected ordinary function call/apply js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var add = function(a, b) { return this.base + a + b; }; var callReceiver = []; callReceiver.base = 10; var applyReceiver = []; applyReceiver.base = 20; var applyArgs = [4, 5]; var called = add.call(callReceiver, 2, 3); var applied = add.apply(applyReceiver, applyArgs); called + ':' + applied")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("15:29")
+    Err(err):
+        expect("unexpected ordinary function call/apply js error: {err}").to_equal("")
+```
+
+</details>
+
 #### dispatches Uint8Array prototype helpers with call and apply in browser scripts
 
 1. var session = BrowserSession new
@@ -2230,8 +2263,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 59 |
-| Active scenarios | 59 |
+| Total scenarios | 60 |
+| Active scenarios | 60 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
