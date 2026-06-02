@@ -1943,6 +1943,22 @@ expect(_eval_str_with_network("http://api.example.com:8080", "var req = require(
 
 </details>
 
+#### tracks bounded http request lifecycle flags
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.writableEnded + ':' + req.writableFinished + ':' + req.destroyed + ':' + req.closed")).to_equal("false:false:false:false")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.end(); req.writableEnded + ':' + req.writableFinished + ':' + req.destroyed + ':' + req.closed")).to_equal("true:true:false:true")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.abort(); req.writableEnded + ':' + req.writableFinished + ':' + req.destroyed + ':' + req.closed")).to_equal("false:false:true:true")
+```
+
+</details>
+
 #### emits bounded http request finish events on end
 
 <details>
@@ -3753,8 +3769,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 243 |
-| Active scenarios | 243 |
+| Total scenarios | 244 |
+| Active scenarios | 244 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
