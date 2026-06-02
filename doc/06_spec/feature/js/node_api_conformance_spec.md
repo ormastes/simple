@@ -3139,6 +3139,34 @@ expect(_eval_before_after_timer_drain("var tickValue = 0; require('process').nex
 
 </details>
 
+#### drains process.nextTick before already queued timers
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_before_after_timer_drain("var order = ''; require('timers').setTimeout(() => { order = order + 'timer'; }, 0); process.nextTick(() => { order = order + 'tick'; }); order", "order", 0)).to_equal(":2:ticktimer")
+```
+
+</details>
+
+#### drains nested process.nextTick callbacks before timers
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_before_after_timer_drain("var order = ''; require('timers').setTimeout(() => { order = order + 'timer'; }, 0); process.nextTick(() => { order = order + 'tick'; process.nextTick(() => { order = order + 'nested'; }); }); order", "order", 0)).to_equal(":3:ticknestedtimer")
+```
+
+</details>
+
 ### TextEncoder and TextDecoder globals
 
 #### encodes text to Uint8Array-compatible bytes
@@ -3321,8 +3349,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 217 |
-| Active scenarios | 217 |
+| Total scenarios | 219 |
+| Active scenarios | 219 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

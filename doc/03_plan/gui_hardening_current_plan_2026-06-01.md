@@ -83,9 +83,12 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   through the runtime drain path and explicit child-process command grants
   through `JsRuntime.grant_node_process`. The callback path uses the same JS
   callback invoker as promise microtasks, so queued callbacks can mutate runtime
-  globals instead of being counted without observable execution. The broader
-  Node API conformance spec now passes its focused builtin/process sandbox
-  scenarios, including rejecting missing and invalid process grants.
+  globals instead of being counted without observable execution. A follow-up
+  phase-ordering slice now drains bounded `process.nextTick` callbacks before
+  already queued `timers.setTimeout(..., 0)` callbacks, including nested
+  nextTick callbacks scheduled during the drain. The broader Node API
+  conformance spec now passes its focused builtin/process sandbox scenarios,
+  including rejecting missing and invalid process grants.
 - HTML compatibility reports now expose exact-pixel policy as structured SDN:
   `exact_required: true`, `perceptual_diagnostic_only: true`, and
   `tolerance_acceptance_allowed: false`. Perceptual percentages remain
@@ -249,12 +252,15 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   explicit process capability grants for `child_process.spawn`. A follow-up
   bounded metadata slice now reports `exitCode`, `signal`, `stdout`, `stderr`,
   `argvLength`, and `pid` on allowed and denied spawn results without host
-  process I/O. Current focused checks pass `node_api_conformance_spec.spl`
-  `217/217` and `node_process_next_tick_spec.spl` `2/2`; missing and invalid
-  process grants remain rejected, and explicit in-memory CommonJS source grants
-  now execute `exports.*` assignments plus `module.exports = ...` replacements
-  with cache identity, slash-bearing specifier coverage, and bounded
-  `/node_modules` index/package-main resolution over granted in-memory files.
+  process I/O. A follow-up phase-ordering slice gives nextTick tasks priority
+  over already queued zero-delay `timers.setTimeout` tasks, including nested
+  nextTick callbacks scheduled during the drain. Current focused checks pass
+  `node_api_conformance_spec.spl` `219/219` and
+  `node_process_next_tick_spec.spl` `2/2`; missing and invalid process grants
+  remain rejected, and explicit in-memory CommonJS source grants now execute
+  `exports.*` assignments plus `module.exports = ...` replacements with cache
+  identity, slash-bearing specifier coverage, and bounded `/node_modules`
+  index/package-main resolution over granted in-memory files.
 - `doc/09_report/budgeted_simple_web_engine2d_scene_matrix_settings_inspector_2026-06-01.md`:
   current Engine2D Node/Bun/Electron budgeted exact-bitmap matrix including
   settings-inspector-tree.
@@ -355,10 +361,10 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   now expose the same iterator through the `Symbol.asyncIterator` key. Full
   pressure propagation/flow control, `for await` syntax support, broader stream
   scheduling, and broader event-loop phases remain open.
-  Bounded `setInterval` rescheduling across explicit timer drains and
-  `clearInterval` from inside an interval callback are covered. Broader
-  event-loop phase ordering, host I/O integration, and full Node timer object
-  behavior remain open.
+  Bounded `setInterval` rescheduling across explicit timer drains,
+  `clearInterval` from inside an interval callback, and nextTick-before-timer
+  phase priority are covered. Broader event-loop phases, host I/O integration,
+  and full Node timer object behavior remain open.
   Bounded timer handle objects with `ref`, `unref`, `hasRef`, repeat metadata,
   object-handle clearing, and `close()` cancellation are covered. Full Node
   handle lifecycle behavior remains open.
@@ -2211,3 +2217,23 @@ numeric comparator ordering, mutation in place, and return-value identity with
 passed `27/27`, the native WASM host spec passed `107/107`, and Node API
 conformance remained `213/213`. The generated scenario manual was refreshed
 with the existing docgen warnings.
+
+CommonJS/Node nextTick phase-order continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/interpreter.spl src/lib/nogc_sync_mut/js/engine/interpreter_async.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+
+The bounded Node scheduler now marks `process.nextTick` tasks as their own
+phase and drains due nextTick tasks before ordinary due timer tasks. The Node
+API conformance suite proves a nextTick scheduled after an already queued
+zero-delay `timers.setTimeout` still runs first, and that a nested nextTick
+scheduled during the drain also runs before the timer. Focused checks passed,
+the Node API conformance suite passes `219/219`, BrowserSession fetch/WASM and
+native WASM host regressions remain `36/36` and `107/107`, and the broad
+`src/lib` check passed with the existing `447` warning profile. Broader
+event-loop phases, host I/O integration, and full timer-object behavior remain
+open.
