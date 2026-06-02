@@ -313,7 +313,7 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   `doc/06_spec/system/app/browser/feature/webgpu_js_wasm_simple_spec.md`:
   JS/WebEngine/WASM BrowserSession evidence. Current focused checks pass the
   WebGPU/JS/WASM system spec `106/106`, the native WASM host spec `107/107`,
-  and the fetch-to-WASM chain spec `63/63`. The coverage includes secure WebGPU
+  and the fetch-to-WASM chain spec `64/64`. The coverage includes secure WebGPU
   globals, fetched `arrayBuffer()` to `WebAssembly.instantiate`, compile
   thenables, bounded WASM exports, traps, table/global metadata, imported
   function binding, and `Uint8Array`/`DataView` access to WebAssembly.Memory.
@@ -351,7 +351,8 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   Ordinary browser-script functions now also dispatch bounded `bind` with
   explicit receiver binding, partial arguments, and callback invocation.
   Bound functions now preserve the bound receiver when invoked through `call`
-  and `apply`.
+  and `apply`. Chained bound functions now retain the original bound receiver
+  while accumulating partial arguments across subsequent bind/call invocations.
   Bounded `Uint8Array.prototype.sort.call` now also honors comparator callbacks
   through the same byte-normalized callback sort path as direct typed-array
   calls. Bounded `Uint8Array.prototype.map.call` now dispatches callback-based
@@ -3480,6 +3481,19 @@ scenario verifies ignored replacement receivers, appended invocation arguments,
 and a function-shaped bound result. The focused fetch/WASM chain spec now
 passes `63/63`; broader Function prototype behavior and full browser/WASM
 semantics remain open.
+
+BrowserSession chained function bind continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession scripts now prove chained `bind` behavior for ordinary
+functions. The scenario verifies original receiver retention after a second
+bind, accumulated partial arguments from both binds, direct invocation, call
+invocation with ignored replacement receiver, and a function-shaped result. The
+focused fetch/WASM chain spec now passes `64/64`; broader Function prototype
+behavior and full browser/WASM semantics remain open.
 
 BrowserSession Uint8Array prototype sort apply continuation:
 

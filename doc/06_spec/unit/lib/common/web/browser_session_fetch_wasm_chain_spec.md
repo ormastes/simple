@@ -2079,6 +2079,39 @@ match result:
 
 </details>
 
+#### dispatches chained function bind with accumulated partial arguments
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `20:21:function`
+
+3. Err
+   - Expected: "unexpected chained function bind js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script('var add = function(a, b, c, d) { return this.base + a + b + c + d; }; var first = add.bind({ base: 10 }, 1); var second = first.bind({ base: 99 }, 2, 3); var viaDirect = second(4); var viaCall = second.call({ base: 50 }, 5); viaDirect + ":" + viaCall + ":" + typeof second')
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("20:21:function")
+    Err(err):
+        expect("unexpected chained function bind js error: {err}").to_equal("")
+```
+
+</details>
+
 #### dispatches Uint8Array prototype helpers with call and apply in browser scripts
 
 1. var session = BrowserSession new
@@ -2362,8 +2395,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 63 |
-| Active scenarios | 63 |
+| Total scenarios | 64 |
+| Active scenarios | 64 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
