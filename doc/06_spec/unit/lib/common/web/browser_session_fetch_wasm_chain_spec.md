@@ -858,6 +858,39 @@ match result:
 
 </details>
 
+#### constructs Uint8Array values from indexed sources in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `4,255:4,255:4,0,9:3:0`
+
+3. Err
+   - Expected: "unexpected uint8 from js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var src = new Uint8Array(2); src[0] = 260; src[1] = -1; var copied = Uint8Array.from(src); var mapped = Uint8Array.from([260, -1, 7], function(v, i) { return v + i; }); copied.toString() + ':' + src.toString() + ':' + mapped.toString() + ':' + mapped.length + ':' + mapped.at(1)")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("4,255:4,255:4,0,9:3:0")
+    Err(err):
+        expect("unexpected uint8 from js error: {err}").to_equal("")
+```
+
+</details>
+
 #### maps Uint8Array values into a new coerced array in browser scripts
 
 1. var session = BrowserSession new
@@ -1240,8 +1273,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 29 |
-| Active scenarios | 29 |
+| Total scenarios | 30 |
+| Active scenarios | 30 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
