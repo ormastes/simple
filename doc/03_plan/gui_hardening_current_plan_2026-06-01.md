@@ -3813,3 +3813,18 @@ scan remain `-1`. The focused fetch/WASM chain spec now passes `74/74`;
 broader typed-array/DataView prototype parity, general
 `Function.prototype.call/apply` dispatch, and full browser/WASM semantics remain
 open.
+
+BrowserSession Uint8Array prototype string apply dispatch continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession scripts now dispatch bounded `Uint8Array.prototype.join.apply`
+and `Uint8Array.prototype.toString.apply` against a browser-script typed array.
+The apply argument array carries a custom separator for `join`, the empty
+argument path preserves comma joining, and `toString.apply` shares the same
+stringification output. The focused fetch/WASM chain spec now passes `75/75`;
+broader typed-array/DataView prototype parity, general
+`Function.prototype.call/apply` dispatch, and full browser/WASM semantics remain
+open.
