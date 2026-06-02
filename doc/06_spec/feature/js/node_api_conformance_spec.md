@@ -2128,6 +2128,22 @@ expect(_eval_str_with_network("http://api.example.com:8080", "var req = require(
 
 </details>
 
+#### auto-ends bounded http get requests
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("http://api.example.com:8080", "var seen = 'no'; var req = require('http').get('http://api.example.com:8080/v1', (res) => { seen = res.statusCode + ':' + res.path; }); seen + ':' + req.requestEnded + ':' + req.responseDelivered")).to_equal("200:/v1:true:true")
+expect(_eval_str_with_network("https://api.example.com:443", "var seen = 'no'; var req = require('node:https').get('https://api.example.com/v2', (res) => { seen = res.statusCode + ':' + res.url; }); seen + ':' + req.requestEnded + ':' + req.target")).to_equal("200:https://api.example.com:443:true:https://api.example.com:443")
+expect(_eval_str_with_network("http://api.example.com:8081", "var seen = 'no'; var req = require('http').get('http://api.example.com:8080', (res) => { seen = res.statusCode; }); seen + ':' + req.status + ':' + req.reason + ':' + req.requestEnded + ':' + req.responseDelivered")).to_equal("no:denied:network-grant-denied:false:false")
+```
+
+</details>
+
 #### emits bounded http request response events on request end
 
 <details>
@@ -3873,8 +3889,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 250 |
-| Active scenarios | 250 |
+| Total scenarios | 251 |
+| Active scenarios | 251 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -419,9 +419,11 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   object snapshots, overwrite-stable `headerCount`, and deterministic
   `headersFlushed`/`flushedHeaderCount` state snapshots. Construction-time
   option-object `headers` now load into the same bounded request-local header
-  state. Full request streams, callbacks, and host network I/O remain open.
-  Bounded `net.connect`, `http.get`, and `https.get` aliases are covered under
-  the same explicit network-grant model.
+  state. Full request streams and host network I/O remain open. Bounded
+  `net.connect`, `http.get`, and `https.get` aliases are covered under the same
+  explicit network-grant model, and allowed bounded `http.get`/`https.get`
+  requests now auto-end through the shared response callback path while denied
+  bounded gets preserve the network-grant denial without fabricating a response.
   Bounded request lifecycle methods now cover deterministic `write`, `end`, and
   `abort`, and `destroy` state, plus bounded request-side `finish` listener
   delivery on `end()`, `abort` listener delivery on `abort()`, and `close`
