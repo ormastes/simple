@@ -12,9 +12,9 @@
 
 ---
 
-## Standard Library (1 features)
+## Other (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Browser Session Fetch Wasm Chain Specification](unit/lib/common/web/browser_session_fetch_wasm_chain_spec.md) | Auto-generated | N/A | 36 | 0% | 0 lines |
+| [Node Api Conformance Specification](feature/js/node_api_conformance_spec.md) | Auto-generated | N/A | 214 | 0% | 0 lines |
 

@@ -1518,6 +1518,21 @@ expect(_eval_str("var EventEmitter = require('events').EventEmitter; var e = new
 
 </details>
 
+#### invokes bounded EventEmitter callbacks with emitted arguments
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var EventEmitter = require('events').EventEmitter; var e = new EventEmitter(); var seen = 'no'; e.on('ready', (a, b) => { seen = a + ':' + b; }); e.emit('ready', 'ok', 7); seen")).to_equal("ok:7")
+expect(_eval_str("var EventEmitter = require('events').EventEmitter; var e = new EventEmitter(); var seen = 'no'; e.once('ready', (value) => { seen = value; }); e.emit('ready', 'once'); e.emit('ready', 'twice'); seen + ':' + e.listenerCount('ready')")).to_equal("once:0")
+```
+
+</details>
+
 #### removes EventEmitter listeners by event name
 
 <details>
@@ -3257,8 +3272,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 213 |
-| Active scenarios | 213 |
+| Total scenarios | 214 |
+| Active scenarios | 214 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
