@@ -3781,6 +3781,101 @@ match instance:
 
 </details>
 
+#### exposes bounded Module exports descriptors
+
+1. var interp =  new interpreter
+
+2. JsValue Array
+   - Expected: _display_js(interp.get_object_property(exports_id, "length")) equals `2`
+
+3. JsValue Object
+   - Expected: _display_js(interp.get_object_property(first_id, "name")) equals `tbl`
+   - Expected: _display_js(interp.get_object_property(first_id, "kind")) equals `table`
+   - Expected: "missing first export descriptor" equals ``
+
+4. JsValue Object
+   - Expected: _display_js(interp.get_object_property(second_id, "name")) equals `answer`
+   - Expected: _display_js(interp.get_object_property(second_id, "kind")) equals `global`
+   - Expected: "missing second export descriptor" equals ``
+   - Expected: "missing exports array" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var interp = _new_interpreter()
+
+val module = interp._native_webassembly_module([JsValue.String(v: "0061736d010000000404017000010606017f00412a0b0710020374626c010006616e737765720300")])
+val exports = interp._native_webassembly_module_exports([module])
+
+match exports:
+    JsValue.Array(exports_id):
+        expect(_display_js(interp.get_object_property(exports_id, "length"))).to_equal("2")
+        match interp.get_object_property(exports_id, "0"):
+            JsValue.Object(first_id):
+                expect(_display_js(interp.get_object_property(first_id, "name"))).to_equal("tbl")
+                expect(_display_js(interp.get_object_property(first_id, "kind"))).to_equal("table")
+            _:
+                expect("missing first export descriptor").to_equal("")
+        match interp.get_object_property(exports_id, "1"):
+            JsValue.Object(second_id):
+                expect(_display_js(interp.get_object_property(second_id, "name"))).to_equal("answer")
+                expect(_display_js(interp.get_object_property(second_id, "kind"))).to_equal("global")
+            _:
+                expect("missing second export descriptor").to_equal("")
+    _:
+        expect("missing exports array").to_equal("")
+```
+
+</details>
+
+#### exposes bounded Module imports descriptors
+
+1. var interp =  new interpreter
+
+2. JsValue Array
+   - Expected: _display_js(interp.get_object_property(imports_id, "length")) equals `1`
+
+3. JsValue Object
+   - Expected: _display_js(interp.get_object_property(first_id, "module")) equals `env`
+   - Expected: _display_js(interp.get_object_property(first_id, "name")) equals `foo`
+   - Expected: _display_js(interp.get_object_property(first_id, "kind")) equals `function`
+   - Expected: "missing import descriptor" equals ``
+   - Expected: "missing imports array" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var interp = _new_interpreter()
+
+val module = interp._native_webassembly_module([JsValue.String(v: "0061736d01000000010401600000020b0103656e7603666f6f0000")])
+val imports = interp._native_webassembly_module_imports([module])
+
+match imports:
+    JsValue.Array(imports_id):
+        expect(_display_js(interp.get_object_property(imports_id, "length"))).to_equal("1")
+        match interp.get_object_property(imports_id, "0"):
+            JsValue.Object(first_id):
+                expect(_display_js(interp.get_object_property(first_id, "module"))).to_equal("env")
+                expect(_display_js(interp.get_object_property(first_id, "name"))).to_equal("foo")
+                expect(_display_js(interp.get_object_property(first_id, "kind"))).to_equal("function")
+            _:
+                expect("missing import descriptor").to_equal("")
+    _:
+        expect("missing imports array").to_equal("")
+```
+
+</details>
+
 #### synthesizes bounded signed global export placeholder
 
 1. var interp =  new interpreter
@@ -4975,8 +5070,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 102 |
-| Active scenarios | 102 |
+| Total scenarios | 104 |
+| Active scenarios | 104 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

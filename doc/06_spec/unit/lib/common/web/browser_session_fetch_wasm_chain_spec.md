@@ -429,6 +429,39 @@ match session.take_pending_request():
 
 </details>
 
+#### exposes Module imports and exports descriptors in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `2:tbl:table:answer:global:1:env:foo:function`
+
+3. Err
+   - Expected: "unexpected descriptor js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var tableGlobal = new WebAssembly.Module('0061736d010000000404017000010606017f00412a0b0710020374626c010006616e737765720300'); var exports = WebAssembly.Module.exports(tableGlobal); var imported = new WebAssembly.Module('0061736d01000000010401600000020b0103656e7603666f6f0000'); var imports = WebAssembly.Module.imports(imported); exports.length + ':' + exports[0].name + ':' + exports[0].kind + ':' + exports[1].name + ':' + exports[1].kind + ':' + imports.length + ':' + imports[0].module + ':' + imports[0].name + ':' + imports[0].kind")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("2:tbl:table:answer:global:1:env:foo:function")
+    Err(err):
+        expect("unexpected descriptor js error: {err}").to_equal("")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -448,8 +481,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
