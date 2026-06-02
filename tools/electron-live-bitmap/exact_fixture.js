@@ -681,8 +681,14 @@ function bitmapToLogicalBgra(image) {
   const native = image.toBitmap({ scaleFactor: 1 }); // BGRA at size.width x size.height
   const nw = size.width;
   const nh = size.height;
+  if (native.length !== nw * nh * 4) {
+    throw new Error(`Electron capture bitmap size mismatch: ${native.length} bytes for ${nw}x${nh}`);
+  }
   if (nw === width && nh === height) {
     return { buffer: native, nativeWidth: nw, nativeHeight: nh, downsampled: false };
+  }
+  if (nw <= 0 || nh <= 0 || nw % width !== 0 || nh % height !== 0) {
+    throw new Error(`Electron capture size is not an integer logical scale: native=${nw}x${nh} logical=${width}x${height}`);
   }
   const out = Buffer.alloc(width * height * 4);
   const kx = nw / width;

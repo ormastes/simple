@@ -42,3 +42,5 @@ dev-done
 - dev: Created state file with 10 acceptance criteria (type: feature).
 - impl: Added first production backend-parity slice for marker-free generated GUI widget HTML.
 - impl: Added live Electron generated-GUI HTML capture evidence. Current result is divergent with exact mismatch accounting, not a fake pass.
+- impl: Made Electron generated-GUI evidence record native capture dimensions and downsample provenance so Retina/HiDPI captures cannot silently invalidate pixel mismatch numbers.
+- impl: Added fail-closed Electron bitmap size/scale validation plus generic CSS-driven button/input layout and paint support for generated GUI and html_compat fixtures.
