@@ -180,6 +180,41 @@ expect(gui_dynlib_probe_extract_smf_library_bytes_for_host_arch(arm64_smf, "unkn
 
 </details>
 
+#### compares extracted SMF cache bytes exactly
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(gui_dynlib_probe_bytes_equal([1u8, 2u8, 3u8], [1u8, 2u8, 3u8])).to_equal(true)
+expect(gui_dynlib_probe_bytes_equal([1u8, 2u8, 3u8], [1u8, 2u8])).to_equal(false)
+expect(gui_dynlib_probe_bytes_equal([1u8, 2u8, 3u8], [1u8, 2u8, 4u8])).to_equal(false)
+```
+
+</details>
+
+#### verifies SMF cache writes by reading back the extracted dynlib bytes
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val path = "/tmp/simple_gui_smf_probe_cache_verify.bin"
+val bytes = [0xCFu8, 0xFAu8, 0xEDu8, 0xFEu8, 1u8, 2u8]
+expect(gui_dynlib_probe_write_cache_bytes_verified(path, bytes)).to_equal(true)
+val reread = rt_file_read_bytes(path) ?? []
+expect(gui_dynlib_probe_bytes_equal(bytes, reread)).to_equal(true)
+expect(gui_dynlib_probe_write_cache_bytes_verified(path, [])).to_equal(false)
+```
+
+</details>
+
 #### rejects callable host dynlib samples as not SMF dynlib acceptance
 
 <details>
@@ -311,8 +346,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

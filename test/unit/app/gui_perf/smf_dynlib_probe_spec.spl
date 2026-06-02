@@ -7,11 +7,14 @@ use app.gui_perf.smf_dynlib_probe_core.{
     gui_dynlib_probe_host_dynlib_extension, gui_dynlib_probe_smf_cache_path,
     gui_dynlib_probe_report, gui_dynlib_probe_workload,
     gui_dynlib_probe_load_host_evidence,
-    gui_dynlib_probe_extract_smf_library_bytes_for_host_arch
+    gui_dynlib_probe_extract_smf_library_bytes_for_host_arch,
+    gui_dynlib_probe_bytes_equal,
+    gui_dynlib_probe_write_cache_bytes_verified
 }
 use app.gui_perf.smf_dynlib_artifact.{gui_smf_wrap_native_library}
 
 extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_bytes(path: text) -> [u8]?
 
 describe "pure GUI SMF dynlib probe":
     it "builds a representative pure GUI workload without pixels":
@@ -101,6 +104,19 @@ describe "pure GUI SMF dynlib probe":
         expect(gui_dynlib_probe_extract_smf_library_bytes_for_host_arch(arm64_smf, "aarch64").len()).to_equal(stub.len())
         expect(gui_dynlib_probe_extract_smf_library_bytes_for_host_arch(arm64_smf, "x86_64").len()).to_equal(0)
         expect(gui_dynlib_probe_extract_smf_library_bytes_for_host_arch(arm64_smf, "unknown").len()).to_equal(0)
+
+    it "compares extracted SMF cache bytes exactly":
+        expect(gui_dynlib_probe_bytes_equal([1u8, 2u8, 3u8], [1u8, 2u8, 3u8])).to_equal(true)
+        expect(gui_dynlib_probe_bytes_equal([1u8, 2u8, 3u8], [1u8, 2u8])).to_equal(false)
+        expect(gui_dynlib_probe_bytes_equal([1u8, 2u8, 3u8], [1u8, 2u8, 4u8])).to_equal(false)
+
+    it "verifies SMF cache writes by reading back the extracted dynlib bytes":
+        val path = "/tmp/simple_gui_smf_probe_cache_verify.bin"
+        val bytes = [0xCFu8, 0xFAu8, 0xEDu8, 0xFEu8, 1u8, 2u8]
+        expect(gui_dynlib_probe_write_cache_bytes_verified(path, bytes)).to_equal(true)
+        val reread = rt_file_read_bytes(path) ?? []
+        expect(gui_dynlib_probe_bytes_equal(bytes, reread)).to_equal(true)
+        expect(gui_dynlib_probe_write_cache_bytes_verified(path, [])).to_equal(false)
 
     it "rejects callable host dynlib samples as not SMF dynlib acceptance":
         val config = GuiDynlibProbeConfig(
