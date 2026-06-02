@@ -2276,6 +2276,23 @@ expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; 
 
 </details>
 
+#### iterates bounded http response bodies
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); typeof saved.streamAsyncIterator + ':' + typeof saved[Symbol.asyncIterator]")).to_equal("function:function")
+expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); var it = saved.streamAsyncIterator(); it.next().value + ':' + saved.readable + ':' + saved.readableLength")).to_equal("bounded-response:false:0")
+expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); var it = saved.streamAsyncIterator(); it.next(); it.next().done")).to_equal("true")
+expect(_eval_str_with_network("http://api.example.com:8080", "var ended = 0; var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.on('end', () => { ended = ended + 1; }); }); req.end(); var it = saved[Symbol.asyncIterator](); it.next(); it.next(); ended + ':' + saved.endDelivered + ':' + saved.readableEnded")).to_equal("1:true:true")
+```
+
+</details>
+
 #### reports bounded http response headers
 
 <details>
@@ -3973,8 +3990,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 256 |
-| Active scenarios | 256 |
+| Total scenarios | 257 |
+| Active scenarios | 257 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

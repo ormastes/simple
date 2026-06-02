@@ -10,7 +10,7 @@ use std.js.engine.runtime.{NATIVE_DATA_VIEW_GET_INT8, NATIVE_DATA_VIEW_SET_INT8,
 use std.js.engine.runtime.{NATIVE_NODE_STREAM_READABLE_DESTROY, NATIVE_NODE_STREAM_READABLE_UNPIPE}
 use std.js.engine.runtime.{NATIVE_NODE_HTTP_REQUEST_DESTROY}
 use std.js.engine.runtime.{NATIVE_NODE_HTTP_GET, NATIVE_NODE_HTTPS_GET}
-use std.js.engine.runtime.{NATIVE_NODE_HTTP_RESPONSE_PAUSE, NATIVE_NODE_HTTP_RESPONSE_RESUME, NATIVE_NODE_HTTP_RESPONSE_IS_PAUSED, NATIVE_NODE_HTTP_RESPONSE_DESTROY, NATIVE_NODE_HTTP_RESPONSE_READ, NATIVE_NODE_HTTP_RESPONSE_SET_ENCODING, NATIVE_NODE_HTTP_RESPONSE_PIPE, NATIVE_NODE_HTTP_RESPONSE_UNPIPE}
+use std.js.engine.runtime.{NATIVE_NODE_HTTP_RESPONSE_PAUSE, NATIVE_NODE_HTTP_RESPONSE_RESUME, NATIVE_NODE_HTTP_RESPONSE_IS_PAUSED, NATIVE_NODE_HTTP_RESPONSE_DESTROY, NATIVE_NODE_HTTP_RESPONSE_READ, NATIVE_NODE_HTTP_RESPONSE_SET_ENCODING, NATIVE_NODE_HTTP_RESPONSE_PIPE, NATIVE_NODE_HTTP_RESPONSE_UNPIPE, NATIVE_NODE_HTTP_RESPONSE_ITERATOR_NEXT}
 use std.js.engine.runtime.{NATIVE_UINT8_ARRAY_FILL, NATIVE_UINT8_ARRAY_INCLUDES, NATIVE_UINT8_ARRAY_INDEX_OF, NATIVE_UINT8_ARRAY_JOIN, NATIVE_UINT8_ARRAY_REVERSE, NATIVE_UINT8_ARRAY_LAST_INDEX_OF, NATIVE_UINT8_ARRAY_TO_STRING, NATIVE_UINT8_ARRAY_AT, NATIVE_UINT8_ARRAY_COPY_WITHIN, NATIVE_UINT8_ARRAY_KEYS, NATIVE_UINT8_ARRAY_VALUES, NATIVE_UINT8_ARRAY_ENTRIES, NATIVE_UINT8_ARRAY_ITERATOR_NEXT}
 use std.js.engine.runtime.{NATIVE_NODE_CHILD_PROCESS_SPAWN, NATIVE_NODE_EVENT_EMITTER_CONSTRUCTOR, NATIVE_NODE_EVENT_EMITTER_EMIT, NATIVE_NODE_EVENT_EMITTER_LISTENER_COUNT, NATIVE_NODE_EVENT_EMITTER_ON, NATIVE_NODE_EVENT_EMITTER_ONCE, NATIVE_NODE_EVENT_EMITTER_REMOVE_ALL_LISTENERS, NATIVE_NODE_EVENT_EMITTER_REMOVE_LISTENER, NATIVE_NODE_FS_EXISTS_SYNC, NATIVE_NODE_FS_MKDIR_SYNC, NATIVE_NODE_FS_PROMISES_READ_FILE, NATIVE_NODE_FS_PROMISES_WRITE_FILE, NATIVE_NODE_FS_READ_FILE_SYNC, NATIVE_NODE_FS_READDIR_SYNC, NATIVE_NODE_FS_STAT_SYNC, NATIVE_NODE_FS_WRITE_FILE_SYNC, NATIVE_NODE_HTTP_CREATE_SERVER, NATIVE_NODE_HTTP_REQUEST, NATIVE_NODE_HTTP_SERVER_CLOSE, NATIVE_NODE_HTTP_SERVER_LISTEN, NATIVE_NODE_HTTPS_REQUEST, NATIVE_NODE_NET_CREATE_CONNECTION, NATIVE_NODE_NET_SOCKET, NATIVE_NODE_READLINE_CLOSE, NATIVE_NODE_READLINE_CREATE_INTERFACE, NATIVE_NODE_READLINE_QUESTION}
 use std.js.engine.parser.{JsParser, js_parse_program_subset}
@@ -71,6 +71,8 @@ impl JsInterpreter:
             return self._native_node_http_response_pipe(this_val, arg_vals)
         if native_id == NATIVE_NODE_HTTP_RESPONSE_UNPIPE:
             return self._native_node_http_response_unpipe(this_val)
+        if native_id == NATIVE_NODE_HTTP_RESPONSE_ITERATOR_NEXT:
+            return self._native_node_http_response_iterator_next(this_val)
         if native_id == NATIVE_NODE_HTTP_REQUEST_SET_HEADER:
             return self._native_node_http_request_set_header(this_val, arg_vals)
         if native_id == NATIVE_NODE_HTTP_REQUEST_GET_HEADER:
@@ -1582,6 +1584,8 @@ impl JsInterpreter:
             self._define_method_on(response_id, "setEncoding", NATIVE_NODE_HTTP_RESPONSE_SET_ENCODING)
             self._define_method_on(response_id, "pipe", NATIVE_NODE_HTTP_RESPONSE_PIPE)
             self._define_method_on(response_id, "unpipe", NATIVE_NODE_HTTP_RESPONSE_UNPIPE)
+            self._define_method_on(response_id, "streamAsyncIterator", NATIVE_NODE_STREAM_READABLE_ASYNC_ITERATOR)
+            self._define_method_on(response_id, "Symbol.asyncIterator", NATIVE_NODE_STREAM_READABLE_ASYNC_ITERATOR)
             if callback_id >= 0:
                 val ignored_callback_result = self._invoke_promise_callback(callback_id, [JsValue.Object(id: response_id)])
             if response_count > 0:
@@ -2584,6 +2588,15 @@ impl JsInterpreter:
         else:
             self.set_object_property(iterator_id, "status", JsValue.String(v: "ok"))
             self.set_object_property(iterator_id, "__simple_stream_source_id", JsValue.Number(v: readable_id.to_f64()))
+            if not to_boolean(self.get_object_property(readable_id, "__simple_stream_readable")):
+                val response_body = self.get_object_property(readable_id, "body")
+                val response_available = not to_boolean(self.get_object_property(readable_id, "responseRead")) and not to_boolean(self.get_object_property(readable_id, "destroyed"))
+                if response_available:
+                    self.set_object_property(iterator_id, "iteratorBody", response_body)
+                else:
+                    self.set_object_property(iterator_id, "iteratorBody", JsValue.Null)
+                self._define_method_on(iterator_id, "next", NATIVE_NODE_HTTP_RESPONSE_ITERATOR_NEXT)
+                return JsValue.Object(id: iterator_id)
         self._define_method_on(iterator_id, "next", NATIVE_NODE_STREAM_ITERATOR_NEXT)
         JsValue.Object(id: iterator_id)
 
@@ -2612,6 +2625,44 @@ impl JsInterpreter:
             _:
                 self.set_object_property(result_id, "done", JsValue.Boolean(v: false))
                 self.set_object_property(result_id, "value", chunk)
+        JsValue.Object(id: result_id)
+
+    me _native_node_http_response_iterator_next(this_val: JsValue) -> JsValue:
+        val iterator_id = _get_obj_id(this_val)
+        val result_id = self.create_object()
+        if iterator_id < 0:
+            self.set_object_property(result_id, "done", JsValue.Boolean(v: true))
+            self.set_object_property(result_id, "value", JsValue.Null)
+            return JsValue.Object(id: result_id)
+        var response_id = -1
+        match self.get_object_property(iterator_id, "__simple_stream_source_id"):
+            JsValue.Number(v): response_id = f64_to_i64(v)
+            _:
+                pass_dn
+        if response_id < 0 or to_boolean(self.get_object_property(response_id, "destroyed")):
+            self.set_object_property(result_id, "done", JsValue.Boolean(v: true))
+            self.set_object_property(result_id, "value", JsValue.Null)
+            return JsValue.Object(id: result_id)
+        var response_length = 0
+        match self.get_object_property(response_id, "readableLength"):
+            JsValue.Number(v): response_length = f64_to_i64(v)
+            _:
+                pass_dn
+        if response_length > 0:
+            self.set_object_property(iterator_id, "iteratorBody", JsValue.Null)
+            self.set_object_property(response_id, "responseRead", JsValue.Boolean(v: true))
+            self.set_object_property(response_id, "readable", JsValue.Boolean(v: false))
+            self.set_object_property(response_id, "readableLength", JsValue.Number(v: 0.0))
+            self.set_object_property(response_id, "pendingData", JsValue.Boolean(v: false))
+            val response_body_for_iterator = self.get_object_property(response_id, "body")
+            self.set_object_property(result_id, "done", JsValue.Boolean(v: false))
+            self.set_object_property(result_id, "value", response_body_for_iterator)
+            return JsValue.Object(id: result_id)
+        if not to_boolean(self.get_object_property(response_id, "readableEnded")) or to_boolean(self.get_object_property(response_id, "pendingEnd")):
+            self.set_object_property(response_id, "pendingEnd", JsValue.Boolean(v: false))
+            self._native_node_http_response_emit(response_id, "end", [])
+        self.set_object_property(result_id, "done", JsValue.Boolean(v: true))
+        self.set_object_property(result_id, "value", JsValue.Null)
         JsValue.Object(id: result_id)
 
     me _native_node_stream_writable(arg_vals: [JsValue]) -> JsValue:
