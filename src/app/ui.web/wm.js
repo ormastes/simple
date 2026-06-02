@@ -65,6 +65,8 @@ class SimpleWindowManager {
     this._snapPreview = null;
     this._lastSnapZone = '';
     this._desktopWidgets = null;
+    this._windowOverview = null;
+    this._controlCenter = null;
 
     this._applyMotionPreference(options.motion || '');
     window.simpleWmSetMotion = (preference) => this.setMotionPreference(preference);
@@ -436,6 +438,8 @@ class SimpleWindowManager {
   _commandPaletteCommands() {
     return [
       { label: 'Open Simple IDE', shortcut: 'Enter', icon: 'I', action: () => this._sendLaunch('simple.ide') },
+      { label: 'Open control center', shortcut: 'Cmd ,', icon: 'C', action: () => this._toggleControlCenter(true) },
+      { label: 'Show window overview', shortcut: 'Cmd O', icon: 'O', action: () => this._toggleWindowOverview(true) },
       { label: 'Toggle desktop widgets', shortcut: 'Cmd W', icon: 'W', action: () => this._toggleDesktopWidgets() },
       { label: 'Set motion: standard', shortcut: 'Cmd 1', icon: 'S', action: () => this.setMotionPreference('standard') },
       { label: 'Set motion: reduced', shortcut: 'Cmd 2', icon: 'M', action: () => this.setMotionPreference('reduced') },
@@ -662,6 +666,176 @@ class SimpleWindowManager {
     if (!shelf) return false;
     shelf.classList.toggle('collapsed');
     return !shelf.classList.contains('collapsed');
+  }
+
+  _ensureWindowOverview() {
+    if (this._windowOverview && this._windowOverview.isConnected) return this._windowOverview;
+    const overview = document.createElement('aside');
+    overview.className = 'wm-window-overview';
+    overview.hidden = true;
+    overview.setAttribute('role', 'dialog');
+    overview.setAttribute('aria-label', 'Window overview');
+    overview.addEventListener('pointerdown', (event) => event.stopPropagation());
+    overview.addEventListener('mousedown', (event) => event.stopPropagation());
+    overview.addEventListener('click', (event) => {
+      const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+      const card = target?.closest('.wm-overview-card');
+      if (!card || !overview.contains(card)) return;
+      this._focusWindowById(card.dataset.windowIdHint || '');
+      this._toggleWindowOverview(false);
+    });
+    document.body.appendChild(overview);
+    this._windowOverview = overview;
+    return overview;
+  }
+
+  _toggleWindowOverview(open = null) {
+    const overview = this._ensureWindowOverview();
+    const shouldOpen = open == null ? overview.hidden : open;
+    overview.hidden = !shouldOpen;
+    if (shouldOpen) this._renderWindowOverview();
+    return shouldOpen;
+  }
+
+  _renderWindowOverview() {
+    const overview = this._ensureWindowOverview();
+    overview.innerHTML = '';
+    const title = document.createElement('div');
+    title.className = 'wm-overview-title';
+    title.textContent = 'Window overview';
+    overview.appendChild(title);
+    const grid = document.createElement('div');
+    grid.className = 'wm-overview-grid';
+    const windows = this._overviewWindows();
+    for (const win of windows) grid.appendChild(this._makeOverviewCard(win));
+    if (!windows.length) {
+      const empty = document.createElement('div');
+      empty.className = 'wm-overview-empty';
+      empty.textContent = 'No open windows';
+      grid.appendChild(empty);
+    }
+    overview.appendChild(grid);
+  }
+
+  _overviewWindows() {
+    const items = [];
+    if (this.transport === 'electron-ipc' && this._electronWindows.size) {
+      for (const [windowId, entry] of this._electronWindows.entries()) {
+        items.push({
+          id: windowId,
+          title: entry.titleText || windowId,
+          active: windowId === this._electronActiveWindowId,
+          minimized: !!entry.minimized
+        });
+      }
+      return items;
+    }
+    if (!this.desktop) return items;
+    for (const win of this.desktop.querySelectorAll('.wm-window')) {
+      const id = win.dataset.surfaceId || win.dataset.canonicalId || '';
+      if (!id) continue;
+      const title = win.querySelector('.wm-title')?.textContent || id;
+      items.push({
+        id,
+        title,
+        active: win.classList.contains('focused'),
+        minimized: win.classList.contains('minimized')
+      });
+    }
+    return items;
+  }
+
+  _makeOverviewCard(win) {
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = 'wm-overview-card' + (win.active ? ' active' : '') + (win.minimized ? ' minimized' : '');
+    card.dataset.windowIdHint = win.id;
+    card.setAttribute('aria-label', `${win.minimized ? 'Restore' : 'Focus'} ${win.title}`);
+    card.appendChild(this._makeRoundIcon('wm-overview-icon', win.title || win.id));
+    const title = document.createElement('span');
+    title.className = 'wm-overview-card-title';
+    title.textContent = win.title || win.id;
+    card.appendChild(title);
+    const meta = document.createElement('span');
+    meta.className = 'wm-overview-card-meta';
+    meta.textContent = win.minimized ? 'Minimized' : (win.active ? 'Active' : 'Open');
+    card.appendChild(meta);
+    return card;
+  }
+
+  _focusWindowById(windowId) {
+    const id = String(windowId || '');
+    if (!id) return;
+    const isElectronWindow = this.transport === 'electron-ipc' && this._electronWindows.has(id);
+    if (isElectronWindow) this._electronFocusWindow(id);
+    this._sendWindowCmd('focus', {
+      window_id_hint: id,
+      ...(isElectronWindow ? { source: HOST_NATIVE_EVENT_SOURCE } : {})
+    });
+  }
+
+  _ensureControlCenter() {
+    if (this._controlCenter && this._controlCenter.isConnected) return this._controlCenter;
+    const panel = document.createElement('aside');
+    panel.className = 'wm-control-center';
+    panel.hidden = true;
+    panel.setAttribute('role', 'dialog');
+    panel.setAttribute('aria-label', 'WM control center');
+    panel.addEventListener('pointerdown', (event) => event.stopPropagation());
+    panel.addEventListener('mousedown', (event) => event.stopPropagation());
+    document.body.appendChild(panel);
+    this._controlCenter = panel;
+    return panel;
+  }
+
+  _toggleControlCenter(open = null) {
+    const panel = this._ensureControlCenter();
+    const shouldOpen = open == null ? panel.hidden : open;
+    panel.hidden = !shouldOpen;
+    if (shouldOpen) this._renderControlCenter();
+    return shouldOpen;
+  }
+
+  _renderControlCenter() {
+    const panel = this._ensureControlCenter();
+    panel.innerHTML = '';
+    const title = document.createElement('div');
+    title.className = 'wm-control-title';
+    title.textContent = 'Control center';
+    panel.appendChild(title);
+    const motion = document.createElement('div');
+    motion.className = 'wm-control-group';
+    motion.setAttribute('aria-label', 'Motion');
+    motion.appendChild(this._makeControlCenterButton('Standard motion', this._normalizeMotionPreference(this._readMotionPreference()) === 'standard', () => this._setMotionFromControlCenter('standard')));
+    motion.appendChild(this._makeControlCenterButton('Reduced motion', this._normalizeMotionPreference(this._readMotionPreference()) === 'reduced', () => this._setMotionFromControlCenter('reduced')));
+    motion.appendChild(this._makeControlCenterButton('Motion off', this._normalizeMotionPreference(this._readMotionPreference()) === 'off', () => this._setMotionFromControlCenter('off')));
+    panel.appendChild(motion);
+    const tools = document.createElement('div');
+    tools.className = 'wm-control-group';
+    tools.setAttribute('aria-label', 'Workspace tools');
+    tools.appendChild(this._makeControlCenterButton('Desktop widgets', !!this._desktopWidgets && !this._desktopWidgets.classList.contains('collapsed'), () => this._toggleDesktopWidgets()));
+    tools.appendChild(this._makeControlCenterButton('Window overview', !!this._windowOverview && !this._windowOverview.hidden, () => this._toggleWindowOverview(true)));
+    panel.appendChild(tools);
+  }
+
+  _makeControlCenterButton(label, active, action) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'wm-control-button' + (active ? ' active' : '');
+    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+    button.textContent = label;
+    button.addEventListener('click', () => {
+      action();
+      this._renderControlCenter();
+    });
+    return button;
+  }
+
+  _setMotionFromControlCenter(preference) {
+    this.setMotionPreference(preference);
+    const shelf = this._ensureDesktopWidgets();
+    const value = shelf ? shelf.querySelector('.wm-widget-system .wm-desktop-widget-value') : null;
+    if (value) value.textContent = this._normalizeMotionPreference(preference);
   }
 
   _isImageIcon(value) {
@@ -1509,6 +1683,32 @@ class SimpleWindowManager {
         e.preventDefault();
         this._toggleCommandPalette();
         return;
+      }
+      const wantsOverview = (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'o';
+      if (wantsOverview) {
+        e.preventDefault();
+        this._toggleWindowOverview();
+        return;
+      }
+      const wantsControlCenter = (e.metaKey || e.ctrlKey) && e.key === ',';
+      if (wantsControlCenter) {
+        e.preventDefault();
+        this._toggleControlCenter();
+        return;
+      }
+      if (this._controlCenter && !this._controlCenter.hidden) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          this._toggleControlCenter(false);
+          return;
+        }
+      }
+      if (this._windowOverview && !this._windowOverview.hidden) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          this._toggleWindowOverview(false);
+          return;
+        }
       }
       if (this._commandPalette && !this._commandPalette.hidden) {
         if (e.key === 'Escape') {

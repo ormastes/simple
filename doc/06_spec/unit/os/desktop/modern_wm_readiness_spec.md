@@ -24,7 +24,7 @@ Verifies one combined readiness report for the modern Web WM, SimpleOS
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -53,6 +53,7 @@ expect(report.translucent_shell)
 expect(report.accessible_controls_ready)
 expect(report.snap_assist_ready)
 expect(report.desktop_widgets_ready)
+expect(report.window_overview_ready)
 expect(report.notes[0]).to_equal("modern WM readiness passed")
 ```
 
@@ -63,7 +64,7 @@ expect(report.notes[0]).to_equal("modern WM readiness passed")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -92,6 +93,7 @@ expect(summary).to_contain("translucent=true")
 expect(summary).to_contain("accessible_controls=true")
 expect(summary).to_contain("snap_assist=true")
 expect(summary).to_contain("desktop_widgets=true")
+expect(summary).to_contain("window_overview=true")
 ```
 
 </details>
@@ -105,4 +107,3 @@ expect(summary).to_contain("desktop_widgets=true")
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
-

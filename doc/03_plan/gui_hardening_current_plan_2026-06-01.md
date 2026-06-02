@@ -1546,3 +1546,20 @@ quality report and combined modern-readiness report now carry
 and the readiness spec passes `2/2`. This advances the Engine2D/Web WM shell
 lane without claiming production Chrome pixel parity or guest QEMU/GTK perf is
 complete.
+
+Web WM window overview continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/app/ui.web/html.spl src/app/ui.web/wm_quality_contract.spl src/os/desktop/modern_wm_readiness.spl test/unit/app/ui/web_wm_modern_shell_spec.spl test/unit/os/desktop/modern_wm_readiness_spec.spl`
+- `node --check src/app/ui.web/wm.js`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/app/ui/web_wm_modern_shell_spec.spl --mode=interpreter --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/os/desktop/modern_wm_readiness_spec.spl --mode=interpreter --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/unit/app/ui/web_wm_modern_shell_spec.spl test/unit/os/desktop/modern_wm_readiness_spec.spl --output doc/06_spec`
+
+The modern Web WM now exposes a command-palette and keyboard-accessible window
+overview. The overview renders focus/restore cards for live browser windows,
+routes selection through the existing focus command path, and carries matching
+preview, CSS, reduced/off-motion, Web quality, and modern-readiness evidence via
+`window_overview_ready`. Focused checks pass, the Web WM spec passes `5/5`, and
+the readiness spec passes `2/2`. This advances the repeated-use desktop shell
+lane without claiming production Chrome pixel parity or guest QEMU/GTK perf is
+complete.
