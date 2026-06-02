@@ -16,9 +16,9 @@
 - optimized path: static-pixel-cache
 - simple cache hits: 10
 - simple cache stores: 1
-- best simple frame us: 28
-- best baseline frame us: 437
-- baseline/simple speedup x1000: 15607
+- best simple frame us: 9
+- best baseline frame us: 462
+- baseline/simple speedup x1000: 51333
 - simple ARGB path: build/node_simple_web_engine2d_two_block_bitmap_evidence/simple-argb.json
 - baseline ARGB path: build/node_simple_web_engine2d_two_block_bitmap_evidence/node-argb.json
 
@@ -34,7 +34,7 @@
 - checksum=26305055459328
 - weighted_checksum=80814070787097600
 - total_checksum=263050554593280
-- frame_us=10
+- frame_us=11
 - backend_name=software
 - optimized_path=static-pixel-cache
 - cache_hits=10
@@ -49,7 +49,7 @@
 - checksum=26305055459328
 - weighted_checksum=80814070787097600
 - total_checksum=263050554593280
-- frame_us=28
+- frame_us=9
 - backend_name=software
 - optimized_path=static-pixel-cache
 - cache_hits=10
@@ -67,5 +67,5 @@
 - checksum=26305055459328
 - weighted_checksum=80814070787097600
 - total_checksum=263050554593280
-- frame_us=437
+- frame_us=462
 - blur_or_tolerance_used=false
