@@ -104,23 +104,38 @@ fi
 
 status=pass
 reason=pass
-if [ "$electron_code" -ne 0 ] && [ ! -f "$ELECTRON_PROOF" ]; then
-    status=fail
-    reason=electron-live-capture-failed
-elif [ "$electron_code" -ne 0 ]; then
-    reason=pass-with-electron-teardown-warning
-elif [ "$blur_used" != "false" ]; then
-    status=fail
-    reason=blur-or-tolerance-not-allowed
-elif [ "$electron_checksum" != "$expected_checksum" ] || [ "$electron_expected" != "$expected_checksum" ]; then
-    status=fail
-    reason=checksum-mismatch
-elif [ "$mismatch_count" != "0" ]; then
-    status=fail
-    reason=pixel-mismatch
-elif [ -z "$electron_frame_us" ] || [ "$electron_frame_us" -le 0 ]; then
-    status=fail
-    reason=missing-electron-timing
+# A non-zero Electron exit with NO proof file means the capture never produced a
+# frame -> hard fail. A non-zero exit WITH a proof file is a teardown-only
+# warning (Electron sometimes exits non-zero while shutting down even after a
+# successful capture). Previously that branch returned early and SKIPPED the
+# pixel/checksum validation, letting a real mismatch ride through as a false
+# pass. Now the proof is always validated; the teardown-warning label is only
+# applied when every real check has already passed.
+teardown_warn=0
+if [ "$electron_code" -ne 0 ]; then
+    if [ ! -f "$ELECTRON_PROOF" ]; then
+        status=fail
+        reason=electron-live-capture-failed
+    else
+        teardown_warn=1
+    fi
+fi
+if [ "$status" = pass ]; then
+    if [ "$blur_used" != "false" ]; then
+        status=fail
+        reason=blur-or-tolerance-not-allowed
+    elif [ "$electron_checksum" != "$expected_checksum" ] || [ "$electron_expected" != "$expected_checksum" ]; then
+        status=fail
+        reason=checksum-mismatch
+    elif [ "$mismatch_count" != "0" ]; then
+        status=fail
+        reason=pixel-mismatch
+    elif [ -z "$electron_frame_us" ] || [ "$electron_frame_us" -le 0 ]; then
+        status=fail
+        reason=missing-electron-timing
+    elif [ "$teardown_warn" -eq 1 ]; then
+        reason=pass-with-electron-teardown-warning
+    fi
 fi
 
 {
