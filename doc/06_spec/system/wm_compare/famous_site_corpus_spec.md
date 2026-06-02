@@ -483,12 +483,34 @@ expect(result.0).to_contain("per-line text ink entries do not match Simple layou
 
 </details>
 
+#### fails the production probe gate when per-line ink no longer covers divergence
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val tool_path = "tools/electron-shell/verify_famous_site_production_probe.js"
+expect(rt_file_exists(tool_path)).to_equal(true)
+expect(rt_file_exists(famous_site_sample_production_report_sdn_path("site_0_google"))).to_equal(true)
+val result = rt_process_run_timeout("node", [tool_path, "--sample=site_0_google", "--drop-text-line-ink-difference-for-test"], 10000)
+expect(result.2).to_equal(1)
+expect(result.0).to_contain("\"status\": \"FAIL\"")
+expect(result.0).to_contain("\"differentPixelsTotal\": 1908")
+expect(result.0).to_contain("\"unexplainedDifferentPixels\": 809")
+expect(result.0).to_contain("per-line text ink diagnostics do not account for production divergence")
+```
+
+</details>
+
 #### passes the production probe gate for the focused production artifact
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 34 lines folded for reproduction.
+Runnable source: 36 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -517,6 +539,8 @@ expect(result.0).to_contain("\"layoutTextMatch\": true")
 expect(result.0).to_contain("\"hasTextLineInkDelta\": true")
 expect(result.0).to_contain("\"textLineInkDeltaCount\": 4")
 expect(result.0).to_contain("\"detailCount\": 4")
+expect(result.0).to_contain("\"differentPixelsTotal\": 2716")
+expect(result.0).to_contain("\"unexplainedDifferentPixels\": 1")
 expect(result.0).to_contain("\"textMatchesLayout\": true")
 expect(result.0).to_contain("\"widthMatchesLayout\": true")
 expect(result.0).to_contain("\"regionNamesSequential\": true")
@@ -1035,8 +1059,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 39 |
-| Active scenarios | 39 |
+| Total scenarios | 40 |
+| Active scenarios | 40 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

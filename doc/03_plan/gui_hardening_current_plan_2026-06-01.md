@@ -630,6 +630,23 @@ with `textMatchesLayout=false`. The famous-site corpus spec passes `39/39`.
 This tightens the per-line glyph/compositing evidence gate without claiming the
 remaining production pixel divergence is fixed.
 
+Production Chrome per-line divergence-accounting continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/app/wm_compare/site_corpus_compat.spl test/system/wm_compare/famous_site_corpus_spec.spl`
+- `node tools/electron-shell/verify_famous_site_production_probe.js --sample=site_0_google`
+- `node tools/electron-shell/verify_famous_site_production_probe.js --sample=site_0_google --drop-text-line-ink-difference-for-test`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/system/wm_compare/famous_site_corpus_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+The production probe verifier now sums per-line `text_line_ink_delta`
+`different_pixels` and requires those rows to account for the focused
+production divergence with at most the current one-pixel residual. The normal
+`site_0_google` verifier reports `differentPixelsTotal=2716` and
+`unexplainedDifferentPixels=1`; the test-only dropped-difference report fails
+closed with `unexplainedDifferentPixels=809`. The famous-site corpus spec
+passes `40/40`. This further tightens the line-by-line glyph/compositing gate
+while the production renderer remains pixel-divergent.
+
 Comparison failure and no-tolerance policy continuation:
 
 - `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/app/wm_compare/comparison_failure_report.spl test/system/wm_compare/comparison_failure_report_spec.spl`

@@ -75,3 +75,4 @@ dev-done
 - impl: Fixed WM preview visual layering by keeping the animated desktop background at z-index 0 and explicit windows at z-index 20; added `visual_layering_ready` to the WM quality contract.
 - verify: Focused WM spec passed 5/5 after the layering regression assertion; Simple checks passed for `html.spl`, `wm_quality_contract.spl`, and `web_wm_modern_shell_spec.spl`; `node --check` passed for `wm.js` and `retained_renderer.js`.
 - evidence: Captured `build/simple_wm_modern_preview.png` from `build/simple_wm_modern_preview.html` at 1440x900 with a 1000ms animation settle wait; visual evidence report written to `doc/09_report/simple_wm_modern_preview_2026-06-02.md`.
+- docs: Regenerated `doc/06_spec/unit/app/ui/web_wm_modern_shell_spec.md`; docgen completed with 7 existing short-doc/link warnings and `find doc/06_spec -name '*_spec.spl' | wc -l` printed `0`.
