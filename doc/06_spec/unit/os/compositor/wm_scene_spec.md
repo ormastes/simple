@@ -324,7 +324,7 @@ expect(has_width)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -336,6 +336,12 @@ expect(html).to_contain("data-window-radius-px='18'")
 expect(html).to_contain("data-widget-radius-px='14'")
 expect(html).to_contain("data-taskbar-radius-px='999'")
 expect(html).to_contain("data-blur-px='24'")
+expect(html).to_contain("data-scrollbar-width-px='10'")
+expect(html).to_contain("data-scrollbar-thumb-radius-px='999'")
+expect(html).to_contain("data-scrollbar-thumb-border-px='3'")
+expect(html).to_contain("scrollbar-width:thin")
+expect(html).to_contain("::-webkit-scrollbar-thumb")
+expect(html).to_contain("background-clip:padding-box")
 expect(html).to_contain("data-desktop-layer-z='0'")
 expect(html).to_contain("data-window-layer-z='20'")
 expect(html).to_contain("data-overlay-layer-z='11000'")
@@ -359,7 +365,7 @@ expect(html).to_contain("backdrop-filter:blur(24px)")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -375,6 +381,9 @@ expect(config.widget_radius_px).to_equal(14)
 expect(config.taskbar_radius_px).to_equal(999)
 expect(config.control_radius_px).to_equal(12)
 expect(config.icon_radius_px).to_equal(999)
+expect(config.scrollbar_width_px).to_equal(10)
+expect(config.scrollbar_thumb_radius_px).to_equal(999)
+expect(config.scrollbar_thumb_border_px).to_equal(3)
 expect(config.blur_px).to_equal(24)
 expect(config.desktop_layer_z).to_equal(0)
 expect(config.snap_layer_z).to_equal(15)
@@ -603,7 +612,7 @@ expect(bounded_affordances).to_equal(4)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -617,6 +626,7 @@ val report = wm_scene_visual_quality_report(scene)
 
 expect(report.passed)
 expect(report.theme_configured)
+expect(report.round_scrollbars)
 expect(report.color_checked)
 expect(report.contrast_ratio_x100).to_be_greater_than(449)
 expect(report.bounded_layout)
