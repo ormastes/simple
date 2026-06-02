@@ -5109,6 +5109,71 @@ match memory:
 
 </details>
 
+#### fills and searches WebAssembly.Memory through Uint8Array prototype helpers
+
+1. var interp =  new interpreter
+
+2. interp set object property
+
+3. JsValue Object
+
+4. JsValue Object
+
+5. JsValue Object
+   - Expected: _display_js(interp._native_uint8_array_fill(window, [JsValue.Number(v: 260.0), JsValue.Number(v: 1.0), JsValue.Number(v: 4.0)])) equals `[object Object]`
+   - Expected: _display_js(interp.get_object_property(buffer_id, "0")) equals `0`
+   - Expected: _display_js(interp.get_object_property(buffer_id, "1")) equals `4`
+   - Expected: _display_js(interp.get_object_property(buffer_id, "3")) equals `4`
+   - Expected: _display_js(interp.get_object_property(buffer_id, "4")) equals `0`
+   - Expected: _display_js(interp._native_uint8_array_index_of(window, [JsValue.Number(v: 4.0)])) equals `1`
+   - Expected: _display_js(interp._native_uint8_array_index_of(window, [JsValue.Number(v: 4.0), JsValue.Number(v: 2.0)])) equals `2`
+   - Expected: _display_js(interp._native_uint8_array_index_of(window, [JsValue.Number(v: 4.0), JsValue.Number(v: -2.0)])) equals `-1`
+   - Expected: _display_js(interp._native_uint8_array_includes(window, [JsValue.Number(v: 4.0)])) equals `true`
+   - Expected: _display_js(interp._native_uint8_array_includes(window, [JsValue.Number(v: 5.0)])) equals `false`
+   - Expected: "missing view" equals ``
+   - Expected: "missing buffer" equals ``
+   - Expected: "missing memory" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 28 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var interp = _new_interpreter()
+val options_id = interp.create_object()
+interp.set_object_property(options_id, "initial", JsValue.Number(v: 1.0))
+val memory = interp._native_webassembly_memory([JsValue.Object(id: options_id)])
+match memory:
+    JsValue.Object(memory_id):
+        match interp.get_object_property(memory_id, "buffer"):
+            JsValue.Object(buffer_id):
+                val view = interp._native_uint8_array([JsValue.Object(id: buffer_id)])
+                match view:
+                    JsValue.Object(view_id):
+                        val window = interp._native_uint8_array_subarray(view, [JsValue.Number(v: 0.0), JsValue.Number(v: 8.0)])
+                        expect(_display_js(interp._native_uint8_array_fill(window, [JsValue.Number(v: 260.0), JsValue.Number(v: 1.0), JsValue.Number(v: 4.0)]))).to_equal("[object Object]")
+                        expect(_display_js(interp.get_object_property(buffer_id, "0"))).to_equal("0")
+                        expect(_display_js(interp.get_object_property(buffer_id, "1"))).to_equal("4")
+                        expect(_display_js(interp.get_object_property(buffer_id, "3"))).to_equal("4")
+                        expect(_display_js(interp.get_object_property(buffer_id, "4"))).to_equal("0")
+                        expect(_display_js(interp._native_uint8_array_index_of(window, [JsValue.Number(v: 4.0)]))).to_equal("1")
+                        expect(_display_js(interp._native_uint8_array_index_of(window, [JsValue.Number(v: 4.0), JsValue.Number(v: 2.0)]))).to_equal("2")
+                        expect(_display_js(interp._native_uint8_array_index_of(window, [JsValue.Number(v: 4.0), JsValue.Number(v: -2.0)]))).to_equal("-1")
+                        expect(_display_js(interp._native_uint8_array_includes(window, [JsValue.Number(v: 4.0)]))).to_equal("true")
+                        expect(_display_js(interp._native_uint8_array_includes(window, [JsValue.Number(v: 5.0)]))).to_equal("false")
+                    _:
+                        expect("missing view").to_equal("")
+            _:
+                expect("missing buffer").to_equal("")
+    _:
+        expect("missing memory").to_equal("")
+```
+
+</details>
+
 #### reads and writes WebAssembly.Memory bytes through DataView little-endian methods
 
 1. var interp =  new interpreter
@@ -5185,8 +5250,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 106 |
-| Active scenarios | 106 |
+| Total scenarios | 107 |
+| Active scenarios | 107 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

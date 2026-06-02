@@ -495,6 +495,39 @@ match result:
 
 </details>
 
+#### fills Uint8Array values in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `0:4:4:0`
+
+3. Err
+   - Expected: "unexpected uint8 js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var b = new Uint8Array(5); b.fill(260, 1, 4); b[0] + ':' + b[1] + ':' + b[3] + ':' + b[4]")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("0:4:4:0")
+    Err(err):
+        expect("unexpected uint8 js error: {err}").to_equal("")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -514,8 +547,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
