@@ -25,12 +25,15 @@ Verifies the first modern Simple Web WM slice at the contract level.
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val html = generate_wm_html_page("glass_dark", "Simple WM", 8080)
 expect(html).to_contain(".wm-window.opening")
+expect(html).to_contain("#wm-desktop::before")
+expect(html).to_contain("z-index: 0")
+expect(html).to_contain(".wm-window { position: absolute; z-index: 20")
 expect(html).to_contain("@keyframes wm-window-open")
 expect(html).to_contain("@keyframes wm-window-close")
 expect(html).to_contain("@keyframes wm-window-minimize")
@@ -166,7 +169,7 @@ expect(report).to_contain("normalized_icons=true")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -196,9 +199,11 @@ expect(report.preview_fixture_ready)
 expect(report.command_context_ready)
 expect(report.command_palette_ready)
 expect(report.title_input_ready)
+expect(report.visual_layering_ready)
 expect(wm_theme_quality_summary("glass_dark")).to_contain("status=pass")
 expect(wm_theme_quality_summary("glass_dark")).to_contain("contrast_ratio_x100=")
 expect(wm_theme_quality_summary("glass_dark")).to_contain("titlebar_height_px=38")
+expect(wm_theme_quality_summary("glass_dark")).to_contain("visual_layering_ready=true")
 ```
 
 </details>
