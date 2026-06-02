@@ -202,7 +202,7 @@ fn collect_spipe_quality_diagnostics(path: &Path, source: &str) -> Vec<Diagnosti
                     .with_code("SPIPE007")
                     .with_file(path.display().to_string())
                     .with_label(line_span(source, idx), "")
-                    .with_help("Use expect_not(condition) instead of expect(condition).to_equal(false)"),
+                    .with_help("Use expect_not(condition) instead of expect(condition).to_equal(false) or .to_be(false)"),
             );
         } else if is_true_boolean_wrapper_assertion(&normalized) && !allow_boolean_wrapper {
             diagnostics.push(
@@ -210,7 +210,7 @@ fn collect_spipe_quality_diagnostics(path: &Path, source: &str) -> Vec<Diagnosti
                     .with_code("SPIPE006")
                     .with_file(path.display().to_string())
                     .with_label(line_span(source, idx), "")
-                    .with_help("Use expect(condition) instead of expect(condition).to_equal(true)"),
+                    .with_help("Use expect(condition) instead of expect(condition).to_equal(true) or .to_be(true)"),
             );
         }
     }

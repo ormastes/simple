@@ -24,7 +24,7 @@ Verifies one combined readiness report for the modern Web WM, SimpleOS
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 106 lines folded for reproduction.
+Runnable source: 110 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -131,6 +131,10 @@ expect(report.translucent_shell)
 expect(report.accessible_controls_ready)
 expect(report.snap_assist_ready)
 expect(report.desktop_widgets_ready)
+expect(report.wallpaper_picker_ready)
+expect(report.app_launcher_ready)
+expect(report.shortcut_overlay_ready)
+expect(report.widget_gallery_ready)
 expect(report.window_overview_ready)
 expect(report.control_center_ready)
 expect(report.notes[0]).to_equal("modern WM readiness passed")
@@ -143,7 +147,7 @@ expect(report.notes[0]).to_equal("modern WM readiness passed")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 105 lines folded for reproduction.
+Runnable source: 109 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -250,6 +254,10 @@ expect(summary).to_contain("translucent=true")
 expect(summary).to_contain("accessible_controls=true")
 expect(summary).to_contain("snap_assist=true")
 expect(summary).to_contain("desktop_widgets=true")
+expect(summary).to_contain("wallpaper_picker=true")
+expect(summary).to_contain("app_launcher=true")
+expect(summary).to_contain("shortcut_overlay=true")
+expect(summary).to_contain("widget_gallery=true")
 expect(summary).to_contain("window_overview=true")
 expect(summary).to_contain("control_center=true")
 ```

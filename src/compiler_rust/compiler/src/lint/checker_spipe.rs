@@ -818,7 +818,7 @@ impl LintChecker {
                 self.emit_with_fix(
                     LintName::SPipeFalseBooleanWrapperAssertions,
                     Span::new(0, 0, line_num, 1),
-                    "false boolean matcher wrapper in spec/example; use expect_not(condition) instead of .to_equal(false)".to_string(),
+                    "false boolean matcher wrapper in spec/example; use expect_not(condition) instead of .to_equal(false) or .to_be(false)".to_string(),
                     Some("use expect_not(condition) instead of .to_equal(false) or .to_be(false)".to_string()),
                     easy_fix,
                 );
@@ -827,7 +827,7 @@ impl LintChecker {
                 self.emit_with_fix(
                     LintName::SPipeBooleanWrapperAssertions,
                     Span::new(0, 0, line_num, 1),
-                    "verbose true boolean assertion in spec/example; use expect(condition) instead of .to_equal(true)"
+                    "verbose true boolean assertion in spec/example; use expect(condition) instead of .to_equal(true) or .to_be(true)"
                         .to_string(),
                     Some("use expect(condition) for true checks".to_string()),
                     easy_fix,

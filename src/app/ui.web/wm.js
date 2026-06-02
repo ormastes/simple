@@ -25,6 +25,8 @@ const NATIVE_SUPPRESSION_TTL_MS = 500;
 const NATIVE_BURST_DEBOUNCE_MS = 80;
 const WM_EXIT_ANIMATION_MS = 210;
 const WM_MOTION_STORAGE_KEY = 'simple.wm.motion';
+const WM_TRANSPARENCY_STORAGE_KEY = 'simple.wm.transparency';
+const WM_WALLPAPER_STORAGE_KEY = 'simple.wm.wallpaper';
 
 class SimpleWindowManager {
   constructor(options = {}) {
@@ -66,10 +68,28 @@ class SimpleWindowManager {
     this._lastSnapZone = '';
     this._desktopWidgets = null;
     this._windowOverview = null;
+    this._stageRail = null;
     this._controlCenter = null;
+    this._widgetGallery = null;
+    this._taskbarPreview = null;
+    this._windowContextMenu = null;
+    this._titleCommandSuggestions = null;
+    this._titleCommandSuggestionItems = [];
+    this._titleCommandSuggestionIndex = 0;
+    this._appLauncher = null;
+    this._appLauncherInput = null;
+    this._appLauncherGrid = null;
+    this._appLauncherItems = [];
+    this._appLauncherActiveIndex = 0;
+    this._launcherApps = [];
+    this._shortcutOverlay = null;
 
     this._applyMotionPreference(options.motion || '');
+    this._applyTransparencyPreference(options.transparency || '');
+    this._applyWallpaperPreference(options.wallpaper || '');
     window.simpleWmSetMotion = (preference) => this.setMotionPreference(preference);
+    window.simpleWmSetTransparency = (preference) => this.setTransparencyPreference(preference);
+    window.simpleWmSetWallpaper = (preference) => this.setWallpaperPreference(preference);
 
     // Load renderer then begin auth.
     this._init();
@@ -144,6 +164,66 @@ class SimpleWindowManager {
     const value = String(preference || '').trim().toLowerCase();
     if (value === 'off' || value === 'reduced' || value === 'standard') return value;
     return 'standard';
+  }
+
+  setTransparencyPreference(preference) {
+    const transparency = this._normalizeTransparencyPreference(preference);
+    try {
+      window.localStorage.setItem(WM_TRANSPARENCY_STORAGE_KEY, transparency);
+    } catch (_) {
+      // Storage can be unavailable in restricted webviews; the DOM attribute is enough.
+    }
+    return this._applyTransparencyPreference(transparency);
+  }
+
+  _applyTransparencyPreference(preference) {
+    const transparency = this._normalizeTransparencyPreference(preference || this._readTransparencyPreference());
+    document.documentElement.dataset.wmTransparency = transparency;
+    return transparency;
+  }
+
+  _readTransparencyPreference() {
+    try {
+      return window.localStorage.getItem(WM_TRANSPARENCY_STORAGE_KEY) || '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  _normalizeTransparencyPreference(preference) {
+    const value = String(preference || '').trim().toLowerCase();
+    if (value === 'off' || value === 'reduced' || value === 'standard') return value;
+    return 'standard';
+  }
+
+  setWallpaperPreference(preference) {
+    const wallpaper = this._normalizeWallpaperPreference(preference);
+    try {
+      window.localStorage.setItem(WM_WALLPAPER_STORAGE_KEY, wallpaper);
+    } catch (_) {
+      // Storage can be unavailable in restricted webviews; the DOM attribute is enough.
+    }
+    return this._applyWallpaperPreference(wallpaper);
+  }
+
+  _applyWallpaperPreference(preference) {
+    const wallpaper = this._normalizeWallpaperPreference(preference || this._readWallpaperPreference());
+    document.documentElement.dataset.wmWallpaper = wallpaper;
+    return wallpaper;
+  }
+
+  _readWallpaperPreference() {
+    try {
+      return window.localStorage.getItem(WM_WALLPAPER_STORAGE_KEY) || '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  _normalizeWallpaperPreference(preference) {
+    const value = String(preference || '').trim().toLowerCase();
+    if (value === 'aurora' || value === 'mesh' || value === 'solid') return value;
+    return 'aurora';
   }
 
   async _authenticate() {
@@ -438,12 +518,22 @@ class SimpleWindowManager {
   _commandPaletteCommands() {
     return [
       { label: 'Open Simple IDE', shortcut: 'Enter', icon: 'I', action: () => this._sendLaunch('simple.ide') },
+      { label: 'Open app launcher', shortcut: 'Cmd Space', icon: 'A', action: () => this._toggleAppLauncher(true) },
+      { label: 'Show keyboard shortcuts', shortcut: 'Cmd /', icon: '?', action: () => this._toggleShortcutOverlay(true) },
       { label: 'Open control center', shortcut: 'Cmd ,', icon: 'C', action: () => this._toggleControlCenter(true) },
       { label: 'Show window overview', shortcut: 'Cmd O', icon: 'O', action: () => this._toggleWindowOverview(true) },
+      { label: 'Show stage rail', shortcut: 'Cmd Shift O', icon: 'R', action: () => this._toggleStageRail(true) },
       { label: 'Toggle desktop widgets', shortcut: 'Cmd W', icon: 'W', action: () => this._toggleDesktopWidgets() },
       { label: 'Set motion: standard', shortcut: 'Cmd 1', icon: 'S', action: () => this.setMotionPreference('standard') },
       { label: 'Set motion: reduced', shortcut: 'Cmd 2', icon: 'M', action: () => this.setMotionPreference('reduced') },
-      { label: 'Set motion: off', shortcut: 'Cmd 3', icon: 'O', action: () => this.setMotionPreference('off') }
+      { label: 'Set motion: off', shortcut: 'Cmd 3', icon: 'O', action: () => this.setMotionPreference('off') },
+      { label: 'Set transparency: standard', shortcut: 'Cmd 4', icon: 'G', action: () => this.setTransparencyPreference('standard') },
+      { label: 'Set transparency: reduced', shortcut: 'Cmd 5', icon: 'R', action: () => this.setTransparencyPreference('reduced') },
+      { label: 'Set transparency: off', shortcut: 'Cmd 6', icon: 'S', action: () => this.setTransparencyPreference('off') },
+      { label: 'Set wallpaper: aurora', shortcut: 'Cmd 7', icon: 'A', action: () => this.setWallpaperPreference('aurora') },
+      { label: 'Set wallpaper: mesh', shortcut: 'Cmd 8', icon: 'M', action: () => this.setWallpaperPreference('mesh') },
+      { label: 'Set wallpaper: solid', shortcut: 'Cmd 9', icon: 'D', action: () => this.setWallpaperPreference('solid') },
+      { label: 'Open widget gallery', shortcut: 'Cmd G', icon: 'W', action: () => this._toggleWidgetGallery(true) }
     ];
   }
 
@@ -503,6 +593,63 @@ class SimpleWindowManager {
     this._toggleCommandPalette(false);
   }
 
+  _ensureShortcutOverlay() {
+    if (this._shortcutOverlay) return this._shortcutOverlay;
+    const overlay = document.createElement('aside');
+    overlay.className = 'wm-shortcut-overlay';
+    overlay.hidden = true;
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-label', 'Keyboard shortcuts');
+
+    const title = document.createElement('div');
+    title.className = 'wm-shortcut-title';
+    title.textContent = 'Keyboard shortcuts';
+    overlay.appendChild(title);
+
+    const grid = document.createElement('div');
+    grid.className = 'wm-shortcut-grid';
+    grid.setAttribute('role', 'list');
+    overlay.appendChild(grid);
+
+    const shortcuts = [
+      ['Command palette', 'Cmd K'],
+      ['App launcher', 'Cmd Space'],
+      ['Keyboard shortcuts', 'Cmd /'],
+      ['Window overview', 'Cmd O'],
+      ['Control center', 'Cmd ,'],
+      ['Title command', 'Cmd L'],
+      ['Widget gallery', 'Cmd G'],
+      ['Close panels', 'Esc']
+    ];
+    shortcuts.forEach(([label, key]) => {
+      const row = document.createElement('div');
+      row.className = 'wm-shortcut-row';
+      row.setAttribute('role', 'listitem');
+      const name = document.createElement('span');
+      name.className = 'wm-shortcut-label';
+      name.textContent = label;
+      const badge = document.createElement('kbd');
+      badge.className = 'wm-shortcut-key';
+      badge.textContent = key;
+      row.appendChild(name);
+      row.appendChild(badge);
+      grid.appendChild(row);
+    });
+
+    document.body.appendChild(overlay);
+    overlay.addEventListener('click', (event) => {
+      if (event.target === overlay) this._toggleShortcutOverlay(false);
+    });
+    this._shortcutOverlay = overlay;
+    return overlay;
+  }
+
+  _toggleShortcutOverlay(open = null) {
+    const overlay = this._ensureShortcutOverlay();
+    const shouldOpen = open == null ? overlay.hidden : open;
+    overlay.hidden = !shouldOpen;
+  }
+
   // Install one persistent click listener on the taskbar that dispatches
   // by data-action. Idempotent — rendering can clear innerHTML without
   // losing the handler. Call once after this.taskbar is bound.
@@ -544,6 +691,11 @@ class SimpleWindowManager {
     this.taskbar.innerHTML = '';
     this.taskbar.setAttribute('role', 'navigation');
     this.taskbar.setAttribute('aria-label', 'Window taskbar');
+    this._launcherApps = (model.pinned || []).map((app) => ({
+      app_id: app.app_id || app.id || app.display_name || '',
+      display_name: app.display_name || app.name || app.app_id || 'App',
+      icon: app.icon || app.display_name || app.app_id || 'A'
+    })).filter((app) => !!app.app_id);
 
     const pinned = document.createElement('div');
     pinned.className = 'wm-taskbar-section pinned';
@@ -774,6 +926,64 @@ class SimpleWindowManager {
     });
   }
 
+  _ensureStageRail() {
+    if (this._stageRail && this._stageRail.isConnected) return this._stageRail;
+    const rail = document.createElement('aside');
+    rail.className = 'wm-stage-rail';
+    rail.hidden = true;
+    rail.setAttribute('aria-label', 'Window stage rail');
+    rail.addEventListener('pointerdown', (event) => event.stopPropagation());
+    rail.addEventListener('mousedown', (event) => event.stopPropagation());
+    rail.addEventListener('click', (event) => {
+      const item = event.target.closest('.wm-stage-rail-item');
+      if (!item || !rail.contains(item)) return;
+      const windowId = item.dataset.windowIdHint || '';
+      if (windowId) this._focusWindowById(windowId);
+    });
+    document.body.appendChild(rail);
+    this._stageRail = rail;
+    return rail;
+  }
+
+  _toggleStageRail(open = null) {
+    const rail = this._ensureStageRail();
+    const shouldOpen = open == null ? rail.hidden : open;
+    rail.hidden = !shouldOpen;
+    if (shouldOpen) this._renderStageRail();
+    return shouldOpen;
+  }
+
+  _renderStageRail() {
+    const rail = this._ensureStageRail();
+    rail.innerHTML = '';
+    const windows = this._overviewWindows();
+    const title = document.createElement('div');
+    title.className = 'wm-stage-rail-title';
+    title.textContent = 'Stage';
+    rail.appendChild(title);
+    for (const win of windows.slice(0, 5)) rail.appendChild(this._makeStageRailItem(win));
+    if (!windows.length) {
+      const empty = document.createElement('div');
+      empty.className = 'wm-stage-rail-empty';
+      empty.textContent = 'No windows';
+      rail.appendChild(empty);
+    }
+  }
+
+  _makeStageRailItem(win) {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'wm-stage-rail-item' + (win.active ? ' active' : '') + (win.minimized ? ' minimized' : '');
+    item.dataset.windowIdHint = win.id;
+    item.setAttribute('aria-label', `${win.minimized ? 'Restore' : 'Focus'} ${win.title}`);
+    item.appendChild(this._makeRoundIcon('wm-stage-rail-icon', win.title || win.id));
+    const label = document.createElement('span');
+    label.className = 'wm-stage-rail-label';
+    label.textContent = win.title || win.id;
+    item.appendChild(label);
+    return item;
+  }
+
   _ensureControlCenter() {
     if (this._controlCenter && this._controlCenter.isConnected) return this._controlCenter;
     const panel = document.createElement('aside');
@@ -836,6 +1046,224 @@ class SimpleWindowManager {
     const shelf = this._ensureDesktopWidgets();
     const value = shelf ? shelf.querySelector('.wm-widget-system .wm-desktop-widget-value') : null;
     if (value) value.textContent = this._normalizeMotionPreference(preference);
+  }
+
+  _setTransparencyFromControlCenter(preference) {
+    this.setTransparencyPreference(preference);
+    const shelf = this._ensureDesktopWidgets();
+    const value = shelf ? shelf.querySelector('.wm-widget-system .wm-desktop-widget-meta') : null;
+    if (value) value.textContent = 'material: ' + this._normalizeTransparencyPreference(preference);
+  }
+
+  _setWallpaperFromControlCenter(preference) {
+    this.setWallpaperPreference(preference);
+    const shelf = this._ensureDesktopWidgets();
+    const value = shelf ? shelf.querySelector('.wm-widget-workspace .wm-desktop-widget-meta') : null;
+    if (value) value.textContent = 'wallpaper: ' + this._normalizeWallpaperPreference(preference);
+  }
+
+  _ensureWidgetGallery() {
+    if (this._widgetGallery && this._widgetGallery.isConnected) return this._widgetGallery;
+    const gallery = document.createElement('aside');
+    gallery.className = 'wm-widget-gallery';
+    gallery.hidden = true;
+    gallery.setAttribute('role', 'dialog');
+    gallery.setAttribute('aria-label', 'Widget gallery');
+    gallery.addEventListener('pointerdown', (event) => event.stopPropagation());
+    gallery.addEventListener('mousedown', (event) => event.stopPropagation());
+    gallery.addEventListener('click', (event) => {
+      const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+      const card = target?.closest('.wm-widget-gallery-card');
+      if (!card || !gallery.contains(card)) return;
+      this._addWidgetFromGallery(card.dataset.widgetKind || '');
+      this._toggleWidgetGallery(false);
+    });
+    document.body.appendChild(gallery);
+    this._widgetGallery = gallery;
+    return gallery;
+  }
+
+  _toggleWidgetGallery(open = null) {
+    const gallery = this._ensureWidgetGallery();
+    const shouldOpen = open == null ? gallery.hidden : open;
+    gallery.hidden = !shouldOpen;
+    if (shouldOpen) this._renderWidgetGallery();
+    return shouldOpen;
+  }
+
+  _renderWidgetGallery() {
+    const gallery = this._ensureWidgetGallery();
+    gallery.innerHTML = '';
+    const title = document.createElement('div');
+    title.className = 'wm-widget-gallery-title';
+    title.textContent = 'Widget gallery';
+    gallery.appendChild(title);
+    const grid = document.createElement('div');
+    grid.className = 'wm-widget-gallery-grid';
+    grid.appendChild(this._makeWidgetGalleryCard('clock', 'Clock', this._desktopClockLabel(), 'Local time'));
+    grid.appendChild(this._makeWidgetGalleryCard('system', 'Motion', this._normalizeMotionPreference(this._readMotionPreference()), 'Preferences'));
+    grid.appendChild(this._makeWidgetGalleryCard('workspace', 'Workspace', 'Simple WM', 'Wallpaper'));
+    gallery.appendChild(grid);
+  }
+
+  _makeWidgetGalleryCard(kind, title, value, meta) {
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = 'wm-widget-gallery-card';
+    card.dataset.widgetKind = kind;
+    card.setAttribute('aria-label', `Add ${title} widget`);
+    card.appendChild(this._makeRoundIcon('wm-overview-icon', title));
+    const titleEl = document.createElement('span');
+    titleEl.className = 'wm-widget-gallery-card-title';
+    titleEl.textContent = title;
+    card.appendChild(titleEl);
+    const valueEl = document.createElement('strong');
+    valueEl.className = 'wm-widget-gallery-card-value';
+    valueEl.textContent = value;
+    card.appendChild(valueEl);
+    const metaEl = document.createElement('span');
+    metaEl.className = 'wm-widget-gallery-card-meta';
+    metaEl.textContent = meta;
+    card.appendChild(metaEl);
+    return card;
+  }
+
+  _addWidgetFromGallery(kind) {
+    const shelf = this._ensureDesktopWidgets();
+    if (!shelf) return false;
+    shelf.classList.remove('collapsed');
+    const widgetKind = String(kind || '').trim().toLowerCase();
+    if (widgetKind === 'clock') {
+      shelf.appendChild(this._makeDesktopWidget('wm-widget-clock', 'Local', this._desktopClockLabel(), 'Clock'));
+      return true;
+    }
+    if (widgetKind === 'system') {
+      shelf.appendChild(this._makeDesktopWidget('wm-widget-system', 'Motion', this._normalizeMotionPreference(this._readMotionPreference()), 'Settings'));
+      return true;
+    }
+    if (widgetKind === 'workspace') {
+      shelf.appendChild(this._makeDesktopWidget('wm-widget-workspace', 'Workspace', 'Simple WM', 'wallpaper: ' + this._normalizeWallpaperPreference(this._readWallpaperPreference())));
+      return true;
+    }
+    return false;
+  }
+
+  _ensureAppLauncher() {
+    if (this._appLauncher && this._appLauncher.isConnected) return this._appLauncher;
+    const launcher = document.createElement('aside');
+    launcher.className = 'wm-app-launcher';
+    launcher.hidden = true;
+    launcher.setAttribute('role', 'dialog');
+    launcher.setAttribute('aria-label', 'App launcher');
+    launcher.addEventListener('pointerdown', (event) => event.stopPropagation());
+    launcher.addEventListener('mousedown', (event) => event.stopPropagation());
+    const input = document.createElement('input');
+    input.className = 'wm-app-launcher-input';
+    input.type = 'text';
+    input.placeholder = 'Search apps';
+    input.setAttribute('aria-label', 'Search apps');
+    input.addEventListener('input', () => this._renderAppLauncher());
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        this._moveAppLauncherSelection(1);
+      } else if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        this._moveAppLauncherSelection(-1);
+      } else if (event.key === 'Enter') {
+        event.preventDefault();
+        this._executeAppLauncherSelection();
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        this._toggleAppLauncher(false);
+      }
+    });
+    launcher.appendChild(input);
+    const grid = document.createElement('div');
+    grid.className = 'wm-app-launcher-grid';
+    grid.setAttribute('role', 'listbox');
+    grid.setAttribute('aria-label', 'Applications');
+    grid.addEventListener('click', (event) => {
+      const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+      const tile = target?.closest('.wm-app-launcher-tile');
+      if (!tile || !grid.contains(tile)) return;
+      this._appLauncherActiveIndex = Number(tile.dataset.launcherIndex || '0') || 0;
+      this._executeAppLauncherSelection();
+    });
+    launcher.appendChild(grid);
+    document.body.appendChild(launcher);
+    this._appLauncher = launcher;
+    this._appLauncherInput = input;
+    this._appLauncherGrid = grid;
+    return launcher;
+  }
+
+  _toggleAppLauncher(open = null) {
+    const launcher = this._ensureAppLauncher();
+    const shouldOpen = open == null ? launcher.hidden : open;
+    launcher.hidden = !shouldOpen;
+    if (shouldOpen) {
+      this._appLauncherInput.value = '';
+      this._appLauncherActiveIndex = 0;
+      this._renderAppLauncher();
+      this._appLauncherInput.focus();
+    }
+    return shouldOpen;
+  }
+
+  _appLauncherApps() {
+    if (this._launcherApps.length) return this._launcherApps;
+    return [
+      { app_id: 'simple.ide', display_name: 'Simple IDE', icon: 'I' },
+      { app_id: 'simple.browser', display_name: 'Browser', icon: 'B' },
+      { app_id: 'simple.terminal', display_name: 'Terminal', icon: 'T' },
+      { app_id: 'simple.settings', display_name: 'Settings', icon: 'S' }
+    ];
+  }
+
+  _renderAppLauncher() {
+    if (!this._appLauncherGrid) return;
+    const query = String(this._appLauncherInput?.value || '').trim().toLowerCase();
+    const apps = this._appLauncherApps().filter((app) => {
+      const label = `${app.display_name || ''} ${app.app_id || ''}`.toLowerCase();
+      return !query || label.includes(query);
+    });
+    this._appLauncherItems = apps;
+    this._appLauncherActiveIndex = Math.min(this._appLauncherActiveIndex, Math.max(apps.length - 1, 0));
+    this._appLauncherGrid.innerHTML = '';
+    apps.forEach((app, index) => {
+      const tile = document.createElement('button');
+      tile.type = 'button';
+      tile.className = 'wm-app-launcher-tile' + (index === this._appLauncherActiveIndex ? ' active' : '');
+      tile.dataset.launcherIndex = String(index);
+      tile.dataset.appId = app.app_id || '';
+      tile.setAttribute('role', 'option');
+      tile.setAttribute('aria-selected', index === this._appLauncherActiveIndex ? 'true' : 'false');
+      tile.setAttribute('aria-label', `Launch ${app.display_name || app.app_id}`);
+      tile.appendChild(this._makeRoundIcon('wm-app-launcher-icon', app.icon || app.display_name || app.app_id));
+      const name = document.createElement('span');
+      name.className = 'wm-app-launcher-name';
+      name.textContent = app.display_name || app.app_id;
+      tile.appendChild(name);
+      this._appLauncherGrid.appendChild(tile);
+    });
+  }
+
+  _moveAppLauncherSelection(delta) {
+    if (!this._appLauncher || this._appLauncher.hidden) return;
+    const count = this._appLauncherItems.length;
+    if (!count) return;
+    this._appLauncherActiveIndex = (this._appLauncherActiveIndex + delta + count) % count;
+    this._renderAppLauncher();
+  }
+
+  _executeAppLauncherSelection() {
+    if (!this._appLauncher || this._appLauncher.hidden) return false;
+    const app = this._appLauncherItems[this._appLauncherActiveIndex];
+    if (!app || !app.app_id) return false;
+    this._sendLaunch(app.app_id);
+    this._toggleAppLauncher(false);
+    return true;
   }
 
   _isImageIcon(value) {
@@ -1147,6 +1575,109 @@ class SimpleWindowManager {
     if (entry) entry.body.innerHTML = html;
   }
 
+  _titleCommandKind(value) {
+    const commandText = String(value || '').trim();
+    if (!commandText) return 'empty';
+    if (commandText.startsWith('/') || commandText.startsWith('./') || commandText.includes('/')) return 'path';
+    if (commandText.startsWith('http://') || commandText.startsWith('https://')) return 'url';
+    if (commandText.includes(' ')) return 'search';
+    return 'command';
+  }
+
+  _submitTitleCommandInput(input) {
+    if (!input) return false;
+    const commandText = String(input.value || '').trim();
+    if (!commandText) return false;
+    const win = input.closest('.wm-window');
+    const commandKind = this._titleCommandKind(commandText);
+    const commandContext = input.placeholder || win?.querySelector('.wm-title-context')?.textContent || '';
+    input.dataset.lastSubmittedValue = commandText;
+    this._sendWindowCmd('title_command', {
+      window_id_hint: win?.dataset.surfaceId || win?.dataset.canonicalId || '',
+      command_text: commandText,
+      command_kind: commandKind,
+      command_context: commandContext
+    });
+    this._showTitleCommandSuggestions(input, false);
+    return true;
+  }
+
+  _focusActiveTitleInput() {
+    const focused = this.desktop?.querySelector('.wm-window.focused .wm-title-input');
+    const fallback = this.desktop?.querySelector('.wm-window .wm-title-input');
+    const input = focused || fallback;
+    if (!input) return false;
+    input.focus();
+    input.select();
+    this._showTitleCommandSuggestions(input, true);
+    return true;
+  }
+
+  _ensureTitleCommandSuggestions() {
+    if (this._titleCommandSuggestions && this._titleCommandSuggestions.isConnected) return this._titleCommandSuggestions;
+    const panel = document.createElement('aside');
+    panel.className = 'wm-title-suggestions';
+    panel.hidden = true;
+    panel.setAttribute('role', 'listbox');
+    panel.setAttribute('aria-label', 'Window command suggestions');
+    panel.addEventListener('mousedown', (event) => event.preventDefault());
+    panel.addEventListener('click', (event) => {
+      const item = event.target.closest('.wm-title-suggestion-item');
+      if (!item || !panel.contains(item)) return;
+      this._applyTitleCommandSuggestion(item.dataset.value || '');
+    });
+    document.body.appendChild(panel);
+    this._titleCommandSuggestions = panel;
+    return panel;
+  }
+
+  _showTitleCommandSuggestions(input, open = true) {
+    const panel = this._ensureTitleCommandSuggestions();
+    if (!open || !input) {
+      panel.hidden = true;
+      return;
+    }
+    const value = String(input.value || input.placeholder || '').trim();
+    const path = value || 'Open workspace';
+    const suggestions = [
+      { label: path, meta: this._titleCommandKind(path), value: path },
+      { label: `Search ${path}`, meta: 'workspace search', value: `search ${path}` }
+    ];
+    panel.innerHTML = '';
+    this._titleCommandSuggestionItems = suggestions;
+    this._titleCommandSuggestionIndex = 0;
+    const rect = input.getBoundingClientRect();
+    panel.style.left = `${Math.round(rect.left)}px`;
+    panel.style.top = `${Math.round(rect.bottom + 6)}px`;
+    panel.style.width = `${Math.max(280, Math.round(rect.width))}px`;
+    suggestions.forEach((suggestion, index) => {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'wm-title-suggestion-item' + (index === 0 ? ' active' : '');
+      item.dataset.value = suggestion.value;
+      item.setAttribute('role', 'option');
+      item.setAttribute('aria-selected', index === 0 ? 'true' : 'false');
+      const label = document.createElement('span');
+      label.className = 'wm-title-suggestion-label';
+      label.textContent = suggestion.label;
+      const meta = document.createElement('span');
+      meta.className = 'wm-title-suggestion-meta';
+      meta.textContent = suggestion.meta;
+      item.appendChild(label);
+      item.appendChild(meta);
+      panel.appendChild(item);
+    });
+    panel.hidden = false;
+  }
+
+  _applyTitleCommandSuggestion(value) {
+    const input = document.activeElement?.classList?.contains('wm-title-input') ? document.activeElement : this.desktop?.querySelector('.wm-window.focused .wm-title-input');
+    if (!input) return false;
+    input.value = value;
+    this._submitTitleCommandInput(input);
+    return true;
+  }
+
   _makeTitleInput(payload) {
     const input = document.createElement('input');
     input.className = 'wm-title-input wm-command-bar';
@@ -1157,6 +1688,19 @@ class SimpleWindowManager {
     input.addEventListener('pointerdown', (event) => event.stopPropagation());
     input.addEventListener('mousedown', (event) => event.stopPropagation());
     input.addEventListener('dblclick', (event) => event.stopPropagation());
+    input.addEventListener('focus', () => this._showTitleCommandSuggestions(input, true));
+    input.addEventListener('input', () => this._showTitleCommandSuggestions(input, true));
+    input.addEventListener('blur', () => setTimeout(() => this._showTitleCommandSuggestions(input, false), 120));
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        this._submitTitleCommandInput(input);
+      }
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        this._showTitleCommandSuggestions(input, false);
+      }
+    });
     return input;
   }
 
@@ -1684,7 +2228,25 @@ class SimpleWindowManager {
         this._toggleCommandPalette();
         return;
       }
+      const wantsAppLauncher = (e.metaKey || e.ctrlKey) && e.key === ' ';
+      if (wantsAppLauncher) {
+        e.preventDefault();
+        this._toggleAppLauncher();
+        return;
+      }
+      const wantsShortcutOverlay = (e.metaKey || e.ctrlKey) && e.key === '/';
+      if (wantsShortcutOverlay) {
+        e.preventDefault();
+        this._toggleShortcutOverlay();
+        return;
+      }
       const wantsOverview = (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'o';
+      const wantsStageRail = wantsOverview && e.shiftKey;
+      if (wantsStageRail) {
+        e.preventDefault();
+        this._toggleStageRail();
+        return;
+      }
       if (wantsOverview) {
         e.preventDefault();
         this._toggleWindowOverview();
@@ -1696,10 +2258,45 @@ class SimpleWindowManager {
         this._toggleControlCenter();
         return;
       }
+      const wantsTitleCommand = (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'l';
+      if (wantsTitleCommand) {
+        if (this._focusActiveTitleInput()) {
+          e.preventDefault();
+          return;
+        }
+      }
+      if (this._windowContextMenu && !this._windowContextMenu.hidden) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          this._hideWindowContextMenu();
+          return;
+        }
+      }
+      if (this._appLauncher && !this._appLauncher.hidden) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          this._toggleAppLauncher(false);
+          return;
+        }
+      }
+      if (this._shortcutOverlay && !this._shortcutOverlay.hidden) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          this._toggleShortcutOverlay(false);
+          return;
+        }
+      }
       if (this._controlCenter && !this._controlCenter.hidden) {
         if (e.key === 'Escape') {
           e.preventDefault();
           this._toggleControlCenter(false);
+          return;
+        }
+      }
+      if (this._stageRail && !this._stageRail.hidden) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          this._toggleStageRail(false);
           return;
         }
       }
