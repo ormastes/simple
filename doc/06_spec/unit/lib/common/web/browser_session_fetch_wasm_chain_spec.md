@@ -1551,6 +1551,39 @@ match result:
 
 </details>
 
+#### dispatches Uint8Array prototype set with apply in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `1,2,4,255,8,6:undefined:4,255,8:6`
+
+3. Err
+   - Expected: "unexpected uint8 set apply dispatch js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var dst = new Uint8Array(6); dst[0] = 1; dst[1] = 2; dst[2] = 3; dst[3] = 4; dst[4] = 5; dst[5] = 6; var src = new Uint8Array(3); src[0] = 260; src[1] = -1; src[2] = 8; var returned = Uint8Array.prototype.set.apply(dst, [src, 2]); dst.toString() + ':' + returned + ':' + src.toString() + ':' + dst.length")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("1,2,4,255,8,6:undefined:4,255,8:6")
+    Err(err):
+        expect("unexpected uint8 set apply dispatch js error: {err}").to_equal("")
+```
+
+</details>
+
 #### sorts Uint8Array values numerically in browser scripts
 
 1. var session = BrowserSession new
@@ -2626,8 +2659,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 71 |
-| Active scenarios | 71 |
+| Total scenarios | 72 |
+| Active scenarios | 72 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
