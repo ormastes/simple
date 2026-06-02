@@ -320,7 +320,8 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   Browser scripts now also cover bounded `Uint8Array[Symbol.iterator]()` value
   iteration through the same deterministic values iterator as `values()`, and
   the returned typed-array iterator object exposes `Symbol.iterator` with shared
-  cursor state.
+  cursor state. `Uint8Array.BYTES_PER_ELEMENT` and instance
+  `BYTES_PER_ELEMENT` are now covered for bounded browser scripts.
 
 ## Related Docs
 
