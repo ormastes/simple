@@ -792,6 +792,39 @@ match result:
 
 </details>
 
+#### dispatches Uint8Array prototype copyWithin edge ranges with call and apply
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `1,2,1,2,3,6:2,3,1,2,3,6:true:true`
+
+3. Err
+   - Expected: "unexpected uint8 copyWithin edge dispatch js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var b = new Uint8Array(6); b[0] = 1; b[1] = 2; b[2] = 3; b[3] = 4; b[4] = 5; b[5] = 6; var viaCall = Uint8Array.prototype.copyWithin.call(b, -4, 0, 3); var afterCall = b.toString(); var viaApply = Uint8Array.prototype.copyWithin.apply(b, [0, -3, -1]); afterCall + ':' + b.toString() + ':' + (viaCall === b) + ':' + (viaApply === b)")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("1,2,1,2,3,6:2,3,1,2,3,6:true:true")
+    Err(err):
+        expect("unexpected uint8 copyWithin edge dispatch js error: {err}").to_equal("")
+```
+
+</details>
+
 #### dispatches remaining Uint8Array prototype helpers with call and apply in browser scripts
 
 1. var session = BrowserSession new
@@ -2593,8 +2626,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 70 |
-| Active scenarios | 70 |
+| Total scenarios | 71 |
+| Active scenarios | 71 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

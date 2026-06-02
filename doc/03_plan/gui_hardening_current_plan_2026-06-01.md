@@ -313,7 +313,7 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   `doc/06_spec/system/app/browser/feature/webgpu_js_wasm_simple_spec.md`:
   JS/WebEngine/WASM BrowserSession evidence. Current focused checks pass the
   WebGPU/JS/WASM system spec `106/106`, the native WASM host spec `107/107`,
-  and the fetch-to-WASM chain spec `70/70`. The coverage includes secure WebGPU
+  and the fetch-to-WASM chain spec `71/71`. The coverage includes secure WebGPU
   globals, fetched `arrayBuffer()` to `WebAssembly.instantiate`, compile
   thenables, bounded WASM exports, traps, table/global metadata, imported
   function binding, and `Uint8Array`/`DataView` access to WebAssembly.Memory.
@@ -330,6 +330,8 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   `Uint8Array` and `DataView` views while rejecting raw `ArrayBuffer`, plain
   objects, and `null`. Bounded `Uint8Array.prototype` helper dispatch now
   covers `subarray.call`, `slice.apply`, and `values.call` in browser scripts.
+  Focused `copyWithin.call`/`copyWithin.apply` coverage now proves negative
+  indexes, overlapping copies, returned receiver identity, and mutation order.
   Bounded constructor metadata now reports `name`/`length` for `ArrayBuffer`,
   `Uint8Array`, and `DataView`, and `Uint8Array.prototype.constructor`
   compares identical to the browser-script `Uint8Array` constructor.
@@ -3430,6 +3432,20 @@ helpers through `call` and `apply`: `fill`, `includes`, `indexOf`, `join`,
 `57/57`; broader typed-array/DataView prototype parity, general
 `Function.prototype.call/apply` dispatch, and full browser/WASM semantics remain
 open.
+
+BrowserSession Uint8Array prototype copyWithin edge dispatch continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession scripts now prove focused `Uint8Array.prototype.copyWithin`
+dispatch through both `call` and `apply`. The scenario verifies negative target
+and source indexes, overlapping copies, ordered in-place mutations across
+successive calls, and returned receiver identity for both dispatch forms. The
+focused fetch/WASM chain spec now passes `71/71`; broader typed-array/DataView
+prototype parity, general `Function.prototype.call/apply` dispatch, and full
+browser/WASM semantics remain open.
 
 BrowserSession Uint8Array remaining prototype helper dispatch continuation:
 
