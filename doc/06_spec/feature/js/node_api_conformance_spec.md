@@ -2561,12 +2561,13 @@ expect(_eval_before_after_timer_drain("var timerValue = 0; var id = setImmediate
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); typeof h")).to_equal("object")
 expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); typeof h.ref")).to_equal("function")
+expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); typeof h.refresh")).to_equal("function")
 expect(_eval_str("var h = require('timers').setInterval(() => {}, 5); h.repeat")).to_equal("true")
 ```
 
@@ -2614,6 +2615,22 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_eval_before_after_timer_drain("var timerValue = 0; var h = require('timers').setTimeout(() => { timerValue = 11; }, 0); h.close(); timerValue", "timerValue", 0)).to_equal("0:0:0")
+```
+
+</details>
+
+#### refreshes bounded Node timer handles
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.refresh(); h.refreshed")).to_equal("true")
+expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.refresh(); h.refreshedAt")).to_equal("0")
+expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.close(); h.refresh(); h.refreshed")).to_equal("false")
 ```
 
 </details>
@@ -3584,8 +3601,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 233 |
-| Active scenarios | 233 |
+| Total scenarios | 234 |
+| Active scenarios | 234 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
