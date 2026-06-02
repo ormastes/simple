@@ -168,7 +168,7 @@ expect(gui_mac_smf_dynlib_accepts_qemu_loader_parity_row(duplicate_callable)).to
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 43 lines folded for reproduction.
+Runnable source: 52 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -192,9 +192,14 @@ val non_empty_error = good.replace("error=", "error=p99-over-threshold")
 val duplicate_loader = good + " loader=host_dynlib"
 val duplicate_call_source = good + " call_source=direct_simple"
 val duplicate_error = good + " error=not-smf-dynlib"
+val duplicate_p99 = good + " p99_us=5000"
+val duplicate_threshold = good + " threshold_us=5000"
+val duplicate_samples = good + " samples=64"
+val duplicate_expected_samples = good + " expected_samples=64"
 expect(gui_mac_smf_dynlib_row_value(good, "loader")).to_equal("smf_dynlib")
 expect(gui_mac_smf_dynlib_row_key_count(duplicate_loader, "loader")).to_equal(2)
 expect(gui_mac_smf_dynlib_row_i64(good, "p99_us")).to_equal(1i64)
+expect(gui_mac_smf_dynlib_row_has_one_i64(duplicate_p99, "p99_us")).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(good)).to_equal(true)
 expect(gui_mac_smf_dynlib_accepts_probe_row(host)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(direct)).to_equal(false)
@@ -215,6 +220,10 @@ expect(gui_mac_smf_dynlib_accepts_probe_row(non_empty_error)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(duplicate_loader)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(duplicate_call_source)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_probe_row(duplicate_error)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_probe_row(duplicate_p99)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_probe_row(duplicate_threshold)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_probe_row(duplicate_samples)).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_probe_row(duplicate_expected_samples)).to_equal(false)
 ```
 
 </details>
