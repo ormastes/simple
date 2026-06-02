@@ -1023,6 +1023,39 @@ match result:
 
 </details>
 
+#### dispatches Uint8Array prototype map with call in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `8,255,16:4,255,7:3:255`
+
+3. Err
+   - Expected: "unexpected uint8 prototype map dispatch js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var b = new Uint8Array(3); b[0] = 260; b[1] = -1; b[2] = 7; var mapped = Uint8Array.prototype.map.call(b, function(v, i, arr) { return v + i + arr.at(i); }); mapped.toString() + ':' + b.toString() + ':' + mapped.length + ':' + mapped.at(1)")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("8,255,16:4,255,7:3:255")
+    Err(err):
+        expect("unexpected uint8 prototype map dispatch js error: {err}").to_equal("")
+```
+
+</details>
+
 #### filters Uint8Array values into a new coerced array in browser scripts
 
 1. var session = BrowserSession new
@@ -1834,8 +1867,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 47 |
-| Active scenarios | 47 |
+| Total scenarios | 48 |
+| Active scenarios | 48 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
