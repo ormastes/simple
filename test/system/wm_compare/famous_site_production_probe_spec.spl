@@ -1,0 +1,46 @@
+# @tag: sys, wm_compare, html_compat, corpus
+
+"""
+# Famous Site Production Probe Spec
+
+Focused production probe coverage for the current Chrome parity gate. This keeps
+fast metadata and fail-closed checks out of the full 42-scenario corpus sweep.
+"""
+
+use std.spec.{describe, it, expect}
+use app.wm_compare.site_corpus.{
+    famous_site_sample_production_simple_ppm_path,
+    famous_site_sample_production_report_sdn_path}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+fn _tool_path() -> text:
+    "tools/electron-shell/verify_famous_site_production_probe.js"
+
+describe "famous-site production probe":
+    it "passes the focused production artifact as bounded divergent evidence":
+        expect(rt_file_exists(_tool_path())).to_equal(true)
+        expect(rt_file_exists(famous_site_sample_production_simple_ppm_path("site_0_google"))).to_equal(true)
+        expect(rt_file_exists(famous_site_sample_production_report_sdn_path("site_0_google"))).to_equal(true)
+        val result = rt_process_run_timeout("node", [_tool_path(), "--sample=site_0_google"], 10000)
+        expect(result.2).to_equal(0)
+        expect(result.0).to_contain("\"status\": \"PASS\"")
+        expect(result.0).to_contain("\"rendererMode\": \"production\"")
+        expect(result.0).to_contain("\"parityStatus\": \"divergent\"")
+        expect(result.0).to_contain("\"boundedDivergenceOnly\": true")
+        expect(result.0).to_contain("\"chromeGlyphCompositingParity\": false")
+        expect(result.0).to_contain("\"promotionRequiredDifferentPixels\": 2717")
+        expect(result.0).to_contain("\"differentPixels\": 2717")
+        expect(result.0).to_contain("\"computedDifferentPixels\": 2717")
+        expect(result.0).to_contain("\"allRegionCountsMatch\": true")
+        expect(result.0).to_contain("\"unexplainedDifferentPixels\": 1")
+
+    it "fails closed when per-line ink position drifts from pixels":
+        expect(rt_file_exists(_tool_path())).to_equal(true)
+        expect(rt_file_exists(famous_site_sample_production_report_sdn_path("site_0_google"))).to_equal(true)
+        val result = rt_process_run_timeout("node", [_tool_path(), "--sample=site_0_google", "--corrupt-text-line-ink-position-for-test"], 10000)
+        expect(result.2).to_equal(1)
+        expect(result.0).to_contain("\"status\": \"FAIL\"")
+        expect(result.0).to_contain("\"allRegionCountsMatch\": false")
+        expect(result.0).to_contain("per-line text ink region geometry does not match production pixels")

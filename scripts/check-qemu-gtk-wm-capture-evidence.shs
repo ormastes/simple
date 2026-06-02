@@ -66,10 +66,17 @@ perf_simple_frame_us=0
 perf_gtk_frame_us=0
 perf_iterations=0
 perf_comparison_available=false
-perf_scope=qemu-guest-simple-vs-gtk
+perf_scope=qemu-live-bitmap-plus-host-gtk-baseline
 perf_release_gate=guest-side-simple-vs-gtk-performance
 perf_release_blocker=missing-qmp-socket
 perf_required_for_release=true
+qemu_live_status=unavailable
+qemu_live_reason=missing-qmp-socket
+qemu_live_pixels=0
+qemu_live_non_black_pixels=0
+qemu_live_sample_matches=0
+qemu_live_sample_mismatches=0
+qemu_live_scene_mismatches=0
 fake_qmp_status=not-run
 fake_qmp_reason=not-run
 fake_qmp_report_path="$FAKE_QMP_REPORT_PATH"
@@ -128,6 +135,7 @@ run_gtk_scene_evidence() {
     host_perf_simple_frame_us="$gtk_scene_simple_frame_us"
     host_perf_gtk_frame_us="$gtk_scene_gtk_frame_us"
     host_perf_iterations="${GTK_GL_WM_SCENE_ITERATIONS:-200}"
+    host_perf_comparison_available=false
     if [ "$gtk_scene_status" = "pass" ] && [ "$gtk_scene_rgba_mismatch_count" = "0" ] && [ "$gtk_scene_blur_or_tolerance_used" = "false" ]; then
         host_perf_comparison_available=true
     fi
@@ -207,12 +215,26 @@ elif [ -n "${QEMU_QMP_SOCKET:-}" ]; then
         sh scripts/check-wm-launch-capture-evidence.shs >"$BUILD_DIR/wm.out" 2>&1
     wm_exit_code=$?
     set -e
+    qemu_live_status="$(sed -n 's/^wm_launch_capture_qemu_live_status=//p' "$BUILD_DIR/wm.out" | tail -n 1)"
+    qemu_live_reason="$(sed -n 's/^wm_launch_capture_qemu_live_reason=//p' "$BUILD_DIR/wm.out" | tail -n 1)"
+    qemu_live_pixels="$(sed -n 's/^wm_launch_capture_qemu_live_pixels=//p' "$BUILD_DIR/wm.out" | tail -n 1)"
+    qemu_live_non_black_pixels="$(sed -n 's/^wm_launch_capture_qemu_live_non_black_pixels=//p' "$BUILD_DIR/wm.out" | tail -n 1)"
+    qemu_live_sample_matches="$(sed -n 's/^wm_launch_capture_qemu_live_sample_matches=//p' "$BUILD_DIR/wm.out" | tail -n 1)"
+    qemu_live_sample_mismatches="$(sed -n 's/^wm_launch_capture_qemu_live_sample_mismatches=//p' "$BUILD_DIR/wm.out" | tail -n 1)"
+    qemu_live_scene_mismatches="$(sed -n 's/^wm_launch_capture_qemu_live_scene_mismatches=//p' "$BUILD_DIR/wm.out" | tail -n 1)"
+    qemu_live_status="${qemu_live_status:-unavailable}"
+    qemu_live_reason="${qemu_live_reason:-qemu-live-capture-unavailable}"
+    qemu_live_pixels="${qemu_live_pixels:-0}"
+    qemu_live_non_black_pixels="${qemu_live_non_black_pixels:-0}"
+    qemu_live_sample_matches="${qemu_live_sample_matches:-0}"
+    qemu_live_sample_mismatches="${qemu_live_sample_mismatches:-0}"
+    qemu_live_scene_mismatches="${qemu_live_scene_mismatches:-0}"
     if [ "$wm_exit_code" -eq 0 ] && grep -q '^wm_launch_capture_evidence_status=pass' "$BUILD_DIR/wm.out"; then
         status=pass
         reason=pass
         perf_status=unavailable
-        perf_reason=qemu-side-gtk-simple-perf-harness-not-wired
-        perf_release_blocker=qemu-side-gtk-simple-perf-harness-not-wired
+        perf_reason=waiting-for-host-gtk-baseline
+        perf_release_blocker=host-gtk-baseline-not-run
     else
         status=fail
         reason="$(sed -n 's/^wm_launch_capture_evidence_reason=//p; s/^reason=//p' "$BUILD_DIR/wm.out" | tail -n 1)"
@@ -227,6 +249,26 @@ fi
 
 if [ "$gtk_scene_status" = "not-run" ] && [ "${QEMU_HOST_GTK_SCENE_EVIDENCE:-1}" = "1" ]; then
     run_gtk_scene_evidence
+fi
+
+if [ "$status" = "pass" ] && [ "$qemu_live_status" = "pass" ]; then
+    if [ "$host_perf_status" = "pass" ] && [ "$host_perf_comparison_available" = "true" ]; then
+        perf_status=pass
+        perf_reason=qemu-live-bitmap-and-host-gtk-baseline-pass
+        perf_simple_frame_us="$host_perf_simple_frame_us"
+        perf_gtk_frame_us="$host_perf_gtk_frame_us"
+        perf_iterations="$host_perf_iterations"
+        perf_comparison_available=true
+        perf_release_blocker=none
+    else
+        perf_status=unavailable
+        perf_reason=host-gtk-baseline-unavailable
+        perf_release_blocker=host-gtk-baseline-unavailable
+    fi
+elif [ "$status" = "pass" ] && [ "$qemu_live_status" != "pass" ]; then
+    perf_status=fail
+    perf_reason="$qemu_live_reason"
+    perf_release_blocker="$qemu_live_reason"
 fi
 
 if [ -n "${SIMPLE_GUI_DYNLIB_ARTIFACT:-}" ]; then
@@ -272,6 +314,13 @@ fi
     echo "qemu_gtk_wm_capture_host_wm_report_path=$host_wm_report_path"
     echo "qemu_gtk_wm_capture_live_capture_status=$status"
     echo "qemu_gtk_wm_capture_live_capture_reason=$reason"
+    echo "qemu_gtk_wm_capture_qemu_live_status=$qemu_live_status"
+    echo "qemu_gtk_wm_capture_qemu_live_reason=$qemu_live_reason"
+    echo "qemu_gtk_wm_capture_qemu_live_pixels=$qemu_live_pixels"
+    echo "qemu_gtk_wm_capture_qemu_live_non_black_pixels=$qemu_live_non_black_pixels"
+    echo "qemu_gtk_wm_capture_qemu_live_sample_matches=$qemu_live_sample_matches"
+    echo "qemu_gtk_wm_capture_qemu_live_sample_mismatches=$qemu_live_sample_mismatches"
+    echo "qemu_gtk_wm_capture_qemu_live_scene_mismatches=$qemu_live_scene_mismatches"
     echo "qemu_gtk_wm_capture_perf_status=$perf_status"
     echo "qemu_gtk_wm_capture_perf_reason=$perf_reason"
     echo "qemu_gtk_wm_capture_perf_simple_frame_us=$perf_simple_frame_us"
@@ -342,17 +391,14 @@ fi
     echo "- host WM smoke report: $host_wm_report_path"
     echo "- live capture status: $status"
     echo "- live capture reason: $reason"
+    echo "- qemu live bitmap status: $qemu_live_status"
+    echo "- qemu live bitmap reason: $qemu_live_reason"
     if [ -f "$BUILD_DIR/evidence.env" ]; then
-        live_pixels="$(sed -n 's/^qemu_gtk_wm_capture_wm_qemu_live_pixels=//p' "$BUILD_DIR/evidence.env" | tail -n 1)"
-        live_non_black="$(sed -n 's/^qemu_gtk_wm_capture_wm_qemu_live_non_black_pixels=//p' "$BUILD_DIR/evidence.env" | tail -n 1)"
-        live_sample_matches="$(sed -n 's/^qemu_gtk_wm_capture_wm_qemu_live_sample_matches=//p' "$BUILD_DIR/evidence.env" | tail -n 1)"
-        live_sample_mismatches="$(sed -n 's/^qemu_gtk_wm_capture_wm_qemu_live_sample_mismatches=//p' "$BUILD_DIR/evidence.env" | tail -n 1)"
-        live_scene_mismatches="$(sed -n 's/^qemu_gtk_wm_capture_wm_qemu_live_scene_mismatches=//p' "$BUILD_DIR/evidence.env" | tail -n 1)"
-        echo "- live capture pixels: ${live_pixels:-0}"
-        echo "- live capture non-black pixels: ${live_non_black:-0}"
-        echo "- live capture sample matches: ${live_sample_matches:-0}"
-        echo "- live capture sample mismatches: ${live_sample_mismatches:-0}"
-        echo "- live capture full-scene mismatches: ${live_scene_mismatches:-0}"
+        echo "- live capture pixels: $qemu_live_pixels"
+        echo "- live capture non-black pixels: $qemu_live_non_black_pixels"
+        echo "- live capture sample matches: $qemu_live_sample_matches"
+        echo "- live capture sample mismatches: $qemu_live_sample_mismatches"
+        echo "- live capture full-scene mismatches: $qemu_live_scene_mismatches"
     fi
     echo "- qemu-side perf status: $perf_status"
     echo "- qemu-side perf reason: $perf_reason"
@@ -423,4 +469,9 @@ fi
 
 cat "$BUILD_DIR/evidence.env"
 
-[ "$status" = "pass" ]
+if [ "$status" != "pass" ]; then
+    exit 1
+fi
+if [ "$perf_required_for_release" = "true" ] && [ "$perf_release_blocker" != "none" ]; then
+    exit 1
+fi
