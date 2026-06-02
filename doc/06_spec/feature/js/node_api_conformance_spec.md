@@ -2505,13 +2505,14 @@ expect(_eval_before_after_timer_drain("var timerValue = 0; var id = require('tim
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); require('node:timers').clearTimeout(h); h.closed")).to_equal("true")
 expect(_eval_str("var h = require('timers').setInterval(() => {}, 5); require('node:timers').clearInterval(h); h.closed")).to_equal("true")
 expect(_eval_str("var h = require('timers').setImmediate(() => {}); require('node:timers').clearImmediate(h); h.closed")).to_equal("true")
+expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); require('node:timers').clearTimeout(h); h.active")).to_equal("false")
 ```
 
 </details>
@@ -2577,13 +2578,14 @@ expect(_eval_before_after_timer_drain("var timerValue = 0; var id = setImmediate
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); typeof h")).to_equal("object")
 expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); typeof h.ref")).to_equal("function")
 expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); typeof h.refresh")).to_equal("function")
+expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.active + ':' + h.closed")).to_equal("true:false")
 expect(_eval_str("var h = require('timers').setInterval(() => {}, 5); h.repeat")).to_equal("true")
 ```
 
@@ -2610,13 +2612,14 @@ expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.unref(); 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); typeof h.close")).to_equal("function")
 expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.close() === h")).to_equal("true")
 expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.close(); h.closed")).to_equal("true")
+expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.close(); h.active")).to_equal("false")
 ```
 
 </details>
@@ -2640,12 +2643,13 @@ expect(_eval_before_after_timer_drain("var timerValue = 0; var h = require('time
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.refresh(); h.refreshed")).to_equal("true")
 expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.refresh(); h.refreshedAt")).to_equal("0")
+expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.refresh(); h.active + ':' + h.closed")).to_equal("true:false")
 expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.close(); h.refresh(); h.refreshed")).to_equal("false")
 ```
 
