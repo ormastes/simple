@@ -792,6 +792,39 @@ match result:
 
 </details>
 
+#### dispatches Uint8Array prototype at and reverse with complementary call and apply
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `255:undefined:7,255,4,1:true:7`
+
+3. Err
+   - Expected: "unexpected uint8 at reverse complementary dispatch js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var b = new Uint8Array(4); b[0] = 1; b[1] = 260; b[2] = -1; b[3] = 7; var neg = Uint8Array.prototype.at.call(b, -2); var miss = Uint8Array.prototype.at.call(b, 9); var returned = Uint8Array.prototype.reverse.apply(b, []); neg + ':' + miss + ':' + b.toString() + ':' + (returned === b) + ':' + returned.at(0)")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("255:undefined:7,255,4,1:true:7")
+    Err(err):
+        expect("unexpected uint8 at reverse complementary dispatch js error: {err}").to_equal("")
+```
+
+</details>
+
 #### copies Uint8Array values within the same storage in browser scripts
 
 1. var session = BrowserSession new
@@ -2824,8 +2857,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 77 |
-| Active scenarios | 77 |
+| Total scenarios | 78 |
+| Active scenarios | 78 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
