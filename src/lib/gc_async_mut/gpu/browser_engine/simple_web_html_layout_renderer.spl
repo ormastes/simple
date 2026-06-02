@@ -413,11 +413,24 @@ fn apply_decls(st: Style, decls: text) -> Style:
         st.pad_b = p
     val margin = decl_get(decls, "margin")
     if margin.len() > 0:
-        val m = parse_int(margin)
-        st.margin_l = m
-        st.margin_t = m
-        st.margin_r = m
-        st.margin_b = m
+        var mg_trimmed = margin.trim()
+        var parts = mg_trimmed.split(" ")
+        if parts.len() == 1:
+            val mv = parse_int(parts[0])
+            st.margin_t = mv
+            st.margin_r = mv
+            st.margin_b = mv
+            st.margin_l = mv
+        elif parts.len() == 2:
+            st.margin_t = parse_int(parts[0])
+            st.margin_b = parse_int(parts[0])
+            st.margin_r = parse_int(parts[1])
+            st.margin_l = parse_int(parts[1])
+        elif parts.len() >= 4:
+            st.margin_t = parse_int(parts[0])
+            st.margin_r = parse_int(parts[1])
+            st.margin_b = parse_int(parts[2])
+            st.margin_l = parse_int(parts[3])
     val ml = decl_get(decls, "margin-left")
     if ml.len() > 0:
         st.margin_l = parse_int(ml)
@@ -907,10 +920,10 @@ class LayoutResult:
     height: i32
 
 fn char_w(fs: i32) -> i32:
-    6 * glyph_scale(fs)
+    5 * glyph_scale(fs)
 
 fn line_h(fs: i32) -> i32:
-    9 * glyph_scale(fs)
+    10 * glyph_scale(fs)
 
 fn line_h_styled(fs: i32, css_lh: i32) -> i32:
     if css_lh > 0:
@@ -977,8 +990,10 @@ fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, viewp
     val st = styles[i]
     var used_w = w
     val css_w = css_length_px(st.width_spec, w, viewport_h)
-    if css_w > 0 and css_w < used_w:
-        used_w = css_w
+    if css_w > 0:
+        val box_w = css_w + st.pad_l + st.pad_r + st.border_w * 2
+        if box_w < used_w:
+            used_w = box_w
     obx[i] = x
     oby[i] = y
     obw[i] = used_w
@@ -1059,12 +1074,16 @@ fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, viewp
     var cy = y + st.pad_t
     var c = i + 1
     var child_seen = false
+    var prev_mb = 0
     while c < nodes.len():
         if nodes[c].parent == i:
             val cst = styles[c]
             if child_seen and st.gap > 0:
                 cy = cy + st.gap
-            cy = cy + cst.margin_t
+            if prev_mb > cst.margin_t:
+                cy = cy + prev_mb
+            else:
+                cy = cy + cst.margin_t
             var child_w = iw - cst.margin_l - cst.margin_r
             if child_w < 1:
                 child_w = 1
@@ -1074,13 +1093,16 @@ fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, viewp
             obw = child.bw
             obh = child.bh
             val ch = child.height
-            cy = cy + ch + cst.margin_b
+            cy = cy + ch
+            prev_mb = cst.margin_b
             child_seen = true
         c = c + 1
     var h = (cy - y) + st.pad_b
     val css_h = css_length_px(st.height_spec, viewport_h, viewport_h)
-    if css_h > h:
-        h = css_h
+    if css_h > 0:
+        val box_h = css_h + st.pad_t + st.pad_b + st.border_w * 2
+        if box_h > h:
+            h = box_h
     val css_min_h = css_length_px(st.min_height_spec, viewport_h, viewport_h)
     if css_min_h > h:
         h = css_min_h
@@ -1171,8 +1193,10 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                 if cpl < 1:
                     cpl = 1
                 var off = 0
-                var ly = by[i]
                 val lh = line_h_styled(st.font_size, st.line_height)
+                val glyph_h = 7 * scale
+                val baseline_offset = (lh - glyph_h + 1) / 3
+                var ly = by[i] + baseline_offset
                 while off < txt.len() and ly < fbh:
                     var endc = off + cpl
                     if endc > txt.len():

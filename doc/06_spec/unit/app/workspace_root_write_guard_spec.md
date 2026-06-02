@@ -23,7 +23,7 @@ expect(file_exists("scripts/check-workspace-root-guard.shs")).to_equal(true)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -35,6 +35,8 @@ expect(source.contains("run_fix")).to_equal(true)
 expect(source.contains("run_lock_preview")).to_equal(true)
 expect(source.contains("run_lock_apply")).to_equal(true)
 expect(source.contains("run_unlock_apply")).to_equal(true)
+expect(source.contains("load_builtin_allowed_root")).to_equal(true)
+expect(source.contains("FILE.md not found at repository root")).to_equal(false)
 ```
 
 </details>

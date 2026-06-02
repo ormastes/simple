@@ -55,10 +55,17 @@ struct WmSceneVisualQualityReport:
     clipboard_history_ready: bool
     privacy_indicator_ready: bool
     system_hud_ready: bool
+    wallpaper_picker_ready: bool
+    dock_stack_ready: bool
+    widget_gallery_ready: bool
     contrast_ratio_x100: i64
     color_checked: bool
     bounded_layout: bool
     translucent_surfaces: bool
+    material_policy_ready: bool
+    glass_blur_px: i32
+    glass_saturation_pct: i32
+    glass_opacity_floor_x100: i32
     rounded_surface_count: i64
     max_command_palette_width_px: i32
     max_control_center_width_px: i32
@@ -82,8 +89,15 @@ struct WmSceneVisualQualityReport:
     max_clipboard_history_width_px: i32
     max_privacy_indicator_width_px: i32
     max_system_hud_width_px: i32
+    max_wallpaper_picker_width_px: i32
+    max_dock_stack_width_px: i32
+    max_widget_gallery_width_px: i32
     min_overview_card_width_px: i32
     min_touch_target_height_px: i32
+    layout_policy_ready: bool
+    layout_safe_area_px: i32
+    layout_panel_gap_px: i32
+    layout_min_touch_target_px: i32
     motion_can_disable: bool
     reduced_motion_duration_ms: i64
 
@@ -99,14 +113,24 @@ struct WmSceneModernThemeConfig:
     taskbar_radius_px: i32
     control_radius_px: i32
     icon_radius_px: i32
+    icon_inner_padding_px: i32
+    icon_mask_shape: text
+    icon_image_fit: text
     scrollbar_width_px: i32
     scrollbar_thumb_radius_px: i32
     scrollbar_thumb_border_px: i32
     blur_px: i32
+    glass_saturation_pct: i32
+    glass_opacity_floor_x100: i32
+    material_policy: text
     desktop_layer_z: i32
     snap_layer_z: i32
     window_layer_z: i32
     overlay_layer_z: i32
+    layout_safe_area_px: i32
+    layout_panel_gap_px: i32
+    layout_min_touch_target_px: i32
+    layout_containment: text
     standard_motion_ms: i32
     reduced_motion_ms: i32
     can_disable_motion: bool
@@ -124,14 +148,24 @@ fn modern_wm_scene_theme_config() -> WmSceneModernThemeConfig:
         taskbar_radius_px: 999,
         control_radius_px: 12,
         icon_radius_px: 999,
+        icon_inner_padding_px: 3,
+        icon_mask_shape: "circle",
+        icon_image_fit: "cover",
         scrollbar_width_px: 10,
         scrollbar_thumb_radius_px: 999,
         scrollbar_thumb_border_px: 3,
         blur_px: 24,
+        glass_saturation_pct: 170,
+        glass_opacity_floor_x100: 6,
+        material_policy: "glass-vibrancy",
         desktop_layer_z: 0,
         snap_layer_z: 15,
         window_layer_z: 20,
         overlay_layer_z: 11000,
+        layout_safe_area_px: 16,
+        layout_panel_gap_px: 12,
+        layout_min_touch_target_px: 44,
+        layout_containment: "layout-paint",
         standard_motion_ms: 240,
         reduced_motion_ms: 80,
         can_disable_motion: true
@@ -207,7 +241,7 @@ fn lifecycle_windows_to_motion_wm_scene(windows: [WmLifecycleWindowState], actio
     ]
     for window in windows:
         val motion = wm_lifecycle_motion_contract(action_kind, window)
-        if not window.minimized or motion.phase == "minimizing" or motion.phase == "closing":
+        if not window.minimized or motion.phase == "minimizing" or motion.phase == "restoring" or motion.phase == "closing":
             elements = elements.push(SceneElement(
                 kind: "motion_window",
                 x: window.x,
@@ -215,7 +249,7 @@ fn lifecycle_windows_to_motion_wm_scene(windows: [WmLifecycleWindowState], actio
                 w: window.w,
                 h: window.h,
                 color: 0xCCCBD5E1u32,
-                text: "{window.title}|{motion.phase}|{motion.class_name}|{motion.duration_ms}|{motion.reduced_duration_ms}|{motion.can_disable}"
+                text: "{window.title}|{motion.phase}|{motion.class_name}|{motion.duration_ms}|{motion.reduced_duration_ms}|{motion.can_disable}|{motion.easing}|{motion.transform_origin}|{motion.dock_origin_x}|{motion.dock_origin_y}"
             ))
     WmSceneSpec(name: "lifecycle_motion_wm_scene", width: width, height: height, elements: elements)
 
@@ -317,6 +351,18 @@ fn shared_wm_scene_to_chromed_wm_scene(scene: SharedWmScene, taskbar: TaskbarMod
     val system_hud_h = _wm_fit_dim(_wm_max_i32(0, scene.height - chrome.command_lane.height - chrome.taskbar.height - 24), 132)
     val system_hud_x = _wm_max_i32(0, (scene.width - system_hud_w) / 2)
     val system_hud_y = _wm_min_i32(chrome.command_lane.height + 128, _wm_max_i32(0, chrome.taskbar.y - system_hud_h - 96))
+    val wallpaper_w = _wm_fit_dim(side_panel_available_w, 380)
+    val wallpaper_h = _wm_fit_dim(_wm_max_i32(0, scene.height - chrome.command_lane.height - chrome.taskbar.height - 24), 196)
+    val wallpaper_x = 16
+    val wallpaper_y = _wm_min_i32(chrome.command_lane.height + 54, _wm_max_i32(0, chrome.taskbar.y - wallpaper_h - 14))
+    val dock_stack_w = _wm_fit_dim(side_panel_available_w, 340)
+    val dock_stack_h = _wm_fit_dim(_wm_max_i32(0, scene.height - chrome.command_lane.height - chrome.taskbar.height - 24), 190)
+    val dock_stack_x = _wm_min_i32(_wm_max_i32(16, scene.width / 2 - 170), _wm_max_i32(0, scene.width - dock_stack_w - 16))
+    val dock_stack_y = _wm_max_i32(chrome.command_lane.height + 8, chrome.taskbar.y - dock_stack_h - 12)
+    val widget_gallery_w = _wm_fit_dim(side_panel_available_w, 440)
+    val widget_gallery_h = _wm_fit_dim(_wm_max_i32(0, scene.height - chrome.command_lane.height - chrome.taskbar.height - 24), 214)
+    val widget_gallery_x = _wm_max_i32(0, (scene.width - widget_gallery_w) / 2)
+    val widget_gallery_y = _wm_min_i32(chrome.command_lane.height + 54, _wm_max_i32(0, chrome.taskbar.y - widget_gallery_h - 14))
     var elements: [SceneElement] = [
         SceneElement(kind: "desktop_chrome", x: 0, y: 0, w: scene.width, h: scene.height, color: 0xFF101418u32, text: ""),
         SceneElement(kind: "command_lane", x: chrome.command_lane.x, y: chrome.command_lane.y, w: chrome.command_lane.width, h: chrome.command_lane.height, color: 0xFF111827u32, text: ""),
@@ -348,7 +394,10 @@ fn shared_wm_scene_to_chromed_wm_scene(scene: SharedWmScene, taskbar: TaskbarMod
         SceneElement(kind: "screen_capture_overlay", x: capture_x, y: capture_y, w: capture_w, h: capture_h, color: 0x99020617u32, text: "Selection|Window|Screen|Capture"),
         SceneElement(kind: "clipboard_history", x: clipboard_x, y: clipboard_y, w: clipboard_w, h: clipboard_h, color: 0xEE020617u32, text: "Command|Code|Link|Paste|Pin|Clear"),
         SceneElement(kind: "privacy_indicator", x: privacy_x, y: privacy_y, w: privacy_w, h: privacy_h, color: 0xEE020617u32, text: "Camera|Mic|Screen|Allow|Block"),
-        SceneElement(kind: "system_hud", x: system_hud_x, y: system_hud_y, w: system_hud_w, h: system_hud_h, color: 0xEE020617u32, text: "Volume|Brightness|68|Mute")
+        SceneElement(kind: "system_hud", x: system_hud_x, y: system_hud_y, w: system_hud_w, h: system_hud_h, color: 0xEE020617u32, text: "Volume|Brightness|68|Mute"),
+        SceneElement(kind: "wallpaper_picker", x: wallpaper_x, y: wallpaper_y, w: wallpaper_w, h: wallpaper_h, color: 0xEE020617u32, text: "Aurora|Dawn|Graphite"),
+        SceneElement(kind: "dock_stack", x: dock_stack_x, y: dock_stack_y, w: dock_stack_w, h: dock_stack_h, color: 0xEE020617u32, text: "Downloads|Screenshot|Report|Archive"),
+        SceneElement(kind: "widget_gallery", x: widget_gallery_x, y: widget_gallery_y, w: widget_gallery_w, h: widget_gallery_h, color: 0xEE020617u32, text: "Clock|Weather|Build|Small|Medium|Large")
     ]
     var icon_i = 0
     while icon_i < right_icon_count:
@@ -452,6 +501,9 @@ fn wm_scene_visual_quality_report(scene: WmSceneSpec) -> WmSceneVisualQualityRep
     val clipboard_history_ready = _scene_clipboard_history_configured(html)
     val privacy_indicator_ready = _scene_privacy_indicator_configured(html)
     val system_hud_ready = _scene_system_hud_configured(html)
+    val wallpaper_picker_ready = _scene_wallpaper_picker_configured(html)
+    val dock_stack_ready = _scene_dock_stack_configured(html)
+    val widget_gallery_ready = _scene_widget_gallery_configured(html)
     val contrast_ratio_x100 = _scene_contrast_ratio_x100(_scene_background_color(scene), 0xFFFFFFFFu32)
     val color_checked = contrast_ratio_x100 >= 450 and html.contains("color:white")
     var bounded_layout = scene.width > 0 and scene.height > 0
@@ -477,6 +529,9 @@ fn wm_scene_visual_quality_report(scene: WmSceneSpec) -> WmSceneVisualQualityRep
     var max_clipboard_history_width_px = 0
     var max_privacy_indicator_width_px = 0
     var max_system_hud_width_px = 0
+    var max_wallpaper_picker_width_px = 0
+    var max_dock_stack_width_px = 0
+    var max_widget_gallery_width_px = 0
     var min_overview_card_width_px = 0
     var min_touch_target_height_px = 0
     var rounded_surface_count: i64 = 0
@@ -504,6 +559,9 @@ fn wm_scene_visual_quality_report(scene: WmSceneSpec) -> WmSceneVisualQualityRep
     var has_clipboard_history = false
     var has_privacy_indicator = false
     var has_system_hud = false
+    var has_wallpaper_picker = false
+    var has_dock_stack = false
+    var has_widget_gallery = false
     for elem in scene.elements:
         if elem.x < 0 or elem.y < 0 or elem.w < 0 or elem.h < 0:
             bounded_layout = false
@@ -672,17 +730,41 @@ fn wm_scene_visual_quality_report(scene: WmSceneSpec) -> WmSceneVisualQualityRep
             if elem.w > 280:
                 bounded_layout = false
             rounded_surface_count = rounded_surface_count + 1
+        elif elem.kind == "wallpaper_picker":
+            has_wallpaper_picker = true
+            if elem.w > max_wallpaper_picker_width_px:
+                max_wallpaper_picker_width_px = elem.w
+            if elem.w > 380:
+                bounded_layout = false
+            rounded_surface_count = rounded_surface_count + 1
+        elif elem.kind == "dock_stack":
+            has_dock_stack = true
+            if elem.w > max_dock_stack_width_px:
+                max_dock_stack_width_px = elem.w
+            if elem.w > 340:
+                bounded_layout = false
+            rounded_surface_count = rounded_surface_count + 1
+        elif elem.kind == "widget_gallery":
+            has_widget_gallery = true
+            if elem.w > max_widget_gallery_width_px:
+                max_widget_gallery_width_px = elem.w
+            if elem.w > 440:
+                bounded_layout = false
+            rounded_surface_count = rounded_surface_count + 1
         elif elem.kind == "taskbar":
             rounded_surface_count = rounded_surface_count + 1
         elif elem.kind == "decoration" or elem.kind == "glass_panel" or elem.kind == "motion_window":
             rounded_surface_count = rounded_surface_count + 1
     if has_control_center:
         min_touch_target_height_px = _scene_touch_target_height_px(html)
+    val config = modern_wm_scene_theme_config()
+    val layout_policy_ready = _scene_layout_policy_configured(html, config)
     val translucent_surfaces = html.contains("backdrop-filter:blur") and html.contains("rgba(") and html.contains("linear-gradient")
-    val has_all_motion_affordances = has_command_palette and has_control_center and has_desktop_widgets and has_window_overview and has_snap_preview and has_notification_toast and has_notification_center and has_live_activity and has_workspace_switcher and has_shortcut_overlay and has_app_launcher and has_context_menu and has_snap_layouts and has_window_switcher and has_quick_settings and hot_corner_count == 4 and has_resize_hud and has_gesture_hints and has_taskbar_preview and has_stage_rail and has_screen_capture and has_clipboard_history and has_privacy_indicator and has_system_hud
+    val material_policy_ready = _scene_material_policy_configured(html, config)
+    val has_all_motion_affordances = has_command_palette and has_control_center and has_desktop_widgets and has_window_overview and has_snap_preview and has_notification_toast and has_notification_center and has_live_activity and has_workspace_switcher and has_shortcut_overlay and has_app_launcher and has_context_menu and has_snap_layouts and has_window_switcher and has_quick_settings and hot_corner_count == 4 and has_resize_hud and has_gesture_hints and has_taskbar_preview and has_stage_rail and has_screen_capture and has_clipboard_history and has_privacy_indicator and has_system_hud and has_wallpaper_picker and has_dock_stack and has_widget_gallery
     val motion_can_disable = has_all_motion_affordances and html.contains("data-motion-can-disable='true'") and html.contains("body[data-motion-mode='off']") and html.contains("animation:none!important")
     val reduced_motion_duration_ms = if has_all_motion_affordances and html.contains("data-reduced-motion-duration-ms='80'") and html.contains("animation-duration:80ms"): 80 else: 0
-    val passed = theme_configured and round_scrollbars and round_icon_converter and titlebar_input_ready and traffic_controls_ready and animated_background_ready and window_interaction_ready and command_palette_ready and theme_accent_controls_ready and focus_depth_ready and lifecycle_animation_ready and taskbar_interaction_ready and dock_magnification_ready and notification_feedback_ready and notification_center_ready and live_activity_ready and workspace_switcher_ready and keyboard_shortcut_overlay_ready and app_launcher_ready and context_menu_ready and snap_layouts_ready and window_switcher_ready and quick_settings_ready and hot_corners_ready and resize_hud_ready and gesture_hints_ready and taskbar_preview_ready and stage_rail_ready and screen_capture_ready and clipboard_history_ready and privacy_indicator_ready and system_hud_ready and color_checked and bounded_layout and translucent_surfaces and rounded_surface_count >= 15 and max_command_palette_width_px <= 680 and max_control_center_width_px <= 320 and max_desktop_widget_width_px <= 260 and max_notification_width_px <= 360 and max_notification_center_width_px <= 340 and max_live_activity_width_px <= 420 and max_workspace_switcher_width_px <= 360 and max_shortcut_overlay_width_px <= 420 and max_app_launcher_width_px <= 520 and max_context_menu_width_px <= 280 and max_snap_layouts_width_px <= 360 and max_window_switcher_width_px <= 460 and max_quick_settings_width_px <= 300 and max_hot_corner_size_px <= 44 and max_resize_hud_width_px <= 240 and max_gesture_hint_width_px <= 360 and max_taskbar_preview_width_px <= 320 and max_stage_rail_width_px <= 88 and max_screen_capture_width_px <= 560 and max_clipboard_history_width_px <= 360 and max_privacy_indicator_width_px <= 300 and max_system_hud_width_px <= 280 and min_overview_card_width_px >= 180 and min_touch_target_height_px >= 44 and motion_can_disable and reduced_motion_duration_ms == 80
+    val passed = theme_configured and round_scrollbars and round_icon_converter and titlebar_input_ready and traffic_controls_ready and animated_background_ready and window_interaction_ready and command_palette_ready and theme_accent_controls_ready and focus_depth_ready and lifecycle_animation_ready and taskbar_interaction_ready and dock_magnification_ready and notification_feedback_ready and notification_center_ready and live_activity_ready and workspace_switcher_ready and keyboard_shortcut_overlay_ready and app_launcher_ready and context_menu_ready and snap_layouts_ready and window_switcher_ready and quick_settings_ready and hot_corners_ready and resize_hud_ready and gesture_hints_ready and taskbar_preview_ready and stage_rail_ready and screen_capture_ready and clipboard_history_ready and privacy_indicator_ready and system_hud_ready and wallpaper_picker_ready and dock_stack_ready and widget_gallery_ready and color_checked and bounded_layout and layout_policy_ready and translucent_surfaces and material_policy_ready and rounded_surface_count >= 15 and max_command_palette_width_px <= 680 and max_control_center_width_px <= 320 and max_desktop_widget_width_px <= 260 and max_notification_width_px <= 360 and max_notification_center_width_px <= 340 and max_live_activity_width_px <= 420 and max_workspace_switcher_width_px <= 360 and max_shortcut_overlay_width_px <= 420 and max_app_launcher_width_px <= 520 and max_context_menu_width_px <= 280 and max_snap_layouts_width_px <= 360 and max_window_switcher_width_px <= 460 and max_quick_settings_width_px <= 300 and max_hot_corner_size_px <= 44 and max_resize_hud_width_px <= 240 and max_gesture_hint_width_px <= 360 and max_taskbar_preview_width_px <= 320 and max_stage_rail_width_px <= 88 and max_screen_capture_width_px <= 560 and max_clipboard_history_width_px <= 360 and max_privacy_indicator_width_px <= 300 and max_system_hud_width_px <= 280 and max_wallpaper_picker_width_px <= 380 and max_dock_stack_width_px <= 340 and max_widget_gallery_width_px <= 440 and min_overview_card_width_px >= 180 and min_touch_target_height_px >= 44 and motion_can_disable and reduced_motion_duration_ms == 80
     WmSceneVisualQualityReport(
         passed: passed,
         theme_configured: theme_configured,
@@ -717,10 +799,17 @@ fn wm_scene_visual_quality_report(scene: WmSceneSpec) -> WmSceneVisualQualityRep
         clipboard_history_ready: clipboard_history_ready,
         privacy_indicator_ready: privacy_indicator_ready,
         system_hud_ready: system_hud_ready,
+        wallpaper_picker_ready: wallpaper_picker_ready,
+        dock_stack_ready: dock_stack_ready,
+        widget_gallery_ready: widget_gallery_ready,
         contrast_ratio_x100: contrast_ratio_x100,
         color_checked: color_checked,
         bounded_layout: bounded_layout,
         translucent_surfaces: translucent_surfaces,
+        material_policy_ready: material_policy_ready,
+        glass_blur_px: config.blur_px,
+        glass_saturation_pct: config.glass_saturation_pct,
+        glass_opacity_floor_x100: config.glass_opacity_floor_x100,
         rounded_surface_count: rounded_surface_count,
         max_command_palette_width_px: max_command_palette_width_px,
         max_control_center_width_px: max_control_center_width_px,
@@ -744,8 +833,15 @@ fn wm_scene_visual_quality_report(scene: WmSceneSpec) -> WmSceneVisualQualityRep
         max_clipboard_history_width_px: max_clipboard_history_width_px,
         max_privacy_indicator_width_px: max_privacy_indicator_width_px,
         max_system_hud_width_px: max_system_hud_width_px,
+        max_wallpaper_picker_width_px: max_wallpaper_picker_width_px,
+        max_dock_stack_width_px: max_dock_stack_width_px,
+        max_widget_gallery_width_px: max_widget_gallery_width_px,
         min_overview_card_width_px: min_overview_card_width_px,
         min_touch_target_height_px: min_touch_target_height_px,
+        layout_policy_ready: layout_policy_ready,
+        layout_safe_area_px: config.layout_safe_area_px,
+        layout_panel_gap_px: config.layout_panel_gap_px,
+        layout_min_touch_target_px: config.layout_min_touch_target_px,
         motion_can_disable: motion_can_disable,
         reduced_motion_duration_ms: reduced_motion_duration_ms
     )
@@ -769,7 +865,7 @@ fn scene_to_html(scene: WmSceneSpec) -> text:
             body = body + "<div class='glass{focus_class}' data-window-focus='{focus}' data-elevation-layer='active-window' data-resize-surface='window' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'><button class='resize-handle resize-east' data-resize-edge='east' data-hit-size-px='44' aria-label='Resize window east'></button><button class='resize-handle resize-south' data-resize-edge='south' data-hit-size-px='44' aria-label='Resize window south'></button><button class='resize-handle resize-west' data-resize-edge='west' data-hit-size-px='44' aria-label='Resize window west'></button><button class='resize-handle resize-south-east' data-resize-edge='south-east' data-hit-size-px='44' aria-label='Resize window south east'></button></div>"
         elif elem.kind == "motion_window":
             val motion = _scene_motion_data(elem.text)
-            body = body + "<div class='motion-window {motion.class_name}' data-title='{motion.title}' data-motion-phase='{motion.phase}' data-motion-class='{motion.class_name}' data-motion-duration-ms='{motion.duration_ms}' data-reduced-motion-duration-ms='{motion.reduced_duration_ms}' data-motion-can-disable='{motion.can_disable}' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'><span class='motion-title'>{motion.title}</span></div>"
+            body = body + "<div class='motion-window {motion.class_name}' data-title='{motion.title}' data-motion-phase='{motion.phase}' data-motion-class='{motion.class_name}' data-motion-duration-ms='{motion.duration_ms}' data-reduced-motion-duration-ms='{motion.reduced_duration_ms}' data-motion-can-disable='{motion.can_disable}' data-motion-easing='{motion.easing}' data-motion-transform-origin='{motion.transform_origin}' data-dock-origin-x='{motion.dock_origin_x}' data-dock-origin-y='{motion.dock_origin_y}' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px;--dock-origin-x:{motion.dock_origin_x}px;--dock-origin-y:{motion.dock_origin_y}px'><span class='motion-title'>{motion.title}</span></div>"
         elif elem.kind == "text_label":
             body = body + "<div class='label' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'>{elem.text}</div>"
         elif elem.kind == "command_lane":
@@ -843,15 +939,16 @@ fn scene_to_html(scene: WmSceneSpec) -> text:
             body = body + "<section class='widget-gallery' role='dialog' aria-label='Widget gallery' data-motion-scope='widget-gallery' data-motion-mode='standard' data-reduced-motion-duration-ms='80' data-motion-can-disable='true' data-widget-source='desktop-gallery' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'><header class='widget-gallery-header'><strong>Widgets</strong><div class='widget-size-control' role='group' aria-label='Widget size'><button class='widget-size active' data-widget-size='small' aria-pressed='true'>Small</button><button class='widget-size' data-widget-size='medium' aria-pressed='false'>Medium</button><button class='widget-size' data-widget-size='large' aria-pressed='false'>Large</button></div></header><div class='widget-gallery-grid' role='listbox' aria-label='Available widgets'><button class='widget-gallery-card active' role='option' aria-selected='true' data-widget-kind='clock'>" + _scene_round_icon_html("widget-gallery-icon", "Clock") + "<span>Clock</span></button><button class='widget-gallery-card' role='option' aria-selected='false' data-widget-kind='weather'>" + _scene_round_icon_html("widget-gallery-icon", "Weather") + "<span>Weather</span></button><button class='widget-gallery-card' role='option' aria-selected='false' data-widget-kind='build'>" + _scene_round_icon_html("widget-gallery-icon", "Build") + "<span>Build</span></button></div><button class='widget-add-button' data-widget-action='add'>Add</button></section>"
     "<!DOCTYPE html><html><head><style>" +
     "body{{margin:0;width:" + w + "px;height:" + h + "px;background:#0f172a}}" +
+    "[data-layout-contained='true']{{contain:layout paint}}.wm-panel{{box-sizing:border-box;overflow:hidden;min-height:44px}}" +
     ".desktop{{position:absolute;overflow:hidden;background:#0f172a}}.desktop::before{{content:'';position:absolute;inset:-12%;background:radial-gradient(circle at 18% 22%,rgba(37,99,235,.28),transparent 28%),radial-gradient(circle at 78% 72%,rgba(20,184,166,.18),transparent 26%),radial-gradient(circle at 46% 48%,rgba(255,255,255,.08),transparent 34%);animation:wm-bg-drift 24000ms ease-in-out infinite alternate}}" +
     ".glass{{position:absolute;background:linear-gradient(180deg,rgba(255,255,255,.16),rgba(255,255,255,.06));border:1px solid rgba(255,255,255,.16);border-top:0;border-radius:0 0 18px 18px;backdrop-filter:blur(18px) saturate(170%);box-shadow:0 22px 60px rgba(0,0,0,.34)}}" +
     ".bar{{position:absolute;display:grid;grid-template-columns:12px 12px 12px 18px minmax(64px,.8fr) minmax(96px,1fr) auto;gap:7px;align-items:center;background:linear-gradient(180deg,rgba(255,255,255,.18),rgba(255,255,255,.07));color:white;font:600 12px system-ui;padding:0 12px;box-sizing:border-box;overflow:hidden;border:1px solid rgba(255,255,255,.18);border-bottom:0;border-radius:18px 18px 0 0;backdrop-filter:blur(20px) saturate(170%);cursor:grab}}.bar:active{{cursor:grabbing}}.bar.focused{{box-shadow:0 0 0 1px rgba(96,165,250,.34),0 18px 46px rgba(37,99,235,.24);transform:translateY(-1px)}}.glass.focused{{box-shadow:0 0 0 1px rgba(96,165,250,.28),0 30px 90px rgba(37,99,235,.22),0 22px 60px rgba(0,0,0,.34)}}" +
     ".traffic{{position:relative;width:12px;height:12px;border:0;padding:0;border-radius:999px;color:transparent;cursor:pointer;box-shadow:inset 0 0 0 1px rgba(0,0,0,.18),0 1px 4px rgba(0,0,0,.24);transition:transform 120ms ease,filter 120ms ease}}.traffic::before{{content:'';position:absolute;inset:-8px;border-radius:999px}}.traffic:focus-visible{{outline:2px solid rgba(96,165,250,.82);outline-offset:3px}}.traffic:hover{{transform:scale(1.08);filter:brightness(1.06)}}.traffic-close{{background:#ff5f57}}.traffic-min{{background:#ffbd2e}}.traffic-max{{background:#28c840}}" +
     ".bar-icon{{width:18px;height:18px;font-size:10px}}.bar-title{{min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}}.bar-command-input{{min-width:140px;width:100%;height:22px;border-radius:999px;padding:0 10px;box-sizing:border-box;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);color:#dbeafe;font:600 11px system-ui;outline:none;overflow:hidden;text-overflow:ellipsis}}.bar-command-input:focus{{border-color:rgba(96,165,250,.72);box-shadow:0 0 0 3px rgba(96,165,250,.18)}}.bar-context{{height:22px;border-radius:999px;padding:0 10px;display:flex;align-items:center;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.10);color:#cbd5e1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}}" +
     ".resize-handle{{position:absolute;border:0;padding:0;background:transparent;color:transparent;z-index:3}}.resize-handle::before{{content:'';position:absolute;inset:-16px;border-radius:999px}}.resize-handle:focus-visible{{outline:2px solid rgba(96,165,250,.82);outline-offset:3px}}.resize-east{{right:-4px;top:18px;width:8px;height:calc(100% - 36px);cursor:ew-resize}}.resize-west{{left:-4px;top:18px;width:8px;height:calc(100% - 36px);cursor:ew-resize}}.resize-south{{left:18px;right:18px;bottom:-4px;height:8px;cursor:ns-resize}}.resize-south-east{{right:2px;bottom:2px;width:16px;height:16px;border-radius:999px;background:rgba(96,165,250,.42);box-shadow:0 0 0 1px rgba(255,255,255,.26) inset;cursor:nwse-resize}}" +
-    ".round-icon{{border-radius:999px;display:inline-grid;place-items:center;overflow:hidden;background:linear-gradient(135deg,#2563eb,rgba(255,255,255,.22));color:white;font-weight:800;box-shadow:inset 0 1px 0 rgba(255,255,255,.22),0 2px 8px rgba(0,0,0,.22);clip-path:circle(50% at 50% 50%)}}.round-icon.icon-normalized-square .icon-image-placeholder{{width:100%;height:100%;border-radius:inherit;background:linear-gradient(135deg,rgba(255,255,255,.28),rgba(37,99,235,.72));object-fit:cover}}.round-icon .icon-glyph{{line-height:1}}" +
+    ".round-icon{{border-radius:999px;display:inline-grid;place-items:center;overflow:hidden;background:linear-gradient(135deg,#2563eb,rgba(255,255,255,.22));color:white;font-weight:800;box-shadow:inset 0 1px 0 rgba(255,255,255,.22),0 2px 8px rgba(0,0,0,.22);clip-path:circle(50% at 50% 50%);isolation:isolate}}.round-icon.icon-normalized-square{{padding:3px;box-sizing:border-box;background:linear-gradient(135deg,rgba(255,255,255,.30),rgba(15,23,42,.44));box-shadow:inset 0 1px 0 rgba(255,255,255,.26),0 4px 14px rgba(0,0,0,.28)}}.round-icon.icon-normalized-square .icon-image-placeholder{{width:100%;height:100%;border-radius:inherit;background:linear-gradient(135deg,rgba(255,255,255,.28),rgba(37,99,235,.72));object-fit:cover;object-position:center;aspect-ratio:1 / 1}}.round-icon.icon-glyph-to-round{{text-transform:uppercase;text-shadow:0 1px 3px rgba(0,0,0,.32)}}.round-icon .icon-glyph{{line-height:1}}" +
     ".wm-scrollable,.glass,.window-overview,.control-center,.command-palette,.app-launcher{{scrollbar-width:thin;scrollbar-color:rgba(96,165,250,.58) transparent}}.wm-scrollable::-webkit-scrollbar,.glass::-webkit-scrollbar,.window-overview::-webkit-scrollbar,.control-center::-webkit-scrollbar,.command-palette::-webkit-scrollbar,.app-launcher::-webkit-scrollbar{{width:10px;height:10px}}.wm-scrollable::-webkit-scrollbar-track,.glass::-webkit-scrollbar-track,.window-overview::-webkit-scrollbar-track,.control-center::-webkit-scrollbar-track,.command-palette::-webkit-scrollbar-track,.app-launcher::-webkit-scrollbar-track{{background:transparent}}.wm-scrollable::-webkit-scrollbar-thumb,.glass::-webkit-scrollbar-thumb,.window-overview::-webkit-scrollbar-thumb,.control-center::-webkit-scrollbar-thumb,.command-palette::-webkit-scrollbar-thumb,.app-launcher::-webkit-scrollbar-thumb{{background:linear-gradient(180deg,rgba(96,165,250,.62),rgba(255,255,255,.18));border:3px solid transparent;background-clip:padding-box;border-radius:999px}}.wm-scrollable::-webkit-scrollbar-thumb:hover{{background:#2563eb}}" +
-    ".motion-window{{position:absolute;border-radius:18px;background:linear-gradient(180deg,rgba(255,255,255,.18),rgba(255,255,255,.06));border:1px solid rgba(255,255,255,.16);backdrop-filter:blur(18px) saturate(170%);box-shadow:0 22px 60px rgba(0,0,0,.34);overflow:hidden;transform-origin:center bottom}}.motion-title{{position:absolute;left:14px;top:10px;color:white;font:600 12px system-ui}}.wm-window-opening{{animation:wm-window-open 240ms cubic-bezier(.2,.8,.2,1) both}}.wm-window-restoring{{animation:wm-window-restore 240ms cubic-bezier(.2,.8,.2,1) both}}.wm-window-closing{{animation:wm-window-close 180ms cubic-bezier(.4,0,.2,1) both}}.wm-window-minimizing{{animation:wm-window-minimize 180ms cubic-bezier(.4,0,.2,1) both}}.wm-window-focused{{box-shadow:0 24px 70px rgba(37,99,235,.32)}}" +
+    ".motion-window{{position:absolute;border-radius:18px;background:linear-gradient(180deg,rgba(255,255,255,.18),rgba(255,255,255,.06));border:1px solid rgba(255,255,255,.16);backdrop-filter:blur(18px) saturate(170%);box-shadow:0 22px 60px rgba(0,0,0,.34);overflow:hidden;transform-origin:center bottom}}.motion-window[data-motion-transform-origin='dock']{{transform-origin:var(--dock-origin-x) var(--dock-origin-y)}}.motion-title{{position:absolute;left:14px;top:10px;color:white;font:600 12px system-ui}}.wm-window-opening{{animation:wm-window-open 240ms cubic-bezier(.2,.8,.2,1) both}}.wm-window-restoring{{animation:wm-window-restore 240ms cubic-bezier(.2,.8,.2,1) both}}.wm-window-closing{{animation:wm-window-close 180ms cubic-bezier(.4,0,.2,1) both}}.wm-window-minimizing{{animation:wm-window-minimize 180ms cubic-bezier(.4,0,.2,1) both}}.wm-window-focused{{box-shadow:0 24px 70px rgba(37,99,235,.32)}}" +
     ".label{{position:absolute;color:white;font:600 12px system-ui;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}}" +
     ".command-lane{{position:absolute;background:linear-gradient(180deg,rgba(255,255,255,.10),rgba(255,255,255,.04));border-bottom:1px solid rgba(255,255,255,.10);backdrop-filter:blur(18px)}}" +
     ".command-clock{{position:absolute;color:white;font:600 12px system-ui;display:flex;align-items:center;justify-content:center}}" +
@@ -861,7 +958,7 @@ fn scene_to_html(scene: WmSceneSpec) -> text:
     ".taskbar-round-icon{{width:26px;height:26px;font-size:11px}}" +
     ".taskbar-launcher{{background:#2563eb}}.taskbar-running{{background:#475569}}.taskbar-launcher:hover,.taskbar-running:hover{{transform:translateY(-6px) scale(1.18);filter:brightness(1.12);box-shadow:0 16px 34px rgba(37,99,235,.32)}}.taskbar-launcher:hover + .taskbar-launcher,.taskbar-launcher:hover + .taskbar-running,.taskbar-running:hover + .taskbar-launcher,.taskbar-running:hover + .taskbar-running{{transform:translateY(-2px) scale(1.07)}}.taskbar-launcher:focus-visible,.taskbar-running:focus-visible{{outline:2px solid rgba(96,165,250,.82);outline-offset:3px;transform:translateY(-6px) scale(1.18)}}.taskbar-running-indicator{{position:absolute;left:50%;bottom:4px;width:18px;height:3px;border-radius:999px;background:#60a5fa;transform:translateX(-50%);animation:wm-taskbar-indicator 1200ms ease-in-out infinite}}" +
     ".desktop-widgets{{position:absolute;display:grid;gap:8px;max-width:260px;pointer-events:none;animation:wm-widget-float 240ms cubic-bezier(.2,.8,.2,1) both}}.desktop-widget{{border-radius:14px;background:linear-gradient(180deg,rgba(255,255,255,.14),rgba(255,255,255,.06));border:1px solid rgba(255,255,255,.14);box-shadow:0 14px 34px rgba(0,0,0,.22);backdrop-filter:blur(20px) saturate(170%);color:white;font:600 12px system-ui;padding:8px 10px;display:flex;align-items:center;justify-content:space-between;min-height:26px}}" +
-    ".command-palette{{position:absolute;display:grid;gap:10px;max-width:680px;border-radius:22px;background:linear-gradient(180deg,rgba(2,6,23,.92),rgba(15,23,42,.74));border:1px solid rgba(255,255,255,.16);box-shadow:0 30px 90px rgba(0,0,0,.44);backdrop-filter:blur(28px) saturate(170%);padding:14px;box-sizing:border-box;animation:wm-command-in 160ms cubic-bezier(.2,.8,.2,1) both}}.command-palette-input{{width:100%;height:44px;border-radius:14px;border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.08);color:white;font:600 13px system-ui;padding:0 12px;box-sizing:border-box}}.command-palette-list{{display:grid;gap:8px;overflow:auto}}.command-palette-item{{min-height:44px;border:1px solid rgba(255,255,255,.12);border-radius:14px;background:rgba(255,255,255,.07);color:white;font:600 12px system-ui;display:grid;grid-template-columns:28px 1fr auto;align-items:center;gap:10px;padding:8px 10px;text-align:left}}.command-palette-item.active{{box-shadow:0 0 0 2px rgba(37,99,235,.56)}}.command-palette-icon{{width:28px;height:28px;font-size:11px}}.command-palette-item kbd{{border-radius:8px;background:rgba(255,255,255,.10);padding:3px 7px;color:#cbd5e1}}" +
+    ".command-palette{{position:absolute;display:grid;gap:10px;max-width:680px;border-radius:22px;background:linear-gradient(180deg,rgba(2,6,23,.92),rgba(15,23,42,.74));border:1px solid rgba(255,255,255,.16);box-shadow:0 30px 90px rgba(0,0,0,.44);backdrop-filter:blur(28px) saturate(170%);padding:14px;box-sizing:border-box;animation:wm-command-in 160ms cubic-bezier(.2,.8,.2,1) both}}.command-palette-input{{width:100%;height:44px;border-radius:14px;border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.08);color:white;font:600 13px system-ui;padding:0 12px;box-sizing:border-box}}.command-palette-list{{display:grid;gap:8px;overflow:auto;min-width:0}}.command-palette-item{{min-height:44px;border:1px solid rgba(255,255,255,.12);border-radius:14px;background:rgba(255,255,255,.07);color:white;font:600 12px system-ui;display:grid;grid-template-columns:28px minmax(0,1fr) auto;align-items:center;gap:10px;padding:8px 10px;text-align:left}}.command-palette-item span{{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}}.command-palette-item.active{{box-shadow:0 0 0 2px rgba(37,99,235,.56)}}.command-palette-icon{{width:28px;height:28px;font-size:11px}}.command-palette-item kbd{{border-radius:8px;background:rgba(255,255,255,.10);padding:3px 7px;color:#cbd5e1}}" +
     ".control-center{{position:absolute;display:grid;grid-template-columns:1fr 1fr;gap:8px;max-width:320px;border-radius:18px;background:linear-gradient(180deg,rgba(15,23,42,.88),rgba(15,23,42,.68));border:1px solid rgba(255,255,255,.16);box-shadow:0 22px 70px rgba(0,0,0,.36);backdrop-filter:blur(24px) saturate(170%);padding:12px;box-sizing:border-box;animation:wm-control-in 180ms cubic-bezier(.2,.8,.2,1) both}}.control-center button{{min-height:44px;border:1px solid rgba(255,255,255,.12);border-radius:12px;background:rgba(255,255,255,.08);color:white;font:600 11px system-ui}}.accent-controls{{grid-column:1 / -1;min-height:44px;border-radius:14px;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12);display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;padding:7px;box-sizing:border-box}}.accent-swatch{{min-height:30px;border-radius:999px;border:1px solid rgba(255,255,255,.20);box-shadow:inset 0 1px 0 rgba(255,255,255,.24);padding:0}}.accent-swatch[data-accent-choice='blue']{{background:#2563eb}}.accent-swatch[data-accent-choice='teal']{{background:#14b8a6}}.accent-swatch[data-accent-choice='rose']{{background:#e11d48}}.accent-swatch.active{{outline:2px solid rgba(255,255,255,.72);outline-offset:2px}}.accent-swatch:focus-visible{{outline:2px solid rgba(96,165,250,.82);outline-offset:3px}}" +
     ".window-overview{{position:absolute;border-radius:22px;background:rgba(2,6,23,.66);border:1px solid rgba(255,255,255,.14);box-shadow:0 30px 90px rgba(0,0,0,.42);backdrop-filter:blur(28px) saturate(160%);padding:18px;box-sizing:border-box;animation:wm-overview-in 200ms cubic-bezier(.2,.8,.2,1) both}}.overview-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px}}.overview-card{{min-height:112px;border:1px solid rgba(255,255,255,.16);border-radius:16px;background:linear-gradient(180deg,rgba(255,255,255,.14),rgba(255,255,255,.06));color:white;text-align:left;padding:12px;display:grid;gap:8px}}.overview-card.active{{box-shadow:0 0 0 2px rgba(37,99,235,.55)}}.overview-icon{{width:28px;height:28px;border-radius:999px;display:grid;place-items:center;background:#2563eb}}.overview-title,.overview-meta{{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}}" +
     ".snap-preview{{position:absolute;border-radius:20px;border:1px solid rgba(96,165,250,.72);background:rgba(37,99,235,.18);box-shadow:0 0 0 1px rgba(255,255,255,.10) inset,0 18px 48px rgba(37,99,235,.22);pointer-events:none;animation:wm-snap-pulse 900ms ease-in-out infinite}}" +
@@ -888,7 +985,7 @@ fn scene_to_html(scene: WmSceneSpec) -> text:
     "@keyframes wm-bg-drift{{from{{transform:translate3d(-1.5%,-1%,0) scale(1)}}to{{transform:translate3d(1.5%,1%,0) scale(1.03)}}}}@keyframes wm-window-open{{from{{opacity:0;transform:translateY(10px) scale(.96)}}to{{opacity:1;transform:translateY(0) scale(1)}}}}@keyframes wm-window-restore{{from{{opacity:.72;transform:translateY(28px) scale(.92)}}to{{opacity:1;transform:translateY(0) scale(1)}}}}@keyframes wm-window-close{{from{{opacity:1;transform:translateY(0) scale(1)}}to{{opacity:0;transform:translateY(8px) scale(.94)}}}}@keyframes wm-window-minimize{{from{{opacity:1;transform:translateY(0) scale(1)}}to{{opacity:.24;transform:translateY(54px) scale(.72)}}}}@keyframes wm-command-in{{from{{opacity:0;transform:translateY(-8px) scale(.98)}}to{{opacity:1;transform:translateY(0) scale(1)}}}}@keyframes wm-widget-float{{from{{opacity:0;transform:translateY(10px) scale(.98)}}to{{opacity:1;transform:translateY(0) scale(1)}}}}@keyframes wm-control-in{{from{{opacity:0;transform:translateY(-8px) scale(.98)}}to{{opacity:1;transform:translateY(0) scale(1)}}}}@keyframes wm-overview-in{{from{{opacity:0;transform:scale(.98)}}to{{opacity:1;transform:scale(1)}}}}@keyframes wm-snap-pulse{{0%,100%{{opacity:.76}}50%{{opacity:1}}}}@keyframes wm-snap-layouts-in{{from{{opacity:0;transform:translateY(6px) scale(.98)}}to{{opacity:1;transform:translateY(0) scale(1)}}}}@keyframes wm-switcher-in{{from{{opacity:0;transform:translateY(8px) scale(.98)}}to{{opacity:1;transform:translateY(0) scale(1)}}}}@keyframes wm-quick-settings-in{{from{{opacity:0;transform:translateY(-6px) scale(.98)}}to{{opacity:1;transform:translateY(0) scale(1)}}}}@keyframes wm-notification-center-in{{from{{opacity:0;transform:translateX(14px) scale(.98)}}to{{opacity:1;transform:translateX(0) scale(1)}}}}@keyframes wm-live-activity-in{{from{{opacity:0;transform:translateY(-6px) scale(.98)}}to{{opacity:1;transform:translateY(0) scale(1)}}}}@keyframes wm-live-activity-progress{{0%,100%{{filter:brightness(1)}}50%{{filter:brightness(1.25)}}}}@keyframes wm-taskbar-indicator{{0%,100%{{opacity:.72;transform:translateX(-50%) scaleX(.82)}}50%{{opacity:1;transform:translateX(-50%) scaleX(1)}}}}@keyframes wm-toast-in{{from{{opacity:0;transform:translateX(18px) scale(.98)}}to{{opacity:1;transform:translateX(0) scale(1)}}}}@keyframes wm-toast-out{{from{{opacity:1;transform:translateX(0) scale(1)}}to{{opacity:0;transform:translateX(18px) scale(.98)}}}}@keyframes wm-toast-progress{{from{{transform:scaleX(1)}}to{{transform:scaleX(0)}}}}@keyframes wm-workspace-in{{from{{opacity:0;transform:translateY(10px) scale(.98)}}to{{opacity:1;transform:translateY(0) scale(1)}}}}@keyframes wm-workspace-slide{{from{{transform:translateX(8px) scaleX(.92)}}to{{transform:translateX(0) scaleX(1)}}}}@keyframes wm-shortcut-in{{from{{opacity:0;transform:translateY(8px) scale(.98)}}to{{opacity:1;transform:translateY(0) scale(1)}}}}@keyframes wm-launcher-in{{from{{opacity:0;transform:translateY(12px) scale(.97)}}to{{opacity:1;transform:translateY(0) scale(1)}}}}@keyframes wm-menu-in{{from{{opacity:0;transform:translateY(4px) scale(.98)}}to{{opacity:1;transform:translateY(0) scale(1)}}}}@keyframes wm-hot-corner-pulse{{0%,100%{{opacity:.44;transform:scale(.72)}}50%{{opacity:1;transform:scale(1)}}}}@keyframes wm-resize-hud-in{{from{{opacity:0;transform:translateY(6px) scale(.98)}}to{{opacity:1;transform:translateY(0) scale(1)}}}}@keyframes wm-gesture-hints-in{{from{{opacity:0;transform:translateX(10px) scale(.98)}}to{{opacity:1;transform:translateX(0) scale(1)}}}}@keyframes wm-taskbar-preview-in{{from{{opacity:0;transform:translateY(8px) scale(.98)}}to{{opacity:1;transform:translateY(0) scale(1)}}}}@keyframes wm-stage-rail-in{{from{{opacity:0;transform:translateX(-10px) scale(.98)}}to{{opacity:1;transform:translateX(0) scale(1)}}}}@keyframes wm-capture-in{{from{{opacity:0;transform:translateY(8px) scale(.98)}}to{{opacity:1;transform:translateY(0) scale(1)}}}}@keyframes wm-clipboard-in{{from{{opacity:0;transform:translateY(8px) scale(.98)}}to{{opacity:1;transform:translateY(0) scale(1)}}}}@keyframes wm-privacy-in{{from{{opacity:0;transform:translateY(-6px) scale(.98)}}to{{opacity:1;transform:translateY(0) scale(1)}}}}@keyframes wm-privacy-pulse{{0%,100%{{opacity:.72;transform:scale(.86)}}50%{{opacity:1;transform:scale(1)}}}}@keyframes wm-system-hud-in{{from{{opacity:0;transform:translateY(8px) scale(.96)}}to{{opacity:1;transform:translateY(0) scale(1)}}}}@keyframes wm-wallpaper-picker-in{{from{{opacity:0;transform:translateY(8px) scale(.98)}}to{{opacity:1;transform:translateY(0) scale(1)}}}}@keyframes wm-wallpaper-orbit{{0%,100%{{transform:translateX(8px)}}50%{{transform:translateX(210px)}}}}@keyframes wm-dock-stack-in{{from{{opacity:0;transform:translateY(12px) scale(.96)}}to{{opacity:1;transform:translateY(0) scale(1)}}}}@keyframes wm-dock-stack-fan{{from{{opacity:0;transform:translateY(12px) rotate(-4deg)}}to{{opacity:1;transform:translateY(0) rotate(0)}}}}@keyframes wm-widget-gallery-in{{from{{opacity:0;transform:translateY(8px) scale(.98)}}to{{opacity:1;transform:translateY(0) scale(1)}}}}@keyframes wm-widget-card-in{{from{{opacity:0;transform:translateY(8px)}}to{{opacity:1;transform:translateY(0)}}}}" +
     "@media (prefers-reduced-motion: reduce){{.desktop::before,.motion-window,.command-palette,.desktop-widgets,.control-center,.window-overview,.snap-preview,.snap-layouts,.window-switcher,.quick-settings,.notification-center,.live-activity,.live-activity-progress span,.taskbar-running-indicator,.notification-toast,.toast-progress,.workspace-switcher,.workspace-active-pill,.shortcut-overlay,.app-launcher,.context-menu,.hot-corner-ring,.resize-hud,.gesture-hints,.taskbar-preview,.stage-rail,.screen-capture-overlay,.clipboard-history,.privacy-indicator,.privacy-dot,.system-hud,.wallpaper-picker,.wallpaper-preview-orbit,.dock-stack,.dock-stack-item,.widget-gallery,.widget-gallery-card{{animation-duration:80ms;animation-iteration-count:1}}}}" +
     "body[data-motion-mode='reduced'] .desktop::before,body[data-motion-mode='reduced'] .motion-window,body[data-motion-mode='reduced'] .command-palette,body[data-motion-mode='reduced'] .desktop-widgets,body[data-motion-mode='reduced'] .control-center,body[data-motion-mode='reduced'] .window-overview,body[data-motion-mode='reduced'] .snap-preview,body[data-motion-mode='reduced'] .snap-layouts,body[data-motion-mode='reduced'] .window-switcher,body[data-motion-mode='reduced'] .quick-settings,body[data-motion-mode='reduced'] .notification-center,body[data-motion-mode='reduced'] .live-activity,body[data-motion-mode='reduced'] .live-activity-progress span,body[data-motion-mode='reduced'] .taskbar-running-indicator,body[data-motion-mode='reduced'] .notification-toast,body[data-motion-mode='reduced'] .toast-progress,body[data-motion-mode='reduced'] .workspace-switcher,body[data-motion-mode='reduced'] .workspace-active-pill,body[data-motion-mode='reduced'] .shortcut-overlay,body[data-motion-mode='reduced'] .app-launcher,body[data-motion-mode='reduced'] .context-menu,body[data-motion-mode='reduced'] .hot-corner-ring,body[data-motion-mode='reduced'] .resize-hud,body[data-motion-mode='reduced'] .gesture-hints,body[data-motion-mode='reduced'] .taskbar-preview,body[data-motion-mode='reduced'] .stage-rail,body[data-motion-mode='reduced'] .screen-capture-overlay,body[data-motion-mode='reduced'] .clipboard-history,body[data-motion-mode='reduced'] .privacy-indicator,body[data-motion-mode='reduced'] .privacy-dot,body[data-motion-mode='reduced'] .system-hud,body[data-motion-mode='reduced'] .wallpaper-picker,body[data-motion-mode='reduced'] .dock-stack,body[data-motion-mode='reduced'] .widget-gallery{{animation-duration:80ms;animation-iteration-count:1}}body[data-motion-mode='off'] .desktop::before,body[data-motion-mode='off'] .motion-window,body[data-motion-mode='off'] .command-palette,body[data-motion-mode='off'] .desktop-widgets,body[data-motion-mode='off'] .control-center,body[data-motion-mode='off'] .window-overview,body[data-motion-mode='off'] .snap-preview,body[data-motion-mode='off'] .snap-layouts,body[data-motion-mode='off'] .window-switcher,body[data-motion-mode='off'] .quick-settings,body[data-motion-mode='off'] .notification-center,body[data-motion-mode='off'] .live-activity,body[data-motion-mode='off'] .live-activity-progress span,body[data-motion-mode='off'] .taskbar-running-indicator,body[data-motion-mode='off'] .notification-toast,body[data-motion-mode='off'] .toast-progress,body[data-motion-mode='off'] .workspace-switcher,body[data-motion-mode='off'] .workspace-active-pill,body[data-motion-mode='off'] .shortcut-overlay,body[data-motion-mode='off'] .app-launcher,body[data-motion-mode='off'] .context-menu,body[data-motion-mode='off'] .hot-corner-ring,body[data-motion-mode='off'] .resize-hud,body[data-motion-mode='off'] .gesture-hints,body[data-motion-mode='off'] .taskbar-preview,body[data-motion-mode='off'] .stage-rail,body[data-motion-mode='off'] .screen-capture-overlay,body[data-motion-mode='off'] .clipboard-history,body[data-motion-mode='off'] .privacy-indicator,body[data-motion-mode='off'] .privacy-dot,body[data-motion-mode='off'] .system-hud,body[data-motion-mode='off'] .wallpaper-picker,body[data-motion-mode='off'] .dock-stack,body[data-motion-mode='off'] .widget-gallery{{animation:none!important;transition:none!important}}" +
-    "</style></head><body data-modern-wm='true' data-theme-configured='true' data-window-radius-px='{config.window_radius_px}' data-widget-radius-px='{config.widget_radius_px}' data-taskbar-radius-px='{config.taskbar_radius_px}' data-control-radius-px='{config.control_radius_px}' data-icon-radius-px='{config.icon_radius_px}' data-scrollbar-width-px='{config.scrollbar_width_px}' data-scrollbar-thumb-radius-px='{config.scrollbar_thumb_radius_px}' data-scrollbar-thumb-border-px='{config.scrollbar_thumb_border_px}' data-blur-px='{config.blur_px}' data-titlebar-height-px='{config.titlebar_height_px}' data-command-lane-height-px='{config.command_lane_height_px}' data-taskbar-height-px='{config.taskbar_height_px}' data-desktop-layer-z='{config.desktop_layer_z}' data-snap-layer-z='{config.snap_layer_z}' data-window-layer-z='{config.window_layer_z}' data-overlay-layer-z='{config.overlay_layer_z}' data-standard-motion-ms='{config.standard_motion_ms}' data-reduced-motion-ms='{config.reduced_motion_ms}' data-motion-mode='standard' data-motion-can-disable='{config.can_disable_motion}' data-width='" + w + "' data-height='" + h + "'>" +
+    "</style></head><body data-modern-wm='true' data-theme-configured='true' data-window-radius-px='{config.window_radius_px}' data-widget-radius-px='{config.widget_radius_px}' data-taskbar-radius-px='{config.taskbar_radius_px}' data-control-radius-px='{config.control_radius_px}' data-icon-radius-px='{config.icon_radius_px}' data-icon-inner-padding-px='{config.icon_inner_padding_px}' data-icon-mask-shape='{config.icon_mask_shape}' data-icon-image-fit='{config.icon_image_fit}' data-layout-safe-area-px='{config.layout_safe_area_px}' data-layout-panel-gap-px='{config.layout_panel_gap_px}' data-layout-min-touch-target-px='{config.layout_min_touch_target_px}' data-layout-containment='{config.layout_containment}' data-layout-contained='true' data-material-policy='{config.material_policy}' data-glass-blur-px='{config.blur_px}' data-glass-saturation-pct='{config.glass_saturation_pct}' data-glass-opacity-floor-x100='{config.glass_opacity_floor_x100}' data-scrollbar-width-px='{config.scrollbar_width_px}' data-scrollbar-thumb-radius-px='{config.scrollbar_thumb_radius_px}' data-scrollbar-thumb-border-px='{config.scrollbar_thumb_border_px}' data-blur-px='{config.blur_px}' data-titlebar-height-px='{config.titlebar_height_px}' data-command-lane-height-px='{config.command_lane_height_px}' data-taskbar-height-px='{config.taskbar_height_px}' data-desktop-layer-z='{config.desktop_layer_z}' data-snap-layer-z='{config.snap_layer_z}' data-window-layer-z='{config.window_layer_z}' data-overlay-layer-z='{config.overlay_layer_z}' data-standard-motion-ms='{config.standard_motion_ms}' data-reduced-motion-ms='{config.reduced_motion_ms}' data-motion-mode='standard' data-motion-can-disable='{config.can_disable_motion}' data-width='" + w + "' data-height='" + h + "'>" +
     body + "</body></html>"
 
 class _SceneMotionData:
@@ -898,6 +995,10 @@ class _SceneMotionData:
     duration_ms: text
     reduced_duration_ms: text
     can_disable: text
+    easing: text
+    transform_origin: text
+    dock_origin_x: text
+    dock_origin_y: text
 
 class _SceneIconData:
     id: text
@@ -936,8 +1037,8 @@ fn _scene_round_icon_html(class_name: text, source: text) -> text:
     val kind = wm_scene_icon_kind(source)
     val glyph = if source.len() > 0: source.substring(0, 1) else: "S"
     if kind == "square-to-round":
-        return "<span class='round-icon {class_name} icon-normalized-square' data-icon-normalized='square-to-round' data-icon-source='{source}'><span class='icon-image-placeholder'></span></span>"
-    "<span class='round-icon {class_name} icon-glyph-to-round' data-icon-normalized='glyph-to-round' data-icon-source='{source}'><span class='icon-glyph'>{glyph}</span></span>"
+        return "<span class='round-icon {class_name} icon-normalized-square' data-icon-normalized='square-to-round' data-icon-source='{source}' data-icon-mask='circle' data-icon-fit='cover' data-icon-fallback='{glyph}' aria-label='Normalized round icon {glyph}'><span class='icon-image-placeholder' aria-hidden='true'></span></span>"
+    "<span class='round-icon {class_name} icon-glyph-to-round' data-icon-normalized='glyph-to-round' data-icon-source='{source}' data-icon-mask='circle' data-icon-fit='glyph' data-icon-fallback='{glyph}' aria-label='Round glyph icon {glyph}'><span class='icon-glyph'>{glyph}</span></span>"
 
 fn _scene_motion_data(blob: text) -> _SceneMotionData:
     val parts = blob.split("|")
@@ -947,6 +1048,10 @@ fn _scene_motion_data(blob: text) -> _SceneMotionData:
     var duration_ms = "0"
     var reduced_duration_ms = "0"
     var can_disable = "true"
+    var easing = "ease"
+    var transform_origin = "center"
+    var dock_origin_x = "0"
+    var dock_origin_y = "0"
     if parts.len() > 0:
         title = parts[0]
     if parts.len() > 1:
@@ -959,7 +1064,15 @@ fn _scene_motion_data(blob: text) -> _SceneMotionData:
         reduced_duration_ms = parts[4]
     if parts.len() > 5:
         can_disable = parts[5]
-    _SceneMotionData(title: title, phase: phase, class_name: class_name, duration_ms: duration_ms, reduced_duration_ms: reduced_duration_ms, can_disable: can_disable)
+    if parts.len() > 6:
+        easing = parts[6]
+    if parts.len() > 7:
+        transform_origin = parts[7]
+    if parts.len() > 8:
+        dock_origin_x = parts[8]
+    if parts.len() > 9:
+        dock_origin_y = parts[9]
+    _SceneMotionData(title: title, phase: phase, class_name: class_name, duration_ms: duration_ms, reduced_duration_ms: reduced_duration_ms, can_disable: can_disable, easing: easing, transform_origin: transform_origin, dock_origin_x: dock_origin_x, dock_origin_y: dock_origin_y)
 
 fn _scene_window_title(blob: text) -> text:
     val parts = blob.split("|")
@@ -995,6 +1108,9 @@ fn _scene_theme_configured(html: text, config: WmSceneModernThemeConfig) -> bool
     html.contains("data-taskbar-radius-px='{config.taskbar_radius_px}'") and
     html.contains("data-control-radius-px='{config.control_radius_px}'") and
     html.contains("data-icon-radius-px='{config.icon_radius_px}'") and
+    html.contains("data-icon-inner-padding-px='{config.icon_inner_padding_px}'") and
+    html.contains("data-icon-mask-shape='{config.icon_mask_shape}'") and
+    html.contains("data-icon-image-fit='{config.icon_image_fit}'") and
     html.contains("data-scrollbar-width-px='{config.scrollbar_width_px}'") and
     html.contains("data-scrollbar-thumb-radius-px='{config.scrollbar_thumb_radius_px}'") and
     html.contains("data-scrollbar-thumb-border-px='{config.scrollbar_thumb_border_px}'") and
@@ -1006,9 +1122,38 @@ fn _scene_theme_configured(html: text, config: WmSceneModernThemeConfig) -> bool
     html.contains("data-snap-layer-z='{config.snap_layer_z}'") and
     html.contains("data-window-layer-z='{config.window_layer_z}'") and
     html.contains("data-overlay-layer-z='{config.overlay_layer_z}'") and
+    html.contains("data-layout-safe-area-px='{config.layout_safe_area_px}'") and
+    html.contains("data-layout-panel-gap-px='{config.layout_panel_gap_px}'") and
+    html.contains("data-layout-min-touch-target-px='{config.layout_min_touch_target_px}'") and
+    html.contains("data-layout-containment='{config.layout_containment}'") and
+    html.contains("data-material-policy='{config.material_policy}'") and
+    html.contains("data-glass-blur-px='{config.blur_px}'") and
+    html.contains("data-glass-saturation-pct='{config.glass_saturation_pct}'") and
+    html.contains("data-glass-opacity-floor-x100='{config.glass_opacity_floor_x100}'") and
     html.contains("data-standard-motion-ms='{config.standard_motion_ms}'") and
     html.contains("data-reduced-motion-ms='{config.reduced_motion_ms}'") and
     html.contains("data-motion-can-disable='{config.can_disable_motion}'")
+
+fn _scene_layout_policy_configured(html: text, config: WmSceneModernThemeConfig) -> bool:
+    html.contains("data-layout-safe-area-px='{config.layout_safe_area_px}'") and
+    html.contains("data-layout-panel-gap-px='{config.layout_panel_gap_px}'") and
+    html.contains("data-layout-min-touch-target-px='{config.layout_min_touch_target_px}'") and
+    html.contains("data-layout-containment='{config.layout_containment}'") and
+    html.contains("data-layout-contained='true'") and
+    html.contains("[data-layout-contained='true']{{contain:layout paint") and
+    html.contains(".wm-panel{{box-sizing:border-box;overflow:hidden;min-height:44px") and
+    html.contains("grid-template-columns:28px minmax(0,1fr) auto") and
+    html.contains(".command-palette-item span{{overflow:hidden;white-space:nowrap;text-overflow:ellipsis")
+
+fn _scene_material_policy_configured(html: text, config: WmSceneModernThemeConfig) -> bool:
+    html.contains("data-material-policy='{config.material_policy}'") and
+    html.contains("data-glass-blur-px='{config.blur_px}'") and
+    html.contains("data-glass-saturation-pct='{config.glass_saturation_pct}'") and
+    html.contains("data-glass-opacity-floor-x100='{config.glass_opacity_floor_x100}'") and
+    html.contains("backdrop-filter:blur(24px) saturate(170%)") and
+    html.contains("backdrop-filter:blur(28px) saturate(170%)") and
+    html.contains("rgba(255,255,255,.06)") and
+    html.contains("rgba(15,23,42,.68)")
 
 fn _scene_round_scrollbars_configured(html: text, config: WmSceneModernThemeConfig) -> bool:
     html.contains("data-scrollbar-width-px='{config.scrollbar_width_px}'") and
@@ -1030,7 +1175,17 @@ fn _scene_round_icon_converter_configured(html: text) -> bool:
     html.contains("icon-glyph-to-round") and
     html.contains("icon-image-placeholder") and
     html.contains("icon-glyph") and
-    html.contains("clip-path:circle(50% at 50% 50%)")
+    html.contains("clip-path:circle(50% at 50% 50%)") and
+    html.contains("data-icon-mask='circle'") and
+    html.contains("data-icon-fit='cover'") and
+    html.contains("data-icon-fit='glyph'") and
+    html.contains("data-icon-fallback='") and
+    html.contains("aria-label='Normalized round icon") and
+    html.contains("aria-label='Round glyph icon") and
+    html.contains(".round-icon.icon-normalized-square{{padding:3px") and
+    html.contains("object-position:center") and
+    html.contains("aspect-ratio:1 / 1") and
+    html.contains(".round-icon.icon-glyph-to-round{{text-transform:uppercase")
 
 fn _scene_titlebar_input_configured(html: text) -> bool:
     html.contains("role='toolbar' aria-label='Window titlebar'") and
@@ -1132,6 +1287,7 @@ fn _scene_lifecycle_animation_configured(html: text) -> bool:
     html.contains(".wm-window-closing{{animation:wm-window-close 180ms") and
     html.contains(".wm-window-minimizing{{animation:wm-window-minimize 180ms") and
     html.contains(".wm-window-restoring{{animation:wm-window-restore 240ms") and
+    html.contains(".motion-window[data-motion-transform-origin='dock']") and
     html.contains("body[data-motion-mode='reduced'] .motion-window") and
     html.contains("body[data-motion-mode='off'] .motion-window") and
     html.contains("animation:none!important")

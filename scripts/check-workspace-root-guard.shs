@@ -1,6 +1,6 @@
 #!/bin/sh
 # Workspace Root Write Guard
-# Audits or fixes misplaced root entries using FILE.md as the policy source.
+# Audits or fixes misplaced root entries using the root policy.
 set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
@@ -55,6 +55,10 @@ root_name() {
 }
 
 load_allowed_root() {
+    if [ ! -f FILE.md ]; then
+        load_builtin_allowed_root
+        return
+    fi
     awk '
         BEGIN { in_table = 0 }
         /^## Quick Reference/ { in_table = 1; next }
@@ -77,7 +81,51 @@ load_allowed_root() {
     ' FILE.md | sort -u
 }
 
+load_builtin_allowed_root() {
+    cat <<'EOF'
+CLAUDE.md
+README.md
+AGENTS.md
+GEMINI.md
+MCP.md
+CHANGELOG.md
+VERSION
+LICENSE
+THIRD_PARTY_NOTICES.md
+.gitignore
+.jjignore
+.gitmodules
+.gitattributes
+.envrc
+.mcp.json
+.jscpd.json
+.dockerignore
+.agents
+.claude
+.codex
+.gemini
+.github
+.spipe
+bin
+src
+test
+examples
+doc
+config
+scripts
+tools
+build
+tmp
+target
+bootstrap
+EOF
+}
+
 load_allowed_child_paths() {
+    if [ ! -f FILE.md ]; then
+        : 
+        return
+    fi
     awk '
         /^## [A-Za-z0-9_.-]+\/ / || /^## [A-Za-z0-9_.-]+\/\(/ || /^## [A-Za-z0-9_.-]+\// {
             section = $2
@@ -327,7 +375,7 @@ run_lock_apply() {
             echo "workspace-root-guard: applying Unix/macOS root write lock"
             : > "$manifest"
             protected_lock_dirs | while IFS= read -r dir; do
-                mode="$(stat -f '%Lp' "$dir" 2>/dev/null || stat -c '%a' "$dir" 2>/dev/null || echo "")"
+                mode="$(stat -c '%a' "$dir" 2>/dev/null || stat -f '%Lp' "$dir" 2>/dev/null || echo "")"
                 printf '%s %s\n' "$dir" "$mode" >> "$manifest"
                 chmod a-w "$dir"
             done
@@ -375,14 +423,17 @@ run_unlock_apply() {
 self_test() {
     tmp="$(mktemp -d "${TMPDIR:-/tmp}/wrg-self.XXXXXX")"
     trap 'rm -rf "$tmp"' EXIT INT TERM
-    cp FILE.md "$tmp/FILE.md"
+    if [ -f FILE.md ]; then
+        cp FILE.md "$tmp/FILE.md"
+    fi
     (
         cd "$tmp"
         mkdir src build
         : > README.md
         : > surprise.tmp
         git init -q
-        git add FILE.md README.md src build
+        git add README.md src build
+        [ ! -f FILE.md ] || git add FILE.md
         git commit -qm init >/dev/null 2>&1 || true
         printf '%s\n' surprise.tmp src/new_child > paths.txt
         if WRG_ROOT_DIR="$tmp" sh "$ROOT_DIR/scripts/check-workspace-root-guard.shs" audit --path-file paths.txt > out.txt 2>&1; then
@@ -438,8 +489,6 @@ if [ -n "${WRG_ROOT_DIR:-}" ]; then
     ROOT_DIR="$WRG_ROOT_DIR"
     cd "$ROOT_DIR"
 fi
-
-[ -f FILE.md ] || die "FILE.md not found at repository root"
 
 TMP_DIR="$(policy_tmp_dir)"
 trap 'rm -rf "$TMP_DIR"' EXIT INT TERM

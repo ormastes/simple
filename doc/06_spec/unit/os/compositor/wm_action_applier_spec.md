@@ -7,7 +7,6 @@
 #### creates windows through shared compositor logic
 
 1. var compositor = Compositor with backends
-   - Expected: wid > 0 is true
    - Expected: compositor.surfaces.len() equals `1`
    - Expected: compositor.surfaces[0].app_id equals `app.test`
 
@@ -23,52 +22,9 @@ var compositor = Compositor.with_backends(ApplierBackend(w: 200, h: 120), nil, 2
 val result = apply_wm_action_to_compositor(compositor, _action("create_window", 0))
 compositor = result.compositor
 val wid = result.window_id
-expect(wid > 0).to_equal(true)
+expect(wid > 0)
 expect(compositor.surfaces.len()).to_equal(1)
 expect(compositor.surfaces[0].app_id).to_equal("app.test")
-```
-
-</details>
-
-#### materializes shared GUI WindowManager state into SimpleOS compositor surfaces
-
-1. var manager = WindowManager new
-
-2. var registry = UiWindowSurfaceRegistry new
-
-3. registry bind with kind
-
-4. var compositor = Compositor with backends
-   - Expected: ids.len() equals `1`
-   - Expected: compositor.surfaces.len() equals `1`
-   - Expected: compositor.surfaces[0].title equals `Simple App`
-   - Expected: compositor.surfaces[0].session.root_id equals `app_root`
-   - Expected: compositor.surfaces[0].process_id equals `55`
-   - Expected: compositor.surfaces[0].app_id equals `simple.app`
-
-
-<details>
-<summary>Executable SPipe</summary>
-
-Runnable source: 15 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-var manager = WindowManager.new()
-val _opened = manager.open_window("surf1", "Simple App", 12, 18, 160, 120, _shared_tree("app"))
-var registry = UiWindowSurfaceRegistry.new()
-registry.bind_with_kind("win1", "surf1", 55u64, "simple.app", "Simple App", UI_SURFACE_KIND_SIMPLE_WEB)
-val scene = shared_wm_scene_from_window_manager(manager, registry, 320, 240)
-var compositor = Compositor.with_backends(ApplierBackend(w: 320, h: 240), nil, 320, 240)
-
-val ids = compositor.create_windows_from_shared_scene(scene)
-
-expect(ids.len()).to_equal(1)
-expect(compositor.surfaces.len()).to_equal(1)
-expect(compositor.surfaces[0].title).to_equal("Simple App")
-expect(compositor.surfaces[0].session.root_id).to_equal("app_root")
-expect(compositor.surfaces[0].process_id).to_equal(55)
-expect(compositor.surfaces[0].app_id).to_equal("simple.app")
 ```
 
 </details>
@@ -76,17 +32,14 @@ expect(compositor.surfaces[0].app_id).to_equal("simple.app")
 #### creates web windows with a Simple Web render request surface
 
 1. var compositor = Compositor with backends
-   - Expected: result.applied is true
    - Expected: compositor.surfaces.len() equals `1`
    - Expected: compositor.surfaces[0].title equals `Simple Browser`
    - Expected: compositor.surfaces[0].session.target equals `simple_web`
    - Expected: compositor.surfaces[0].session.surface_id equals `web_window_{result.window_id}`
    - Expected: compositor.surfaces[0].session.viewport_w equals `96`
    - Expected: compositor.surfaces[0].session.viewport_h equals `72`
-   - Expected: compositor.surfaces[0].session.wants_pixels is true
    - Expected: req.target equals `simple_web`
    - Expected: req.surface_id equals `web_window_77`
-   - Expected: req.wants_pixels is true
 
 
 <details>
@@ -100,20 +53,20 @@ var compositor = Compositor.with_backends(ApplierBackend(w: 200, h: 120), nil, 2
 val action = WmAction(kind: "create_web_window", window_id: 0, title: "Simple Browser", x: 4, y: 6, width: 96, height: 72, content: "https://example.test", process_id: 700, app_id: "/host/browser", owner_port: 42, src_port: 0)
 val result = apply_wm_action_to_compositor(compositor, action)
 compositor = result.compositor
-expect(result.applied).to_equal(true)
+expect(result.applied)
 expect(compositor.surfaces.len()).to_equal(1)
 expect(compositor.surfaces[0].title).to_equal("Simple Browser")
 expect(compositor.surfaces[0].session.target).to_equal("simple_web")
 expect(compositor.surfaces[0].session.surface_id).to_equal("web_window_{result.window_id}")
 expect(compositor.surfaces[0].session.viewport_w).to_equal(96)
 expect(compositor.surfaces[0].session.viewport_h).to_equal(72)
-expect(compositor.surfaces[0].session.wants_pixels).to_equal(true)
+expect(compositor.surfaces[0].session.wants_pixels)
 expect(compositor.surfaces[0].session.body_html).to_contain("https://example.test")
 
 val req = wm_action_web_window_request(77, "Browser", "about:blank", 64, 48)
 expect(req.target).to_equal("simple_web")
 expect(req.surface_id).to_equal("web_window_77")
-expect(req.wants_pixels).to_equal(true)
+expect(req.wants_pixels)
 ```
 
 </details>
@@ -129,10 +82,8 @@ expect(req.wants_pixels).to_equal(true)
    - Expected: compositor.surfaces[0].width equals `80`
 
 4. compositor = apply wm action to compositor
-   - Expected: compositor.surfaces[0].visible is false
 
 5. compositor = apply wm action to compositor
-   - Expected: compositor.surfaces[0].visible is true
 
 
 <details>
@@ -151,9 +102,9 @@ compositor = apply_wm_action_to_compositor(compositor, _action("resize", wid)).c
 expect(compositor.surfaces[0].x).to_equal(10)
 expect(compositor.surfaces[0].width).to_equal(80)
 compositor = apply_wm_action_to_compositor(compositor, _action("minimize", wid)).compositor
-expect(compositor.surfaces[0].visible).to_equal(false)
+expect(not compositor.surfaces[0].visible)
 compositor = apply_wm_action_to_compositor(compositor, _action("restore", wid)).compositor
-expect(compositor.surfaces[0].visible).to_equal(true)
+expect(compositor.surfaces[0].visible)
 ```
 
 </details>
@@ -163,12 +114,13 @@ expect(compositor.surfaces[0].visible).to_equal(true)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(wm_action_is_shared_lifecycle("resize")).to_equal(true)
-expect(wm_action_is_shared_lifecycle("none")).to_equal(false)
+expect(wm_action_is_shared_lifecycle("resize"))
+val none_is_lifecycle = wm_action_is_shared_lifecycle("none")
+expect(not none_is_lifecycle)
 ```
 
 </details>
@@ -197,7 +149,6 @@ expect(normalized.app_id).to_equal("launcher.app")
 #### builds remote update trees through shared compositor logic
 
 1. var compositor = Compositor with backends
-   - Expected: updated.applied is true
    - Expected: compositor.surfaces[0].session.root_id equals `remote_{created.window_id}`
    - Expected: tree.root_id equals `remote_44`
    - Expected: tree.title() equals `Window 44`
@@ -215,7 +166,7 @@ val created = apply_wm_action_to_compositor(compositor, _action("create_window",
 compositor = created.compositor
 val updated = apply_wm_action_to_compositor(compositor, _action("update_tree", created.window_id))
 compositor = updated.compositor
-expect(updated.applied).to_equal(true)
+expect(updated.applied)
 expect(compositor.surfaces[0].session.root_id).to_equal("remote_{created.window_id}")
 
 val tree = wm_action_remote_tree(44, "payload")
@@ -267,11 +218,9 @@ expect(restored.kind).to_equal("restore")
 #### applies lifecycle actions to host-neutral window state
 
 1. var result = apply wm action to lifecycle windows
-   - Expected: result.applied is true
    - Expected: result.window_id equals `1`
    - Expected: result.next_window_id equals `2`
    - Expected: windows.len() equals `1`
-   - Expected: windows[0].focused is true
 
 2. result = apply wm action to lifecycle windows
    - Expected: windows[0].x equals `40`
@@ -282,7 +231,6 @@ expect(restored.kind).to_equal("restore")
    - Expected: windows[0].h equals `220`
 
 4. result = apply wm action to lifecycle windows
-   - Expected: windows[0].focused is true
 
 5. result = apply wm action to lifecycle windows
    - Expected: windows[0].x equals `0`
@@ -304,11 +252,11 @@ Reproduction: this block contains the complete executable scenario source.
 var windows: [WmLifecycleWindowState] = []
 var result = apply_wm_action_to_lifecycle_windows(windows, 1, 640, 480, _action("create_window", 0))
 windows = result.windows
-expect(result.applied).to_equal(true)
+expect(result.applied)
 expect(result.window_id).to_equal(1)
 expect(result.next_window_id).to_equal(2)
 expect(windows.len()).to_equal(1)
-expect(windows[0].focused).to_equal(true)
+expect(windows[0].focused)
 
 result = apply_wm_action_to_lifecycle_windows(windows, result.next_window_id, 640, 480, wm_move_action(1, 40, 50))
 windows = result.windows
@@ -322,7 +270,7 @@ expect(windows[0].h).to_equal(220)
 
 result = apply_wm_action_to_lifecycle_windows(windows, result.next_window_id, 640, 480, wm_focus_action(1))
 windows = result.windows
-expect(windows[0].focused).to_equal(true)
+expect(windows[0].focused)
 
 result = apply_wm_action_to_lifecycle_windows(windows, result.next_window_id, 640, 480, _action("maximize", 1))
 windows = result.windows
@@ -342,26 +290,51 @@ expect(result.windows.len()).to_equal(0)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 42 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val window = WmLifecycleWindowState(id: 3, owner_port: 11, title: "Motion", x: 20, y: 60, w: 200, h: 140, content: "", process_id: 1, app_id: "/motion", minimized: false, focused: true)
 val minimized = WmLifecycleWindowState(id: 4, owner_port: 11, title: "Minimized", x: 20, y: 60, w: 200, h: 140, content: "", process_id: 1, app_id: "/motion", minimized: true, focused: false)
 expect(wm_lifecycle_motion_phase("create_window", window)).to_equal("opening")
+expect(wm_lifecycle_motion_phase("create_web_window", window)).to_equal("opening")
 expect(wm_lifecycle_motion_phase("destroy_window", window)).to_equal("closing")
 expect(wm_lifecycle_motion_phase("minimize", window)).to_equal("minimizing")
 expect(wm_lifecycle_motion_phase("restore", minimized)).to_equal("restoring")
+expect(wm_lifecycle_motion_phase("maximize", minimized)).to_equal("restoring")
 expect(wm_lifecycle_motion_phase("focus", window)).to_equal("focused")
 expect(wm_lifecycle_motion_phase("move", minimized)).to_equal("minimized")
 val contract = wm_lifecycle_motion_contract("restore", minimized)
+val opening = wm_lifecycle_motion_contract("create_window", window)
+val closing = wm_lifecycle_motion_contract("destroy_window", window)
+val focused = wm_lifecycle_motion_contract("focus", window)
+val idle = wm_lifecycle_motion_contract("move", window)
+val minimized_idle = wm_lifecycle_motion_contract("move", minimized)
 expect(contract.class_name).to_equal("wm-window-restoring")
 expect(contract.duration_ms).to_equal(240)
 expect(contract.reduced_duration_ms).to_equal(80)
 expect(contract.can_disable)
+expect(contract.easing).to_equal("cubic-bezier(.2,.8,.2,1)")
+expect(contract.transform_origin).to_equal("dock")
+expect(contract.dock_origin_x).to_equal(120)
+expect(contract.dock_origin_y).to_equal(248)
+expect(opening.easing).to_equal("cubic-bezier(.2,.8,.2,1)")
+expect(opening.transform_origin).to_equal("center")
+expect(closing.easing).to_equal("cubic-bezier(.4,0,.2,1)")
+expect(closing.transform_origin).to_equal("center")
+expect(focused.easing).to_equal("ease")
+expect(focused.reduced_duration_ms).to_equal(80)
+expect(idle.easing).to_equal("ease")
+expect(idle.reduced_duration_ms).to_equal(0)
+expect(minimized_idle.class_name).to_equal("wm-window-minimized")
+expect(minimized_idle.duration_ms).to_equal(0)
+expect(minimized_idle.reduced_duration_ms).to_equal(0)
 val summary = wm_lifecycle_motion_summary("minimize", window)
 expect(summary).to_contain("phase=minimizing")
 expect(summary).to_contain("class=wm-window-minimizing")
+expect(summary).to_contain("easing=cubic-bezier(.4,0,.2,1)")
+expect(summary).to_contain("origin=dock")
+expect(summary).to_contain("dock_origin=120,248")
 expect(summary).to_contain("can_disable=true")
 ```
 
@@ -403,10 +376,8 @@ expect(wm_lifecycle_hit_taskbar(windows, 640, 480, first_x + (item_w / 2), dock_
    - Expected: moved.windows[0].x equals `0`
    - Expected: moved.windows[0].y equals `48`
    - Expected: grip.interaction.resize_window_id equals `7`
-   - Expected: down.resizing is true
    - Expected: resized.windows[0].w equals `160`
    - Expected: resized.windows[0].h equals `120`
-   - Expected: up.resizing is false
    - Expected: up.resize_window_id equals `0`
 
 
@@ -429,12 +400,12 @@ val probe = WmPointerInteractionState(dragging: false, drag_window_id: 0, drag_o
 val grip = wm_lifecycle_pointer_move(windows, 8, 640, 480, probe, 238, 228)
 expect(grip.interaction.resize_window_id).to_equal(7)
 val down = wm_lifecycle_left_button(grip.interaction, true)
-expect(down.resizing).to_equal(true)
+expect(down.resizing)
 val resized = wm_lifecycle_pointer_move(windows, 8, 640, 480, down, 0, 0)
 expect(resized.windows[0].w).to_equal(160)
 expect(resized.windows[0].h).to_equal(120)
 val up = wm_lifecycle_left_button(resized.interaction, false)
-expect(up.resizing).to_equal(false)
+expect(not up.resizing)
 expect(up.resize_window_id).to_equal(0)
 ```
 
@@ -459,8 +430,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

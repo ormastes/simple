@@ -324,7 +324,7 @@ expect(has_width)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 51 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -335,6 +335,17 @@ expect(html).to_contain("data-theme-configured='true'")
 expect(html).to_contain("data-window-radius-px='18'")
 expect(html).to_contain("data-widget-radius-px='14'")
 expect(html).to_contain("data-taskbar-radius-px='999'")
+expect(html).to_contain("data-icon-radius-px='999'")
+expect(html).to_contain("data-icon-inner-padding-px='3'")
+expect(html).to_contain("data-icon-mask-shape='circle'")
+expect(html).to_contain("data-icon-image-fit='cover'")
+expect(html).to_contain("data-layout-safe-area-px='16'")
+expect(html).to_contain("data-layout-panel-gap-px='12'")
+expect(html).to_contain("data-layout-min-touch-target-px='44'")
+expect(html).to_contain("data-layout-containment='layout-paint'")
+expect(html).to_contain("data-layout-contained='true'")
+expect(html).to_contain("[data-layout-contained='true']{{contain:layout paint")
+expect(html).to_contain(".wm-panel{{box-sizing:border-box;overflow:hidden;min-height:44px")
 expect(html).to_contain("data-blur-px='24'")
 expect(html).to_contain("data-scrollbar-width-px='10'")
 expect(html).to_contain("data-scrollbar-thumb-radius-px='999'")
@@ -377,7 +388,7 @@ expect(html).to_contain("backdrop-filter:blur(24px)")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -393,6 +404,13 @@ expect(config.widget_radius_px).to_equal(14)
 expect(config.taskbar_radius_px).to_equal(999)
 expect(config.control_radius_px).to_equal(12)
 expect(config.icon_radius_px).to_equal(999)
+expect(config.icon_inner_padding_px).to_equal(3)
+expect(config.icon_mask_shape).to_equal("circle")
+expect(config.icon_image_fit).to_equal("cover")
+expect(config.layout_safe_area_px).to_equal(16)
+expect(config.layout_panel_gap_px).to_equal(12)
+expect(config.layout_min_touch_target_px).to_equal(44)
+expect(config.layout_containment).to_equal("layout-paint")
 expect(config.scrollbar_width_px).to_equal(10)
 expect(config.scrollbar_thumb_radius_px).to_equal(999)
 expect(config.scrollbar_thumb_border_px).to_equal(3)
@@ -529,7 +547,7 @@ expect_not(html.contains("Hidden"))
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 536 lines folded for reproduction.
+Runnable source: 594 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -733,6 +751,16 @@ expect(html).to_contain("icon-normalized-square")
 expect(html).to_contain("icon-glyph-to-round")
 expect(html).to_contain("icon-image-placeholder")
 expect(html).to_contain("clip-path:circle(50% at 50% 50%)")
+expect(html).to_contain("data-icon-mask='circle'")
+expect(html).to_contain("data-icon-fit='cover'")
+expect(html).to_contain("data-icon-fit='glyph'")
+expect(html).to_contain("data-icon-fallback='")
+expect(html).to_contain("aria-label='Normalized round icon")
+expect(html).to_contain("aria-label='Round glyph icon")
+expect(html).to_contain(".round-icon.icon-normalized-square{{padding:3px")
+expect(html).to_contain("object-position:center")
+expect(html).to_contain("aspect-ratio:1 / 1")
+expect(html).to_contain(".round-icon.icon-glyph-to-round{{text-transform:uppercase")
 expect(html).to_contain("<button class='traffic traffic-close'")
 expect(html).to_contain("data-window-control='close'")
 expect(html).to_contain("data-window-control='minimize'")
@@ -1069,6 +1097,54 @@ expect(html).to_contain("data-hud-action='brightness'")
 expect(html).to_contain("@keyframes wm-system-hud-in")
 expect(html).to_contain("body[data-motion-mode='reduced'] .system-hud")
 expect(html).to_contain("body[data-motion-mode='off'] .system-hud")
+expect(html).to_contain("class='wallpaper-picker'")
+expect(html).to_contain("role='dialog' aria-label='Wallpaper picker'")
+expect(html).to_contain("data-motion-scope='wallpaper-picker'")
+expect(html).to_contain("data-wallpaper-source='desktop-background'")
+expect(html).to_contain("class='wallpaper-dynamic-toggle active' data-wallpaper-motion='dynamic' aria-pressed='true'")
+expect(html).to_contain("class='wallpaper-swatches' role='radiogroup' aria-label='Wallpaper choices'")
+expect(html).to_contain("data-wallpaper-choice='aurora'")
+expect(html).to_contain("data-wallpaper-choice='dawn'")
+expect(html).to_contain("data-wallpaper-choice='graphite'")
+expect(html).to_contain("class='wallpaper-preview' role='img' aria-label='Animated aurora wallpaper preview'")
+expect(html).to_contain("class='wallpaper-preview-orbit'")
+expect(html).to_contain("@keyframes wm-wallpaper-picker-in")
+expect(html).to_contain("@keyframes wm-wallpaper-orbit")
+expect(html).to_contain("body[data-motion-mode='reduced'] .wallpaper-picker")
+expect(html).to_contain("body[data-motion-mode='off'] .wallpaper-picker")
+expect(html).to_contain("class='dock-stack'")
+expect(html).to_contain("role='dialog' aria-label='Dock stack Downloads'")
+expect(html).to_contain("data-motion-scope='dock-stack'")
+expect(html).to_contain("data-stack-source='dock'")
+expect(html).to_contain("data-stack-layout='fan-grid'")
+expect(html).to_contain("class='dock-stack-mode active' data-stack-mode='fan' aria-pressed='true'")
+expect(html).to_contain("class='dock-stack-mode' data-stack-mode='grid' aria-pressed='false'")
+expect(html).to_contain("class='dock-stack-items' role='listbox' aria-label='Downloads stack items'")
+expect(html).to_contain("data-stack-item='screenshot'")
+expect(html).to_contain("data-stack-item='report'")
+expect(html).to_contain("data-stack-item='archive'")
+expect(html).to_contain("class='dock-stack-anchor' aria-hidden='true'")
+expect(html).to_contain("@keyframes wm-dock-stack-in")
+expect(html).to_contain("@keyframes wm-dock-stack-fan")
+expect(html).to_contain("body[data-motion-mode='reduced'] .dock-stack")
+expect(html).to_contain("body[data-motion-mode='off'] .dock-stack")
+expect(html).to_contain("class='widget-gallery'")
+expect(html).to_contain("role='dialog' aria-label='Widget gallery'")
+expect(html).to_contain("data-motion-scope='widget-gallery'")
+expect(html).to_contain("data-widget-source='desktop-gallery'")
+expect(html).to_contain("class='widget-size-control' role='group' aria-label='Widget size'")
+expect(html).to_contain("data-widget-size='small'")
+expect(html).to_contain("data-widget-size='medium'")
+expect(html).to_contain("data-widget-size='large'")
+expect(html).to_contain("class='widget-gallery-grid' role='listbox' aria-label='Available widgets'")
+expect(html).to_contain("data-widget-kind='clock'")
+expect(html).to_contain("data-widget-kind='weather'")
+expect(html).to_contain("data-widget-kind='build'")
+expect(html).to_contain("class='widget-add-button' data-widget-action='add'")
+expect(html).to_contain("@keyframes wm-widget-gallery-in")
+expect(html).to_contain("@keyframes wm-widget-card-in")
+expect(html).to_contain("body[data-motion-mode='reduced'] .widget-gallery")
+expect(html).to_contain("body[data-motion-mode='off'] .widget-gallery")
 ```
 
 </details>
@@ -1078,7 +1154,7 @@ expect(html).to_contain("body[data-motion-mode='off'] .system-hud")
 1. var manager = WindowManager new
 
 2. var registry = UiWindowSurfaceRegistry new
-   - Expected: bounded_affordances equals `27`
+   - Expected: bounded_affordances equals `30`
 
 
 <details>
@@ -1095,7 +1171,7 @@ val scene = shared_wm_scene_to_chromed_wm_scene(shared, _shared_taskbar(), 1000,
 
 var bounded_affordances = 0
 for elem in scene.elements:
-    if elem.kind == "command_palette" or elem.kind == "desktop_widgets" or elem.kind == "control_center" or elem.kind == "window_overview" or elem.kind == "snap_preview" or elem.kind == "notification_toast" or elem.kind == "notification_center" or elem.kind == "live_activity" or elem.kind == "workspace_switcher" or elem.kind == "shortcut_overlay" or elem.kind == "app_launcher" or elem.kind == "context_menu" or elem.kind == "snap_layouts" or elem.kind == "window_switcher" or elem.kind == "quick_settings" or elem.kind == "hot_corner_zone" or elem.kind == "resize_hud" or elem.kind == "gesture_hints" or elem.kind == "taskbar_preview" or elem.kind == "stage_rail" or elem.kind == "screen_capture_overlay" or elem.kind == "clipboard_history" or elem.kind == "privacy_indicator" or elem.kind == "system_hud":
+    if elem.kind == "command_palette" or elem.kind == "desktop_widgets" or elem.kind == "control_center" or elem.kind == "window_overview" or elem.kind == "snap_preview" or elem.kind == "notification_toast" or elem.kind == "notification_center" or elem.kind == "live_activity" or elem.kind == "workspace_switcher" or elem.kind == "shortcut_overlay" or elem.kind == "app_launcher" or elem.kind == "context_menu" or elem.kind == "snap_layouts" or elem.kind == "window_switcher" or elem.kind == "quick_settings" or elem.kind == "hot_corner_zone" or elem.kind == "resize_hud" or elem.kind == "gesture_hints" or elem.kind == "taskbar_preview" or elem.kind == "stage_rail" or elem.kind == "screen_capture_overlay" or elem.kind == "clipboard_history" or elem.kind == "privacy_indicator" or elem.kind == "system_hud" or elem.kind == "wallpaper_picker" or elem.kind == "dock_stack" or elem.kind == "widget_gallery":
         bounded_affordances = bounded_affordances + 1
         expect(elem.x).to_be_greater_than(-1)
         expect(elem.y).to_be_greater_than(-1)
@@ -1104,7 +1180,7 @@ for elem in scene.elements:
         expect(elem.x + elem.w).to_be_less_than(scene.width + 1)
         expect(elem.y + elem.h).to_be_less_than(scene.height + 1)
 
-expect(bounded_affordances).to_equal(27)
+expect(bounded_affordances).to_equal(30)
 ```
 
 </details>
@@ -1138,15 +1214,21 @@ expect(bounded_affordances).to_equal(27)
    - Expected: report.max_clipboard_history_width_px equals `360`
    - Expected: report.max_privacy_indicator_width_px equals `300`
    - Expected: report.max_system_hud_width_px equals `280`
+   - Expected: report.max_wallpaper_picker_width_px equals `380`
+   - Expected: report.max_dock_stack_width_px equals `340`
+   - Expected: report.max_widget_gallery_width_px equals `440`
    - Expected: report.min_overview_card_width_px equals `180`
    - Expected: report.min_touch_target_height_px equals `44`
+   - Expected: report.layout_safe_area_px equals `16`
+   - Expected: report.layout_panel_gap_px equals `12`
+   - Expected: report.layout_min_touch_target_px equals `44`
    - Expected: report.reduced_motion_duration_ms equals `80`
 
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 72 lines folded for reproduction.
+Runnable source: 82 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1191,6 +1273,9 @@ expect(report.screen_capture_ready)
 expect(report.clipboard_history_ready)
 expect(report.privacy_indicator_ready)
 expect(report.system_hud_ready)
+expect(report.wallpaper_picker_ready)
+expect(report.dock_stack_ready)
+expect(report.widget_gallery_ready)
 expect(report.color_checked)
 expect(report.contrast_ratio_x100).to_be_greater_than(449)
 expect(report.bounded_layout)
@@ -1218,8 +1303,15 @@ expect(report.max_screen_capture_width_px).to_equal(560)
 expect(report.max_clipboard_history_width_px).to_equal(360)
 expect(report.max_privacy_indicator_width_px).to_equal(300)
 expect(report.max_system_hud_width_px).to_equal(280)
+expect(report.max_wallpaper_picker_width_px).to_equal(380)
+expect(report.max_dock_stack_width_px).to_equal(340)
+expect(report.max_widget_gallery_width_px).to_equal(440)
 expect(report.min_overview_card_width_px).to_equal(180)
 expect(report.min_touch_target_height_px).to_equal(44)
+expect(report.layout_policy_ready)
+expect(report.layout_safe_area_px).to_equal(16)
+expect(report.layout_panel_gap_px).to_equal(12)
+expect(report.layout_min_touch_target_px).to_equal(44)
 expect(report.motion_can_disable)
 expect(report.reduced_motion_duration_ms).to_equal(80)
 ```
@@ -1465,7 +1557,7 @@ expect_not(report.traffic_controls_ready)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 33 lines folded for reproduction.
+Runnable source: 44 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1496,12 +1588,23 @@ expect(minimizing_html).to_contain("wm-window-minimizing")
 expect(minimizing_html).to_contain(".wm-window-minimizing{{animation:wm-window-minimize 180ms")
 expect(minimizing_html).to_contain("data-title='Hidden'")
 expect(minimizing_html).to_contain("data-motion-duration-ms='180'")
+expect(minimizing_html).to_contain("data-motion-easing='cubic-bezier(.4,0,.2,1)'")
+expect(minimizing_html).to_contain("data-motion-transform-origin='dock'")
+expect(minimizing_html).to_contain("data-dock-origin-x='150'")
+expect(minimizing_html).to_contain("data-dock-origin-y='288'")
+expect(minimizing_html).to_contain("--dock-origin-x:150px")
+expect(minimizing_html).to_contain("--dock-origin-y:288px")
+expect(minimizing_html).to_contain(".motion-window[data-motion-transform-origin='dock']")
 
 val restoring_scene = lifecycle_windows_to_motion_wm_scene(windows, "restore", 640, 480)
 val restoring_html = scene_to_html(restoring_scene)
 expect(restoring_html).to_contain("wm-window-restoring")
 expect(restoring_html).to_contain(".wm-window-restoring{{animation:wm-window-restore 240ms")
 expect(restoring_html).to_contain("data-motion-phase='restoring'")
+expect(restoring_html).to_contain("data-motion-easing='cubic-bezier(.2,.8,.2,1)'")
+expect(restoring_html).to_contain("data-motion-transform-origin='dock'")
+expect(restoring_html).to_contain("data-dock-origin-x='150'")
+expect(restoring_html).to_contain("data-dock-origin-y='288'")
 ```
 
 </details>
