@@ -2290,11 +2290,13 @@ expect(_eval_str("var r = require('stream').Readable.from(['a']); r.on('data', (
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_eval_str("var opts = {}; opts.highWaterMark = 4; var s = require('stream'); var r = s.Readable.from(['ab','cde']); var w = s.Writable(opts); r.pipe(w); w.writableLength + ':' + w.backpressure")).to_equal("5:true")
+expect(_eval_str("var opts = {}; opts.highWaterMark = 4; var s = require('stream'); var r = s.Readable.from(['ab','cd','ef']); var w = s.Writable(opts); r.pipe(w); w.bytesWritten + ':' + r.readableLength + ':' + r.pipeBackpressured + ':' + r.pipePaused + ':' + r.endEmitted")).to_equal("4:1:true:true:false")
+expect(_eval_str("var opts = {}; opts.highWaterMark = 4; var s = require('stream'); var r = s.Readable.from(['ab','cd','ef']); var w = s.Writable(opts); r.pipe(w); w.writableLength = 0; w.backpressure = false; r.resume(); w.bytesWritten + ':' + w.lastChunk + ':' + r.readableLength + ':' + r.pipeBackpressured + ':' + r.endEmitted")).to_equal("6:ef:0:false:true")
 ```
 
 </details>
