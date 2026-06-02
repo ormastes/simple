@@ -89,6 +89,56 @@ expect(report.exact_backend_parity).to_equal(true)
 
 </details>
 
+#### backend-executed reduced GUI widget scene
+
+#### executes real CPU SIMD drawing operations with exact software parity
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val report = run_backend_executed_gui_widget_scene_parity(16, 16)
+expect(report.software_resolved_backend).to_equal("software")
+expect(report.cpu_simd_resolved_backend).to_equal("cpu_simd")
+expect(report.software_pixel_count).to_equal(16 * 16)
+expect(report.cpu_simd_pixel_count).to_equal(16 * 16)
+expect(report.cpu_simd_different_pixels).to_equal(0)
+expect(report.cpu_simd_max_channel_diff).to_equal(0)
+expect(report.cpu_simd_total_hits).to_be_greater_than(0)
+expect(report.cpu_simd_fill_hits).to_be_greater_than(0)
+expect(report.tolerance_used).to_equal(false)
+```
+
+</details>
+
+#### executes real Metal framebuffer readback when Metal is available
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val report = run_backend_executed_gui_widget_scene_parity(16, 16)
+if is_macos():
+    expect(report.metal_resolved_backend).to_equal("metal")
+    expect(report.metal_gpu_frame_complete).to_equal(true)
+    expect(report.metal_gpu_readback_pixel_count).to_equal(16 * 16)
+    expect(report.metal_gpu_readback_checksum).to_be_greater_than(0)
+else:
+    expect(report.metal_resolved_backend).to_equal("software")
+    expect(report.metal_gpu_frame_complete).to_equal(false)
+expect(report.metal_pixel_count).to_equal(16 * 16)
+expect(report.metal_different_pixels).to_equal(0)
+expect(report.metal_max_channel_diff).to_equal(0)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -108,8 +158,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
