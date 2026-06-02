@@ -396,6 +396,23 @@ expect(config.can_disable_motion)
 
 </details>
 
+#### AC-2: classifies OS compositor icons for round normalization
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(wm_scene_icon_kind("https://simple.local/icon.png")).to_equal("square-to-round")
+expect(wm_scene_icon_kind("data:image/gif;base64,R0lGODlhAQABAAAAACw=")).to_equal("square-to-round")
+expect(wm_scene_icon_kind("/apps/simple.png")).to_equal("square-to-round")
+expect(wm_scene_icon_kind("terminal")).to_equal("glyph-to-round")
+```
+
+</details>
+
 ### WmScene — SharedWmScene projection
 
 #### projects shared GUI windows into pure Simple WM scene elements
@@ -463,7 +480,7 @@ expect_not(html.contains("Hidden"))
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 88 lines folded for reproduction.
+Runnable source: 94 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -528,6 +545,12 @@ expect(has_snap_preview)
 expect(html).to_contain("class='command-lane'")
 expect(html).to_contain("data-app='terminal'")
 expect(html).to_contain("data-window='win1'")
+expect(html).to_contain("data-icon-normalized='square-to-round'")
+expect(html).to_contain("data-icon-normalized='glyph-to-round'")
+expect(html).to_contain("icon-normalized-square")
+expect(html).to_contain("icon-glyph-to-round")
+expect(html).to_contain("icon-image-placeholder")
+expect(html).to_contain("clip-path:circle(50% at 50% 50%)")
 expect(html).to_contain("traffic-close")
 expect(html).to_contain("bar-command")
 expect(html).to_contain("aria-label='Desktop widgets'")
@@ -612,7 +635,7 @@ expect(bounded_affordances).to_equal(4)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -627,6 +650,7 @@ val report = wm_scene_visual_quality_report(scene)
 expect(report.passed)
 expect(report.theme_configured)
 expect(report.round_scrollbars)
+expect(report.round_icon_converter)
 expect(report.color_checked)
 expect(report.contrast_ratio_x100).to_be_greater_than(449)
 expect(report.bounded_layout)
@@ -889,8 +913,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 28 |
-| Active scenarios | 28 |
+| Total scenarios | 29 |
+| Active scenarios | 29 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
