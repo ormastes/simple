@@ -759,6 +759,39 @@ match result:
 
 </details>
 
+#### finds Uint8Array values with callback predicates in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `4:1:undefined:-1`
+
+3. Err
+   - Expected: "unexpected uint8 find js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var b = new Uint8Array(4); b[0] = 1; b[1] = 260; b[2] = -1; b[3] = 7; b.find(function(v, i, arr) { return i; }) + ':' + b.findIndex(function(v, i, arr) { return i; }) + ':' + b.find(function(v) { return false; }) + ':' + b.findIndex(function(v) { return false; })")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("4:1:undefined:-1")
+    Err(err):
+        expect("unexpected uint8 find js error: {err}").to_equal("")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -778,8 +811,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 15 |
-| Active scenarios | 15 |
+| Total scenarios | 16 |
+| Active scenarios | 16 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
