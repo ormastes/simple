@@ -3128,6 +3128,23 @@ expect(_eval_before_after_two_timer_drains("var h = require('timers').setInterva
 
 </details>
 
+#### tracks bounded timer handle completion state
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.completed")).to_equal("false")
+expect(_eval_before_after_timer_drain("var h = require('timers').setTimeout(() => {}, 0); h.completed", "h.active + ':' + h.completed", 0)).to_equal("false:1:false:true")
+expect(_eval_before_after_timer_drain("var h = require('timers').setInterval(() => {}, 1); h.completed", "h.active + ':' + h.completed", 1)).to_equal("false:1:true:false")
+expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); require('node:timers').clearTimeout(h); h.completed + ':' + h.cleared")).to_equal("false:true")
+```
+
+</details>
+
 #### refreshes bounded Node timer handles
 
 <details>
@@ -4112,8 +4129,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 264 |
-| Active scenarios | 264 |
+| Total scenarios | 265 |
+| Active scenarios | 265 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
