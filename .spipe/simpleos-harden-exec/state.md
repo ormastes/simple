@@ -124,6 +124,9 @@ arch-done
 - 2026-05-23 intake: Created state file with 7 acceptance criteria (3 pillars: security hardening, QEMU boot, exec-from-fs)
 - 2026-05-23 research: Found all 8 loader files exist; FAT32 binary read wired; ELF64 loader implemented; capability system exists but NOT wired to exec path; hardening probes exist but canary-only (NX/SMEP/SMAP missing); disk_launch_manifest still uses resident-task placeholders; no exec-from-fs spec tests found; 7 requirements drafted
 - 2026-05-23 arch: Designed 11 modules (3 new spl, 6 modified spl, 1 new shs); sibling _as pattern for caller_task (D-1); D-11 kernel-origin bypass in cap_exec_gate; loader_api_vfs.spl split for freestanding link safety (D-8); spec uses resolve_executable_bytes + synthetic vfs hook (D-9); REQ-3 scoped to disk_launch_manifest path, spawn pipeline unchanged (D-12); HardeningReport arch-neutral type; 6 new runtime externs; no circular deps verified
+- 2026-06-02 continue-audit: Rechecked the active SimpleOS hardening goal against current executable-launch evidence. The shared app registry already normalizes shell-style executable paths (`/bin/simple`, `/usr/bin/simple`, `/bin/sh`, `/usr/bin/shell`) to canonical SMF app entries; the missing piece for this continuation was executable SPipe evidence tying that shared registry behavior to VFS exec aliasing.
+- 2026-06-02 continue-impl: Added focused assertions to `test/unit/os/kernel/loader/app_registry_spec.spl` and `test/system/app/os/feature/vfs_exec_bytes_spec.spl` proving shell-style executable launch paths map to `/SYS/APPS/SIMPLSTC.SMF` and `/SYS/APPS/SHELLSMF.SMF`. Also corrected the stale fallback entry count from 18 to 19 to match the current registry table including `/sys/apps/simple`.
+- 2026-06-02 continue-verify: `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/kernel/loader/app_registry.spl src/os/services/vfs/vfs_init.spl test/unit/os/kernel/loader/app_registry_spec.spl test/system/app/os/feature/vfs_exec_bytes_spec.spl` passed. `app_registry_spec.spl` passed `25/25`; `vfs_exec_bytes_spec.spl` passed `4/4`. `spipe-docgen` generated `doc/06_spec/unit/os/kernel/loader/app_registry_spec.md` and refreshed `doc/06_spec/system/app/os/feature/vfs_exec_bytes_spec.md`; `find doc/06_spec -name '*_spec.spl' | wc -l` printed `0`.
 
 ### 3-arch
 
@@ -284,6 +287,24 @@ scripts/run_simpleos_qemu.shs:                                  [REQ-5]
 - REQ-5 -> `run_simpleos_qemu` (new script) + `disk_image_bake` (existing, invoked by script)
 - REQ-6 -> `hardening_types` + `x86_64_hardening_probe` + `riscv64_hardening_probe` + `arm64_hardening_probe` + `arch_adapt_harness`
 - REQ-7 -> `exec_from_fs_spec` (4 it-blocks covering ELF parse, binary fidelity, capability denial, NX probe)
+
+### 2026-06-02 SSH Shell/Launch Evidence
+
+- Restored `Terminal` transport buffering (`feed_remote_input`, `peek_input`, line-preserving `read_input`, `take_mirrored_output`) so SSH shell sessions can process command chunks without losing later lines.
+- Added `SshShellLaunchReport` test helper in `src/os/apps/sshd/ssh_session.spl` to resolve SSH shell/exec command tokens through the registry-backed `/usr/bin`, `/sys/apps`, and `/bin` launch candidates.
+- Extended `test/unit/os/apps/sshd/ssh_session_shell_spec.spl` with executable evidence for:
+  - shell banner/prompt startup over the SSH shell adapter;
+  - built-in command round-trip over the adapter;
+  - multi-command input in a single transport chunk;
+  - `simple.smf --version` resolving to `/usr/bin/simple.smf` and FAT32/root SMF aliases;
+  - `simple --check` resolving to `/usr/bin/simple` and the same SMF-backed aliases;
+  - `sh -lc pwd` resolving to `/usr/bin/sh` and the shell SMF aliases.
+- Verification:
+  - `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/apps/terminal/terminal.spl src/os/apps/sshd/ssh_session.spl test/unit/os/apps/sshd/ssh_session_shell_spec.spl` -> PASS.
+  - `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/os/apps/sshd/ssh_session_shell_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json` -> PASS, 6/6.
+  - `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple spipe-docgen test/unit/os/apps/sshd/ssh_session_shell_spec.spl --output doc/06_spec` -> generated `doc/06_spec/unit/os/apps/sshd/ssh_session_shell_spec.md`.
+  - `find doc/06_spec -name '*_spec.spl' | wc -l` -> `0`.
+- Scope note: this is unit-level SSH shell/launch-path evidence. It does not yet prove a live QEMU SSH login/server session can launch SMF/executable files.
 
 ### 4-spec
 <pending>

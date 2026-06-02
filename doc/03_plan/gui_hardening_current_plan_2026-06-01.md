@@ -1489,3 +1489,21 @@ targets are 44px high. The Web WM quality and modern readiness reports now carry
 `accessible_controls_ready`. Focused checks pass, the Web WM spec passes `5/5`,
 and the modern readiness spec passes `2/2`. This advances Web WM usability and
 release evidence without claiming production Chrome pixel parity is fixed.
+
+SimpleOS SSH shell launch evidence continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/apps/terminal/terminal.spl src/os/apps/sshd/ssh_session.spl test/unit/os/apps/sshd/ssh_session_shell_spec.spl examples/simple_os/arch/x86_64/ssh_live_entry.spl`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/ssh_qemu_contract.spl examples/simple_os/arch/x86_64/ssh_live_entry.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/os/apps/sshd/ssh_session_shell_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/unit/os/apps/sshd/ssh_session_shell_spec.spl --output doc/06_spec`
+
+Terminal transport buffering now preserves multi-line SSH shell input chunks,
+and SSH shell launch evidence resolves `simple.smf --version`, `simple --check`,
+and `sh -lc pwd` through SMF-backed app registry aliases. The bounded x64 SSH
+live probe contract now sends `SESSION shell simple.smf --version` and
+`SESSION shell simple --check` probes and requires `/usr/bin/simple(.smf)` plus
+`/SYS/APPS/SIMPLSTC.SMF` evidence in the host-visible output. Focused checks
+pass with the existing generated-marker warning on the live entrypoint, and
+`ssh_session_shell_spec.spl` passes `6/6`. This advances SimpleOS live
+execution evidence without claiming the remaining guest-side QEMU/GTK
+performance harness is complete.
