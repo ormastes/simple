@@ -42,14 +42,24 @@ Verified result on Apple aarch64: `executed=true bit_exact=true hits=2`.
 
 ## Interpreter vs AOT
 
+The live CPU-SIMD session (`cpu_simd_session.fill_span` → `simd_fill_row`)
+routes solid fills through the NEON kernel on aarch64, so the path literally
+named "CPU SIMD" genuinely executes NEON (verified: `fill_span` advances the
+NEON hit counter and stays bit-identical). Blend and blit stay scalar: an exact
+NEON divide-by-255 differs from the scalar floor (and Metal has no blend
+kernel), and a boxed-array copy is already memcpy-equivalent.
+
 Under the tree-walking interpreter a `[u32]` array is a boxed `Vec<Value>`, so
-the kernels gather inputs into a packed `&[u32]` and scatter the result back.
-The NEON instructions genuinely execute over the packed buffer (that is what the
-disassembly and counter prove); the gather/scatter is an interpreter artifact
-that disappears under AOT compilation, where the framebuffer is already a packed
-buffer. The live software-backend raster loops are therefore left scalar under
-the interpreter (boxed per-row NEON would be a net loss); they share the same
-canonical kernels once AOT-compiled.
+the fill kernel builds a packed NEON row in the runtime and then copies it into
+the framebuffer element-by-element. The NEON instructions genuinely execute over
+the packed buffer (that is what the disassembly and counter prove); the per-row
+copy is an interpreter artifact, not a speedup, and it disappears under AOT
+compilation where the framebuffer is already a packed buffer the kernel fills in
+place. Note the separate `backend_software` raster loops (used by the non-SIMD
+`SoftwareBackend`/`CpuBackend`) keep their own inlined `self.buf[idx] = color`
+scalar stores and do **not** call these kernels; routing those through the SIMD
+layer is tracked as future work and is gated on the array un-boxing that AOT
+provides.
 
 ## Deployment
 

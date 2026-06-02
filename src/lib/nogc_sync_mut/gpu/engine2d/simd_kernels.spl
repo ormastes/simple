@@ -269,11 +269,44 @@ fn cpu_simd_runtime_evidence() -> CpuSimdRuntimeEvidence:
     )
 
 # ============================================================================
+# Native-SIMD routing gate
+#
+# When the host has real SIMD (NEON on aarch64), the hot solid-fill row routes
+# through the native `rt_simd_fill_row_u32` kernel so the live CPU-SIMD render
+# path (cpu_simd_session.fill_span) genuinely executes NEON rather than a scalar
+# loop. Output is bit-identical to the scalar path.
+#
+# Interpreter note: a `[u32]` framebuffer is a boxed array here, so the native
+# row is built with NEON and then copied into the framebuffer element-by-
+# element — the per-row marshalling is an interpreter artifact, not a win, but
+# it is the path that genuinely runs NEON. Under AOT the framebuffer is packed
+# and the same kernel fills it in place. (Blend stays scalar: Metal has no
+# blend kernel and an exact NEON divide-by-255 differs from the scalar floor;
+# blit stays scalar: a boxed-array copy is already memcpy-equivalent.)
+var _neon_rows_cached: bool = false
+var _neon_rows_detected: bool = false
+
+fn _neon_pixel_rows_enabled() -> bool:
+    if _neon_rows_detected:
+        return _neon_rows_cached
+    _neon_rows_cached = detect_simd_level() == SimdLevel.Neon
+    _neon_rows_detected = true
+    _neon_rows_cached
+
+# ============================================================================
 # Fill Row — write solid color across a pixel row
 # ============================================================================
 
 pub fn simd_fill_row(buf: any, offset: i64, count: i64, color: u32):
     if count <= 0:
+        return
+    if _neon_pixel_rows_enabled():
+        # Genuine NEON: vdupq_n_u32 + vst1q_u32 build the row in the runtime.
+        val row = rt_simd_fill_row_u32(count, color)
+        var j: i64 = 0
+        while j < count:
+            buf[(offset + j).to_i32()] = row[j.to_i32()]
+            j = j + 1
         return
     _scalar_fill_row(buf, offset, count, color)
 

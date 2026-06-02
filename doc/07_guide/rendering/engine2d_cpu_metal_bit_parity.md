@@ -50,5 +50,34 @@ C/MSL, so the CPU result is bit-identical to the GPU kernel including for the
 negative intermediates that occur when a channel decreases down the gradient.
 
 Scope note: this aligns the CPU and Metal backends only. Other GPU backends
-(Vulkan, CUDA) have their own gradient kernels; aligning those is tracked
-separately.
+(Vulkan, CUDA) have their own gradient kernels; the CUDA strict spec already
+asserts the integer-lerp values this fix produces, and the CPU↔Vulkan parity
+spec only compares CPU-vs-CPU paths, so neither regresses. The web/Chromium
+parity gates do not render gradients (the HTML layout renderer has no gradient
+path), so they are unaffected.
+
+## What is and is not bit-exact (measured)
+
+The deterministic opaque ops are bit-exact CPU↔Metal on genuine GPU readback and
+are what the gate enforces:
+
+| op             | result  | notes |
+|----------------|---------|-------|
+| clear          | MATCH   | byte write |
+| draw_rect_filled | MATCH | byte write |
+| draw_rect (outline) | MATCH | byte write |
+| draw_gradient_rect | MATCH | after the integer-lerp fix above |
+
+The primitive-rasterization ops use *different algorithms* on CPU (Bresenham /
+midpoint) and on the Metal GPU (per-pixel / distance-field), so they are not
+bit-exact and are **not** claimed by the gate (measured on a 32×32 scene):
+
+| op              | CPU↔Metal | mismatches | note |
+|-----------------|-----------|------------|------|
+| draw_line       | DIVERGE   | 24/1024    | Bresenham vs GPU per-pixel line |
+| draw_circle(+filled) | DIVERGE | 92/1024 | midpoint vs GPU distance check |
+| draw_rounded_rect | DIVERGE | 532/1024  | different corner rasterization |
+| draw_triangle_filled | n/a   | —          | Metal does not GPU-dispatch it (`gpu_frame_complete=false`); any "match" is a CPU-mirror tautology, so it is excluded |
+
+Aligning these is tracked in
+`doc/08_tracking/bug/engine2d_cpu_metal_primitive_raster_divergence_2026-06-03.md`.
