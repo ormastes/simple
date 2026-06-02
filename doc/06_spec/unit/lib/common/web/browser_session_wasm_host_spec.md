@@ -3720,11 +3720,17 @@ match instance:
 
 4. JsValue Object
    - Expected: _display_js(interp.get_object_property(table_id, "kind")) equals `table`
+   - Expected: _display_js(interp.get_object_property(table_id, "element")) equals `funcref`
    - Expected: _display_js(interp.get_object_property(table_id, "length")) equals `1`
+   - Expected: _display_js(interp._native_webassembly_table_get(JsValue.Object(id: table_id), [JsValue.Number(v: 0.0)])) equals `null`
+   - Expected: _display_js(interp._native_webassembly_table_grow(JsValue.Object(id: table_id), [JsValue.Number(v: 1.0), JsValue.Null])) equals `1`
+   - Expected: _display_js(interp.get_object_property(table_id, "length")) equals `2`
    - Expected: "missing table" equals ``
 
 5. JsValue Object
    - Expected: _display_js(interp.get_object_property(global_id, "kind")) equals `global`
+   - Expected: _display_js(interp.get_object_property(global_id, "valueType")) equals `i32`
+   - Expected: _display_js(interp.get_object_property(global_id, "mutable")) equals `false`
    - Expected: _display_js(interp.get_object_property(global_id, "value")) equals `42`
    - Expected: "missing global" equals ``
    - Expected: "missing exports" equals ``
@@ -3734,7 +3740,7 @@ match instance:
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 39 lines folded for reproduction.
+Runnable source: 45 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -3764,12 +3770,18 @@ match instance:
                 match interp.get_object_property(exports_id, "tbl"):
                     JsValue.Object(table_id):
                         expect(_display_js(interp.get_object_property(table_id, "kind"))).to_equal("table")
+                        expect(_display_js(interp.get_object_property(table_id, "element"))).to_equal("funcref")
                         expect(_display_js(interp.get_object_property(table_id, "length"))).to_equal("1")
+                        expect(_display_js(interp._native_webassembly_table_get(JsValue.Object(id: table_id), [JsValue.Number(v: 0.0)]))).to_equal("null")
+                        expect(_display_js(interp._native_webassembly_table_grow(JsValue.Object(id: table_id), [JsValue.Number(v: 1.0), JsValue.Null]))).to_equal("1")
+                        expect(_display_js(interp.get_object_property(table_id, "length"))).to_equal("2")
                     _:
                         expect("missing table").to_equal("")
                 match interp.get_object_property(exports_id, "answer"):
                     JsValue.Object(global_id):
                         expect(_display_js(interp.get_object_property(global_id, "kind"))).to_equal("global")
+                        expect(_display_js(interp.get_object_property(global_id, "valueType"))).to_equal("i32")
+                        expect(_display_js(interp.get_object_property(global_id, "mutable"))).to_equal("false")
                         expect(_display_js(interp.get_object_property(global_id, "value"))).to_equal("42")
                     _:
                         expect("missing global").to_equal("")
@@ -3872,6 +3884,109 @@ match imports:
                 expect("missing import descriptor").to_equal("")
     _:
         expect("missing imports array").to_equal("")
+```
+
+</details>
+
+#### constructs bounded WebAssembly.Table values with get set and grow
+
+1. var interp =  new interpreter
+
+2. interp set object property
+
+3. interp set object property
+
+4. interp set object property
+
+5. JsValue Object
+   - Expected: _display_js(interp.get_object_property(table_id, "kind")) equals `table`
+   - Expected: _display_js(interp.get_object_property(table_id, "element")) equals `externref`
+   - Expected: _display_js(interp.get_object_property(table_id, "length")) equals `1`
+   - Expected: _display_js(interp._native_webassembly_table_get(table, [JsValue.Number(v: 0.0)])) equals `null`
+
+6. interp  native webassembly table set
+   - Expected: _display_js(interp._native_webassembly_table_get(table, [JsValue.Number(v: 0.0)])) equals `slot0`
+   - Expected: _display_js(interp._native_webassembly_table_grow(table, [JsValue.Number(v: 1.0), JsValue.String(v: "slot1")])) equals `1`
+   - Expected: _display_js(interp.get_object_property(table_id, "length")) equals `2`
+   - Expected: _display_js(interp._native_webassembly_table_get(table, [JsValue.Number(v: 1.0)])) equals `slot1`
+   - Expected: _display_js(interp._native_webassembly_table_grow(table, [JsValue.Number(v: 1.0)])) equals `-1`
+   - Expected: "missing table" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 21 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var interp = _new_interpreter()
+val options_id = interp.create_object()
+interp.set_object_property(options_id, "element", JsValue.String(v: "externref"))
+interp.set_object_property(options_id, "initial", JsValue.Number(v: 1.0))
+interp.set_object_property(options_id, "maximum", JsValue.Number(v: 2.0))
+
+val table = interp._native_webassembly_table([JsValue.Object(id: options_id)])
+match table:
+    JsValue.Object(table_id):
+        expect(_display_js(interp.get_object_property(table_id, "kind"))).to_equal("table")
+        expect(_display_js(interp.get_object_property(table_id, "element"))).to_equal("externref")
+        expect(_display_js(interp.get_object_property(table_id, "length"))).to_equal("1")
+        expect(_display_js(interp._native_webassembly_table_get(table, [JsValue.Number(v: 0.0)]))).to_equal("null")
+        interp._native_webassembly_table_set(table, [JsValue.Number(v: 0.0), JsValue.String(v: "slot0")])
+        expect(_display_js(interp._native_webassembly_table_get(table, [JsValue.Number(v: 0.0)]))).to_equal("slot0")
+        expect(_display_js(interp._native_webassembly_table_grow(table, [JsValue.Number(v: 1.0), JsValue.String(v: "slot1")]))).to_equal("1")
+        expect(_display_js(interp.get_object_property(table_id, "length"))).to_equal("2")
+        expect(_display_js(interp._native_webassembly_table_get(table, [JsValue.Number(v: 1.0)]))).to_equal("slot1")
+        expect(_display_js(interp._native_webassembly_table_grow(table, [JsValue.Number(v: 1.0)]))).to_equal("-1")
+    _:
+        expect("missing table").to_equal("")
+```
+
+</details>
+
+#### constructs bounded WebAssembly.Global values
+
+1. var interp =  new interpreter
+
+2. interp set object property
+
+3. interp set object property
+
+4. JsValue Object
+   - Expected: _display_js(interp.get_object_property(global_id, "kind")) equals `global`
+   - Expected: _display_js(interp.get_object_property(global_id, "valueType")) equals `i32`
+   - Expected: _display_js(interp.get_object_property(global_id, "mutable")) equals `true`
+   - Expected: _display_js(interp.get_object_property(global_id, "value")) equals `7`
+
+5. interp set object property
+   - Expected: _display_js(interp.get_object_property(global_id, "value")) equals `8`
+   - Expected: "missing global" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var interp = _new_interpreter()
+val descriptor_id = interp.create_object()
+interp.set_object_property(descriptor_id, "value", JsValue.String(v: "i32"))
+interp.set_object_property(descriptor_id, "mutable", JsValue.Boolean(v: true))
+
+val global = interp._native_webassembly_global([JsValue.Object(id: descriptor_id), JsValue.Number(v: 7.0)])
+match global:
+    JsValue.Object(global_id):
+        expect(_display_js(interp.get_object_property(global_id, "kind"))).to_equal("global")
+        expect(_display_js(interp.get_object_property(global_id, "valueType"))).to_equal("i32")
+        expect(_display_js(interp.get_object_property(global_id, "mutable"))).to_equal("true")
+        expect(_display_js(interp.get_object_property(global_id, "value"))).to_equal("7")
+        interp.set_object_property(global_id, "value", JsValue.Number(v: 8.0))
+        expect(_display_js(interp.get_object_property(global_id, "value"))).to_equal("8")
+    _:
+        expect("missing global").to_equal("")
 ```
 
 </details>
@@ -5070,8 +5185,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 104 |
-| Active scenarios | 104 |
+| Total scenarios | 106 |
+| Active scenarios | 106 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
