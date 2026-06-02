@@ -2204,7 +2204,7 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(_eval_str_with_network("http://api.example.com:8080", "var seen = 'no'; var req = require('http').request('http://api.example.com:8080', (res) => { res.on('data', (chunk) => { seen = chunk; }); }); req.end(); seen")).to_equal("bounded-response")
+expect(_eval_str_with_network("http://api.example.com:8080", "var seen = 'no'; var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.on('data', (chunk) => { seen = chunk; }); }); req.end(); seen + ':' + saved.bytesRead")).to_equal("bounded-response:16")
 expect(_eval_str_with_network("http://api.example.com:8080", "var ended = 'no'; var req = require('http').request('http://api.example.com:8080', (res) => { res.on('end', () => { ended = 'yes'; }); }); req.end(); ended")).to_equal("yes")
 expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.once('end', () => {}); }); req.end(); saved.listenerCount('end')")).to_equal("0")
 ```
@@ -2271,7 +2271,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); saved.readable + ':' + saved.readableLength + ':' + saved.read() + ':' + saved.readable + ':' + saved.readableLength + ':' + saved.read()")).to_equal("true:16:bounded-response:false:0:undefined")
-expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.pause(); res.on('data', () => {}); }); req.end(); saved.pendingData + ':' + saved.read() + ':' + saved.pendingData + ':' + saved.readableLength")).to_equal("true:bounded-response:false:0")
+expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.pause(); res.on('data', () => {}); }); req.end(); saved.pendingData + ':' + saved.read() + ':' + saved.pendingData + ':' + saved.readableLength + ':' + saved.bytesRead")).to_equal("true:bounded-response:false:0:16")
 expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); saved.destroy(); saved.read()")).to_equal("undefined")
 ```
 
@@ -2301,7 +2301,7 @@ Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(_eval_str_with_network("http://api.example.com:8080", "var stream = require('stream'); var w = stream.Writable(); var saved = null; var returned = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; returned = res.pipe(w); }); req.end(); returned.lastChunk + ':' + returned.bytesWritten + ':' + w.lastChunk + ':' + w.bytesWritten + ':' + saved.readableLength + ':' + saved.responseRead")).to_equal("bounded-response:16:bounded-response:16:0:true")
+expect(_eval_str_with_network("http://api.example.com:8080", "var stream = require('stream'); var w = stream.Writable(); var saved = null; var returned = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; returned = res.pipe(w); }); req.end(); returned.lastChunk + ':' + returned.bytesWritten + ':' + w.lastChunk + ':' + w.bytesWritten + ':' + saved.readableLength + ':' + saved.responseRead + ':' + saved.bytesRead")).to_equal("bounded-response:16:bounded-response:16:0:true:16")
 expect(_eval_str_with_network("http://api.example.com:8080", "var stream = require('stream'); var w = stream.Writable(); var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.pause(); res.pipe(w); }); req.end(); w.bytesWritten + ':' + saved.pipePaused + ':' + saved.responseRead + ':' + saved.readableLength")).to_equal("0:true:false:16")
 expect(_eval_str_with_network("http://api.example.com:8080", "var stream = require('stream'); var w = stream.Writable(); var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.pause(); res.pipe(w); }); req.end(); saved.resume(); w.lastChunk + ':' + w.bytesWritten + ':' + saved.pipePaused + ':' + saved.pipeResumed")).to_equal("bounded-response:16:false:true")
 expect(_eval_str_with_network("http://api.example.com:8080", "var stream = require('stream'); var w = stream.Writable(); var saved = null; var returned = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.pause(); res.pipe(w); returned = res.unpipe(); }); req.end(); saved.resume(); (returned === saved) + ':' + w.bytesWritten + ':' + saved.pipePaused + ':' + saved.pipeResumed + ':' + saved.pipeUnpiped + ':' + saved.responseRead")).to_equal("true:0:false:false:true:false")
@@ -2320,7 +2320,7 @@ Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); saved.complete + ':' + saved.readableEnded + ':' + saved.endDelivered")).to_equal("true:true:false")
+expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); saved.complete + ':' + saved.readableEnded + ':' + saved.endDelivered + ':' + saved.readableHighWaterMark + ':' + saved.readableObjectMode + ':' + saved.readableEncoding + ':' + saved.bytesRead")).to_equal("true:true:false:16384:false::0")
 expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.on('data', () => {}); res.on('end', () => {}); }); req.end(); saved.dataListenerCount + ':' + saved.endListenerCount + ':' + saved.dataDelivered + ':' + saved.endDelivered")).to_equal("1:1:true:true")
 expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080'); req.on('response', (res) => { saved = res; res.on('end', () => {}); }); req.end(); saved.complete + ':' + saved.readableEnded + ':' + saved.endListenerCount")).to_equal("true:true:1")
 expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.on('data', () => {}); }); req.end(); saved.readable + ':' + saved.responseRead + ':' + saved.readableLength")).to_equal("false:true:0")
@@ -2356,7 +2356,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); typeof saved.streamAsyncIterator + ':' + typeof saved[Symbol.asyncIterator]")).to_equal("function:function")
-expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); var it = saved.streamAsyncIterator(); it.next().value + ':' + saved.readable + ':' + saved.readableLength")).to_equal("bounded-response:false:0")
+expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); var it = saved.streamAsyncIterator(); it.next().value + ':' + saved.readable + ':' + saved.readableLength + ':' + saved.bytesRead")).to_equal("bounded-response:false:0:16")
 expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); var it = saved.streamAsyncIterator(); it.next(); it.next().done")).to_equal("true")
 expect(_eval_str_with_network("http://api.example.com:8080", "var ended = 0; var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.on('end', () => { ended = ended + 1; }); }); req.end(); var it = saved[Symbol.asyncIterator](); it.next(); it.next(); ended + ':' + saved.endDelivered + ':' + saved.readableEnded")).to_equal("1:true:true")
 ```
