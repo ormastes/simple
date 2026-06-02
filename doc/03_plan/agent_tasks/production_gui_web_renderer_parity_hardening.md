@@ -86,3 +86,16 @@ expected and acceptable per NFR-006: **record** mismatch %, viewport, color
 format, and both artifact PNGs as documented divergence; do not assert `==0`.
 Closing the fidelity gap (AA/gamma/LCD text) is the long-tail "production level"
 work tracked in `doc/03_plan/gui_hardening_current_plan_2026-06-01.md`.
+
+### Hand-off
+
+The 2× fix belongs in `tools/electron-live-bitmap/exact_fixture.js` (pixel
+extraction after `capturePage`/`toBitmap`), which the concurrent agent has
+uncommitted edits in (readiness detection) — committing it here would bundle
+their in-flight work, so it is handed off via this doc rather than edited.
+Saved to project memory as `bug-electron-capture-2x-retina`. Verification
+probes: `build/cap_probe/getsize_probe.js`, `downscale_probe.js`,
+`electron_fixed_6x.png` (corrected reference). A non-colliding fidelity probe
+(`build/cap_probe/render_probe.spl`) hit a probe-specific import-scope build
+error (`variable color not found` via a broader module graph than the harness
+entry pulls) — not a production bug; the harness entry renders fine.
