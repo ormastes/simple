@@ -207,6 +207,39 @@ match result:
 
 </details>
 
+#### routes invalid WebAssembly.instantiate results through catch in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `invalid:invalid-wasm-header:invalid:unsupported-wasm-imports:instantiated:8`
+
+3. Err
+   - Expected: "unexpected wasm instantiate catch js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var out = ''; WebAssembly.instantiate('0061736d00000000').catch(function(err) { out = err.status + ':' + err.error; }); var imports = {}; WebAssembly.instantiate('0061736d01000000010401600000020b0103656e7603666f6f0000', imports).catch(function(err) { out = out + ':' + err.status + ':' + err.error; }); WebAssembly.instantiate('0061736d01000000').then(function(result) { out = out + ':' + result.status + ':' + result.module.byteLength; }); out")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("invalid:invalid-wasm-header:invalid:unsupported-wasm-imports:instantiated:8")
+    Err(err):
+        expect("unexpected wasm instantiate catch js error: {err}").to_equal("")
+```
+
+</details>
+
 #### chains compiled WebAssembly modules into instantiate
 
 1. var session = BrowserSession new
@@ -1438,8 +1471,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 35 |
-| Active scenarios | 35 |
+| Total scenarios | 36 |
+| Active scenarios | 36 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

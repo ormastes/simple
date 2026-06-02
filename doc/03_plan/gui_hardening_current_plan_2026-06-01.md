@@ -937,6 +937,28 @@ The generated scenario manual was refreshed with the existing docgen warning
 profile. Broader WASM semantics, typed-array prototype parity, and production
 GUI pixel parity remain open.
 
+BrowserSession WebAssembly instantiate rejection continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession JS/WebEngine/WASM evidence now includes bounded async instantiate
+rejection handling in browser scripts. The scenario proves invalid byte payloads
+route through `catch` with `status=invalid` and `error=invalid-wasm-header`,
+unsupported imports route through `catch` with `status=invalid` and
+`error=unsupported-wasm-imports`, and a subsequent valid instantiate still
+reaches its `then` handler with `status=instantiated` and module byte length,
+yielding
+`invalid:invalid-wasm-header:invalid:unsupported-wasm-imports:instantiated:8`.
+Focused checks passed, the fetch/WASM chain spec passed `36/36`, the native
+WASM host spec passed `107/107`, and Node API conformance remained `213/213`.
+The generated scenario manual was refreshed with the existing docgen warning
+profile. Broader WASM semantics, typed-array prototype parity, and production
+GUI pixel parity remain open.
+
 Production Chrome exact-policy fail-closed continuation:
 
 - `jj git fetch`
