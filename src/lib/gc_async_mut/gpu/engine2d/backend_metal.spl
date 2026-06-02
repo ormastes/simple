@@ -8,6 +8,7 @@
 use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended}
 use std.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.gpu.engine2d.backend_probe.{BackendProbeResult}
+use std.gpu.engine2d.glyph.{glyph_data, glyph_height, glyph_advance}
 use std.gc_async_mut.gpu.engine2d.metal_session.{MetalSession}
 use std.nogc_sync_mut.env.platform.{is_macos}
 use std.nogc_sync_mut.io.metal_sffi.{
@@ -257,7 +258,11 @@ impl RenderBackend for MetalBackend:
             self.gpu_frame_complete = false
     me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
         self.mirror.draw_text(x, y, text_val, color, font_size)
-        self.gpu_frame_complete = false
+        if self.initialized and self.d_framebuffer != 0 and self.session.pipe_rect_filled != 0:
+            self.gpu_frame_complete = self.gpu_frame_complete and self._dispatch_metal_text(x, y, text_val, color, font_size)
+            self.dirty = true
+        else:
+            self.gpu_frame_complete = false
     me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         self.mirror.draw_image(x, y, w, h, pixels)
         self.gpu_frame_complete = false
@@ -451,6 +456,33 @@ impl MetalBackend:
         val pipeline = self.session.pipe_gradient
         val ok = self._dispatch_metal_2d(pipeline, w, h, params, 32)
         rt_free(params)
+        ok
+
+    me _dispatch_metal_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32) -> bool:
+        val gh = glyph_height()
+        var scale = font_size / gh
+        if scale < 1:
+            scale = 1
+        val advance = glyph_advance(scale)
+        var ok = true
+        var i: i64 = 0
+        var cursor_x = x
+        while i < text_val.len():
+            val code = text_val.char_code_at(i)
+            val ch = "{code as char}"
+            val bitmap = glyph_data(ch)
+            var gy = 0
+            while gy < gh:
+                val row_data = bitmap[gy]
+                var gx = 0
+                while gx < 5:
+                    val bit = (row_data >> (4 - gx)) & 1
+                    if bit != 0:
+                        ok = ok and self._dispatch_metal_rect_filled(cursor_x + gx * scale, y + gy * scale, scale, scale, color)
+                    gx = gx + 1
+                gy = gy + 1
+            cursor_x = cursor_x + advance
+            i = i + 1
         ok
 
     me _dispatch_metal_1d(pipeline: i64, threads: i64, block_x: i64, params: i64, params_len: i64) -> bool:
