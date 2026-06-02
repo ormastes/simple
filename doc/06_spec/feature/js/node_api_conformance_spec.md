@@ -2154,13 +2154,14 @@ expect(_eval_str("var s = require('stream'); var r = s.Readable.from(['ab','cde'
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_eval_str("var seen = 0; var s = require('stream'); var r = s.Readable.from(['abc']); var w = s.Writable(); r.on('end', () => { seen = seen + 1; }); r.pipe(w); seen + ':' + r.endEmitted + ':' + r.readableLength")).to_equal("1:true:0")
 expect(_eval_str("var seen = 0; var s = require('stream'); var r = s.Readable.from(['abc']); var w = s.Writable(); r.once('end', () => { seen = seen + 1; }); r.pipe(w); r.pipe(w); seen + ':' + r.listenerCount('end') + ':' + r.endEmitted")).to_equal("1:0:true")
 expect(_eval_str("var seen = 0; var s = require('stream'); var r = s.Readable.from(['abc']); var w = s.Writable(); r.pause(); r.on('end', () => { seen = seen + 1; }); r.pipe(w); r.resume(); seen + ':' + r.endEmitted + ':' + w.bytesWritten")).to_equal("1:true:3")
+expect(_eval_str("var s = require('stream'); var r = s.Readable.from(['abc']); var w = s.Writable(); r.pipe(w); r.readableEnded + ':' + r.readable")).to_equal("true:false")
 ```
 
 </details>
@@ -2251,7 +2252,7 @@ expect(_eval_str("var seen = ''; var r = require('stream').Readable.from(['a']);
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -2259,6 +2260,7 @@ expect(_eval_str("var seen = ''; var r = require('stream').Readable.from(['a','b
 expect(_eval_str("var seen = 0; var r = require('stream').Readable.from(['a']); r.once('end', () => { seen = seen + 1; }); r.on('data', (c) => {}); r.resume(); seen + ':' + r.listenerCount('end') + ':' + r.endEmitted")).to_equal("1:0:true")
 expect(_eval_str("var seen = ''; var r = require('stream').Readable.from(['a','b']); r.once('data', (c) => { seen = seen + c; }); seen + ':' + r.readableLength + ':' + r.endEmitted")).to_equal("a:1:false")
 expect(_eval_str("var seen = ''; var r = require('stream').Readable.from(['a']); r.pause(); r.on('end', () => { seen = seen + ':end'; }); r.on('data', (c) => { seen = seen + c; }); r.resume(); seen + ':' + r.endEmitted")).to_equal("a:end:true")
+expect(_eval_str("var r = require('stream').Readable.from(['a']); r.on('data', (c) => {}); r.readableEnded + ':' + r.readable")).to_equal("true:false")
 ```
 
 </details>
@@ -2315,13 +2317,14 @@ expect(_eval_str("var r = require('stream').Readable.from(['a','b']); var it = r
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_eval_str("var seen = 0; var r = require('stream').Readable.from(['a']); r.on('end', () => { seen = seen + 1; }); var it = r.streamAsyncIterator(); it.next(); it.next(); seen + ':' + r.endEmitted + ':' + r.readableLength")).to_equal("1:true:0")
 expect(_eval_str("var seen = 0; var r = require('stream').Readable.from(['a']); r.once('end', () => { seen = seen + 1; }); var it = r.streamAsyncIterator(); it.next(); it.next(); it.next(); seen + ':' + r.listenerCount('end') + ':' + r.endEmitted")).to_equal("1:0:true")
 expect(_eval_str("var seen = 0; var r = require('stream').Readable.from(['a','b']); r.on('end', () => { seen = seen + 1; }); var it = r.streamAsyncIterator(); it.next(); seen + ':' + r.endEmitted + ':' + r.readableLength")).to_equal("0:false:1")
+expect(_eval_str("var r = require('stream').Readable.from(['a']); var it = r.streamAsyncIterator(); it.next(); it.next(); r.readableEnded + ':' + r.readable")).to_equal("true:false")
 ```
 
 </details>

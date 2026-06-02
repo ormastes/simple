@@ -387,8 +387,10 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   readable async-iterator exhaustion now emits `end` through both explicit and
   `Symbol.asyncIterator` methods. Bounded readable `pipe()` drains now emit
   `end`, including once-listener cleanup and paused pending-pipe resume
-  delivery. Full flow control, `for await` syntax support, broader stream
-  scheduling, and broader event-loop phases remain open.
+  delivery. Bounded readable end-state now sets `readableEnded=true` and
+  `readable=false` across data, pipe, and async-iterator exhaustion. Full flow
+  control, `for await` syntax support, broader stream scheduling, and broader
+  event-loop phases remain open.
   Bounded `setInterval` rescheduling across explicit timer drains,
   `clearInterval` from inside an interval callback, and nextTick-before-timer
   phase priority are covered. Broader event-loop phases, host I/O integration,
@@ -2303,6 +2305,24 @@ Bounded `Writable(opts)` now honors `highWaterMark`, tracks
 the high-water mark. `Readable.pipe(Writable)` now propagates destination
 length and backpressure after bounded chunk transfer. Focused checks passed,
 the Node API conformance suite passes `222/222`, BrowserSession fetch/WASM and
+native WASM host regressions remain `36/36` and `107/107`, and the broad
+`src/lib` check passed with the existing `447` warning profile. Full stream
+flow control, async scheduling, and host I/O integration remain open.
+
+CommonJS/Node bounded readable ended-state continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/interpreter_native.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+
+Bounded readable streams now expose deterministic end-state flags: the shared
+readable end emitter sets `readableEnded=true` and `readable=false` whenever
+data listeners, pipe drains, or async iterator exhaustion consume all buffered
+chunks. Focused checks passed, the Node API conformance suite remains
+`232/232` with stronger lifecycle assertions, BrowserSession fetch/WASM and
 native WASM host regressions remain `36/36` and `107/107`, and the broad
 `src/lib` check passed with the existing `447` warning profile. Full stream
 flow control, async scheduling, and host I/O integration remain open.
