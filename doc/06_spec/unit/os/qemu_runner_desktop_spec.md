@@ -2,6 +2,34 @@
 
 ## Scenarios
 
+#### allows desktop serial log paths to be isolated per run
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val old_uefi = rt_env_get("SIMPLEOS_DESKTOP_UEFI_SERIAL_LOG") ?? ""
+val old_disk = rt_env_get("SIMPLEOS_DESKTOP_DISK_SERIAL_LOG") ?? ""
+val old_wm = rt_env_get("SIMPLEOS_WM_SIMPLE_WEB_SERIAL_LOG") ?? ""
+
+expect(rt_env_set("SIMPLEOS_DESKTOP_UEFI_SERIAL_LOG", "build/tmp/qemu-runner/uefi.serial.log")).to_equal(true)
+expect(rt_env_set("SIMPLEOS_DESKTOP_DISK_SERIAL_LOG", "build/tmp/qemu-runner/disk.serial.log")).to_equal(true)
+expect(rt_env_set("SIMPLEOS_WM_SIMPLE_WEB_SERIAL_LOG", "build/tmp/qemu-runner/wm.serial.log")).to_equal(true)
+
+expect(desktop_uefi_serial_log_path()).to_equal("build/tmp/qemu-runner/uefi.serial.log")
+expect(desktop_disk_serial_log_path()).to_equal("build/tmp/qemu-runner/disk.serial.log")
+expect(wm_simple_web_serial_log_path()).to_equal("build/tmp/qemu-runner/wm.serial.log")
+
+expect(rt_env_set("SIMPLEOS_DESKTOP_UEFI_SERIAL_LOG", old_uefi)).to_equal(true)
+expect(rt_env_set("SIMPLEOS_DESKTOP_DISK_SERIAL_LOG", old_disk)).to_equal(true)
+expect(rt_env_set("SIMPLEOS_WM_SIMPLE_WEB_SERIAL_LOG", old_wm)).to_equal(true)
+```
+
+</details>
+
 #### builds a desktop UEFI validator command requiring structured FAT checks for migrated tool apps
 
 <details>
@@ -243,8 +271,8 @@ expect(cmd.contains("-display")).to_equal(false)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
