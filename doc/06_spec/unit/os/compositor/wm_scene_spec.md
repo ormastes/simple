@@ -411,7 +411,7 @@ expect_not(html.contains("Hidden"))
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 73 lines folded for reproduction.
+Runnable source: 88 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -481,12 +481,27 @@ expect(html).to_contain("bar-command")
 expect(html).to_contain("aria-label='Desktop widgets'")
 expect(html).to_contain("class='desktop-widget'")
 expect(html).to_contain("aria-label='WM control center'")
+expect(html).to_contain("data-motion-scope='control-center'")
+expect(html).to_contain("data-motion-choice='standard'")
+expect(html).to_contain("data-motion-choice='reduced'")
+expect(html).to_contain("data-motion-choice='off'")
 expect(html).to_contain("Standard motion")
 expect(html).to_contain("Motion off")
 expect(html).to_contain("aria-label='Window overview'")
 expect(html).to_contain("class='overview-card active'")
 expect(html).to_contain("class='snap-preview active'")
 expect(html).to_contain("data-snap-zone='right'")
+expect(html).to_contain("data-motion-mode='standard'")
+expect(html).to_contain("data-motion-can-disable='true'")
+expect(html).to_contain("data-reduced-motion-duration-ms='80'")
+expect(html).to_contain("@keyframes wm-widget-float")
+expect(html).to_contain("@keyframes wm-control-in")
+expect(html).to_contain("@keyframes wm-overview-in")
+expect(html).to_contain("@keyframes wm-snap-pulse")
+expect(html).to_contain("@media (prefers-reduced-motion: reduce)")
+expect(html).to_contain("body[data-motion-mode='reduced']")
+expect(html).to_contain("body[data-motion-mode='off']")
+expect(html).to_contain("animation:none!important")
 expect(html).to_contain("repeat(auto-fit,minmax(180px,1fr))")
 ```
 
