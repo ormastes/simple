@@ -259,6 +259,91 @@ match session.take_pending_request():
 
 </details>
 
+#### instantiates streaming fetch responses with imports
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `queued`
+
+3. Err
+   - Expected: "unexpected queue error: {err}" equals ``
+
+4. Ok
+   - Expected: _display_js(value) equals ``
+
+5. Err
+   - Expected: "unexpected pre-commit js error: {err}" equals ``
+
+6. Some
+   - Expected: request.kind equals `fetch`
+   - Expected: request.url equals `https://example.com/mod.wasm`
+
+7. Ok
+
+8. Ok
+   - Expected: _display_js(value) equals `stream:instantiated:1:42`
+
+9. Err
+   - Expected: "unexpected js error: {err}" equals ``
+
+10. Err
+   - Expected: "unexpected commit error: {err}" equals ``
+   - Expected: "missing fetch request" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 41 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val queued = session.eval_script("var out = ''; var imports = { env: { foo: function(x) { return x + 1; } } }; WebAssembly.instantiateStreaming(window.fetch('/mod.wasm'), imports).then(function(result) { out = 'stream:' + result.status + ':' + result.module.importCount + ':' + result.instance.exports.run(41); }); 'queued'")
+match queued:
+    Ok(value):
+        expect(_display_js(value)).to_equal("queued")
+    Err(err):
+        expect("unexpected queue error: {err}").to_equal("")
+match session.eval_script("out"):
+    Ok(value):
+        expect(_display_js(value)).to_equal("")
+    Err(err):
+        expect("unexpected pre-commit js error: {err}").to_equal("")
+
+match session.take_pending_request():
+    Some(request):
+        expect(request.kind).to_equal("fetch")
+        expect(request.url).to_equal("https://example.com/mod.wasm")
+        val committed = session.commit_network_response(BrowserResponse.create(
+            request_id: request.id,
+            kind: "fetch",
+            url: request.url,
+            status: 200,
+            headers: "Content-Type: application/wasm\n",
+            body: "0061736d0100000001060160017f017f020b0103656e7603666f6f0000030201000707010372756e00010a08010600200010000b",
+            error: ""
+        ))
+        match committed:
+            Ok(_):
+                match session.eval_script("out"):
+                    Ok(value):
+                        expect(_display_js(value)).to_equal("stream:instantiated:1:42")
+                    Err(err):
+                        expect("unexpected js error: {err}").to_equal("")
+            Err(err):
+                expect("unexpected commit error: {err}").to_equal("")
+    nil:
+        expect("missing fetch request").to_equal("")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -278,8 +363,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
