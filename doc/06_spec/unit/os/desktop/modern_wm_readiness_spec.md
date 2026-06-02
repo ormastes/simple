@@ -24,7 +24,7 @@ Verifies one combined readiness report for the modern Web WM, SimpleOS
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -33,6 +33,7 @@ expect(report.passed)
 expect(report.web_quality_ready)
 expect(report.os_dock_ready)
 expect(report.os_taskbar_ready)
+expect(report.os_affordances_ready)
 expect(report.lifecycle_motion_ready)
 expect(report.rendered_motion_ready)
 expect(report.color_checked)
@@ -43,6 +44,12 @@ expect(report.window_min_width_px).to_equal(200)
 expect(report.window_min_height_px).to_equal(120)
 expect(report.title_input_min_width_px).to_equal(140)
 expect(report.taskbar_icon_size_px).to_equal(26)
+expect(report.command_palette_max_width_px).to_equal(680)
+expect(report.control_center_max_width_px).to_equal(320)
+expect(report.desktop_widget_max_width_px).to_equal(260)
+expect(report.overview_card_min_width_px).to_equal(180)
+expect(report.touch_target_min_height_px).to_equal(44)
+expect(report.responsive_layout_ready)
 expect(report.command_palette_ready)
 expect(report.title_input_ready)
 expect(report.visual_layering_ready)
@@ -54,6 +61,7 @@ expect(report.accessible_controls_ready)
 expect(report.snap_assist_ready)
 expect(report.desktop_widgets_ready)
 expect(report.window_overview_ready)
+expect(report.control_center_ready)
 expect(report.notes[0]).to_equal("modern WM readiness passed")
 ```
 
@@ -64,7 +72,7 @@ expect(report.notes[0]).to_equal("modern WM readiness passed")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -74,15 +82,22 @@ expect(summary).to_contain("status=pass")
 expect(summary).to_contain("web=true")
 expect(summary).to_contain("dock=true")
 expect(summary).to_contain("taskbar=true")
+expect(summary).to_contain("os_affordances=true")
 expect(summary).to_contain("lifecycle=true")
 expect(summary).to_contain("rendered_motion=true")
 expect(summary).to_contain("color_checked=true")
 expect(summary).to_contain("contrast_ratio_x100=")
 expect(summary).to_contain("size_layout=true")
+expect(summary).to_contain("responsive_layout=true")
 expect(summary).to_contain("titlebar=38px")
 expect(summary).to_contain("window_min=200x120")
 expect(summary).to_contain("title_input=140px")
 expect(summary).to_contain("taskbar_icon=26px")
+expect(summary).to_contain("command_palette_max=680px")
+expect(summary).to_contain("control_center_max=320px")
+expect(summary).to_contain("desktop_widget_max=260px")
+expect(summary).to_contain("overview_card_min=180px")
+expect(summary).to_contain("touch_target_min=44px")
 expect(summary).to_contain("command_palette=true")
 expect(summary).to_contain("title_input_ready=true")
 expect(summary).to_contain("visual_layering=true")
@@ -94,6 +109,7 @@ expect(summary).to_contain("accessible_controls=true")
 expect(summary).to_contain("snap_assist=true")
 expect(summary).to_contain("desktop_widgets=true")
 expect(summary).to_contain("window_overview=true")
+expect(summary).to_contain("control_center=true")
 ```
 
 </details>
@@ -107,3 +123,4 @@ expect(summary).to_contain("window_overview=true")
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+

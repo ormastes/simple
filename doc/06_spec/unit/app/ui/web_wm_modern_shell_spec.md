@@ -25,7 +25,7 @@ Verifies the first modern Simple Web WM slice at the contract level.
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 53 lines folded for reproduction.
+Runnable source: 58 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -58,6 +58,11 @@ expect(html).to_contain(".wm-overview-card")
 expect(html).to_contain(".wm-overview-card.active")
 expect(html).to_contain(".wm-overview-icon")
 expect(html).to_contain("@keyframes wm-overview-in")
+expect(html).to_contain(".wm-control-center")
+expect(html).to_contain(".wm-control-center[hidden]")
+expect(html).to_contain(".wm-control-group")
+expect(html).to_contain(".wm-control-button")
+expect(html).to_contain("@keyframes wm-control-in")
 expect(html).to_contain("prefers-reduced-motion")
 expect(html).to_contain("data-wm-motion=reduced")
 expect(html).to_contain("data-wm-motion=off")
@@ -91,7 +96,7 @@ expect(html).to_contain("border-radius: 999px")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 69 lines folded for reproduction.
+Runnable source: 77 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -149,6 +154,14 @@ expect(js).to_contain("_focusWindowById")
 expect(js).to_contain("Show window overview")
 expect(js).to_contain("wm-window-overview")
 expect(js).to_contain("wm-overview-card")
+expect(js).to_contain("_ensureControlCenter")
+expect(js).to_contain("_toggleControlCenter")
+expect(js).to_contain("_renderControlCenter")
+expect(js).to_contain("_makeControlCenterButton")
+expect(js).to_contain("_setMotionFromControlCenter")
+expect(js).to_contain("Open control center")
+expect(js).to_contain("wm-control-center")
+expect(js).to_contain("wm-control-button")
 expect(js).to_contain("wm-titlebar-icon")
 expect(js).to_contain("wm-command-bar")
 expect(js).to_contain("wm-btn-")
@@ -173,7 +186,7 @@ expect(retained).to_contain("Maximize window")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 39 lines folded for reproduction.
+Runnable source: 46 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -196,6 +209,13 @@ expect(preview).to_contain("wm-overview-card active")
 expect(preview).to_contain("wm-overview-card-title")
 expect(preview).to_contain("wm-overview-card-meta")
 expect(preview).to_contain("Show window overview")
+expect(preview).to_contain("aria-label=\"WM control center\"")
+expect(preview).to_contain("wm-control-center")
+expect(preview).to_contain("wm-control-button active")
+expect(preview).to_contain("Standard motion")
+expect(preview).to_contain("Reduced motion")
+expect(preview).to_contain("Motion off")
+expect(preview).to_contain("Open control center")
 expect(preview).to_contain("wm-traffic-lights")
 expect(preview).to_contain("wm-title-input wm-command-bar")
 expect(preview).to_contain("wm-command-palette")
@@ -225,7 +245,7 @@ expect(preview).to_contain("contrast_ratio_x100=450")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -241,6 +261,7 @@ val report = wm_modern_preview_evidence_report(path, "glass_dark")
 expect(report).to_contain("wm_modern_preview")
 expect(report).to_contain("path=build/simple_wm_modern_preview.html")
 expect(report).to_contain("command_palette=true")
+expect(report).to_contain("control_center=true")
 expect(report).to_contain("window_overview=true")
 expect(report).to_contain("normalized_icons=true")
 expect(report).to_contain("desktop_widgets=true")
@@ -253,7 +274,7 @@ expect(report).to_contain("desktop_widgets=true")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 41 lines folded for reproduction.
+Runnable source: 55 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -272,6 +293,11 @@ expect(report.window_min_width_px).to_equal(200)
 expect(report.window_min_height_px).to_equal(120)
 expect(report.title_input_min_width_px).to_equal(140)
 expect(report.taskbar_icon_size_px).to_equal(26)
+expect(report.command_palette_max_width_px).to_equal(680)
+expect(report.control_center_max_width_px).to_equal(320)
+expect(report.desktop_widget_max_width_px).to_equal(260)
+expect(report.overview_card_min_width_px).to_equal(180)
+expect(report.touch_target_min_height_px).to_equal(44)
 expect(report.rounded_shapes)
 expect(report.round_icon_masking)
 expect(report.round_icon_converter)
@@ -290,14 +316,23 @@ expect(report.accessible_controls_ready)
 expect(report.snap_assist_ready)
 expect(report.desktop_widgets_ready)
 expect(report.window_overview_ready)
+expect(report.control_center_ready)
+expect(report.responsive_layout_ready)
 expect(wm_theme_quality_summary("glass_dark")).to_contain("status=pass")
 expect(wm_theme_quality_summary("glass_dark")).to_contain("contrast_ratio_x100=")
 expect(wm_theme_quality_summary("glass_dark")).to_contain("titlebar_height_px=38")
+expect(wm_theme_quality_summary("glass_dark")).to_contain("command_palette_max_width_px=680")
+expect(wm_theme_quality_summary("glass_dark")).to_contain("control_center_max_width_px=320")
+expect(wm_theme_quality_summary("glass_dark")).to_contain("desktop_widget_max_width_px=260")
+expect(wm_theme_quality_summary("glass_dark")).to_contain("overview_card_min_width_px=180")
+expect(wm_theme_quality_summary("glass_dark")).to_contain("touch_target_min_height_px=44")
+expect(wm_theme_quality_summary("glass_dark")).to_contain("responsive_layout_ready=true")
 expect(wm_theme_quality_summary("glass_dark")).to_contain("visual_layering_ready=true")
 expect(wm_theme_quality_summary("glass_dark")).to_contain("accessible_controls_ready=true")
 expect(wm_theme_quality_summary("glass_dark")).to_contain("snap_assist_ready=true")
 expect(wm_theme_quality_summary("glass_dark")).to_contain("desktop_widgets_ready=true")
 expect(wm_theme_quality_summary("glass_dark")).to_contain("window_overview_ready=true")
+expect(wm_theme_quality_summary("glass_dark")).to_contain("control_center_ready=true")
 ```
 
 </details>
@@ -311,3 +346,4 @@ expect(wm_theme_quality_summary("glass_dark")).to_contain("window_overview_ready
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+

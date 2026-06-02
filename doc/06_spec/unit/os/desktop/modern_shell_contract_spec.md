@@ -148,12 +148,64 @@ expect(running[1].get_prop("modern_minimized")).to_equal("true")
 
 </details>
 
+#### defines portable modern desktop affordances for SimpleOS renderers
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val contract = modern_desktop_affordance_contract()
+expect(contract.command_palette)
+expect(contract.control_center)
+expect(contract.window_overview)
+expect(contract.desktop_widgets)
+expect(contract.snap_assist)
+expect(contract.motion_verbosity_controls)
+expect(contract.can_disable_motion)
+expect(contract.translucent_panels)
+expect(contract.rounded_controls)
+expect(contract.reduced_motion_ms).to_equal(80)
+val summary = modern_desktop_affordance_summary()
+expect(summary).to_contain("modern_desktop_affordances")
+expect(summary).to_contain("control_center=true")
+expect(summary).to_contain("window_overview=true")
+expect(summary).to_contain("desktop_widgets=true")
+expect(summary).to_contain("snap_assist=true")
+expect(summary).to_contain("motion_controls=true")
+```
+
+</details>
+
+#### writes modern affordance metadata onto the actual taskbar shell tree
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = build_taskbar_shell_tree(_taskbar_model())
+expect(root.get_prop("modern_command_palette")).to_equal("true")
+expect(root.get_prop("modern_control_center")).to_equal("true")
+expect(root.get_prop("modern_window_overview")).to_equal("true")
+expect(root.get_prop("modern_desktop_widgets")).to_equal("true")
+expect(root.get_prop("modern_snap_assist")).to_equal("true")
+expect(root.get_prop("modern_motion_controls")).to_equal("true")
+expect(root.get_prop("modern_affordance_reduced_motion_ms")).to_equal("80")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -1579,3 +1579,21 @@ passes with `parityStatus=divergent`, `boundedDivergenceOnly=true`,
 and `differentPixels=2717`. The famous-site corpus spec passes `42/42` in about
 86s, so this strengthens the release gate wording while keeping the production
 Chrome pixel-parity blocker explicitly open.
+
+Web WM control center and OS affordance continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/app/ui.web/html.spl src/app/ui.web/wm_quality_contract.spl test/unit/app/ui/web_wm_modern_shell_spec.spl src/os/desktop/taskbar_shell.spl test/unit/os/desktop/modern_shell_contract_spec.spl src/os/desktop/modern_wm_readiness.spl test/unit/os/desktop/modern_wm_readiness_spec.spl`
+- `node --check src/app/ui.web/wm.js`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/app/ui/web_wm_modern_shell_spec.spl --mode=interpreter --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/os/desktop/modern_shell_contract_spec.spl --mode=interpreter --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/os/desktop/modern_wm_readiness_spec.spl --mode=interpreter --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/unit/app/ui/web_wm_modern_shell_spec.spl test/unit/os/desktop/modern_shell_contract_spec.spl test/unit/os/desktop/modern_wm_readiness_spec.spl --output doc/06_spec --no-index`
+
+The modern Web WM now exposes a control center for motion and workspace
+affordances, and the SimpleOS taskbar shell now publishes a portable modern
+desktop affordance contract for command palette, control center, window
+overview, desktop widgets, snap assist, and motion verbosity controls. The
+combined readiness report now requires both Web quality evidence and OS-shell
+affordance metadata before reporting `os_affordances=true` and
+`control_center=true`. Focused Web WM, modern shell contract, and readiness
+specs pass `5/5`, `7/7`, and `2/2`.
