@@ -532,6 +532,35 @@ expect(_object_property_text(interp, invalid_instance, "error")).to_equal("inval
 
 </details>
 
+#### instantiates precompiled WebAssembly modules
+
+1. var interp =  new interpreter
+   - Expected: _object_property_text(interp, result, "status") equals `instantiated`
+   - Expected: _object_child_property_text(interp, result, "module", "byteLength") equals `11`
+   - Expected: _object_child_property_text(interp, result, "module", "sectionCount") equals `1`
+   - Expected: _object_child_property_text(interp, result, "instance", "exports") equals `[object Object]`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var interp = _new_interpreter()
+
+val module = interp._native_webassembly_module([JsValue.String(v: "0061736d01000000010100")])
+val result = interp._native_webassembly_instantiate(JsValue.Undefined, [module])
+
+expect(_object_property_text(interp, result, "status")).to_equal("instantiated")
+expect(_object_child_property_text(interp, result, "module", "byteLength")).to_equal("11")
+expect(_object_child_property_text(interp, result, "module", "sectionCount")).to_equal("1")
+expect(_object_child_property_text(interp, result, "instance", "exports")).to_equal("[object Object]")
+```
+
+</details>
+
 #### exposes bounded memory export metadata and instance memory shape
 
 1. var interp =  new interpreter
@@ -4946,8 +4975,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 101 |
-| Active scenarios | 101 |
+| Total scenarios | 102 |
+| Active scenarios | 102 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
