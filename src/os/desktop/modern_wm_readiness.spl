@@ -1,0 +1,104 @@
+# Combined modern WM readiness audit for Web WM plus SimpleOS shell/compositor.
+
+use app.ui.web.wm_quality_contract.{wm_theme_quality_report}
+use os.compositor.wm_action_applier.{WmLifecycleWindowState, wm_lifecycle_motion_contract}
+use os.compositor.wm_scene.{lifecycle_windows_to_motion_wm_scene, scene_to_html}
+use os.desktop.dock.{Dock, DockItem, dock_item_modern_icon_kind, modern_dock_metrics}
+use os.desktop.taskbar_shell.{build_taskbar_shell_tree, modern_taskbar_shell_contract}
+use common.ui.taskbar_model.{AppRef, TaskbarModel, TrayItem, WindowRef}
+use std.window_protocol.geometry.{Px}
+
+struct ModernWmReadinessReport:
+    theme: text
+    passed: bool
+    web_quality_ready: bool
+    os_dock_ready: bool
+    os_taskbar_ready: bool
+    lifecycle_motion_ready: bool
+    rendered_motion_ready: bool
+    color_checked: bool
+    contrast_ratio_x100: i64
+    notes: [text]
+
+fn modern_wm_readiness_report(theme: text) -> ModernWmReadinessReport:
+    val web = wm_theme_quality_report(theme)
+    val dock_ready = _os_dock_ready()
+    val taskbar_ready = _os_taskbar_ready()
+    val lifecycle_ready = _lifecycle_motion_ready()
+    val rendered_ready = _rendered_motion_ready()
+    val passed = web.passed and dock_ready and taskbar_ready and lifecycle_ready and rendered_ready
+    ModernWmReadinessReport(
+        theme: theme,
+        passed: passed,
+        web_quality_ready: web.passed,
+        os_dock_ready: dock_ready,
+        os_taskbar_ready: taskbar_ready,
+        lifecycle_motion_ready: lifecycle_ready,
+        rendered_motion_ready: rendered_ready,
+        color_checked: web.color_checked,
+        contrast_ratio_x100: web.contrast_ratio_x100,
+        notes: _modern_wm_notes(passed, web.contrast_ratio_x100)
+    )
+
+fn modern_wm_readiness_summary(theme: text) -> text:
+    val r = modern_wm_readiness_report(theme)
+    val status = if r.passed: "pass" else: "fail"
+    "modern_wm_readiness theme={r.theme} status={status} web={r.web_quality_ready} dock={r.os_dock_ready} taskbar={r.os_taskbar_ready} lifecycle={r.lifecycle_motion_ready} rendered_motion={r.rendered_motion_ready} color_checked={r.color_checked} contrast_ratio_x100={r.contrast_ratio_x100}"
+
+fn _os_dock_ready() -> bool:
+    val metrics = modern_dock_metrics()
+    val dock = Dock.create(Px(value: 1024), Px(value: 768))
+    val expected_width = 7 * metrics.icon_size_px + 6 * metrics.item_spacing_px + metrics.padding_px * 2
+    val image = DockItem(app_name: "Browser", icon_char: "https://simple.local/icon.png", is_pinned: true, is_running: false, window_id: nil)
+    metrics.translucent and metrics.round_icon_converter and metrics.motion_can_disable and metrics.icon_size_px == 48 and metrics.height_px == 64 and dock.width.value == expected_width and dock.height.value == metrics.height_px and dock_item_modern_icon_kind(image) == "square-to-round"
+
+fn _os_taskbar_ready() -> bool:
+    val contract = modern_taskbar_shell_contract()
+    val root = build_taskbar_shell_tree(_readiness_taskbar_model())
+    val sections = root.children()
+    if sections.len() != 3:
+        return false
+    val pinned = sections[0].children()
+    if pinned.len() < 2:
+        return false
+    contract.translucent and contract.rounded_taskbar and contract.rounded_icons and contract.motion_can_disable and root.get_prop("modern_shell") == "true" and root.get_prop("modern_taskbar_height_px") == "{contract.height_px}" and pinned[1].get_prop("modern_icon_kind") == "square-to-round"
+
+fn _lifecycle_motion_ready() -> bool:
+    val window = _readiness_window(false)
+    val minimized = _readiness_window(true)
+    val open = wm_lifecycle_motion_contract("create_window", window)
+    val close = wm_lifecycle_motion_contract("destroy_window", window)
+    val minimize = wm_lifecycle_motion_contract("minimize", window)
+    val restore = wm_lifecycle_motion_contract("restore", minimized)
+    open.class_name == "wm-window-opening" and close.phase == "closing" and minimize.duration_ms == 180 and restore.duration_ms == 240 and restore.reduced_duration_ms == 80 and restore.can_disable
+
+fn _rendered_motion_ready() -> bool:
+    val windows = [_readiness_window(false), _readiness_window(true)]
+    val html = scene_to_html(lifecycle_windows_to_motion_wm_scene(windows, "restore", 640, 480))
+    html.contains("motion-window") and html.contains("data-motion-phase='restoring'") and html.contains("data-motion-class='wm-window-restoring'") and html.contains("data-motion-can-disable='true'")
+
+fn _readiness_taskbar_model() -> TaskbarModel:
+    TaskbarModel(
+        pinned: [
+            AppRef(app_id: "terminal", display_name: "Terminal", icon: ">"),
+            AppRef(app_id: "browser", display_name: "Browser", icon: "https://simple.local/icon.png")
+        ],
+        running: [
+            WindowRef(window_id: "win1", app_id: "terminal", title: "Terminal", minimized: false)
+        ],
+        tray: [
+            TrayItem(item_id: "clock", label: "09:41", icon: "clock")
+        ]
+    )
+
+fn _readiness_window(minimized: bool) -> WmLifecycleWindowState:
+    WmLifecycleWindowState(id: if minimized: 2 else: 1, owner_port: 11, title: if minimized: "Hidden" else: "Active", x: 20, y: 60, w: 220, h: 160, content: "", process_id: 1, app_id: "/readiness", minimized: minimized, focused: not minimized)
+
+fn _modern_wm_notes(passed: bool, contrast_ratio_x100: i64) -> [text]:
+    var notes: [text] = []
+    if passed:
+        notes = notes.push("modern WM readiness passed")
+    else:
+        notes = notes.push("modern WM readiness failed")
+    notes.push("contrast_ratio_x100={contrast_ratio_x100}")
+    notes

@@ -11,7 +11,8 @@ use os.compositor.browser_compositor_backend.{BrowserCompositorBackend}
 use os.compositor.wm_scene.{
     WmSceneSpec, SceneElement,
     standard_wm_scene, render_scene_to_backend, scene_to_html, shared_wm_scene_to_wm_scene,
-    shared_wm_scene_to_chromed_wm_scene}
+    shared_wm_scene_to_chromed_wm_scene, lifecycle_windows_to_motion_wm_scene}
+use os.compositor.wm_action_applier.{WmLifecycleWindowState}
 use common.ui.web_render_api.{WEB_RENDER_TARGET_SIMPLE_WEB, WebRenderRequest}
 use common.ui.builder.{column, label, build_tree_with_title}
 use common.ui.taskbar_model.{AppRef, TaskbarModel, TrayItem, WindowRef}
@@ -60,7 +61,7 @@ describe "WmScene — standard_wm_scene":
         it "AC-2: standard scene has a name":
             val scene = standard_wm_scene(W, H)
             val has_name = scene.name.len() > 0
-            expect(has_name).to_equal(true)
+            expect(has_name)
 
         it "AC-2: standard scene contains multiple elements":
             val scene = standard_wm_scene(W, H)
@@ -74,7 +75,7 @@ describe "WmScene — standard_wm_scene":
             for elem in scene.elements:
                 if elem.kind == "desktop_chrome":
                     found = true
-            expect(found).to_equal(true)
+            expect(found)
 
         it "AC-2: scene contains a window decoration element":
             val scene = standard_wm_scene(W, H)
@@ -82,7 +83,7 @@ describe "WmScene — standard_wm_scene":
             for elem in scene.elements:
                 if elem.kind == "decoration":
                     found = true
-            expect(found).to_equal(true)
+            expect(found)
 
         it "AC-2: scene contains a glass panel element":
             val scene = standard_wm_scene(W, H)
@@ -90,7 +91,7 @@ describe "WmScene — standard_wm_scene":
             for elem in scene.elements:
                 if elem.kind == "glass_panel":
                     found = true
-            expect(found).to_equal(true)
+            expect(found)
 
         it "AC-2: scene contains a text label element":
             val scene = standard_wm_scene(W, H)
@@ -98,7 +99,7 @@ describe "WmScene — standard_wm_scene":
             for elem in scene.elements:
                 if elem.kind == "text_label":
                     found = true
-            expect(found).to_equal(true)
+            expect(found)
 
         it "AC-3: scene element positions are within bounds":
             val scene = standard_wm_scene(W, H)
@@ -108,7 +109,7 @@ describe "WmScene — standard_wm_scene":
                     all_in_bounds = false
                 if elem.x + elem.w > W or elem.y + elem.h > H:
                     all_in_bounds = false
-            expect(all_in_bounds).to_equal(true)
+            expect(all_in_bounds)
 
 # ============================================================================
 # Test Group 2: Scene Rendering to Backend (AC-3)
@@ -143,7 +144,7 @@ describe "WmScene — render_scene_to_backend":
             for p in pixels:
                 if p != 0:
                     has_nonzero = true
-            expect(has_nonzero).to_equal(true)
+            expect(has_nonzero)
 
         it "AC-3: small scenes render through the Simple Web Renderer pixel path":
             val scene = standard_wm_scene(80, 60)
@@ -172,19 +173,33 @@ describe "WmScene — scene_to_html":
             val scene = standard_wm_scene(W, H)
             val html = scene_to_html(scene)
             val has_html = html.contains("<html") or html.contains("<!DOCTYPE")
-            expect(has_html).to_equal(true)
+            expect(has_html)
 
         it "AC-2: HTML contains style information for glass panel":
             val scene = standard_wm_scene(W, H)
             val html = scene_to_html(scene)
             val has_style = html.contains("backdrop-filter") or html.contains("blur")
-            expect(has_style).to_equal(true)
+            expect(has_style)
 
         it "AC-2: HTML dimensions match scene dimensions":
             val scene = standard_wm_scene(W, H)
             val html = scene_to_html(scene)
             val has_width = html.contains("800")
-            expect(has_width).to_equal(true)
+            expect(has_width)
+
+        it "AC-2: HTML exposes modern WM chrome controls and rounded translucent shell markers":
+            val scene = standard_wm_scene(W, H)
+            val html = scene_to_html(scene)
+            expect(html).to_contain("data-modern-wm='true'")
+            expect(html).to_contain("traffic-close")
+            expect(html).to_contain("traffic-min")
+            expect(html).to_contain("traffic-max")
+            expect(html).to_contain("bar-command")
+            expect(html).to_contain("bar-context")
+            expect(html).to_contain("border-radius:18px 18px 0 0")
+            expect(html).to_contain("border-radius:999px")
+            expect(html).to_contain("radial-gradient")
+            expect(html).to_contain("backdrop-filter:blur(24px)")
 
 describe "WmScene — SharedWmScene projection":
 
@@ -204,7 +219,7 @@ describe "WmScene — SharedWmScene projection":
         expect(scene.height).to_equal(480)
         expect(scene.elements.len()).to_equal(4)
         expect(html).to_contain("Terminal")
-        expect(html.contains("Hidden")).to_equal(false)
+        expect_not(html.contains("Hidden"))
 
     it "projects shared command lane, clock, right icons, taskbar launchers, and windows into render elements":
         var manager = WindowManager.new()
@@ -239,12 +254,42 @@ describe "WmScene — SharedWmScene projection":
             elif elem.kind == "decoration":
                 has_window_bar = true
 
-        expect(has_command).to_equal(true)
-        expect(has_clock).to_equal(true)
+        expect(has_command)
+        expect(has_clock)
         expect(right_icons).to_equal(2)
         expect(launchers).to_equal(2)
         expect(running).to_equal(1)
-        expect(has_window_bar).to_equal(true)
+        expect(has_window_bar)
         expect(html).to_contain("class='command-lane'")
         expect(html).to_contain("data-app='terminal'")
         expect(html).to_contain("data-window='win1'")
+        expect(html).to_contain("traffic-close")
+        expect(html).to_contain("bar-command")
+
+describe "WmScene — lifecycle motion projection":
+
+    it "projects host-neutral lifecycle motion classes into inspectable HTML":
+        val windows = [
+            WmLifecycleWindowState(id: 1, owner_port: 11, title: "Opening", x: 20, y: 60, w: 220, h: 160, content: "", process_id: 1, app_id: "/opening", minimized: false, focused: true),
+            WmLifecycleWindowState(id: 2, owner_port: 22, title: "Hidden", x: 40, y: 80, w: 220, h: 160, content: "", process_id: 2, app_id: "/hidden", minimized: true, focused: false)
+        ]
+        val opening_scene = lifecycle_windows_to_motion_wm_scene(windows, "create_window", 640, 480)
+        val opening_html = scene_to_html(opening_scene)
+        expect(opening_scene.name).to_equal("lifecycle_motion_wm_scene")
+        expect(opening_html).to_contain("class='motion-window wm-window-opening'")
+        expect(opening_html).to_contain("data-motion-phase='opening'")
+        expect(opening_html).to_contain("data-motion-duration-ms='240'")
+        expect(opening_html).to_contain("data-reduced-motion-duration-ms='80'")
+        expect(opening_html).to_contain("data-motion-can-disable='true'")
+        expect_not(opening_html.contains("Hidden"))
+
+        val minimizing_scene = lifecycle_windows_to_motion_wm_scene(windows, "minimize", 640, 480)
+        val minimizing_html = scene_to_html(minimizing_scene)
+        expect(minimizing_html).to_contain("wm-window-minimizing")
+        expect(minimizing_html).to_contain("data-title='Hidden'")
+        expect(minimizing_html).to_contain("data-motion-duration-ms='180'")
+
+        val restoring_scene = lifecycle_windows_to_motion_wm_scene(windows, "restore", 640, 480)
+        val restoring_html = scene_to_html(restoring_scene)
+        expect(restoring_html).to_contain("wm-window-restoring")
+        expect(restoring_html).to_contain("data-motion-phase='restoring'")

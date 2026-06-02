@@ -331,7 +331,7 @@ expect(gui_mac_smf_dynlib_accepts_pass_row(row + " status=skip")).to_equal(false
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -351,6 +351,8 @@ expect(gui_mac_smf_dynlib_accepts_transcript(full.replace("artifact=build/gui/pu
 expect(gui_mac_smf_dynlib_accepts_transcript(full.replace("dynload=smf_dynlib", "dynload=native"))).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_transcript(full.replace("host_dynload=sffi", "host_dynload=native"))).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_transcript(full.replace("loader=smf_dynlib dynload=smf_dynlib", "loader=host_dynlib dynload=host_dynlib_diagnostic"))).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_transcript(full.replace("artifact_sha256=abc", "artifact_sha256=def"))).to_equal(false)
+expect(gui_mac_smf_dynlib_accepts_transcript(full.replace("artifact_size=4096", "artifact_size=8192"))).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_transcript(contract + "\nGUI_DYNLIB_PERF pass=false error=p99-over-threshold\n" + qemu + "\n" + loader + "\n" + probe + "\n" + pass_row)).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_transcript(full + "\nGUI_DYNLIB_PERF pass=false error=p99-over-threshold")).to_equal(false)
 expect(gui_mac_smf_dynlib_accepts_transcript("Compiled src/app/gui_perf/pure_gui_hot_dynlib_export.spl\n" + full)).to_equal(false)

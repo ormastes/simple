@@ -3,7 +3,7 @@
 
 use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
 use os.compositor.compositor.{Compositor}
-use os.compositor.wm_action_applier.{WmLifecycleWindowState, WmPointerInteractionState, apply_wm_action_to_compositor, apply_wm_action_to_lifecycle_windows, wm_action_from_bridge_request, wm_action_is_shared_lifecycle, wm_action_remote_tree, wm_action_web_window_request, wm_action_with_app_id, wm_destroy_action, wm_focus_action, wm_lifecycle_hit_taskbar, wm_lifecycle_left_button, wm_lifecycle_pointer_move, wm_move_action, wm_resize_action, wm_taskbar_dock_width, wm_taskbar_item_width, wm_taskbar_item_x}
+use os.compositor.wm_action_applier.{WmLifecycleWindowState, WmPointerInteractionState, apply_wm_action_to_compositor, apply_wm_action_to_lifecycle_windows, wm_action_from_bridge_request, wm_action_is_shared_lifecycle, wm_action_remote_tree, wm_action_web_window_request, wm_action_with_app_id, wm_destroy_action, wm_focus_action, wm_lifecycle_hit_taskbar, wm_lifecycle_left_button, wm_lifecycle_motion_contract, wm_lifecycle_motion_phase, wm_lifecycle_motion_summary, wm_lifecycle_pointer_move, wm_move_action, wm_resize_action, wm_taskbar_dock_width, wm_taskbar_item_width, wm_taskbar_item_x}
 use os.services.wm.wm_world.{WmAction}
 use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_CREATE_WEB_WINDOW, COMP_UPDATE_TREE, COMP_RESIZE, COMP_MOVE, COMP_SET_TITLE, COMP_MINIMIZE, COMP_RESTORE}
 use common.ui.builder.{column, label, build_tree_with_title}
@@ -195,6 +195,25 @@ describe "shared WM action applier":
 
         result = apply_wm_action_to_lifecycle_windows(windows, result.next_window_id, 640, 480, wm_destroy_action(1))
         expect(result.windows.len()).to_equal(0)
+
+    it "derives modern motion phases from lifecycle actions and window state":
+        val window = WmLifecycleWindowState(id: 3, owner_port: 11, title: "Motion", x: 20, y: 60, w: 200, h: 140, content: "", process_id: 1, app_id: "/motion", minimized: false, focused: true)
+        val minimized = WmLifecycleWindowState(id: 4, owner_port: 11, title: "Minimized", x: 20, y: 60, w: 200, h: 140, content: "", process_id: 1, app_id: "/motion", minimized: true, focused: false)
+        expect(wm_lifecycle_motion_phase("create_window", window)).to_equal("opening")
+        expect(wm_lifecycle_motion_phase("destroy_window", window)).to_equal("closing")
+        expect(wm_lifecycle_motion_phase("minimize", window)).to_equal("minimizing")
+        expect(wm_lifecycle_motion_phase("restore", minimized)).to_equal("restoring")
+        expect(wm_lifecycle_motion_phase("focus", window)).to_equal("focused")
+        expect(wm_lifecycle_motion_phase("move", minimized)).to_equal("minimized")
+        val contract = wm_lifecycle_motion_contract("restore", minimized)
+        expect(contract.class_name).to_equal("wm-window-restoring")
+        expect(contract.duration_ms).to_equal(240)
+        expect(contract.reduced_duration_ms).to_equal(80)
+        expect(contract.can_disable)
+        val summary = wm_lifecycle_motion_summary("minimize", window)
+        expect(summary).to_contain("phase=minimizing")
+        expect(summary).to_contain("class=wm-window-minimizing")
+        expect(summary).to_contain("can_disable=true")
 
     it "handles taskbar hit testing in host-neutral lifecycle state":
         val windows = [

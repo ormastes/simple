@@ -3,6 +3,7 @@ use os.compositor.browser_compositor_backend.{BrowserCompositorBackend}
 use common.ui.taskbar_model.{TaskbarModel}
 use common.ui.web_render_api.{WEB_RENDER_TARGET_SIMPLE_WEB, WebRenderRequest}
 use common.ui.window_scene.{SharedWmScene, shared_wm_scene_chrome}
+use os.compositor.wm_action_applier.{WmLifecycleWindowState, wm_lifecycle_motion_contract}
 use os.compositor.web_render_surface.{compositor_render_html_pixels}
 
 class SceneElement:
@@ -69,6 +70,24 @@ fn shared_wm_scene_to_wm_scene(scene: SharedWmScene) -> WmSceneSpec:
                 text: window.title
             ))
     WmSceneSpec(name: "shared_wm_scene", width: scene.width, height: scene.height, elements: elements)
+
+fn lifecycle_windows_to_motion_wm_scene(windows: [WmLifecycleWindowState], action_kind: text, width: i32, height: i32) -> WmSceneSpec:
+    var elements: [SceneElement] = [
+        SceneElement(kind: "desktop_chrome", x: 0, y: 0, w: width, h: height, color: 0xFF0F172Au32, text: "")
+    ]
+    for window in windows:
+        val motion = wm_lifecycle_motion_contract(action_kind, window)
+        if not window.minimized or motion.phase == "minimizing" or motion.phase == "closing":
+            elements = elements.push(SceneElement(
+                kind: "motion_window",
+                x: window.x,
+                y: window.y,
+                w: window.w,
+                h: window.h,
+                color: 0xCCCBD5E1u32,
+                text: "{window.title}|{motion.phase}|{motion.class_name}|{motion.duration_ms}|{motion.reduced_duration_ms}|{motion.can_disable}"
+            ))
+    WmSceneSpec(name: "lifecycle_motion_wm_scene", width: width, height: height, elements: elements)
 
 fn shared_wm_scene_to_chromed_wm_scene(scene: SharedWmScene, taskbar: TaskbarModel, dpi_scale_milli: i32, clock_label: text, right_icon_count: i32) -> WmSceneSpec:
     val chrome = shared_wm_scene_chrome(scene, dpi_scale_milli, clock_label, right_icon_count, taskbar.pinned.len() + taskbar.running.len())
@@ -156,9 +175,12 @@ fn scene_to_html(scene: WmSceneSpec) -> text:
         if elem.kind == "desktop_chrome":
             body = body + "<div class='desktop' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'></div>"
         elif elem.kind == "decoration":
-            body = body + "<div class='bar' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'>{elem.text}</div>"
+            body = body + "<div class='bar' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'><span class='traffic traffic-close'></span><span class='traffic traffic-min'></span><span class='traffic traffic-max'></span><span class='bar-icon'>S</span><span class='bar-title'>{elem.text}</span><span class='bar-command'>{elem.text}</span><span class='bar-context'>workspace</span></div>"
         elif elem.kind == "glass_panel":
             body = body + "<div class='glass' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'></div>"
+        elif elem.kind == "motion_window":
+            val motion = _scene_motion_data(elem.text)
+            body = body + "<div class='motion-window {motion.class_name}' data-title='{motion.title}' data-motion-phase='{motion.phase}' data-motion-class='{motion.class_name}' data-motion-duration-ms='{motion.duration_ms}' data-reduced-motion-duration-ms='{motion.reduced_duration_ms}' data-motion-can-disable='{motion.can_disable}' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'><span class='motion-title'>{motion.title}</span></div>"
         elif elem.kind == "text_label":
             body = body + "<div class='label' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'>{elem.text}</div>"
         elif elem.kind == "command_lane":
@@ -175,15 +197,48 @@ fn scene_to_html(scene: WmSceneSpec) -> text:
             body = body + "<button class='taskbar-running' data-window='{elem.text}' style='left:{elem.x}px;top:{elem.y}px;width:{elem.w}px;height:{elem.h}px'>{elem.text}</button>"
     "<!DOCTYPE html><html><head><style>" +
     "body{{margin:0;width:" + w + "px;height:" + h + "px;background:#0f172a}}" +
-    ".desktop{{position:absolute;background:#0f172a}}" +
-    ".glass{{position:absolute;background:rgba(203,213,225,.8);backdrop-filter:blur(8px)}}" +
-    ".bar{{position:absolute;background:#334155;color:white;font:600 12px system-ui;padding:8px 12px;box-sizing:border-box;overflow:hidden}}" +
+    ".desktop{{position:absolute;background:radial-gradient(circle at 18% 22%,rgba(37,99,235,.28),transparent 28%),radial-gradient(circle at 78% 72%,rgba(20,184,166,.18),transparent 26%),#0f172a}}" +
+    ".glass{{position:absolute;background:linear-gradient(180deg,rgba(255,255,255,.16),rgba(255,255,255,.06));border:1px solid rgba(255,255,255,.16);border-top:0;border-radius:0 0 18px 18px;backdrop-filter:blur(18px) saturate(170%);box-shadow:0 22px 60px rgba(0,0,0,.34)}}" +
+    ".bar{{position:absolute;display:grid;grid-template-columns:12px 12px 12px 18px minmax(64px,.8fr) minmax(96px,1fr) auto;gap:7px;align-items:center;background:linear-gradient(180deg,rgba(255,255,255,.18),rgba(255,255,255,.07));color:white;font:600 12px system-ui;padding:0 12px;box-sizing:border-box;overflow:hidden;border:1px solid rgba(255,255,255,.18);border-bottom:0;border-radius:18px 18px 0 0;backdrop-filter:blur(20px) saturate(170%)}}" +
+    ".traffic{{width:12px;height:12px;border-radius:999px;box-shadow:inset 0 0 0 1px rgba(0,0,0,.18),0 1px 4px rgba(0,0,0,.24)}}.traffic-close{{background:#ff5f57}}.traffic-min{{background:#ffbd2e}}.traffic-max{{background:#28c840}}" +
+    ".bar-icon{{width:18px;height:18px;border-radius:999px;display:grid;place-items:center;background:linear-gradient(135deg,#2563eb,rgba(255,255,255,.22));font-size:10px;overflow:hidden}}.bar-title{{min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}}.bar-command{{height:22px;border-radius:999px;padding:0 10px;display:flex;align-items:center;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);color:#dbeafe;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}}.bar-context{{height:22px;border-radius:999px;padding:0 10px;display:flex;align-items:center;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.10);color:#cbd5e1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}}" +
+    ".motion-window{{position:absolute;border-radius:18px;background:linear-gradient(180deg,rgba(255,255,255,.18),rgba(255,255,255,.06));border:1px solid rgba(255,255,255,.16);backdrop-filter:blur(18px) saturate(170%);box-shadow:0 22px 60px rgba(0,0,0,.34);overflow:hidden}}.motion-title{{position:absolute;left:14px;top:10px;color:white;font:600 12px system-ui}}.wm-window-opening,.wm-window-restoring{{opacity:1}}.wm-window-closing,.wm-window-minimizing{{opacity:.72}}.wm-window-focused{{box-shadow:0 24px 70px rgba(37,99,235,.32)}}" +
     ".label{{position:absolute;color:white;font:600 12px system-ui;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}}" +
-    ".command-lane{{position:absolute;background:#111827}}" +
+    ".command-lane{{position:absolute;background:linear-gradient(180deg,rgba(255,255,255,.10),rgba(255,255,255,.04));border-bottom:1px solid rgba(255,255,255,.10);backdrop-filter:blur(18px)}}" +
     ".command-clock{{position:absolute;color:white;font:600 12px system-ui;display:flex;align-items:center;justify-content:center}}" +
     ".command-icon{{position:absolute;background:#e5e7eb;border-radius:999px;transform:scale(.35)}}" +
-    ".taskbar{{position:absolute;background:rgba(17,24,39,.8)}}" +
-    ".taskbar-launcher,.taskbar-running{{position:absolute;border:0;color:white;font:600 11px system-ui;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}}" +
+    ".taskbar{{position:absolute;background:linear-gradient(180deg,rgba(255,255,255,.16),rgba(255,255,255,.06));border:1px solid rgba(255,255,255,.16);border-radius:999px;box-shadow:0 18px 48px rgba(0,0,0,.30);backdrop-filter:blur(24px) saturate(170%)}}" +
+    ".taskbar-launcher,.taskbar-running{{position:absolute;border:0;color:white;font:600 11px system-ui;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;border-radius:999px}}" +
     ".taskbar-launcher{{background:#2563eb}}.taskbar-running{{background:#475569}}" +
-    "</style></head><body data-width='" + w + "' data-height='" + h + "'>" +
+    "</style></head><body data-modern-wm='true' data-width='" + w + "' data-height='" + h + "'>" +
     body + "</body></html>"
+
+class _SceneMotionData:
+    title: text
+    phase: text
+    class_name: text
+    duration_ms: text
+    reduced_duration_ms: text
+    can_disable: text
+
+fn _scene_motion_data(blob: text) -> _SceneMotionData:
+    val parts = blob.split("|")
+    var title = ""
+    var phase = "idle"
+    var class_name = "wm-window-idle"
+    var duration_ms = "0"
+    var reduced_duration_ms = "0"
+    var can_disable = "true"
+    if parts.len() > 0:
+        title = parts[0]
+    if parts.len() > 1:
+        phase = parts[1]
+    if parts.len() > 2:
+        class_name = parts[2]
+    if parts.len() > 3:
+        duration_ms = parts[3]
+    if parts.len() > 4:
+        reduced_duration_ms = parts[4]
+    if parts.len() > 5:
+        can_disable = parts[5]
+    _SceneMotionData(title: title, phase: phase, class_name: class_name, duration_ms: duration_ms, reduced_duration_ms: reduced_duration_ms, can_disable: can_disable)

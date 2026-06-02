@@ -36,6 +36,13 @@ class WmLifecycleApplyResult:
     window_id: i64
     applied: bool
 
+class WmLifecycleMotionContract:
+    phase: text
+    class_name: text
+    duration_ms: i32
+    reduced_duration_ms: i32
+    can_disable: bool
+
 class WmPointerInteractionState:
     dragging: bool
     drag_window_id: i64
@@ -115,6 +122,49 @@ fn wm_action_is_shared_lifecycle(kind: text) -> bool:
 
 fn wm_action_with_app_id(action: WmAction, app_id: text) -> WmAction:
     WmAction(kind: action.kind, window_id: action.window_id, title: action.title, x: action.x, y: action.y, width: action.width, height: action.height, content: action.content, process_id: action.process_id, app_id: app_id, owner_port: action.owner_port, src_port: action.src_port)
+
+fn wm_lifecycle_motion_contract(action_kind: text, window: WmLifecycleWindowState) -> WmLifecycleMotionContract:
+    val phase = wm_lifecycle_motion_phase(action_kind, window)
+    WmLifecycleMotionContract(
+        phase: phase,
+        class_name: "wm-window-" + phase,
+        duration_ms: wm_lifecycle_motion_duration_ms(phase),
+        reduced_duration_ms: wm_lifecycle_reduced_motion_duration_ms(phase),
+        can_disable: true
+    )
+
+fn wm_lifecycle_motion_phase(action_kind: text, window: WmLifecycleWindowState) -> text:
+    if action_kind == "create_window" or action_kind == "create_web_window":
+        return "opening"
+    if action_kind == "destroy_window":
+        return "closing"
+    if action_kind == "minimize":
+        return "minimizing"
+    if action_kind == "restore" or action_kind == "maximize":
+        return "restoring"
+    if action_kind == "focus":
+        return "focused"
+    if window.minimized:
+        return "minimized"
+    "idle"
+
+fn wm_lifecycle_motion_duration_ms(phase: text) -> i32:
+    if phase == "opening" or phase == "restoring":
+        return 240
+    if phase == "closing" or phase == "minimizing":
+        return 180
+    if phase == "focused":
+        return 150
+    0
+
+fn wm_lifecycle_reduced_motion_duration_ms(phase: text) -> i32:
+    if phase == "idle" or phase == "minimized":
+        return 0
+    80
+
+fn wm_lifecycle_motion_summary(action_kind: text, window: WmLifecycleWindowState) -> text:
+    val c = wm_lifecycle_motion_contract(action_kind, window)
+    "wm_lifecycle_motion window={window.id} action={action_kind} phase={c.phase} class={c.class_name} duration={c.duration_ms}ms reduced={c.reduced_duration_ms}ms can_disable={c.can_disable}"
 
 fn wm_lifecycle_find_window_index(windows: [WmLifecycleWindowState], window_id: i64) -> i32:
     var i = 0

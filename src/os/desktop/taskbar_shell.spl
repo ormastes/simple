@@ -24,9 +24,44 @@ enum ShellMode:
     Classic
     Taskbar
 
+struct ModernTaskbarShellContract:
+    height_px: i32
+    icon_size_px: i32
+    corner_radius_px: i32
+    blur_radius_px: i32
+    item_gap_px: i32
+    hover_lift_px: i32
+    motion_ms: i32
+    reduced_motion_ms: i32
+    translucent: bool
+    rounded_taskbar: bool
+    rounded_icons: bool
+    motion_can_disable: bool
+
 fn default_shell_mode() -> ShellMode:
     """Classic preserves the existing desktop; callers opt into Taskbar."""
     ShellMode.Classic
+
+fn modern_taskbar_shell_contract() -> ModernTaskbarShellContract:
+    """Return the portable modern taskbar contract for SimpleOS renderers."""
+    ModernTaskbarShellContract(
+        height_px: 48,
+        icon_size_px: 26,
+        corner_radius_px: 999,
+        blur_radius_px: 24,
+        item_gap_px: 8,
+        hover_lift_px: 3,
+        motion_ms: 150,
+        reduced_motion_ms: 80,
+        translucent: true,
+        rounded_taskbar: true,
+        rounded_icons: true,
+        motion_can_disable: true
+    )
+
+fn modern_taskbar_shell_summary(model: TaskbarModel) -> text:
+    val c = modern_taskbar_shell_contract()
+    "modern_taskbar pinned={model.pinned.len()} running={model.running.len()} tray={model.tray.len()} height={c.height_px}px icon={c.icon_size_px}px radius={c.corner_radius_px}px blur={c.blur_radius_px}px hover_lift={c.hover_lift_px}px motion={c.motion_ms}ms reduced={c.reduced_motion_ms}ms translucent={c.translucent} rounded_taskbar={c.rounded_taskbar} rounded_icons={c.rounded_icons} motion_can_disable={c.motion_can_disable}"
 
 # ==========================================================================
 # Widget Builder
@@ -34,26 +69,44 @@ fn default_shell_mode() -> ShellMode:
 
 fn _pinned_buttons(pinned: [AppRef]) -> [WidgetNode]:
     var items: [WidgetNode] = []
+    val contract = modern_taskbar_shell_contract()
     for a in pinned:
-        val b = button("pinned:" + a.app_id, a.display_name, "launch:" + a.app_id)
+        var b = button("pinned:" + a.app_id, a.display_name, "launch:" + a.app_id)
+        b = b.set_prop("modern_shell_role", "pinned_launcher")
+        b = b.set_prop("modern_icon", a.icon)
+        b = b.set_prop("modern_icon_kind", _taskbar_icon_kind(a.icon))
+        b = b.set_prop("modern_icon_size_px", "{contract.icon_size_px}")
+        b = b.set_prop("modern_icon_radius_px", "{contract.corner_radius_px}")
+        b = b.set_prop("modern_motion_ms", "{contract.motion_ms}")
         items = items.push(b)
     items
 
 fn _running_buttons(running: [WindowRef]) -> [WidgetNode]:
     var items: [WidgetNode] = []
+    val contract = modern_taskbar_shell_contract()
     for w in running:
         var caption = w.title
         if w.minimized:
             caption = "[-] " + caption
         val action = "focus:" + w.window_id
-        val b = button("running:" + w.window_id, caption, action)
+        var b = button("running:" + w.window_id, caption, action)
+        b = b.set_prop("modern_shell_role", "running_window")
+        b = b.set_prop("modern_minimized", if w.minimized: "true" else: "false")
+        b = b.set_prop("modern_icon_size_px", "{contract.icon_size_px}")
+        b = b.set_prop("modern_icon_radius_px", "{contract.corner_radius_px}")
+        b = b.set_prop("modern_motion_ms", "{contract.motion_ms}")
         items = items.push(b)
     items
 
 fn _tray_labels(tray: [TrayItem]) -> [WidgetNode]:
     var items: [WidgetNode] = []
+    val contract = modern_taskbar_shell_contract()
     for t in tray:
-        val l = label("tray:" + t.item_id, t.label)
+        var l = label("tray:" + t.item_id, t.label)
+        l = l.set_prop("modern_shell_role", "tray_item")
+        l = l.set_prop("modern_icon", t.icon)
+        l = l.set_prop("modern_icon_kind", _taskbar_icon_kind(t.icon))
+        l = l.set_prop("modern_icon_size_px", "{contract.icon_size_px}")
         items = items.push(l)
     items
 
@@ -63,7 +116,26 @@ fn build_taskbar_shell_tree(model: TaskbarModel) -> WidgetNode:
     Returns the root WidgetNode. No wallpaper, no desktop icons — the
     whole shell is the taskbar.
     """
-    val pinned = row("taskbar-pinned", _pinned_buttons(model.pinned))
-    val running = row("taskbar-running", _running_buttons(model.running))
-    val tray = row("taskbar-tray", _tray_labels(model.tray))
-    row("taskbar-root", [pinned, running, tray])
+    val contract = modern_taskbar_shell_contract()
+    var pinned = row("taskbar-pinned", _pinned_buttons(model.pinned))
+    pinned = pinned.set_prop("modern_shell_section", "pinned")
+    var running = row("taskbar-running", _running_buttons(model.running))
+    running = running.set_prop("modern_shell_section", "running")
+    var tray = row("taskbar-tray", _tray_labels(model.tray))
+    tray = tray.set_prop("modern_shell_section", "tray")
+    var root = row("taskbar-root", [pinned, running, tray])
+    root = root.set_prop("modern_shell", "true")
+    root = root.set_prop("modern_taskbar_height_px", "{contract.height_px}")
+    root = root.set_prop("modern_taskbar_radius_px", "{contract.corner_radius_px}")
+    root = root.set_prop("modern_taskbar_blur_px", "{contract.blur_radius_px}")
+    root = root.set_prop("modern_taskbar_gap_px", "{contract.item_gap_px}")
+    root = root.set_prop("modern_motion_ms", "{contract.motion_ms}")
+    root = root.set_prop("modern_reduced_motion_ms", "{contract.reduced_motion_ms}")
+    root = root.set_prop("modern_motion_can_disable", if contract.motion_can_disable: "true" else: "false")
+    root = root.set_prop("modern_translucent", if contract.translucent: "true" else: "false")
+    root
+
+fn _taskbar_icon_kind(icon: text) -> text:
+    if icon.starts_with("/") or icon.starts_with("data:") or icon.starts_with("http://") or icon.starts_with("https://"):
+        return "square-to-round"
+    "glyph-to-round"

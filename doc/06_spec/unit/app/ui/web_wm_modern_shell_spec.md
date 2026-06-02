@@ -169,7 +169,7 @@ expect(report).to_contain("normalized_icons=true")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -177,6 +177,8 @@ val report = wm_theme_quality_report("glass_dark")
 expect(report.passed)
 expect(report.color_checked)
 expect(report.contrast_ratio_x100).to_be_greater_than(449)
+expect(report.contrast_ratio_x100).to_be_greater_than(1700)
+expect(report.contrast_ratio_x100).to_be_less_than(1900)
 expect(report.contrast_delta).to_be_greater_than(96)
 expect(report.semantic_tokens)
 expect(report.stable_layout)

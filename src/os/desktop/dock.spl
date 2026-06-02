@@ -20,6 +20,22 @@ struct DockItem:
     is_running: bool
     window_id: WindowId?  # nil if not running
 
+struct ModernDockMetrics:
+    """Shared modern dock geometry and motion contract for SimpleOS renderers."""
+    icon_size_px: i32
+    item_spacing_px: i32
+    padding_px: i32
+    height_px: i32
+    corner_radius_px: i32
+    icon_radius_px: i32
+    blur_radius_px: i32
+    hover_lift_px: i32
+    motion_ms: i32
+    reduced_motion_ms: i32
+    translucent: bool
+    round_icon_converter: bool
+    motion_can_disable: bool
+
 # ============================================================================
 # Dock
 # ============================================================================
@@ -48,10 +64,10 @@ impl Dock:
     static fn create(screen_width: Px, screen_height: Px) -> Dock:
         """Create a dock with default pinned items, centered at screen bottom."""
         val defaults = default_dock_items()
-        val item_size: i32 = 48
-        val padding: i32 = 16
-        val dock_h: i32 = 64
-        val dock_w = defaults.len().to_i32() * item_size + padding * 2
+        val metrics = modern_dock_metrics()
+        val gap_total = _dock_gap_total(defaults.len().to_i32(), metrics.item_spacing_px)
+        val dock_h = metrics.height_px
+        val dock_w = defaults.len().to_i32() * metrics.icon_size_px + gap_total + metrics.padding_px * 2
         val sw = screen_width.value
         val sh = screen_height.value
         val dock_x = (sw - dock_w) / 2
@@ -180,10 +196,10 @@ impl Dock:
 
     fn compute_position() -> (Px, Px, Px, Px):
         """Compute dock (x, y, width, height) centered at screen bottom."""
-        val item_size: i32 = 48
-        val padding: i32 = 16
-        val dock_h: i32 = 64
-        val dock_w = self.items.len().to_i32() * item_size + padding * 2
+        val metrics = modern_dock_metrics()
+        val gap_total = _dock_gap_total(self.items.len().to_i32(), metrics.item_spacing_px)
+        val dock_h = metrics.height_px
+        val dock_w = self.items.len().to_i32() * metrics.icon_size_px + gap_total + metrics.padding_px * 2
         val sw = self.screen_width.value
         val sh = self.screen_height.value
         val dock_x = (sw - dock_w) / 2
@@ -207,6 +223,44 @@ impl Dock:
         self.y = pos.1
         self.width = pos.2
         self.height = pos.3
+
+fn modern_dock_metrics() -> ModernDockMetrics:
+    """Return the SimpleOS-wide modern dock metrics.
+
+    The Web WM and OS compositor paths use the same values so dock/taskbar
+    renderers agree on rounded icons, translucent shell sizing, and bounded
+    motion timing.
+    """
+    ModernDockMetrics(
+        icon_size_px: 48,
+        item_spacing_px: 8,
+        padding_px: 16,
+        height_px: 64,
+        corner_radius_px: 32,
+        icon_radius_px: 999,
+        blur_radius_px: 24,
+        hover_lift_px: 3,
+        motion_ms: 180,
+        reduced_motion_ms: 80,
+        translucent: true,
+        round_icon_converter: true,
+        motion_can_disable: true
+    )
+
+fn _dock_gap_total(item_count: i32, gap_px: i32) -> i32:
+    if item_count <= 1:
+        return 0
+    (item_count - 1) * gap_px
+
+fn dock_item_modern_icon_kind(item: DockItem) -> text:
+    """Classify a dock icon for square-to-round normalization."""
+    if item.icon_char.starts_with("/") or item.icon_char.starts_with("data:") or item.icon_char.starts_with("http://") or item.icon_char.starts_with("https://"):
+        return "square-to-round"
+    "glyph-to-round"
+
+fn modern_dock_summary(item_count: i32) -> text:
+    val m = modern_dock_metrics()
+    "modern_dock items={item_count} icon={m.icon_size_px}px height={m.height_px}px radius={m.corner_radius_px}px icon_radius={m.icon_radius_px}px blur={m.blur_radius_px}px hover_lift={m.hover_lift_px}px motion={m.motion_ms}ms reduced={m.reduced_motion_ms}ms translucent={m.translucent} round_icon_converter={m.round_icon_converter} motion_can_disable={m.motion_can_disable}"
 
 # ============================================================================
 # Default Dock Items
