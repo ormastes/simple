@@ -272,6 +272,7 @@ class Style:
     bg: u32
     fg: u32
     font_size: i32
+    line_height: i32
     width: i32
     height: i32
     min_height: i32
@@ -291,10 +292,10 @@ class Style:
     bold: bool
 
 fn default_style() -> Style:
-    Style(bg: 0u32, fg: argb(20, 20, 24), font_size: 16, width: -1, height: -1, min_height: -1, min_height_vh: -1, flex_grow: 0, pad_l: 0, pad_t: 0, pad_r: 0, pad_b: 0, margin_t: 0, margin_b: 0, gap: 0, border_w: 0, border_color: 0u32, display: "block", text_align: "left", bold: false)
+    Style(bg: 0u32, fg: argb(20, 20, 24), font_size: 16, line_height: -1, width: -1, height: -1, min_height: -1, min_height_vh: -1, flex_grow: 0, pad_l: 0, pad_t: 0, pad_r: 0, pad_b: 0, margin_t: 0, margin_b: 0, gap: 0, border_w: 0, border_color: 0u32, display: "block", text_align: "left", bold: false)
 
 fn inherit_style(p: Style) -> Style:
-    Style(bg: 0u32, fg: p.fg, font_size: p.font_size, width: -1, height: -1, min_height: -1, min_height_vh: -1, flex_grow: 0, pad_l: 0, pad_t: 0, pad_r: 0, pad_b: 0, margin_t: 0, margin_b: 0, gap: 0, border_w: 0, border_color: 0u32, display: p.display, text_align: p.text_align, bold: p.bold)
+    Style(bg: 0u32, fg: p.fg, font_size: p.font_size, line_height: p.line_height, width: -1, height: -1, min_height: -1, min_height_vh: -1, flex_grow: 0, pad_l: 0, pad_t: 0, pad_r: 0, pad_b: 0, margin_t: 0, margin_b: 0, gap: 0, border_w: 0, border_color: 0u32, display: p.display, text_align: p.text_align, bold: p.bold)
 
 fn is_inline_tag(tag: text) -> bool:
     tag == "a" or tag == "span" or tag == "b" or tag == "strong" or tag == "em" or tag == "i" or tag == "small" or tag == "code" or tag == "#text"
@@ -336,6 +337,38 @@ fn parse_border_color(raw: text) -> u32:
         i = i - 1
     0u32
 
+fn parse_line_height(raw: text, font_size: i32) -> i32:
+    val s = raw.trim().lower()
+    if s.len() == 0 or s == "normal" or s == "inherit":
+        return -1
+    if s.index_of("px") >= 0:
+        val px = parse_int(s)
+        if px > 0:
+            return px
+        return -1
+    val dot = s.index_of(".")
+    if dot >= 0:
+        val whole = parse_int(s.substring(0, dot))
+        var frac = 0
+        var scale = 1
+        var i = dot + 1
+        while i < s.len() and scale < 100:
+            val c = s.substring(i, i + 1)
+            if c >= "0" and c <= "9":
+                frac = (frac * 10) + hex_val(c)
+                scale = scale * 10
+            else:
+                break
+            i = i + 1
+        val numerator = (whole * scale) + frac
+        return ((font_size * numerator) + (scale / 2)) / scale
+    val v = parse_int(s)
+    if v <= 0:
+        return -1
+    if v <= 4:
+        return font_size * v
+    v
+
 # apply a declaration block onto a style
 fn apply_decls(st: Style, decls: text) -> Style:
     if decls.len() == 0:
@@ -356,6 +389,11 @@ fn apply_decls(st: Style, decls: text) -> Style:
         val v = parse_int(fs)
         if v > 0:
             st.font_size = v
+    val lh = decl_get(decls, "line-height")
+    if lh.len() > 0:
+        val line_px = parse_line_height(lh, st.font_size)
+        if line_px > 0:
+            st.line_height = line_px
     val width = decl_get(decls, "width")
     if width.len() > 0:
         val w = parse_int(width)
@@ -969,6 +1007,11 @@ fn char_w(fs: i32) -> i32:
 fn line_h(fs: i32) -> i32:
     9 * glyph_scale(fs)
 
+fn style_line_h(st: Style) -> i32:
+    if st.line_height > 0:
+        return st.line_height
+    line_h(st.font_size)
+
 fn has_ancestor_tag(nodes: [HNode], i: i32, tag: text) -> bool:
     var p = nodes[i].parent
     while p >= 0:
@@ -1039,11 +1082,11 @@ fn layout_inline_children(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i3
             if nodes[c].tag == "#text":
                 val txt = nodes[c].text_data.trim()
                 cw = txt.len() * char_w(cst.font_size)
-                ch = line_h(cst.font_size)
+                ch = style_line_h(cst)
             if cw < 0:
                 cw = char_w(cst.font_size)
             if ch < 0:
-                ch = line_h(cst.font_size)
+                ch = style_line_h(cst)
             var cy = content_y + ((h - st.border_w - st.pad_t - st.pad_b - ch) / 2)
             if cy < content_y:
                 cy = content_y
@@ -1135,7 +1178,7 @@ fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, viewp
         var lines = (txt.len() + cpl - 1) / cpl
         if lines < 1:
             lines = 1
-        val h = lines * line_h(st.font_size)
+        val h = lines * style_line_h(st)
         obh[i] = h
         return LayoutResult(bx: obx, by: oby, bw: obw, bh: obh, height: h)
     if nodes[i].tag == "img":
@@ -1237,13 +1280,15 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                     cpl = 1
                 var off = 0
                 var ly = by[i]
-                val lh = line_h(st.font_size)
+                val lh = style_line_h(st)
                 while off < txt.len() and ly < fbh:
                     var endc = off + cpl
                     if endc > txt.len():
                         endc = txt.len()
                     val line = txt.substring(off, endc)
-                    out = fb_text(out, fbw, fbh, bx[i], ly, line, st.fg, scale)
+                    val glyph_h = 7 * scale
+                    val text_y = if lh > glyph_h: ly + ((lh - glyph_h) / 2) else: ly
+                    out = fb_text(out, fbw, fbh, bx[i], text_y, line, st.fg, scale)
                     off = endc
                     ly = ly + lh
         i = i + 1

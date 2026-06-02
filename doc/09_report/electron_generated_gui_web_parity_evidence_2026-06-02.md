@@ -7,9 +7,9 @@
 - generated HTML has style: true
 - generated HTML has app shell: true
 - Simple distinct colors: 9
-- mismatch count: 2396
+- mismatch count: 2388
 - blur/tolerance used: false
-- Electron frame us: 20216
+- Electron frame us: 18296
 - generated HTML path: build/electron_generated_gui_web_parity_evidence/generated-gui.html
 - Simple expected ARGB path: build/electron_generated_gui_web_parity_evidence/simple-cpu-simd-expected-argb.json
 - Electron captured ARGB path: build/electron_generated_gui_web_parity_evidence/electron-captured-argb.json
@@ -26,11 +26,11 @@
 - electron_generated_gui_web_distinct_simple_colors=9
 - electron_generated_gui_web_simple_checksum=29666283213627
 - electron_generated_gui_web_electron_checksum=29667104958092
-- electron_generated_gui_web_simple_weighted_checksum=102536392748872760
+- electron_generated_gui_web_simple_weighted_checksum=102534157432532312
 - electron_generated_gui_web_electron_weighted_checksum=102532817446855770
-- electron_generated_gui_web_mismatch_count=2396
+- electron_generated_gui_web_mismatch_count=2388
 - electron_generated_gui_web_blur_or_tolerance_used=false
-- electron_generated_gui_web_electron_frame_us=20216
+- electron_generated_gui_web_electron_frame_us=18296
 - electron_generated_gui_web_html_path=build/electron_generated_gui_web_parity_evidence/generated-gui.html
 - electron_generated_gui_web_expected_argb_path=build/electron_generated_gui_web_parity_evidence/simple-cpu-simd-expected-argb.json
 - electron_generated_gui_web_captured_argb_path=build/electron_generated_gui_web_parity_evidence/electron-captured-argb.json
