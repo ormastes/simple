@@ -2212,6 +2212,24 @@ expect(_eval_str("var s = require('stream'); var r = s.Readable.from(['abc']); v
 
 </details>
 
+#### delivers bounded readable data listeners
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var seen = ''; var r = require('stream').Readable.from(['a','b']); r.on('data', (c) => { seen = seen + c; }); seen + ':' + r.readableLength + ':' + r.readableFlowing")).to_equal("ab:0:true")
+expect(_eval_str("var seen = ''; var r = require('stream').Readable.from(['a','b']); r.once('data', (c) => { seen = seen + c; }); seen + ':' + r.readableLength + ':' + r.listenerCount('data')")).to_equal("a:1:0")
+expect(_eval_str("var seen = ''; var r = require('stream').Readable.from(['a','b']); r.pause(); r.on('data', (c) => { seen = seen + c; }); seen + ':' + r.readableLength + ':' + r.readableFlowing")).to_equal(":2:false")
+expect(_eval_str("var seen = ''; var r = require('stream').Readable.from(['a','b']); r.pause(); r.on('data', (c) => { seen = seen + c; }); r.resume(); seen + ':' + r.readableLength + ':' + r.readableFlowing")).to_equal("ab:0:true")
+expect(_eval_str("var seen = ''; var r = require('stream').Readable.from(['a']); r.destroy(); r.on('data', (c) => { seen = seen + c; }); seen + ':' + r.readableLength + ':' + r.destroyed")).to_equal(":0:true")
+```
+
+</details>
+
 #### propagates bounded pipe backpressure to writable destinations
 
 <details>
@@ -3491,8 +3509,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 228 |
-| Active scenarios | 228 |
+| Total scenarios | 229 |
+| Active scenarios | 229 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

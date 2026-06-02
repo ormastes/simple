@@ -1953,6 +1953,7 @@ impl JsInterpreter:
             self.set_object_property(readable_id, "pipeResumed", JsValue.Boolean(v: true))
         else:
             self.set_object_property(readable_id, "pipeResumed", JsValue.Boolean(v: false))
+            val ignored_data_result = self._native_node_stream_readable_drain_data(this_val)
         this_val
 
     me _native_node_stream_readable_is_paused(this_val: JsValue) -> JsValue:
@@ -1996,6 +1997,49 @@ impl JsInterpreter:
             JsValue.Boolean(v): self.set_object_property(readable_id, "closeEmitted", JsValue.Boolean(v: v))
             _:
                 self.set_object_property(readable_id, "closeEmitted", JsValue.Boolean(v: false))
+        this_val
+
+    me _native_node_stream_readable_drain_data(this_val: JsValue) -> JsValue:
+        val readable_id = _get_obj_id(this_val)
+        if readable_id < 0:
+            return this_val
+        match self.get_object_property(readable_id, "destroyed"):
+            JsValue.Boolean(v):
+                if v:
+                    return this_val
+            _:
+                pass_dn
+        match self.get_object_property(readable_id, "paused"):
+            JsValue.Boolean(v):
+                if v:
+                    self.set_object_property(readable_id, "readableFlowing", JsValue.Boolean(v: false))
+                    return this_val
+            _:
+                pass_dn
+        var listener_count = 0
+        match self.get_object_property(readable_id, "__simple_node_event_count_data"):
+            JsValue.Number(v): listener_count = f64_to_i64(v)
+            _:
+                pass_dn
+        if listener_count <= 0:
+            return this_val
+        self.set_object_property(readable_id, "readableFlowing", JsValue.Boolean(v: true))
+        var length = 0
+        match self.get_object_property(readable_id, "readableLength"):
+            JsValue.Number(v): length = f64_to_i64(v)
+            _:
+                pass_dn
+        while length > 0 and listener_count > 0:
+            val chunk = self._native_node_stream_readable_read(this_val)
+            val ignored_emit_result = self._native_node_event_emitter_emit(this_val, [JsValue.String(v: "data"), chunk])
+            match self.get_object_property(readable_id, "readableLength"):
+                JsValue.Number(v): length = f64_to_i64(v)
+                _:
+                    length = 0
+            match self.get_object_property(readable_id, "__simple_node_event_count_data"):
+                JsValue.Number(v): listener_count = f64_to_i64(v)
+                _:
+                    listener_count = 0
         this_val
 
     me _native_node_stream_readable_async_iterator(this_val: JsValue) -> JsValue:
@@ -2222,6 +2266,13 @@ impl JsInterpreter:
                 self.set_object_property(emitter_id, "__simple_node_event_callback_" + event_name, JsValue.Function(id: callback_id))
         if once:
             self.set_object_property(emitter_id, "__simple_node_event_once_" + event_name, JsValue.Number(v: 1.0))
+        if event_name == "data":
+            match self.get_object_property(emitter_id, "readable"):
+                JsValue.Boolean(v):
+                    if v:
+                        val ignored_data_result = self._native_node_stream_readable_drain_data(this_val)
+                _:
+                    pass_dn
         this_val
 
     me _native_node_event_emitter_emit(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
