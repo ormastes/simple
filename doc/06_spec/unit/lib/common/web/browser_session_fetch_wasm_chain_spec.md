@@ -1325,7 +1325,7 @@ match result:
 1. var session = BrowserSession new
 
 2. Ok
-   - Expected: _display_js(value) equals `object:1:function:function:function`
+   - Expected: _display_js(value) equals `true:object:1:function:function:function`
 
 3. Err
    - Expected: "unexpected uint8 prototype metadata js error: {err}" equals ``
@@ -1343,12 +1343,45 @@ session.open_html(
     "https://example.com/webgpu-wasm.html",
     "<html><body>WASM GPU</body></html>"
 )
-val result = session.eval_script("typeof Uint8Array.prototype + ':' + Uint8Array.prototype.BYTES_PER_ELEMENT + ':' + typeof Uint8Array.prototype.subarray + ':' + typeof Uint8Array.prototype.values + ':' + typeof Uint8Array.prototype[Symbol.iterator]")
+val result = session.eval_script("(Uint8Array.prototype === Uint8Array.prototype) + ':' + typeof Uint8Array.prototype + ':' + Uint8Array.prototype.BYTES_PER_ELEMENT + ':' + typeof Uint8Array.prototype.subarray + ':' + typeof Uint8Array.prototype.values + ':' + typeof Uint8Array.prototype[Symbol.iterator]")
 match result:
     Ok(value):
-        expect(_display_js(value)).to_equal("object:1:function:function:function")
+        expect(_display_js(value)).to_equal("true:object:1:function:function:function")
     Err(err):
         expect("unexpected uint8 prototype metadata js error: {err}").to_equal("")
+```
+
+</details>
+
+#### evaluates strict equality for browser script values
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `true:true:true:true:true`
+
+3. Err
+   - Expected: "unexpected strict equality js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("(1 === 1) + ':' + ('a' === 'a') + ':' + (1 !== 2) + ':' + (window === window) + ':' + (document === document)")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("true:true:true:true:true")
+    Err(err):
+        expect("unexpected strict equality js error: {err}").to_equal("")
 ```
 
 </details>
@@ -1537,8 +1570,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 38 |
-| Active scenarios | 38 |
+| Total scenarios | 39 |
+| Active scenarios | 39 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

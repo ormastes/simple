@@ -323,7 +323,10 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   cursor state. `Uint8Array.BYTES_PER_ELEMENT` and instance
   `BYTES_PER_ELEMENT` are now covered for bounded browser scripts. Bounded
   `Uint8Array.prototype` now exposes byte-element metadata plus the existing
-  subarray/value-iterator method surface in BrowserSession scripts.
+  subarray/value-iterator method surface in BrowserSession scripts, with stable
+  strict identity across repeated prototype reads. Browser scripts now also
+  parse and evaluate strict `===` / `!==` equality correctly for primitive
+  values and host object globals.
 
 ## Related Docs
 
@@ -3225,10 +3228,14 @@ BrowserSession Uint8Array prototype metadata continuation:
 - `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
 - `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
 
-BrowserSession scripts now expose bounded `Uint8Array.prototype` metadata:
-`typeof Uint8Array.prototype` is `object`, `BYTES_PER_ELEMENT` is `1`, and the
-prototype carries function-valued `subarray`, `values`, and `Symbol.iterator`
-entries backed by the existing deterministic typed-array native methods. The
-focused fetch/WASM chain spec now passes `38/38`; broader typed-array
-prototype parity, general `Function.prototype.call/apply` dispatch, and full
-browser/WASM semantics remain open.
+BrowserSession scripts now expose bounded `Uint8Array.prototype` metadata and
+stable identity: repeated `Uint8Array.prototype` reads compare true with
+`===`, `typeof Uint8Array.prototype` is `object`, `BYTES_PER_ELEMENT` is `1`,
+and the prototype carries function-valued `subarray`, `values`, and
+`Symbol.iterator` entries backed by the existing deterministic typed-array
+native methods. The equality parser no longer treats the `==` substring inside
+`===` / `!==` as the operator; browser scripts now prove strict equality for
+numbers, strings, host globals, and strict inequality for distinct primitive
+values. The focused fetch/WASM chain spec now passes `39/39`; broader
+typed-array prototype parity, general `Function.prototype.call/apply`
+dispatch, and full browser/WASM semantics remain open.
