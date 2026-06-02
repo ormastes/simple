@@ -64,6 +64,7 @@ pub mod serial;
 // Always compile ratatui_tui module (it has stubs when feature is disabled)
 pub mod ratatui_tui;
 pub mod screenshot_sffi;
+pub mod engine2d_simd_ops;
 pub mod simd;
 pub mod simd_aes_ops;
 pub mod simd_byte_ops;

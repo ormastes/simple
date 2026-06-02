@@ -76,6 +76,25 @@ extern fn rt_simd_has_neon() -> bool
 extern fn rt_simd_has_rvv() -> bool
 
 # ============================================================================
+# Native SIMD pixel-row kernels (NEON on aarch64 / SSE2 on x86_64)
+#
+# These are the genuine vectorized span kernels: the Rust runtime executes
+# `vdupq_n_u32`/`vst1q_u32` (fill) and `vld1q_u32`/`vst1q_u32` (copy) over a
+# packed pixel buffer. Output is bit-identical to the scalar reference. The
+# neon-hit counter only increments when a real SIMD (not scalar-fallback)
+# chunk runs, so the evidence layer can prove NEON actually executed instead
+# of trusting a scalar path that merely reports `has_neon`.
+#
+# Implementation: src/compiler_rust/runtime/src/value/engine2d_simd_ops.rs;
+# interpreter dispatch: compiler/src/interpreter_extern/simd.rs.
+# ============================================================================
+
+extern fn rt_simd_fill_row_u32(count: i64, color: u32) -> [u32]
+extern fn rt_simd_copy_row_u32(src: [u32]) -> [u32]
+extern fn rt_simd_engine2d_neon_hits() -> i64
+extern fn rt_simd_engine2d_neon_reset() -> i64
+
+# ============================================================================
 # Detection
 # ============================================================================
 
@@ -124,13 +143,67 @@ class CpuSimdRuntimeEvidence:
     checksum: i64
     hit_summary: text
     reason: text
+    # Genuine native-SIMD proof (NEON on aarch64 / SSE2 on x86_64): set by
+    # running the native pixel-row kernels and comparing to a scalar reference.
+    native_simd_executed: bool   # a real SIMD chunk ran (hit counter advanced)
+    native_simd_bit_exact: bool  # native output == scalar reference, byte-exact
+    native_simd_hits: i64
 
 impl CpuSimdRuntimeEvidence:
     fn executed_all() -> bool:
         self.executed_fill and self.executed_copy and self.executed_alpha and self.executed_scroll
 
     fn diagnostic_text() -> text:
-        "arch={self.arch};feature={self.feature};level={self.level};x86={self.x86_available.to_text()};arm={self.arm_available.to_text()};riscv={self.riscv_available.to_text()};executed={self.executed_all().to_text()};checksum={self.checksum};hits={self.hit_summary};reason={self.reason}"
+        "arch={self.arch};feature={self.feature};level={self.level};x86={self.x86_available.to_text()};arm={self.arm_available.to_text()};riscv={self.riscv_available.to_text()};executed={self.executed_all().to_text()};checksum={self.checksum};hits={self.hit_summary};native_simd_executed={self.native_simd_executed.to_text()};native_simd_bit_exact={self.native_simd_bit_exact.to_text()};native_simd_hits={self.native_simd_hits};reason={self.reason}"
+
+class NativeSimdPixelEvidence:
+    """Proof that the native vectorized pixel-row kernels actually ran on
+    real SIMD hardware (not the scalar fallback) and stayed bit-identical."""
+    executed: bool
+    bit_exact: bool
+    hits: i64
+    fill_checksum: i64
+
+fn native_simd_pixel_evidence() -> NativeSimdPixelEvidence:
+    """Run the native fill/copy row kernels and verify SIMD genuinely executed.
+
+    `executed` is true only when the runtime's NEON/SSE2 chunk path ran (the
+    hit counter advanced); a scalar host leaves it false. `bit_exact` compares
+    the native output against an independent scalar reference computed here.
+    """
+    rt_simd_engine2d_neon_reset()
+    val count: i64 = 64
+    val color: u32 = 0xFF8040C0
+    val native_fill = rt_simd_fill_row_u32(count, color)
+
+    var ref_fill: [u32] = [0u32; 64]
+    var i: i64 = 0
+    while i < count:
+        ref_fill[i.to_i32()] = color
+        i = i + 1
+
+    var fill_exact = native_fill.len() == count
+    i = 0
+    while i < count:
+        if native_fill[i.to_i32()] != ref_fill[i.to_i32()]:
+            fill_exact = false
+        i = i + 1
+
+    val native_copy = rt_simd_copy_row_u32(native_fill)
+    var copy_exact = native_copy.len() == native_fill.len()
+    i = 0
+    while i < native_fill.len():
+        if native_copy[i.to_i32()] != native_fill[i.to_i32()]:
+            copy_exact = false
+        i = i + 1
+
+    val hits = rt_simd_engine2d_neon_hits()
+    NativeSimdPixelEvidence(
+        executed: hits > 0,
+        bit_exact: fill_exact and copy_exact,
+        hits: hits,
+        fill_checksum: _cpu_simd_checksum(native_fill)
+    )
 
 fn _cpu_simd_checksum(buf: [u32]) -> i64:
     var sum: i64 = 0
@@ -167,7 +240,15 @@ fn cpu_simd_runtime_evidence() -> CpuSimdRuntimeEvidence:
     val executed_copy = copy_delta > 0
     val executed_alpha = alpha_delta > 0
     val executed_scroll = scroll_delta > 0
-    val reason = if feature == "scalar": "runtime reported scalar fallback; SIMD feature unavailable" else: "runtime reported SIMD feature and kernels executed"
+    val native = native_simd_pixel_evidence()
+    val reason = if feature == "scalar":
+        "runtime reported scalar fallback; SIMD feature unavailable"
+    else if native.executed and native.bit_exact:
+        "native SIMD kernels executed (hits={native.hits}) and matched scalar bit-for-bit"
+    else if native.executed:
+        "native SIMD kernels executed but diverged from scalar reference"
+    else:
+        "SIMD feature reported but native kernels did not take the vectorized path"
     CpuSimdRuntimeEvidence(
         arch: arch,
         feature: feature,
@@ -181,7 +262,10 @@ fn cpu_simd_runtime_evidence() -> CpuSimdRuntimeEvidence:
         executed_scroll: executed_scroll,
         checksum: _cpu_simd_checksum(pixels),
         hit_summary: "fill_delta={fill_delta},copy_delta={copy_delta},alpha_delta={alpha_delta},scroll_delta={scroll_delta}",
-        reason: reason
+        reason: reason,
+        native_simd_executed: native.executed,
+        native_simd_bit_exact: native.bit_exact,
+        native_simd_hits: native.hits
     )
 
 # ============================================================================

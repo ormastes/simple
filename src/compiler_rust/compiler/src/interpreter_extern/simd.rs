@@ -23,6 +23,10 @@ use simple_runtime::value::simd_aes_ops::{
 use simple_runtime::value::db_accel_bitmap_ops::{
     bitmap_and_words as sffi_bitmap_and_words, bitmap_or_words as sffi_bitmap_or_words,
 };
+use simple_runtime::value::engine2d_simd_ops::{
+    copy_row_u32 as sffi_copy_row_u32, engine2d_simd_row_hits as sffi_engine2d_simd_row_hits,
+    engine2d_simd_row_reset as sffi_engine2d_simd_row_reset, fill_row_u32 as sffi_fill_row_u32,
+};
 use simple_runtime::value::simd_byte_ops::{add_u8x16 as sffi_add_u8x16, xor_u8x16 as sffi_xor_u8x16};
 use simple_runtime::value::simd_clmul_ops::{
     clmul_hi_u64 as sffi_clmul_hi_u64, clmul_lo_u64 as sffi_clmul_lo_u64, xor_u64x2 as sffi_xor_u64x2,
@@ -1327,6 +1331,83 @@ fn pack_u64_array(words: Vec<u64>) -> Value {
             .map(|word| Value::UInt { value: word, width: 64 })
             .collect(),
     )
+}
+
+// ---------------------------------------------------------------------------
+// Engine2D pixel-row SIMD kernels (NEON on aarch64 / SSE2 on x86_64).
+// Back the rt_simd_fill_row_u32 / rt_simd_copy_row_u32 externs used by the CPU
+// engine2d backend's hot raster rows. Output is bit-identical to scalar.
+// ---------------------------------------------------------------------------
+
+fn require_u32_value(name: &str, value: &Value) -> Result<u32, CompileError> {
+    match value {
+        Value::UInt { value, .. } => Ok(*value as u32),
+        Value::Int(i) => Ok(*i as u32),
+        Value::Unit { value, .. } => require_u32_value(name, value.as_ref()),
+        Value::Nil => Ok(0),
+        other => Err(CompileError::runtime(format!(
+            "{name}: expected u32-compatible numeric value, got {:?}",
+            other
+        ))),
+    }
+}
+
+fn unpack_u32_array(name: &str, value: &Value) -> Result<Vec<u32>, CompileError> {
+    match value {
+        Value::Array(items) => items.iter().map(|item| require_u32_value(name, item)).collect(),
+        Value::FrozenArray(items) => {
+            items.iter().map(|item| require_u32_value(name, item)).collect()
+        }
+        other => Err(CompileError::runtime(format!(
+            "{name}: expected [u32] array, got {:?}",
+            other
+        ))),
+    }
+}
+
+fn pack_u32_array(pixels: Vec<u32>) -> Value {
+    Value::array(
+        pixels
+            .into_iter()
+            .map(|p| Value::UInt { value: p as u64, width: 32 })
+            .collect(),
+    )
+}
+
+/// rt_simd_fill_row_u32(count: i64, color: u32) -> [u32]
+pub fn rt_simd_fill_row_u32(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::runtime(
+            "rt_simd_fill_row_u32 expects 2 arguments (count, color)".to_string(),
+        ));
+    }
+    let count = require_u64_value("rt_simd_fill_row_u32(count)", &args[0])? as usize;
+    let color = require_u32_value("rt_simd_fill_row_u32(color)", &args[1])?;
+    Ok(pack_u32_array(sffi_fill_row_u32(count, color)))
+}
+
+/// rt_simd_copy_row_u32(src: [u32]) -> [u32]
+pub fn rt_simd_copy_row_u32(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime(
+            "rt_simd_copy_row_u32 expects 1 argument (src)".to_string(),
+        ));
+    }
+    let src = unpack_u32_array("rt_simd_copy_row_u32(src)", &args[0])?;
+    Ok(pack_u32_array(sffi_copy_row_u32(&src)))
+}
+
+/// rt_simd_engine2d_neon_hits() -> i64
+pub fn rt_simd_engine2d_neon_hits(args: &[Value]) -> Result<Value, CompileError> {
+    expect_no_args("rt_simd_engine2d_neon_hits", args)?;
+    Ok(Value::Int(sffi_engine2d_simd_row_hits() as i64))
+}
+
+/// rt_simd_engine2d_neon_reset() -> i64 (returns 0)
+pub fn rt_simd_engine2d_neon_reset(args: &[Value]) -> Result<Value, CompileError> {
+    expect_no_args("rt_simd_engine2d_neon_reset", args)?;
+    sffi_engine2d_simd_row_reset();
+    Ok(Value::Int(0))
 }
 
 fn binop_u64x2<F>(name: &str, args: &[Value], op: F) -> Result<Value, CompileError>

@@ -652,6 +652,10 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_simd_has_avx2",
     "rt_simd_has_neon",
     "rt_simd_has_rvv",
+    "rt_simd_fill_row_u32",
+    "rt_simd_copy_row_u32",
+    "rt_simd_engine2d_neon_hits",
+    "rt_simd_engine2d_neon_reset",
     "rt_simd_detect_profile",
     "rt_simd_profile_name",
     // Phase 1 SIMD int bitwise / shift externs.
