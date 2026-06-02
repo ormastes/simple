@@ -312,11 +312,13 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   `test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`, and
   `doc/06_spec/system/app/browser/feature/webgpu_js_wasm_simple_spec.md`:
   JS/WebEngine/WASM BrowserSession evidence. Current focused checks pass the
-  WebGPU/JS/WASM system spec `106/106`, the native WASM host spec `101/101`,
-  and the fetch-to-WASM chain spec `1/1`. The coverage includes secure WebGPU
+  WebGPU/JS/WASM system spec `106/106`, the native WASM host spec `107/107`,
+  and the fetch-to-WASM chain spec `37/37`. The coverage includes secure WebGPU
   globals, fetched `arrayBuffer()` to `WebAssembly.instantiate`, compile
   thenables, bounded WASM exports, traps, table/global metadata, imported
   function binding, and `Uint8Array`/`DataView` access to WebAssembly.Memory.
+  Browser scripts now also cover bounded `Uint8Array[Symbol.iterator]()` value
+  iteration through the same deterministic values iterator as `values()`.
 
 ## Related Docs
 
