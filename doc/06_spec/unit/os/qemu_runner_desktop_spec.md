@@ -179,7 +179,7 @@ expect(cmd).to_contain("none")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -202,6 +202,9 @@ expect(net_cmd.contains("-net")).to_equal(false)
 
 val ssh = scenario_x64_ssh()
 expect(scenario_name_or_missing("x64-ssh")).to_equal("x64-ssh")
+expect(scenario_qemu_exit_success(ssh, 0)).to_equal(true)
+expect(scenario_qemu_exit_success(ssh, 1)).to_equal(true)
+expect(scenario_qemu_exit_success(ssh, 124)).to_equal(false)
 val ssh_cmd = build_scenario_command(ssh, "build/os/simpleos_x86_64.elf")
 expect(ssh_cmd).to_contain("user,id=n0,hostfwd=tcp::2222-:22")
 expect(ssh_cmd.contains("-net")).to_equal(false)
