@@ -1188,6 +1188,39 @@ match result:
 
 </details>
 
+#### dispatches Uint8Array prototype sort with call in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `1,4,7,255:1,4,7,255:1:255`
+
+3. Err
+   - Expected: "unexpected uint8 prototype sort dispatch js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var b = new Uint8Array(4); b[0] = 260; b[1] = -1; b[2] = 7; b[3] = 1; var returned = Uint8Array.prototype.sort.call(b); returned.toString() + ':' + b.toString() + ':' + returned.at(0) + ':' + returned.at(3)")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("1,4,7,255:1,4,7,255:1:255")
+    Err(err):
+        expect("unexpected uint8 prototype sort dispatch js error: {err}").to_equal("")
+```
+
+</details>
+
 #### iterates Uint8Array keys and values in browser scripts
 
 1. var session = BrowserSession new
@@ -1702,8 +1735,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 43 |
-| Active scenarios | 43 |
+| Total scenarios | 44 |
+| Active scenarios | 44 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
