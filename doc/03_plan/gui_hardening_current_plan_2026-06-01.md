@@ -443,6 +443,9 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   response callback or request `response` listener registers response listeners,
   with deterministic response completion state, listener counts, and synthetic
   response header metadata including raw header order and HTTP version parts.
+  Bounded synthetic responses now expose `pause()`, `resume()`, and
+  `isPaused()` and defer pending `data`/`end` delivery while paused before
+  draining in order on `resume()`.
   Real response streaming and event-loop ordering remain open.
 - Generated GUI WASM: move widget-matrix-specific state patterns into shared
   per-widget state helpers and cover additional generated apps.

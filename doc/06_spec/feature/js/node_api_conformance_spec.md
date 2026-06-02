@@ -2176,6 +2176,22 @@ expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; 
 
 </details>
 
+#### pauses and resumes bounded http response delivery
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); typeof saved.pause + ':' + typeof saved.resume + ':' + typeof saved.isPaused")).to_equal("function:function:function")
+expect(_eval_str_with_network("http://api.example.com:8080", "var seen = ''; var ended = 'no'; var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.pause(); res.on('data', (chunk) => { seen = seen + chunk; }); res.on('end', () => { ended = 'yes'; }); }); req.end(); seen + ':' + ended + ':' + saved.pendingData + ':' + saved.pendingEnd + ':' + saved.complete + ':' + saved.isPaused()")).to_equal(":no:true:true:false:true")
+expect(_eval_str_with_network("http://api.example.com:8080", "var seen = ''; var ended = 'no'; var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.pause(); res.on('data', (chunk) => { seen = seen + chunk; }); res.on('end', () => { ended = 'yes'; }); }); req.end(); saved.resume(); seen + ':' + ended + ':' + saved.pendingData + ':' + saved.pendingEnd + ':' + saved.complete + ':' + saved.isPaused()")).to_equal("bounded-response:yes:false:false:true:false")
+```
+
+</details>
+
 #### tracks bounded http response lifecycle state
 
 <details>
@@ -3889,8 +3905,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 251 |
-| Active scenarios | 251 |
+| Total scenarios | 252 |
+| Active scenarios | 252 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
