@@ -3,13 +3,16 @@ set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 MODULE_DIR="${ROOT_DIR}/.spipe/spipe"
+DRY_RUN=0
+DOC_ROOT=""
 
 usage() {
   cat <<'USAGE'
-Usage: sh scripts/setup-spipe-submodule.shs [--force] [--dry-run]
+Usage: sh scripts/setup-spipe-submodule.shs [--force] [--dry-run] [--doc-root PATH]
 
-Initializes the .spipe/spipe submodule if needed, then delegates to the
-platform-specific SPipe link setup script.
+Initializes the .spipe/spipe compatibility submodule and examples/spipe
+standalone SPipe project submodule, refreshes host .spipe links, then delegates
+to the platform-specific SPipe link setup script.
 
 Unix/macOS:
   sh scripts/setup-spipe-submodule.shs
@@ -26,8 +29,64 @@ case "${1:-}" in
     ;;
 esac
 
-if [ ! -d "${MODULE_DIR}/.git" ] && [ ! -f "${MODULE_DIR}/.git" ]; then
-  git submodule update --init --recursive -- .spipe/spipe
+EXPECT_DOC_ROOT=0
+for arg in "$@"; do
+  if [ "$EXPECT_DOC_ROOT" -eq 1 ]; then
+    DOC_ROOT="$arg"
+    EXPECT_DOC_ROOT=0
+    continue
+  fi
+  case "$arg" in
+    --dry-run) DRY_RUN=1 ;;
+    --doc-root) EXPECT_DOC_ROOT=1 ;;
+  esac
+done
+if [ "$EXPECT_DOC_ROOT" -eq 1 ]; then
+  echo "setup-spipe-submodule: --doc-root requires a path" >&2
+  exit 2
+fi
+
+if [ ! -d "${MODULE_DIR}/.git" ] && [ ! -f "${MODULE_DIR}/.git" ] \
+  || [ ! -d "${ROOT_DIR}/examples/spipe/.git" ] && [ ! -f "${ROOT_DIR}/examples/spipe/.git" ]; then
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "would_init_submodules .spipe/spipe examples/spipe"
+  else
+    git submodule update --init --recursive -- .spipe/spipe examples/spipe
+  fi
+fi
+
+if [ "$DRY_RUN" -ne 1 ]; then
+  mkdir -p "${ROOT_DIR}/.spipe"
+fi
+if [ ! -e "${ROOT_DIR}/.spipe/spipe_project" ] && [ "$DRY_RUN" -ne 1 ]; then
+  ln -s "../examples/spipe" "${ROOT_DIR}/.spipe/spipe_project"
+fi
+link_common() {
+  link_path="$1"
+  target="$2"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "would_link ${link_path} -> ${target}"
+    return
+  fi
+  mkdir -p "$(dirname -- "${ROOT_DIR}/${link_path}")"
+  if [ -e "${ROOT_DIR}/${link_path}" ]; then
+    return
+  fi
+  ln -s "$target" "${ROOT_DIR}/${link_path}"
+}
+
+link_common ".spipe/domain_expert" "../examples/spipe/doc/00_llm_process/domain_expert"
+link_common ".spipe/template" "../examples/spipe/doc/00_llm_process/template"
+link_common ".spipe/spipe_docs" "../examples/spipe/doc/00_llm_process/spipe"
+link_common ".spipe/tool_expert/spipe_submodule" "../../examples/spipe/doc/00_llm_process/tool_expert/spipe_submodule"
+link_common ".spipe/project_expert/spipe" "../../examples/spipe/doc/00_llm_process/project_expert/simple"
+
+if [ -f "${ROOT_DIR}/examples/spipe/cli/spipe.js" ] && [ "$DRY_RUN" -ne 1 ]; then
+  if [ -n "$DOC_ROOT" ]; then
+    node "${ROOT_DIR}/examples/spipe/cli/spipe.js" doc-link "${ROOT_DIR}" "$DOC_ROOT" >/dev/null
+  else
+    node "${ROOT_DIR}/examples/spipe/cli/spipe.js" doc-link "${ROOT_DIR}" >/dev/null
+  fi
 fi
 
 if [ -n "${OS:-}" ] && [ "${OS}" = "Windows_NT" ]; then

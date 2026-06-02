@@ -310,7 +310,7 @@ RuntimeValue rt_u32_alloc_filled(uint64_t len, uint32_t fill)
     a->len = len;
     a->cap = len;
     a->items = runtime_array_inline_items(a);
-    RuntimeValue item = ENCODE_INT((int64_t)(uint64_t)fill);
+    RuntimeValue item = (RuntimeValue)(uint64_t)fill;
     for (uint64_t i = 0; i < len; i++) {
         a->items[i] = item;
     }
@@ -1073,12 +1073,15 @@ void rt_framebuffer_write(RuntimeValue addr, RuntimeValue offset, RuntimeValue v
     base[off] = (uint8_t)v;
 }
 
+RuntimeValue rt_mmio_write_u32_real(RuntimeValue addr, RuntimeValue val);
+
 void rt_fb_blit_array32(RuntimeValue dst_addr, RuntimeValue dst_stride_pixels,
                         RuntimeValue src_pixels, RuntimeValue src_stride_pixels,
                         RuntimeValue copy_w, RuntimeValue copy_h)
 {
-    if (!IS_HEAP(src_pixels)) return;
-    RuntimeArray *src = (RuntimeArray *)DECODE_PTR(src_pixels);
+    RuntimeArray *src = IS_HEAP(src_pixels)
+        ? (RuntimeArray *)DECODE_PTR(src_pixels)
+        : (RuntimeArray *)(uintptr_t)src_pixels;
     if (!src || src->hdr.type != HEAP_ARRAY) return;
 
     volatile uint32_t *dst = (volatile uint32_t *)(uintptr_t)(uint64_t)dst_addr;
@@ -1100,11 +1103,31 @@ void rt_fb_blit_array32(RuntimeValue dst_addr, RuntimeValue dst_stride_pixels,
 
         for (uint64_t x = 0; x < row_count; x++) {
             RuntimeValue item = src_items[src_row + x];
-            uint32_t pixel = IS_INT(item) ? (uint32_t)DECODE_INT(item)
-                                          : (uint32_t)(uint64_t)item;
-            dst[dst_row + x] = pixel;
+            uint32_t pixel = (uint32_t)(uint64_t)item;
+            rt_mmio_write_u32_real((RuntimeValue)(uintptr_t)(dst + dst_row + x), (RuntimeValue)(uint64_t)pixel);
         }
     }
+}
+
+RuntimeValue rt_fb_fill_rect32(RuntimeValue addr, RuntimeValue stride_pixels,
+                               RuntimeValue x, RuntimeValue y,
+                               RuntimeValue w, RuntimeValue h,
+                               RuntimeValue color)
+{
+    volatile uint32_t *fb = (volatile uint32_t *)(uintptr_t)(uint64_t)addr;
+    uint64_t stride = (uint64_t)stride_pixels;
+    uint64_t x0 = (uint64_t)x;
+    uint64_t y0 = (uint64_t)y;
+    uint64_t width = (uint64_t)w;
+    uint64_t height = (uint64_t)h;
+    uint32_t pixel = (uint32_t)(uint64_t)color;
+    for (uint64_t row = 0; row < height; row++) {
+        uint64_t base = (y0 + row) * stride + x0;
+        for (uint64_t col = 0; col < width; col++) {
+            rt_mmio_write_u32_real((RuntimeValue)(uintptr_t)(fb + base + col), (RuntimeValue)(uint64_t)pixel);
+        }
+    }
+    return ENCODE_INT(0);
 }
 
 RuntimeValue rt_native_eq(RuntimeValue a, RuntimeValue b)

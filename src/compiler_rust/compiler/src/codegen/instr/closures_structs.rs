@@ -473,6 +473,15 @@ pub(crate) fn compile_method_call_static<M: Module>(
             if type_qualifier.is_none() && candidates.len() > 1 && unique_ids.len() == 1 {
                 return Some(*candidates[0].1);
             }
+            if type_qualifier.is_none()
+                && candidates.len() > 1
+                && matches!(
+                    method_part,
+                    "unwrap" | "unwrap_or" | "unwrap_err" | "is_some" | "is_none" | "is_ok" | "is_err"
+                )
+            {
+                return None;
+            }
             if type_qualifier.is_none() && candidates.len() > 1 {
                 let cand_names: Vec<&str> = candidates.iter().map(|(k, _)| k.as_str()).collect();
                 eprintln!(
@@ -544,7 +553,12 @@ pub(crate) fn compile_method_call_static<M: Module>(
             }
         }
         // Final fallback: import_map bare name (may pick wrong overload)
-        if resolved_name.is_none() {
+        if resolved_name.is_none()
+            && !matches!(
+                lookup_name,
+                "unwrap" | "unwrap_or" | "unwrap_err" | "is_some" | "is_none" | "is_ok" | "is_err"
+            )
+        {
             resolved_name = ctx.import_map.get(lookup_name).map(|s| s.as_str());
         }
 

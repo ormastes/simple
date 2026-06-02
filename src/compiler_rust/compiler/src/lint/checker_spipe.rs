@@ -542,6 +542,35 @@ impl LintChecker {
         )
     }
 
+    fn boolean_wrapper_easy_fix(
+        &self,
+        original_line: &str,
+        normalized: &str,
+        line_start: usize,
+        line_num: usize,
+    ) -> Option<EasyFix> {
+        let subject = Self::extract_expect_subject(normalized)?;
+        let replacement_call = if normalized.contains(").to_equal(false)") || normalized.contains(").to_be(false)") {
+            format!("expect_not({})", subject)
+        } else {
+            format!("expect({})", subject)
+        };
+        let indent_len = original_line.len() - original_line.trim_start().len();
+        let new_text = format!("{}{}", &original_line[..indent_len], replacement_call);
+        let file = self.source_file.as_ref()?.display().to_string();
+
+        Some(EasyFix {
+            id: format!("L:spipe_boolean_wrapper_assertions:{}", line_num),
+            description: "replace verbose boolean matcher chain with concise assertion".to_string(),
+            replacements: vec![Replacement {
+                file,
+                span: simple_common::diagnostic::Span::new(line_start, line_start + original_line.len(), line_num, 1),
+                new_text,
+            }],
+            confidence: FixConfidence::Safe,
+        })
+    }
+
     fn indent_width(line: &str) -> usize {
         let mut width = 0usize;
         for ch in line.chars() {
@@ -709,10 +738,12 @@ impl LintChecker {
     }
 
     pub(super) fn check_spipe_placeholder_patterns(&mut self, source: &str) {
+        let mut byte_offset = 0usize;
         for (idx, line) in source.lines().enumerate() {
             let line_num = idx + 1;
             let trimmed = line.trim();
             if trimmed.is_empty() || trimmed.starts_with('#') {
+                byte_offset += line.len() + 1;
                 continue;
             }
 
@@ -773,13 +804,16 @@ impl LintChecker {
             }
 
             if Self::is_boolean_wrapper_assertion(&normalized) {
-                self.emit(
+                let easy_fix = self.boolean_wrapper_easy_fix(line, &normalized, byte_offset, line_num);
+                self.emit_with_fix(
                     LintName::SPipeBooleanWrapperAssertions,
                     Span::new(0, 0, line_num, 1),
-                    "verbose boolean equality assertion in spec/example".to_string(),
-                    Some("use expect(condition) for true checks and expect_not(condition) for false checks".to_string()),
+                    "verbose boolean matcher assertion in spec/example".to_string(),
+                    Some("use expect(condition) for true checks; use expect_not(condition) instead of .to_equal(false) or .to_be(false)".to_string()),
+                    easy_fix,
                 );
             }
+            byte_offset += line.len() + 1;
         }
     }
 

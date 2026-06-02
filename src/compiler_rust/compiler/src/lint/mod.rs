@@ -250,9 +250,19 @@ describe "demo":
         expect(code != 0).to_equal(true)
 "#;
         let diagnostics = check_code_in_file("demo_spec.spl", code);
-        assert!(diagnostics
+        let lint = diagnostics
             .iter()
-            .any(|d| d.lint == LintName::SPipeBooleanWrapperAssertions));
+            .find(|d| d.lint == LintName::SPipeBooleanWrapperAssertions)
+            .expect("missing boolean wrapper lint");
+        assert!(lint
+            .suggestion
+            .as_deref()
+            .unwrap_or("")
+            .contains("use expect(condition)"));
+        let fix = lint.easy_fix.as_ref().expect("missing boolean wrapper fix");
+        assert_eq!(fix.confidence, simple_common::diagnostic::FixConfidence::Safe);
+        assert_eq!(fix.replacements.len(), 1);
+        assert_eq!(fix.replacements[0].new_text.trim(), "expect(code!=0)");
     }
 
     #[test]
@@ -264,9 +274,19 @@ describe "demo":
         expect(ok).to_equal(false)
 "#;
         let diagnostics = check_code_in_file("demo_spec.spl", code);
-        assert!(diagnostics
+        let lint = diagnostics
             .iter()
-            .any(|d| d.lint == LintName::SPipeBooleanWrapperAssertions));
+            .find(|d| d.lint == LintName::SPipeBooleanWrapperAssertions)
+            .expect("missing false boolean wrapper lint");
+        assert!(lint
+            .suggestion
+            .as_deref()
+            .unwrap_or("")
+            .contains("expect_not(condition)"));
+        let fix = lint.easy_fix.as_ref().expect("missing false boolean wrapper fix");
+        assert_eq!(fix.confidence, simple_common::diagnostic::FixConfidence::Safe);
+        assert_eq!(fix.replacements.len(), 1);
+        assert_eq!(fix.replacements[0].new_text.trim(), "expect_not(ok)");
     }
 
     #[test]
@@ -283,9 +303,7 @@ describe "demo":
         assert!(diagnostics
             .iter()
             .all(|d| d.lint != LintName::SPipeBooleanWrapperAssertions));
-        assert!(diagnostics
-            .iter()
-            .all(|d| d.lint != LintName::SPipeEmptyExamples));
+        assert!(diagnostics.iter().all(|d| d.lint != LintName::SPipeEmptyExamples));
     }
 
     #[test]

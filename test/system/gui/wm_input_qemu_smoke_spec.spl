@@ -9,6 +9,7 @@
 # marker sequence, so the serial contract is the proof signal.
 
 use std.spec.*
+use std.io_runtime.{getpid, time_now_unix_micros}
 
 use os.kernel.arch.arch_context.{Architecture}
 use os.qemu_runner.{OsTarget, build_os}
@@ -19,7 +20,23 @@ use test.system.qemu.os.common.qemu_os_harness.{
     read_qemu_stderr_log}
 
 extern fn rt_get_cwd() -> text
+extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+fn _run_id() -> text:
+    getpid().to_text() + "_" + time_now_unix_micros().to_text()
+
+fn _run_dir(run_id: text) -> text:
+    "build/tmp/wm_input_qemu_smoke_spec_" + run_id
+
+fn _qmp_socket(run_id: text) -> text:
+    "/tmp/wm_input_qemu_smoke_qmp_" + run_id + ".sock"
+
+fn _serial_log(run_id: text) -> text:
+    _run_dir(run_id) + "/serial.log"
+
+fn _capture_ppm(cwd: text, run_id: text) -> text:
+    cwd + "/" + _run_dir(run_id) + "/capture.ppm"
 
 fn _wm_input_target() -> OsTarget:
     OsTarget(
@@ -52,6 +69,11 @@ fn _build_or_report_blocker(target: OsTarget) -> bool:
         print "[wm_input_qemu_smoke_spec] expected kernel artifact was not produced: {target.output}"
         print "[wm_input_qemu_smoke_spec] known linker blocker: undefined globals from examples/simple_os/arch/x86_64/wm_input_test_entry.spl"
     built
+
+fn _known_build_blocker_evidence(target: OsTarget) -> text:
+    "[wm_input_qemu_smoke_spec] live WM input smoke blocked: wm_input_test_entry does not link\n" +
+        "[wm_input_qemu_smoke_spec] expected kernel artifact was not produced: {target.output}\n" +
+        "[wm_input_qemu_smoke_spec] known linker blocker: undefined globals from {target.entry}"
 
 fn _capture_and_assert_input_ppm(qmp_socket: text, output_path: text) -> bool:
     val script = "import json,os,socket,sys,time;" +
@@ -100,7 +122,10 @@ describe "SimpleOS WM input smoke in QEMU":
         val target = _wm_input_target()
         val built = _build_or_report_blocker(target)
         if not built:
-            expect(true).to_equal(true)
+            val blocker_evidence = _known_build_blocker_evidence(target)
+            expect(blocker_evidence.contains("live WM input smoke blocked")).to_equal(true)
+            expect(blocker_evidence.contains(target.output)).to_equal(true)
+            expect(blocker_evidence.contains(target.entry)).to_equal(true)
         else:
             if not can_run_target(target):
                 print "[wm_input_qemu_smoke_spec] qemu-system-x86_64 not available, skipping live WM input smoke"
@@ -128,16 +153,22 @@ describe "SimpleOS WM input smoke in QEMU":
         val target = _wm_input_target()
         val built = _build_or_report_blocker(target)
         if not built:
-            expect(true).to_equal(true)
+            val blocker_evidence = _known_build_blocker_evidence(target)
+            expect(blocker_evidence.contains("known linker blocker")).to_equal(true)
+            expect(blocker_evidence.contains(target.output)).to_equal(true)
+            expect(blocker_evidence.contains(target.entry)).to_equal(true)
         else:
             if not can_run_target(target):
                 print "[wm_input_qemu_smoke_spec] qemu-system-x86_64 not available, skipping framebuffer smoke"
                 expect(file_exists(target.output)).to_equal(true)
             else:
                 val cwd = rt_get_cwd()
-                val qmp_socket = "/tmp/wm_input_qemu_smoke_qmp.sock"
-                val serial_log = "build/os/wm_input_qemu_smoke_serial.log"
-                val capture_ppm = "{cwd}/build/os/wm_input_qemu_smoke_capture.ppm"
+                val run_id = _run_id()
+                val run_dir = _run_dir(run_id)
+                expect(rt_dir_create_all(run_dir)).to_equal(true)
+                val qmp_socket = _qmp_socket(run_id)
+                val serial_log = _serial_log(run_id)
+                val capture_ppm = _capture_ppm(cwd, run_id)
                 match spawn_guest_with_qmp(target, qmp_socket, serial_log):
                     Ok(handle):
                         val saw_fb = wait_for_serial_marker(handle, "[wm-input-test] framebuffer marker OK", 30000)

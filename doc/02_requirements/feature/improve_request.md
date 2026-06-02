@@ -24,8 +24,9 @@ Track improvement ideas discovered while developing Simple standard library and 
 | Symbol Table Cross-Refs | ✅ Implemented | Low |
 | MCP Server Auto-Install for Claude Code | 🔍 PROPOSED | High |
 | symbol_table_spec.spl timeout (>30s) | 🔍 PROPOSED | Medium |
+| [macOS GUI Live Window Evidence](macos_gui_live_window_evidence.md) | 🔍 PROPOSED | High |
 
-**Summary:** 16 implemented, 1 partial, 0 blocked, 0 proposed
+**Summary:** 16 implemented, 1 partial, 0 blocked, 3 proposed
 
 **BDD Spec Coverage:** 5 improvements now have dedicated BDD specs in `simple/std_lib/test/features/stdlib/`:
 - JSON Library → `json_spec.spl` (15 tests)

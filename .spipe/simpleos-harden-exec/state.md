@@ -306,6 +306,29 @@ scripts/run_simpleos_qemu.shs:                                  [REQ-5]
   - `find doc/06_spec -name '*_spec.spl' | wc -l` -> `0`.
 - Scope note: this is unit-level SSH shell/launch-path evidence. It does not yet prove a live QEMU SSH login/server session can launch SMF/executable files.
 
+### 2026-06-02 Live SSH/QEMU Evidence
+
+- Extended the x64 SSH live TCP probe contract to include authenticated session probes for:
+  - `SESSION shell simple.smf --version` -> SMF launch marker with `/usr/bin/simple.smf` and `/SYS/APPS/SIMPLSTC.SMF`.
+  - `SESSION shell simple --check` -> executable-file launch marker with `/usr/bin/simple` and `/SYS/APPS/SIMPLSTC.SMF`.
+- Replaced the stale live system spec wiring with the current `x64-ssh` scenario contract:
+  - uses `build_os_with_backend(target, "cranelift")`;
+  - runs `test_scenario(scenario, scenario_test_timeout_ms(scenario))`;
+  - uses runner timeout flag `--timeout 900` rather than ignored `--timeout-ms`.
+- Hardened `examples/simple_os/arch/x86_64/ssh_live_entry.spl` for the bare-metal live path:
+  - removed POSIX/service bootstrap calls that faulted before the TCP listener;
+  - added direct `rt_net_init()`/`rt_net_stats()` initialization before binding port 22.
+- Fixed `src/os/qemu_runner_part5.spl` so `x64-ssh` accepts the probe wrapper's host-side success exit code `0`; the wrapper already terminates QEMU after observing `TEST PASSED`.
+- Verification:
+  - `SIMPLE_LIB=src src/compiler_rust/target/release/simple check examples/simple_os/arch/x86_64/ssh_live_entry.spl test/system/ssh_live_login_in_qemu_spec.spl src/os/qemu_runner_part5.spl` -> PASS.
+  - `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/system/ssh_live_login_in_qemu_spec.spl --mode=interpreter --timeout 900 --clean --format json` -> PASS, 1/1.
+- Evidence artifacts:
+  - `build/test-artifacts/system/ssh_live_login_in_qemu/combined.log` contains `TEST PASSED`.
+  - `build/os/x64-ssh-live.session-smf.txt` contains `SESSION OK shell simple.smf path=/usr/bin/simple.smf alias=/SYS/APPS/SIMPLSTC.SMF`.
+  - `build/os/x64-ssh-live.session-exec.txt` contains `SESSION OK shell simple path=/usr/bin/simple alias=/SYS/APPS/SIMPLSTC.SMF`.
+- 2026-06-02 continuation: Refreshed the generated scenario manual for `test/system/ssh_live_login_in_qemu_spec.spl` so it documents the live QEMU boot, host port 2222 forwarding, SSH shell/auth probes, SMF launch transcript, executable launch transcript, and failure diagnostics. `spipe-docgen --no-index` generated a complete manual at `doc/06_spec/system/ssh_live_login_in_qemu_spec.md` with no stub output.
+- 2026-06-02 continuation verification: The current live SSH/QEMU gate passed `1/1` with `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/system/ssh_live_login_in_qemu_spec.spl --mode=interpreter --timeout 900 --clean --format json`. `build/os/x64-ssh-live.session-smf.txt` contains `SESSION OK shell simple.smf path=/usr/bin/simple.smf alias=/SYS/APPS/SIMPLSTC.SMF`, `build/os/x64-ssh-live.session-exec.txt` contains `SESSION OK shell simple path=/usr/bin/simple alias=/SYS/APPS/SIMPLSTC.SMF`, no SSH/QEMU processes remained, and the doc layout guard returned `0`.
+
 ### 4-spec
 <pending>
 

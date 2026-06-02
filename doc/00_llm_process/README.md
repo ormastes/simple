@@ -29,11 +29,24 @@ updated paths in `.spipe/<feature>/state.md`.
 
 This expert tree plus the self-healing update step is Simple's realization of the LLM Wiki and Auto-Research patterns — see [llm_wiki_and_auto_research.md](llm_wiki_and_auto_research.md) for the concept mapping.
 
-## SPipe submodule
+## SPipe project
 
-Reusable SPipe process assets are being moved to the `.spipe/spipe` submodule
-from `https://github.com/ormastes/Spipe.git`. The host setup script initializes
-the submodule and links reusable expert roots into this repository:
+Reusable SPipe process assets live in the standalone SPipe project from
+`https://github.com/ormastes/Spipe.git`.
+
+This host repository keeps two mounts:
+
+- `examples/spipe`: the example SPipe project submodule.
+- `.spipe/spipe`: the compatibility submodule mount used by existing setup
+  scripts and links.
+
+The host-local `.spipe/doc` link points to this repository's configured process
+doc root, `doc/00_llm_process`. SPipe's generic default is `doc/llm_process`,
+but this repository keeps the current `doc/00_llm_process` path.
+
+The host setup script initializes both SPipe submodules, refreshes
+`.spipe/spipe_project` and `.spipe/doc`, and links reusable expert roots into
+this repository:
 
 ```bash
 sh scripts/setup-spipe-submodule.shs
@@ -48,7 +61,9 @@ powershell -ExecutionPolicy Bypass -File .spipe\spipe\scripts\setup-spipe-links.
 The link setup preserves existing host-owned directories unless `--force` is
 passed. In this repository, `skill_command/`, `spipe/`, `template/`,
 `project_expert/`, `domain_expert/`, and `tool_expert/` are linked from the
-submodule.
+submodule. Host-specific subproject expert links are kept under `.spipe/` by
+`.spipe/subproject_links.sdn` so they do not write through the shared
+`project_expert/` symlink into the reusable SPipe project.
 
 ## generator tool
 

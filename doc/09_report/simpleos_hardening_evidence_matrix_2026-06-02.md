@@ -1,0 +1,22 @@
+# SimpleOS Hardening Evidence Matrix
+
+- status: pass
+- reason: pass
+- passed: 8/8
+- executable_launch_from_fs: pass
+- ssh_shell_smf_and_exec: pass
+- shared_wm_logic: pass
+- cpu_simd_engine2d_diagram: pass
+- web_renderer_engine2d_bitmap: pass
+- simple_gui_webrenderer_bitmap: pass
+- qemu_host_counterpart_bitmap: pass
+- qemu_wm_simple_gui_mdi: pass
+- qemu_wm_simple_gui_mdi_ppm_anchors: pass
+- qemu_wm_simple_gui_mdi_ppm_nonblack: 779590
+- simple_web_node_report: doc/09_report/simple_web_engine2d_js_bitmap_evidence_2026-06-02.md
+- simple_web_bun_report: doc/09_report/bun_simple_web_engine2d_js_bitmap_evidence_2026-06-02.md
+- simple_web_node_env: build/simple_web_engine2d_js_bitmap_evidence_current/evidence.env
+- simple_web_bun_env: build/bun_simple_web_engine2d_js_bitmap_evidence_current/evidence.env
+- gui_entry_latest_dir: build/tmp/gui_entry_engine2d_wm_simple_web_spec_3373724_1780378587720186
+- gui_entry_capture_ppm_bytes: 2359312
+- gui_entry_capture_raw_bytes: 3145728

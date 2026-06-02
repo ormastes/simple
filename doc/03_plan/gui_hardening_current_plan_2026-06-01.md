@@ -33,6 +33,10 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   before replacing the rectangle-only production corpus path. The text painter
   now exposes calibrated famous-site paint runs so production paint can consume
   the shared wrapping/width/y-position model without duplicating font metrics.
+  The focused production verifier now reads its strict current-difference bound
+  from the checked-in sample baseline and independently recomputes PPM pixels,
+  while still reporting
+  `chromeGlyphCompositingParity=false` until exact pixels reach zero.
 - 8K color/image Option A is selected and documented: lazy packed 8K surfaces,
   CIELAB as the semantic color space, XYZ as the connection space, and fail-
   closed unsupported codec/profile paths. The JPEG XL stage now distinguishes
@@ -91,6 +95,12 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   tolerance path. QEMU-side Simple-vs-GTK performance remains unwired; the
   QEMU/GTK evidence wrapper now records that as structured guest-side release
   blocker metadata and marks the host perf baseline as non-promoting.
+- macOS live-window release evidence now has a fail-closed wrapper and system
+  spec. Linux hosts must report an explicit `requires-macos` skip with zero
+  capture bytes/checksum/non-background pixels; a Darwin run must launch through
+  `scripts/macos-gui-run.shs`, find a real `SimpleGui` window, report a positive
+  window rectangle, capture that rectangle, and prove non-background pixels
+  before satisfying the `live-macos-window-visual-proof` gate.
 - Pure GUI release/perf evidence now defines a WM/web/native-runtime-free command
   boundary, SMF/dynlib performance contract, and fail-closed probe row. Current
   Linux-host evidence intentionally reports `pass=false` without a real
@@ -137,6 +147,15 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   glyph/compositing blocker gateable line by line. The production `compare`
   record also contains `acceptance_policy_flags: (exact_required: true
   perceptual_diagnostic_only: true tolerance_acceptance_allowed: false)`.
+- `tools/electron-shell/verify_famous_site_production_probe.js`: focused
+  production Chrome-parity verifier, with
+  `test/baselines/famous_site_corpus/site_0_google/production_probe_baseline.json`
+  as its checked-in regression bound. Current `site_0_google` evidence passes
+  only as bounded divergent evidence with `differentPixels=2717`,
+  `computedDifferentPixels=2717`, `maxDifferentPixels=2717`,
+  `boundedDivergenceOnly=true`, and `chromeGlyphCompositingParity=false`; a
+  missing baseline, text-line ink corruption, and residual-pixel corruption all
+  fail closed.
 - `doc/09_report/chrome_production_glyph_paint_probe_2026-06-01.md`:
   fail-closed production glyph paint probe showing generic layout and Engine2D
   bitmap glyph routes regress the strict `site_0_google` different-pixel bound.
@@ -174,6 +193,11 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   perf baseline fields with Simple `1us`, GTK `301us`, `200` iterations,
   comparison available, `0` RGBA mismatches, and
   `blur_or_tolerance_used=false`.
+- `scripts/check-macos-gui-live-window-evidence.shs` and
+  `test/system/gui/macos_gui_live_window_evidence_spec.spl`: macOS live-window
+  evidence gate. Current Linux verification proves the explicit
+  `requires-macos` skip path; the macOS branch requires a real `SimpleGui`
+  window rectangle, screenshot bytes/checksum, and non-background pixels.
 - `src/lib/common/ui/builder.spl` and
   `examples/ui/widget_matrix_wasm_gui.spl`: shared retained-WASM widget event
   helper and widget-matrix refactor. Current CLI/browser evidence keeps

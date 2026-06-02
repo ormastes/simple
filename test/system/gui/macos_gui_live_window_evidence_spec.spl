@@ -1,0 +1,113 @@
+# @tag:system, slow
+# @tag:gui
+# @tag:macos
+
+"""
+# macOS GUI Live Window Evidence Spec
+
+Runs the macOS live GUI window evidence wrapper. On macOS this must launch the
+sample through `scripts/macos-gui-run.shs`, detect a real `SimpleGui` window,
+capture its window rectangle, and fingerprint the capture. On non-macOS hosts it
+must skip explicitly so Linux CI cannot claim live macOS window evidence.
+"""
+
+use std.io_runtime.{getpid, time_now_unix_micros}
+use std.spec.*
+
+extern fn rt_platform_name() -> text
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+fn _run_id() -> text:
+    getpid().to_text() + "_" + time_now_unix_micros().to_text()
+
+fn _build_dir(run_id: text) -> text:
+    "build/tmp/macos_gui_live_window_evidence_spec_" + run_id
+
+fn _report_path(run_id: text) -> text:
+    "build/tmp/macos_gui_live_window_evidence_spec_" + run_id + ".md"
+
+fn _run_evidence(run_id: text) -> (text, text, i32):
+    rt_process_run_timeout(
+        "/bin/sh",
+        [
+            "-c",
+            "BUILD_DIR=" + _build_dir(run_id) + " REPORT_PATH=" + _report_path(run_id) +
+                " SIMPLE_LIB=src sh scripts/check-macos-gui-live-window-evidence.shs"
+        ],
+        180000
+    )
+
+fn _extract_field(output: text, prefix: text) -> text:
+    val lines = output.split("\n")
+    var i = 0
+    while i < lines.len():
+        if lines[i].starts_with(prefix):
+            return lines[i].substring(prefix.len())
+        i = i + 1
+    return ""
+
+fn _extract_i64_field(output: text, prefix: text) -> i64:
+    val value = _extract_field(output, prefix)
+    if value == "":
+        return 0
+    return value.to_i64()
+
+fn _window_rect_has_positive_size(rect: text) -> bool:
+    val parts = rect.split(",")
+    if parts.len() != 4:
+        return false
+    val width = parts[2].to_i64()
+    val height = parts[3].to_i64()
+    return width > 0 and height > 0
+
+describe "macOS GUI live window evidence":
+    slow_it "passes on macOS and reports an explicit requires-macos skip elsewhere":
+        val run_id = _run_id()
+        val result = _run_evidence(run_id)
+        val stdout = result[0]
+        val stderr = result[1]
+        val code = result[2]
+        val host_os = rt_platform_name()
+        if code != 0:
+            print "macos_gui_live_window_evidence stdout: " + stdout
+            print "macos_gui_live_window_evidence stderr: " + stderr
+        if host_os == "macos":
+            expect(code).to_equal(0)
+            expect(stdout).to_contain("macos_gui_live_window_evidence_status=pass")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_reason=pass")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_host_os=macos")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_launcher=macos-gui-run")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_window_found=true")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_window_title=SimpleGui")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_window_rect=")
+            expect(_window_rect_has_positive_size(_extract_field(stdout, "macos_gui_live_window_evidence_window_rect="))).to_equal(true)
+            expect(stdout).to_contain("macos_gui_live_window_evidence_capture_path=" + _build_dir(run_id) + "/simplegui-window.png")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_capture_bytes=")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_capture_cksum=")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_non_background_pixels=")
+            expect(_extract_i64_field(stdout, "macos_gui_live_window_evidence_capture_bytes=")).to_be_greater_than(0)
+            expect(_extract_i64_field(stdout, "macos_gui_live_window_evidence_capture_cksum=")).to_be_greater_than(0)
+            expect(_extract_i64_field(stdout, "macos_gui_live_window_evidence_non_background_pixels=")).to_be_greater_than(0)
+            expect(stdout).to_contain("macos_gui_live_window_evidence_release_gate=live-macos-window-visual-proof")
+            val report = rt_file_read_text(_report_path(run_id))
+            expect(report).to_contain("# macOS GUI Live Window Evidence")
+            expect(report).to_contain("macos_gui_live_window_evidence_status=pass")
+            expect(report).to_contain("macos_gui_live_window_evidence_window_rect=")
+            expect(report).to_contain("macos_gui_live_window_evidence_capture_cksum=")
+        else:
+            expect(code).to_equal(0)
+            expect(stdout).to_contain("macos_gui_live_window_evidence_status=skip")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_reason=requires-macos")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_host_os=")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_launcher=macos-gui-run")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_window_found=false")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_capture_path=")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_capture_bytes=0")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_capture_cksum=0")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_non_background_pixels=0")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_release_gate=live-macos-window-visual-proof")
+            val report = rt_file_read_text(_report_path(run_id))
+            expect(report).to_contain("# macOS GUI Live Window Evidence")
+            expect(report).to_contain("macos_gui_live_window_evidence_status=skip")
+            expect(report).to_contain("macos_gui_live_window_evidence_reason=requires-macos")

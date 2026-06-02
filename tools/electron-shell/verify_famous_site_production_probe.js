@@ -11,9 +11,21 @@ const corruptTextLineInkForTest = process.argv.includes("--corrupt-text-line-ink
 const corruptTextLineInkPositionForTest = process.argv.includes("--corrupt-text-line-ink-position-for-test");
 const dropTextLineInkDifferenceForTest = process.argv.includes("--drop-text-line-ink-difference-for-test");
 const hideResidualDifferenceForTest = process.argv.includes("--hide-residual-difference-for-test");
-const maxDifferentPixels = sample === "site_0_google" ? 2717 : 6000;
 const dir = path.join(root, "test", "baselines", "famous_site_corpus", sample);
 const reportPath = path.join(dir, "report.production.sdn");
+const baselinePath = path.join(dir, "production_probe_baseline.json");
+
+function readProductionProbeBaseline() {
+  if (!fs.existsSync(baselinePath)) return null;
+  try {
+    const baseline = JSON.parse(fs.readFileSync(baselinePath, "utf8"));
+    if (baseline.sample !== sample) return null;
+    if (!Number.isInteger(baseline.maxDifferentPixels) || baseline.maxDifferentPixels <= 0) return null;
+    return baseline;
+  } catch (_err) {
+    return null;
+  }
+}
 
 function matchText(text, regex, fallback = "") {
   const match = text.match(regex);
@@ -268,6 +280,7 @@ let result = {
   status: "FAIL",
   sample,
   report: path.relative(root, reportPath),
+  baseline: path.relative(root, baselinePath),
   rendererMode: "",
   exact: false,
   accepted: false,
@@ -277,7 +290,7 @@ let result = {
   chromeGlyphCompositingParity: false,
   promotionRequiredDifferentPixels: 0,
   differentPixels: 0,
-  maxDifferentPixels,
+  maxDifferentPixels: 0,
   computedDifferentPixels: null,
   reportFresh: false,
   hasSimpleLayoutLines: false,
@@ -323,6 +336,8 @@ let result = {
 if (!fs.existsSync(reportPath)) {
   failures.push("missing production report; run site_corpus_compat.spl with --production-renderer first");
 } else {
+  const baseline = readProductionProbeBaseline();
+  if (!baseline) failures.push("missing or invalid production probe baseline");
   let text = fs.readFileSync(reportPath, "utf8");
   if (dropAcceptancePolicyFlagsForTest) {
     text = text.replace(" acceptance_policy_flags: (exact_required: true perceptual_diagnostic_only: true tolerance_acceptance_allowed: false)", "");
@@ -351,6 +366,7 @@ if (!fs.existsSync(reportPath)) {
   result.textRegionDelta = textRegionDelta(chromePath, simplePath, path.join(dir, "chrome_metrics.json"));
   result.divergent = !result.exact && !result.accepted;
   result.reportFresh = result.computedDifferentPixels === result.differentPixels;
+  result.maxDifferentPixels = baseline ? baseline.maxDifferentPixels : 0;
   result.hasSimpleLayoutLines = text.includes("simple_layout_lines:");
   result.hasSimpleLayoutLineWidths = text.includes("simple_layout_line_widths:");
   result.simpleLayoutLineCount = parseIntField(text, /simple_layout_lines:\s*\(text_lines count:\s*([0-9]+)/);
@@ -381,7 +397,7 @@ if (!fs.existsSync(reportPath)) {
   result.textInkDelta.overflowChromeExactBlackPixels = parseIntField(text, /overflow_text:\s*\(region[^\)]*chrome_exact_black_pixels:\s*([0-9]+)/);
   result.textInkDelta.overflowSimpleBackgroundMismatchPixels = parseIntField(text, /overflow_text:\s*\(region[^\)]*simple_background_mismatch_pixels:\s*([0-9]+)/);
   result.parityStatus = result.exact && result.accepted && result.differentPixels === 0 ? "exact" : "divergent";
-  result.boundedDivergenceOnly = result.parityStatus === "divergent" && result.differentPixels > 0 && result.differentPixels <= maxDifferentPixels;
+  result.boundedDivergenceOnly = result.parityStatus === "divergent" && result.differentPixels > 0 && result.differentPixels <= result.maxDifferentPixels;
   result.chromeGlyphCompositingParity = result.parityStatus === "exact";
   result.promotionRequiredDifferentPixels = result.parityStatus === "exact" ? 0 : result.differentPixels;
   if (result.rendererMode !== "production") failures.push("report is not renderer_mode production");
@@ -397,7 +413,7 @@ if (!fs.existsSync(reportPath)) {
   if (result.chromeCanvasMetricCount <= 0) failures.push("text geometry delta did not report Chrome canvas metrics");
   if (result.simpleGeometryLineCount <= 0) failures.push("text geometry delta did not report Simple text lines");
   if (result.differentPixels <= 1000 || result.differentPixels >= 6000) failures.push("production divergence is outside bounded evidence range");
-  if (result.differentPixels > maxDifferentPixels) failures.push("production probe regressed above current focused baseline");
+  if (result.differentPixels > result.maxDifferentPixels) failures.push("production probe regressed above current focused baseline");
   if (!result.textRegionDelta) failures.push("missing production text region delta diagnostics");
   if (result.textRegionDelta && result.textRegionDelta.divBox.differentPixels <= 0) failures.push("production div-box text delta did not report differences");
   if (result.textRegionDelta && (!result.textRegionDelta.overflowText || result.textRegionDelta.overflowText.differentPixels <= 0)) failures.push("production overflow text delta did not report differences");
