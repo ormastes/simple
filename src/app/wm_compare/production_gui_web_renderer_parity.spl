@@ -1,0 +1,97 @@
+# Production GUI/Web Renderer Parity Harness
+#
+# Builds marker-free GUI widget HTML through the real common.ui builder and
+# renderer, then compares Simple Web Renderer backends at exact pixel level.
+
+use common.ui.builder.{button, column, image, label, build_tree_with_title, with_icon}
+use common.ui.state.{init_state}
+use app.ui.render.widgets.{render_html_tree}
+use app.wm_compare.html_compat.{compare_exact}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend,
+    simple_web_resolved_engine2d_backend_name}
+
+struct ProductionGuiWebParityReport:
+    width: i32
+    height: i32
+    html: text
+    has_widget_html: bool
+    has_legacy_fixture_marker: bool
+    tolerance_used: bool
+    software_resolved_backend: text
+    cpu_simd_resolved_backend: text
+    metal_resolved_backend: text
+    software_pixel_count: i32
+    cpu_simd_pixel_count: i32
+    metal_pixel_count: i32
+    distinct_software_colors: i32
+    cpu_simd_different_pixels: i64
+    cpu_simd_match_percentage: i64
+    cpu_simd_max_channel_diff: i32
+    metal_different_pixels: i64
+    metal_match_percentage: i64
+    metal_max_channel_diff: i32
+    exact_backend_parity: bool
+
+fn generated_gui_widget_html() -> text:
+    val hero = label("prod_gui_text", "AB CD")
+    val detail = label("prod_gui_detail", "EF")
+    val preview = image("prod_gui_image", "production-preview.png", "Production preview")
+    val action = with_icon(button("prod_gui_button", "RUN", "run_production_gui"), "image")
+    val root = column("prod_gui_root", [hero, detail, preview, action])
+    val tree = build_tree_with_title(root, "Production GUI Web Parity", "light")
+    val state = init_state(tree)
+    render_html_tree(state.tree.root_node(), state)
+
+fn has_legacy_fixture_marker(html: text) -> bool:
+    html.contains("data-simple-actual-gui-button") or
+    html.contains("simple-web-engine2d-") or
+    html.contains("data-font-corpus=\"known-site-fonts\"") or
+    html.contains("wm-app-titlebar") or
+    html.contains("wm-app-content")
+
+fn count_distinct_colors(px: [u32]) -> i32:
+    var seen: [u32] = []
+    var i = 0
+    while i < px.len():
+        val c = px[i]
+        var found = false
+        var j = 0
+        while j < seen.len():
+            if seen[j] == c:
+                found = true
+            j = j + 1
+        if not found:
+            seen.push(c)
+        i = i + 1
+    seen.len()
+
+fn run_generated_gui_widget_backend_parity(width: i32, height: i32) -> ProductionGuiWebParityReport:
+    val html = generated_gui_widget_html()
+    val software = simple_web_render_html_to_pixels_with_engine2d_backend(html, width, height, "software")
+    val cpu_simd = simple_web_render_html_to_pixels_with_engine2d_backend(html, width, height, "cpu_simd")
+    val metal = simple_web_render_html_to_pixels_with_engine2d_backend(html, width, height, "metal")
+    val cpu_cmp = compare_exact(software, cpu_simd, width, height)
+    val metal_cmp = compare_exact(software, metal, width, height)
+    ProductionGuiWebParityReport(
+        width: width,
+        height: height,
+        html: html,
+        has_widget_html: html.contains("widget-") and html.contains("data-action="),
+        has_legacy_fixture_marker: has_legacy_fixture_marker(html),
+        tolerance_used: false,
+        software_resolved_backend: simple_web_resolved_engine2d_backend_name(width, height, "software"),
+        cpu_simd_resolved_backend: simple_web_resolved_engine2d_backend_name(width, height, "cpu_simd"),
+        metal_resolved_backend: simple_web_resolved_engine2d_backend_name(width, height, "metal"),
+        software_pixel_count: software.len(),
+        cpu_simd_pixel_count: cpu_simd.len(),
+        metal_pixel_count: metal.len(),
+        distinct_software_colors: count_distinct_colors(software),
+        cpu_simd_different_pixels: cpu_cmp.different_pixels,
+        cpu_simd_match_percentage: cpu_cmp.match_percentage,
+        cpu_simd_max_channel_diff: cpu_cmp.max_channel_diff,
+        metal_different_pixels: metal_cmp.different_pixels,
+        metal_match_percentage: metal_cmp.match_percentage,
+        metal_max_channel_diff: metal_cmp.max_channel_diff,
+        exact_backend_parity: cpu_cmp.different_pixels == 0 and metal_cmp.different_pixels == 0 and cpu_cmp.max_channel_diff == 0 and metal_cmp.max_channel_diff == 0
+    )
