@@ -270,7 +270,6 @@ class Style:
     bg: u32
     fg: u32
     font_size: i32
-    line_height: i32
     pad_l: i32
     pad_t: i32
     pad_r: i32
@@ -282,10 +281,10 @@ class Style:
     bold: bool
 
 fn default_style() -> Style:
-    Style(bg: 0u32, fg: argb(20, 20, 24), font_size: 16, line_height: 0, pad_l: 0, pad_t: 0, pad_r: 0, pad_b: 0, margin_t: 0, margin_b: 0, display: "block", text_align: "left", bold: false)
+    Style(bg: 0u32, fg: argb(20, 20, 24), font_size: 16, pad_l: 0, pad_t: 0, pad_r: 0, pad_b: 0, margin_t: 0, margin_b: 0, display: "block", text_align: "left", bold: false)
 
 fn inherit_style(p: Style) -> Style:
-    Style(bg: 0u32, fg: p.fg, font_size: p.font_size, line_height: p.line_height, pad_l: 0, pad_t: 0, pad_r: 0, pad_b: 0, margin_t: 0, margin_b: 0, display: p.display, text_align: p.text_align, bold: p.bold)
+    Style(bg: 0u32, fg: p.fg, font_size: p.font_size, pad_l: 0, pad_t: 0, pad_r: 0, pad_b: 0, margin_t: 0, margin_b: 0, display: p.display, text_align: p.text_align, bold: p.bold)
 
 fn is_inline_tag(tag: text) -> bool:
     tag == "a" or tag == "span" or tag == "b" or tag == "strong" or tag == "em" or tag == "i" or tag == "small" or tag == "code" or tag == "#text"
@@ -316,11 +315,6 @@ fn apply_decls(st: Style, decls: text) -> Style:
     val ta = decl_get(decls, "text-align")
     if ta.len() > 0:
         st.text_align = ta
-    val lh = decl_get(decls, "line-height")
-    if lh.len() > 0:
-        val lhv = parse_int(lh)
-        if lhv > 0:
-            st.line_height = lhv
     val fw = decl_get(decls, "font-weight")
     if fw.len() > 0:
         if fw == "bold" or fw == "700" or fw == "600" or fw == "800":
@@ -747,13 +741,13 @@ fn fb_glyph(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, gi: i32, color: u32, 
         ry = ry + 1
     out
 
-# draw a string; advances 5*scale px per char (5px glyph, no gap at bitmap level)
+# draw a string; advances 6*scale px per char (5px glyph + 1px gap)
 fn fb_text(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, color: u32, scale: i32) -> [u32]:
     var out = fb
     var i = 0
     val n = s.len()
     var cx = x
-    val adv = 5 * scale
+    val adv = 6 * scale
     while i < n:
         val code = s.char_code_at(i)
         val ch = "{code as char}".upper()
@@ -784,15 +778,10 @@ class LayoutResult:
     height: i32
 
 fn char_w(fs: i32) -> i32:
-    5 * glyph_scale(fs)
+    6 * glyph_scale(fs)
 
 fn line_h(fs: i32) -> i32:
-    10 * glyph_scale(fs)
-
-fn line_h_styled(fs: i32, css_lh: i32) -> i32:
-    if css_lh > 0:
-        return css_lh
-    10 * glyph_scale(fs)
+    9 * glyph_scale(fs)
 
 fn has_ancestor_tag(nodes: [HNode], i: i32, tag: text) -> bool:
     var p = nodes[i].parent
@@ -864,7 +853,7 @@ fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, bx: [
         var lines = (txt.len() + cpl - 1) / cpl
         if lines < 1:
             lines = 1
-        val h = lines * line_h_styled(st.font_size, st.line_height)
+        val h = lines * line_h(st.font_size)
         obh[i] = h
         return LayoutResult(bx: obx, by: oby, bw: obw, bh: obh, height: h)
     if nodes[i].tag == "img":
@@ -958,10 +947,8 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                 if cpl < 1:
                     cpl = 1
                 var off = 0
-                val lh = line_h_styled(st.font_size, st.line_height)
-                val glyph_h = 7 * scale
-                val baseline_offset = (lh - glyph_h + 1) / 3
-                var ly = by[i] + baseline_offset
+                var ly = by[i]
+                val lh = line_h(st.font_size)
                 while off < txt.len() and ly < fbh:
                     var endc = off + cpl
                     if endc > txt.len():
