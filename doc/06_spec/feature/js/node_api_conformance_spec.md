@@ -1811,13 +1811,16 @@ expect(_eval_str_with_network("http://api.example.com:8080", "var headers = {Acc
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_eval_str_with_network("http://api.example.com:8080", "typeof require('http').request('http://api.example.com:8080').write")).to_equal("function")
 expect(_eval_str_with_network("http://api.example.com:8080", "typeof require('http').request('http://api.example.com:8080').end")).to_equal("function")
 expect(_eval_str_with_network("https://api.example.com:443", "typeof require('node:https').request('https://api.example.com').abort")).to_equal("function")
+expect(_eval_str_with_network("http://api.example.com:8080", "typeof require('http').request('http://api.example.com:8080').on")).to_equal("function")
+expect(_eval_str_with_network("http://api.example.com:8080", "typeof require('http').request('http://api.example.com:8080').once")).to_equal("function")
+expect(_eval_str_with_network("http://api.example.com:8080", "typeof require('http').request('http://api.example.com:8080').listenerCount")).to_equal("function")
 expect(_eval_str_with_network("http://api.example.com:8080", "typeof require('http').request('http://api.example.com:8080').setHeader")).to_equal("function")
 expect(_eval_str_with_network("http://api.example.com:8080", "typeof require('http').request('http://api.example.com:8080').removeHeader")).to_equal("function")
 expect(_eval_str_with_network("http://api.example.com:8080", "typeof require('http').request('http://api.example.com:8080').getHeaderNames")).to_equal("function")
@@ -1936,6 +1939,22 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.end(); req.requestEnded")).to_equal("true")
 expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.abort(); req.aborted")).to_equal("true")
+```
+
+</details>
+
+#### emits bounded http request finish events on end
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("http://api.example.com:8080", "var seen = 'no'; var req = require('http').request('http://api.example.com:8080'); req.on('finish', () => { seen = 'yes'; }); req.end(); seen + ':' + req.finishEmitted + ':' + req.finishListenerCount")).to_equal("yes:true:1")
+expect(_eval_str_with_network("http://api.example.com:8080", "var seen = 0; var req = require('http').request('http://api.example.com:8080'); req.once('finish', () => { seen = seen + 1; }); req.end(); req.end(); seen + ':' + req.listenerCount('finish')")).to_equal("1:0")
+expect(_eval_str_with_network("http://api.example.com:8080", "var req = require('http').request('http://api.example.com:8080'); req.end(); req.finishEmitted + ':' + req.finishListenerCount")).to_equal("false:0")
 ```
 
 </details>
@@ -3637,8 +3656,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 236 |
-| Active scenarios | 236 |
+| Total scenarios | 237 |
+| Active scenarios | 237 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
