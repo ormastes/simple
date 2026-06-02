@@ -2194,6 +2194,24 @@ expect(_eval_str("var s = require('stream'); var r = s.Readable.from(['abc']); v
 
 </details>
 
+#### destroys bounded readable streams
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str("var r = require('stream').Readable.from(['a']); typeof r.destroy")).to_equal("function")
+expect(_eval_str("var r = require('stream').Readable.from(['a']); r.destroy(); r.destroyed + ':' + r.closed + ':' + r.readable + ':' + r.readableLength")).to_equal("true:true:false:0")
+expect(_eval_str("var seen = 0; var r = require('stream').Readable.from(['a']); r.on('close', () => { seen = seen + 1; }); r.destroy(); r.destroy(); seen + ':' + r.closeEmitted + ':' + r.listenerCount('close')")).to_equal("1:true:1")
+expect(_eval_str("var seen = 0; var r = require('stream').Readable.from(['a']); r.once('close', () => { seen = seen + 1; }); r.destroy(); r.destroy(); seen + ':' + r.listenerCount('close')")).to_equal("1:0")
+expect(_eval_str("var s = require('stream'); var r = s.Readable.from(['abc']); var w = s.Writable(); r.pause(); r.pipe(w); r.destroy(); r.resume(); w.bytesWritten + ':' + r.pipePaused + ':' + r.destroyed")).to_equal("0:false:true")
+```
+
+</details>
+
 #### propagates bounded pipe backpressure to writable destinations
 
 <details>
@@ -3473,8 +3491,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 227 |
-| Active scenarios | 227 |
+| Total scenarios | 228 |
+| Active scenarios | 228 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

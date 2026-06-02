@@ -265,8 +265,9 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   expose `pause`, `resume`, and `isPaused`, track `readableFlowing`, and defer
   `pipe()` drains while paused. A pending bounded pipe destination is now
   drained automatically on `resume()`. Bounded `unpipe()` now clears pending
-  pipe destinations before resume. Current focused checks pass
-  `node_api_conformance_spec.spl` `227/227` and
+  pipe destinations before resume. Bounded readable `destroy()` now closes
+  readable state, clears pending pipe state, and idempotently emits `close`.
+  Current focused checks pass `node_api_conformance_spec.spl` `228/228` and
   `node_process_next_tick_spec.spl` `2/2`; missing and invalid process grants
   remain rejected, and explicit in-memory CommonJS source grants now execute
   `exports.*` assignments plus `module.exports = ...` replacements with cache
@@ -374,9 +375,12 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   covered. Bounded `Writable.end()` drain clearing and `drain` callback
   emission are covered. Bounded readable `pause`/`resume` flow state and
   paused-pipe deferral are covered, including automatic bounded pending-pipe
-  drain on `resume()` and pending-pipe cancellation through `unpipe()`. Full
-  flow control, `for await` syntax support, broader stream scheduling, and
-  broader event-loop phases remain open.
+  drain on `resume()` and pending-pipe cancellation through `unpipe()`. Bounded
+  readable `destroy()` lifecycle is covered for `destroyed`/`closed` flags,
+  `readable=false`, readable length clearing, pending-pipe cancellation,
+  paused-pipe clearing, and idempotent `close` listener emission/once-listener
+  cleanup. Full flow control, `for await` syntax support, broader stream
+  scheduling, and broader event-loop phases remain open.
   Bounded `setInterval` rescheduling across explicit timer drains,
   `clearInterval` from inside an interval callback, and nextTick-before-timer
   phase priority are covered. Broader event-loop phases, host I/O integration,
@@ -2369,3 +2373,21 @@ BrowserSession fetch/WASM and native WASM host regressions remain `36/36` and
 `107/107`, and the broad `src/lib` check passed with the existing `447`
 warning profile. Full stream flow control, async scheduling, and host I/O
 integration remain open.
+
+CommonJS/Node bounded readable destroy continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/runtime.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+
+Bounded readable streams now expose deterministic `destroy()`, mark
+`destroyed`/`closed`, set `readable=false`, clear `readableLength`, cancel the
+pending pipe destination, clear `pipePaused`, and idempotently emit `close`
+listeners via the existing EventEmitter path, including once-listener cleanup. Focused checks
+passed, the Node API conformance suite passes `228/228`, BrowserSession
+fetch/WASM and native WASM host regressions remain `36/36` and `107/107`, and
+the broad `src/lib` check passed with the existing `447` warning profile. Full
+stream flow control, async scheduling, and host I/O integration remain open.
