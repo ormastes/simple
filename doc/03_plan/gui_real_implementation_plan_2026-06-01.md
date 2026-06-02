@@ -193,7 +193,20 @@ the evidence.
   fallback. Fallback cannot satisfy the dynlib acceptance gate.
 - Add an evidence report under `doc/09_report/` only after the probe has run.
 
-### Phase 6 - QEMU ARM64 Parity
+### Phase 6 - Renderer And Shell Comparison Evidence
+
+- Re-run the CPU/Vulkan parity evidence before any accelerated presentation
+  backend is accepted for GUI command batches.
+- Re-run Node.js and pure Simple web bitmap evidence when GUI command shapes,
+  layout metadata, or Engine2D command emission changes.
+- Re-run Electron live/generated bitmap evidence when browser-shell capture or
+  web-renderer parity is used as regression context.
+- Re-run Tauri comparison only as shell/adapter evidence. Do not treat Tauri
+  or Electron success as proof that the pure GUI SMF/dynlib release path works.
+- Record comparison reports under `doc/09_report/` with labels that state
+  whether the evidence is release, acceleration, renderer parity, or shell-only.
+
+### Phase 7 - QEMU ARM64 Parity
 
 - Boot or smoke the SimpleOS ARM64 adapter with the same GUI artifact contract.
 - Prove that the QEMU lane uses the pure GUI command ABI and not WM/web renderer
@@ -217,6 +230,28 @@ the evidence.
   dispatch.
 - Native fallback guard: if a native helper is unavoidable, it is C, isolated at
   the adapter boundary, and has tests proving pixel/rendering logic is unchanged.
+- CPU/Vulkan comparison:
+  `scripts/check-vulkan-engine2d-readback.shs` must pass with zero mismatches
+  and no blur/tolerance evidence before Vulkan is accepted as an accelerated
+  GUI presentation candidate.
+- Node.js web rendering comparison:
+  `scripts/check-node-simple-web-engine2d-bitmap-evidence.shs` must pass with
+  exact ARGB/checksum parity before current Node Engine2D evidence is cited.
+  `scripts/check-node-web-render-bitmap-evidence.shs` must also pass before the
+  older generic Node web-render fixture is cited as fresh evidence.
+- Pure Simple web rendering comparison:
+  `scripts/check-simple-web-engine2d-js-bitmap-evidence.shs` must pass with
+  exact parity and no blur/tolerance evidence before the pure Simple web lane is
+  cited.
+- Electron shell/rendering comparison:
+  `scripts/check-electron-simple-web-engine2d-bitmap-evidence.shs` and
+  `scripts/check-electron-live-bitmap-evidence.shs` must pass before Electron
+  evidence is cited as browser-shell regression coverage.
+- Tauri shell comparison:
+  restore `test/perf/tauri_equiv/tauri_reference/Cargo.toml`, fix
+  `workflow_driver.spl`/`simple_app.spl` argument access for the current CLI,
+  then re-run `test/perf/tauri_equiv/README.md` workflows or the matching perf
+  specs before Tauri evidence is cited as current shell/adapter evidence.
 - Diagnostic only:
   `SIMPLE_LIB=src bin/simple compile src/app/gui_perf/pure_gui_hot_dynlib_export.spl --native --shared --strip -o build/gui/libpure_gui_hot.dylib`
   on macOS or `... -o build/gui/libpure_gui_hot.so` on Linux, followed by
