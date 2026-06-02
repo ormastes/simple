@@ -3461,12 +3461,18 @@ class SimpleWindowManager {
     panel.appendChild(this._makeQualityTypographyPreview());
     panel.appendChild(this._makeQualityDepthPreview());
     panel.appendChild(this._makeQualityInteractionPreview());
+    panel.appendChild(this._makeQualityStatePreview());
+    panel.appendChild(this._makeQualityVerbosityPreview());
+    panel.appendChild(this._makeQualityPerformancePreview());
+    panel.appendChild(this._makeQualitySpatialPreview());
+    panel.appendChild(this._makeQualityDockPreview());
     panel.appendChild(this._makeQualityResponsivePreview());
     panel.appendChild(this._makeQualityAccessibilityPreview());
     panel.appendChild(this._makeQualityMotionPreview());
     panel.appendChild(this._makeQualityAnimationPreview());
     panel.appendChild(this._makeQualityWidgetPreview());
     panel.appendChild(this._makeQualityMaterialPreview());
+    panel.appendChild(this._makeQualitySurfacePreview());
     if (this._qualityAuditMode === 'full') {
       panel.appendChild(this._makeQualityCheckDetail(items));
       panel.appendChild(this._makeQualityDetailPanel());
@@ -3843,6 +3849,156 @@ class SimpleWindowManager {
     return metric;
   }
 
+  _makeQualityStatePreview() {
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-state-preview';
+    preview.dataset.qualityState = 'transitions';
+    preview.appendChild(this._makeQualityStateMetric('Hover', 'lift', 'hover'));
+    preview.appendChild(this._makeQualityStateMetric('Focus', 'ring', 'focus'));
+    preview.appendChild(this._makeQualityStateMetric('Active', 'accent', 'active'));
+    preview.appendChild(this._makeQualityStateMetric('Window', 'restore', 'window'));
+    return preview;
+  }
+
+  _makeQualityStateMetric(label, value, kind) {
+    const metric = document.createElement('span');
+    metric.className = 'wm-quality-state-metric';
+    metric.dataset.stateMetric = kind;
+    const sample = document.createElement('span');
+    sample.className = 'wm-quality-state-sample';
+    sample.setAttribute('aria-hidden', 'true');
+    const name = document.createElement('span');
+    name.className = 'wm-quality-state-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-state-value';
+    result.textContent = value;
+    metric.appendChild(sample);
+    metric.appendChild(name);
+    metric.appendChild(result);
+    return metric;
+  }
+
+  _makeQualityVerbosityPreview() {
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-verbosity-preview';
+    preview.dataset.qualityVerbosity = 'calm';
+    preview.appendChild(this._makeQualityVerbosityMetric('Audit', this._qualityAuditMode === 'compact' ? 'compact' : 'full', 'audit'));
+    preview.appendChild(this._makeQualityVerbosityMetric('Motion', this._normalizeMotionPreference(this._readMotionPreference()), 'motion'));
+    preview.appendChild(this._makeQualityVerbosityMetric('Glass', this._normalizeTransparencyPreference(this._readTransparencyPreference()), 'material'));
+    preview.appendChild(this._makeQualityVerbosityMetric('Focus', this._focusModeLabel(), 'focus'));
+    return preview;
+  }
+
+  _makeQualityVerbosityMetric(label, value, kind) {
+    const metric = document.createElement('span');
+    metric.className = 'wm-quality-verbosity-metric';
+    metric.dataset.verbosityMetric = kind;
+    const indicator = document.createElement('span');
+    indicator.className = 'wm-quality-verbosity-indicator';
+    indicator.setAttribute('aria-hidden', 'true');
+    const name = document.createElement('span');
+    name.className = 'wm-quality-verbosity-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-verbosity-value';
+    result.textContent = String(value || '').trim();
+    metric.appendChild(indicator);
+    metric.appendChild(name);
+    metric.appendChild(result);
+    return metric;
+  }
+
+  _makeQualityPerformancePreview() {
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-performance-preview';
+    preview.dataset.qualityPerformance = 'compositor';
+    preview.appendChild(this._makeQualityPerformanceMetric('Frame', '16ms', 'frame'));
+    preview.appendChild(this._makeQualityPerformanceMetric('Motion', 'transform', 'motion'));
+    preview.appendChild(this._makeQualityPerformanceMetric('Opacity', 'fade', 'opacity'));
+    preview.appendChild(this._makeQualityPerformanceMetric('Fallback', 'reduce', 'fallback'));
+    return preview;
+  }
+
+  _makeQualityPerformanceMetric(label, value, kind) {
+    const metric = document.createElement('span');
+    metric.className = 'wm-quality-performance-metric';
+    metric.dataset.performanceMetric = kind;
+    const meter = document.createElement('span');
+    meter.className = 'wm-quality-performance-meter';
+    meter.setAttribute('aria-hidden', 'true');
+    const name = document.createElement('span');
+    name.className = 'wm-quality-performance-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-performance-value';
+    result.textContent = value;
+    metric.appendChild(meter);
+    metric.appendChild(name);
+    metric.appendChild(result);
+    return metric;
+  }
+
+  _makeQualitySpatialPreview() {
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-spatial-preview';
+    preview.dataset.qualitySpatial = 'origin';
+    preview.appendChild(this._makeQualitySpatialMetric('Open', 'center', 'open'));
+    preview.appendChild(this._makeQualitySpatialMetric('Close', 'return', 'close'));
+    preview.appendChild(this._makeQualitySpatialMetric('Minimize', 'dock', 'minimize'));
+    preview.appendChild(this._makeQualitySpatialMetric('Restore', 'dock', 'restore'));
+    return preview;
+  }
+
+  _makeQualitySpatialMetric(label, value, kind) {
+    const metric = document.createElement('span');
+    metric.className = 'wm-quality-spatial-metric';
+    metric.dataset.spatialMetric = kind;
+    const path = document.createElement('span');
+    path.className = 'wm-quality-spatial-path';
+    path.setAttribute('aria-hidden', 'true');
+    const name = document.createElement('span');
+    name.className = 'wm-quality-spatial-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-spatial-value';
+    result.textContent = value;
+    metric.appendChild(path);
+    metric.appendChild(name);
+    metric.appendChild(result);
+    return metric;
+  }
+
+  _makeQualityDockPreview() {
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-dock-preview';
+    preview.dataset.qualityDock = 'magnification';
+    preview.appendChild(this._makeQualityDockMetric('Magnify', '1.18x', 'magnify'));
+    preview.appendChild(this._makeQualityDockMetric('Neighbor', '1.07x', 'neighbor'));
+    preview.appendChild(this._makeQualityDockMetric('Running', 'indicator', 'running'));
+    preview.appendChild(this._makeQualityDockMetric('Stack', this._dockStackMode === 'grid' ? 'grid' : 'fan', 'stack'));
+    return preview;
+  }
+
+  _makeQualityDockMetric(label, value, kind) {
+    const metric = document.createElement('span');
+    metric.className = 'wm-quality-dock-metric';
+    metric.dataset.dockMetric = kind;
+    const icon = document.createElement('span');
+    icon.className = 'wm-quality-dock-icon';
+    icon.setAttribute('aria-hidden', 'true');
+    const name = document.createElement('span');
+    name.className = 'wm-quality-dock-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-dock-value';
+    result.textContent = value;
+    metric.appendChild(icon);
+    metric.appendChild(name);
+    metric.appendChild(result);
+    return metric;
+  }
+
   _makeQualityResponsivePreview() {
     const root = getComputedStyle(document.documentElement);
     const preview = document.createElement('div');
@@ -4049,6 +4205,37 @@ class SimpleWindowManager {
     const result = document.createElement('strong');
     result.className = 'wm-quality-material-value';
     result.textContent = value;
+    metric.appendChild(name);
+    metric.appendChild(result);
+    return metric;
+  }
+
+  _makeQualitySurfacePreview() {
+    const root = getComputedStyle(document.documentElement);
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-surface-preview';
+    preview.dataset.qualitySurface = 'transparency';
+    preview.appendChild(this._makeQualitySurfaceMetric('Window', this._qualityCssPx(root, '--ui-glass-blur-px', 24) + 'px', 'window'));
+    preview.appendChild(this._makeQualitySurfaceMetric('Command', 'glass', 'command'));
+    preview.appendChild(this._makeQualitySurfaceMetric('Taskbar', 'glass', 'taskbar'));
+    preview.appendChild(this._makeQualitySurfaceMetric('Widget', 'glass', 'widget'));
+    return preview;
+  }
+
+  _makeQualitySurfaceMetric(label, value, kind) {
+    const metric = document.createElement('span');
+    metric.className = 'wm-quality-surface-metric';
+    metric.dataset.surfaceMetric = kind;
+    const sample = document.createElement('span');
+    sample.className = 'wm-quality-surface-sample';
+    sample.setAttribute('aria-hidden', 'true');
+    const name = document.createElement('span');
+    name.className = 'wm-quality-surface-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-surface-value';
+    result.textContent = value;
+    metric.appendChild(sample);
     metric.appendChild(name);
     metric.appendChild(result);
     return metric;

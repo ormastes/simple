@@ -24,7 +24,7 @@ Verifies one combined readiness report for the modern Web WM, SimpleOS
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 198 lines folded for reproduction.
+Runnable source: 203 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -180,6 +180,7 @@ expect(report.quality_inspector_motion_policy_ready)
 expect(report.quality_inspector_animation_preview_ready)
 expect(report.quality_inspector_widget_preview_ready)
 expect(report.quality_inspector_material_preview_ready)
+expect(report.quality_inspector_surface_preview_ready)
 expect(report.quality_inspector_color_preview_ready)
 expect(report.quality_inspector_layout_preview_ready)
 expect(report.quality_inspector_titlebar_preview_ready)
@@ -187,6 +188,10 @@ expect(report.quality_inspector_icon_preview_ready)
 expect(report.quality_inspector_typography_preview_ready)
 expect(report.quality_inspector_depth_preview_ready)
 expect(report.quality_inspector_interaction_preview_ready)
+expect(report.quality_inspector_state_preview_ready)
+expect(report.quality_inspector_verbosity_preview_ready)
+expect(report.quality_inspector_performance_preview_ready)
+expect(report.quality_inspector_spatial_preview_ready)
 expect(report.quality_inspector_responsive_preview_ready)
 expect(report.quality_inspector_accessibility_preview_ready)
 expect(report.command_palette_grouping_ready)
@@ -235,7 +240,7 @@ expect(report.notes[0]).to_equal("modern WM readiness passed")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 197 lines folded for reproduction.
+Runnable source: 202 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -391,6 +396,7 @@ expect(summary).to_contain("quality_inspector_motion_policy=true")
 expect(summary).to_contain("quality_inspector_animation_preview=true")
 expect(summary).to_contain("quality_inspector_widget_preview=true")
 expect(summary).to_contain("quality_inspector_material_preview=true")
+expect(summary).to_contain("quality_inspector_surface_preview=true")
 expect(summary).to_contain("quality_inspector_color_preview=true")
 expect(summary).to_contain("quality_inspector_layout_preview=true")
 expect(summary).to_contain("quality_inspector_titlebar_preview=true")
@@ -398,6 +404,10 @@ expect(summary).to_contain("quality_inspector_icon_preview=true")
 expect(summary).to_contain("quality_inspector_typography_preview=true")
 expect(summary).to_contain("quality_inspector_depth_preview=true")
 expect(summary).to_contain("quality_inspector_interaction_preview=true")
+expect(summary).to_contain("quality_inspector_state_preview=true")
+expect(summary).to_contain("quality_inspector_verbosity_preview=true")
+expect(summary).to_contain("quality_inspector_performance_preview=true")
+expect(summary).to_contain("quality_inspector_spatial_preview=true")
 expect(summary).to_contain("quality_inspector_responsive_preview=true")
 expect(summary).to_contain("quality_inspector_accessibility_preview=true")
 expect(summary).to_contain("title_input_ready=true")
