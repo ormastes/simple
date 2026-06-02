@@ -9,7 +9,7 @@ use std.js.types.ast_types.JsExpression
 use std.js.types.ast_types.JsStatement
 use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, NativeIdMapping, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64, _digit_val}
 use std.js.engine.vm_object_store.{ObjectStore}
-use std.js.engine.runtime.{NATIVE_SET_IMMEDIATE, NATIVE_CLEAR_IMMEDIATE, NATIVE_WEBASSEMBLY_EXPORT_FUNCTION, NATIVE_WEBASSEMBLY_INSTANTIATE_THEN}
+use std.js.engine.runtime.{NATIVE_SET_IMMEDIATE, NATIVE_CLEAR_IMMEDIATE, NATIVE_WEBASSEMBLY_COMPILE_CATCH, NATIVE_WEBASSEMBLY_COMPILE_THEN, NATIVE_WEBASSEMBLY_EXPORT_FUNCTION, NATIVE_WEBASSEMBLY_INSTANTIATE_THEN}
 use std.js.node.buffer_module.{buffer_byteLength}
 use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter}
 use std.nogc_sync_mut.js.engine.interpreter_object.{JsInterpreter}
@@ -848,6 +848,51 @@ impl JsInterpreter:
                                     self.call_stack.pop()
                                     self.control_return = wasm_saved_return
                                     return Ok(wasm_result)
+                            if mapping.second == NATIVE_WEBASSEMBLY_COMPILE_THEN or mapping.second == NATIVE_WEBASSEMBLY_COMPILE_CATCH:
+                                var compile_status = ""
+                                val compile_result_id = _get_obj_id(this_val)
+                                if compile_result_id >= 0:
+                                    match self.get_object_property(compile_result_id, "status"):
+                                        JsValue.String(v): compile_status = v
+                                        _: pass_dn
+                                var compile_callback_id = -1
+                                if mapping.second == NATIVE_WEBASSEMBLY_COMPILE_THEN:
+                                    if compile_status == "compiled" and arg_vals.len() > 0:
+                                        compile_callback_id = _get_fn_id(arg_vals.get(0))
+                                    if compile_status != "compiled" and arg_vals.len() > 1:
+                                        compile_callback_id = _get_fn_id(arg_vals.get(1))
+                                if mapping.second == NATIVE_WEBASSEMBLY_COMPILE_CATCH:
+                                    if compile_status != "compiled" and arg_vals.len() > 0:
+                                        compile_callback_id = _get_fn_id(arg_vals.get(0))
+                                if compile_callback_id >= 0 and compile_callback_id < self.functions.len():
+                                    val compile_fn = self.functions.get(compile_callback_id)
+                                    val compile_env = self.env_stack.create_env(compile_fn.closure_env)
+                                    var cpi = 0
+                                    while cpi < compile_fn.params.len():
+                                        var cpv = JsValue.Undefined
+                                        if cpi == 0:
+                                            if compile_status == "compiled":
+                                                cpv = self.get_object_property(compile_result_id, "module")
+                                            else:
+                                                cpv = this_val
+                                        self.env_stack.define_var(compile_env, compile_fn.params.get(cpi), cpv)
+                                        cpi = cpi + 1
+                                    self.env_stack.define_var(compile_env, "this", JsValue.Undefined)
+                                    val compile_frame = CallFrame(function_name: compile_fn.name, env_id: compile_env, line: 0, this_value: JsValue.Undefined)
+                                    self.call_stack.push(compile_frame)
+                                    val compile_saved_return = self.control_return
+                                    self.control_return = false
+                                    var compile_result = JsValue.Undefined
+                                    var cbi = 0
+                                    while cbi < compile_fn.body.len():
+                                        compile_result = self.exec_statement(compile_fn.body.get(cbi), compile_env)?
+                                        if self.control_return:
+                                            compile_result = self.return_value
+                                            break
+                                        cbi = cbi + 1
+                                    self.call_stack.pop()
+                                    self.control_return = compile_saved_return
+                                    return Ok(compile_result)
                             if mapping.second == NATIVE_WEBASSEMBLY_EXPORT_FUNCTION:
                                 return Ok(self._native_webassembly_export_function(this_val, arg_vals, fn_id))
                             return Ok(self._dispatch_native_with_receiver(mapping.second, this_val, arg_vals, env))
