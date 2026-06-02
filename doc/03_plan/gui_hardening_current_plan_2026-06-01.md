@@ -254,13 +254,15 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   `argvLength`, and `pid` on allowed and denied spawn results without host
   process I/O. A follow-up phase-ordering slice gives nextTick tasks priority
   over already queued zero-delay `timers.setTimeout` tasks, including nested
-  nextTick callbacks scheduled during the drain. Current focused checks pass
-  `node_api_conformance_spec.spl` `219/219` and
-  `node_process_next_tick_spec.spl` `2/2`; missing and invalid process grants
-  remain rejected, and explicit in-memory CommonJS source grants now execute
-  `exports.*` assignments plus `module.exports = ...` replacements with cache
-  identity, slash-bearing specifier coverage, and bounded `/node_modules`
-  index/package-main resolution over granted in-memory files.
+  nextTick callbacks scheduled during the drain. A bounded terminal grant now
+  lets `readline.createInterface` return allowed deterministic terminal state,
+  invoke `question` callbacks with the granted answer, and close without host
+  terminal I/O. Current focused checks pass `node_api_conformance_spec.spl`
+  `220/220` and `node_process_next_tick_spec.spl` `2/2`; missing and invalid
+  process grants remain rejected, and explicit in-memory CommonJS source grants
+  now execute `exports.*` assignments plus `module.exports = ...` replacements
+  with cache identity, slash-bearing specifier coverage, and bounded
+  `/node_modules` index/package-main resolution over granted in-memory files.
 - `doc/09_report/budgeted_simple_web_engine2d_scene_matrix_settings_inspector_2026-06-01.md`:
   current Engine2D Node/Bun/Electron budgeted exact-bitmap matrix including
   settings-inspector-tree.
@@ -368,6 +370,9 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   Bounded timer handle objects with `ref`, `unref`, `hasRef`, repeat metadata,
   object-handle clearing, and `close()` cancellation are covered. Full Node
   handle lifecycle behavior remains open.
+  Bounded `readline.createInterface` terminal grants are covered for allowed
+  interface state, deterministic `question` callback answers, prompt/answer
+  metadata, and close state. Real terminal I/O remains open.
   Bounded `http.request`/`https.request` endpoint extraction now covers URL
   strings with explicit ports and option objects with default ports under the
   existing explicit network-grant model. Real host network I/O remains open.
@@ -2237,3 +2242,22 @@ native WASM host regressions remain `36/36` and `107/107`, and the broad
 `src/lib` check passed with the existing `447` warning profile. Broader
 event-loop phases, host I/O integration, and full timer-object behavior remain
 open.
+
+CommonJS/Node bounded readline terminal grant continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/runtime.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+
+`JsRuntime.grant_node_terminal(answer)` now enables bounded readline terminal
+capability. Granted `readline` and `node:readline` interfaces report
+`status=allowed`, `terminal=true`, deterministic `question` prompt/answer
+metadata, callback invocation with the granted answer, and close state.
+Ungranted readline remains fail-closed with `terminal-denied`. Focused checks
+passed, the Node API conformance suite passes `220/220`, BrowserSession
+fetch/WASM and native WASM host regressions remain `36/36` and `107/107`, and
+the broad `src/lib` check passed with the existing `447` warning profile. Real
+terminal I/O, TTY streams, and event-loop integration remain open.

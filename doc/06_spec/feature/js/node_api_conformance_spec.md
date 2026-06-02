@@ -2474,6 +2474,23 @@ expect(_eval_str("require('readline').createInterface({}).close().status")).to_e
 
 </details>
 
+#### allows bounded readline interaction with terminal grants
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_terminal("Ada", "require('readline').createInterface({}).status")).to_equal("allowed")
+expect(_eval_str_with_terminal("Ada", "require('node:readline').createInterface({}).terminal")).to_equal("true")
+expect(_eval_str_with_terminal("Ada", "var rl = require('readline').createInterface({}); var seen = ''; var result = rl.question('name?', (answer) => { seen = answer; }); result.status + ':' + result.prompt + ':' + result.answer + ':' + seen")).to_equal("allowed:name?:Ada:Ada")
+expect(_eval_str_with_terminal("Ada", "var rl = require('node:readline').createInterface({}); var result = rl.close(); result.status + ':' + result.closed + ':' + rl.closed")).to_equal("allowed:true:true")
+```
+
+</details>
+
 ### Buffer global and module shape
 
 #### exposes Buffer through require('buffer')
@@ -3349,8 +3366,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 219 |
-| Active scenarios | 219 |
+| Total scenarios | 220 |
+| Active scenarios | 220 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

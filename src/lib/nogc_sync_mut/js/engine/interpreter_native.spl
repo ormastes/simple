@@ -318,9 +318,9 @@ impl JsInterpreter:
         if native_id == NATIVE_NODE_READLINE_CREATE_INTERFACE:
             return self._native_node_readline_create_interface(arg_vals)
         if native_id == NATIVE_NODE_READLINE_QUESTION:
-            return self._native_node_readline_denied_method(this_val, "question", arg_vals)
+            return self._native_node_readline_method(this_val, "question", arg_vals)
         if native_id == NATIVE_NODE_READLINE_CLOSE:
-            return self._native_node_readline_denied_method(this_val, "close", arg_vals)
+            return self._native_node_readline_method(this_val, "close", arg_vals)
         if native_id == NATIVE_NODE_STREAM_READABLE_FROM:
             return self._native_node_stream_readable_from(arg_vals)
         if native_id == NATIVE_NODE_STREAM_READABLE_READ:
@@ -1689,19 +1689,51 @@ impl JsInterpreter:
 
     me _native_node_readline_create_interface(arg_vals: [JsValue]) -> JsValue:
         val iface_id = self.create_object()
-        self.set_object_property(iface_id, "status", JsValue.String(v: "denied"))
-        self.set_object_property(iface_id, "error", JsValue.String(v: "terminal-denied"))
+        var terminal_allowed = false
+        if val Some(marker) = self.lookup_global_value("__simple_node_terminal_grant"):
+            match marker:
+                JsValue.Boolean(v): terminal_allowed = v
+                _:
+                    pass_dn
+        self.set_object_property(iface_id, "status", JsValue.String(v: if terminal_allowed: "allowed" else: "denied"))
+        self.set_object_property(iface_id, "error", JsValue.String(v: if terminal_allowed: "" else: "terminal-denied"))
         self.set_object_property(iface_id, "operation", JsValue.String(v: "readline.createInterface"))
-        self.set_object_property(iface_id, "terminal", JsValue.Boolean(v: false))
+        self.set_object_property(iface_id, "terminal", JsValue.Boolean(v: terminal_allowed))
+        self.set_object_property(iface_id, "closed", JsValue.Boolean(v: false))
         self._define_method_on(iface_id, "question", NATIVE_NODE_READLINE_QUESTION)
         self._define_method_on(iface_id, "close", NATIVE_NODE_READLINE_CLOSE)
         JsValue.Object(id: iface_id)
 
-    me _native_node_readline_denied_method(this_val: JsValue, operation: text, arg_vals: [JsValue]) -> JsValue:
+    me _native_node_readline_method(this_val: JsValue, operation: text, arg_vals: [JsValue]) -> JsValue:
         val result_id = self.create_object()
-        self.set_object_property(result_id, "status", JsValue.String(v: "denied"))
-        self.set_object_property(result_id, "error", JsValue.String(v: "terminal-denied"))
+        val iface_id = _get_obj_id(this_val)
+        var terminal_allowed = false
+        if iface_id >= 0:
+            match self.get_object_property(iface_id, "terminal"):
+                JsValue.Boolean(v): terminal_allowed = v
+                _:
+                    pass_dn
+        self.set_object_property(result_id, "status", JsValue.String(v: if terminal_allowed: "allowed" else: "denied"))
+        self.set_object_property(result_id, "error", JsValue.String(v: if terminal_allowed: "" else: "terminal-denied"))
         self.set_object_property(result_id, "operation", JsValue.String(v: "readline." + operation))
+        if operation == "question":
+            val prompt = if arg_vals.len() > 0: js_to_string(arg_vals[0]) else: ""
+            var answer = ""
+            if terminal_allowed:
+                if val Some(answer_val) = self.lookup_global_value("__simple_node_terminal_answer"):
+                    match answer_val:
+                        JsValue.String(v): answer = v
+                        _:
+                            pass_dn
+                if arg_vals.len() > 1:
+                    val callback_id = _get_fn_id(arg_vals[1])
+                    if callback_id >= 0:
+                        val ignored_callback_result = self._invoke_promise_callback(callback_id, [JsValue.String(v: answer)])
+            self.set_object_property(result_id, "prompt", JsValue.String(v: prompt))
+            self.set_object_property(result_id, "answer", JsValue.String(v: answer))
+        if operation == "close" and iface_id >= 0:
+            self.set_object_property(iface_id, "closed", JsValue.Boolean(v: true))
+            self.set_object_property(result_id, "closed", JsValue.Boolean(v: true))
         JsValue.Object(id: result_id)
 
     me _native_node_stream_module() -> JsValue:
