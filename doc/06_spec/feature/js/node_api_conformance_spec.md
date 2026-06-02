@@ -3184,11 +3184,12 @@ expect(_eval_str("var h = require('timers').setTimeout(() => {}, 5); h.close(); 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_eval_before_after_timer_drain("var h = require('timers').setTimeout(() => {}, 0); h.completed", "h.refresh(); h.active + ':' + h.completed + ':' + h.refreshed + ':' + h.dueAt", 0)).to_equal("false:1:true:false:true:0")
+expect(_eval_timer_drain_action_then_timer_drain("var timerValue = 0; var h = require('timers').setTimeout(() => { timerValue = timerValue + 1; }, 0); timerValue", "h.refresh(); h.active + ':' + h.completed + ':' + h.fireCount", "timerValue + ':' + h.fireCount + ':' + h.active + ':' + h.completed", 0, 0)).to_equal("0:1:true:false:1:1:2:2:false:true")
 ```
 
 </details>

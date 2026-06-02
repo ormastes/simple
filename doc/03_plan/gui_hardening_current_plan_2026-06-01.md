@@ -3098,3 +3098,21 @@ becomes active again, clears `completed`, records `refreshed=true`, and restores
 the visible due window from its stored delay. Focused checks and regression
 evidence are captured in this continuation; broader event-loop ordering, host
 I/O integration, and full Node timer-object lifecycle behavior remain open.
+
+CommonJS/Node bounded completed-timeout callback refresh continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/interpreter_native.spl test/feature/js/node_api_conformance_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/feature/js/node_api_conformance_spec.spl --output doc/06_spec`
+
+Completed bounded timeout handles now retain the original callback id on the
+handle, so `refresh()` after a one-shot firing requeues the same callback
+instead of only reactivating visible lifecycle state. The Node API conformance
+scenario drains the timeout, refreshes the completed handle, drains again, and
+verifies both the second callback execution and updated `fireCount`. Focused
+checks and regression evidence are captured in this continuation; broader
+event-loop ordering, host I/O integration, and full Node timer-object lifecycle
+behavior remain open.
