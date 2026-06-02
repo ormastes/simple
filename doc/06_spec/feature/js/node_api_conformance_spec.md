@@ -2185,7 +2185,7 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); typeof saved.pause + ':' + typeof saved.resume + ':' + typeof saved.isPaused + ':' + typeof saved.destroy + ':' + typeof saved.read")).to_equal("function:function:function:function:function")
+expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); typeof saved.pause + ':' + typeof saved.resume + ':' + typeof saved.isPaused + ':' + typeof saved.destroy + ':' + typeof saved.read + ':' + typeof saved.setEncoding")).to_equal("function:function:function:function:function:function")
 expect(_eval_str_with_network("http://api.example.com:8080", "var seen = ''; var ended = 'no'; var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.pause(); res.on('data', (chunk) => { seen = seen + chunk; }); res.on('end', () => { ended = 'yes'; }); }); req.end(); seen + ':' + ended + ':' + saved.pendingData + ':' + saved.pendingEnd + ':' + saved.complete + ':' + saved.isPaused()")).to_equal(":no:true:true:false:true")
 expect(_eval_str_with_network("http://api.example.com:8080", "var seen = ''; var ended = 'no'; var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.pause(); res.on('data', (chunk) => { seen = seen + chunk; }); res.on('end', () => { ended = 'yes'; }); }); req.end(); saved.resume(); seen + ':' + ended + ':' + saved.pendingData + ':' + saved.pendingEnd + ':' + saved.complete + ':' + saved.isPaused()")).to_equal("bounded-response:yes:false:false:true:false")
 ```
@@ -2219,6 +2219,21 @@ Reproduction: this block contains the complete executable scenario source.
 expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); saved.readableLength + ':' + saved.read() + ':' + saved.readableLength + ':' + saved.read()")).to_equal("16:bounded-response:0:undefined")
 expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.pause(); res.on('data', () => {}); }); req.end(); saved.pendingData + ':' + saved.read() + ':' + saved.pendingData + ':' + saved.readableLength")).to_equal("true:bounded-response:false:0")
 expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; }); req.end(); saved.destroy(); saved.read()")).to_equal("undefined")
+```
+
+</details>
+
+#### sets bounded http response encoding
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var returned = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; returned = res.setEncoding('utf-8'); }); req.end(); (returned === saved) + ':' + saved.encoding + ':' + saved.readableEncoding")).to_equal("true:utf8:utf8")
+expect(_eval_str_with_network("http://api.example.com:8080", "var saved = null; var req = require('http').request('http://api.example.com:8080', (res) => { saved = res; res.pause(); res.setEncoding('base64'); res.on('data', () => {}); }); req.end(); saved.read() + ':' + saved.encoding + ':' + saved.pendingData")).to_equal("bounded-response:base64:false")
 ```
 
 </details>
@@ -3936,8 +3951,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 254 |
-| Active scenarios | 254 |
+| Total scenarios | 255 |
+| Active scenarios | 255 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
