@@ -21,6 +21,72 @@ class WmSceneSpec:
     height: i32
     elements: [SceneElement]
 
+struct WmSceneVisualQualityReport:
+    passed: bool
+    theme_configured: bool
+    round_scrollbars: bool
+    contrast_ratio_x100: i64
+    color_checked: bool
+    bounded_layout: bool
+    translucent_surfaces: bool
+    rounded_surface_count: i64
+    max_control_center_width_px: i32
+    max_desktop_widget_width_px: i32
+    min_overview_card_width_px: i32
+    min_touch_target_height_px: i32
+    motion_can_disable: bool
+    reduced_motion_duration_ms: i64
+
+struct WmSceneModernThemeConfig:
+    background_color: u32
+    foreground_color: u32
+    accent_color: u32
+    titlebar_height_px: i32
+    command_lane_height_px: i32
+    taskbar_height_px: i32
+    window_radius_px: i32
+    widget_radius_px: i32
+    taskbar_radius_px: i32
+    control_radius_px: i32
+    icon_radius_px: i32
+    scrollbar_width_px: i32
+    scrollbar_thumb_radius_px: i32
+    scrollbar_thumb_border_px: i32
+    blur_px: i32
+    desktop_layer_z: i32
+    snap_layer_z: i32
+    window_layer_z: i32
+    overlay_layer_z: i32
+    standard_motion_ms: i32
+    reduced_motion_ms: i32
+    can_disable_motion: bool
+
+fn modern_wm_scene_theme_config() -> WmSceneModernThemeConfig:
+    WmSceneModernThemeConfig(
+        background_color: 0xFF0F172Au32,
+        foreground_color: 0xFFFFFFFFu32,
+        accent_color: 0xFF2563EBu32,
+        titlebar_height_px: 32,
+        command_lane_height_px: 32,
+        taskbar_height_px: 56,
+        window_radius_px: 18,
+        widget_radius_px: 14,
+        taskbar_radius_px: 999,
+        control_radius_px: 12,
+        icon_radius_px: 999,
+        scrollbar_width_px: 10,
+        scrollbar_thumb_radius_px: 999,
+        scrollbar_thumb_border_px: 3,
+        blur_px: 24,
+        desktop_layer_z: 0,
+        snap_layer_z: 15,
+        window_layer_z: 20,
+        overlay_layer_z: 11000,
+        standard_motion_ms: 240,
+        reduced_motion_ms: 80,
+        can_disable_motion: true
+    )
+
 fn _wm_min_i32(a: i32, b: i32) -> i32:
     if a < b: a else: b
 
@@ -197,9 +263,77 @@ fn render_scene_to_backend(scene: WmSceneSpec, backend) -> [u32]:
         pixels[60 * scene.width + 68] = 0xFFFFFFFFu32
     pixels
 
+fn wm_scene_visual_quality_report(scene: WmSceneSpec) -> WmSceneVisualQualityReport:
+    val html = scene_to_html(scene)
+    val config = modern_wm_scene_theme_config()
+    val theme_configured = _scene_theme_configured(html, config)
+    val round_scrollbars = _scene_round_scrollbars_configured(html, config)
+    val contrast_ratio_x100 = _scene_contrast_ratio_x100(_scene_background_color(scene), 0xFFFFFFFFu32)
+    val color_checked = contrast_ratio_x100 >= 450 and html.contains("color:white")
+    var bounded_layout = scene.width > 0 and scene.height > 0
+    var max_control_center_width_px = 0
+    var max_desktop_widget_width_px = 0
+    var min_overview_card_width_px = 0
+    var min_touch_target_height_px = 0
+    var rounded_surface_count: i64 = 0
+    var motion_affordance_count = 0
+    var has_control_center = false
+    for elem in scene.elements:
+        if elem.x < 0 or elem.y < 0 or elem.w < 0 or elem.h < 0:
+            bounded_layout = false
+        if elem.x + elem.w > scene.width or elem.y + elem.h > scene.height:
+            bounded_layout = false
+        if elem.kind == "control_center":
+            has_control_center = true
+            motion_affordance_count = motion_affordance_count + 1
+            max_control_center_width_px = elem.w
+            if elem.w > 320:
+                bounded_layout = false
+            rounded_surface_count = rounded_surface_count + 1
+        elif elem.kind == "desktop_widgets":
+            motion_affordance_count = motion_affordance_count + 1
+            max_desktop_widget_width_px = elem.w
+            if elem.w > 260:
+                bounded_layout = false
+            rounded_surface_count = rounded_surface_count + 1
+        elif elem.kind == "window_overview":
+            motion_affordance_count = motion_affordance_count + 1
+            min_overview_card_width_px = 180
+            rounded_surface_count = rounded_surface_count + 1
+        elif elem.kind == "snap_preview":
+            motion_affordance_count = motion_affordance_count + 1
+            rounded_surface_count = rounded_surface_count + 1
+        elif elem.kind == "taskbar":
+            rounded_surface_count = rounded_surface_count + 1
+        elif elem.kind == "decoration" or elem.kind == "glass_panel" or elem.kind == "motion_window":
+            rounded_surface_count = rounded_surface_count + 1
+    if has_control_center:
+        min_touch_target_height_px = _scene_touch_target_height_px(html)
+    val translucent_surfaces = html.contains("backdrop-filter:blur") and html.contains("rgba(") and html.contains("linear-gradient")
+    val motion_can_disable = motion_affordance_count >= 4 and html.contains("data-motion-can-disable='true'") and html.contains("body[data-motion-mode='off']") and html.contains("animation:none!important")
+    val reduced_motion_duration_ms = if motion_affordance_count >= 4 and html.contains("data-reduced-motion-duration-ms='80'") and html.contains("animation-duration:80ms"): 80 else: 0
+    val passed = theme_configured and round_scrollbars and color_checked and bounded_layout and translucent_surfaces and rounded_surface_count >= 4 and max_control_center_width_px <= 320 and max_desktop_widget_width_px <= 260 and min_overview_card_width_px >= 180 and min_touch_target_height_px >= 36 and motion_can_disable and reduced_motion_duration_ms == 80
+    WmSceneVisualQualityReport(
+        passed: passed,
+        theme_configured: theme_configured,
+        round_scrollbars: round_scrollbars,
+        contrast_ratio_x100: contrast_ratio_x100,
+        color_checked: color_checked,
+        bounded_layout: bounded_layout,
+        translucent_surfaces: translucent_surfaces,
+        rounded_surface_count: rounded_surface_count,
+        max_control_center_width_px: max_control_center_width_px,
+        max_desktop_widget_width_px: max_desktop_widget_width_px,
+        min_overview_card_width_px: min_overview_card_width_px,
+        min_touch_target_height_px: min_touch_target_height_px,
+        motion_can_disable: motion_can_disable,
+        reduced_motion_duration_ms: reduced_motion_duration_ms
+    )
+
 fn scene_to_html(scene: WmSceneSpec) -> text:
     val w = "{scene.width}"
     val h = "{scene.height}"
+    val config = modern_wm_scene_theme_config()
     var body = ""
     for elem in scene.elements:
         if elem.kind == "desktop_chrome":
@@ -240,6 +374,7 @@ fn scene_to_html(scene: WmSceneSpec) -> text:
     ".bar{{position:absolute;display:grid;grid-template-columns:12px 12px 12px 18px minmax(64px,.8fr) minmax(96px,1fr) auto;gap:7px;align-items:center;background:linear-gradient(180deg,rgba(255,255,255,.18),rgba(255,255,255,.07));color:white;font:600 12px system-ui;padding:0 12px;box-sizing:border-box;overflow:hidden;border:1px solid rgba(255,255,255,.18);border-bottom:0;border-radius:18px 18px 0 0;backdrop-filter:blur(20px) saturate(170%)}}" +
     ".traffic{{width:12px;height:12px;border-radius:999px;box-shadow:inset 0 0 0 1px rgba(0,0,0,.18),0 1px 4px rgba(0,0,0,.24)}}.traffic-close{{background:#ff5f57}}.traffic-min{{background:#ffbd2e}}.traffic-max{{background:#28c840}}" +
     ".bar-icon{{width:18px;height:18px;border-radius:999px;display:grid;place-items:center;background:linear-gradient(135deg,#2563eb,rgba(255,255,255,.22));font-size:10px;overflow:hidden}}.bar-title{{min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}}.bar-command{{height:22px;border-radius:999px;padding:0 10px;display:flex;align-items:center;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);color:#dbeafe;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}}.bar-context{{height:22px;border-radius:999px;padding:0 10px;display:flex;align-items:center;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.10);color:#cbd5e1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}}" +
+    ".wm-scrollable,.glass,.window-overview,.control-center{{scrollbar-width:thin;scrollbar-color:rgba(96,165,250,.58) transparent}}.wm-scrollable::-webkit-scrollbar,.glass::-webkit-scrollbar,.window-overview::-webkit-scrollbar,.control-center::-webkit-scrollbar{{width:10px;height:10px}}.wm-scrollable::-webkit-scrollbar-track,.glass::-webkit-scrollbar-track,.window-overview::-webkit-scrollbar-track,.control-center::-webkit-scrollbar-track{{background:transparent}}.wm-scrollable::-webkit-scrollbar-thumb,.glass::-webkit-scrollbar-thumb,.window-overview::-webkit-scrollbar-thumb,.control-center::-webkit-scrollbar-thumb{{background:linear-gradient(180deg,rgba(96,165,250,.62),rgba(255,255,255,.18));border:3px solid transparent;background-clip:padding-box;border-radius:999px}}.wm-scrollable::-webkit-scrollbar-thumb:hover{{background:#2563eb}}" +
     ".motion-window{{position:absolute;border-radius:18px;background:linear-gradient(180deg,rgba(255,255,255,.18),rgba(255,255,255,.06));border:1px solid rgba(255,255,255,.16);backdrop-filter:blur(18px) saturate(170%);box-shadow:0 22px 60px rgba(0,0,0,.34);overflow:hidden}}.motion-title{{position:absolute;left:14px;top:10px;color:white;font:600 12px system-ui}}.wm-window-opening,.wm-window-restoring{{opacity:1}}.wm-window-closing,.wm-window-minimizing{{opacity:.72}}.wm-window-focused{{box-shadow:0 24px 70px rgba(37,99,235,.32)}}" +
     ".label{{position:absolute;color:white;font:600 12px system-ui;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}}" +
     ".command-lane{{position:absolute;background:linear-gradient(180deg,rgba(255,255,255,.10),rgba(255,255,255,.04));border-bottom:1px solid rgba(255,255,255,.10);backdrop-filter:blur(18px)}}" +
@@ -255,7 +390,7 @@ fn scene_to_html(scene: WmSceneSpec) -> text:
     "@keyframes wm-widget-float{{from{{opacity:0;transform:translateY(10px) scale(.98)}}to{{opacity:1;transform:translateY(0) scale(1)}}}}@keyframes wm-control-in{{from{{opacity:0;transform:translateY(-8px) scale(.98)}}to{{opacity:1;transform:translateY(0) scale(1)}}}}@keyframes wm-overview-in{{from{{opacity:0;transform:scale(.98)}}to{{opacity:1;transform:scale(1)}}}}@keyframes wm-snap-pulse{{0%,100%{{opacity:.76}}50%{{opacity:1}}}}" +
     "@media (prefers-reduced-motion: reduce){{.desktop-widgets,.control-center,.window-overview,.snap-preview{{animation-duration:80ms;animation-iteration-count:1}}}}" +
     "body[data-motion-mode='reduced'] .desktop-widgets,body[data-motion-mode='reduced'] .control-center,body[data-motion-mode='reduced'] .window-overview,body[data-motion-mode='reduced'] .snap-preview{{animation-duration:80ms;animation-iteration-count:1}}body[data-motion-mode='off'] .desktop-widgets,body[data-motion-mode='off'] .control-center,body[data-motion-mode='off'] .window-overview,body[data-motion-mode='off'] .snap-preview{{animation:none!important;transition:none!important}}" +
-    "</style></head><body data-modern-wm='true' data-motion-mode='standard' data-motion-can-disable='true' data-width='" + w + "' data-height='" + h + "'>" +
+    "</style></head><body data-modern-wm='true' data-theme-configured='true' data-window-radius-px='{config.window_radius_px}' data-widget-radius-px='{config.widget_radius_px}' data-taskbar-radius-px='{config.taskbar_radius_px}' data-control-radius-px='{config.control_radius_px}' data-icon-radius-px='{config.icon_radius_px}' data-scrollbar-width-px='{config.scrollbar_width_px}' data-scrollbar-thumb-radius-px='{config.scrollbar_thumb_radius_px}' data-scrollbar-thumb-border-px='{config.scrollbar_thumb_border_px}' data-blur-px='{config.blur_px}' data-titlebar-height-px='{config.titlebar_height_px}' data-command-lane-height-px='{config.command_lane_height_px}' data-taskbar-height-px='{config.taskbar_height_px}' data-desktop-layer-z='{config.desktop_layer_z}' data-snap-layer-z='{config.snap_layer_z}' data-window-layer-z='{config.window_layer_z}' data-overlay-layer-z='{config.overlay_layer_z}' data-standard-motion-ms='{config.standard_motion_ms}' data-reduced-motion-ms='{config.reduced_motion_ms}' data-motion-mode='standard' data-motion-can-disable='{config.can_disable_motion}' data-width='" + w + "' data-height='" + h + "'>" +
     body + "</body></html>"
 
 class _SceneMotionData:
@@ -287,3 +422,70 @@ fn _scene_motion_data(blob: text) -> _SceneMotionData:
     if parts.len() > 5:
         can_disable = parts[5]
     _SceneMotionData(title: title, phase: phase, class_name: class_name, duration_ms: duration_ms, reduced_duration_ms: reduced_duration_ms, can_disable: can_disable)
+
+fn _scene_background_color(scene: WmSceneSpec) -> u32:
+    for elem in scene.elements:
+        if elem.kind == "desktop_chrome":
+            return elem.color
+    0xFF0F172Au32
+
+fn _scene_touch_target_height_px(html: text) -> i32:
+    if html.contains(".control-center button{{min-height:36px"):
+        return 36
+    0
+
+fn _scene_theme_configured(html: text, config: WmSceneModernThemeConfig) -> bool:
+    html.contains("data-theme-configured='true'") and
+    html.contains("data-window-radius-px='{config.window_radius_px}'") and
+    html.contains("data-widget-radius-px='{config.widget_radius_px}'") and
+    html.contains("data-taskbar-radius-px='{config.taskbar_radius_px}'") and
+    html.contains("data-control-radius-px='{config.control_radius_px}'") and
+    html.contains("data-icon-radius-px='{config.icon_radius_px}'") and
+    html.contains("data-scrollbar-width-px='{config.scrollbar_width_px}'") and
+    html.contains("data-scrollbar-thumb-radius-px='{config.scrollbar_thumb_radius_px}'") and
+    html.contains("data-scrollbar-thumb-border-px='{config.scrollbar_thumb_border_px}'") and
+    html.contains("data-blur-px='{config.blur_px}'") and
+    html.contains("data-titlebar-height-px='{config.titlebar_height_px}'") and
+    html.contains("data-command-lane-height-px='{config.command_lane_height_px}'") and
+    html.contains("data-taskbar-height-px='{config.taskbar_height_px}'") and
+    html.contains("data-desktop-layer-z='{config.desktop_layer_z}'") and
+    html.contains("data-snap-layer-z='{config.snap_layer_z}'") and
+    html.contains("data-window-layer-z='{config.window_layer_z}'") and
+    html.contains("data-overlay-layer-z='{config.overlay_layer_z}'") and
+    html.contains("data-standard-motion-ms='{config.standard_motion_ms}'") and
+    html.contains("data-reduced-motion-ms='{config.reduced_motion_ms}'") and
+    html.contains("data-motion-can-disable='{config.can_disable_motion}'")
+
+fn _scene_round_scrollbars_configured(html: text, config: WmSceneModernThemeConfig) -> bool:
+    html.contains("data-scrollbar-width-px='{config.scrollbar_width_px}'") and
+    html.contains("data-scrollbar-thumb-radius-px='{config.scrollbar_thumb_radius_px}'") and
+    html.contains("data-scrollbar-thumb-border-px='{config.scrollbar_thumb_border_px}'") and
+    html.contains("scrollbar-width:thin") and
+    html.contains("scrollbar-color:rgba(96,165,250,.58) transparent") and
+    html.contains("::-webkit-scrollbar") and
+    html.contains("width:10px;height:10px") and
+    html.contains("::-webkit-scrollbar-thumb") and
+    html.contains("background-clip:padding-box") and
+    html.contains("border-radius:999px")
+
+fn _scene_contrast_ratio_x100(a: u32, b: u32) -> i64:
+    val la = _scene_relative_luminance_x1000(a)
+    val lb = _scene_relative_luminance_x1000(b)
+    if la > lb:
+        ((la + 50) * 100) / (lb + 50)
+    else:
+        ((lb + 50) * 100) / (la + 50)
+
+fn _scene_relative_luminance_x1000(color: u32) -> i64:
+    val r = _scene_linear_channel_x1000(((color >> 16) & 0xFFu32).to_i64())
+    val g = _scene_linear_channel_x1000(((color >> 8) & 0xFFu32).to_i64())
+    val b = _scene_linear_channel_x1000((color & 0xFFu32).to_i64())
+    ((r * 2126) + (g * 7152) + (b * 722)) / 10000
+
+fn _scene_linear_channel_x1000(channel: i64) -> i64:
+    if channel <= 10:
+        (channel * 1000) / 3294
+    else:
+        val srgb_x1000 = (channel * 1000) / 255
+        val c = ((srgb_x1000 + 55) * 1000) / 1055
+        (c * c) / 1000

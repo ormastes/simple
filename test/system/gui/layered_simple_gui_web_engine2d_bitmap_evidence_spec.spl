@@ -1,0 +1,74 @@
+# @tag:system, slow
+# @tag:gui
+# @tag:engine2d
+# @tag:bitmap
+
+"""
+# Layered Simple GUI / WebRenderer / Engine2D Bitmap Evidence Spec
+
+Runs the layered bitmap evidence wrapper with minimal iterations and verifies
+that both representative scenes pass exact-bitmap, no-blur/no-tolerance checks
+through the Node, Bun, and Electron GUI layers.
+"""
+
+use std.spec.*
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+fn _build_dir() -> text:
+    "build/tmp/layered_simple_gui_web_engine2d_bitmap_evidence_spec"
+
+fn _report_path() -> text:
+    "build/tmp/layered_simple_gui_web_engine2d_bitmap_evidence_spec.md"
+
+fn _run_evidence() -> (text, text, i32):
+    rt_process_run_timeout(
+        "/bin/sh",
+        [
+            "-c",
+            "SIMPLE_BIN=src/compiler_rust/target/release/simple SIMPLE_LIB=src " +
+                "LAYERED_BITMAP_ITERATIONS=1 LAYERED_BITMAP_TRIALS=1 LAYERED_ELECTRON_ITERATIONS=1 " +
+                "BUILD_DIR=" + _build_dir() + " REPORT_PATH=" + _report_path() +
+                " sh scripts/check-layered-simple-gui-web-engine2d-bitmap-evidence.shs"
+        ],
+        180000
+    )
+
+fn _expect_exact_layer(stdout: text, scene: text, layer: text):
+    expect(stdout).to_contain("layered_" + scene + "_" + layer + "_status=pass")
+    expect(stdout).to_contain("layered_" + scene + "_" + layer + "_reason=pass")
+    expect(stdout).to_contain("layered_" + scene + "_" + layer + "_mismatch_count=0")
+    expect(stdout).to_contain("layered_" + scene + "_" + layer + "_blur_or_tolerance_used=false")
+    expect(stdout).to_contain("layered_" + scene + "_" + layer + "_result=pass")
+
+describe "Layered Simple GUI Web Engine2D bitmap evidence":
+    slow_it "passes exact bitmap checks through Node, Bun, and Electron layers":
+        val result = _run_evidence()
+        val stdout = result[0]
+        val stderr = result[1]
+        val code = result[2]
+        if code != 0:
+            print "layered bitmap evidence stdout: " + stdout
+            print "layered bitmap evidence stderr: " + stderr
+        expect(code).to_equal(0)
+        expect(stdout).to_contain("layered_simple_gui_web_engine2d_status=pass")
+        expect(stdout).to_contain("layered_simple_gui_web_engine2d_reason=pass")
+        expect(stdout).to_contain("layered_simple_gui_web_engine2d_policy=exact-bitmap-no-blur-no-tolerance")
+        expect(stdout).to_contain("layered_simple_gui_web_engine2d_layers=web-renderer-engine2d-node,web-renderer-engine2d-bun,simple-gui-web-renderer-electron")
+        expect(stdout).to_contain("layered_simple_gui_web_engine2d_scenes=image_taskbar_command,toolbar_modal_grid")
+
+        _expect_exact_layer(stdout, "image_taskbar_command", "node")
+        _expect_exact_layer(stdout, "image_taskbar_command", "bun")
+        _expect_exact_layer(stdout, "toolbar_modal_grid", "node")
+        _expect_exact_layer(stdout, "toolbar_modal_grid", "bun")
+        _expect_exact_layer(stdout, "image_taskbar_command", "electron_gui")
+        _expect_exact_layer(stdout, "toolbar_modal_grid", "electron_gui")
+        expect(stdout).to_contain("layered_image_taskbar_command_electron_gui_captured_argb_written=true")
+        expect(stdout).to_contain("layered_toolbar_modal_grid_electron_gui_captured_argb_written=true")
+
+        val report = rt_file_read_text(_report_path())
+        expect(report).to_contain("# Layered Simple GUI / WebRenderer / Engine2D Bitmap Evidence")
+        expect(report).to_contain("- status: pass")
+        expect(report).to_contain("- policy: exact bitmap, no blur, no tolerance")
+        expect(report).to_contain("- scenes: image_taskbar_command, toolbar_modal_grid")

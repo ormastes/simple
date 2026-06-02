@@ -24,7 +24,7 @@ Verifies one combined readiness report for the modern Web WM, SimpleOS
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 41 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -37,6 +37,11 @@ expect(report.os_affordances_ready)
 expect(report.lifecycle_motion_ready)
 expect(report.rendered_motion_ready)
 expect(report.rendered_affordances_ready)
+expect(report.os_render_quality_ready)
+expect(report.os_render_theme_configured)
+expect(report.os_render_contrast_ratio_x100).to_be_greater_than(449)
+expect(report.os_render_bounded_layout)
+expect(report.os_render_touch_target_min_height_px).to_equal(36)
 expect(report.color_checked)
 expect(report.contrast_ratio_x100).to_be_greater_than(449)
 expect(report.size_layout_configured)
@@ -73,7 +78,7 @@ expect(report.notes[0]).to_equal("modern WM readiness passed")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -87,6 +92,11 @@ expect(summary).to_contain("os_affordances=true")
 expect(summary).to_contain("lifecycle=true")
 expect(summary).to_contain("rendered_motion=true")
 expect(summary).to_contain("rendered_affordances=true")
+expect(summary).to_contain("os_render_quality=true")
+expect(summary).to_contain("os_render_theme_configured=true")
+expect(summary).to_contain("os_render_contrast_ratio_x100=")
+expect(summary).to_contain("os_render_bounded_layout=true")
+expect(summary).to_contain("os_render_touch_target_min=36px")
 expect(summary).to_contain("color_checked=true")
 expect(summary).to_contain("contrast_ratio_x100=")
 expect(summary).to_contain("size_layout=true")

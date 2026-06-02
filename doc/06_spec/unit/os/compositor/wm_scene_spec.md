@@ -324,13 +324,23 @@ expect(has_width)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val scene = standard_wm_scene(W, H)
 val html = scene_to_html(scene)
 expect(html).to_contain("data-modern-wm='true'")
+expect(html).to_contain("data-theme-configured='true'")
+expect(html).to_contain("data-window-radius-px='18'")
+expect(html).to_contain("data-widget-radius-px='14'")
+expect(html).to_contain("data-taskbar-radius-px='999'")
+expect(html).to_contain("data-blur-px='24'")
+expect(html).to_contain("data-desktop-layer-z='0'")
+expect(html).to_contain("data-window-layer-z='20'")
+expect(html).to_contain("data-overlay-layer-z='11000'")
+expect(html).to_contain("data-standard-motion-ms='240'")
+expect(html).to_contain("data-reduced-motion-ms='80'")
 expect(html).to_contain("traffic-close")
 expect(html).to_contain("traffic-min")
 expect(html).to_contain("traffic-max")
@@ -340,6 +350,39 @@ expect(html).to_contain("border-radius:18px 18px 0 0")
 expect(html).to_contain("border-radius:999px")
 expect(html).to_contain("radial-gradient")
 expect(html).to_contain("backdrop-filter:blur(24px)")
+```
+
+</details>
+
+#### AC-2: exposes a deterministic modern theme configuration for OS renderers
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val config = modern_wm_scene_theme_config()
+expect(config.background_color).to_equal(0xFF0F172Au32)
+expect(config.foreground_color).to_equal(0xFFFFFFFFu32)
+expect(config.accent_color).to_equal(0xFF2563EBu32)
+expect(config.titlebar_height_px).to_equal(32)
+expect(config.command_lane_height_px).to_equal(32)
+expect(config.taskbar_height_px).to_equal(56)
+expect(config.window_radius_px).to_equal(18)
+expect(config.widget_radius_px).to_equal(14)
+expect(config.taskbar_radius_px).to_equal(999)
+expect(config.control_radius_px).to_equal(12)
+expect(config.icon_radius_px).to_equal(999)
+expect(config.blur_px).to_equal(24)
+expect(config.desktop_layer_z).to_equal(0)
+expect(config.snap_layer_z).to_equal(15)
+expect(config.window_layer_z).to_equal(20)
+expect(config.overlay_layer_z).to_equal(11000)
+expect(config.standard_motion_ms).to_equal(240)
+expect(config.reduced_motion_ms).to_equal(80)
+expect(config.can_disable_motion)
 ```
 
 </details>
@@ -543,6 +586,127 @@ expect(bounded_affordances).to_equal(4)
 
 </details>
 
+#### reports visual quality metrics for rendered OS affordances
+
+1. var manager = WindowManager new
+
+2. var registry = UiWindowSurfaceRegistry new
+
+3. registry bind with kind
+   - Expected: report.max_control_center_width_px equals `320`
+   - Expected: report.max_desktop_widget_width_px equals `260`
+   - Expected: report.min_overview_card_width_px equals `180`
+   - Expected: report.min_touch_target_height_px equals `36`
+   - Expected: report.reduced_motion_duration_ms equals `80`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 21 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var manager = WindowManager.new()
+val _opened = manager.open_window("surf1", "Terminal", 20, 40, 300, 200, _shared_tree("terminal"))
+var registry = UiWindowSurfaceRegistry.new()
+registry.bind_with_kind("win1", "surf1", 77u64, "simple.terminal", "Terminal", UI_SURFACE_KIND_SIMPLE_WEB)
+val shared = shared_wm_scene_from_window_manager(manager, registry, 800, 600)
+val scene = shared_wm_scene_to_chromed_wm_scene(shared, _shared_taskbar(), 1000, "09:41", 2)
+val report = wm_scene_visual_quality_report(scene)
+
+expect(report.passed)
+expect(report.theme_configured)
+expect(report.color_checked)
+expect(report.contrast_ratio_x100).to_be_greater_than(449)
+expect(report.bounded_layout)
+expect(report.translucent_surfaces)
+expect(report.rounded_surface_count).to_be_greater_than(3)
+expect(report.max_control_center_width_px).to_equal(320)
+expect(report.max_desktop_widget_width_px).to_equal(260)
+expect(report.min_overview_card_width_px).to_equal(180)
+expect(report.min_touch_target_height_px).to_equal(36)
+expect(report.motion_can_disable)
+expect(report.reduced_motion_duration_ms).to_equal(80)
+```
+
+</details>
+
+#### fails visual quality when rendered affordances are out of bounds
+
+1. SceneElement
+
+2. SceneElement
+
+3. SceneElement
+
+4. SceneElement
+
+5. SceneElement
+
+6. expect not
+
+7. expect not
+   - Expected: report.max_control_center_width_px equals `340`
+   - Expected: report.max_desktop_widget_width_px equals `280`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val scene = WmSceneSpec(
+    name: "bad_affordance_scene",
+    width: 240,
+    height: 180,
+    elements: [
+        SceneElement(kind: "desktop_chrome", x: 0, y: 0, w: 240, h: 180, color: 0xFF101418u32, text: ""),
+        SceneElement(kind: "control_center", x: -4, y: 40, w: 340, h: 120, color: 0xDD111827u32, text: "oversized"),
+        SceneElement(kind: "desktop_widgets", x: 20, y: 40, w: 280, h: 100, color: 0xCC111827u32, text: "oversized"),
+        SceneElement(kind: "window_overview", x: 40, y: 72, w: 180, h: 80, color: 0xDD020617u32, text: "overview"),
+        SceneElement(kind: "snap_preview", x: 120, y: 42, w: 130, h: 100, color: 0x552563EBu32, text: "right")
+    ]
+)
+val report = wm_scene_visual_quality_report(scene)
+
+expect_not(report.passed)
+expect_not(report.bounded_layout)
+expect(report.max_control_center_width_px).to_equal(340)
+expect(report.max_desktop_widget_width_px).to_equal(280)
+```
+
+</details>
+
+#### fails visual quality without modern affordance motion controls
+
+1. expect not
+
+2. expect not
+   - Expected: report.reduced_motion_duration_ms equals `0`
+   - Expected: report.min_touch_target_height_px equals `0`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val scene = standard_wm_scene(800, 600)
+val report = wm_scene_visual_quality_report(scene)
+
+expect_not(report.passed)
+expect_not(report.motion_can_disable)
+expect(report.reduced_motion_duration_ms).to_equal(0)
+expect(report.min_touch_target_height_px).to_equal(0)
+```
+
+</details>
+
 ### WmScene — lifecycle motion projection
 
 #### projects host-neutral lifecycle motion classes into inspectable HTML
@@ -613,8 +777,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 22 |
-| Active scenarios | 22 |
+| Total scenarios | 26 |
+| Active scenarios | 26 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
