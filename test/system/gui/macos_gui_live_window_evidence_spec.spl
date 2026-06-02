@@ -70,6 +70,28 @@ fn _ratio_is_coherent(ratio: text, positive_sample: bool) -> bool:
         return ratio.starts_with("0.") or ratio == "1.000000"
     return ratio == "0.000000"
 
+fn _ratio_to_ppm(ratio: text) -> i64:
+    val parts = ratio.split(".")
+    if parts.len() != 2:
+        return -1
+    val whole = parts[0]
+    val fraction = parts[1]
+    if fraction.len() != 6:
+        return -1
+    if whole != "0" and whole != "1":
+        return -1
+    var ppm = 0
+    var i = 0
+    while i < 6:
+        val digit = fraction.substring(i, i + 1).to_i64()
+        if digit < 0 or digit > 9:
+            return -1
+        ppm = ppm * 10 + digit
+        i = i + 1
+    if whole == "1":
+        return 1000000 + ppm
+    return ppm
+
 fn _capture_fields_are_coherent(output: text, positive_sample: bool) -> bool:
     val width = _extract_i64_field(output, "macos_gui_live_window_evidence_capture_width=")
     val height = _extract_i64_field(output, "macos_gui_live_window_evidence_capture_height=")
@@ -85,7 +107,8 @@ fn _capture_fields_are_coherent(output: text, positive_sample: bool) -> bool:
     if positive_sample:
         if width <= 0 or height <= 0 or total_pixels <= 0 or non_background_pixels <= 0:
             return false
-        return _ratio_is_coherent(ratio, true)
+        val expected_ratio_ppm = (non_background_pixels * 1000000 + (total_pixels / 2)) / total_pixels
+        return _ratio_is_coherent(ratio, true) and _ratio_to_ppm(ratio) == expected_ratio_ppm
     if width != 0 or height != 0 or total_pixels != 0 or non_background_pixels != 0:
         return false
     return _ratio_is_coherent(ratio, false)
@@ -123,9 +146,15 @@ describe "macOS GUI live window evidence":
             "macos_gui_live_window_evidence_capture_total_pixels=35\n" +
             "macos_gui_live_window_evidence_non_background_pixels=12\n" +
             "macos_gui_live_window_evidence_non_background_ratio=0.000000\n"
+        val wrong_positive_ratio = "macos_gui_live_window_evidence_capture_width=7\n" +
+            "macos_gui_live_window_evidence_capture_height=5\n" +
+            "macos_gui_live_window_evidence_capture_total_pixels=35\n" +
+            "macos_gui_live_window_evidence_non_background_pixels=12\n" +
+            "macos_gui_live_window_evidence_non_background_ratio=0.999999\n"
         expect(_capture_fields_are_coherent(mismatched_total, true)).to_equal(false)
         expect(_capture_fields_are_coherent(overflow_non_background, true)).to_equal(false)
         expect(_capture_fields_are_coherent(zero_positive_ratio, true)).to_equal(false)
+        expect(_capture_fields_are_coherent(wrong_positive_ratio, true)).to_equal(false)
 
     slow_it "passes on macOS and reports an explicit requires-macos skip elsewhere":
         val run_id = _run_id()

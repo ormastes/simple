@@ -31,8 +31,8 @@
 - auto QMP guest perf iterations:
 - auto QMP guest perf pending marker:
 - qmp socket:
-- host WM smoke status: pass
-- host WM smoke reason: wm-launch-capture-contract-verified
+- host WM smoke status: fail
+- host WM smoke reason: specs-failed
 - host WM smoke report: build/tmp/qemu_gtk_wm_capture_evidence_current/wm-host-launch-capture.md
 - live capture status: unavailable
 - live capture reason: missing-qmp-socket
@@ -59,7 +59,7 @@
 - host perf baseline status: pass
 - host perf baseline reason: pass
 - host perf baseline simple frame us: 1
-- host perf baseline GTK frame us: 279
+- host perf baseline GTK frame us: 299
 - host perf baseline iterations: 200
 - host perf baseline comparison available: true
 - host perf baseline scope: host-gtk-gl-exact-scene-baseline
@@ -73,13 +73,13 @@
 - fake QMP captured ARGB path: build/tmp/qemu_gtk_wm_capture_evidence_current/fake-qmp/captured-argb.json
 - fake QMP captured ARGB bytes: 33915
 - fake QMP captured ARGB cksum: 1773745064
-- fake QMP output bytes: 2046
-- fake QMP output cksum: 2449873325
+- fake QMP output bytes: 2016
+- fake QMP output cksum: 663100009
 - host GTK GL WM scene status: pass
 - host GTK GL WM scene reason: pass
 - host GTK GL WM scene report: build/tmp/qemu_gtk_wm_capture_evidence_current/gtk-gl-wm-scene.md
 - host GTK GL WM scene simple frame us: 1
-- host GTK GL WM scene GTK frame us: 279
+- host GTK GL WM scene GTK frame us: 299
 - host GTK GL WM scene mismatch count: 0
 - host GTK GL WM scene expected RGBA path: build/tmp/qemu_gtk_wm_capture_evidence_current/gtk-gl/simple-expected-rgba.json
 - host GTK GL WM scene expected RGBA bytes: 663300
@@ -89,9 +89,9 @@
 - host GTK GL WM scene captured RGBA cksum: 70624314
 - host GTK GL WM scene blur/tolerance used: false
 - host GTK GL WM scene output bytes: 1254
-- host GTK GL WM scene output cksum: 3193501046
-- GUI SMF artifact contract status: missing
-- GUI SMF artifact contract row: GUI_SMF_ARTIFACT_CONTRACT status=missing artifact= sha256= size=0 smf_role=-1 arch=0 embedded_dynlib=false symbol=gui_dynlib_hot_probe_tick qemu_status=not-run qemu_reason=live-qemu-not-executed macos_status=not-run macos_reason=requires-macos-arm64
+- host GTK GL WM scene output cksum: 3759507469
+- GUI SMF artifact contract status: fail
+- GUI SMF artifact contract row: GUI_SMF_ARTIFACT_CONTRACT status=fail artifact=build/gui/pure_gui_hot.smf sha256=3bcabd9ebc83e86c32d07e3d048189763e428af16786e3b99dd34b6764b526b3 size=15219344 smf_role=2 arch=1 embedded_dynlib=true symbol=gui_dynlib_hot_probe_tick qemu_status=not-run qemu_reason=live-qemu-not-executed macos_status=not-run macos_reason=requires-macos-arm64
 - GUI SMF artifact contract scope: contract-only; does not promote live QEMU capture
 
 ## Raw Evidence
@@ -127,9 +127,9 @@
 - qemu_gtk_wm_capture_auto_qmp_guest_perf_pending_marker=
 - qemu_gtk_wm_capture_qmp_socket=
 - qemu_gtk_wm_capture_wm_exit_code=0
-- qemu_gtk_wm_capture_host_wm_status=pass
-- qemu_gtk_wm_capture_host_wm_reason=wm-launch-capture-contract-verified
-- qemu_gtk_wm_capture_host_wm_exit_code=0
+- qemu_gtk_wm_capture_host_wm_status=fail
+- qemu_gtk_wm_capture_host_wm_reason=specs-failed
+- qemu_gtk_wm_capture_host_wm_exit_code=1
 - qemu_gtk_wm_capture_host_wm_report_path=build/tmp/qemu_gtk_wm_capture_evidence_current/wm-host-launch-capture.md
 - qemu_gtk_wm_capture_live_capture_status=unavailable
 - qemu_gtk_wm_capture_live_capture_reason=missing-qmp-socket
@@ -159,7 +159,7 @@
 - qemu_gtk_wm_capture_host_perf_status=pass
 - qemu_gtk_wm_capture_host_perf_reason=pass
 - qemu_gtk_wm_capture_host_perf_simple_frame_us=1
-- qemu_gtk_wm_capture_host_perf_gtk_frame_us=279
+- qemu_gtk_wm_capture_host_perf_gtk_frame_us=299
 - qemu_gtk_wm_capture_host_perf_iterations=200
 - qemu_gtk_wm_capture_host_perf_comparison_available=true
 - qemu_gtk_wm_capture_host_perf_scope=host-gtk-gl-exact-scene-baseline
@@ -173,13 +173,13 @@
 - qemu_gtk_wm_capture_fake_qmp_captured_argb_path=build/tmp/qemu_gtk_wm_capture_evidence_current/fake-qmp/captured-argb.json
 - qemu_gtk_wm_capture_fake_qmp_captured_argb_bytes=33915
 - qemu_gtk_wm_capture_fake_qmp_captured_argb_cksum=1773745064
-- qemu_gtk_wm_capture_fake_qmp_output_bytes=2046
-- qemu_gtk_wm_capture_fake_qmp_output_cksum=2449873325
+- qemu_gtk_wm_capture_fake_qmp_output_bytes=2016
+- qemu_gtk_wm_capture_fake_qmp_output_cksum=663100009
 - qemu_gtk_wm_capture_gtk_scene_status=pass
 - qemu_gtk_wm_capture_gtk_scene_reason=pass
 - qemu_gtk_wm_capture_gtk_scene_report_path=build/tmp/qemu_gtk_wm_capture_evidence_current/gtk-gl-wm-scene.md
 - qemu_gtk_wm_capture_gtk_scene_simple_frame_us=1
-- qemu_gtk_wm_capture_gtk_scene_gtk_frame_us=279
+- qemu_gtk_wm_capture_gtk_scene_gtk_frame_us=299
 - qemu_gtk_wm_capture_gtk_scene_rgba_mismatch_count=0
 - qemu_gtk_wm_capture_gtk_scene_expected_rgba_path=build/tmp/qemu_gtk_wm_capture_evidence_current/gtk-gl/simple-expected-rgba.json
 - qemu_gtk_wm_capture_gtk_scene_expected_rgba_bytes=663300
@@ -189,13 +189,13 @@
 - qemu_gtk_wm_capture_gtk_scene_captured_rgba_cksum=70624314
 - qemu_gtk_wm_capture_gtk_scene_blur_or_tolerance_used=false
 - qemu_gtk_wm_capture_gtk_scene_output_bytes=1254
-- qemu_gtk_wm_capture_gtk_scene_output_cksum=3193501046
-- qemu_gtk_wm_capture_gui_smf_artifact_contract_status=missing
-- qemu_gtk_wm_capture_gui_smf_artifact_contract_row=GUI_SMF_ARTIFACT_CONTRACT status=missing artifact= sha256= size=0 smf_role=-1 arch=0 embedded_dynlib=false symbol=gui_dynlib_hot_probe_tick qemu_status=not-run qemu_reason=live-qemu-not-executed macos_status=not-run macos_reason=requires-macos-arm64
-- qemu_gtk_wm_capture_host_evidence_status=pass
-- qemu_gtk_wm_capture_host_evidence_reason=wm-launch-capture-contract-verified
+- qemu_gtk_wm_capture_gtk_scene_output_cksum=3759507469
+- qemu_gtk_wm_capture_gui_smf_artifact_contract_status=fail
+- qemu_gtk_wm_capture_gui_smf_artifact_contract_row=GUI_SMF_ARTIFACT_CONTRACT status=fail artifact=build/gui/pure_gui_hot.smf sha256=3bcabd9ebc83e86c32d07e3d048189763e428af16786e3b99dd34b6764b526b3 size=15219344 smf_role=2 arch=1 embedded_dynlib=true symbol=gui_dynlib_hot_probe_tick qemu_status=not-run qemu_reason=live-qemu-not-executed macos_status=not-run macos_reason=requires-macos-arm64
+- qemu_gtk_wm_capture_host_evidence_status=fail
+- qemu_gtk_wm_capture_host_evidence_reason=specs-failed
 - qemu_gtk_wm_capture_host_contract_status=pass
-- qemu_gtk_wm_capture_host_spec_status=pass
+- qemu_gtk_wm_capture_host_spec_status=fail
 - qemu_gtk_wm_capture_host_electron_live_status=skipped
 - qemu_gtk_wm_capture_host_electron_live_reason=RUN_ELECTRON_LIVE_SMOKE=0
 - qemu_gtk_wm_capture_host_qemu_live_status=skipped
@@ -243,14 +243,12 @@
 - qemu_capture_fake_qmp_mismatch_count=0
 - qemu_capture_fake_qmp_first_mismatch=-1
 - qemu_capture_fake_qmp_blur_or_tolerance_used=false
-- qemu_capture_fake_qmp_capture_us=262410
+- qemu_capture_fake_qmp_capture_us=285709
 - qemu_capture_fake_qmp_pixel0=4280307872
 - qemu_capture_fake_qmp_pixel384=4279310375
 - qemu_capture_fake_qmp_pixel1000=4293257195
 - qemu_capture_fake_qmp_error=
 - fake_qmp_socket=build/tmp/qemu_gtk_wm_capture_evidence_current/fake-qmp/fake-qmp.sock
-- __CM_FS__:2497
-- __CM_FS__:9229
 - qemu_capture_fake_qmp_status=pass
 - qemu_capture_fake_qmp_reason=fake-qmp-screendump-pass
 - qemu_capture_fake_qmp_report=build/tmp/qemu_gtk_wm_capture_evidence_current/fake-qmp-capture.md
@@ -308,7 +306,7 @@
 -
 - Running: test/unit/app/ui/wm_runtime_bridge_spec.spl
 - [1/1] test/unit/app/ui/wm_runtime_bridge_spec.spl
--   [32mPASSED[0m (224ms)
+-   [32mPASSED[0m (226ms)
 -
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -316,12 +314,12 @@
 - Files: 1
 - [32mPassed: 5[0m
 - Failed: 0
-- Duration: 229ms
+- Duration: 232ms
 -
 - [32m✓ All tests passed![0m
 -
 - Slowest tests:
--        224ms  test/unit/app/ui/wm_runtime_bridge_spec.spl
+-        226ms  test/unit/app/ui/wm_runtime_bridge_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/app/ui/host_wm_runtime_loop_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -335,21 +333,24 @@
 -
 - Running: test/unit/app/ui/host_wm_runtime_loop_spec.spl
 - [1/1] test/unit/app/ui/host_wm_runtime_loop_spec.spl
--   [32mPASSED[0m (1072ms)
+-   [31mFAILED[0m (1179ms)
 -
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
 - ═══════════════════════════════════════════════════════════════
 - Files: 1
-- [32mPassed: 2[0m
-- Failed: 0
-- Duration: 1077ms
+- [32mPassed: 0[0m
+- [31mFailed: 1[0m
+- Duration: 1183ms
 -
-- [32m✓ All tests passed![0m
+- [31m✗ Some tests failed[0m
+-
+- Failed files:
+-   - test/unit/app/ui/host_wm_runtime_loop_spec.spl
 -
 - Slowest tests:
--       1072ms  test/unit/app/ui/host_wm_runtime_loop_spec.spl
-- spec_exit_code=0
+-       1179ms  test/unit/app/ui/host_wm_runtime_loop_spec.spl
+- spec_exit_code=1
 - spec_path=test/unit/os/desktop/wm_runtime_bridge_spec.spl
 - Simple Test Runner v1.0.0-beta
 -
@@ -362,7 +363,7 @@
 -
 - Running: test/unit/os/desktop/wm_runtime_bridge_spec.spl
 - [1/1] test/unit/os/desktop/wm_runtime_bridge_spec.spl
--   [32mPASSED[0m (194ms)
+-   [32mPASSED[0m (203ms)
 -
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -370,12 +371,12 @@
 - Files: 1
 - [32mPassed: 5[0m
 - Failed: 0
-- Duration: 199ms
+- Duration: 207ms
 -
 - [32m✓ All tests passed![0m
 -
 - Slowest tests:
--        194ms  test/unit/os/desktop/wm_runtime_bridge_spec.spl
+-        203ms  test/unit/os/desktop/wm_runtime_bridge_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/os/compositor/qemu_capture_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -389,7 +390,7 @@
 -
 - Running: test/unit/os/compositor/qemu_capture_spec.spl
 - [1/1] test/unit/os/compositor/qemu_capture_spec.spl
--   [32mPASSED[0m (573ms)
+-   [32mPASSED[0m (597ms)
 -
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -397,12 +398,12 @@
 - Files: 1
 - [32mPassed: 11[0m
 - Failed: 0
-- Duration: 578ms
+- Duration: 603ms
 -
 - [32m✓ All tests passed![0m
 -
 - Slowest tests:
--        573ms  test/unit/os/compositor/qemu_capture_spec.spl
+-        597ms  test/unit/os/compositor/qemu_capture_spec.spl
 - spec_exit_code=0
 - spec_path=test/unit/os/compositor/electron_capture_spec.spl
 - Simple Test Runner v1.0.0-beta
@@ -416,7 +417,7 @@
 -
 - Running: test/unit/os/compositor/electron_capture_spec.spl
 - [1/1] test/unit/os/compositor/electron_capture_spec.spl
--   [32mPASSED[0m (462ms)
+-   [32mPASSED[0m (524ms)
 -
 - ═══════════════════════════════════════════════════════════════
 - Test Summary
@@ -424,17 +425,17 @@
 - Files: 1
 - [32mPassed: 7[0m
 - Failed: 0
-- Duration: 467ms
+- Duration: 528ms
 -
 - [32m✓ All tests passed![0m
 -
 - Slowest tests:
--        462ms  test/unit/os/compositor/electron_capture_spec.spl
+-        524ms  test/unit/os/compositor/electron_capture_spec.spl
 - spec_exit_code=0
-- wm_launch_capture_evidence_status=pass
-- wm_launch_capture_evidence_reason=wm-launch-capture-contract-verified
+- wm_launch_capture_evidence_status=fail
+- wm_launch_capture_evidence_reason=specs-failed
 - wm_launch_capture_contract_status=pass
-- wm_launch_capture_spec_status=pass
+- wm_launch_capture_spec_status=fail
 - wm_launch_capture_electron_live_status=skipped
 - wm_launch_capture_electron_live_reason=RUN_ELECTRON_LIVE_SMOKE=0
 - wm_launch_capture_qemu_live_status=skipped
@@ -468,11 +469,14 @@
 - gtk_gl_wm_scene_gtk_gl_context=true
 - gtk_gl_wm_scene_gtk_iterations=200
 - gtk_gl_wm_scene_gtk_checksum=1193966625284
-- gtk_gl_wm_scene_gtk_total_us=55890
-- gtk_gl_wm_scene_gtk_frame_us=279
+- gtk_gl_wm_scene_gtk_total_us=59967
+- gtk_gl_wm_scene_gtk_frame_us=299
 - gtk_gl_wm_scene_gtk_blur_or_tolerance_used=false
 - gtk_gl_wm_scene_reference_checksum=1193966625284
 - gtk_gl_wm_scene_rgba_mismatch_count=0
 - gtk_gl_wm_scene_expected_rgba_path=build/tmp/qemu_gtk_wm_capture_evidence_current/gtk-gl/simple-expected-rgba.json
 - gtk_gl_wm_scene_captured_rgba_path=build/tmp/qemu_gtk_wm_capture_evidence_current/gtk-gl/gtk-captured-rgba.json
 - gtk_gl_wm_scene_blur_or_tolerance_used=false
+
+## GUI SMF Artifact Contract Output
+- GUI_SMF_ARTIFACT_CONTRACT status=fail artifact=build/gui/pure_gui_hot.smf sha256=3bcabd9ebc83e86c32d07e3d048189763e428af16786e3b99dd34b6764b526b3 size=15219344 smf_role=2 arch=1 embedded_dynlib=true symbol=gui_dynlib_hot_probe_tick qemu_status=not-run qemu_reason=live-qemu-not-executed macos_status=not-run macos_reason=requires-macos-arm64

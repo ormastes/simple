@@ -248,12 +248,15 @@ describe "demo":
 describe "demo":
     it "wraps comparison":
         expect(code != 0).to_equal(true)
+        expect(path.ends_with(".spl")).to_be(true)
 "#;
         let diagnostics = check_code_in_file("demo_spec.spl", code);
-        let lint = diagnostics
+        let wrapper_lints: Vec<_> = diagnostics
             .iter()
-            .find(|d| d.lint == LintName::SPipeBooleanWrapperAssertions)
-            .expect("missing boolean wrapper lint");
+            .filter(|d| d.lint == LintName::SPipeBooleanWrapperAssertions)
+            .collect();
+        assert_eq!(wrapper_lints.len(), 2);
+        let lint = wrapper_lints[0];
         assert_eq!(lint.level, LintLevel::Warn);
         assert!(lint
             .suggestion
@@ -273,12 +276,15 @@ describe "demo":
     it "wraps negative boolean":
         val ok = false
         expect(ok).to_equal(false)
+        expect(found).to_be(false)
 "#;
         let diagnostics = check_code_in_file("demo_spec.spl", code);
-        let lint = diagnostics
+        let wrapper_lints: Vec<_> = diagnostics
             .iter()
-            .find(|d| d.lint == LintName::SPipeFalseBooleanWrapperAssertions)
-            .expect("missing false boolean wrapper lint");
+            .filter(|d| d.lint == LintName::SPipeFalseBooleanWrapperAssertions)
+            .collect();
+        assert_eq!(wrapper_lints.len(), 2);
+        let lint = wrapper_lints[0];
         assert_eq!(lint.level, LintLevel::Deny);
         assert!(lint
             .suggestion
