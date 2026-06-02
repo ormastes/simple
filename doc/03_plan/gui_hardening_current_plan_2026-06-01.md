@@ -1782,6 +1782,24 @@ the fetch/WASM chain spec passed `19/19`, the native WASM host spec passed
 manual was refreshed with the existing docgen warning. Broader typed-array
 prototype parity and production GUI pixel parity remain open.
 
+BrowserSession Uint8Array slice/subarray continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession typed-array prototype coverage now includes bounded
+`Uint8Array.subarray` and `slice` range return evidence. The browser script
+scenario proves positive start, negative end normalization, negative start
+normalization, returned typed-array `toString`, `length`, `at`, and source-array
+preservation with `4,255,7:3:4:255,7:2:1,4,255,7,9`. Focused checks passed,
+the fetch/WASM chain spec passed `20/20`, the native WASM host spec passed
+`107/107`, and Node API conformance remained `213/213`. The generated scenario
+manual was refreshed with the existing docgen warning. Broader typed-array
+prototype parity and production GUI pixel parity remain open.
+
 BrowserSession Uint8Array lastIndexOf continuation:
 
 - `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/runtime.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl src/lib/nogc_sync_mut/js/engine/interpreter_eval.spl test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
