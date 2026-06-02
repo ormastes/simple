@@ -957,6 +957,39 @@ match result:
 
 </details>
 
+#### dispatches Uint8Array prototype find helpers with call and apply in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `255:3:undefined:-1`
+
+3. Err
+   - Expected: "unexpected uint8 prototype find dispatch js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var b = new Uint8Array(4); b[0] = 1; b[1] = 260; b[2] = -1; b[3] = 7; var found = Uint8Array.prototype.find.call(b, function(v, i, arr) { return v == 255 && i == 2 && arr.at(3) == 7; }); var idx = Uint8Array.prototype.findIndex.call(b, function(v, i, arr) { return arr.at(i) == 7; }); var miss = Uint8Array.prototype.find.apply(b, [function(v) { return v == 99; }]); var missIdx = Uint8Array.prototype.findIndex.apply(b, [function(v) { return v == 99; }]); found + ':' + idx + ':' + miss + ':' + missIdx")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("255:3:undefined:-1")
+    Err(err):
+        expect("unexpected uint8 prototype find dispatch js error: {err}").to_equal("")
+```
+
+</details>
+
 #### reduces Uint8Array values with accumulator callbacks in browser scripts
 
 1. var session = BrowserSession new
@@ -2065,8 +2098,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 54 |
-| Active scenarios | 54 |
+| Total scenarios | 55 |
+| Active scenarios | 55 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
