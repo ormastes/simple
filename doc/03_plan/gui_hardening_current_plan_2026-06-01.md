@@ -1412,6 +1412,24 @@ diagnostics are hidden. The focused system spec passes `41/41`, and the mirrored
 manual was refreshed. This advances Chrome parity diagnostics without closing
 the production glyph/compositing divergence.
 
+Production Chrome line-region geometry continuation:
+
+- `node --check tools/electron-shell/verify_famous_site_production_probe.js`
+- `node tools/electron-shell/verify_famous_site_production_probe.js --sample=site_0_google`
+- `node tools/electron-shell/verify_famous_site_production_probe.js --sample=site_0_google --corrupt-text-line-ink-position-for-test`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check test/system/wm_compare/famous_site_corpus_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/system/wm_compare/famous_site_corpus_spec.spl --mode=interpreter --timeout-ms=240000 --clean`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple run src/app/spipe_docgen/main.spl test/system/wm_compare/famous_site_corpus_spec.spl --output doc/06_spec`
+
+The residual mask no longer trusts only report-provided line geometry. The
+verifier independently recounts Chrome-vs-Simple PPM differences inside each
+reported `text_line_ink_delta` rectangle and exposes `allRegionCountsMatch` plus
+per-line reported/actual counts. The normal focused probe passes with exact
+counts `808/761/779/368`; the shifted-position mutation fails closed with
+`allRegionCountsMatch=false`, first actual count `745`, and
+`per-line text ink region geometry does not match production pixels`. The
+focused system spec now passes `42/42`.
+
 Modern WM readiness surface-field continuation:
 
 - `SIMPLE_LIB=src src/compiler_rust/target/release/simple check test/system/wm_compare/famous_site_corpus_spec.spl src/app/wm_compare/site_corpus_compat.spl src/os/desktop/modern_wm_readiness.spl test/unit/os/desktop/modern_wm_readiness_spec.spl`
@@ -1439,3 +1457,18 @@ readiness, visual layering, motion control, round icons, round scrollbars, and
 translucent shell readiness. The focused readiness spec asserts those fields and
 summary markers; the spec passes `2/2`, checks pass, and the mirrored manual was
 refreshed with existing short-doc warnings.
+
+SimpleOS shell exec alias evidence continuation:
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/kernel/loader/app_registry.spl src/os/services/vfs/vfs_init.spl test/unit/os/kernel/loader/app_registry_spec.spl test/system/app/os/feature/vfs_exec_bytes_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/unit/os/kernel/loader/app_registry_spec.spl --mode=interpreter --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/system/app/os/feature/vfs_exec_bytes_spec.spl --mode=interpreter --clean --format json`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/system/app/os/feature/vfs_exec_bytes_spec.spl test/unit/os/kernel/loader/app_registry_spec.spl --output doc/06_spec`
+
+The SimpleOS fallback registry and VFS exec byte-buffer specs now assert that
+`/bin/simple`, `/usr/bin/simple`, `/bin/sh`, and `/usr/bin/shell` normalize to
+the shared SMF app aliases used by baked SimpleOS app execution. The app
+registry spec passes `25/25`, the VFS exec bytes spec passes `4/4`, and the
+mirrored manuals were refreshed. This advances the live SimpleOS execution lane
+without claiming the remaining guest-side QEMU/GTK performance harness is
+complete.

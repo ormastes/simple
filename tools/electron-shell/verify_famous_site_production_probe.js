@@ -8,6 +8,7 @@ const sampleArg = process.argv.find((arg) => arg.startsWith("--sample="));
 const sample = sampleArg ? sampleArg.slice("--sample=".length) : "site_0_google";
 const dropAcceptancePolicyFlagsForTest = process.argv.includes("--drop-acceptance-policy-flags-for-test");
 const corruptTextLineInkForTest = process.argv.includes("--corrupt-text-line-ink-for-test");
+const corruptTextLineInkPositionForTest = process.argv.includes("--corrupt-text-line-ink-position-for-test");
 const dropTextLineInkDifferenceForTest = process.argv.includes("--drop-text-line-ink-difference-for-test");
 const hideResidualDifferenceForTest = process.argv.includes("--hide-residual-difference-for-test");
 const maxDifferentPixels = sample === "site_0_google" ? 2717 : 6000;
@@ -85,6 +86,40 @@ function pixelInLineInkRegion(x, y, inkLines) {
     if (x >= line.x && x < line.x + line.width && y >= line.y && y < line.y + 18) return true;
   }
   return false;
+}
+
+function lineInkRegionPixelCounts(chromePath, simplePath, inkLines) {
+  const chrome = parsePpm(chromePath);
+  const simple = parsePpm(simplePath);
+  const detail = {
+    allRegionCountsMatch: inkLines.length > 0,
+    counts: []
+  };
+  if (!chrome || !simple || chrome.width !== simple.width || chrome.height !== simple.height) {
+    detail.allRegionCountsMatch = false;
+    return detail;
+  }
+  for (const line of inkLines) {
+    let actualDifferentPixels = 0;
+    const right = Math.min(chrome.width, line.x + line.width);
+    const bottom = Math.min(chrome.height, line.y + 18);
+    for (let y = Math.max(0, line.y); y < bottom; y += 1) {
+      for (let x = Math.max(0, line.x); x < right; x += 1) {
+        const c = pixelAt(chrome, x, y);
+        const s = pixelAt(simple, x, y);
+        if (c[0] !== s[0] || c[1] !== s[1] || c[2] !== s[2]) actualDifferentPixels += 1;
+      }
+    }
+    const matchesReported = actualDifferentPixels === line.differentPixels;
+    if (!matchesReported) detail.allRegionCountsMatch = false;
+    detail.counts.push({
+      index: line.index,
+      reportedDifferentPixels: line.differentPixels,
+      actualDifferentPixels,
+      matchesReported
+    });
+  }
+  return detail;
 }
 
 function residualDifferenceDetails(chromePath, simplePath, inkLines) {
@@ -261,7 +296,9 @@ let result = {
     widthMatchesLayout: false,
     regionNamesSequential: false,
     allLinesHaveDifferences: false,
-    allLinesHaveChromeBlackPixels: false
+    allLinesHaveChromeBlackPixels: false,
+    allRegionCountsMatch: false,
+    regionPixelCounts: []
   },
   residualDifference: {
     count: 0,
@@ -324,7 +361,13 @@ if (!fs.existsSync(reportPath)) {
   result.hasExactAcceptancePolicyFlags = text.includes("acceptance_policy_flags: (exact_required: true perceptual_diagnostic_only: true tolerance_acceptance_allowed: false)");
   result.textLineInkDeltaCount = parseIntField(text, /text_line_ink_delta:\s*\(text_line_ink_delta count:\s*([0-9]+)/);
   const textLineInkEntries = parseTextLineInkEntries(text);
+  if (corruptTextLineInkPositionForTest && textLineInkEntries.length > 0) {
+    textLineInkEntries[0].x += 8;
+  }
   result.textLineInkDetails = compareTextLineInk(parseSimpleLayoutLineWidths(text), textLineInkEntries);
+  const regionPixelCounts = lineInkRegionPixelCounts(chromePath, simplePath, textLineInkEntries);
+  result.textLineInkDetails.allRegionCountsMatch = regionPixelCounts.allRegionCountsMatch;
+  result.textLineInkDetails.regionPixelCounts = regionPixelCounts.counts;
   result.textLineInkDetails.unexplainedDifferentPixels = result.differentPixels - result.textLineInkDetails.differentPixelsTotal;
   result.residualDifference = hideResidualDifferenceForTest ? { count: 0, first: null } : residualDifferenceDetails(chromePath, simplePath, textLineInkEntries);
   result.textInkDelta.divBoxDifferentPixels = parseIntField(text, /div_box:\s*\(region[^\)]*different_pixels:\s*([0-9]+)/);
@@ -359,6 +402,7 @@ if (!fs.existsSync(reportPath)) {
   if (result.hasTextLineInkDelta && !result.textLineInkDetails.regionNamesSequential) failures.push("per-line text ink regions are not sequential");
   if (result.hasTextLineInkDelta && !result.textLineInkDetails.allLinesHaveDifferences) failures.push("per-line text ink entries did not report differences for every line");
   if (result.hasTextLineInkDelta && !result.textLineInkDetails.allLinesHaveChromeBlackPixels) failures.push("per-line text ink entries did not report Chrome glyph pixels for every line");
+  if (result.hasTextLineInkDelta && !result.textLineInkDetails.allRegionCountsMatch) failures.push("per-line text ink region geometry does not match production pixels");
   if (result.hasTextLineInkDelta && result.textLineInkDetails.unexplainedDifferentPixels < 0) failures.push("per-line text ink differences exceed production divergence");
   if (result.hasTextLineInkDelta && result.textLineInkDetails.unexplainedDifferentPixels > 1) failures.push("per-line text ink diagnostics do not account for production divergence");
   if (result.hasTextLineInkDelta && result.residualDifference.count !== result.textLineInkDetails.unexplainedDifferentPixels) failures.push("residual pixel diagnostics do not match unexplained production divergence");

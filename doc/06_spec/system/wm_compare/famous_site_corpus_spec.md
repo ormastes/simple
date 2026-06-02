@@ -483,6 +483,29 @@ expect(result.0).to_contain("per-line text ink entries do not match Simple layou
 
 </details>
 
+#### fails the production probe gate when per-line ink position drifts from pixels
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val tool_path = "tools/electron-shell/verify_famous_site_production_probe.js"
+expect(rt_file_exists(tool_path)).to_equal(true)
+expect(rt_file_exists(famous_site_sample_production_report_sdn_path("site_0_google"))).to_equal(true)
+val result = rt_process_run_timeout("node", [tool_path, "--sample=site_0_google", "--corrupt-text-line-ink-position-for-test"], 10000)
+expect(result.2).to_equal(1)
+expect(result.0).to_contain("\"status\": \"FAIL\"")
+expect(result.0).to_contain("\"allRegionCountsMatch\": false")
+expect(result.0).to_contain("\"reportedDifferentPixels\": 808")
+expect(result.0).to_contain("\"actualDifferentPixels\": 745")
+expect(result.0).to_contain("per-line text ink region geometry does not match production pixels")
+```
+
+</details>
+
 #### fails the production probe gate when per-line ink no longer covers divergence
 
 <details>
@@ -532,7 +555,7 @@ expect(result.0).to_contain("residual pixel diagnostics do not match unexplained
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 43 lines folded for reproduction.
+Runnable source: 46 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -563,6 +586,9 @@ expect(result.0).to_contain("\"textLineInkDeltaCount\": 4")
 expect(result.0).to_contain("\"detailCount\": 4")
 expect(result.0).to_contain("\"differentPixelsTotal\": 2716")
 expect(result.0).to_contain("\"unexplainedDifferentPixels\": 1")
+expect(result.0).to_contain("\"allRegionCountsMatch\": true")
+expect(result.0).to_contain("\"reportedDifferentPixels\": 808")
+expect(result.0).to_contain("\"actualDifferentPixels\": 808")
 expect(result.0).to_contain("\"residualDifference\"")
 expect(result.0).to_contain("\"count\": 1")
 expect(result.0).to_contain("\"first\"")
@@ -1088,8 +1114,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 41 |
-| Active scenarios | 41 |
+| Total scenarios | 42 |
+| Active scenarios | 42 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
