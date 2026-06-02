@@ -453,7 +453,8 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   chainable `setEncoding()` with normalized `encoding`/`readableEncoding`
   tracking. Bounded synthetic responses now pipe their synthetic body into
   bounded `Writable` destinations, defer pipe while paused, drain on `resume()`,
-  and suppress pipe after read or destroy.
+  suppress pipe after read or destroy, and expose `unpipe()` to cancel a pending
+  paused pipe before resume.
   Real response streaming and event-loop ordering remain open.
 - Generated GUI WASM: move widget-matrix-specific state patterns into shared
   per-widget state helpers and cover additional generated apps.
