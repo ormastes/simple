@@ -1089,6 +1089,39 @@ match result:
 
 </details>
 
+#### dispatches Uint8Array prototype transform helpers with apply in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `8,255,16,19:255,7,8:554:19016511008:4,255,7,8`
+
+3. Err
+   - Expected: "unexpected uint8 prototype transform apply dispatch js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var b = new Uint8Array(4); b[0] = 260; b[1] = -1; b[2] = 7; b[3] = 8; var mapped = Uint8Array.prototype.map.apply(b, [function(v, i, arr) { return v + i + arr.at(i); }]); var filtered = Uint8Array.prototype.filter.apply(b, [function(v, i, arr) { return i && arr.at(0) == 4; }]); var reduced = Uint8Array.prototype.reduce.apply(b, [function(acc, v, i, arr) { return acc + v + i + arr.at(i); }, 0]); var reducedRight = Uint8Array.prototype.reduceRight.apply(b, [function(acc, v, i, arr) { return acc * 1000 + v + i + arr.at(i); }, 0]); mapped.toString() + ':' + filtered.toString() + ':' + reduced + ':' + reducedRight + ':' + b.toString()")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("8,255,16,19:255,7,8:554:19016511008:4,255,7,8")
+    Err(err):
+        expect("unexpected uint8 prototype transform apply dispatch js error: {err}").to_equal("")
+```
+
+</details>
+
 #### reduces Uint8Array values with accumulator callbacks in browser scripts
 
 1. var session = BrowserSession new
@@ -2494,8 +2527,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 67 |
-| Active scenarios | 67 |
+| Total scenarios | 68 |
+| Active scenarios | 68 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
