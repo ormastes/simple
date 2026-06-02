@@ -4,6 +4,17 @@
 const { app, BrowserWindow } = require("electron");
 const fs = require("fs");
 
+// Capture color exactness (no-tolerance policy):
+// A windowed BrowserWindow.capturePage() is composited through the OS display
+// server, which applies the monitor's ICC/color profile and shifts solid colors
+// a few levels away from the raw CSS values (e.g. macOS: R+4, B-1) — breaking
+// exact pixel equality. Offscreen rendering (webPreferences.offscreen=true,
+// captured below) renders to an in-process buffer in the page's own color space,
+// bypassing the display compositor, so captured pixels equal the CSS colors
+// exactly and deterministically. Pinning the color profile to sRGB reinforces
+// this. Must be set before app is ready.
+app.commandLine.appendSwitch("force-color-profile", "srgb");
+
 const width = Number(process.env.ELECTRON_BITMAP_WIDTH || 96);
 const height = Number(process.env.ELECTRON_BITMAP_HEIGHT || 64);
 const iterations = Number(process.env.ELECTRON_BITMAP_ITERATIONS || 5);
@@ -728,13 +739,13 @@ function bitmapToLogicalBgra(image) {
 async function main() {
   await app.whenReady();
   const win = new BrowserWindow({
-    show: true,
+    show: false,
     useContentSize: true,
     width: 1280,
     height: 720,
     backgroundColor: "#000000",
     webPreferences: {
-      offscreen: false,
+      offscreen: true,
       backgroundThrottling: false,
       nodeIntegration: false,
       contextIsolation: true,
@@ -742,6 +753,10 @@ async function main() {
   });
   win.setContentSize(width, height);
   win.webContents.setZoomFactor(1);
+  // Drive the offscreen rendering pipeline (a consumer for paint frames keeps it
+  // producing, which also lets requestAnimationFrame-based readiness fire).
+  win.webContents.setFrameRate(30);
+  win.webContents.on("paint", () => {});
   await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(fixtureHtml())}`);
   const ready = await win.webContents.executeJavaScript(`
     new Promise((resolve) => {
