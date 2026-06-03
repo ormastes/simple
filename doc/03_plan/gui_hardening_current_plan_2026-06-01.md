@@ -3985,3 +3985,17 @@ BrowserSession scripts now decode a truncated UTF-8 byte sequence through
 WASM validation result all agree in the browser-session path. The focused
 fetch/WASM chain spec now passes `86/86`; broader browser/WASM semantics remain
 open.
+
+BrowserSession WebAssembly Memory prototype dispatch continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession scripts now mutate a `WebAssembly.Memory` buffer through
+prototype-dispatched typed-array and DataView helpers:
+`Uint8Array.prototype.set.apply`, `DataView.prototype.setUint16.call`, and
+`DataView.prototype.getUint16.apply`. Byte coercion, little-endian writes,
+shared memory storage, and memory buffer length all agree through the
+browser-session path. The focused fetch/WASM chain spec now passes `87/87`;
+broader browser/WASM semantics remain open.

@@ -3069,6 +3069,39 @@ match result:
 
 </details>
 
+#### dispatches prototype helpers over WebAssembly Memory buffer views
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `4:255:7:258:2:1:65536`
+
+3. Err
+   - Expected: "unexpected wasm memory prototype dispatch js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var memory = new WebAssembly.Memory({ initial: 1, maximum: 2 }); var bytes = new Uint8Array(memory.buffer); var src = new Uint8Array(3); src[0] = 260; src[1] = -1; src[2] = 7; Uint8Array.prototype.set.apply(bytes, [src, 5]); var view = new DataView(memory.buffer); DataView.prototype.setUint16.call(view, 9, 258, true); bytes[5] + ':' + bytes[6] + ':' + bytes[7] + ':' + DataView.prototype.getUint16.apply(view, [9, true]) + ':' + bytes[9] + ':' + bytes[10] + ':' + memory.buffer.byteLength")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("4:255:7:258:2:1:65536")
+    Err(err):
+        expect("unexpected wasm memory prototype dispatch js error: {err}").to_equal("")
+```
+
+</details>
+
 #### preserves WebAssembly Memory state when grow exceeds maximum in browser scripts
 
 1. var session = BrowserSession new
@@ -3121,8 +3154,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 86 |
-| Active scenarios | 86 |
+| Total scenarios | 87 |
+| Active scenarios | 87 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
