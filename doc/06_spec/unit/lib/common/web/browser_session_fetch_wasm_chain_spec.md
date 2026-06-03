@@ -3102,6 +3102,39 @@ match result:
 
 </details>
 
+#### preserves prototype-dispatched WebAssembly Memory bytes after grow
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `1:131072:1,4,255:2,1:131072`
+
+3. Err
+   - Expected: "unexpected wasm memory prototype grow js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var memory = new WebAssembly.Memory({ initial: 1, maximum: 2 }); var before = new Uint8Array(memory.buffer); var src = new Uint8Array(3); src[0] = 1; src[1] = 260; src[2] = -1; Uint8Array.prototype.set.call(before, src, 12); var view = new DataView(memory.buffer); DataView.prototype.setUint16.apply(view, [20, 258, true]); var old = memory.grow(1); var after = new Uint8Array(memory.buffer); old + ':' + memory.buffer.byteLength + ':' + after[12] + ',' + after[13] + ',' + after[14] + ':' + after[20] + ',' + after[21] + ':' + after.length")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("1:131072:1,4,255:2,1:131072")
+    Err(err):
+        expect("unexpected wasm memory prototype grow js error: {err}").to_equal("")
+```
+
+</details>
+
 #### preserves WebAssembly Memory state when grow exceeds maximum in browser scripts
 
 1. var session = BrowserSession new
@@ -3154,8 +3187,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 87 |
-| Active scenarios | 87 |
+| Total scenarios | 88 |
+| Active scenarios | 88 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
