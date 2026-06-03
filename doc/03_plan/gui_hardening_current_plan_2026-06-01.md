@@ -4155,3 +4155,17 @@ descriptors from the streamed compiled module before instantiation. Streamed
 module byte length, export count, export names, and export kinds all agree in
 the browser-session path. The focused fetch/WASM chain spec now passes `99/99`;
 broader browser/WASM semantics remain open.
+
+BrowserSession compileStreaming module import descriptor continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession scripts now fetch and compile an imported-function WASM module
+through `WebAssembly.compileStreaming`, then read
+`WebAssembly.Module.imports` descriptors from the streamed compiled module
+before instantiation. Import count, streamed module byte length, descriptor
+count, and import module/name/kind all agree in the browser-session path. The
+focused fetch/WASM chain spec now passes `100/100`; broader browser/WASM
+semantics remain open.
