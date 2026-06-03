@@ -29,6 +29,20 @@ const WM_TRANSPARENCY_STORAGE_KEY = 'simple.wm.transparency';
 const WM_WALLPAPER_STORAGE_KEY = 'simple.wm.wallpaper';
 const WM_ACCENT_STORAGE_KEY = 'simple.wm.accent';
 const WM_FOCUS_MODE_STORAGE_KEY = 'simple.wm.focus_mode';
+const WM_CONTRAST_STORAGE_KEY = 'simple.wm.contrast';
+const WM_FEEDBACK_STORAGE_KEY = 'simple.wm.feedback';
+const WM_ENERGY_STORAGE_KEY = 'simple.wm.energy';
+const WM_ANIMATION_STYLE_STORAGE_KEY = 'simple.wm.animation_style';
+const WM_DOCK_MAGNIFICATION_STORAGE_KEY = 'simple.wm.dock_magnification';
+const WM_DOCK_VISIBILITY_STORAGE_KEY = 'simple.wm.dock_visibility';
+const WM_SURFACE_DEPTH_STORAGE_KEY = 'simple.wm.surface_depth';
+const WM_TRAFFIC_SIDE_STORAGE_KEY = 'simple.wm.traffic_side';
+const WM_CHROME_VERBOSITY_STORAGE_KEY = 'simple.wm.chrome_verbosity';
+const WM_WINDOW_TRANSITION_STORAGE_KEY = 'simple.wm.window_transition';
+const WM_DENSITY_STORAGE_KEY = 'simple.wm.density';
+const WM_BACKDROP_MOTION_STORAGE_KEY = 'simple.wm.backdrop_motion';
+const WM_BACKDROP_INTENSITY_STORAGE_KEY = 'simple.wm.backdrop_intensity';
+const WM_QUIET_MODE_STORAGE_KEY = 'simple.wm.quiet_mode';
 
 class SimpleWindowManager {
   constructor(options = {}) {
@@ -108,6 +122,20 @@ class SimpleWindowManager {
     this._wallpaperPicker = null;
     this._accentPalette = null;
     this._focusMode = 'off';
+    this._contrastMode = 'comfortable';
+    this._feedbackMode = 'standard';
+    this._energyMode = 'standard';
+    this._animationStyle = 'spring';
+    this._dockMagnificationMode = 'standard';
+    this._dockVisibilityMode = 'shown';
+    this._surfaceDepthMode = 'layered';
+    this._trafficSideMode = 'left';
+    this._chromeVerbosityMode = 'full';
+    this._windowTransitionMode = 'mac';
+    this._densityMode = 'comfortable';
+    this._backdropMotionMode = 'ambient';
+    this._backdropIntensityMode = 'balanced';
+    this._quietMode = 'off';
     this._dockStack = null;
     this._dockStackMode = 'fan';
     this._qualityInspector = null;
@@ -140,11 +168,39 @@ class SimpleWindowManager {
     this._applyWallpaperPreference(options.wallpaper || '');
     this._applyAccentPreference(options.accent || '');
     this._applyFocusMode(options.focusMode || '');
+    this._applyContrastPreference(options.contrast || '');
+    this._applyFeedbackPreference(options.feedback || '');
+    this._applyEnergyPreference(options.energy || '');
+    this._applyAnimationStyle(options.animationStyle || '');
+    this._applyDockMagnificationPreference(options.dockMagnification || '');
+    this._applyDockVisibilityPreference(options.dockVisibility || '');
+    this._applySurfaceDepthPreference(options.surfaceDepth || '');
+    this._applyTrafficSidePreference(options.trafficSide || '');
+    this._applyChromeVerbosityPreference(options.chromeVerbosity || '');
+    this._applyWindowTransitionPreference(options.windowTransition || '');
+    this._applyDensityPreference(options.density || '');
+    this._applyBackdropMotionPreference(options.backdropMotion || '');
+    this._applyBackdropIntensityPreference(options.backdropIntensity || '');
+    this._applyQuietModePreference(options.quietMode || '');
     window.simpleWmSetMotion = (preference) => this.setMotionPreference(preference);
     window.simpleWmSetTransparency = (preference) => this.setTransparencyPreference(preference);
     window.simpleWmSetWallpaper = (preference) => this.setWallpaperPreference(preference);
     window.simpleWmSetAccent = (preference) => this.setAccentPreference(preference);
     window.simpleWmSetFocusMode = (preference) => this.setFocusMode(preference);
+    window.simpleWmSetContrast = (preference) => this.setContrastPreference(preference);
+    window.simpleWmSetFeedback = (preference) => this.setFeedbackPreference(preference);
+    window.simpleWmSetEnergy = (preference) => this.setEnergyPreference(preference);
+    window.simpleWmSetAnimationStyle = (preference) => this.setAnimationStyle(preference);
+    window.simpleWmSetDockMagnification = (preference) => this.setDockMagnificationPreference(preference);
+    window.simpleWmSetDockVisibility = (preference) => this.setDockVisibilityPreference(preference);
+    window.simpleWmSetSurfaceDepth = (preference) => this.setSurfaceDepthPreference(preference);
+    window.simpleWmSetTrafficSide = (preference) => this.setTrafficSidePreference(preference);
+    window.simpleWmSetChromeVerbosity = (preference) => this.setChromeVerbosityPreference(preference);
+    window.simpleWmSetWindowTransition = (preference) => this.setWindowTransitionPreference(preference);
+    window.simpleWmSetDensity = (preference) => this.setDensityPreference(preference);
+    window.simpleWmSetBackdropMotion = (preference) => this.setBackdropMotionPreference(preference);
+    window.simpleWmSetBackdropIntensity = (preference) => this.setBackdropIntensityPreference(preference);
+    window.simpleWmSetQuietMode = (preference) => this.setQuietModePreference(preference);
 
     // Load renderer then begin auth.
     this._init();
@@ -361,6 +417,380 @@ class SimpleWindowManager {
     if (mode === 'work') return 'Work focus';
     if (mode === 'deep') return 'Deep focus';
     return 'Focus off';
+  }
+
+  setContrastPreference(preference) {
+    const mode = this._normalizeContrastPreference(preference);
+    this._writePreference(WM_CONTRAST_STORAGE_KEY, mode);
+    const applied = this._applyContrastPreference(mode);
+    this._showSystemHud('Readability', this._contrastLabel(applied), 1600);
+    return applied;
+  }
+
+  _applyContrastPreference(preference) {
+    const mode = this._normalizeContrastPreference(preference || this._readContrastPreference());
+    this._contrastMode = mode;
+    document.documentElement.dataset.wmContrast = mode;
+    return mode;
+  }
+
+  _readContrastPreference() {
+    return this._readPreference(WM_CONTRAST_STORAGE_KEY);
+  }
+
+  _normalizeContrastPreference(preference) {
+    const value = String(preference || '').trim().toLowerCase();
+    if (value === 'high' || value === 'comfortable') return value;
+    return 'comfortable';
+  }
+
+  _contrastLabel(mode = this._contrastMode) {
+    if (mode === 'high') return 'High contrast';
+    return 'Comfortable contrast';
+  }
+
+  setFeedbackPreference(preference) {
+    const mode = this._normalizeFeedbackPreference(preference);
+    this._writePreference(WM_FEEDBACK_STORAGE_KEY, mode);
+    const applied = this._applyFeedbackPreference(mode);
+    if (applied !== 'off') this._showSystemHud('Feedback', this._feedbackLabel(applied), 1500);
+    return applied;
+  }
+
+  _applyFeedbackPreference(preference) {
+    const mode = this._normalizeFeedbackPreference(preference || this._readFeedbackPreference());
+    this._feedbackMode = mode;
+    document.documentElement.dataset.wmFeedback = mode;
+    return mode;
+  }
+
+  _readFeedbackPreference() {
+    return this._readPreference(WM_FEEDBACK_STORAGE_KEY);
+  }
+
+  _normalizeFeedbackPreference(preference) {
+    const value = String(preference || '').trim().toLowerCase();
+    if (value === 'subtle' || value === 'off' || value === 'standard') return value;
+    return 'standard';
+  }
+
+  _feedbackLabel(mode = this._feedbackMode) {
+    if (mode === 'subtle') return 'Subtle feedback';
+    if (mode === 'off') return 'Feedback off';
+    return 'Standard feedback';
+  }
+
+  _feedbackAllows(level = 'standard') {
+    if (this._feedbackMode === 'off') return level === 'critical';
+    if (this._feedbackMode === 'subtle') return level !== 'verbose';
+    return true;
+  }
+
+  setEnergyPreference(preference) {
+    const mode = this._normalizeEnergyPreference(preference);
+    this._writePreference(WM_ENERGY_STORAGE_KEY, mode);
+    const applied = this._applyEnergyPreference(mode);
+    this._showSystemHud('Energy policy', this._energyLabel(applied), 1500);
+    return applied;
+  }
+
+  _applyEnergyPreference(preference) {
+    const mode = this._normalizeEnergyPreference(preference || this._readEnergyPreference());
+    this._energyMode = mode;
+    document.documentElement.dataset.wmEnergy = mode;
+    return mode;
+  }
+
+  _readEnergyPreference() {
+    return this._readPreference(WM_ENERGY_STORAGE_KEY);
+  }
+
+  _normalizeEnergyPreference(preference) {
+    const value = String(preference || '').trim().toLowerCase();
+    if (value === 'low' || value === 'low-power' || value === 'low_power') return 'low';
+    if (value === 'critical' || value === 'critical-saver' || value === 'critical_saver') return 'critical';
+    if (value === 'standard') return value;
+    return 'standard';
+  }
+
+  _energyLabel(mode = this._energyMode) {
+    if (mode === 'low') return 'Low power';
+    if (mode === 'critical') return 'Critical saver';
+    return 'Standard energy';
+  }
+
+  setAnimationStyle(preference) {
+    const mode = this._normalizeAnimationStyle(preference);
+    this._writePreference(WM_ANIMATION_STYLE_STORAGE_KEY, mode);
+    const applied = this._applyAnimationStyle(mode);
+    this._showSystemHud('Animation', applied);
+    return applied;
+  }
+
+  _applyAnimationStyle(preference) {
+    const mode = this._normalizeAnimationStyle(preference || this._readAnimationStyle());
+    this._animationStyle = mode;
+    document.documentElement.dataset.wmAnimationStyle = mode;
+    return mode;
+  }
+
+  _readAnimationStyle() {
+    return this._readPreference(WM_ANIMATION_STYLE_STORAGE_KEY);
+  }
+
+  _normalizeAnimationStyle(preference) {
+    const value = String(preference || '').trim().toLowerCase();
+    if (value === 'calm' || value === 'snappy' || value === 'spring') return value;
+    return 'spring';
+  }
+
+  setDockMagnificationPreference(preference) {
+    const mode = this._normalizeDockMagnificationPreference(preference);
+    this._writePreference(WM_DOCK_MAGNIFICATION_STORAGE_KEY, mode);
+    const applied = this._applyDockMagnificationPreference(mode);
+    this._showSystemHud('Dock', this._dockMagnificationLabel(applied));
+    return applied;
+  }
+
+  _applyDockMagnificationPreference(preference) {
+    const mode = this._normalizeDockMagnificationPreference(preference || this._readDockMagnificationPreference());
+    this._dockMagnificationMode = mode;
+    document.documentElement.dataset.wmDockMagnification = mode;
+    return mode;
+  }
+
+  _readDockMagnificationPreference() {
+    return this._readPreference(WM_DOCK_MAGNIFICATION_STORAGE_KEY);
+  }
+
+  _normalizeDockMagnificationPreference(preference) {
+    const value = String(preference || '').trim().toLowerCase();
+    if (value === 'subtle' || value === 'off' || value === 'standard') return value;
+    return 'standard';
+  }
+
+  _dockMagnificationLabel(mode = this._dockMagnificationMode) {
+    if (mode === 'subtle') return 'Subtle dock';
+    if (mode === 'off') return 'Dock magnification off';
+    return 'Standard dock';
+  }
+
+  setDockVisibilityPreference(preference) {
+    const mode = this._normalizeDockVisibilityPreference(preference);
+    this._writePreference(WM_DOCK_VISIBILITY_STORAGE_KEY, mode);
+    const applied = this._applyDockVisibilityPreference(mode);
+    this._showSystemHud('Dock visibility', this._dockVisibilityLabel(applied));
+    return applied;
+  }
+
+  _applyDockVisibilityPreference(preference) {
+    const mode = this._normalizeDockVisibilityPreference(preference || this._readDockVisibilityPreference());
+    this._dockVisibilityMode = mode;
+    document.documentElement.dataset.wmDockVisibility = mode;
+    return mode;
+  }
+
+  _readDockVisibilityPreference() {
+    return this._readPreference(WM_DOCK_VISIBILITY_STORAGE_KEY);
+  }
+
+  _normalizeDockVisibilityPreference(preference) {
+    const value = String(preference || '').trim().toLowerCase();
+    if (value === 'auto' || value === 'hidden' || value === 'shown') return value;
+    return 'shown';
+  }
+
+  _dockVisibilityLabel(mode = this._dockVisibilityMode) {
+    if (mode === 'auto') return 'Auto-hide';
+    if (mode === 'hidden') return 'Hidden';
+    return 'Shown';
+  }
+
+  setSurfaceDepthPreference(preference) {
+    const mode = this._normalizeThreeMode(preference, 'layered', 'subtle', 'flat');
+    this._writePreference(WM_SURFACE_DEPTH_STORAGE_KEY, mode);
+    this._surfaceDepthMode = mode;
+    document.documentElement.dataset.wmSurfaceDepth = mode;
+    this._showSystemHud('Surface depth', mode);
+    return mode;
+  }
+
+  _applySurfaceDepthPreference(preference) {
+    const mode = this._normalizeThreeMode(preference || this._readSurfaceDepthPreference(), 'layered', 'subtle', 'flat');
+    this._surfaceDepthMode = mode;
+    document.documentElement.dataset.wmSurfaceDepth = mode;
+    return mode;
+  }
+
+  _readSurfaceDepthPreference() {
+    return this._readPreference(WM_SURFACE_DEPTH_STORAGE_KEY);
+  }
+
+  setTrafficSidePreference(preference) {
+    const mode = this._normalizeThreeMode(preference, 'left', 'right', 'left');
+    this._writePreference(WM_TRAFFIC_SIDE_STORAGE_KEY, mode);
+    this._trafficSideMode = mode;
+    document.documentElement.dataset.wmTrafficSide = mode;
+    this._showSystemHud('Traffic controls', mode);
+    return mode;
+  }
+
+  _applyTrafficSidePreference(preference) {
+    const mode = this._normalizeThreeMode(preference || this._readTrafficSidePreference(), 'left', 'right', 'left');
+    this._trafficSideMode = mode;
+    document.documentElement.dataset.wmTrafficSide = mode;
+    return mode;
+  }
+
+  _readTrafficSidePreference() {
+    return this._readPreference(WM_TRAFFIC_SIDE_STORAGE_KEY);
+  }
+
+  setChromeVerbosityPreference(preference) {
+    const mode = this._normalizeThreeMode(preference, 'full', 'compact', 'minimal');
+    this._writePreference(WM_CHROME_VERBOSITY_STORAGE_KEY, mode);
+    this._chromeVerbosityMode = mode;
+    document.documentElement.dataset.wmChromeVerbosity = mode;
+    this._showSystemHud('Chrome verbosity', mode);
+    return mode;
+  }
+
+  _applyChromeVerbosityPreference(preference) {
+    const mode = this._normalizeThreeMode(preference || this._readChromeVerbosityPreference(), 'full', 'compact', 'minimal');
+    this._chromeVerbosityMode = mode;
+    document.documentElement.dataset.wmChromeVerbosity = mode;
+    return mode;
+  }
+
+  _readChromeVerbosityPreference() {
+    return this._readPreference(WM_CHROME_VERBOSITY_STORAGE_KEY);
+  }
+
+  setWindowTransitionPreference(preference) {
+    const mode = this._normalizeThreeMode(preference, 'mac', 'fade', 'none');
+    this._writePreference(WM_WINDOW_TRANSITION_STORAGE_KEY, mode);
+    this._windowTransitionMode = mode;
+    document.documentElement.dataset.wmWindowTransition = mode;
+    this._showSystemHud('Window motion', mode);
+    return mode;
+  }
+
+  _applyWindowTransitionPreference(preference) {
+    const mode = this._normalizeThreeMode(preference || this._readWindowTransitionPreference(), 'mac', 'fade', 'none');
+    this._windowTransitionMode = mode;
+    document.documentElement.dataset.wmWindowTransition = mode;
+    return mode;
+  }
+
+  _readWindowTransitionPreference() {
+    return this._readPreference(WM_WINDOW_TRANSITION_STORAGE_KEY);
+  }
+
+  setDensityPreference(preference) {
+    const mode = this._normalizeThreeMode(preference, 'comfortable', 'compact', 'spacious');
+    this._writePreference(WM_DENSITY_STORAGE_KEY, mode);
+    this._densityMode = mode;
+    document.documentElement.dataset.wmDensity = mode;
+    this._showSystemHud('Layout density', mode);
+    return mode;
+  }
+
+  _applyDensityPreference(preference) {
+    const mode = this._normalizeThreeMode(preference || this._readDensityPreference(), 'comfortable', 'compact', 'spacious');
+    this._densityMode = mode;
+    document.documentElement.dataset.wmDensity = mode;
+    return mode;
+  }
+
+  _readDensityPreference() {
+    return this._readPreference(WM_DENSITY_STORAGE_KEY);
+  }
+
+  setBackdropMotionPreference(preference) {
+    const mode = this._normalizeThreeMode(preference, 'ambient', 'subtle', 'static');
+    this._writePreference(WM_BACKDROP_MOTION_STORAGE_KEY, mode);
+    this._backdropMotionMode = mode;
+    document.documentElement.dataset.wmBackdropMotion = mode;
+    this._showSystemHud('Backdrop motion', mode);
+    return mode;
+  }
+
+  _applyBackdropMotionPreference(preference) {
+    const mode = this._normalizeThreeMode(preference || this._readBackdropMotionPreference(), 'ambient', 'subtle', 'static');
+    this._backdropMotionMode = mode;
+    document.documentElement.dataset.wmBackdropMotion = mode;
+    return mode;
+  }
+
+  _readBackdropMotionPreference() {
+    return this._readPreference(WM_BACKDROP_MOTION_STORAGE_KEY);
+  }
+
+  setBackdropIntensityPreference(preference) {
+    const mode = this._normalizeThreeMode(preference, 'balanced', 'vivid', 'quiet');
+    this._writePreference(WM_BACKDROP_INTENSITY_STORAGE_KEY, mode);
+    this._backdropIntensityMode = mode;
+    document.documentElement.dataset.wmBackdropIntensity = mode;
+    this._showSystemHud('Backdrop intensity', this._backdropIntensityLabel(mode));
+    return mode;
+  }
+
+  _applyBackdropIntensityPreference(preference) {
+    const mode = this._normalizeThreeMode(preference || this._readBackdropIntensityPreference(), 'balanced', 'vivid', 'quiet');
+    this._backdropIntensityMode = mode;
+    document.documentElement.dataset.wmBackdropIntensity = mode;
+    return mode;
+  }
+
+  _readBackdropIntensityPreference() {
+    return this._readPreference(WM_BACKDROP_INTENSITY_STORAGE_KEY);
+  }
+
+  _backdropIntensityLabel(mode) {
+    if (mode === 'vivid') return 'Vivid backdrop';
+    if (mode === 'quiet') return 'Quiet backdrop';
+    return 'Balanced backdrop';
+  }
+
+  setQuietModePreference(preference) {
+    const mode = this._normalizeThreeMode(preference, 'off', 'on', 'off');
+    this._writePreference(WM_QUIET_MODE_STORAGE_KEY, mode);
+    const applied = this._applyQuietModePreference(mode);
+    this._showSystemHud('Quiet mode', applied === 'on' ? 'on' : 'off');
+    return applied;
+  }
+
+  _applyQuietModePreference(preference) {
+    const mode = this._normalizeThreeMode(preference || this._readQuietModePreference(), 'off', 'on', 'off');
+    this._quietMode = mode;
+    document.documentElement.dataset.wmQuietMode = mode;
+    return mode;
+  }
+
+  _readQuietModePreference() {
+    return this._readPreference(WM_QUIET_MODE_STORAGE_KEY);
+  }
+
+  _normalizeThreeMode(preference, first, second, third) {
+    const value = String(preference || '').trim().toLowerCase();
+    if (value === first || value === second || value === third) return value;
+    return first;
+  }
+
+  _writePreference(key, value) {
+    try {
+      window.localStorage.setItem(key, value);
+    } catch (_) {
+      // Storage can be unavailable in restricted webviews; the DOM mode still applies.
+    }
+  }
+
+  _readPreference(key) {
+    try {
+      return window.localStorage.getItem(key) || '';
+    } catch (_) {
+      return '';
+    }
   }
 
   _toggleFocusMode() {
@@ -764,6 +1194,39 @@ class SimpleWindowManager {
       { label: 'Set transparency: standard', category: 'Appearance', shortcut: 'Cmd 4', icon: 'G', action: () => this.setTransparencyPreference('standard') },
       { label: 'Set transparency: reduced', category: 'Appearance', shortcut: 'Cmd 5', icon: 'R', action: () => this.setTransparencyPreference('reduced') },
       { label: 'Set transparency: off', category: 'Appearance', shortcut: 'Cmd 6', icon: 'S', action: () => this.setTransparencyPreference('off') },
+      { label: 'Set accent: blue', category: 'Appearance', shortcut: '', icon: 'B', action: () => this._setAccentFromControlCenter('blue') },
+      { label: 'Set accent: green', category: 'Appearance', shortcut: '', icon: 'G', action: () => this._setAccentFromControlCenter('green') },
+      { label: 'Set accent: rose', category: 'Appearance', shortcut: '', icon: 'R', action: () => this._setAccentFromControlCenter('rose') },
+      { label: 'Set accent: amber', category: 'Appearance', shortcut: '', icon: 'A', action: () => this._setAccentFromControlCenter('amber') },
+      { label: 'Set accent: violet', category: 'Appearance', shortcut: '', icon: 'V', action: () => this._setAccentFromControlCenter('violet') },
+      { label: 'Set contrast: comfortable', category: 'Appearance', shortcut: '', icon: 'C', action: () => this.setContrastPreference('comfortable') },
+      { label: 'Set contrast: high', category: 'Appearance', shortcut: '', icon: 'H', action: () => this.setContrastPreference('high') },
+      { label: 'Set feedback: standard', category: 'Appearance', shortcut: '', icon: 'F', action: () => this.setFeedbackPreference('standard') },
+      { label: 'Set feedback: subtle', category: 'Appearance', shortcut: '', icon: 'F', action: () => this.setFeedbackPreference('subtle') },
+      { label: 'Set feedback: off', category: 'Appearance', shortcut: '', icon: 'F', action: () => this.setFeedbackPreference('off') },
+      { label: 'Set energy: standard', category: 'Appearance', shortcut: '', icon: 'E', action: () => this.setEnergyPreference('standard') },
+      { label: 'Set energy: low power', category: 'Appearance', shortcut: '', icon: 'E', action: () => this.setEnergyPreference('low') },
+      { label: 'Set energy: critical saver', category: 'Appearance', shortcut: '', icon: 'E', action: () => this.setEnergyPreference('critical') },
+      { label: 'Set backdrop intensity: vivid', category: 'Appearance', shortcut: '', icon: 'V', action: () => this.setBackdropIntensityPreference('vivid') },
+      { label: 'Set backdrop intensity: balanced', category: 'Appearance', shortcut: '', icon: 'B', action: () => this.setBackdropIntensityPreference('balanced') },
+      { label: 'Set backdrop intensity: quiet', category: 'Appearance', shortcut: '', icon: 'Q', action: () => this.setBackdropIntensityPreference('quiet') },
+      { label: 'Set animation style: spring', category: 'Appearance', shortcut: '', icon: 'S', action: () => this.setAnimationStyle('spring') },
+      { label: 'Set animation style: calm', category: 'Appearance', shortcut: '', icon: 'C', action: () => this.setAnimationStyle('calm') },
+      { label: 'Set animation style: snappy', category: 'Appearance', shortcut: '', icon: 'N', action: () => this.setAnimationStyle('snappy') },
+      { label: 'Set dock magnification: standard', category: 'Appearance', shortcut: '', icon: 'D', action: () => this.setDockMagnificationPreference('standard') },
+      { label: 'Set dock magnification: subtle', category: 'Appearance', shortcut: '', icon: 'D', action: () => this.setDockMagnificationPreference('subtle') },
+      { label: 'Set dock magnification: off', category: 'Appearance', shortcut: '', icon: 'D', action: () => this.setDockMagnificationPreference('off') },
+      { label: 'Set dock visibility: shown', category: 'Appearance', shortcut: '', icon: 'D', action: () => this.setDockVisibilityPreference('shown') },
+      { label: 'Set dock visibility: auto-hide', category: 'Appearance', shortcut: '', icon: 'D', action: () => this.setDockVisibilityPreference('auto') },
+      { label: 'Set dock visibility: hidden', category: 'Appearance', shortcut: '', icon: 'D', action: () => this.setDockVisibilityPreference('hidden') },
+      { label: 'Set chrome verbosity: full', category: 'Appearance', shortcut: '', icon: 'F', action: () => this.setChromeVerbosityPreference('full') },
+      { label: 'Set chrome verbosity: compact', category: 'Appearance', shortcut: '', icon: 'C', action: () => this.setChromeVerbosityPreference('compact') },
+      { label: 'Set chrome verbosity: minimal', category: 'Appearance', shortcut: '', icon: 'M', action: () => this.setChromeVerbosityPreference('minimal') },
+      { label: 'Set window motion: mac', category: 'Appearance', shortcut: '', icon: 'M', action: () => this.setWindowTransitionPreference('mac') },
+      { label: 'Set window motion: fade', category: 'Appearance', shortcut: '', icon: 'F', action: () => this.setWindowTransitionPreference('fade') },
+      { label: 'Set window motion: none', category: 'Appearance', shortcut: '', icon: 'N', action: () => this.setWindowTransitionPreference('none') },
+      { label: 'Set quiet mode: off', category: 'Appearance', shortcut: '', icon: 'Q', action: () => this.setQuietModePreference('off') },
+      { label: 'Set quiet mode: on', category: 'Appearance', shortcut: '', icon: 'Q', action: () => this.setQuietModePreference('on') },
       { label: 'Open wallpaper picker', category: 'Appearance', shortcut: 'Cmd Shift B', icon: 'B', action: () => this._toggleWallpaperPicker(true) },
       { label: 'Set wallpaper: aurora', category: 'Appearance', shortcut: 'Cmd 7', icon: 'A', action: () => this.setWallpaperPreference('aurora') },
       { label: 'Set wallpaper: mesh', category: 'Appearance', shortcut: 'Cmd 8', icon: 'M', action: () => this.setWallpaperPreference('mesh') },
@@ -2870,6 +3333,7 @@ class SimpleWindowManager {
   }
 
   _showSystemHud(label = 'System', value = 'ready', durationMs = 1800) {
+    if (!this._feedbackAllows('standard')) return null;
     const hud = this._ensureSystemHud();
     hud.innerHTML = '';
     const icon = document.createElement('span');
@@ -3022,6 +3486,60 @@ class SimpleWindowManager {
     motion.appendChild(this._makeControlCenterButton('Reduced motion', this._normalizeMotionPreference(this._readMotionPreference()) === 'reduced', () => this._setMotionFromControlCenter('reduced')));
     motion.appendChild(this._makeControlCenterButton('Motion off', this._normalizeMotionPreference(this._readMotionPreference()) === 'off', () => this._setMotionFromControlCenter('off')));
     panel.appendChild(motion);
+    const quiet = document.createElement('div');
+    quiet.className = 'wm-control-group';
+    quiet.setAttribute('aria-label', 'Quiet mode');
+    quiet.appendChild(this._makeControlCenterButton('Quiet mode off', this._quietMode === 'off', () => this.setQuietModePreference('off')));
+    quiet.appendChild(this._makeControlCenterButton('Quiet mode on', this._quietMode === 'on', () => this.setQuietModePreference('on')));
+    panel.appendChild(quiet);
+    const animation = document.createElement('div');
+    animation.className = 'wm-control-group';
+    animation.setAttribute('aria-label', 'Animation style');
+    animation.appendChild(this._makeControlCenterButton('Spring motion', this._animationStyle === 'spring', () => this.setAnimationStyle('spring')));
+    animation.appendChild(this._makeControlCenterButton('Calm motion', this._animationStyle === 'calm', () => this.setAnimationStyle('calm')));
+    animation.appendChild(this._makeControlCenterButton('Snappy motion', this._animationStyle === 'snappy', () => this.setAnimationStyle('snappy')));
+    panel.appendChild(animation);
+    const dockMagnification = document.createElement('div');
+    dockMagnification.className = 'wm-control-group';
+    dockMagnification.setAttribute('aria-label', 'Dock magnification');
+    dockMagnification.appendChild(this._makeControlCenterButton('Standard dock', this._dockMagnificationMode === 'standard', () => this.setDockMagnificationPreference('standard')));
+    dockMagnification.appendChild(this._makeControlCenterButton('Subtle dock', this._dockMagnificationMode === 'subtle', () => this.setDockMagnificationPreference('subtle')));
+    dockMagnification.appendChild(this._makeControlCenterButton('Dock magnification off', this._dockMagnificationMode === 'off', () => this.setDockMagnificationPreference('off')));
+    panel.appendChild(dockMagnification);
+    const dockVisibility = document.createElement('div');
+    dockVisibility.className = 'wm-control-group';
+    dockVisibility.setAttribute('aria-label', 'Dock visibility');
+    dockVisibility.appendChild(this._makeControlCenterButton('Dock shown', this._dockVisibilityMode === 'shown', () => this.setDockVisibilityPreference('shown')));
+    dockVisibility.appendChild(this._makeControlCenterButton('Dock auto-hide', this._dockVisibilityMode === 'auto', () => this.setDockVisibilityPreference('auto')));
+    dockVisibility.appendChild(this._makeControlCenterButton('Dock hidden', this._dockVisibilityMode === 'hidden', () => this.setDockVisibilityPreference('hidden')));
+    panel.appendChild(dockVisibility);
+    const surface = document.createElement('div');
+    surface.className = 'wm-control-group';
+    surface.setAttribute('aria-label', 'Surface depth');
+    surface.appendChild(this._makeControlCenterButton('Layered depth', this._surfaceDepthMode === 'layered', () => this.setSurfaceDepthPreference('layered')));
+    surface.appendChild(this._makeControlCenterButton('Subtle depth', this._surfaceDepthMode === 'subtle', () => this.setSurfaceDepthPreference('subtle')));
+    surface.appendChild(this._makeControlCenterButton('Flat depth', this._surfaceDepthMode === 'flat', () => this.setSurfaceDepthPreference('flat')));
+    panel.appendChild(surface);
+    const traffic = document.createElement('div');
+    traffic.className = 'wm-control-group';
+    traffic.setAttribute('aria-label', 'Traffic controls');
+    traffic.appendChild(this._makeControlCenterButton('Left traffic', this._trafficSideMode === 'left', () => this.setTrafficSidePreference('left')));
+    traffic.appendChild(this._makeControlCenterButton('Right traffic', this._trafficSideMode === 'right', () => this.setTrafficSidePreference('right')));
+    panel.appendChild(traffic);
+    const chrome = document.createElement('div');
+    chrome.className = 'wm-control-group';
+    chrome.setAttribute('aria-label', 'Chrome verbosity');
+    chrome.appendChild(this._makeControlCenterButton('Full chrome', this._chromeVerbosityMode === 'full', () => this.setChromeVerbosityPreference('full')));
+    chrome.appendChild(this._makeControlCenterButton('Compact chrome', this._chromeVerbosityMode === 'compact', () => this.setChromeVerbosityPreference('compact')));
+    chrome.appendChild(this._makeControlCenterButton('Minimal chrome', this._chromeVerbosityMode === 'minimal', () => this.setChromeVerbosityPreference('minimal')));
+    panel.appendChild(chrome);
+    const windowMotion = document.createElement('div');
+    windowMotion.className = 'wm-control-group';
+    windowMotion.setAttribute('aria-label', 'Window motion');
+    windowMotion.appendChild(this._makeControlCenterButton('Mac motion', this._windowTransitionMode === 'mac', () => this.setWindowTransitionPreference('mac')));
+    windowMotion.appendChild(this._makeControlCenterButton('Fade motion', this._windowTransitionMode === 'fade', () => this.setWindowTransitionPreference('fade')));
+    windowMotion.appendChild(this._makeControlCenterButton('Motion none', this._windowTransitionMode === 'none', () => this.setWindowTransitionPreference('none')));
+    panel.appendChild(windowMotion);
     const focus = document.createElement('div');
     focus.className = 'wm-control-group';
     focus.setAttribute('aria-label', 'Focus mode');
@@ -3036,6 +3554,34 @@ class SimpleWindowManager {
     material.appendChild(this._makeControlCenterButton('Reduced glass', this._normalizeTransparencyPreference(this._readTransparencyPreference()) === 'reduced', () => this._setTransparencyFromControlCenter('reduced')));
     material.appendChild(this._makeControlCenterButton('Solid surfaces', this._normalizeTransparencyPreference(this._readTransparencyPreference()) === 'off', () => this._setTransparencyFromControlCenter('off')));
     panel.appendChild(material);
+    const accent = document.createElement('div');
+    accent.className = 'wm-control-group';
+    accent.setAttribute('aria-label', 'Accent color');
+    const activeAccent = this._normalizeAccentPreference(this._readAccentPreference()).id;
+    this._accentChoices().forEach((choice) => {
+      accent.appendChild(this._makeControlCenterButton(choice.label + ' accent', activeAccent === choice.id, () => this._setAccentFromControlCenter(choice.id)));
+    });
+    panel.appendChild(accent);
+    const contrast = document.createElement('div');
+    contrast.className = 'wm-control-group';
+    contrast.setAttribute('aria-label', 'Readability contrast');
+    contrast.appendChild(this._makeControlCenterButton('Comfortable contrast', this._contrastMode === 'comfortable', () => this.setContrastPreference('comfortable')));
+    contrast.appendChild(this._makeControlCenterButton('High contrast', this._contrastMode === 'high', () => this.setContrastPreference('high')));
+    panel.appendChild(contrast);
+    const feedback = document.createElement('div');
+    feedback.className = 'wm-control-group';
+    feedback.setAttribute('aria-label', 'Feedback policy');
+    feedback.appendChild(this._makeControlCenterButton('Standard feedback', this._feedbackMode === 'standard', () => this.setFeedbackPreference('standard')));
+    feedback.appendChild(this._makeControlCenterButton('Subtle feedback', this._feedbackMode === 'subtle', () => this.setFeedbackPreference('subtle')));
+    feedback.appendChild(this._makeControlCenterButton('Feedback off', this._feedbackMode === 'off', () => this.setFeedbackPreference('off')));
+    panel.appendChild(feedback);
+    const energy = document.createElement('div');
+    energy.className = 'wm-control-group';
+    energy.setAttribute('aria-label', 'Energy policy');
+    energy.appendChild(this._makeControlCenterButton('Standard energy', this._energyMode === 'standard', () => this.setEnergyPreference('standard')));
+    energy.appendChild(this._makeControlCenterButton('Low power', this._energyMode === 'low', () => this.setEnergyPreference('low')));
+    energy.appendChild(this._makeControlCenterButton('Critical saver', this._energyMode === 'critical', () => this.setEnergyPreference('critical')));
+    panel.appendChild(energy);
     const wallpaper = document.createElement('div');
     wallpaper.className = 'wm-control-group';
     wallpaper.setAttribute('aria-label', 'Animated wallpaper');
@@ -3044,6 +3590,27 @@ class SimpleWindowManager {
     wallpaper.appendChild(this._makeControlCenterButton('Mesh', activeWallpaper === 'mesh', () => this._setWallpaperFromControlCenter('mesh')));
     wallpaper.appendChild(this._makeControlCenterButton('Solid', activeWallpaper === 'solid', () => this._setWallpaperFromControlCenter('solid')));
     panel.appendChild(wallpaper);
+    const backdrop = document.createElement('div');
+    backdrop.className = 'wm-control-group';
+    backdrop.setAttribute('aria-label', 'Backdrop motion');
+    backdrop.appendChild(this._makeControlCenterButton('Ambient drift', this._backdropMotionMode === 'ambient', () => this.setBackdropMotionPreference('ambient')));
+    backdrop.appendChild(this._makeControlCenterButton('Subtle drift', this._backdropMotionMode === 'subtle', () => this.setBackdropMotionPreference('subtle')));
+    backdrop.appendChild(this._makeControlCenterButton('Static backdrop', this._backdropMotionMode === 'static', () => this.setBackdropMotionPreference('static')));
+    panel.appendChild(backdrop);
+    const backdropIntensity = document.createElement('div');
+    backdropIntensity.className = 'wm-control-group';
+    backdropIntensity.setAttribute('aria-label', 'Backdrop intensity');
+    backdropIntensity.appendChild(this._makeControlCenterButton('Vivid backdrop', this._backdropIntensityMode === 'vivid', () => this.setBackdropIntensityPreference('vivid')));
+    backdropIntensity.appendChild(this._makeControlCenterButton('Balanced backdrop', this._backdropIntensityMode === 'balanced', () => this.setBackdropIntensityPreference('balanced')));
+    backdropIntensity.appendChild(this._makeControlCenterButton('Quiet backdrop', this._backdropIntensityMode === 'quiet', () => this.setBackdropIntensityPreference('quiet')));
+    panel.appendChild(backdropIntensity);
+    const density = document.createElement('div');
+    density.className = 'wm-control-group';
+    density.setAttribute('aria-label', 'Layout density');
+    density.appendChild(this._makeControlCenterButton('Compact density', this._densityMode === 'compact', () => this.setDensityPreference('compact')));
+    density.appendChild(this._makeControlCenterButton('Comfortable density', this._densityMode === 'comfortable', () => this.setDensityPreference('comfortable')));
+    density.appendChild(this._makeControlCenterButton('Spacious density', this._densityMode === 'spacious', () => this.setDensityPreference('spacious')));
+    panel.appendChild(density);
     const tools = document.createElement('div');
     tools.className = 'wm-control-group';
     tools.setAttribute('aria-label', 'Workspace tools');
@@ -3096,6 +3663,14 @@ class SimpleWindowManager {
     const value = shelf ? shelf.querySelector('.wm-widget-workspace .wm-desktop-widget-meta') : null;
     if (value) value.textContent = 'wallpaper: ' + wallpaper;
     this._sendWindowCmd('wallpaper_pick', { wallpaper_id: wallpaper });
+  }
+
+  _setAccentFromControlCenter(preference) {
+    const accentId = this.setAccentPreference(preference);
+    this._sendWindowCmd('accent_pick', { accent_id: accentId });
+    if (this._controlCenter && !this._controlCenter.hidden) this._renderControlCenter();
+    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
+    return accentId;
   }
 
   _ensureWallpaperPicker() {
@@ -3455,23 +4030,34 @@ class SimpleWindowManager {
     visibleItems.forEach((item) => grid.appendChild(this._makeQualityInspectorRow(item)));
     panel.appendChild(grid);
     panel.appendChild(this._makeQualityColorPreview());
+    panel.appendChild(this._makeQualityComputedColorPreview());
     panel.appendChild(this._makeQualityLayoutPreview());
+    panel.appendChild(this._makeQualityComputedLayoutPreview());
     panel.appendChild(this._makeQualityTitlebarPreview());
+    panel.appendChild(this._makeQualityComputedTitlebarPreview());
     panel.appendChild(this._makeQualityIconPreview());
+    panel.appendChild(this._makeQualityComputedIconPreview());
+    panel.appendChild(this._makeQualityComputedScrollbarPreview());
     panel.appendChild(this._makeQualityTypographyPreview());
     panel.appendChild(this._makeQualityDepthPreview());
     panel.appendChild(this._makeQualityInteractionPreview());
     panel.appendChild(this._makeQualityStatePreview());
     panel.appendChild(this._makeQualityVerbosityPreview());
     panel.appendChild(this._makeQualityPerformancePreview());
+    panel.appendChild(this._makeQualityComputedBackdropPreview());
+    panel.appendChild(this._makeQualityComputedMotionPreview());
     panel.appendChild(this._makeQualitySpatialPreview());
     panel.appendChild(this._makeQualityDockPreview());
+    panel.appendChild(this._makeQualityComputedDockPreview());
     panel.appendChild(this._makeQualityResponsivePreview());
+    panel.appendChild(this._makeQualityViewportPreview());
     panel.appendChild(this._makeQualityAccessibilityPreview());
     panel.appendChild(this._makeQualityMotionPreview());
     panel.appendChild(this._makeQualityAnimationPreview());
     panel.appendChild(this._makeQualityWidgetPreview());
+    panel.appendChild(this._makeQualityComputedWidgetPreview());
     panel.appendChild(this._makeQualityMaterialPreview());
+    panel.appendChild(this._makeQualityComputedMaterialPreview());
     panel.appendChild(this._makeQualitySurfacePreview());
     if (this._qualityAuditMode === 'full') {
       panel.appendChild(this._makeQualityCheckDetail(items));
@@ -3658,6 +4244,60 @@ class SimpleWindowManager {
     return metric;
   }
 
+  _makeQualityComputedColorPreview() {
+    const root = getComputedStyle(document.documentElement);
+    const fallbackBg = root.getPropertyValue('--ui-bg') || getComputedStyle(document.body).backgroundColor;
+    const fallbackText = root.getPropertyValue('--ui-text') || getComputedStyle(document.body).color;
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-computed-color-preview';
+    preview.dataset.qualityComputedColor = 'live';
+    [
+      ['Window', '.wm-window.focused, .wm-window', 'window'],
+      ['Command', '.wm-command-palette, .wm-title-input, .wm-command-bar', 'command'],
+      ['Taskbar', '#wm-taskbar, .wm-taskbar-item', 'taskbar'],
+      ['Widget', '.wm-desktop-widget, .widget-panel', 'widget']
+    ].forEach(([label, selector, kind]) => {
+      const colors = this._qualityComputedSurfaceColors(selector, fallbackBg, fallbackText);
+      const ratio = this._qualityContrastRatio(colors.bg, colors.fg);
+      preview.appendChild(this._makeQualityComputedColorMetric(label, ratio + ':1', kind, ratio >= 4.5));
+    });
+    return preview;
+  }
+
+  _makeQualityComputedColorMetric(label, value, kind, good) {
+    const metric = document.createElement('span');
+    metric.className = 'wm-quality-computed-color-metric' + (good ? ' good' : ' warn');
+    metric.dataset.computedColorMetric = kind;
+    const chip = document.createElement('span');
+    chip.className = 'wm-quality-computed-color-chip';
+    chip.setAttribute('aria-hidden', 'true');
+    const name = document.createElement('span');
+    name.className = 'wm-quality-computed-color-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-computed-color-value';
+    result.textContent = value;
+    metric.appendChild(chip);
+    metric.appendChild(name);
+    metric.appendChild(result);
+    return metric;
+  }
+
+  _qualityComputedSurfaceColors(selector, fallbackBg, fallbackText) {
+    const el = document.querySelector(selector);
+    if (!el) return { bg: fallbackBg, fg: fallbackText };
+    const style = getComputedStyle(el);
+    const bg = this._qualityVisibleColor(style.backgroundColor, fallbackBg);
+    const fg = this._qualityVisibleColor(style.color, fallbackText);
+    return { bg, fg };
+  }
+
+  _qualityVisibleColor(value, fallback) {
+    const text = String(value || '').trim();
+    if (!text || text === 'transparent' || text === 'rgba(0, 0, 0, 0)') return fallback;
+    return text;
+  }
+
   _makeQualityLayoutPreview() {
     const root = getComputedStyle(document.documentElement);
     const titlebar = document.querySelector('.wm-titlebar');
@@ -3686,6 +4326,53 @@ class SimpleWindowManager {
     metric.appendChild(name);
     metric.appendChild(result);
     return metric;
+  }
+
+  _makeQualityComputedLayoutPreview() {
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-computed-layout-preview';
+    preview.dataset.qualityComputedLayout = 'live';
+    [
+      ['Window', '.wm-window.focused, .wm-window', 'window', 200, 120],
+      ['Titlebar', '.wm-titlebar', 'titlebar', 0, 38],
+      ['Taskbar', '#wm-taskbar', 'taskbar', 180, 34],
+      ['Widget', '.wm-desktop-widget, .widget-panel', 'widget', 160, 44]
+    ].forEach(([label, selector, kind, minWidth, minHeight]) => {
+      const geometry = this._qualityComputedGeometry(selector, minWidth, minHeight);
+      preview.appendChild(this._makeQualityComputedLayoutMetric(label, geometry.label, kind, geometry.good));
+    });
+    return preview;
+  }
+
+  _makeQualityComputedLayoutMetric(label, value, kind, good) {
+    const metric = document.createElement('span');
+    metric.className = 'wm-quality-computed-layout-metric' + (good ? ' good' : ' warn');
+    metric.dataset.computedLayoutMetric = kind;
+    const frame = document.createElement('span');
+    frame.className = 'wm-quality-computed-layout-frame';
+    frame.setAttribute('aria-hidden', 'true');
+    const name = document.createElement('span');
+    name.className = 'wm-quality-computed-layout-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-computed-layout-value';
+    result.textContent = value;
+    metric.appendChild(frame);
+    metric.appendChild(name);
+    metric.appendChild(result);
+    return metric;
+  }
+
+  _qualityComputedGeometry(selector, minWidth, minHeight) {
+    const el = document.querySelector(selector);
+    if (!el) return { label: 'missing', good: false };
+    const rect = el.getBoundingClientRect();
+    const width = Math.round(rect.width || 0);
+    const height = Math.round(rect.height || 0);
+    return {
+      label: width + 'x' + height,
+      good: width >= minWidth && height >= minHeight
+    };
   }
 
   _makeQualityTitlebarPreview() {
@@ -3722,6 +4409,47 @@ class SimpleWindowManager {
     return metric;
   }
 
+  _makeQualityComputedTitlebarPreview() {
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-computed-titlebar-preview';
+    preview.dataset.qualityComputedTitlebar = 'live';
+    const titlebar = document.querySelector('.wm-titlebar');
+    const controls = titlebar ? titlebar.querySelectorAll('.wm-traffic-lights button') : [];
+    const icon = titlebar?.querySelector('.wm-titlebar-icon');
+    const input = titlebar?.querySelector('.wm-title-input, .wm-command-bar');
+    const context = titlebar?.querySelector('.wm-title-context');
+    preview.appendChild(this._makeQualityComputedTitlebarMetric('Traffic', controls.length + ' left', 'traffic', controls.length === 3 && this._trafficSideMode === 'left'));
+    preview.appendChild(this._makeQualityComputedTitlebarMetric('Icon', icon ? this._qualityElementWidth(icon) + 'px' : 'missing', 'icon', !!icon));
+    preview.appendChild(this._makeQualityComputedTitlebarMetric('Input', input ? this._qualityElementWidth(input) + 'px' : 'missing', 'input', this._qualityElementWidth(input) >= 140));
+    preview.appendChild(this._makeQualityComputedTitlebarMetric('Context', context ? this._qualityVisibleText(context, 'visible') : 'missing', 'context', !!context));
+    return preview;
+  }
+
+  _makeQualityComputedTitlebarMetric(label, value, kind, good) {
+    const metric = document.createElement('span');
+    metric.className = 'wm-quality-computed-titlebar-metric' + (good ? ' good' : ' warn');
+    metric.dataset.computedTitlebarMetric = kind;
+    const glyph = document.createElement('span');
+    glyph.className = 'wm-quality-computed-titlebar-glyph';
+    glyph.setAttribute('aria-hidden', 'true');
+    glyph.textContent = label.charAt(0);
+    const name = document.createElement('span');
+    name.className = 'wm-quality-computed-titlebar-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-computed-titlebar-value';
+    result.textContent = value;
+    metric.appendChild(glyph);
+    metric.appendChild(name);
+    metric.appendChild(result);
+    return metric;
+  }
+
+  _qualityVisibleText(el, fallback = '') {
+    const text = String(el?.textContent || '').trim();
+    return text || fallback;
+  }
+
   _makeQualityIconPreview() {
     const root = getComputedStyle(document.documentElement);
     const preview = document.createElement('div');
@@ -3751,6 +4479,112 @@ class SimpleWindowManager {
     metric.appendChild(name);
     metric.appendChild(result);
     return metric;
+  }
+
+  _makeQualityComputedIconPreview() {
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-computed-icon-preview';
+    preview.dataset.qualityComputedIcon = 'live';
+    [
+      ['Round', '.wm-round-icon', 'round'],
+      ['Image', '.wm-icon-image', 'image'],
+      ['Square', '.wm-icon-normalized-square', 'square'],
+      ['Glyph', '.wm-icon-glyph', 'glyph']
+    ].forEach(([label, selector, kind]) => {
+      const evidence = this._qualityComputedIconEvidence(selector, kind);
+      preview.appendChild(this._makeQualityComputedIconMetric(label, evidence.label, kind, evidence.good));
+    });
+    return preview;
+  }
+
+  _makeQualityComputedIconMetric(label, value, kind, good) {
+    const metric = document.createElement('span');
+    metric.className = 'wm-quality-computed-icon-metric' + (good ? ' good' : ' warn');
+    metric.dataset.computedIconMetric = kind;
+    const glyph = document.createElement('span');
+    glyph.className = 'wm-quality-computed-icon-glyph wm-round-icon';
+    glyph.setAttribute('aria-hidden', 'true');
+    glyph.textContent = label.charAt(0);
+    const name = document.createElement('span');
+    name.className = 'wm-quality-computed-icon-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-computed-icon-value';
+    result.textContent = value;
+    metric.appendChild(glyph);
+    metric.appendChild(name);
+    metric.appendChild(result);
+    return metric;
+  }
+
+  _qualityComputedIconEvidence(selector, kind) {
+    const el = document.querySelector(selector);
+    if (!el) return { label: 'missing', good: false };
+    const style = getComputedStyle(el);
+    if (kind === 'round') {
+      const radius = style.borderRadius || '';
+      return { label: radius || 'round', good: radius.includes('999') || radius.includes('50%') };
+    }
+    if (kind === 'image') {
+      const fit = style.objectFit || '';
+      return { label: fit || 'image', good: fit === 'cover' || fit === 'contain' };
+    }
+    if (kind === 'square') {
+      const clip = style.clipPath || '';
+      return { label: clip && clip !== 'none' ? 'clipped' : 'circle', good: clip.includes('circle') || el.classList.contains('wm-icon-normalized-square') };
+    }
+    const text = String(el.textContent || '').trim();
+    return { label: text ? 'glyph ' + text.charAt(0).toUpperCase() : 'glyph', good: text.length > 0 };
+  }
+
+  _makeQualityComputedScrollbarPreview() {
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-computed-scrollbar-preview';
+    preview.dataset.qualityComputedScrollbar = 'live';
+    [
+      ['App', '.wm-app-content, .wm-body, .wm-content', 'app'],
+      ['Command', '.wm-command-palette-list', 'command'],
+      ['Clipboard', '.wm-clipboard-list', 'clipboard'],
+      ['Notify', '.wm-notification-list', 'notification']
+    ].forEach(([label, selector, kind]) => {
+      const evidence = this._qualityComputedScrollbarEvidence(selector);
+      preview.appendChild(this._makeQualityComputedScrollbarMetric(label, evidence.label, kind, evidence.good));
+    });
+    return preview;
+  }
+
+  _makeQualityComputedScrollbarMetric(label, value, kind, good) {
+    const metric = document.createElement('span');
+    metric.className = 'wm-quality-computed-scrollbar-metric' + (good ? ' good' : ' warn');
+    metric.dataset.computedScrollbarMetric = kind;
+    const rail = document.createElement('span');
+    rail.className = 'wm-quality-computed-scrollbar-rail';
+    rail.setAttribute('aria-hidden', 'true');
+    const name = document.createElement('span');
+    name.className = 'wm-quality-computed-scrollbar-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-computed-scrollbar-value';
+    result.textContent = value;
+    metric.appendChild(rail);
+    metric.appendChild(name);
+    metric.appendChild(result);
+    return metric;
+  }
+
+  _qualityComputedScrollbarEvidence(selector) {
+    const el = document.querySelector(selector);
+    if (!el) return { label: 'missing', good: false };
+    const style = getComputedStyle(el);
+    const overflowY = String(style.overflowY || style.overflow || '').trim();
+    const overflowX = String(style.overflowX || style.overflow || '').trim();
+    const hasScrollablePolicy = ['auto', 'scroll', 'overlay'].includes(overflowY) || ['auto', 'scroll', 'overlay'].includes(overflowX);
+    const firefoxWidth = String(style.scrollbarWidth || '').trim();
+    const policy = firefoxWidth || overflowY || 'auto';
+    return {
+      label: policy,
+      good: hasScrollablePolicy || firefoxWidth === 'thin'
+    };
   }
 
   _makeQualityTypographyPreview() {
@@ -3910,13 +4744,16 @@ class SimpleWindowManager {
   }
 
   _makeQualityPerformancePreview() {
+    const root = getComputedStyle(document.documentElement);
     const preview = document.createElement('div');
     preview.className = 'wm-quality-performance-preview';
-    preview.dataset.qualityPerformance = 'compositor';
+    preview.dataset.qualityPerformance = this._energyMode || 'standard';
     preview.appendChild(this._makeQualityPerformanceMetric('Frame', '16ms', 'frame'));
     preview.appendChild(this._makeQualityPerformanceMetric('Motion', 'transform', 'motion'));
     preview.appendChild(this._makeQualityPerformanceMetric('Opacity', 'fade', 'opacity'));
-    preview.appendChild(this._makeQualityPerformanceMetric('Fallback', 'reduce', 'fallback'));
+    preview.appendChild(this._makeQualityPerformanceMetric('Energy', this._energyLabel(), 'energy'));
+    preview.appendChild(this._makeQualityPerformanceMetric('Backdrop', this._qualityCssPx(root, '--ui-backdrop-opacity-x100', 90) + '%', 'backdrop'));
+    preview.appendChild(this._makeQualityPerformanceMetric('Fallback', this._energyMode === 'critical' ? 'off' : 'reduce', 'fallback'));
     return preview;
   }
 
@@ -3937,6 +4774,107 @@ class SimpleWindowManager {
     metric.appendChild(name);
     metric.appendChild(result);
     return metric;
+  }
+
+  _makeQualityComputedBackdropPreview() {
+    const root = getComputedStyle(document.documentElement);
+    const desktop = document.querySelector('#wm-desktop');
+    const pseudo = desktop ? getComputedStyle(desktop, '::before') : null;
+    const motionMode = this._normalizeMotionPreference(this._readMotionPreference());
+    const duration = pseudo ? this._qualityCssDurationListMs(pseudo.animationDuration) : this._qualityCssPx(root, '--ui-backdrop-duration-ms', 0);
+    const animationName = pseudo ? String(pseudo.animationName || 'none').split(',')[0].trim() : 'none';
+    const opacity = this._qualityCssPx(root, '--ui-backdrop-opacity-x100', 90);
+    const driftScale = this._qualityCssPx(root, '--ui-backdrop-drift-scale-x100', 103);
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-computed-backdrop-preview';
+    preview.dataset.qualityComputedBackdrop = motionMode;
+    preview.appendChild(this._makeQualityComputedBackdropMetric('Motion', duration + 'ms ' + animationName, 'motion', motionMode === 'off' ? duration === 0 : duration >= 0));
+    preview.appendChild(this._makeQualityComputedBackdropMetric('Opacity', opacity + '%', 'opacity', opacity >= 18 && opacity <= 100));
+    preview.appendChild(this._makeQualityComputedBackdropMetric('Drift', (driftScale / 100).toFixed(2) + 'x', 'drift', motionMode === 'off' || driftScale >= 100));
+    preview.appendChild(this._makeQualityComputedBackdropMetric('Energy', this._energyLabel(), 'energy', this._energyMode !== 'critical' || duration === 0));
+    return preview;
+  }
+
+  _makeQualityComputedBackdropMetric(label, value, kind, good) {
+    const metric = document.createElement('span');
+    metric.className = 'wm-quality-computed-backdrop-metric' + (good ? ' good' : ' warn');
+    metric.dataset.computedBackdropMetric = kind;
+    const orb = document.createElement('span');
+    orb.className = 'wm-quality-computed-backdrop-orb';
+    orb.setAttribute('aria-hidden', 'true');
+    const name = document.createElement('span');
+    name.className = 'wm-quality-computed-backdrop-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-computed-backdrop-value';
+    result.textContent = value;
+    metric.appendChild(orb);
+    metric.appendChild(name);
+    metric.appendChild(result);
+    return metric;
+  }
+
+  _makeQualityComputedMotionPreview() {
+    const motionMode = this._normalizeMotionPreference(this._readMotionPreference());
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-computed-motion-preview';
+    preview.dataset.qualityComputedMotion = motionMode;
+    [
+      ['Window', '.wm-window.focused, .wm-window', '', 'window'],
+      ['Dock', '#wm-taskbar, .wm-taskbar-item', '', 'dock'],
+      ['Command', '.wm-command-palette, .wm-title-input, .wm-command-bar', '', 'command'],
+      ['Backdrop', '#wm-desktop', '::before', 'backdrop']
+    ].forEach(([label, selector, pseudo, kind]) => {
+      const timing = this._qualityComputedMotionTiming(selector, pseudo);
+      const disabledOk = motionMode !== 'off' || timing.durationMs === 0;
+      preview.appendChild(this._makeQualityComputedMotionMetric(label, timing.label, kind, disabledOk));
+    });
+    return preview;
+  }
+
+  _makeQualityComputedMotionMetric(label, value, kind, good) {
+    const metric = document.createElement('span');
+    metric.className = 'wm-quality-computed-motion-metric' + (good ? ' good' : ' warn');
+    metric.dataset.computedMotionMetric = kind;
+    const rail = document.createElement('span');
+    rail.className = 'wm-quality-computed-motion-rail';
+    rail.setAttribute('aria-hidden', 'true');
+    const name = document.createElement('span');
+    name.className = 'wm-quality-computed-motion-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-computed-motion-value';
+    result.textContent = value;
+    metric.appendChild(rail);
+    metric.appendChild(name);
+    metric.appendChild(result);
+    return metric;
+  }
+
+  _qualityComputedMotionTiming(selector, pseudo = '') {
+    const el = document.querySelector(selector);
+    if (!el) return { label: '0ms none', durationMs: 0 };
+    const style = getComputedStyle(el, pseudo || null);
+    const animationName = String(style.animationName || 'none').split(',')[0].trim();
+    const animationMs = this._qualityCssDurationListMs(style.animationDuration);
+    const transitionMs = this._qualityCssDurationListMs(style.transitionDuration);
+    const durationMs = Math.max(animationMs, transitionMs);
+    const name = animationName && animationName !== 'none' ? animationName : 'transition';
+    return { label: durationMs + 'ms ' + name, durationMs };
+  }
+
+  _qualityCssDurationListMs(value) {
+    const parts = String(value || '').split(',');
+    let maxMs = 0;
+    parts.forEach((part) => {
+      const text = part.trim();
+      if (!text) return;
+      const raw = parseFloat(text);
+      if (!Number.isFinite(raw)) return;
+      const ms = text.endsWith('ms') ? raw : raw * 1000;
+      maxMs = Math.max(maxMs, Math.round(ms));
+    });
+    return maxMs;
   }
 
   _makeQualitySpatialPreview() {
@@ -3973,9 +4911,10 @@ class SimpleWindowManager {
     const preview = document.createElement('div');
     preview.className = 'wm-quality-dock-preview';
     preview.dataset.qualityDock = 'magnification';
+    preview.dataset.wmDockVisibility = this._dockVisibilityMode;
     preview.appendChild(this._makeQualityDockMetric('Magnify', '1.18x', 'magnify'));
     preview.appendChild(this._makeQualityDockMetric('Neighbor', '1.07x', 'neighbor'));
-    preview.appendChild(this._makeQualityDockMetric('Running', 'indicator', 'running'));
+    preview.appendChild(this._makeQualityDockMetric('Visibility', this._dockVisibilityLabel(this._dockVisibilityMode).toLowerCase(), 'visibility'));
     preview.appendChild(this._makeQualityDockMetric('Stack', this._dockStackMode === 'grid' ? 'grid' : 'fan', 'stack'));
     return preview;
   }
@@ -3992,6 +4931,43 @@ class SimpleWindowManager {
     name.textContent = label;
     const result = document.createElement('strong');
     result.className = 'wm-quality-dock-value';
+    result.textContent = value;
+    metric.appendChild(icon);
+    metric.appendChild(name);
+    metric.appendChild(result);
+    return metric;
+  }
+
+  _makeQualityComputedDockPreview() {
+    const root = getComputedStyle(document.documentElement);
+    const item = document.querySelector('.wm-taskbar-item');
+    const stack = this._dockStack;
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-computed-dock-preview';
+    preview.dataset.qualityComputedDock = 'live';
+    const scale = this._qualityCssPx(root, '--ui-dock-target-scale-x100', 118);
+    const itemHeight = this._qualityElementMinHeight(item);
+    const visibility = document.documentElement.dataset.wmDockVisibility || this._dockVisibilityMode;
+    const stackLabel = (stack && !stack.hidden ? 'open ' : '') + (this._dockStackMode === 'grid' ? 'grid' : 'fan');
+    preview.appendChild(this._makeQualityComputedDockMetric('Scale', (scale / 100).toFixed(2) + 'x', 'scale', scale >= 108));
+    preview.appendChild(this._makeQualityComputedDockMetric('Hit', itemHeight + 'px', 'hit', itemHeight >= 34));
+    preview.appendChild(this._makeQualityComputedDockMetric('Visibility', visibility, 'visibility', ['shown', 'auto', 'hidden'].includes(visibility)));
+    preview.appendChild(this._makeQualityComputedDockMetric('Stack', stackLabel, 'stack', this._dockStackItems().length >= 3));
+    return preview;
+  }
+
+  _makeQualityComputedDockMetric(label, value, kind, good) {
+    const metric = document.createElement('span');
+    metric.className = 'wm-quality-computed-dock-metric' + (good ? ' good' : ' warn');
+    metric.dataset.computedDockMetric = kind;
+    const icon = document.createElement('span');
+    icon.className = 'wm-quality-computed-dock-icon';
+    icon.setAttribute('aria-hidden', 'true');
+    const name = document.createElement('span');
+    name.className = 'wm-quality-computed-dock-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-computed-dock-value';
     result.textContent = value;
     metric.appendChild(icon);
     metric.appendChild(name);
@@ -4028,6 +5004,59 @@ class SimpleWindowManager {
     metric.appendChild(name);
     metric.appendChild(result);
     return metric;
+  }
+
+  _makeQualityViewportPreview() {
+    const snapshot = this._qualityViewportSnapshot();
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-viewport-preview';
+    preview.dataset.qualityViewport = 'live';
+    preview.appendChild(this._makeQualityViewportMetric('Viewport', snapshot.viewport, 'viewport', snapshot.viewportOk));
+    preview.appendChild(this._makeQualityViewportMetric('Desktop', snapshot.desktop, 'desktop', snapshot.desktopOk));
+    preview.appendChild(this._makeQualityViewportMetric('Window', snapshot.window, 'window', snapshot.windowOk));
+    preview.appendChild(this._makeQualityViewportMetric('Overflow', snapshot.overflow, 'overflow', snapshot.overflowOk));
+    return preview;
+  }
+
+  _makeQualityViewportMetric(label, value, kind, good) {
+    const metric = document.createElement('span');
+    metric.className = 'wm-quality-viewport-metric' + (good ? ' good' : ' warn');
+    metric.dataset.viewportMetric = kind;
+    const frame = document.createElement('span');
+    frame.className = 'wm-quality-viewport-frame';
+    frame.setAttribute('aria-hidden', 'true');
+    const name = document.createElement('span');
+    name.className = 'wm-quality-viewport-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-viewport-value';
+    result.textContent = value;
+    metric.appendChild(frame);
+    metric.appendChild(name);
+    metric.appendChild(result);
+    return metric;
+  }
+
+  _qualityViewportSnapshot() {
+    const root = document.documentElement;
+    const viewportWidth = Math.max(0, window.innerWidth || root.clientWidth || 0);
+    const viewportHeight = Math.max(0, window.innerHeight || root.clientHeight || 0);
+    const desktopRect = this.desktop ? this.desktop.getBoundingClientRect() : { width: viewportWidth, height: viewportHeight };
+    const activeWindow = document.querySelector('.wm-window.focused, .wm-window');
+    const windowRect = activeWindow ? activeWindow.getBoundingClientRect() : { width: 0, height: 0, left: 0, top: 0, right: 0, bottom: 0 };
+    const overflowX = Math.max(root.scrollWidth || 0, document.body?.scrollWidth || 0) > viewportWidth + 1;
+    const overflowY = Math.max(root.scrollHeight || 0, document.body?.scrollHeight || 0) > viewportHeight + 1;
+    const windowOk = !activeWindow || (windowRect.left >= -8 && windowRect.top >= -8 && windowRect.right <= viewportWidth + 8 && windowRect.bottom <= viewportHeight + 8);
+    return {
+      viewport: Math.round(viewportWidth) + 'x' + Math.round(viewportHeight),
+      desktop: Math.round(desktopRect.width || 0) + 'x' + Math.round(desktopRect.height || 0),
+      window: activeWindow ? Math.round(windowRect.width || 0) + 'x' + Math.round(windowRect.height || 0) : 'none',
+      overflow: overflowX || overflowY ? (overflowX ? 'x' : '') + (overflowY ? 'y' : '') : 'none',
+      viewportOk: viewportWidth >= 320 && viewportHeight >= 240,
+      desktopOk: Math.round(desktopRect.width || 0) <= viewportWidth + 1 && Math.round(desktopRect.height || 0) <= viewportHeight + 1,
+      windowOk: windowOk,
+      overflowOk: !overflowX && !overflowY
+    };
   }
 
   _makeQualityAccessibilityPreview() {
@@ -4183,6 +5212,43 @@ class SimpleWindowManager {
     return metric;
   }
 
+  _makeQualityComputedWidgetPreview() {
+    const widgets = document.querySelectorAll('.wm-desktop-widget');
+    const firstWidget = widgets[0];
+    const gallery = document.querySelector('.wm-widget-gallery');
+    const controls = firstWidget ? firstWidget.querySelectorAll('.wm-widget-control') : [];
+    const radius = firstWidget ? getComputedStyle(firstWidget).borderRadius : '';
+    const galleryWidth = this._qualityElementWidth(gallery);
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-computed-widget-preview';
+    preview.dataset.qualityComputedWidget = 'live';
+    preview.appendChild(this._makeQualityComputedWidgetMetric('Count', widgets.length + ' live', 'count', widgets.length >= 3));
+    preview.appendChild(this._makeQualityComputedWidgetMetric('Shape', radius || 'missing', 'shape', radius.includes('20') || radius.includes('999')));
+    preview.appendChild(this._makeQualityComputedWidgetMetric('Controls', controls.length + ' actions', 'controls', controls.length >= 2));
+    preview.appendChild(this._makeQualityComputedWidgetMetric('Gallery', (galleryWidth || 440) + 'px', 'gallery', (galleryWidth || 440) <= 440));
+    return preview;
+  }
+
+  _makeQualityComputedWidgetMetric(label, value, kind, good) {
+    const metric = document.createElement('span');
+    metric.className = 'wm-quality-computed-widget-metric' + (good ? ' good' : ' warn');
+    metric.dataset.computedWidgetMetric = kind;
+    const glyph = document.createElement('span');
+    glyph.className = 'wm-quality-computed-widget-glyph';
+    glyph.setAttribute('aria-hidden', 'true');
+    glyph.textContent = label.charAt(0);
+    const name = document.createElement('span');
+    name.className = 'wm-quality-computed-widget-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-computed-widget-value';
+    result.textContent = String(value).trim();
+    metric.appendChild(glyph);
+    metric.appendChild(name);
+    metric.appendChild(result);
+    return metric;
+  }
+
   _makeQualityMaterialPreview() {
     const root = getComputedStyle(document.documentElement);
     const preview = document.createElement('div');
@@ -4208,6 +5274,66 @@ class SimpleWindowManager {
     metric.appendChild(name);
     metric.appendChild(result);
     return metric;
+  }
+
+  _makeQualityComputedMaterialPreview() {
+    const mode = this._normalizeTransparencyPreference(this._readTransparencyPreference());
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-computed-material-preview';
+    preview.dataset.qualityComputedMaterial = mode;
+    [
+      ['Window', '.wm-window.focused, .wm-window', 'window'],
+      ['Command', '.wm-command-palette, .wm-title-input, .wm-command-bar', 'command'],
+      ['Taskbar', '#wm-taskbar', 'taskbar'],
+      ['Widget', '.wm-desktop-widget, .widget-panel', 'widget']
+    ].forEach(([label, selector, kind]) => {
+      const evidence = this._qualityComputedMaterialEvidence(selector, mode);
+      preview.appendChild(this._makeQualityComputedMaterialMetric(label, evidence.label, kind, evidence.good));
+    });
+    return preview;
+  }
+
+  _makeQualityComputedMaterialMetric(label, value, kind, good) {
+    const metric = document.createElement('span');
+    metric.className = 'wm-quality-computed-material-metric' + (good ? ' good' : ' warn');
+    metric.dataset.computedMaterialMetric = kind;
+    const sample = document.createElement('span');
+    sample.className = 'wm-quality-computed-material-sample';
+    sample.setAttribute('aria-hidden', 'true');
+    const name = document.createElement('span');
+    name.className = 'wm-quality-computed-material-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-computed-material-value';
+    result.textContent = value;
+    metric.appendChild(sample);
+    metric.appendChild(name);
+    metric.appendChild(result);
+    return metric;
+  }
+
+  _qualityComputedMaterialEvidence(selector, mode) {
+    const el = document.querySelector(selector);
+    if (!el) return { label: 'missing', good: false };
+    const style = getComputedStyle(el);
+    const backdrop = String(style.backdropFilter || style.webkitBackdropFilter || '').trim();
+    const alpha = this._qualityCssAlpha(style.backgroundColor);
+    if (mode === 'off') {
+      return { label: 'solid ' + Math.round(alpha * 100) + '%', good: (!backdrop || backdrop === 'none') && alpha >= 0.9 };
+    }
+    const hasBlur = backdrop.includes('blur');
+    const label = hasBlur ? backdrop.split(')')[0] + ')' : 'no blur';
+    return { label, good: hasBlur || mode === 'reduced' };
+  }
+
+  _qualityCssAlpha(value) {
+    const text = String(value || '').trim();
+    const rgba = text.match(/rgba?\(([^)]+)\)/i);
+    if (!rgba) return 1;
+    const parts = rgba[1].split(',').map((part) => part.trim());
+    if (parts.length < 4) return 1;
+    const alpha = parseFloat(parts[3]);
+    return Number.isFinite(alpha) ? Math.max(0, Math.min(1, alpha)) : 1;
   }
 
   _makeQualitySurfacePreview() {
@@ -4374,6 +5500,8 @@ class SimpleWindowManager {
     [
       ['motion', 'Reduce motion'],
       ['material', 'Reduce glass'],
+      ['energy_low', 'Low power'],
+      ['energy_critical', 'Critical saver'],
       ['layout', 'Open layout tools'],
       ['contrast', 'Accent palette']
     ].forEach(([action, label]) => {
@@ -4394,6 +5522,12 @@ class SimpleWindowManager {
     } else if (action === 'material') {
       this.setTransparencyPreference('reduced');
       this._sendWindowCmd('quality_action', { quality_action: action, value: 'reduced' });
+    } else if (action === 'energy_low') {
+      this.setEnergyPreference('low');
+      this._sendWindowCmd('quality_action', { quality_action: action, value: 'low' });
+    } else if (action === 'energy_critical') {
+      this.setEnergyPreference('critical');
+      this._sendWindowCmd('quality_action', { quality_action: action, value: 'critical' });
     } else if (action === 'layout') {
       this._toggleWindowArrangePalette(true);
       this._sendWindowCmd('quality_action', { quality_action: action, value: 'layout_tools' });
@@ -6724,6 +7858,7 @@ class SimpleWindowManager {
   // -------------------------------------------------------------------------
 
   _showToast(msg) {
+    if (!this._feedbackAllows('critical')) return;
     const t = document.createElement('div');
     t.className = 'wm-toast';
     t.textContent = msg;
