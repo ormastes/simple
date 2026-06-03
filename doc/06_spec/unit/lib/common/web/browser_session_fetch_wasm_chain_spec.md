@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 141 | 141 | 0 | 0 |
+| 142 | 142 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -2501,6 +2501,91 @@ match session.take_pending_request():
                 match session.eval_script("out"):
                     Ok(value):
                         expect(_display_js(value)).to_equal("stream:instantiated:1:42")
+                    Err(err):
+                        expect("unexpected js error: {err}").to_equal("")
+            Err(err):
+                expect("unexpected commit error: {err}").to_equal("")
+    nil:
+        expect("missing fetch request").to_equal("")
+```
+
+</details>
+
+#### exposes instantiateStreaming module export descriptors
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `queued`
+
+3. Err
+   - Expected: "unexpected queue error: {err}" equals ``
+
+4. Ok
+   - Expected: _display_js(value) equals ``
+
+5. Err
+   - Expected: "unexpected pre-commit js error: {err}" equals ``
+
+6. Some
+   - Expected: request.kind equals `fetch`
+   - Expected: request.url equals `https://example.com/mod.wasm`
+
+7. Ok
+
+8. Ok
+   - Expected: _display_js(value) equals `streamExportDescriptors:instantiated:40:2:tbl:table:answer:global`
+
+9. Err
+   - Expected: "unexpected js error: {err}" equals ``
+
+10. Err
+   - Expected: "unexpected commit error: {err}" equals ``
+   - Expected: "missing fetch request" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 41 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val queued = session.eval_script("var out = ''; WebAssembly.instantiateStreaming(window.fetch('/mod.wasm')).then(function(result) { var exports = WebAssembly.Module.exports(result.module); out = 'streamExportDescriptors:' + result.status + ':' + result.module.byteLength + ':' + exports.length + ':' + exports[0].name + ':' + exports[0].kind + ':' + exports[1].name + ':' + exports[1].kind; }); 'queued'")
+match queued:
+    Ok(value):
+        expect(_display_js(value)).to_equal("queued")
+    Err(err):
+        expect("unexpected queue error: {err}").to_equal("")
+match session.eval_script("out"):
+    Ok(value):
+        expect(_display_js(value)).to_equal("")
+    Err(err):
+        expect("unexpected pre-commit js error: {err}").to_equal("")
+
+match session.take_pending_request():
+    Some(request):
+        expect(request.kind).to_equal("fetch")
+        expect(request.url).to_equal("https://example.com/mod.wasm")
+        val committed = session.commit_network_response(BrowserResponse.create(
+            request_id: request.id,
+            kind: "fetch",
+            url: request.url,
+            status: 200,
+            headers: "Content-Type: application/wasm\n",
+            body: "0061736d010000000404017000010606017f00412a0b0710020374626c010006616e737765720300",
+            error: ""
+        ))
+        match committed:
+            Ok(_):
+                match session.eval_script("out"):
+                    Ok(value):
+                        expect(_display_js(value)).to_equal("streamExportDescriptors:instantiated:40:2:tbl:table:answer:global")
                     Err(err):
                         expect("unexpected js error: {err}").to_equal("")
             Err(err):
@@ -6902,8 +6987,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 141 |
-| Active scenarios | 141 |
+| Total scenarios | 142 |
+| Active scenarios | 142 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
