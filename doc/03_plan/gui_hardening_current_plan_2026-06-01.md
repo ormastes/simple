@@ -4169,3 +4169,16 @@ before instantiation. Import count, streamed module byte length, descriptor
 count, and import module/name/kind all agree in the browser-session path. The
 focused fetch/WASM chain spec now passes `100/100`; broader browser/WASM
 semantics remain open.
+
+BrowserSession invalid compileStreaming catch continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession scripts now route an invalid WASM body delivered through
+`WebAssembly.compileStreaming(window.fetch(...))` into the promise `catch`
+callback after the network response is committed. The queued state remains
+empty before commit, the fetch request targets the expected module URL, and the
+catch callback receives `invalid-wasm-header`. The focused fetch/WASM chain spec
+now passes `101/101`; broader browser/WASM semantics remain open.
