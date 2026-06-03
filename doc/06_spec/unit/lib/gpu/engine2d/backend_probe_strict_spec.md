@@ -143,12 +143,12 @@ expect(probe.strict_failure_without_fallback()).to_equal(true)
 
 </details>
 
-#### reports OpenCL from ICD platform evidence without graphics or present
+#### requires OpenCL session proof beyond ICD platform evidence
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -157,7 +157,6 @@ val probe = StrictBackendFactory.strict().create_backend("opencl")
 expect(probe.requested_name).to_equal("opencl")
 expect(probe.selected_name).to_equal("opencl")
 expect(probe.api_name).to_equal("opencl")
-expect(probe.feature_gate).to_equal("opencl_icd_platform")
 expect(probe.shader_format).to_equal("opencl-c")
 expect(probe.has_compute).to_equal(true)
 expect(probe.has_graphics).to_equal(false)
@@ -165,10 +164,13 @@ expect(probe.has_present).to_equal(false)
 expect(probe.strict_failure_without_fallback()).to_equal(true)
 if probe.status == BackendStatus.Initialized:
     expect(probe.available).to_equal(true)
-    expect(probe.diagnostic_text()).to_contain("platform")
+    expect(probe.feature_gate).to_equal("opencl_context")
+    expect(probe.diagnostic_text()).to_contain("session initialized")
 else:
     expect(probe.status).to_equal(BackendStatus.Unavailable)
-    expect(probe.diagnostic_text()).to_contain("OpenCL ICD")
+    val gate_is_known = probe.feature_gate == "opencl_icd_platform" or probe.feature_gate == "opencl_platform" or probe.feature_gate == "opencl_context"
+    expect(gate_is_known).to_equal(true)
+    expect(probe.diagnostic_text()).to_contain("OpenCL")
 ```
 
 </details>
@@ -209,7 +211,7 @@ expect(webgpu.strict_failure_without_fallback()).to_equal(true)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -231,6 +233,9 @@ expect(summary).to_contain("runtime_evidence selected=")
 expect(summary).to_contain("metal_status=")
 expect(summary).to_contain("vulkan_status=")
 expect(summary).to_contain("cuda_status=")
+expect(summary).to_contain("opencl_status=")
+expect(summary).to_contain("opencl_gate=")
+expect(summary).to_contain("opencl_reason=")
 expect(summary).to_contain("cpu_simd_x86_status=")
 expect(summary).to_contain("cpu_simd_arm_status=")
 expect(summary).to_contain("cpu_simd_riscv_status=")

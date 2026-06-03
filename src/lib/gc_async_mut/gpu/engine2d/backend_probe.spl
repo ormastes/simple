@@ -2,6 +2,7 @@
 
 use std.gc_async_mut.cuda.{cuda_available, cuda_init, cuda_device_count, cuda_device_name, CUDA_SUCCESS}
 use std.gc_async_mut.gpu.engine2d.cuda_session.{CudaSession}
+use std.gc_async_mut.gpu.engine2d.opencl_session.{OpenClSession}
 use std.gpu.engine2d.sffi_opencl.{OpenClFfi}
 use std.gpu.engine2d.simd_kernels.{CpuSimdRuntimeEvidence, cpu_simd_runtime_evidence}
 
@@ -232,9 +233,22 @@ class BackendProber:
             no_platform.has_graphics = false
             no_platform.has_present = false
             return no_platform
-        var r = BackendProbeResult.success(BACKEND_OPENCL, "OpenCL ICD loaded and reported {platform_count} platform(s)")
+        val session = OpenClSession.create_with_ffi(OpenClFfi.create_static())
+        val evidence = session.init_evidence()
+        if not evidence.success:
+            var session_failed = BackendProbeResult.unavailable(BACKEND_OPENCL, "OpenCL session proof failed: {evidence.diagnostic_text()}")
+            session_failed.api_name = "opencl"
+            session_failed.feature_gate = "opencl_context"
+            session_failed.shader_format = "opencl-c"
+            session_failed.has_compute = true
+            session_failed.has_graphics = false
+            session_failed.has_present = false
+            session_failed.memory_mb = platform_count
+            return session_failed
+        session.shutdown()
+        var r = BackendProbeResult.success(BACKEND_OPENCL, "OpenCL ICD loaded and session initialized with {platform_count} platform(s)")
         r.api_name = "opencl"
-        r.feature_gate = "opencl_icd_platform"
+        r.feature_gate = "opencl_context"
         r.shader_format = "opencl-c"
         r.has_compute = true
         r.has_graphics = false
@@ -326,7 +340,7 @@ class BackendProber:
             selected = cpu_arm
         elif cpu_riscv.status == BackendStatus.Initialized:
             selected = cpu_riscv
-        "runtime_evidence selected={selected.selected_name};status={backend_status_text(selected.status)};compute={selected.has_compute};graphics={selected.has_graphics};present={selected.has_present};device={selected.device_name};driver={selected.driver_version};memory_mb={selected.memory_mb};reason={selected.reason};metal_status={backend_status_text(metal.status)};vulkan_status={backend_status_text(vulkan.status)};cuda_status={backend_status_text(cuda.status)};cpu_simd_x86_status={backend_status_text(cpu_x86.status)};cpu_simd_arm_status={backend_status_text(cpu_arm.status)};cpu_simd_riscv_status={backend_status_text(cpu_riscv.status)}"
+        "runtime_evidence selected={selected.selected_name};status={backend_status_text(selected.status)};compute={selected.has_compute};graphics={selected.has_graphics};present={selected.has_present};device={selected.device_name};driver={selected.driver_version};memory_mb={selected.memory_mb};reason={selected.reason};metal_status={backend_status_text(metal.status)};vulkan_status={backend_status_text(vulkan.status)};cuda_status={backend_status_text(cuda.status)};opencl_status={backend_status_text(opencl.status)};opencl_gate={opencl.feature_gate};opencl_reason={opencl.reason};cpu_simd_x86_status={backend_status_text(cpu_x86.status)};cpu_simd_arm_status={backend_status_text(cpu_arm.status)};cpu_simd_riscv_status={backend_status_text(cpu_riscv.status)}"
 
     fn probe_optix(self) -> BackendProbeResult:
         var r = BackendProbeResult.unavailable(BACKEND_OPTIX, "OptiX is ray tracing only and has no Engine2D raster backend")

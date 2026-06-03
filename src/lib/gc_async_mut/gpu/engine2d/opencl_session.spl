@@ -9,6 +9,41 @@ use std.gc_async_mut.gpu.engine2d.generated_kernel_dispatch.{
 }
 use std.gc_async_mut.gpu.engine2d.sffi_opencl.{OpenClFfi}
 
+class OpenClSessionEvidence:
+    operation: text
+    success: bool
+    status_code: text
+    reason: text
+    platform: i64
+    context: i64
+    queue: i64
+    program: i64
+    kernel: i64
+    generation: i64
+    readback_available: bool
+    expected_checksum: i64
+    actual_checksum: i64
+
+    static fn create(operation: text, success: bool, status_code: text, reason: text, platform: i64, context: i64, queue: i64, program: i64, kernel: i64, generation: i64, readback_available: bool, expected_checksum: i64, actual_checksum: i64) -> OpenClSessionEvidence:
+        OpenClSessionEvidence(
+            operation: operation,
+            success: success,
+            status_code: status_code,
+            reason: reason,
+            platform: platform,
+            context: context,
+            queue: queue,
+            program: program,
+            kernel: kernel,
+            generation: generation,
+            readback_available: readback_available,
+            expected_checksum: expected_checksum,
+            actual_checksum: actual_checksum
+        )
+
+    fn diagnostic_text() -> text:
+        "OpenClSessionEvidence[op={self.operation} success={self.success.to_text()} status={self.status_code} reason={self.reason} platform={self.platform} context={self.context} queue={self.queue} program={self.program} kernel={self.kernel} generation={self.generation} readback={self.readback_available.to_text()} expected={self.expected_checksum} actual={self.actual_checksum}]"
+
 class OpenClSession:
     platform: i64
     context: i64
@@ -65,6 +100,22 @@ class OpenClSession:
         self.generation = self.generation + 1
         0
 
+    me init_evidence() -> OpenClSessionEvidence:
+        val rc = self.init()
+        if rc == 0:
+            return self._evidence("init", true, "initialized", "opencl-session-initialized", 0, true, 0, 0)
+        if self.ffi == nil:
+            return self._evidence("init", false, "missing-ffi", "missing-opencl-ffi", 0, false, 0, 0)
+        if not self.ffi.is_available():
+            return self._evidence("init", false, "runtime-unavailable", "opencl-runtime-unavailable", 0, false, 0, 0)
+        if self.ffi.platform_count() < 1:
+            return self._evidence("init", false, "platform-unavailable", "opencl-platform-unavailable", 0, false, 0, 0)
+        if self.context == 0:
+            return self._evidence("init", false, "context-unavailable", "opencl-context-create-failed", 0, false, 0, 0)
+        if self.queue == 0:
+            return self._evidence("init", false, "queue-unavailable", "opencl-queue-create-failed", 0, false, 0, 0)
+        self._evidence("init", false, "init-failed", "opencl-init-failed", 0, false, 0, 0)
+
     me is_valid() -> bool:
         self.is_initialized and self.queue != 0
 
@@ -79,6 +130,18 @@ class OpenClSession:
         self.program = program
         program
 
+    me load_module_evidence(source: text) -> OpenClSessionEvidence:
+        val program = self.load_module(source)
+        if program != 0:
+            return self._evidence("load_module", true, "loaded", "opencl-program-built", 0, true, 0, 0)
+        if self.ffi == nil:
+            return self._evidence("load_module", false, "missing-ffi", "missing-opencl-ffi", 0, false, 0, 0)
+        if self.context == 0:
+            return self._evidence("load_module", false, "missing-context", "missing-opencl-context", 0, false, 0, 0)
+        if source == "":
+            return self._evidence("load_module", false, "empty-source", "missing-opencl-program-source", 0, false, 0, 0)
+        self._evidence("load_module", false, "build-failed", "opencl-program-build-failed", 0, false, 0, 0)
+
     me launch_kernel(name: text, gx: i64, gy: i64, lx: i64, ly: i64) -> i64:
         if self.ffi == nil or self.queue == 0 or self.program == 0:
             return 1
@@ -91,6 +154,18 @@ class OpenClSession:
         else:
             1
 
+    me launch_kernel_evidence(name: text, gx: i64, gy: i64, lx: i64, ly: i64) -> OpenClSessionEvidence:
+        val rc = self.launch_kernel(name, gx, gy, lx, ly)
+        if rc == 0:
+            return self._evidence("launch_kernel", true, "submitted", "opencl-kernel-submitted", self.kernel_cache, true, 0, 0)
+        if self.ffi == nil:
+            return self._evidence("launch_kernel", false, "missing-ffi", "missing-opencl-ffi", 0, false, 0, 0)
+        if self.queue == 0 or self.program == 0:
+            return self._evidence("launch_kernel", false, "missing-program-or-queue", "missing-opencl-program-or-queue", 0, false, 0, 0)
+        if self.kernel_cache == 0:
+            return self._evidence("launch_kernel", false, "missing-kernel", "opencl-kernel-create-failed", 0, false, 0, 0)
+        self._evidence("launch_kernel", false, "submit-failed", "opencl-kernel-submit-failed", self.kernel_cache, false, 0, 0)
+
     me launch_generated_2d(op: text, width: i64, height: i64, args_ptr: i64) -> i64:
         if self.ffi == nil or self.queue == 0 or self.program == 0:
             return 1
@@ -100,6 +175,24 @@ class OpenClSession:
         if not plan.dispatch_ready:
             return 1
         self.launch_kernel(plan.entry_name, plan.grid_x, plan.grid_y, plan.block_x, plan.block_y)
+
+    me launch_generated_2d_evidence(op: text, width: i64, height: i64, args_ptr: i64) -> OpenClSessionEvidence:
+        val plan = generated_2d_launch_plan("opencl", op, width, height)
+        val operation = "launch_generated_2d:{op}"
+        if not plan.dispatch_ready:
+            return self._evidence(operation, false, "plan-not-ready", plan.reason, 0, false, 0, 0)
+        if args_ptr == 0:
+            return self._evidence(operation, false, "missing-args-pointer", "missing-generated-2d-args-pointer", 0, false, 0, 0)
+        if self.ffi == nil:
+            return self._evidence(operation, false, "missing-ffi", "missing-opencl-ffi", 0, false, 0, 0)
+        if self.queue == 0 or self.program == 0:
+            return self._evidence(operation, false, "missing-program-or-queue", "missing-opencl-program-or-queue", 0, false, 0, 0)
+        val rc = self.launch_kernel(plan.entry_name, plan.grid_x, plan.grid_y, plan.block_x, plan.block_y)
+        if rc == 0:
+            return self._evidence(operation, true, "submitted", "opencl-generated-2d-kernel-submitted", self.kernel_cache, true, 0, 0)
+        if self.kernel_cache == 0:
+            return self._evidence(operation, false, "missing-kernel", "opencl-generated-2d-kernel-create-failed", 0, false, 0, 0)
+        self._evidence(operation, false, "submit-failed", "opencl-generated-2d-kernel-submit-failed", self.kernel_cache, false, 0, 0)
 
     me fill_kernel(width: i64, height: i64, args_ptr: i64) -> i64:
         self.launch_generated_2d(GENERATED_2D_FILL, width, height, args_ptr)
@@ -121,6 +214,26 @@ class OpenClSession:
         else:
             1
 
+    me synchronize_evidence() -> OpenClSessionEvidence:
+        val rc = self.synchronize()
+        if rc == 0:
+            return self._evidence("synchronize", true, "synchronized", "opencl-queue-finished", 0, true, 0, 0)
+        if self.ffi == nil:
+            return self._evidence("synchronize", false, "missing-ffi", "missing-opencl-ffi", 0, false, 0, 0)
+        if self.queue == 0:
+            return self._evidence("synchronize", false, "missing-queue", "missing-opencl-queue", 0, false, 0, 0)
+        self._evidence("synchronize", false, "sync-failed", "opencl-queue-finish-failed", 0, false, 0, 0)
+
+    fn readback_evidence(readback_available: bool, expected_checksum: i64, actual_checksum: i64) -> OpenClSessionEvidence:
+        if not readback_available:
+            return self._evidence("readback", false, "readback-unavailable", "device-readback-required", 0, false, expected_checksum, actual_checksum)
+        if expected_checksum == 0 or actual_checksum == 0:
+            return self._evidence("readback", false, "invalid-checksum", "device-readback-checksum-required", 0, true, expected_checksum, actual_checksum)
+        val checksum_delta = expected_checksum - actual_checksum
+        if checksum_delta == 0:
+            return self._evidence("readback", true, "readback-matched", "readback-checksum-matched", 0, true, expected_checksum, actual_checksum)
+        self._evidence("readback", false, "readback-mismatch", "device-readback-checksum-mismatch", 0, true, expected_checksum, actual_checksum)
+
     me shutdown():
         self.ref_count = 0
         self.platform = 0
@@ -130,3 +243,20 @@ class OpenClSession:
         self.kernel_cache = 0
         self.is_initialized = false
         self.generation = self.generation + 1
+
+    fn _evidence(operation: text, success: bool, status_code: text, reason: text, kernel: i64, readback_available: bool, expected_checksum: i64, actual_checksum: i64) -> OpenClSessionEvidence:
+        OpenClSessionEvidence.create(
+            operation,
+            success,
+            status_code,
+            reason,
+            self.platform,
+            self.context,
+            self.queue,
+            self.program,
+            kernel,
+            self.generation,
+            readback_available,
+            expected_checksum,
+            actual_checksum
+        )

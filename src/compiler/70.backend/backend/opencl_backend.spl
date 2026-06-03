@@ -1,0 +1,315 @@
+# OpenCL Backend Contract
+#
+# First-class compiler-side OpenCL target contract. Full MIR lowering is still
+# a separate compiler slice; this module exposes generated portable-compute
+# OpenCL C source, SPIR-V artifact evidence, and honest diagnostics for generic
+# MIR compilation attempts.
+
+use compiler.mir.mir_data.{MirModule}
+use compiler.mir.mir_instructions.{MirFunction, MirInst, MirTerminator, MirOperand, MirBinOp, MirUnaryOp, GpuBarrierScope, GpuMemoryScope}
+use compiler.mir.mir_types.{MirLocal, MirType, LocalKind, MirConstValue}
+use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, CompileOptions, CompileError, compileerror_backend_error}
+use compiler.backend.gpu_backend_metadata.{gpu_backend_accepts_kernel_metadata}
+use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
+use compiler.backend.gpu_portable_compute.{
+    PortableComputeCompilePlan,
+    PortableComputeCompiledArtifactEvidence,
+    PortableComputeTarget,
+    emit_portable_2d_optimization_module,
+    portable_compute_2d_optimization_compile_plan,
+    portable_compute_compiled_artifact_evidence
+}
+
+class OpenClBackendCompileContract:
+    source: text
+    plan: PortableComputeCompilePlan
+    evidence: PortableComputeCompiledArtifactEvidence
+    ready: bool
+    status: text
+    diagnostic: text
+
+    static fn create(output_stem: text, artifact_magic: text, exported_symbols: text, byte_count: i64) -> OpenClBackendCompileContract:
+        val module = emit_portable_2d_optimization_module(PortableComputeTarget.OpenCl)
+        val plan = portable_compute_2d_optimization_compile_plan(PortableComputeTarget.OpenCl, output_stem)
+        val evidence = portable_compute_compiled_artifact_evidence(plan, artifact_magic, exported_symbols, byte_count)
+        val status = if evidence.artifact_valid:
+            "compiled_artifact_verified"
+        else:
+            evidence.reason
+        OpenClBackendCompileContract(
+            source: module.source,
+            plan: plan,
+            evidence: evidence,
+            ready: evidence.artifact_valid,
+            status: status,
+            diagnostic: if evidence.artifact_valid: "" else: "OpenCL artifact rejected: {evidence.reason}"
+        )
+
+    fn summary() -> text:
+        "OpenClBackendCompileContract[source={self.plan.source_format} binary={self.plan.binary_format} entry={self.plan.entry_name} ready={self.ready.to_text()} status={self.status}]"
+
+class OpenClBackendKernelPlan:
+    accepted_kernel_count: i64
+    rejected_kernel_count: i64
+    rejected_kernel_names: text
+    ready: bool
+    diagnostic: text
+
+    static fn create(accepted_kernel_count: i64, rejected_kernel_count: i64, rejected_kernel_names: text) -> OpenClBackendKernelPlan:
+        OpenClBackendKernelPlan(
+            accepted_kernel_count: accepted_kernel_count,
+            rejected_kernel_count: rejected_kernel_count,
+            rejected_kernel_names: rejected_kernel_names,
+            ready: rejected_kernel_count == 0,
+            diagnostic: if rejected_kernel_count == 0:
+                ""
+            else:
+                "OpenCL backend rejected CUDA-only kernel(s): {rejected_kernel_names}"
+        )
+
+    fn summary() -> text:
+        "OpenClBackendKernelPlan[accepted={self.accepted_kernel_count} rejected={self.rejected_kernel_count} ready={self.ready.to_text()}]"
+
+class OpenClBackend:
+    options: CompileOptions
+
+    static fn create(options: CompileOptions) -> OpenClBackend:
+        OpenClBackend(options: options)
+
+    static fn generated_2d_contract(output_stem: text, artifact_magic: text, exported_symbols: text, byte_count: i64) -> OpenClBackendCompileContract:
+        OpenClBackendCompileContract.create(output_stem, artifact_magic, exported_symbols, byte_count)
+
+    static fn accepts_gpu_kernel(func: MirFunction) -> bool:
+        if not func.is_kernel:
+            return true
+        gpu_backend_accepts_kernel_metadata(BackendKind.OpenCl, func.gpu_target, func.gpu_backend_order)
+
+    static fn plan_module_kernels(module: MirModule) -> OpenClBackendKernelPlan:
+        var accepted = 0
+        var rejected = 0
+        var rejected_names: [text] = []
+        for symbol in module.functions.keys():
+            val func: MirFunction = module.functions[symbol]
+            if func.is_kernel:
+                if OpenClBackend.accepts_gpu_kernel(func):
+                    accepted = accepted + 1
+                else:
+                    rejected = rejected + 1
+                    rejected_names.push(func.name)
+        OpenClBackendKernelPlan.create(accepted, rejected, rejected_names.join(","))
+
+    static fn compile_module_to_opencl_source(module: MirModule) -> Result<text, CompileError>:
+        val plan = OpenClBackend.plan_module_kernels(module)
+        if not plan.ready:
+            return Err(compileerror_backend_error(BackendKind.OpenCl, plan.diagnostic))
+        if plan.accepted_kernel_count == 0:
+            return Err(compileerror_backend_error(
+                BackendKind.OpenCl,
+                "OpenCL backend requires at least one @gpu/@gpu_kernel MIR function"
+            ))
+        var kernels: [text] = []
+        for symbol in module.functions.keys():
+            val func: MirFunction = module.functions[symbol]
+            if func.is_kernel and OpenClBackend.accepts_gpu_kernel(func):
+                kernels.push(OpenClBackend.emit_kernel_source(func))
+        Ok(kernels.join("\n"))
+
+    static fn emit_kernel_source(func: MirFunction) -> text:
+        val params = OpenClBackend.emit_kernel_params(func)
+        var lines: [text] = []
+        lines.push("__kernel void {func.name}({params}) {")
+        for block in func.blocks:
+            if block.label.?:
+                lines.push("    // {block.label.unwrap()}")
+            for inst in block.instructions:
+                lines.push("    {OpenClBackend.emit_instruction(inst)}")
+            lines.push("    {OpenClBackend.emit_terminator(block.terminator)}")
+        lines.push("}")
+        lines.join("\n")
+
+    static fn emit_kernel_params(func: MirFunction) -> text:
+        var params: [text] = []
+        for local in func.locals:
+            match local.kind:
+                case Arg(_):
+                    params.push(OpenClBackend.emit_param(local))
+                case _:
+                    ()
+        params.join(", ")
+
+    static fn emit_param(local: MirLocal) -> text:
+        "{OpenClBackend.opencl_type(local.type_, true)} {OpenClBackend.local_name(local)}"
+
+    static fn local_name(local: MirLocal) -> text:
+        if local.name.?:
+            return local.name.unwrap()
+        "v{local.id.id}"
+
+    static fn local_id_name(id) -> text:
+        "v{id.id}"
+
+    static fn opencl_type(type_: MirType, as_param: bool) -> text:
+        match type_.kind:
+            case I8: "char"
+            case I16: "short"
+            case I32: "int"
+            case I64: "long"
+            case U8: "uchar"
+            case U16: "ushort"
+            case U32: "uint"
+            case U64: "ulong"
+            case F32: "float"
+            case F64: "double"
+            case Bool: "bool"
+            case Unit: "void"
+            case Ptr(pointee, _):
+                val inner = OpenClBackend.opencl_type(pointee, false)
+                if as_param: "__global {inner}*" else: "{inner}*"
+            case Ref(referent, _):
+                val inner = OpenClBackend.opencl_type(referent, false)
+                if as_param: "__global {inner}*" else: "{inner}*"
+            case _:
+                "ulong"
+
+    static fn emit_instruction(inst: MirInst) -> text:
+        match inst.kind:
+            case Const(dest, value, type_):
+                "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name(dest)} = {OpenClBackend.emit_const_value(value)};"
+            case Copy(dest, src):
+                "ulong {OpenClBackend.local_id_name(dest)} = {OpenClBackend.local_id_name(src)};"
+            case Move(dest, src):
+                "ulong {OpenClBackend.local_id_name(dest)} = {OpenClBackend.local_id_name(src)};"
+            case BinOp(dest, op, left, right):
+                "ulong {OpenClBackend.local_id_name(dest)} = {OpenClBackend.emit_operand(left)} {OpenClBackend.emit_binop(op)} {OpenClBackend.emit_operand(right)};"
+            case UnaryOp(dest, op, operand):
+                "ulong {OpenClBackend.local_id_name(dest)} = {OpenClBackend.emit_unaryop(op)}{OpenClBackend.emit_operand(operand)};"
+            case GpuGlobalId(dest, dim):
+                "ulong {OpenClBackend.local_id_name(dest)} = get_global_id({dim});"
+            case GpuLocalId(dest, dim):
+                "ulong {OpenClBackend.local_id_name(dest)} = get_local_id({dim});"
+            case GpuBlockId(dest, dim):
+                "ulong {OpenClBackend.local_id_name(dest)} = get_group_id({dim});"
+            case GpuBlockDim(dest, dim):
+                "ulong {OpenClBackend.local_id_name(dest)} = get_local_size({dim});"
+            case GpuGridDim(dest, dim):
+                "ulong {OpenClBackend.local_id_name(dest)} = get_num_groups({dim});"
+            case GpuBarrier(scope):
+                OpenClBackend.emit_barrier(scope)
+            case GpuMemFence(scope):
+                OpenClBackend.emit_mem_fence(scope)
+            case GpuSharedAlloc(dest, type_, size):
+                "__local {OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name(dest)}[{size}];"
+            case DebugValue(_, name):
+                "// debug value: {name}"
+            case Nop:
+                "// nop"
+            case _:
+                "// unsupported MIR instruction for OpenCL subset"
+
+    static fn emit_operand(operand: MirOperand) -> text:
+        match operand.kind:
+            case Copy(local):
+                OpenClBackend.local_id_name(local)
+            case Move(local):
+                OpenClBackend.local_id_name(local)
+            case Const(value, _):
+                OpenClBackend.emit_const_value(value)
+
+    static fn emit_const_value(value: MirConstValue) -> text:
+        match value:
+            case Int(v):
+                v.to_text()
+            case Float(v):
+                v.to_text()
+            case Bool(v):
+                if v: "true" else: "false"
+            case Str(v):
+                "\"{v}\""
+            case Zero:
+                "0"
+            case _:
+                "0"
+
+    static fn emit_binop(op: MirBinOp) -> text:
+        match op:
+            case Add: "+"
+            case Sub: "-"
+            case Mul: "*"
+            case Div: "/"
+            case Rem: "%"
+            case BitAnd: "&"
+            case BitOr: "|"
+            case BitXor: "^"
+            case Shl: "<<"
+            case Shr: ">>"
+            case Eq: "=="
+            case Ne: "!="
+            case Lt: "<"
+            case Le: "<="
+            case Gt: ">"
+            case Ge: ">="
+            case _: "+"
+
+    static fn emit_unaryop(op: MirUnaryOp) -> text:
+        match op:
+            case Neg: "-"
+            case Not: "!"
+            case BitNot: "~"
+            case Transpose: ""
+
+    static fn emit_barrier(scope: GpuBarrierScope) -> text:
+        match scope:
+            case Workgroup:
+                "barrier(CLK_LOCAL_MEM_FENCE);"
+            case Device:
+                "mem_fence(CLK_GLOBAL_MEM_FENCE);"
+            case Subgroup:
+                "// subgroup barrier deferred"
+
+    static fn emit_mem_fence(scope: GpuMemoryScope) -> text:
+        match scope:
+            case Workgroup:
+                "mem_fence(CLK_LOCAL_MEM_FENCE);"
+            case Device:
+                "mem_fence(CLK_GLOBAL_MEM_FENCE);"
+            case All:
+                "mem_fence(CLK_LOCAL_MEM_FENCE | CLK_GLOBAL_MEM_FENCE);"
+            case QueueFamily:
+                "// queue-family fence deferred for OpenCL"
+
+    static fn emit_terminator(term: MirTerminator) -> text:
+        match term:
+            case Ret(_):
+                "return;"
+            case Unreachable:
+                "// unreachable"
+            case Abort(message):
+                "// abort: {message}"
+            case Goto(target):
+                "// goto BB{target.id}"
+            case If(_, then_, else_):
+                "// if terminator deferred: BB{then_.id} else BB{else_.id}"
+            case Switch(_, _, default):
+                "// switch terminator deferred: default BB{default.id}"
+            case CallTerminator(_, _, _, normal, _):
+                "// call terminator deferred: normal BB{normal.id}"
+
+impl Codegen for OpenClBackend:
+    fn backend_kind() -> BackendKind:
+        BackendKind.OpenCl
+
+    fn backend_name() -> text:
+        "opencl"
+
+    fn supports_target(target: CodegenTarget) -> bool:
+        target == CodegenTarget.OpenClC or target == CodegenTarget.OpenClSpirv
+
+    fn output_kind() -> CodegenOutputKind:
+        CodegenOutputKind.GpuCode
+
+    fn compile_module(module: MirModule) -> Result<CodegenOutput, CompileError>:
+        val source = OpenClBackend.compile_module_to_opencl_source(module)?
+        Ok(CodegenOutput.gpu_output(module.name, source))
+
+fn opencl_backend_2d_compile_contract(output_stem: text, artifact_magic: text, exported_symbols: text, byte_count: i64) -> OpenClBackendCompileContract:
+    OpenClBackend.generated_2d_contract(output_stem, artifact_magic, exported_symbols, byte_count)

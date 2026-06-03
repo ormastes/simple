@@ -6,6 +6,8 @@
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
 use compiler.backend.backend_api.*
+use compiler.backend.backend.backend_types.{compileerror_backend_error}
+use compiler.backend.gpu_backend_metadata.{gpu_backend_accepts_kernel_metadata}
 use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
 use compiler.backend.gpu_codegen_types.{GpuCodegen, GpuBarrierScope}
 use compiler.backend.cuda_type_mapper.CudaTypeMapper
@@ -65,7 +67,7 @@ class CudaBackend:
             case Some(cap):
                 Ok(CudaBackend.create(cap))
             case nil:
-                Err(CompileError.backend_error(
+                Err(compileerror_backend_error(
                     BackendKind.Cuda,
                     "Target is not a CUDA target"
                 ))
@@ -84,6 +86,11 @@ class CudaBackend:
         # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
         for symbol in module.functions.keys():
             val func: MirFunction = module.functions[symbol]
+            if not CudaBackend.accepts_gpu_kernel_target(func):
+                return Err(compileerror_backend_error(
+                    BackendKind.Cuda,
+                    "CUDA backend cannot compile GPU kernel '{func.name}' with target '{func.gpu_target}'"
+                ))
             val result = self.compile_function(builder, func)
             match result:
                 case Ok(kern):
@@ -168,6 +175,11 @@ class CudaBackend:
                     case _:
                         ()
         false
+
+    static fn accepts_gpu_kernel_target(func: MirFunction) -> bool:
+        if not func.is_kernel:
+            return true
+        gpu_backend_accepts_kernel_metadata(BackendKind.Cuda, func.gpu_target, func.gpu_backend_order)
 
     me emit_local_decl(builder: PtxBuilder, local: MirLocal):
         """Emit local variable declaration."""
@@ -322,7 +334,7 @@ class CudaBackend:
                 ()
 
             case _:
-                return Err(CompileError.backend_error(
+                return Err(compileerror_backend_error(
                     BackendKind.Cuda,
                     "Unsupported instruction: {inst.kind}"
                 ))
@@ -701,8 +713,7 @@ impl Codegen for CudaBackend:
     fn backend_kind() -> BackendKind: BackendKind.Cuda
     fn backend_name() -> text: "cuda"
     fn supports_target(target: CodegenTarget) -> bool:
-        val _ = target
-        true
+        target == CodegenTarget.CudaPtx
     fn output_kind() -> CodegenOutputKind: CodegenOutputKind.GpuCode
 
     me compile_module(module: MirModule) -> Result<CodegenOutput, CompileError>:

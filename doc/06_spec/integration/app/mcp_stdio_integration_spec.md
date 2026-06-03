@@ -1,5 +1,39 @@
 # Mcp Stdio Integration Specification
 
+> 1. Operator sends a Content-Length framed initialize request
+
+<!-- sdn-diagram:id=mcp_stdio_integration_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=mcp_stdio_integration_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+mcp_stdio_integration_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=mcp_stdio_integration_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 5 | 5 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Mcp Stdio Integration Specification
+
 ## Scenarios
 
 ### MCP Protocol Runtime
@@ -317,3 +351,5 @@ Tests covering:
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
+
+</details>

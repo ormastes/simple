@@ -37,6 +37,8 @@ Read the existing state file. Append your research summary. Do not modify earlie
   - Reusable modules/functions identified
   - Domain knowledge notes (if any)
   - Open questions: NONE (all resolved, or escalated back to intake)
+  - **≥1 SDN context/dependency diagram** using `<!-- sdn-diagram:id=... -->` format (see `.claude/skills/lib/spipe_diagrams.md`)
+- Research prose is **≤30 lines** (tables and diagrams excluded from count)
 - State file contains `## Requirements` — derived from ACs, mapped to code areas
 - `## Phase` updated to `research-done`
 

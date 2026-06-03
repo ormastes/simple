@@ -523,6 +523,8 @@ struct FunctionAttr:
     is_alloc: bool          # @alloc - function performs allocation
     is_no_alloc: bool       # @no_alloc - function must not allocate
     is_gpu_kernel: bool     # @gpu_kernel - GPU kernel function (emitted as .entry in PTX)
+    gpu_target: text        # @gpu/@gpu_kernel target metadata: cuda, opencl, auto, etc.
+    gpu_backends: text      # Optional ordered backend list, comma-separated text.
     is_simd: bool           # @simd - auto-vectorized loop with GPU grid/bounds
     has_fast_math: bool     # @fast_math - permits reassociation-sensitive FP transforms
     simd_enable: bool       # @simd(enable) or bare @simd
@@ -542,6 +544,8 @@ impl FunctionAttr:
             is_alloc: false,
             is_no_alloc: false,
             is_gpu_kernel: false,
+            gpu_target: "",
+            gpu_backends: "",
             is_simd: false,
             has_fast_math: false,
             simd_enable: false,
@@ -560,6 +564,8 @@ fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
     var is_alloc = false
     var is_no_alloc = false
     var is_gpu_kernel = false
+    var gpu_target = ""
+    var gpu_backends = ""
     var is_simd = false
     var has_fast_math = false
     var simd_enable = false
@@ -586,8 +592,13 @@ fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
             is_alloc = true
         elif attr.name == "no_alloc":
             is_no_alloc = true
-        elif attr.name == "gpu_kernel":
+        elif attr.name == "gpu_kernel" or attr.name == "gpu":
             is_gpu_kernel = true
+            val parsed = parse_gpu_function_attr_args(attr)
+            if parsed.gpu_target.len() > 0:
+                gpu_target = parsed.gpu_target
+            if parsed.gpu_backends.len() > 0:
+                gpu_backends = parsed.gpu_backends
         elif attr.name == "fast_math":
             has_fast_math = true
         elif attr.name == "simd":
@@ -614,12 +625,41 @@ fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
         is_alloc: is_alloc,
         is_no_alloc: is_no_alloc,
         is_gpu_kernel: is_gpu_kernel,
+        gpu_target: gpu_target,
+        gpu_backends: gpu_backends,
         is_simd: is_simd,
         has_fast_math: has_fast_math,
         simd_enable: simd_enable,
         simd_disable: simd_disable,
         simd_prefer_scalable: simd_prefer_scalable
     )
+
+struct GpuFunctionAttrArgs:
+    gpu_target: text
+    gpu_backends: text
+
+fn parse_gpu_function_attr_args(attr: Attribute) -> GpuFunctionAttrArgs:
+    var gpu_target = ""
+    var gpu_backends = ""
+    if attr.args.len() > 0:
+        val first = extract_text_arg(attr.args[0])
+        if first.len() > 0:
+            gpu_target = first
+    for arg in attr.args:
+        match arg.kind:
+            case Assign(left, op, right):
+                match left.kind:
+                    case Ident(name):
+                        val value = extract_text_arg(right)
+                        if name == "target" and value.len() > 0:
+                            gpu_target = value
+                        elif name == "backend" and value.len() > 0:
+                            gpu_target = value
+                        elif name == "backends" and value.len() > 0:
+                            gpu_backends = value
+                    case _: ()
+            case _: ()
+    GpuFunctionAttrArgs(gpu_target: gpu_target, gpu_backends: gpu_backends)
 
 # ============================================================================
 # Task Attribute Types

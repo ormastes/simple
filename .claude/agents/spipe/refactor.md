@@ -62,6 +62,7 @@ If a refactoring risks breaking behavior, skip it and note in state file.
 - [ ] No file exceeds 800 lines
 - [ ] All specs still pass: `bin/simple test <spec_file>` green for each
 - [ ] Doc/wiki refactor pass recorded in state file
+- [ ] Before/after structural diagram included when module boundaries changed (see `.claude/skills/lib/spipe_diagrams.md`)
 - [ ] Numbered artifact guard passes
 - [ ] State file updated: `phase: refactor` marked complete
 

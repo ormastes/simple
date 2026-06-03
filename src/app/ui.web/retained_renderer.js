@@ -451,7 +451,7 @@ export class RetainedRenderer {
 
     for (const direction of ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw']) {
       const handle = document.createElement('div');
-      handle.className = 'wm-resize-handle';
+      handle.className = 'wm-resize-handle wm-resize-' + direction;
       handle.dataset.direction = direction;
       winEl.appendChild(handle);
     }

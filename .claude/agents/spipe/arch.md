@@ -30,6 +30,8 @@ Read the existing state file. Append your architecture doc. Do not modify earlie
   - Dependency map (A depends on B, no cycles)
   - Architecture decisions with rationale
   - Public API surface (function signatures, type names)
+  - **≥1 SDN architecture diagram** (component/flow) using `<!-- sdn-diagram:id=... -->` format (see `.claude/skills/lib/spipe_diagrams.md`)
+- Architecture prose is **≤30 lines** (tables and diagrams excluded from count)
 - No circular dependencies in the module graph
 - Every REQ-N is covered by at least one module
 - `## Phase` updated to `arch-done`

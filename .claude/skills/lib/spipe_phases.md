@@ -84,7 +84,8 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
 **Exit Criteria:**
 - Module list with file paths (new and modified)
 - At least one interface definition (function signature or class structure)
-- Data flow description (can be textual, does not need diagrams)
+- **≥1 SDN architecture diagram** (component/flow) using `<!-- sdn-diagram:id=... -->` format
+- Architecture prose ≤30 lines (tables and diagrams excluded)
 - No inheritance used (composition, traits, or mixins only)
 - Architecture fits within existing project structure conventions
 
@@ -222,6 +223,8 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
 - Every AC is marked as verified with evidence
 - **Generated docs reviewed:** run `bin/simple spipe-docgen <spec> --output doc/06_spec`
   and verify output reads like a hand-written manual (not test plumbing)
+- **Diagram presence:** each phase doc (research, arch, refactor) has ≥1 SDN diagram
+- **Prose concision:** each phase doc ≤30 lines of prose (tables/diagrams excluded)
 - If any AC cannot be verified, it is documented with a clear reason
 
 ---

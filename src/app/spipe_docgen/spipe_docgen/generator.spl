@@ -588,6 +588,34 @@ fn append_scenarios_section(md_parts: [text], raw_content: text, file_path: text
         parts.push("\n")
     parts
 
+fn build_dependency_sdn(doc: SspecDoc) -> text:
+    var lines: [text] = []
+    lines.push("@layout dag")
+    lines.push("@direction LR")
+    lines.push("")
+    val raw = doc.raw_content
+    val src_lines = raw.split("\n")
+    var imports: [text] = []
+    for line in src_lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("use "):
+            val mod_path = trimmed.replace("use ", "").split(".")[0]
+            if mod_path != "" and not _sdn_dep_in(imports, mod_path):
+                imports.push(mod_path)
+    val stem = get_file_stem(doc.file_path)
+    if imports.len() == 0:
+        lines.push(stem)
+    else:
+        for imp in imports:
+            lines.push(stem + " -> " + imp)
+    lines.join("\n")
+
+fn _sdn_dep_in(arr: [text], item: text) -> bool:
+    for x in arr:
+        if x == item:
+            return true
+    false
+
 fn generate_feature_doc(doc: SspecDoc, output_dir: text) -> Result<text, text>:
     val file_name = output_file_stem(doc)
     val has_docstring = doc.doc_blocks.len() > 0
@@ -707,8 +735,38 @@ fn generate_feature_doc(doc: SspecDoc, output_dir: text) -> Result<text, text>:
     if related != "":
         md_parts.push("\n" + related + "\n")
 
+    # Build summary card: concise overview + diagram placeholder + stats at top
+    var card_parts: [text] = []
+    card_parts.push("# {feature_name}\n\n")
+
+    val card_summary = extract_summary_from_markdown(md_parts.join(""))
+    if card_summary != "":
+        card_parts.push("> {card_summary}\n\n")
+
+    val diag_id = file_name + ".arch"
+    val dep_sdn = build_dependency_sdn(doc)
+    card_parts.push("<!-- sdn-diagram:id={diag_id} -->\n")
+    card_parts.push("<details class=\"sdn-source\">\n<summary>SDN source</summary>\n\n")
+    card_parts.push("```sdn id={diag_id} hash=sha256:auto render=ascii\n")
+    card_parts.push(dep_sdn + "\n")
+    card_parts.push("```\n\n</details>\n\n")
+    card_parts.push("<details class=\"sdn-ascii\" open>\n<summary>Diagram</summary>\n\n")
+    card_parts.push("```ascii generated-from={diag_id} hash=sha256:auto\n")
+    card_parts.push("# run: simple md-diagram-update\n")
+    card_parts.push("```\n\n</details>\n")
+    card_parts.push("<!-- sdn-diagram:end -->\n\n")
+
+    if total_tests > 0 or skip_tests > 0 or pending_tests > 0:
+        card_parts.push("| Tests | Active | Skipped | Pending |\n")
+        card_parts.push("|-------|--------|---------|--------:|\n")
+        card_parts.push("| {total_tests + skip_tests + pending_tests} | {total_tests} | {skip_tests} | {pending_tests} |\n\n")
+
+    card_parts.push("<details>\n<summary>Full Scenario Manual</summary>\n\n")
+    card_parts.push(md_parts.join(""))
+    card_parts.push("\n</details>\n")
+
     # Write to file
-    val md = md_parts.join("")
+    val md = card_parts.join("")
     val rel_dir = output_relative_dir(doc)
     if rel_dir != "":
         native_fs_create_dir(output_dir + "/" + rel_dir)

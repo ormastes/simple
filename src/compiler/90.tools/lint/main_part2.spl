@@ -149,6 +149,10 @@ impl Linter:
         lints.push(Lint.new("UI003", LintLevel.Warn, LintCategory.Style,
             "Raw theme-name string literal — use ThemeId enum variant"))
 
+        # MD diagram staleness lint (DIAG001)
+        lints.push(Lint.new("DIAG001", LintLevel.Warn, LintCategory.Correctness,
+            "Stale SDN diagram — run 'simple md-diagram-update' to regenerate"))
+
         # Try to load project-level lint config from simple.sdn
         # Search in common project root locations
         var config = LintConfig.new()
@@ -190,6 +194,7 @@ impl Linter:
         self.check_theme_package(path)
         self.check_riscv_rtl_debuggability(path, content)
         self.check_param_tag_spl(path, content)
+        self.check_stale_md_diagrams(path, content)
 
         # Run shared EasyFix rules and attach as lint results
         val shared_fixes = check_all_rules(content, path)
@@ -552,3 +557,25 @@ impl Linter:
                     "P0/critical TODO must have issue number")
                     .with_fix("Add issue: {keyword}: [{area}][{priority}] description [#123]")
                 self.results.push(LintResult.new(path, line_num, idx, lint))
+
+    me check_stale_md_diagrams(path: String, content: String):
+        if not path.ends_with(".md"):
+            return
+        val lines = content.split("\n")
+        var line_num = 1
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed.starts_with("```sdn ") and trimmed.contains("hash="):
+                val hash_idx = trimmed.index_of("hash=")
+                if hash_idx >= 0:
+                    val after_hash = trimmed.substring(hash_idx + 5, trimmed.len())
+                    val space_idx = after_hash.index_of(" ")
+                    var hash_val = after_hash
+                    if space_idx > 0:
+                        hash_val = after_hash.substring(0, space_idx)
+                    if hash_val == "sha256:auto":
+                        val lint = Lint.new("DIAG001", LintLevel.Warn, LintCategory.Correctness,
+                            "SDN diagram has placeholder hash — run 'simple md-diagram-update'")
+                            .with_fix("Run: simple md-diagram-update " + path)
+                        self.results.push(LintResult.new(path, line_num, 0, lint))
+            line_num = line_num + 1

@@ -24,6 +24,7 @@ const HOST_NATIVE_EVENT_SOURCE = 'native_event';
 const NATIVE_SUPPRESSION_TTL_MS = 500;
 const NATIVE_BURST_DEBOUNCE_MS = 80;
 const WM_EXIT_ANIMATION_MS = 210;
+const WM_SNAP_COMMIT_MS = 360;
 const WM_MOTION_STORAGE_KEY = 'simple.wm.motion';
 const WM_TRANSPARENCY_STORAGE_KEY = 'simple.wm.transparency';
 const WM_WALLPAPER_STORAGE_KEY = 'simple.wm.wallpaper';
@@ -95,6 +96,7 @@ class SimpleWindowManager {
     this._windowSwitcherActiveIndex = 0;
     this._workspaceSwitcher = null;
     this._activeWorkspaceId = 'main';
+    this._workspaceSwitcherActiveIndex = 0;
     this._customWorkspaces = null;
     this._clipboardHistory = null;
     this._clipboardSearchQuery = '';
@@ -119,6 +121,7 @@ class SimpleWindowManager {
     this._privacyIndicator = null;
     this._controlCenter = null;
     this._widgetGallery = null;
+    this._widgetGalleryActiveIndex = 0;
     this._wallpaperPicker = null;
     this._accentPalette = null;
     this._focusMode = 'off';
@@ -138,6 +141,8 @@ class SimpleWindowManager {
     this._quietMode = 'off';
     this._dockStack = null;
     this._dockStackMode = 'fan';
+    this._dockStackActiveIndex = 0;
+    this._stageRailActiveIndex = 0;
     this._qualityInspector = null;
     this._qualityFilter = 'all';
     this._selectedQualityCheck = 'color';
@@ -151,6 +156,8 @@ class SimpleWindowManager {
     this._titleCommandSuggestionsPanel = null;
     this._titleCommandSuggestionItems = [];
     this._titleCommandSuggestionIndex = 0;
+    this._desktopBackdropPointer = { x: 50, y: 50 };
+    this._desktopBackdropPointerRaf = 0;
     this._appLauncher = null;
     this._appLauncherInput = null;
     this._appLauncherFilters = null;
@@ -262,6 +269,7 @@ class SimpleWindowManager {
   _applyMotionPreference(preference) {
     const motion = this._normalizeMotionPreference(preference || this._readMotionPreference());
     document.documentElement.dataset.wmMotion = motion;
+    if (motion === 'off') this._resetDesktopBackdropPointer();
     return motion;
   }
 
@@ -498,6 +506,7 @@ class SimpleWindowManager {
     const mode = this._normalizeEnergyPreference(preference || this._readEnergyPreference());
     this._energyMode = mode;
     document.documentElement.dataset.wmEnergy = mode;
+    if (mode === 'critical') this._resetDesktopBackdropPointer();
     return mode;
   }
 
@@ -711,6 +720,7 @@ class SimpleWindowManager {
     this._writePreference(WM_BACKDROP_MOTION_STORAGE_KEY, mode);
     this._backdropMotionMode = mode;
     document.documentElement.dataset.wmBackdropMotion = mode;
+    if (mode === 'static') this._resetDesktopBackdropPointer();
     this._showSystemHud('Backdrop motion', mode);
     return mode;
   }
@@ -719,6 +729,7 @@ class SimpleWindowManager {
     const mode = this._normalizeThreeMode(preference || this._readBackdropMotionPreference(), 'ambient', 'subtle', 'static');
     this._backdropMotionMode = mode;
     document.documentElement.dataset.wmBackdropMotion = mode;
+    if (mode === 'static') this._resetDesktopBackdropPointer();
     return mode;
   }
 
@@ -731,6 +742,7 @@ class SimpleWindowManager {
     this._writePreference(WM_BACKDROP_INTENSITY_STORAGE_KEY, mode);
     this._backdropIntensityMode = mode;
     document.documentElement.dataset.wmBackdropIntensity = mode;
+    if (mode === 'quiet') this._resetDesktopBackdropPointer();
     this._showSystemHud('Backdrop intensity', this._backdropIntensityLabel(mode));
     return mode;
   }
@@ -739,6 +751,7 @@ class SimpleWindowManager {
     const mode = this._normalizeThreeMode(preference || this._readBackdropIntensityPreference(), 'balanced', 'vivid', 'quiet');
     this._backdropIntensityMode = mode;
     document.documentElement.dataset.wmBackdropIntensity = mode;
+    if (mode === 'quiet') this._resetDesktopBackdropPointer();
     return mode;
   }
 
@@ -764,6 +777,7 @@ class SimpleWindowManager {
     const mode = this._normalizeThreeMode(preference || this._readQuietModePreference(), 'off', 'on', 'off');
     this._quietMode = mode;
     document.documentElement.dataset.wmQuietMode = mode;
+    if (mode === 'on') this._resetDesktopBackdropPointer();
     return mode;
   }
 
@@ -791,6 +805,44 @@ class SimpleWindowManager {
     } catch (_) {
       return '';
     }
+  }
+
+  _desktopBackdropPointerEnabled() {
+    const root = document.documentElement.dataset;
+    return this.desktop &&
+      root.wmMotion !== 'off' &&
+      root.wmBackdropMotion !== 'static' &&
+      root.wmBackdropIntensity !== 'quiet' &&
+      root.wmQuietMode !== 'on' &&
+      root.wmEnergy !== 'critical';
+  }
+
+  _updateDesktopBackdropPointer(event) {
+    if (!this._desktopBackdropPointerEnabled()) return false;
+    const rect = this.desktop.getBoundingClientRect();
+    if (!rect.width || !rect.height) return false;
+    const x = Math.max(0, Math.min(100, ((event.clientX - rect.left) / rect.width) * 100));
+    const y = Math.max(0, Math.min(100, ((event.clientY - rect.top) / rect.height) * 100));
+    this._desktopBackdropPointer = { x, y };
+    if (this._desktopBackdropPointerRaf) return true;
+    this._desktopBackdropPointerRaf = window.requestAnimationFrame(() => {
+      this._desktopBackdropPointerRaf = 0;
+      const current = this._desktopBackdropPointer || { x: 50, y: 50 };
+      document.documentElement.style.setProperty('--ui-backdrop-pointer-x', current.x.toFixed(1) + '%');
+      document.documentElement.style.setProperty('--ui-backdrop-pointer-y', current.y.toFixed(1) + '%');
+    });
+    return true;
+  }
+
+  _resetDesktopBackdropPointer() {
+    this._desktopBackdropPointer = { x: 50, y: 50 };
+    if (this._desktopBackdropPointerRaf) {
+      window.cancelAnimationFrame(this._desktopBackdropPointerRaf);
+      this._desktopBackdropPointerRaf = 0;
+    }
+    document.documentElement.style.setProperty('--ui-backdrop-pointer-x', '50%');
+    document.documentElement.style.setProperty('--ui-backdrop-pointer-y', '50%');
+    return true;
   }
 
   _toggleFocusMode() {
@@ -2068,6 +2120,7 @@ class SimpleWindowManager {
       this._windowSwitcherActiveIndex = index;
       this._activateWindowSwitcherSelection();
     });
+    switcher.addEventListener('keydown', (event) => this._handleWindowSwitcherKeydown(event));
     document.body.appendChild(switcher);
     this._windowSwitcher = switcher;
     return switcher;
@@ -2077,7 +2130,10 @@ class SimpleWindowManager {
     const switcher = this._ensureWindowSwitcher();
     const shouldOpen = open == null ? switcher.hidden : open;
     switcher.hidden = !shouldOpen;
-    if (shouldOpen) this._renderWindowSwitcher();
+    if (shouldOpen) {
+      this._renderWindowSwitcher();
+      this._focusWindowSwitcherActiveCard();
+    }
     return shouldOpen;
   }
 
@@ -2095,6 +2151,7 @@ class SimpleWindowManager {
     const windows = this._windowSwitcherWindows();
     this._windowSwitcherItems = windows;
     this._windowSwitcherActiveIndex = Math.min(this._windowSwitcherActiveIndex, Math.max(windows.length - 1, 0));
+    if (windows.length) list.setAttribute('aria-activedescendant', 'wm-window-switcher-card-' + this._windowSwitcherActiveIndex);
     for (const [index, win] of windows.entries()) list.appendChild(this._makeWindowSwitcherCard(win, index));
     if (!windows.length) {
       const empty = document.createElement('div');
@@ -2118,6 +2175,7 @@ class SimpleWindowManager {
   _makeWindowSwitcherCard(win, index) {
     const card = document.createElement('button');
     card.type = 'button';
+    card.id = 'wm-window-switcher-card-' + index;
     card.className = 'wm-window-switcher-card' + (index === this._windowSwitcherActiveIndex ? ' active' : '') + (win.minimized ? ' minimized' : '');
     card.dataset.switcherIndex = String(index);
     card.dataset.switchWindow = win.id;
@@ -2139,12 +2197,47 @@ class SimpleWindowManager {
     return card;
   }
 
+  _handleWindowSwitcherKeydown(event) {
+    if (!this._windowSwitcher || this._windowSwitcher.hidden) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      this._toggleWindowSwitcher(false);
+      return;
+    }
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      this._activateWindowSwitcherSelection();
+      return;
+    }
+    if (event.key === 'Tab') {
+      event.preventDefault();
+      this._moveWindowSwitcherSelection(event.shiftKey ? -1 : 1);
+      return;
+    }
+    if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+      event.preventDefault();
+      this._moveWindowSwitcherSelection(1);
+      return;
+    }
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      this._moveWindowSwitcherSelection(-1);
+    }
+  }
+
   _moveWindowSwitcherSelection(delta) {
     if (!this._windowSwitcher || this._windowSwitcher.hidden) return;
     const count = this._windowSwitcherItems.length;
     if (!count) return;
     this._windowSwitcherActiveIndex = (this._windowSwitcherActiveIndex + delta + count) % count;
     this._renderWindowSwitcher();
+    this._focusWindowSwitcherActiveCard();
+  }
+
+  _focusWindowSwitcherActiveCard() {
+    if (!this._windowSwitcher || this._windowSwitcher.hidden) return;
+    const card = this._windowSwitcher.querySelector('.wm-window-switcher-card.active');
+    if (card) card.focus({ preventScroll: true });
   }
 
   _activateWindowSwitcherSelection() {
@@ -2160,6 +2253,7 @@ class SimpleWindowManager {
     const rail = document.createElement('aside');
     rail.className = 'wm-stage-rail';
     rail.hidden = true;
+    rail.setAttribute('role', 'dialog');
     rail.setAttribute('aria-label', 'Window stage rail');
     rail.addEventListener('pointerdown', (event) => event.stopPropagation());
     rail.addEventListener('mousedown', (event) => event.stopPropagation());
@@ -2167,13 +2261,37 @@ class SimpleWindowManager {
       const target = event.target instanceof Element ? event.target : event.target?.parentElement;
       const action = target?.closest('[data-stage-action]');
       if (action && rail.contains(action)) {
+        this._stageRailActiveIndex = Number(action.closest('.wm-stage-rail-item')?.dataset.stageIndex || '0') || 0;
         this._activateStageRailAction(action.dataset.stageAction || '', action.closest('.wm-stage-rail-item')?.dataset.windowIdHint || '');
         return;
       }
       const item = target?.closest('.wm-stage-rail-focus');
       if (!item || !rail.contains(item)) return;
-      const windowId = item.closest('.wm-stage-rail-item')?.dataset.windowIdHint || '';
+      const row = item.closest('.wm-stage-rail-item');
+      this._stageRailActiveIndex = Number(row?.dataset.stageIndex || '0') || 0;
+      const windowId = row?.dataset.windowIdHint || '';
       if (windowId) this._focusWindowById(windowId);
+    });
+    rail.addEventListener('keydown', (event) => {
+      if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
+        event.preventDefault();
+        this._moveStageRailSelection(1);
+      } else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') {
+        event.preventDefault();
+        this._moveStageRailSelection(-1);
+      } else if (event.key === 'Home') {
+        event.preventDefault();
+        this._moveStageRailSelection(-999);
+      } else if (event.key === 'End') {
+        event.preventDefault();
+        this._moveStageRailSelection(999);
+      } else if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        this._activateStageRailSelection();
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        this._toggleStageRail(false);
+      }
     });
     document.body.appendChild(rail);
     this._stageRail = rail;
@@ -2191,12 +2309,17 @@ class SimpleWindowManager {
   _renderStageRail() {
     const rail = this._ensureStageRail();
     rail.innerHTML = '';
-    const windows = this._overviewWindows();
+    const windows = this._overviewWindows().slice(0, 5);
+    const activeIndex = windows.findIndex((win) => win.active);
+    if (activeIndex >= 0) this._stageRailActiveIndex = activeIndex;
+    if (this._stageRailActiveIndex >= windows.length) this._stageRailActiveIndex = Math.max(0, windows.length - 1);
+    rail.setAttribute('aria-activedescendant', `wm-stage-rail-item-${this._stageRailActiveIndex}`);
+    rail.dataset.stageActiveIndex = String(this._stageRailActiveIndex);
     const title = document.createElement('div');
     title.className = 'wm-stage-rail-title';
     title.textContent = 'Stage';
     rail.appendChild(title);
-    for (const win of windows.slice(0, 5)) rail.appendChild(this._makeStageRailItem(win));
+    windows.forEach((win, index) => rail.appendChild(this._makeStageRailItem(win, index)));
     if (!windows.length) {
       const empty = document.createElement('div');
       empty.className = 'wm-stage-rail-empty';
@@ -2205,13 +2328,19 @@ class SimpleWindowManager {
     }
   }
 
-  _makeStageRailItem(win) {
+  _makeStageRailItem(win, index) {
     const item = document.createElement('div');
-    item.className = 'wm-stage-rail-item' + (win.active ? ' active' : '') + (win.minimized ? ' minimized' : '');
+    const active = index === this._stageRailActiveIndex;
+    item.id = `wm-stage-rail-item-${index}`;
+    item.className = 'wm-stage-rail-item' + (active ? ' active' : '') + (win.minimized ? ' minimized' : '');
     item.dataset.windowIdHint = win.id;
+    item.dataset.stageIndex = String(index);
+    item.setAttribute('role', 'option');
+    item.setAttribute('aria-selected', active ? 'true' : 'false');
     const focus = document.createElement('button');
     focus.type = 'button';
     focus.className = 'wm-stage-rail-focus';
+    focus.tabIndex = active ? 0 : -1;
     focus.setAttribute('aria-label', `${win.minimized ? 'Restore' : 'Focus'} ${win.title}`);
     focus.appendChild(this._makeRoundIcon('wm-stage-rail-icon', win.title || win.id));
     const label = document.createElement('span');
@@ -2239,6 +2368,42 @@ class SimpleWindowManager {
     return button;
   }
 
+  _moveStageRailSelection(delta) {
+    const rail = this._ensureStageRail();
+    const items = Array.from(rail.querySelectorAll('.wm-stage-rail-item'));
+    if (!items.length) return;
+    const max = items.length - 1;
+    this._stageRailActiveIndex = Math.max(0, Math.min(max, this._stageRailActiveIndex + delta));
+    this._syncStageRailSelection(true);
+  }
+
+  _syncStageRailSelection(shouldFocus = true) {
+    const rail = this._ensureStageRail();
+    const items = Array.from(rail.querySelectorAll('.wm-stage-rail-item'));
+    if (!items.length) return;
+    const activeIndex = Math.max(0, Math.min(items.length - 1, this._stageRailActiveIndex));
+    this._stageRailActiveIndex = activeIndex;
+    rail.setAttribute('aria-activedescendant', `wm-stage-rail-item-${activeIndex}`);
+    rail.dataset.stageActiveIndex = String(activeIndex);
+    items.forEach((item, index) => {
+      const active = index === activeIndex;
+      item.classList.toggle('active', active);
+      item.setAttribute('aria-selected', active ? 'true' : 'false');
+      const focus = item.querySelector('.wm-stage-rail-focus');
+      if (focus) {
+        focus.tabIndex = active ? 0 : -1;
+        if (active && shouldFocus) focus.focus();
+      }
+    });
+  }
+
+  _activateStageRailSelection() {
+    const rail = this._ensureStageRail();
+    const item = rail.querySelector(`.wm-stage-rail-item[data-stage-index="${this._stageRailActiveIndex}"]`);
+    const windowId = item?.dataset.windowIdHint || '';
+    if (windowId) this._focusWindowById(windowId);
+  }
+
   _activateStageRailAction(action, windowId) {
     const id = String(windowId || '');
     if (!id) return;
@@ -2261,13 +2426,37 @@ class SimpleWindowManager {
       const target = event.target instanceof Element ? event.target : event.target?.parentElement;
       const action = target?.closest('[data-workspace-action]');
       if (action && switcher.contains(action)) {
+        this._workspaceSwitcherActiveIndex = Number(action.closest('.wm-workspace-card')?.dataset.workspaceIndex || '0') || 0;
         this._activateWorkspaceAction(action.dataset.workspaceAction || '', action.closest('.wm-workspace-card')?.dataset.workspaceId || 'main');
         return;
       }
       const item = target?.closest('.wm-workspace-switch');
       if (!item || !switcher.contains(item)) return;
-      this._switchWorkspace(item.closest('.wm-workspace-card')?.dataset.workspaceId || 'main');
+      const card = item.closest('.wm-workspace-card');
+      this._workspaceSwitcherActiveIndex = Number(card?.dataset.workspaceIndex || '0') || 0;
+      this._switchWorkspace(card?.dataset.workspaceId || 'main');
       this._toggleWorkspaceSwitcher(false);
+    });
+    switcher.addEventListener('keydown', (event) => {
+      if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+        event.preventDefault();
+        this._moveWorkspaceSwitcherSelection(1);
+      } else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+        event.preventDefault();
+        this._moveWorkspaceSwitcherSelection(-1);
+      } else if (event.key === 'Home') {
+        event.preventDefault();
+        this._moveWorkspaceSwitcherSelection(-999);
+      } else if (event.key === 'End') {
+        event.preventDefault();
+        this._moveWorkspaceSwitcherSelection(999);
+      } else if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        this._activateWorkspaceSwitcherSelection();
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        this._toggleWorkspaceSwitcher(false);
+      }
     });
     document.body.appendChild(switcher);
     this._workspaceSwitcher = switcher;
@@ -2285,13 +2474,21 @@ class SimpleWindowManager {
   _renderWorkspaceSwitcher() {
     const switcher = this._ensureWorkspaceSwitcher();
     switcher.innerHTML = '';
+    const items = this._workspaceItems();
+    const activeIndex = items.findIndex((workspace) => workspace.id === this._activeWorkspaceId);
+    if (activeIndex >= 0) this._workspaceSwitcherActiveIndex = activeIndex;
+    if (this._workspaceSwitcherActiveIndex >= items.length) this._workspaceSwitcherActiveIndex = Math.max(0, items.length - 1);
+    switcher.setAttribute('aria-activedescendant', `wm-workspace-card-${this._workspaceSwitcherActiveIndex}`);
+    switcher.dataset.workspaceActiveIndex = String(this._workspaceSwitcherActiveIndex);
     const title = document.createElement('div');
     title.className = 'wm-workspace-title';
     title.textContent = 'Workspaces';
     switcher.appendChild(title);
     const grid = document.createElement('div');
     grid.className = 'wm-workspace-grid';
-    for (const workspace of this._workspaceItems()) grid.appendChild(this._makeWorkspaceCard(workspace));
+    grid.setAttribute('role', 'listbox');
+    grid.setAttribute('aria-label', 'Available workspaces');
+    for (let index = 0; index < items.length; index += 1) grid.appendChild(this._makeWorkspaceCard(items[index], index));
     switcher.appendChild(grid);
   }
 
@@ -2304,13 +2501,19 @@ class SimpleWindowManager {
     ];
   }
 
-  _makeWorkspaceCard(workspace) {
+  _makeWorkspaceCard(workspace, index) {
     const card = document.createElement('div');
-    card.className = 'wm-workspace-card' + (workspace.id === this._activeWorkspaceId ? ' active' : '');
+    const active = index === this._workspaceSwitcherActiveIndex;
+    card.id = `wm-workspace-card-${index}`;
+    card.className = 'wm-workspace-card' + (active ? ' active' : '');
     card.dataset.workspaceId = workspace.id;
+    card.dataset.workspaceIndex = String(index);
+    card.setAttribute('role', 'option');
+    card.setAttribute('aria-selected', active ? 'true' : 'false');
     const switchButton = document.createElement('button');
     switchButton.type = 'button';
     switchButton.className = 'wm-workspace-switch';
+    switchButton.tabIndex = active ? 0 : -1;
     switchButton.setAttribute('aria-label', `Switch to ${workspace.label} workspace`);
     switchButton.appendChild(this._makeRoundIcon('wm-workspace-icon', workspace.label));
     const label = document.createElement('span');
@@ -2340,6 +2543,43 @@ class SimpleWindowManager {
     button.dataset.workspaceAction = action;
     button.textContent = label;
     return button;
+  }
+
+  _moveWorkspaceSwitcherSelection(delta) {
+    const switcher = this._ensureWorkspaceSwitcher();
+    const cards = Array.from(switcher.querySelectorAll('.wm-workspace-card'));
+    if (!cards.length) return;
+    const max = cards.length - 1;
+    this._workspaceSwitcherActiveIndex = Math.max(0, Math.min(max, this._workspaceSwitcherActiveIndex + delta));
+    this._syncWorkspaceSwitcherSelection(true);
+  }
+
+  _syncWorkspaceSwitcherSelection(shouldFocus = true) {
+    const switcher = this._ensureWorkspaceSwitcher();
+    const cards = Array.from(switcher.querySelectorAll('.wm-workspace-card'));
+    if (!cards.length) return;
+    const activeIndex = Math.max(0, Math.min(cards.length - 1, this._workspaceSwitcherActiveIndex));
+    this._workspaceSwitcherActiveIndex = activeIndex;
+    switcher.setAttribute('aria-activedescendant', `wm-workspace-card-${activeIndex}`);
+    switcher.dataset.workspaceActiveIndex = String(activeIndex);
+    cards.forEach((card, index) => {
+      const active = index === activeIndex;
+      card.classList.toggle('active', active);
+      card.setAttribute('aria-selected', active ? 'true' : 'false');
+      const button = card.querySelector('.wm-workspace-switch');
+      if (button) {
+        button.tabIndex = active ? 0 : -1;
+        if (active && shouldFocus) button.focus();
+      }
+    });
+  }
+
+  _activateWorkspaceSwitcherSelection() {
+    const switcher = this._ensureWorkspaceSwitcher();
+    const card = switcher.querySelector(`.wm-workspace-card[data-workspace-index="${this._workspaceSwitcherActiveIndex}"]`);
+    const workspaceId = card?.dataset.workspaceId || 'main';
+    this._switchWorkspace(workspaceId);
+    this._toggleWorkspaceSwitcher(false);
   }
 
   _activateWorkspaceAction(action, workspaceId) {
@@ -2771,6 +3011,7 @@ class SimpleWindowManager {
     label.textContent = setting.label;
     const value = document.createElement('span');
     value.className = 'wm-quick-slider-value';
+    value.setAttribute('aria-live', 'polite');
     value.textContent = `${setting.value}%`;
     head.appendChild(label);
     head.appendChild(value);
@@ -2783,6 +3024,7 @@ class SimpleWindowManager {
     slider.value = String(setting.value);
     slider.dataset.setting = setting.id;
     slider.setAttribute('aria-label', `${setting.label} level`);
+    slider.setAttribute('aria-valuetext', `${setting.value}%`);
     row.appendChild(slider);
     return row;
   }
@@ -2794,7 +3036,21 @@ class SimpleWindowManager {
     this._quickSettingLevels[id] = value;
     this._sendWindowCmd('quick_setting_level', { setting: id, level: value });
     this._showSystemHud(id === 'audio' ? 'Audio' : 'Brightness', `${value}%`, 900);
-    this._renderQuickSettings();
+    this._updateQuickSettingLevelDom(id, value);
+  }
+
+  _updateQuickSettingLevelDom(settingId, value) {
+    if (!this._quickSettings || !this._quickSettings.isConnected) return;
+    const label = `${value}%`;
+    for (const slider of this._quickSettings.querySelectorAll(`.wm-quick-slider[data-setting="${settingId}"]`)) {
+      slider.value = String(value);
+      slider.setAttribute('aria-valuetext', label);
+    }
+    for (const row of this._quickSettings.querySelectorAll(`.wm-quick-slider-row[data-setting="${settingId}"] .wm-quick-slider-value`)) {
+      row.textContent = label;
+    }
+    const setting = this._quickSettings.querySelector(`.wm-quick-setting[data-setting="${settingId}"] .wm-quick-value`);
+    if (setting) setting.textContent = label;
   }
 
   _activateQuickSetting(settingId) {
@@ -3023,6 +3279,7 @@ class SimpleWindowManager {
     const panel = this._ensureLiveActivity();
     panel.innerHTML = '';
     panel.dataset.liveActivityId = 'build';
+    panel.dataset.liveState = this._liveActivityPaused ? 'paused' : 'running';
     panel.appendChild(this._makeRoundIcon('wm-live-activity-icon', 'Build'));
     const body = document.createElement('span');
     body.className = 'wm-live-activity-body';
@@ -3037,6 +3294,12 @@ class SimpleWindowManager {
     const progress = document.createElement('span');
     progress.className = 'wm-live-activity-progress';
     progress.dataset.liveProgress = '64';
+    progress.setAttribute('role', 'progressbar');
+    progress.setAttribute('aria-label', 'Build progress');
+    progress.setAttribute('aria-valuemin', '0');
+    progress.setAttribute('aria-valuemax', '100');
+    progress.setAttribute('aria-valuenow', '64');
+    progress.setAttribute('aria-valuetext', '64%');
     const bar = document.createElement('span');
     bar.className = 'wm-live-activity-bar';
     progress.appendChild(bar);
@@ -3058,6 +3321,8 @@ class SimpleWindowManager {
     button.type = 'button';
     button.className = 'wm-live-activity-action' + (active ? ' active' : '');
     button.dataset.liveAction = action;
+    button.setAttribute('aria-label', `Live activity ${label.toLowerCase()}`);
+    button.setAttribute('aria-pressed', active || action === 'pause' || action === 'resume' ? String(active || action === 'resume') : 'false');
     button.textContent = label;
     return button;
   }
@@ -3872,7 +4137,29 @@ class SimpleWindowManager {
       }
       const item = event.target.closest('.wm-dock-stack-item');
       if (!item || !stack.contains(item)) return;
+      this._dockStackActiveIndex = Number(item.dataset.stackIndex || '0') || 0;
       this._openDockStackItem(item.dataset.stackItem || '');
+    });
+    stack.addEventListener('keydown', (event) => {
+      if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+        event.preventDefault();
+        this._moveDockStackSelection(1);
+      } else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+        event.preventDefault();
+        this._moveDockStackSelection(-1);
+      } else if (event.key === 'Home') {
+        event.preventDefault();
+        this._moveDockStackSelection(-999);
+      } else if (event.key === 'End') {
+        event.preventDefault();
+        this._moveDockStackSelection(999);
+      } else if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        this._activateDockStackSelection();
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        this._toggleDockStack(false);
+      }
     });
     document.body.appendChild(stack);
     this._dockStack = stack;
@@ -3908,8 +4195,11 @@ class SimpleWindowManager {
     const list = document.createElement('div');
     list.className = 'wm-dock-stack-list ' + mode;
     list.setAttribute('role', 'listbox');
-    this._dockStackItems().forEach((item) => list.appendChild(this._makeDockStackItem(item)));
+    list.setAttribute('aria-label', 'Downloads stack items');
+    list.setAttribute('aria-activedescendant', `wm-dock-stack-item-${this._dockStackActiveIndex}`);
+    this._dockStackItems().forEach((item, index) => list.appendChild(this._makeDockStackItem(item, index)));
     stack.appendChild(list);
+    this._syncDockStackSelection(false);
   }
 
   _dockStackItems() {
@@ -3930,12 +4220,17 @@ class SimpleWindowManager {
     return button;
   }
 
-  _makeDockStackItem(item) {
+  _makeDockStackItem(item, index) {
     const button = document.createElement('button');
+    const active = index === this._dockStackActiveIndex;
     button.type = 'button';
-    button.className = 'wm-dock-stack-item';
+    button.id = `wm-dock-stack-item-${index}`;
+    button.className = 'wm-dock-stack-item' + (active ? ' active' : '');
     button.dataset.stackItem = item.id;
+    button.dataset.stackIndex = String(index);
     button.setAttribute('role', 'option');
+    button.setAttribute('aria-selected', active ? 'true' : 'false');
+    button.tabIndex = active ? 0 : -1;
     button.appendChild(this._makeRoundIcon('wm-dock-stack-icon', item.icon));
     const body = document.createElement('span');
     body.className = 'wm-dock-stack-body';
@@ -3955,6 +4250,38 @@ class SimpleWindowManager {
     this._dockStackMode = mode === 'grid' ? 'grid' : 'fan';
     this._sendWindowCmd('dock_stack_mode', { stack_mode: this._dockStackMode });
     this._renderDockStack();
+  }
+
+  _moveDockStackSelection(delta) {
+    const stack = this._ensureDockStack();
+    const items = Array.from(stack.querySelectorAll('.wm-dock-stack-item'));
+    if (!items.length) return;
+    const max = items.length - 1;
+    this._dockStackActiveIndex = Math.max(0, Math.min(max, this._dockStackActiveIndex + delta));
+    this._syncDockStackSelection(true);
+  }
+
+  _syncDockStackSelection(shouldFocus = true) {
+    const stack = this._ensureDockStack();
+    const list = stack.querySelector('.wm-dock-stack-list');
+    const items = Array.from(stack.querySelectorAll('.wm-dock-stack-item'));
+    if (!items.length) return;
+    const activeIndex = Math.max(0, Math.min(items.length - 1, this._dockStackActiveIndex));
+    this._dockStackActiveIndex = activeIndex;
+    if (list) list.setAttribute('aria-activedescendant', `wm-dock-stack-item-${activeIndex}`);
+    items.forEach((item, index) => {
+      const active = index === activeIndex;
+      item.classList.toggle('active', active);
+      item.setAttribute('aria-selected', active ? 'true' : 'false');
+      item.tabIndex = active ? 0 : -1;
+      if (active && shouldFocus) item.focus();
+    });
+  }
+
+  _activateDockStackSelection() {
+    const stack = this._ensureDockStack();
+    const item = stack.querySelector(`.wm-dock-stack-item[data-stack-index="${this._dockStackActiveIndex}"]`);
+    this._openDockStackItem(item?.dataset.stackItem || '');
   }
 
   _openDockStackItem(itemId) {
@@ -4041,6 +4368,7 @@ class SimpleWindowManager {
     panel.appendChild(this._makeQualityComputedCommandPreview());
     panel.appendChild(this._makeQualityIconPreview());
     panel.appendChild(this._makeQualityComputedIconPreview());
+    panel.appendChild(this._makeQualityComputedIconKitPreview());
     panel.appendChild(this._makeQualityComputedScrollbarPreview());
     panel.appendChild(this._makeQualityTypographyPreview());
     panel.appendChild(this._makeQualityDepthPreview());
@@ -4059,6 +4387,7 @@ class SimpleWindowManager {
     panel.appendChild(this._makeQualityComputedBackdropPreview());
     panel.appendChild(this._makeQualityComputedWallpaperPreview());
     panel.appendChild(this._makeQualityComputedMotionPreview());
+    panel.appendChild(this._makeQualityComputedMotionBudgetPreview());
     panel.appendChild(this._makeQualitySpatialPreview());
     panel.appendChild(this._makeQualityComputedSpatialPreview());
     panel.appendChild(this._makeQualityDockPreview());
@@ -4081,6 +4410,8 @@ class SimpleWindowManager {
       panel.appendChild(this._makeQualityCheckDetail(items));
       panel.appendChild(this._makeQualityDetailPanel());
     }
+    panel.appendChild(this._makeQualityRecommendations(items));
+    panel.appendChild(this._makeQualityReportPreview(items));
     panel.appendChild(this._makeQualityActions());
   }
 
@@ -4712,6 +5043,34 @@ class SimpleWindowManager {
     metric.appendChild(name);
     metric.appendChild(result);
     return metric;
+  }
+
+  _simpleOsIconSeeds() {
+    return [
+      { id: 'simple.os', label: 'Simple OS', icon: 'S' },
+      { id: 'simple.wm', label: 'Simple WM', icon: 'W' },
+      { id: 'simple.ide', label: 'Simple IDE', icon: 'I' },
+      { id: 'simple.browser', label: 'Browser', icon: 'B' },
+      { id: 'simple.square', label: 'Square app', icon: 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22%3E%3Crect width=%2264%22 height=%2264%22 fill=%22%237dd3fc%22/%3E%3Ctext x=%2232%22 y=%2239%22 text-anchor=%22middle%22 font-size=%2226%22 font-family=%22Arial%22 font-weight=%22700%22 fill=%22%230a0a0f%22%3ES%3C/text%3E%3C/svg%3E' }
+    ];
+  }
+
+  _makeQualityComputedIconKitPreview() {
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-computed-icon-kit-preview';
+    preview.dataset.qualityComputedIconKit = 'simple-os';
+    this._simpleOsIconSeeds().forEach((item) => {
+      const tile = document.createElement('span');
+      tile.className = 'wm-quality-computed-icon-kit-item';
+      tile.dataset.iconKitId = item.id;
+      tile.appendChild(this._makeRoundIcon('wm-quality-computed-icon-kit-icon', item.icon));
+      const label = document.createElement('span');
+      label.className = 'wm-quality-computed-icon-kit-label';
+      label.textContent = item.label;
+      tile.appendChild(label);
+      preview.appendChild(tile);
+    });
+    return preview;
   }
 
   _qualityComputedIconEvidence(selector, kind) {
@@ -5527,6 +5886,70 @@ class SimpleWindowManager {
     metric.appendChild(name);
     metric.appendChild(result);
     return metric;
+  }
+
+  _makeQualityComputedMotionBudgetPreview() {
+    const budget = this._qualityMotionBudgetSnapshot();
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-computed-motion-budget-preview';
+    preview.dataset.qualityComputedMotionBudget = budget.mode;
+    preview.appendChild(this._makeQualityComputedMotionBudgetMetric('Active', budget.active, 'active', budget.activeOk));
+    preview.appendChild(this._makeQualityComputedMotionBudgetMetric('Longest', budget.longest, 'longest', budget.longestOk));
+    preview.appendChild(this._makeQualityComputedMotionBudgetMetric('Policy', budget.policy, 'policy', budget.policyOk));
+    preview.appendChild(this._makeQualityComputedMotionBudgetMetric('Fallback', budget.fallback, 'fallback', budget.fallbackOk));
+    return preview;
+  }
+
+  _makeQualityComputedMotionBudgetMetric(label, value, kind, good) {
+    const metric = document.createElement('span');
+    metric.className = 'wm-quality-computed-motion-budget-metric' + (good ? ' good' : ' warn');
+    metric.dataset.computedMotionBudgetMetric = kind;
+    const rail = document.createElement('span');
+    rail.className = 'wm-quality-computed-motion-budget-rail';
+    rail.setAttribute('aria-hidden', 'true');
+    const name = document.createElement('span');
+    name.className = 'wm-quality-computed-motion-budget-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-computed-motion-budget-value';
+    result.textContent = value;
+    metric.appendChild(rail);
+    metric.appendChild(name);
+    metric.appendChild(result);
+    return metric;
+  }
+
+  _qualityMotionBudgetSnapshot() {
+    const mode = this._normalizeMotionPreference(this._readMotionPreference());
+    const animations = typeof document.getAnimations === 'function' ? document.getAnimations({ subtree: true }) : [];
+    const running = animations.filter((animation) => animation.playState !== 'idle' && animation.playState !== 'finished');
+    const durations = running.map((animation) => {
+      const timing = typeof animation.effect?.getTiming === 'function' ? animation.effect.getTiming() : {};
+      const duration = Number(timing.duration || 0);
+      return Number.isFinite(duration) ? duration : 0;
+    });
+    const root = getComputedStyle(document.documentElement);
+    const fallbackLongest = Math.max(
+      this._qualityCssPx(root, '--ui-motion-open-ms', 260),
+      this._qualityCssPx(root, '--ui-motion-minimize-ms', 210),
+      this._qualityCssPx(root, '--ui-motion-close-ms', 180),
+      this._qualityCssPx(root, '--ui-backdrop-duration-ms', 24000)
+    );
+    const longest = durations.length ? Math.max(...durations) : fallbackLongest;
+    const activeCount = running.length;
+    const budgetLimit = mode === 'standard' ? 16 : mode === 'reduced' ? 8 : 0;
+    const longestLimit = mode === 'standard' ? 30000 : mode === 'reduced' ? 1200 : 0;
+    return {
+      mode,
+      active: activeCount + '/' + budgetLimit,
+      longest: Math.round(longest) + 'ms',
+      policy: mode === 'off' ? 'no motion' : mode === 'reduced' ? 'short motion' : 'standard motion',
+      fallback: typeof document.getAnimations === 'function' ? 'web animations' : 'css tokens',
+      activeOk: activeCount <= budgetLimit,
+      longestOk: longest <= longestLimit,
+      policyOk: ['standard', 'reduced', 'off'].includes(mode),
+      fallbackOk: true
+    };
   }
 
   _qualityComputedMotionTiming(selector, pseudo = '') {
@@ -6358,6 +6781,107 @@ class SimpleWindowManager {
     return panel;
   }
 
+  _makeQualityRecommendations(items) {
+    const panel = document.createElement('div');
+    panel.className = 'wm-quality-recommendations';
+    panel.dataset.qualityRecommendations = 'actionable';
+    const title = document.createElement('div');
+    title.className = 'wm-quality-recommendations-title';
+    title.textContent = 'Recommended changes';
+    panel.appendChild(title);
+    const list = document.createElement('div');
+    list.className = 'wm-quality-recommendations-list';
+    this._qualityRecommendationItems(items).forEach((item) => {
+      const action = document.createElement('button');
+      action.type = 'button';
+      action.className = 'wm-quality-recommendation wm-quality-fix';
+      action.dataset.qualityFix = item.key;
+      const label = document.createElement('span');
+      label.className = 'wm-quality-recommendation-label';
+      label.textContent = item.label;
+      const change = document.createElement('strong');
+      change.className = 'wm-quality-recommendation-change';
+      change.textContent = item.fix || 'Review theme tokens';
+      const evidence = document.createElement('span');
+      evidence.className = 'wm-quality-recommendation-evidence';
+      evidence.textContent = (item.value || 'n/a') + ' vs ' + (item.threshold || 'policy');
+      action.appendChild(label);
+      action.appendChild(change);
+      action.appendChild(evidence);
+      list.appendChild(action);
+    });
+    panel.appendChild(list);
+    return panel;
+  }
+
+  _qualityRecommendationItems(items) {
+    const checks = items || this._qualityInspectorItems();
+    const preferred = ['color', 'motion', 'material', 'touch', 'titlebar', 'input', 'bounds'];
+    const picked = [];
+    const add = (item) => {
+      if (item && !picked.some((candidate) => candidate.key === item.key)) picked.push(item);
+    };
+    checks.filter((item) => !item.good).forEach(add);
+    preferred.forEach((key) => add(checks.find((item) => item.key === key)));
+    return picked.slice(0, 3);
+  }
+
+  _makeQualityReportPreview(items) {
+    const report = this._qualityReportText(items);
+    const panel = document.createElement('div');
+    panel.className = 'wm-quality-report';
+    panel.dataset.qualityReport = 'shareable';
+    const title = document.createElement('div');
+    title.className = 'wm-quality-report-title';
+    title.textContent = 'Quality report';
+    panel.appendChild(title);
+    const summary = document.createElement('div');
+    summary.className = 'wm-quality-report-summary';
+    summary.textContent = report.split('\n').slice(0, 4).join(' | ');
+    panel.appendChild(summary);
+    const copy = document.createElement('button');
+    copy.type = 'button';
+    copy.className = 'wm-quality-report-copy';
+    copy.dataset.qualityAction = 'copy_report';
+    copy.textContent = 'Copy report';
+    panel.appendChild(copy);
+    return panel;
+  }
+
+  _qualityReportText(items = null) {
+    const checks = items || this._qualityInspectorItems();
+    const passed = checks.filter((item) => item.good).length;
+    const total = Math.max(1, checks.length);
+    const score = Math.round((passed / total) * 100);
+    const lines = [
+      'Simple WM quality report',
+      'Score: ' + score + '%',
+      'Checks: ' + passed + '/' + total,
+      'Motion: ' + this._normalizeMotionPreference(this._readMotionPreference()),
+      'Material: ' + this._normalizeTransparencyPreference(this._readTransparencyPreference()),
+      'Density: ' + this._densityMode,
+      'Window motion: ' + this._windowTransitionMode
+    ];
+    checks.forEach((item) => {
+      lines.push((item.good ? 'PASS ' : 'WARN ') + item.label + ': ' + item.value + ' target ' + (item.threshold || 'n/a'));
+    });
+    return lines.join('\n');
+  }
+
+  _copyQualityReport() {
+    const report = this._qualityReportText();
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(report).catch(() => {});
+    }
+    this._sendWindowCmd('quality_report_copy', { quality_report: report, quality_score: this._qualityReportScore(report) });
+    this._showSystemHud('Quality report', 'Copied', 1500);
+  }
+
+  _qualityReportScore(report) {
+    const match = String(report || '').match(/Score:\s*(\d+)%/);
+    return match ? Number(match[1]) : 0;
+  }
+
   _applyQualityFix(check) {
     const target = check || this._selectedQualityCheck;
     if (target === 'color') {
@@ -6462,7 +6986,8 @@ class SimpleWindowManager {
       ['energy_low', 'Low power'],
       ['energy_critical', 'Critical saver'],
       ['layout', 'Open layout tools'],
-      ['contrast', 'Accent palette']
+      ['contrast', 'Accent palette'],
+      ['copy_report', 'Copy report']
     ].forEach(([action, label]) => {
       const button = document.createElement('button');
       button.type = 'button';
@@ -6493,6 +7018,9 @@ class SimpleWindowManager {
     } else if (action === 'contrast') {
       this._toggleAccentPalette(true);
       this._sendWindowCmd('quality_action', { quality_action: action, value: 'accent_palette' });
+    } else if (action === 'copy_report') {
+      this._copyQualityReport();
+      this._sendWindowCmd('quality_action', { quality_action: action, value: 'report' });
     }
     if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
   }
@@ -6589,8 +7117,29 @@ class SimpleWindowManager {
       const target = event.target instanceof Element ? event.target : event.target?.parentElement;
       const card = target?.closest('.wm-widget-gallery-card');
       if (!card || !gallery.contains(card)) return;
-      this._addWidgetFromGallery(card.dataset.widgetKind || '');
-      this._toggleWidgetGallery(false);
+      this._widgetGalleryActiveIndex = Number(card.dataset.widgetIndex || '0') || 0;
+      this._activateWidgetGallerySelection();
+    });
+    gallery.addEventListener('keydown', (event) => {
+      if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+        event.preventDefault();
+        this._moveWidgetGallerySelection(1);
+      } else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+        event.preventDefault();
+        this._moveWidgetGallerySelection(-1);
+      } else if (event.key === 'Home') {
+        event.preventDefault();
+        this._moveWidgetGallerySelection(-999);
+      } else if (event.key === 'End') {
+        event.preventDefault();
+        this._moveWidgetGallerySelection(999);
+      } else if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        this._activateWidgetGallerySelection();
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        this._toggleWidgetGallery(false);
+      }
     });
     document.body.appendChild(gallery);
     this._widgetGallery = gallery;
@@ -6614,17 +7163,33 @@ class SimpleWindowManager {
     gallery.appendChild(title);
     const grid = document.createElement('div');
     grid.className = 'wm-widget-gallery-grid';
-    grid.appendChild(this._makeWidgetGalleryCard('clock', 'Clock', this._desktopClockLabel(), 'Local time'));
-    grid.appendChild(this._makeWidgetGalleryCard('system', 'Motion', this._normalizeMotionPreference(this._readMotionPreference()), 'Preferences'));
-    grid.appendChild(this._makeWidgetGalleryCard('workspace', 'Workspace', 'Simple WM', 'Wallpaper'));
+    grid.setAttribute('role', 'listbox');
+    grid.setAttribute('aria-label', 'Available widgets');
+    grid.setAttribute('aria-activedescendant', `wm-widget-gallery-card-${this._widgetGalleryActiveIndex}`);
+    grid.appendChild(this._makeWidgetGalleryCard('clock', 'Clock', this._desktopClockLabel(), 'Local time', 0));
+    grid.appendChild(this._makeWidgetGalleryCard('system', 'Motion', this._normalizeMotionPreference(this._readMotionPreference()), 'Preferences', 1));
+    grid.appendChild(this._makeWidgetGalleryCard('workspace', 'Workspace', 'Simple WM', 'Wallpaper', 2));
     gallery.appendChild(grid);
+    const status = document.createElement('div');
+    status.className = 'wm-widget-gallery-status';
+    status.setAttribute('role', 'status');
+    status.setAttribute('aria-live', 'polite');
+    status.textContent = 'Choose a widget to add';
+    gallery.appendChild(status);
+    this._syncWidgetGallerySelection(false);
   }
 
-  _makeWidgetGalleryCard(kind, title, value, meta) {
+  _makeWidgetGalleryCard(kind, title, value, meta, index) {
     const card = document.createElement('button');
     card.type = 'button';
-    card.className = 'wm-widget-gallery-card';
+    const active = index === this._widgetGalleryActiveIndex;
+    card.id = `wm-widget-gallery-card-${index}`;
+    card.className = 'wm-widget-gallery-card' + (active ? ' active' : '');
     card.dataset.widgetKind = kind;
+    card.dataset.widgetIndex = String(index);
+    card.setAttribute('role', 'option');
+    card.setAttribute('aria-selected', active ? 'true' : 'false');
+    card.tabIndex = active ? 0 : -1;
     card.setAttribute('aria-label', `Add ${title} widget`);
     card.appendChild(this._makeRoundIcon('wm-overview-icon', title));
     const titleEl = document.createElement('span');
@@ -6642,6 +7207,43 @@ class SimpleWindowManager {
     return card;
   }
 
+  _moveWidgetGallerySelection(delta) {
+    const gallery = this._ensureWidgetGallery();
+    const cards = Array.from(gallery.querySelectorAll('.wm-widget-gallery-card'));
+    if (!cards.length) return;
+    const max = cards.length - 1;
+    this._widgetGalleryActiveIndex = Math.max(0, Math.min(max, this._widgetGalleryActiveIndex + delta));
+    this._syncWidgetGallerySelection(true);
+  }
+
+  _syncWidgetGallerySelection(shouldFocus = true) {
+    const gallery = this._ensureWidgetGallery();
+    const grid = gallery.querySelector('.wm-widget-gallery-grid');
+    const cards = Array.from(gallery.querySelectorAll('.wm-widget-gallery-card'));
+    if (!cards.length) return;
+    const activeIndex = Math.max(0, Math.min(cards.length - 1, this._widgetGalleryActiveIndex));
+    this._widgetGalleryActiveIndex = activeIndex;
+    if (grid) grid.setAttribute('aria-activedescendant', `wm-widget-gallery-card-${activeIndex}`);
+    cards.forEach((card, index) => {
+      const active = index === activeIndex;
+      card.classList.toggle('active', active);
+      card.setAttribute('aria-selected', active ? 'true' : 'false');
+      card.tabIndex = active ? 0 : -1;
+      if (active && shouldFocus) card.focus();
+    });
+  }
+
+  _activateWidgetGallerySelection() {
+    const gallery = this._ensureWidgetGallery();
+    const card = gallery.querySelector(`.wm-widget-gallery-card[data-widget-index="${this._widgetGalleryActiveIndex}"]`);
+    const kind = card?.dataset.widgetKind || '';
+    const added = this._addWidgetFromGallery(kind);
+    const status = gallery.querySelector('.wm-widget-gallery-status');
+    if (status) status.textContent = added ? `${kind || 'widget'} widget added` : 'Widget could not be added';
+    if (added) this._toggleWidgetGallery(false);
+    return added;
+  }
+
   _addWidgetFromGallery(kind) {
     const shelf = this._ensureDesktopWidgets();
     if (!shelf) return false;
@@ -6649,14 +7251,17 @@ class SimpleWindowManager {
     const widgetKind = String(kind || '').trim().toLowerCase();
     if (widgetKind === 'clock') {
       shelf.appendChild(this._makeDesktopWidget('wm-widget-clock', 'Local', this._desktopClockLabel(), 'Clock'));
+      this._sendWindowCmd('widget_add', { widget_kind: widgetKind });
       return true;
     }
     if (widgetKind === 'system') {
       shelf.appendChild(this._makeDesktopWidget('wm-widget-system', 'Motion', this._normalizeMotionPreference(this._readMotionPreference()), 'Settings'));
+      this._sendWindowCmd('widget_add', { widget_kind: widgetKind });
       return true;
     }
     if (widgetKind === 'workspace') {
       shelf.appendChild(this._makeDesktopWidget('wm-widget-workspace', 'Workspace', 'Simple WM', 'wallpaper: ' + this._normalizeWallpaperPreference(this._readWallpaperPreference())));
+      this._sendWindowCmd('widget_add', { widget_kind: widgetKind });
       return true;
     }
     return false;
@@ -7238,6 +7843,7 @@ class SimpleWindowManager {
     panel.style.top = `${Math.round(rect.bottom + 6)}px`;
     panel.style.width = `${Math.max(280, Math.round(rect.width))}px`;
     panel.appendChild(this._makeTitleCommandModeChips(commandKind));
+    panel.appendChild(this._makeTitleCommandProfileChips(input));
     suggestions.forEach((suggestion, index) => {
       const item = document.createElement('button');
       item.type = 'button';
@@ -7285,6 +7891,32 @@ class SimpleWindowManager {
     return row;
   }
 
+  _titleCommandProfiles() {
+    return [
+      { id: 'ide', label: 'IDE', value: 'src/app/ui.web/html.spl', meta: 'VS Code-like file command' },
+      { id: 'browser', label: 'Browser', value: 'https://simple.local', meta: 'browser URL command' }
+    ];
+  }
+
+  _makeTitleCommandProfileChips(input) {
+    const row = document.createElement('div');
+    row.className = 'wm-title-command-profiles';
+    row.setAttribute('role', 'group');
+    row.setAttribute('aria-label', 'Command profiles');
+    const current = String(input?.placeholder || input?.value || '').toLowerCase();
+    for (const profile of this._titleCommandProfiles()) {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'wm-title-command-profile' + (current.includes(profile.id) ? ' active' : '');
+      chip.dataset.commandProfile = profile.id;
+      chip.title = profile.meta;
+      chip.textContent = profile.label;
+      chip.addEventListener('click', () => this._applyTitleCommandProfile(profile));
+      row.appendChild(chip);
+    }
+    return row;
+  }
+
   _titleCommandSuggestions(value, kind) {
     const text = String(value || '').trim();
     const base = text || 'src/app';
@@ -7303,6 +7935,16 @@ class SimpleWindowManager {
     if (mode.id === 'url' && !current.startsWith('http://') && !current.startsWith('https://')) input.value = mode.prefix + current;
     else if (mode.id === 'search' && !current.startsWith('search ')) input.value = mode.prefix + current;
     else if (mode.id === 'command' && !current.startsWith('>')) input.value = mode.prefix + current;
+    this._showTitleCommandSuggestions(input, true);
+    input.focus();
+    return true;
+  }
+
+  _applyTitleCommandProfile(profile) {
+    const input = document.activeElement?.classList?.contains('wm-title-input') ? document.activeElement : this.desktop?.querySelector('.wm-window.focused .wm-title-input');
+    if (!input || !profile) return false;
+    input.value = profile.value;
+    input.placeholder = profile.label + ' command';
     this._showTitleCommandSuggestions(input, true);
     input.focus();
     return true;
@@ -7634,6 +8276,31 @@ class SimpleWindowManager {
     this._lastSnapZone = '';
   }
 
+  _windowElementById(windowId) {
+    const key = String(windowId || '');
+    if (!key) return null;
+    if (this.transport === 'electron-ipc' && this._electronWindows.has(key)) {
+      return this._electronWindows.get(key)?.winEl || null;
+    }
+    if (!this.desktop) return null;
+    const escaped = key.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    return this.desktop.querySelector(`.wm-window[data-surface-id="${escaped}"], .wm-window[data-canonical-id="${escaped}"]`);
+  }
+
+  _markSnapCommitted(winEl, zone) {
+    if (!winEl || !zone) return;
+    if (winEl._wmSnapCommitTimer) window.clearTimeout(winEl._wmSnapCommitTimer);
+    winEl.dataset.snapCommitZone = zone;
+    winEl.classList.remove('snap-committed');
+    void winEl.offsetWidth;
+    winEl.classList.add('snap-committed');
+    winEl._wmSnapCommitTimer = window.setTimeout(() => {
+      winEl.classList.remove('snap-committed');
+      winEl.dataset.snapCommitZone = '';
+      winEl._wmSnapCommitTimer = 0;
+    }, WM_SNAP_COMMIT_MS);
+  }
+
   _ensureSnapLayoutPalette() {
     if (this._snapLayoutPalette && this._snapLayoutPalette.isConnected) return this._snapLayoutPalette;
     const panel = document.createElement('aside');
@@ -7737,6 +8404,7 @@ class SimpleWindowManager {
       this._electronMoveWindow(windowId, rect.x, rect.y);
       this._electronResizeWindow(windowId, rect.w, rect.h);
     }
+    this._markSnapCommitted(this._windowElementById(windowId), zone);
     const source = isElectronWindow ? { source: HOST_NATIVE_EVENT_SOURCE } : {};
     this._sendWindowCmd('focus', { window_id_hint: windowId, ...source });
     this._sendWindowCmd('move', { window_id_hint: windowId, ...source, x: rect.x, y: rect.y, snap_zone: zone });
@@ -8156,6 +8824,7 @@ class SimpleWindowManager {
 
     const ghost = isElectronWindow ? null : this._createGhost(winEl);
     const r = winEl.getBoundingClientRect();
+    winEl.dataset.resizeActive = 'true';
     this.resizeState = {
       surfaceId, ghostEl: ghost, timer: null, direction, isElectronWindow,
       startX: e.clientX, startY: e.clientY,
@@ -8238,6 +8907,7 @@ class SimpleWindowManager {
           h: snappedRect.h,
           snap_zone: this._lastSnapZone || this._detectSnapZone(e)
         });
+        this._markSnapCommitted(ds.winEl, this._lastSnapZone || this._detectSnapZone(e));
       }
       if (ds.ghostEl) ds.ghostEl.remove();
       this._clearDragFeedback();
@@ -8266,6 +8936,7 @@ class SimpleWindowManager {
         h: Math.round(h)
       });
       if (rs.ghostEl) rs.ghostEl.remove();
+      if (rs.winEl) rs.winEl.dataset.resizeActive = 'false';
       clearTimeout(rs.timer);
       this.resizeState = null;
       this._hideResizeHud(900);
@@ -8282,6 +8953,7 @@ class SimpleWindowManager {
     this._ensureHotCorners();
     this._ensureDesktopItems();
     document.addEventListener('mousemove', (e) => {
+      this._updateDesktopBackdropPointer(e);
       this._onMousemove(e);
       this._updateHotCornerPreview(e);
     });
