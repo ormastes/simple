@@ -311,6 +311,31 @@ impl CowEnv {
         self.overlay.insert(key, value)
     }
 
+    /// Get a mutable reference to a value, promoting it from the shared base
+    /// into the local overlay on first mutable access (so the base stays
+    /// immutable/shared). Enables in-place mutation of arrays/dicts held in a
+    /// local or `self`, avoiding an O(n) copy-on-write clone per element write.
+    /// Copy-on-write semantics are preserved: the promoted value Arc-clones the
+    /// container handle, so a genuinely aliased container still deep-copies on
+    /// the first `Arc::make_mut` and only then mutates in place.
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut Value> {
+        if self.overlay.contains_key(key) {
+            return self.overlay.get_mut(key);
+        }
+        if self.tombstones.contains(key) {
+            return None;
+        }
+        let promoted = match &self.base {
+            Some(base) => base.get(key).cloned(),
+            None => None,
+        };
+        if let Some(v) = promoted {
+            self.overlay.insert(key.to_string(), v);
+            return self.overlay.get_mut(key);
+        }
+        None
+    }
+
     /// Remove a key. Returns the removed value if any.
     pub fn remove(&mut self, key: &str) -> Option<Value> {
         if let Some(v) = self.overlay.remove(key) {

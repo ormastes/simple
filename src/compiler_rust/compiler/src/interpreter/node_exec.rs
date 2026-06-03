@@ -859,6 +859,45 @@ fn exec_assignment(
 
         // Case 1: Plain identifier: arr[i] = value
         if let Expr::Identifier(container_name) = receiver.as_ref() {
+            // Fast in-place path for a local array/dict that is PROVABLY
+            // unaliased (Arc strong_count == 1, no weak refs): mutate in place,
+            // avoiding the O(n) copy-on-write clone the `.cloned()` path below
+            // performs on every element write. When the container is shared
+            // (another variable aliases it) we fall through to the clone path,
+            // preserving value semantics. Globals/tuples/__setitem__ also fall
+            // through.
+            let case1_unique = match env.get(container_name) {
+                Some(Value::Array(arc)) => Arc::strong_count(arc) == 1 && Arc::weak_count(arc) == 0,
+                Some(Value::Dict(arc)) => Arc::strong_count(arc) == 1 && Arc::weak_count(arc) == 0,
+                _ => false,
+            };
+            if case1_unique {
+                if let Some(slot) = env.get_mut(container_name) {
+                    match slot {
+                        Value::Array(arc) => {
+                            if let Some(arr) = Arc::get_mut(arc) {
+                                let idx = index_val.as_int()? as usize;
+                                if idx < arr.len() {
+                                    arr[idx] = value;
+                                } else {
+                                    while arr.len() < idx {
+                                        arr.push(Value::Nil);
+                                    }
+                                    arr.push(value);
+                                }
+                                return Ok(Control::Next);
+                            }
+                        }
+                        Value::Dict(dict) => {
+                            if let Some(map) = Arc::get_mut(dict) {
+                                map.insert(index_val.to_key_string(), value);
+                                return Ok(Control::Next);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
             // Try local env first
             let container_opt = env.get(container_name).cloned();
             // Try module globals if not in local env
@@ -992,6 +1031,56 @@ fn exec_assignment(
         } = receiver.as_ref()
         {
             if let Expr::Identifier(obj_name) = obj_expr.as_ref() {
+                // Fast in-place path for the hot `self.buf[i] = color` raster
+                // loop: mutate the field array in place only when it is PROVABLY
+                // unaliased (Arc strong_count == 1, checked again via
+                // Arc::get_mut), avoiding the O(n) clone the `.cloned()` path
+                // below does on every write. A shared array (e.g. captured by
+                // another variable) falls through to the clone path, preserving
+                // value semantics.
+                let case2_unique = match env.get(obj_name) {
+                    Some(Value::Object { fields, .. }) => match fields.get(field_name) {
+                        Some(Value::Array(arc)) => {
+                            Arc::strong_count(arc) == 1 && Arc::weak_count(arc) == 0
+                        }
+                        Some(Value::Dict(arc)) => {
+                            Arc::strong_count(arc) == 1 && Arc::weak_count(arc) == 0
+                        }
+                        _ => false,
+                    },
+                    _ => false,
+                };
+                if case2_unique {
+                    if let Some(Value::Object { fields, .. }) = env.get_mut(obj_name) {
+                        if let Some(fmap) = Arc::get_mut(fields) {
+                            if let Some(slot) = fmap.get_mut(field_name) {
+                                match slot {
+                                    Value::Array(arc) => {
+                                        if let Some(arr) = Arc::get_mut(arc) {
+                                            let idx = index_val.as_int()? as usize;
+                                            if idx < arr.len() {
+                                                arr[idx] = value;
+                                            } else {
+                                                while arr.len() < idx {
+                                                    arr.push(Value::Nil);
+                                                }
+                                                arr.push(value);
+                                            }
+                                            return Ok(Control::Next);
+                                        }
+                                    }
+                                    Value::Dict(dict) => {
+                                        if let Some(map) = Arc::get_mut(dict) {
+                                            map.insert(index_val.to_key_string(), value);
+                                            return Ok(Control::Next);
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
                 if let Some(obj_val) = env.get(obj_name).cloned() {
                     match obj_val {
                         Value::Object { class, fields } => {
