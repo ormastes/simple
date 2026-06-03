@@ -2,10 +2,13 @@
 
 - status: pass
 - reason: runtime-evidence-verified
-- arch: x86_64
-- feature: avx2
-- level: AVX2
+- arch: aarch64
+- feature: neon
+- level: NEON
 - checksum: 5096
+- native_simd_executed: true
+- native_simd_bit_exact: true
+- native_simd_hits: 2
 - provider_hits: 33
 - provider_changes: 0
 - fill expected checksum: 581977577856
@@ -31,20 +34,23 @@
 - diagram scroll hits: 7
 - policy: exact bitmap, no blur, no tolerance
 - blur/tolerance used: false
-- x86_status: Initialized
-- arm_status: Unavailable
+- x86_status: Unavailable
+- arm_status: Initialized
 - riscv_status: Unavailable
 - evidence_log: build/cpu-simd-engine2d-evidence/evidence.log
-- evidence_log_bytes: 3471
-- evidence_log_cksum: 44221271
+- evidence_log_bytes: 3941
+- evidence_log_cksum: 1109426248
 
 ## Raw Evidence
 - cpu_simd_evidence_status=pass
 - cpu_simd_evidence_reason=runtime-evidence-verified
-- cpu_simd_evidence_arch=x86_64
-- cpu_simd_evidence_feature=avx2
-- cpu_simd_evidence_level=AVX2
+- cpu_simd_evidence_arch=aarch64
+- cpu_simd_evidence_feature=neon
+- cpu_simd_evidence_level=NEON
 - cpu_simd_evidence_checksum=5096
+- cpu_simd_evidence_native_simd_executed=true
+- cpu_simd_evidence_native_simd_bit_exact=true
+- cpu_simd_evidence_native_simd_hits=2
 - cpu_simd_evidence_provider_hits=33
 - cpu_simd_evidence_provider_changes=0
 - cpu_simd_evidence_fill_expected_checksum=581977577856
@@ -70,12 +76,12 @@
 - cpu_simd_evidence_diagram_scroll_hits=7
 - cpu_simd_evidence_policy=exact-bitmap-no-blur-no-tolerance
 - cpu_simd_evidence_blur_or_tolerance_used=false
-- cpu_simd_evidence_x86_status=Initialized
-- cpu_simd_evidence_arm_status=Unavailable
+- cpu_simd_evidence_x86_status=Unavailable
+- cpu_simd_evidence_arm_status=Initialized
 - cpu_simd_evidence_riscv_status=Unavailable
 - cpu_simd_evidence_log=build/cpu-simd-engine2d-evidence/evidence.log
-- cpu_simd_evidence_log_bytes=3471
-- cpu_simd_evidence_log_cksum=44221271
+- cpu_simd_evidence_log_bytes=3941
+- cpu_simd_evidence_log_cksum=1109426248
 
 ## Evidence Log
 - [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown type: any
@@ -84,12 +90,16 @@
 - [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_opencl' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
 - [gc-warning] Higher-layer module 'std.nogc_sync_mut.sffi.dynamic' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
 - [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_kernels' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
-- cpu_simd_arch=x86_64
-- cpu_simd_feature=avx2
-- cpu_simd_level=AVX2
+- cpu_simd_arch=aarch64
+- cpu_simd_feature=neon
+- cpu_simd_level=NEON
 - cpu_simd_executed_all=true
 - cpu_simd_checksum=5096
 - cpu_simd_hit_summary=fill_delta=1,copy_delta=1,alpha_delta=1,scroll_delta=1
+- cpu_simd_native_simd_executed=true
+- cpu_simd_native_simd_bit_exact=true
+- cpu_simd_native_simd_hits=2
+- cpu_simd_native_simd_reason=native SIMD kernels executed (hits=2) and matched scalar bit-for-bit
 - cpu_simd_provider_hits=33
 - cpu_simd_provider_changes=0
 - cpu_simd_fill_expected_checksum=581977577856
@@ -117,10 +127,10 @@
 - cpu_simd_policy=exact-bitmap-no-blur-no-tolerance
 - cpu_simd_blur_or_tolerance_used=false
 - cpu_simd_probe_status=Initialized
-- cpu_simd_x86_status=Initialized
-- cpu_simd_arm_status=Unavailable
+- cpu_simd_x86_status=Unavailable
+- cpu_simd_arm_status=Initialized
 - cpu_simd_riscv_status=Unavailable
-- cpu_simd_x86_diag=requested=cpu_simd_x86;selected=cpu_simd_x86;status=Initialized;api=cpu-simd-x86;gate=x86_sse42_avx2_avx512;shader=none;reason=CPU SIMD runtime evidence: arch=x86_64;feature=avx2;level=AVX2;x86=true;arm=false;riscv=false;executed=true;checksum=5096;hits=fill_delta=1,copy_delta=1,alpha_delta=1,scroll_delta=1;reason=runtime reported SIMD feature and kernels executed
-- cpu_simd_arm_diag=requested=cpu_simd_arm;selected=cpu_simd_arm;status=Unavailable;api=cpu-simd-arm;gate=arm_neon_sve;shader=none;reason=CPU SIMD runtime evidence unavailable for cpu_simd_arm: arch=x86_64;feature=avx2;level=AVX2;x86=true;arm=false;riscv=false;executed=true;checksum=5096;hits=fill_delta=1,copy_delta=1,alpha_delta=1,scroll_delta=1;reason=runtime reported SIMD feature and kernels executed
-- cpu_simd_riscv_diag=requested=cpu_simd_riscv;selected=cpu_simd_riscv;status=Unavailable;api=cpu-simd-riscv;gate=riscv_vector_extension;shader=none;reason=CPU SIMD runtime evidence unavailable for cpu_simd_riscv: arch=x86_64;feature=avx2;level=AVX2;x86=true;arm=false;riscv=false;executed=true;checksum=5096;hits=fill_delta=1,copy_delta=1,alpha_delta=1,scroll_delta=1;reason=runtime reported SIMD feature and kernels executed
+- cpu_simd_x86_diag=requested=cpu_simd_x86;selected=cpu_simd_x86;status=Unavailable;api=cpu-simd-x86;gate=x86_sse42_avx2_avx512;shader=none;reason=CPU SIMD runtime evidence unavailable for cpu_simd_x86: arch=aarch64;feature=neon;level=NEON;x86=false;arm=true;riscv=false;executed=true;checksum=5096;hits=fill_delta=1,copy_delta=1,alpha_delta=1,scroll_delta=1;native_simd_executed=true;native_simd_bit_exact=true;native_simd_hits=2;reason=native SIMD kernels executed (hits=2) and matched scalar bit-for-bit
+- cpu_simd_arm_diag=requested=cpu_simd_arm;selected=cpu_simd_arm;status=Initialized;api=cpu-simd-arm;gate=arm_neon_sve;shader=none;reason=CPU SIMD runtime evidence: arch=aarch64;feature=neon;level=NEON;x86=false;arm=true;riscv=false;executed=true;checksum=5096;hits=fill_delta=1,copy_delta=1,alpha_delta=1,scroll_delta=1;native_simd_executed=true;native_simd_bit_exact=true;native_simd_hits=2;reason=native SIMD kernels executed (hits=2) and matched scalar bit-for-bit
+- cpu_simd_riscv_diag=requested=cpu_simd_riscv;selected=cpu_simd_riscv;status=Unavailable;api=cpu-simd-riscv;gate=riscv_vector_extension;shader=none;reason=CPU SIMD runtime evidence unavailable for cpu_simd_riscv: arch=aarch64;feature=neon;level=NEON;x86=false;arm=true;riscv=false;executed=true;checksum=5096;hits=fill_delta=1,copy_delta=1,alpha_delta=1,scroll_delta=1;native_simd_executed=true;native_simd_bit_exact=true;native_simd_hits=2;reason=native SIMD kernels executed (hits=2) and matched scalar bit-for-bit
 - overall=pass

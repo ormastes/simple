@@ -843,8 +843,10 @@ async function main() {
   }
 
   const exitCode = last.sum === expected && last.weighted === expectedWeighted && last.mismatches === 0 ? 0 : 2;
+  try { win.destroy(); } catch (_) {}
+  process.exitCode = exitCode;
+  setImmediate(() => process.exit(exitCode));
   app.exit(exitCode);
-  process.exit(exitCode);
 }
 
 main().catch(async (err) => {

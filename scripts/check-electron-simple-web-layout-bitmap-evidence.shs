@@ -6,7 +6,7 @@ cd "$ROOT_DIR"
 
 BUILD_DIR="${BUILD_DIR:-build/electron_simple_web_layout_bitmap_evidence}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/electron_simple_web_layout_bitmap_evidence_$(date -u +%F).md}"
-SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+SIMPLE_BIN="${SIMPLE_BIN:-src/compiler_rust/target/release/simple}"
 WIDTH="${ELECTRON_BITMAP_WIDTH:-96}"
 HEIGHT="${ELECTRON_BITMAP_HEIGHT:-64}"
 ITERATIONS="${ELECTRON_BITMAP_ITERATIONS:-3}"
@@ -14,13 +14,14 @@ TIMEOUT_SECS="${ELECTRON_BITMAP_TIMEOUT_SECS:-60}"
 SCENE="${ELECTRON_BITMAP_SCENE:-simple-web-layout-text-flow}"
 SIMPLE_SRC="$BUILD_DIR/simple_web_layout_expected.spl"
 SIMPLE_OUT="$BUILD_DIR/simple.out"
+HTML_PATH="$BUILD_DIR/scene.html"
 EXPECTED_ARGB="$BUILD_DIR/expected-argb.json"
 CAPTURED_ARGB="$BUILD_DIR/electron-argb.json"
 ELECTRON_OUT="$BUILD_DIR/electron.out"
 ELECTRON_PROOF="$BUILD_DIR/electron-proof.json"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
-rm -f "$SIMPLE_SRC" "$SIMPLE_OUT" "$EXPECTED_ARGB" "$CAPTURED_ARGB" "$ELECTRON_OUT" "$ELECTRON_PROOF" "$BUILD_DIR/evidence.env" "$REPORT_PATH"
+rm -f "$SIMPLE_SRC" "$SIMPLE_OUT" "$HTML_PATH" "$EXPECTED_ARGB" "$CAPTURED_ARGB" "$ELECTRON_OUT" "$ELECTRON_PROOF" "$BUILD_DIR/evidence.env" "$REPORT_PATH"
 
 have() {
     command -v "$1" >/dev/null 2>&1
@@ -51,19 +52,28 @@ emit_unavailable() {
     cat "$BUILD_DIR/evidence.env"
 }
 
-for required in node npm xvfb-run; do
+for required in node npm; do
     if ! have "$required"; then
         emit_unavailable "missing-command:$required"
         exit 1
     fi
 done
 
+ELECTRON_BIN=""
+if [ -x "tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron" ]; then
+    ELECTRON_BIN="tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
+elif [ -x "tools/electron-shell/node_modules/.bin/electron" ]; then
+    ELECTRON_BIN="tools/electron-shell/node_modules/.bin/electron"
+elif [ -x "tools/electron-shell/node_modules/electron/dist/electron" ]; then
+    ELECTRON_BIN="tools/electron-shell/node_modules/electron/dist/electron"
+fi
+
 if [ ! -x "$SIMPLE_BIN" ]; then
     emit_unavailable "missing-simple-bin"
     exit 1
 fi
 
-if [ ! -x "tools/electron-shell/node_modules/.bin/electron" ] && [ ! -x "tools/electron-shell/node_modules/electron/dist/electron" ]; then
+if [ "$ELECTRON_BIN" = "" ]; then
     emit_unavailable "missing-electron-dependency"
     exit 1
 fi
@@ -75,6 +85,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_h
 
 val WIDTH: i32 = $WIDTH
 val HEIGHT: i32 = $HEIGHT
+val HTML_PATH: text = "$HTML_PATH"
 val EXPECTED_ARGB_PATH: text = "$EXPECTED_ARGB"
 
 fn checksum(pixels: [u32]) -> i64:
@@ -106,6 +117,38 @@ fn write_expected_bitmap(pixels: [u32]) -> bool:
 
 fn main():
     var html = "<html><body><main><h1>GUI</h1><p>taskbar command</p></main></body></html>"
+    if "$SCENE" == "simple-web-layout-css-box-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.shell{display:flex;gap:4px;background-color:#0f172a;padding:4px;width:88px;height:56px}.rail{background-color:#1d4ed8;width:12px;height:48px}.stack{display:flex;flex-direction:column;gap:3px;background-color:#e5e7eb;padding:3px;width:60px;height:42px}.row{background-color:#22c55e;width:54px;height:10px}.row.alt{background-color:#f59e0b;width:36px;height:10px}.leaf{background-color:#ef4444;width:18px;height:8px;margin-left:6px}</style></head><body><section class='shell'><div class='rail'></div><div class='stack'><div class='row'></div><div class='row alt'></div><div class='leaf'></div></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-border-nested-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.shell{background-color:#dbeafe;border:2px solid #0f172a;padding:4px;width:84px;height:52px}.shell>.direct{background-color:#22c55e;border:1px solid #14532d;width:24px;height:12px}.shell .nested .target{background-color:#f59e0b;border:2px solid #7c2d12;width:36px;height:10px;margin-left:6px}.shell>.nested{background-color:#e5e7eb;border:1px solid #334155;padding:3px;width:60px;height:24px;margin-top:4px}.outside .target{background-color:#ef4444;width:10px;height:10px}</style></head><body><section class='shell'><div class='direct'></div><div class='nested'><div class='target'></div></div></section><section class='outside'><div class='target'></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-text-raster-track":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#ffffff}.panel{background-color:#f8fafc;border:1px solid #334155;padding:4px;width:86px;height:54px}.title{color:#0f172a;font-size:16px;background-color:#f8fafc}.sub{color:#475569;font-size:8px;background-color:#f8fafc;margin-top:4px}</style></head><body><section class='panel'><div class='title'>TEXT RASTER</div><div class='sub'>Chrome AA baseline</div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-selector-inline-box-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.shell{background-color:#e5e7eb;padding:4px;width:88px;height:56px}.shell>.direct.hot{background-color:#22c55e;width:16px;height:12px}.shell .nested #target{background-color:#1d4ed8;width:24px;height:10px;margin-left:6px}.shell .nested .inline{background-color:#f59e0b;width:12px;height:8px;margin-left:8px;margin-top:3px}.outside #target{background-color:#ef4444;width:40px;height:40px}</style></head><body><section class='shell'><div class='direct hot'></div><div class='nested'><div id='target'></div><div class='inline' style='background-color:#334155;width:18px;height:8px'></div></div></section><section class='outside'><div id='target'></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-attribute-selector-box-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.shell{background-color:#e5e7eb;padding:4px;width:88px;height:56px}[data-card]{background-color:#22c55e;width:16px;height:8px}div[data-state='active']{background-color:#1d4ed8;width:20px;height:8px;margin-top:3px}div[data-route^='/app']{background-color:#f59e0b;width:12px;height:8px;margin-left:5px;margin-top:3px}div[data-route$='/settings']{background-color:#334155;width:10px;height:8px;margin-left:5px}.shell div[data-state='inactive']{background-color:#ef4444;width:40px;height:12px}</style></head><body><section class='shell'><div data-card='true'></div><div data-state='active'></div><div data-route='/app/home'></div><div data-route='/account/settings'></div><div data-state='inactive'></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-border-box-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.shell{box-sizing:border-box;background-color:#dbeafe;border:3px solid #0f172a;padding:5px;width:88px;height:58px}.content{box-sizing:border-box;background-color:#22c55e;border:2px solid #14532d;padding:3px;width:42px;height:22px}.inner{background-color:#f59e0b;width:18px;height:6px}.normal{background-color:#1d4ed8;border:2px solid #1e3a8a;padding:3px;width:18px;height:6px;margin-top:4px}</style></head><body><section class='shell'><div class='content'><div class='inner'></div></div><div class='normal'></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-padding-longhand-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.shell{background-color:#e5e7eb;padding-top:3px;padding-right:5px;padding-bottom:7px;padding-left:9px;width:78px;height:46px}.box{background-color:#22c55e;width:24px;height:10px}.override{background-color:#1d4ed8;padding:2px;padding-left:6px;padding-bottom:4px;width:20px;height:8px;margin-top:4px}.leaf{background-color:#f59e0b;width:8px;height:4px}</style></head><body><section class='shell'><div class='box'></div><div class='override'><div class='leaf'></div></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-border-side-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.shell{background-color:#e5e7eb;border-left:4px solid #0f172a;border-top:2px solid #0f172a;border-right:6px solid #0f172a;border-bottom:3px solid #0f172a;padding:3px 5px 7px 9px;width:70px;height:40px}.box{background-color:#22c55e;width:20px;height:8px}.next{background-color:#1d4ed8;border:1px solid #334155;border-width:1px 3px 2px 5px;padding:2px;width:16px;height:6px;margin-top:4px}.leaf{background-color:#f59e0b;width:8px;height:3px}</style></head><body><section class='shell'><div class='box'></div><div class='next'><div class='leaf'></div></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-overflow-hidden-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.shell{overflow:hidden;background-color:#e5e7eb;border:2px solid #0f172a;padding:4px;width:40px;height:24px}.wide{background-color:#22c55e;width:70px;height:10px}.tall{background-color:#1d4ed8;width:20px;height:20px;margin-top:4px}.outside{background-color:#ef4444;width:10px;height:10px;margin-top:4px}</style></head><body><section class='shell'><div class='wide'></div><div class='tall'></div><div class='outside'></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-visibility-hidden-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.shell{background-color:#e5e7eb;padding:4px;width:60px;height:44px}.hidden{visibility:hidden;background-color:#ef4444;border:2px solid #7f1d1d;padding:2px;width:24px;height:10px}.hidden .child{background-color:#f59e0b;width:12px;height:4px}.next{background-color:#1d4ed8;width:18px;height:8px;margin-top:4px}.shown{visibility:visible;background-color:#22c55e;width:12px;height:6px;margin-top:3px}</style></head><body><section class='shell'><div class='hidden'><div class='child'></div></div><div class='next'></div><div class='shown'></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-position-absolute-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.shell{position:relative;background-color:#e5e7eb;border:2px solid #0f172a;padding:4px;width:60px;height:42px}.flow{background-color:#22c55e;width:18px;height:8px}.abs{position:absolute;left:32px;top:4px;background-color:#1d4ed8;width:20px;height:12px}.next{background-color:#334155;width:24px;height:8px;margin-top:4px}.abs2{position:absolute;left:6px;top:30px;background-color:#f59e0b;width:16px;height:8px}</style></head><body><section class='shell'><div class='flow'></div><div class='abs'></div><div class='next'></div><div class='abs2'></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-position-right-bottom-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.shell{position:relative;background-color:#e5e7eb;border:2px solid #0f172a;padding:4px;width:60px;height:42px}.flow{background-color:#22c55e;width:18px;height:8px}.right{position:absolute;right:6px;top:6px;background-color:#1d4ed8;width:12px;height:10px}.bottom{position:absolute;right:8px;bottom:5px;background-color:#f59e0b;width:16px;height:8px}.next{background-color:#334155;width:24px;height:8px;margin-top:4px}</style></head><body><section class='shell'><div class='flow'></div><div class='right'></div><div class='bottom'></div><div class='next'></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-position-overlap-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.shell{position:relative;background-color:#e5e7eb;border:2px solid #0f172a;padding:4px;width:60px;height:42px}.flow{background-color:#22c55e;width:18px;height:8px}.abs{position:absolute;left:10px;top:8px;background-color:#1d4ed8;width:30px;height:20px}.next{background-color:#334155;width:36px;height:14px;margin-top:4px}</style></head><body><section class='shell'><div class='flow'></div><div class='abs'></div><div class='next'></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-position-z-index-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.shell{position:relative;background-color:#e5e7eb;border:2px solid #0f172a;padding:4px;width:60px;height:42px}.base{background-color:#22c55e;width:36px;height:14px}.high{position:absolute;left:8px;top:6px;z-index:2;background-color:#f59e0b;width:30px;height:20px}.low{position:absolute;left:14px;top:10px;z-index:1;background-color:#1d4ed8;width:30px;height:20px}.next{background-color:#334155;width:24px;height:8px;margin-top:4px}</style></head><body><section class='shell'><div class='base'></div><div class='high'></div><div class='low'></div><div class='next'></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-opacity-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.shell{background-color:#f8fafc;padding:4px;width:88px;height:56px}.half{background-color:#1d4ed8;opacity:0.5;width:20px;height:12px}.zero{background-color:#ef4444;opacity:0;width:24px;height:10px;margin-top:4px}.full{background-color:#22c55e;opacity:1;width:16px;height:8px;margin-top:4px}</style></head><body><section class='shell'><div class='half'></div><div class='zero'></div><div class='full'></div></section></body></html>"
+    if "$SCENE" == "simple-web-layout-background-shorthand-matrix":
+        html = "<html><head><style>html,body{margin:0;padding:0;width:${WIDTH}px;height:${HEIGHT}px;overflow:hidden;background-color:#f8fafc}.shell{background:url(hero.png) #dbeafe no-repeat;padding:4px;width:88px;height:56px}.rgb{background:rgb(34,197,94) no-repeat;width:20px;height:10px}.later-bg{background-color:#ef4444;background:#1d4ed8;width:18px;height:8px;margin-top:4px}.later-bg-color{background:#f59e0b;background-color:#334155;width:16px;height:8px;margin-top:4px}</style></head><body><section class='shell'><div class='rgb'></div><div class='later-bg'></div><div class='later-bg-color'></div></section></body></html>"
     if "$SCENE" == "simple-web-layout-commandbar-taskbar-card":
         html = "<html><style>header{background-color:#1d4ed8;color:#ffffff;font-size:8px;padding:1px}nav{background-color:#0f172a;color:#ffffff;font-size:8px;padding:1px}main{background-color:#e5e7eb;color:#111827;font-size:8px;padding:1px}button{background-color:#22c55e;color:#052e16;font-size:8px;padding:1px}footer{background-color:#334155;color:#ffffff;font-size:8px;padding:1px}</style><body><header>CMD</header><nav>TASK</nav><main><button>RUN</button>CARD</main><footer>OK</footer></body></html>"
     if "$SCENE" == "simple-web-layout-image-text-command-taskbar":
@@ -116,14 +159,15 @@ fn main():
         html = "<html><style>.status{background-color:#334155;color:#ffffff;font-size:8px;padding:1px}.panel .status{background-color:#22c55e;color:#052e16;font-size:8px;padding:1px}</style><body><section class='panel'><div class='status'>IN</div></section><div class='status'>OUT</div></body></html>"
     if "$SCENE" == "simple-web-layout-child-scope":
         html = "<html><style>.status{background-color:#334155;color:#ffffff;font-size:8px;padding:1px}.panel>.status{background-color:#22c55e;color:#052e16;font-size:8px;padding:1px}</style><body><section class='panel'><div class='status'>DIRECT</div><div><span class='status'>NESTED</span></div></section><div class='status'>OUT</div></body></html>"
+    val wrote_html = rt_file_write_text(HTML_PATH, html)
     val pixels = simple_web_render_html_to_pixels(html, WIDTH, HEIGHT)
     if pixels.len() != WIDTH * HEIGHT:
         print "simple_status=fail"
         print "simple_reason=wrong-pixel-count"
         return
     val wrote = write_expected_bitmap(pixels)
-    print "simple_status={if wrote: \"pass\" else: \"fail\"}"
-    print "simple_reason={if wrote: \"pass\" else: \"write-expected-argb-failed\"}"
+    print "simple_status={if wrote and wrote_html: \"pass\" else: \"fail\"}"
+    print "simple_reason={if wrote and wrote_html: \"pass\" else: \"write-expected-artifacts-failed\"}"
     print "renderer=pure-simple-web-layout-renderer"
     print "scene=$SCENE"
     print "width={WIDTH}"
@@ -155,6 +199,10 @@ if [ "$simple_status" != "pass" ]; then
     emit_unavailable "simple-layout-status-failed"
     exit 1
 fi
+if [ ! -s "$HTML_PATH" ]; then
+    emit_unavailable "missing-scene-html-file"
+    exit 1
+fi
 if [ ! -s "$EXPECTED_ARGB" ]; then
     emit_unavailable "missing-expected-argb-file"
     exit 1
@@ -165,14 +213,33 @@ if [ "$simple_blur" != "false" ]; then
 fi
 
 set +e
-if have timeout; then
-    timeout "$TIMEOUT_SECS" sh -c 'ELECTRON_BITMAP_SCENE="$1" ELECTRON_BITMAP_WIDTH="$2" ELECTRON_BITMAP_HEIGHT="$3" ELECTRON_BITMAP_ITERATIONS="$4" ELECTRON_BITMAP_EXPECTED_CHECKSUM="$5" ELECTRON_BITMAP_EXPECTED_WEIGHTED_CHECKSUM="$6" ELECTRON_BITMAP_EXPECTED_ARGB_PATH="$7" ELECTRON_BITMAP_PROOF_PATH="$8" ELECTRON_BITMAP_CAPTURED_ARGB_PATH="$9" SIMPLE_ELECTRON_LIVE_BITMAP=1 xvfb-run -a --server-args="-screen 0 1280x720x24" npm --prefix tools/electron-shell exec -- electron --no-sandbox tools/electron-shell' sh "$SCENE" "$WIDTH" "$HEIGHT" "$ITERATIONS" "$simple_checksum" "$simple_weighted" "$EXPECTED_ARGB" "$ELECTRON_PROOF" "$CAPTURED_ARGB" >"$ELECTRON_OUT" 2>&1
-else
-    ELECTRON_BITMAP_SCENE="$SCENE" ELECTRON_BITMAP_WIDTH="$WIDTH" ELECTRON_BITMAP_HEIGHT="$HEIGHT" ELECTRON_BITMAP_ITERATIONS="$ITERATIONS" ELECTRON_BITMAP_EXPECTED_CHECKSUM="$simple_checksum" ELECTRON_BITMAP_EXPECTED_WEIGHTED_CHECKSUM="$simple_weighted" ELECTRON_BITMAP_EXPECTED_ARGB_PATH="$EXPECTED_ARGB" ELECTRON_BITMAP_PROOF_PATH="$ELECTRON_PROOF" ELECTRON_BITMAP_CAPTURED_ARGB_PATH="$CAPTURED_ARGB" SIMPLE_ELECTRON_LIVE_BITMAP=1 \
+if have xvfb-run; then
+    ELECTRON_BITMAP_SCENE="$SCENE" ELECTRON_BITMAP_WIDTH="$WIDTH" ELECTRON_BITMAP_HEIGHT="$HEIGHT" ELECTRON_BITMAP_ITERATIONS="$ITERATIONS" ELECTRON_BITMAP_EXPECTED_CHECKSUM="$simple_checksum" ELECTRON_BITMAP_EXPECTED_WEIGHTED_CHECKSUM="$simple_weighted" ELECTRON_BITMAP_EXPECTED_ARGB_PATH="$EXPECTED_ARGB" ELECTRON_BITMAP_HTML_PATH="$HTML_PATH" ELECTRON_BITMAP_PROOF_PATH="$ELECTRON_PROOF" ELECTRON_BITMAP_CAPTURED_ARGB_PATH="$CAPTURED_ARGB" SIMPLE_ELECTRON_LIVE_BITMAP=1 \
         xvfb-run -a --server-args="-screen 0 1280x720x24" \
-        npm --prefix tools/electron-shell exec -- electron --no-sandbox tools/electron-shell >"$ELECTRON_OUT" 2>&1
+        "$ELECTRON_BIN" --force-device-scale-factor=1 --high-dpi-support=1 --force-color-profile=srgb --no-sandbox tools/electron-shell >"$ELECTRON_OUT" 2>&1 &
+else
+    ELECTRON_BITMAP_SCENE="$SCENE" ELECTRON_BITMAP_WIDTH="$WIDTH" ELECTRON_BITMAP_HEIGHT="$HEIGHT" ELECTRON_BITMAP_ITERATIONS="$ITERATIONS" ELECTRON_BITMAP_EXPECTED_CHECKSUM="$simple_checksum" ELECTRON_BITMAP_EXPECTED_WEIGHTED_CHECKSUM="$simple_weighted" ELECTRON_BITMAP_EXPECTED_ARGB_PATH="$EXPECTED_ARGB" ELECTRON_BITMAP_HTML_PATH="$HTML_PATH" ELECTRON_BITMAP_PROOF_PATH="$ELECTRON_PROOF" ELECTRON_BITMAP_CAPTURED_ARGB_PATH="$CAPTURED_ARGB" SIMPLE_ELECTRON_LIVE_BITMAP=1 \
+        "$ELECTRON_BIN" --force-device-scale-factor=1 --high-dpi-support=1 --force-color-profile=srgb --no-sandbox tools/electron-shell >"$ELECTRON_OUT" 2>&1 &
 fi
-electron_code=$?
+electron_pid=$!
+elapsed=0
+electron_code=0
+while kill -0 "$electron_pid" >/dev/null 2>&1; do
+    if [ "$elapsed" -ge "$TIMEOUT_SECS" ]; then
+        kill "$electron_pid" >/dev/null 2>&1 || true
+        sleep 1
+        kill -9 "$electron_pid" >/dev/null 2>&1 || true
+        wait "$electron_pid" >/dev/null 2>&1 || true
+        electron_code=124
+        break
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+done
+if [ "$electron_code" -eq 0 ]; then
+    wait "$electron_pid"
+    electron_code=$?
+fi
 set -e
 
 if [ -f "$ELECTRON_PROOF" ]; then
@@ -195,24 +262,80 @@ else
     blur_used="$(field_of blur_or_tolerance_used "$ELECTRON_OUT")"
 fi
 
+RESIDUAL_ENV="$BUILD_DIR/residual.env"
+if [ -s "$EXPECTED_ARGB" ] && [ -s "$CAPTURED_ARGB" ]; then
+    node - "$EXPECTED_ARGB" "$CAPTURED_ARGB" "$SCENE" >"$RESIDUAL_ENV" <<'NODE'
+const fs = require("fs");
+const simple = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const electron = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
+const scene = String(process.argv[4] || "");
+const sp = Array.isArray(simple.pixels) ? simple.pixels : [];
+const ep = Array.isArray(electron.pixels) ? electron.pixels : [];
+const surface = scene === "simple-web-layout-text-raster-track"
+  ? new Set([0xffffffff, 0xfff8fafc, 0xff334155])
+  : new Set([
+      0xffffffff, 0xfff8fafc, 0xff334155, 0xffdbeafe, 0xffe5e7eb,
+      0xff0f172a, 0xff1d4ed8, 0xff22c55e, 0xfff59e0b, 0xffef4444,
+      0xff7c2d12, 0xff14532d
+    ]);
+let chromeExtraTextPixels = 0;
+let simpleExtraTextPixels = 0;
+let textColorDeltaPixels = 0;
+let surfaceGeometryPixels = 0;
+let samePixels = 0;
+const n = Math.min(sp.length, ep.length);
+for (let i = 0; i < n; i += 1) {
+  const sv = Number(sp[i]) >>> 0;
+  const ev = Number(ep[i]) >>> 0;
+  if (sv === ev) {
+    samePixels += 1;
+    continue;
+  }
+  const simpleSurface = surface.has(sv);
+  const electronSurface = surface.has(ev);
+  if (simpleSurface && !electronSurface) chromeExtraTextPixels += 1;
+  else if (!simpleSurface && electronSurface) simpleExtraTextPixels += 1;
+  else if (!simpleSurface && !electronSurface) textColorDeltaPixels += 1;
+  else surfaceGeometryPixels += 1;
+}
+surfaceGeometryPixels += Math.abs(sp.length - ep.length);
+console.log(`electron_simple_web_layout_same_pixels=${samePixels}`);
+console.log(`electron_simple_web_layout_chrome_extra_text_pixels=${chromeExtraTextPixels}`);
+console.log(`electron_simple_web_layout_simple_extra_text_pixels=${simpleExtraTextPixels}`);
+console.log(`electron_simple_web_layout_text_color_delta_pixels=${textColorDeltaPixels}`);
+console.log(`electron_simple_web_layout_surface_geometry_pixels=${surfaceGeometryPixels}`);
+NODE
+else
+    {
+        echo "electron_simple_web_layout_same_pixels="
+        echo "electron_simple_web_layout_chrome_extra_text_pixels="
+        echo "electron_simple_web_layout_simple_extra_text_pixels="
+        echo "electron_simple_web_layout_text_color_delta_pixels="
+        echo "electron_simple_web_layout_surface_geometry_pixels="
+    } >"$RESIDUAL_ENV"
+fi
+same_pixels="$(field_of electron_simple_web_layout_same_pixels "$RESIDUAL_ENV")"
+chrome_extra_text_pixels="$(field_of electron_simple_web_layout_chrome_extra_text_pixels "$RESIDUAL_ENV")"
+simple_extra_text_pixels="$(field_of electron_simple_web_layout_simple_extra_text_pixels "$RESIDUAL_ENV")"
+text_color_delta_pixels="$(field_of electron_simple_web_layout_text_color_delta_pixels "$RESIDUAL_ENV")"
+surface_geometry_pixels="$(field_of electron_simple_web_layout_surface_geometry_pixels "$RESIDUAL_ENV")"
+
 status=pass
 reason=pass
 if [ "$electron_code" -ne 0 ] && [ ! -f "$ELECTRON_PROOF" ]; then
     status=fail
     reason=electron-live-capture-failed
-elif [ "$electron_code" -ne 0 ]; then
-    reason=pass-with-electron-teardown-warning
 elif [ "$blur_used" != "false" ]; then
     status=fail
     reason=blur-or-tolerance-not-allowed
 elif [ "$electron_checksum" != "$simple_checksum" ] || [ "$electron_expected" != "$simple_checksum" ]; then
-    status=fail
+    status=divergent
     reason=checksum-mismatch
 elif [ "$electron_weighted" != "$simple_weighted" ] || [ "$electron_expected_weighted" != "$simple_weighted" ]; then
-    status=fail
+    status=divergent
     reason=weighted-checksum-mismatch
 elif [ "$mismatch_count" != "0" ]; then
-    status=fail
+    status=divergent
     reason=pixel-mismatch
 elif [ ! -s "$CAPTURED_ARGB" ] || [ "$captured_argb_written" != "true" ]; then
     status=fail
@@ -220,6 +343,8 @@ elif [ ! -s "$CAPTURED_ARGB" ] || [ "$captured_argb_written" != "true" ]; then
 elif [ -z "$electron_frame_us" ] || [ "$electron_frame_us" -le 0 ]; then
     status=fail
     reason=missing-electron-timing
+elif [ "$electron_code" -ne 0 ]; then
+    reason=pass-with-electron-teardown-warning
 fi
 
 {
@@ -234,8 +359,14 @@ fi
     echo "electron_simple_web_layout_simple_weighted_checksum=$simple_weighted"
     echo "electron_simple_web_layout_electron_weighted_checksum=${electron_weighted:-0}"
     echo "electron_simple_web_layout_mismatch_count=${mismatch_count:-}"
+    echo "electron_simple_web_layout_same_pixels=${same_pixels:-}"
+    echo "electron_simple_web_layout_chrome_extra_text_pixels=${chrome_extra_text_pixels:-}"
+    echo "electron_simple_web_layout_simple_extra_text_pixels=${simple_extra_text_pixels:-}"
+    echo "electron_simple_web_layout_text_color_delta_pixels=${text_color_delta_pixels:-}"
+    echo "electron_simple_web_layout_surface_geometry_pixels=${surface_geometry_pixels:-}"
     echo "electron_simple_web_layout_blur_or_tolerance_used=${blur_used:-}"
     echo "electron_simple_web_layout_electron_frame_us=${electron_frame_us:-0}"
+    echo "electron_simple_web_layout_html_path=$HTML_PATH"
     echo "electron_simple_web_layout_expected_argb_path=$EXPECTED_ARGB"
     echo "electron_simple_web_layout_captured_argb_path=$CAPTURED_ARGB"
     echo "electron_simple_web_layout_captured_argb_written=${captured_argb_written:-}"
@@ -254,8 +385,14 @@ fi
     echo "- Simple weighted checksum: $simple_weighted"
     echo "- Electron weighted checksum: ${electron_weighted:-0}"
     echo "- mismatch count: ${mismatch_count:-}"
+    echo "- same pixels: ${same_pixels:-}"
+    echo "- Chrome extra text pixels: ${chrome_extra_text_pixels:-}"
+    echo "- Simple extra text pixels: ${simple_extra_text_pixels:-}"
+    echo "- text color delta pixels: ${text_color_delta_pixels:-}"
+    echo "- surface geometry pixels: ${surface_geometry_pixels:-}"
     echo "- blur/tolerance used: ${blur_used:-}"
     echo "- Electron frame us: ${electron_frame_us:-0}"
+    echo "- HTML path: $HTML_PATH"
     echo "- expected ARGB path: $EXPECTED_ARGB"
     echo "- captured ARGB path: $CAPTURED_ARGB"
     echo "- captured ARGB written: ${captured_argb_written:-}"

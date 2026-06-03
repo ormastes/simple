@@ -407,16 +407,26 @@ export class SimpleAiChatPanel {
         }
 
         function renderMarkdown(text) {
-            let html = escapeHtml(text);
             const tick = String.fromCharCode(96);
             const codeBlockRegex = new RegExp(tick + tick + tick + '([\\\\w-]+)?\\\\n([\\\\s\\\\S]*?)' + tick + tick + tick, 'g');
             const inlineCodeRegex = new RegExp(tick + '([^' + tick + ']+)' + tick, 'g');
-            html = html.replace(codeBlockRegex, (_, lang, code) => {
-                return '<pre><code>' + code + '</code></pre>';
-            });
-            html = html.replace(inlineCodeRegex, '<code>$1</code>');
+            // Stash code spans behind sentinel tokens so the inline/bold/newline
+            // passes below cannot corrupt code content (e.g. ** turned into <strong>,
+            // or code newlines turned into <br> inside <pre>).
+            const placeholders = [];
+            const stash = (value) => {
+                const token = '\\uE000' + placeholders.length + '\\uE000';
+                placeholders.push(value);
+                return token;
+            };
+            let html = escapeHtml(text);
+            html = html.replace(codeBlockRegex, (_, lang, code) => stash('<pre><code>' + code + '</code></pre>'));
+            html = html.replace(inlineCodeRegex, (_, code) => stash('<code>' + code + '</code>'));
             html = html.replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>');
             html = html.replace(/\\n/g, '<br>');
+            placeholders.forEach((value, index) => {
+                html = html.replace('\\uE000' + index + '\\uE000', () => value);
+            });
             return html;
         }
 

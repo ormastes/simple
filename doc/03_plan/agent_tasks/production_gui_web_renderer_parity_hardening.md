@@ -17,19 +17,81 @@
 - Add executable SPipe system spec for software, CPU SIMD, and Metal exact
   backend parity.
 - Add live Electron generated-GUI HTML evidence that compares Electron capture
-  pixels against Simple CPU SIMD expected pixels and records the current
-  divergence.
+  pixels against Simple CPU SIMD expected pixels.
+- Convert the generated-GUI Electron lane to exact parity for this fixture with
+  `mismatch_count=0`, matching checksums, and no tolerance.
+- Add a repeatable 96x72 and 128x96 Electron generated-GUI parity matrix.
+- Add a canonical Electron layout manifest and exact pixel runner.
+- Add the first exact CSS box-model/flex manifest case for width, height,
+  padding, flex row/column, gap, margin-left, and compound class selectors.
+- Add the second exact CSS border/nested-selector manifest case for solid
+  borders, border-aware content-box sizing, direct-child selectors, descendant
+  selectors, and scoped selector rejection.
+- Add the third exact text-free selector/inline-style manifest case for
+  direct-child compound class selectors, descendant ID selectors, scoped
+  selector rejection, and inline style precedence.
+- Add the fourth exact text-free attribute-selector manifest case for
+  attribute presence, exact value, prefix, suffix, and non-matching selector
+  behavior.
+- Add the fifth exact text-free border-box manifest case for
+  `box-sizing:border-box` explicit outer width/height with padding and borders,
+  while preserving default content-box sizing in the same scene.
+- Add the sixth exact text-free padding-longhand manifest case for
+  `padding-top`, `padding-right`, `padding-bottom`, `padding-left`, and
+  shorthand-plus-longhand side overrides.
+- Add the seventh exact text-free asymmetric border-side manifest case for
+  `border-left`, `border-top`, `border-right`, `border-bottom`, and
+  `border-width` side shorthand geometry.
+- Add the eighth exact text-free overflow-hidden manifest case for ancestor
+  padding-box clipping of oversized descendants and later overflowing siblings.
+- Add the ninth exact text-free visibility-hidden manifest case for
+  layout-preserving paint suppression of hidden boxes and inherited hidden
+  descendants.
+- Add the tenth exact text-free positioned-layout manifest case for
+  `position:relative` containing blocks, `position:absolute` direct children,
+  `left`/`top` padding-box offsets, and removal from normal flow.
+- Add the eleventh exact text-free positioned-overlap manifest case for
+  `position:absolute` boxes painting above later normal-flow siblings under the
+  default `z-index:auto` behavior.
+- Add the twelfth exact text-free positioned z-index manifest case for positive
+  `z-index` ordering across overlapping `position:absolute` boxes.
+- Add the first text-heavy CSS manifest case as tracked divergence evidence
+  with real Electron/Simple artifacts and no tolerance.
+- Add tracked text residual buckets for Chrome extra text coverage, Simple
+  extra bitmap coverage, text color delta, and surface geometry.
+- Add a generic non-widget scaled text coverage-thinning path that reduces the
+  tracked text case mismatch from 1557 to 1283 without changing exact text-free
+  manifest parity.
+- Add browser-like word wrapping, tighter 8px text metrics, and large-font ink
+  inset for non-widget text, reducing the tracked text mismatch from 1283 to
+  1082 and eliminating the tracked surface-geometry residual.
+- Retune the non-widget scaled text sparse coverage phase from `% 6 == 4` to
+  `% 8 == 2`, reducing the tracked text mismatch from 1082 to 1070 while
+  keeping all twelve exact text-free manifest cases bit-exact.
+- Add lowercase 5x7 glyphs, direct lowercase glyph lookup, tighter large-font
+  paint advance, and a one-pixel browser text ink inset, reducing the tracked
+  text mismatch from 1070 to 997 while keeping all twelve exact text-free
+  manifest cases bit-exact.
+- Add generic CSS `opacity` parsing and clipped leaf background opacity
+  blending, then promote `opacity_matrix` as the thirteenth exact text-free
+  manifest case while keeping the tracked text mismatch at 997.
+- Add generic CSS declaration last-wins handling plus `background` shorthand
+  fallback color extraction for `url(...) #rgb` and `rgb(...)`, then promote
+  `background_shorthand_matrix` as the fourteenth exact text-free manifest
+  case while keeping the tracked text mismatch at 997.
+- Include the layout manifest in the aggregate production renderer parity gate.
 
 ## Next Agent Tasks
 
-- Convert the live Electron generated-GUI divergence into passing parity by
-  aligning viewport/base offset, CSS defaults, image replacement behavior, and
-  text rasterization policy.
-- Add a canonical Electron/WebKit capture manifest and exact pixel runner.
-- Add CPU SIMD counter evidence to the parity report.
-- Add Metal GPU-readback provenance to reject CPU mirror fallback.
-- Expand CSS/layout matrix for width, height, margin, padding, border, flex,
-  gap, and nested selectors.
+- Continue replacing the bitmap glyph and sparse coverage heuristics with a
+  generic Chrome text raster/compositing model, then expand the CSS/layout
+  manifest with more text-heavy cases.
+- Reduce focused renderer spec runtime or split the exact layout cases into a
+  separate focused spec. The latest default-timeout interpreter run hit the
+  120s limit, while
+  `SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl --mode=interpreter --clean --timeout 180`
+  passed 44/44 but was flagged `[PERF BUG]` at 98.744 seconds after the
+  background shorthand exact-case update.
 
 ## Verified Diagnostics — Claude (2026-06-02)
 

@@ -105,13 +105,27 @@ if [ "$simple_blur" != "false" ]; then
 fi
 
 set +e
-if have timeout; then
-    timeout "$TIMEOUT_SECS" sh -c 'env ELECTRON_BITMAP_SCENE="$1" ELECTRON_BITMAP_WIDTH="$2" ELECTRON_BITMAP_HEIGHT="$3" ELECTRON_BITMAP_ITERATIONS="$4" ELECTRON_BITMAP_EXPECTED_CHECKSUM="$5" ELECTRON_BITMAP_EXPECTED_WEIGHTED_CHECKSUM="$6" ELECTRON_BITMAP_EXPECTED_ARGB_PATH="$7" ELECTRON_BITMAP_HTML_PATH="$8" ELECTRON_BITMAP_PROOF_PATH="$9" ELECTRON_BITMAP_CAPTURED_ARGB_PATH="${10}" SIMPLE_ELECTRON_LIVE_BITMAP=1 '"$XVFB_PREFIX"' "${11}" --force-device-scale-factor=1 --high-dpi-support=1 --force-color-profile=srgb --no-sandbox tools/electron-shell' sh "$SCENE" "$WIDTH" "$HEIGHT" "$ITERATIONS" "$simple_checksum" "$simple_weighted" "$EXPECTED_ARGB" "$HTML_PATH" "$ELECTRON_PROOF" "$CAPTURED_ARGB" "$ELECTRON_BIN" >"$ELECTRON_OUT" 2>&1
-else
-    ELECTRON_BITMAP_SCENE="$SCENE" ELECTRON_BITMAP_WIDTH="$WIDTH" ELECTRON_BITMAP_HEIGHT="$HEIGHT" ELECTRON_BITMAP_ITERATIONS="$ITERATIONS" ELECTRON_BITMAP_EXPECTED_CHECKSUM="$simple_checksum" ELECTRON_BITMAP_EXPECTED_WEIGHTED_CHECKSUM="$simple_weighted" ELECTRON_BITMAP_EXPECTED_ARGB_PATH="$EXPECTED_ARGB" ELECTRON_BITMAP_HTML_PATH="$HTML_PATH" ELECTRON_BITMAP_PROOF_PATH="$ELECTRON_PROOF" ELECTRON_BITMAP_CAPTURED_ARGB_PATH="$CAPTURED_ARGB" SIMPLE_ELECTRON_LIVE_BITMAP=1 \
-        "$ELECTRON_BIN" --force-device-scale-factor=1 --high-dpi-support=1 --force-color-profile=srgb --no-sandbox tools/electron-shell >"$ELECTRON_OUT" 2>&1
+electron_code=0
+ELECTRON_BITMAP_SCENE="$SCENE" ELECTRON_BITMAP_WIDTH="$WIDTH" ELECTRON_BITMAP_HEIGHT="$HEIGHT" ELECTRON_BITMAP_ITERATIONS="$ITERATIONS" ELECTRON_BITMAP_EXPECTED_CHECKSUM="$simple_checksum" ELECTRON_BITMAP_EXPECTED_WEIGHTED_CHECKSUM="$simple_weighted" ELECTRON_BITMAP_EXPECTED_ARGB_PATH="$EXPECTED_ARGB" ELECTRON_BITMAP_HTML_PATH="$HTML_PATH" ELECTRON_BITMAP_PROOF_PATH="$ELECTRON_PROOF" ELECTRON_BITMAP_CAPTURED_ARGB_PATH="$CAPTURED_ARGB" SIMPLE_ELECTRON_LIVE_BITMAP=1 \
+    "$ELECTRON_BIN" --force-device-scale-factor=1 --high-dpi-support=1 --force-color-profile=srgb --no-sandbox tools/electron-shell >"$ELECTRON_OUT" 2>&1 &
+electron_pid=$!
+elapsed=0
+while kill -0 "$electron_pid" >/dev/null 2>&1; do
+    if [ "$elapsed" -ge "$TIMEOUT_SECS" ]; then
+        kill "$electron_pid" >/dev/null 2>&1 || true
+        sleep 1
+        kill -9 "$electron_pid" >/dev/null 2>&1 || true
+        wait "$electron_pid" >/dev/null 2>&1 || true
+        electron_code=124
+        break
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+done
+if [ "$electron_code" -eq 0 ]; then
+    wait "$electron_pid"
+    electron_code=$?
 fi
-electron_code=$?
 set -e
 
 if [ -f "$ELECTRON_PROOF" ]; then
@@ -136,8 +150,50 @@ else
     blur_used="$(field_of blur_or_tolerance_used "$ELECTRON_OUT")"
 fi
 
+RESIDUAL_ENV="$BUILD_DIR/residual.env"
+if [ -s "$EXPECTED_ARGB" ] && [ -s "$CAPTURED_ARGB" ]; then
+    node - "$EXPECTED_ARGB" "$CAPTURED_ARGB" >"$RESIDUAL_ENV" <<'NODE'
+const fs = require("fs");
+const simple = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const electron = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
+const sp = Array.isArray(simple.pixels) ? simple.pixels : [];
+const ep = Array.isArray(electron.pixels) ? electron.pixels : [];
+const surfaces = new Set([
+  0xfff5f5f5, 0xffcbd5e1, 0xff0066cc, 0xff2563eb,
+  0xff64748b, 0xfff59e0b, 0xff22c55e
+]);
+const simpleText = new Set([0xff141418, 0xff0f172a]);
+let missingAntialias = 0;
+let simpleTextOverpaint = 0;
+let other = 0;
+const n = Math.min(sp.length, ep.length);
+for (let i = 0; i < n; i += 1) {
+  const sv = Number(sp[i]) >>> 0;
+  const ev = Number(ep[i]) >>> 0;
+  if (sv === ev) continue;
+  if (surfaces.has(sv) && !surfaces.has(ev)) missingAntialias += 1;
+  else if (simpleText.has(sv)) simpleTextOverpaint += 1;
+  else other += 1;
+}
+if (sp.length !== ep.length) other += Math.abs(sp.length - ep.length);
+console.log(`electron_generated_gui_web_missing_antialias_pixels=${missingAntialias}`);
+console.log(`electron_generated_gui_web_simple_text_overpaint_pixels=${simpleTextOverpaint}`);
+console.log(`electron_generated_gui_web_other_mismatch_pixels=${other}`);
+NODE
+else
+    {
+        echo "electron_generated_gui_web_missing_antialias_pixels="
+        echo "electron_generated_gui_web_simple_text_overpaint_pixels="
+        echo "electron_generated_gui_web_other_mismatch_pixels="
+    } >"$RESIDUAL_ENV"
+fi
+missing_antialias_pixels="$(field_of electron_generated_gui_web_missing_antialias_pixels "$RESIDUAL_ENV")"
+simple_text_overpaint_pixels="$(field_of electron_generated_gui_web_simple_text_overpaint_pixels "$RESIDUAL_ENV")"
+other_mismatch_pixels="$(field_of electron_generated_gui_web_other_mismatch_pixels "$RESIDUAL_ENV")"
+
 status=pass
 reason=pass
+watchdog_teardown=false
 if [ "$electron_code" -ne 0 ] && [ ! -f "$ELECTRON_PROOF" ]; then
     status=unavailable
     reason=electron-live-capture-failed
@@ -160,7 +216,7 @@ elif [ -z "$electron_frame_us" ] || [ "$electron_frame_us" -le 0 ]; then
     status=fail
     reason=missing-electron-timing
 elif [ "$electron_code" -ne 0 ]; then
-    reason=pass-with-electron-teardown-warning
+    watchdog_teardown=true
 fi
 
 {
@@ -178,11 +234,15 @@ fi
     echo "electron_generated_gui_web_simple_weighted_checksum=$simple_weighted"
     echo "electron_generated_gui_web_electron_weighted_checksum=${electron_weighted:-0}"
     echo "electron_generated_gui_web_mismatch_count=${mismatch_count:-}"
+    echo "electron_generated_gui_web_missing_antialias_pixels=${missing_antialias_pixels:-}"
+    echo "electron_generated_gui_web_simple_text_overpaint_pixels=${simple_text_overpaint_pixels:-}"
+    echo "electron_generated_gui_web_other_mismatch_pixels=${other_mismatch_pixels:-}"
     echo "electron_generated_gui_web_blur_or_tolerance_used=${blur_used:-}"
     echo "electron_generated_gui_web_electron_frame_us=${electron_frame_us:-0}"
     echo "electron_generated_gui_web_capture_native_width=${capture_native_width:-}"
     echo "electron_generated_gui_web_capture_native_height=${capture_native_height:-}"
     echo "electron_generated_gui_web_capture_downsampled=${capture_downsampled:-}"
+    echo "electron_generated_gui_web_watchdog_teardown=$watchdog_teardown"
     echo "electron_generated_gui_web_html_path=$HTML_PATH"
     echo "electron_generated_gui_web_expected_argb_path=$EXPECTED_ARGB"
     echo "electron_generated_gui_web_captured_argb_path=$CAPTURED_ARGB"
@@ -201,10 +261,14 @@ fi
     echo "- generated HTML has app shell: ${html_has_app_shell:-}"
     echo "- Simple distinct colors: ${distinct_colors:-}"
     echo "- mismatch count: ${mismatch_count:-}"
+    echo "- missing antialias pixels: ${missing_antialias_pixels:-}"
+    echo "- Simple text overpaint pixels: ${simple_text_overpaint_pixels:-}"
+    echo "- other mismatch pixels: ${other_mismatch_pixels:-}"
     echo "- blur/tolerance used: ${blur_used:-}"
     echo "- Electron frame us: ${electron_frame_us:-0}"
     echo "- capture native dimensions: ${capture_native_width:-}x${capture_native_height:-}"
     echo "- capture downsampled: ${capture_downsampled:-}"
+    echo "- watchdog teardown: $watchdog_teardown"
     echo "- generated HTML path: $HTML_PATH"
     echo "- Simple expected ARGB path: $EXPECTED_ARGB"
     echo "- Electron captured ARGB path: $CAPTURED_ARGB"
@@ -214,4 +278,4 @@ fi
 } >"$REPORT_PATH"
 
 cat "$BUILD_DIR/evidence.env"
-[ "$status" = "pass" ] || [ "$status" = "divergent" ]
+[ "$status" = "pass" ]

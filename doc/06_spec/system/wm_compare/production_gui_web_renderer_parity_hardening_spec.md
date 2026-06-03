@@ -1,5 +1,40 @@
 # Production Gui Web Renderer Parity Hardening Specification
 
+> <details>
+
+<!-- sdn-diagram:id=production_gui_web_renderer_parity_hardening_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=production_gui_web_renderer_parity_hardening_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+production_gui_web_renderer_parity_hardening_spec -> std
+production_gui_web_renderer_parity_hardening_spec -> app
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=production_gui_web_renderer_parity_hardening_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 6 | 6 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Production Gui Web Renderer Parity Hardening Specification
+
 ## Scenarios
 
 ### production GUI web renderer parity hardening
@@ -164,3 +199,5 @@ Tests covering:
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
+
+</details>
