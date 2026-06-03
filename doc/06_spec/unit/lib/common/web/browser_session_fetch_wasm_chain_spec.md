@@ -2904,6 +2904,39 @@ match result:
 
 </details>
 
+#### encodes browser TextEncoder bytes into WASM validation buffers
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `utf-8:utf-8:3:97,115,109:true:asm`
+
+3. Err
+   - Expected: "unexpected text codec wasm header js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var encoder = new TextEncoder(); var decoder = new TextDecoder('utf8'); var header = new Uint8Array(8); var letters = encoder.encode('asm'); header[0] = 0; Uint8Array.prototype.set.call(header, letters, 1); header[4] = 1; header[5] = 0; header[6] = 0; header[7] = 0; encoder.encoding + ':' + decoder.encoding + ':' + letters.length + ':' + header[1] + ',' + header[2] + ',' + header[3] + ':' + WebAssembly.validate(header) + ':' + decoder.decode(header.slice(1, 4))")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("utf-8:utf-8:3:97,115,109:true:asm")
+    Err(err):
+        expect("unexpected text codec wasm header js error: {err}").to_equal("")
+```
+
+</details>
+
 #### shares WebAssembly Memory buffer bytes with typed array views in browser scripts
 
 1. var session = BrowserSession new
@@ -2989,8 +3022,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 82 |
-| Active scenarios | 82 |
+| Total scenarios | 83 |
+| Active scenarios | 83 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

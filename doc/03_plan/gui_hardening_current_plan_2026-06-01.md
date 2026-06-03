@@ -3929,3 +3929,17 @@ signed read, and backing Uint8Array storage parity with direct DataView helpers.
 The focused fetch/WASM chain spec now passes `82/82`; broader typed-array,
 DataView, general `Function.prototype.call/apply` dispatch, and full
 browser/WASM semantics remain open.
+
+BrowserSession TextEncoder/TextDecoder WASM header continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession scripts now round browser `TextEncoder` output through
+`Uint8Array.prototype.set.call` into a WASM magic/version header, validate that
+typed-array header with `WebAssembly.validate`, and decode the encoded module
+magic bytes back through `TextDecoder('utf8')`. Encoding labels, byte content,
+typed-array storage, decoder output, and WASM header validation all agree in the
+browser-session path. The focused fetch/WASM chain spec now passes `83/83`;
+broader browser/WASM semantics remain open.
