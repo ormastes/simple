@@ -1561,6 +1561,39 @@ match result:
 
 </details>
 
+#### exposes instantiated WebAssembly table and global exports in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `instantiated:table:funcref:null:1:2:global:i32:false:42`
+
+3. Err
+   - Expected: "unexpected instantiated table/global export js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var out = ''; WebAssembly.instantiate('0061736d010000000404017000010606017f00412a0b0710020374626c010006616e737765720300').then(function(result) { var table = result.instance.exports.tbl; var global = result.instance.exports.answer; var before = table.get(0); var old = table.grow(1, null); out = result.status + ':' + table.kind + ':' + table.element + ':' + before + ':' + old + ':' + table.length + ':' + global.kind + ':' + global.valueType + ':' + global.mutable + ':' + global.value; }); out")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("instantiated:table:funcref:null:1:2:global:i32:false:42")
+    Err(err):
+        expect("unexpected instantiated table/global export js error: {err}").to_equal("")
+```
+
+</details>
+
 #### mutates WebAssembly Global values in browser scripts
 
 1. var session = BrowserSession new
@@ -4286,8 +4319,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 107 |
-| Active scenarios | 107 |
+| Total scenarios | 108 |
+| Active scenarios | 108 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

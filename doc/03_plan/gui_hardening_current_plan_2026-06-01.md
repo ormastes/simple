@@ -4265,3 +4265,17 @@ function. The focused assertion checks the module import count, byte length,
 instance status, exported function type, return value, and host import call
 count. The focused fetch/WASM chain spec now passes `107/107`; broader
 browser/WASM semantics remain open.
+
+BrowserSession instantiated WebAssembly table/global export continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession scripts now instantiate a module that exports a bounded table
+and immutable i32 global, then read `result.instance.exports.tbl` and
+`result.instance.exports.answer` through normal browser script access. The
+focused assertion checks instantiate status, exported table kind/element,
+initial null slot, grow return/length, and exported global kind/value metadata.
+The focused fetch/WASM chain spec now passes `108/108`; broader browser/WASM
+semantics remain open.
