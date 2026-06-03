@@ -27,7 +27,7 @@ backend_gpu_target_contract_spec -> compiler
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -114,6 +114,29 @@ expect(CudaBackend.accepts_gpu_kernel_target(make_gpu_kernel("opencl_kernel", "o
 
 </details>
 
+#### uses backend order metadata to keep auto GPU kernels on the selected backend
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val cuda_only = make_gpu_kernel_with_order("cuda_only", "auto", "cuda")
+val opencl_only = make_gpu_kernel_with_order("opencl_only", "auto", "opencl")
+val both = make_gpu_kernel_with_order("both", "auto", "opencl,cuda")
+
+expect(CudaBackend.accepts_gpu_kernel_target(cuda_only)).to_equal(true)
+expect(CudaBackend.accepts_gpu_kernel_target(opencl_only)).to_equal(false)
+expect(CudaBackend.accepts_gpu_kernel_target(both)).to_equal(true)
+expect(OpenClBackend.accepts_gpu_kernel(cuda_only)).to_equal(false)
+expect(OpenClBackend.accepts_gpu_kernel(opencl_only)).to_equal(true)
+expect(OpenClBackend.accepts_gpu_kernel(both)).to_equal(true)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -133,8 +156,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -330,14 +330,35 @@ scenario comment, file comment, nearest folder/root config, built-in default.
 Invalid manual visibility metadata renders a manual warning and leaves the
 scenario visible by default so the generated doc is still reviewable.
 
+## SDN Diagrams in Generated Docs
+
+Generated docs now include a summary card with an SDN diagram placeholder at
+the top. The full scenario manual is folded below in a `<details>` block.
+
+The diagram is auto-generated from the spec's `use` imports, showing which
+modules the spec depends on. After generating docs, run:
+
+```bash
+bin/simple md-diagram-update doc/06_spec/
+```
+
+This renders the ASCII art and fills in the hash. The lint check
+`bin/simple build lint` reports `DIAG001` warnings for stale or placeholder
+diagrams.
+
+For phase docs (research, architecture, refactor), include at least one SDN
+diagram manually using the `<!-- sdn-diagram:id=... -->` format. See
+`.claude/skills/lib/spipe_diagrams.md` for the format reference and examples.
+
 ## Quality Loop
 
 After writing or changing a scenario:
 
 1. Generate the doc with `bin/simple spipe-docgen <spec> --output doc/06_spec`.
-2. Read the generated doc as if it were a hand-written manual.
-3. Check that auto-generated docs put `## Scenarios` immediately after the
-   title, then inspect the primary scenario steps first.
-4. If it reads like code or test plumbing, improve `@step`, helper names,
+2. Run `bin/simple md-diagram-update` to render diagram placeholders.
+3. Read the generated doc as if it were a hand-written manual.
+4. Check that the summary card (title, overview, diagram, stats) is readable
+   at a glance and the full manual is folded below.
+5. If it reads like code or test plumbing, improve `@step`, helper names,
    visibility, capture kind, or checker/capture output.
-5. Repeat until the manual is useful without opening the source test.
+6. Repeat until the manual is useful without opening the source test.
