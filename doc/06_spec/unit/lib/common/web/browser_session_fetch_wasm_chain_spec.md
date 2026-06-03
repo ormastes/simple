@@ -339,6 +339,39 @@ match result:
 
 </details>
 
+#### instantiates compiled WebAssembly imports through exported functions
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `instantiated:1:52:42:1`
+
+3. Err
+   - Expected: "unexpected compiled instantiate import call js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var out = ''; var calls = 0; var imports = { env: { foo: function(x) { calls = calls + 1; return x + 3; } } }; WebAssembly.compile('0061736d0100000001060160017f017f020b0103656e7603666f6f0000030201000707010372756e00010a08010600200010000b').then(function(module) { return WebAssembly.instantiate(module, imports); }).then(function(result) { out = result.status + ':' + result.module.importCount + ':' + result.module.byteLength + ':' + result.instance.exports.run(39) + ':' + calls; }); out")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("instantiated:1:52:42:1")
+    Err(err):
+        expect("unexpected compiled instantiate import call js error: {err}").to_equal("")
+```
+
+</details>
+
 #### chains compiled WebAssembly modules into instantiate
 
 1. var session = BrowserSession new
@@ -3385,8 +3418,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 94 |
-| Active scenarios | 94 |
+| Total scenarios | 95 |
+| Active scenarios | 95 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
