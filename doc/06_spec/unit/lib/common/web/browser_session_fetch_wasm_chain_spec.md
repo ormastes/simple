@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 127 | 127 | 0 | 0 |
+| 128 | 128 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -198,6 +198,91 @@ match session.take_pending_request():
                 match session.eval_script("out"):
                     Ok(value):
                         expect(_display_js(value)).to_equal("fetch>arrayBuffer:41>instantiate:instantiated:41:function:42:42")
+                    Err(err):
+                        expect("unexpected js error: {err}").to_equal("")
+            Err(err):
+                expect("unexpected commit error: {err}").to_equal("")
+    nil:
+        expect("missing fetch request").to_equal("")
+```
+
+</details>
+
+#### chains fetched arrayBuffer bytes into WebAssembly import calls
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `queued`
+
+3. Err
+   - Expected: "unexpected queue error: {err}" equals ``
+
+4. Ok
+   - Expected: _display_js(value) equals ``
+
+5. Err
+   - Expected: "unexpected pre-commit js error: {err}" equals ``
+
+6. Some
+   - Expected: request.kind equals `fetch`
+   - Expected: request.url equals `https://example.com/mod.wasm`
+
+7. Ok
+
+8. Ok
+   - Expected: _display_js(value) equals `fetch>arrayBuffer:52>instantiate:instantiated:1:52:42:1`
+
+9. Err
+   - Expected: "unexpected js error: {err}" equals ``
+
+10. Err
+   - Expected: "unexpected commit error: {err}" equals ``
+   - Expected: "missing fetch request" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 41 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val queued = session.eval_script("var out = ''; var stages = ''; var calls = 0; var imports = { env: { foo: function(x) { calls = calls + 1; return x + 2; } } }; window.fetch('/mod.wasm').then(function(r) { stages = stages + 'fetch>'; return r.arrayBuffer(); }).then(function(bytes) { stages = stages + 'arrayBuffer:' + bytes.byteLength + '>'; return WebAssembly.instantiate(bytes, imports); }).then(function(result) { out = stages + 'instantiate:' + result.status + ':' + result.module.importCount + ':' + result.module.byteLength + ':' + result.instance.exports.run(40) + ':' + calls; }); 'queued'")
+match queued:
+    Ok(value):
+        expect(_display_js(value)).to_equal("queued")
+    Err(err):
+        expect("unexpected queue error: {err}").to_equal("")
+match session.eval_script("out"):
+    Ok(value):
+        expect(_display_js(value)).to_equal("")
+    Err(err):
+        expect("unexpected pre-commit js error: {err}").to_equal("")
+
+match session.take_pending_request():
+    Some(request):
+        expect(request.kind).to_equal("fetch")
+        expect(request.url).to_equal("https://example.com/mod.wasm")
+        val committed = session.commit_network_response(BrowserResponse.create(
+            request_id: request.id,
+            kind: "fetch",
+            url: request.url,
+            status: 200,
+            headers: "Content-Type: application/wasm\n",
+            body: "0061736d0100000001060160017f017f020b0103656e7603666f6f0000030201000707010372756e00010a08010600200010000b",
+            error: ""
+        ))
+        match committed:
+            Ok(_):
+                match session.eval_script("out"):
+                    Ok(value):
+                        expect(_display_js(value)).to_equal("fetch>arrayBuffer:52>instantiate:instantiated:1:52:42:1")
                     Err(err):
                         expect("unexpected js error: {err}").to_equal("")
             Err(err):
@@ -5712,8 +5797,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 127 |
-| Active scenarios | 127 |
+| Total scenarios | 128 |
+| Active scenarios | 128 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
