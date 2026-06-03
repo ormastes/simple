@@ -273,6 +273,39 @@ match result:
 
 </details>
 
+#### exposes compiled WebAssembly module export descriptors in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `40:2:tbl:table:answer:global`
+
+3. Err
+   - Expected: "unexpected compiled export descriptor js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var out = ''; WebAssembly.compile('0061736d010000000404017000010606017f00412a0b0710020374626c010006616e737765720300').then(function(module) { var exports = WebAssembly.Module.exports(module); out = module.byteLength + ':' + exports.length + ':' + exports[0].name + ':' + exports[0].kind + ':' + exports[1].name + ':' + exports[1].kind; }); out")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("40:2:tbl:table:answer:global")
+    Err(err):
+        expect("unexpected compiled export descriptor js error: {err}").to_equal("")
+```
+
+</details>
+
 #### exposes instantiated WebAssembly module import descriptors in browser scripts
 
 1. var session = BrowserSession new
@@ -3536,8 +3569,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 97 |
-| Active scenarios | 97 |
+| Total scenarios | 98 |
+| Active scenarios | 98 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
