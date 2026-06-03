@@ -504,6 +504,39 @@ match result:
 
 </details>
 
+#### constructs WebAssembly Instance function export bodies with call arguments
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `41:instantiated:function:42:42`
+
+3. Err
+   - Expected: "unexpected instance constructor function export body argument js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var module = new WebAssembly.Module('0061736d0100000001070160027f7f017f030201000707010372756e00000a09010700200020016a0b'); var instance = new WebAssembly.Instance(module); module.byteLength + ':' + instance.status + ':' + typeof instance.exports.run + ':' + instance.exports.run(40, 2) + ':' + instance.exports.run(7, 35)")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("41:instantiated:function:42:42")
+    Err(err):
+        expect("unexpected instance constructor function export body argument js error: {err}").to_equal("")
+```
+
+</details>
+
 #### synthesizes multiple WebAssembly function exports in browser scripts
 
 1. var session = BrowserSession new
@@ -5131,8 +5164,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 120 |
-| Active scenarios | 120 |
+| Total scenarios | 121 |
+| Active scenarios | 121 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
