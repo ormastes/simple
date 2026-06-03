@@ -4077,3 +4077,16 @@ import object and read import descriptors from the resulting
 count, import module/name/kind, and instance exports object type all agree in
 the browser-session path. The focused fetch/WASM chain spec now passes
 `93/93`; broader browser/WASM semantics remain open.
+
+BrowserSession direct instantiate import-call continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession scripts now directly instantiate an imported-function WASM module,
+invoke the host import through an exported `run` function, and verify the host
+callback count. Instantiation status, import count, exported result, and host
+callback invocation count all agree in the browser-session path. The focused
+fetch/WASM chain spec now passes `94/94`; broader browser/WASM semantics remain
+open.
