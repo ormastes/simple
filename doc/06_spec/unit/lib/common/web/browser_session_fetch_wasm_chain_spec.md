@@ -273,6 +273,39 @@ match result:
 
 </details>
 
+#### exposes instantiated WebAssembly module import descriptors in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `instantiated:1:1:env:foo:function:object`
+
+3. Err
+   - Expected: "unexpected instantiated import descriptor js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var out = ''; var imports = { env: { foo: function() { return 7; } } }; WebAssembly.instantiate('0061736d01000000010401600000020b0103656e7603666f6f0000', imports).then(function(result) { var descriptors = WebAssembly.Module.imports(result.module); out = result.status + ':' + result.module.importCount + ':' + descriptors.length + ':' + descriptors[0].module + ':' + descriptors[0].name + ':' + descriptors[0].kind + ':' + typeof result.instance.exports; }); out")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("instantiated:1:1:env:foo:function:object")
+    Err(err):
+        expect("unexpected instantiated import descriptor js error: {err}").to_equal("")
+```
+
+</details>
+
 #### chains compiled WebAssembly modules into instantiate
 
 1. var session = BrowserSession new
@@ -3319,8 +3352,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 92 |
-| Active scenarios | 92 |
+| Total scenarios | 93 |
+| Active scenarios | 93 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
