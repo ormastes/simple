@@ -4059,6 +4059,7 @@ class SimpleWindowManager {
     panel.appendChild(this._makeQualityResponsivePreview());
     panel.appendChild(this._makeQualityViewportPreview());
     panel.appendChild(this._makeQualityAccessibilityPreview());
+    panel.appendChild(this._makeQualityComputedAccessibilityPreview());
     panel.appendChild(this._makeQualityMotionPreview());
     panel.appendChild(this._makeQualityAnimationPreview());
     panel.appendChild(this._makeQualityWidgetPreview());
@@ -5409,6 +5410,65 @@ class SimpleWindowManager {
     metric.appendChild(name);
     metric.appendChild(result);
     return metric;
+  }
+
+  _makeQualityComputedAccessibilityPreview() {
+    const snapshot = this._qualityAccessibilitySnapshot();
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-computed-accessibility-preview';
+    preview.dataset.qualityComputedAccessibility = 'live';
+    preview.appendChild(this._makeQualityComputedAccessibilityMetric('Focus', snapshot.focus, 'focus', snapshot.focusOk));
+    preview.appendChild(this._makeQualityComputedAccessibilityMetric('Labels', snapshot.labels, 'labels', snapshot.labelsOk));
+    preview.appendChild(this._makeQualityComputedAccessibilityMetric('Touch', snapshot.touch, 'touch', snapshot.touchOk));
+    preview.appendChild(this._makeQualityComputedAccessibilityMetric('Reduce', snapshot.reduce, 'reduce', snapshot.reduceOk));
+    return preview;
+  }
+
+  _makeQualityComputedAccessibilityMetric(label, value, kind, good) {
+    const metric = document.createElement('span');
+    metric.className = 'wm-quality-computed-accessibility-metric' + (good ? ' good' : ' warn');
+    metric.dataset.computedAccessibilityMetric = kind;
+    const indicator = document.createElement('span');
+    indicator.className = 'wm-quality-computed-accessibility-indicator';
+    indicator.setAttribute('aria-hidden', 'true');
+    const name = document.createElement('span');
+    name.className = 'wm-quality-computed-accessibility-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-computed-accessibility-value';
+    result.textContent = value;
+    metric.appendChild(indicator);
+    metric.appendChild(name);
+    metric.appendChild(result);
+    return metric;
+  }
+
+  _qualityAccessibilitySnapshot() {
+    const focusRule = Array.from(document.styleSheets || []).some((sheet) => {
+      try {
+        return Array.from(sheet.cssRules || []).some((rule) => String(rule.selectorText || rule.cssText || '').includes(':focus-visible'));
+      } catch (_err) {
+        return false;
+      }
+    });
+    const controls = Array.from(document.querySelectorAll('button, input, [role="button"], [role="menuitem"], [role="option"]'));
+    const labeled = controls.filter((el) => {
+      const label = String(el.getAttribute('aria-label') || el.getAttribute('title') || el.textContent || '').trim();
+      return label.length > 0 || el.getAttribute('aria-labelledby');
+    }).length;
+    const taskbarItem = document.querySelector('.wm-taskbar-item, .wm-control-button, button');
+    const touchHeight = this._qualityElementMinHeight(taskbarItem);
+    const reduceCapable = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)').media.includes('prefers-reduced-motion') : true;
+    return {
+      focus: focusRule ? 'focus rule' : 'missing',
+      labels: labeled + '/' + controls.length,
+      touch: touchHeight + 'px',
+      reduce: reduceCapable ? 'media' : 'missing',
+      focusOk: focusRule,
+      labelsOk: controls.length === 0 || labeled >= Math.max(1, Math.floor(controls.length * 0.9)),
+      touchOk: touchHeight >= 44,
+      reduceOk: reduceCapable
+    };
   }
 
   _makeQualityMotionPreview() {

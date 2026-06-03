@@ -98,6 +98,18 @@ fn _parse_primary_component(raw: text) -> text:
     else:
         raw.substring(0, plus)
 
+fn _parse_component_kind(component: text) -> text:
+    val colon = component.index_of(":")
+    if colon <= 0 or colon == component.len() - 1:
+        return ""
+    component.substring(0, colon)
+
+fn _parse_component_name(component: text) -> text:
+    val colon = component.index_of(":")
+    if colon <= 0 or colon == component.len() - 1:
+        return ""
+    component.substring(colon + 1)
+
 fn _chain_count(raw: text) -> i32:
     if raw == "":
         return 0
@@ -109,36 +121,54 @@ fn _chain_count(raw: text) -> i32:
         idx = idx + 1
     count
 
+fn _chain_valid(raw: text) -> bool:
+    if raw == "":
+        return false
+    val parts = raw.split("+")
+    for part in parts:
+        val kind = _parse_component_kind(part)
+        val name = _parse_component_name(part)
+        if kind == "" or name == "":
+            return false
+        if not _valid_backend_kind(kind):
+            return false
+    true
+
+fn _chain_reason(raw: text) -> text:
+    if raw == "":
+        return "expected kind:name"
+    val parts = raw.split("+")
+    for part in parts:
+        val kind = _parse_component_kind(part)
+        val name = _parse_component_name(part)
+        if kind == "" or name == "":
+            return "expected kind:name"
+        if not _valid_backend_kind(kind):
+            return "unknown backend kind"
+    "ok"
+
 pub fn graphical_backend_spec(raw: text) -> GraphicalBackendSpec:
     val primary = _parse_primary_component(raw)
-    val colon = primary.index_of(":")
-    if raw == "" or colon <= 0 or colon == primary.len() - 1:
+    val reason = _chain_reason(raw)
+    if reason != "ok":
         return GraphicalBackendSpec(
             raw: raw,
-            primary_kind: "",
-            primary_name: "",
+            primary_kind: _parse_component_kind(primary),
+            primary_name: _parse_component_name(primary),
             chain_count: _chain_count(raw),
             valid: false,
-            reason: "expected kind:name"
+            reason: reason
         )
-    val kind = primary.substring(0, colon)
-    val name = primary.substring(colon + 1)
-    if not _valid_backend_kind(kind):
-        return GraphicalBackendSpec(
-            raw: raw,
-            primary_kind: kind,
-            primary_name: name,
-            chain_count: _chain_count(raw),
-            valid: false,
-            reason: "unknown backend kind"
-        )
-    GraphicalBackendSpec(
+    val kind = _parse_component_kind(primary)
+    val name = _parse_component_name(primary)
+    val valid = _chain_valid(raw)
+    return GraphicalBackendSpec(
         raw: raw,
         primary_kind: kind,
         primary_name: name,
         chain_count: _chain_count(raw),
-        valid: true,
-        reason: "ok"
+        valid: valid,
+        reason: if valid: "ok" else: "expected kind:name"
     )
 
 pub fn surface_rect(x: i32, y: i32, width: i32, height: i32) -> SurfaceRect:
@@ -207,6 +237,27 @@ pub fn graphical_capture_metadata_valid(capture: GraphicalCapture) -> bool:
     if capture.geometry.physical_width != capture.width or capture.geometry.physical_height != capture.height:
         return false
     if capture.geometry.scale_factor <= 0.0:
+        return false
+    if capture.geometry.color_space == "":
+        return false
+    if capture.geometry.content_rect.width <= 0 or capture.geometry.content_rect.height <= 0:
+        return false
+    if capture.geometry.panel_rect.width <= 0 or capture.geometry.panel_rect.height <= 0:
+        return false
+    if capture.geometry.has_outer_window_rect and
+       (capture.geometry.outer_window_rect.width <= 0 or capture.geometry.outer_window_rect.height <= 0):
+        return false
+    if capture.geometry.content_rect.x < 0 or capture.geometry.content_rect.y < 0:
+        return false
+    if capture.geometry.panel_rect.x < 0 or capture.geometry.panel_rect.y < 0:
+        return false
+    if capture.geometry.content_rect.x + capture.geometry.content_rect.width > capture.width:
+        return false
+    if capture.geometry.content_rect.y + capture.geometry.content_rect.height > capture.height:
+        return false
+    if capture.geometry.panel_rect.x + capture.geometry.panel_rect.width > capture.width:
+        return false
+    if capture.geometry.panel_rect.y + capture.geometry.panel_rect.height > capture.height:
         return false
     if capture.pixels.len() != capture.width * capture.height:
         return false

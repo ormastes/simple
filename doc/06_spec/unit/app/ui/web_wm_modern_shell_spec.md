@@ -25,7 +25,7 @@ Verifies the first modern Simple Web WM slice at the contract level.
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 381 lines folded for reproduction.
+Runnable source: 385 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -95,6 +95,10 @@ expect(html).to_contain(".wm-quality-computed-layout-preview")
 expect(html).to_contain(".wm-quality-computed-layout-metric.warn")
 expect(html).to_contain(".wm-quality-computed-layout-frame")
 expect(html).to_contain(".wm-quality-computed-layout-value")
+expect(html).to_contain(".wm-quality-computed-density-preview")
+expect(html).to_contain(".wm-quality-computed-density-metric.warn")
+expect(html).to_contain(".wm-quality-computed-density-frame")
+expect(html).to_contain(".wm-quality-computed-density-value")
 expect(html).to_contain(".wm-quality-computed-shape-preview")
 expect(html).to_contain(".wm-quality-computed-shape-metric.warn")
 expect(html).to_contain(".wm-quality-computed-shape-sample")
@@ -419,7 +423,7 @@ expect(html).to_contain("border-radius: 999px")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 601 lines folded for reproduction.
+Runnable source: 608 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -563,6 +567,13 @@ expect(js).to_contain("_makeQualityComputedLayoutMetric")
 expect(js).to_contain("_qualityComputedGeometry")
 expect(js).to_contain("dataset.qualityComputedLayout")
 expect(js).to_contain("dataset.computedLayoutMetric")
+expect(js).to_contain("_makeQualityComputedDensityPreview")
+expect(js).to_contain("_makeQualityComputedDensityMetric")
+expect(js).to_contain("dataset.qualityComputedDensity")
+expect(js).to_contain("dataset.computedDensityMetric")
+expect(js).to_contain("document.documentElement.dataset.wmDensity")
+expect(js).to_contain("--ui-layout-panel-gap-px")
+expect(js).to_contain("--ui-layout-min-touch-target-px")
 expect(js).to_contain("#wm-taskbar")
 expect(js).to_contain("_makeQualityComputedShapePreview")
 expect(js).to_contain("_makeQualityComputedShapeMetric")
@@ -1033,7 +1044,7 @@ expect(retained).to_contain("Maximize window")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 659 lines folded for reproduction.
+Runnable source: 667 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1322,6 +1333,14 @@ expect(preview).to_contain("wm-quality-computed-layout-frame")
 expect(preview).to_contain("wm-quality-computed-layout-value")
 expect(preview).to_contain("640x420")
 expect(preview).to_contain("320x56")
+expect(preview).to_contain("data-quality-computed-density=\"comfortable\"")
+expect(preview).to_contain("data-computed-density-metric=\"mode\"")
+expect(preview).to_contain("data-computed-density-metric=\"safe\"")
+expect(preview).to_contain("data-computed-density-metric=\"gap\"")
+expect(preview).to_contain("data-computed-density-metric=\"touch\"")
+expect(preview).to_contain("wm-quality-computed-density-frame")
+expect(preview).to_contain("comfortable")
+expect(preview).to_contain("12px")
 expect(preview).to_contain("data-quality-computed-shape=\"round\"")
 expect(preview).to_contain("data-computed-shape-metric=\"window\"")
 expect(preview).to_contain("data-computed-shape-metric=\"taskbar\"")

@@ -9,7 +9,7 @@
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -19,6 +19,9 @@ expect(capture.backend_name).to_equal("software")
 expect(capture.width).to_equal(32)
 expect(capture.height).to_equal(24)
 expect(capture.pixels.len()).to_equal(32 * 24)
+expect(capture.pixel_checksum).to_be_greater_than(0)
+expect(capture.unique_sampled_colors).to_be_greater_than(0)
+expect(capture.elapsed_us).to_be_greater_than(-1)
 ```
 
 </details>
@@ -28,7 +31,7 @@ expect(capture.pixels.len()).to_equal(32 * 24)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -41,6 +44,10 @@ val capture = capture_engine2d_filled_rect(
 )
 expect(capture.success).to_equal(true)
 expect(capture.pixels.len()).to_equal(16 * 12)
+expect(capture.pixel_checksum).to_be_greater_than(0)
+expect(capture.non_background_pixels).to_be_greater_than(0)
+expect(capture.non_background_pixels).to_be_less_than(16 * 12)
+expect(capture.unique_sampled_colors).to_be_greater_than(1)
 ```
 
 </details>
@@ -103,6 +110,30 @@ expect(sdn).to_contain("expected_backend: \"2d:cpu\"")
 
 </details>
 
+#### records bounded performance evidence for repeated Engine2D captures
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val perf = benchmark_engine2d_filled_rect_capture(16, 12, "cpu", 8)
+expect(perf.success).to_equal(true)
+expect(perf.backend_name).to_equal("cpu")
+expect(perf.iterations).to_equal(8)
+expect(perf.pixels_per_iteration).to_equal(16 * 12)
+expect(perf.aggregate_checksum).to_be_greater_than(0)
+expect(perf.total_us).to_be_greater_than(-1)
+val sdn = backend_capture_perf_report_sdn(perf)
+expect(sdn).to_contain("backend_capture_perf_report")
+expect(sdn).to_contain("iterations: 8")
+expect(sdn).to_contain("pixels_per_iteration: 192")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -122,8 +153,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
