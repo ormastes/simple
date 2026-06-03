@@ -4294,3 +4294,18 @@ focused assertion checks the queued pre-commit state, fetch URL, instantiate
 status, streamed module byte length, exported table kind/element/null slot/grow
 metadata, and exported immutable i32 global metadata. The focused fetch/WASM
 chain spec now passes `109/109`; broader browser/WASM semantics remain open.
+
+BrowserSession compileStreaming table/global export continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession scripts now compile the bounded table/global module through
+`WebAssembly.compileStreaming(window.fetch('/mod.wasm'))`, pass the streamed
+module into `WebAssembly.instantiate(module)`, and read the exported table and
+immutable global after the chained promise resolves. The focused assertion
+checks the queued pre-commit state, fetch URL, instantiated status, streamed
+module byte length, exported table kind/element/null slot/grow metadata, and
+exported immutable i32 global metadata. The focused fetch/WASM chain spec now
+passes `110/110`; broader browser/WASM semantics remain open.
