@@ -148,7 +148,7 @@ class SimpleWindowManager {
     this._wmTooltipAnchor = null;
     this._windowContextMenu = null;
     this._windowContextMenuWindowId = '';
-    this._titleCommandSuggestions = null;
+    this._titleCommandSuggestionsPanel = null;
     this._titleCommandSuggestionItems = [];
     this._titleCommandSuggestionIndex = 0;
     this._appLauncher = null;
@@ -4033,6 +4033,7 @@ class SimpleWindowManager {
     panel.appendChild(this._makeQualityComputedColorPreview());
     panel.appendChild(this._makeQualityLayoutPreview());
     panel.appendChild(this._makeQualityComputedLayoutPreview());
+    panel.appendChild(this._makeQualityComputedDensityPreview());
     panel.appendChild(this._makeQualityComputedShapePreview());
     panel.appendChild(this._makeQualityTitlebarPreview());
     panel.appendChild(this._makeQualityComputedTitlebarPreview());
@@ -4049,8 +4050,10 @@ class SimpleWindowManager {
     panel.appendChild(this._makeQualityVerbosityPreview());
     panel.appendChild(this._makeQualityPerformancePreview());
     panel.appendChild(this._makeQualityComputedBackdropPreview());
+    panel.appendChild(this._makeQualityComputedWallpaperPreview());
     panel.appendChild(this._makeQualityComputedMotionPreview());
     panel.appendChild(this._makeQualitySpatialPreview());
+    panel.appendChild(this._makeQualityComputedSpatialPreview());
     panel.appendChild(this._makeQualityDockPreview());
     panel.appendChild(this._makeQualityComputedDockPreview());
     panel.appendChild(this._makeQualityResponsivePreview());
@@ -4361,6 +4364,41 @@ class SimpleWindowManager {
     name.textContent = label;
     const result = document.createElement('strong');
     result.className = 'wm-quality-computed-layout-value';
+    result.textContent = value;
+    metric.appendChild(frame);
+    metric.appendChild(name);
+    metric.appendChild(result);
+    return metric;
+  }
+
+  _makeQualityComputedDensityPreview() {
+    const root = getComputedStyle(document.documentElement);
+    const mode = document.documentElement.dataset.wmDensity || this._densityMode || 'comfortable';
+    const safe = this._qualityCssPx(root, '--ui-layout-safe-area-px', 16);
+    const gap = this._qualityCssPx(root, '--ui-layout-panel-gap-px', 12);
+    const touch = this._qualityCssPx(root, '--ui-layout-min-touch-target-px', 44);
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-computed-density-preview';
+    preview.dataset.qualityComputedDensity = mode;
+    preview.appendChild(this._makeQualityComputedDensityMetric('Mode', mode, 'mode', ['compact', 'comfortable', 'spacious'].includes(mode)));
+    preview.appendChild(this._makeQualityComputedDensityMetric('Safe', safe + 'px', 'safe', safe >= 12 && safe <= 24));
+    preview.appendChild(this._makeQualityComputedDensityMetric('Gap', gap + 'px', 'gap', gap >= 8 && gap <= 18));
+    preview.appendChild(this._makeQualityComputedDensityMetric('Touch', touch + 'px', 'touch', touch >= 44));
+    return preview;
+  }
+
+  _makeQualityComputedDensityMetric(label, value, kind, good) {
+    const metric = document.createElement('span');
+    metric.className = 'wm-quality-computed-density-metric' + (good ? ' good' : ' warn');
+    metric.dataset.computedDensityMetric = kind;
+    const frame = document.createElement('span');
+    frame.className = 'wm-quality-computed-density-frame';
+    frame.setAttribute('aria-hidden', 'true');
+    const name = document.createElement('span');
+    name.className = 'wm-quality-computed-density-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-computed-density-value';
     result.textContent = value;
     metric.appendChild(frame);
     metric.appendChild(name);
@@ -4998,6 +5036,44 @@ class SimpleWindowManager {
     return metric;
   }
 
+  _makeQualityComputedWallpaperPreview() {
+    const root = document.documentElement;
+    const wallpaper = this._normalizeWallpaperPreference(root.dataset.wmWallpaper || this._readWallpaperPreference());
+    const rawMotion = String(this._readBackdropMotionPreference() || '').trim();
+    const motion = ['ambient', 'subtle', 'static'].includes(rawMotion) ? rawMotion : 'ambient';
+    const choices = this._wallpaperChoices();
+    const swatches = document.querySelectorAll('.wm-wallpaper-swatch');
+    const duration = this._qualityCssPx(getComputedStyle(root), '--ui-backdrop-duration-ms', 24000);
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-computed-wallpaper-preview';
+    preview.dataset.qualityComputedWallpaper = wallpaper;
+    preview.appendChild(this._makeQualityComputedWallpaperMetric('Mode', wallpaper, 'mode', ['aurora', 'mesh', 'solid'].includes(wallpaper)));
+    preview.appendChild(this._makeQualityComputedWallpaperMetric('Choices', choices.length + ' choices', 'choices', choices.length >= 3));
+    preview.appendChild(this._makeQualityComputedWallpaperMetric('Swatches', swatches.length + ' live', 'swatches', swatches.length >= 3 || !this._wallpaperPicker?.hidden));
+    preview.appendChild(this._makeQualityComputedWallpaperMetric('Motion', motion, 'motion', motion === 'static' || duration >= 0));
+    preview.appendChild(this._makeQualityComputedWallpaperMetric('Duration', duration + 'ms', 'duration', motion === 'static' ? duration === 0 : duration >= 12000));
+    return preview;
+  }
+
+  _makeQualityComputedWallpaperMetric(label, value, kind, good) {
+    const metric = document.createElement('span');
+    metric.className = 'wm-quality-computed-wallpaper-metric' + (good ? ' good' : ' warn');
+    metric.dataset.computedWallpaperMetric = kind;
+    const orb = document.createElement('span');
+    orb.className = 'wm-quality-computed-wallpaper-orb';
+    orb.setAttribute('aria-hidden', 'true');
+    const name = document.createElement('span');
+    name.className = 'wm-quality-computed-wallpaper-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-computed-wallpaper-value';
+    result.textContent = value;
+    metric.appendChild(orb);
+    metric.appendChild(name);
+    metric.appendChild(result);
+    return metric;
+  }
+
   _makeQualityComputedMotionPreview() {
     const motionMode = this._normalizeMotionPreference(this._readMotionPreference());
     const preview = document.createElement('div');
@@ -5089,6 +5165,67 @@ class SimpleWindowManager {
     metric.appendChild(name);
     metric.appendChild(result);
     return metric;
+  }
+
+  _makeQualityComputedSpatialPreview() {
+    const snapshot = this._qualitySpatialSnapshot();
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-computed-spatial-preview';
+    preview.dataset.qualityComputedSpatial = snapshot.mode;
+    preview.appendChild(this._makeQualityComputedSpatialMetric('Origin', snapshot.origin, 'origin', snapshot.originOk));
+    preview.appendChild(this._makeQualityComputedSpatialMetric('Target', snapshot.target, 'target', snapshot.targetOk));
+    preview.appendChild(this._makeQualityComputedSpatialMetric('Bounds', snapshot.bounds, 'bounds', snapshot.boundsOk));
+    preview.appendChild(this._makeQualityComputedSpatialMetric('Mode', snapshot.mode, 'mode', snapshot.modeOk));
+    return preview;
+  }
+
+  _makeQualityComputedSpatialMetric(label, value, kind, good) {
+    const metric = document.createElement('span');
+    metric.className = 'wm-quality-computed-spatial-metric' + (good ? ' good' : ' warn');
+    metric.dataset.computedSpatialMetric = kind;
+    const path = document.createElement('span');
+    path.className = 'wm-quality-computed-spatial-path';
+    path.setAttribute('aria-hidden', 'true');
+    const name = document.createElement('span');
+    name.className = 'wm-quality-computed-spatial-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-computed-spatial-value';
+    result.textContent = value;
+    metric.appendChild(path);
+    metric.appendChild(name);
+    metric.appendChild(result);
+    return metric;
+  }
+
+  _qualitySpatialSnapshot() {
+    const root = document.documentElement;
+    const mode = this._normalizeThreeMode(this._readWindowTransitionPreference(), 'mac', 'fade', 'none');
+    const active = document.querySelector('.wm-window.focused, .wm-window');
+    const taskbar = this.taskbar || document.getElementById('wm-taskbar');
+    const viewportWidth = Math.max(1, window.innerWidth || root.clientWidth || 1);
+    const viewportHeight = Math.max(1, window.innerHeight || root.clientHeight || 1);
+    const winRect = active ? active.getBoundingClientRect() : { left: viewportWidth * 0.25, top: viewportHeight * 0.18, right: viewportWidth * 0.75, bottom: viewportHeight * 0.72, width: viewportWidth * 0.5, height: viewportHeight * 0.54 };
+    const dockRect = taskbar ? taskbar.getBoundingClientRect() : { top: viewportHeight - 64, left: viewportWidth * 0.25, right: viewportWidth * 0.75, width: viewportWidth * 0.5, height: 56 };
+    const centerX = winRect.left + (winRect.width / 2);
+    const centerY = winRect.top + (winRect.height / 2);
+    const viewportCenterX = viewportWidth / 2;
+    const viewportCenterY = viewportHeight / 2;
+    const centerDistance = Math.hypot(centerX - viewportCenterX, centerY - viewportCenterY);
+    const centerBudget = Math.max(96, Math.min(viewportWidth, viewportHeight) * 0.22);
+    const dockDistance = Math.max(0, dockRect.top - winRect.bottom);
+    const boundsOk = winRect.left >= -8 && winRect.top >= -8 && winRect.right <= viewportWidth + 8 && winRect.bottom <= viewportHeight + 8;
+    const targetOk = dockRect.width >= 120 && dockRect.top >= viewportHeight * 0.68 && dockDistance <= viewportHeight;
+    return {
+      origin: centerDistance <= centerBudget ? 'centered' : 'offset',
+      target: targetOk ? 'dock return' : 'missing dock',
+      bounds: boundsOk ? 'in viewport' : 'overflow',
+      mode,
+      originOk: centerDistance <= centerBudget,
+      targetOk,
+      boundsOk,
+      modeOk: mode === 'mac' || mode === 'fade' || mode === 'none'
+    };
   }
 
   _makeQualityDockPreview() {
@@ -6474,7 +6611,7 @@ class SimpleWindowManager {
   }
 
   _ensureTitleCommandSuggestions() {
-    if (this._titleCommandSuggestions && this._titleCommandSuggestions.isConnected) return this._titleCommandSuggestions;
+    if (this._titleCommandSuggestionsPanel && this._titleCommandSuggestionsPanel.isConnected) return this._titleCommandSuggestionsPanel;
     const panel = document.createElement('aside');
     panel.className = 'wm-title-suggestions';
     panel.hidden = true;
@@ -6487,7 +6624,7 @@ class SimpleWindowManager {
       this._applyTitleCommandSuggestion(item.dataset.value || '');
     });
     document.body.appendChild(panel);
-    this._titleCommandSuggestions = panel;
+    this._titleCommandSuggestionsPanel = panel;
     return panel;
   }
 
@@ -6580,7 +6717,7 @@ class SimpleWindowManager {
   }
 
   _moveTitleCommandSuggestionSelection(delta) {
-    const panel = this._titleCommandSuggestions;
+    const panel = this._titleCommandSuggestionsPanel;
     if (!panel || panel.hidden) return false;
     const items = Array.from(panel.querySelectorAll('.wm-title-suggestion-item'));
     if (items.length === 0) return false;
@@ -6594,7 +6731,7 @@ class SimpleWindowManager {
   }
 
   _executeTitleCommandSuggestion() {
-    const panel = this._titleCommandSuggestions;
+    const panel = this._titleCommandSuggestionsPanel;
     if (!panel || panel.hidden) return false;
     const active = panel.querySelector('.wm-title-suggestion-item.active');
     return this._applyTitleCommandSuggestion(active?.dataset.value || '');
