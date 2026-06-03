@@ -4405,3 +4405,16 @@ fetch URL, instantiated status, streamed module byte length, function export
 count, both exported function types, and both call results. The focused
 fetch/WASM chain spec now passes `116/116`; broader browser/WASM semantics
 remain open.
+
+BrowserSession WebAssembly function export body argument continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession scripts now instantiate a bounded `i32.add` function body
+module, read the exported `run` function, and call it twice with different
+argument pairs through normal browser script dispatch. The focused assertion
+checks instantiate status, module byte length, exported function type, and both
+argument-driven return values. The focused fetch/WASM chain spec now passes
+`117/117`; broader browser/WASM semantics remain open.
