@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 126 | 126 | 0 | 0 |
+| 127 | 127 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -544,6 +544,93 @@ match session.take_pending_request():
                         expect("unexpected js error: {err}").to_equal("")
             Err(err):
                 expect("unexpected commit error: {err}").to_equal("")
+    nil:
+        expect("missing fetch request").to_equal("")
+```
+
+</details>
+
+#### routes fetched arrayBuffer compile fetch errors through catch
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `queued`
+
+3. Err
+   - Expected: "unexpected queue error: {err}" equals ``
+
+4. Ok
+   - Expected: _display_js(value) equals ``
+
+5. Err
+   - Expected: "unexpected pre-commit js error: {err}" equals ``
+
+6. Some
+   - Expected: request.kind equals `fetch`
+   - Expected: request.url equals `https://example.com/down.wasm`
+
+7. Ok
+   - Expected: "expected fetch commit error" equals ``
+
+8. Err
+   - Expected: err equals `network-down`
+
+9. Ok
+   - Expected: _display_js(value) equals `compileFetchError:network-down`
+
+10. Err
+   - Expected: "unexpected js error: {js_err}" equals ``
+   - Expected: "missing fetch request" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 42 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val queued = session.eval_script("var out = ''; window.fetch('/down.wasm').then(function(r) { return r.arrayBuffer(); }).then(function(bytes) { return WebAssembly.compile(bytes); }).then(function(module) { out = 'unexpected:' + module.byteLength; }).catch(function(err) { out = 'compileFetchError:' + err; }); 'queued'")
+match queued:
+    Ok(value):
+        expect(_display_js(value)).to_equal("queued")
+    Err(err):
+        expect("unexpected queue error: {err}").to_equal("")
+match session.eval_script("out"):
+    Ok(value):
+        expect(_display_js(value)).to_equal("")
+    Err(err):
+        expect("unexpected pre-commit js error: {err}").to_equal("")
+
+match session.take_pending_request():
+    Some(request):
+        expect(request.kind).to_equal("fetch")
+        expect(request.url).to_equal("https://example.com/down.wasm")
+        val committed = session.commit_network_response(BrowserResponse.create(
+            request_id: request.id,
+            kind: "fetch",
+            url: request.url,
+            status: 0,
+            headers: "",
+            body: "",
+            error: "network-down"
+        ))
+        match committed:
+            Ok(_):
+                expect("expected fetch commit error").to_equal("")
+            Err(err):
+                expect(err).to_equal("network-down")
+                match session.eval_script("out"):
+                    Ok(value):
+                        expect(_display_js(value)).to_equal("compileFetchError:network-down")
+                    Err(js_err):
+                        expect("unexpected js error: {js_err}").to_equal("")
     nil:
         expect("missing fetch request").to_equal("")
 ```
@@ -5625,8 +5712,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 126 |
-| Active scenarios | 126 |
+| Total scenarios | 127 |
+| Active scenarios | 127 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

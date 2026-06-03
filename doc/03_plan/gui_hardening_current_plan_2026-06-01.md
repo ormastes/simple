@@ -4550,3 +4550,16 @@ the promise `catch` callback before the fetched-byte
 assertion checks the queued pre-commit state, fetch URL, rejected commit error,
 and catch callback network error. The focused fetch/WASM chain spec now passes
 `126/126`; broader browser/WASM semantics remain open.
+
+BrowserSession fetched arrayBuffer compile fetch-error continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession scripts now route a failed `window.fetch('/down.wasm')` through
+the promise `catch` callback before the fetched-byte
+`arrayBuffer() -> WebAssembly.compile(bytes)` chain can run. The focused
+assertion checks the queued pre-commit state, fetch URL, rejected commit error,
+and catch callback network error. The focused fetch/WASM chain spec now passes
+`127/127`; broader browser/WASM semantics remain open.
