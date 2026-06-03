@@ -150,6 +150,49 @@ describe "BrowserSession fetch WASM promise chain":
             nil:
                 expect("missing fetch request").to_equal("")
 
+    it "chains fetched arrayBuffer bytes through WebAssembly.compile into function body calls":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/webgpu-wasm.html",
+            "<html><body>WASM GPU</body></html>"
+        )
+        val queued = session.eval_script("var out = ''; var stages = ''; window.fetch('/mod.wasm').then(function(r) { stages = stages + 'fetch>'; return r.arrayBuffer(); }).then(function(bytes) { stages = stages + 'arrayBuffer:' + bytes.byteLength + '>'; return WebAssembly.compile(bytes); }).then(function(module) { stages = stages + 'compile:' + module.byteLength + '>'; return WebAssembly.instantiate(module); }).then(function(result) { out = stages + 'instantiate:' + result.status + ':' + result.module.byteLength + ':' + typeof result.instance.exports.run + ':' + result.instance.exports.run(40, 2) + ':' + result.instance.exports.run(7, 35); }); 'queued'")
+        match queued:
+            Ok(value):
+                expect(_display_js(value)).to_equal("queued")
+            Err(err):
+                expect("unexpected queue error: {err}").to_equal("")
+        match session.eval_script("out"):
+            Ok(value):
+                expect(_display_js(value)).to_equal("")
+            Err(err):
+                expect("unexpected pre-commit js error: {err}").to_equal("")
+
+        match session.take_pending_request():
+            Some(request):
+                expect(request.kind).to_equal("fetch")
+                expect(request.url).to_equal("https://example.com/mod.wasm")
+                val committed = session.commit_network_response(BrowserResponse.create(
+                    request_id: request.id,
+                    kind: "fetch",
+                    url: request.url,
+                    status: 200,
+                    headers: "Content-Type: application/wasm\n",
+                    body: "0061736d0100000001070160027f7f017f030201000707010372756e00000a09010700200020016a0b",
+                    error: ""
+                ))
+                match committed:
+                    Ok(_):
+                        match session.eval_script("out"):
+                            Ok(value):
+                                expect(_display_js(value)).to_equal("fetch>arrayBuffer:41>compile:41>instantiate:instantiated:41:function:42:42")
+                            Err(err):
+                                expect("unexpected js error: {err}").to_equal("")
+                    Err(err):
+                        expect("unexpected commit error: {err}").to_equal("")
+            nil:
+                expect("missing fetch request").to_equal("")
+
     it "routes invalid WebAssembly.compile results through catch in browser scripts":
         var session = BrowserSession.new()
         session.open_html(
