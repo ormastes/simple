@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 138 | 138 | 0 | 0 |
+| 139 | 139 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1390,6 +1390,91 @@ match session.take_pending_request():
                 match session.eval_script("out"):
                     Ok(value):
                         expect(_display_js(value)).to_equal("fetch>arrayBuffer:40>compile:40:2:tbl:table:answer:global")
+                    Err(err):
+                        expect("unexpected js error: {err}").to_equal("")
+            Err(err):
+                expect("unexpected commit error: {err}").to_equal("")
+    nil:
+        expect("missing fetch request").to_equal("")
+```
+
+</details>
+
+#### exposes fetched arrayBuffer compiled module import descriptors
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `queued`
+
+3. Err
+   - Expected: "unexpected queue error: {err}" equals ``
+
+4. Ok
+   - Expected: _display_js(value) equals ``
+
+5. Err
+   - Expected: "unexpected pre-commit js error: {err}" equals ``
+
+6. Some
+   - Expected: request.kind equals `fetch`
+   - Expected: request.url equals `https://example.com/mod.wasm`
+
+7. Ok
+
+8. Ok
+   - Expected: _display_js(value) equals `fetch>arrayBuffer:27>compile:1:27:1:env:foo:function`
+
+9. Err
+   - Expected: "unexpected js error: {err}" equals ``
+
+10. Err
+   - Expected: "unexpected commit error: {err}" equals ``
+   - Expected: "missing fetch request" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 41 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val queued = session.eval_script("var out = ''; var stages = ''; window.fetch('/mod.wasm').then(function(r) { stages = stages + 'fetch>'; return r.arrayBuffer(); }).then(function(bytes) { stages = stages + 'arrayBuffer:' + bytes.byteLength + '>'; return WebAssembly.compile(bytes); }).then(function(module) { var descriptors = WebAssembly.Module.imports(module); out = stages + 'compile:' + module.importCount + ':' + module.byteLength + ':' + descriptors.length + ':' + descriptors[0].module + ':' + descriptors[0].name + ':' + descriptors[0].kind; }); 'queued'")
+match queued:
+    Ok(value):
+        expect(_display_js(value)).to_equal("queued")
+    Err(err):
+        expect("unexpected queue error: {err}").to_equal("")
+match session.eval_script("out"):
+    Ok(value):
+        expect(_display_js(value)).to_equal("")
+    Err(err):
+        expect("unexpected pre-commit js error: {err}").to_equal("")
+
+match session.take_pending_request():
+    Some(request):
+        expect(request.kind).to_equal("fetch")
+        expect(request.url).to_equal("https://example.com/mod.wasm")
+        val committed = session.commit_network_response(BrowserResponse.create(
+            request_id: request.id,
+            kind: "fetch",
+            url: request.url,
+            status: 200,
+            headers: "Content-Type: application/wasm\n",
+            body: "0061736d01000000010401600000020b0103656e7603666f6f0000",
+            error: ""
+        ))
+        match committed:
+            Ok(_):
+                match session.eval_script("out"):
+                    Ok(value):
+                        expect(_display_js(value)).to_equal("fetch>arrayBuffer:27>compile:1:27:1:env:foo:function")
                     Err(err):
                         expect("unexpected js error: {err}").to_equal("")
             Err(err):
@@ -6647,8 +6732,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 138 |
-| Active scenarios | 138 |
+| Total scenarios | 139 |
+| Active scenarios | 139 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
