@@ -1,0 +1,83 @@
+# @tag: rendering, backend, capture, graphical_equality
+
+use std.spec.{describe, it, expect}
+use std.gc_async_mut.gpu.browser_engine.backend_screenshot_capture.{
+    capture_with_backend,
+    capture_engine2d_filled_rect}
+use app.wm_compare.graphical_backend_equality.{
+    graphical_capture,
+    graphical_equality_compare,
+    graphical_equality_report_sdn,
+    render_case,
+    surface_geometry}
+
+fn _html() -> text:
+    "<html><body><div class='widget-button'>Run</div></body></html>"
+
+describe "graphical backend capture facade":
+
+    it "captures browser-rendered pixels through the shared BackendCapture shape":
+        val capture = capture_with_backend(_html(), 32, 24, "software")
+        expect(capture.success).to_equal(true)
+        expect(capture.backend_name).to_equal("software")
+        expect(capture.width).to_equal(32)
+        expect(capture.height).to_equal(24)
+        expect(capture.pixels.len()).to_equal(32 * 24)
+
+    it "captures Engine2D readback pixels for a canonical filled-rect case":
+        val capture = capture_engine2d_filled_rect(
+            16,
+            12,
+            "cpu",
+            0xFFFFFFFFu32,
+            0xFF2563EBu32
+        )
+        expect(capture.success).to_equal(true)
+        expect(capture.pixels.len()).to_equal(16 * 12)
+
+    it "feeds shared captures into the wm_compare graphical equality report":
+        val first = capture_engine2d_filled_rect(
+            16,
+            12,
+            "cpu",
+            0xFFFFFFFFu32,
+            0xFF2563EBu32
+        )
+        val second = capture_engine2d_filled_rect(
+            16,
+            12,
+            "cpu",
+            0xFFFFFFFFu32,
+            0xFF2563EBu32
+        )
+        val geometry = surface_geometry(16, 12, first.width, first.height, 1.0, "srgb")
+        val scenario = render_case(
+            "engine2d_filled_rect",
+            16,
+            12,
+            "#ffffff",
+            ["clear", "filled_rect"],
+            "strict"
+        )
+        val expected = graphical_capture(
+            "2d:" + first.backend_name,
+            "render_target",
+            first.pixels,
+            geometry,
+            first.success,
+            first.error
+        )
+        val actual = graphical_capture(
+            "2d:" + second.backend_name,
+            "render_target",
+            second.pixels,
+            geometry,
+            second.success,
+            second.error
+        )
+        val report = graphical_equality_compare(scenario, expected, actual)
+        expect(report.pixel_status).to_equal("exact_match")
+        expect(report.accepted).to_equal(true)
+        val sdn = graphical_equality_report_sdn(report)
+        expect(sdn).to_contain("engine2d_filled_rect")
+        expect(sdn).to_contain("expected_backend: \"2d:cpu\"")

@@ -29,3 +29,7 @@ dev-done
 - dev: Created state file with 6 acceptance criteria (type: feature).
 - dev: Ran SPipe command wiring check; status PASS.
 - dev: Ran `jj git fetch`; GitHub checkpoint reported `Nothing changed`.
+- impl: Selected Feature Option B + NFR Option 2 from the plan and wrote final
+  requirements, NFRs, architecture, design, and system test plan.
+- impl: Added `wm_compare` graphical equality model, render-side capture facade,
+  focused system spec, focused integration spec, and mirrored manuals.

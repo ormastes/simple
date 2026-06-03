@@ -1,0 +1,71 @@
+# Shared screenshot capture facade for rendering parity tests.
+
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer}
+use std.gpu.engine2d.engine.{Engine2D}
+
+pub struct BackendCapture:
+    backend_name: text
+    pixels: [u32]
+    width: i32
+    height: i32
+    success: bool
+    error: text
+
+fn _failed_capture(backend_name: text, width: i32, height: i32, error: text) -> BackendCapture:
+    BackendCapture(
+        backend_name: backend_name,
+        pixels: [],
+        width: width,
+        height: height,
+        success: false,
+        error: error
+    )
+
+fn _valid_dimensions(width: i32, height: i32) -> bool:
+    width > 0 and height > 0
+
+pub fn backend_capture_ok(backend_name: text, pixels: [u32],
+                          width: i32, height: i32) -> BackendCapture:
+    BackendCapture(
+        backend_name: backend_name,
+        pixels: pixels,
+        width: width,
+        height: height,
+        success: _valid_dimensions(width, height) and pixels.len() == width * height,
+        error: if pixels.len() == width * height: "" else: "pixel count does not match dimensions"
+    )
+
+pub fn capture_with_backend(html: text, width: i32, height: i32,
+                            backend_name: text) -> BackendCapture:
+    if not _valid_dimensions(width, height):
+        return _failed_capture(backend_name, width, height, "invalid dimensions")
+    var renderer = BrowserRenderer.create_with_backend(width, height, backend_name)
+    val result = renderer.render_html_to_pixels(html)
+    if not result.ok:
+        return _failed_capture(renderer.backend_name(), width, height, result.error)
+    backend_capture_ok(renderer.backend_name(), result.pixel_data, width, height)
+
+pub fn capture_with_effect_engine(html: text, width: i32, height: i32,
+                                  engine_kind: text) -> BackendCapture:
+    if engine_kind != "int" and engine_kind != "float":
+        return _failed_capture(engine_kind, width, height, "unknown effect engine")
+    capture_with_backend(html, width, height, "software")
+
+pub fn capture_engine2d_filled_rect(width: i32, height: i32,
+                                    backend_name: text,
+                                    background: u32,
+                                    rect_color: u32) -> BackendCapture:
+    if not _valid_dimensions(width, height):
+        return _failed_capture(backend_name, width, height, "invalid dimensions")
+    var engine = Engine2D.create_with_backend(width, height, backend_name)
+    engine.clear(background)
+    val rect_w = if width > 4: width - 4 else: width
+    val rect_h = if height > 4: height - 4 else: height
+    val rect_x = if width > 4: 2 else: 0
+    val rect_y = if height > 4: 2 else: 0
+    engine.draw_rect_filled(rect_x, rect_y, rect_w, rect_h, rect_color)
+    engine.present()
+    val pixels = engine.read_pixels()
+    val selected = engine.backend_name()
+    engine.shutdown()
+    backend_capture_ok(selected, pixels, width, height)

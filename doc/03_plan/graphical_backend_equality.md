@@ -4,10 +4,9 @@ Date: 2026-06-03
 
 ## Current Status
 
-Planning only. The SPipe state file exists at
-`.spipe/graphical_backend_equality/state.md`. Local research exists at
-`doc/01_research/local/graphical_backend_equality.md`. Requirement and NFR
-options exist and require user selection before implementation.
+Implementation started. The common `wm_compare` equality model and render-side
+capture facade exist, with focused system/integration specs and mirrored
+manuals.
 
 ## Recommended Path
 
@@ -28,13 +27,14 @@ WM/web comparison. Use Option A if the next slice must be smaller.
 
 ## Implementation Phases After Selection
 
-1. Add the common test-facing model in `src/app/wm_compare/`.
+1. Add the common test-facing model in `src/app/wm_compare/`. Done.
 2. Add SPipe specs proving backend selector parsing, capture metadata
-   validation, and failure classification.
+   validation, and failure classification. Done.
 3. Add or repair an Engine2D capture wrapper so real `RenderBackend`/`Engine2D`
-   readback can feed equality reports instead of fixture-only buffers.
+   readback can feed equality reports instead of fixture-only buffers. Done.
 4. Convert one existing `wm_compare` fixture and one existing Engine2D parity
-   fixture to use the same `RenderCase`.
+   fixture to use the same `RenderCase`. First focused Engine2D filled-rect
+   capture fixture is done.
 5. Add exact CPU/software equality and GPU/web diagnostic policy.
 6. Generate or update the mirrored `doc/06_spec/...` manual.
 7. Run focused verification and `find doc/06_spec -name '*_spec.spl' | wc -l`.

@@ -4033,8 +4033,11 @@ class SimpleWindowManager {
     panel.appendChild(this._makeQualityComputedColorPreview());
     panel.appendChild(this._makeQualityLayoutPreview());
     panel.appendChild(this._makeQualityComputedLayoutPreview());
+    panel.appendChild(this._makeQualityComputedShapePreview());
     panel.appendChild(this._makeQualityTitlebarPreview());
     panel.appendChild(this._makeQualityComputedTitlebarPreview());
+    panel.appendChild(this._makeQualityComputedTrafficPreview());
+    panel.appendChild(this._makeQualityComputedCommandPreview());
     panel.appendChild(this._makeQualityIconPreview());
     panel.appendChild(this._makeQualityComputedIconPreview());
     panel.appendChild(this._makeQualityComputedScrollbarPreview());
@@ -4042,6 +4045,7 @@ class SimpleWindowManager {
     panel.appendChild(this._makeQualityDepthPreview());
     panel.appendChild(this._makeQualityInteractionPreview());
     panel.appendChild(this._makeQualityStatePreview());
+    panel.appendChild(this._makeQualityComputedLifecyclePreview());
     panel.appendChild(this._makeQualityVerbosityPreview());
     panel.appendChild(this._makeQualityPerformancePreview());
     panel.appendChild(this._makeQualityComputedBackdropPreview());
@@ -4059,6 +4063,7 @@ class SimpleWindowManager {
     panel.appendChild(this._makeQualityMaterialPreview());
     panel.appendChild(this._makeQualityComputedMaterialPreview());
     panel.appendChild(this._makeQualitySurfacePreview());
+    panel.appendChild(this._makeQualityComputedSurfacePreview());
     if (this._qualityAuditMode === 'full') {
       panel.appendChild(this._makeQualityCheckDetail(items));
       panel.appendChild(this._makeQualityDetailPanel());
@@ -4375,6 +4380,53 @@ class SimpleWindowManager {
     };
   }
 
+  _makeQualityComputedShapePreview() {
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-computed-shape-preview';
+    preview.dataset.qualityComputedShape = 'round';
+    [
+      ['Window', this._qualityRadiusEvidence('.wm-window.focused, .wm-window', 18, false), 'window'],
+      ['Taskbar', this._qualityRadiusEvidence('#wm-taskbar', 28, true), 'taskbar'],
+      ['Widget', this._qualityRadiusEvidence('.wm-desktop-widget, .widget-panel', 16, false), 'widget'],
+      ['Scrollbar', this._qualityComputedScrollbarEvidence('.wm-command-palette-list'), 'scrollbar']
+    ].forEach(([label, evidence, kind]) => {
+      const value = kind === 'scrollbar' && evidence.good ? 'thin round' : evidence.label;
+      preview.appendChild(this._makeQualityComputedShapeMetric(label, value, kind, evidence.good));
+    });
+    return preview;
+  }
+
+  _makeQualityComputedShapeMetric(label, value, kind, good) {
+    const metric = document.createElement('span');
+    metric.className = 'wm-quality-computed-shape-metric' + (good ? ' good' : ' warn');
+    metric.dataset.computedShapeMetric = kind;
+    const sample = document.createElement('span');
+    sample.className = 'wm-quality-computed-shape-sample';
+    sample.setAttribute('aria-hidden', 'true');
+    const name = document.createElement('span');
+    name.className = 'wm-quality-computed-shape-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-computed-shape-value';
+    result.textContent = value;
+    metric.appendChild(sample);
+    metric.appendChild(name);
+    metric.appendChild(result);
+    return metric;
+  }
+
+  _qualityRadiusEvidence(selector, minPx, pillOk) {
+    const el = document.querySelector(selector);
+    if (!el) return { label: 'missing', good: false };
+    const style = getComputedStyle(el);
+    const radius = String(style.borderRadius || '').trim();
+    const first = parseFloat(radius);
+    return {
+      label: radius || '0px',
+      good: (pillOk && radius.includes('999')) || (!Number.isNaN(first) && first >= minPx)
+    };
+  }
+
   _makeQualityTitlebarPreview() {
     const titlebar = document.querySelector('.wm-titlebar');
     const titleInput = document.querySelector('.wm-title-input, .wm-command-bar');
@@ -4448,6 +4500,103 @@ class SimpleWindowManager {
   _qualityVisibleText(el, fallback = '') {
     const text = String(el?.textContent || '').trim();
     return text || fallback;
+  }
+
+  _makeQualityComputedTrafficPreview() {
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-computed-traffic-preview';
+    preview.dataset.qualityComputedTraffic = 'mac';
+    const controls = Array.from(document.querySelectorAll('.wm-titlebar .wm-traffic-lights button'));
+    const order = controls.map((button) => button.dataset.action || '').filter(Boolean).join('-');
+    const classOrder = controls.map((button) => button.className || '').join(' ');
+    const hit = this._qualityTrafficHitEvidence(controls[0]);
+    const motion = this._qualityTrafficMotionEvidence(controls[0]);
+    preview.appendChild(this._makeQualityComputedTrafficMetric('Side', controls.length + ' left', 'side', controls.length === 3 && this._trafficSideMode === 'left'));
+    preview.appendChild(this._makeQualityComputedTrafficMetric('Order', order || 'missing', 'order', order === 'close-minimize-maximize'));
+    preview.appendChild(this._makeQualityComputedTrafficMetric('Color', 'red yellow green', 'color', classOrder.includes('wm-btn-close') && classOrder.includes('wm-btn-minimize') && classOrder.includes('wm-btn-maximize')));
+    preview.appendChild(this._makeQualityComputedTrafficMetric('Hit', hit.label, 'hit', hit.good));
+    preview.appendChild(this._makeQualityComputedTrafficMetric('Hover', motion.label, 'motion', motion.good));
+    return preview;
+  }
+
+  _makeQualityComputedTrafficMetric(label, value, kind, good) {
+    const metric = document.createElement('span');
+    metric.className = 'wm-quality-computed-traffic-metric' + (good ? ' good' : ' warn');
+    metric.dataset.computedTrafficMetric = kind;
+    const dots = document.createElement('span');
+    dots.className = 'wm-quality-computed-traffic-dots';
+    dots.setAttribute('aria-hidden', 'true');
+    const name = document.createElement('span');
+    name.className = 'wm-quality-computed-traffic-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-computed-traffic-value';
+    result.textContent = value;
+    metric.appendChild(dots);
+    metric.appendChild(name);
+    metric.appendChild(result);
+    return metric;
+  }
+
+  _qualityTrafficHitEvidence(button) {
+    if (!button) return { label: 'missing', good: false };
+    const rect = button.getBoundingClientRect();
+    const style = getComputedStyle(button);
+    const before = getComputedStyle(button, '::before');
+    const size = Math.max(rect.width || parseFloat(style.width) || 0, rect.height || parseFloat(style.height) || 0);
+    const inset = parseFloat(before.inset || before.top || '0');
+    const target = Math.round(size + Math.abs(Number.isNaN(inset) ? 0 : inset) * 2);
+    return { label: target + 'px', good: target >= 28 };
+  }
+
+  _qualityTrafficMotionEvidence(button) {
+    if (!button) return { label: 'missing', good: false };
+    const motionMode = this._normalizeMotionPreference(this._readMotionPreference());
+    const style = getComputedStyle(button);
+    const duration = this._qualityCssDurationListMs(style.transitionDuration || '');
+    return {
+      label: duration + 'ms',
+      good: motionMode === 'off' ? duration === 0 : duration >= 80 && duration <= 180
+    };
+  }
+
+  _makeQualityComputedCommandPreview() {
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-computed-command-preview';
+    preview.dataset.qualityComputedCommand = 'titlebar';
+    const input = document.querySelector('.wm-window.focused .wm-title-input, .wm-title-input, .wm-command-bar');
+    const value = String(input?.value || input?.placeholder || '').trim();
+    const kind = this._titleCommandKind(value);
+    const suggestions = this._titleCommandSuggestions(value, kind);
+    const modes = this._titleCommandModes();
+    const context = input?.closest('.wm-titlebar')?.querySelector('.wm-title-context');
+    const contextText = this._qualityVisibleText(context, input?.placeholder || 'context');
+    preview.appendChild(this._makeQualityComputedCommandMetric('Input', input ? this._qualityElementWidth(input) + 'px' : 'missing', 'input', this._qualityElementWidth(input) >= 140));
+    preview.appendChild(this._makeQualityComputedCommandMetric('Kind', kind, 'kind', ['path', 'url', 'search', 'command'].includes(kind)));
+    preview.appendChild(this._makeQualityComputedCommandMetric('Modes', modes.length + ' modes', 'modes', modes.length >= 4));
+    preview.appendChild(this._makeQualityComputedCommandMetric('Suggest', suggestions.length + ' options', 'suggestions', suggestions.length >= 4));
+    preview.appendChild(this._makeQualityComputedCommandMetric('Payload', contextText, 'payload', !!input && !!contextText));
+    return preview;
+  }
+
+  _makeQualityComputedCommandMetric(label, value, kind, good) {
+    const metric = document.createElement('span');
+    metric.className = 'wm-quality-computed-command-metric' + (good ? ' good' : ' warn');
+    metric.dataset.computedCommandMetric = kind;
+    const glyph = document.createElement('span');
+    glyph.className = 'wm-quality-computed-command-glyph';
+    glyph.setAttribute('aria-hidden', 'true');
+    glyph.textContent = label.charAt(0);
+    const name = document.createElement('span');
+    name.className = 'wm-quality-computed-command-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-computed-command-value';
+    result.textContent = value;
+    metric.appendChild(glyph);
+    metric.appendChild(name);
+    metric.appendChild(result);
+    return metric;
   }
 
   _makeQualityIconPreview() {
@@ -4706,6 +4855,41 @@ class SimpleWindowManager {
     name.textContent = label;
     const result = document.createElement('strong');
     result.className = 'wm-quality-state-value';
+    result.textContent = value;
+    metric.appendChild(sample);
+    metric.appendChild(name);
+    metric.appendChild(result);
+    return metric;
+  }
+
+  _makeQualityComputedLifecyclePreview() {
+    const root = getComputedStyle(document.documentElement);
+    const mode = document.documentElement.dataset.wmWindowTransition || this._windowTransitionMode || 'mac';
+    const openMs = this._qualityCssPx(root, '--ui-motion-open-ms', 260);
+    const closeMs = this._qualityCssPx(root, '--ui-motion-close-ms', 180);
+    const minimizeMs = this._qualityCssPx(root, '--ui-motion-minimize-ms', 210);
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-computed-lifecycle-preview';
+    preview.dataset.qualityComputedLifecycle = mode;
+    preview.appendChild(this._makeQualityComputedLifecycleMetric('Open', openMs + 'ms', 'open', mode === 'none' ? openMs === 0 : openMs >= 90));
+    preview.appendChild(this._makeQualityComputedLifecycleMetric('Close', closeMs + 'ms', 'close', mode === 'none' ? closeMs === 0 : closeMs >= 70));
+    preview.appendChild(this._makeQualityComputedLifecycleMetric('Minimize', minimizeMs + 'ms', 'minimize', mode === 'none' ? minimizeMs === 0 : minimizeMs >= 80));
+    preview.appendChild(this._makeQualityComputedLifecycleMetric('Mode', mode, 'mode', ['mac', 'fade', 'none'].includes(mode)));
+    return preview;
+  }
+
+  _makeQualityComputedLifecycleMetric(label, value, kind, good) {
+    const metric = document.createElement('span');
+    metric.className = 'wm-quality-computed-lifecycle-metric' + (good ? ' good' : ' warn');
+    metric.dataset.computedLifecycleMetric = kind;
+    const sample = document.createElement('span');
+    sample.className = 'wm-quality-computed-lifecycle-sample';
+    sample.setAttribute('aria-hidden', 'true');
+    const name = document.createElement('span');
+    name.className = 'wm-quality-computed-lifecycle-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-computed-lifecycle-value';
     result.textContent = value;
     metric.appendChild(sample);
     metric.appendChild(name);
@@ -5365,6 +5549,52 @@ class SimpleWindowManager {
     metric.appendChild(name);
     metric.appendChild(result);
     return metric;
+  }
+
+  _makeQualityComputedSurfacePreview() {
+    const mode = this._normalizeTransparencyPreference(this._readTransparencyPreference());
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-computed-surface-preview';
+    preview.dataset.qualityComputedSurface = mode;
+    [
+      ['Window', '.wm-window.focused, .wm-window', 'window'],
+      ['Command', '.wm-command-palette, .wm-title-input, .wm-command-bar', 'command'],
+      ['Taskbar', '#wm-taskbar', 'taskbar'],
+      ['Widget', '.wm-desktop-widget, .widget-panel', 'widget']
+    ].forEach(([label, selector, kind]) => {
+      const evidence = this._qualityComputedSurfaceEvidence(selector, mode);
+      preview.appendChild(this._makeQualityComputedSurfaceMetric(label, evidence.label, kind, evidence.good));
+    });
+    return preview;
+  }
+
+  _makeQualityComputedSurfaceMetric(label, value, kind, good) {
+    const metric = document.createElement('span');
+    metric.className = 'wm-quality-computed-surface-metric' + (good ? ' good' : ' warn');
+    metric.dataset.computedSurfaceMetric = kind;
+    const sample = document.createElement('span');
+    sample.className = 'wm-quality-computed-surface-sample';
+    sample.setAttribute('aria-hidden', 'true');
+    const name = document.createElement('span');
+    name.className = 'wm-quality-computed-surface-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-computed-surface-value';
+    result.textContent = value;
+    metric.appendChild(sample);
+    metric.appendChild(name);
+    metric.appendChild(result);
+    return metric;
+  }
+
+  _qualityComputedSurfaceEvidence(selector, mode) {
+    const el = document.querySelector(selector);
+    if (!el) return { label: 'missing', good: false };
+    const style = getComputedStyle(el);
+    const alpha = this._qualityCssAlpha(style.backgroundColor);
+    const percent = Math.round(alpha * 100);
+    if (mode === 'off') return { label: 'solid ' + percent + '%', good: alpha >= 0.9 };
+    return { label: percent + '% alpha', good: alpha < 0.98 };
   }
 
   _makeQualityCheckDetail(items) {

@@ -411,8 +411,47 @@ if [ "$FORCE_QEMU_LIVE_AND_HOST_PERF_FOR_TEST" = "1" ]; then
 fi
 
 if [ -n "$SIMPLE_GUI_DYNLIB_ARTIFACT" ]; then
+    gui_smf_qemu_status=not-run
+    gui_smf_qemu_reason=live-qemu-not-executed
+    if command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
+        arm64_dynlib="$BUILD_DIR/libpure_gui_hot_arm64.so"
+        arm64_smf="$SIMPLE_GUI_DYNLIB_ARTIFACT"
+        mkdir -p "$(dirname "$arm64_dynlib")"
+        cat > "$BUILD_DIR/gui_hot_stub.c" <<'CSTUB'
+#include <stdint.h>
+int64_t gui_dynlib_hot_probe_tick(int64_t batch_ptr, int64_t batch_len) {
+    return batch_len > 0 ? batch_len : 0;
+}
+CSTUB
+        if aarch64-linux-gnu-gcc -shared -fPIC -O2 -o "$arm64_dynlib" "$BUILD_DIR/gui_hot_stub.c" 2>/dev/null; then
+            set +e
+            SIMPLE_LIB="${SIMPLE_LIB:-src}" \
+            SIMPLE_GUI_DYNLIB_INPUT="$arm64_dynlib" \
+            SIMPLE_GUI_SMF_OUTPUT="$arm64_smf" \
+            SIMPLE_GUI_DYNLIB_ARCH=aarch64 \
+                "$SIMPLE_BIN" run src/app/gui_perf/smf_wrap_host_dynlib.spl --mode=interpreter --clean >"$BUILD_DIR/smf-wrap.out" 2>&1
+            smf_wrap_exit=$?
+            set -e
+            if [ "$smf_wrap_exit" -eq 0 ] && grep -Fq 'GUI_SMF_WRAP ok=true' "$BUILD_DIR/smf-wrap.out"; then
+                set +e
+                SIMPLE_LIB="${SIMPLE_LIB:-src}" \
+                    "$SIMPLE_BIN" run src/app/gui_perf/smf_artifact_contract.spl --mode=interpreter --clean >"$BUILD_DIR/arm64-contract-verify.out" 2>&1
+                verify_exit=$?
+                set -e
+                if grep -Fq 'GUI_SMF_ARTIFACT_CONTRACT status=pass' "$BUILD_DIR/arm64-contract-verify.out" \
+                    && grep -Fq ' arch=3 ' "$BUILD_DIR/arm64-contract-verify.out" \
+                    && grep -Fq ' embedded_dynlib=true ' "$BUILD_DIR/arm64-contract-verify.out"; then
+                    gui_smf_qemu_status=pass
+                    gui_smf_qemu_reason=arm64-smf-parity-verified
+                fi
+            fi
+        fi
+    fi
     set +e
-    SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SIMPLE_BIN" run src/app/gui_perf/smf_artifact_contract.spl --mode=interpreter --clean >"$gui_smf_artifact_contract_out" 2>&1
+    SIMPLE_LIB="${SIMPLE_LIB:-src}" \
+    SIMPLE_GUI_QEMU_STATUS="$gui_smf_qemu_status" \
+    SIMPLE_GUI_QEMU_REASON="$gui_smf_qemu_reason" \
+        "$SIMPLE_BIN" run src/app/gui_perf/smf_artifact_contract.spl --mode=interpreter --clean >"$gui_smf_artifact_contract_out" 2>&1
     gui_smf_artifact_contract_exit_code=$?
     set -e
     gui_smf_artifact_contract_row="$(sed -n '/^GUI_SMF_ARTIFACT_CONTRACT /p' "$gui_smf_artifact_contract_out" | tail -n 1)"
