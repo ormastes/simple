@@ -561,6 +561,39 @@ match result:
 
 </details>
 
+#### preserves WebAssembly Table slots when grow exceeds maximum
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `2:1:-1:slot0:slot1`
+
+3. Err
+   - Expected: "unexpected table grow limit js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var table = new WebAssembly.Table({ element: 'externref', initial: 1, maximum: 2 }); table.set(0, 'slot0'); var old = table.grow(1, 'slot1'); var fail = table.grow(1, 'slot2'); table.length + ':' + old + ':' + fail + ':' + table.get(0) + ':' + table.get(1)")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("2:1:-1:slot0:slot1")
+    Err(err):
+        expect("unexpected table grow limit js error: {err}").to_equal("")
+```
+
+</details>
+
 #### fills and searches Uint8Array values in browser scripts
 
 1. var session = BrowserSession new
@@ -3220,8 +3253,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 89 |
-| Active scenarios | 89 |
+| Total scenarios | 90 |
+| Active scenarios | 90 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
