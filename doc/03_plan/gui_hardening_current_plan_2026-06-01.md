@@ -4358,3 +4358,17 @@ queued pre-commit state, fetch URL, instantiated status, streamed module byte
 length, grown memory byte length, page size, byte coercion, grow return value,
 grown view length, and preserved byte contents. The focused fetch/WASM chain
 spec now passes `113/113`; broader browser/WASM semantics remain open.
+
+BrowserSession multiple WebAssembly function export continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession scripts now instantiate a module that exports two bounded
+functions, read `result.instance.exports.init` and
+`result.instance.exports.render`, verify both exports are functions, and call
+both synthesized exports through normal browser script dispatch. The focused
+assertion checks instantiate status, module byte length, function export count,
+both exported function types, and both call results. The focused fetch/WASM
+chain spec now passes `114/114`; broader browser/WASM semantics remain open.

@@ -471,6 +471,39 @@ match result:
 
 </details>
 
+#### synthesizes multiple WebAssembly function exports in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `instantiated:47:2:function:function:undefined:undefined`
+
+3. Err
+   - Expected: "unexpected multiple function export js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var out = ''; WebAssembly.instantiate('0061736d01000000010401600000030302000007110204696e697400000672656e64657200010a070202000b02000b').then(function(result) { var exports = result.instance.exports; out = result.status + ':' + result.module.byteLength + ':' + result.module.functionExportCount + ':' + typeof exports.init + ':' + typeof exports.render + ':' + exports.init() + ':' + exports.render(); }); out")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("instantiated:47:2:function:function:undefined:undefined")
+    Err(err):
+        expect("unexpected multiple function export js error: {err}").to_equal("")
+```
+
+</details>
+
 #### chains compiled WebAssembly modules into instantiate
 
 1. var session = BrowserSession new
@@ -4692,8 +4725,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 113 |
-| Active scenarios | 113 |
+| Total scenarios | 114 |
+| Active scenarios | 114 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
