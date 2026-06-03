@@ -3943,3 +3943,17 @@ magic bytes back through `TextDecoder('utf8')`. Encoding labels, byte content,
 typed-array storage, decoder output, and WASM header validation all agree in the
 browser-session path. The focused fetch/WASM chain spec now passes `83/83`;
 broader browser/WASM semantics remain open.
+
+BrowserSession partial TextEncoder WASM validation continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession scripts now report partial `TextEncoder.encodeInto` writes into a
+short caller-provided `Uint8Array`, decode the written bytes through
+`TextDecoder`, and reject the short typed-array payload through
+`WebAssembly.validate`. The read/written counts, bounded destination storage,
+decoded text, and invalid WASM validation result all agree in the
+browser-session path. The focused fetch/WASM chain spec now passes `84/84`;
+broader browser/WASM semantics remain open.

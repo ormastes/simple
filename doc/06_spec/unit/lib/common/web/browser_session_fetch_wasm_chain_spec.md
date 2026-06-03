@@ -2937,6 +2937,39 @@ match result:
 
 </details>
 
+#### reports partial browser TextEncoder writes before WASM validation
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `3:3:109,111,100:mod:false`
+
+3. Err
+   - Expected: "unexpected partial text codec wasm validation js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var encoder = new TextEncoder(); var decoder = new TextDecoder(); var dst = new Uint8Array(3); var written = encoder.encodeInto('module', dst); written.read + ':' + written.written + ':' + dst.toString() + ':' + decoder.decode(dst) + ':' + WebAssembly.validate(dst)")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("3:3:109,111,100:mod:false")
+    Err(err):
+        expect("unexpected partial text codec wasm validation js error: {err}").to_equal("")
+```
+
+</details>
+
 #### shares WebAssembly Memory buffer bytes with typed array views in browser scripts
 
 1. var session = BrowserSession new
@@ -3022,8 +3055,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 83 |
-| Active scenarios | 83 |
+| Total scenarios | 84 |
+| Active scenarios | 84 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
