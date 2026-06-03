@@ -438,6 +438,39 @@ match result:
 
 </details>
 
+#### instantiates compiled WebAssembly function export bodies with call arguments
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `instantiated:41:function:42:42`
+
+3. Err
+   - Expected: "unexpected compiled function export body argument js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var out = ''; WebAssembly.compile('0061736d0100000001070160027f7f017f030201000707010372756e00000a09010700200020016a0b').then(function(module) { return WebAssembly.instantiate(module); }).then(function(result) { out = result.status + ':' + result.module.byteLength + ':' + typeof result.instance.exports.run + ':' + result.instance.exports.run(40, 2) + ':' + result.instance.exports.run(7, 35); }); out")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("instantiated:41:function:42:42")
+    Err(err):
+        expect("unexpected compiled function export body argument js error: {err}").to_equal("")
+```
+
+</details>
+
 #### constructs WebAssembly Instance imports through exported functions
 
 1. var session = BrowserSession new
@@ -5098,8 +5131,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 119 |
-| Active scenarios | 119 |
+| Total scenarios | 120 |
+| Active scenarios | 120 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
