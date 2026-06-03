@@ -63,6 +63,30 @@ When creating a new theme, generate at minimum:
 
 Full coverage (10 screens) documented in `stitch_design_system.md` Section 9.
 
+## Mobile Rendering
+
+Two rendering paths for mobile targets:
+
+| Path | Mechanism | Targets |
+|------|-----------|---------|
+| **Tauri WebView** | HTML/CSS in native shell | iOS simulator, Android emulator |
+| **WASM native surface** | No-JS `wasm32-simple-ui` | `android_wasm`, `ios_wasm`, `host_wm_wasm`, `simpleos_wm_wasm` |
+
+**Responsive breakpoints** (from `common/ui/profile.spl`):
+- compact (<= 600px, phone): single column, 16px font, 44px touch targets
+- regular (601–1200px, tablet): 2-column grid
+- expanded (> 1200px, desktop): multi-column
+
+**Themes**: iOS has `ios_light`/`ios_dark` with full CSS overrides (`src/lib/common/ui/ios_css.spl`). Android has no dedicated theme yet — uses default with responsive CSS.
+
+**Guides**:
+- `doc/07_guide/mobile/android_dev_guide.md` — Android emulator + WASM path
+- `doc/07_guide/mobile/ios_dev_guide.md` — iOS simulator + Tauri
+- `doc/07_guide/mobile/wasm_gui_guide.md` — WASM native surface contract
+- `doc/07_guide/mobile/tauri_mobile_guide.md` — Tauri shell for both platforms
+
+**Testing on Linux** (no device): run contract-level spec (`test/unit/app/ui/web_wm_modern_shell_spec.spl`), WASM artifact evidence (`src/lib/common/ui/wasm_hello_gui.spl`), or open preview HTML in browser DevTools mobile emulation.
+
 ## Outputs
 | Artifact | Location |
 |----------|----------|
