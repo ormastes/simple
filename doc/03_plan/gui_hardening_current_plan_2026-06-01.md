@@ -4718,3 +4718,21 @@ spec now passes `136/136`; the native WASM host spec remained `107/107`, the
 WebGPU JS/WASM system spec remained `106/106`, Node API conformance remained
 `275/275`, and `src/lib` completed with the existing `447 warning(s)`. Broader
 browser/WASM semantics remain open.
+
+BrowserSession fetched arrayBuffer compile multiple function export continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession scripts now fetch a bounded multi-function-export WASM body,
+convert the response through `arrayBuffer()`, compile the fetched bytes with
+`WebAssembly.compile(bytes)`, instantiate the compiled module, and read both
+exported callable stubs through the browser script surface. The focused
+assertion checks queued pre-commit state, fetch URL, fetched byte length,
+compiled module byte length, instantiated status, module byte length, function
+export count, both exported function types, and both call results. The focused
+fetch/WASM chain spec now passes `137/137`; the native WASM host spec remained
+`107/107`, the WebGPU JS/WASM system spec remained `106/106`, Node API
+conformance remained `275/275`, and `src/lib` completed with the existing
+`447 warning(s)`. Broader browser/WASM semantics remain open.
