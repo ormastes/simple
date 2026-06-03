@@ -561,6 +561,39 @@ match result:
 
 </details>
 
+#### mutates WebAssembly Global values in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `7:9:i32:true:3:false`
+
+3. Err
+   - Expected: "unexpected global mutation js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var global = new WebAssembly.Global({ value: 'i32', mutable: true }, 7); var before = global.value; global.value = 9; var immutable = new WebAssembly.Global({ value: 'i32', mutable: false }, 3); before + ':' + global.value + ':' + global.valueType + ':' + global.mutable + ':' + immutable.value + ':' + immutable.mutable")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("7:9:i32:true:3:false")
+    Err(err):
+        expect("unexpected global mutation js error: {err}").to_equal("")
+```
+
+</details>
+
 #### preserves WebAssembly Table slots when grow exceeds maximum
 
 1. var session = BrowserSession new
@@ -3253,8 +3286,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 90 |
-| Active scenarios | 90 |
+| Total scenarios | 91 |
+| Active scenarios | 91 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

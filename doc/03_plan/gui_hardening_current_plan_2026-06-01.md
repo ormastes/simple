@@ -4040,3 +4040,15 @@ remain stable. The successful grow result, failed grow result, preserved slot
 values, and bounded length all agree in the browser-session path. The focused
 fetch/WASM chain spec now passes `90/90`; broader browser/WASM semantics remain
 open.
+
+BrowserSession WebAssembly Global mutation continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession scripts now mutate a mutable `WebAssembly.Global` value and keep
+immutable global metadata readable in the same script path. Initial value,
+updated value, value type, mutable flag, immutable value, and immutable flag all
+agree in the browser-session path. The focused fetch/WASM chain spec now passes
+`91/91`; broader browser/WASM semantics remain open.
