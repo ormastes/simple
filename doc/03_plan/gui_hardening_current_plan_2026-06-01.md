@@ -4388,3 +4388,20 @@ assertion checks the queued pre-commit state, fetch URL, instantiate status,
 streamed module byte length, function export count, both exported function
 types, and both call results. The focused fetch/WASM chain spec now passes
 `115/115`; broader browser/WASM semantics remain open.
+
+BrowserSession compileStreaming multiple function export continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession scripts now compile the two-function module through
+`WebAssembly.compileStreaming(window.fetch('/mod.wasm'))`, pass the streamed
+module into `WebAssembly.instantiate(module)`, read
+`result.instance.exports.init` and `result.instance.exports.render`, verify
+both exports are functions, and call both synthesized exports after the chained
+promise resolves. The focused assertion checks the queued pre-commit state,
+fetch URL, instantiated status, streamed module byte length, function export
+count, both exported function types, and both call results. The focused
+fetch/WASM chain spec now passes `116/116`; broader browser/WASM semantics
+remain open.
