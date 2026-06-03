@@ -3003,6 +3003,39 @@ match result:
 
 </details>
 
+#### replaces truncated browser TextDecoder bytes before WASM validation
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `65533:226,130:false`
+
+3. Err
+   - Expected: "unexpected truncated text decoder wasm validation js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var bytes = new Uint8Array(2); bytes[0] = 226; bytes[1] = 130; var text = new TextDecoder().decode(bytes); text.charCodeAt(0) + ':' + bytes.toString() + ':' + WebAssembly.validate(bytes)")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("65533:226,130:false")
+    Err(err):
+        expect("unexpected truncated text decoder wasm validation js error: {err}").to_equal("")
+```
+
+</details>
+
 #### shares WebAssembly Memory buffer bytes with typed array views in browser scripts
 
 1. var session = BrowserSession new
@@ -3088,8 +3121,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 85 |
-| Active scenarios | 85 |
+| Total scenarios | 86 |
+| Active scenarios | 86 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
