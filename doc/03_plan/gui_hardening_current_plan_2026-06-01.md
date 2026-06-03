@@ -4610,3 +4610,21 @@ fetch/WASM chain spec now passes `130/130`; the native WASM host spec remained
 `107/107`, the WebGPU JS/WASM system spec remained `106/106`, Node API
 conformance remained `275/275`, and `src/lib` completed with the existing
 `447 warning(s)`. Broader browser/WASM semantics remain open.
+
+BrowserSession fetched arrayBuffer compile missing-import catch continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession scripts now fetch a valid imported-function WASM body, convert
+the response through `arrayBuffer()`, compile the fetched bytes with
+`WebAssembly.compile(bytes)`, pass the compiled module plus an empty import
+object into `WebAssembly.instantiate(module, {})`, and route the missing host
+import through the promise `catch` callback. The focused assertion checks the
+queued pre-commit state, fetch URL, fetched byte length, compiled module byte
+length, rejected instantiate status, and `unsupported-wasm-imports` metadata.
+The focused fetch/WASM chain spec now passes `131/131`; the native WASM host
+spec remained `107/107`, the WebGPU JS/WASM system spec remained `106/106`,
+Node API conformance remained `275/275`, and `src/lib` completed with the
+existing `447 warning(s)`. Broader browser/WASM semantics remain open.
