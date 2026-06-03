@@ -2739,6 +2739,39 @@ match result:
 
 </details>
 
+#### dispatches DataView prototype helpers with complementary call and apply
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `258:-1:16909060:1,2,255,4,3,2,1`
+
+3. Err
+   - Expected: "unexpected dataview complementary dispatch js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var buffer = new ArrayBuffer(7); var view = new DataView(buffer); DataView.prototype.setUint16.apply(view, [0, 258, false]); DataView.prototype.setInt8.call(view, 2, -1); DataView.prototype.setUint32.apply(view, [3, 16909060, true]); var bytes = new Uint8Array(buffer); DataView.prototype.getUint16.call(view, 0, false) + ':' + DataView.prototype.getInt8.apply(view, [2]) + ':' + DataView.prototype.getUint32.call(view, 3, true) + ':' + bytes.toString()")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("258:-1:16909060:1,2,255,4,3,2,1")
+    Err(err):
+        expect("unexpected dataview complementary dispatch js error: {err}").to_equal("")
+```
+
+</details>
+
 #### reads signed ArrayBuffer bytes through DataView in browser scripts
 
 1. var session = BrowserSession new
@@ -2890,8 +2923,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 79 |
-| Active scenarios | 79 |
+| Total scenarios | 80 |
+| Active scenarios | 80 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
