@@ -4103,3 +4103,17 @@ that compiled module with host imports, invoke the host import through exported
 compiled module byte length, exported result, and host callback invocation count
 all agree in the browser-session path. The focused fetch/WASM chain spec now
 passes `95/95`; broader browser/WASM semantics remain open.
+
+BrowserSession compileStreaming import-call continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession scripts now fetch an imported-function WASM module through
+`WebAssembly.compileStreaming`, instantiate the compiled module with host
+imports, invoke the host import through exported `run`, and verify the host
+callback count. Import count, compiled module byte length, exported result, and
+host callback invocation count all agree in the browser-session path. The
+focused fetch/WASM chain spec now passes `96/96`; broader browser/WASM semantics
+remain open.
