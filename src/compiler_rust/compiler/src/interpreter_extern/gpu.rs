@@ -1673,6 +1673,53 @@ pub fn rt_opencl_create_kernel_fn(args: &[Value]) -> Result<Value, CompileError>
     Ok(Value::Int(0))
 }
 
+/// `rt_opencl_mem_alloc(context: i64, size: i64) -> i64`
+pub fn rt_opencl_mem_alloc_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let _context = arg_i64(args, 0, "rt_opencl_mem_alloc", 2)?;
+    let _size = arg_i64(args, 1, "rt_opencl_mem_alloc", 2)?;
+    Ok(Value::Int(0))
+}
+
+/// `rt_opencl_mem_free(buffer: i64) -> bool`
+pub fn rt_opencl_mem_free_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let _buffer = arg_i64(args, 0, "rt_opencl_mem_free", 1)?;
+    Ok(Value::Bool(false))
+}
+
+/// `rt_opencl_write_buffer(queue: i64, buffer: i64, host_ptr: i64, size: i64) -> bool`
+pub fn rt_opencl_write_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let _queue = arg_i64(args, 0, "rt_opencl_write_buffer", 4)?;
+    let _buffer = arg_i64(args, 1, "rt_opencl_write_buffer", 4)?;
+    let _host_ptr = arg_i64(args, 2, "rt_opencl_write_buffer", 4)?;
+    let _size = arg_i64(args, 3, "rt_opencl_write_buffer", 4)?;
+    Ok(Value::Bool(false))
+}
+
+/// `rt_opencl_read_buffer(queue: i64, buffer: i64, host_ptr: i64, size: i64) -> bool`
+pub fn rt_opencl_read_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let _queue = arg_i64(args, 0, "rt_opencl_read_buffer", 4)?;
+    let _buffer = arg_i64(args, 1, "rt_opencl_read_buffer", 4)?;
+    let _host_ptr = arg_i64(args, 2, "rt_opencl_read_buffer", 4)?;
+    let _size = arg_i64(args, 3, "rt_opencl_read_buffer", 4)?;
+    Ok(Value::Bool(false))
+}
+
+/// `rt_opencl_set_kernel_arg_i64(kernel: i64, index: i64, value: i64) -> bool`
+pub fn rt_opencl_set_kernel_arg_i64_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let _kernel = arg_i64(args, 0, "rt_opencl_set_kernel_arg_i64", 3)?;
+    let _index = arg_i64(args, 1, "rt_opencl_set_kernel_arg_i64", 3)?;
+    let _value = arg_i64(args, 2, "rt_opencl_set_kernel_arg_i64", 3)?;
+    Ok(Value::Bool(false))
+}
+
+/// `rt_opencl_set_kernel_arg_buffer(kernel: i64, index: i64, buffer: i64) -> bool`
+pub fn rt_opencl_set_kernel_arg_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let _kernel = arg_i64(args, 0, "rt_opencl_set_kernel_arg_buffer", 3)?;
+    let _index = arg_i64(args, 1, "rt_opencl_set_kernel_arg_buffer", 3)?;
+    let _buffer = arg_i64(args, 2, "rt_opencl_set_kernel_arg_buffer", 3)?;
+    Ok(Value::Bool(false))
+}
+
 /// `rt_opencl_enqueue_ndrange(queue, kernel, gx, gy, gz, lx, ly, lz) -> bool`
 pub fn rt_opencl_enqueue_ndrange_fn(args: &[Value]) -> Result<Value, CompileError> {
     let _queue = arg_i64(args, 0, "rt_opencl_enqueue_ndrange", 8)?;
@@ -1689,6 +1736,30 @@ pub fn rt_opencl_enqueue_ndrange_fn(args: &[Value]) -> Result<Value, CompileErro
 /// `rt_opencl_finish(queue: i64) -> bool`
 pub fn rt_opencl_finish_fn(args: &[Value]) -> Result<Value, CompileError> {
     let _queue = arg_i64(args, 0, "rt_opencl_finish", 1)?;
+    Ok(Value::Bool(false))
+}
+
+/// `rt_opencl_release_kernel(kernel: i64) -> bool`
+pub fn rt_opencl_release_kernel_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let _kernel = arg_i64(args, 0, "rt_opencl_release_kernel", 1)?;
+    Ok(Value::Bool(false))
+}
+
+/// `rt_opencl_release_program(program: i64) -> bool`
+pub fn rt_opencl_release_program_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let _program = arg_i64(args, 0, "rt_opencl_release_program", 1)?;
+    Ok(Value::Bool(false))
+}
+
+/// `rt_opencl_release_queue(queue: i64) -> bool`
+pub fn rt_opencl_release_queue_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let _queue = arg_i64(args, 0, "rt_opencl_release_queue", 1)?;
+    Ok(Value::Bool(false))
+}
+
+/// `rt_opencl_release_context(context: i64) -> bool`
+pub fn rt_opencl_release_context_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let _context = arg_i64(args, 0, "rt_opencl_release_context", 1)?;
     Ok(Value::Bool(false))
 }
 

@@ -27,6 +27,9 @@ typedef uint64_t rt_opencl_device_type;
 #define RT_OPENCL_QUEUE_MAGIC 0x534f4349U
 #define RT_OPENCL_PROGRAM_MAGIC 0x534f4350U
 #define RT_OPENCL_KERNEL_MAGIC 0x534f434bU
+#define RT_OPENCL_BUFFER_MAGIC 0x534f4342U
+#define RT_OPENCL_TRUE 1
+#define RT_OPENCL_MEM_READ_WRITE (1ULL << 0)
 
 typedef int (*rt_opencl_get_platform_ids_fn)(uint32_t, void*, uint32_t*);
 typedef int (*rt_opencl_get_device_ids_fn)(void*, rt_opencl_device_type, uint32_t, void**, uint32_t*);
@@ -36,12 +39,17 @@ typedef void* (*rt_opencl_create_command_queue_with_properties_fn)(void*, void*,
 typedef void* (*rt_opencl_create_program_with_source_fn)(void*, uint32_t, const char**, const size_t*, int*);
 typedef int (*rt_opencl_build_program_fn)(void*, uint32_t, void* const*, const char*, void*, void*);
 typedef void* (*rt_opencl_create_kernel_fn)(void*, const char*, int*);
+typedef int (*rt_opencl_set_kernel_arg_fn)(void*, uint32_t, size_t, const void*);
+typedef void* (*rt_opencl_create_buffer_fn)(void*, uint64_t, size_t, void*, int*);
+typedef int (*rt_opencl_enqueue_write_buffer_fn)(void*, void*, uint32_t, size_t, size_t, const void*, uint32_t, const void**, void*);
+typedef int (*rt_opencl_enqueue_read_buffer_fn)(void*, void*, uint32_t, size_t, size_t, void*, uint32_t, const void**, void*);
 typedef int (*rt_opencl_enqueue_ndrange_kernel_fn)(void*, void*, uint32_t, const size_t*, const size_t*, const size_t*, uint32_t, const void**, void*);
 typedef int (*rt_opencl_finish_fn)(void*);
 typedef int (*rt_opencl_release_context_fn)(void*);
 typedef int (*rt_opencl_release_command_queue_fn)(void*);
 typedef int (*rt_opencl_release_program_fn)(void*);
 typedef int (*rt_opencl_release_kernel_fn)(void*);
+typedef int (*rt_opencl_release_mem_object_fn)(void*);
 
 typedef struct RtOpenClFns {
     rt_opencl_get_platform_ids_fn get_platform_ids;
@@ -52,12 +60,17 @@ typedef struct RtOpenClFns {
     rt_opencl_create_program_with_source_fn create_program_with_source;
     rt_opencl_build_program_fn build_program;
     rt_opencl_create_kernel_fn create_kernel;
+    rt_opencl_set_kernel_arg_fn set_kernel_arg;
+    rt_opencl_create_buffer_fn create_buffer;
+    rt_opencl_enqueue_write_buffer_fn enqueue_write_buffer;
+    rt_opencl_enqueue_read_buffer_fn enqueue_read_buffer;
     rt_opencl_enqueue_ndrange_kernel_fn enqueue_ndrange_kernel;
     rt_opencl_finish_fn finish;
     rt_opencl_release_context_fn release_context;
     rt_opencl_release_command_queue_fn release_command_queue;
     rt_opencl_release_program_fn release_program;
     rt_opencl_release_kernel_fn release_kernel;
+    rt_opencl_release_mem_object_fn release_mem_object;
 } RtOpenClFns;
 
 typedef struct RtOpenClContext {
@@ -85,6 +98,13 @@ typedef struct RtOpenClKernel {
     void* kernel;
 } RtOpenClKernel;
 
+typedef struct RtOpenClBuffer {
+    uint32_t magic;
+    RtOpenClContext* owner;
+    void* mem;
+    size_t size;
+} RtOpenClBuffer;
+
 static RtOpenClFns* rt_opencl_load_symbols(void) {
 #if defined(_WIN32)
     return NULL;
@@ -107,20 +127,31 @@ static RtOpenClFns* rt_opencl_load_symbols(void) {
     fns.create_program_with_source = (rt_opencl_create_program_with_source_fn)dlsym(opencl_handle, "clCreateProgramWithSource");
     fns.build_program = (rt_opencl_build_program_fn)dlsym(opencl_handle, "clBuildProgram");
     fns.create_kernel = (rt_opencl_create_kernel_fn)dlsym(opencl_handle, "clCreateKernel");
+    fns.set_kernel_arg = (rt_opencl_set_kernel_arg_fn)dlsym(opencl_handle, "clSetKernelArg");
+    fns.create_buffer = (rt_opencl_create_buffer_fn)dlsym(opencl_handle, "clCreateBuffer");
+    fns.enqueue_write_buffer = (rt_opencl_enqueue_write_buffer_fn)dlsym(opencl_handle, "clEnqueueWriteBuffer");
+    fns.enqueue_read_buffer = (rt_opencl_enqueue_read_buffer_fn)dlsym(opencl_handle, "clEnqueueReadBuffer");
     fns.enqueue_ndrange_kernel = (rt_opencl_enqueue_ndrange_kernel_fn)dlsym(opencl_handle, "clEnqueueNDRangeKernel");
     fns.finish = (rt_opencl_finish_fn)dlsym(opencl_handle, "clFinish");
     fns.release_context = (rt_opencl_release_context_fn)dlsym(opencl_handle, "clReleaseContext");
     fns.release_command_queue = (rt_opencl_release_command_queue_fn)dlsym(opencl_handle, "clReleaseCommandQueue");
     fns.release_program = (rt_opencl_release_program_fn)dlsym(opencl_handle, "clReleaseProgram");
     fns.release_kernel = (rt_opencl_release_kernel_fn)dlsym(opencl_handle, "clReleaseKernel");
+    fns.release_mem_object = (rt_opencl_release_mem_object_fn)dlsym(opencl_handle, "clReleaseMemObject");
     if (!fns.get_platform_ids || !fns.get_device_ids || !fns.create_context ||
         (!fns.create_command_queue && !fns.create_command_queue_with_properties) ||
         !fns.create_program_with_source || !fns.build_program || !fns.create_kernel ||
-        !fns.enqueue_ndrange_kernel || !fns.finish) {
+        !fns.set_kernel_arg || !fns.create_buffer || !fns.enqueue_write_buffer ||
+        !fns.enqueue_read_buffer || !fns.enqueue_ndrange_kernel || !fns.finish ||
+        !fns.release_mem_object) {
         return NULL;
     }
     return &fns;
 #endif
+}
+
+static bool rt_opencl_handle_is_plausible(int64_t handle) {
+    return handle >= 4096;
 }
 
 static int rt_opencl_platform_at(RtOpenClFns* fns, int64_t platform_index, void** out_platform) {
@@ -200,7 +231,7 @@ int64_t rt_opencl_create_context(int64_t platform) {
 int64_t rt_opencl_create_queue(int64_t context) {
     RtOpenClFns* fns = rt_opencl_load_symbols();
     RtOpenClContext* wrapped_context = (RtOpenClContext*)(intptr_t)context;
-    if (!fns || !wrapped_context || wrapped_context->magic != RT_OPENCL_CONTEXT_MAGIC) return 0;
+    if (!fns || !rt_opencl_handle_is_plausible(context) || !wrapped_context || wrapped_context->magic != RT_OPENCL_CONTEXT_MAGIC) return 0;
     int status = 0;
     void* queue = NULL;
     if (fns->create_command_queue_with_properties) {
@@ -223,7 +254,7 @@ int64_t rt_opencl_create_queue(int64_t context) {
 int64_t rt_opencl_create_program(int64_t context, const char* source) {
     RtOpenClFns* fns = rt_opencl_load_symbols();
     RtOpenClContext* wrapped_context = (RtOpenClContext*)(intptr_t)context;
-    if (!fns || !wrapped_context || wrapped_context->magic != RT_OPENCL_CONTEXT_MAGIC || !source || source[0] == '\0') {
+    if (!fns || !rt_opencl_handle_is_plausible(context) || !wrapped_context || wrapped_context->magic != RT_OPENCL_CONTEXT_MAGIC || !source || source[0] == '\0') {
         return 0;
     }
     const char* sources[] = { source };
@@ -245,7 +276,7 @@ int64_t rt_opencl_create_program(int64_t context, const char* source) {
 bool rt_opencl_build_program(int64_t program) {
     RtOpenClFns* fns = rt_opencl_load_symbols();
     RtOpenClProgram* wrapped_program = (RtOpenClProgram*)(intptr_t)program;
-    if (!fns || !wrapped_program || wrapped_program->magic != RT_OPENCL_PROGRAM_MAGIC || !wrapped_program->owner) {
+    if (!fns || !rt_opencl_handle_is_plausible(program) || !wrapped_program || wrapped_program->magic != RT_OPENCL_PROGRAM_MAGIC || !wrapped_program->owner) {
         return false;
     }
     return fns->build_program(
@@ -261,7 +292,7 @@ bool rt_opencl_build_program(int64_t program) {
 int64_t rt_opencl_create_kernel(int64_t program, const char* name) {
     RtOpenClFns* fns = rt_opencl_load_symbols();
     RtOpenClProgram* wrapped_program = (RtOpenClProgram*)(intptr_t)program;
-    if (!fns || !wrapped_program || wrapped_program->magic != RT_OPENCL_PROGRAM_MAGIC || !name || name[0] == '\0') {
+    if (!fns || !rt_opencl_handle_is_plausible(program) || !wrapped_program || wrapped_program->magic != RT_OPENCL_PROGRAM_MAGIC || !name || name[0] == '\0') {
         return 0;
     }
     int status = 0;
@@ -278,11 +309,120 @@ int64_t rt_opencl_create_kernel(int64_t program, const char* name) {
     return (int64_t)(intptr_t)wrapped;
 }
 
+int64_t rt_opencl_mem_alloc(int64_t context, int64_t size) {
+    RtOpenClFns* fns = rt_opencl_load_symbols();
+    RtOpenClContext* wrapped_context = (RtOpenClContext*)(intptr_t)context;
+    if (!fns || !rt_opencl_handle_is_plausible(context) || !wrapped_context ||
+        wrapped_context->magic != RT_OPENCL_CONTEXT_MAGIC || size <= 0) {
+        return 0;
+    }
+    int status = 0;
+    void* mem = fns->create_buffer(wrapped_context->context, RT_OPENCL_MEM_READ_WRITE, (size_t)size, NULL, &status);
+    if (status != RT_OPENCL_SUCCESS || !mem) return 0;
+    RtOpenClBuffer* wrapped = (RtOpenClBuffer*)calloc(1, sizeof(RtOpenClBuffer));
+    if (!wrapped) {
+        fns->release_mem_object(mem);
+        return 0;
+    }
+    wrapped->magic = RT_OPENCL_BUFFER_MAGIC;
+    wrapped->owner = wrapped_context;
+    wrapped->mem = mem;
+    wrapped->size = (size_t)size;
+    return (int64_t)(intptr_t)wrapped;
+}
+
+bool rt_opencl_mem_free(int64_t buffer) {
+    RtOpenClFns* fns = rt_opencl_load_symbols();
+    RtOpenClBuffer* wrapped_buffer = (RtOpenClBuffer*)(intptr_t)buffer;
+    if (!fns || !rt_opencl_handle_is_plausible(buffer) || !wrapped_buffer ||
+        wrapped_buffer->magic != RT_OPENCL_BUFFER_MAGIC) {
+        return false;
+    }
+    int status = fns->release_mem_object(wrapped_buffer->mem);
+    wrapped_buffer->magic = 0;
+    free(wrapped_buffer);
+    return status == RT_OPENCL_SUCCESS;
+}
+
+bool rt_opencl_write_buffer(int64_t queue, int64_t buffer, int64_t host_ptr, int64_t size) {
+    RtOpenClFns* fns = rt_opencl_load_symbols();
+    RtOpenClQueue* wrapped_queue = (RtOpenClQueue*)(intptr_t)queue;
+    RtOpenClBuffer* wrapped_buffer = (RtOpenClBuffer*)(intptr_t)buffer;
+    if (!fns || !rt_opencl_handle_is_plausible(queue) || !rt_opencl_handle_is_plausible(buffer) ||
+        !wrapped_queue || !wrapped_buffer || host_ptr == 0 || size <= 0 ||
+        wrapped_queue->magic != RT_OPENCL_QUEUE_MAGIC ||
+        wrapped_buffer->magic != RT_OPENCL_BUFFER_MAGIC ||
+        (size_t)size > wrapped_buffer->size) {
+        return false;
+    }
+    return fns->enqueue_write_buffer(
+        wrapped_queue->queue,
+        wrapped_buffer->mem,
+        RT_OPENCL_TRUE,
+        0,
+        (size_t)size,
+        (const void*)(intptr_t)host_ptr,
+        0,
+        NULL,
+        NULL
+    ) == RT_OPENCL_SUCCESS;
+}
+
+bool rt_opencl_read_buffer(int64_t queue, int64_t buffer, int64_t host_ptr, int64_t size) {
+    RtOpenClFns* fns = rt_opencl_load_symbols();
+    RtOpenClQueue* wrapped_queue = (RtOpenClQueue*)(intptr_t)queue;
+    RtOpenClBuffer* wrapped_buffer = (RtOpenClBuffer*)(intptr_t)buffer;
+    if (!fns || !rt_opencl_handle_is_plausible(queue) || !rt_opencl_handle_is_plausible(buffer) ||
+        !wrapped_queue || !wrapped_buffer || host_ptr == 0 || size <= 0 ||
+        wrapped_queue->magic != RT_OPENCL_QUEUE_MAGIC ||
+        wrapped_buffer->magic != RT_OPENCL_BUFFER_MAGIC ||
+        (size_t)size > wrapped_buffer->size) {
+        return false;
+    }
+    return fns->enqueue_read_buffer(
+        wrapped_queue->queue,
+        wrapped_buffer->mem,
+        RT_OPENCL_TRUE,
+        0,
+        (size_t)size,
+        (void*)(intptr_t)host_ptr,
+        0,
+        NULL,
+        NULL
+    ) == RT_OPENCL_SUCCESS;
+}
+
+bool rt_opencl_set_kernel_arg_i64(int64_t kernel, int64_t index, int64_t value) {
+    RtOpenClFns* fns = rt_opencl_load_symbols();
+    RtOpenClKernel* wrapped_kernel = (RtOpenClKernel*)(intptr_t)kernel;
+    if (!fns || !rt_opencl_handle_is_plausible(kernel) || !wrapped_kernel ||
+        wrapped_kernel->magic != RT_OPENCL_KERNEL_MAGIC || index < 0) {
+        return false;
+    }
+    int64_t arg = value;
+    return fns->set_kernel_arg(wrapped_kernel->kernel, (uint32_t)index, sizeof(arg), &arg) == RT_OPENCL_SUCCESS;
+}
+
+bool rt_opencl_set_kernel_arg_buffer(int64_t kernel, int64_t index, int64_t buffer) {
+    RtOpenClFns* fns = rt_opencl_load_symbols();
+    RtOpenClKernel* wrapped_kernel = (RtOpenClKernel*)(intptr_t)kernel;
+    RtOpenClBuffer* wrapped_buffer = (RtOpenClBuffer*)(intptr_t)buffer;
+    if (!fns || !rt_opencl_handle_is_plausible(kernel) || !rt_opencl_handle_is_plausible(buffer) ||
+        !wrapped_kernel || !wrapped_buffer || index < 0 ||
+        wrapped_kernel->magic != RT_OPENCL_KERNEL_MAGIC ||
+        wrapped_buffer->magic != RT_OPENCL_BUFFER_MAGIC) {
+        return false;
+    }
+    void* mem = wrapped_buffer->mem;
+    return fns->set_kernel_arg(wrapped_kernel->kernel, (uint32_t)index, sizeof(mem), &mem) == RT_OPENCL_SUCCESS;
+}
+
 bool rt_opencl_enqueue_ndrange(int64_t queue, int64_t kernel, int64_t gx, int64_t gy, int64_t gz, int64_t lx, int64_t ly, int64_t lz) {
     RtOpenClFns* fns = rt_opencl_load_symbols();
     RtOpenClQueue* wrapped_queue = (RtOpenClQueue*)(intptr_t)queue;
     RtOpenClKernel* wrapped_kernel = (RtOpenClKernel*)(intptr_t)kernel;
-    if (!fns || !wrapped_queue || !wrapped_kernel ||
+    if (!fns || !rt_opencl_handle_is_plausible(queue) || !rt_opencl_handle_is_plausible(kernel) ||
+        !wrapped_queue || !wrapped_kernel ||
         wrapped_queue->magic != RT_OPENCL_QUEUE_MAGIC ||
         wrapped_kernel->magic != RT_OPENCL_KERNEL_MAGIC ||
         gx <= 0 || gy <= 0 || gz <= 0) {
@@ -307,8 +447,48 @@ bool rt_opencl_enqueue_ndrange(int64_t queue, int64_t kernel, int64_t gx, int64_
 bool rt_opencl_finish(int64_t queue) {
     RtOpenClFns* fns = rt_opencl_load_symbols();
     RtOpenClQueue* wrapped_queue = (RtOpenClQueue*)(intptr_t)queue;
-    if (!fns || !wrapped_queue || wrapped_queue->magic != RT_OPENCL_QUEUE_MAGIC) return false;
+    if (!fns || !rt_opencl_handle_is_plausible(queue) || !wrapped_queue || wrapped_queue->magic != RT_OPENCL_QUEUE_MAGIC) return false;
     return fns->finish(wrapped_queue->queue) == RT_OPENCL_SUCCESS;
+}
+
+bool rt_opencl_release_kernel(int64_t kernel) {
+    RtOpenClFns* fns = rt_opencl_load_symbols();
+    RtOpenClKernel* wrapped_kernel = (RtOpenClKernel*)(intptr_t)kernel;
+    if (!fns || !fns->release_kernel || !rt_opencl_handle_is_plausible(kernel) || !wrapped_kernel || wrapped_kernel->magic != RT_OPENCL_KERNEL_MAGIC) return false;
+    int status = fns->release_kernel(wrapped_kernel->kernel);
+    wrapped_kernel->magic = 0;
+    free(wrapped_kernel);
+    return status == RT_OPENCL_SUCCESS;
+}
+
+bool rt_opencl_release_program(int64_t program) {
+    RtOpenClFns* fns = rt_opencl_load_symbols();
+    RtOpenClProgram* wrapped_program = (RtOpenClProgram*)(intptr_t)program;
+    if (!fns || !fns->release_program || !rt_opencl_handle_is_plausible(program) || !wrapped_program || wrapped_program->magic != RT_OPENCL_PROGRAM_MAGIC) return false;
+    int status = fns->release_program(wrapped_program->program);
+    wrapped_program->magic = 0;
+    free(wrapped_program);
+    return status == RT_OPENCL_SUCCESS;
+}
+
+bool rt_opencl_release_queue(int64_t queue) {
+    RtOpenClFns* fns = rt_opencl_load_symbols();
+    RtOpenClQueue* wrapped_queue = (RtOpenClQueue*)(intptr_t)queue;
+    if (!fns || !fns->release_command_queue || !rt_opencl_handle_is_plausible(queue) || !wrapped_queue || wrapped_queue->magic != RT_OPENCL_QUEUE_MAGIC) return false;
+    int status = fns->release_command_queue(wrapped_queue->queue);
+    wrapped_queue->magic = 0;
+    free(wrapped_queue);
+    return status == RT_OPENCL_SUCCESS;
+}
+
+bool rt_opencl_release_context(int64_t context) {
+    RtOpenClFns* fns = rt_opencl_load_symbols();
+    RtOpenClContext* wrapped_context = (RtOpenClContext*)(intptr_t)context;
+    if (!fns || !fns->release_context || !rt_opencl_handle_is_plausible(context) || !wrapped_context || wrapped_context->magic != RT_OPENCL_CONTEXT_MAGIC) return false;
+    int status = fns->release_context(wrapped_context->context);
+    wrapped_context->magic = 0;
+    free(wrapped_context);
+    return status == RT_OPENCL_SUCCESS;
 }
 
 static inline int64_t engine2d_numeric_arg(int64_t value) {

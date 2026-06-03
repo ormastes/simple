@@ -7,7 +7,7 @@
 
 use compiler.mir.mir_data.{MirModule}
 use compiler.mir.mir_instructions.{MirFunction, MirInst, MirTerminator, MirOperand, MirBinOp, MirUnaryOp, GpuBarrierScope, GpuMemoryScope}
-use compiler.mir.mir_types.{MirLocal, MirType, LocalKind, MirConstValue}
+use compiler.mir.mir_types.{MirLocal, MirType, MirTypeKind, LocalKind, MirConstValue}
 use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, CompileOptions, CompileError, compileerror_backend_error}
 use compiler.backend.gpu_backend_metadata.{gpu_backend_accepts_kernel_metadata}
 use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
@@ -122,7 +122,7 @@ class OpenClBackend:
             if block.label.?:
                 lines.push("    // {block.label.unwrap()}")
             for inst in block.instructions:
-                lines.push("    {OpenClBackend.emit_instruction(inst)}")
+                lines.push("    {OpenClBackend.emit_instruction(func, inst)}")
             lines.push("    {OpenClBackend.emit_terminator(block.terminator)}")
         lines.push("}")
         lines.join("\n")
@@ -148,6 +148,18 @@ class OpenClBackend:
     static fn local_id_name(id) -> text:
         "v{id.id}"
 
+    static fn local_id_name_for_func(func: MirFunction, id) -> text:
+        for local in func.locals:
+            if local.id.id == id.id:
+                return OpenClBackend.local_name(local)
+        OpenClBackend.local_id_name(id)
+
+    static fn local_id_type(func: MirFunction, id) -> MirType:
+        for local in func.locals:
+            if local.id.id == id.id:
+                return local.type_
+        MirType(kind: MirTypeKind.U64)
+
     static fn opencl_type(type_: MirType, as_param: bool) -> text:
         match type_.kind:
             case I8: "char"
@@ -164,41 +176,53 @@ class OpenClBackend:
             case Unit: "void"
             case Ptr(pointee, _):
                 val inner = OpenClBackend.opencl_type(pointee, false)
-                if as_param: "__global {inner}*" else: "{inner}*"
+                "__global {inner}*"
             case Ref(referent, _):
                 val inner = OpenClBackend.opencl_type(referent, false)
-                if as_param: "__global {inner}*" else: "{inner}*"
+                "__global {inner}*"
             case _:
                 "ulong"
 
-    static fn emit_instruction(inst: MirInst) -> text:
+    static fn emit_instruction(func: MirFunction, inst: MirInst) -> text:
         match inst.kind:
             case Const(dest, value, type_):
-                "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name(dest)} = {OpenClBackend.emit_const_value(value)};"
+                "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest)} = {OpenClBackend.emit_const_value(value)};"
             case Copy(dest, src):
-                "ulong {OpenClBackend.local_id_name(dest)} = {OpenClBackend.local_id_name(src)};"
+                val type_ = OpenClBackend.local_id_type(func, dest)
+                "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest)} = {OpenClBackend.local_id_name_for_func(func, src)};"
             case Move(dest, src):
-                "ulong {OpenClBackend.local_id_name(dest)} = {OpenClBackend.local_id_name(src)};"
+                val type_ = OpenClBackend.local_id_type(func, dest)
+                "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest)} = {OpenClBackend.local_id_name_for_func(func, src)};"
             case BinOp(dest, op, left, right):
-                "ulong {OpenClBackend.local_id_name(dest)} = {OpenClBackend.emit_operand(left)} {OpenClBackend.emit_binop(op)} {OpenClBackend.emit_operand(right)};"
+                val type_ = OpenClBackend.local_id_type(func, dest)
+                "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest)} = {OpenClBackend.emit_operand(func, left)} {OpenClBackend.emit_binop(op)} {OpenClBackend.emit_operand(func, right)};"
             case UnaryOp(dest, op, operand):
-                "ulong {OpenClBackend.local_id_name(dest)} = {OpenClBackend.emit_unaryop(op)}{OpenClBackend.emit_operand(operand)};"
+                val type_ = OpenClBackend.local_id_type(func, dest)
+                "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest)} = {OpenClBackend.emit_unaryop(op)}{OpenClBackend.emit_operand(func, operand)};"
+            case Load(dest, ptr):
+                val type_ = OpenClBackend.local_id_type(func, dest)
+                "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest)} = *{OpenClBackend.emit_operand(func, ptr)};"
+            case Store(ptr, value):
+                "*{OpenClBackend.emit_operand(func, ptr)} = {OpenClBackend.emit_operand(func, value)};"
+            case GetElementPtr(dest, base, indices):
+                val type_ = OpenClBackend.local_id_type(func, dest)
+                "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest)} = {OpenClBackend.emit_gep_expr(func, base, indices)};"
             case GpuGlobalId(dest, dim):
-                "ulong {OpenClBackend.local_id_name(dest)} = get_global_id({dim});"
+                "{OpenClBackend.opencl_type(OpenClBackend.local_id_type(func, dest), false)} {OpenClBackend.local_id_name_for_func(func, dest)} = get_global_id({dim});"
             case GpuLocalId(dest, dim):
-                "ulong {OpenClBackend.local_id_name(dest)} = get_local_id({dim});"
+                "{OpenClBackend.opencl_type(OpenClBackend.local_id_type(func, dest), false)} {OpenClBackend.local_id_name_for_func(func, dest)} = get_local_id({dim});"
             case GpuBlockId(dest, dim):
-                "ulong {OpenClBackend.local_id_name(dest)} = get_group_id({dim});"
+                "{OpenClBackend.opencl_type(OpenClBackend.local_id_type(func, dest), false)} {OpenClBackend.local_id_name_for_func(func, dest)} = get_group_id({dim});"
             case GpuBlockDim(dest, dim):
-                "ulong {OpenClBackend.local_id_name(dest)} = get_local_size({dim});"
+                "{OpenClBackend.opencl_type(OpenClBackend.local_id_type(func, dest), false)} {OpenClBackend.local_id_name_for_func(func, dest)} = get_local_size({dim});"
             case GpuGridDim(dest, dim):
-                "ulong {OpenClBackend.local_id_name(dest)} = get_num_groups({dim});"
+                "{OpenClBackend.opencl_type(OpenClBackend.local_id_type(func, dest), false)} {OpenClBackend.local_id_name_for_func(func, dest)} = get_num_groups({dim});"
             case GpuBarrier(scope):
                 OpenClBackend.emit_barrier(scope)
             case GpuMemFence(scope):
                 OpenClBackend.emit_mem_fence(scope)
             case GpuSharedAlloc(dest, type_, size):
-                "__local {OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name(dest)}[{size}];"
+                "__local {OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest)}[{size}];"
             case DebugValue(_, name):
                 "// debug value: {name}"
             case Nop:
@@ -206,14 +230,20 @@ class OpenClBackend:
             case _:
                 "// unsupported MIR instruction for OpenCL subset"
 
-    static fn emit_operand(operand: MirOperand) -> text:
+    static fn emit_operand(func: MirFunction, operand: MirOperand) -> text:
         match operand.kind:
             case Copy(local):
-                OpenClBackend.local_id_name(local)
+                OpenClBackend.local_id_name_for_func(func, local)
             case Move(local):
-                OpenClBackend.local_id_name(local)
+                OpenClBackend.local_id_name_for_func(func, local)
             case Const(value, _):
                 OpenClBackend.emit_const_value(value)
+
+    static fn emit_gep_expr(func: MirFunction, base: MirOperand, indices: [MirOperand]) -> text:
+        var expr = OpenClBackend.emit_operand(func, base)
+        for index in indices:
+            expr = "({expr} + {OpenClBackend.emit_operand(func, index)})"
+        expr
 
     static fn emit_const_value(value: MirConstValue) -> text:
         match value:

@@ -1,5 +1,39 @@
 # Ffi Opencl Specification
 
+> <details>
+
+<!-- sdn-diagram:id=ffi_opencl_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=ffi_opencl_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+ffi_opencl_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=ffi_opencl_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 8 | 8 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Ffi Opencl Specification
+
 ## Scenarios
 
 ### OpenClFfi
@@ -97,6 +131,45 @@ expect(ffi.finish(0)).to_equal(false)
 
 </details>
 
+#### fails closed when releasing invalid OpenCL handles
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val ffi = OpenClFfi.create_static()
+expect(ffi.release_kernel(0)).to_equal(false)
+expect(ffi.release_program(0)).to_equal(false)
+expect(ffi.release_queue(0)).to_equal(false)
+expect(ffi.release_context(0)).to_equal(false)
+```
+
+</details>
+
+#### fails closed for invalid OpenCL buffers and kernel args
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val ffi = OpenClFfi.create_static()
+expect(ffi.mem_alloc(0, 16)).to_equal(0)
+expect(ffi.mem_alloc(1, 0)).to_equal(0)
+expect(ffi.mem_free(0)).to_equal(false)
+expect(ffi.write_buffer(0, 0, 0, 16)).to_equal(false)
+expect(ffi.read_buffer(0, 0, 0, 16)).to_equal(false)
+expect(ffi.set_kernel_arg_i64(0, 0, 1)).to_equal(false)
+expect(ffi.set_kernel_arg_buffer(0, 0, 0)).to_equal(false)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -116,8 +189,11 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
+
+</details>

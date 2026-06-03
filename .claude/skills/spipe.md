@@ -52,6 +52,25 @@ until the generated manual is usable without opening the source.
 cp .claude/templates/spipe_template.spl test/my_spec.spl
 ```
 
+## FILE.md Enforcement
+
+SPipe verify runs `sh scripts/check-workspace-root-guard.shs audit --strict`.
+Default: diagnose and report. Auto-fix: trace origin and fix creating code.
+See [`doc/07_guide/workspace/file_manifest_tldr.md`](../../doc/07_guide/workspace/file_manifest_tldr.md).
+
+## Code Quality Checks
+
+SPipe verify and implementation phases enforce these quality gates:
+
+- **Duplication**: no line-level, token-level, or semantic duplicates; parameter
+  lists with 3+ fields become a struct
+- **Cohesion**: each file covers one concern; split large files by feature, not
+  by number suffix
+- **Coupling**: minimize public interface per layer and per feature; prefer
+  private helpers
+- **Naming**: files use descriptive names, never numbered copies (`_1`, `_v2`)
+- **Docs**: every new doc produces a `xxxx_tldr.md` (≤30 lines + diagram)
+
 ## Run
 
 ```

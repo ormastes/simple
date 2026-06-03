@@ -38,22 +38,6 @@ die() {
     exit 2
 }
 
-is_ignored() {
-    contains_line "$1" "$IGNORED_FILE"
-}
-
-is_tracked() {
-    contains_line "$1" "$TRACKED_FILE" || grep -Fq -- "$1/" "$TRACKED_FILE"
-}
-
-path_depth() {
-    printf '%s\n' "$1" | awk -F/ '{print NF}'
-}
-
-root_name() {
-    printf '%s\n' "$1" | awk -F/ '{print $1}'
-}
-
 load_allowed_root() {
     if [ ! -f FILE.md ]; then
         load_builtin_allowed_root
@@ -153,6 +137,81 @@ contains_line() {
     grep -Fxq -- "$value" "$file"
 }
 
+# --- Recursive FILE.md manifest tree ---
+
+_extract_linked_children() {
+    _file="$1"
+    _pdir="$2"
+    [ -f "$_file" ] || return 0
+    awk '
+        /^## Child Manifests/ { in_sect = 1; next }
+        in_sect && /^## / { in_sect = 0 }
+        in_sect && /\| `/ {
+            line = $0
+            while (match(line, /`[^`]+`/)) {
+                item = substr(line, RSTART + 1, RLENGTH - 2)
+                if (item != "Path" && item != "") print item
+                line = substr(line, RSTART + RLENGTH)
+            }
+        }
+    ' "$_file" | while IFS= read -r cpath; do
+        [ -n "$cpath" ] || continue
+        if [ -n "$_pdir" ]; then
+            case "$cpath" in
+                /*) ;;
+                *) cpath="${_pdir}/${cpath}" ;;
+            esac
+        fi
+        cdir="$(dirname "$cpath")"
+        printf '%s\t%s\n' "$cpath" "$cdir"
+    done
+}
+
+_extract_allowed() {
+    _file="$1"
+    _dir="$2"
+    awk -v dir="$_dir" '
+        /^## Allowed Entries/ { in_sect = 1; next }
+        in_sect && /^## / { in_sect = 0 }
+        in_sect && /\| `/ {
+            line = $0
+            while (match(line, /`[^`]+`/)) {
+                item = substr(line, RSTART + 1, RLENGTH - 2)
+                gsub(/\/$/, "", item)
+                if (item != "Entry" && item != "") {
+                    print dir "/" item
+                }
+                line = substr(line, RSTART + RLENGTH)
+            }
+        }
+    ' "$_file"
+}
+
+load_manifest_tree() {
+    _queue="$TMP_DIR/mq.txt"
+    _next="$TMP_DIR/mqn.txt"
+    _seen="$TMP_DIR/mseen.txt"
+    : > "$MANIFEST_TREE_FILE"
+    : > "$MANIFEST_DIRS_FILE"
+    : > "$_seen"
+    _extract_linked_children "FILE.md" "" > "$_queue"
+    while [ -s "$_queue" ]; do
+        : > "$_next"
+        while IFS='	' read -r _mpath _mdir; do
+            [ -n "$_mpath" ] || continue
+            grep -Fxq "$_mpath" "$_seen" 2>/dev/null && continue
+            echo "$_mpath" >> "$_seen"
+            [ -f "$_mpath" ] || continue
+            echo "$_mdir" >> "$MANIFEST_DIRS_FILE"
+            _extract_allowed "$_mpath" "$_mdir" >> "$MANIFEST_TREE_FILE"
+            _extract_linked_children "$_mpath" "$_mdir" >> "$_next"
+        done < "$_queue"
+        mv "$_next" "$_queue"
+    done
+    sort -u "$MANIFEST_DIRS_FILE" -o "$MANIFEST_DIRS_FILE" 2>/dev/null || true
+    sort -u "$MANIFEST_TREE_FILE" -o "$MANIFEST_TREE_FILE" 2>/dev/null || true
+}
+
 is_mutable_root_dir() {
     candidate="$1"
     for mutable in $MUTABLE_ROOT_DIRS; do
@@ -177,59 +236,34 @@ policy_tmp_dir() {
     mktemp -d "${TMPDIR:-/tmp}/workspace-root-guard.XXXXXX"
 }
 
-classify_path() {
-    rel="${1#./}"
-    case "$rel" in
-        ""|".git"|".jj"|.git/*|.jj/*)
-            return 0
-            ;;
-    esac
-
-    if is_ignored "$rel"; then
-        return 0
-    fi
-
-    first="$(root_name "$rel")"
-    if ! contains_line "$first" "$ALLOWED_ROOT_FILE"; then
-        if [ "$STRICT" -eq 1 ] || ! is_tracked "$first"; then
-            echo "WRG001 root entry is not allowed by FILE.md: $first"
-            return 1
-        fi
-        return 0
-    fi
-
-    depth="$(path_depth "$rel")"
-    if [ "$depth" -eq 2 ]; then
-        if contains_line "$rel" "$ALLOWED_CHILD_FILE"; then
-            return 0
-        fi
-        if [ "$STRICT" -eq 1 ] || ! is_tracked "$rel"; then
-            echo "WRG002 immediate root child entry is not declared by FILE.md: $rel"
-            return 1
-        fi
-    fi
-    return 0
+_emit_prefixes() {
+    awk -F/ -v md="$1" '
+        {
+            for (d = 1; d <= NF && d <= md; d++) {
+                path = $1
+                for (i = 2; i <= d; i++) path = path "/" $i
+                print path
+            }
+        }
+    ' | sort -u
 }
 
 list_audit_paths() {
+    max_depth=2
+    if [ -s "$MANIFEST_DIRS_FILE" ]; then
+        md=$(awk -F/ '{if (NF > m) m = NF} END {print m+1}' "$MANIFEST_DIRS_FILE")
+        [ "$md" -gt "$max_depth" ] && max_depth="$md"
+    fi
     if [ "$STAGED_ONLY" -eq 1 ]; then
-        git diff --cached --name-only --diff-filter=AR 2>/dev/null || true
-        return
+        git diff --cached --name-only --diff-filter=AR 2>/dev/null | _emit_prefixes "$max_depth"
+    elif [ -n "$PATH_FILE" ]; then
+        _emit_prefixes "$max_depth" < "$PATH_FILE"
+    else
+        {
+            git ls-files 2>/dev/null || true
+            git ls-files --others --exclude-standard 2>/dev/null || true
+        } | _emit_prefixes "$max_depth"
     fi
-    if [ -n "$PATH_FILE" ]; then
-        cat "$PATH_FILE"
-        return
-    fi
-    {
-        git ls-files 2>/dev/null || true
-        git ls-files --others --exclude-standard 2>/dev/null || true
-    } | awk -F/ '
-        NF == 1 { print $1; next }
-        NF > 1 {
-            print $1
-            print $1 "/" $2
-        }
-    ' | sort -u
 }
 
 run_audit() {
@@ -239,17 +273,26 @@ run_audit() {
     awk -v strict="$effective_strict" \
         -v allowed_root_file="$ALLOWED_ROOT_FILE" \
         -v allowed_child_file="$ALLOWED_CHILD_FILE" \
+        -v manifest_tree_file="$MANIFEST_TREE_FILE" \
+        -v manifest_dirs_file="$MANIFEST_DIRS_FILE" \
         -v tracked_file="$TRACKED_FILE" \
         -v ignored_file="$IGNORED_FILE" \
         -v paths_file="$PATHS_FILE" '
         FILENAME == allowed_root_file { allowed_root[$0] = 1; next }
         FILENAME == allowed_child_file { allowed_child[$0] = 1; next }
+        FILENAME == manifest_tree_file { manifest_tree[$0] = 1; next }
+        FILENAME == manifest_dirs_file { manifest_dir[$0] = 1; next }
         FILENAME == tracked_file {
             tracked[$0] = 1
             split($0, parts, "/")
             tracked[parts[1]] = 1
             if (parts[2] != "") {
                 tracked[parts[1] "/" parts[2]] = 1
+            }
+            for (i = 3; i <= length(parts); i++) {
+                p = parts[1]
+                for (j = 2; j <= i; j++) p = p "/" parts[j]
+                tracked[p] = 1
             }
             next
         }
@@ -273,17 +316,31 @@ run_audit() {
                 }
                 next
             }
-            if (part_count == 2 && !allowed_child[rel]) {
-                if (strict == 1 || !tracked[rel]) {
-                    key = "WRG002:" rel
-                    if (!seen[key]) {
-                        print "WRG002 immediate root child entry is not declared by FILE.md: " rel
-                        seen[key] = 1
+            if (part_count >= 2) {
+                parent = parts[1]
+                for (k = 2; k < part_count; k++) parent = parent "/" parts[k]
+                if (manifest_dir[parent]) {
+                    if (!manifest_tree[rel]) {
+                        if (strict == 1 || !tracked[rel]) {
+                            key = "WRG003:" rel
+                            if (!seen[key]) {
+                                print "WRG003 entry not declared by " parent "/FILE.md: " rel
+                                seen[key] = 1
+                            }
+                        }
+                    }
+                } else if (part_count == 2 && !allowed_child[rel]) {
+                    if (strict == 1 || !tracked[rel]) {
+                        key = "WRG002:" rel
+                        if (!seen[key]) {
+                            print "WRG002 immediate root child entry is not declared by FILE.md: " rel
+                            seen[key] = 1
+                        }
                     }
                 }
             }
         }
-    ' "$ALLOWED_ROOT_FILE" "$ALLOWED_CHILD_FILE" "$TRACKED_FILE" "$IGNORED_FILE" "$PATHS_FILE" > "$TMP_DIR/violations"
+    ' "$ALLOWED_ROOT_FILE" "$ALLOWED_CHILD_FILE" "$MANIFEST_TREE_FILE" "$MANIFEST_DIRS_FILE" "$TRACKED_FILE" "$IGNORED_FILE" "$PATHS_FILE" > "$TMP_DIR/violations"
 
     if [ -s "$TMP_DIR/violations" ]; then
         cat "$TMP_DIR/violations"
@@ -428,12 +485,28 @@ self_test() {
     fi
     (
         cd "$tmp"
-        mkdir src build
+        mkdir -p src/app build
         : > README.md
         : > surprise.tmp
         git init -q
         git add README.md src build
         [ ! -f FILE.md ] || git add FILE.md
+
+        # Create a child FILE.md for WRG003 testing
+        if [ -f FILE.md ]; then
+            cat > src/FILE.md <<'CHILD'
+# src/ Manifest
+
+## Allowed Entries
+
+| Entry | Description |
+|---|---|
+| `app` | Applications |
+| `FILE.md` | This manifest |
+CHILD
+            git add src/FILE.md
+        fi
+
         git commit -qm init >/dev/null 2>&1 || true
         printf '%s\n' surprise.tmp src/new_child > paths.txt
         if WRG_ROOT_DIR="$tmp" sh "$ROOT_DIR/scripts/check-workspace-root-guard.shs" audit --path-file paths.txt > out.txt 2>&1; then
@@ -441,7 +514,21 @@ self_test() {
             exit 1
         fi
         grep -q "WRG001" out.txt
-        grep -q "WRG002" out.txt
+        grep -qE "WRG00[23]" out.txt
+
+        # WRG003: governed dir blocks undeclared entry, allows declared entry
+        if grep -q "Child Manifests" FILE.md 2>/dev/null && [ -f src/FILE.md ]; then
+            printf '%s\n' src/rogue_child > wrg003_bad.txt
+            if WRG_ROOT_DIR="$tmp" sh "$ROOT_DIR/scripts/check-workspace-root-guard.shs" audit --path-file wrg003_bad.txt > wrg003_out.txt 2>&1; then
+                echo "workspace-root-guard: self-test WRG003 expected violation but passed" >&2
+                exit 1
+            fi
+            grep -q "WRG003" wrg003_out.txt
+
+            printf '%s\n' src/app > wrg003_ok.txt
+            WRG_ROOT_DIR="$tmp" sh "$ROOT_DIR/scripts/check-workspace-root-guard.shs" audit --path-file wrg003_ok.txt >/dev/null
+        fi
+
         printf '%s\n' README.md build/generated.tmp > clean_paths.txt
         WRG_ROOT_DIR="$tmp" sh "$ROOT_DIR/scripts/check-workspace-root-guard.shs" audit --path-file clean_paths.txt >/dev/null
     )
@@ -494,10 +581,13 @@ TMP_DIR="$(policy_tmp_dir)"
 trap 'rm -rf "$TMP_DIR"' EXIT INT TERM
 ALLOWED_ROOT_FILE="$TMP_DIR/allowed-root.txt"
 ALLOWED_CHILD_FILE="$TMP_DIR/allowed-child.txt"
+MANIFEST_TREE_FILE="$TMP_DIR/manifest-tree.txt"
+MANIFEST_DIRS_FILE="$TMP_DIR/manifest-dirs.txt"
 TRACKED_FILE="$TMP_DIR/tracked.txt"
 IGNORED_FILE="$TMP_DIR/ignored.txt"
 load_allowed_root > "$ALLOWED_ROOT_FILE"
 load_allowed_child_paths > "$ALLOWED_CHILD_FILE"
+load_manifest_tree
 git ls-files > "$TRACKED_FILE" 2>/dev/null || : > "$TRACKED_FILE"
 if [ -n "$PATH_FILE" ]; then
     git check-ignore --stdin < "$PATH_FILE" > "$IGNORED_FILE" 2>/dev/null || : > "$IGNORED_FILE"

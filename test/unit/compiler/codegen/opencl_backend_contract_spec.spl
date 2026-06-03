@@ -8,8 +8,8 @@ use compiler.common.attributes.{vhdl_hardware_metadata_default}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.mir_data.{MirFunction, MirModule, MirSignature, BlockId, LocalId}
-use compiler.mir.mir_instructions.{MirBlock, MirInst, MirInstKind, MirTerminator, GpuBarrierScope}
-use compiler.mir.mir_types.{MirType}
+use compiler.mir.mir_instructions.{MirBlock, MirInst, MirInstKind, MirTerminator, MirOperand, MirBinOp, GpuBarrierScope}
+use compiler.mir.mir_types.{MirLocal, MirType, MirTypeKind, LocalKind}
 
 fn empty_kernel_block() -> MirBlock:
     MirBlock(
@@ -27,6 +27,38 @@ fn opencl_id_kernel_block() -> MirBlock:
             MirInst(kind: MirInstKind.GpuGlobalId(LocalId(id: 0), 0), span: nil),
             MirInst(kind: MirInstKind.GpuLocalId(LocalId(id: 1), 0), span: nil),
             MirInst(kind: MirInstKind.GpuBarrier(GpuBarrierScope.Workgroup), span: nil)
+        ],
+        terminator: MirTerminator.Ret(nil)
+    )
+
+fn u32_type() -> MirType:
+    MirType(kind: MirTypeKind.U32)
+
+fn u64_type() -> MirType:
+    MirType(kind: MirTypeKind.U64)
+
+fn global_u32_ptr_type() -> MirType:
+    MirType.ptr(u32_type(), true)
+
+fn arg_local(id: i64, index: i64, name: text, type_: MirType) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: Some(name), type_: type_, kind: LocalKind.Arg(index), is_ghost: false)
+
+fn temp_local(id: i64, type_: MirType) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: nil, type_: type_, kind: LocalKind.Temp, is_ghost: false)
+
+fn opencl_vector_add_block() -> MirBlock:
+    MirBlock(
+        id: BlockId.entry(),
+        label: Some("entry"),
+        instructions: [
+            MirInst(kind: MirInstKind.GpuGlobalId(LocalId(id: 3), 0), span: nil),
+            MirInst(kind: MirInstKind.GetElementPtr(LocalId(id: 4), MirOperand.copy(LocalId(id: 0)), [MirOperand.copy(LocalId(id: 3))]), span: nil),
+            MirInst(kind: MirInstKind.GetElementPtr(LocalId(id: 5), MirOperand.copy(LocalId(id: 1)), [MirOperand.copy(LocalId(id: 3))]), span: nil),
+            MirInst(kind: MirInstKind.Load(LocalId(id: 7), MirOperand.copy(LocalId(id: 4))), span: nil),
+            MirInst(kind: MirInstKind.Load(LocalId(id: 8), MirOperand.copy(LocalId(id: 5))), span: nil),
+            MirInst(kind: MirInstKind.BinOp(LocalId(id: 9), MirBinOp.Add, MirOperand.copy(LocalId(id: 7)), MirOperand.copy(LocalId(id: 8))), span: nil),
+            MirInst(kind: MirInstKind.GetElementPtr(LocalId(id: 6), MirOperand.copy(LocalId(id: 2)), [MirOperand.copy(LocalId(id: 3))]), span: nil),
+            MirInst(kind: MirInstKind.Store(MirOperand.copy(LocalId(id: 6)), MirOperand.copy(LocalId(id: 9))), span: nil)
         ],
         terminator: MirTerminator.Ret(nil)
     )
@@ -64,6 +96,44 @@ fn make_opencl_id_kernel() -> MirFunction:
         signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
         locals: [],
         blocks: [opencl_id_kernel_block()],
+        entry_block: BlockId.entry(),
+        span: Span.empty(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: true,
+        gpu_target: "opencl",
+        gpu_backend_order: "opencl",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false
+    )
+
+fn make_opencl_vector_add_kernel() -> MirFunction:
+    val ptr_u32 = global_u32_ptr_type()
+    MirFunction(
+        symbol: SymbolId(id: 5),
+        name: "opencl_vector_add_u32",
+        signature: MirSignature(params: [ptr_u32, ptr_u32, ptr_u32], return_type: MirType.unit(), is_variadic: false),
+        locals: [
+            arg_local(0, 0, "a", ptr_u32),
+            arg_local(1, 1, "b", ptr_u32),
+            arg_local(2, 2, "out", ptr_u32),
+            temp_local(3, u64_type()),
+            temp_local(4, ptr_u32),
+            temp_local(5, ptr_u32),
+            temp_local(6, ptr_u32),
+            temp_local(7, u32_type()),
+            temp_local(8, u32_type()),
+            temp_local(9, u32_type())
+        ],
+        blocks: [opencl_vector_add_block()],
         entry_block: BlockId.entry(),
         span: Span.empty(),
         generic_params: [],
@@ -145,3 +215,17 @@ describe "OpenCL backend contract":
         expect(source).to_contain("ulong v1 = get_local_id(0);")
         expect(source).to_contain("barrier(CLK_LOCAL_MEM_FENCE);")
         expect(source).to_contain("return;")
+
+    it "emits OpenCL C load store and pointer arithmetic for memory kernels":
+        val module = make_kernel_module([make_opencl_vector_add_kernel()])
+        val source = OpenClBackend.compile_module_to_opencl_source(module).unwrap()
+
+        expect(source).to_contain("__kernel void opencl_vector_add_u32(__global uint* a, __global uint* b, __global uint* out)")
+        expect(source).to_contain("ulong v3 = get_global_id(0);")
+        expect(source).to_contain("__global uint* v4 = (a + v3);")
+        expect(source).to_contain("__global uint* v5 = (b + v3);")
+        expect(source).to_contain("uint v7 = *v4;")
+        expect(source).to_contain("uint v8 = *v5;")
+        expect(source).to_contain("uint v9 = v7 + v8;")
+        expect(source).to_contain("__global uint* v6 = (out + v3);")
+        expect(source).to_contain("*v6 = v9;")

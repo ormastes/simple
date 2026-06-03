@@ -22,6 +22,10 @@ bin/                # Binaries (bin/simple → release/<triple>/simple symlink)
 ```
 
 - **Import namespace:** `use std.X` preferred (resolves from `src/lib/`)
+- **FILE.md manifests:** Each directory can have a `FILE.md` declaring allowed entries.
+  Root FILE.md links to child manifests via `## Child Manifests`. Enforced by
+  `scripts/check-workspace-root-guard.shs` (lint + pre-commit hook).
+  See `doc/07_guide/workspace/file_manifest.md`.
 - **Detailed:** `doc/04_architecture/file_class_structure.md` (2,649 files, 623K lines)
 - **Glossary:** `doc/04_architecture/glossary.md`
 

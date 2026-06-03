@@ -119,6 +119,17 @@ class OpenClSession:
     me is_valid() -> bool:
         self.is_initialized and self.queue != 0
 
+    me retain() -> OpenClSession:
+        self.ref_count = self.ref_count + 1
+        self
+
+    me release():
+        if self.ref_count <= 0:
+            return
+        self.ref_count = self.ref_count - 1
+        if self.ref_count == 0:
+            self._cleanup()
+
     me load_module(source: text) -> i64:
         if self.ffi == nil or self.context == 0:
             return 0
@@ -206,6 +217,36 @@ class OpenClSession:
     me scroll_kernel(width: i64, height: i64, args_ptr: i64) -> i64:
         self.launch_generated_2d(GENERATED_2D_SCROLL, width, height, args_ptr)
 
+    me alloc(size: i64) -> i64:
+        if self.ffi == nil or self.context == 0 or size <= 0:
+            return 0
+        self.ffi.mem_alloc(self.context, size)
+
+    me free(buffer: i64):
+        if self.ffi == nil or buffer == 0:
+            return
+        self.ffi.mem_free(buffer)
+
+    me write_buffer(buffer: i64, host_ptr: i64, size: i64) -> bool:
+        if self.ffi == nil or self.queue == 0 or buffer == 0 or host_ptr == 0 or size <= 0:
+            return false
+        self.ffi.write_buffer(self.queue, buffer, host_ptr, size)
+
+    me read_buffer(buffer: i64, host_ptr: i64, size: i64) -> bool:
+        if self.ffi == nil or self.queue == 0 or buffer == 0 or host_ptr == 0 or size <= 0:
+            return false
+        self.ffi.read_buffer(self.queue, buffer, host_ptr, size)
+
+    me set_kernel_arg_i64(kernel: i64, index: i64, value: i64) -> bool:
+        if self.ffi == nil or kernel == 0 or index < 0:
+            return false
+        self.ffi.set_kernel_arg_i64(kernel, index, value)
+
+    me set_kernel_arg_buffer(kernel: i64, index: i64, buffer: i64) -> bool:
+        if self.ffi == nil or kernel == 0 or buffer == 0 or index < 0:
+            return false
+        self.ffi.set_kernel_arg_buffer(kernel, index, buffer)
+
     me synchronize() -> i64:
         if self.ffi == nil or self.queue == 0:
             return 1
@@ -235,6 +276,19 @@ class OpenClSession:
         self._evidence("readback", false, "readback-mismatch", "device-readback-checksum-mismatch", 0, true, expected_checksum, actual_checksum)
 
     me shutdown():
+        self.ref_count = 0
+        self._cleanup()
+
+    me _cleanup():
+        if self.ffi != nil:
+            if self.kernel_cache != 0:
+                self.ffi.release_kernel(self.kernel_cache)
+            if self.program != 0:
+                self.ffi.release_program(self.program)
+            if self.queue != 0:
+                self.ffi.release_queue(self.queue)
+            if self.context != 0:
+                self.ffi.release_context(self.context)
         self.ref_count = 0
         self.platform = 0
         self.context = 0

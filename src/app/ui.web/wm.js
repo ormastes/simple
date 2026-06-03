@@ -99,13 +99,16 @@ class SimpleWindowManager {
     this._workspaceSwitcherActiveIndex = 0;
     this._customWorkspaces = null;
     this._clipboardHistory = null;
+    this._clipboardHistoryActiveIndex = 0;
     this._clipboardSearchQuery = '';
     this._clipboardKindFilter = 'all';
     this._screenCaptureOverlay = null;
     this._screenCaptureMode = 'selection';
     this._quickSettings = null;
+    this._quickSettingsActiveIndex = 0;
     this._notificationCenter = null;
     this._notificationFilter = 'all';
+    this._notificationCenterActiveIndex = 0;
     this._liveActivity = null;
     this._liveActivityPaused = false;
     this._hotCorners = null;
@@ -123,7 +126,9 @@ class SimpleWindowManager {
     this._widgetGallery = null;
     this._widgetGalleryActiveIndex = 0;
     this._wallpaperPicker = null;
+    this._wallpaperPickerActiveIndex = 0;
     this._accentPalette = null;
+    this._accentPaletteActiveIndex = 0;
     this._focusMode = 'off';
     this._contrastMode = 'comfortable';
     this._feedbackMode = 'standard';
@@ -167,6 +172,8 @@ class SimpleWindowManager {
     this._appLauncherCategory = 'all';
     this._launcherApps = [];
     this._shortcutOverlay = null;
+    this._shortcutOverlayActiveIndex = 0;
+    this._shortcutOverlayItemsCache = [];
     this._shortcutSearchQuery = '';
     this._quickSettingLevels = { audio: 42, brightness: 68 };
 
@@ -1190,19 +1197,27 @@ class SimpleWindowManager {
     input.type = 'text';
     input.placeholder = 'Run a command';
     input.setAttribute('aria-label', 'Global command');
+    input.setAttribute('aria-controls', 'wm-command-palette-list');
+    input.setAttribute('aria-activedescendant', 'wm-command-item-0');
     palette.appendChild(input);
 
     const list = document.createElement('div');
+    list.id = 'wm-command-palette-list';
     list.className = 'wm-command-palette-list';
     list.setAttribute('role', 'listbox');
     list.setAttribute('aria-label', 'Available commands');
+    list.setAttribute('aria-activedescendant', 'wm-command-item-0');
     palette.appendChild(list);
     document.body.appendChild(palette);
 
     this._commandPalette = palette;
     this._commandPaletteInput = input;
     this._commandPaletteList = list;
-    input.addEventListener('input', () => this._renderCommandPaletteItems());
+    input.addEventListener('input', () => {
+      this._commandPaletteActiveIndex = 0;
+      this._renderCommandPaletteItems();
+    });
+    input.addEventListener('keydown', (event) => this._handleCommandPaletteKeydown(event, false));
     list.addEventListener('click', (event) => {
       const item = event.target.closest('.wm-command-item, .wm-command-recent');
       if (!item || !list.contains(item)) return;
@@ -1210,6 +1225,7 @@ class SimpleWindowManager {
       this._commandPaletteActiveIndex = index;
       this._executeCommandPaletteAction();
     });
+    list.addEventListener('keydown', (event) => this._handleCommandPaletteKeydown(event, true));
     this._renderCommandPaletteItems();
     return palette;
   }
@@ -1295,9 +1311,17 @@ class SimpleWindowManager {
     this._commandPaletteItems = commands;
     this._commandPaletteActiveIndex = Math.min(this._commandPaletteActiveIndex, Math.max(commands.length - 1, 0));
     this._commandPaletteList.innerHTML = '';
+    if (commands.length) {
+      this._commandPaletteList.setAttribute('aria-activedescendant', `wm-command-item-${this._commandPaletteActiveIndex}`);
+      this._commandPaletteInput?.setAttribute('aria-activedescendant', `wm-command-item-${this._commandPaletteActiveIndex}`);
+    } else {
+      this._commandPaletteList.removeAttribute('aria-activedescendant');
+      this._commandPaletteInput?.removeAttribute('aria-activedescendant');
+    }
     if (!query) this._renderCommandPaletteRecents(commands);
     let lastCategory = '';
     commands.forEach((command, index) => {
+      const active = index === this._commandPaletteActiveIndex;
       const category = command.category || 'Commands';
       if (category !== lastCategory) {
         const heading = document.createElement('div');
@@ -1308,11 +1332,13 @@ class SimpleWindowManager {
       }
       const item = document.createElement('button');
       item.type = 'button';
-      item.className = 'wm-command-item' + (index === this._commandPaletteActiveIndex ? ' active' : '');
+      item.id = `wm-command-item-${index}`;
+      item.className = 'wm-command-item' + (active ? ' active' : '');
       item.dataset.commandIndex = String(index);
       item.dataset.commandCategory = category;
+      item.tabIndex = active ? 0 : -1;
       item.setAttribute('role', 'option');
-      item.setAttribute('aria-selected', index === this._commandPaletteActiveIndex ? 'true' : 'false');
+      item.setAttribute('aria-selected', active ? 'true' : 'false');
       item.setAttribute('aria-label', command.label);
       item.appendChild(this._makeRoundIcon('wm-taskbar-icon', command.icon));
       const label = document.createElement('span');
@@ -1364,7 +1390,57 @@ class SimpleWindowManager {
     const count = this._commandPaletteItems.length;
     if (!count) return;
     this._commandPaletteActiveIndex = (this._commandPaletteActiveIndex + delta + count) % count;
-    this._renderCommandPaletteItems();
+    this._syncCommandPaletteSelection(false);
+  }
+
+  _setCommandPaletteSelection(index, shouldFocus = false) {
+    if (!this._commandPalette || this._commandPalette.hidden) return;
+    const count = this._commandPaletteItems.length;
+    if (!count) return;
+    this._commandPaletteActiveIndex = Math.max(0, Math.min(count - 1, index));
+    this._syncCommandPaletteSelection(shouldFocus);
+  }
+
+  _syncCommandPaletteSelection(shouldFocus = false) {
+    if (!this._commandPaletteList) return;
+    const items = Array.from(this._commandPaletteList.querySelectorAll('.wm-command-item'));
+    if (!items.length) return;
+    const activeIndex = Math.max(0, Math.min(items.length - 1, this._commandPaletteActiveIndex));
+    this._commandPaletteActiveIndex = activeIndex;
+    const activeId = `wm-command-item-${activeIndex}`;
+    this._commandPaletteList.setAttribute('aria-activedescendant', activeId);
+    this._commandPaletteInput?.setAttribute('aria-activedescendant', activeId);
+    items.forEach((item, index) => {
+      const active = index === activeIndex;
+      item.classList.toggle('active', active);
+      item.setAttribute('aria-selected', active ? 'true' : 'false');
+      item.tabIndex = active ? 0 : -1;
+      if (active && shouldFocus) item.focus();
+    });
+  }
+
+  _handleCommandPaletteKeydown(event, shouldFocus = false) {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      this._moveCommandPaletteSelection(1);
+      if (shouldFocus) this._syncCommandPaletteSelection(true);
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      this._moveCommandPaletteSelection(-1);
+      if (shouldFocus) this._syncCommandPaletteSelection(true);
+    } else if (event.key === 'Home') {
+      event.preventDefault();
+      this._setCommandPaletteSelection(0, shouldFocus);
+    } else if (event.key === 'End') {
+      event.preventDefault();
+      this._setCommandPaletteSelection(this._commandPaletteItems.length - 1, shouldFocus);
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      this._executeCommandPaletteAction();
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      this._toggleCommandPalette(false);
+    }
   }
 
   _executeCommandPaletteAction() {
@@ -1393,11 +1469,16 @@ class SimpleWindowManager {
     search.type = 'search';
     search.placeholder = 'Search shortcuts';
     search.setAttribute('aria-label', 'Search keyboard shortcuts');
+    search.setAttribute('aria-controls', 'wm-shortcut-grid');
+    search.setAttribute('aria-activedescendant', 'wm-shortcut-row-0');
     overlay.appendChild(search);
 
     const grid = document.createElement('div');
+    grid.id = 'wm-shortcut-grid';
     grid.className = 'wm-shortcut-grid';
-    grid.setAttribute('role', 'list');
+    grid.setAttribute('role', 'listbox');
+    grid.setAttribute('aria-label', 'Available keyboard shortcuts');
+    grid.setAttribute('aria-activedescendant', 'wm-shortcut-row-0');
     overlay.appendChild(grid);
 
     document.body.appendChild(overlay);
@@ -1406,8 +1487,11 @@ class SimpleWindowManager {
     });
     search.addEventListener('input', () => {
       this._shortcutSearchQuery = search.value || '';
+      this._shortcutOverlayActiveIndex = 0;
       this._renderShortcutOverlay();
     });
+    search.addEventListener('keydown', (event) => this._handleShortcutOverlayKeydown(event, false));
+    grid.addEventListener('keydown', (event) => this._handleShortcutOverlayKeydown(event, true));
     this._shortcutOverlay = overlay;
     this._renderShortcutOverlay();
     return overlay;
@@ -1459,16 +1543,22 @@ class SimpleWindowManager {
     const grid = this._shortcutOverlay.querySelector('.wm-shortcut-grid');
     if (!grid) return;
     const items = this._filteredShortcutOverlayItems();
+    this._shortcutOverlayItemsCache = items;
+    this._shortcutOverlayActiveIndex = Math.min(this._shortcutOverlayActiveIndex, Math.max(items.length - 1, 0));
     grid.innerHTML = '';
     if (!items.length) {
+      grid.removeAttribute('aria-activedescendant');
+      this._shortcutOverlay.querySelector('.wm-shortcut-search')?.removeAttribute('aria-activedescendant');
       const empty = document.createElement('div');
       empty.className = 'wm-shortcut-empty';
       empty.textContent = 'No matching shortcuts';
       grid.appendChild(empty);
       return;
     }
+    grid.setAttribute('aria-activedescendant', `wm-shortcut-row-${this._shortcutOverlayActiveIndex}`);
+    this._shortcutOverlay.querySelector('.wm-shortcut-search')?.setAttribute('aria-activedescendant', `wm-shortcut-row-${this._shortcutOverlayActiveIndex}`);
     let lastCategory = '';
-    items.forEach((item) => {
+    items.forEach((item, index) => {
       if (item.category !== lastCategory) {
         const section = document.createElement('div');
         section.className = 'wm-shortcut-section';
@@ -1476,15 +1566,22 @@ class SimpleWindowManager {
         grid.appendChild(section);
         lastCategory = item.category;
       }
-      grid.appendChild(this._makeShortcutOverlayRow(item));
+      grid.appendChild(this._makeShortcutOverlayRow(item, index));
     });
   }
 
-  _makeShortcutOverlayRow(item) {
-    const row = document.createElement('div');
-    row.className = 'wm-shortcut-row';
+  _makeShortcutOverlayRow(item, index) {
+    const active = index === this._shortcutOverlayActiveIndex;
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.id = `wm-shortcut-row-${index}`;
+    row.className = 'wm-shortcut-row' + (active ? ' active' : '');
     row.dataset.shortcutCategory = item.category;
-    row.setAttribute('role', 'listitem');
+    row.dataset.shortcutIndex = String(index);
+    row.tabIndex = active ? 0 : -1;
+    row.setAttribute('role', 'option');
+    row.setAttribute('aria-selected', active ? 'true' : 'false');
+    row.setAttribute('aria-label', `${item.label}: ${item.key}`);
     const name = document.createElement('span');
     name.className = 'wm-shortcut-label';
     name.textContent = item.label;
@@ -1494,6 +1591,60 @@ class SimpleWindowManager {
     row.appendChild(name);
     row.appendChild(badge);
     return row;
+  }
+
+  _handleShortcutOverlayKeydown(event, shouldFocus = false) {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      this._moveShortcutOverlaySelection(1, shouldFocus);
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      this._moveShortcutOverlaySelection(-1, shouldFocus);
+    } else if (event.key === 'Home') {
+      event.preventDefault();
+      this._setShortcutOverlaySelection(0, shouldFocus);
+    } else if (event.key === 'End') {
+      event.preventDefault();
+      this._setShortcutOverlaySelection(this._shortcutOverlayItemsCache.length - 1, shouldFocus);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      this._toggleShortcutOverlay(false);
+    }
+  }
+
+  _moveShortcutOverlaySelection(delta, shouldFocus = false) {
+    if (!this._shortcutOverlay || this._shortcutOverlay.hidden) return;
+    const count = this._shortcutOverlayItemsCache.length;
+    if (!count) return;
+    this._shortcutOverlayActiveIndex = (this._shortcutOverlayActiveIndex + delta + count) % count;
+    this._syncShortcutOverlaySelection(shouldFocus);
+  }
+
+  _setShortcutOverlaySelection(index, shouldFocus = false) {
+    if (!this._shortcutOverlay || this._shortcutOverlay.hidden) return;
+    const count = this._shortcutOverlayItemsCache.length;
+    if (!count) return;
+    this._shortcutOverlayActiveIndex = Math.max(0, Math.min(count - 1, index));
+    this._syncShortcutOverlaySelection(shouldFocus);
+  }
+
+  _syncShortcutOverlaySelection(shouldFocus = false) {
+    if (!this._shortcutOverlay) return;
+    const grid = this._shortcutOverlay.querySelector('.wm-shortcut-grid');
+    const rows = grid ? Array.from(grid.querySelectorAll('.wm-shortcut-row')) : [];
+    if (!grid || !rows.length) return;
+    const activeIndex = Math.max(0, Math.min(rows.length - 1, this._shortcutOverlayActiveIndex));
+    this._shortcutOverlayActiveIndex = activeIndex;
+    const activeId = `wm-shortcut-row-${activeIndex}`;
+    grid.setAttribute('aria-activedescendant', activeId);
+    this._shortcutOverlay.querySelector('.wm-shortcut-search')?.setAttribute('aria-activedescendant', activeId);
+    rows.forEach((row, index) => {
+      const active = index === activeIndex;
+      row.classList.toggle('active', active);
+      row.setAttribute('aria-selected', active ? 'true' : 'false');
+      row.tabIndex = active ? 0 : -1;
+      if (active && shouldFocus) row.focus();
+    });
   }
 
   _ensureWmTooltip() {
@@ -2644,6 +2795,7 @@ class SimpleWindowManager {
       if (action && panel.contains(action)) {
         const item = action.closest('.wm-clipboard-item');
         const id = item?.dataset.clipboardId || '';
+        if (item) this._clipboardHistoryActiveIndex = Number(item.dataset.clipboardIndex || '0') || 0;
         if (action.dataset.clipboardAction === 'paste') this._pasteClipboardItem(id);
         if (action.dataset.clipboardAction === 'pin') this._pinClipboardItem(id);
         if (action.dataset.clipboardAction === 'clear') this._clearClipboardHistory();
@@ -2652,12 +2804,43 @@ class SimpleWindowManager {
       }
       const item = target?.closest('.wm-clipboard-item');
       if (!item || !panel.contains(item)) return;
+      this._clipboardHistoryActiveIndex = Number(item.dataset.clipboardIndex || '0') || 0;
       this._pasteClipboardItem(item.dataset.clipboardId || '');
+    });
+    panel.addEventListener('keydown', (event) => {
+      const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        this._toggleClipboardHistory(false);
+        return;
+      }
+      const searchHasFocus = Boolean(target?.closest('.wm-clipboard-search'));
+      if (target?.closest('.wm-clipboard-filter, .wm-clipboard-action') && !searchHasFocus) return;
+      if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
+        event.preventDefault();
+        this._moveClipboardHistorySelection(1);
+      } else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') {
+        event.preventDefault();
+        this._moveClipboardHistorySelection(-1);
+      } else if (event.key === 'Home') {
+        event.preventDefault();
+        this._setClipboardHistorySelection(0);
+      } else if (event.key === 'End') {
+        event.preventDefault();
+        this._setClipboardHistorySelection(this._filteredClipboardItems().length - 1);
+      } else if (!searchHasFocus && event.key === 'Enter') {
+        event.preventDefault();
+        this._activateClipboardHistorySelection('paste');
+      } else if (!searchHasFocus && event.key === ' ') {
+        event.preventDefault();
+        this._activateClipboardHistorySelection('pin');
+      }
     });
     panel.addEventListener('input', (event) => {
       const input = event.target?.closest?.('.wm-clipboard-search');
       if (!input || !panel.contains(input)) return;
       this._clipboardSearchQuery = input.value || '';
+      this._clipboardHistoryActiveIndex = 0;
       this._renderClipboardHistory();
     });
     document.body.appendChild(panel);
@@ -2675,7 +2858,16 @@ class SimpleWindowManager {
 
   _renderClipboardHistory() {
     const panel = this._ensureClipboardHistory();
+    const items = this._filteredClipboardItems();
+    if (this._clipboardHistoryActiveIndex >= items.length) this._clipboardHistoryActiveIndex = Math.max(0, items.length - 1);
     panel.innerHTML = '';
+    if (items.length) {
+      panel.setAttribute('aria-activedescendant', `wm-clipboard-item-${this._clipboardHistoryActiveIndex}`);
+      panel.dataset.clipboardActiveIndex = String(this._clipboardHistoryActiveIndex);
+    } else {
+      panel.removeAttribute('aria-activedescendant');
+      delete panel.dataset.clipboardActiveIndex;
+    }
     const title = document.createElement('div');
     title.className = 'wm-clipboard-title';
     title.textContent = 'Clipboard';
@@ -2695,8 +2887,9 @@ class SimpleWindowManager {
     const list = document.createElement('div');
     list.className = 'wm-clipboard-list';
     list.setAttribute('role', 'listbox');
-    const items = this._filteredClipboardItems();
-    for (const item of items) list.appendChild(this._makeClipboardItem(item));
+    list.setAttribute('aria-label', 'Clipboard entries');
+    if (items.length) list.setAttribute('aria-activedescendant', `wm-clipboard-item-${this._clipboardHistoryActiveIndex}`);
+    for (let index = 0; index < items.length; index += 1) list.appendChild(this._makeClipboardItem(items[index], index));
     if (!items.length) {
       const empty = document.createElement('div');
       empty.className = 'wm-clipboard-empty';
@@ -2758,17 +2951,23 @@ class SimpleWindowManager {
   _setClipboardKindFilter(kind) {
     const value = String(kind || 'all');
     this._clipboardKindFilter = ['command', 'code', 'link'].includes(value) ? value : 'all';
+    this._clipboardHistoryActiveIndex = 0;
     this._renderClipboardHistory();
   }
 
-  _makeClipboardItem(item) {
+  _makeClipboardItem(item, index) {
     const row = document.createElement('button');
     row.type = 'button';
-    row.className = 'wm-clipboard-item' + (item.pinned ? ' pinned' : '') + (item.id === 'command' ? ' active' : '');
+    const active = index === this._clipboardHistoryActiveIndex;
+    row.id = `wm-clipboard-item-${index}`;
+    row.className = 'wm-clipboard-item' + (item.pinned ? ' pinned' : '') + (active ? ' active' : '');
     row.dataset.clipboardId = item.id;
     row.dataset.clipboardKind = item.kind;
+    row.dataset.clipboardIndex = String(index);
+    row.tabIndex = active ? 0 : -1;
     row.setAttribute('role', 'option');
-    row.setAttribute('aria-selected', item.id === 'command' ? 'true' : 'false');
+    row.setAttribute('aria-selected', active ? 'true' : 'false');
+    row.setAttribute('aria-label', `${item.label}: ${item.value}`);
     row.appendChild(this._makeRoundIcon('wm-clipboard-icon', item.kind));
     const body = document.createElement('span');
     body.className = 'wm-clipboard-body';
@@ -2810,6 +3009,51 @@ class SimpleWindowManager {
     if (row) row.classList.toggle('pinned');
     this._sendWindowCmd('clipboard_pin', { clipboard_id: itemId });
     this._showSystemHud('Clipboard', 'pinned', 1400);
+  }
+
+  _moveClipboardHistorySelection(delta) {
+    if (!this._clipboardHistory || this._clipboardHistory.hidden) return;
+    const max = this._filteredClipboardItems().length - 1;
+    if (max < 0) return;
+    this._clipboardHistoryActiveIndex = Math.max(0, Math.min(max, this._clipboardHistoryActiveIndex + delta));
+    this._syncClipboardHistorySelection(true);
+  }
+
+  _setClipboardHistorySelection(index) {
+    if (!this._clipboardHistory || this._clipboardHistory.hidden) return;
+    const max = this._filteredClipboardItems().length - 1;
+    if (max < 0) return;
+    this._clipboardHistoryActiveIndex = Math.max(0, Math.min(max, index));
+    this._syncClipboardHistorySelection(true);
+  }
+
+  _syncClipboardHistorySelection(shouldFocus = true) {
+    if (!this._clipboardHistory) return;
+    const list = this._clipboardHistory.querySelector('.wm-clipboard-list');
+    const items = list ? Array.from(list.querySelectorAll('.wm-clipboard-item')) : [];
+    if (!list || !items.length) return;
+    const activeIndex = Math.max(0, Math.min(items.length - 1, this._clipboardHistoryActiveIndex));
+    this._clipboardHistoryActiveIndex = activeIndex;
+    const activeId = `wm-clipboard-item-${activeIndex}`;
+    this._clipboardHistory.setAttribute('aria-activedescendant', activeId);
+    this._clipboardHistory.dataset.clipboardActiveIndex = String(activeIndex);
+    list.setAttribute('aria-activedescendant', activeId);
+    items.forEach((item, index) => {
+      const active = index === activeIndex;
+      item.classList.toggle('active', active);
+      item.tabIndex = active ? 0 : -1;
+      item.setAttribute('aria-selected', active ? 'true' : 'false');
+      if (active && shouldFocus) item.focus();
+    });
+  }
+
+  _activateClipboardHistorySelection(action = 'paste') {
+    if (!this._clipboardHistory || this._clipboardHistory.hidden) return;
+    const item = this._clipboardHistory.querySelector(`.wm-clipboard-item[data-clipboard-index="${this._clipboardHistoryActiveIndex}"]`);
+    const clipboardId = item?.dataset.clipboardId || '';
+    if (!clipboardId) return;
+    if (action === 'pin') this._pinClipboardItem(clipboardId);
+    else this._pasteClipboardItem(clipboardId);
   }
 
   _clearClipboardHistory() {
@@ -2923,7 +3167,29 @@ class SimpleWindowManager {
       const target = event.target instanceof Element ? event.target : event.target?.parentElement;
       const item = target?.closest('.wm-quick-setting');
       if (!item || !panel.contains(item)) return;
+      this._quickSettingsActiveIndex = Number(item.dataset.settingIndex || '0') || 0;
       this._activateQuickSetting(item.dataset.setting || '');
+    });
+    panel.addEventListener('keydown', (event) => {
+      if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+        event.preventDefault();
+        this._moveQuickSettingsSelection(1);
+      } else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+        event.preventDefault();
+        this._moveQuickSettingsSelection(-1);
+      } else if (event.key === 'Home') {
+        event.preventDefault();
+        this._setQuickSettingsSelection(0);
+      } else if (event.key === 'End') {
+        event.preventDefault();
+        this._setQuickSettingsSelection(this._quickSettingItems().length - 1);
+      } else if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        this._activateQuickSettingsSelection();
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        this._toggleQuickSettings(false);
+      }
     });
     panel.addEventListener('input', (event) => {
       const target = event.target instanceof Element ? event.target : event.target?.parentElement;
@@ -2946,14 +3212,21 @@ class SimpleWindowManager {
 
   _renderQuickSettings() {
     const panel = this._ensureQuickSettings();
+    const items = this._quickSettingItems();
+    if (this._quickSettingsActiveIndex >= items.length) this._quickSettingsActiveIndex = Math.max(0, items.length - 1);
     panel.innerHTML = '';
+    panel.setAttribute('aria-activedescendant', `wm-quick-setting-${this._quickSettingsActiveIndex}`);
+    panel.dataset.quickActiveIndex = String(this._quickSettingsActiveIndex);
     const title = document.createElement('div');
     title.className = 'wm-quick-title';
     title.textContent = 'Quick settings';
     panel.appendChild(title);
     const grid = document.createElement('div');
     grid.className = 'wm-quick-grid';
-    for (const setting of this._quickSettingItems()) grid.appendChild(this._makeQuickSetting(setting));
+    grid.setAttribute('role', 'listbox');
+    grid.setAttribute('aria-label', 'Quick setting toggles');
+    grid.setAttribute('aria-activedescendant', `wm-quick-setting-${this._quickSettingsActiveIndex}`);
+    for (let index = 0; index < items.length; index += 1) grid.appendChild(this._makeQuickSetting(items[index], index));
     panel.appendChild(grid);
     const sliders = document.createElement('div');
     sliders.className = 'wm-quick-sliders';
@@ -2979,12 +3252,19 @@ class SimpleWindowManager {
     ];
   }
 
-  _makeQuickSetting(setting) {
+  _makeQuickSetting(setting, index) {
     const button = document.createElement('button');
     button.type = 'button';
     const active = setting.id === 'wifi' || (setting.id === 'focus' && this._focusMode !== 'off');
-    button.className = 'wm-quick-setting' + (active ? ' active' : '');
+    const selected = index === this._quickSettingsActiveIndex;
+    button.id = `wm-quick-setting-${index}`;
+    button.className = 'wm-quick-setting' + (active ? ' active' : '') + (selected ? ' selected' : '');
     button.dataset.setting = setting.id;
+    button.dataset.settingIndex = String(index);
+    button.tabIndex = selected ? 0 : -1;
+    button.setAttribute('role', 'option');
+    button.setAttribute('aria-selected', selected ? 'true' : 'false');
+    button.setAttribute('aria-pressed', active ? 'true' : 'false');
     button.appendChild(this._makeRoundIcon('wm-quick-icon', setting.label));
     const body = document.createElement('span');
     body.className = 'wm-quick-body';
@@ -3064,6 +3344,46 @@ class SimpleWindowManager {
     this._showSystemHud('Quick setting', id, 1600);
   }
 
+  _moveQuickSettingsSelection(delta) {
+    if (!this._quickSettings || this._quickSettings.hidden) return;
+    const max = this._quickSettingItems().length - 1;
+    this._quickSettingsActiveIndex = Math.max(0, Math.min(max, this._quickSettingsActiveIndex + delta));
+    this._syncQuickSettingsSelection(true);
+  }
+
+  _setQuickSettingsSelection(index) {
+    if (!this._quickSettings || this._quickSettings.hidden) return;
+    const max = this._quickSettingItems().length - 1;
+    this._quickSettingsActiveIndex = Math.max(0, Math.min(max, index));
+    this._syncQuickSettingsSelection(true);
+  }
+
+  _syncQuickSettingsSelection(shouldFocus = true) {
+    if (!this._quickSettings) return;
+    const grid = this._quickSettings.querySelector('.wm-quick-grid');
+    const settings = grid ? Array.from(grid.querySelectorAll('.wm-quick-setting')) : [];
+    if (!grid || !settings.length) return;
+    const activeIndex = Math.max(0, Math.min(settings.length - 1, this._quickSettingsActiveIndex));
+    this._quickSettingsActiveIndex = activeIndex;
+    const activeId = `wm-quick-setting-${activeIndex}`;
+    this._quickSettings.setAttribute('aria-activedescendant', activeId);
+    this._quickSettings.dataset.quickActiveIndex = String(activeIndex);
+    grid.setAttribute('aria-activedescendant', activeId);
+    settings.forEach((setting, index) => {
+      const selected = index === activeIndex;
+      setting.classList.toggle('selected', selected);
+      setting.tabIndex = selected ? 0 : -1;
+      setting.setAttribute('aria-selected', selected ? 'true' : 'false');
+      if (selected && shouldFocus) setting.focus();
+    });
+  }
+
+  _activateQuickSettingsSelection() {
+    if (!this._quickSettings || this._quickSettings.hidden) return;
+    const setting = this._quickSettings.querySelector(`.wm-quick-setting[data-setting-index="${this._quickSettingsActiveIndex}"]`);
+    this._activateQuickSetting(setting?.dataset.setting || '');
+  }
+
   _ensureNotificationCenter() {
     if (this._notificationCenter && this._notificationCenter.isConnected) return this._notificationCenter;
     const panel = document.createElement('aside');
@@ -3088,6 +3408,34 @@ class SimpleWindowManager {
       if (action.dataset.notificationAction === 'ack') this._ackNotification(notificationId);
       if (action.dataset.notificationAction === 'clear') this._clearNotifications();
     });
+    panel.addEventListener('keydown', (event) => {
+      const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        this._toggleNotificationCenter(false);
+        return;
+      }
+      if (target?.closest('.wm-notification-action, .wm-notification-filter, .wm-notification-clear')) return;
+      if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
+        event.preventDefault();
+        this._moveNotificationCenterSelection(1);
+      } else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') {
+        event.preventDefault();
+        this._moveNotificationCenterSelection(-1);
+      } else if (event.key === 'Home') {
+        event.preventDefault();
+        this._setNotificationCenterSelection(0);
+      } else if (event.key === 'End') {
+        event.preventDefault();
+        this._setNotificationCenterSelection(this._filteredNotificationItems().length - 1);
+      } else if (event.key === 'Enter') {
+        event.preventDefault();
+        this._activateNotificationCenterSelection('open');
+      } else if (event.key === ' ') {
+        event.preventDefault();
+        this._activateNotificationCenterSelection('ack');
+      }
+    });
     document.body.appendChild(panel);
     this._notificationCenter = panel;
     return panel;
@@ -3104,7 +3452,16 @@ class SimpleWindowManager {
   _renderNotificationCenter() {
     const panel = this._ensureNotificationCenter();
     panel.dataset.focusMode = this._focusMode;
+    const items = this._filteredNotificationItems();
+    if (this._notificationCenterActiveIndex >= items.length) this._notificationCenterActiveIndex = Math.max(0, items.length - 1);
     panel.innerHTML = '';
+    if (items.length) {
+      panel.setAttribute('aria-activedescendant', `wm-notification-card-${this._notificationCenterActiveIndex}`);
+      panel.dataset.notificationActiveIndex = String(this._notificationCenterActiveIndex);
+    } else {
+      panel.removeAttribute('aria-activedescendant');
+      delete panel.dataset.notificationActiveIndex;
+    }
     const header = document.createElement('div');
     header.className = 'wm-notification-header';
     const title = document.createElement('strong');
@@ -3130,8 +3487,10 @@ class SimpleWindowManager {
     const list = document.createElement('div');
     list.className = 'wm-notification-list';
     list.dataset.notificationSource = 'history';
-    const items = this._filteredNotificationItems();
-    for (const item of items) list.appendChild(this._makeNotificationCard(item));
+    list.setAttribute('role', 'listbox');
+    list.setAttribute('aria-label', 'Notification history');
+    if (items.length) list.setAttribute('aria-activedescendant', `wm-notification-card-${this._notificationCenterActiveIndex}`);
+    for (let index = 0; index < items.length; index += 1) list.appendChild(this._makeNotificationCard(items[index], index));
     if (!items.length) {
       const empty = document.createElement('div');
       empty.className = 'wm-notification-empty';
@@ -3163,6 +3522,7 @@ class SimpleWindowManager {
     const next = this._notificationFilters().some((filter) => filter.id === filterId) ? filterId : 'all';
     if (this._notificationFilter === next) return;
     this._notificationFilter = next;
+    this._notificationCenterActiveIndex = 0;
     this._renderNotificationCenter();
   }
 
@@ -3181,13 +3541,20 @@ class SimpleWindowManager {
     ];
   }
 
-  _makeNotificationCard(item) {
+  _makeNotificationCard(item, index) {
     const card = document.createElement('article');
     const quiet = this._notificationItemQuiet(item);
-    card.className = 'wm-notification-card' + (item.unread ? ' unread' : '') + (quiet ? ' quiet' : '');
+    const selected = index === this._notificationCenterActiveIndex;
+    card.id = `wm-notification-card-${index}`;
+    card.className = 'wm-notification-card' + (item.unread ? ' unread' : '') + (quiet ? ' quiet' : '') + (selected ? ' selected' : '');
     card.dataset.notificationId = item.id;
     card.dataset.notificationKind = item.kind;
+    card.dataset.notificationIndex = String(index);
     card.dataset.focusFiltered = quiet ? 'true' : 'false';
+    card.tabIndex = selected ? 0 : -1;
+    card.setAttribute('role', 'option');
+    card.setAttribute('aria-selected', selected ? 'true' : 'false');
+    card.setAttribute('aria-label', `${item.title}: ${item.meta}`);
     card.appendChild(this._makeRoundIcon('wm-notification-icon', item.title));
     const body = document.createElement('span');
     body.className = 'wm-notification-body';
@@ -3222,6 +3589,51 @@ class SimpleWindowManager {
     button.dataset.notificationAction = action;
     button.textContent = label;
     return button;
+  }
+
+  _moveNotificationCenterSelection(delta) {
+    if (!this._notificationCenter || this._notificationCenter.hidden) return;
+    const max = this._filteredNotificationItems().length - 1;
+    if (max < 0) return;
+    this._notificationCenterActiveIndex = Math.max(0, Math.min(max, this._notificationCenterActiveIndex + delta));
+    this._syncNotificationCenterSelection(true);
+  }
+
+  _setNotificationCenterSelection(index) {
+    if (!this._notificationCenter || this._notificationCenter.hidden) return;
+    const max = this._filteredNotificationItems().length - 1;
+    if (max < 0) return;
+    this._notificationCenterActiveIndex = Math.max(0, Math.min(max, index));
+    this._syncNotificationCenterSelection(true);
+  }
+
+  _syncNotificationCenterSelection(shouldFocus = true) {
+    if (!this._notificationCenter) return;
+    const list = this._notificationCenter.querySelector('.wm-notification-list');
+    const cards = list ? Array.from(list.querySelectorAll('.wm-notification-card')) : [];
+    if (!list || !cards.length) return;
+    const activeIndex = Math.max(0, Math.min(cards.length - 1, this._notificationCenterActiveIndex));
+    this._notificationCenterActiveIndex = activeIndex;
+    const activeId = `wm-notification-card-${activeIndex}`;
+    this._notificationCenter.setAttribute('aria-activedescendant', activeId);
+    this._notificationCenter.dataset.notificationActiveIndex = String(activeIndex);
+    list.setAttribute('aria-activedescendant', activeId);
+    cards.forEach((card, index) => {
+      const selected = index === activeIndex;
+      card.classList.toggle('selected', selected);
+      card.tabIndex = selected ? 0 : -1;
+      card.setAttribute('aria-selected', selected ? 'true' : 'false');
+      if (selected && shouldFocus) card.focus();
+    });
+  }
+
+  _activateNotificationCenterSelection(action = 'open') {
+    if (!this._notificationCenter || this._notificationCenter.hidden) return;
+    const card = this._notificationCenter.querySelector(`.wm-notification-card[data-notification-index="${this._notificationCenterActiveIndex}"]`);
+    const notificationId = card?.dataset.notificationId || '';
+    if (!notificationId) return;
+    if (action === 'ack') this._ackNotification(notificationId);
+    else this._openNotification(notificationId);
   }
 
   _openNotification(notificationId) {
@@ -3956,7 +4368,29 @@ class SimpleWindowManager {
       }
       const choice = event.target.closest('.wm-wallpaper-choice');
       if (!choice || !picker.contains(choice)) return;
+      this._wallpaperPickerActiveIndex = Number(choice.dataset.wallpaperIndex || '0') || 0;
       this._selectWallpaperChoice(choice.dataset.wallpaperChoice || '');
+    });
+    picker.addEventListener('keydown', (event) => {
+      if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+        event.preventDefault();
+        this._moveWallpaperPickerSelection(1);
+      } else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+        event.preventDefault();
+        this._moveWallpaperPickerSelection(-1);
+      } else if (event.key === 'Home') {
+        event.preventDefault();
+        this._setWallpaperPickerSelection(0);
+      } else if (event.key === 'End') {
+        event.preventDefault();
+        this._setWallpaperPickerSelection(this._wallpaperChoices().length - 1);
+      } else if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        this._activateWallpaperPickerSelection();
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        this._toggleWallpaperPicker(false);
+      }
     });
     document.body.appendChild(picker);
     this._wallpaperPicker = picker;
@@ -3974,7 +4408,12 @@ class SimpleWindowManager {
   _renderWallpaperPicker() {
     const picker = this._ensureWallpaperPicker();
     const active = this._normalizeWallpaperPreference(this._readWallpaperPreference());
+    const choices = this._wallpaperChoices();
+    const activeIndex = choices.findIndex((choice) => choice.id === active);
+    if (activeIndex >= 0) this._wallpaperPickerActiveIndex = activeIndex;
     picker.innerHTML = '';
+    picker.setAttribute('aria-activedescendant', `wm-wallpaper-choice-${this._wallpaperPickerActiveIndex}`);
+    picker.dataset.wallpaperActiveIndex = String(this._wallpaperPickerActiveIndex);
     const header = document.createElement('div');
     header.className = 'wm-wallpaper-header';
     const title = document.createElement('div');
@@ -3991,7 +4430,10 @@ class SimpleWindowManager {
     picker.appendChild(header);
     const grid = document.createElement('div');
     grid.className = 'wm-wallpaper-grid';
-    this._wallpaperChoices().forEach((choice) => grid.appendChild(this._makeWallpaperChoice(choice, choice.id === active)));
+    grid.setAttribute('role', 'listbox');
+    grid.setAttribute('aria-label', 'Available wallpapers');
+    grid.setAttribute('aria-activedescendant', `wm-wallpaper-choice-${this._wallpaperPickerActiveIndex}`);
+    choices.forEach((choice, index) => grid.appendChild(this._makeWallpaperChoice(choice, index)));
     picker.appendChild(grid);
   }
 
@@ -4003,12 +4445,19 @@ class SimpleWindowManager {
     ];
   }
 
-  _makeWallpaperChoice(choice, active) {
+  _makeWallpaperChoice(choice, index) {
+    const selected = choice.id === this._normalizeWallpaperPreference(this._readWallpaperPreference());
+    const active = index === this._wallpaperPickerActiveIndex;
     const button = document.createElement('button');
     button.type = 'button';
+    button.id = `wm-wallpaper-choice-${index}`;
     button.className = 'wm-wallpaper-choice' + (active ? ' active' : '');
     button.dataset.wallpaperChoice = choice.id;
-    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+    button.dataset.wallpaperIndex = String(index);
+    button.tabIndex = active ? 0 : -1;
+    button.setAttribute('role', 'option');
+    button.setAttribute('aria-selected', selected ? 'true' : 'false');
+    button.setAttribute('aria-pressed', selected ? 'true' : 'false');
     const swatch = document.createElement('span');
     swatch.className = 'wm-wallpaper-swatch wm-wallpaper-swatch-' + choice.id;
     const body = document.createElement('span');
@@ -4024,6 +4473,45 @@ class SimpleWindowManager {
     button.appendChild(swatch);
     button.appendChild(body);
     return button;
+  }
+
+  _moveWallpaperPickerSelection(delta) {
+    if (!this._wallpaperPicker || this._wallpaperPicker.hidden) return;
+    const max = this._wallpaperChoices().length - 1;
+    this._wallpaperPickerActiveIndex = Math.max(0, Math.min(max, this._wallpaperPickerActiveIndex + delta));
+    this._syncWallpaperPickerSelection(true);
+  }
+
+  _setWallpaperPickerSelection(index) {
+    if (!this._wallpaperPicker || this._wallpaperPicker.hidden) return;
+    const max = this._wallpaperChoices().length - 1;
+    this._wallpaperPickerActiveIndex = Math.max(0, Math.min(max, index));
+    this._syncWallpaperPickerSelection(true);
+  }
+
+  _syncWallpaperPickerSelection(shouldFocus = true) {
+    if (!this._wallpaperPicker) return;
+    const grid = this._wallpaperPicker.querySelector('.wm-wallpaper-grid');
+    const choices = grid ? Array.from(grid.querySelectorAll('.wm-wallpaper-choice')) : [];
+    if (!grid || !choices.length) return;
+    const activeIndex = Math.max(0, Math.min(choices.length - 1, this._wallpaperPickerActiveIndex));
+    this._wallpaperPickerActiveIndex = activeIndex;
+    const activeId = `wm-wallpaper-choice-${activeIndex}`;
+    this._wallpaperPicker.setAttribute('aria-activedescendant', activeId);
+    this._wallpaperPicker.dataset.wallpaperActiveIndex = String(activeIndex);
+    grid.setAttribute('aria-activedescendant', activeId);
+    choices.forEach((choice, index) => {
+      const active = index === activeIndex;
+      choice.classList.toggle('active', active);
+      choice.tabIndex = active ? 0 : -1;
+      if (active && shouldFocus) choice.focus();
+    });
+  }
+
+  _activateWallpaperPickerSelection() {
+    if (!this._wallpaperPicker || this._wallpaperPicker.hidden) return;
+    const choice = this._wallpaperPicker.querySelector(`.wm-wallpaper-choice[data-wallpaper-index="${this._wallpaperPickerActiveIndex}"]`);
+    this._selectWallpaperChoice(choice?.dataset.wallpaperChoice || 'aurora');
   }
 
   _selectWallpaperChoice(preference) {
@@ -4049,7 +4537,29 @@ class SimpleWindowManager {
     palette.addEventListener('click', (event) => {
       const choice = event.target.closest('.wm-accent-choice');
       if (!choice || !palette.contains(choice)) return;
+      this._accentPaletteActiveIndex = Number(choice.dataset.accentIndex || '0') || 0;
       this._selectAccentChoice(choice.dataset.accentChoice || '');
+    });
+    palette.addEventListener('keydown', (event) => {
+      if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+        event.preventDefault();
+        this._moveAccentPaletteSelection(1);
+      } else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+        event.preventDefault();
+        this._moveAccentPaletteSelection(-1);
+      } else if (event.key === 'Home') {
+        event.preventDefault();
+        this._setAccentPaletteSelection(0);
+      } else if (event.key === 'End') {
+        event.preventDefault();
+        this._setAccentPaletteSelection(this._accentChoices().length - 1);
+      } else if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        this._activateAccentPaletteSelection();
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        this._toggleAccentPalette(false);
+      }
     });
     document.body.appendChild(palette);
     this._accentPalette = palette;
@@ -4067,14 +4577,22 @@ class SimpleWindowManager {
   _renderAccentPalette() {
     const palette = this._ensureAccentPalette();
     const active = this._normalizeAccentPreference(this._readAccentPreference()).id;
+    const choices = this._accentChoices();
+    const activeIndex = choices.findIndex((choice) => choice.id === active);
+    if (activeIndex >= 0) this._accentPaletteActiveIndex = activeIndex;
     palette.innerHTML = '';
+    palette.setAttribute('aria-activedescendant', `wm-accent-choice-${this._accentPaletteActiveIndex}`);
+    palette.dataset.accentActiveIndex = String(this._accentPaletteActiveIndex);
     const title = document.createElement('div');
     title.className = 'wm-accent-title';
     title.textContent = 'Accent';
     palette.appendChild(title);
     const grid = document.createElement('div');
     grid.className = 'wm-accent-grid';
-    this._accentChoices().forEach((choice) => grid.appendChild(this._makeAccentChoice(choice, choice.id === active)));
+    grid.setAttribute('role', 'listbox');
+    grid.setAttribute('aria-label', 'Available accent colors');
+    grid.setAttribute('aria-activedescendant', `wm-accent-choice-${this._accentPaletteActiveIndex}`);
+    choices.forEach((choice, index) => grid.appendChild(this._makeAccentChoice(choice, index)));
     palette.appendChild(grid);
   }
 
@@ -4088,12 +4606,19 @@ class SimpleWindowManager {
     ];
   }
 
-  _makeAccentChoice(choice, active) {
+  _makeAccentChoice(choice, index) {
+    const selected = choice.id === this._normalizeAccentPreference(this._readAccentPreference()).id;
+    const active = index === this._accentPaletteActiveIndex;
     const button = document.createElement('button');
     button.type = 'button';
+    button.id = `wm-accent-choice-${index}`;
     button.className = 'wm-accent-choice' + (active ? ' active' : '');
     button.dataset.accentChoice = choice.id;
-    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+    button.dataset.accentIndex = String(index);
+    button.tabIndex = active ? 0 : -1;
+    button.setAttribute('role', 'option');
+    button.setAttribute('aria-selected', selected ? 'true' : 'false');
+    button.setAttribute('aria-pressed', selected ? 'true' : 'false');
     const swatch = document.createElement('span');
     swatch.className = 'wm-accent-swatch wm-accent-' + choice.id;
     const body = document.createElement('span');
@@ -4109,6 +4634,45 @@ class SimpleWindowManager {
     button.appendChild(swatch);
     button.appendChild(body);
     return button;
+  }
+
+  _moveAccentPaletteSelection(delta) {
+    if (!this._accentPalette || this._accentPalette.hidden) return;
+    const max = this._accentChoices().length - 1;
+    this._accentPaletteActiveIndex = Math.max(0, Math.min(max, this._accentPaletteActiveIndex + delta));
+    this._syncAccentPaletteSelection(true);
+  }
+
+  _setAccentPaletteSelection(index) {
+    if (!this._accentPalette || this._accentPalette.hidden) return;
+    const max = this._accentChoices().length - 1;
+    this._accentPaletteActiveIndex = Math.max(0, Math.min(max, index));
+    this._syncAccentPaletteSelection(true);
+  }
+
+  _syncAccentPaletteSelection(shouldFocus = true) {
+    if (!this._accentPalette) return;
+    const grid = this._accentPalette.querySelector('.wm-accent-grid');
+    const choices = grid ? Array.from(grid.querySelectorAll('.wm-accent-choice')) : [];
+    if (!grid || !choices.length) return;
+    const activeIndex = Math.max(0, Math.min(choices.length - 1, this._accentPaletteActiveIndex));
+    this._accentPaletteActiveIndex = activeIndex;
+    const activeId = `wm-accent-choice-${activeIndex}`;
+    this._accentPalette.setAttribute('aria-activedescendant', activeId);
+    this._accentPalette.dataset.accentActiveIndex = String(activeIndex);
+    grid.setAttribute('aria-activedescendant', activeId);
+    choices.forEach((choice, index) => {
+      const active = index === activeIndex;
+      choice.classList.toggle('active', active);
+      choice.tabIndex = active ? 0 : -1;
+      if (active && shouldFocus) choice.focus();
+    });
+  }
+
+  _activateAccentPaletteSelection() {
+    if (!this._accentPalette || this._accentPalette.hidden) return;
+    const choice = this._accentPalette.querySelector(`.wm-accent-choice[data-accent-index="${this._accentPaletteActiveIndex}"]`);
+    this._selectAccentChoice(choice?.dataset.accentChoice || 'blue');
   }
 
   _selectAccentChoice(preference) {
@@ -7281,6 +7845,8 @@ class SimpleWindowManager {
     input.type = 'text';
     input.placeholder = 'Search apps';
     input.setAttribute('aria-label', 'Search apps');
+    input.setAttribute('aria-controls', 'wm-app-launcher-grid');
+    input.setAttribute('aria-activedescendant', 'wm-app-launcher-tile-0');
     input.addEventListener('input', () => this._renderAppLauncher());
     input.addEventListener('keydown', (event) => {
       if (event.key === 'ArrowDown') {
@@ -7309,15 +7875,38 @@ class SimpleWindowManager {
     });
     launcher.appendChild(filters);
     const grid = document.createElement('div');
+    grid.id = 'wm-app-launcher-grid';
     grid.className = 'wm-app-launcher-grid';
     grid.setAttribute('role', 'listbox');
     grid.setAttribute('aria-label', 'Applications');
+    grid.setAttribute('aria-activedescendant', 'wm-app-launcher-tile-0');
     grid.addEventListener('click', (event) => {
       const target = event.target instanceof Element ? event.target : event.target?.parentElement;
       const tile = target?.closest('.wm-app-launcher-tile');
       if (!tile || !grid.contains(tile)) return;
       this._appLauncherActiveIndex = Number(tile.dataset.launcherIndex || '0') || 0;
       this._executeAppLauncherSelection();
+    });
+    grid.addEventListener('keydown', (event) => {
+      if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+        event.preventDefault();
+        this._moveAppLauncherSelection(1, true);
+      } else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+        event.preventDefault();
+        this._moveAppLauncherSelection(-1, true);
+      } else if (event.key === 'Home') {
+        event.preventDefault();
+        this._setAppLauncherSelection(0, true);
+      } else if (event.key === 'End') {
+        event.preventDefault();
+        this._setAppLauncherSelection(this._appLauncherItems.length - 1, true);
+      } else if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        this._executeAppLauncherSelection();
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        this._toggleAppLauncher(false);
+      }
     });
     launcher.appendChild(grid);
     document.body.appendChild(launcher);
@@ -7364,15 +7953,25 @@ class SimpleWindowManager {
     this._appLauncherItems = apps;
     this._appLauncherActiveIndex = Math.min(this._appLauncherActiveIndex, Math.max(apps.length - 1, 0));
     this._appLauncherGrid.innerHTML = '';
+    if (apps.length) {
+      this._appLauncherGrid.setAttribute('aria-activedescendant', `wm-app-launcher-tile-${this._appLauncherActiveIndex}`);
+      this._appLauncherInput?.setAttribute('aria-activedescendant', `wm-app-launcher-tile-${this._appLauncherActiveIndex}`);
+    } else {
+      this._appLauncherGrid.removeAttribute('aria-activedescendant');
+      this._appLauncherInput?.removeAttribute('aria-activedescendant');
+    }
     apps.forEach((app, index) => {
+      const active = index === this._appLauncherActiveIndex;
       const tile = document.createElement('button');
       tile.type = 'button';
-      tile.className = 'wm-app-launcher-tile' + (index === this._appLauncherActiveIndex ? ' active' : '');
+      tile.id = `wm-app-launcher-tile-${index}`;
+      tile.className = 'wm-app-launcher-tile' + (active ? ' active' : '');
       tile.dataset.launcherIndex = String(index);
       tile.dataset.appId = app.app_id || '';
       tile.dataset.appCategory = this._appLauncherCategoryForApp(app.app_id || '', app.display_name || '', app.category || '');
+      tile.tabIndex = active ? 0 : -1;
       tile.setAttribute('role', 'option');
-      tile.setAttribute('aria-selected', index === this._appLauncherActiveIndex ? 'true' : 'false');
+      tile.setAttribute('aria-selected', active ? 'true' : 'false');
       tile.setAttribute('aria-label', `Launch ${app.display_name || app.app_id}`);
       tile.appendChild(this._makeRoundIcon('wm-app-launcher-icon', app.icon || app.display_name || app.app_id));
       const name = document.createElement('span');
@@ -7439,12 +8038,38 @@ class SimpleWindowManager {
     return category ? category.label : 'Work';
   }
 
-  _moveAppLauncherSelection(delta) {
+  _moveAppLauncherSelection(delta, shouldFocus = false) {
     if (!this._appLauncher || this._appLauncher.hidden) return;
     const count = this._appLauncherItems.length;
     if (!count) return;
     this._appLauncherActiveIndex = (this._appLauncherActiveIndex + delta + count) % count;
-    this._renderAppLauncher();
+    this._syncAppLauncherSelection(shouldFocus);
+  }
+
+  _setAppLauncherSelection(index, shouldFocus = false) {
+    if (!this._appLauncher || this._appLauncher.hidden) return;
+    const count = this._appLauncherItems.length;
+    if (!count) return;
+    this._appLauncherActiveIndex = Math.max(0, Math.min(count - 1, index));
+    this._syncAppLauncherSelection(shouldFocus);
+  }
+
+  _syncAppLauncherSelection(shouldFocus = false) {
+    if (!this._appLauncherGrid) return;
+    const tiles = Array.from(this._appLauncherGrid.querySelectorAll('.wm-app-launcher-tile'));
+    if (!tiles.length) return;
+    const activeIndex = Math.max(0, Math.min(tiles.length - 1, this._appLauncherActiveIndex));
+    this._appLauncherActiveIndex = activeIndex;
+    const activeId = `wm-app-launcher-tile-${activeIndex}`;
+    this._appLauncherGrid.setAttribute('aria-activedescendant', activeId);
+    this._appLauncherInput?.setAttribute('aria-activedescendant', activeId);
+    tiles.forEach((tile, index) => {
+      const active = index === activeIndex;
+      tile.classList.toggle('active', active);
+      tile.setAttribute('aria-selected', active ? 'true' : 'false');
+      tile.tabIndex = active ? 0 : -1;
+      if (active && shouldFocus) tile.focus();
+    });
   }
 
   _executeAppLauncherSelection() {

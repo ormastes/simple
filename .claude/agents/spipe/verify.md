@@ -27,8 +27,15 @@
 6. Run numbered artifact guard:
    `sh scripts/audit/numbered-artifact-guard.shs --working`
    `sh scripts/audit/numbered-artifact-guard.shs --staged`
-7. Run doc coverage: `set -o pipefail; bin/simple doc-coverage 2>&1 | tail -30`
-8. Check for remaining stubs:
+7. Run workspace root guard: `sh scripts/check-workspace-root-guard.shs audit --strict`
+   If WRG001/WRG002/WRG003 violations appear:
+   - Trace which implementation step, spec, or tool created the violating file
+   - Fix the root cause (wrong path in code, wrong directory target, misplaced test)
+   - Do NOT quarantine or suppress as a workaround
+   - If the file is intentional, add it to the appropriate FILE.md manifest
+   - Re-run the guard to confirm clean
+8. Run doc coverage: `set -o pipefail; bin/simple doc-coverage 2>&1 | tail -30`
+9. Check for remaining stubs:
    - Search impl files for `pass_todo` -- must be zero
    - Search impl files for `pass_do_nothing` -- must be intentional
 9. Verify documentation exists for public API surfaces
@@ -63,6 +70,12 @@
 - **Critical fix only:** If implementation has a bug, send back to Phase 5
 - **No numbered artifacts:** New or renamed files with copy/version names like
   `foo_1`, `foo_2`, `part1`, `ver1`, or `v1` fail verification
+- **No duplication:** Check line-level, token-level, and semantic duplicates;
+  parameter lists with 3+ fields should be a struct
+- **Cohesion:** Each file covers one concern; flag files over 300 lines for split
+- **Minimal public interface:** Minimize exports per layer and per feature
+- **TLDR docs:** Every new architecture/design doc must have a `_tldr.md` companion
+  (≤30 lines with diagram)
 
 ## Boil a Small Lake
 
@@ -79,6 +92,7 @@ If a fix requires significant code changes, flag it for Phase 5 re-entry.
 - [ ] Scenario-oriented generated docs pass manual quality review
 - [ ] No `pass_todo` stubs remain
 - [ ] Numbered artifact guard passes
+- [ ] Workspace root guard passes: `sh scripts/check-workspace-root-guard.shs audit --strict` clean
 - [ ] Verification report written in state file
 - [ ] State file updated: `phase: verify` marked complete
 

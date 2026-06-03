@@ -1,12 +1,12 @@
 # Test Specification
 
-*Generated: 2026-06-02 01:30:14*
+*Generated: 2026-06-03 08:02:41*
 
-## test/feature/js
+## test/unit/lib/gpu/engine2d
 
-❌ **node_api_conformance_spec.spl** (2108ms)
-  - Source: `test/feature/js/node_api_conformance_spec.spl`
-  - Generated doc: `spec/node_api_conformance_spec.md`
+❌ **opencl_session_contract_spec.spl** (147ms)
+  - Source: `test/unit/lib/gpu/engine2d/opencl_session_contract_spec.spl`
+  - Generated doc: `doc/06_spec/opencl_session_contract_spec.md`
 
 
 ---
@@ -14,6 +14,6 @@
 ## Summary
 
 - **Total:** 1 tests
-- **Passed:** 208 ✅
+- **Passed:** 5 ✅
 - **Failed:** 1 ❌
-- **Duration:** 2118ms
+- **Duration:** 151ms

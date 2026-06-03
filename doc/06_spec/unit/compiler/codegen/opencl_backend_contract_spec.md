@@ -27,7 +27,7 @@ opencl_backend_contract_spec -> compiler
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -148,6 +148,31 @@ expect(source).to_contain("return;")
 
 </details>
 
+#### emits OpenCL C load store and pointer arithmetic for memory kernels
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val module = make_kernel_module([make_opencl_vector_add_kernel()])
+val source = OpenClBackend.compile_module_to_opencl_source(module).unwrap()
+
+expect(source).to_contain("__kernel void opencl_vector_add_u32(__global uint* a, __global uint* b, __global uint* out)")
+expect(source).to_contain("ulong v3 = get_global_id(0);")
+expect(source).to_contain("__global uint* v4 = (a + v3);")
+expect(source).to_contain("__global uint* v5 = (b + v3);")
+expect(source).to_contain("uint v7 = *v4;")
+expect(source).to_contain("uint v8 = *v5;")
+expect(source).to_contain("uint v9 = v7 + v8;")
+expect(source).to_contain("__global uint* v6 = (out + v3);")
+expect(source).to_contain("*v6 = v9;")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -167,8 +192,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

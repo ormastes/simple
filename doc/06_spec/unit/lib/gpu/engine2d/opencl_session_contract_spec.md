@@ -1,5 +1,39 @@
 # Opencl Session Contract Specification
 
+> <details>
+
+<!-- sdn-diagram:id=opencl_session_contract_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=opencl_session_contract_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+opencl_session_contract_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=opencl_session_contract_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 5 | 5 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Opencl Session Contract Specification
+
 ## Scenarios
 
 ### OpenClSession compute contract
@@ -70,6 +104,108 @@ expect(session.ref_count).to_equal(0)
 
 </details>
 
+#### retains and releases shared OpenCL sessions like CUDA sessions
+
+1. var session = OpenClSession create
+   - Expected: retained.ref_count equals `2`
+   - Expected: session.is_valid() is true
+
+2. session release
+   - Expected: session.ref_count equals `1`
+   - Expected: session.context equals `2`
+   - Expected: session.queue equals `3`
+
+3. session release
+   - Expected: session.ref_count equals `0`
+   - Expected: session.is_valid() is false
+   - Expected: session.platform equals `0`
+   - Expected: session.context equals `0`
+   - Expected: session.queue equals `0`
+   - Expected: session.program equals `0`
+   - Expected: session.kernel_cache equals `0`
+   - Expected: session.generation equals `generation_before + 1`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 28 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = OpenClSession.create()
+session.platform = 1
+session.context = 2
+session.queue = 3
+session.program = 4
+session.kernel_cache = 5
+session.is_initialized = true
+session.ref_count = 1
+val generation_before = session.generation
+
+val retained = session.retain()
+expect(retained.ref_count).to_equal(2)
+expect(session.is_valid()).to_equal(true)
+
+session.release()
+expect(session.ref_count).to_equal(1)
+expect(session.context).to_equal(2)
+expect(session.queue).to_equal(3)
+
+session.release()
+expect(session.ref_count).to_equal(0)
+expect(session.is_valid()).to_equal(false)
+expect(session.platform).to_equal(0)
+expect(session.context).to_equal(0)
+expect(session.queue).to_equal(0)
+expect(session.program).to_equal(0)
+expect(session.kernel_cache).to_equal(0)
+expect(session.generation).to_equal(generation_before + 1)
+```
+
+</details>
+
+#### cleans up through injected OpenCL FFI release hooks
+
+1. var session = OpenClSession create with ffi
+
+2. session release
+   - Expected: session.ref_count equals `0`
+   - Expected: session.is_valid() is false
+   - Expected: session.context equals `0`
+   - Expected: session.queue equals `0`
+   - Expected: session.program equals `0`
+   - Expected: session.kernel_cache equals `0`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = OpenClSession.create_with_ffi(OpenClFfi.create_static())
+session.platform = 1
+session.context = 2
+session.queue = 3
+session.program = 4
+session.kernel_cache = 5
+session.is_initialized = true
+session.ref_count = 1
+
+session.release()
+
+expect(session.ref_count).to_equal(0)
+expect(session.is_valid()).to_equal(false)
+expect(session.context).to_equal(0)
+expect(session.queue).to_equal(0)
+expect(session.program).to_equal(0)
+expect(session.kernel_cache).to_equal(0)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -89,9 +225,11 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
+
+</details>
