@@ -4222,3 +4222,17 @@ callback after the host network commit returns `network-down`. The queued state
 remains empty before commit, the fetch request targets the expected module URL,
 and the catch callback receives the network error. The focused fetch/WASM chain
 spec now passes `104/104`; broader browser/WASM semantics remain open.
+
+BrowserSession instantiateStreaming missing-import catch continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession scripts now route a valid imported-function WASM body delivered
+through `WebAssembly.instantiateStreaming(window.fetch(...), {})` into the
+promise `catch` callback when required imports are missing. The queued state
+remains empty before commit, the fetch request targets the expected module URL,
+and the catch callback receives the rejected instantiate result status and
+`unsupported-wasm-imports` metadata. The focused fetch/WASM chain spec now
+passes `105/105`; broader browser/WASM semantics remain open.
