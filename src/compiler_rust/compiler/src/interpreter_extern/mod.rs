@@ -1544,6 +1544,13 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_vulkan_wait_idle", gpu::rt_vulkan_wait_idle_fn);
     insert_simple!("rt_opencl_is_available", gpu::rt_opencl_is_available_fn);
     insert_simple!("rt_opencl_platform_count", gpu::rt_opencl_platform_count_fn);
+    insert_simple!("rt_opencl_create_context", gpu::rt_opencl_create_context_fn);
+    insert_simple!("rt_opencl_create_queue", gpu::rt_opencl_create_queue_fn);
+    insert_simple!("rt_opencl_create_program", gpu::rt_opencl_create_program_fn);
+    insert_simple!("rt_opencl_build_program", gpu::rt_opencl_build_program_fn);
+    insert_simple!("rt_opencl_create_kernel", gpu::rt_opencl_create_kernel_fn);
+    insert_simple!("rt_opencl_enqueue_ndrange", gpu::rt_opencl_enqueue_ndrange_fn);
+    insert_simple!("rt_opencl_finish", gpu::rt_opencl_finish_fn);
     insert_simple!(
         "rt_vulkan_create_graphics_pipeline",
         gpu::rt_vulkan_create_graphics_pipeline_fn

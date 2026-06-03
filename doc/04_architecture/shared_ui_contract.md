@@ -10,21 +10,63 @@ This document is the authoritative source of truth for the shared UI contract. A
 
 ## 2. Supported Surfaces
 
-### Shared-Contract Stable
+The shared UI contract has two layers:
+
+1. **Semantic UI contract** - the backend-neutral widget tree, state snapshot,
+   command/event vocabulary, and read-after-write behavior. This layer applies
+   to TUI, GUI, web, Electron, Tauri, and headless adapters.
+2. **Protocol contract** - the concrete HTTP/WebSocket `/api/test/...` API used
+   by network-addressable surfaces. This layer is stable today for Web Backend
+   and TUI-Web Proxy only.
+
+### Semantic-Contract Surfaces
+
+| Surface | Transport | Module | Stage | Notes |
+|---------|-----------|--------|-------|-------|
+| Native TUI | Direct terminal rendering | `app.ui.tui` | S1 target | Must expose the same semantic tree, command vocabulary, focus state, and captures through adapter helpers; it is not required to speak HTTP. |
+| Web Backend | HTTP + WebSocket | `app.ui.web` | S4 | Full HTML rendering, browser client, and `/api/test` endpoints. |
+| TUI-Web Proxy | HTTP + WebSocket | `app.ui.tui_web` | S4 | TUI rendered as HTML over network. |
+| Electron | IPC stdin/stdout + WebView bridge | `app.ui.electron` | S2 target | Host IPC is adapter-private; render, snapshot, patch, input, capability, and host-window envelopes come from the shared API. |
+| Tauri | IPC stdin/stdout + WebView bridge | `app.ui.tauri` | S2 target | Host IPC is adapter-private; render, snapshot, patch, input, capability, and host-window envelopes come from the shared API. |
+| Pure Simple GUI | Engine2D/Web renderer bridge | `app.ui.web`, `std.gpu.browser_engine` | S3 target | GUI state must flow through semantic UI, then shared web render artifacts, then Engine2D-backed pixels when requested. |
+| Headless | In-memory adapter | `app.ui.none` | S1 target | No interaction surface, but can expose semantic state for tests and automation. |
+
+### Maturity Stages
+
+| Stage | Meaning | Required Evidence |
+|-------|---------|-------------------|
+| S0 Adapter-only | Surface exists but has no shared semantic snapshot. | Adapter is documented as out of shared assertions. |
+| S1 Semantic state | Surface exposes `ElementInfo`, `UIStateInfo`, protocol version, and capability state through a shared helper. | Shared state query tests pass for the surface. |
+| S2 Semantic events | Surface accepts shared semantic commands/events and reports dispatch results. | Click/type/key/focus/resize command tests pass with read-after-write checks. |
+| S3 Shared renderer | Surface render/snapshot/patch/input envelopes are produced by the shared render API or a documented renderer bridge. | Envelope parity tests pass and renderer-specific transport is adapter-only. |
+| S4 Protocol stable | Surface exposes the stable HTTP/WebSocket `/api/test` protocol. | Protocol endpoint tests pass. |
+
+The next implementation target is to move Native TUI and headless to S1/S2,
+Electron and Tauri to S2/S3, and pure Simple GUI/web to S3 with Engine2D-backed
+capture evidence. Web and TUI-Web remain the only S4 surfaces today.
+
+### Protocol-Stable Surfaces
 
 | Surface | Transport | Module | Notes |
 |---------|-----------|--------|-------|
 | Web Backend | HTTP + WebSocket | `app.ui.web` | Full HTML rendering, browser client |
 | TUI-Web Proxy | HTTP + WebSocket | `app.ui.tui_web` | TUI rendered as HTML over network |
 
-### Adapter-Only (Not Part of Shared Claim)
+### Adapter Boundary
 
-| Surface | Reason |
-|---------|--------|
-| Native TUI | Direct terminal rendering, no HTTP protocol |
-| Electron | IPC stdin/stdout, different protocol shape |
-| Tauri | IPC stdin/stdout, different protocol shape |
-| Headless | No interaction surface |
+Different transports are allowed below the semantic contract. Native TUI does
+not need HTTP; Electron and Tauri may keep IPC/WebView bridges; headless may
+keep in-memory state only. These adapters must not invent a different widget
+kind vocabulary, focus model, command meaning, render-envelope schema, or
+capability vocabulary when participating in shared tests.
+
+`src/lib/common/ui/semantic_contract.spl` is the code owner for the S1 and S2
+surface-neutral API. It defines protocol version, semantic element/state
+records, semantic command/event types, dispatch result, snapshot helpers, and
+transport-independent capability records. It reuses the existing UI access
+snapshot substrate instead of creating a competing widget tree. `RenderBackend`
+remains the low-level render/event/capability interface; it is not the semantic
+UI contract by itself.
 
 ### Out of Scope
 
@@ -32,6 +74,8 @@ This document is the authoritative source of truth for the shared UI contract. A
 - CSS/browser layout assertions
 - Terminal emulator quirks
 - Platform-specific key codes
+- Requiring every staged surface to expose `/api/test` before it exposes the
+  shared semantic model
 
 ## 3. Protocol Contract
 
@@ -106,6 +150,11 @@ The `/api/test/event` endpoint accepts these event types:
 | `resize` | `width`, `height` | Viewport resize |
 
 ## 4. Data Model Contract
+
+The data model is semantic first. HTTP JSON, Electron IPC, Tauri IPC, terminal
+test helpers, and headless snapshots are transport encodings of the same model.
+Tests may use transport-specific capture mechanisms, but assertions about UI
+state must target the fields below.
 
 ### 4.1 ElementInfo
 

@@ -1641,6 +1641,57 @@ pub fn rt_opencl_platform_count_fn(_args: &[Value]) -> Result<Value, CompileErro
     Ok(Value::Int(opencl_dlopen::platform_count()))
 }
 
+/// `rt_opencl_create_context(platform: i64) -> i64`
+pub fn rt_opencl_create_context_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let _platform = arg_i64(args, 0, "rt_opencl_create_context", 1)?;
+    Ok(Value::Int(0))
+}
+
+/// `rt_opencl_create_queue(context: i64) -> i64`
+pub fn rt_opencl_create_queue_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let _context = arg_i64(args, 0, "rt_opencl_create_queue", 1)?;
+    Ok(Value::Int(0))
+}
+
+/// `rt_opencl_create_program(context: i64, source: text) -> i64`
+pub fn rt_opencl_create_program_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let _context = arg_i64(args, 0, "rt_opencl_create_program", 2)?;
+    let _source = arg_text(args, 1, "rt_opencl_create_program", 2)?;
+    Ok(Value::Int(0))
+}
+
+/// `rt_opencl_build_program(program: i64) -> bool`
+pub fn rt_opencl_build_program_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let _program = arg_i64(args, 0, "rt_opencl_build_program", 1)?;
+    Ok(Value::Bool(false))
+}
+
+/// `rt_opencl_create_kernel(program: i64, name: text) -> i64`
+pub fn rt_opencl_create_kernel_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let _program = arg_i64(args, 0, "rt_opencl_create_kernel", 2)?;
+    let _name = arg_text(args, 1, "rt_opencl_create_kernel", 2)?;
+    Ok(Value::Int(0))
+}
+
+/// `rt_opencl_enqueue_ndrange(queue, kernel, gx, gy, gz, lx, ly, lz) -> bool`
+pub fn rt_opencl_enqueue_ndrange_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let _queue = arg_i64(args, 0, "rt_opencl_enqueue_ndrange", 8)?;
+    let _kernel = arg_i64(args, 1, "rt_opencl_enqueue_ndrange", 8)?;
+    let _gx = arg_i64(args, 2, "rt_opencl_enqueue_ndrange", 8)?;
+    let _gy = arg_i64(args, 3, "rt_opencl_enqueue_ndrange", 8)?;
+    let _gz = arg_i64(args, 4, "rt_opencl_enqueue_ndrange", 8)?;
+    let _lx = arg_i64(args, 5, "rt_opencl_enqueue_ndrange", 8)?;
+    let _ly = arg_i64(args, 6, "rt_opencl_enqueue_ndrange", 8)?;
+    let _lz = arg_i64(args, 7, "rt_opencl_enqueue_ndrange", 8)?;
+    Ok(Value::Bool(false))
+}
+
+/// `rt_opencl_finish(queue: i64) -> bool`
+pub fn rt_opencl_finish_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let _queue = arg_i64(args, 0, "rt_opencl_finish", 1)?;
+    Ok(Value::Bool(false))
+}
+
 /// WebGPU surface stubs — no surface is available in interpreter mode.
 pub fn rt_webgpu_create_surface_fn(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(0))

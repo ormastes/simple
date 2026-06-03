@@ -22,6 +22,14 @@ Current implementation is a staged unification. The shared web render API and En
 
 ## Boundaries
 
+`common.ui.backend` and `doc/04_architecture/shared_ui_contract.md` define the
+semantic UI layer above transport. Native TUI, pure Simple GUI/web, Electron,
+Tauri, and headless adapters may use different event loops and IPC, but they
+must expose the same semantic widget tree, command vocabulary, focus state,
+capability vocabulary, and read-after-write behavior before rendering. HTTP
+`/api/test` remains the stable protocol only for Web and TUI-Web; staged
+surfaces participate through adapter helpers until they grow protocol endpoints.
+
 `common.ui.web_render_api` owns web render request, artifact, target capability, IPC JSON, host-window command JSON, snapshot envelopes, patch envelopes, input envelopes, and optional pixel-output representation. Platform adapters may own transport and native process details, but they must not invent incompatible render payloads. Host-native web surfaces are classified in `common.ui.window_surface_registry`; Electron and Tauri are both native-host surface kinds.
 
 `WebRenderTransportBundle` is the common bridge proof for webview-style hosts.
@@ -31,6 +39,19 @@ their helper output to this bundle, so Chromium-webview access is shared through
 `common.ui.web_render_api` while the native host process remains adapter-owned.
 
 The SimpleOS web-window adapter exposes its app surfaces as `WebRenderRequest` values and its rasterized compositor payloads as `WebRenderArtifact` pixel artifacts. Host WM renderer-name reporting uses `WEB_RENDER_TARGET_SIMPLE_WEB` from the same common API instead of local string literals.
+
+Pure Simple GUI/web follows the layered path:
+
+```text
+semantic UI tree
+  -> shared web render request/artifact
+  -> pure Simple web renderer
+  -> Engine2D RenderBackend when pixels or captures are requested
+```
+
+Compatibility fixtures and recognized-site shortcuts are allowed only as
+compatibility paths. They must not be counted as proof that the general Simple
+web renderer path is Engine2D-backed.
 
 Host-native surfaces are not a competing web renderer. They are an adapter
 boundary for platform windows, input capture, and process/window integration.
@@ -97,6 +118,7 @@ The GTK size/speed harness in `scripts/check-gtk-gui-size-speed-baseline.shs` be
 Focused verification should cover:
 
 - `test/unit/app/ui/web_render_backend_api_spec.spl`
+- semantic UI adapter conformance specs across TUI/Web/Electron/Tauri/headless
 - `test/unit/app/ui/backend_matrix_spec.spl`
 - `test/unit/lib/gc_async_mut/gpu/engine2d/*backend*_spec.spl`
 - `test/integration/rendering/cuda_strict_spec.spl`

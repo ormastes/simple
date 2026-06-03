@@ -1,0 +1,250 @@
+# Shared semantic UI contract facade.
+#
+# This module names the surface-neutral UI contract above concrete transports
+# and renderer envelopes. It intentionally reuses the existing UI access
+# snapshot model as the semantic state substrate instead of creating a parallel
+# widget tree.
+
+use common.ui.access_types.{
+    UI_ACCESS_PROTOCOL_VERSION,
+    UiAccessNode,
+    UiAccessProp,
+    UiAccessEvent,
+    UiAccessSnapshot
+}
+use common.ui.access_snapshot.{ui_access_snapshot_from_state}
+use common.ui.widget.{UIState, UIEvent}
+
+val SEMANTIC_UI_PROTOCOL_VERSION: i32 = UI_ACCESS_PROTOCOL_VERSION
+
+val SEMANTIC_UI_STAGE_ADAPTER_ONLY: text = "S0"
+val SEMANTIC_UI_STAGE_STATE: text = "S1"
+val SEMANTIC_UI_STAGE_EVENTS: text = "S2"
+val SEMANTIC_UI_STAGE_RENDERER: text = "S3"
+val SEMANTIC_UI_STAGE_PROTOCOL: text = "S4"
+
+val SEMANTIC_UI_STATUS_AVAILABLE: text = "available"
+val SEMANTIC_UI_STATUS_UNAVAILABLE: text = "semantic_adapter_unavailable"
+
+class SemanticUiCapability:
+    name: text
+    value: text
+    available: bool
+
+    static fn create(name: text, value: text, available: bool) -> SemanticUiCapability:
+        SemanticUiCapability(name: name, value: value, available: available)
+
+class SemanticElementInfo:
+    canonical_id: text
+    surface_id: text
+    widget_id: text
+    kind: text
+    visible: bool
+    focused: bool
+    enabled: bool
+    selected: bool
+    text: text
+    props: [UiAccessProp]
+    child_ids: [text]
+    action_names: [text]
+
+    static fn from_access(node: UiAccessNode) -> SemanticElementInfo:
+        SemanticElementInfo(
+            canonical_id: node.canonical_id,
+            surface_id: node.surface_id,
+            widget_id: node.widget_id,
+            kind: node.kind,
+            visible: node.visible,
+            focused: node.focused,
+            enabled: node.enabled,
+            selected: node.selected,
+            text: node.text_value,
+            props: node.props,
+            child_ids: node.child_ids,
+            action_names: node.action_names
+        )
+
+class SemanticUiStateInfo:
+    mode: text
+    focused_id: text
+    title: text
+    theme: text
+    element_count: i32
+    protocol_version: i32
+    active_surface: text
+
+    static fn from_access(snapshot: UiAccessSnapshot) -> SemanticUiStateInfo:
+        var focused_id = ""
+        for node in snapshot.nodes:
+            if node.focused:
+                focused_id = node.canonical_id
+        var title = ""
+        if snapshot.surfaces.len() > 0:
+            title = snapshot.surfaces[0].title
+        SemanticUiStateInfo(
+            mode: snapshot.mode,
+            focused_id: focused_id,
+            title: title,
+            theme: "",
+            element_count: snapshot.nodes.len(),
+            protocol_version: snapshot.protocol_version,
+            active_surface: snapshot.active_surface
+        )
+
+class SemanticUiCommand:
+    command_type: text
+    surface_id: text
+    target_id: text
+    value: text
+    key: text
+    x: f64
+    y: f64
+    dx: f64
+    dy: f64
+
+    static fn create(command_type: text, surface_id: text, target_id: text, value: text, key: text) -> SemanticUiCommand:
+        SemanticUiCommand(
+            command_type: command_type,
+            surface_id: surface_id,
+            target_id: target_id,
+            value: value,
+            key: key,
+            x: 0.0,
+            y: 0.0,
+            dx: 0.0,
+            dy: 0.0
+        )
+
+    static fn click(surface_id: text, target_id: text) -> SemanticUiCommand:
+        SemanticUiCommand.create("click", surface_id, target_id, "", "")
+
+    static fn type_text(surface_id: text, target_id: text, value: text) -> SemanticUiCommand:
+        SemanticUiCommand.create("type", surface_id, target_id, value, "")
+
+    static fn key(surface_id: text, key: text) -> SemanticUiCommand:
+        SemanticUiCommand.create("key", surface_id, "", "", key)
+
+    static fn action(surface_id: text, name: text) -> SemanticUiCommand:
+        SemanticUiCommand.create("action", surface_id, "", name, "")
+
+    static fn focus(surface_id: text, target_id: text) -> SemanticUiCommand:
+        SemanticUiCommand.create("focus", surface_id, target_id, "", "")
+
+class SemanticUiDispatchResult:
+    ok: bool
+    command_type: text
+    surface_id: text
+    target_id: text
+    affected_id: text
+    reason: text
+    snapshot_revision: i64
+
+    static fn success(command: SemanticUiCommand, affected_id: text, snapshot_revision: i64) -> SemanticUiDispatchResult:
+        SemanticUiDispatchResult(
+            ok: true,
+            command_type: command.command_type,
+            surface_id: command.surface_id,
+            target_id: command.target_id,
+            affected_id: affected_id,
+            reason: "ok",
+            snapshot_revision: snapshot_revision
+        )
+
+    static fn failure(command: SemanticUiCommand, reason: text, snapshot_revision: i64) -> SemanticUiDispatchResult:
+        SemanticUiDispatchResult(
+            ok: false,
+            command_type: command.command_type,
+            surface_id: command.surface_id,
+            target_id: command.target_id,
+            affected_id: "",
+            reason: reason,
+            snapshot_revision: snapshot_revision
+        )
+
+class SemanticUiSnapshot:
+    protocol_version: i32
+    stage: text
+    adapter_status: text
+    state: SemanticUiStateInfo
+    elements: [SemanticElementInfo]
+    capabilities: [SemanticUiCapability]
+    recent_events: [UiAccessEvent]
+
+    static fn unavailable(stage: text, reason: text) -> SemanticUiSnapshot:
+        SemanticUiSnapshot(
+            protocol_version: SEMANTIC_UI_PROTOCOL_VERSION,
+            stage: stage,
+            adapter_status: reason,
+            state: SemanticUiStateInfo(
+                mode: "",
+                focused_id: "",
+                title: "",
+                theme: "",
+                element_count: 0,
+                protocol_version: SEMANTIC_UI_PROTOCOL_VERSION,
+                active_surface: ""
+            ),
+            elements: [],
+            capabilities: [],
+            recent_events: []
+        )
+
+fn semantic_ui_elements_from_access(nodes: [UiAccessNode]) -> [SemanticElementInfo]:
+    var out: [SemanticElementInfo] = []
+    for node in nodes:
+        out = out.push(SemanticElementInfo.from_access(node))
+    out
+
+fn semantic_ui_snapshot_from_access(snapshot: UiAccessSnapshot, stage: text, adapter_status: text) -> SemanticUiSnapshot:
+    SemanticUiSnapshot(
+        protocol_version: snapshot.protocol_version,
+        stage: stage,
+        adapter_status: adapter_status,
+        state: SemanticUiStateInfo.from_access(snapshot),
+        elements: semantic_ui_elements_from_access(snapshot.nodes),
+        capabilities: [],
+        recent_events: snapshot.recent_events
+    )
+
+fn semantic_ui_snapshot_from_state(state: UIState, stage: text, adapter_status: text) -> SemanticUiSnapshot:
+    semantic_ui_snapshot_from_access(ui_access_snapshot_from_state(state, []), stage, adapter_status)
+
+fn semantic_ui_command_to_event_kind(command: SemanticUiCommand) -> text:
+    if command.command_type == "type":
+        return "input"
+    if command.command_type == "key":
+        return "key"
+    command.command_type
+
+fn semantic_ui_command_to_event(command: SemanticUiCommand) -> UIEvent?:
+    if command.command_type == "click":
+        return UIEvent.Action(name: "click_" + command.target_id)
+    if command.command_type == "type":
+        return UIEvent.InputChange(target_id: command.target_id, value: command.value)
+    if command.command_type == "key":
+        return UIEvent.KeyPress(key: command.key)
+    if command.command_type == "action":
+        return UIEvent.Action(name: command.value)
+    if command.command_type == "focus":
+        return UIEvent.FocusEvent(target_id: command.target_id, kind: "focus")
+    if command.command_type == "focus_next":
+        return UIEvent.FocusNext
+    if command.command_type == "focus_prev":
+        return UIEvent.FocusPrev
+    if command.command_type == "quit":
+        return UIEvent.Quit
+    nil
+
+fn semantic_ui_stage_at_least(stage: text, required: text) -> bool:
+    _semantic_stage_rank(stage) >= _semantic_stage_rank(required)
+
+fn _semantic_stage_rank(stage: text) -> i32:
+    if stage == SEMANTIC_UI_STAGE_PROTOCOL:
+        return 4
+    if stage == SEMANTIC_UI_STAGE_RENDERER:
+        return 3
+    if stage == SEMANTIC_UI_STAGE_EVENTS:
+        return 2
+    if stage == SEMANTIC_UI_STAGE_STATE:
+        return 1
+    0

@@ -67,9 +67,41 @@ REQ-012: Tests and evidence
 Add focused tests or specs for:
 
 - shared web render API conformance across Web/Electron/Tauri/pure Simple
+- shared semantic UI conformance across TUI/Web/Electron/Tauri/headless helpers
 - Engine2D backend interface conformance for CPU/Metal/CUDA
+- pure Simple web renderer to Engine2D capture evidence
 - host/SimpleOS WM shared logic parity
 - size comparison reporting for the Qt baseline
+
+REQ-013: Shared semantic UI across TUI and GUI backends
+
+The repo must define a backend-neutral semantic UI contract above individual
+surface transports. Native TUI, pure Simple GUI/web, Electron, Tauri, and
+headless adapters may keep different transports, but they must map to the same
+semantic widget tree, widget kind vocabulary, focus state, command/event
+vocabulary, capability vocabulary, and read-after-write behavior before any
+surface-specific rendering or IPC is applied. HTTP/WebSocket `/api/test` support
+may remain stable only for Web and TUI-Web while the other surfaces are staged
+through semantic adapter helpers.
+
+The planned code owner is `src/lib/common/ui/semantic_contract.spl`, separate
+from `RenderBackend` and `web_render_api.spl`. It must define typed semantic
+state, element, command, dispatch, snapshot, and capability records.
+
+REQ-014: Pure Simple GUI to web renderer to Engine2D path
+
+The pure Simple GUI path must route from semantic UI state through the shared
+web render API, then through the pure Simple web renderer, and finally into the
+Engine2D render interface when pixel output or capture is requested. Fixture or
+heuristic renderer shortcuts must be reported as compatibility paths and must
+not be used as evidence that the whole renderer is Engine2D-backed.
+
+REQ-015: Semantic contract system tests
+
+Add shared semantic UI tests that assert the same fixture produces the same
+semantic state and command results across Web, Native TUI, Electron, Tauri, and
+headless helpers. `/api/test` endpoint coverage remains the Web/TUI-Web
+protocol transport test, not the only proof of semantic contract conformance.
 
 ## Out Of Scope
 

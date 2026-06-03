@@ -6,6 +6,8 @@
 #include "runtime_simd_dispatch.h"
 #include "runtime.h"
 
+#include <stdlib.h>
+
 #if defined(__x86_64__) || defined(_M_X64)
 #  include <immintrin.h>
 #endif
@@ -14,32 +16,155 @@
 #  include <dlfcn.h>
 #endif
 
-typedef int (*rt_opencl_get_platform_ids_fn)(uint32_t, void*, uint32_t*);
+typedef intptr_t rt_opencl_context_property;
+typedef uint64_t rt_opencl_device_type;
 
-static rt_opencl_get_platform_ids_fn rt_opencl_get_platform_ids_symbol(void) {
+#define RT_OPENCL_SUCCESS 0
+#define RT_OPENCL_DEVICE_TYPE_GPU (1ULL << 2)
+#define RT_OPENCL_DEVICE_TYPE_ACCELERATOR (1ULL << 3)
+#define RT_OPENCL_CONTEXT_PLATFORM 0x1084
+#define RT_OPENCL_CONTEXT_MAGIC 0x534f4343U
+#define RT_OPENCL_QUEUE_MAGIC 0x534f4349U
+#define RT_OPENCL_PROGRAM_MAGIC 0x534f4350U
+#define RT_OPENCL_KERNEL_MAGIC 0x534f434bU
+
+typedef int (*rt_opencl_get_platform_ids_fn)(uint32_t, void*, uint32_t*);
+typedef int (*rt_opencl_get_device_ids_fn)(void*, rt_opencl_device_type, uint32_t, void**, uint32_t*);
+typedef void* (*rt_opencl_create_context_fn)(const rt_opencl_context_property*, uint32_t, void* const*, void*, void*, int*);
+typedef void* (*rt_opencl_create_command_queue_fn)(void*, void*, uint64_t, int*);
+typedef void* (*rt_opencl_create_command_queue_with_properties_fn)(void*, void*, const rt_opencl_context_property*, int*);
+typedef void* (*rt_opencl_create_program_with_source_fn)(void*, uint32_t, const char**, const size_t*, int*);
+typedef int (*rt_opencl_build_program_fn)(void*, uint32_t, void* const*, const char*, void*, void*);
+typedef void* (*rt_opencl_create_kernel_fn)(void*, const char*, int*);
+typedef int (*rt_opencl_enqueue_ndrange_kernel_fn)(void*, void*, uint32_t, const size_t*, const size_t*, const size_t*, uint32_t, const void**, void*);
+typedef int (*rt_opencl_finish_fn)(void*);
+typedef int (*rt_opencl_release_context_fn)(void*);
+typedef int (*rt_opencl_release_command_queue_fn)(void*);
+typedef int (*rt_opencl_release_program_fn)(void*);
+typedef int (*rt_opencl_release_kernel_fn)(void*);
+
+typedef struct RtOpenClFns {
+    rt_opencl_get_platform_ids_fn get_platform_ids;
+    rt_opencl_get_device_ids_fn get_device_ids;
+    rt_opencl_create_context_fn create_context;
+    rt_opencl_create_command_queue_fn create_command_queue;
+    rt_opencl_create_command_queue_with_properties_fn create_command_queue_with_properties;
+    rt_opencl_create_program_with_source_fn create_program_with_source;
+    rt_opencl_build_program_fn build_program;
+    rt_opencl_create_kernel_fn create_kernel;
+    rt_opencl_enqueue_ndrange_kernel_fn enqueue_ndrange_kernel;
+    rt_opencl_finish_fn finish;
+    rt_opencl_release_context_fn release_context;
+    rt_opencl_release_command_queue_fn release_command_queue;
+    rt_opencl_release_program_fn release_program;
+    rt_opencl_release_kernel_fn release_kernel;
+} RtOpenClFns;
+
+typedef struct RtOpenClContext {
+    uint32_t magic;
+    void* platform;
+    void* device;
+    void* context;
+} RtOpenClContext;
+
+typedef struct RtOpenClQueue {
+    uint32_t magic;
+    RtOpenClContext* owner;
+    void* queue;
+} RtOpenClQueue;
+
+typedef struct RtOpenClProgram {
+    uint32_t magic;
+    RtOpenClContext* owner;
+    void* program;
+} RtOpenClProgram;
+
+typedef struct RtOpenClKernel {
+    uint32_t magic;
+    RtOpenClProgram* owner;
+    void* kernel;
+} RtOpenClKernel;
+
+static RtOpenClFns* rt_opencl_load_symbols(void) {
 #if defined(_WIN32)
     return NULL;
 #else
     static void* opencl_handle = NULL;
-    static rt_opencl_get_platform_ids_fn symbol = NULL;
+    static RtOpenClFns fns;
     static int attempted = 0;
-    if (attempted) return symbol;
+    if (attempted) return fns.get_platform_ids ? &fns : NULL;
     attempted = 1;
     opencl_handle = dlopen("libOpenCL.so.1", RTLD_LAZY | RTLD_LOCAL);
     if (!opencl_handle) {
         opencl_handle = dlopen("libOpenCL.so", RTLD_LAZY | RTLD_LOCAL);
     }
     if (!opencl_handle) return NULL;
-    symbol = (rt_opencl_get_platform_ids_fn)dlsym(opencl_handle, "clGetPlatformIDs");
-    return symbol;
+    fns.get_platform_ids = (rt_opencl_get_platform_ids_fn)dlsym(opencl_handle, "clGetPlatformIDs");
+    fns.get_device_ids = (rt_opencl_get_device_ids_fn)dlsym(opencl_handle, "clGetDeviceIDs");
+    fns.create_context = (rt_opencl_create_context_fn)dlsym(opencl_handle, "clCreateContext");
+    fns.create_command_queue = (rt_opencl_create_command_queue_fn)dlsym(opencl_handle, "clCreateCommandQueue");
+    fns.create_command_queue_with_properties = (rt_opencl_create_command_queue_with_properties_fn)dlsym(opencl_handle, "clCreateCommandQueueWithProperties");
+    fns.create_program_with_source = (rt_opencl_create_program_with_source_fn)dlsym(opencl_handle, "clCreateProgramWithSource");
+    fns.build_program = (rt_opencl_build_program_fn)dlsym(opencl_handle, "clBuildProgram");
+    fns.create_kernel = (rt_opencl_create_kernel_fn)dlsym(opencl_handle, "clCreateKernel");
+    fns.enqueue_ndrange_kernel = (rt_opencl_enqueue_ndrange_kernel_fn)dlsym(opencl_handle, "clEnqueueNDRangeKernel");
+    fns.finish = (rt_opencl_finish_fn)dlsym(opencl_handle, "clFinish");
+    fns.release_context = (rt_opencl_release_context_fn)dlsym(opencl_handle, "clReleaseContext");
+    fns.release_command_queue = (rt_opencl_release_command_queue_fn)dlsym(opencl_handle, "clReleaseCommandQueue");
+    fns.release_program = (rt_opencl_release_program_fn)dlsym(opencl_handle, "clReleaseProgram");
+    fns.release_kernel = (rt_opencl_release_kernel_fn)dlsym(opencl_handle, "clReleaseKernel");
+    if (!fns.get_platform_ids || !fns.get_device_ids || !fns.create_context ||
+        (!fns.create_command_queue && !fns.create_command_queue_with_properties) ||
+        !fns.create_program_with_source || !fns.build_program || !fns.create_kernel ||
+        !fns.enqueue_ndrange_kernel || !fns.finish) {
+        return NULL;
+    }
+    return &fns;
 #endif
 }
 
-int64_t rt_opencl_platform_count(void) {
-    rt_opencl_get_platform_ids_fn get_platform_ids = rt_opencl_get_platform_ids_symbol();
-    if (!get_platform_ids) return 0;
+static int rt_opencl_platform_at(RtOpenClFns* fns, int64_t platform_index, void** out_platform) {
+    if (!fns || !out_platform) return 0;
     uint32_t count = 0;
-    int status = get_platform_ids(0, NULL, &count);
+    if (fns->get_platform_ids(0, NULL, &count) != RT_OPENCL_SUCCESS || count == 0) return 0;
+    void** platforms = (void**)calloc(count, sizeof(void*));
+    if (!platforms) return 0;
+    int ok = fns->get_platform_ids(count, platforms, NULL) == RT_OPENCL_SUCCESS;
+    uint32_t index = platform_index <= 1 ? 0 : (uint32_t)(platform_index - 1);
+    if (!ok || index >= count || !platforms[index]) {
+        free(platforms);
+        return 0;
+    }
+    *out_platform = platforms[index];
+    free(platforms);
+    return 1;
+}
+
+static int rt_opencl_first_non_cpu_device(RtOpenClFns* fns, void* platform, void** out_device) {
+    if (!fns || !platform || !out_device) return 0;
+    rt_opencl_device_type types[2] = {
+        RT_OPENCL_DEVICE_TYPE_GPU,
+        RT_OPENCL_DEVICE_TYPE_ACCELERATOR
+    };
+    for (size_t i = 0; i < 2; i++) {
+        uint32_t count = 0;
+        if (fns->get_device_ids(platform, types[i], 0, NULL, &count) != RT_OPENCL_SUCCESS || count == 0) {
+            continue;
+        }
+        void* device = NULL;
+        if (fns->get_device_ids(platform, types[i], 1, &device, NULL) == RT_OPENCL_SUCCESS && device) {
+            *out_device = device;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int64_t rt_opencl_platform_count(void) {
+    RtOpenClFns* fns = rt_opencl_load_symbols();
+    if (!fns) return 0;
+    uint32_t count = 0;
+    int status = fns->get_platform_ids(0, NULL, &count);
     if (status != 0) return 0;
     return (int64_t)count;
 }
@@ -49,47 +174,141 @@ bool rt_opencl_is_available(void) {
 }
 
 int64_t rt_opencl_create_context(int64_t platform) {
-    (void)platform;
-    return 0;
+    RtOpenClFns* fns = rt_opencl_load_symbols();
+    void* platform_handle = NULL;
+    void* device = NULL;
+    if (!rt_opencl_platform_at(fns, platform, &platform_handle)) return 0;
+    if (!rt_opencl_first_non_cpu_device(fns, platform_handle, &device)) return 0;
+    rt_opencl_context_property properties[] = {
+        RT_OPENCL_CONTEXT_PLATFORM, (rt_opencl_context_property)platform_handle, 0
+    };
+    int status = 0;
+    void* context = fns->create_context(properties, 1, &device, NULL, NULL, &status);
+    if (status != RT_OPENCL_SUCCESS || !context) return 0;
+    RtOpenClContext* wrapped = (RtOpenClContext*)calloc(1, sizeof(RtOpenClContext));
+    if (!wrapped) {
+        if (fns->release_context) fns->release_context(context);
+        return 0;
+    }
+    wrapped->magic = RT_OPENCL_CONTEXT_MAGIC;
+    wrapped->platform = platform_handle;
+    wrapped->device = device;
+    wrapped->context = context;
+    return (int64_t)(intptr_t)wrapped;
 }
 
 int64_t rt_opencl_create_queue(int64_t context) {
-    (void)context;
-    return 0;
+    RtOpenClFns* fns = rt_opencl_load_symbols();
+    RtOpenClContext* wrapped_context = (RtOpenClContext*)(intptr_t)context;
+    if (!fns || !wrapped_context || wrapped_context->magic != RT_OPENCL_CONTEXT_MAGIC) return 0;
+    int status = 0;
+    void* queue = NULL;
+    if (fns->create_command_queue_with_properties) {
+        queue = fns->create_command_queue_with_properties(wrapped_context->context, wrapped_context->device, NULL, &status);
+    } else {
+        queue = fns->create_command_queue(wrapped_context->context, wrapped_context->device, 0, &status);
+    }
+    if (status != RT_OPENCL_SUCCESS || !queue) return 0;
+    RtOpenClQueue* wrapped = (RtOpenClQueue*)calloc(1, sizeof(RtOpenClQueue));
+    if (!wrapped) {
+        if (fns->release_command_queue) fns->release_command_queue(queue);
+        return 0;
+    }
+    wrapped->magic = RT_OPENCL_QUEUE_MAGIC;
+    wrapped->owner = wrapped_context;
+    wrapped->queue = queue;
+    return (int64_t)(intptr_t)wrapped;
 }
 
 int64_t rt_opencl_create_program(int64_t context, const char* source) {
-    (void)context;
-    (void)source;
-    return 0;
+    RtOpenClFns* fns = rt_opencl_load_symbols();
+    RtOpenClContext* wrapped_context = (RtOpenClContext*)(intptr_t)context;
+    if (!fns || !wrapped_context || wrapped_context->magic != RT_OPENCL_CONTEXT_MAGIC || !source || source[0] == '\0') {
+        return 0;
+    }
+    const char* sources[] = { source };
+    size_t lengths[] = { strlen(source) };
+    int status = 0;
+    void* program = fns->create_program_with_source(wrapped_context->context, 1, sources, lengths, &status);
+    if (status != RT_OPENCL_SUCCESS || !program) return 0;
+    RtOpenClProgram* wrapped = (RtOpenClProgram*)calloc(1, sizeof(RtOpenClProgram));
+    if (!wrapped) {
+        if (fns->release_program) fns->release_program(program);
+        return 0;
+    }
+    wrapped->magic = RT_OPENCL_PROGRAM_MAGIC;
+    wrapped->owner = wrapped_context;
+    wrapped->program = program;
+    return (int64_t)(intptr_t)wrapped;
 }
 
 bool rt_opencl_build_program(int64_t program) {
-    (void)program;
-    return false;
+    RtOpenClFns* fns = rt_opencl_load_symbols();
+    RtOpenClProgram* wrapped_program = (RtOpenClProgram*)(intptr_t)program;
+    if (!fns || !wrapped_program || wrapped_program->magic != RT_OPENCL_PROGRAM_MAGIC || !wrapped_program->owner) {
+        return false;
+    }
+    return fns->build_program(
+        wrapped_program->program,
+        1,
+        &wrapped_program->owner->device,
+        NULL,
+        NULL,
+        NULL
+    ) == RT_OPENCL_SUCCESS;
 }
 
 int64_t rt_opencl_create_kernel(int64_t program, const char* name) {
-    (void)program;
-    (void)name;
-    return 0;
+    RtOpenClFns* fns = rt_opencl_load_symbols();
+    RtOpenClProgram* wrapped_program = (RtOpenClProgram*)(intptr_t)program;
+    if (!fns || !wrapped_program || wrapped_program->magic != RT_OPENCL_PROGRAM_MAGIC || !name || name[0] == '\0') {
+        return 0;
+    }
+    int status = 0;
+    void* kernel = fns->create_kernel(wrapped_program->program, name, &status);
+    if (status != RT_OPENCL_SUCCESS || !kernel) return 0;
+    RtOpenClKernel* wrapped = (RtOpenClKernel*)calloc(1, sizeof(RtOpenClKernel));
+    if (!wrapped) {
+        if (fns->release_kernel) fns->release_kernel(kernel);
+        return 0;
+    }
+    wrapped->magic = RT_OPENCL_KERNEL_MAGIC;
+    wrapped->owner = wrapped_program;
+    wrapped->kernel = kernel;
+    return (int64_t)(intptr_t)wrapped;
 }
 
 bool rt_opencl_enqueue_ndrange(int64_t queue, int64_t kernel, int64_t gx, int64_t gy, int64_t gz, int64_t lx, int64_t ly, int64_t lz) {
-    (void)queue;
-    (void)kernel;
-    (void)gx;
-    (void)gy;
-    (void)gz;
-    (void)lx;
-    (void)ly;
-    (void)lz;
-    return false;
+    RtOpenClFns* fns = rt_opencl_load_symbols();
+    RtOpenClQueue* wrapped_queue = (RtOpenClQueue*)(intptr_t)queue;
+    RtOpenClKernel* wrapped_kernel = (RtOpenClKernel*)(intptr_t)kernel;
+    if (!fns || !wrapped_queue || !wrapped_kernel ||
+        wrapped_queue->magic != RT_OPENCL_QUEUE_MAGIC ||
+        wrapped_kernel->magic != RT_OPENCL_KERNEL_MAGIC ||
+        gx <= 0 || gy <= 0 || gz <= 0) {
+        return false;
+    }
+    size_t global[3] = { (size_t)gx, (size_t)gy, (size_t)gz };
+    size_t local[3] = { (size_t)lx, (size_t)ly, (size_t)lz };
+    const size_t* local_ptr = (lx > 0 && ly > 0 && lz > 0) ? local : NULL;
+    return fns->enqueue_ndrange_kernel(
+        wrapped_queue->queue,
+        wrapped_kernel->kernel,
+        3,
+        NULL,
+        global,
+        local_ptr,
+        0,
+        NULL,
+        NULL
+    ) == RT_OPENCL_SUCCESS;
 }
 
 bool rt_opencl_finish(int64_t queue) {
-    (void)queue;
-    return false;
+    RtOpenClFns* fns = rt_opencl_load_symbols();
+    RtOpenClQueue* wrapped_queue = (RtOpenClQueue*)(intptr_t)queue;
+    if (!fns || !wrapped_queue || wrapped_queue->magic != RT_OPENCL_QUEUE_MAGIC) return false;
+    return fns->finish(wrapped_queue->queue) == RT_OPENCL_SUCCESS;
 }
 
 static inline int64_t engine2d_numeric_arg(int64_t value) {

@@ -4047,10 +4047,13 @@ class SimpleWindowManager {
     panel.appendChild(this._makeQualityInteractionPreview());
     panel.appendChild(this._makeQualityComputedShortcutPreview());
     panel.appendChild(this._makeQualityComputedMultitaskingPreview());
+    panel.appendChild(this._makeQualityComputedWorkspaceControlsPreview());
+    panel.appendChild(this._makeQualityComputedWindowActionsPreview());
     panel.appendChild(this._makeQualityStatePreview());
     panel.appendChild(this._makeQualityComputedLifecyclePreview());
     panel.appendChild(this._makeQualityVerbosityPreview());
     panel.appendChild(this._makeQualityComputedPersonalizationPreview());
+    panel.appendChild(this._makeQualityComputedControlCenterPreview());
     panel.appendChild(this._makeQualityComputedOsToolsPreview());
     panel.appendChild(this._makeQualityPerformancePreview());
     panel.appendChild(this._makeQualityComputedBackdropPreview());
@@ -4065,6 +4068,7 @@ class SimpleWindowManager {
     panel.appendChild(this._makeQualityAccessibilityPreview());
     panel.appendChild(this._makeQualityComputedAccessibilityPreview());
     panel.appendChild(this._makeQualityComputedStatusPreview());
+    panel.appendChild(this._makeQualityComputedProductivityPreview());
     panel.appendChild(this._makeQualityMotionPreview());
     panel.appendChild(this._makeQualityAnimationPreview());
     panel.appendChild(this._makeQualityWidgetPreview());
@@ -4985,6 +4989,127 @@ class SimpleWindowManager {
     };
   }
 
+  _makeQualityComputedWorkspaceControlsPreview() {
+    const snapshot = this._qualityWorkspaceControlsSnapshot();
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-computed-workspace-controls-preview';
+    preview.dataset.qualityComputedWorkspaceControls = 'live';
+    preview.appendChild(this._makeQualityComputedWorkspaceControlsMetric('Workspace', snapshot.workspace, 'workspace', snapshot.workspaceOk));
+    preview.appendChild(this._makeQualityComputedWorkspaceControlsMetric('Corners', snapshot.corners, 'corners', snapshot.cornersOk));
+    preview.appendChild(this._makeQualityComputedWorkspaceControlsMetric('Gestures', snapshot.gestures, 'gestures', snapshot.gesturesOk));
+    preview.appendChild(this._makeQualityComputedWorkspaceControlsMetric('Focus', snapshot.focus, 'focus', snapshot.focusOk));
+    return preview;
+  }
+
+  _makeQualityComputedWorkspaceControlsMetric(label, value, kind, good) {
+    const metric = document.createElement('span');
+    metric.className = 'wm-quality-computed-workspace-controls-metric ' + (good ? 'good' : 'warn');
+    metric.dataset.computedWorkspaceControlsMetric = kind;
+    const glyph = document.createElement('span');
+    glyph.className = 'wm-quality-computed-workspace-controls-glyph';
+    glyph.setAttribute('aria-hidden', 'true');
+    glyph.textContent = label.slice(0, 1);
+    const name = document.createElement('span');
+    name.className = 'wm-quality-computed-workspace-controls-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-computed-workspace-controls-value';
+    result.textContent = value;
+    metric.appendChild(glyph);
+    metric.appendChild(name);
+    metric.appendChild(result);
+    return metric;
+  }
+
+  _qualityWorkspaceControlsSnapshot() {
+    const workspace = this._ensureWorkspaceSwitcher();
+    this._renderWorkspaceSwitcher();
+    const workspaceCards = workspace.querySelectorAll('.wm-workspace-card').length;
+    const workspaceActions = workspace.querySelectorAll('[data-workspace-action]').length;
+    const corners = this._ensureHotCorners();
+    const cornerZones = corners.querySelectorAll('[data-hot-corner-action]').length;
+    const gestures = this._ensureGestureHints();
+    this._renderGestureHints();
+    const gestureRows = gestures.querySelectorAll('[data-gesture-hint]').length;
+    const resize = this._ensureResizeHud();
+    const resizeLive = resize.getAttribute('role') === 'status' && resize.getAttribute('aria-live') === 'polite';
+    const focus = this._normalizeFocusMode(document.documentElement.dataset.wmFocusMode || this._focusMode);
+    return {
+      workspace: String(workspaceCards) + ' spaces',
+      workspaceOk: workspaceCards >= 3 && workspaceActions >= 9,
+      corners: String(cornerZones) + ' zones',
+      cornersOk: cornerZones >= 4,
+      gestures: String(gestureRows) + ' hints',
+      gesturesOk: gestureRows >= 4 && resizeLive,
+      focus: this._focusModeLabel(focus),
+      focusOk: ['off', 'work', 'deep'].includes(focus)
+    };
+  }
+
+  _makeQualityComputedWindowActionsPreview() {
+    const snapshot = this._qualityWindowActionsSnapshot();
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-computed-window-actions-preview';
+    preview.dataset.qualityComputedWindowActions = 'live';
+    preview.appendChild(this._makeQualityComputedWindowActionsMetric('Snap', snapshot.snap, 'snap', snapshot.snapOk));
+    preview.appendChild(this._makeQualityComputedWindowActionsMetric('Arrange', snapshot.arrange, 'arrange', snapshot.arrangeOk));
+    preview.appendChild(this._makeQualityComputedWindowActionsMetric('Taskbar', snapshot.taskbar, 'taskbar', snapshot.taskbarOk));
+    preview.appendChild(this._makeQualityComputedWindowActionsMetric('Chrome', snapshot.chrome, 'chrome', snapshot.chromeOk));
+    return preview;
+  }
+
+  _makeQualityComputedWindowActionsMetric(label, value, kind, good) {
+    const metric = document.createElement('span');
+    metric.className = 'wm-quality-computed-window-actions-metric ' + (good ? 'good' : 'warn');
+    metric.dataset.computedWindowActionsMetric = kind;
+    const glyph = document.createElement('span');
+    glyph.className = 'wm-quality-computed-window-actions-glyph';
+    glyph.setAttribute('aria-hidden', 'true');
+    glyph.textContent = label.slice(0, 1);
+    const name = document.createElement('span');
+    name.className = 'wm-quality-computed-window-actions-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-computed-window-actions-value';
+    result.textContent = value;
+    metric.appendChild(glyph);
+    metric.appendChild(name);
+    metric.appendChild(result);
+    return metric;
+  }
+
+  _qualityWindowActionsSnapshot() {
+    const active = this._arrangeVisibleWindows()[0];
+    const snap = this._ensureSnapLayoutPalette();
+    if (active?.el) this._renderSnapLayoutPalette(active.el, active.el.querySelector('.wm-btn-maximize') || active.el);
+    const snapChoices = snap.querySelectorAll('[data-snap-layout]').length;
+    const snapPreviews = snap.querySelectorAll('[data-snap-preview]').length;
+    const arrange = this._ensureWindowArrangePalette();
+    this._renderWindowArrangePalette();
+    const arrangeModes = arrange.querySelectorAll('[data-arrange-mode]').length;
+    const arrangePreviews = arrange.querySelectorAll('[data-arrange-preview]').length;
+    const taskbarEntry = this.windows.find((entry) => entry && (entry.window_id || entry.title));
+    const taskbarPreview = this._ensureTaskbarPreview();
+    if (taskbarEntry) {
+      const anchor = this.taskbar?.querySelector('.wm-taskbar-item') || this.taskbar || document.body;
+      this._showTaskbarPreview(taskbarEntry, anchor);
+    }
+    const previewActions = taskbarPreview.querySelectorAll('[data-preview-action]').length;
+    const previewTitle = taskbarPreview.dataset.previewTitle || '';
+    const trafficButtons = active?.el ? active.el.querySelectorAll('.wm-traffic-lights button').length : 0;
+    const titleInput = active?.el ? active.el.querySelectorAll('.wm-title-input').length : 0;
+    return {
+      snap: String(snapChoices) + ' layouts',
+      snapOk: snapChoices >= 3 && snapPreviews >= 3,
+      arrange: String(arrangeModes) + ' modes',
+      arrangeOk: arrangeModes >= 4 && arrangePreviews >= 4,
+      taskbar: String(previewActions) + ' actions',
+      taskbarOk: previewActions >= 3 && previewTitle.length > 0,
+      chrome: String(trafficButtons) + ' traffic',
+      chromeOk: trafficButtons >= 3 && titleInput >= 1
+    };
+  }
+
   _makeQualityStatePreview() {
     const preview = document.createElement('div');
     preview.className = 'wm-quality-state-preview';
@@ -5126,6 +5251,73 @@ class SimpleWindowManager {
       transparencyOk: ['standard', 'reduced', 'off'].includes(transparency),
       wallpaperOk: ['aurora', 'mesh', 'solid'].includes(wallpaper),
       accentOk: this._accentChoices().some((option) => option.id === accent)
+    };
+  }
+
+  _makeQualityComputedControlCenterPreview() {
+    const snapshot = this._qualityControlCenterSnapshot();
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-computed-control-center-preview';
+    preview.dataset.qualityComputedControlCenter = 'live';
+    preview.appendChild(this._makeQualityComputedControlCenterMetric('Groups', snapshot.groups, 'groups', snapshot.groupsOk));
+    preview.appendChild(this._makeQualityComputedControlCenterMetric('Policy', snapshot.policy, 'policy', snapshot.policyOk));
+    preview.appendChild(this._makeQualityComputedControlCenterMetric('Active', snapshot.active, 'active', snapshot.activeOk));
+    preview.appendChild(this._makeQualityComputedControlCenterMetric('Tools', snapshot.tools, 'tools', snapshot.toolsOk));
+    return preview;
+  }
+
+  _makeQualityComputedControlCenterMetric(label, value, kind, good) {
+    const metric = document.createElement('span');
+    metric.className = 'wm-quality-computed-control-center-metric ' + (good ? 'good' : 'warn');
+    metric.dataset.computedControlCenterMetric = kind;
+    const glyph = document.createElement('span');
+    glyph.className = 'wm-quality-computed-control-center-glyph';
+    glyph.setAttribute('aria-hidden', 'true');
+    glyph.textContent = label.slice(0, 1);
+    const name = document.createElement('span');
+    name.className = 'wm-quality-computed-control-center-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-computed-control-center-value';
+    result.textContent = value;
+    metric.appendChild(glyph);
+    metric.appendChild(name);
+    metric.appendChild(result);
+    return metric;
+  }
+
+  _qualityControlCenterSnapshot() {
+    const panel = this._ensureControlCenter();
+    this._renderControlCenter();
+    const groups = Array.from(panel.querySelectorAll('.wm-control-group'));
+    const policyNames = [
+      'Material transparency',
+      'Motion preference',
+      'Animation style',
+      'Dock visibility',
+      'Traffic controls',
+      'Chrome verbosity',
+      'Window motion',
+      'Readability contrast',
+      'Energy policy',
+      'Animated wallpaper',
+      'Backdrop motion',
+      'Layout density'
+    ];
+    const policyGroups = policyNames.filter((label) => !!panel.querySelector('.wm-control-group[aria-label="' + label + '"]')).length;
+    const buttons = panel.querySelectorAll('.wm-control-button').length;
+    const activeButtons = panel.querySelectorAll('.wm-control-button.active[aria-pressed="true"]').length;
+    const tools = panel.querySelector('.wm-control-group[aria-label="Workspace tools"]');
+    const toolButtons = tools ? tools.querySelectorAll('.wm-control-button').length : 0;
+    return {
+      groups: String(groups.length) + ' groups',
+      groupsOk: groups.length >= 18,
+      policy: String(policyGroups) + '/' + String(policyNames.length) + ' policy',
+      policyOk: policyGroups === policyNames.length && buttons >= 48,
+      active: String(activeButtons) + ' active',
+      activeOk: activeButtons >= 12,
+      tools: String(toolButtons) + ' tools',
+      toolsOk: toolButtons >= 10
     };
   }
 
@@ -5748,6 +5940,66 @@ class SimpleWindowManager {
       privacyOk: !!privacy && privacyRows >= 3,
       notifyOk: !!notificationCenter && unread >= 1,
       activityOk: !!activity && activity.getAttribute('role') === 'status' && activityLive === 'polite' && progress >= 0 && progress <= 100
+    };
+  }
+
+  _makeQualityComputedProductivityPreview() {
+    const snapshot = this._qualityProductivitySnapshot();
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-computed-productivity-preview';
+    preview.dataset.qualityComputedProductivity = 'live';
+    preview.appendChild(this._makeQualityComputedProductivityMetric('Clipboard', snapshot.clipboard, 'clipboard', snapshot.clipboardOk));
+    preview.appendChild(this._makeQualityComputedProductivityMetric('Quick', snapshot.quick, 'quick', snapshot.quickOk));
+    preview.appendChild(this._makeQualityComputedProductivityMetric('Notify', snapshot.notify, 'notify', snapshot.notifyOk));
+    preview.appendChild(this._makeQualityComputedProductivityMetric('Capture', snapshot.capture, 'capture', snapshot.captureOk));
+    return preview;
+  }
+
+  _makeQualityComputedProductivityMetric(label, value, kind, good) {
+    const metric = document.createElement('span');
+    metric.className = 'wm-quality-computed-productivity-metric ' + (good ? 'good' : 'warn');
+    metric.dataset.computedProductivityMetric = kind;
+    const indicator = document.createElement('span');
+    indicator.className = 'wm-quality-computed-productivity-indicator';
+    indicator.setAttribute('aria-hidden', 'true');
+    const name = document.createElement('span');
+    name.className = 'wm-quality-computed-productivity-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-computed-productivity-value';
+    result.textContent = value;
+    metric.appendChild(indicator);
+    metric.appendChild(name);
+    metric.appendChild(result);
+    return metric;
+  }
+
+  _qualityProductivitySnapshot() {
+    const clipboard = this._ensureClipboardHistory();
+    this._renderClipboardHistory();
+    const clips = clipboard.querySelectorAll('.wm-clipboard-item').length;
+    const clipFilters = clipboard.querySelectorAll('[data-clipboard-filter]').length;
+    const quick = this._ensureQuickSettings();
+    this._renderQuickSettings();
+    const quickItems = quick.querySelectorAll('.wm-quick-setting').length;
+    const quickSliders = quick.querySelectorAll('.wm-quick-slider').length;
+    const notify = this._ensureNotificationCenter();
+    this._renderNotificationCenter();
+    const notifications = notify.querySelectorAll('.wm-notification-card').length;
+    const notifyActions = notify.querySelectorAll('[data-notification-action]').length;
+    const capture = this._ensureScreenCapture();
+    this._renderScreenCapture();
+    const captureModes = capture.querySelectorAll('[data-capture-mode]').length;
+    const captureActions = capture.querySelectorAll('[data-capture-action]').length;
+    return {
+      clipboard: String(clips) + ' clips',
+      clipboardOk: clips >= 3 && clipFilters >= 4,
+      quick: String(quickItems) + '/' + String(quickSliders) + ' controls',
+      quickOk: quickItems >= 5 && quickSliders >= 2,
+      notify: String(notifications) + ' cards',
+      notifyOk: notifications >= 3 && notifyActions >= 4,
+      capture: String(captureModes) + ' modes',
+      captureOk: captureModes >= 3 && captureActions >= 2
     };
   }
 

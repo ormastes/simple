@@ -6,6 +6,41 @@ Date: 2026-05-29
 
 This slice documents the current concrete API files and the optional Qt size baseline behavior. It does not change renderer implementation files.
 
+## Semantic UI API
+
+The shared UI contract is semantic first. Each UI adapter converts application
+state into the same widget tree and command vocabulary before transport-specific
+serialization:
+
+- Native TUI maps terminal widgets and key events to semantic widget IDs,
+  focus, enabled/selected state, and commands.
+- Pure Simple GUI/web maps semantic state to `WebRenderRequest` artifacts and
+  then to Simple web renderer output.
+- Electron and Tauri consume the same render/snapshot/patch/input envelopes as
+  Web, while keeping IPC/WebView plumbing adapter-private.
+- Headless exposes the same semantic state for tests without rendering pixels.
+
+Design rule: backend-specific transport code may change delivery shape, but it
+may not change widget kind values, focus semantics, command meanings,
+capability names, or read-after-write behavior.
+
+Code owner: `src/lib/common/ui/semantic_contract.spl`.
+
+It defines the first S1/S2 facade over the existing UI access snapshot model:
+
+- `SEMANTIC_UI_PROTOCOL_VERSION`;
+- `SemanticElementInfo` matching `ElementInfo`;
+- `SemanticUiStateInfo` matching `UIStateInfo`;
+- `SemanticUiCommand` for click, type, submit, focus, key, resize, drag, and
+  named action;
+- `SemanticUiDispatchResult` with ok/error, affected element, and reason;
+- `SemanticUiSnapshot` containing state, elements, capabilities, and optional
+  capture metadata.
+
+`RenderBackend` remains a rendering adapter interface. It can carry semantic
+snapshots later, but it must not be treated as the semantic contract until these
+typed structures and adapter tests exist.
+
 ## Web Render API
 
 `src/lib/common/ui/web_render_api.spl` is the canonical web render API. `WebRenderRequest` carries target, surface, HTML body, CSS, JS, viewport, and optional pixel-output intent. `WebRenderArtifact` carries generated HTML, body HTML, IPC JSON, optional pixels, and capability summary.
@@ -21,6 +56,17 @@ Adapters use the API as follows:
 - `src/os/compositor/simple_web_window_renderer.spl` exposes WM app content through `WebRenderRequest` and blits `WebRenderArtifact.pixels`.
 - `src/os/compositor/host_compositor_entry.spl` reports the shared `WEB_RENDER_TARGET_SIMPLE_WEB` target for host and SimpleOS framebuffer paths.
 - Pure Simple browser participation is verified by `test/unit/app/ui/web_render_backend_api_spec.spl`.
+
+Pure Simple GUI renderer path:
+
+1. Build semantic UI state through the shared UI backend contract.
+2. Convert semantic state into `WebRenderRequest`/snapshot/patch/input
+   artifacts.
+3. Render through the pure Simple web renderer.
+4. Use Engine2D `RenderBackend` for pixel output, capture, and equality
+   evidence when requested.
+5. Report fixture-only or recognized-site shortcuts separately from general
+   Engine2D-backed renderer evidence.
 
 Host-native surface and input capture code is adapter-private. It is allowed to
 own native window handles, host process effects, and backend-specific event
@@ -90,3 +136,6 @@ state remains in the shared WM path.
 - Missing Qt: report `qt_build=unavailable` and `comparison_status=unavailable`; do not fail the script.
 - Missing Simple web report: record Simple artifact as unavailable in the Qt report; rely on the web baremetal audit script for that side.
 - Missing CUDA runtime/device/kernels or unverified CUDA kernel readback: typed unavailable or failed probe; no silent success.
+- Missing semantic adapter support: report `semantic_adapter_unavailable` for
+  that surface; do not treat a transport-specific render pass as semantic UI
+  conformance.
