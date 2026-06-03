@@ -4577,3 +4577,19 @@ The focused assertion checks the queued pre-commit state, fetch URL, fetched
 byte length, instantiated status, module import count, module byte length,
 exported return value, and host import call count. The focused fetch/WASM chain
 spec now passes `128/128`; broader browser/WASM semantics remain open.
+
+BrowserSession fetched arrayBuffer compile import-call continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession scripts now fetch a valid imported-function WASM body, convert
+the response through `arrayBuffer()`, compile the fetched bytes with
+`WebAssembly.compile(bytes)`, pass the compiled module plus imports into
+`WebAssembly.instantiate(module, imports)`, and call the exported `run`
+function. The focused assertion checks the queued pre-commit state, fetch URL,
+fetched byte length, compiled module byte length, instantiated status, module
+import count, module byte length, exported return value, and host import call
+count. The focused fetch/WASM chain spec now passes `129/129`; broader
+browser/WASM semantics remain open.
