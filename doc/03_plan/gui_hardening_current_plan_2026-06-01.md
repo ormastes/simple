@@ -4013,3 +4013,17 @@ buffer preserves the coerced bytes and little-endian words. The old page count,
 new buffer length, preserved byte storage, and grown view length all agree in
 the browser-session path. The focused fetch/WASM chain spec now passes `88/88`;
 broader browser/WASM semantics remain open.
+
+BrowserSession WebAssembly Memory prototype failed-grow continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession scripts now write into `WebAssembly.Memory` through
+prototype-dispatched `Uint8Array.prototype.set.apply`,
+`DataView.prototype.setUint16.call`, and `DataView.prototype.getUint16.apply`,
+then attempt an over-maximum memory grow. The failed grow result, stable buffer
+length, preserved byte storage, and DataView readback all agree in the
+browser-session path. The focused fetch/WASM chain spec now passes `89/89`;
+broader browser/WASM semantics remain open.
