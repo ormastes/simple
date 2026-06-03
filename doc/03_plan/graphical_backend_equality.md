@@ -8,6 +8,19 @@ Implementation started. The common `wm_compare` equality model and render-side
 capture facade exist, with focused system/integration specs and mirrored
 manuals.
 
+2026-06-03 quality continuation:
+
+- Composed backend selector validation now checks every `+` component, not only
+  the primary component.
+- Capture metadata validation now checks color-space presence and content/panel
+  rectangle bounds.
+- Capture records now include pixel checksum, non-background pixel count,
+  sampled color diversity, elapsed microseconds, and repeated-capture perf SDN.
+- Focused tests prove actual Engine2D drawing content: non-background pixels,
+  color diversity, checksum, and repeated capture performance evidence.
+- A GitHub sync checkpoint failed with `git@github.com: Permission denied
+  (publickey)`; local verification continued without rebase or push.
+
 ## Recommended Path
 
 Use Feature Option B with NFR Option 2 if the goal is to refactor tests around a

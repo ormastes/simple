@@ -13,7 +13,8 @@ renderer and compositor comparison helpers.
   parsing, normalized capture metadata, and equality report classification.
 - New `src/lib/gc_async_mut/gpu/browser_engine/backend_screenshot_capture.spl`
   repairs the test-facing capture facade for browser-rendered pixels and
-  Engine2D readback.
+  Engine2D readback, including quality metrics and repeated-capture performance
+  evidence.
 - Future Engine2D adapters should feed real `RenderBackend`/`Engine2D`
   readback into this contract instead of adding another comparison vocabulary.
 

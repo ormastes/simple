@@ -25,100 +25,62 @@ for b in t32_mcp_server t32_lsp_mcp_server; do
   fi
 done
 
-if [ -x "release/${PLATFORM_TRIPLE}/simple_mcp_server" ] || [ -x "release/linux-x86_64/simple_mcp_server" ]; then
-  rm -f simple_mcp_server
-  cat > simple_mcp_server <<'EOF'
+rm -f simple_mcp_server
+cat > simple_mcp_server <<'EOF'
 #!/bin/sh
 set -eu
 
+case "${1:-}" in
+  --version|-v)
+    printf '%s\n' 'simple-mcp-server 4.0.0'
+    exit 0
+    ;;
+  --help|-h)
+    printf '%s\n' 'simple-mcp-server 4.0.0'
+    printf '%s\n' 'Usage: simple_mcp_server'
+    printf '%s\n' '       simple_mcp_server --version'
+    exit 0
+    ;;
+esac
+
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-platform_dir="${SIMPLE_PLATFORM_TRIPLE:-x86_64-unknown-linux-gnu}"
+repo_root="${script_dir}/.."
 
-if [ "${platform_dir}" = "x86_64-unknown-linux-gnu" ] && [ -x "${script_dir}/release/linux-x86_64/simple_mcp_server" ]; then
-  native="${script_dir}/release/linux-x86_64/simple_mcp_server"
-else
-  native="${script_dir}/release/${platform_dir}/simple_mcp_server"
-fi
-
-if [ ! -x "${native}" ]; then
-  for candidate in "${script_dir}"/release/*/simple_mcp_server; do
-    if [ -x "${candidate}" ]; then
-      native="${candidate}"
-      break
-    fi
-  done
-fi
-
-if [ ! -x "${native}" ]; then
-  printf '%s\n' "error: native simple_mcp_server not found under ${script_dir}/release" >&2
-  exit 127
-fi
-
-tmp_input="${TMPDIR:-/tmp}/simple_mcp_server_input.$$"
-cat > "${tmp_input}"
-
-tmp_delegate="${TMPDIR:-/tmp}/simple_mcp_server_delegate.$$"
-grep -v '"method":"initialized"' "${tmp_input}" > "${tmp_delegate}" || true
-tmp_source_err="${TMPDIR:-/tmp}/simple_mcp_server_source_err.$$"
-
-fallback_runtime=""
+runtime=""
 for candidate in \
-  "${script_dir}/../src/compiler_rust/target/debug/simple" \
-  "${script_dir}/../bin/release/simple" \
-  "${script_dir}/simple"
+  "${script_dir}/release/x86_64-unknown-linux-gnu/simple" \
+  "${script_dir}/release/linux-x86_64/simple" \
+  "${script_dir}/simple" \
+  "${repo_root}/bin/release/simple" \
+  "${repo_root}/src/compiler_rust/target/release/simple" \
+  "${repo_root}/src/compiler_rust/target/debug/simple"
 do
   if [ -x "${candidate}" ]; then
-    fallback_runtime="${candidate}"
+    runtime="${candidate}"
     break
   fi
 done
 
-run_source_mcp() {
-  if [ -z "${fallback_runtime}" ]; then
-    return 127
-  fi
-  SIMPLE_LIB="${SIMPLE_LIB:-src}" "${fallback_runtime}" "${script_dir}/../src/app/mcp/main.spl" "$@" < "${tmp_delegate}" 2> "${tmp_source_err}"
-}
-
-needs_wm_text_mcp=false
-if grep -q '"play_wm_text_' "${tmp_delegate}"; then
-  needs_wm_text_mcp=true
+if [ -z "${runtime}" ]; then
+  printf '%s\n' "error: simple runtime not found" >&2
+  exit 127
 fi
 
-if [ "${needs_wm_text_mcp}" = "true" ]; then
-  run_source_mcp "$@"
-  status="$?"
-  rm -f "${tmp_input}" "${tmp_delegate}" "${tmp_source_err}"
-  exit "${status}"
+entry="${repo_root}/src/app/mcp/main.spl"
+if [ ! -f "${entry}" ]; then
+  printf '%s\n' "error: MCP entry point not found: ${entry}" >&2
+  exit 127
 fi
 
-tmp_output="${TMPDIR:-/tmp}/simple_mcp_server_output.$$"
-tmp_native_err="${TMPDIR:-/tmp}/simple_mcp_server_native_err.$$"
-set +e
-if command -v timeout >/dev/null 2>&1; then
-  timeout 5 "${native}" "$@" < "${tmp_delegate}" > "${tmp_output}" 2> "${tmp_native_err}"
-  status="$?"
-  if [ "${status}" = "124" ]; then
-    status=0
-  fi
-else
-  "${native}" "$@" < "${tmp_delegate}" > "${tmp_output}" 2> "${tmp_native_err}"
-  status="$?"
-fi
-set -e
+export SIMPLE_LIB="${SIMPLE_LIB:-${repo_root}/src}"
+export SIMPLE_LOG="${SIMPLE_LOG:-error}"
+export SIMPLE_TIMEOUT_SECONDS="${SIMPLE_TIMEOUT_SECONDS:-86400}"
+export SIMPLE_MEMORY_LIMIT_MB="${SIMPLE_MEMORY_LIMIT_MB:-${SIMPLE_TEST_MEMORY_LIMIT_MB:-100}}"
+export RUST_LOG="${RUST_LOG:-error}"
 
-if [ "${status}" != "0" ] || { grep -q '"method":"tools/list"' "${tmp_delegate}" && ! grep -q 'play_wm_text_status' "${tmp_output}"; }; then
-  run_source_mcp "$@"
-  status="$?"
-else
-  cat "${tmp_output}"
-fi
-
-rm -f "${tmp_input}" "${tmp_delegate}" "${tmp_output}" "${tmp_native_err}" "${tmp_source_err}"
-exit "${status}"
+exec "${runtime}" "${entry}" "$@" 2>>"${repo_root}/.simple/logs/simple_mcp_stderr.log"
 EOF
-  chmod +x simple_mcp_server
-fi
+chmod +x simple_mcp_server
 
 if [ -x "release/${PLATFORM_TRIPLE}/simple_lsp_mcp_server" ] || [ -x "release/linux-x86_64/simple_lsp_mcp_server" ]; then
   rm -f simple_lsp_mcp_server

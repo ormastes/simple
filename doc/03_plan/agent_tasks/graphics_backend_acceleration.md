@@ -49,6 +49,34 @@ Tasks:
 - Prove command queue, pipeline, dispatch, completion, and readback.
 - Keep Linux unavailable diagnostics typed.
 
+## Agent D2: OpenCL Backend Proof
+
+Ownership:
+- `src/runtime/runtime_simd_dispatch.c`
+- `src/lib/nogc_sync_mut/gpu/engine2d/sffi_opencl.spl`
+- `src/lib/gc_async_mut/gpu/engine2d/opencl_session.spl`
+- `src/lib/gc_async_mut/gpu/engine2d/generated_kernel_dispatch.spl`
+- OpenCL strict smoke tests
+
+Tasks:
+- Replace stub-like OpenCL ICD hooks with real context, queue, program, kernel,
+  enqueue, finish, and typed error reporting.
+- Prove unavailable/build-failed/submit-failed/sync-failed/readback-failed
+  states separately.
+- Add generated fill/checksum kernel proof before broader 2D acceleration.
+- Keep CPU fallback out of strict OpenCL success paths.
+
+Implementation order:
+1. Implement `rt_opencl_*` calls in `src/runtime/runtime_simd_dispatch.c` or a
+   CUDA-runtime-equivalent Rust bridge.
+2. Wire `src/lib/nogc_sync_mut/gpu/engine2d/sffi_opencl.spl` to those calls.
+3. Make `opencl_session.spl` produce typed init/load/launch/sync/readback
+   evidence.
+4. Update `backend_probe.spl` and `engine.spl` only after runtime/session
+   evidence proves OpenCL is not a CPU fallback.
+5. Add generated artifact support and compiler target validation after runtime
+   loading is real.
+
 ## Agent E: WebGPU/wgpu Runtime Proof
 
 Ownership:
@@ -86,7 +114,8 @@ Ownership:
 
 Tasks:
 - Separate unavailable, fallback, and hardware execution statuses.
-- Add perf fields for init, command, readback, and RSS.
+- Add perf fields for init, command, readback, artifact format, runtime state,
+  fallback reason, and RSS.
 
 ## Agent I: Direct 2D C vs Simple Performance
 
@@ -141,3 +170,15 @@ Tasks:
 - Add provider hit/change counters to perf reports.
 - Ensure C-vs-Simple and Tauri-equivalent reports list active providers.
 
+## Agent N: Normalized Backend Comparison Harness
+
+Ownership:
+- `test/perf/backend_compare/`
+- parsers for existing startup, web-size, Tauri, Electron/Node, and graphics_2d
+  reports
+
+Tasks:
+- Define `BackendComparisonSample` report rows.
+- Normalize existing probe outputs without deleting backend-native reports.
+- Reject ratio comparisons when fixture, viewport, sample count, warmup count,
+  compiler mode, hardware identity, or backend selection policy differ.

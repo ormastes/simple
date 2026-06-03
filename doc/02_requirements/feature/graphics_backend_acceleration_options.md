@@ -5,7 +5,8 @@ Date: 2026-05-16
 
 ## Option A: Backend Proof Only
 
-Description: add strict forced-backend smoke tests for CPU, CUDA, Vulkan, Metal, and WebGPU.
+Description: add strict forced-backend smoke tests for CPU, CUDA, OpenCL,
+Vulkan, Metal, and WebGPU.
 
 Pros:
 - Lowest risk.
@@ -38,7 +39,7 @@ Description: extend Option B with reference benchmarks:
 - Rust+Tauri vs Simple GUI app;
 - Chrome vs Simple web renderer;
 - CPU scalar vs CPU SIMD;
-- GPU backend vs CPU reference.
+- CUDA/OpenCL/Vulkan/Metal/WebGPU backend vs CPU reference.
 
 Pros:
 - Directly supports the updated goal.
@@ -48,6 +49,7 @@ Pros:
 Cons:
 - Requires benchmark infrastructure before some implementation work.
 - Tauri and Chrome comparison requires platform-dependent setup.
+- OpenCL proof requires a host ICD or explicit unavailable evidence.
 
 Effort: XL, 30-45 files.
 
@@ -76,4 +78,6 @@ Select Option B2 first. Use measured gaps to drive Option D cleanup.
 - REQ-GFX-PERF-004: strict backend selection fails on fallback.
 - REQ-GFX-PERF-005: WM exposes frame pacing, event-loop, dirty-rect, and present timings.
 - REQ-GFX-PERF-006: SIMD/vectorization providers are declared through Simple optimization plugin metadata.
-
+- REQ-GFX-PERF-007: OpenCL generated-kernel evidence records ICD/platform,
+  artifact format, program build status, kernel submit status, sync/readback
+  status, and fallback reason separately from CUDA evidence.

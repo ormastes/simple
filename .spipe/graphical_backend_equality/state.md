@@ -33,3 +33,8 @@ dev-done
   requirements, NFRs, architecture, design, and system test plan.
 - impl: Added `wm_compare` graphical equality model, render-side capture facade,
   focused system spec, focused integration spec, and mirrored manuals.
+- quality: Tightened composed backend selector validation, capture rectangle and
+  color metadata validation, drawing-content metrics, and repeated capture perf
+  evidence.
+- quality: GitHub fetch checkpoint failed with SSH public-key permission; no
+  rebase or push attempted.

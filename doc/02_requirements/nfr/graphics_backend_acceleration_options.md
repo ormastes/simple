@@ -15,10 +15,12 @@ Effort: S.
 ## NFR Option 2: Backend Production Targets
 
 Description:
-- Warm backend init under 250 ms for CPU/WebGPU and under 500 ms for CUDA/Vulkan/Metal after driver load.
+- Warm backend init under 250 ms for CPU/WebGPU and under 500 ms for
+  CUDA/OpenCL/Vulkan/Metal after driver load.
 - 1920x1080 clear+rect+blit smoke under 16.7 ms average on hardware backends after warmup.
 - Readback measured separately from command time.
-- Diagnostics report selected backend, device, feature gate, shader format, and fallback reason.
+- Diagnostics report selected backend, device, feature gate, shader/artifact
+  format, ICD/runtime state where applicable, and fallback reason.
 
 Effort: M.
 
@@ -30,20 +32,22 @@ Description:
 - Simple GUI app equal or better than Rust+Tauri on cold start or idle memory, and within 1.25x on p95 new-window, scroll, resize, and IPC.
 - Simple web app-shell fixtures under 16.7 ms p95 frame time for 60 Hz scroll targets after warmup.
 - Chrome comparison reports include both pixel compatibility and timing status.
-- Every claim records hardware, OS, backend, compiler mode, feature flags, sample count, and active optimization providers.
+- Every claim records hardware, OS, backend, compiler mode, feature flags,
+  sample count, active optimization providers, and OpenCL/CUDA artifact
+  compile/load/submit/sync/readback timings where applicable.
 
 Effort: M.
 
 ## NFR Option 3: Cross-Platform Release Gate
 
 Description:
-- Linux: CPU, CUDA on NVIDIA, Vulkan where available.
+- Linux: CPU, CUDA on NVIDIA, OpenCL ICD where available, Vulkan where available.
 - macOS: CPU, Metal, WebGPU/wgpu.
-- Windows: CPU, CUDA on NVIDIA, WebGPU/wgpu/D3D-class path where enabled.
+- Windows: CPU, CUDA on NVIDIA, OpenCL ICD where available,
+  WebGPU/wgpu/D3D-class path where enabled.
 
 Effort: L.
 
 ## Recommended Selection
 
 Use NFR Option 2B for this feature. Keep NFR Option 1 as default CI and add NFR Option 3 once platform CI exists.
-

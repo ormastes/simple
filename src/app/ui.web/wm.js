@@ -4045,9 +4045,13 @@ class SimpleWindowManager {
     panel.appendChild(this._makeQualityTypographyPreview());
     panel.appendChild(this._makeQualityDepthPreview());
     panel.appendChild(this._makeQualityInteractionPreview());
+    panel.appendChild(this._makeQualityComputedShortcutPreview());
+    panel.appendChild(this._makeQualityComputedMultitaskingPreview());
     panel.appendChild(this._makeQualityStatePreview());
     panel.appendChild(this._makeQualityComputedLifecyclePreview());
     panel.appendChild(this._makeQualityVerbosityPreview());
+    panel.appendChild(this._makeQualityComputedPersonalizationPreview());
+    panel.appendChild(this._makeQualityComputedOsToolsPreview());
     panel.appendChild(this._makeQualityPerformancePreview());
     panel.appendChild(this._makeQualityComputedBackdropPreview());
     panel.appendChild(this._makeQualityComputedWallpaperPreview());
@@ -4060,6 +4064,7 @@ class SimpleWindowManager {
     panel.appendChild(this._makeQualityViewportPreview());
     panel.appendChild(this._makeQualityAccessibilityPreview());
     panel.appendChild(this._makeQualityComputedAccessibilityPreview());
+    panel.appendChild(this._makeQualityComputedStatusPreview());
     panel.appendChild(this._makeQualityMotionPreview());
     panel.appendChild(this._makeQualityAnimationPreview());
     panel.appendChild(this._makeQualityWidgetPreview());
@@ -4871,6 +4876,115 @@ class SimpleWindowManager {
     return metric;
   }
 
+  _makeQualityComputedShortcutPreview() {
+    const snapshot = this._qualityShortcutSnapshot();
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-computed-shortcut-preview';
+    preview.dataset.qualityComputedShortcut = 'live';
+    preview.appendChild(this._makeQualityComputedShortcutMetric('Commands', snapshot.commands, 'commands', snapshot.commandsOk));
+    preview.appendChild(this._makeQualityComputedShortcutMetric('Search', snapshot.search, 'search', snapshot.searchOk));
+    preview.appendChild(this._makeQualityComputedShortcutMetric('Modes', snapshot.modes, 'modes', snapshot.modesOk));
+    preview.appendChild(this._makeQualityComputedShortcutMetric('Context', snapshot.context, 'context', snapshot.contextOk));
+    return preview;
+  }
+
+  _makeQualityComputedShortcutMetric(label, value, kind, good) {
+    const metric = document.createElement('span');
+    metric.className = 'wm-quality-computed-shortcut-metric ' + (good ? 'good' : 'warn');
+    metric.dataset.computedShortcutMetric = kind;
+    const glyph = document.createElement('span');
+    glyph.className = 'wm-quality-computed-shortcut-glyph';
+    glyph.setAttribute('aria-hidden', 'true');
+    glyph.textContent = label.slice(0, 1);
+    const name = document.createElement('span');
+    name.className = 'wm-quality-computed-shortcut-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-computed-shortcut-value';
+    result.textContent = value;
+    metric.appendChild(glyph);
+    metric.appendChild(name);
+    metric.appendChild(result);
+    return metric;
+  }
+
+  _qualityShortcutSnapshot() {
+    const commands = this._commandPaletteCommands().length;
+    const shortcuts = this._shortcutOverlayItems().length;
+    const overlay = this._ensureShortcutOverlay();
+    const search = overlay ? overlay.querySelector('.wm-shortcut-search') : null;
+    const modes = this._titleCommandModes().length;
+    const contextGroups = this._windowContextMenuGroups().length;
+    return {
+      commands: String(commands) + ' commands',
+      commandsOk: commands >= 12 && shortcuts >= 8,
+      search: search ? 'search ready' : 'missing',
+      searchOk: !!search,
+      modes: String(modes) + ' modes',
+      modesOk: modes >= 4,
+      context: String(contextGroups) + ' groups',
+      contextOk: contextGroups >= 4
+    };
+  }
+
+  _makeQualityComputedMultitaskingPreview() {
+    const snapshot = this._qualityMultitaskingSnapshot();
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-computed-multitasking-preview';
+    preview.dataset.qualityComputedMultitasking = 'live';
+    preview.appendChild(this._makeQualityComputedMultitaskingMetric('Overview', snapshot.overview, 'overview', snapshot.overviewOk));
+    preview.appendChild(this._makeQualityComputedMultitaskingMetric('Switcher', snapshot.switcher, 'switcher', snapshot.switcherOk));
+    preview.appendChild(this._makeQualityComputedMultitaskingMetric('Stage', snapshot.stage, 'stage', snapshot.stageOk));
+    preview.appendChild(this._makeQualityComputedMultitaskingMetric('Peek', snapshot.peek, 'peek', snapshot.peekOk));
+    return preview;
+  }
+
+  _makeQualityComputedMultitaskingMetric(label, value, kind, good) {
+    const metric = document.createElement('span');
+    metric.className = 'wm-quality-computed-multitasking-metric ' + (good ? 'good' : 'warn');
+    metric.dataset.computedMultitaskingMetric = kind;
+    const glyph = document.createElement('span');
+    glyph.className = 'wm-quality-computed-multitasking-glyph';
+    glyph.setAttribute('aria-hidden', 'true');
+    glyph.textContent = label.slice(0, 1);
+    const name = document.createElement('span');
+    name.className = 'wm-quality-computed-multitasking-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-computed-multitasking-value';
+    result.textContent = value;
+    metric.appendChild(glyph);
+    metric.appendChild(name);
+    metric.appendChild(result);
+    return metric;
+  }
+
+  _qualityMultitaskingSnapshot() {
+    const windows = this._windowSwitcherWindows();
+    const overview = this._ensureWindowOverview();
+    this._renderWindowOverview();
+    const overviewCards = overview.querySelectorAll('.wm-overview-card').length;
+    const overviewSearch = !!overview.querySelector('.wm-overview-search');
+    const switcher = this._ensureWindowSwitcher();
+    this._renderWindowSwitcher();
+    const switcherCards = switcher.querySelectorAll('.wm-window-switcher-card').length;
+    const stage = this._ensureStageRail();
+    this._renderStageRail();
+    const stageItems = stage.querySelectorAll('.wm-stage-rail-item').length;
+    const stageActions = stage.querySelectorAll('[data-stage-action]').length;
+    const peekState = this.desktop ? String(this.desktop.dataset.desktopPeek || 'false') : 'missing';
+    return {
+      overview: String(overviewCards) + ' cards',
+      overviewOk: overviewCards >= Math.min(windows.length, 1) && overviewSearch,
+      switcher: String(switcherCards) + ' cards',
+      switcherOk: switcherCards >= Math.min(windows.length, 1) && switcher.dataset.switcherShortcut === 'Meta Tab',
+      stage: String(stageItems) + ' items',
+      stageOk: stageItems >= Math.min(windows.length, 1) && stageActions >= Math.min(windows.length, 1) * 2,
+      peek: peekState === 'true' ? 'peek on' : 'peek ready',
+      peekOk: !!this.desktop && (peekState === 'true' || peekState === 'false')
+    };
+  }
+
   _makeQualityStatePreview() {
     const preview = document.createElement('div');
     preview.className = 'wm-quality-state-preview';
@@ -4964,6 +5078,117 @@ class SimpleWindowManager {
     metric.appendChild(name);
     metric.appendChild(result);
     return metric;
+  }
+
+  _makeQualityComputedPersonalizationPreview() {
+    const snapshot = this._qualityPersonalizationSnapshot();
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-computed-personalization-preview';
+    preview.dataset.qualityComputedPersonalization = 'live';
+    preview.appendChild(this._makeQualityComputedPersonalizationMetric('Motion', snapshot.motion, 'motion', snapshot.motionOk));
+    preview.appendChild(this._makeQualityComputedPersonalizationMetric('Glass', snapshot.transparency, 'transparency', snapshot.transparencyOk));
+    preview.appendChild(this._makeQualityComputedPersonalizationMetric('Wallpaper', snapshot.wallpaper, 'wallpaper', snapshot.wallpaperOk));
+    preview.appendChild(this._makeQualityComputedPersonalizationMetric('Accent', snapshot.accent, 'accent', snapshot.accentOk));
+    return preview;
+  }
+
+  _makeQualityComputedPersonalizationMetric(label, value, kind, good) {
+    const metric = document.createElement('span');
+    metric.className = 'wm-quality-computed-personalization-metric' + (good ? ' good' : ' warn');
+    metric.dataset.computedPersonalizationMetric = kind;
+    const indicator = document.createElement('span');
+    indicator.className = 'wm-quality-computed-personalization-indicator';
+    indicator.setAttribute('aria-hidden', 'true');
+    const name = document.createElement('span');
+    name.className = 'wm-quality-computed-personalization-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-computed-personalization-value';
+    result.textContent = value;
+    metric.appendChild(indicator);
+    metric.appendChild(name);
+    metric.appendChild(result);
+    return metric;
+  }
+
+  _qualityPersonalizationSnapshot() {
+    const root = document.documentElement;
+    const motion = this._normalizeMotionPreference(root.dataset.wmMotion || this._readMotionPreference());
+    const transparency = this._normalizeTransparencyPreference(root.dataset.wmTransparency || this._readTransparencyPreference());
+    const wallpaper = this._normalizeWallpaperPreference(root.dataset.wmWallpaper || this._readWallpaperPreference());
+    const accent = this._normalizeAccentPreference(root.dataset.wmAccent || this._readAccentPreference()).id;
+    return {
+      motion: motion,
+      transparency: transparency,
+      wallpaper: wallpaper,
+      accent: accent,
+      motionOk: ['standard', 'reduced', 'off'].includes(motion),
+      transparencyOk: ['standard', 'reduced', 'off'].includes(transparency),
+      wallpaperOk: ['aurora', 'mesh', 'solid'].includes(wallpaper),
+      accentOk: this._accentChoices().some((option) => option.id === accent)
+    };
+  }
+
+  _makeQualityComputedOsToolsPreview() {
+    const snapshot = this._qualityOsToolsSnapshot();
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-computed-os-tools-preview';
+    preview.dataset.qualityComputedOsTools = 'live';
+    preview.appendChild(this._makeQualityComputedOsToolsMetric('Launcher', snapshot.launcher, 'launcher', snapshot.launcherOk));
+    preview.appendChild(this._makeQualityComputedOsToolsMetric('Widgets', snapshot.widgets, 'widgets', snapshot.widgetsOk));
+    preview.appendChild(this._makeQualityComputedOsToolsMetric('Style', snapshot.style, 'style', snapshot.styleOk));
+    preview.appendChild(this._makeQualityComputedOsToolsMetric('Dock', snapshot.dock, 'dock', snapshot.dockOk));
+    return preview;
+  }
+
+  _makeQualityComputedOsToolsMetric(label, value, kind, good) {
+    const metric = document.createElement('span');
+    metric.className = 'wm-quality-computed-os-tools-metric ' + (good ? 'good' : 'warn');
+    metric.dataset.computedOsToolsMetric = kind;
+    const glyph = document.createElement('span');
+    glyph.className = 'wm-quality-computed-os-tools-glyph';
+    glyph.setAttribute('aria-hidden', 'true');
+    glyph.textContent = label.slice(0, 1);
+    const name = document.createElement('span');
+    name.className = 'wm-quality-computed-os-tools-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-computed-os-tools-value';
+    result.textContent = value;
+    metric.appendChild(glyph);
+    metric.appendChild(name);
+    metric.appendChild(result);
+    return metric;
+  }
+
+  _qualityOsToolsSnapshot() {
+    this._ensureAppLauncher();
+    this._renderAppLauncher();
+    const apps = this._appLauncherGrid ? this._appLauncherGrid.querySelectorAll('.wm-app-launcher-tile').length : 0;
+    const categories = this._appLauncherFilters ? this._appLauncherFilters.querySelectorAll('[data-app-category]').length : 0;
+    const gallery = this._ensureWidgetGallery();
+    this._renderWidgetGallery();
+    const widgetCards = gallery.querySelectorAll('.wm-widget-gallery-card').length;
+    const wallpaper = this._ensureWallpaperPicker();
+    this._renderWallpaperPicker();
+    const wallpaperChoices = wallpaper.querySelectorAll('[data-wallpaper-choice]').length;
+    const accent = this._ensureAccentPalette();
+    this._renderAccentPalette();
+    const accentChoices = accent.querySelectorAll('[data-accent-choice]').length;
+    const dock = this._ensureDockStack();
+    this._renderDockStack();
+    const dockItems = dock.querySelectorAll('[data-stack-item]').length;
+    const dockModes = dock.querySelectorAll('[data-stack-mode]').length;
+    return {
+      launcher: String(apps) + ' apps',
+      launcherOk: apps >= 4 && categories >= 4,
+      widgets: String(widgetCards) + ' cards',
+      widgetsOk: widgetCards >= 3,
+      style: String(wallpaperChoices) + '/' + String(accentChoices) + ' choices',
+      styleOk: wallpaperChoices >= 3 && accentChoices >= 5,
+      dock: String(dockItems) + ' items',
+      dockOk: dockItems >= 3 && dockModes >= 2
+    };
   }
 
   _makeQualityPerformancePreview() {
@@ -5468,6 +5693,61 @@ class SimpleWindowManager {
       labelsOk: controls.length === 0 || labeled >= Math.max(1, Math.floor(controls.length * 0.9)),
       touchOk: touchHeight >= 44,
       reduceOk: reduceCapable
+    };
+  }
+
+  _makeQualityComputedStatusPreview() {
+    const snapshot = this._qualityStatusSnapshot();
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-computed-status-preview';
+    preview.dataset.qualityComputedStatus = 'live';
+    preview.appendChild(this._makeQualityComputedStatusMetric('HUD', snapshot.hud, 'hud', snapshot.hudOk));
+    preview.appendChild(this._makeQualityComputedStatusMetric('Privacy', snapshot.privacy, 'privacy', snapshot.privacyOk));
+    preview.appendChild(this._makeQualityComputedStatusMetric('Notify', snapshot.notify, 'notify', snapshot.notifyOk));
+    preview.appendChild(this._makeQualityComputedStatusMetric('Activity', snapshot.activity, 'activity', snapshot.activityOk));
+    return preview;
+  }
+
+  _makeQualityComputedStatusMetric(label, value, kind, good) {
+    const metric = document.createElement('span');
+    metric.className = 'wm-quality-computed-status-metric' + (good ? ' good' : ' warn');
+    metric.dataset.computedStatusMetric = kind;
+    const indicator = document.createElement('span');
+    indicator.className = 'wm-quality-computed-status-indicator';
+    indicator.setAttribute('aria-hidden', 'true');
+    const name = document.createElement('span');
+    name.className = 'wm-quality-computed-status-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-computed-status-value';
+    result.textContent = value;
+    metric.appendChild(indicator);
+    metric.appendChild(name);
+    metric.appendChild(result);
+    return metric;
+  }
+
+  _qualityStatusSnapshot() {
+    const hud = document.querySelector('.wm-system-hud');
+    const privacy = document.querySelector('.wm-privacy-indicator');
+    const notificationCenter = document.querySelector('.wm-notification-center');
+    const activity = document.querySelector('.wm-live-activity');
+    const privacyRows = privacy ? privacy.querySelectorAll('[data-privacy-service]').length : 0;
+    const unread = notificationCenter ? notificationCenter.querySelectorAll('.wm-notification-card.unread').length : 0;
+    const progressEl = activity ? activity.querySelector('[data-live-progress]') : null;
+    const progressRaw = progressEl ? parseInt(progressEl.getAttribute('data-live-progress') || '0', 10) : 0;
+    const progress = Number.isFinite(progressRaw) ? Math.max(0, Math.min(100, progressRaw)) : 0;
+    const hudLive = hud ? String(hud.getAttribute('aria-live') || '').trim() : '';
+    const activityLive = activity ? String(activity.getAttribute('aria-live') || '').trim() : '';
+    return {
+      hud: hudLive || 'none',
+      privacy: privacyRows + ' services',
+      notify: unread + ' unread',
+      activity: progress + '%',
+      hudOk: !!hud && hud.getAttribute('role') === 'status' && hudLive === 'polite',
+      privacyOk: !!privacy && privacyRows >= 3,
+      notifyOk: !!notificationCenter && unread >= 1,
+      activityOk: !!activity && activity.getAttribute('role') === 'status' && activityLive === 'polite' && progress >= 0 && progress <= 100
     };
   }
 
