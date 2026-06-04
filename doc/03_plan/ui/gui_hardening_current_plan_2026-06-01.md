@@ -5482,6 +5482,278 @@ fetch/WASM chain spec now passes `169/169`; the native WASM host spec remained
 conformance remained `275/275`, and `src/lib` completed with the current
 `399 warning(s)`. Broader browser/WASM semantics remain open.
 
+BrowserSession WebAssembly constructor/compiled import-call parity continuation:
+
+Completion checklist:
+
+- Add a BrowserSession browser-script scenario that invokes the same imported
+  function module through synchronous `new WebAssembly.Module(...)` plus
+  `new WebAssembly.Instance(...)`, then compares that path with
+  `WebAssembly.compile(...).then(module => WebAssembly.instantiate(...))` in
+  the same script evaluation.
+- Verify the constructor path exposes import count `1`, module byte length
+  `52`, instance status `instantiated`, exported `run` type `function`,
+  exported return value `42`, and constructor host import call count `1`.
+- Verify the compiled instantiate promise resolves with status
+  `instantiated`, import count `1`, byte length `52`, exported return value
+  `42`, and compiled host import call count `1`.
+- Verify separate import objects keep constructor and compiled host call
+  counters independent while preserving deterministic ordered output.
+- Regenerate the mirrored scenario manual for the changed SPipe spec and move
+  the generated old `01_unit` output onto the tracked `unit` manual path.
+- Restore generated index/manual noise from docgen and adjacent specs.
+- Record command evidence, pass counts, warning count, and remaining open scope.
+- Run diff hygiene and doc layout gates before committing and pushing.
+
+Test checklist:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+
+BrowserSession scripts now compare constructor-created and compiled
+WebAssembly import-call paths in the same script evaluation. The focused
+assertion verifies the constructor path exposes import count `1`, module byte
+length `52`, instance status `instantiated`, exported `run` type `function`,
+exported return value `42`, and constructor host import call count `1`, then
+verifies the compiled instantiate promise resolves with matching import count,
+byte length, exported return value, and independent host import call count. The
+focused fetch/WASM chain spec now passes `184/184`; the native WASM host spec
+remained `107/107`, the WebGPU JS/WASM system spec remained `106/106`, Node API
+conformance remained `275/275`, and `src/lib` completed with the current
+`399 warning(s)` across `5903` files. Broader browser/WASM semantics remain
+open.
+
+BrowserSession WebAssembly constructor/compiled function-body parity continuation:
+
+Completion checklist:
+
+- Add a BrowserSession browser-script scenario that invokes the same exported
+  function body through synchronous `new WebAssembly.Module(...)` plus
+  `new WebAssembly.Instance(...)`, then compares that path with
+  `WebAssembly.compile(...).then(module => WebAssembly.instantiate(module))`
+  in the same script evaluation.
+- Verify the constructor path exposes module byte length `41`, instance status
+  `instantiated`, exported `run` type `function`, and two argument-driven
+  return values of `42`.
+- Verify the compiled instantiate promise resolves with matching status, byte
+  length, exported `run` type `function`, and two argument-driven return
+  values of `42`.
+- Verify the synchronous constructor result is visible before the compiled
+  promise callback appends its deterministic output.
+- Regenerate the mirrored scenario manual for the changed SPipe spec and move
+  the generated old `01_unit` output onto the tracked `unit` manual path.
+- Restore generated index/manual noise from docgen and adjacent specs.
+- Record command evidence, pass counts, warning count, and remaining open scope.
+- Run diff hygiene and doc layout gates before committing and pushing.
+
+Test checklist:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+
+BrowserSession scripts now compare constructor-created and compiled
+WebAssembly function-body paths in the same script evaluation. The focused
+assertion verifies the constructor path exposes module byte length `41`,
+instance status `instantiated`, exported `run` type `function`, and two
+argument-driven return values of `42`, then verifies the compiled instantiate
+promise resolves with matching status, byte length, export type, and two
+argument-driven return values. The focused fetch/WASM chain spec now passes
+`185/185`; the native WASM host spec remained `107/107`, the WebGPU JS/WASM
+system spec remained `106/106`, Node API conformance remained `275/275`, and
+`src/lib` completed with the current `399 warning(s)` across `5903` files.
+Broader browser/WASM semantics remain open.
+
+BrowserSession WebAssembly constructor/compiled multi-export parity continuation:
+
+Completion checklist:
+
+- Add a BrowserSession browser-script scenario that reads multiple function
+  exports through synchronous `new WebAssembly.Module(...)` plus
+  `new WebAssembly.Instance(...)`, then compares that path with
+  `WebAssembly.compile(...).then(module => WebAssembly.instantiate(module))`
+  in the same script evaluation.
+- Verify the constructor path exposes module byte length `47`, function export
+  count `2`, instance status `instantiated`, `init` and `render` export types
+  as `function`, and both function calls returning `undefined`.
+- Verify the compiled instantiate promise resolves with matching status, byte
+  length, function export count, export types, and call return values.
+- Verify the synchronous constructor result is visible before the compiled
+  promise callback appends its deterministic output.
+- Regenerate the mirrored scenario manual for the changed SPipe spec and move
+  the generated old `01_unit` output onto the tracked `unit` manual path.
+- Restore generated index/manual noise from docgen and adjacent specs.
+- Record command evidence, pass counts, warning count, and remaining open scope.
+- Run diff hygiene and doc layout gates before committing and pushing.
+
+Test checklist:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+
+BrowserSession scripts now compare constructor-created and compiled
+WebAssembly multi-export paths in the same script evaluation. The focused
+assertion verifies the constructor path exposes module byte length `47`,
+function export count `2`, instance status `instantiated`, `init` and `render`
+export types as `function`, and both function calls returning `undefined`, then
+verifies the compiled instantiate promise resolves with matching status, byte
+length, export count, export types, and call return values. The focused
+fetch/WASM chain spec now passes `186/186`; the native WASM host spec remained
+`107/107`, the WebGPU JS/WASM system spec remained `106/106`, Node API
+conformance remained `275/275`, and `src/lib` completed with the current
+`399 warning(s)` across `5903` files. Broader browser/WASM semantics remain
+open.
+
+BrowserSession WebAssembly constructor/compiled descriptor metadata parity continuation:
+
+Completion checklist:
+
+- Add a BrowserSession browser-script scenario that reads export and import
+  descriptors through synchronous `new WebAssembly.Module(...)` constructor
+  modules, then compares those descriptors with chained `WebAssembly.compile`
+  module descriptors in the same script evaluation.
+- Verify the constructor export module exposes byte length `40`, two exports,
+  `tbl:table`, and `answer:global`.
+- Verify the constructor import module exposes byte length `27`, import count
+  `1`, one `env:foo:function` descriptor, and an instantiated import-backed
+  instance with exports object metadata.
+- Verify the compiled export module exposes matching byte length, export count,
+  export names, and export kinds.
+- Verify the compiled import module exposes matching import count, byte length,
+  descriptor count, module/name/kind, and deterministic output ordering.
+- Regenerate the mirrored scenario manual for the changed SPipe spec and move
+  the generated old `01_unit` output onto the tracked `unit` manual path.
+- Restore generated index/manual noise from docgen and adjacent specs.
+- Record command evidence, pass counts, warning count, and remaining open scope.
+- Run diff hygiene and doc layout gates before committing and pushing.
+
+Test checklist:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+
+BrowserSession scripts now compare constructor-created and compiled
+WebAssembly descriptor metadata paths in the same script evaluation. The
+focused assertion verifies the constructor export module exposes byte length
+`40`, two exports, `tbl:table`, and `answer:global`; verifies the constructor
+import module exposes byte length `27`, import count `1`, one
+`env:foo:function` descriptor, and an instantiated import-backed instance; then
+verifies chained compiled modules expose matching export and import descriptor
+metadata. The focused fetch/WASM chain spec now passes `187/187`; the native
+WASM host spec remained `107/107`, the WebGPU JS/WASM system spec remained
+`106/106`, Node API conformance remained `275/275`, and `src/lib` completed
+with the current `399 warning(s)` across `5903` files. Broader browser/WASM
+semantics remain open.
+
+BrowserSession WebAssembly constructor/compiled invalid metadata parity continuation:
+
+Completion checklist:
+
+- Add a BrowserSession browser-script scenario that reads invalid module and
+  instance metadata through synchronous `new WebAssembly.Module(...)` plus
+  `new WebAssembly.Instance(...)`, then compares those failures with chained
+  `WebAssembly.compile(...).catch(...)` errors in the same script evaluation.
+- Verify the constructor invalid-header module exposes
+  `validated=false:error=invalid-wasm-header`, and its instance exposes
+  `status=invalid`, `moduleValid=false`, and `error=invalid-wasm-module`.
+- Verify the constructor truncated-section module exposes
+  `validated=false:error=invalid-wasm-section`, section count `0`, and an
+  invalid instance with `moduleValid=false:error=invalid-wasm-module`.
+- Verify the compiled invalid-header promise catch reports
+  `invalid:invalid-wasm-header`.
+- Verify the compiled truncated-section promise catch reports
+  `invalid:invalid-wasm-section` and preserves deterministic chained output.
+- Regenerate the mirrored scenario manual for the changed SPipe spec and move
+  the generated old `01_unit` output onto the tracked `unit` manual path.
+- Restore generated index/manual noise from docgen and adjacent specs.
+- Record command evidence, pass counts, warning count, and remaining open scope.
+- Run diff hygiene and doc layout gates before committing and pushing.
+
+Test checklist:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+
+BrowserSession scripts now compare constructor-created and compiled
+WebAssembly invalid-module metadata paths in the same script evaluation. The
+focused assertion verifies the constructor invalid-header and truncated-section
+modules expose invalid module metadata plus invalid instance metadata, then
+verifies chained compiled promise catches report matching invalid-header and
+invalid-section errors. The focused fetch/WASM chain spec now passes
+`188/188`; the native WASM host spec remained `107/107`, the WebGPU JS/WASM
+system spec remained `106/106`, Node API conformance remained `275/275`, and
+`src/lib` completed with the current `399 warning(s)` across `5903` files.
+Broader browser/WASM semantics remain open.
+
+BrowserSession WebAssembly constructor/compiled missing-import parity continuation:
+
+Completion checklist:
+
+- Add a BrowserSession browser-script scenario that reads missing-import
+  metadata through synchronous `new WebAssembly.Module(...)` plus
+  `new WebAssembly.Instance(...)`, then compares that failure with
+  `WebAssembly.compile(...).then(module => WebAssembly.instantiate(...)).catch(...)`
+  in the same script evaluation.
+- Verify the constructor module exposes import count `1` and byte length `27`.
+- Verify the constructor instance exposes `status=invalid`,
+  `moduleValid=true`, `error=unsupported-wasm-imports`, and an exports object.
+- Verify the compiled module exposes matching import count `1` and byte length
+  `27` before instantiation.
+- Verify the compiled instantiate catch reports
+  `invalid:unsupported-wasm-imports` and preserves deterministic ordered output.
+- Regenerate the mirrored scenario manual for the changed SPipe spec and move
+  the generated old `01_unit` output onto the tracked `unit` manual path.
+- Restore generated index/manual noise from docgen and adjacent specs.
+- Record command evidence, pass counts, warning count, and remaining open scope.
+- Run diff hygiene and doc layout gates before committing and pushing.
+
+Test checklist:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+
+BrowserSession scripts now compare constructor-created and compiled
+WebAssembly missing-import paths in the same script evaluation. The focused
+assertion verifies the constructor module exposes import count `1` and byte
+length `27`; verifies the constructor instance exposes `status=invalid`,
+`moduleValid=true`, `error=unsupported-wasm-imports`, and an exports object;
+then verifies the compiled module exposes matching import metadata before
+compiled instantiation catches `invalid:unsupported-wasm-imports`. The focused
+fetch/WASM chain spec now passes `189/189`; the native WASM host spec remained
+`107/107`, the WebGPU JS/WASM system spec remained `106/106`, Node API
+conformance remained `275/275`, and `src/lib` completed with the current
+`399 warning(s)` across `5903` files. Broader browser/WASM semantics remain
+open.
+
 BrowserSession WebAssembly odd-length decorated-hex promise rejection continuation:
 
 Completion checklist:
