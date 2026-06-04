@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 225 | 225 | 0 | 0 |
+| 226 | 226 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -12138,6 +12138,39 @@ match result:
 
 </details>
 
+#### keeps Uint8Array prototype slice call and apply copied buffers isolated
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `false:false:0:0:3:3:4,3,4:3,255,5:1,2,3,99,5,6:4:255`
+
+3. Err
+   - Expected: "unexpected uint8 prototype slice copied buffer js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var b = new Uint8Array(6); b[0] = 1; b[1] = 2; b[2] = 3; b[3] = 4; b[4] = 5; b[5] = 6; var callSlice = Uint8Array.prototype.slice.call(b, 1, 4); var applySlice = Uint8Array.prototype.slice.apply(b, [2, 5]); callSlice[0] = 260; applySlice[1] = -1; b[3] = 99; (callSlice.buffer === b.buffer) + ':' + (applySlice.buffer === b.buffer) + ':' + callSlice.byteOffset + ':' + applySlice.byteOffset + ':' + callSlice.length + ':' + applySlice.length + ':' + callSlice.toString() + ':' + applySlice.toString() + ':' + b.toString() + ':' + callSlice.at(0) + ':' + applySlice.at(1)")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("false:false:0:0:3:3:4,3,4:3,255,5:1,2,3,99,5,6:4:255")
+    Err(err):
+        expect("unexpected uint8 prototype slice copied buffer js error: {err}").to_equal("")
+```
+
+</details>
+
 #### copies overlapping Uint8Array subarray windows through set in browser scripts
 
 1. var session = BrowserSession new
@@ -12784,8 +12817,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 225 |
-| Active scenarios | 225 |
+| Total scenarios | 226 |
+| Active scenarios | 226 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
