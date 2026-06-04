@@ -1,0 +1,208 @@
+use std.gpu.{GpuDevice, GpuBuffer}
+use std.simd.{Vec4f, Vec8f}
+use std.io.{print}
+use std.time.{now_ns}
+
+val TILE_SIZE = 16
+
+# ============================================================
+# SIMD Matrix Multiply (CPU)
+# ============================================================
+
+# SIMD matmul using Vec4f (4-wide float SIMD)
+@simd
+fn matmul_simd_vec4f(a: [f32], b: [f32], c: &mut [f32], m: i64, n: i64, k: i64):
+    var i = 0
+    while i < m:
+        var j = 0
+        while j < n:
+            var sum = Vec4f.zero()
+            var p = 0
+            # Process 4 elements at a time along k dimension
+            while p + 4 <= k:
+                val a_vec = Vec4f.load(a, i * k + p)
+                # Gather b values for column j at rows p..p+4
+                val b_vec = Vec4f(
+                    b[p * n + j],
+                    b[(p + 1) * n + j],
+                    b[(p + 2) * n + j],
+                    b[(p + 3) * n + j]
+                )
+                sum = sum + a_vec * b_vec
+                p = p + 4
+            # Horizontal sum of Vec4f
+            var scalar_sum = sum.horizontal_add()
+            # Handle remainder
+            while p < k:
+                scalar_sum = scalar_sum + a[i * k + p] * b[p * n + j]
+                p = p + 1
+            c[i * n + j] = scalar_sum
+            j = j + 1
+        i = i + 1
+
+# SIMD matmul using Vec8f (8-wide float SIMD, AVX)
+@simd
+fn matmul_simd_vec8f(a: [f32], b_transposed: [f32], c: &mut [f32],
+                     m: i64, n: i64, k: i64):
+    var i = 0
+    while i < m:
+        var j = 0
+        while j < n:
+            var sum = Vec8f.zero()
+            var p = 0
+            while p + 8 <= k:
+                val a_vec = Vec8f.load(a, i * k + p)
+                val b_vec = Vec8f.load(b_transposed, j * k + p)
+                sum = sum + a_vec * b_vec
+                p = p + 8
+            var scalar_sum = sum.horizontal_add()
+            while p < k:
+                scalar_sum = scalar_sum + a[i * k + p] * b_transposed[j * k + p]
+                p = p + 1
+            c[i * n + j] = scalar_sum
+            j = j + 1
+        i = i + 1
+
+# Transpose matrix for cache-friendly SIMD access
+fn transpose(mat: [f32], rows: i64, cols: i64) -> [f32]:
+    var result = [f32].fill(rows * cols, 0.0)
+    var i = 0
+    while i < rows:
+        var j = 0
+        while j < cols:
+            result[j * rows + i] = mat[i * cols + j]
+            j = j + 1
+        i = i + 1
+    result
+
+# ============================================================
+# GPU Matrix Multiply
+# ============================================================
+
+@gpu_kernel
+fn matmul_gpu_kernel(a: &[f32], b: &[f32], c: &mut [f32],
+                     m: i64, n: i64, k: i64):
+    @shared var tile_a: [f32; TILE_SIZE * TILE_SIZE]
+    @shared var tile_b: [f32; TILE_SIZE * TILE_SIZE]
+
+    val row = block_idx_y() * TILE_SIZE + thread_idx_y()
+    val col = block_idx_x() * TILE_SIZE + thread_idx_x()
+    var sum = 0.0f32
+
+    var t = 0
+    while t < (k + TILE_SIZE - 1) / TILE_SIZE:
+        val a_col = t * TILE_SIZE + thread_idx_x()
+        val b_row = t * TILE_SIZE + thread_idx_y()
+
+        if row < m and a_col < k:
+            tile_a[thread_idx_y() * TILE_SIZE + thread_idx_x()] = a[row * k + a_col]
+        else:
+            tile_a[thread_idx_y() * TILE_SIZE + thread_idx_x()] = 0.0
+
+        if b_row < k and col < n:
+            tile_b[thread_idx_y() * TILE_SIZE + thread_idx_x()] = b[b_row * n + col]
+        else:
+            tile_b[thread_idx_y() * TILE_SIZE + thread_idx_x()] = 0.0
+
+        sync_threads()
+
+        var i = 0
+        while i < TILE_SIZE:
+            sum = sum + tile_a[thread_idx_y() * TILE_SIZE + i] * tile_b[i * TILE_SIZE + thread_idx_x()]
+            i = i + 1
+
+        sync_threads()
+        t = t + 1
+
+    if row < m and col < n:
+        c[row * n + col] = sum
+
+fn matmul_gpu(a: [f32], b: [f32], m: i64, n: i64, k: i64) -> Result<[f32], GpuError>:
+    val dev = GpuDevice.get(0)?
+    val buf_a = dev.alloc_copy(a)?
+    val buf_b = dev.alloc_copy(b)?
+    var buf_c = dev.alloc_f32(m * n)?
+
+    val grid_x = (n + TILE_SIZE - 1) / TILE_SIZE
+    val grid_y = (m + TILE_SIZE - 1) / TILE_SIZE
+
+    dev.launch(matmul_gpu_kernel,
+        grid: (grid_x, grid_y),
+        block: (TILE_SIZE, TILE_SIZE),
+        args: (buf_a, buf_b, buf_c, m, n, k))
+    dev.sync()?
+    buf_c.to_host()
+
+# ============================================================
+# Naive CPU matmul for reference
+# ============================================================
+
+fn matmul_naive(a: [f32], b: [f32], m: i64, n: i64, k: i64) -> [f32]:
+    var c = [f32].fill(m * n, 0.0)
+    var i = 0
+    while i < m:
+        var j = 0
+        while j < n:
+            var sum = 0.0f32
+            var p = 0
+            while p < k:
+                sum = sum + a[i * k + p] * b[p * n + j]
+                p = p + 1
+            c[i * n + j] = sum
+            j = j + 1
+        i = i + 1
+    c
+
+# ============================================================
+# Benchmark
+# ============================================================
+
+fn benchmark(name: text, f: fn() -> [f32], iterations: i64) -> f64:
+    val start = now_ns()
+    var i = 0
+    while i < iterations:
+        val _ = f()
+        i = i + 1
+    val elapsed = (now_ns() - start).to_f64() / 1_000_000.0
+    val avg = elapsed / iterations.to_f64()
+    print "  {name}: {avg:.2} ms avg ({iterations} iterations)"
+    avg
+
+fn main():
+    val sizes = [64, 128, 256, 512]
+
+    var s = 0
+    while s < sizes.len():
+        val n = sizes[s]
+        print "Matrix size: {n}x{n}"
+
+        val a = [f32].fill(n * n, 1.0)
+        val b = [f32].fill(n * n, 1.0)
+        val b_t = transpose(b, n, n)
+        val iters = if n <= 128: 10 else: 3
+
+        # Naive CPU
+        var c_naive = [f32].fill(n * n, 0.0)
+        benchmark("Naive CPU", fn(): matmul_naive(a, b, n, n, n), iters)
+
+        # SIMD Vec4f
+        var c_simd4 = [f32].fill(n * n, 0.0)
+        benchmark("SIMD Vec4f", fn():
+            matmul_simd_vec4f(a, b, c_simd4, n, n, n)
+            c_simd4
+        , iters)
+
+        # SIMD Vec8f (with transposed B for better cache behavior)
+        var c_simd8 = [f32].fill(n * n, 0.0)
+        benchmark("SIMD Vec8f", fn():
+            matmul_simd_vec8f(a, b_t, c_simd8, n, n, n)
+            c_simd8
+        , iters)
+
+        # GPU
+        val gpu_time = benchmark("GPU kernel", fn():
+            matmul_gpu(a, b, n, n, n) ?? []
+        , iters)
+
+        print ""
+        s = s + 1

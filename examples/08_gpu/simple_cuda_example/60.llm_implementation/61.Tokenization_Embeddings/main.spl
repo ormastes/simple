@@ -1,0 +1,121 @@
+use std.gpu.{GpuDevice, GpuBuffer}
+use std.ml.{Tensor, Embedding, PositionalEncoding, Layer}
+use std.io.{print}
+
+# GPU kernel: look up embedding vectors for token IDs
+@gpu_kernel
+fn embedding_lookup_kernel(token_ids: &[i32], embed_table: &[f32],
+                           output: &mut [f32], seq_len: i64, embed_dim: i64):
+    val idx = thread_idx_x() + block_idx_x() * block_dim_x()
+    if idx < seq_len:
+        val token_id = token_ids[idx]
+        var d = 0
+        while d < embed_dim:
+            output[idx * embed_dim + d] = embed_table[token_id * embed_dim + d]
+            d = d + 1
+
+# GPU kernel: add positional encoding to embeddings
+@gpu_kernel
+fn add_position_kernel(embeddings: &mut [f32], pos_enc: &[f32],
+                       seq_len: i64, embed_dim: i64):
+    val pos = block_idx_x()
+    val d = thread_idx_x()
+    if pos < seq_len and d < embed_dim:
+        val offset = pos * embed_dim + d
+        embeddings[offset] = embeddings[offset] + pos_enc[offset]
+
+# Sinusoidal positional encoding
+fn compute_positional_encoding(max_len: i64, embed_dim: i64) -> [f32]:
+    var pe = [f32].fill(max_len * embed_dim, 0.0)
+    var pos = 0
+    while pos < max_len:
+        var i = 0
+        while i < embed_dim / 2:
+            val angle = pos.to_f32() / (10000.0 ** (2.0 * i.to_f32() / embed_dim.to_f32()))
+            pe[pos * embed_dim + 2 * i] = sin(angle)
+            pe[pos * embed_dim + 2 * i + 1] = cos(angle)
+            i = i + 1
+        pos = pos + 1
+    pe
+
+# Embedding layer that wraps the kernel
+class TokenEmbedding:
+    vocab_size: i64
+    embed_dim: i64
+    table: GpuBuffer
+
+    static fn create(vocab_size: i64, embed_dim: i64) -> Result<TokenEmbedding, GpuError>:
+        val dev = GpuDevice.get(0)?
+        # Initialize with small random values (simplified: use 0.01 * index)
+        var init_data = [f32].fill(vocab_size * embed_dim, 0.0)
+        var i = 0
+        while i < vocab_size * embed_dim:
+            init_data[i] = (i % 100).to_f32() * 0.01 - 0.5
+            i = i + 1
+        val table = dev.alloc_copy(init_data)?
+        Ok(TokenEmbedding(vocab_size: vocab_size, embed_dim: embed_dim, table: table))
+
+    fn lookup(self, token_ids: [i32]) -> Result<Tensor<f32>, GpuError>:
+        val seq_len = token_ids.len()
+        val dev = GpuDevice.get(0)?
+        val buf_ids = dev.alloc_copy(token_ids)?
+        var buf_out = dev.alloc_f32(seq_len * self.embed_dim)?
+        val block_size = 256
+        val grid_size = (seq_len + block_size - 1) / block_size
+        dev.launch(embedding_lookup_kernel,
+            grid: grid_size, block: block_size,
+            args: (buf_ids, self.table, buf_out, seq_len, self.embed_dim))
+        dev.sync()?
+        val data = buf_out.to_host()?
+        Ok(Tensor(shape: [seq_len, self.embed_dim], data: data))
+
+# Full embedding pipeline: token IDs -> token embeddings + positional encoding
+fn embed_tokens(token_ids: [i32], vocab_size: i64, embed_dim: i64,
+                max_len: i64) -> Result<Tensor<f32>, GpuError>:
+    val embedding = TokenEmbedding.create(vocab_size, embed_dim)?
+    val pos_encoding = compute_positional_encoding(max_len, embed_dim)
+
+    # Pipeline: tokens -> embedding lookup -> add position
+    val embedded = embedding.lookup(token_ids)?
+
+    val dev = GpuDevice.get(0)?
+    val seq_len = token_ids.len()
+    var buf_emb = dev.alloc_copy(embedded.data)?
+    val buf_pos = dev.alloc_copy(pos_encoding)?
+
+    dev.launch(add_position_kernel,
+        grid: seq_len, block: embed_dim,
+        args: (buf_emb, buf_pos, seq_len, embed_dim))
+    dev.sync()?
+
+    val result_data = buf_emb.to_host()?
+    Ok(Tensor(shape: [seq_len, embed_dim], data: result_data))
+
+# Using Simple's ~> pipeline operator for layer composition
+fn build_embedding_pipeline(vocab_size: i64, embed_dim: i64, max_len: i64) -> Layer:
+    Embedding(vocab_size, embed_dim)
+        ~> PositionalEncoding(max_len, embed_dim)
+
+fn main():
+    val vocab_size = 50_000
+    val embed_dim = 512
+    val max_len = 2048
+
+    # Example token sequence: "Hello world"
+    val token_ids = [15496, 995]  # Example BPE token IDs
+
+    print "Embedding lookup for {token_ids.len()} tokens"
+    print "  Vocab size: {vocab_size}"
+    print "  Embedding dim: {embed_dim}"
+
+    val result = embed_tokens(token_ids, vocab_size, embed_dim, max_len)
+    match result:
+        Ok(tensor):
+            print "  Output shape: [{tensor.shape[0]}, {tensor.shape[1]}]"
+            print "  First 4 values: [{tensor.data[0]}, {tensor.data[1]}, {tensor.data[2]}, {tensor.data[3]}]"
+        Err(e):
+            print "  Error: {e.message}"
+
+    # Pipeline approach
+    val pipeline = build_embedding_pipeline(vocab_size, embed_dim, max_len)
+    print "Pipeline: {pipeline.describe()}"

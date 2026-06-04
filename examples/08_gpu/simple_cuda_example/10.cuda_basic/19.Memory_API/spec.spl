@@ -1,0 +1,180 @@
+# Exercise 19: Memory API - Tests
+#
+# Tests for each GPU memory operation: alloc, upload, download, free,
+# memset, copy, and error handling.
+
+use std.gpu.{
+    gpu_alloc, gpu_upload, gpu_download, gpu_free,
+    gpu_memset, gpu_copy,
+    GpuBuffer, GpuError
+}
+
+use self.main.{
+    demo_basic_lifecycle, demo_memset, demo_device_copy,
+    demo_multi_buffer, scale_kernel, add_kernel
+}
+
+fn approx_eq(a: f32, b: f32, tol: f32) -> bool:
+    val diff = a - b
+    diff < tol and diff > (0.0f32 - tol)
+
+fn all_equal(data: List<f32>, expected: f32, tol: f32) -> bool:
+    var i = 0
+    while i < data.len():
+        if not approx_eq(data[i], expected, tol):
+            return false
+        i = i + 1
+    true
+
+describe "Memory API":
+
+    describe "gpu_alloc and gpu_free":
+
+        it "allocates and frees a buffer":
+            val buf = gpu_alloc<f32>(512)
+            expect(buf.is_ok()).to_equal(true)
+            val free_result = gpu_free(buf.unwrap())
+            expect(free_result.is_ok()).to_equal(true)
+
+        it "allocates zero-size buffer":
+            val buf = gpu_alloc<f32>(0)
+            # Implementation-defined: may succeed with empty buffer or fail
+            # We just verify it does not crash
+            if buf.is_ok():
+                val free_result = gpu_free(buf.unwrap())
+                expect(free_result.is_ok()).to_equal(true)
+
+    describe "gpu_upload and gpu_download":
+
+        it "round-trips data correctly":
+            val n = 256
+            var host_data = List<f32>()
+            var i = 0
+            while i < n:
+                host_data.push(i * 1.0f32)
+                i = i + 1
+
+            val buf = gpu_alloc<f32>(n)
+            expect(buf.is_ok()).to_equal(true)
+            val dev = buf.unwrap()
+
+            val up = gpu_upload(dev, host_data)
+            expect(up.is_ok()).to_equal(true)
+
+            val result = gpu_download<f32>(dev, n)
+            expect(result.is_ok()).to_equal(true)
+
+            val data = result.unwrap()
+            expect(data.len()).to_equal(n)
+            expect(approx_eq(data[0], 0.0f32, 0.001f32)).to_equal(true)
+            expect(approx_eq(data[100], 100.0f32, 0.001f32)).to_equal(true)
+            expect(approx_eq(data[255], 255.0f32, 0.001f32)).to_equal(true)
+
+            gpu_free(dev)
+
+        it "handles single element":
+            var data = List<f32>()
+            data.push(99.5f32)
+
+            val buf = gpu_alloc<f32>(1)
+            expect(buf.is_ok()).to_equal(true)
+            val dev = buf.unwrap()
+
+            gpu_upload(dev, data)
+            val result = gpu_download<f32>(dev, 1)
+            expect(result.is_ok()).to_equal(true)
+            expect(approx_eq(result.unwrap()[0], 99.5f32, 0.001f32)).to_equal(true)
+
+            gpu_free(dev)
+
+    describe "gpu_memset":
+
+        it "zeros out a buffer":
+            val n = 512
+            val result = demo_memset(n)
+            expect(result.is_ok()).to_equal(true)
+            expect(all_equal(result.unwrap(), 0.0f32, 0.001f32)).to_equal(true)
+
+        it "zeros out and verifies every element":
+            val n = 1024
+            val buf = gpu_alloc<f32>(n)
+            expect(buf.is_ok()).to_equal(true)
+            val dev = buf.unwrap()
+
+            # Upload non-zero data first
+            var data = List<f32>()
+            var i = 0
+            while i < n:
+                data.push(999.0f32)
+                i = i + 1
+            gpu_upload(dev, data)
+
+            # Memset to zero
+            val ms = gpu_memset(dev, 0, n)
+            expect(ms.is_ok()).to_equal(true)
+
+            # Verify all zeros
+            val result = gpu_download<f32>(dev, n)
+            expect(result.is_ok()).to_equal(true)
+            expect(all_equal(result.unwrap(), 0.0f32, 0.001f32)).to_equal(true)
+
+            gpu_free(dev)
+
+    describe "gpu_copy":
+
+        it "copies data between device buffers":
+            val n = 256
+            val result = demo_device_copy(n)
+            expect(result.is_ok()).to_equal(true)
+            expect(all_equal(result.unwrap(), 42.0f32, 0.001f32)).to_equal(true)
+
+        it "copy does not affect source":
+            val n = 128
+            var src_data = List<f32>()
+            var i = 0
+            while i < n:
+                src_data.push(7.0f32)
+                i = i + 1
+
+            val src = gpu_alloc<f32>(n)
+            val dst = gpu_alloc<f32>(n)
+            expect(src.is_ok()).to_equal(true)
+            expect(dst.is_ok()).to_equal(true)
+
+            val src_dev = src.unwrap()
+            val dst_dev = dst.unwrap()
+
+            gpu_upload(src_dev, src_data)
+            gpu_copy(dst_dev, src_dev, n)
+
+            # Verify source is unchanged
+            val src_result = gpu_download<f32>(src_dev, n)
+            expect(src_result.is_ok()).to_equal(true)
+            expect(all_equal(src_result.unwrap(), 7.0f32, 0.001f32)).to_equal(true)
+
+            # Verify destination has the copy
+            val dst_result = gpu_download<f32>(dst_dev, n)
+            expect(dst_result.is_ok()).to_equal(true)
+            expect(all_equal(dst_result.unwrap(), 7.0f32, 0.001f32)).to_equal(true)
+
+            gpu_free(src_dev)
+            gpu_free(dst_dev)
+
+    describe "full lifecycle":
+
+        it "scales data through full pipeline":
+            val n = 1024
+            val result = demo_basic_lifecycle(n)
+            expect(result.is_ok()).to_equal(true)
+            val data = result.unwrap()
+            # Original: [0, 1, 2, ...], scaled by 2.0 -> [0, 2, 4, ...]
+            expect(approx_eq(data[0], 0.0f32, 0.001f32)).to_equal(true)
+            expect(approx_eq(data[1], 2.0f32, 0.001f32)).to_equal(true)
+            expect(approx_eq(data[10], 20.0f32, 0.001f32)).to_equal(true)
+
+        it "adds two buffers through full pipeline":
+            val n = 1024
+            val result = demo_multi_buffer(n)
+            expect(result.is_ok()).to_equal(true)
+            # 3.0 + 7.0 = 10.0
+            expect(all_equal(result.unwrap(), 10.0f32, 0.001f32)).to_equal(true)

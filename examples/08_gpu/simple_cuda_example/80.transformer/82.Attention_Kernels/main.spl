@@ -1,0 +1,275 @@
+use std.gpu.{GpuDevice, GpuBuffer, atomic_add}
+use std.ml.{Tensor}
+use std.io.{print}
+use std.math.{sqrt, exp}
+
+val HEAD_TILE = 32  # Tile size for attention within a head
+
+# ============================================================
+# Fused QKV projection kernel
+# ============================================================
+
+# Projects input into Q, K, V for all heads in one kernel launch
+# input: [batch, seq_len, d_model]
+# wq, wk, wv: [d_model, d_model]
+# q, k, v: [batch, num_heads, seq_len, head_dim]
+@gpu_kernel
+fn fused_qkv_projection_kernel(input: &[f32],
+                                wq: &[f32], wk: &[f32], wv: &[f32],
+                                q: &mut [f32], k: &mut [f32], v: &mut [f32],
+                                batch: i64, seq_len: i64, d_model: i64,
+                                num_heads: i64, head_dim: i64):
+    val b = block_idx_z()
+    val s = block_idx_y() * block_dim_y() + thread_idx_y()
+    val d = block_idx_x() * block_dim_x() + thread_idx_x()
+
+    if b >= batch or s >= seq_len or d >= d_model:
+        return
+
+    # Compute Q, K, V projections
+    var q_val = 0.0f32
+    var k_val = 0.0f32
+    var v_val = 0.0f32
+
+    var i = 0
+    while i < d_model:
+        val inp = input[(b * seq_len + s) * d_model + i]
+        q_val = q_val + inp * wq[i * d_model + d]
+        k_val = k_val + inp * wk[i * d_model + d]
+        v_val = v_val + inp * wv[i * d_model + d]
+        i = i + 1
+
+    # Reshape into [batch, num_heads, seq_len, head_dim]
+    val h = d / head_dim
+    val hd = d % head_dim
+    val offset = ((b * num_heads + h) * seq_len + s) * head_dim + hd
+
+    q[offset] = q_val
+    k[offset] = k_val
+    v[offset] = v_val
+
+# ============================================================
+# Per-head attention with shared memory
+# ============================================================
+
+@gpu_kernel
+fn multi_head_attention_kernel(q: &[f32], k: &[f32], v: &[f32],
+                               output: &mut [f32],
+                               batch: i64, num_heads: i64,
+                               seq_len: i64, head_dim: i64,
+                               scale: f32, causal: i32):
+    val b = block_idx_z()         # batch index
+    val h = block_idx_y()         # head index
+    val query_pos = block_idx_x() # query position
+
+    if b >= batch or h >= num_heads or query_pos >= seq_len:
+        return
+
+    @shared var q_tile: [f32; HEAD_TILE]
+    @shared var k_tile: [f32; HEAD_TILE * HEAD_TILE]
+    @shared var v_tile: [f32; HEAD_TILE * HEAD_TILE]
+
+    val tid = thread_idx_x()
+    val head_offset = (b * num_heads + h) * seq_len * head_dim
+
+    # Load query vector
+    if tid < head_dim:
+        q_tile[tid] = q[head_offset + query_pos * head_dim + tid]
+    sync_threads()
+
+    # Online softmax + value accumulation
+    var running_max = -1.0e9f32
+    var running_sum = 0.0f32
+    var acc: [f32; HEAD_TILE]
+    var d = 0
+    while d < head_dim:
+        acc[d] = 0.0
+        d = d + 1
+
+    var tile_start = 0
+    while tile_start < seq_len:
+        val tile_end = if tile_start + HEAD_TILE < seq_len: tile_start + HEAD_TILE else: seq_len
+        val tile_len = tile_end - tile_start
+
+        # Load K and V tiles
+        if tid < tile_len:
+            var dk = 0
+            while dk < head_dim:
+                k_tile[tid * head_dim + dk] = k[head_offset + (tile_start + tid) * head_dim + dk]
+                v_tile[tid * head_dim + dk] = v[head_offset + (tile_start + tid) * head_dim + dk]
+                dk = dk + 1
+        sync_threads()
+
+        var col = 0
+        while col < tile_len:
+            val abs_col = tile_start + col
+
+            if causal == 1 and abs_col > query_pos:
+                col = col + 1
+                continue
+
+            # Dot product
+            var dot = 0.0f32
+            d = 0
+            while d < head_dim:
+                dot = dot + q_tile[d] * k_tile[col * head_dim + d]
+                d = d + 1
+            val score = dot * scale
+
+            # Online softmax update
+            val new_max = if score > running_max: score else: running_max
+            val correction = exp(running_max - new_max)
+            val weight = exp(score - new_max)
+            running_sum = running_sum * correction + weight
+
+            d = 0
+            while d < head_dim:
+                acc[d] = acc[d] * correction + weight * v_tile[col * head_dim + d]
+                d = d + 1
+            running_max = new_max
+
+            col = col + 1
+        sync_threads()
+        tile_start = tile_start + HEAD_TILE
+
+    # Write normalized output
+    d = 0
+    while d < head_dim:
+        output[head_offset + query_pos * head_dim + d] = acc[d] / running_sum
+        d = d + 1
+
+# ============================================================
+# Output projection: concat heads and project
+# ============================================================
+
+@gpu_kernel
+fn output_projection_kernel(head_outputs: &[f32], wo: &[f32],
+                            output: &mut [f32],
+                            batch: i64, seq_len: i64, d_model: i64,
+                            num_heads: i64, head_dim: i64):
+    val b = block_idx_z()
+    val s = block_idx_y() * block_dim_y() + thread_idx_y()
+    val d = block_idx_x() * block_dim_x() + thread_idx_x()
+
+    if b >= batch or s >= seq_len or d >= d_model:
+        return
+
+    # Concatenate heads then project
+    var sum = 0.0f32
+    var h = 0
+    while h < num_heads:
+        var hd = 0
+        while hd < head_dim:
+            val concat_idx = h * head_dim + hd
+            val head_val = head_outputs[((b * num_heads + h) * seq_len + s) * head_dim + hd]
+            sum = sum + head_val * wo[concat_idx * d_model + d]
+            hd = hd + 1
+        h = h + 1
+
+    output[(b * seq_len + s) * d_model + d] = sum
+
+# ============================================================
+# High-level batched multi-head attention
+# ============================================================
+
+class BatchedMultiHeadAttention:
+    d_model: i64
+    num_heads: i64
+    head_dim: i64
+    wq: GpuBuffer
+    wk: GpuBuffer
+    wv: GpuBuffer
+    wo: GpuBuffer
+
+    static fn create(dev: GpuDevice, d_model: i64, num_heads: i64) -> Result<BatchedMultiHeadAttention, GpuError>:
+        val head_dim = d_model / num_heads
+        val w_size = d_model * d_model
+        Ok(BatchedMultiHeadAttention(
+            d_model: d_model,
+            num_heads: num_heads,
+            head_dim: head_dim,
+            wq: dev.alloc_copy([f32].fill(w_size, 0.01))?,
+            wk: dev.alloc_copy([f32].fill(w_size, 0.01))?,
+            wv: dev.alloc_copy([f32].fill(w_size, 0.01))?,
+            wo: dev.alloc_copy([f32].fill(w_size, 0.01))?
+        ))
+
+    fn forward(self, dev: GpuDevice, input: GpuBuffer,
+               batch: i64, seq_len: i64, causal: bool) -> Result<GpuBuffer, GpuError>:
+        val head_dim = self.head_dim
+        val total_heads = batch * self.num_heads * seq_len * head_dim
+        val scale = 1.0 / sqrt(head_dim.to_f32())
+        val causal_flag = if causal: 1 else: 0
+
+        # QKV projection
+        var buf_q = dev.alloc_f32(total_heads)?
+        var buf_k = dev.alloc_f32(total_heads)?
+        var buf_v = dev.alloc_f32(total_heads)?
+
+        val block_2d = (16, 16)
+        val grid_proj = ((self.d_model + 15) / 16, (seq_len + 15) / 16, batch)
+
+        dev.launch(fused_qkv_projection_kernel,
+            grid: grid_proj, block: block_2d,
+            args: (input, self.wq, self.wk, self.wv, buf_q, buf_k, buf_v,
+                   batch, seq_len, self.d_model, self.num_heads, head_dim))
+
+        # Per-head attention
+        var buf_attn_out = dev.alloc_f32(total_heads)?
+
+        dev.launch(multi_head_attention_kernel,
+            grid: (seq_len, self.num_heads, batch),
+            block: HEAD_TILE,
+            args: (buf_q, buf_k, buf_v, buf_attn_out,
+                   batch, self.num_heads, seq_len, head_dim, scale, causal_flag))
+
+        # Output projection
+        var buf_output = dev.alloc_f32(batch * seq_len * self.d_model)?
+
+        dev.launch(output_projection_kernel,
+            grid: ((self.d_model + 15) / 16, (seq_len + 15) / 16, batch),
+            block: block_2d,
+            args: (buf_attn_out, self.wo, buf_output,
+                   batch, seq_len, self.d_model, self.num_heads, head_dim))
+
+        dev.sync()?
+        Ok(buf_output)
+
+fn main():
+    val batch = 4
+    val seq_len = 64
+    val d_model = 256
+    val num_heads = 8
+
+    print "Batched Multi-Head Attention:"
+    print "  batch={batch}, seq_len={seq_len}, d_model={d_model}, heads={num_heads}"
+
+    val dev = GpuDevice.get(0)
+    match dev:
+        Ok(d):
+            val mha = BatchedMultiHeadAttention.create(d, d_model, num_heads)
+            match mha:
+                Ok(attn):
+                    val input_data = [f32].fill(batch * seq_len * d_model, 0.1)
+                    val input = d.alloc_copy(input_data)
+                    match input:
+                        Ok(inp):
+                            val result = attn.forward(d, inp, batch, seq_len, causal: true)
+                            match result:
+                                Ok(out):
+                                    val host_data = out.to_host()
+                                    match host_data:
+                                        Ok(data):
+                                            print "  Output elements: {data.len()}"
+                                            print "  Expected: {batch * seq_len * d_model}"
+                                            print "  First value: {data[0]}"
+                                        Err(e):
+                                            print "  Transfer error: {e.message}"
+                                Err(e):
+                                    print "  Forward error: {e.message}"
+                        Err(e):
+                            print "  Input alloc error: {e.message}"
+                Err(e):
+                    print "  MHA create error: {e.message}"
+        Err(e):
+            print "No GPU: {e.message}"

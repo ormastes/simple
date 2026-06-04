@@ -1,0 +1,159 @@
+# Exercise 18: Thread Hierarchy - Tests
+#
+# Verifies that all grid/block configurations produce correct results.
+
+use std.gpu.{GpuError}
+
+use self.main.{
+    create_vec,
+    run_vec_add_1d, run_mat_add_2d,
+    run_matmul_row, run_matmul_2d,
+    run_vec_add_grid_stride
+}
+
+fn approx_equal_scalar(a: f32, b: f32, tol: f32) -> bool:
+    val diff = a - b
+    diff < tol and diff > (0.0f32 - tol)
+
+fn all_approx(data: List<f32>, expected: f32, tol: f32) -> bool:
+    var i = 0
+    while i < data.len():
+        if not approx_equal_scalar(data[i], expected, tol):
+            return false
+        i = i + 1
+    true
+
+describe "Thread Hierarchy":
+
+    describe "1D grid - vector addition":
+
+        it "adds two vectors of 1024 elements":
+            val n = 1024
+            val a = create_vec(n, 1.0f32)
+            val b = create_vec(n, 2.0f32)
+            val result = run_vec_add_1d(a, b, n)
+            expect(result.is_ok()).to_equal(true)
+            expect(all_approx(result.unwrap(), 3.0f32, 0.001f32)).to_equal(true)
+
+        it "handles non-block-aligned sizes":
+            # 1000 is not a multiple of 256 (block size)
+            val n = 1000
+            val a = create_vec(n, 4.0f32)
+            val b = create_vec(n, 5.0f32)
+            val result = run_vec_add_1d(a, b, n)
+            expect(result.is_ok()).to_equal(true)
+            val data = result.unwrap()
+            expect(data.len()).to_equal(n)
+            expect(all_approx(data, 9.0f32, 0.001f32)).to_equal(true)
+
+    describe "2D grid - matrix addition":
+
+        it "adds two 64x64 matrices":
+            val rows = 64
+            val cols = 64
+            val total = rows * cols
+            val a = create_vec(total, 10.0f32)
+            val b = create_vec(total, 20.0f32)
+            val result = run_mat_add_2d(a, b, rows, cols)
+            expect(result.is_ok()).to_equal(true)
+            expect(all_approx(result.unwrap(), 30.0f32, 0.001f32)).to_equal(true)
+
+        it "handles non-square non-aligned matrix":
+            val rows = 33
+            val cols = 47
+            val total = rows * cols
+            val a = create_vec(total, 1.5f32)
+            val b = create_vec(total, 2.5f32)
+            val result = run_mat_add_2d(a, b, rows, cols)
+            expect(result.is_ok()).to_equal(true)
+            val data = result.unwrap()
+            expect(data.len()).to_equal(total)
+            expect(all_approx(data, 4.0f32, 0.001f32)).to_equal(true)
+
+    describe "1D row-per-thread matmul":
+
+        it "multiplies identity matrix":
+            val n = 16
+            # Create identity matrix
+            var identity = create_vec(n * n, 0.0f32)
+            var i = 0
+            while i < n:
+                identity[i * n + i] = 1.0f32
+                i = i + 1
+            val ones = create_vec(n * n, 1.0f32)
+            val result = run_matmul_row(ones, identity, n)
+            expect(result.is_ok()).to_equal(true)
+            expect(all_approx(result.unwrap(), 1.0f32, 0.001f32)).to_equal(true)
+
+        it "computes ones * ones = n for each element":
+            val n = 32
+            val ones = create_vec(n * n, 1.0f32)
+            val result = run_matmul_row(ones, ones, n)
+            expect(result.is_ok()).to_equal(true)
+            val expected_val = n * 1.0f32
+            expect(all_approx(result.unwrap(), expected_val, 0.01f32)).to_equal(true)
+
+    describe "2D matmul":
+
+        it "multiplies identity matrix":
+            val n = 16
+            var identity = create_vec(n * n, 0.0f32)
+            var i = 0
+            while i < n:
+                identity[i * n + i] = 1.0f32
+                i = i + 1
+            val twos = create_vec(n * n, 2.0f32)
+            val result = run_matmul_2d(twos, identity, n)
+            expect(result.is_ok()).to_equal(true)
+            expect(all_approx(result.unwrap(), 2.0f32, 0.001f32)).to_equal(true)
+
+        it "matches row-per-thread variant":
+            val n = 32
+            val a = create_vec(n * n, 1.5f32)
+            val b = create_vec(n * n, 2.0f32)
+            val r_row = run_matmul_row(a, b, n)
+            val r_2d = run_matmul_2d(a, b, n)
+            expect(r_row.is_ok()).to_equal(true)
+            expect(r_2d.is_ok()).to_equal(true)
+            val d_row = r_row.unwrap()
+            val d_2d = r_2d.unwrap()
+            var all_match = true
+            var i = 0
+            while i < n * n:
+                val diff = d_row[i] - d_2d[i]
+                if diff > 0.01f32 or diff < -0.01f32:
+                    all_match = false
+                i = i + 1
+            expect(all_match).to_equal(true)
+
+    describe "grid-stride loop":
+
+        it "handles data larger than grid":
+            # Launch only 32*256 = 8192 threads for 100000 elements
+            val n = 100000
+            val a = create_vec(n, 7.0f32)
+            val b = create_vec(n, 3.0f32)
+            val result = run_vec_add_grid_stride(a, b, n)
+            expect(result.is_ok()).to_equal(true)
+            val data = result.unwrap()
+            expect(data.len()).to_equal(n)
+            expect(all_approx(data, 10.0f32, 0.001f32)).to_equal(true)
+
+        it "matches 1D vec_add results":
+            val n = 4096
+            val a = create_vec(n, 2.5f32)
+            val b = create_vec(n, 3.5f32)
+            val r1 = run_vec_add_1d(a, b, n)
+            val r2 = run_vec_add_grid_stride(a, b, n)
+            expect(r1.is_ok()).to_equal(true)
+            expect(r2.is_ok()).to_equal(true)
+            val d1 = r1.unwrap()
+            val d2 = r2.unwrap()
+            var match_ok = true
+            var i = 0
+            while i < n:
+                val diff = d1[i] - d2[i]
+                if diff > 0.001f32 or diff < -0.001f32:
+                    match_ok = false
+                i = i + 1
+            expect(match_ok).to_equal(true)

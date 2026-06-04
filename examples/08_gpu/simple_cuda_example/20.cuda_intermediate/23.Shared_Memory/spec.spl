@@ -1,0 +1,125 @@
+# Exercise 23: Shared Memory Reduction - Tests
+
+use std.gpu.{GpuError}
+
+use self.main.{
+    make_data, make_sequential, cpu_sum,
+    run_reduce_naive, run_reduce_sequential, run_reduce_optimized,
+    BLOCK_SIZE
+}
+
+fn approx_eq(a: f32, b: f32, tol: f32) -> bool:
+    val diff = a - b
+    diff < tol and diff > (0.0f32 - tol)
+
+describe "Shared Memory Reduction":
+
+    describe "naive interleaved":
+
+        it "sums 256 ones (single block)":
+            val data = make_data(256, 1.0f32)
+            val result = run_reduce_naive(data)
+            expect(result.is_ok()).to_equal(true)
+            expect(approx_eq(result.unwrap(), 256.0f32, 1.0f32)).to_equal(true)
+
+        it "sums 1024 ones (multiple blocks)":
+            val data = make_data(1024, 1.0f32)
+            val result = run_reduce_naive(data)
+            expect(result.is_ok()).to_equal(true)
+            expect(approx_eq(result.unwrap(), 1024.0f32, 1.0f32)).to_equal(true)
+
+        it "sums sequential values":
+            val n = 512
+            val data = make_sequential(n)
+            val expected = cpu_sum(data)
+            val result = run_reduce_naive(data)
+            expect(result.is_ok()).to_equal(true)
+            expect(approx_eq(result.unwrap(), expected, 1.0f32)).to_equal(true)
+
+    describe "sequential addressing":
+
+        it "sums 256 ones (single block)":
+            val data = make_data(256, 1.0f32)
+            val result = run_reduce_sequential(data)
+            expect(result.is_ok()).to_equal(true)
+            expect(approx_eq(result.unwrap(), 256.0f32, 1.0f32)).to_equal(true)
+
+        it "sums 4096 elements (many blocks)":
+            val data = make_data(4096, 1.0f32)
+            val result = run_reduce_sequential(data)
+            expect(result.is_ok()).to_equal(true)
+            expect(approx_eq(result.unwrap(), 4096.0f32, 2.0f32)).to_equal(true)
+
+        it "sums non-block-aligned size":
+            val n = 1000
+            val data = make_data(n, 2.0f32)
+            val result = run_reduce_sequential(data)
+            expect(result.is_ok()).to_equal(true)
+            expect(approx_eq(result.unwrap(), 2000.0f32, 1.0f32)).to_equal(true)
+
+    describe "optimized (first-add + warp unroll)":
+
+        it "sums 512 ones (exercises first-add during load)":
+            val data = make_data(512, 1.0f32)
+            val result = run_reduce_optimized(data)
+            expect(result.is_ok()).to_equal(true)
+            expect(approx_eq(result.unwrap(), 512.0f32, 1.0f32)).to_equal(true)
+
+        it "sums 4096 ones":
+            val data = make_data(4096, 1.0f32)
+            val result = run_reduce_optimized(data)
+            expect(result.is_ok()).to_equal(true)
+            expect(approx_eq(result.unwrap(), 4096.0f32, 2.0f32)).to_equal(true)
+
+        it "sums sequential values correctly":
+            val n = 2048
+            val data = make_sequential(n)
+            val expected = cpu_sum(data)
+            val result = run_reduce_optimized(data)
+            expect(result.is_ok()).to_equal(true)
+            # Allow larger tolerance for large sums (floating point accumulation)
+            expect(approx_eq(result.unwrap(), expected, expected * 0.001f32)).to_equal(true)
+
+    describe "all variants consistency":
+
+        it "all three produce same result for uniform data":
+            val data = make_data(2048, 3.0f32)
+            val r1 = run_reduce_naive(data)
+            val r2 = run_reduce_sequential(data)
+            val r3 = run_reduce_optimized(data)
+            expect(r1.is_ok()).to_equal(true)
+            expect(r2.is_ok()).to_equal(true)
+            expect(r3.is_ok()).to_equal(true)
+            val expected = 2048.0f32 * 3.0f32
+            expect(approx_eq(r1.unwrap(), expected, 2.0f32)).to_equal(true)
+            expect(approx_eq(r2.unwrap(), expected, 2.0f32)).to_equal(true)
+            expect(approx_eq(r3.unwrap(), expected, 2.0f32)).to_equal(true)
+
+        it "all three produce same result for sequential data":
+            val n = 1024
+            val data = make_sequential(n)
+            val expected = cpu_sum(data)
+            val r1 = run_reduce_naive(data)
+            val r2 = run_reduce_sequential(data)
+            val r3 = run_reduce_optimized(data)
+            expect(r1.is_ok()).to_equal(true)
+            expect(r2.is_ok()).to_equal(true)
+            expect(r3.is_ok()).to_equal(true)
+            val tol = expected * 0.001f32
+            expect(approx_eq(r1.unwrap(), expected, tol)).to_equal(true)
+            expect(approx_eq(r2.unwrap(), expected, tol)).to_equal(true)
+            expect(approx_eq(r3.unwrap(), expected, tol)).to_equal(true)
+
+        it "matches CPU reference for large input":
+            val n = 8192
+            val data = make_data(n, 0.5f32)
+            val expected = cpu_sum(data)
+            val r1 = run_reduce_naive(data)
+            val r2 = run_reduce_sequential(data)
+            val r3 = run_reduce_optimized(data)
+            expect(r1.is_ok()).to_equal(true)
+            expect(r2.is_ok()).to_equal(true)
+            expect(r3.is_ok()).to_equal(true)
+            expect(approx_eq(r1.unwrap(), expected, 2.0f32)).to_equal(true)
+            expect(approx_eq(r2.unwrap(), expected, 2.0f32)).to_equal(true)
+            expect(approx_eq(r3.unwrap(), expected, 2.0f32)).to_equal(true)

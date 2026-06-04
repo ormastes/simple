@@ -1,0 +1,308 @@
+# Exercise 22: Streams and Async Operations
+#
+# Demonstrates multi-stream GPU processing:
+# - Creating and destroying streams
+# - Async uploads and downloads
+# - Kernel launches on specific streams
+# - Overlapping compute and transfer
+
+use std.gpu.{
+    gpu_alloc, gpu_alloc_pinned, gpu_upload, gpu_download, gpu_free,
+    gpu_upload_async, gpu_download_async,
+    gpu_stream_create, gpu_stream_destroy, gpu_stream_sync,
+    gpu_device_sync,
+    gpu_block_id_x, gpu_block_dim_x, gpu_local_id_x,
+    gpu_launch, GpuBuffer, GpuStream, GpuError
+}
+
+# --------------------------------------------------------------------------
+# Kernel: scale each element (used across all demos)
+# --------------------------------------------------------------------------
+
+@gpu_kernel
+fn scale_kernel(data: GpuBuffer<f32>, scale: f32, n: i32):
+    val idx = gpu_block_id_x() * gpu_block_dim_x() + gpu_local_id_x()
+    if idx < n:
+        data[idx] = data[idx] * scale
+
+# --------------------------------------------------------------------------
+# Kernel: element-wise add
+# --------------------------------------------------------------------------
+
+@gpu_kernel
+fn add_kernel(a: GpuBuffer<f32>, b: GpuBuffer<f32>, c: GpuBuffer<f32>, n: i32):
+    val idx = gpu_block_id_x() * gpu_block_dim_x() + gpu_local_id_x()
+    if idx < n:
+        c[idx] = a[idx] + b[idx]
+
+# --------------------------------------------------------------------------
+# Helper: create a list of f32
+# --------------------------------------------------------------------------
+
+fn make_data(n: i32, val_fill: f32) -> List<f32>:
+    var data = List<f32>()
+    var i = 0
+    while i < n:
+        data.push(val_fill)
+        i = i + 1
+    data
+
+# --------------------------------------------------------------------------
+# Demo 1: Single stream -- basic async workflow
+#
+# Shows the minimal stream usage: create, async ops, sync, destroy.
+# --------------------------------------------------------------------------
+
+fn demo_single_stream(n: i32) -> Result<List<f32>, GpuError>:
+    print "=== Demo 1: Single Stream ==="
+
+    val stream = gpu_stream_create()?
+    print "  Stream created"
+
+    val dev_buf = gpu_alloc<f32>(n)?
+    val host_data = make_data(n, 5.0f32)
+
+    # Async upload on the stream
+    gpu_upload_async(dev_buf, host_data, stream)?
+    print "  Async upload enqueued"
+
+    # Launch kernel on the stream
+    val block_size = 256
+    val grid_size = (n + block_size - 1) / block_size
+    scale_kernel<<<grid: (grid_size, 1, 1), block: (block_size, 1, 1), stream: stream>>>(
+        dev_buf, 3.0f32, n
+    )
+    print "  Kernel enqueued (scale by 3.0)"
+
+    # Async download on the stream
+    val result = gpu_download_async<f32>(dev_buf, n, stream)?
+    print "  Async download enqueued"
+
+    # Wait for everything on this stream to complete
+    gpu_stream_sync(stream)?
+    print "  Stream synchronized"
+
+    gpu_free(dev_buf)?
+    gpu_stream_destroy(stream)?
+    print "  Stream destroyed"
+
+    Ok(result)
+
+# --------------------------------------------------------------------------
+# Demo 2: Two independent streams -- overlap compute and transfer
+#
+# Stream 1 processes chunk A while stream 2 uploads chunk B.
+# This is the fundamental overlap pattern.
+# --------------------------------------------------------------------------
+
+fn demo_two_streams(n: i32) -> Result<List<f32>, GpuError>:
+    print "=== Demo 2: Two Streams (Overlap) ==="
+
+    val stream1 = gpu_stream_create()?
+    val stream2 = gpu_stream_create()?
+
+    val half = n / 2
+    val block_size = 256
+    val grid_size = (half + block_size - 1) / block_size
+
+    # Allocate two device buffers
+    val dev_a = gpu_alloc<f32>(half)?
+    val dev_b = gpu_alloc<f32>(half)?
+
+    val data_a = make_data(half, 2.0f32)
+    val data_b = make_data(half, 4.0f32)
+
+    # Stream 1: upload A, compute A
+    gpu_upload_async(dev_a, data_a, stream1)?
+    scale_kernel<<<grid: (grid_size, 1, 1), block: (block_size, 1, 1), stream: stream1>>>(
+        dev_a, 10.0f32, half
+    )
+
+    # Stream 2: upload B, compute B (can overlap with stream 1)
+    gpu_upload_async(dev_b, data_b, stream2)?
+    scale_kernel<<<grid: (grid_size, 1, 1), block: (block_size, 1, 1), stream: stream2>>>(
+        dev_b, 10.0f32, half
+    )
+
+    # Download results (each on its own stream)
+    val result_a = gpu_download_async<f32>(dev_a, half, stream1)?
+    val result_b = gpu_download_async<f32>(dev_b, half, stream2)?
+
+    # Sync both streams
+    gpu_stream_sync(stream1)?
+    gpu_stream_sync(stream2)?
+    print "  Both streams complete"
+
+    gpu_free(dev_a)?
+    gpu_free(dev_b)?
+    gpu_stream_destroy(stream1)?
+    gpu_stream_destroy(stream2)?
+
+    # Combine results
+    var combined = List<f32>()
+    var i = 0
+    while i < half:
+        combined.push(result_a[i])
+        i = i + 1
+    i = 0
+    while i < half:
+        combined.push(result_b[i])
+        i = i + 1
+
+    Ok(combined)
+
+# --------------------------------------------------------------------------
+# Demo 3: Pipeline with multiple streams
+#
+# Process data in chunks, each on its own stream, creating a pipeline
+# where upload/compute/download of different chunks overlap.
+# --------------------------------------------------------------------------
+
+fn demo_pipeline(total: i32, num_streams: i32) -> Result<List<f32>, GpuError>:
+    print "=== Demo 3: Pipeline ({num_streams} streams) ==="
+
+    val chunk_size = total / num_streams
+    val block_size = 256
+    val grid_size = (chunk_size + block_size - 1) / block_size
+
+    # Create streams and buffers
+    var streams = List<GpuStream>()
+    var dev_bufs = List<GpuBuffer<f32>>()
+
+    var s = 0
+    while s < num_streams:
+        val stream = gpu_stream_create()?
+        streams.push(stream)
+        val buf = gpu_alloc<f32>(chunk_size)?
+        dev_bufs.push(buf)
+        s = s + 1
+
+    # Enqueue all work across streams
+    s = 0
+    while s < num_streams:
+        val data = make_data(chunk_size, (s + 1) * 1.0f32)
+        gpu_upload_async(dev_bufs[s], data, streams[s])?
+        scale_kernel<<<grid: (grid_size, 1, 1), block: (block_size, 1, 1), stream: streams[s]>>>(
+            dev_bufs[s], 2.0f32, chunk_size
+        )
+        s = s + 1
+    print "  All chunks enqueued"
+
+    # Download all results
+    var results = List<List<f32>>()
+    s = 0
+    while s < num_streams:
+        val chunk_result = gpu_download_async<f32>(dev_bufs[s], chunk_size, streams[s])?
+        results.push(chunk_result)
+        s = s + 1
+
+    # Sync all streams
+    gpu_device_sync()?
+    print "  All streams synchronized via device_sync"
+
+    # Cleanup
+    s = 0
+    while s < num_streams:
+        gpu_free(dev_bufs[s])?
+        gpu_stream_destroy(streams[s])?
+        s = s + 1
+
+    # Flatten results
+    var combined = List<f32>()
+    s = 0
+    while s < num_streams:
+        var i = 0
+        while i < chunk_size:
+            combined.push(results[s][i])
+            i = i + 1
+        s = s + 1
+
+    Ok(combined)
+
+# --------------------------------------------------------------------------
+# Demo 4: Two-stream add -- streams feed into a combined operation
+#
+# Stream 1 prepares buffer A, stream 2 prepares buffer B, then we
+# sync both and launch the add kernel on the default stream.
+# --------------------------------------------------------------------------
+
+fn demo_stream_add(n: i32) -> Result<List<f32>, GpuError>:
+    print "=== Demo 4: Stream-Based Add ==="
+
+    val stream1 = gpu_stream_create()?
+    val stream2 = gpu_stream_create()?
+
+    val dev_a = gpu_alloc<f32>(n)?
+    val dev_b = gpu_alloc<f32>(n)?
+    val dev_c = gpu_alloc<f32>(n)?
+
+    val data_a = make_data(n, 3.0f32)
+    val data_b = make_data(n, 7.0f32)
+
+    val block_size = 256
+    val grid_size = (n + block_size - 1) / block_size
+
+    # Prepare A on stream 1: upload then scale by 2 -> 6.0
+    gpu_upload_async(dev_a, data_a, stream1)?
+    scale_kernel<<<grid: (grid_size, 1, 1), block: (block_size, 1, 1), stream: stream1>>>(
+        dev_a, 2.0f32, n
+    )
+
+    # Prepare B on stream 2: upload then scale by 3 -> 21.0
+    gpu_upload_async(dev_b, data_b, stream2)?
+    scale_kernel<<<grid: (grid_size, 1, 1), block: (block_size, 1, 1), stream: stream2>>>(
+        dev_b, 3.0f32, n
+    )
+
+    # Sync both streams before combining
+    gpu_stream_sync(stream1)?
+    gpu_stream_sync(stream2)?
+    print "  Both preparation streams done"
+
+    # Add on default stream (no stream parameter)
+    add_kernel<<<grid: (grid_size, 1, 1), block: (block_size, 1, 1)>>>(
+        dev_a, dev_b, dev_c, n
+    )
+
+    val result = gpu_download<f32>(dev_c, n)?
+
+    gpu_free(dev_a)?
+    gpu_free(dev_b)?
+    gpu_free(dev_c)?
+    gpu_stream_destroy(stream1)?
+    gpu_stream_destroy(stream2)?
+
+    Ok(result)
+
+# --------------------------------------------------------------------------
+# Main
+# --------------------------------------------------------------------------
+
+fn main() -> Result<i32, GpuError>:
+    val n = 4096
+
+    val r1 = demo_single_stream(n)?
+    print "  r1[0] = {r1[0]} (expected 15.0)"
+
+    print ""
+
+    val r2 = demo_two_streams(n)?
+    print "  r2[0] = {r2[0]} (expected 20.0), r2[{n / 2}] = {r2[n / 2]} (expected 40.0)"
+
+    print ""
+
+    val r3 = demo_pipeline(n, 4)?
+    val chunk = n / 4
+    print "  r3[0] = {r3[0]} (expected 2.0)"
+    print "  r3[{chunk}] = {r3[chunk]} (expected 4.0)"
+    print "  r3[{chunk * 2}] = {r3[chunk * 2]} (expected 6.0)"
+    print "  r3[{chunk * 3}] = {r3[chunk * 3]} (expected 8.0)"
+
+    print ""
+
+    val r4 = demo_stream_add(n)?
+    print "  r4[0] = {r4[0]} (expected 27.0: 3*2 + 7*3)"
+
+    print ""
+    print "All stream demos complete."
+    Ok(0)

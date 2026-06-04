@@ -1,0 +1,73 @@
+use std.gpu.{GpuDevice}
+use std.math.{abs}
+
+describe "Core GEMM dispatcher":
+    it "should select SIMD for small matrices":
+        val strategy = select_strategy(8, 8, 8)
+        match strategy:
+            GemmStrategy.SimdCpu: expect(true).to_equal(true)
+            _: expect(false).to_equal(true)
+
+    it "should select SharedMemory for medium matrices":
+        val strategy = select_strategy(128, 128, 128)
+        match strategy:
+            GemmStrategy.SimdCpu: expect(false).to_equal(true)
+            _: expect(true).to_equal(true)  # SharedMemory or TensorCore
+
+    it "should compute shared memory GEMM correctly":
+        val a = [1.0, 2.0, 3.0, 4.0]
+        val b = [5.0, 6.0, 7.0, 8.0]
+        val c = gemm_shared(a, b, 2, 2, 2)?
+        expect(c[0]).to_equal(19.0)
+        expect(c[1]).to_equal(22.0)
+        expect(c[2]).to_equal(43.0)
+        expect(c[3]).to_equal(50.0)
+
+    it "should compute SIMD GEMM correctly":
+        val a = [1.0, 2.0, 3.0, 4.0]
+        val b_t = transpose([5.0, 6.0, 7.0, 8.0], 2, 2)
+        var c = [f32].fill(4, 0.0)
+        gemm_simd(a, b_t, c, 2, 2, 2)
+        expect(c[0]).to_equal(19.0)
+        expect(c[1]).to_equal(22.0)
+        expect(c[2]).to_equal(43.0)
+        expect(c[3]).to_equal(50.0)
+
+    it "should dispatch correctly for small matrices":
+        val a = [1.0, 2.0, 3.0, 4.0]
+        val b = [5.0, 6.0, 7.0, 8.0]
+        val c = gemm_dispatch(a, b, 2, 2, 2)?
+        expect(c[0]).to_equal(19.0)
+        expect(c[3]).to_equal(50.0)
+
+    it "should handle non-square matrices":
+        # 2x3 * 3x2 = 2x2
+        val a = [1.0, 2.0, 3.0,
+                 4.0, 5.0, 6.0]
+        val b = [7.0, 8.0,
+                 9.0, 10.0,
+                 11.0, 12.0]
+        val c = gemm_dispatch(a, b, 2, 2, 3)?
+        expect(c[0]).to_equal(58.0)
+        expect(c[1]).to_equal(64.0)
+        expect(c[2]).to_equal(139.0)
+        expect(c[3]).to_equal(154.0)
+
+    it "should agree between shared and SIMD":
+        val n = 16
+        val a = [f32].fill(n * n, 2.0)
+        val b = [f32].fill(n * n, 3.0)
+        val c_shared = gemm_shared(a, b, n, n, n)?
+        val b_t = transpose(b, n, n)
+        var c_simd = [f32].fill(n * n, 0.0)
+        gemm_simd(a, b_t, c_simd, n, n, n)
+        var i = 0
+        while i < n * n:
+            val diff = abs(c_shared[i] - c_simd[i])
+            expect(diff).to_be_less_than(0.01)
+            i = i + 1
+
+    it "should convert to f16 and back":
+        val data = [1.0, 2.0, 3.0]
+        val f16_data = to_f16(data)
+        expect(f16_data.len()).to_equal(3)

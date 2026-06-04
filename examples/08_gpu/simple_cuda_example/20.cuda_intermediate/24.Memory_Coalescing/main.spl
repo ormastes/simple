@@ -1,0 +1,389 @@
+# Exercise 24: Memory Coalescing
+#
+# Demonstrates:
+# - Coalesced (row-major) vs strided (column-major) GPU memory access
+# - Matrix transpose to fix uncoalesced access
+# - CPU @simd with Vec4f/Vec8f for comparison
+
+use std.gpu.{
+    gpu_alloc, gpu_upload, gpu_download, gpu_free,
+    gpu_block_id_x, gpu_block_id_y,
+    gpu_block_dim_x, gpu_block_dim_y,
+    gpu_local_id_x, gpu_local_id_y,
+    gpu_shared_mem, gpu_syncthreads,
+    gpu_launch, GpuBuffer, GpuError
+}
+
+use std.simd.{Vec4f, Vec8f, simd_load, simd_store, simd_add, simd_mul}
+
+val TILE_SIZE = 16
+
+# --------------------------------------------------------------------------
+# GPU Kernel: Coalesced column sum (row-major access)
+#
+# Each thread sums one column. Consecutive threads access consecutive
+# memory addresses (col = threadIdx.x), so reads are coalesced.
+#
+# Access pattern for row i: data[i * cols + col]
+# Threads in a warp read: data[i*cols+0], data[i*cols+1], ..., data[i*cols+31]
+# These are consecutive addresses -> coalesced!
+# --------------------------------------------------------------------------
+
+@gpu_kernel
+fn column_sum_coalesced(data: GpuBuffer<f32>, result: GpuBuffer<f32>,
+                        rows: i32, cols: i32):
+    val col = gpu_block_id_x() * gpu_block_dim_x() + gpu_local_id_x()
+    if col < cols:
+        var sum = 0.0f32
+        var row = 0
+        while row < rows:
+            sum = sum + data[row * cols + col]
+            row = row + 1
+        result[col] = sum
+
+# --------------------------------------------------------------------------
+# GPU Kernel: Row sum with strided access (BAD pattern)
+#
+# Each thread sums one row. But consecutive threads access addresses
+# separated by 'cols' elements (row = threadIdx.x), causing strided access.
+#
+# Thread 0 reads: data[0], data[cols], data[2*cols], ...
+# Thread 1 reads: data[1], data[cols+1], data[2*cols+1], ...
+# Within one iteration, threads in a warp read data[0], data[1], ..., data[31]
+# -- this IS coalesced. But if we did column-major storage, it would be bad.
+#
+# To demonstrate truly strided access, we access columns in the inner loop
+# with stride = rows (transposed layout).
+# --------------------------------------------------------------------------
+
+@gpu_kernel
+fn row_sum_strided(data: GpuBuffer<f32>, result: GpuBuffer<f32>,
+                   rows: i32, cols: i32):
+    # data is stored in column-major order: data[col * rows + row]
+    val row = gpu_block_id_x() * gpu_block_dim_x() + gpu_local_id_x()
+    if row < rows:
+        var sum = 0.0f32
+        var col = 0
+        while col < cols:
+            # Column-major: stride between consecutive elements = rows
+            sum = sum + data[col * rows + row]
+            col = col + 1
+        result[row] = sum
+
+# --------------------------------------------------------------------------
+# GPU Kernel: Matrix transpose (coalesced read, coalesced write via shared mem)
+#
+# Uses shared memory tiling to achieve coalesced access for both
+# the read (input) and write (output) of the transpose.
+# --------------------------------------------------------------------------
+
+@gpu_kernel
+fn transpose_kernel(input: GpuBuffer<f32>, output: GpuBuffer<f32>,
+                    rows: i32, cols: i32):
+    # Shared memory tile with padding to avoid bank conflicts
+    # (TILE_SIZE+1 columns to offset bank addresses)
+    val tile = gpu_shared_mem<f32>(TILE_SIZE * (TILE_SIZE + 1))
+
+    val bx = gpu_block_id_x()
+    val by = gpu_block_id_y()
+    val tx = gpu_local_id_x()
+    val ty = gpu_local_id_y()
+
+    # Read from input (coalesced): consecutive threads read consecutive columns
+    val in_row = by * TILE_SIZE + ty
+    val in_col = bx * TILE_SIZE + tx
+    if in_row < rows and in_col < cols:
+        tile[ty * (TILE_SIZE + 1) + tx] = input[in_row * cols + in_col]
+    gpu_syncthreads()
+
+    # Write to output (coalesced): swap block x/y and thread x/y
+    val out_row = bx * TILE_SIZE + ty
+    val out_col = by * TILE_SIZE + tx
+    if out_row < cols and out_col < rows:
+        output[out_row * rows + out_col] = tile[tx * (TILE_SIZE + 1) + ty]
+
+# --------------------------------------------------------------------------
+# GPU Kernel: Scale with coalesced access
+# --------------------------------------------------------------------------
+
+@gpu_kernel
+fn scale_coalesced(data: GpuBuffer<f32>, result: GpuBuffer<f32>,
+                   scale: f32, n: i32):
+    val idx = gpu_block_id_x() * gpu_block_dim_x() + gpu_local_id_x()
+    if idx < n:
+        result[idx] = data[idx] * scale
+
+# --------------------------------------------------------------------------
+# CPU SIMD comparison: Vec4f and Vec8f
+#
+# CPU equivalent of coalesced access: process 4 or 8 floats at once.
+# --------------------------------------------------------------------------
+
+fn cpu_scale_scalar(data: List<f32>, scale: f32) -> List<f32>:
+    var result = List<f32>()
+    var i = 0
+    while i < data.len():
+        result.push(data[i] * scale)
+        i = i + 1
+    result
+
+fn cpu_scale_vec4f(data: List<f32>, scale: f32) -> List<f32>:
+    val n = data.len()
+    var result = List<f32>()
+    var i = 0
+    while i < n:
+        result.push(0.0f32)
+        i = i + 1
+
+    val scale_vec = Vec4f(scale, scale, scale, scale)
+
+    # Process 4 elements at a time
+    i = 0
+    while i + 4 <= n:
+        val chunk = simd_load<Vec4f>(data, i)
+        val scaled = simd_mul(chunk, scale_vec)
+        simd_store(result, i, scaled)
+        i = i + 4
+
+    # Handle remainder
+    while i < n:
+        result[i] = data[i] * scale
+        i = i + 1
+
+    result
+
+fn cpu_scale_vec8f(data: List<f32>, scale: f32) -> List<f32>:
+    val n = data.len()
+    var result = List<f32>()
+    var i = 0
+    while i < n:
+        result.push(0.0f32)
+        i = i + 1
+
+    val scale_vec = Vec8f(scale, scale, scale, scale, scale, scale, scale, scale)
+
+    # Process 8 elements at a time
+    i = 0
+    while i + 8 <= n:
+        val chunk = simd_load<Vec8f>(data, i)
+        val scaled = simd_mul(chunk, scale_vec)
+        simd_store(result, i, scaled)
+        i = i + 8
+
+    # Handle remainder
+    while i < n:
+        result[i] = data[i] * scale
+        i = i + 1
+
+    result
+
+fn cpu_add_vec4f(a: List<f32>, b: List<f32>) -> List<f32>:
+    val n = a.len()
+    var result = List<f32>()
+    var i = 0
+    while i < n:
+        result.push(0.0f32)
+        i = i + 1
+
+    i = 0
+    while i + 4 <= n:
+        val va = simd_load<Vec4f>(a, i)
+        val vb = simd_load<Vec4f>(b, i)
+        val vc = simd_add(va, vb)
+        simd_store(result, i, vc)
+        i = i + 4
+
+    while i < n:
+        result[i] = a[i] + b[i]
+        i = i + 1
+
+    result
+
+# --------------------------------------------------------------------------
+# Host-side runners
+# --------------------------------------------------------------------------
+
+fn make_matrix(rows: i32, cols: i32, fill: f32) -> List<f32>:
+    var data = List<f32>()
+    var i = 0
+    while i < rows * cols:
+        data.push(fill)
+        i = i + 1
+    data
+
+fn make_sequential_matrix(rows: i32, cols: i32) -> List<f32>:
+    var data = List<f32>()
+    var i = 0
+    while i < rows * cols:
+        data.push(i * 1.0f32)
+        i = i + 1
+    data
+
+fn run_column_sum_coalesced(data_host: List<f32>, rows: i32, cols: i32) -> Result<List<f32>, GpuError>:
+    val total = rows * cols
+    val data_dev = gpu_alloc<f32>(total)?
+    val result_dev = gpu_alloc<f32>(cols)?
+
+    gpu_upload(data_dev, data_host)?
+
+    val block_size = 256
+    val grid_size = (cols + block_size - 1) / block_size
+    column_sum_coalesced<<<grid: (grid_size, 1, 1), block: (block_size, 1, 1)>>>(
+        data_dev, result_dev, rows, cols
+    )
+
+    val result = gpu_download<f32>(result_dev, cols)?
+    gpu_free(data_dev)?
+    gpu_free(result_dev)?
+    Ok(result)
+
+fn to_column_major(data: List<f32>, rows: i32, cols: i32) -> List<f32>:
+    var col_major = List<f32>()
+    var i = 0
+    while i < rows * cols:
+        col_major.push(0.0f32)
+        i = i + 1
+    var r = 0
+    while r < rows:
+        var c = 0
+        while c < cols:
+            col_major[c * rows + r] = data[r * cols + c]
+            c = c + 1
+        r = r + 1
+    col_major
+
+fn run_row_sum_strided(data_host: List<f32>, rows: i32, cols: i32) -> Result<List<f32>, GpuError>:
+    # Convert to column-major to demonstrate strided access
+    val col_major = to_column_major(data_host, rows, cols)
+    val total = rows * cols
+    val data_dev = gpu_alloc<f32>(total)?
+    val result_dev = gpu_alloc<f32>(rows)?
+
+    gpu_upload(data_dev, col_major)?
+
+    val block_size = 256
+    val grid_size = (rows + block_size - 1) / block_size
+    row_sum_strided<<<grid: (grid_size, 1, 1), block: (block_size, 1, 1)>>>(
+        data_dev, result_dev, rows, cols
+    )
+
+    val result = gpu_download<f32>(result_dev, rows)?
+    gpu_free(data_dev)?
+    gpu_free(result_dev)?
+    Ok(result)
+
+fn run_transpose(data_host: List<f32>, rows: i32, cols: i32) -> Result<List<f32>, GpuError>:
+    val total = rows * cols
+    val input_dev = gpu_alloc<f32>(total)?
+    val output_dev = gpu_alloc<f32>(total)?
+
+    gpu_upload(input_dev, data_host)?
+
+    val block_dim = (TILE_SIZE, TILE_SIZE, 1)
+    val grid_dim = ((cols + TILE_SIZE - 1) / TILE_SIZE,
+                    (rows + TILE_SIZE - 1) / TILE_SIZE, 1)
+    transpose_kernel<<<grid: grid_dim, block: block_dim>>>(
+        input_dev, output_dev, rows, cols
+    )
+
+    val result = gpu_download<f32>(output_dev, total)?
+    gpu_free(input_dev)?
+    gpu_free(output_dev)?
+    Ok(result)
+
+fn run_gpu_scale(data_host: List<f32>, scale: f32) -> Result<List<f32>, GpuError>:
+    val n = data_host.len()
+    val data_dev = gpu_alloc<f32>(n)?
+    val result_dev = gpu_alloc<f32>(n)?
+
+    gpu_upload(data_dev, data_host)?
+
+    val block_size = 256
+    val grid_size = (n + block_size - 1) / block_size
+    scale_coalesced<<<grid: (grid_size, 1, 1), block: (block_size, 1, 1)>>>(
+        data_dev, result_dev, scale, n
+    )
+
+    val result = gpu_download<f32>(result_dev, n)?
+    gpu_free(data_dev)?
+    gpu_free(result_dev)?
+    Ok(result)
+
+# --------------------------------------------------------------------------
+# CPU reference
+# --------------------------------------------------------------------------
+
+fn cpu_column_sum(data: List<f32>, rows: i32, cols: i32) -> List<f32>:
+    var result = List<f32>()
+    var c = 0
+    while c < cols:
+        var sum = 0.0f32
+        var r = 0
+        while r < rows:
+            sum = sum + data[r * cols + c]
+            r = r + 1
+        result.push(sum)
+        c = c + 1
+    result
+
+fn cpu_row_sum(data: List<f32>, rows: i32, cols: i32) -> List<f32>:
+    var result = List<f32>()
+    var r = 0
+    while r < rows:
+        var sum = 0.0f32
+        var c = 0
+        while c < cols:
+            sum = sum + data[r * cols + c]
+            c = c + 1
+        result.push(sum)
+        r = r + 1
+    result
+
+# --------------------------------------------------------------------------
+# Main
+# --------------------------------------------------------------------------
+
+fn main() -> Result<i32, GpuError>:
+    val rows = 64
+    val cols = 64
+    val data = make_matrix(rows, cols, 1.0f32)
+
+    # GPU coalesced column sum
+    print "=== GPU Coalesced Column Sum ==="
+    val col_sums = run_column_sum_coalesced(data, rows, cols)?
+    print "  col_sums[0] = {col_sums[0]} (expected {rows}.0)"
+
+    # GPU strided row sum
+    print "=== GPU Strided Row Sum ==="
+    val row_sums = run_row_sum_strided(data, rows, cols)?
+    print "  row_sums[0] = {row_sums[0]} (expected {cols}.0)"
+
+    # GPU transpose
+    print "=== GPU Transpose ==="
+    val seq_data = make_sequential_matrix(4, 4)
+    val transposed = run_transpose(seq_data, 4, 4)?
+    print "  Original [0,1] = {seq_data[1]}, Transposed [1,0] = {transposed[4]}"
+
+    # CPU SIMD comparison
+    print "=== CPU SIMD Comparison ==="
+    var cpu_data = List<f32>()
+    var i = 0
+    while i < 1024:
+        cpu_data.push(3.0f32)
+        i = i + 1
+
+    val scalar_result = cpu_scale_scalar(cpu_data, 2.0f32)
+    val vec4_result = cpu_scale_vec4f(cpu_data, 2.0f32)
+    val vec8_result = cpu_scale_vec8f(cpu_data, 2.0f32)
+
+    print "  Scalar: result[0] = {scalar_result[0]}"
+    print "  Vec4f:  result[0] = {vec4_result[0]}"
+    print "  Vec8f:  result[0] = {vec8_result[0]}"
+
+    # GPU scale for comparison
+    val gpu_result = run_gpu_scale(cpu_data, 2.0f32)?
+    print "  GPU:    result[0] = {gpu_result[0]}"
+
+    print ""
+    print "All memory coalescing demos complete."
+    Ok(0)

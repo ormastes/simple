@@ -1,0 +1,85 @@
+use std.gpu.{GpuDevice}
+use std.ml.{Tensor}
+use std.math.{abs}
+
+describe "Optimized attention":
+    it "should produce correct output shape":
+        val seq_len = 16
+        val d_k = 8
+        val q = Tensor.randn([seq_len, d_k])
+        val k = Tensor.randn([seq_len, d_k])
+        val v = Tensor.randn([seq_len, d_k])
+        val result = flash_attention(q, k, v, causal: false)?
+        expect(result.shape[0]).to_equal(seq_len)
+        expect(result.shape[1]).to_equal(d_k)
+
+    it "should match naive attention without causal mask":
+        val seq_len = 8
+        val d_k = 4
+        val q = Tensor.randn([seq_len, d_k])
+        val k = Tensor.randn([seq_len, d_k])
+        val v = Tensor.randn([seq_len, d_k])
+        val naive_out = naive_attention(q, k, v, causal: false)?
+        val flash_out = flash_attention(q, k, v, causal: false)?
+        var i = 0
+        while i < naive_out.data.len():
+            val diff = abs(naive_out.data[i] - flash_out.data[i])
+            expect(diff).to_be_less_than(0.001)
+            i = i + 1
+
+    it "should match naive attention with causal mask":
+        val seq_len = 8
+        val d_k = 4
+        val q = Tensor.randn([seq_len, d_k])
+        val k = Tensor.randn([seq_len, d_k])
+        val v = Tensor.randn([seq_len, d_k])
+        val naive_out = naive_attention(q, k, v, causal: true)?
+        val flash_out = flash_attention(q, k, v, causal: true)?
+        var i = 0
+        while i < naive_out.data.len():
+            val diff = abs(naive_out.data[i] - flash_out.data[i])
+            expect(diff).to_be_less_than(0.001)
+            i = i + 1
+
+    it "should handle uniform Q K V":
+        val seq_len = 4
+        val d_k = 4
+        val q = Tensor.ones([seq_len, d_k])
+        val k = Tensor.ones([seq_len, d_k])
+        val v = Tensor.ones([seq_len, d_k])
+        val result = flash_attention(q, k, v, causal: false)?
+        # All attention weights equal -> output = average of V = ones
+        var i = 0
+        while i < d_k:
+            val diff = abs(result.data[i] - 1.0)
+            expect(diff).to_be_less_than(0.01)
+            i = i + 1
+
+    it "should respect causal mask at position 0":
+        val seq_len = 4
+        val d_k = 4
+        val q = Tensor.ones([seq_len, d_k])
+        val k = Tensor.ones([seq_len, d_k])
+        # Make V rows distinct
+        val v = Tensor(shape: [seq_len, d_k], data: [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0
+        ])
+        val result = flash_attention(q, k, v, causal: true)?
+        # Position 0 can only see position 0, so output[0] = V[0]
+        expect(result.data[0]).to_equal(1.0)
+        expect(result.data[1]).to_equal(0.0)
+
+    it "should handle single token sequence":
+        val q = Tensor.randn([1, 8])
+        val k = Tensor.randn([1, 8])
+        val v = Tensor.randn([1, 8])
+        val result = flash_attention(q, k, v, causal: true)?
+        # Single token: attention weight = 1.0, output = V
+        var i = 0
+        while i < 8:
+            val diff = abs(result.data[i] - v.data[i])
+            expect(diff).to_be_less_than(0.001)
+            i = i + 1

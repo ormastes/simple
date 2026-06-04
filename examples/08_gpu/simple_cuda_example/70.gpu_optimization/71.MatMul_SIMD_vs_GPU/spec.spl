@@ -1,0 +1,86 @@
+use std.gpu.{GpuDevice}
+use std.simd.{Vec4f, Vec8f}
+use std.math.{abs}
+
+describe "MatMul SIMD vs GPU":
+    it "should compute naive matmul correctly":
+        val a = [1.0, 2.0, 3.0, 4.0]
+        val b = [5.0, 6.0, 7.0, 8.0]
+        val c = matmul_naive(a, b, 2, 2, 2)
+        # [1*5+2*7, 1*6+2*8, 3*5+4*7, 3*6+4*8] = [19, 22, 43, 50]
+        expect(c[0]).to_equal(19.0)
+        expect(c[1]).to_equal(22.0)
+        expect(c[2]).to_equal(43.0)
+        expect(c[3]).to_equal(50.0)
+
+    it "should compute SIMD Vec4f matmul correctly":
+        val a = [1.0, 2.0, 3.0, 4.0]
+        val b = [5.0, 6.0, 7.0, 8.0]
+        var c = [f32].fill(4, 0.0)
+        matmul_simd_vec4f(a, b, c, 2, 2, 2)
+        expect(c[0]).to_equal(19.0)
+        expect(c[1]).to_equal(22.0)
+        expect(c[2]).to_equal(43.0)
+        expect(c[3]).to_equal(50.0)
+
+    it "should compute SIMD Vec8f matmul correctly":
+        val a = [1.0, 2.0, 3.0, 4.0]
+        val b_t = transpose([5.0, 6.0, 7.0, 8.0], 2, 2)
+        var c = [f32].fill(4, 0.0)
+        matmul_simd_vec8f(a, b_t, c, 2, 2, 2)
+        expect(c[0]).to_equal(19.0)
+        expect(c[1]).to_equal(22.0)
+        expect(c[2]).to_equal(43.0)
+        expect(c[3]).to_equal(50.0)
+
+    it "should compute GPU matmul correctly":
+        val a = [1.0, 2.0, 3.0, 4.0]
+        val b = [5.0, 6.0, 7.0, 8.0]
+        val c = matmul_gpu(a, b, 2, 2, 2)?
+        expect(c[0]).to_equal(19.0)
+        expect(c[1]).to_equal(22.0)
+        expect(c[2]).to_equal(43.0)
+        expect(c[3]).to_equal(50.0)
+
+    it "should agree between all implementations":
+        val n = 16
+        val a = [f32].fill(n * n, 2.0)
+        val b = [f32].fill(n * n, 3.0)
+        val b_t = transpose(b, n, n)
+
+        val c_naive = matmul_naive(a, b, n, n, n)
+
+        var c_simd4 = [f32].fill(n * n, 0.0)
+        matmul_simd_vec4f(a, b, c_simd4, n, n, n)
+
+        var c_simd8 = [f32].fill(n * n, 0.0)
+        matmul_simd_vec8f(a, b_t, c_simd8, n, n, n)
+
+        val c_gpu = matmul_gpu(a, b, n, n, n)?
+
+        var i = 0
+        while i < n * n:
+            # Each element = sum of n * (2*3) = 6n = 96
+            expect(c_naive[i]).to_equal(96.0)
+            expect(c_simd4[i]).to_equal(96.0)
+            expect(c_simd8[i]).to_equal(96.0)
+            expect(abs(c_gpu[i] - 96.0)).to_be_less_than(0.01)
+            i = i + 1
+
+    it "should handle identity matrix":
+        val a = [1.0, 0.0, 0.0, 1.0]
+        val b = [3.0, 4.0, 5.0, 6.0]
+        val c_naive = matmul_naive(a, b, 2, 2, 2)
+        val c_gpu = matmul_gpu(a, b, 2, 2, 2)?
+        expect(c_naive[0]).to_equal(3.0)
+        expect(c_naive[3]).to_equal(6.0)
+        expect(c_gpu[0]).to_equal(3.0)
+        expect(c_gpu[3]).to_equal(6.0)
+
+    it "should transpose correctly":
+        val m = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]  # 2x3
+        val t = transpose(m, 2, 3)  # 3x2
+        expect(t[0]).to_equal(1.0)  # (0,0)
+        expect(t[1]).to_equal(4.0)  # (0,1)
+        expect(t[2]).to_equal(2.0)  # (1,0)
+        expect(t[3]).to_equal(5.0)  # (1,1)

@@ -1,0 +1,191 @@
+# Exercise 24: Memory Coalescing - Tests
+
+use std.gpu.{GpuError}
+
+use self.main.{
+    make_matrix, make_sequential_matrix,
+    run_column_sum_coalesced, run_row_sum_strided,
+    run_transpose, run_gpu_scale,
+    cpu_column_sum, cpu_row_sum,
+    cpu_scale_scalar, cpu_scale_vec4f, cpu_scale_vec8f,
+    cpu_add_vec4f,
+    to_column_major
+}
+
+fn approx_eq(a: f32, b: f32, tol: f32) -> bool:
+    val diff = a - b
+    diff < tol and diff > (0.0f32 - tol)
+
+fn lists_approx_equal(a: List<f32>, b: List<f32>, tol: f32) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if not approx_eq(a[i], b[i], tol):
+            return false
+        i = i + 1
+    true
+
+describe "Memory Coalescing":
+
+    describe "coalesced column sum":
+
+        it "sums uniform matrix columns":
+            val rows = 32
+            val cols = 32
+            val data = make_matrix(rows, cols, 1.0f32)
+            val result = run_column_sum_coalesced(data, rows, cols)
+            expect(result.is_ok()).to_equal(true)
+            val sums = result.unwrap()
+            expect(sums.len()).to_equal(cols)
+            var all_ok = true
+            var i = 0
+            while i < cols:
+                if not approx_eq(sums[i], rows * 1.0f32, 0.01f32):
+                    all_ok = false
+                i = i + 1
+            expect(all_ok).to_equal(true)
+
+        it "matches CPU reference":
+            val rows = 64
+            val cols = 48
+            val data = make_sequential_matrix(rows, cols)
+            val expected = cpu_column_sum(data, rows, cols)
+            val result = run_column_sum_coalesced(data, rows, cols)
+            expect(result.is_ok()).to_equal(true)
+            expect(lists_approx_equal(result.unwrap(), expected, 1.0f32)).to_equal(true)
+
+    describe "strided row sum":
+
+        it "sums uniform matrix rows":
+            val rows = 32
+            val cols = 32
+            val data = make_matrix(rows, cols, 2.0f32)
+            val result = run_row_sum_strided(data, rows, cols)
+            expect(result.is_ok()).to_equal(true)
+            val sums = result.unwrap()
+            expect(sums.len()).to_equal(rows)
+            var all_ok = true
+            var i = 0
+            while i < rows:
+                if not approx_eq(sums[i], cols * 2.0f32, 0.01f32):
+                    all_ok = false
+                i = i + 1
+            expect(all_ok).to_equal(true)
+
+        it "matches CPU row sum reference":
+            val rows = 32
+            val cols = 64
+            val data = make_sequential_matrix(rows, cols)
+            val expected = cpu_row_sum(data, rows, cols)
+            val result = run_row_sum_strided(data, rows, cols)
+            expect(result.is_ok()).to_equal(true)
+            expect(lists_approx_equal(result.unwrap(), expected, 1.0f32)).to_equal(true)
+
+    describe "transpose":
+
+        it "transposes 4x4 identity":
+            # Identity matrix should be unchanged by transpose
+            var identity = make_matrix(4, 4, 0.0f32)
+            identity[0] = 1.0f32
+            identity[5] = 1.0f32
+            identity[10] = 1.0f32
+            identity[15] = 1.0f32
+            val result = run_transpose(identity, 4, 4)
+            expect(result.is_ok()).to_equal(true)
+            expect(lists_approx_equal(result.unwrap(), identity, 0.001f32)).to_equal(true)
+
+        it "transposes sequential 4x4 matrix":
+            # [0,1,2,3; 4,5,6,7; 8,9,10,11; 12,13,14,15]
+            # Transposed: [0,4,8,12; 1,5,9,13; 2,6,10,14; 3,7,11,15]
+            val data = make_sequential_matrix(4, 4)
+            val result = run_transpose(data, 4, 4)
+            expect(result.is_ok()).to_equal(true)
+            val t = result.unwrap()
+            # Check specific elements: T[i][j] = M[j][i]
+            # T[0][1] = M[1][0] = 4
+            expect(approx_eq(t[1], 4.0f32, 0.001f32)).to_equal(true)
+            # T[1][0] = M[0][1] = 1
+            expect(approx_eq(t[4], 1.0f32, 0.001f32)).to_equal(true)
+            # T[2][3] = M[3][2] = 14
+            expect(approx_eq(t[11], 14.0f32, 0.001f32)).to_equal(true)
+
+        it "double transpose returns original":
+            val rows = 16
+            val cols = 16
+            val data = make_sequential_matrix(rows, cols)
+            val t1 = run_transpose(data, rows, cols)
+            expect(t1.is_ok()).to_equal(true)
+            val t2 = run_transpose(t1.unwrap(), cols, rows)
+            expect(t2.is_ok()).to_equal(true)
+            expect(lists_approx_equal(t2.unwrap(), data, 0.001f32)).to_equal(true)
+
+    describe "GPU vs CPU scale":
+
+        it "GPU scale matches CPU scalar":
+            var data = List<f32>()
+            var i = 0
+            while i < 512:
+                data.push(i * 1.0f32)
+                i = i + 1
+            val cpu_result = cpu_scale_scalar(data, 3.0f32)
+            val gpu_result = run_gpu_scale(data, 3.0f32)
+            expect(gpu_result.is_ok()).to_equal(true)
+            expect(lists_approx_equal(gpu_result.unwrap(), cpu_result, 0.01f32)).to_equal(true)
+
+    describe "CPU SIMD":
+
+        it "Vec4f scale matches scalar":
+            var data = List<f32>()
+            var i = 0
+            while i < 100:
+                data.push(i * 0.5f32)
+                i = i + 1
+            val scalar = cpu_scale_scalar(data, 4.0f32)
+            val vec4 = cpu_scale_vec4f(data, 4.0f32)
+            expect(lists_approx_equal(vec4, scalar, 0.001f32)).to_equal(true)
+
+        it "Vec8f scale matches scalar":
+            var data = List<f32>()
+            var i = 0
+            while i < 100:
+                data.push(i * 0.5f32)
+                i = i + 1
+            val scalar = cpu_scale_scalar(data, 2.5f32)
+            val vec8 = cpu_scale_vec8f(data, 2.5f32)
+            expect(lists_approx_equal(vec8, scalar, 0.001f32)).to_equal(true)
+
+        it "Vec4f add is correct":
+            var a = List<f32>()
+            var b = List<f32>()
+            var i = 0
+            while i < 100:
+                a.push(i * 1.0f32)
+                b.push(i * 2.0f32)
+                i = i + 1
+            val result = cpu_add_vec4f(a, b)
+            expect(result.len()).to_equal(100)
+            expect(approx_eq(result[0], 0.0f32, 0.001f32)).to_equal(true)
+            expect(approx_eq(result[10], 30.0f32, 0.001f32)).to_equal(true)
+            expect(approx_eq(result[99], 297.0f32, 0.001f32)).to_equal(true)
+
+        it "handles non-aligned sizes (remainder elements)":
+            # 13 elements: 12 via SIMD + 1 remainder
+            var data = List<f32>()
+            var i = 0
+            while i < 13:
+                data.push(5.0f32)
+                i = i + 1
+            val vec4 = cpu_scale_vec4f(data, 3.0f32)
+            val vec8 = cpu_scale_vec8f(data, 3.0f32)
+            expect(vec4.len()).to_equal(13)
+            expect(vec8.len()).to_equal(13)
+            var all_ok = true
+            i = 0
+            while i < 13:
+                if not approx_eq(vec4[i], 15.0f32, 0.001f32):
+                    all_ok = false
+                if not approx_eq(vec8[i], 15.0f32, 0.001f32):
+                    all_ok = false
+                i = i + 1
+            expect(all_ok).to_equal(true)

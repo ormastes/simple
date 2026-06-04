@@ -1,0 +1,108 @@
+# Exercise 22: Streams and Async - Tests
+
+use std.gpu.{GpuError}
+
+use self.main.{
+    make_data,
+    demo_single_stream, demo_two_streams,
+    demo_pipeline, demo_stream_add
+}
+
+fn approx_eq(a: f32, b: f32, tol: f32) -> bool:
+    val diff = a - b
+    diff < tol and diff > (0.0f32 - tol)
+
+fn all_approx(data: List<f32>, expected: f32, tol: f32) -> bool:
+    var i = 0
+    while i < data.len():
+        if not approx_eq(data[i], expected, tol):
+            return false
+        i = i + 1
+    true
+
+fn all_approx_range(data: List<f32>, start: i32, end_idx: i32,
+                    expected: f32, tol: f32) -> bool:
+    var i = start
+    while i < end_idx:
+        if not approx_eq(data[i], expected, tol):
+            return false
+        i = i + 1
+    true
+
+describe "Streams and Async":
+
+    describe "single stream":
+
+        it "scales data correctly via async pipeline":
+            val n = 1024
+            val result = demo_single_stream(n)
+            expect(result.is_ok()).to_equal(true)
+            # 5.0 * 3.0 = 15.0
+            expect(all_approx(result.unwrap(), 15.0f32, 0.01f32)).to_equal(true)
+
+        it "handles large data":
+            val n = 16384
+            val result = demo_single_stream(n)
+            expect(result.is_ok()).to_equal(true)
+            val data = result.unwrap()
+            expect(data.len()).to_equal(n)
+            expect(all_approx(data, 15.0f32, 0.01f32)).to_equal(true)
+
+    describe "two streams":
+
+        it "processes both halves correctly":
+            val n = 2048
+            val half = n / 2
+            val result = demo_two_streams(n)
+            expect(result.is_ok()).to_equal(true)
+            val data = result.unwrap()
+            expect(data.len()).to_equal(n)
+            # First half: 2.0 * 10.0 = 20.0
+            expect(all_approx_range(data, 0, half, 20.0f32, 0.01f32)).to_equal(true)
+            # Second half: 4.0 * 10.0 = 40.0
+            expect(all_approx_range(data, half, n, 40.0f32, 0.01f32)).to_equal(true)
+
+    describe "pipeline":
+
+        it "processes 4 chunks with correct scaling":
+            val total = 4096
+            val num_streams = 4
+            val chunk = total / num_streams
+            val result = demo_pipeline(total, num_streams)
+            expect(result.is_ok()).to_equal(true)
+            val data = result.unwrap()
+            expect(data.len()).to_equal(total)
+            # Chunk 0: fill=1.0, scale=2.0 -> 2.0
+            expect(all_approx_range(data, 0, chunk, 2.0f32, 0.01f32)).to_equal(true)
+            # Chunk 1: fill=2.0, scale=2.0 -> 4.0
+            expect(all_approx_range(data, chunk, chunk * 2, 4.0f32, 0.01f32)).to_equal(true)
+            # Chunk 2: fill=3.0, scale=2.0 -> 6.0
+            expect(all_approx_range(data, chunk * 2, chunk * 3, 6.0f32, 0.01f32)).to_equal(true)
+            # Chunk 3: fill=4.0, scale=2.0 -> 8.0
+            expect(all_approx_range(data, chunk * 3, total, 8.0f32, 0.01f32)).to_equal(true)
+
+        it "processes 2 chunks":
+            val total = 2048
+            val result = demo_pipeline(total, 2)
+            expect(result.is_ok()).to_equal(true)
+            val data = result.unwrap()
+            val half = total / 2
+            expect(all_approx_range(data, 0, half, 2.0f32, 0.01f32)).to_equal(true)
+            expect(all_approx_range(data, half, total, 4.0f32, 0.01f32)).to_equal(true)
+
+    describe "stream-based add":
+
+        it "combines results from two streams":
+            val n = 1024
+            val result = demo_stream_add(n)
+            expect(result.is_ok()).to_equal(true)
+            # A = 3.0 * 2.0 = 6.0, B = 7.0 * 3.0 = 21.0, C = 6.0 + 21.0 = 27.0
+            expect(all_approx(result.unwrap(), 27.0f32, 0.01f32)).to_equal(true)
+
+        it "handles larger input":
+            val n = 8192
+            val result = demo_stream_add(n)
+            expect(result.is_ok()).to_equal(true)
+            val data = result.unwrap()
+            expect(data.len()).to_equal(n)
+            expect(all_approx(data, 27.0f32, 0.01f32)).to_equal(true)

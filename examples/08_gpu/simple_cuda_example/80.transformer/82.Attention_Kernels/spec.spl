@@ -1,0 +1,72 @@
+use std.gpu.{GpuDevice}
+use std.math.{abs}
+
+describe "Multi-head attention kernels":
+    it "should create batched multi-head attention":
+        val dev = GpuDevice.get(0)?
+        val mha = BatchedMultiHeadAttention.create(dev, 64, 4)?
+        expect(mha.d_model).to_equal(64)
+        expect(mha.num_heads).to_equal(4)
+        expect(mha.head_dim).to_equal(16)
+
+    it "should compute forward pass with correct output size":
+        val dev = GpuDevice.get(0)?
+        val mha = BatchedMultiHeadAttention.create(dev, 32, 4)?
+        val batch = 2
+        val seq_len = 8
+        val input = dev.alloc_copy([f32].fill(batch * seq_len * 32, 0.1))?
+        val output = mha.forward(dev, input, batch, seq_len, causal: false)?
+        val data = output.to_host()?
+        expect(data.len()).to_equal(batch * seq_len * 32)
+
+    it "should produce different outputs for different inputs":
+        val dev = GpuDevice.get(0)?
+        val mha = BatchedMultiHeadAttention.create(dev, 16, 2)?
+        val input1 = dev.alloc_copy([f32].fill(1 * 4 * 16, 0.1))?
+        val input2 = dev.alloc_copy([f32].fill(1 * 4 * 16, 0.9))?
+        val out1 = mha.forward(dev, input1, 1, 4, causal: false)?
+        val out2 = mha.forward(dev, input2, 1, 4, causal: false)?
+        val data1 = out1.to_host()?
+        val data2 = out2.to_host()?
+        var differs = false
+        var i = 0
+        while i < data1.len():
+            if abs(data1[i] - data2[i]) > 0.001:
+                differs = true
+            i = i + 1
+        expect(differs).to_equal(true)
+
+    it "should handle single batch single position":
+        val dev = GpuDevice.get(0)?
+        val mha = BatchedMultiHeadAttention.create(dev, 16, 2)?
+        val input = dev.alloc_copy([f32].fill(1 * 1 * 16, 0.5))?
+        val output = mha.forward(dev, input, 1, 1, causal: true)?
+        val data = output.to_host()?
+        expect(data.len()).to_equal(16)
+
+    it "should handle causal masking":
+        val dev = GpuDevice.get(0)?
+        val mha = BatchedMultiHeadAttention.create(dev, 16, 2)?
+        val input = dev.alloc_copy([f32].fill(1 * 8 * 16, 0.5))?
+        val causal_out = mha.forward(dev, input, 1, 8, causal: true)?
+        val full_out = mha.forward(dev, input, 1, 8, causal: false)?
+        val causal_data = causal_out.to_host()?
+        val full_data = full_out.to_host()?
+        # First position output should be the same (only attends to itself)
+        var first_pos_same = true
+        var i = 0
+        while i < 16:
+            if abs(causal_data[i] - full_data[i]) > 0.001:
+                first_pos_same = false
+            i = i + 1
+        expect(first_pos_same).to_equal(true)
+
+    it "should handle multiple batches":
+        val dev = GpuDevice.get(0)?
+        val mha = BatchedMultiHeadAttention.create(dev, 16, 2)?
+        val batch = 4
+        val seq_len = 4
+        val input = dev.alloc_copy([f32].fill(batch * seq_len * 16, 0.3))?
+        val output = mha.forward(dev, input, batch, seq_len, causal: false)?
+        val data = output.to_host()?
+        expect(data.len()).to_equal(batch * seq_len * 16)

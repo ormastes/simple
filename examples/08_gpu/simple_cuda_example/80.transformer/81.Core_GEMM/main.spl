@@ -1,0 +1,226 @@
+use std.gpu.{GpuDevice, GpuBuffer, TensorFragment, tensor_load, tensor_store, tensor_mma}
+use std.simd.{Vec8f}
+use std.ml.{Tensor}
+use std.io.{print}
+use std.time.{now_ns}
+
+val TILE_SIZE = 16
+val WMMA_SIZE = 16
+
+# ============================================================
+# Strategy 1: Shared memory tiled GEMM
+# ============================================================
+
+@gpu_kernel
+fn gemm_shared_kernel(a: &[f32], b: &[f32], c: &mut [f32],
+                      m: i64, n: i64, k: i64):
+    @shared var tile_a: [f32; TILE_SIZE * TILE_SIZE]
+    @shared var tile_b: [f32; TILE_SIZE * TILE_SIZE]
+
+    val row = block_idx_y() * TILE_SIZE + thread_idx_y()
+    val col = block_idx_x() * TILE_SIZE + thread_idx_x()
+    var sum = 0.0f32
+
+    var t = 0
+    while t < (k + TILE_SIZE - 1) / TILE_SIZE:
+        val a_col = t * TILE_SIZE + thread_idx_x()
+        val b_row = t * TILE_SIZE + thread_idx_y()
+
+        if row < m and a_col < k:
+            tile_a[thread_idx_y() * TILE_SIZE + thread_idx_x()] = a[row * k + a_col]
+        else:
+            tile_a[thread_idx_y() * TILE_SIZE + thread_idx_x()] = 0.0
+
+        if b_row < k and col < n:
+            tile_b[thread_idx_y() * TILE_SIZE + thread_idx_x()] = b[b_row * n + col]
+        else:
+            tile_b[thread_idx_y() * TILE_SIZE + thread_idx_x()] = 0.0
+
+        sync_threads()
+
+        var i = 0
+        while i < TILE_SIZE:
+            sum = sum + tile_a[thread_idx_y() * TILE_SIZE + i] * tile_b[i * TILE_SIZE + thread_idx_x()]
+            i = i + 1
+
+        sync_threads()
+        t = t + 1
+
+    if row < m and col < n:
+        c[row * n + col] = sum
+
+# ============================================================
+# Strategy 2: Tensor core GEMM (f16 input, f32 accumulator)
+# ============================================================
+
+@gpu_kernel
+fn gemm_tensor_core_kernel(a: &[f16], b: &[f16], c: &mut [f32],
+                           m: i64, n: i64, k: i64):
+    val warp_m = (block_idx_x() * block_dim_x() + thread_idx_x()) / 32 * WMMA_SIZE
+    val warp_n = block_idx_y() * WMMA_SIZE
+
+    if warp_m >= m or warp_n >= n:
+        return
+
+    var frag_a = TensorFragment<WMMA_SIZE, WMMA_SIZE, f16>.zero()
+    var frag_b = TensorFragment<WMMA_SIZE, WMMA_SIZE, f16>.zero()
+    var frag_acc = TensorFragment<WMMA_SIZE, WMMA_SIZE, f32>.zero()
+
+    var t = 0
+    while t < k:
+        tensor_load(frag_a, a, warp_m * k + t, k)
+        tensor_load(frag_b, b, t * n + warp_n, n)
+        tensor_mma(frag_acc, frag_a, frag_b, frag_acc)
+        t = t + WMMA_SIZE
+
+    tensor_store(c, frag_acc, warp_m * n + warp_n, n)
+
+# ============================================================
+# Strategy 3: SIMD CPU fallback
+# ============================================================
+
+@simd
+fn gemm_simd(a: [f32], b_t: [f32], c: &mut [f32], m: i64, n: i64, k: i64):
+    var i = 0
+    while i < m:
+        var j = 0
+        while j < n:
+            var sum = Vec8f.zero()
+            var p = 0
+            while p + 8 <= k:
+                val a_vec = Vec8f.load(a, i * k + p)
+                val b_vec = Vec8f.load(b_t, j * k + p)
+                sum = sum + a_vec * b_vec
+                p = p + 8
+            var scalar_sum = sum.horizontal_add()
+            while p < k:
+                scalar_sum = scalar_sum + a[i * k + p] * b_t[j * k + p]
+                p = p + 1
+            c[i * n + j] = scalar_sum
+            j = j + 1
+        i = i + 1
+
+# ============================================================
+# GEMM Dispatcher
+# ============================================================
+
+enum GemmStrategy:
+    SharedMemory
+    TensorCore
+    SimdCpu
+
+fn select_strategy(m: i64, n: i64, k: i64) -> GemmStrategy:
+    # Small matrices: CPU SIMD is faster (no GPU transfer overhead)
+    if m * n * k < 64 * 64 * 64:
+        return GemmStrategy.SimdCpu
+
+    # Tensor-core aligned dimensions (multiples of 16)
+    val dev = GpuDevice.get(0)
+    match dev:
+        Ok(d):
+            if d.has_tensor_cores() and m % 16 == 0 and n % 16 == 0 and k % 16 == 0:
+                return GemmStrategy.TensorCore
+        _:
+            pass_dn
+
+    # Default: shared memory tiled
+    GemmStrategy.SharedMemory
+
+fn gemm_dispatch(a: [f32], b: [f32], m: i64, n: i64, k: i64) -> Result<[f32], GpuError>:
+    val strategy = select_strategy(m, n, k)
+
+    match strategy:
+        GemmStrategy.SimdCpu:
+            # Transpose B for cache-friendly access
+            val b_t = transpose(b, k, n)
+            var c = [f32].fill(m * n, 0.0)
+            gemm_simd(a, b_t, c, m, n, k)
+            Ok(c)
+
+        GemmStrategy.TensorCore:
+            val a_f16 = to_f16(a)
+            val b_f16 = to_f16(b)
+            gemm_tensor_core(a_f16, b_f16, m, n, k)
+
+        GemmStrategy.SharedMemory:
+            gemm_shared(a, b, m, n, k)
+
+fn gemm_shared(a: [f32], b: [f32], m: i64, n: i64, k: i64) -> Result<[f32], GpuError>:
+    val dev = GpuDevice.get(0)?
+    val buf_a = dev.alloc_copy(a)?
+    val buf_b = dev.alloc_copy(b)?
+    var buf_c = dev.alloc_f32(m * n)?
+    val grid = ((n + TILE_SIZE - 1) / TILE_SIZE, (m + TILE_SIZE - 1) / TILE_SIZE)
+    dev.launch(gemm_shared_kernel, grid: grid, block: (TILE_SIZE, TILE_SIZE),
+        args: (buf_a, buf_b, buf_c, m, n, k))
+    dev.sync()?
+    buf_c.to_host()
+
+fn gemm_tensor_core(a: [f16], b: [f16], m: i64, n: i64, k: i64) -> Result<[f32], GpuError>:
+    val dev = GpuDevice.get(0)?
+    val buf_a = dev.alloc_copy(a)?
+    val buf_b = dev.alloc_copy(b)?
+    var buf_c = dev.alloc_f32(m * n)?
+    val warps_m = (m + WMMA_SIZE - 1) / WMMA_SIZE
+    val warps_n = (n + WMMA_SIZE - 1) / WMMA_SIZE
+    val block_size = 128
+    dev.launch(gemm_tensor_core_kernel,
+        grid: ((warps_m * 32 + block_size - 1) / block_size, warps_n),
+        block: block_size,
+        args: (buf_a, buf_b, buf_c, m, n, k))
+    dev.sync()?
+    buf_c.to_host()
+
+fn transpose(mat: [f32], rows: i64, cols: i64) -> [f32]:
+    var result = [f32].fill(rows * cols, 0.0)
+    var i = 0
+    while i < rows:
+        var j = 0
+        while j < cols:
+            result[j * rows + i] = mat[i * cols + j]
+            j = j + 1
+        i = i + 1
+    result
+
+fn to_f16(data: [f32]) -> [f16]:
+    var result: [f16] = []
+    var i = 0
+    while i < data.len():
+        result = result + [data[i].to_f16()]
+        i = i + 1
+    result
+
+fn main():
+    # Test different sizes to trigger different strategies
+    val test_cases = [
+        (8, 8, 8),       # Small -> SIMD
+        (128, 128, 128), # Medium -> SharedMemory
+        (256, 256, 256), # Large aligned -> TensorCore (if available)
+    ]
+
+    var t = 0
+    while t < test_cases.len():
+        val (m, n, k) = test_cases[t]
+        val a = [f32].fill(m * k, 1.0)
+        val b = [f32].fill(k * n, 1.0)
+
+        val strategy = select_strategy(m, n, k)
+        val strategy_name = match strategy:
+            GemmStrategy.SimdCpu: "SIMD CPU"
+            GemmStrategy.TensorCore: "Tensor Core"
+            GemmStrategy.SharedMemory: "Shared Memory"
+
+        print "GEMM {m}x{n}x{k} -> strategy: {strategy_name}"
+
+        val start = now_ns()
+        val result = gemm_dispatch(a, b, m, n, k)
+        val elapsed = (now_ns() - start).to_f64() / 1_000_000.0
+
+        match result:
+            Ok(c):
+                # Each element should = k (sum of k ones)
+                print "  Result[0] = {c[0]} (expected {k}.0), time: {elapsed:.2} ms"
+            Err(e):
+                print "  Error: {e.message}"
+
+        t = t + 1

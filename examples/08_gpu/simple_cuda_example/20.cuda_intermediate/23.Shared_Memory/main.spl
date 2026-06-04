@@ -1,0 +1,285 @@
+# Exercise 23: Shared Memory Reduction Patterns
+#
+# Three variants of parallel sum reduction:
+# 1. Naive interleaved addressing
+# 2. Sequential addressing (no bank conflicts)
+# 3. First-add during load + unroll last warp
+
+use std.gpu.{
+    gpu_alloc, gpu_upload, gpu_download, gpu_free, gpu_memset,
+    gpu_shared_mem, gpu_syncthreads,
+    gpu_atomic_add,
+    gpu_block_id_x, gpu_block_dim_x, gpu_local_id_x,
+    gpu_grid_dim_x,
+    gpu_launch, GpuBuffer, GpuError
+}
+
+val BLOCK_SIZE = 256
+
+# --------------------------------------------------------------------------
+# Variant 1: Naive interleaved reduction
+#
+# At each step, thread i adds element at position (i + stride) where
+# stride starts at 1 and doubles each step.
+#
+# Problem: threads 0, 2, 4, ... then 0, 4, 8, ... are active,
+# causing divergent warps. Also, interleaved access patterns cause
+# shared memory bank conflicts.
+# --------------------------------------------------------------------------
+
+@gpu_kernel
+fn reduce_naive(input: GpuBuffer<f32>, output: GpuBuffer<f32>, n: i32):
+    val shared = gpu_shared_mem<f32>(BLOCK_SIZE)
+
+    val tid = gpu_local_id_x()
+    val global_idx = gpu_block_id_x() * gpu_block_dim_x() + tid
+
+    # Load from global to shared
+    if global_idx < n:
+        shared[tid] = input[global_idx]
+    else:
+        shared[tid] = 0.0f32
+    gpu_syncthreads()
+
+    # Naive interleaved reduction
+    # stride: 1, 2, 4, 8, ...
+    var stride = 1
+    while stride < gpu_block_dim_x():
+        # Only threads where (tid % (2*stride)) == 0 are active
+        if tid % (2 * stride) == 0:
+            shared[tid] = shared[tid] + shared[tid + stride]
+        gpu_syncthreads()
+        stride = stride * 2
+
+    # Thread 0 writes block result
+    if tid == 0:
+        gpu_atomic_add(output, 0, shared[0])
+
+# --------------------------------------------------------------------------
+# Variant 2: Sequential addressing
+#
+# Instead of interleaved access, we use sequential addressing:
+# stride starts at blockDim/2 and halves each step. Thread i adds
+# element at (i + stride). This avoids bank conflicts because
+# consecutive threads access consecutive memory locations.
+# --------------------------------------------------------------------------
+
+@gpu_kernel
+fn reduce_sequential(input: GpuBuffer<f32>, output: GpuBuffer<f32>, n: i32):
+    val shared = gpu_shared_mem<f32>(BLOCK_SIZE)
+
+    val tid = gpu_local_id_x()
+    val global_idx = gpu_block_id_x() * gpu_block_dim_x() + tid
+
+    # Load from global to shared
+    if global_idx < n:
+        shared[tid] = input[global_idx]
+    else:
+        shared[tid] = 0.0f32
+    gpu_syncthreads()
+
+    # Sequential addressing reduction
+    # stride: blockDim/2, blockDim/4, ..., 2, 1
+    var stride = gpu_block_dim_x() / 2
+    while stride > 0:
+        if tid < stride:
+            shared[tid] = shared[tid] + shared[tid + stride]
+        gpu_syncthreads()
+        stride = stride / 2
+
+    # Thread 0 writes block result
+    if tid == 0:
+        gpu_atomic_add(output, 0, shared[0])
+
+# --------------------------------------------------------------------------
+# Variant 3: First-add during load + unroll last warp
+#
+# Optimization 1: Each thread loads TWO elements and adds them during
+# the initial load. This halves the number of reduction steps needed.
+# We launch half as many threads as data elements.
+#
+# Optimization 2: When stride <= 32 (warp size), all active threads
+# are in the same warp and execute in lockstep. We can skip
+# gpu_syncthreads() for the final iterations. This is called
+# "warp-synchronous" reduction.
+# --------------------------------------------------------------------------
+
+@gpu_kernel
+fn reduce_optimized(input: GpuBuffer<f32>, output: GpuBuffer<f32>, n: i32):
+    val shared = gpu_shared_mem<f32>(BLOCK_SIZE)
+
+    val tid = gpu_local_id_x()
+    # Each block processes 2 * BLOCK_SIZE elements
+    val global_idx = gpu_block_id_x() * (gpu_block_dim_x() * 2) + tid
+
+    # First add during load: load two elements and add them
+    var my_sum = 0.0f32
+    if global_idx < n:
+        my_sum = input[global_idx]
+    if global_idx + gpu_block_dim_x() < n:
+        my_sum = my_sum + input[global_idx + gpu_block_dim_x()]
+    shared[tid] = my_sum
+    gpu_syncthreads()
+
+    # Tree reduction with sequential addressing
+    var stride = gpu_block_dim_x() / 2
+    while stride > 32:
+        if tid < stride:
+            shared[tid] = shared[tid] + shared[tid + stride]
+        gpu_syncthreads()
+        stride = stride / 2
+
+    # Warp-synchronous reduction for the last warp (stride <= 32)
+    # All 32 threads in a warp execute in lockstep, so no sync needed.
+    # We still write to shared memory, but warp-level coherence ensures
+    # visibility within the warp.
+    if tid < 32:
+        if stride >= 32:
+            shared[tid] = shared[tid] + shared[tid + 32]
+        if stride >= 16:
+            shared[tid] = shared[tid] + shared[tid + 16]
+        if stride >= 8:
+            shared[tid] = shared[tid] + shared[tid + 8]
+        if stride >= 4:
+            shared[tid] = shared[tid] + shared[tid + 4]
+        if stride >= 2:
+            shared[tid] = shared[tid] + shared[tid + 2]
+        if stride >= 1:
+            shared[tid] = shared[tid] + shared[tid + 1]
+
+    # Thread 0 writes block result
+    if tid == 0:
+        gpu_atomic_add(output, 0, shared[0])
+
+# --------------------------------------------------------------------------
+# Host-side runners
+# --------------------------------------------------------------------------
+
+fn make_data(n: i32, fill: f32) -> List<f32>:
+    var data = List<f32>()
+    var i = 0
+    while i < n:
+        data.push(fill)
+        i = i + 1
+    data
+
+fn make_sequential(n: i32) -> List<f32>:
+    var data = List<f32>()
+    var i = 0
+    while i < n:
+        data.push(i * 1.0f32)
+        i = i + 1
+    data
+
+fn run_reduce_naive(data_host: List<f32>) -> Result<f32, GpuError>:
+    val n = data_host.len()
+    val data_dev = gpu_alloc<f32>(n)?
+    val result_dev = gpu_alloc<f32>(1)?
+
+    gpu_upload(data_dev, data_host)?
+    var zero = List<f32>()
+    zero.push(0.0f32)
+    gpu_upload(result_dev, zero)?
+
+    val grid_size = (n + BLOCK_SIZE - 1) / BLOCK_SIZE
+    reduce_naive<<<grid: (grid_size, 1, 1), block: (BLOCK_SIZE, 1, 1)>>>(
+        data_dev, result_dev, n
+    )
+
+    val result = gpu_download<f32>(result_dev, 1)?
+    gpu_free(data_dev)?
+    gpu_free(result_dev)?
+    Ok(result[0])
+
+fn run_reduce_sequential(data_host: List<f32>) -> Result<f32, GpuError>:
+    val n = data_host.len()
+    val data_dev = gpu_alloc<f32>(n)?
+    val result_dev = gpu_alloc<f32>(1)?
+
+    gpu_upload(data_dev, data_host)?
+    var zero = List<f32>()
+    zero.push(0.0f32)
+    gpu_upload(result_dev, zero)?
+
+    val grid_size = (n + BLOCK_SIZE - 1) / BLOCK_SIZE
+    reduce_sequential<<<grid: (grid_size, 1, 1), block: (BLOCK_SIZE, 1, 1)>>>(
+        data_dev, result_dev, n
+    )
+
+    val result = gpu_download<f32>(result_dev, 1)?
+    gpu_free(data_dev)?
+    gpu_free(result_dev)?
+    Ok(result[0])
+
+fn run_reduce_optimized(data_host: List<f32>) -> Result<f32, GpuError>:
+    val n = data_host.len()
+    val data_dev = gpu_alloc<f32>(n)?
+    val result_dev = gpu_alloc<f32>(1)?
+
+    gpu_upload(data_dev, data_host)?
+    var zero = List<f32>()
+    zero.push(0.0f32)
+    gpu_upload(result_dev, zero)?
+
+    # Each block handles 2 * BLOCK_SIZE elements, so we need half the blocks
+    val grid_size = (n + (BLOCK_SIZE * 2) - 1) / (BLOCK_SIZE * 2)
+    reduce_optimized<<<grid: (grid_size, 1, 1), block: (BLOCK_SIZE, 1, 1)>>>(
+        data_dev, result_dev, n
+    )
+
+    val result = gpu_download<f32>(result_dev, 1)?
+    gpu_free(data_dev)?
+    gpu_free(result_dev)?
+    Ok(result[0])
+
+# --------------------------------------------------------------------------
+# CPU reference
+# --------------------------------------------------------------------------
+
+fn cpu_sum(data: List<f32>) -> f32:
+    var total = 0.0f32
+    var i = 0
+    while i < data.len():
+        total = total + data[i]
+        i = i + 1
+    total
+
+# --------------------------------------------------------------------------
+# Main
+# --------------------------------------------------------------------------
+
+fn main() -> Result<i32, GpuError>:
+    val n = 4096
+    val ones = make_data(n, 1.0f32)
+    val expected_ones = cpu_sum(ones)
+
+    print "=== Reduction of {n} ones (expected {expected_ones}) ==="
+
+    val r1 = run_reduce_naive(ones)?
+    print "  Naive:      {r1}"
+
+    val r2 = run_reduce_sequential(ones)?
+    print "  Sequential: {r2}"
+
+    val r3 = run_reduce_optimized(ones)?
+    print "  Optimized:  {r3}"
+
+    print ""
+
+    # Sequential data: sum of 0..n-1 = n*(n-1)/2
+    val seq = make_sequential(n)
+    val expected_seq = cpu_sum(seq)
+    print "=== Reduction of 0..{n - 1} (expected {expected_seq}) ==="
+
+    val r4 = run_reduce_naive(seq)?
+    print "  Naive:      {r4}"
+
+    val r5 = run_reduce_sequential(seq)?
+    print "  Sequential: {r5}"
+
+    val r6 = run_reduce_optimized(seq)?
+    print "  Optimized:  {r6}"
+
+    print ""
+    print "All reduction variants complete."
+    Ok(0)

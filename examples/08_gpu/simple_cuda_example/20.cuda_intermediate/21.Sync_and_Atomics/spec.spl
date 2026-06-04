@@ -1,0 +1,177 @@
+# Exercise 21: Synchronization and Atomics - Tests
+
+use std.gpu.{GpuError}
+
+use self.main.{
+    run_atomic_count, run_atomic_minmax,
+    run_histogram, run_cas_max, run_block_reduce_sum
+}
+
+fn approx_eq_f32(a: f32, b: f32, tol: f32) -> bool:
+    val diff = a - b
+    diff < tol and diff > (0.0f32 - tol)
+
+describe "Sync and Atomics":
+
+    describe "atomic counter":
+
+        it "counts all threads":
+            val result = run_atomic_count(1000)
+            expect(result.is_ok()).to_equal(true)
+            expect(result.unwrap()).to_equal(1000)
+
+        it "counts across multiple blocks":
+            # 10000 threads = ~40 blocks of 256
+            val result = run_atomic_count(10000)
+            expect(result.is_ok()).to_equal(true)
+            expect(result.unwrap()).to_equal(10000)
+
+        it "handles single thread":
+            val result = run_atomic_count(1)
+            expect(result.is_ok()).to_equal(true)
+            expect(result.unwrap()).to_equal(1)
+
+    describe "atomic min/max":
+
+        it "finds min and max of sequential data":
+            var data = List<i32>()
+            var i = 0
+            while i < 256:
+                data.push(i)
+                i = i + 1
+            val result = run_atomic_minmax(data)
+            expect(result.is_ok()).to_equal(true)
+            val mm = result.unwrap()
+            expect(mm[0]).to_equal(0)
+            expect(mm[1]).to_equal(255)
+
+        it "finds min and max with negative values":
+            var data = List<i32>()
+            var i = 0
+            while i < 500:
+                data.push(i - 250)
+                i = i + 1
+            val result = run_atomic_minmax(data)
+            expect(result.is_ok()).to_equal(true)
+            val mm = result.unwrap()
+            expect(mm[0]).to_equal(-250)
+            expect(mm[1]).to_equal(249)
+
+        it "handles all-same values":
+            var data = List<i32>()
+            var i = 0
+            while i < 100:
+                data.push(42)
+                i = i + 1
+            val result = run_atomic_minmax(data)
+            expect(result.is_ok()).to_equal(true)
+            val mm = result.unwrap()
+            expect(mm[0]).to_equal(42)
+            expect(mm[1]).to_equal(42)
+
+    describe "histogram":
+
+        it "builds uniform histogram":
+            # Data: 0,1,2,...,9,0,1,2,...,9,...  (100 of each)
+            var data = List<i32>()
+            var i = 0
+            while i < 1000:
+                data.push(i % 10)
+                i = i + 1
+            val result = run_histogram(data, 10)
+            expect(result.is_ok()).to_equal(true)
+            val hist = result.unwrap()
+            expect(hist.len()).to_equal(10)
+            var bin = 0
+            while bin < 10:
+                expect(hist[bin]).to_equal(100)
+                bin = bin + 1
+
+        it "builds skewed histogram":
+            # All values are 0 -> bin 0 gets everything
+            var data = List<i32>()
+            var i = 0
+            while i < 512:
+                data.push(0)
+                i = i + 1
+            val result = run_histogram(data, 4)
+            expect(result.is_ok()).to_equal(true)
+            val hist = result.unwrap()
+            expect(hist[0]).to_equal(512)
+            expect(hist[1]).to_equal(0)
+            expect(hist[2]).to_equal(0)
+            expect(hist[3]).to_equal(0)
+
+        it "total of all bins equals input size":
+            var data = List<i32>()
+            var i = 0
+            while i < 777:
+                data.push(i * 13)
+                i = i + 1
+            val result = run_histogram(data, 8)
+            expect(result.is_ok()).to_equal(true)
+            val hist = result.unwrap()
+            var total = 0
+            var bin = 0
+            while bin < 8:
+                total = total + hist[bin]
+                bin = bin + 1
+            expect(total).to_equal(777)
+
+    describe "compare-and-swap max":
+
+        it "finds maximum via CAS":
+            var data = List<i32>()
+            var i = 0
+            while i < 1000:
+                data.push(i)
+                i = i + 1
+            val result = run_cas_max(data)
+            expect(result.is_ok()).to_equal(true)
+            expect(result.unwrap()).to_equal(999)
+
+        it "finds maximum with scattered values":
+            var data = List<i32>()
+            data.push(10)
+            data.push(500)
+            data.push(3)
+            data.push(999)
+            data.push(42)
+            data.push(1)
+            val result = run_cas_max(data)
+            expect(result.is_ok()).to_equal(true)
+            expect(result.unwrap()).to_equal(999)
+
+    describe "block reduce sum":
+
+        it "sums 1024 ones":
+            var data = List<f32>()
+            var i = 0
+            while i < 1024:
+                data.push(1.0f32)
+                i = i + 1
+            val result = run_block_reduce_sum(data)
+            expect(result.is_ok()).to_equal(true)
+            expect(approx_eq_f32(result.unwrap(), 1024.0f32, 1.0f32)).to_equal(true)
+
+        it "sums sequential values":
+            # Sum of 0..255 = 255*256/2 = 32640
+            var data = List<f32>()
+            var i = 0
+            while i < 256:
+                data.push(i * 1.0f32)
+                i = i + 1
+            val result = run_block_reduce_sum(data)
+            expect(result.is_ok()).to_equal(true)
+            expect(approx_eq_f32(result.unwrap(), 32640.0f32, 1.0f32)).to_equal(true)
+
+        it "sums across multiple blocks":
+            # 2048 elements = 8 blocks of 256
+            var data = List<f32>()
+            var i = 0
+            while i < 2048:
+                data.push(0.5f32)
+                i = i + 1
+            val result = run_block_reduce_sum(data)
+            expect(result.is_ok()).to_equal(true)
+            expect(approx_eq_f32(result.unwrap(), 1024.0f32, 1.0f32)).to_equal(true)

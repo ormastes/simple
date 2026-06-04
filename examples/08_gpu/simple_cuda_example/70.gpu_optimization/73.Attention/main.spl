@@ -1,0 +1,245 @@
+use std.gpu.{GpuDevice, GpuBuffer}
+use std.ml.{Tensor}
+use std.io.{print}
+use std.math.{sqrt, exp, log, max}
+
+val BLOCK_SIZE = 64  # Tile size for flash attention
+
+# ============================================================
+# Naive attention (for comparison) - O(n^2) memory
+# ============================================================
+
+@gpu_kernel
+fn naive_attention_kernel(q: &[f32], k: &[f32], v: &[f32], output: &mut [f32],
+                          seq_len: i64, d_k: i64, scale: f32, causal: i32):
+    val row = block_idx_x()
+    if row >= seq_len:
+        return
+
+    # Compute QK^T for this row
+    var scores: [f32; 4096]  # max seq_len
+    var max_score = -1.0e9f32
+
+    var col = 0
+    while col < seq_len:
+        if causal == 1 and col > row:
+            scores[col] = -1.0e9
+        else:
+            var dot = 0.0f32
+            var d = 0
+            while d < d_k:
+                dot = dot + q[row * d_k + d] * k[col * d_k + d]
+                d = d + 1
+            scores[col] = dot * scale
+        if scores[col] > max_score:
+            max_score = scores[col]
+        col = col + 1
+
+    # Softmax
+    var exp_sum = 0.0f32
+    col = 0
+    while col < seq_len:
+        scores[col] = exp(scores[col] - max_score)
+        exp_sum = exp_sum + scores[col]
+        col = col + 1
+
+    col = 0
+    while col < seq_len:
+        scores[col] = scores[col] / exp_sum
+        col = col + 1
+
+    # Multiply by V
+    var d = 0
+    while d < d_k:
+        var sum = 0.0f32
+        col = 0
+        while col < seq_len:
+            sum = sum + scores[col] * v[col * d_k + d]
+            col = col + 1
+        output[row * d_k + d] = sum
+        d = d + 1
+
+# ============================================================
+# Flash-attention style: tiled, O(n) memory
+# ============================================================
+
+# Online softmax state per query row
+# Maintains running max and sum for numerically stable incremental softmax
+
+@gpu_kernel
+fn flash_attention_kernel(q: &[f32], k: &[f32], v: &[f32], output: &mut [f32],
+                          seq_len: i64, d_k: i64, scale: f32, causal: i32):
+    val query_row = block_idx_x()
+    if query_row >= seq_len:
+        return
+
+    @shared var q_tile: [f32; BLOCK_SIZE]        # current query vector
+    @shared var k_tile: [f32; BLOCK_SIZE * BLOCK_SIZE]  # key tile
+    @shared var v_tile: [f32; BLOCK_SIZE * BLOCK_SIZE]  # value tile
+
+    val tid = thread_idx_x()
+
+    # Load query vector into shared memory
+    if tid < d_k:
+        q_tile[tid] = q[query_row * d_k + tid]
+    sync_threads()
+
+    # Running online softmax state
+    var running_max = -1.0e9f32
+    var running_sum = 0.0f32
+    var accumulator: [f32; BLOCK_SIZE]  # accumulated output (d_k values)
+    var d = 0
+    while d < d_k:
+        accumulator[d] = 0.0
+        d = d + 1
+
+    # Process K,V in tiles
+    var tile_start = 0
+    while tile_start < seq_len:
+        val tile_end = if tile_start + BLOCK_SIZE < seq_len: tile_start + BLOCK_SIZE else: seq_len
+        val tile_len = tile_end - tile_start
+
+        # Load K tile
+        if tid < tile_len:
+            var dk = 0
+            while dk < d_k:
+                k_tile[tid * d_k + dk] = k[(tile_start + tid) * d_k + dk]
+                dk = dk + 1
+
+        # Load V tile
+        if tid < tile_len:
+            var dk = 0
+            while dk < d_k:
+                v_tile[tid * d_k + dk] = v[(tile_start + tid) * d_k + dk]
+                dk = dk + 1
+
+        sync_threads()
+
+        # Compute scores for this tile
+        var col = 0
+        while col < tile_len:
+            val abs_col = tile_start + col
+
+            # Causal mask
+            if causal == 1 and abs_col > query_row:
+                col = col + 1
+                continue
+
+            # Dot product Q . K[col]
+            var dot = 0.0f32
+            d = 0
+            while d < d_k:
+                dot = dot + q_tile[d] * k_tile[col * d_k + d]
+                d = d + 1
+            val score = dot * scale
+
+            # Online softmax update
+            val new_max = max(running_max, score)
+            val correction = exp(running_max - new_max)
+            val new_weight = exp(score - new_max)
+
+            # Rescale existing accumulator
+            running_sum = running_sum * correction + new_weight
+            d = 0
+            while d < d_k:
+                accumulator[d] = accumulator[d] * correction + new_weight * v_tile[col * d_k + d]
+                d = d + 1
+
+            running_max = new_max
+            col = col + 1
+
+        sync_threads()
+        tile_start = tile_start + BLOCK_SIZE
+
+    # Normalize by sum
+    d = 0
+    while d < d_k:
+        output[query_row * d_k + d] = accumulator[d] / running_sum
+        d = d + 1
+
+# ============================================================
+# High-level wrappers
+# ============================================================
+
+fn flash_attention(q: Tensor<f32>, k: Tensor<f32>, v: Tensor<f32>,
+                   causal: bool) -> Result<Tensor<f32>, GpuError>:
+    val seq_len = q.shape[0]
+    val d_k = q.shape[1]
+    val scale = 1.0 / sqrt(d_k.to_f32())
+    val causal_flag = if causal: 1 else: 0
+
+    val dev = GpuDevice.get(0)?
+    val buf_q = dev.alloc_copy(q.data)?
+    val buf_k = dev.alloc_copy(k.data)?
+    val buf_v = dev.alloc_copy(v.data)?
+    var buf_out = dev.alloc_f32(seq_len * d_k)?
+
+    dev.launch(flash_attention_kernel,
+        grid: seq_len,
+        block: BLOCK_SIZE,
+        args: (buf_q, buf_k, buf_v, buf_out, seq_len, d_k, scale, causal_flag))
+    dev.sync()?
+
+    val data = buf_out.to_host()?
+    Ok(Tensor(shape: [seq_len, d_k], data: data))
+
+fn naive_attention(q: Tensor<f32>, k: Tensor<f32>, v: Tensor<f32>,
+                   causal: bool) -> Result<Tensor<f32>, GpuError>:
+    val seq_len = q.shape[0]
+    val d_k = q.shape[1]
+    val scale = 1.0 / sqrt(d_k.to_f32())
+    val causal_flag = if causal: 1 else: 0
+
+    val dev = GpuDevice.get(0)?
+    val buf_q = dev.alloc_copy(q.data)?
+    val buf_k = dev.alloc_copy(k.data)?
+    val buf_v = dev.alloc_copy(v.data)?
+    var buf_out = dev.alloc_f32(seq_len * d_k)?
+
+    dev.launch(naive_attention_kernel,
+        grid: seq_len, block: 1,
+        args: (buf_q, buf_k, buf_v, buf_out, seq_len, d_k, scale, causal_flag))
+    dev.sync()?
+
+    val data = buf_out.to_host()?
+    Ok(Tensor(shape: [seq_len, d_k], data: data))
+
+fn main():
+    val seq_len = 256
+    val d_k = 64
+
+    val q = Tensor.randn([seq_len, d_k])
+    val k = Tensor.randn([seq_len, d_k])
+    val v = Tensor.randn([seq_len, d_k])
+
+    print "Attention: seq_len={seq_len}, d_k={d_k}"
+
+    # Naive attention
+    val naive_result = naive_attention(q, k, v, causal: true)
+    match naive_result:
+        Ok(out):
+            print "Naive attention output shape: [{out.shape[0]}, {out.shape[1]}]"
+        Err(e):
+            print "Naive error: {e.message}"
+
+    # Flash attention
+    val flash_result = flash_attention(q, k, v, causal: true)
+    match flash_result:
+        Ok(out):
+            print "Flash attention output shape: [{out.shape[0]}, {out.shape[1]}]"
+        Err(e):
+            print "Flash error: {e.message}"
+
+    # Compare results
+    match (naive_result, flash_result):
+        (Ok(naive_out), Ok(flash_out)):
+            var max_diff = 0.0f32
+            var i = 0
+            while i < naive_out.data.len():
+                val diff = (naive_out.data[i] - flash_out.data[i]).abs()
+                if diff > max_diff:
+                    max_diff = diff
+                i = i + 1
+            print "Max difference between naive and flash: {max_diff}"
+        _:
+            print "Could not compare (one or both failed)"
