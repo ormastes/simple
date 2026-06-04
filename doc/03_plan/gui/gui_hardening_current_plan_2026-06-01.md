@@ -9142,8 +9142,8 @@ Detailed completion checklist:
 - [x] Run required shared-runtime checks for `src/compiler`, `src/lib`, MCP, LSP,
   and MCP stdio.
 - [x] Run final diff hygiene and executable-spec layout guards.
-- [ ] Commit only the `toReversed` runtime/spec/manual/plan update.
-- [ ] Fetch/rebase with file-count guard and push `HEAD:main` with
+- [x] Commit only the `toReversed` runtime/spec/manual/plan update.
+- [x] Fetch/rebase with file-count guard and push `HEAD:main` with
   `GITHUB_TOKEN` unset.
 
 Detailed test checklist:
@@ -9169,5 +9169,7 @@ after returned-copy mutation. The focused fetch/WASM chain spec now passes
 `237/237`, and the generated manual records `Total scenarios | 237 |`.
 Adjacent regressions passed at `107/107`, `106/106`, and `275/275`. Shared
 runtime checks passed for `src/compiler`, `src/lib`, MCP, LSP MCP, and MCP
-stdio with the current warning profiles unchanged. Broader typed-array prototype
-parity and production GUI pixel parity remain open.
+stdio with the current warning profiles unchanged. Final sync guards passed with
+file count stable at `78091`, and the runtime/spec continuation was pushed to
+`origin/main` as `bd8f91c903`. Broader typed-array prototype parity and
+production GUI pixel parity remain open.
