@@ -3794,16 +3794,84 @@
  - `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
  - `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
  
- BrowserSession scripts now dispatch bounded `Uint8Array.prototype.find.call`,
- `find.apply`, `findIndex.call`, and `findIndex.apply` against browser-script
- typed arrays. Search callbacks receive normalized byte value, index, and
- receiver arguments, return the first matching value or index, and preserve
- `undefined`/`-1` misses. The focused fetch/WASM chain spec now passes `55/55`;
- broader typed-array/DataView prototype parity, general
- `Function.prototype.call/apply` dispatch, and full browser/WASM semantics remain
- open.
- 
- BrowserSession Uint8Array prototype transform apply continuation:
+BrowserSession scripts now dispatch bounded `Uint8Array.prototype.find.call`,
+`find.apply`, `findIndex.call`, and `findIndex.apply` against browser-script
+typed arrays. Search callbacks receive normalized byte value, index, and
+receiver arguments, return the first matching value or index, and preserve
+`undefined`/`-1` misses. The focused fetch/WASM chain spec now passes `55/55`;
+broader typed-array/DataView prototype parity, general
+`Function.prototype.call/apply` dispatch, and full browser/WASM semantics remain
+open.
+
+BrowserSession Uint8Array findLast/findLastIndex continuation:
+
+Completion checklist:
+
+- [x] Scope remains bounded to BrowserSession JavaScript interpreter
+  `Uint8Array` callback helper parity.
+- [x] Add direct member dispatch for `findLast` and `findLastIndex`.
+- [x] Preserve normalized byte callback values, index argument delivery, and
+  typed-array receiver argument delivery.
+- [x] Return the last matching byte for `findLast`.
+- [x] Return the last matching index for `findLastIndex`.
+- [x] Preserve miss behavior: `undefined` for `findLast`, `-1` for
+  `findLastIndex`.
+- [x] Add prototype `call` dispatch for both reverse-search helpers.
+- [x] Add prototype `apply` dispatch for both reverse-search helpers.
+- [x] Refresh generated scenario manual after executable spec changes.
+- [x] Run focused compile and focused fetch/WASM chain spec.
+- [x] Run adjacent browser/WASM and JS conformance checks.
+- [x] Run shared compiler/lib/MCP/LSP smoke checks.
+- [x] Run final layout, whitespace, file-count, and status gates.
+- [ ] Commit implementation and spec/doc updates.
+- [ ] Push guarded main update after fetch/rebase/file-count safety check.
+- [ ] Commit and push sync-complete checklist update.
+
+Tests checklist:
+
+- [x] Direct browser-script `b.findLast(callback)` returns the reverse-order
+  matching normalized byte.
+- [x] Direct browser-script `b.findLastIndex(callback)` returns the
+  reverse-order matching index.
+- [x] Direct miss cases preserve `undefined` and `-1` returns.
+- [x] Prototype `Uint8Array.prototype.findLast.call(bytes, callback)` dispatches
+  with normalized byte, index, and receiver callback arguments.
+- [x] Prototype `Uint8Array.prototype.findLastIndex.call(bytes, callback)`
+  dispatches with normalized byte, index, and receiver callback arguments.
+- [x] Prototype `findLast.apply` and `findLastIndex.apply` accept callback
+  arrays and preserve miss behavior.
+- [x] Focused spec result recorded: fetch/WASM chain `245/245`.
+- [x] Adjacent spec results recorded: WASM host `107/107`, WebGPU JS/WASM
+  `106/106`, Node API conformance `275/275`.
+- [x] Shared smoke result recorded: compiler check `14 warning(s) / 2627
+  files`, lib check `405 warning(s) / 5936 files`, MCP check `2 warning(s) /
+  27 files`, Simple LSP MCP check `5/5 files`, MCP stdio integration `5/5`.
+
+Commands run:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/interpreter_eval.spl test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --force-rebuild --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/compiler`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/app/mcp`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/app/simple_lsp_mcp`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter`
+- `git diff --check`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+BrowserSession scripts now support bounded `Uint8Array.findLast`,
+`findLastIndex`, `Uint8Array.prototype.findLast.call/apply`, and
+`findLastIndex.call/apply` against browser-script typed arrays. Reverse search
+callbacks receive normalized byte value, index, and receiver arguments, return
+the last matching byte or index, and preserve `undefined`/`-1` misses. Broader
+typed-array/DataView prototype parity, general `Function.prototype.call/apply`
+dispatch, and full browser/WASM semantics remain open.
+
+BrowserSession Uint8Array prototype transform apply continuation:
  
  - `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
  - `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`

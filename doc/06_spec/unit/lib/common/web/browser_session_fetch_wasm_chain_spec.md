@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 243 | 243 | 0 | 0 |
+| 245 | 245 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -10752,6 +10752,72 @@ match result:
 
 </details>
 
+#### finds Uint8Array values from the end with callback predicates in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `4:4:undefined:-1`
+
+3. Err
+   - Expected: "unexpected uint8 findLast js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var b = new Uint8Array(5); b[0] = 1; b[1] = 260; b[2] = -1; b[3] = 7; b[4] = 260; b.findLast(function(v, i, arr) { return v == 4 && arr.at(i) == 4; }) + ':' + b.findLastIndex(function(v, i, arr) { return v == 4 && arr.at(i) == 4; }) + ':' + b.findLast(function(v) { return v == 99; }) + ':' + b.findLastIndex(function(v) { return v == 99; })")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("4:4:undefined:-1")
+    Err(err):
+        expect("unexpected uint8 findLast js error: {err}").to_equal("")
+```
+
+</details>
+
+#### dispatches Uint8Array prototype findLast helpers with call and apply in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `4:4:undefined:-1`
+
+3. Err
+   - Expected: "unexpected uint8 prototype findLast dispatch js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var b = new Uint8Array(5); b[0] = 1; b[1] = 260; b[2] = -1; b[3] = 7; b[4] = 260; var found = Uint8Array.prototype.findLast.call(b, function(v, i, arr) { return v == 4 && i > 1 && arr.at(2) == 255; }); var idx = Uint8Array.prototype.findLastIndex.call(b, function(v, i, arr) { return v == 4 && i > 1 && arr.at(i) == 4; }); var miss = Uint8Array.prototype.findLast.apply(b, [function(v) { return v == 99; }]); var missIdx = Uint8Array.prototype.findLastIndex.apply(b, [function(v) { return v == 99; }]); found + ':' + idx + ':' + miss + ':' + missIdx")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("4:4:undefined:-1")
+    Err(err):
+        expect("unexpected uint8 prototype findLast dispatch js error: {err}").to_equal("")
+```
+
+</details>
+
 #### dispatches Uint8Array prototype transform helpers with apply in browser scripts
 
 1. var session = BrowserSession new
@@ -13378,8 +13444,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 243 |
-| Active scenarios | 243 |
+| Total scenarios | 245 |
+| Active scenarios | 245 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
