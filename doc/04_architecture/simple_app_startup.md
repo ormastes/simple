@@ -69,6 +69,9 @@ The startup policy helper in `src/app/startup/launch_metadata.spl` turns this
 metadata into a `StartupLaunchPlan` with concrete include/load/cache decisions.
 SimpleOS uses `launch_metadata_for_simpleos_path(...)` so `/sys/apps/*.smf`
 and `/sys/lib/*.smf` choose the SimpleOS VFS prewarm lane instead of host mmap.
+The pure Simple `llvm-lib` native-build path emits
+`<output>.simple_launch.sdn` after successful build; the checker reads that
+sidecar automatically.
 
 ## Native Build Launch
 
@@ -94,7 +97,9 @@ Native build metadata should come from the build process, not startup guessing.
 For ELF this can be a `.note.simple.launch`; for Mach-O a
 `__SIMPLE,__launch` section; for PE a resource section. Build should also emit
 a sidecar metadata file so `simple launch-meta check <path>` can validate a
-binary without platform-specific binary parsing.
+binary without platform-specific binary parsing. The sidecar lane is implemented
+for `simple native-build --backend=llvm-lib`; embedded binary sections remain an
+open follow-up.
 
 ## Interpreter Script Launch
 
@@ -210,3 +215,4 @@ Open evidence gaps:
 - SimpleOS process-callable shared-library mapping if executable dynlib calls
   inside SimpleOS are claimed
 - final build/link gate proving unused parser/cache/dynlib code is excluded
+- embedded ELF/Mach-O/PE launch metadata sections for native binaries

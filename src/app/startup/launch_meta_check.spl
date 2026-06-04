@@ -1,14 +1,24 @@
 # Launch metadata checker.
 
 use std.cli.cli_util (get_cli_args)
-use app.startup.launch_metadata.{launch_metadata_for_path, launch_metadata_for_simpleos_path, startup_plan_from_metadata, startup_feature_summary}
+use app.startup.launch_metadata.{
+    LaunchMetadata,
+    launch_metadata_for_path,
+    launch_metadata_for_simpleos_path,
+    launch_metadata_sidecar_path,
+    parse_launch_metadata_sidecar,
+    startup_detect_launch_kind,
+    startup_plan_from_metadata,
+    startup_feature_summary
+}
 
 extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
 
 fn _print_help():
-    print "Usage: simple launch-meta check [--simpleos] <path>"
+    print "Usage: simple launch-meta check [--simpleos] [--metadata <path>] <path>"
     print ""
-    print "Checks Simple startup metadata policy for native, script, SMF, and SimpleOS launch paths."
+    print "Checks Simple startup metadata policy and sidecars for native, script, SMF, and SimpleOS launch paths."
 
 fn _strip_entry_arg(args: [text]) -> [text]:
     if args.len() > 0 and args[0].ends_with("launch_meta_check.spl"):
@@ -18,7 +28,31 @@ fn _strip_entry_arg(args: [text]) -> [text]:
 fn _is_simpleos_virtual_path(path: text) -> bool:
     path.starts_with("/sys/apps/") or path.starts_with("/sys/lib/")
 
-fn _check_path(path: text, target: text) -> i64:
+fn _dependency_is_concrete_path(dep: text) -> bool:
+    dep.starts_with("/") or dep.starts_with("./") or dep.starts_with("../")
+
+fn _check_host_dependency_files(deps: [text], kind: text) -> i64:
+    var missing = 0
+    for dep in deps:
+        if _dependency_is_concrete_path(dep) and not rt_file_exists(dep):
+            print "launch-meta: missing {kind} dependency: {dep}"
+            missing = missing + 1
+    missing
+
+fn _metadata_for_check(path: text, target: text, metadata_path: text) -> LaunchMetadata:
+    val simpleos_target = target == "simpleos"
+    val fallback_kind = startup_detect_launch_kind(path)
+    if metadata_path != "":
+        val content = rt_file_read_text(metadata_path)
+        return parse_launch_metadata_sidecar(content, fallback_kind)
+    val default_sidecar = launch_metadata_sidecar_path(path)
+    if not simpleos_target and rt_file_exists(default_sidecar):
+        return parse_launch_metadata_sidecar(rt_file_read_text(default_sidecar), fallback_kind)
+    if simpleos_target:
+        return launch_metadata_for_simpleos_path(path)
+    launch_metadata_for_path(path)
+
+fn _check_path(path: text, target: text, metadata_path: text) -> i64:
     if path == "":
         print "launch-meta: missing path"
         return 2
@@ -26,10 +60,21 @@ fn _check_path(path: text, target: text) -> i64:
     if not simpleos_target and not rt_file_exists(path):
         print "launch-meta: path not found: {path}"
         return 2
+    if metadata_path != "" and not rt_file_exists(metadata_path):
+        print "launch-meta: metadata path not found: {metadata_path}"
+        return 2
     if simpleos_target and not _is_simpleos_virtual_path(path):
         print "launch-meta: SimpleOS paths must be under /sys/apps or /sys/lib: {path}"
         return 2
-    val metadata = if simpleos_target: launch_metadata_for_simpleos_path(path) else: launch_metadata_for_path(path)
+    val metadata = _metadata_for_check(path, target, metadata_path)
+    if simpleos_target and metadata.target_os != "simpleos":
+        print "launch-meta: metadata target_os must be simpleos for --simpleos"
+        return 2
+    if not simpleos_target:
+        val missing_native = _check_host_dependency_files(metadata.required_native_dynlibs, "native dynlib")
+        val missing_smf = _check_host_dependency_files(metadata.required_smf_dynlibs, "SMF dynlib")
+        if missing_native + missing_smf > 0:
+            return 2
     val plan = startup_plan_from_metadata(path, [], metadata, not simpleos_target, simpleos_target)
     print "launch-meta: ok {path}"
     print startup_feature_summary(plan)
@@ -47,12 +92,29 @@ fn main() -> i64:
         print "launch-meta: unknown command: {args[0]}"
         _print_help()
         return 1
-    if args.len() < 2:
+    var target = "host"
+    var metadata_path = ""
+    var artifact_path = ""
+    var i = 1
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--simpleos":
+            target = "simpleos"
+        elif arg == "--metadata":
+            if i + 1 >= args.len():
+                print "launch-meta: --metadata requires a path"
+                return 2
+            i = i + 1
+            metadata_path = args[i]
+        elif arg.starts_with("--metadata="):
+            metadata_path = arg.slice("--metadata=".len(), arg.len())
+        elif arg.starts_with("-"):
+            print "launch-meta: unknown check option: {arg}"
+            return 2
+        else:
+            artifact_path = arg
+        i = i + 1
+    if artifact_path == "":
         print "launch-meta: check requires a path"
         return 2
-    if args[1] == "--simpleos":
-        if args.len() < 3:
-            print "launch-meta: check --simpleos requires a path"
-            return 2
-        return _check_path(args[2], "simpleos")
-    _check_path(args[1], "host")
+    _check_path(artifact_path, target, metadata_path)

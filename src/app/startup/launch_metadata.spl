@@ -61,6 +61,18 @@ pub fn launch_metadata_default(entry_kind: text) -> LaunchMetadata:
 pub fn launch_metadata_for_path(path: text) -> LaunchMetadata:
     launch_metadata_default(startup_detect_launch_kind(path))
 
+pub fn launch_metadata_for_native_build(target_os: text, target_arch: text, target_abi: text) -> LaunchMetadata:
+    LaunchMetadata(
+        entry_kind: "native",
+        target_os: target_os,
+        target_arch: target_arch,
+        target_abi: target_abi,
+        uses_arg_parser: false,
+        mmap_hint: false,
+        required_native_dynlibs: [],
+        required_smf_dynlibs: []
+    )
+
 pub fn launch_metadata_for_simpleos_path(path: text) -> LaunchMetadata:
     val kind = startup_detect_launch_kind(path)
     val uses_args = kind == "script" or kind == "smf"
@@ -114,3 +126,71 @@ pub fn startup_feature_summary(plan: StartupLaunchPlan) -> text:
         "|arg_parser=" + plan.include_arg_parser.to_text() +
         "|cache=" + plan.cache_strategy +
         "|dynlib=" + plan.include_dynlib_loader.to_text()
+
+pub fn launch_metadata_sidecar_path(artifact_path: text) -> text:
+    artifact_path + ".simple_launch.sdn"
+
+fn _metadata_bool_text(value: bool) -> text:
+    if value:
+        return "true"
+    "false"
+
+pub fn render_launch_metadata_sidecar(metadata: LaunchMetadata) -> text:
+    var out = "simple_launch_metadata:\n"
+    out = out + "  entry_kind: \"" + metadata.entry_kind + "\"\n"
+    out = out + "  target_os: \"" + metadata.target_os + "\"\n"
+    out = out + "  target_arch: \"" + metadata.target_arch + "\"\n"
+    out = out + "  target_abi: \"" + metadata.target_abi + "\"\n"
+    out = out + "  uses_arg_parser: " + _metadata_bool_text(metadata.uses_arg_parser) + "\n"
+    out = out + "  mmap_hint: " + _metadata_bool_text(metadata.mmap_hint) + "\n"
+    for dep in metadata.required_native_dynlibs:
+        out = out + "  native_dynlib: \"" + dep + "\"\n"
+    for dep in metadata.required_smf_dynlibs:
+        out = out + "  smf_dynlib: \"" + dep + "\"\n"
+    out
+
+fn _strip_metadata_quotes(value: text) -> text:
+    val trimmed = value.trim()
+    if trimmed.len() >= 2 and trimmed.starts_with("\"") and trimmed.ends_with("\""):
+        return trimmed.slice(1, trimmed.len() - 1)
+    trimmed
+
+fn _metadata_value(line: text, key: text) -> text:
+    val trimmed = line.trim()
+    val prefix = key + ":"
+    if not trimmed.starts_with(prefix):
+        return ""
+    _strip_metadata_quotes(trimmed.slice(prefix.len(), trimmed.len()))
+
+pub fn parse_launch_metadata_sidecar(content: text, fallback_kind: text) -> LaunchMetadata:
+    var metadata = launch_metadata_default(fallback_kind)
+    var native_dynlibs: [text] = []
+    var smf_dynlibs: [text] = []
+    for line in content.split("\n"):
+        val entry_kind = _metadata_value(line, "entry_kind")
+        if entry_kind != "":
+            metadata.entry_kind = entry_kind
+        val target_os = _metadata_value(line, "target_os")
+        if target_os != "":
+            metadata.target_os = target_os
+        val target_arch = _metadata_value(line, "target_arch")
+        if target_arch != "":
+            metadata.target_arch = target_arch
+        val target_abi = _metadata_value(line, "target_abi")
+        if target_abi != "":
+            metadata.target_abi = target_abi
+        val uses_arg_parser = _metadata_value(line, "uses_arg_parser")
+        if uses_arg_parser != "":
+            metadata.uses_arg_parser = uses_arg_parser == "true"
+        val mmap_hint = _metadata_value(line, "mmap_hint")
+        if mmap_hint != "":
+            metadata.mmap_hint = mmap_hint == "true"
+        val native_dynlib = _metadata_value(line, "native_dynlib")
+        if native_dynlib != "":
+            native_dynlibs.push(native_dynlib)
+        val smf_dynlib = _metadata_value(line, "smf_dynlib")
+        if smf_dynlib != "":
+            smf_dynlibs.push(smf_dynlib)
+    metadata.required_native_dynlibs = native_dynlibs
+    metadata.required_smf_dynlibs = smf_dynlibs
+    metadata

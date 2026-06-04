@@ -9,8 +9,8 @@ loading.
 
 - One metadata contract covers `native | script | smf`: target OS/arch/ABI, arg
   parser policy, mmap/cache hint, native dynlibs, and SMF dynlibs.
-- Native builds should embed metadata and emit a sidecar for
-  `simple launch-meta check`.
+- Pure Simple `llvm-lib` native builds emit `<output>.simple_launch.sdn`;
+  embedded native sections are still follow-up work.
 - Scripts use generated module-graph metadata; SMF files carry metadata in the
   SMF manifest/header.
 - SimpleOS paths use `launch_metadata_for_simpleos_path(...)` and

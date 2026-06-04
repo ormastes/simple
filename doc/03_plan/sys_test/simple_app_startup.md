@@ -13,6 +13,7 @@ Covered:
 - native dynlib and role-2 SMF dynlib dependency policy
 - explicit SimpleOS launch metadata and VFS prewarm policy
 - SimpleOS WM hover prefetch of executable/SMF bytes without execution
+- build-emitted launch metadata sidecar rendering and parsing
 
 Excluded:
 
@@ -52,6 +53,7 @@ Generated/manual docs mirror the executable paths:
 | REQ-002 | File arg parsing and parser gating | `test/03_system/app/simple/feature/simple_app_startup_spec.spl` | `doc/06_spec/03_system/app/simple/feature/simple_app_startup_spec.md` | Full |
 | REQ-003 | Mmap/cache startup strategy | `test/03_system/app/simple/feature/simple_app_startup_spec.spl` | `doc/06_spec/03_system/app/simple/feature/simple_app_startup_spec.md` | Full |
 | REQ-004 | Conditional native/SMF dynlib loading | `test/03_system/app/simple/feature/simple_app_startup_spec.spl` | `doc/06_spec/03_system/app/simple/feature/simple_app_startup_spec.md` | Full |
+| REQ-005 | Build launch metadata sidecar | `test/03_system/app/simple/feature/simple_app_startup_spec.spl` | `doc/06_spec/03_system/app/simple/feature/simple_app_startup_spec.md` | Full |
 | REQ-100 | SimpleOS launch metadata and VFS prewarm | `test/03_system/app/simpleos/feature/simple_app_startup_spec.spl` | `doc/06_spec/03_system/app/simpleos/feature/simple_app_startup_spec.md` | Full |
 | REQ-101 | SimpleOS hover prefetch | `test/03_system/app/simpleos/feature/simple_app_startup_spec.spl` | `doc/06_spec/03_system/app/simpleos/feature/simple_app_startup_spec.md` | Full |
 | REQ-102 | SimpleOS launcher icon prefetch | `test/03_system/app/simpleos/feature/simple_app_startup_spec.spl` | `doc/06_spec/03_system/app/simpleos/feature/simple_app_startup_spec.md` | Full |

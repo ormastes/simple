@@ -5,8 +5,12 @@
 use std.spec.*
 use app.startup.launch_metadata.{
     LaunchMetadata,
+    launch_metadata_for_native_build,
     startup_detect_launch_kind,
     launch_metadata_for_simpleos_path,
+    render_launch_metadata_sidecar,
+    parse_launch_metadata_sidecar,
+    launch_metadata_sidecar_path,
     startup_normalize_program_args,
     startup_plan_from_metadata,
     startup_feature_summary
@@ -104,3 +108,35 @@ describe "simple app startup metadata":
             expect(plan.include_dynlib_loader).to_equal(true)
             expect(plan.load_smf_dynlibs[0]).to_equal("/sys/lib/gui_hot.smf")
             expect(plan.program_args[0]).to_equal("app.smf")
+
+    describe "REQ-005: build launch metadata sidecar":
+        it "should render native build launch metadata as a sidecar":
+            val metadata = launch_metadata_for_native_build("host", "x86_64", "native")
+            val sidecar = render_launch_metadata_sidecar(metadata)
+            expect(sidecar).to_contain("simple_launch_metadata:")
+            expect(sidecar).to_contain("entry_kind: \"native\"")
+            expect(sidecar).to_contain("uses_arg_parser: false")
+            expect(sidecar).to_contain("mmap_hint: false")
+
+        it "should parse sidecar metadata with native and SMF dynlib dependencies":
+            val sidecar =
+                "simple_launch_metadata:\n" +
+                "  entry_kind: \"smf\"\n" +
+                "  target_os: \"simpleos\"\n" +
+                "  target_arch: \"x86_64\"\n" +
+                "  target_abi: \"simpleos\"\n" +
+                "  uses_arg_parser: true\n" +
+                "  mmap_hint: true\n" +
+                "  native_dynlib: \"libhost_gui.dylib\"\n" +
+                "  smf_dynlib: \"/sys/lib/gui_hot.smf\"\n"
+            val metadata = parse_launch_metadata_sidecar(sidecar, "native")
+            val plan = startup_plan_from_metadata("app.smf", ["app.smf"], metadata, false, true)
+            expect(metadata.entry_kind).to_equal("smf")
+            expect(metadata.target_os).to_equal("simpleos")
+            expect(plan.include_dynlib_loader).to_equal(true)
+            expect(plan.load_native_dynlibs[0]).to_equal("libhost_gui.dylib")
+            expect(plan.load_smf_dynlibs[0]).to_equal("/sys/lib/gui_hot.smf")
+            expect(plan.cache_strategy).to_equal("simpleos_vfs_prewarm")
+
+        it "should name sidecars next to the artifact path":
+            expect(launch_metadata_sidecar_path("build/app")).to_equal("build/app.simple_launch.sdn")

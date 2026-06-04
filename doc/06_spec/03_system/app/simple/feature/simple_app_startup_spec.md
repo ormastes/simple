@@ -28,7 +28,7 @@ simple_app_startup_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 13 | 13 | 0 | 0 |
+| 16 | 16 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -266,6 +266,72 @@ expect(plan.program_args[0]).to_equal("app.smf")
 
 </details>
 
+### REQ-005: build launch metadata sidecar
+
+#### should render native build launch metadata as a sidecar
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val metadata = launch_metadata_for_native_build("host", "x86_64", "native")
+val sidecar = render_launch_metadata_sidecar(metadata)
+expect(sidecar).to_contain("simple_launch_metadata:")
+expect(sidecar).to_contain("entry_kind: \"native\"")
+expect(sidecar).to_contain("uses_arg_parser: false")
+expect(sidecar).to_contain("mmap_hint: false")
+```
+
+</details>
+
+#### should parse sidecar metadata with native and SMF dynlib dependencies
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val sidecar =
+    "simple_launch_metadata:\n" +
+    "  entry_kind: \"smf\"\n" +
+    "  target_os: \"simpleos\"\n" +
+    "  target_arch: \"x86_64\"\n" +
+    "  target_abi: \"simpleos\"\n" +
+    "  uses_arg_parser: true\n" +
+    "  mmap_hint: true\n" +
+    "  native_dynlib: \"libhost_gui.dylib\"\n" +
+    "  smf_dynlib: \"/sys/lib/gui_hot.smf\"\n"
+val metadata = parse_launch_metadata_sidecar(sidecar, "native")
+val plan = startup_plan_from_metadata("app.smf", ["app.smf"], metadata, false, true)
+expect(metadata.entry_kind).to_equal("smf")
+expect(metadata.target_os).to_equal("simpleos")
+expect(plan.include_dynlib_loader).to_equal(true)
+expect(plan.load_native_dynlibs[0]).to_equal("libhost_gui.dylib")
+expect(plan.load_smf_dynlibs[0]).to_equal("/sys/lib/gui_hot.smf")
+expect(plan.cache_strategy).to_equal("simpleos_vfs_prewarm")
+```
+
+</details>
+
+#### should name sidecars next to the artifact path
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(launch_metadata_sidecar_path("build/app")).to_equal("build/app.simple_launch.sdn")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -284,13 +350,14 @@ Tests covering:
 - REQ-002: file argument parsing
 - REQ-003: mmap or cache strategy
 - REQ-004: conditional dynlib loading
+- REQ-005: build launch metadata sidecar
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 16 |
+| Active scenarios | 16 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

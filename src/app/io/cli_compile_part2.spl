@@ -17,6 +17,7 @@ use compiler.common.driver_core_types (compileoptions_normalize_mir_optimization
 use compiler.mir_opt (mir_optimization_inventory_lines)
 use compiler.mir_opt.mod (TargetOptContext, target_opt_context_default)
 use app.build.build_cli (parse_build_driver_flags, build_driver_flags_to_target_opt_ctx)
+use app.startup.launch_metadata.{launch_metadata_for_native_build, launch_metadata_sidecar_path, render_launch_metadata_sidecar}
 
 extern fn rt_compile_to_llvm_ir(source_file: text, target_triple: text, bare_metal: bool) -> (text, text, i64)
 extern fn rt_native_build(args: [text]) -> i64
@@ -433,9 +434,17 @@ fn cli_native_build(args: [text]) -> i64:
             aot_native_file_with_backend(entry_point, output, "llvm-lib", release, opt_level)
         match result:
             case CompileResult.Success(_):
+                val metadata = launch_metadata_for_native_build("host", "", "native")
+                val metadata_path = launch_metadata_sidecar_path(output)
+                val metadata_text = render_launch_metadata_sidecar(metadata)
+                if not _cli_file_write_impl(metadata_path, metadata_text):
+                    env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
+                    _cli_eprint("Error: failed to write launch metadata sidecar: {metadata_path}")
+                    return 1
                 env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
                 if verbose:
                     _cli_eprint("[native-build] Build successful: {output}")
+                    _cli_eprint("[native-build] Launch metadata: {metadata_path}")
                 return 0
             case _:
                 env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
