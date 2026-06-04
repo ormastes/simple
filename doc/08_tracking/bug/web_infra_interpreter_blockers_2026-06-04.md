@@ -80,10 +80,27 @@ restaurant webapp infra test vehicle.
     - Result: **native-build produces a 655KB linked ELF binary** (99 files,
       0.4s compile, 11.8s link). Runtime segfaults from 717 stubbed symbols.
 
+13. **Runtime symbol coverage** — FIXED (2026-06-04)
+    - Added `src/runtime/runtime_sqlite.c`: 27 `rt_sqlite_*` functions wrapping
+      libsqlite3. Added `-lsqlite3` to Linux link config.
+    - Made inline asm compilation non-fatal for host-target builds.
+    - Best build command for webapp (entry-closure + full Rust runtime):
+      `native-build --source ... --source src/lib --entry main.spl
+       --runtime-bundle core-c-bootstrap --runtime-path src/compiler_rust/target/release`
+    - Result: 9.1MB binary, app prints "[RestaurantApp] Starting at http://localhost:3001",
+      passes module inits and WebApp.new(), crashes in WebApp.start() — codegen bug.
+
+14. **Codegen bug in WebApp.start()** — open
+    - Binary starts, prints startup message, crashes in WebApp.start()
+    - GDB: `mov 0x30(%rdi),%r10` segfaults — WebApp struct field access
+    - Likely a Cranelift codegen issue with struct layout or field offsets
+    - This is the final runtime blocker for serving HTTP
+
 ## Conclusion
 
-**Native build works!** Bugs 5-7, 9, 11, 12 all fixed. Entry-closure +
-weak-only stubs produce a linked ELF binary. Runtime needs more symbol coverage.
-**Interpreter path** still blocked by generics (3) + `?` operator (8).
+**Native build produces working binaries up to WebApp.start().** Bugs 5-7,
+9, 11, 12, 13 all fixed. Bug 14 (codegen in WebApp.start) is the last
+runtime blocker. The app initializes, creates the WebApp, mounts routes,
+and crashes when starting the HTTP listener.
 
-Next priority: runtime symbol coverage → (3) generics → (8) `?` typing.
+**Interpreter path** still blocked by generics (3) + `?` operator (8).
