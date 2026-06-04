@@ -4206,6 +4206,68 @@ decoded text, and invalid WASM validation result all agree in the
 browser-session path. The focused fetch/WASM chain spec now passes `84/84`;
 broader browser/WASM semantics remain open.
 
+BrowserSession TextEncoder nonzero-offset encodeInto continuation:
+
+Completion checklist:
+
+- [x] Continue from clean detached temp worktree
+  `/tmp/simple-gui-hardening-next36-clean` on pushed `main` after the earlier
+  `/tmp/simple-gui-hardening-next36` checkout showed unrelated staged changes.
+- [x] Leave the primary detached dirty checkout untouched.
+- [x] Confirm existing `TextEncoder.encodeInto` coverage exercises short
+  zero-offset destinations only.
+- [x] Confirm numeric typed-array property writes already route through
+  `byteOffset` to the backing `ArrayBuffer`.
+- [x] Add one browser-script scenario that writes through `base.subarray(2, 6)`.
+- [x] Verify `read` and `written` counts are bounded by the destination view
+  length.
+- [x] Verify encoded bytes appear in the view-relative destination.
+- [x] Verify backing storage guard bytes before and after the view remain
+  unchanged.
+- [x] Decode the written view bytes through `TextDecoder`.
+- [x] Reject the short view payload through `WebAssembly.validate`.
+- [x] Refresh generated scenario manual after executable spec changes.
+- [x] Run focused compile and focused fetch/WASM chain spec.
+- [x] Run adjacent browser/WASM and JS conformance checks.
+- [x] Run final layout, whitespace, file-count, and status gates.
+- [ ] Commit test/manual/plan update.
+- [ ] Push guarded main update after fetch/rebase/file-count safety check.
+- [ ] Commit and push sync-complete checklist update.
+
+Tests checklist:
+
+- [x] `TextEncoder.encodeInto("module", view)` writes only four bytes to a
+  four-byte nonzero-offset destination view.
+- [x] The view reports `byteOffset == 2` and `length == 4`.
+- [x] View bytes are `109,111,100,117`.
+- [x] Base bytes preserve guards: `1,2,...,7,8`.
+- [x] `TextDecoder.decode(view)` returns `modu`.
+- [x] `WebAssembly.validate(view)` returns `false`.
+- [x] Focused spec result recorded: fetch/WASM chain spec passed `249/249`
+  with `--timeout 240`.
+- [x] Adjacent spec results recorded: WASM host `107/107`, WebGPU JS/WASM
+  system `106/106`, Node API conformance `275/275`.
+
+Commands run:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout 240 --clean --force-rebuild --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout 240 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout 240 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout 240 --clean --format json`
+
+Generated manual evidence:
+
+- `doc/06_spec/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.md`
+  reports `Total scenarios | 249 |`.
+
+BrowserSession now proves `TextEncoder.encodeInto` writes through nonzero-offset
+`Uint8Array` views, preserves backing-storage guard bytes around the view,
+decodes the truncated view as `modu`, and rejects the short view payload through
+`WebAssembly.validate`. This is a coverage-only continuation; no runtime change
+was required.
+
 BrowserSession TextDecoder constructor option property continuation:
 
 Completion checklist:

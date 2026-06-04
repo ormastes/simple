@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 248 | 248 | 0 | 0 |
+| 249 | 249 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -13260,6 +13260,39 @@ match result:
 
 </details>
 
+#### writes TextEncoder encodeInto output through nonzero-offset Uint8Array views
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `4:4:2:4:109,111,100,117:1,2,109,111,100,117,7,8:modu:false`
+
+3. Err
+   - Expected: "unexpected nonzero-offset text encoder encodeInto js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var encoder = new TextEncoder(); var decoder = new TextDecoder(); var base = new Uint8Array(8); base[0] = 1; base[1] = 2; base[6] = 7; base[7] = 8; var view = base.subarray(2, 6); var written = encoder.encodeInto('module', view); written.read + ':' + written.written + ':' + view.byteOffset + ':' + view.length + ':' + view.toString() + ':' + base.toString() + ':' + decoder.decode(view) + ':' + WebAssembly.validate(view)")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("4:4:2:4:109,111,100,117:1,2,109,111,100,117,7,8:modu:false")
+    Err(err):
+        expect("unexpected nonzero-offset text encoder encodeInto js error: {err}").to_equal("")
+```
+
+</details>
+
 #### reports TextDecoder constructor option properties in browser scripts
 
 1. var session = BrowserSession new
@@ -13543,8 +13576,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 248 |
-| Active scenarios | 248 |
+| Total scenarios | 249 |
+| Active scenarios | 249 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
