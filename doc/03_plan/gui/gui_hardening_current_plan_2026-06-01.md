@@ -4231,9 +4231,9 @@ Completion checklist:
 - [x] Run adjacent browser/WASM and JS conformance checks.
 - [x] Run shared lib check because runtime source changed.
 - [x] Run final layout, whitespace, file-count, and status gates.
-- [ ] Commit runtime/test/manual/plan update.
-- [ ] Push guarded main update after fetch/rebase/file-count safety check.
-- [ ] Commit and push sync-complete checklist update.
+- [x] Commit runtime/test/manual/plan update.
+- [x] Push guarded main update after fetch/rebase/file-count safety check.
+- [x] Commit and push sync-complete checklist update.
 
 Tests checklist:
 
@@ -4269,6 +4269,9 @@ properties are observable, defaults remain false, `utf8` still normalizes to
 `utf-8`, and configured decoders still decode typed-array ASCII payloads. This
 does not claim full fatal decode exception semantics; that broader browser API
 parity remains open.
+
+Sync evidence: runtime commit `ed98be31cf` pushed to `main` after guarded
+fetch/rebase with file count stable at `78091`.
 
 BrowserSession invalid TextDecoder WASM validation continuation:
  
