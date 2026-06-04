@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 168 | 168 | 0 | 0 |
+| 169 | 169 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -2238,6 +2238,39 @@ match result:
         expect(_display_js(value)).to_equal("false:false:invalid-wasm-header:0:0")
     Err(err):
         expect("unexpected separator-only decorated wasm hex js error: {err}").to_equal("")
+```
+
+</details>
+
+#### routes separator-only decorated WebAssembly hex promise results through catch in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `compile:invalid:invalid-wasm-header:instantiate:invalid:invalid-wasm-header`
+
+3. Err
+   - Expected: "unexpected separator-only decorated wasm promise js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var out = ''; var decorated = '  \\t0x__ \\n\\r  '; WebAssembly.compile(decorated).catch(function(err) { out = 'compile:' + err.status + ':' + err.error; }); WebAssembly.instantiate(decorated).catch(function(err) { out = out + ':instantiate:' + err.status + ':' + err.error; }); out")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("compile:invalid:invalid-wasm-header:instantiate:invalid:invalid-wasm-header")
+    Err(err):
+        expect("unexpected separator-only decorated wasm promise js error: {err}").to_equal("")
 ```
 
 </details>
@@ -8094,8 +8127,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 168 |
-| Active scenarios | 168 |
+| Total scenarios | 169 |
+| Active scenarios | 169 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
