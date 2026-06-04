@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 240 | 240 | 0 | 0 |
+| 243 | 243 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -11544,6 +11544,72 @@ match result:
 
 </details>
 
+#### copies Uint8Array values with one replaced index without mutating source
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `9,4,3:1,2,3:false:false:0:3`
+
+3. Err
+   - Expected: "unexpected uint8 with js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var b = new Uint8Array(3); b[0] = 1; b[1] = 2; b[2] = 3; var copy = b.with(1, 260); copy[0] = 9; copy.toString() + ':' + b.toString() + ':' + (copy === b) + ':' + (copy.buffer === b.buffer) + ':' + copy.byteOffset + ':' + copy.byteLength")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("9,4,3:1,2,3:false:false:0:3")
+    Err(err):
+        expect("unexpected uint8 with js error: {err}").to_equal("")
+```
+
+</details>
+
+#### copies Uint8Array values with a negative replacement index
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `1,2,255:1,2,3:255`
+
+3. Err
+   - Expected: "unexpected uint8 negative with js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var b = new Uint8Array(3); b[0] = 1; b[1] = 2; b[2] = 3; var copy = b.with(-1, -1); copy.toString() + ':' + b.toString() + ':' + copy.at(-1)")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("1,2,255:1,2,3:255")
+    Err(err):
+        expect("unexpected uint8 negative with js error: {err}").to_equal("")
+```
+
+</details>
+
 #### dispatches Uint8Array prototype sort with call in browser scripts
 
 1. var session = BrowserSession new
@@ -11738,6 +11804,39 @@ match result:
         expect(_display_js(value)).to_equal("3,12,8,11,255:255,11,13,4,3:3,4,255,8,11:false:false:false:false")
     Err(err):
         expect("unexpected uint8 prototype toSorted dispatch js error: {err}").to_equal("")
+```
+
+</details>
+
+#### dispatches Uint8Array prototype with with call and apply
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `7,12,255,8:3,4,11,13:3,4,255,8:false:false:false:false`
+
+3. Err
+   - Expected: "unexpected uint8 prototype with dispatch js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var b = new Uint8Array(4); b[0] = 3; b[1] = 260; b[2] = -1; b[3] = 8; var callCopy = Uint8Array.prototype.with.call(b, 0, 7); var applyCopy = Uint8Array.prototype.with.apply(b, [-2, 11]); callCopy[1] = 12; applyCopy[3] = 13; callCopy.toString() + ':' + applyCopy.toString() + ':' + b.toString() + ':' + (callCopy === b) + ':' + (applyCopy === b) + ':' + (callCopy.buffer === b.buffer) + ':' + (applyCopy.buffer === b.buffer)")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("7,12,255,8:3,4,11,13:3,4,255,8:false:false:false:false")
+    Err(err):
+        expect("unexpected uint8 prototype with dispatch js error: {err}").to_equal("")
 ```
 
 </details>
@@ -13279,8 +13378,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 240 |
-| Active scenarios | 240 |
+| Total scenarios | 243 |
+| Active scenarios | 243 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

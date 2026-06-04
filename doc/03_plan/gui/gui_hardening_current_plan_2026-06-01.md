@@ -5709,6 +5709,67 @@ typed-array prototype parity and production GUI pixel parity remain open. Final
 sync guards passed with file count stable at `78091`, and the runtime/spec
 continuation was pushed to `origin/main` as `6718fa7d1c`.
 
+BrowserSession Uint8Array with continuation:
+
+Detailed completion checklist:
+
+- [x] Start from clean temp worktree `/tmp/simple-gui-hardening-next31` on
+  `main` at `origin/main`.
+- [x] Leave the primary detached dirty checkout untouched.
+- [x] Audit BrowserSession `Uint8Array` coverage and confirm copy-by-change
+  `toReversed` and `toSorted` are covered while `with` is absent.
+- [x] Add `NATIVE_UINT8_ARRAY_WITH` with an unused native id.
+- [x] Register `with` on constructed `Uint8Array` instances,
+  byte-array-created typed arrays, and `Uint8Array.prototype`.
+- [x] Route direct member calls through a copied replacement helper.
+- [x] Route prototype `call` and `apply` dispatch through the same helper.
+- [x] Return a new zero-offset `Uint8Array` with independent backing storage.
+- [x] Preserve source `Uint8Array` bytes after mutating returned copies.
+- [x] Preserve byte normalization in replacement output: `260 -> 4` and
+  `-1 -> 255`.
+- [x] Cover valid positive and negative replacement indexes.
+- [x] Run focused changed-file compiler checks.
+- [x] Run the focused BrowserSession fetch/WASM chain interpreter spec.
+- [x] Regenerate the mirrored SPipe scenario manual and move old-path docgen
+  output to `doc/06_spec/unit/...`.
+- [x] Run adjacent native WASM host regression.
+- [x] Run adjacent WebGPU JS/WASM browser-system regression.
+- [x] Run adjacent Node API conformance regression.
+- [x] Run required shared-runtime checks for `src/compiler`, `src/lib`, MCP, LSP,
+  and MCP stdio.
+- [x] Run final diff hygiene and executable-spec layout guards.
+- [ ] Commit only the `with` runtime/spec/manual/plan update.
+- [ ] Fetch/rebase with file-count guard and push `HEAD:main` with
+  `GITHUB_TOKEN` unset.
+
+Detailed test checklist:
+
+- [x] `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/interpreter_eval.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl src/lib/nogc_sync_mut/js/engine/runtime.spl test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl` - passed.
+- [x] `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --force-rebuild --format json` - `243/243` passed.
+- [x] `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec` - generated `243`-scenario manual with existing docgen stub warning.
+- [x] `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json` - `107/107` passed.
+- [x] `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json` - `106/106` passed.
+- [x] `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json` - `275/275` passed.
+- [x] `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/compiler` - passed with `14 warning(s)` across `2627 file(s)`.
+- [x] `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib` - passed with `405 warning(s)` across `5936 file(s)`.
+- [x] `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/app/mcp` - passed with the existing `2 warning(s)` profile across `27 file(s)`.
+- [x] `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/app/simple_lsp_mcp` - passed across `5 file(s)`.
+- [x] `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter` - `5/5` passed.
+- [x] `git diff --check` - passed with no output.
+- [x] `find doc/06_spec -name '*_spec.spl' | wc -l` - `0`.
+
+BrowserSession scripts now expose bounded `Uint8Array.prototype.with` for direct
+calls plus prototype `call`/`apply` dispatch. The implementation returns fresh
+zero-offset copied storage, preserves the source typed array after returned-copy
+mutation, supports positive and negative replacement indexes, and preserves
+normalized byte output. The focused fetch/WASM chain spec now passes `243/243`,
+and the generated manual records `Total scenarios | 243 |`. Adjacent and
+shared-runtime regressions passed at `107/107`, `106/106`, `275/275`, compiler
+`14 warning(s)` across `2627 file(s)`, lib `405 warning(s)` across
+`5936 file(s)`, MCP `2 warning(s)` across `27 file(s)`, LSP MCP `5 file(s)`,
+and MCP stdio `5/5`. Broader typed-array prototype parity and production GUI
+pixel parity remain open.
+
 BrowserSession Uint8Array prototype slice copied-buffer continuation:
 
 Detailed completion checklist:
