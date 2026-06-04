@@ -5199,6 +5199,73 @@ Test checklist:
 - `git diff --check`
 - `find doc/06_spec -name '*_spec.spl' | wc -l`
 
+BrowserSession Uint8Array constructor nonzero-offset copy continuation:
+
+Detailed completion checklist:
+
+- Confirm the fresh worktree starts from synchronized `main`/`origin/main`.
+- Confirm the prior nonzero-offset `Uint8Array.set` source/target scenario and
+  `228`-scenario generated manual are present.
+- Inspect `Uint8Array` constructor handling for indexed sources and
+  nonzero-offset typed-array views.
+- Fix indexed-source `Uint8Array` construction so copied arrays receive an
+  independent backing `ArrayBuffer` instead of only numeric properties.
+- Preserve the existing `new Uint8Array(buffer, offset, length)` shared-buffer
+  view behavior.
+- Add one BrowserSession browser-script scenario that creates a source
+  `Uint8Array`, obtains a nonzero-offset `subarray(...)` view, and constructs
+  `new Uint8Array(view)`.
+- Verify constructor copying reads bytes from the source view window rather than
+  source index zero.
+- Verify the constructed copy has `byteOffset=0`, a backing
+  `copy.buffer.byteLength` equal to the copied length, and a buffer distinct
+  from the source view buffer.
+- Verify writes to the constructed copy remain isolated from later writes
+  through the source view/base buffer.
+- Verify byte coercion still applies to copied values and later view writes.
+- Regenerate the mirrored SPipe scenario manual and move old-path docgen output
+  onto `doc/06_spec/unit/...`.
+- Restore generated index, tracking, and adjacent old-path manual noise.
+- Record focused and manual scenario counts after docgen.
+- Run the focused BrowserSession check and interpreter spec.
+- Run native WASM host, WebGPU JS/WASM, and Node API conformance regressions.
+- Run `src/lib` check, diff hygiene, and executable-spec layout guard.
+- Commit only the focused runtime fix, spec, generated manual, and plan
+  evidence.
+- Fetch/rebase with file-count guard and push `HEAD:main` with `GITHUB_TOKEN`
+  unset.
+
+Detailed test checklist:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/interpreter_native.spl`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+- `git diff --check`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+Result:
+
+BrowserSession scripts now prove `new Uint8Array(view)` copies bytes from a
+nonzero-offset source view into an independent zero-offset backing buffer. The
+runtime now allocates an `ArrayBuffer` for copied indexed-source `Uint8Array`
+construction and for byte-array-created typed arrays while preserving the
+existing shared `new Uint8Array(buffer, offset, length)` view path. The focused
+assertion verifies copied bytes come from the source view window rather than
+source index zero, `copy.buffer !== view.buffer`, `copy.byteOffset == 0`,
+`copy.buffer.byteLength == 3`, `new Uint8Array(copy.buffer)` reads the copied
+bytes, copied writes remain isolated from later source view/base-buffer writes,
+and Uint8 coercion is preserved. The focused fetch/WASM chain spec now passes
+`229/229`, and the generated manual records `Total scenarios | 229 |`. The
+native WASM host spec remained `107/107`, the WebGPU JS/WASM system spec
+remained `106/106`, Node API conformance remained `275/275`, and `src/lib`
+completed with the current `405 warning(s)` across `5936` files. Broader
+browser/WASM semantics remain open.
+
 BrowserSession Uint8Array nonzero-offset set source/target continuation:
 
 Detailed completion checklist:
