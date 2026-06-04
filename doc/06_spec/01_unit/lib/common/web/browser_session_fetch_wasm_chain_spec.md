@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 176 | 176 | 0 | 0 |
+| 177 | 177 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -2766,6 +2766,39 @@ match result:
         expect(_display_js(value)).to_equal("1:27:1:env:foo:function")
     Err(err):
         expect("unexpected compiled import descriptor js error: {err}").to_equal("")
+```
+
+</details>
+
+#### compares compiled and instantiated WebAssembly module import descriptors in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `compile:1:27:1:env:foo:function:instantiate:instantiated:1:27:1:env:foo:funct... (full value in folded executable source)`
+
+3. Err
+   - Expected: "unexpected combined import descriptor js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var out = ''; var wasm = '0061736d01000000010401600000020b0103656e7603666f6f0000'; var imports = { env: { foo: function() { return 7; } } }; WebAssembly.compile(wasm).then(function(module) { var descriptors = WebAssembly.Module.imports(module); out = 'compile:' + module.importCount + ':' + module.byteLength + ':' + descriptors.length + ':' + descriptors[0].module + ':' + descriptors[0].name + ':' + descriptors[0].kind; }); WebAssembly.instantiate(wasm, imports).then(function(result) { var descriptors = WebAssembly.Module.imports(result.module); out = out + ':instantiate:' + result.status + ':' + result.module.importCount + ':' + result.module.byteLength + ':' + descriptors.length + ':' + descriptors[0].module + ':' + descriptors[0].name + ':' + descriptors[0].kind + ':' + typeof result.instance.exports; }); out")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("compile:1:27:1:env:foo:function:instantiate:instantiated:1:27:1:env:foo:function:object")
+    Err(err):
+        expect("unexpected combined import descriptor js error: {err}").to_equal("")
 ```
 
 </details>
@@ -8358,8 +8391,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 176 |
-| Active scenarios | 176 |
+| Total scenarios | 177 |
+| Active scenarios | 177 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
