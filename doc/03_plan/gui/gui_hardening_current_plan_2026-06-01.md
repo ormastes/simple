@@ -8625,3 +8625,24 @@ Detailed test checklist:
 - `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
 - `git diff --check`
 - `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+Result:
+
+BrowserSession scripts already compare raw compileStreaming module import
+descriptors and compileStreaming-instantiated module import descriptors in the
+same script evaluation. The executable scenario verifies two real fetch
+boundaries, an initially empty `out`, ordered output after committing the first
+`application/wasm` response, and a deterministic final output after committing
+the second response. The raw compileStreaming side reports import count `1`,
+byte length `27`, one descriptor, and descriptor fields `env:foo:function`; the
+compileStreaming-instantiated side reports `status=instantiated`, import count
+`1`, byte length `27`, one descriptor, matching descriptor fields, and
+`typeof result.instance.exports == object`. Current manual evidence records
+this scenario under "compares compileStreaming module and compileStreaming
+instantiated import descriptors in browser scripts" and the generated manual now
+records `Total scenarios | 229 |`. Fresh verification for this plan-evidence
+closure kept the focused fetch/WASM chain spec at `229/229`, native WASM host at
+`107/107`, WebGPU JS/WASM at `106/106`, Node API conformance at `275/275`, and
+`src/lib` at the current `405 warning(s)` across `5936` files. Diff hygiene and
+the executable-spec layout guard also passed. Broader browser/WASM semantics
+remain open.
