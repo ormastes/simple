@@ -9023,8 +9023,8 @@ Detailed completion checklist:
 - [x] Run adjacent WebGPU JS/WASM browser-system regression.
 - [x] Run adjacent Node API conformance regression.
 - [x] Run final diff hygiene and executable-spec layout guards.
-- [ ] Commit only the edge-range spec/manual/plan/bug-note update.
-- [ ] Fetch/rebase with file-count guard and push `HEAD:main` with
+- [x] Commit only the edge-range spec/manual/plan/bug-note update.
+- [x] Fetch/rebase with file-count guard and push `HEAD:main` with
   `GITHUB_TOKEN` unset.
 
 Detailed test checklist:
@@ -9046,5 +9046,6 @@ and remain independent after copied-result and source mutations. The focused
 fetch/WASM chain spec now passes `235/235`, and the generated manual records
 `Total scenarios | 235 |`. Adjacent native WASM host, WebGPU JS/WASM, and Node
 API conformance regressions passed at `107/107`, `106/106`, and `275/275`.
-Final sync guards are in progress for this continuation. Broader typed-array
-prototype parity and production GUI pixel parity remain open.
+Final sync guards passed with file count stable at `78091`, and the edge-range
+continuation was pushed to `origin/main`. Broader typed-array prototype parity
+and production GUI pixel parity remain open.
