@@ -27,7 +27,7 @@ restaurant_webapp_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 27 | 27 | 0 | 0 |
+| 43 | 43 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -699,6 +699,391 @@ Then_file_contains("examples/06_io/restaurant_webapp/models/condition.spl", "tru
 
 </details>
 
+### Restaurant Payment Gateway
+
+#### Payment model has DbCodec with card_last_four and transaction_id
+
+1. Then file contains
+
+2. Then file contains
+
+3. Then file contains
+
+4. Then file contains
+
+5. Then file contains
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+Then_file_contains("examples/06_io/restaurant_webapp/models/payment.spl", "class Payment")
+Then_file_contains("examples/06_io/restaurant_webapp/models/payment.spl", "card_last_four")
+Then_file_contains("examples/06_io/restaurant_webapp/models/payment.spl", "transaction_id")
+Then_file_contains("examples/06_io/restaurant_webapp/models/payment.spl", "fn encode")
+Then_file_contains("examples/06_io/restaurant_webapp/models/payment.spl", "fn decode")
+```
+
+</details>
+
+#### mock gateway charges cards starting with 4 and rejects others
+
+1. Then file contains
+
+2. Then file contains
+
+3. Then file contains
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+Then_file_contains("examples/06_io/restaurant_webapp/models/payment.spl", "fn mock_gateway_charge")
+Then_file_contains("examples/06_io/restaurant_webapp/models/payment.spl", "mock_txn_")
+Then_file_contains("examples/06_io/restaurant_webapp/models/payment.spl", "Card declined")
+```
+
+</details>
+
+#### supports three payment methods: desk_credit, gate_pay, store_checkout
+
+1. Then file contains
+
+2. Then file contains
+
+3. Then file contains
+
+4. Then file contains
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+Then_file_contains("examples/06_io/restaurant_webapp/models/payment.spl", "desk_credit")
+Then_file_contains("examples/06_io/restaurant_webapp/models/payment.spl", "gate_pay")
+Then_file_contains("examples/06_io/restaurant_webapp/models/payment.spl", "store_checkout")
+Then_file_contains("examples/06_io/restaurant_webapp/models/payment.spl", "fn is_valid_payment_method")
+```
+
+</details>
+
+#### PaymentController has desk-pay, gate-pay, and store-checkout flows
+
+1. Then file contains
+
+2. Then file contains
+
+3. Then file contains
+
+4. Then file contains
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+Then_file_contains("examples/06_io/restaurant_webapp/controllers/payment_controller.spl", "action_desk_pay")
+Then_file_contains("examples/06_io/restaurant_webapp/controllers/payment_controller.spl", "action_gate_pay")
+Then_file_contains("examples/06_io/restaurant_webapp/controllers/payment_controller.spl", "action_store_checkout")
+Then_file_contains("examples/06_io/restaurant_webapp/controllers/payment_controller.spl", "mock_gateway_charge")
+```
+
+</details>
+
+#### PaymentController sends receipt emails after payment
+
+1. Then file contains
+
+2. Then file contains
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+Then_file_contains("examples/06_io/restaurant_webapp/controllers/payment_controller.spl", "build_payment_receipt_email")
+Then_file_contains("examples/06_io/restaurant_webapp/controllers/payment_controller.spl", "send_notification")
+```
+
+</details>
+
+#### routes include desk-pay, gate-pay, and store checkout
+
+1. Then file contains
+
+2. Then file contains
+
+3. Then file contains
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+Then_file_contains("examples/06_io/restaurant_webapp/routes.sdn", "/admin/orders/:order_id/desk-pay")
+Then_file_contains("examples/06_io/restaurant_webapp/routes.sdn", "/admin/orders/:order_id/gate-pay")
+Then_file_contains("examples/06_io/restaurant_webapp/routes.sdn", "/checkout/:order_id")
+```
+
+</details>
+
+#### payment views have credit card forms with CSRF
+
+1. Then file contains
+
+2. Then file contains
+
+3. Then file contains
+
+4. Then file contains
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+Then_file_contains("examples/06_io/restaurant_webapp/views/payment/desk_pay.html", "card_number")
+Then_file_contains("examples/06_io/restaurant_webapp/views/payment/desk_pay.html", "csrf_token")
+Then_file_contains("examples/06_io/restaurant_webapp/views/payment/gate_pay.html", "card_number")
+Then_file_contains("examples/06_io/restaurant_webapp/views/payment/store_checkout.html", "card_number")
+```
+
+</details>
+
+### Restaurant Delivery
+
+#### DeliveryRequest model has address, phone, email, status
+
+1. Then file contains
+
+2. Then file contains
+
+3. Then file contains
+
+4. Then file contains
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+Then_file_contains("examples/06_io/restaurant_webapp/models/delivery.spl", "class DeliveryRequest")
+Then_file_contains("examples/06_io/restaurant_webapp/models/delivery.spl", "customer_name")
+Then_file_contains("examples/06_io/restaurant_webapp/models/delivery.spl", "address")
+Then_file_contains("examples/06_io/restaurant_webapp/models/delivery.spl", "estimated_time")
+```
+
+</details>
+
+#### DeliveryController has customer request and admin management
+
+1. Then file contains
+
+2. Then file contains
+
+3. Then file contains
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+Then_file_contains("examples/06_io/restaurant_webapp/controllers/delivery_controller.spl", "action_request_delivery")
+Then_file_contains("examples/06_io/restaurant_webapp/controllers/delivery_controller.spl", "action_update_status")
+Then_file_contains("examples/06_io/restaurant_webapp/controllers/delivery_controller.spl", "find_pending_deliveries")
+```
+
+</details>
+
+#### delivery sends confirmation email to customer
+
+1. Then file contains
+
+2. Then file contains
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+Then_file_contains("examples/06_io/restaurant_webapp/controllers/delivery_controller.spl", "build_delivery_confirmation_email")
+Then_file_contains("examples/06_io/restaurant_webapp/controllers/delivery_controller.spl", "send_notification")
+```
+
+</details>
+
+#### routes include customer delivery request and admin management
+
+1. Then file contains
+
+2. Then file contains
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+Then_file_contains("examples/06_io/restaurant_webapp/routes.sdn", "/delivery/:order_id/request")
+Then_file_contains("examples/06_io/restaurant_webapp/routes.sdn", "/admin/deliveries")
+```
+
+</details>
+
+### Restaurant Email Service
+
+#### email service builds order confirmation, status update, delivery, and receipt emails
+
+1. Then file contains
+
+2. Then file contains
+
+3. Then file contains
+
+4. Then file contains
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+Then_file_contains("examples/06_io/restaurant_webapp/services/email_service.spl", "build_order_confirmation_email")
+Then_file_contains("examples/06_io/restaurant_webapp/services/email_service.spl", "build_order_status_email")
+Then_file_contains("examples/06_io/restaurant_webapp/services/email_service.spl", "build_delivery_confirmation_email")
+Then_file_contains("examples/06_io/restaurant_webapp/services/email_service.spl", "build_payment_receipt_email")
+```
+
+</details>
+
+#### email bodies contain HTML with order details
+
+1. Then file contains
+
+2. Then file contains
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+Then_file_contains("examples/06_io/restaurant_webapp/services/email_service.spl", "<html>")
+Then_file_contains("examples/06_io/restaurant_webapp/services/email_service.spl", "format_price")
+```
+
+</details>
+
+#### send_notification logs in test mode
+
+1. Then file contains
+
+2. Then file contains
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+Then_file_contains("examples/06_io/restaurant_webapp/services/email_service.spl", "fn send_notification")
+Then_file_contains("examples/06_io/restaurant_webapp/services/email_service.spl", "[EMAIL]")
+```
+
+</details>
+
+### Restaurant Migrations Payment and Delivery
+
+#### defines payments table with card and transaction fields
+
+1. Then file contains
+
+2. Then file contains
+
+3. Then file contains
+
+4. Then file contains
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+Then_file_contains("examples/06_io/restaurant_webapp/db/migrations.spl", "payments")
+Then_file_contains("examples/06_io/restaurant_webapp/db/migrations.spl", "card_last_four")
+Then_file_contains("examples/06_io/restaurant_webapp/db/migrations.spl", "transaction_id")
+Then_file_contains("examples/06_io/restaurant_webapp/db/migrations.spl", "gateway_response")
+```
+
+</details>
+
+#### defines delivery_requests table with address and status
+
+1. Then file contains
+
+2. Then file contains
+
+3. Then file contains
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+Then_file_contains("examples/06_io/restaurant_webapp/db/migrations.spl", "delivery_requests")
+Then_file_contains("examples/06_io/restaurant_webapp/db/migrations.spl", "customer_email")
+Then_file_contains("examples/06_io/restaurant_webapp/db/migrations.spl", "estimated_time")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -718,13 +1103,17 @@ Tests covering:
 - Restaurant Controllers Web Framework
 - Restaurant Views Template SSR
 - Restaurant Webapp Edge Cases
+- Restaurant Payment Gateway
+- Restaurant Delivery
+- Restaurant Email Service
+- Restaurant Migrations Payment and Delivery
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 27 |
-| Active scenarios | 27 |
+| Total scenarios | 43 |
+| Active scenarios | 43 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -1,0 +1,110 @@
+use std.spec
+use std.io_runtime
+
+enum CircuitState:
+    Closed
+    Open
+    HalfOpen
+
+struct CircuitBreaker:
+    val connector_name: text
+    val state: CircuitState
+    val failure_count: int
+    val failure_threshold: int
+    val success_count: int
+    val success_threshold: int
+    val last_failure_time: int
+
+fn new_circuit_breaker(connector_name: text, failure_threshold: int, success_threshold: int) -> CircuitBreaker:
+    return CircuitBreaker { connector_name: connector_name, state: CircuitState.Closed, failure_count: 0, failure_threshold: failure_threshold, success_count: 0, success_threshold: success_threshold, last_failure_time: 0 }
+
+fn circuit_allow_request(cb: CircuitBreaker) -> bool:
+    if cb.state == CircuitState.Closed: return true
+    if cb.state == CircuitState.HalfOpen: return true
+    return false
+
+fn circuit_record_success(cb: CircuitBreaker) -> CircuitBreaker:
+    if cb.state == CircuitState.HalfOpen:
+        val new_success = cb.success_count + 1
+        if new_success >= cb.success_threshold:
+            return CircuitBreaker { connector_name: cb.connector_name, state: CircuitState.Closed, failure_count: 0, failure_threshold: cb.failure_threshold, success_count: 0, success_threshold: cb.success_threshold, last_failure_time: 0 }
+        return CircuitBreaker { connector_name: cb.connector_name, state: CircuitState.HalfOpen, failure_count: cb.failure_count, failure_threshold: cb.failure_threshold, success_count: new_success, success_threshold: cb.success_threshold, last_failure_time: cb.last_failure_time }
+    return CircuitBreaker { connector_name: cb.connector_name, state: cb.state, failure_count: 0, failure_threshold: cb.failure_threshold, success_count: 0, success_threshold: cb.success_threshold, last_failure_time: 0 }
+
+fn circuit_record_failure(cb: CircuitBreaker, timestamp: int) -> CircuitBreaker:
+    val new_failures = cb.failure_count + 1
+    if new_failures >= cb.failure_threshold:
+        return CircuitBreaker { connector_name: cb.connector_name, state: CircuitState.Open, failure_count: new_failures, failure_threshold: cb.failure_threshold, success_count: 0, success_threshold: cb.success_threshold, last_failure_time: timestamp }
+    return CircuitBreaker { connector_name: cb.connector_name, state: cb.state, failure_count: new_failures, failure_threshold: cb.failure_threshold, success_count: cb.success_count, success_threshold: cb.success_threshold, last_failure_time: timestamp }
+
+fn circuit_try_half_open(cb: CircuitBreaker, current_time: int, cooldown_seconds: int) -> CircuitBreaker:
+    if cb.state != CircuitState.Open: return cb
+    val elapsed = current_time - cb.last_failure_time
+    if elapsed >= cooldown_seconds:
+        return CircuitBreaker { connector_name: cb.connector_name, state: CircuitState.HalfOpen, failure_count: cb.failure_count, failure_threshold: cb.failure_threshold, success_count: 0, success_threshold: cb.success_threshold, last_failure_time: cb.last_failure_time }
+    return cb
+
+describe "Circuit breaker — gateway failure protection":
+
+    describe "initial state":
+        it "starts in Closed state":
+            val cb = new_circuit_breaker("stripe", 3, 2)
+            expect cb.state == CircuitState.Closed
+
+        it "allows requests when closed":
+            val cb = new_circuit_breaker("stripe", 3, 2)
+            expect circuit_allow_request(cb) == true
+
+    describe "trip to Open":
+        it "stays Closed below failure threshold":
+            var cb = new_circuit_breaker("stripe", 3, 2)
+            cb = circuit_record_failure(cb, 100)
+            cb = circuit_record_failure(cb, 101)
+            expect cb.state == CircuitState.Closed
+            expect cb.failure_count == 2
+
+        it "opens after reaching failure threshold":
+            var cb = new_circuit_breaker("stripe", 3, 2)
+            cb = circuit_record_failure(cb, 100)
+            cb = circuit_record_failure(cb, 101)
+            cb = circuit_record_failure(cb, 102)
+            expect cb.state == CircuitState.Open
+            expect circuit_allow_request(cb) == false
+
+    describe "recovery to HalfOpen":
+        it "transitions to HalfOpen after cooldown":
+            var cb = new_circuit_breaker("paypal", 2, 2)
+            cb = circuit_record_failure(cb, 100)
+            cb = circuit_record_failure(cb, 101)
+            expect cb.state == CircuitState.Open
+            cb = circuit_try_half_open(cb, 200, 60)
+            expect cb.state == CircuitState.HalfOpen
+            expect circuit_allow_request(cb) == true
+
+        it "stays Open before cooldown expires":
+            var cb = new_circuit_breaker("paypal", 2, 2)
+            cb = circuit_record_failure(cb, 100)
+            cb = circuit_record_failure(cb, 101)
+            cb = circuit_try_half_open(cb, 130, 60)
+            expect cb.state == CircuitState.Open
+
+    describe "HalfOpen to Closed":
+        it "closes after enough successes in HalfOpen":
+            var cb = new_circuit_breaker("btcpay", 2, 2)
+            cb = circuit_record_failure(cb, 100)
+            cb = circuit_record_failure(cb, 101)
+            cb = circuit_try_half_open(cb, 200, 60)
+            expect cb.state == CircuitState.HalfOpen
+            cb = circuit_record_success(cb)
+            expect cb.state == CircuitState.HalfOpen
+            cb = circuit_record_success(cb)
+            expect cb.state == CircuitState.Closed
+
+        it "resets failure count on close":
+            var cb = new_circuit_breaker("local", 2, 1)
+            cb = circuit_record_failure(cb, 100)
+            cb = circuit_record_failure(cb, 101)
+            cb = circuit_try_half_open(cb, 200, 60)
+            cb = circuit_record_success(cb)
+            expect cb.state == CircuitState.Closed
+            expect cb.failure_count == 0

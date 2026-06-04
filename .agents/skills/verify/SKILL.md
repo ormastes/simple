@@ -52,6 +52,10 @@ not create, rewrite, or weaken SPipe after verification.
 
 ### 4. NFR
 - Performance benchmarks exist
+- For `simple run` script-startup changes, require evidence from
+  `test/02_integration/app/startup_argparse_mmap_perf_spec.spl` and confirm CLI
+  argument scripts still avoid unnecessary compile/JIT startup unless
+  `SIMPLE_EXECUTION_MODE` is explicitly set.
 - Security: input validation, no secrets
 - Reliability: error handling paths
 - Core/MCP regression gate for compiler/core/lib or MCP/LSP changes:

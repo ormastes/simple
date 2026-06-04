@@ -159,5 +159,9 @@ STATUS: FAIL (2 failures, 1 warning)
 - Audit hot request paths for repeated full scans, repeated file rereads, and per-request subprocesses; flag uncached patterns as FAIL or WARN based on impact
 - Verify cache invalidation exists for write flows that affect cached or indexed data
 - Require startup and representative request performance evidence for performance-sensitive tooling changes
+- For `simple run` script-startup changes, require evidence from
+  `test/02_integration/app/startup_argparse_mmap_perf_spec.spl` and confirm CLI
+  argument scripts still avoid unnecessary compile/JIT startup unless
+  `SIMPLE_EXECUTION_MODE` is explicitly set.
 - Do not mark STATUS: PASS for compiler/core/lib or MCP/LSP work unless the matching runtime and MCP smoke checks passed
 - Do not mark short grammar verification PASS when docs list a counterpart but executable tests only cover a longer equivalent form.

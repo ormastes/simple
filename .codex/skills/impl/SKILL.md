@@ -144,5 +144,9 @@ Before declaring implementation complete, verify:
 - Do not place full-tree scans or repeated file rereads in request handlers when a cache or index is viable
 - When cached or indexed data depends on writable files, implement explicit invalidation on create, edit, move, delete, rename, template application, and bulk replace flows
 - Add perf smoke coverage for startup and representative hot requests when changing performance-sensitive tooling
+- For `simple run` script-startup work, preserve the driver fast path for `.shs`,
+  `get_cli_args`, and `std.cli` scripts; verify
+  `test/02_integration/app/startup_argparse_mmap_perf_spec.spl` before claiming
+  completion.
 - After compiler/core/lib changes, verify MCP/LSP source-native startup before finishing the task; after packaging/release changes, verify isolated npm install startup too
 - Short grammar is preferred where it is proven and readable; never normalize a failing compact form into a long workaround without either fixing it or recording a concrete bug/report.

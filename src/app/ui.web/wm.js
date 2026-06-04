@@ -11973,9 +11973,32 @@ class SimpleWindowManager {
     const preview = document.createElement('div');
     preview.className = 'wm-snap-preview';
     preview.setAttribute('aria-hidden', 'true');
+    const content = document.createElement('div');
+    content.className = 'wm-snap-preview-content';
+    const label = document.createElement('strong');
+    label.className = 'wm-snap-preview-label';
+    content.appendChild(label);
+    const hint = document.createElement('span');
+    hint.className = 'wm-snap-preview-hint';
+    content.appendChild(hint);
+    preview.appendChild(content);
     this.desktop.appendChild(preview);
     this._snapPreview = preview;
     return preview;
+  }
+
+  _snapZoneLabel(zone) {
+    if (zone === 'left') return 'Snap left';
+    if (zone === 'right') return 'Snap right';
+    if (zone === 'full') return 'Fill workspace';
+    return 'Snap layout';
+  }
+
+  _snapZoneHint(zone) {
+    if (zone === 'left') return 'Release or press Left';
+    if (zone === 'right') return 'Release or press Right';
+    if (zone === 'full') return 'Release or press Up';
+    return 'Release to snap';
   }
 
   _detectSnapZone(e) {
@@ -12016,6 +12039,10 @@ class SimpleWindowManager {
     preview.style.top = `${rect.y}px`;
     preview.style.width = `${rect.w}px`;
     preview.style.height = `${rect.h}px`;
+    const label = preview.querySelector('.wm-snap-preview-label');
+    if (label) label.textContent = this._snapZoneLabel(zone);
+    const hint = preview.querySelector('.wm-snap-preview-hint');
+    if (hint) hint.textContent = this._snapZoneHint(zone);
     preview.classList.add('active');
     this._lastSnapZone = zone;
   }

@@ -196,6 +196,21 @@ Simple extends Clean Architecture with dimensions:
 | Generics | 0% (monomorphization) |
 | GC allocation | 5-10% (generational GC) |
 
+### Script Startup Performance
+
+The `simple run` driver keeps script startup competitive by selecting the
+interpreter for script-shaped workloads that are cheaper to run directly than to
+compile first. Files ending in `.shs` and scripts that use CLI argument helpers
+such as `get_cli_args` or `std.cli` should prefer interpreter execution unless
+`SIMPLE_EXECUTION_MODE` is explicitly set.
+
+When changing this path, verify both behavior and speed with the startup/mmap
+performance spec:
+
+```bash
+SIMPLE_LIB=src bin/simple test test/02_integration/app/startup_argparse_mmap_perf_spec.spl --mode=interpreter --clean
+```
+
 ---
 
 ## Platform Support
