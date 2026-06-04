@@ -5141,3 +5141,41 @@ metadata remains `wasm32`. The focused fetch/WASM chain spec now passes
 system spec remained `106/106`, Node API conformance remained `275/275`, and
 `src/lib` completed with the existing `447 warning(s)`. Broader browser/WASM
 semantics remain open.
+
+BrowserSession WebAssembly control-whitespace decorated-hex normalization continuation:
+
+Completion checklist:
+
+- Add a BrowserSession browser-script scenario that embeds newline, tab, and
+  carriage-return separators inside a decorated WASM hex payload.
+- Verify the whitespace-decorated payload is accepted by
+  `WebAssembly.validate(...)`.
+- Verify `new WebAssembly.Module(...)` receives the normalized bytes and marks
+  the module valid.
+- Verify normalized metadata stays stable: byte length `8`, section count `0`,
+  and target `wasm32`.
+- Regenerate the mirrored scenario manual for the changed SPipe spec.
+- Restore generated index/manual noise from docgen and adjacent specs.
+- Record command evidence, pass counts, warning count, and remaining open scope.
+- Run diff hygiene and doc layout gates before committing and pushing.
+
+Test checklist:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+
+BrowserSession scripts now pass a decorated WASM hex payload containing
+newline, tab, and carriage-return separators through
+`WebAssembly.validate(...)` and `new WebAssembly.Module(...)`. The focused
+assertion verifies the control whitespace is stripped during normalization, the
+payload validates, the module is marked valid, byte length remains `8`, section
+count remains `0`, and target metadata remains `wasm32`. The focused
+fetch/WASM chain spec now passes `161/161`; the native WASM host spec remained
+`107/107`, the WebGPU JS/WASM system spec remained `106/106`, Node API
+conformance remained `275/275`, and `src/lib` completed with the existing
+`447 warning(s)`. Broader browser/WASM semantics remain open.
