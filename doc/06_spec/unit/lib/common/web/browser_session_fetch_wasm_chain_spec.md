@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 155 | 155 | 0 | 0 |
+| 156 | 156 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1974,6 +1974,39 @@ match result:
         expect(_display_js(value)).to_equal("invalid:invalid-wasm-header:invalid:unsupported-wasm-imports:instantiated:8")
     Err(err):
         expect("unexpected wasm instantiate catch js error: {err}").to_equal("")
+```
+
+</details>
+
+#### routes truncated WebAssembly section results through catch in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `compileSection:invalid:invalid-wasm-section:instantiateSection:invalid:invali... (full value in folded executable source)`
+
+3. Err
+   - Expected: "unexpected wasm truncated section catch js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var out = ''; WebAssembly.compile('0061736d010000000105').catch(function(err) { out = 'compileSection:' + err.status + ':' + err.error; }); WebAssembly.instantiate('0061736d010000000105').catch(function(err) { out = out + ':instantiateSection:' + err.status + ':' + err.error; }); out")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("compileSection:invalid:invalid-wasm-section:instantiateSection:invalid:invalid-wasm-section")
+    Err(err):
+        expect("unexpected wasm truncated section catch js error: {err}").to_equal("")
 ```
 
 </details>
@@ -7572,8 +7605,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 155 |
-| Active scenarios | 155 |
+| Total scenarios | 156 |
+| Active scenarios | 156 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

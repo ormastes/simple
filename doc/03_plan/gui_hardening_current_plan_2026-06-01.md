@@ -1116,6 +1116,22 @@ The generated scenario manual was refreshed with the existing docgen warning
 profile. Broader WASM semantics, typed-array prototype parity, and production
 GUI pixel parity remain open.
 
+BrowserSession WebAssembly truncated-section rejection continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession scripts now pass a valid-header/truncated-section payload
+through both `WebAssembly.compile(...)` and `WebAssembly.instantiate(...)`.
+The focused assertion verifies both promise `catch` callbacks receive
+`status=invalid` and `error=invalid-wasm-section`, proving section-level
+validation errors propagate through the non-streaming async rejection path. The
+focused fetch/WASM chain spec now passes `156/156`; the native WASM host spec
+remained `107/107`, the WebGPU JS/WASM system spec remained `106/106`, Node API
+conformance remained `275/275`, and `src/lib` completed with the existing
+`447 warning(s)`. Broader browser/WASM semantics remain open.
+
 Production Chrome exact-policy fail-closed continuation:
 
 - `jj git fetch`
