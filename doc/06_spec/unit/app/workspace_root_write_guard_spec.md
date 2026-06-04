@@ -122,7 +122,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = read_file("scripts/check-repo-hygiene.shs")
+val source = read_file("scripts/check/check-repo-hygiene.shs")
 expect(source.contains("check-workspace-root-guard.shs audit --staged")).to_equal(true)
 ```
 

@@ -12,11 +12,11 @@ The change stays inside existing build boundaries.
 
 ## Release Package Layer
 
-`.github/workflows/release.yml` continues to build native MCP/LSP binaries with the bootstrap runtime, but passes `--strip` and then calls `scripts/check-executable-size-budgets.shs` on package outputs.
+`.github/workflows/release.yml` continues to build native MCP/LSP binaries with the bootstrap runtime, but passes `--strip` and then calls `scripts/check/check-executable-size-budgets.shs` on package outputs.
 
 ## Guardrail Layer
 
-`scripts/check-executable-size-budgets.shs` owns byte budgets and release-strip checks. Budgets are configurable through environment variables so release maintainers can adjust thresholds without editing workflow logic.
+`scripts/check/check-executable-size-budgets.shs` owns byte budgets and release-strip checks. Budgets are configurable through environment variables so release maintainers can adjust thresholds without editing workflow logic.
 
 ## Loader ABI Layer
 
@@ -30,7 +30,7 @@ This keeps the primary architecture seam narrow:
 
 ## Loader Dependency Guardrails
 
-`scripts/check-loader-dependency-closure.shs` is the regression guard for the loader startup path. It checks direct-dependency allowlists for `simple-loader`, `simple-native-loader`, `simple-common`, and `simple-native-all`, then walks the `simple-native-loader` normal dependency tree and fails if `simple-runtime` reappears there.
+`scripts/check/check-loader-dependency-closure.shs` is the regression guard for the loader startup path. It checks direct-dependency allowlists for `simple-loader`, `simple-native-loader`, `simple-common`, and `simple-native-all`, then walks the `simple-native-loader` normal dependency tree and fails if `simple-runtime` reappears there.
 
 ## Native Binary Root Layer
 

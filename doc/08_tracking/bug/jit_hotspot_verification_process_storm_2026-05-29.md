@@ -50,7 +50,7 @@ Do not run these on a loaded host until a process-count guard is in place:
 bin/simple test test/unit/compiler/interpreter/tiered_jit_hotspot_spec.spl --mode=interpreter --clean
 bin/simple test test/unit/compiler/mir_opt/general_patterns_backend_recommendation_spec.spl --mode=interpreter --clean
 bin/simple test test/system/infra/heavy_work_preflight_spec.spl
-scripts/check-web-baremetal-size-audit.shs
+scripts/check/check-web-baremetal-size-audit.shs
 ```
 
 ## Resolution Criteria

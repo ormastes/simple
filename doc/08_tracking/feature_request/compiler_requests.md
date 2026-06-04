@@ -654,9 +654,9 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
     `test/unit/compiler/loader/module_loader_spec.spl`,
     `test/unit/compiler/loader/module_loader_crash_fix_spec.spl`
   - smoke gates:
-    `sh scripts/check-core-runtime-smoke.shs src/compiler_rust/target/release/simple`
+    `sh scripts/check/check-core-runtime-smoke.shs src/compiler_rust/target/release/simple`
     and
-    `SIMPLE_BINARY=src/compiler_rust/target/release/simple sh scripts/check-mcp-native-smoke.shs`
+    `SIMPLE_BINARY=src/compiler_rust/target/release/simple sh scripts/check/check-mcp-native-smoke.shs`
 
   Remaining decision after the 2026-04-27 review pass:
   - do not share reload orchestration next, because the compatibility loader is

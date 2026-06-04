@@ -78,7 +78,7 @@ When asked to check BSD/FreeBSD bootstrap from a Linux host, do **not** stop at
 FreeBSD". The canonical automated entrypoint is:
 
 ```bash
-sh scripts/check-freebsd-bootstrap-qemu.shs --smoke
+sh scripts/check/check-freebsd-bootstrap-qemu.shs --smoke
 ```
 
 Use `--full` for the repeated bootstrap verification pass. The wrapper creates

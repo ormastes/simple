@@ -30,7 +30,7 @@ Release packaging in `.github/workflows/release.yml` builds native MCP and LSP p
 
 - ELF native-build runtime linking now retains only symbols derived from generated object undefined references plus explicit runtime lifecycle/string/dispatch roots. `SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE=1` preserves the old behavior for diagnostics.
 - Release package MCP and LSP native-build steps pass `--strip`.
-- `scripts/check-executable-size-budgets.shs` checks budgets for CLI, MCP, LSP, native executables, and `libsimple_runtime.a`.
+- `scripts/check/check-executable-size-budgets.shs` checks budgets for CLI, MCP, LSP, native executables, and `libsimple_runtime.a`.
 
 ## Loader Dependency Closure Follow-On
 
@@ -61,7 +61,7 @@ Measured locally from the current workspace after the loader-closure implementat
 - Added `simple-runtime-abi` as the dedicated owner of `AbiVersion`, `RuntimeSymbolProvider`, `RUNTIME_SYMBOL_NAMES`, and static symbol registration.
 - `simple-native-loader` now depends on `simple-runtime-abi` instead of `simple-runtime`.
 - `simple-runtime` now generates and registers its static symbol table through the ABI crate during build/runtime initialization.
-- `scripts/check-loader-dependency-closure.shs` enforces the direct-dependency allowlists and fails if `simple-native-loader` regains a normal dependency on `simple-runtime`.
+- `scripts/check/check-loader-dependency-closure.shs` enforces the direct-dependency allowlists and fails if `simple-native-loader` regains a normal dependency on `simple-runtime`.
 
 ## Native Binary Dependency Architecture Follow-On
 
@@ -104,7 +104,7 @@ The primary size/startup problem has shifted from broad dynamic loader over-link
 
 ### Implemented Audit Surface
 
-- Added `scripts/check-native-binary-dependency-closure.shs` to report:
+- Added `scripts/check/check-native-binary-dependency-closure.shs` to report:
   - common native executable artifacts found in the local workspace
   - `readelf` / `ldd` loaded-module surfaces where applicable
   - direct dependency lists for `simple-driver` and `simple-native-all`

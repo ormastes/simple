@@ -54,15 +54,15 @@ Observed on this host as of 2026-05-29:
 - `examples/09_embedded/fpga_riscv/README.md` states the current in-repo
   runnable FPGA CPU lane is handwritten RV32I, GHDL-validated, and not a
   generated RV64 SimpleOS-capable core.
-- `scripts/check-kria-k26-fpga-bringup.shs` already probes UART, Xilinx/JTAG
+- `scripts/check/check-kria-k26-fpga-bringup.shs` already probes UART, Xilinx/JTAG
   detection, Simple hello, and GHDL RISC-V hello.
-- `scripts/rtl_riscv64_linux_generated.shs` and
-  `scripts/check-riscv-rtl-linux-smoke.shs` are existing generated RV64 Linux
+- `scripts/rtl/rtl_riscv64_linux_generated.shs` and
+  `scripts/check/check-riscv-rtl-linux-smoke.shs` are existing generated RV64 Linux
   proof lanes.
 - `scripts/fpga/check_kv260_simple_rv64_linux.shs` loads the current KV260
   bitstream, validates the Simple RV64 ELF header, checks merged USB PS UART,
   and runs the generated RV64 Linux handoff smoke.
-- `scripts/make_os_disk.shs` has RISC-V image lanes, including `riscv64`.
+- `scripts/os/make_os_disk.shs` has RISC-V image lanes, including `riscv64`.
 
 ## Board Strategy
 
@@ -131,13 +131,13 @@ Host
 - Keep the host-native smoke lane:
 
 ```bash
-scripts/check-kria-k26-fpga-bringup.shs --local-only
+scripts/check/check-kria-k26-fpga-bringup.shs --local-only
 ```
 
 - Add a new hardware preflight script:
 
 ```bash
-scripts/check-riscv64-fpga-simpleos-preflight.shs
+scripts/check/check-riscv64-fpga-simpleos-preflight.shs
 ```
 
 It should report:
@@ -284,7 +284,7 @@ Feature request:
 - Stage 1: compiled-in initramfs with `/init`.
 - Stage 2: memory-backed block device loaded with the bitstream or UART loader.
 - Stage 3: SD/eMMC bridge if the board design exposes one to the softcore.
-- Reuse `scripts/make_os_disk.shs` only after block-device geometry is real.
+- Reuse `scripts/os/make_os_disk.shs` only after block-device geometry is real.
 
 ### Problems
 
@@ -351,7 +351,7 @@ SIMPLE-RV64-FPGA-SHELL ok
 
 - Owns USB/JTAG/UART detection.
 - Produces `doc/08_tracking/hardware/riscv64_fpga_inventory_<date>.md`.
-- Adds `scripts/check-riscv64-fpga-simpleos-preflight.shs`.
+- Adds `scripts/check/check-riscv64-fpga-simpleos-preflight.shs`.
 
 ### Agent B: RV64 Reference Softcore Lane
 
@@ -385,7 +385,7 @@ SIMPLE-RV64-FPGA-SHELL ok
 ### Gate 1: Inventory
 
 ```bash
-scripts/check-riscv64-fpga-simpleos-preflight.shs
+scripts/check/check-riscv64-fpga-simpleos-preflight.shs
 ```
 
 Pass requires board, UART, toolchain, and JTAG status classified.
@@ -393,8 +393,8 @@ Pass requires board, UART, toolchain, and JTAG status classified.
 ### Gate 2: Simulation
 
 ```bash
-scripts/check-riscv-rtl-linux-smoke.shs
-scripts/rtl_riscv64_linux_generated.shs
+scripts/check/check-riscv-rtl-linux-smoke.shs
+scripts/rtl/rtl_riscv64_linux_generated.shs
 ```
 
 Pass requires RV64 generated/reference lane still works before hardware changes.
@@ -447,7 +447,7 @@ existing RV32 GHDL lane.
 Implement Agent A first:
 
 ```bash
-scripts/check-riscv64-fpga-simpleos-preflight.shs
+scripts/check/check-riscv64-fpga-simpleos-preflight.shs
 ```
 
 Do not start SimpleOS kernel changes until the preflight report names the exact

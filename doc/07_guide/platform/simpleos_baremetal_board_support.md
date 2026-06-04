@@ -51,9 +51,9 @@ Serial symlinks show the Xilinx ML Carrier card on `/dev/ttyUSB2`, `/dev/ttyUSB4
 |--------|-------------------|---------------------|----------------------|
 | x86_64 | QEMU SimpleOS disk boot path | QEMU, optional GDB stub | Source-present. QEMU and PCI host tools available; not booted in this audit. |
 | x86_32 | Multiboot SimpleOS arch lane | QEMU | Source-present in `src/os/kernel/arch/x86_32`; not run here. |
-| ARM Cortex-M33 | QEMU MPS2-AN505 | QEMU serial console | Verified here. `scripts/run_simpleos_cortex_m33_qemu.shs` boots to `simpleos>` shell, reports MPU enabled and in-memory FS. |
-| ARM Cortex-M4 | Arduino UNO R4 WiFi / RA4M1 | CMSIS-DAP SWD through OpenOCD | Build-verified here with `scripts/run_simpleos_ra4m1.shs --build-only`. Board is connected. Flash was not executed. |
-| ARM Cortex-M33 | STM32U585 / Arduino UNO Q lane | ST-Link/OpenOCD/stm32prog SWD | Build-verified here with `scripts/run_simpleos_stm32u585.shs --build-only`. No matching ST-Link/UNO Q identity was confirmed in USB inventory. |
+| ARM Cortex-M33 | QEMU MPS2-AN505 | QEMU serial console | Verified here. `scripts/os/run_simpleos_cortex_m33_qemu.shs` boots to `simpleos>` shell, reports MPU enabled and in-memory FS. |
+| ARM Cortex-M4 | Arduino UNO R4 WiFi / RA4M1 | CMSIS-DAP SWD through OpenOCD | Build-verified here with `scripts/os/run_simpleos_ra4m1.shs --build-only`. Board is connected. Flash was not executed. |
+| ARM Cortex-M33 | STM32U585 / Arduino UNO Q lane | ST-Link/OpenOCD/stm32prog SWD | Build-verified here with `scripts/os/run_simpleos_stm32u585.shs --build-only`. No matching ST-Link/UNO Q identity was confirmed in USB inventory. |
 | ARM32 | QEMU and STM32 remote lanes | OpenOCD/ST-Link/TRACE32 depending on board | Source-present in `src/os/kernel/arch/arm32` and remote board docs; not run here. |
 | ARM64 | QEMU `virt`/AArch64 lane | QEMU, GDB stub | Source-present in `src/os/kernel/arch/arm64`; not run here. |
 | RISC-V 32 | QEMU/GHDL/remote lanes | QEMU GDB, GHDL, hardware-specific debug | Source-present with many specs. QEMU tool exists; RV32 baremetal GCC is missing locally. |
@@ -69,7 +69,7 @@ Serial symlinks show the Xilinx ML Carrier card on `/dev/ttyUSB2`, `/dev/ttyUSB4
 | PCI/PCIe | Source-present in `src/os/drivers/pci/pci.spl`, `src/os/services/pcimgr/`, and `src/os/tools/dev/lspci_tool.spl`. Host PCI inventory is available through Linux `lspci`; SimpleOS PCI boot was not run here. |
 | File systems | Source-present for FAT32, VFS, devfs, procfs, pipefs, DBFS/NVFS integration points. Cortex-M33 QEMU verified an in-memory filesystem at boot. |
 | Shell | Verified here for Cortex-M33 QEMU boot to `simpleos>` shell. Full SimpleOS shell source exists under `src/os/apps/shell/`; Cortex-M33 has `shell_lite.spl`. |
-| Filesystem boot | Source-present in `src/os/kernel/boot/boot_fs*.spl`, VFS boot init, FS exec spawn modules, and `scripts/run_simpleos_qemu.shs` FAT32 disk image path. Not run here. |
+| Filesystem boot | Source-present in `src/os/kernel/boot/boot_fs*.spl`, VFS boot init, FS exec spawn modules, and `scripts/os/run_simpleos_qemu.shs` FAT32 disk image path. Not run here. |
 | Bootloader/OS download | Source-present and partially locally checkable. K26 uses FT4232H/JTAG and Vivado/OpenOCD/openFPGALoader. RA4M1 uses CMSIS-DAP/OpenOCD SWD. STM32U585 uses ST-Link/OpenOCD/stm32prog. |
 
 ## Commands Used
@@ -86,10 +86,10 @@ command -v qemu-system-riscv32 qemu-system-riscv64 qemu-system-x86_64 qemu-syste
 SimpleOS checks:
 
 ```bash
-sh scripts/check-riscv64-fpga-simpleos-preflight.shs --local-only
-timeout 120s sh scripts/run_simpleos_ra4m1.shs --build-only
-timeout 120s sh scripts/run_simpleos_stm32u585.shs --build-only
-timeout 20s sh scripts/run_simpleos_cortex_m33_qemu.shs
+sh scripts/check/check-riscv64-fpga-simpleos-preflight.shs --local-only
+timeout 120s sh scripts/os/run_simpleos_ra4m1.shs --build-only
+timeout 120s sh scripts/os/run_simpleos_stm32u585.shs --build-only
+timeout 20s sh scripts/os/run_simpleos_cortex_m33_qemu.shs
 ```
 
 SPipe checks attempted:
@@ -107,8 +107,8 @@ The three RISC-V FPGA SPipe checks failed in the current working tree even thoug
 ### RISC-V64 FPGA / K26 ML carrier
 
 1. Confirm `lsusb` includes `0403:6011`.
-2. Run `sh scripts/check-riscv64-fpga-simpleos-preflight.shs --local-only`.
-3. If channel A is bound to `ftdi_sio`, run `sh scripts/jtag-ftdi-unbind.shs`.
+2. Run `sh scripts/check/check-riscv64-fpga-simpleos-preflight.shs --local-only`.
+3. If channel A is bound to `ftdi_sio`, run `sh scripts/fpga/jtag-ftdi-unbind.shs`.
 4. Build or provide the FPGA bitstream and SimpleOS ELF under `build/riscv64-fpga/`.
 5. Program the FPGA with Vivado or openFPGALoader.
 6. Load the SimpleOS ELF over JTAG/OpenOCD or XSDB.
@@ -119,15 +119,15 @@ Current local blockers: `yosys` is missing and no `build/riscv64-fpga/simpleos.{
 ### Arduino UNO R4 WiFi / RA4M1
 
 1. Confirm `lsusb` includes `2341:1002`.
-2. Build with `sh scripts/run_simpleos_ra4m1.shs --build-only`.
-3. Flash with `sh scripts/run_simpleos_ra4m1.shs` after confirming the board can be reset safely.
+2. Build with `sh scripts/os/run_simpleos_ra4m1.shs --build-only`.
+3. Flash with `sh scripts/os/run_simpleos_ra4m1.shs` after confirming the board can be reset safely.
 4. Open the serial console at `/dev/ttyACM0` and 115200 baud.
 
 This audit built `build/os/simpleos_ra4m1.elf` but did not flash it.
 
 ### STM32U585 / Arduino UNO Q lane
 
-1. Build with `sh scripts/run_simpleos_stm32u585.shs --build-only`.
+1. Build with `sh scripts/os/run_simpleos_stm32u585.shs --build-only`.
 2. Select `FLASHER=st-flash`, `FLASHER=openocd`, or `FLASHER=stm32prog`.
 3. Flash only after confirming an STM32U585-compatible probe and target are attached.
 
@@ -138,7 +138,7 @@ This audit built `build/os/simpleos_stm32u585.elf`; no matching ST-Link or STM32
 Run:
 
 ```bash
-sh scripts/run_simpleos_cortex_m33_qemu.shs
+sh scripts/os/run_simpleos_cortex_m33_qemu.shs
 ```
 
 Expected boot evidence includes `SimpleOS Lite v0.5`, MPU enabled, in-memory filesystem initialized, and a `simpleos>` shell prompt.

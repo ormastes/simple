@@ -1,13 +1,13 @@
 # Crash-Safe Heavy-Work Preflight Plan
 
 Status: **Implemented** (2026-05-29) — guardrails automated in
-`scripts/check-heavy-work-preflight.shs`.
+`scripts/check/check-heavy-work-preflight.shs`.
 
 Origin: May 25 host hard-lockup during parallel QEMU/build/agent work.
 
 ## Implemented
 
-- `scripts/check-heavy-work-preflight.shs` — 8-check preflight gate:
+- `scripts/check/check-heavy-work-preflight.shs` — 8-check preflight gate:
   disk space, available memory, swap overcommit, CPU headroom, QEMU guest
   count, kernel log danger patterns, git working tree cleanliness, stale
   lock files.
@@ -20,7 +20,7 @@ Origin: May 25 host hard-lockup during parallel QEMU/build/agent work.
 Run before any heavy operation (QEMU, board flash, full bootstrap, benchmarks):
 
 ```bash
-sh scripts/check-heavy-work-preflight.shs
+sh scripts/check/check-heavy-work-preflight.shs
 ```
 
 ## Goal (original)

@@ -9,7 +9,7 @@ interpreter, compiler, or profile-planning slices.
 ## Always Run
 
 ```bash
-sh scripts/install-spipe-dev-command.shs --check
+sh scripts/setup/install-spipe-dev-command.shs --check
 git diff --check
 find doc/06_spec -name '*_spec.spl' | wc -l
 ```
@@ -29,7 +29,7 @@ SIMPLE_LIB=src bin/simple test test/system/app/browser/feature/webgpu_js_wasm_si
 ```bash
 SIMPLE_LIB=src bin/simple check src/lib/gc_async_mut/gpu/browser_engine/text_painter.spl test/unit/browser_engine/text_painter_spec.spl
 SIMPLE_LIB=src bin/simple test test/unit/browser_engine/text_painter_spec.spl --mode=interpreter --clean --force-rebuild
-scripts/check-gtk-gui-repeat-evidence.shs
+scripts/check/check-gtk-gui-repeat-evidence.shs
 ```
 
 If vector-font or GPU evidence is unavailable, record the unavailable backend

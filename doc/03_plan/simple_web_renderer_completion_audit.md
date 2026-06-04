@@ -99,7 +99,7 @@ Current verification evidence:
   antialias detection, thresholding, and AA-exclusion reporting.
 - The production generated-GUI web parity slice now has a live Electron exact
   pixel gate for marker-free `common.ui` widget HTML:
-  `scripts/check-electron-generated-gui-web-parity-evidence.shs` reports
+  `scripts/check/check-electron-generated-gui-web-parity-evidence.shs` reports
   `electron_generated_gui_web_status=pass`, `mismatch_count=0`, matching
   checksums/weighted checksums, and `blur_or_tolerance_used=false` for the
   96x72 generated widget fixture. This is a focused fixture pass, not a claim

@@ -30,7 +30,7 @@ macOS arm64 host to load and call the dynlib symbol natively.
    it with a representative batch.
 3. The evidence script emits `macos_status=pass` in the
    `GUI_SMF_ARTIFACT_CONTRACT` row when the probe succeeds.
-4. The hardening matrix check (`scripts/check-simpleos-hardening-evidence-matrix.shs`)
+4. The hardening matrix check (`scripts/check/check-simpleos-hardening-evidence-matrix.shs`)
    sees all three fields as `pass` and promotes `qemu_gui_smf_artifact_status`
    to `pass`.
 5. Matrix reaches 9/9.

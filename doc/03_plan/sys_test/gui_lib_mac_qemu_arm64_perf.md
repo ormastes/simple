@@ -15,13 +15,13 @@ Prove host GUI sanity, Metal readback, QEMU ARM64 readiness, live or explicitly 
 
 ## Candidate Commands
 
-- `sh scripts/check-metal-generated-2d-readback.shs`
-- `sh scripts/check-metal-engine2d-framebuffer-readback-evidence.shs`
+- `sh scripts/check/check-metal-generated-2d-readback.shs`
+- `sh scripts/check/check-metal-engine2d-framebuffer-readback-evidence.shs`
 - `bin/simple test test/perf/graphics_2d/metal_smoke_spec.spl --mode=interpreter`
 - `bin/simple run test/perf/graphics_2d/perf_2d_runner.spl --mode=interpreter`
-- `sh scripts/check-simpleos-arm64-wm-qemu-readiness.shs`
-- `sh scripts/check-wm-launch-capture-evidence.shs`
-- `STRICT_QEMU_CAPTURE=1 QEMU_QMP_SOCKET=<socket> sh scripts/check-wm-launch-capture-evidence.shs`
+- `sh scripts/check/check-simpleos-arm64-wm-qemu-readiness.shs`
+- `sh scripts/check/check-wm-launch-capture-evidence.shs`
+- `STRICT_QEMU_CAPTURE=1 QEMU_QMP_SOCKET=<socket> sh scripts/check/check-wm-launch-capture-evidence.shs`
 
 ## Pass Criteria
 

@@ -701,6 +701,6 @@ Full contribution gate:
 
 ```sh
 bin/simple test --only-skipped --list-skip-features --pending test/unit/compiler/vhdl_python_hdl_parity_spec.spl.skip
-sh scripts/check-core-runtime-smoke.shs bin/simple
-SIMPLE_BINARY=bin/simple sh scripts/check-mcp-native-smoke.shs
+sh scripts/check/check-core-runtime-smoke.shs bin/simple
+SIMPLE_BINARY=bin/simple sh scripts/check/check-mcp-native-smoke.shs
 ```

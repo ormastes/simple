@@ -74,7 +74,7 @@ feature
 **Disk image / QEMU boot:**
 - `src/os/port/disk_image.spl` — FAT32 image builder (BPB + FAT + root dir + payload). Writes structural bytes via `rt_file_write_bytes` + `rt_file_truncate` for zero-extension.
 - `src/os/port/disk_image_bake.spl` — bake harness combining initramfs + FAT32. Opt-in fast path via `scripts/bake_disk_via_mkfs.shs` (dosfstools/mtools). Requires pre-built `/tmp/hello_rs_simpleos/...` + `/tmp/hello_c.o`.
-- `scripts/make_os_disk.shs` — shell script for disk creation.
+- `scripts/os/make_os_disk.shs` — shell script for disk creation.
 - No end-to-end QEMU boot script that chains: build kernel → bake disk → run QEMU.
 
 **Shell exec:**
@@ -113,7 +113,7 @@ feature
 - REQ-2 (from AC-2): FAT32 binary read path (`g_vfs_read_fat32_path_bytes` / `Fat32Driver`) already exists; verify it correctly returns `[u8]` for arbitrary binary files (not text-lossy); ensure it is reachable from the exec pipeline in baremetal mode — area: `src/os/services/fat32/fat32.spl`, `src/os/services/vfs/vfs_init.spl`
 - REQ-3 (from AC-3): `elf64_load` in `elf64.spl` is already implemented; wire it correctly through `loader_api.loader_dispatch` so that bytes from FAT32 flow through: `g_vfs_read_executable_bytes` → `loader_dispatch` → `elf64_load` → process image — area: `src/os/kernel/loader/loader_api.spl`, `src/os/kernel/loader/elf64.spl`
 - REQ-4 (from AC-4): Remove `disk_launch_manifest` resident-task placeholders; replace with real `loader_api.loader_exec` dispatch; ensure `fs_exec_spawn` creates a real scheduler task via the `process_image` + `stack_builder` pipeline — area: `src/os/kernel/loader/disk_launch_manifest.spl`, `src/os/kernel/loader/fs_exec_spawn.spl`
-- REQ-5 (from AC-5): Add end-to-end QEMU boot script that: (a) calls `disk_image_bake` to produce kernel + FAT32 disk, (b) launches QEMU x86_64 with the disk image, sample ELF executables pre-loaded — area: `src/os/port/disk_image_bake.spl`, `scripts/make_os_disk.shs` (or new `scripts/run_simpleos_qemu.shs`)
+- REQ-5 (from AC-5): Add end-to-end QEMU boot script that: (a) calls `disk_image_bake` to produce kernel + FAT32 disk, (b) launches QEMU x86_64 with the disk image, sample ELF executables pre-loaded — area: `src/os/port/disk_image_bake.spl`, `scripts/os/make_os_disk.shs` (or new `scripts/os/run_simpleos_qemu.shs`)
 - REQ-6 (from AC-6): Extend `x86_64_hardening_probe.spl` (and riscv64/arm64) with NX/SMEP/SMAP/CR4/EFER probes and ASLR-seed logging at boot; canary-only is insufficient — area: `src/os/kernel/arch_adapt/x86_64_hardening_probe.spl`
 - REQ-7 (from AC-7): Add `src/os/kernel/loader/fs_exec_spawn_spec.spl` (or equivalent) with spipe `it` blocks: inject synthetic FAT32 bytes → verify ELF parse → verify spawn returns valid PID → verify exit code — area: `src/os/kernel/loader/` (new spec file)
 
@@ -147,7 +147,7 @@ arch-done
 | arm64_hardening_probe | `src/os/kernel/arch_adapt/arm64_hardening_probe.spl` | Extend with `arm64_hardening_probe_full() -> HardeningReport`; reads SCTLR_EL1 (WXN/SW) and ID_AA64MMFR1_EL1 (VHE) | Modified |
 | hardening_types | `src/os/kernel/arch_adapt/hardening_types.spl` | New shared type: `class HardeningReport { nx: bool, smep: bool, smap: bool, wp: bool, aslr_seed: u64, arch: text }` | New |
 | arch_adapt_harness | `src/os/kernel/arch_adapt/arch_adapt.spl` | Add `arch_hardening_probe() -> HardeningReport` dispatch that calls the right per-arch `*_hardening_probe_full()` under `@cfg` | Modified |
-| run_simpleos_qemu | `scripts/run_simpleos_qemu.shs` | End-to-end shell script: invoke `disk_image_bake` to produce disk + initramfs, then launch QEMU x86_64 with kernel ELF + FAT32 disk image + serial stdio | New |
+| run_simpleos_qemu | `scripts/os/run_simpleos_qemu.shs` | End-to-end shell script: invoke `disk_image_bake` to produce disk + initramfs, then launch QEMU x86_64 with kernel ELF + FAT32 disk image + serial stdio | New |
 | exec_from_fs_spec | `test/unit/os/kernel/loader/exec_from_fs_spec.spl` | Spipe spec: inject synthetic ELF64 bytes via `_set_synthetic_vfs_file_for_test`, call `fs_exec_prepare_spawn`, verify ELF parse (entry != 0), verify no capability denial when `TaskId.KERNEL_INIT` used; verify binary-roundtrip fidelity (high bytes 0x80–0xFF pass intact) | New |
 
 ### Dependency Map
@@ -184,10 +184,10 @@ arch-done
 - **D-7: HardeningReport is arch-neutral output** — All three probe files return the same `HardeningReport` type from `hardening_types.spl`. Fields unavailable on a given arch are set to `false`/`0`. This allows the spec test to assert on the struct without arch-gating.
 - **D-8: loader_api_vfs split for link safety** — Simple's module linker pulls the full transitive import closure. `loader_api.spl` must stay VFS-free so `disk_launch_manifest.spl` can import it without pulling `os.services.vfs.vfs_init` (and the full FAT32/UI closure). `loader_dispatch_from_vfs` is therefore moved to a new sibling file `loader_api_vfs.spl` which imports both `loader_api` and `vfs_init`. `disk_launch_manifest` imports only `loader_api` (calling `loader_exec` which uses `rt_file_read_bytes`, a pure extern). x86_64_fs_exec_spawn uses the existing `g_vfs_read_fat32_path_bytes` import it already has.
 - **D-9: spec test injection via resolve_executable_bytes, not g_vfs_read_executable_bytes** — `_set_synthetic_vfs_file_for_test` lives in `executable_source.spl` and intercepts the `resolve_executable_bytes` path. The spec calls `resolve_executable_bytes(path, arch)` directly (not via `fs_exec_prepare_spawn`) to test the byte pipeline in isolation, then separately calls `fs_exec_prepare_spawn` after verifying bytes are non-empty. This avoids the mismatch where `g_vfs_read_executable_bytes` (vfs_init) does not consult the executable_source synthetic hook. Binary roundtrip test injects a 256-byte sequence via `_set_synthetic_vfs_file_for_test` and asserts `resolve_executable_bytes` returns len==256 with all bytes intact.
-- **D-10: QEMU script is pure shell** — `scripts/run_simpleos_qemu.shs` invokes `bin/simple run src/os/port/disk_image_bake.spl` to produce the disk image, then calls `qemu-system-x86_64` with `-kernel`, `-drive`, and `-serial stdio`. No new Simple code needed for the script itself.
+- **D-10: QEMU script is pure shell** — `scripts/os/run_simpleos_qemu.shs` invokes `bin/simple run src/os/port/disk_image_bake.spl` to produce the disk image, then calls `qemu-system-x86_64` with `-kernel`, `-drive`, and `-serial stdio`. No new Simple code needed for the script itself.
 - **D-11: kernel-origin bypass in cap_exec_gate** — The legacy 3-arg `fs_exec_spawn` calls `fs_exec_spawn_as(caller: TaskId { id: KERNEL_TASK_ID }, ...)` where `KERNEL_TASK_ID = 0`. Task 0 may not have been run through the capability seed routine. `exec_cap_check` therefore has an explicit early return: `if caller.id == KERNEL_TASK_ID: return Ok(())`. This is documented and intentional — kernel-initiated exec (boot, init launch) is implicitly trusted; user-space exec must always carry a seeded TaskId > 0.
 - **D-12: REQ-3 deferred from spawn pipeline** — The spawn pipeline (`fs_exec_spawn` → `build_user_process_image_unchecked`) continues to use the ELF sniff path inside `process_image.spl` (via `rt_arm_elf64_*` externs). `loader_api.loader_dispatch` + `elf64_load` (the `vmm_mmap` path) is used only by `disk_launch_manifest` callers and by `loader_api_vfs.loader_dispatch_from_vfs`. These are two distinct ELF implementations. REQ-3 is satisfied at the byte-routing level (FAT32 bytes correctly flow into an ELF-capable dispatcher) but the full process-spawn integration of `elf64_load`+`vmm_mmap` is scoped to the `disk_launch_manifest` replacement path, not the bootstrap-scheduler path. The spec test verifies byte fidelity and ELF parse via `resolve_executable_bytes` + `elf64_has_magic`, not end-to-end vmm_mmap.
-- **D-10: QEMU script is pure shell** — `scripts/run_simpleos_qemu.shs` invokes `bin/simple run src/os/port/disk_image_bake.spl` to produce the disk image, then calls `qemu-system-x86_64` with `-kernel`, `-drive`, and `-serial stdio`. No new Simple code needed for the script itself.
+- **D-10: QEMU script is pure shell** — `scripts/os/run_simpleos_qemu.shs` invokes `bin/simple run src/os/port/disk_image_bake.spl` to produce the disk image, then calls `qemu-system-x86_64` with `-kernel`, `-drive`, and `-serial stdio`. No new Simple code needed for the script itself.
 
 ### Public API
 
@@ -272,7 +272,7 @@ boot sequence:
           -> rt_x86_64_rdrand_u64() -> aslr_seed
   -> serial_println("[harden] " + report fields)
 
-scripts/run_simpleos_qemu.shs:                                  [REQ-5]
+scripts/os/run_simpleos_qemu.shs:                                  [REQ-5]
   -> bin/simple run src/os/port/disk_image_bake.spl -> build/os/simpleos.img + initramfs
   -> qemu-system-x86_64 -kernel build/os/kernel.elf -drive file=build/os/simpleos.img,...
      -serial stdio -m 256M

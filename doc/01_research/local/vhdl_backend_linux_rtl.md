@@ -37,7 +37,7 @@ The VHDL backend is not "none", but it is still not complete enough to claim ful
 | LINUX-003 | Add CLINT/timer and PLIC/external IRQ fabric. | generated RTL + tests | Linux needs timer/external interrupt delivery. |
 | LINUX-004 | Add 16550-compatible UART and memory map. | generated RTL + DTB | Needed for early console and boot markers. |
 | LINUX-005 | Generate boot ROM, DTB, OpenSBI/U-Boot integration metadata. | firmware packager | Linux boot needs hart ID, DTB address, `satp=0`, alignment, and firmware services. |
-| LINUX-006 | Keep generated-RTL Linux smoke lanes authoritative and clearly separated from external LiteX/CVA6 diagnostics. | scripts/check-riscv-rtl-linux-smoke.shs | Must preserve generated-only acceptance and truthful external-reference labeling. |
+| LINUX-006 | Keep generated-RTL Linux smoke lanes authoritative and clearly separated from external LiteX/CVA6 diagnostics. | scripts/check/check-riscv-rtl-linux-smoke.shs | Must preserve generated-only acceptance and truthful external-reference labeling. |
 
 ## Recommended Order
 

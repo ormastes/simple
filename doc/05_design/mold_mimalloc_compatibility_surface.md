@@ -16,7 +16,7 @@ classes, functions, roles, and remaining gaps.
 | Linker detection | `src/compiler/70.backend/linker/mold.spl`, `mold_default_linker_order` | Implemented as a native linker wrapper. Detects bundled mold first, then system mold, LLD, and GNU ld. |
 | Linker execution | `MoldBackend.link_objects` | Delegates to external mold/lld/ld process with CRT/runtime arguments. |
 | User override | `SIMPLE_LINKER`, `mold_supported_override_aliases`, CLI linker paths | Supports `mold`, `lld`, `ld.lld`, `lld-link`, `ld`, `gnu`, and `bfd` aliases in the Simple wrapper. |
-| Bundled binary install | `scripts/install-mold.shs` | Installs an upstream mold binary into `bin/mold/mold`; not a source reimplementation. |
+| Bundled binary install | `scripts/setup/install-mold.shs` | Installs an upstream mold binary into `bin/mold/mold`; not a source reimplementation. |
 | Completion predicate | `mold_is_pure_simple_linker_complete` | Returns `false` until a real in-process ELF/Mach-O/COFF linker is implemented. |
 
 Remaining mold gaps: no pure-Simple ELF/Mach-O/COFF linker, no linker-script

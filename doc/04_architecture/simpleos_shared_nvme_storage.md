@@ -234,7 +234,7 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   captured serial log. The app delegates to the same physical-NVMe readiness
   gate and exits nonzero when the log is q35/emulator-only or lacks real device
   identity.
-- The canonical lab wrapper is `scripts/run_simpleos_physical_nvme_perf.shs`.
+- The canonical lab wrapper is `scripts/os/run_simpleos_physical_nvme_perf.shs`.
   In `--validate-log-only` mode it checks an existing serial capture; otherwise
   it captures from `SERIAL_PORT` for `SIMPLEOS_NVME_SERIAL_SECONDS` and then
   invokes the same checker app.
@@ -242,7 +242,7 @@ while direct MMIO/DMA/IRQ/doorbell access remains gated for user-space drivers.
   checker app, and at least one host-visible NVMe namespace device before a lab
   run starts. Labs may override the device glob with `SIMPLEOS_NVME_DEVICE_GLOB`.
 - Production lab runs should use `SERIAL_PORT=<port> SERIAL_BAUD=<baud>
-  scripts/run_simpleos_physical_nvme_perf.shs --production --serial-log <path>
+  scripts/os/run_simpleos_physical_nvme_perf.shs --production --serial-log <path>
   --serial-seconds=<seconds> --preflight-out <path> --report-out <path>` when
   the host and serial capture are checked in one invocation. The wrapper writes
   the host-visible NVMe identity report first and then requires the captured

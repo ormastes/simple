@@ -75,7 +75,7 @@ the working production binary at `bin/simple` is the Rust seed.
 **Consequence:** Fixes to interpreter behaviour in `src/compiler_rust/compiler/`
 only reach users when `bin/simple` is rebuilt from the Rust seed. The Rust
 seed is produced by cargo into `src/compiler_rust/target/bootstrap/simple`
-and then copied to `bin/simple`. See `scripts/setup.sh` `preferred_runtime`
+and then copied to `bin/simple`. See `scripts/setup/setup.sh` `preferred_runtime`
 fallback ladder: `build/bootstrap/stage2_full/simple` → `target/release/simple`
 → `target/bootstrap/simple`.
 

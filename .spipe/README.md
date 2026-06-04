@@ -18,11 +18,11 @@ overrides it in `.spipe/config.sdn` with `host_process_doc: doc/00_llm_process`.
 Run `node .spipe/spipe_project/cli/spipe.js doc-link .` to recreate the
 `.spipe/doc` link from that configuration.
 
-Run `sh scripts/setup-spipe-submodule.shs` to initialize both SPipe submodules,
+Run `sh scripts/setup/setup-spipe-submodule.shs` to initialize both SPipe submodules,
 refresh `.spipe/spipe_project`, `.spipe/doc`, and the top-level common process
 links, then recreate the configured doc-root process links.
 
-Run `sh scripts/check-spipe-submodule-gitlinks.shs --check` to verify that
+Run `sh scripts/check/check-spipe-submodule-gitlinks.shs --check` to verify that
 `.spipe/spipe` and `examples/spipe` are parent gitlinks. Use `--repair` if a
 recursive `git add examples/spipe` accidentally cached submodule files.
 On Windows, use

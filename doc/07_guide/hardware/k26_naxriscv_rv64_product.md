@@ -79,7 +79,7 @@ All dependencies reside in `litex-venv`:
 
 ```bash
 # Unbind JTAG from ftdi_sio
-sh scripts/jtag-ftdi-unbind.shs
+sh scripts/fpga/jtag-ftdi-unbind.shs
 
 # Program via openFPGALoader
 openFPGALoader -c ft4232 --detect
@@ -118,4 +118,4 @@ These patches live in `litex-venv` and are not upstreamed:
 | Hardware inventory | `doc/08_tracking/hardware/riscv64_fpga_inventory_2026-05-19.md` |
 | Hardware manifest | `doc/08_tracking/hardware/hardware_manifest.sdn` |
 | Bare-metal hello | `examples/09_embedded/fpga_riscv/rv64_fpga_hello/` |
-| Preflight check | `scripts/check-riscv64-fpga-simpleos-preflight.shs` |
+| Preflight check | `scripts/check/check-riscv64-fpga-simpleos-preflight.shs` |

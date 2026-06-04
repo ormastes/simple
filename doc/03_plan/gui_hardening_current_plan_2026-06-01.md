@@ -559,22 +559,22 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
 
 - `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer.spl test/unit/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer_spec.spl`
 - `SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/unit/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer_spec.spl --mode=interpreter --clean --format json`
-- `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check-node-simple-web-engine2d-settings-inspector-tree-bitmap-evidence.shs`
-- `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check-bun-simple-web-engine2d-settings-inspector-tree-bitmap-evidence.shs`
-- `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check-electron-simple-web-engine2d-settings-inspector-tree-bitmap-evidence.shs`
-- `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check-node-simple-web-engine2d-media-gallery-command-bitmap-evidence.shs`
-- `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check-bun-simple-web-engine2d-media-gallery-command-bitmap-evidence.shs`
-- `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check-electron-simple-web-engine2d-media-gallery-command-bitmap-evidence.shs`
-- `SIMPLE_BIN=src/compiler_rust/target/release/simple NODE_BITMAP_ITERATIONS=20 sh scripts/check-node-simple-web-engine2d-report-table-command-bitmap-evidence.shs`
-- `SIMPLE_BIN=src/compiler_rust/target/release/simple NODE_BITMAP_ITERATIONS=20 sh scripts/check-bun-simple-web-engine2d-report-table-command-bitmap-evidence.shs`
-- `SIMPLE_BIN=src/compiler_rust/target/release/simple ELECTRON_BITMAP_ITERATIONS=1 sh scripts/check-electron-simple-web-engine2d-report-table-command-bitmap-evidence.shs`
-- `SIMPLE_BIN=src/compiler_rust/target/release/simple BUDGETED_MATRIX_BITMAP_ITERATIONS=20 BUDGETED_MATRIX_BITMAP_TRIALS=1 BUDGETED_MATRIX_ELECTRON_ITERATIONS=1 BUILD_DIR=build/budgeted_simple_web_engine2d_scene_matrix_settings_inspector REPORT_PATH=doc/09_report/budgeted_simple_web_engine2d_scene_matrix_settings_inspector_2026-06-01.md sh scripts/check-budgeted-simple-web-engine2d-scene-matrix-bitmap-evidence.shs`
-- `SIMPLE_BIN=src/compiler_rust/target/release/simple BUDGETED_MATRIX_BITMAP_ITERATIONS=20 BUDGETED_MATRIX_BITMAP_TRIALS=1 BUDGETED_MATRIX_ELECTRON_ITERATIONS=1 BUILD_DIR=build/budgeted_simple_web_engine2d_scene_matrix_media_gallery REPORT_PATH=doc/09_report/budgeted_simple_web_engine2d_scene_matrix_media_gallery_2026-06-01.md sh scripts/check-budgeted-simple-web-engine2d-scene-matrix-bitmap-evidence.shs`
-- `SIMPLE_BIN=src/compiler_rust/target/release/simple BUDGETED_MATRIX_BITMAP_ITERATIONS=20 BUDGETED_MATRIX_BITMAP_TRIALS=1 BUDGETED_MATRIX_ELECTRON_ITERATIONS=1 BUILD_DIR=build/budgeted_simple_web_engine2d_scene_matrix_report_table REPORT_PATH=doc/09_report/budgeted_simple_web_engine2d_scene_matrix_report_table_2026-06-01.md sh scripts/check-budgeted-simple-web-engine2d-scene-matrix-bitmap-evidence.shs`
-- `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check-node-simple-web-engine2d-image-taskbar-command-bitmap-evidence.shs`
-- `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check-bun-simple-web-engine2d-image-taskbar-command-bitmap-evidence.shs`
-- `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check-electron-simple-web-engine2d-image-taskbar-command-bitmap-evidence.shs`
-- `SIMPLE_BIN=src/compiler_rust/target/release/simple BUDGETED_MATRIX_BITMAP_ITERATIONS=20 BUDGETED_MATRIX_BITMAP_TRIALS=1 BUDGETED_MATRIX_ELECTRON_ITERATIONS=1 BUILD_DIR=build/budgeted_simple_web_engine2d_scene_matrix_full REPORT_PATH=doc/09_report/budgeted_simple_web_engine2d_scene_matrix_full_2026-06-01.md sh scripts/check-budgeted-simple-web-engine2d-scene-matrix-bitmap-evidence.shs`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check/check-node-simple-web-engine2d-settings-inspector-tree-bitmap-evidence.shs`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check/check-bun-simple-web-engine2d-settings-inspector-tree-bitmap-evidence.shs`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check/check-electron-simple-web-engine2d-settings-inspector-tree-bitmap-evidence.shs`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check/check-node-simple-web-engine2d-media-gallery-command-bitmap-evidence.shs`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check/check-bun-simple-web-engine2d-media-gallery-command-bitmap-evidence.shs`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check/check-electron-simple-web-engine2d-media-gallery-command-bitmap-evidence.shs`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple NODE_BITMAP_ITERATIONS=20 sh scripts/check/check-node-simple-web-engine2d-report-table-command-bitmap-evidence.shs`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple NODE_BITMAP_ITERATIONS=20 sh scripts/check/check-bun-simple-web-engine2d-report-table-command-bitmap-evidence.shs`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple ELECTRON_BITMAP_ITERATIONS=1 sh scripts/check/check-electron-simple-web-engine2d-report-table-command-bitmap-evidence.shs`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple BUDGETED_MATRIX_BITMAP_ITERATIONS=20 BUDGETED_MATRIX_BITMAP_TRIALS=1 BUDGETED_MATRIX_ELECTRON_ITERATIONS=1 BUILD_DIR=build/budgeted_simple_web_engine2d_scene_matrix_settings_inspector REPORT_PATH=doc/09_report/budgeted_simple_web_engine2d_scene_matrix_settings_inspector_2026-06-01.md sh scripts/check/check-budgeted-simple-web-engine2d-scene-matrix-bitmap-evidence.shs`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple BUDGETED_MATRIX_BITMAP_ITERATIONS=20 BUDGETED_MATRIX_BITMAP_TRIALS=1 BUDGETED_MATRIX_ELECTRON_ITERATIONS=1 BUILD_DIR=build/budgeted_simple_web_engine2d_scene_matrix_media_gallery REPORT_PATH=doc/09_report/budgeted_simple_web_engine2d_scene_matrix_media_gallery_2026-06-01.md sh scripts/check/check-budgeted-simple-web-engine2d-scene-matrix-bitmap-evidence.shs`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple BUDGETED_MATRIX_BITMAP_ITERATIONS=20 BUDGETED_MATRIX_BITMAP_TRIALS=1 BUDGETED_MATRIX_ELECTRON_ITERATIONS=1 BUILD_DIR=build/budgeted_simple_web_engine2d_scene_matrix_report_table REPORT_PATH=doc/09_report/budgeted_simple_web_engine2d_scene_matrix_report_table_2026-06-01.md sh scripts/check/check-budgeted-simple-web-engine2d-scene-matrix-bitmap-evidence.shs`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check/check-node-simple-web-engine2d-image-taskbar-command-bitmap-evidence.shs`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check/check-bun-simple-web-engine2d-image-taskbar-command-bitmap-evidence.shs`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check/check-electron-simple-web-engine2d-image-taskbar-command-bitmap-evidence.shs`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple BUDGETED_MATRIX_BITMAP_ITERATIONS=20 BUDGETED_MATRIX_BITMAP_TRIALS=1 BUDGETED_MATRIX_ELECTRON_ITERATIONS=1 BUILD_DIR=build/budgeted_simple_web_engine2d_scene_matrix_full REPORT_PATH=doc/09_report/budgeted_simple_web_engine2d_scene_matrix_full_2026-06-01.md sh scripts/check/check-budgeted-simple-web-engine2d-scene-matrix-bitmap-evidence.shs`
 - `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/gc_async_mut/gpu/browser_engine/text_painter.spl test/unit/browser_engine/text_painter_spec.spl`
 - `SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/unit/browser_engine/text_painter_spec.spl --mode=interpreter --clean --format json`
 - `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/app/wm_compare/site_corpus_layout_report.spl test/system/wm_compare/famous_site_corpus_spec.spl test/unit/browser_engine/text_painter_spec.spl`
@@ -614,8 +614,8 @@ Generated GUI WASM shared-helper continuation check:
 
 - `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/common/ui/builder.spl examples/ui/widget_matrix_wasm_gui.spl test/unit/app/ui/builder_spec.spl`
 - `SIMPLE_LIB=src src/compiler_rust/target/release/simple examples/ui/widget_matrix_wasm_gui.spl`
-- `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check-gui-wasm-cli-artifact.shs`
-- `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check-gui-wasm-browser-execution-evidence.shs`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check/check-gui-wasm-cli-artifact.shs`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check/check-gui-wasm-browser-execution-evidence.shs`
 
 The compile and generated-WASM gates passed. The source run returned
 `wasm_gui:event:matrix_checkbox:changed`; CLI artifact evidence passed with
@@ -1838,7 +1838,7 @@ performance harness is complete.
 
 QEMU/GTK guest perf blocker metadata continuation:
 
-- `QEMU_HOST_GTK_SCENE_EVIDENCE=0 BUILD_DIR=build/tmp/qemu_gtk_wm_capture_evidence_spec REPORT_PATH=build/tmp/qemu_gtk_wm_capture_evidence_spec.md sh scripts/check-qemu-gtk-wm-capture-evidence.shs`
+- `QEMU_HOST_GTK_SCENE_EVIDENCE=0 BUILD_DIR=build/tmp/qemu_gtk_wm_capture_evidence_spec REPORT_PATH=build/tmp/qemu_gtk_wm_capture_evidence_spec.md sh scripts/check/check-qemu-gtk-wm-capture-evidence.shs`
 - `SIMPLE_LIB=src src/compiler_rust/target/release/simple check test/system/gui/qemu_gtk_wm_capture_evidence_spec.spl`
 - `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/system/gui/qemu_gtk_wm_capture_evidence_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
 - `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/system/gui/qemu_gtk_wm_capture_evidence_spec.spl --output doc/06_spec`

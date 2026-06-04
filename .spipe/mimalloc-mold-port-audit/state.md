@@ -95,7 +95,7 @@ Phase 2 will deep-dive actual source code to verify these claims.
   `link.spl`, `linker_wrapper.spl`, `linker_wrapper_helpers.spl`, `linker_wrapper_lib_support.spl`, `linker_context.spl`, `symbol_analysis.spl`, `object_emitter.spl`, `object_resolver.spl`, `object_provider.spl`, `object_code_unit.spl`, `obj_taker.spl`, `lld_ffi.spl` (+ C shim `lld_shim.cpp`/`.h`), `crt_discovery.spl`, `lazy_instantiator.spl`, SMF reader/writer suite, `wasm_linker.spl`, `msvc.spl`
   — These cover the SMF internal format and compiler pipeline, NOT a pure-Simple ELF/COFF/Mach-O linker.
 
-- `scripts/install-mold.shs` — downloads/installs upstream mold binary into `bin/mold/mold`; source reimplementation does not exist.
+- `scripts/setup/install-mold.shs` — downloads/installs upstream mold binary into `bin/mold/mold`; source reimplementation does not exist.
 
 #### ELF / object format
 

@@ -94,8 +94,8 @@ Explicit non-goal:
 Host-side disk/image validation:
 
 ```sh
-sh scripts/make_os_disk.shs 64 build/os/fat32-arm64.img "" arm64
-sh scripts/make_os_disk.shs 64 build/os/fat32-arm32.img "" arm32
+sh scripts/os/make_os_disk.shs 64 build/os/fat32-arm64.img "" arm64
+sh scripts/os/make_os_disk.shs 64 build/os/fat32-arm32.img "" arm32
 ```
 
 Live guest verification:

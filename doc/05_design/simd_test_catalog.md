@@ -514,7 +514,7 @@ TGT1–TGT6 from §5.2 (NEON, SSE2, AVX2, AVX-512, SVE2, RVV) plus:
 
 ### 6.3 QEMU Runner Conventions
 
-Mirrors `scripts/check-freebsd-bootstrap-qemu.shs` pattern. Per-target wrapper:
+Mirrors `scripts/check/check-freebsd-bootstrap-qemu.shs` pattern. Per-target wrapper:
 
 | Target | QEMU invocation | CPU flag |
 |--------|----------------|---------|

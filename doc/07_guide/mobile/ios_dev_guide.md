@@ -13,7 +13,7 @@ Guide for building and running Simple apps â€” specifically the LLM Dashboard â€
 | Tauri CLI | 2.x | installed by `ios-setup.shs` |
 | CocoaPods | any recent | `sudo gem install cocoapods` (if pod install fails) |
 
-The `simple` binary must be on `$PATH` or symlinked as `bin/simple` (created by `scripts/setup.sh`).
+The `simple` binary must be on `$PATH` or symlinked as `bin/simple` (created by `scripts/setup/setup.sh`).
 
 ## 2. Setup
 

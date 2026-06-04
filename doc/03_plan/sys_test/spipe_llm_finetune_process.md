@@ -12,7 +12,7 @@ and route verification failures into retry/retune actions.
 
 - `examples/spipe/scripts/build.sh`
 - `.spipe/spipe/scripts/build.sh`
-- `scripts/install-spipe-dev-command.shs --check`
+- `scripts/setup/install-spipe-dev-command.shs --check`
 - `node examples/spipe/cli/spipe.js doctor .`
 - `node examples/spipe/cli/spipe.js fine-tune-status <attempt_id>`
 - `node examples/spipe/cli/spipe.js fine-tune-next <attempt_id>`

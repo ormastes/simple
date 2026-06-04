@@ -27,7 +27,7 @@ opencl_backend_contract_spec -> compiler
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -173,6 +173,88 @@ expect(source).to_contain("*v6 = v9;")
 
 </details>
 
+#### emits OpenCL C checked arithmetic as GPU arithmetic
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val module = make_kernel_module([make_opencl_checked_binop_kernel()])
+val source = OpenClBackend.compile_module_to_opencl_source(module).unwrap()
+
+expect(source).to_contain("__kernel void opencl_checked_add_u32(uint left, uint right)")
+expect(source).to_contain("uint v2 = left + right;")
+expect(source).to_contain("return;")
+```
+
+</details>
+
+#### emits OpenCL C casts and bitcasts distinctly
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val module = make_kernel_module([make_opencl_cast_bitcast_kernel()])
+val source = OpenClBackend.compile_module_to_opencl_source(module).unwrap()
+
+expect(source).to_contain("__kernel void opencl_cast_bitcast_u32(uint bits)")
+expect(source).to_contain("float v1 = (float)(bits);")
+expect(source).to_contain("float v2 = as_float(bits);")
+expect(source).to_contain("return;")
+```
+
+</details>
+
+#### emits OpenCL C direct named device calls
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val module = make_kernel_module([make_opencl_scale_device_function(), make_opencl_call_kernel()])
+val source = OpenClBackend.compile_module_to_opencl_source(module).unwrap()
+
+expect(source).to_contain("uint opencl_scale_u32(uint left, uint right)")
+expect(source).to_contain("uint v2 = left * right;")
+expect(source).to_contain("return v2;")
+expect(source).to_contain("__kernel void opencl_call_u32(uint left, uint right)")
+expect(source).to_contain("uint v2 = opencl_scale_u32(left, right);")
+expect(source).to_contain("return;")
+```
+
+</details>
+
+#### emits OpenCL C array aggregates and field access
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val module = make_kernel_module([make_opencl_array_aggregate_kernel()])
+val source = OpenClBackend.compile_module_to_opencl_source(module).unwrap()
+
+expect(source).to_contain("__kernel void opencl_array_aggregate_u32(uint a, uint b, uint c)")
+expect(source).to_contain("uint v3[3] = { a, b, c };")
+expect(source).to_contain("uint v4 = v3[1];")
+expect(source).to_contain("v3[2] = v4;")
+expect(source).to_contain("return;")
+```
+
+</details>
+
 #### emits OpenCL C labels gotos and conditional branches
 
 <details>
@@ -259,8 +341,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

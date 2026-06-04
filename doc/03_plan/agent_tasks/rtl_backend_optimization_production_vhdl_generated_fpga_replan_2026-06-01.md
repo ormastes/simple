@@ -30,10 +30,10 @@ bin/simple test test/unit/hardware/fpga_linux/riscv_fpga_linux_spec.spl
 bin/simple test test/system/app/hardware/feature/riscv_fpga_linux_spec.spl
 bin/simple test test/system/app/hardware/feature/rv64_linux_rtl_pipeline_spec.spl
 bin/simple test test/unit/compiler/lint/riscv_rtl_debuggability_spec.spl
-sh scripts/check-riscv-rtl-linux-smoke.shs --timeout=30
+sh scripts/check/check-riscv-rtl-linux-smoke.shs --timeout=30
 ```
 
-`scripts/check-riscv-rtl-linux-smoke.shs` now runs both public lanes by default and supports `--rv32-only` and `--rv64-only`.
+`scripts/check/check-riscv-rtl-linux-smoke.shs` now runs both public lanes by default and supports `--rv32-only` and `--rv64-only`.
 
 ### Physical FPGA
 
@@ -114,7 +114,7 @@ bin/simple test test/unit/hardware/fpga_linux/riscv_fpga_linux_spec.spl
 bin/simple test test/system/app/hardware/feature/riscv_fpga_linux_spec.spl
 bin/simple test test/system/app/hardware/feature/rv64_linux_rtl_pipeline_spec.spl
 bin/simple test test/unit/compiler/lint/riscv_rtl_debuggability_spec.spl
-sh scripts/check-riscv-rtl-linux-smoke.shs --timeout=30
+sh scripts/check/check-riscv-rtl-linux-smoke.shs --timeout=30
 sh scripts/fpga/check_kv260_simple_rv64_linux.shs
 find doc/06_spec -name '*_spec.spl' | wc -l
 ```

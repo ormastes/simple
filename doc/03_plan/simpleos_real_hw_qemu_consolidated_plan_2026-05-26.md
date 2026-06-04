@@ -80,13 +80,13 @@ hardware actions.
   Artifacts are under
   `build/test-artifacts/simpleos-board-validation-2026-05-26/`.
   Commands and results:
-  - `timeout 120 sh scripts/run_simpleos_ra4m1.shs --build-only --protection=fault-test`;
+  - `timeout 120 sh scripts/os/run_simpleos_ra4m1.shs --build-only --protection=fault-test`;
     result: pass, built `build/os/simpleos_ra4m1.elf`, emitted
     `REAL_BOARD_NOT_RUN board=ra4m1-uno-r4 reason=build-only`.
-  - `timeout 120 sh scripts/run_simpleos_stm32u585.shs --build-only --protection=fault-test`;
+  - `timeout 120 sh scripts/os/run_simpleos_stm32u585.shs --build-only --protection=fault-test`;
     result: pass, built `build/os/simpleos_stm32u585.elf`, emitted
     `REAL_BOARD_NOT_RUN board=stm32u585-uno-q reason=build-only`.
-  - `timeout 180 sh scripts/run_simpleos_cortex_m33_qemu.shs --smoke`;
+  - `timeout 180 sh scripts/os/run_simpleos_cortex_m33_qemu.shs --smoke`;
     result: pass, AN505 QEMU emitted `TEST PASSED` and
     `fault_recovered=pass`.
   - `src/compiler_rust/target/debug/simple test test/unit/os/simpleos_board_hardening_spec.spl --mode=interpreter --clean`;
@@ -96,8 +96,8 @@ hardware actions.
     per-file `FAILED` status line for process code `-1`; this is not board
     evidence.
 - 2026-05-26: Added bounded q35 smoke harness
-  `scripts/run_simpleos_q35_smoke.shs` and ran
-  `sh scripts/run_simpleos_q35_smoke.shs --timeout=30`.
+  `scripts/os/run_simpleos_q35_smoke.shs` and ran
+  `sh scripts/os/run_simpleos_q35_smoke.shs --timeout=30`.
   Artifact: `build/test-artifacts/simpleos-board-validation-2026-05-26/q35_smoke_harness.log`.
   Result: pass. QEMU exited with expected `isa-debug-exit` code `1`; serial
   contained `[harden] text_write_trap=pass`, `[stage1] pci_count=7`,

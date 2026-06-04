@@ -90,9 +90,9 @@ available only for existing fixture/corpus gates.
 
 ## Open Architecture Work
 
-`scripts/check-electron-generated-gui-web-parity-evidence.shs` is now a
+`scripts/check/check-electron-generated-gui-web-parity-evidence.shs` is now a
 release-style live Electron generated-GUI gate for one viewport. The matrix
-wrapper `scripts/check-electron-generated-gui-web-parity-matrix-evidence.shs`
+wrapper `scripts/check/check-electron-generated-gui-web-parity-matrix-evidence.shs`
 runs isolated 80x64, 96x72, 128x96, and 160x120 cases and fails unless exact
 pixels, checksums, weighted checksums, and no-tolerance policy all match. Later
 slices should add text-heavy and broader Chrome corpus scenes to the canonical
@@ -100,9 +100,9 @@ layout manifest instead of creating more one-off evidence scripts.
 
 The canonical layout manifest lives at
 `tools/electron-live-bitmap/simple_web_layout_capture_manifest.txt` and is run
-by `scripts/check-electron-simple-web-layout-manifest-evidence.shs`.
+by `scripts/check/check-electron-simple-web-layout-manifest-evidence.shs`.
 
-`scripts/check-production-gui-web-renderer-parity-evidence.shs` aggregates the
+`scripts/check/check-production-gui-web-renderer-parity-evidence.shs` aggregates the
 release evidence for this slice: Electron/Chrome viewport matrix, Electron
 CSS/layout manifest, backend-executed CPU SIMD/Metal parity, and raw Metal
 framebuffer readback. It is the single command to prove this renderer parity

@@ -36,8 +36,8 @@ Compiler tests cover:
 
 Files:
 
-- `scripts/check-live-kms-security-workflow.shs`: validates workflow invariants and runs `actionlint` if available.
-- `scripts/check-repo-hygiene.shs`: invokes the live KMS checker as part of the existing hygiene gate.
+- `scripts/check/check-live-kms-security-workflow.shs`: validates workflow invariants and runs `actionlint` if available.
+- `scripts/check/check-repo-hygiene.shs`: invokes the live KMS checker as part of the existing hygiene gate.
 - `doc/07_guide/security/live_kms_security_gates.md`: operator guide for environments, secrets, manual execution, and OIDC direction.
 - `test/code_quality/live_kms_security_workflow_spec.spl`: guards the workflow and guide from the Simple test side.
 

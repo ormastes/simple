@@ -25,7 +25,7 @@ dev-done
 ## Log
 - dev: Created state file with 5 acceptance criteria (type: code-quality)
 - audit: Closed `hosted_cocoa.c` and `hosted_win32.c` as stale unbuilt C duplicates based on active `spl_hosted_runtime` Rust exports and path/build-reference evidence.
-- verify: `sh scripts/install-spipe-dev-command.shs --check` passed.
+- verify: `sh scripts/setup/install-spipe-dev-command.shs --check` passed.
 - verify: `cargo check --manifest-path src/runtime/hosted/Cargo.toml` passed.
 - verify: `bin/simple test test/unit/os/compositor/hosted_backend_cocoa_spec.spl` passed 7 examples.
 - verify: `bin/simple test test/unit/os/compositor/hosted_backend_win32_spec.spl` passed 6 examples.

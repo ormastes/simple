@@ -142,7 +142,7 @@ If schema validation fails:
    bin/simple check src/app/mcp
    bin/simple check src/app/simple_lsp_mcp
    SIMPLE_LIB=src bin/simple test test/integration/app/mcp_stdio_integration_spec.spl --mode=interpreter
-   scripts/check-mcp-native-smoke.shs
+   scripts/check/check-mcp-native-smoke.shs
    ```
 
 5. If the npm package or registry wrapper changed, also run the core-lane
@@ -379,7 +379,7 @@ bin/simple query sem-query 'FIND fn WHERE name starts_with "parse_" AND param_co
 **Tools not working:**
 - Check `SIMPLE_PROJECT_ROOT` env var is set correctly
 - Check logs: `~/Library/Logs/Claude/` (macOS) or `~/.config/Claude/logs/` (Linux)
-- Run `scripts/check-mcp-native-smoke.shs`; it must report
+- Run `scripts/check/check-mcp-native-smoke.shs`; it must report
   `mcp_wm_text_tools_present=true` for the common WM text tools.
 
 ---

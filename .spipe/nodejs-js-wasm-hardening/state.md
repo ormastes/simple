@@ -73,20 +73,20 @@ dev-incomplete
 - dev: Wired native Node-compatible `child_process.spawn` enforcement to generic sanitized per-command process grant markers, matching `JsRuntime.grant_node_process(...)` instead of hardcoding only the `node` command.
 - dev: PASS `SIMPLE_LIB=src bin/simple check src/lib/nogc_sync_mut/js/engine/interpreter_native.spl src/lib/nogc_sync_mut/js/engine/runtime.spl test/feature/js/node_api_conformance_spec.spl`.
 - dev: PASS `SIMPLE_LIB=src bin/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --clean` (149 scenarios), including positive `git` spawn only when `git` is explicitly granted and denial when only `node` is granted.
-- dev: PASS cross-lane smoke checks: WebGPU JS/WASM Simple (106 scenarios), interpreter perf (10 scenarios), and `scripts/check-gtk-gui-repeat-evidence.shs` with deterministic vector checksum 212444.
+- dev: PASS cross-lane smoke checks: WebGPU JS/WASM Simple (106 scenarios), interpreter perf (10 scenarios), and `scripts/check/check-gtk-gui-repeat-evidence.shs` with deterministic vector checksum 212444.
 - dev: Optimized Node-compatible `require()` with a single-entry canonical last-hit cache before the reverse scan over cached module names. Repeated `require('path')`/`require('node:path')` calls now avoid the linear scan while preserving the shared module object.
 - dev: PASS `SIMPLE_LIB=src bin/simple check src/lib/nogc_sync_mut/js/engine/interpreter.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl test/feature/js/node_api_conformance_spec.spl`.
 - dev: PASS `SIMPLE_LIB=src bin/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --clean` (150 scenarios).
 - dev: Regenerated `doc/06_spec/feature/js/node_api_conformance_spec.md`; docgen completed with existing compiler/docgen warnings and emitted a stub-style manual.
-- dev: PASS cross-lane smoke checks: WebGPU JS/WASM Simple (106 scenarios), interpreter perf (10 scenarios), and `scripts/check-gtk-gui-repeat-evidence.shs` with Simple open 224 us, GTK open 75025 us, Simple frame 1 us, GTK frame 27 us, vector checksum 212444 deterministic true.
-- dev: Added `scripts/check-ai-cli-qemu-lanes.shs`, a contract-first Phase 6
+- dev: PASS cross-lane smoke checks: WebGPU JS/WASM Simple (106 scenarios), interpreter perf (10 scenarios), and `scripts/check/check-gtk-gui-repeat-evidence.shs` with Simple open 224 us, GTK open 75025 us, Simple frame 1 us, GTK frame 27 us, vector checksum 212444 deterministic true.
+- dev: Added `scripts/check/check-ai-cli-qemu-lanes.shs`, a contract-first Phase 6
   harness that derives required QEMU serial markers from
   `src/os/ai_cli_js_node_contract.spl`, supports a CI-safe `--contract-only`
   mode, and fails default validation until staged runtime artifacts and real
   guest serial logs exist. Fixed the AI CLI QEMU marker contract so manifest,
   blocker, and blocker-report markers are non-empty in generated lane evidence.
 - dev: Added host-side AI CLI smoke package materialization with
-  `scripts/check-ai-cli-qemu-lanes.shs --stage-smoke-package`. The mode writes
+  `scripts/check/check-ai-cli-qemu-lanes.shs --stage-smoke-package`. The mode writes
   `AI_MANIFEST.SDN`, `launch.spl`, `qemu_markers.txt`, a short package
   manifest, generated `<app>.js` smoke entry, and `runtime.smf` under the
   FAT32-like staging tree while reporting
@@ -110,7 +110,7 @@ dev-incomplete
 - dev: PASS `SIMPLE_LIB=src bin/simple check src/lib/nogc_sync_mut/js/engine/interpreter_string_methods.spl src/lib/gc_async_mut/js/engine/interpreter_string_methods.spl src/lib/nogc_async_mut/js/engine/interpreter_string_methods.spl test/feature/js/node_api_conformance_spec.spl test/feature/js/es5_conformance_spec.spl`.
 - dev: PASS `SIMPLE_LIB=src bin/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --clean` (151 scenarios), including prefix/suffix coverage through the runtime helper. ES5 conformance remains a pre-existing interpreter-harness failure at 54/54 scenarios returning `nil`.
 - dev: PASS cross-lane smoke checks: WebGPU JS/WASM Simple (106 scenarios),
-  interpreter perf (10 scenarios), and `scripts/check-gtk-gui-repeat-evidence.shs`
+  interpreter perf (10 scenarios), and `scripts/check/check-gtk-gui-repeat-evidence.shs`
   with Simple open 210 us, GTK open 77889 us, Simple frame 1 us, GTK frame
   27 us, vector checksum 212444 deterministic true.
 - dev: Regenerated `doc/06_spec/feature/js/node_api_conformance_spec.md`;

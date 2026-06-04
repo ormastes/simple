@@ -145,15 +145,15 @@ Current SIMD probe coverage:
 - Small public `solve` calls stay on the scalar path to preserve exact scalar test semantics; the explicit `openblas_solve` adapter exercises LAPACKE parity and larger configured solves may route through OpenBLAS.
 - Availability checks use typed backend diagnostics through `require_linalg_backend("openblas")`.
 - The runtime C ABI exposes integer-callable bit-buffer wrappers for `ddot`, `daxpy`, `dgemm`, and `dgesv` so interpreter-mode tests can exercise the same dynamic loading path as CUDA/PyTorch probes.
-- `scripts/fetch-scilib-openblas-deps.shs` can stage Ubuntu OpenBLAS/LAPACKE packages into `build/scilib/deps/root` without root privileges.
-- `scripts/check-scilib-runtime-shims.shs` builds mock and OpenBLAS shims, auto-detects the local staged dependency root when present, verifies ABI symbol parity, runs deterministic BLAS/LAPACK parity fixtures, records warm load/latency/RSS evidence, and runs the Simple OpenBLAS backend spec against a canonical `libspl_scilib.so` SFFI path.
+- `scripts/deps/fetch-scilib-openblas-deps.shs` can stage Ubuntu OpenBLAS/LAPACKE packages into `build/scilib/deps/root` without root privileges.
+- `scripts/check/check-scilib-runtime-shims.shs` builds mock and OpenBLAS shims, auto-detects the local staged dependency root when present, verifies ABI symbol parity, runs deterministic BLAS/LAPACK parity fixtures, records warm load/latency/RSS evidence, and runs the Simple OpenBLAS backend spec against a canonical `libspl_scilib.so` SFFI path.
 - `SCILIB_REQUIRE_REAL_OPENBLAS=1` is the hard real-backend gate. It must fail when the shim compiled the unavailable fallback.
 
 Current OpenBLAS probe coverage:
 
 - `std.linalg.openblas_dot`, `openblas_axpy`, `openblas_gemv`, `openblas_gemm`, and `openblas_solve` are explicit dynamic adapters with typed unavailable errors.
 - Existing public `dot`, `try_axpy`, `gemv`, `try_gemm`, and larger `solve` calls consult OpenBLAS when configured, then preserve scalar fallback if the shim is absent or non-real.
-- The C shim compiles and exports the complete mock/OpenBLAS ABI on this host. With locally staged OpenBLAS/LAPACKE packages, `SCILIB_REQUIRE_REAL_OPENBLAS=1 scripts/check-scilib-runtime-shims.shs` reports `openblas_real=true` and the OpenBLAS-configured scilib suite passes.
+- The C shim compiles and exports the complete mock/OpenBLAS ABI on this host. With locally staged OpenBLAS/LAPACKE packages, `SCILIB_REQUIRE_REAL_OPENBLAS=1 scripts/check/check-scilib-runtime-shims.shs` reports `openblas_real=true` and the OpenBLAS-configured scilib suite passes.
 - This completes the selected Phase B real-backend probe and gate. Phase C now reuses the same configured public-routing pattern for CUDA and PyTorch dot/GEMV/GEMM/solve probes, while broad accelerator ownership and ndarray dispatch remain future work.
 
 ## CUDA Design
@@ -309,7 +309,7 @@ bin/simple check src/lib
 
 Backend-specific gates:
 
-- SIMD: scalar parity specs plus the focused `scripts/check-scilib-accelerator-perf.shs` wall-clock gate. The gate records focused interpreter-visible public operation budgets for f64 dot/axpy, f32 dot/axpy, NDArray f64 add, NDArray f64 sum, NDArray f64 abs/square, NDArray f64 scalar multiply, NDArray f32 sum, NDArray f32 scalar multiply/divide, and NDArray f32 abs/square through `test/perf/scilib_simd_ops_perf_spec.spl`; broad native SIMD microbenchmarks remain follow-up work.
+- SIMD: scalar parity specs plus the focused `scripts/check/check-scilib-accelerator-perf.shs` wall-clock gate. The gate records focused interpreter-visible public operation budgets for f64 dot/axpy, f32 dot/axpy, NDArray f64 add, NDArray f64 sum, NDArray f64 abs/square, NDArray f64 scalar multiply, NDArray f32 sum, NDArray f32 scalar multiply/divide, and NDArray f32 abs/square through `test/perf/scilib_simd_ops_perf_spec.spl`; broad native SIMD microbenchmarks remain follow-up work.
 - CUDA: opt-in GPU specs gated by CUDA availability; tests must report unavailable rather than fail on CPU-only hosts. The accelerator perf gate records scalar fallback comparison timings for the same dot/GEMV/GEMM/solve/inverse fixtures plus narrow 4096-element Float64 HtoD/DtoH transfer timings.
 - PyTorch: opt-in libtorch specs gated by runtime availability and ABI version diagnostics. The accelerator perf gate records scalar fallback comparison timings for the same dot/GEMM/solve/inverse fixtures plus narrow 4096-element Float64 tensor creation/copy timings.
 
@@ -333,7 +333,7 @@ SIMPLE_SFFI_PATH=build/scilib SIMPLE_BLAS_BACKEND=mock bin/simple test test/feat
 Current accelerator performance gate:
 
 ```text
-SCILIB_REQUIRE_ACCELERATOR_PERF=1 scripts/check-scilib-accelerator-perf.shs
+SCILIB_REQUIRE_ACCELERATOR_PERF=1 scripts/check/check-scilib-accelerator-perf.shs
 ```
 
 This gate builds the local CUDA and PyTorch shims when the host toolchains are present, checks scalar parity for CUDA 4096-element dot, CUDA 64x32 GEMV, CUDA 32x32 GEMM, CUDA 16x16 solve, CUDA 16x16 inverse, PyTorch dot, PyTorch GEMM, PyTorch 16x16 solve, and PyTorch 16x16 inverse fixtures, records warm dynamic-load time, operation latency, focused public SIMD operation latency, and max RSS, and enforces configurable budgets through `SCILIB_ACCELERATOR_MAX_LOAD_MS`, `SCILIB_ACCELERATOR_MAX_OP_US`, `SCILIB_SIMD_MAX_SPEC_MS`, `SCILIB_SIMD_MAX_OP_NS`, and `SCILIB_ACCELERATOR_MAX_RSS_KB`.

@@ -65,7 +65,7 @@ is documentary only.
 
 - **Lint**: `bin/simple build lint` runs the guard automatically
 - **Pre-commit**: `.git/hooks/pre-commit` blocks commits with violations
-  (install via `sh scripts/install-workspace-guard-hook.shs --apply`)
+  (install via `sh scripts/setup/install-workspace-guard-hook.shs --apply`)
 - **SPipe verify**: Phase 7 runs the guard in strict mode
 - **MCP**: File I/O protection engine has in-memory root policy rules
 
@@ -77,6 +77,6 @@ sh scripts/check-workspace-root-guard.shs audit --strict   # All entries must be
 sh scripts/check-workspace-root-guard.shs audit --staged   # Only newly staged files
 sh scripts/check-workspace-root-guard.shs fix              # Quarantine violations
 sh scripts/check-workspace-root-guard.shs --self-test      # Run smoke tests
-sh scripts/install-workspace-guard-hook.shs --check        # Check hook status
-sh scripts/install-workspace-guard-hook.shs --apply        # Install hook
+sh scripts/setup/install-workspace-guard-hook.shs --check        # Check hook status
+sh scripts/setup/install-workspace-guard-hook.shs --apply        # Install hook
 ```

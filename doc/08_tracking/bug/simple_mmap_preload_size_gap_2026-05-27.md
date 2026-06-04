@@ -11,7 +11,7 @@ below the C counter-size target on the audited Linux host.
 Current evidence from:
 
 ```sh
-sh scripts/check-startup-size-performance-audit.shs
+sh scripts/check/check-startup-size-performance-audit.shs
 ```
 
 Current measured rows:
@@ -52,7 +52,7 @@ All items above are implemented and verified as of 2026-05-29:
 - `src/runtime/simple_core/core_fs.spl` provides `pub fn rt_file_preload_pages(path: i64) -> i64`
   using `open` + `lseek` + `mmap` + page-touch loop + `munmap` — no hosted runtime, no regex,
   no CLI/parser modules.
-- `scripts/check-startup-size-performance-audit.shs` builds `simple_mmap_preload` using
+- `scripts/check/check-startup-size-performance-audit.shs` builds `simple_mmap_preload` using
   `--runtime-bundle core-c-bootstrap` from a minimal entry `.spl` that declares only
   `rt_cli_get_args` and `rt_file_preload_pages` as externs.
 - Regression gate `check_mmap_preload_gate` is active at the end of the script; it fails the

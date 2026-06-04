@@ -9,7 +9,7 @@ Run:
 ```sh
 BUILD_DIR=build/gui_color_image_pipeline_8k_evidence \
 REPORT_PATH=doc/09_report/gui_color_image_pipeline_8k_evidence_2026-06-01.md \
-sh scripts/check-gui-color-image-pipeline-8k-evidence.shs
+sh scripts/check/check-gui-color-image-pipeline-8k-evidence.shs
 ```
 
 ## Coverage

@@ -154,7 +154,7 @@ T-CUDA-07  # backend dispatch (depends on T-CUDA-02/03/05)
 T-CUDA-08  # Cargo.toml feature flags and workspace wiring
 T-CUDA-09  # SFFI_PATH + test harness mock default (parallel with T-CUDA-08)
     ↓
-T-CUDA-10  # scripts/setup.sh integration
+T-CUDA-10  # scripts/setup/setup.sh integration
 T-CUDA-11  # bootstrap script wiring (parallel with T-CUDA-10)
     ↓
 T-CUDA-12  # CI matrix (mock-only, openblas-host, cuda-host)
@@ -502,7 +502,7 @@ For interpreter-mode spec runs (AC-7 / OQ-D compliance):
      `doc/08_tracking/feature_request/compiler_requests.md` and use the hard-coded prefix for v1.
 2. `SIMPLE_SFFI_PATH` must include the `build/` directory so `libspl_cublas_mock.so` is found
    by `spl_dlopen` without a full install step.
-   - Add `export SIMPLE_SFFI_PATH="${SIMPLE_SFFI_PATH}:${REPO_ROOT}/build"` to `scripts/setup.sh`
+   - Add `export SIMPLE_SFFI_PATH="${SIMPLE_SFFI_PATH}:${REPO_ROOT}/build"` to `scripts/setup/setup.sh`
      (see T-CUDA-10).
 3. Verify: run `bin/simple test src/lib/common/linalg/axpy_spec.spl` in interpreter mode — must
    not hang, must not require CUDA, must use mock symbols.
@@ -512,13 +512,13 @@ OpenBLAS installed (mock-only machine).
 
 ---
 
-### T-CUDA-10: Integrate into `scripts/setup.sh`
+### T-CUDA-10: Integrate into `scripts/setup/setup.sh`
 
 **Estimate:** 0.5 day
 **Depends on:** T-CUDA-08, T-CUDA-09
-**Disjoint files:** `scripts/setup.sh` only
+**Disjoint files:** `scripts/setup/setup.sh` only
 
-Add to `scripts/setup.sh`:
+Add to `scripts/setup/setup.sh`:
 
 1. Build the scilib mock shim unconditionally:
    ```sh
@@ -556,7 +556,7 @@ Add to `scripts/setup.sh`:
 5. Set `SIMPLE_BLAS_BACKEND=mock` in the local `.envrc` or equivalent if the user's env
    does not already set it (do not override an existing value).
 
-**Done when:** `scripts/setup.sh` runs cleanly on a CPU-only machine; produces
+**Done when:** `scripts/setup/setup.sh` runs cleanly on a CPU-only machine; produces
 `build/libspl_cublas_mock.so`; prints `[scilib]` status lines.
 
 ---
@@ -573,10 +573,10 @@ the self-hosted binary can run linalg specs.
 Add to the post-deploy section of `scripts/bootstrap/bootstrap-from-scratch.sh`:
 ```sh
 # Build scilib shims (mock always; openblas/cuda if available)
-sh scripts/setup.sh --scilib-only
+sh scripts/setup/setup.sh --scilib-only
 ```
 
-Add a `--scilib-only` flag to `scripts/setup.sh` that runs only the scilib build steps
+Add a `--scilib-only` flag to `scripts/setup/setup.sh` that runs only the scilib build steps
 (steps 1–4 of T-CUDA-10), skipping the symlink and other setup.
 
 **Rationale:** Per `feedback_extern_bootstrap_rebuild`, after adding new `rt_*` externs a
@@ -605,8 +605,8 @@ Define three CI matrix legs for scilib:
 
 For each leg:
 
-- `mock-only`: `apt-get install gcc` only; no BLAS/CUDA packages; scripts/setup.sh builds mock.
-- `openblas-host`: `apt-get install libopenblas-dev`; scripts/setup.sh detects and builds openblas
+- `mock-only`: `apt-get install gcc` only; no BLAS/CUDA packages; scripts/setup/setup.sh builds mock.
+- `openblas-host`: `apt-get install libopenblas-dev`; scripts/setup/setup.sh detects and builds openblas
   shim; specs additionally check that `rt_blas_ddot([1,2,3], [1,2,3])` returns `14.0` (numeric
   correctness check beyond mock zeros).
 - `cuda-host`: uses NVIDIA-provided Docker image or runner with CUDA toolkit 11.7+; full shim set.
@@ -672,7 +672,7 @@ done
 ```
 
 Run this script:
-1. At the end of `scripts/setup.sh` for all three shims (skipping any not built).
+1. At the end of `scripts/setup/setup.sh` for all three shims (skipping any not built).
 2. As a CI check in the mock-only leg — all three shims must export the same `rt_*` set.
 3. Manually after any new symbol is added in `scilib_port_blas.md` or `scilib_port_lapack.md`.
 
@@ -692,7 +692,7 @@ symbol is present in one but not the other.
 - [ ] `build/libspl_cublas.so` builds on a CUDA ≥ 11.7 machine; uses `_64` API (T-CUDA-05/06)
 - [ ] `SIMPLE_BLAS_BACKEND=mock` is the default in `bin/simple test` for linalg/ndarray specs
   (T-CUDA-09)
-- [ ] `scripts/setup.sh` builds mock unconditionally; openblas and cuda conditionally; appends
+- [ ] `scripts/setup/setup.sh` builds mock unconditionally; openblas and cuda conditionally; appends
   `build/` to `SIMPLE_SFFI_PATH` (T-CUDA-10)
 - [ ] `scripts/bootstrap/bootstrap-from-scratch.sh --deploy` triggers scilib mock build (T-CUDA-11)
 - [ ] CI matrix has three legs: mock-only, openblas-host, cuda-host (T-CUDA-12)

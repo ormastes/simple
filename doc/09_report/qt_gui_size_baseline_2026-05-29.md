@@ -37,4 +37,4 @@ Date: 2026-05-29
 - This script does not install Qt or network dependencies.
 - Missing Qt records an unavailable baseline instead of failing the Simple verification path.
 - The comparison passes only when a Qt artifact and a Simple Web artifact are both measured.
-- Use `scripts/check-web-baremetal-size-audit.shs` to refresh the Simple web-render artifact side of the comparison.
+- Use `scripts/check/check-web-baremetal-size-audit.shs` to refresh the Simple web-render artifact side of the comparison.

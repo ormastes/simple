@@ -27,6 +27,6 @@ bin/simple bug-gen                  # Generate bug report
 
 ## Setup
 ```bash
-scripts/setup.sh          # Create bin/simple symlink (auto-detects platform)
+scripts/setup/setup.sh          # Create bin/simple symlink (auto-detects platform)
 sh config/mcp/install.shs # Install MCP config
 ```

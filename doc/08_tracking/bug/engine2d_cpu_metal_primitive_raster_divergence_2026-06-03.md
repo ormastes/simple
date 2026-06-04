@@ -45,5 +45,5 @@ the same way `draw_gradient_rect` was canonicalized to the MSL integer lerp:
 src/compiler_rust/target/gui/debug/simple run build/metalcmp/moreops.spl   # ad-hoc
 ```
 
-The shipped gate (`scripts/check-engine2d-cpu-metal-parity-evidence.shs`) only
+The shipped gate (`scripts/check/check-engine2d-cpu-metal-parity-evidence.shs`) only
 asserts the bit-exact ops above; extend it per primitive as each is aligned.

@@ -48,5 +48,5 @@ doc.)
 ## Acceptance
 
 - core-c native binaries that link `simple_core` (not `runtime_native.c`) pass:
-  `"abc".len() == 3`; stdin EOF terminates; `scripts/check-mcp-native-smoke.shs`
+  `"abc".len() == 3`; stdin EOF terminates; `scripts/check/check-mcp-native-smoke.shs`
   reports `mcp_tools_json_valid=true`, `mcp_wm_text_tools_present=true`.

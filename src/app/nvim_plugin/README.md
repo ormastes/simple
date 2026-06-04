@@ -256,7 +256,7 @@ Run `:checkhealth simple` to verify:
 From the repository root, run:
 
 ```bash
-python3 scripts/nvim_plugin_smoke.py
+python3 scripts/smoke/nvim_plugin_smoke.py
 ```
 
 The smoke test starts isolated `nvim --headless` processes with this worktree's

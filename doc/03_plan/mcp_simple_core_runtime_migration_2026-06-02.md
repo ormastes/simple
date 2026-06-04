@@ -73,7 +73,7 @@ runtime, which has a registry-free `rt_string_len` and `read()` stdin.
      --source src/compiler --source src/app --source src/lib \
      --entry-closure --entry src/app/mcp/main.spl \
      --output bin/release/<triple>/simple_mcp_server      # NOTE: no --strip
-   scripts/check-mcp-native-smoke.shs   # expect json_valid=true, wm_text_present=true
+   scripts/check/check-mcp-native-smoke.shs   # expect json_valid=true, wm_text_present=true
    ```
    Deploy ONLY `simple_mcp_server` to `bin/release/<triple>/`; do NOT overwrite
    the self-hosted `bin/release/<triple>/simple`.
@@ -81,7 +81,7 @@ runtime, which has a registry-free `rt_string_len` and `read()` stdin.
 ## Verification signals
 
 - `"abc".len() == 3` true on core-c; stdin EOF terminates.
-- `scripts/check-mcp-native-smoke.shs`: `mcp_tools_json_valid=true`,
+- `scripts/check/check-mcp-native-smoke.shs`: `mcp_tools_json_valid=true`,
   `mcp_tools_schema_valid=true`, `mcp_wm_text_tools_present=true`.
 
 ## Notes / risks

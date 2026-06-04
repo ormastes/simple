@@ -39,15 +39,15 @@ implementation
   - `bin/simple test test/system/os/network_system_spec.spl`
   - `bin/simple test test/system/os/filesystem_system_spec.spl`
   - `bin/simple test test/integration/http_baremetal_spec.spl`
-  - `sh scripts/run_simpleos_q35_smoke.shs --timeout=30`
-  - `sh scripts/run_simpleos_q35_smoke.shs --pure-simple --timeout=30`
+  - `sh scripts/os/run_simpleos_q35_smoke.shs --timeout=30`
+  - `sh scripts/os/run_simpleos_q35_smoke.shs --pure-simple --timeout=30`
   - `find doc/06_spec -name '*_spec.spl' | wc -l` returned `0`.
 
 ## Generated FPGA Evidence - 2026-06-01
 
 - Replanned the VHDL/FPGA lane around Simple-authored generated RTL rather than direct hand-written VHDL.
-- Updated `scripts/check-riscv-rtl-linux-smoke.shs` so the public gate runs both `generated_rv32_linux` and `generated_rv64_linux` by default.
-- `sh scripts/check-riscv-rtl-linux-smoke.shs --timeout=30` passed:
+- Updated `scripts/check/check-riscv-rtl-linux-smoke.shs` so the public gate runs both `generated_rv32_linux` and `generated_rv64_linux` by default.
+- `sh scripts/check/check-riscv-rtl-linux-smoke.shs --timeout=30` passed:
   - RV32 marker: `[GHDL-GEN-RV32] PASS`
   - RV64 marker: `[GHDL-GEN-RV64-LINUX-HANDOFF] PASS`
 - KV260 physical gate passed with artifacts in `build/kv260_simple_rv64_linux_check_20260601_084520/`:

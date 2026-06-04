@@ -28,7 +28,7 @@ Verified in test workspace:
 - Generated RV64 Linux handoff smoke passes in GHDL:
   `[GHDL-GEN-RV64-LINUX-HANDOFF] PASS`.
 - The public generated RISC-V RTL smoke wrapper runs both generated lanes by default:
-  `sh scripts/check-riscv-rtl-linux-smoke.shs --timeout=30`.
+  `sh scripts/check/check-riscv-rtl-linux-smoke.shs --timeout=30`.
 - Generated RV32 smoke passes in GHDL:
   `[GHDL-GEN-RV32] PASS`.
 - QEMU RV64 SimpleOS logs show boot markers and HTTP bind/listen behavior when

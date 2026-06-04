@@ -1,13 +1,13 @@
 <!-- codex-design -->
 # SimpleOS ARM QEMU FS Toolchain Verification Architecture
 
-This rollout defines one ARM verification contract across `scripts/make_os_disk.shs`,
+This rollout defines one ARM verification contract across `scripts/os/make_os_disk.shs`,
 `src/os/qemu_runner.spl`, the ARM fs-exec entrypoints, and the
 launcher/VFS/loader stack.
 
 ## Contract Boundaries
 
-- `scripts/make_os_disk.shs` owns host-side image construction and staging of
+- `scripts/os/make_os_disk.shs` owns host-side image construction and staging of
   the toolchain artifacts, manifests, proof assets, and marker-bearing SMFs.
 - `src/os/qemu_runner.spl` owns scenario selection, disk-image materialization,
   host-side image validation, QEMU launch wiring, and serial acceptance checks.
@@ -50,7 +50,7 @@ serial-marker contract.
 
 ## Verification Data Flow
 
-1. `scripts/make_os_disk.shs` seeds FAT32 media with the ARM toolchain app set,
+1. `scripts/os/make_os_disk.shs` seeds FAT32 media with the ARM toolchain app set,
    manifests, version files, and proof assets.
 2. `src/os/qemu_runner.spl` validates those staged artifacts before boot and
    selects the ARM fs-exec target for the scenario.

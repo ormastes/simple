@@ -94,8 +94,8 @@ Required live verification:
 
 - `bin/simple os test --scenario=arm64-virtio-fat32-smf`
 - `bin/simple os test --scenario=arm32-virtio-fat32-smf`
-- `sh scripts/make_os_disk.shs 64 build/os/fat32-arm64.img "" arm64`
-- `sh scripts/make_os_disk.shs 64 build/os/fat32-arm32.img "" arm32`
+- `sh scripts/os/make_os_disk.shs 64 build/os/fat32-arm64.img "" arm64`
+- `sh scripts/os/make_os_disk.shs 64 build/os/fat32-arm32.img "" arm32`
 
 The design is complete only when metadata-only staging cannot accidentally pass
 the ARM acceptance lane.

@@ -50,7 +50,7 @@ Before attempting the full build and boot, check that the host QEMU binary
 supports the documented `virt` plus `ramfb` lane:
 
 ```bash
-sh scripts/check-simpleos-arm64-wm-qemu-readiness.shs
+sh scripts/check/check-simpleos-arm64-wm-qemu-readiness.shs
 ```
 
 The probe verifies that `qemu-system-aarch64` is on `PATH`, that the `virt`

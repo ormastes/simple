@@ -149,9 +149,9 @@ the hot metric stays event ingress to SMF/dynlib command-batch emission.
 
 Node.js is useful as a repeatable JavaScript bitmap baseline, but it is not the
 real GUI implementation target. The current Node.js Engine2D lane
-(`scripts/check-node-simple-web-engine2d-bitmap-evidence.shs`) is the valid
+(`scripts/check/check-node-simple-web-engine2d-bitmap-evidence.shs`) is the valid
 current web-renderer comparison lane. The older generic
-`scripts/check-node-web-render-bitmap-evidence.shs` lane is stale until its
+`scripts/check/check-node-web-render-bitmap-evidence.shs` lane is stale until its
 Simple fixture segfault is fixed and rerun.
 
 ### Pure Simple Web Rendering
@@ -285,21 +285,21 @@ as proof of the pure GUI SMF/dynlib release path.
 - Native fallback guard: if a native helper is unavoidable, it is C, isolated at
   the adapter boundary, and has tests proving pixel/rendering logic is unchanged.
 - CPU/Vulkan comparison:
-  `scripts/check-vulkan-engine2d-readback.shs` must pass with zero mismatches
+  `scripts/check/check-vulkan-engine2d-readback.shs` must pass with zero mismatches
   and no blur/tolerance evidence before Vulkan is accepted as an accelerated
   GUI presentation candidate.
 - Node.js web rendering comparison:
-  `scripts/check-node-simple-web-engine2d-bitmap-evidence.shs` must pass with
+  `scripts/check/check-node-simple-web-engine2d-bitmap-evidence.shs` must pass with
   exact ARGB/checksum parity before current Node Engine2D evidence is cited.
-  `scripts/check-node-web-render-bitmap-evidence.shs` must also pass before the
+  `scripts/check/check-node-web-render-bitmap-evidence.shs` must also pass before the
   older generic Node web-render fixture is cited as fresh evidence.
 - Pure Simple web rendering comparison:
-  `scripts/check-simple-web-engine2d-js-bitmap-evidence.shs` must pass with
+  `scripts/check/check-simple-web-engine2d-js-bitmap-evidence.shs` must pass with
   exact parity and no blur/tolerance evidence before the pure Simple web lane is
   cited.
 - Electron shell/rendering comparison:
-  `scripts/check-electron-simple-web-engine2d-bitmap-evidence.shs` and
-  `scripts/check-electron-live-bitmap-evidence.shs` must pass before Electron
+  `scripts/check/check-electron-simple-web-engine2d-bitmap-evidence.shs` and
+  `scripts/check/check-electron-live-bitmap-evidence.shs` must pass before Electron
   evidence is cited as browser-shell regression coverage.
 - Tauri shell comparison:
   restore `test/perf/tauri_equiv/tauri_reference/Cargo.toml`, fix

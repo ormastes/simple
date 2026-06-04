@@ -11,7 +11,7 @@ rendering.
 Command:
 
 ```sh
-scripts/check-gtk-gui-repeat-evidence.shs
+scripts/check/check-gtk-gui-repeat-evidence.shs
 ```
 
 Key output:

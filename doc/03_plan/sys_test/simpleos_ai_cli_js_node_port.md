@@ -8,10 +8,10 @@ pending Node-compatible runtime provisioning.
 
 Current QEMU harness:
 
-- `scripts/check-ai-cli-qemu-lanes.shs --contract-only` materializes the
+- `scripts/check/check-ai-cli-qemu-lanes.shs --contract-only` materializes the
   selected Codex/Claude/Gemini by x86/RISC-V/ARM lane marker contract and exits
   successfully without claiming guest evidence.
-- `scripts/check-ai-cli-qemu-lanes.shs --stage-smoke-package` materializes the
+- `scripts/check/check-ai-cli-qemu-lanes.shs --stage-smoke-package` materializes the
   selected host-side smoke package tree and reports
   `ai_cli_qemu_lanes_status=stage-smoke-package` with reason
   `host-package-materialized-no-guest-validation`; it does not read serial logs
@@ -20,7 +20,7 @@ Current QEMU harness:
   `build/ai-cli-qemu-lanes/reports/ai-cli-disk-import.tsv` by default. Each row
   records app, target, guest path, host path, byte count, and digest for later
   FAT32 image ingestion.
-- `scripts/check-ai-cli-qemu-lanes.shs --stage-smoke-package
+- `scripts/check/check-ai-cli-qemu-lanes.shs --stage-smoke-package
   --populate-fat32-image <img>` mirrors the selected staged tree into an
   existing formatted FAT32 image and reports
   `fat32_populate_status=host-image-populated` only when the host populator
@@ -91,7 +91,7 @@ Mirrored manual: `doc/06_spec/system/os/simpleos_ai_cli_js_node_port_spec.md`
 - REQ-007: explicit full Node/V8/libuv later-layer blocker.
 - Runtime conformance: `node_api_conformance_spec.spl` covers explicit positive
   and denial behavior for credential env, file, network, and process grants.
-- QEMU lane harness: `scripts/check-ai-cli-qemu-lanes.shs` records expected
+- QEMU lane harness: `scripts/check/check-ai-cli-qemu-lanes.shs` records expected
   runtime artifact paths, serial log paths, lane scenarios, and required marker
   files for the 3x3 app/target matrix.
 - Host provisioning: `--stage-smoke-package` writes `AI_MANIFEST.SDN`,

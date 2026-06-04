@@ -89,7 +89,7 @@ This pass added the first convention-first architecture slice:
 
 ## 2026-05-23 Live KMS CI Hardening Follow-up
 
-The live KMS workflow exists at `.github/workflows/live-kms-security.yml` and is covered by `test/code_quality/live_kms_security_workflow_spec.spl`. The local repo had no existing `actionlint` integration, and the shared `repo-hygiene` workflow only called `scripts/check-repo-hygiene.shs`.
+The live KMS workflow exists at `.github/workflows/live-kms-security.yml` and is covered by `test/code_quality/live_kms_security_workflow_spec.spl`. The local repo had no existing `actionlint` integration, and the shared `repo-hygiene` workflow only called `scripts/check/check-repo-hygiene.shs`.
 
 Local improvement target:
 
@@ -101,7 +101,7 @@ Local improvement target:
 
 Implemented files:
 
-- `scripts/check-live-kms-security-workflow.shs`
-- `scripts/check-repo-hygiene.shs`
+- `scripts/check/check-live-kms-security-workflow.shs`
+- `scripts/check/check-repo-hygiene.shs`
 - `doc/07_guide/security/live_kms_security_gates.md`
 - `test/code_quality/live_kms_security_workflow_spec.spl`

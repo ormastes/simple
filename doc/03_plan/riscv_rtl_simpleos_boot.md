@@ -252,19 +252,19 @@ netstack, TLS, and HTTP closures.
   rings, posts bounded RX buffers, proves TX completion with
   `[net-riscv] Network packet TX ready`, consumes RX descriptors, handles ARP
   and a minimal TCP handshake, and serves the boot-local HTTP response.
-- `sh scripts/qemu_rv64_http_test.shs --elf build/simpleos-rv64.elf --expect-http-only`
+- `sh scripts/qemu/qemu_rv64_http_test.shs --elf build/simpleos-rv64.elf --expect-http-only`
   is the current executable HTTP boundary check. It proves `/health` returns
   JSON 200 and `/` returns HTML 200 over QEMU host forwarding. The default
   script mode remains the full production HTTP+HTTPS gate and still fails until
   RISC-V TLS is production-ready. Deferred mode remains available only for
   older packet-unavailable images.
-- `sh scripts/qemu_rv64_http_test.shs --elf build/simpleos-rv64.elf --expect-http-only --with-display`
+- `sh scripts/qemu/qemu_rv64_http_test.shs --elf build/simpleos-rv64.elf --expect-http-only --with-display`
   now exposes QEMU `virtio-gpu-pci`, initializes the RV64 freestanding modern
   virtio-pci common/notify path, creates a 320x240 BGRA resource, attaches
   backing memory, sets scanout 0, transfers and flushes a deterministic test
   pattern, and requires `[display-riscv] Display service ready: 320x240
   framebuffer` before accepting the live HTTP smoke result.
-- `sh scripts/qemu_rv64_http_test.shs --elf build/simpleos-rv64.elf --expect-http-only --with-display --with-storage`
+- `sh scripts/qemu/qemu_rv64_http_test.shs --elf build/simpleos-rv64.elf --expect-http-only --with-display --with-storage`
   now creates a QEMU raw probe disk with NVFS superblock replicas at LBA 0 and
   LBA 1, exposes it through `virtio-blk-pci`, initializes the RV64 freestanding
   legacy virtio-blk queue, completes three-descriptor sector-read requests,
@@ -277,7 +277,7 @@ netstack, TLS, and HTTP closures.
   QEMU memory map constants and the noalloc PMM initializer live in the
   freestanding C bridge because the previous SPL global-constant callsite
   lowered the initializer arguments to zero on the RV64 LLVM path.
-- `scripts/qemu_rv32_http_test.shs` has the same `--expect-deferred` contract.
+- `scripts/qemu/qemu_rv32_http_test.shs` has the same `--expect-deferred` contract.
   This pass verified the script contract and syntax, but did not run RV32 QEMU
   because no current `build/simpleos-rv32.elf` kernel image was present.
 - A diagnostic import of `os.kernel.net.tcp_shim` proves the intended strong
@@ -334,7 +334,7 @@ SIMPLE_BOOTSTRAP=1 src/compiler_rust/target/debug/simple native-build \
 Current HTTP-only smoke:
 
 ```bash
-sh scripts/qemu_rv64_http_test.shs --elf build/simpleos-rv64.elf --expect-http-only
+sh scripts/qemu/qemu_rv64_http_test.shs --elf build/simpleos-rv64.elf --expect-http-only
 ```
 
 ## Key Files
@@ -357,7 +357,7 @@ sh scripts/qemu_rv64_http_test.shs --elf build/simpleos-rv64.elf --expect-http-o
 | `src/os/kernel/net/{tcp,driver,thread}_shim.spl` | Baremetal shim stubs |
 | `src/lib/hardware/fpga_linux/soc_vhdl_gen.spl` | SoC VHDL generator |
 | `src/compiler_rust/compiler/src/codegen/runtime_ffi.rs` | Runtime FFI declarations |
-| `scripts/qemu_rv64_http_test.shs` | QEMU integration test script |
+| `scripts/qemu/qemu_rv64_http_test.shs` | QEMU integration test script |
 
 ## Convergence (C1)
 

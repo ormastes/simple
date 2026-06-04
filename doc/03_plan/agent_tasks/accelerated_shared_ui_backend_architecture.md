@@ -68,9 +68,9 @@ Files:
 - `test/perf/tauri_equiv/perf_tauri_runner.spl`
 - `test/perf/graphics_2d/`
 - `doc/09_report/`
-- `scripts/check-*`
-- `scripts/check-startup-size-performance-audit.shs`
-- `scripts/check-web-baremetal-size-audit.shs`
+- `scripts/check/check-*`
+- `scripts/check/check-startup-size-performance-audit.shs`
+- `scripts/check/check-web-baremetal-size-audit.shs`
 - `doc/03_plan/sys_test/`
 
 Tasks:

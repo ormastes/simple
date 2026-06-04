@@ -122,7 +122,7 @@
 ## Known Remaining Work
 
 1. Prove the physical NVMe production lane on real hardware.
-   - Run `scripts/run_simpleos_physical_nvme_perf.shs --production --serial-log <path>`.
+   - Run `scripts/os/run_simpleos_physical_nvme_perf.shs --production --serial-log <path>`.
    - Verify the log with `src/app/simpleos_nvme_serial_check/main.spl`.
    - Required evidence includes `hardware_target=real-nvme`, `qemu=false`,
      `physical_runs>=3`, direct 4K shared-DMA paths, FAT32/NVFS/DBFS consumer
@@ -135,7 +135,7 @@
 2. Keep the serial checker crash fix covered while collecting real production
    evidence.
    - DONE for the production/release lane used by
-     `scripts/run_simpleos_physical_nvme_perf.shs`: `test/unit/app/simpleos_nvme_serial_check_spec.spl`
+     `scripts/os/run_simpleos_physical_nvme_perf.shs`: `test/unit/app/simpleos_nvme_serial_check_spec.spl`
      passes 32 examples in interpreter-driven SPipe when the wrapper is pointed
      at the current debug CLI with `SIMPLEOS_SIMPLE_BIN=src/compiler_rust/target/debug/simple`.
    - The checker now owns a minimal local serial-evidence gate and the wrapper
@@ -313,19 +313,19 @@ bin/simple test test/unit/os/drivers/nvme/nvme_vfat_baseline_script_spec.spl --m
 FAT32_4K_RUNS=0 scripts/perf/run-fat32-4k-cfat-baseline.shs
   FAILED cleanly with a positive-integer validation error for the repeated-run
   count knob.
-sh scripts/run_simpleos_physical_nvme_perf.shs --preflight --report-out /tmp/simpleos_nvme_preflight_probe.sdn
+sh scripts/os/run_simpleos_physical_nvme_perf.shs --preflight --report-out /tmp/simpleos_nvme_preflight_probe.sdn
   FAILED locally: default /dev/nvme*n1 matched 3 real NVMe namespaces, and
   standalone preflight now fails closed before identity probing when the device
   glob is ambiguous
-SIMPLEOS_NVME_DEVICE_GLOB=/dev/nvme{0,1,2}n1 sh scripts/run_simpleos_physical_nvme_perf.shs --preflight --report-out /tmp/simpleos_<dev>_preflight.sdn
+SIMPLEOS_NVME_DEVICE_GLOB=/dev/nvme{0,1,2}n1 sh scripts/os/run_simpleos_physical_nvme_perf.shs --preflight --report-out /tmp/simpleos_<dev>_preflight.sdn
   FAILED for each visible namespace: nvme0n1, nvme1n1, and nvme2n1 all report
   namespace_nsid=1 only, with no distinct user namespace on the same controller
 2026-05-28 current re-probe:
-  sh scripts/run_simpleos_physical_nvme_perf.shs --preflight --report-out /tmp/simpleos_nvme_preflight_probe_current.sdn
+  sh scripts/os/run_simpleos_physical_nvme_perf.shs --preflight --report-out /tmp/simpleos_nvme_preflight_probe_current.sdn
   still fails because /dev/nvme*n1 matches three namespace devices.
   Explicit per-device preflight for /dev/nvme0n1, /dev/nvme1n1, and
   /dev/nvme2n1 still fails with no distinct assignable user namespace.
-sh scripts/run_simpleos_physical_nvme_perf.shs --preflight-scan --report-out /tmp/simpleos_nvme_preflight_scan_current.sdn --preflight-out /tmp/simpleos_nvme_preflight_current.sdn
+sh scripts/os/run_simpleos_physical_nvme_perf.shs --preflight-scan --report-out /tmp/simpleos_nvme_preflight_scan_current.sdn --preflight-out /tmp/simpleos_nvme_preflight_current.sdn
   FAILED locally after testing all default matches independently:
   /dev/nvme0n1, /dev/nvme1n1, and /dev/nvme2n1 each report no distinct
   assignable user namespace, producing `preflight-scan=not-ready
@@ -535,7 +535,7 @@ bin/simple test test/unit/os/port/host_fat32_tree_populator_spec.spl --mode=inte
 bin/simple check src/lib
 
 # Physical acceptance, only on a host with an isolated same-controller user namespace:
-sh scripts/run_simpleos_physical_nvme_perf.shs --preflight-scan --report-out /tmp/simpleos_nvme_preflight_scan.sdn --preflight-out /tmp/simpleos_nvme_preflight.sdn
+sh scripts/os/run_simpleos_physical_nvme_perf.shs --preflight-scan --report-out /tmp/simpleos_nvme_preflight_scan.sdn --preflight-out /tmp/simpleos_nvme_preflight.sdn
 scripts/perf/prepare-fat32-4k-vfat.shs
 FAT32_4K_RUNS=3 REQUIRE_VFAT_BASELINE=1 scripts/perf/run-fat32-4k-cfat-baseline.shs
 ```

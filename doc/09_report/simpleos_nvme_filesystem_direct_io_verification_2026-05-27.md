@@ -114,7 +114,7 @@ identity fields. An actual physical NVMe run remains pending. The same gate is
 now exposed by
 `src/app/simpleos_nvme_serial_check/main.spl --serial-log <path>` so captured
 real hardware logs can be checked directly in the runner or lab workflow.
-`scripts/run_simpleos_physical_nvme_perf.shs --serial-log <path>
+`scripts/os/run_simpleos_physical_nvme_perf.shs --serial-log <path>
 --validate-log-only` is the canonical wrapper for checking an existing capture;
 without `--validate-log-only` it captures from `SERIAL_PORT` first and then
 delegates to the same checker. The wrapper also supports `--preflight` to verify
@@ -122,7 +122,7 @@ the checker runtime/app and a host-visible NVMe namespace device before capture.
 For production lab use, the live command must provide the serial device and
 capture parameters explicitly:
 `SERIAL_PORT=<port> SERIAL_BAUD=<baud>
-scripts/run_simpleos_physical_nvme_perf.shs --production --serial-log <path>
+scripts/os/run_simpleos_physical_nvme_perf.shs --production --serial-log <path>
 --serial-seconds=<seconds> --preflight-out <path> --report-out <path>`. This
 generates the host NVMe identity report and then validates that the SimpleOS
 serial log reports the same model, serial, system namespace, and distinct user

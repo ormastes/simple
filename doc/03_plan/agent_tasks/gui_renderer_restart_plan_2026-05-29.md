@@ -32,7 +32,7 @@ These checks passed during the session and should be repeated after restore:
   - CPU and Metal-requested paths both rendered 768 pixels.
   - CPU/Metal sample parity printed `true true`.
 - On-screen Simple web renderer:
-  - `scripts/macos-gui-run.shs examples/ui/web_engine2d_gui.spl`
+  - `scripts/gui/macos-gui-run.shs examples/ui/web_engine2d_gui.spl`
   - macOS window: `Simple Web + Engine2D`, outer size `640x512`.
   - Screenshot: `build/screenshots/web_engine2d_gui_current.png`.
 - Headless Simple browser:
@@ -40,17 +40,17 @@ These checks passed during the session and should be repeated after restore:
   - CPU snapshot wrote `build/screenshots/browser_cpu_probe.ppm`.
   - Metal-requested snapshot wrote `build/screenshots/browser_metal_probe.ppm`.
 - On-screen Simple browser:
-  - `scripts/macos-gui-run.shs src/app/ui/main.spl browser examples/ui/hello_gui.ui.sdn --backend cpu`
+  - `scripts/gui/macos-gui-run.shs src/app/ui/main.spl browser examples/ui/hello_gui.ui.sdn --backend cpu`
   - macOS window: `Simple Browser`, outer size `336x256`.
   - Screenshot: `build/screenshots/simple_browser_cpu_gui_current.png`.
 - Tauri:
-  - `scripts/macos-tauri-simple-run.shs examples/ui/hello_tauri.ui.sdn`
+  - `scripts/gui/macos-tauri-simple-run.shs examples/ui/hello_tauri.ui.sdn`
   - Tauri shell opened a native window with rendered `Hello Tauri`.
   - Screenshot: `build/screenshots/tauri_gui_current.png`.
 
 ## Known Fixes To Re-Check
 
-1. `scripts/macos-gui-run.shs`
+1. `scripts/gui/macos-gui-run.shs`
    - Must forward extra program args after the `.spl` entry.
    - Must absolutize existing forwarded file paths before `open ... --args`.
 
@@ -82,14 +82,14 @@ timeout 100s env SIMPLE_TIMEOUT_SECONDS=0 SIMPLE_EXECUTION_MODE=interpret \
   /tmp/browser_snapshot_probe.spl
 
 env SIMPLE_TIMEOUT_SECONDS=120 \
-  scripts/macos-gui-run.shs examples/ui/web_engine2d_gui.spl
+  scripts/gui/macos-gui-run.shs examples/ui/web_engine2d_gui.spl
 
 env SIMPLE_TIMEOUT_SECONDS=180 \
-  scripts/macos-gui-run.shs src/app/ui/main.spl browser \
+  scripts/gui/macos-gui-run.shs src/app/ui/main.spl browser \
   examples/ui/hello_gui.ui.sdn --backend cpu
 
 env SIMPLE_TIMEOUT_SECONDS=120 \
-  scripts/macos-tauri-simple-run.shs examples/ui/hello_tauri.ui.sdn
+  scripts/gui/macos-tauri-simple-run.shs examples/ui/hello_tauri.ui.sdn
 ```
 
 After on-screen runs, capture screenshots under `build/screenshots/` and confirm

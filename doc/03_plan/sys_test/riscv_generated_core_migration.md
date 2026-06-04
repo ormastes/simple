@@ -14,5 +14,5 @@ Date: 2026-04-29
    Verifies proof-lane labels and shell-contract defaults.
 2. `test/unit/hardware/fpga_linux/riscv_fpga_linux_spec.spl`
    Verifies generated bundle metadata, readiness summaries, and scope labels.
-3. `bash -n scripts/check-riscv-rtl-linux-smoke.shs scripts/rtl_riscv32_linux_litex.shs scripts/rtl_riscv64_linux_cva6.shs`
+3. `bash -n scripts/check/check-riscv-rtl-linux-smoke.shs scripts/rtl/rtl_riscv32_linux_litex.shs scripts/rtl/rtl_riscv64_linux_cva6.shs`
    Verifies script syntax after truth-label changes.

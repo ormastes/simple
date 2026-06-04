@@ -36,7 +36,7 @@ scalar-pretending-to-be-NEON false-greens:
    counter did not advance (`native_simd_executed`), closing the old false-green
    where the path reported `has_neon` without running NEON.
 
-The gate (`scripts/check-cpu-simd-engine2d-evidence.shs`) reports
+The gate (`scripts/check/check-cpu-simd-engine2d-evidence.shs`) reports
 `native_simd_executed`, `native_simd_bit_exact`, and `native_simd_hits`.
 Verified result on Apple aarch64: `executed=true bit_exact=true hits=2`.
 

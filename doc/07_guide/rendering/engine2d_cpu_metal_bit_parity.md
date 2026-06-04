@@ -7,7 +7,7 @@ dedicated gate, not by trusting per-backend readback specs.
 ## Gate
 
 ```sh
-sh scripts/check-engine2d-cpu-metal-parity-evidence.shs
+sh scripts/check/check-engine2d-cpu-metal-parity-evidence.shs
 ```
 
 It runs `test/integration/rendering/engine2d_cpu_metal_parity_run.spl` via

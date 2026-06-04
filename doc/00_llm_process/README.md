@@ -49,7 +49,7 @@ The host setup script initializes both SPipe submodules, refreshes
 this repository:
 
 ```bash
-sh scripts/setup-spipe-submodule.shs
+sh scripts/setup/setup-spipe-submodule.shs
 ```
 
 On Windows, run the PowerShell setup script from the submodule:

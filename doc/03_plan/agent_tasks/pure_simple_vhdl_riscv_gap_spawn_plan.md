@@ -142,8 +142,8 @@ Acceptance:
 bin/simple test --no-cache test/system/compiler/pure_simple_vhdl_source_of_truth_spec.spl
 bin/simple test --no-cache test/system/compiler/vhdl_source_facade_spec.spl
 bin/simple test --only-skipped --list-skip-features --pending test/unit/compiler/vhdl_python_hdl_parity_spec.spl.skip
-sh scripts/check-core-runtime-smoke.shs bin/simple
-SIMPLE_BINARY=bin/simple sh scripts/check-mcp-native-smoke.shs
+sh scripts/check/check-core-runtime-smoke.shs bin/simple
+SIMPLE_BINARY=bin/simple sh scripts/check/check-mcp-native-smoke.shs
 ```
 
 ## Done Definition

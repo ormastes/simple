@@ -716,7 +716,7 @@ node -e "const fs=require('fs'); JSON.parse(fs.readFileSync('tools/electron-shel
 node test/unit/app/ui/electron_bridge_common_envelope_test.js
 timeout 5s bin/simple run src/app/ui.electron/app.spl examples/ui/hello_tauri.ui.sdn | head -1
 xvfb-run -a --server-args='-screen 0 1280x720x24' npm --prefix tools/electron-shell run live-smoke
-scripts/check-electron-live-smoke.shs
+scripts/check/check-electron-live-smoke.shs
 cat build/electron_shell_envelope.json
 ```
 
@@ -731,7 +731,7 @@ The live Electron BrowserWindow proof also passes on this host under Xvfb; the
 proof file contains
 `{"target":"electron","surface_id":"main","width":1280,"height":720}` after the
 WebView observes `window.__SIMPLE_WEB_RENDER_ENVELOPE__`. The repo-level
-`scripts/check-electron-live-smoke.shs` gate now owns dependency checks, Xvfb
+`scripts/check/check-electron-live-smoke.shs` gate now owns dependency checks, Xvfb
 launch, proof cleanup, and JSON validation; `npm --prefix tools/electron-shell
 run live-smoke-ci` delegates to the same gate. The advisory Electron workflow
 now installs the live-smoke dependencies and runs the same package command when

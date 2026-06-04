@@ -25,7 +25,7 @@ through IPC.
 ## Architecture
 
 ```
-FAT32 Disk Image (scripts/make_os_disk.shs)
+FAT32 Disk Image (scripts/os/make_os_disk.shs)
   /sys/apps/simple_browser.smf
   /sys/apps/simple_compiler.smf
   ...

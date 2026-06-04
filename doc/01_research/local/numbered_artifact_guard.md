@@ -34,7 +34,7 @@ checks, and supports `--all` for local research.
 ## Implemented Guard
 
 - Script: `scripts/audit/numbered-artifact-guard.shs`
-- Repo hygiene integration: `scripts/check-repo-hygiene.shs`
+- Repo hygiene integration: `scripts/check/check-repo-hygiene.shs`
 - Default check: staged added/renamed paths
 - Working-copy check: added/untracked/renamed paths before staging
 - CI/build check: added/renamed paths from `origin/main` merge-base to `HEAD`

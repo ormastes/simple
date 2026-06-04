@@ -63,5 +63,5 @@ The reimplementation is complete only when:
    upstream mold would be selected.
 4. SimpleOS links through the Simple mold implementation and allocates through
    the Simple mimalloc implementation with real reclaim.
-5. The audit gate in `scripts/check-mold-mimalloc-reimplementation-audit.shs`
+5. The audit gate in `scripts/check/check-mold-mimalloc-reimplementation-audit.shs`
    reports `mold_mimalloc_reimplementation_ready=true`.

@@ -89,7 +89,7 @@ $path = [Environment]::GetEnvironmentVariable("Path", "User")
 ```bash
 git clone https://github.com/simple-lang/simple.git
 cd simple
-scripts/setup.sh                    # Creates the bin/simple wrapper and runtime launchers
+scripts/setup/setup.sh                    # Creates the bin/simple wrapper and runtime launchers
 ```
 
 On Windows (CMD/PowerShell):
@@ -105,11 +105,11 @@ If no pre-built release binary exists yet, bootstrap first:
 ```bash
 # Linux / macOS
 scripts/bootstrap/bootstrap-from-scratch.sh --deploy
-scripts/setup.sh
+scripts/setup/setup.sh
 
 # Windows (Git Bash / MSYS2)
 scripts/bootstrap/bootstrap-windows.sh --deploy
-scripts/setup.sh
+scripts/setup/setup.sh
 ```
 
 ### Verify Installation

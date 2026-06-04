@@ -28,7 +28,7 @@ Rust unit coverage builds tiny C objects and verifies that the runtime-retention
 
 ## Loader Dependency Audit
 
-`scripts/check-loader-dependency-closure.shs` uses `cargo metadata`, `cargo tree`, and manifest parsing to report:
+`scripts/check/check-loader-dependency-closure.shs` uses `cargo metadata`, `cargo tree`, and manifest parsing to report:
 
 - direct dependencies for `simple-loader`, `simple-native-loader`, `simple-common`, and `simple-native-all`
 - classification as normal, platform-gated, feature-gated, or test-only
@@ -41,7 +41,7 @@ It fails when:
 
 ## Native Binary Audit Detail
 
-`scripts/check-native-binary-dependency-closure.shs` extends the feature from loader-only closure to binary-root closure.
+`scripts/check/check-native-binary-dependency-closure.shs` extends the feature from loader-only closure to binary-root closure.
 
 It inspects the common local native outputs for:
 

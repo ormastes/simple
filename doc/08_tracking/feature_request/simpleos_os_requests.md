@@ -123,7 +123,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   process diagnostics, shell smoke, and final process-shell success:
   `SIMPLEOS_QEMU_X86_32_BOOT_LIVE=1 SIMPLE_LIB=src bin/simple test test/system/simpleos_x86_32_boot_probe_live_spec.spl --mode=interpreter --clean`
   (`4/4`, 3931 ms). Codex completed the filesystem-backed criterion with an
-  equivalent live QEMU FAT32 initrd lane: `scripts/make_os_disk.shs` now emits
+  equivalent live QEMU FAT32 initrd lane: `scripts/os/make_os_disk.shs` now emits
   x86_32 SMF/ELF payload markers, the i386 Multiboot handoff captures the
   initrd module, and
   `examples/simple_os/arch/x86_32/initrd_fs_exec_probe_entry.spl` verifies

@@ -36,13 +36,13 @@ dev-done
 - impl: Added `src/lib/common/ui/win_text_access.spl` and re-exported it from `common.ui.access`.
 - mcp: Added read-only `play_wm_text_status` status hook in the MCP play tool table and dispatch path.
 - test: Added source-contract SPipe spec and mirrored manual for the first shared module/MCP contract.
-- verify: `SIMPLE_LIB=src bin/release/simple test test/system/app/wm_text_access_mcp/feature/wm_text_access_mcp_spec.spl --mode=interpreter --fail-fast` passed 10 examples; lints for touched implementation/spec paths passed; `sh scripts/check-mcp-native-smoke.shs` passed JSON/schema checks; `doc/06_spec` executable spec count is 0.
+- verify: `SIMPLE_LIB=src bin/release/simple test test/system/app/wm_text_access_mcp/feature/wm_text_access_mcp_spec.spl --mode=interpreter --fail-fast` passed 10 examples; lints for touched implementation/spec paths passed; `sh scripts/check/check-mcp-native-smoke.shs` passed JSON/schema checks; `doc/06_spec` executable spec count is 0.
 - verify-note: `SIMPLE_LIB=src bin/release/simple test test/integration/app/mcp_stdio_integration_spec.spl --mode=interpreter --fail-fast` did not pass because the current runner cannot parse unrelated modules such as `src/compiler/tools/lint/main_part3.spl`, `src/app/io/cli_compile_part1.spl`, and `src/std/common/spec/scenario_helpers.spl`; failures were outside the new WM text-access files.
 - blocker-fix: Normalized parser-sensitive multiline expressions/imports in MCP support paths, fixed process governor imports/state for interpreter execution, restored `bin/simple_mcp_server` delegation, and added a narrow safe-editor wrapper path for the stdio spec.
-- verify: MCP stdio integration now passes 5/5 examples; WM text-access source-contract spec still passes 10/10; touched-path lint exits 0; `find doc/06_spec -name '*_spec.spl' | wc -l` prints 0; `sh scripts/check-mcp-native-smoke.shs` passes JSON/schema checks.
+- verify: MCP stdio integration now passes 5/5 examples; WM text-access source-contract spec still passes 10/10; touched-path lint exits 0; `find doc/06_spec -name '*_spec.spl' | wc -l` prints 0; `sh scripts/check/check-mcp-native-smoke.shs` passes JSON/schema checks.
 - impl: Made the window-to-text core public/importable, added a host-WM primitive-field snapshot helper for CLI/service/MCP callers, fixed parser-sensitive shared UI query serialization, and made the process shell result path public for MCP stdio tests.
 - test: Upgraded the WM text-access SPipe spec from source-contract-only to 15 examples, including behavioral TRACE32, Simple UI, host WM, merged-query, supported-action, and unsupported-operation assertions.
-- verify: `SIMPLE_LIB=src bin/release/simple test test/system/app/wm_text_access_mcp/feature/wm_text_access_mcp_spec.spl --mode=interpreter --fail-fast` passes 15/15; MCP stdio integration passes 5/5; `bin/release/simple check src/compiler`, `src/lib`, `src/app/mcp`, and `src/app/simple_lsp_mcp` all report no errors; `sh scripts/check-mcp-native-smoke.shs` passes; `doc/06_spec` executable spec count remains 0.
+- verify: `SIMPLE_LIB=src bin/release/simple test test/system/app/wm_text_access_mcp/feature/wm_text_access_mcp_spec.spl --mode=interpreter --fail-fast` passes 15/15; MCP stdio integration passes 5/5; `bin/release/simple check src/compiler`, `src/lib`, `src/app/mcp`, and `src/app/simple_lsp_mcp` all report no errors; `sh scripts/check/check-mcp-native-smoke.shs` passes; `doc/06_spec` executable spec count remains 0.
 - audit: Rechecked the current request against existing artifacts. Research,
   requirements, architecture, detail design, system plan, agent plan, SPipe
   spec, mirrored manual, implementation, MCP status hook, UI access guide, and
@@ -86,8 +86,8 @@ dev-done
 - fix: `bin/simple_mcp_server` native `tools/list` was stale and the rebuilt
   native binary segfaulted, so the wrapper now falls back to the source MCP
   entrypoint for stale `tools/list` output and `play_wm_text_*` calls.
-  `scripts/setup.sh` generates the same fallback wrapper.
-- verify: `scripts/check-mcp-native-smoke.shs` now asserts
+  `scripts/setup/setup.sh` generates the same fallback wrapper.
+- verify: `scripts/check/check-mcp-native-smoke.shs` now asserts
   `mcp_wm_text_tools_present=true`; wrapper probes show 151 tools and
   `play_wm_text_status`, `play_wm_text_snapshot`, `play_wm_text_find`, and
   `play_wm_text_act` present with clean stderr.

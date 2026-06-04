@@ -12,7 +12,7 @@ feature
 > Implement the RISC-V64 FPGA SimpleOS launch infrastructure: hardware inventory/preflight scripts, SimpleOS RV64 FPGA platform kernel capsules (manifest-driven UART/timer/memory), bare-metal hello payload, riscv64-fpga-min boot profile, and skip-safe test harness — proving the path from host JTAG/UART detection to SimpleOS boot markers on the connected Xilinx FT4232H carrier board.
 
 ## Acceptance Criteria
-- [x] AC-1: `scripts/check-riscv64-fpga-simpleos-preflight.shs` exists and reports board USB IDs, serial ports, JTAG claim status, available synthesis/programming tools, RISC-V cross compiler versions, and pass/fail/blocked summary
+- [x] AC-1: `scripts/check/check-riscv64-fpga-simpleos-preflight.shs` exists and reports board USB IDs, serial ports, JTAG claim status, available synthesis/programming tools, RISC-V cross compiler versions, and pass/fail/blocked summary
 - [x] AC-2: Hardware inventory log generated under `doc/08_tracking/hardware/` with board model, FT4232H channel map, and udev permissions
 - [x] AC-3: JTAG-mode unbind/rebind script exists that temporarily releases the FTDI JTAG interface from ftdi_sio for programming, then rebinds
 - [x] AC-4: SimpleOS RV64 FPGA platform capsules exist: `src/os/kernel/arch/riscv64/platform/fpga.spl`, `manifest.spl`, `uart_mmio.spl`, `timer_mmio.spl`
@@ -161,7 +161,7 @@ feature
 
 | AC | Verdict | Notes |
 |----|---------|-------|
-| AC-1 | PASS | `scripts/check-riscv64-fpga-simpleos-preflight.shs` exists (5566 bytes, executable). 50 matches for lsusb/ttyUSB/BLOCKED/pass/fail patterns. |
+| AC-1 | PASS | `scripts/check/check-riscv64-fpga-simpleos-preflight.shs` exists (5566 bytes, executable). 50 matches for lsusb/ttyUSB/BLOCKED/pass/fail patterns. |
 | AC-2 | PASS | `doc/08_tracking/hardware/riscv64_fpga_inventory_2026-05-19.md` exists (6313 bytes). Contains ML_Carrier_Card, FT4232H channel map, dialout/plugdev udev rules. |
 | AC-3 | PASS | `scripts/jtag-ftdi-unbind.shs` exists (2648 bytes, executable). 31 matches for unbind/rebind/ftdi_sio/3-2:1.0 patterns. |
 | AC-4 | PASS | All 4 capsules present: `fpga.spl`, `manifest.spl`, `uart_mmio.spl`, `timer_mmio.spl` under `src/os/kernel/arch/riscv64/platform/`. |

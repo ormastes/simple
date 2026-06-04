@@ -76,8 +76,8 @@ Every backend comparison report must include:
 - checksum or pixel/capture proof for rendering claims.
 
 The normalized comparison harness sits above existing focused probes. It should
-reuse `scripts/check-startup-size-performance-audit.shs`,
-`scripts/check-web-baremetal-size-audit.shs`, `test/perf/tauri_equiv/`, and
+reuse `scripts/check/check-startup-size-performance-audit.shs`,
+`scripts/check/check-web-baremetal-size-audit.shs`, `test/perf/tauri_equiv/`, and
 `test/perf/graphics_2d/`, but convert their outputs into one
 `BackendComparisonSample` schema. Backend-specific probes may keep their native
 formats, but release evidence must include the normalized schema.

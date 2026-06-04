@@ -28,9 +28,9 @@ real-board serial evidence for the selected protection mode.
 
 ## Commands Run
 
-- `timeout 20s sh scripts/run_simpleos_cortex_m33_qemu.shs`
-- `timeout 40s sh scripts/run_simpleos_ra4m1.shs --build-only`
-- `timeout 40s sh scripts/run_simpleos_stm32u585.shs --build-only`
+- `timeout 20s sh scripts/os/run_simpleos_cortex_m33_qemu.shs`
+- `timeout 40s sh scripts/os/run_simpleos_ra4m1.shs --build-only`
+- `timeout 40s sh scripts/os/run_simpleos_stm32u585.shs --build-only`
 - `bin/release/x86_64-unknown-linux-gnu/simple os build --arch=x86_64`
 - `timeout 20s qemu-system-x86_64 -machine q35 -cpu qemu64 -m 512M -kernel build/os/simpleos_x86_64.elf -serial stdio -monitor none -display none -no-reboot -device isa-debug-exit,iobase=0xf4,iosize=0x04 -drive file=build/os/fat32-x86_64.img,if=none,id=nvme0,format=raw -device nvme,drive=nvme0,serial=simpleos0 -netdev user,id=net0 -device virtio-net-pci,netdev=net0`
 - `bin/release/x86_64-unknown-linux-gnu/simple check src/os/qemu_runner_part5.spl`
@@ -96,7 +96,7 @@ the AN505 QEMU smoke path.
 
 Command:
 
-- `timeout 30s sh scripts/run_simpleos_cortex_m33_qemu.shs --smoke`
+- `timeout 30s sh scripts/os/run_simpleos_cortex_m33_qemu.shs --smoke`
 
 Process result:
 
@@ -132,14 +132,14 @@ not prove the final pure Simple board HAL because the lane builds
 Catalog alignment: `simpleos_board_qemu_command_for_id_with_mode("mps2-an505",
 ..., FaultTest)` now includes `-semihosting-config enable=on,target=native`, so
 the executable board catalog represents the same self-terminating smoke command
-shape as `scripts/run_simpleos_cortex_m33_qemu.shs --smoke`.
+shape as `scripts/os/run_simpleos_cortex_m33_qemu.shs --smoke`.
 
 Latest rerun result: `QEMU_SMOKE_EXIT=124` because the command was intentionally
 bounded by `timeout 20s`.
 
 Command:
 
-- `timeout 20s sh scripts/run_simpleos_cortex_m33_qemu.shs`
+- `timeout 20s sh scripts/os/run_simpleos_cortex_m33_qemu.shs`
 
 Serial again reached the interactive shell before timeout:
 
@@ -171,7 +171,7 @@ Latest result: `RA4M1_BUILD_EXIT=0` with explicit protection mode.
 
 Command:
 
-- `timeout 40s sh scripts/run_simpleos_ra4m1.shs --build-only --protection=fault-test`
+- `timeout 40s sh scripts/os/run_simpleos_ra4m1.shs --build-only --protection=fault-test`
 
 The script built `build/os/simpleos_ra4m1.elf` and reported:
 
@@ -195,7 +195,7 @@ Latest result: `STM32U585_BUILD_EXIT=0` with explicit protection mode.
 
 Command:
 
-- `timeout 40s sh scripts/run_simpleos_stm32u585.shs --build-only --protection=fault-test`
+- `timeout 40s sh scripts/os/run_simpleos_stm32u585.shs --build-only --protection=fault-test`
 
 The script built `build/os/simpleos_stm32u585.elf`.
 
@@ -524,9 +524,9 @@ plain exit `0` is no longer accepted as scenario success.
 - `simple check src/os/port/simpleos_board_hardening.spl test/unit/os/simpleos_board_hardening_spec.spl`: PASS
 - `simple test test/unit/os/simpleos_board_hardening_spec.spl --clean`: PASS,
   `3` examples passed.
-- `sh -n scripts/run_simpleos_ra4m1.shs && sh -n scripts/run_simpleos_stm32u585.shs`: PASS
-- `timeout 40s sh scripts/run_simpleos_ra4m1.shs --build-only --protection=fault-test`: PASS
-- `timeout 40s sh scripts/run_simpleos_stm32u585.shs --build-only --protection=fault-test`: PASS
+- `sh -n scripts/os/run_simpleos_ra4m1.shs && sh -n scripts/os/run_simpleos_stm32u585.shs`: PASS
+- `timeout 40s sh scripts/os/run_simpleos_ra4m1.shs --build-only --protection=fault-test`: PASS
+- `timeout 40s sh scripts/os/run_simpleos_stm32u585.shs --build-only --protection=fault-test`: PASS
 - `simple check src/os/qemu_runner_part5.spl test/unit/os/qemu_runner_spec.spl`: PASS
 - `simple test test/unit/os/qemu_runner_spec.spl --clean`: FAIL, unchanged
   coarse result of `61` passed and `3` failed. The runner does not print failing
@@ -544,7 +544,7 @@ plain exit `0` is no longer accepted as scenario success.
 - `simple check src/os/port/simpleos_board_hardening.spl test/unit/os/simpleos_board_hardening_spec.spl`: PASS
 - `simple test test/unit/os/simpleos_board_hardening_spec.spl --clean`: PASS,
   `4` examples passed.
-- `sh -n scripts/run_simpleos_ra4m1.shs && sh -n scripts/run_simpleos_stm32u585.shs`: PASS
+- `sh -n scripts/os/run_simpleos_ra4m1.shs && sh -n scripts/os/run_simpleos_stm32u585.shs`: PASS
 - `simple check src/os/port/simpleos_board_hardening.spl test/unit/os/simpleos_board_hardening_spec.spl`: PASS
 - `simple test test/unit/os/simpleos_board_hardening_spec.spl --clean`: PASS,
   `4` examples passed.

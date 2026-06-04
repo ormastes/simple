@@ -26,7 +26,7 @@ The following work is already landed and should not be restated as primary
 feature scope:
 
 - Disk packaging for the six tool apps already exists in
-  `scripts/make_os_disk.shs`.
+  `scripts/os/make_os_disk.shs`.
 - Canonical runtime app ids already exist as `/sys/apps/<name>`.
 - Launcher-visible identities, compatibility aliases, and desktop shortcut
   wiring already exist in `src/os/services/launcher/launcher.spl`.
@@ -90,7 +90,7 @@ or a launcher entry exists.
 
 Touch this layer only if host validation or canonical app-id bytes are wrong.
 
-- Preserve the existing disk packaging in `scripts/make_os_disk.shs`.
+- Preserve the existing disk packaging in `scripts/os/make_os_disk.shs`.
 - Preserve FAT short-name compatibility and `.smf` sidecars as accepted inputs,
   not as runtime identity.
 - Only change packaging if a host-side validation step proves that a target app
@@ -195,7 +195,7 @@ reference process-backed filesystem desktop app in this set.
 
 ### Done
 
-- Disk packaging already exists in `scripts/make_os_disk.shs` for:
+- Disk packaging already exists in `scripts/os/make_os_disk.shs` for:
   - `simple_browser`
   - `simple_compiler`
   - `simple_interpreter`

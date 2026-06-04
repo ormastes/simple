@@ -30,7 +30,7 @@ Declare allowed files per directory. Enforced at lint, commit, and SPipe verify.
 # Add governed dir entry   → edit dir/FILE.md ## Allowed Entries
 # Create new child manifest → create dir/FILE.md + link in parent
 # Check status             → sh scripts/check-workspace-root-guard.shs audit
-# Install hook             → sh scripts/install-workspace-guard-hook.shs --apply
+# Install hook             → sh scripts/setup/install-workspace-guard-hook.shs --apply
 ```
 
 Orphan FILE.md (not linked by parent) = documentation only, not enforced.

@@ -139,7 +139,7 @@ Create a pure-Simple implementation of the narrow host ABI already defined by th
 - Initial conformance gate added: `test_core_lane_runtime_archives_expose_required_abi_symbols` verifies the generated core-C archive, and any discovered `simple-core` archive, against the authoritative required-symbol list.
 - Core-C runtime now exports the missing required stdout/stderr and value-constructor ABI symbols needed for that gate.
 - Core-required ABI now includes the framed-stdio startup symbols `stdin_read_char` and `print_raw`; the core-C behavior probe covers stdin byte read, raw stdout write, stdout/stderr flush, and value constructors.
-- `scripts/check-simple-core-runtime-smoke.shs` now materializes `build/simple-core/libsimple_runtime.a` from the core C runtime sources, verifies required ABI exports including `rt_platform_name`, and runs explicit `--runtime-bundle simple-core` smoke checks. This is a reproducible ABI-complete bootstrap gate, not the final pure-Simple core family implementation.
+- `scripts/check/check-simple-core-runtime-smoke.shs` now materializes `build/simple-core/libsimple_runtime.a` from the core C runtime sources, verifies required ABI exports including `rt_platform_name`, and runs explicit `--runtime-bundle simple-core` smoke checks. This is a reproducible ABI-complete bootstrap gate, not the final pure-Simple core family implementation.
 - `hello_native.spl` builds and runs on explicit `simple-core`, producing `Hello World`; the smoke script audits the hello and TUI smoke binaries for `libsimple_native_all.a`, `rust-hosted`, and unwind markers.
 - The generated standalone TUI wrapper and the real `run_tui("examples/ui/minimal.ui.sdn")` app path both build and run on explicit `simple-core`, exit 0, and print `UI closed.`. The real app path renders through `screen_render(screen)` and exits cleanly on stdin EOF in native smoke mode.
 - Core C runtime now matches the compiled Simple array ABI for `rt_array_push`, `rt_array_get`, `rt_array_set`, `rt_index_get`, `rt_index_set`, and generic `rt_len` on arrays; a native `[text]` push/len/index probe on explicit `simple-core` returns `1` and `abc`.
@@ -158,7 +158,7 @@ Create a pure-Simple implementation of the narrow host ABI already defined by th
 - `std.async.Future<T>` now stores `Poll<T>` directly for the no-GC core path; ready/pending, `map`, `then`, joins, selects, and sync-backed async file helpers no longer route through `future_alloc_*`, `promise_*`, or `async_*` opaque FFI declarations.
 - The Simple-source tree now owns the raw-pointer atomic fallback symbols needed by `std.log` (`rt_atomic_load_u64`, `rt_atomic_store_u64`, `rt_atomic_fetch_add_u64`, `rt_atomic_store_u32`, `rt_atomic_store_u8`) through `src/runtime/simple_core/core_atomic.spl`. This is a bootstrap/single-thread fallback over the raw pointer ABI; hosted/platform lanes remain responsible for true concurrent atomic semantics.
 - The no-GC `std.io.driver.IoDriver` public surface now has a pure Simple fallback that keeps timeout completion smoke behavior local to the no-GC backend and returns `-38` for kernel I/O operations until a platform-specific event driver is selected. This removes direct `rt_driver_*` imports from `src/lib`; the native linker still emits generic `rt_driver_*` stubs from runtime metadata, so linker/runtime metadata cleanup remains a separate package-closure task.
-- `scripts/check-simple-core-runtime-smoke.shs` now builds `build/simple-core/libsimple_runtime.a` from `src/runtime/simple_core` with `--emit-archive --no-mangle` (falling back to the current Rust CLI if `bin/simple` is stale), then verifies hello, standalone TUI, interactive TUI, and closure cleanliness on the selectable `simple-core` lane.
+- `scripts/check/check-simple-core-runtime-smoke.shs` now builds `build/simple-core/libsimple_runtime.a` from `src/runtime/simple_core` with `--emit-archive --no-mangle` (falling back to the current Rust CLI if `bin/simple` is stale), then verifies hello, standalone TUI, interactive TUI, and closure cleanliness on the selectable `simple-core` lane.
 - Pure-Simple source coverage is now 41 of 41 `core-required` symbols.
 
 ## Workstream 2: Migrate MCP/LSP Off `rust-hosted`
@@ -329,7 +329,7 @@ Remove the temporary explicit hosted packaging commands and ship MCP/LSP artifac
 - App-only MCP and Simple LSP MCP binaries pass initialize + tools/list smoke on `core-c`; MCP includes `debug_create_session`, `simple_check`, and `test_daemon_status`, and Simple LSP MCP includes `lsp_definition`.
 - Closure audit on those app-only core-C binaries found no `libsimple_native_all.a`, `rust-hosted`, or unwind strings/symbols.
 - `doc/07_guide/tooling/mcp.md` now documents core-C package validation commands for MCP/LSP instead of `rust-hosted`.
-- `scripts/check-mcp-native-smoke.shs` now validates the mixed transports used by the package binaries: MCP JSON-lines and Simple LSP MCP framed `Content-Length`. The package smoke reports 144 MCP tools and 11 LSP tools with valid schemas.
+- `scripts/check/check-mcp-native-smoke.shs` now validates the mixed transports used by the package binaries: MCP JSON-lines and Simple LSP MCP framed `Content-Length`. The package smoke reports 144 MCP tools and 11 LSP tools with valid schemas.
 
 ### Progress 2026-05-05
 

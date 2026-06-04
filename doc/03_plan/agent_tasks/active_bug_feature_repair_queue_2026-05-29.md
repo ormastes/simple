@@ -189,7 +189,7 @@ Spawned read-only explorers:
       `bin/simple run /tmp/simple_jit_text_extern_probe.MG9fAq.spl`,
       `SIMPLE_LIB=src bin/simple test test/unit/app/simpleos_nvme_serial_check_spec.spl --mode=interpreter --clean`,
       and
-      `sh scripts/run_simpleos_physical_nvme_perf.shs --serial-log /tmp/simple_nvme_serial.HSZrKZ.log --validate-log-only`
+      `sh scripts/os/run_simpleos_physical_nvme_perf.shs --serial-log /tmp/simple_nvme_serial.HSZrKZ.log --validate-log-only`
       (`rc=1`, expected missing-marker validation failure).
 18. Pure Simple collection parity/performance refreshed.
     - Rebuilt `build/simple-core/libsimple_runtime.a` from
@@ -373,7 +373,7 @@ Spawned read-only explorers:
 27. SimpleOS FR-SOS-025 x86_32 FAT32 initrd filesystem app lane completed.
     - Added x86_32 Multiboot module preservation/capture so QEMU `-initrd`
       FAT32 images are visible to the freestanding i386 kernel.
-    - Updated `scripts/make_os_disk.shs` to emit x86_32 SMF/ELF payload markers
+    - Updated `scripts/os/make_os_disk.shs` to emit x86_32 SMF/ELF payload markers
       and `x86_32-initrd-fat32-smf` lane metadata.
     - Added `examples/simple_os/arch/x86_32/initrd_fs_exec_probe_entry.spl`,
       which verifies the FAT32 initrd contains `HELLOSMF`, `BROWSMF`, and

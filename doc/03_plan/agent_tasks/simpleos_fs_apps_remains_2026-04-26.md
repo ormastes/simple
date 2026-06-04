@@ -198,7 +198,7 @@ Acceptance:
 
 ## Dependencies
 
-- Disk image packaging path in `scripts/make_os_disk.shs` and any helper code it
+- Disk image packaging path in `scripts/os/make_os_disk.shs` and any helper code it
   depends on
 - Launcher resolution and shell/shortcut routing for `/sys/apps/*`
 - VFS executable-byte resolution for packaged FAT32 apps

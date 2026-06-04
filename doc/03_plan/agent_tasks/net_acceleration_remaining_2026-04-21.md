@@ -159,8 +159,8 @@ Every implementation wave must run:
 - `git diff --check`.
 - Stub scan on touched files: `TODO`, `pass_todo`, `stub`, `placeholder`,
   `not implemented`, and `expect(true).to_equal(true)`.
-- `sh scripts/check-core-runtime-smoke.shs bin/simple` after `src/lib` changes.
-- `SIMPLE_BINARY=bin/simple sh scripts/check-mcp-native-smoke.shs` after
+- `sh scripts/check/check-core-runtime-smoke.shs bin/simple` after `src/lib` changes.
+- `SIMPLE_BINARY=bin/simple sh scripts/check/check-mcp-native-smoke.shs` after
   compiler/core/lib changes that can affect MCP/LSP startup.
 
 Network implementation waves should also add or update:

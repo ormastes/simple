@@ -14,7 +14,7 @@
    `fix` is requested.
 3. Integration gates: `bin/simple build lint` runs staged audit before the
    normal runtime lint path. `.git/hooks/pre-commit` runs the staged audit
-   (installed via `scripts/install-workspace-guard-hook.shs --apply`).
+   (installed via `scripts/setup/install-workspace-guard-hook.shs --apply`).
 4. Permission backend: `lock` and `unlock` currently emit platform-specific
    restore and lock commands. They do not mutate permissions by default.
 5. Tool-server guard: MCP file I/O already has in-memory protection rules. The

@@ -17,7 +17,7 @@ now pass:
 Run:
 
 ```sh
-sh scripts/check-startup-size-performance-audit.shs
+sh scripts/check/check-startup-size-performance-audit.shs
 ```
 
 Report:

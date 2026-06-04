@@ -9,7 +9,7 @@ After syncing `main` to GitHub and rebuilding/deploying the macOS ARM64
   the full tool list. The first invalid entries omit the closing object before
   the next tool and expose required schema keys without matching
   `inputSchema.properties`.
-- `scripts/check-mcp-native-smoke.shs` fails with
+- `scripts/check/check-mcp-native-smoke.shs` fails with
   `mcp_tools_json_valid=false`, `mcp_tools_schema_valid=false`, and
   `mcp_tools_count=0`.
 - Rebuilding `src/app/mcp/main.spl` on macOS ARM64 with the core-C lane fails at
@@ -34,7 +34,7 @@ After syncing `main` to GitHub and rebuilding/deploying the macOS ARM64
 ## Repro commands
 
 ```bash
-scripts/check-mcp-native-smoke.shs
+scripts/check/check-mcp-native-smoke.shs
 
 SIMPLE_LIB=src bin/simple native-build \
   --runtime-bundle core-c \

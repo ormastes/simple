@@ -21,7 +21,7 @@ manifest. Never deletes files by default.
 
 `src/app/io/cli_ops.spl` defines `_cli_run_workspace_root_guard()` which shells
 out to the guard script with `audit --staged`. Both `cli_lint_commands.spl` and
-`lint_entry.spl` call it before normal lint. `scripts/check-repo-hygiene.shs`
+`lint_entry.spl` call it before normal lint. `scripts/check/check-repo-hygiene.shs`
 also delegates to `audit --staged`.
 
 ## Phase 4 - Commit Hook — ✅ Complete

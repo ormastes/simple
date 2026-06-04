@@ -16,7 +16,7 @@ store or TLS implementation size.
 Current nearby evidence from:
 
 ```sh
-sh scripts/check-startup-size-performance-audit.shs
+sh scripts/check/check-startup-size-performance-audit.shs
 ```
 
 Current measured rows:

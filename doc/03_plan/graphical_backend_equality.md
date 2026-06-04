@@ -54,7 +54,7 @@ WM/web comparison. Use Option A if the next slice must be smaller.
 
 ## Verification Start Set
 
-- `sh scripts/install-spipe-dev-command.shs --check`
+- `sh scripts/setup/install-spipe-dev-command.shs --check`
 - `SIMPLE_LIB=src src/compiler_rust/target/release/simple check <changed src/spec files>`
 - `SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/system/wm_compare/<new spec>.spl --mode=interpreter --clean --format json`
 - `SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/integration/rendering/backend_screenshot_compare_spec.spl --mode=interpreter --clean --format json`

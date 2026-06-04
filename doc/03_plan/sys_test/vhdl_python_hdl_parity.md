@@ -18,5 +18,5 @@
 
 ## Final Gates
 
-- `sh scripts/check-core-runtime-smoke.shs bin/simple`
-- `SIMPLE_BINARY=bin/simple sh scripts/check-mcp-native-smoke.shs`
+- `sh scripts/check/check-core-runtime-smoke.shs bin/simple`
+- `SIMPLE_BINARY=bin/simple sh scripts/check/check-mcp-native-smoke.shs`

@@ -286,7 +286,7 @@ Rust-seed change**:
    Aqua session. Use the helper:
 
    ```bash
-   scripts/macos-gui-run.shs examples/ui/web_engine2d_gui.spl
+   scripts/gui/macos-gui-run.shs examples/ui/web_engine2d_gui.spl
    ```
 
    It builds a throwaway `.app` around the gui driver (binary copied in — it is
@@ -320,4 +320,4 @@ Notes:
 - GUI/WM restart plan: [`doc/03_plan/simple_gui_wm_restart_2026-05-28.md`](../03_plan/simple_gui_wm_restart_2026-05-28.md)
 - Cross-backend parity harness: `src/app/wm_compare/`
 - Semantic UI access surface: [tooling/ui_access.md](tooling/ui_access.md)
-- macOS on-screen GUI launcher: `scripts/macos-gui-run.shs` (see §9)
+- macOS on-screen GUI launcher: `scripts/gui/macos-gui-run.shs` (see §9)

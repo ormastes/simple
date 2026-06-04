@@ -13,7 +13,7 @@
 - Event Log: .spipe/repo-hygiene-gate/events.jsonl
 
 ## Acceptance Criteria
-- [x] AC-1: A repo hygiene gate script exists at `scripts/check-repo-hygiene.shs` following the project check-script convention.
+- [x] AC-1: A repo hygiene gate script exists at `scripts/check/check-repo-hygiene.shs` following the project check-script convention.
 - [x] AC-2: A `.spl` entry point at `src/app/build/repo_hygiene_gate.spl` invokes the gate and reports pass/fail.
 - [x] AC-3: A dedicated CI workflow (`.github/workflows/repo-hygiene.yml`) runs the hygiene gate on every push/PR to main — no path filter, catches all drift.
 - [x] AC-4: The gate detects at least: stale `.smf` placeholders (warning), forbidden file types (`.py`/`.sh` outside vendor/node_modules), naming convention violations in `src/lib/`, and credential/secret leaks.
@@ -42,10 +42,10 @@
 Categorized as code-quality. Refined goal: hygiene regression gate wired into build check pipeline. 5 ACs covering script, entry point, wiring, detection rules, and test coverage.
 
 ### 2-research
-Existing infrastructure: `scripts/check-*.shs` pattern (11 scripts), `src/app/build/cli_entry.spl` (stub returning 0), dispatch table routes `build` to `src/app/build/main.spl` (missing — needs creation). `src/app/build/os_harden_audit.spl` is the closest existing audit pattern. `test/unit/app/audit/audit_spec.spl` provides test template.
+Existing infrastructure: `scripts/check/check-*.shs` pattern (11 scripts), `src/app/build/cli_entry.spl` (stub returning 0), dispatch table routes `build` to `src/app/build/main.spl` (missing — needs creation). `src/app/build/os_harden_audit.spl` is the closest existing audit pattern. `test/unit/app/audit/audit_spec.spl` provides test template.
 
 ### 5-implement
-Created `scripts/check-repo-hygiene.shs` (hygiene gate), `src/app/build/repo_hygiene_gate.spl` (standalone .spl entry), dedicated CI workflow `.github/workflows/repo-hygiene.yml` (no path filter — runs on all pushes/PRs), test spec at `test/unit/app/build/repo_hygiene_gate_spec.spl`.
+Created `scripts/check/check-repo-hygiene.shs` (hygiene gate), `src/app/build/repo_hygiene_gate.spl` (standalone .spl entry), dedicated CI workflow `.github/workflows/repo-hygiene.yml` (no path filter — runs on all pushes/PRs), test spec at `test/unit/app/build/repo_hygiene_gate_spec.spl`.
 
 ### 7-verify
 Gate script runs and detects policy violations. Test spec validates behavior.

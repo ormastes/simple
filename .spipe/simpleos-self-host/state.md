@@ -116,7 +116,7 @@ N/A — integration feature, specs defined in arch phase.
 **Completed 2026-05-11 — 3 parallel streams**
 
 **Stream A: SimpleOS native-build script**
-- Created `scripts/simpleos-native-build.shs` — builds Simple compiler as static SimpleOS ELF
+- Created `scripts/os/simpleos-native-build.shs` — builds Simple compiler as static SimpleOS ELF
 - Supports `--target` override for x86_64/riscv64/aarch64
 - Uses `SIMPLE_BOOTSTRAP=1` + `native-build` with freestanding link
 

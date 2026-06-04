@@ -65,7 +65,7 @@ Host repositories that mount SPipe as submodules should also keep the parent
 index entries as gitlinks. In the Simple host, run:
 
 ```sh
-sh scripts/check-spipe-submodule-gitlinks.shs --check
+sh scripts/check/check-spipe-submodule-gitlinks.shs --check
 ```
 
 ## Host Setup

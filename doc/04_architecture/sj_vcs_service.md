@@ -384,7 +384,7 @@ Four-priority migration order (from R-C recommendations):
 4. **`src/app/mcp/main_lazy_vcs_tools.spl`** — covered by existing integration spec.
 
 Bootstrap-exempt callers (must stay raw): `scripts/bootstrap/bootstrap-from-scratch.sh`,
-`scripts/setup.sh`, jj install/upgrade scripts. These predate the daemon and must not depend on it.
+`scripts/setup/setup.sh`, jj install/upgrade scripts. These predate the daemon and must not depend on it.
 
 Migration sweep for `gg` callers: R-C found zero `gg` callers in tracked files. AC-5 is
 satisfied by: (a) documenting `gg → sj git` alias mapping in

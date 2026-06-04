@@ -80,8 +80,8 @@ Primary tests:
   - `bin/simple test test/unit/compiler/loader/module_loader_spec.spl`
   - `bin/simple test test/unit/compiler/loader/module_loader_crash_fix_spec.spl`
   - runtime-loader-focused regression coverage for the lifecycle-aware path
-  - `sh scripts/check-core-runtime-smoke.shs src/compiler_rust/target/release/simple`
-  - `SIMPLE_BINARY=src/compiler_rust/target/release/simple sh scripts/check-mcp-native-smoke.shs`
+  - `sh scripts/check/check-core-runtime-smoke.shs src/compiler_rust/target/release/simple`
+  - `SIMPLE_BINARY=src/compiler_rust/target/release/simple sh scripts/check/check-mcp-native-smoke.shs`
 
 ## Recommended Order
 

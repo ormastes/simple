@@ -37,7 +37,7 @@ shell with `[MPU] Enabled, 8 regions available, 4 configured`. The serial
 classifies as `mps2-an505` QEMU `enforce` evidence, but not `fault-test`
 evidence, and the lane still needs a non-interactive guest pass/exit marker.
 
-Follow-up AN505 smoke progress: `scripts/run_simpleos_cortex_m33_qemu.shs
+Follow-up AN505 smoke progress: `scripts/os/run_simpleos_cortex_m33_qemu.shs
 --smoke` now runs the guest selftest, emits explicit protection markers
 (`protection_probe=pass`, `protection_enabled=pass`, `region_contract=pass`,
 `fault_recovered=pass`), prints `TEST PASSED`, and exits QEMU with status `0`.
@@ -86,7 +86,7 @@ protection selftest during boot and emit `fault_recovered=pass` when it passes.
 Exit evidence:
 
 - Focused qemu runner tests reject x86_64 exit `0` for `isa-debug-exit` lanes.
-- Search report over `src/os`, `scripts/run_simpleos_*`, and board plans shows
+- Search report over `src/os`, `scripts/os/run_simpleos_*`, and board plans shows
   no acceptance marker that allows dummy/fake/stub success.
 
 ## Phase 2 - Board Catalog And Real QEMU Mapping
@@ -113,8 +113,8 @@ Initial descriptors:
 | Board | CPU | QEMU | Physical Script | Protection |
 |-------|-----|------|-----------------|------------|
 | `mps2-an505` | Cortex-M33 | `qemu-system-arm -machine mps2-an505 -cpu cortex-m33` | QEMU only | PMSAv8-M MPU |
-| `ra4m1-uno-r4` | Cortex-M4 | no faithful QEMU target | `scripts/run_simpleos_ra4m1.shs` | PMSAv7 MPU |
-| `stm32u585-uno-q` | Cortex-M33 | partial via AN505 only for CPU-class smoke | `scripts/run_simpleos_stm32u585.shs` | PMSAv8-M MPU |
+| `ra4m1-uno-r4` | Cortex-M4 | no faithful QEMU target | `scripts/os/run_simpleos_ra4m1.shs` | PMSAv7 MPU |
+| `stm32u585-uno-q` | Cortex-M33 | partial via AN505 only for CPU-class smoke | `scripts/os/run_simpleos_stm32u585.shs` | PMSAv8-M MPU |
 | `x86_64-q35` | x86_64 | `qemu-system-x86_64 -machine q35` | PC/UEFI | paging/IOMMU |
 | `riscv64-virt` | rv64gc | `qemu-system-riscv64 -machine virt` | QEMU/FPGA follow-up | Sv39 |
 | `xck26-ml-carrier` | rv64gc FPGA lane | generated-linux wrapper | board bundle | Sv39/IOMMU gate |
@@ -505,7 +505,7 @@ Pure-Simple completion gate:
 QEMU commands to prove before claiming completion:
 
 - AN505 Cortex-M33 build + run:
-  - `sh scripts/run_simpleos_cortex_m33_qemu.shs`
+  - `sh scripts/os/run_simpleos_cortex_m33_qemu.shs`
 - x86_64 q35 PCI/NVMe/network:
   - QEMU lane with q35, NVMe, virtio-net, serial log, and marker checks.
   - Pure-Simple lane must use the pure q35 marker contract, not only

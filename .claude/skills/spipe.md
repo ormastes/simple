@@ -16,8 +16,8 @@ Codex routes SPipe development work through `$sp_dev`:
 Check or install that wiring with:
 
 ```bash
-sh scripts/install-spipe-dev-command.shs --check
-sh scripts/install-spipe-dev-command.shs --apply
+sh scripts/setup/install-spipe-dev-command.shs --check
+sh scripts/setup/install-spipe-dev-command.shs --apply
 ```
 
 ## Quick references in the same directory

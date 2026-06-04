@@ -60,7 +60,7 @@ Current guards cover:
 - `spipe doctor .` host link and common-surface checks.
 - `sh examples/spipe/scripts/build.sh` separated project smoke.
 - `sh .spipe/spipe/scripts/build.sh` compatibility mount smoke.
-- `sh scripts/install-spipe-dev-command.shs --check` SPipe command routing.
+- `sh scripts/setup/install-spipe-dev-command.shs --check` SPipe command routing.
 - `find doc/06_spec -name '*_spec.spl' | wc -l` layout invariant.
 - `diff -qr -x .git examples/spipe .spipe/spipe` checkout drift invariant.
 

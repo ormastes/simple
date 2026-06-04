@@ -88,5 +88,5 @@ cargo test -p simple-compiler build_vreg_types -- --nocapture
 bin/simple run /tmp/jit_text_07.spl
 bin/simple run /tmp/simple_jit_text_extern_probe.MG9fAq.spl
 SIMPLE_LIB=src bin/simple test test/unit/app/simpleos_nvme_serial_check_spec.spl --mode=interpreter --clean
-sh scripts/run_simpleos_physical_nvme_perf.shs --serial-log /tmp/simple_nvme_serial.HSZrKZ.log --validate-log-only
+sh scripts/os/run_simpleos_physical_nvme_perf.shs --serial-log /tmp/simple_nvme_serial.HSZrKZ.log --validate-log-only
 ```

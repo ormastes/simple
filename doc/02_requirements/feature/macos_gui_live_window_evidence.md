@@ -30,7 +30,7 @@ captures the visible window, and emits deterministic visual evidence.
 
 ## Candidate Files
 
-- `scripts/check-macos-gui-live-window-evidence.shs`
+- `scripts/check/check-macos-gui-live-window-evidence.shs`
 - `test/system/gui/macos_gui_live_window_evidence_spec.spl`
 - `doc/06_spec/system/gui/macos_gui_live_window_evidence_spec.md`
 

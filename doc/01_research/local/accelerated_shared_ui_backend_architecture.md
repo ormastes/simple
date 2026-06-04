@@ -55,9 +55,9 @@ existing shared-WM completion audit instead of replacing it.
   `doc/02_requirements/nfr/graphics_backend_acceleration_options.md` already
   define performance-first backend options, but they under-specify OpenCL.
 - Existing performance infrastructure is split by concern:
-  `scripts/check-startup-size-performance-audit.shs` measures stripped startup
+  `scripts/check/check-startup-size-performance-audit.shs` measures stripped startup
   probes, binary size, section bytes, loaded libraries, and average runtime;
-  `scripts/check-web-baremetal-size-audit.shs` measures web/bare-metal size
+  `scripts/check/check-web-baremetal-size-audit.shs` measures web/bare-metal size
   budgets; `test/perf/graphics_2d/` contains C, Vulkan, CUDA SFFI, Metal, and
   tiered-JIT 2D benchmark files; `test/perf/tauri_equiv/` records GUI/Tauri
   workflow fields but currently uses simulated values.

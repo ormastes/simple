@@ -11,7 +11,7 @@ Workflow:
 - Protected environments: `live-kms-aws`, `live-kms-gcp`, `live-kms-azure`, `live-kms-hsm`
 - Test: `test/integration/lib/security/live_kms_transport_spec.spl`
 
-Repository hygiene also runs `scripts/check-live-kms-security-workflow.shs` to keep this workflow manual-only, environment-scoped, and fail-fast on missing credentials. If `actionlint` is installed locally, that script runs it before the invariant checks.
+Repository hygiene also runs `scripts/check/check-live-kms-security-workflow.shs` to keep this workflow manual-only, environment-scoped, and fail-fast on missing credentials. If `actionlint` is installed locally, that script runs it before the invariant checks.
 
 ## Environment Setup
 
@@ -93,7 +93,7 @@ AWS:
 Local structural checks:
 
 ```sh
-sh scripts/check-live-kms-security-workflow.shs
+sh scripts/check/check-live-kms-security-workflow.shs
 bin/simple test test/system/code_quality/live_kms_security_workflow_spec.spl --mode=interpreter
 ```
 

@@ -12,7 +12,7 @@ Owner: Codex main coordinator
   `RUN_QEMU_LIVE_CAPTURE`, `STRICT_QEMU_CAPTURE`, `QEMU_QMP_SOCKET`, and
   `QEMU_SCREENDUMP_PATH`.
 - Focused evidence already passed with live QEMU/Electron disabled:
-  `scripts/check-wm-launch-capture-evidence.shs` reports
+  `scripts/check/check-wm-launch-capture-evidence.shs` reports
   `wm_launch_capture_evidence_status=pass`,
   `wm_launch_capture_qemu_live_status=skipped`.
 
@@ -74,14 +74,14 @@ Scope:
   `unavailable` or `skipped`, not as a false pass.
 
 Owned files:
-- `scripts/check-wm-launch-capture-evidence.shs`
-- `scripts/check-electron-live-smoke.shs`
+- `scripts/check/check-wm-launch-capture-evidence.shs`
+- `scripts/check/check-electron-live-smoke.shs`
 - `src/os/compositor/qemu_capture.spl`
 - `test/unit/os/compositor/qemu_capture_spec.spl`
 - `test/unit/os/compositor/electron_capture_spec.spl`
 
 Evidence:
-- `RUN_QEMU_LIVE_CAPTURE=0 RUN_ELECTRON_LIVE_SMOKE=0 scripts/check-wm-launch-capture-evidence.shs`
+- `RUN_QEMU_LIVE_CAPTURE=0 RUN_ELECTRON_LIVE_SMOKE=0 scripts/check/check-wm-launch-capture-evidence.shs`
 - A strict QEMU lane on hosts with `QEMU_QMP_SOCKET` available.
 
 ### Slice D - Active Repair Queue Residuals
@@ -174,5 +174,5 @@ Evidence:
   passed `11/11`.
 - `bin/simple test test/unit/os/compositor/electron_capture_spec.spl --mode=interpreter`
   passed `7/7`.
-- `RUN_QEMU_LIVE_CAPTURE=0 RUN_ELECTRON_LIVE_SMOKE=0 STRICT_LIVE_CAPTURE=0 STRICT_QEMU_CAPTURE=0 WM_CAPTURE_EVIDENCE_TIMEOUT_SECS=60 scripts/check-wm-launch-capture-evidence.shs`
+- `RUN_QEMU_LIVE_CAPTURE=0 RUN_ELECTRON_LIVE_SMOKE=0 STRICT_LIVE_CAPTURE=0 STRICT_QEMU_CAPTURE=0 WM_CAPTURE_EVIDENCE_TIMEOUT_SECS=60 scripts/check/check-wm-launch-capture-evidence.shs`
   reported `wm_launch_capture_evidence_status=pass`.

@@ -35,7 +35,7 @@ helpers, capture policy, inline/previous scenario expansion, and manual
 visibility until the generated manual is good enough to use without opening the
 source test. See `doc/07_guide/testing/sspec_scenario_manual.md`.
 
-Run `sh scripts/install-spipe-dev-command.shs --check` on Unix-like hosts, or
+Run `sh scripts/setup/install-spipe-dev-command.shs --check` on Unix-like hosts, or
 `powershell -ExecutionPolicy Bypass -File scripts\install-spipe-dev-command.ps1 --check`
 on Windows, to verify that this repository still routes Codex development
 through `/sp_dev` and does not carry a separate `/dev` skill.

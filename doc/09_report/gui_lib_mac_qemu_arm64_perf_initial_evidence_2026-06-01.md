@@ -35,15 +35,15 @@
 
 ## Verification Run
 
-- `sh scripts/install-spipe-dev-command.shs --check`: PASS.
-- `sh scripts/check-simpleos-arm64-wm-qemu-readiness.shs`: ready; QEMU aarch64 present; `virt` machine present; `ramfb` device present; dry-run parse true.
+- `sh scripts/setup/install-spipe-dev-command.shs --check`: PASS.
+- `sh scripts/check/check-simpleos-arm64-wm-qemu-readiness.shs`: ready; QEMU aarch64 present; `virt` machine present; `ramfb` device present; dry-run parse true.
 - `bash -n bin/simple && bash -n scripts/macos-gui-run.shs`: PASS.
 - `SIMPLE_TIMEOUT_SECONDS=30 scripts/macos-gui-run.shs examples/simple_os/hosted/gui_test.spl`: rejected as release evidence. It only proves macOS `.app` registration and event delivery for a smoke surface; it is not a real shared WM, does not render Simple Web MDI content, and must not be used as the manual-inspection path.
 - `bin/simple test test/perf/graphics_2d/metal_smoke_spec.spl --mode=interpreter`: PASS, 12 tests.
 - `bin/simple test test/integration/rendering/perf_smoke_spec.spl --mode=interpreter`: PASS, 16 tests.
-- `sh scripts/check-metal-generated-2d-readback.shs`: unavailable, reason `missing-metal-submit-readback-harness`; report `doc/09_report/metal_generated_2d_readback_2026-06-01.md`.
-- `sh scripts/check-metal-engine2d-framebuffer-readback-evidence.shs`: PASS, reason `raw-metal-framebuffer-download-proven`; report `doc/09_report/metal_engine2d_framebuffer_readback_2026-06-01.md`.
-- `RUN_QEMU_LIVE_CAPTURE=0 sh scripts/check-wm-launch-capture-evidence.shs`: PASS for contract/spec after module fixes; QEMU live capture skipped by request; electron live unavailable due missing `xvfb-run`; report `build/wm-launch-capture-evidence/report.md`.
+- `sh scripts/check/check-metal-generated-2d-readback.shs`: unavailable, reason `missing-metal-submit-readback-harness`; report `doc/09_report/metal_generated_2d_readback_2026-06-01.md`.
+- `sh scripts/check/check-metal-engine2d-framebuffer-readback-evidence.shs`: PASS, reason `raw-metal-framebuffer-download-proven`; report `doc/09_report/metal_engine2d_framebuffer_readback_2026-06-01.md`.
+- `RUN_QEMU_LIVE_CAPTURE=0 sh scripts/check/check-wm-launch-capture-evidence.shs`: PASS for contract/spec after module fixes; QEMU live capture skipped by request; electron live unavailable due missing `xvfb-run`; report `build/wm-launch-capture-evidence/report.md`.
 - `bin/simple run test/perf/graphics_2d/perf_2d_runner.spl`: PASS after switching the timer wrapper to the exported `rt_time_now_unix_micros` symbol. Latest host numbers: fill avg 29,069 us; rect avg 247,733 us; mixed avg 3,885 us. The pure rect path remains the main optimization target.
 - `test/perf/graphics_2d/simple_runner.spl` pure Simple framebuffer optimization:
   - Changed the runner framebuffer from four `u8` stores per pixel to one packed `i64` pixel store, with final hash expansion preserving C byte-order parity.
@@ -102,7 +102,7 @@
   - Verification: `backend_evidence_spec.spl` passed, 10 tests in 3,812 ms.
   - Verification: `shared_mdi_framebuffer_scene_spec.spl` passed, 2 tests in 18,045 ms.
   - Verification: `arm64_wm_shared_mdi_contract_spec.spl` passed, 1 test in 3,852 ms.
-  - Capture blocker: `scripts/check-hosted-wm-capture-evidence.shs` now exits bounded and records `hosted-wm-capture-timeout`; latest report is `doc/09_report/hosted_wm_capture_evidence_2026-06-01.md`. The hosted capture artifact is still not accepted evidence until the timeout is fixed.
+  - Capture blocker: `scripts/check/check-hosted-wm-capture-evidence.shs` now exits bounded and records `hosted-wm-capture-timeout`; latest report is `doc/09_report/hosted_wm_capture_evidence_2026-06-01.md`. The hosted capture artifact is still not accepted evidence until the timeout is fixed.
 
 ## Open Evidence Gaps
 

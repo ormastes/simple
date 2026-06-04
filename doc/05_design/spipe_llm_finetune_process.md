@@ -121,7 +121,7 @@ Key release evidence commands:
 - `spipe fine-tune-ready <attempt_id>`
 - `spipe fine-tune-report <attempt_id>`
 - `spipe fine-tune-verify <record.sdn>`
-- `sh scripts/check-spipe-submodule-gitlinks.shs --check`
+- `sh scripts/check/check-spipe-submodule-gitlinks.shs --check`
 - `find doc/06_spec -name '*_spec.spl' | wc -l`
 
 ## Host Scripts

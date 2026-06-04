@@ -83,7 +83,7 @@ is unavailable.
 Evidence:
 
 ```sh
-sh scripts/check-gui-wasm-cli-artifact.shs
+sh scripts/check/check-gui-wasm-cli-artifact.shs
 ```
 
 On 2026-05-31 this produced `build/gui_wasm_cli_artifact/hello_wasm_gui.wasm`

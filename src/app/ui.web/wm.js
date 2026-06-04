@@ -157,6 +157,8 @@ class SimpleWindowManager {
     this._qualityBackdropPolicyActiveIndex = 0;
     this._qualityWallpaperPolicyActiveIndex = 0;
     this._qualityTitleCommandPolicyActiveIndex = 1;
+    this._qualityWindowTransitionPolicyActiveIndex = 0;
+    this._qualityAnimationStylePolicyActiveIndex = 0;
     this._taskbarPreview = null;
     this._taskbarPreviewHideTimer = 0;
     this._wmTooltip = null;
@@ -4914,6 +4916,20 @@ class SimpleWindowManager {
         this._activateQualityTitleCommandPolicySelection();
         return;
       }
+      const windowTransitionPolicy = event.target.closest('.wm-quality-window-transition-policy-item');
+      if (windowTransitionPolicy && panel.contains(windowTransitionPolicy)) {
+        this._qualityWindowTransitionPolicyActiveIndex = Number(windowTransitionPolicy.dataset.windowTransitionPolicyIndex || '0') || 0;
+        this._syncQualityWindowTransitionPolicySelection(false);
+        this._activateQualityWindowTransitionPolicySelection();
+        return;
+      }
+      const animationStylePolicy = event.target.closest('.wm-quality-animation-style-policy-item');
+      if (animationStylePolicy && panel.contains(animationStylePolicy)) {
+        this._qualityAnimationStylePolicyActiveIndex = Number(animationStylePolicy.dataset.animationStylePolicyIndex || '0') || 0;
+        this._syncQualityAnimationStylePolicySelection(false);
+        this._activateQualityAnimationStylePolicySelection();
+        return;
+      }
       const mode = event.target.closest('[data-quality-mode]');
       if (mode && panel.contains(mode)) {
         this._setQualityAuditMode(mode.dataset.qualityMode || 'full');
@@ -4935,13 +4951,17 @@ class SimpleWindowManager {
       const backdropPolicy = target ? target.closest('.wm-quality-backdrop-policy-item') : null;
       const wallpaperPolicy = target ? target.closest('.wm-quality-wallpaper-policy-item') : null;
       const titleCommandPolicy = target ? target.closest('.wm-quality-title-command-policy-item') : null;
-      if ((!contrastPolicy || !panel.contains(contrastPolicy)) && (!densityPolicy || !panel.contains(densityPolicy)) && (!backdropPolicy || !panel.contains(backdropPolicy)) && (!wallpaperPolicy || !panel.contains(wallpaperPolicy)) && (!titleCommandPolicy || !panel.contains(titleCommandPolicy))) return;
+      const windowTransitionPolicy = target ? target.closest('.wm-quality-window-transition-policy-item') : null;
+      const animationStylePolicy = target ? target.closest('.wm-quality-animation-style-policy-item') : null;
+      if ((!contrastPolicy || !panel.contains(contrastPolicy)) && (!densityPolicy || !panel.contains(densityPolicy)) && (!backdropPolicy || !panel.contains(backdropPolicy)) && (!wallpaperPolicy || !panel.contains(wallpaperPolicy)) && (!titleCommandPolicy || !panel.contains(titleCommandPolicy)) && (!windowTransitionPolicy || !panel.contains(windowTransitionPolicy)) && (!animationStylePolicy || !panel.contains(animationStylePolicy))) return;
       const moveSelection = (delta) => {
         if (contrastPolicy) this._moveQualityContrastPolicySelection(delta);
         if (densityPolicy) this._moveQualityDensityPolicySelection(delta);
         if (backdropPolicy) this._moveQualityBackdropPolicySelection(delta);
         if (wallpaperPolicy) this._moveQualityWallpaperPolicySelection(delta);
         if (titleCommandPolicy) this._moveQualityTitleCommandPolicySelection(delta);
+        if (windowTransitionPolicy) this._moveQualityWindowTransitionPolicySelection(delta);
+        if (animationStylePolicy) this._moveQualityAnimationStylePolicySelection(delta);
       };
       const setSelection = (index) => {
         if (contrastPolicy) this._setQualityContrastPolicySelection(index);
@@ -4949,14 +4969,18 @@ class SimpleWindowManager {
         if (backdropPolicy) this._setQualityBackdropPolicySelection(index);
         if (wallpaperPolicy) this._setQualityWallpaperPolicySelection(index);
         if (titleCommandPolicy) this._setQualityTitleCommandPolicySelection(index);
+        if (windowTransitionPolicy) this._setQualityWindowTransitionPolicySelection(index);
+        if (animationStylePolicy) this._setQualityAnimationStylePolicySelection(index);
       };
-      const itemCount = contrastPolicy ? this._qualityContrastPolicyItems().length : densityPolicy ? this._qualityDensityPolicyItems().length : backdropPolicy ? this._qualityBackdropPolicyItems().length : wallpaperPolicy ? this._qualityWallpaperPolicyItems().length : this._qualityTitleCommandPolicyItems().length;
+      const itemCount = contrastPolicy ? this._qualityContrastPolicyItems().length : densityPolicy ? this._qualityDensityPolicyItems().length : backdropPolicy ? this._qualityBackdropPolicyItems().length : wallpaperPolicy ? this._qualityWallpaperPolicyItems().length : titleCommandPolicy ? this._qualityTitleCommandPolicyItems().length : windowTransitionPolicy ? this._qualityWindowTransitionPolicyItems().length : this._qualityAnimationStylePolicyItems().length;
       const activateSelection = () => {
         if (contrastPolicy) this._activateQualityContrastPolicySelection();
         if (densityPolicy) this._activateQualityDensityPolicySelection();
         if (backdropPolicy) this._activateQualityBackdropPolicySelection();
         if (wallpaperPolicy) this._activateQualityWallpaperPolicySelection();
         if (titleCommandPolicy) this._activateQualityTitleCommandPolicySelection();
+        if (windowTransitionPolicy) this._activateQualityWindowTransitionPolicySelection();
+        if (animationStylePolicy) this._activateQualityAnimationStylePolicySelection();
       };
       if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
         event.preventDefault();
@@ -6413,6 +6437,7 @@ class SimpleWindowManager {
     preview.appendChild(this._makeQualityComputedLifecycleMetric('Close', closeMs + 'ms', 'close', mode === 'none' ? closeMs === 0 : closeMs >= 70));
     preview.appendChild(this._makeQualityComputedLifecycleMetric('Minimize', minimizeMs + 'ms', 'minimize', mode === 'none' ? minimizeMs === 0 : minimizeMs >= 80));
     preview.appendChild(this._makeQualityComputedLifecycleMetric('Mode', mode, 'mode', ['mac', 'fade', 'none'].includes(mode)));
+    preview.appendChild(this._makeQualityWindowTransitionPolicy(mode));
     return preview;
   }
 
@@ -6433,6 +6458,86 @@ class SimpleWindowManager {
     metric.appendChild(name);
     metric.appendChild(result);
     return metric;
+  }
+
+  _makeQualityWindowTransitionPolicy(activeMode) {
+    const entries = [
+      ['mac', 'Mac', 'scale + dock return'],
+      ['fade', 'Fade', 'opacity only'],
+      ['none', 'None', 'no window motion']
+    ];
+    const currentIndex = entries.findIndex(([mode]) => mode === activeMode);
+    if (currentIndex >= 0) this._qualityWindowTransitionPolicyActiveIndex = currentIndex;
+    const policy = document.createElement('div');
+    policy.className = 'wm-quality-window-transition-policy';
+    policy.setAttribute('role', 'listbox');
+    policy.setAttribute('aria-label', 'Window transition policy');
+    policy.dataset.windowTransitionPolicyActiveIndex = String(this._qualityWindowTransitionPolicyActiveIndex);
+    policy.setAttribute('aria-activedescendant', `wm-quality-window-transition-policy-${this._qualityWindowTransitionPolicyActiveIndex}`);
+    entries.forEach(([mode, label, value], index) => {
+      const selected = index === this._qualityWindowTransitionPolicyActiveIndex;
+      const item = document.createElement('button');
+      item.id = `wm-quality-window-transition-policy-${index}`;
+      item.className = 'wm-quality-window-transition-policy-item' + (selected ? ' selected' : '');
+      item.dataset.windowTransitionPolicy = mode;
+      item.dataset.windowTransitionPolicyIndex = String(index);
+      item.tabIndex = selected ? 0 : -1;
+      item.setAttribute('role', 'option');
+      item.setAttribute('aria-selected', selected ? 'true' : 'false');
+      const name = document.createElement('span');
+      name.className = 'wm-quality-window-transition-policy-label';
+      name.textContent = label;
+      const result = document.createElement('strong');
+      result.className = 'wm-quality-window-transition-policy-value';
+      result.textContent = value;
+      item.appendChild(name);
+      item.appendChild(result);
+      policy.appendChild(item);
+    });
+    return policy;
+  }
+
+  _qualityWindowTransitionPolicyItems() {
+    if (!this._qualityInspector) return [];
+    return Array.from(this._qualityInspector.querySelectorAll('.wm-quality-window-transition-policy-item'));
+  }
+
+  _moveQualityWindowTransitionPolicySelection(delta) {
+    const items = this._qualityWindowTransitionPolicyItems();
+    if (!items.length) return;
+    const next = (this._qualityWindowTransitionPolicyActiveIndex + delta + items.length) % items.length;
+    this._setQualityWindowTransitionPolicySelection(next);
+  }
+
+  _setQualityWindowTransitionPolicySelection(index) {
+    const items = this._qualityWindowTransitionPolicyItems();
+    if (!items.length) return;
+    this._qualityWindowTransitionPolicyActiveIndex = Math.max(0, Math.min(index, items.length - 1));
+    this._syncQualityWindowTransitionPolicySelection();
+  }
+
+  _syncQualityWindowTransitionPolicySelection(shouldFocus = true) {
+    const items = this._qualityWindowTransitionPolicyItems();
+    if (!items.length) return;
+    const policy = items[0].closest('.wm-quality-window-transition-policy');
+    items.forEach((item, index) => {
+      const selected = index === this._qualityWindowTransitionPolicyActiveIndex;
+      item.classList.toggle('selected', selected);
+      item.tabIndex = selected ? 0 : -1;
+      item.setAttribute('aria-selected', selected ? 'true' : 'false');
+      if (selected && policy) policy.setAttribute('aria-activedescendant', item.id);
+      if (selected && shouldFocus) item.focus();
+    });
+    if (policy) policy.dataset.windowTransitionPolicyActiveIndex = String(this._qualityWindowTransitionPolicyActiveIndex);
+  }
+
+  _activateQualityWindowTransitionPolicySelection() {
+    const item = this._qualityWindowTransitionPolicyItems()[this._qualityWindowTransitionPolicyActiveIndex];
+    if (!item) return;
+    const transition = item.dataset.windowTransitionPolicy || 'mac';
+    this.setWindowTransitionPreference(transition);
+    this._sendWindowCmd('quality_window_transition_policy', { window_transition_policy: transition });
+    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
   }
 
   _makeQualityVerbosityPreview() {
@@ -7556,6 +7661,7 @@ class SimpleWindowManager {
     preview.appendChild(this._makeQualityAnimationTrack('Dock', '160', 'dock'));
     preview.appendChild(this._makeQualityAnimationTrack('Command', '180', 'command'));
     preview.appendChild(this._makeQualityAnimationTrack('Backdrop', 'ambient', 'background'));
+    preview.appendChild(this._makeQualityAnimationStylePolicy());
     return preview;
   }
 
@@ -7576,6 +7682,87 @@ class SimpleWindowManager {
     track.appendChild(name);
     track.appendChild(result);
     return track;
+  }
+
+  _makeQualityAnimationStylePolicy() {
+    const entries = [
+      ['spring', 'Spring', 'expressive bounce'],
+      ['calm', 'Calm', 'slower easing'],
+      ['snappy', 'Snappy', 'fast response']
+    ];
+    const style = this._normalizeAnimationStyle(document.documentElement.dataset.wmAnimationStyle || this._readAnimationStyle());
+    const currentIndex = entries.findIndex(([mode]) => mode === style);
+    if (currentIndex >= 0) this._qualityAnimationStylePolicyActiveIndex = currentIndex;
+    const policy = document.createElement('div');
+    policy.className = 'wm-quality-animation-style-policy';
+    policy.setAttribute('role', 'listbox');
+    policy.setAttribute('aria-label', 'Animation style policy');
+    policy.dataset.animationStylePolicyActiveIndex = String(this._qualityAnimationStylePolicyActiveIndex);
+    policy.setAttribute('aria-activedescendant', `wm-quality-animation-style-policy-${this._qualityAnimationStylePolicyActiveIndex}`);
+    entries.forEach(([mode, label, value], index) => {
+      const selected = index === this._qualityAnimationStylePolicyActiveIndex;
+      const item = document.createElement('button');
+      item.id = `wm-quality-animation-style-policy-${index}`;
+      item.className = 'wm-quality-animation-style-policy-item' + (selected ? ' selected' : '');
+      item.dataset.animationStylePolicy = mode;
+      item.dataset.animationStylePolicyIndex = String(index);
+      item.tabIndex = selected ? 0 : -1;
+      item.setAttribute('role', 'option');
+      item.setAttribute('aria-selected', selected ? 'true' : 'false');
+      const name = document.createElement('span');
+      name.className = 'wm-quality-animation-style-policy-label';
+      name.textContent = label;
+      const result = document.createElement('strong');
+      result.className = 'wm-quality-animation-style-policy-value';
+      result.textContent = value;
+      item.appendChild(name);
+      item.appendChild(result);
+      policy.appendChild(item);
+    });
+    return policy;
+  }
+
+  _qualityAnimationStylePolicyItems() {
+    if (!this._qualityInspector) return [];
+    return Array.from(this._qualityInspector.querySelectorAll('.wm-quality-animation-style-policy-item'));
+  }
+
+  _moveQualityAnimationStylePolicySelection(delta) {
+    const items = this._qualityAnimationStylePolicyItems();
+    if (!items.length) return;
+    const next = (this._qualityAnimationStylePolicyActiveIndex + delta + items.length) % items.length;
+    this._setQualityAnimationStylePolicySelection(next);
+  }
+
+  _setQualityAnimationStylePolicySelection(index) {
+    const items = this._qualityAnimationStylePolicyItems();
+    if (!items.length) return;
+    this._qualityAnimationStylePolicyActiveIndex = Math.max(0, Math.min(index, items.length - 1));
+    this._syncQualityAnimationStylePolicySelection();
+  }
+
+  _syncQualityAnimationStylePolicySelection(shouldFocus = true) {
+    const items = this._qualityAnimationStylePolicyItems();
+    if (!items.length) return;
+    const policy = items[0].closest('.wm-quality-animation-style-policy');
+    items.forEach((item, index) => {
+      const selected = index === this._qualityAnimationStylePolicyActiveIndex;
+      item.classList.toggle('selected', selected);
+      item.tabIndex = selected ? 0 : -1;
+      item.setAttribute('aria-selected', selected ? 'true' : 'false');
+      if (selected && policy) policy.setAttribute('aria-activedescendant', item.id);
+      if (selected && shouldFocus) item.focus();
+    });
+    if (policy) policy.dataset.animationStylePolicyActiveIndex = String(this._qualityAnimationStylePolicyActiveIndex);
+  }
+
+  _activateQualityAnimationStylePolicySelection() {
+    const item = this._qualityAnimationStylePolicyItems()[this._qualityAnimationStylePolicyActiveIndex];
+    if (!item) return;
+    const style = item.dataset.animationStylePolicy || 'spring';
+    this.setAnimationStyle(style);
+    this._sendWindowCmd('quality_animation_style_policy', { animation_style_policy: style });
+    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
   }
 
   _makeQualityWidgetPreview() {

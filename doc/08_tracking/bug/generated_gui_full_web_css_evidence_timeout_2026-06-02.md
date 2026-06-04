@@ -10,7 +10,7 @@ evidence could render the same full production Web UI CSS page used by browser
 backends.
 
 ## Failure
-`sh scripts/check-electron-generated-gui-web-parity-evidence.shs` produced the
+`sh scripts/check/check-electron-generated-gui-web-parity-evidence.shs` produced the
 expected HTML and ARGB artifacts, then the Simple runner exceeded the 60-second
 watchdog while running under `SIMPLE_LIB=src`.
 

@@ -129,7 +129,7 @@ state remains in the shared WM path.
 
 ## Size Baseline Design
 
-`scripts/check-qt-gui-size-baseline.shs` writes `doc/09_report/qt_gui_size_baseline_<date>.md`. The report must include command, artifact paths, size fields, availability, Qt discovery state, the smallest measured Simple Web artifact from the web baremetal audit, and the comparison status. When Qt is missing, the report must say the baseline is unavailable and keep `comparison_status=unavailable`; it must not claim equal-or-better until both artifacts are measured.
+`scripts/check/check-qt-gui-size-baseline.shs` writes `doc/09_report/qt_gui_size_baseline_<date>.md`. The report must include command, artifact paths, size fields, availability, Qt discovery state, the smallest measured Simple Web artifact from the web baremetal audit, and the comparison status. When Qt is missing, the report must say the baseline is unavailable and keep `comparison_status=unavailable`; it must not claim equal-or-better until both artifacts are measured.
 
 ## Error Handling
 

@@ -12,8 +12,8 @@
 
 ## Acceptance Criteria
 - [x] AC-1: `find_linker()` in `mold.spl` unconditionally picks mold first — VERIFIED: code already correct; `find_mold_path()` checks `bin/mold/mold` before PATH; host lld path is SimpleOS-guest-only (gated on `is_simpleos_target()`), not a host override.
-- [x] AC-2: `scripts/install-mold.shs` downloads mold 2.35.1 to `bin/mold/mold` for Linux x86_64/aarch64 — DONE
-- [x] AC-3: SimpleOS filesystem image build includes mold at `/usr/bin/mold` — DONE: `scripts/make_os_disk.shs` `stage_mold_payload()` copies to guest `/usr/bin/mold`; `src/os/port/rootfs_inject.spl` adds `rootfs_inject_binary()`/`rootfs_inject_mold()` for post-hoc mcopy injection; `scripts/install-mold.shs` extended to mcopy into existing disk image
+- [x] AC-2: `scripts/setup/install-mold.shs` downloads mold 2.35.1 to `bin/mold/mold` for Linux x86_64/aarch64 — DONE
+- [x] AC-3: SimpleOS filesystem image build includes mold at `/usr/bin/mold` — DONE: `scripts/os/make_os_disk.shs` `stage_mold_payload()` copies to guest `/usr/bin/mold`; `src/os/port/rootfs_inject.spl` adds `rootfs_inject_binary()`/`rootfs_inject_mold()` for post-hoc mcopy injection; `scripts/setup/install-mold.shs` extended to mcopy into existing disk image
 - [x] AC-4: `src/lib/nogc_sync_mut/mimalloc.spl` implements mimalloc segments/pages/free-list algorithm in pure Simple — DONE in mimalloc-interp-perf (commit ppqkoxnl)
 - [x] AC-5: `MimallocAllocator` implements `Allocator` trait, exported via `mimalloc.spl` + `__init__.spl` — DONE in mimalloc-interp-perf
 - [x] AC-6: SimpleOS kernel heap delegates to mimalloc — DONE: `heap.spl` free-list replaced; `heap_init` calls `mimalloc_init` + injects `_kernel_pmm_page_alloc` bump provider; `heap_alloc`/`heap_free` delegate to `mi_malloc_raw`/`mi_free_raw`. Known regression: bump provider allocates full 4 KiB pages; sub-page bucketing is follow-up
@@ -51,7 +51,7 @@
 
 **Gaps to close:**
 1. Verify mold is truly default (lld may still win in some paths)
-2. Add `scripts/install-mold.shs` or extend `scripts/setup.sh`
+2. Add `scripts/setup/install-mold.shs` or extend `scripts/setup/setup.sh`
 3. Add mold to SimpleOS filesystem image build
 4. Implement mimalloc algorithm in Simple
 5. Wire MimallocAllocator as default
@@ -60,7 +60,7 @@
 ### 2-research
 **AC-1:** `find_linker()` in `mold.spl` already returns mold first. `find_mold_path()` checks `cwd()/bin/mold/mold` before `which mold`. The in-process lld block in `linker_wrapper.spl` is gated on `is_simpleos_target()` — it is a cross-compile necessity (no fork/exec on SimpleOS guest), not a host override. No code change needed.
 
-**AC-2:** `scripts/setup.sh` is the main setup script (bash). `.shs` files in this repo are plain `#!/usr/bin/env bash` scripts. `scripts/install_compiler_rt_simpleos.shs` confirmed the format. Mold 2.35.1 tarball URL: `https://github.com/rui314/mold/releases/download/v2.35.1/mold-2.35.1-{arch}-linux.tar.gz`. Both x86_64 and aarch64 pre-builts exist.
+**AC-2:** `scripts/setup/setup.sh` is the main setup script (bash). `.shs` files in this repo are plain `#!/usr/bin/env bash` scripts. `scripts/install_compiler_rt_simpleos.shs` confirmed the format. Mold 2.35.1 tarball URL: `https://github.com/rui314/mold/releases/download/v2.35.1/mold-2.35.1-{arch}-linux.tar.gz`. Both x86_64 and aarch64 pre-builts exist.
 
 **AC-3:** No rootfs binary-injection mechanism found. `scenario_x64_nvme_fat32` and `scenario_x64_desktop_disk` use pre-built FAT32 images. No `rootfs_add_binary` or equivalent exists. Deferred.
 
@@ -71,7 +71,7 @@
 ### 3-arch
 **AC-1:** No code change. Verified correct. Only gap is `bin/mold/mold` binary (filled by AC-2).
 
-**AC-2:** New `scripts/install-mold.shs` (bash, idempotent). Detects Linux x86_64/aarch64; skips gracefully on other platforms. Downloads from GitHub releases, extracts `bin/mold` subdirectory, installs to `bin/mold/mold`, makes executable.
+**AC-2:** New `scripts/setup/install-mold.shs` (bash, idempotent). Detects Linux x86_64/aarch64; skips gracefully on other platforms. Downloads from GitHub releases, extracts `bin/mold` subdirectory, installs to `bin/mold/mold`, makes executable.
 
 **AC-3:** Deferred. TODO file written: `doc/08_tracking/todo/mold_simpleos_rootfs_blocker_2026-04-24.md`. Options documented: `rootfs_inject_binary()` helper or `mcopy`/`e2cp` step.
 
@@ -86,7 +86,7 @@ Files written:
 
 ### 5-implement
 Files created/modified:
-- `scripts/install-mold.shs` — NEW: idempotent mold 2.35.1 downloader for Linux x86_64/aarch64
+- `scripts/setup/install-mold.shs` — NEW: idempotent mold 2.35.1 downloader for Linux x86_64/aarch64
 - `src/os/kernel/memory/heap.spl` — AC-6 deferred blocker comment added at top
 - `test/unit/os/memory/mold_linker_spec.spl` — NEW
 - `test/unit/os/memory/mimalloc_os_spec.spl` — NEW
@@ -110,7 +110,7 @@ AC-6: No source change to alloc path — deferred with documented blocker.
 
 **AC verification:**
 - AC-1: Confirmed by code reading — `find_linker()` returns mold first; lld branch gated on `is_simpleos_target()`. No host override.
-- AC-2: `scripts/install-mold.shs` exists, executable, idempotent, correct URL for v2.35.1.
+- AC-2: `scripts/setup/install-mold.shs` exists, executable, idempotent, correct URL for v2.35.1.
 - AC-3: DEFERRED — blocker tracked in `doc/08_tracking/todo/mold_simpleos_rootfs_blocker_2026-04-24.md`.
 - AC-4: Already done (prior commit ppqkoxnl).
 - AC-5: Already done (prior commit ppqkoxnl).
@@ -121,7 +121,7 @@ AC-6: No source change to alloc path — deferred with documented blocker.
 Committed with jj. All deliverables durable on disk before commit.
 
 **Files shipped:**
-- `scripts/install-mold.shs`
+- `scripts/setup/install-mold.shs`
 - `src/os/kernel/memory/heap.spl` (blocker comment)
 - `test/unit/os/memory/mold_linker_spec.spl`
 - `test/unit/os/memory/mimalloc_os_spec.spl`

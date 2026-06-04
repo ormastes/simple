@@ -134,7 +134,7 @@ not SimpleOS runtime design.
 For SD-image verification, prefer the Simple inspector:
 
 ```bash
-bin/simple run scripts/simpleos_fat32_image_list.spl -- build/os/fat32-riscv64.img
+bin/simple run scripts/os/simpleos_fat32_image_list.spl -- build/os/fat32-riscv64.img
 ```
 
 This keeps FAT32 image inspection in Simple instead of Python.

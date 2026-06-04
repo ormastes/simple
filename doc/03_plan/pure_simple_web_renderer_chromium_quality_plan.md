@@ -236,7 +236,7 @@ Phase C: Add WPT-inspired reftests.
 Focused commands:
 
 ```
-sh scripts/install-spipe-dev-command.shs --check
+sh scripts/setup/install-spipe-dev-command.shs --check
 find doc/06_spec -name '*_spec.spl' | wc -l
 SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/system/wm_compare/famous_site_corpus_spec.spl --mode=interpreter --clean --format json
 SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/system/wm_compare/famous_site_engine2d_backend_spec.spl --mode=interpreter --clean --format json

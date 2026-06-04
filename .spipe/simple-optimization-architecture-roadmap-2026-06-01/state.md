@@ -28,11 +28,11 @@ dev-done
 ## Log
 - dev: Created state file with 6 acceptance criteria (type: code-quality).
 - dev: Added the parallel-agent control plane to `doc/01_research/local/simple_optimization_architecture_roadmap_2026-06-01.md`.
-- verify: PASS `sh scripts/install-spipe-dev-command.shs --check`.
+- verify: PASS `sh scripts/setup/install-spipe-dev-command.shs --check`.
 - verify: PASS `find doc/06_spec -name '*_spec.spl' | wc -l` returned `0`.
 - verify: PASS `SIMPLE_LIB=src bin/simple check src/os/ai_cli_js_node_contract.spl`.
 - verify: PASS `SIMPLE_LIB=src bin/simple test test/system/os/simpleos_ai_cli_js_node_port_spec.spl --mode=interpreter --clean` (23 scenarios).
-- verify: PASS `scripts/check-gtk-gui-repeat-evidence.shs`; Simple open 203 us, GTK open 68904 us, Simple frame 1 us, GTK frame 26 us, vector checksum 212444 deterministic true.
+- verify: PASS `scripts/check/check-gtk-gui-repeat-evidence.shs`; Simple open 203 us, GTK open 68904 us, Simple frame 1 us, GTK frame 26 us, vector checksum 212444 deterministic true.
 - verify: PASS `SIMPLE_LIB=src bin/simple test test/unit/app/interpreter/perf_spec.spl --mode=interpreter --clean` (10 scenarios).
 - verify: PASS `SIMPLE_LIB=src bin/simple test test/unit/compiler/interpreter/tiered_jit_hotspot_spec.spl --mode=interpreter --clean` (51 scenarios).
 - implementation: Interpreter/runtime speed lane changed `DIAGRAM_ENABLED` loads/stores in `src/compiler_rust/runtime/src/value/diagram_sffi.rs` from `Ordering::SeqCst` to `Ordering::Relaxed`; the flag only gates recording and recorded diagram data remains protected by locks.
@@ -59,7 +59,7 @@ dev-done
 - verification: PASS `find doc/06_spec -name '*_spec.spl' | wc -l` returned `0`.
 - sync: Non-mutating sync-safety snapshot recorded `git ls-files` count `77108`; `jj status` shows working copy `@` on top of `main` parent `test: tighten ai cli credential grant boundary` with uncommitted changes, so no fetch/rebase/push was attempted in that slice.
 - sync: Current non-mutating file-count guard is `77107` after removing the local credential debug scratch file; working copy remains uncommitted, so no GitHub push was attempted.
-- verify: PASS `sh scripts/install-spipe-dev-command.shs --check`.
+- verify: PASS `sh scripts/setup/install-spipe-dev-command.shs --check`.
 - verify: PASS `SIMPLE_LIB=src bin/simple check src/lib/gc_async_mut/gpu/browser_engine/text_painter.spl test/unit/browser_engine/text_painter_spec.spl`.
 - verify: PASS `SIMPLE_LIB=src bin/simple check src/lib/nogc_sync_mut/js/engine/interpreter.spl src/lib/nogc_sync_mut/js/engine/interpreter_eval_member.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl src/lib/nogc_sync_mut/js/engine/runtime.spl test/feature/js/node_api_conformance_spec.spl`.
 - verify: PASS `cargo check -p simple-runtime --manifest-path src/compiler_rust/Cargo.toml`.
@@ -69,13 +69,13 @@ dev-done
 - verify: PASS `SIMPLE_LIB=src bin/simple test test/unit/app/interpreter/perf_spec.spl --mode=interpreter --clean` (10 scenarios).
 - verify: PASS `SIMPLE_LIB=src bin/simple test test/unit/compiler/interpreter/tiered_jit_hotspot_spec.spl --mode=interpreter --clean` (51 scenarios).
 - verify: PASS `cargo test -p simple-runtime diagram_sffi --manifest-path src/compiler_rust/Cargo.toml` (3 tests).
-- verify: PASS `scripts/check-gtk-gui-repeat-evidence.shs`; Simple open 203 us, GTK open 68904 us, Simple frame 1 us, GTK frame 25 us, Simple text 10 us, GTK text 25 us, vector checksum 212444 deterministic true.
+- verify: PASS `scripts/check/check-gtk-gui-repeat-evidence.shs`; Simple open 203 us, GTK open 68904 us, Simple frame 1 us, GTK frame 25 us, Simple text 10 us, GTK text 25 us, vector checksum 212444 deterministic true.
 - verify: PASS `git diff --check`.
 - verify: PASS `find doc/06_spec -name '*_spec.spl' | wc -l` returned `0`.
 - sync: PASS committed and pushed `d826cf69e0f4 perf: advance simple optimization checkpoint` to GitHub `main`; post-push fetch confirmed `main`/`main@origin` at the checkpoint, working copy clean, `git diff --check` PASS, `doc/06_spec` stray `.spl` count `0`, tracked file count `77107`.
 - implementation: GUI lane added a fast vector-font unavailable fallback probe to the GTK size/speed baseline and made the repeat evidence wrapper require that fail-closed probe by default.
 - verification: PASS fallback probe mode (`GTK_EVIDENCE_FALLBACK_PROBE_ONLY=1 GTK_EVIDENCE_FORCE_VECTOR_FONT_UNAVAILABLE=1`) reported `gtk_benchmark_fallback_probe_status=pass`, reason `forced-vector-font-unavailable`, zero vector-font ink pixels, deterministic true.
-- verification: PASS `scripts/check-gtk-gui-repeat-evidence.shs` with fallback probe `forced-vector-font-unavailable`, Simple open 203 us, GTK open 68904 us, Simple frame 1 us, GTK frame 25 us, vector checksum 212444.
+- verification: PASS `scripts/check/check-gtk-gui-repeat-evidence.shs` with fallback probe `forced-vector-font-unavailable`, Simple open 203 us, GTK open 68904 us, Simple frame 1 us, GTK frame 25 us, vector checksum 212444.
 - docs: Added `doc/09_report/gtk_gui_repeat_fallback_evidence_2026-06-01.md` and updated GUI/roadmap state for AC-6 fallback evidence.
 - implementation: Interpreter lane changed the shared timeout flag from `SeqCst` to `Release` stores plus `Acquire` reads in `fault_detection`, `watchdog`, and the compiler interpreter timeout test path.
 - verification: PASS `cargo check -p simple-compiler -p simple-common --manifest-path src/compiler_rust/Cargo.toml`; PASS `cargo test -p simple-common timeout --manifest-path src/compiler_rust/Cargo.toml`; PASS `cargo test -p simple-compiler watchdog --manifest-path src/compiler_rust/Cargo.toml -- --test-threads=1`.

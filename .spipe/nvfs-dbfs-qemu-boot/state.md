@@ -74,7 +74,7 @@ feature
 
 - `src/os/port/disk_image.spl` — FAT32 disk image builder (`build(cfg: DiskImageConfig, out_path: text) -> Result<(), text>`). Produces BPB sector 0, FSInfo sector 1, FAT tables, root dir, payload clusters. Uses `rt_file_truncate` for zero-extending. **No DBFS superblock writing** — FAT32 only.
 
-- `src/os/port/disk_image_bake.spl` — High-level `bake(out_disk, out_initramfs)` using `disk_image.build`. FAT32 carrier only; uses `scripts/make_os_disk.shs` for real image. Has `_bake_via_mkfs_fat` fast path. No native DBFS image path.
+- `src/os/port/disk_image_bake.spl` — High-level `bake(out_disk, out_initramfs)` using `disk_image.build`. FAT32 carrier only; uses `scripts/os/make_os_disk.shs` for real image. Has `_bake_via_mkfs_fat` fast path. No native DBFS image path.
 
 - `src/os/installer/image_builder.spl` — Additional image builder (uninspected; likely FAT32 focused).
 

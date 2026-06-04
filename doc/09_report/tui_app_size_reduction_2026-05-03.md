@@ -49,4 +49,4 @@ Date: 2026-05-27
 - This audit measures the bootstrap core floor, not the default `auto` lane once `simple-core` is available.
 - The audit intentionally records anchor strings instead of claiming full transitive Rust crate closure proof.
 - Set `MAX_HELLO_SIMPLE_BYTES` and/or `MAX_MINIMAL_TUI_BYTES` to turn the audit into a size-budget gate.
-- Use `scripts/check-tui-standalone-closure.shs` alongside this report for the import-surface guard.
+- Use `scripts/check/check-tui-standalone-closure.shs` alongside this report for the import-surface guard.

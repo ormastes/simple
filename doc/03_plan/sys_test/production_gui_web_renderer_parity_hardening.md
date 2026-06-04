@@ -35,7 +35,7 @@ Expected result: `6` passed examples, `0` failures.
 Run the live Electron generated-GUI comparison:
 
 ```bash
-sh scripts/check-electron-generated-gui-web-parity-evidence.shs
+sh scripts/check/check-electron-generated-gui-web-parity-evidence.shs
 ```
 
 Recorded result on 2026-06-03:
@@ -57,7 +57,7 @@ directly and enforces exact pixel parity for this fixture.
 Run the live Electron generated-GUI viewport matrix:
 
 ```bash
-sh scripts/check-electron-generated-gui-web-parity-matrix-evidence.shs
+sh scripts/check/check-electron-generated-gui-web-parity-matrix-evidence.shs
 ```
 
 Recorded result on 2026-06-03:
@@ -72,7 +72,7 @@ Recorded result on 2026-06-03:
 Run the aggregate release-style parity evidence gate:
 
 ```bash
-sh scripts/check-production-gui-web-renderer-parity-evidence.shs
+sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs
 ```
 
 Expected result:
@@ -87,7 +87,7 @@ Expected result:
 Run the live Electron CSS/layout manifest evidence:
 
 ```bash
-sh scripts/check-electron-simple-web-layout-manifest-evidence.shs
+sh scripts/check/check-electron-simple-web-layout-manifest-evidence.shs
 ```
 
 Recorded result on 2026-06-03:

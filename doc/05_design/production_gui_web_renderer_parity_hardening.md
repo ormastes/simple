@@ -60,11 +60,11 @@ expected-bitmap canvas. The script now fails on nonzero mismatch counts for the
 generated GUI slice and records watchdog teardown separately from pass/fail
 status.
 
-`scripts/check-electron-generated-gui-web-parity-matrix-evidence.shs` runs the
+`scripts/check/check-electron-generated-gui-web-parity-matrix-evidence.shs` runs the
 same gate at 80x64, 96x72, 128x96, and 160x120 in isolated build directories
 to prove the slice is not single-viewport-only.
 
-`scripts/check-electron-simple-web-layout-manifest-evidence.shs` reads
+`scripts/check/check-electron-simple-web-layout-manifest-evidence.shs` reads
 `tools/electron-live-bitmap/simple_web_layout_capture_manifest.txt` and runs
 manifest cases through real Electron HTML capture plus Simple expected ARGB.
 The initial exact case, `css_box_matrix`, requires mismatch count `0`, matching
@@ -126,7 +126,7 @@ generated-widget Chrome text overlay. The tracked text case remains divergent
 at `mismatch_count=997`, but Simple-extra text pixels are lower and surface
 geometry still matches in the canonical text case.
 
-`scripts/check-production-gui-web-renderer-parity-evidence.shs` composes the
+`scripts/check/check-production-gui-web-renderer-parity-evidence.shs` composes the
 generated-GUI matrix gate, CSS/layout manifest gate, backend-executed CPU
 SIMD/Metal parity, and Metal framebuffer readback evidence. It fails unless all
 four sub-gates pass.

@@ -22,4 +22,4 @@ The 8K GUI color/image lane keeps the default render target as packed 32-bit pix
 
 ## Evidence
 
-The authoritative gate is `scripts/check-gui-color-image-pipeline-8k-evidence.shs`. It runs the generated 8K surface/color probe plus focused surface, Lab/XYZ, image decode, and TIFF raster specs.
+The authoritative gate is `scripts/check/check-gui-color-image-pipeline-8k-evidence.shs`. It runs the generated 8K surface/color probe plus focused surface, Lab/XYZ, image decode, and TIFF raster specs.

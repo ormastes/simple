@@ -11,7 +11,7 @@ counter-size target on the audited Linux host.
 Current evidence from:
 
 ```sh
-sh scripts/check-startup-size-performance-audit.shs
+sh scripts/check/check-startup-size-performance-audit.shs
 ```
 
 Current measured rows:
@@ -59,7 +59,7 @@ the ELF loader.
 
 ## Status: RESOLVED
 
-Verified 2026-05-29 by running `sh scripts/check-startup-size-performance-audit.shs` on Linux x86_64.
+Verified 2026-05-29 by running `sh scripts/check/check-startup-size-performance-audit.shs` on Linux x86_64.
 All regression gates passed with real `ok` results (not `skip`):
 
 ```

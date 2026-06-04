@@ -110,7 +110,7 @@ with no sleep, re-presenting occasionally for static content. See
 A bare CLI process is never registered with the window server (`lsappinfo` empty for it),
 even with winit's `ActivationPolicy::Regular`. Launch from a PROPER `.app` bundle so
 LaunchServices registers it in the Aqua session. Helper script (no Rust):
-`scripts/macos-gui-run.shs` — locates the gui driver, builds a throwaway `.app` (binary
+`scripts/gui/macos-gui-run.shs` — locates the gui driver, builds a throwaway `.app` (binary
 COPIED into `Contents/MacOS`, it's self-contained per `otool -L`), sets env via Info.plist
 `LSEnvironment`, launches with `open App --args run <abs.spl>`, and nudges the window
 on-screen via `osascript` (winit may place small windows off-screen, e.g. y=-1095;
@@ -118,7 +118,7 @@ on-screen via `osascript` (winit may place small windows off-screen, e.g. y=-109
 An `exec`-wrapper bundle does NOT work (exec to an out-of-bundle binary de-registers).
 
 ### Status: RESOLVED (verified on screen, stock driver). Usage
-`scripts/macos-gui-run.shs examples/ui/web_engine2d_gui.spl`
+`scripts/gui/macos-gui-run.shs examples/ui/web_engine2d_gui.spl`
 
 Notes: needs a gui-feature driver (`CARGO_TARGET_DIR=target/gui cargo build -p
 simple-driver --features gui`). The earlier Rust-seed experiments

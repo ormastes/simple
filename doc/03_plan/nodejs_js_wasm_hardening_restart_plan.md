@@ -140,10 +140,10 @@ Completed evidence:
      evidence reach those exact layers.
 
 2. Phase 6 QEMU runtime provisioning.
-   - `scripts/check-ai-cli-qemu-lanes.shs --contract-only` now derives required
+   - `scripts/check/check-ai-cli-qemu-lanes.shs --contract-only` now derives required
      marker files from `src/os/ai_cli_js_node_contract.spl` and records the
      selected app/target lane contract without claiming guest evidence.
-   - `scripts/check-ai-cli-qemu-lanes.shs --stage-smoke-package` now writes the
+   - `scripts/check/check-ai-cli-qemu-lanes.shs --stage-smoke-package` now writes the
      selected host-side smoke package files into the FAT32-like staging tree and
      exits with `stage-smoke-package`, not `pass`, because no guest serial
      evidence has been observed.
@@ -156,7 +156,7 @@ Completed evidence:
      into a formatted image. This is still host-side readiness, not guest boot
      evidence.
    - Current in-progress slice adds
-     `scripts/check-ai-cli-qemu-lanes.shs --stage-smoke-package
+     `scripts/check/check-ai-cli-qemu-lanes.shs --stage-smoke-package
      --populate-fat32-image <img>` so the harness can materialize the selected
      smoke package and mirror it into an existing formatted FAT32 image. The
      expected success marker is `fat32_populate_status=host-image-populated`.
@@ -220,14 +220,14 @@ Initial harness command:
 
 ```sh
 SIMPLE_BIN=/home/ormastes/dev/pub/simple/bin/simple SIMPLE_LIB=<worktree>/src \
-  sh scripts/check-ai-cli-qemu-lanes.shs --contract-only
+  sh scripts/check/check-ai-cli-qemu-lanes.shs --contract-only
 ```
 
 Host-side staging command:
 
 ```sh
 SIMPLE_BIN=/home/ormastes/dev/pub/simple/bin/simple SIMPLE_LIB=<worktree>/src \
-  sh scripts/check-ai-cli-qemu-lanes.shs --stage-smoke-package --target x86 --app codex
+  sh scripts/check/check-ai-cli-qemu-lanes.shs --stage-smoke-package --target x86 --app codex
 ```
 
 The staging command should report `ai_cli_qemu_lanes_status=stage-smoke-package`
@@ -238,7 +238,7 @@ Host-side FAT32 image population command:
 
 ```sh
 SIMPLE_BIN=/home/ormastes/dev/pub/simple/bin/simple SIMPLE_LIB=<worktree>/src \
-  sh scripts/check-ai-cli-qemu-lanes.shs --stage-smoke-package \
+  sh scripts/check/check-ai-cli-qemu-lanes.shs --stage-smoke-package \
   --populate-fat32-image <formatted-fat32.img> --target x86 --app codex
 ```
 
@@ -251,9 +251,9 @@ required serial markers.
 Promotion commands after runtime provisioning exists:
 
 ```sh
-sh scripts/check-ai-cli-qemu-lanes.shs --target x86 --app all
-sh scripts/check-ai-cli-qemu-lanes.shs --target riscv --app all
-sh scripts/check-ai-cli-qemu-lanes.shs --target arm --app all
+sh scripts/check/check-ai-cli-qemu-lanes.shs --target x86 --app all
+sh scripts/check/check-ai-cli-qemu-lanes.shs --target riscv --app all
+sh scripts/check/check-ai-cli-qemu-lanes.shs --target arm --app all
 ```
 
 ## Immediate Next Commands

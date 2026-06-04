@@ -60,7 +60,7 @@ The refactor must avoid avoidable frame buffer copies, repeated full-frame alloc
 
 REQ-011: Qt baseline comparison
 
-Add a reproducible baseline plan or harness for an equivalent Qt-based GUI app and compare binary/package size against the Simple GUI/web-render path. `scripts/check-qt-gui-size-baseline.shs` is the harness. If Qt is unavailable locally, it must record `qt_status=unavailable` as an optional, non-blocking baseline rather than failing normal verification.
+Add a reproducible baseline plan or harness for an equivalent Qt-based GUI app and compare binary/package size against the Simple GUI/web-render path. `scripts/check/check-qt-gui-size-baseline.shs` is the harness. If Qt is unavailable locally, it must record `qt_status=unavailable` as an optional, non-blocking baseline rather than failing normal verification.
 
 REQ-012: Tests and evidence
 

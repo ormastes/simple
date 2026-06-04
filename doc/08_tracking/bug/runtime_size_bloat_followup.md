@@ -229,9 +229,9 @@ On **2026-05-03**, the app-layer TUI split landed:
 - TUI rendering moved to `src/app/ui.render/tui_widgets.spl`
 - HTML rendering moved to `src/app/ui.render/html_widgets.spl`
 - generated native TUI entries now target `app.ui.tui.standalone.run_standalone_tui`
-- `scripts/check-tui-standalone-closure.shs` now guards the no-web/no-HTML import lane
+- `scripts/check/check-tui-standalone-closure.shs` now guards the no-web/no-HTML import lane
 
-Measured with `scripts/check-ui-native-size-audit.shs` and recorded in
+Measured with `scripts/check/check-ui-native-size-audit.shs` and recorded in
 `doc/09_report/tui_app_size_reduction_2026-05-03.md`:
 
 - stripped Simple hello: **14,041,944 bytes**
@@ -280,7 +280,7 @@ Verification evidence from the same date:
 
 Important measured result:
 
-- rerunning `scripts/check-ui-native-size-audit.shs` after the runtime-gating changes still produced:
+- rerunning `scripts/check/check-ui-native-size-audit.shs` after the runtime-gating changes still produced:
   - stripped Simple hello: **14,041,944 bytes**
   - stripped Simple minimal TUI app: **14,041,944 bytes**
 
@@ -313,7 +313,7 @@ Root cause:
 
 Concrete evidence:
 
-- `scripts/check-ui-native-size-audit.shs` originally passed:
+- `scripts/check/check-ui-native-size-audit.shs` originally passed:
   - `--source src/compiler`
   - `--source src/lib`
   - `--source src/app`
@@ -427,7 +427,7 @@ the current bootstrap-floor lane is now below that target.
 Verification command:
 
 ```bash
-MAX_HELLO_SIMPLE_BYTES=500000 MAX_MINIMAL_TUI_BYTES=510000 sh scripts/check-ui-native-size-audit.shs
+MAX_HELLO_SIMPLE_BYTES=500000 MAX_MINIMAL_TUI_BYTES=510000 sh scripts/check/check-ui-native-size-audit.shs
 ```
 
 Result on 2026-05-27:

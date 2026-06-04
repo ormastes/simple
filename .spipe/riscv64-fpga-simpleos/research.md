@@ -69,7 +69,7 @@ hardware_manifest |id, field, value, unit, notes|
 
 ## Gap 3: SHS Script Pattern
 
-File: `scripts/check-kria-k26-fpga-bringup.shs`
+File: `scripts/check/check-kria-k26-fpga-bringup.shs`
 
 Pattern:
 ```sh

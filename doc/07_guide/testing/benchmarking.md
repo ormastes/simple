@@ -163,7 +163,7 @@ labels.
 
 ### Linux QEMU Network Parity
 
-Use `scripts/linux_qemu_net_parity_bench.shs` when comparing the same
+Use `scripts/qemu/linux_qemu_net_parity_bench.shs` when comparing the same
 C/Rust/Simple network parity workload inside a Linux QEMU guest. The harness
 requires a caller-supplied bootable guest image with SSH plus benchmark
 prerequisites:
@@ -171,7 +171,7 @@ prerequisites:
 ```bash
 LINUX_QEMU_IMAGE=/path/to/linux.qcow2 \
 LINUX_QEMU_SSH_USER=ubuntu \
-scripts/linux_qemu_net_parity_bench.shs
+scripts/qemu/linux_qemu_net_parity_bench.shs
 ```
 
 Useful knobs include `LINUX_QEMU_DISK=virtio|nvme`,

@@ -109,9 +109,9 @@ This boundary is part of the architecture, not an untracked workaround:
 
 ## Qt Size Baseline
 
-The Qt comparison is an optional external baseline. `scripts/check-qt-gui-size-baseline.shs` records a report even when Qt development files are absent. It records both sides separately: the smallest measured Simple Web artifact from the web baremetal audit and the Qt minimal GUI artifact when Qt development files are available. It also records Qt discovery state for pkg-config, qmake, cmake, and c++. `comparison_status=unavailable` is evidence that the equal-or-better size claim could not be proven locally, not a failure of the Simple renderer verification path.
+The Qt comparison is an optional external baseline. `scripts/check/check-qt-gui-size-baseline.shs` records a report even when Qt development files are absent. It records both sides separately: the smallest measured Simple Web artifact from the web baremetal audit and the Qt minimal GUI artifact when Qt development files are available. It also records Qt discovery state for pkg-config, qmake, cmake, and c++. `comparison_status=unavailable` is evidence that the equal-or-better size claim could not be proven locally, not a failure of the Simple renderer verification path.
 
-The GTK size/speed harness in `scripts/check-gtk-gui-size-speed-baseline.shs` belongs to the HTML/CSS binary-cache milestone. It measures Simple render-loop cost, static-cache hits, prepared `SWBC1` reuse, retained command payload bytes, and GTK availability separately from this WM-level Qt comparison.
+The GTK size/speed harness in `scripts/check/check-gtk-gui-size-speed-baseline.shs` belongs to the HTML/CSS binary-cache milestone. It measures Simple render-loop cost, static-cache hits, prepared `SWBC1` reuse, retained command payload bytes, and GTK availability separately from this WM-level Qt comparison.
 
 ## Verification
 
@@ -123,4 +123,4 @@ Focused verification should cover:
 - `test/unit/lib/gc_async_mut/gpu/engine2d/*backend*_spec.spl`
 - `test/integration/rendering/cuda_strict_spec.spl`
 - `test/unit/os/compositor/*wm*_spec.spl`
-- `scripts/check-qt-gui-size-baseline.shs`
+- `scripts/check/check-qt-gui-size-baseline.shs`

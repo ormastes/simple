@@ -322,7 +322,7 @@ The `pc` value is the reset vector address from `hardware_manifest.sdn` field `r
 Disjoint ownership prevents parallel agent conflicts. No two agents may write to the same directory.
 
 ### Agent A (Scripts + Hardware Tracking)
-- `scripts/check-riscv64-fpga-simpleos-preflight.shs` — preflight inventory script
+- `scripts/check/check-riscv64-fpga-simpleos-preflight.shs` — preflight inventory script
 - `scripts/jtag-ftdi-unbind.shs` — JTAG FTDI unbind/rebind helper
 - `doc/08_tracking/hardware/` — hardware log files, `hardware_manifest.sdn`
 

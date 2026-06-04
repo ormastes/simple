@@ -8,14 +8,18 @@ Build, audit, bootstrap, and utility scripts.
 |---|---|
 | `audit` | Audit scripts |
 | `bootstrap` | Bootstrap scripts |
-| `fpga` | FPGA scripts |
+| `check` | Verification and evidence check scripts |
+| `deps` | Dependency fetching scripts |
+| `fpga` | FPGA board scripts (kria, jtag, flash) |
+| `gui` | macOS GUI launcher scripts |
 | `hooks` | Git hook scripts |
 | `openocd` | OpenOCD configurations |
+| `os` | SimpleOS run and build scripts |
 | `perf` | Performance scripts |
-| `setup.sh` | Project setup (Unix) |
-| `setup.ps1` | Project setup (Windows) |
+| `qemu` | QEMU test and setup scripts |
+| `resource` | Resource files |
+| `rtl` | RTL/FPGA generation scripts |
+| `setup` | Project setup and install scripts |
+| `smoke` | Protocol smoke test scripts |
 | `check-workspace-root-guard.shs` | Workspace root guard |
-| `install-spipe-dev-command.shs` | SPipe dev installer |
-| `install-spipe-dev-command.ps1` | SPipe dev installer (Windows) |
-| `install-workspace-guard-hook.shs` | Hook installer |
 | `FILE.md` | This manifest |

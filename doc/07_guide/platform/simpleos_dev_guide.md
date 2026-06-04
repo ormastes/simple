@@ -284,7 +284,7 @@ Host prerequisites for the x86_64 bootstrap lane are explicit:
 - `ninja`
 
 The disk/UEFI acceptance lane does not silently degrade when those artifacts are
-missing. `scripts/make_os_disk.shs` now fails fast instead of shipping placeholder
+missing. `scripts/os/make_os_disk.shs` now fails fast instead of shipping placeholder
 LLVM/Rust payloads.
 
 ### 4.2 Supported Targets
@@ -314,7 +314,7 @@ build/os/sysroot/
   share/simpleos/       # simpleos.ld linker script
 ```
 
-When `scripts/make_os_disk.shs` builds the x86_64 guest image, the staged
+When `scripts/os/make_os_disk.shs` builds the x86_64 guest image, the staged
 filesystem contract is:
 
 ```text
@@ -501,7 +501,7 @@ legacy `build/os/fat32.img` when only the older artifact exists. Missing
 per-platform media is created with:
 
 ```bash
-sh scripts/make_os_disk.shs 64 build/os/fat32-x86_64.img
+sh scripts/os/make_os_disk.shs 64 build/os/fat32-x86_64.img
 ```
 
 That `.shs` entrypoint populates the FAT32 image with host filesystem tools:

@@ -15,7 +15,7 @@ From Linux, do not stop at `bootstrap-freebsd-seed.sh` saying it must run on
 FreeBSD. Use the repo-managed automated wrapper:
 
 ```bash
-sh scripts/check-freebsd-bootstrap-qemu.shs --smoke
+sh scripts/check/check-freebsd-bootstrap-qemu.shs --smoke
 ```
 
 Use `--full` for the repeated bootstrap verification pass. The wrapper creates

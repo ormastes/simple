@@ -14,7 +14,7 @@
 
 ## Team C: SimpleOS QEMU ARM64 Lane
 
-- Run `scripts/check-simpleos-arm64-wm-qemu-readiness.shs`.
+- Run `scripts/check/check-simpleos-arm64-wm-qemu-readiness.shs`.
 - Launch or attach to QEMU ARM64 with HVF when available.
 - Produce QMP `screendump` capture evidence and record QEMU binary, accelerator, display backend, socket path, and image path.
 - Keep the ARM64 dock on real procedural icon rendering, not placeholder letters; the live screendump assertion should detect icon artwork detail in the framebuffer.

@@ -57,7 +57,7 @@ The default process doc root is `doc/llm_process`; Simple overrides it with
 The parent repo must track `.spipe/spipe` as a gitlink. In this checkout,
 `examples/spipe` is intentionally tracked as normal parent-repo files so local
 examples remain visible without requiring a second SPipe gitlink. The
-`scripts/check-spipe-submodule-gitlinks.shs` checker and the matching
+`scripts/check/check-spipe-submodule-gitlinks.shs` checker and the matching
 PowerShell script verify this mixed invariant and repair only `.spipe/spipe`.
 
 ## Hot Path / Performance

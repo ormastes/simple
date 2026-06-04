@@ -97,7 +97,7 @@ including cases where C optimized the whole loop into a near-constant result.
 - `bin/simple test test/unit/compiler/mir_opt/strength_reduction_spec.spl`
   passed: 2 examples, 0 failures.
 - `bash -n test/perf/run_net_driver_logic_parity_bench.shs
-  scripts/qemu_rv64_http_test.shs scripts/qemu_rv32_http_test.shs` passed.
+  scripts/qemu/qemu_rv64_http_test.shs scripts/qemu/qemu_rv32_http_test.shs` passed.
 
 ## Completion Audit
 

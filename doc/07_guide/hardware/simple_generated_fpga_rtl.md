@@ -7,7 +7,7 @@ This guide shows the current repo-native path for generating FPGA RTL artifacts 
 The public generated RISC-V RTL smoke gate now runs both generated lanes by default:
 
 ```bash
-sh scripts/check-riscv-rtl-linux-smoke.shs --timeout=30
+sh scripts/check/check-riscv-rtl-linux-smoke.shs --timeout=30
 ```
 
 Verified result:

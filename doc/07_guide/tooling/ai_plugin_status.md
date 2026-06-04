@@ -58,7 +58,7 @@ Step 7: verify-agent (Claude+MCP) → verification report
 | MCP servers | Shell wrappers | Shell wrappers | Shell via bash | .cmd wrappers needed |
 | LSP plugins | Via MCP | Via MCP | Via MCP | Via MCP |
 | Agent plugins | CLI tools | CLI tools | CLI tools | CLI tools |
-| Setup | `scripts/setup.sh` | `scripts/setup.sh` | `scripts/setup.sh` (Git Bash) | `scripts\setup.cmd` |
+| Setup | `scripts/setup/setup.sh` | `scripts/setup/setup.sh` | `scripts/setup/setup.sh` (Git Bash) | `scripts\setup.cmd` |
 
 ## Configuration Files
 

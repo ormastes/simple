@@ -7,9 +7,9 @@ Windows.
 
 ## Changes
 
-- Added `scripts/setup-spipe-submodule.ps1` as the native Windows wrapper for
+- Added `scripts/setup/setup-spipe-submodule.ps1` as the native Windows wrapper for
   initializing `.spipe/spipe` and running the submodule link setup.
-- Added `scripts/install-spipe-dev-command.ps1` as the native Windows checker
+- Added `scripts/setup/install-spipe-dev-command.ps1` as the native Windows checker
   for `/sp_dev` wiring.
 - Updated `.codex/skills/sp_dev/SKILL.md` to document the Windows check
   command.

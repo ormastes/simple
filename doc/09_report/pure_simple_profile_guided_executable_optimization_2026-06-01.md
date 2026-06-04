@@ -69,7 +69,7 @@ Date: 2026-06-01
 - `tiered_jit_hotspot_spec.spl`: `51` passed.
 - `git diff --check` passed after generated spec EOF cleanup.
 - `find doc/06_spec -name '*_spec.spl' | wc -l` returned `0`.
-- `sh scripts/install-spipe-dev-command.shs --check` returned `STATUS: PASS
+- `sh scripts/setup/install-spipe-dev-command.shs --check` returned `STATUS: PASS
   spipe-dev-command wiring`.
 - Maintainability file-size scan: all scoped implementation files are below
   `800` lines; `native_profile_counter.spl` is `567` lines and

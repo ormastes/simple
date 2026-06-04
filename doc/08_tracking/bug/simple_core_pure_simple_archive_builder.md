@@ -4,7 +4,7 @@
 
 `doc/03_plan/default_native_runtime_shift_phase2_plan.md` requires a
 pure-Simple implementation of the narrow `simple-core` host ABI. The current
-repeatable gate, `scripts/check-simple-core-runtime-smoke.shs`, materializes
+repeatable gate, `scripts/check/check-simple-core-runtime-smoke.shs`, materializes
 `build/simple-core/libsimple_runtime.a` from C runtime sources. That archive is
 ABI-complete enough for hello, standalone TUI, real TUI app smoke, MCP, and
 Simple LSP MCP package validation, but it is not a pure-Simple runtime archive.
@@ -54,7 +54,7 @@ Simple LSP MCP package validation, but it is not a pure-Simple runtime archive.
 - `src/runtime/simple_core/core_string.spl` implements the remaining string,
   generic length/conversion/slice/equality, stdin byte-read, raw stdout/stderr
   write, and print-alias ABI needed by ordinary `print` lowering.
-- `scripts/check-simple-core-runtime-smoke.shs` now builds the selectable
+- `scripts/check/check-simple-core-runtime-smoke.shs` now builds the selectable
   `build/simple-core/libsimple_runtime.a` archive from the Simple source tree
   instead of compiling the C runtime sources into that lane.
 - Pure-Simple required-symbol coverage is now complete for the current
@@ -92,7 +92,7 @@ Add a Simple-source runtime archive lane:
 
 **Status: RESOLVED** (live-verified 2026-05-29)
 
-Live run of `sh scripts/check-simple-core-runtime-smoke.shs` (exit 0):
+Live run of `sh scripts/check/check-simple-core-runtime-smoke.shs` (exit 0):
 
 ```
 simple_core_archive=build/simple-core/libsimple_runtime.a
@@ -102,7 +102,7 @@ simple_core_tui_app=true
 simple_core_closure_clean=true
 ```
 
-Resolved for the tracked bootstrap gate: `scripts/check-simple-core-runtime-smoke.shs`
+Resolved for the tracked bootstrap gate: `scripts/check/check-simple-core-runtime-smoke.shs`
 passes with `simple_core_hello=true`, `simple_core_standalone_tui=true`,
 `simple_core_tui_app=true`, and `simple_core_closure_clean=true`. The
 `simple-core` Simple module tree now exports the core-required lifecycle,

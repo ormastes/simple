@@ -85,7 +85,7 @@
 ### Delivered
 - **ELF fix:** `Linkage::Preemptible` → `Export` + `reemit_clean_macho` weak-scope promotion
 - **Capability bug fix:** `CapabilitySet.full()` was producing empty caps — FileRead/FileWrite/FileCreate/FileExec/ProcessSpawn now seeded for full-capability tasks
-- **Build script:** `scripts/simpleos-native-build.shs` — builds Simple compiler as static SimpleOS ELF (x86_64/riscv64/aarch64)
+- **Build script:** `scripts/os/simpleos-native-build.shs` — builds Simple compiler as static SimpleOS ELF (x86_64/riscv64/aarch64)
 - **Initramfs:** Compiler packed at `/bin/simple` + `/usr/bin/simple`
 - **QEMU integration test:** `test/integration/simpleos_self_host_spec.spl` (14 cases) + kernel smoke step + e2e verify
 - **Self-host chain:** SimpleOS boots → loads compiler from initramfs → compiles .spl → runs output

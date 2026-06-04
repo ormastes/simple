@@ -27,7 +27,7 @@ Scope: SimpleOS QEMU validation for boot, window manager, browser app surfaces, 
   - GUI desktop launcher.
   - `--wm` switches to `examples/simple_os/arch/x86_64/wm_entry.spl`.
   - `--serial` routes serial to stdout instead of a file.
-- `scripts/make_os_disk.shs`
+- `scripts/os/make_os_disk.shs`
   - Builds `build/os/fat32.img` with fixture files for NVMe/FAT32 lanes.
 - `src/os/qemu_runner.spl`
   - Defines target-based `build_os/run_os/test_os`.

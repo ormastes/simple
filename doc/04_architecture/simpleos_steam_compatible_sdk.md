@@ -17,7 +17,7 @@ Layer list:
 - `src/os/game/common/` — public game-port contracts and shared manifest format.
 - `src/os/game/steam/` — Steam facade and SFFI backend projection.
 - `examples/os/game/` — rebuildable game proofs and bridge fixtures.
-- `scripts/make_os_disk.shs` plus `examples/simple_os/.../toolchain_vfs_probe_entry.spl` — guest packaging and spawn evidence.
+- `scripts/os/make_os_disk.shs` plus `examples/simple_os/.../toolchain_vfs_probe_entry.spl` — guest packaging and spawn evidence.
 
 Tree-level encapsulation:
 

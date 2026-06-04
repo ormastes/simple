@@ -18,7 +18,7 @@ sh scripts/check_script_layout.shs
 Use `.shs` for normal repo shell entrypoints:
 
 - `scripts/os_gui.shs`
-- `scripts/make_os_disk.shs`
+- `scripts/os/make_os_disk.shs`
 - `scripts/check_release_payload.shs`
 
 The checker rejects new `scripts/*.sh` or `scripts/*.bash` files unless they are
@@ -56,9 +56,9 @@ Blank lines and `#` comments are ignored.
 
 Current exceptions are bootstrap/setup compatibility scripts such as:
 
-- `scripts/setup.sh`
+- `scripts/setup/setup.sh`
 - `scripts/install-dev-tools.sh`
-- `scripts/platform-detect.sh`
+- `scripts/setup/platform-detect.sh`
 - `scripts/bootstrap/*.sh`
 
 Do not add product scripts here just to bypass the rule. If a new shell helper
@@ -68,7 +68,7 @@ is part of normal repo usage, prefer `.shs`.
 
 The checker is wired into:
 
-- `scripts/setup.sh`
+- `scripts/setup/setup.sh`
 - `scripts/install-dev-tools.sh`
 
 You can also run it directly in CI or locally:
@@ -84,7 +84,7 @@ sh scripts/check_script_layout.shs
 bash scripts/install-dev-tools.sh
 
 # Create/update bin/ symlinks and launchers
-sh scripts/setup.sh
+sh scripts/setup/setup.sh
 
 # Re-run the policy check directly
 sh scripts/check_script_layout.shs

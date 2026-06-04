@@ -130,15 +130,20 @@ FILE.md files) are allowed.
 |---|---|
 | `scripts/audit` | Audit scripts |
 | `scripts/bootstrap` | Bootstrap scripts |
-| `scripts/fpga` | FPGA scripts |
+| `scripts/check` | Verification and evidence check scripts |
+| `scripts/deps` | Dependency fetching scripts |
+| `scripts/fpga` | FPGA board scripts (kria, jtag, flash) |
+| `scripts/gui` | macOS GUI launcher scripts |
 | `scripts/hooks` | Git hook scripts |
 | `scripts/openocd` | OpenOCD configs |
+| `scripts/os` | SimpleOS run and build scripts |
 | `scripts/perf` | Performance scripts |
-| `scripts/setup.sh` | Project setup |
-| `scripts/setup.ps1` | Windows setup |
+| `scripts/qemu` | QEMU test and setup scripts |
+| `scripts/resource` | Resource files |
+| `scripts/rtl` | RTL/FPGA generation scripts |
+| `scripts/setup` | Project setup and install scripts |
+| `scripts/smoke` | Protocol smoke test scripts |
 | `scripts/check-workspace-root-guard.shs` | Workspace root guard |
-| `scripts/install-spipe-dev-command.shs` | SPipe dev installer |
-| `scripts/install-workspace-guard-hook.shs` | Hook installer |
 | `scripts/FILE.md` | Scripts manifest |
 
 ## test/

@@ -68,4 +68,4 @@ Updated on 2026-05-01 to replace the earlier subset/phased target with the full 
 
 - The executable spec and codec unit coverage must validate full round-trip behavior, corruption handling, typed errors, and duplicate-path parity instead of subset acceptance.
 - SIMD verification must test forced scalar/AVX2/NEON helper entrypoints directly and require byte-for-byte parity across helper outputs and codec outputs.
-- Final verification must include focused compression coverage, `bin/simple test`, `bin/simple build lint`, `sh scripts/check-core-runtime-smoke.shs bin/simple`, `SIMPLE_BINARY=bin/simple sh scripts/check-mcp-native-smoke.shs`, and a `verify` pass result of `STATUS: PASS`.
+- Final verification must include focused compression coverage, `bin/simple test`, `bin/simple build lint`, `sh scripts/check/check-core-runtime-smoke.shs bin/simple`, `SIMPLE_BINARY=bin/simple sh scripts/check/check-mcp-native-smoke.shs`, and a `verify` pass result of `STATUS: PASS`.

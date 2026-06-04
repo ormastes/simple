@@ -187,8 +187,8 @@ Executed on 2026-05-14:
   - `cargo run --manifest-path src/compiler_rust/Cargo.toml -p simple-driver --bin simple -- test test/unit/lib/gc_async_mut/gpu/engine2d/backend_webgpu_spec.spl --mode=interpreter --clean --force-rebuild`: `4` passed, `0` failed
   - `cargo check --manifest-path src/compiler_rust/Cargo.toml -p simple-common -p simple-compiler`: exit code `0`
 - Required smoke gates:
-  - `sh scripts/check-core-runtime-smoke.shs src/compiler_rust/target/bootstrap/simple`: `core_runtime_smoke=true`
-  - `SIMPLE_BINARY=src/compiler_rust/target/bootstrap/simple MCP_SERVER=build/bootstrap/mcp-package/simple_mcp_server LSP_MCP_SERVER=build/bootstrap/mcp-package/simple_lsp_mcp_server sh scripts/check-mcp-native-smoke.shs`: JSON/schema validation passed for both servers
+  - `sh scripts/check/check-core-runtime-smoke.shs src/compiler_rust/target/bootstrap/simple`: `core_runtime_smoke=true`
+  - `SIMPLE_BINARY=src/compiler_rust/target/bootstrap/simple MCP_SERVER=build/bootstrap/mcp-package/simple_mcp_server LSP_MCP_SERVER=build/bootstrap/mcp-package/simple_lsp_mcp_server sh scripts/check/check-mcp-native-smoke.shs`: JSON/schema validation passed for both servers
 
 ## Maintenance Gates
 

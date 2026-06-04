@@ -150,8 +150,8 @@ Every implementation wave must run:
 - Touched-file stub scan for `TODO`, `pass_todo`, `stub`, `placeholder`,
   `not implemented`, and `expect(true).to_equal(true)`.
 - QEMU scenario for the changed device class when applicable.
-- `sh scripts/check-core-runtime-smoke.shs bin/simple` after `src/lib` changes.
-- `SIMPLE_BINARY=bin/simple sh scripts/check-mcp-native-smoke.shs` after
+- `sh scripts/check/check-core-runtime-smoke.shs bin/simple` after `src/lib` changes.
+- `SIMPLE_BINARY=bin/simple sh scripts/check/check-mcp-native-smoke.shs` after
   compiler/core/lib changes that can affect MCP/LSP startup.
 
 ## Guardrails

@@ -18,7 +18,7 @@ the C counters.
 Run:
 
 ```sh
-SIMPLE_BINARY=src/compiler_rust/target/debug/simple RUNS=20 sh scripts/check-startup-size-performance-audit.shs
+SIMPLE_BINARY=src/compiler_rust/target/debug/simple RUNS=20 sh scripts/check/check-startup-size-performance-audit.shs
 ```
 
 `doc/09_report/startup_size_performance_audit_2026-05-27.md` now shows Simple
@@ -43,7 +43,7 @@ core runtime archive no longer forces `libm` into hello/TUI/network binaries.
 
 - `cargo test -q -p simple-compiler --manifest-path src/compiler_rust/Cargo.toml linker_tests::link_inputs_require_libm_detects_math_symbols_only_when_referenced`: PASS
 - `cargo build -q --manifest-path src/compiler_rust/Cargo.toml -p simple-driver --bin simple`: PASS
-- `SIMPLE_BINARY=src/compiler_rust/target/debug/simple RUNS=20 sh scripts/check-startup-size-performance-audit.shs`: PASS
+- `SIMPLE_BINARY=src/compiler_rust/target/debug/simple RUNS=20 sh scripts/check/check-startup-size-performance-audit.shs`: PASS
 
 The focused hello verbose probe linked without `-lm`, and `ldd` showed only
 `libc.so.6` and the dynamic loader.

@@ -115,7 +115,7 @@ For each phase N (2 through 8):
 4. **Verify entry criteria** -- if the previous phase output is missing or incomplete, re-run the previous phase
 5. **Preflight local runner:** before spawning any agent that may run tests or
    build checks, verify `bin/simple` exists. If it is missing, run
-   `sh scripts/setup.sh`; if `bin/simple` is still missing after setup, stop
+   `sh scripts/setup/setup.sh`; if `bin/simple` is still missing after setup, stop
    and report the setup failure instead of spawning the agent.
 6. **Spawn a fresh Agent** with this prompt:
 

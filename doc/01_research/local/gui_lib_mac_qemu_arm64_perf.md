@@ -47,17 +47,17 @@ Validate Simple GUI library sanity, drawing consistency, capture comparison, and
 
 - Host and Metal checks:
   - `scripts/macos-gui-run.shs`
-  - `scripts/check-metal-generated-2d-readback.shs`
-  - `scripts/check-metal-engine2d-framebuffer-readback-evidence.shs`
+  - `scripts/check/check-metal-generated-2d-readback.shs`
+  - `scripts/check/check-metal-engine2d-framebuffer-readback-evidence.shs`
   - `test/perf/graphics_2d/metal_smoke_spec.spl`
   - `test/perf/graphics_2d/bench_2d_metal_simple.spl`
   - `test/perf/graphics_2d/bench_2d_metal_simple_jit.spl`
   - `test/perf/graphics_2d/perf_2d_runner.spl`
 - QEMU and capture checks:
-  - `scripts/check-simpleos-arm64-wm-qemu-readiness.shs`
-  - `scripts/check-wm-launch-capture-evidence.shs`
-  - `scripts/check-qemu-gtk-wm-capture-evidence.shs`
-  - `scripts/check-qemu-capture-fake-qmp-evidence.shs`
+  - `scripts/check/check-simpleos-arm64-wm-qemu-readiness.shs`
+  - `scripts/check/check-wm-launch-capture-evidence.shs`
+  - `scripts/check/check-qemu-gtk-wm-capture-evidence.shs`
+  - `scripts/check/check-qemu-capture-fake-qmp-evidence.shs`
   - `test/system/gui/arm64_wm_qemu_contract_spec.spl`
   - `test/system/gui/wm_input_qemu_smoke_spec.spl`
   - `test/system/engine2d_in_qemu_spec.spl`

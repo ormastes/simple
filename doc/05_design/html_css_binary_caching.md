@@ -31,7 +31,7 @@
 
 ## GTK Comparison
 
-`scripts/check-gtk-gui-size-speed-baseline.shs` generates:
+`scripts/check/check-gtk-gui-size-speed-baseline.shs` generates:
 
 - a Simple render-loop benchmark using the lightweight pure software HTML renderer and optimization profile;
 - a Simple static-cache hit loop using `WebRenderStaticArtifactCache`;

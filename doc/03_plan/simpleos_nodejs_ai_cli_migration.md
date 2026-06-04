@@ -234,7 +234,7 @@ All three architectures, all three tools:
 - [ ] Automated serial capture and marker verification
 - [ ] Update `ai_cli_qemu_lane` runtime_status from "blocked-runtime-artifact" to "ready"
 
-2026-06-01 checkpoint: `scripts/check-ai-cli-qemu-lanes.shs --stage-smoke-package`
+2026-06-01 checkpoint: `scripts/check/check-ai-cli-qemu-lanes.shs --stage-smoke-package`
 materializes a host-side FAT32-like staging tree for selected AI CLI smoke
 packages, including `AI_MANIFEST.SDN`, `launch.spl`, `qemu_markers.txt`,
 `<app>.js`, the short package manifest, and
@@ -247,7 +247,7 @@ staging path shape can be mirrored into a formatted FAT32 image. This is not
 checked off as FAT32 disk image provisioning because it has not yet been
 integrated into the boot image flow or validated through guest serial markers.
 
-2026-06-01 follow-up: `scripts/check-ai-cli-qemu-lanes.shs --stage-smoke-package
+2026-06-01 follow-up: `scripts/check/check-ai-cli-qemu-lanes.shs --stage-smoke-package
 --populate-fat32-image <img>` now connects the staged AI CLI tree to an
 existing formatted FAT32 image through the host populator and reports
 `fat32_populate_status=host-image-populated` on success. The FAT32 driver also

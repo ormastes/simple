@@ -17,9 +17,9 @@ guest execution of a runtime artifact, not just host package generation.
 
 Fresh evidence from 2026-06-01:
 
-- `scripts/check-ai-cli-qemu-lanes.shs --contract-only` passes for 9 lanes and
+- `scripts/check/check-ai-cli-qemu-lanes.shs --contract-only` passes for 9 lanes and
   reports `ai_cli_qemu_lanes_status=contract-only`.
-- `scripts/check-ai-cli-qemu-lanes.shs --stage-smoke-package --target x86 --app codex`
+- `scripts/check/check-ai-cli-qemu-lanes.shs --stage-smoke-package --target x86 --app codex`
   materializes the host package and reports
   `ai_cli_qemu_lanes_status=stage-smoke-package`.
 - Default validation for `--target x86 --app codex` fails because
@@ -44,12 +44,12 @@ Fresh evidence from 2026-06-01:
    `build/os/ai-cli-arm64.serial.log`.
    If reusing `x64-desktop-disk`, align or copy from its real serial path only
    after the guest emits the AI CLI markers in that log.
-5. Pass `scripts/check-ai-cli-qemu-lanes.shs --target all --app all` without
+5. Pass `scripts/check/check-ai-cli-qemu-lanes.shs --target all --app all` without
    `--contract-only` or `--stage-smoke-package`.
 
 ## Likely Files
 
-- `scripts/check-ai-cli-qemu-lanes.shs`
+- `scripts/check/check-ai-cli-qemu-lanes.shs`
 - `src/os/ai_cli_js_node_contract.spl`
 - `src/os/services/vfs/vfs_boot_init.spl`
 - `src/os/kernel/loader/x86_64_fs_exec_spawn.spl`

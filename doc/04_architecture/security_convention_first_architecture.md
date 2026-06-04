@@ -69,8 +69,8 @@ Backend security owns lowering installation points:
 Live provider validation is intentionally outside hermetic CI:
 
 - `.github/workflows/live-kms-security.yml`: manual-only live KMS workflow.
-- `scripts/check-live-kms-security-workflow.shs`: local structural workflow checker.
-- `scripts/check-repo-hygiene.shs`: repo hygiene integration.
+- `scripts/check/check-live-kms-security-workflow.shs`: local structural workflow checker.
+- `scripts/check/check-repo-hygiene.shs`: repo hygiene integration.
 - `doc/07_guide/security/live_kms_security_gates.md`: operator guide.
 - `test/system/code_quality/live_kms_security_workflow_spec.spl`: Simple canary for workflow and guide invariants.
 
@@ -181,8 +181,8 @@ The live KMS gate remains outside normal CI execution:
 - Provider jobs use protected environments: `live-kms-aws`, `live-kms-gcp`, `live-kms-azure`, and `live-kms-hsm`.
 - Provider preflight checks fail before live execution when required credentials or OIDC bootstrap variables are missing.
 - `SIMPLE_LIVE_KMS_PROVIDER` selects the same Simple integration spec for each provider lane.
-- `scripts/check-live-kms-security-workflow.shs` guards workflow shape locally and optionally runs `actionlint` when present.
-- `scripts/check-repo-hygiene.shs` includes the live workflow checker without requiring cloud credentials or network access.
+- `scripts/check/check-live-kms-security-workflow.shs` guards workflow shape locally and optionally runs `actionlint` when present.
+- `scripts/check/check-repo-hygiene.shs` includes the live workflow checker without requiring cloud credentials or network access.
 - Top-level workflow permissions stay at `contents: read`; AWS/GCP/Azure OIDC jobs add job-scoped `id-token: write`.
 - The `auth` selector preserves `secret` mode and adds `oidc` mode for provider-by-provider migration.
 
