@@ -25,7 +25,16 @@ fn target_uses_x86_intel_asm(target: Option<(&str, &str, &str)>) -> bool {
 }
 
 fn has_unresolved_simple_operand(instruction: &str) -> bool {
-    instruction.contains('{') || instruction.contains('}')
+    instruction.contains('{')
+        || instruction.contains('}')
+        // Unresolved Simple asm operands leak as the Rust `{:?}` of the AST
+        // operand node, e.g. `li t0, Identifier("mstatus_mie")` or
+        // `csrr Integer(0), mhartid` (seen in the riscv/riscv32 baremetal startup
+        // blocks). These are never valid assembler tokens, and the host bootstrap
+        // binary never executes those baremetal blocks, so skip them instead of
+        // emitting invalid asm that fails the clang assemble step.
+        || instruction.contains("Identifier(")
+        || instruction.contains("Integer(")
 }
 
 pub(crate) fn write_inline_asm_c_for_target(
