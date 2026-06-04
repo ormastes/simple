@@ -11,7 +11,7 @@ Intensive tests for the math expression rendering pipeline:
 | Difficulty | 3/5 |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/math_render_spec.spl` |
-| Updated | 2026-05-28 |
+| Updated | 2026-04-07 |
 | Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
@@ -41,25 +41,13 @@ implicit multiplication, and LaTeX-style commands.
 
 | Category | Count |
 |----------|------:|
-| Artifacts | 2 |
-| Logs | 5 |
+| Artifacts | 1 |
 
 ### Artifacts
 
 | Item | Kind | Path |
 |------|------|------|
 | `result.json` | JSON artifact | `build/test-artifacts/feature/usage/math_render/result.json` |
-| `summary.txt` | Text artifact | `build/test-artifacts/feature/usage/math_render/summary.txt` |
-
-### Logs
-
-| Item | Kind | Path |
-|------|------|------|
-| `combined.log` | Log file | `build/test-artifacts/feature/usage/math_render/combined.log` |
-| `output.log` | Log file | `build/test-artifacts/feature/usage/math_render/output.log` |
-| `run.log` | Log file | `build/test-artifacts/feature/usage/math_render/run.log` |
-| `stderr.log` | Log file | `build/test-artifacts/feature/usage/math_render/stderr.log` |
-| `stdout.log` | Log file | `build/test-artifacts/feature/usage/math_render/stdout.log` |
 
 ## Scenarios
 

@@ -10,7 +10,7 @@ use compiler.backend.opencl_backend.{OpenClBackend}
 use compiler.common.attributes.{vhdl_hardware_metadata_default}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.{SymbolId}
-use compiler.mir.mir_data.{MirFunction, MirSignature, BlockId}
+use compiler.mir.mir_data.{MirFunction, MirModule, MirSignature, BlockId}
 use compiler.mir.mir_instructions.{MirBlock, MirTerminator}
 use compiler.mir.mir_types.{MirType}
 
@@ -50,6 +50,14 @@ fn make_gpu_kernel_with_order(name: text, target: text, backend_order: text) -> 
         vhdl_metadata: vhdl_hardware_metadata_default(),
         has_fast_math: false
     )
+
+fn make_gpu_module(functions: [MirFunction]) -> MirModule:
+    var map: {SymbolId: MirFunction} = {}
+    var index = 1
+    for func in functions:
+        map[SymbolId(id: index)] = func
+        index = index + 1
+    MirModule(name: "gpu_backend_contract_module", functions: map, statics: {}, constants: {}, types: {})
 
 describe "compiler GPU target contract":
 
@@ -116,3 +124,23 @@ describe "compiler GPU target contract":
         expect(HipBackend.accepts_gpu_kernel(rocm_only)).to_equal(true)
         expect(HipBackend.accepts_gpu_kernel(cuda_opencl)).to_equal(false)
         expect(HipBackend.accepts_gpu_kernel(all_gpu)).to_equal(true)
+
+    it "plans CUDA and OpenCL tagged kernel subsets through one shared contract":
+        val cuda_only = make_gpu_kernel_with_order("cuda_only", "auto", "cuda")
+        val opencl_only = make_gpu_kernel_with_order("opencl_only", "auto", "opencl")
+        val shared = make_gpu_kernel_with_order("shared_gpu", "auto", "cuda,opencl")
+        val module = make_gpu_module([cuda_only, opencl_only, shared])
+
+        val cuda_plan = CudaBackend.plan_module_kernels(module)
+        val opencl_plan = OpenClBackend.plan_module_kernels(module)
+
+        expect(cuda_plan.backend_name).to_equal("cuda")
+        expect(cuda_plan.accepted_kernel_count).to_equal(2)
+        expect(cuda_plan.rejected_kernel_count).to_equal(1)
+        expect(cuda_plan.rejected_kernel_names).to_contain("opencl_only")
+        expect(cuda_plan.summary()).to_contain("backend=cuda")
+        expect(opencl_plan.backend_name).to_equal("opencl")
+        expect(opencl_plan.accepted_kernel_count).to_equal(2)
+        expect(opencl_plan.rejected_kernel_count).to_equal(1)
+        expect(opencl_plan.rejected_kernel_names).to_contain("cuda_only")
+        expect(opencl_plan.summary()).to_contain("backend=opencl")

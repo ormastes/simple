@@ -41,6 +41,13 @@ scripts/ci-test.sh                                         # CI-style
 System tests (`test/03_system/`) **MUST** have `# @cover` at the top. See `/spipe` skill for format.
 Bypass temporarily: `--no-cover-check`
 
+## Spec Doc Generation
+
+`bin/simple spec-gen [path]` extracts doc comments from `*_spec.spl` files into `doc/06_spec/`.
+Generated specs preserve source path hierarchy and always end with `_spec.md`.
+Path mapping: `test/01_unit/compiler/parser/x_spec.spl` -> `doc/06_spec/01_unit/compiler/parser/x_spec.md`
+See `doc/06_spec/FILE.md` for generated-vs-manual rules.
+
 ## Writing BDD Tests
 
 Tests in `test/` directory, use `*_spec.spl` naming. Use docstring markdown, NOT println().

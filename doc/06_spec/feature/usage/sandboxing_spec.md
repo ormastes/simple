@@ -1,44 +1,104 @@
 # Sandboxing & Isolation
 
-> **⚠️ GENERATED FILE** - Do not edit directly!
-> **Source:** `test/03_system/feature/usage/sandboxing_spec.spl`
-> **Generated:** 2026-01-10 04:47:40
->
-> To update this file, edit the source _spec.spl file and run:
-> ```bash
-> bin/simple spipe-docgen test/03_system/feature/usage/sandboxing_spec.spl
-> ```
+Simple provides two complementary isolation models for secure code execution:
 
-**Status:** ✅ Runtime Complete (#916-919), 📋 Environment Planned (#920-923)
-**Feature IDs:** #916-923
-**Keywords:** sandbox, isolation, security, environment, virtualen
-**Last Updated:** 2025-12-28
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Feature IDs | #916-923 |
+| Status | Runtime Complete (#916-919), Environment Planned (#920-923) |
+| Source | `test/03_system/feature/usage/sandboxing_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple spipe-docgen` (Rust) |
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 14 |
+| Active scenarios | 14 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+**Keywords:** sandbox, isolation, security, environment, virtualenv
+**Last Updated:** 2026-01-18
 **Topics:** security, tooling
-
-## Quick Navigation
-
-- [Overview](#overview)
-- [Test Cases](#test-cases) (0 tests)
-- [Source Code](#source-code)
+**Migrated From:** doc/06_spec/sandboxing.md
 
 ## Overview
 
-### Two Isolation Models
+Simple provides two complementary isolation models for secure code execution:
+
+### Runtime Sandboxing (#916-919)
+- **Resource Limits** - CPU, memory, file descriptors, threads
+- **Network Isolation** - Block/allow network access by domain
+- **Filesystem Isolation** - Restrict read/write paths
+
+### Environment Isolation (#920-923) - Planned
+- **Virtual Environments** - Per-project dependencies
+- **Package Isolation** - Isolated package installations
+- **Reproducible Builds** - Lock files for exact versions
+
+## CLI Usage
+
+```bash
+simple script.spl --sandbox
+
+simple script.spl --time-limit 30 --memory-limit 100M
+
+simple script.spl --no-network
+simple script.spl --network-allow github.com,api.example.com
+simple script.spl --network-block malicious.com
+
+simple script.spl --read-only /tmp,/usr/lib
+simple script.spl --read-write /app/data
+```
 
 ## Related Specifications
 
 - **BDD Testing** - Test framework integration
 - **Build Audit** - Security auditing
 
----
+## Available APIs
 
----
+Process execution for sandbox testing:
+```simple
+import sys.process
 
-## Source Code
+val exit_code = process.run_timeout("simple", ["script.spl", "--time-limit", "5"], 10000)
 
-**View full specification:** [sandboxing_spec.spl](../../test/03_system/feature/usage/sandboxing_spec.spl)
+val result = process.output("simple", ["--version"])
+if result.is_success():
+print(result.stdout)
+```
 
----
+## Evidence
 
-*This file was auto-generated from the executable specification.*
-*Source: `test/03_system/feature/usage/sandboxing_spec.spl`*
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
+
+### Artifacts
+
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/sandboxing/result.json` |
+
+## Scenarios
+
+- limits CPU time for long-running scripts
+- limits memory allocation
+- limits file descriptors
+- limits thread creation
+- blocks all network access with --no-network
+- allows only specified domains with --network-allow
+- blocks specified domains with --network-block
+- restricts to read-only paths
+- allows read-write to specific paths
+- uses overlay filesystem for isolation
+- applies multiple restrictions simultaneously
+- provides secure defaults with --sandbox
+- creates isolated virtual environments
+- supports lock files for reproducibility

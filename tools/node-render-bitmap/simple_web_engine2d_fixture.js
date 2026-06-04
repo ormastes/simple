@@ -9,6 +9,10 @@ const iterations = Number(process.env.NODE_BITMAP_ITERATIONS || 1000);
 const runtime = process.env.JS_RENDER_RUNTIME || "node";
 const scene = process.env.SIMPLE_WEB_ENGINE2D_SCENE || "simple-web-engine2d-image-taskbar-command";
 const pixelOut = process.env.SIMPLE_WEB_ENGINE2D_PIXEL_OUT || "";
+const target = "pure_simple";
+const producer = `${runtime}-simple-web-engine2d-baseline`;
+const engine2dBackend = "software";
+const pixelFormat = "argb-u32";
 
 const html = "<html><body style='background-color: #112233'><div class='wm-app-titlebar' style='background-color: #445566; width: 80px; height: 40px'></div><main class='wm-app-content simple-web-accent'>image taskbar command</main></body></html>";
 const fontCharset = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,:;!?-_()[]/\\'\"+=#%&@*<>";
@@ -477,8 +481,10 @@ if (pixelOut) {
   fs.writeFileSync(pixelOut, JSON.stringify({
     width,
     height,
-    format: "argb-u32",
-    producer: `${runtime}-simple-web-engine2d-baseline`,
+    format: pixelFormat,
+    target,
+    producer,
+    engine2d_backend: engine2dBackend,
     pixels: Array.from(warm, (px) => px >>> 0),
   }));
 }
@@ -492,7 +498,10 @@ for (let i = 0; i < iterations; i += 1) {
 const elapsed = process.hrtime.bigint() - start;
 const frameUs = elapsed > 0n ? Number(elapsed / BigInt(iterations) / 1000n) : 1;
 
-console.log(`renderer=${runtime}-simple-web-engine2d-baseline`);
+console.log(`target=${target}`);
+console.log(`renderer=${producer}`);
+console.log(`producer=${producer}`);
+console.log(`engine2d_backend=${engine2dBackend}`);
 console.log(`scene=${scene}`);
 console.log(`width=${width}`);
 console.log(`height=${height}`);
@@ -501,4 +510,5 @@ console.log(`checksum=${warmChecksum.toString()}`);
 console.log(`weighted_checksum=${warmWeighted.toString()}`);
 console.log(`total_checksum=${total.toString()}`);
 console.log(`frame_us=${frameUs > 0 ? frameUs : 1}`);
+console.log(`pixel_format=${pixelFormat}`);
 console.log("blur_or_tolerance_used=false");

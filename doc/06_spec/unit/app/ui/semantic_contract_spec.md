@@ -1,5 +1,41 @@
 # Semantic Contract Specification
 
+> <details>
+
+<!-- sdn-diagram:id=semantic_contract_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=semantic_contract_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+semantic_contract_spec -> std
+semantic_contract_spec -> common
+semantic_contract_spec -> nogc_sync_mut
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=semantic_contract_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 8 | 8 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Semantic Contract Specification
+
 ## Scenarios
 
 ### semantic UI contract snapshot
@@ -40,6 +76,28 @@ expect(snapshot.protocol_version).to_equal(SEMANTIC_UI_PROTOCOL_VERSION)
 expect(snapshot.adapter_status).to_equal("semantic_adapter_unavailable")
 expect(snapshot.state.element_count).to_equal(0)
 expect(snapshot.elements.len()).to_equal(0)
+```
+
+</details>
+
+#### carries backend capability vocabulary in semantic snapshots
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val caps = semantic_ui_capabilities_from_backend([Capability.Mouse, Capability.Color])
+expect(caps.len()).to_equal(2)
+expect(caps[0].name).to_equal("Mouse")
+expect(caps[0].available).to_equal(true)
+
+val snapshot = semantic_ui_snapshot_from_state_with_capabilities(_semantic_demo_state(), SEMANTIC_UI_STAGE_STATE, SEMANTIC_UI_STATUS_AVAILABLE, [Capability.Mouse, Capability.Color])
+expect(semantic_ui_has_capability(snapshot, "Mouse")).to_equal(true)
+expect(semantic_ui_has_capability(snapshot, "Color")).to_equal(true)
+expect(semantic_ui_has_capability(snapshot, "Images")).to_equal(false)
 ```
 
 </details>
@@ -214,9 +272,11 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
+
+</details>

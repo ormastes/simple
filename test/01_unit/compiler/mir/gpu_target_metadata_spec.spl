@@ -3,12 +3,11 @@
 # @tag: unit, compiler, mir, gpu, opencl
 
 use std.spipe.*
-use compiler.common.attributes.{FunctionAttr}
-use compiler.common.config.{Logger}
+use compiler.common.attributes.{FunctionAttr, parse_function_attrs}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.attributes.{vhdl_hardware_metadata_default}
-use compiler.frontend.frontend.{parse_full_frontend}
-use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.frontend.parser_types.{Attribute}
+use compiler.frontend.parser_types_expr.{Expr, ExprKind}
 use compiler.hir.hir_types.{SymbolId, SymbolTable}
 use compiler.mir.mir_data.{MirFunction, MirModule, MirSignature, MirBuilder, BlockId}
 use compiler.mir.mir_instructions.{MirBlock, MirTerminator}
@@ -17,9 +16,6 @@ use compiler.mir.mir_lowering.{MirLowering}
 
 fn empty_span() -> Span:
     Span.empty()
-
-fn make_logger() -> Logger:
-    Logger(level: 0)
 
 fn empty_block(label: text) -> MirBlock:
     MirBlock(
@@ -62,23 +58,25 @@ fn make_gpu_attr(target: text, backends: text) -> FunctionAttr:
     attr.gpu_backends = backends
     attr
 
-describe "MIR GPU target metadata":
-    it "lowers source @gpu OpenCL decorator metadata through HIR into MIR":
-        val src = "@gpu(\"opencl\")\nfn opencl_kernel(value: u32) -> u32:\n    value\n"
-        val module = parse_full_frontend(src, "source_opencl_kernel.spl", "source_opencl_kernel", make_logger())
-        var hir_lowering = HirLowering.with_filename("source_opencl_kernel.spl")
-        val hir_module = hir_lowering.lower_module(module)
-        var mir_lowering = MirLowering.new(hir_module.symbols)
-        val mir_module = mir_lowering.lower_module(hir_module)
+fn make_gpu_source_attr(target: text) -> Attribute:
+    val span = empty_span()
+    Attribute(
+        name: "gpu",
+        args: [Expr(kind: ExprKind.StringLit(target, nil), span: span)],
+        span: span
+    )
 
-        var found = false
-        for mir_fn in mir_module.functions.values():
-            if mir_fn.name == "opencl_kernel":
-                found = true
-                expect(mir_fn.is_kernel).to_equal(true)
-                expect(mir_fn.gpu_target).to_equal("opencl")
-                expect(mir_fn.gpu_backend_order).to_equal("opencl")
-        expect(found).to_equal(true)
+describe "MIR GPU target metadata":
+    it "lowers frontend-shaped gpu attribute metadata into MIR":
+        val parsed_attr = parse_function_attrs([make_gpu_source_attr("opencl")])
+        val lowerer = MirLowering.new(SymbolTable.new())
+        val fn_ = make_mir_function("gpu_kernel")
+
+        val result = lowerer.apply_function_attr_to_mir(fn_, parsed_attr)
+
+        expect(result.is_kernel).to_equal(true)
+        expect(result.gpu_target).to_equal("opencl")
+        expect(result.gpu_backend_order).to_equal("opencl")
 
     it "propagates normalized OpenCL target metadata from function attrs":
         val lowerer = MirLowering.new(SymbolTable.new())

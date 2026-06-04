@@ -32,6 +32,24 @@ REQUIREMENTS -> NFR;  RESEARCH -> DESIGN -> ADR;  GUIDES <- OPERATIONS
 - Research goes in `doc/01_research/`, NOT mixed with specs
 - Use SDN for config/data, not JSON/YAML
 
+## doc/06_spec Structure (Generated vs Manual)
+
+`doc/06_spec/` uses a 4-level hierarchy: `{category}/{domain}/{subdomain}/{file}`.
+
+| Content | Naming | Lifecycle |
+|---------|--------|-----------|
+| **Generated** specs | `*_spec.md` (has `_Generated from` header) | Overwritten by `bin/simple spec-gen` |
+| **Manual** specs | Non-`_spec.md` names (README, INDEX, guides) | Hand-edited, survives regeneration |
+| **Auto-meta** | `feature.md`, `pending_feature.md` | Regenerated every test run |
+
+Categories mirror test/ structure:
+- `unit/` -> `test/01_unit/`, `integration/` -> `test/02_integration/`, `system/` -> `test/03_system/`
+- `feature/` for language feature specs (language/, usage/)
+
+Path mapping: `test/01_unit/compiler/parser/x_spec.spl` -> `doc/06_spec/unit/compiler/parser/x_spec.md`
+
+See `doc/06_spec/FILE.md` for full manifest.
+
 ## Documentation Workflow (New Features)
 
 1. **Research** -> `doc/01_research/<feature>.md` (if non-obvious)
@@ -41,7 +59,7 @@ REQUIREMENTS -> NFR;  RESEARCH -> DESIGN -> ADR;  GUIDES <- OPERATIONS
 5. **Architecture** -> `doc/04_architecture/<feature>.md`
 6. **Design** -> `doc/05_design/<feature>.md`
 7. **ADR** -> `doc/04_architecture/adr/ADR-NNN-title.md` (major decisions)
-8. **Feature Spec** -> `doc/06_spec/<feature>.md`
+8. **Feature Spec** -> `doc/06_spec/{category}/{domain}/{subdomain}/<feature>_spec.md` (generated from test)
 9. **BDD Tests** -> `test/*_spec.spl` (link Requirements + Design in docstring)
 10. **Guide** -> `doc/07_guide/<feature>_guide.md` (if applicable)
 11. **Report** -> `doc/09_report/<feature>_complete_YYYY-MM-DD.md`

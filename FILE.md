@@ -54,6 +54,7 @@ FILE.md files) are allowed.
 |---|---|
 | `src/FILE.md` | `src/` directory |
 | `doc/FILE.md` | `doc/` directory |
+| `doc/06_spec/FILE.md` | `doc/06_spec/` specs (generated vs manual) |
 | `config/FILE.md` | `config/` directory |
 | `scripts/FILE.md` | `scripts/` directory |
 | `test/FILE.md` | `test/` directory |

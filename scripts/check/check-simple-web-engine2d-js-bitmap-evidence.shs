@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 BUILD_DIR="${BUILD_DIR:-build/simple_web_engine2d_js_bitmap_evidence}"
@@ -19,6 +19,7 @@ SIMPLE_OUT="$BUILD_DIR/simple.out"
 JS_OUT="$BUILD_DIR/${JS_RENDER_RUNTIME}.out"
 SIMPLE_ARGB="$BUILD_DIR/simple-argb.json"
 JS_ARGB="$BUILD_DIR/${JS_RENDER_RUNTIME}-argb.json"
+NODE_FIXTURE_TOOL_PATH="tools/node-render-bitmap/simple_web_engine2d_fixture.js"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$SIMPLE_SRC" "$SIMPLE_OUT" "$JS_OUT" "$SIMPLE_ARGB" "$JS_ARGB" "$REPORT_PATH"
@@ -40,6 +41,12 @@ emit_unavailable() {
         echo "simple_web_engine2d_js_height=$HEIGHT"
         echo "simple_web_engine2d_js_iterations=$ITERATIONS"
         echo "simple_web_engine2d_js_trials=$TRIALS"
+        echo "simple_web_engine2d_js_node_fixture_tool_path=$NODE_FIXTURE_TOOL_PATH"
+        echo "simple_web_engine2d_js_node_fixture_target=pure_simple"
+        echo "simple_web_engine2d_js_node_fixture_renderer=$JS_RENDER_RUNTIME-simple-web-engine2d-baseline"
+        echo "simple_web_engine2d_js_node_fixture_producer=$JS_RENDER_RUNTIME-simple-web-engine2d-baseline"
+        echo "simple_web_engine2d_js_node_fixture_engine2d_backend=software"
+        echo "simple_web_engine2d_js_node_fixture_pixel_format=argb-u32"
     } >"$BUILD_DIR/evidence.env"
     {
         echo "# Simple Web Engine2D JS Bitmap Evidence"
@@ -183,6 +190,11 @@ simple_blur=""
 js_blur=""
 simple_frame_us=""
 js_frame_us=""
+js_target=""
+js_renderer=""
+js_producer=""
+js_engine2d_backend=""
+js_pixel_format=""
 simple_cache_hits=""
 simple_cache_stores=""
 mismatch_count=""
@@ -192,7 +204,7 @@ while [ "$trial" -le "$TRIALS" ]; do
     rm -f "$SIMPLE_ARGB" "$JS_ARGB"
     SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SIMPLE_BIN" run "$SIMPLE_SRC" --mode=interpreter --clean >"$trial_simple_out" 2>&1
     simple_code=$?
-    JS_RENDER_RUNTIME="$JS_RENDER_RUNTIME" SIMPLE_WEB_ENGINE2D_SCENE="$SCENE" NODE_BITMAP_WIDTH="$WIDTH" NODE_BITMAP_HEIGHT="$HEIGHT" NODE_BITMAP_ITERATIONS="$ITERATIONS" SIMPLE_WEB_ENGINE2D_PIXEL_OUT="$JS_ARGB" "$JS_RENDER_RUNTIME_BIN" tools/node-render-bitmap/simple_web_engine2d_fixture.js >"$trial_js_out" 2>&1
+    JS_RENDER_RUNTIME="$JS_RENDER_RUNTIME" SIMPLE_WEB_ENGINE2D_SCENE="$SCENE" NODE_BITMAP_WIDTH="$WIDTH" NODE_BITMAP_HEIGHT="$HEIGHT" NODE_BITMAP_ITERATIONS="$ITERATIONS" SIMPLE_WEB_ENGINE2D_PIXEL_OUT="$JS_ARGB" "$JS_RENDER_RUNTIME_BIN" "$NODE_FIXTURE_TOOL_PATH" >"$trial_js_out" 2>&1
     js_code=$?
     {
         echo "## trial $trial"
@@ -222,6 +234,11 @@ while [ "$trial" -le "$TRIALS" ]; do
     trial_js_blur="$(field_of blur_or_tolerance_used "$trial_js_out")"
     trial_simple_frame_us="$(field_of frame_us "$trial_simple_out")"
     trial_js_frame_us="$(field_of frame_us "$trial_js_out")"
+    trial_js_target="$(field_of target "$trial_js_out")"
+    trial_js_renderer="$(field_of renderer "$trial_js_out")"
+    trial_js_producer="$(field_of producer "$trial_js_out")"
+    trial_js_engine2d_backend="$(field_of engine2d_backend "$trial_js_out")"
+    trial_js_pixel_format="$(field_of pixel_format "$trial_js_out")"
     trial_simple_cache_hits="$(field_of cache_hits "$trial_simple_out")"
     trial_simple_cache_stores="$(field_of cache_stores "$trial_simple_out")"
     trial_mismatch_count="$(node -e 'const fs=require("fs"); const a=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); const b=JSON.parse(fs.readFileSync(process.argv[2],"utf8")); let n=0; if (a.width!==b.width || a.height!==b.height || a.pixels.length!==b.pixels.length) { n = Math.max(a.pixels.length, b.pixels.length); } else { for (let i=0;i<a.pixels.length;i+=1) if ((a.pixels[i]>>>0)!==(b.pixels[i]>>>0)) n+=1; } console.log(n);' "$SIMPLE_ARGB" "$JS_ARGB")"
@@ -239,6 +256,11 @@ while [ "$trial" -le "$TRIALS" ]; do
         js_blur="$trial_js_blur"
         simple_frame_us="$trial_simple_frame_us"
         js_frame_us="$trial_js_frame_us"
+        js_target="$trial_js_target"
+        js_renderer="$trial_js_renderer"
+        js_producer="$trial_js_producer"
+        js_engine2d_backend="$trial_js_engine2d_backend"
+        js_pixel_format="$trial_js_pixel_format"
         simple_cache_hits="$trial_simple_cache_hits"
         simple_cache_stores="$trial_simple_cache_stores"
         mismatch_count="$trial_mismatch_count"
@@ -250,6 +272,10 @@ while [ "$trial" -le "$TRIALS" ]; do
         fi
         if [ "$mismatch_count" != "$trial_mismatch_count" ]; then
             mismatch_count="inconsistent"
+            break
+        fi
+        if [ "$js_target" != "$trial_js_target" ] || [ "$js_renderer" != "$trial_js_renderer" ] || [ "$js_producer" != "$trial_js_producer" ] || [ "$js_engine2d_backend" != "$trial_js_engine2d_backend" ] || [ "$js_pixel_format" != "$trial_js_pixel_format" ]; then
+            js_target="inconsistent"
             break
         fi
         if [ "$trial_simple_frame_us" -gt 0 ] && [ "$trial_simple_frame_us" -lt "$simple_frame_us" ]; then
@@ -281,6 +307,18 @@ else
     elif [ "$simple_blur" != "false" ] || [ "$js_blur" != "false" ]; then
         status=fail
         reason=blur-or-tolerance-not-allowed
+    elif [ "$js_target" != "pure_simple" ]; then
+        status=fail
+        reason=node-fixture-target-mismatch
+    elif [ "$js_renderer" != "$JS_RENDER_RUNTIME-simple-web-engine2d-baseline" ] || [ "$js_producer" != "$JS_RENDER_RUNTIME-simple-web-engine2d-baseline" ]; then
+        status=fail
+        reason=node-fixture-producer-mismatch
+    elif [ "$js_engine2d_backend" != "software" ]; then
+        status=fail
+        reason=node-fixture-engine2d-backend-mismatch
+    elif [ "$js_pixel_format" != "argb-u32" ]; then
+        status=fail
+        reason=node-fixture-pixel-format-mismatch
     elif [ -z "$simple_checksum" ] || [ -z "$js_checksum" ] || [ "$simple_checksum" != "$js_checksum" ]; then
         status=fail
         reason=checksum-mismatch
@@ -326,6 +364,12 @@ mismatch_count="${mismatch_count:-}"
     echo "simple_web_engine2d_js_height=$HEIGHT"
     echo "simple_web_engine2d_js_iterations=$ITERATIONS"
     echo "simple_web_engine2d_js_trials=$TRIALS"
+    echo "simple_web_engine2d_js_node_fixture_tool_path=$NODE_FIXTURE_TOOL_PATH"
+    echo "simple_web_engine2d_js_node_fixture_target=$js_target"
+    echo "simple_web_engine2d_js_node_fixture_renderer=$js_renderer"
+    echo "simple_web_engine2d_js_node_fixture_producer=$js_producer"
+    echo "simple_web_engine2d_js_node_fixture_engine2d_backend=$js_engine2d_backend"
+    echo "simple_web_engine2d_js_node_fixture_pixel_format=$js_pixel_format"
     echo "simple_web_engine2d_js_simple_checksum=$simple_checksum"
     echo "simple_web_engine2d_js_baseline_checksum=$js_checksum"
     echo "simple_web_engine2d_js_simple_weighted_checksum=$simple_weighted"
@@ -348,6 +392,12 @@ mismatch_count="${mismatch_count:-}"
     echo "- status: $status"
     echo "- reason: $reason"
     echo "- baseline runtime: $JS_RENDER_RUNTIME"
+    echo "- node fixture tool: $NODE_FIXTURE_TOOL_PATH"
+    echo "- node fixture target: $js_target"
+    echo "- node fixture renderer: $js_renderer"
+    echo "- node fixture producer: $js_producer"
+    echo "- node fixture Engine2D backend: $js_engine2d_backend"
+    echo "- node fixture pixel format: $js_pixel_format"
     echo "- scene: $SCENE"
     echo "- dimensions: ${WIDTH}x${HEIGHT}"
     echo "- iterations per trial: $ITERATIONS"

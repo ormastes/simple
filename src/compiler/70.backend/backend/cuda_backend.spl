@@ -7,7 +7,7 @@ use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
 use compiler.backend.backend_api.*
 use compiler.backend.backend.backend_types.{compileerror_backend_error}
-use compiler.backend.gpu_backend_metadata.{gpu_backend_accepts_kernel_metadata}
+use compiler.backend.gpu_backend_metadata.{GpuBackendKernelPlan, gpu_backend_accepts_kernel_metadata, gpu_backend_plan_module_kernels}
 use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
 use compiler.backend.gpu_codegen_types.{GpuCodegen, GpuBarrierScope}
 use compiler.backend.cuda_type_mapper.CudaTypeMapper
@@ -74,6 +74,10 @@ class CudaBackend:
 
     me compile(module: MirModule) -> Result<CudaCompiledModule, CompileError>:
         """Compile MIR module to PTX."""
+        val plan = CudaBackend.plan_module_kernels(module)
+        if not plan.ready:
+            return Err(compileerror_backend_error(BackendKind.Cuda, plan.diagnostic))
+
         val builder = PtxBuilder.create(self.compute_capability)
 
         # Emit module header
@@ -180,6 +184,9 @@ class CudaBackend:
         if not func.is_kernel:
             return true
         gpu_backend_accepts_kernel_metadata(BackendKind.Cuda, func.gpu_target, func.gpu_backend_order)
+
+    static fn plan_module_kernels(module: MirModule) -> GpuBackendKernelPlan:
+        gpu_backend_plan_module_kernels(BackendKind.Cuda, module)
 
     me emit_local_decl(builder: PtxBuilder, local: MirLocal):
         """Emit local variable declaration."""

@@ -7,11 +7,12 @@
 use common.ui.builder.{button, panel, text_widget, build_tree_with_title}
 use common.ui.state.{init_state}
 use common.ui.widget.{UIEvent}
-use common.ui.web_render_api.{WEB_RENDER_TARGET_ELECTRON, WEB_RENDER_TARGET_PURE_SIMPLE, WEB_RENDER_TARGET_TAURI, WebRenderHostWindowCommand, WebRenderRequest, web_render_cache_key, web_render_dynamic_region_count, web_render_ipc_json, web_render_ipc_json_with_html, web_render_optimization_profile, web_render_to_artifact, web_render_transport_bundle, web_render_url_request}
+use common.ui.semantic_contract.{SemanticUiCommand, semantic_ui_snapshot_to_json}
+use common.ui.web_render_api.{WEB_RENDER_TARGET_ELECTRON, WEB_RENDER_TARGET_PURE_SIMPLE, WEB_RENDER_TARGET_TAURI, WebRenderHostWindowCommand, WebRenderRequest, web_render_cache_key, web_render_dynamic_region_count, web_render_ipc_json, web_render_ipc_json_with_html, web_render_ipc_json_with_html_and_semantic, web_render_optimization_profile, web_render_to_artifact, web_render_transport_bundle, web_render_url_request}
 use app.ui.web.backend.{WebBackend, web_render_patch_transport_json, web_render_snapshot_transport_json}
-use app.ui.electron.backend.{ElectronBackend, electron_render_ipc_json}
-use app.ui.tauri.backend.{TauriBackend, tauri_render_ipc_json}
-use app.ui.browser.backend.{BrowserBackend}
+use app.ui.electron.backend.{ElectronBackend, electron_render_ipc_json, electron_semantic_render_ipc_json, electron_semantic_snapshot}
+use app.ui.tauri.backend.{TauriBackend, tauri_render_ipc_json, tauri_semantic_render_ipc_json, tauri_semantic_snapshot}
+use app.ui.browser.backend.{BrowserBackend, browser_semantic_snapshot}
 use app.ui.ipc.async_handler.{ipc_writer_message}
 use std.gc_async_mut.ui.web_render_pixel_backend.{web_render_default_page_html as web_render_pixel_default_page_html, web_render_url_to_request}
 
@@ -110,8 +111,10 @@ describe "web render backends use the shared common API":
         val body = WebBackend.new(4015).render_html(state)
         val electron_req = WebRenderRequest.html(WEB_RENDER_TARGET_ELECTRON, "", body, "", "", 1280, 720)
         val tauri_req = WebRenderRequest.html(WEB_RENDER_TARGET_TAURI, "", body, "", "", 1280, 720)
+        val browser_req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "", body, "", "", 1280, 720)
         val electron_bundle = web_render_transport_bundle(electron_req, "main", UIEvent.KeyPress(key: "enter"), 8u64, 8u64, 9u64, "[]", "{\"mode\":\"NORMAL\"}", cmd)
         val tauri_bundle = web_render_transport_bundle(tauri_req, "main", UIEvent.InputChange(target_id: "name", value: "Ada"), 8u64, 8u64, 9u64, "[]", "{\"mode\":\"NORMAL\"}", cmd)
+        val browser_bundle = web_render_transport_bundle(browser_req, "main", UIEvent.MouseEvent(x: 10.0, y: 20.0, button: "left", kind: "down"), 8u64, 8u64, 9u64, "[]", "{\"mode\":\"NORMAL\"}", cmd)
 
         val electron = ElectronBackend.new(4016).unwrap()
         expect(electron_render_ipc_json(state, 1280, 720)).to_contain("\"target\":\"electron\"")
@@ -130,6 +133,12 @@ describe "web render backends use the shared common API":
         expect(tauri.snapshot_envelope_json("main", 8u64, "{\"mode\":\"NORMAL\"}")).to_equal(tauri_bundle.snapshot_json)
         expect(tauri.patch_envelope_json("main", 8u64, 9u64, "[]", "{\"mode\":\"NORMAL\"}")).to_equal(tauri_bundle.patch_json)
         expect(tauri.host_window_command_json(cmd)).to_equal(tauri_bundle.host_window_json)
+
+        val browser = BrowserBackend.create(1280, 720, "software").unwrap()
+        expect(browser.input_envelope_json("main", UIEvent.MouseEvent(x: 10.0, y: 20.0, button: "left", kind: "down"))).to_equal(browser_bundle.input_json)
+        expect(browser.snapshot_envelope_json("main", 8u64, "{\"mode\":\"NORMAL\"}")).to_equal(browser_bundle.snapshot_json)
+        expect(browser.patch_envelope_json("main", 8u64, 9u64, "[]", "{\"mode\":\"NORMAL\"}")).to_equal(browser_bundle.patch_json)
+        expect(browser.host_window_command_json(cmd)).to_equal(browser_bundle.host_window_json)
 
     it "classifies static shells and dynamic islands for binary cache planning":
         val static_req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "Static", "<main><section>stable</section></main>", ".stable{contain:layout paint style}", "", 320, 200)
@@ -154,6 +163,38 @@ describe "web render backends use the shared common API":
         expect(ipc).to_contain("\"target\":\"electron\"")
         expect(ipc).to_contain("cached")
         expect(web_render_ipc_json(req)).to_contain("\"target\":\"electron\"")
+
+    it "attaches semantic snapshots at the shared render and transport boundary":
+        val state = sample_state()
+        val body = WebBackend.new(4020).render_html(state)
+        val req = WebRenderRequest.html(WEB_RENDER_TARGET_ELECTRON, "", body, "", "", 1280, 720)
+        val semantic_json = semantic_ui_snapshot_to_json(electron_semantic_snapshot(state))
+        val ipc = web_render_ipc_json_with_html_and_semantic(req, "<html><body><div id=\"app\">" + body + "</div></body></html>", semantic_json)
+        expect(ipc).to_contain("\"semantic\":{\"protocol_version\"")
+        expect(ipc).to_contain("\"stage\":\"S3\"")
+        expect(ipc).to_contain("\"element_count\":3")
+
+        val electron = ElectronBackend.new(4021).unwrap()
+        val tauri = TauriBackend.new(4022).unwrap()
+        val browser = BrowserBackend.create(1280, 720, "software").unwrap()
+        expect(electron_semantic_render_ipc_json(state, 1280, 720)).to_contain("\"semantic\":{\"protocol_version\"")
+        expect(tauri_semantic_render_ipc_json(state, 1280, 720)).to_contain("\"target\":\"tauri\"")
+        expect(electron.semantic_snapshot_json(state)).to_equal(semantic_json)
+        expect(tauri.semantic_snapshot_json(state)).to_equal(semantic_ui_snapshot_to_json(tauri_semantic_snapshot(state)))
+        expect(browser.semantic_snapshot_json(state)).to_equal(semantic_ui_snapshot_to_json(browser_semantic_snapshot(state)))
+        expect(electron.semantic_snapshot_envelope_json(state, "main", 10u64)).to_contain("\"snapshot\":{\"protocol_version\"")
+        expect(tauri.semantic_snapshot_envelope_json(state, "main", 10u64)).to_contain("\"target\":\"tauri\"")
+        expect(browser.semantic_snapshot_envelope_json(state, "main", 10u64)).to_contain("\"target\":\"pure_simple\"")
+
+        val command = SemanticUiCommand.type_text("main", "web_render_action", "Run")
+        val bundle = browser.semantic_transport_bundle(state, "main", command, 10u64, 10u64, 11u64, "[]")
+        expect(bundle.input_json).to_contain("\"event_type\":\"input\"")
+        expect(bundle.snapshot_json).to_contain("\"stage\":\"S3\"")
+        expect(bundle.patch_json).to_contain("\"snapshot\":{\"protocol_version\"")
+
+        browser.render_frame(state.tree, state)
+        expect(browser.last_semantic_snapshot_json).to_contain("\"stage\":\"S3\"")
+        expect(browser.last_semantic_snapshot_json).to_contain("\"canonical_id\":\"main#web_render_root\"")
 
     it "builds URL render requests through the common request envelope":
         val req = web_render_url_request(WEB_RENDER_TARGET_PURE_SIMPLE, "about:blank", 320, 200).with_pixel_output()

@@ -9,7 +9,7 @@ use compiler.mir.mir_data.{MirModule}
 use compiler.mir.mir_instructions.{MirFunction, MirInst, MirTerminator, MirOperand, MirBinOp, MirUnaryOp, AggregateKind, GpuBarrierScope, GpuMemoryScope, GpuAtomicOpKind, SwitchCase, BlockId}
 use compiler.mir.mir_types.{MirLocal, MirType, MirTypeKind, LocalKind, MirConstValue}
 use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, CompileOptions, CompileError, compileerror_backend_error}
-use compiler.backend.gpu_backend_metadata.{gpu_backend_accepts_kernel_metadata}
+use compiler.backend.gpu_backend_metadata.{GpuBackendKernelPlan, gpu_backend_accepts_kernel_metadata, gpu_backend_plan_module_kernels}
 use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
 use compiler.backend.gpu_portable_compute.{
     PortableComputeCompilePlan,
@@ -48,28 +48,6 @@ class OpenClBackendCompileContract:
     fn summary() -> text:
         "OpenClBackendCompileContract[source={self.plan.source_format} binary={self.plan.binary_format} entry={self.plan.entry_name} ready={self.ready.to_text()} status={self.status}]"
 
-class OpenClBackendKernelPlan:
-    accepted_kernel_count: i64
-    rejected_kernel_count: i64
-    rejected_kernel_names: text
-    ready: bool
-    diagnostic: text
-
-    static fn create(accepted_kernel_count: i64, rejected_kernel_count: i64, rejected_kernel_names: text) -> OpenClBackendKernelPlan:
-        OpenClBackendKernelPlan(
-            accepted_kernel_count: accepted_kernel_count,
-            rejected_kernel_count: rejected_kernel_count,
-            rejected_kernel_names: rejected_kernel_names,
-            ready: rejected_kernel_count == 0,
-            diagnostic: if rejected_kernel_count == 0:
-                ""
-            else:
-                "OpenCL backend rejected CUDA-only kernel(s): {rejected_kernel_names}"
-        )
-
-    fn summary() -> text:
-        "OpenClBackendKernelPlan[accepted={self.accepted_kernel_count} rejected={self.rejected_kernel_count} ready={self.ready.to_text()}]"
-
 class OpenClBackend:
     options: CompileOptions
 
@@ -84,19 +62,8 @@ class OpenClBackend:
             return true
         gpu_backend_accepts_kernel_metadata(BackendKind.OpenCl, func.gpu_target, func.gpu_backend_order)
 
-    static fn plan_module_kernels(module: MirModule) -> OpenClBackendKernelPlan:
-        var accepted = 0
-        var rejected = 0
-        var rejected_names: [text] = []
-        for symbol in module.functions.keys():
-            val func: MirFunction = module.functions[symbol]
-            if func.is_kernel:
-                if OpenClBackend.accepts_gpu_kernel(func):
-                    accepted = accepted + 1
-                else:
-                    rejected = rejected + 1
-                    rejected_names.push(func.name)
-        OpenClBackendKernelPlan.create(accepted, rejected, rejected_names.join(","))
+    static fn plan_module_kernels(module: MirModule) -> GpuBackendKernelPlan:
+        gpu_backend_plan_module_kernels(BackendKind.OpenCl, module)
 
     static fn compile_module_to_opencl_source(module: MirModule) -> Result<text, CompileError>:
         val plan = OpenClBackend.plan_module_kernels(module)

@@ -38,6 +38,8 @@ const WM_DOCK_MAGNIFICATION_STORAGE_KEY = 'simple.wm.dock_magnification';
 const WM_DOCK_VISIBILITY_STORAGE_KEY = 'simple.wm.dock_visibility';
 const WM_SURFACE_DEPTH_STORAGE_KEY = 'simple.wm.surface_depth';
 const WM_TRAFFIC_SIDE_STORAGE_KEY = 'simple.wm.traffic_side';
+const WM_ICON_MASK_STORAGE_KEY = 'simple.wm.icon_mask';
+const WM_CORNER_RADIUS_STORAGE_KEY = 'simple.wm.corner_radius';
 const WM_CHROME_VERBOSITY_STORAGE_KEY = 'simple.wm.chrome_verbosity';
 const WM_WINDOW_TRANSITION_STORAGE_KEY = 'simple.wm.window_transition';
 const WM_DENSITY_STORAGE_KEY = 'simple.wm.density';
@@ -138,6 +140,8 @@ class SimpleWindowManager {
     this._dockVisibilityMode = 'shown';
     this._surfaceDepthMode = 'layered';
     this._trafficSideMode = 'left';
+    this._iconMaskMode = 'circle';
+    this._cornerRadiusMode = 'round';
     this._chromeVerbosityMode = 'full';
     this._windowTransitionMode = 'mac';
     this._densityMode = 'comfortable';
@@ -153,8 +157,16 @@ class SimpleWindowManager {
     this._selectedQualityCheck = 'color';
     this._qualityAuditMode = 'full';
     this._qualityContrastPolicyActiveIndex = 0;
+    this._qualityAccentPolicyActiveIndex = 0;
     this._qualityDensityPolicyActiveIndex = 1;
     this._qualitySurfaceDepthPolicyActiveIndex = 0;
+    this._qualityTrafficSidePolicyActiveIndex = 0;
+    this._qualityWidgetStackPolicyActiveIndex = 0;
+    this._qualityIconMaskPolicyActiveIndex = 0;
+    this._qualityCornerRadiusPolicyActiveIndex = 0;
+    this._qualityMaterialPolicyActiveIndex = 0;
+    this._qualityDockMagnificationPolicyActiveIndex = 0;
+    this._qualityDockVisibilityPolicyActiveIndex = 0;
     this._qualityBackdropPolicyActiveIndex = 0;
     this._qualityWallpaperPolicyActiveIndex = 0;
     this._qualityTitleCommandPolicyActiveIndex = 1;
@@ -201,6 +213,8 @@ class SimpleWindowManager {
     this._applyDockVisibilityPreference(options.dockVisibility || '');
     this._applySurfaceDepthPreference(options.surfaceDepth || '');
     this._applyTrafficSidePreference(options.trafficSide || '');
+    this._applyIconMaskPreference(options.iconMask || '');
+    this._applyCornerRadiusPreference(options.cornerRadius || '');
     this._applyChromeVerbosityPreference(options.chromeVerbosity || '');
     this._applyWindowTransitionPreference(options.windowTransition || '');
     this._applyDensityPreference(options.density || '');
@@ -220,6 +234,8 @@ class SimpleWindowManager {
     window.simpleWmSetDockVisibility = (preference) => this.setDockVisibilityPreference(preference);
     window.simpleWmSetSurfaceDepth = (preference) => this.setSurfaceDepthPreference(preference);
     window.simpleWmSetTrafficSide = (preference) => this.setTrafficSidePreference(preference);
+    window.simpleWmSetIconMask = (preference) => this.setIconMaskPreference(preference);
+    window.simpleWmSetCornerRadius = (preference) => this.setCornerRadiusPreference(preference);
     window.simpleWmSetChromeVerbosity = (preference) => this.setChromeVerbosityPreference(preference);
     window.simpleWmSetWindowTransition = (preference) => this.setWindowTransitionPreference(preference);
     window.simpleWmSetDensity = (preference) => this.setDensityPreference(preference);
@@ -671,6 +687,51 @@ class SimpleWindowManager {
 
   _readTrafficSidePreference() {
     return this._readPreference(WM_TRAFFIC_SIDE_STORAGE_KEY);
+  }
+
+  setIconMaskPreference(preference) {
+    const mode = this._normalizeIconMaskPreference(preference);
+    this._writePreference(WM_ICON_MASK_STORAGE_KEY, mode);
+    this._iconMaskMode = mode;
+    document.documentElement.dataset.wmIconMask = mode;
+    this._showSystemHud('Icon mask', mode);
+    return mode;
+  }
+
+  _applyIconMaskPreference(preference) {
+    const mode = this._normalizeIconMaskPreference(preference || this._readIconMaskPreference());
+    this._iconMaskMode = mode;
+    document.documentElement.dataset.wmIconMask = mode;
+    return mode;
+  }
+
+  _readIconMaskPreference() {
+    return this._readPreference(WM_ICON_MASK_STORAGE_KEY);
+  }
+
+  _normalizeIconMaskPreference(preference) {
+    const value = String(preference || '').trim().toLowerCase();
+    if (value === 'circle' || value === 'rounded' || value === 'square') return value;
+    return 'circle';
+  }
+
+  setCornerRadiusPreference(preference) {
+    const mode = this._normalizeThreeMode(preference, 'round', 'soft', 'square');
+    this._writePreference(WM_CORNER_RADIUS_STORAGE_KEY, mode);
+    const applied = this._applyCornerRadiusPreference(mode);
+    this._showSystemHud('Corner radius', applied);
+    return applied;
+  }
+
+  _applyCornerRadiusPreference(preference) {
+    const mode = this._normalizeThreeMode(preference || this._readCornerRadiusPreference(), 'round', 'soft', 'square');
+    this._cornerRadiusMode = mode;
+    document.documentElement.dataset.wmCornerRadius = mode;
+    return mode;
+  }
+
+  _readCornerRadiusPreference() {
+    return this._readPreference(WM_CORNER_RADIUS_STORAGE_KEY);
   }
 
   setChromeVerbosityPreference(preference) {
@@ -1958,9 +2019,10 @@ class SimpleWindowManager {
     icon.className = `${baseClass} wm-round-icon`;
     const value = String(raw || 'S');
     icon.dataset.iconSource = value;
+    icon.dataset.iconMask = this._iconMaskMode || 'circle';
     if (this._isImageIcon(value)) {
       icon.classList.add('wm-icon-normalized-square');
-      icon.dataset.iconNormalized = 'square-to-round';
+      icon.dataset.iconNormalized = this._iconMaskMode === 'square' ? 'square-preserved' : this._iconMaskMode === 'rounded' ? 'square-to-rounded' : 'square-to-round';
       const img = document.createElement('img');
       img.className = 'wm-icon-image';
       img.src = value;
@@ -4892,6 +4954,13 @@ class SimpleWindowManager {
         this._activateQualityContrastPolicySelection();
         return;
       }
+      const accentPolicy = event.target.closest('.wm-quality-accent-policy-item');
+      if (accentPolicy && panel.contains(accentPolicy)) {
+        this._qualityAccentPolicyActiveIndex = Number(accentPolicy.dataset.accentPolicyIndex || '0') || 0;
+        this._syncQualityAccentPolicySelection(false);
+        this._activateQualityAccentPolicySelection();
+        return;
+      }
       const densityPolicy = event.target.closest('.wm-quality-density-policy-item');
       if (densityPolicy && panel.contains(densityPolicy)) {
         this._qualityDensityPolicyActiveIndex = Number(densityPolicy.dataset.densityPolicyIndex || '0') || 0;
@@ -4904,6 +4973,55 @@ class SimpleWindowManager {
         this._qualitySurfaceDepthPolicyActiveIndex = Number(surfaceDepthPolicy.dataset.surfaceDepthPolicyIndex || '0') || 0;
         this._syncQualitySurfaceDepthPolicySelection(false);
         this._activateQualitySurfaceDepthPolicySelection();
+        return;
+      }
+      const trafficSidePolicy = event.target.closest('.wm-quality-traffic-side-policy-item');
+      if (trafficSidePolicy && panel.contains(trafficSidePolicy)) {
+        this._qualityTrafficSidePolicyActiveIndex = Number(trafficSidePolicy.dataset.trafficSidePolicyIndex || '0') || 0;
+        this._syncQualityTrafficSidePolicySelection(false);
+        this._activateQualityTrafficSidePolicySelection();
+        return;
+      }
+      const widgetStackPolicy = event.target.closest('.wm-quality-widget-stack-policy-item');
+      if (widgetStackPolicy && panel.contains(widgetStackPolicy)) {
+        this._qualityWidgetStackPolicyActiveIndex = Number(widgetStackPolicy.dataset.widgetStackPolicyIndex || '0') || 0;
+        this._syncQualityWidgetStackPolicySelection(false);
+        this._activateQualityWidgetStackPolicySelection();
+        return;
+      }
+      const iconMaskPolicy = event.target.closest('.wm-quality-icon-mask-policy-item');
+      if (iconMaskPolicy && panel.contains(iconMaskPolicy)) {
+        this._qualityIconMaskPolicyActiveIndex = Number(iconMaskPolicy.dataset.iconMaskPolicyIndex || '0') || 0;
+        this._syncQualityIconMaskPolicySelection(false);
+        this._activateQualityIconMaskPolicySelection();
+        return;
+      }
+      const cornerRadiusPolicy = event.target.closest('.wm-quality-corner-radius-policy-item');
+      if (cornerRadiusPolicy && panel.contains(cornerRadiusPolicy)) {
+        this._qualityCornerRadiusPolicyActiveIndex = Number(cornerRadiusPolicy.dataset.cornerRadiusPolicyIndex || '0') || 0;
+        this._syncQualityCornerRadiusPolicySelection(false);
+        this._activateQualityCornerRadiusPolicySelection();
+        return;
+      }
+      const materialPolicy = event.target.closest('.wm-quality-material-policy-item');
+      if (materialPolicy && panel.contains(materialPolicy)) {
+        this._qualityMaterialPolicyActiveIndex = Number(materialPolicy.dataset.materialPolicyIndex || '0') || 0;
+        this._syncQualityMaterialPolicySelection(false);
+        this._activateQualityMaterialPolicySelection();
+        return;
+      }
+      const dockMagnificationPolicy = event.target.closest('.wm-quality-dock-magnification-policy-item');
+      if (dockMagnificationPolicy && panel.contains(dockMagnificationPolicy)) {
+        this._qualityDockMagnificationPolicyActiveIndex = Number(dockMagnificationPolicy.dataset.dockMagnificationPolicyIndex || '0') || 0;
+        this._syncQualityDockMagnificationPolicySelection(false);
+        this._activateQualityDockMagnificationPolicySelection();
+        return;
+      }
+      const dockVisibilityPolicy = event.target.closest('.wm-quality-dock-visibility-policy-item');
+      if (dockVisibilityPolicy && panel.contains(dockVisibilityPolicy)) {
+        this._qualityDockVisibilityPolicyActiveIndex = Number(dockVisibilityPolicy.dataset.dockVisibilityPolicyIndex || '0') || 0;
+        this._syncQualityDockVisibilityPolicySelection(false);
+        this._activateQualityDockVisibilityPolicySelection();
         return;
       }
       const backdropPolicy = event.target.closest('.wm-quality-backdrop-policy-item');
@@ -4979,8 +5097,16 @@ class SimpleWindowManager {
     panel.addEventListener('keydown', (event) => {
       const target = event.target instanceof Element ? event.target : null;
       const contrastPolicy = target ? target.closest('.wm-quality-contrast-policy-item') : null;
+      const accentPolicy = target ? target.closest('.wm-quality-accent-policy-item') : null;
       const densityPolicy = target ? target.closest('.wm-quality-density-policy-item') : null;
       const surfaceDepthPolicy = target ? target.closest('.wm-quality-surface-depth-policy-item') : null;
+      const trafficSidePolicy = target ? target.closest('.wm-quality-traffic-side-policy-item') : null;
+      const widgetStackPolicy = target ? target.closest('.wm-quality-widget-stack-policy-item') : null;
+      const iconMaskPolicy = target ? target.closest('.wm-quality-icon-mask-policy-item') : null;
+      const cornerRadiusPolicy = target ? target.closest('.wm-quality-corner-radius-policy-item') : null;
+      const materialPolicy = target ? target.closest('.wm-quality-material-policy-item') : null;
+      const dockMagnificationPolicy = target ? target.closest('.wm-quality-dock-magnification-policy-item') : null;
+      const dockVisibilityPolicy = target ? target.closest('.wm-quality-dock-visibility-policy-item') : null;
       const backdropPolicy = target ? target.closest('.wm-quality-backdrop-policy-item') : null;
       const wallpaperPolicy = target ? target.closest('.wm-quality-wallpaper-policy-item') : null;
       const titleCommandPolicy = target ? target.closest('.wm-quality-title-command-policy-item') : null;
@@ -4989,11 +5115,19 @@ class SimpleWindowManager {
       const chromeVerbosityPolicy = target ? target.closest('.wm-quality-chrome-verbosity-policy-item') : null;
       const feedbackPolicy = target ? target.closest('.wm-quality-feedback-policy-item') : null;
       const energyPolicy = target ? target.closest('.wm-quality-energy-policy-item') : null;
-      if ((!contrastPolicy || !panel.contains(contrastPolicy)) && (!densityPolicy || !panel.contains(densityPolicy)) && (!surfaceDepthPolicy || !panel.contains(surfaceDepthPolicy)) && (!backdropPolicy || !panel.contains(backdropPolicy)) && (!wallpaperPolicy || !panel.contains(wallpaperPolicy)) && (!titleCommandPolicy || !panel.contains(titleCommandPolicy)) && (!windowTransitionPolicy || !panel.contains(windowTransitionPolicy)) && (!animationStylePolicy || !panel.contains(animationStylePolicy)) && (!chromeVerbosityPolicy || !panel.contains(chromeVerbosityPolicy)) && (!feedbackPolicy || !panel.contains(feedbackPolicy)) && (!energyPolicy || !panel.contains(energyPolicy))) return;
+      if ((!contrastPolicy || !panel.contains(contrastPolicy)) && (!accentPolicy || !panel.contains(accentPolicy)) && (!densityPolicy || !panel.contains(densityPolicy)) && (!surfaceDepthPolicy || !panel.contains(surfaceDepthPolicy)) && (!trafficSidePolicy || !panel.contains(trafficSidePolicy)) && (!widgetStackPolicy || !panel.contains(widgetStackPolicy)) && (!iconMaskPolicy || !panel.contains(iconMaskPolicy)) && (!cornerRadiusPolicy || !panel.contains(cornerRadiusPolicy)) && (!materialPolicy || !panel.contains(materialPolicy)) && (!dockMagnificationPolicy || !panel.contains(dockMagnificationPolicy)) && (!dockVisibilityPolicy || !panel.contains(dockVisibilityPolicy)) && (!backdropPolicy || !panel.contains(backdropPolicy)) && (!wallpaperPolicy || !panel.contains(wallpaperPolicy)) && (!titleCommandPolicy || !panel.contains(titleCommandPolicy)) && (!windowTransitionPolicy || !panel.contains(windowTransitionPolicy)) && (!animationStylePolicy || !panel.contains(animationStylePolicy)) && (!chromeVerbosityPolicy || !panel.contains(chromeVerbosityPolicy)) && (!feedbackPolicy || !panel.contains(feedbackPolicy)) && (!energyPolicy || !panel.contains(energyPolicy))) return;
       const moveSelection = (delta) => {
         if (contrastPolicy) this._moveQualityContrastPolicySelection(delta);
+        if (accentPolicy) this._moveQualityAccentPolicySelection(delta);
         if (densityPolicy) this._moveQualityDensityPolicySelection(delta);
         if (surfaceDepthPolicy) this._moveQualitySurfaceDepthPolicySelection(delta);
+        if (trafficSidePolicy) this._moveQualityTrafficSidePolicySelection(delta);
+        if (widgetStackPolicy) this._moveQualityWidgetStackPolicySelection(delta);
+        if (iconMaskPolicy) this._moveQualityIconMaskPolicySelection(delta);
+        if (cornerRadiusPolicy) this._moveQualityCornerRadiusPolicySelection(delta);
+        if (materialPolicy) this._moveQualityMaterialPolicySelection(delta);
+        if (dockMagnificationPolicy) this._moveQualityDockMagnificationPolicySelection(delta);
+        if (dockVisibilityPolicy) this._moveQualityDockVisibilityPolicySelection(delta);
         if (backdropPolicy) this._moveQualityBackdropPolicySelection(delta);
         if (wallpaperPolicy) this._moveQualityWallpaperPolicySelection(delta);
         if (titleCommandPolicy) this._moveQualityTitleCommandPolicySelection(delta);
@@ -5005,8 +5139,16 @@ class SimpleWindowManager {
       };
       const setSelection = (index) => {
         if (contrastPolicy) this._setQualityContrastPolicySelection(index);
+        if (accentPolicy) this._setQualityAccentPolicySelection(index);
         if (densityPolicy) this._setQualityDensityPolicySelection(index);
         if (surfaceDepthPolicy) this._setQualitySurfaceDepthPolicySelection(index);
+        if (trafficSidePolicy) this._setQualityTrafficSidePolicySelection(index);
+        if (widgetStackPolicy) this._setQualityWidgetStackPolicySelection(index);
+        if (iconMaskPolicy) this._setQualityIconMaskPolicySelection(index);
+        if (cornerRadiusPolicy) this._setQualityCornerRadiusPolicySelection(index);
+        if (materialPolicy) this._setQualityMaterialPolicySelection(index);
+        if (dockMagnificationPolicy) this._setQualityDockMagnificationPolicySelection(index);
+        if (dockVisibilityPolicy) this._setQualityDockVisibilityPolicySelection(index);
         if (backdropPolicy) this._setQualityBackdropPolicySelection(index);
         if (wallpaperPolicy) this._setQualityWallpaperPolicySelection(index);
         if (titleCommandPolicy) this._setQualityTitleCommandPolicySelection(index);
@@ -5016,11 +5158,19 @@ class SimpleWindowManager {
         if (feedbackPolicy) this._setQualityFeedbackPolicySelection(index);
         if (energyPolicy) this._setQualityEnergyPolicySelection(index);
       };
-      const itemCount = contrastPolicy ? this._qualityContrastPolicyItems().length : densityPolicy ? this._qualityDensityPolicyItems().length : surfaceDepthPolicy ? this._qualitySurfaceDepthPolicyItems().length : backdropPolicy ? this._qualityBackdropPolicyItems().length : wallpaperPolicy ? this._qualityWallpaperPolicyItems().length : titleCommandPolicy ? this._qualityTitleCommandPolicyItems().length : windowTransitionPolicy ? this._qualityWindowTransitionPolicyItems().length : animationStylePolicy ? this._qualityAnimationStylePolicyItems().length : chromeVerbosityPolicy ? this._qualityChromeVerbosityPolicyItems().length : feedbackPolicy ? this._qualityFeedbackPolicyItems().length : this._qualityEnergyPolicyItems().length;
+      const itemCount = contrastPolicy ? this._qualityContrastPolicyItems().length : accentPolicy ? this._qualityAccentPolicyItems().length : densityPolicy ? this._qualityDensityPolicyItems().length : surfaceDepthPolicy ? this._qualitySurfaceDepthPolicyItems().length : trafficSidePolicy ? this._qualityTrafficSidePolicyItems().length : widgetStackPolicy ? this._qualityWidgetStackPolicyItems().length : iconMaskPolicy ? this._qualityIconMaskPolicyItems().length : cornerRadiusPolicy ? this._qualityCornerRadiusPolicyItems().length : materialPolicy ? this._qualityMaterialPolicyItems().length : dockMagnificationPolicy ? this._qualityDockMagnificationPolicyItems().length : dockVisibilityPolicy ? this._qualityDockVisibilityPolicyItems().length : backdropPolicy ? this._qualityBackdropPolicyItems().length : wallpaperPolicy ? this._qualityWallpaperPolicyItems().length : titleCommandPolicy ? this._qualityTitleCommandPolicyItems().length : windowTransitionPolicy ? this._qualityWindowTransitionPolicyItems().length : animationStylePolicy ? this._qualityAnimationStylePolicyItems().length : chromeVerbosityPolicy ? this._qualityChromeVerbosityPolicyItems().length : feedbackPolicy ? this._qualityFeedbackPolicyItems().length : this._qualityEnergyPolicyItems().length;
       const activateSelection = () => {
         if (contrastPolicy) this._activateQualityContrastPolicySelection();
+        if (accentPolicy) this._activateQualityAccentPolicySelection();
         if (densityPolicy) this._activateQualityDensityPolicySelection();
         if (surfaceDepthPolicy) this._activateQualitySurfaceDepthPolicySelection();
+        if (trafficSidePolicy) this._activateQualityTrafficSidePolicySelection();
+        if (widgetStackPolicy) this._activateQualityWidgetStackPolicySelection();
+        if (iconMaskPolicy) this._activateQualityIconMaskPolicySelection();
+        if (cornerRadiusPolicy) this._activateQualityCornerRadiusPolicySelection();
+        if (materialPolicy) this._activateQualityMaterialPolicySelection();
+        if (dockMagnificationPolicy) this._activateQualityDockMagnificationPolicySelection();
+        if (dockVisibilityPolicy) this._activateQualityDockVisibilityPolicySelection();
         if (backdropPolicy) this._activateQualityBackdropPolicySelection();
         if (wallpaperPolicy) this._activateQualityWallpaperPolicySelection();
         if (titleCommandPolicy) this._activateQualityTitleCommandPolicySelection();
@@ -5303,6 +5453,7 @@ class SimpleWindowManager {
     preview.appendChild(this._makeQualityColorMetric('Accent', accent, accent));
     preview.appendChild(this._makeQualityColorMetric('Contrast', contrast + ':1', accent));
     preview.appendChild(this._makeQualityContrastPolicy());
+    preview.appendChild(this._makeQualityAccentPolicy());
     return preview;
   }
 
@@ -5402,6 +5553,87 @@ class SimpleWindowManager {
     const contrast = item.dataset.contrastPolicy || 'comfortable';
     this.setContrastPreference(contrast);
     this._sendWindowCmd('quality_contrast_policy', { contrast_policy: contrast });
+    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
+  }
+
+  _makeQualityAccentPolicy() {
+    const entries = this._accentChoices();
+    const current = this._normalizeAccentPreference(this._readAccentPreference()).id;
+    const currentIndex = entries.findIndex((choice) => choice.id === current);
+    if (currentIndex >= 0) this._qualityAccentPolicyActiveIndex = currentIndex;
+    const policy = document.createElement('div');
+    policy.className = 'wm-quality-accent-policy';
+    policy.setAttribute('role', 'listbox');
+    policy.setAttribute('aria-label', 'Accent color policy');
+    policy.dataset.accentPolicyActiveIndex = String(this._qualityAccentPolicyActiveIndex);
+    policy.setAttribute('aria-activedescendant', `wm-quality-accent-policy-${this._qualityAccentPolicyActiveIndex}`);
+    entries.forEach((choice, index) => {
+      const selected = index === this._qualityAccentPolicyActiveIndex;
+      const item = document.createElement('button');
+      item.id = `wm-quality-accent-policy-${index}`;
+      item.className = 'wm-quality-accent-policy-item' + (selected ? ' selected' : '');
+      item.dataset.accentPolicy = choice.id;
+      item.dataset.accentPolicyIndex = String(index);
+      item.tabIndex = selected ? 0 : -1;
+      item.setAttribute('role', 'option');
+      item.setAttribute('aria-selected', selected ? 'true' : 'false');
+      const swatch = document.createElement('span');
+      swatch.className = 'wm-quality-accent-policy-swatch';
+      swatch.style.background = choice.color;
+      const name = document.createElement('span');
+      name.className = 'wm-quality-accent-policy-label';
+      name.textContent = choice.label;
+      const result = document.createElement('strong');
+      result.className = 'wm-quality-accent-policy-value';
+      result.textContent = choice.meta;
+      item.appendChild(swatch);
+      item.appendChild(name);
+      item.appendChild(result);
+      policy.appendChild(item);
+    });
+    return policy;
+  }
+
+  _qualityAccentPolicyItems() {
+    if (!this._qualityInspector) return [];
+    return Array.from(this._qualityInspector.querySelectorAll('.wm-quality-accent-policy-item'));
+  }
+
+  _moveQualityAccentPolicySelection(delta) {
+    const items = this._qualityAccentPolicyItems();
+    if (!items.length) return;
+    const next = (this._qualityAccentPolicyActiveIndex + delta + items.length) % items.length;
+    this._setQualityAccentPolicySelection(next);
+  }
+
+  _setQualityAccentPolicySelection(index) {
+    const items = this._qualityAccentPolicyItems();
+    if (!items.length) return;
+    this._qualityAccentPolicyActiveIndex = Math.max(0, Math.min(index, items.length - 1));
+    this._syncQualityAccentPolicySelection();
+  }
+
+  _syncQualityAccentPolicySelection(shouldFocus = true) {
+    const items = this._qualityAccentPolicyItems();
+    if (!items.length) return;
+    const policy = items[0].closest('.wm-quality-accent-policy');
+    items.forEach((item, index) => {
+      const selected = index === this._qualityAccentPolicyActiveIndex;
+      item.classList.toggle('selected', selected);
+      item.tabIndex = selected ? 0 : -1;
+      item.setAttribute('aria-selected', selected ? 'true' : 'false');
+      if (selected && policy) policy.setAttribute('aria-activedescendant', item.id);
+      if (selected && shouldFocus) item.focus();
+    });
+    if (policy) policy.dataset.accentPolicyActiveIndex = String(this._qualityAccentPolicyActiveIndex);
+  }
+
+  _activateQualityAccentPolicySelection() {
+    const item = this._qualityAccentPolicyItems()[this._qualityAccentPolicyActiveIndex];
+    if (!item) return;
+    const accent = item.dataset.accentPolicy || 'blue';
+    this.setAccentPreference(accent);
+    this._sendWindowCmd('quality_accent_policy', { accent_policy: accent });
     if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
   }
 
@@ -5666,6 +5898,7 @@ class SimpleWindowManager {
       const value = kind === 'scrollbar' && evidence.good ? 'thin round' : evidence.label;
       preview.appendChild(this._makeQualityComputedShapeMetric(label, value, kind, evidence.good));
     });
+    preview.appendChild(this._makeQualityCornerRadiusPolicy());
     return preview;
   }
 
@@ -5698,6 +5931,87 @@ class SimpleWindowManager {
       label: radius || '0px',
       good: (pillOk && radius.includes('999')) || (!Number.isNaN(first) && first >= minPx)
     };
+  }
+
+  _makeQualityCornerRadiusPolicy() {
+    const entries = [
+      ['round', 'Round', '24 / 20 / pill'],
+      ['soft', 'Soft', '16 / 14 / 18'],
+      ['square', 'Square', '8 / 8 / 10']
+    ];
+    const mode = this._normalizeThreeMode(this._readCornerRadiusPreference() || this._cornerRadiusMode, 'round', 'soft', 'square');
+    const currentIndex = entries.findIndex(([radius]) => radius === mode);
+    if (currentIndex >= 0) this._qualityCornerRadiusPolicyActiveIndex = currentIndex;
+    const policy = document.createElement('div');
+    policy.className = 'wm-quality-corner-radius-policy';
+    policy.setAttribute('role', 'listbox');
+    policy.setAttribute('aria-label', 'Corner radius policy');
+    policy.dataset.cornerRadiusPolicyActiveIndex = String(this._qualityCornerRadiusPolicyActiveIndex);
+    policy.setAttribute('aria-activedescendant', `wm-quality-corner-radius-policy-${this._qualityCornerRadiusPolicyActiveIndex}`);
+    entries.forEach(([radius, label, value], index) => {
+      const selected = index === this._qualityCornerRadiusPolicyActiveIndex;
+      const item = document.createElement('button');
+      item.id = `wm-quality-corner-radius-policy-${index}`;
+      item.className = 'wm-quality-corner-radius-policy-item' + (selected ? ' selected' : '');
+      item.dataset.cornerRadiusPolicy = radius;
+      item.dataset.cornerRadiusPolicyIndex = String(index);
+      item.tabIndex = selected ? 0 : -1;
+      item.setAttribute('role', 'option');
+      item.setAttribute('aria-selected', selected ? 'true' : 'false');
+      const name = document.createElement('span');
+      name.className = 'wm-quality-corner-radius-policy-label';
+      name.textContent = label;
+      const result = document.createElement('strong');
+      result.className = 'wm-quality-corner-radius-policy-value';
+      result.textContent = value;
+      item.appendChild(name);
+      item.appendChild(result);
+      policy.appendChild(item);
+    });
+    return policy;
+  }
+
+  _qualityCornerRadiusPolicyItems() {
+    if (!this._qualityInspector) return [];
+    return Array.from(this._qualityInspector.querySelectorAll('.wm-quality-corner-radius-policy-item'));
+  }
+
+  _moveQualityCornerRadiusPolicySelection(delta) {
+    const items = this._qualityCornerRadiusPolicyItems();
+    if (!items.length) return;
+    const next = (this._qualityCornerRadiusPolicyActiveIndex + delta + items.length) % items.length;
+    this._setQualityCornerRadiusPolicySelection(next);
+  }
+
+  _setQualityCornerRadiusPolicySelection(index) {
+    const items = this._qualityCornerRadiusPolicyItems();
+    if (!items.length) return;
+    this._qualityCornerRadiusPolicyActiveIndex = Math.max(0, Math.min(index, items.length - 1));
+    this._syncQualityCornerRadiusPolicySelection();
+  }
+
+  _syncQualityCornerRadiusPolicySelection(shouldFocus = true) {
+    const items = this._qualityCornerRadiusPolicyItems();
+    if (!items.length) return;
+    const policy = items[0].closest('.wm-quality-corner-radius-policy');
+    items.forEach((item, index) => {
+      const selected = index === this._qualityCornerRadiusPolicyActiveIndex;
+      item.classList.toggle('selected', selected);
+      item.tabIndex = selected ? 0 : -1;
+      item.setAttribute('aria-selected', selected ? 'true' : 'false');
+      if (selected && policy) policy.setAttribute('aria-activedescendant', item.id);
+      if (selected && shouldFocus) item.focus();
+    });
+    if (policy) policy.dataset.cornerRadiusPolicyActiveIndex = String(this._qualityCornerRadiusPolicyActiveIndex);
+  }
+
+  _activateQualityCornerRadiusPolicySelection() {
+    const item = this._qualityCornerRadiusPolicyItems()[this._qualityCornerRadiusPolicyActiveIndex];
+    if (!item) return;
+    const radius = item.dataset.cornerRadiusPolicy || 'round';
+    this.setCornerRadiusPreference(radius);
+    this._sendWindowCmd('quality_corner_radius_policy', { corner_radius_policy: radius });
+    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
   }
 
   _makeQualityTitlebarPreview() {
@@ -5789,6 +6103,7 @@ class SimpleWindowManager {
     preview.appendChild(this._makeQualityComputedTrafficMetric('Color', 'red yellow green', 'color', classOrder.includes('wm-btn-close') && classOrder.includes('wm-btn-minimize') && classOrder.includes('wm-btn-maximize')));
     preview.appendChild(this._makeQualityComputedTrafficMetric('Hit', hit.label, 'hit', hit.good));
     preview.appendChild(this._makeQualityComputedTrafficMetric('Hover', motion.label, 'motion', motion.good));
+    preview.appendChild(this._makeQualityTrafficSidePolicy(this._trafficSideMode));
     return preview;
   }
 
@@ -5831,6 +6146,85 @@ class SimpleWindowManager {
       label: duration + 'ms',
       good: motionMode === 'off' ? duration === 0 : duration >= 80 && duration <= 180
     };
+  }
+
+  _makeQualityTrafficSidePolicy(activeSide) {
+    const side = this._normalizeThreeMode(activeSide || this._trafficSideMode, 'left', 'right', 'left');
+    const entries = [
+      ['left', 'Left', 'Mac top-left'],
+      ['right', 'Right', 'right title controls']
+    ];
+    this._qualityTrafficSidePolicyActiveIndex = Math.max(0, entries.findIndex(([mode]) => mode === side));
+    const policy = document.createElement('div');
+    policy.className = 'wm-quality-traffic-side-policy';
+    policy.setAttribute('role', 'listbox');
+    policy.setAttribute('aria-label', 'Traffic side policy');
+    policy.dataset.trafficSidePolicyActiveIndex = String(this._qualityTrafficSidePolicyActiveIndex);
+    policy.setAttribute('aria-activedescendant', `wm-quality-traffic-side-policy-${this._qualityTrafficSidePolicyActiveIndex}`);
+    entries.forEach(([mode, label, value], index) => {
+      const selected = index === this._qualityTrafficSidePolicyActiveIndex;
+      const item = document.createElement('button');
+      item.id = `wm-quality-traffic-side-policy-${index}`;
+      item.className = 'wm-quality-traffic-side-policy-item' + (selected ? ' selected' : '');
+      item.dataset.trafficSidePolicy = mode;
+      item.dataset.trafficSidePolicyIndex = String(index);
+      item.setAttribute('role', 'option');
+      item.setAttribute('aria-selected', selected ? 'true' : 'false');
+      item.tabIndex = selected ? 0 : -1;
+      const name = document.createElement('span');
+      name.className = 'wm-quality-traffic-side-policy-label';
+      name.textContent = label;
+      const result = document.createElement('strong');
+      result.className = 'wm-quality-traffic-side-policy-value';
+      result.textContent = value;
+      item.appendChild(name);
+      item.appendChild(result);
+      policy.appendChild(item);
+    });
+    return policy;
+  }
+
+  _qualityTrafficSidePolicyItems() {
+    if (!this._qualityInspector) return [];
+    return Array.from(this._qualityInspector.querySelectorAll('.wm-quality-traffic-side-policy-item'));
+  }
+
+  _moveQualityTrafficSidePolicySelection(delta) {
+    const items = this._qualityTrafficSidePolicyItems();
+    if (!items.length) return;
+    this._qualityTrafficSidePolicyActiveIndex = (this._qualityTrafficSidePolicyActiveIndex + delta + items.length) % items.length;
+    this._syncQualityTrafficSidePolicySelection(true);
+  }
+
+  _setQualityTrafficSidePolicySelection(index) {
+    const items = this._qualityTrafficSidePolicyItems();
+    if (!items.length) return;
+    this._qualityTrafficSidePolicyActiveIndex = Math.max(0, Math.min(items.length - 1, index));
+    this._syncQualityTrafficSidePolicySelection(true);
+  }
+
+  _syncQualityTrafficSidePolicySelection(shouldFocus = false) {
+    const items = this._qualityTrafficSidePolicyItems();
+    if (!items.length) return;
+    const policy = items[0].closest('.wm-quality-traffic-side-policy');
+    items.forEach((item, index) => {
+      const selected = index === this._qualityTrafficSidePolicyActiveIndex;
+      item.classList.toggle('selected', selected);
+      item.tabIndex = selected ? 0 : -1;
+      item.setAttribute('aria-selected', selected ? 'true' : 'false');
+      if (selected && policy) policy.setAttribute('aria-activedescendant', item.id);
+      if (selected && shouldFocus) item.focus();
+    });
+    if (policy) policy.dataset.trafficSidePolicyActiveIndex = String(this._qualityTrafficSidePolicyActiveIndex);
+  }
+
+  _activateQualityTrafficSidePolicySelection() {
+    const item = this._qualityTrafficSidePolicyItems()[this._qualityTrafficSidePolicyActiveIndex];
+    if (!item) return;
+    const side = item.dataset.trafficSidePolicy || 'left';
+    this.setTrafficSidePreference(side);
+    this._sendWindowCmd('quality_traffic_side_policy', { traffic_side_policy: side });
+    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
   }
 
   _makeQualityComputedCommandPreview() {
@@ -5960,6 +6354,7 @@ class SimpleWindowManager {
     preview.appendChild(this._makeQualityIconMetric('Padding', this._qualityCssPx(root, '--ui-icon-inner-padding-px', 3) + 'px'));
     preview.appendChild(this._makeQualityIconMetric('Fit', root.getPropertyValue('--ui-icon-image-fit') || 'cover'));
     preview.appendChild(this._makeQualityIconMetric('Square', 'normalized'));
+    preview.appendChild(this._makeQualityIconMaskPolicy());
     return preview;
   }
 
@@ -5980,6 +6375,87 @@ class SimpleWindowManager {
     metric.appendChild(name);
     metric.appendChild(result);
     return metric;
+  }
+
+  _makeQualityIconMaskPolicy() {
+    const mode = this._normalizeIconMaskPreference(document.documentElement.dataset.wmIconMask || this._iconMaskMode);
+    const entries = [
+      ['circle', 'Circle', 'strict round'],
+      ['rounded', 'Rounded', 'soft square'],
+      ['square', 'Square', 'preserve source']
+    ];
+    const currentIndex = entries.findIndex(([mask]) => mask === mode);
+    if (currentIndex >= 0) this._qualityIconMaskPolicyActiveIndex = currentIndex;
+    const policy = document.createElement('div');
+    policy.className = 'wm-quality-icon-mask-policy';
+    policy.setAttribute('role', 'listbox');
+    policy.setAttribute('aria-label', 'Icon mask policy');
+    policy.dataset.iconMaskPolicyActiveIndex = String(this._qualityIconMaskPolicyActiveIndex);
+    policy.setAttribute('aria-activedescendant', `wm-quality-icon-mask-policy-${this._qualityIconMaskPolicyActiveIndex}`);
+    entries.forEach(([mask, label, value], index) => {
+      const selected = index === this._qualityIconMaskPolicyActiveIndex;
+      const item = document.createElement('button');
+      item.id = `wm-quality-icon-mask-policy-${index}`;
+      item.className = 'wm-quality-icon-mask-policy-item' + (selected ? ' selected' : '');
+      item.dataset.iconMaskPolicy = mask;
+      item.dataset.iconMaskPolicyIndex = String(index);
+      item.setAttribute('role', 'option');
+      item.setAttribute('aria-selected', selected ? 'true' : 'false');
+      item.tabIndex = selected ? 0 : -1;
+      const name = document.createElement('span');
+      name.className = 'wm-quality-icon-mask-policy-label';
+      name.textContent = label;
+      const result = document.createElement('strong');
+      result.className = 'wm-quality-icon-mask-policy-value';
+      result.textContent = value;
+      item.appendChild(name);
+      item.appendChild(result);
+      policy.appendChild(item);
+    });
+    return policy;
+  }
+
+  _qualityIconMaskPolicyItems() {
+    if (!this._qualityInspector) return [];
+    return Array.from(this._qualityInspector.querySelectorAll('.wm-quality-icon-mask-policy-item'));
+  }
+
+  _moveQualityIconMaskPolicySelection(delta) {
+    const items = this._qualityIconMaskPolicyItems();
+    if (!items.length) return;
+    const next = (this._qualityIconMaskPolicyActiveIndex + delta + items.length) % items.length;
+    this._setQualityIconMaskPolicySelection(next);
+  }
+
+  _setQualityIconMaskPolicySelection(index) {
+    const items = this._qualityIconMaskPolicyItems();
+    if (!items.length) return;
+    this._qualityIconMaskPolicyActiveIndex = Math.max(0, Math.min(index, items.length - 1));
+    this._syncQualityIconMaskPolicySelection();
+  }
+
+  _syncQualityIconMaskPolicySelection(shouldFocus = true) {
+    const items = this._qualityIconMaskPolicyItems();
+    if (!items.length) return;
+    const policy = items[0].closest('.wm-quality-icon-mask-policy');
+    items.forEach((item, index) => {
+      const selected = index === this._qualityIconMaskPolicyActiveIndex;
+      item.classList.toggle('selected', selected);
+      item.tabIndex = selected ? 0 : -1;
+      item.setAttribute('aria-selected', selected ? 'true' : 'false');
+      if (selected && policy) policy.setAttribute('aria-activedescendant', item.id);
+      if (selected && shouldFocus) item.focus();
+    });
+    if (policy) policy.dataset.iconMaskPolicyActiveIndex = String(this._qualityIconMaskPolicyActiveIndex);
+  }
+
+  _activateQualityIconMaskPolicySelection() {
+    const item = this._qualityIconMaskPolicyItems()[this._qualityIconMaskPolicyActiveIndex];
+    if (!item) return;
+    const mask = item.dataset.iconMaskPolicy || 'circle';
+    this.setIconMaskPreference(mask);
+    this._sendWindowCmd('quality_icon_mask_policy', { icon_mask_policy: mask });
+    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
   }
 
   _makeQualityComputedIconPreview() {
@@ -7536,10 +8012,16 @@ class SimpleWindowManager {
     preview.className = 'wm-quality-dock-preview';
     preview.dataset.qualityDock = 'magnification';
     preview.dataset.wmDockVisibility = this._dockVisibilityMode;
-    preview.appendChild(this._makeQualityDockMetric('Magnify', '1.18x', 'magnify'));
-    preview.appendChild(this._makeQualityDockMetric('Neighbor', '1.07x', 'neighbor'));
+    const magnification = document.documentElement.dataset.wmDockMagnification || this._dockMagnificationMode;
+    const scale = magnification === 'subtle' ? '1.08x' : magnification === 'off' ? '1.00x' : '1.18x';
+    const neighbor = magnification === 'subtle' ? '1.03x' : magnification === 'off' ? '1.00x' : '1.07x';
+    preview.dataset.wmDockMagnification = magnification;
+    preview.appendChild(this._makeQualityDockMetric('Magnify', scale, 'magnify'));
+    preview.appendChild(this._makeQualityDockMetric('Neighbor', neighbor, 'neighbor'));
     preview.appendChild(this._makeQualityDockMetric('Visibility', this._dockVisibilityLabel(this._dockVisibilityMode).toLowerCase(), 'visibility'));
     preview.appendChild(this._makeQualityDockMetric('Stack', this._dockStackMode === 'grid' ? 'grid' : 'fan', 'stack'));
+    preview.appendChild(this._makeQualityDockMagnificationPolicy());
+    preview.appendChild(this._makeQualityDockVisibilityPolicy());
     return preview;
   }
 
@@ -7560,6 +8042,170 @@ class SimpleWindowManager {
     metric.appendChild(name);
     metric.appendChild(result);
     return metric;
+  }
+
+  _makeQualityDockMagnificationPolicy() {
+    const current = document.documentElement.dataset.wmDockMagnification || this._readDockMagnificationPreference() || this._dockMagnificationMode;
+    const entries = [
+      ['standard', 'Standard', '1.18 / 1.07'],
+      ['subtle', 'Subtle', '1.08 / 1.03'],
+      ['off', 'Off', 'no magnify']
+    ];
+    const currentIndex = entries.findIndex(([mode]) => mode === current);
+    if (currentIndex >= 0) this._qualityDockMagnificationPolicyActiveIndex = currentIndex;
+    const policy = document.createElement('div');
+    policy.className = 'wm-quality-dock-magnification-policy';
+    policy.setAttribute('role', 'listbox');
+    policy.setAttribute('aria-label', 'Dock magnification policy');
+    policy.dataset.dockMagnificationPolicyActiveIndex = String(this._qualityDockMagnificationPolicyActiveIndex);
+    policy.setAttribute('aria-activedescendant', `wm-quality-dock-magnification-policy-${this._qualityDockMagnificationPolicyActiveIndex}`);
+    entries.forEach(([mode, label, value], index) => {
+      const selected = index === this._qualityDockMagnificationPolicyActiveIndex;
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.id = `wm-quality-dock-magnification-policy-${index}`;
+      item.className = 'wm-quality-dock-magnification-policy-item' + (selected ? ' selected' : '');
+      item.dataset.dockMagnificationPolicy = mode;
+      item.dataset.dockMagnificationPolicyIndex = String(index);
+      item.setAttribute('role', 'option');
+      item.setAttribute('aria-selected', selected ? 'true' : 'false');
+      item.tabIndex = selected ? 0 : -1;
+      const name = document.createElement('span');
+      name.className = 'wm-quality-dock-magnification-policy-label';
+      name.textContent = label;
+      const result = document.createElement('strong');
+      result.className = 'wm-quality-dock-magnification-policy-value';
+      result.textContent = value;
+      item.appendChild(name);
+      item.appendChild(result);
+      policy.appendChild(item);
+    });
+    return policy;
+  }
+
+  _qualityDockMagnificationPolicyItems() {
+    if (!this._qualityInspector) return [];
+    return Array.from(this._qualityInspector.querySelectorAll('.wm-quality-dock-magnification-policy-item'));
+  }
+
+  _moveQualityDockMagnificationPolicySelection(delta) {
+    const items = this._qualityDockMagnificationPolicyItems();
+    if (!items.length) return;
+    const next = (this._qualityDockMagnificationPolicyActiveIndex + delta + items.length) % items.length;
+    this._setQualityDockMagnificationPolicySelection(next);
+  }
+
+  _setQualityDockMagnificationPolicySelection(index) {
+    const items = this._qualityDockMagnificationPolicyItems();
+    if (!items.length) return;
+    this._qualityDockMagnificationPolicyActiveIndex = Math.max(0, Math.min(index, items.length - 1));
+    this._syncQualityDockMagnificationPolicySelection();
+  }
+
+  _syncQualityDockMagnificationPolicySelection(shouldFocus = true) {
+    const items = this._qualityDockMagnificationPolicyItems();
+    if (!items.length) return;
+    const policy = items[0].closest('.wm-quality-dock-magnification-policy');
+    items.forEach((item, index) => {
+      const selected = index === this._qualityDockMagnificationPolicyActiveIndex;
+      item.classList.toggle('selected', selected);
+      item.tabIndex = selected ? 0 : -1;
+      item.setAttribute('aria-selected', selected ? 'true' : 'false');
+      if (selected && policy) policy.setAttribute('aria-activedescendant', item.id);
+      if (selected && shouldFocus) item.focus();
+    });
+    if (policy) policy.dataset.dockMagnificationPolicyActiveIndex = String(this._qualityDockMagnificationPolicyActiveIndex);
+  }
+
+  _activateQualityDockMagnificationPolicySelection() {
+    const item = this._qualityDockMagnificationPolicyItems()[this._qualityDockMagnificationPolicyActiveIndex];
+    if (!item) return;
+    const magnification = item.dataset.dockMagnificationPolicy || 'standard';
+    this.setDockMagnificationPreference(magnification);
+    this._sendWindowCmd('quality_dock_magnification_policy', { dock_magnification_policy: magnification });
+    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
+  }
+
+  _makeQualityDockVisibilityPolicy() {
+    const current = document.documentElement.dataset.wmDockVisibility || this._readDockVisibilityPreference() || this._dockVisibilityMode;
+    const entries = [
+      ['shown', 'Shown', 'always visible'],
+      ['auto', 'Auto', 'hide until hover'],
+      ['hidden', 'Hidden', 'quiet dock']
+    ];
+    const currentIndex = entries.findIndex(([mode]) => mode === current);
+    if (currentIndex >= 0) this._qualityDockVisibilityPolicyActiveIndex = currentIndex;
+    const policy = document.createElement('div');
+    policy.className = 'wm-quality-dock-visibility-policy';
+    policy.setAttribute('role', 'listbox');
+    policy.setAttribute('aria-label', 'Dock visibility policy');
+    policy.dataset.dockVisibilityPolicyActiveIndex = String(this._qualityDockVisibilityPolicyActiveIndex);
+    policy.setAttribute('aria-activedescendant', `wm-quality-dock-visibility-policy-${this._qualityDockVisibilityPolicyActiveIndex}`);
+    entries.forEach(([mode, label, value], index) => {
+      const selected = index === this._qualityDockVisibilityPolicyActiveIndex;
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.id = `wm-quality-dock-visibility-policy-${index}`;
+      item.className = 'wm-quality-dock-visibility-policy-item' + (selected ? ' selected' : '');
+      item.dataset.dockVisibilityPolicy = mode;
+      item.dataset.dockVisibilityPolicyIndex = String(index);
+      item.setAttribute('role', 'option');
+      item.setAttribute('aria-selected', selected ? 'true' : 'false');
+      item.tabIndex = selected ? 0 : -1;
+      const name = document.createElement('span');
+      name.className = 'wm-quality-dock-visibility-policy-label';
+      name.textContent = label;
+      const result = document.createElement('strong');
+      result.className = 'wm-quality-dock-visibility-policy-value';
+      result.textContent = value;
+      item.appendChild(name);
+      item.appendChild(result);
+      policy.appendChild(item);
+    });
+    return policy;
+  }
+
+  _qualityDockVisibilityPolicyItems() {
+    if (!this._qualityInspector) return [];
+    return Array.from(this._qualityInspector.querySelectorAll('.wm-quality-dock-visibility-policy-item'));
+  }
+
+  _moveQualityDockVisibilityPolicySelection(delta) {
+    const items = this._qualityDockVisibilityPolicyItems();
+    if (!items.length) return;
+    const next = (this._qualityDockVisibilityPolicyActiveIndex + delta + items.length) % items.length;
+    this._setQualityDockVisibilityPolicySelection(next);
+  }
+
+  _setQualityDockVisibilityPolicySelection(index) {
+    const items = this._qualityDockVisibilityPolicyItems();
+    if (!items.length) return;
+    this._qualityDockVisibilityPolicyActiveIndex = Math.max(0, Math.min(index, items.length - 1));
+    this._syncQualityDockVisibilityPolicySelection();
+  }
+
+  _syncQualityDockVisibilityPolicySelection(shouldFocus = true) {
+    const items = this._qualityDockVisibilityPolicyItems();
+    if (!items.length) return;
+    const policy = items[0].closest('.wm-quality-dock-visibility-policy');
+    items.forEach((item, index) => {
+      const selected = index === this._qualityDockVisibilityPolicyActiveIndex;
+      item.classList.toggle('selected', selected);
+      item.tabIndex = selected ? 0 : -1;
+      item.setAttribute('aria-selected', selected ? 'true' : 'false');
+      if (selected && policy) policy.setAttribute('aria-activedescendant', item.id);
+      if (selected && shouldFocus) item.focus();
+    });
+    if (policy) policy.dataset.dockVisibilityPolicyActiveIndex = String(this._qualityDockVisibilityPolicyActiveIndex);
+  }
+
+  _activateQualityDockVisibilityPolicySelection() {
+    const item = this._qualityDockVisibilityPolicyItems()[this._qualityDockVisibilityPolicyActiveIndex];
+    if (!item) return;
+    const visibility = item.dataset.dockVisibilityPolicy || 'shown';
+    this.setDockVisibilityPreference(visibility);
+    this._sendWindowCmd('quality_dock_visibility_policy', { dock_visibility_policy: visibility });
+    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
   }
 
   _makeQualityComputedDockPreview() {
@@ -8187,6 +8833,7 @@ class SimpleWindowManager {
     preview.appendChild(this._makeQualityComputedWidgetMetric('Shape', radius || 'missing', 'shape', radius.includes('20') || radius.includes('999')));
     preview.appendChild(this._makeQualityComputedWidgetMetric('Controls', controls.length + ' actions', 'controls', controls.length >= 2));
     preview.appendChild(this._makeQualityComputedWidgetMetric('Gallery', (galleryWidth || 440) + 'px', 'gallery', (galleryWidth || 440) <= 440));
+    preview.appendChild(this._makeQualityWidgetStackPolicy());
     return preview;
   }
 
@@ -8210,6 +8857,99 @@ class SimpleWindowManager {
     return metric;
   }
 
+  _makeQualityWidgetStackPolicy() {
+    const shelf = this._ensureDesktopWidgets();
+    const gallery = this._widgetGallery;
+    const activeMode = gallery && !gallery.hidden ? 'gallery' : shelf && shelf.classList.contains('collapsed') ? 'hidden' : 'visible';
+    const entries = [
+      ['visible', 'Visible', 'show widgets'],
+      ['gallery', 'Gallery', 'add widgets'],
+      ['hidden', 'Hidden', 'quiet desktop']
+    ];
+    const currentIndex = entries.findIndex(([mode]) => mode === activeMode);
+    if (currentIndex >= 0) this._qualityWidgetStackPolicyActiveIndex = currentIndex;
+    const policy = document.createElement('div');
+    policy.className = 'wm-quality-widget-stack-policy';
+    policy.setAttribute('role', 'listbox');
+    policy.setAttribute('aria-label', 'Widget stack policy');
+    policy.dataset.widgetStackPolicyActiveIndex = String(this._qualityWidgetStackPolicyActiveIndex);
+    policy.setAttribute('aria-activedescendant', `wm-quality-widget-stack-policy-${this._qualityWidgetStackPolicyActiveIndex}`);
+    entries.forEach(([mode, label, value], index) => {
+      const selected = index === this._qualityWidgetStackPolicyActiveIndex;
+      const item = document.createElement('button');
+      item.id = `wm-quality-widget-stack-policy-${index}`;
+      item.className = 'wm-quality-widget-stack-policy-item' + (selected ? ' selected' : '');
+      item.dataset.widgetStackPolicy = mode;
+      item.dataset.widgetStackPolicyIndex = String(index);
+      item.setAttribute('role', 'option');
+      item.setAttribute('aria-selected', selected ? 'true' : 'false');
+      item.tabIndex = selected ? 0 : -1;
+      const name = document.createElement('span');
+      name.className = 'wm-quality-widget-stack-policy-label';
+      name.textContent = label;
+      const result = document.createElement('strong');
+      result.className = 'wm-quality-widget-stack-policy-value';
+      result.textContent = value;
+      item.appendChild(name);
+      item.appendChild(result);
+      policy.appendChild(item);
+    });
+    return policy;
+  }
+
+  _qualityWidgetStackPolicyItems() {
+    if (!this._qualityInspector) return [];
+    return Array.from(this._qualityInspector.querySelectorAll('.wm-quality-widget-stack-policy-item'));
+  }
+
+  _moveQualityWidgetStackPolicySelection(delta) {
+    const items = this._qualityWidgetStackPolicyItems();
+    if (!items.length) return;
+    const next = (this._qualityWidgetStackPolicyActiveIndex + delta + items.length) % items.length;
+    this._setQualityWidgetStackPolicySelection(next);
+  }
+
+  _setQualityWidgetStackPolicySelection(index) {
+    const items = this._qualityWidgetStackPolicyItems();
+    if (!items.length) return;
+    this._qualityWidgetStackPolicyActiveIndex = Math.max(0, Math.min(index, items.length - 1));
+    this._syncQualityWidgetStackPolicySelection();
+  }
+
+  _syncQualityWidgetStackPolicySelection(shouldFocus = true) {
+    const items = this._qualityWidgetStackPolicyItems();
+    if (!items.length) return;
+    const policy = items[0].closest('.wm-quality-widget-stack-policy');
+    items.forEach((item, index) => {
+      const selected = index === this._qualityWidgetStackPolicyActiveIndex;
+      item.classList.toggle('selected', selected);
+      item.tabIndex = selected ? 0 : -1;
+      item.setAttribute('aria-selected', selected ? 'true' : 'false');
+      if (selected && policy) policy.setAttribute('aria-activedescendant', item.id);
+      if (selected && shouldFocus) item.focus();
+    });
+    if (policy) policy.dataset.widgetStackPolicyActiveIndex = String(this._qualityWidgetStackPolicyActiveIndex);
+  }
+
+  _activateQualityWidgetStackPolicySelection() {
+    const item = this._qualityWidgetStackPolicyItems()[this._qualityWidgetStackPolicyActiveIndex];
+    if (!item) return;
+    const mode = item.dataset.widgetStackPolicy || 'visible';
+    const shelf = this._ensureDesktopWidgets();
+    if (mode === 'hidden') {
+      if (shelf) shelf.classList.add('collapsed');
+      this._toggleWidgetGallery(false);
+    } else if (mode === 'gallery') {
+      if (shelf) shelf.classList.remove('collapsed');
+      this._toggleWidgetGallery(true);
+    } else {
+      if (shelf) shelf.classList.remove('collapsed');
+      this._toggleWidgetGallery(false);
+    }
+    this._sendWindowCmd('quality_widget_stack_policy', { widget_stack_policy: mode });
+    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
+  }
+
   _makeQualityMaterialPreview() {
     const root = getComputedStyle(document.documentElement);
     const preview = document.createElement('div');
@@ -8219,6 +8959,7 @@ class SimpleWindowManager {
     preview.appendChild(this._makeQualityMaterialMetric('Floor', this._qualityCssPx(root, '--ui-glass-opacity-floor-x100', 6) + '%'));
     preview.appendChild(this._makeQualityMaterialMetric('Solid', this._qualityCssPx(root, '--ui-solid-surface-opacity-x100', 96) + '%'));
     preview.appendChild(this._makeQualityMaterialMetric('Mode', this._normalizeTransparencyPreference(this._readTransparencyPreference())));
+    preview.appendChild(this._makeQualityMaterialPolicy());
     return preview;
   }
 
@@ -8235,6 +8976,87 @@ class SimpleWindowManager {
     metric.appendChild(name);
     metric.appendChild(result);
     return metric;
+  }
+
+  _makeQualityMaterialPolicy() {
+    const mode = this._normalizeTransparencyPreference(document.documentElement.dataset.wmTransparency || this._readTransparencyPreference());
+    const entries = [
+      ['standard', 'Standard', 'glass vibrancy'],
+      ['reduced', 'Reduced', 'lighter blur'],
+      ['off', 'Solid', 'no glass']
+    ];
+    const currentIndex = entries.findIndex(([material]) => material === mode);
+    if (currentIndex >= 0) this._qualityMaterialPolicyActiveIndex = currentIndex;
+    const policy = document.createElement('div');
+    policy.className = 'wm-quality-material-policy';
+    policy.setAttribute('role', 'listbox');
+    policy.setAttribute('aria-label', 'Material transparency policy');
+    policy.dataset.materialPolicyActiveIndex = String(this._qualityMaterialPolicyActiveIndex);
+    policy.setAttribute('aria-activedescendant', `wm-quality-material-policy-${this._qualityMaterialPolicyActiveIndex}`);
+    entries.forEach(([material, label, value], index) => {
+      const selected = index === this._qualityMaterialPolicyActiveIndex;
+      const item = document.createElement('button');
+      item.id = `wm-quality-material-policy-${index}`;
+      item.className = 'wm-quality-material-policy-item' + (selected ? ' selected' : '');
+      item.dataset.materialPolicy = material;
+      item.dataset.materialPolicyIndex = String(index);
+      item.setAttribute('role', 'option');
+      item.setAttribute('aria-selected', selected ? 'true' : 'false');
+      item.tabIndex = selected ? 0 : -1;
+      const name = document.createElement('span');
+      name.className = 'wm-quality-material-policy-label';
+      name.textContent = label;
+      const result = document.createElement('strong');
+      result.className = 'wm-quality-material-policy-value';
+      result.textContent = value;
+      item.appendChild(name);
+      item.appendChild(result);
+      policy.appendChild(item);
+    });
+    return policy;
+  }
+
+  _qualityMaterialPolicyItems() {
+    if (!this._qualityInspector) return [];
+    return Array.from(this._qualityInspector.querySelectorAll('.wm-quality-material-policy-item'));
+  }
+
+  _moveQualityMaterialPolicySelection(delta) {
+    const items = this._qualityMaterialPolicyItems();
+    if (!items.length) return;
+    const next = (this._qualityMaterialPolicyActiveIndex + delta + items.length) % items.length;
+    this._setQualityMaterialPolicySelection(next);
+  }
+
+  _setQualityMaterialPolicySelection(index) {
+    const items = this._qualityMaterialPolicyItems();
+    if (!items.length) return;
+    this._qualityMaterialPolicyActiveIndex = Math.max(0, Math.min(index, items.length - 1));
+    this._syncQualityMaterialPolicySelection();
+  }
+
+  _syncQualityMaterialPolicySelection(shouldFocus = true) {
+    const items = this._qualityMaterialPolicyItems();
+    if (!items.length) return;
+    const policy = items[0].closest('.wm-quality-material-policy');
+    items.forEach((item, index) => {
+      const selected = index === this._qualityMaterialPolicyActiveIndex;
+      item.classList.toggle('selected', selected);
+      item.tabIndex = selected ? 0 : -1;
+      item.setAttribute('aria-selected', selected ? 'true' : 'false');
+      if (selected && policy) policy.setAttribute('aria-activedescendant', item.id);
+      if (selected && shouldFocus) item.focus();
+    });
+    if (policy) policy.dataset.materialPolicyActiveIndex = String(this._qualityMaterialPolicyActiveIndex);
+  }
+
+  _activateQualityMaterialPolicySelection() {
+    const item = this._qualityMaterialPolicyItems()[this._qualityMaterialPolicyActiveIndex];
+    if (!item) return;
+    const material = item.dataset.materialPolicy || 'standard';
+    this.setTransparencyPreference(material);
+    this._sendWindowCmd('quality_material_policy', { material_policy: material });
+    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
   }
 
   _makeQualityComputedMaterialPreview() {
