@@ -60,7 +60,7 @@ Verifies the first modern Simple Web WM slice at the contract level.
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 549 lines folded for reproduction.
+Runnable source: 554 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -204,6 +204,11 @@ expect(html).to_contain(".wm-quality-computed-scrollbar-preview")
 expect(html).to_contain(".wm-quality-computed-scrollbar-metric.warn")
 expect(html).to_contain(".wm-quality-computed-scrollbar-rail")
 expect(html).to_contain(".wm-quality-computed-scrollbar-value")
+expect(html).to_contain(".wm-quality-surface-depth-policy")
+expect(html).to_contain(".wm-quality-surface-depth-policy-item")
+expect(html).to_contain(".wm-quality-surface-depth-policy-item.selected")
+expect(html).to_contain(".wm-quality-surface-depth-policy-label")
+expect(html).to_contain(".wm-quality-surface-depth-policy-value")
 expect(html).to_contain(".wm-quality-computed-material-preview")
 expect(html).to_contain(".wm-quality-computed-material-metric.warn")
 expect(html).to_contain(".wm-quality-computed-material-sample")
@@ -622,7 +627,7 @@ expect(html).to_contain("border-radius: 999px")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 1089 lines folded for reproduction.
+Runnable source: 1105 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -862,6 +867,22 @@ expect(js).to_contain("dataset.qualityComputedScrollbar")
 expect(js).to_contain("dataset.computedScrollbarMetric")
 expect(js).to_contain("style.overflowY")
 expect(js).to_contain("style.scrollbarWidth")
+expect(js).to_contain("_makeQualityDepthPreview")
+expect(js).to_contain("_makeQualityDepthMetric")
+expect(js).to_contain("_makeQualitySurfaceDepthPolicy")
+expect(js).to_contain("_qualitySurfaceDepthPolicyItems")
+expect(js).to_contain("_moveQualitySurfaceDepthPolicySelection")
+expect(js).to_contain("_setQualitySurfaceDepthPolicySelection")
+expect(js).to_contain("_syncQualitySurfaceDepthPolicySelection")
+expect(js).to_contain("_activateQualitySurfaceDepthPolicySelection")
+expect(js).to_contain("dataset.qualityDepth")
+expect(js).to_contain("dataset.depthMetric")
+expect(js).to_contain("dataset.surfaceDepthPolicy")
+expect(js).to_contain("dataset.surfaceDepthPolicyIndex")
+expect(js).to_contain("dataset.surfaceDepthPolicyActiveIndex")
+expect(js).to_contain("quality_surface_depth_policy")
+expect(js).to_contain("setSurfaceDepthPreference(depth)")
+expect(js).to_contain("surface_depth_policy")
 expect(js).to_contain("_makeQualityComputedMaterialPreview")
 expect(js).to_contain("_makeQualityComputedMaterialMetric")
 expect(js).to_contain("_qualityComputedMaterialEvidence")
@@ -1724,7 +1745,7 @@ expect(retained).to_contain("Maximize window")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 1086 lines folded for reproduction.
+Runnable source: 1102 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -2217,6 +2238,22 @@ expect(preview).to_contain("data-depth-metric=\"taskbar\"")
 expect(preview).to_contain("data-depth-metric=\"blur\"")
 expect(preview).to_contain("data-depth-metric=\"shadow\"")
 expect(preview).to_contain("wm-quality-depth-plane")
+expect(preview).to_contain("role=\"listbox\" aria-label=\"Surface depth policy\"")
+expect(preview).to_contain("data-surface-depth-policy-active-index=\"0\"")
+expect(preview).to_contain("aria-activedescendant=\"wm-quality-surface-depth-policy-0\"")
+expect(preview).to_contain("id=\"wm-quality-surface-depth-policy-0\"")
+expect(preview).to_contain("id=\"wm-quality-surface-depth-policy-1\"")
+expect(preview).to_contain("id=\"wm-quality-surface-depth-policy-2\"")
+expect(preview).to_contain("wm-quality-surface-depth-policy-item selected")
+expect(preview).to_contain("data-surface-depth-policy=\"layered\"")
+expect(preview).to_contain("data-surface-depth-policy=\"subtle\"")
+expect(preview).to_contain("data-surface-depth-policy=\"flat\"")
+expect(preview).to_contain("data-surface-depth-policy-index=\"0\"")
+expect(preview).to_contain("data-surface-depth-policy-index=\"1\"")
+expect(preview).to_contain("data-surface-depth-policy-index=\"2\"")
+expect(preview).to_contain("deep elevation")
+expect(preview).to_contain("lighter shadows")
+expect(preview).to_contain("minimal depth")
 expect(preview).to_contain("data-quality-interaction=\"affordance\"")
 expect(preview).to_contain("data-interaction-metric=\"focus\"")
 expect(preview).to_contain("data-interaction-metric=\"hover\"")
