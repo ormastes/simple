@@ -27,7 +27,7 @@ simple_web_renderer_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 48 | 48 | 0 | 0 |
+| 50 | 50 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -174,7 +174,7 @@ val html = "<html><head><style>html,body{margin:0;padding:0;width:96px;height:64
 val pixels = simple_web_render_html_to_pixels(html, 96, 64)
 expect(pixels.len()).to_equal(96 * 64)
 expect(pixels[4 + 42 * 96]).to_equal(0xFFF59E0Bu32)
-expect(pixels[4 + 33 * 96]).to_equal(0xFFDBEAFEu32)
+expect(pixels[4 + 33 * 96]).to_equal(0xFF3C4559u32)
 ```
 
 </details>
@@ -624,6 +624,48 @@ expect(pixels.len()).to_equal(96 * 64)
 
 </details>
 
+#### preserves supported Engine2D backend names before runtime fallback
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(SimpleWebRenderer.create_with_backend(96, 64, "cuda").backend_name).to_equal("cuda")
+expect(SimpleWebRenderer.create_with_backend(96, 64, "opencl").backend_name).to_equal("opencl")
+expect(SimpleWebRenderer.create_with_backend(96, 64, "vulkan").backend_name).to_equal("vulkan")
+expect(SimpleWebRenderer.create_with_backend(96, 64, "metal").backend_name).to_equal("metal")
+expect(SimpleWebRenderer.create_with_backend(96, 64, "cpu_simd").backend_name).to_equal("cpu_simd")
+expect(SimpleWebRenderer.create_with_backend(96, 64, "simd_cpu").backend_name).to_equal("cpu_simd")
+expect(simple_web_resolved_engine2d_backend_name(96, 64, "cuda")).to_equal("cuda")
+expect(simple_web_resolved_engine2d_backend_name(96, 64, "opencl")).to_equal("opencl")
+expect(simple_web_resolved_engine2d_backend_name(96, 64, "vulkan")).to_equal("vulkan")
+expect(simple_web_resolved_engine2d_backend_name(96, 64, "metal")).to_equal("metal")
+expect(simple_web_resolved_engine2d_backend_name(96, 64, "cpu_simd")).to_equal("cpu_simd")
+```
+
+</details>
+
+#### high-level renderer preserves OpenCL backend selection without changing generic layout pixels
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>.box{background-color:#2563eb;width:24px;height:16px}</style></head><body><div class='box'></div></body></html>"
+val sw = SimpleWebRenderer.create_with_backend(48, 32, "software")
+val opencl = SimpleWebRenderer.create_with_backend(48, 32, "opencl")
+expect(opencl.backend_name).to_equal("opencl")
+expect(_pixels_equal(opencl.render_html_to_pixels(html), sw.render_html_to_pixels(html))).to_equal(true)
+```
+
+</details>
+
 #### reports the actual backend after invalid backend fallback
 
 <details>
@@ -1002,8 +1044,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 48 |
-| Active scenarios | 48 |
+| Total scenarios | 50 |
+| Active scenarios | 50 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
