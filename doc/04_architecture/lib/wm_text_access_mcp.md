@@ -30,17 +30,22 @@ Use an adapter envelope over existing semantic sources.
 ```text
 CLI / service / MCP
         |
-wm_text_access facade
+SGTTI facade (Simple Gui Texture Tree Interface)
         |
 shared access core: snapshot, query, find, act, value, history
         |
 adapter envelope with source/capability/staleness metadata
         |
-+-------------------+-------------------+-------------------+
-| TRACE32 adapter   | Simple UI adapter | Host WM adapter   |
-| catalog/AREA/text | common.ui.access  | std.play.wm       |
-+-------------------+-------------------+-------------------+
++-------------------+-------------------+-------------------+-------------------+
+| TRACE32 adapter   | Simple UI adapter | Host WM adapter   | Compositor adapter|
+| catalog/AREA/text | common.ui.access  | std.play.wm       | gtti.spl          |
++-------------------+-------------------+-------------------+-------------------+
 ```
+
+The compositor adapter (`src/os/compositor/gtti.spl`) bridges SimpleOS
+`Compositor` surfaces into `WinTextSnapshot` nodes. It supports **hidden WM
+mode** (`WM_MODE_HIDDEN`) where the surface tree is populated without rendering,
+enabling headless GUI testing.
 
 ## Layer Responsibilities
 
@@ -75,7 +80,7 @@ The shared core owns backend-independent behavior:
 
 Adapters only materialize snapshots and execute backend-specific operations. They do not own query semantics.
 
-Required first-step adapters:
+Required adapters:
 
 - TRACE32 window adapter:
   - source: catalog entries, actions, fields, `WinPrint.*`, `PRinTer.FILE`, AREA output
@@ -87,6 +92,10 @@ Required first-step adapters:
   - source: `std.play.wm` window list/focus/input/screenshot
   - semantic depth: top-level windows only
   - internal controls: unsupported unless a future accessibility adapter supplies them
+- SimpleOS Compositor adapter (SGTTI):
+  - source: `Compositor` surface list via `gtti_snapshot_from_compositor`
+  - semantic depth: window-level surfaces with position/size/visibility
+  - hidden WM mode: `WM_MODE_HIDDEN` populates tree without rendering
 
 Future adapters:
 

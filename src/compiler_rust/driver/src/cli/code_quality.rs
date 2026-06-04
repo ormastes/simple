@@ -5,6 +5,7 @@ use simple_common::fix_applicator::FixApplicator;
 use simple_compiler::{Formatter, LintChecker, LintConfig};
 use simple_parser::ast::{Expr, FunctionDef, Node};
 use simple_parser::Parser;
+use simple_sdn::{parse_document, SdnValue};
 use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -14,7 +15,7 @@ use crate::cli::interactive_fix;
 
 const QUALITY_CODES: &[&str] = &[
     "STUB001", "STUB003", "SPIPE001", "SPIPE002", "SPIPE003", "SPIPE004", "SPIPE005", "SPIPE006", "SPIPE007", "UI001",
-    "UI002", "UI003",
+    "UI002", "UI003", "TRK001",
 ];
 
 fn is_test_like_path(path: &Path) -> bool {
@@ -34,6 +35,14 @@ fn is_theme_package_lint_path(path: &Path) -> bool {
             path.extension().and_then(|s| s.to_str()),
             Some("sdn") | Some("css") | Some("html")
         )
+}
+
+fn is_feature_tracking_db_path(path: &Path) -> bool {
+    path.file_name().and_then(|s| s.to_str()) == Some("feature_db.sdn")
+        && path
+            .to_string_lossy()
+            .replace('\\', "/")
+            .ends_with("doc/08_tracking/feature/feature_db.sdn")
 }
 
 fn compact(source: &str) -> String {
@@ -781,7 +790,9 @@ pub fn lint_directory(dir: &PathBuf, json_output: bool, fix_flags: &FixFlags) ->
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| {
-            e.path().extension().and_then(|s| s.to_str()) == Some("spl") || is_theme_package_lint_path(e.path())
+            e.path().extension().and_then(|s| s.to_str()) == Some("spl")
+                || is_theme_package_lint_path(e.path())
+                || is_feature_tracking_db_path(e.path())
         })
     {
         let path = entry.path();
@@ -832,7 +843,8 @@ pub fn lint_directory(dir: &PathBuf, json_output: bool, fix_flags: &FixFlags) ->
                     .as_ref()
                     .ok()
                     .map(|e| e.path().extension().and_then(|s| s.to_str()) == Some("spl")
-                        || is_theme_package_lint_path(e.path()))
+                        || is_theme_package_lint_path(e.path())
+                        || is_feature_tracking_db_path(e.path()))
                     == Some(true))
                 .count()
         );
@@ -1197,9 +1209,173 @@ fn lint_theme_package_file(path: &std::path::Path, json_output: bool) -> Option<
     Some((!diags.is_empty(), diags.len(), 0, diags, Vec::new(), Some(source)))
 }
 
+fn lint_feature_tracking_db_file(path: &std::path::Path, json_output: bool) -> Option<LintResult> {
+    let source = match fs::read_to_string(path) {
+        Ok(source) => source,
+        Err(e) => {
+            if !json_output {
+                eprintln!("error: cannot read {}: {}", path.display(), e);
+            }
+            return None;
+        }
+    };
+    let diags = collect_feature_tracking_db_diagnostics(path, &source);
+
+    if !json_output {
+        if diags.is_empty() {
+            println!("{}: OK", path.display());
+        } else {
+            for diagnostic in &diags {
+                let (line, column) = diagnostic
+                    .labels
+                    .first()
+                    .map(|label| (label.span.line, label.span.column))
+                    .unwrap_or((1, 1));
+                println!(
+                    "{}:{}:{}: error: {} [{}]",
+                    path.display(),
+                    line,
+                    column,
+                    diagnostic.message,
+                    diagnostic.code.clone().unwrap_or_else(|| "TRK001".to_string())
+                );
+                for help in &diagnostic.help {
+                    println!("  help: {}", help);
+                }
+            }
+        }
+    }
+
+    Some((!diags.is_empty(), diags.len(), 0, diags, Vec::new(), Some(source)))
+}
+
+fn collect_feature_tracking_db_diagnostics(path: &Path, source: &str) -> Vec<Diagnostic> {
+    let doc = match parse_document(source) {
+        Ok(doc) => doc,
+        Err(e) => {
+            return vec![Diagnostic::error(format!("Invalid feature tracking database: {}", e))
+                .with_code("TRK000".to_string())
+                .with_file(path.display().to_string())
+                .with_label(Span::new(0, 0, 1, 1), "feature_db.sdn parse error")
+                .with_help("Fix SDN syntax before running feature traceability lint")];
+        }
+    };
+    let root = doc.root();
+    let table = match root {
+        SdnValue::Dict(dict) => dict.get("features"),
+        _ => None,
+    };
+    let (fields, rows) = match table {
+        Some(SdnValue::Table {
+            fields: Some(fields),
+            rows,
+            ..
+        }) => (fields, rows),
+        _ => {
+            return vec![Diagnostic::error("Feature tracking database is missing the features table")
+                .with_code("TRK000".to_string())
+                .with_file(path.display().to_string())
+                .with_label(Span::new(0, 0, 1, 1), "missing features table")
+                .with_help("Add a features table with the canonical tracking columns")];
+        }
+    };
+
+    let row_lines = feature_db_row_line_indexes(source);
+    let mut diagnostics = Vec::new();
+    for (row_idx, row) in rows.iter().enumerate() {
+        let mut map = std::collections::BTreeMap::new();
+        for (idx, field) in fields.iter().enumerate() {
+            if let Some(value) = row.get(idx) {
+                map.insert(field.as_str(), sdn_lint_value_to_string(value));
+            }
+        }
+        if map.get("valid").map(|v| v == "false").unwrap_or(false) {
+            continue;
+        }
+        if map.get("status").map(|v| v.as_str()) != Some("done") {
+            continue;
+        }
+
+        let required = [
+            "requirement",
+            "research",
+            "plan",
+            "architecture",
+            "design",
+            "system_spec",
+            "spec_doc",
+            "implementation",
+        ];
+        let missing: Vec<&str> = required
+            .iter()
+            .copied()
+            .filter(|field| is_blank_tracking_lint_value(map.get(field).map(|s| s.as_str()).unwrap_or("")))
+            .collect();
+        if missing.is_empty() {
+            continue;
+        }
+
+        let id = map.get("id").map(|s| s.as_str()).unwrap_or("<missing-id>");
+        let line_idx = row_lines.get(row_idx).copied().unwrap_or(0);
+        diagnostics.push(
+            Diagnostic::error(format!(
+                "Done feature {} is missing required traceability field(s): {}",
+                id,
+                missing.join(", ")
+            ))
+            .with_code("TRK001".to_string())
+            .with_file(path.display().to_string())
+            .with_label(line_span(source, line_idx), "done feature row")
+            .with_help("Populate requirement, research, plan, architecture, design, system_spec, spec_doc, and implementation before status=done"),
+        );
+    }
+    diagnostics
+}
+
+fn feature_db_row_line_indexes(source: &str) -> Vec<usize> {
+    let mut in_features = false;
+    let mut rows = Vec::new();
+    for (idx, line) in source.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("features |") {
+            in_features = true;
+            continue;
+        }
+        if !in_features {
+            continue;
+        }
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if !line.starts_with(' ') && !line.starts_with('\t') {
+            break;
+        }
+        rows.push(idx);
+    }
+    rows
+}
+
+fn is_blank_tracking_lint_value(value: &str) -> bool {
+    value.is_empty() || value == "none" || value == "tbd" || value == "-"
+}
+
+fn sdn_lint_value_to_string(value: &SdnValue) -> String {
+    match value {
+        SdnValue::Null => String::new(),
+        SdnValue::Bool(value) => value.to_string(),
+        SdnValue::Int(value) => value.to_string(),
+        SdnValue::Float(value) => value.to_string(),
+        SdnValue::String(value) => value.clone(),
+        other => other.to_string(),
+    }
+}
+
 /// Internal lint function that returns diagnostic information
 /// Returns: (has_errors, error_count, warning_count, diagnostics, easy_fixes, source_text)
 pub fn lint_file_internal(path: &std::path::Path, json_output: bool) -> Option<LintResult> {
+    if is_feature_tracking_db_path(path) {
+        return lint_feature_tracking_db_file(path, json_output);
+    }
     if is_theme_package_lint_path(path) {
         return lint_theme_package_file(path, json_output);
     }

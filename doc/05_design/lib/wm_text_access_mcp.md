@@ -189,12 +189,42 @@ Unsupported:
 - button/menu invocation by internal label
 - child control tree queries
 
+### SimpleOS Compositor Adapter (SGTTI)
+
+Inputs:
+
+- `Compositor` instance (surface list, focus state)
+- WM mode (`WM_MODE_NORMAL` or `WM_MODE_HIDDEN`)
+
+Behavior:
+
+- maps each `WindowSurface` to a SGTTI surface and root node of kind
+  `compositor_window`.
+- `gtti_snapshot_from_compositor(comp, mode, ...)` is the adapter entry point
+  in `src/os/compositor/gtti.spl`.
+- hidden WM mode populates the tree without rendering to a display backend,
+  enabling headless GUI testing.
+- node props carry `wm_mode`, `x`, `y`, `width`, `height`, `visible`.
+
+Capabilities:
+
+- `list`
+- `focus`
+- `query_text`
+- `screenshot`
+
+Unsupported:
+
+- internal widget-level tree (compositor surfaces are window-level)
+- value read/write on compositor surfaces
+
 ## CLI/Service/MCP Surface
 
 Canonical operations:
 
 - snapshot construction through `win_text_trace32_snapshot`,
-  `win_text_simple_ui_snapshot`, and `win_text_host_wm_snapshot`
+  `win_text_simple_ui_snapshot`, `win_text_host_wm_snapshot`, and
+  `win_text_compositor_snapshot`
 - shared query through `win_text_find_nodes`
 - shared action validation/routing through `win_text_route_action`
 - snapshot composition through `win_text_merge_snapshots`

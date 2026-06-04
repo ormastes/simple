@@ -105,7 +105,7 @@ expect(result.gpu_backend_order).to_equal("hip")
 
 </details>
 
-#### preserves explicit backend order through MirFunction copies
+#### preserves canonical explicit backend order through MirFunction copies
 
 <details>
 <summary>Executable SPipe</summary>
@@ -115,7 +115,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val fn_ = make_mir_function("gpu_kernel")
-val attr = make_gpu_attr("auto", "rocm,cl,cuda")
+val attr = parse_function_attrs([make_gpu_source_attr_with_backends("auto", "rocm,cl,cuda")])
 val lowerer = MirLowering.new(SymbolTable.new())
 val tagged = lowerer.apply_function_attr_to_mir(fn_, attr)
 

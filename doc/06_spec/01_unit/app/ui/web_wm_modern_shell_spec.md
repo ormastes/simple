@@ -60,7 +60,7 @@ Verifies the first modern Simple Web WM slice at the contract level.
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 679 lines folded for reproduction.
+Runnable source: 685 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -551,7 +551,13 @@ expect(html).to_contain(".wm-capture-selection")
 expect(html).to_contain(".wm-capture-toolbar")
 expect(html).to_contain(".wm-capture-mode")
 expect(html).to_contain(".wm-capture-action")
+expect(html).to_contain(".wm-capture-selection.action-feedback")
+expect(html).to_contain(".wm-screen-capture-overlay[data-capture-feedback='capture'] .wm-capture-selection")
+expect(html).to_contain(".wm-capture-mode.action-feedback")
+expect(html).to_contain(".wm-capture-action.action-feedback")
+expect(html).to_contain(":root[data-wm-motion=off] .wm-capture-selection.action-feedback")
 expect(html).to_contain("@keyframes wm-capture-in")
+expect(html).to_contain("@keyframes wm-capture-action-feedback")
 expect(html).to_contain(".wm-quick-settings")
 expect(html).to_contain(".wm-quick-settings[hidden]")
 expect(html).to_contain(".wm-quick-grid")
@@ -752,7 +758,7 @@ expect(html).to_contain("border-radius: 999px")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 1331 lines folded for reproduction.
+Runnable source: 1337 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1945,6 +1951,12 @@ expect(js).to_contain("_makeCaptureModeButton")
 expect(js).to_contain("_makeCaptureActionButton")
 expect(js).to_contain("_setScreenCaptureMode")
 expect(js).to_contain("_captureScreenSelection")
+expect(js).to_contain("_cancelScreenCapture")
+expect(js).to_contain("_markScreenCaptureFeedback")
+expect(js).to_contain("_screenCaptureFeedbackTimer")
+expect(js).to_contain("dataset.captureFeedback")
+expect(js).to_contain("classList.add('action-feedback')")
+expect(js).to_contain("setTimeout(() => this._toggleScreenCapture(false), 180)")
 expect(js).to_contain("Open screen capture")
 expect(js).to_contain("Cmd Shift S")
 expect(js).to_contain("wantsScreenCapture")
@@ -2096,7 +2108,7 @@ expect(retained).to_contain("Maximize window")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 1303 lines folded for reproduction.
+Runnable source: 1308 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -2273,12 +2285,17 @@ expect(preview).to_contain("Show clipboard history")
 expect(preview).to_contain("Cmd Shift V")
 expect(preview).to_contain("Clipboard history")
 expect(preview).to_contain("aria-label=\"Screen capture\"")
+expect(preview).to_contain("data-capture-feedback=\"capture\"")
+expect(preview).to_contain("data-capture-feedback-value=\"selection\"")
 expect(preview).to_contain("aria-label=\"Capture selection preview\"")
+expect(preview).to_contain("wm-capture-selection action-feedback")
 expect(preview).to_contain("role=\"toolbar\" aria-label=\"Capture controls\"")
+expect(preview).to_contain("wm-capture-mode active action-feedback")
 expect(preview).to_contain("data-capture-mode=\"selection\"")
 expect(preview).to_contain("data-capture-mode=\"window\"")
 expect(preview).to_contain("data-capture-mode=\"screen\"")
 expect(preview).to_contain("data-capture-action=\"capture\"")
+expect(preview).to_contain("wm-capture-action active action-feedback")
 expect(preview).to_contain("Open screen capture")
 expect(preview).to_contain("Cmd Shift S")
 expect(preview).to_contain("Screen capture")

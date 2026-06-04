@@ -120,6 +120,7 @@ class SimpleWindowManager {
     this._notificationActionFeedbackTimers = new Map();
     this._liveActivity = null;
     this._liveActivityPaused = false;
+    this._liveActivityActionFeedbackTimer = 0;
     this._hotCorners = null;
     this._hotCornerHint = null;
     this._activeHotCorner = '';
@@ -4019,6 +4020,7 @@ class SimpleWindowManager {
 
   _activateLiveActivityAction(action) {
     if (action === 'open') {
+      this._markLiveActivityActionFeedback('open');
       this._sendWindowCmd('live_activity_open', { activity_id: 'build' });
       return;
     }
@@ -4027,18 +4029,51 @@ class SimpleWindowManager {
       this._sendWindowCmd(action === 'pause' ? 'live_activity_pause' : 'live_activity_resume', { activity_id: 'build' });
       this._showSystemHud('Live activity', this._liveActivityPaused ? 'paused' : 'resumed', 1400);
       this._renderLiveActivity();
+      this._markLiveActivityActionFeedback(action, this._liveActivityPaused ? 'resume' : 'pause');
       return;
     }
     if (action === 'cancel') {
+      this._markLiveActivityActionFeedback('cancel');
       this._sendWindowCmd('live_activity_cancel', { activity_id: 'build' });
-      this._toggleLiveActivity(false);
+      setTimeout(() => this._toggleLiveActivity(false), 180);
       this._showSystemHud('Live activity', 'cancelled', 1400);
       return;
     }
     if (action === 'dismiss') {
+      this._markLiveActivityActionFeedback('dismiss');
       this._sendWindowCmd('live_activity_dismiss', { activity_id: 'build' });
-      this._toggleLiveActivity(false);
+      setTimeout(() => this._toggleLiveActivity(false), 180);
     }
+  }
+
+  _markLiveActivityActionFeedback(action, targetAction = '') {
+    if (!this._liveActivity || !this._liveActivity.isConnected) return;
+    const feedback = String(action || 'open');
+    const target = String(targetAction || feedback);
+    if (this._liveActivityActionFeedbackTimer) clearTimeout(this._liveActivityActionFeedbackTimer);
+    const panel = this._liveActivity;
+    const targets = [panel];
+    const button = panel.querySelector(`.wm-live-activity-action[data-live-action="${target}"]`);
+    if (button) targets.push(button);
+    const progress = panel.querySelector('.wm-live-activity-progress');
+    if (progress) targets.push(progress);
+    panel.dataset.liveFeedback = feedback;
+    panel.dataset.liveFeedbackTarget = target;
+    for (const item of targets) {
+      item.classList.remove('action-feedback');
+      void item.offsetWidth;
+      item.classList.add('action-feedback');
+      item.dataset.liveFeedback = feedback;
+    }
+    this._liveActivityActionFeedbackTimer = setTimeout(() => {
+      delete panel.dataset.liveFeedback;
+      delete panel.dataset.liveFeedbackTarget;
+      for (const item of targets) {
+        item.classList.remove('action-feedback');
+        delete item.dataset.liveFeedback;
+      }
+      this._liveActivityActionFeedbackTimer = 0;
+    }, 560);
   }
 
   _ensureHotCorners() {

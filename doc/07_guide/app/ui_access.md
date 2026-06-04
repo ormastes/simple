@@ -74,11 +74,20 @@ This matches the repo-local agent skill at [.codex/skills/simple-ui/SKILL.md](..
 ## Common Window Text Access
 
 `std.common.ui.win_text_access` extends the canonical UI access model to
-non-Simple window sources. It currently normalizes:
+non-Simple window sources. This unified contract is called the **Simple Gui
+Texture Tree Interface (SGTTI)** — see the glossary entry for full context. It
+currently normalizes four sources:
 
-- TRACE32 text or MDI windows captured by catalog/open/capture metadata
-- Simple UI access snapshots
-- host WM top-level windows
+- **TRACE32** text or MDI windows captured by catalog/open/capture metadata
+- **Simple UI** access snapshots (in-process semantic)
+- **Host WM** top-level windows (Linux/macOS/Windows)
+- **SimpleOS Compositor** surfaces via the SGTTI adapter (`src/os/compositor/gtti.spl`)
+
+The compositor source bridges `Compositor` surfaces into access nodes, including
+in **hidden WM mode** (`WM_MODE_HIDDEN`) where the compositor populates its
+surface tree without rendering to a display backend — enabling headless GUI
+testing. Use `gtti_snapshot_from_compositor(comp, WM_MODE_HIDDEN, ...)` to
+snapshot compositor state.
 
 The shared layer provides snapshot construction, staleness metadata, filtered
 text lookup, snapshot merging, and action routing through
@@ -88,17 +97,21 @@ the query/action contract consistent across CLI, service, and MCP callers.
 
 The Simple MCP probe `play_wm_text_status` reports whether the common adapter
 contract is available. It is intentionally a status/contract probe, not a live
-refresh command; TRACE32, Simple UI, and host WM adapters still own their
-backend-specific refresh and privileged input steps.
+refresh command; adapters still own their backend-specific refresh and
+privileged input steps.
 
 MCP clients that already have scalar adapter data can call the common facade
 directly:
 
 | Tool | Purpose |
 |------|---------|
-| `play_wm_text_snapshot` | Normalize one TRACE32, Simple UI, or host WM payload into a canonical snapshot |
-| `play_wm_text_find` | Query normalized window text nodes through the shared selector logic |
-| `play_wm_text_act` | Validate and route an action against a normalized canonical target |
+| `play_wm_text_snapshot` | SGTTI snapshot — normalize TRACE32, Simple UI, host WM, or compositor payload |
+| `play_wm_text_find` | SGTTI query — find nodes in the normalized texture tree |
+| `play_wm_text_act` | SGTTI action — validate and route against a normalized canonical target |
+
+Pass `"source": "compositor"` to `play_wm_text_snapshot` to build a compositor
+snapshot with optional `wm_mode`, `window_id`, `title`, `width`, `height`,
+`visible`, `focused`, and `app_id` fields.
 
 These tools do not refresh live backends. For live Simple UI sessions, use
 `ui_access_*`; for live TRACE32 open/capture, use TRACE32 MCP tools first and
