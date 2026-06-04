@@ -11,13 +11,18 @@
 
 Unit tests for the Simple Gui Texture Tree Interface (SGTTI) compositor adapter.
 Tests that compositor surfaces produce correct WinTextSnapshot nodes via
-`gtti_snapshot_from_compositor` and that hidden WM mode populates the tree.
-Also tests the win_text_compositor_snapshot core function directly and
-verifies WM CLI integration via the MCP snapshot path.
+`gtti_snapshot_from_compositor` with a real Compositor instance, and that
+hidden WM mode populates the tree without rendering.
 """
 
 use std.spipe.*
+use os.compositor.compositor.{Compositor, WindowSurface}
+use os.compositor.cursor.{CursorState}
+use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
+use os.compositor.host_compositor_entry.{HeadlessHostCompositorBackend}
+use os.compositor.gtti.{gtti_snapshot_from_compositor}
 use os.compositor.wm_core.{WM_MODE_NORMAL, WM_MODE_HIDDEN, wm_mode_is_hidden}
+use os.drivers.framebuffer.fb_driver.{Color}
 use common.ui.win_text_access.{
     GttiSurface,
     WinTextSnapshot,
@@ -25,6 +30,34 @@ use common.ui.win_text_access.{
     win_text_find_nodes,
     WIN_TEXT_SOURCE_COMPOSITOR
 }
+
+fn _make_gtti_test_compositor() -> Compositor:
+    val cursor = CursorState(
+        x: 512,
+        y: 384,
+        visible: true,
+        hotspot_x: 1,
+        hotspot_y: 1
+    )
+    val backend = HeadlessHostCompositorBackend.new(1024, 768)
+    return Compositor(
+        surfaces: [],
+        focused_idx: -1,
+        backend: backend,
+        input: nil,
+        cursor: cursor,
+        desktop_bg: Color.rgb(0, 48, 96),
+        next_id: 1,
+        screen_width: 1024,
+        screen_height: 768,
+        running: false,
+        dragging: false,
+        drag_window_id: 0,
+        drag_offset_x: 0,
+        drag_offset_y: 0,
+        pending_meta_key: 0,
+        pending_shortcut: ""
+    )
 
 # ============================================================================
 # WM mode constants
@@ -150,3 +183,88 @@ describe "compositor snapshot with multiple surfaces":
             if prop.key == "visible":
                 hid_prop = prop.value
         expect(hid_prop).to_equal("false")
+
+# ============================================================================
+# gtti_snapshot_from_compositor — real Compositor adapter
+# ============================================================================
+
+describe "gtti_snapshot_from_compositor with real Compositor":
+
+    it "empty compositor produces empty snapshot":
+        var comp = _make_gtti_test_compositor()
+        val snap = gtti_snapshot_from_compositor(comp, WM_MODE_HIDDEN, 1000, 1000)
+        expect(snap.access.surfaces.len()).to_equal(0)
+        expect(snap.access.nodes.len()).to_equal(0)
+        expect(snap.sources[0].source_id).to_equal("compositor")
+
+    it "compositor with one window produces one compositor_window node":
+        var comp = _make_gtti_test_compositor()
+        comp.create_window("Terminal", 50, 50, 640, 480)
+        val snap = gtti_snapshot_from_compositor(comp, WM_MODE_HIDDEN, 2000, 2000)
+        expect(snap.access.surfaces.len()).to_equal(1)
+        expect(snap.access.nodes.len()).to_equal(1)
+        expect(snap.access.nodes[0].kind).to_equal("compositor_window")
+        expect(snap.access.nodes[0].text_value).to_equal("Terminal")
+
+    it "compositor with two windows produces two nodes":
+        var comp = _make_gtti_test_compositor()
+        comp.create_window("Editor", 10, 10, 800, 600)
+        comp.create_window("Browser", 100, 100, 1024, 768)
+        val snap = gtti_snapshot_from_compositor(comp, WM_MODE_NORMAL, 3000, 3000)
+        expect(snap.access.surfaces.len()).to_equal(2)
+        expect(snap.access.nodes.len()).to_equal(2)
+        expect(snap.access.surfaces[0].title).to_equal("Editor")
+        expect(snap.access.surfaces[1].title).to_equal("Browser")
+
+    it "focused window is marked focused in snapshot":
+        var comp = _make_gtti_test_compositor()
+        val id1 = comp.create_window("Win1", 0, 0, 400, 300)
+        val id2 = comp.create_window("Win2", 50, 50, 400, 300)
+        comp.focus_window(id1)
+        val snap = gtti_snapshot_from_compositor(comp, WM_MODE_HIDDEN, 4000, 4000)
+        val found = win_text_find_nodes(snap, "", "compositor_window", "Win1", 10)
+        expect(found.len()).to_equal(1)
+
+    it "hidden mode label appears in node props":
+        var comp = _make_gtti_test_compositor()
+        comp.create_window("HiddenTest", 0, 0, 320, 240)
+        val snap = gtti_snapshot_from_compositor(comp, WM_MODE_HIDDEN, 5000, 5000)
+        var found_mode = ""
+        for prop in snap.access.nodes[0].props:
+            if prop.key == "wm_mode":
+                found_mode = prop.value
+        expect(found_mode).to_equal("hidden")
+
+    it "normal mode label appears in node props":
+        var comp = _make_gtti_test_compositor()
+        comp.create_window("NormalTest", 0, 0, 320, 240)
+        val snap = gtti_snapshot_from_compositor(comp, WM_MODE_NORMAL, 5000, 5000)
+        var found_mode = ""
+        for prop in snap.access.nodes[0].props:
+            if prop.key == "wm_mode":
+                found_mode = prop.value
+        expect(found_mode).to_equal("normal")
+
+    it "app_id is preserved from compositor surface":
+        var comp = _make_gtti_test_compositor()
+        val id = comp.create_window("MyApp", 0, 0, 640, 480)
+        comp.set_window_identity(id, 42, "my_app")
+        val snap = gtti_snapshot_from_compositor(comp, WM_MODE_HIDDEN, 6000, 6000)
+        expect(snap.access.surfaces[0].app_id).to_equal("my_app")
+
+    it "find by kind works on compositor adapter snapshot":
+        var comp = _make_gtti_test_compositor()
+        comp.create_window("Findable", 0, 0, 200, 150)
+        val snap = gtti_snapshot_from_compositor(comp, WM_MODE_HIDDEN, 7000, 7000)
+        val found = win_text_find_nodes(snap, "", "compositor_window", "", 10)
+        expect(found.len()).to_equal(1)
+        expect(found[0].text_value).to_equal("Findable")
+
+    it "find by title text works on compositor adapter snapshot":
+        var comp = _make_gtti_test_compositor()
+        comp.create_window("Calculator", 100, 100, 320, 240)
+        comp.create_window("Settings", 200, 200, 400, 300)
+        val snap = gtti_snapshot_from_compositor(comp, WM_MODE_HIDDEN, 8000, 8000)
+        val found = win_text_find_nodes(snap, "", "", "Calculator", 10)
+        expect(found.len()).to_equal(1)
+        expect(found[0].kind).to_equal("compositor_window")

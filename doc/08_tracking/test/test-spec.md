@@ -1,12 +1,12 @@
 # Test Specification
 
-*Generated: 2026-06-04 05:40:12*
+*Generated: 2026-06-04 07:36:43*
 
-## test/01_unit/app/ui
+## test/01_unit/compiler/backend
 
-❌ **web_render_backend_api_spec.spl** (47671ms)
-  - Source: `test/01_unit/app/ui/web_render_backend_api_spec.spl`
-  - Generated doc: `doc/06_spec/web_render_backend_api_spec.md`
+❌ **backend_gpu_target_contract_spec.spl** (4264ms)
+  - Source: `test/01_unit/compiler/backend/backend_gpu_target_contract_spec.spl`
+  - Generated doc: `doc/06_spec/backend_gpu_target_contract_spec.md`
 
 
 ---
@@ -16,4 +16,4 @@
 - **Total:** 1 tests
 - **Passed:** 7 ✅
 - **Failed:** 1 ❌
-- **Duration:** 47678ms
+- **Duration:** 4272ms

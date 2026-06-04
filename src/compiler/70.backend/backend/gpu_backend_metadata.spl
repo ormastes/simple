@@ -3,7 +3,7 @@
 # Shared acceptance logic for compiler GPU backends consuming MIR metadata from
 # @gpu/@gpu_kernel attributes.
 
-use compiler.backend.backend.backend_types.{BackendKind}
+use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget}
 use compiler.mir.mir_data.{MirModule}
 use compiler.mir.mir_instructions.{MirFunction}
 
@@ -76,6 +76,22 @@ fn gpu_backend_accepts_kernel_metadata(kind: BackendKind, target_name: text, bac
         return false
     gpu_backend_order_contains(backend_order, backend_name)
 
+fn gpu_backend_accepts_kernel(kind: BackendKind, func: MirFunction) -> bool:
+    if not func.is_kernel:
+        return true
+    gpu_backend_accepts_kernel_metadata(kind, func.gpu_target, func.gpu_backend_order)
+
+fn gpu_backend_supports_target(kind: BackendKind, target: CodegenTarget) -> bool:
+    if kind == BackendKind.Cuda:
+        return target == CodegenTarget.CudaPtx
+    if kind == BackendKind.Hip:
+        return target == CodegenTarget.HipHsaco
+    if kind == BackendKind.OpenCl:
+        return target == CodegenTarget.OpenClC or target == CodegenTarget.OpenClSpirv
+    if kind == BackendKind.Vulkan:
+        return target == CodegenTarget.VulkanSpirv
+    false
+
 fn gpu_backend_plan_module_kernels(kind: BackendKind, module: MirModule) -> GpuBackendKernelPlan:
     val backend_name = gpu_backend_metadata_name(kind)
     var accepted = 0
@@ -84,7 +100,7 @@ fn gpu_backend_plan_module_kernels(kind: BackendKind, module: MirModule) -> GpuB
     for symbol in module.functions.keys():
         val func: MirFunction = module.functions[symbol]
         if func.is_kernel:
-            if gpu_backend_accepts_kernel_metadata(kind, func.gpu_target, func.gpu_backend_order):
+            if gpu_backend_accepts_kernel(kind, func):
                 accepted = accepted + 1
             else:
                 rejected = rejected + 1

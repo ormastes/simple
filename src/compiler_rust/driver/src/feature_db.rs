@@ -476,9 +476,8 @@ fn parse_feature_db(doc: &SdnDocument) -> Result<FeatureDb, String> {
                 .unwrap_or_default(),
             modes: parse_modes(&row_map),
             platforms: parse_list_field(row_map.get("platforms")),
-            status: normalize_tracking_status(
-                row_map.get("status").map(String::as_str).unwrap_or("request")
-            ).to_string(),
+            status: normalize_tracking_status(row_map.get("status").map(String::as_str).unwrap_or("request"))
+                .to_string(),
             valid: parse_bool_field(row_map.get("valid")).unwrap_or(true),
         };
         db.records.insert(id, record);
@@ -497,8 +496,20 @@ pub fn generate_feature_docs(db: &FeatureDb, output_dir: &Path) -> Result<(), St
     generate_feature_index(output_dir, &records, &last_id)?;
     generate_group_docs(output_dir, &records)?;
     generate_pending_features(output_dir, &records)?;
-    generate_status_features(output_dir, &records, "request", "Requested Features", "request_feature.md")?;
-    generate_status_features(output_dir, &records, "current", "Current Features", "current_feature.md")?;
+    generate_status_features(
+        output_dir,
+        &records,
+        "request",
+        "Requested Features",
+        "request_feature.md",
+    )?;
+    generate_status_features(
+        output_dir,
+        &records,
+        "current",
+        "Current Features",
+        "current_feature.md",
+    )?;
     generate_status_features(output_dir, &records, "done", "Done Features", "done_feature.md")?;
 
     Ok(())

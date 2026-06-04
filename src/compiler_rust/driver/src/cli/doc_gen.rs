@@ -32,6 +32,32 @@ const TRACKING_TODO_DB: &str = "doc/08_tracking/todo/todo_db.sdn";
 
 /// Run feature-gen command
 pub fn run_feature_gen(args: &[String]) -> i32 {
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        println!("Usage: simple feature-gen [options]");
+        println!();
+        println!("Options:");
+        println!("  --log-mode=<human|json>  Output mode");
+        println!("  --progress=<summary|dot> Progress rendering");
+        println!("  --json                   Output JSON summary");
+        println!("  --db <path>              Input database file");
+        println!("  -o, --output <path>      Output directory");
+        return 0;
+    }
+    let log_mode = parse_log_mode(args);
+    if let Err(message) = &log_mode {
+        eprintln!("{}", message);
+        return 1;
+    }
+    let log_mode = log_mode.unwrap();
+    let progress = parse_named_arg(args, "progress").unwrap_or_else(|| {
+        if args.iter().any(|arg| arg == "--dots") {
+            "dot".to_string()
+        } else {
+            "summary".to_string()
+        }
+    });
+    let as_json = log_mode == "json" || args.iter().any(|arg| arg == "--json");
+
     let db_path = args
         .iter()
         .position(|a| a == "--db")
@@ -46,27 +72,47 @@ pub fn run_feature_gen(args: &[String]) -> i32 {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("doc/08_tracking/feature"));
 
-    println!("Generating feature docs from {}...", db_path.display());
+    if !as_json && progress != "dot" {
+        println!("Generating feature docs from {}...", db_path.display());
+    }
 
     let db = match load_feature_db(&db_path) {
         Ok(db) => db,
         Err(e) => {
-            eprintln!("error: failed to load feature db: {}", e);
+            if as_json {
+                println!("{{\"command\":\"feature-gen\",\"status\":\"error\",\"features\":0}}");
+            } else {
+                eprintln!("error: failed to load feature db: {}", e);
+            }
             return 1;
         }
     };
 
     if let Err(e) = generate_feature_docs(&db, &output_dir) {
-        eprintln!("error: failed to generate docs: {}", e);
+        if as_json {
+            println!("{{\"command\":\"feature-gen\",\"status\":\"error\",\"features\":0}}");
+        } else {
+            eprintln!("error: failed to generate docs: {}", e);
+        }
         return 1;
     }
 
     let count = db.records.values().filter(|r| r.valid).count();
-    println!("Generated docs for {} features", count);
-    println!("  -> {}/feature.md", output_dir.display());
-    println!("  -> {}/request_feature.md", output_dir.display());
-    println!("  -> {}/current_feature.md", output_dir.display());
-    println!("  -> {}/done_feature.md", output_dir.display());
+    if as_json {
+        println!(
+            "{{\"command\":\"feature-gen\",\"status\":\"ok\",\"features\":{}}}",
+            count
+        );
+    } else if progress == "dot" {
+        println!(".");
+        println!("Done. Generated tracking docs for {} features", count);
+    } else {
+        println!("Generated docs for {} features", count);
+        println!("  -> {}/feature.md", output_dir.display());
+        println!("  -> {}/request_feature.md", output_dir.display());
+        println!("  -> {}/current_feature.md", output_dir.display());
+        println!("  -> {}/done_feature.md", output_dir.display());
+    }
 
     0
 }
@@ -103,16 +149,32 @@ pub fn run_tracking(args: &[String]) -> i32 {
                 println!("| Kind | Database | Rows | External mapping |");
                 println!("|------|----------|------|------------------|");
                 if kind == "all" || kind == "feature" {
-                    println!("| feature | `{}` | {} | GitHub issue/project fields via external_* columns |", TRACKING_FEATURE_DB, count_table_rows(TRACKING_FEATURE_DB, "features"));
+                    println!(
+                        "| feature | `{}` | {} | GitHub issue/project fields via external_* columns |",
+                        TRACKING_FEATURE_DB,
+                        count_table_rows(TRACKING_FEATURE_DB, "features")
+                    );
                 }
                 if kind == "all" || kind == "bug" {
-                    println!("| bug | `{}` | {} | GitHub issue labels severity/status |", TRACKING_BUG_DB, count_table_rows(TRACKING_BUG_DB, "bugs") + count_table_rows(TRACKING_BUG_DB, "bugs_active"));
+                    println!(
+                        "| bug | `{}` | {} | GitHub issue labels severity/status |",
+                        TRACKING_BUG_DB,
+                        count_table_rows(TRACKING_BUG_DB, "bugs") + count_table_rows(TRACKING_BUG_DB, "bugs_active")
+                    );
                 }
                 if kind == "all" || kind == "task" {
-                    println!("| task | `{}` | {} | GitHub issue or project item |", TRACKING_TASK_DB, count_table_rows(TRACKING_TASK_DB, "tasks"));
+                    println!(
+                        "| task | `{}` | {} | GitHub issue or project item |",
+                        TRACKING_TASK_DB,
+                        count_table_rows(TRACKING_TASK_DB, "tasks")
+                    );
                 }
                 if kind == "all" || kind == "todo" {
-                    println!("| todo | `{}` | {} | GitHub issue only when linked |", TRACKING_TODO_DB, count_table_rows(TRACKING_TODO_DB, "todos"));
+                    println!(
+                        "| todo | `{}` | {} | GitHub issue only when linked |",
+                        TRACKING_TODO_DB,
+                        count_table_rows(TRACKING_TODO_DB, "todos")
+                    );
                 }
             }
             0
@@ -125,7 +187,9 @@ pub fn run_tracking(args: &[String]) -> i32 {
         "sync" => {
             println!("tracking sync: explicit GitHub/task-system sync entrypoint");
             println!("target={} kind={}", target, kind);
-            println!("Local DB rows remain source-of-truth for offline work; external IDs are stored in external_* columns.");
+            println!(
+                "Local DB rows remain source-of-truth for offline work; external IDs are stored in external_* columns."
+            );
             0
         }
         "check" => {
@@ -138,7 +202,10 @@ pub fn run_tracking(args: &[String]) -> i32 {
                 println!("tracking: clean");
                 0
             } else {
-                eprintln!("tracking: {} done feature(s) missing required pipeline artifacts", issues);
+                eprintln!(
+                    "tracking: {} done feature(s) missing required pipeline artifacts",
+                    issues
+                );
                 1
             }
         }
@@ -171,7 +238,10 @@ pub fn run_check_dbs(args: &[String]) -> i32 {
     if strict {
         let feature_issues = count_done_traceability_issues(TRACKING_FEATURE_DB);
         if feature_issues > 0 {
-            eprintln!("check-dbs: {} done feature(s) missing required pipeline artifacts", feature_issues);
+            eprintln!(
+                "check-dbs: {} done feature(s) missing required pipeline artifacts",
+                feature_issues
+            );
             issues += feature_issues;
         }
     }
@@ -218,6 +288,20 @@ fn parse_named_arg(args: &[String], name: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn parse_log_mode(args: &[String]) -> Result<String, String> {
+    let mode = parse_named_arg(args, "log-mode").unwrap_or_else(|| {
+        if args.iter().any(|arg| arg == "--json") {
+            "json".to_string()
+        } else {
+            "human".to_string()
+        }
+    });
+    match mode.as_str() {
+        "human" | "json" | "llm" | "quiet" => Ok(mode),
+        other => Err(format!("invalid log mode: {}", other)),
+    }
 }
 
 fn count_table_rows(path: &str, table_name: &str) -> usize {
@@ -297,7 +381,11 @@ fn count_done_traceability_issues(path: &str) -> usize {
         _ => None,
     };
     let (fields, rows) = match table {
-        Some(SdnValue::Table { fields: Some(fields), rows, .. }) => (fields, rows),
+        Some(SdnValue::Table {
+            fields: Some(fields),
+            rows,
+            ..
+        }) => (fields, rows),
         _ => return 1,
     };
     let required = [
@@ -324,7 +412,10 @@ fn count_done_traceability_issues(path: &str) -> usize {
         if map.get("status").map(|v| v.as_str()) != Some("done") {
             continue;
         }
-        if required.iter().any(|field| is_blank_tracking_value(map.get(field).map(|s| s.as_str()).unwrap_or(""))) {
+        if required
+            .iter()
+            .any(|field| is_blank_tracking_value(map.get(field).map(|s| s.as_str()).unwrap_or("")))
+        {
             issues += 1;
         }
     }

@@ -112,6 +112,7 @@ class SimpleWindowManager {
     this._screenCaptureMode = 'selection';
     this._quickSettings = null;
     this._quickSettingsActiveIndex = 0;
+    this._quickSettingsFeedbackTimers = new Map();
     this._notificationCenter = null;
     this._notificationFilter = 'all';
     this._notificationCenterActiveIndex = 0;
@@ -184,6 +185,7 @@ class SimpleWindowManager {
     this._taskbarPreview = null;
     this._taskbarPreviewHideTimer = 0;
     this._launchFeedbackTimers = new Map();
+    this._widgetActionFeedbackTimers = new WeakMap();
     this._wmTooltip = null;
     this._wmTooltipAnchor = null;
     this._windowContextMenu = null;
@@ -191,6 +193,7 @@ class SimpleWindowManager {
     this._titleCommandSuggestionsPanel = null;
     this._titleCommandSuggestionItems = [];
     this._titleCommandSuggestionIndex = 0;
+    this._titleCommandSuggestionFeedbackTimer = 0;
     this._desktopBackdropPointer = { x: 50, y: 50 };
     this._desktopBackdropPointerRaf = 0;
     this._appLauncher = null;
@@ -2155,6 +2158,7 @@ class SimpleWindowManager {
 
   _pinDesktopWidget(widget) {
     widget.classList.toggle('pinned');
+    this._markDesktopWidgetAction(widget, widget.classList.contains('pinned') ? 'pin' : 'unpin');
     this._sendWindowCmd('widget_pin', {
       widget_kind: widget.dataset.widgetKind || 'widget',
       pinned: widget.classList.contains('pinned')
@@ -2165,11 +2169,29 @@ class SimpleWindowManager {
   _removeDesktopWidget(widget) {
     const kind = widget.dataset.widgetKind || 'widget';
     widget.classList.add('removing');
+    this._markDesktopWidgetAction(widget, 'remove');
     this._sendWindowCmd('widget_remove', { widget_kind: kind });
     window.setTimeout(() => {
       if (widget.isConnected) widget.remove();
     }, this._normalizeMotionPreference(this._readMotionPreference()) === 'off' ? 0 : 160);
     return true;
+  }
+
+  _markDesktopWidgetAction(widget, action = '') {
+    if (!widget) return;
+    const kind = String(action || 'update').trim() || 'update';
+    const prior = this._widgetActionFeedbackTimers.get(widget);
+    if (prior) window.clearTimeout(prior);
+    widget.classList.remove('action-feedback');
+    void widget.offsetWidth;
+    widget.classList.add('action-feedback');
+    widget.dataset.widgetFeedback = kind;
+    const timer = window.setTimeout(() => {
+      widget.classList.remove('action-feedback');
+      if (widget.dataset.widgetFeedback === kind) delete widget.dataset.widgetFeedback;
+      this._widgetActionFeedbackTimers.delete(widget);
+    }, 520);
+    this._widgetActionFeedbackTimers.set(widget, timer);
   }
 
   _desktopClockLabel() {
@@ -3461,6 +3483,7 @@ class SimpleWindowManager {
     this._sendWindowCmd('quick_setting_level', { setting: id, level: value });
     this._showSystemHud(id === 'audio' ? 'Audio' : 'Brightness', `${value}%`, 900);
     this._updateQuickSettingLevelDom(id, value);
+    this._markQuickSettingFeedback(id, 'level');
   }
 
   _updateQuickSettingLevelDom(settingId, value) {
@@ -3482,10 +3505,40 @@ class SimpleWindowManager {
     if (!id) return;
     if (id === 'focus') {
       this._toggleFocusMode();
+      this._markQuickSettingFeedback(id, 'toggle');
       return;
     }
     this._sendWindowCmd('quick_setting', { setting: id });
     this._showSystemHud('Quick setting', id, 1600);
+    this._markQuickSettingFeedback(id, 'toggle');
+  }
+
+  _markQuickSettingFeedback(settingId, feedback) {
+    if (!this._quickSettings || !this._quickSettings.isConnected) return;
+    const id = String(settingId || '');
+    if (!id) return;
+    const value = String(feedback || 'toggle');
+    const key = `${id}:${value}`;
+    const existing = this._quickSettingsFeedbackTimers.get(key);
+    if (existing) clearTimeout(existing);
+    const targets = [
+      ...this._quickSettings.querySelectorAll(`.wm-quick-setting[data-setting="${id}"]`),
+      ...this._quickSettings.querySelectorAll(`.wm-quick-slider-row[data-setting="${id}"]`)
+    ];
+    for (const target of targets) {
+      target.classList.remove('changed');
+      void target.offsetWidth;
+      target.classList.add('changed');
+      target.dataset.quickFeedback = value;
+    }
+    const timer = setTimeout(() => {
+      for (const target of targets) {
+        target.classList.remove('changed');
+        delete target.dataset.quickFeedback;
+      }
+      this._quickSettingsFeedbackTimers.delete(key);
+    }, 520);
+    this._quickSettingsFeedbackTimers.set(key, timer);
   }
 
   _moveQuickSettingsSelection(delta) {
@@ -4044,7 +4097,9 @@ class SimpleWindowManager {
   _showResizeHud(width, height, direction = '') {
     const hud = this._ensureResizeHud();
     hud.hidden = false;
-    hud.dataset.resizeDirection = String(direction || '');
+    const resizeDirection = String(direction || '');
+    hud.dataset.resizeDirection = resizeDirection;
+    hud.dataset.resizeFeedback = resizeDirection ? 'directional' : 'size-only';
     hud.innerHTML = '';
     const label = document.createElement('span');
     label.className = 'wm-resize-hud-label';
@@ -9983,17 +10038,23 @@ class SimpleWindowManager {
     shelf.classList.remove('collapsed');
     const widgetKind = String(kind || '').trim().toLowerCase();
     if (widgetKind === 'clock') {
-      shelf.appendChild(this._makeDesktopWidget('wm-widget-clock', 'Local', this._desktopClockLabel(), 'Clock'));
+      const widget = this._makeDesktopWidget('wm-widget-clock', 'Local', this._desktopClockLabel(), 'Clock');
+      shelf.appendChild(widget);
+      this._markDesktopWidgetAction(widget, 'add');
       this._sendWindowCmd('widget_add', { widget_kind: widgetKind });
       return true;
     }
     if (widgetKind === 'system') {
-      shelf.appendChild(this._makeDesktopWidget('wm-widget-system', 'Motion', this._normalizeMotionPreference(this._readMotionPreference()), 'Settings'));
+      const widget = this._makeDesktopWidget('wm-widget-system', 'Motion', this._normalizeMotionPreference(this._readMotionPreference()), 'Settings');
+      shelf.appendChild(widget);
+      this._markDesktopWidgetAction(widget, 'add');
       this._sendWindowCmd('widget_add', { widget_kind: widgetKind });
       return true;
     }
     if (widgetKind === 'workspace') {
-      shelf.appendChild(this._makeDesktopWidget('wm-widget-workspace', 'Workspace', 'Simple WM', 'wallpaper: ' + this._normalizeWallpaperPreference(this._readWallpaperPreference())));
+      const widget = this._makeDesktopWidget('wm-widget-workspace', 'Workspace', 'Simple WM', 'wallpaper: ' + this._normalizeWallpaperPreference(this._readWallpaperPreference()));
+      shelf.appendChild(widget);
+      this._markDesktopWidgetAction(widget, 'add');
       this._sendWindowCmd('widget_add', { widget_kind: widgetKind });
       return true;
     }
@@ -10659,6 +10720,8 @@ class SimpleWindowManager {
     panel.innerHTML = '';
     this._titleCommandSuggestionItems = suggestions;
     this._titleCommandSuggestionIndex = 0;
+    panel.dataset.activeSuggestionIndex = '0';
+    panel.dataset.activeSuggestionKind = suggestions[0]?.kind || commandKind;
     const rect = input.getBoundingClientRect();
     panel.style.left = `${Math.round(rect.left)}px`;
     panel.style.top = `${Math.round(rect.bottom + 6)}px`;
@@ -10668,9 +10731,10 @@ class SimpleWindowManager {
     suggestions.forEach((suggestion, index) => {
       const item = document.createElement('button');
       item.type = 'button';
-      item.className = 'wm-title-suggestion-item' + (index === 0 ? ' active' : '');
+      item.className = 'wm-title-suggestion-item' + (index === 0 ? ' active previewed' : '');
       item.dataset.value = suggestion.value;
       item.dataset.commandKind = suggestion.kind;
+      item.dataset.suggestionFeedback = index === 0 ? 'previewed' : 'idle';
       item.setAttribute('role', 'option');
       item.setAttribute('aria-selected', index === 0 ? 'true' : 'false');
       const label = document.createElement('span');
@@ -10683,6 +10747,7 @@ class SimpleWindowManager {
       item.appendChild(meta);
       panel.appendChild(item);
     });
+    this._syncTitleCommandSuggestionPreview(panel, Array.from(panel.querySelectorAll('.wm-title-suggestion-item')));
     panel.hidden = false;
   }
 
@@ -10777,12 +10842,24 @@ class SimpleWindowManager {
     const items = Array.from(panel.querySelectorAll('.wm-title-suggestion-item'));
     if (items.length === 0) return false;
     this._titleCommandSuggestionIndex = (this._titleCommandSuggestionIndex + delta + items.length) % items.length;
+    this._syncTitleCommandSuggestionPreview(panel, items);
+    return true;
+  }
+
+  _syncTitleCommandSuggestionPreview(panel, items) {
     items.forEach((item, index) => {
       const active = index === this._titleCommandSuggestionIndex;
       item.classList.toggle('active', active);
+      item.classList.toggle('previewed', active);
+      if (!item.classList.contains('accepted')) item.dataset.suggestionFeedback = active ? 'previewed' : 'idle';
       item.setAttribute('aria-selected', active ? 'true' : 'false');
     });
-    return true;
+    const active = items[this._titleCommandSuggestionIndex] || null;
+    if (panel) {
+      panel.dataset.activeSuggestionIndex = String(this._titleCommandSuggestionIndex);
+      panel.dataset.activeSuggestionKind = active?.dataset?.commandKind || '';
+      panel.dataset.activeSuggestionValue = active?.dataset?.value || '';
+    }
   }
 
   _executeTitleCommandSuggestion() {
@@ -10795,9 +10872,42 @@ class SimpleWindowManager {
   _applyTitleCommandSuggestion(value) {
     const input = document.activeElement?.classList?.contains('wm-title-input') ? document.activeElement : this.desktop?.querySelector('.wm-window.focused .wm-title-input');
     if (!input) return false;
+    const panel = this._titleCommandSuggestionsPanel;
+    const active = panel && !panel.hidden ? panel.querySelector('.wm-title-suggestion-item.active') : null;
+    const kind = active?.dataset?.commandKind || this._titleCommandKind(value);
+    this._markTitleCommandSuggestionAccepted(active, input, kind, value);
     input.value = value;
     this._submitTitleCommandInput(input);
     return true;
+  }
+
+  _markTitleCommandSuggestionAccepted(item, input, kind, value) {
+    if (this._titleCommandSuggestionFeedbackTimer) clearTimeout(this._titleCommandSuggestionFeedbackTimer);
+    const winEl = input?.closest?.('.wm-window');
+    const feedbackKind = String(kind || this._titleCommandKind(value || input?.value || '') || 'command');
+    if (item) {
+      item.classList.add('accepted');
+      item.dataset.suggestionFeedback = 'accepted';
+    }
+    if (this._titleCommandSuggestionsPanel) this._titleCommandSuggestionsPanel.dataset.suggestionFeedback = 'accepted';
+    if (input) {
+      input.dataset.acceptedSuggestionKind = feedbackKind;
+      input.dataset.acceptedSuggestionValue = String(value || '');
+    }
+    if (winEl) winEl.dataset.titleSuggestionFeedback = feedbackKind;
+    this._titleCommandSuggestionFeedbackTimer = window.setTimeout(() => {
+      if (item) {
+        item.classList.remove('accepted');
+        if (item.classList.contains('active')) item.dataset.suggestionFeedback = 'previewed';
+      }
+      if (this._titleCommandSuggestionsPanel?.dataset?.suggestionFeedback === 'accepted') delete this._titleCommandSuggestionsPanel.dataset.suggestionFeedback;
+      if (input?.dataset?.acceptedSuggestionKind === feedbackKind) {
+        delete input.dataset.acceptedSuggestionKind;
+        delete input.dataset.acceptedSuggestionValue;
+      }
+      if (winEl?.dataset?.titleSuggestionFeedback === feedbackKind) delete winEl.dataset.titleSuggestionFeedback;
+      this._titleCommandSuggestionFeedbackTimer = 0;
+    }, 560);
   }
 
   _makeTitleInput(payload) {
@@ -11095,6 +11205,10 @@ class SimpleWindowManager {
       this.dragState = null;
     }
     if (this.resizeState && this.resizeState.ghostEl) {
+      if (this.resizeState.winEl) {
+        this.resizeState.winEl.dataset.resizeActive = 'false';
+        delete this.resizeState.winEl.dataset.resizeDirection;
+      }
       this.resizeState.ghostEl.remove();
       clearTimeout(this.resizeState.timer);
       this.resizeState = null;
@@ -11714,6 +11828,12 @@ class SimpleWindowManager {
     const ghost = isElectronWindow ? null : this._createGhost(winEl);
     const r = winEl.getBoundingClientRect();
     winEl.dataset.resizeActive = 'true';
+    winEl.dataset.resizeDirection = String(direction || '');
+    if (ghost) {
+      ghost.dataset.resizeFeedback = 'directional';
+      ghost.dataset.resizeDirection = String(direction || '');
+      ghost.classList.add('resize-active');
+    }
     this.resizeState = {
       surfaceId, ghostEl: ghost, timer: null, direction, isElectronWindow,
       startX: e.clientX, startY: e.clientY,
@@ -11766,6 +11886,7 @@ class SimpleWindowManager {
         }
         rs.ghostEl.style.width  = w + 'px';
         rs.ghostEl.style.height = h + 'px';
+        rs.ghostEl.dataset.resizeDirection = dir;
       }
       this._showResizeHud(w, h, dir);
     }
@@ -11842,7 +11963,10 @@ class SimpleWindowManager {
         h: Math.round(h)
       });
       if (rs.ghostEl) rs.ghostEl.remove();
-      if (rs.winEl) rs.winEl.dataset.resizeActive = 'false';
+      if (rs.winEl) {
+        rs.winEl.dataset.resizeActive = 'false';
+        delete rs.winEl.dataset.resizeDirection;
+      }
       clearTimeout(rs.timer);
       this.resizeState = null;
       this._hideResizeHud(900);

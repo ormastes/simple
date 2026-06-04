@@ -15,6 +15,12 @@
 # - No async/await, no spawn, no actors
 # - No exceptions (no throw/try-catch)
 
+use compiler.common.gpu_target_metadata.{
+    normalize_gpu_target_metadata_name,
+    gpu_target_metadata_backend_order_for_target,
+    gpu_target_metadata_is_supported_backend_name
+}
+
 # ============================================================================
 # GPU Check Error
 # ============================================================================
@@ -55,7 +61,7 @@ impl GpuCheckError:
             case StringOperation(detail, line):
                 "GPU kernel error (line {line}): string operations not allowed in GPU kernels: {detail}"
             case InvalidTarget(target, line):
-                "GPU kernel error (line {line}): unsupported GPU target '{target}' (supported: auto, cuda, hip/rocm, opencl)"
+                "GPU kernel error (line {line}): unsupported GPU target '{target}' (supported: auto, cuda, hip/rocm, opencl, vulkan)"
             case UnsupportedFeature(detail, line):
                 "GPU kernel error (line {line}): {detail}"
 
@@ -89,6 +95,7 @@ enum GpuKernelTarget:
     Cuda
     Hip
     OpenCl
+    Vulkan
 
 class GpuKernelTargetSelection:
     target: GpuKernelTarget
@@ -115,34 +122,26 @@ fn gpu_kernel_target_name(target: GpuKernelTarget) -> text:
         case Cuda: "cuda"
         case Hip: "hip"
         case OpenCl: "opencl"
+        case Vulkan: "vulkan"
 
 fn normalize_gpu_target_name(name: text) -> text:
-    val lower = name.trim().lower()
-    if lower == "" or lower == "default":
-        return "auto"
-    if lower == "auto":
-        return "auto"
-    if lower == "cuda" or lower == "ptx" or lower == "nvptx":
-        return "cuda"
-    if lower == "hip" or lower == "hip-cpp" or lower == "hsaco" or lower == "rocm":
-        return "hip"
-    if lower == "opencl" or lower == "opencl-c" or lower == "opencl-spirv" or lower == "cl":
-        return "opencl"
-    lower
+    normalize_gpu_target_metadata_name(name)
 
 fn is_supported_gpu_target_name(normalized: text) -> bool:
-    normalized == "cuda" or normalized == "hip" or normalized == "opencl" or normalized == "auto"
+    gpu_target_metadata_is_supported_backend_name(normalized)
 
 fn parse_gpu_kernel_target(target_name: text) -> GpuKernelTargetSelection:
     val normalized = normalize_gpu_target_name(target_name)
     if normalized == "auto":
-        return GpuKernelTargetSelection.create(GpuKernelTarget.Auto, "auto", "cuda,opencl", true, "ready")
+        return GpuKernelTargetSelection.create(GpuKernelTarget.Auto, "auto", gpu_target_metadata_backend_order_for_target("auto"), true, "ready")
     if normalized == "cuda":
-        return GpuKernelTargetSelection.create(GpuKernelTarget.Cuda, "cuda", "cuda", true, "ready")
+        return GpuKernelTargetSelection.create(GpuKernelTarget.Cuda, "cuda", gpu_target_metadata_backend_order_for_target("cuda"), true, "ready")
     if normalized == "hip":
-        return GpuKernelTargetSelection.create(GpuKernelTarget.Hip, "hip", "hip", true, "ready")
+        return GpuKernelTargetSelection.create(GpuKernelTarget.Hip, "hip", gpu_target_metadata_backend_order_for_target("hip"), true, "ready")
     if normalized == "opencl":
-        return GpuKernelTargetSelection.create(GpuKernelTarget.OpenCl, "opencl", "opencl", true, "ready")
+        return GpuKernelTargetSelection.create(GpuKernelTarget.OpenCl, "opencl", gpu_target_metadata_backend_order_for_target("opencl"), true, "ready")
+    if normalized == "vulkan":
+        return GpuKernelTargetSelection.create(GpuKernelTarget.Vulkan, "vulkan", gpu_target_metadata_backend_order_for_target("vulkan"), true, "ready")
     GpuKernelTargetSelection.create(GpuKernelTarget.Auto, normalized, "", false, "unsupported-gpu-target")
 
 fn validate_gpu_backend_order(backends: text) -> GpuCheckError?:

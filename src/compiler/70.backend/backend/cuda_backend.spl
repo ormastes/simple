@@ -7,7 +7,7 @@ use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
 use compiler.backend.backend_api.*
 use compiler.backend.backend.backend_types.{compileerror_backend_error}
-use compiler.backend.gpu_backend_metadata.{GpuBackendKernelPlan, gpu_backend_accepts_kernel_metadata, gpu_backend_plan_module_kernels}
+use compiler.backend.gpu_backend_metadata.{GpuBackendKernelPlan, gpu_backend_accepts_kernel, gpu_backend_plan_module_kernels, gpu_backend_supports_target}
 use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
 use compiler.backend.gpu_codegen_types.{GpuCodegen, GpuBarrierScope}
 use compiler.backend.cuda_type_mapper.CudaTypeMapper
@@ -50,7 +50,7 @@ class CudaBackend:
             type_mapper: CudaTypeMapper.create_sm(compute_cap.0, compute_cap.1),
             compute_capability: compute_cap,
             options: CompileOptions.default_options()
-                .with_target(CodegenTarget.CudaPtx(compute_cap))
+                .with_target(CodegenTarget.CudaPtx)
         )
 
     static fn create_with_options(compute_cap: (i64, i64), opts: CompileOptions) -> CudaBackend:
@@ -63,14 +63,12 @@ class CudaBackend:
 
     static fn for_target(target: CodegenTarget) -> Result<CudaBackend, CompileError>:
         """Create CUDA backend from target."""
-        match target.cuda_compute_capability():
-            case Some(cap):
-                Ok(CudaBackend.create(cap))
-            case nil:
-                Err(compileerror_backend_error(
-                    BackendKind.Cuda,
-                    "Target is not a CUDA target"
-                ))
+        if target == CodegenTarget.CudaPtx:
+            return Ok(CudaBackend.create((8, 6)))
+        Err(compileerror_backend_error(
+            BackendKind.Cuda,
+            "Target is not a CUDA target"
+        ))
 
     me compile(module: MirModule) -> Result<CudaCompiledModule, CompileError>:
         """Compile MIR module to PTX."""
@@ -181,9 +179,7 @@ class CudaBackend:
         false
 
     static fn accepts_gpu_kernel(func: MirFunction) -> bool:
-        if not func.is_kernel:
-            return true
-        gpu_backend_accepts_kernel_metadata(BackendKind.Cuda, func.gpu_target, func.gpu_backend_order)
+        gpu_backend_accepts_kernel(BackendKind.Cuda, func)
 
     static fn accepts_gpu_kernel_target(func: MirFunction) -> bool:
         CudaBackend.accepts_gpu_kernel(func)
@@ -723,7 +719,7 @@ impl Codegen for CudaBackend:
     fn backend_kind() -> BackendKind: BackendKind.Cuda
     fn backend_name() -> text: "cuda"
     fn supports_target(target: CodegenTarget) -> bool:
-        target == CodegenTarget.CudaPtx
+        gpu_backend_supports_target(BackendKind.Cuda, target)
     fn output_kind() -> CodegenOutputKind: CodegenOutputKind.GpuCode
 
     me compile_module(module: MirModule) -> Result<CodegenOutput, CompileError>:
