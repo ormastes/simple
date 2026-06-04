@@ -22,7 +22,4 @@ features |id, group, device, component, title, description, status, priority, so
 Before setting `status=done`, fill:
 
 `requirement`, `research`, `plan`, `architecture`, `design`, `system_spec`,
-`spec_doc`, and `implementation`.
-
-Fill `unit_tests`, `integration_tests`, and `guide` when the feature scope
-requires them.
+`spec_doc`, `implementation`, `unit_tests`, `integration_tests`, and `guide`.

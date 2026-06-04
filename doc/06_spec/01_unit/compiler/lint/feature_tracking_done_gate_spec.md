@@ -1,6 +1,6 @@
-# Feature Tracking Done Gate Specification
+# feature_tracking_done_gate_spec
 
-> <details>
+> Feature tracking done-gate lint coverage.
 
 <!-- sdn-diagram:id=feature_tracking_done_gate_spec.arch -->
 <details class="sdn-source">
@@ -27,16 +27,31 @@ feature_tracking_done_gate_spec -> compiler
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Feature Tracking Done Gate Specification
+# feature_tracking_done_gate_spec
+
+Feature tracking done-gate lint coverage.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Compiler |
+| Status | Active |
+| Source | `test/01_unit/compiler/lint/feature_tracking_done_gate_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+Feature tracking done-gate lint coverage.
 
 ## Scenarios
 
 ### feature tracking done gate lint
+_Verifies traceability enforcement for canonical feature_db.sdn rows._
 
 #### flags done feature rows missing traceability evidence
 
@@ -52,6 +67,23 @@ val source = feature_tracking_header() +
 
 expect(count_feature_tracking_lint(source, "TRK001")).to_equal(1)
 expect(count_feature_tracking_lint_with_level(source, "TRK001", LintLevel.Deny)).to_equal(1)
+```
+
+</details>
+
+#### flags done feature rows missing unit, integration, and guide evidence
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val source = feature_tracking_header() +
+    "    \"FR-TRACK-005\",core,device,component,\"Done without tests\",\"Missing final evidence\",done,P1,doc/08_tracking/feature/source.md,doc/02_requirements/feature/good.md,doc/01_research/local/good.md,doc/03_plan/good.md,doc/04_architecture/good.md,doc/05_design/good.md,test/03_system/app/good_spec.spl,doc/06_spec/system/app/good_spec.md,src/app/good/main.spl,none,none,none,github,123,https://example.invalid/123,2026-06-04,2026-06-04,2026-06-04,true\n"
+
+expect(count_feature_tracking_lint(source, "TRK001")).to_equal(1)
 ```
 
 </details>
@@ -107,27 +139,12 @@ expect(count_feature_tracking_lint(source, "TRK001")).to_equal(0)
 
 </details>
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Compiler |
-| Status | Active |
-| Source | `test/01_unit/compiler/lint/feature_tracking_done_gate_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- feature tracking done gate lint
-
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
