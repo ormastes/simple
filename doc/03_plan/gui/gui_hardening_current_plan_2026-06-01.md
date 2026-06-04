@@ -5676,8 +5676,8 @@ Detailed completion checklist:
 - [x] Run required shared-runtime checks for `src/compiler`, `src/lib`, MCP, LSP,
   and MCP stdio.
 - [x] Run final diff hygiene and executable-spec layout guards.
-- [ ] Commit only the `toSorted` runtime/spec/manual/plan update.
-- [ ] Fetch/rebase with file-count guard and push `HEAD:main` with
+- [x] Commit only the `toSorted` runtime/spec/manual/plan update.
+- [x] Fetch/rebase with file-count guard and push `HEAD:main` with
   `GITHUB_TOKEN` unset.
 
 Detailed test checklist:
@@ -5705,7 +5705,9 @@ chain spec now passes `240/240`, and the generated manual records
 `Total scenarios | 240 |`. Adjacent regressions passed at `107/107`, `106/106`,
 and `275/275`. Shared runtime checks passed for `src/compiler`, `src/lib`, MCP,
 LSP MCP, and MCP stdio with the current warning profiles unchanged. Broader
-typed-array prototype parity and production GUI pixel parity remain open.
+typed-array prototype parity and production GUI pixel parity remain open. Final
+sync guards passed with file count stable at `78091`, and the runtime/spec
+continuation was pushed to `origin/main` as `6718fa7d1c`.
 
 BrowserSession Uint8Array prototype slice copied-buffer continuation:
 
