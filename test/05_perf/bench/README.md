@@ -137,11 +137,11 @@ stub warnings before use; an earlier stale hosted runtime bundle stubbed
 ## Submodule Import Limitation
 
 `examples/nvfs` and `examples/spostgre` are separate git submodules. Their
-packages are not resolvable via `use examples.nvfs.*` from main-repo
+packages are not resolvable via `use os.services.nvfs.*` from main-repo
 `bin/simple run`. NVFS and WAL scenarios run against local shims that mirror
 the real API exactly:
 
-- **FR-BENCH-NVFS-001:** wire real `use examples.nvfs.src.core.arena.*` once
+- **FR-BENCH-NVFS-001:** wire real `use os.services.nvfs.core.arena.*` once
   submodule import resolution is supported in the bench runner.
 - **FR-BENCH-WAL-001:** wire real `use examples.spostgre.src.engine.wal.*`
   similarly.

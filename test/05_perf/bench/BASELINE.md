@@ -62,7 +62,7 @@ No numbers recorded. Reduction to ITER=10 outer recommended for next run.
 - Struct field `namespace: Namespace` → `ns: Namespace` in both `src/driver/fs_driver_impl.spl`
   and `src/posix/fs_driver_impl.spl`
 - All `self.namespace.` accesses renamed to `self.ns.`
-- All three `use examples.nvfs.src.core.namespace.{...}` imports updated to `ns_tree`
+- All three `use os.services.nvfs.core.namespace.{...}` imports updated to `ns_tree`
 - Also fixed `case Aes128GcmResult.Ok(data: plaintext):` → positional pattern in `encryption.spl`
 
 Bench now loads past parse/compile; terminates via interpreter-bulk-buffer limit (expected).

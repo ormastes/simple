@@ -48,7 +48,7 @@ src/lib/nogc_sync_mut/fs/nvfs_posix/
     posix_ops.spl          # POSIX operation translation functions
 
 # Implementation body — NVFS submodule (compiled only when submodule is present)
-examples/11_advanced/nvfs/src/posix/
+src/os/services/nvfs/posix/
     cow_engine.spl         # COW shadow arena machinery
     truncate.spl           # ftruncate implementation
     mmap_emul.spl          # mmap MAP_SHARED emulation via page-fault shadow
@@ -374,7 +374,7 @@ There is no silent fallback from native to shim or vice versa.
 ## 11. COW shadow engine internals
 
 The COW shadow engine is the core mechanism behind `pwrite`, `ftruncate`, and
-`mmap MAP_SHARED` emulation. It lives in `examples/11_advanced/nvfs/src/posix/cow_engine.spl`.
+`mmap MAP_SHARED` emulation. It lives in `src/os/services/nvfs/posix/cow_engine.spl`.
 
 ### 11.1 Shadow arena lifecycle
 

@@ -86,6 +86,7 @@ class SimpleWindowManager {
     this._commandPaletteList = null;
     this._commandPaletteItems = [];
     this._commandPaletteActiveIndex = 0;
+    this._commandRecentFeedbackTimer = 0;
     this._snapPreview = null;
     this._snapLayoutPalette = null;
     this._windowArrangePalette = null;
@@ -1386,10 +1387,15 @@ class SimpleWindowManager {
     });
     input.addEventListener('keydown', (event) => this._handleCommandPaletteKeydown(event, false));
     list.addEventListener('click', (event) => {
-      const item = event.target.closest('.wm-command-item, .wm-command-recent');
+      const target = event.target && event.target.closest ? event.target : null;
+      const item = target ? target.closest('.wm-command-item, .wm-command-recent') : null;
       if (!item || !list.contains(item)) return;
       const index = Number(item.dataset.commandIndex || 0);
       this._commandPaletteActiveIndex = index;
+      if (item.classList.contains('wm-command-recent')) {
+        this._executeCommandPaletteRecent(index);
+        return;
+      }
       this._executeCommandPaletteAction();
     });
     list.addEventListener('keydown', (event) => this._handleCommandPaletteKeydown(event, true));
@@ -1475,6 +1481,7 @@ class SimpleWindowManager {
 
   _renderCommandPaletteItems() {
     if (!this._commandPaletteList) return;
+    this._clearCommandRecentFeedback();
     const query = String(this._commandPaletteInput?.value || '').trim().toLowerCase();
     const commands = this._commandPaletteCommands()
       .filter((command) => !query || command.label.toLowerCase().includes(query));
@@ -1533,6 +1540,7 @@ class SimpleWindowManager {
       chip.type = 'button';
       chip.className = 'wm-command-recent';
       chip.dataset.commandIndex = String(commands.indexOf(command));
+      chip.dataset.commandCategory = command.category || 'Commands';
       chip.setAttribute('aria-label', command.label);
       chip.appendChild(this._makeRoundIcon('wm-command-recent-icon', command.icon));
       const label = document.createElement('span');
@@ -1619,6 +1627,60 @@ class SimpleWindowManager {
     if (!command) return;
     command.action();
     this._toggleCommandPalette(false);
+  }
+
+  _executeCommandPaletteRecent(index) {
+    if (!this._commandPalette || this._commandPalette.hidden) return;
+    const command = this._commandPaletteItems[index];
+    if (!command) return;
+    this._commandPaletteActiveIndex = index;
+    this._markCommandRecentFeedback(index, command);
+    this._sendWindowCmd('command_palette_recent', {
+      command_label: command.label,
+      command_category: command.category || 'Commands'
+    });
+    window.setTimeout(() => {
+      if (!this._commandPalette || this._commandPalette.hidden) return;
+      command.action();
+      this._toggleCommandPalette(false);
+    }, 180);
+  }
+
+  _markCommandRecentFeedback(index, command) {
+    if (!this._commandPalette || !this._feedbackAllows('standard')) return;
+    window.clearTimeout(this._commandRecentFeedbackTimer);
+    this._clearCommandRecentFeedback();
+    const palette = this._commandPalette;
+    palette.dataset.commandRecentFeedback = 'activate';
+    palette.dataset.commandRecentIndex = String(index);
+    palette.classList.add('action-feedback');
+    const chip = palette.querySelector(`.wm-command-recent[data-command-index="${index}"]`);
+    if (chip) {
+      chip.dataset.commandFeedback = 'recent';
+      chip.classList.add('action-feedback');
+      chip.setAttribute('aria-label', `${command.label}, activated`);
+      const icon = chip.querySelector('.wm-command-recent-icon');
+      if (icon) icon.classList.add('action-feedback');
+    }
+    this._commandRecentFeedbackTimer = window.setTimeout(() => this._clearCommandRecentFeedback(), 560);
+  }
+
+  _clearCommandRecentFeedback() {
+    window.clearTimeout(this._commandRecentFeedbackTimer);
+    this._commandRecentFeedbackTimer = 0;
+    if (!this._commandPalette) return;
+    delete this._commandPalette.dataset.commandRecentFeedback;
+    delete this._commandPalette.dataset.commandRecentIndex;
+    this._commandPalette.classList.remove('action-feedback');
+    this._commandPalette.querySelectorAll('.wm-command-recent.action-feedback, .wm-command-recent-icon.action-feedback').forEach((node) => {
+      node.classList.remove('action-feedback');
+      if (node.dataset && node.dataset.commandFeedback) delete node.dataset.commandFeedback;
+      if (node.classList.contains('wm-command-recent')) {
+        const labelEl = Array.from(node.children).find((child) => child.tagName === 'SPAN' && !child.classList.contains('wm-command-recent-icon'));
+        const label = labelEl ? labelEl.textContent || '' : '';
+        if (label) node.setAttribute('aria-label', label);
+      }
+    });
   }
 
   _ensureShortcutOverlay() {

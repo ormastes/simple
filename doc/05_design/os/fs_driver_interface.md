@@ -530,7 +530,7 @@ Files touched: cleanup of `examples/09_embedded/simple_os/arch/x86_64/` and rela
 - NVFS mounts available alongside FAT32 mounts.
 - The POSIX shim mount enables legacy userspace tools to target NVFS without changes.
 
-Files touched: extend `mount_table.spl`; connect `examples/11_advanced/nvfs/` submodule to the
+Files touched: extend `mount_table.spl`; connect `src/os/services/nvfs/` submodule to the
 driver instance enum.
 
 ---
@@ -551,14 +551,14 @@ src/lib/nogc_sync_mut/fs/fat32/     # FAT32 driver impl — main repo
 
 src/lib/nogc_sync_mut/fs/nvfs_posix/  # POSIX shim contract — main repo
     posix_driver.spl               # NvfsPosixDriver implementing FsDriver
-    # (impl body in examples/11_advanced/nvfs/src/posix/ submodule)
+    # (impl body in src/os/services/nvfs/posix/ submodule)
 
 src/lib/nogc_async_mut/fs_driver/   # Async sibling trait — main repo
     async_driver.spl               # AsyncFsDriver trait
     async_mount_table.spl          # AsyncDriverInstance, async dispatch
 
 examples/09_embedded/simple_os/                # FAT32 implementation (existing, unchanged)
-examples/11_advanced/nvfs/                     # NVFS implementation (submodule)
+src/os/services/nvfs/                     # NVFS implementation (submodule)
     src/driver/                    # NvfsDriver impl
     src/posix/                     # NvfsPosixDriver impl body
 ```

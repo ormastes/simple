@@ -5,12 +5,67 @@
 
 fn extent_lookup_impl(object_id: i64, logical_off: i64) -> i64:
     """Return extent arena_id, -1 if no mapping."""
-    pass_todo
+    var i: i64 = 0
+    while i < _extent_rows.len() as i64:
+        val row = _extent_rows[i as i32]
+        if row.object_id == object_id and logical_off >= row.logical_off and logical_off < row.logical_off + row.length:
+            return row.arena_id
+        i = i + 1
+    -1
 
 fn extent_insert_impl(object_id: i64, logical_off: i64, arena_id: i64, phys_off: i64, length: i64, generation: i64) -> bool:
     """Insert one extent row."""
-    pass_todo
+    if object_id < 0 or logical_off < 0 or arena_id < 0 or phys_off < 0 or length <= 0:
+        return false
+    val row = NvfsExtentRow(
+        object_id: object_id,
+        logical_off: logical_off,
+        arena_id: arena_id,
+        phys_off: phys_off,
+        length: length,
+        generation: generation
+    )
+    var i: i64 = 0
+    while i < _extent_rows.len() as i64:
+        val old = _extent_rows[i as i32]
+        if old.object_id == object_id and old.logical_off == logical_off:
+            _extent_rows[i as i32] = row
+            return true
+        i = i + 1
+    _extent_rows = _extent_rows.push(row)
+    true
 
 fn extent_truncate_impl(object_id: i64, new_length: i64) -> bool:
     """Truncate the object to `new_length`; CoW the trailing extent."""
-    pass_todo
+    if object_id < 0 or new_length < 0:
+        return false
+    var kept: [NvfsExtentRow] = []
+    for row in _extent_rows:
+        if row.object_id != object_id:
+            kept = kept.push(row)
+        else:
+            val end = row.logical_off + row.length
+            if row.logical_off < new_length:
+                if end <= new_length:
+                    kept = kept.push(row)
+                else:
+                    kept = kept.push(NvfsExtentRow(
+                        object_id: row.object_id,
+                        logical_off: row.logical_off,
+                        arena_id: row.arena_id,
+                        phys_off: row.phys_off,
+                        length: new_length - row.logical_off,
+                        generation: row.generation + 1
+                    ))
+    _extent_rows = kept
+    true
+
+struct NvfsExtentRow:
+    object_id: i64
+    logical_off: i64
+    arena_id: i64
+    phys_off: i64
+    length: i64
+    generation: i64
+
+var _extent_rows: [NvfsExtentRow] = []

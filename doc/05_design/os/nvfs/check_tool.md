@@ -2,8 +2,8 @@
 
 **Status:** Skeleton implemented (FR-NVFS-N8-001).  Full walker deferred (FR-NVFS-N8-002).
 **Reference tools:** `btrfs-check`, `zpool scrub`, `fsck.ext4`.
-**Source:** `examples/11_advanced/nvfs/src/tool/nvfs_check.spl`
-**Tests:** `examples/11_advanced/nvfs/test/01_unit/tool/nvfs_check_test.spl`
+**Source:** `src/os/services/nvfs/tool/nvfs_check.spl`
+**Tests:** `test/01_unit/os/services/nvfs/tool/nvfs_check_test.spl`
 
 ---
 
@@ -155,7 +155,7 @@ counts are always accurate.
 |------------|-------------------|---------------|
 | NvfsCheckOpts struct | yes | yes |
 | CheckReport + pretty-print | yes | yes |
-| Phase dispatcher (5 stubs) | yes (pass_todo) | yes (real walkers) |
+| Phase dispatcher (5 stubs) | yes (placeholder-skip) | yes (real walkers) |
 | Superblock replica walk | stub | real |
 | Checkpoint ring walk | stub | real |
 | pmap B-tree walk | stub | real |

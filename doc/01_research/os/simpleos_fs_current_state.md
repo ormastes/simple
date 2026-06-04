@@ -196,8 +196,8 @@ Full POSIX-like surface: mount/unmount/remount/statfs/root/open/close/read/write
 ```
 enum DriverInstance:
     Fat32(driver: Fat32Driver)        ← stub
-    Nvfs(driver: NvfsDriver)          ← real (examples/11_advanced/nvfs/src/driver/)
-    NvfsPosix(driver: NvfsPosixDriver)← real (examples/11_advanced/nvfs/src/posix/, Phase 9 B2)
+    Nvfs(driver: NvfsDriver)          ← real (src/os/services/nvfs/driver/)
+    NvfsPosix(driver: NvfsPosixDriver)← real (src/os/services/nvfs/posix/, Phase 9 B2)
     RamFs(driver: RamFsStub)          ← stub
 ```
 
@@ -207,7 +207,7 @@ enum DriverInstance:
 ### 6.4 Capability System (`capability.spl`)
 22 `Capability` variants; `CapabilitySet` bitmask. Drivers declare capabilities; callers can probe for optional extensions via `probe(cap) -> Option<Extension>`.
 
-### 6.5 `NvfsPosixDriver` (`examples/11_advanced/nvfs/src/posix/fs_driver_impl.spl`)
+### 6.5 `NvfsPosixDriver` (`src/os/services/nvfs/posix/fs_driver_impl.spl`)
 Implements `FsDriver` over NVFS arenas with POSIX semantics (random write, truncate, rename visibility). Uses `CowShadow` (`cow_engine.spl`) and `FdTable` (`fd_table.spl`). Phase 9 B2 — complete.
 
 ---
@@ -305,7 +305,7 @@ arm64/riscv64/arm32 `baremetal_stubs.c` files contain no FAT32 code. The entire 
 | File | What it tests | Path exercised |
 |------|---------------|----------------|
 | `examples/09_embedded/simple_os/arch/x86_64/fs_test_entry.spl` | read/size/exists on hello.txt, numbers.txt, hello.spl | Direct C-extern |
-| `examples/11_advanced/nvfs/test/01_unit/posix_shim_test.spl` | NvfsPosixDriver open/read/write/stat/rename/unlink | NEW FsDriver trait |
+| `test/01_unit/os/services/nvfs/posix_shim_test.spl` | NvfsPosixDriver open/read/write/stat/rename/unlink | NEW FsDriver trait |
 
 No test exercises `VfsManager` with a real driver mounted. No test exercises `Fat32Driver` (new-trait stub) — it is entirely unsupported.
 
@@ -320,8 +320,8 @@ No test exercises `VfsManager` with a real driver mounted. No test exercises `Fa
 | FAT32 x86_64-only | YES |
 | VfsManager populated at boot | **NO** |
 | MountTable (new) connected to hardware | **NO** |
-| NvfsDriver real | YES (examples/11_advanced/nvfs/src/driver/) |
-| NvfsPosixDriver real | YES (examples/11_advanced/nvfs/src/posix/, Phase 9 B2) |
+| NvfsDriver real | YES (src/os/services/nvfs/driver/) |
+| NvfsPosixDriver real | YES (src/os/services/nvfs/posix/, Phase 9 B2) |
 | Direct C-extern call sites | 2 files (fs_test_entry.spl, shell_serial_entry.spl) |
 | Total FS call-site files | 6 |
 | Recommended M1 starting file | `src/os/services/vfs/vfs_init.spl` |

@@ -16,4 +16,5 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Helpers Text Specification](01_unit/lib/gpu/engine2d/helpers_text_spec.md) | Auto-generated | N/A | 3 | 0% | 0 lines |
+| [Opencl Session Contract Specification](01_unit/lib/gpu/engine2d/opencl_session_contract_spec.md) | Auto-generated | N/A | 7 | 0% | 0 lines |
+
