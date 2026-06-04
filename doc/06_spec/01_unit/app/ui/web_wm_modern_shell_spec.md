@@ -60,7 +60,7 @@ Verifies the first modern Simple Web WM slice at the contract level.
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 823 lines folded for reproduction.
+Runnable source: 828 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -549,10 +549,15 @@ expect(html).to_contain(".wm-dock-stack[data-stack-feedback='mode'] .wm-dock-sta
 expect(html).to_contain(".wm-dock-stack-item")
 expect(html).to_contain(".wm-dock-stack-item.active")
 expect(html).to_contain(".wm-dock-stack-item:focus-visible")
+expect(html).to_contain(".wm-dock-stack-item.action-feedback")
+expect(html).to_contain(".wm-dock-stack[data-stack-item-feedback='open'] .wm-dock-stack-item[data-stack-item-feedback='open']")
 expect(html).to_contain(".wm-dock-stack-icon")
+expect(html).to_contain(".wm-dock-stack-icon.action-feedback")
 expect(html).to_contain("@keyframes wm-dock-stack-in")
 expect(html).to_contain("@keyframes wm-dock-stack-fan")
 expect(html).to_contain("@keyframes wm-dock-stack-mode-feedback")
+expect(html).to_contain("@keyframes wm-dock-stack-item-open-feedback")
+expect(html).to_contain("@keyframes wm-dock-stack-icon-open-feedback")
 expect(html).to_contain(".wm-quality-inspector")
 expect(html).to_contain(".wm-quality-inspector[hidden]")
 expect(html).to_contain(".wm-quality-grid")
@@ -896,7 +901,7 @@ expect(html).to_contain("@keyframes wm-hot-corner-activate")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 1520 lines folded for reproduction.
+Runnable source: 1525 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1137,8 +1142,13 @@ expect(js).to_contain("_setDockStackMode")
 expect(js).to_contain("_markDockStackModeFeedback")
 expect(js).to_contain("_clearDockStackModeFeedback")
 expect(js).to_contain("_dockStackModeFeedbackTimer")
+expect(js).to_contain("_markDockStackItemFeedback")
+expect(js).to_contain("_clearDockStackItemFeedback")
+expect(js).to_contain("_dockStackItemFeedbackTimer")
 expect(js).to_contain("dataset.stackFeedback")
 expect(js).to_contain("dataset.stackFeedbackMode")
+expect(js).to_contain("dataset.stackItemFeedback")
+expect(js).to_contain("dataset.stackItemFeedbackId")
 expect(js).to_contain("_moveDockStackSelection")
 expect(js).to_contain("_syncDockStackSelection")
 expect(js).to_contain("_activateDockStackSelection")
@@ -2429,7 +2439,7 @@ expect(retained).to_contain("Maximize window")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 1427 lines folded for reproduction.
+Runnable source: 1430 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -2545,11 +2555,14 @@ expect(preview).to_contain("data-stack-layout=\"fan-grid\"")
 expect(preview).to_contain("data-stack-mode-active=\"fan\"")
 expect(preview).to_contain("data-stack-feedback=\"mode\"")
 expect(preview).to_contain("data-stack-feedback-mode=\"fan\"")
+expect(preview).to_contain("data-stack-item-feedback=\"open\"")
+expect(preview).to_contain("data-stack-item-feedback-id=\"screenshot\"")
 expect(preview).to_contain("wm-dock-stack-mode active action-feedback")
 expect(preview).to_contain("aria-busy=\"true\"")
 expect(preview).to_contain("role=\"listbox\" aria-label=\"Downloads stack items\"")
 expect(preview).to_contain("aria-activedescendant=\"wm-dock-stack-item-0\"")
-expect(preview).to_contain("wm-dock-stack-item active")
+expect(preview).to_contain("wm-dock-stack-item active action-feedback")
+expect(preview).to_contain("wm-dock-stack-icon wm-round-icon action-feedback")
 expect(preview).to_contain("aria-selected=\"true\"")
 expect(preview).to_contain("data-stack-index=\"0\"")
 expect(preview).to_contain("aria-label=\"Widget gallery\"")

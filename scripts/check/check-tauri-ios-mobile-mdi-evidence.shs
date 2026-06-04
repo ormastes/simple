@@ -1,0 +1,145 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
+TAURI_DIR="$ROOT_DIR/tools/tauri-shell"
+BUILD_DIR="$ROOT_DIR/build/tauri_ios_mdi"
+SMOKE_SOURCE="$ROOT_DIR/examples/06_io/ui/tauri_mobile_mdi_smoke.spl"
+SCREENSHOT="${IOS_MDI_SCREENSHOT:-$BUILD_DIR/ios_simulator_mdi.png}"
+LOG_STREAM="$BUILD_DIR/ios_simulator_log_stream.txt"
+IOS_DEV_LOG="$BUILD_DIR/ios_tauri_dev.log"
+TIMEOUT_SECS="${IOS_MDI_TIMEOUT_SECS:-60}"
+
+mkdir -p "$BUILD_DIR"
+
+fail() {
+    echo "status=fail"
+    echo "reason=$1"
+    exit 1
+}
+
+if [ "$(uname -s)" != "Darwin" ]; then
+    echo "ios_tooling=unavailable"
+    echo "ios_reason=iOS simulator evidence requires macOS with Xcode; current host $(uname -s)"
+    echo "status=unavailable"
+    exit 0
+fi
+
+command -v xcrun >/dev/null 2>&1 || fail "xcrun not found; install Xcode"
+command -v xcodebuild >/dev/null 2>&1 || fail "xcodebuild not found; install Xcode"
+command -v cargo >/dev/null 2>&1 || fail "cargo not found"
+cargo tauri --version >/dev/null 2>&1 || fail "cargo-tauri not found"
+test -f "$SMOKE_SOURCE" || fail "mobile MDI smoke source missing: $SMOKE_SOURCE"
+
+HOST_ARCH="$(uname -m)"
+IOS_RUNTIME_VAR="SIMPLE_IOS_RUNTIME_X86_64_SIM"
+case "$HOST_ARCH" in
+    arm64|aarch64) IOS_RUNTIME_VAR="SIMPLE_IOS_RUNTIME_AARCH64_SIM" ;;
+esac
+
+IOS_RUNTIME_PATH="$(eval "printf '%s' \"\${$IOS_RUNTIME_VAR:-}\"")"
+test -n "$IOS_RUNTIME_PATH" || fail "$IOS_RUNTIME_VAR must point at a simulator-compatible Simple runtime"
+test -f "$IOS_RUNTIME_PATH" || fail "$IOS_RUNTIME_VAR path missing: $IOS_RUNTIME_PATH"
+
+SIM_UDID="${IOS_SIM_UDID:-}"
+if [ -z "$SIM_UDID" ]; then
+    SIM_UDID="$(
+        xcrun simctl list devices available -j |
+        python3 - <<'PY'
+import json
+import sys
+devices = json.load(sys.stdin).get("devices", {})
+iphones = [
+    device
+    for runtime_devices in devices.values()
+    for device in runtime_devices
+    if "iPhone" in device.get("name", "") and device.get("isAvailable")
+]
+print(iphones[0]["udid"] if iphones else "")
+PY
+    )"
+fi
+test -n "$SIM_UDID" || fail "no available iPhone simulator found"
+
+cd "$TAURI_DIR"
+npm run prepare:dist >/tmp/tauri_ios_prepare_dist.log 2>&1
+if [ ! -d "src-tauri/gen/apple" ]; then
+    cargo tauri ios init > "$BUILD_DIR/ios_init.log" 2>&1
+fi
+
+xcrun simctl boot "$SIM_UDID" >/dev/null 2>&1 || true
+xcrun simctl bootstatus "$SIM_UDID" -b > "$BUILD_DIR/ios_bootstatus.log" 2>&1
+
+: > "$LOG_STREAM"
+xcrun simctl spawn "$SIM_UDID" log stream --style compact \
+    --predicate 'process CONTAINS "simple" OR eventMessage CONTAINS "tauri-shell" OR eventMessage CONTAINS "mdi proof"' \
+    > "$LOG_STREAM" 2>&1 &
+LOG_PID=$!
+
+cleanup() {
+    kill "$LOG_PID" 2>/dev/null || true
+    if [ -n "${IOS_DEV_PID:-}" ]; then
+        kill "$IOS_DEV_PID" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT INT TERM
+
+env "$IOS_RUNTIME_VAR=$IOS_RUNTIME_PATH" \
+    SIMPLE_MOBILE_ENTRY_SOURCE="$SMOKE_SOURCE" \
+    cargo tauri ios dev --no-watch > "$IOS_DEV_LOG" 2>&1 &
+IOS_DEV_PID=$!
+
+end=$(( $(date +%s) + TIMEOUT_SECS ))
+proof_seen=0
+while [ "$(date +%s)" -lt "$end" ]; do
+    if grep -q '\[tauri-shell\] mdi proof:' "$LOG_STREAM" "$IOS_DEV_LOG" 2>/dev/null; then
+        proof_seen=1
+        break
+    fi
+    sleep 2
+done
+
+xcrun simctl io "$SIM_UDID" screenshot "$SCREENSHOT" > "$BUILD_DIR/ios_screenshot.log" 2>&1 \
+    || fail "failed to capture iOS simulator screenshot"
+test -s "$SCREENSHOT" || fail "iOS simulator screenshot is empty: $SCREENSHOT"
+
+if [ "$proof_seen" != "1" ]; then
+    fail "iOS MDI proof log not observed within ${TIMEOUT_SECS}s"
+fi
+
+python3 - "$LOG_STREAM" "$IOS_DEV_LOG" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+log = "\n".join(Path(path).read_text(errors="ignore") for path in sys.argv[1:])
+for forbidden in ["F DEBUG", "panicked", "InvalidUri", "Cannot redefine", "parse error", "Permission denied"]:
+    if forbidden in log:
+        raise SystemExit(f"forbidden log marker present: {forbidden}")
+matches = re.findall(r"\[tauri-shell\] mdi proof: (\{.*?\})", log)
+if not matches:
+    raise SystemExit("MDI proof JSON missing")
+proof = json.loads(matches[-1])
+checks = {
+    "count": proof.get("count", 0) >= 4,
+    "hasDesktop": proof.get("hasDesktop") is True,
+    "imageCount": proof.get("imageCount", 0) >= 1,
+    "dragMoved": proof.get("dragMoved") is True,
+    "hasWindowEventRuntime": proof.get("hasWindowEventRuntime") is True,
+    "bodyClickRouted": proof.get("bodyClickRouted") is True,
+    "bodyInputRouted": proof.get("bodyInputRouted") is True,
+    "htmlRenderable": proof.get("htmlRenderable") is True,
+}
+failed = [name for name, ok in checks.items() if not ok]
+if failed:
+    raise SystemExit("MDI proof failed fields: " + ", ".join(failed))
+print("ios_logcat_proof=pass")
+PY
+
+echo "ios_tooling=available"
+echo "ios_simulator=$SIM_UDID"
+echo "ios_screenshot=$SCREENSHOT"
+echo "ios_log_stream=$LOG_STREAM"
+echo "ios_dev_log=$IOS_DEV_LOG"
+echo "status=pass"
