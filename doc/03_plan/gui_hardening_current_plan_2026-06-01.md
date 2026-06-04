@@ -1148,6 +1148,22 @@ fetch/WASM chain spec now passes `158/158`; the native WASM host spec remained
 conformance remained `275/275`, and `src/lib` completed with the existing
 `447 warning(s)`. Broader browser/WASM semantics remain open.
 
+BrowserSession WebAssembly invalid decorated-hex continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession scripts now pass a decorated WASM hex payload containing a
+non-hex character through `WebAssembly.validate(...)` and
+`new WebAssembly.Module(...)`. The focused assertion verifies validation fails
+closed, module validation is false, the error is `invalid-wasm-header`, byte
+length normalizes to `0`, and section count remains `0`. The focused
+fetch/WASM chain spec now passes `159/159`; the native WASM host spec remained
+`107/107`, the WebGPU JS/WASM system spec remained `106/106`, Node API
+conformance remained `275/275`, and `src/lib` completed with the existing
+`447 warning(s)`. Broader browser/WASM semantics remain open.
+
 Production Chrome exact-policy fail-closed continuation:
 
 - `jj git fetch`
