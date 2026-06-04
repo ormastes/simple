@@ -33,6 +33,28 @@ function _canonicalId(surface_id, widget_id) {
 }
 
 function _applyProp(el, key, value) {
+  if (key === 'class' || key === 'className' || key === 'class_name') {
+    const base = el.className || '';
+    const extra = String(value || '').trim();
+    el.className = extra ? `${base} ${extra}`.trim() : base;
+    return;
+  }
+  if (key === 'style' || key === 'css' || key === 'style_text' || key === 'css_text') {
+    el.setAttribute('style', value || '');
+    return;
+  }
+  if (key === 'id') {
+    el.id = value || '';
+    return;
+  }
+  if (key === 'role') {
+    el.setAttribute('role', value || '');
+    return;
+  }
+  if (String(key).startsWith('aria-')) {
+    el.setAttribute(key, value || '');
+    return;
+  }
   if (key === 'x') {
     el.style.left = value + 'px';
     return;
@@ -406,6 +428,7 @@ export class RetainedRenderer {
   }
 
   _materializeSurface(surface, nodeMap) {
+    const rootNode = nodeMap.get(surface.root_canonical_id);
     const winEl = document.createElement('div');
     winEl.className = 'wm-window';
     winEl.dataset.surfaceId = surface.surface_id;
@@ -423,7 +446,7 @@ export class RetainedRenderer {
       btn.setAttribute('aria-label', aria);
       lights.appendChild(btn);
     }
-    const icon = this._makeSurfaceIcon(surface);
+    const icon = this._makeSurfaceIcon(surface, rootNode);
     const title = document.createElement('div');
     title.className = 'wm-title';
     title.textContent = surface.title || surface.surface_id;
@@ -441,15 +464,16 @@ export class RetainedRenderer {
     const body = document.createElement('div');
     body.className = 'wm-body';
     body.dataset.surfaceId = surface.surface_id;
-    const rootNode = nodeMap.get(surface.root_canonical_id);
     if (rootNode) {
       const rootEl = this._materializeNodeFromAccess(rootNode, nodeMap);
       body.appendChild(rootEl);
       const props = rootNode.props || {};
       if (props.x != null) winEl.style.left = props.x + 'px';
       if (props.y != null) winEl.style.top = props.y + 'px';
-      if (props.width != null) winEl.style.width = props.width + 'px';
-      if (props.height != null) winEl.style.height = props.height + 'px';
+      const width = props.width ?? props.w;
+      const height = props.height ?? props.h;
+      if (width != null) winEl.style.width = width + 'px';
+      if (height != null) winEl.style.height = height + 'px';
       if (props.visible === false || props.visible === 'false') winEl.style.display = 'none';
     }
     winEl.appendChild(body);
@@ -541,8 +565,9 @@ export class RetainedRenderer {
     this._focusAcquiredTimers.set(el, timer);
   }
 
-  _makeSurfaceIcon(surface) {
-    const raw = surface.icon || surface.app_icon || surface.title || surface.app_id || surface.surface_id || 'S';
+  _makeSurfaceIcon(surface, rootNode = null) {
+    const props = rootNode?.props || {};
+    const raw = surface.icon || surface.app_icon || props.icon || props.app_icon || props.image || surface.title || surface.app_id || surface.surface_id || 'S';
     return this._makeRoundIcon('wm-titlebar-icon', raw);
   }
 

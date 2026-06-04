@@ -10464,6 +10464,10 @@ class SimpleWindowManager {
     this._dispatch(frame);
   }
 
+  handleMessage(frame) {
+    this.receiveFrame(frame);
+  }
+
   receiveElectronMessage(msg) {
     if (!msg || !msg.type) return;
     switch (msg.type) {
@@ -11734,7 +11738,10 @@ class SimpleWindowManager {
       if (ds.isElectronWindow) {
         this._electronMoveWindow(ds.surfaceId, Math.round(nextX), Math.round(nextY));
       } else if (ds.ghostEl) {
-        // Optimistic: ghost is cosmetic; server patches or mouseup reconcile.
+        if (ds.winEl) {
+          ds.winEl.style.left = nextX + 'px';
+          ds.winEl.style.top = nextY + 'px';
+        }
         ds.ghostEl.style.left = nextX + 'px';
         ds.ghostEl.style.top  = nextY + 'px';
       }
@@ -11753,6 +11760,10 @@ class SimpleWindowManager {
       if (rs.isElectronWindow) {
         this._electronResizeWindow(rs.surfaceId, Math.round(w), Math.round(h));
       } else if (rs.ghostEl) {
+        if (rs.winEl) {
+          rs.winEl.style.width = w + 'px';
+          rs.winEl.style.height = h + 'px';
+        }
         rs.ghostEl.style.width  = w + 'px';
         rs.ghostEl.style.height = h + 'px';
       }
@@ -11775,6 +11786,13 @@ class SimpleWindowManager {
       if (this.transport === 'electron-ipc' && this._electronWindows.has(ds.surfaceId)) {
         this._electronMoveWindow(ds.surfaceId, Math.round(newX), Math.round(newY));
         if (snappedRect) this._electronResizeWindow(ds.surfaceId, snappedRect.w, snappedRect.h);
+      } else if (ds.winEl) {
+        ds.winEl.style.left = Math.round(newX) + 'px';
+        ds.winEl.style.top = Math.round(newY) + 'px';
+        if (snappedRect) {
+          ds.winEl.style.width = snappedRect.w + 'px';
+          ds.winEl.style.height = snappedRect.h + 'px';
+        }
       }
       // Send authoritative move request; server will reconcile and patch back.
       // window_id_hint is a HINT only; server resolves via UiWindowSurfaceRegistry.
@@ -11813,6 +11831,9 @@ class SimpleWindowManager {
       if (dir === 'n' || dir.includes('n')) h = Math.max(minH, rs.origH - dy);
       if (this.transport === 'electron-ipc' && this._electronWindows.has(rs.surfaceId)) {
         this._electronResizeWindow(rs.surfaceId, Math.round(w), Math.round(h));
+      } else if (rs.winEl) {
+        rs.winEl.style.width = Math.round(w) + 'px';
+        rs.winEl.style.height = Math.round(h) + 'px';
       }
       this._sendWindowCmd('resize', {
         window_id_hint: rs.surfaceId,
