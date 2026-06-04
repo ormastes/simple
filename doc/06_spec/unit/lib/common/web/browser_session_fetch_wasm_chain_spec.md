@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 223 | 223 | 0 | 0 |
+| 224 | 224 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -12105,6 +12105,39 @@ match result:
 
 </details>
 
+#### copies overlapping Uint8Array subarray windows through set in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `1,2,1,2,3,6:undefined:1,2,1`
+
+3. Err
+   - Expected: "unexpected uint8 overlapping set js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var b = new Uint8Array(6); b[0] = 1; b[1] = 2; b[2] = 3; b[3] = 4; b[4] = 5; b[5] = 6; var src = b.subarray(0, 3); var returned = b.set(src, 2); b.toString() + ':' + returned + ':' + src.toString()")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("1,2,1,2,3,6:undefined:1,2,1")
+    Err(err):
+        expect("unexpected uint8 overlapping set js error: {err}").to_equal("")
+```
+
+</details>
+
 #### reports ArrayBuffer and typed-array constructor metadata in browser scripts
 
 1. var session = BrowserSession new
@@ -12718,8 +12751,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 223 |
-| Active scenarios | 223 |
+| Total scenarios | 224 |
+| Active scenarios | 224 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -313,7 +313,7 @@
    `doc/06_spec/system/app/browser/feature/webgpu_js_wasm_simple_spec.md`:
    JS/WebEngine/WASM BrowserSession evidence. Current focused checks pass the
    WebGPU/JS/WASM system spec `106/106`, the native WASM host spec `107/107`,
-   and the fetch-to-WASM chain spec `223/223`. The coverage includes secure WebGPU
+   and the fetch-to-WASM chain spec `224/224`. The coverage includes secure WebGPU
    globals, fetched `arrayBuffer()` to `WebAssembly.instantiate`, compile
    thenables, bounded WASM exports, traps, table/global metadata, imported
    function binding, and `Uint8Array`/`DataView` access to WebAssembly.Memory.
@@ -5198,6 +5198,59 @@ Test checklist:
 - `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
 - `git diff --check`
 - `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+BrowserSession Uint8Array overlapping set/subarray continuation:
+
+Detailed completion checklist:
+
+- Confirm the fresh worktree starts from synchronized `main`/`origin/main`.
+- Inspect current typed-array coverage and choose a non-duplicate parity gap.
+- Probe copied-buffer `Uint8Array.slice` isolation; record the concrete runtime
+  dispatch gap instead of silently normalizing it away.
+- Add a BrowserSession scenario proving `Uint8Array.prototype.set` snapshots
+  values from an overlapping shared `subarray` source before receiver mutation.
+- Verify the receiver mutates from `1,2,3,4,5,6` to `1,2,1,2,3,6`.
+- Verify `set(...)` returns `undefined`.
+- Verify the shared source subarray reflects post-copy receiver storage as
+  `1,2,1`, proving the source remains a live window while the set copy itself
+  used the pre-mutation snapshot.
+- Regenerate the mirrored SPipe scenario manual and move old-path docgen output
+  onto `doc/06_spec/unit/...`.
+- Restore generated index, tracking, and adjacent old-path manual noise.
+- Record focused and manual scenario counts after docgen.
+- Run the focused BrowserSession check and interpreter spec.
+- Run native WASM host, WebGPU JS/WASM, and Node API conformance regressions.
+- Run `src/lib` check, diff hygiene, and executable-spec layout guard.
+- Commit only the focused spec, generated manual, plan evidence, and bug note.
+- Fetch/rebase with file-count guard and push `HEAD:main` with `GITHUB_TOKEN`
+  unset.
+
+Detailed test checklist:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+- `git diff --check`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+BrowserSession scripts now prove overlapping `Uint8Array.prototype.set` copies
+from a live shared `subarray` source through a snapshot before receiver
+mutation. The focused assertion verifies `b.set(b.subarray(0, 3), 2)` mutates
+the receiver from `1,2,3,4,5,6` to `1,2,1,2,3,6`, returns `undefined`, and
+leaves the shared source view reporting `1,2,1` after the receiver mutation.
+The focused fetch/WASM chain spec now passes `224/224`, and the generated
+manual records `Total scenarios | 224 |`. A copied-buffer
+`Uint8Array.prototype.slice` isolation probe exposed a separate runtime
+dispatch gap, now recorded in
+`doc/08_tracking/bug/browser_session_uint8array_slice_copy_buffer_2026-06-04.md`.
+The native WASM host spec remained `107/107`, the WebGPU JS/WASM system spec
+remained `106/106`, Node API conformance remained `275/275`, and `src/lib`
+completed with the current `405 warning(s)` across `5936` files. Broader
+typed-array prototype parity and production GUI pixel parity remain open.
 
 BrowserSession Uint8Array subarray shared-buffer parity continuation:
 
