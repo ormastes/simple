@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 153 | 153 | 0 | 0 |
+| 154 | 154 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -2535,6 +2535,39 @@ match result:
         expect(_display_js(value)).to_equal("invalid:false:invalid-wasm-module:object")
     Err(err):
         expect("unexpected instance constructor missing module js error: {err}").to_equal("")
+```
+
+</details>
+
+#### returns empty WebAssembly Module descriptors for invalid module arguments
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `false:invalid-wasm-header:0:0:0:0`
+
+3. Err
+   - Expected: "unexpected invalid module descriptor js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var module = new WebAssembly.Module('00'); var exports = WebAssembly.Module.exports(module); var imports = WebAssembly.Module.imports(module); var missingExports = WebAssembly.Module.exports(); var missingImports = WebAssembly.Module.imports(); module.validated + ':' + module.error + ':' + exports.length + ':' + imports.length + ':' + missingExports.length + ':' + missingImports.length")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("false:invalid-wasm-header:0:0:0:0")
+    Err(err):
+        expect("unexpected invalid module descriptor js error: {err}").to_equal("")
 ```
 
 </details>
@@ -7506,8 +7539,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 153 |
-| Active scenarios | 153 |
+| Total scenarios | 154 |
+| Active scenarios | 154 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
