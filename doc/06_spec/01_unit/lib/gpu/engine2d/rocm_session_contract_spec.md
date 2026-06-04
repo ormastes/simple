@@ -27,7 +27,7 @@ rocm_session_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -104,6 +104,23 @@ expect(session.ref_count).to_equal(0)
 
 </details>
 
+#### exports the HIP nonzero image blit kernel for transparent text
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val source = _engine2d_hip_source()
+
+expect(source).to_contain("kernel_blit_image_nonzero")
+expect(source).to_contain("if (pixel == 0) return")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -123,8 +140,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

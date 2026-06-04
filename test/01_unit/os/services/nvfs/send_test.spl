@@ -1,0 +1,189 @@
+# @cover examples/nvfs/src/core/send.spl 80%
+"""
+# NVFS N6b Raw Send Unit Tests
+
+**Feature IDs:** #NVFS-N6b-RAW-SEND
+**Category:** Replication / Data Transfer
+**Difficulty:** 3/5
+**Status:** Implemented
+**Design:** doc/05_design/nvfs/send_format.md; N6b milestone
+
+## Overview
+
+Tests for the N6b raw send / encrypted replication stream:
+  1. Plaintext roundtrip — send → receive → data matches original.
+  2. Encrypted send with correct key — receiver decrypts successfully.
+  3. Encrypted send with wrong key — decrypt tag verify fails (Err Corrupt).
+  4. Encrypted send with no key — receiver stores opaque; encrypted_opaque flag set.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| SendStream | Append-only byte buffer; wire output of send_arena |
+| RecvStream | Read-cursor over a byte buffer; input to receive_arena |
+| send_arena | Serialises one arena into a SendStream (plaintext or encrypted) |
+| receive_arena | Reconstructs an arena from a RecvStream; decrypts if key supplied |
+| encrypted_opaque | ReceiveResult flag — true when encrypted + no key provided |
+"""
+
+use std.sspec.*
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+fn _make_ks_with_data_key(arena_id: i64) -> (KeyStore, KeyHandle):
+    """Create a KeyStore and derive a data key for arena_id."""
+    val ks = keystore_new()
+    val passphrase: [u8] = [0x73u8, 0x65u8, 0x6Eu8, 0x64u8]  # "send"
+    val wk = keystore_derive_wrapping(ks, passphrase)
+    val master_res = keystore_generate_master(ks, wk.key_id)
+    val master = master_res.unwrap()
+    val dk_res = keystore_derive_data_key(ks, master.key_id, arena_id)
+    val dk = dk_res.unwrap()
+    (ks, dk)
+
+fn _arena_with_data(data: [u8]) -> i64:
+    """Create, populate, and seal an arena; return its arena_id."""
+    val aid = arena_create_impl(0, 0)
+    val _ = arena_append_impl(aid, data, 0)
+    val _ = arena_seal_impl(aid, 1)
+    aid
+
+fn _bytes_equal(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: i64 = 0
+    while i < a.len() as i64:
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+# ---------------------------------------------------------------------------
+# Test 1: Plaintext roundtrip (no encryption)
+# ---------------------------------------------------------------------------
+
+describe "send — plaintext roundtrip":
+    """send_arena with key=None → receive_arena with key=None must reconstruct
+    identical byte content in the new arena."""
+
+    it "received arena contains the original plaintext bytes":
+        val original: [u8] = [0x41u8, 0x42u8, 0x43u8, 0x44u8, 0x45u8]  # "ABCDE"
+        val src_arena = _arena_with_data(original)
+        val ks = keystore_new()
+
+        var stream = send_stream_new()
+        val sr = send_arena(src_arena, stream, ks, None)
+        expect(sr.ok).to_equal(true)
+        expect(sr.bytes_written > 0).to_equal(true)
+
+        val data = recv_stream_data(stream)
+        var rstream = recv_stream_new(data)
+        val rr = receive_arena(rstream, ks, None)
+        expect(rr.ok).to_equal(true)
+        expect(rr.encrypted_opaque).to_equal(false)
+
+        val received = arena_readv_impl(rr.arena_id, 0, original.len() as i64)
+        expect(_bytes_equal(received, original)).to_equal(true)
+
+# ---------------------------------------------------------------------------
+# Test 2: Encrypted send → receiver with correct key mounts successfully
+# ---------------------------------------------------------------------------
+
+describe "send — encrypted roundtrip with correct key":
+    """send_arena with a data key → receive_arena with the SAME KeyStore and
+    key must decrypt and reconstruct the original plaintext."""
+
+    it "received arena decrypts to original plaintext when key is correct":
+        val original: [u8] = [0xDEu8, 0xADu8, 0xBEu8, 0xEFu8, 0x01u8, 0x02u8]
+        val src_arena = _arena_with_data(original)
+        val pair = _make_ks_with_data_key(src_arena)
+        val ks = pair.0
+        val dk = pair.1
+
+        var stream = send_stream_new()
+        val sr = send_arena(src_arena, stream, ks, Some(dk))
+        expect(sr.ok).to_equal(true)
+
+        val data = recv_stream_data(stream)
+        var rstream = recv_stream_new(data)
+        val rr = receive_arena(rstream, ks, Some(dk))
+        expect(rr.ok).to_equal(true)
+        expect(rr.encrypted_opaque).to_equal(false)
+
+        val received = arena_readv_impl(rr.arena_id, 0, original.len() as i64)
+        expect(_bytes_equal(received, original)).to_equal(true)
+
+# ---------------------------------------------------------------------------
+# Test 3: Encrypted send → receiver with wrong key fails tag verify
+# ---------------------------------------------------------------------------
+
+describe "send — encrypted send with wrong key fails":
+    """receive_arena with a different KeyStore (different master key) must fail
+    with an error because the GCM tag will not verify."""
+
+    it "receive_arena returns ok=false when the key does not match":
+        val original: [u8] = [0x11u8, 0x22u8, 0x33u8, 0x44u8]
+        val src_arena = _arena_with_data(original)
+        val pair = _make_ks_with_data_key(src_arena)
+        val sender_ks = pair.0
+        val sender_dk = pair.1
+
+        var stream = send_stream_new()
+        val sr = send_arena(src_arena, stream, sender_ks, Some(sender_dk))
+        expect(sr.ok).to_equal(true)
+
+        # Build a different KeyStore — different master key → different data key.
+        val wrong_pair = _make_ks_with_data_key(src_arena)
+        val wrong_ks = wrong_pair.0
+        # Use the sender's KeyHandle key_id but wrong KeyStore raw bytes.
+        # The iv stored in the stream was derived from sender_ks; wrong_ks
+        # will produce a different raw key → tag mismatch.
+        val wrong_kh = KeyHandle(
+            level:   sender_dk.level,
+            kek_ref: sender_dk.kek_ref,
+            key_id:  sender_dk.key_id
+        )
+
+        val data = recv_stream_data(stream)
+        var rstream = recv_stream_new(data)
+        val rr = receive_arena(rstream, wrong_ks, Some(wrong_kh))
+        # Decryption must fail (tag mismatch or key not found).
+        expect(rr.ok).to_equal(false)
+
+# ---------------------------------------------------------------------------
+# Test 4: Encrypted send → receiver with no key stores opaque
+# ---------------------------------------------------------------------------
+
+describe "send — encrypted send to receiver with no key stores opaque":
+    """receive_arena with key=None on an encrypted stream must store the
+    ciphertext as-is and set encrypted_opaque=true.  The arena cannot be
+    mounted but is preserved for later key presentation."""
+
+    it "encrypted_opaque is true and arena is non-empty when no key supplied":
+        val original: [u8] = [0xAAu8, 0xBBu8, 0xCCu8, 0xDDu8, 0xEEu8]
+        val src_arena = _arena_with_data(original)
+        val pair = _make_ks_with_data_key(src_arena)
+        val ks = pair.0
+        val dk = pair.1
+
+        var stream = send_stream_new()
+        val sr = send_arena(src_arena, stream, ks, Some(dk))
+        expect(sr.ok).to_equal(true)
+
+        val data = recv_stream_data(stream)
+        var rstream = recv_stream_new(data)
+        val no_ks = keystore_new()
+        val rr = receive_arena(rstream, no_ks, None)
+        expect(rr.ok).to_equal(true)
+        expect(rr.encrypted_opaque).to_equal(true)
+
+        # Arena exists and holds the ciphertext (some bytes present, not plaintext).
+        val stored = arena_total_bytes_impl(rr.arena_id)
+        expect(stored > 0).to_equal(true)
+        # Stored bytes must differ from original plaintext (it's ciphertext).
+        val stored_data = arena_readv_impl(rr.arena_id, 0, stored)
+        val matches_plaintext = _bytes_equal(stored_data, original)
+        expect(matches_plaintext).to_equal(false)

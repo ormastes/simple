@@ -1,0 +1,528 @@
+# NVFS N6b — raw send / encrypted replication stream.
+#
+# Design: doc/05_design/nvfs/send_format.md
+# Streams a sealed MODEL_IMMUTABLE arena between peers without decryption.
+# Ciphertext + key metadata travel over the wire; the receiver cannot read
+# plaintext unless it possesses the dataset key.
+#
+# Wire format:
+#   Leading 16-byte stream header (magic "NVSR", version, flags, …)
+#   Per-arena records: arena-begin (type=0), extent (type=1), arena-end (type=2)
+#   Extent record: fixed header fields + raw ciphertext payload
+#
+# Encryption flag (bit 0 of flags):
+#   Set  → extent payload is AES-GCM ciphertext; encrypted_nonce[12] is present.
+#   Clear → extent payload is plaintext (no nonce field).
+#
+# Checksum field in extent record uses algo 0 (none) for N6b.
+# FR-NVFS-N6b-002 tracks upgrading to CRC32C once accessible from submodule.
+
+use std.fs_driver.error.{FsError}
+
+# ---------------------------------------------------------------------------
+# Import encryption primitives from N6a (same core package).
+# ---------------------------------------------------------------------------
+
+# Re-use types from encryption.spl (co-located module, auto-available in core/).
+
+# ---------------------------------------------------------------------------
+# Stream magic + constants
+# ---------------------------------------------------------------------------
+
+val NVSR_MAGIC_0: u8 = 0x4Eu8  # 'N'
+val NVSR_MAGIC_1: u8 = 0x56u8  # 'V'
+val NVSR_MAGIC_2: u8 = 0x53u8  # 'S'
+val NVSR_MAGIC_3: u8 = 0x52u8  # 'R'
+val NVSR_VERSION: u8 = 1u8
+val NVSR_FLAG_ENCRYPTED:   u16 = 0x0001u16
+val NVSR_FLAG_REFLINK_COMP: u16 = 0x0002u16
+
+val RECORD_ARENA_BEGIN: u8 = 0u8
+val RECORD_EXTENT:      u8 = 1u8
+val RECORD_ARENA_END:   u8 = 2u8
+
+val CHECKSUM_ALGO_NONE: u8 = 0u8
+
+# ---------------------------------------------------------------------------
+# SendStream / RecvStream — simple buffer-backed byte streams
+# ---------------------------------------------------------------------------
+
+struct SendStream:
+    """Append-only byte buffer acting as the send-side wire stream."""
+    buf: [u8]
+
+struct RecvStream:
+    """Read-cursor over an immutable byte buffer acting as the receive-side stream."""
+    buf: [u8]
+    pos: i64
+
+fn send_stream_new() -> SendStream:
+    """Create an empty SendStream."""
+    SendStream(buf: [])
+
+fn recv_stream_new(data: [u8]) -> RecvStream:
+    """Wrap `data` in a RecvStream starting at position 0."""
+    RecvStream(buf: data, pos: 0)
+
+fn recv_stream_data(s: &RecvStream) -> [u8]:
+    """Return the underlying buffer (for testing / transport hand-off)."""
+    s.buf
+
+# ---------------------------------------------------------------------------
+# Low-level encode / decode helpers
+# ---------------------------------------------------------------------------
+
+fn _push_u8(s: &mut SendStream, v: u8):
+    s.buf.push(v)
+
+fn _push_u16_le(s: &mut SendStream, v: u16):
+    s.buf.push((v & 0xFFu16).to_u8())
+    s.buf.push(((v >> 8u16) & 0xFFu16).to_u8())
+
+fn _push_u32_le(s: &mut SendStream, v: u32):
+    s.buf.push((v & 0xFFu32).to_u8())
+    s.buf.push(((v >> 8u32) & 0xFFu32).to_u8())
+    s.buf.push(((v >> 16u32) & 0xFFu32).to_u8())
+    s.buf.push(((v >> 24u32) & 0xFFu32).to_u8())
+
+fn _push_u64_le(s: &mut SendStream, v: u64):
+    var tmp = v
+    var i: i64 = 0
+    while i < 8:
+        s.buf.push((tmp & 0xFFu64).to_u8())
+        tmp = tmp >> 8u64
+        i = i + 1
+
+fn _push_bytes(s: &mut SendStream, data: [u8]):
+    var i: i64 = 0
+    while i < data.len() as i64:
+        s.buf.push(data[i])
+        i = i + 1
+
+fn _read_u8(s: &mut RecvStream) -> Result<u8, FsError>:
+    if s.pos >= s.buf.len() as i64:
+        return Err(FsError.IoError(0))
+    val v = s.buf[s.pos]
+    s.pos = s.pos + 1
+    Ok(v)
+
+fn _read_u16_le(s: &mut RecvStream) -> Result<u16, FsError>:
+    val b0_res = _read_u8(s)
+    val b0 = match b0_res:
+        case Err(e): return Err(e)
+        case Ok(v): v
+    val b1_res = _read_u8(s)
+    val b1 = match b1_res:
+        case Err(e): return Err(e)
+        case Ok(v): v
+    Ok(b0.to_u16() | (b1.to_u16() << 8u16))
+
+fn _read_u32_le(s: &mut RecvStream) -> Result<u32, FsError>:
+    var acc: u32 = 0u32
+    var shift: u32 = 0u32
+    var i: i64 = 0
+    while i < 4:
+        val b_res = _read_u8(s)
+        val b = match b_res:
+            case Err(e): return Err(e)
+            case Ok(v): v
+        acc = acc | (b.to_u32() << shift)
+        shift = shift + 8u32
+        i = i + 1
+    Ok(acc)
+
+fn _read_u64_le(s: &mut RecvStream) -> Result<u64, FsError>:
+    var acc: u64 = 0u64
+    var shift: u64 = 0u64
+    var i: i64 = 0
+    while i < 8:
+        val b_res = _read_u8(s)
+        val b = match b_res:
+            case Err(e): return Err(e)
+            case Ok(v): v
+        acc = acc | (b.to_u64() << shift)
+        shift = shift + 8u64
+        i = i + 1
+    Ok(acc)
+
+fn _read_bytes(s: &mut RecvStream, n: i64) -> Result<[u8], FsError>:
+    if s.pos + n > s.buf.len() as i64:
+        return Err(FsError.IoError(0))
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < n:
+        out.push(s.buf[s.pos + i])
+        i = i + 1
+    s.pos = s.pos + n
+    Ok(out)
+
+fn _zero_bytes(n: i64) -> [u8]:
+    var z: [u8] = []
+    var i: i64 = 0
+    while i < n:
+        z.push(0u8)
+        i = i + 1
+    z
+
+# ---------------------------------------------------------------------------
+# Result types
+# ---------------------------------------------------------------------------
+
+struct SendResult:
+    """Outcome of streaming one arena into a SendStream."""
+    ok:           bool
+    bytes_written: i64
+    error:        i64   # 0 = no error, -1 = invalid arena, -2 = other
+
+struct ReceiveResult:
+    """Outcome of reconstructing one arena from a RecvStream."""
+    ok:              bool
+    arena_id:        i64   # id of the newly-created arena in this node's store
+    encrypted_opaque: bool  # true when encrypted and no key was supplied
+    error:           i64   # 0 = no error, negative = error code
+
+# ---------------------------------------------------------------------------
+# Stream-header encode / decode
+# ---------------------------------------------------------------------------
+
+fn _write_stream_header(s: &mut SendStream, flags: u16, arena_count: u32):
+    """Emit the 16-byte leading stream header."""
+    _push_u8(s, NVSR_MAGIC_0)
+    _push_u8(s, NVSR_MAGIC_1)
+    _push_u8(s, NVSR_MAGIC_2)
+    _push_u8(s, NVSR_MAGIC_3)
+    _push_u8(s, NVSR_VERSION)  # version (low byte)
+    _push_u8(s, 0u8)            # version (high byte) — u16 LE
+    _push_u16_le(s, flags)
+    _push_u32_le(s, arena_count)
+    _push_u8(s, CHECKSUM_ALGO_NONE)
+    _push_u8(s, 0u8)  # reserved[0]
+    _push_u8(s, 0u8)  # reserved[1]
+    _push_u8(s, 0u8)  # reserved[2]
+
+struct StreamHeader:
+    magic:          [u8]
+    version:        u16
+    flags:          u16
+    arena_count:    u32
+    checksum_algo:  u8
+
+fn _read_stream_header(s: &mut RecvStream) -> Result<StreamHeader, FsError>:
+    val magic_res = _read_bytes(s, 4)
+    val magic = match magic_res:
+        case Err(e): return Err(e)
+        case Ok(v): v
+    # Validate magic
+    if (magic.len() as i64 < 4 or
+        magic[0] != NVSR_MAGIC_0 or
+        magic[1] != NVSR_MAGIC_1 or
+        magic[2] != NVSR_MAGIC_2 or
+        magic[3] != NVSR_MAGIC_3):
+        return Err(FsError.Corrupt)
+    val ver_res = _read_u16_le(s)
+    val version = match ver_res:
+        case Err(e): return Err(e)
+        case Ok(v): v
+    val flags_res = _read_u16_le(s)
+    val flags = match flags_res:
+        case Err(e): return Err(e)
+        case Ok(v): v
+    val ac_res = _read_u32_le(s)
+    val arena_count = match ac_res:
+        case Err(e): return Err(e)
+        case Ok(v): v
+    val calgo_res = _read_u8(s)
+    val checksum_algo = match calgo_res:
+        case Err(e): return Err(e)
+        case Ok(v): v
+    # Skip reserved[3]
+    val _reserved = _read_bytes(s, 3)
+    Ok(StreamHeader(
+        magic:         magic,
+        version:       version,
+        flags:         flags,
+        arena_count:   arena_count,
+        checksum_algo: checksum_algo
+    ))
+
+# ---------------------------------------------------------------------------
+# Per-arena record encode helpers
+# ---------------------------------------------------------------------------
+
+fn _write_arena_begin(s: &mut SendStream, arena_id: i64):
+    _push_u8(s, RECORD_ARENA_BEGIN)
+    _push_u64_le(s, arena_id as u64)
+
+fn _write_arena_end(s: &mut SendStream, arena_id: i64):
+    _push_u8(s, RECORD_ARENA_END)
+    _push_u64_le(s, arena_id as u64)
+
+fn _write_extent_record(
+    s: &mut SendStream,
+    arena_id: i64,
+    logical_off: i64,
+    payload: [u8],
+    birth_gen: u32,
+    is_encrypted: bool,
+    nonce: [u8]
+):
+    """Emit one extent record.
+
+    Wire layout (when encrypted):
+      u8  record_type = 1
+      u64 arena_id
+      u64 logical_off
+      u64 phys_ptr (stub: same as logical_off for N6b)
+      u32 len
+      u32 birth_gen
+      [u8;32] checksum (zeros for algo=0)
+      [u8;12] encrypted_nonce  (only present when is_encrypted)
+      payload bytes
+    """
+    _push_u8(s, RECORD_EXTENT)
+    _push_u64_le(s, arena_id as u64)
+    _push_u64_le(s, logical_off as u64)
+    _push_u64_le(s, logical_off as u64)  # phys_ptr stub = logical_off
+    _push_u32_le(s, payload.len() as u32)
+    _push_u32_le(s, birth_gen)
+    # 32-byte checksum (zeros for N6b, algo=none)
+    val zero_cs = _zero_bytes(32)
+    _push_bytes(s, zero_cs)
+    # Nonce only present when encrypted
+    if is_encrypted:
+        # Pad / truncate nonce to exactly 12 bytes
+        var padded_nonce: [u8] = []
+        var ni: i64 = 0
+        while ni < 12:
+            if ni < nonce.len() as i64:
+                padded_nonce.push(nonce[ni])
+            else:
+                padded_nonce.push(0u8)
+            ni = ni + 1
+        _push_bytes(s, padded_nonce)
+    # payload (ciphertext or plaintext)
+    _push_bytes(s, payload)
+
+# ---------------------------------------------------------------------------
+# Public: send_arena
+# ---------------------------------------------------------------------------
+
+pub fn send_arena(
+    arena_id: i64,
+    stream: &mut SendStream,
+    ks: &KeyStore,
+    key: Option<KeyHandle>
+) -> SendResult:
+    """Stream a sealed arena's contents into `stream`.
+
+    If `key` is Some, each extent block is encrypted via `encrypt_arena_data`
+    and the ENCRYPTED flag is set in the stream header.  If `key` is None,
+    plaintext is streamed (ENCRYPTED flag clear).
+
+    The arena must exist and be readable via `arena_readv_impl`.  Returns a
+    SendResult; bytes_written is the number of bytes appended to stream.buf.
+    """
+    val total = arena_total_bytes_impl(arena_id)
+    if total < 0:
+        return SendResult(ok: false, bytes_written: 0, error: -1)
+
+    val is_encrypted = match key:
+        case None: false
+        case Some(_): true
+
+    val flags: u16 = if is_encrypted: NVSR_FLAG_ENCRYPTED else: 0u16
+
+    val start_len = stream.buf.len() as i64
+
+    # Stream header: 1 arena in this single-arena call.
+    _write_stream_header(stream, flags, 1u32)
+    _write_arena_begin(stream, arena_id)
+
+    # Chunk the arena into extents (one chunk = whole arena for N6b).
+    # FR-NVFS-N6b-002: split into preferred_granule chunks for large arenas.
+    val chunk_size: i64 = if total > 0: total else: 0
+
+    if chunk_size > 0:
+        val raw = arena_readv_impl(arena_id, 0, chunk_size)
+        if raw.len() == 0:
+            return SendResult(ok: false, bytes_written: 0, error: -2)
+
+        match key:
+            case None:
+                _write_extent_record(stream, arena_id, 0, raw, 0u32, false, [])
+            case Some(kh):
+                val enc_res = encrypt_arena_data(ks, kh, arena_id, 0, raw)
+                match enc_res:
+                    case Err(_):
+                        return SendResult(ok: false, bytes_written: 0, error: -2)
+                    case Ok(env):
+                        # payload = ciphertext || tag (matches EncryptedEnvelope layout)
+                        var payload: [u8] = []
+                        var pi: i64 = 0
+                        while pi < env.ciphertext.len() as i64:
+                            payload.push(env.ciphertext[pi])
+                            pi = pi + 1
+                        pi = 0
+                        while pi < env.tag.len() as i64:
+                            payload.push(env.tag[pi])
+                            pi = pi + 1
+                        _write_extent_record(stream, arena_id, 0, payload, 0u32, true, env.iv)
+
+    _write_arena_end(stream, arena_id)
+
+    val bytes_written = stream.buf.len() as i64 - start_len
+    SendResult(ok: true, bytes_written: bytes_written, error: 0)
+
+# ---------------------------------------------------------------------------
+# Public: receive_arena
+# ---------------------------------------------------------------------------
+
+pub fn receive_arena(
+    stream: &mut RecvStream,
+    ks: &KeyStore,
+    key: Option<KeyHandle>
+) -> ReceiveResult:
+    """Reconstruct an arena from a RecvStream produced by `send_arena`.
+
+    Behaviour:
+    - Unencrypted stream: plaintext stored directly.
+    - Encrypted stream + key supplied: decrypt each extent; Err(Corrupt) on
+      tag mismatch → returns error.
+    - Encrypted stream + key=None: ciphertext stored as-is (opaque);
+      encrypted_opaque=true in ReceiveResult.  The arena cannot be mounted
+      until a key is presented separately.
+
+    Returns a ReceiveResult; on success, arena_id identifies the new arena
+    in the local arena store.
+    """
+    val hdr_res = _read_stream_header(stream)
+    val hdr = match hdr_res:
+        case Err(_): return ReceiveResult(ok: false, arena_id: -1, encrypted_opaque: false, error: -1)
+        case Ok(v): v
+
+    val stream_encrypted = (hdr.flags & NVSR_FLAG_ENCRYPTED) != 0u16
+    val no_key_opaque = stream_encrypted and (match key: case None: true case Some(_): false)
+
+    # Create a fresh arena to receive the data.
+    val new_arena_id = arena_create_impl(0, 0)
+
+    # Process records until we see arena-end.
+    var done = false
+    var error: i64 = 0
+    while (not done) and (error == 0):
+        val rtype_res = _read_u8(stream)
+        val rtype = match rtype_res:
+            case Err(_):
+                error = -2
+                0u8
+            case Ok(v): v
+
+        if error != 0:
+            pass_do_nothing
+        else:
+            if rtype == RECORD_ARENA_BEGIN:
+                val _aid = _read_u64_le(stream)
+            else:
+                if rtype == RECORD_ARENA_END:
+                    val _aid = _read_u64_le(stream)
+                    done = true
+                else:
+                    if rtype == RECORD_EXTENT:
+                        val aid_res = _read_u64_le(stream)
+                        val _sent_arena_id = match aid_res:
+                            case Err(_): error = -2; 0u64
+                            case Ok(v): v
+
+                        val loff_res = _read_u64_le(stream)
+                        val _logical_off = match loff_res:
+                            case Err(_): error = -2; 0u64
+                            case Ok(v): v
+
+                        val pptr_res = _read_u64_le(stream)
+                        val _phys_ptr = match pptr_res:
+                            case Err(_): error = -2; 0u64
+                            case Ok(v): v
+
+                        val len_res = _read_u32_le(stream)
+                        val payload_len = match len_res:
+                            case Err(_): error = -2; 0u32
+                            case Ok(v): v
+
+                        val bgen_res = _read_u32_le(stream)
+                        val _birth_gen = match bgen_res:
+                            case Err(_): error = -2; 0u32
+                            case Ok(v): v
+
+                        # 32-byte checksum (ignored for algo=0)
+                        val _cs = _read_bytes(stream, 32)
+
+                        # Nonce (12 bytes, only present when stream_encrypted)
+                        var nonce: [u8] = []
+                        if stream_encrypted:
+                            val nonce_res = _read_bytes(stream, 12)
+                            nonce = match nonce_res:
+                                case Err(_): error = -2; []
+                                case Ok(v): v
+
+                        # Payload
+                        if error == 0:
+                            val payload_res = _read_bytes(stream, payload_len as i64)
+                            val payload = match payload_res:
+                                case Err(_): error = -2; []
+                                case Ok(v): v
+
+                            if error == 0:
+                                if no_key_opaque:
+                                    # Store ciphertext as-is; cannot mount without key.
+                                    val _ = arena_append_impl(new_arena_id, payload, 0)
+                                else:
+                                    if stream_encrypted:
+                                        # Decrypt: payload = ciphertext || 16-byte tag
+                                        val pl_len = payload.len() as i64
+                                        if pl_len < 16:
+                                            error = -3
+                                        else:
+                                            val ct_len = pl_len - 16
+                                            var ciphertext: [u8] = []
+                                            var tag: [u8] = []
+                                            var ci: i64 = 0
+                                            while ci < ct_len:
+                                                ciphertext.push(payload[ci])
+                                                ci = ci + 1
+                                            while ci < pl_len:
+                                                tag.push(payload[ci])
+                                                ci = ci + 1
+                                            val kh = match key:
+                                                case None:
+                                                    # Unreachable: no_key_opaque handled above.
+                                                    return ReceiveResult(ok: false, arena_id: -1, encrypted_opaque: false, error: -4)
+                                                case Some(k): k
+                                            val env = EncryptedEnvelope(
+                                                key_id:     kh.key_id,
+                                                iv:         nonce,
+                                                ciphertext: ciphertext,
+                                                tag:        tag
+                                            )
+                                            val dec_res = decrypt_arena_data(ks, env)
+                                            match dec_res:
+                                                case Err(_):
+                                                    error = -3  # tag mismatch
+                                                case Ok(plaintext):
+                                                    val _ = arena_append_impl(new_arena_id, plaintext, 0)
+                                    else:
+                                        # Plaintext stream.
+                                        val _ = arena_append_impl(new_arena_id, payload, 0)
+                    else:
+                        # Unknown record type — skip? For N6b treat as corrupt.
+                        error = -2
+
+    if error != 0:
+        val _ = arena_discard_impl(new_arena_id)
+        return ReceiveResult(ok: false, arena_id: -1, encrypted_opaque: false, error: error)
+
+    ReceiveResult(
+        ok:               true,
+        arena_id:         new_arena_id,
+        encrypted_opaque: no_key_opaque,
+        error:            0
+    )

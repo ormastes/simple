@@ -27,7 +27,7 @@ backend_cuda_renderbackend_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -96,13 +96,14 @@ expect(valid_status).to_equal(true)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val source = cuda_2d_ptx_source()
 
 expect(source).to_contain("simple_2d_fill_u32")
+expect(source).to_contain("kernel_draw_image_nonzero")
 expect(source).to_contain("param_width")
 expect(source).to_contain("param_height")
 ```
@@ -136,6 +137,94 @@ if ok:
 else:
     expect(backend.initialized).to_equal(false)
     expect(backend.owns_session).to_equal(false)
+```
+
+</details>
+
+#### routes draw_text_bg through the shared text image path without CUDA hardware
+
+1. var backend = CudaBackend create
+   - Expected: backend.mirror.init(4, 4) is true
+
+2. backend draw text bg
+   - Expected: text_bg[0] equals `expected[0]`
+   - Expected: text_bg[1] equals `expected[1]`
+   - Expected: text_bg[2] equals `expected[2]`
+   - Expected: text_bg[3] equals `expected[3]`
+
+3. backend shutdown
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var backend = CudaBackend.create()
+expect(backend.mirror.init(4, 4)).to_equal(true)
+
+backend.draw_text_bg(0, 0, "I", 0xff111111u32, 0xff222222u32, 7)
+val text_bg = backend.read_pixels()
+val expected = text_render_to_buf("I", 0xff111111u32, 0xff222222u32, 7)
+
+expect(text_bg[0]).to_equal(expected[0])
+expect(text_bg[1]).to_equal(expected[1])
+expect(text_bg[2]).to_equal(expected[2])
+expect(text_bg[3]).to_equal(expected[3])
+backend.shutdown()
+```
+
+</details>
+
+#### routes foreground draw_text through transparent text image semantics without CUDA hardware
+
+1. var backend = CudaBackend create
+   - Expected: backend.mirror.init(4, 4) is true
+
+2. backend mirror clear
+
+3. backend draw text
+   - Expected: fg_count > 0 is true
+   - Expected: bg_count > 0 is true
+   - Expected: transparent_count > 0 is true
+
+4. backend shutdown
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 25 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var backend = CudaBackend.create()
+val bg = 0xff333333u32
+expect(backend.mirror.init(4, 4)).to_equal(true)
+backend.mirror.clear(bg)
+
+backend.draw_text(0, 0, "I", 0xff111111u32, 7)
+val text_pixels = backend.read_pixels()
+val expected = text_render_to_buf("I", 0xff111111u32, 0u32, 7)
+var fg_count = 0
+var bg_count = 0
+var transparent_count = 0
+var idx = 0
+while idx < 16:
+    if text_pixels[idx] == 0xff111111u32:
+        fg_count = fg_count + 1
+    if text_pixels[idx] == bg:
+        bg_count = bg_count + 1
+    if expected[idx] == 0u32:
+        transparent_count = transparent_count + 1
+    idx = idx + 1
+
+expect(fg_count > 0).to_equal(true)
+expect(bg_count > 0).to_equal(true)
+expect(transparent_count > 0).to_equal(true)
+backend.shutdown()
 ```
 
 </details>
@@ -270,8 +359,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

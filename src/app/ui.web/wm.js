@@ -91,6 +91,8 @@ class SimpleWindowManager {
     this._windowArrangePalette = null;
     this._lastSnapZone = '';
     this._topMenuBar = null;
+    this._topMenuFeedbackTimer = 0;
+    this._topMenuFeedbackAction = '';
     this._desktopWidgets = null;
     this._desktopItems = null;
     this._desktopItemsFeedbackTimer = 0;
@@ -139,12 +141,14 @@ class SimpleWindowManager {
     this._systemHudTimer = 0;
     this._privacyIndicator = null;
     this._controlCenter = null;
+    this._controlCenterFeedbackTimer = 0;
     this._widgetGallery = null;
     this._widgetGalleryActiveIndex = 0;
     this._wallpaperPicker = null;
     this._wallpaperPickerActiveIndex = 0;
     this._accentPalette = null;
     this._accentPaletteActiveIndex = 0;
+    this._accentPaletteFeedbackTimer = 0;
     this._focusMode = 'off';
     this._contrastMode = 'comfortable';
     this._feedbackMode = 'standard';
@@ -215,6 +219,7 @@ class SimpleWindowManager {
     this._shortcutOverlayActiveIndex = 0;
     this._shortcutOverlayItemsCache = [];
     this._shortcutSearchQuery = '';
+    this._shortcutOverlayFeedbackTimer = 0;
     this._quickSettingLevels = { audio: 42, brightness: 68 };
 
     this._applyMotionPreference(options.motion || '');
@@ -1243,10 +1248,13 @@ class SimpleWindowManager {
     bar.setAttribute('role', 'menubar');
     bar.setAttribute('aria-label', 'Simple desktop menu bar');
     bar.addEventListener('click', (event) => {
-      const item = event.target.closest('[data-menu-action]');
+      const target = event.target && event.target.closest ? event.target : null;
+      const item = target ? target.closest('[data-menu-action]') : null;
       if (!item || !bar.contains(item)) return;
-      this._activateTopMenuAction(item.dataset.menuAction || '');
+      const action = item.dataset.menuAction || '';
+      this._activateTopMenuAction(action);
       this._renderTopMenuBar();
+      this._markTopMenuFeedback(action);
     });
     document.body.appendChild(bar);
     this._topMenuBar = bar;
@@ -1280,11 +1288,45 @@ class SimpleWindowManager {
   _makeTopMenuButton(label, action, primary) {
     const button = document.createElement('button');
     button.type = 'button';
-    button.className = 'wm-top-menu-item' + (primary ? ' primary' : '');
+    const feedback = action && action === this._topMenuFeedbackAction;
+    button.className = 'wm-top-menu-item' + (primary ? ' primary' : '') + (feedback ? ' action-feedback' : '');
     button.dataset.menuAction = action;
+    if (feedback) button.dataset.menuFeedback = 'activate';
     button.setAttribute('role', 'menuitem');
     button.textContent = label;
     return button;
+  }
+
+  _markTopMenuFeedback(action) {
+    if (!this._topMenuBar || !this._topMenuBar.isConnected || !this._feedbackAllows('standard')) return;
+    const value = String(action || '').trim();
+    if (!value) return;
+    window.clearTimeout(this._topMenuFeedbackTimer);
+    this._topMenuFeedbackAction = value;
+    this._topMenuBar.dataset.menuFeedback = 'activate';
+    this._topMenuBar.dataset.menuFeedbackAction = value;
+    this._topMenuBar.classList.add('action-feedback');
+    const safeValue = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(value) : value.replace(/["\\]/g, '\\$&');
+    const selector = `.wm-top-menu-item[data-menu-action="${safeValue}"]`;
+    this._topMenuBar.querySelectorAll(selector).forEach((item) => {
+      item.dataset.menuFeedback = 'activate';
+      item.classList.add('action-feedback');
+    });
+    this._topMenuFeedbackTimer = window.setTimeout(() => this._clearTopMenuFeedback(), 560);
+  }
+
+  _clearTopMenuFeedback() {
+    window.clearTimeout(this._topMenuFeedbackTimer);
+    this._topMenuFeedbackTimer = 0;
+    this._topMenuFeedbackAction = '';
+    if (!this._topMenuBar) return;
+    delete this._topMenuBar.dataset.menuFeedback;
+    delete this._topMenuBar.dataset.menuFeedbackAction;
+    this._topMenuBar.classList.remove('action-feedback');
+    this._topMenuBar.querySelectorAll('.wm-top-menu-item.action-feedback').forEach((item) => {
+      item.classList.remove('action-feedback');
+      delete item.dataset.menuFeedback;
+    });
   }
 
   _activeWindowTitle() {
@@ -1620,6 +1662,12 @@ class SimpleWindowManager {
     });
     search.addEventListener('keydown', (event) => this._handleShortcutOverlayKeydown(event, false));
     grid.addEventListener('keydown', (event) => this._handleShortcutOverlayKeydown(event, true));
+    grid.addEventListener('click', (event) => {
+      const target = event.target && event.target.closest ? event.target : null;
+      const row = target ? target.closest('.wm-shortcut-row') : null;
+      if (!row || !grid.contains(row)) return;
+      this._activateShortcutOverlaySelection(Number(row.dataset.shortcutIndex || '0'));
+    });
     this._shortcutOverlay = overlay;
     this._renderShortcutOverlay();
     return overlay;
@@ -1670,6 +1718,7 @@ class SimpleWindowManager {
     if (!this._shortcutOverlay) return;
     const grid = this._shortcutOverlay.querySelector('.wm-shortcut-grid');
     if (!grid) return;
+    this._clearShortcutOverlayFeedback();
     const items = this._filteredShortcutOverlayItems();
     this._shortcutOverlayItemsCache = items;
     this._shortcutOverlayActiveIndex = Math.min(this._shortcutOverlayActiveIndex, Math.max(items.length - 1, 0));
@@ -1706,6 +1755,7 @@ class SimpleWindowManager {
     row.className = 'wm-shortcut-row' + (active ? ' active' : '');
     row.dataset.shortcutCategory = item.category;
     row.dataset.shortcutIndex = String(index);
+    row.dataset.shortcutKey = item.key;
     row.tabIndex = active ? 0 : -1;
     row.setAttribute('role', 'option');
     row.setAttribute('aria-selected', active ? 'true' : 'false');
@@ -1734,10 +1784,67 @@ class SimpleWindowManager {
     } else if (event.key === 'End') {
       event.preventDefault();
       this._setShortcutOverlaySelection(this._shortcutOverlayItemsCache.length - 1, shouldFocus);
+    } else if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      this._activateShortcutOverlaySelection(this._shortcutOverlayActiveIndex);
     } else if (event.key === 'Escape') {
       event.preventDefault();
       this._toggleShortcutOverlay(false);
     }
+  }
+
+  _activateShortcutOverlaySelection(index = this._shortcutOverlayActiveIndex) {
+    if (!this._shortcutOverlay || this._shortcutOverlay.hidden) return;
+    const count = this._shortcutOverlayItemsCache.length;
+    if (!count) return;
+    const activeIndex = Math.max(0, Math.min(count - 1, index));
+    this._shortcutOverlayActiveIndex = activeIndex;
+    this._syncShortcutOverlaySelection(false);
+    const item = this._shortcutOverlayItemsCache[activeIndex];
+    if (!item) return;
+    this._markShortcutOverlayFeedback(activeIndex, item);
+    this._sendWindowCmd('shortcut_overlay_activate', {
+      shortcut_label: item.label,
+      shortcut_key: item.key,
+      shortcut_category: item.category
+    });
+  }
+
+  _markShortcutOverlayFeedback(index, item) {
+    if (!this._shortcutOverlay || !this._feedbackAllows('standard')) return;
+    const overlay = this._shortcutOverlay;
+    window.clearTimeout(this._shortcutOverlayFeedbackTimer);
+    this._clearShortcutOverlayFeedback();
+    overlay.dataset.shortcutFeedback = 'activate';
+    overlay.dataset.shortcutFeedbackIndex = String(index);
+    overlay.classList.add('action-feedback');
+    const row = overlay.querySelector(`.wm-shortcut-row[data-shortcut-index="${index}"]`);
+    if (row) {
+      row.dataset.shortcutFeedback = 'activate';
+      row.classList.add('action-feedback');
+      row.setAttribute('aria-label', `${item.label}: ${item.key}, activated`);
+      const key = row.querySelector('.wm-shortcut-key');
+      if (key) key.classList.add('action-feedback');
+    }
+    this._shortcutOverlayFeedbackTimer = window.setTimeout(() => this._clearShortcutOverlayFeedback(), 560);
+  }
+
+  _clearShortcutOverlayFeedback() {
+    if (!this._shortcutOverlay) return;
+    window.clearTimeout(this._shortcutOverlayFeedbackTimer);
+    this._shortcutOverlayFeedbackTimer = 0;
+    delete this._shortcutOverlay.dataset.shortcutFeedback;
+    delete this._shortcutOverlay.dataset.shortcutFeedbackIndex;
+    this._shortcutOverlay.classList.remove('action-feedback');
+    this._shortcutOverlay.querySelectorAll('.wm-shortcut-row.action-feedback, .wm-shortcut-key.action-feedback').forEach((node) => {
+      node.classList.remove('action-feedback');
+      if (node.dataset && node.dataset.shortcutFeedback) delete node.dataset.shortcutFeedback;
+      if (node.classList.contains('wm-shortcut-row')) {
+        const label = node.querySelector('.wm-shortcut-label')?.textContent || '';
+        const key = node.querySelector('.wm-shortcut-key')?.textContent || '';
+        if (label && key) node.setAttribute('aria-label', `${label}: ${key}`);
+      }
+    });
   }
 
   _moveShortcutOverlaySelection(delta, shouldFocus = false) {
@@ -4895,15 +5002,56 @@ class SimpleWindowManager {
 
   _makeControlCenterButton(label, active, action) {
     const button = document.createElement('button');
+    const feedbackId = this._controlCenterActionId(label);
     button.type = 'button';
     button.className = 'wm-control-button' + (active ? ' active' : '');
+    button.dataset.controlAction = feedbackId;
     button.setAttribute('aria-pressed', active ? 'true' : 'false');
     button.textContent = label;
     button.addEventListener('click', () => {
       action();
       this._renderControlCenter();
+      this._markControlCenterFeedback(feedbackId);
     });
     return button;
+  }
+
+  _controlCenterActionId(label) {
+    return String(label || 'control').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'control';
+  }
+
+  _markControlCenterFeedback(actionId) {
+    if (!this._controlCenter || !this._controlCenter.isConnected || !this._feedbackAllows('standard')) return;
+    const id = this._controlCenterActionId(actionId);
+    if (this._controlCenterFeedbackTimer) clearTimeout(this._controlCenterFeedbackTimer);
+    this._clearControlCenterFeedback();
+    const panel = this._controlCenter;
+    const button = panel.querySelector(`.wm-control-button[data-control-action="${CSS.escape(id)}"]`);
+    panel.dataset.controlFeedback = id;
+    panel.classList.remove('action-feedback');
+    void panel.offsetWidth;
+    panel.classList.add('action-feedback');
+    if (button) {
+      button.dataset.controlFeedback = id;
+      button.classList.remove('action-feedback');
+      void button.offsetWidth;
+      button.classList.add('action-feedback');
+    }
+    this._controlCenterFeedbackTimer = setTimeout(() => {
+      this._clearControlCenterFeedback();
+      this._controlCenterFeedbackTimer = 0;
+    }, 560);
+  }
+
+  _clearControlCenterFeedback() {
+    if (!this._controlCenter || !this._controlCenter.isConnected) return;
+    const panel = this._controlCenter;
+    delete panel.dataset.controlFeedback;
+    panel.classList.remove('action-feedback');
+    panel.querySelectorAll('.wm-control-button.action-feedback').forEach((button) => {
+      button.classList.remove('action-feedback');
+      delete button.dataset.controlFeedback;
+    });
   }
 
   _setMotionFromControlCenter(preference) {
@@ -5274,7 +5422,49 @@ class SimpleWindowManager {
     this.setAccentPreference(accent.id);
     this._sendWindowCmd('accent_pick', { accent_id: accent.id });
     this._renderAccentPalette();
+    this._markAccentPaletteFeedback(accent.id);
     if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
+  }
+
+  _markAccentPaletteFeedback(accentId) {
+    if (!this._accentPalette || !this._accentPalette.isConnected || !this._feedbackAllows('standard')) return;
+    const id = this._normalizeAccentPreference(accentId).id;
+    if (this._accentPaletteFeedbackTimer) clearTimeout(this._accentPaletteFeedbackTimer);
+    this._clearAccentPaletteFeedback();
+    const palette = this._accentPalette;
+    const choice = palette.querySelector(`.wm-accent-choice[data-accent-choice="${CSS.escape(id)}"]`);
+    palette.dataset.accentFeedback = 'pick';
+    palette.dataset.accentFeedbackChoice = id;
+    palette.classList.remove('action-feedback');
+    void palette.offsetWidth;
+    palette.classList.add('action-feedback');
+    if (choice) {
+      choice.dataset.accentFeedback = 'pick';
+      choice.classList.remove('action-feedback');
+      void choice.offsetWidth;
+      choice.classList.add('action-feedback');
+      const swatch = choice.querySelector('.wm-accent-swatch');
+      if (swatch) swatch.classList.add('action-feedback');
+    }
+    this._accentPaletteFeedbackTimer = setTimeout(() => {
+      this._clearAccentPaletteFeedback();
+      this._accentPaletteFeedbackTimer = 0;
+    }, 560);
+  }
+
+  _clearAccentPaletteFeedback() {
+    if (!this._accentPalette || !this._accentPalette.isConnected) return;
+    const palette = this._accentPalette;
+    delete palette.dataset.accentFeedback;
+    delete palette.dataset.accentFeedbackChoice;
+    palette.classList.remove('action-feedback');
+    palette.querySelectorAll('.wm-accent-choice.action-feedback').forEach((choice) => {
+      choice.classList.remove('action-feedback');
+      delete choice.dataset.accentFeedback;
+    });
+    palette.querySelectorAll('.wm-accent-swatch.action-feedback').forEach((swatch) => {
+      swatch.classList.remove('action-feedback');
+    });
   }
 
   _ensureDockStack() {

@@ -16,5 +16,4 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Backend Cuda Renderbackend Specification](01_unit/lib/gc_async_mut/gpu/engine2d/backend_cuda_renderbackend_spec.md) | Auto-generated | N/A | 9 | 0% | 0 lines |
-
+| [Helpers Text Specification](01_unit/lib/gpu/engine2d/helpers_text_spec.md) | Auto-generated | N/A | 3 | 0% | 0 lines |

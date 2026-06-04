@@ -9,6 +9,7 @@ use std.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
 use std.gc_async_mut.gpu.engine2d.cuda_session.{CudaSession}
 use std.gc_async_mut.cuda.{cuda_available, cuda_init, cuda_device_count, cuda_device_name, cuda_memcpy_htod, cuda_memcpy_dtoh, cuda_launch_kernel, CUDA_SUCCESS}
+use std.gpu.engine2d.helpers_text.{text_blit_buffer, text_transparent_blit_buffer}
 
 extern fn rt_alloc(size: i64) -> i64
 extern fn rt_free(ptr: i64, size: i64)
@@ -37,8 +38,11 @@ fn cuda_2d_circle_ptx_source() -> text:
 fn cuda_2d_rounded_rect_ptx_source() -> text:
     "\n.visible .entry kernel_draw_rounded_rect(\n    .param .u64 param_fb,\n    .param .u32 param_x,\n    .param .u32 param_y,\n    .param .u32 param_w,\n    .param .u32 param_h,\n    .param .u32 param_radius,\n    .param .u32 param_color,\n    .param .u32 param_stride,\n    .param .u32 param_surface_h\n) {\n    .reg .u64  %rd<3>;\n    .reg .u32  %r<12>;\n    .reg .s32  %s<32>;\n    .reg .pred %p<18>;\n    mov.u32     %r0, %ctaid.x;\n    mov.u32     %r1, %ntid.x;\n    mov.u32     %r2, %tid.x;\n    mad.lo.u32  %r3, %r0, %r1, %r2;\n    cvt.s32.u32 %s0, %r3;\n    ld.param.u32 %r4, [param_w];\n    ld.param.u32 %r5, [param_h];\n    cvt.s32.u32 %s1, %r4;\n    cvt.s32.u32 %s2, %r5;\n    mul.lo.s32  %s3, %s1, %s2;\n    setp.ge.s32 %p0, %s0, %s3;\n    @%p0 bra done_rounded_rect;\n    rem.s32     %s4, %s0, %s1;\n    div.s32     %s5, %s0, %s1;\n    ld.param.u32 %r6, [param_x];\n    ld.param.u32 %r7, [param_y];\n    cvt.s32.u32 %s6, %r6;\n    cvt.s32.u32 %s7, %r7;\n    add.s32     %s8, %s6, %s4;\n    add.s32     %s9, %s7, %s5;\n    ld.param.u32 %r8, [param_radius];\n    cvt.s32.u32 %s10, %r8;\n    setp.le.s32 %p1, %s10, 0;\n    @%p1 bra rounded_rect_bounds;\n    setp.lt.s32 %p2, %s4, %s10;\n    setp.lt.s32 %p3, %s5, %s10;\n    and.pred    %p4, %p2, %p3;\n    @%p4 bra rounded_rect_top_left;\n    sub.s32     %s11, %s1, %s10;\n    setp.ge.s32 %p5, %s4, %s11;\n    and.pred    %p6, %p5, %p3;\n    @%p6 bra rounded_rect_top_right;\n    sub.s32     %s12, %s2, %s10;\n    setp.ge.s32 %p7, %s5, %s12;\n    and.pred    %p8, %p2, %p7;\n    @%p8 bra rounded_rect_bottom_left;\n    and.pred    %p9, %p5, %p7;\n    @%p9 bra rounded_rect_bottom_right;\n    bra rounded_rect_bounds;\nrounded_rect_top_left:\n    sub.s32     %s13, %s4, %s10;\n    sub.s32     %s14, %s5, %s10;\n    bra rounded_rect_corner_check;\nrounded_rect_top_right:\n    sub.s32     %s15, %s1, 1;\n    sub.s32     %s15, %s15, %s10;\n    sub.s32     %s13, %s4, %s15;\n    sub.s32     %s14, %s5, %s10;\n    bra rounded_rect_corner_check;\nrounded_rect_bottom_left:\n    sub.s32     %s16, %s2, 1;\n    sub.s32     %s16, %s16, %s10;\n    sub.s32     %s13, %s4, %s10;\n    sub.s32     %s14, %s5, %s16;\n    bra rounded_rect_corner_check;\nrounded_rect_bottom_right:\n    sub.s32     %s15, %s1, 1;\n    sub.s32     %s15, %s15, %s10;\n    sub.s32     %s16, %s2, 1;\n    sub.s32     %s16, %s16, %s10;\n    sub.s32     %s13, %s4, %s15;\n    sub.s32     %s14, %s5, %s16;\nrounded_rect_corner_check:\n    mul.lo.s32  %s17, %s13, %s13;\n    mul.lo.s32  %s18, %s14, %s14;\n    add.s32     %s19, %s17, %s18;\n    mul.lo.s32  %s20, %s10, %s10;\n    setp.gt.s32 %p10, %s19, %s20;\n    @%p10 bra done_rounded_rect;\nrounded_rect_bounds:\n    ld.param.u32 %r9, [param_stride];\n    cvt.s32.u32 %s21, %r9;\n    ld.param.u32 %r10, [param_surface_h];\n    cvt.s32.u32 %s22, %r10;\n    setp.lt.s32 %p11, %s8, 0;\n    @%p11 bra done_rounded_rect;\n    setp.lt.s32 %p12, %s9, 0;\n    @%p12 bra done_rounded_rect;\n    setp.ge.s32 %p13, %s8, %s21;\n    @%p13 bra done_rounded_rect;\n    setp.ge.s32 %p14, %s9, %s22;\n    @%p14 bra done_rounded_rect;\n    mad.lo.s32  %s23, %s9, %s21, %s8;\n    cvt.u32.s32 %r11, %s23;\n    ld.param.u64  %rd0, [param_fb];\n    mul.wide.u32  %rd1, %r11, 4;\n    add.u64       %rd2, %rd0, %rd1;\n    ld.param.u32  %r4, [param_color];\n    st.global.u32 [%rd2], %r4;\ndone_rounded_rect:\n    ret;\n}\n"
 
+fn cuda_2d_image_nonzero_ptx_source() -> text:
+    "\n.visible .entry kernel_draw_image_nonzero(\n    .param .u64 param_fb,\n    .param .u64 param_src,\n    .param .u32 param_x,\n    .param .u32 param_y,\n    .param .u32 param_w,\n    .param .u32 param_h,\n    .param .u32 param_stride,\n    .param .u32 param_surface_h\n) {\n    .reg .u64  %rd<6>;\n    .reg .u32  %r<20>;\n    .reg .pred %p0;\n    mov.u32     %r0, %ctaid.x;\n    mov.u32     %r1, %ntid.x;\n    mov.u32     %r2, %tid.x;\n    mad.lo.u32  %r3, %r0, %r1, %r2;\n    ld.param.u32  %r4, [param_w];\n    ld.param.u32  %r5, [param_h];\n    mul.lo.u32    %r6, %r4, %r5;\n    setp.ge.u32   %p0, %r3, %r6;\n    @%p0 bra done_image_nonzero;\n    div.u32  %r7, %r3, %r4;\n    rem.u32  %r8, %r3, %r4;\n    ld.param.u32  %r9,  [param_x];\n    ld.param.u32  %r10, [param_y];\n    add.u32  %r11, %r9,  %r8;\n    add.u32  %r12, %r10, %r7;\n    ld.param.u32  %r13, [param_stride];\n    ld.param.u32  %r14, [param_surface_h];\n    setp.ge.u32   %p0, %r11, %r13;\n    @%p0 bra done_image_nonzero;\n    setp.ge.u32   %p0, %r12, %r14;\n    @%p0 bra done_image_nonzero;\n    ld.param.u64  %rd0, [param_src];\n    mul.wide.u32  %rd1, %r3, 4;\n    add.u64       %rd2, %rd0, %rd1;\n    ld.global.u32 %r15, [%rd2];\n    setp.eq.u32   %p0, %r15, 0;\n    @%p0 bra done_image_nonzero;\n    mad.lo.u32    %r16, %r12, %r13, %r11;\n    ld.param.u64  %rd3, [param_fb];\n    mul.wide.u32  %rd4, %r16, 4;\n    add.u64       %rd5, %rd3, %rd4;\n    st.global.u32 [%rd5], %r15;\ndone_image_nonzero:\n    ret;\n}\n"
+
 fn cuda_2d_ptx_source() -> text:
-    cuda_2d_base_ptx_source() + cuda_2d_generated_fill_ptx_source() + cuda_2d_gradient_ptx_source() + cuda_2d_line_ptx_source() + cuda_2d_circle_ptx_source() + cuda_2d_rounded_rect_ptx_source()
+    cuda_2d_base_ptx_source() + cuda_2d_generated_fill_ptx_source() + cuda_2d_gradient_ptx_source() + cuda_2d_line_ptx_source() + cuda_2d_circle_ptx_source() + cuda_2d_rounded_rect_ptx_source() + cuda_2d_image_nonzero_ptx_source()
 
 fn _i64(v: i32) -> i64:
     v as i64
@@ -662,6 +666,40 @@ class CudaBackend:
             if not self._copy_mirror_to_device():
                 self._disable_device_readback_after_mirror_sync_failure()
 
+    me _draw_image_kernel(kernel_name: text, x: i32, y: i32, w: i32, h: i32, pixels: [u32]) -> bool:
+        if not self.initialized:
+            return false
+        if w <= 0 or h <= 0:
+            return true
+        val pixel_count = w * h
+        val image_bytes = _i64(pixel_count) * 4
+        if pixel_count > pixels.len():
+            return false
+        val host_pixels = rt_alloc(image_bytes)
+        val d_pixels = self.session.alloc(image_bytes)
+        if host_pixels != 0 and d_pixels != 0:
+            _write_u32_pixels_to_host(host_pixels, pixels, pixel_count)
+            val upload_rc = cuda_memcpy_htod(d_pixels, host_pixels, image_bytes)
+            if upload_rc == CUDA_SUCCESS:
+                _write_image_launch_args(self.rect_val_ptr, self.rect_args_ptr, self.d_framebuffer, d_pixels, x, y, w, h, self.width(), self.height())
+                val total = _i64(w) * _i64(h)
+                val grid_x = (total + CUDA_2D_BLOCK_SIZE - 1) / CUDA_2D_BLOCK_SIZE
+                val rc = self.session.launch_kernel_args(kernel_name, grid_x, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, self.rect_args_ptr)
+                if rc == CUDA_SUCCESS:
+                    val sync_rc = self.session.sync()
+                    if sync_rc == CUDA_SUCCESS:
+                        rt_free(host_pixels, image_bytes)
+                        self.session.free(d_pixels)
+                        return true
+            rt_free(host_pixels, image_bytes)
+            self.session.free(d_pixels)
+        else:
+            if host_pixels != 0:
+                rt_free(host_pixels, image_bytes)
+            if d_pixels != 0:
+                self.session.free(d_pixels)
+        false
+
 impl RenderBackend for CudaBackend:
     fn name() -> text:
         "cuda"
@@ -832,39 +870,20 @@ impl RenderBackend for CudaBackend:
         self.mirror.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
         self._sync_mirror_to_device_after_cpu_path()
     me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
+        val text_buf = text_transparent_blit_buffer(text_val, color, font_size)
+        if text_buf.is_empty():
+            return
+        if self._draw_image_kernel("kernel_draw_image_nonzero", x, y, text_buf.width, text_buf.height, text_buf.pixels):
+            self.mirror.draw_text(x, y, text_val, color, font_size)
+            return
         self.mirror.draw_text(x, y, text_val, color, font_size)
         self._sync_mirror_to_device_after_cpu_path()
     me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
-        if self.initialized:
-            if w <= 0 or h <= 0:
-                return
-            val pixel_count = w * h
-            val image_bytes = _i64(pixel_count) * 4
-            if pixel_count <= pixels.len():
-                val host_pixels = rt_alloc(image_bytes)
-                val d_pixels = self.session.alloc(image_bytes)
-                if host_pixels != 0 and d_pixels != 0:
-                    _write_u32_pixels_to_host(host_pixels, pixels, pixel_count)
-                    val upload_rc = cuda_memcpy_htod(d_pixels, host_pixels, image_bytes)
-                    if upload_rc == CUDA_SUCCESS:
-                        _write_image_launch_args(self.rect_val_ptr, self.rect_args_ptr, self.d_framebuffer, d_pixels, x, y, w, h, self.width(), self.height())
-                        val total = _i64(w) * _i64(h)
-                        val grid_x = (total + CUDA_2D_BLOCK_SIZE - 1) / CUDA_2D_BLOCK_SIZE
-                        val rc = self.session.launch_kernel_args("kernel_draw_image", grid_x, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, self.rect_args_ptr)
-                        if rc == CUDA_SUCCESS:
-                            val sync_rc = self.session.sync()
-                            if sync_rc == CUDA_SUCCESS:
-                                self.mirror.draw_image(x, y, w, h, pixels)
-                                rt_free(host_pixels, image_bytes)
-                                self.session.free(d_pixels)
-                                return
-                    rt_free(host_pixels, image_bytes)
-                    self.session.free(d_pixels)
-                else:
-                    if host_pixels != 0:
-                        rt_free(host_pixels, image_bytes)
-                    if d_pixels != 0:
-                        self.session.free(d_pixels)
+        if w <= 0 or h <= 0:
+            return
+        if self._draw_image_kernel("kernel_draw_image", x, y, w, h, pixels):
+            self.mirror.draw_image(x, y, w, h, pixels)
+            return
         self.mirror.draw_image(x, y, w, h, pixels)
         self._sync_mirror_to_device_after_cpu_path()
     me set_clip(x: i32, y: i32, w: i32, h: i32):
@@ -893,8 +912,10 @@ impl RenderBackend for CudaBackend:
 
 impl Engine2DExtended for CudaBackend:
     me draw_text_bg(x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32):
-        self.mirror.draw_text_bg(x, y, text_val, fg, bg, font_size)
-        self._sync_mirror_to_device_after_cpu_path()
+        val text_buf = text_blit_buffer(text_val, fg, bg, font_size)
+        if text_buf.is_empty():
+            return
+        self.draw_image(x, y, text_buf.width, text_buf.height, text_buf.pixels)
 
     me draw_ellipse(cx: i32, cy: i32, rx: i32, ry: i32, color: u32):
         self.mirror.draw_ellipse(cx, cy, rx, ry, color)
