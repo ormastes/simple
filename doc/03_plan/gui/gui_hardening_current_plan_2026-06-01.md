@@ -5402,6 +5402,65 @@ conformance remained `275/275`, and `src/lib` completed with the current
 `405 warning(s)` across `5936` files. Broader browser/WASM semantics remain
 open.
 
+BrowserSession Uint8Array nonzero-offset callback helper continuation:
+
+Detailed completion checklist:
+
+- Confirm the fresh worktree starts from synchronized `main`/`origin/main`.
+- Confirm existing BrowserSession coverage already exercises direct and
+  prototype-dispatched `Uint8Array` callback helpers on zero-offset arrays.
+- Confirm existing BrowserSession coverage already exercises shared
+  nonzero-offset `subarray` storage, nonzero-offset constructor copies,
+  nonzero-offset `set`, and nonzero-offset `slice` copies.
+- Add one BrowserSession browser-script scenario using `base.subarray(2, 6)` as
+  the receiver for callback helpers.
+- Verify `map`, `filter`, `reduce`, `reduceRight`, `some`, `every`, `find`,
+  `findIndex`, and `forEach`-style callback observation read bytes from the
+  logical view window rather than from source buffer index zero.
+- Verify callbacks receive logical view indices `0..length-1` and the same view
+  object as the callback receiver argument.
+- Verify `map` and `filter` return independent typed-array buffers with byte
+  offset `0`.
+- Verify `map` preserves Uint8 coercion for returned callback values.
+- Verify mutating the base buffer after callback-produced arrays are created
+  updates the shared view but does not mutate `map`/`filter` results.
+- Regenerate the mirrored SPipe scenario manual and move old-path docgen output
+  onto `doc/06_spec/unit/...`.
+- Restore generated index, tracking, and adjacent old-path manual noise.
+- Record focused and manual scenario counts after docgen.
+- Run the focused BrowserSession check and interpreter spec.
+- Run native WASM host, WebGPU JS/WASM, and Node API conformance regressions.
+- Run `src/lib` check, diff hygiene, and executable-spec layout guard.
+- Commit only the focused spec, generated manual, and plan evidence.
+- Fetch/rebase with file-count guard and push `HEAD:main` with `GITHUB_TOKEN`
+  unset.
+
+Detailed test checklist:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+- `git diff --check`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+BrowserSession scripts now prove callback helpers run over the logical byte
+window of a nonzero-offset `Uint8Array.subarray` receiver. The focused
+assertion verifies `map`, `filter`, `reduce`, `reduceRight`, `some`, `every`,
+`find`, `findIndex`, and `forEach` callbacks receive normalized view-window
+bytes, logical indices, and the same view receiver; `map`/`filter` return
+independent byte-offset-`0` buffers; callback return values still coerce through
+Uint8; and later base-buffer mutation changes the shared view without changing
+the callback-produced copies. The focused fetch/WASM chain spec now passes
+`230/230`, and the generated manual records `Total scenarios | 230 |`. The
+native WASM host spec remained `107/107`, the WebGPU JS/WASM system spec
+remained `106/106`, Node API conformance remained `275/275`, and `src/lib`
+completed with the current `405 warning(s)` across `5936` files. Broader
+typed-array prototype parity and production GUI pixel parity remain open.
+
 BrowserSession Uint8Array prototype slice copied-buffer continuation:
 
 Detailed completion checklist:
