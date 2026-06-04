@@ -4300,6 +4300,23 @@ instance status, exported function type, return value, and host import call
 count. The focused fetch/WASM chain spec now passes `107/107`; broader
 browser/WASM semantics remain open.
 
+BrowserSession WebAssembly Instance constructor table/global export continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession scripts now build a table/global WASM module through
+`new WebAssembly.Module(...)`, construct it synchronously with
+`new WebAssembly.Instance(module)`, and read the exported `tbl` and `answer`
+objects through the browser script surface. The focused assertion checks module
+byte length, instance status, table kind/element, null table slot, grow result
+and length, global kind/value type/mutability, and exported global value. The
+focused fetch/WASM chain spec now passes `146/146`; the native WASM host spec
+remained `107/107`, the WebGPU JS/WASM system spec remained `106/106`, Node
+API conformance remained `275/275`, and `src/lib` completed with the existing
+`447 warning(s)`. Broader browser/WASM semantics remain open.
+
 BrowserSession instantiated WebAssembly table/global export continuation:
 
 - `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`

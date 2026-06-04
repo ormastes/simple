@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 145 | 145 | 0 | 0 |
+| 146 | 146 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -2271,6 +2271,39 @@ match result:
         expect(_display_js(value)).to_equal("41:instantiated:function:42:42")
     Err(err):
         expect("unexpected instance constructor function export body argument js error: {err}").to_equal("")
+```
+
+</details>
+
+#### constructs WebAssembly Instance table and global exports in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `40:instantiated:table:funcref:null:1:2:global:i32:false:42`
+
+3. Err
+   - Expected: "unexpected instance constructor table/global export js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var module = new WebAssembly.Module('0061736d010000000404017000010606017f00412a0b0710020374626c010006616e737765720300'); var instance = new WebAssembly.Instance(module); var table = instance.exports.tbl; var global = instance.exports.answer; var before = table.get(0); var old = table.grow(1, null); module.byteLength + ':' + instance.status + ':' + table.kind + ':' + table.element + ':' + before + ':' + old + ':' + table.length + ':' + global.kind + ':' + global.valueType + ':' + global.mutable + ':' + global.value")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("40:instantiated:table:funcref:null:1:2:global:i32:false:42")
+    Err(err):
+        expect("unexpected instance constructor table/global export js error: {err}").to_equal("")
 ```
 
 </details>
@@ -7242,8 +7275,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 145 |
-| Active scenarios | 145 |
+| Total scenarios | 146 |
+| Active scenarios | 146 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
