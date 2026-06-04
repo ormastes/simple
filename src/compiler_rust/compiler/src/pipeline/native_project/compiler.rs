@@ -337,6 +337,10 @@ pub(crate) fn compile_file_to_object(
         lowerer.set_duplicate_global_struct_defs(std::sync::Arc::new(std::collections::HashMap::new()));
         lowerer.set_ambiguous_field_names(std::sync::Arc::new(std::collections::HashSet::new()));
     }
+    // Give the lowerer the whole-program function return-type map so calls
+    // reached via the global import map (no `use` import) get a real result
+    // type instead of ANY (Pass 0.5c in module_pass.rs resolves them).
+    lowerer.set_global_fn_return_types(std::sync::Arc::clone(&imports.fn_return_types));
     // W15-H: seed the lowerer with the project-wide enum table and
     // eagerly register every entry into `module.types` + `self.globals`
     // before `lower_module(&ast)` runs. Pass 0 of `module_pass.rs`

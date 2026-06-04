@@ -191,6 +191,7 @@ pub(crate) struct ModuleImports {
     /// functions. Used to strip spurious nil receivers from module-qualified
     /// calls (see `ImportMapResult::fn_arities`).
     pub fn_arities: std::sync::Arc<std::collections::HashMap<String, usize>>,
+    pub fn_return_types: std::sync::Arc<std::collections::HashMap<String, simple_parser::Type>>,
     /// When true, pass `struct_defs` to the HIR lowerer so cross-module field
     /// accesses (e.g. `fb_info.addr.addr`) can resolve to real FieldGet instructions
     /// instead of falling through to dynamic MethodCall (which becomes
@@ -616,6 +617,7 @@ impl NativeProjectBuilder {
                 enum_defs: std::sync::Arc::new(result.enum_defs),
                 data_exports: std::sync::Arc::new(result.data_exports),
                 fn_arities: std::sync::Arc::new(result.fn_arities),
+                fn_return_types: std::sync::Arc::new(result.fn_return_types),
                 populate_global_struct_defs: true,
                 populate_global_enum_defs: true,
             }
@@ -630,6 +632,7 @@ impl NativeProjectBuilder {
                 enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
                 data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
                 fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
+                fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
                 populate_global_struct_defs: false,
                 populate_global_enum_defs: false,
             }

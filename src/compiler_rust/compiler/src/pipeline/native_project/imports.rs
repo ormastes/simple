@@ -50,6 +50,7 @@ pub(crate) struct ImportMapResult {
     /// built from `arg_vals.len()` which includes the nil, causing the callee
     /// to receive nil in its first register instead of the real argument.
     pub fn_arities: std::collections::HashMap<String, usize>,
+    pub fn_return_types: std::collections::HashMap<String, simple_parser::Type>,
 }
 
 /// Sanitize a mangled symbol name for the host platform.
@@ -219,6 +220,11 @@ pub(crate) fn build_import_map(
     let mut enum_defs: HashMap<String, Vec<(String, Option<usize>)>> = HashMap::new();
     let mut data_exports: HashSet<String> = HashSet::new();
     let mut fn_arities: HashMap<String, usize> = HashMap::new();
+    // Bare function name -> declared named return type (struct/enum/class).
+    // Lets the lowerer give a real return type to calls reached via the global
+    // import map (no `use` import), so the result isn't ANY and field access
+    // on it resolves. Only named (uppercase) return types are kept.
+    let mut fn_return_types: HashMap<String, simple_parser::Type> = HashMap::new();
 
     let mut seen_canonical = HashSet::new();
     for (path, source) in file_sources {
@@ -240,6 +246,26 @@ pub(crate) fn build_import_map(
                             let mangled = format!("{}__{}", prefix, f.name);
                             fn_arities.insert(mangled.clone(), f.params.len());
                             raw_to_mangled.entry(f.name.clone()).or_default().push(mangled);
+                            // Record a named (uppercase) return type so callers
+                            // reached via the global import map get a real result
+                            // type instead of ANY. Skip on bare-name collision to
+                            // avoid mis-typing a same-named function elsewhere.
+                            if let Some(simple_parser::Type::Simple(tn)) = &f.return_type {
+                                if tn.chars().next().is_some_and(|c| c.is_uppercase()) {
+                                    match fn_return_types.entry(f.name.clone()) {
+                                        std::collections::hash_map::Entry::Occupied(mut e) => {
+                                            if e.get() != &simple_parser::Type::Simple(tn.clone()) {
+                                                // Conflicting return types for the same bare
+                                                // name: mark ambiguous by removing the entry.
+                                                e.insert(simple_parser::Type::Simple(String::new()));
+                                            }
+                                        }
+                                        std::collections::hash_map::Entry::Vacant(e) => {
+                                            e.insert(simple_parser::Type::Simple(tn.clone()));
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     simple_parser::ast::Node::Class(c) => {
@@ -498,6 +524,8 @@ pub(crate) fn build_import_map(
     map.entry("get_errors".to_string())
         .or_insert_with(|| compile_result_get_errors.clone());
 
+    // Drop ambiguous (empty-name sentinel) entries before returning.
+    fn_return_types.retain(|_, ty| !matches!(ty, simple_parser::Type::Simple(s) if s.is_empty()));
     ImportMapResult {
         map,
         ambiguous,
@@ -508,6 +536,7 @@ pub(crate) fn build_import_map(
         enum_defs,
         data_exports,
         fn_arities,
+        fn_return_types,
     }
 }
 

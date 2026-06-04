@@ -64,6 +64,12 @@ pub struct Lowerer {
     pub(super) type_inference_config: TypeInferenceConfig,
     /// Pre-registered method return types: "ClassName.method" -> return TypeId
     pub(super) method_return_types: HashMap<String, TypeId>,
+    /// Whole-program map of free-function name -> declared (named) return type,
+    /// built by `build_import_map`. Functions reached via the global import map
+    /// (called without a `use` import) otherwise have no return-type info, so
+    /// their call results become ANY and field access on them fails. Resolved
+    /// into `method_return_types` in Pass 0.5c (additive: upgrade-only).
+    pub(super) global_fn_return_types: Option<std::sync::Arc<HashMap<String, Type>>>,
     /// When true, unknown types resolve to ANY instead of erroring.
     /// This allows compilation to proceed even when imports can't be fully resolved.
     pub(super) lenient_types: bool,
@@ -124,6 +130,7 @@ impl Lowerer {
             deprecation_warnings: DeprecationWarningCollector::new(),
             type_inference_config: TypeInferenceConfig::default(),
             method_return_types: HashMap::new(),
+            global_fn_return_types: None,
             lenient_types: false,
             extern_fn_names: HashSet::new(),
             imported_function_names: HashSet::new(),
@@ -162,6 +169,7 @@ impl Lowerer {
             deprecation_warnings: DeprecationWarningCollector::new(),
             type_inference_config: TypeInferenceConfig::default(),
             method_return_types: HashMap::new(),
+            global_fn_return_types: None,
             lenient_types: false,
             extern_fn_names: HashSet::new(),
             imported_function_names: HashSet::new(),
@@ -223,6 +231,7 @@ impl Lowerer {
             deprecation_warnings: DeprecationWarningCollector::new(),
             type_inference_config: TypeInferenceConfig::default(),
             method_return_types: HashMap::new(),
+            global_fn_return_types: None,
             lenient_types: false,
             extern_fn_names: HashSet::new(),
             imported_function_names: HashSet::new(),
@@ -263,6 +272,11 @@ impl Lowerer {
     /// isn't in the per-file registry.
     pub fn set_global_struct_defs(&mut self, defs: GlobalStructDefs) {
         self.global_struct_defs = Some(defs);
+    }
+
+    /// Set the whole-program free-function return-type map (see field doc).
+    pub fn set_global_fn_return_types(&mut self, defs: std::sync::Arc<HashMap<String, Type>>) {
+        self.global_fn_return_types = Some(defs);
     }
 
     pub fn set_duplicate_global_struct_defs(&mut self, defs: DuplicateGlobalStructDefs) {

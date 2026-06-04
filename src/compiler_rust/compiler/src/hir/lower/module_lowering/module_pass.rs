@@ -701,6 +701,37 @@ impl Lowerer {
         .to_string()
     }
 
+    /// Pass 0.5c: Populate `method_return_types` for free functions reached via
+    /// the whole-program import map (called without a `use` import). Such calls
+    /// otherwise have no return-type info, so their result is ANY and field
+    /// access on the result fails ("cannot infer field type, struct 'ANY'").
+    /// We resolve each function's declared named return type now that all
+    /// imported types (and `global_struct_defs`) are available.
+    /// ADDITIVE: only fills entries that are missing or ANY, and only when the
+    /// return type resolves to a concrete type — never downgrades.
+    fn populate_global_fn_return_types(&mut self) {
+        let Some(map) = self.global_fn_return_types.clone() else {
+            return;
+        };
+        let debug = std::env::var("SIMPLE_DEBUG_ANYRET").is_ok();
+        let mut upgraded = 0usize;
+        for (fn_name, ret_type) in map.iter() {
+            match self.method_return_types.get(fn_name) {
+                Some(&existing) if existing != TypeId::ANY => continue,
+                _ => {}
+            }
+            if let Ok(resolved) = self.resolve_type(ret_type) {
+                if resolved != TypeId::ANY {
+                    self.method_return_types.insert(fn_name.clone(), resolved);
+                    upgraded += 1;
+                }
+            }
+        }
+        if debug {
+            eprintln!("[ANYRET-GLOBAL] upgraded={}", upgraded);
+        }
+    }
+
     pub fn lower_module(mut self, ast_module: &Module) -> LowerResult<HirModule> {
         // Hoist nested type definitions (e.g. `class Foo:` defined inside an
         // SPipe `it` block) to module scope so the rest of the lowering
@@ -787,6 +818,10 @@ impl Lowerer {
                 }
             }
         }
+
+        // Pass 0.5c: upgrade imported return types that resolved to ANY before
+        // their home module was loaded (now that all imports are registered).
+        self.populate_global_fn_return_types();
 
         // First pass: collect type and function declarations (with full field resolution)
         for item in &ast_module.items {
@@ -1167,6 +1202,10 @@ impl Lowerer {
                 }
             }
         }
+
+        // Pass 0.5c: upgrade imported return types that resolved to ANY before
+        // their home module was loaded (now that all imports are registered).
+        self.populate_global_fn_return_types();
 
         // First pass: collect type and function declarations
         for item in &ast_module.items {
