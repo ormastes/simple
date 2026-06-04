@@ -313,7 +313,7 @@
    `doc/06_spec/system/app/browser/feature/webgpu_js_wasm_simple_spec.md`:
    JS/WebEngine/WASM BrowserSession evidence. Current focused checks pass the
    WebGPU/JS/WASM system spec `106/106`, the native WASM host spec `107/107`,
-   and the fetch-to-WASM chain spec `71/71`. The coverage includes secure WebGPU
+   and the fetch-to-WASM chain spec `220/220`. The coverage includes secure WebGPU
    globals, fetched `arrayBuffer()` to `WebAssembly.instantiate`, compile
    thenables, bounded WASM exports, traps, table/global metadata, imported
    function binding, and `Uint8Array`/`DataView` access to WebAssembly.Memory.
@@ -8090,14 +8090,85 @@ BrowserSession fetched invalid arrayBuffer instantiate catch continuation:
  - `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
  - `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
  
- BrowserSession scripts now compare constructor-created and compiled
- WebAssembly table/global export paths in the same script evaluation. The
- focused assertion verifies the constructor path exposes module byte length
- `40`, instance status `instantiated`, table kind `table`, element `funcref`,
- initial slot `null`, grow return `1`, grown length `2`, and global
- metadata/value `global:i32:false:42`, then verifies the compiled instantiate
- promise resolves with matching table/global metadata and grow behavior. The
- focused fetch/WASM chain spec now passes `183/183`; the native WASM host spec
- remained `107/107`, the WebGPU JS/WASM system spec remained `106/106`, Node API
- conformance remained `275/275`, and `src/lib` completed with the current
- `399 warning(s)`. Broader browser/WASM semantics remain open.
+BrowserSession scripts now compare constructor-created and compiled
+WebAssembly table/global export paths in the same script evaluation. The
+focused assertion verifies the constructor path exposes module byte length
+`40`, instance status `instantiated`, table kind `table`, element `funcref`,
+initial slot `null`, grow return `1`, grown length `2`, and global
+metadata/value `global:i32:false:42`, then verifies the compiled instantiate
+promise resolves with matching table/global metadata and grow behavior. The
+focused fetch/WASM chain spec now passes `183/183`; the native WASM host spec
+remained `107/107`, the WebGPU JS/WASM system spec remained `106/106`, Node API
+conformance remained `275/275`, and `src/lib` completed with the current
+`399 warning(s)`. Broader browser/WASM semantics remain open.
+
+BrowserSession WebAssembly compileStreaming module/instantiated export descriptor
+parity continuation:
+
+Detailed completion checklist:
+
+- Confirm the primary checkout and worktree state before editing; keep the dirty
+  detached primary checkout untouched and work from a clean `main` worktree.
+- Confirm `main` and `origin/main` are synchronized before starting the slice.
+- Confirm `doc/06_spec` contains no executable `*_spec.spl` files before
+  editing.
+- Audit the focused BrowserSession WASM scenario matrix for already-covered
+  fetched arrayBuffer, direct/compiled, constructor/compiled,
+  instantiateStreaming, and compileStreaming descriptor cases.
+- Add one same-script BrowserSession scenario that compares raw export
+  descriptors from `WebAssembly.compileStreaming(...)` with export descriptors
+  from a separate `compileStreaming(...).then(module =>
+  WebAssembly.instantiate(module))` path using the same module bytes.
+- Verify the raw compiled-module side reports byte length `40`, two exports,
+  `tbl:table`, and `answer:global`.
+- Verify the compileStreaming-instantiated side reports `status=instantiated`,
+  byte length `40`, two exports, `tbl:table`, and `answer:global`.
+- Verify the scenario has two real asynchronous fetch boundaries, a pre-commit
+  empty `out` assertion, committed `application/wasm` responses, ordered
+  intermediate output after the first commit, and deterministic final output.
+- Regenerate the mirrored SPipe scenario manual for the focused spec.
+- Move the generated old-path manual from `doc/06_spec/01_unit/...` onto the
+  tracked `doc/06_spec/unit/...` path.
+- Remove adjacent generated old-path manual noise from docgen and regression
+  specs.
+- Keep `doc/06_spec/INDEX.md` and `doc/08_tracking/test/*` unchanged unless a
+  deliberate tracking update is needed.
+- Record the new focused scenario count and manual `Total scenarios` count.
+- Run the adjacent native WASM host, WebGPU JS/WASM, and Node API conformance
+  regression specs after the focused spec passes.
+- Run `src/lib` check because the BrowserSession/WASM surface is shared library
+  behavior.
+- Run diff hygiene and the executable-spec layout guard before committing.
+- Commit only the focused spec, generated manual, and plan evidence.
+- Fetch/rebase with a file-count guard, then push `HEAD:main` through the HTTPS
+  remote with `GITHUB_TOKEN` unset.
+- If the remote advances during the slice, rebase, rerun the focused and
+  adjacent gates needed for confidence, then push again.
+
+Detailed test checklist:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `mkdir -p doc/06_spec/unit/lib/common/web && mv doc/06_spec/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.md doc/06_spec/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.md`
+- `rm -rf doc/06_spec/01_unit/lib/common/web doc/06_spec/03_system/app/browser doc/06_spec/03_system/feature/js`
+- `git restore doc/06_spec/INDEX.md doc/08_tracking/test/test-spec.html doc/08_tracking/test/test-spec.md`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+- `git diff --check`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+BrowserSession scripts now compare raw compileStreaming module export
+descriptors and compileStreaming-instantiated module export descriptors in the
+same script evaluation. The focused assertion verifies the raw
+compileStreaming path reports byte length `40`, two exports, `tbl:table`, and
+`answer:global`, then verifies the compileStreaming-instantiated path resolves
+with `status=instantiated`, byte length `40`, two exports, `tbl:table`, and
+`answer:global`. The focused fetch/WASM chain spec now passes `220/220`, and
+the generated manual records `Total scenarios | 220 |`. The native WASM host
+spec remained `107/107`, the WebGPU JS/WASM system spec remained `106/106`,
+Node API conformance remained `275/275`, and `src/lib` completed with the
+current `405 warning(s)` across `5936` files. Broader browser/WASM semantics
+remain open.

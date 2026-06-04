@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 219 | 219 | 0 | 0 |
+| 220 | 220 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -7326,6 +7326,132 @@ match session.take_pending_request():
 
 </details>
 
+#### compares compileStreaming module and compileStreaming instantiated export descriptors in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `queued`
+
+3. Err
+   - Expected: "unexpected queue error: {err}" equals ``
+
+4. Ok
+   - Expected: _display_js(value) equals ``
+
+5. Err
+   - Expected: "unexpected pre-commit js error: {err}" equals ``
+
+6. Some
+   - Expected: request.kind equals `fetch`
+   - Expected: request.url equals `https://example.com/module.wasm`
+
+7. Ok
+
+8. Ok
+   - Expected: _display_js(value) equals `compileStreamModuleExports:40:2:tbl:table:answer:global`
+
+9. Err
+   - Expected: "unexpected first commit js error: {err}" equals ``
+
+10. Err
+   - Expected: "unexpected first commit error: {err}" equals ``
+   - Expected: "missing module fetch request" equals ``
+
+11. Some
+   - Expected: request.kind equals `fetch`
+   - Expected: request.url equals `https://example.com/instance.wasm`
+
+12. Ok
+
+13. Ok
+   - Expected: _display_js(value) equals `compileStreamModuleExports:40:2:tbl:table:answer:global:compileStreamInstExpo... (full value in folded executable source)`
+
+14. Err
+   - Expected: "unexpected second commit js error: {err}" equals ``
+
+15. Err
+   - Expected: "unexpected second commit error: {err}" equals ``
+   - Expected: "missing instance fetch request" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 66 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val queued = session.eval_script("var out = ''; WebAssembly.compileStreaming(window.fetch('/module.wasm')).then(function(module) { var exports = WebAssembly.Module.exports(module); out = 'compileStreamModuleExports:' + module.byteLength + ':' + exports.length + ':' + exports[0].name + ':' + exports[0].kind + ':' + exports[1].name + ':' + exports[1].kind; }); WebAssembly.compileStreaming(window.fetch('/instance.wasm')).then(function(module) { return WebAssembly.instantiate(module); }).then(function(result) { var exports = WebAssembly.Module.exports(result.module); out = out + ':compileStreamInstExports:' + result.status + ':' + result.module.byteLength + ':' + exports.length + ':' + exports[0].name + ':' + exports[0].kind + ':' + exports[1].name + ':' + exports[1].kind; }); 'queued'")
+match queued:
+    Ok(value):
+        expect(_display_js(value)).to_equal("queued")
+    Err(err):
+        expect("unexpected queue error: {err}").to_equal("")
+match session.eval_script("out"):
+    Ok(value):
+        expect(_display_js(value)).to_equal("")
+    Err(err):
+        expect("unexpected pre-commit js error: {err}").to_equal("")
+
+match session.take_pending_request():
+    Some(request):
+        expect(request.kind).to_equal("fetch")
+        expect(request.url).to_equal("https://example.com/module.wasm")
+        val committed = session.commit_network_response(BrowserResponse.create(
+            request_id: request.id,
+            kind: "fetch",
+            url: request.url,
+            status: 200,
+            headers: "Content-Type: application/wasm\n",
+            body: "0061736d010000000404017000010606017f00412a0b0710020374626c010006616e737765720300",
+            error: ""
+        ))
+        match committed:
+            Ok(_):
+                match session.eval_script("out"):
+                    Ok(value):
+                        expect(_display_js(value)).to_equal("compileStreamModuleExports:40:2:tbl:table:answer:global")
+                    Err(err):
+                        expect("unexpected first commit js error: {err}").to_equal("")
+            Err(err):
+                expect("unexpected first commit error: {err}").to_equal("")
+    nil:
+        expect("missing module fetch request").to_equal("")
+
+match session.take_pending_request():
+    Some(request):
+        expect(request.kind).to_equal("fetch")
+        expect(request.url).to_equal("https://example.com/instance.wasm")
+        val committed = session.commit_network_response(BrowserResponse.create(
+            request_id: request.id,
+            kind: "fetch",
+            url: request.url,
+            status: 200,
+            headers: "Content-Type: application/wasm\n",
+            body: "0061736d010000000404017000010606017f00412a0b0710020374626c010006616e737765720300",
+            error: ""
+        ))
+        match committed:
+            Ok(_):
+                match session.eval_script("out"):
+                    Ok(value):
+                        expect(_display_js(value)).to_equal("compileStreamModuleExports:40:2:tbl:table:answer:global:compileStreamInstExports:instantiated:40:2:tbl:table:answer:global")
+                    Err(err):
+                        expect("unexpected second commit js error: {err}").to_equal("")
+            Err(err):
+                expect("unexpected second commit error: {err}").to_equal("")
+    nil:
+        expect("missing instance fetch request").to_equal("")
+```
+
+</details>
+
 #### compares compileStreaming and instantiateStreaming export descriptors in browser scripts
 
 1. var session = BrowserSession new
@@ -12307,8 +12433,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 219 |
-| Active scenarios | 219 |
+| Total scenarios | 220 |
+| Active scenarios | 220 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
