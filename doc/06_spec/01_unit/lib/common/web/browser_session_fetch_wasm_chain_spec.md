@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 177 | 177 | 0 | 0 |
+| 178 | 178 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -2865,6 +2865,39 @@ match result:
         expect(_display_js(value)).to_equal("instantiated:1:52:42:1")
     Err(err):
         expect("unexpected compiled instantiate import call js error: {err}").to_equal("")
+```
+
+</details>
+
+#### compares direct and compiled WebAssembly import calls in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `direct:instantiated:1:42:1:compiled:instantiated:1:52:42:1`
+
+3. Err
+   - Expected: "unexpected combined import call js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var out = ''; var wasm = '0061736d0100000001060160017f017f020b0103656e7603666f6f0000030201000707010372756e00010a08010600200010000b'; var directCalls = 0; var compiledCalls = 0; var directImports = { env: { foo: function(x) { directCalls = directCalls + 1; return x + 2; } } }; var compiledImports = { env: { foo: function(x) { compiledCalls = compiledCalls + 1; return x + 3; } } }; WebAssembly.instantiate(wasm, directImports).then(function(result) { out = 'direct:' + result.status + ':' + result.module.importCount + ':' + result.instance.exports.run(40) + ':' + directCalls; }); WebAssembly.compile(wasm).then(function(module) { return WebAssembly.instantiate(module, compiledImports); }).then(function(result) { out = out + ':compiled:' + result.status + ':' + result.module.importCount + ':' + result.module.byteLength + ':' + result.instance.exports.run(39) + ':' + compiledCalls; }); out")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("direct:instantiated:1:42:1:compiled:instantiated:1:52:42:1")
+    Err(err):
+        expect("unexpected combined import call js error: {err}").to_equal("")
 ```
 
 </details>
@@ -8391,8 +8424,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 177 |
-| Active scenarios | 177 |
+| Total scenarios | 178 |
+| Active scenarios | 178 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
