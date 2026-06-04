@@ -31,9 +31,9 @@
 
 ### Repo-Side Linux Behavioral Gates
 
-- `sh scripts/rtl_riscv64_linux_generated.shs`
+- `sh scripts/rtl/rtl_riscv64_linux_generated.shs`
   - `PASS: generated_rv64_linux repo-native generated Linux acceptance lane passed`
-- `sh scripts/rtl_riscv32_linux_generated.shs`
+- `sh scripts/rtl/rtl_riscv32_linux_generated.shs`
   - `PASS: generated_rv32_linux repo-native generated Linux acceptance lane passed`
 
 ### Generated Bundle

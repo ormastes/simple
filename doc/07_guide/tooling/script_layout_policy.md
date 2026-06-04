@@ -57,7 +57,7 @@ Blank lines and `#` comments are ignored.
 Current exceptions are bootstrap/setup compatibility scripts such as:
 
 - `scripts/setup/setup.sh`
-- `scripts/install-dev-tools.sh`
+- `scripts/setup/install-dev-tools.sh`
 - `scripts/setup/platform-detect.sh`
 - `scripts/bootstrap/*.sh`
 
@@ -69,7 +69,7 @@ is part of normal repo usage, prefer `.shs`.
 The checker is wired into:
 
 - `scripts/setup/setup.sh`
-- `scripts/install-dev-tools.sh`
+- `scripts/setup/install-dev-tools.sh`
 
 You can also run it directly in CI or locally:
 
@@ -81,7 +81,7 @@ sh scripts/check_script_layout.shs
 
 ```bash
 # Install local dev tools
-bash scripts/install-dev-tools.sh
+bash scripts/setup/install-dev-tools.sh
 
 # Create/update bin/ symlinks and launchers
 sh scripts/setup/setup.sh

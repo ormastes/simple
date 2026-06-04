@@ -10,8 +10,8 @@ scripts, serving as the post-refactor bit-equality check for SA-2/3/4.
 
 | Lane | Script | Exit Code | Result |
 |------|--------|-----------|--------|
-| RV32 | `scripts/rtl_riscv32_linux_generated.shs` | 0 | **PASS** |
-| RV64 | `scripts/rtl_riscv64_linux_generated.shs` | 126 | **FAIL** |
+| RV32 | `scripts/rtl/rtl_riscv32_linux_generated.shs` | 0 | **PASS** |
+| RV64 | `scripts/rtl/rtl_riscv64_linux_generated.shs` | 126 | **FAIL** |
 
 ## RV32 Lane Output (PASS)
 
@@ -28,7 +28,7 @@ PASS: generated_rv32_linux generated Linux acceptance gates passed
 
 ```
 PASS: generated RV64 RTL Linux tools present
-scripts/rtl_riscv64_linux_generated.shs: 58: /home/ormastes/dev/pub/simple/src/compiler_rust/target/debug/simple: Exec format error
+scripts/rtl/rtl_riscv64_linux_generated.shs: 58: /home/ormastes/dev/pub/simple/src/compiler_rust/target/debug/simple: Exec format error
 EXIT_CODE=126
 ```
 
@@ -66,8 +66,8 @@ RV64). Before SA-2/3/4 can validate byte-equality, the architect must either:
 
 1. Run both generation scripts:
    ```
-   sh scripts/rtl_riscv32_linux_generated.shs
-   sh scripts/rtl_riscv64_linux_generated.shs
+   sh scripts/rtl/rtl_riscv32_linux_generated.shs
+   sh scripts/rtl/rtl_riscv64_linux_generated.shs
    ```
 2. Capture sha256 of every file in the stable artifact tree (TBD path after fix):
    ```

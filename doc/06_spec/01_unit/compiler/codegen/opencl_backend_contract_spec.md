@@ -27,7 +27,7 @@ opencl_backend_contract_spec -> compiler
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 16 | 16 | 0 | 0 |
+| 17 | 17 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -319,6 +319,36 @@ expect(source).to_contain("return;")
 
 </details>
 
+#### emits OpenCL C generic MirSimd vector operations
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val module = make_kernel_module([make_opencl_generic_simd_kernel()])
+val source = OpenClBackend.compile_module_to_opencl_source(module).unwrap()
+
+expect(source).to_contain("__kernel void opencl_generic_simd_vectors(float scalar, float4 y, float4 z, int4 ix, int4 iy, __global float4* vec_io, __global float* scalar_io)")
+expect(source).to_contain("float4 v8 = (float4)(scalar);")
+expect(source).to_contain("float4 v9 = *vec_io;")
+expect(source).to_contain("float4 v10 = (float4)(scalar_io[iy.s0], scalar_io[iy.s1], scalar_io[iy.s2], scalar_io[iy.s3]);")
+expect(source).to_contain("float4 v11 = v8 + v9;")
+expect(source).to_contain("float4 v12 = fma(v11, y, z);")
+expect(source).to_contain("float4 v13 = sqrt(v12);")
+expect(source).to_contain("float v14 = v13.s0 + v13.s1 + v13.s2 + v13.s3;")
+expect(source).to_contain("int4 v15 = ix < iy;")
+expect(source).to_contain("float4 v16 = select(v10, v13, v15);")
+expect(source).to_contain("int4 v17 = v15 & ix;")
+expect(source).to_contain("*vec_io = v16;")
+expect(source).to_contain("scalar_io[iy.s0] = v16.s0; scalar_io[iy.s1] = v16.s1;")
+expect(source).to_contain("return;")
+```
+
+</details>
+
 #### emits OpenCL C labels gotos and conditional branches
 
 <details>
@@ -405,8 +435,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 16 |
-| Active scenarios | 16 |
+| Total scenarios | 17 |
+| Active scenarios | 17 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

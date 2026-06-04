@@ -46,7 +46,7 @@ Validate Simple GUI library sanity, drawing consistency, capture comparison, and
 ## Test and Script Surfaces
 
 - Host and Metal checks:
-  - `scripts/macos-gui-run.shs`
+  - `scripts/gui/macos-gui-run.shs`
   - `scripts/check/check-metal-generated-2d-readback.shs`
   - `scripts/check/check-metal-engine2d-framebuffer-readback-evidence.shs`
   - `test/05_perf/graphics_2d/metal_smoke_spec.spl`

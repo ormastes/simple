@@ -61,6 +61,12 @@ fn bool_type() -> MirType:
 fn global_u32_ptr_type() -> MirType:
     MirType.ptr(u32_type(), true)
 
+fn global_f32_ptr_type() -> MirType:
+    MirType.ptr(f32_type(), true)
+
+fn global_vec4f_ptr_type() -> MirType:
+    MirType.ptr(vec4f_type(), true)
+
 fn private_u32_ptr_type() -> MirType:
     MirType.ptr(u32_type(), false)
 
@@ -171,6 +177,27 @@ fn opencl_simd_block() -> MirBlock:
             MirInst(kind: MirInstKind.SimdHaddF32x4(LocalId(id: 9), MirOperand.copy(LocalId(id: 6))), span: nil),
             MirInst(kind: MirInstKind.SimdHmaxF32x4(LocalId(id: 10), MirOperand.copy(LocalId(id: 6))), span: nil),
             MirInst(kind: MirInstKind.SimdHminF32x4(LocalId(id: 11), MirOperand.copy(LocalId(id: 6))), span: nil)
+        ],
+        terminator: MirTerminator.Ret(nil)
+    )
+
+fn opencl_generic_simd_block() -> MirBlock:
+    MirBlock(
+        id: BlockId.entry(),
+        label: Some("entry"),
+        instructions: [
+            MirInst(kind: MirInstKind.MirSimdSplat(LocalId(id: 8), MirOperand.copy(LocalId(id: 0)), vec4f_type()), span: nil),
+            MirInst(kind: MirInstKind.MirSimdLoad(LocalId(id: 9), MirOperand.copy(LocalId(id: 5)), true, vec4f_type()), span: nil),
+            MirInst(kind: MirInstKind.MirSimdGather(LocalId(id: 10), MirOperand.copy(LocalId(id: 6)), MirOperand.copy(LocalId(id: 4)), vec4f_type()), span: nil),
+            MirInst(kind: MirInstKind.MirSimdBinop(LocalId(id: 11), MirOperand.copy(LocalId(id: 8)), MirOperand.copy(LocalId(id: 9)), "Add"), span: nil),
+            MirInst(kind: MirInstKind.MirSimdTernop(LocalId(id: 12), MirOperand.copy(LocalId(id: 11)), MirOperand.copy(LocalId(id: 1)), MirOperand.copy(LocalId(id: 2)), "Fma"), span: nil),
+            MirInst(kind: MirInstKind.MirSimdUnop(LocalId(id: 13), MirOperand.copy(LocalId(id: 12)), "Sqrt"), span: nil),
+            MirInst(kind: MirInstKind.MirSimdReduce(LocalId(id: 14), MirOperand.copy(LocalId(id: 13)), "Sum"), span: nil),
+            MirInst(kind: MirInstKind.MirSimdCmp(LocalId(id: 15), MirOperand.copy(LocalId(id: 3)), MirOperand.copy(LocalId(id: 4)), "Lt"), span: nil),
+            MirInst(kind: MirInstKind.MirSimdSelect(LocalId(id: 16), MirOperand.copy(LocalId(id: 15)), MirOperand.copy(LocalId(id: 13)), MirOperand.copy(LocalId(id: 10))), span: nil),
+            MirInst(kind: MirInstKind.MirSimdMaskOp(LocalId(id: 17), MirOperand.copy(LocalId(id: 15)), MirOperand.copy(LocalId(id: 3)), "And"), span: nil),
+            MirInst(kind: MirInstKind.MirSimdStore(MirOperand.copy(LocalId(id: 16)), MirOperand.copy(LocalId(id: 5)), true), span: nil),
+            MirInst(kind: MirInstKind.MirSimdScatter(MirOperand.copy(LocalId(id: 16)), MirOperand.copy(LocalId(id: 6)), MirOperand.copy(LocalId(id: 4))), span: nil)
         ],
         terminator: MirTerminator.Ret(nil)
     )
@@ -568,6 +595,52 @@ fn make_opencl_simd_kernel() -> MirFunction:
         has_fast_math: false
     )
 
+fn make_opencl_generic_simd_kernel() -> MirFunction:
+    val ptr_vec4f = global_vec4f_ptr_type()
+    val ptr_f32 = global_f32_ptr_type()
+    MirFunction(
+        symbol: SymbolId(id: 16),
+        name: "opencl_generic_simd_vectors",
+        signature: MirSignature(params: [f32_type(), vec4f_type(), vec4f_type(), vec4i_type(), vec4i_type(), ptr_vec4f, ptr_f32], return_type: MirType.unit(), is_variadic: false),
+        locals: [
+            arg_local(0, 0, "scalar", f32_type()),
+            arg_local(1, 1, "y", vec4f_type()),
+            arg_local(2, 2, "z", vec4f_type()),
+            arg_local(3, 3, "ix", vec4i_type()),
+            arg_local(4, 4, "iy", vec4i_type()),
+            arg_local(5, 5, "vec_io", ptr_vec4f),
+            arg_local(6, 6, "scalar_io", ptr_f32),
+            temp_local(8, vec4f_type()),
+            temp_local(9, vec4f_type()),
+            temp_local(10, vec4f_type()),
+            temp_local(11, vec4f_type()),
+            temp_local(12, vec4f_type()),
+            temp_local(13, vec4f_type()),
+            temp_local(14, f32_type()),
+            temp_local(15, vec4i_type()),
+            temp_local(16, vec4f_type()),
+            temp_local(17, vec4i_type())
+        ],
+        blocks: [opencl_generic_simd_block()],
+        entry_block: BlockId.entry(),
+        span: Span.empty(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: true,
+        gpu_target: "opencl",
+        gpu_backend_order: "opencl",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false
+    )
+
 fn make_opencl_branch_kernel() -> MirFunction:
     MirFunction(
         symbol: SymbolId(id: 6),
@@ -801,6 +874,25 @@ describe "OpenCL backend contract":
         expect(source).to_contain("float v9 = v6.s0 + v6.s1 + v6.s2 + v6.s3;")
         expect(source).to_contain("float v10 = fmax(fmax(v6.s0, v6.s1), fmax(v6.s2, v6.s3));")
         expect(source).to_contain("float v11 = fmin(fmin(v6.s0, v6.s1), fmin(v6.s2, v6.s3));")
+        expect(source).to_contain("return;")
+
+    it "emits OpenCL C generic MirSimd vector operations":
+        val module = make_kernel_module([make_opencl_generic_simd_kernel()])
+        val source = OpenClBackend.compile_module_to_opencl_source(module).unwrap()
+
+        expect(source).to_contain("__kernel void opencl_generic_simd_vectors(float scalar, float4 y, float4 z, int4 ix, int4 iy, __global float4* vec_io, __global float* scalar_io)")
+        expect(source).to_contain("float4 v8 = (float4)(scalar);")
+        expect(source).to_contain("float4 v9 = *vec_io;")
+        expect(source).to_contain("float4 v10 = (float4)(scalar_io[iy.s0], scalar_io[iy.s1], scalar_io[iy.s2], scalar_io[iy.s3]);")
+        expect(source).to_contain("float4 v11 = v8 + v9;")
+        expect(source).to_contain("float4 v12 = fma(v11, y, z);")
+        expect(source).to_contain("float4 v13 = sqrt(v12);")
+        expect(source).to_contain("float v14 = v13.s0 + v13.s1 + v13.s2 + v13.s3;")
+        expect(source).to_contain("int4 v15 = ix < iy;")
+        expect(source).to_contain("float4 v16 = select(v10, v13, v15);")
+        expect(source).to_contain("int4 v17 = v15 & ix;")
+        expect(source).to_contain("*vec_io = v16;")
+        expect(source).to_contain("scalar_io[iy.s0] = v16.s0; scalar_io[iy.s1] = v16.s1;")
         expect(source).to_contain("return;")
 
     it "emits OpenCL C labels gotos and conditional branches":

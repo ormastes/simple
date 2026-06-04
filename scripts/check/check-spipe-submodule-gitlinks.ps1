@@ -78,7 +78,7 @@ function Test-TrackedTree($Path) {
     Write-Output "tracked_tree_bad $Path entries=$($lines.Count) mode=$mode"
 }
 
-Test-TrackedTree "examples/spipe"
+Test-TrackedTree "examples/05_stdlib/spipe"
 
 if ($failures -eq 0) {
     Write-Output "STATUS: PASS spipe-submodule-gitlinks"

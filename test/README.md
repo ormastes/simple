@@ -47,7 +47,7 @@ bin/simple test --mode=native        # Native compiled
 The executable tree is also the source of truth for generated scenario
 documentation. After removing the leading `test/` segment, generated SPipe docs
 must mirror the same path below `doc/06_spec/`. Example:
-`test/feature/usage/math_blocks_spec.spl` generates
+`test/03_system/feature/usage/math_blocks_spec.spl` generates
 `doc/06_spec/feature/usage/math_blocks_spec.md`.
 
 Generated docs should read as scenario-based manuals, not as raw test dumps.
@@ -68,7 +68,7 @@ aligned with the current workspace compiler/runtime changes.
 Tests use the built-in SPipe BDD framework. No imports needed for `describe`, `it`, `expect`.
 
 ```simple
-# test/unit/std/example_spec.spl
+# test/01_unit/std/example_spec.spl
 
 use std.my_module.{my_function}
 
@@ -187,20 +187,20 @@ baseline and reports improvements or regressions:
 
 | Category | Directory | Purpose |
 |----------|-----------|---------|
-| Unit | `test/unit/` | Single module/function tests |
+| Unit | `test/01_unit/` | Single module/function tests |
 | Shared | `test/shared/` | Import-free cross-platform specs marked `# @platform: all` |
 | Integration | `test/integration/` | Cross-module tests |
-| Feature | `test/feature/` | Language feature BDD specs |
-| System | `test/system/` | End-to-end pipeline tests |
+| Feature | `test/03_system/feature/` | Language feature BDD specs |
+| System | `test/03_system/` | End-to-end pipeline tests |
 
 ## Traceability Rules
 
 - Keep one scenario source per behavior-oriented `*_spec.spl` file.
-- Put unit tests under `test/unit/<source-area>/...`.
+- Put unit tests under `test/01_unit/<source-area>/...`.
 - Put import-free cross-platform specs under `test/shared/<domain>/...`; shared specs may use built-in `describe`/`context`/`it`/`expect` only.
 - Put cross-module tests under `test/integration/<source-area>/...`.
-- Put user-visible feature BDD tests under `test/feature/<domain>/...`.
-- Put end-to-end workflows under `test/system/<domain>/...`.
+- Put user-visible feature BDD tests under `test/03_system/feature/<domain>/...`.
+- Put end-to-end workflows under `test/03_system/<domain>/...`.
 - Generated manual/spec docs live at the matching `doc/06_spec/<same path>.md`.
 - Generated manual/spec docs for scenario-oriented files must be reviewed as
   scenario manuals: primary scenarios visible, advanced/edge details folded or

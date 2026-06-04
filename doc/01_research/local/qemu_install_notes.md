@@ -74,4 +74,4 @@ rather than skip to a degraded report:
 - Platform-specific VM setup (FreeBSD, etc.):
   `doc/07_guide/platform/platforms.md`
 - Dev-tool bootstrap (does not install QEMU; add it separately):
-  `scripts/install-dev-tools.sh`
+  `scripts/setup/install-dev-tools.sh`

@@ -12,8 +12,8 @@ Scope: determine whether Simple currently generates real VHDL/RTL for a RISC-V C
 | Backend-generated examples | `examples/09_embedded/vhdl/README.md` states `backend/` is pending/empty and needs completion of backend phases 3-4. | Not proven. |
 | RV32 VHDL CPU | `examples/09_embedded/fpga_riscv/rtl/*.vhd` is a hand-written single-cycle RV32I CPU with GHDL semihosting support. | Works for small baremetal tests, not generated from Simple. |
 | Simple-generated RV32/RV64 FPGA Linux VHDL | `src/hardware/fpga_linux/riscv_fpga_linux.spl` emits the repo-native generated Linux bundle/manifests consumed by the authoritative `generated_rv32_linux` and `generated_rv64_linux` lanes. | Current repo-native Linux orchestration truth. |
-| RV32 Linux RTL smoke | `scripts/rtl_riscv32_linux_generated.shs` drives the generated RV32 Linux lane. | Authoritative generated lane. |
-| RV64 Linux RTL smoke | `scripts/rtl_riscv64_linux_generated.shs` drives the generated RV64 Linux lane. | Authoritative generated lane. |
+| RV32 Linux RTL smoke | `scripts/rtl/rtl_riscv32_linux_generated.shs` drives the generated RV32 Linux lane. | Authoritative generated lane. |
+| RV64 Linux RTL smoke | `scripts/rtl/rtl_riscv64_linux_generated.shs` drives the generated RV64 Linux lane. | Authoritative generated lane. |
 
 ## Direct Answer
 
