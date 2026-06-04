@@ -80,6 +80,7 @@ class SimpleWindowManager {
     this._electronZCounter = 20;
     this._focusAcquiredTimers = new WeakMap();
     this._trafficCommandTimers = new WeakMap();
+    this._titleCommandFeedbackTimers = new WeakMap();
     this._commandPalette = null;
     this._commandPaletteInput = null;
     this._commandPaletteList = null;
@@ -10580,6 +10581,7 @@ class SimpleWindowManager {
     const commandKind = this._titleCommandKind(commandText);
     const commandContext = input.placeholder || win?.querySelector('.wm-title-context')?.textContent || '';
     input.dataset.lastSubmittedValue = commandText;
+    this._markTitleCommandSubmitted(input, commandKind, commandText);
     this._sendWindowCmd('title_command', {
       window_id_hint: win?.dataset.surfaceId || win?.dataset.canonicalId || '',
       command_text: commandText,
@@ -10588,6 +10590,27 @@ class SimpleWindowManager {
     });
     this._showTitleCommandSuggestions(input, false);
     return true;
+  }
+
+  _markTitleCommandSubmitted(input, commandKind = '', commandText = '') {
+    if (!input) return;
+    const prior = this._titleCommandFeedbackTimers.get(input);
+    if (prior) window.clearTimeout(prior);
+    const kind = String(commandKind || this._titleCommandKind(commandText || input.value || '') || 'command');
+    const winEl = input.closest('.wm-window');
+    input.classList.remove('command-submitted');
+    void input.offsetWidth;
+    input.classList.add('command-submitted');
+    input.dataset.commandFeedback = 'submitted';
+    input.dataset.commandKind = kind;
+    if (winEl) winEl.dataset.titleCommandFeedback = kind;
+    const timer = window.setTimeout(() => {
+      input.classList.remove('command-submitted');
+      delete input.dataset.commandFeedback;
+      if (winEl && winEl.dataset.titleCommandFeedback === kind) delete winEl.dataset.titleCommandFeedback;
+      this._titleCommandFeedbackTimers.delete(input);
+    }, 560);
+    this._titleCommandFeedbackTimers.set(input, timer);
   }
 
   _focusActiveTitleInput() {

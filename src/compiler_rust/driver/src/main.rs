@@ -90,7 +90,7 @@ use simple_driver::cli::verify::run_verify;
 #[cfg(feature = "tui")]
 use simple_driver::cli::tui::run_tui_repl;
 use simple_driver::cli::doc_gen::{
-    run_check_dbs, run_feature_gen, run_spec_gen, run_task_gen, run_todo_gen, run_todo_scan,
+    run_bug_gen, run_check_dbs, run_feature_gen, run_spec_gen, run_task_gen, run_todo_gen, run_todo_scan,
     run_traceability_check, run_tracking,
 };
 use simple_driver::cli::qualify_ignore::{handle_qualify_ignore, parse_qualify_ignore_args};
@@ -535,6 +535,13 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         app_path: "src/app/task_gen/main.spl",
         rust_handler: Handler::Args(run_task_gen),
         env_override: "SIMPLE_TASK_GEN_RUST",
+        needs_rust_flags: &[],
+    },
+    CommandEntry {
+        name: "bug-gen",
+        app_path: "src/app/bug_gen/main.spl",
+        rust_handler: Handler::Args(run_bug_gen),
+        env_override: "SIMPLE_BUG_GEN_RUST",
         needs_rust_flags: &[],
     },
     CommandEntry {

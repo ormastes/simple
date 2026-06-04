@@ -59,6 +59,6 @@ Typical execution time: 2-3 seconds for full project scan
 
 ## See Also
 
-- Test results: `doc/test/test_result.md`
-- Feature tracking: `doc/feature/feature.md`
-- Build status: `doc/build/recent_build.md`
+- Test results: `doc/08_tracking/test/test_result.md`
+- Feature tracking: `doc/08_tracking/feature/feature.md`
+- Build status: `doc/08_tracking/build/recent_build.md`

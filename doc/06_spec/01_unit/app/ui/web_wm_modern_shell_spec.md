@@ -60,7 +60,7 @@ Verifies the first modern Simple Web WM slice at the contract level.
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 642 lines folded for reproduction.
+Runnable source: 647 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -292,10 +292,15 @@ expect(html).to_contain(".wm-quality-traffic-side-policy-value")
 expect(html).to_contain(":root[data-wm-motion=off] .wm-quality-computed-traffic-dots::before")
 expect(html).to_contain(".wm-traffic-lights button::after")
 expect(html).to_contain(".wm-traffic-lights:hover button::after")
+expect(html).to_contain(".wm-traffic-lights button.commanding")
+expect(html).to_contain(".wm-traffic-lights button.commanding::before")
 expect(html).to_contain(".wm-btn-close::after { content: 'x'")
 expect(html).to_contain(".wm-btn-minimize::after { content: '-'")
 expect(html).to_contain(".wm-btn-maximize::after { content: '+'")
+expect(html).to_contain("@keyframes wm-traffic-command")
+expect(html).to_contain("@keyframes wm-traffic-command-ring")
 expect(html).to_contain(":root[data-wm-motion=off] .wm-traffic-lights button::after")
+expect(html).to_contain(":root[data-wm-motion=off] .wm-traffic-lights button.commanding")
 expect(html).to_contain(".wm-quality-computed-dock-preview")
 expect(html).to_contain(".wm-quality-computed-dock-metric.warn")
 expect(html).to_contain(".wm-quality-computed-dock-icon")
@@ -715,7 +720,7 @@ expect(html).to_contain("border-radius: 999px")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 1289 lines folded for reproduction.
+Runnable source: 1293 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -729,6 +734,10 @@ expect(js).to_contain("_markWindowFocusAcquired")
 expect(js).to_contain("_focusAcquiredTimers")
 expect(js).to_contain("dataset.focusTransition")
 expect(js).to_contain("classList.add('focus-acquired')")
+expect(js).to_contain("_markTrafficCommandFeedback")
+expect(js).to_contain("_trafficCommandTimers")
+expect(js).to_contain("dataset.windowCommandFeedback")
+expect(js).to_contain("classList.add('commanding')")
 expect(js).to_contain("style.setProperty('--wm-minimize-target-x'")
 expect(js).to_contain("style.setProperty('--wm-minimize-target-y'")
 expect(js).to_contain("style.removeProperty('--wm-minimize-target-x')")
@@ -2017,7 +2026,7 @@ expect(retained).to_contain("Maximize window")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 1280 lines folded for reproduction.
+Runnable source: 1282 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -2520,6 +2529,8 @@ expect(preview).to_contain("data-computed-traffic-metric=\"color\"")
 expect(preview).to_contain("data-computed-traffic-metric=\"hit\"")
 expect(preview).to_contain("data-computed-traffic-metric=\"motion\"")
 expect(preview).to_contain("wm-quality-computed-traffic-dots")
+expect(preview).to_contain("wm-btn-minimize commanding")
+expect(preview).to_contain("data-window-command-feedback=\"minimize\"")
 expect(preview).to_contain("role=\"listbox\" aria-label=\"Traffic side policy\"")
 expect(preview).to_contain("data-traffic-side-policy-active-index=\"0\"")
 expect(preview).to_contain("aria-activedescendant=\"wm-quality-traffic-side-policy-0\"")
