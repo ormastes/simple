@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 226 | 226 | 0 | 0 |
+| 227 | 227 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -12171,6 +12171,39 @@ match result:
 
 </details>
 
+#### copies Uint8Array slice bytes from nonzero-offset views in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `true:false:false:false:0:0:0:2:2:2:4,50:30,255:99,50:30,77,50,60:10,20,30,77,... (full value in folded executable source)`
+
+3. Err
+   - Expected: "unexpected uint8 view slice copied buffer js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var base = new Uint8Array(7); base[0] = 10; base[1] = 20; base[2] = 30; base[3] = 40; base[4] = 50; base[5] = 60; base[6] = 70; var view = base.subarray(2, 6); var direct = view.slice(1, 3); var callSlice = Uint8Array.prototype.slice.call(view, 0, 2); var applySlice = Uint8Array.prototype.slice.apply(view, [-3, -1]); direct[0] = 260; callSlice[1] = -1; applySlice[0] = 99; view[1] = 77; (view.buffer === base.buffer) + ':' + (direct.buffer === view.buffer) + ':' + (callSlice.buffer === view.buffer) + ':' + (applySlice.buffer === view.buffer) + ':' + direct.byteOffset + ':' + callSlice.byteOffset + ':' + applySlice.byteOffset + ':' + direct.length + ':' + callSlice.length + ':' + applySlice.length + ':' + direct.toString() + ':' + callSlice.toString() + ':' + applySlice.toString() + ':' + view.toString() + ':' + base.toString()")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("true:false:false:false:0:0:0:2:2:2:4,50:30,255:99,50:30,77,50,60:10,20,30,77,50,60,70")
+    Err(err):
+        expect("unexpected uint8 view slice copied buffer js error: {err}").to_equal("")
+```
+
+</details>
+
 #### copies overlapping Uint8Array subarray windows through set in browser scripts
 
 1. var session = BrowserSession new
@@ -12817,8 +12850,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 226 |
-| Active scenarios | 226 |
+| Total scenarios | 227 |
+| Active scenarios | 227 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
