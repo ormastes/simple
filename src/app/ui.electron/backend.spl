@@ -9,8 +9,13 @@ use common.ui.capability.{Capability, NotSupported}
 use common.ui.semantic_contract.{
     SEMANTIC_UI_STAGE_RENDERER,
     SEMANTIC_UI_STATUS_AVAILABLE,
+    SemanticUiCommand,
+    SemanticUiRenderTransportBundle,
     SemanticUiSnapshot,
-    semantic_ui_snapshot_from_state_with_capabilities
+    semantic_ui_render_transport_bundle,
+    semantic_ui_snapshot_from_state_with_capabilities,
+    semantic_ui_snapshot_to_json,
+    semantic_ui_snapshot_transport_json
 }
 use common.ui.web_render_api.{
     WEB_RENDER_TARGET_ELECTRON,
@@ -19,6 +24,7 @@ use common.ui.web_render_api.{
     web_render_body_html,
     web_render_capabilities_for_target,
     web_render_host_window_command_to_json,
+    web_render_ipc_json_with_html_and_semantic,
     web_render_input_envelope_from_event,
     web_render_input_envelope_to_json,
     web_render_to_artifact
@@ -36,6 +42,14 @@ fn electron_render_ipc_json(state: UIState, viewport_w: i32, viewport_h: i32) ->
     val body_html = render_html_tree(state.tree.root_node(), state)
     val req = WebRenderRequest.html(WEB_RENDER_TARGET_ELECTRON, "", body_html, css, "", viewport_w, viewport_h)
     web_render_to_artifact(req).ipc_json
+
+fn electron_semantic_render_ipc_json(state: UIState, viewport_w: i32, viewport_h: i32) -> text:
+    val theme = state.tree.theme_name()
+    val css = generate_css(theme)
+    val body_html = render_html_tree(state.tree.root_node(), state)
+    val full_html = "<html><head><title></title><style>" + css + "</style></head><body><div id=\"app\">" + body_html + "</div></body></html>"
+    val req = WebRenderRequest.html(WEB_RENDER_TARGET_ELECTRON, "", body_html, css, "", viewport_w, viewport_h)
+    web_render_ipc_json_with_html_and_semantic(req, full_html, semantic_ui_snapshot_to_json(electron_semantic_snapshot(state)))
 
 # =========================================================================
 # Electron Backend
@@ -93,6 +107,18 @@ class ElectronBackend:
 
     fn host_window_command_json(cmd: WebRenderHostWindowCommand) -> text:
         web_render_host_window_command_to_json(cmd)
+
+    fn semantic_snapshot_json(state: UIState) -> text:
+        semantic_ui_snapshot_to_json(electron_semantic_snapshot(state))
+
+    fn semantic_snapshot_envelope_json(state: UIState, surface_id: text, revision: u64) -> text:
+        semantic_ui_snapshot_transport_json(WEB_RENDER_TARGET_ELECTRON, surface_id, revision, electron_semantic_snapshot(state))
+
+    fn semantic_transport_bundle(state: UIState, surface_id: text, command: SemanticUiCommand, revision: u64, from_sequence: u64, to_sequence: u64, patches_json: text) -> SemanticUiRenderTransportBundle:
+        semantic_ui_render_transport_bundle(WEB_RENDER_TARGET_ELECTRON, surface_id, electron_semantic_snapshot(state), command, revision, from_sequence, to_sequence, patches_json)
+
+    fn semantic_render_ipc_json(state: UIState) -> text:
+        electron_semantic_render_ipc_json(state, self.viewport_width(), self.viewport_height())
 
     # --- Capabilities ---
 

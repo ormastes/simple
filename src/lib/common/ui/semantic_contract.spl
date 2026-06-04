@@ -16,6 +16,15 @@ use common.ui.access_snapshot.{ui_access_snapshot_from_state}
 use common.ui.capability.{Capability}
 use common.ui.capability_policy.{capability_name}
 use common.ui.widget.{UIState, UIEvent}
+use common.ui.web_render_api.{
+    WebRenderPatchEnvelope,
+    WebRenderSnapshotEnvelope,
+    web_render_input_envelope_from_event,
+    web_render_input_envelope_to_json,
+    web_render_patch_envelope_to_json,
+    web_render_snapshot_envelope_to_json
+}
+use common.text_advanced.{escape_json}
 
 val SEMANTIC_UI_PROTOCOL_VERSION: i32 = UI_ACCESS_PROTOCOL_VERSION
 
@@ -191,6 +200,27 @@ class SemanticUiSnapshot:
             recent_events: []
         )
 
+class SemanticUiRenderTransportBundle:
+    target: text
+    surface_id: text
+    semantic_json: text
+    input_json: text
+    snapshot_json: text
+    patch_json: text
+
+    static fn create(target: text, surface_id: text, snapshot: SemanticUiSnapshot, command: SemanticUiCommand, revision: u64, from_sequence: u64, to_sequence: u64, patches_json: text) -> SemanticUiRenderTransportBundle:
+        val semantic_json = semantic_ui_snapshot_to_json(snapshot)
+        val event = _semantic_ui_command_event_or_action(command)
+        val input = web_render_input_envelope_from_event(target, surface_id, event)
+        SemanticUiRenderTransportBundle(
+            target: target,
+            surface_id: surface_id,
+            semantic_json: semantic_json,
+            input_json: web_render_input_envelope_to_json(input),
+            snapshot_json: semantic_ui_snapshot_transport_json(target, surface_id, revision, snapshot),
+            patch_json: web_render_patch_envelope_to_json(WebRenderPatchEnvelope(target: target, surface_id: surface_id, from_sequence: from_sequence, to_sequence: to_sequence, patches_json: patches_json, snapshot_json: semantic_json))
+        )
+
 fn semantic_ui_elements_from_access(nodes: [UiAccessNode]) -> [SemanticElementInfo]:
     var out: [SemanticElementInfo] = []
     for node in nodes:
@@ -234,6 +264,62 @@ fn semantic_ui_has_capability(snapshot: SemanticUiSnapshot, capability: text) ->
         if cap.name == capability and cap.available:
             return true
     false
+
+fn semantic_ui_snapshot_to_json(snapshot: SemanticUiSnapshot) -> text:
+    "{" +
+    "\"protocol_version\":{snapshot.protocol_version}," +
+    "\"stage\":\"{escape_json(snapshot.stage)}\"," +
+    "\"adapter_status\":\"{escape_json(snapshot.adapter_status)}\"," +
+    "\"state\":{" +
+    "\"mode\":\"{escape_json(snapshot.state.mode)}\"," +
+    "\"focused_id\":\"{escape_json(snapshot.state.focused_id)}\"," +
+    "\"title\":\"{escape_json(snapshot.state.title)}\"," +
+    "\"theme\":\"{escape_json(snapshot.state.theme)}\"," +
+    "\"element_count\":{snapshot.state.element_count}," +
+    "\"active_surface\":\"{escape_json(snapshot.state.active_surface)}\"" +
+    "}," +
+    "\"capabilities\":" + _semantic_ui_capabilities_json(snapshot.capabilities) + "," +
+    "\"elements\":" + _semantic_ui_elements_json(snapshot.elements) + "," +
+    "\"recent_event_count\":{snapshot.recent_events.len()}" +
+    "}"
+
+fn semantic_ui_snapshot_transport_json(target: text, surface_id: text, revision: u64, snapshot: SemanticUiSnapshot) -> text:
+    web_render_snapshot_envelope_to_json(WebRenderSnapshotEnvelope(target: target, surface_id: surface_id, revision: revision, snapshot_json: semantic_ui_snapshot_to_json(snapshot)))
+
+fn semantic_ui_render_transport_bundle(target: text, surface_id: text, snapshot: SemanticUiSnapshot, command: SemanticUiCommand, revision: u64, from_sequence: u64, to_sequence: u64, patches_json: text) -> SemanticUiRenderTransportBundle:
+    SemanticUiRenderTransportBundle.create(target, surface_id, snapshot, command, revision, from_sequence, to_sequence, patches_json)
+
+fn _semantic_ui_command_event_or_action(command: SemanticUiCommand) -> UIEvent:
+    val event = semantic_ui_command_to_event(command)
+    if event.?:
+        return event.unwrap()
+    UIEvent.Action(name: command.command_type)
+
+fn _semantic_ui_capabilities_json(caps: [SemanticUiCapability]) -> text:
+    var parts: [text] = []
+    for cap in caps:
+        parts.push("{" +
+            "\"name\":\"{escape_json(cap.name)}\"," +
+            "\"value\":\"{escape_json(cap.value)}\"," +
+            "\"available\":{cap.available.to_text()}" +
+            "}")
+    "[" + parts.join(",") + "]"
+
+fn _semantic_ui_elements_json(elements: [SemanticElementInfo]) -> text:
+    var parts: [text] = []
+    for el in elements:
+        parts.push("{" +
+            "\"canonical_id\":\"{escape_json(el.canonical_id)}\"," +
+            "\"surface_id\":\"{escape_json(el.surface_id)}\"," +
+            "\"widget_id\":\"{escape_json(el.widget_id)}\"," +
+            "\"kind\":\"{escape_json(el.kind)}\"," +
+            "\"visible\":{el.visible.to_text()}," +
+            "\"focused\":{el.focused.to_text()}," +
+            "\"enabled\":{el.enabled.to_text()}," +
+            "\"selected\":{el.selected.to_text()}," +
+            "\"text\":\"{escape_json(el.text)}\"" +
+            "}")
+    "[" + parts.join(",") + "]"
 
 fn semantic_ui_command_to_event_kind(command: SemanticUiCommand) -> text:
     if command.command_type == "type":

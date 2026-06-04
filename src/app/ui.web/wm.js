@@ -1359,6 +1359,9 @@ class SimpleWindowManager {
       { label: 'Set dock visibility: shown', category: 'Appearance', shortcut: '', icon: 'D', action: () => this.setDockVisibilityPreference('shown') },
       { label: 'Set dock visibility: auto-hide', category: 'Appearance', shortcut: '', icon: 'D', action: () => this.setDockVisibilityPreference('auto') },
       { label: 'Set dock visibility: hidden', category: 'Appearance', shortcut: '', icon: 'D', action: () => this.setDockVisibilityPreference('hidden') },
+      { label: 'Set corner radius: round', category: 'Appearance', shortcut: '', icon: 'R', action: () => this.setCornerRadiusPreference('round') },
+      { label: 'Set corner radius: soft', category: 'Appearance', shortcut: '', icon: 'S', action: () => this.setCornerRadiusPreference('soft') },
+      { label: 'Set corner radius: square', category: 'Appearance', shortcut: '', icon: 'Q', action: () => this.setCornerRadiusPreference('square') },
       { label: 'Set chrome verbosity: full', category: 'Appearance', shortcut: '', icon: 'F', action: () => this.setChromeVerbosityPreference('full') },
       { label: 'Set chrome verbosity: compact', category: 'Appearance', shortcut: '', icon: 'C', action: () => this.setChromeVerbosityPreference('compact') },
       { label: 'Set chrome verbosity: minimal', category: 'Appearance', shortcut: '', icon: 'M', action: () => this.setChromeVerbosityPreference('minimal') },
@@ -4361,6 +4364,13 @@ class SimpleWindowManager {
     density.appendChild(this._makeControlCenterButton('Comfortable density', this._densityMode === 'comfortable', () => this.setDensityPreference('comfortable')));
     density.appendChild(this._makeControlCenterButton('Spacious density', this._densityMode === 'spacious', () => this.setDensityPreference('spacious')));
     panel.appendChild(density);
+    const cornerRadius = document.createElement('div');
+    cornerRadius.className = 'wm-control-group';
+    cornerRadius.setAttribute('aria-label', 'Corner radius');
+    cornerRadius.appendChild(this._makeControlCenterButton('Round corners', this._cornerRadiusMode === 'round', () => this._setCornerRadiusFromControlCenter('round')));
+    cornerRadius.appendChild(this._makeControlCenterButton('Soft corners', this._cornerRadiusMode === 'soft', () => this._setCornerRadiusFromControlCenter('soft')));
+    cornerRadius.appendChild(this._makeControlCenterButton('Square corners', this._cornerRadiusMode === 'square', () => this._setCornerRadiusFromControlCenter('square')));
+    panel.appendChild(cornerRadius);
     const tools = document.createElement('div');
     tools.className = 'wm-control-group';
     tools.setAttribute('aria-label', 'Workspace tools');
@@ -4421,6 +4431,13 @@ class SimpleWindowManager {
     if (this._controlCenter && !this._controlCenter.hidden) this._renderControlCenter();
     if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
     return accentId;
+  }
+
+  _setCornerRadiusFromControlCenter(preference) {
+    const radius = this.setCornerRadiusPreference(preference);
+    this._sendWindowCmd('corner_radius_pick', { corner_radius_id: radius });
+    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
+    return radius;
   }
 
   _ensureWallpaperPicker() {

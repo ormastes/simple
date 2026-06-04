@@ -12,7 +12,7 @@ Project documentation organized by numbered categories.
 | `03_plan` | Planning documents |
 | `04_architecture` | Architecture documentation |
 | `05_design` | Design documents |
-| `06_spec` | Specifications |
+| `06_spec` | Specifications (see `06_spec/FILE.md` for generated vs manual) |
 | `07_guide` | Guides and references |
 | `08_tracking` | Tracking (tests, todos, bugs) |
 | `09_report` | Reports |

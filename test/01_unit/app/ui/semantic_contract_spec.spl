@@ -15,15 +15,19 @@ use common.ui.semantic_contract.{
     SemanticUiCommand,
     SemanticUiDispatchResult,
     SemanticUiSnapshot,
+    semantic_ui_render_transport_bundle,
     semantic_ui_capabilities_from_backend,
     semantic_ui_command_to_event_kind,
     semantic_ui_command_to_event,
     semantic_ui_has_capability,
     semantic_ui_snapshot_from_state,
     semantic_ui_snapshot_from_state_with_capabilities,
+    semantic_ui_snapshot_to_json,
+    semantic_ui_snapshot_transport_json,
     semantic_ui_stage_at_least
 }
 use common.ui.capability.{Capability}
+use common.ui.web_render_api.{WEB_RENDER_TARGET_ELECTRON}
 use nogc_sync_mut.ui.session.{UISession}
 use common.ui.widget.{UIEvent}
 
@@ -53,6 +57,34 @@ describe "semantic UI contract snapshot":
         expect(snapshot.adapter_status).to_equal("semantic_adapter_unavailable")
         expect(snapshot.state.element_count).to_equal(0)
         expect(snapshot.elements.len()).to_equal(0)
+
+    it "serializes semantic snapshots into shared render snapshot envelopes":
+        val snapshot = semantic_ui_snapshot_from_state_with_capabilities(_semantic_demo_state(), SEMANTIC_UI_STAGE_RENDERER, SEMANTIC_UI_STATUS_AVAILABLE, [Capability.Mouse])
+        val json = semantic_ui_snapshot_to_json(snapshot)
+        expect(json).to_contain("\"stage\":\"S3\"")
+        expect(json).to_contain("\"adapter_status\":\"available\"")
+        expect(json).to_contain("\"element_count\":3")
+        expect(json).to_contain("\"capabilities\":[")
+        expect(json).to_contain("\"name\":\"Mouse\"")
+        expect(json).to_contain("\"canonical_id\":\"main#root\"")
+
+        val envelope = semantic_ui_snapshot_transport_json(WEB_RENDER_TARGET_ELECTRON, "main", 7u64, snapshot)
+        expect(envelope).to_contain("\"type\":\"snapshot\"")
+        expect(envelope).to_contain("\"target\":\"electron\"")
+        expect(envelope).to_contain("\"revision\":7")
+        expect(envelope).to_contain("\"snapshot\":{\"protocol_version\"")
+
+    it "builds semantic render transport bundles from shared commands":
+        val snapshot = semantic_ui_snapshot_from_state_with_capabilities(_semantic_demo_state(), SEMANTIC_UI_STAGE_RENDERER, SEMANTIC_UI_STATUS_AVAILABLE, [Capability.Mouse])
+        val bundle = semantic_ui_render_transport_bundle(WEB_RENDER_TARGET_ELECTRON, "main", snapshot, SemanticUiCommand.type_text("main", "name_input", "Grace"), 8u64, 8u64, 9u64, "[]")
+
+        expect(bundle.target).to_equal("electron")
+        expect(bundle.semantic_json).to_contain("\"focused_id\"")
+        expect(bundle.input_json).to_contain("\"event_type\":\"input\"")
+        expect(bundle.input_json).to_contain("\"target_id\":\"name_input\"")
+        expect(bundle.snapshot_json).to_contain("\"stage\":\"S3\"")
+        expect(bundle.patch_json).to_contain("\"patches\":[]")
+        expect(bundle.patch_json).to_contain("\"snapshot\":{\"protocol_version\"")
 
     it "carries backend capability vocabulary in semantic snapshots":
         val caps = semantic_ui_capabilities_from_backend([Capability.Mouse, Capability.Color])
