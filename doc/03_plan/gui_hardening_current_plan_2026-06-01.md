@@ -4247,6 +4247,24 @@ catch callback receives the rejected instantiate result status and error
 metadata. The focused fetch/WASM chain spec now passes `102/102`; broader
 browser/WASM semantics remain open.
 
+BrowserSession truncated-section streaming catch continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession scripts now route valid-header/truncated-section WASM bodies
+through both `WebAssembly.compileStreaming(window.fetch(...))` and
+`WebAssembly.instantiateStreaming(window.fetch(...))` promise `catch` callbacks
+after network responses are committed. The focused assertion checks queued
+pre-commit state, compile and instantiate fetch URLs, `invalid-wasm-section`
+from compileStreaming, and `status=invalid` plus `invalid-wasm-section` from
+instantiateStreaming. The focused fetch/WASM chain spec now passes `157/157`;
+the native WASM host spec remained `107/107`, the WebGPU JS/WASM system spec
+remained `106/106`, Node API conformance remained `275/275`, and `src/lib`
+completed with the existing `447 warning(s)`. Broader browser/WASM semantics
+remain open.
+
 BrowserSession instantiateStreaming fetch-error catch continuation:
 
 - `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
