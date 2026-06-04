@@ -280,19 +280,30 @@ impl ModuleInliner:
             var modified = false
             var generated_locals: [MirLocal] = []
 
+            # Per-function inline budget. Bounds total inlined volume so a
+            # function calling many small candidates (e.g. the densely
+            # interconnected Hindley-Milner helpers in type_inference.spl) can
+            # never blow MIR size — and codegen time — up unboundedly. Any call
+            # left un-inlined stays a correct Call, so capping is safe. This
+            # mirrors the seed-side guard in codegen/mir_inline.rs.
+            val max_inline_locals = 2048
             for block in func.blocks:
-                var caller_with_generated_locals = func
-                caller_with_generated_locals.locals = func.locals
-                for local in generated_locals:
-                    caller_with_generated_locals.locals = caller_with_generated_locals.locals.push(local)
-                val result = self.inline_calls_in_block_with_candidates(
-                    block, caller_with_generated_locals, inline_candidates, inline_candidates_by_name, cost_analyzer
-                )
-                optimized_blocks = optimized_blocks.push(result.block)
-                if result.did_inline:
-                    modified = true
-                    for local in result.generated_locals:
-                        generated_locals = generated_locals.push(local)
+                if generated_locals.len() > max_inline_locals:
+                    # Budget exhausted: emit remaining blocks without inlining.
+                    optimized_blocks = optimized_blocks.push(block)
+                else:
+                    var caller_with_generated_locals = func
+                    caller_with_generated_locals.locals = func.locals
+                    for local in generated_locals:
+                        caller_with_generated_locals.locals = caller_with_generated_locals.locals.push(local)
+                    val result = self.inline_calls_in_block_with_candidates(
+                        block, caller_with_generated_locals, inline_candidates, inline_candidates_by_name, cost_analyzer
+                    )
+                    optimized_blocks = optimized_blocks.push(result.block)
+                    if result.did_inline:
+                        modified = true
+                        for local in result.generated_locals:
+                            generated_locals = generated_locals.push(local)
 
             if modified:
                 var new_locals = func.locals

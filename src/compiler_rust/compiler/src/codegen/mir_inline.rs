@@ -110,8 +110,25 @@ fn inline_in_function_indexed(
     pool: &[Option<MirFunction>],
     candidate_indices: &HashMap<String, usize>,
 ) {
+    // Circuit breaker against runaway transitive inlining. `inline_call`
+    // appends the callee's blocks (plus a continuation) to the caller, so the
+    // `index < caller.blocks.len()` walk below also visits freshly-inlined
+    // bodies and keeps inlining their calls. For densely interconnected small
+    // pure functions (e.g. the Hindley-Milner helpers in
+    // `10.frontend/core/type_inference.spl`, where unify_lookup → unify_is_bound,
+    // type_subst_apply → unify_lookup, … all qualify) this cascades into
+    // multiplicative MIR growth and made that file exceed the per-file compile
+    // timeout (>300s) despite checking in <0.1s. Inlining is a pure
+    // optimization — any call left un-inlined stays a correct `Call` — so we
+    // simply stop once a caller has grown past these bounds.
+    const MAX_CALLER_BLOCKS: usize = 512;
+    const MAX_INLINES: usize = 256;
+    let mut inlines_done = 0usize;
     let mut index = 0;
     while index < caller.blocks.len() {
+        if inlines_done >= MAX_INLINES || caller.blocks.len() > MAX_CALLER_BLOCKS {
+            break;
+        }
         let Some((call_pos, dest, target, args)) = tail_call_in_block(&caller.blocks[index]) else {
             index += 1;
             continue;
@@ -132,6 +149,7 @@ fn inline_in_function_indexed(
         // Clone happens here, at the actual inline site.
         let callee = callee.clone();
         inline_call(caller, index, call_pos, dest, args, &callee);
+        inlines_done += 1;
         index += 1;
     }
 }
