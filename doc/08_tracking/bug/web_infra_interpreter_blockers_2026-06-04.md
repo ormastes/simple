@@ -62,20 +62,30 @@ restaurant webapp infra test vehicle.
     - Falls back to stub (CODEGEN-STUB-FALLBACK) — non-fatal for webapp code
     - Root cause: codegen emitting float operations on integer-typed values
 
-11. **Native build links all of `--source src/lib` including wrong-arch code**
-    - RISC-V inline assembly (csrs, csrw, mie) compiled on x86_64 → 20+ asm errors
-    - Linking fails: `fatal error: too many errors emitted`
-    - Root cause: `native-build --source src/lib` compiles ALL lib files including
-      `nogc_async_mut_noalloc/` baremetal code, not just webapp-reachable modules
-    - Binary not produced despite successful compilation of webapp files
+11. **Full-scan discovery compiles unreachable wrong-arch code** — FIXED (2026-06-04)
+    - Root cause: `native-build --entry` defaulted to full-scan instead of
+      entry-closure discovery. `--source src/lib` compiled ALL 2600+ stdlib
+      files including RISC-V baremetal asm, GPU rasterization, torch, etc.
+    - Fix: auto-enable `entry_closure` when `--entry` is provided. Added
+      `--no-entry-closure` escape hatch. Bootstrap already passed
+      `--entry-closure` explicitly so this is a no-op for bootstrap.
+    - Result: RISC-V asm errors eliminated, Cranelift codegen stubs reduced
+      from ~20 to near-zero for webapp-reachable code.
+
+12. **Linker STB_GLOBAL binding conflicts in _stubs.s**
+    - Stubs assembly declares `.globl` for symbols that are also defined in
+      compiled object files, causing `changed binding to STB_GLOBAL` errors
+    - Affects ~30 symbols (SIMD, database WAL, HTTP, JIT modules)
+    - Root cause: stub generator doesn't check if symbol is already compiled
+    - Binary not produced until this is resolved
 
 ## Conclusion
 
 **Interpreter path blocked** by generics (3) + `?` operator (8).
-**Native build:** import resolution (9) FIXED. Compilation succeeds for webapp
-files. Linking blocked by wrong-arch code (11) and Cranelift codegen stubs (10).
-Bugs 5-7, 9 resolved.
+**Native build:** bugs 9, 11 FIXED. Entry-closure discovery now compiles only
+reachable modules. Linking blocked by stub binding conflicts (12). Cranelift
+codegen stubs (10) mostly eliminated by entry-closure (no longer compiling
+GPU/baremetal code). Bugs 5-7, 9, 11 resolved.
 
-The restaurant webapp code is correct — all 43 SPipe specs pass. Remaining
-blockers are all pre-existing compiler issues, not webapp bugs. Priority:
-(11) arch-filtered linking → (10) Cranelift codegen → (3) generics → (8) `?` typing.
+The restaurant webapp code is correct — all 43 SPipe specs pass. Next priority:
+(12) stub binding fix → (3) generics → (8) `?` typing.

@@ -148,7 +148,7 @@ expect(sample.warm_start_us).to_equal(1000000)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -161,12 +161,14 @@ val records = current_host_backend_measurement_matrix(
     454623792,
     "backend-measurement-spec-startup"
 )
-expect(records.len()).to_equal(4)
+expect(records.len()).to_equal(6)
 expect(backend_measurement_matrix_valid(records)).to_equal(true)
 val sdn = backend_measurement_matrix_sdn(records)
 expect(sdn).to_contain("metal_status:")
 expect(sdn).to_contain("vulkan_status:")
 expect(sdn).to_contain("cuda_status:")
+expect(sdn).to_contain("opencl_status:")
+expect(sdn).to_contain("hip_status:")
 expect(sdn).to_contain("cpu_simd_status: \"Initialized\"")
 ```
 

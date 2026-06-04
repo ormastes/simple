@@ -901,7 +901,7 @@ expect(html).to_contain("@keyframes wm-hot-corner-activate")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 1525 lines folded for reproduction.
+Runnable source: 1526 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1785,6 +1785,7 @@ expect(js).to_contain("dataset.accentFeedback")
 expect(js).to_contain("dataset.accentFeedbackChoice")
 expect(js).to_contain("classList.add('action-feedback')")
 expect(js).to_contain("_feedbackAllows('standard')")
+expect(js).to_contain("aria-busy")
 expect(js).to_contain("aria-activedescendant")
 expect(js).to_contain("aria-selected")
 expect(js).to_contain("event.key === 'ArrowRight'")
@@ -2439,7 +2440,7 @@ expect(retained).to_contain("Maximize window")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 1430 lines folded for reproduction.
+Runnable source: 1431 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -3720,6 +3721,7 @@ expect(preview).to_contain("data-accent-source=\"theme\"")
 expect(preview).to_contain("wm-accent-palette action-feedback")
 expect(preview).to_contain("data-accent-feedback=\"pick\"")
 expect(preview).to_contain("data-accent-feedback-choice=\"blue\"")
+expect(preview).to_contain("aria-busy=\"true\"")
 expect(preview).to_contain("aria-activedescendant=\"wm-accent-choice-0\"")
 expect(preview).to_contain("data-accent-active-index=\"0\"")
 expect(preview).to_contain("role=\"listbox\" aria-label=\"Available accent colors\"")

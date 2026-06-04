@@ -27,7 +27,7 @@ opencl_backend_cli_smoke_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -88,6 +88,58 @@ expect(rt_file_exists(opencl_out_path)).to_equal(false)
 
 </details>
 
+#### bin/simple compile --backend=opencl treats @gpu opencl tag as kernel
+
+1. "@gpu
+
+2. "fn tagged add kernel
+
+3. delete if exists
+
+4. delete if exists
+
+5. rt file write text
+   - Expected: code equals `0`
+   - Expected: rt_file_exists(opencl_out_path) is true
+
+6. delete if exists
+
+7. delete if exists
+   - Expected: rt_file_exists(opencl_out_path) is false
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 21 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val src_path = "/tmp/sml_driver_api_opencl_tagged_kernel.spl"
+val opencl_out_path = "/tmp/sml_driver_api_opencl_tagged_kernel.cl"
+val source =
+    "@gpu(\"opencl\")\n" +
+    "fn tagged_add_kernel(a: i32, b: i32) -> i32:\n" +
+    "    return a + b\n"
+delete_if_exists(src_path)
+delete_if_exists(opencl_out_path)
+rt_file_write_text(src_path, source)
+
+val (_stdout, _stderr, code) = rt_process_run("bin/simple", ["compile", "--backend=opencl", src_path, "-o", opencl_out_path])
+
+expect(code).to_equal(0)
+expect(rt_file_exists(opencl_out_path)).to_equal(true)
+val output = rt_file_read_text(opencl_out_path)
+expect(output).to_contain("__kernel void tagged_add_kernel(long p0, long p1)")
+expect(output).to_contain("return;")
+
+delete_if_exists(src_path)
+delete_if_exists(opencl_out_path)
+expect(rt_file_exists(opencl_out_path)).to_equal(false)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -107,8 +159,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
+| Total scenarios | 2 |
+| Active scenarios | 2 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

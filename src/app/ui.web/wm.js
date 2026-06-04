@@ -5354,11 +5354,13 @@ class SimpleWindowManager {
     const panel = this._controlCenter;
     const button = panel.querySelector(`.wm-control-button[data-control-action="${CSS.escape(id)}"]`);
     panel.dataset.controlFeedback = id;
+    panel.setAttribute('aria-busy', 'true');
     panel.classList.remove('action-feedback');
     void panel.offsetWidth;
     panel.classList.add('action-feedback');
     if (button) {
       button.dataset.controlFeedback = id;
+      button.setAttribute('aria-busy', 'true');
       button.classList.remove('action-feedback');
       void button.offsetWidth;
       button.classList.add('action-feedback');
@@ -5373,9 +5375,11 @@ class SimpleWindowManager {
     if (!this._controlCenter || !this._controlCenter.isConnected) return;
     const panel = this._controlCenter;
     delete panel.dataset.controlFeedback;
+    panel.removeAttribute('aria-busy');
     panel.classList.remove('action-feedback');
     panel.querySelectorAll('.wm-control-button.action-feedback').forEach((button) => {
       button.classList.remove('action-feedback');
+      button.removeAttribute('aria-busy');
       delete button.dataset.controlFeedback;
     });
   }
@@ -5798,11 +5802,13 @@ class SimpleWindowManager {
     const choice = palette.querySelector(`.wm-accent-choice[data-accent-choice="${CSS.escape(id)}"]`);
     palette.dataset.accentFeedback = 'pick';
     palette.dataset.accentFeedbackChoice = id;
+    palette.setAttribute('aria-busy', 'true');
     palette.classList.remove('action-feedback');
     void palette.offsetWidth;
     palette.classList.add('action-feedback');
     if (choice) {
       choice.dataset.accentFeedback = 'pick';
+      choice.setAttribute('aria-busy', 'true');
       choice.classList.remove('action-feedback');
       void choice.offsetWidth;
       choice.classList.add('action-feedback');
@@ -5820,9 +5826,11 @@ class SimpleWindowManager {
     const palette = this._accentPalette;
     delete palette.dataset.accentFeedback;
     delete palette.dataset.accentFeedbackChoice;
+    palette.removeAttribute('aria-busy');
     palette.classList.remove('action-feedback');
     palette.querySelectorAll('.wm-accent-choice.action-feedback').forEach((choice) => {
       choice.classList.remove('action-feedback');
+      choice.removeAttribute('aria-busy');
       delete choice.dataset.accentFeedback;
     });
     palette.querySelectorAll('.wm-accent-swatch.action-feedback').forEach((swatch) => {

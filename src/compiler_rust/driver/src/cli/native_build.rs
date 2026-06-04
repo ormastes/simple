@@ -85,6 +85,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
     let mut runtime_path: Option<PathBuf> = None;
     let mut runtime_bundle = String::from("auto");
     let mut entry_closure = false;
+    let mut entry_closure_explicit = false;
     let mut emit_archive = false;
     let mut target_triple: Option<String> = None;
     let mut linker_script: Option<PathBuf> = None;
@@ -257,6 +258,12 @@ pub fn handle_native_build(args: &[String]) -> i32 {
             }
             "--entry-closure" => {
                 entry_closure = true;
+                entry_closure_explicit = true;
+                i += 1;
+            }
+            "--no-entry-closure" => {
+                entry_closure = false;
+                entry_closure_explicit = true;
                 i += 1;
             }
             "--emit-archive" => {
@@ -348,6 +355,14 @@ pub fn handle_native_build(args: &[String]) -> i32 {
             None
         }
     });
+
+    // When --entry is provided, default to entry-closure discovery so only
+    // reachable modules are compiled. This avoids pulling in wrong-arch code
+    // (e.g. RISC-V baremetal asm on x86_64) from broad --source dirs like src/lib.
+    // Callers can still pass --no-entry-closure to force full-scan if needed.
+    if entry_file.is_some() && !entry_closure && !entry_closure_explicit {
+        entry_closure = true;
+    }
 
     // Ensure output directory exists
     if let Some(parent) = output.parent() {

@@ -1853,6 +1853,13 @@ impl GpuSourceDialect {
             GpuSourceDialect::Hip => "HIP",
         }
     }
+
+    fn backend_name(self) -> &'static str {
+        match self {
+            GpuSourceDialect::OpenCl => "opencl",
+            GpuSourceDialect::Hip => "hip",
+        }
+    }
 }
 
 /// Generate C-like GPU source from a MIR module.
@@ -1863,9 +1870,17 @@ fn generate_gpu_source(module: &mir::MirModule, dialect: GpuSourceDialect) -> St
         dialect.label()
     ));
 
-    let has_kernels = module.functions.iter().any(is_gpu_kernel_function);
+    let has_kernels = module.functions.iter().any(|func| is_gpu_kernel_for_backend(func, dialect.backend_name()));
     for func in &module.functions {
-        if has_kernels && !is_gpu_kernel_function(func) && func.name == "main" {
+        if has_kernels && is_gpu_kernel_function(func) && !is_gpu_kernel_for_backend(func, dialect.backend_name()) {
+            out.push_str(&format!(
+                "// Skipped GPU function for non-{} target: {}\n\n",
+                dialect.backend_name(),
+                func.name
+            ));
+            continue;
+        }
+        if has_kernels && !is_gpu_kernel_for_backend(func, dialect.backend_name()) && func.name == "main" {
             out.push_str(&format!("// Skipped host function: {}\n\n", func.name));
             continue;
         }
@@ -1878,11 +1893,37 @@ fn generate_gpu_source(module: &mir::MirModule, dialect: GpuSourceDialect) -> St
 fn is_gpu_kernel_function(func: &MirFunction) -> bool {
     func.attributes
         .iter()
-        .any(|a| a == "gpu_kernel" || a == "kernel" || a == "cuda_kernel" || a == "opencl_kernel")
+        .any(|a| a == "gpu" || a == "gpu_kernel" || a == "kernel" || a == "cuda_kernel" || a == "opencl_kernel")
+}
+
+fn gpu_function_matches_backend(func: &MirFunction, backend: &str) -> bool {
+    let explicit_targets: Vec<&str> = func
+        .attributes
+        .iter()
+        .filter_map(|attr| attr.strip_prefix("gpu_target_"))
+        .collect();
+    if !explicit_targets.is_empty() {
+        return explicit_targets.iter().any(|target| *target == "auto" || *target == backend);
+    }
+
+    let backend_order: Vec<&str> = func
+        .attributes
+        .iter()
+        .filter_map(|attr| attr.strip_prefix("gpu_backend_"))
+        .collect();
+    if !backend_order.is_empty() {
+        return backend_order.iter().any(|candidate| *candidate == "auto" || *candidate == backend);
+    }
+
+    true
+}
+
+fn is_gpu_kernel_for_backend(func: &MirFunction, backend: &str) -> bool {
+    is_gpu_kernel_function(func) && gpu_function_matches_backend(func, backend)
 }
 
 fn emit_gpu_source_function(out: &mut String, func: &MirFunction, dialect: GpuSourceDialect) {
-    let is_kernel = is_gpu_kernel_function(func);
+    let is_kernel = is_gpu_kernel_for_backend(func, dialect.backend_name());
     let return_type = if is_kernel { "void" } else { "long" };
     let prefix = if is_kernel { dialect.kernel_prefix() } else { "" };
     out.push_str(&format!("{}{} {}(", prefix, return_type, func.name));
@@ -3823,6 +3864,50 @@ fn read_rom(addr: u8) -> u8:
         );
         assert!(opencl.contains("return;"), "expected OpenCL kernel return:\n{opencl}");
         assert!(!opencl.starts_with("SMF"), "OpenCL backend must not emit SMF bytes");
+    }
+
+    #[test]
+    fn compile_file_to_opencl_treats_gpu_opencl_tag_as_kernel() {
+        let source_file = NamedTempFile::new().expect("temp source");
+        std::fs::write(
+            source_file.path(),
+            "@gpu(\"opencl\")\nfn tagged_add(a: i32, b: i32) -> i32:\n    return a + b\n",
+        )
+        .expect("write source");
+        let output_file = NamedTempFile::new().expect("temp opencl");
+
+        let mut pipeline = CompilerPipeline::new().expect("compiler pipeline");
+        pipeline
+            .compile_file_to_opencl(source_file.path(), output_file.path())
+            .expect("compile OpenCL");
+
+        let opencl = std::fs::read_to_string(output_file.path()).expect("read OpenCL output");
+        assert!(
+            opencl.contains("__kernel void tagged_add(long p0, long p1)"),
+            "expected @gpu(\"opencl\") to emit OpenCL kernel signature:\n{opencl}"
+        );
+    }
+
+    #[test]
+    fn compile_file_to_hip_treats_gpu_hip_tag_as_kernel() {
+        let source_file = NamedTempFile::new().expect("temp source");
+        std::fs::write(
+            source_file.path(),
+            "@gpu(\"hip\")\nfn tagged_add(a: i32, b: i32) -> i32:\n    return a + b\n",
+        )
+        .expect("write source");
+        let output_file = NamedTempFile::new().expect("temp hip");
+
+        let mut pipeline = CompilerPipeline::new().expect("compiler pipeline");
+        pipeline
+            .compile_file_to_hip(source_file.path(), output_file.path())
+            .expect("compile HIP");
+
+        let hip = std::fs::read_to_string(output_file.path()).expect("read HIP output");
+        assert!(
+            hip.contains("extern \"C\" __global__ void tagged_add(long p0, long p1)"),
+            "expected @gpu(\"hip\") to emit HIP kernel signature:\n{hip}"
+        );
     }
 
     #[test]

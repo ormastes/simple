@@ -56,6 +56,63 @@ fn type_name_hint(ty: &ast::Type) -> Option<String> {
     }
 }
 
+fn normalize_gpu_attr_backend_name(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "auto" => Some("auto"),
+        "cuda" | "ptx" | "nvptx" | "cuda-ptx" => Some("cuda"),
+        "opencl" | "opencl-c" | "opencl-spirv" | "cl" => Some("opencl"),
+        "hip" | "hip-cpp" | "hipcc" | "rocm" => Some("hip"),
+        _ => None,
+    }
+}
+
+fn gpu_attr_string_value(expr: &ast::Expr) -> Option<&str> {
+    match expr {
+        ast::Expr::String(value) => Some(value.as_str()),
+        ast::Expr::Identifier(value) => Some(value.as_str()),
+        _ => None,
+    }
+}
+
+fn append_gpu_attribute_metadata(attrs: &mut Vec<String>, attr: &ast::Attribute) {
+    if attr.name != "gpu" {
+        return;
+    }
+
+    if !attrs.contains(&"gpu_kernel".to_string()) {
+        attrs.push("gpu_kernel".to_string());
+    }
+
+    if let Some(args) = &attr.args {
+        if let Some(first) = args.first().and_then(gpu_attr_string_value) {
+            if let Some(normalized) = normalize_gpu_attr_backend_name(first) {
+                attrs.push(format!("gpu_target_{normalized}"));
+            }
+        }
+    }
+
+    if let Some(named_args) = &attr.named_args {
+        for (name, value) in named_args {
+            if name == "target" {
+                if let Some(raw) = gpu_attr_string_value(value) {
+                    if let Some(normalized) = normalize_gpu_attr_backend_name(raw) {
+                        attrs.push(format!("gpu_target_{normalized}"));
+                    }
+                }
+            }
+            if name == "backends" {
+                if let Some(raw) = gpu_attr_string_value(value) {
+                    for backend in raw.split(',') {
+                        if let Some(normalized) = normalize_gpu_attr_backend_name(backend) {
+                            attrs.push(format!("gpu_backend_{normalized}"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn block_uses_self(body: &ast::Block) -> bool {
     body.statements.iter().any(node_uses_self)
 }
@@ -640,6 +697,9 @@ impl Lowerer {
         // Extract attributes for AOP predicate matching.
         // Include both #[attr] attributes and @decorator decorators (that aren't effects).
         let mut attributes: Vec<String> = f.attributes.iter().map(|attr| attr.name.clone()).collect();
+        for attr in &f.attributes {
+            append_gpu_attribute_metadata(&mut attributes, attr);
+        }
         for dec in &f.decorators {
             if let ast::Expr::Identifier(name) = &dec.name {
                 if ast::Effect::from_decorator_name(name).is_none() && !attributes.contains(name) {

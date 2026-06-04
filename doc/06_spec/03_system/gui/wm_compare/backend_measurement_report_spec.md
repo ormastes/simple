@@ -268,22 +268,26 @@ expect(backend_measurement_satisfies_lane(record)).to_equal(false)
 </details>
 
 <details>
-<summary>Advanced: requires Metal Vulkan CUDA and CPU SIMD lanes in the matrix</summary>
+<summary>Advanced: requires Metal Vulkan CUDA OpenCL HIP and CPU SIMD lanes in the matrix</summary>
 
-#### requires Metal Vulkan CUDA and CPU SIMD lanes in the matrix
+#### requires Metal Vulkan CUDA OpenCL HIP and CPU SIMD lanes in the matrix
 
 1. StrictBackendFactory strict
 
 2. StrictBackendFactory strict
 
 3. StrictBackendFactory strict
+
+4. StrictBackendFactory strict
+
+5. StrictBackendFactory strict
    - Expected: backend_measurement_matrix_valid(records) is true
 
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -299,13 +303,23 @@ val cuda = backend_measurement_from_probe(
     StrictBackendFactory.strict().create_backend("cuda"),
     "", "local-linux", 0, 0, 0, 0, 0, 0, 0, "", false
 )
+val opencl = backend_measurement_from_probe(
+    StrictBackendFactory.strict().create_backend("opencl"),
+    "", "local-linux", 0, 0, 0, 0, 0, 0, 0, "", false
+)
+val rocm = backend_measurement_from_probe(
+    StrictBackendFactory.strict().create_backend("rocm"),
+    "", "local-linux", 0, 0, 0, 0, 0, 0, 0, "", false
+)
 val cpu_simd = _initialized_record("cpu_simd")
-val records = [metal, vulkan, cuda, cpu_simd]
+val records = [metal, vulkan, cuda, opencl, rocm, cpu_simd]
 expect(backend_measurement_matrix_valid(records)).to_equal(true)
 val sdn = backend_measurement_matrix_sdn(records)
 expect(sdn).to_contain("metal_status:")
 expect(sdn).to_contain("vulkan_status:")
 expect(sdn).to_contain("cuda_status:")
+expect(sdn).to_contain("opencl_status:")
+expect(sdn).to_contain("hip_status:")
 expect(sdn).to_contain("cpu_simd_status:")
 expect(sdn).to_contain("p50_us:")
 expect(sdn).to_contain("p95_us:")
