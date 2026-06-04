@@ -55,7 +55,7 @@ impl GpuCheckError:
             case StringOperation(detail, line):
                 "GPU kernel error (line {line}): string operations not allowed in GPU kernels: {detail}"
             case InvalidTarget(target, line):
-                "GPU kernel error (line {line}): unsupported GPU target '{target}' (supported: auto, cuda, opencl)"
+                "GPU kernel error (line {line}): unsupported GPU target '{target}' (supported: auto, cuda, hip/rocm, opencl)"
             case UnsupportedFeature(detail, line):
                 "GPU kernel error (line {line}): {detail}"
 
@@ -87,6 +87,7 @@ val GPU_SCALAR_TYPES: [text] = [
 enum GpuKernelTarget:
     Auto
     Cuda
+    Hip
     OpenCl
 
 class GpuKernelTargetSelection:
@@ -112,6 +113,7 @@ fn gpu_kernel_target_name(target: GpuKernelTarget) -> text:
     match target:
         case Auto: "auto"
         case Cuda: "cuda"
+        case Hip: "hip"
         case OpenCl: "opencl"
 
 fn normalize_gpu_target_name(name: text) -> text:
@@ -122,9 +124,14 @@ fn normalize_gpu_target_name(name: text) -> text:
         return "auto"
     if lower == "cuda" or lower == "ptx" or lower == "nvptx":
         return "cuda"
+    if lower == "hip" or lower == "hip-cpp" or lower == "hsaco" or lower == "rocm":
+        return "hip"
     if lower == "opencl" or lower == "opencl-c" or lower == "opencl-spirv" or lower == "cl":
         return "opencl"
     lower
+
+fn is_supported_gpu_target_name(normalized: text) -> bool:
+    normalized == "cuda" or normalized == "hip" or normalized == "opencl" or normalized == "auto"
 
 fn parse_gpu_kernel_target(target_name: text) -> GpuKernelTargetSelection:
     val normalized = normalize_gpu_target_name(target_name)
@@ -132,6 +139,8 @@ fn parse_gpu_kernel_target(target_name: text) -> GpuKernelTargetSelection:
         return GpuKernelTargetSelection.create(GpuKernelTarget.Auto, "auto", "cuda,opencl", true, "ready")
     if normalized == "cuda":
         return GpuKernelTargetSelection.create(GpuKernelTarget.Cuda, "cuda", "cuda", true, "ready")
+    if normalized == "hip":
+        return GpuKernelTargetSelection.create(GpuKernelTarget.Hip, "hip", "hip", true, "ready")
     if normalized == "opencl":
         return GpuKernelTargetSelection.create(GpuKernelTarget.OpenCl, "opencl", "opencl", true, "ready")
     GpuKernelTargetSelection.create(GpuKernelTarget.Auto, normalized, "", false, "unsupported-gpu-target")
@@ -143,7 +152,7 @@ fn validate_gpu_backend_order(backends: text) -> GpuCheckError?:
     val parts = trimmed.split(",")
     for part in parts:
         val normalized = normalize_gpu_target_name(part)
-        if normalized != "cuda" and normalized != "opencl" and normalized != "auto":
+        if not is_supported_gpu_target_name(normalized):
             return Some(GpuCheckError.InvalidTarget(normalized, 0))
     nil
 
@@ -224,7 +233,7 @@ class GpuKernelChecker:
         val parts = trimmed.split(",")
         for part in parts:
             val normalized = normalize_gpu_target_name(part)
-            if normalized != "cuda" and normalized != "opencl" and normalized != "auto":
+            if not is_supported_gpu_target_name(normalized):
                 self.errors.push(GpuCheckError.InvalidTarget(normalized, line))
 
     # ------------------------------------------------------------------

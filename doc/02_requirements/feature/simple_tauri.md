@@ -6,7 +6,7 @@
 
 ## Motivation
 
-Build a **pure-Simple desktop application framework** inspired by Tauri, using the existing browser engine (`examples/browser/`) as the webview backend. Unlike Tauri (Rust + system webview) or Electron (Node + Chromium), SimpleTauri is a **single-language stack** where both the backend logic and the rendering engine are Simple code.
+Build a **pure-Simple desktop application framework** inspired by Tauri, using the existing browser engine (`examples/11_advanced/browser/`) as the webview backend. Unlike Tauri (Rust + system webview) or Electron (Node + Chromium), SimpleTauri is a **single-language stack** where both the backend logic and the rendering engine are Simple code.
 
 ### Why Not Just Use Tauri?
 
@@ -189,7 +189,7 @@ capabilities:
 | Module | Path | Used For |
 |--------|------|----------|
 | SDL2 windowing | `src/lib/nogc_sync_mut/io/window_ffi.spl` | Window creation, events, framebuffer present |
-| Browser engine | `examples/browser/` | HTML/CSS/DOM/JS render pipeline |
+| Browser engine | `examples/11_advanced/browser/` | HTML/CSS/DOM/JS render pipeline |
 | UI framework | `src/lib/common/ui/` | Native UI mode widgets, reactive state, sessions |
 | Compositor | `src/lib/nogc_sync_mut/compositor/` | Layer compositing, damage tracking |
 | HTTP client | `src/lib/nogc_sync_mut/http/` | HTTP plugin |
@@ -219,5 +219,5 @@ capabilities:
 - Research: `doc/01_research/simple_tauri.md`
 - Plan: `doc/03_plan/simple_tauri.md` (Phase 4)
 - Design: `doc/05_design/simple_tauri.md` (Phase 4)
-- Browser architecture: `examples/browser/capsule.sdn`
+- Browser architecture: `examples/11_advanced/browser/capsule.sdn`
 - UI framework: `src/lib/common/ui/`

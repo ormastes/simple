@@ -20,13 +20,13 @@ Dependency: 11.1.
 ### 11.3 Bare-enum literal callsites
 What: Once `doc/05_design/compiler_rfc_bare_enum_literals.md` lands, simplify call sites that currently use qualified form (`Toast(..., StatusVariant.Success)` → `Toast(..., Success)`).
 Why: Reduces boilerplate at every typed-action / status-variant call site across UI and app code.
-Where: `src/lib/common/ui/`, `examples/ui/`, any app code using `StatusVariant`/`Accent`/`LayoutKind`.
+Where: `src/lib/common/ui/`, `examples/06_io/ui/`, any app code using `StatusVariant`/`Accent`/`LayoutKind`.
 Dependency: bare-enum RFC merged and compiler support shipped.
 
 ### 11.4 Chain syntax in examples
-What: Once `doc/05_design/compiler_rfc_method_chain_fix.md` lands, update `examples/ui/fluent/method_modifiers_example.spl` to use true dot-chains (`node.width(120).height(40).accent(Primary)`) instead of intermediate-`var` form.
+What: Once `doc/05_design/compiler_rfc_method_chain_fix.md` lands, update `examples/06_io/ui/fluent/method_modifiers_example.spl` to use true dot-chains (`node.width(120).height(40).accent(Primary)`) instead of intermediate-`var` form.
 Why: Phase 3 shipped methods but deferred chain syntax pending compiler fix (RFC §4.1 risk 3).
-Where: `examples/ui/fluent/method_modifiers_example.spl`.
+Where: `examples/06_io/ui/fluent/method_modifiers_example.spl`.
 Dependency: chain-fix RFC merged and compiler support shipped.
 
 ## UI-track

@@ -143,7 +143,7 @@ expect(pixel(surface, 0, 0)).to_equal([0, 0, 0, 0])
 |-------|-------|
 | Category | GPU & SIMD |
 | Status | Active |
-| Source | `examples/browser/test/gpu/raster_spec.spl` |
+| Source | `examples/11_advanced/browser/test/gpu/raster_spec.spl` |
 | Updated | 2026-05-31 |
 | Generator | `simple spipe-docgen` (Simple) |
 

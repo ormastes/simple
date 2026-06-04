@@ -39,7 +39,7 @@ This research covers the shared SMF runtime path across:
 - `src/os/kernel/loader/loader_api.spl` dispatches executable bytes to ELF or SMF loaders.
 - `src/os/kernel/loader/smf.spl` was a minimal stub. It now recognizes v1.1 trailer headers and legacy offset-0 headers.
 - `src/os/kernel/loader/elf64.spl`, `elf_loader.spl`, and `process_image.spl` are still the real process-image path. SMF should initially wrap or reference ELF process images rather than replace ELF mapping logic.
-- `examples/simple_os/arch/*/boot/baremetal_stubs.c` provide architecture-specific host/runtime bridges. Drivers stay baremetal; apps should see a host-like OS ABI through syscalls, filesystem paths, and process services.
+- `examples/09_embedded/simple_os/arch/*/boot/baremetal_stubs.c` provide architecture-specific host/runtime bridges. Drivers stay baremetal; apps should see a host-like OS ABI through syscalls, filesystem paths, and process services.
 
 ## Findings
 

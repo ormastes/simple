@@ -38,7 +38,7 @@ All located in `src/lib/nogc_sync_mut/io/`.
 
 ### 1.3 Browser GPU Modules
 
-The browser platform (`examples/browser/`) contains GPU context, device, memory, and driver modules (`src/lib/nogc_sync_mut/gpu/`, `gpu_driver/`, `gpu_runtime/`). These target a future Vulkan/WebGPU pipeline and are not needed for the initial software renderer, but inform the Phase 8 GPU acceleration design.
+The browser platform (`examples/11_advanced/browser/`) contains GPU context, device, memory, and driver modules (`src/lib/nogc_sync_mut/gpu/`, `gpu_driver/`, `gpu_runtime/`). These target a future Vulkan/WebGPU pipeline and are not needed for the initial software renderer, but inform the Phase 8 GPU acceleration design.
 
 ### 1.4 Geometry Library
 
@@ -143,4 +143,4 @@ A `test/03_system/engine_2d_spec.spl` should exercise the full engine lifecycle:
 - **Limitations:** `doc/08_tracking/bug/engine_2d_limitations.md`
 - **Source:** `src/lib/nogc_sync_mut/engine/`, `src/lib/common/engine/`
 - **Unit Tests:** `test/01_unit/lib/engine/`
-- **Demo:** `examples/engine_2d_demo/main.spl`
+- **Demo:** `examples/11_advanced/engine_2d_demo/main.spl`

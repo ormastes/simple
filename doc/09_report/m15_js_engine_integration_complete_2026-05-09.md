@@ -5,7 +5,7 @@
 
 ## Summary
 
-Integrated the JavaScript engine from `examples/browser/feature/script/` into the canonical browser engine at `src/lib/gc_async_mut/gpu/browser_engine/script/`. Wired DOM bindings (getElementById, querySelector, textContent, style, classList, addEventListener), implemented event loop (microtask/macrotask queues, setTimeout, setInterval, requestAnimationFrame), and wired console.log to a DevTools console buffer.
+Integrated the JavaScript engine from `examples/11_advanced/browser/feature/script/` into the canonical browser engine at `src/lib/gc_async_mut/gpu/browser_engine/script/`. Wired DOM bindings (getElementById, querySelector, textContent, style, classList, addEventListener), implemented event loop (microtask/macrotask queues, setTimeout, setInterval, requestAnimationFrame), and wired console.log to a DevTools console buffer.
 
 ## Architecture
 

@@ -28,11 +28,11 @@ verification, and remaining platform gates.
 These checks passed during the session and should be repeated after restore:
 
 - Headless Simple web renderer:
-  - `examples/ui/web_engine2d_gui.spl`
+  - `examples/06_io/ui/web_engine2d_gui.spl`
   - CPU and Metal-requested paths both rendered 768 pixels.
   - CPU/Metal sample parity printed `true true`.
 - On-screen Simple web renderer:
-  - `scripts/gui/macos-gui-run.shs examples/ui/web_engine2d_gui.spl`
+  - `scripts/gui/macos-gui-run.shs examples/06_io/ui/web_engine2d_gui.spl`
   - macOS window: `Simple Web + Engine2D`, outer size `640x512`.
   - Screenshot: `build/screenshots/web_engine2d_gui_current.png`.
 - Headless Simple browser:
@@ -40,11 +40,11 @@ These checks passed during the session and should be repeated after restore:
   - CPU snapshot wrote `build/screenshots/browser_cpu_probe.ppm`.
   - Metal-requested snapshot wrote `build/screenshots/browser_metal_probe.ppm`.
 - On-screen Simple browser:
-  - `scripts/gui/macos-gui-run.shs src/app/ui/main.spl browser examples/ui/hello_gui.ui.sdn --backend cpu`
+  - `scripts/gui/macos-gui-run.shs src/app/ui/main.spl browser examples/06_io/ui/hello_gui.ui.sdn --backend cpu`
   - macOS window: `Simple Browser`, outer size `336x256`.
   - Screenshot: `build/screenshots/simple_browser_cpu_gui_current.png`.
 - Tauri:
-  - `scripts/gui/macos-tauri-simple-run.shs examples/ui/hello_tauri.ui.sdn`
+  - `scripts/gui/macos-tauri-simple-run.shs examples/06_io/ui/hello_tauri.ui.sdn`
   - Tauri shell opened a native window with rendered `Hello Tauri`.
   - Screenshot: `build/screenshots/tauri_gui_current.png`.
 
@@ -71,7 +71,7 @@ These checks passed during the session and should be repeated after restore:
 ```bash
 timeout 75s env SIMPLE_TIMEOUT_SECONDS=0 SIMPLE_EXECUTION_MODE=interpret \
   SIMPLE_LIB=$PWD/src src/compiler_rust/target/debug/simple \
-  examples/ui/web_engine2d_gui.spl
+  examples/06_io/ui/web_engine2d_gui.spl
 
 timeout 120s env SIMPLE_TIMEOUT_SECONDS=0 SIMPLE_EXECUTION_MODE=interpret \
   SIMPLE_LIB=$PWD/src src/compiler_rust/target/debug/simple \
@@ -82,14 +82,14 @@ timeout 100s env SIMPLE_TIMEOUT_SECONDS=0 SIMPLE_EXECUTION_MODE=interpret \
   /tmp/browser_snapshot_probe.spl
 
 env SIMPLE_TIMEOUT_SECONDS=120 \
-  scripts/gui/macos-gui-run.shs examples/ui/web_engine2d_gui.spl
+  scripts/gui/macos-gui-run.shs examples/06_io/ui/web_engine2d_gui.spl
 
 env SIMPLE_TIMEOUT_SECONDS=180 \
   scripts/gui/macos-gui-run.shs src/app/ui/main.spl browser \
-  examples/ui/hello_gui.ui.sdn --backend cpu
+  examples/06_io/ui/hello_gui.ui.sdn --backend cpu
 
 env SIMPLE_TIMEOUT_SECONDS=120 \
-  scripts/gui/macos-tauri-simple-run.shs examples/ui/hello_tauri.ui.sdn
+  scripts/gui/macos-tauri-simple-run.shs examples/06_io/ui/hello_tauri.ui.sdn
 ```
 
 After on-screen runs, capture screenshots under `build/screenshots/` and confirm

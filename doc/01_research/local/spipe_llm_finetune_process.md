@@ -9,10 +9,10 @@ project while keeping host-local LLM fine-tune process state under `.spipe/`.
 
 ## Current Implementation Evidence
 
-- `.gitmodules` declares both `.spipe/spipe` and `examples/spipe` using
+- `.gitmodules` declares both `.spipe/spipe` and `examples/05_stdlib/spipe` using
   `https://github.com/ormastes/Spipe.git`.
-- Parent index records `.spipe/spipe` and `examples/spipe` as gitlinks.
-- `.spipe/spipe_project` links to `examples/spipe`.
+- Parent index records `.spipe/spipe` and `examples/05_stdlib/spipe` as gitlinks.
+- `.spipe/spipe_project` links to `examples/05_stdlib/spipe`.
 - `.spipe/doc` links to this host project's configured process docs:
   `doc/00_llm_process`.
 - `.spipe/config.sdn` sets the host override from the generic default
@@ -25,11 +25,11 @@ project while keeping host-local LLM fine-tune process state under `.spipe/`.
 
 The separated SPipe project exposes:
 
-- CLI: `examples/spipe/cli/spipe.js`
-- MCP server: `examples/spipe/mcp/server.js`
-- Package manifest: `examples/spipe/package.json`
-- Plugin manifest: `examples/spipe/plugin/.codex-plugin/plugin.json`
-- Build guard: `examples/spipe/scripts/build.sh`
+- CLI: `examples/05_stdlib/spipe/cli/spipe.js`
+- MCP server: `examples/05_stdlib/spipe/mcp/server.js`
+- Package manifest: `examples/05_stdlib/spipe/package.json`
+- Plugin manifest: `examples/05_stdlib/spipe/plugin/.codex-plugin/plugin.json`
+- Build guard: `examples/05_stdlib/spipe/scripts/build.sh`
 
 The CLI supports host link inspection, doctor checks, process doc linking,
 fine-tune attempt initialization, data download recording, data cache/check
@@ -58,11 +58,11 @@ This is correct because final requirements must not be selected by an agent.
 Current guards cover:
 
 - `spipe doctor .` host link and common-surface checks.
-- `sh examples/spipe/scripts/build.sh` separated project smoke.
+- `sh examples/05_stdlib/spipe/scripts/build.sh` separated project smoke.
 - `sh .spipe/spipe/scripts/build.sh` compatibility mount smoke.
 - `sh scripts/setup/install-spipe-dev-command.shs --check` SPipe command routing.
 - `find doc/06_spec -name '*_spec.spl' | wc -l` layout invariant.
-- `diff -qr -x .git examples/spipe .spipe/spipe` checkout drift invariant.
+- `diff -qr -x .git examples/05_stdlib/spipe .spipe/spipe` checkout drift invariant.
 
 ## Gaps / Open Items
 

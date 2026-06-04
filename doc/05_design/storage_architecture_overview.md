@@ -148,9 +148,9 @@ Details: [`nvfs/send_format.md`](nvfs/send_format.md).
 | Layer | Trait contracts | Implementation |
 |-------|----------------|----------------|
 | FsDriver trait + MountTable | `src/lib/nogc_sync_mut/fs/` | n/a (trait only) |
-| NVFS native | `src/lib/nogc_sync_mut/fs/nvfs/` | `examples/nvfs/src/core/` |
-| NVFS POSIX shim | `src/lib/nogc_sync_mut/fs/nvfs/` | `examples/nvfs/src/posix/` |
-| Simple DB | `src/lib/nogc_sync_mut/simple_db_if/` | `examples/simple_db/src/engine/` |
+| NVFS native | `src/lib/nogc_sync_mut/fs/nvfs/` | `examples/11_advanced/nvfs/src/core/` |
+| NVFS POSIX shim | `src/lib/nogc_sync_mut/fs/nvfs/` | `examples/11_advanced/nvfs/src/posix/` |
+| Simple DB | `src/lib/nogc_sync_mut/simple_db_if/` | `examples/11_advanced/simple_db/src/engine/` |
 | FAT32 (C runtime) | `src/os/services/vfs/` | `src/os/arch/x86_64/fat32/` |
 
 ---

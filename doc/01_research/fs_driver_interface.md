@@ -471,7 +471,7 @@ A `match` on `DriverInstance` dispatches to the concrete driver. The VFS layer's
 
 ### 4.1 Glob Results
 
-Search `examples/simple_os/**/*fat*`: **no results** — no FAT32 driver exists yet in `examples/simple_os/`.
+Search `examples/09_embedded/simple_os/**/*fat*`: **no results** — no FAT32 driver exists yet in `examples/09_embedded/simple_os/`.
 
 Search `src/lib/nogc_sync_mut/fs/**`:
 - `src/lib/nogc_sync_mut/fs/__init__.spl` — fs module doc, declares submodules (path, nvfs)
@@ -868,7 +868,7 @@ All driver functions return `Result<T, FsError>`. Callers use the `?` operator. 
 ### 9.1 Current State
 
 As of 2026-04-17:
-- No FAT32 driver implemented in `examples/simple_os/` or `src/lib/`.
+- No FAT32 driver implemented in `examples/09_embedded/simple_os/` or `src/lib/`.
 - No VFS dispatch layer.
 - NVFS skeleton exists (`std.fs.nvfs`): `SuperblockReader` trait, arena re-exports. No implementation.
 - All filesystem access in SimpleOS is via host syscalls through `std.fs.path` (wraps host OS).
@@ -901,12 +901,12 @@ As of 2026-04-17:
 
 ### 9.4 Phase 3 — Wire VFS to SimpleOS Syscall Layer
 
-1. Add syscall handlers for `open`, `read`, `write`, `close`, `stat`, `readdir` in `examples/simple_os/arch/x86_64/`.
+1. Add syscall handlers for `open`, `read`, `write`, `close`, `stat`, `readdir` in `examples/09_embedded/simple_os/arch/x86_64/`.
 2. Handlers call `MountTable::resolve(path) -> MountEntry`, then dispatch via `match entry.driver { ... }`.
 3. `FsError` → errno translation at syscall boundary.
 
 **Concrete breakages:**
-- `examples/simple_os/arch/x86_64/boot/baremetal_stubs.c` (currently modified per git status) may need syscall table entries updated.
+- `examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c` (currently modified per git status) may need syscall table entries updated.
 - Any existing SimpleOS test that calls host-syscall paths will need to be redirected or mocked.
 
 ### 9.5 Phase 4 — Retrofit NVFS Skeleton

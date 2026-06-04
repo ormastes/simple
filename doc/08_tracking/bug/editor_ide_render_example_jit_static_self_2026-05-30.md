@@ -7,7 +7,7 @@ Date: 2026-05-30
 Running the embedded IDE render example succeeds through interpreter fallback:
 
 ```bash
-bin/simple run examples/ide/simple_ide_render.spl
+bin/simple run examples/10_tooling/ide/simple_ide_render.spl
 ```
 
 Observed output includes the expected render proof:
@@ -47,11 +47,11 @@ Verification after refreshing `bin/simple` from the rebuilt bootstrap binary:
 
 ```bash
 cd src/compiler_rust && cargo test -p simple-compiler resolves_numbered_stdlib_imports_from_examples_tree -- --nocapture
-cd ../.. && SIMPLE_LIB=src bin/simple check examples/ide/simple_ide_render.spl
-SIMPLE_LIB=src bin/simple run examples/ide/simple_ide_render.spl
-bin/simple run examples/ide/simple_ide_render.spl
+cd ../.. && SIMPLE_LIB=src bin/simple check examples/10_tooling/ide/simple_ide_render.spl
+SIMPLE_LIB=src bin/simple run examples/10_tooling/ide/simple_ide_render.spl
+bin/simple run examples/10_tooling/ide/simple_ide_render.spl
 bin/simple test test/01_unit/lib/editor/editor_launch_contract_spec.spl --mode=interpreter --clean
-bin/simple run examples/ide/simple_ide_launch.spl
+bin/simple run examples/10_tooling/ide/simple_ide_launch.spl
 ```
 
 The example prints:
@@ -68,7 +68,7 @@ The recovered editor/IDE crash-session audit still proves the shared
 GUI/WebRender path through interpreter fallback:
 
 ```bash
-SIMPLE_LIB=src bin/simple run examples/ide/simple_ide_render.spl
+SIMPLE_LIB=src bin/simple run examples/10_tooling/ide/simple_ide_render.spl
 bin/simple test test/01_unit/lib/editor/editor_launch_contract_spec.spl --mode=interpreter --clean
 ```
 

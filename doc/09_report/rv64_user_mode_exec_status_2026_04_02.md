@@ -58,10 +58,10 @@ ELF program header segment sizes updated from 4 to 32 bytes.
 
 ### 4. Boot integration (sscratch + trap runtime)
 
-**Modified:** `examples/simple_os/arch/riscv64/boot/crt0.S`
+**Modified:** `examples/09_embedded/simple_os/arch/riscv64/boot/crt0.S`
 - Added `csrw sscratch, _stack_top` after BSS zeroing, before `call spl_start`
 
-**Modified:** `examples/simple_os/arch/riscv64/entry.spl`
+**Modified:** `examples/09_embedded/simple_os/arch/riscv64/entry.spl`
 - Full kernel bootstrap: UART init, interrupt controller init, scheduler/IPC/klog
   creation, trap runtime installation, proof binary loading, user task spawn,
   and `_rv64_enter_user()` call to enter U-mode
@@ -178,8 +178,8 @@ next milestone.
 ### Modified
 - `src/os/kernel/loader/executable_source.spl` — real proof binary instructions
 - `src/os/kernel/ipc/syscall.spl` — multi-arch debug_write
-- `examples/simple_os/arch/riscv64/boot/crt0.S` — sscratch setup
-- `examples/simple_os/arch/riscv64/entry.spl` — full kernel bootstrap
+- `examples/09_embedded/simple_os/arch/riscv64/boot/crt0.S` — sscratch setup
+- `examples/09_embedded/simple_os/arch/riscv64/entry.spl` — full kernel bootstrap
 - `src/os/kernel/arch/riscv64/context.spl` — _rv64_enter_user extern
 - `src/os/kernel/scheduler/scheduler.spl` — get_user_context method
 

@@ -133,7 +133,7 @@ A `SoftwareRenderer` produces a pixel buffer each frame by processing render com
 
 ### REQ-ENG-015: Playable Demo Example
 
-A minimal platformer demo (`examples/engine_2d_demo/main.spl`) demonstrates engine usage: window creation, physics world setup, input binding, render loop, and player movement.
+A minimal platformer demo (`examples/11_advanced/engine_2d_demo/main.spl`) demonstrates engine usage: window creation, physics world setup, input binding, render loop, and player movement.
 
 **Acceptance:** Demo compiles and runs. Player rectangle moves with WASD. Gravity pulls player down. Ground collision prevents falling through floor.
 
@@ -158,7 +158,7 @@ A minimal platformer demo (`examples/engine_2d_demo/main.spl`) demonstrates engi
 - **Limitations:** `doc/bug/engine_2d_limitations.md`
 - **Source:** `src/lib/nogc_sync_mut/engine/`, `src/lib/common/engine/`
 - **Unit Tests:** `test/01_unit/lib/engine/`
-- **Demo:** `examples/engine_2d_demo/main.spl`
+- **Demo:** `examples/11_advanced/engine_2d_demo/main.spl`
 
 ## std.game2d Game Framework Layer (2026-04-25)
 

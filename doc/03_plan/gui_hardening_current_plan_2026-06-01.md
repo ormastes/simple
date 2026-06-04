@@ -197,7 +197,7 @@ live Electron/QEMU evidence, and release-grade no-tolerance verification.
   present, the host GTK GL scene passes with zero bitmap mismatches, and the
   guest-side Simple-vs-GTK perf release gate remains blocked.
 - `src/lib/common/ui/builder.spl` and
-  `examples/ui/widget_matrix_wasm_gui.spl`: shared retained-WASM widget event
+  `examples/06_io/ui/widget_matrix_wasm_gui.spl`: shared retained-WASM widget event
   helper and widget-matrix refactor. Current CLI/browser evidence keeps
   widget-matrix import count at `0`, event markers at `23/23`, retained
   selectors at `23/23`, nonzero boxes at `23/23`, and retained event mutations
@@ -612,8 +612,8 @@ returned `0`.
 
 Generated GUI WASM shared-helper continuation check:
 
-- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/common/ui/builder.spl examples/ui/widget_matrix_wasm_gui.spl test/01_unit/app/ui/builder_spec.spl`
-- `SIMPLE_LIB=src src/compiler_rust/target/release/simple examples/ui/widget_matrix_wasm_gui.spl`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/common/ui/builder.spl examples/06_io/ui/widget_matrix_wasm_gui.spl test/01_unit/app/ui/builder_spec.spl`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple examples/06_io/ui/widget_matrix_wasm_gui.spl`
 - `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check/check-gui-wasm-cli-artifact.shs`
 - `SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check/check-gui-wasm-browser-execution-evidence.shs`
 
@@ -1820,8 +1820,8 @@ release evidence without claiming production Chrome pixel parity is fixed.
 
 SimpleOS SSH shell launch evidence continuation:
 
-- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/apps/terminal/terminal.spl src/os/apps/sshd/ssh_session.spl test/01_unit/os/apps/sshd/ssh_session_shell_spec.spl examples/simple_os/arch/x86_64/ssh_live_entry.spl`
-- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/ssh_qemu_contract.spl examples/simple_os/arch/x86_64/ssh_live_entry.spl`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/apps/terminal/terminal.spl src/os/apps/sshd/ssh_session.spl test/01_unit/os/apps/sshd/ssh_session_shell_spec.spl examples/09_embedded/simple_os/arch/x86_64/ssh_live_entry.spl`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/ssh_qemu_contract.spl examples/09_embedded/simple_os/arch/x86_64/ssh_live_entry.spl`
 - `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/01_unit/os/apps/sshd/ssh_session_shell_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
 - `SIMPLE_LIB=src src/compiler_rust/target/release/simple spipe-docgen test/01_unit/os/apps/sshd/ssh_session_shell_spec.spl --output doc/06_spec`
 

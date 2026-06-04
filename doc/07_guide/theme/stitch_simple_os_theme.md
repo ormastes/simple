@@ -99,7 +99,7 @@ functions).
 built from the same `glass/numeric_tokens.spl` tokens. These are only used for
 contexts that want a token-driven default without threading a live `GlassConfig`
 through — today the only such caller is the **boot splash**
-(`examples/simple_os/hosted/hosted_wm.spl`, `src/os/compositor/boot_splash.spl`).
+(`examples/09_embedded/simple_os/hosted/hosted_wm.spl`, `src/os/compositor/boot_splash.spl`).
 
 #### Decorations and chrome
 
@@ -141,7 +141,7 @@ parallel browser-only palette.
 
 Current Web WM flow:
 
-- `examples/ui/simpleos_web_wm.ui.sdn` selects `glass_obsidian_dark`
+- `examples/06_io/ui/simpleos_web_wm.ui.sdn` selects `glass_obsidian_dark`
 - `src/app/ui.web/html.spl::generate_wm_html_page()` embeds the WM shell
 - `generate_css(theme)` derives page chrome and CSS custom properties such as
   `--ui-bg`, `--ui-text`, and `--glass-accent` from the shared glass token path
@@ -209,7 +209,7 @@ taskbar, app-window content, and window chrome through the shared CSS generation
 
 ## 4. Switching themes at runtime
 
-- The hosted WM (`examples/simple_os/hosted/hosted_wm.spl`) starts with the
+- The hosted WM (`examples/09_embedded/simple_os/hosted/hosted_wm.spl`) starts with the
   compositor default, currently `GlassConfig.obsidian_dark()`.
 - Pressing **`T`** in the running WM toggles between dark and light via
   `compositor.spl`'s T-key handlers. (The cycle currently flips between
@@ -222,7 +222,7 @@ taskbar, app-window content, and window chrome through the shared CSS generation
 To change the runtime default:
 1. Edit `src/os/compositor/compositor.spl`, field `glass_config:` in the
    `Compositor` constructor (search for `GlassConfig.obsidian_dark()`).
-2. Edit `examples/simple_os/hosted/hosted_wm.spl`, `val splash_cfg = ...`, to match.
+2. Edit `examples/09_embedded/simple_os/hosted/hosted_wm.spl`, `val splash_cfg = ...`, to match.
 3. Rebuild and relaunch.
 
 ---

@@ -29,7 +29,7 @@ flags into multiple backend paths.
 If a user needs a known-good sample asset, the default should be:
 
 ```text
-examples/ui/widget_matrix.ui.sdn
+examples/06_io/ui/widget_matrix.ui.sdn
 ```
 
 Reason:

@@ -58,7 +58,7 @@ AMD documentation says Kria starter kits use a two-stage boot model: primary boo
 - RV64GC QEMU spec:
   `bin/simple test test/03_system/qemu/rv64gc_qemu_boot_spec.spl --mode=interpreter` passed 14 examples.
 - SimpleOS RV64 local boot:
-  rebuilt the Rust Simple compiler with LLVM 18 support, created `build/os/fat32-riscv64.img`, then ran `timeout 180 bin/simple run examples/simple_os/run.spl -- --arch=riscv64`.
+  rebuilt the Rust Simple compiler with LLVM 18 support, created `build/os/fat32-riscv64.img`, then ran `timeout 180 bin/simple run examples/09_embedded/simple_os/run.spl -- --arch=riscv64`.
   QEMU printed `SIMPLEOS_RISCV_SMF_FS_PASS` and `TEST PASSED`.
 - Web stack DB specs:
   `bin/simple test test/02_integration/app/web_stack_sample_persistence_spec.spl --mode=interpreter` passed 1 example.

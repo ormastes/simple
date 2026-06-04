@@ -176,7 +176,7 @@ Resolve both blockers in order:
 Once both are ready:
 
 3. Add a `x64-toolchain-exec-probe` QEMU lane (entry point analogous to
-   `examples/simple_os/arch/x86_64/toolchain_vfs_probe_entry.spl`) that:
+   `examples/09_embedded/simple_os/arch/x86_64/toolchain_vfs_probe_entry.spl`) that:
    - spawns `/sys/apps/clang` with `hello.c` as argv[0];
    - verifies a real compile output or well-defined diagnostic via serial;
    - emits `[toolchain-exec] compiler-ran app=clang status=ok` (or `fail`);

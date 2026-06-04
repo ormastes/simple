@@ -1615,7 +1615,7 @@ expect(image.format).to_equal(ImageFormat.Svg)
 |-------|-------|
 | Category | Other |
 | Status | Active |
-| Source | `examples/browser/test/paint/image_decode_spec.spl` |
+| Source | `examples/11_advanced/browser/test/paint/image_decode_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 

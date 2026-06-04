@@ -4,10 +4,10 @@ Feature set: remaining unchecked NVFS tracker criteria.
 
 ## Focused Tests
 
-- `examples/nvfs/test/01_unit/fs_driver/mount_table_test.spl`
-- `examples/nvfs/test/01_unit/core/compression_test.spl`
-- `examples/nvfs/test/01_unit/core/dedup_test.spl`
-- `examples/simple_db/test/02_integration/storage/simple_db_nvfs_e2e_test.spl`
+- `examples/11_advanced/nvfs/test/01_unit/fs_driver/mount_table_test.spl`
+- `examples/11_advanced/nvfs/test/01_unit/core/compression_test.spl`
+- `examples/11_advanced/nvfs/test/01_unit/core/dedup_test.spl`
+- `examples/11_advanced/simple_db/test/02_integration/storage/simple_db_nvfs_e2e_test.spl`
 
 ## Acceptance Coverage
 

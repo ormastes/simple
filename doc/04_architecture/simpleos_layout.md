@@ -1,4 +1,4 @@
-# SimpleOS Layout — src/os vs examples/simple_os
+# SimpleOS Layout — src/os vs examples/09_embedded/simple_os
 
 **Date:** 2026-04-14
 
@@ -7,7 +7,7 @@
 | Path | Role |
 |---|---|
 | `src/os/` | **Library.** Reusable OS components: drivers, kernel services, compositor, libc shims, port build drivers. Compiled and linked by consumers. |
-| `examples/simple_os/` | **Harness.** QEMU-specific integration: boot entries, linker scripts, baremetal weak stubs, memory maps, QEMU device wiring. |
+| `examples/09_embedded/simple_os/` | **Harness.** QEMU-specific integration: boot entries, linker scripts, baremetal weak stubs, memory maps, QEMU device wiring. |
 
 The library does not know about QEMU. The harness does not implement OS logic.
 
@@ -16,14 +16,14 @@ The library does not know about QEMU. The harness does not implement OS logic.
 ## The Boundary Rule
 
 > **Library** (`src/os/`) provides strong `@export("C")` symbols.
-> **Harness** (`examples/simple_os/`) provides weak stubs and linker strong-aliases.
+> **Harness** (`examples/09_embedded/simple_os/`) provides weak stubs and linker strong-aliases.
 > The linker resolves strong over weak — library wins.
 
 ### The 65 `spl_handle_*` Wave
 
 The canonical example of this rule in practice:
 
-- `examples/simple_os/` declares 65 `spl_handle_<syscall>` functions as `@weak`
+- `examples/09_embedded/simple_os/` declares 65 `spl_handle_<syscall>` functions as `@weak`
   placeholders that return `ENOSYS`.
 - `src/os/kernel/abi/syscall_shim.spl` declares the same 65 names as strong
   `@export("C")` implementations.
@@ -39,7 +39,7 @@ in `src/os/`; the harness weak stub is already there waiting.
 
 Some paths appear in both locations by design:
 
-| Path segment | In `src/os/` | In `examples/simple_os/` | Why both exist |
+| Path segment | In `src/os/` | In `examples/09_embedded/simple_os/` | Why both exist |
 |---|---|---|---|
 | `arch/x86_64/` | Generic x86_64 support code | QEMU-specific memory layout, LAPIC base, etc. | Arch support vs QEMU quirks |
 | `boot.spl` | Boot protocol abstraction | `boot_stage1_entry.spl`, `boot_stage2_entry.spl` | Abstract interface vs concrete Limine/multiboot entries |
@@ -58,12 +58,12 @@ These are not duplicates. Do not merge or flatten them.
 
 2. **Is it QEMU-specific wiring** (a boot entry point, a linker script fragment,
    a QEMU device stub, a baremetal memory map)?
-   → Put it in `examples/simple_os/`. Use weak symbols where the library will
+   → Put it in `examples/09_embedded/simple_os/`. Use weak symbols where the library will
    provide the real implementation.
 
 3. **Is it a test that exercises the integration** (a QEMU smoke spec, a guest
    binary that calls a syscall)?
-   → Put it in `examples/simple_os/apps/` or `test/`.
+   → Put it in `examples/09_embedded/simple_os/apps/` or `test/`.
 
 When in doubt: if the code makes sense outside of QEMU (e.g., on real hardware
 or in a hosted environment), it belongs in `src/os/`.
@@ -76,7 +76,7 @@ or in a hosted environment), it belongs in `src/os/`.
 
 Signs of a boundary violation:
 
-- A file from `src/os/` is duplicated under `examples/simple_os/` (or vice versa).
+- A file from `src/os/` is duplicated under `examples/09_embedded/simple_os/` (or vice versa).
 - A strong symbol is defined in the harness directory.
 - A weak stub is defined in the library directory.
 - A QEMU device address (`0xFEE00000`, etc.) appears in `src/os/`.

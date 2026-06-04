@@ -77,7 +77,7 @@ engine.destroy_bind_group(bg_id)
 
 ## Browser WebGPU Context
 
-**Source:** `examples/browser/feature/gpu/webgpu_context.spl`
+**Source:** `examples/11_advanced/browser/feature/gpu/webgpu_context.spl`
 
 The browser WebGPU context follows MDSOC+ capsule architecture. It manages the full adapter/device lifecycle for in-browser rendering.
 

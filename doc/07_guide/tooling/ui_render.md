@@ -18,10 +18,10 @@ When render output is used as SSPEC evidence, publish GUI images under
 
 ```bash
 # Render a .ui.sdn file as text
-simple ui render examples/ui/widget_matrix.ui.sdn
+simple ui render examples/06_io/ui/widget_matrix.ui.sdn
 
 # Render as HTML
-simple ui render examples/ui/widget_matrix.ui.sdn --format html
+simple ui render examples/06_io/ui/widget_matrix.ui.sdn --format html
 
 # Render the built-in demo
 simple ui render --demo
@@ -59,7 +59,7 @@ If `file` is omitted and `--demo` is not set, the command prints usage help.
 | `--theme` | `dark` | Theme name: `dark`, `light`, or adapter-specific |
 | `--width` | `80` | Viewport width in columns |
 | `--height` | `24` | Viewport height in rows |
-| `--demo` | `false` | Use built-in demo asset (`examples/ui/widget_matrix.ui.sdn`) |
+| `--demo` | `false` | Use built-in demo asset (`examples/06_io/ui/widget_matrix.ui.sdn`) |
 | `--backend` | `auto` | Backend hint: `auto`, `headless`, `tui`, `web`, `tauri`, `electron` |
 
 ---
@@ -183,7 +183,7 @@ Produces a text table of spreadsheet contents at 120-column width.
 simple ui render --demo --format both
 ```
 
-Renders `examples/ui/widget_matrix.ui.sdn` in both formats. Useful for
+Renders `examples/06_io/ui/widget_matrix.ui.sdn` in both formats. Useful for
 verifying widget coverage and theme/layout regressions.
 
 ### Custom viewport and theme
@@ -234,7 +234,7 @@ simple ui render --adapter dashboard --format text
 The default demo asset is:
 
 ```text
-examples/ui/widget_matrix.ui.sdn
+examples/06_io/ui/widget_matrix.ui.sdn
 ```
 
 Use it when:

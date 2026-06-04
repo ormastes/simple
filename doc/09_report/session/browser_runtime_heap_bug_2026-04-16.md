@@ -18,10 +18,10 @@ These fixes removed the original `0x210` array-allocation storm and changed the 
 - `src/lib/common/web/browser_session.spl`
 - `src/lib/common/js/engine/runtime.spl`
 - `src/lib/common/js/engine/interpreter.spl`
-- `examples/simple_os/arch/x86_64/boot/baremetal_stubs.c`
-- `examples/simple_os/arch/x86_64/boot/rt_extras.c`
-- `examples/simple_os/arch/arm64/boot/baremetal_stubs.c`
-- `examples/simple_os/arch/riscv64/boot/baremetal_stubs.c`
+- `examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c`
+- `examples/09_embedded/simple_os/arch/x86_64/boot/rt_extras.c`
+- `examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c`
+- `examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_stubs.c`
 
 ### Current strongest remaining lead
 
@@ -144,7 +144,7 @@ Additional helpful TODOs:
 - rerun:
   - `test/01_unit/lib/common/web/browser_session_spec.spl`
   - `test/01_unit/lib/common/web/browser_session_async_spec.spl`
-  - the QEMU runtime probe command against `examples/simple_os/arch/x86_64/browser_runtime_probe_entry.spl`
+  - the QEMU runtime probe command against `examples/09_embedded/simple_os/arch/x86_64/browser_runtime_probe_entry.spl`
 
 ## 2026-04-16 completion update
 
@@ -169,7 +169,7 @@ What still remains after the task is complete:
 ## 2026-04-16 direct bare-metal JS runtime result
 
 A direct x86_64 bare-metal `JsRuntime` probe now exists at:
-- `examples/simple_os/arch/x86_64/js_runtime_probe_entry.spl`
+- `examples/09_embedded/simple_os/arch/x86_64/js_runtime_probe_entry.spl`
 
 And the system regression now exists at:
 - `test/03_system/js_runtime_in_qemu_spec.spl`

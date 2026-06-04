@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-27
 **Status:** COMPLETE (all phases implemented 2026-05-27)
-**Scope:** Embedded PureDatabase + Full Simple DB (`examples/simple_db/`)
+**Scope:** Embedded PureDatabase + Full Simple DB (`examples/11_advanced/simple_db/`)
 
 ## Executive Summary
 
@@ -175,7 +175,7 @@ At 10K rows with 10 mutations: 100x less I/O than current full rewrite.
 
 ### Phase 7: Full Simple DB Query Compilation
 
-**Goal:** Make Full Simple DB (`examples/simple_db/`) competitive with PostgreSQL.
+**Goal:** Make Full Simple DB (`examples/11_advanced/simple_db/`) competitive with PostgreSQL.
 
 Full DB already has: WAL, buffer_mgr, BRIN indexes, tier_cache, vacuum,
 checkpoint, page management, NVFS shim.
@@ -283,7 +283,7 @@ All phases implemented. Key deliverables:
 | Phase 3 | DONE | `get()`/`put()`/`delete_by_key()`/`scan_all()` direct typed API |
 | Phase 5 | DONE | `scan_range()` with RowBitmap from `db/accel.spl`; accel import integrated |
 | Phase 6 | DONE | `_tbl_dirty: [bool]` per-table dirty tracking + `_mark_table_dirty()` |
-| Phase 7 | DONE | `examples/simple_db/src/engine/typed_store.spl` — TypedStore/TypedTable for Full DB |
+| Phase 7 | DONE | `examples/11_advanced/simple_db/src/engine/typed_store.spl` — TypedStore/TypedTable for Full DB |
 | Phase 8 | DONE | `test/05_perf/bench/db_benchmark_suite_spec.spl` — 6 head-to-head benchmarks (17s) |
 
 ### Measured Results (interpreter mode, 200 rows)

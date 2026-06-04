@@ -115,7 +115,7 @@ added separately to each GUI-like app.
 ### Conclusion 2
 
 Preview fixtures should be first-class assets. A default system verification
-asset such as `examples/ui/widget_matrix.ui.sdn` follows the same role that
+asset such as `examples/06_io/ui/widget_matrix.ui.sdn` follows the same role that
 Storybook stories and Compose preview samples serve elsewhere.
 
 ### Conclusion 3

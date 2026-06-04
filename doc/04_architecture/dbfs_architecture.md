@@ -23,12 +23,12 @@ Module path: `src/lib/nogc_sync_mut/db/dbfs_engine/`
 - The 8 `simple_db_if` trait contracts (`BufferManager`, `WalWriter`, `PageStore`, `PageMap`, `TempStore`, `Checkpointer`, `BlobStore`, `Vacuumer`) serve as the interface specification; `DbFsEngine` implements them with DBFS-specific type parameters.
 
 **Reuse sources (read-only reference; no vendored changes):**
-- `examples/simple_db/src/engine/wal.spl` — WAL writer with CRC32C, group-commit, arena-backed log
-- `examples/simple_db/src/engine/buffer_mgr.spl` — clock-sweep buffer manager
-- `examples/simple_db/src/engine/checkpoint.spl` — checkpoint sealing protocol
-- `examples/nvfs/src/core/pmap_btree.spl` — full CLRS B-tree (delete/rebalance), key type generalized
-- `examples/nvfs/src/core/intent_log.spl` — intent log structure (must add disk persistence)
-- `examples/nvfs/src/core/checkpoint.spl` — 4096-slot ring (must add META_DURABLE persistence)
+- `examples/11_advanced/simple_db/src/engine/wal.spl` — WAL writer with CRC32C, group-commit, arena-backed log
+- `examples/11_advanced/simple_db/src/engine/buffer_mgr.spl` — clock-sweep buffer manager
+- `examples/11_advanced/simple_db/src/engine/checkpoint.spl` — checkpoint sealing protocol
+- `examples/11_advanced/nvfs/src/core/pmap_btree.spl` — full CLRS B-tree (delete/rebalance), key type generalized
+- `examples/11_advanced/nvfs/src/core/intent_log.spl` — intent log structure (must add disk persistence)
+- `examples/11_advanced/nvfs/src/core/checkpoint.spl` — 4096-slot ring (must add META_DURABLE persistence)
 - `src/lib/nogc_sync_mut/simple_db_if/` — 8 trait contract definitions
 
 ---
@@ -46,7 +46,7 @@ Six gaps must be closed for AC-3. Each has a design, module path, and LoC budget
 
 ### Gap 2: Namespace B-tree with Ino/DirEntryKey
 
-**Design:** Structural copy of `examples/nvfs/src/core/pmap_btree.spl` with key type changed from `(arena_id: i64, offset: i64)` to `DentryKey { parent_ino: i64, name_hash: i64 }` for DENTRY lookup and `InodeKey { ino: i64 }` for INODE lookup. The B-tree is generic over a key trait `BTreeKey` with `cmp()` and `encode_page()` methods. Delete uses the same CLRS top-down rebalancing. No other structural changes.
+**Design:** Structural copy of `examples/11_advanced/nvfs/src/core/pmap_btree.spl` with key type changed from `(arena_id: i64, offset: i64)` to `DentryKey { parent_ino: i64, name_hash: i64 }` for DENTRY lookup and `InodeKey { ino: i64 }` for INODE lookup. The B-tree is generic over a key trait `BTreeKey` with `cmp()` and `encode_page()` methods. Delete uses the same CLRS top-down rebalancing. No other structural changes.
 
 **Module:** `src/lib/nogc_sync_mut/db/dbfs_engine/ns_btree.spl`
 **LoC budget:** ~350 (pmap_btree is ~300; +50 for key generalization)
@@ -60,14 +60,14 @@ Six gaps must be closed for AC-3. Each has a design, module path, and LoC budget
 
 ### Gap 4: Intent Log Disk Persistence
 
-**Design:** The current `examples/nvfs/src/core/intent_log.spl` holds records in an in-memory `Vec`. DBFS's `DbFsIntentLog` writes each appended record to the `DB_WAL` arena via `arena_append(wal_handle, record_bytes, DURABLE_GROUP_COMMIT)` before returning. The in-memory buffer is retained as a read cache (replay scan uses the on-disk log). On mount, the intent log is reconstructed by reading the `DB_WAL` arena from `intent_log_head` LSN forward. The log is a linear sequence of fixed-header + variable-payload records. Log rotation happens at checkpoint: the old WAL arena is sealed; a new `DB_WAL` arena is created; `intent_log_head` in the checkpoint entry points to the new arena's start.
+**Design:** The current `examples/11_advanced/nvfs/src/core/intent_log.spl` holds records in an in-memory `Vec`. DBFS's `DbFsIntentLog` writes each appended record to the `DB_WAL` arena via `arena_append(wal_handle, record_bytes, DURABLE_GROUP_COMMIT)` before returning. The in-memory buffer is retained as a read cache (replay scan uses the on-disk log). On mount, the intent log is reconstructed by reading the `DB_WAL` arena from `intent_log_head` LSN forward. The log is a linear sequence of fixed-header + variable-payload records. Log rotation happens at checkpoint: the old WAL arena is sealed; a new `DB_WAL` arena is created; `intent_log_head` in the checkpoint entry points to the new arena's start.
 
 **Module:** `src/lib/nogc_sync_mut/db/dbfs_engine/intent_log.spl`
 **LoC budget:** ~200
 
 ### Gap 5: Checkpoint Ring Disk Persistence
 
-**Design:** The current `examples/nvfs/src/core/checkpoint.spl` maintains 4096 slots in memory. DBFS's `DbFsCheckpointRing` writes each `CheckpointEntry` to the `META_DURABLE` arena via `arena_append` after all sealed arenas are confirmed durable. A `CheckpointEntry` contains: `gen: u64`, `clean: bool`, `intent_log_head: Lsn`, `root_ino_page: PageId`, `wall_time: i64`, `checksum: u32`. The ring is a circular log in the META_DURABLE arena; the latest entry with `clean=true` is the recovery starting point. On mount, the ring is scanned from the end backward to find the last clean entry.
+**Design:** The current `examples/11_advanced/nvfs/src/core/checkpoint.spl` maintains 4096 slots in memory. DBFS's `DbFsCheckpointRing` writes each `CheckpointEntry` to the `META_DURABLE` arena via `arena_append` after all sealed arenas are confirmed durable. A `CheckpointEntry` contains: `gen: u64`, `clean: bool`, `intent_log_head: Lsn`, `root_ino_page: PageId`, `wall_time: i64`, `checksum: u32`. The ring is a circular log in the META_DURABLE arena; the latest entry with `clean=true` is the recovery starting point. On mount, the ring is scanned from the end backward to find the last clean entry.
 
 **Module:** `src/lib/nogc_sync_mut/db/dbfs_engine/checkpoint_ring.spl`
 **LoC budget:** ~150
@@ -291,7 +291,7 @@ arena_preferred_granule(h: ArenaHandle) -> u64
 - `arena_clone_range` → read-modify-write at the sector level
 - `arena_preferred_granule` → `BlockDevice.sector_size()` (typically 512 or 4096)
 
-**NVFS-arena backend implementation:** Existing concrete NVFS Arena impl in `examples/nvfs/src/core/arena.spl` already satisfies the trait. No changes needed to existing NVFS consumers.
+**NVFS-arena backend implementation:** Existing concrete NVFS Arena impl in `examples/11_advanced/nvfs/src/core/arena.spl` already satisfies the trait. No changes needed to existing NVFS consumers.
 
 **DbFsDriver constructor signature:**
 ```

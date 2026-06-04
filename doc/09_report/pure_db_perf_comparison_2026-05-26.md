@@ -4,7 +4,7 @@
 
 Profiled embedded PureDatabase (`database/pure_sql/database.spl`) to identify
 bottlenecks and implement optimizations.  Comparison against SQLite (FFI),
-full Simple DB (`examples/simple_db/`), and pre-optimization baseline.
+full Simple DB (`examples/11_advanced/simple_db/`), and pre-optimization baseline.
 
 ## Top 3 Bottlenecks (AC-3)
 
@@ -114,7 +114,7 @@ row storage.  Its value is zero-dependency embedding and simplicity.
 
 ## Full Simple DB Comparison
 
-Full Simple DB (`examples/simple_db/`) uses WAL, TOAST, buffer pool, BRIN
+Full Simple DB (`examples/11_advanced/simple_db/`) uses WAL, TOAST, buffer pool, BRIN
 indexes, and NVFS/DBFS storage — fundamentally different architecture from
 PureDatabase.  Apples-to-apples comparison requires workload alignment that
 goes beyond this analysis scope.

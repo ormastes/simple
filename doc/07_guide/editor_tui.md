@@ -43,7 +43,7 @@ registers command, language, and debug-adapter contributions. Root policy stays
 in `src/lib/editor/extensions/roots.spl`; app code only injects environment
 values. `test/01_unit/lib/editor/extension_discovery_contract_spec.spl` covers a
 real temp-root manifest discovery and activation path, plus the sample IDE
-extension at `examples/ide/extensions/markdown-notes/extension.sdn` and
+extension at `examples/10_tooling/ide/extensions/markdown-notes/extension.sdn` and
 its sandbox-gated `main.spl` runtime entrypoint.
 
 Do not add duplicate MDSOC-numbered aliases such as `30.view` or
@@ -81,7 +81,7 @@ The editor must remain runnable on both host platforms and SimpleOS:
   screenshot proof is not yet claimed here.
 - `test/01_unit/lib/editor/host_simpleos_surface_contract_spec.spl` enforces this
   boundary with source-level checks for shared editor services, TUI code,
-  `src/app/ide/main.spl`, and `examples/ide/simple_ide_launch.spl`, plus a
+  `src/app/ide/main.spl`, and `examples/10_tooling/ide/simple_ide_launch.spl`, plus a
   small runtime render proof.
 
 ## Rendering a frame (today)
@@ -149,9 +149,9 @@ line-numbered content + reverse-video status bar; line count computed by
 - **Shared launch parsing/readiness surface: verified** —
   `src/lib/editor/core/launch.spl` is used by `src/app/editor/main.spl`,
   `src/app/editor/tui_main.spl`, `src/app/ide/main.spl`, and
-  `examples/ide/simple_ide_launch.spl`. `test/01_unit/lib/editor/editor_launch_contract_spec.spl`
+  `examples/10_tooling/ide/simple_ide_launch.spl`. `test/01_unit/lib/editor/editor_launch_contract_spec.spl`
   runs the IDE and example entrypoints through `bin/simple`. The embedded
-  example render entrypoint, `examples/ide/simple_ide_render.spl`, also runs
+  example render entrypoint, `examples/10_tooling/ide/simple_ide_render.spl`, also runs
   through `bin/simple` and proves shared GUI/WebRender editor HTML generation;
   full interactive frame-render evidence above applies to `src/app/editor/tui_main.spl`.
 - **Markdown-first checks:** `test/03_system/editor_markdown_spec.spl` covers the

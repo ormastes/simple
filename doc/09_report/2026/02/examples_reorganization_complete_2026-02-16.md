@@ -121,7 +121,7 @@ Every category has README.md explaining:
 
 ### 09_embedded (40+ files)
 - baremetal/ ← `examples/baremetal/`
-- qemu/ ← `examples/qemu/`
+- qemu/ ← `examples/09_embedded/qemu/`
 - vhdl/ ← `examples/vhdl/`
 
 ### 10_tooling (15 files)

@@ -116,5 +116,5 @@ Until then, code must mutate the receiver only via inline `self.*` writes or
 
 ## Related
 
-- Render symptom + example app: `examples/ui/engine2d_backend_test.spl`
+- Render symptom + example app: `examples/06_io/ui/engine2d_backend_test.spl`
 - Regression guard: `test/01_unit/lib/gpu/engine2d/backend_software_primitives_spec.spl`

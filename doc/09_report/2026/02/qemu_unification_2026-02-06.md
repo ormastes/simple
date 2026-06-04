@@ -31,7 +31,7 @@ The user requested to refactor shared QEMU logic to avoid duplication across:
    - Exit code interpretation
    - Toolchain detection (QEMU, GDB, cross-compilers)
 
-2. **`examples/qemu/unified_runner_example.spl`** (150 lines)
+2. **`examples/09_embedded/qemu/unified_runner_example.spl`** (150 lines)
    - Demonstrates remote debugging use case
    - Demonstrates bare-metal testing use case
    - Multi-architecture detection example
@@ -215,7 +215,7 @@ val loader = Loader_create(LoaderConfig_qemu("test.elf", "x86"))
 
 ### Example Code
 
-- ✅ `examples/qemu/unified_runner_example.spl` demonstrates all use cases
+- ✅ `examples/09_embedded/qemu/unified_runner_example.spl` demonstrates all use cases
 
 ## Migration Path
 
@@ -258,7 +258,7 @@ Embedded in module docstrings:
 - Utility functions - Toolchain detection
 
 ### Examples
-- `examples/qemu/unified_runner_example.spl` - All use cases
+- `examples/09_embedded/qemu/unified_runner_example.spl` - All use cases
 - Example output shows multi-architecture detection
 
 ## Performance Impact

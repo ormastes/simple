@@ -204,7 +204,7 @@ system changes needed).
 Once this RFC is implemented and the acceptance criteria pass:
 
 1. Remove "Chained methods broken — use intermediate `var`" from `.claude/rules/language.md`.
-2. Update `examples/ui/fluent/method_modifiers_example.spl` to use chain syntax.
+2. Update `examples/06_io/ui/fluent/method_modifiers_example.spl` to use chain syntax.
 3. Update `doc/05_design/ui_typed_core_rfc.md` §4.1 Option B note to say "resolved".
 4. Phase 3 examples in `doc/` that show the intermediate-`var` workaround can be updated to chain form.
 

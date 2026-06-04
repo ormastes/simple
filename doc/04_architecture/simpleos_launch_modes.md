@@ -27,7 +27,7 @@ Current examples:
 - `src/os/kernel/loader/builtin_binary_registry.spl` still resolves `/sys/apps/browser_demo` and other legacy paths to resident entrypoints
 - `src/os/services/launcher/launcher.spl` still contains Browser Demo seeded-shortcut fallback logic
 - `src/os/desktop/shell.spl` still special-cases Browser Demo window seeding when a remote Browser Demo window appears
-- `examples/simple_os/arch/x86_64/desktop_e2e_entry.spl` still has a Browser Demo local-fallback branch for the baremetal E2E lane
+- `examples/09_embedded/simple_os/arch/x86_64/desktop_e2e_entry.spl` still has a Browser Demo local-fallback branch for the baremetal E2E lane
 
 This path exists so old launch surfaces keep working while the launch stack is being retired or replaced.
 
@@ -61,7 +61,7 @@ So the missing work is to standardize launcher-facing app start on the syscall b
 
 The x86_64 baremetal boot path now installs an explicit trap-runtime bundle during boot.
 
-- `examples/simple_os/arch/x86_64/os_entry.spl` installs `X86Interrupt.install_bootstrap_runtime(...)`
+- `examples/09_embedded/simple_os/arch/x86_64/os_entry.spl` installs `X86Interrupt.install_bootstrap_runtime(...)`
 - `src/os/kernel/arch/x86_64/trap_runtime.spl` owns `Scheduler`, `IpcManager`, and `KernelLog`
 - `src/os/kernel/arch/x86_64/interrupt.spl` exposes runtime installation/query helpers
 

@@ -72,17 +72,17 @@ Implement embedded SQLite-style DB support in Simple with BM25 and other search 
 Known unrelated dirty items before this slice:
 
 - `examples/10_tooling/trace32_tools`
-- `examples/korean_stock_mcp`
-- `examples/llm_cli_tools`
-- `examples/nvfs`
-- `examples/obsidian-search`
-- `examples/simple_cuda_example`
-- `examples/simple_deeplearning_study`
+- `examples/10_tooling/korean_stock_mcp`
+- `examples/10_tooling/llm_cli_tools`
+- `examples/11_advanced/nvfs`
+- `examples/10_tooling/obsidian-search`
+- `examples/08_gpu/simple_cuda_example`
+- `examples/07_ml/simple_deeplearning_study`
 - `examples/spostgre` deleted
 - `src/compiler/50.mir/mir_instructions.spl`
 - `src/compiler_rust/vendor/zerocopy/win-cargo.bat`
 - `.spipe/db-fts-engine/`
-- `examples/simple_db/`
+- `examples/11_advanced/simple_db/`
 - `src/lib/nogc_sync_mut/database/pure_sql/`
 - `test/02_integration/storage/dbfs/pure_db_spec.spl`
 

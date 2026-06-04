@@ -36,7 +36,7 @@ Owns:
 
 Legacy primary files were under `src/app/vscode_rich_editor/`; that package has
 been removed. The current product entrypoint is `src/app/ide/main.spl`, with the
-reusable editor backend under `src/lib/editor/`. The `examples/ide/**` files are
+reusable editor backend under `src/lib/editor/`. The `examples/10_tooling/ide/**` files are
 sample integrations only, not embedded app ownership.
 
 ### 2. Host Editor Provider

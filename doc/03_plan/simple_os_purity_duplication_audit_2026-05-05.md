@@ -11,12 +11,12 @@ Owned-code scope excludes vendored/runtime third-party files per `AGENTS.md`.
 ### File Size
 
 Top oversized SimpleOS-owned files measured on 2026-05-05 with
-`find src/os examples/simple_os -name '*.spl' -not -path '*/vendor/*' ... | wc -l`:
+`find src/os examples/09_embedded/simple_os -name '*.spl' -not -path '*/vendor/*' ... | wc -l`:
 
 | File | Lines | Finding |
 |---|---:|---|
 | `src/os/kernel/ipc/syscall.spl` | 3740 | Exceeds 800-line refactor target; dispatcher mixes syscall routing, user-copy helpers, wait/task info, datasets, queues, DMA, SPM, and privilege handling. |
-| `examples/simple_os/arch/x86_64/wm_entry.spl` | 3603 | Exceeds 800-line target; likely test-entry fixture with repeated GUI setup patterns. |
+| `examples/09_embedded/simple_os/arch/x86_64/wm_entry.spl` | 3603 | Exceeds 800-line target; likely test-entry fixture with repeated GUI setup patterns. |
 | `src/os/qemu_runner.spl` | 2945 | Exceeds 800-line target; scenario catalog, media setup, command construction, and result parsing are still coupled even after desktop/toolchain/SSH contract extraction. |
 | `src/os/kernel/scheduler/scheduler.spl` | 2710 | Exceeds 800-line target; scheduler core and accessor surface are in one module. |
 | `src/os/services/vfs/vfs_init.spl` | 1835 | Exceeds 800-line target; VFS init, seeded executable materialization, FAT32 fallbacks, cache handling, and alias normalization remain concentrated. |
@@ -89,7 +89,7 @@ Fresh verification run for this audit:
 1. Split `src/os/kernel/ipc/syscall.spl` by syscall domains before claiming the dispatcher is pure or maintainable.
 2. Continue splitting `src/os/qemu_runner.spl` into scenario catalog, media preparation, command assembly, and result parsing modules. The desktop/toolchain/SSH contracts are extracted, but the runner is still 2945 lines.
 3. Fix or constrain `bin/simple duplicate-check` so it returns bounded output for owned OS subsets, then rerun semantic, token, and cosine modes.
-4. Audit repeated x86_64 GUI/bootstrap setup across `examples/simple_os/arch/x86_64/*_entry.spl`.
+4. Audit repeated x86_64 GUI/bootstrap setup across `examples/09_embedded/simple_os/arch/x86_64/*_entry.spl`.
 5. Split `src/os/services/vfs/vfs_init.spl` after locking VFS seeded-app and FAT32 fallback behavior with focused regression tests.
 
 ## Status

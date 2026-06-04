@@ -12,7 +12,7 @@ only the on-screen host display is broken.
 
 ```
 SIMPLE_GUI=1 SIMPLE_EXECUTION_MODE=interpret \
-  src/compiler_rust/target/gui/debug/simple run examples/ui/web_engine2d_gui.spl
+  src/compiler_rust/target/gui/debug/simple run examples/06_io/ui/web_engine2d_gui.spl
 ```
 
 - `rt_winit_window_new` returns a valid handle (1); the present loop runs the full
@@ -24,8 +24,8 @@ SIMPLE_GUI=1 SIMPLE_EXECUTION_MODE=interpret \
 - Runtime logs `winit::platform_impl::macos::event_handler:131 tried to run event
   handler, but no handler was set`.
 
-Affects every interpreter-driven winit GUI on macOS: `examples/ui/web_engine2d_gui.spl`,
-`examples/simple_os/hosted/hosted_wm_software.spl`, `examples/simple_os/hosted/gui_test.spl`,
+Affects every interpreter-driven winit GUI on macOS: `examples/06_io/ui/web_engine2d_gui.spl`,
+`examples/09_embedded/simple_os/hosted/hosted_wm_software.spl`, `examples/09_embedded/simple_os/hosted/gui_test.spl`,
 the `ui.browser`/`ui.chromium` shells, etc. (Prior "verified" GUI screenshots in this
 repo were headless PPM snapshots, not real on-screen windows.)
 
@@ -85,7 +85,7 @@ continuously so AppKit can complete the window-server handshake. Options:
 
 Open. Discovered 2026-05-28 while verifying the pure-Simple web renderer + Engine2D
 (software/CPU) GUI path. The render path is correct and shipped to `main`
-(`examples/ui/web_engine2d_gui.spl`); this bug is purely the macOS on-screen host
+(`examples/06_io/ui/web_engine2d_gui.spl`); this bug is purely the macOS on-screen host
 display. Three single-call objc2 patches are exhausted — do not retry them; the fix is
 architectural.
 
@@ -104,7 +104,7 @@ than `rt_thread_sleep` — a sleep leaves AppKit with no handler between frames
 (`"no handler was set"`) and the window never composites. Fix is in the Simple app loop
 (no Rust change): present once, then loop calling `rt_winit_event_loop_poll_events(el, 1)`
 with no sleep, re-presenting occasionally for static content. See
-`examples/ui/web_engine2d_gui.spl`.
+`examples/06_io/ui/web_engine2d_gui.spl`.
 
 ### Part B — packaging: proper .app bundle launched via `open` (registers the process)
 A bare CLI process is never registered with the window server (`lsappinfo` empty for it),
@@ -118,7 +118,7 @@ on-screen via `osascript` (winit may place small windows off-screen, e.g. y=-109
 An `exec`-wrapper bundle does NOT work (exec to an out-of-bundle binary de-registers).
 
 ### Status: RESOLVED (verified on screen, stock driver). Usage
-`scripts/gui/macos-gui-run.shs examples/ui/web_engine2d_gui.spl`
+`scripts/gui/macos-gui-run.shs examples/06_io/ui/web_engine2d_gui.spl`
 
 Notes: needs a gui-feature driver (`CARGO_TARGET_DIR=target/gui cargo build -p
 simple-driver --features gui`). The earlier Rust-seed experiments

@@ -40,7 +40,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Status:** Implemented (2026-05-30 — Phase 1-3 code landed, bootstrap build passes: TypedInteger inference, rt_array_repeat C impl + SFFI registration, scalar sqrt/abs/floor/ceil/round intrinsics in both BuiltinMethod and MethodCallStatic paths)
 - **Requested-semantics:**
   Pure-Simple per-pixel rasterizers (e.g. the SDF software renderer in
-  `examples/ui/engine2d_shapes_gui.spl`) currently fall back to the tree-walk
+  `examples/06_io/ui/engine2d_shapes_gui.spl`) currently fall back to the tree-walk
   interpreter because JIT/HIR lowering bails with `Cannot infer type:
   TypedInteger(0, U32)` (and some lean variants hard-panic on
   `rt_function_not_found` from `[u32; N]` array-repeat / `.to_u32()` lowering).
@@ -53,7 +53,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   resolve in JIT rather than emitting an unresolved `rt_function_not_found`
   symbol that panics at `finalize_definitions`.
 - **Acceptance-criteria:**
-  - [ ] `bin/simple run examples/ui/engine2d_shapes_gui.spl` JIT-compiles
+  - [ ] `bin/simple run examples/06_io/ui/engine2d_shapes_gui.spl` JIT-compiles
         without `Cannot infer type: TypedInteger(0, U32)` interpreter fallback.
   - [ ] No `can't resolve symbol rt_function_not_found` panic for a program that
         only uses `[u32; N]`, `.to_u32()`, `.to_f64()`, `.sqrt()`, and `[u32]`

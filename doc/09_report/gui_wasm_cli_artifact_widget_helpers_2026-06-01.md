@@ -8,7 +8,7 @@
 ### hello
 - status: pass
 - reason: pass
-- source: examples/ui/hello_wasm_gui.spl
+- source: examples/06_io/ui/hello_wasm_gui.spl
 - output: build/gui_wasm_cli_artifact_widget_helpers/hello_wasm_gui.wasm
 - size bytes: 4380
 - magic hex: 0061736d
@@ -19,7 +19,7 @@
 ### widget_matrix
 - status: pass
 - reason: pass
-- source: examples/ui/widget_matrix_wasm_gui.spl
+- source: examples/06_io/ui/widget_matrix_wasm_gui.spl
 - output: build/gui_wasm_cli_artifact_widget_helpers/widget_matrix_wasm_gui.wasm
 - size bytes: 12484
 - magic hex: 0061736d
@@ -32,7 +32,7 @@
 ### builder_matrix
 - status: pass
 - reason: pass
-- source: examples/ui/builder_matrix_wasm_gui.spl
+- source: examples/06_io/ui/builder_matrix_wasm_gui.spl
 - output: build/gui_wasm_cli_artifact_widget_helpers/builder_matrix_wasm_gui.wasm
 - size bytes: 9486
 - magic hex: 0061736d
@@ -45,13 +45,13 @@
 ## Compiler Output
 
 ### builder_matrix.compile.out
-- Compiled examples/ui/builder_matrix_wasm_gui.spl -> build/gui_wasm_cli_artifact_widget_helpers/builder_matrix_wasm_gui.wasm
+- Compiled examples/06_io/ui/builder_matrix_wasm_gui.spl -> build/gui_wasm_cli_artifact_widget_helpers/builder_matrix_wasm_gui.wasm
 
 ### hello.compile.out
-- Compiled examples/ui/hello_wasm_gui.spl -> build/gui_wasm_cli_artifact_widget_helpers/hello_wasm_gui.wasm
+- Compiled examples/06_io/ui/hello_wasm_gui.spl -> build/gui_wasm_cli_artifact_widget_helpers/hello_wasm_gui.wasm
 
 ### widget_matrix.compile.out
-- Compiled examples/ui/widget_matrix_wasm_gui.spl -> build/gui_wasm_cli_artifact_widget_helpers/widget_matrix_wasm_gui.wasm
+- Compiled examples/06_io/ui/widget_matrix_wasm_gui.spl -> build/gui_wasm_cli_artifact_widget_helpers/widget_matrix_wasm_gui.wasm
 
 ## Compiler Error
 

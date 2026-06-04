@@ -185,7 +185,7 @@ Landed 2026-04-18 (local `main`, not pushed):
 | B     | `nvotmqstnuuz`   | `driver/{manifest,registry,static_table,loader}.spl` + test        |
 | C.1   | `kkxzmyptnswk`   | `io/dma.spl` API + barrier-only fallbacks + test                   |
 | D     | `ynpptnlkslxt`   | `fs_driver` + `gpu_driver` adapters + `driver/native_libs.spl`     |
-| E     | `wm 1a…`         | `examples/simple_os/src/drivers/null_block.spl` + 5-case test      |
+| E     | `wm 1a…`         | `examples/09_embedded/simple_os/src/drivers/null_block.spl` + 5-case test      |
 
 Open follow-ups are tracked in detail at
 `doc/08_tracking/feature_request/driver_framework_requests.md`:

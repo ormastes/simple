@@ -2,7 +2,7 @@
 
 > **Location:** `src/lib/nogc_sync_mut/http_server/`
 > **Import:** `use std.nogc_sync_mut.http_server.*`
-> **Full example using this lib:** `examples/simple_web_server/` ([design](simple_web_server_example.md))
+> **Full example using this lib:** `examples/06_io/simple_web_server/` ([design](simple_web_server_example.md))
 > **Architecture overview:** [simple_web_server_split.md](simple_web_server_split.md)
 
 ## Quick Start
@@ -162,7 +162,7 @@ fn with_logging(inner: fn(HttpRequest) -> HttpResponse) -> fn(HttpRequest) -> Ht
         return resp
 ```
 
-See `examples/simple_web_server/middleware.spl` ([design](simple_web_server_example.md)) for CORS, compression, and logging middleware built on this pattern.
+See `examples/06_io/simple_web_server/middleware.spl` ([design](simple_web_server_example.md)) for CORS, compression, and logging middleware built on this pattern.
 
 ## Error Model
 
@@ -185,6 +185,6 @@ No other stdlib dependencies. JSON, TLS, file I/O are opt-in via the caller.
 | Module | Relationship |
 |--------|-------------|
 | `std.nogc_async_mut.http_server` | Full async server with middleware, CORS, CSRF, compression, metrics. Use when you need async I/O or the full middleware stack. |
-| `std.nogc_sync_mut.io.tls_sffi` | TLS layer. Wrap `SimpleHttpServer` connections with TLS — see `examples/simple_web_server/tls.spl`. |
+| `std.nogc_sync_mut.io.tls_sffi` | TLS layer. Wrap `SimpleHttpServer` connections with TLS — see `examples/06_io/simple_web_server/tls.spl`. |
 | `app.io.http_sffi` | SFFI-based HTTP server (Rust hyper). Different approach — uses extern runtime, not pure-Simple TCP. |
 | `app.ui.web.server` | UI-specific sync server. Future refactor candidate to use this lib internally. |

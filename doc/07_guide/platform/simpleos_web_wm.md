@@ -7,7 +7,7 @@ WebSocket message stream.
 Current runtime identity:
 
 - page title: `SimpleOS Web WM`
-- fixture: `examples/ui/simpleos_web_wm.ui.sdn`
+- fixture: `examples/06_io/ui/simpleos_web_wm.ui.sdn`
 - theme: `glass_obsidian_dark`
 - default window set: `Terminal`, `Editor`, `Browser`, `File Manager`
 
@@ -17,7 +17,7 @@ Current runtime identity:
 
 The standard entry is:
 
-- [examples/ui/web_wm.spl](../../../examples/ui/web_wm.spl)
+- [examples/06_io/ui/web_wm.spl](../../../examples/06_io/ui/web_wm.spl)
 
 That entry routes into:
 
@@ -76,7 +76,7 @@ The Web WM does not keep a separate visual palette.
 
 Theme flow:
 
-1. `examples/ui/simpleos_web_wm.ui.sdn` selects `glass_obsidian_dark`
+1. `examples/06_io/ui/simpleos_web_wm.ui.sdn` selects `glass_obsidian_dark`
 2. `src/app/ui.web/html.spl::generate_css()` derives CSS from the shared glass
    token path
 3. window chrome, taskbar, borders, and traffic-light buttons are generated
@@ -96,7 +96,7 @@ For the full theme/token architecture, see
 The practical runtime path today is source execution:
 
 ```bash
-src/compiler_rust/target/bootstrap/simple examples/ui/web_wm.spl
+src/compiler_rust/target/bootstrap/simple examples/06_io/ui/web_wm.spl
 ```
 
 Then open:

@@ -87,7 +87,7 @@ Spawned read-only explorers:
 8. Driver framework FR-DRIVER-0003 focused verification passed.
    - `SIMPLE_LIB=src bin/simple check src/compiler/10.frontend/core/parser_decls_part2.spl test/01_unit/compiler/packed_struct_bitfield_spec.spl`
      passed.
-   - `SIMPLE_LIB=src bin/simple check src/lib/nogc_sync_mut/driver/null_block_driver.spl examples/simple_os/src/drivers/null_block.spl test/01_unit/lib/driver/null_block_driver_test.spl`
+   - `SIMPLE_LIB=src bin/simple check src/lib/nogc_sync_mut/driver/null_block_driver.spl examples/09_embedded/simple_os/src/drivers/null_block.spl test/01_unit/lib/driver/null_block_driver_test.spl`
      passed.
    - `SIMPLE_LIB=src bin/simple test test/01_unit/compiler/packed_struct_bitfield_spec.spl --mode=interpreter --clean --format json`
      passed `4/4` in 212 ms.
@@ -272,7 +272,7 @@ Spawned read-only explorers:
     - Delayed the AP marker print until after the AP-side online hook so the
       live spec sees a stable serial marker on the shared UART.
     - Verification passed:
-      `SIMPLE_LIB=src bin/simple check src/os/kernel/arch/x86_64/cpu.spl examples/simple_os/arch/x86_64/smp_ap_probe_entry.spl`,
+      `SIMPLE_LIB=src bin/simple check src/os/kernel/arch/x86_64/cpu.spl examples/09_embedded/simple_os/arch/x86_64/smp_ap_probe_entry.spl`,
       manual QEMU boot of `build/os/simpleos_smp_ap_probe_manual.elf` showing
       `[smp] AP trampoline prepared cpu=1 vector=0x08`,
       `[smp] AP reached 64-bit entry`, and `[smp-probe] done`, and
@@ -291,11 +291,11 @@ Spawned read-only explorers:
     - Verification passed:
       `SIMPLEOS_QEMU_X86_32_BOOT_LIVE=1 SIMPLE_LIB=src bin/simple test test/03_system/simpleos_x86_32_boot_probe_live_spec.spl --mode=interpreter --clean`
       (`1/1`, 1113 ms), direct LLVM native build of
-      `examples/simple_os/arch/x86_32/browser_probe_entry.spl`, and manual
+      `examples/09_embedded/simple_os/arch/x86_32/browser_probe_entry.spl`, and manual
       `qemu-system-i386` serial output showing `SimpleOS x86_32 boot`,
       `[BOOT] Calling spl_start()...`, and `[probe browser-x86] spl_start`.
 24. SimpleOS FR-SOS-025 x86_32 live `int 0x80` trap-entry proof completed.
-    - Added `examples/simple_os/arch/x86_32/int80_probe_entry.spl` as a live
+    - Added `examples/09_embedded/simple_os/arch/x86_32/int80_probe_entry.spl` as a live
       QEMU probe for the i386 IDT/trap path.
     - Added C-side x86_32 boot support to install a vector `0x80` IDT entry,
       enter a save/restore handler from `int $0x80`, call a Simple ABI
@@ -305,7 +305,7 @@ Spawned read-only explorers:
     - Extended `test/03_system/simpleos_x86_32_boot_probe_live_spec.spl` with a
       gated live `int80` case that asserts `[int80 probe] brk ok`.
     - Verification passed:
-      `SIMPLE_LIB=src bin/simple check test/03_system/simpleos_x86_32_boot_probe_live_spec.spl examples/simple_os/arch/x86_32/int80_probe_entry.spl`,
+      `SIMPLE_LIB=src bin/simple check test/03_system/simpleos_x86_32_boot_probe_live_spec.spl examples/09_embedded/simple_os/arch/x86_32/int80_probe_entry.spl`,
       `SIMPLE_LIB=src bin/simple test test/01_unit/os/kernel/arch/x86_32_interrupt_spec.spl --mode=interpreter --clean`
       (`5/5`),
       `SIMPLE_LIB=src bin/simple test test/01_unit/os/kernel/arch/x86_32_trap_model_spec.spl --mode=interpreter --clean`
@@ -322,7 +322,7 @@ Spawned read-only explorers:
       `arch/hal.spl` keeps the public reset test facade by delegating to the
       reset module.
     - Added `src/os/kernel/arch/x86_32/early_syscall.spl` and
-      `examples/simple_os/arch/x86_32/int80_syscall_probe_entry.spl` as a
+      `examples/09_embedded/simple_os/arch/x86_32/int80_syscall_probe_entry.spl` as a
       freestanding-clean Simple ABI target for the live i386 IDT handler.
       The entry-closure i686 native build compiles only the probe and early
       syscall module and reports zero unexpected freestanding symbols.
@@ -354,14 +354,14 @@ Spawned read-only explorers:
     - Fixed the i386 `int 0x80` C bridge so syscall arguments are passed
       deterministically through `eax/ebx/ecx/edx/esi/edi`, with `arg5` fixed at
       zero for this wrapper.
-    - Added `examples/simple_os/arch/x86_32/int80_process_shell_probe_entry.spl`
+    - Added `examples/09_embedded/simple_os/arch/x86_32/int80_process_shell_probe_entry.spl`
       and `test/01_unit/os/kernel/arch/x86_32_early_syscall_spec.spl`; extended the
       gated live spec to assert `[x86_32 process] create ok`,
       `[x86_32 process] brk ok`, `[x86_32 process] reboot ok`,
       `[x86_32 process] diagnostics ok`, `[x86_32 shell] smoke ok`, and
       `[x86_32 process] shell-smoke ok`.
     - Verification passed:
-      `SIMPLE_LIB=src bin/simple check examples/simple_os/arch/x86_32/int80_probe_entry.spl src/os/kernel/arch/x86_32/early_syscall.spl examples/simple_os/arch/x86_32/int80_process_shell_probe_entry.spl test/03_system/simpleos_x86_32_boot_probe_live_spec.spl test/01_unit/os/kernel/arch/x86_32_early_syscall_spec.spl`,
+      `SIMPLE_LIB=src bin/simple check examples/09_embedded/simple_os/arch/x86_32/int80_probe_entry.spl src/os/kernel/arch/x86_32/early_syscall.spl examples/09_embedded/simple_os/arch/x86_32/int80_process_shell_probe_entry.spl test/03_system/simpleos_x86_32_boot_probe_live_spec.spl test/01_unit/os/kernel/arch/x86_32_early_syscall_spec.spl`,
       `SIMPLE_LIB=src bin/simple test test/01_unit/os/kernel/arch/x86_32_early_syscall_spec.spl --mode=interpreter --clean`
       (`1/1`),
       `SIMPLE_LIB=src bin/simple test test/01_unit/os/kernel/arch/x86_32_interrupt_spec.spl --mode=interpreter --clean`
@@ -375,12 +375,12 @@ Spawned read-only explorers:
       FAT32 images are visible to the freestanding i386 kernel.
     - Updated `scripts/os/make_os_disk.shs` to emit x86_32 SMF/ELF payload markers
       and `x86_32-initrd-fat32-smf` lane metadata.
-    - Added `examples/simple_os/arch/x86_32/initrd_fs_exec_probe_entry.spl`,
+    - Added `examples/09_embedded/simple_os/arch/x86_32/initrd_fs_exec_probe_entry.spl`,
       which verifies the FAT32 initrd contains `HELLOSMF`, `BROWSMF`, and
       x86_32 payload markers, then gates app spawn pids through live `int 0x80`
       dispatch before emitting `[x86_32 fs] app execution ok`.
     - Verification passed:
-      `SIMPLE_LIB=src bin/simple check examples/simple_os/arch/x86_32/initrd_fs_exec_probe_entry.spl test/03_system/simpleos_x86_32_boot_probe_live_spec.spl`,
+      `SIMPLE_LIB=src bin/simple check examples/09_embedded/simple_os/arch/x86_32/initrd_fs_exec_probe_entry.spl test/03_system/simpleos_x86_32_boot_probe_live_spec.spl`,
       focused QEMU boot of `simpleos_x86_32_initrd_fs_exec_probe.elf` with
       `-initrd build/os/simpleos_x86_32_fs_exec.img`, and
       `SIMPLEOS_QEMU_X86_32_BOOT_LIVE=1 SIMPLE_LIB=src bin/simple test test/03_system/simpleos_x86_32_boot_probe_live_spec.spl --mode=interpreter --clean`
@@ -413,7 +413,7 @@ Spawned read-only explorers:
       disk probe exit-code acceptance mismatch.
     - Verification passed:
       `git diff --check`,
-      `SIMPLE_LIB=src bin/simple check src/os/services/vfs/vfs_boot_init.spl src/os/services/vfs/vfs_init.spl src/os/drivers/nvme/nvme_driver_part2.spl src/os/drivers/nvme/nvme_queue.spl src/os/kernel/loader/x86_64_fs_exec_spawn.spl src/os/qemu_runner_part5.spl examples/simple_os/arch/x86_64/desktop_e2e_entry.spl`,
+      `SIMPLE_LIB=src bin/simple check src/os/services/vfs/vfs_boot_init.spl src/os/services/vfs/vfs_init.spl src/os/drivers/nvme/nvme_driver_part2.spl src/os/drivers/nvme/nvme_queue.spl src/os/kernel/loader/x86_64_fs_exec_spawn.spl src/os/qemu_runner_part5.spl examples/09_embedded/simple_os/arch/x86_64/desktop_e2e_entry.spl`,
       `SIMPLE_LIB=src bin/simple test test/01_unit/os/services/vfs/vfs_boot_nvme_lease_spec.spl --mode=interpreter --clean`,
       `SIMPLE_LIB=src bin/simple test test/01_unit/os/services/vfs/nvme_block_adapter_spec.spl --mode=interpreter --clean`, and
       `SIMPLE_LIB=src bin/simple os test --scenario=x64-desktop-disk`
@@ -1147,7 +1147,7 @@ Spawned read-only explorers:
     - Confirmed C helper HMAC inner SHA over `ipad || ikm` is wrong before the
       final HMAC stage, isolating the immediate A1 failure to multi-block
       `_tls_sha256_process_block` behavior in
-      `examples/simple_os/arch/x86_64/boot/baremetal_stubs.c`.
+      `examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c`.
     - Tried one-shot HMAC and one-shot SHA digest wrappers; neither changed the
     live result. Next step is replacing or fixing `_tls_sha256_process_block`
     against an 86-byte/multi-block vector.

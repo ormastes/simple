@@ -472,7 +472,7 @@ Key paths:
 
 - **Shared traits:** `src/lib/nogc_sync_mut/simple_db_if/`, `src/lib/gc_async_mut/simple_db_if/`
 - **Embedded (stdlib):** `src/lib/nogc_sync_mut/database/` — BugDB, TestDB, FeatureDB, QueryBuilder, atomic I/O
-- **Full engine (submodule):** `examples/simple_db/` → `https://github.com/ormastes/simple-spostgre.git`
+- **Full engine (submodule):** `examples/11_advanced/simple_db/` → `https://github.com/ormastes/simple-spostgre.git`
 - **DBFS tests:** `test/02_integration/storage/dbfs/` — btree, pager, WAL, checkpoint, intent log, NVMe, capability, recovery
 - **Research:** `doc/01_research/simple_db_research.md`
 - **Design:** `doc/05_design/simple_db_design.md`, `doc/05_design/nvfs/from_simple_db.md`

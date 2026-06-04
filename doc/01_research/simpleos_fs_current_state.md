@@ -196,8 +196,8 @@ Full POSIX-like surface: mount/unmount/remount/statfs/root/open/close/read/write
 ```
 enum DriverInstance:
     Fat32(driver: Fat32Driver)        ← stub
-    Nvfs(driver: NvfsDriver)          ← real (examples/nvfs/src/driver/)
-    NvfsPosix(driver: NvfsPosixDriver)← real (examples/nvfs/src/posix/, Phase 9 B2)
+    Nvfs(driver: NvfsDriver)          ← real (examples/11_advanced/nvfs/src/driver/)
+    NvfsPosix(driver: NvfsPosixDriver)← real (examples/11_advanced/nvfs/src/posix/, Phase 9 B2)
     RamFs(driver: RamFsStub)          ← stub
 ```
 
@@ -207,7 +207,7 @@ enum DriverInstance:
 ### 6.4 Capability System (`capability.spl`)
 22 `Capability` variants; `CapabilitySet` bitmask. Drivers declare capabilities; callers can probe for optional extensions via `probe(cap) -> Option<Extension>`.
 
-### 6.5 `NvfsPosixDriver` (`examples/nvfs/src/posix/fs_driver_impl.spl`)
+### 6.5 `NvfsPosixDriver` (`examples/11_advanced/nvfs/src/posix/fs_driver_impl.spl`)
 Implements `FsDriver` over NVFS arenas with POSIX semantics (random write, truncate, rename visibility). Uses `CowShadow` (`cow_engine.spl`) and `FdTable` (`fd_table.spl`). Phase 9 B2 — complete.
 
 ---
@@ -218,12 +218,12 @@ All sites where filesystem operations are invoked, with file, line range, and th
 
 | # | File | Line(s) | Function | Call form | Path |
 |---|------|---------|----------|-----------|------|
-| 1 | `examples/simple_os/arch/x86_64/fs_test_entry.spl` | 1–98 | `fs_test_entry()` | `extern rt_fat32_read_file_text`, `rt_fat32_file_size`, `rt_fat32_file_exists` | Direct C-extern |
-| 2 | `examples/simple_os/arch/x86_64/fs_test_entry.spl` | ~30 | `fs_test_entry()` | `vfs_boot_init()` | Startup hook |
-| 3 | `examples/simple_os/arch/x86_64/shell_serial_entry.spl` | ~40–60 | shell loop | `rt_fat32_read_file_text`, `rt_fat32_file_size` | Direct C-extern |
-| 4 | `examples/simple_os/arch/x86_64/shell_serial_entry.spl` | ~10 | init | `vfs_boot_init()` | Startup hook |
-| 5 | `examples/simple_os/arch/x86_64/boot_stage2_entry.spl` | 1–43 | `boot_stage2()` | `vfs_boot_init()`, `vfs_is_ready()` | Startup hook |
-| 6 | `examples/simple_os/arch/x86_64/boot_stage3_entry.spl` | 1–47 | `boot_stage3()` | `vfs_boot_init()`, `net_boot_init()`, `vfs_is_ready()` | Startup hook |
+| 1 | `examples/09_embedded/simple_os/arch/x86_64/fs_test_entry.spl` | 1–98 | `fs_test_entry()` | `extern rt_fat32_read_file_text`, `rt_fat32_file_size`, `rt_fat32_file_exists` | Direct C-extern |
+| 2 | `examples/09_embedded/simple_os/arch/x86_64/fs_test_entry.spl` | ~30 | `fs_test_entry()` | `vfs_boot_init()` | Startup hook |
+| 3 | `examples/09_embedded/simple_os/arch/x86_64/shell_serial_entry.spl` | ~40–60 | shell loop | `rt_fat32_read_file_text`, `rt_fat32_file_size` | Direct C-extern |
+| 4 | `examples/09_embedded/simple_os/arch/x86_64/shell_serial_entry.spl` | ~10 | init | `vfs_boot_init()` | Startup hook |
+| 5 | `examples/09_embedded/simple_os/arch/x86_64/boot_stage2_entry.spl` | 1–43 | `boot_stage2()` | `vfs_boot_init()`, `vfs_is_ready()` | Startup hook |
+| 6 | `examples/09_embedded/simple_os/arch/x86_64/boot_stage3_entry.spl` | 1–47 | `boot_stage3()` | `vfs_boot_init()`, `net_boot_init()`, `vfs_is_ready()` | Startup hook |
 | 7 | `src/os/services/vfs/vfs_init.spl` | 43–109 | `CNvmeBlockAdapter` | syscall 85 (`NvmeReadSector`) | Syscall |
 | 8 | `src/os/services/vfs/vfs_init.spl` | ~200–260 | `vfs_boot_init()` | syscall 86 (`NvmeInit`) | Syscall |
 | 9 | `src/os/services/fat32/fat32.spl` | 1–1009 | `Fat32Volume.*` | `BlockDevice.read_sector`, `write_sector` | OLD trait |
@@ -304,8 +304,8 @@ arm64/riscv64/arm32 `baremetal_stubs.c` files contain no FAT32 code. The entire 
 
 | File | What it tests | Path exercised |
 |------|---------------|----------------|
-| `examples/simple_os/arch/x86_64/fs_test_entry.spl` | read/size/exists on hello.txt, numbers.txt, hello.spl | Direct C-extern |
-| `examples/nvfs/test/01_unit/posix_shim_test.spl` | NvfsPosixDriver open/read/write/stat/rename/unlink | NEW FsDriver trait |
+| `examples/09_embedded/simple_os/arch/x86_64/fs_test_entry.spl` | read/size/exists on hello.txt, numbers.txt, hello.spl | Direct C-extern |
+| `examples/11_advanced/nvfs/test/01_unit/posix_shim_test.spl` | NvfsPosixDriver open/read/write/stat/rename/unlink | NEW FsDriver trait |
 
 No test exercises `VfsManager` with a real driver mounted. No test exercises `Fat32Driver` (new-trait stub) — it is entirely unsupported.
 
@@ -320,8 +320,8 @@ No test exercises `VfsManager` with a real driver mounted. No test exercises `Fa
 | FAT32 x86_64-only | YES |
 | VfsManager populated at boot | **NO** |
 | MountTable (new) connected to hardware | **NO** |
-| NvfsDriver real | YES (examples/nvfs/src/driver/) |
-| NvfsPosixDriver real | YES (examples/nvfs/src/posix/, Phase 9 B2) |
+| NvfsDriver real | YES (examples/11_advanced/nvfs/src/driver/) |
+| NvfsPosixDriver real | YES (examples/11_advanced/nvfs/src/posix/, Phase 9 B2) |
 | Direct C-extern call sites | 2 files (fs_test_entry.spl, shell_serial_entry.spl) |
 | Total FS call-site files | 6 |
 | Recommended M1 starting file | `src/os/services/vfs/vfs_init.spl` |

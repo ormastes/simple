@@ -33,7 +33,7 @@ This means the boot, launcher, compositor ownership, editor launch, and FAT32-ba
   - deletes stale capture files before screendump,
   - waits briefly for a fresh non-empty capture file,
   - falls back from JSON `screendump` to HMP `screendump`.
-- `examples/simple_os/arch/x86_64/desktop_e2e_entry.spl` now gives the framebuffer lanes longer post-marker capture windows.
+- `examples/09_embedded/simple_os/arch/x86_64/desktop_e2e_entry.spl` now gives the framebuffer lanes longer post-marker capture windows.
 
 ### What still fails
 

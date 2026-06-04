@@ -43,7 +43,7 @@ Check the newly connected FPGA board, research how to use it, inspect UART first
 - `bin/simple test test/03_system/app/simpleos/feature/simpleos_rv64_hosted_qemu_spec.spl --mode=interpreter` passed 3 examples, proving the RV64 hosted QEMU command includes disk and SSH/HTTP host-forwarding.
 - Rebuilt `src/compiler_rust/target/debug/simple` with `LLVM_SYS_180_PREFIX=/usr/lib/llvm-18 cargo build --manifest-path src/compiler_rust/Cargo.toml -p simple-driver --features llvm --bin simple`.
 - Created `build/os/fat32-riscv64.img` with `sh scripts/os/make_os_disk.shs 64 build/os/fat32-riscv64.img "" riscv64`.
-- `timeout 180 bin/simple run examples/simple_os/run.spl -- --arch=riscv64` built `build/os/simpleos_riscv64_smf_fs.elf`, booted under `qemu-system-riscv64`, and printed `SIMPLEOS_RISCV_SMF_FS_PASS` plus `TEST PASSED`.
+- `timeout 180 bin/simple run examples/09_embedded/simple_os/run.spl -- --arch=riscv64` built `build/os/simpleos_riscv64_smf_fs.elf`, booted under `qemu-system-riscv64`, and printed `SIMPLEOS_RISCV_SMF_FS_PASS` plus `TEST PASSED`.
 - `bin/simple test test/02_integration/app/web_stack_sample_persistence_spec.spl --mode=interpreter` passed 1 example.
 - `bin/simple test test/02_integration/app/web_stack_sample_spec.spl --mode=interpreter` passed 4 examples.
 - Host-side SQLite HTTP wrapper is running at `http://127.0.0.1:3080` from `build/web_stack_sample/live_server.py` with DB `build/web_stack_sample/live.sqlite3`; `GET /api/items` returned rows for `Kria K26 bring-up` and `Web stack sample`.
@@ -55,7 +55,7 @@ Check the newly connected FPGA board, research how to use it, inspect UART first
 - A build-only K26 PL smoke attempt failed before synthesis because this Vivado install does not expose `xck26-sfvc784-2LV-c`, `xck26-sfvc784-2LVI-i`, or matching K26 board parts through `get_parts` / `get_board_parts`.
 - Installed K26 board XMLs reference `xck26-sfvc784-2LV-c` and `xck26-sfvc784-2LVI-i`, but Vivado reports those parts invalid or unavailable.
 - The initial RV64 SimpleOS run failed because the selected Rust compiler lacked the `llvm` feature; rebuilding with LLVM 18 resolved this local QEMU blocker.
-- `examples/web_stack_sample/main.spl` is a persistence/preflight entrypoint, not a socket listener; the live HTTP proof uses the generated host wrapper in `build/web_stack_sample/live_server.py`.
+- `examples/06_io/web_stack_sample/main.spl` is a persistence/preflight entrypoint, not a socket listener; the live HTTP proof uses the generated host wrapper in `build/web_stack_sample/live_server.py`.
 
 ## Completion Audit
 

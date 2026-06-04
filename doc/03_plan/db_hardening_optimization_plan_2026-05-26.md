@@ -35,7 +35,7 @@ track.
   - bounded queue backpressure
   - batch push/pop APIs
   - optional DBFS durable handoff.
-- Improve full Simple DB in `examples/simple_db/`:
+- Improve full Simple DB in `examples/11_advanced/simple_db/`:
   - WAL, TOAST, and buffer-pool benchmarks over NVFS/DBFS storage paths
   - comparison against embedded DB and direct DBFS/NVFS baselines.
 - Keep logging/progress options stable for DB tools without flooding logs.

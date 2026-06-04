@@ -7,7 +7,7 @@ rendering sample requested by the active GUI hardening lane.
 
 Sample:
 
-- `examples/ui/engine2d_backend_test.spl`
+- `examples/06_io/ui/engine2d_backend_test.spl`
 
 Guide:
 
@@ -20,7 +20,7 @@ Command:
 ```bash
 SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple \
   src/compiler_rust/target/release/simple run \
-  examples/ui/engine2d_backend_test.spl --backend=cpu_simd
+  examples/06_io/ui/engine2d_backend_test.spl --backend=cpu_simd
 ```
 
 Outcome:
@@ -36,7 +36,7 @@ Command:
 ```bash
 SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple \
   src/compiler_rust/target/release/simple run \
-  examples/ui/engine2d_backend_test.spl --backend=metal
+  examples/06_io/ui/engine2d_backend_test.spl --backend=metal
 ```
 
 Outcome:
@@ -61,7 +61,7 @@ same underlying renderer.
 
 - `src/compiler_rust/target/release/simple check` passed for:
   - `src/lib/gc_async_mut/gpu/engine2d/engine.spl`
-  - `examples/ui/engine2d_backend_test.spl`
+  - `examples/06_io/ui/engine2d_backend_test.spl`
   - `test/02_integration/rendering/engine2d_backend_spec.spl`
   - `test/02_integration/rendering/metal_engine2d_readback_spec.spl`
   - `test/05_perf/graphics_2d/metal_readback_proof_spec.spl`

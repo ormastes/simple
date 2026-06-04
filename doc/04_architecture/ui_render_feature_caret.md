@@ -248,7 +248,7 @@ flag semantics flow from the same authoritative parse contract.
 2. New GUI-like apps must register a render adapter instead of inventing a new
    parser.
 3. Default verification should use the shared demo asset
-   (`examples/ui/widget_matrix.ui.sdn`).
+   (`examples/06_io/ui/widget_matrix.ui.sdn`).
 4. Shared docs and tests must validate help/config/output parity.
 
 ---

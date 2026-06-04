@@ -37,7 +37,7 @@ The Rust winit_ffi.rs already handles macOS (pump_events) and Linux/Windows (ded
 ## Non-Functional Requirements
 
 ### NFR-1: No Code Duplication
-The hosted desktop (`examples/simple_os/hosted/`) should reuse `src/os/` code, not duplicate it.
+The hosted desktop (`examples/09_embedded/simple_os/hosted/`) should reuse `src/os/` code, not duplicate it.
 
 ### NFR-2: Interpreter Performance
 Use native-side pixel buffer (`rt_winit_buffer_*` functions) for fast rendering. Array-based pixel manipulation is too slow for the interpreter.

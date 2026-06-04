@@ -5,7 +5,7 @@ Date: 2026-05-27
 ## Build Inputs
 
 - Simple hello: `examples/01_getting_started/hello_native.spl`
-- Simple minimal TUI: generated standalone entry -> `examples/ui/minimal.ui.sdn`
+- Simple minimal TUI: generated standalone entry -> `examples/06_io/ui/minimal.ui.sdn`
 - C hello: `build/size_audit/hello.c`
 - C ncurses hello: `build/size_audit/hello_ncurses.c`
 

@@ -96,7 +96,7 @@ expect(scenario_test_timeout_ms(scenario)).to_equal(120000)
 
 expect(scenario_name_or_missing("x64-wm-simple-web-check")).to_equal("x64-wm-simple-web-check")
 val target = scenario_target(scenario)
-expect(target.entry).to_equal("examples/simple_os/arch/x86_64/gui_entry_engine2d.spl")
+expect(target.entry).to_equal("examples/09_embedded/simple_os/arch/x86_64/gui_entry_engine2d.spl")
 expect(target.output).to_equal("build/os/simpleos_wm_simple_web_check_32.elf")
 expect(target.qemu_memory).to_equal("2G")
 
@@ -106,8 +106,8 @@ val sources = os_native_build_sources(direct_target)
 expect(sources).to_contain("build/os/generated")
 expect(sources).to_contain("src/os")
 expect(sources).to_contain("src/lib")
-expect(sources).to_contain("examples/simple_os/arch/x86_64")
-expect(sources.contains("examples/simple_os")).to_equal(false)
+expect(sources).to_contain("examples/09_embedded/simple_os/arch/x86_64")
+expect(sources.contains("examples/09_embedded/simple_os")).to_equal(false)
 
 val cmd = build_scenario_command(scenario, target.output)
 expect(cmd[0]).to_equal("qemu-system-x86_64")
@@ -214,7 +214,7 @@ expect(ssh_target.entry).to_equal(get_ssh_live_target().entry)
 expect(ssh_target.output).to_equal("build/os/simpleos_ssh_live_32.elf")
 
 val ssh_probe_target = get_ssh_x25519_probe_target()
-expect(ssh_probe_target.entry).to_equal("examples/simple_os/arch/x86_64/ssh_x25519_probe_entry.spl")
+expect(ssh_probe_target.entry).to_equal("examples/09_embedded/simple_os/arch/x86_64/ssh_x25519_probe_entry.spl")
 expect(ssh_probe_target.output).to_equal("build/os/simpleos_ssh_x25519_probe_32.elf")
 ```
 

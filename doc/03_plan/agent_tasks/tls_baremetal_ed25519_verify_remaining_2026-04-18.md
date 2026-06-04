@@ -24,10 +24,10 @@ src/compiler_rust/target/debug/simple native-build --clean \
   --source src --source examples \
   --backend cranelift \
   --entry-closure \
-  --entry examples/simple_os/arch/x86_64/tls_system_test_entry.spl \
+  --entry examples/09_embedded/simple_os/arch/x86_64/tls_system_test_entry.spl \
   --target x86_64-unknown-none \
   -o build/os/simpleos_tls_system_x86_64.elf \
-  --linker-script examples/simple_os/arch/x86_64/linker.ld
+  --linker-script examples/09_embedded/simple_os/arch/x86_64/linker.ld
 ```
 
 That exact ELF still fails in live QEMU at:
@@ -79,9 +79,9 @@ Owner:
 - freestanding artifact / build-shape correctness
 
 Files:
-- `examples/simple_os/arch/x86_64/tls_system_test_entry.spl`
-- `examples/simple_os/arch/x86_64/boot/baremetal_stubs.c`
-- `examples/simple_os/arch/x86_64/boot/curve25519_ring_helper.c`
+- `examples/09_embedded/simple_os/arch/x86_64/tls_system_test_entry.spl`
+- `examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c`
+- `examples/09_embedded/simple_os/arch/x86_64/boot/curve25519_ring_helper.c`
 
 ### Copernicus
 

@@ -16,11 +16,11 @@ style, layout, paint, and render scene generation:
    `src/os/compositor/browser_backend.spl` and
    `src/os/compositor/browser_compositor_backend.spl`, which are the
    render backends the V3 chromium shell already uses.
-2. `examples/browser/feature/{dom,style,layout,paint,parser}/...`
+2. `examples/11_advanced/browser/feature/{dom,style,layout,paint,parser}/...`
    (~45.7 k lines) — the maximalist "Chromium-class browser" research
    tree. Includes a JS engine (`script/engine/jit.spl`), a full display
    list pipeline, and entity/dom node stores under
-   `examples/browser/entity/dom/`.
+   `examples/11_advanced/browser/entity/dom/`.
 
 The V3 shell plan (`v3_simple_browser_milestones.md` §4) calls out that
 this duplication is non-deterministic for V3: a second engine path means
@@ -36,7 +36,7 @@ M4 is the milestone that resolves the decision.
 
 Every `use` site in the V3 graph — specifically under
 `src/os/compositor/` and `src/app/ui.chromium/` — resolves to that path.
-`examples/browser/feature/...` is demoted to **research / test fixtures
+`examples/11_advanced/browser/feature/...` is demoted to **research / test fixtures
 only** and MUST NOT be imported from `src/lib/` or from the V3 shell
 import graph.
 
@@ -75,7 +75,7 @@ import graph.
 
 ### Negative / follow-ups
 
-- The examples tree's JS engine (`examples/browser/feature/script/`)
+- The examples tree's JS engine (`examples/11_advanced/browser/feature/script/`)
   is not usable from V3 without a separate bridge. V3 does not need it;
   M9 decides whether to keep or delete it.
 - `src/lib/nogc_sync_mut/web_ui/*` still imports from `examples/`. That

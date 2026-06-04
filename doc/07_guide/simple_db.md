@@ -3,7 +3,7 @@
 Simple DB is a two-tier database system written in Simple:
 
 - **Simple DB Embedded** (stdlib) — lightweight embedded database for compiler metadata, project tracking, and application-level key-value/table storage. Ships with every Simple installation. Uses SDN format with atomic file I/O.
-- **Simple DB Full** (example) — full-featured PostgreSQL-compatible storage engine with MVCC, WAL, TOAST, B-tree indexing, and NVFS-backed append-only storage. Lives in `examples/simple_db/`.
+- **Simple DB Full** (example) — full-featured PostgreSQL-compatible storage engine with MVCC, WAL, TOAST, B-tree indexing, and NVFS-backed append-only storage. Lives in `examples/11_advanced/simple_db/`.
 
 Both tiers share a common trait interface (`simple_db_if`) and reuse core logic (SDN parsing, atomic I/O, QueryBuilder, string interning) from the stdlib. The full engine extends the embedded foundation with transactional storage, buffer management, and recovery.
 
@@ -255,7 +255,7 @@ src/lib/gc_sync_mut/db/              # GC-based DB compat layer
 src/lib/gc_sync_mut/io/sqlite_sffi.spl  # SQLite FFI bindings
 
 # ── Full Tier (example submodule) ────────────────────────────────
-examples/simple_db/                   # full engine (MVCC, WAL, TOAST, buffer pool)
+examples/11_advanced/simple_db/                   # full engine (MVCC, WAL, TOAST, buffer pool)
 
 # ── Tests ────────────────────────────────────────────────────────
 test/02_integration/storage/dbfs/                            # DBFS test suite (28+ specs)
@@ -282,12 +282,12 @@ test/03_system/simple_db_nvfs_constants_spec.spl  # full tier NVFS constants
 The full engine implementation lives in a separate git submodule:
 
 ```
-examples/simple_db/  →  https://github.com/ormastes/simple-simple_db.git
+examples/11_advanced/simple_db/  →  https://github.com/ormastes/simple-simple_db.git
 ```
 
 Clone with submodules:
 ```bash
 git clone --recurse-submodules https://github.com/ormastes/simple.git
 # or if already cloned:
-git submodule update --init examples/simple_db
+git submodule update --init examples/11_advanced/simple_db
 ```

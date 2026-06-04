@@ -26,7 +26,7 @@ remain C-only during Phase 2.
 
 ### 3.1 `rt_gui_blend_fill`
 
-- **C signature** — `examples/simple_os/arch/x86_64/boot/glass_render.c:348`:
+- **C signature** — `examples/09_embedded/simple_os/arch/x86_64/boot/glass_render.c:348`:
   `RuntimeValue rt_gui_blend_fill(xy, wh, color, alpha)`
 - **Simple signature** — `src/os/compositor/display_backend.spl:43`:
   `extern fn rt_gui_blend_fill(xy: u64, wh: u64, color: u64, alpha: u64)`
@@ -116,7 +116,7 @@ impl (or absence thereof). The `rt_gui_blend_fill / box_blur / gradient_v /
 read_pixel` C symbols now have only two in-tree consumers: (a) `FbCompositorBackend`'s
 own `CompositorGlassCapable` impl in `display_backend.spl:156-170` (kept until
 D2 Phase 2 reimplements blend/blur natively against `FramebufferDriver`), and
-(b) the standalone arch-layer entry points `examples/simple_os/arch/{arm64,
+(b) the standalone arch-layer entry points `examples/09_embedded/simple_os/arch/{arm64,
 x86_64}/wm_entry.spl`, `arch/x86_64/desktop_entry.spl`, and
 `arch/x86_64/gpu_render_test_entry.spl`, which are out of D2 scope. The
 deprecated facade row that previously said "any caller via `glass_effects.spl`
@@ -161,13 +161,13 @@ Shared via symlink rather than a fork — the source is portable C (uses only
   currently says **3 passes minimum, 5 passes reference**; specs MUST NOT
   snapshot-compare blur output across backends without a tolerance.
 - **Browser**: already re-implements HVHVH natively — covered. Keep.
-- **arm64**: ~~`examples/simple_os/arch/arm64/boot/glass_render.c:348/554/626/737`
+- **arm64**: ~~`examples/09_embedded/simple_os/arch/arm64/boot/glass_render.c:348/554/626/737`
   is a full fork of the x86_64 source~~ — **resolved**: file is a symlink to
   `../../x86_64/boot/glass_render.c` (verified 2026-04-14), so there is one
   canonical translation unit and no lock-step hazard. The earlier "fork"
   characterisation was inaccurate (same line numbers because it is the same
   file via symlink).
-- **riscv64**: ~~no `glass_render.c` exists at `examples/simple_os/arch/riscv64/boot/`~~ —
+- **riscv64**: ~~no `glass_render.c` exists at `examples/09_embedded/simple_os/arch/riscv64/boot/`~~ —
   **resolved**: added `arch/riscv64/boot/glass_render.c` as a symlink to
   `../../x86_64/boot/glass_render.c`, matching the arm64 precedent. Source
   is portable C (`stdint.h`/`stddef.h` only), so a single shared impl covers
@@ -190,9 +190,9 @@ Suggested path: `test/01_unit/os/compositor/glass_contract_spec.spl`. Cases:
 
 ## 7. References
 
-- C reference impl (x86_64, canonical): `examples/simple_os/arch/x86_64/boot/glass_render.c:298,319,348,554,575-579,626,737`.
-- C reference impl (arm64): `examples/simple_os/arch/arm64/boot/glass_render.c` → symlink to x86_64 canonical source.
-- C reference impl (riscv64): `examples/simple_os/arch/riscv64/boot/glass_render.c` → symlink to x86_64 canonical source.
+- C reference impl (x86_64, canonical): `examples/09_embedded/simple_os/arch/x86_64/boot/glass_render.c:298,319,348,554,575-579,626,737`.
+- C reference impl (arm64): `examples/09_embedded/simple_os/arch/arm64/boot/glass_render.c` → symlink to x86_64 canonical source.
+- C reference impl (riscv64): `examples/09_embedded/simple_os/arch/riscv64/boot/glass_render.c` → symlink to x86_64 canonical source.
 - Hosted winit analogue: `src/compiler_rust/compiler/src/interpreter_extern/winit_ffi.rs:1487,1507,1551,1646`.
 - Simple-side externs and callers: `src/os/compositor/display_backend.spl:43-46,120-138,221-240`; `src/os/compositor/compositor_engine2d.spl:58-60,137-157`; `src/os/compositor/glass_effects.spl:11-18`.
 - Hosted Simple-side: `src/os/compositor/hosted_backend.spl:23-26,136-163`.

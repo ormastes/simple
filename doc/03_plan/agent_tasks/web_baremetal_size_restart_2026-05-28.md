@@ -21,9 +21,9 @@ Already pushed to `main`:
 Files changed in the unpushed local commit:
 
 - `doc/03_plan/agent_tasks/web_baremetal_size_restart_2026-05-28.md`
-- `examples/simple_os/arch/common/baremetal_pl011_uart_stdout.c`
-- `examples/simple_os/arch/arm64/boot/baremetal_uart_stdout.c`
-- `examples/simple_os/arch/arm32/boot/baremetal_uart_stdout.c`
+- `examples/09_embedded/simple_os/arch/common/baremetal_pl011_uart_stdout.c`
+- `examples/09_embedded/simple_os/arch/arm64/boot/baremetal_uart_stdout.c`
+- `examples/09_embedded/simple_os/arch/arm32/boot/baremetal_uart_stdout.c`
 - `scripts/check/check-web-baremetal-size-audit.shs`
 - `doc/09_report/web_baremetal_size_audit_2026-05-28.md`
 
@@ -74,14 +74,14 @@ symbols when symbol compatibility matters:
 ```bash
 clang -target aarch64-unknown-none-elf -ffreestanding -nostdlib -fno-pie \
   -Os -ffunction-sections -fdata-sections \
-  -c examples/simple_os/arch/arm64/boot/baremetal_uart_stdout.c \
+  -c examples/09_embedded/simple_os/arch/arm64/boot/baremetal_uart_stdout.c \
   -o /tmp/arm64_uart.o
 llvm-size /tmp/arm64_uart.o
 llvm-nm /tmp/arm64_uart.o
 
 clang -target armv7-none-eabi -ffreestanding -nostdlib -fno-pic \
   -Os -ffunction-sections -fdata-sections \
-  -c examples/simple_os/arch/arm32/boot/baremetal_uart_stdout.c \
+  -c examples/09_embedded/simple_os/arch/arm32/boot/baremetal_uart_stdout.c \
   -o /tmp/arm32_uart.o
 llvm-size /tmp/arm32_uart.o
 llvm-nm /tmp/arm32_uart.o

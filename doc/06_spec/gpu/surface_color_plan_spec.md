@@ -56,7 +56,7 @@ expect(plan.initializes_jpegxl_decoder).to_equal(false)
 |-------|-------|
 | Category | GPU & SIMD |
 | Status | Active |
-| Source | `examples/browser/test/gpu/surface_color_plan_spec.spl` |
+| Source | `examples/11_advanced/browser/test/gpu/surface_color_plan_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 

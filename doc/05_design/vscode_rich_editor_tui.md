@@ -5,7 +5,7 @@
 > standalone VS Code rich-editor package. The current editor/IDE UI source of
 > truth is `doc/07_guide/editor_tui.md`, with reusable code in
 > `src/lib/editor/` and the product entrypoint in `src/app/ide/main.spl`.
-> `examples/ide/**` contains sample integrations only.
+> `examples/10_tooling/ide/**` contains sample integrations only.
 
 **Feature:** legacy `vscode_rich_editor`; current feature is the shared Simple IDE/editor UI
 **Date:** 2026-04-12

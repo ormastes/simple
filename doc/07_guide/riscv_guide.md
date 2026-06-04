@@ -487,7 +487,7 @@ use std.nogc_sync_mut.debug.remote.exec.adapter_ghdl_rv32.{GhdlRv32Adapter}
 
 ### Hybrid Simulation (mllvm_qemu_rtl)
 
-The `examples/mllvm_qemu_rtl/` project provides a hybrid RTL simulation with
+The `examples/09_embedded/mllvm_qemu_rtl/` project provides a hybrid RTL simulation with
 RISC-V guest CPU models:
 
 - `src/guest/riscv/cpu32.spl` -- RV32I CPU definition (32 x 32-bit registers)
@@ -769,7 +769,7 @@ formats/test/
     target_riscv64_spec.spl     # Debug format test
 ```
 
-### Examples (`examples/mllvm_qemu_rtl/`)
+### Examples (`examples/09_embedded/mllvm_qemu_rtl/`)
 
 ```
 src/guest/riscv/

@@ -568,7 +568,7 @@ Uncovered or weak areas:
   the existing substring-heuristic branches whose exact pixels the fixture specs
   pin; otherwise it routes to `simple_web_layout_render_html_pixels(...)` in the
   new `simple_web_html_layout_renderer.spl` (parse -> CSS cascade -> block
-  layout -> paint text+boxes, ported from `examples/ui/mini_html_render.spl`).
+  layout -> paint text+boxes, ported from `examples/06_io/ui/mini_html_render.spl`).
   All pinned-fixture specs stay green because every pinned fixture still matches
   the heuristic discriminator: `simple_web_engine2d_renderer_spec.spl`,
   `simple_web_html_renderer_spec.spl`, `web_renderer_backend_parity_spec.spl`,

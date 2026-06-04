@@ -52,7 +52,7 @@ then asserts marker-free provenance, non-empty pixels, color diversity, and
 exact backend parity for software, CPU SIMD, and Metal.
 
 The Electron generated-GUI evidence script uses
-`examples/ui/generated_gui_web_parity_expected.spl` to generate the same real
+`examples/06_io/ui/generated_gui_web_parity_expected.spl` to generate the same real
 GUI widget HTML and Simple CPU SIMD expected ARGB. It passes the HTML path to
 `tools/electron-live-bitmap/exact_fixture.js` through
 `ELECTRON_BITMAP_HTML_PATH`, so Electron renders the HTML rather than an

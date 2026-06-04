@@ -1,6 +1,6 @@
 # Simple Web Server — Full Standalone Example
 
-> **Location:** `examples/simple_web_server/`
+> **Location:** `examples/06_io/simple_web_server/`
 > **Lightweight lib this example uses:** `src/lib/nogc_sync_mut/http_server/` ([API doc](simple_web_server_lib_api.md))
 > **Architecture overview:** [simple_web_server_split.md](simple_web_server_split.md)
 
@@ -11,7 +11,7 @@ A full-featured standalone HTTP server built entirely on the lightweight `std.no
 ## File Structure
 
 ```
-examples/simple_web_server/
+examples/06_io/simple_web_server/
 ├── main.spl              # Entry point, CLI args, server startup
 ├── config.spl            # ServerConfig class (port, host, TLS paths, static root)
 ├── routes.spl            # Application route definitions
@@ -180,13 +180,13 @@ fn try_websocket_upgrade(req: HttpRequest, stream: TcpStream) -> bool:
 
 ```bash
 # Basic
-bin/simple run examples/simple_web_server/main.spl
+bin/simple run examples/06_io/simple_web_server/main.spl
 
 # With options
-bin/simple run examples/simple_web_server/main.spl -- --port=3000 --static=./my_assets
+bin/simple run examples/06_io/simple_web_server/main.spl -- --port=3000 --static=./my_assets
 
 # With TLS
-bin/simple run examples/simple_web_server/main.spl -- --tls-cert=cert.pem --tls-key=key.pem
+bin/simple run examples/06_io/simple_web_server/main.spl -- --tls-cert=cert.pem --tls-key=key.pem
 ```
 
 ## Relationship to Lightweight Lib
@@ -196,10 +196,10 @@ This example **reuses** the lightweight lib — it does not duplicate or fork it
 | Layer | Source | What it provides |
 |-------|--------|------------------|
 | **TCP + HTTP parsing** | `std.nogc_sync_mut.http_server` (lib) | Request/response types, parser, router, server loop |
-| **Middleware** | `examples/simple_web_server/middleware.spl` (this example) | CORS, logging, compression — wraps lib handlers |
-| **Static files** | `examples/simple_web_server/static_files.spl` (this example) | File serving via `mount()` — uses lib's prefix routing |
-| **TLS** | `examples/simple_web_server/tls.spl` (this example) | TLS termination — wraps lib's TCP accept |
-| **WebSocket** | `examples/simple_web_server/websocket.spl` (this example) | WS upgrade — intercepts before lib's HTTP routing |
+| **Middleware** | `examples/06_io/simple_web_server/middleware.spl` (this example) | CORS, logging, compression — wraps lib handlers |
+| **Static files** | `examples/06_io/simple_web_server/static_files.spl` (this example) | File serving via `mount()` — uses lib's prefix routing |
+| **TLS** | `examples/06_io/simple_web_server/tls.spl` (this example) | TLS termination — wraps lib's TCP accept |
+| **WebSocket** | `examples/06_io/simple_web_server/websocket.spl` (this example) | WS upgrade — intercepts before lib's HTTP routing |
 
 Any feature the example adds can be extracted into a separate lib module later if demand warrants it, without changing the core lightweight lib.
 

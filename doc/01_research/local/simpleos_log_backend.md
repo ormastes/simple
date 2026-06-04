@@ -11,7 +11,7 @@ Route SimpleOS baremetal debug output through the shared Simple log library inst
   - target bitmask switching via `TARGET_DEVICE`, `TARGET_SEMIHOST`, `TARGET_HOST_FILE`
 - `src/lib/nogc_async_mut_noalloc/log/targets.spl` currently hardcodes `print msg` for both device and semihost targets.
 - SimpleOS x86_64 already has a serial sink in the runtime boundary:
-  - `examples/simple_os/arch/x86_64/boot/baremetal_stubs.c`
+  - `examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c`
   - `serial_println(RuntimeValue)` and direct `serial_puts(...)`
 - Pulling `os.kernel.arch.x86_64.console` into the std log library would create the wrong dependency direction (`std` depending on `os`).
 

@@ -154,6 +154,7 @@ class SimpleWindowManager {
     this._qualityAuditMode = 'full';
     this._qualityContrastPolicyActiveIndex = 0;
     this._qualityDensityPolicyActiveIndex = 1;
+    this._qualitySurfaceDepthPolicyActiveIndex = 0;
     this._qualityBackdropPolicyActiveIndex = 0;
     this._qualityWallpaperPolicyActiveIndex = 0;
     this._qualityTitleCommandPolicyActiveIndex = 1;
@@ -4898,6 +4899,13 @@ class SimpleWindowManager {
         this._activateQualityDensityPolicySelection();
         return;
       }
+      const surfaceDepthPolicy = event.target.closest('.wm-quality-surface-depth-policy-item');
+      if (surfaceDepthPolicy && panel.contains(surfaceDepthPolicy)) {
+        this._qualitySurfaceDepthPolicyActiveIndex = Number(surfaceDepthPolicy.dataset.surfaceDepthPolicyIndex || '0') || 0;
+        this._syncQualitySurfaceDepthPolicySelection(false);
+        this._activateQualitySurfaceDepthPolicySelection();
+        return;
+      }
       const backdropPolicy = event.target.closest('.wm-quality-backdrop-policy-item');
       if (backdropPolicy && panel.contains(backdropPolicy)) {
         this._qualityBackdropPolicyActiveIndex = Number(backdropPolicy.dataset.backdropPolicyIndex || '0') || 0;
@@ -4972,6 +4980,7 @@ class SimpleWindowManager {
       const target = event.target instanceof Element ? event.target : null;
       const contrastPolicy = target ? target.closest('.wm-quality-contrast-policy-item') : null;
       const densityPolicy = target ? target.closest('.wm-quality-density-policy-item') : null;
+      const surfaceDepthPolicy = target ? target.closest('.wm-quality-surface-depth-policy-item') : null;
       const backdropPolicy = target ? target.closest('.wm-quality-backdrop-policy-item') : null;
       const wallpaperPolicy = target ? target.closest('.wm-quality-wallpaper-policy-item') : null;
       const titleCommandPolicy = target ? target.closest('.wm-quality-title-command-policy-item') : null;
@@ -4980,10 +4989,11 @@ class SimpleWindowManager {
       const chromeVerbosityPolicy = target ? target.closest('.wm-quality-chrome-verbosity-policy-item') : null;
       const feedbackPolicy = target ? target.closest('.wm-quality-feedback-policy-item') : null;
       const energyPolicy = target ? target.closest('.wm-quality-energy-policy-item') : null;
-      if ((!contrastPolicy || !panel.contains(contrastPolicy)) && (!densityPolicy || !panel.contains(densityPolicy)) && (!backdropPolicy || !panel.contains(backdropPolicy)) && (!wallpaperPolicy || !panel.contains(wallpaperPolicy)) && (!titleCommandPolicy || !panel.contains(titleCommandPolicy)) && (!windowTransitionPolicy || !panel.contains(windowTransitionPolicy)) && (!animationStylePolicy || !panel.contains(animationStylePolicy)) && (!chromeVerbosityPolicy || !panel.contains(chromeVerbosityPolicy)) && (!feedbackPolicy || !panel.contains(feedbackPolicy)) && (!energyPolicy || !panel.contains(energyPolicy))) return;
+      if ((!contrastPolicy || !panel.contains(contrastPolicy)) && (!densityPolicy || !panel.contains(densityPolicy)) && (!surfaceDepthPolicy || !panel.contains(surfaceDepthPolicy)) && (!backdropPolicy || !panel.contains(backdropPolicy)) && (!wallpaperPolicy || !panel.contains(wallpaperPolicy)) && (!titleCommandPolicy || !panel.contains(titleCommandPolicy)) && (!windowTransitionPolicy || !panel.contains(windowTransitionPolicy)) && (!animationStylePolicy || !panel.contains(animationStylePolicy)) && (!chromeVerbosityPolicy || !panel.contains(chromeVerbosityPolicy)) && (!feedbackPolicy || !panel.contains(feedbackPolicy)) && (!energyPolicy || !panel.contains(energyPolicy))) return;
       const moveSelection = (delta) => {
         if (contrastPolicy) this._moveQualityContrastPolicySelection(delta);
         if (densityPolicy) this._moveQualityDensityPolicySelection(delta);
+        if (surfaceDepthPolicy) this._moveQualitySurfaceDepthPolicySelection(delta);
         if (backdropPolicy) this._moveQualityBackdropPolicySelection(delta);
         if (wallpaperPolicy) this._moveQualityWallpaperPolicySelection(delta);
         if (titleCommandPolicy) this._moveQualityTitleCommandPolicySelection(delta);
@@ -4996,6 +5006,7 @@ class SimpleWindowManager {
       const setSelection = (index) => {
         if (contrastPolicy) this._setQualityContrastPolicySelection(index);
         if (densityPolicy) this._setQualityDensityPolicySelection(index);
+        if (surfaceDepthPolicy) this._setQualitySurfaceDepthPolicySelection(index);
         if (backdropPolicy) this._setQualityBackdropPolicySelection(index);
         if (wallpaperPolicy) this._setQualityWallpaperPolicySelection(index);
         if (titleCommandPolicy) this._setQualityTitleCommandPolicySelection(index);
@@ -5005,10 +5016,11 @@ class SimpleWindowManager {
         if (feedbackPolicy) this._setQualityFeedbackPolicySelection(index);
         if (energyPolicy) this._setQualityEnergyPolicySelection(index);
       };
-      const itemCount = contrastPolicy ? this._qualityContrastPolicyItems().length : densityPolicy ? this._qualityDensityPolicyItems().length : backdropPolicy ? this._qualityBackdropPolicyItems().length : wallpaperPolicy ? this._qualityWallpaperPolicyItems().length : titleCommandPolicy ? this._qualityTitleCommandPolicyItems().length : windowTransitionPolicy ? this._qualityWindowTransitionPolicyItems().length : animationStylePolicy ? this._qualityAnimationStylePolicyItems().length : chromeVerbosityPolicy ? this._qualityChromeVerbosityPolicyItems().length : feedbackPolicy ? this._qualityFeedbackPolicyItems().length : this._qualityEnergyPolicyItems().length;
+      const itemCount = contrastPolicy ? this._qualityContrastPolicyItems().length : densityPolicy ? this._qualityDensityPolicyItems().length : surfaceDepthPolicy ? this._qualitySurfaceDepthPolicyItems().length : backdropPolicy ? this._qualityBackdropPolicyItems().length : wallpaperPolicy ? this._qualityWallpaperPolicyItems().length : titleCommandPolicy ? this._qualityTitleCommandPolicyItems().length : windowTransitionPolicy ? this._qualityWindowTransitionPolicyItems().length : animationStylePolicy ? this._qualityAnimationStylePolicyItems().length : chromeVerbosityPolicy ? this._qualityChromeVerbosityPolicyItems().length : feedbackPolicy ? this._qualityFeedbackPolicyItems().length : this._qualityEnergyPolicyItems().length;
       const activateSelection = () => {
         if (contrastPolicy) this._activateQualityContrastPolicySelection();
         if (densityPolicy) this._activateQualityDensityPolicySelection();
+        if (surfaceDepthPolicy) this._activateQualitySurfaceDepthPolicySelection();
         if (backdropPolicy) this._activateQualityBackdropPolicySelection();
         if (wallpaperPolicy) this._activateQualityWallpaperPolicySelection();
         if (titleCommandPolicy) this._activateQualityTitleCommandPolicySelection();
@@ -6148,6 +6160,7 @@ class SimpleWindowManager {
     preview.appendChild(this._makeQualityDepthMetric('Taskbar', this._qualityElementZIndex(taskbar, 10000)));
     preview.appendChild(this._makeQualityDepthMetric('Blur', this._qualityCssPx(root, '--ui-glass-blur-px', 24) + 'px'));
     preview.appendChild(this._makeQualityDepthMetric('Shadow', 'layered'));
+    preview.appendChild(this._makeQualitySurfaceDepthPolicy(this._surfaceDepthMode));
     return preview;
   }
 
@@ -6168,6 +6181,86 @@ class SimpleWindowManager {
     metric.appendChild(name);
     metric.appendChild(result);
     return metric;
+  }
+
+  _makeQualitySurfaceDepthPolicy(activeMode) {
+    const mode = this._normalizeThreeMode(activeMode || this._surfaceDepthMode, 'layered', 'subtle', 'flat');
+    const entries = [
+      ['layered', 'Layered', 'deep elevation'],
+      ['subtle', 'Subtle', 'lighter shadows'],
+      ['flat', 'Flat', 'minimal depth']
+    ];
+    this._qualitySurfaceDepthPolicyActiveIndex = Math.max(0, entries.findIndex(([depth]) => depth === mode));
+    const policy = document.createElement('div');
+    policy.className = 'wm-quality-surface-depth-policy';
+    policy.setAttribute('role', 'listbox');
+    policy.setAttribute('aria-label', 'Surface depth policy');
+    policy.dataset.surfaceDepthPolicyActiveIndex = String(this._qualitySurfaceDepthPolicyActiveIndex);
+    policy.setAttribute('aria-activedescendant', `wm-quality-surface-depth-policy-${this._qualitySurfaceDepthPolicyActiveIndex}`);
+    entries.forEach(([depth, label, value], index) => {
+      const selected = index === this._qualitySurfaceDepthPolicyActiveIndex;
+      const item = document.createElement('button');
+      item.id = `wm-quality-surface-depth-policy-${index}`;
+      item.className = 'wm-quality-surface-depth-policy-item' + (selected ? ' selected' : '');
+      item.dataset.surfaceDepthPolicy = depth;
+      item.dataset.surfaceDepthPolicyIndex = String(index);
+      item.setAttribute('role', 'option');
+      item.setAttribute('aria-selected', selected ? 'true' : 'false');
+      item.tabIndex = selected ? 0 : -1;
+      const name = document.createElement('span');
+      name.className = 'wm-quality-surface-depth-policy-label';
+      name.textContent = label;
+      const result = document.createElement('strong');
+      result.className = 'wm-quality-surface-depth-policy-value';
+      result.textContent = value;
+      item.appendChild(name);
+      item.appendChild(result);
+      policy.appendChild(item);
+    });
+    return policy;
+  }
+
+  _qualitySurfaceDepthPolicyItems() {
+    if (!this._qualityInspector) return [];
+    return Array.from(this._qualityInspector.querySelectorAll('.wm-quality-surface-depth-policy-item'));
+  }
+
+  _moveQualitySurfaceDepthPolicySelection(delta) {
+    const items = this._qualitySurfaceDepthPolicyItems();
+    if (!items.length) return;
+    this._qualitySurfaceDepthPolicyActiveIndex = (this._qualitySurfaceDepthPolicyActiveIndex + delta + items.length) % items.length;
+    this._syncQualitySurfaceDepthPolicySelection(true);
+  }
+
+  _setQualitySurfaceDepthPolicySelection(index) {
+    const items = this._qualitySurfaceDepthPolicyItems();
+    if (!items.length) return;
+    this._qualitySurfaceDepthPolicyActiveIndex = Math.max(0, Math.min(items.length - 1, index));
+    this._syncQualitySurfaceDepthPolicySelection(true);
+  }
+
+  _syncQualitySurfaceDepthPolicySelection(shouldFocus = false) {
+    const items = this._qualitySurfaceDepthPolicyItems();
+    if (!items.length) return;
+    const policy = items[0].closest('.wm-quality-surface-depth-policy');
+    items.forEach((item, index) => {
+      const selected = index === this._qualitySurfaceDepthPolicyActiveIndex;
+      item.classList.toggle('selected', selected);
+      item.tabIndex = selected ? 0 : -1;
+      item.setAttribute('aria-selected', selected ? 'true' : 'false');
+      if (selected && policy) policy.setAttribute('aria-activedescendant', item.id);
+      if (selected && shouldFocus) item.focus();
+    });
+    if (policy) policy.dataset.surfaceDepthPolicyActiveIndex = String(this._qualitySurfaceDepthPolicyActiveIndex);
+  }
+
+  _activateQualitySurfaceDepthPolicySelection() {
+    const item = this._qualitySurfaceDepthPolicyItems()[this._qualitySurfaceDepthPolicyActiveIndex];
+    if (!item) return;
+    const depth = item.dataset.surfaceDepthPolicy || 'layered';
+    this.setSurfaceDepthPreference(depth);
+    this._sendWindowCmd('quality_surface_depth_policy', { surface_depth_policy: depth });
+    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
   }
 
   _makeQualityInteractionPreview() {

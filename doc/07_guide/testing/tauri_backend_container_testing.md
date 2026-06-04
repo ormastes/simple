@@ -96,7 +96,7 @@ Current limitation:
 For testing with older Simple binaries, use `.spl` files that output render JSON:
 
 ```simple
-# examples/ui/test_render.spl
+# examples/06_io/ui/test_render.spl
 fn main():
     val html = "<div><h1>Hello</h1></div>"
     val escaped = html.replace("\"", "\\\"")
@@ -110,7 +110,7 @@ fn main():
 | `DISPLAY` | X11 display for Xvfb | `:99` |
 | `WEBKIT_DISABLE_DMABUF_RENDERER` | Bypass GPU/DRI permission issues | `1` |
 | `SIMPLE_BIN` | Override Simple binary path | `./bin/simple` |
-| `SIMPLE_ENTRY` | Override entry file path | `examples/ui/hello.spl` |
+| `SIMPLE_ENTRY` | Override entry file path | `examples/06_io/ui/hello.spl` |
 
 ### Verifying the Render Pipeline
 

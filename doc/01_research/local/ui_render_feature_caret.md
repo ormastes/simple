@@ -147,7 +147,7 @@ Recommended reuse:
 
 ## Current Structural Problems
 
-1. `--render` exists ad hoc in `examples/smux/main.spl`, not in shared UI.
+1. `--render` exists ad hoc in `examples/06_io/smux/main.spl`, not in shared UI.
 2. Parser ownership is split between `src/app/ui/main.spl` and
    `src/app/ui/cli_entry.spl`.
 3. Backend override is partly centralized in `src/app/ui/detect.spl`, but
@@ -194,7 +194,7 @@ render code by backend or app.
 ### Default demo asset
 
 The best current default render target is:
-- `examples/ui/widget_matrix.ui.sdn`
+- `examples/06_io/ui/widget_matrix.ui.sdn`
 
 Reason:
 - wide widget coverage

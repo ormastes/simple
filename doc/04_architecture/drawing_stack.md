@@ -6,7 +6,7 @@
 ## Overview
 
 The drawing stack is a Chromium-class rendering pipeline written in Simple,
-consumed by `examples/browser/` (simple_browser V3 shell). It mirrors
+consumed by `examples/11_advanced/browser/` (simple_browser V3 shell). It mirrors
 Chrome's layering — **Blink** (DOM/CSS/layout) → **cc** (layer trees + tiles)
 → **viz** (compositor frames) → **Skia** (2D graphics core) — so existing
 Chromium literature applies. Where the MDSOC capsule model forces divergence

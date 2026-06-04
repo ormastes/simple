@@ -132,11 +132,11 @@ SimpleOS target metadata is centralized in `src/os/port/simpleos_multiplatform_b
 
 ```bash
 # Build all first-class SimpleOS QEMU targets
-bin/simple run examples/simple_os/build.spl
+bin/simple run examples/09_embedded/simple_os/build.spl
 
 # Build 32-bit x86 explicitly
-bin/simple run examples/simple_os/build.spl -- --arch=x86_32
-bin/simple run examples/simple_os/build.spl -- --arch=i686
+bin/simple run examples/09_embedded/simple_os/build.spl -- --arch=x86_32
+bin/simple run examples/09_embedded/simple_os/build.spl -- --arch=i686
 ```
 
 The 32-bit x86 lane is `i686-simpleos`: C boot support is compiled with `--target=i686-unknown-none-elf -m32`, assembly boot support uses the same i686 freestanding target, QEMU runs with `qemu-system-i386`, and the SimpleOS runner defaults that lane to LLVM because Cranelift does not expose an i686 freestanding target here. Build the selected compiler binary with the Rust `llvm` feature and LLVM 18 available through `LLVM_SYS_180_PREFIX` or system discovery before using this lane.

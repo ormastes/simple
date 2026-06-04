@@ -11,7 +11,7 @@ module — the build profile picks, you do not change the source.
 ## 1. Minimum viable driver
 
 ```spl
-# examples/simple_os/drivers/null_block/null_block.spl
+# examples/09_embedded/simple_os/drivers/null_block/null_block.spl
 use std.driver.core.{Driver}
 use std.driver.error.{DriverError}
 use std.driver.types.{DriverContext, DriverHandle, DeviceId, IoctlCmd,
@@ -58,12 +58,12 @@ module null_block:
 
 Build static (kernel-embedded):
 ```
-bin/simple build --driver-mode=static  examples/simple_os/drivers/null_block
+bin/simple build --driver-mode=static  examples/09_embedded/simple_os/drivers/null_block
 ```
 
 Build dynamic (loadable `.lsm`):
 ```
-bin/simple build --driver-mode=dynamic examples/simple_os/drivers/null_block
+bin/simple build --driver-mode=dynamic examples/09_embedded/simple_os/drivers/null_block
 ```
 
 ## 2. MMIO, IRQs, bitmasks

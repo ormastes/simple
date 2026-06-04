@@ -261,8 +261,8 @@ Remaining mobile platform blockers:
 
 Read-only browser investigation found:
 - Browser app entry and bridge paths:
-  `examples/browser/mod.spl`, `examples/browser/render_adapter.spl`, and
-  `examples/browser/ui_bridge.spl`.
+  `examples/11_advanced/browser/mod.spl`, `examples/11_advanced/browser/render_adapter.spl`, and
+  `examples/11_advanced/browser/ui_bridge.spl`.
 - Pure Simple renderer paths:
   `src/lib/gc_async_mut/gpu/browser_engine/browser_renderer.spl`,
   `src/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer.spl`, and
@@ -676,7 +676,7 @@ SIMPLE_LIB=src timeout 120s bin/simple check src/app/ui.tauri/tauri_entry.spl sr
 SIMPLE_LIB=src timeout 120s bin/simple test test/01_unit/app/ui/tauri_entry_common_envelope_spec.spl --mode=interpreter --clean --format json
 SIMPLE_LIB=src timeout 120s bin/simple test test/01_unit/app/ui/async_ipc_spec.spl --mode=interpreter --clean --format json
 cargo test --manifest-path tools/tauri-shell/src-tauri/Cargo.toml --lib
-SIMPLE_LIB=src timeout 60s bin/simple tauri-entry examples/ui/hello_tauri.ui.sdn | rg -o '"target":"tauri"|"surface_id":"main"|"width":1280|"height":720'
+SIMPLE_LIB=src timeout 60s bin/simple tauri-entry examples/06_io/ui/hello_tauri.ui.sdn | rg -o '"target":"tauri"|"surface_id":"main"|"width":1280|"height":720'
 ```
 
 Result: `simple tauri-entry <file.ui.sdn>` now emits the same common
@@ -714,7 +714,7 @@ node --check tools/electron-shell/main.js
 node --check tools/electron-shell/preload.js
 node -e "const fs=require('fs'); JSON.parse(fs.readFileSync('tools/electron-shell/package.json','utf8'))"
 node test/01_unit/app/ui/electron_bridge_common_envelope_test.js
-timeout 5s bin/simple run src/app/ui.electron/app.spl examples/ui/hello_tauri.ui.sdn | head -1
+timeout 5s bin/simple run src/app/ui.electron/app.spl examples/06_io/ui/hello_tauri.ui.sdn | head -1
 xvfb-run -a --server-args='-screen 0 1280x720x24' npm --prefix tools/electron-shell run live-smoke
 scripts/check/check-electron-live-smoke.shs
 cat build/electron_shell_envelope.json

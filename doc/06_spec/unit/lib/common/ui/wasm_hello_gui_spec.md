@@ -115,7 +115,7 @@ val android = wasm_hello_gui_compile_plan_for_target(WEB_RENDER_TARGET_ANDROID_W
 val ios = wasm_hello_gui_compile_plan_for_target(WEB_RENDER_TARGET_IOS_WASM)
 val summary = wasm_hello_gui_compile_plan_summary(ios)
 
-expect(android.source_entry).to_equal("examples/ui/hello_wasm_gui.spl")
+expect(android.source_entry).to_equal("examples/06_io/ui/hello_wasm_gui.spl")
 expect(android.target_triple).to_equal("wasm32-unknown-unknown")
 expect(android.linker).to_equal("wasm-ld")
 expect(android.output_path).to_equal("build/gui/android/hello.wasm")
@@ -229,7 +229,7 @@ val no_source = wasm_hello_gui_compile_result_for_request(wasm_hello_gui_compile
 expect(no_sysroot.status).to_equal("missing_wasi_sysroot")
 expect(no_sysroot.ready).to_equal(false)
 expect(no_source.status).to_equal("missing_source_entry")
-expect(no_source.diagnostic).to_contain("examples/ui/hello_wasm_gui.spl")
+expect(no_source.diagnostic).to_contain("examples/06_io/ui/hello_wasm_gui.spl")
 ```
 
 </details>

@@ -14,7 +14,7 @@ a garbage `data.len()` even though the same record decrypted successfully via
 
 ## Evidence
 
-- A clean QEMU run of `examples/simple_os/arch/x86_64/tls_unit_entry.spl`
+- A clean QEMU run of `examples/09_embedded/simple_os/arch/x86_64/tls_unit_entry.spl`
   showed pure record encryption and compact decrypt succeeding for D3, D4, D9,
   and D10.
 - The failure only appeared when destructuring

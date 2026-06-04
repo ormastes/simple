@@ -33,7 +33,7 @@ dropped. None of these block the current green test state.
 - **Status:** Open
 - **Requested-semantics:**
   The real layout renderer paints text glyph-by-glyph; a realistic full page
-  (`examples/ui/sample_page.html`, ~4 KB) renders in ~2m37s under
+  (`examples/06_io/ui/sample_page.html`, ~4 KB) renders in ~2m37s under
   `SIMPLE_EXECUTION_MODE=interpret`. That is correct but far too slow for any
   interactive or test-harness use. Want either (a) a lean direct-`[u32]`
   framebuffer text rasterizer (bitmap font blit, no per-pixel engine dispatch)
@@ -42,7 +42,7 @@ dropped. None of these block the current green test state.
   `native-build` currently exits 3 with no diagnostic in this checkout (see
   Notes) — option (a) is the unblocked path.
 - **Acceptance-criteria:**
-  - [ ] `examples/ui/sample_page.html` renders through the layout renderer in
+  - [ ] `examples/06_io/ui/sample_page.html` renders through the layout renderer in
         < 10s under `SIMPLE_EXECUTION_MODE=interpret` on the dev machine.
   - [ ] ASCII preview / pixel output still shows legible text rows and block
         backgrounds (no fidelity regression vs the current path).

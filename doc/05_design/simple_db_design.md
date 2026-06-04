@@ -49,9 +49,9 @@ Per CLAUDE.md "MDSOC+ by default" and the 1-dev state's MDSOC+ placement, Simple
 |---|---|---|---|
 | Trait contracts (shared) | `src/lib/nogc_sync_mut/storage/` | Cross-feature storage types: `Generation`, `SealToken`, `PublishResult`, `Durability`, `StorageClass` re-exports | New |
 | Simple DB trait contracts | `src/lib/nogc_sync_mut/simple_db_if/` | **(name committed in this design)** — public trait contracts: `PageStore`, `WalWriter`, `BufferManager`, `PageMap`, `Vacuumer`, `Checkpointer`, `RelationOracle` | New |
-| Engine implementation | `examples/simple_db/src/engine/*` (submodule) | Concrete impls of simple_db_if traits; buffer pool, WAL writer, MVCC, BRIN, HOT, pmap, recovery | New |
-| ECS business layer | `examples/simple_db/src/business/*` (submodule) | Components (Relation / PageDescriptor / Tuple / WalRecord / Txn / Checkpoint / ...) and Systems (sys_commit, sys_wal_flush, ...) over `std.ecs` | New |
-| CLI (tool) | `examples/simple_db/src/tool/*` (submodule, symlinked to `src/app/simple_db/`) | `simple_db` CLI: init, wal-replay, vacuum, checkpoint-now, dump-catalog | New |
+| Engine implementation | `examples/11_advanced/simple_db/src/engine/*` (submodule) | Concrete impls of simple_db_if traits; buffer pool, WAL writer, MVCC, BRIN, HOT, pmap, recovery | New |
+| ECS business layer | `examples/11_advanced/simple_db/src/business/*` (submodule) | Components (Relation / PageDescriptor / Tuple / WalRecord / Txn / Checkpoint / ...) and Systems (sys_commit, sys_wal_flush, ...) over `std.ecs` | New |
+| CLI (tool) | `examples/11_advanced/simple_db/src/tool/*` (submodule, symlinked to `src/app/simple_db/`) | `simple_db` CLI: init, wal-replay, vacuum, checkpoint-now, dump-catalog | New |
 
 > **Decision (committed here):** the trait-contract namespace is `simple_db_if` — matches the existing `fs/nvfs/` sibling pattern. Phase 4/5 shall not re-litigate this name.
 

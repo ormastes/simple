@@ -27,12 +27,12 @@ Build the embedded page from any `.ui.sdn`:
 
 ```sh
 SIMPLE_EXECUTION_MODE=interpret bin/simple run \
-  examples/ui/render_mobile_page.spl \
-  examples/ui/mobile_hello.ui.sdn \
+  examples/06_io/ui/render_mobile_page.spl \
+  examples/06_io/ui/mobile_hello.ui.sdn \
   tools/tauri-shell/dist/index.html
 ```
 
-`examples/ui/mobile_hello.{ui.sdn,spl}` is the reference app — it exercises
+`examples/06_io/ui/mobile_hello.{ui.sdn,spl}` is the reference app — it exercises
 list, button, textbox (input/textfield), scroll, checkbox and radio over the
 touch-enabled mobile backend (`TauriBackend.new_mobile` / `run_tauri_mobile`).
 
@@ -126,7 +126,7 @@ adb exec-out screencap -p > /tmp/android.png
   `scene_to_canvas_html(scene, id)` translates a `RenderScene` (rect / circle /
   line / text) into an HTML5 `<canvas>` 2D-context replay script for the mobile
   webview. Vector commands stay crisp at any DPI and avoid marshalling raw pixel
-  buffers across the interpreter FFI. Demo: `examples/ui/mobile_2d.spl` (run
+  buffers across the interpreter FFI. Demo: `examples/06_io/ui/mobile_2d.spl` (run
   under `SIMPLE_EXECUTION_MODE=interpret`).
 
 ## 6. Troubleshooting

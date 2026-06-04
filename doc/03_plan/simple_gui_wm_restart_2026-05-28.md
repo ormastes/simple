@@ -109,7 +109,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/gui/wm_input_qemu_smoke_spec.spl -
 ```
 
 The new system spec is a bounded live WM input smoke for
-`examples/simple_os/arch/x86_64/wm_input_test_entry.spl`. It builds the
+`examples/09_embedded/simple_os/arch/x86_64/wm_input_test_entry.spl`. It builds the
 standalone input-test kernel, boots it under `qemu-system-x86_64` when the
 kernel exists, and asserts the serial input markers for init, focus click,
 drag to `444,252`, `[PASS] wm_input_test_entry`, and `TEST PASSED`.
@@ -141,8 +141,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/gui/arm64_wm_qemu_contract_spec.sp
 ```
 
 The ARM64 contract spec ties `doc/07_guide/platform/simpleos_arm64_wm_qemu.md`
-to `examples/simple_os/arch/arm64/wm_entry.spl` and
-`examples/simple_os/arch/arm64/wm_entry_io.spl`. It checks that the documented
+to `examples/09_embedded/simple_os/arch/arm64/wm_entry.spl` and
+`examples/09_embedded/simple_os/arch/arm64/wm_entry_io.spl`. It checks that the documented
 `qemu-system-aarch64`/`ramfb` command, `aarch64-unknown-none` target, output
 ELF path, fw_cfg MMIO address, `etc/ramfb` selector path, and acceptance serial
 markers are present in the guide and source. This prevents drift in the non-x86
@@ -168,7 +168,7 @@ Current result on this Linux host:
   the named `arm64-wm-ramfb` scenario command contract, runner CLI commands,
   WM-specific serial acceptance markers, and a 120s scenario test timeout.
 - The extended QEMU runner spec now passes `25/25` and asserts the ARM64 WM
-  target uses `build/os/generated`, `src/os`, and `examples/simple_os`, plus
+  target uses `build/os/generated`, `src/os`, and `examples/09_embedded/simple_os`, plus
   `SIMPLE_BOOTSTRAP=1`, `SIMPLE_LIB="$(pwd)/src"`, and
   `SIMPLE_ALLOW_FREESTANDING_STUBS=1`; it also proves
   `get_scenario("arm64-wm-ramfb")` resolves to the WM target and QEMU command.

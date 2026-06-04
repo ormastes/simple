@@ -27,7 +27,7 @@ The BGA/std-vga path is mandatory coverage for Engine2D graphics-core and WM-fac
 - `bin/simple os build --scenario=x64-wm-simple-web-check`
 - `bin/simple os test --scenario=x64-wm-simple-web-check`
 
-The named scenario binds to `examples/simple_os/arch/x86_64/gui_entry_engine2d.spl`, uses the proven desktop/browser `2G` memory profile, and keeps full QMP/framebuffer capture plus serial-marker validation in `test/03_system/gui_entry_engine2d_wm_simple_web_spec.spl`.
+The named scenario binds to `examples/09_embedded/simple_os/arch/x86_64/gui_entry_engine2d.spl`, uses the proven desktop/browser `2G` memory profile, and keeps full QMP/framebuffer capture plus serial-marker validation in `test/03_system/gui_entry_engine2d_wm_simple_web_spec.spl`.
 
 ## Acceptance
 

@@ -18,7 +18,7 @@ reopened `.spl` files in a `CustomTextEditorProvider` and rendered
 natural-height math and image widgets inside a CodeMirror 6 webview. That
 standalone implementation tree has been removed; current work routes through
 the shared Simple editor/IDE surfaces in `src/lib/editor/`, `src/app/editor/`,
-and `src/app/ide/main.spl`. The `examples/ide/**` files are sample integrations
+and `src/app/ide/main.spl`. The `examples/10_tooling/ide/**` files are sample integrations
 that demonstrate launch and render contracts; they are not the embedded app.
 
 Current work is Markdown-first: Markdown notes, wiki links, preview, outline,

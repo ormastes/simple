@@ -20,7 +20,7 @@ Plan a stable x86 strategy that supports:
   - `qemu-system-i386`
   - `-machine pc`
   - `-cpu qemu32`
-- `examples/simple_os/arch/x86_32/` contains:
+- `examples/09_embedded/simple_os/arch/x86_32/` contains:
   - `boot/crt0.s`
   - `linker.ld`
   - `boot/baremetal_stubs.c`
@@ -28,13 +28,13 @@ Plan a stable x86 strategy that supports:
 
 ### Existing x86_64 lane
 
-- `examples/simple_os/arch/x86_64/boot/crt0.s` performs a 32-bit Multiboot handoff and then enters long mode.
-- `examples/simple_os/arch/x86_64/boot/baremetal_stubs.c` owns the freestanding runtime for the wrapper lane.
+- `examples/09_embedded/simple_os/arch/x86_64/boot/crt0.s` performs a 32-bit Multiboot handoff and then enters long mode.
+- `examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c` owns the freestanding runtime for the wrapper lane.
 - `src/os/qemu_runner.spl` already maps `Architecture.X86_64` to:
   - `qemu-system-x86_64`
   - `-machine q35`
   - `-cpu qemu64`
-- `examples/simple_os/arch/x86_64` is the rich wrapper lane for desktop, WM, browser, tools, and probes.
+- `examples/09_embedded/simple_os/arch/x86_64` is the rich wrapper lane for desktop, WM, browser, tools, and probes.
 
 ## Known Working vs Broken
 
@@ -72,9 +72,9 @@ This matches the current code layout better than continuing to force x86_64 arti
 
 ## File-Level Recommendations
 
-1. Extend `examples/simple_os/arch/x86_32/` with minimal browser and desktop wrapper entries.
+1. Extend `examples/09_embedded/simple_os/arch/x86_32/` with minimal browser and desktop wrapper entries.
 2. Keep `src/os/kernel/arch/x86_32/` as the kernel-grade 32-bit boot/runtime source of truth.
-3. Keep `examples/simple_os/arch/x86_64/boot/` as the full wrapper/runtime path for the 64-bit lane.
+3. Keep `examples/09_embedded/simple_os/arch/x86_64/boot/` as the full wrapper/runtime path for the 64-bit lane.
 4. Add explicit x86_32 browser/desktop targets in `src/os/qemu_runner.spl`.
 5. Keep `qemu-system-i386/qemu32` and `qemu-system-x86_64/qemu64` as distinct acceptance environments.
 6. Share browser/desktop app logic above the boot/runtime boundary only.

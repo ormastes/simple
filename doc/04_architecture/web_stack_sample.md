@@ -2,8 +2,8 @@
 
 ## Purpose
 
-`examples/web_stack_sample/` is the canonical verification target for the
-Simple web stack. It is intentionally smaller than `examples/webapp/` while
+`examples/06_io/web_stack_sample/` is the canonical verification target for the
+Simple web stack. It is intentionally smaller than `examples/06_io/webapp/` while
 still exercising auth/session, CRUD, and search/filter in one app.
 
 ## Storage Split

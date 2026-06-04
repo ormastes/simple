@@ -301,7 +301,7 @@ fn custom_request():
 
 ## Complete Example: Todo App
 
-**File:** `simple/std_lib/examples/browser/todo_app.sui`
+**File:** `simple/std_lib/examples/11_advanced/browser/todo_app.sui`
 
 A complete interactive todo list application demonstrating all browser APIs:
 
@@ -386,7 +386,7 @@ setup_event_listeners()
    - Window class with 12 methods
    - Event, Node, DOMRect, helpers
 
-4. **`simple/std_lib/examples/browser/todo_app.sui`** (~250 LOC)
+4. **`simple/std_lib/examples/11_advanced/browser/todo_app.sui`** (~250 LOC)
    - Complete interactive web app
    - Demonstrates all browser APIs
    - Server/client/template blocks

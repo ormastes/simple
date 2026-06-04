@@ -61,14 +61,14 @@ does not start cleanly.
 
 For UI pipeline validation:
 
-- `examples/ui/demo_menubar_statusbar.ui.sdn`
-- `examples/ui/demo_kitchen_sink.ui.sdn`
+- `examples/06_io/ui/demo_menubar_statusbar.ui.sdn`
+- `examples/06_io/ui/demo_kitchen_sink.ui.sdn`
 
 For SimpleOS / WM-related work:
 
-- `examples/simple_os/hosted/hosted_wm.spl`
-- `examples/simple_os/arch/x86_64/wm_entry.spl`
-- `examples/simple_os/arch/arm64/wm_entry.spl`
+- `examples/09_embedded/simple_os/hosted/hosted_wm.spl`
+- `examples/09_embedded/simple_os/arch/x86_64/wm_entry.spl`
+- `examples/09_embedded/simple_os/arch/arm64/wm_entry.spl`
 
 The `.ui.sdn` demos are the easiest targets for HTML snapshot export because they already go through the UI renderer directly.
 
@@ -78,7 +78,7 @@ Use the wrapper script first:
 
 ```bash
 sh scripts/export_ui_snapshot.shs \
-  examples/ui/demo_menubar_statusbar.ui.sdn \
+  examples/06_io/ui/demo_menubar_statusbar.ui.sdn \
   build/ui_snapshots/demo_menubar_statusbar.electron.snapshot.html \
   build/ui_snapshots/demo_menubar_statusbar.electron.snapshot.png
 ```
@@ -96,7 +96,7 @@ Use the Node driver when more control is needed:
 
 ```bash
 node tools/electron-shell/export_snapshot.js \
-  --entry examples/ui/demo_menubar_statusbar.ui.sdn \
+  --entry examples/06_io/ui/demo_menubar_statusbar.ui.sdn \
   --png build/ui_snapshots/demo_menubar_statusbar.electron.snapshot.png
 ```
 
@@ -119,7 +119,7 @@ You can use it directly:
 SIMPLE_UI_DUMP_HTML_PATH=build/ui_snapshots/demo.html \
   tools/electron-shell/node_modules/.bin/electron \
   tools/electron-shell \
-  examples/ui/demo_menubar_statusbar.ui.sdn
+  examples/06_io/ui/demo_menubar_statusbar.ui.sdn
 ```
 
 This is useful when debugging the Electron shell itself rather than the wrapper tooling.

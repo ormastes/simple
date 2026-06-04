@@ -1,6 +1,6 @@
 # Deep Learning Equation Tests for m{} Math Blocks
 
-Tests that composite DL equations parse, evaluate correctly, render to LaTeX, and render to nvim-friendly Unicode. Covers all 27 DL equations found in `examples/simple_deeplearning_study/` and `src/lib/gc_async_mut/torch/`.
+Tests that composite DL equations parse, evaluate correctly, render to LaTeX, and render to nvim-friendly Unicode. Covers all 27 DL equations found in `examples/07_ml/simple_deeplearning_study/` and `src/lib/gc_async_mut/torch/`.
 
 ## At a Glance
 
@@ -28,7 +28,7 @@ Tests that composite DL equations parse, evaluate correctly, render to LaTeX, an
 
 Tests that composite DL equations parse, evaluate correctly, render to LaTeX,
 and render to nvim-friendly Unicode. Covers all 27 DL equations found in
-`examples/simple_deeplearning_study/` and `src/lib/gc_async_mut/torch/`.
+`examples/07_ml/simple_deeplearning_study/` and `src/lib/gc_async_mut/torch/`.
 
 ## Evidence
 

@@ -64,7 +64,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Related-upfront:** none
 - **Related-design-doc:** `doc/05_design/simpleos_fr_sos_025_x86_32_parity.md`
 - **Related-issue:** none
-- **Notes:** As of 2026-04-22, `examples/simple_os/arch/x86_32` contains only
+- **Notes:** As of 2026-04-22, `examples/09_embedded/simple_os/arch/x86_32` contains only
   a minimal entry, linker/runtime stubs, and a browser probe, while x86_64 owns
   the full desktop/shell/process/syscall/reboot live lanes. x86_32 must remain
   described as a boot/probe lane until the parity criteria above are complete.
@@ -81,7 +81,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   x86_32 context construction now has unit coverage for kernel/user selector
   setup and stack alignment. The context switch/FPU methods now route through
   explicit x86_32 runtime hooks, with C-side freestanding helpers in
-  `examples/simple_os/arch/x86_32/boot/baremetal_stubs.c`; live preemptive
+  `examples/09_embedded/simple_os/arch/x86_32/boot/baremetal_stubs.c`; live preemptive
   switching is still not proven. The
   pure `int 0x80` syscall register contract is captured in
   `src/os/kernel/arch/x86_32/trap_model.spl`; the live trap-entry assembly path
@@ -112,11 +112,11 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   `SIMPLEOS_QEMU_X86_32_BOOT_LIVE=1 SIMPLE_LIB=src bin/simple test test/03_system/simpleos_x86_32_boot_probe_live_spec.spl --mode=interpreter --clean`
   (`3/3`, 2965 ms). Codex also added a narrow freestanding early syscall ABI
   probe in `src/os/kernel/arch/x86_32/early_syscall.spl` plus
-  `examples/simple_os/arch/x86_32/int80_syscall_probe_entry.spl`, proving an
+  `examples/09_embedded/simple_os/arch/x86_32/int80_syscall_probe_entry.spl`, proving an
   imported Simple syscall ABI symbol can be reached from the live i386 IDT path
   without dragging the full hosted scheduler/IPC/VFS closure into the
   freestanding i686 link. Codex then extended that live lane with
-  `examples/simple_os/arch/x86_32/int80_process_shell_probe_entry.spl`, a
+  `examples/09_embedded/simple_os/arch/x86_32/int80_process_shell_probe_entry.spl`, a
   deterministic i386 register-argument bridge in the boot stubs, and hosted
   coverage in `test/01_unit/os/kernel/arch/x86_32_early_syscall_spec.spl`. The
   gated QEMU spec now asserts live markers for process creation, `brk`, reboot,
@@ -126,7 +126,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   equivalent live QEMU FAT32 initrd lane: `scripts/os/make_os_disk.shs` now emits
   x86_32 SMF/ELF payload markers, the i386 Multiboot handoff captures the
   initrd module, and
-  `examples/simple_os/arch/x86_32/initrd_fs_exec_probe_entry.spl` verifies
+  `examples/09_embedded/simple_os/arch/x86_32/initrd_fs_exec_probe_entry.spl` verifies
   `HELLOSMF`, `BROWSMF`, and x86_32 payload markers before routing
   filesystem-gated app spawns through `int 0x80`. The gated spec now has five
   live checks and passes:
@@ -352,12 +352,12 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Status:** Implemented
 - **Requested-semantics:**
   The x86_64 full OS native-build path should not fail because the unrelated
-  `examples/simple_os/arch/x86_64/wm_entry.spl` module exceeds the current
+  `examples/09_embedded/simple_os/arch/x86_64/wm_entry.spl` module exceeds the current
   per-file 60 second compilation timeout.
 - **Acceptance-criteria:**
   - [x] Identify whether the timeout is caused by compiler performance,
         source inclusion breadth, or `wm_entry.spl` complexity.
-  - [x] Native-building `examples/simple_os/arch/x86_64/os_entry.spl` either
+  - [x] Native-building `examples/09_embedded/simple_os/arch/x86_64/os_entry.spl` either
         excludes unrelated entry modules or compiles `wm_entry.spl` within the
         configured timeout.
   - [x] Add a focused regression check for the selected fix.

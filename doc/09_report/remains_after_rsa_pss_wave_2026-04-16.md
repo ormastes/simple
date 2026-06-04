@@ -57,7 +57,7 @@ Per-layer state:
 7. **`rt_ed25519_sign` spec has no determinism fuzz beyond 2 repetitions.** Could add an RFC 8032 standard test vector round-trip.
    - Estimated effort: S.
 
-8. **SSH host-key demo example** at `examples/ssh_rsa_hostkey/main.spl` has no automated spec covering it. Could add a driver that boots the daemon with a test PEM, connects an SSH client, captures the rsa-sha2-256 signature, verifies.
+8. **SSH host-key demo example** at `examples/06_io/ssh_rsa_hostkey/main.spl` has no automated spec covering it. Could add a driver that boots the daemon with a test PEM, connects an SSH client, captures the rsa-sha2-256 signature, verifies.
    - Depends on: SSH client-side test infrastructure; probably blocked on the same native-mode issue.
    - Estimated effort: M.
 

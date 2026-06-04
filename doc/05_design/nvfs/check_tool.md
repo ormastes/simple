@@ -2,8 +2,8 @@
 
 **Status:** Skeleton implemented (FR-NVFS-N8-001).  Full walker deferred (FR-NVFS-N8-002).
 **Reference tools:** `btrfs-check`, `zpool scrub`, `fsck.ext4`.
-**Source:** `examples/nvfs/src/tool/nvfs_check.spl`
-**Tests:** `examples/nvfs/test/01_unit/tool/nvfs_check_test.spl`
+**Source:** `examples/11_advanced/nvfs/src/tool/nvfs_check.spl`
+**Tests:** `examples/11_advanced/nvfs/test/01_unit/tool/nvfs_check_test.spl`
 
 ---
 

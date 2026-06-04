@@ -42,7 +42,7 @@ src/lib/gc_async_mut/svllm/
   nvfs_client/            # shim against the parallel nvfs design
 ```
 
-Product binary + integration tests live in a separate GitHub repo (`ormastes/svllm`, public, MIT) added at `examples/svllm/` as a git submodule.
+Product binary + integration tests live in a separate GitHub repo (`ormastes/svllm`, public, MIT) added at `examples/07_ml/svllm/` as a git submodule.
 
 ## Phase roadmap
 

@@ -35,7 +35,7 @@
 
 ## Focused Specs
 
-    spec_path=examples/browser/test/gpu/surface_color_plan_spec.spl
+    spec_path=examples/11_advanced/browser/test/gpu/surface_color_plan_spec.spl
     Simple Test Runner v1.0.0-beta
     
     ───────────────────────────────────────────────────────────────
@@ -45,8 +45,8 @@
       Test files (*_test.spl):  0
     ───────────────────────────────────────────────────────────────
     
-    Running: examples/browser/test/gpu/surface_color_plan_spec.spl
-    [1/1] examples/browser/test/gpu/surface_color_plan_spec.spl
+    Running: examples/11_advanced/browser/test/gpu/surface_color_plan_spec.spl
+    [1/1] examples/11_advanced/browser/test/gpu/surface_color_plan_spec.spl
       [32mPASSED[0m (317ms)
     
     ═══════════════════════════════════════════════════════════════
@@ -60,7 +60,7 @@
     [32m✓ All tests passed![0m
     
     Slowest tests:
-           317ms  examples/browser/test/gpu/surface_color_plan_spec.spl
+           317ms  examples/11_advanced/browser/test/gpu/surface_color_plan_spec.spl
     spec_exit_code=0
     spec_path=test/01_unit/lib/common/color/color_lab_xyz_spec.spl
     Simple Test Runner v1.0.0-beta
@@ -89,7 +89,7 @@
     Slowest tests:
            125ms  test/01_unit/lib/common/color/color_lab_xyz_spec.spl
     spec_exit_code=0
-    spec_path=examples/browser/test/paint/image_decode_spec.spl
+    spec_path=examples/11_advanced/browser/test/paint/image_decode_spec.spl
     Simple Test Runner v1.0.0-beta
     
     ───────────────────────────────────────────────────────────────
@@ -99,8 +99,8 @@
       Test files (*_test.spl):  0
     ───────────────────────────────────────────────────────────────
     
-    Running: examples/browser/test/paint/image_decode_spec.spl
-    [1/1] examples/browser/test/paint/image_decode_spec.spl
+    Running: examples/11_advanced/browser/test/paint/image_decode_spec.spl
+    [1/1] examples/11_advanced/browser/test/paint/image_decode_spec.spl
       [32mPASSED[0m (616ms)
     
     ═══════════════════════════════════════════════════════════════
@@ -114,9 +114,9 @@
     [32m✓ All tests passed![0m
     
     Slowest tests:
-           616ms  examples/browser/test/paint/image_decode_spec.spl
+           616ms  examples/11_advanced/browser/test/paint/image_decode_spec.spl
     spec_exit_code=0
-    spec_path=examples/browser/test/gpu/tiff_image_raster_spec.spl
+    spec_path=examples/11_advanced/browser/test/gpu/tiff_image_raster_spec.spl
     Simple Test Runner v1.0.0-beta
     
     ───────────────────────────────────────────────────────────────
@@ -126,8 +126,8 @@
       Test files (*_test.spl):  0
     ───────────────────────────────────────────────────────────────
     
-    Running: examples/browser/test/gpu/tiff_image_raster_spec.spl
-    [1/1] examples/browser/test/gpu/tiff_image_raster_spec.spl
+    Running: examples/11_advanced/browser/test/gpu/tiff_image_raster_spec.spl
+    [1/1] examples/11_advanced/browser/test/gpu/tiff_image_raster_spec.spl
       [32mPASSED[0m (519ms)
     
     ═══════════════════════════════════════════════════════════════
@@ -141,5 +141,5 @@
     [32m✓ All tests passed![0m
     
     Slowest tests:
-           519ms  examples/browser/test/gpu/tiff_image_raster_spec.spl
+           519ms  examples/11_advanced/browser/test/gpu/tiff_image_raster_spec.spl
     spec_exit_code=0

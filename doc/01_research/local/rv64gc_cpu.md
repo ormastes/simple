@@ -7,7 +7,7 @@
 
 ## 1. Existing RV64 Assets
 
-### 1.1 MLLVM QEMU RTL Example (`examples/mllvm_qemu_rtl/src/guest/riscv/`)
+### 1.1 MLLVM QEMU RTL Example (`examples/09_embedded/mllvm_qemu_rtl/src/guest/riscv/`)
 
 | File | Content |
 |------|---------|
@@ -144,10 +144,10 @@ The source modules use namespace `hardware.rv32imac.core.*` and `hardware.rv32im
 
 | Source | Target | What |
 |--------|--------|------|
-| `examples/mllvm_qemu_rtl/.../opcodes.spl` | `hardware.rv64gc.pkg.rv64_opcodes` | Opcode enum (add M/A/F/D/C opcodes) |
-| `examples/mllvm_qemu_rtl/.../common.spl` | `hardware.rv64gc.pkg.rv64_constants` | Register ID constants, GPR names |
-| `examples/mllvm_qemu_rtl/.../decoder_common.spl` | `hardware.rv64gc.core.rv64_decode` | Immediate extraction, field helpers |
-| `examples/mllvm_qemu_rtl/.../decoder64.spl` | `hardware.rv64gc.core.rv64_decode` | Base I decoder (extend for M/A/F/D/C) |
+| `examples/09_embedded/mllvm_qemu_rtl/.../opcodes.spl` | `hardware.rv64gc.pkg.rv64_opcodes` | Opcode enum (add M/A/F/D/C opcodes) |
+| `examples/09_embedded/mllvm_qemu_rtl/.../common.spl` | `hardware.rv64gc.pkg.rv64_constants` | Register ID constants, GPR names |
+| `examples/09_embedded/mllvm_qemu_rtl/.../decoder_common.spl` | `hardware.rv64gc.core.rv64_decode` | Immediate extraction, field helpers |
+| `examples/09_embedded/mllvm_qemu_rtl/.../decoder64.spl` | `hardware.rv64gc.core.rv64_decode` | Base I decoder (extend for M/A/F/D/C) |
 
 ### 3.2 Constant/Definition Reuse (import or mirror)
 

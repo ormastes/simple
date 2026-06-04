@@ -10,24 +10,24 @@ and route verification failures into retry/retune actions.
 
 ## Test Surfaces
 
-- `examples/spipe/scripts/build.sh`
+- `examples/05_stdlib/spipe/scripts/build.sh`
 - `.spipe/spipe/scripts/build.sh`
 - `scripts/setup/install-spipe-dev-command.shs --check`
-- `node examples/spipe/cli/spipe.js doctor .`
-- `node examples/spipe/cli/spipe.js fine-tune-status <attempt_id>`
-- `node examples/spipe/cli/spipe.js fine-tune-next <attempt_id>`
-- `node examples/spipe/cli/spipe.js fine-tune-verify <record.sdn>`
+- `node examples/05_stdlib/spipe/cli/spipe.js doctor .`
+- `node examples/05_stdlib/spipe/cli/spipe.js fine-tune-status <attempt_id>`
+- `node examples/05_stdlib/spipe/cli/spipe.js fine-tune-next <attempt_id>`
+- `node examples/05_stdlib/spipe/cli/spipe.js fine-tune-verify <record.sdn>`
 
 ## Required Scenarios
 
 1. Submodule separation:
-   - `.gitmodules` contains `.spipe/spipe` and `examples/spipe`.
+   - `.gitmodules` contains `.spipe/spipe` and `examples/05_stdlib/spipe`.
    - Parent index records both paths as `160000` gitlinks.
-   - `examples/spipe` and `.spipe/spipe` match apart from `.git`.
+   - `examples/05_stdlib/spipe` and `.spipe/spipe` match apart from `.git`.
 
 2. Host link wiring:
    - `.spipe/doc` resolves to configured host doc root.
-   - `.spipe/spipe_project` resolves to `examples/spipe`.
+   - `.spipe/spipe_project` resolves to `examples/05_stdlib/spipe`.
    - Common links for domain expert, SPipe docs, template, project expert, and
      tool expert resolve into the separated SPipe project.
 

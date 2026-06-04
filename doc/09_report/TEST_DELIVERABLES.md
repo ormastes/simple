@@ -219,7 +219,7 @@ Additional structures supported:
    - Theme color resolution
    - TUI and HTML output generation
 
-4. `/sessions/zen-modest-feynman/mnt/dev/simple/examples/ui/demo_kitchen_sink.ui.sdn`
+4. `/sessions/zen-modest-feynman/mnt/dev/simple/examples/06_io/ui/demo_kitchen_sink.ui.sdn`
    - Test data: 233 lines, 8,791 bytes
    - 48 widget definitions
    - 23 different widget types

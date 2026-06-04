@@ -501,7 +501,7 @@ Files touched: 5 new files under `src/lib/nogc_sync_mut/fs_driver/`.
 - Create `src/lib/nogc_sync_mut/fs/fat32/fat32_driver.spl` implementing `FsDriver`.
   - All extension `probe` calls return `None`.
   - `capabilities()` returns `CapabilitySet::empty()`.
-  - Delegate all actual I/O to the existing FAT32 code in `examples/simple_os/`.
+  - Delegate all actual I/O to the existing FAT32 code in `examples/09_embedded/simple_os/`.
 - Add `DriverInstance::Fat32(Fat32Driver)` to the enum.
 - Keep the existing direct-call path: FAT32 callers in SimpleOS still call the old
   `fat32_*` functions. No callers updated yet.
@@ -514,7 +514,7 @@ Files touched: new `fat32_driver.spl`; extend `mount_table.spl`.
 - VFS layer dispatches to `DriverInstance::Fat32` which delegates to the old fat32 code.
 - Mount table initialized at boot with a FAT32 mount at `/`.
 
-Files touched: all files in `examples/simple_os/` that call `fat32_*` directly
+Files touched: all files in `examples/09_embedded/simple_os/` that call `fat32_*` directly
 (estimate 8–15 call sites).
 
 ### Phase (d) — Remove direct FAT32 path (1 week)
@@ -522,7 +522,7 @@ Files touched: all files in `examples/simple_os/` that call `fat32_*` directly
 - Delete the old `fat32_*` free functions.
 - All callers now go through VFS. FAT32 implementation lives only in `Fat32Driver`.
 
-Files touched: cleanup of `examples/simple_os/arch/x86_64/` and related modules.
+Files touched: cleanup of `examples/09_embedded/simple_os/arch/x86_64/` and related modules.
 
 ### Phase (e) — Plug NVFS in (N4 milestone)
 
@@ -530,7 +530,7 @@ Files touched: cleanup of `examples/simple_os/arch/x86_64/` and related modules.
 - NVFS mounts available alongside FAT32 mounts.
 - The POSIX shim mount enables legacy userspace tools to target NVFS without changes.
 
-Files touched: extend `mount_table.spl`; connect `examples/nvfs/` submodule to the
+Files touched: extend `mount_table.spl`; connect `examples/11_advanced/nvfs/` submodule to the
 driver instance enum.
 
 ---
@@ -547,18 +547,18 @@ src/lib/nogc_sync_mut/fs_driver/    # Trait contracts — main repo
 
 src/lib/nogc_sync_mut/fs/fat32/     # FAT32 driver impl — main repo
     fat32_driver.spl                # Fat32Driver implementing FsDriver
-    # (delegates to existing FAT32 code in examples/simple_os/)
+    # (delegates to existing FAT32 code in examples/09_embedded/simple_os/)
 
 src/lib/nogc_sync_mut/fs/nvfs_posix/  # POSIX shim contract — main repo
     posix_driver.spl               # NvfsPosixDriver implementing FsDriver
-    # (impl body in examples/nvfs/src/posix/ submodule)
+    # (impl body in examples/11_advanced/nvfs/src/posix/ submodule)
 
 src/lib/nogc_async_mut/fs_driver/   # Async sibling trait — main repo
     async_driver.spl               # AsyncFsDriver trait
     async_mount_table.spl          # AsyncDriverInstance, async dispatch
 
-examples/simple_os/                # FAT32 implementation (existing, unchanged)
-examples/nvfs/                     # NVFS implementation (submodule)
+examples/09_embedded/simple_os/                # FAT32 implementation (existing, unchanged)
+examples/11_advanced/nvfs/                     # NVFS implementation (submodule)
     src/driver/                    # NvfsDriver impl
     src/posix/                     # NvfsPosixDriver impl body
 ```

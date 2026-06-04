@@ -76,7 +76,7 @@ match result:
 |-------|-------|
 | Category | Other |
 | Status | Active |
-| Source | `examples/browser/test/script/webassembly_host_spec.spl` |
+| Source | `examples/11_advanced/browser/test/script/webassembly_host_spec.spl` |
 | Updated | 2026-05-31 |
 | Generator | `simple spipe-docgen` (Simple) |
 

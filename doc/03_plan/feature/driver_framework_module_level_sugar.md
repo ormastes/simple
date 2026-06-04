@@ -118,13 +118,13 @@ Mirror the module/impl-level sugar in the Rust seed for immediate usability.
    - Module-level `@driver(...)` with explicit `ops=...`
    - Impl-level `@driver(...)` on a `impl Driver for MyBlock`
    - Error case: `@driver(...)` on module with no matching functions
-2. Migrate `examples/simple_os/src/drivers/null_block.spl` to use module-level
+2. Migrate `examples/09_embedded/simple_os/src/drivers/null_block.spl` to use module-level
    `@driver(...)` instead of function-level, verify test still passes
 3. Write migration guide snippet in
    `doc/07_guide/driver_attribute_migration.md` (optional, only if requested)
 
 **Files to create:** `test/01_unit/compiler/driver_module_attr_spec.spl`
-**Files to modify:** `examples/simple_os/src/drivers/null_block.spl`
+**Files to modify:** `examples/09_embedded/simple_os/src/drivers/null_block.spl`
 
 ## Acceptance Criteria
 

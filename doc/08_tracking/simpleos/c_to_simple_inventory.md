@@ -14,7 +14,7 @@ Priority port targets:
 | Priority | Current source | Status | Target Simple owner |
 | --- | --- | --- | --- |
 | 1 | `src/runtime/startup/baremetal/runtime_minimal.c` | Shared runtime control flow already ported into `src/os/runtime/baremetal/runtime_minimal.spl`; verify remaining call sites and remove residual fallback use. | `src/os/runtime/baremetal/runtime_minimal.spl` |
-| 2 | `examples/simple_os/arch/*/boot/baremetal_stubs.c` | Still present as arch shim glue; split into shared runtime core plus thin arch shims. | shared Simple runtime + per-family shim |
+| 2 | `examples/09_embedded/simple_os/arch/*/boot/baremetal_stubs.c` | Still present as arch shim glue; split into shared runtime core plus thin arch shims. | shared Simple runtime + per-family shim |
 | 3 | `src/os/libc/simpleos_crt0.S` | Replace with `HalCstart` implementation per target. | `src/os/kernel/arch/*/cstart.spl` |
 | 4 | `src/os/libc/simpleos_setjmp.S` | Replace with `HalCstart.setjmp/longjmp` implementation per target. | `src/os/kernel/arch/*/cstart.spl` |
 

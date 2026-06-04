@@ -21,7 +21,7 @@ Simple interpreter: 0.55% of nginx RPS. Expected — interpreter overhead + sing
 1. **`rt_text_to_i64` extern** — replaced with pure-Simple char_at+arithmetic parsing in:
    - `src/lib/nogc_sync_mut/http_server/parser.spl`
    - `src/lib/nogc_sync_mut/http_server/types.spl`
-   - `examples/simple_web_server/config.spl`
+   - `examples/06_io/simple_web_server/config.spl`
 
 ### Reverted: Library degradations (filed as interpreter bugs)
 The following workarounds were reverted because they degraded the shared library API.
@@ -49,7 +49,7 @@ Compile Simple web server to native binary for production performance.
 
 ### Steps
 1. Resolve all extern stubs needed for compiled mode (`thread_spawn2`, TCP accept)
-2. `bin/simple native-build --entry examples/simple_web_server/main.spl -o build/simple-web-server`
+2. `bin/simple native-build --entry examples/06_io/simple_web_server/main.spl -o build/simple-web-server`
 3. Multi-threaded accept loop (restore `thread_spawn2` behind compiled-mode guard)
 4. Sendfile routing for static files (already implemented in `sendfile_routing.spl`)
 5. Benchmark compiled binary vs nginx with wrk (4 threads, 50 connections)

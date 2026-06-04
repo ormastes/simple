@@ -7,9 +7,9 @@ Scope: SimpleOS QEMU validation for boot, window manager, browser app surfaces, 
 ## Workspace Notes
 
 - The worktree is dirty. Relevant modified files include:
-  - `examples/simple_os/arch/x86_64/wm_entry.spl`
-  - `examples/browser/test/compat/chrome_compare.spl`
-  - `examples/browser/test/compat/test_manifest.spl`
+  - `examples/09_embedded/simple_os/arch/x86_64/wm_entry.spl`
+  - `examples/11_advanced/browser/test/compat/chrome_compare.spl`
+  - `examples/11_advanced/browser/test/compat/test_manifest.spl`
   - `src/app/ui.web/html.spl`
   - `src/lib/common/web/browser_session.spl`
   - `tools/electron-shell/index.html`
@@ -25,7 +25,7 @@ Scope: SimpleOS QEMU validation for boot, window manager, browser app surfaces, 
   - Checks serial markers for boot, memory, services, shell, and compositor.
 - `scripts/os_gui.shs`
   - GUI desktop launcher.
-  - `--wm` switches to `examples/simple_os/arch/x86_64/wm_entry.spl`.
+  - `--wm` switches to `examples/09_embedded/simple_os/arch/x86_64/wm_entry.spl`.
   - `--serial` routes serial to stdout instead of a file.
 - `scripts/os/make_os_disk.shs`
   - Builds `build/os/fat32.img` with fixture files for NVMe/FAT32 lanes.
@@ -35,9 +35,9 @@ Scope: SimpleOS QEMU validation for boot, window manager, browser app surfaces, 
 
 ### GUI / browser / input surfaces
 
-- `examples/simple_os/arch/x86_64/gui_entry.spl`
+- `examples/09_embedded/simple_os/arch/x86_64/gui_entry.spl`
   - Full desktop shell entry with BGA framebuffer + PS/2 keyboard/mouse.
-- `examples/simple_os/arch/x86_64/wm_entry.spl`
+- `examples/09_embedded/simple_os/arch/x86_64/wm_entry.spl`
   - Stable glass window-manager path.
 - `src/os/desktop/shell.spl`
   - Desktop shell, launcher integration, app creation, browser demo reachability.
@@ -56,14 +56,14 @@ Scope: SimpleOS QEMU validation for boot, window manager, browser app surfaces, 
   - Interactive shell with built-ins and extended command dispatch.
 - `src/os/tools/shell/register_tools.spl`
   - Small ToolRegistry subset only.
-- `examples/simple_os/arch/x86_64/tools_test_entry.spl`
+- `examples/09_embedded/simple_os/arch/x86_64/tools_test_entry.spl`
   - Baremetal/QEMU tools validation entry.
 
 ### SSH / networking surfaces
 
-- `examples/simple_os/arch/x86_64/ssh_live_entry.spl`
+- `examples/09_embedded/simple_os/arch/x86_64/ssh_live_entry.spl`
   - Live SSH daemon boot path.
-- `examples/simple_os/arch/x86_64/ssh_system_test_entry.spl`
+- `examples/09_embedded/simple_os/arch/x86_64/ssh_system_test_entry.spl`
   - SSH system test path.
 - `src/os/apps/sshd/sshd.spl`
   - Live daemon implementation.
@@ -170,7 +170,7 @@ Observed result:
 Critical caveat:
 
 - The harness is permissive.
-- In `examples/simple_os/arch/x86_64/tools_test_entry.spl`, `test_run()` marks a tool as pass without checking the return code.
+- In `examples/09_embedded/simple_os/arch/x86_64/tools_test_entry.spl`, `test_run()` marks a tool as pass without checking the return code.
 - Serial output shows multiple weak results under an all-pass summary:
   - `lspci` reported `No PCI devices found.`
   - `ifconfig` reported `No network interfaces found.`
@@ -265,7 +265,7 @@ Interpretation:
   - the bootable live multiboot image carries both unresolved early bindings:
     - `U serial_println`
     - `U Users__ormastes__simple__examples__simple_os__arch__x86_64__ssh_live_entry__SshDaemon`
-  - source order in `examples/simple_os/arch/x86_64/ssh_live_entry.spl` calls `serial_println(...)` before `SshDaemon.new(22)`
+  - source order in `examples/09_embedded/simple_os/arch/x86_64/ssh_live_entry.spl` calls `serial_println(...)` before `SshDaemon.new(22)`
   - the bootable live multiboot image shows early null indirect calls inside `spl_start`
   - strongest current mapping:
     - first null indirect call most likely maps to the first `serial_println("")`
@@ -294,7 +294,7 @@ Interpretation:
   - `src/lib/common/ui/backend_factory.spl`
   - flow: `UITree -> DOM -> layout -> paint -> RenderScene -> execute_scene_to_buffer`
 - The most practical next lane is a new baremetal entry such as:
-  - `examples/simple_os/arch/x86_64/browser_soft_entry.spl`
+  - `examples/09_embedded/simple_os/arch/x86_64/browser_soft_entry.spl`
 - Minimal structure for that lane:
   - build a fixed `BeDomNode` tree
   - run `layout_tree`
@@ -313,7 +313,7 @@ Interpretation:
   - but there is no usable QMP device identifier for `input-send-event`
   - explicit device attempts (`video0`, `ps2mouse`, `ps2-kbd`, `i8042`, `VGA`) all returned `DeviceNotFound`
 - The guest side is PS/2-only:
-  - `examples/simple_os/arch/x86_64/wm_entry.spl` initializes the PS/2 controller directly
+  - `examples/09_embedded/simple_os/arch/x86_64/wm_entry.spl` initializes the PS/2 controller directly
   - WM input consumption reads only 3-byte PS/2 auxiliary packets
 - The QEMU launch side is also PS/2-only in practice:
   - `scripts/os_gui.shs` uses `-display cocoa` and `-vga std`
@@ -337,7 +337,7 @@ Interpretation:
     - `[PANIC] heap exhausted`
   - so there is still no bootable lane that both wraps the real desktop E2E harness and reaches `test_main()`
 - The narrowest concrete cause proven so far is the fixed 64 MB bump heap in:
-  - `examples/simple_os/arch/x86_64/boot/baremetal_stubs.c`
+  - `examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c`
 - Changing guest RAM from 512 MB to 2 GB does not move the failure point.
 - Best current culprit chain:
   - `_start() -> spl_start() -> generated wrapper / entry-closure setup -> early runtime string/array/map allocations`
@@ -352,14 +352,14 @@ Interpretation:
 ### Desktop app launch validation update (2026-04-08)
 
 - New baremetal wrapper:
-  - `examples/simple_os/arch/x86_64/desktop_e2e_entry.spl`
+  - `examples/09_embedded/simple_os/arch/x86_64/desktop_e2e_entry.spl`
 - Runtime heap:
-  - `examples/simple_os/arch/x86_64/boot/baremetal_stubs.c` now uses a 512 MB bump heap, matching the boot log.
+  - `examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c` now uses a 512 MB bump heap, matching the boot log.
 - Launcher behavior:
   - desktop E2E no longer depends on heap-backed text arrays for registry state.
   - the launcher now uses fixed default slots for the three desktop apps and keeps launch state in `app_pid`.
 - QEMU result:
-  - `bin/simple native-build --entry examples/simple_os/arch/x86_64/desktop_e2e_entry.spl --entry-closure ...` builds successfully.
+  - `bin/simple native-build --entry examples/09_embedded/simple_os/arch/x86_64/desktop_e2e_entry.spl --entry-closure ...` builds successfully.
   - `qemu-system-x86_64 ... -kernel build/os/simpleos_desktop_e2e_32.elf` reaches `desktop_e2e_test.test_main()`.
   - serial log shows `TEST PASSED`.
 - Residual oddity:
@@ -384,7 +384,7 @@ Interpretation:
 - Mouse interaction is initialized but not end-to-end verified.
 - The browser sample path is blocked by unconditional `Engine2D` / `backend_cuda` imports before backend fallback can help.
 - The next browser lane is concrete enough to implement:
-  - new entry `examples/simple_os/arch/x86_64/browser_soft_entry.spl`
+  - new entry `examples/09_embedded/simple_os/arch/x86_64/browser_soft_entry.spl`
   - imports only `BeDomNode`, `layout_tree`, `generate_paint_list`, `paint_commands_to_scene`, and `execute_scene_to_buffer`
   - validates success by counting non-background pixels in a software-rendered buffer
 

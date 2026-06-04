@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-14
 **Status:** Decision (unblocks `doc/03_plan/gui_drawing_layer_variations.md` item 5)
-**Decision:** **Option B — grow `examples/browser` (simple_browser) into the V3 host shell.**
+**Decision:** **Option B — grow `examples/11_advanced/browser` (simple_browser) into the V3 host shell.**
 
 ---
 
@@ -55,18 +55,18 @@ ships paint scenes via shared memory or `OnPaint`, and forwards input events.
 - Not "pure Simple". V3's title literally says "Pure Simple + Chromium host";
   the "+" was meant to be Chromium-class behaviour, not a binary blob.
 
-## 3. Option B — grow `examples/browser` (simple_browser)
+## 3. Option B — grow `examples/11_advanced/browser` (simple_browser)
 
 The repo already contains a substantial in-tree browser engine.
 
 **What exists today**
-- `examples/browser/` is real: top-level dirs `entity/`, `feature/`,
+- `examples/11_advanced/browser/` is real: top-level dirs `entity/`, `feature/`,
   `transform/`, `shared/`, `test/`, plus `mod.spl`, `render_adapter.spl`,
   `ui_bridge.spl`, `devtools_panel.spl`, `smoke_test.spl`.
-- `wc -l` over `examples/browser/**/*.spl` reports **62,760 lines total**
+- `wc -l` over `examples/11_advanced/browser/**/*.spl` reports **62,760 lines total**
   (`render_adapter.spl:514`, `ui_bridge.spl:450`, `devtools_panel.spl:378`,
   `mod.spl:191`, plus the entity/feature/transform/test tree).
-- Subsystems already present as `.spl` files (`examples/browser/feature/...`):
+- Subsystems already present as `.spl` files (`examples/11_advanced/browser/feature/...`):
   - **JS engine:** `script/engine/lexer.spl`, `parser.spl`,
     `bytecode_compiler.spl`, `interpreter.spl`, `vm.spl`, `jit.spl`, `gc.spl`,
     `runtime.spl`; builtins for `string/number/object/json/promise/date/error/
@@ -88,7 +88,7 @@ The repo already contains a substantial in-tree browser engine.
   dom_bridge,event_bridge,renderer,main}.spl` and `src/app/ui.web/*` and
   `src/app/ui.electron/*`. There is **no** `src/app/ui.chromium/` yet — that
   is exactly the artifact plan item 5 demands.
-- Conformance baseline is being measured: `examples/browser/test/compat/
+- Conformance baseline is being measured: `examples/11_advanced/browser/test/compat/
   external/wpt_compatibility_report.md` (dated 2026-04-08) reports against 37
   WPT reftests + 2 Acid tests. Flexbox 55.6% supported, Colors 30%, Display
   0% supported. So we know honestly where the engine is.
@@ -126,7 +126,7 @@ wrapper, the input-event translation, and the missing CSS bits the
 
 ## 5. Recommendation
 
-**Pick Option B — grow `examples/browser` / `std.gc_async_mut.gpu.browser_engine`
+**Pick Option B — grow `examples/11_advanced/browser` / `std.gc_async_mut.gpu.browser_engine`
 into the V3 shell.** Top three reasons:
 
 1. **The engine already exists and is already wired.** `browser_compositor_
@@ -156,12 +156,12 @@ milestone is small enough to be a single tracking ticket.
 
 | # | Milestone | Gate |
 |---|-----------|------|
-| M1 | `ui.chromium/main.spl` skeleton: own a winit window, drive the existing `browser_compositor_backend` into its pixel buffer, present via `rt_winit_buffer_create`/`present_rgba`. | `bin/simple run examples/simple_os/desktop_shell --backend chromium` opens a window showing the existing taskbar. No interactivity required. |
-| M2 | Input bridge: translate winit keyboard/mouse events into the DOM event types in `examples/browser/entity/dom/event_types.spl` and into `common.ui.event`. | `test/sys/wm_compare/input_event_chromium_spec.spl` passes the same input cases as the PS/2 and hosted backends. |
-| M3 | CSS coverage gap closure for the widgets `DesktopShell` actually paints: finish the subset of `display`, `border`, `background`, `flex`, `grid`, color functions used by the dark/light theme constants in `browser_compositor_backend.spl`. | `examples/browser/test/compat/external/wpt_compatibility_report.md` shows ≥80% on the categories the shell exercises (the rest can stay red). |
-| M4 | Widget→DOM→paint→scene round-trip via the *engine in `examples/browser/`* (not only the duplicate at `src/lib/.../browser_engine/`). Decide whether to merge the two engines or keep one as the canonical V3 engine. | A single `use` graph; no duplicated layout/paint code between `examples/browser/feature/layout/*` and `src/lib/gc_async_mut/gpu/browser_engine/layout/*`. (Recommendation: keep `std.gc_async_mut.gpu.browser_engine` as the canonical one; demote `examples/browser` to feature labs and tests.) |
+| M1 | `ui.chromium/main.spl` skeleton: own a winit window, drive the existing `browser_compositor_backend` into its pixel buffer, present via `rt_winit_buffer_create`/`present_rgba`. | `bin/simple run examples/09_embedded/simple_os/desktop_shell --backend chromium` opens a window showing the existing taskbar. No interactivity required. |
+| M2 | Input bridge: translate winit keyboard/mouse events into the DOM event types in `examples/11_advanced/browser/entity/dom/event_types.spl` and into `common.ui.event`. | `test/sys/wm_compare/input_event_chromium_spec.spl` passes the same input cases as the PS/2 and hosted backends. |
+| M3 | CSS coverage gap closure for the widgets `DesktopShell` actually paints: finish the subset of `display`, `border`, `background`, `flex`, `grid`, color functions used by the dark/light theme constants in `browser_compositor_backend.spl`. | `examples/11_advanced/browser/test/compat/external/wpt_compatibility_report.md` shows ≥80% on the categories the shell exercises (the rest can stay red). |
+| M4 | Widget→DOM→paint→scene round-trip via the *engine in `examples/11_advanced/browser/`* (not only the duplicate at `src/lib/.../browser_engine/`). Decide whether to merge the two engines or keep one as the canonical V3 engine. | A single `use` graph; no duplicated layout/paint code between `examples/11_advanced/browser/feature/layout/*` and `src/lib/gc_async_mut/gpu/browser_engine/layout/*`. (Recommendation: keep `std.gc_async_mut.gpu.browser_engine` as the canonical one; demote `examples/11_advanced/browser` to feature labs and tests.) |
 | M5 | `wm_compare` parity: same `DesktopShell` rendered through V1 (baremetal fb), V2 (winit), V3 (simple_browser shell) — ≤1% perceptual diff. | `test/sys/wm_compare/v1_v2_v3_parity_spec.spl` green. This is the V3 acceptance artifact. |
-| M6 | Stretch (post-V3): JS event loop wired so `web_api/timer_binding` and `event_binding` can drive a Simple-authored DOM app in the shell. | `examples/browser/smoke_test.spl` runs end-to-end inside the shell window. |
+| M6 | Stretch (post-V3): JS event loop wired so `web_api/timer_binding` and `event_binding` can drive a Simple-authored DOM app in the shell. | `examples/11_advanced/browser/smoke_test.spl` runs end-to-end inside the shell window. |
 
 M1–M5 are the V3 critical path. M6 is the line beyond which "simple_browser"
 starts being a usable end-user browser — explicitly out of scope for the V3
@@ -169,22 +169,22 @@ plan unblock.
 
 ## 7. Open questions / unknowns this doc does not resolve
 
-- **Two engines.** `examples/browser/feature/...` and
+- **Two engines.** `examples/11_advanced/browser/feature/...` and
   `src/lib/gc_async_mut/gpu/browser_engine/...` overlap. M4 forces a merge
   decision; this doc recommends keeping the `std.` one and folding
-  `examples/browser` into tests + feature labs, but does not commit to it.
-- **JS engine completeness.** `examples/browser/feature/script/engine/jit.spl`
+  `examples/11_advanced/browser` into tests + feature labs, but does not commit to it.
+- **JS engine completeness.** `examples/11_advanced/browser/feature/script/engine/jit.spl`
   exists but its maturity isn't visible from file listings alone. V3 itself
   doesn't need JIT, so this is a non-blocker, but flagging it.
 - **WebGPU.** `gui_drawing_layer_variations.md` lists the WebGPU path in
   `engine2d` as a separate gap. This doc treats that as orthogonal — V3 ships
   on the software path first.
-- **No README in `examples/browser`.** There is no top-level README and no
+- **No README in `examples/11_advanced/browser`.** There is no top-level README and no
   written milestone list in the directory; the only doc is the WPT report.
   The "12-milestone in-repo browser" referenced in user memory
   `project_browser_platform` is **not** discoverable from the tree itself.
   M1–M5 above are derived from V3 needs, not from a pre-existing milestone
-  list inside `examples/browser/`.
+  list inside `examples/11_advanced/browser/`.
 
 ## 8. References
 
@@ -198,10 +198,10 @@ plan unblock.
 - `src/app/ui.browser/`, `src/app/ui.web/`, `src/app/ui.electron/` — existing
   app-side adapters; `src/app/ui.chromium/` does not exist yet (this is
   plan item 5's artifact).
-- `examples/browser/` — 62,760 LOC across `entity/`, `feature/`, `transform/`,
+- `examples/11_advanced/browser/` — 62,760 LOC across `entity/`, `feature/`, `transform/`,
   `shared/`, `test/`, plus top-level `mod.spl`, `render_adapter.spl:514`,
   `ui_bridge.spl:450`, `devtools_panel.spl:378`, `smoke_test.spl`.
-- `examples/browser/test/compat/external/wpt_compatibility_report.md` —
+- `examples/11_advanced/browser/test/compat/external/wpt_compatibility_report.md` —
   current WPT baseline (2026-04-08).
 - `src/lib/gc_async_mut/gpu/browser_engine/` — ~5,993 LOC, the engine the
   compositor backend already calls.

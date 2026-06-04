@@ -38,7 +38,7 @@ Official plugins: File System, Store, SQL, Dialog, Clipboard, Notifications, She
 
 ## 2. Existing Simple Building Blocks
 
-### 2.1 Browser Engine (`examples/browser/`)
+### 2.1 Browser Engine (`examples/11_advanced/browser/`)
 
 **170 .spl files, ~48K lines.** MDSOC 3-dimension architecture (entity/feature/transform).
 
@@ -209,10 +209,10 @@ Tauri uses multi-process (core + webview). SimpleTauri should support **both**:
 
 ## 6. Related Work in This Codebase
 
-- Browser MDSOC config: `examples/browser/capsule.sdn`
-- Browser render pipeline: `examples/browser/transform/pipeline.spl`
-- Browser IPC types: `examples/browser/entity/ipc/`
-- Browser capability broker: `examples/browser/feature/sandbox/capability_broker.spl`
+- Browser MDSOC config: `examples/11_advanced/browser/capsule.sdn`
+- Browser render pipeline: `examples/11_advanced/browser/transform/pipeline.spl`
+- Browser IPC types: `examples/11_advanced/browser/entity/ipc/`
+- Browser capability broker: `examples/11_advanced/browser/feature/sandbox/capability_broker.spl`
 - Engine2D game loop (SDL2 present pattern): `src/lib/nogc_sync_mut/engine/core/game_loop.spl`
 - UI framework app: `src/lib/common/ui/app.spl`
 - UI backend trait: `src/lib/common/ui/backend.spl`

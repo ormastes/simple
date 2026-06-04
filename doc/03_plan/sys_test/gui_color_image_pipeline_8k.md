@@ -15,10 +15,10 @@ sh scripts/check/check-gui-color-image-pipeline-8k-evidence.shs
 ## Coverage
 
 - Generated 8K probe: packed BGRA8 dimensions, byte counts, lazy init flags, CIELAB semantic space, CIE XYZ connection space, RGB565 packed-path rejection, and Lab/XYZ/packed ARGB roundtrip.
-- `examples/browser/test/gpu/surface_color_plan_spec.spl`: browser surface policy.
+- `examples/11_advanced/browser/test/gpu/surface_color_plan_spec.spl`: browser surface policy.
 - `test/01_unit/lib/common/color/color_lab_xyz_spec.spl`: color conversion and surface planning helpers.
-- `examples/browser/test/paint/image_decode_spec.spl`: browser decode metadata, sparse 8K placeholders, JPEG XL staged metadata, ICC routing, and fail-closed profile diagnostics.
-- `examples/browser/test/gpu/tiff_image_raster_spec.spl`: TIFF raster evidence through browser/GPU-facing rasterization.
+- `examples/11_advanced/browser/test/paint/image_decode_spec.spl`: browser decode metadata, sparse 8K placeholders, JPEG XL staged metadata, ICC routing, and fail-closed profile diagnostics.
+- `examples/11_advanced/browser/test/gpu/tiff_image_raster_spec.spl`: TIFF raster evidence through browser/GPU-facing rasterization.
 
 ## Pass Criteria
 

@@ -274,7 +274,7 @@ Each patch is encoded with an `"op"` discriminator (snake_case) and a canonical 
     "action": "spawn_native_window",
     "window_id": "host-window-1",
     "surface_id": "host-surface-1",
-    "app_id": "examples/hello_taskbar",
+    "app_id": "examples/01_getting_started/hello_taskbar",
     "title": "Hello Taskbar",
     "url": "/wm/native_window?app_id=examples%2Fhello_taskbar&surface_id=host-surface-1&window_id=host-window-1",
     "x": 0,
@@ -321,7 +321,7 @@ application are unavailable until a non-JavaScript transport is implemented.
 
 ### Host taskbar app catalog
 
-The host taskbar runtime resolves launches through a small catalog, not through server-route hardcoding. The catalog contains the cross-platform `examples/hello_taskbar` app and the built-in desktop manifests from `src/os/desktop/app_manifest.spl`. Manifest-backed apps use their manifest binary path as `app_id`, e.g. `/sys/apps/terminal`, are exposed as pinned taskbar items by default, and receive generic SimpleWeb/Electron HTML until the app provides richer host content.
+The host taskbar runtime resolves launches through a small catalog, not through server-route hardcoding. The catalog contains the cross-platform `examples/01_getting_started/hello_taskbar` app and the built-in desktop manifests from `src/os/desktop/app_manifest.spl`. Manifest-backed apps use their manifest binary path as `app_id`, e.g. `/sys/apps/terminal`, are exposed as pinned taskbar items by default, and receive generic SimpleWeb/Electron HTML until the app provides richer host content.
 
 Remaining work for the host WM shell backends is tracked in
 [`doc/03_plan/agent_tasks/host_wm_shell_backends_remaining.md`](../03_plan/agent_tasks/host_wm_shell_backends_remaining.md).

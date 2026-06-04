@@ -4,7 +4,7 @@
 > - Lightweight lib API: [`simple_web_server_lib_api.md`](simple_web_server_lib_api.md)
 > - Full example design: [`simple_web_server_example.md`](simple_web_server_example.md)
 > - Lib source: `src/lib/nogc_sync_mut/http_server/`
-> - Example source: `examples/simple_web_server/`
+> - Example source: `examples/06_io/simple_web_server/`
 
 ## Overview
 
@@ -13,7 +13,7 @@ Split the web server stack into two tiers:
 | Tier | Location | Purpose |
 |------|----------|---------|
 | **Lightweight Lib** | `src/lib/nogc_sync_mut/http_server/` | Embeddable sync HTTP server for any Simple app |
-| **Full Example** | `examples/simple_web_server/` | Standalone feature-rich web server reusing the lib |
+| **Full Example** | `examples/06_io/simple_web_server/` | Standalone feature-rich web server reusing the lib |
 
 The lightweight lib is imported as `use std.nogc_sync_mut.http_server.*` (or `use std.http_server.*` via re-export). The full example demonstrates how to layer middleware, TLS, WebSocket, and static-file serving on top of that core.
 
@@ -54,7 +54,7 @@ Sync, no GC, minimal surface. Depends only on:
 - Access logging / metrics
 - Async / event-loop patterns
 
-### Full Example (`examples/simple_web_server/`)
+### Full Example (`examples/06_io/simple_web_server/`)
 
 Standalone application that demonstrates layering features on top of the lightweight lib:
 

@@ -84,7 +84,7 @@ Both forms work — `with_width(node, 120)` becomes a thin wrapper around `node.
 
 Headline asks reframed: this phase delivers ~80% of the user's "first param as callee object" recommendation today, *via library code only*. The remaining 20% (UFCS for arbitrary first-arg-receiver functions) ships under the **Compiler RFC Track** (see end of plan) and is not blocked by this work.
 
-Files: `src/lib/common/ui/builder.spl`, `src/lib/common/ui/widget.spl` (add methods to `WidgetNode` class). New examples under `examples/ui/fluent/`.
+Files: `src/lib/common/ui/builder.spl`, `src/lib/common/ui/widget.spl` (add methods to `WidgetNode` class). New examples under `examples/06_io/ui/fluent/`.
 
 Exit gate: same as Phase 2, plus new chain-form examples build and run.
 
@@ -199,10 +199,10 @@ End-to-end testing per phase:
 3. **IPC protocol** — `bin/simple test test/01_unit/app/ui/ipc_protocol_spec.spl` — protocol v1 unchanged
 4. **Build** — `bin/simple build` and `bin/simple build check`
 5. **Linting** — `bin/simple build lint` (Phase 8 onwards)
-6. **Downstream consumers** — `examples/browser/` and SimpleOS userland build against new API after Phase 7
+6. **Downstream consumers** — `examples/11_advanced/browser/` and SimpleOS userland build against new API after Phase 7
 7. **MCP smoke** — `mcp__simple-mcp__simple_check` on changed modules; `mcp__simple-lsp-mcp__lsp_diagnostics` on `widget.spl` and `builder.spl` after each enum addition
 
-Acceptance for the migration as a whole: all seven checks green, golden fixture diff zero, and `examples/ui/fluent/` showcases chain-form authoring end to end.
+Acceptance for the migration as a whole: all seven checks green, golden fixture diff zero, and `examples/06_io/ui/fluent/` showcases chain-form authoring end to end.
 
 ## Execution notes
 

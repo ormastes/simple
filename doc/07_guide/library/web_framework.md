@@ -518,7 +518,7 @@ The compiler includes 6 security lint rules (activated by `bin/simple build lint
 
 ## Example Application
 
-See `examples/webapp/` for a complete todo-list application demonstrating all features.
+See `examples/06_io/webapp/` for a complete todo-list application demonstrating all features.
 
 ## Related
 

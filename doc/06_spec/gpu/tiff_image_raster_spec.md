@@ -560,7 +560,7 @@ expect(pixel(surface, 1, 1)).to_equal([128, 128, 128, 255])
 |-------|-------|
 | Category | GPU & SIMD |
 | Status | Active |
-| Source | `examples/browser/test/gpu/tiff_image_raster_spec.spl` |
+| Source | `examples/11_advanced/browser/test/gpu/tiff_image_raster_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 

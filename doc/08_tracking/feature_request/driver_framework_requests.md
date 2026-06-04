@@ -48,7 +48,7 @@ or `Rejected` (one-line reason).
   - [x] `sffi_lint.spl` gains a driver-shim conformance rule: a module
         declaring `extern fn` **and** `@driver(...)` must also provide
         a matching `impl Driver`.
-  - [x] Example: `examples/simple_os/src/drivers/null_block.spl` is
+  - [x] Example: `examples/09_embedded/simple_os/src/drivers/null_block.spl` is
         rewritten to use `@driver(...)` and passes the existing
         `test/01_unit/lib/driver/null_block_driver_test.spl`.
 - **Related-upfront:** `doc/04_architecture/driver_architecture.md §3` (unified grammar)
@@ -190,7 +190,7 @@ or `Rejected` (one-line reason).
   - [x] Round-trip test: `let x: Foo; x.a = 5; assert(x.a == 5)` with
         `a: u16:4` passes.
         (`test/01_unit/compiler/packed_struct_sugar_test.spl` — 2 tests pass)
-  - [x] Example: `examples/simple_os/src/drivers/null_block.spl`
+  - [x] Example: `examples/09_embedded/simple_os/src/drivers/null_block.spl`
         grows a `@packed` status-register field and still passes its
         unit test.
         (Verified 2026-05-29 with `bin/simple check` on the SimpleOS wrapper,

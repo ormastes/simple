@@ -133,7 +133,7 @@ The remaining work is now arranged into four active tracks:
   - add benchmark gates for point lookup, prefix search, contains search, and
     batched filters
 - Improve Simple DB full:
-  - keep `examples/simple_db/` as the full-engine surface
+  - keep `examples/11_advanced/simple_db/` as the full-engine surface
   - use NVFS/DBFS storage paths for WAL, TOAST, and buffer-pool benchmarks
   - compare embedded/full DB workloads against the optimized FAT baseline and
     DBFS/NVFS direct baselines

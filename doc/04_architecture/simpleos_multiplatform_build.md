@@ -24,7 +24,7 @@ The catalog owns:
 - freestanding C flags, freestanding ASM flags, and target link hints
 - QEMU binary, machine, and CPU defaults
 
-`simpleos_native_build_config.spl` delegates target names, architecture extraction, clang target selection, C flags, ASM flags, and boot-source discovery to the catalog. `examples/simple_os/build.spl` enumerates `get_all_targets()` so the example builder cannot silently drift back to four targets.
+`simpleos_native_build_config.spl` delegates target names, architecture extraction, clang target selection, C flags, ASM flags, and boot-source discovery to the catalog. `examples/09_embedded/simple_os/build.spl` enumerates `get_all_targets()` so the example builder cannot silently drift back to four targets.
 
 `src/os/qemu_runner.spl` selects LLVM automatically for `Architecture.X86` when `SIMPLE_OS_BUILD_BACKEND` is unset, because the Cranelift backend in this toolchain does not provide an i686 freestanding object target. An explicit `SIMPLE_OS_BUILD_BACKEND=cranelift` still wins for diagnostics.
 
@@ -40,8 +40,8 @@ Build rules:
 - C mode: `-m32 -march=i686 -ffreestanding -nostdlib`
 - ASM target: `--target=i686-unknown-none-elf`
 - ASM mode: `-m32 -march=i686 -ffreestanding`
-- boot C source: `examples/simple_os/arch/x86_32/boot/baremetal_stubs.c`
-- boot ASM source: `examples/simple_os/arch/x86_32/boot/crt0.s`
+- boot C source: `examples/09_embedded/simple_os/arch/x86_32/boot/baremetal_stubs.c`
+- boot ASM source: `examples/09_embedded/simple_os/arch/x86_32/boot/crt0.s`
 - linker mode hint: `elf_i386`
 - QEMU: `qemu-system-i386`
 
@@ -92,7 +92,7 @@ RISC-V SimpleOS QEMU builds default to LLVM native-build because the current Cra
 
 <!-- codex-design -->
 
-RISC-V boot/runtime code is now owned by Simple modules under `src/os/kernel/arch/riscv32` and `src/os/kernel/arch/riscv64`. The platform catalog keeps `boot_c_sources` and `boot_asm_sources` empty for both RISC-V targets, so native-build cannot silently reintroduce `examples/simple_os/arch/riscv*/boot` C or assembly objects.
+RISC-V boot/runtime code is now owned by Simple modules under `src/os/kernel/arch/riscv32` and `src/os/kernel/arch/riscv64`. The platform catalog keeps `boot_c_sources` and `boot_asm_sources` empty for both RISC-V targets, so native-build cannot silently reintroduce `examples/09_embedded/simple_os/arch/riscv*/boot` C or assembly objects.
 
 RV64 hardware entry and trap entry are `@naked` Simple functions with embedded assembly. `_start` lives with the RV64 boot module; `_rv64_trap_vector` and `_rv64_enter_user` live in `trap_vector.spl` and preserve the existing trap-frame ABI used by `interrupt.spl`.
 

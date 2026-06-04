@@ -1,7 +1,7 @@
 # NVFS Send Stream Format (NVSR)
 
 **Milestone:** N6b — raw send / encrypted replication stream
-**Status:** Implemented (`examples/nvfs/src/core/send.spl`)
+**Status:** Implemented (`examples/11_advanced/nvfs/src/core/send.spl`)
 **Related:** `nvfs_design_v2.md §14` (encryption); `nvfs_requests.md FR-NVFS-N6b-001`
 
 ## Purpose

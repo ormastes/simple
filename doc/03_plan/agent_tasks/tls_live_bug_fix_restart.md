@@ -66,8 +66,8 @@ baseline and should be re-narrowed before changing SHA internals again.
 
 ## 2026-05-30 Update 2: A1 narrowed to C seed helper multi-block SHA
 
-Added live diagnostics to `examples/simple_os/arch/x86_64/tls_unit_entry.spl`
-and `examples/simple_os/arch/x86_64/boot/baremetal_stubs.c`.
+Added live diagnostics to `examples/09_embedded/simple_os/arch/x86_64/tls_unit_entry.spl`
+and `examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c`.
 
 Findings:
 - `rt_tls13_hkdf_extract_into` receives the correct RFC 5869 TC1 inputs:
@@ -119,7 +119,7 @@ pure-Simple SHA-256 / HMAC implementation that A2 is the first to exercise.
 ## Why A2 is the first pure-Simple SHA call
 
 - `A1` passes through the C-extern fast-path `rt_tls13_hkdf_extract_into` in
-  [examples/simple_os/arch/x86_64/boot/baremetal_stubs.c](/home/ormastes/dev/pub/simple/examples/simple_os/arch/x86_64/boot/baremetal_stubs.c).
+  [examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c](/home/ormastes/dev/pub/simple/examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c).
   That extern internally uses a known-good SHA-256 helper. Its passing only
   proves the helper SHA is correct, not the pure-Simple SHA.
 - `A2` runs `hkdf_expand_with_info_len(...)` in
@@ -186,7 +186,7 @@ Treat that as a strong lead for step 2/3.
 - HMAC + HKDF: [src/os/tls13/hkdf.spl](/home/ormastes/dev/pub/simple/src/os/tls13/hkdf.spl)
   - `hmac_sha256` ipad/opad construction
   - `hkdf_expand_with_info_len` T-block chaining
-- TLS unit entry harness: [examples/simple_os/arch/x86_64/tls_unit_entry.spl](/home/ormastes/dev/pub/simple/examples/simple_os/arch/x86_64/tls_unit_entry.spl)
+- TLS unit entry harness: [examples/09_embedded/simple_os/arch/x86_64/tls_unit_entry.spl](/home/ormastes/dev/pub/simple/examples/09_embedded/simple_os/arch/x86_64/tls_unit_entry.spl)
   - Where the bisection harness needs to be inserted (and removed in ship phase)
 
 ## What stays in tree regardless of next phase
@@ -361,7 +361,7 @@ Highest-signal code locations:
 - [src/os/tls13/record13.spl](/home/ormastes/dev/pub/simple/src/os/tls13/record13.spl:148)
 - [src/os/tls13/record13.spl](/home/ormastes/dev/pub/simple/src/os/tls13/record13.spl:248)
 - [src/os/crypto/aes128_gcm.spl](/home/ormastes/dev/pub/simple/src/os/crypto/aes128_gcm.spl:508)
-- [examples/simple_os/arch/x86_64/boot/baremetal_stubs.c](/home/ormastes/dev/pub/simple/examples/simple_os/arch/x86_64/boot/baremetal_stubs.c:10832)
+- [examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c](/home/ormastes/dev/pub/simple/examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c:10832)
 
 ## Changes Already In Place
 
@@ -378,12 +378,12 @@ Do not accidentally revert these without re-evaluating live TLS:
 - Indexed byte reads replaced fragile iteration in:
   - [src/os/tls13/hkdf.spl](/home/ormastes/dev/pub/simple/src/os/tls13/hkdf.spl)
   - [src/os/tls13/transcript.spl](/home/ormastes/dev/pub/simple/src/os/tls13/transcript.spl)
-  - [examples/simple_os/arch/x86_64/tls_unit_entry.spl](/home/ormastes/dev/pub/simple/examples/simple_os/arch/x86_64/tls_unit_entry.spl)
+  - [examples/09_embedded/simple_os/arch/x86_64/tls_unit_entry.spl](/home/ormastes/dev/pub/simple/examples/09_embedded/simple_os/arch/x86_64/tls_unit_entry.spl)
 
 ### Record helper adjustments
 
 - Record helper nonce XOR fix is already present in:
-  - [examples/simple_os/arch/x86_64/boot/baremetal_stubs.c](/home/ormastes/dev/pub/simple/examples/simple_os/arch/x86_64/boot/baremetal_stubs.c)
+  - [examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c](/home/ormastes/dev/pub/simple/examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c)
 
 - Current record-path compromise is already present in:
   - [src/os/tls13/record13.spl](/home/ormastes/dev/pub/simple/src/os/tls13/record13.spl)
@@ -444,7 +444,7 @@ Goal:
 
 ## Diagnostic Notes To Preserve
 
-Current TLS harness diagnostics in [examples/simple_os/arch/x86_64/tls_unit_entry.spl](/home/ormastes/dev/pub/simple/examples/simple_os/arch/x86_64/tls_unit_entry.spl) are useful and should be kept until the live lane is green:
+Current TLS harness diagnostics in [examples/09_embedded/simple_os/arch/x86_64/tls_unit_entry.spl](/home/ormastes/dev/pub/simple/examples/09_embedded/simple_os/arch/x86_64/tls_unit_entry.spl) are useful and should be kept until the live lane is green:
 - `A2` prints `okm_a` prefix
 - `D4`, `D9`, `D10` print returned content type and data length
 

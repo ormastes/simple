@@ -203,14 +203,14 @@ Supported features:
 
 Not yet: parallel builds (`-j N`), conditionals, `include`, `.PHONY`.
 
-### 3.2 CMake Port (examples/cmake/)
+### 3.2 CMake Port (examples/10_tooling/cmake/)
 
-**Source:** `examples/cmake/`
+**Source:** `examples/10_tooling/cmake/`
 
 SimpleOS-native CMakeLists.txt parser and build file generator:
 
 ```bash
-bin/simple run examples/cmake/simple_cmake.spl -- examples/cmake/example/
+bin/simple run examples/10_tooling/cmake/simple_cmake.spl -- examples/10_tooling/cmake/example/
 ```
 
 Supported CMake subset:
@@ -220,14 +220,14 @@ Supported CMake subset:
 - `message()`, `option()`, `find_program()`, `find_library()`
 - Generates Makefile or build.ninja output
 
-### 3.3 Ninja Port (examples/ninja/)
+### 3.3 Ninja Port (examples/10_tooling/ninja/)
 
-**Source:** `examples/ninja/`
+**Source:** `examples/10_tooling/ninja/`
 
 Ninja build file parser and executor:
 
 ```bash
-bin/simple run examples/ninja/simple_ninja.spl -- examples/ninja/example/
+bin/simple run examples/10_tooling/ninja/simple_ninja.spl -- examples/10_tooling/ninja/example/
 ```
 
 Supported ninja subset:
@@ -237,14 +237,14 @@ Supported ninja subset:
 - `pool`, `default`, `include`, `subninja`
 - Dependency-based rebuild, parallel execution
 
-### 3.4 Enhanced Make (examples/make/)
+### 3.4 Enhanced Make (examples/10_tooling/make/)
 
-**Source:** `examples/make/`
+**Source:** `examples/10_tooling/make/`
 
 Enhanced make implementation beyond simple_make:
 
 ```bash
-bin/simple run examples/make/simple_make_enhanced.spl -- -j4 all
+bin/simple run examples/10_tooling/make/simple_make_enhanced.spl -- -j4 all
 ```
 
 Additional features over simple_make:
@@ -417,17 +417,17 @@ SimpleOS target metadata is centralized in one catalog so C/ASM boot objects, Si
 Build all first-class QEMU targets:
 
 ```bash
-bin/simple run examples/simple_os/build.spl
+bin/simple run examples/09_embedded/simple_os/build.spl
 ```
 
 Build the 32-bit x86 lane:
 
 ```bash
-bin/simple run examples/simple_os/build.spl -- --arch=x86_32
-bin/simple run examples/simple_os/build.spl -- --arch=i686
+bin/simple run examples/09_embedded/simple_os/build.spl -- --arch=x86_32
+bin/simple run examples/09_embedded/simple_os/build.spl -- --arch=i686
 ```
 
-The x86_32 lane uses `qemu-system-i386`, an ELF32 linker mode, and freestanding C/ASM boot support under `examples/simple_os/arch/x86_32/boot/`. The QEMU runner chooses LLVM for this lane by default because the current Cranelift object backend cannot initialize an i686 freestanding target. The selected `simple` binary must be built with the Rust `llvm` feature and a discoverable LLVM 18 installation, for example by setting `LLVM_SYS_180_PREFIX` before running `cargo build --features llvm`.
+The x86_32 lane uses `qemu-system-i386`, an ELF32 linker mode, and freestanding C/ASM boot support under `examples/09_embedded/simple_os/arch/x86_32/boot/`. The QEMU runner chooses LLVM for this lane by default because the current Cranelift object backend cannot initialize an i686 freestanding target. The selected `simple` binary must be built with the Rust `llvm` feature and a discoverable LLVM 18 installation, for example by setting `LLVM_SYS_180_PREFIX` before running `cargo build --features llvm`.
 
 ### 4.8 Native Build Config
 
@@ -456,20 +456,20 @@ The first workflow works today. The second is still architecture-dependent.
 
 #### Build a native x86_64 SimpleOS entry
 
-Use an existing entry file under `examples/simple_os/arch/x86_64/` as a template.
+Use an existing entry file under `examples/09_embedded/simple_os/arch/x86_64/` as a template.
 For example, build the minimal entry directly:
 
 ```bash
 src/compiler_rust/target/release/simple native-build \
   --source src/os \
   --source src/lib \
-  --source examples/simple_os \
+  --source examples/09_embedded/simple_os \
   --backend cranelift \
   --entry-closure \
-  --entry examples/simple_os/arch/x86_64/minimal_entry.spl \
+  --entry examples/09_embedded/simple_os/arch/x86_64/minimal_entry.spl \
   --target x86_64-unknown-none \
   -o build/os/minimal_x86_64.elf \
-  --linker-script examples/simple_os/arch/x86_64/linker.ld
+  --linker-script examples/09_embedded/simple_os/arch/x86_64/linker.ld
 ```
 
 For normal day-to-day work, prefer the higher-level QEMU runner:
@@ -509,7 +509,7 @@ That `.shs` entrypoint populates the FAT32 image with host filesystem tools:
 Linux loop mount is the fallback.
 
 `x64-nvme-fat32` is the focused filesystem contract lane. It binds to
-`examples/simple_os/arch/x86_64/fs_test_entry.spl` and always uses
+`examples/09_embedded/simple_os/arch/x86_64/fs_test_entry.spl` and always uses
 `build/os/fat32-x86_64.img` so the guest can assert on `HELLO.TXT`,
 `NUMBERS.TXT`, and `HELLO.SPL`. The SPipe wrapper for filesystem variants is:
 
@@ -832,10 +832,10 @@ gui_entry.spl (x86_64 Multiboot entry)
 
 | Entry | File | Purpose |
 |-------|------|---------|
-| GUI Desktop | `examples/simple_os/arch/x86_64/gui_entry.spl` | Full desktop shell + all 28 apps |
-| Glass WM | `examples/simple_os/arch/x86_64/wm_entry.spl` | Self-contained glass window manager |
-| GPU Test | `examples/simple_os/arch/x86_64/gpu_test_entry.spl` | VirtIO-GPU testing |
-| Minimal GUI | `examples/simple_os/arch/x86_64/gui_entry_minimal.spl` | Minimal framebuffer test |
+| GUI Desktop | `examples/09_embedded/simple_os/arch/x86_64/gui_entry.spl` | Full desktop shell + all 28 apps |
+| Glass WM | `examples/09_embedded/simple_os/arch/x86_64/wm_entry.spl` | Self-contained glass window manager |
+| GPU Test | `examples/09_embedded/simple_os/arch/x86_64/gpu_test_entry.spl` | VirtIO-GPU testing |
+| Minimal GUI | `examples/09_embedded/simple_os/arch/x86_64/gui_entry_minimal.spl` | Minimal framebuffer test |
 
 ### 8.7 QEMU Configuration
 
@@ -868,7 +868,7 @@ src/os/
     gpu/          — VirtIO-GPU acceleration
   services/       — WM service, launcher shortcuts
 
-examples/simple_os/
+examples/09_embedded/simple_os/
   arch/x86_64/    — x86_64 entry points, linker script, boot/ C stubs
   src/            — GUI kernel main
 ```

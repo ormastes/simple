@@ -25,7 +25,7 @@ HTML string
   -> browser_renderer.spl (paint BeLayoutBox -> SceneCommand list -> GPU)
 ```
 
-Per ADR-002, this canonical engine is production. The research tree at `examples/browser/` is demoted to labs.
+Per ADR-002, this canonical engine is production. The research tree at `examples/11_advanced/browser/` is demoted to labs.
 
 ## Layout Engine
 

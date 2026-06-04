@@ -14,8 +14,8 @@ The actual boot-time write of `tp` must happen in `start.S` (or equivalent
 baremetal stubs).  The relevant files are currently modified by an in-flight
 track and cannot be edited:
 
-- `examples/simple_os/arch/riscv64/boot/baremetal_stubs.c` — dirty in `jj st`
-- `examples/simple_os/arch/riscv64/boot/ghdl_boot_info_runtime.c` — dirty in `jj st`
+- `examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_stubs.c` — dirty in `jj st`
+- `examples/09_embedded/simple_os/arch/riscv64/boot/ghdl_boot_info_runtime.c` — dirty in `jj st`
 
 This FR records the exact change needed so it is not lost when those files
 reach a clean state on main.
@@ -70,8 +70,8 @@ This matches the `TrapFrameTest.regs[4]` index verified in `per_cpu_tp_spec.spl`
 
 Both conditions were met (2026-05-10):
 
-1. `examples/simple_os/arch/riscv64/boot/baremetal_stubs.c` and
-   `examples/simple_os/arch/riscv64/boot/ghdl_boot_info_runtime.c` are clean
+1. `examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_stubs.c` and
+   `examples/09_embedded/simple_os/arch/riscv64/boot/ghdl_boot_info_runtime.c` are clean
    on main (confirmed via `git status`).
 2. `per_cpu_base_array` symbol defined in
    `src/lib/nogc_async_mut_noalloc/baremetal/riscv/startup.spl` as

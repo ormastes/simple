@@ -68,8 +68,8 @@ Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(simpleos_platform_default_entry("x86_64")).to_equal("examples/simple_os/arch/x86_64/os_entry.spl")
-expect(simpleos_platform_linker_script("x86_64")).to_equal("examples/simple_os/arch/x86_64/linker.ld")
+expect(simpleos_platform_default_entry("x86_64")).to_equal("examples/09_embedded/simple_os/arch/x86_64/os_entry.spl")
+expect(simpleos_platform_linker_script("x86_64")).to_equal("examples/09_embedded/simple_os/arch/x86_64/linker.ld")
 expect(simpleos_platform_native_target("x86_64")).to_equal("x86_64-unknown-none")
 expect(simpleos_platform_qemu_system("x86_64")).to_equal("qemu-system-x86_64")
 expect(simpleos_platform_qemu_machine("x86_64")).to_equal("q35")
@@ -136,10 +136,10 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val c_sources = simpleos_platform_boot_c_sources("x86_32")
-expect(c_sources).to_contain("examples/simple_os/arch/x86_32/boot/baremetal_stubs.c")
+expect(c_sources).to_contain("examples/09_embedded/simple_os/arch/x86_32/boot/baremetal_stubs.c")
 
 val asm_sources = simpleos_platform_boot_asm_sources("x86_32")
-expect(asm_sources).to_contain("examples/simple_os/arch/x86_32/boot/crt0.s")
+expect(asm_sources).to_contain("examples/09_embedded/simple_os/arch/x86_32/boot/crt0.s")
 ```
 
 </details>
@@ -154,10 +154,10 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val backlog = simpleos_platform_grandfathered_native_sources("x86_64")
-expect(backlog).to_contain("examples/simple_os/arch/x86_64/boot/ap_trampoline.s")
-expect(backlog).to_contain("examples/simple_os/arch/x86_64/boot/syscall_entry.s")
-expect(backlog).to_contain("examples/simple_os/arch/x86_64/boot/auto_stubs.c")
-expect(backlog).to_contain("examples/simple_os/arch/x86_64/boot/rt_extras.c")
+expect(backlog).to_contain("examples/09_embedded/simple_os/arch/x86_64/boot/ap_trampoline.s")
+expect(backlog).to_contain("examples/09_embedded/simple_os/arch/x86_64/boot/syscall_entry.s")
+expect(backlog).to_contain("examples/09_embedded/simple_os/arch/x86_64/boot/auto_stubs.c")
+expect(backlog).to_contain("examples/09_embedded/simple_os/arch/x86_64/boot/rt_extras.c")
 ```
 
 </details>
@@ -172,14 +172,14 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val arm64_c_sources = simpleos_platform_boot_c_sources("arm64")
-expect(arm64_c_sources).to_contain("examples/simple_os/arch/arm64/boot/baremetal_stubs.c")
+expect(arm64_c_sources).to_contain("examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c")
 val arm64_asm_sources = simpleos_platform_boot_asm_sources("arm64")
-expect(arm64_asm_sources).to_contain("examples/simple_os/arch/arm64/boot/crt0.S")
+expect(arm64_asm_sources).to_contain("examples/09_embedded/simple_os/arch/arm64/boot/crt0.S")
 
 val arm32_c_sources = simpleos_platform_boot_c_sources("arm32")
-expect(arm32_c_sources).to_contain("examples/simple_os/arch/arm32/boot/baremetal_stubs.c")
+expect(arm32_c_sources).to_contain("examples/09_embedded/simple_os/arch/arm32/boot/baremetal_stubs.c")
 val arm32_asm_sources = simpleos_platform_boot_asm_sources("arm32")
-expect(arm32_asm_sources).to_contain("examples/simple_os/arch/arm32/boot/crt0.s")
+expect(arm32_asm_sources).to_contain("examples/09_embedded/simple_os/arch/arm32/boot/crt0.s")
 ```
 
 </details>
@@ -195,8 +195,8 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 expect(simpleos_target_arch("i686-simpleos")).to_equal("x86")
 expect(simpleos_clang_target("i686-simpleos")).to_equal("i686-unknown-none-elf")
-expect(simpleos_boot_c_sources("i686-simpleos")).to_contain("examples/simple_os/arch/x86_32/boot/baremetal_stubs.c")
-expect(simpleos_boot_asm_sources("i686-simpleos")).to_contain("examples/simple_os/arch/x86_32/boot/crt0.s")
+expect(simpleos_boot_c_sources("i686-simpleos")).to_contain("examples/09_embedded/simple_os/arch/x86_32/boot/baremetal_stubs.c")
+expect(simpleos_boot_asm_sources("i686-simpleos")).to_contain("examples/09_embedded/simple_os/arch/x86_32/boot/crt0.s")
 expect(simpleos_target_artifact_slug("i686-simpleos")).to_equal("x86_32")
 expect(simpleos_target_kernel_output("i686-simpleos")).to_equal("build/os/simpleos_x86_32.elf")
 expect(simpleos_target_disk_image_output("i686-simpleos")).to_equal("build/os/fat32-x86_32.img")
@@ -306,7 +306,7 @@ Reproduction: this block contains the complete executable scenario source.
 expect(simpleos_target_boot_impl_kind("x86_64-simpleos")).to_equal(SimpleOsNativeImplementationKind.StandaloneAsm)
 expect(simpleos_target_runtime_impl_kind("x86_64-simpleos")).to_equal(SimpleOsNativeImplementationKind.Simple)
 expect(simpleos_target_standalone_asm_policy("x86_64-simpleos")).to_equal(SimpleOsStandaloneAsmPolicy.EntryStubsOnly)
-expect(simpleos_target_grandfathered_native_sources("x86_64-simpleos")).to_contain("examples/simple_os/arch/x86_64/boot/ap_trampoline.s")
+expect(simpleos_target_grandfathered_native_sources("x86_64-simpleos")).to_contain("examples/09_embedded/simple_os/arch/x86_64/boot/ap_trampoline.s")
 
 expect(simpleos_target_boot_impl_kind("riscv64gc-simpleos")).to_equal(SimpleOsNativeImplementationKind.EmbeddedAsm)
 expect(simpleos_target_standalone_asm_policy("riscv64gc-simpleos")).to_equal(SimpleOsStandaloneAsmPolicy.EntryStubsOnly)
@@ -353,13 +353,13 @@ Reproduction: this block contains the complete executable scenario source.
 val arm64_lane = simpleos_platform_qemu_acceptance_lane("arm64")
 expect(arm64_lane.name).to_equal("arm64-virtio-fat32-smf")
 expect(arm64_lane.lane_kind).to_equal(SimpleOsLaneKind.FsExec)
-expect(arm64_lane.entry).to_equal("examples/simple_os/arch/arm64/fs_exec_entry.spl")
+expect(arm64_lane.entry).to_equal("examples/09_embedded/simple_os/arch/arm64/fs_exec_entry.spl")
 expect(arm64_lane.media_path_hint).to_equal("build/os/fat32-arm64.img")
 
 val rv64_lane = simpleos_platform_qemu_acceptance_lane("riscv64")
 expect(rv64_lane.name).to_equal("riscv64-hosted")
 expect(rv64_lane.lane_kind).to_equal(SimpleOsLaneKind.HostedCompileSmoke)
-expect(rv64_lane.entry).to_equal("examples/simple_os/arch/riscv64/hosted_entry.spl")
+expect(rv64_lane.entry).to_equal("examples/09_embedded/simple_os/arch/riscv64/hosted_entry.spl")
 expect(rv64_lane.media_path_hint).to_equal("build/os/fat32-riscv64.img")
 
 val arm_markers = simpleos_platform_qemu_acceptance_required_markers("arm64")
@@ -378,7 +378,7 @@ expect(rv64_markers).to_contain("HOSTED_FS_TOOLCHAIN_READY arch=riscv64 apps=sim
 
 1. fail
    - Expected: lane.lane_kind equals `SimpleOsLaneKind.FsExec`
-   - Expected: lane.entry equals `examples/simple_os/arch/riscv64/smoke_entry.spl`
+   - Expected: lane.entry equals `examples/09_embedded/simple_os/arch/riscv64/smoke_entry.spl`
    - Expected: lane.timeout_ms equals `60000`
    - Expected: lane.media_path_hint equals `build/os/fat32-riscv64.img`
    - Expected: lane.required_serial_markers.len() equals `0`
@@ -387,7 +387,7 @@ expect(rv64_markers).to_contain("HOSTED_FS_TOOLCHAIN_READY arch=riscv64 apps=sim
    - Expected: x64_lanes.len() equals `2`
    - Expected: x64_lanes[0].name equals `x86_64-smoke`
    - Expected: x64_lanes[1].name equals `x86_64-q35-pure-nvme-perf`
-   - Expected: lane.entry equals `examples/simple_os/arch/x86_64/q35_pure_nvme_perf_entry.spl`
+   - Expected: lane.entry equals `examples/09_embedded/simple_os/arch/x86_64/q35_pure_nvme_perf_entry.spl`
    - Expected: lane.media_path_hint equals `build/os/fat32-x86_64.img`
    - Expected: lane.image_layout equals `SimpleOsImageLayoutKind.Fat32Disk`
    - Expected: lane.output equals `build/os/simpleos_x86_64_pure_nvme_perf.elf`
@@ -413,7 +413,7 @@ else:
 val rv64_virtio = simpleos_platform_qemu_lane("riscv64", "riscv64-virtio-fat32-smf")
 if val lane = rv64_virtio:
     expect(lane.lane_kind).to_equal(SimpleOsLaneKind.FsExec)
-    expect(lane.entry).to_equal("examples/simple_os/arch/riscv64/smoke_entry.spl")
+    expect(lane.entry).to_equal("examples/09_embedded/simple_os/arch/riscv64/smoke_entry.spl")
     expect(lane.timeout_ms).to_equal(60000)
     expect(lane.media_path_hint).to_equal("build/os/fat32-riscv64.img")
     expect(lane.required_serial_markers.len()).to_equal(0)
@@ -427,7 +427,7 @@ expect(x64_lanes[1].name).to_equal("x86_64-q35-pure-nvme-perf")
 
 val x64_pure = simpleos_platform_qemu_lane("x86_64", "x86_64-q35-pure-nvme-perf")
 if val lane = x64_pure:
-    expect(lane.entry).to_equal("examples/simple_os/arch/x86_64/q35_pure_nvme_perf_entry.spl")
+    expect(lane.entry).to_equal("examples/09_embedded/simple_os/arch/x86_64/q35_pure_nvme_perf_entry.spl")
     expect(lane.media_path_hint).to_equal("build/os/fat32-x86_64.img")
     expect(lane.image_layout).to_equal(SimpleOsImageLayoutKind.Fat32Disk)
     expect(lane.output).to_equal("build/os/simpleos_x86_64_pure_nvme_perf.elf")
@@ -526,11 +526,11 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val rv64_backlog = simpleos_platform_grandfathered_native_sources("riscv64")
-expect(rv64_backlog).to_contain("examples/simple_os/arch/riscv64/boot/baremetal_stubs.c")
-expect(rv64_backlog).to_contain("examples/simple_os/arch/riscv64/boot/ghdl_boot_info_runtime.c")
+expect(rv64_backlog).to_contain("examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_stubs.c")
+expect(rv64_backlog).to_contain("examples/09_embedded/simple_os/arch/riscv64/boot/ghdl_boot_info_runtime.c")
 
 val rv32_backlog = simpleos_platform_grandfathered_native_sources("riscv32")
-expect(rv32_backlog).to_contain("examples/simple_os/arch/riscv32/boot/baremetal_stubs.c")
+expect(rv32_backlog).to_contain("examples/09_embedded/simple_os/arch/riscv32/boot/baremetal_stubs.c")
 ```
 
 </details>

@@ -121,12 +121,12 @@ Generated: 2026-03-25
 
 | File | TODO Summary |
 |------|-------------|
-| `examples/browser/entity/dom/paint_types.spl` | Color -> std.common.color.types.Color; PaintOp -> Rect2 params + RenderCommand parallel; DisplayItem -> ZIndex |
-| `examples/browser/entity/dom/box_types.spl` | LayoutBox -> compose with Rect2 |
-| `examples/browser/entity/dom/css_types.spl` | CSSValue.Color -> wrap std.common.color.types.Color |
-| `examples/browser/entity/media/canvas_types.spl` | CanvasOp colors text -> Color type; points -> Vec2; Path2D -> PathBuilder |
-| `examples/browser/entity/media/image_types.spl` | ImageData pixel format -> align with engine packed RGBA |
-| `examples/browser/feature/composite/damage_tracker.spl` | DamageRect -> Rect2 |
-| `examples/browser/test/composite/damage_tracking_spec.spl` | DamageRect -> Rect2 |
-| `examples/browser/test/paint/display_list_spec.spl` | PaintStyle colors -> follow Color migration |
-| `examples/browser/test/paint/stacking_context_spec.spl` | StackingContext.z_index -> ZIndex |
+| `examples/11_advanced/browser/entity/dom/paint_types.spl` | Color -> std.common.color.types.Color; PaintOp -> Rect2 params + RenderCommand parallel; DisplayItem -> ZIndex |
+| `examples/11_advanced/browser/entity/dom/box_types.spl` | LayoutBox -> compose with Rect2 |
+| `examples/11_advanced/browser/entity/dom/css_types.spl` | CSSValue.Color -> wrap std.common.color.types.Color |
+| `examples/11_advanced/browser/entity/media/canvas_types.spl` | CanvasOp colors text -> Color type; points -> Vec2; Path2D -> PathBuilder |
+| `examples/11_advanced/browser/entity/media/image_types.spl` | ImageData pixel format -> align with engine packed RGBA |
+| `examples/11_advanced/browser/feature/composite/damage_tracker.spl` | DamageRect -> Rect2 |
+| `examples/11_advanced/browser/test/composite/damage_tracking_spec.spl` | DamageRect -> Rect2 |
+| `examples/11_advanced/browser/test/paint/display_list_spec.spl` | PaintStyle colors -> follow Color migration |
+| `examples/11_advanced/browser/test/paint/stacking_context_spec.spl` | StackingContext.z_index -> ZIndex |

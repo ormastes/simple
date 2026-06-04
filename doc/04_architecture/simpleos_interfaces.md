@@ -30,13 +30,13 @@ this file in the same commit.
 **Status:** frozen (existing 53 shims) + new-this-cycle (5 new syscalls below)
 
 **Location:** `src/os/kernel/abi/syscall_shim.spl`
-**Weak stubs:** `examples/simple_os/arch/x86_64/boot/baremetal_stubs.c`
+**Weak stubs:** `examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c`
 
 ### Calling convention
 
 All syscall handlers share the same C-ABI signature: six `u64` arguments
 (`a0`–`a5`) and an `i64` return value. The SYSCALL dispatch stub in
-`examples/simple_os/arch/x86_64/boot/` copies `rdi, rsi, rdx, r10, r8, r9`
+`examples/09_embedded/simple_os/arch/x86_64/boot/` copies `rdi, rsi, rdx, r10, r8, r9`
 into those slots and places the return value in `rax`.
 
 ### Existing frozen shims (Wave 10F, 53 total — representative set)
@@ -195,7 +195,7 @@ sys_exit_thread   = 111  # per-thread exit, releases stack and TLS slot
 
 `@export` shim names follow the `spl_handle_<n>` convention used by Wave 1
 (see `src/os/kernel/abi/syscall_shim.spl` lines 108–172). Weak stubs in
-`examples/simple_os/arch/x86_64/boot/baremetal_stubs.c` must return -ENOSYS
+`examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c` must return -ENOSYS
 until the strong override lands.
 
 `TaskContext` gains a `fs_base: u64` field (`src/os/kernel/types/task_types.spl`)
@@ -208,7 +208,7 @@ constant already exists at `src/os/kernel/arch/x86_64/cpu.spl:104`.
 `src/os/kernel/abi/syscall_shim.spl` (4 new @export shims),
 `src/os/kernel/types/task_types.spl` (TaskContext.fs_base),
 `src/os/kernel/scheduler/context_switch.spl` (wrmsr on switch-in),
-`examples/simple_os/arch/x86_64/boot/baremetal_stubs.c` (4 weak stubs).
+`examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c` (4 weak stubs).
 
 **Consumers:** musl PAL overlay at `src/os/external/musl/arch/simpleos-x86_64/`,
 Rust libstd PAL fork at `/home/ormastes/rust:simpleos`.
@@ -395,7 +395,7 @@ Linker script constants (userspace):
 
 - Entry point: `_start`
 - Load base: `0x10000000`
-- No multiboot header (kernel script at `examples/simple_os/arch/x86_64/linker.ld`
+- No multiboot header (kernel script at `examples/09_embedded/simple_os/arch/x86_64/linker.ld`
   uses `_entry32` + `0x100000` — do not mix these)
 
 Rebuild:
@@ -509,7 +509,7 @@ wave-4a-builder limit (HELLOCO not yet written); follow-up.
 
 **Status:** frozen
 
-**Location:** `examples/simple_os/` (kernel boot path)
+**Location:** `examples/09_embedded/simple_os/` (kernel boot path)
 **Transport:** COM1 serial at 115200 baud (default QEMU `-serial stdio`)
 
 ### Marker tokens (from kernel source scan)
@@ -779,7 +779,7 @@ port-dev-chain maintainer before merge.
 | IF-05 | `src/os/port/llvm/sysroot.shs` |
 | IF-06 | `src/os/port/initramfs_pack.spl` |
 | IF-07 | `src/os/services/fat32/fat32.spl` |
-| IF-08 | `examples/simple_os/arch/x86_64/` |
+| IF-08 | `examples/09_embedded/simple_os/arch/x86_64/` |
 | IF-09 | `src/os/port/bootstrap_native_verify.spl` |
 | IF-10 | `src/compiler_rust/.cargo/config.toml` |
 | IF-11 | `src/compiler/70.backend/linker/lld_ffi.spl` |

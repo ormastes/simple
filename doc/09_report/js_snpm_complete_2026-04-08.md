@@ -5,7 +5,7 @@
 
 ## Summary
 
-Promoted the browser's JavaScript engine from `examples/browser/` to `src/lib/common/js/` as a standard library module, added ES2015+ features, created Node.js-compatible runtime modules, built an ECMAScript conformance test suite, and implemented the `snpm` npm-like package manager.
+Promoted the browser's JavaScript engine from `examples/11_advanced/browser/` to `src/lib/common/js/` as a standard library module, added ES2015+ features, created Node.js-compatible runtime modules, built an ECMAScript conformance test suite, and implemented the `snpm` npm-like package manager.
 
 ## Deliverables
 

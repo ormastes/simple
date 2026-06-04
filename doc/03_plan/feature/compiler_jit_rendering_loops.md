@@ -8,7 +8,7 @@
 
 ## Context
 
-Pure-Simple per-pixel SDF rasterizers (e.g. `examples/ui/engine2d_shapes_gui.spl`)
+Pure-Simple per-pixel SDF rasterizers (e.g. `examples/06_io/ui/engine2d_shapes_gui.spl`)
 fall back to the tree-walk interpreter because Cranelift JIT lowering fails on:
 
 1. **`TypedInteger(0, U32)` inference** -- JIT bails with "Cannot infer type"
@@ -92,7 +92,7 @@ symbol resolution tables in the Cranelift adapter
 
 ### Phase 4: End-to-End Validation (S)
 
-1. Run `bin/simple run examples/ui/engine2d_shapes_gui.spl` and confirm
+1. Run `bin/simple run examples/06_io/ui/engine2d_shapes_gui.spl` and confirm
    it does not fall back to interpreter with type-inference errors
 2. Measure render time at 640x480 -- target: under 5 seconds
 3. Verify no `rt_function_not_found` panics in the JIT path
@@ -102,7 +102,7 @@ symbol resolution tables in the Cranelift adapter
 
 ## Acceptance Criteria
 
-- [ ] `bin/simple run examples/ui/engine2d_shapes_gui.spl` JIT-compiles
+- [ ] `bin/simple run examples/06_io/ui/engine2d_shapes_gui.spl` JIT-compiles
       without `Cannot infer type: TypedInteger(0, U32)` interpreter fallback
 - [ ] No `can't resolve symbol rt_function_not_found` panic for programs using
       `[u32; N]`, `.to_u32()`, `.to_f64()`, `.sqrt()`, and `[u32]` index ops

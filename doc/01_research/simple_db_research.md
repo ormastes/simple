@@ -8,7 +8,7 @@
 
 `Simple DB` is a PostgreSQL-compatible storage engine written in Simple that keeps PostgreSQL's conceptual model (8 KiB pages, MVCC via `xmin`/`xmax`, HOT chains, per-relation forks, BRIN summaries, WAL-first durability, TOAST out-of-line storage) but replaces the physicalization layer. Pages never update in place on flash. Every user-visible update appends a new physical page into an NVFS arena and atomically bumps a page-indirection map (`rel.pmap`) that maps logical block numbers to physical extents. Checkpoints become a two-step dance — seal the active data arena and atomically publish the new pmap root. The WAL lives in its own aligned-append arena. TOAST becomes a WiscKey-style external value log (`rel.blob`) so that vacuum need only rewrite pointers, not full-size off-page blobs. NVMe ZNS zone append and FDP placement IDs are capability-probed and used opportunistically; they are never required for correctness.
 
-The engine's Simple realization is MDSOC-outer wrapping an ECS-inner business layer. The MDSOC outer pins the five project-standard axes (modules, dependencies, side effects, ownership/capabilities, concurrency). The ECS inner models the dataflow with eleven POD components (`Relation`, `PageDescriptor`, `Tuple`, `WalRecord`, `Txn`, `Checkpoint`, `VacuumTask`, `BufferFrame`, `PmapBinding`, `BlobRef`, `CapabilityView`) and eight free-function systems (`sys_commit`, `sys_wal_flush`, `sys_checkpoint`, `sys_vacuum`, `sys_buffer_evict`, `sys_pmap_publish`, `sys_blob_gc`, `sys_capability_probe`). Trait surfaces live in `src/lib/nogc_sync_mut/simple_db_if/`; impl lives in submodule `examples/simple_db/`. The engine target is nogc_sync_mut (synchronous mutable, no GC) at M1–M2; M3+ graduates hot paths to `nogc_async_mut` for AIO.
+The engine's Simple realization is MDSOC-outer wrapping an ECS-inner business layer. The MDSOC outer pins the five project-standard axes (modules, dependencies, side effects, ownership/capabilities, concurrency). The ECS inner models the dataflow with eleven POD components (`Relation`, `PageDescriptor`, `Tuple`, `WalRecord`, `Txn`, `Checkpoint`, `VacuumTask`, `BufferFrame`, `PmapBinding`, `BlobRef`, `CapabilityView`) and eight free-function systems (`sys_commit`, `sys_wal_flush`, `sys_checkpoint`, `sys_vacuum`, `sys_buffer_evict`, `sys_pmap_publish`, `sys_blob_gc`, `sys_capability_probe`). Trait surfaces live in `src/lib/nogc_sync_mut/simple_db_if/`; impl lives in submodule `examples/11_advanced/simple_db/`. The engine target is nogc_sync_mut (synchronous mutable, no GC) at M1–M2; M3+ graduates hot paths to `nogc_async_mut` for AIO.
 
 Research grounds the design against five anchor source bodies:
 
@@ -341,7 +341,7 @@ No `extends`, no virtual methods, no superclass chains. Traits + composition + m
 
 - `jj` (Jujutsu) colocated with git, no branches, work on `main`.
 - `jj commit -m ...` for new commits; `jj bookmark set main -r @- && jj git push --bookmark main` to push.
-- Submodules via git (`examples/Simple DB`, `examples/nvfs`) pointing at private `ormastes/*` repos.
+- Submodules via git (`examples/Simple DB`, `examples/11_advanced/nvfs`) pointing at private `ormastes/*` repos.
 
 ### 10.7 Primary sources
 
@@ -720,7 +720,7 @@ src/lib/nogc_sync_mut/storage/       # shared primitives (main repo)
   arena.spl                          # ArenaHandle + Arena trait (7 verbs)
   mdsoc_base.spl                     # Header-only MDSOC outer doc
 
-examples/simple_db/src/               # engine impl (submodule)
+examples/11_advanced/simple_db/src/               # engine impl (submodule)
   engine/                            # physicalization
     page.spl, wal.spl, pmap.spl,
     buffer_mgr.spl, txn.spl,
@@ -731,7 +731,7 @@ examples/simple_db/src/               # engine impl (submodule)
     cli_entry.spl, main.spl
 ```
 
-Symlink: `src/app/Simple DB -> ../../examples/simple_db/src/tool` (trace32 pattern, verified Phase 5).
+Symlink: `src/app/Simple DB -> ../../examples/11_advanced/simple_db/src/tool` (trace32 pattern, verified Phase 5).
 
 ### F.2 Runtime family per module
 
@@ -740,17 +740,17 @@ Symlink: `src/app/Simple DB -> ../../examples/simple_db/src/tool` (trace32 patte
 | `simple_db_if/` | `nogc_sync_mut` | Trait declarations only; matches engine family. |
 | `storage/` | `nogc_sync_mut` | Shared primitives; sync-mut for buffer-manager idiom. |
 | `fs/nvfs/` (contracts) | `nogc_sync_mut` | Matches engine family. |
-| `examples/simple_db/engine/` | `nogc_sync_mut` (M1-M2), `nogc_async_mut` (M3+) | Sync initially; AIO path at M3. |
-| `examples/simple_db/business/` | `nogc_sync_mut` | ECS over engine; runtime family matches engine. |
-| `examples/nvfs/core/` | `nogc_sync_mut` | NVFS impl; sync-mut for filesystem kernel idiom. |
-| `examples/nvfs/driver/` | `nogc_sync_mut_noalloc` (future) | When real NVMe driver lands, no-alloc for IRQ context. |
+| `examples/11_advanced/simple_db/engine/` | `nogc_sync_mut` (M1-M2), `nogc_async_mut` (M3+) | Sync initially; AIO path at M3. |
+| `examples/11_advanced/simple_db/business/` | `nogc_sync_mut` | ECS over engine; runtime family matches engine. |
+| `examples/11_advanced/nvfs/core/` | `nogc_sync_mut` | NVFS impl; sync-mut for filesystem kernel idiom. |
+| `examples/11_advanced/nvfs/driver/` | `nogc_sync_mut_noalloc` (future) | When real NVMe driver lands, no-alloc for IRQ context. |
 
 ### F.3 Capability declaration per module
 
 Each MDSOC outer declares the capabilities it needs:
 
 ```
-Module: examples/simple_db/engine/
+Module: examples/11_advanced/simple_db/engine/
 Capabilities: [
   FilesystemArenaAccess,  // provided by NVFS handle
   ClockMonotonic,         // for commit-timestamp
@@ -762,7 +762,7 @@ Capabilities: [
 NVFS runs with a narrower set:
 
 ```
-Module: examples/nvfs/core/
+Module: examples/11_advanced/nvfs/core/
 Capabilities: [
   BlockDeviceAccess,      // raw NVMe handle
   DmaBufferAlloc,         // pinned buffers
@@ -805,8 +805,8 @@ Benchmarks report SMART counters, host I/O counters, SSD model, preconditioning 
 - `src/lib/nogc_sync_mut/simple_db_if/*.spl` (trait contracts, Phase 5 output)
 - `src/lib/nogc_sync_mut/storage/*.spl` (shared primitives, Phase 5 output)
 - `src/lib/nogc_sync_mut/fs/nvfs/*.spl` (NVFS trait contracts, Phase 5 output)
-- `examples/simple_db/src/` (engine skeleton, Phase 5 output)
-- `examples/nvfs/src/` (NVFS impl skeleton, Phase 5 output)
+- `examples/11_advanced/simple_db/src/` (engine skeleton, Phase 5 output)
+- `examples/11_advanced/nvfs/src/` (NVFS impl skeleton, Phase 5 output)
 
 ## Appendix I — Terminology and acronyms
 

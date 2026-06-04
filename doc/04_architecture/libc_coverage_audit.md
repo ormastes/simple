@@ -99,7 +99,7 @@ All 20 gaps previously identified are now closed. Each symbol has a strong imple
 
 ## Already-Stubbed-Weakly
 
-Symbols in `examples/simple_os/arch/x86_64/boot/baremetal_stubs.c` with `__attribute__((weak))`:
+Symbols in `examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c` with `__attribute__((weak))`:
 
 | Symbol | Line | Purpose |
 |--------|------|---------|

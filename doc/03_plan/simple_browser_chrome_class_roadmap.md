@@ -84,7 +84,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 
 | Feature | Chrome (V8) | Simple | Gap |
 |---------|-------------|--------|-----|
-| Engine | V8, JIT, IC, OSR | 8,220-line engine in examples/browser/feature/script/ | Lexer+parser+bytecode+VM+JIT+GC exist but NOT wired to V3 |
+| Engine | V8, JIT, IC, OSR | 8,220-line engine in examples/11_advanced/browser/feature/script/ | Lexer+parser+bytecode+VM+JIT+GC exist but NOT wired to V3 |
 | ES spec compliance | ~100% ES2024 | Unknown subset | No Test262 harness run |
 | DOM bindings | Full Web IDL | 7 web API stubs (console, crypto, dom, event, fetch, timer, worker) | Stubs only, not production |
 | Event loop | Spec-compliant | None in V3 | M6 was deferred from V3 |
@@ -172,7 +172,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 
 ### AD-1: Engine Unification Strategy
 
-**Decision:** Migrate examples/browser features INTO the canonical engine (`src/lib/gc_async_mut/gpu/browser_engine/`) incrementally, subsystem by subsystem.
+**Decision:** Migrate examples/11_advanced/browser features INTO the canonical engine (`src/lib/gc_async_mut/gpu/browser_engine/`) incrementally, subsystem by subsystem.
 
 **Rationale:** ADR-002 established the canonical engine as production. The examples tree (~62k lines) contains mature subsystems (parser, layout, paint, composite, script, net, sandbox) that are individually portable. Each milestone below moves one subsystem from examples → canonical, validates via WPT/corpus gates, then deletes the examples copy.
 
@@ -184,7 +184,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 
 ### AD-2: JavaScript Engine Approach
 
-**Decision:** Wire the existing Simple-native JS engine (`examples/browser/feature/script/`, 8,220 lines) into V3 via ChromiumEngine.
+**Decision:** Wire the existing Simple-native JS engine (`examples/11_advanced/browser/feature/script/`, 8,220 lines) into V3 via ChromiumEngine.
 
 **Rationale:** The engine already has lexer, parser, bytecode compiler, VM, GC, and 7 web API binding stubs. Building on this avoids external dependencies and aligns with the project's "all code in .spl" rule. JIT compilation exists but should remain disabled until correctness is proven via Test262.
 
@@ -208,7 +208,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 
 ### AD-4: Networking Stack
 
-**Decision:** Wire the existing examples/browser/feature/net/ stack, then harden.
+**Decision:** Wire the existing examples/11_advanced/browser/feature/net/ stack, then harden.
 
 **Rationale:** The net stack (DNS, TLS, HTTP/1, HTTP/2, WebSocket, fetch, cache, cookies, CORS) exists as 9 files. Integration before rewrite — get real pages loading, then fix issues discovered by real-world traffic. Known risk: text-typed APIs corrupt binary data (memory: `feedback_text_only_byte_cliffs.md`), requiring a `[u8]` byte-buffer path.
 
@@ -260,7 +260,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 **Goal:** Raise WPT from 37.8% to 65%+ by landing float layout and low-effort CSS gaps.
 
 **Work:**
-- Port `examples/browser/feature/layout/float.spl` → canonical engine
+- Port `examples/11_advanced/browser/feature/layout/float.spl` → canonical engine
 - Implement float clearing, float context, float positioning per CSS 2.1 spec
 - Land CSS quick wins: `hsl()`/`hsla()`, `currentColor`, `display: inline-flex`, `display: flow-root`, `display: contents`, `list-style: none`, `flex-flow` shorthand
 - Add `calc()` for length values
@@ -274,7 +274,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 **Goal:** WHATWG-compliant HTML parser in canonical engine; normal flow layout complete.
 
 **Work:**
-- Port `examples/browser/feature/parser/html_tokenizer.spl` + tree builder (5 state files) → canonical engine, replacing the current minimal parser
+- Port `examples/11_advanced/browser/feature/parser/html_tokenizer.spl` + tree builder (5 state files) → canonical engine, replacing the current minimal parser
 - Implement missing insertion modes: in_head, in_select, in_template, after_after_body, foreign_content
 - Complete normal flow: margin collapse, inline formatting context, anonymous block generation
 - Add `<table>` layout (basic — rows, cells, auto column sizing)
@@ -288,7 +288,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 **Goal:** JS executes in V3 shell. DOM manipulation works. Event loop runs.
 
 **Work:**
-- Move `examples/browser/feature/script/` → `src/lib/gc_async_mut/gpu/browser_engine/script/`
+- Move `examples/11_advanced/browser/feature/script/` → `src/lib/gc_async_mut/gpu/browser_engine/script/`
 - Create `JsRuntime` class: owns VM lifecycle, GC, bytecode store
 - Wire DOM bindings: `document.getElementById`, `document.querySelector`, `element.textContent`, `element.style`, `element.classList`, `element.addEventListener`
 - Implement event loop: microtask queue (Promise resolution), macrotask queue (setTimeout, setInterval), requestAnimationFrame
@@ -303,7 +303,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 **Goal:** Browser loads pages from the internet via HTTP/1.1 and HTTP/2.
 
 **Work:**
-- Move `examples/browser/feature/net/` → canonical engine
+- Move `examples/11_advanced/browser/feature/net/` → canonical engine
 - Wire `fetch()` API in JS runtime to net stack
 - Implement resource loader: HTML, CSS, images, JS — with Content-Type dispatch
 - Add `[u8]` byte-buffer path to fix text-typed API corruption (R2 risk)
@@ -402,7 +402,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 **Goal:** CSS Grid Layout fully functional. Remaining layout edge cases resolved.
 
 **Work:**
-- Port and complete `examples/browser/feature/layout/grid.spl`
+- Port and complete `examples/11_advanced/browser/feature/layout/grid.spl`
 - Grid: explicit/implicit tracks, `fr` unit, `minmax()`, `repeat()`, auto-fill/auto-fit, named lines, grid areas, alignment (justify/align-items/content/self)
 - Multi-column layout (port multicol.spl)
 - CSS `writing-mode` (vertical text)
@@ -419,7 +419,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 
 **Work:**
 - Process-separate renderer via child process spawn + IPC (Mojo-style message passing)
-- Port `examples/browser/feature/sandbox/` → canonical engine
+- Port `examples/11_advanced/browser/feature/sandbox/` → canonical engine
 - Capability broker: renderer has no direct filesystem/network access
 - CSP enforcement (Content-Security-Policy header parsing + policy evaluation)
 - Mixed content blocking (HTTPS page blocking HTTP subresources)
@@ -811,20 +811,20 @@ Sites are ranked by Semrush global traffic. Each milestone's gate criterion incl
 
 ## 6. Subsystem Migration Schedule
 
-Each subsystem migrates from `examples/browser/feature/` → `src/lib/gc_async_mut/gpu/browser_engine/` per AD-1.
+Each subsystem migrates from `examples/11_advanced/browser/feature/` → `src/lib/gc_async_mut/gpu/browser_engine/` per AD-1.
 
 | Subsystem | Source | Lines | Target Milestone | Dependencies |
 |-----------|--------|-------|-----------------|--------------|
-| layout/float | examples/browser/feature/layout/float.spl | ~500 | M13 | None |
-| parser/html_* | examples/browser/feature/parser/ | ~2,000 | M14 | None |
-| script/* | examples/browser/feature/script/ | 8,220 | M15 | M14 (DOM for bindings) |
-| net/* | examples/browser/feature/net/ | ~1,500 | M16 | M15 (fetch API binding) |
-| style/cascade | examples/browser/feature/style/ | ~1,000 | M17 | M14 (parser) |
-| layout/grid | examples/browser/feature/layout/grid.spl | ~800 | M21 | M17 (style) |
-| composite/* | examples/browser/feature/composite/ | ~1,000 | M19 | M17 (animations) |
-| gpu/* | examples/browser/feature/gpu/ | ~1,000 | M19 | composite |
-| sandbox/* | examples/browser/feature/sandbox/ | ~600 | M22 | M19 (threads) |
-| browser/devtools | examples/browser/feature/browser/devtools.spl | ~300 | M23 | M15 (JS runtime) |
+| layout/float | examples/11_advanced/browser/feature/layout/float.spl | ~500 | M13 | None |
+| parser/html_* | examples/11_advanced/browser/feature/parser/ | ~2,000 | M14 | None |
+| script/* | examples/11_advanced/browser/feature/script/ | 8,220 | M15 | M14 (DOM for bindings) |
+| net/* | examples/11_advanced/browser/feature/net/ | ~1,500 | M16 | M15 (fetch API binding) |
+| style/cascade | examples/11_advanced/browser/feature/style/ | ~1,000 | M17 | M14 (parser) |
+| layout/grid | examples/11_advanced/browser/feature/layout/grid.spl | ~800 | M21 | M17 (style) |
+| composite/* | examples/11_advanced/browser/feature/composite/ | ~1,000 | M19 | M17 (animations) |
+| gpu/* | examples/11_advanced/browser/feature/gpu/ | ~1,000 | M19 | composite |
+| sandbox/* | examples/11_advanced/browser/feature/sandbox/ | ~600 | M22 | M19 (threads) |
+| browser/devtools | examples/11_advanced/browser/feature/browser/devtools.spl | ~300 | M23 | M15 (JS runtime) |
 | webgpu backend/context | src/lib/gc_async_mut/gpu + api guides | TBD | M25 | M19, M22 for isolation |
 | webgl compatibility | new browser_engine/gpu/webgl | TBD | M27 | M25 |
 | browser chrome/profile | app/browser + browser_engine/profile | TBD | M19/M28 | M16 |

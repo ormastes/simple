@@ -53,7 +53,7 @@ scan kernels are still scalar fallbacks.
 
 ### Simple DB
 
-- `examples/simple_db/src/engine/scan.spl` adds a BRIN-aware tuple scan helper.
+- `examples/11_advanced/simple_db/src/engine/scan.spl` adds a BRIN-aware tuple scan helper.
 - `simple_db_scan_text_with_brin()` keeps BRIN as the coarse filter and refines
   surviving tuples with shared text scans.
 - `simple_db_text_search()` is the minimal text-search prototype: token match

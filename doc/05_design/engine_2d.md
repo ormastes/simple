@@ -244,7 +244,7 @@ An `enum Component2D` with variants (Sprite, Camera, TileMap, Physics) is exhaus
 - **Limitations:** `doc/08_tracking/bug/engine_2d_limitations.md`
 - **Source:** `src/lib/nogc_sync_mut/engine/`, `src/lib/common/engine/`
 - **Unit Tests:** `test/01_unit/lib/engine/`
-- **Demo:** `examples/engine_2d_demo/main.spl`
+- **Demo:** `examples/11_advanced/engine_2d_demo/main.spl`
 
 ## std.game2d Detail Design (2026-04-25)
 

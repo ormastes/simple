@@ -5,7 +5,7 @@ its backend from CLI args.
 
 ## Sample
 
-- `examples/ui/engine2d_backend_test.spl`
+- `examples/06_io/ui/engine2d_backend_test.spl`
 
 The sample renders a compact 2D scene with a filled rectangle, circle, thick
 line, vertical gradient, rounded rectangle, and text. It reads the framebuffer
@@ -16,19 +16,19 @@ back and checks exact pixels for each primitive.
 Run the always-available SIMD CPU lane:
 
 ```bash
-bin/simple run examples/ui/engine2d_backend_test.spl --backend=cpu_simd
+bin/simple run examples/06_io/ui/engine2d_backend_test.spl --backend=cpu_simd
 ```
 
 Run strict Metal selection on macOS:
 
 ```bash
-bin/simple run examples/ui/engine2d_backend_test.spl --backend=metal
+bin/simple run examples/06_io/ui/engine2d_backend_test.spl --backend=metal
 ```
 
 Probe the discoverability sweep:
 
 ```bash
-bin/simple run examples/ui/engine2d_backend_test.spl --backend=all
+bin/simple run examples/06_io/ui/engine2d_backend_test.spl --backend=all
 ```
 
 `cpu_simd` and `simd_cpu` are explicit aliases for the SIMD-instrumented CPU

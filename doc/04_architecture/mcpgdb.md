@@ -3,7 +3,7 @@
 `mcpgdb` now uses a split example/runtime architecture:
 
 1. Example source surface
-- `examples/mcpgdb/main.spl`, `examples/mcpgdb/json_helpers.spl`, `examples/mcpgdb/protocol.spl`
+- `examples/10_tooling/mcpgdb/main.spl`, `examples/10_tooling/mcpgdb/json_helpers.spl`, `examples/10_tooling/mcpgdb/protocol.spl`
 - Keeps the feature discoverable under `examples/`
 - Defines the public MCP shape and cold-start framing logic
 
@@ -33,4 +33,4 @@ Safety model:
 
 Runtime note:
 - `src/app/mcpgdb/main.spl` is now the canonical runtime path and successfully serves `initialize`, `tools/list`, and a representative `tools/call` in this workspace.
-- `examples/mcpgdb/main.spl` remains useful as example source, but it still inherits the example watchdog and is no longer the recommended runtime path.
+- `examples/10_tooling/mcpgdb/main.spl` remains useful as example source, but it still inherits the example watchdog and is no longer the recommended runtime path.

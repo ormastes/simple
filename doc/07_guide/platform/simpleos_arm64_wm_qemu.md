@@ -23,12 +23,12 @@ LLVM_SYS_180_PREFIX=/opt/homebrew/opt/llvm@18 \
 PATH=/opt/homebrew/opt/llvm@18/bin:$PATH \
 LIBRARY_PATH=/opt/homebrew/opt/zstd/lib:$LIBRARY_PATH \
 src/compiler_rust/target/debug/simple native-build \
-  --source build/os/generated --source src/os --source examples/simple_os \
+  --source build/os/generated --source src/os --source examples/09_embedded/simple_os \
   --backend llvm --opt-level=aggressive --log on --timeout 180 \
-  --entry-closure --entry examples/simple_os/arch/arm64/wm_entry.spl \
+  --entry-closure --entry examples/09_embedded/simple_os/arch/arm64/wm_entry.spl \
   --target aarch64-unknown-none \
   -o build/os/simpleos_arm64_wm.elf \
-  --linker-script examples/simple_os/arch/arm64/linker.ld
+  --linker-script examples/09_embedded/simple_os/arch/arm64/linker.ld
 ```
 
 ## Run
@@ -65,7 +65,7 @@ The repo QEMU runner exposes the same lane as the named scenario
 builds/runs:
 
 ```text
-examples/simple_os/arch/arm64/wm_entry.spl
+examples/09_embedded/simple_os/arch/arm64/wm_entry.spl
 build/os/simpleos_arm64_wm.elf
 qemu-system-aarch64 -machine virt -cpu host -accel hvf -m 384M -kernel build/os/simpleos_arm64_wm.elf -device ramfb
 ```

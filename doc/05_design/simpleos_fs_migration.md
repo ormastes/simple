@@ -104,8 +104,8 @@ src/os/services/vfs/vfs.spl           ← RETIRED (Filesystem trait removed)
 **Goal**: `fs_test_entry.spl` and `shell_serial_entry.spl` call through `g_mount_table` instead of `rt_fat32_*` externs.
 
 **Files to touch**:
-- `examples/simple_os/arch/x86_64/fs_test_entry.spl`
-- `examples/simple_os/arch/x86_64/shell_serial_entry.spl`
+- `examples/09_embedded/simple_os/arch/x86_64/fs_test_entry.spl`
+- `examples/09_embedded/simple_os/arch/x86_64/shell_serial_entry.spl`
 
 **Migration pattern** (per call site):
 ```
@@ -253,8 +253,8 @@ This adapter is a bridge, not a long-term target. Retire it when M3 is done.
 ### M2
 | File | Action |
 |------|--------|
-| `examples/simple_os/arch/x86_64/fs_test_entry.spl` | Replace `rt_fat32_*` calls with `g_mount_table` dispatch |
-| `examples/simple_os/arch/x86_64/shell_serial_entry.spl` | Replace `rt_fat32_*` calls with `g_mount_table` dispatch |
+| `examples/09_embedded/simple_os/arch/x86_64/fs_test_entry.spl` | Replace `rt_fat32_*` calls with `g_mount_table` dispatch |
+| `examples/09_embedded/simple_os/arch/x86_64/shell_serial_entry.spl` | Replace `rt_fat32_*` calls with `g_mount_table` dispatch |
 
 ### M3
 | File | Action |
@@ -267,7 +267,7 @@ This adapter is a bridge, not a long-term target. Retire it when M3 is done.
 |------|--------|
 | `src/lib/nogc_sync_mut/fs_driver/fat32_impl.spl` | Replace C-extern delegation with `Fat32Volume` calls |
 | `src/os/services/fat32/fat32.spl` | Align `BlockDevice` trait with `CNvmeBlockAdapter` if needed |
-| `examples/simple_os/arch/x86_64/boot/baremetal_stubs.c` | Remove `rt_fat32_*` RuntimeValue wrappers (after M4 tests pass) |
+| `examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c` | Remove `rt_fat32_*` RuntimeValue wrappers (after M4 tests pass) |
 
 ### M5
 | File | Action |
@@ -290,7 +290,7 @@ This adapter is a bridge, not a long-term target. Retire it when M3 is done.
 ### M2 Done When
 - [ ] `fs_test_entry.spl` produces identical output via FsDriver path vs. old C-extern path
 - [ ] `shell_serial_entry.spl` can read/write files through `g_mount_table`
-- [ ] `grep -r "rt_fat32_" examples/simple_os/arch/x86_64/*.spl` returns no results
+- [ ] `grep -r "rt_fat32_" examples/09_embedded/simple_os/arch/x86_64/*.spl` returns no results
 
 ### M3 Done When
 - [ ] `bin/simple build` succeeds with `vfs.spl` deleted

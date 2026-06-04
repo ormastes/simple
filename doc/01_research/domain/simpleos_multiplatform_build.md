@@ -23,7 +23,7 @@ Cross-platform OS builds are less error-prone when target metadata is explicit a
 
 ## SimpleOS Implication
 
-The SimpleOS catalog should canonicalize the 32-bit x86 lane as `i686-simpleos`, use `i686-unknown-none-elf` for C/ASM boot support, and keep QEMU execution on `qemu-system-i386`. This matches the existing x86_32 Multiboot1 boot sources in `examples/simple_os/arch/x86_32/boot/`.
+The SimpleOS catalog should canonicalize the 32-bit x86 lane as `i686-simpleos`, use `i686-unknown-none-elf` for C/ASM boot support, and keep QEMU execution on `qemu-system-i386`. This matches the existing x86_32 Multiboot1 boot sources in `examples/09_embedded/simple_os/arch/x86_32/boot/`.
 
 ## Sources
 

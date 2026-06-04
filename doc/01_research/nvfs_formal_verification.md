@@ -408,7 +408,7 @@ crash relation.  Both are ~100 lines and out of the 60-minute budget.
    `arena_append`s, port the sequential invariants to object
    invariants in an Iris-style CSL.  Perennial is the reference.
 5. **Connect to implementation.**  Today the Lean model is
-   independent of `examples/nvfs/src/core/*.spl`.  Add a
+   independent of `examples/11_advanced/nvfs/src/core/*.spl`.  Add a
    refinement-generator that emits Lean `FsState` from a Simple-level
    structural representation so the proofs bind to the actual N1
    implementation, not just a paper model.

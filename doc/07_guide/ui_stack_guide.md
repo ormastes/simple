@@ -279,14 +279,14 @@ Rust-seed change**:
    `rt_thread_sleep`. The interpreter owns the main thread, so a sleep leaves
    AppKit with no handler between frames and the window never composites.
    Present once, then re-present occasionally for static content. Examples:
-   `examples/ui/web_engine2d_gui.spl`,
-   `examples/simple_os/hosted/hosted_wm_software.spl`.
+   `examples/06_io/ui/web_engine2d_gui.spl`,
+   `examples/09_embedded/simple_os/hosted/hosted_wm_software.spl`.
 
 2. **Launch via a `.app` bundle** so LaunchServices registers the process in the
    Aqua session. Use the helper:
 
    ```bash
-   scripts/gui/macos-gui-run.shs examples/ui/web_engine2d_gui.spl
+   scripts/gui/macos-gui-run.shs examples/06_io/ui/web_engine2d_gui.spl
    ```
 
    It builds a throwaway `.app` around the gui driver (binary copied in — it is

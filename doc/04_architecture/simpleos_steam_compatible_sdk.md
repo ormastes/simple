@@ -16,8 +16,8 @@ Layer list:
 
 - `src/os/game/common/` — public game-port contracts and shared manifest format.
 - `src/os/game/steam/` — Steam facade and SFFI backend projection.
-- `examples/os/game/` — rebuildable game proofs and bridge fixtures.
-- `scripts/os/make_os_disk.shs` plus `examples/simple_os/.../toolchain_vfs_probe_entry.spl` — guest packaging and spawn evidence.
+- `examples/09_embedded/os/game/` — rebuildable game proofs and bridge fixtures.
+- `scripts/os/make_os_disk.shs` plus `examples/09_embedded/simple_os/.../toolchain_vfs_probe_entry.spl` — guest packaging and spawn evidence.
 
 Tree-level encapsulation:
 
@@ -96,14 +96,14 @@ loaded. Interpreter tests use `steam_sffi_probe_from_evidence`; actual bridge
 execution requires compiled Simple mode because `spl_dlopen` is not available in
 the interpreter.
 
-`examples/os/game/steam_bridge_mock/simple_steam_bridge_mock.c` is a deliberately
+`examples/09_embedded/os/game/steam_bridge_mock/simple_steam_bridge_mock.c` is a deliberately
 small local fixture for that compiled-mode path. It exports the required symbol
-names so `examples/os/game/steam_sffi_probe_demo.spl` can prove the loader and
+names so `examples/09_embedded/os/game/steam_sffi_probe_demo.spl` can prove the loader and
 symbol probe work against a real shared object. The fixture is labeled
 `mock_bridge=true real_steam_backend=false`; it must not be treated as a Steam
 client, Valve SDK substitute, DRM backend, or network service.
 
-`examples/os/game/steam_bridge_real/simple_steam_bridge_real.c` is the non-mock
+`examples/09_embedded/os/game/steam_bridge_real/simple_steam_bridge_real.c` is the non-mock
 bridge skeleton. It loads a user-provided Steamworks redistributable from
 `SIMPLE_STEAMWORKS_LIB_PATH`, verifies the required symbols, and reports
 `simple_steam_bridge_real_backend_ready` only when that library is present. It

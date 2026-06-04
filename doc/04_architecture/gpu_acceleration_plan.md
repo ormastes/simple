@@ -25,9 +25,9 @@ PaintOp stream
 ```
 
 The CPU-Int and CPU-Float variants are implemented in:
-- `examples/browser/feature/paint/shadow_int.spl` / `shadow_float.spl`
-- `examples/browser/feature/paint/gradient_int.spl` / `gradient_float.spl`
-- `examples/browser/feature/paint/filter_int.spl` / `filter_float.spl`
+- `examples/11_advanced/browser/feature/paint/shadow_int.spl` / `shadow_float.spl`
+- `examples/11_advanced/browser/feature/paint/gradient_int.spl` / `gradient_float.spl`
+- `examples/11_advanced/browser/feature/paint/filter_int.spl` / `filter_float.spl`
 
 ## GPU Backend Targets
 

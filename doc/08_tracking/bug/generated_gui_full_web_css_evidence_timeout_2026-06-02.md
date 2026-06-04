@@ -4,7 +4,7 @@
 open
 
 ## Context
-`examples/ui/generated_gui_web_parity_expected.spl` briefly imported
+`examples/06_io/ui/generated_gui_web_parity_expected.spl` briefly imported
 `app.ui.web.html.generate_css("light")` so the Electron generated-GUI parity
 evidence could render the same full production Web UI CSS page used by browser
 backends.
@@ -23,7 +23,7 @@ html_has_app_shell=true
 pixel_count=6912
 [memory-guard] SIMPLE_LIB=src contains 600+ .spl files
 [watchdog] wall-clock timeout (60s) exceeded
-error: example timed out after 60s: examples/ui/generated_gui_web_parity_expected.spl
+error: example timed out after 60s: examples/06_io/ui/generated_gui_web_parity_expected.spl
 ```
 
 The generated HTML artifact was about 38 KB, dominated by full WM/web CSS. The
@@ -39,6 +39,6 @@ full-CSS evidence lane that reports CSS size, parse/layout time, and max RSS.
 ## Repro
 
 ```sh
-SIMPLE_TIMEOUT_SECONDS=60 SIMPLE_LIB=src bin/simple run examples/ui/generated_gui_web_parity_expected.spl --mode=interpreter --clean
+SIMPLE_TIMEOUT_SECONDS=60 SIMPLE_LIB=src bin/simple run examples/06_io/ui/generated_gui_web_parity_expected.spl --mode=interpreter --clean
 ```
 

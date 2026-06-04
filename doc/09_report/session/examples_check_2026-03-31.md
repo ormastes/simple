@@ -58,7 +58,7 @@ complete list of every broken example; it is the first blocker per folder.
 | `examples/09_embedded` | `examples/09_embedded/baremetal/baremetal/blinky_stm32f4.spl` | parse error |
 | `examples/10_tooling` | `examples/10_tooling/backends/backend_switching.spl` | parse error |
 | `examples/11_advanced` | `examples/11_advanced/mir/mir_json.spl` | semantic error: undefined identifier `MirConstValue` |
-| `examples/ui` | `examples/ui/demo_async.spl` | timeout |
+| `examples/06_io/ui` | `examples/06_io/ui/demo_async.spl` | timeout |
 
 ## Additional Failures Observed Early
 

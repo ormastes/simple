@@ -109,7 +109,7 @@ Key limitations:
 
 **Status: Entity/type definitions complete, no runtime implementation**
 
-The browser project (`examples/browser/entity/`) defines comprehensive type hierarchies across 27 files in 6 domains:
+The browser project (`examples/11_advanced/browser/entity/`) defines comprehensive type hierarchies across 27 files in 6 domains:
 
 | Domain | Files | Key Types |
 |--------|-------|-----------|

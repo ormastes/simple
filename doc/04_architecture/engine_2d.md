@@ -6,8 +6,8 @@ This document locks the Simple OS/QEMU graphics-core subset of Engine2D. The tar
 
 ## Layers
 
-- Mandatory BGA boot entries: `examples/simple_os/arch/x86_64/gui_entry_engine2d_min.spl`, `gui_engine2d_primitives_entry.spl`, and `gui_entry_engine2d.spl`
-- VirtIO proof entry: `examples/simple_os/arch/x86_64/gui_entry_engine2d_virtio.spl`
+- Mandatory BGA boot entries: `examples/09_embedded/simple_os/arch/x86_64/gui_entry_engine2d_min.spl`, `gui_engine2d_primitives_entry.spl`, and `gui_entry_engine2d.spl`
+- VirtIO proof entry: `examples/09_embedded/simple_os/arch/x86_64/gui_entry_engine2d_virtio.spl`
 - Engine facade: a freestanding Engine2D-style core in `src/os/compositor/engine2d_baremetal_core.spl`
 - Mandatory device path: BGA/std-vga framebuffer initialized by `bga_init_framebuffer`, then pixel writes to the framebuffer scanout
 - Proof device path: VirtIO-GPU wrapper initialization and direct-framebuffer backend proof, covered separately from mandatory BGA behavior

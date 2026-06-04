@@ -147,8 +147,8 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val x86_64 = get_target(Architecture.X86_64)
-expect(x86_64.entry).to_equal("examples/simple_os/arch/x86_64/boot_stage1_entry.spl")
-expect(x86_64.linker_script).to_equal("examples/simple_os/arch/x86_64/linker.ld")
+expect(x86_64.entry).to_equal("examples/09_embedded/simple_os/arch/x86_64/boot_stage1_entry.spl")
+expect(x86_64.linker_script).to_equal("examples/09_embedded/simple_os/arch/x86_64/linker.ld")
 expect(x86_64.target_triple).to_equal("x86_64-unknown-none")
 expect(x86_64.qemu_system).to_equal("qemu-system-x86_64")
 
@@ -170,10 +170,10 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val arm64 = get_qemu_target(Architecture.Arm64)
-expect(arm64.entry).to_equal("examples/simple_os/arch/arm64/fs_exec_entry.spl")
+expect(arm64.entry).to_equal("examples/09_embedded/simple_os/arch/arm64/fs_exec_entry.spl")
 expect(arm64.output).to_equal("build/os/simpleos_arm64_fs_exec.elf")
 val arm32 = get_qemu_target(Architecture.Arm32)
-expect(arm32.entry).to_equal("examples/simple_os/arch/arm32/fs_exec_entry.spl")
+expect(arm32.entry).to_equal("examples/09_embedded/simple_os/arch/arm32/fs_exec_entry.spl")
 expect(arm32.output).to_equal("build/os/simpleos_arm32_fs_exec.elf")
 ```
 
@@ -261,10 +261,10 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val rv64 = get_qemu_target(Architecture.Riscv64)
-expect(rv64.entry).to_equal("examples/simple_os/arch/riscv64/smoke_entry.spl")
+expect(rv64.entry).to_equal("examples/09_embedded/simple_os/arch/riscv64/smoke_entry.spl")
 expect(rv64.output).to_equal("build/os/simpleos_riscv64_smf_fs.elf")
 val rv32 = get_qemu_target(Architecture.Riscv32)
-expect(rv32.entry).to_equal("examples/simple_os/arch/riscv32/smoke_entry.spl")
+expect(rv32.entry).to_equal("examples/09_embedded/simple_os/arch/riscv32/smoke_entry.spl")
 expect(rv32.output).to_equal("build/os/simpleos_riscv32_smf_fs.elf")
 ```
 
@@ -352,8 +352,8 @@ expect(cmd.contains("-kernel")).to_equal(false)
 expect(cmd).to_contain("virtio-blk-device,drive=armdisk")
 
 val target = scenario_target(arm64)
-expect(target.entry).to_equal("examples/simple_os/arch/arm64/fs_exec_entry.spl")
-expect(target.linker_script).to_equal("examples/simple_os/arch/arm64/fs_exec_linker.ld")
+expect(target.entry).to_equal("examples/09_embedded/simple_os/arch/arm64/fs_exec_entry.spl")
+expect(target.linker_script).to_equal("examples/09_embedded/simple_os/arch/arm64/fs_exec_linker.ld")
 expect(target.output).to_equal("build/os/simpleos_arm64_fs_exec.elf")
 
 val arm64_lane = simpleos_platform_qemu_lane("arm64", "arm64-virtio-fat32-smf")
@@ -510,7 +510,7 @@ expect(cmd64).to_contain("-kernel")
 expect(cmd64).to_contain("build/os/simpleos_riscv64_smf_fs.elf")
 expect(cmd64).to_contain("virtio-blk-device,drive=rvdisk")
 val target64 = scenario_target(rv64)
-expect(target64.entry).to_equal("examples/simple_os/arch/riscv64/smoke_entry.spl")
+expect(target64.entry).to_equal("examples/09_embedded/simple_os/arch/riscv64/smoke_entry.spl")
 
 val rv32 = scenario_riscv32_virtio_fat32_smf()
 val cmd32 = build_scenario_command(rv32, "build/os/simpleos_riscv32_smf_fs.elf")
@@ -519,7 +519,7 @@ expect(cmd32).to_contain("-kernel")
 expect(cmd32).to_contain("build/os/simpleos_riscv32_smf_fs.elf")
 expect(cmd32).to_contain("virtio-blk-device,drive=rvdisk")
 val target32 = scenario_target(rv32)
-expect(target32.entry).to_equal("examples/simple_os/arch/riscv32/smoke_entry.spl")
+expect(target32.entry).to_equal("examples/09_embedded/simple_os/arch/riscv32/smoke_entry.spl")
 expect(target32.output).to_equal("build/os/simpleos_riscv32_smf_fs.elf")
 ```
 
@@ -668,7 +668,7 @@ val rv64_target = scenario_target(scenario_riscv64_virtio_fat32_smf())
 val rv64_args = os_native_build_args(rv64_target, "llvm")
 expect(rv64_args).to_contain("--log")
 expect(rv64_args).to_contain("on")
-expect(rv64_args).to_contain("examples/simple_os/arch/riscv64")
+expect(rv64_args).to_contain("examples/09_embedded/simple_os/arch/riscv64")
 expect(rv64_args.contains("src")).to_equal(false)
 expect(os_native_build_sources(rv64_target)[0]).to_equal("build/os/generated")
 
@@ -676,7 +676,7 @@ val rv32_target = scenario_target(scenario_riscv32_virtio_fat32_smf())
 val rv32_args = os_native_build_args(rv32_target, "llvm")
 expect(rv32_args).to_contain("--log")
 expect(rv32_args).to_contain("on")
-expect(rv32_args).to_contain("examples/simple_os/arch/riscv32")
+expect(rv32_args).to_contain("examples/09_embedded/simple_os/arch/riscv32")
 expect(rv32_args.contains("src")).to_equal(false)
 expect(os_native_build_sources(rv32_target)[0]).to_equal("build/os/generated")
 ```
@@ -725,7 +725,7 @@ expect(riscv_fs_exec_disk_image_path(Architecture.Riscv32)).to_equal("build/os/f
 
 1. fail
    - Expected: hosted_cmd[0] equals `qemu-system-riscv64`
-   - Expected: hosted_target.entry equals `examples/simple_os/arch/riscv64/hosted_entry.spl`
+   - Expected: hosted_target.entry equals `examples/09_embedded/simple_os/arch/riscv64/hosted_entry.spl`
    - Expected: hosted_target.output equals `build/os/simpleos_riscv64_hosted.elf`
 
 
@@ -759,7 +759,7 @@ expect(hosted_cmd).to_contain("build/os/simpleos_riscv64_hosted.elf")
 expect(hosted_cmd).to_contain("user,id=n0,hostfwd=tcp::2222-:22,hostfwd=tcp::8080-:80")
 
 val hosted_target = scenario_target(hosted)
-expect(hosted_target.entry).to_equal("examples/simple_os/arch/riscv64/hosted_entry.spl")
+expect(hosted_target.entry).to_equal("examples/09_embedded/simple_os/arch/riscv64/hosted_entry.spl")
 expect(hosted_target.output).to_equal("build/os/simpleos_riscv64_hosted.elf")
 ```
 
@@ -798,7 +798,7 @@ if val resolved = scenario:
     expect(scenario_lane_kind(resolved)).to_equal(SimpleOsLaneKind.Smoke)
     expect(scenario_test_timeout_ms(resolved)).to_equal(30000)
     val target = scenario_target(resolved)
-    expect(target.entry).to_equal("examples/simple_os/arch/x86_64/q35_pure_nvme_perf_entry.spl")
+    expect(target.entry).to_equal("examples/09_embedded/simple_os/arch/x86_64/q35_pure_nvme_perf_entry.spl")
     expect(target.output).to_equal("build/os/simpleos_x86_64_pure_nvme_perf.elf")
     val cmd = build_scenario_command(resolved, target.output)
     expect(cmd).to_contain("nvme,id=pureperf,serial=pure-simple-perf")

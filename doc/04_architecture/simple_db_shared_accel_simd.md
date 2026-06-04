@@ -9,7 +9,7 @@ is reused by:
 
 - `src/lib/nogc_sync_mut/database/query.spl`
 - `src/lib/nogc_sync_mut/db/dbfs_engine/schema.spl`
-- `examples/simple_db/src/engine/scan.spl`
+- `examples/11_advanced/simple_db/src/engine/scan.spl`
 
 ## Layering
 

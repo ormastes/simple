@@ -21,7 +21,7 @@ model). Editor surface details: `doc/07_guide/editor_tui.md`.
 | **Editor TUI** | `src/app/editor/tui_main.spl` | `bin/simple run src/app/editor/tui_main.spl <files>` | Split-pane, file-tree, diagnostics, command palette (`EditorController`) |
 | **Editor GUI** | `src/app/editor/gui_shell_core.spl` | GUI shell (SDL/Winit) | Same backend, desktop shell |
 | **Simple IDE** | `src/app/ide/main.spl` | `bin/simple run src/app/ide/main.spl [--tui|--gui|--gui-sdl] <files>` | Thin VS Code-like product entrypoint over the shared editor launch contract; currently a readiness/option-parsing entrypoint, not a rendering shell |
-| **Example IDE** | `examples/ide/simple_ide_launch.spl`, `examples/ide/simple_ide_render.spl` | `bin/simple run examples/ide/simple_ide_launch.spl`; `SIMPLE_LIB=src bin/simple run examples/ide/simple_ide_render.spl` | Minimal embedded/sample integrations: launch-contract parsing plus shared GUI/WebRender rendering of editor HTML; the render example currently proves the pure Simple/interpreter fallback path |
+| **Example IDE** | `examples/10_tooling/ide/simple_ide_launch.spl`, `examples/10_tooling/ide/simple_ide_render.spl` | `bin/simple run examples/10_tooling/ide/simple_ide_launch.spl`; `SIMPLE_LIB=src bin/simple run examples/10_tooling/ide/simple_ide_render.spl` | Minimal embedded/sample integrations: launch-contract parsing plus shared GUI/WebRender rendering of editor HTML; the render example currently proves the pure Simple/interpreter fallback path |
 | **Shared backend** | `src/lib/editor/` (~129 files) | — | Piece-table buffers, multi-buffer, split panes, LSP/diagnostics/markdown/wiki services |
 
 Both svim and the Editor consume the same `src/lib/editor/` backend (epic
@@ -36,7 +36,7 @@ and the VS Code extension all point at one library surface.
 Launch-mode parsing is also shared: `src/lib/editor/core/launch.spl` owns the
 pure `EditorLaunchOptions` contract used by `src/app/editor/main.spl`,
 `src/app/editor/tui_main.spl`, `src/app/ide/main.spl`, and
-`examples/ide/simple_ide_launch.spl`.
+`examples/10_tooling/ide/simple_ide_launch.spl`.
 Reusable path/text helpers are shared through `src/lib/editor/core/path_text.spl`
 so editor controllers, GUI shell rendering, and MCP helpers do not keep separate
 dirname, basename, payload, CSV, integer, and markdown-path parsers.
@@ -48,7 +48,7 @@ The concrete extension points live in `src/lib/editor/extensions/host.spl`:
 `onLanguage:*` / `onCommand:*` events, and contribute command, language, and
 debug-adapter registrations. `test/01_unit/lib/editor/extension_discovery_contract_spec.spl`
 now covers the real temp-root discovery and activation path plus the embedded
-IDE example extension at `examples/ide/extensions/markdown-notes/extension.sdn`
+IDE example extension at `examples/10_tooling/ide/extensions/markdown-notes/extension.sdn`
 and its sandbox-gated `main.spl` runtime entrypoint.
 
 ### IDE Office plugin suite

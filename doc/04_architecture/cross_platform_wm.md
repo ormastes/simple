@@ -31,7 +31,7 @@
 └─────────────────────────────────────────────────────────┘
 
 Separate (not integrated):
-  examples/simple_os/hosted/ — standalone pixel rendering via winit
+  examples/09_embedded/simple_os/hosted/ — standalone pixel rendering via winit
   (duplicates rendering logic, doesn't use CompositorBackend)
 ```
 
@@ -271,7 +271,7 @@ All `self.mouse.poll()` → `self.input.poll_mouse()`
 
 #### Baremetal (unchanged)
 ```simple
-# examples/simple_os/arch/x86_64/gui_entry.spl
+# examples/09_embedded/simple_os/arch/x86_64/gui_entry.spl
 val fb = FramebufferDriver.from_boot_info(fb_info)
 val backend = FbCompositorBackend.new(fb)
 val input = Ps2InputBackend.new(Ps2Keyboard.new(), Ps2Mouse.create(...))

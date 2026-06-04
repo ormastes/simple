@@ -141,10 +141,10 @@ does not replace guest-side QEMU performance evidence.
 - [gc-warning] Higher-layer module 'std.nogc_sync_mut.test_runner.system_monitor' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
 - [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.process_ops' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
 - [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.sysinfo_ops' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
-- [build][x86_64] phase=plan entry=examples/simple_os/arch/x86_64/desktop_e2e_entry.spl target=x86_64-unknown-none backend=cranelift log=on
+- [build][x86_64] phase=plan entry=examples/09_embedded/simple_os/arch/x86_64/desktop_e2e_entry.spl target=x86_64-unknown-none backend=cranelift log=on
 - [build][x86_64] phase=spawn timeout_ms=900000
 - [build][x86_64] env: SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$(pwd)/src" SIMPLE_ALLOW_FREESTANDING_STUBS=1 SIMPLE_OS_LOG_MODE=on PATH="/usr/bin:$PATH"
-- [build][x86_64] cmd: src/compiler_rust/target/debug/simple native-build --source build/os/generated --source src/os --source src/lib --source examples/simple_os --backend cranelift --cpu x86-64-v1 --opt-level=aggressive --log on --entry-closure --entry examples/simple_os/arch/x86_64/desktop_e2e_entry.spl --target x86_64-unknown-none -o build/os/simpleos_desktop_e2e_32.elf --linker-script examples/simple_os/arch/x86_64/linker.ld
+- [build][x86_64] cmd: src/compiler_rust/target/debug/simple native-build --source build/os/generated --source src/os --source src/lib --source examples/09_embedded/simple_os --backend cranelift --cpu x86-64-v1 --opt-level=aggressive --log on --entry-closure --entry examples/09_embedded/simple_os/arch/x86_64/desktop_e2e_entry.spl --target x86_64-unknown-none -o build/os/simpleos_desktop_e2e_32.elf --linker-script examples/09_embedded/simple_os/arch/x86_64/linker.ld
 - [build][x86_64] phase=native-build OK elapsed_ms=186349
 - simpleos_desktop_qmp_status=pass
 - simpleos_desktop_qmp_reason=pass

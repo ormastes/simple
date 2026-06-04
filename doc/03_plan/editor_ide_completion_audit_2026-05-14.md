@@ -23,9 +23,9 @@ and `doc/03_plan/editor_ide_production_matrix_2026-05-13.md`.
   - Result: PASS, 1 passed.
 - `bin/simple test test/01_unit/lib/editor/editor_launch_contract_spec.spl --mode=interpreter --clean`
   - Result: PASS, 5 passed.
-- `SIMPLE_LIB=src bin/simple run examples/ide/simple_ide_render.spl`
+- `SIMPLE_LIB=src bin/simple run examples/10_tooling/ide/simple_ide_render.spl`
   - Result: prints `target=pure_simple`, `has_editor_source=true`, and `has_markdown_language=true`.
-- `bin/simple run examples/ide/simple_ide_launch.spl`
+- `bin/simple run examples/10_tooling/ide/simple_ide_launch.spl`
   - Result: prints `mode=tui`, `files=2`.
 - `SIMPLE_LIB=src bin/simple check src/app/dap/simple_dap_main.spl src/lib/editor/view/split_tree.spl src/lib/editor/view/wincmd.spl src/lib/editor/core/session.spl src/app/editor/editor_ctrl_core.spl`
   - Result: PASS.
