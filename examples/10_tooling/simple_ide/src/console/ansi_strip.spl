@@ -2,6 +2,10 @@
 #
 # Strip or parse ANSI SGR sequences from terminal output so the console
 # panel can display clean text or re-apply styles selectively.
+#
+# Uses `for ch in s:` iteration with `ch == "\x1b"` to detect ESC bytes.
+# This is the proven pattern used across the codebase (main_lazy_diag_tools,
+# test_runner_files, etc.).
 
 use std.text.{to_int_or}
 
@@ -27,43 +31,21 @@ struct AnsiStyle:
 # ============================================================================
 
 fn strip_ansi(input: text) -> text:
-    """Remove all ANSI CSI escape sequences from the input string."""
+    """
+    Remove all ANSI CSI escape sequences from the input string.
+    Uses the for-ch-in iterator pattern proven in the codebase.
+    """
     var parts: [text] = []
-    var i = 0
     var in_escape = false
-    val slen = input.len()
-
-    while i < slen:
-        val ch = input[i:i + 1]
+    for ch in input:
         if in_escape:
-            # Inside escape sequence — skip until letter terminator
-            if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z"):
+            if ch == "m":
                 in_escape = false
-            i = i + 1
             continue
-        # Check for ESC [ sequence
-        if i + 1 < slen:
-            val next = input[i + 1:i + 2]
-            if next == "[":
-                # Look ahead to confirm this is an ANSI sequence
-                var j = i + 2
-                var looks_like_ansi = false
-                while j < slen:
-                    val c = input[j:j + 1]
-                    if (c >= "0" and c <= "9") or c == ";" or c == "?":
-                        j = j + 1
-                    elif (c >= "a" and c <= "z") or (c >= "A" and c <= "Z"):
-                        looks_like_ansi = true
-                        j = j + 1
-                        break
-                    else:
-                        break
-                if looks_like_ansi:
-                    i = j
-                    continue
+        if ch == "\x1b":
+            in_escape = true
+            continue
         parts.push(ch)
-        i = i + 1
-
     parts.join("")
 
 # ============================================================================
@@ -75,46 +57,68 @@ fn parse_ansi_segments(input: text) -> [AnsiSegment]:
     Split input into segments, each carrying its current style state.
     Handles SGR codes: reset (0), bold (1), dim (2),
     foreground 30-37 / 90-97, background 40-47 / 100-107.
+
+    Uses a three-state machine over `for ch in input:`:
+      state 0 = normal text
+      state 1 = just saw ESC
+      state 2 = inside CSI params (after ESC[)
     """
     var segments: [AnsiSegment] = []
     var style = AnsiStyle(fg: "", bg: "", bold: false, dim: false)
     var buf = ""
-    var i = 0
-    val slen = input.len()
+    var state = 0
+    var param = ""
 
-    while i < slen:
-        val ch = input[i:i + 1]
-
-        if ch == "\x1b" and i + 1 < slen and input[i + 1:i + 2] == "[":
-            # Flush accumulated text
-            if buf != "":
-                segments.push(AnsiSegment(content: buf, fg_color: style.fg, bg_color: style.bg, bold: style.bold, dim: style.dim))
-                buf = ""
-
-            # Collect parameter bytes between ESC[ and final byte
-            i = i + 2
-            var param = ""
-            while i < slen:
-                val code = input[i:i + 1]
-                i = i + 1
-                if (code >= "@" and code <= "~"):
-                    # Only process SGR (final byte 'm')
-                    if code == "m":
-                        style = _apply_sgr(param, style)
-                    break
-                param = param + code
-        else:
-            buf = buf + ch
-            i = i + 1
+    for ch in input:
+        if state == 0:
+            # Normal text
+            if ch == "\x1b":
+                state = 1
+            else:
+                buf = buf + ch
+        elif state == 1:
+            # Just saw ESC
+            if ch == "[":
+                # Flush accumulated text before entering CSI
+                if buf != "":
+                    segments.push(AnsiSegment(
+                        content: buf,
+                        fg_color: style.fg,
+                        bg_color: style.bg,
+                        bold: style.bold,
+                        dim: style.dim
+                    ))
+                    buf = ""
+                param = ""
+                state = 2
+            else:
+                # Not a CSI sequence, treat ESC as invisible and keep ch
+                buf = buf + ch
+                state = 0
+        elif state == 2:
+            # Inside CSI params — collect until letter terminator
+            if (ch >= "A" and ch <= "Z") or (ch >= "a" and ch <= "z"):
+                # Final byte of CSI
+                if ch == "m":
+                    style = _apply_sgr(param, style)
+                state = 0
+            else:
+                param = param + ch
 
     # Flush remaining text
     if buf != "":
-        segments.push(AnsiSegment(content: buf, fg_color: style.fg, bg_color: style.bg, bold: style.bold, dim: style.dim))
+        segments.push(AnsiSegment(
+            content: buf,
+            fg_color: style.fg,
+            bg_color: style.bg,
+            bold: style.bold,
+            dim: style.dim
+        ))
 
     segments
 
 # ============================================================================
-# SGR parameter application (returns new style)
+# SGR parameter application (returns new style — avoids value-copy bug)
 # ============================================================================
 
 fn _apply_sgr(param: text, prev: AnsiStyle) -> AnsiStyle:
@@ -130,6 +134,7 @@ fn _apply_sgr(param: text, prev: AnsiStyle) -> AnsiStyle:
         val code = to_int_or(sgr_parts[pi].trim(), 0)
 
         if code == 0:
+            # Reset all
             fg = ""
             bg = ""
             is_bold = false
