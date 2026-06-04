@@ -116,10 +116,16 @@ pub(crate) fn compile_inline_asm_c(
 
     let output = cmd.output().map_err(|e| format!("compile inline asm C ({cc}): {e}"))?;
     if !output.status.success() {
-        return Err(format!(
-            "compile inline asm C failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if target.is_none() {
+            eprintln!(
+                "[WARN] inline asm compilation failed (host target) — skipping asm object. \
+                 This is expected when full-scan pulls in wrong-arch asm blocks.\n  {}",
+                stderr.lines().take(3).collect::<Vec<_>>().join("\n  ")
+            );
+            return Ok(None);
+        }
+        return Err(format!("compile inline asm C failed: {}", stderr));
     }
     Ok(Some(out))
 }

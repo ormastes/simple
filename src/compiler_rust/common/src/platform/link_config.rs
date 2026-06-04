@@ -65,7 +65,7 @@ impl PlatformLinkConfig {
 
     fn linux() -> Self {
         Self {
-            libraries: vec!["pthread", "dl", "m", "unwind"],
+            libraries: vec!["pthread", "dl", "m", "unwind", "sqlite3"],
             library_search_paths: vec![],
             system_scan_libs: vec![
                 "/lib/x86_64-linux-gnu/libc.so.6",
