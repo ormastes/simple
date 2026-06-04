@@ -79,6 +79,10 @@
   fallback color extraction for `url(...) #rgb` and `rgb(...)`, then promote
   `background_shorthand_matrix` as the fourteenth exact text-free manifest
   case while keeping the tracked text mismatch at 997.
+- Add `right`/`bottom` support for `position:absolute` boxes against the
+  containing block padding box, then promote `position_right_bottom_matrix` as
+  the fifteenth exact text-free manifest case while keeping the tracked text
+  mismatch at 997.
 - Include the layout manifest in the aggregate production renderer parity gate.
 
 ## Next Agent Tasks
@@ -90,8 +94,8 @@
   separate focused spec. The latest default-timeout interpreter run hit the
   120s limit, while
   `SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl --mode=interpreter --clean --timeout 180`
-  passed 44/44 but was flagged `[PERF BUG]` at 98.744 seconds after the
-  background shorthand exact-case update.
+  passed 45/45 but was flagged `[PERF BUG]` at 138.907 seconds after the
+  absolute right/bottom exact-case update.
 
 ## Verified Diagnostics — Claude (2026-06-02)
 

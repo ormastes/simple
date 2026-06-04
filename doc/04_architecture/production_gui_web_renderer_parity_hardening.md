@@ -57,6 +57,10 @@ This slice adds a production parity harness in `app.wm_compare`:
 - The positioned z-index manifest case extends computed style and paint to carry
   positive `z-index` values, painting absolute boxes in ascending z-index order
   while preserving DOM order within the same z-index level.
+- The positioned right/bottom manifest case extends computed style and layout
+  to carry `right` and `bottom` offsets for `position:absolute` boxes, resolving
+  them from the containing block padding box without reintroducing normal-flow
+  contribution.
 - The opacity manifest case extends computed style and paint to carry CSS
   `opacity` values, blending clipped leaf backgrounds over the existing
   framebuffer while preserving exact behavior for fully opaque boxes.

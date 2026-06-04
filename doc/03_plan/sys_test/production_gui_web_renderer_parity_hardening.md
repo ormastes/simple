@@ -97,8 +97,8 @@ Recorded result on 2026-06-03:
   `selector_inline_box_matrix`, `attribute_selector_box_matrix`,
   `border_box_matrix`, `padding_longhand_matrix`, `border_side_matrix`,
   `overflow_hidden_matrix`, `visibility_hidden_matrix`,
-  `position_absolute_matrix`, `position_overlap_matrix`,
-  `position_z_index_matrix`, `opacity_matrix`,
+  `position_absolute_matrix`, `position_right_bottom_matrix`,
+  `position_overlap_matrix`, `position_z_index_matrix`, `opacity_matrix`,
   `background_shorthand_matrix`
 - mismatch count for each case: `0`
 - checksums and weighted checksums match for each case
@@ -108,8 +108,8 @@ Recorded result on 2026-06-03:
 - tracked text residuals: Chrome extra text `771`, Simple extra text `71`,
   text color delta `155`, surface geometry `0`
 - tracked text blur/tolerance used: `false`
-- manifest case count: `15`
-- exact pass count: `14`
+- manifest case count: `16`
+- exact pass count: `15`
 - tracked count: `1`
 - fail count: `0`
 - report: `doc/09_report/electron_simple_web_layout_manifest_evidence_2026-06-03.md`
