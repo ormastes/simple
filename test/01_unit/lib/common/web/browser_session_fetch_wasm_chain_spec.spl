@@ -2994,6 +2994,74 @@ describe "BrowserSession fetch WASM promise chain":
             nil:
                 expect("missing fetch request").to_equal("")
 
+    it "compares compileStreaming and instantiateStreaming base module metadata in browser scripts":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/webgpu-wasm.html",
+            "<html><body>WASM GPU</body></html>"
+        )
+        val queued = session.eval_script("var out = ''; WebAssembly.compileStreaming(window.fetch('/compile.wasm')).then(function(module) { out = 'compileStreamModule:' + module.byteLength + ':' + module.sectionCount + ':' + module.hasTypeSection; }); WebAssembly.instantiateStreaming(window.fetch('/instantiate.wasm')).then(function(result) { out = out + ':instantiateStreamModule:' + result.status + ':' + result.module.byteLength + ':' + result.module.sectionCount + ':' + typeof result.instance.exports; }); 'queued'")
+        match queued:
+            Ok(value):
+                expect(_display_js(value)).to_equal("queued")
+            Err(err):
+                expect("unexpected queue error: {err}").to_equal("")
+        match session.eval_script("out"):
+            Ok(value):
+                expect(_display_js(value)).to_equal("")
+            Err(err):
+                expect("unexpected pre-commit js error: {err}").to_equal("")
+
+        match session.take_pending_request():
+            Some(request):
+                expect(request.kind).to_equal("fetch")
+                expect(request.url).to_equal("https://example.com/compile.wasm")
+                val committed = session.commit_network_response(BrowserResponse.create(
+                    request_id: request.id,
+                    kind: "fetch",
+                    url: request.url,
+                    status: 200,
+                    headers: "Content-Type: application/wasm\n",
+                    body: "0061736d01000000010100",
+                    error: ""
+                ))
+                match committed:
+                    Ok(_):
+                        match session.eval_script("out"):
+                            Ok(value):
+                                expect(_display_js(value)).to_equal("compileStreamModule:11:1:true")
+                            Err(err):
+                                expect("unexpected first commit js error: {err}").to_equal("")
+                    Err(err):
+                        expect("unexpected first commit error: {err}").to_equal("")
+            nil:
+                expect("missing compile fetch request").to_equal("")
+
+        match session.take_pending_request():
+            Some(request):
+                expect(request.kind).to_equal("fetch")
+                expect(request.url).to_equal("https://example.com/instantiate.wasm")
+                val committed = session.commit_network_response(BrowserResponse.create(
+                    request_id: request.id,
+                    kind: "fetch",
+                    url: request.url,
+                    status: 200,
+                    headers: "Content-Type: application/wasm\n",
+                    body: "0061736d01000000010100",
+                    error: ""
+                ))
+                match committed:
+                    Ok(_):
+                        match session.eval_script("out"):
+                            Ok(value):
+                                expect(_display_js(value)).to_equal("compileStreamModule:11:1:true:instantiateStreamModule:instantiated:11:1:object")
+                            Err(err):
+                                expect("unexpected second commit js error: {err}").to_equal("")
+                    Err(err):
+                        expect("unexpected second commit error: {err}").to_equal("")
+            nil:
+                expect("missing instantiate fetch request").to_equal("")
+
     it "routes invalid compileStreaming responses through catch":
         var session = BrowserSession.new()
         session.open_html(
