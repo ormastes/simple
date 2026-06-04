@@ -42,4 +42,4 @@ type: reference
 ## Doc Locations
 - Design decisions: `doc/05_design/<domain>/<topic>/` (language, compiler, lib, app, os, hardware, platform, runtime, ui, ml, infra)
 - Specs: `doc/06_spec/`
-- Writing guides: `doc/07_guide/infra/design_writing.md`, `doc/07_guide/infra/architecture_writing.md`
+- Writing guides: `doc/07_guide/infra/writing/design_writing.md`, `doc/07_guide/infra/writing/architecture_writing.md`

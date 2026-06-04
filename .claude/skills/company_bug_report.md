@@ -103,4 +103,4 @@ and exit 1.
 - All writes to `doc/08_tracking/debug/` go through the driver; the
   dispatcher itself never writes files.
 - TODO: cross-link the arch doc once Agent A lands
-  `doc/05_design/spipe_infra_arch.md`.
+  `doc/05_design/infra/spipe/spipe_infra_arch.md`.

@@ -28,7 +28,7 @@ sh scripts/setup/install-spipe-dev-command.shs --apply
 - [`.claude/agents/spipe/verify.md`](../agents/spipe/verify.md) — SPipe verification phase
 - [`.claude/skills/lib/spipe_phases.md`](lib/spipe_phases.md) — phase map
 - [`.claude/skills/lib/spipe_diagrams.md`](lib/spipe_diagrams.md) — diagram & concision rules (≤30 lines + ≥1 SDN diagram)
-- [`doc/07_guide/infra/sspec_scenario_manual.md`](../../doc/07_guide/infra/sspec_scenario_manual.md) — scenario manual, capture, inline/previous scenario, and environmental-test guidance
+- [`doc/07_guide/infra/testing/sspec_scenario_manual.md`](../../doc/07_guide/infra/testing/sspec_scenario_manual.md) — scenario manual, capture, inline/previous scenario, and environmental-test guidance
 
 ## Scenario Manual Quality
 
@@ -56,7 +56,7 @@ cp .claude/templates/spipe_template.spl test/my_spec.spl
 
 SPipe verify runs `sh scripts/check-workspace-root-guard.shs audit --strict`.
 Default: diagnose and report. Auto-fix: trace origin and fix creating code.
-See [`doc/07_guide/workspace/file_manifest_tldr.md`](../../doc/07_guide/workspace/file_manifest_tldr.md).
+See [`doc/07_guide/infra/workspace/file_manifest_tldr.md`](../../doc/07_guide/infra/workspace/file_manifest_tldr.md).
 
 ## Code Quality Checks
 
@@ -79,8 +79,8 @@ When a feature ships a runnable module, package it as a **Simple Feature Module*
 privileged layers must be gated). Consume it via `std.sfm`: `sfm_load` parses the
 container, `sfm_resolve` resolves a manifest layer (DI wires layers from the
 manifest; an AOP authz aspect enforces the security level). See
-[`doc/04_architecture/simple_feature_module.md`](../../doc/04_architecture/simple_feature_module.md)
-and [`doc/05_design/simple_feature_module.md`](../../doc/05_design/simple_feature_module.md).
+[`doc/04_architecture/infra/sfm/simple_feature_module.md`](../../doc/04_architecture/infra/sfm/simple_feature_module.md)
+and [`doc/05_design/infra/sfm/simple_feature_module.md`](../../doc/05_design/infra/sfm/simple_feature_module.md).
 
 ## Run
 

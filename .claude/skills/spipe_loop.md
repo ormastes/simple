@@ -27,7 +27,7 @@ description: SPipe Loop — periodic check-and-implement plus daily-debug ingest
 ## `--daily-debug` Mode — 7-Step Pipeline
 
 > Source: derived from issue #10 task spec. Will be reconciled with
-> `doc/05_design/spipe_infra_arch.md` §"Daily Debug Analysis" once that
+> `doc/05_design/infra/spipe/spipe_infra_arch.md` §"Daily Debug Analysis" once that
 > doc lands (Agent A).
 
 | # | Step | Driver call | Side effects |

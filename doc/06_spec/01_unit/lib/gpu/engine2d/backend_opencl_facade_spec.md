@@ -43,7 +43,7 @@ backend_opencl_facade_spec -> std
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -56,6 +56,7 @@ expect(source).to_contain("__kernel void simple_2d_scroll_u32")
 expect(source).to_contain("__kernel void simple_2d_rect_filled_u32")
 expect(source).to_contain("__kernel void simple_2d_rect_outline_u32")
 expect(source).to_contain("__kernel void simple_2d_line_u32")
+expect(source).to_contain("__kernel void simple_2d_gradient_rect_u32")
 expect(source).to_contain("__kernel void simple_2d_blit_image_u32")
 expect(source).to_contain("__kernel void simple_2d_blit_nonzero_u32")
 ```
@@ -93,16 +94,20 @@ expect(source).to_contain("__kernel void simple_2d_blit_nonzero_u32")
    - Expected: lined[5] equals `0xff778899u32`
    - Expected: lined[10] equals `0xff778899u32`
    - Expected: lined[15] equals `0xff778899u32`
+
+5. backend draw gradient rect
+   - Expected: gradient[0] equals `0xffff0000u32`
+   - Expected: gradient[15] equals `0xff0000ffu32`
    - Expected: backend.last_probe.status equals `BackendStatus.Unavailable`
    - Expected: backend.last_probe.has_graphics is false
 
-5. backend shutdown
+6. backend shutdown
 
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -138,6 +143,10 @@ if ok:
     expect(lined[5]).to_equal(0xff778899u32)
     expect(lined[10]).to_equal(0xff778899u32)
     expect(lined[15]).to_equal(0xff778899u32)
+    backend.draw_gradient_rect(0, 0, 4, 4, 0xffff0000u32, 0xff0000ffu32)
+    val gradient = backend.read_pixels()
+    expect(gradient[0]).to_equal(0xffff0000u32)
+    expect(gradient[15]).to_equal(0xff0000ffu32)
 else:
     expect(backend.last_probe.status).to_equal(BackendStatus.Unavailable)
     expect(backend.last_probe.has_graphics).to_equal(false)

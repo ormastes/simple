@@ -99,6 +99,35 @@ fn opencl_2d_generated_source() -> text:
     "    long av = ta + ((ba - ta) * dy) / max_t;\n" +
     "    dst[py * surface_width + px] = (uint)((av << 24) | (rr << 16) | (gg << 8) | bv);\n" +
     "}\n" +
+    "__kernel void simple_2d_circle_u32(__global uint* dst, long surface_width, long surface_height, long cx, long cy, long r, long color) {\n" +
+    "    long i = get_global_id(0);\n" +
+    "    long diameter = 2 * r + 1;\n" +
+    "    long count = diameter * diameter;\n" +
+    "    if (i >= count) { return; }\n" +
+    "    long dx = (i % diameter) - r;\n" +
+    "    long dy = (i / diameter) - r;\n" +
+    "    long px = cx + dx;\n" +
+    "    long py = cy + dy;\n" +
+    "    if (px < 0 || py < 0 || px >= surface_width || py >= surface_height) { return; }\n" +
+    "    long dist_sq = dx * dx + dy * dy;\n" +
+    "    long r_sq = r * r;\n" +
+    "    long inner = (r - 1) * (r - 1);\n" +
+    "    if (dist_sq >= inner && dist_sq <= r_sq) { dst[py * surface_width + px] = (uint)color; }\n" +
+    "}\n" +
+    "__kernel void simple_2d_circle_filled_u32(__global uint* dst, long surface_width, long surface_height, long cx, long cy, long r, long color) {\n" +
+    "    long i = get_global_id(0);\n" +
+    "    long diameter = 2 * r + 1;\n" +
+    "    long count = diameter * diameter;\n" +
+    "    if (i >= count) { return; }\n" +
+    "    long dx = (i % diameter) - r;\n" +
+    "    long dy = (i / diameter) - r;\n" +
+    "    long px = cx + dx;\n" +
+    "    long py = cy + dy;\n" +
+    "    if (px < 0 || py < 0 || px >= surface_width || py >= surface_height) { return; }\n" +
+    "    long dist_sq = dx * dx + dy * dy;\n" +
+    "    long r_sq = r * r;\n" +
+    "    if (dist_sq <= r_sq) { dst[py * surface_width + px] = (uint)color; }\n" +
+    "}\n" +
     "__kernel void simple_2d_blit_image_u32(__global uint* dst, __global const uint* src, long x, long y, long w, long h, long surface_width, long surface_height) {\n" +
     "    long i = get_global_id(0);\n" +
     "    long count = w * h;\n" +
@@ -389,10 +418,32 @@ impl RenderBackend for OpenClBackend:
         self.device_current = false
 
     me draw_circle(cx: i32, cy: i32, r: i32, color: u32):
+        if r < 0:
+            return
+        if r == 0:
+            self.draw_rect_filled(cx, cy, 1, 1, color)
+            return
+        if self._can_use_device_draw() and self._ensure_device_current():
+            val rc = self.session.launch_circle_u32(self.d_framebuffer, _i64(self.width()), _i64(self.height()), _i64(cx), _i64(cy), _i64(r), _i64_from_u32(color), false)
+            if rc == 0:
+                self.device_current = true
+                self.mirror.draw_circle(cx, cy, r, color)
+                return
         self.mirror.draw_circle(cx, cy, r, color)
         self.device_current = false
 
     me draw_circle_filled(cx: i32, cy: i32, r: i32, color: u32):
+        if r < 0:
+            return
+        if r == 0:
+            self.draw_rect_filled(cx, cy, 1, 1, color)
+            return
+        if self._can_use_device_draw() and self._ensure_device_current():
+            val rc = self.session.launch_circle_u32(self.d_framebuffer, _i64(self.width()), _i64(self.height()), _i64(cx), _i64(cy), _i64(r), _i64_from_u32(color), true)
+            if rc == 0:
+                self.device_current = true
+                self.mirror.draw_circle_filled(cx, cy, r, color)
+                return
         self.mirror.draw_circle_filled(cx, cy, r, color)
         self.device_current = false
 

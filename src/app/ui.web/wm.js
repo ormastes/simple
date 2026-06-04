@@ -87,6 +87,7 @@ class SimpleWindowManager {
     this._commandPaletteItems = [];
     this._commandPaletteActiveIndex = 0;
     this._commandItemFeedbackTimer = 0;
+    this._commandSelectionFeedbackTimer = 0;
     this._commandRecentFeedbackTimer = 0;
     this._snapPreview = null;
     this._snapLayoutPalette = null;
@@ -1482,6 +1483,7 @@ class SimpleWindowManager {
 
   _renderCommandPaletteItems() {
     if (!this._commandPaletteList) return;
+    this._clearCommandSelectionFeedback();
     this._clearCommandItemFeedback();
     this._clearCommandRecentFeedback();
     const query = String(this._commandPaletteInput?.value || '').trim().toLowerCase();
@@ -1571,6 +1573,7 @@ class SimpleWindowManager {
     if (!count) return;
     this._commandPaletteActiveIndex = (this._commandPaletteActiveIndex + delta + count) % count;
     this._syncCommandPaletteSelection(false);
+    this._markCommandSelectionFeedback(this._commandPaletteActiveIndex, 'keyboard');
   }
 
   _setCommandPaletteSelection(index, shouldFocus = false) {
@@ -1579,6 +1582,7 @@ class SimpleWindowManager {
     if (!count) return;
     this._commandPaletteActiveIndex = Math.max(0, Math.min(count - 1, index));
     this._syncCommandPaletteSelection(shouldFocus);
+    this._markCommandSelectionFeedback(this._commandPaletteActiveIndex, 'keyboard');
   }
 
   _syncCommandPaletteSelection(shouldFocus = false) {
@@ -1645,6 +1649,7 @@ class SimpleWindowManager {
   _markCommandItemFeedback(index, command) {
     if (!this._commandPalette || !this._feedbackAllows('standard')) return false;
     window.clearTimeout(this._commandItemFeedbackTimer);
+    this._clearCommandSelectionFeedback();
     this._clearCommandItemFeedback();
     const palette = this._commandPalette;
     palette.dataset.commandItemFeedback = 'activate';
@@ -1678,10 +1683,39 @@ class SimpleWindowManager {
     });
   }
 
+  _markCommandSelectionFeedback(index, source) {
+    if (!this._commandPalette || !this._feedbackAllows('standard')) return;
+    window.clearTimeout(this._commandSelectionFeedbackTimer);
+    this._clearCommandSelectionFeedback();
+    const palette = this._commandPalette;
+    palette.dataset.commandSelectionFeedback = source || 'keyboard';
+    palette.dataset.commandSelectionIndex = String(index);
+    const item = palette.querySelector(`.wm-command-item[data-command-index="${index}"]`);
+    if (!item) return;
+    item.dataset.commandSelectionFeedback = 'select';
+    item.classList.add('selection-feedback');
+    item.querySelector('.wm-taskbar-icon')?.classList.add('selection-feedback');
+    item.querySelector('.wm-command-shortcut')?.classList.add('selection-feedback');
+    this._commandSelectionFeedbackTimer = window.setTimeout(() => this._clearCommandSelectionFeedback(), 360);
+  }
+
+  _clearCommandSelectionFeedback() {
+    window.clearTimeout(this._commandSelectionFeedbackTimer);
+    this._commandSelectionFeedbackTimer = 0;
+    if (!this._commandPalette) return;
+    delete this._commandPalette.dataset.commandSelectionFeedback;
+    delete this._commandPalette.dataset.commandSelectionIndex;
+    this._commandPalette.querySelectorAll('.selection-feedback').forEach((node) => {
+      node.classList.remove('selection-feedback');
+      if (node.dataset && node.dataset.commandSelectionFeedback) delete node.dataset.commandSelectionFeedback;
+    });
+  }
+
   _executeCommandPaletteRecent(index) {
     if (!this._commandPalette || this._commandPalette.hidden) return;
     const command = this._commandPaletteItems[index];
     if (!command) return;
+    this._clearCommandSelectionFeedback();
     this._clearCommandItemFeedback();
     this._commandPaletteActiveIndex = index;
     this._markCommandRecentFeedback(index, command);

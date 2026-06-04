@@ -61,7 +61,7 @@ expect(session.is_valid()).to_equal(false)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -80,6 +80,7 @@ expect(session.launch_fill_u32(1, 4, 4, 0xff112233 as i64)).to_equal(1)
 expect(session.launch_rect_filled_u32(1, 4, 4, 1, 1, 2, 2, 0xff445566 as i64)).to_equal(1)
 expect(session.launch_rect_outline_u32(1, 4, 4, 0, 0, 4, 4, 0xff778899 as i64)).to_equal(1)
 expect(session.launch_line_u32(1, 4, 4, 0, 0, 3, 3, 0xff778899 as i64, 1)).to_equal(1)
+expect(session.launch_gradient_rect_u32(1, 4, 4, 0, 0, 4, 4, 0xffff0000 as i64, 0xff0000ff as i64)).to_equal(1)
 expect(session.launch_blit_image_u32(1, 2, 0, 0, 4, 4, 8, 8)).to_equal(1)
 expect(session.launch_blit_nonzero_u32(1, 2, 0, 0, 4, 4, 8, 8)).to_equal(1)
 expect(session.fill_kernel(64, 64, 4096)).to_equal(1)
@@ -196,6 +197,9 @@ expect(session.kernel_cache).to_equal(0)
    - Expected: session.launch_line_u32(0, 4, 4, 0, 0, 3, 3, 1, 1) equals `1`
    - Expected: session.launch_line_u32(1, 0, 4, 0, 0, 3, 3, 1, 1) equals `1`
    - Expected: session.launch_line_u32(1, 4, 4, 0, 0, 3, 3, 1, 0) equals `1`
+   - Expected: session.launch_gradient_rect_u32(0, 4, 4, 0, 0, 4, 4, 1, 2) equals `1`
+   - Expected: session.launch_gradient_rect_u32(1, 0, 4, 0, 0, 4, 4, 1, 2) equals `1`
+   - Expected: session.launch_gradient_rect_u32(1, 4, 4, 0, 0, 0, 4, 1, 2) equals `1`
    - Expected: session.launch_blit_image_u32(0, 2, 0, 0, 4, 4, 8, 8) equals `1`
    - Expected: session.launch_blit_image_u32(1, 0, 0, 0, 4, 4, 8, 8) equals `1`
    - Expected: session.launch_blit_image_u32(1, 2, 0, 0, 0, 4, 8, 8) equals `1`
@@ -206,7 +210,7 @@ expect(session.kernel_cache).to_equal(0)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -234,6 +238,9 @@ expect(session.launch_rect_outline_u32(1, 4, 4, 1, 1, 2, 0, 1)).to_equal(1)
 expect(session.launch_line_u32(0, 4, 4, 0, 0, 3, 3, 1, 1)).to_equal(1)
 expect(session.launch_line_u32(1, 0, 4, 0, 0, 3, 3, 1, 1)).to_equal(1)
 expect(session.launch_line_u32(1, 4, 4, 0, 0, 3, 3, 1, 0)).to_equal(1)
+expect(session.launch_gradient_rect_u32(0, 4, 4, 0, 0, 4, 4, 1, 2)).to_equal(1)
+expect(session.launch_gradient_rect_u32(1, 0, 4, 0, 0, 4, 4, 1, 2)).to_equal(1)
+expect(session.launch_gradient_rect_u32(1, 4, 4, 0, 0, 0, 4, 1, 2)).to_equal(1)
 expect(session.launch_blit_image_u32(0, 2, 0, 0, 4, 4, 8, 8)).to_equal(1)
 expect(session.launch_blit_image_u32(1, 0, 0, 0, 4, 4, 8, 8)).to_equal(1)
 expect(session.launch_blit_image_u32(1, 2, 0, 0, 0, 4, 8, 8)).to_equal(1)

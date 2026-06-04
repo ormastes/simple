@@ -21,7 +21,7 @@ Delegate GUI/TUI design to Gemini API. Gemini generates designs; Stitch MCP rend
 ### Phase 1: Gather Context
 
 Read these files to build the design prompt:
-- `doc/02_requirements/feature/<feature>.md` (requirements)
+- `doc/02_requirements/feature/<feature>.md` (requirements — auto-generated, stays flat)
 - `src/lib/common/ui/glass_tokens.spl` (glass design tokens — default style)
 - `src/lib/common/ui/glass_theme.spl` (glass_dark / glass_light themes)
 - `src/lib/common/ui/glass_css.spl` (CSS component patterns)
@@ -77,9 +77,9 @@ Convert Stitch HTML output to Simple `.spl` widget code:
 
 | Artifact | Location |
 |----------|----------|
-| GUI design doc | `doc/05_design/<feature>_gui.md` |
-| TUI design doc | `doc/05_design/<feature>_tui.md` |
-| HTML prototypes | `doc/05_design/<feature>_screens/` |
+| GUI design doc | `doc/05_design/ui/<topic>/<feature>_gui.md` |
+| TUI design doc | `doc/05_design/ui/<topic>/<feature>_tui.md` |
+| HTML prototypes | `doc/05_design/ui/<topic>/<feature>_screens/` |
 | Component code | `src/lib/common/ui/<feature>/` |
 | Tests | `test/01_unit/lib/common/ui/<feature>_spec.spl` |
 

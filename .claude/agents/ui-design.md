@@ -103,4 +103,4 @@ Snapshot: `doc/05_design/ui/stitch_snapshots/` (pulled 2026-04-12, mode `reconci
 | API key | `.security/env.sh` |
 | Web app templates | `src/app/web/` |
 | Example outputs | `examples/` |
-| Design docs | `doc/05_design/<domain>/` |
+| Design docs | `doc/05_design/<domain>/<topic>/` |
