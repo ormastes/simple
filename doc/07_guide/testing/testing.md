@@ -617,7 +617,7 @@ simple test --all           # entire test/
 
 ## Test Database
 
-The test database (`doc/test/test_db.sdn` + `test_db_runs.sdn`) provides persistent storage for test execution data, timing statistics, and run history.
+The test database (`doc/08_tracking/test/test_db.sdn` + `test_db_runs.sdn`) provides persistent storage for test execution data, timing statistics, and run history.
 
 ### Key Operations
 
@@ -649,7 +649,7 @@ db.save()
 
 ```bash
 # Restore from backup
-cp doc/test/test_db.sdn.bak doc/test/test_db.sdn
+cp doc/08_tracking/test/test_db.sdn.bak doc/08_tracking/test/test_db.sdn
 
 # Clean up stale runs
 simple test --cleanup-runs

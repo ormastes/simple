@@ -419,7 +419,7 @@ grep -r "file_atomic_write.*\.sdn" src/
 | Current Pattern | Replacement |
 |----------------|-------------|
 | `file_write("doc/bug/bug_db.sdn", ...)` | `bugdb.save()` |
-| `file_read("doc/test/test_db.sdn")` | `testdb = create_test_database(path)` |
+| `file_read("doc/08_tracking/test/test_db.sdn")` | `testdb = create_test_database(path)` |
 | `file_atomic_write("doc/02_requirements/feature/feature_db.sdn", ...)` | `featuredb.save()` |
 
 **3. Add imports**:

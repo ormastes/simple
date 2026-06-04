@@ -401,7 +401,7 @@ if errors.?:
 from lib.database.test import TestDatabase, TestResult, TestStatus
 
 # Load database
-val testdb = TestDatabase.load("doc/test/test_db.sdn")?
+val testdb = TestDatabase.load("doc/08_tracking/test/test_db.sdn")?
 
 # Start test run
 val run_id = testdb.start_run()

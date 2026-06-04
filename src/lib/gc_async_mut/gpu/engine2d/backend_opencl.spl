@@ -1,0 +1,185 @@
+# 2D Engine — OpenCL backend facade.
+#
+# OpenCL render selection fails closed until the shared OpenClSession can
+# initialize and build generated 2D kernel source. The host mirror remains the
+# canonical framebuffer for operations that are not yet offloaded.
+
+use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended}
+use std.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
+use std.gc_async_mut.gpu.engine2d.opencl_session.{OpenClSession}
+use std.gpu.engine2d.sffi_opencl.{OpenClFfi}
+
+fn opencl_2d_generated_source() -> text:
+    "__kernel void simple_2d_fill_u32(__global uint* dst, uint width, uint height, uint color) {\n" +
+    "    uint i = get_global_id(0);\n" +
+    "    uint count = width * height;\n" +
+    "    if (i < count) { dst[i] = color; }\n" +
+    "}\n" +
+    "__kernel void simple_2d_copy_u32(__global const uint* src, __global uint* dst, uint width, uint height) {\n" +
+    "    uint i = get_global_id(0);\n" +
+    "    uint count = width * height;\n" +
+    "    if (i < count) { dst[i] = src[i]; }\n" +
+    "}\n" +
+    "__kernel void simple_2d_alpha_u32(__global const uint* src, __global uint* dst, uint width, uint height, uchar alpha) {\n" +
+    "    uint i = get_global_id(0);\n" +
+    "    uint count = width * height;\n" +
+    "    if (i < count) { dst[i] = src[i]; }\n" +
+    "}\n" +
+    "__kernel void simple_2d_scroll_u32(__global const uint* src, __global uint* dst, uint width, uint height, int delta_y) {\n" +
+    "    uint i = get_global_id(0);\n" +
+    "    uint count = width * height;\n" +
+    "    if (i < count) { dst[i] = src[i]; }\n" +
+    "}\n"
+
+fn _opencl_probe_failure(message: text, gate: text) -> BackendProbeResult:
+    var failed = BackendProbeResult.unavailable("opencl", message)
+    failed.api_name = "opencl"
+    failed.feature_gate = gate
+    failed.shader_format = "opencl-c"
+    failed.has_compute = true
+    failed.has_graphics = false
+    failed.has_present = false
+    failed
+
+fn _opencl_render_ready() -> BackendProbeResult:
+    var ready = BackendProbeResult.success("opencl", "OpenCL generated 2D render source loaded")
+    ready.api_name = "opencl"
+    ready.feature_gate = "opencl_2d_render"
+    ready.shader_format = "opencl-c"
+    ready.has_compute = true
+    ready.has_graphics = true
+    ready.has_present = true
+    ready
+
+class OpenClBackend:
+    mirror: SoftwareBackend
+    session: OpenClSession
+    owns_session: bool
+    initialized: bool
+    last_probe: BackendProbeResult
+
+    static fn create() -> OpenClBackend:
+        OpenClBackend(
+            mirror: SoftwareBackend.create(),
+            session: OpenClSession.create(),
+            owns_session: false,
+            initialized: false,
+            last_probe: BackendProbeResult.unavailable("opencl", "not probed")
+        )
+
+    me init_with_session(width: i32, height: i32, session: OpenClSession) -> bool:
+        if width <= 0 or height <= 0:
+            self.last_probe = _opencl_probe_failure("invalid OpenCL framebuffer dimensions", "opencl_surface")
+            self.initialized = false
+            return false
+        if not session.is_valid():
+            self.last_probe = _opencl_probe_failure("OpenCL shared session is not initialized", "opencl_context")
+            self.initialized = false
+            return false
+        self.session = session.retain()
+        self.owns_session = true
+        val load = self.session.load_module_evidence(opencl_2d_generated_source())
+        if not load.success:
+            self.last_probe = _opencl_probe_failure("OpenCL generated 2D source load failed: {load.diagnostic_text()}", "opencl_2d_render")
+            self.session.release()
+            self.owns_session = false
+            self.initialized = false
+            return false
+        if not self.mirror.init(width, height):
+            self.last_probe = _opencl_probe_failure("OpenCL host mirror surface allocation failed", "opencl_surface")
+            self.session.release()
+            self.owns_session = false
+            self.initialized = false
+            return false
+        self.last_probe = _opencl_render_ready()
+        self.initialized = true
+        true
+
+impl RenderBackend for OpenClBackend:
+    fn name() -> text:
+        "opencl"
+
+    me init(width: i32, height: i32) -> bool:
+        var session = OpenClSession.create_with_ffi(OpenClFfi.create_static())
+        val init_ev = session.init_evidence()
+        if not init_ev.success:
+            self.last_probe = _opencl_probe_failure("OpenCL session initialization failed: {init_ev.diagnostic_text()}", "opencl_context")
+            self.initialized = false
+            return false
+        if not self.init_with_session(width, height, session):
+            session.release()
+            self.owns_session = false
+            return false
+        session.release()
+        true
+
+    me shutdown():
+        self.mirror.shutdown()
+        if self.owns_session:
+            self.session.release()
+            self.owns_session = false
+        self.initialized = false
+
+    me clear(color: u32):
+        self.mirror.clear(color)
+
+    me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        self.mirror.draw_rect(x, y, w, h, color)
+
+    me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
+        self.mirror.draw_rect_filled(x, y, w, h, color)
+
+    me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
+        self.mirror.draw_line(x1, y1, x2, y2, color, thickness)
+
+    me draw_circle(cx: i32, cy: i32, r: i32, color: u32):
+        self.mirror.draw_circle(cx, cy, r, color)
+
+    me draw_circle_filled(cx: i32, cy: i32, r: i32, color: u32):
+        self.mirror.draw_circle_filled(cx, cy, r, color)
+
+    me draw_rounded_rect(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32):
+        self.mirror.draw_rounded_rect(x, y, w, h, radius, color)
+
+    me draw_triangle_filled(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32):
+        self.mirror.draw_triangle_filled(x1, y1, x2, y2, x3, y3, color)
+
+    me draw_gradient_rect(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32):
+        self.mirror.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
+
+    me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
+        self.mirror.draw_text(x, y, text_val, color, font_size)
+
+    me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        self.mirror.draw_image(x, y, w, h, pixels)
+
+    me set_clip(x: i32, y: i32, w: i32, h: i32):
+        self.mirror.set_clip(x, y, w, h)
+
+    me clear_clip():
+        self.mirror.clear_clip()
+
+    me set_mask(mask_pixels: [u8], w: i32, h: i32):
+        self.mirror.set_mask(mask_pixels, w, h)
+
+    me clear_mask():
+        self.mirror.clear_mask()
+
+    me present():
+        if self.initialized:
+            self.session.synchronize()
+        self.mirror.present()
+
+    fn read_pixels() -> [u32]:
+        self.mirror.read_pixels()
+
+    fn width() -> i32:
+        self.mirror.width()
+
+    fn height() -> i32:
+        self.mirror.height()
+
+impl Engine2DExtended for OpenClBackend:
+    me draw_text_bg(x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32):
+        self.mirror.draw_text_bg(x, y, text_val, fg, bg, font_size)

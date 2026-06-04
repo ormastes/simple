@@ -544,7 +544,7 @@ pub fn run_all_tests(test_root: &Path, filter: Option<&str>) -> Vec<(SimpleTestF
     let all_tests_run = filter.is_none();
 
     // Load test database (create if doesn't exist)
-    let db_path = Path::new("doc/test/test_db.sdn");
+    let db_path = Path::new("doc/08_tracking/test/test_db.sdn");
     let mut test_db = test_db::load_test_db(db_path).unwrap_or_else(|_| test_db::TestDb::new());
 
     let results: Vec<(SimpleTestFile, SimpleTestResult)> = tests
@@ -587,7 +587,7 @@ pub fn run_all_tests(test_root: &Path, filter: Option<&str>) -> Vec<(SimpleTestF
     let _ = test_db::save_test_db(db_path, &test_db);
 
     // Generate test result documentation
-    let doc_dir = Path::new("doc/test");
+    let doc_dir = Path::new("doc/08_tracking/test");
     let _ = test_db::generate_test_result_docs(&test_db, doc_dir);
 
     results

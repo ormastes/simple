@@ -291,7 +291,7 @@ simple test --list-qualified
 ├── auth.sdn              # Authentication config (password hash, tokens)
 └── oauth_cache.sdn       # Cached OAuth tokens (optional)
 
-doc/test/
+doc/08_tracking/test/
 ├── test_db.sdn           # SIGNED - test results with qualified_ignore
 └── test_db.sdn.prev      # Backup before changes
 ```

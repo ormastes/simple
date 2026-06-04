@@ -448,14 +448,14 @@ pub fn run_test_result_gen(args: &[String]) -> i32 {
         .position(|a| a == "--db")
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("doc/test/test_db.sdn"));
+        .unwrap_or_else(|| PathBuf::from("doc/08_tracking/test/test_db.sdn"));
 
     let output_dir = args
         .iter()
         .position(|a| a == "-o" || a == "--output")
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("doc/test"));
+        .unwrap_or_else(|| PathBuf::from("doc/08_tracking/test"));
 
     println!("Generating test result docs from {}...", db_path.display());
 
@@ -746,7 +746,7 @@ pub fn print_doc_gen_help() {
     eprintln!("  spec-gen:        tests/spec/ -> doc/06_spec/");
     eprintln!("  todo-scan:       . -> doc/todo/todo_db.sdn");
     eprintln!("  todo-gen:        doc/todo/todo_db.sdn -> doc/TODO.md");
-    eprintln!("  test-result-gen: doc/test/test_db.sdn -> doc/test/");
+    eprintln!("  test-result-gen: doc/08_tracking/test/test_db.sdn -> doc/08_tracking/test/");
     eprintln!("  bug-add/update:  doc/bug/bug_db.sdn");
     eprintln!("  bug-gen:         doc/bug/bug_db.sdn -> doc/bug/");
 }

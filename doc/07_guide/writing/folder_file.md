@@ -265,7 +265,7 @@ bin/
 ### Auto-Updated (Committed but auto-generated)
 
 - `doc/02_requirements/feature/feature.md` - Generated from tests
-- `doc/test/test_result.md` - Generated from test runs
+- `doc/08_tracking/test/test_result.md` - Generated from test runs
 - `doc/bug/bug_report.md` - Generated from bug DB
 
 ### Infrastructure (Edit with Caution)

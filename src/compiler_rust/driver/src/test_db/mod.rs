@@ -5,7 +5,7 @@
 //! - `test_db.sdn` — stable data (strings, files, suites, tests) tracked in jj
 //! - `test_db_runs.sdn` — volatile data (timing, runs, changes) jj-ignored
 //!
-//! Auto-generates: doc/test/test_result.md
+//! Auto-generates: doc/08_tracking/test/test_result.md
 
 pub mod types;
 pub mod run_record;

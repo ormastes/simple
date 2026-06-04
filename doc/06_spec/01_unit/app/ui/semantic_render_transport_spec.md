@@ -69,7 +69,7 @@ expect(tauri_semantic_render_ipc_json(state, 1280, 720)).to_contain("\"target\":
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -80,6 +80,15 @@ val electron_json = electron.semantic_snapshot_json(state)
 expect(electron_json.len()).to_be_greater_than(0)
 expect(electron_json).to_contain("stage")
 expect(electron.semantic_snapshot_envelope_json(state, "main", 10u64)).to_contain("snapshot")
+val snapshot_env = WebRenderSnapshotEnvelope(target: WEB_RENDER_TARGET_ELECTRON, surface_id: "main", revision: 10u64, snapshot_json: "{\"ok\":true}")
+val snapshot_json = web_render_snapshot_envelope_to_json_with_semantic(snapshot_env, electron_json)
+expect(snapshot_json).to_contain("\"semantic\":{\"protocol_version\"")
+val command = SemanticUiCommand.type_text("main", "web_render_action", "Run")
+val bundle = semantic_ui_render_transport_bundle(WEB_RENDER_TARGET_ELECTRON, "main", electron_semantic_snapshot(state), command, 10u64, 10u64, 11u64, "[]")
+expect(bundle.input_json).to_contain("event_type")
+expect(bundle.input_json).to_contain("web_render_action")
+expect(bundle.snapshot_json).to_contain("snapshot")
+expect(bundle.patch_json).to_contain("patches")
 ```
 
 </details>

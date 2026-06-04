@@ -29,7 +29,7 @@ semantic_contract_spec -> nogc_sync_mut
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -76,6 +76,33 @@ expect(snapshot.protocol_version).to_equal(SEMANTIC_UI_PROTOCOL_VERSION)
 expect(snapshot.adapter_status).to_equal("semantic_adapter_unavailable")
 expect(snapshot.state.element_count).to_equal(0)
 expect(snapshot.elements.len()).to_equal(0)
+```
+
+</details>
+
+#### serializes semantic snapshots into shared render snapshot envelopes
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val snapshot = semantic_ui_snapshot_from_state_with_capabilities(_semantic_demo_state(), SEMANTIC_UI_STAGE_RENDERER, SEMANTIC_UI_STATUS_AVAILABLE, [Capability.Mouse])
+val json = semantic_ui_snapshot_to_json(snapshot)
+expect(json).to_contain("\"stage\":\"S3\"")
+expect(json).to_contain("\"adapter_status\":\"available\"")
+expect(json).to_contain("\"element_count\":3")
+expect(json).to_contain("\"capabilities\":[")
+expect(json).to_contain("\"name\":\"Mouse\"")
+expect(json).to_contain("\"canonical_id\":\"main#root\"")
+
+val envelope = semantic_ui_snapshot_transport_json(WEB_RENDER_TARGET_ELECTRON, "main", 7u64, snapshot)
+expect(envelope).to_contain("\"type\":\"snapshot\"")
+expect(envelope).to_contain("\"target\":\"electron\"")
+expect(envelope).to_contain("\"revision\":7")
+expect(envelope).to_contain("protocol_version")
 ```
 
 </details>
@@ -272,8 +299,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

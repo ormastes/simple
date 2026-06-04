@@ -97,7 +97,7 @@ FILE.md files) are allowed.
 | `doc/11_archive` | Archived docs |
 | `doc/.obsidian` | Obsidian vault config |
 | `doc/README.md` | Doc readme |
-| `doc/test` | Doc test files |
+| `doc/08_tracking/test` | Doc test files |
 | `doc/TODO.md` | TODO tracking |
 | `doc/FILE.md` | Doc manifest |
 

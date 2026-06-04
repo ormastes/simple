@@ -139,7 +139,7 @@ src/app/test_runner/
 6. Reporting Phase (Host)
    ┌─────────────────┐
    │ Format output   │ ──► Console, JSON, JUnit XML
-   │ Update database │ ──► doc/test/test_db.sdn
+   │ Update database │ ──► doc/08_tracking/test/test_db.sdn
    │ Exit with code  │ ──► 0 = pass, 1 = fail
    └─────────────────┘
 ```

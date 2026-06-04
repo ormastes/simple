@@ -258,7 +258,7 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
     print_discovery_summary(&test_files, &doctest_cache, quiet);
 
     // Start test run tracking (only for full suite — DB lock is expensive)
-    let db_path = PathBuf::from("doc/test/test_db.sdn");
+    let db_path = PathBuf::from("doc/08_tracking/test/test_db.sdn");
     let test_run = if options.path.is_some() || options.no_db {
         None // Skip DB tracking for targeted runs and explicit no-db runs
     } else {
@@ -541,7 +541,7 @@ fn prompt_for_ignored_qualifications() {
     }
 
     // Load test database to find unqualified ones
-    let db_path = PathBuf::from("doc/test/test_db.sdn");
+    let db_path = PathBuf::from("doc/08_tracking/test/test_db.sdn");
     let db = match crate::test_db::load_test_db(&db_path) {
         Ok(db) => db,
         Err(_) => return,
@@ -775,7 +775,7 @@ fn execute_test_files(
         eprintln!("⚠️  Warning: Listing tests with filters scans all files (slow for large test suites)");
         eprintln!("   Tip: Limit scope with path argument, e.g.:");
         eprintln!("        simple test test/unit/lib/std/ --only-skipped --list");
-        eprintln!("   Or use test database: cat doc/test/test_db.sdn | grep skip\n");
+        eprintln!("   Or use test database: cat doc/08_tracking/test/test_db.sdn | grep skip\n");
     }
 
     for (idx, path) in test_files.iter().enumerate() {
@@ -1513,7 +1513,7 @@ use crate::test_db::{TestRunRecord, TestRunStatus, cleanup_stale_runs, list_runs
 
 /// Handle run management commands (--list-runs, --cleanup-runs, --prune-runs)
 fn handle_run_management(options: &TestOptions) -> TestRunResult {
-    let db_path = PathBuf::from("doc/test/test_db.sdn");
+    let db_path = PathBuf::from("doc/08_tracking/test/test_db.sdn");
     handle_run_management_with_db(options, &db_path)
 }
 
@@ -1648,7 +1648,7 @@ mod tests {
     #[test]
     fn list_runs_marks_stale_running_entries_crashed_before_listing() {
         let temp = tempdir().expect("tempdir");
-        let db_dir = temp.path().join("doc/test");
+        let db_dir = temp.path().join("doc/08_tracking/test");
         fs::create_dir_all(&db_dir).expect("create db dir");
         let db_path = db_dir.join("test_db.sdn");
         let runs_path = db_dir.join("test_db_runs.sdn");

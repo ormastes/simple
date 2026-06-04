@@ -5340,6 +5340,7 @@ class SimpleWindowManager {
     }
     panel.appendChild(this._makeQualityRecommendations(items));
     panel.appendChild(this._makeQualityReportPreview(items));
+    panel.appendChild(this._makeQualityEvidencePreview());
     panel.appendChild(this._makeQualityActions());
   }
 
@@ -5691,17 +5692,47 @@ class SimpleWindowManager {
     const preview = document.createElement('div');
     preview.className = 'wm-quality-computed-color-preview';
     preview.dataset.qualityComputedColor = 'live';
-    [
+    const rows = [
       ['Window', '.wm-window.focused, .wm-window', 'window'],
       ['Command', '.wm-command-palette, .wm-title-input, .wm-command-bar', 'command'],
       ['Taskbar', '#wm-taskbar, .wm-taskbar-item', 'taskbar'],
       ['Widget', '.wm-desktop-widget, .widget-panel', 'widget']
-    ].forEach(([label, selector, kind]) => {
+    ].map(([label, selector, kind]) => {
       const colors = this._qualityComputedSurfaceColors(selector, fallbackBg, fallbackText);
       const ratio = this._qualityContrastRatio(colors.bg, colors.fg);
       preview.appendChild(this._makeQualityComputedColorMetric(label, ratio + ':1', kind, ratio >= 4.5));
+      return { label, kind, ratio, grade: this._qualityContrastGrade(ratio) };
     });
+    preview.appendChild(this._makeQualityContrastMatrix(rows));
     return preview;
+  }
+
+  _qualityContrastGrade(ratio) {
+    if (ratio >= 7) return 'AAA pass';
+    if (ratio >= 4.5) return 'AA pass';
+    return 'Fail';
+  }
+
+  _makeQualityContrastMatrix(rows) {
+    const matrix = document.createElement('div');
+    matrix.className = 'wm-quality-contrast-matrix';
+    matrix.dataset.qualityContrastMatrix = 'surface';
+    rows.forEach((row) => {
+      const item = document.createElement('span');
+      item.className = 'wm-quality-contrast-matrix-item' + (row.ratio >= 4.5 ? ' good' : ' warn');
+      item.dataset.contrastSurface = row.kind;
+      item.dataset.contrastGrade = row.grade;
+      const label = document.createElement('span');
+      label.className = 'wm-quality-contrast-matrix-label';
+      label.textContent = row.label;
+      const value = document.createElement('strong');
+      value.className = 'wm-quality-contrast-matrix-value';
+      value.textContent = row.ratio + ':1 ' + row.grade;
+      item.appendChild(label);
+      item.appendChild(value);
+      matrix.appendChild(item);
+    });
+    return matrix;
   }
 
   _makeQualityComputedColorMetric(label, value, kind, good) {
@@ -6543,12 +6574,29 @@ class SimpleWindowManager {
 
   _simpleOsIconSeeds() {
     return [
-      { id: 'simple.os', label: 'Simple OS', icon: 'S' },
-      { id: 'simple.wm', label: 'Simple WM', icon: 'W' },
+      { id: 'simple.os', label: 'Simple OS', icon: 'S', brand: 'os', shape: 'round', conversion: 'brand-to-round' },
+      { id: 'simple.wm', label: 'Simple WM', icon: 'W', brand: 'wm', shape: 'round', conversion: 'brand-to-round' },
       { id: 'simple.ide', label: 'Simple IDE', icon: 'I' },
       { id: 'simple.browser', label: 'Browser', icon: 'B' },
-      { id: 'simple.square', label: 'Square app', icon: 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22%3E%3Crect width=%2264%22 height=%2264%22 fill=%22%237dd3fc%22/%3E%3Ctext x=%2232%22 y=%2239%22 text-anchor=%22middle%22 font-size=%2226%22 font-family=%22Arial%22 font-weight=%22700%22 fill=%22%230a0a0f%22%3ES%3C/text%3E%3C/svg%3E' }
+      { id: 'simple.square', label: 'Square app', icon: 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22%3E%3Crect width=%2264%22 height=%2264%22 fill=%22%237dd3fc%22/%3E%3Ctext x=%2232%22 y=%2239%22 text-anchor=%22middle%22 font-size=%2226%22 font-family=%22Arial%22 font-weight=%22700%22 fill=%22%230a0a0f%22%3ES%3C/text%3E%3C/svg%3E', shape: 'square-source', conversion: 'square-to-round' }
     ];
+  }
+
+  _makeSimpleBrandIcon(baseClass, item) {
+    const icon = this._makeRoundIcon(baseClass, item.icon);
+    icon.classList.add('wm-simple-brand-mark');
+    icon.dataset.iconBrand = item.brand || 'simple';
+    icon.dataset.iconShape = item.shape || 'round';
+    icon.dataset.iconConversion = item.conversion || 'brand-to-round';
+    const core = document.createElement('span');
+    core.className = 'wm-simple-brand-mark-core';
+    core.setAttribute('aria-hidden', 'true');
+    const node = document.createElement('span');
+    node.className = 'wm-simple-brand-mark-node';
+    node.setAttribute('aria-hidden', 'true');
+    icon.appendChild(core);
+    icon.appendChild(node);
+    return icon;
   }
 
   _makeQualityComputedIconKitPreview() {
@@ -6559,11 +6607,19 @@ class SimpleWindowManager {
       const tile = document.createElement('span');
       tile.className = 'wm-quality-computed-icon-kit-item';
       tile.dataset.iconKitId = item.id;
-      tile.appendChild(this._makeRoundIcon('wm-quality-computed-icon-kit-icon', item.icon));
+      if (item.shape) tile.dataset.iconShape = item.shape;
+      if (item.conversion) tile.dataset.iconConversion = item.conversion;
+      tile.appendChild(item.brand ? this._makeSimpleBrandIcon('wm-quality-computed-icon-kit-icon', item) : this._makeRoundIcon('wm-quality-computed-icon-kit-icon', item.icon));
       const label = document.createElement('span');
       label.className = 'wm-quality-computed-icon-kit-label';
       label.textContent = item.label;
       tile.appendChild(label);
+      if (item.conversion) {
+        const badge = document.createElement('span');
+        badge.className = 'wm-quality-computed-icon-kit-badge';
+        badge.textContent = item.conversion;
+        tile.appendChild(badge);
+      }
       preview.appendChild(tile);
     });
     return preview;
@@ -9469,6 +9525,41 @@ class SimpleWindowManager {
     return policy;
   }
 
+  _makeQualityEvidencePreview() {
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-evidence-preview';
+    preview.dataset.qualityEvidence = 'review-ready';
+    [
+      ['tokens', 'Theme tokens', '--ui-bg / --ui-text / --ui-motion'],
+      ['dom', 'DOM metrics', 'bounds, hit target, titlebar'],
+      ['fixture', 'Preview fixture', 'build/simple_wm_modern_preview.html'],
+      ['capture', 'Capture path', 'screen capture + copied report']
+    ].forEach(([kind, label, value]) => {
+      preview.appendChild(this._makeQualityEvidenceItem(kind, label, value));
+    });
+    return preview;
+  }
+
+  _makeQualityEvidenceItem(kind, label, value) {
+    const item = document.createElement('span');
+    item.className = 'wm-quality-evidence-item';
+    item.dataset.qualityEvidenceSource = kind;
+    const mark = document.createElement('span');
+    mark.className = 'wm-quality-evidence-mark';
+    mark.setAttribute('aria-hidden', 'true');
+    mark.textContent = label.charAt(0);
+    const name = document.createElement('span');
+    name.className = 'wm-quality-evidence-label';
+    name.textContent = label;
+    const detail = document.createElement('strong');
+    detail.className = 'wm-quality-evidence-value';
+    detail.textContent = value;
+    item.appendChild(mark);
+    item.appendChild(name);
+    item.appendChild(detail);
+    return item;
+  }
+
   _makeQualityActions() {
     const actions = document.createElement('div');
     actions.className = 'wm-quality-actions';
@@ -9479,6 +9570,7 @@ class SimpleWindowManager {
       ['material', 'Reduce glass'],
       ['energy_low', 'Low power'],
       ['energy_critical', 'Critical saver'],
+      ['calm_mode', 'Calm mode'],
       ['layout', 'Open layout tools'],
       ['contrast', 'Accent palette'],
       ['copy_report', 'Copy report']
@@ -9506,6 +9598,14 @@ class SimpleWindowManager {
     } else if (action === 'energy_critical') {
       this.setEnergyPreference('critical');
       this._sendWindowCmd('quality_action', { quality_action: action, value: 'critical' });
+    } else if (action === 'calm_mode') {
+      this.setQuietModePreference('on');
+      this.setBackdropMotionPreference('static');
+      this.setBackdropIntensityPreference('quiet');
+      this.setChromeVerbosityPreference('minimal');
+      this.setDockVisibilityPreference('auto');
+      this.setFeedbackPreference('subtle');
+      this._sendWindowCmd('quality_action', { quality_action: action, value: 'quiet_static_minimal' });
     } else if (action === 'layout') {
       this._toggleWindowArrangePalette(true);
       this._sendWindowCmd('quality_action', { quality_action: action, value: 'layout_tools' });

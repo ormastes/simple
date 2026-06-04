@@ -3,7 +3,7 @@
 # High-level entry point that auto-selects the best available rendering
 # backend and delegates all drawing operations to it.
 #
-# Backend priority: cuda > rocm > metal > qualcomm > vulkan > opengl > intel > webgpu > software > cpu_simd > cpu
+# Backend priority: cuda > rocm > metal > qualcomm > vulkan > opencl > opengl > intel > webgpu > software > cpu_simd > cpu
 #
 # Usage:
 #   use std.gpu.engine2d.engine.{Engine2D}
@@ -18,6 +18,7 @@ use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended}
 use std.gpu.engine2d.backend_cpu.{CpuBackend}
 use std.gpu.engine2d.backend_cuda.{CudaBackend}
 use std.gpu.engine2d.backend_vulkan.{VulkanBackend}
+use std.gpu.engine2d.backend_opencl.{OpenClBackend}
 use std.gpu.engine2d.backend_opengl.{OpenGLBackend}
 use std.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.gpu.engine2d.backend_baremetal.{BaremetalBackend}
@@ -74,7 +75,7 @@ class Engine2D:
     static fn create(width: i32, height: i32) -> Engine2D:
         """Create engine with auto-detected best backend.
 
-        Tries backends in priority order: cuda, vulkan, opengl, software, cpu.
+        Tries backends in priority order: cuda, rocm, metal, qualcomm, vulkan, opencl, opengl, intel, webgpu, software, cpu.
         Falls back to cpu if all others fail.
 
         Args:
@@ -93,7 +94,7 @@ class Engine2D:
         Args:
             width: Framebuffer width in pixels
             height: Framebuffer height in pixels
-            backend_name: One of "cuda", "vulkan", "opengl", "software", "cpu_simd", "simd_cpu", "cpu", "baremetal"
+            backend_name: One of "cuda", "rocm", "metal", "vulkan", "opencl", "opengl", "software", "cpu_simd", "simd_cpu", "cpu", "baremetal"
 
         Returns:
             Initialized Engine2D (falls back to cpu on failure)
@@ -110,6 +111,11 @@ class Engine2D:
             var vulkan = VulkanBackend.create()
             if vulkan.init(width, height):
                 return Engine2D(backend: vulkan, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "vulkan")
+
+        if backend_name == "opencl":
+            var opencl = OpenClBackend.create()
+            if opencl.init(width, height):
+                return Engine2D(backend: opencl, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "opencl")
 
         if backend_name == "opengl":
             var opengl = OpenGLBackend.create()
@@ -216,6 +222,12 @@ class Engine2D:
                 return BackendProbeResult.unavailable("vulkan", b.last_error)
             return BackendProbeResult.unavailable("vulkan", "vkCreateInstance failed or no devices")
 
+        if backend_name == "opencl":
+            var b = OpenClBackend.create()
+            if b.init(width, height):
+                return b.last_probe
+            return b.last_probe
+
         if backend_name == "metal":
             var b = MetalBackend.create()
             if b.init(width, height):
@@ -264,7 +276,7 @@ class Engine2D:
     static fn detect_best_backend() -> text:
         """Detect the best available backend.
 
-        Priority: cuda > rocm > metal > qualcomm > vulkan > opengl > intel > webgpu > software > cpu
+        Priority: cuda > rocm > metal > qualcomm > vulkan > opencl > opengl > intel > webgpu > software > cpu
 
         Returns:
             Backend name string
@@ -294,6 +306,11 @@ class Engine2D:
         if vulkan.init(1, 1):
             vulkan.shutdown()
             return "vulkan"
+
+        var opencl = OpenClBackend.create()
+        if opencl.init(1, 1):
+            opencl.shutdown()
+            return "opencl"
 
         var opengl = OpenGLBackend.create()
         if opengl.init(1, 1):
@@ -339,6 +356,11 @@ class Engine2D:
         if vulkan.init(1, 1):
             available.push("vulkan")
             vulkan.shutdown()
+
+        var opencl = OpenClBackend.create()
+        if opencl.init(1, 1):
+            available.push("opencl")
+            opencl.shutdown()
 
         var opengl = OpenGLBackend.create()
         if opengl.init(1, 1):

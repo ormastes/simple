@@ -37,7 +37,7 @@ pub fn update_test_database(
     results: &[TestFileResult],
     all_tests_run: bool,
 ) -> Result<(), String> {
-    let db_path = Path::new("doc/test/test_db.sdn");
+    let db_path = Path::new("doc/08_tracking/test/test_db.sdn");
 
     debug_log!(
         DebugLevel::Basic,
@@ -183,7 +183,7 @@ pub fn update_test_database(
     );
 
     // Generate test result documentation
-    let doc_dir = Path::new("doc/test");
+    let doc_dir = Path::new("doc/08_tracking/test");
     test_db::generate_test_result_docs(&test_db, doc_dir)?;
     debug_log!(
         DebugLevel::Basic,
@@ -197,7 +197,7 @@ pub fn update_test_database(
 
 /// Update test database with Rust test results
 pub fn update_rust_test_database(results: &[TestFileResult]) -> Result<(), String> {
-    let db_path = Path::new("doc/test/test_db.sdn");
+    let db_path = Path::new("doc/08_tracking/test/test_db.sdn");
 
     debug_log!(
         DebugLevel::Basic,
@@ -288,7 +288,7 @@ pub fn update_rust_test_database(results: &[TestFileResult]) -> Result<(), Strin
     test_db::save_test_db(db_path, &test_db)?;
 
     // Generate test result documentation
-    let doc_dir = Path::new("doc/test");
+    let doc_dir = Path::new("doc/08_tracking/test");
     test_db::generate_test_result_docs(&test_db, doc_dir)?;
 
     Ok(())

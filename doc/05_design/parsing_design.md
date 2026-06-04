@@ -195,7 +195,7 @@ SDN files (`.sdn`) are captured after parsing and written directly:
 
 Use cases:
 - Configuration files (`simple.toml` equivalent)
-- Test databases (`doc/test/test_db.sdn`)
+- Test databases (`doc/08_tracking/test/test_db.sdn`)
 - Feature databases (`doc/02_requirements/feature/feature_db.sdn`)
 - TODO tracking (`doc/todo/todo_db.sdn`)
 
