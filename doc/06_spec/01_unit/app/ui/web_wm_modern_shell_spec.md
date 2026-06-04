@@ -60,7 +60,7 @@ Verifies the first modern Simple Web WM slice at the contract level.
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 685 lines folded for reproduction.
+Runnable source: 691 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -581,12 +581,18 @@ expect(html).to_contain("@keyframes wm-quick-setting-feedback")
 expect(html).to_contain(".wm-live-activity")
 expect(html).to_contain(".wm-live-activity[hidden]")
 expect(html).to_contain(".wm-live-activity[data-live-state='paused']")
+expect(html).to_contain(".wm-live-activity.action-feedback")
 expect(html).to_contain(".wm-live-activity-progress")
+expect(html).to_contain(".wm-live-activity-progress.action-feedback")
 expect(html).to_contain(".wm-live-activity-bar")
 expect(html).to_contain(".wm-live-activity-actions")
 expect(html).to_contain(".wm-live-activity-action")
+expect(html).to_contain(".wm-live-activity-action.action-feedback")
+expect(html).to_contain(".wm-live-activity[data-live-feedback='open'] .wm-live-activity-action[data-live-action='open']")
 expect(html).to_contain(".wm-live-activity-action:focus-visible")
+expect(html).to_contain(":root[data-wm-motion=off] .wm-live-activity.action-feedback")
 expect(html).to_contain("@keyframes wm-live-activity-in")
+expect(html).to_contain("@keyframes wm-live-activity-action-feedback")
 expect(html).to_contain(".wm-system-hud")
 expect(html).to_contain(".wm-system-hud[hidden]")
 expect(html).to_contain(".wm-system-hud-icon")
@@ -758,7 +764,7 @@ expect(html).to_contain("border-radius: 999px")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 1337 lines folded for reproduction.
+Runnable source: 1343 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -2033,6 +2039,12 @@ expect(js).to_contain("wantsLiveActivity")
 expect(js).to_contain("live_activity_open")
 expect(js).to_contain("_makeLiveActivityAction")
 expect(js).to_contain("_activateLiveActivityAction")
+expect(js).to_contain("_markLiveActivityActionFeedback")
+expect(js).to_contain("_liveActivityActionFeedbackTimer")
+expect(js).to_contain("dataset.liveFeedback")
+expect(js).to_contain("dataset.liveFeedbackTarget")
+expect(js).to_contain("classList.add('action-feedback')")
+expect(js).to_contain("setTimeout(() => this._toggleLiveActivity(false), 180)")
 expect(js).to_contain("aria-pressed")
 expect(js).to_contain("live_activity_pause")
 expect(js).to_contain("live_activity_resume")
@@ -2108,7 +2120,7 @@ expect(retained).to_contain("Maximize window")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 1308 lines folded for reproduction.
+Runnable source: 1313 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -2368,11 +2380,16 @@ expect(preview).to_contain("Cmd Shift Q")
 expect(preview).to_contain("Quick settings")
 expect(preview).to_contain("aria-label=\"Live activity\"")
 expect(preview).to_contain("data-live-state=\"running\"")
+expect(preview).to_contain("wm-live-activity action-feedback")
+expect(preview).to_contain("data-live-feedback=\"open\"")
+expect(preview).to_contain("data-live-feedback-target=\"open\"")
 expect(preview).to_contain("role=\"progressbar\"")
 expect(preview).to_contain("aria-label=\"Build progress\"")
 expect(preview).to_contain("aria-valuenow=\"64\"")
 expect(preview).to_contain("aria-valuetext=\"64%\"")
+expect(preview).to_contain("wm-live-activity-progress action-feedback")
 expect(preview).to_contain("role=\"group\" aria-label=\"Live activity controls\"")
+expect(preview).to_contain("wm-live-activity-action active action-feedback")
 expect(preview).to_contain("data-live-action=\"pause\"")
 expect(preview).to_contain("data-live-action=\"cancel\"")
 expect(preview).to_contain("aria-label=\"Live activity pause\"")

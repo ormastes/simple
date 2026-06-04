@@ -19,6 +19,77 @@ use compiler.semantics.lint.riscv_rtl_debuggability_lint (lint_riscv_rtl_debugga
 
 # File I/O wrapper
 
+fn lint_is_feature_tracking_db(path: String) -> Bool:
+    val normalized = path.replace("\\", "/")
+    return normalized.ends_with("doc/08_tracking/feature/feature_db.sdn") or normalized.ends_with("feature_db.sdn")
+
+fn lint_parse_csv_fields(line: String) -> [String]:
+    var fields: [String] = []
+    var current = ""
+    var in_quotes = false
+    var i = 0
+    while i < line.len():
+        val ch = line.substring(i, i + 1)
+        if ch == "\"":
+            if in_quotes and i + 1 < line.len() and line.substring(i + 1, i + 2) == "\"":
+                current = current + "\""
+                i = i + 1
+            else:
+                in_quotes = not in_quotes
+        elif ch == "," and not in_quotes:
+            fields.push(current.trim())
+            current = ""
+        else:
+            current = current + ch
+        i = i + 1
+    fields.push(current.trim())
+    fields
+
+fn lint_header_fields(line: String) -> [String]:
+    val parts = line.split("|")
+    if parts.len() < 2:
+        return []
+    lint_parse_csv_fields(parts[1])
+
+fn lint_field_index(header: [String], name: String) -> Int:
+    var i = 0
+    while i < header.len():
+        if header[i].trim() == name:
+            return i
+        i = i + 1
+    -1
+
+fn lint_row_field(header: [String], row: [String], name: String) -> String:
+    val idx = lint_field_index(header, name)
+    if idx < 0 or idx >= row.len():
+        return ""
+    row[idx].trim()
+
+fn lint_is_blank_tracking_value(value: String) -> Bool:
+    val normalized = value.trim().lower()
+    if normalized == "" or normalized == "\"\"":
+        return true
+    if normalized == "none" or normalized == "tbd" or normalized == "-":
+        return true
+    false
+
+fn lint_missing_done_traceability_fields(header: [String], row: [String]) -> [String]:
+    val required = [
+        "requirement",
+        "research",
+        "plan",
+        "architecture",
+        "design",
+        "system_spec",
+        "spec_doc",
+        "implementation",
+    ]
+    var missing: [String] = []
+    for field in required:
+        if lint_is_blank_tracking_value(lint_row_field(header, row, field)):
+            missing.push(field)
+    missing
+
 impl Linter:
     me check_unfold_declaration(path: String, line_num: Int, line: String):
         # Validate unfold declaration: unfold {subpkg1, subpkg2, ...}
@@ -90,6 +161,49 @@ impl Linter:
                 "Direct database file write detected. Use lib.database.{db_type} instead.")
                 .with_fix("Import: use std.database.{db_type} (create_{db_type}_database), then use db.save()")
             self.results.push(LintResult.new(path, line_num, 0, lint))
+
+    me check_feature_tracking_done_gate(path: String, content: String):
+        if not lint_is_feature_tracking_db(path):
+            return
+
+        val lines = content.split("\n")
+        var in_features = false
+        var header: [String] = []
+        var line_num = 1
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed.starts_with("features |"):
+                in_features = true
+                header = lint_header_fields(trimmed)
+                line_num = line_num + 1
+                continue
+
+            if not in_features:
+                line_num = line_num + 1
+                continue
+
+            if trimmed == "" or trimmed.starts_with("#"):
+                line_num = line_num + 1
+                continue
+
+            if not line.starts_with(" ") and not line.starts_with("\t"):
+                in_features = false
+                line_num = line_num + 1
+                continue
+
+            val row = lint_parse_csv_fields(trimmed)
+            val status = lint_row_field(header, row, "status").lower()
+            val valid = lint_row_field(header, row, "valid").lower()
+            if status == "done" and valid != "false":
+                val missing = lint_missing_done_traceability_fields(header, row)
+                if missing.len() > 0:
+                    val id = lint_row_field(header, row, "id")
+                    val lint = Lint.new("TRK001", LintLevel.Deny, LintCategory.Correctness,
+                        "Done feature '{id}' missing required traceability fields: {missing.join(\", \")}")
+                        .with_fix("Fill requirement, research, plan, architecture, design, system_spec, spec_doc, and implementation before marking the feature done")
+                    self.results.push(LintResult.new(path, line_num, 0, lint))
+
+            line_num = line_num + 1
 
     me check_spipe_quality(path: String, content: String):
         if not is_test_like_file(path):
