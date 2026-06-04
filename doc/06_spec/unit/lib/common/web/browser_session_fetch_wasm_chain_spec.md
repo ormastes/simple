@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 212 | 212 | 0 | 0 |
+| 213 | 213 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1291,6 +1291,132 @@ match session.take_pending_request():
                 match session.eval_script("out"):
                     Ok(value):
                         expect(_display_js(value)).to_equal("directArrayBufferImports:27:instantiated:1:27:1:env:foo:function:object:compiledArrayBufferImports:27:1:27:1:env:foo:function:compiledInstantiate:instantiated:1:27:object")
+                    Err(err):
+                        expect("unexpected second commit js error: {err}").to_equal("")
+            Err(err):
+                expect("unexpected second commit error: {err}").to_equal("")
+    nil:
+        expect("missing compiled fetch request").to_equal("")
+```
+
+</details>
+
+#### compares fetched arrayBuffer direct and compiled invalid header catches
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `queued`
+
+3. Err
+   - Expected: "unexpected queue error: {err}" equals ``
+
+4. Ok
+   - Expected: _display_js(value) equals ``
+
+5. Err
+   - Expected: "unexpected pre-commit js error: {err}" equals ``
+
+6. Some
+   - Expected: request.kind equals `fetch`
+   - Expected: request.url equals `https://example.com/direct-bad.wasm`
+
+7. Ok
+
+8. Ok
+   - Expected: _display_js(value) equals `directArrayBufferInvalid:16:invalid:invalid-wasm-header`
+
+9. Err
+   - Expected: "unexpected first commit js error: {err}" equals ``
+
+10. Err
+   - Expected: "unexpected first commit error: {err}" equals ``
+   - Expected: "missing direct fetch request" equals ``
+
+11. Some
+   - Expected: request.kind equals `fetch`
+   - Expected: request.url equals `https://example.com/compiled-bad.wasm`
+
+12. Ok
+
+13. Ok
+   - Expected: _display_js(value) equals `directArrayBufferInvalid:16:invalid:invalid-wasm-header:compiledArrayBufferIn... (full value in folded executable source)`
+
+14. Err
+   - Expected: "unexpected second commit js error: {err}" equals ``
+
+15. Err
+   - Expected: "unexpected second commit error: {err}" equals ``
+   - Expected: "missing compiled fetch request" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 66 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val queued = session.eval_script("var out = ''; var directBytes = 0; var compiledBytes = 0; window.fetch('/direct-bad.wasm').then(function(r) { return r.arrayBuffer(); }).then(function(bytes) { directBytes = bytes.byteLength; return WebAssembly.instantiate(bytes); }).then(function(result) { out = 'unexpectedDirect:' + result.status; }).catch(function(err) { out = 'directArrayBufferInvalid:' + directBytes + ':' + err.status + ':' + err.error; }); window.fetch('/compiled-bad.wasm').then(function(r) { return r.arrayBuffer(); }).then(function(bytes) { compiledBytes = bytes.byteLength; return WebAssembly.compile(bytes); }).then(function(module) { out = out + ':unexpectedCompiled:' + module.byteLength; }).catch(function(err) { out = out + ':compiledArrayBufferInvalid:' + compiledBytes + ':' + err.status + ':' + err.error; }); 'queued'")
+match queued:
+    Ok(value):
+        expect(_display_js(value)).to_equal("queued")
+    Err(err):
+        expect("unexpected queue error: {err}").to_equal("")
+match session.eval_script("out"):
+    Ok(value):
+        expect(_display_js(value)).to_equal("")
+    Err(err):
+        expect("unexpected pre-commit js error: {err}").to_equal("")
+
+match session.take_pending_request():
+    Some(request):
+        expect(request.kind).to_equal("fetch")
+        expect(request.url).to_equal("https://example.com/direct-bad.wasm")
+        val committed = session.commit_network_response(BrowserResponse.create(
+            request_id: request.id,
+            kind: "fetch",
+            url: request.url,
+            status: 200,
+            headers: "Content-Type: application/wasm\n",
+            body: "0061736d00000000",
+            error: ""
+        ))
+        match committed:
+            Ok(_):
+                match session.eval_script("out"):
+                    Ok(value):
+                        expect(_display_js(value)).to_equal("directArrayBufferInvalid:16:invalid:invalid-wasm-header")
+                    Err(err):
+                        expect("unexpected first commit js error: {err}").to_equal("")
+            Err(err):
+                expect("unexpected first commit error: {err}").to_equal("")
+    nil:
+        expect("missing direct fetch request").to_equal("")
+
+match session.take_pending_request():
+    Some(request):
+        expect(request.kind).to_equal("fetch")
+        expect(request.url).to_equal("https://example.com/compiled-bad.wasm")
+        val committed = session.commit_network_response(BrowserResponse.create(
+            request_id: request.id,
+            kind: "fetch",
+            url: request.url,
+            status: 200,
+            headers: "Content-Type: application/wasm\n",
+            body: "0061736d00000000",
+            error: ""
+        ))
+        match committed:
+            Ok(_):
+                match session.eval_script("out"):
+                    Ok(value):
+                        expect(_display_js(value)).to_equal("directArrayBufferInvalid:16:invalid:invalid-wasm-header:compiledArrayBufferInvalid:16:invalid:invalid-wasm-header")
                     Err(err):
                         expect("unexpected second commit js error: {err}").to_equal("")
             Err(err):
@@ -11421,8 +11547,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 212 |
-| Active scenarios | 212 |
+| Total scenarios | 213 |
+| Active scenarios | 213 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

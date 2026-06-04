@@ -5965,6 +5965,72 @@ Test checklist:
 - `git diff --check`
 - `find doc/06_spec -name '*_spec.spl' | wc -l`
 
+BrowserSession scripts now compare fetched-arrayBuffer direct instantiated-module
+import descriptors and compiled-module import descriptors in one queued script.
+The first network commit completes only
+`WebAssembly.instantiate(bytes, imports)` and records byte length `27`,
+instantiated status, import count `1`, module byte length `27`, descriptor
+`env:foo:function`, and the instance exports object. The second network commit
+appends `WebAssembly.compile(bytes)` descriptor evidence with byte length `27`,
+import count `1`, the same descriptor, and successful
+`WebAssembly.instantiate(module, imports)` evidence. The focused fetch/WASM chain
+spec is now passing `212/212`; adjacent WASM host, WebGPU JS/WASM, and Node API
+specs remain passing at `107/107`, `106/106`, and `275/275`; `src/lib` remains
+passing with `405 warning(s)` across `5936` files. Docgen regenerated the
+mirrored manual with `Total scenarios | 212 |`; diff hygiene and the
+`doc/06_spec` layout gate are checked before push.
+
+BrowserSession fetched arrayBuffer direct/compiled invalid-header catch parity
+continuation:
+
+Completion checklist:
+
+- Add one same-script BrowserSession scenario that queues both
+  `window.fetch('/direct-bad.wasm')` and
+  `window.fetch('/compiled-bad.wasm')`, so direct invalid instantiate and
+  compiled invalid compile rejection paths run through the same event/promise
+  scheduler.
+- Verify the pre-commit script result is exactly `queued`, and verify `out`
+  remains empty before any network response is committed.
+- Verify the first pending network request is a fetch for
+  `https://example.com/direct-bad.wasm`.
+- Commit the invalid-header module response for `/direct-bad.wasm` and verify
+  the direct `arrayBuffer()` byte length is `16`.
+- Verify `WebAssembly.instantiate(bytes)` does not write an unexpected success
+  result and instead routes through `catch` with status `invalid` and error
+  `invalid-wasm-header`.
+- Verify the second pending network request is a fetch for
+  `https://example.com/compiled-bad.wasm`.
+- Commit the same invalid-header module response for `/compiled-bad.wasm` and
+  verify the compiled `arrayBuffer()` byte length is `16`.
+- Verify `WebAssembly.compile(bytes)` does not write an unexpected compiled
+  module result and instead routes through `catch` with status `invalid` and
+  error `invalid-wasm-header`.
+- Verify the final output preserves the direct invalid-header rejection evidence
+  and appends the compiled invalid-header rejection evidence in deterministic
+  order.
+- Regenerate the mirrored scenario manual and confirm its total scenario count
+  increments from `212` to `213`.
+- Move docgen's old `01_unit` output onto the tracked `unit` manual path, remove
+  generated adjacent-spec noise, restore generated tracking-index churn, and keep
+  only the intended spec/manual/plan files in the commit.
+- Confirm no executable `*_spec.spl` files remain under `doc/06_spec` before
+  commit or push.
+- Push only after the local focused, adjacent, `src/lib`, diff, and layout gates
+  pass against the rebased `main` worktree.
+
+Test checklist:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+- `git diff --check`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
 BrowserSession fetched invalid arrayBuffer instantiate catch continuation:
  
  - `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
