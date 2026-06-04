@@ -4230,9 +4230,9 @@ Completion checklist:
 - [x] Run focused compile and focused fetch/WASM chain spec.
 - [x] Run adjacent browser/WASM and JS conformance checks.
 - [x] Run final layout, whitespace, file-count, and status gates.
-- [ ] Commit test/manual/plan update.
-- [ ] Push guarded main update after fetch/rebase/file-count safety check.
-- [ ] Commit and push sync-complete checklist update.
+- [x] Commit test/manual/plan update.
+- [x] Push guarded main update after fetch/rebase/file-count safety check.
+- [x] Commit and push sync-complete checklist update.
 
 Tests checklist:
 
@@ -4267,6 +4267,10 @@ BrowserSession now proves `TextEncoder.encodeInto` writes through nonzero-offset
 decodes the truncated view as `modu`, and rejects the short view payload through
 `WebAssembly.validate`. This is a coverage-only continuation; no runtime change
 was required.
+
+Sync evidence: coverage commit `ad5f72c08b` pushed to `main` after guarded
+fetch/rebase with file count stable at `78119`; sync-complete checklist update
+was committed and pushed immediately afterward.
 
 BrowserSession TextDecoder constructor option property continuation:
 
