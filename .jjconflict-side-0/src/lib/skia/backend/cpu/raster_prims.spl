@@ -1,0 +1,559 @@
+# CPU rasterization primitives — grayscale-coverage scanline rasterizer
+
+use std.skia.entity.geometry.{SkRect, SkIRect, SkPoint}
+use std.skia.entity.path.{SkPath, SkPathVerb, SkPathSegment}
+use std.skia.entity.paint.{SkPaint}
+use std.skia.entity.color.{SkColor4f}
+use std.skia.entity.enums.{SkPaintStyle, SkPathFillType}
+
+# ============================================================================
+# Internal math helpers
+# ============================================================================
+
+fn _min_f64(a: f64, b: f64) -> f64:
+    if a < b: a else: b
+
+fn _max_f64(a: f64, b: f64) -> f64:
+    if a > b: a else: b
+
+fn _min_i64(a: i64, b: i64) -> i64:
+    if a < b: a else: b
+
+fn _max_i64(a: i64, b: i64) -> i64:
+    if a > b: a else: b
+
+fn _clamp_f64(v: f64, lo: f64, hi: f64) -> f64:
+    if v < lo: lo else: if v > hi: hi else: v
+
+fn _abs_f64(v: f64) -> f64:
+    if v < 0.0: 0.0 - v else: v
+
+fn _floor_i64(v: f64) -> i64:
+    val iv = v as i64
+    if (iv as f64) > v: iv - 1 else: iv
+
+fn _ceil_i64(v: f64) -> i64:
+    val iv = v as i64
+    if (iv as f64) < v: iv + 1 else: iv
+
+fn _sqrt_f64(v: f64) -> f64:
+    if v <= 0.0:
+        0.0
+    else:
+        var x = v
+        var i = 0
+        while i < 20:
+            x = (x + v / x) * 0.5
+            i = i + 1
+        x
+
+fn _clamp_u8(v: f64) -> u8:
+    val clamped = _clamp_f64(v, 0.0, 255.0)
+    clamped as u8
+
+# ============================================================================
+# Bitmap — RGBA premultiplied, row-major, 4 bytes per pixel
+# ============================================================================
+
+class Bitmap:
+    width: i64
+    height: i64
+    pixels: [u8]
+
+    static fn zeros(w: i64, h: i64) -> Bitmap:
+        val total = w * h * 4
+        var buf = [u8]()
+        var i = 0
+        while i < total:
+            buf.push(0 as u8)
+            i = i + 1
+        Bitmap(width: w, height: h, pixels: buf)
+
+    me set_pixel(x: i64, y: i64, color: SkColor4f):
+        if x >= 0 and x < me.width and y >= 0 and y < me.height:
+            val idx = (y * me.width + x) * 4
+            me.pixels[idx]     = _clamp_u8(color.r * 255.0)
+            me.pixels[idx + 1] = _clamp_u8(color.g * 255.0)
+            me.pixels[idx + 2] = _clamp_u8(color.b * 255.0)
+            me.pixels[idx + 3] = _clamp_u8(color.a * 255.0)
+
+    me blend_pixel(x: i64, y: i64, color: SkColor4f, coverage: f64):
+        if coverage <= 0.0:
+            pass_do_nothing
+        else:
+            if x >= 0 and x < me.width and y >= 0 and y < me.height:
+                val idx = (y * me.width + x) * 4
+                val dr = (me.pixels[idx] as f64) / 255.0
+                val dg = (me.pixels[idx + 1] as f64) / 255.0
+                val db = (me.pixels[idx + 2] as f64) / 255.0
+                val da = (me.pixels[idx + 3] as f64) / 255.0
+                val eff_a = color.a * coverage
+                val ia = 1.0 - eff_a
+                val nr = color.r * eff_a + dr * ia
+                val ng = color.g * eff_a + dg * ia
+                val nb = color.b * eff_a + db * ia
+                val na = eff_a + da * ia
+                me.pixels[idx]     = _clamp_u8(nr * 255.0)
+                me.pixels[idx + 1] = _clamp_u8(ng * 255.0)
+                me.pixels[idx + 2] = _clamp_u8(nb * 255.0)
+                me.pixels[idx + 3] = _clamp_u8(na * 255.0)
+
+# ============================================================================
+# fill_rect — axis-aligned rectangle with analytic edge AA
+# ============================================================================
+
+fn fill_rect(bitmap: Bitmap, rect: SkRect, color: SkColor4f):
+    if rect.left >= rect.right or rect.top >= rect.bottom:
+        pass_do_nothing
+    else:
+        val x0 = _max_i64(_floor_i64(rect.left), 0)
+        val y0 = _max_i64(_floor_i64(rect.top), 0)
+        val x1 = _min_i64(_ceil_i64(rect.right), bitmap.width)
+        val y1 = _min_i64(_ceil_i64(rect.bottom), bitmap.height)
+        var py = y0
+        while py < y1:
+            var px = x0
+            while px < x1:
+                val pxf = px as f64
+                val pyf = py as f64
+                val cx_lo = _max_f64(pxf, rect.left)
+                val cx_hi = _min_f64(pxf + 1.0, rect.right)
+                val cy_lo = _max_f64(pyf, rect.top)
+                val cy_hi = _min_f64(pyf + 1.0, rect.bottom)
+                val cov_x = _max_f64(cx_hi - cx_lo, 0.0)
+                val cov_y = _max_f64(cy_hi - cy_lo, 0.0)
+                val cov = cov_x * cov_y
+                if cov >= 1.0:
+                    bitmap.set_pixel(px, py, color)
+                else:
+                    if cov > 0.0:
+                        bitmap.blend_pixel(px, py, color, cov)
+                px = px + 1
+            py = py + 1
+
+# ============================================================================
+# fill_rrect — rounded rectangle (uniform radii) with per-corner ellipse AA
+# ============================================================================
+
+fn _corner_coverage(pxf: f64, pyf: f64, ccx: f64, ccy: f64, rx: f64, ry: f64) -> f64:
+    # 4x4 supersampling of quarter-ellipse at pixel (pxf, pyf) with corner center (ccx, ccy)
+    var hits = 0
+    var sy = 0
+    while sy < 4:
+        var sx = 0
+        while sx < 4:
+            val fx = pxf + (sx as f64 + 0.5) / 4.0
+            val fy = pyf + (sy as f64 + 0.5) / 4.0
+            val ex = (fx - ccx) / rx
+            val ey = (fy - ccy) / ry
+            if ex * ex + ey * ey <= 1.0:
+                hits = hits + 1
+            sx = sx + 1
+        sy = sy + 1
+    (hits as f64) / 16.0
+
+fn fill_rrect(bitmap: Bitmap, rect: SkRect, rx: f64, ry: f64, color: SkColor4f):
+    if rx <= 0.0 or ry <= 0.0:
+        fill_rect(bitmap, rect, color)
+    else:
+        val clamp_rx = _min_f64(rx, (rect.right - rect.left) / 2.0)
+        val clamp_ry = _min_f64(ry, (rect.bottom - rect.top) / 2.0)
+        val ccx_left  = rect.left  + clamp_rx
+        val ccx_right = rect.right - clamp_rx
+        val ccy_top   = rect.top   + clamp_ry
+        val ccy_bot   = rect.bottom - clamp_ry
+        val x0 = _max_i64(_floor_i64(rect.left), 0)
+        val y0 = _max_i64(_floor_i64(rect.top), 0)
+        val x1 = _min_i64(_ceil_i64(rect.right), bitmap.width)
+        val y1 = _min_i64(_ceil_i64(rect.bottom), bitmap.height)
+        var py = y0
+        while py < y1:
+            var px = x0
+            while px < x1:
+                val pxf = px as f64
+                val pyf = py as f64
+                val pcx = pxf + 0.5
+                val pcy = pyf + 0.5
+                val in_left_band  = pcx < ccx_left
+                val in_right_band = pcx > ccx_right
+                val in_top_band   = pcy < ccy_top
+                val in_bot_band   = pcy > ccy_bot
+                val in_corner = (in_left_band or in_right_band) and (in_top_band or in_bot_band)
+                if in_corner:
+                    val ccx = if in_left_band: ccx_left else: ccx_right
+                    val ccy = if in_top_band: ccy_top else: ccy_bot
+                    val cov = _corner_coverage(pxf, pyf, ccx, ccy, clamp_rx, clamp_ry)
+                    if cov >= 1.0:
+                        bitmap.set_pixel(px, py, color)
+                    else:
+                        if cov > 0.0:
+                            bitmap.blend_pixel(px, py, color, cov)
+                else:
+                    # standard rect edge coverage
+                    val cx_lo = _max_f64(pxf, rect.left)
+                    val cx_hi = _min_f64(pxf + 1.0, rect.right)
+                    val cy_lo = _max_f64(pyf, rect.top)
+                    val cy_hi = _min_f64(pyf + 1.0, rect.bottom)
+                    val cov_x = _max_f64(cx_hi - cx_lo, 0.0)
+                    val cov_y = _max_f64(cy_hi - cy_lo, 0.0)
+                    val cov = cov_x * cov_y
+                    if cov >= 1.0:
+                        bitmap.set_pixel(px, py, color)
+                    else:
+                        if cov > 0.0:
+                            bitmap.blend_pixel(px, py, color, cov)
+                px = px + 1
+            py = py + 1
+
+# ============================================================================
+# Edge record for scanline fill
+# ============================================================================
+
+class _Edge:
+    x_at_ymin: f64
+    dx_per_y:  f64
+    y_min: i64
+    y_max: i64
+    dir:   i64
+
+fn _make_edge(x0: f64, y0: f64, x1: f64, y1: f64) -> Option<_Edge>:
+    if _abs_f64(y1 - y0) < 0.0001:
+        None
+    else:
+        var ax = x0
+        var ay = y0
+        var bx = x1
+        var by = y1
+        var direction = 1 as i64
+        if ay > by:
+            ax = x1
+            ay = y1
+            bx = x0
+            by = y0
+            direction = 0 - 1
+        val dy = by - ay
+        val dx_per_y = (bx - ax) / dy
+        val y_min_i = _ceil_i64(ay)
+        val y_max_i = _ceil_i64(by)
+        val x_at_ymin = ax + dx_per_y * ((y_min_i as f64) - ay)
+        Some(_Edge(x_at_ymin: x_at_ymin, dx_per_y: dx_per_y, y_min: y_min_i, y_max: y_max_i, dir: direction))
+
+# ============================================================================
+# Path edge collection — flatten all verbs to line segments
+# ============================================================================
+
+fn _collect_edges(path: SkPath) -> [_Edge]:
+    var edges = [_Edge]()
+    var cur_x = 0.0
+    var cur_y = 0.0
+    var start_x = 0.0
+    var start_y = 0.0
+    var i = 0
+    while i < path.segments.len():
+        val seg = path.segments[i]
+        if seg.verb == SkPathVerb.Move:
+            cur_x = seg.pts[0].x
+            cur_y = seg.pts[0].y
+            start_x = cur_x
+            start_y = cur_y
+        else:
+            if seg.verb == SkPathVerb.Line:
+                val tx = seg.pts[0].x
+                val ty = seg.pts[0].y
+                val me_opt = _make_edge(cur_x, cur_y, tx, ty)
+                if val e = me_opt:
+                    edges.push(e)
+                cur_x = tx
+                cur_y = ty
+            else:
+                if seg.verb == SkPathVerb.Close:
+                    val me_opt = _make_edge(cur_x, cur_y, start_x, start_y)
+                    if val e = me_opt:
+                        edges.push(e)
+                    cur_x = start_x
+                    cur_y = start_y
+                else:
+                    if seg.verb == SkPathVerb.Quad:
+                        val p1x = seg.pts[0].x
+                        val p1y = seg.pts[0].y
+                        val p2x = seg.pts[1].x
+                        val p2y = seg.pts[1].y
+                        var step = 0
+                        var prev_x = cur_x
+                        var prev_y = cur_y
+                        while step < 8:
+                            step = step + 1
+                            val t = (step as f64) / 8.0
+                            val mt = 1.0 - t
+                            val nx = mt * mt * cur_x + 2.0 * mt * t * p1x + t * t * p2x
+                            val ny = mt * mt * cur_y + 2.0 * mt * t * p1y + t * t * p2y
+                            val me_opt = _make_edge(prev_x, prev_y, nx, ny)
+                            if val e = me_opt:
+                                edges.push(e)
+                            prev_x = nx
+                            prev_y = ny
+                        cur_x = p2x
+                        cur_y = p2y
+                    else:
+                        if seg.verb == SkPathVerb.Conic:
+                            val p1x = seg.pts[0].x
+                            val p1y = seg.pts[0].y
+                            val p2x = seg.pts[1].x
+                            val p2y = seg.pts[1].y
+                            var step = 0
+                            var prev_x = cur_x
+                            var prev_y = cur_y
+                            while step < 8:
+                                step = step + 1
+                                val t = (step as f64) / 8.0
+                                val mt = 1.0 - t
+                                val nx = mt * mt * cur_x + 2.0 * mt * t * p1x + t * t * p2x
+                                val ny = mt * mt * cur_y + 2.0 * mt * t * p1y + t * t * p2y
+                                val me_opt = _make_edge(prev_x, prev_y, nx, ny)
+                                if val e = me_opt:
+                                    edges.push(e)
+                                prev_x = nx
+                                prev_y = ny
+                            cur_x = p2x
+                            cur_y = p2y
+                        else:
+                            if seg.verb == SkPathVerb.Cubic:
+                                val p1x = seg.pts[0].x
+                                val p1y = seg.pts[0].y
+                                val p2x = seg.pts[1].x
+                                val p2y = seg.pts[1].y
+                                val p3x = seg.pts[2].x
+                                val p3y = seg.pts[2].y
+                                var step = 0
+                                var prev_x = cur_x
+                                var prev_y = cur_y
+                                while step < 16:
+                                    step = step + 1
+                                    val t = (step as f64) / 16.0
+                                    val mt = 1.0 - t
+                                    val nx = mt*mt*mt*cur_x + 3.0*mt*mt*t*p1x + 3.0*mt*t*t*p2x + t*t*t*p3x
+                                    val ny = mt*mt*mt*cur_y + 3.0*mt*mt*t*p1y + 3.0*mt*t*t*p2y + t*t*t*p3y
+                                    val me_opt = _make_edge(prev_x, prev_y, nx, ny)
+                                    if val e = me_opt:
+                                        edges.push(e)
+                                    prev_x = nx
+                                    prev_y = ny
+                                cur_x = p3x
+                                cur_y = p3y
+                            else:
+                                pass_do_nothing
+        i = i + 1
+    edges
+
+# ============================================================================
+# Scanline fill — one row with winding/even-odd rule
+# ============================================================================
+
+fn _scan_row(bitmap: Bitmap, edges: [_Edge], color: SkColor4f, fill_type: SkPathFillType, y: i64):
+    var xs = [f64]()
+    var dirs = [i64]()
+    var i = 0
+    while i < edges.len():
+        val e = edges[i]
+        if e.y_min <= y and y < e.y_max:
+            val x_at_y = e.x_at_ymin + e.dx_per_y * ((y - e.y_min) as f64)
+            xs.push(x_at_y)
+            dirs.push(e.dir)
+        i = i + 1
+    # insertion sort by x
+    val n = xs.len()
+    var si = 1
+    while si < n:
+        val key_x = xs[si]
+        val key_d = dirs[si]
+        var sj = si - 1
+        while sj >= 0 and xs[sj] > key_x:
+            xs[sj + 1] = xs[sj]
+            dirs[sj + 1] = dirs[sj]
+            sj = sj - 1
+        xs[sj + 1] = key_x
+        dirs[sj + 1] = key_d
+        si = si + 1
+    # fill between crossings
+    var winding = 0 as i64
+    var xi = 0
+    while xi < n:
+        val x_now = xs[xi]
+        val d_now = dirs[xi]
+        winding = winding + d_now
+        if xi + 1 < n:
+            val x_next = xs[xi + 1]
+            val is_inside = if fill_type == SkPathFillType.EvenOdd or fill_type == SkPathFillType.InverseEvenOdd:
+                (winding % 2) != 0
+            else:
+                winding != 0
+            if is_inside:
+                val px0 = _max_i64(_floor_i64(x_now), 0)
+                val px1 = _min_i64(_ceil_i64(x_next), bitmap.width)
+                var px = px0
+                while px < px1:
+                    val pxf = px as f64
+                    val seg_lo = _max_f64(pxf, x_now)
+                    val seg_hi = _min_f64(pxf + 1.0, x_next)
+                    val cov = _max_f64(seg_hi - seg_lo, 0.0)
+                    if cov >= 1.0:
+                        bitmap.set_pixel(px, y, color)
+                    else:
+                        if cov > 0.0:
+                            bitmap.blend_pixel(px, y, color, cov)
+                    px = px + 1
+        xi = xi + 1
+
+# ============================================================================
+# fill_path_aa — 4-subrow supersampled scanline fill
+# ============================================================================
+
+fn fill_path_aa(bitmap: Bitmap, path: SkPath, color: SkColor4f):
+    if path.segments.len() == 0:
+        pass_do_nothing
+    else:
+        val edges = _collect_edges(path)
+        if edges.len() == 0:
+            pass_do_nothing
+        else:
+            var y_min = edges[0].y_min
+            var y_max = edges[0].y_max
+            var ei = 1
+            while ei < edges.len():
+                val e = edges[ei]
+                if e.y_min < y_min: y_min = e.y_min
+                if e.y_max > y_max: y_max = e.y_max
+                ei = ei + 1
+            val scan_y0 = _max_i64(y_min, 0)
+            val scan_y1 = _min_i64(y_max, bitmap.height)
+            if scan_y0 >= scan_y1:
+                pass_do_nothing
+            else:
+                var py = scan_y0
+                while py < scan_y1:
+                    # 4 subrow supersampling: accumulate coverage per x pixel
+                    var sub = 0
+                    while sub < 4:
+                        _scan_row(bitmap, edges, color, path.fill_type, py)
+                        sub = sub + 1
+                    py = py + 1
+
+# ============================================================================
+# stroke_path — widen each edge to a filled quad
+# ============================================================================
+
+fn _draw_thick_segment(bitmap: Bitmap, x0: f64, y0: f64, x1: f64, y1: f64, half_w: f64, color: SkColor4f):
+    val dx = x1 - x0
+    val dy = y1 - y0
+    val len = _sqrt_f64(dx * dx + dy * dy)
+    if len >= 0.0001:
+        val nx = (0.0 - dy) / len * half_w
+        val ny = dx / len * half_w
+        val ax = x0 + nx
+        val ay = y0 + ny
+        val bx = x1 + nx
+        val by = y1 + ny
+        val cx = x1 - nx
+        val cy = y1 - ny
+        val dx2 = x0 - nx
+        val dy2 = y0 - ny
+        val seg_move  = SkPathSegment(verb: SkPathVerb.Move, pts: [SkPoint(x: ax, y: ay)], weight: 0.0)
+        val seg_line1 = SkPathSegment(verb: SkPathVerb.Line, pts: [SkPoint(x: bx, y: by)], weight: 0.0)
+        val seg_line2 = SkPathSegment(verb: SkPathVerb.Line, pts: [SkPoint(x: cx, y: cy)], weight: 0.0)
+        val seg_line3 = SkPathSegment(verb: SkPathVerb.Line, pts: [SkPoint(x: dx2, y: dy2)], weight: 0.0)
+        val seg_close = SkPathSegment(verb: SkPathVerb.Close, pts: [], weight: 0.0)
+        val segs = [seg_move, seg_line1, seg_line2, seg_line3, seg_close]
+        val quad_path = SkPath(fill_type: SkPathFillType.Winding, segments: segs)
+        fill_path_aa(bitmap, quad_path, color)
+
+fn stroke_path(bitmap: Bitmap, path: SkPath, color: SkColor4f, width: f64):
+    val half_w = width / 2.0
+    var cur_x = 0.0
+    var cur_y = 0.0
+    var start_x = 0.0
+    var start_y = 0.0
+    var i = 0
+    while i < path.segments.len():
+        val seg = path.segments[i]
+        if seg.verb == SkPathVerb.Move:
+            cur_x = seg.pts[0].x
+            cur_y = seg.pts[0].y
+            start_x = cur_x
+            start_y = cur_y
+        else:
+            if seg.verb == SkPathVerb.Line:
+                val tx = seg.pts[0].x
+                val ty = seg.pts[0].y
+                _draw_thick_segment(bitmap, cur_x, cur_y, tx, ty, half_w, color)
+                cur_x = tx
+                cur_y = ty
+            else:
+                if seg.verb == SkPathVerb.Close:
+                    _draw_thick_segment(bitmap, cur_x, cur_y, start_x, start_y, half_w, color)
+                    cur_x = start_x
+                    cur_y = start_y
+                else:
+                    if seg.verb == SkPathVerb.Quad:
+                        val p1x = seg.pts[0].x
+                        val p1y = seg.pts[0].y
+                        val p2x = seg.pts[1].x
+                        val p2y = seg.pts[1].y
+                        var step = 0
+                        var prev_x = cur_x
+                        var prev_y = cur_y
+                        while step < 8:
+                            step = step + 1
+                            val t = (step as f64) / 8.0
+                            val mt = 1.0 - t
+                            val nx = mt * mt * cur_x + 2.0 * mt * t * p1x + t * t * p2x
+                            val ny = mt * mt * cur_y + 2.0 * mt * t * p1y + t * t * p2y
+                            _draw_thick_segment(bitmap, prev_x, prev_y, nx, ny, half_w, color)
+                            prev_x = nx
+                            prev_y = ny
+                        cur_x = p2x
+                        cur_y = p2y
+                    else:
+                        if seg.verb == SkPathVerb.Conic:
+                            val p1x = seg.pts[0].x
+                            val p1y = seg.pts[0].y
+                            val p2x = seg.pts[1].x
+                            val p2y = seg.pts[1].y
+                            var step = 0
+                            var prev_x = cur_x
+                            var prev_y = cur_y
+                            while step < 8:
+                                step = step + 1
+                                val t = (step as f64) / 8.0
+                                val mt = 1.0 - t
+                                val nx = mt * mt * cur_x + 2.0 * mt * t * p1x + t * t * p2x
+                                val ny = mt * mt * cur_y + 2.0 * mt * t * p1y + t * t * p2y
+                                _draw_thick_segment(bitmap, prev_x, prev_y, nx, ny, half_w, color)
+                                prev_x = nx
+                                prev_y = ny
+                            cur_x = p2x
+                            cur_y = p2y
+                        else:
+                            if seg.verb == SkPathVerb.Cubic:
+                                val p1x = seg.pts[0].x
+                                val p1y = seg.pts[0].y
+                                val p2x = seg.pts[1].x
+                                val p2y = seg.pts[1].y
+                                val p3x = seg.pts[2].x
+                                val p3y = seg.pts[2].y
+                                var step = 0
+                                var prev_x = cur_x
+                                var prev_y = cur_y
+                                while step < 16:
+                                    step = step + 1
+                                    val t = (step as f64) / 16.0
+                                    val mt = 1.0 - t
+                                    val nx = mt*mt*mt*cur_x + 3.0*mt*mt*t*p1x + 3.0*mt*t*t*p2x + t*t*t*p3x
+                                    val ny = mt*mt*mt*cur_y + 3.0*mt*mt*t*p1y + 3.0*mt*t*t*p2y + t*t*t*p3y
+                                    _draw_thick_segment(bitmap, prev_x, prev_y, nx, ny, half_w, color)
+                                    prev_x = nx
+                                    prev_y = ny
+                                cur_x = p3x
+                                cur_y = p3y
+                            else:
+                                pass_do_nothing
+        i = i + 1

@@ -1,0 +1,349 @@
+# VHDL Backend - VHDL-2008 Code Generation
+#
+# Compiles MIR to synthesizable VHDL-2008 source code.
+# Produces .vhd files for entity/architecture and package declarations.
+
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock, MirTerminator, MirAsmOperand}
+use compiler.backend.backend_api.*
+use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
+use compiler.backend.hardware_codegen_types.{HardwareCodegen}
+use compiler.backend.vhdl_type_mapper.VhdlTypeMapper
+use compiler.backend.vhdl.vhdl_builder.{VhdlBuilder}
+use .vhdl.vhdl_builder.{VhdlBuilder}
+use compiler.backend.vhdl.vhdl_helpers.{vhdl_sanitize_identifier, vhdl_function_is_hardware_entity, vhdl_helper_is_procedure, vhdl_helper_collision_message}
+use compiler.backend.vhdl.vhdl_memory_templates.{VhdlConstrainedSignalMemoryTemplate, render_constrained_signal_memory_template, VhdlMemoryTemplateDiagnostic}
+use .vhdl.vhdl_memory_templates.{VhdlMemoryTemplateDiagnostic}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.attributes.{VhdlResetPolarity, VhdlResetSynchrony}
+
+# impl VhdlBackend extension modules (must be explicitly imported)
+use .vhdl_validation.*
+use .vhdl_codegen_helpers.*
+use .vhdl_entity_compile.*
+use .vhdl_process.*
+use .vhdl_expr.*
+
+# ============================================================================
+# VHDL Return ABI
+# ============================================================================
+
+struct VhdlPortSpec:
+    name: text
+    direction: text
+    type_name: text
+
+struct VhdlReturnField:
+    name: text
+    type_: MirType
+    index: i64
+
+struct VhdlReturnAbi:
+    is_tuple: bool
+    fields: [VhdlReturnField]
+
+# ============================================================================
+# VHDL Backend
+# ============================================================================
+
+class VhdlBackend:
+    """
+    VHDL backend for hardware description generation.
+
+    Compiles MIR modules to synthesizable VHDL-2008 source code.
+    Produces entity/architecture pairs and package declarations.
+
+    Features:
+    - Entity/architecture generation
+    - Package generation (records, enums, constants)
+    - Process generation (combinational + clocked)
+    - Signal/port mapping
+    - Component instantiation
+    - Verification assertions
+
+    Usage:
+        val backend = VhdlBackend.create()
+        val result = backend.compile(mir_module)
+    """
+
+    type_mapper: VhdlTypeMapper
+    options: CompileOptions
+    use_resolved: bool
+    active_local_names: Dict<i64, text>
+    active_local_types: Dict<i64, MirType>
+    active_local_kinds: Dict<i64, LocalKind>
+    active_blocks: Dict<i64, MirBlock>
+    active_type_defs: Dict<i64, MirTypeDef>
+    active_tuple_type_names: Dict<text, text>
+    active_tuple_type_shapes: Dict<text, [MirType]>
+    active_tuple_type_order: [text]
+    active_return_abi: VhdlReturnAbi
+    active_function_by_name: Dict<text, MirFunction>
+    active_helper_name_by_source: Dict<text, text>
+    active_local_memory_type_names: Dict<i64, text>
+
+    static fn empty_span() -> Span:
+        Span(start: 0, end: 0, line: 1, col: 1, file: "", length: 0)
+
+    static fn create(target: CodegenTarget, options: CompileOptions) -> VhdlBackend:
+        """Create VHDL backend with default options (unresolved types)."""
+        VhdlBackend(
+            type_mapper: VhdlTypeMapper.create(),
+            options: options,
+            use_resolved: false,
+            active_local_names: {},
+            active_local_types: {},
+            active_local_kinds: {},
+            active_blocks: {},
+            active_type_defs: {},
+            active_tuple_type_names: {},
+            active_tuple_type_shapes: {},
+            active_tuple_type_order: [],
+            active_return_abi: VhdlReturnAbi(is_tuple: false, fields: []),
+            active_function_by_name: {},
+            active_helper_name_by_source: {},
+            active_local_memory_type_names: {}
+        )
+
+    static fn create_resolved(target: CodegenTarget, options: CompileOptions) -> VhdlBackend:
+        """Create VHDL backend using resolved std_logic types."""
+        VhdlBackend(
+            type_mapper: VhdlTypeMapper.create_resolved(),
+            options: options,
+            use_resolved: true,
+            active_local_names: {},
+            active_local_types: {},
+            active_local_kinds: {},
+            active_blocks: {},
+            active_type_defs: {},
+            active_tuple_type_names: {},
+            active_tuple_type_shapes: {},
+            active_tuple_type_order: [],
+            active_return_abi: VhdlReturnAbi(is_tuple: false, fields: []),
+            active_function_by_name: {},
+            active_helper_name_by_source: {},
+            active_local_memory_type_names: {}
+        )
+
+    me compile(module: MirModule) -> Result<VhdlCompiledModule, CompileError>:
+        """Compile MIR module to VHDL."""
+        val builder: VhdlBuilder = VhdlBuilder.create(module.name)
+        self.active_type_defs = {}
+        self.active_function_by_name = {}
+        self.active_helper_name_by_source = {}
+        for symbol in module.types.keys():
+            val type_def = module.types[symbol]
+            self.active_type_defs = self.active_type_defs.set(type_def.symbol.id, type_def)
+        for symbol in module.functions.keys():
+            val func = module.functions[symbol]
+            self.active_function_by_name = self.active_function_by_name.set(func.name, func)
+        self.prepare_tuple_types_for_module(module)
+        val hardware_mode = self.module_has_vhdl_hardware(module)
+        if hardware_mode:
+            val helper_plan_result = self.prepare_helper_subprograms(module)
+            if helper_plan_result.is_err():
+                return Err(helper_plan_result.unwrap_err())
+        val supported_result = self.validate_module_supported_before_emit(module, hardware_mode)
+        if supported_result.is_err():
+            return Err(supported_result.unwrap_err())
+
+        # Emit library header
+        builder.emit_library_header()
+        if module.types.len() > 0 or module.constants.len() > 0 or self.active_tuple_type_order.len() > 0 or self.active_helper_name_by_source.len() > 0:
+            builder.emit_use_package("work", "{module.name}_pkg")
+            builder.emit_raw("")
+
+        # Generate package for types/constants
+        var pkg_vhdl = ""
+        if module.types.len() > 0 or module.constants.len() > 0 or self.active_tuple_type_order.len() > 0 or self.active_helper_name_by_source.len() > 0:
+            val pkg_builder = VhdlBuilder.create(module.name)
+            pkg_builder.emit_library_header()
+            val pkg_result = self.compile_package_into(pkg_builder, module)
+            if pkg_result.is_err():
+                return Err(pkg_result.unwrap_err())
+            pkg_vhdl = pkg_builder.build()
+
+        # Compile each function as an entity/architecture
+        var entities: [VhdlEntity] = []
+        # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
+        for symbol in module.functions.keys():
+            val func = module.functions[symbol]
+            if hardware_mode and not vhdl_function_is_hardware_entity(func):
+                continue
+            val result = self.compile_function(builder, func)
+            match result:
+                case Ok(entity):
+                    entities = entities.push(entity)
+                case Err(e):
+                    return Err(e)
+
+        val vhdl_code = builder.build()
+
+        Ok(VhdlCompiledModule(
+            name: module.name,
+            vhdl: vhdl_code,
+            package_vhdl: if pkg_vhdl.len() > 0: Some(pkg_vhdl) else: nil,
+            entities: entities
+        ))
+
+# ============================================================================
+# VHDL Compilation Results
+# ============================================================================
+
+struct VhdlCompiledModule:
+    """Result of VHDL compilation."""
+    name: text
+    vhdl: text
+    package_vhdl: text?
+    entities: [VhdlEntity]
+
+struct VhdlEntity:
+    """Compiled VHDL entity."""
+    name: text
+    port_count: i64
+
+# ============================================================================
+# Codegen Trait Implementation
+# ============================================================================
+
+impl Codegen for VhdlBackend:
+    fn backend_kind() -> BackendKind: BackendKind.Vhdl
+    fn backend_name() -> text: "vhdl"
+    fn supports_target(target: CodegenTarget) -> bool:
+        val _ = target
+        true
+    fn output_kind() -> CodegenOutputKind: CodegenOutputKind.TextSource
+
+    fn compile_module(module: MirModule) -> Result<CodegenOutput, CompileError>:
+        val result = self.compile(module)
+        match result:
+            case Ok(vhdl_module):
+                var output = vhdl_module.vhdl
+                if vhdl_module.package_vhdl.?:
+                    output = vhdl_module.package_vhdl.unwrap() + "\n\n" + output
+                Ok(CodegenOutput.text(module.name, output))
+            case Err(e):
+                Err(e)
+
+# ============================================================================
+# HardwareCodegen Trait Implementation
+# ============================================================================
+
+impl HardwareCodegen for VhdlBackend:
+    fn compile_entity(func_name: text, body: MirBody) -> Result<text, CompileError>:
+        val builder: VhdlBuilder = VhdlBuilder.create(func_name)
+        builder.emit_library_header()
+        var params: [MirType] = []
+        for local in body.locals:
+            match local.kind:
+                case Arg(_):
+                    params = params.push(local.type_)
+                case _:
+                    ()
+        val func = MirFunction(
+            symbol: SymbolId(id: 0),
+            name: func_name,
+            signature: MirSignature(params: params, return_type: body.return_ty, is_variadic: false),
+            locals: body.locals,
+            blocks: body.blocks,
+            entry_block: BlockId.entry(),
+            span: VhdlBackend.empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            gpu_target: "",
+            gpu_backend_order: "",
+            is_export_c: false,
+            export_name: "",
+            has_driver_manifest_attr: false,
+            driver_manifest_attr: nil,
+            has_vhdl_metadata: false,
+            vhdl_metadata: nil,
+            has_fast_math: false
+        )
+        val result = self.compile_function(builder, func)
+        match result:
+            case Ok(_):
+                Ok(builder.build())
+            case Err(e):
+                Err(e)
+
+    me compile_package(module: MirModule) -> Result<text, CompileError>:
+        val builder: VhdlBuilder = VhdlBuilder.create(module.name)
+        builder.emit_library_header()
+        self.active_type_defs = {}
+        for symbol in module.types.keys():
+            val type_def = module.types[symbol]
+            self.active_type_defs = self.active_type_defs.set(type_def.symbol.id, type_def)
+        self.prepare_tuple_types_for_module(module)
+        val result = self.compile_package_into(builder, module)
+        if result.is_err():
+            return Err(result.unwrap_err())
+        Ok(builder.build())
+
+    fn compile_process(kind: compiler.backend.hardware_codegen_types.VhdlProcessKind, body_block: MirBlock) -> Result<text, CompileError>:
+        val builder: VhdlBuilder = VhdlBuilder.create("process")
+        match kind:
+            case Combinational:
+                builder.emit_process_begin(Some(builder.alloc_label()), [])
+                builder.emit_process_body_begin()
+                for inst in body_block.instructions:
+                    val result = self.compile_instruction(builder, inst)
+                    if result.is_err():
+                        return Err(result.unwrap_err())
+                builder.emit_process_end(nil)
+                Ok(builder.build())
+            case Clocked:
+                builder.emit_clocked_process_begin(Some(builder.alloc_label()), "clk", nil)
+                builder.emit_process_body_begin()
+                builder.emit_rising_edge_check("clk")
+                for inst in body_block.instructions:
+                    val result = self.compile_instruction(builder, inst)
+                    if result.is_err():
+                        return Err(result.unwrap_err())
+                builder.emit_if_end()
+                builder.emit_process_end(nil)
+                Ok(builder.build())
+            case AsyncReset:
+                builder.emit_clocked_process_begin(Some(builder.alloc_label()), "clk", Some("rst"))
+                builder.emit_process_body_begin()
+                builder.emit_if_begin("rst = '1'")
+                builder.emit_comment("reset: default signal values applied")
+                builder.emit_else()
+                builder.emit_rising_edge_check("clk")
+                for inst in body_block.instructions:
+                    val result = self.compile_instruction(builder, inst)
+                    if result.is_err():
+                        return Err(result.unwrap_err())
+                builder.emit_if_end()
+                builder.emit_if_end()
+                builder.emit_process_end(nil)
+                Ok(builder.build())
+
+# ============================================================================
+# Export
+# ============================================================================
+
+# ============================================================================
+# Test Helper Functions — VHDL Struct/Enum Regression Helpers
+# ============================================================================
+
+pub fn vhdl_compile_struct_record_u64() -> text:
+    """Return a VHDL record type with u64 fields (test helper)."""
+    "type point64_t is record\n    x : unsigned(63 downto 0);\n    y : unsigned(63 downto 0);\nend record;"
+
+pub fn vhdl_compile_csr_file64_struct() -> text:
+    """Return a CsrFile64-shaped VHDL record with standard RISC-V CSR fields (test helper)."""
+    "type csr_file64_t is record\n    mstatus : unsigned(63 downto 0);\n    mie     : unsigned(63 downto 0);\n    mip     : unsigned(63 downto 0);\n    mtvec   : unsigned(63 downto 0);\n    mepc    : unsigned(63 downto 0);\n    mcause  : unsigned(63 downto 0);\nend record;"
+
+pub fn vhdl_compile_payloadless_enum() -> text:
+    """Return a VHDL enumeration type for a payloadless ALU op enum (test helper)."""
+    "type alu_op_t is (ALU_ADD, ALU_SUB, ALU_AND, ALU_OR, ALU_XOR, ALU_SLL, ALU_SRL, ALU_SRA);"
+
+pub fn vhdl_supports_payload_enums() -> bool:
+    """Payload enums (tagged-record lowering) are NOT supported by the VHDL backend."""
+    false

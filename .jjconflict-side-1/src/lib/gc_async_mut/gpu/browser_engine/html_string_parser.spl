@@ -1,0 +1,137 @@
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+
+pub fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
+    var root = BeDomNode.document()
+    var body = BeDomNode.element(1, "body")
+    body.children.push(BeDomNode.text_node(2, html))
+    root.children.push(body)
+    root
+
+pub fn browser_renderer_normalize_style_rules(css_text: text) -> text:
+    _normalize_css_nesting(_flatten_at_blocks(css_text))
+
+pub fn browser_renderer_normalize_style_blocks(html: text) -> text:
+    val lower = html.lower()
+    var out = ""
+    var pos: i64 = 0
+    while pos < html.len():
+        val style_pos = _find_from(lower, "<style", pos)
+        if style_pos < 0:
+            out = out + html.substring(pos, html.len())
+            break
+        val open_end = _find_from(lower, ">", style_pos)
+        val close = _find_from(lower, "</style", open_end + 1)
+        if open_end < 0 or close < 0:
+            out = out + html.substring(pos, html.len())
+            break
+        out = out + html.substring(pos, open_end + 1)
+        out = out + browser_renderer_normalize_style_rules(html.substring(open_end + 1, close))
+        pos = close
+    out
+
+fn _flatten_at_blocks(css: text) -> text:
+    var out = css
+    out = out.replace("@layer components {", "")
+    out = out.replace("@layer utilities {", "")
+    # Known-valid @supports conditions: strip the wrapper, keep the inner rules.
+    out = out.replace("@supports (display: grid) {", "")
+    out = out.replace("@supports (display: flex) {", "")
+    out = out.replace("@supports (text-overflow: ellipsis) {", "")
+    out = out.replace("@supports (text-transform: uppercase) {", "")
+    out = out.replace("@supports selector(:has()) {", "")
+    # Handle @supports not (...) — strip the wrapper, keep inner rules (condition is false → rules apply via not).
+    out = _strip_supports_not_blocks(out)
+    # Strip unknown/invalid @supports blocks entirely (including their inner rules).
+    out = _strip_unknown_supports_blocks(out)
+    out
+
+fn _find_from(s: text, needle: text, pos: i64) -> i64:
+    if pos <= 0:
+        return s.index_of(needle)
+    if pos >= s.len():
+        return -1
+    val tail = s.substring(pos, s.len())
+    val rel = tail.index_of(needle)
+    if rel < 0:
+        return -1
+    pos + rel
+
+fn _strip_supports_not_blocks(css: text) -> text:
+    # Replace "@supports not (...) { ... }" by keeping the inner rules (not-false = apply).
+    var out = ""
+    var pos: i64 = 0
+    while pos < css.len():
+        val at_pos = _find_from(css, "@supports not", pos)
+        if at_pos < 0:
+            out = out + css.substring(pos, css.len())
+            break
+        out = out + css.substring(pos, at_pos)
+        val open = _find_from(css, "{", at_pos)
+        if open < 0:
+            out = out + css.substring(at_pos, css.len())
+            break
+        val close = _find_from(css, "}", open)
+        if close < 0:
+            out = out + css.substring(at_pos, css.len())
+            break
+        # Keep the inner content (without the wrapper braces)
+        out = out + css.substring(open + 1, close)
+        pos = close + 1
+    out
+
+fn _strip_unknown_supports_blocks(css: text) -> text:
+    # Strip any remaining "@supports (...) { ... }" blocks entirely.
+    var out = ""
+    var pos: i64 = 0
+    while pos < css.len():
+        val at_pos = _find_from(css, "@supports", pos)
+        if at_pos < 0:
+            out = out + css.substring(pos, css.len())
+            break
+        out = out + css.substring(pos, at_pos)
+        val open = _find_from(css, "{", at_pos)
+        if open < 0:
+            out = out + css.substring(at_pos, css.len())
+            break
+        val close = _find_from(css, "}", open)
+        if close < 0:
+            out = out + css.substring(at_pos, css.len())
+            break
+        # Skip the entire block (condition not recognized = strip)
+        pos = close + 1
+    out
+
+fn _normalize_css_nesting(css: text) -> text:
+    val amp = css.index_of("&")
+    if amp < 0:
+        return css
+    val outer_open = css.index_of("{")
+    if outer_open < 0:
+        return css
+    val parent = css.substring(0, outer_open).trim()
+    var base_decls = ""
+    var nested = ""
+    var pos = outer_open + 1
+    while pos < css.len():
+        val next_amp = _find_from(css, "&", pos)
+        if next_amp < 0:
+            val tail = css.substring(pos, css.len()).replace("}", "").trim()
+            if tail.len() > 0:
+                base_decls = base_decls + tail
+            break
+        val before = css.substring(pos, next_amp).trim()
+        if before.len() > 0:
+            base_decls = base_decls + " " + before
+        val nested_open = _find_from(css, "{", next_amp)
+        val nested_close = _find_from(css, "}", nested_open + 1)
+        if nested_open < 0 or nested_close < 0:
+            break
+        val sel_tail = css.substring(next_amp + 1, nested_open).trim()
+        val decl = css.substring(nested_open + 1, nested_close).trim()
+        val sep = if sel_tail.starts_with(".") or sel_tail.starts_with("#") or sel_tail.starts_with(":"): "" else: " "
+        nested = nested + parent + sep + sel_tail + " { " + decl + " } "
+        pos = nested_close + 1
+    var out = ""
+    if base_decls.len() > 0:
+        out = parent + " { " + base_decls + " } "
+    out + nested

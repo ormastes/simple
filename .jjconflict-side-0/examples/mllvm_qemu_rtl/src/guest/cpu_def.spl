@@ -1,0 +1,136 @@
+# Guest CPU Definition
+#
+# Architecture-independent abstraction for guest CPU state.
+# Used by both the emulation path (instruction decoding) and
+# the compilation path (target ABI definition).
+
+use core.types.{GuestArch}
+use core.mem_op.{Endian, GuestRegId}
+
+# ============================================================================
+# Guest Register Definition
+# ============================================================================
+
+struct GuestRegDef:
+    """Definition of a single guest CPU register."""
+    id: GuestRegId
+    width: i64              # Register width in bits
+    aliases: [GuestRegAlias]
+
+impl GuestRegDef:
+    static fn new(id: GuestRegId, width: i64) -> GuestRegDef:
+        GuestRegDef(id: id, width: width, aliases: [])
+
+    fn with_alias(alias: GuestRegAlias) -> GuestRegDef:
+        var new_aliases = self.aliases
+        new_aliases.push(alias)
+        GuestRegDef(..self, aliases: new_aliases)
+
+struct GuestRegAlias:
+    """A sub-register alias (e.g., AL is bits [0:7] of AX)."""
+    name: text
+    parent_index: i64       # Index into GuestCpuDef.registers
+    bit_offset: i64         # Starting bit position within parent
+    width: i64              # Width in bits
+
+impl GuestRegAlias:
+    static fn new(name: text, parent_index: i64, bit_offset: i64, width: i64) -> GuestRegAlias:
+        GuestRegAlias(
+            name: name,
+            parent_index: parent_index,
+            bit_offset: bit_offset,
+            width: width
+        )
+
+# ============================================================================
+# Address Space Definition
+# ============================================================================
+
+struct AddrSpaceDef:
+    """Definition of an address space (for Harvard architectures)."""
+    id: i64                 # Address space number (matches IrTcTypeKind.Ptr.addr_space)
+    name: text              # "program", "data", "io"
+    addr_width: i64         # Address width in bits
+    size: i64               # Total addressable size in bytes
+
+impl AddrSpaceDef:
+    static fn new(id: i64, name: text, addr_width: i64, size: i64) -> AddrSpaceDef:
+        AddrSpaceDef(id: id, name: name, addr_width: addr_width, size: size)
+
+# ============================================================================
+# Guest CPU Definition
+# ============================================================================
+
+struct GuestCpuDef:
+    """Complete definition of a guest CPU architecture."""
+    name: text              # "avr", "i8086"
+    arch: GuestArch
+    word_size: i64          # Native word size in bits (8, 16, 32, 64)
+    endian: Endian
+    registers: [GuestRegDef]
+    pc_reg: GuestRegId      # Program counter register
+    sp_reg: GuestRegId?     # Stack pointer (if applicable)
+    flags_reg: GuestRegId?  # Status/flags register
+    addr_spaces: [AddrSpaceDef]
+
+impl GuestCpuDef:
+    fn register_count() -> i64:
+        self.registers.len()
+
+    fn find_register(name: text) -> GuestRegDef?:
+        for reg in self.registers:
+            if reg.id.name == name:
+                return Some(reg)
+        nil
+
+    fn find_addr_space(id: i64) -> AddrSpaceDef?:
+        for as_ in self.addr_spaces:
+            if as_.id == id:
+                return Some(as_)
+        nil
+
+    fn total_register_bits() -> i64:
+        """Total bits of register state to save/restore."""
+        var total: i64 = 0
+        for reg in self.registers:
+            total = total + reg.width
+        total
+
+# ============================================================================
+# Guest State (Runtime)
+# ============================================================================
+
+struct GuestState:
+    """Runtime guest CPU state — holds register values during emulation."""
+    cpu_def: GuestCpuDef
+    reg_values: [i64]       # Register values (one per GuestRegDef)
+    pc: i64                 # Current program counter value
+
+impl GuestState:
+    static fn new(cpu_def: GuestCpuDef) -> GuestState:
+        var values: [i64] = []
+        for _ in 0..cpu_def.registers.len():
+            values.push(0)
+        GuestState(cpu_def: cpu_def, reg_values: values, pc: 0)
+
+    fn get_reg(index: i64) -> i64:
+        self.reg_values[index]
+
+    me set_reg(index: i64, value: i64):
+        # Mask to register width
+        val width = self.cpu_def.registers[index].width
+        val mask = if width >= 64: -1 else: (1 << width) - 1
+        self.reg_values[index] = value & mask
+
+    fn get_reg_by_name(name: text) -> i64?:
+        for i in 0..self.cpu_def.registers.len():
+            if self.cpu_def.registers[i].id.name == name:
+                return Some(self.reg_values[i])
+        nil
+
+    me set_reg_by_name(name: text, value: i64) -> bool:
+        for i in 0..self.cpu_def.registers.len():
+            if self.cpu_def.registers[i].id.name == name:
+                self.set_reg(i, value)
+                return true
+        false

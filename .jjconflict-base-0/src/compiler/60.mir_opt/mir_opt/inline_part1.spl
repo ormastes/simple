@@ -1,0 +1,440 @@
+# Function Inlining
+#
+# Replaces function calls with the function body.
+#
+# Transformation:
+#   fn add_one(x: i64) -> i64:
+#       x + 1
+#
+#   val y = add_one(5)
+#
+# After inlining:
+#   val y = 5 + 1
+#
+# Benefits:
+# - Eliminates call overhead (setup, jump, return)
+# - Enables interprocedural optimization (const fold, CSE across call boundaries)
+# - Improves instruction cache locality
+# - Reduces stack pressure
+#
+# Costs:
+# - Increases code size (trade-off)
+# - May increase compile time
+# - Can hurt I-cache if too aggressive
+#
+# Strategy:
+# - Always inline: tiny functions (< 50 bytes)
+# - Aggressively inline: hot functions (< 500 bytes)
+# - Never inline: recursive functions, large functions
+#
+# Heuristics:
+# - Size threshold (configurable)
+# - Call site count (don't inline if called many times)
+# - Recursion detection (prevent infinite inlining)
+
+use compiler.mir.mir_data.*
+use compiler.mir.mir.*
+use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
+use compiler.mir_opt.mod.{MirPass}
+
+# ============================================================================
+# Inlining Policy
+# ============================================================================
+
+enum InlinePolicy:
+    """
+    Policy for deciding whether to inline a function.
+    """
+    Always          # Inline regardless of size (for tiny functions)
+    Aggressive      # Inline if below threshold (for optimization)
+    Conservative    # Only inline very small functions (for code size)
+    Never           # Don't inline (for debugging, recursive functions)
+
+impl InlinePolicy:
+    fn should_inline(size: i64, threshold: i64) -> bool:
+        """Check if function should be inlined given size."""
+        match self:
+            case Always: true
+            case Aggressive: size <= threshold
+            case Conservative: size <= threshold / 2
+            case Never: false
+
+# ============================================================================
+# Inline Cost Analysis
+# ============================================================================
+
+class InlineCostAnalyzer:
+    """
+    Analyzes the cost/benefit of inlining a function.
+
+    Cost factors:
+    - Function body size (instruction count)
+    - Number of call sites (code size multiplication)
+    - Complexity (loops, branches increase cost)
+
+    Benefit factors:
+    - Call overhead saved
+    - Optimization opportunities enabled
+    - Hot path (frequently executed)
+    """
+    threshold: i64  # Size threshold in "instruction units"
+
+impl InlineCostAnalyzer:
+    static fn new(threshold: i64) -> InlineCostAnalyzer:
+        InlineCostAnalyzer(threshold: threshold)
+
+    fn estimate_function_size(func: MirFunction) -> i64:
+        """
+        Estimate function size in instruction units.
+
+        Simple heuristic: count instructions + weight by complexity.
+        """
+        var size = 0
+
+        for block in func.blocks:
+            # Each instruction adds to size
+            size = size + block.instructions.len()
+
+            # Terminator cost
+            match block.terminator:
+                case Ret(_): size = size + 1
+                case Goto(_): size = size + 1
+                case If(_, _, _): size = size + 2  # Branch is expensive
+                case Switch(_, targets, _): size = size + targets.len()
+                case _: size = size + 1
+
+        size
+
+    fn _is_crypto_primitive(name: text) -> bool:
+        if name.ends_with("rotr32") or name.ends_with("rotl32"):
+            return true
+        if name.ends_with("shr32") or name.ends_with("add_mod32"):
+            return true
+        if name.ends_with("sha256_ch") or name.ends_with("sha256_maj"):
+            return true
+        if name.ends_with("sha256_sigma0") or name.ends_with("sha256_sigma1"):
+            return true
+        if name.ends_with("sha256_Sigma0") or name.ends_with("sha256_Sigma1"):
+            return true
+        if name.ends_with("_aes_sbox") or name.ends_with("_aes_rcon"):
+            return true
+        if name.ends_with("_xxh64_rotl") or name.ends_with("_xxh64_round"):
+            return true
+        if name.ends_with("rotate_left") or name.ends_with("rotate_right"):
+            return true
+        if name.ends_with("_b") or name.ends_with("_u8_at"):
+            return true
+        false
+
+    fn _has_always_inline_marker(func: MirFunction) -> bool:
+        """
+        Frontends currently preserve inline intent in symbol text for MIR-only
+        passes. Accept both explicit markers and known crypto primitive helpers.
+        """
+        func.name.contains("@always_inline") or
+        func.name.contains("#[always_inline]") or
+        func.name.contains("always_inline") or
+        func.name.contains("force_inline") or
+        self._is_crypto_primitive(func.name)
+
+    fn should_inline(func: MirFunction, policy: InlinePolicy) -> bool:
+        """
+        Decide if function should be inlined.
+
+        Checks:
+        1. Size threshold
+        2. Recursion (never inline recursive)
+        3. Policy
+        4. Crypto primitives are always inlined
+        """
+        if self._has_always_inline_marker(func):
+            return true
+
+        val size = self.estimate_function_size(func)
+
+        if self._is_crypto_primitive(func.name):
+            return size <= self.threshold * 4
+
+        # Never inline if too large
+        if size > self.threshold * 2:
+            return false
+
+        # Check policy
+        policy.should_inline(size, self.threshold)
+
+    fn is_recursive(func: MirFunction) -> bool:
+        """
+        Check if function is recursive (calls itself).
+
+        Conservative: returns true if any call matches function name.
+
+        Phase 1B.6 - TODO #132 ✅
+        """
+        # Check if function calls itself
+        val func_name = func.name
+
+        # Scan all instructions for calls to self
+        for block in func.blocks:
+            for instr in block.instructions:
+                match instr.kind:
+                    case Call(_, target, _):
+                        # Check if target is same function
+                        val target_name = self.extract_operand_function_name(target)
+                        if target_name.? and target_name.unwrap() == func_name:
+                            return true
+                    case _:
+                        ()  # Not a call
+
+        false
+
+    fn extract_operand_function_name(op: MirOperand) -> text?:
+        match op.kind:
+            case Const(value, type_):
+                match type_.kind:
+                    case FuncPtr(_):
+                        match value:
+                            case Str(name): Some(name)
+                            case _: nil
+                    case _: nil
+            case _: nil
+
+# ============================================================================
+# Function Inliner
+# ============================================================================
+
+class FunctionInliner:
+    """
+    Performs actual inlining transformation.
+
+    Process:
+    1. Find call instruction
+    2. Copy function body
+    3. Rename locals (avoid conflicts)
+    4. Replace call with inlined body
+    5. Connect control flow
+    """
+    next_local_id: i64
+    inlined_count: i64
+    local_map: Dict<i64, LocalId>
+    generated_locals: [MirLocal]
+
+impl FunctionInliner:
+    static fn new(next_local_id: i64) -> FunctionInliner:
+        FunctionInliner(
+            next_local_id: next_local_id,
+            inlined_count: 0,
+            local_map: {},
+            generated_locals: []
+        )
+
+    me inline_call(
+        caller_block: MirBlock,
+        call_inst_idx: i64,
+        callee: MirFunction,
+        call_dest: LocalId?,
+        args: [MirOperand]
+    ) -> [MirBlock]:
+        """
+        Inline a function call.
+
+        Returns new blocks (caller block split + inlined body).
+
+        Strategy:
+        1. Split caller block at call site
+        2. Copy callee body blocks
+        3. Bind arguments to parameters
+        4. Connect control flow
+        5. Handle return value
+        """
+        if callee.blocks.len() != 1:
+            return [caller_block]
+
+        val callee_block = callee.blocks[0]
+        if not self.can_inline_block(callee_block):
+            return [caller_block]
+
+        var new_instructions: [MirInst] = []
+        self.local_map = {}
+        self.generated_locals = []
+
+        # Copy instructions before call
+        var i = 0
+        while i < call_inst_idx:
+            new_instructions = new_instructions.push(caller_block.instructions[i])
+            i = i + 1
+
+        # Bind parameter locals to caller operands, materializing constants.
+        for local in callee.locals:
+            match local.kind:
+                case Arg(param_idx):
+                    if param_idx < args.len():
+                        val bound = self.bind_argument(local, args[param_idx])
+                        self.local_map[local.id.id] = bound.local
+                        if bound.inst.?:
+                            new_instructions = new_instructions.push(bound.inst.unwrap())
+                    else:
+                        self.local_map[local.id.id] = self.fresh_local_like(local)
+                case _:
+                    self.local_map[local.id.id] = self.fresh_local_like(local)
+
+        # Copy inlined body with all local operands remapped into the caller.
+        for inst in callee_block.instructions:
+            val renamed = self.rename_instruction(inst)
+            new_instructions = new_instructions.push(renamed)
+
+        # Handle return value: check terminator for Return and assign to call_dest
+        match callee_block.terminator:
+            case Ret(ret_op):
+                if call_dest.? and ret_op.?:
+                    val ret_operand = self.rename_operand(ret_op.unwrap())
+                    match ret_operand.kind:
+                        case Copy(src):
+                            new_instructions = new_instructions.push(MirInst(kind: MirInstKind.Copy(call_dest.unwrap(), src), span: nil))
+                        case Move(src):
+                            new_instructions = new_instructions.push(MirInst(kind: MirInstKind.Move(call_dest.unwrap(), src), span: nil))
+                        case Const(cv, ct):
+                            new_instructions = new_instructions.push(MirInst(kind: MirInstKind.Const(call_dest.unwrap(), cv, ct), span: nil))
+            case _: ()
+
+        # Copy instructions after call
+        i = call_inst_idx + 1
+        while i < caller_block.instructions.len():
+            new_instructions = new_instructions.push(caller_block.instructions[i])
+            i = i + 1
+
+        self.inlined_count = self.inlined_count + 1
+
+        [MirBlock(
+            id: caller_block.id,
+            label: caller_block.label,
+            instructions: new_instructions,
+            terminator: caller_block.terminator
+        )]
+
+    fn can_inline_block(block: MirBlock) -> bool:
+        for inst in block.instructions:
+            match inst.kind:
+                case Const(_, _, _): ()
+                case Copy(_, _): ()
+                case Move(_, _): ()
+                case BinOp(_, _, _, _): ()
+                case UnaryOp(_, _, _): ()
+                case CheckedBinOp(_, _, _, _): ()
+                case Alloc(_, _): ()
+                case Load(_, _): ()
+                case Store(_, _): ()
+                case GetElementPtr(_, _, _): ()
+                case Aggregate(_, _, _): ()
+                case GetField(_, _, _): ()
+                case SetField(_, _, _): ()
+                case Cast(_, _, _): ()
+                case Bitcast(_, _, _): ()
+                case Call(_, _, _): ()
+                case Intrinsic(_, _, _): ()
+                case Nop: ()
+                case _: return false
+        match block.terminator:
+            case Ret(_): true
+            case _: false
+
+    me bind_argument(local: MirLocal, arg: MirOperand) -> InlineArgBinding:
+        match arg.kind:
+            case Copy(src):
+                InlineArgBinding(local: src, inst: nil)
+            case Move(src):
+                InlineArgBinding(local: src, inst: nil)
+            case Const(cv, ct):
+                val dest = self.fresh_local_like(local)
+                InlineArgBinding(local: dest, inst: Some(MirInst(kind: MirInstKind.Const(dest, cv, ct), span: nil)))
+
+    me fresh_local_like(local: MirLocal) -> LocalId:
+        val id = self.fresh_local()
+        self.generated_locals = self.generated_locals.push(MirLocal(
+            id: id,
+            name: local.name,
+            type_: local.type_,
+            kind: LocalKind.Temp,
+            is_ghost: local.is_ghost
+        ))
+        id
+
+    fn rename_local(local: LocalId) -> LocalId:
+        if self.local_map.has(local.id):
+            return self.local_map[local.id]
+        local
+
+    fn rename_operand(op: MirOperand) -> MirOperand:
+        match op.kind:
+            case Copy(local):
+                MirOperand(kind: MirOperandKind.Copy(self.rename_local(local)))
+            case Move(local):
+                MirOperand(kind: MirOperandKind.Move(self.rename_local(local)))
+            case Const(_, _):
+                op
+
+    fn rename_operands(ops: [MirOperand]) -> [MirOperand]:
+        var renamed: [MirOperand] = []
+        for op in ops:
+            renamed = renamed.push(self.rename_operand(op))
+        renamed
+
+    me rename_instruction(inst: MirInst) -> MirInst:
+        """
+        Rename locals in instruction to avoid conflicts.
+
+        Creates fresh local IDs for all definitions.
+        For instructions that define a destination, allocate a fresh local ID
+        and substitute it. Uses only local context (no global rename map needed
+        since single-block functions have unique definitions per instruction).
+        """
+        match inst.kind:
+            case Const(dest, value, type_):
+                MirInst(kind: MirInstKind.Const(self.rename_local(dest), value, type_), span: inst.span)
+            case Copy(dest, src):
+                MirInst(kind: MirInstKind.Copy(self.rename_local(dest), self.rename_local(src)), span: inst.span)
+            case Move(dest, src):
+                MirInst(kind: MirInstKind.Move(self.rename_local(dest), self.rename_local(src)), span: inst.span)
+            case BinOp(dest, op, left, right):
+                MirInst(kind: MirInstKind.BinOp(self.rename_local(dest), op, self.rename_operand(left), self.rename_operand(right)), span: inst.span)
+            case UnaryOp(dest, op, operand):
+                MirInst(kind: MirInstKind.UnaryOp(self.rename_local(dest), op, self.rename_operand(operand)), span: inst.span)
+            case CheckedBinOp(dest, op, left, right):
+                MirInst(kind: MirInstKind.CheckedBinOp(self.rename_local(dest), op, self.rename_operand(left), self.rename_operand(right)), span: inst.span)
+            case Alloc(dest, type_):
+                MirInst(kind: MirInstKind.Alloc(self.rename_local(dest), type_), span: inst.span)
+            case Load(dest, ptr):
+                MirInst(kind: MirInstKind.Load(self.rename_local(dest), self.rename_operand(ptr)), span: inst.span)
+            case Store(ptr, value):
+                MirInst(kind: MirInstKind.Store(self.rename_operand(ptr), self.rename_operand(value)), span: inst.span)
+            case GetElementPtr(dest, base, indices):
+                MirInst(kind: MirInstKind.GetElementPtr(self.rename_local(dest), self.rename_operand(base), self.rename_operands(indices)), span: inst.span)
+            case Aggregate(dest, kind, operands):
+                MirInst(kind: MirInstKind.Aggregate(self.rename_local(dest), kind, self.rename_operands(operands)), span: inst.span)
+            case GetField(dest, base, field):
+                MirInst(kind: MirInstKind.GetField(self.rename_local(dest), self.rename_operand(base), field), span: inst.span)
+            case SetField(base, field, value):
+                MirInst(kind: MirInstKind.SetField(self.rename_operand(base), field, self.rename_operand(value)), span: inst.span)
+            case Cast(dest, operand, target):
+                MirInst(kind: MirInstKind.Cast(self.rename_local(dest), self.rename_operand(operand), target), span: inst.span)
+            case Bitcast(dest, operand, target):
+                MirInst(kind: MirInstKind.Bitcast(self.rename_local(dest), self.rename_operand(operand), target), span: inst.span)
+            case Call(dest, func, args):
+                val new_dest = if dest.?: Some(self.rename_local(dest.unwrap())) else: nil
+                MirInst(kind: MirInstKind.Call(new_dest, self.rename_operand(func), self.rename_operands(args)), span: inst.span)
+            case Intrinsic(dest, name, args):
+                val new_dest = if dest.?: Some(self.rename_local(dest.unwrap())) else: nil
+                MirInst(kind: MirInstKind.Intrinsic(new_dest, name, self.rename_operands(args)), span: inst.span)
+            case _:
+                inst
+
+    me fresh_local() -> LocalId:
+        """Allocate a fresh local ID."""
+        val id = self.next_local_id
+        self.next_local_id = self.next_local_id + 1
+        LocalId(id: id)
+
+struct InlineArgBinding:
+    local: LocalId
+    inst: MirInst?
+
+# ============================================================================

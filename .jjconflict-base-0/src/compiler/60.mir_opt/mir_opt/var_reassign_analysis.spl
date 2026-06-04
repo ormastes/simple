@@ -1,0 +1,337 @@
+use compiler.mir.mir_instructions.{MirBlock, MirInst, MirInstKind, MirOperand, MirOperandKind, MirTerminator}
+use compiler.mir.mir_types.{LocalId, MirConstValue, MirType}
+use compiler.interp.execution.tiered_jit.{
+    JitVarOptimizationFacts,
+    jit_var_optimization_fact_list,
+    jit_var_optimization_facts
+}
+
+struct VarReassignAnalysis:
+    has_var_reassignment: bool
+    reassignment_count: i64
+    ssa_transform_safe: bool
+    escape_analyzed: bool
+    no_escape: bool
+    borrow_reassign_safe: bool
+    reason: text
+
+fn local_list_contains(locals: [i64], local_id: i64) -> bool:
+    var i = 0
+    while i < locals.len():
+        if locals[i] == local_id:
+            return true
+        i = i + 1
+    false
+
+fn local_list_push_unique(locals: [i64], local_id: i64) -> [i64]:
+    if local_list_contains(locals, local_id):
+        locals
+    else:
+        locals.push(local_id)
+
+fn local_count_index(local_ids: [i64], local_id: i64) -> i64:
+    var i = 0
+    while i < local_ids.len():
+        if local_ids[i] == local_id:
+            return i
+        i = i + 1
+    -1
+
+fn local_count_increment(local_ids: [i64], counts: [i64], local_id: i64) -> ([i64], [i64]):
+    val idx = local_count_index(local_ids, local_id)
+    if idx < 0:
+        (local_ids.push(local_id), counts.push(1))
+    else:
+        var updated: [i64] = []
+        var i = 0
+        while i < counts.len():
+            if i == idx:
+                updated = updated.push(counts[i] + 1)
+            else:
+                updated = updated.push(counts[i])
+            i = i + 1
+        (local_ids, updated)
+
+fn local_count_value(local_ids: [i64], counts: [i64], local_id: i64) -> i64:
+    val idx = local_count_index(local_ids, local_id)
+    if idx < 0:
+        0
+    else:
+        counts[idx]
+
+fn local_alias_root(keys: [i64], values: [i64], local_id: i64) -> i64:
+    var root = local_id
+    var guard = 0
+    while guard < 64:
+        val idx = local_count_index(keys, root)
+        if idx < 0:
+            return root
+        val next = values[idx]
+        if next == root:
+            return root
+        root = next
+        guard = guard + 1
+    root
+
+fn local_alias_set(keys: [i64], values: [i64], local_id: i64, root_id: i64) -> ([i64], [i64]):
+    val idx = local_count_index(keys, local_id)
+    if idx < 0:
+        (keys.push(local_id), values.push(root_id))
+    else:
+        var updated: [i64] = []
+        var i = 0
+        while i < values.len():
+            if i == idx:
+                updated = updated.push(root_id)
+            else:
+                updated = updated.push(values[i])
+            i = i + 1
+        (keys, updated)
+
+fn local_alias_reset(keys: [i64], values: [i64], local_id: i64) -> ([i64], [i64]):
+    local_alias_set(keys, values, local_id, local_id)
+
+fn var_reassign_operand_local(operand: MirOperand) -> i64?:
+    match operand.kind:
+        case Copy(local):
+            Some(local.id)
+        case Move(local):
+            Some(local.id)
+        case Const(_, _):
+            nil
+
+fn var_reassign_collect_escape_operand(escaped: [i64], operand: MirOperand) -> [i64]:
+    val local = var_reassign_operand_local(operand)
+    if local.?:
+        local_list_push_unique(escaped, local.unwrap())
+    else:
+        escaped
+
+fn var_reassign_collect_escape_operand_with_aliases(escaped: [i64], operand: MirOperand, alias_keys: [i64], alias_values: [i64]) -> [i64]:
+    val local = var_reassign_operand_local(operand)
+    if local.?:
+        local_list_push_unique(escaped, local_alias_root(alias_keys, alias_values, local.unwrap()))
+    else:
+        escaped
+
+fn var_reassign_written_local(inst: MirInst) -> i64?:
+    match inst.kind:
+        case Const(dest, _, _):
+            Some(dest.id)
+        case Copy(dest, _):
+            Some(dest.id)
+        case Move(dest, _):
+            Some(dest.id)
+        case BinOp(dest, _, _, _):
+            Some(dest.id)
+        case UnaryOp(dest, _, _):
+            Some(dest.id)
+        case CheckedBinOp(dest, _, _, _):
+            Some(dest.id)
+        case Alloc(dest, _):
+            Some(dest.id)
+        case Load(dest, _):
+            Some(dest.id)
+        case GetElementPtr(dest, _, _):
+            Some(dest.id)
+        case Aggregate(dest, _, _):
+            Some(dest.id)
+        case GetField(dest, _, _):
+            Some(dest.id)
+        case Cast(dest, _, _):
+            Some(dest.id)
+        case Bitcast(dest, _, _):
+            Some(dest.id)
+        case Call(dest, _, _):
+            if dest.?:
+                Some(dest.unwrap().id)
+            else:
+                nil
+        case CallIndirect(dest, _, _, _):
+            if dest.?:
+                Some(dest.unwrap().id)
+            else:
+                nil
+        case Intrinsic(dest, _, _):
+            if dest.?:
+                Some(dest.unwrap().id)
+            else:
+                nil
+        case Ref(dest, _, _):
+            Some(dest.id)
+        case _:
+            nil
+
+fn var_reassign_collect_inst_escapes(escaped: [i64], inst: MirInst) -> [i64]:
+    var result = escaped
+    match inst.kind:
+        case Store(_, value):
+            result = var_reassign_collect_escape_operand(result, value)
+        case SetField(_, _, value):
+            result = var_reassign_collect_escape_operand(result, value)
+        case Call(_, _, args):
+            for arg in args:
+                result = var_reassign_collect_escape_operand(result, arg)
+        case CallIndirect(_, _, args, _):
+            for arg in args:
+                result = var_reassign_collect_escape_operand(result, arg)
+        case Intrinsic(_, _, args):
+            for arg in args:
+                result = var_reassign_collect_escape_operand(result, arg)
+        case _:
+            pass_do_nothing
+    result
+
+fn var_reassign_collect_inst_escapes_with_aliases(escaped: [i64], inst: MirInst, alias_keys: [i64], alias_values: [i64]) -> [i64]:
+    var result = escaped
+    match inst.kind:
+        case Store(ptr, value):
+            result = var_reassign_collect_escape_operand_with_aliases(result, ptr, alias_keys, alias_values)
+            result = var_reassign_collect_escape_operand_with_aliases(result, value, alias_keys, alias_values)
+        case SetField(base, _, value):
+            result = var_reassign_collect_escape_operand_with_aliases(result, base, alias_keys, alias_values)
+            result = var_reassign_collect_escape_operand_with_aliases(result, value, alias_keys, alias_values)
+        case Call(_, func, args):
+            result = var_reassign_collect_escape_operand_with_aliases(result, func, alias_keys, alias_values)
+            for arg in args:
+                result = var_reassign_collect_escape_operand_with_aliases(result, arg, alias_keys, alias_values)
+        case CallIndirect(_, ptr, args, _):
+            result = var_reassign_collect_escape_operand_with_aliases(result, ptr, alias_keys, alias_values)
+            for arg in args:
+                result = var_reassign_collect_escape_operand_with_aliases(result, arg, alias_keys, alias_values)
+        case Intrinsic(_, _, args):
+            for arg in args:
+                result = var_reassign_collect_escape_operand_with_aliases(result, arg, alias_keys, alias_values)
+        case _:
+            pass_do_nothing
+    result
+
+fn var_reassign_collect_term_escapes(escaped: [i64], term: MirTerminator) -> [i64]:
+    match term:
+        case Ret(value):
+            if value.?:
+                var_reassign_collect_escape_operand(escaped, value.unwrap())
+            else:
+                escaped
+        case CallTerminator(_, _, args, _, _):
+            var result = escaped
+            for arg in args:
+                result = var_reassign_collect_escape_operand(result, arg)
+            result
+        case _:
+            escaped
+
+fn var_reassign_collect_term_escapes_with_aliases(escaped: [i64], term: MirTerminator, alias_keys: [i64], alias_values: [i64]) -> [i64]:
+    match term:
+        case Ret(value):
+            if value.?:
+                var_reassign_collect_escape_operand_with_aliases(escaped, value.unwrap(), alias_keys, alias_values)
+            else:
+                escaped
+        case If(cond, _, _):
+            var_reassign_collect_escape_operand_with_aliases(escaped, cond, alias_keys, alias_values)
+        case Switch(value, _, _):
+            var_reassign_collect_escape_operand_with_aliases(escaped, value, alias_keys, alias_values)
+        case CallTerminator(dest, func, args, _, _):
+            var result = escaped
+            if dest.?:
+                result = local_list_push_unique(result, local_alias_root(alias_keys, alias_values, dest.unwrap().id))
+            result = var_reassign_collect_escape_operand_with_aliases(result, func, alias_keys, alias_values)
+            for arg in args:
+                result = var_reassign_collect_escape_operand_with_aliases(result, arg, alias_keys, alias_values)
+            result
+        case _:
+            escaped
+
+fn var_reassign_update_aliases_for_inst(inst: MirInst, alias_keys: [i64], alias_values: [i64]) -> ([i64], [i64]):
+    match inst.kind:
+        case Copy(dest, src):
+            local_alias_set(alias_keys, alias_values, dest.id, local_alias_root(alias_keys, alias_values, src.id))
+        case Move(dest, src):
+            local_alias_set(alias_keys, alias_values, dest.id, local_alias_root(alias_keys, alias_values, src.id))
+        case Ref(dest, _, place):
+            local_alias_set(alias_keys, alias_values, dest.id, local_alias_root(alias_keys, alias_values, place.local.id))
+        case _:
+            val written = var_reassign_written_local(inst)
+            if written.?:
+                local_alias_reset(alias_keys, alias_values, written.unwrap())
+            else:
+                (alias_keys, alias_values)
+
+fn analyze_var_reassign_blocks(blocks: [MirBlock]) -> VarReassignAnalysis:
+    var local_ids: [i64] = []
+    var counts: [i64] = []
+    var borrowed: [i64] = []
+    var escaped: [i64] = []
+    var borrow_safe = true
+    var alias_keys: [i64] = []
+    var alias_values: [i64] = []
+
+    for block in blocks:
+        for inst in block.instructions:
+            val written = var_reassign_written_local(inst)
+            if written.?:
+                val local_id = written.unwrap()
+                val local_root = local_alias_root(alias_keys, alias_values, local_id)
+                if local_count_value(local_ids, counts, local_id) > 0 and (local_list_contains(borrowed, local_id) or local_list_contains(borrowed, local_root)):
+                    borrow_safe = false
+                val next_counts = local_count_increment(local_ids, counts, local_id)
+                local_ids = next_counts[0]
+                counts = next_counts[1]
+            match inst.kind:
+                case Ref(_, _, place):
+                    borrowed = local_list_push_unique(borrowed, local_alias_root(alias_keys, alias_values, place.local.id))
+                case _:
+                    pass_do_nothing
+            escaped = var_reassign_collect_inst_escapes_with_aliases(escaped, inst, alias_keys, alias_values)
+            val next_aliases = var_reassign_update_aliases_for_inst(inst, alias_keys, alias_values)
+            alias_keys = next_aliases[0]
+            alias_values = next_aliases[1]
+        escaped = var_reassign_collect_term_escapes_with_aliases(escaped, block.terminator, alias_keys, alias_values)
+
+    var reassignment_count = 0
+    var no_escape = true
+    var i = 0
+    while i < local_ids.len():
+        val count = counts[i]
+        if count > 1:
+            reassignment_count = reassignment_count + (count - 1)
+            if local_list_contains(escaped, local_ids[i]):
+                no_escape = false
+        i = i + 1
+
+    val has_reassignment = reassignment_count > 0
+    val ssa_safe = (not has_reassignment) or (borrow_safe and no_escape)
+    val reason = if not borrow_safe:
+        "borrow.reassign_unsafe"
+    elif not no_escape:
+        "escape.reassigned_storage"
+    else:
+        "ready"
+    VarReassignAnalysis(
+        has_var_reassignment: has_reassignment,
+        reassignment_count: reassignment_count,
+        ssa_transform_safe: ssa_safe,
+        escape_analyzed: true,
+        no_escape: no_escape,
+        borrow_reassign_safe: borrow_safe,
+        reason: reason
+    )
+
+fn var_reassign_analysis_to_jit_facts(analysis: VarReassignAnalysis) -> JitVarOptimizationFacts:
+    jit_var_optimization_facts(
+        analysis.has_var_reassignment,
+        analysis.reassignment_count,
+        analysis.ssa_transform_safe,
+        analysis.escape_analyzed,
+        analysis.no_escape,
+        analysis.borrow_reassign_safe
+    )
+
+fn var_reassign_analysis_hotspot_facts(base_facts: [text], analysis: VarReassignAnalysis) -> [text]:
+    var facts = base_facts
+    val jit_facts = var_reassign_analysis_to_jit_facts(analysis)
+    for fact in jit_var_optimization_fact_list(jit_facts):
+        if not facts.contains(fact):
+            facts = facts.push(fact)
+    facts

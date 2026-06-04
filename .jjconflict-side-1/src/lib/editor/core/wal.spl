@@ -1,0 +1,83 @@
+# Editor WAL — append-only recovery log for session persistence.
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+
+struct WalEntry:
+    sequence: i64
+    table: text
+    operation: text
+    key: text
+    data_sdn: text
+
+class WalWriter:
+    wal_path: text
+    db_path: text
+    checkpoint_threshold: i64
+    entry_count: i64
+    next_sequence: i64
+
+    static fn new(wal_path: text, db_path: text) -> WalWriter:
+        WalWriter(wal_path: wal_path, db_path: db_path, checkpoint_threshold: 100, entry_count: 0, next_sequence: 1)
+
+    me append(table: text, operation: text, key: text, data_sdn: text) -> bool:
+        val entry = WalEntry(sequence: me.next_sequence, table: table, operation: operation, key: key, data_sdn: data_sdn)
+        val existing = rt_file_read_text(me.wal_path) ?? ""
+        val ok = rt_file_write_text(me.wal_path, existing + wal_format_entry(entry) + "\n")
+        if ok:
+            me.next_sequence = me.next_sequence + 1
+            me.entry_count = me.entry_count + 1
+            if me.entry_count >= me.checkpoint_threshold:
+                me.checkpoint()
+        ok
+
+    me append_set(table: text, key: text, data_sdn: text) -> bool:
+        me.append(table, "set", key, data_sdn)
+
+    me append_delete(table: text, key: text) -> bool:
+        me.append(table, "delete", key, "")
+
+    me checkpoint() -> bool:
+        val db_content = rt_file_read_text(me.db_path) ?? ""
+        val wal_content = rt_file_read_text(me.wal_path) ?? ""
+        val merged = _wal_apply_entries(db_content, wal_parse_entries(wal_content))
+        val tmp_path = me.db_path + ".tmp"
+        if not rt_file_write_text(tmp_path, merged):
+            return false
+        if not rt_file_write_text(me.db_path, rt_file_read_text(tmp_path) ?? merged):
+            return false
+        rt_file_delete(tmp_path)
+        rt_file_write_text(me.wal_path, "")
+        me.entry_count = 0
+        true
+
+class WalReader:
+    wal_path: text
+
+    static fn new(wal_path: text) -> WalReader:
+        WalReader(wal_path: wal_path)
+
+    me read_entries() -> [WalEntry]:
+        wal_parse_entries(rt_file_read_text(me.wal_path) ?? "")
+
+    me has_entries() -> bool:
+        me.read_entries().len() > 0
+
+fn wal_format_entry(entry: WalEntry) -> text:
+    "WAL|" + entry.sequence.to_text() + "|" + entry.table + "|" + entry.operation + "|" + entry.key + "|" + entry.data_sdn
+
+fn wal_parse_entries(content: text) -> [WalEntry]:
+    var entries: [WalEntry] = []
+    for line in content.split("\n"):
+        if line.starts_with("WAL|"):
+            val parts = line.split("|")
+            if parts.len() >= 6:
+                entries.push(WalEntry(sequence: parts[1].to_i64() ?? 0, table: parts[2], operation: parts[3], key: parts[4], data_sdn: parts[5]))
+    entries
+
+fn _wal_apply_entries(db_content: text, entries: [WalEntry]) -> text:
+    var out = db_content
+    for entry in entries:
+        out = out + wal_format_entry(entry) + "\n"
+    out

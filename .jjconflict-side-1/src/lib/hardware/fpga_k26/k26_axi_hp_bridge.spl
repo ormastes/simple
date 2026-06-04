@@ -1,0 +1,266 @@
+# ============================================================================
+# K26 AXI-HP Bridge — VexRiscv-SMP AXI4 to PS S_AXI_HP0
+# ============================================================================
+#
+# Bridges the VexRiscv-SMP core's AXI4 master (iBus/dBus) to the Zynq
+# UltraScale+ PS S_AXI_HP0 high-performance slave port for DDR access.
+#
+# AXI4 master side (from VexRiscv-SMP):
+#   - 64-bit data, 32-bit address, burst-capable
+#
+# AXI-HP slave side (to PS DDR controller):
+#   - 128-bit data, 49-bit address, burst-capable
+#   - Directly accesses DDR4 via PS memory controller
+#
+# VHDL synthesizable subset: i64, u32, bool, structs only.
+# ============================================================================
+
+# ============================================================================
+# AXI4 Master Signals (from VexRiscv-SMP core)
+# ============================================================================
+
+struct Axi4MasterWrite:
+    awaddr: i64
+    awlen: u32
+    awsize: u32
+    awburst: u32
+    awvalid: bool
+    wdata: i64
+    wstrb: u32
+    wlast: bool
+    wvalid: bool
+    bready: bool
+
+struct Axi4MasterRead:
+    araddr: i64
+    arlen: u32
+    arsize: u32
+    arburst: u32
+    arvalid: bool
+    rready: bool
+
+struct Axi4SlaveWriteResp:
+    awready: bool
+    wready: bool
+    bresp: u32
+    bvalid: bool
+
+struct Axi4SlaveReadResp:
+    arready: bool
+    rdata: i64
+    rresp: u32
+    rlast: bool
+    rvalid: bool
+
+# ============================================================================
+# AXI-HP Port Signals (to PS)
+# ============================================================================
+
+struct AxiHpMaster:
+    awaddr: i64
+    awlen: u32
+    awsize: u32
+    awburst: u32
+    awvalid: bool
+    wdata_lo: i64
+    wdata_hi: i64
+    wstrb: u32
+    wlast: bool
+    wvalid: bool
+    bready: bool
+    araddr: i64
+    arlen: u32
+    arsize: u32
+    arburst: u32
+    arvalid: bool
+    rready: bool
+
+struct AxiHpSlave:
+    awready: bool
+    wready: bool
+    bresp: u32
+    bvalid: bool
+    arready: bool
+    rdata_lo: i64
+    rdata_hi: i64
+    rresp: u32
+    rlast: bool
+    rvalid: bool
+
+# ============================================================================
+# Bridge State
+# ============================================================================
+
+struct AxiHpBridge:
+    pending_write: bool
+    pending_read: bool
+    addr_offset: i64
+
+# ============================================================================
+# Bridge Operations
+# ============================================================================
+
+fn axi_hp_bridge_create() -> AxiHpBridge:
+    return AxiHpBridge(
+        pending_write: false,
+        pending_read: false,
+        addr_offset: 0
+    )
+
+fn axi_hp_bridge_forward_write(wr: Axi4MasterWrite) -> AxiHpMaster:
+    return AxiHpMaster(
+        awaddr: wr.awaddr,
+        awlen: wr.awlen,
+        awsize: wr.awsize,
+        awburst: wr.awburst,
+        awvalid: wr.awvalid,
+        wdata_lo: wr.wdata,
+        wdata_hi: 0,
+        wstrb: wr.wstrb,
+        wlast: wr.wlast,
+        wvalid: wr.wvalid,
+        bready: wr.bready,
+        araddr: 0,
+        arlen: 0,
+        arsize: 0,
+        arburst: 0,
+        arvalid: false,
+        rready: false
+    )
+
+fn axi_hp_bridge_forward_read(rd: Axi4MasterRead) -> AxiHpMaster:
+    return AxiHpMaster(
+        awaddr: 0,
+        awlen: 0,
+        awsize: 0,
+        awburst: 0,
+        awvalid: false,
+        wdata_lo: 0,
+        wdata_hi: 0,
+        wstrb: 0,
+        wlast: false,
+        wvalid: false,
+        bready: false,
+        araddr: rd.araddr,
+        arlen: rd.arlen,
+        arsize: rd.arsize,
+        arburst: rd.arburst,
+        arvalid: rd.arvalid,
+        rready: rd.rready
+    )
+
+fn axi_hp_bridge_write_resp(hp: AxiHpSlave) -> Axi4SlaveWriteResp:
+    return Axi4SlaveWriteResp(
+        awready: hp.awready,
+        wready: hp.wready,
+        bresp: hp.bresp,
+        bvalid: hp.bvalid
+    )
+
+fn axi_hp_bridge_read_resp(hp: AxiHpSlave) -> Axi4SlaveReadResp:
+    return Axi4SlaveReadResp(
+        arready: hp.arready,
+        rdata: hp.rdata_lo,
+        rresp: hp.rresp,
+        rlast: hp.rlast,
+        rvalid: hp.rvalid
+    )
+
+# ============================================================================
+# SystemVerilog Generation
+# ============================================================================
+
+fn generate_axi_hp_bridge_sv() -> text:
+    var sv = "// Auto-generated AXI-HP bridge: VexRiscv-SMP AXI4 -> PS S_AXI_HP0\n"
+    sv = sv + "module k26_axi_hp_bridge (\n"
+    sv = sv + "    input  wire        clk,\n"
+    sv = sv + "    input  wire        rst_n,\n"
+    sv = sv + "    // VexRiscv-SMP AXI4 master (64-bit data)\n"
+    sv = sv + "    input  wire [31:0] s_axi_awaddr,\n"
+    sv = sv + "    input  wire [7:0]  s_axi_awlen,\n"
+    sv = sv + "    input  wire [2:0]  s_axi_awsize,\n"
+    sv = sv + "    input  wire [1:0]  s_axi_awburst,\n"
+    sv = sv + "    input  wire        s_axi_awvalid,\n"
+    sv = sv + "    output wire        s_axi_awready,\n"
+    sv = sv + "    input  wire [63:0] s_axi_wdata,\n"
+    sv = sv + "    input  wire [7:0]  s_axi_wstrb,\n"
+    sv = sv + "    input  wire        s_axi_wlast,\n"
+    sv = sv + "    input  wire        s_axi_wvalid,\n"
+    sv = sv + "    output wire        s_axi_wready,\n"
+    sv = sv + "    output wire [1:0]  s_axi_bresp,\n"
+    sv = sv + "    output wire        s_axi_bvalid,\n"
+    sv = sv + "    input  wire        s_axi_bready,\n"
+    sv = sv + "    input  wire [31:0] s_axi_araddr,\n"
+    sv = sv + "    input  wire [7:0]  s_axi_arlen,\n"
+    sv = sv + "    input  wire [2:0]  s_axi_arsize,\n"
+    sv = sv + "    input  wire [1:0]  s_axi_arburst,\n"
+    sv = sv + "    input  wire        s_axi_arvalid,\n"
+    sv = sv + "    output wire        s_axi_arready,\n"
+    sv = sv + "    output wire [63:0] s_axi_rdata,\n"
+    sv = sv + "    output wire [1:0]  s_axi_rresp,\n"
+    sv = sv + "    output wire        s_axi_rlast,\n"
+    sv = sv + "    output wire        s_axi_rvalid,\n"
+    sv = sv + "    input  wire        s_axi_rready,\n"
+    sv = sv + "    // PS S_AXI_HP0 master (128-bit data)\n"
+    sv = sv + "    output wire [48:0] m_axi_awaddr,\n"
+    sv = sv + "    output wire [7:0]  m_axi_awlen,\n"
+    sv = sv + "    output wire [2:0]  m_axi_awsize,\n"
+    sv = sv + "    output wire [1:0]  m_axi_awburst,\n"
+    sv = sv + "    output wire        m_axi_awvalid,\n"
+    sv = sv + "    input  wire        m_axi_awready,\n"
+    sv = sv + "    output wire [127:0] m_axi_wdata,\n"
+    sv = sv + "    output wire [15:0] m_axi_wstrb,\n"
+    sv = sv + "    output wire        m_axi_wlast,\n"
+    sv = sv + "    output wire        m_axi_wvalid,\n"
+    sv = sv + "    input  wire        m_axi_wready,\n"
+    sv = sv + "    input  wire [1:0]  m_axi_bresp,\n"
+    sv = sv + "    input  wire        m_axi_bvalid,\n"
+    sv = sv + "    output wire        m_axi_bready,\n"
+    sv = sv + "    output wire [48:0] m_axi_araddr,\n"
+    sv = sv + "    output wire [7:0]  m_axi_arlen,\n"
+    sv = sv + "    output wire [2:0]  m_axi_arsize,\n"
+    sv = sv + "    output wire [1:0]  m_axi_arburst,\n"
+    sv = sv + "    output wire        m_axi_arvalid,\n"
+    sv = sv + "    input  wire        m_axi_arready,\n"
+    sv = sv + "    input  wire [127:0] m_axi_rdata,\n"
+    sv = sv + "    input  wire [1:0]  m_axi_rresp,\n"
+    sv = sv + "    input  wire        m_axi_rlast,\n"
+    sv = sv + "    input  wire        m_axi_rvalid,\n"
+    sv = sv + "    output wire        m_axi_rready\n"
+    sv = sv + ");\n\n"
+    sv = sv + "    // Width adaptation: 64-bit -> 128-bit (lower half)\n"
+    sv = sv + "    assign m_axi_awaddr  = {17'b0, s_axi_awaddr};\n"
+    sv = sv + "    assign m_axi_awlen   = s_axi_awlen;\n"
+    sv = sv + "    assign m_axi_awsize  = s_axi_awsize;\n"
+    sv = sv + "    assign m_axi_awburst = s_axi_awburst;\n"
+    sv = sv + "    assign m_axi_awvalid = s_axi_awvalid;\n"
+    sv = sv + "    assign s_axi_awready = m_axi_awready;\n\n"
+    sv = sv + "    assign m_axi_wdata   = {64'b0, s_axi_wdata};\n"
+    sv = sv + "    assign m_axi_wstrb   = {8'b0, s_axi_wstrb};\n"
+    sv = sv + "    assign m_axi_wlast   = s_axi_wlast;\n"
+    sv = sv + "    assign m_axi_wvalid  = s_axi_wvalid;\n"
+    sv = sv + "    assign s_axi_wready  = m_axi_wready;\n\n"
+    sv = sv + "    assign s_axi_bresp   = m_axi_bresp;\n"
+    sv = sv + "    assign s_axi_bvalid  = m_axi_bvalid;\n"
+    sv = sv + "    assign m_axi_bready  = s_axi_bready;\n\n"
+    sv = sv + "    assign m_axi_araddr  = {17'b0, s_axi_araddr};\n"
+    sv = sv + "    assign m_axi_arlen   = s_axi_arlen;\n"
+    sv = sv + "    assign m_axi_arsize  = s_axi_arsize;\n"
+    sv = sv + "    assign m_axi_arburst = s_axi_arburst;\n"
+    sv = sv + "    assign m_axi_arvalid = s_axi_arvalid;\n"
+    sv = sv + "    assign s_axi_arready = m_axi_arready;\n\n"
+    sv = sv + "    assign s_axi_rdata   = m_axi_rdata[63:0];\n"
+    sv = sv + "    assign s_axi_rresp   = m_axi_rresp;\n"
+    sv = sv + "    assign s_axi_rlast   = m_axi_rlast;\n"
+    sv = sv + "    assign s_axi_rvalid  = m_axi_rvalid;\n"
+    sv = sv + "    assign m_axi_rready  = s_axi_rready;\n\n"
+    sv = sv + "endmodule\n"
+    return sv
+
+fn axi_hp_bridge_port_map() -> text:
+    var tcl = "# AXI-HP bridge port connections for Vivado block design\n"
+    tcl = tcl + "connect_bd_intf_net [get_bd_intf_pins axi_hp_bridge/M_AXI] "
+    tcl = tcl + "[get_bd_intf_pins zynq_ultra_ps_e/S_AXI_HP0_FPD]\n"
+    tcl = tcl + "set_property CONFIG.PSU__USE__S_AXI_HP0 {1} [get_bd_cells zynq_ultra_ps_e]\n"
+    tcl = tcl + "set_property CONFIG.PSU__CRL_APB__S_AXI_HP0_FREQ {100} [get_bd_cells zynq_ultra_ps_e]\n"
+    return tcl

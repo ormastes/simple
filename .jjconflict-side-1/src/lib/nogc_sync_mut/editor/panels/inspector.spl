@@ -1,0 +1,248 @@
+# InspectorPanel — property editor for selected scene nodes
+#
+# Shows editable properties for the currently selected node's components.
+# Groups properties by component type (Transform, Sprite, Physics, Audio).
+
+use std.nogc_sync_mut.editor.selection.{NodeId}
+use std.nogc_sync_mut.editor.typed_event_bus.{EditorEvent, EventQueue}
+use std.common.editor.scene_format.{SceneNodeData}
+
+# ============================================================================
+# PropertyType
+# ============================================================================
+
+enum PropertyType:
+    FloatProp
+    IntProp
+    TextProp
+    BoolProp
+    ColorProp
+
+# ============================================================================
+# PropertyField — one editable property row
+# ============================================================================
+
+struct PropertyField:
+    component_name: text
+    property_name: text
+    display_name: text
+    prop_type: PropertyType
+    value_text: text
+    editable: bool
+
+# ============================================================================
+# ComponentSection — a group of properties for one component
+# ============================================================================
+
+struct ComponentSection:
+    name: text
+    expanded: bool
+    fields: [PropertyField]
+
+# ============================================================================
+# InspectorPanel
+# ============================================================================
+
+class InspectorPanel:
+    sections: [ComponentSection]
+    event_queue: EventQueue
+    scroll_offset: f64
+    inspected_node: NodeId
+
+impl InspectorPanel:
+    static fn new() -> InspectorPanel:
+        InspectorPanel(
+            sections: [],
+            event_queue: EventQueue.new(),
+            scroll_offset: 0.0,
+            inspected_node: NodeId.null()
+        )
+
+    me inspect_node(node: SceneNodeData):
+        self.inspected_node = NodeId(id: node.node_id)
+        var new_sections: [ComponentSection] = []
+
+        # Transform section is always present
+        val transform = build_transform_section(node)
+        new_sections = new_sections.push(transform)
+
+        # Sprite section if texture is set
+        if node.sprite_texture != "":
+            val sprite = build_sprite_section(node)
+            new_sections = new_sections.push(sprite)
+
+        # Physics section if enabled
+        if node.has_physics:
+            val physics = build_physics_section(node)
+            new_sections = new_sections.push(physics)
+
+        # Audio section if enabled
+        if node.has_audio:
+            val audio = build_audio_section(node)
+            new_sections = new_sections.push(audio)
+
+        self.sections = new_sections
+        self.scroll_offset = 0.0
+
+    me clear():
+        self.sections = []
+        self.inspected_node = NodeId.null()
+
+    me toggle_section(section_name: text):
+        var updated: [ComponentSection] = []
+        for sec in self.sections:
+            if sec.name == section_name:
+                val toggled = ComponentSection(
+                    name: sec.name,
+                    expanded: not sec.expanded,
+                    fields: sec.fields
+                )
+                updated = updated.push(toggled)
+            else:
+                updated = updated.push(sec)
+        self.sections = updated
+
+    me update_property(component: text, property: text, value: text):
+        self.event_queue.push(EditorEvent.PropertyChanged(
+            node_id: self.inspected_node,
+            property: component + "." + property,
+            value: value
+        ))
+
+    fn section_count(self) -> i32:
+        self.sections.len()
+
+    fn is_inspecting(self) -> bool:
+        not self.inspected_node.is_null()
+
+    me scroll_by(delta: f64):
+        self.scroll_offset = self.scroll_offset + delta
+        if self.scroll_offset < 0.0:
+            self.scroll_offset = 0.0
+
+# ============================================================================
+# Section builders
+# ============================================================================
+
+fn build_transform_section(node: SceneNodeData) -> ComponentSection:
+    var fields: [PropertyField] = []
+    fields = fields.push(PropertyField(
+        component_name: "Transform",
+        property_name: "x",
+        display_name: "X",
+        prop_type: PropertyType.FloatProp,
+        value_text: node.transform_x.to_text(),
+        editable: true
+    ))
+    fields = fields.push(PropertyField(
+        component_name: "Transform",
+        property_name: "y",
+        display_name: "Y",
+        prop_type: PropertyType.FloatProp,
+        value_text: node.transform_y.to_text(),
+        editable: true
+    ))
+    fields = fields.push(PropertyField(
+        component_name: "Transform",
+        property_name: "rotation",
+        display_name: "Rotation",
+        prop_type: PropertyType.FloatProp,
+        value_text: node.transform_rotation.to_text(),
+        editable: true
+    ))
+    fields = fields.push(PropertyField(
+        component_name: "Transform",
+        property_name: "scale_x",
+        display_name: "Scale X",
+        prop_type: PropertyType.FloatProp,
+        value_text: node.transform_scale_x.to_text(),
+        editable: true
+    ))
+    fields = fields.push(PropertyField(
+        component_name: "Transform",
+        property_name: "scale_y",
+        display_name: "Scale Y",
+        prop_type: PropertyType.FloatProp,
+        value_text: node.transform_scale_y.to_text(),
+        editable: true
+    ))
+    ComponentSection(
+        name: "Transform",
+        expanded: true,
+        fields: fields
+    )
+
+fn build_sprite_section(node: SceneNodeData) -> ComponentSection:
+    var fields: [PropertyField] = []
+    fields = fields.push(PropertyField(
+        component_name: "Sprite",
+        property_name: "texture",
+        display_name: "Texture",
+        prop_type: PropertyType.TextProp,
+        value_text: node.sprite_texture,
+        editable: true
+    ))
+    ComponentSection(
+        name: "Sprite",
+        expanded: true,
+        fields: fields
+    )
+
+fn build_physics_section(node: SceneNodeData) -> ComponentSection:
+    var fields: [PropertyField] = []
+    fields = fields.push(PropertyField(
+        component_name: "Physics",
+        property_name: "body_type",
+        display_name: "Body Type",
+        prop_type: PropertyType.TextProp,
+        value_text: node.physics_body_type,
+        editable: true
+    ))
+    fields = fields.push(PropertyField(
+        component_name: "Physics",
+        property_name: "mass",
+        display_name: "Mass",
+        prop_type: PropertyType.FloatProp,
+        value_text: node.physics_mass.to_text(),
+        editable: true
+    ))
+    ComponentSection(
+        name: "Physics",
+        expanded: true,
+        fields: fields
+    )
+
+fn build_audio_section(node: SceneNodeData) -> ComponentSection:
+    var fields: [PropertyField] = []
+    fields = fields.push(PropertyField(
+        component_name: "Audio",
+        property_name: "clip_path",
+        display_name: "Clip Path",
+        prop_type: PropertyType.TextProp,
+        value_text: node.audio_clip_path,
+        editable: true
+    ))
+    fields = fields.push(PropertyField(
+        component_name: "Audio",
+        property_name: "group",
+        display_name: "Group",
+        prop_type: PropertyType.TextProp,
+        value_text: node.audio_group,
+        editable: true
+    ))
+    var spatial_text = "false"
+    if node.audio_spatial:
+        spatial_text = "true"
+    fields = fields.push(PropertyField(
+        component_name: "Audio",
+        property_name: "spatial",
+        display_name: "Spatial",
+        prop_type: PropertyType.BoolProp,
+        value_text: spatial_text,
+        editable: true
+    ))
+    ComponentSection(
+        name: "Audio",
+        expanded: true,
+        fields: fields
+    )

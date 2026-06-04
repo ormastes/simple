@@ -1,0 +1,242 @@
+# MCP Server Entry Point
+#
+# Table-driven tool dispatch with ~100 tools (68 original + ~33 new CLI wrappers).
+# Uses only extern fn calls for I/O — no subprocess dispatch, no hangs.
+#
+# Architecture:
+#   - Zero stdlib imports: all JSON helpers and tool logic inlined
+#   - Table-driven dispatch: tool_table.spl defines all tool metadata
+#   - CLI passthrough: most tools delegate to bin/simple via cli_passthrough.spl
+#   - Fast startup (~200ms), fast tool calls (<1s)
+#
+# Module files:
+#   - tool_registry.spl        — McpToolEntry struct
+#   - tool_table.spl           — All tool definitions (name, schema, annotations, handler_kind)
+#   - cli_passthrough.spl      — Generic CLI passthrough handler for handler_kind="cli"
+#   - main_lazy_json.spl       — JSON helpers, tool result helpers, shell helpers
+#   - main_lazy_protocol.spl   — Protocol I/O, initialize, tools list, schemas, resources, prompts
+#   - main_lazy_diag_tools.spl — In-process diagnostic handlers (read, edit, multi_edit, status, api)
+#   - main_lazy_vcs_tools.spl  — VCS tool handlers (diff, log, squash, new, commit, push, rebase, pull)
+#   - main_lazy_debug_tools.spl — Debug session/breakpoint/variable handlers
+#   - main_lazy_debug_log_tools.spl — Debug log tool handlers
+#   - main_lazy_tasks.spl         — Background task manager
+#   - main_lazy_query_tools.spl   — Query + Analysis tool handlers (deps, context, api_diff, search)
+#   - main_lazy_test_daemon_tools.spl — Test daemon IPC handlers
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_get(name: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_exit(code: i64)
+extern fn rt_cli_get_args() -> [text]
+
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
+
+fn _mcp_find_simple_binary() -> text:
+    val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "":
+        return env_bin
+    if rt_file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
+        return "bin/release/aarch64-apple-darwin-macho/simple"
+    if rt_file_exists("bin/release/macos-arm64/simple"):
+        return "bin/release/macos-arm64/simple"
+    if rt_file_exists("bin/release/darwin-aarch64/simple"):
+        return "bin/release/darwin-aarch64/simple"
+    if rt_file_exists("bin/release/macos-x86_64/simple"):
+        return "bin/release/macos-x86_64/simple"
+    if rt_file_exists("bin/release/linux-x86_64/simple"):
+        return "bin/release/linux-x86_64/simple"
+    if rt_file_exists("bin/simple"):
+        return "bin/simple"
+
+    val os_env = rt_env_get("OS") ?? ""
+    if os_env.contains("Windows"):
+        if rt_file_exists("bin/simple.exe"):
+            return "bin/simple.exe"
+        if rt_file_exists("bin/release/x86_64-pc-windows-msvc/simple.exe"):
+            return "bin/release/x86_64-pc-windows-msvc/simple.exe"
+        if rt_file_exists("bin/release/x86_64-pc-windows-gnu/simple.exe"):
+            return "bin/release/x86_64-pc-windows-gnu/simple.exe"
+    "bin/simple"
+
+# Load split module implementations from sibling files.
+use .main_lazy_json
+use .main_lazy_protocol
+use .main_lazy_diag_tools
+use .main_lazy_vcs_tools
+use .main_lazy_debug_tools
+use .main_lazy_dialog_tools
+# main_lazy_debug_log_tools removed — debug log tools now CLI passthrough
+# main_lazy_tasks removed — task tools now CLI passthrough
+use .main_lazy_query_tools
+use .main_lazy_play_tools
+use .main_lazy_assistant
+use .main_editor_tools
+use .main_static_tools
+use .main_dispatch
+# main_lazy_test_daemon_tools removed — test daemon tools now CLI passthrough
+use .tool_registry
+use .tool_table
+use .cli_passthrough
+use .dap_bridge
+use .startup_log
+
+val SERVER_NAME = "simple-mcp-full"
+val SERVER_VERSION = "4.0.0"
+val NL = "\n"
+
+# Protocol auto-detection
+var USE_JSON_LINES = false
+
+# Caches
+var TOOLS_CACHE = ""
+var INIT_CACHE = ""
+
+# Debug session state managed by dap_bridge.spl (DapSession class)
+
+# MCP log level (protocol-level, not debug log)
+var MCP_LOG_LEVEL = "info"
+
+# --- Server loop ---
+
+fn print_help():
+    print "Simple MCP Server"
+    print ""
+    print "Usage: simple mcp [options]"
+    print ""
+    print "Runs the Simple MCP JSON-RPC server on stdin/stdout."
+    print ""
+    print "Options:"
+    print "  -h, --help          Show this help message"
+    print "  -v, --version       Show version information"
+    print ""
+    print "Shared log options:"
+    for line in log_options_help():
+        print "  {line}"
+
+fn print_help_with_progress(progress_mode: text):
+    val progress = render_progress(progress_mode, 0, 1, "usage")
+    if progress != "":
+        print progress
+    print_help()
+
+fn mcp_is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or arg == "--tui" or arg == "--stdout" or arg == "--quiet" or arg == "--verbose" or arg == "--dots" or arg == "--count" or arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or arg == "--progress" or arg.starts_with("--log-mode=") or arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn mcp_clean_log_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if mcp_is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
+        i = i + 1
+    cleaned
+
+fn mcp_get_cli_args() -> [text]:
+    val raw_args = rt_cli_get_args()
+    var args: [text] = []
+    var start_idx = 1
+    if raw_args.len() > 2 and raw_args[1] == "run" and raw_args[2].ends_with(".spl"):
+        start_idx = 3
+    elif raw_args.len() > 1 and raw_args[1].ends_with(".spl"):
+        start_idx = 2
+    var i = start_idx
+    while i < raw_args.len():
+        args.push(raw_args[i])
+        i = i + 1
+    args
+
+fn main() -> i64:
+    val raw_args = mcp_get_cli_args()
+    val log_opts = parse_log_options(raw_args)
+    if not log_opts.valid:
+        error("mcp", log_opts.error)
+        return 1
+
+    val args = mcp_clean_log_args(raw_args)
+    if args.len() > 0 and (args[0] == "--help" or args[0] == "-h" or args[0] == "help"):
+        print_help_with_progress(log_opts.progress)
+        return 0
+    if args.len() > 0 and (args[0] == "--version" or args[0] == "-v"):
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"mcp\",\"status\":\"ok\",\"version\":\"{SERVER_VERSION}\"}"
+        else:
+            print "Simple MCP Server v{SERVER_VERSION}"
+        return 0
+    if args.len() > 0:
+        val message = "Unknown mcp option: {args[0]}"
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"mcp\",\"status\":\"error\",\"message\":\"{message}\"}"
+        else:
+            error("mcp", message)
+        return 1
+    if raw_args.len() > 0 and log_opts.log_mode == "json":
+        print "{\"command\":\"mcp\",\"status\":\"ready\",\"tool\":\"Simple MCP Server\",\"version\":\"{SERVER_VERSION}\"}"
+        return 0
+    if raw_args.len() > 0 and log_opts.progress != "none":
+        val progress = render_progress(log_opts.progress, 1, 1, "mcp")
+        if progress != "":
+            print progress
+        return 0
+
+    while true:
+        var line = read_stdin_message()
+        if line == "":
+            rt_exit(0)
+            return 0
+        var method = extract_field(line, "method")
+        var id = extract_id(line)
+        var response = ""
+        if method == "initialize":
+            response = make_init_response(id)
+        elif method == "initialized" or method == "notifications/initialized":
+            response = ""
+        elif method == "shutdown":
+            response = make_json_result(id, "null")
+        elif method == "tools/list":
+            response = make_json_result(id, _mcp_static_tools_result())
+        elif method == "tools/call":
+            var tool_name = extract_nested(line, "name")
+            response = dispatch_tool(id, tool_name, line)
+        elif method == "resources/list":
+            response = handle_resources_list(id)
+        elif method == "resources/templates/list":
+            response = handle_resource_templates_list(id)
+        elif method == "resources/read":
+            val uri = extract_nested(line, "uri")
+            response = handle_resources_read(id, uri)
+        elif method == "prompts/list":
+            response = handle_prompts_list(id)
+        elif method == "prompts/get":
+            val prompt_name = extract_nested(line, "name")
+            response = handle_prompts_get(id, prompt_name, line)
+        elif method == "completion/complete" or method == "completions/complete":
+            response = handle_completion_req(id, line)
+        elif method == "logging/setLevel":
+            val level = extract_nested(line, "level")
+            if level != "":
+                MCP_LOG_LEVEL = level
+            response = make_json_result(id, jo1(jp("level", js(MCP_LOG_LEVEL))))
+        elif method == "roots/list":
+            val cwd = get_cwd()
+            var root = LB()
+            root = root + jp("uri", js("file://" + cwd))
+            root = root + "," + jp("name", js("workspace"))
+            root = root + RB()
+            response = make_json_result(id, jo1(jp("roots", "[" + root + "]")))
+        elif method == "ping":
+            response = make_json_result(id, LB() + RB())
+        elif method == "notifications/cancelled" or method == "notifications/roots/list_changed":
+            response = ""
+        else:
+            if id != "" and id != "null":
+                response = make_error(id, -32601, "Method not found: " + method)
+        if response != "":
+            write_stdout_message(response)
+    0

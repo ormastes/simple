@@ -1,0 +1,393 @@
+# Target Capability Matrix — TargetFamily Rows
+#
+# Feature ID: #COMPILER-BACKEND-TARGET-MATRIX
+# Category:   Compiler | Backend | Target Capability Matrix
+# Status:     Active
+#
+# Tests Task 1: TargetFamily rows for x86-64, x86-32, AArch64, ARM32, RV64, RV32.
+# Verifies:
+#   - all_target_family_rows() returns 6 entries
+#   - each row has the correct pointer_bits
+#   - enable/disable matrix matches architecture constraints
+#   - disabled_reason is non-empty for disabled features
+#   - caps_kind_from_triple correctly dispatches new arch prefixes
+#
+# Interpreter-mode note (per .claude/rules/testing.md):
+#   Test runner in interpreter mode only verifies file loading and
+#   describe/it block reachability.  Assertions are not executed.
+
+use compiler.backend.feature_caps.{
+    TargetFeatureClass,
+    ArmCaps, Rv32Caps, X86_32Caps,
+    arm_caps_from_target, rv32_caps_from_target, x86_32_caps_from_target,
+    arm_supports_feature_class, rv32_supports_feature_class, x86_32_supports_feature_class,
+    preferred_lane_count_arm, preferred_lane_count_rv32, preferred_lane_count_x86_32,
+    TargetCapsKind, caps_kind_from_triple, caps_kind_target_name, caps_kind_supports,
+    TargetIdiom,
+    TargetFamilyRow,
+    target_family_row_x86_64, target_family_row_x86_32,
+    target_family_row_aarch64, target_family_row_arm32,
+    target_family_row_rv64, target_family_row_rv32,
+    all_target_family_rows,
+    target_family_row_supports_class, target_family_row_disabled_reason
+}
+
+# ============================================================================
+# Task 1 — all_target_family_rows count and names
+# ============================================================================
+
+describe "TargetMatrix — all_target_family_rows":
+    it "returns exactly 6 rows":
+        val rows = all_target_family_rows()
+        expect(rows.len()).to_equal(6)
+
+    it "first row is x86-64":
+        val rows = all_target_family_rows()
+        expect(rows.get(0).name).to_equal("x86-64")
+
+    it "second row is x86-32":
+        val rows = all_target_family_rows()
+        expect(rows.get(1).name).to_equal("x86-32")
+
+    it "third row is aarch64":
+        val rows = all_target_family_rows()
+        expect(rows.get(2).name).to_equal("aarch64")
+
+    it "fourth row is arm32":
+        val rows = all_target_family_rows()
+        expect(rows.get(3).name).to_equal("arm32")
+
+    it "fifth row is rv64":
+        val rows = all_target_family_rows()
+        expect(rows.get(4).name).to_equal("rv64")
+
+    it "sixth row is rv32":
+        val rows = all_target_family_rows()
+        expect(rows.get(5).name).to_equal("rv32")
+
+# ============================================================================
+# Task 1 — pointer_bits per family
+# ============================================================================
+
+describe "TargetMatrix — pointer_bits":
+    it "x86-64 has 64-bit pointers":
+        val row = target_family_row_x86_64()
+        expect(row.pointer_bits).to_equal(64)
+
+    it "x86-32 has 32-bit pointers":
+        val row = target_family_row_x86_32()
+        expect(row.pointer_bits).to_equal(32)
+
+    it "aarch64 has 64-bit pointers":
+        val row = target_family_row_aarch64()
+        expect(row.pointer_bits).to_equal(64)
+
+    it "arm32 has 32-bit pointers":
+        val row = target_family_row_arm32()
+        expect(row.pointer_bits).to_equal(32)
+
+    it "rv64 has 64-bit pointers":
+        val row = target_family_row_rv64()
+        expect(row.pointer_bits).to_equal(64)
+
+    it "rv32 has 32-bit pointers":
+        val row = target_family_row_rv32()
+        expect(row.pointer_bits).to_equal(32)
+
+# ============================================================================
+# Task 1 — enable/disable matrix correctness
+# ============================================================================
+
+describe "TargetMatrix — x86-64 enable matrix":
+    it "x86-64 enables FixedWidthSimd":
+        val row = target_family_row_x86_64()
+        expect(target_family_row_supports_class(row, TargetFeatureClass.FixedWidthSimd)).to_equal(true)
+
+    it "x86-64 enables ScalableSimd":
+        val row = target_family_row_x86_64()
+        expect(target_family_row_supports_class(row, TargetFeatureClass.ScalableSimd)).to_equal(true)
+
+    it "x86-64 enables BitManip":
+        val row = target_family_row_x86_64()
+        expect(target_family_row_supports_class(row, TargetFeatureClass.BitManip)).to_equal(true)
+
+    it "x86-64 enables Crypto":
+        val row = target_family_row_x86_64()
+        expect(target_family_row_supports_class(row, TargetFeatureClass.Crypto)).to_equal(true)
+
+    it "x86-64 enables Matrix":
+        val row = target_family_row_x86_64()
+        expect(target_family_row_supports_class(row, TargetFeatureClass.Matrix)).to_equal(true)
+
+describe "TargetMatrix — x86-32 enable matrix":
+    it "x86-32 enables FixedWidthSimd":
+        val row = target_family_row_x86_32()
+        expect(target_family_row_supports_class(row, TargetFeatureClass.FixedWidthSimd)).to_equal(true)
+
+    it "x86-32 disables ScalableSimd":
+        val row = target_family_row_x86_32()
+        expect(target_family_row_supports_class(row, TargetFeatureClass.ScalableSimd)).to_equal(false)
+
+    it "x86-32 disables ScalableSimd with non-empty reason":
+        val row = target_family_row_x86_32()
+        val reason = target_family_row_disabled_reason(row, TargetFeatureClass.ScalableSimd)
+        expect(reason.len()).to_be_greater_than(0)
+
+    it "x86-32 disables Matrix with non-empty reason":
+        val row = target_family_row_x86_32()
+        expect(target_family_row_supports_class(row, TargetFeatureClass.Matrix)).to_equal(false)
+        val reason = target_family_row_disabled_reason(row, TargetFeatureClass.Matrix)
+        expect(reason.len()).to_be_greater_than(0)
+
+describe "TargetMatrix — arm32 enable matrix":
+    it "arm32 enables FixedWidthSimd":
+        val row = target_family_row_arm32()
+        expect(target_family_row_supports_class(row, TargetFeatureClass.FixedWidthSimd)).to_equal(true)
+
+    it "arm32 disables ScalableSimd":
+        val row = target_family_row_arm32()
+        expect(target_family_row_supports_class(row, TargetFeatureClass.ScalableSimd)).to_equal(false)
+
+    it "arm32 disables Matrix":
+        val row = target_family_row_arm32()
+        expect(target_family_row_supports_class(row, TargetFeatureClass.Matrix)).to_equal(false)
+
+    it "arm32 ScalableSimd disabled reason is non-empty":
+        val row = target_family_row_arm32()
+        val reason = target_family_row_disabled_reason(row, TargetFeatureClass.ScalableSimd)
+        expect(reason.len()).to_be_greater_than(0)
+
+describe "TargetMatrix — rv32 enable matrix":
+    it "rv32 disables FixedWidthSimd":
+        val row = target_family_row_rv32()
+        expect(target_family_row_supports_class(row, TargetFeatureClass.FixedWidthSimd)).to_equal(false)
+
+    it "rv32 disables ScalableSimd":
+        val row = target_family_row_rv32()
+        expect(target_family_row_supports_class(row, TargetFeatureClass.ScalableSimd)).to_equal(false)
+
+    it "rv32 enables BitManip":
+        val row = target_family_row_rv32()
+        expect(target_family_row_supports_class(row, TargetFeatureClass.BitManip)).to_equal(true)
+
+    it "rv32 enables Crypto":
+        val row = target_family_row_rv32()
+        expect(target_family_row_supports_class(row, TargetFeatureClass.Crypto)).to_equal(true)
+
+    it "rv32 FixedWidthSimd disabled reason is non-empty":
+        val row = target_family_row_rv32()
+        val reason = target_family_row_disabled_reason(row, TargetFeatureClass.FixedWidthSimd)
+        expect(reason.len()).to_be_greater_than(0)
+
+# ============================================================================
+# Task 1 — caps_kind_from_triple dispatches new architectures
+# ============================================================================
+
+describe "TargetMatrix — caps_kind_from_triple new arch dispatch":
+    it "i686 prefix dispatches to X86_32":
+        val kind = caps_kind_from_triple("i686")
+        expect(caps_kind_target_name(kind)).to_equal("x86_32")
+
+    it "i386 prefix dispatches to X86_32":
+        val kind = caps_kind_from_triple("i386-unknown-linux-gnu")
+        expect(caps_kind_target_name(kind)).to_equal("x86_32")
+
+    it "thumbv7em prefix dispatches to Arm":
+        val kind = caps_kind_from_triple("thumbv7em-none-eabihf")
+        expect(caps_kind_target_name(kind)).to_equal("arm32")
+
+    it "thumbv6m prefix dispatches to Arm":
+        val kind = caps_kind_from_triple("thumbv6m-none-eabi")
+        expect(caps_kind_target_name(kind)).to_equal("arm32")
+
+    it "riscv32 prefix dispatches to Rv32":
+        val kind = caps_kind_from_triple("riscv32imac-unknown-none-elf")
+        expect(caps_kind_target_name(kind)).to_equal("riscv32")
+
+    it "rv32 prefix dispatches to Rv32":
+        val kind = caps_kind_from_triple("rv32imac")
+        expect(caps_kind_target_name(kind)).to_equal("riscv32")
+
+    it "x86_64 prefix still dispatches to x86_64":
+        val kind = caps_kind_from_triple("x86_64-unknown-linux-gnu")
+        expect(caps_kind_target_name(kind)).to_equal("x86_64")
+
+# ============================================================================
+# Task 5 — ArmCaps feature tables
+# ============================================================================
+
+describe "TargetMatrix — ArmCaps conservative feature tables":
+    it "thumbv6m baseline has no NEON, no AES, no SHA2":
+        val caps = arm_caps_from_target("thumbv6m-none-eabi")
+        expect(caps.has_neon).to_equal(false)
+        expect(caps.has_aes).to_equal(false)
+        expect(caps.has_sha2).to_equal(false)
+
+    it "thumbv7em has DSP but no NEON":
+        val caps = arm_caps_from_target("thumbv7em-none-eabihf")
+        expect(caps.has_neon).to_equal(false)
+        expect(caps.has_dsp).to_equal(true)
+
+    it "thumbv7em-neon has NEON but no crypto":
+        val caps = arm_caps_from_target("thumbv7em-neon-eabihf")
+        expect(caps.has_neon).to_equal(true)
+        expect(caps.has_aes).to_equal(false)
+
+    it "neon+crypto triple has NEON + AES + SHA2 + CRC32":
+        val caps = arm_caps_from_target("armv8-neon-crypto")
+        expect(caps.has_neon).to_equal(true)
+        expect(caps.has_aes).to_equal(true)
+        expect(caps.has_sha2).to_equal(true)
+        expect(caps.has_crc32).to_equal(true)
+
+    it "ARM32 RotateLeft is always supported (barrel shifter)":
+        val caps = arm_caps_from_target("thumbv6m-none-eabi")
+        expect(caps.supports(TargetIdiom.RotateLeft)).to_equal(true)
+
+    it "ARM32 CountLeadingZeros is always supported (CLZ from ARMv5)":
+        val caps = arm_caps_from_target("thumbv6m-none-eabi")
+        expect(caps.supports(TargetIdiom.CountLeadingZeros)).to_equal(true)
+
+    it "ARM32 CRC32U64 is always unsupported (64-bit operand unavailable)":
+        val caps = arm_caps_from_target("armv8-neon-crypto")
+        expect(caps.supports(TargetIdiom.Crc32U64)).to_equal(false)
+
+    it "ARM32 SimdI32x8 is always unsupported (no 256-bit NEON)":
+        val caps = arm_caps_from_target("armv8-neon-crypto")
+        expect(caps.supports(TargetIdiom.SimdI32x8)).to_equal(false)
+
+    it "ARM32 preferred_vector_width is 128 with NEON":
+        val caps = arm_caps_from_target("armv8-neon-crypto")
+        expect(preferred_lane_count_arm(caps, 32)).to_equal(4)
+
+    it "ARM32 preferred_vector_width is 32 without NEON":
+        val caps = arm_caps_from_target("thumbv6m-none-eabi")
+        expect(preferred_lane_count_arm(caps, 32)).to_equal(1)
+
+describe "TargetMatrix — arm_supports_feature_class":
+    it "neon+crypto supports FixedWidthSimd":
+        val caps = arm_caps_from_target("armv8-neon-crypto")
+        expect(arm_supports_feature_class(caps, TargetFeatureClass.FixedWidthSimd)).to_equal(true)
+
+    it "arm32 never supports ScalableSimd":
+        val caps = arm_caps_from_target("armv8-neon-crypto")
+        expect(arm_supports_feature_class(caps, TargetFeatureClass.ScalableSimd)).to_equal(false)
+
+    it "arm32 always supports BitManip class":
+        val caps = arm_caps_from_target("thumbv6m-none-eabi")
+        expect(arm_supports_feature_class(caps, TargetFeatureClass.BitManip)).to_equal(true)
+
+# ============================================================================
+# Task 5 — Rv32Caps feature tables
+# ============================================================================
+
+describe "TargetMatrix — Rv32Caps conservative feature tables":
+    it "riscv32imac baseline has no Zbb, no crypto":
+        val caps = rv32_caps_from_target("riscv32imac")
+        expect(caps.has_zbb).to_equal(false)
+        expect(caps.has_zkne).to_equal(false)
+        expect(caps.has_zknd).to_equal(false)
+        expect(caps.has_zknh).to_equal(false)
+
+    it "riscv32imac_zbb has Zbb bitmanip":
+        val caps = rv32_caps_from_target("riscv32imac_zbb")
+        expect(caps.has_zbb).to_equal(true)
+
+    it "riscv32imac_zbb supports RotateLeft":
+        val caps = rv32_caps_from_target("riscv32imac_zbb")
+        expect(caps.supports(TargetIdiom.RotateLeft)).to_equal(true)
+
+    it "riscv32imac_zknd_zkne_zknh supports AesEnc and SHA-256":
+        val caps = rv32_caps_from_target("riscv32imac_zknd_zkne_zknh")
+        expect(caps.supports(TargetIdiom.AesEnc)).to_equal(true)
+        expect(caps.supports(TargetIdiom.Sha256Rounds2)).to_equal(true)
+
+    it "rv32 Sha512Rounds2 is always unsupported (64-bit ops unavailable)":
+        val caps = rv32_caps_from_target("riscv32imac_zknd_zkne_zknh")
+        expect(caps.supports(TargetIdiom.Sha512Rounds2)).to_equal(false)
+
+    it "rv32 SimdI32x8 is always unsupported":
+        val caps = rv32_caps_from_target("riscv32imac_zbb")
+        expect(caps.supports(TargetIdiom.SimdI32x8)).to_equal(false)
+
+    it "rv32 preferred vector width is 32 without V":
+        val caps = rv32_caps_from_target("riscv32imac")
+        expect(preferred_lane_count_rv32(caps, 32)).to_equal(1)
+
+describe "TargetMatrix — rv32_supports_feature_class":
+    it "riscv32imac_zbb supports BitManip class":
+        val caps = rv32_caps_from_target("riscv32imac_zbb")
+        expect(rv32_supports_feature_class(caps, TargetFeatureClass.BitManip)).to_equal(true)
+
+    it "rv32 never supports ScalableSimd":
+        val caps = rv32_caps_from_target("riscv32imac_zbb")
+        expect(rv32_supports_feature_class(caps, TargetFeatureClass.ScalableSimd)).to_equal(false)
+
+    it "riscv32imac_zknd_zkne supports Crypto class":
+        val caps = rv32_caps_from_target("riscv32imac_zknd_zkne")
+        expect(rv32_supports_feature_class(caps, TargetFeatureClass.Crypto)).to_equal(true)
+
+    it "rv32 baseline does not support Crypto class":
+        val caps = rv32_caps_from_target("riscv32imac")
+        expect(rv32_supports_feature_class(caps, TargetFeatureClass.Crypto)).to_equal(false)
+
+# ============================================================================
+# Task 5 — X86_32Caps feature tables
+# ============================================================================
+
+describe "TargetMatrix — X86_32Caps feature tables":
+    it "i686 baseline has SSE2 but no SSE42, no crypto":
+        val caps = x86_32_caps_from_target("i686-linux-gnu")
+        expect(caps.has_sse2).to_equal(true)
+        expect(caps.has_sse42).to_equal(false)
+        expect(caps.has_aes).to_equal(false)
+
+    it "i686-v2 has SSE42 and POPCNT but no AES":
+        val caps = x86_32_caps_from_target("i686-v2")
+        expect(caps.has_sse42).to_equal(true)
+        expect(caps.has_popcnt).to_equal(true)
+        expect(caps.has_aes).to_equal(false)
+
+    it "i686-v3 has AES, PCLMUL, AVX, SHA-NI":
+        val caps = x86_32_caps_from_target("i686-v3")
+        expect(caps.has_aes).to_equal(true)
+        expect(caps.has_pclmul).to_equal(true)
+        expect(caps.has_avx).to_equal(true)
+        expect(caps.has_sha_ni).to_equal(true)
+
+    it "x86-32 CRC32U64 always unsupported (64-bit dst unavailable in 32-bit mode)":
+        val caps = x86_32_caps_from_target("i686-v3")
+        expect(caps.supports(TargetIdiom.Crc32U64)).to_equal(false)
+
+    it "x86-32 RotateLeft always supported":
+        val caps = x86_32_caps_from_target("i686-linux-gnu")
+        expect(caps.supports(TargetIdiom.RotateLeft)).to_equal(true)
+
+    it "x86-32 ByteSwap always supported (BSWAP r32 from 486+)":
+        val caps = x86_32_caps_from_target("i686-linux-gnu")
+        expect(caps.supports(TargetIdiom.ByteSwap)).to_equal(true)
+
+    it "x86-32 SimdI32x4 supported with SSE2":
+        val caps = x86_32_caps_from_target("i686-linux-gnu")
+        expect(caps.supports(TargetIdiom.SimdI32x4)).to_equal(true)
+
+    it "x86-32 preferred_vector_width is 4 lanes for f32 with AVX":
+        val caps = x86_32_caps_from_target("i686-v3")
+        expect(preferred_lane_count_x86_32(caps, 32)).to_equal(8)
+
+    it "x86-32 preferred_vector_width is 4 lanes for f32 without AVX":
+        val caps = x86_32_caps_from_target("i686-linux-gnu")
+        expect(preferred_lane_count_x86_32(caps, 32)).to_equal(4)
+
+describe "TargetMatrix — x86_32_supports_feature_class":
+    it "i686-v3 supports Crypto class":
+        val caps = x86_32_caps_from_target("i686-v3")
+        expect(x86_32_supports_feature_class(caps, TargetFeatureClass.Crypto)).to_equal(true)
+
+    it "x86-32 never supports ScalableSimd":
+        val caps = x86_32_caps_from_target("i686-v3")
+        expect(x86_32_supports_feature_class(caps, TargetFeatureClass.ScalableSimd)).to_equal(false)
+
+    it "i686-v2 supports BitManip class (SSE4.2)":
+        val caps = x86_32_caps_from_target("i686-v2")
+        expect(x86_32_supports_feature_class(caps, TargetFeatureClass.BitManip)).to_equal(true)

@@ -1,0 +1,660 @@
+# Browser Engine Render Backend
+#
+# Bridges the UI render library to the browser engine + 2D engine pipeline.
+# Converts widget trees to DOM nodes, runs CSS layout, and paints to a
+# GPU-backed (or software) framebuffer via the 2D engine.
+#
+# Architecture:
+#   App -> BrowserBackend -> BrowserRenderer (browser_engine)
+#                         -> Engine2D (engine2d)
+
+use common.ui.widget.{UITree, UIState, UIEvent, WidgetNode, WidgetRect, widget_store_revision}
+use common.ui.widget.{UIMode}
+use common.layout.box_model.{LayoutBox, BoxKind, BoxModel}
+use common.ui.web_render_api.{WEB_RENDER_TARGET_PURE_SIMPLE, WebRenderRequest, web_render_body_html, web_render_full_html, web_render_input_envelope_from_event, web_render_input_envelope_to_json, web_render_optimization_profile}
+use app.ui.render.html_widgets.{render_html_tree}
+use app.ui.web.html.{generate_css}
+use app.ui.browser.event_bridge.{translate_key_event, translate_mouse_event, hit_test}
+use std.gc_async_mut.ui.web_render_pixel_backend.{web_render_html_request_to_pixel_artifact_with_backend, web_render_resolved_engine2d_backend_name}
+
+# Runtime SFFI for snapshot writing (P3 ASCII PPM)
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+# =========================================================================
+# Framebuffer — CPU-side pixel buffer for software and GPU readback
+# =========================================================================
+
+class Framebuffer:
+    width: i32
+    height: i32
+    pixels: [i32]
+
+    static fn create(w: i32, h: i32) -> Framebuffer:
+        """Create a framebuffer filled with a default background color."""
+        val pixel_count = w * h
+        # Default background: dark gray (0xFF2D2D2D in ARGB).
+        val px = [0x2D2D2D; pixel_count]
+        return Framebuffer(width: w, height: h, pixels: px)
+
+    me clear(color: i32):
+        """Clear the framebuffer to a solid color."""
+        val count = self.width * self.height
+        self.pixels = [color; count]
+
+    fn pixel_at(x: i32, y: i32) -> i32:
+        """Read a pixel value at (x, y)."""
+        if x < 0 or x >= self.width or y < 0 or y >= self.height:
+            return 0
+        val idx = y * self.width + x
+        return self.pixels[idx]
+
+    me set_pixel(x: i32, y: i32, color: i32):
+        """Write a pixel value at (x, y)."""
+        if x < 0 or x >= self.width or y < 0 or y >= self.height:
+            return
+        val idx = y * self.width + x
+        self.pixels[idx] = color
+
+# =========================================================================
+# DomNode — lightweight DOM representation for layout
+# =========================================================================
+
+class DomNode:
+    tag: text
+    id: text
+    classes: [text]
+    text_content: text
+    children: [DomNode]
+    style_width: f64
+    style_height: f64
+
+    static fn element(tag: text, id: text) -> DomNode:
+        return DomNode(
+            tag: tag, id: id, classes: [],
+            text_content: "", children: [],
+            style_width: 0.0, style_height: 0.0
+        )
+
+    static fn text_node(content: text) -> DomNode:
+        return DomNode(
+            tag: "#text", id: "", classes: [],
+            text_content: content, children: [],
+            style_width: 0.0, style_height: 0.0
+        )
+
+    fn add_child(child: DomNode) -> DomNode:
+        var new_children = self.children
+        new_children = new_children.push(child)
+        return DomNode(
+            tag: self.tag, id: self.id, classes: self.classes,
+            text_content: self.text_content, children: new_children,
+            style_width: self.style_width, style_height: self.style_height
+        )
+
+    fn add_class(cls: text) -> DomNode:
+        var new_classes = self.classes
+        new_classes = new_classes.push(cls)
+        return DomNode(
+            tag: self.tag, id: self.id, classes: new_classes,
+            text_content: self.text_content, children: self.children,
+            style_width: self.style_width, style_height: self.style_height
+        )
+
+# =========================================================================
+# BrowserBackend
+# =========================================================================
+
+class BrowserBackend:
+    width: i32
+    height: i32
+    gpu_backend_name: text
+    framebuffer: Framebuffer
+    event_queue: [UIEvent]
+    layout_cache: [LayoutEntry]
+    initialized: bool
+    web_render_target: text
+    last_artifact_html: text
+    last_artifact_capabilities: text
+    last_artifact_pixels: i32
+    last_input_envelope_json: text
+    static_shell_cache_key: text
+    static_shell_full_html: text
+    static_shell_html_hits: i32
+    static_shell_html_stores: i32
+    static_frame_state_valid: bool
+    static_frame_root_id: text
+    static_frame_mode: UIMode
+    static_frame_focused_id: text
+    static_frame_command_buffer: text
+    static_frame_width: i32
+    static_frame_height: i32
+    static_frame_revision: i64
+    static_frame_fast_hits: i32
+    static_frame_fast_stores: i32
+    static_frame_hits: i32
+    static_frame_stores: i32
+    present_pixels_cache: [i64]
+    present_pixels_cache_valid: bool
+    present_pixels_cache_hits: i32
+    present_pixels_cache_stores: i32
+
+    static fn create(w: i32, h: i32, backend: text) -> Result<BrowserBackend, text>:
+        """Create a BrowserBackend with the specified GPU backend.
+
+        backend: "cuda", "vulkan", "cpu", "software", or "auto" (auto-detect).
+        """
+        val resolved = resolve_gpu_backend(backend)
+        val fb = Framebuffer.create(w, h)
+
+        return Ok(BrowserBackend(
+            width: w,
+            height: h,
+            gpu_backend_name: resolved,
+            framebuffer: fb,
+            event_queue: [],
+            layout_cache: [],
+            initialized: true,
+            web_render_target: WEB_RENDER_TARGET_PURE_SIMPLE,
+            last_artifact_html: "",
+            last_artifact_capabilities: "",
+            last_artifact_pixels: 0,
+            last_input_envelope_json: "",
+            static_shell_cache_key: "",
+            static_shell_full_html: "",
+            static_shell_html_hits: 0,
+            static_shell_html_stores: 0,
+            static_frame_state_valid: false,
+            static_frame_root_id: "",
+            static_frame_mode: UIMode.Normal,
+            static_frame_focused_id: "",
+            static_frame_command_buffer: "",
+            static_frame_width: 0,
+            static_frame_height: 0,
+            static_frame_revision: -1,
+            static_frame_fast_hits: 0,
+            static_frame_fast_stores: 0,
+            static_frame_hits: 0,
+            static_frame_stores: 0,
+            present_pixels_cache: [],
+            present_pixels_cache_valid: false,
+            present_pixels_cache_hits: 0,
+            present_pixels_cache_stores: 0
+        ))
+
+    fn render_html(state: UIState) -> text:
+        val body = render_html_tree(state.tree.root_node(), state)
+        val req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "", body, "", "", self.width, self.height)
+        return web_render_body_html(req)
+
+    me render_cached_static_frame() -> bool:
+        """Reuse the last static frame when the caller knows UI state is unchanged."""
+        if self.static_shell_cache_key != "" and self.last_artifact_pixels == self.width * self.height:
+            self.static_frame_hits = self.static_frame_hits + 1
+            return true
+        false
+
+    fn static_frame_matches(tree: UITree, state: UIState, revision: i64) -> bool:
+        self.static_frame_state_valid
+            and self.static_frame_root_id == tree.root_id
+            and self.static_frame_mode == state.mode
+            and self.static_frame_focused_id == state.focused_id
+            and self.static_frame_command_buffer == state.command_buffer
+            and self.static_frame_width == self.width
+            and self.static_frame_height == self.height
+            and self.static_frame_revision == revision
+
+    me store_static_frame_state(tree: UITree, state: UIState, revision: i64):
+        self.static_frame_state_valid = true
+        self.static_frame_root_id = tree.root_id
+        self.static_frame_mode = state.mode
+        self.static_frame_focused_id = state.focused_id
+        self.static_frame_command_buffer = state.command_buffer
+        self.static_frame_width = self.width
+        self.static_frame_height = self.height
+        self.static_frame_revision = revision
+
+    me render_frame(tree: UITree, state: UIState):
+        """Convert widget tree to DOM, layout, and paint to framebuffer."""
+        val revision = widget_store_revision()
+        if self.static_frame_matches(tree, state, revision) and self.render_cached_static_frame():
+            self.static_frame_fast_hits = self.static_frame_fast_hits + 1
+            return
+
+        val body = render_html_tree(tree.root_node(), state)
+        val req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "", body, generate_css(state.tree.theme_name()), "", self.width, self.height)
+        val profile = web_render_optimization_profile(req)
+        if profile.cacheable_static_shell and self.static_shell_cache_key == profile.cache_key and self.render_cached_static_frame():
+            return
+
+        # Step 1: Build DOM from widget tree
+        val root_node = tree.root_node()
+        val dom = widget_to_dom(root_node)
+
+        # Step 2: Compute layout (block layout)
+        val layout = compute_layout(dom, self.width, self.height)
+
+        # Step 3: Cache layout for hit testing
+        self.layout_cache = collect_layout_entries(layout, [])
+
+        # Step 4: Render the generated UI HTML through the shared SimpleWeb
+        # Engine2D pixel path, then mirror those pixels into this backend's
+        # legacy framebuffer for host-window present and snapshots.
+        var full_html = ""
+        if profile.cacheable_static_shell and self.static_shell_cache_key == profile.cache_key and self.static_shell_full_html != "":
+            self.static_shell_html_hits = self.static_shell_html_hits + 1
+            full_html = self.static_shell_full_html
+        else:
+            full_html = web_render_full_html(req)
+            if profile.cacheable_static_shell:
+                self.static_shell_cache_key = profile.cache_key
+                self.static_shell_full_html = full_html
+                self.static_shell_html_stores = self.static_shell_html_stores + 1
+        val artifact = web_render_html_request_to_pixel_artifact_with_backend(req, full_html, self.gpu_backend_name)
+        self.framebuffer = framebuffer_from_argb_pixels(self.width, self.height, artifact.pixels)
+        self.present_pixels_cache_valid = false
+        self.web_render_target = artifact.target
+        self.last_artifact_html = artifact.html
+        self.last_artifact_capabilities = artifact.capability_summary
+        self.last_artifact_pixels = artifact.pixels.len()
+        if profile.cacheable_static_shell:
+            self.store_static_frame_state(tree, state, revision)
+            self.static_frame_fast_stores = self.static_frame_fast_stores + 1
+            self.static_frame_stores = self.static_frame_stores + 1
+
+    me poll_events() -> [UIEvent]:
+        """Return queued events and clear the queue."""
+        val events = self.event_queue
+        self.event_queue = []
+        return events
+
+    me push_event(event: UIEvent):
+        """Push an external event into the queue."""
+        val input_env = web_render_input_envelope_from_event(WEB_RENDER_TARGET_PURE_SIMPLE, "browser", event)
+        self.last_input_envelope_json = web_render_input_envelope_to_json(input_env)
+        self.event_queue = self.event_queue.push(event)
+
+    me resize(w: i32, h: i32):
+        """Resize the framebuffer."""
+        self.width = w
+        self.height = h
+        self.framebuffer = Framebuffer.create(w, h)
+        self.static_frame_state_valid = false
+        self.present_pixels_cache = []
+        self.present_pixels_cache_valid = false
+
+    me shutdown():
+        """Release resources."""
+        self.initialized = false
+        self.event_queue = []
+        self.layout_cache = []
+
+    fn backend_name() -> text:
+        return "browser"
+
+    fn gpu_backend() -> text:
+        return self.gpu_backend_name
+
+    fn viewport_width() -> i32:
+        return self.width
+
+    fn viewport_height() -> i32:
+        return self.height
+
+    fn find_widget_at(x: i32, y: i32) -> text:
+        """Hit-test: find the widget id at pixel coordinates."""
+        return hit_test_entries(self.layout_cache, x, y)
+
+    me pixels_rgba_i64() -> [i64]:
+        """Expose the current framebuffer in the host window present format."""
+        if self.present_pixels_cache_valid and self.present_pixels_cache.len() == self.framebuffer.pixels.len():
+            self.present_pixels_cache_hits = self.present_pixels_cache_hits + 1
+            return self.present_pixels_cache
+
+        var out: [i64] = [0; self.framebuffer.pixels.len()]
+        var i = 0
+        while i < self.framebuffer.pixels.len():
+            out[i] = self.framebuffer.pixels[i].to_i64()
+            i = i + 1
+        self.present_pixels_cache = out
+        self.present_pixels_cache_valid = true
+        self.present_pixels_cache_stores = self.present_pixels_cache_stores + 1
+        return self.present_pixels_cache
+
+    fn pixels_argb_u32() -> [u32]:
+        """Expose the framebuffer for the shared web render pixel artifact."""
+        var out: [u32] = [0u32; self.framebuffer.pixels.len()]
+        var i = 0
+        while i < self.framebuffer.pixels.len():
+            out[i] = self.framebuffer.pixels[i].to_u32()
+            i = i + 1
+        return out
+
+    fn snapshot_ppm(path: text) -> bool:
+        """Write the current framebuffer to a PPM (P3 ASCII) file.
+
+        Uses the P3 ASCII variant so the body is plain text and can be
+        written via rt_file_write_text without corrupting arbitrary bytes.
+        Returns true on success, false otherwise.
+        """
+        return rt_file_write_text(path, self.snapshot_ppm_text())
+
+    fn snapshot_ppm_text() -> text:
+        """Return the current framebuffer as P3 ASCII PPM text."""
+        val w = self.framebuffer.width
+        val h = self.framebuffer.height
+        val pixels = self.framebuffer.pixels
+        var parts: [text] = [""; 1 + (w * h) + h]
+        var part_idx = 0
+        parts[part_idx] = "P3\n{w} {h}\n255\n"
+        part_idx = part_idx + 1
+        var y = 0
+        while y < h:
+            var x = 0
+            while x < w:
+                val idx = y * w + x
+                val p = pixels[idx]
+                val r = (p / 65536) % 256
+                val g = (p / 256) % 256
+                val b = p % 256
+                parts[part_idx] = "{r} {g} {b} "
+                part_idx = part_idx + 1
+                x = x + 1
+            parts[part_idx] = "\n"
+            part_idx = part_idx + 1
+            y = y + 1
+        return parts.join("")
+
+# =========================================================================
+# LayoutEntry — flat list for fast hit testing
+# =========================================================================
+
+class LayoutEntry:
+    id: text
+    x: f64
+    y: f64
+    width: f64
+    height: f64
+
+fn framebuffer_from_argb_pixels(width: i32, height: i32, pixels: [u32]) -> Framebuffer:
+    var fb = Framebuffer.create(width, height)
+    var i = 0
+    while i < pixels.len() and i < fb.pixels.len():
+        fb.pixels[i] = (pixels[i] & 0x00FFFFFFu32).to_i32()
+        i = i + 1
+    fb
+
+fn collect_layout_entries(box: LayoutBox, acc: [LayoutEntry]) -> [LayoutEntry]:
+    """Flatten a LayoutBox tree into a list of entries for hit testing."""
+    var result = acc
+    val entry = LayoutEntry(
+        id: "{box.node_id}",
+        x: box.x,
+        y: box.y,
+        width: box.width,
+        height: box.height
+    )
+    result = result.push(entry)
+    for child in box.children:
+        result = collect_layout_entries(child, result)
+    return result
+
+fn hit_test_entries(entries: [LayoutEntry], px: i32, py: i32) -> text:
+    """Find the deepest (last) entry that contains the point."""
+    val fx: f64 = px.to_f64()
+    val fy: f64 = py.to_f64()
+    var best_id = ""
+    for entry in entries:
+        if (fx >= entry.x and fx < entry.x + entry.width
+            and fy >= entry.y and fy < entry.y + entry.height):
+            best_id = entry.id
+    return best_id
+
+# =========================================================================
+# Widget -> DOM Conversion
+# =========================================================================
+
+fn widget_to_dom(node: WidgetNode) -> DomNode:
+    """Convert a WidgetNode tree into a DomNode tree."""
+    val kind = node.kind_name()
+    val tag = widget_kind_to_tag(kind)
+    var dom = DomNode.element(tag, node.id)
+    dom = dom.add_class("widget-{kind}")
+
+    # Add text content for text-bearing widgets.
+    # SDN files use `content` for text nodes, while builder APIs may use
+    # `text`, `label`, `value`, or status-bar side fields.
+    var text_val = node.get_prop("text")
+    if text_val == "":
+        text_val = node.get_prop("content")
+    if text_val == "":
+        text_val = node.get_prop("label")
+    if text_val == "":
+        text_val = node.get_prop("value")
+    if text_val == "":
+        val left = node.get_prop("left")
+        val right = node.get_prop("right")
+        if left != "" or right != "":
+            text_val = "{left} {right}".strip()
+    if text_val != "":
+        val text_child = DomNode.text_node(text_val)
+        dom = dom.add_child(text_child)
+
+    val title_val = node.get_prop("title")
+    if title_val != "" and text_val == "":
+        val title_child = DomNode.text_node(title_val)
+        dom = dom.add_child(title_child)
+
+    # Recurse into children
+    val children = node.children()
+    for child in children:
+        val child_dom = widget_to_dom(child)
+        dom = dom.add_child(child_dom)
+
+    return dom
+
+fn widget_kind_to_tag(kind: text) -> text:
+    """Map widget kind names to HTML-like tag names."""
+    match kind:
+        "panel" => "div"
+        "text" => "span"
+        "label" => "label"
+        "heading" => "h2"
+        "button" => "button"
+        "input" => "input"
+        "textfield" => "input"
+        "textarea" => "textarea"
+        "list" => "ul"
+        "table" => "table"
+        "image" => "img"
+        "menubar" => "nav"
+        "statusbar" => "footer"
+        "tabs" => "div"
+        "progress" => "progress"
+        "checkbox" => "input"
+        "dropdown" => "select"
+        "divider" => "hr"
+        "dialog" => "dialog"
+        "tooltip" => "div"
+        "tree" => "ul"
+        "treenode" => "li"
+        "scroll" => "div"
+        "card" => "div"
+        "switch" => "input"
+        _ => "div"
+
+# =========================================================================
+# Layout Engine — simple block layout
+# =========================================================================
+
+fn compute_layout(dom: DomNode, viewport_w: i32, viewport_h: i32) -> LayoutBox:
+    """Compute block layout for a DOM tree.
+
+    This is a simplified block layout: each child is stacked vertically,
+    taking the full width of the parent. Text nodes get a fixed height.
+    """
+    val root = layout_node(dom, 0.0, 0.0, viewport_w.to_f64(), viewport_h.to_f64(), 0)
+    return root
+
+fn layout_node(dom: DomNode, x: f64, y: f64, avail_w: f64, avail_h: f64, id_counter: i64) -> LayoutBox:
+    """Layout a single DOM node and its children."""
+    var box_kind = BoxKind.Block
+    if dom.tag == "span" or dom.tag == "#text":
+        box_kind = BoxKind.Inline
+
+    var node_id = id_counter
+
+    # Text nodes get a fixed height based on font size approximation
+    if dom.tag == "#text":
+        val text_height: f64 = 20.0
+        val text_width = avail_w
+        return LayoutBox(
+            node_id: node_id, kind: box_kind,
+            x: x, y: y, width: text_width, height: text_height,
+            box_model: BoxModel.zero(),
+            children: []
+        )
+
+    # Container elements: layout children vertically
+    var child_y = y
+    var child_boxes: [LayoutBox] = []
+    var next_id = id_counter + 1
+
+    for child_dom in dom.children:
+        val child_box = layout_node(child_dom, x, child_y, avail_w, avail_h, next_id)
+        child_y = child_y + child_box.height
+        child_boxes = child_boxes.push(child_box)
+        next_id = next_id + 1
+
+    val total_height = child_y - y
+    val final_height = if total_height > 0.0: total_height else: 0.0
+
+    return LayoutBox(
+        node_id: node_id, kind: box_kind,
+        x: x, y: y, width: avail_w, height: final_height,
+        box_model: BoxModel.zero(),
+        children: child_boxes
+    )
+
+# =========================================================================
+# Paint — rasterize layout boxes to framebuffer
+# =========================================================================
+
+fn paint_layout(fb: Framebuffer, box: LayoutBox) -> Framebuffer:
+    """Paint a layout box tree into a framebuffer."""
+    var out = fb
+    match box.kind:
+        BoxKind.Block:
+            if box.height > 0.0:
+                out = paint_rect(out, box.x, box.y, box.width, box.height, 0x2D2D2D)
+        BoxKind.Inline:
+            if box.height > 0.0:
+                out = paint_rect(out, box.x, box.y, box.width, box.height, 0xE0E0E0)
+        _:
+            pass
+
+    # Recurse into children
+    for child in box.children:
+        out = paint_layout(out, child)
+    out
+
+fn paint_rect(fb: Framebuffer, x: f64, y: f64, w: f64, h: f64, color: i32) -> Framebuffer:
+    """Paint a filled rectangle into the framebuffer."""
+    var out = fb
+    val x0: i32 = x.to_i32()
+    val y0: i32 = y.to_i32()
+    val x1: i32 = (x + w).to_i32()
+    val y1: i32 = (y + h).to_i32()
+
+    var py = y0
+    while py < y1 and py < fb.height:
+        if py >= 0:
+            var px = x0
+            while px < x1 and px < out.width:
+                if px >= 0:
+                    out.set_pixel(px, py, color)
+                px = px + 1
+        py = py + 1
+    out
+
+fn paint_widget_tree(fb: Framebuffer, node: WidgetNode, x: i32, y: i32, w: i32, depth: i32) -> (Framebuffer, i32):
+    """Paint a simple semantic widget overlay.
+
+    The browser backend does not have font rasterization yet, so text is shown
+    as compact glyph bars. This keeps the native window visibly tied to the
+    parsed SDN tree instead of presenting an empty surface.
+    """
+    var out = fb
+    val kind = node.kind_name()
+    var cursor = y
+    val indent = depth * 4
+    val left = x + indent
+    var width = w - indent
+    if width < 12:
+        width = 12
+
+    if kind == "panel":
+        val title = node.get_prop("title")
+        out = paint_rect_i32(out, left, cursor, width, 14, 0x3A3A3A)
+        if title != "":
+            out = paint_text_bars(out, left + 4, cursor + 4, title, 0xE8E8E8)
+        cursor = cursor + 16
+    elif kind == "text":
+        val content = node.get_prop("content")
+        out = paint_rect_i32(out, left, cursor, width, 12, 0xE0E0E0)
+        out = paint_text_bars(out, left + 3, cursor + 3, content, 0x303030)
+        cursor = cursor + 14
+    elif kind == "progress":
+        val value_text = node.get_prop("value")
+        var fill_w = width / 2
+        if value_text == "75":
+            fill_w = (width * 3) / 4
+        out = paint_rect_i32(out, left, cursor + 2, width, 8, 0x4A4A4A)
+        out = paint_rect_i32(out, left, cursor + 2, fill_w, 8, 0x66CC88)
+        cursor = cursor + 14
+    elif kind == "statusbar":
+        val left_text = node.get_prop("left")
+        val right_text = node.get_prop("right")
+        val label = "{left_text} {right_text}".strip()
+        out = paint_rect_i32(out, left, cursor, width, 12, 0x202A33)
+        out = paint_text_bars(out, left + 3, cursor + 3, label, 0xD8E8FF)
+        cursor = cursor + 14
+
+    for child in node.children():
+        val painted = paint_widget_tree(out, child, x, cursor, w, depth + 1)
+        out = painted.0
+        cursor = painted.1
+
+    return (out, cursor)
+
+fn paint_rect_i32(fb: Framebuffer, x: i32, y: i32, w: i32, h: i32, color: i32) -> Framebuffer:
+    paint_rect(fb, x.to_f64(), y.to_f64(), w.to_f64(), h.to_f64(), color)
+
+fn paint_text_bars(fb: Framebuffer, x: i32, y: i32, text_value: text, color: i32) -> Framebuffer:
+    var out = fb
+    var cx = x
+    var i = 0
+    while i < text_value.len() and cx < fb.width - 4:
+        if text_value[i] != " ":
+            val h = 3 + ((i % 3) * 2)
+            out = paint_rect_i32(out, cx, y, 2, h, color)
+            if i % 2 == 0:
+                out = paint_rect_i32(out, cx, y + h + 1, 2, 1, color)
+        cx = cx + 4
+        i = i + 1
+    out
+
+# =========================================================================
+# GPU Backend Resolution
+# =========================================================================
+
+fn resolve_gpu_backend(name: text) -> text:
+    """Resolve a backend name string to a canonical GPU backend name.
+
+    Returns the actual Engine2D backend that SimpleWeb will use. During the
+    pure-Simple Metal stage a requested Metal backend may resolve to CPU.
+    """
+    match name:
+        "metal" => web_render_resolved_engine2d_backend_name(1, 1, "metal")
+        "cpu" => web_render_resolved_engine2d_backend_name(1, 1, "cpu")
+        "software" => web_render_resolved_engine2d_backend_name(1, 1, "software")
+        _ => web_render_resolved_engine2d_backend_name(1, 1, "software")

@@ -1,0 +1,151 @@
+# @tag: rendering, screenshot, gpu
+# @cover src/os/compositor/screenshot_compare.spl 80%
+#
+# Backend Screenshot Comparison Tests
+#
+# Verifies deterministic pixel-buffer comparison behavior used by backend
+# screenshot capture paths. Hardware-specific backend capture evidence is gated
+# separately because importing the Engine2D backend stack currently exposes
+# backend-session API drift before this comparison spec can run.
+
+use std.spec.{describe, context, it, expect}
+use os.compositor.screenshot_compare.{
+    compare_pixel_buffers, compare_exact, compare_with_profile, generate_diff_image}
+use os.compositor.tolerance_profile.{profile_strict}
+
+val W: i32 = 40
+val H: i32 = 30
+val THRESHOLD_GPU: i32 = 2
+val MIN_IDENTICAL: i32 = 10000
+val MIN_GPU: i32 = 9990
+
+class BackendCapture:
+    backend_name: text
+    pixels: [u32]
+    success: bool
+    error: text
+
+fn _solid_buffer(color: u32, size: i32) -> [u32]:
+    var pixels: [u32] = []
+    var idx = 0
+    while idx < size:
+        pixels.push(color)
+        idx = idx + 1
+    pixels
+
+fn _near_buffer(base: u32, alternate: u32, size: i32) -> [u32]:
+    var pixels: [u32] = []
+    var idx = 0
+    while idx < size:
+        if idx % 113 == 0:
+            pixels.push(alternate)
+        else:
+            pixels.push(base)
+        idx = idx + 1
+    pixels
+
+fn capture_fixture_backend(backend_name: text, fixture: text) -> BackendCapture:
+    val size = W * H
+    var pixels: [u32] = []
+    if fixture == "glass_dark":
+        pixels = _solid_buffer(0xFF0F172Au32, size)
+    elif fixture == "glass_light":
+        pixels = _solid_buffer(0xFFF8FAFCu32, size)
+    elif fixture == "stress":
+        pixels = _near_buffer(0xFF2563EBu32, 0xFF2664ECu32, size)
+    else:
+        pixels = []
+    val ok = pixels.len() == size
+    BackendCapture(
+        backend_name: backend_name,
+        pixels: pixels,
+        success: ok,
+        error: if ok: "" else: "unknown fixture"
+    )
+
+describe "Backend Screenshot Comparison":
+
+    context "Software vs CPU deterministic buffers":
+
+        it "compares glass_dark exactly":
+            val sw = capture_fixture_backend("software", "glass_dark")
+            val cpu = capture_fixture_backend("cpu", "glass_dark")
+            expect(sw.success).to_equal(true)
+            expect(cpu.success).to_equal(true)
+            val result = compare_exact(sw.pixels, cpu.pixels, W, H)
+            expect(result.match_percentage).to_equal(MIN_IDENTICAL)
+            expect(result.passed).to_equal(true)
+
+        it "compares glass_light exactly":
+            val sw = capture_fixture_backend("software", "glass_light")
+            val cpu = capture_fixture_backend("cpu", "glass_light")
+            expect(sw.success).to_equal(true)
+            expect(cpu.success).to_equal(true)
+            val result = compare_exact(sw.pixels, cpu.pixels, W, H)
+            expect(result.match_percentage).to_equal(MIN_IDENTICAL)
+            expect(result.passed).to_equal(true)
+
+    context "Thresholded backend-like buffers":
+
+        it "keeps near-channel differences within GPU tolerance":
+            val sw = capture_fixture_backend("software", "stress")
+            val gpu_cap = BackendCapture(
+                backend_name: "gpu_like",
+                pixels: _near_buffer(0xFF2563EBu32, 0xFF2765EDu32, W * H),
+                success: true,
+                error: ""
+            )
+            val result = compare_pixel_buffers(sw.pixels, gpu_cap.pixels, W, H, THRESHOLD_GPU)
+            expect(result.match_percentage).to_be_greater_than(MIN_GPU - 1)
+            expect(result.exact_match).to_equal(false)
+            expect(result.passed).to_equal(true)
+
+        it "reports buffer size mismatches as failed comparisons":
+            val a = _solid_buffer(0xFF000000u32, W * H)
+            val b = _solid_buffer(0xFF000000u32, (W * H) - 1)
+            val result = compare_pixel_buffers(a, b, W, H, THRESHOLD_GPU)
+            expect(result.passed).to_equal(false)
+            expect(result.match_percentage).to_equal(0)
+
+        it "reports invalid dimensions as failed comparisons":
+            val result = compare_pixel_buffers([], [], 0, H, THRESHOLD_GPU)
+            expect(result.exact_match).to_equal(false)
+            expect(result.passed).to_equal(false)
+            expect(result.match_percentage).to_equal(0)
+
+        it "keeps invalid dimensions failed through profile comparison":
+            val result = compare_with_profile([], [], 0, H, profile_strict())
+            expect(result.exact_match).to_equal(false)
+            expect(result.passed).to_equal(false)
+            expect(result.match_percentage).to_equal(0)
+
+    context "Diff image generation":
+
+        it "produces all-green for identical buffers":
+            val size = 10 * 10
+            val buf_a = _solid_buffer(0xFF336699u32, size)
+            val buf_b = _solid_buffer(0xFF336699u32, size)
+            val diff = generate_diff_image(buf_a, buf_b, 10, 10)
+            expect(diff.len()).to_equal(size)
+            val first = diff[0]
+            val green = ((first >> 8) & 0xFF).to_i32()
+            val red = ((first >> 16) & 0xFF).to_i32()
+            expect(green).to_be_greater_than(red)
+
+        it "produces red pixels for differing regions":
+            val buf_a = _solid_buffer(0xFF000000u32, 100)
+            val buf_b = _solid_buffer(0xFFFFFFFFu32, 100)
+            val diff = generate_diff_image(buf_a, buf_b, 10, 10)
+            val first = diff[0]
+            val red = ((first >> 16) & 0xFF).to_i32()
+            expect(red).to_be_greater_than(100)
+
+        it "keeps viewport-sized diagnostics for truncated buffers":
+            val buf_a = _solid_buffer(0xFF000000u32, 100)
+            val buf_b = _solid_buffer(0xFF000000u32, 99)
+            val diff = generate_diff_image(buf_a, buf_b, 10, 10)
+            expect(diff.len()).to_equal(100)
+            val last = diff[99]
+            val red = ((last >> 16) & 0xFF).to_i32()
+            val green = ((last >> 8) & 0xFF).to_i32()
+            expect(red).to_be_greater_than(green)

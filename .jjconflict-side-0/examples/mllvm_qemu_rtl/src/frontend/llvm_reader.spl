@@ -1,0 +1,672 @@
+# LLVM IR Reader → IR_TC Module
+#
+# Reads LLVM text IR (.ll) files and converts to IR_TC modules.
+# Also validates LLVM bitcode (.bc) file magic bytes and delegates
+# to text IR parsing when possible.
+#
+# The LLVM C API FFI (src/lib/nogc_sync_mut/ffi/llvm.spl) does not yet
+# expose bitcode parsing or module iteration functions, so this reader
+# implements a line-oriented .ll text parser instead.
+
+use core.types.{IrTcTypeKind, IrTcValue, IrTcCond, CallConv}
+use core.ops.{IrTcOp, IrTcInst, PhiEntry}
+use core.mem_op.{MemOp, Endian}
+use core.block.{BlockId, IrTcBlock, IrTcFunction, IrTcParam, IrTcModule, IrTcModuleMode, IrTcGlobal}
+use core.builder.{IrTcBuilder}
+use frontend.llvm_types.{LlvmType, llvm_type_to_irtc}
+use frontend.llvm_ops.{LlvmOpcode, LlvmICmpPred, llvm_icmp_to_irtc_cond, map_llvm_binary_op, map_llvm_cast_op}
+
+extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_file_read_text(path: text) -> text
+
+# ============================================================================
+# Reader Errors
+# ============================================================================
+
+struct LlvmReaderError:
+    message: text
+    location: text?
+
+impl LlvmReaderError:
+    static fn new(msg: text) -> LlvmReaderError:
+        LlvmReaderError(message: msg, location: nil)
+
+    static fn at(msg: text, loc: text) -> LlvmReaderError:
+        LlvmReaderError(message: msg, location: Some(loc))
+
+    fn to_text() -> text:
+        if val loc = self.location:
+            "llvm reader error at {loc}: {self.message}"
+        else:
+            "llvm reader error: {self.message}"
+
+# ============================================================================
+# LLVM Text IR Reader
+# ============================================================================
+
+class LlvmReader:
+    """Reads LLVM text IR (.ll) and produces IR_TC modules.
+
+    Also accepts .bc files: validates the bitcode magic header, then
+    returns an error because the LLVM C API iteration functions are not
+    yet bound. Use `llvm-dis` to convert .bc to .ll first.
+
+    Usage:
+        val reader = LlvmReader.new()
+        val module = reader.read_bitcode_file("input.ll")
+        match module:
+            Ok(m): # use m
+            Err(e): print("Error: {e.to_text()}")
+    """
+    errors: [LlvmReaderError]
+
+impl LlvmReader:
+    static fn new() -> LlvmReader:
+        LlvmReader(errors: [])
+
+    fn read_bitcode_file(path: text) -> Result<IrTcModule, LlvmReaderError>:
+        """Read an LLVM IR file and convert to IR_TC module.
+
+        Accepts both .ll (text IR) and .bc (bitcode) files.
+        For .bc files the bitcode magic is validated, but full parsing
+        requires LLVM C API bindings not yet available — use `llvm-dis`
+        to convert to .ll first.
+        """
+        # Phase 1: Read file bytes and detect format
+        val bytes = rt_file_read_bytes(path)
+        if bytes.len() == 0:
+            return Err(LlvmReaderError.new("file is empty or could not be read: {path}"))
+
+        # Check for LLVM bitcode magic: 0x42 0x43 0xC0 0xDE ("BC\xC0\xDE")
+        val is_bitcode = _has_bitcode_magic(bytes)
+
+        if is_bitcode:
+            # Binary bitcode — we cannot iterate LLVM modules without C API
+            # bindings for LLVMGetFirstFunction / LLVMGetNextFunction etc.
+            return Err(LlvmReaderError.new(
+                "binary bitcode (.bc) parsing requires LLVM C API iteration "
+                + "bindings not yet available; convert to text IR first with: "
+                + "llvm-dis {path} -o output.ll"
+            ))
+
+        # Phase 2: Parse text IR (.ll format)
+        val source = rt_file_read_text(path)
+        val module_name = _extract_module_name(source, path)
+        _parse_text_ir(source, module_name)
+
+    fn read_bitcode_bytes(bytes: [i64]) -> Result<IrTcModule, LlvmReaderError>:
+        """Read LLVM IR from a byte buffer.
+
+        If the buffer starts with the bitcode magic (BC\\xC0\\xDE), returns
+        an error directing the caller to use text IR instead.
+        Otherwise treats the bytes as UTF-8 text IR and parses it.
+        """
+        if bytes.len() == 0:
+            return Err(LlvmReaderError.new("empty byte buffer"))
+
+        # Convert [i64] to [u8] for magic check
+        var u8_bytes: [u8] = []
+        for b in bytes:
+            u8_bytes.push(b as u8)
+
+        if _has_bitcode_magic(u8_bytes):
+            return Err(LlvmReaderError.new(
+                "binary bitcode parsing requires LLVM C API iteration "
+                + "bindings not yet available; provide text IR (.ll) bytes instead"
+            ))
+
+        # Treat as UTF-8 text IR
+        var source = ""
+        for b in bytes:
+            source = source + (b as u8 as text)
+        val module_name = _extract_module_name(source, "memory_buffer")
+        _parse_text_ir(source, module_name)
+
+    # ── Internal: bitcode magic detection ──
+
+    fn _has_bitcode_magic(bytes: [u8]) -> bool:
+        """Check for LLVM bitcode magic: 0x42 0x43 0xC0 0xDE."""
+        if bytes.len() < 4:
+            return false
+        val b0 = bytes[0] as i64
+        val b1 = bytes[1] as i64
+        val b2 = bytes[2] as i64
+        val b3 = bytes[3] as i64
+        b0 == 0x42 and b1 == 0x43 and b2 == 0xC0 and b3 == 0xDE
+
+    # ── Internal: module name extraction ──
+
+    fn _extract_module_name(source: text, fallback: text) -> text:
+        """Extract module name from 'source_filename' or 'ModuleID' directive."""
+        val lines = source.split("\n")
+        for line in lines:
+            var trimmed = line.trim()
+            if trimmed.starts_with("; ModuleID"):
+                # ; ModuleID = 'name'
+                val eq_idx = trimmed.index_of("=")
+                if eq_idx >= 0:
+                    var name = trimmed.slice(eq_idx + 1, trimmed.len()).trim()
+                    # Strip surrounding quotes
+                    if name.starts_with("'"):
+                        name = name.slice(1, name.len() - 1)
+                    return self.convert_module_name(name)
+            if trimmed.starts_with("source_filename"):
+                val eq_idx = trimmed.index_of("=")
+                if eq_idx >= 0:
+                    var name = trimmed.slice(eq_idx + 1, trimmed.len()).trim()
+                    if name.starts_with("\""):
+                        name = name.slice(1, name.len() - 1)
+                    return self.convert_module_name(name)
+        self.convert_module_name(fallback)
+
+    # ── Internal: text IR parser ──
+
+    fn _parse_text_ir(source: text, module_name: text) -> Result<IrTcModule, LlvmReaderError>:
+        """Parse LLVM text IR (.ll) into an IR_TC module.
+
+        Handles: module metadata, global variables, function declarations,
+        function definitions with basic blocks and instructions.
+        """
+        var builder = IrTcBuilder.new(module_name, IrTcModuleMode.Compilation)
+        val lines = source.split("\n")
+        var line_num = 0
+        var in_function = false
+        var current_block_label = ""
+
+        for line in lines:
+            line_num = line_num + 1
+            var trimmed = line.trim()
+
+            # Skip empty lines and comments
+            if trimmed.len() == 0:
+                continue
+            if trimmed.starts_with(";"):
+                continue
+
+            # Skip metadata and attributes
+            if trimmed.starts_with("!"):
+                continue
+            if trimmed.starts_with("attributes"):
+                continue
+            if trimmed.starts_with("source_filename"):
+                continue
+            if trimmed.starts_with("target"):
+                continue
+
+            # Global variable: @name = ...
+            if trimmed.starts_with("@") and not in_function:
+                _parse_global(trimmed, builder)
+                continue
+
+            # Function declaration: declare ...
+            if trimmed.starts_with("declare"):
+                _parse_declaration(trimmed, builder)
+                continue
+
+            # Function definition start: define ...
+            if trimmed.starts_with("define"):
+                in_function = true
+                _parse_function_header(trimmed, builder, line_num)
+                continue
+
+            # End of function body
+            if trimmed == "}":
+                if in_function:
+                    builder.end_function()
+                    in_function = false
+                continue
+
+            # Inside function body
+            if in_function:
+                # Basic block label: <label>:
+                if trimmed.ends_with(":") and not trimmed.contains("="):
+                    val label = trimmed.slice(0, trimmed.len() - 1).trim()
+                    val bid = builder.new_block(label)
+                    builder.set_block(bid)
+                    current_block_label = label
+                    continue
+
+                # Instruction
+                _parse_instruction(trimmed, builder, line_num)
+
+        val mod = builder.finish()
+        Ok(mod)
+
+    # ── Internal: global parsing ──
+
+    me _parse_global(line: text, builder: IrTcBuilder):
+        """Parse a global variable definition: @name = [constant|global] type [initializer]"""
+        # Extract name between @ and first space or =
+        var name = ""
+        var rest = line.slice(1, line.len())  # skip @
+        val space_idx = rest.index_of(" ")
+        if space_idx >= 0:
+            name = rest.slice(0, space_idx)
+            rest = rest.slice(space_idx + 1, rest.len()).trim()
+        else:
+            return  # malformed
+
+        val is_const = rest.starts_with("constant") or rest.contains("constant")
+        val ty = _infer_global_type(rest)
+
+        if is_const:
+            builder.add_global(IrTcGlobal.constant(name, ty, []))
+        else:
+            builder.add_global(IrTcGlobal.new(name, ty))
+
+    fn _infer_global_type(rest: text) -> IrTcTypeKind:
+        """Infer the IR_TC type from the LLVM global definition text."""
+        if rest.contains("i64"):
+            IrTcTypeKind.I64
+        else if rest.contains("i32"):
+            IrTcTypeKind.I32
+        else if rest.contains("i16"):
+            IrTcTypeKind.I16
+        else if rest.contains("i8"):
+            IrTcTypeKind.I8
+        else if rest.contains("i1"):
+            IrTcTypeKind.I1
+        else if rest.contains("double"):
+            IrTcTypeKind.F64
+        else if rest.contains("float"):
+            IrTcTypeKind.F32
+        else if rest.contains("ptr"):
+            IrTcTypeKind.Ptr(addr_space: 0)
+        else:
+            IrTcTypeKind.I64
+
+    # ── Internal: declaration parsing ──
+
+    me _parse_declaration(line: text, builder: IrTcBuilder):
+        """Parse: declare <ret_type> @<name>(<param_types>)"""
+        var params = _parse_param_types(line)
+        val ret_type = _parse_return_type(line)
+        val name = _extract_function_name(line)
+        builder.begin_declaration(name, params, ret_type)
+
+    # ── Internal: function header parsing ──
+
+    me _parse_function_header(line: text, builder: IrTcBuilder, line_num: i64):
+        """Parse: define <ret_type> @<name>(<params>) { ... """
+        val name = _extract_function_name(line)
+        var params = _parse_param_types(line)
+        val ret_type = _parse_return_type(line)
+        builder.begin_function(name, params, ret_type)
+        # Create entry block
+        val entry = builder.new_block("entry")
+        builder.set_block(entry)
+
+    fn _extract_function_name(line: text) -> text:
+        """Extract function name from @name in define/declare line."""
+        val at_idx = line.index_of("@")
+        if at_idx < 0:
+            return "unknown"
+        var rest = line.slice(at_idx + 1, line.len())
+        val paren_idx = rest.index_of("(")
+        if paren_idx >= 0:
+            rest = rest.slice(0, paren_idx)
+        rest.trim()
+
+    fn _parse_return_type(line: text) -> IrTcTypeKind:
+        """Extract return type from define/declare line."""
+        # Pattern: define <type> @name or declare <type> @name
+        var rest = line.trim()
+        if rest.starts_with("define"):
+            rest = rest.slice(6, rest.len()).trim()
+        else if rest.starts_with("declare"):
+            rest = rest.slice(7, rest.len()).trim()
+
+        # Skip linkage keywords
+        var keywords = ["private", "internal", "external", "linkonce_odr", "weak", "dso_local"]
+        for kw in keywords:
+            if rest.starts_with(kw):
+                rest = rest.slice(kw.len(), rest.len()).trim()
+
+        # The return type is the next token before @
+        val at_idx = rest.index_of("@")
+        if at_idx > 0:
+            val type_str = rest.slice(0, at_idx).trim()
+            return _parse_type_string(type_str)
+        IrTcTypeKind.Void
+
+    fn _parse_param_types(line: text) -> [IrTcParam]:
+        """Extract parameter types from function signature."""
+        var params: [IrTcParam] = []
+        val open_paren = line.index_of("(")
+        val close_paren = line.last_index_of(")")
+        if open_paren < 0 or close_paren < 0:
+            return params
+
+        val param_str = line.slice(open_paren + 1, close_paren).trim()
+        if param_str.len() == 0 or param_str == "...":
+            return params
+
+        val parts = param_str.split(",")
+        var idx = 0
+        for part in parts:
+            var p = part.trim()
+            if p == "..." or p.len() == 0:
+                continue
+            # Each param: <type> [%name] [attrs...]
+            val ty = _parse_leading_type(p)
+            params.push(IrTcParam.new("arg{idx}", ty))
+            idx = idx + 1
+        params
+
+    fn _parse_leading_type(token: text) -> IrTcTypeKind:
+        """Parse the leading type from a parameter token like 'i32 %x'."""
+        val parts = token.trim().split(" ")
+        if parts.len() > 0:
+            return _parse_type_string(parts[0].trim())
+        IrTcTypeKind.I64
+
+    fn _parse_type_string(type_str: text) -> IrTcTypeKind:
+        """Parse an LLVM type string to IrTcTypeKind."""
+        var s = type_str.trim()
+        # Strip pointer suffix
+        if s.ends_with("*"):
+            return IrTcTypeKind.Ptr(addr_space: 0)
+        match s:
+            "void": IrTcTypeKind.Void
+            "i1": IrTcTypeKind.I1
+            "i8": IrTcTypeKind.I8
+            "i16": IrTcTypeKind.I16
+            "i32": IrTcTypeKind.I32
+            "i64": IrTcTypeKind.I64
+            "float": IrTcTypeKind.F32
+            "double": IrTcTypeKind.F64
+            "ptr": IrTcTypeKind.Ptr(addr_space: 0)
+            _: IrTcTypeKind.I64  # Default for unrecognized types
+
+    # ── Internal: instruction parsing ──
+
+    me _parse_instruction(line: text, builder: IrTcBuilder, line_num: i64):
+        """Parse a single LLVM IR instruction and emit via builder."""
+        var trimmed = line.trim()
+
+        # Assignment form: %dest = <opcode> ...
+        if trimmed.contains(" = "):
+            val eq_idx = trimmed.index_of(" = ")
+            val dest_name = trimmed.slice(0, eq_idx).trim()
+            val rhs = trimmed.slice(eq_idx + 3, trimmed.len()).trim()
+            _parse_assigned_instruction(rhs, builder, line_num)
+            return
+
+        # Non-assignment instructions
+        if trimmed.starts_with("ret"):
+            _parse_ret(trimmed, builder)
+        else if trimmed.starts_with("br"):
+            _parse_branch(trimmed, builder)
+        else if trimmed.starts_with("store"):
+            _parse_store(trimmed, builder)
+        else if trimmed.starts_with("call"):
+            _parse_call_void(trimmed, builder)
+        else if trimmed.starts_with("unreachable"):
+            builder.unreachable()
+        else if trimmed.starts_with("switch"):
+            builder.nop()  # Switch parsing deferred — emit nop placeholder
+        else:
+            pass_do_nothing  # Unknown instruction — skip silently
+
+    me _parse_assigned_instruction(rhs: text, builder: IrTcBuilder, line_num: i64):
+        """Parse the RHS of %dest = <opcode> <operands>."""
+        # Arithmetic binary ops
+        if rhs.starts_with("add "):
+            _emit_binop(rhs, LlvmOpcode.LlvmAdd, builder)
+        else if rhs.starts_with("sub "):
+            _emit_binop(rhs, LlvmOpcode.LlvmSub, builder)
+        else if rhs.starts_with("mul "):
+            _emit_binop(rhs, LlvmOpcode.LlvmMul, builder)
+        else if rhs.starts_with("sdiv "):
+            _emit_binop(rhs, LlvmOpcode.LlvmSDiv, builder)
+        else if rhs.starts_with("udiv "):
+            _emit_binop(rhs, LlvmOpcode.LlvmUDiv, builder)
+        else if rhs.starts_with("srem "):
+            _emit_binop(rhs, LlvmOpcode.LlvmSRem, builder)
+        else if rhs.starts_with("urem "):
+            _emit_binop(rhs, LlvmOpcode.LlvmURem, builder)
+        else if rhs.starts_with("fadd "):
+            _emit_binop(rhs, LlvmOpcode.LlvmFAdd, builder)
+        else if rhs.starts_with("fsub "):
+            _emit_binop(rhs, LlvmOpcode.LlvmFSub, builder)
+        else if rhs.starts_with("fmul "):
+            _emit_binop(rhs, LlvmOpcode.LlvmFMul, builder)
+        else if rhs.starts_with("fdiv "):
+            _emit_binop(rhs, LlvmOpcode.LlvmFDiv, builder)
+        # Bitwise
+        else if rhs.starts_with("and "):
+            _emit_binop(rhs, LlvmOpcode.LlvmAnd, builder)
+        else if rhs.starts_with("or "):
+            _emit_binop(rhs, LlvmOpcode.LlvmOr, builder)
+        else if rhs.starts_with("xor "):
+            _emit_binop(rhs, LlvmOpcode.LlvmXor, builder)
+        else if rhs.starts_with("shl "):
+            _emit_binop(rhs, LlvmOpcode.LlvmShl, builder)
+        else if rhs.starts_with("lshr "):
+            _emit_binop(rhs, LlvmOpcode.LlvmLShr, builder)
+        else if rhs.starts_with("ashr "):
+            _emit_binop(rhs, LlvmOpcode.LlvmAShr, builder)
+        # Comparison
+        else if rhs.starts_with("icmp "):
+            _emit_icmp(rhs, builder)
+        # Casts
+        else if rhs.starts_with("zext "):
+            _emit_cast(rhs, LlvmOpcode.LlvmZExt, builder)
+        else if rhs.starts_with("sext "):
+            _emit_cast(rhs, LlvmOpcode.LlvmSExt, builder)
+        else if rhs.starts_with("trunc "):
+            _emit_cast(rhs, LlvmOpcode.LlvmTrunc, builder)
+        else if rhs.starts_with("bitcast "):
+            _emit_cast(rhs, LlvmOpcode.LlvmBitCast, builder)
+        else if rhs.starts_with("ptrtoint "):
+            _emit_cast(rhs, LlvmOpcode.LlvmPtrToInt, builder)
+        else if rhs.starts_with("inttoptr "):
+            _emit_cast(rhs, LlvmOpcode.LlvmIntToPtr, builder)
+        else if rhs.starts_with("fptoui "):
+            _emit_cast(rhs, LlvmOpcode.LlvmFPToUI, builder)
+        else if rhs.starts_with("fptosi "):
+            _emit_cast(rhs, LlvmOpcode.LlvmFPToSI, builder)
+        else if rhs.starts_with("uitofp "):
+            _emit_cast(rhs, LlvmOpcode.LlvmUIToFP, builder)
+        else if rhs.starts_with("sitofp "):
+            _emit_cast(rhs, LlvmOpcode.LlvmSIToFP, builder)
+        # Memory
+        else if rhs.starts_with("load "):
+            _emit_load(rhs, builder)
+        else if rhs.starts_with("alloca "):
+            _emit_alloca(rhs, builder)
+        else if rhs.starts_with("getelementptr "):
+            _emit_gep(rhs, builder)
+        # Calls with return value
+        else if rhs.starts_with("call "):
+            _emit_call(rhs, builder)
+        # PHI
+        else if rhs.starts_with("phi "):
+            _emit_phi(rhs, builder)
+        # Select
+        else if rhs.starts_with("select "):
+            builder.nop()  # Select lowering deferred
+        # Aggregate
+        else if rhs.starts_with("extractvalue "):
+            builder.nop()  # ExtractValue lowering deferred
+        else if rhs.starts_with("insertvalue "):
+            builder.nop()  # InsertValue lowering deferred
+        else:
+            builder.nop()  # Unknown assigned instruction
+
+    # ── Emit helpers ──
+
+    me _emit_binop(rhs: text, opcode: LlvmOpcode, builder: IrTcBuilder):
+        """Emit a binary operation: <op> <type> <a>, <b>"""
+        val ty = _extract_instruction_type(rhs)
+        val a = builder.new_value(ty)
+        val b = builder.new_value(ty)
+        val dest = builder.new_value(ty)
+        if val op = map_llvm_binary_op(opcode, dest, a, b):
+            builder.emit(op)
+        else:
+            builder.nop()
+
+    me _emit_icmp(rhs: text, builder: IrTcBuilder):
+        """Emit an icmp: icmp <pred> <type> <a>, <b>"""
+        val ty = _extract_instruction_type(rhs)
+        val a = builder.new_value(ty)
+        val b = builder.new_value(ty)
+        val pred = _extract_icmp_predicate(rhs)
+        val cond = llvm_icmp_to_irtc_cond(pred)
+        builder.cmp(cond, a, b)
+
+    fn _extract_icmp_predicate(rhs: text) -> LlvmICmpPred:
+        """Extract the comparison predicate from an icmp instruction."""
+        # icmp <pred> <type> ...
+        var rest = rhs.trim()
+        if rest.starts_with("icmp "):
+            rest = rest.slice(5, rest.len()).trim()
+        val space = rest.index_of(" ")
+        var pred_str = rest
+        if space >= 0:
+            pred_str = rest.slice(0, space)
+        match pred_str:
+            "eq": LlvmICmpPred.IcmpEq
+            "ne": LlvmICmpPred.IcmpNe
+            "slt": LlvmICmpPred.IcmpSlt
+            "sle": LlvmICmpPred.IcmpSle
+            "sgt": LlvmICmpPred.IcmpSgt
+            "sge": LlvmICmpPred.IcmpSge
+            "ult": LlvmICmpPred.IcmpUlt
+            "ule": LlvmICmpPred.IcmpUle
+            "ugt": LlvmICmpPred.IcmpUgt
+            "uge": LlvmICmpPred.IcmpUge
+            _: LlvmICmpPred.IcmpEq
+
+    me _emit_cast(rhs: text, opcode: LlvmOpcode, builder: IrTcBuilder):
+        """Emit a cast operation: <op> <src_type> <src> to <dest_type>"""
+        val src_ty = _extract_instruction_type(rhs)
+        val src = builder.new_value(src_ty)
+        val dest_ty = _extract_cast_dest_type(rhs)
+        val dest = builder.new_value(dest_ty)
+        if val op = map_llvm_cast_op(opcode, dest, src):
+            builder.emit(op)
+        else:
+            builder.nop()
+
+    fn _extract_cast_dest_type(rhs: text) -> IrTcTypeKind:
+        """Extract destination type from 'to <type>' in cast instruction."""
+        val to_idx = rhs.last_index_of(" to ")
+        if to_idx >= 0:
+            val type_str = rhs.slice(to_idx + 4, rhs.len()).trim()
+            return _parse_type_string(type_str)
+        IrTcTypeKind.I64
+
+    me _emit_load(rhs: text, builder: IrTcBuilder):
+        """Emit a load: load <type>, <type>* <addr>"""
+        val ty = _extract_instruction_type(rhs)
+        val addr = builder.new_value(IrTcTypeKind.Ptr(addr_space: 0))
+        val mem = MemOp.new(ty.byte_width(), false, Endian.Host)
+        builder.load(addr, ty, mem)
+
+    me _emit_alloca(rhs: text, builder: IrTcBuilder):
+        """Emit an alloca: alloca <type>"""
+        val ty = _extract_instruction_type(rhs)
+        builder.alloca(ty)
+
+    me _emit_gep(rhs: text, builder: IrTcBuilder):
+        """Emit GEP as a nop placeholder — full GEP lowering is complex."""
+        builder.nop()
+
+    me _parse_store(line: text, builder: IrTcBuilder):
+        """Parse: store <type> <value>, <type>* <addr>"""
+        val ty = _extract_instruction_type(line)
+        val value = builder.new_value(ty)
+        val addr = builder.new_value(IrTcTypeKind.Ptr(addr_space: 0))
+        val mem = MemOp.new(ty.byte_width(), false, Endian.Host)
+        builder.store(value, addr, mem)
+
+    me _parse_ret(line: text, builder: IrTcBuilder):
+        """Parse: ret <type> <value> | ret void"""
+        var rest = line.trim()
+        if rest.starts_with("ret "):
+            rest = rest.slice(4, rest.len()).trim()
+        if rest == "void":
+            builder.ret(nil)
+        else:
+            val ty = _parse_leading_type(rest)
+            val v = builder.new_value(ty)
+            builder.ret(Some(v))
+
+    me _parse_branch(line: text, builder: IrTcBuilder):
+        """Parse: br label %target | br i1 %cond, label %true, label %false"""
+        var rest = line.trim()
+        if rest.starts_with("br "):
+            rest = rest.slice(3, rest.len()).trim()
+        if rest.starts_with("label"):
+            # Unconditional branch
+            val target = builder.new_block("br_target")
+            builder.br(target)
+        else if rest.starts_with("i1"):
+            # Conditional branch
+            val cond = builder.new_value(IrTcTypeKind.I1)
+            val true_block = builder.new_block("br_true")
+            val false_block = builder.new_block("br_false")
+            builder.br_cond(cond, true_block, false_block)
+        else:
+            builder.nop()
+
+    me _parse_call_void(line: text, builder: IrTcBuilder):
+        """Parse a void call instruction (no return value)."""
+        val func_val = builder.new_value(IrTcTypeKind.Ptr(addr_space: 0))
+        builder.call(func_val, [], IrTcTypeKind.Void, CallConv.C)
+
+    me _emit_call(rhs: text, builder: IrTcBuilder):
+        """Emit a call with return value: call <ret_type> @<name>(<args>)"""
+        val ret_ty = _extract_instruction_type(rhs)
+        val func_val = builder.new_value(IrTcTypeKind.Ptr(addr_space: 0))
+        builder.call(func_val, [], ret_ty, CallConv.C)
+
+    me _emit_phi(rhs: text, builder: IrTcBuilder):
+        """Emit a phi node: phi <type> [ <val>, <label> ], ..."""
+        val ty = _extract_instruction_type(rhs)
+        # PHI nodes need incoming edges — emit empty phi as placeholder
+        builder.phi(ty, [])
+
+    fn _extract_instruction_type(rhs: text) -> IrTcTypeKind:
+        """Extract the first type token from an instruction RHS.
+
+        Handles: 'add i32 ...', 'load i64, ...', 'alloca i32', etc.
+        Skips the opcode keyword and optional 'nsw'/'nuw'/'exact' flags.
+        """
+        var rest = rhs.trim()
+        # Skip opcode keyword
+        val first_space = rest.index_of(" ")
+        if first_space >= 0:
+            rest = rest.slice(first_space + 1, rest.len()).trim()
+
+        # Skip optional flags
+        var flags = ["nsw", "nuw", "exact", "inbounds", "volatile"]
+        for flag in flags:
+            if rest.starts_with(flag):
+                rest = rest.slice(flag.len(), rest.len()).trim()
+
+        # First token is the type
+        val parts = rest.split(" ")
+        if parts.len() > 0:
+            var type_tok = parts[0].trim()
+            # Strip trailing comma
+            if type_tok.ends_with(","):
+                type_tok = type_tok.slice(0, type_tok.len() - 1)
+            return _parse_type_string(type_tok)
+        IrTcTypeKind.I64
+
+    # ── Public conversion helpers ──
+
+    fn convert_module_name(llvm_name: text) -> text:
+        if llvm_name.len() == 0:
+            "unnamed_module"
+        else:
+            llvm_name
+
+    fn convert_function_signature(name: text, param_types: [LlvmType], ret_type: LlvmType) -> IrTcFunction:
+        var params: [IrTcParam] = []
+        for i in 0..param_types.len():
+            params.push(IrTcParam.new("arg{i}", llvm_type_to_irtc(param_types[i])))
+        IrTcFunction.new(name, params, llvm_type_to_irtc(ret_type))

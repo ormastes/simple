@@ -1,0 +1,102 @@
+#!/bin/sh
+# Chrome vs Electron Comparison Runner
+#
+# Takes both Chrome and Electron screenshots of the same HTML test files
+# and compares them to measure reference-renderer agreement.
+#
+# Usage:
+#   ./chrome_vs_electron_runner.shs [html_dir] [output_dir]
+#
+# Output:
+#   output_dir/chrome/    — Chrome screenshots (PNG)
+#   output_dir/electron/  — Electron screenshots (PNG)
+#   output_dir/diff/      — Difference images
+#   output_dir/report.md  — Agreement report
+#
+# Dependencies:
+#   - Chrome/Chromium
+#   - Electron (npm install in tools/electron-shell/)
+#   - ImageMagick (compare command)
+
+HTML_DIR="${1:-$(cd "$(dirname "$0")" && pwd)/html}"
+OUTPUT_DIR="${2:-/tmp/chrome_vs_electron}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+CHROME_SCRIPT="$SCRIPT_DIR/chrome_screenshot.shs"
+ELECTRON_SCRIPT="$SCRIPT_DIR/electron_screenshot.shs"
+
+WIDTH=800
+HEIGHT=600
+
+echo "=== Chrome vs Electron Runner ==="
+echo "HTML dir: $HTML_DIR"
+echo "Output:   $OUTPUT_DIR"
+echo ""
+
+mkdir -p "$OUTPUT_DIR/chrome" "$OUTPUT_DIR/electron" "$OUTPUT_DIR/diff"
+
+TOTAL=0
+MATCH=0
+DIVERGE=0
+SKIP=0
+
+REPORT="$OUTPUT_DIR/report.md"
+echo "# Chrome vs Electron Agreement Report" > "$REPORT"
+echo "" >> "$REPORT"
+echo "Viewport: ${WIDTH}x${HEIGHT}" >> "$REPORT"
+echo "Date: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$REPORT"
+echo "" >> "$REPORT"
+echo "| Test | Category | RMSE | Status |" >> "$REPORT"
+echo "|------|----------|------|--------|" >> "$REPORT"
+
+for category_dir in "$HTML_DIR"/*/; do
+    category="$(basename "$category_dir")"
+    for html_file in "$category_dir"*.html; do
+        [ -f "$html_file" ] || continue
+        test_name="$(basename "$html_file" .html)"
+        TOTAL=$((TOTAL + 1))
+
+        # Chrome screenshot
+        chrome_png="$OUTPUT_DIR/chrome/${test_name}.png"
+        sh "$CHROME_SCRIPT" "$html_file" "$chrome_png" "$WIDTH" "$HEIGHT" 2>/dev/null
+
+        # Electron screenshot
+        electron_png="$OUTPUT_DIR/electron/${test_name}.png"
+        sh "$ELECTRON_SCRIPT" "$html_file" "$electron_png" "$WIDTH" "$HEIGHT" 2>/dev/null
+
+        if [ ! -f "$chrome_png" ] || [ ! -f "$electron_png" ]; then
+            echo "SKIP $category/$test_name (missing screenshot)"
+            SKIP=$((SKIP + 1))
+            echo "| $test_name | $category | -- | SKIP |" >> "$REPORT"
+            continue
+        fi
+
+        # Compare
+        if command -v compare >/dev/null 2>&1; then
+            metric=$(compare -metric RMSE \
+                "$chrome_png" "$electron_png" \
+                "$OUTPUT_DIR/diff/${test_name}.png" 2>&1 | head -1)
+
+            # Extract numeric RMSE value (format: "123.45 (0.00123)")
+            rmse_num=$(echo "$metric" | sed 's/ .*//')
+
+            echo "$category/$test_name: RMSE=$metric"
+            echo "| $test_name | $category | $metric | COMPARED |" >> "$REPORT"
+        else
+            echo "$category/$test_name: screenshots taken (no compare tool)"
+            echo "| $test_name | $category | -- | NO_COMPARE |" >> "$REPORT"
+        fi
+    done
+done
+
+echo "" >> "$REPORT"
+echo "## Summary" >> "$REPORT"
+echo "- Total: $TOTAL" >> "$REPORT"
+echo "- Skipped: $SKIP" >> "$REPORT"
+echo "- Compared: $((TOTAL - SKIP))" >> "$REPORT"
+
+echo ""
+echo "=== Done: $TOTAL tests ($SKIP skipped) ==="
+echo "Report: $REPORT"
+echo "Chrome:   $OUTPUT_DIR/chrome/"
+echo "Electron: $OUTPUT_DIR/electron/"
+echo "Diff:     $OUTPUT_DIR/diff/"

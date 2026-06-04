@@ -1,0 +1,163 @@
+#![allow(REQC001)]
+#![allow(REQC004)]
+#![allow(unnamed_duplicate_typed_args)]
+
+val H2_DEFAULT_MAX_CONCURRENT = 100
+val H2_PRIORITY_WEIGHT_DEFAULT = 16
+val H2_PRIORITY_WEIGHT_MAX = 256
+val H2_PRIORITY_ROOT = 0
+
+class H2Header:
+    name: text
+    value: text
+
+    static fn new(name: text, value: text) -> H2Header:
+        H2Header(name: name, value: value)
+
+class H2Request:
+    method: text
+    path: text
+    headers: [H2Header]
+    weight: i64
+
+    static fn new(method: text, path: text, headers: [H2Header]) -> H2Request:
+        H2Request(
+            method: method,
+            path: path,
+            headers: headers,
+            weight: H2_PRIORITY_WEIGHT_DEFAULT
+        )
+
+    fn with_priority(weight: i64) -> H2Request:
+        H2Request(
+            method: self.method,
+            path: self.path,
+            headers: self.headers,
+            weight: weight
+        )
+
+class H2Response:
+    stream_id: i64
+    status: i64
+    headers: [H2Header]
+    body: [u8]
+
+    static fn new(stream_id: i64, status: i64, headers: [H2Header], body: [u8]) -> H2Response:
+        H2Response(
+            stream_id: stream_id,
+            status: status,
+            headers: headers,
+            body: body
+        )
+
+class H2PriorityNode:
+    stream_id: i64
+    weight: i64
+    dependency: i64
+
+    static fn new(stream_id: i64, weight: i64, dependency: i64) -> H2PriorityNode:
+        H2PriorityNode(
+            stream_id: stream_id,
+            weight: weight,
+            dependency: dependency
+        )
+
+class H2StreamSlot:
+    stream_id: i64
+    request_index: i64
+    active: bool
+    weight: i64
+    window_size: i64
+
+    static fn create(stream_id: i64, request_index: i64, weight: i64, window: i64) -> H2StreamSlot:
+        H2StreamSlot(
+            stream_id: stream_id,
+            request_index: request_index,
+            active: true,
+            weight: weight,
+            window_size: window
+        )
+
+class H2ParallelFetch:
+    max_concurrent_val: i64
+    slots: [H2StreamSlot]
+    priorities: [H2PriorityNode]
+    next_stream_id: i64
+    conn_window: i64
+
+    static fn new(max_concurrent: i64) -> H2ParallelFetch:
+        H2ParallelFetch(
+            max_concurrent_val: max_concurrent,
+            slots: [H2StreamSlot](),
+            priorities: [H2PriorityNode](),
+            next_stream_id: 1,
+            conn_window: 65535
+        )
+
+    fn active_streams() -> i64:
+        var count = 0
+        for slot in self.slots:
+            if slot.active:
+                count = count + 1
+        count
+
+    fn max_concurrent() -> i64:
+        self.max_concurrent_val
+
+    me set_priority(stream_id: i64, weight: i64, dependency: i64) -> void:
+        val node = H2PriorityNode.new(stream_id, weight, dependency)
+        self.priorities = self.priorities + [node]
+
+    me fetch_parallel(requests: [H2Request]) -> [H2Response]:
+        var responses = [H2Response]()
+        var queue_start = 0
+
+        var i = 0
+        while i < requests.len() and self.active_streams() < self.max_concurrent_val:
+            val req = requests.get(i)
+            val sid = self.next_stream_id
+            self.next_stream_id = self.next_stream_id + 2
+            val slot = H2StreamSlot.create(sid, i, req.weight, self.conn_window)
+            self.slots = self.slots + [slot]
+            i = i + 1
+
+        var dispatched = i
+
+        var slot_idx = 0
+        while slot_idx < self.slots.len():
+            val slot = self.slots.get(slot_idx)
+            if slot.active:
+                val resp = H2Response.new(slot.stream_id, 200, [H2Header](), [u8]())
+                responses = responses + [resp]
+                self.slots.get(slot_idx).active = false
+
+                if dispatched < requests.len():
+                    val req = requests.get(dispatched)
+                    val sid = self.next_stream_id
+                    self.next_stream_id = self.next_stream_id + 2
+                    val next_slot = H2StreamSlot.create(sid, dispatched, req.weight, self.conn_window)
+                    self.slots = self.slots + [next_slot]
+                    dispatched = dispatched + 1
+            slot_idx = slot_idx + 1
+
+        responses
+
+fn stream_id_for_index(index: i64) -> i64:
+    index * 2 + 1
+
+fn index_for_stream_id(stream_id: i64) -> i64:
+    (stream_id - 1) / 2
+
+fn can_open_stream(active: i64, max_concurrent: i64) -> bool:
+    active < max_concurrent
+
+fn priority_weight_for_type(resource_type: text) -> i64:
+    if resource_type == "html":
+        return 256
+    if resource_type == "css":
+        return 220
+    if resource_type == "js":
+        return 220
+    if resource_type == "image":
+        return 147
+    H2_PRIORITY_WEIGHT_DEFAULT

@@ -1,0 +1,764 @@
+# Part 5 of src/os/qemu_runner.spl
+use os.qemu_runner.*
+# SimpleOS QEMU Runner — Multi-Architecture Boot & Test
+#
+# Provides build + run + test functionality for all 6 architectures.
+# Usage:
+#   bin/simple os build --arch=x86_64
+#   bin/simple os run --arch=riscv64
+#   bin/simple os test --arch=all
+
+use os.kernel.arch.arch_context.{Architecture}
+use os.packages.os_packages.{os_version}
+use os.port.simpleos_multiplatform_build.{
+    SimpleOsLaneContract,
+    SimpleOsLaneKind,
+    simpleos_platform_default_entry,
+    simpleos_platform_disk_image_output,
+    simpleos_platform_linker_script,
+    simpleos_platform_native_target,
+    simpleos_platform_qemu_acceptance_lane,
+    simpleos_platform_qemu_cpu,
+    simpleos_platform_qemu_lane,
+    simpleos_platform_qemu_machine,
+    simpleos_platform_qemu_smoke_lane,
+    simpleos_platform_qemu_system,
+    simpleos_platform_kernel_output,
+    simpleos_platform_target_by_name
+}
+use os.port.simpleos_board_hardening.{
+    simpleos_protection_evidence_accepts_hardening,
+    simpleos_protection_evidence_from_serial,
+    simpleos_protection_evidence_reason,
+    simpleos_protection_mode_from_text
+}
+use os.drivers.real_device_readiness.{real_device_physical_nvme_serial_acceptance_reason}
+use os.desktop_qemu_contract.{
+    clear_qemu_serial_log,
+    desktop_container_marker_fragments,
+    desktop_disk_serial_accepts_completion,
+    desktop_disk_serial_log_path,
+    desktop_uefi_serial_accepts_completion,
+    desktop_uefi_serial_log_path,
+    desktop_wine_exec_env_marker_contract_accepts,
+    desktop_wine_exec_env_required_marker_fragments,
+    print_desktop_disk_missing_markers,
+    print_desktop_uefi_missing_markers,
+    print_wm_simple_web_missing_markers,
+    qemu_serial_log_contains,
+    read_qemu_serial_log,
+    run_x64_desktop_disk_probe,
+    run_x64_wm_simple_web_probe,
+    wm_simple_web_serial_acceptance_reason,
+    wm_simple_web_serial_accepts_completion,
+    wm_simple_web_serial_log_path
+}
+use os.toolchain_vfs_probe_contract.{
+    print_toolchain_vfs_probe_missing_markers,
+    toolchain_vfs_probe_serial_accepts_completion
+}
+use os.ssh_qemu_contract.{run_x64_ssh_probe}
+use hardware.riscv_common.core.riscv_formal.{verify_rv64_qemu_user_proof_contract}
+
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_env_cwd() -> text
+extern fn rt_time_now_unix_micros() -> i64
+
+fn ensure_riscv_fs_exec_disk_image(arch: Architecture) -> bool:
+    """Ensure the RISC-V FAT32 image has SMF CLI and WM GUI acceptance fixtures."""
+    _ensure_catalog_fs_exec_disk_image(
+        "ensure_riscv_fs_exec_disk_image",
+        "RISC-V SMF markers are missing",
+        riscv_fs_exec_disk_image_path(arch),
+        arch_display_name(arch),
+        _riscv_fs_exec_platform_name(arch),
+        arch
+    )
+
+fn _fs_test_disk_image_has_required_fixtures(img_path: text) -> bool:
+    val cmd =
+        "if command -v mtype >/dev/null 2>&1; then " +
+        "mtype -i \"{img_path}\" ::/HELLO.TXT 2>/dev/null | grep -q 'Hello from SimpleOS' && " +
+        "mtype -i \"{img_path}\" ::/NUMBERS.TXT 2>/dev/null | grep -q '^5$' && " +
+        "mtype -i \"{img_path}\" ::/HELLO.SPL 2>/dev/null | grep -q 'fn main' && " +
+        "mtype -i \"{img_path}\" ::/SYS/PERF/FAT4K.BIN 2>/dev/null | grep -q 'SIMPLEOS_FAT32_DIRECT_IO_4K_FIXTURE'; " +
+        "else " +
+        "grep -a -q 'Hello from SimpleOS' \"{img_path}\" && " +
+        "grep -a -q 'fn main' \"{img_path}\" && " +
+        "grep -a -q 'SIMPLEOS_FAT32_DIRECT_IO_4K_FIXTURE' \"{img_path}\"; " +
+        "fi"
+    val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 5000)
+    exit_code == 0
+
+fn _ensure_catalog_fs_exec_disk_image(
+    log_prefix: text,
+    missing_message: text,
+    img_path: text,
+    arch_label: text,
+    platform_name: text,
+    arch: Architecture
+) -> bool:
+    if rt_file_exists(img_path) and _catalog_fs_exec_disk_image_has_required_smf(img_path, platform_name, arch):
+        return true
+    print "[{log_prefix}] {img_path} missing or incomplete, invoking scripts/os/make_os_disk.shs for {arch_label}"
+    val (stdout, stderr, exit_code) = rt_process_run_timeout(
+        "/bin/sh", ["scripts/os/make_os_disk.shs", "64", img_path, "", arch_label], 60000)
+    if stdout != "":
+        print "[{log_prefix}] stdout:\n{stdout}"
+    if stderr != "":
+        print "[{log_prefix}] stderr:\n{stderr}"
+    if exit_code != 0:
+        print "[{log_prefix}] make_os_disk.shs exited {exit_code}"
+        return false
+    if not rt_file_exists(img_path):
+        return false
+    if not _catalog_fs_exec_disk_image_has_required_smf(img_path, platform_name, arch):
+        print "[{log_prefix}] image exists but {missing_message}"
+        return false
+    true
+
+fn _catalog_fs_exec_disk_image_has_required_smf(img_path: text, platform_name: text, arch: Architecture) -> bool:
+    if platform_name == "x86_32":
+        return _x86_32_fs_exec_disk_image_has_required_smf(img_path)
+    if platform_name == "arm64" or platform_name == "arm32":
+        return _arm_fs_exec_disk_image_has_required_smf(img_path, arch)
+    _riscv_fs_exec_disk_image_has_required_smf(img_path, arch)
+
+fn _x86_32_fs_exec_disk_image_has_required_smf(img_path: text) -> bool:
+    val cmd =
+        "if command -v mtype >/dev/null 2>&1; then " +
+        "mtype -i \"{img_path}\" ::/SYS/APPS/HELLOSMF.SMF 2>/dev/null | grep -a -q 'SIMPLEOS_X86_32_HELLO_ELF' && " +
+        "mtype -i \"{img_path}\" ::/SYS/APPS/BROWSMF.SMF 2>/dev/null | grep -a -q 'SIMPLEOS_X86_32_GUI_ELF'; " +
+        "else " +
+        "grep -a -q 'HELLOSMF' \"{img_path}\" && " +
+        "grep -a -q 'BROWSMF' \"{img_path}\" && " +
+        "grep -a -q 'SIMPLEOS_X86_32_HELLO_ELF' \"{img_path}\"; " +
+        "fi"
+    val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 5000)
+    exit_code == 0
+
+fn ensure_x86_32_fs_exec_disk_image() -> bool:
+    """Ensure the x86_32 FAT32 initrd image has SMF app payload fixtures."""
+    _ensure_catalog_fs_exec_disk_image(
+        "ensure_x86_32_fs_exec_disk_image",
+        "x86_32 SMF markers are missing",
+        simpleos_platform_disk_image_output("x86_32"),
+        "x86_32",
+        "x86_32",
+        Architecture.X86
+    )
+
+fn _staged_tool_app_smf_name(app_name: text) -> text:
+    if app_name == "simple_compiler":
+        return "SCOMPSMF"
+    if app_name == "simple_loader":
+        return "SLOADSMF"
+    if app_name == "simple_interpreter":
+        return "SINTSMF"
+    if app_name == "llvm":
+        return "LLVMSMF"
+    if app_name == "clang":
+        return "CLANGSMF"
+    if app_name == "rust":
+        return "RUSTSMF"
+    if app_name == "hello_world":
+        return "HELLOSMF"
+    if app_name == "simple_browser":
+        return "BROWSMF"
+    ""
+
+fn _native_tool_version_path(app_name: text) -> text:
+    if app_name == "llvm":
+        return "/SYS/LLVMVER.TXT"
+    if app_name == "clang":
+        return "/SYS/CLANGVER.TXT"
+    if app_name == "rust":
+        return "/SYS/RUSTVER.TXT"
+    ""
+
+fn _native_tool_version_pattern(app_name: text) -> text:
+    if app_name == "llvm":
+        return "standalone app"
+    if app_name == "clang":
+        return "clang version"
+    if app_name == "rust":
+        return "standalone app"
+    ""
+
+fn _native_tool_pipeline_path(app_name: text) -> text:
+    if app_name == "llvm":
+        return "/usr/share/simpleos/toolchain/llvm/pipeline.step"
+    if app_name == "clang":
+        return "/usr/share/simpleos/toolchain/clang/pipeline.step"
+    if app_name == "rust":
+        return "/usr/share/simpleos/toolchain/rust/pipeline.step"
+    ""
+
+fn _native_tool_pipeline_pattern(app_name: text) -> text:
+    if app_name == "llvm":
+        return "pipeline=compile-pipeline-step"
+    if app_name == "clang":
+        return "pipeline=compile-pipeline-step"
+    if app_name == "rust":
+        return "pipeline=build-pipeline-step"
+    ""
+
+fn _catalog_lane_disk_image_has_required_staged_apps(img_path: text, lane: SimpleOsLaneContract) -> bool:
+    var mtype_checks: [text] = []
+    var grep_checks: [text] = []
+    var has_native_tool = false
+    for app in lane.staged_apps:
+        val smf_name = _staged_tool_app_smf_name(app.app_name)
+        if smf_name != "":
+            mtype_checks.push("mtype -i \"{img_path}\" ::/SYS/APPS/{smf_name}.SMF 2>/dev/null | strings | grep -q '{app.app_path}'")
+            mtype_checks.push("mtype -i \"{img_path}\" ::/SYS/APPS/{smf_name}.SMF 2>/dev/null | grep -a -q 'SMF'")
+            grep_checks.push("grep -a -q '{smf_name}' \"{img_path}\"")
+        grep_checks.push("grep -a -q '{app.app_path}' \"{img_path}\"")
+        if app.native_launch_mode != "":
+            has_native_tool = true
+            mtype_checks.push("mtype -i \"{img_path}\" ::{app.manifest_path} 2>/dev/null | grep -q 'entry_app={app.app_path}'")
+            mtype_checks.push("mtype -i \"{img_path}\" ::{app.manifest_path} 2>/dev/null | grep -q 'lane={lane.name}'")
+            mtype_checks.push("mtype -i \"{img_path}\" ::{app.manifest_path} 2>/dev/null | grep -q 'mode={app.native_launch_mode}'")
+            mtype_checks.push("mtype -i \"{img_path}\" ::{app.manifest_path} 2>/dev/null | grep -q 'status={app.native_launch_status}'")
+            grep_checks.push("grep -a -q 'entry_app={app.app_path}' \"{img_path}\"")
+            grep_checks.push("grep -a -q 'lane={lane.name}' \"{img_path}\"")
+            grep_checks.push("grep -a -q 'mode={app.native_launch_mode}' \"{img_path}\"")
+            grep_checks.push("grep -a -q 'status={app.native_launch_status}' \"{img_path}\"")
+            val version_path = _native_tool_version_path(app.app_name)
+            val version_pattern = _native_tool_version_pattern(app.app_name)
+            if version_path != "" and version_pattern != "":
+                mtype_checks.push("mtype -i \"{img_path}\" ::{version_path} 2>/dev/null | grep -q '{version_pattern}'")
+                grep_checks.push("grep -a -q '{version_pattern}' \"{img_path}\"")
+            val pipeline_path = _native_tool_pipeline_path(app.app_name)
+            val pipeline_pattern = _native_tool_pipeline_pattern(app.app_name)
+            if pipeline_path != "" and pipeline_pattern != "":
+                mtype_checks.push("mtype -i \"{img_path}\" ::{pipeline_path} 2>/dev/null | grep -q '{pipeline_pattern}'")
+                mtype_checks.push("mtype -i \"{img_path}\" ::{app.manifest_path} 2>/dev/null | grep -q 'proof_pipeline={pipeline_path}'")
+                grep_checks.push("grep -a -q '{pipeline_path}' \"{img_path}\"")
+            grep_checks.push("grep -a -q '{app.app_path} status={app.native_launch_status}' \"{img_path}\"")
+    if has_native_tool:
+        mtype_checks.push("mtype -i \"{img_path}\" ::/SYS/TOOLSET.SDN 2>/dev/null | grep -q 'lane = \"{lane.name}\"'")
+        grep_checks.push("grep -a -q 'lane = \"{lane.name}\"' \"{img_path}\"")
+    if mtype_checks.len() == 0 and grep_checks.len() == 0:
+        return true
+    val mtype_cmd = if mtype_checks.len() == 0: "true" else: mtype_checks.join(" && ")
+    val grep_cmd = if grep_checks.len() == 0: "true" else: grep_checks.join(" && ")
+    val cmd =
+        "(" + mtype_cmd + ") || (" + grep_cmd + ")"
+    val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 5000)
+    exit_code == 0
+
+fn _arm_fs_exec_disk_image_has_required_smf(img_path: text, arch: Architecture) -> bool:
+    val marker = if arch == Architecture.Arm64: "SIMPLEOS_ARM64_HELLO_ELF" else: "SIMPLEOS_ARM32_HELLO_ELF"
+    val platform_name = _arm_fs_exec_platform_name(arch)
+    val machine_marker = "elf-machine={platform_name}"
+    val lane_name = _arm_fs_exec_scenario_name(arch)
+    val lane = simpleos_platform_qemu_lane(platform_name, lane_name)
+    if val resolved_lane = lane:
+        val cmd =
+            "if command -v mtype >/dev/null 2>&1; then " +
+            "mtype -i \"{img_path}\" ::/SYS/APPS/HELLOSMF.SMF 2>/dev/null | grep -a -q '{marker}' && " +
+            "mtype -i \"{img_path}\" ::/SYS/MARKERS.TXT 2>/dev/null | grep -a -q '{machine_marker}' && " +
+            "mtype -i \"{img_path}\" ::/SYS/APPS/HELLOSMF.SMF 2>/dev/null | grep -a -q 'SMF'; " +
+            "else " +
+            "grep -a -q '{marker}' \"{img_path}\" && " +
+            "grep -a -q '{machine_marker}' \"{img_path}\" && " +
+            "grep -a -q 'HELLOSMF' \"{img_path}\" && " +
+            "grep -a -q 'SMF' \"{img_path}\"; " +
+            "fi"
+        val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 5000)
+        return exit_code == 0 and _catalog_lane_disk_image_has_required_staged_apps(img_path, resolved_lane)
+    false
+
+fn _riscv_fs_exec_disk_image_has_required_smf(img_path: text, arch: Architecture) -> bool:
+    val hello_marker = if arch == Architecture.Riscv64: "SIMPLEOS_RISCV64_HELLO_ELF" else: "SIMPLEOS_RISCV32_HELLO_ELF"
+    val gui_marker = if arch == Architecture.Riscv64: "SIMPLEOS_RISCV64_GUI_ELF" else: "SIMPLEOS_RISCV32_GUI_ELF"
+    val platform_name = _riscv_fs_exec_platform_name(arch)
+    val machine_marker = "elf-machine={platform_name}"
+    val lane_name = if arch == Architecture.Riscv64: "riscv64-hosted" else: _riscv_fs_exec_scenario_name(arch)
+    val lane = simpleos_platform_qemu_lane(platform_name, lane_name)
+    if val resolved_lane = lane:
+        val cmd =
+            "if command -v mtype >/dev/null 2>&1; then " +
+            "mtype -i \"{img_path}\" ::/SYS/APPS/HELLOSMF.SMF 2>/dev/null | grep -a -q '{hello_marker}' && " +
+            "mtype -i \"{img_path}\" ::/SYS/APPS/BROWSMF.SMF 2>/dev/null | grep -a -q '{gui_marker}' && " +
+            "mtype -i \"{img_path}\" ::/SYS/MARKERS.TXT 2>/dev/null | grep -a -q '{machine_marker}' && " +
+            "mtype -i \"{img_path}\" ::/SYS/APPS/HELLOSMF.SMF 2>/dev/null | grep -a -q 'SMF'; " +
+            "else " +
+            "grep -a -q '{hello_marker}' \"{img_path}\" && " +
+            "grep -a -q '{gui_marker}' \"{img_path}\" && " +
+            "grep -a -q '{machine_marker}' \"{img_path}\" && " +
+            "grep -a -q 'HELLOSMF' \"{img_path}\" && " +
+            "grep -a -q 'BROWSMF' \"{img_path}\" && " +
+            "grep -a -q 'SMF' \"{img_path}\"; " +
+            "fi"
+        val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 5000)
+        return exit_code == 0 and _catalog_lane_disk_image_has_required_staged_apps(img_path, resolved_lane)
+    false
+
+fn ensure_arm_fs_exec_kernel_binary(scenario: QemuScenario, target: OsTarget) -> bool:
+    if not _is_arm_fs_exec_scenario(scenario):
+        return true
+    if scenario.arch == Architecture.Arm32:
+        return rt_file_exists(target.output)
+    val bin_path = arm_fs_exec_kernel_bin_path(scenario.arch)
+    val cmd =
+        "if command -v llvm-objcopy >/dev/null 2>&1; then OBJCOPY=llvm-objcopy; " +
+        "elif [ -x /opt/homebrew/opt/llvm/bin/llvm-objcopy ]; then OBJCOPY=/opt/homebrew/opt/llvm/bin/llvm-objcopy; " +
+        "else echo llvm-objcopy not found >&2; exit 127; fi; " +
+        "$OBJCOPY -O binary \"{target.output}\" \"{bin_path}\""
+    val (stdout, stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 30000)
+    if stdout != "":
+        print "[ensure_arm_fs_exec_kernel_binary] stdout:\n{stdout}"
+    if stderr != "":
+        print "[ensure_arm_fs_exec_kernel_binary] stderr:\n{stderr}"
+    exit_code == 0 and rt_file_exists(bin_path)
+
+fn scenario_kernel_path(scenario: QemuScenario, target: OsTarget) -> text:
+    if scenario.arch == Architecture.Arm32 and _is_arm_fs_exec_scenario(scenario):
+        return target.output
+    if _is_arm_fs_exec_scenario(scenario):
+        return arm_fs_exec_kernel_bin_path(scenario.arch)
+    target.output
+
+fn _desktop_disk_image_has_required_manifests(img_path: text) -> bool:
+    """Best-effort host-side validation that the disk image is populated.
+
+    The desktop disk lane currently packages plain-text resident manifests
+    for the remote-capable desktop apps plus at least one real filesystem-
+    backed user ELF marker. Grepping for each marker is lightweight and
+    avoids false-positive success on an empty FAT32 image.
+    """
+    val markers = [
+        "browser_demo_remote_main",
+        "hello_world_remote_main",
+        "file_manager_remote_main",
+        "shell_remote_main",
+        "editor_remote_main",
+        "smux_remote_main"
+    ]
+    var i: u64 = 0
+    while i < markers.len():
+        val marker = markers[i]
+        val shell_cmd = "grep -a -q '{marker}' \"{img_path}\""
+        val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", shell_cmd], 5000)
+        if exit_code != 0:
+            return false
+        i = i + 1
+    val payload_cmd = "if command -v mtype >/dev/null 2>&1; then " +
+        "mtype -i \"{img_path}\" ::/SYS/APPS/hello_world 2>/dev/null | strings | grep -q 'SIMPLEOS_DISK_HELLO_ELF'; " +
+        "else grep -a -q 'SIMPLEOS_DISK_HELLO_ELF' \"{img_path}\"; fi"
+    val (_payload_stdout, _payload_stderr, payload_exit) = rt_process_run_timeout("/bin/sh", ["-c", payload_cmd], 5000)
+    if payload_exit != 0:
+        return false
+    val ssh_cmd =
+        "if command -v mtype >/dev/null 2>&1; then " +
+        "mtype -i \"{img_path}\" ::/SYS/APPS/SHELL.APP 2>/dev/null | grep -q 'shell_remote_main' && " +
+        "mtype -i \"{img_path}\" ::/SYS/APPS/SMUX.APP 2>/dev/null | grep -q 'smux_remote_main' && " +
+        "mtype -i \"{img_path}\" ::/SYS/APPS/SIMPLECLI.CAT 2>/dev/null | grep -q '^info|src/app/info/main.spl|smoke|staged$' && " +
+        "mtype -i \"{img_path}\" ::/SYS/APPS/SIMPLECLI.CAT 2>/dev/null | grep -q '^list|src/app/list/main.spl|smoke|staged$' && " +
+        "mtype -i \"{img_path}\" ::/SYS/APPS/SIMPLECLI.CAT 2>/dev/null | grep -q '^stats|src/app/stats/main.spl|smoke|staged$'; " +
+        "else " +
+        "grep -a -q 'info|src/app/info/main.spl|smoke|staged' \"{img_path}\" && " +
+        "grep -a -q 'list|src/app/list/main.spl|smoke|staged' \"{img_path}\" && " +
+        "grep -a -q 'stats|src/app/stats/main.spl|smoke|staged' \"{img_path}\" && " +
+        "grep -a -q 'shell_remote_main' \"{img_path}\" && " +
+        "grep -a -q 'smux_remote_main' \"{img_path}\"; " +
+        "fi"
+    val (_ssh_stdout, _ssh_stderr, ssh_exit) = rt_process_run_timeout("/bin/sh", ["-c", ssh_cmd], 5000)
+    if ssh_exit != 0:
+        return false
+    true
+
+fn build_scenario_command(scenario: QemuScenario, kernel_path: text) -> [text]:
+    _build_scenario_command_impl(scenario, kernel_path, false)
+
+fn build_scenario_command_headless(scenario: QemuScenario, kernel_path: text) -> [text]:
+    _build_scenario_command_impl(scenario, kernel_path, true)
+
+pub fn arm64_wm_ramfb_serial_log_path() -> text:
+    "build/os/arm64_wm_serial.log"
+
+fn _build_scenario_command_impl(scenario: QemuScenario, kernel_path: text, headless: bool) -> [text]:
+    """Build QEMU command line from a scenario."""
+    val qemu_bin = match scenario.arch:
+        Architecture.X86_64: "qemu-system-x86_64"
+        Architecture.Riscv64: "qemu-system-riscv64"
+        Architecture.Riscv32: "qemu-system-riscv32"
+        Architecture.Arm64: "qemu-system-aarch64"
+        Architecture.Arm32: "qemu-system-arm"
+        _: "qemu-system-x86_64"
+
+    var args: [text] = [qemu_bin]
+    for hardening_arg in qemu_scenario_hardening_args(scenario):
+        args.push(hardening_arg)
+    args.push("-machine")
+    args.push(scenario.machine)
+    args.push("-cpu")
+    args.push(scenario.cpu)
+    args.push("-m")
+    args.push(scenario.memory)
+    args.push("-serial")
+    if scenario.name == "x64-desktop-uefi":
+        args.push("file:" + desktop_uefi_serial_log_path())
+    elif scenario.name == "arm64-wm-ramfb":
+        args.push("file:" + arm64_wm_ramfb_serial_log_path())
+    else:
+        args.push("stdio")
+    if not scenario.gui_mode or headless:
+        args.push("-display")
+        args.push("none")
+    args.push("-no-reboot")
+    if _is_arm_fs_exec_scenario(scenario) and scenario.arch == Architecture.Arm32:
+        args.push("-device")
+        args.push("loader,file={kernel_path},addr=0x40200000")
+        args.push("-device")
+        args.push("loader,addr=0x40200000,cpu-num=0")
+    elif _is_arm_fs_exec_scenario(scenario):
+        args.push("-device")
+        args.push("loader,file={kernel_path},addr=0x40200000,force-raw=on")
+        args.push("-device")
+        args.push("loader,addr=0x40200000,cpu-num=0")
+    elif scenario.name == "x64-desktop-uefi":
+        # UEFI lane boots the disk image through OVMF/Limine, not QEMU -kernel.
+        pass
+    else:
+        args.push("-kernel")
+        args.push(kernel_path)
+    for extra in scenario.qemu_extra:
+        args.push(extra)
+    args
+
+fn _prepare_q35_pure_nvme_user_namespace_disk(scenario: QemuScenario) -> bool:
+    if scenario.name != "x86_64-q35-pure-nvme-perf":
+        return true
+    val cmd =
+        "mkdir -p build/test-artifacts/simpleos-q35-smoke && " +
+        "cp build/os/fat32-x86_64.img build/test-artifacts/simpleos-q35-smoke/q35_user_namespace.img"
+    val (_stdout, stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 5000)
+    if exit_code != 0:
+        print "[scenario][{scenario.name}] phase=user-namespace-media FAILED: {stderr}"
+        return false
+    true
+
+fn build_scenario(scenario: QemuScenario) -> bool:
+    """Build the kernel image required by a named scenario."""
+    if not ensure_scenario_media(scenario):
+        print "[scenario][{scenario.name}] phase=media FAILED"
+        return false
+    val target = scenario_target(scenario)
+    print "[scenario][{scenario.name}] phase=build target={target.output}"
+    if not build_os(target):
+        print "[scenario][{scenario.name}] phase=build FAILED target={target.output}"
+        return false
+    if scenario.name == "x64-desktop-uefi":
+        return ensure_desktop_uefi_boot_image(target.output)
+    ensure_arm_fs_exec_kernel_binary(scenario, target)
+
+fn run_scenario(scenario: QemuScenario) -> bool:
+    _run_scenario_impl(scenario, false)
+
+fn run_scenario_headless(scenario: QemuScenario) -> bool:
+    _run_scenario_impl(scenario, true)
+
+fn _run_scenario_impl(scenario: QemuScenario, headless: bool) -> bool:
+    """Build and run a named QEMU scenario."""
+    if not ensure_scenario_media(scenario):
+        return false
+    val target = scenario_target(scenario)
+    if scenario.name == "x64-desktop-uefi":
+        if not ensure_desktop_uefi_boot_image(target.output):
+            return false
+    if not ensure_arm_fs_exec_kernel_binary(scenario, target):
+        return false
+    if not _prepare_q35_pure_nvme_user_namespace_disk(scenario):
+        return false
+    val cmd_parts = _build_scenario_command_impl(scenario, scenario_kernel_path(scenario, target), headless)
+    val qemu_bin = cmd_parts[0]
+    val qemu_args = cmd_parts.slice(1)
+    print "[run] {scenario.name}: {cmd_parts.join(" ")}"
+    val timeout: i64 = if scenario.gui_mode: 600000 else: 30000
+    if scenario.name == "x64-desktop-uefi":
+        clear_qemu_serial_log(desktop_uefi_serial_log_path())
+    if scenario.name == "arm64-wm-ramfb":
+        clear_qemu_serial_log(arm64_wm_ramfb_serial_log_path())
+    val (stdout, stderr, exit_code) = rt_process_run_timeout(qemu_bin, qemu_args, timeout)
+    val serial_output = if scenario.name == "x64-desktop-uefi":
+        read_qemu_serial_log(desktop_uefi_serial_log_path())
+    else if scenario.name == "arm64-wm-ramfb":
+        read_qemu_serial_log(arm64_wm_ramfb_serial_log_path())
+    else:
+        stdout
+    if serial_output != "":
+        print "[run] serial output:\n{serial_output}"
+    if stderr != "":
+        print "[run] stderr:\n{stderr}"
+    val success = scenario_qemu_exit_success(scenario, exit_code)
+    if not success:
+        print "[run] FAILED (exit code {exit_code})"
+    success
+
+fn test_scenario(scenario: QemuScenario, timeout_ms: u64) -> bool:
+    """Run a named QEMU scenario as a smoke/integration test."""
+    if not ensure_scenario_media(scenario):
+        return false
+    val target = scenario_target(scenario)
+    if scenario.name == "x64-desktop-uefi":
+        if not ensure_desktop_uefi_boot_image(target.output):
+            return false
+    if not ensure_arm_fs_exec_kernel_binary(scenario, target):
+        return false
+    if not _prepare_q35_pure_nvme_user_namespace_disk(scenario):
+        return false
+    val cmd_parts = build_scenario_command_headless(scenario, scenario_kernel_path(scenario, target))
+    val qemu_bin = cmd_parts[0]
+    val qemu_args = cmd_parts.slice(1)
+    print "[test] {scenario.name} (timeout: {timeout_ms}ms): {cmd_parts.join(" ")}"
+    if scenario.name == "x64-desktop-uefi":
+        clear_qemu_serial_log(desktop_uefi_serial_log_path())
+    if scenario.name == "x64-desktop-disk":
+        clear_qemu_serial_log(desktop_disk_serial_log_path())
+    if scenario.name == "x64-wm-simple-web-check":
+        clear_qemu_serial_log(wm_simple_web_serial_log_path())
+    if scenario.name == "arm64-wm-ramfb":
+        clear_qemu_serial_log(arm64_wm_ramfb_serial_log_path())
+    val (stdout, stderr, exit_code) = if scenario.name == "x64-ssh":
+        run_x64_ssh_probe(cmd_parts, timeout_ms)
+    else if scenario.name == "x64-wm-simple-web-check":
+        run_x64_wm_simple_web_probe(cmd_parts, wm_simple_web_serial_log_path(), timeout_ms)
+    else if scenario.name == "x64-desktop-disk":
+        run_x64_desktop_disk_probe(cmd_parts, desktop_disk_serial_log_path(), timeout_ms)
+    else:
+        rt_process_run_timeout(qemu_bin, qemu_args, timeout_ms as i64)
+    val raw_serial_output = if scenario.name == "x64-desktop-uefi":
+        read_qemu_serial_log(desktop_uefi_serial_log_path()) + stderr
+    else:
+        stdout + stderr
+    val serial_output = if scenario.name == "x64-desktop-disk" and raw_serial_output == "":
+        read_qemu_serial_log(desktop_disk_serial_log_path()) + stderr
+    else if scenario.name == "x64-wm-simple-web-check" and raw_serial_output == "" and qemu_serial_log_contains(wm_simple_web_serial_log_path(), "TEST PASSED"):
+        read_qemu_serial_log(wm_simple_web_serial_log_path()) + stderr
+    else if scenario.name == "arm64-wm-ramfb":
+        read_qemu_serial_log(arm64_wm_ramfb_serial_log_path()) + stderr
+    else:
+        raw_serial_output
+    print "[test] serial output:\n{serial_output}"
+    val accepted = if scenario.name == "x64-desktop-uefi":
+        desktop_uefi_serial_accepts_completion(serial_output)
+    else if scenario.name == "x64-desktop-disk":
+        desktop_disk_serial_accepts_completion(serial_output)
+    else if scenario.name == "x64-toolchain-vfs-probe":
+        toolchain_vfs_probe_serial_accepts_completion(serial_output)
+    else if scenario.name == "x64-wm-simple-web-check":
+        wm_simple_web_serial_accepts_completion(serial_output)
+    else if _scenario_uses_catalog_completion_contract(scenario):
+        _scenario_serial_accepts_completion_with_optional_protection(scenario, serial_output)
+    else if scenario.name == "arm64-wm-ramfb":
+        _scenario_serial_accepts_completion(scenario, serial_output)
+    else:
+        serial_output.contains("TEST PASSED")
+    val success = accepted and (scenario_qemu_exit_success(scenario, exit_code) or scenario.name == "arm64-wm-ramfb")
+    if not success:
+        if scenario.name == "x64-desktop-uefi":
+            print "[test] FAILED: scenario {scenario.name} did not satisfy desktop driver completion markers"
+            print_desktop_uefi_missing_markers(serial_output)
+        else if scenario.name == "x64-desktop-disk":
+            print "[test] FAILED: scenario {scenario.name} did not satisfy desktop disk completion markers"
+            print_desktop_disk_missing_markers(serial_output)
+        else if scenario.name == "x64-toolchain-vfs-probe":
+            print "[test] FAILED: scenario {scenario.name} did not satisfy toolchain VFS probe markers"
+            print_toolchain_vfs_probe_missing_markers(serial_output)
+        else if scenario.name == "x64-wm-simple-web-check":
+            print "[test] FAILED: scenario {scenario.name} did not satisfy WM Simple Web completion markers"
+            print_wm_simple_web_missing_markers(serial_output)
+        else if _scenario_uses_catalog_completion_contract(scenario):
+            print "[test] FAILED: scenario {scenario.name} did not satisfy catalog lane completion markers"
+            _print_scenario_missing_markers(scenario, serial_output)
+        else if scenario.name == "arm64-wm-ramfb":
+            print "[test] FAILED: scenario {scenario.name} did not satisfy ARM64 WM ramfb completion markers"
+            _print_scenario_missing_markers(scenario, serial_output)
+        else:
+            print "[test] FAILED: scenario {scenario.name} did not report TEST PASSED"
+    success
+
+pub fn scenario_qemu_exit_success(scenario: QemuScenario, exit_code: i32) -> bool:
+    """Return whether a QEMU process exit code is successful for this scenario.
+
+    x86_64 scenarios include isa-debug-exit in their QEMU arguments, where a
+    guest success code exits QEMU as 1.  Other architectures use normal QEMU
+    process status and must exit 0.  This keeps marker checks from masking a
+    timeout, crash, or failed guest run.
+    """
+    if scenario.name == "x64-desktop-disk" or scenario.name == "x64-wm-simple-web-check" or scenario.name == "x64-ssh" or scenario.name == "x86_32-initrd-fat32-smf":
+        return exit_code == 0 or exit_code == 1
+    if scenario.arch == Architecture.X86_64:
+        return exit_code == 1
+    exit_code == 0
+
+fn arm_fs_exec_required_marker_fragments(scenario: QemuScenario) -> [text]:
+    val lane_opt = _catalog_lane_for_scenario(scenario)
+    if lane_opt != nil:
+        return lane_opt.required_serial_markers
+    []
+
+fn riscv64_hosted_required_marker_fragments() -> [text]:
+    val lane_opt = _catalog_lane_for_scenario(scenario_riscv64_hosted())
+    if lane_opt != nil:
+        return lane_opt.required_serial_markers
+    []
+
+fn arm64_wm_ramfb_required_marker_fragments() -> [text]:
+    [
+        "[WM] Framebuffer allocated and registered",
+        "[WM] fw_cfg sig: 81 69 77 85",
+        "[WM] Found etc/ramfb in fw_cfg",
+        "[WM] ramfb configured successfully via fw_cfg DMA",
+        "[WM] Glass desktop rendered!"
+    ]
+
+fn _scenario_required_marker_fragments(scenario: QemuScenario) -> [text]:
+    if scenario.name == "arm64-wm-ramfb":
+        return arm64_wm_ramfb_required_marker_fragments()
+    val lane_opt = _catalog_lane_for_scenario(scenario)
+    if lane_opt != nil:
+        return lane_opt.required_serial_markers
+    []
+
+fn _scenario_uses_catalog_completion_contract(scenario: QemuScenario) -> bool:
+    if _catalog_lane_for_scenario(scenario) != nil:
+        return true
+    false
+
+fn _scenario_serial_accepts_completion(scenario: QemuScenario, serial_output: text) -> bool:
+    for marker in _scenario_required_marker_fragments(scenario):
+        if not serial_output.contains(marker):
+            return false
+    true
+
+fn _scenario_serial_accepts_completion_with_optional_protection(scenario: QemuScenario, serial_output: text) -> bool:
+    val mode_text = rt_env_get("SIMPLEOS_PROTECTION_MODE") ?? ""
+    qemu_scenario_serial_acceptance_reason(scenario, mode_text, serial_output) == "ready"
+
+pub fn qemu_scenario_serial_acceptance_reason(scenario: QemuScenario, mode_text: text, serial_output: text) -> text:
+    if scenario.name == "x86_64-physical-nvme-perf":
+        return real_device_physical_nvme_serial_acceptance_reason(serial_output)
+    if scenario.name == "x64-wm-simple-web-check":
+        return wm_simple_web_serial_acceptance_reason(serial_output)
+    for marker in _scenario_required_marker_fragments(scenario):
+        if not serial_output.contains(marker):
+            return "missing-marker:" + marker
+    if mode_text == "" or mode_text == "off":
+        return "ready"
+    qemu_scenario_protection_serial_reason(scenario, mode_text, serial_output)
+
+pub fn qemu_scenario_serial_accepts_completion(scenario: QemuScenario, mode_text: text, serial_output: text) -> bool:
+    qemu_scenario_serial_acceptance_reason(scenario, mode_text, serial_output) == "ready"
+
+fn _print_scenario_missing_markers(scenario: QemuScenario, serial_output: text):
+    for marker in _scenario_required_marker_fragments(scenario):
+        if not serial_output.contains(marker):
+            print "[test] missing marker fragment: {marker}"
+
+pub fn qemu_protection_serial_reason(board_id: text, mode_text: text, runtime: text, serial_output: text) -> text:
+    val mode = simpleos_protection_mode_from_text(mode_text)
+    if val parsed_mode = mode:
+        val evidence = simpleos_protection_evidence_from_serial(board_id, parsed_mode, runtime, serial_output)
+        if simpleos_protection_evidence_accepts_hardening(evidence):
+            return "ready"
+        val evidence_reason = simpleos_protection_evidence_reason(evidence)
+        if evidence_reason == "ready":
+            return "diagnostic-protection-mode:" + mode_text
+        return evidence_reason
+    "unsupported-protection-mode:" + mode_text
+
+pub fn qemu_protection_serial_accepts_hardening(board_id: text, mode_text: text, runtime: text, serial_output: text) -> bool:
+    qemu_protection_serial_reason(board_id, mode_text, runtime, serial_output) == "ready"
+
+pub fn qemu_scenario_protection_board_id(scenario: QemuScenario) -> text:
+    if scenario.arch == Architecture.X86_64 and scenario.machine == "q35":
+        return "x86_64-q35"
+    if scenario.arch == Architecture.Riscv64 and scenario.machine == "virt":
+        return "riscv64-virt"
+    ""
+
+pub fn qemu_scenario_protection_serial_reason(scenario: QemuScenario, mode_text: text, serial_output: text) -> text:
+    val board_id = qemu_scenario_protection_board_id(scenario)
+    if board_id == "":
+        return "unsupported-qemu-board:" + scenario.name
+    qemu_protection_serial_reason(board_id, mode_text, "qemu", serial_output)
+
+pub fn qemu_scenario_protection_serial_accepts_hardening(scenario: QemuScenario, mode_text: text, serial_output: text) -> bool:
+    qemu_scenario_protection_serial_reason(scenario, mode_text, serial_output) == "ready"
+
+fn scenario_test_timeout_ms(scenario: QemuScenario) -> u64:
+    """Return a realistic smoke-test timeout for a named QEMU scenario."""
+    if scenario.name == "x64-nvme-fat32":
+        return 60000
+    if scenario.name == "arm64-wm-ramfb":
+        return 120000
+    val catalog_platform = _catalog_platform_name_for_scenario(scenario)
+    if catalog_platform != "":
+        if val lane = simpleos_platform_qemu_lane(catalog_platform, scenario.name):
+            if lane.timeout_ms > 0:
+                return lane.timeout_ms as u64
+    if _is_arm_fs_exec_scenario(scenario):
+        if val lane = simpleos_platform_qemu_lane(_arm_fs_exec_platform_name(scenario.arch), scenario.name):
+            return lane.timeout_ms as u64
+        return 60000
+    if scenario.name == "riscv64-hosted":
+        if val lane = simpleos_platform_qemu_lane("riscv64", "riscv64-hosted"):
+            return lane.timeout_ms as u64
+        return 120000
+    if _is_riscv_fs_exec_scenario(scenario):
+        if val lane = simpleos_platform_qemu_lane(_riscv_fs_exec_platform_name(scenario.arch), scenario.name):
+            return lane.timeout_ms as u64
+        return 60000
+    if val timeout_ms = _desktop_scenario_timeout_ms(scenario.name):
+        return timeout_ms
+    10000
+
+fn ensure_scenario_media(scenario: QemuScenario) -> bool:
+    """Materialize required host-side disk media for scenarios that attach storage."""
+    if scenario.name == "x64-nvme-fat32" or scenario.name == "x64-ssh" or scenario.name == "x64-desktop-disk" or scenario.name == "x64-desktop-uefi" or scenario.name == "x64-toolchain-vfs-probe":
+        if val ready = _ensure_desktop_scenario_media(scenario.name):
+            return ready
+        return false
+    if _catalog_lane_for_scenario(scenario) != nil:
+        if scenario.arch == Architecture.X86_64:
+            return ensure_fs_test_disk_image()
+        if scenario.arch == Architecture.X86:
+            return ensure_x86_32_fs_exec_disk_image()
+        if scenario.arch == Architecture.Arm64 or scenario.arch == Architecture.Arm32:
+            return ensure_arm_fs_exec_disk_image(scenario.arch)
+        if scenario.arch == Architecture.Riscv64 or scenario.arch == Architecture.Riscv32:
+            return ensure_riscv_fs_exec_disk_image(scenario.arch)
+    true
+
+fn boot_disk_image_serial(image: text, timeout_ms: i64) -> (text, text, i32):
+    """Boot a raw disk image in QEMU x86_64 and capture serial output.
+
+    Uses the standard q35 machine with COM1 mapped to stdio so the caller
+    can grep for [phase-3-*] markers in the returned stdout+stderr tuple.
+    No -kernel flag — the firmware boots directly from the disk image.
+    """
+    val args = [
+        "-no-user-config",
+        "-monitor", "none",
+        "-machine", "q35",
+        "-cpu", "qemu64",
+        "-m", "512M",
+        "-serial", "stdio",
+        "-display", "none",
+        "-net", "none",
+        "-no-reboot",
+        "-drive", "file=" + image + ",format=raw,if=virtio",
+        "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"
+    ]
+    rt_process_run_timeout("qemu-system-x86_64", args, timeout_ms)

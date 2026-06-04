@@ -1,0 +1,295 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/electron_simple_web_engine2d_bitmap_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/electron_simple_web_engine2d_bitmap_evidence_$(date -u +%F).md}"
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+WIDTH="${ELECTRON_BITMAP_WIDTH:-96}"
+HEIGHT="${ELECTRON_BITMAP_HEIGHT:-64}"
+ITERATIONS="${ELECTRON_BITMAP_ITERATIONS:-5}"
+TIMEOUT_SECS="${ELECTRON_BITMAP_TIMEOUT_SECS:-60}"
+SCENE="${ELECTRON_BITMAP_SCENE:-simple-web-engine2d-image-taskbar-command}"
+SIMPLE_SRC="$BUILD_DIR/simple_web_engine2d_expected.spl"
+SIMPLE_OUT="$BUILD_DIR/simple.out"
+EXPECTED_ARGB="$BUILD_DIR/expected-argb.json"
+CAPTURED_ARGB="$BUILD_DIR/electron-argb.json"
+ELECTRON_OUT="$BUILD_DIR/electron.out"
+ELECTRON_PROOF="$BUILD_DIR/electron-proof.json"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$SIMPLE_SRC" "$SIMPLE_OUT" "$EXPECTED_ARGB" "$CAPTURED_ARGB" "$ELECTRON_OUT" "$ELECTRON_PROOF" "$BUILD_DIR/evidence.env" "$REPORT_PATH"
+
+have() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+field_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" | tail -n 1
+}
+
+emit_unavailable() {
+    reason="$1"
+    {
+        echo "electron_simple_web_engine2d_status=unavailable"
+        echo "electron_simple_web_engine2d_reason=$reason"
+        echo "electron_simple_web_engine2d_scene=$SCENE"
+        echo "electron_simple_web_engine2d_width=$WIDTH"
+        echo "electron_simple_web_engine2d_height=$HEIGHT"
+        echo "electron_simple_web_engine2d_iterations=$ITERATIONS"
+    } >"$BUILD_DIR/evidence.env"
+    {
+        echo "# Electron Simple Web Engine2D Bitmap Evidence"
+        echo
+        echo "- status: unavailable"
+        echo "- reason: $reason"
+    } >"$REPORT_PATH"
+    cat "$BUILD_DIR/evidence.env"
+}
+
+UNAME_S="$(uname -s)"
+# Electron offscreen rendering needs no X server on macOS; only Linux requires
+# xvfb-run to back the offscreen/GPU pipeline.
+REQUIRED_CMDS="node npm"
+if [ "$UNAME_S" = "Linux" ]; then
+    REQUIRED_CMDS="node npm xvfb-run"
+fi
+for required in $REQUIRED_CMDS; do
+    if ! have "$required"; then
+        emit_unavailable "missing-command:$required"
+        exit 1
+    fi
+done
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+    emit_unavailable "missing-simple-bin"
+    exit 1
+fi
+
+if [ ! -x "tools/electron-shell/node_modules/.bin/electron" ] && [ ! -x "tools/electron-shell/node_modules/electron/dist/electron" ]; then
+    emit_unavailable "missing-electron-dependency"
+    exit 1
+fi
+
+cat >"$SIMPLE_SRC" <<SIMPLE_EOF
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels}
+
+val WIDTH: i32 = $WIDTH
+val HEIGHT: i32 = $HEIGHT
+val EXPECTED_ARGB_PATH: text = "$EXPECTED_ARGB"
+
+fn checksum(pixels: [u32]) -> i64:
+    var sum: i64 = 0
+    var i = 0
+    while i < pixels.len():
+        sum = sum + pixels[i].to_i64()
+        i = i + 1
+    sum
+
+fn weighted_checksum(pixels: [u32]) -> i64:
+    var sum: i64 = 0
+    var i = 0
+    while i < pixels.len():
+        sum = sum + (pixels[i].to_i64() * (i.to_i64() + 1))
+        i = i + 1
+    sum
+
+fn write_expected_bitmap(pixels: [u32]) -> bool:
+    var json = "{\"width\":" + WIDTH.to_text() + ",\"height\":" + HEIGHT.to_text() + ",\"format\":\"argb-u32\",\"producer\":\"pure-simple-web-engine2d\",\"pixels\":["
+    var i = 0
+    while i < pixels.len():
+        if i > 0:
+            json = json + ","
+        json = json + pixels[i].to_i64().to_text()
+        i = i + 1
+    json = json + "]}"
+    rt_file_write_text(EXPECTED_ARGB_PATH, json)
+
+fn main():
+    var html = "<html><body style='background-color: #112233'><div class='wm-app-titlebar' style='background-color: #445566; width: 80px; height: 40px'></div><main class='wm-app-content simple-web-accent'>image taskbar command</main></body></html>"
+    if "$SCENE" == "simple-web-engine2d-two-block-content":
+        html = "<html><body style='margin:0; background-color: #112233'><div style='background-color: #445566; width: 80px; height: 40px'></div><div style='background-color: #22c55e; width: 80px; height: 40px'></div></body></html>"
+    if "$SCENE" == "simple-web-engine2d-wide-card-content":
+        html = "<html><body style='background-color: #0b1020'><section style='background-color: #f59e0b; width: 120px; height: 60px'></section></body></html>"
+    if "$SCENE" == "simple-web-engine2d-split-pane-status-list":
+        html = "<html><body class='simple-web-engine2d-split-pane-status-list' style='margin:0; background-color: #101820'><div style='background-color: #1f2937; width: 12px; height: 64px'></div><main>split pane status list</main></body></html>"
+    if "$SCENE" == "simple-web-engine2d-toolbar-modal-grid":
+        html = "<html><body class='simple-web-engine2d-toolbar-modal-grid' style='margin:0; background-color: #0e1116'><header data-simple-surface='toolbar command_bar'></header><aside data-simple-surface='utility_rail'></aside><main data-simple-surface='image grid modal taskbar'></main></body></html>"
+    if "$SCENE" == "simple-web-engine2d-dashboard-command-list":
+        html = "<html><body class='simple-web-engine2d-dashboard-command-list' style='margin:0; background-color: #0b1220'><main>dashboard command list</main></body></html>"
+    if "$SCENE" == "simple-web-engine2d-form-sidebar-validation":
+        html = "<html><body class='simple-web-engine2d-form-sidebar-validation' style='margin:0; background-color: #0a0f1a'><main>form sidebar validation</main></body></html>"
+    if "$SCENE" == "simple-web-engine2d-settings-inspector-tree":
+        html = "<html><body class='simple-web-engine2d-settings-inspector-tree' style='margin:0; background-color: #0b1020'><main>settings inspector tree</main></body></html>"
+    if "$SCENE" == "simple-web-engine2d-media-gallery-command":
+        html = "<html><body class='simple-web-engine2d-media-gallery-command' style='margin:0; background-color: #0f172a'><main>media gallery command</main></body></html>"
+    if "$SCENE" == "simple-web-engine2d-report-table-command":
+        html = "<html><body class='simple-web-engine2d-report-table-command' style='margin:0; background-color: #f8fafc'><main>report table command</main></body></html>"
+    val pixels = simple_web_render_html_to_pixels(html, WIDTH, HEIGHT)
+    val wrote = write_expected_bitmap(pixels)
+    print "simple_status={if wrote: \"pass\" else: \"fail\"}"
+    print "simple_reason={if wrote: \"pass\" else: \"write-expected-argb-failed\"}"
+    print "renderer=pure-simple-web-engine2d"
+    print "scene=$SCENE"
+    print "width={WIDTH}"
+    print "height={HEIGHT}"
+    print "checksum={checksum(pixels)}"
+    print "weighted_checksum={weighted_checksum(pixels)}"
+    print "expected_argb_path={EXPECTED_ARGB_PATH}"
+    print "blur_or_tolerance_used=false"
+
+main()
+SIMPLE_EOF
+
+set +e
+SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SIMPLE_BIN" run "$SIMPLE_SRC" --mode=interpreter --clean >"$SIMPLE_OUT" 2>&1
+simple_code=$?
+set -e
+
+if [ "$simple_code" -ne 0 ]; then
+    emit_unavailable "simple-render-failed"
+    exit 1
+fi
+
+simple_checksum="$(field_of checksum "$SIMPLE_OUT")"
+simple_weighted="$(field_of weighted_checksum "$SIMPLE_OUT")"
+simple_blur="$(field_of blur_or_tolerance_used "$SIMPLE_OUT")"
+simple_status="$(field_of simple_status "$SIMPLE_OUT")"
+
+if [ "$simple_status" != "pass" ] || [ ! -s "$EXPECTED_ARGB" ]; then
+    emit_unavailable "missing-expected-argb-file"
+    exit 1
+fi
+
+if [ -z "$simple_checksum" ] || [ "$simple_checksum" = "0" ] || [ -z "$simple_weighted" ] || [ "$simple_weighted" = "0" ]; then
+    emit_unavailable "missing-simple-checksum"
+    exit 1
+fi
+
+if [ "$simple_blur" != "false" ]; then
+    emit_unavailable "simple-blur-or-tolerance-not-allowed"
+    exit 1
+fi
+
+# Shared Electron command; xvfb-run prefix only on Linux (macOS offscreen
+# rendering needs no X server). Positionals: 1=scene 2=w 3=h 4=iters
+# 5=expected_checksum 6=expected_weighted 7=proof 8=expected_argb 9=captured_argb.
+ELECTRON_RUN_CMD='ELECTRON_BITMAP_SCENE="$1" ELECTRON_BITMAP_WIDTH="$2" ELECTRON_BITMAP_HEIGHT="$3" ELECTRON_BITMAP_ITERATIONS="$4" ELECTRON_BITMAP_EXPECTED_CHECKSUM="$5" ELECTRON_BITMAP_EXPECTED_WEIGHTED_CHECKSUM="$6" ELECTRON_BITMAP_PROOF_PATH="$7" ELECTRON_BITMAP_EXPECTED_ARGB_PATH="$8" ELECTRON_BITMAP_CAPTURED_ARGB_PATH="$9" SIMPLE_ELECTRON_LIVE_BITMAP=1 '
+if [ "$UNAME_S" = "Linux" ]; then
+    ELECTRON_RUN_CMD="$ELECTRON_RUN_CMD"'xvfb-run -a --server-args="-screen 0 1280x720x24" '
+fi
+ELECTRON_RUN_CMD="$ELECTRON_RUN_CMD"'npm --prefix tools/electron-shell exec -- electron --no-sandbox tools/electron-shell'
+
+set +e
+if have timeout; then
+    timeout "$TIMEOUT_SECS" sh -c "$ELECTRON_RUN_CMD" sh "$SCENE" "$WIDTH" "$HEIGHT" "$ITERATIONS" "$simple_checksum" "$simple_weighted" "$ELECTRON_PROOF" "$EXPECTED_ARGB" "$CAPTURED_ARGB" >"$ELECTRON_OUT" 2>&1
+else
+    sh -c "$ELECTRON_RUN_CMD" sh "$SCENE" "$WIDTH" "$HEIGHT" "$ITERATIONS" "$simple_checksum" "$simple_weighted" "$ELECTRON_PROOF" "$EXPECTED_ARGB" "$CAPTURED_ARGB" >"$ELECTRON_OUT" 2>&1
+fi
+electron_code=$?
+set -e
+
+if [ -f "$ELECTRON_PROOF" ]; then
+    electron_checksum="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(p.checksum||'')" "$ELECTRON_PROOF")"
+    electron_expected="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(p.expected_checksum||'')" "$ELECTRON_PROOF")"
+    electron_weighted="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(p.weighted_checksum||'')" "$ELECTRON_PROOF")"
+    electron_expected_weighted="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(p.expected_weighted_checksum||'')" "$ELECTRON_PROOF")"
+    mismatch_count="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(String(p.mismatch_count ?? ''))" "$ELECTRON_PROOF")"
+    electron_frame_us="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(String(p.frame_us ?? ''))" "$ELECTRON_PROOF")"
+    captured_argb_written="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(String(p.captured_argb_written ?? ''))" "$ELECTRON_PROOF")"
+    blur_used="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(String(p.blur_or_tolerance_used ?? ''))" "$ELECTRON_PROOF")"
+else
+    electron_checksum="$(field_of checksum "$ELECTRON_OUT")"
+    electron_expected="$(field_of expected_checksum "$ELECTRON_OUT")"
+    electron_weighted="$(field_of weighted_checksum "$ELECTRON_OUT")"
+    electron_expected_weighted="$(field_of expected_weighted_checksum "$ELECTRON_OUT")"
+    mismatch_count="$(field_of mismatch_count "$ELECTRON_OUT")"
+    electron_frame_us="$(field_of frame_us "$ELECTRON_OUT")"
+    captured_argb_written="$(field_of captured_argb_written "$ELECTRON_OUT")"
+    blur_used="$(field_of blur_or_tolerance_used "$ELECTRON_OUT")"
+fi
+
+status=pass
+reason=pass
+if [ "$electron_code" -ne 0 ] && [ ! -f "$ELECTRON_PROOF" ]; then
+    status=fail
+    reason=electron-live-capture-failed
+elif [ "$blur_used" != "false" ]; then
+    status=fail
+    reason=blur-or-tolerance-not-allowed
+elif [ "$electron_checksum" != "$simple_checksum" ] || [ "$electron_expected" != "$simple_checksum" ]; then
+    status=fail
+    reason=checksum-mismatch
+elif [ "$electron_weighted" != "$simple_weighted" ] || [ "$electron_expected_weighted" != "$simple_weighted" ]; then
+    status=fail
+    reason=weighted-checksum-mismatch
+elif [ "$mismatch_count" != "0" ]; then
+    status=fail
+    reason=pixel-mismatch
+elif [ ! -s "$CAPTURED_ARGB" ] || [ "$captured_argb_written" != "true" ]; then
+    status=fail
+    reason=missing-captured-argb
+elif [ -z "$electron_frame_us" ] || [ "$electron_frame_us" -le 0 ]; then
+    status=fail
+    reason=missing-electron-timing
+elif [ "$electron_code" -ne 0 ]; then
+    reason=pass-with-electron-teardown-warning
+fi
+
+{
+    echo "electron_simple_web_engine2d_status=$status"
+    echo "electron_simple_web_engine2d_reason=$reason"
+    echo "electron_simple_web_engine2d_scene=$SCENE"
+    echo "electron_simple_web_engine2d_width=$WIDTH"
+    echo "electron_simple_web_engine2d_height=$HEIGHT"
+    echo "electron_simple_web_engine2d_iterations=$ITERATIONS"
+    echo "electron_simple_web_engine2d_simple_checksum=$simple_checksum"
+    echo "electron_simple_web_engine2d_electron_checksum=${electron_checksum:-0}"
+    echo "electron_simple_web_engine2d_simple_weighted_checksum=$simple_weighted"
+    echo "electron_simple_web_engine2d_electron_weighted_checksum=${electron_weighted:-0}"
+    echo "electron_simple_web_engine2d_mismatch_count=${mismatch_count:-}"
+    echo "electron_simple_web_engine2d_blur_or_tolerance_used=${blur_used:-}"
+    echo "electron_simple_web_engine2d_electron_frame_us=${electron_frame_us:-0}"
+    echo "electron_simple_web_engine2d_expected_argb_path=$EXPECTED_ARGB"
+    echo "electron_simple_web_engine2d_captured_argb_path=$CAPTURED_ARGB"
+    echo "electron_simple_web_engine2d_captured_argb_written=${captured_argb_written:-}"
+    echo "electron_simple_web_engine2d_exit_code=$electron_code"
+} >"$BUILD_DIR/evidence.env"
+
+{
+    echo "# Electron Simple Web Engine2D Bitmap Evidence"
+    echo
+    echo "- status: $status"
+    echo "- reason: $reason"
+    echo "- scene: $SCENE"
+    echo "- dimensions: ${WIDTH}x${HEIGHT}"
+    echo "- Simple checksum: $simple_checksum"
+    echo "- Electron checksum: ${electron_checksum:-0}"
+    echo "- Simple weighted checksum: $simple_weighted"
+    echo "- Electron weighted checksum: ${electron_weighted:-0}"
+    echo "- mismatch count: ${mismatch_count:-}"
+    echo "- blur/tolerance used: ${blur_used:-}"
+    echo "- Electron frame us: ${electron_frame_us:-0}"
+    echo "- expected ARGB path: $EXPECTED_ARGB"
+    echo "- captured ARGB path: $CAPTURED_ARGB"
+    echo "- captured ARGB written: ${captured_argb_written:-}"
+    echo
+    echo "## Raw Evidence"
+    sed 's/^/- /' "$BUILD_DIR/evidence.env"
+    echo
+    echo "## Simple Output"
+    sed 's/^/- /' "$SIMPLE_OUT"
+    echo
+    echo "## Electron Output"
+    sed 's/^/- /' "$ELECTRON_OUT"
+} >"$REPORT_PATH"
+
+cat "$BUILD_DIR/evidence.env"
+
+[ "$status" = "pass" ]

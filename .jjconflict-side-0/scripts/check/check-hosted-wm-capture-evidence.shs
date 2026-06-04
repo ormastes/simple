@@ -1,0 +1,201 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/hosted-wm-capture-evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/hosted_wm_capture_evidence_$(date -u +%F).md}"
+CAPTURE_PPM="${CAPTURE_PPM:-$BUILD_DIR/hosted_wm_first_frame.ppm}"
+LOG_PATH="$BUILD_DIR/capture.log"
+VALIDATION_LOG="$BUILD_DIR/validation.env"
+SIMPLE_BIN="${SIMPLE_BIN:-src/compiler_rust/target/debug/simple}"
+TIMEOUT_SECS="${HOSTED_WM_CAPTURE_TIMEOUT_SECS:-45}"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$CAPTURE_PPM" "$LOG_PATH" "$VALIDATION_LOG" "$REPORT_PATH"
+
+echo "check=hosted_wm_capture_evidence"
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+    echo "hosted_wm_capture_status=fail"
+    echo "hosted_wm_capture_reason=missing-simple-bin"
+    exit 1
+fi
+
+set +e
+SIMPLE_LIB="${SIMPLE_LIB:-src}" SIMPLE_HOSTED_WM_CAPTURE_PPM="$CAPTURE_PPM" \
+    "$SIMPLE_BIN" run src/os/compositor/hosted_wm_capture_evidence.spl --mode=interpreter >"$LOG_PATH" 2>&1 &
+run_pid=$!
+deadline=$((SECONDS + TIMEOUT_SECS))
+while kill -0 "$run_pid" >/dev/null 2>&1 && [ "$SECONDS" -lt "$deadline" ]; do
+    sleep 1
+done
+if kill -0 "$run_pid" >/dev/null 2>&1; then
+    kill "$run_pid" >/dev/null 2>&1 || true
+    wait "$run_pid" >/dev/null 2>&1 || true
+    run_code=124
+else
+    wait "$run_pid"
+    run_code=$?
+fi
+set -e
+
+cat "$LOG_PATH"
+
+if [ "$run_code" -eq 124 ]; then
+    {
+        echo "# Hosted WM Capture Evidence"
+        echo
+        echo "- status: unavailable"
+        echo "- reason: hosted-wm-capture-timeout"
+        echo "- timeout_secs: $TIMEOUT_SECS"
+        echo "- capture_ppm: $CAPTURE_PPM"
+        echo "- launcher_log: $LOG_PATH"
+    } >"$REPORT_PATH"
+    echo "hosted_wm_capture_status=unavailable"
+    echo "hosted_wm_capture_reason=hosted-wm-capture-timeout"
+    echo "hosted_wm_capture_report_path=$REPORT_PATH"
+    exit 0
+fi
+
+if [ "$run_code" -ne 0 ]; then
+    echo "hosted_wm_capture_status=fail"
+    echo "hosted_wm_capture_reason=capture-program-failed"
+    exit 1
+fi
+
+if [ ! -s "$CAPTURE_PPM" ]; then
+    echo "hosted_wm_capture_status=fail"
+    echo "hosted_wm_capture_reason=capture-missing"
+    exit 1
+fi
+
+python3 - "$CAPTURE_PPM" >"$VALIDATION_LOG" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = path.read_bytes()
+status = "pass"
+reason = "hosted-first-frame-capture-valid"
+tokens = []
+i = 0
+while len(tokens) < 4 and i < len(data):
+    while i < len(data) and data[i] in b" \t\r\n":
+        i += 1
+    if i < len(data) and data[i:i+1] == b"#":
+        while i < len(data) and data[i] not in b"\r\n":
+            i += 1
+        continue
+    j = i
+    while j < len(data) and data[j] not in b" \t\r\n":
+        j += 1
+    tokens.append(data[i:j])
+    i = j
+while i < len(data) and data[i] in b" \t\r\n":
+    i += 1
+
+if len(tokens) < 4 or tokens[0] not in (b"P6", b"P3"):
+    status = "fail"
+    reason = "not-supported-ppm"
+    width = height = non_bg = bright = accent = checksum = 0
+else:
+    width = int(tokens[1])
+    height = int(tokens[2])
+    maxv = int(tokens[3])
+    pixels = data[i:]
+    bg = (0x0F, 0x17, 0x2A)
+    non_bg = bright = accent = 0
+    checksum = 2166136261
+    if width != 270 or height != 150 or maxv != 255:
+        status = "fail"
+        reason = "unexpected-ppm-shape"
+    else:
+        if tokens[0] == b"P6":
+            if len(pixels) < width * height * 3:
+                status = "fail"
+                reason = "unexpected-ppm-shape"
+            else:
+                values = None
+        else:
+            try:
+                values = [int(part) for part in pixels.split()]
+            except ValueError:
+                status = "fail"
+                reason = "invalid-p3-pixels"
+                values = []
+            if status == "pass" and len(values) < width * height * 3:
+                status = "fail"
+                reason = "unexpected-ppm-shape"
+        for y in range(height):
+            for x in range(width):
+                off = (y * width + x) * 3
+                if status != "pass":
+                    r = g = b = 0
+                elif tokens[0] == b"P6":
+                    r, g, b = pixels[off], pixels[off + 1], pixels[off + 2]
+                else:
+                    r, g, b = values[off], values[off + 1], values[off + 2]
+                if (r, g, b) != bg:
+                    non_bg += 1
+                if r > 210 and g > 210 and b > 210:
+                    bright += 1
+                if max(r, g, b) - min(r, g, b) > 65:
+                    accent += 1
+                if x % 17 == 0 and y % 13 == 0:
+                    checksum ^= (r << 16) | (g << 8) | b
+                    checksum = (checksum * 16777619) & 0xFFFFFFFF
+        if status == "pass" and non_bg < 16000:
+            status = "fail"
+            reason = "too-few-rendered-pixels"
+        elif status == "pass" and bright < 200:
+            status = "fail"
+            reason = "missing-text-or-highlight-pixels"
+        elif status == "pass" and accent < 4000:
+            status = "fail"
+            reason = "missing-colored-window-content"
+
+print(f"hosted_wm_capture_status={status}")
+print(f"hosted_wm_capture_reason={reason}")
+print(f"hosted_wm_capture_width={width}")
+print(f"hosted_wm_capture_height={height}")
+print(f"hosted_wm_capture_non_background_pixels={non_bg}")
+print(f"hosted_wm_capture_bright_pixels={bright}")
+print(f"hosted_wm_capture_accent_pixels={accent}")
+print(f"hosted_wm_capture_sample_checksum={checksum}")
+PY
+
+cat "$VALIDATION_LOG"
+
+status="$(sed -n 's/^hosted_wm_capture_status=//p' "$VALIDATION_LOG" | tail -n 1)"
+reason="$(sed -n 's/^hosted_wm_capture_reason=//p' "$VALIDATION_LOG" | tail -n 1)"
+width="$(sed -n 's/^hosted_wm_capture_width=//p' "$VALIDATION_LOG" | tail -n 1)"
+height="$(sed -n 's/^hosted_wm_capture_height=//p' "$VALIDATION_LOG" | tail -n 1)"
+non_bg="$(sed -n 's/^hosted_wm_capture_non_background_pixels=//p' "$VALIDATION_LOG" | tail -n 1)"
+bright="$(sed -n 's/^hosted_wm_capture_bright_pixels=//p' "$VALIDATION_LOG" | tail -n 1)"
+accent="$(sed -n 's/^hosted_wm_capture_accent_pixels=//p' "$VALIDATION_LOG" | tail -n 1)"
+checksum="$(sed -n 's/^hosted_wm_capture_sample_checksum=//p' "$VALIDATION_LOG" | tail -n 1)"
+render_us="$(sed -n 's/^hosted_wm_capture_render_us=//p' "$LOG_PATH" | tail -n 1)"
+
+{
+    echo "# Hosted WM Capture Evidence"
+    echo
+    echo "- status: $status"
+    echo "- reason: $reason"
+    echo "- capture_ppm: $CAPTURE_PPM"
+    echo "- width: $width"
+    echo "- height: $height"
+    echo "- non_background_pixels: $non_bg"
+    echo "- bright_pixels: $bright"
+    echo "- accent_pixels: $accent"
+    echo "- sample_checksum: $checksum"
+    echo "- render_us: ${render_us:-0}"
+    echo "- launcher_log: $LOG_PATH"
+} >"$REPORT_PATH"
+
+echo "hosted_wm_capture_report_path=$REPORT_PATH"
+
+if [ "$status" != "pass" ]; then
+    exit 1
+fi

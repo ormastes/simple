@@ -1,0 +1,470 @@
+# Part 1 of src/compiler/90.tools/lint/main.spl
+use compiler.tools.lint.main.*
+# Simple Language Linter
+# Semantic lints for code quality and safety
+# Usage: simple_lint <file.spl> [--deny-all] [--warn-all]
+
+# I/O imports
+use std.nogc_sync_mut.io.file_ops (file_read, file_exists, file_write)
+use std.nogc_sync_mut.io.dir_ops (is_dir)
+use app.io.cli_ops (get_args)
+
+# Logging imports
+use std.log.{error, info}
+
+# Import EasyFix data types from stdlib
+use std.tooling.easy_fix.*
+use nogc_sync_mut.ui.theme_package.{validate_default_theme_package}
+use compiler.semantics.lint.riscv_rtl_debuggability_lint.{lint_riscv_rtl_debuggability}
+
+# File I/O wrapper
+
+fn read_file(path: String) -> Result<String, String>:
+    val file_content = file_read(path)
+    if file_content == "":
+        return Err("Failed to read file: {path}")
+    return Ok(file_content)
+
+# Lint levels
+enum LintLevel:
+    Allow
+    Warn
+    Deny
+
+# All configurable lint names.
+fn all_lint_names() -> [text]:
+    ["primitive_api", "bare_bool", "print_in_test_spec", "todo_format",
+     "spipe_no_print_based_tests", "spipe_missing_docstrings",
+     "spipe_minimal_docstrings", "spipe_manual_assertions",
+     "spipe_placeholder_tests", "spipe_empty_examples",
+     "spipe_boolean_wrapper_assertions", "spipe_false_boolean_wrapper_assertions",
+     "unnamed_duplicate_typed_args", "resource_leak",
+     "wildcard_match", "non_exhaustive_match",
+     "export_outside_init", "init_boundary_violation",
+     "bypass_with_code_files", "unknown_decorator", "stub_impl",
+     "unknown_attribute", "too_many_arguments",
+     "required_comment",
+     "ui_no_raw_widget_kind", "ui_no_raw_variant", "ui_no_raw_theme_name",
+     "stale_md_diagrams"]
+
+# Build the default levels dict for all configurable lint names.
+# Most are Warn; exceptions: spipe_no_print_based_tests=Deny,
+# spipe_placeholder_tests=Deny, spipe_empty_examples=Deny,
+# spipe_false_boolean_wrapper_assertions=Deny, export_outside_init=Deny,
+# stub_impl=Deny, wildcard_match=Allow.
+fn build_default_levels() -> Dict<String, String>:
+    var levels: Dict<String, String> = {}
+    levels["primitive_api"] = "warn"
+    levels["bare_bool"] = "warn"
+    levels["print_in_test_spec"] = "warn"
+    levels["todo_format"] = "warn"
+    levels["spipe_no_print_based_tests"] = "deny"
+    levels["spipe_missing_docstrings"] = "warn"
+    levels["spipe_minimal_docstrings"] = "warn"
+    levels["spipe_manual_assertions"] = "warn"
+    levels["spipe_placeholder_tests"] = "deny"
+    levels["spipe_empty_examples"] = "deny"
+    levels["spipe_boolean_wrapper_assertions"] = "warn"
+    levels["spipe_false_boolean_wrapper_assertions"] = "deny"
+    levels["unnamed_duplicate_typed_args"] = "warn"
+    levels["resource_leak"] = "warn"
+    levels["wildcard_match"] = "allow"
+    levels["non_exhaustive_match"] = "warn"
+    levels["export_outside_init"] = "deny"
+    levels["init_boundary_violation"] = "warn"
+    levels["bypass_with_code_files"] = "warn"
+    levels["unknown_decorator"] = "warn"
+    levels["stub_impl"] = "deny"
+    levels["unknown_attribute"] = "warn"
+    levels["too_many_arguments"] = "warn"
+    levels["required_comment"] = "warn"
+    levels["ui_no_raw_widget_kind"] = "warn"
+    levels["ui_no_raw_variant"] = "warn"
+    levels["ui_no_raw_theme_name"] = "warn"
+    levels["stale_md_diagrams"] = "warn"
+    levels
+
+# Parse a level string ("allow", "warn", "deny") into LintLevel.
+# Returns nil for unknown strings.
+fn parse_lint_level(level_str: String) -> Option<LintLevel>:
+    val lower = level_str.lower()
+    if lower == "allow":
+        return Some(LintLevel.Allow)
+    if lower == "warn":
+        return Some(LintLevel.Warn)
+    if lower == "deny":
+        return Some(LintLevel.Deny)
+    nil
+
+# Lint configuration — overrides for lint levels.
+# Loaded from simple.sdn [lints] section and/or file-level attributes.
+class LintConfig:
+    levels: Dict<String, String>
+
+    # Create a default config (all defaults, no overrides).
+impl LintConfig:
+    static fn new() -> LintConfig:
+        LintConfig(levels: {})
+
+    # Load config from an SDN file.  Parses the [lints] section.
+    static fn from_sdn_file(path: String) -> LintConfig:
+        if not file_exists(path):
+            return LintConfig.new()
+        val content = file_read(path)
+        if content == "":
+            return LintConfig.new()
+        LintConfig.from_sdn_string(content)
+
+    # Parse config from an SDN string.
+    static fn from_sdn_string(content: String) -> LintConfig:
+        var config = LintConfig.new()
+        var in_lints_section = false
+
+        val lines = content.split("\n")
+        for line in lines:
+            val trimmed = line.trim()
+
+            # Skip empty lines and comments
+            if trimmed == "" or trimmed.starts_with("#"):
+                continue
+
+            # Check for [lints] section header
+            if trimmed == "[lints]":
+                in_lints_section = true
+                continue
+
+            # Any other section header exits [lints]
+            if trimmed.starts_with("[") and trimmed.ends_with("]"):
+                in_lints_section = false
+                continue
+
+            # Parse lint = "level" entries inside [lints]
+            if in_lints_section and trimmed.contains("="):
+                val parts = trimmed.split("=")
+                if parts.len() >= 2:
+                    val lint_name = parts[0].trim()
+                    var level_str = parts[1].trim()
+                    # Strip surrounding quotes
+                    level_str = level_str.replace("\"", "")
+                    level_str = level_str.replace("'", "")
+                    level_str = level_str.trim()
+
+                    # Validate the lint name is known
+                    if all_lint_names().contains(lint_name):
+                        config.levels[lint_name] = level_str
+                    elif lint_name == "unknown_annotation":
+                        # Meta-lint: sets both unknown_decorator and unknown_attribute
+                        config.levels["unknown_decorator"] = level_str
+                        config.levels["unknown_attribute"] = level_str
+
+        config
+
+    # Get the effective level for a lint name.
+    # Checks overrides first, then falls back to built-in defaults.
+    fn get_level(lint_name: String) -> LintLevel:
+        var level_str = ""
+        if self.levels.has(lint_name):
+            level_str = self.levels[lint_name]
+        else:
+            val defaults = build_default_levels()
+            if defaults.has(lint_name):
+                level_str = defaults[lint_name]
+            else:
+                return LintLevel.Warn  # Unknown lint defaults to Warn
+
+        val parsed = parse_lint_level(level_str)
+        match parsed:
+            case Some(level):
+                return level
+            case nil:
+                return LintLevel.Warn
+
+    # Set the level for a specific lint name.
+    me set_level(lint_name: String, level: LintLevel):
+        match level:
+            case Allow:
+                self.levels[lint_name] = "allow"
+            case Warn:
+                self.levels[lint_name] = "warn"
+            case Deny:
+                self.levels[lint_name] = "deny"
+
+    # Apply file-level attribute overrides.
+    # Scans the first N lines (before first definition) for:
+    #   @allow(lint1, lint2)
+    #   @warn(lint1, lint2)
+    #   @deny(lint1, lint2)
+    #   @allow(lint1)  (inner attribute)
+    me apply_file_attributes(content: String):
+        val lines = content.split("\n")
+        for line in lines:
+            val trimmed = line.trim()
+
+            # Stop scanning at the first definition (fn, class, enum, struct, trait, etc.)
+            if trimmed.starts_with("fn ") or trimmed.starts_with("me ") or trimmed.starts_with("class ") or trimmed.starts_with("enum ") or trimmed.starts_with("struct ") or trimmed.starts_with("trait "):
+                return
+
+            # Also stop at module-level val/var assignments that aren't attributes
+            # but continue past use/import and comments
+            if trimmed.starts_with("val ") or trimmed.starts_with("var "):
+                return
+
+            # Match @allow(...), @warn(...), @deny(...)
+            var attr_line = trimmed
+
+            if not attr_line.starts_with("@"):
+                continue
+
+            # Parse @allow(...), @warn(...), @deny(...)
+            var level_opt: Option<LintLevel> = nil
+            var inner_start = 0
+
+            if attr_line.starts_with("@allow("):
+                level_opt = Some(LintLevel.Allow)
+                inner_start = 7
+            elif attr_line.starts_with("@warn("):
+                level_opt = Some(LintLevel.Warn)
+                inner_start = 6
+            elif attr_line.starts_with("@deny("):
+                level_opt = Some(LintLevel.Deny)
+                inner_start = 6
+
+            match level_opt:
+                case nil:
+                    continue
+                case Some(level):
+                    # Extract the content between parens
+                    val close_paren = attr_line.find(")")
+                    if close_paren < 0:
+                        continue
+                    val lint_list_str = attr_line.slice(inner_start, close_paren)
+                    val lint_names = lint_list_str.split(",")
+                    for name in lint_names:
+                        val clean_name = name.trim()
+                        if clean_name == "":
+                            continue
+                        # Handle meta-lint unknown_annotation
+                        if clean_name == "unknown_annotation":
+                            self.set_level("unknown_decorator", level)
+                            self.set_level("unknown_attribute", level)
+                        elif all_lint_names().contains(clean_name):
+                            self.set_level(clean_name, level)
+
+    # Create a child config that inherits all current settings.
+    fn child() -> LintConfig:
+        var new_levels: Dict<String, String> = {}
+        for key in self.levels.keys():
+            new_levels[key] = self.levels[key]
+        LintConfig(levels: new_levels)
+
+# Check if a lint result should be suppressed based on config.
+# Returns true if the result should be kept (not suppressed).
+fn should_keep_lint_result(config: LintConfig, lint_code: String) -> Bool:
+    # Map internal lint codes to config lint names where possible
+    val config_name = map_lint_code_to_config_name(lint_code)
+    if config_name == "":
+        return true  # Unknown lint code — keep it
+    val level = config.get_level(config_name)
+    match level:
+        case Allow:
+            return false  # Suppressed
+        case Warn:
+            return true
+        case Deny:
+            return true
+
+# Override lint level from config if Deny.
+fn apply_config_level(config: LintConfig, lint_code: String, original_level: LintLevel) -> LintLevel:
+    val config_name = map_lint_code_to_config_name(lint_code)
+    if config_name == "":
+        return original_level
+    val config_level = config.get_level(config_name)
+    match config_level:
+        case Deny:
+            return LintLevel.Deny
+        case Allow:
+            return original_level  # Suppression handled by should_keep_lint_result
+        case Warn:
+            return original_level
+
+# Map internal lint code (e.g. "T001") to config name (e.g. "todo_format").
+# Returns "" for codes with no direct mapping.
+fn map_lint_code_to_config_name(code: String) -> String:
+    if code == "primitive_api":
+        return "primitive_api"
+    if code == "bare_bool":
+        return "bare_bool"
+    if code == "T001" or code == "T002" or code == "T003" or code == "T004":
+        return "todo_format"
+    if code == "ARG001" or code == "ARG002":
+        return "too_many_arguments"
+    if code == "STUB001" or code == "STUB002" or code == "STUB003":
+        return "stub_impl"
+    if code == "SPIPE001" or code == "SPIPE002" or code == "SPIPE003":
+        return "spipe_placeholder_tests"
+    if code == "SPIPE004":
+        return "spipe_no_print_based_tests"
+    if code == "SPIPE005":
+        return "spipe_empty_examples"
+    if code == "SPIPE006":
+        return "spipe_boolean_wrapper_assertions"
+    if code == "SPIPE007":
+        return "spipe_false_boolean_wrapper_assertions"
+    if code == "I001" or code == "I002" or code == "I003":
+        return "init_boundary_violation"
+    if code == "D001":
+        return ""  # database lint has no config mapping
+    if code == "W001" or code == "W002" or code == "W003":
+        return ""  # unused variable/import/dead code — no config mapping
+    if code == "ST001" or code == "ST002" or code == "ST003":
+        return ""  # style lints — no config mapping
+    if code == "C002":
+        return "non_exhaustive_match"
+    if (code == "MEXH001" or code == "MEXH002" or code == "MEXH003" or
+        code == "MEXH004" or code == "MEXH005"):
+        return "non_exhaustive_match"
+    if code == "S001" or code == "S002" or code == "S003":
+        return ""  # safety lints — no config mapping
+    if code == "CC001" or code == "CC002":
+        return ""  # concurrency lints — no config mapping
+    if code == "CLOS001":
+        return ""  # closure capture — no config mapping
+    if code == "RET001":
+        return ""  # ignored return — no config mapping
+    if code == "BOOL001":
+        return ""  # multiline bool — no config mapping
+    if code == "REQC001" or code == "REQC002" or code == "REQC003" or code == "REQC004":
+        return "required_comment"
+    if code == "SAFE001" or code == "SAFE003":
+        return ""  # safety — no config mapping
+    if code == "W0401" or code == "W0402" or code == "W0403":
+        return ""  # visibility — no config mapping
+    if code == "UI001":
+        return "ui_no_raw_widget_kind"
+    if code == "UI002":
+        return "ui_no_raw_variant"
+    if code == "UI003":
+        return "ui_no_raw_theme_name"
+    if code == "DIAG001":
+        return "stale_md_diagrams"
+    ""
+
+# Try to find simple.sdn by walking up from a file path.
+fn find_project_sdn(file_path: String) -> String:
+    # Try to find simple.sdn in parent directories
+    var dir = get_parent_directory(file_path)
+    var depth = 0
+    while depth < 10:
+        val candidate = "{dir}/simple.sdn"
+        if file_exists(candidate):
+            return candidate
+        val parent = get_parent_directory(dir)
+        if parent == dir:
+            return ""  # Reached root
+        dir = parent
+        depth = depth + 1
+    ""
+
+# Lint categories
+enum LintCategory:
+    Safety      # Memory safety, null checks
+    Correctness # Logic errors, type mismatches
+    Warning     # Potential issues
+    Style       # Code style recommendations
+    Concurrency # Concurrency-related issues
+
+class Lint:
+    code: String
+    level: LintLevel
+    category: LintCategory
+    message: String
+    fix_hint: Option<String>
+    easy_fix: Option<EasyFix>
+
+impl Lint:
+    fn new(code: String, level: LintLevel, category: LintCategory, message: String) -> Lint:
+        Lint(
+            code: code,
+            level: level,
+            category: category,
+            message: message,
+            fix_hint: nil,
+            easy_fix: nil
+        )
+
+    fn with_fix(hint: String) -> Lint:
+        Lint(
+            code: self.code,
+            level: self.level,
+            category: self.category,
+            message: self.message,
+            fix_hint: Some(hint),
+            easy_fix: self.easy_fix
+        )
+
+    fn with_easy_fix(fix: EasyFix) -> Lint:
+        Lint(
+            code: self.code,
+            level: self.level,
+            category: self.category,
+            message: self.message,
+            fix_hint: self.fix_hint,
+            easy_fix: Some(fix)
+        )
+
+class LintResult:
+    file_path: String
+    line: Int
+    column: Int
+    lint: Lint
+
+impl LintResult:
+    fn new(file_path: String, line: Int, column: Int, lint: Lint) -> LintResult:
+        LintResult(
+            file_path: file_path,
+            line: line,
+            column: column,
+            lint: lint
+        )
+
+    fn format() -> String:
+        var level_str = "unknown"
+        match self.lint.level:
+            case Allow:
+                level_str = "allow"
+            case Warn:
+                level_str = "warning"
+            case Deny:
+                level_str = "error"
+
+        var output = self.file_path + ":" + self.line.to_string() + ":" + self.column.to_string() + ": " + level_str + "[" + self.lint.code + "]: " + self.lint.message
+
+        match self.lint.fix_hint:
+            case Some(hint):
+                output = output + "\n" + "  hint: " + hint
+            case nil:
+                val _ = 0
+
+        match self.lint.easy_fix:
+            case Some(fix):
+                output = output + "\n" + "  fix: available [{fix.id}] ({fix.confidence_str()})"
+            case nil:
+                val _ = 0
+
+        return output
+
+    fn has_easy_fix() -> Bool:
+        self.lint.easy_fix.? == true
+
+# Valid TODO areas and priorities
+fn _todo_areas() -> [text]:
+    ["runtime", "codegen", "compiler", "parser", "type",
+     "stdlib", "gpu", "ui", "test", "driver", "loader", "pkg", "sdn"]
+
+fn _todo_priorities() -> [text]:
+    ["P0", "P1", "P2", "P3", "critical", "high", "medium", "low"]
+
+class Linter:
+    lints: [Lint]
+    results: [LintResult]
+    config: LintConfig

@@ -1,0 +1,202 @@
+# DWARF Debug Information Reader Specification
+# Tests SourceLocation creation, field access, to_string, and is_valid.
+# Tests DwarfInfo construction and state.
+# Since DWARF loading requires actual ELF binaries, these tests focus on
+# the SourceLocation data structure and DwarfInfo state management.
+
+# --- Local SourceLocation for testing ---
+# Defined locally to avoid FFI dependencies from remote.dwarf
+
+class SourceLocation:
+    file: text
+    line: i64
+    column: i64
+
+    static fn at(file: text, line: i64, column: i64) -> SourceLocation:
+        SourceLocation(file: file, line: line, column: column)
+
+    static fn at_line(file: text, line: i64) -> SourceLocation:
+        SourceLocation(file: file, line: line, column: 0)
+
+impl SourceLocation:
+    fn to_string() -> text:
+        if self.column > 0:
+            "{self.file}:{self.line}:{self.column}"
+        else:
+            "{self.file}:{self.line}"
+
+    fn is_valid() -> bool:
+        self.file.len() > 0 and self.line > 0
+
+# --- Local DwarfInfo for testing ---
+# Simulates the DwarfInfo struct without FFI calls
+
+class DwarfInfo:
+    handle: i64
+    binary_path: text
+    loaded: bool
+
+impl DwarfInfo:
+    static fn create_unloaded(path: text) -> DwarfInfo:
+        DwarfInfo(
+            handle: 0,
+            binary_path: path,
+            loaded: false
+        )
+
+    static fn create_loaded(handle: i64, path: text) -> DwarfInfo:
+        DwarfInfo(
+            handle: handle,
+            binary_path: path,
+            loaded: true
+        )
+
+    fn is_loaded() -> bool:
+        self.loaded and self.handle != 0
+
+    fn get_binary_path() -> text:
+        self.binary_path
+
+    me close():
+        if self.loaded:
+            self.loaded = false
+            self.handle = 0
+
+# ============================================================================
+# SourceLocation Tests
+# ============================================================================
+
+describe "SourceLocation":
+    describe "creation with at()":
+        it "creates a location with file, line, and column":
+            val loc = SourceLocation.at("main.spl", 42, 10)
+            expect(loc.file).to_equal("main.spl")
+            expect(loc.line).to_equal(42)
+            expect(loc.column).to_equal(10)
+
+        it "creates a location with column 0":
+            val loc = SourceLocation.at("test.spl", 1, 0)
+            expect(loc.column).to_equal(0)
+
+        it "creates a location with large line number":
+            val loc = SourceLocation.at("big.spl", 99999, 5)
+            expect(loc.line).to_equal(99999)
+
+    describe "creation with at_line()":
+        it "creates a location with column defaulting to 0":
+            val loc = SourceLocation.at_line("main.spl", 42)
+            expect(loc.file).to_equal("main.spl")
+            expect(loc.line).to_equal(42)
+            expect(loc.column).to_equal(0)
+
+        it "creates a location with line 1":
+            val loc = SourceLocation.at_line("start.spl", 1)
+            expect(loc.line).to_equal(1)
+
+    describe "to_string()":
+        it "formats with column when column > 0":
+            val loc = SourceLocation.at("main.spl", 42, 10)
+            expect(loc.to_string()).to_equal("main.spl:42:10")
+
+        it "formats without column when column is 0":
+            val loc = SourceLocation.at_line("main.spl", 42)
+            expect(loc.to_string()).to_equal("main.spl:42")
+
+        it "includes full path in output":
+            val loc = SourceLocation.at("/home/user/src/main.spl", 10, 5)
+            expect(loc.to_string()).to_equal("/home/user/src/main.spl:10:5")
+
+        it "formats at_line result without column":
+            val loc = SourceLocation.at_line("test.spl", 100)
+            expect(loc.to_string()).to_equal("test.spl:100")
+
+    describe "is_valid()":
+        it "returns true for valid location":
+            val loc = SourceLocation.at("main.spl", 1, 0)
+            expect(loc.is_valid()).to_equal(true)
+
+        it "returns false for empty file":
+            val loc = SourceLocation.at("", 1, 0)
+            expect(loc.is_valid()).to_equal(false)
+
+        it "returns false for line 0":
+            val loc = SourceLocation.at("main.spl", 0, 0)
+            expect(loc.is_valid()).to_equal(false)
+
+        it "returns false for negative line":
+            val loc = SourceLocation.at("main.spl", -1, 0)
+            expect(loc.is_valid()).to_equal(false)
+
+        it "returns false for empty file and line 0":
+            val loc = SourceLocation.at("", 0, 0)
+            expect(loc.is_valid()).to_equal(false)
+
+    describe "field access":
+        it "accesses file field directly":
+            val loc = SourceLocation.at("src/app.spl", 25, 3)
+            expect(loc.file).to_equal("src/app.spl")
+
+        it "accesses line field directly":
+            val loc = SourceLocation.at("test.spl", 50, 1)
+            expect(loc.line).to_equal(50)
+
+        it "accesses column field directly":
+            val loc = SourceLocation.at("test.spl", 50, 7)
+            expect(loc.column).to_equal(7)
+
+# ============================================================================
+# DwarfInfo Tests
+# ============================================================================
+
+describe "DwarfInfo":
+    describe "construction":
+        it "creates an unloaded DwarfInfo":
+            val info = DwarfInfo.create_unloaded("/path/to/binary")
+            expect(info.handle).to_equal(0)
+            expect(info.binary_path).to_equal("/path/to/binary")
+            expect(info.loaded).to_equal(false)
+
+        it "creates a loaded DwarfInfo with handle":
+            val info = DwarfInfo.create_loaded(42, "/path/to/binary")
+            expect(info.handle).to_equal(42)
+            expect(info.loaded).to_equal(true)
+
+    describe "is_loaded()":
+        it "returns false for unloaded info":
+            val info = DwarfInfo.create_unloaded("/path/to/binary")
+            expect(info.is_loaded()).to_equal(false)
+
+        it "returns true for loaded info with valid handle":
+            val info = DwarfInfo.create_loaded(1, "/path/to/binary")
+            expect(info.is_loaded()).to_equal(true)
+
+        it "returns false when handle is 0 even if loaded flag is true":
+            val info = DwarfInfo(handle: 0, binary_path: "test", loaded: true)
+            expect(info.is_loaded()).to_equal(false)
+
+    describe "get_binary_path()":
+        it "returns the binary path":
+            val info = DwarfInfo.create_unloaded("/usr/bin/myapp")
+            expect(info.get_binary_path()).to_equal("/usr/bin/myapp")
+
+        it "returns empty string for empty path":
+            val info = DwarfInfo.create_unloaded("")
+            expect(info.get_binary_path()).to_equal("")
+
+    describe "close()":
+        it "marks info as unloaded after close":
+            var info = DwarfInfo.create_loaded(42, "/path/to/binary")
+            info.close()
+            expect(info.loaded).to_equal(false)
+            expect(info.handle).to_equal(0)
+
+        it "is_loaded returns false after close":
+            var info = DwarfInfo.create_loaded(99, "/path/to/binary")
+            info.close()
+            expect(info.is_loaded()).to_equal(false)
+
+        it "close on unloaded info is a no-op":
+            var info = DwarfInfo.create_unloaded("/path/to/binary")
+            info.close()
+            expect(info.loaded).to_equal(false)
+            expect(info.handle).to_equal(0)

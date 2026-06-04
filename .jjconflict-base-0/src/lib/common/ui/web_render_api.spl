@@ -1,0 +1,758 @@
+# Shared web render API for GUI backends and pure Simple web rendering.
+
+use common.ui.capability.{Capability}
+use common.ui.widget.{UIEvent}
+use common.text_advanced.{escape_json}
+
+val WEB_RENDER_TARGET_SIMPLE_WEB: text = "simple_web"
+val WEB_RENDER_TARGET_ELECTRON: text = "electron"
+val WEB_RENDER_TARGET_TAURI: text = "tauri"
+val WEB_RENDER_TARGET_PURE_SIMPLE: text = "pure_simple"
+val WEB_RENDER_TARGET_ANDROID_WASM: text = "android_wasm"
+val WEB_RENDER_TARGET_IOS_WASM: text = "ios_wasm"
+val WEB_RENDER_TARGET_HOST_WM_WASM: text = "host_wm_wasm"
+val WEB_RENDER_TARGET_SIMPLEOS_WM_WASM: text = "simpleos_wm_wasm"
+val WEB_RENDER_CACHE_SCHEMA_VERSION: text = "simple-web-cache-v1"
+val WEB_RENDER_WASM_SCHEMA_VERSION: text = "simple-web-wasm-v1"
+
+class WebRenderRequest:
+    target: text
+    surface_id: text
+    title: text
+    body_html: text
+    css: text
+    js: text
+    viewport_w: i32
+    viewport_h: i32
+    wants_pixels: bool
+
+    static fn html(target: text, title: text, body_html: text, css: text, js: text, viewport_w: i32, viewport_h: i32) -> WebRenderRequest:
+        WebRenderRequest(
+            target: target,
+            surface_id: "",
+            title: title,
+            body_html: body_html,
+            css: css,
+            js: js,
+            viewport_w: viewport_w,
+            viewport_h: viewport_h,
+            wants_pixels: false
+        )
+
+    me with_surface(surface_id: text) -> WebRenderRequest:
+        WebRenderRequest(
+            target: self.target,
+            surface_id: surface_id,
+            title: self.title,
+            body_html: self.body_html,
+            css: self.css,
+            js: self.js,
+            viewport_w: self.viewport_w,
+            viewport_h: self.viewport_h,
+            wants_pixels: self.wants_pixels
+        )
+
+    me with_pixel_output() -> WebRenderRequest:
+        WebRenderRequest(
+            target: self.target,
+            surface_id: self.surface_id,
+            title: self.title,
+            body_html: self.body_html,
+            css: self.css,
+            js: self.js,
+            viewport_w: self.viewport_w,
+            viewport_h: self.viewport_h,
+            wants_pixels: true
+        )
+
+fn web_render_default_page_body_html(url: text) -> text:
+    "<main class='simple-web-default'><h1>Simple Web</h1><p>" + url + "</p></main>"
+
+fn web_render_url_request(target: text, url: text, viewport_w: i32, viewport_h: i32) -> WebRenderRequest:
+    WebRenderRequest.html(target, "Simple Web", web_render_default_page_body_html(url), "", "", viewport_w, viewport_h)
+
+class WebRenderArtifact:
+    target: text
+    html: text
+    ipc_json: text
+    pixels: [u32]
+    viewport_w: i32
+    viewport_h: i32
+    capability_summary: text
+    binary_schema: text
+    binary_cache_key: text
+    binary_cache_path: text
+    binary_bytes: i32
+    binary_layout_bytes: i32
+    binary_command_count: i32
+
+    static fn empty(target: text, viewport_w: i32, viewport_h: i32) -> WebRenderArtifact:
+        WebRenderArtifact(
+            target: target,
+            html: "",
+            ipc_json: "",
+            pixels: [],
+            viewport_w: viewport_w,
+            viewport_h: viewport_h,
+            capability_summary: "",
+            binary_schema: "",
+            binary_cache_key: "",
+            binary_cache_path: "",
+            binary_bytes: 0,
+            binary_layout_bytes: 0,
+            binary_command_count: 0
+        )
+
+class WebRenderBinaryArtifactMetadata:
+    schema: text
+    cache_key: text
+    cache_path: text
+    encoded_bytes: i32
+    layout_bytes: i32
+    command_count: i32
+
+    static fn none() -> WebRenderBinaryArtifactMetadata:
+        WebRenderBinaryArtifactMetadata(
+            schema: "",
+            cache_key: "",
+            cache_path: "",
+            encoded_bytes: 0,
+            layout_bytes: 0,
+            command_count: 0
+        )
+
+class WebRenderWasmArtifactMetadata:
+    schema: text
+    module_path: text
+    abi: text
+    encoded_bytes: i32
+    layout_bytes: i32
+    command_count: i32
+
+    static fn create(module_path: text, abi: text, encoded_bytes: i32, layout_bytes: i32, command_count: i32) -> WebRenderWasmArtifactMetadata:
+        WebRenderWasmArtifactMetadata(
+            schema: WEB_RENDER_WASM_SCHEMA_VERSION,
+            module_path: module_path,
+            abi: abi,
+            encoded_bytes: encoded_bytes,
+            layout_bytes: layout_bytes,
+            command_count: command_count
+        )
+
+fn web_render_artifact_with_binary_metadata(artifact: WebRenderArtifact, meta: WebRenderBinaryArtifactMetadata) -> WebRenderArtifact:
+    WebRenderArtifact(
+        target: artifact.target,
+        html: artifact.html,
+        ipc_json: artifact.ipc_json,
+        pixels: artifact.pixels,
+        viewport_w: artifact.viewport_w,
+        viewport_h: artifact.viewport_h,
+        capability_summary: artifact.capability_summary,
+        binary_schema: meta.schema,
+        binary_cache_key: meta.cache_key,
+        binary_cache_path: meta.cache_path,
+        binary_bytes: meta.encoded_bytes,
+        binary_layout_bytes: meta.layout_bytes,
+        binary_command_count: meta.command_count
+        )
+
+fn web_render_wasm_no_js_target(target: text) -> bool:
+    target == WEB_RENDER_TARGET_ANDROID_WASM or
+    target == WEB_RENDER_TARGET_IOS_WASM or
+    target == WEB_RENDER_TARGET_HOST_WM_WASM or
+    target == WEB_RENDER_TARGET_SIMPLEOS_WM_WASM
+
+fn web_render_wasm_abi_for_target(target: text) -> text:
+    if target == WEB_RENDER_TARGET_ANDROID_WASM:
+        return "wasm32-simple-ui-android"
+    if target == WEB_RENDER_TARGET_IOS_WASM:
+        return "wasm32-simple-ui-ios"
+    if target == WEB_RENDER_TARGET_HOST_WM_WASM:
+        return "wasm32-simple-ui-host-wm"
+    if target == WEB_RENDER_TARGET_SIMPLEOS_WM_WASM:
+        return "wasm32-simple-ui-simpleos-wm"
+    "wasm32-simple-ui"
+
+fn web_render_wasm_no_js_validation_error(req: WebRenderRequest, meta: WebRenderWasmArtifactMetadata) -> text:
+    if not web_render_wasm_no_js_target(req.target):
+        return "target does not require generated wasm without javascript"
+    if req.js != "":
+        return "javascript is not allowed for generated wasm target"
+    if meta.module_path == "":
+        return "missing wasm module path"
+    if meta.abi != web_render_wasm_abi_for_target(req.target):
+        return "wasm abi does not match render target"
+    if meta.encoded_bytes <= 0:
+        return "missing wasm module bytes"
+    ""
+
+fn web_render_wasm_no_js_is_valid(req: WebRenderRequest, meta: WebRenderWasmArtifactMetadata) -> bool:
+    web_render_wasm_no_js_validation_error(req, meta) == ""
+
+fn web_render_generated_wasm_artifact(req: WebRenderRequest, meta: WebRenderWasmArtifactMetadata) -> WebRenderArtifact:
+    val base = web_render_to_artifact(req)
+    web_render_artifact_with_binary_metadata(base, WebRenderBinaryArtifactMetadata(
+        schema: meta.schema,
+        cache_key: web_render_cache_key(req) + "|wasm=" + meta.module_path + "|abi=" + meta.abi,
+        cache_path: meta.module_path,
+        encoded_bytes: meta.encoded_bytes,
+        layout_bytes: meta.layout_bytes,
+        command_count: meta.command_count
+    ))
+
+class WebRenderOptimizationProfile:
+    cache_schema: text
+    cache_key: text
+    cacheable_static_shell: bool
+    static_shell_bytes: i32
+    dynamic_region_count: i32
+    render_plan: text
+
+class WebRenderHostWindowCommand:
+    action: text
+    window_id: text
+    surface_id: text
+    app_id: text
+    title: text
+    url: text
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+
+class WebRenderSnapshotEnvelope:
+    target: text
+    surface_id: text
+    revision: u64
+    snapshot_json: text
+
+class WebRenderPatchEnvelope:
+    target: text
+    surface_id: text
+    from_sequence: u64
+    to_sequence: u64
+    patches_json: text
+    snapshot_json: text
+
+class WebRenderInputEnvelope:
+    target: text
+    surface_id: text
+    event_type: text
+    target_id: text
+    key: text
+    value: text
+    x: f64
+    y: f64
+    dx: f64
+    dy: f64
+    button: text
+
+class WebRenderTransportBundle:
+    render_json: text
+    input_json: text
+    snapshot_json: text
+    patch_json: text
+    host_window_json: text
+
+class WebRenderGtkBenchmarkEvidence:
+    scene_id: text
+    simple_frame_us: i64
+    gtk_frame_us: i64
+    simple_text_us: i64
+    gtk_text_us: i64
+    simple_iterations: i64
+    gtk_iterations: i64
+    simple_trial_count: i64
+    gtk_trial_count: i64
+    min_iterations: i64
+    min_trials: i64
+    sample_confident: bool
+    trial_confident: bool
+    faster_than_gtk: bool
+    status: text
+    reason: text
+
+    static fn create(scene_id: text, simple_frame_us: i64, gtk_frame_us: i64, simple_text_us: i64, gtk_text_us: i64, simple_iterations: i64, gtk_iterations: i64, simple_trial_count: i64, gtk_trial_count: i64) -> WebRenderGtkBenchmarkEvidence:
+        val reason = web_render_gtk_benchmark_reason(scene_id, simple_frame_us, gtk_frame_us, simple_text_us, gtk_text_us, simple_iterations, gtk_iterations, simple_trial_count, gtk_trial_count)
+        WebRenderGtkBenchmarkEvidence(
+            scene_id: scene_id,
+            simple_frame_us: simple_frame_us,
+            gtk_frame_us: gtk_frame_us,
+            simple_text_us: simple_text_us,
+            gtk_text_us: gtk_text_us,
+            simple_iterations: simple_iterations,
+            gtk_iterations: gtk_iterations,
+            simple_trial_count: simple_trial_count,
+            gtk_trial_count: gtk_trial_count,
+            min_iterations: web_render_gtk_benchmark_min_iterations(),
+            min_trials: web_render_gtk_benchmark_min_trials(),
+            sample_confident: web_render_gtk_benchmark_has_enough_samples(simple_iterations, gtk_iterations),
+            trial_confident: web_render_gtk_benchmark_has_enough_trials(simple_trial_count, gtk_trial_count),
+            faster_than_gtk: reason == "pass",
+            status: if reason == "pass": "pass" else: "fail",
+            reason: reason
+        )
+
+    fn summary() -> text:
+        "WebRenderGtkBenchmarkEvidence[scene={self.scene_id} simple_frame_us={self.simple_frame_us} gtk_frame_us={self.gtk_frame_us} simple_text_us={self.simple_text_us} gtk_text_us={self.gtk_text_us} simple_iters={self.simple_iterations} gtk_iters={self.gtk_iterations} simple_trials={self.simple_trial_count} gtk_trials={self.gtk_trial_count} min_iters={self.min_iterations} min_trials={self.min_trials} sample_confident={self.sample_confident} trial_confident={self.trial_confident} status={self.status} reason={self.reason}]"
+
+fn web_render_gtk_benchmark_min_iterations() -> i64:
+    3
+
+fn web_render_gtk_benchmark_min_trials() -> i64:
+    3
+
+fn web_render_gtk_benchmark_has_enough_samples(simple_iterations: i64, gtk_iterations: i64) -> bool:
+    simple_iterations >= web_render_gtk_benchmark_min_iterations() and gtk_iterations >= web_render_gtk_benchmark_min_iterations()
+
+fn web_render_gtk_benchmark_has_enough_trials(simple_trial_count: i64, gtk_trial_count: i64) -> bool:
+    simple_trial_count >= web_render_gtk_benchmark_min_trials() and gtk_trial_count >= web_render_gtk_benchmark_min_trials()
+
+fn web_render_gtk_benchmark_reason(scene_id: text, simple_frame_us: i64, gtk_frame_us: i64, simple_text_us: i64, gtk_text_us: i64, simple_iterations: i64, gtk_iterations: i64, simple_trial_count: i64, gtk_trial_count: i64) -> text:
+    if scene_id == "":
+        return "missing-scene"
+    if simple_iterations <= 0 or gtk_iterations <= 0:
+        return "missing-iterations"
+    if simple_trial_count <= 0 or gtk_trial_count <= 0:
+        return "missing-trials"
+    if not web_render_gtk_benchmark_has_enough_samples(simple_iterations, gtk_iterations):
+        return "sample-count-too-low"
+    if not web_render_gtk_benchmark_has_enough_trials(simple_trial_count, gtk_trial_count):
+        return "trial-count-too-low"
+    if simple_frame_us <= 0 or gtk_frame_us <= 0 or simple_text_us <= 0 or gtk_text_us <= 0:
+        return "missing-timings"
+    if simple_frame_us >= gtk_frame_us:
+        return "frame-not-faster"
+    if simple_text_us >= gtk_text_us:
+        return "text-not-faster"
+    "pass"
+
+fn web_render_gtk_benchmark_evidence(scene_id: text, simple_frame_us: i64, gtk_frame_us: i64, simple_text_us: i64, gtk_text_us: i64, simple_iterations: i64, gtk_iterations: i64) -> WebRenderGtkBenchmarkEvidence:
+    WebRenderGtkBenchmarkEvidence.create(scene_id, simple_frame_us, gtk_frame_us, simple_text_us, gtk_text_us, simple_iterations, gtk_iterations, 1, 1)
+
+fn web_render_gtk_benchmark_evidence_with_trials(scene_id: text, simple_frame_us: i64, gtk_frame_us: i64, simple_text_us: i64, gtk_text_us: i64, simple_iterations: i64, gtk_iterations: i64, simple_trial_count: i64, gtk_trial_count: i64) -> WebRenderGtkBenchmarkEvidence:
+    WebRenderGtkBenchmarkEvidence.create(scene_id, simple_frame_us, gtk_frame_us, simple_text_us, gtk_text_us, simple_iterations, gtk_iterations, simple_trial_count, gtk_trial_count)
+
+class WebRenderVectorFontBenchmarkEvidence:
+    scene_id: text
+    vector_text_us: i64
+    glyph_pixels: i64
+    ink_pixels: i64
+    checksum: i64
+    iterations: i64
+    deterministic: bool
+    status: text
+    reason: text
+
+    static fn create(scene_id: text, vector_text_us: i64, glyph_pixels: i64, ink_pixels: i64, checksum: i64, iterations: i64, deterministic: bool) -> WebRenderVectorFontBenchmarkEvidence:
+        val reason = web_render_vector_font_benchmark_reason(scene_id, vector_text_us, glyph_pixels, ink_pixels, checksum, iterations, deterministic)
+        WebRenderVectorFontBenchmarkEvidence(
+            scene_id: scene_id,
+            vector_text_us: vector_text_us,
+            glyph_pixels: glyph_pixels,
+            ink_pixels: ink_pixels,
+            checksum: checksum,
+            iterations: iterations,
+            deterministic: deterministic,
+            status: if reason == "pass": "pass" else: "fail",
+            reason: reason
+        )
+
+    fn summary() -> text:
+        "WebRenderVectorFontBenchmarkEvidence[scene={self.scene_id} vector_text_us={self.vector_text_us} glyph_pixels={self.glyph_pixels} ink_pixels={self.ink_pixels} checksum={self.checksum} iterations={self.iterations} deterministic={self.deterministic} status={self.status} reason={self.reason}]"
+
+fn web_render_vector_font_benchmark_reason(scene_id: text, vector_text_us: i64, glyph_pixels: i64, ink_pixels: i64, checksum: i64, iterations: i64, deterministic: bool) -> text:
+    if scene_id == "":
+        return "missing-scene"
+    if iterations <= 0:
+        return "missing-iterations"
+    if vector_text_us <= 0:
+        return "missing-timing"
+    if glyph_pixels <= 0:
+        return "missing-glyph-pixels"
+    if ink_pixels <= 0:
+        return "empty-render-output"
+    if checksum <= 0:
+        return "missing-checksum"
+    if not deterministic:
+        return "nondeterministic-render-output"
+    "pass"
+
+fn web_render_vector_font_benchmark_evidence(scene_id: text, vector_text_us: i64, glyph_pixels: i64, ink_pixels: i64, checksum: i64, iterations: i64, deterministic: bool) -> WebRenderVectorFontBenchmarkEvidence:
+    WebRenderVectorFontBenchmarkEvidence.create(scene_id, vector_text_us, glyph_pixels, ink_pixels, checksum, iterations, deterministic)
+
+class WebRenderVectorFontComputeEvidence:
+    scene_id: text
+    cpu_checksum: i64
+    cpu_ink_pixels: i64
+    cuda_status: text
+    cuda_reason: text
+    cuda_checksum: i64
+    opencl_status: text
+    opencl_reason: text
+    opencl_checksum: i64
+    blur_or_tolerance_used: bool
+    status: text
+    reason: text
+
+    static fn create(scene_id: text, cpu_checksum: i64, cpu_ink_pixels: i64, cuda_status: text, cuda_reason: text, cuda_checksum: i64, opencl_status: text, opencl_reason: text, opencl_checksum: i64, blur_or_tolerance_used: bool) -> WebRenderVectorFontComputeEvidence:
+        val reason = web_render_vector_font_compute_reason(scene_id, cpu_checksum, cpu_ink_pixels, cuda_status, cuda_reason, cuda_checksum, opencl_status, opencl_reason, opencl_checksum, blur_or_tolerance_used)
+        WebRenderVectorFontComputeEvidence(
+            scene_id: scene_id,
+            cpu_checksum: cpu_checksum,
+            cpu_ink_pixels: cpu_ink_pixels,
+            cuda_status: cuda_status,
+            cuda_reason: cuda_reason,
+            cuda_checksum: cuda_checksum,
+            opencl_status: opencl_status,
+            opencl_reason: opencl_reason,
+            opencl_checksum: opencl_checksum,
+            blur_or_tolerance_used: blur_or_tolerance_used,
+            status: if reason == "pass": "pass" else: "fail",
+            reason: reason
+        )
+
+    fn summary() -> text:
+        "WebRenderVectorFontComputeEvidence[scene={self.scene_id} cpu_checksum={self.cpu_checksum} cpu_ink_pixels={self.cpu_ink_pixels} cuda_status={self.cuda_status} cuda_reason={self.cuda_reason} cuda_checksum={self.cuda_checksum} opencl_status={self.opencl_status} opencl_reason={self.opencl_reason} opencl_checksum={self.opencl_checksum} blur_or_tolerance_used={self.blur_or_tolerance_used} status={self.status} reason={self.reason}]"
+
+fn web_render_vector_font_compute_backend_reason(backend: text, backend_status: text, backend_reason: text, backend_checksum: i64, cpu_checksum: i64) -> text:
+    if backend_status == "":
+        return "missing-" + backend + "-status"
+    if backend_status == "unavailable":
+        if backend_reason == "":
+            return "missing-" + backend + "-unavailable-reason"
+        return "pass"
+    if backend_status != "pass":
+        return backend + "-not-proven"
+    if backend_checksum <= 0:
+        return "missing-" + backend + "-checksum"
+    if backend_checksum != cpu_checksum:
+        return backend + "-checksum-mismatch"
+    "pass"
+
+fn web_render_vector_font_compute_reason(scene_id: text, cpu_checksum: i64, cpu_ink_pixels: i64, cuda_status: text, cuda_reason: text, cuda_checksum: i64, opencl_status: text, opencl_reason: text, opencl_checksum: i64, blur_or_tolerance_used: bool) -> text:
+    if scene_id == "":
+        return "missing-scene"
+    if blur_or_tolerance_used:
+        return "blur-or-tolerance-not-allowed"
+    if cpu_checksum <= 0:
+        return "missing-cpu-checksum"
+    if cpu_ink_pixels <= 0:
+        return "empty-cpu-render-output"
+    val cuda = web_render_vector_font_compute_backend_reason("cuda", cuda_status, cuda_reason, cuda_checksum, cpu_checksum)
+    if cuda != "pass":
+        return cuda
+    val opencl = web_render_vector_font_compute_backend_reason("opencl", opencl_status, opencl_reason, opencl_checksum, cpu_checksum)
+    if opencl != "pass":
+        return opencl
+    "pass"
+
+fn web_render_vector_font_compute_evidence(scene_id: text, cpu_checksum: i64, cpu_ink_pixels: i64, cuda_status: text, cuda_reason: text, cuda_checksum: i64, opencl_status: text, opencl_reason: text, opencl_checksum: i64, blur_or_tolerance_used: bool) -> WebRenderVectorFontComputeEvidence:
+    WebRenderVectorFontComputeEvidence.create(scene_id, cpu_checksum, cpu_ink_pixels, cuda_status, cuda_reason, cuda_checksum, opencl_status, opencl_reason, opencl_checksum, blur_or_tolerance_used)
+
+class WebRenderExactBitmapComparisonEvidence:
+    scene_id: text
+    simple_renderer: text
+    baseline_renderer: text
+    width: i64
+    height: i64
+    simple_checksum: i64
+    baseline_checksum: i64
+    mismatch_count: i64
+    blur_or_tolerance_used: bool
+    simple_frame_us: i64
+    baseline_frame_us: i64
+    simple_iterations: i64
+    baseline_iterations: i64
+    simple_trial_count: i64
+    baseline_trial_count: i64
+    status: text
+    reason: text
+
+    static fn create(scene_id: text, simple_renderer: text, baseline_renderer: text, width: i64, height: i64, simple_checksum: i64, baseline_checksum: i64, mismatch_count: i64, blur_or_tolerance_used: bool, simple_frame_us: i64, baseline_frame_us: i64, simple_iterations: i64, baseline_iterations: i64, simple_trial_count: i64, baseline_trial_count: i64) -> WebRenderExactBitmapComparisonEvidence:
+        val reason = web_render_exact_bitmap_comparison_reason(scene_id, simple_renderer, baseline_renderer, width, height, simple_checksum, baseline_checksum, mismatch_count, blur_or_tolerance_used, simple_frame_us, baseline_frame_us, simple_iterations, baseline_iterations, simple_trial_count, baseline_trial_count)
+        WebRenderExactBitmapComparisonEvidence(
+            scene_id: scene_id,
+            simple_renderer: simple_renderer,
+            baseline_renderer: baseline_renderer,
+            width: width,
+            height: height,
+            simple_checksum: simple_checksum,
+            baseline_checksum: baseline_checksum,
+            mismatch_count: mismatch_count,
+            blur_or_tolerance_used: blur_or_tolerance_used,
+            simple_frame_us: simple_frame_us,
+            baseline_frame_us: baseline_frame_us,
+            simple_iterations: simple_iterations,
+            baseline_iterations: baseline_iterations,
+            simple_trial_count: simple_trial_count,
+            baseline_trial_count: baseline_trial_count,
+            status: if reason == "pass": "pass" else: "fail",
+            reason: reason
+        )
+
+    fn summary() -> text:
+        "WebRenderExactBitmapComparisonEvidence[scene={self.scene_id} simple_renderer={self.simple_renderer} baseline_renderer={self.baseline_renderer} width={self.width} height={self.height} simple_checksum={self.simple_checksum} baseline_checksum={self.baseline_checksum} mismatches={self.mismatch_count} blur_or_tolerance_used={self.blur_or_tolerance_used} simple_frame_us={self.simple_frame_us} baseline_frame_us={self.baseline_frame_us} simple_iters={self.simple_iterations} baseline_iters={self.baseline_iterations} simple_trials={self.simple_trial_count} baseline_trials={self.baseline_trial_count} status={self.status} reason={self.reason}]"
+
+fn web_render_exact_bitmap_comparison_reason(scene_id: text, simple_renderer: text, baseline_renderer: text, width: i64, height: i64, simple_checksum: i64, baseline_checksum: i64, mismatch_count: i64, blur_or_tolerance_used: bool, simple_frame_us: i64, baseline_frame_us: i64, simple_iterations: i64, baseline_iterations: i64, simple_trial_count: i64, baseline_trial_count: i64) -> text:
+    if scene_id == "":
+        return "missing-scene"
+    if simple_renderer == "":
+        return "missing-simple-renderer"
+    if baseline_renderer == "":
+        return "missing-baseline-renderer"
+    if width <= 0 or height <= 0:
+        return "missing-dimensions"
+    if blur_or_tolerance_used:
+        return "blur-or-tolerance-not-allowed"
+    if simple_checksum <= 0 or baseline_checksum <= 0:
+        return "missing-checksum"
+    if simple_checksum != baseline_checksum:
+        return "checksum-mismatch"
+    if mismatch_count != 0:
+        return "pixel-mismatch"
+    if simple_iterations <= 0 or baseline_iterations <= 0:
+        return "missing-iterations"
+    if simple_trial_count <= 0 or baseline_trial_count <= 0:
+        return "missing-trials"
+    if not web_render_gtk_benchmark_has_enough_samples(simple_iterations, baseline_iterations):
+        return "sample-count-too-low"
+    if not web_render_gtk_benchmark_has_enough_trials(simple_trial_count, baseline_trial_count):
+        return "trial-count-too-low"
+    if simple_frame_us <= 0 or baseline_frame_us <= 0:
+        return "missing-timings"
+    if simple_frame_us > baseline_frame_us:
+        return "simple-slower-than-baseline"
+    "pass"
+
+fn web_render_exact_bitmap_comparison_evidence(scene_id: text, simple_renderer: text, baseline_renderer: text, width: i64, height: i64, simple_checksum: i64, baseline_checksum: i64, mismatch_count: i64, blur_or_tolerance_used: bool, simple_frame_us: i64, baseline_frame_us: i64, simple_iterations: i64, baseline_iterations: i64, simple_trial_count: i64, baseline_trial_count: i64) -> WebRenderExactBitmapComparisonEvidence:
+    WebRenderExactBitmapComparisonEvidence.create(scene_id, simple_renderer, baseline_renderer, width, height, simple_checksum, baseline_checksum, mismatch_count, blur_or_tolerance_used, simple_frame_us, baseline_frame_us, simple_iterations, baseline_iterations, simple_trial_count, baseline_trial_count)
+
+fn web_render_capabilities_for_target(target: text) -> [Capability]:
+    if target == WEB_RENDER_TARGET_ELECTRON:
+        return [Capability.Mouse, Capability.Color, Capability.Images, Capability.NativeDialogs, Capability.Notification]
+    if target == WEB_RENDER_TARGET_TAURI:
+        return [Capability.Mouse, Capability.Color, Capability.Images, Capability.NativeDialogs, Capability.Notification]
+    [Capability.Mouse, Capability.Color, Capability.Images, Capability.Touch]
+
+fn web_render_capability_summary(target: text) -> text:
+    if target == WEB_RENDER_TARGET_ELECTRON:
+        return "mouse,color,images,native_dialogs,notification"
+    if target == WEB_RENDER_TARGET_TAURI:
+        return "mouse,color,images,native_dialogs,notification"
+    if web_render_wasm_no_js_target(target):
+        return "mouse,color,images,touch,generated_wasm,no_javascript"
+    "mouse,color,images,touch"
+
+fn web_render_full_html(req: WebRenderRequest) -> text:
+    val title = if req.title != "": "<title>" + escape_json(req.title) + "</title>" else: ""
+    val css = if req.css != "": "<style>" + req.css + "</style>" else: ""
+    val js = if req.js != "": "<script>" + req.js + "</script>" else: ""
+    # charset + responsive viewport are required for readable phone/tablet
+    # layout: without width=device-width, mobile WebKit lays out at ~980px and
+    # scales the whole page down, making everything tiny. viewport-fit=cover
+    # lets content extend under the notch / home indicator.
+    val meta = "<meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1, viewport-fit=cover\">"
+    "<!DOCTYPE html><html><head>" + meta + title + css + "</head><body><div id=\"app\">" + req.body_html + "</div>" + js + "</body></html>"
+
+fn web_render_body_html(req: WebRenderRequest) -> text:
+    req.body_html
+
+fn web_render_ipc_json(req: WebRenderRequest) -> text:
+    web_render_ipc_json_with_html(req, web_render_full_html(req))
+
+fn web_render_ipc_json_with_html(req: WebRenderRequest, full_html: text) -> text:
+    "{\"type\":\"render\",\"target\":\"" + escape_json(req.target) + "\",\"surface_id\":\"" + escape_json(req.surface_id) + "\",\"width\":" + str(req.viewport_w) + ",\"height\":" + str(req.viewport_h) + ",\"html\":\"" + escape_json(full_html) + "\"}"
+
+fn _web_render_index_of_from(haystack: text, marker: text, start: i64) -> i64:
+    if marker == "":
+        return start
+    var offset = start
+    while offset < haystack.len():
+        val tail = haystack.substring(offset, haystack.len())
+        val found = tail.index_of(marker)
+        if found < 0:
+            return -1
+        return offset + found
+    -1
+
+fn _web_render_count_marker(haystack: text, marker: text) -> i32:
+    if marker == "":
+        return 0
+    var count = 0
+    var offset = 0i64
+    while offset < haystack.len():
+        val found = _web_render_index_of_from(haystack, marker, offset)
+        if found < 0:
+            return count
+        count = count + 1
+        offset = found + marker.len()
+    count
+
+fn _web_render_text_fingerprint(value: text) -> text:
+    val len = value.len()
+    val head_end = if len < 24: len else: 24
+    val tail_start = if len < 24: 0 else: len - 24
+    val head = value.substring(0, head_end)
+    val tail = value.substring(tail_start, len)
+    "len={len};head={escape_json(head)};tail={escape_json(tail)}"
+
+fn web_render_dynamic_region_count(req: WebRenderRequest) -> i32:
+    _web_render_count_marker(req.body_html, "data-simple-dynamic") +
+    _web_render_count_marker(req.body_html, "data-live") +
+    _web_render_count_marker(req.body_html, "data-ui-patch") +
+    _web_render_count_marker(req.js, "WebSocket")
+
+fn web_render_cache_key(req: WebRenderRequest) -> text:
+    WEB_RENDER_CACHE_SCHEMA_VERSION +
+    "|target=" + req.target +
+    "|surface=" + req.surface_id +
+    "|viewport=" + str(req.viewport_w) + "x" + str(req.viewport_h) +
+    "|pixels=" + str(req.wants_pixels) +
+    "|cap=" + web_render_capability_summary(req.target) +
+    "|title=" + _web_render_text_fingerprint(req.title) +
+    "|body=" + _web_render_text_fingerprint(req.body_html) +
+    "|css=" + _web_render_text_fingerprint(req.css) +
+    "|js=" + _web_render_text_fingerprint(req.js)
+
+fn web_render_optimization_profile(req: WebRenderRequest) -> WebRenderOptimizationProfile:
+    val dynamic_regions = web_render_dynamic_region_count(req)
+    val cacheable = dynamic_regions == 0
+    val plan = if cacheable:
+        "binary_static_shell"
+    else:
+        "static_shell_with_dynamic_islands"
+    WebRenderOptimizationProfile(
+        cache_schema: WEB_RENDER_CACHE_SCHEMA_VERSION,
+        cache_key: web_render_cache_key(req),
+        cacheable_static_shell: cacheable,
+        static_shell_bytes: req.body_html.len() + req.css.len(),
+        dynamic_region_count: dynamic_regions,
+        render_plan: plan
+    )
+
+fn web_render_host_window_command_to_json(cmd: WebRenderHostWindowCommand) -> text:
+    "{" +
+    "\"action\":\"{escape_json(cmd.action)}\"," +
+    "\"window_id\":\"{escape_json(cmd.window_id)}\"," +
+    "\"surface_id\":\"{escape_json(cmd.surface_id)}\"," +
+    "\"app_id\":\"{escape_json(cmd.app_id)}\"," +
+    "\"title\":\"{escape_json(cmd.title)}\"," +
+    "\"url\":\"{escape_json(cmd.url)}\"," +
+    "\"x\":{cmd.x}," +
+    "\"y\":{cmd.y}," +
+    "\"width\":{cmd.width}," +
+    "\"height\":{cmd.height}" +
+    "}"
+
+fn web_render_snapshot_envelope_to_json(env: WebRenderSnapshotEnvelope) -> text:
+    "{\"type\":\"snapshot\",\"target\":\"" + escape_json(env.target) + "\",\"surface_id\":\"" + escape_json(env.surface_id) + "\",\"revision\":" + str(env.revision) + ",\"snapshot\":" + env.snapshot_json + "}"
+
+fn web_render_patch_envelope_to_json(env: WebRenderPatchEnvelope) -> text:
+    val snapshot_part = if env.snapshot_json != "": ",\"snapshot\":" + env.snapshot_json else: ""
+    "{\"type\":\"patch\",\"target\":\"" + escape_json(env.target) + "\",\"surface_id\":\"" + escape_json(env.surface_id) + "\",\"from_sequence\":" + str(env.from_sequence) + ",\"to_sequence\":" + str(env.to_sequence) + ",\"patches\":" + env.patches_json + snapshot_part + "}"
+
+fn web_render_input_envelope_to_json(env: WebRenderInputEnvelope) -> text:
+    "{" +
+    "\"type\":\"input\"," +
+    "\"target\":\"{escape_json(env.target)}\"," +
+    "\"surface_id\":\"{escape_json(env.surface_id)}\"," +
+    "\"event_type\":\"{escape_json(env.event_type)}\"," +
+    "\"target_id\":\"{escape_json(env.target_id)}\"," +
+    "\"key\":\"{escape_json(env.key)}\"," +
+    "\"value\":\"{escape_json(env.value)}\"," +
+    "\"x\":{env.x}," +
+    "\"y\":{env.y}," +
+    "\"dx\":{env.dx}," +
+    "\"dy\":{env.dy}," +
+    "\"button\":\"{escape_json(env.button)}\"" +
+    "}"
+
+fn web_render_transport_bundle(req: WebRenderRequest, surface_id: text, event: UIEvent, revision: u64, from_sequence: u64, to_sequence: u64, patches_json: text, snapshot_json: text, cmd: WebRenderHostWindowCommand) -> WebRenderTransportBundle:
+    val input = web_render_input_envelope_from_event(req.target, surface_id, event)
+    WebRenderTransportBundle(
+        render_json: web_render_to_artifact(req.with_surface(surface_id)).ipc_json,
+        input_json: web_render_input_envelope_to_json(input),
+        snapshot_json: web_render_snapshot_envelope_to_json(WebRenderSnapshotEnvelope(target: req.target, surface_id: surface_id, revision: revision, snapshot_json: snapshot_json)),
+        patch_json: web_render_patch_envelope_to_json(WebRenderPatchEnvelope(target: req.target, surface_id: surface_id, from_sequence: from_sequence, to_sequence: to_sequence, patches_json: patches_json, snapshot_json: snapshot_json)),
+        host_window_json: web_render_host_window_command_to_json(cmd)
+    )
+
+fn web_render_input_envelope_from_event(target: text, surface_id: text, event: UIEvent) -> WebRenderInputEnvelope:
+    match event:
+        UIEvent.KeyPress(key):
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "key", target_id: "", key: key, value: "", x: 0.0, y: 0.0, dx: 0.0, dy: 0.0, button: "")
+        UIEvent.Resize(width, height):
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "resize", target_id: "", key: "", value: "", x: width.to_f64(), y: height.to_f64(), dx: 0.0, dy: 0.0, button: "")
+        UIEvent.Action(name):
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "action", target_id: "", key: "", value: name, x: 0.0, y: 0.0, dx: 0.0, dy: 0.0, button: "")
+        UIEvent.TouchPress(x, y):
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "touch_press", target_id: "", key: "", value: "", x: x.to_f64(), y: y.to_f64(), dx: 0.0, dy: 0.0, button: "")
+        UIEvent.TouchMove(x, y):
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "touch_move", target_id: "", key: "", value: "", x: x.to_f64(), y: y.to_f64(), dx: 0.0, dy: 0.0, button: "")
+        UIEvent.TouchRelease(x, y):
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "touch_release", target_id: "", key: "", value: "", x: x.to_f64(), y: y.to_f64(), dx: 0.0, dy: 0.0, button: "")
+        UIEvent.MouseEvent(x, y, button, kind):
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "mouse_" + kind, target_id: "", key: "", value: "", x: x, y: y, dx: 0.0, dy: 0.0, button: button)
+        UIEvent.ScrollEvent(x, y, dx, dy):
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "scroll", target_id: "", key: "", value: "", x: x, y: y, dx: dx, dy: dy, button: "")
+        UIEvent.FocusEvent(target_id, kind):
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: kind, target_id: target_id, key: "", value: "", x: 0.0, y: 0.0, dx: 0.0, dy: 0.0, button: "")
+        UIEvent.InputChange(target_id, value):
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "input", target_id: target_id, key: "", value: value, x: 0.0, y: 0.0, dx: 0.0, dy: 0.0, button: "")
+        UIEvent.FetchResult(request_id, url, status, headers, body, error):
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "fetch_result", target_id: request_id, key: "", value: url, x: status.to_f64(), y: 0.0, dx: 0.0, dy: 0.0, button: "")
+        UIEvent.FocusNext:
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "focus_next", target_id: "", key: "", value: "", x: 0.0, y: 0.0, dx: 0.0, dy: 0.0, button: "")
+        UIEvent.FocusPrev:
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "focus_prev", target_id: "", key: "", value: "", x: 0.0, y: 0.0, dx: 0.0, dy: 0.0, button: "")
+        UIEvent.CommandMode:
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "command_mode", target_id: "", key: "", value: "", x: 0.0, y: 0.0, dx: 0.0, dy: 0.0, button: "")
+        UIEvent.NormalMode:
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "normal_mode", target_id: "", key: "", value: "", x: 0.0, y: 0.0, dx: 0.0, dy: 0.0, button: "")
+        UIEvent.InsertMode:
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "insert_mode", target_id: "", key: "", value: "", x: 0.0, y: 0.0, dx: 0.0, dy: 0.0, button: "")
+        UIEvent.FileChanged:
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "file_changed", target_id: "", key: "", value: "", x: 0.0, y: 0.0, dx: 0.0, dy: 0.0, button: "")
+        UIEvent.Quit:
+            WebRenderInputEnvelope(target: target, surface_id: surface_id, event_type: "quit", target_id: "", key: "", value: "", x: 0.0, y: 0.0, dx: 0.0, dy: 0.0, button: "")
+
+fn web_render_to_artifact(req: WebRenderRequest) -> WebRenderArtifact:
+    val html = web_render_full_html(req)
+    val ipc = if req.target == WEB_RENDER_TARGET_ELECTRON or req.target == WEB_RENDER_TARGET_TAURI:
+        web_render_ipc_json_with_html(req, html)
+    else:
+        ""
+    WebRenderArtifact(
+        target: req.target,
+        html: html,
+        ipc_json: ipc,
+        pixels: [],
+        viewport_w: req.viewport_w,
+        viewport_h: req.viewport_h,
+        capability_summary: web_render_capability_summary(req.target),
+        binary_schema: "",
+        binary_cache_key: "",
+        binary_cache_path: "",
+        binary_bytes: 0,
+        binary_layout_bytes: 0,
+        binary_command_count: 0
+    )
+
+fn web_render_pixel_artifact(req: WebRenderRequest, pixels: [u32]) -> WebRenderArtifact:
+    val base = web_render_to_artifact(req.with_pixel_output())
+    WebRenderArtifact(
+        target: base.target,
+        html: base.html,
+        ipc_json: base.ipc_json,
+        pixels: pixels,
+        viewport_w: base.viewport_w,
+        viewport_h: base.viewport_h,
+        capability_summary: base.capability_summary,
+        binary_schema: base.binary_schema,
+        binary_cache_key: base.binary_cache_key,
+        binary_cache_path: base.binary_cache_path,
+        binary_bytes: base.binary_bytes,
+        binary_layout_bytes: base.binary_layout_bytes,
+        binary_command_count: base.binary_command_count
+    )

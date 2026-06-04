@@ -1,0 +1,133 @@
+# ROCm Session
+#
+# Shared HIP/ROCm state boundary for Engine2D compute sessions. The default
+# constructor is fail-closed so interpreter and non-AMD hosts can exercise the
+# contract without resolving HIP runtime externs.
+
+use std.gc_async_mut.gpu.engine2d.backend_session.{BackendSessionKind}
+use std.gc_async_mut.gpu.engine2d.generated_kernel_dispatch.{
+    GENERATED_2D_ALPHA, GENERATED_2D_COPY, GENERATED_2D_FILL, GENERATED_2D_SCROLL,
+    generated_2d_launch_plan
+}
+use std.gc_async_mut.gpu.engine2d.sffi_rocm.{RocmFfi}
+
+class RocmSession:
+    device: i64
+    module_cache: i64
+    stream: i64
+    ref_count: i64
+    is_initialized: bool
+    generation: i64
+    ffi: RocmFfi?
+
+    static fn create() -> RocmSession:
+        RocmSession(
+            device: 0,
+            module_cache: 0,
+            stream: 0,
+            ref_count: 0,
+            is_initialized: false,
+            generation: 0,
+            ffi: nil
+        )
+
+    static fn create_with_ffi(ffi: RocmFfi) -> RocmSession:
+        val session = RocmSession.create()
+        session.ffi = ffi
+        session
+
+    fn kind() -> BackendSessionKind:
+        BackendSessionKind.Rocm
+
+    fn is_available() -> bool:
+        if self.ffi == nil:
+            return false
+        self.ffi.is_available()
+
+    me init() -> i64:
+        if self.ffi == nil:
+            return 1
+        if not self.ffi.init():
+            return 1
+        if self.ffi.device_count() < 1:
+            return 1
+        self.device = 0
+        self.module_cache = 0
+        self.stream = 0
+        self.ref_count = 1
+        self.is_initialized = true
+        self.generation = self.generation + 1
+        0
+
+    me retain() -> RocmSession:
+        self.ref_count = self.ref_count + 1
+        self
+
+    me release():
+        if self.ref_count <= 0:
+            return
+        self.ref_count = self.ref_count - 1
+        if self.ref_count == 0:
+            self._cleanup()
+
+    me is_valid() -> bool:
+        self.is_initialized and self.ffi != nil
+
+    me load_module(source: text) -> i64:
+        if self.ffi == nil:
+            return 0
+        # RocmFfi does not expose a text-safe dynamic module loader yet.
+        0
+
+    me synchronize() -> i64:
+        if self.ffi == nil:
+            return 1
+        if self.ffi.synchronize():
+            0
+        else:
+            1
+
+    me shutdown():
+        self.ref_count = 0
+        self._cleanup()
+
+    me launch_kernel(name: text, gx: i64, gy: i64, bx: i64, by: i64) -> i64:
+        if self.ffi == nil:
+            return 1
+        if self.module_cache == 0:
+            return 1
+        if self.ffi.launch_kernel(name, gx, gy, 1, bx, by, 1, 0):
+            0
+        else:
+            1
+
+    me launch_generated_2d(op: text, width: i64, height: i64, args_ptr: i64) -> i64:
+        if self.ffi == nil:
+            return 1
+        if self.module_cache == 0:
+            return 1
+        if args_ptr == 0:
+            return 1
+        val plan = generated_2d_launch_plan("rocm", op, width, height)
+        if not plan.dispatch_ready:
+            return 1
+        self.launch_kernel(plan.entry_name, plan.grid_x, plan.grid_y, plan.block_x, plan.block_y)
+
+    me fill_kernel(width: i64, height: i64, args_ptr: i64) -> i64:
+        self.launch_generated_2d(GENERATED_2D_FILL, width, height, args_ptr)
+
+    me copy_kernel(width: i64, height: i64, args_ptr: i64) -> i64:
+        self.launch_generated_2d(GENERATED_2D_COPY, width, height, args_ptr)
+
+    me alpha_blend_kernel(width: i64, height: i64, args_ptr: i64) -> i64:
+        self.launch_generated_2d(GENERATED_2D_ALPHA, width, height, args_ptr)
+
+    me scroll_kernel(width: i64, height: i64, args_ptr: i64) -> i64:
+        self.launch_generated_2d(GENERATED_2D_SCROLL, width, height, args_ptr)
+
+    me _cleanup():
+        self.module_cache = 0
+        self.device = 0
+        self.stream = 0
+        self.is_initialized = false
+        self.generation = self.generation + 1

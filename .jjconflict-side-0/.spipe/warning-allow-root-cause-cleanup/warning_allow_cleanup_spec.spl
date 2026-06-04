@@ -1,0 +1,209 @@
+"""
+Warning/Allow Root-Cause Cleanup — agent task spec.
+
+Self-contained tests covering Tasks A-E:
+  A: Rust strict workflow pathing
+  B: Simple strict-lint workflow
+  C: primitive-sort NEON threshold constants
+  D: decorator whitelist aligned with stdlib decorators
+  E: regression canaries
+
+All classes defined inline (self-contained per project rules).
+"""
+
+use std.spipe.*
+
+# ── Inline models ─────────────────────────────────────────────────────────────
+
+class DecoratorWhitelist:
+    names: [text]
+
+static fn decorator_whitelist_default() -> DecoratorWhitelist:
+    val base = [
+        "async", "pure", "io", "net", "fs", "unsafe", "verify", "trusted",
+        "ghost", "auto_lean", "bounds", "extern", "simd", "inline", "test",
+        "property_test", "snapshot_test", "deprecated", "generated_by",
+        "Lib", "inject", "sys_inject", "naked", "noreturn", "interrupt",
+        "entry", "align", "gpu_intrinsic",
+        "variant", "immutable", "no_gc"
+    ]
+    DecoratorWhitelist(names: base)
+
+fn decorator_is_known(wl: DecoratorWhitelist, name: text) -> bool:
+    for n in wl.names:
+        if n == name:
+            return true
+    false
+
+fn decorator_size(wl: DecoratorWhitelist) -> i64:
+    wl.names.len()
+
+class AttributeWhitelist:
+    names: [text]
+
+static fn attribute_whitelist_default() -> AttributeWhitelist:
+    val base = [
+        "allow", "warn", "deny", "default", "concurrency_mode", "layout",
+        "pure", "snapshot", "deprecated", "bypass", "skip_todo", "generated",
+        "inline", "ignore"
+    ]
+    AttributeWhitelist(names: base)
+
+fn attribute_is_known(wl: AttributeWhitelist, name: text) -> bool:
+    for n in wl.names:
+        if n == name:
+            return true
+    false
+
+fn attribute_is_suppress(name: text) -> bool:
+    name == "allow" or name == "warn" or name == "deny"
+
+class StrictLintLane:
+    workflow_name: text
+    deny_all: bool
+    canary_count: i64
+
+static fn strict_lane_default() -> StrictLintLane:
+    StrictLintLane(
+        workflow_name: "simple-strict-lints.yml",
+        deny_all: true,
+        canary_count: 4
+    )
+
+class RegressionCanary:
+    rust_workflow_path: text
+    simple_lane_path: text
+    primitive_sort_path: text
+
+static fn regression_canary_default() -> RegressionCanary:
+    RegressionCanary(
+        rust_workflow_path: ".github/workflows/rust-tests.yml",
+        simple_lane_path: ".github/workflows/simple-strict-lints.yml",
+        primitive_sort_path: "src/compiler_rust/runtime/src/value/primitive_sort.rs"
+    )
+
+fn canary_check_rust_wf(content: text) -> bool:
+    content.contains("src/compiler_rust") and
+    content.contains("working-directory: src/compiler_rust")
+
+fn canary_check_simple_lane(content: text) -> bool:
+    content.contains("Strict Simple Lints") and
+    content.contains("--deny-all") and
+    content.contains("warning_allow_root_cause_cleanup_spec.spl")
+
+fn canary_check_neon(content: text) -> bool:
+    content.contains("const NEON_I64_RADIX_MIN_LEN") and
+    content.contains("const NEON_F64_RADIX_MIN_LEN")
+
+# ── Tests ─────────────────────────────────────────────────────────────────────
+
+describe "warning allow root-cause cleanup — decorator whitelist":
+
+    it "default whitelist includes legacy decorators":
+        val wl = decorator_whitelist_default()
+        expect(decorator_is_known(wl, "async")).to_equal(true)
+        expect(decorator_is_known(wl, "pure")).to_equal(true)
+        expect(decorator_is_known(wl, "inline")).to_equal(true)
+
+    it "default whitelist includes new stdlib decorators variant immutable no_gc":
+        val wl = decorator_whitelist_default()
+        expect(decorator_is_known(wl, "variant")).to_equal(true)
+        expect(decorator_is_known(wl, "immutable")).to_equal(true)
+        expect(decorator_is_known(wl, "no_gc")).to_equal(true)
+
+    it "unknown name is not in whitelist":
+        val wl = decorator_whitelist_default()
+        expect(decorator_is_known(wl, "totally_unknown_xyz")).to_equal(false)
+
+    it "whitelist size is positive and covers required entries":
+        val wl = decorator_whitelist_default()
+        expect(decorator_size(wl) > 0).to_equal(true)
+        expect(decorator_size(wl) >= 30).to_equal(true)
+
+    it "empty name is not in whitelist":
+        val wl = decorator_whitelist_default()
+        expect(decorator_is_known(wl, "")).to_equal(false)
+
+describe "warning allow root-cause cleanup — attribute whitelist":
+
+    it "default attribute whitelist contains suppress attrs":
+        val wl = attribute_whitelist_default()
+        expect(attribute_is_known(wl, "allow")).to_equal(true)
+        expect(attribute_is_known(wl, "warn")).to_equal(true)
+        expect(attribute_is_known(wl, "deny")).to_equal(true)
+
+    it "suppress attr detector identifies allow warn deny":
+        expect(attribute_is_suppress("allow")).to_equal(true)
+        expect(attribute_is_suppress("warn")).to_equal(true)
+        expect(attribute_is_suppress("deny")).to_equal(true)
+
+    it "suppress attr detector rejects non-suppress attrs":
+        expect(attribute_is_suppress("inline")).to_equal(false)
+        expect(attribute_is_suppress("pure")).to_equal(false)
+
+    it "default attribute whitelist contains layout and concurrency_mode":
+        val wl = attribute_whitelist_default()
+        expect(attribute_is_known(wl, "layout")).to_equal(true)
+        expect(attribute_is_known(wl, "concurrency_mode")).to_equal(true)
+
+    it "unknown attribute is not in whitelist":
+        val wl = attribute_whitelist_default()
+        expect(attribute_is_known(wl, "not_an_attr_xyz")).to_equal(false)
+
+describe "warning allow root-cause cleanup — strict lint lane":
+
+    it "default strict lane has deny_all true":
+        val lane = strict_lane_default()
+        expect(lane.deny_all).to_equal(true)
+
+    it "default strict lane workflow name is simple-strict-lints.yml":
+        val lane = strict_lane_default()
+        expect(lane.workflow_name).to_equal("simple-strict-lints.yml")
+
+    it "default strict lane has 4 canaries":
+        val lane = strict_lane_default()
+        expect(lane.canary_count).to_equal(4)
+
+    it "strict lane is_strict returns true when deny_all set":
+        val lane = strict_lane_default()
+        expect(lane.deny_all == true).to_equal(true)
+
+    it "non-strict lane has deny_all false":
+        val lane = StrictLintLane(
+            workflow_name: "advisory-lints.yml",
+            deny_all: false,
+            canary_count: 0
+        )
+        expect(lane.deny_all).to_equal(false)
+
+describe "warning allow root-cause cleanup — regression canary":
+
+    it "canary detects valid rust workflow path content":
+        val content = "working-directory: src/compiler_rust\nrun: cargo clippy"
+        expect(canary_check_rust_wf(content)).to_equal(true)
+
+    it "canary rejects rust workflow pointing to legacy path":
+        val content = "working-directory: rust\nrun: cargo clippy"
+        expect(canary_check_rust_wf(content)).to_equal(false)
+
+    it "canary detects valid simple strict lane content":
+        val content = "name: Strict Simple Lints\n--deny-all\nwarning_allow_root_cause_cleanup_spec.spl"
+        expect(canary_check_simple_lane(content)).to_equal(true)
+
+    it "canary rejects simple lane missing deny-all":
+        val content = "name: Strict Simple Lints\nwarning_allow_root_cause_cleanup_spec.spl"
+        expect(canary_check_simple_lane(content)).to_equal(false)
+
+    it "canary detects neon threshold constants present":
+        val content = "const NEON_I64_RADIX_MIN_LEN: usize = 1024;\nconst NEON_F64_RADIX_MIN_LEN: usize = 512;"
+        expect(canary_check_neon(content)).to_equal(true)
+
+    it "canary rejects runtime missing neon constants":
+        val content = "fn sort_primitive(data: &mut [i64]) {"
+        expect(canary_check_neon(content)).to_equal(false)
+
+    it "regression canary default has expected paths":
+        val rc = regression_canary_default()
+        expect(rc.rust_workflow_path.contains("rust-tests.yml")).to_equal(true)
+        expect(rc.simple_lane_path.contains("simple-strict-lints.yml")).to_equal(true)
+        expect(rc.primitive_sort_path.contains("primitive_sort.rs")).to_equal(true)

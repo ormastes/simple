@@ -1,0 +1,56 @@
+# Wrap a host GUI dynlib in a role-2 SMF envelope for the perf probe.
+
+use app.gui_perf.smf_dynlib_artifact.{gui_smf_dynlib_arch_code, gui_smf_parse_header, gui_smf_wrap_native_library}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_platform_name() -> text
+extern fn rt_file_read_bytes(path: text) -> [u8]?
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+
+fn _env_or(key: text, fallback: text) -> text:
+    val value = rt_env_get(key) ?? ""
+    if value == "":
+        return fallback
+    value
+
+fn _host_arch_from_env() -> text:
+    _env_or("SIMPLE_GUI_DYNLIB_ARCH", _env_or("HOSTTYPE", ""))
+
+fn main() -> i64:
+    val input = _env_or("SIMPLE_GUI_DYNLIB_INPUT", "")
+    val output = _env_or("SIMPLE_GUI_SMF_OUTPUT", "")
+    if input == "" or output == "":
+        print "GUI_SMF_WRAP ok=false error=missing-input-or-output"
+        return 1
+    var arch = _host_arch_from_env()
+    if arch == "":
+        if rt_platform_name() == "macos":
+            arch = "arm64"
+        else:
+            arch = "x86_64"
+    val dynlib_bytes = rt_file_read_bytes(input) ?? []
+    if dynlib_bytes.len() == 0:
+        print "GUI_SMF_WRAP ok=false error=missing-input"
+        return 1
+    val arch_code = gui_smf_dynlib_arch_code(arch)
+    val smf_bytes = gui_smf_wrap_native_library(dynlib_bytes, arch_code)
+    if smf_bytes.len() <= dynlib_bytes.len():
+        print "GUI_SMF_WRAP ok=false error=wrap-produced-empty-output"
+        return 1
+    if not rt_file_write_bytes(output, smf_bytes):
+        print "GUI_SMF_WRAP ok=false error=write-failed"
+        return 1
+    val written = rt_file_read_bytes(output) ?? []
+    if written.len() <= dynlib_bytes.len():
+        print "GUI_SMF_WRAP ok=false error=wrap-produced-empty-output"
+        return 1
+    val header_opt = gui_smf_parse_header(written)
+    if header_opt == nil:
+        print "GUI_SMF_WRAP ok=false error=bad-contract reason=missing-smf-header"
+        return 1
+    val header = header_opt.unwrap()
+    if header.role != 2 or header.arch != arch_code as i64 or header.stub_size <= 0:
+        print "GUI_SMF_WRAP ok=false error=bad-contract reason=bad-smf-header"
+        return 1
+    print "GUI_SMF_WRAP ok=true input=" + input + " output=" + output
+    0

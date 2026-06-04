@@ -1,0 +1,1465 @@
+# Part 1 of src/lib/nogc_sync_mut/database/pure_sql/database.spl
+# Pure Simple SQL Database Engine — no FFI, no sqlite dependency.
+#
+# Drop-in replacement for std.database.sql.Database, backed by
+# sql_parser + MVCC in-process storage.
+
+use std.io_runtime
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read, file_write}
+use std.database.sql.types.{DbValue, DbRow, DbError}
+use nogc_sync_mut.db.dbfs_engine.sql_parser.{
+    sql_parse, SqlStmtKind, SqlExprKind, SqlExpr,
+    SqlColumnType, SqlColumnDef, SqlSelect, SqlInsert,
+    SqlUpdate, SqlDelete, SqlCreateTable, SqlStatement,
+    SqlJoin, JoinKind, SqlOrderDir
+}
+use nogc_sync_mut.db.dbfs_engine.mvcc.{
+    MvccTable, MvccTxnManager, MvccSnapshot, MvccTuple, mvcc_is_visible
+}
+use nogc_sync_mut.db.dbfs_engine.fts.search.{FtsEngine}
+use nogc_sync_mut.db.db_query.{query_fts_match, query_page_summary_scan}
+use nogc_sync_mut.db.page_summary.{PageSummaryIndex}
+
+# ── Full-text search types ──────────────────────────────────────────────────
+
+enum PureSearchAlgorithm:
+    Contains
+    TermFrequency
+    Bm25
+
+struct PureSearchResult:
+    row: DbRow
+    score: f64
+    row_index: i64
+
+# ── Module-level helpers ─────────────────────────────────────────────────────
+
+var _param_idx: i64 = 0
+
+fn _reset_param_idx():
+    _param_idx = 0
+
+fn _find_idx(names: [text], target: text) -> i32:
+    var i: i32 = 0
+    while i < names.len() as i32:
+        if names[i] == target:
+            return i
+        i = i + 1
+    -1
+
+fn _build_col_map(cols: [text]) -> Dict<text, i32>:
+    var m: Dict<text, i32> = {}
+    var i: i32 = 0
+    while i < cols.len() as i32:
+        m[cols[i]] = i
+        i = i + 1
+    m
+
+fn _col_idx(m: Dict<text, i32>, name: text) -> i32:
+    if m.has(name):
+        return m[name]
+    -1
+
+# ── Row serialization ────────────────────────────────────────────────────────
+# Each cell: TYPE_CHAR ":" value, cells separated by "\t".
+
+fn _serialize_row(values: [DbValue]) -> text:
+    var result = ""
+    var i: i32 = 0
+    while i < values.len() as i32:
+        if i > 0:
+            result = result + "\t"
+        val v = values[i]
+        match v:
+            DbValue.Integer(value):
+                result = result + "I:{value}"
+            DbValue.Real(value):
+                result = result + "R:{value}"
+            DbValue.Text(value):
+                result = result + "T:{value}"
+            DbValue.Null:
+                result = result + "N:"
+            DbValue.Bool(value):
+                if value:
+                    result = result + "B:1"
+                else:
+                    result = result + "B:0"
+            DbValue.Blob(value):
+                result = result + "N:"
+        i = i + 1
+    result
+
+fn _deserialize_row(data: text) -> [DbValue]:
+    val parts = data.split("\t")
+    var result: [DbValue] = []
+    var i: i32 = 0
+    while i < parts.len() as i32:
+        val p = parts[i]
+        if p.starts_with("I:"):
+            val ns = p.slice(2, p.len())
+            val n = ns.to_int() ?? 0
+            result.push(DbValue.Integer(value: n))
+        elif p.starts_with("R:"):
+            result.push(DbValue.Real(value: 0.0))
+        elif p.starts_with("T:"):
+            val txt = p.slice(2, p.len())
+            result.push(DbValue.Text(value: txt))
+        elif p.starts_with("B:"):
+            val bv = p.slice(2, p.len())
+            result.push(DbValue.Bool(value: bv == "1"))
+        else:
+            result.push(DbValue.Null)
+        i = i + 1
+    result
+
+# ── Expression evaluation ────────────────────────────────────────────────────
+
+fn _parse_literal(v: text) -> DbValue:
+    if v == "NULL" or v == "null":
+        return DbValue.Null
+    # Check if the value looks numeric before calling to_int
+    # (to_int returns Some(0) for non-numeric strings in interpreter mode)
+    if _is_numeric_text(v):
+        val n = v.to_int() ?? 0
+        return DbValue.Integer(value: n)
+    DbValue.Text(value: v)
+
+fn _is_numeric_text(v: text) -> bool:
+    if v.len() == 0:
+        return false
+    var i: i64 = 0
+    # Allow leading minus sign
+    if v.char_at(0) == "-":
+        if v.len() == 1:
+            return false
+        i = 1
+    while i < v.len():
+        val c = v.char_at(i)
+        if c < "0" or c > "9":
+            return false
+        i = i + 1
+    true
+
+fn _dbval_eq(a: DbValue, b: DbValue) -> bool:
+    if a.is_null() and b.is_null():
+        return true
+    if a.is_null() or b.is_null():
+        return false
+    if _dbval_is_int(a) and _dbval_is_int(b):
+        return _dbval_as_i64(a) == _dbval_as_i64(b)
+    a.to_text() == b.to_text()
+
+fn _check_pk_eq_operands(left: SqlExpr, right: SqlExpr, col_names: [text], pk_ci: i32) -> text:
+    if left.kind == SqlExprKind.Column:
+        val ci = _find_idx(col_names, left.value)
+        if ci == pk_ci:
+            if right.kind == SqlExprKind.Literal:
+                return right.value
+    if right.kind == SqlExprKind.Column:
+        val ci2 = _find_idx(col_names, right.value)
+        if ci2 == pk_ci:
+            if left.kind == SqlExprKind.Literal:
+                return left.value
+    ""
+
+fn _extract_pk_eq_inner(expr: SqlExpr, col_names: [text], pk_ci: i32) -> text:
+    if expr.kind != SqlExprKind.BinaryOp:
+        return ""
+    if expr.value != "=":
+        return ""
+    if not expr.left.?:
+        return ""
+    if not expr.right.?:
+        return ""
+    _check_pk_eq_operands(expr.left, expr.right, col_names, pk_ci)
+
+fn _extract_pk_eq(where_expr: SqlExpr?, col_names: [text], pk_ci: i32) -> text:
+    if not where_expr.?:
+        return ""
+    _extract_pk_eq_inner(where_expr, col_names, pk_ci)
+
+fn _check_pk_eq_op_params(left: SqlExpr, right: SqlExpr, col_names: [text], pk_ci: i32, params: [DbValue]) -> text:
+    if left.kind == SqlExprKind.Column:
+        val ci = _find_idx(col_names, left.value)
+        if ci == pk_ci:
+            if right.kind == SqlExprKind.Literal:
+                return right.value
+            if right.kind == SqlExprKind.Placeholder:
+                if params.len() > 0:
+                    return params[0].to_text()
+    if right.kind == SqlExprKind.Column:
+        val ci2 = _find_idx(col_names, right.value)
+        if ci2 == pk_ci:
+            if left.kind == SqlExprKind.Literal:
+                return left.value
+            if left.kind == SqlExprKind.Placeholder:
+                if params.len() > 0:
+                    return params[0].to_text()
+    ""
+
+fn _extract_pk_eq_params(where_expr: SqlExpr?, col_names: [text], pk_ci: i32, params: [DbValue]) -> text:
+    if not where_expr.?:
+        return ""
+    val expr = where_expr
+    if expr.kind != SqlExprKind.BinaryOp:
+        return ""
+    if expr.value != "=":
+        return ""
+    if not expr.left.?:
+        return ""
+    if not expr.right.?:
+        return ""
+    _check_pk_eq_op_params(expr.left, expr.right, col_names, pk_ci, params)
+
+# ── Range predicate extraction for fast SELECT WHERE ────────────────────────
+
+# Resolve a Literal to an integer value.
+# Returns [value] on success, [] on failure.
+fn _resolve_int_literal(expr: SqlExpr) -> [i64]:
+    if expr.kind == SqlExprKind.Literal:
+        if not _is_numeric_text(expr.value):
+            return []
+        val v = expr.value.to_int() ?? 0
+        var result: [i64] = []
+        result.push(v as i64)
+        return result
+    []
+
+# Returns [col_index, low_value, high_value, low_inclusive, high_inclusive]
+# as a flat i64 array, or empty if the WHERE is not a simple int range.
+# low_inclusive/high_inclusive: 1 = inclusive, 0 = exclusive.
+
+fn _extract_int_range(where_expr: SqlExpr?, col_map: Dict<text, i32>) -> [i64]:
+    if not where_expr.?:
+        return []
+    val expr = where_expr
+    # BETWEEN col low AND high
+    if expr.kind == SqlExprKind.Between:
+        if not expr.left.?:
+            return []
+        if expr.left.kind != SqlExprKind.Column:
+            return []
+        val ci = _col_idx(col_map, expr.left.value)
+        if ci < 0:
+            return []
+        if expr.args.len() < 2:
+            return []
+        val lo_expr = expr.args[0]
+        val hi_expr = expr.args[1]
+        val lo_v = _resolve_int_literal(lo_expr)
+        val hi_v = _resolve_int_literal(hi_expr)
+        if lo_v.len() == 0 or hi_v.len() == 0:
+            return []
+        var result: [i64] = []
+        result.push(ci as i64)
+        result.push(lo_v[0])
+        result.push(hi_v[0])
+        result.push(1)
+        result.push(1)
+        return result
+    # AND of two binary comparisons on the same column
+    if expr.kind != SqlExprKind.BinaryOp:
+        return []
+    if expr.value != "AND":
+        return []
+    if not expr.left.? or not expr.right.?:
+        return []
+    val left = expr.left
+    val right = expr.right
+    if left.kind != SqlExprKind.BinaryOp or right.kind != SqlExprKind.BinaryOp:
+        return []
+    # Try to extract (col OP literal) from each side
+    val b1 = _extract_bound(left, col_map)
+    val b2 = _extract_bound(right, col_map)
+    if b1.len() != 3 or b2.len() != 3:
+        return []
+    # Both must reference the same column
+    if b1[0] != b2[0]:
+        return []
+    val ci = b1[0]
+    # b[1] = value, b[2] = kind (0=col>=val, 1=col>val, 2=col<=val, 3=col<val)
+    var lo: i64 = 0
+    var hi: i64 = 0
+    var lo_inc: i64 = 1
+    var hi_inc: i64 = 1
+    var has_lo = false
+    var has_hi = false
+    # Process b1
+    if b1[2] == 0:
+        lo = b1[1]
+        lo_inc = 1
+        has_lo = true
+    elif b1[2] == 1:
+        lo = b1[1]
+        lo_inc = 0
+        has_lo = true
+    elif b1[2] == 2:
+        hi = b1[1]
+        hi_inc = 1
+        has_hi = true
+    elif b1[2] == 3:
+        hi = b1[1]
+        hi_inc = 0
+        has_hi = true
+    # Process b2
+    if b2[2] == 0:
+        lo = b2[1]
+        lo_inc = 1
+        has_lo = true
+    elif b2[2] == 1:
+        lo = b2[1]
+        lo_inc = 0
+        has_lo = true
+    elif b2[2] == 2:
+        hi = b2[1]
+        hi_inc = 1
+        has_hi = true
+    elif b2[2] == 3:
+        hi = b2[1]
+        hi_inc = 0
+        has_hi = true
+    if not has_lo or not has_hi:
+        return []
+    var result: [i64] = []
+    result.push(ci)
+    result.push(lo)
+    result.push(hi)
+    result.push(lo_inc)
+    result.push(hi_inc)
+    result
+
+# Returns [col_index, literal_value, kind] where kind:
+# 0 = col >= val, 1 = col > val, 2 = col <= val, 3 = col < val
+# Returns [] if not a simple column-literal/placeholder comparison.
+fn _extract_bound(expr: SqlExpr, col_map: Dict<text, i32>) -> [i64]:
+    if expr.kind != SqlExprKind.BinaryOp:
+        return []
+    val op = expr.value
+    if not expr.left.? or not expr.right.?:
+        return []
+    val left = expr.left
+    val right = expr.right
+    # col OP value (literal or placeholder)
+    if left.kind == SqlExprKind.Column:
+        val ci = _col_idx(col_map, left.value)
+        if ci < 0:
+            return []
+        val resolved = _resolve_int_literal(right)
+        if resolved.len() == 0:
+            return []
+        val v = resolved[0]
+        var kind: i64 = -1
+        if op == ">=":
+            kind = 0
+        elif op == ">":
+            kind = 1
+        elif op == "<=":
+            kind = 2
+        elif op == "<":
+            kind = 3
+        elif op == "=":
+            kind = 4
+        if kind < 0:
+            return []
+        var result: [i64] = []
+        result.push(ci as i64)
+        result.push(v)
+        result.push(kind)
+        return result
+    # value OP col (reversed)
+    if right.kind == SqlExprKind.Column:
+        val ci = _col_idx(col_map, right.value)
+        if ci < 0:
+            return []
+        val resolved = _resolve_int_literal(left)
+        if resolved.len() == 0:
+            return []
+        val v = resolved[0]
+        var kind: i64 = -1
+        # Flip: "50 <= col" means col >= 50
+        if op == "<=":
+            kind = 0
+        elif op == "<":
+            kind = 1
+        elif op == ">=":
+            kind = 2
+        elif op == ">":
+            kind = 3
+        elif op == "=":
+            kind = 4
+        if kind < 0:
+            return []
+        var result: [i64] = []
+        result.push(ci as i64)
+        result.push(v)
+        result.push(kind)
+        return result
+    []
+
+# Extract a LIKE prefix pattern from a WHERE clause.
+# Returns (col_index, prefix_string) if pattern is "prefix%" or "prefix_...%"
+# Returns (-1, "") if not a simple LIKE prefix pattern.
+fn _extract_like_prefix(where_expr: SqlExpr?, col_map: Dict<text, i32>) -> i32:
+    if not where_expr.?:
+        return -1
+    val expr = where_expr
+    if expr.kind != SqlExprKind.BinaryOp:
+        return -1
+    if expr.value != "LIKE":
+        return -1
+    if not expr.left.? or not expr.right.?:
+        return -1
+    val left = expr.left
+    val right = expr.right
+    if left.kind != SqlExprKind.Column:
+        return -1
+    val ci = _col_idx(col_map, left.value)
+    if ci < 0:
+        return -1
+    if right.kind != SqlExprKind.Literal:
+        return -1
+    ci
+
+fn _like_prefix_str(where_expr: SqlExpr?) -> text:
+    """Extract the literal prefix before the first % wildcard.
+    Only returns a non-empty prefix if it contains no _ wildcards,
+    since _ matches any single character in LIKE and cannot be
+    safely reduced to starts_with."""
+    if not where_expr.?:
+        return ""
+    val expr = where_expr
+    if not expr.right.?:
+        return ""
+    val pattern = expr.right.value
+    # Remove surrounding quotes if present
+    var pat = pattern
+    if pat.starts_with("'") and pat.ends_with("'"):
+        pat = pat.slice(1, pat.len() - 1)
+    # Find first % and take everything before it as the prefix
+    # Reject if any _ wildcard appears before the %
+    var i: i64 = 0
+    while i < pat.len():
+        val ch = pat.char_at(i)
+        if ch == "%":
+            return pat.slice(0, i)
+        if ch == "_":
+            return ""
+        i = i + 1
+    ""
+
+fn _like_any_prefix(where_expr: SqlExpr?) -> text:
+    """Extract the literal prefix before the first wildcard (% or _).
+    Used as a starts_with pre-filter before running full _like_match.
+    Returns "" if no literal prefix exists (pattern starts with wildcard)."""
+    if not where_expr.?:
+        return ""
+    val expr = where_expr
+    if not expr.right.?:
+        return ""
+    val pattern = expr.right.value
+    var pat = pattern
+    if pat.starts_with("'") and pat.ends_with("'"):
+        pat = pat.slice(1, pat.len() - 1)
+    var i: i64 = 0
+    while i < pat.len():
+        val ch = pat.char_at(i)
+        if ch == "%" or ch == "_":
+            return pat.slice(0, i)
+        i = i + 1
+    ""
+
+# Extract column index and full LIKE pattern from WHERE col LIKE 'pattern'.
+# Returns (col_index, pattern_string). col_index is -1 if not a simple LIKE.
+fn _extract_like_col(where_expr: SqlExpr?, col_map: Dict<text, i32>) -> i32:
+    if not where_expr.?:
+        return -1
+    val expr = where_expr
+    if expr.kind != SqlExprKind.BinaryOp:
+        return -1
+    if expr.value != "LIKE":
+        return -1
+    if not expr.left.? or not expr.right.?:
+        return -1
+    val left = expr.left
+    val right = expr.right
+    if left.kind != SqlExprKind.Column:
+        return -1
+    val ci = _col_idx(col_map, left.value)
+    if ci < 0:
+        return -1
+    if right.kind != SqlExprKind.Literal:
+        return -1
+    ci
+
+fn _extract_like_pattern(where_expr: SqlExpr?) -> text:
+    if not where_expr.?:
+        return ""
+    val expr = where_expr
+    if not expr.right.?:
+        return ""
+    val pattern = expr.right.value
+    var pat = pattern
+    if pat.starts_with("'") and pat.ends_with("'"):
+        pat = pat.slice(1, pat.len() - 1)
+    pat
+
+# Extract a single-sided integer comparison from a WHERE clause.
+# Returns [col_index, value, kind] where kind: 0=>=, 1=>, 2=<=, 3=<, 4==
+# Returns [] if not a simple single comparison.
+fn _extract_single_int_bound(where_expr: SqlExpr?, col_map: Dict<text, i32>) -> [i64]:
+    if not where_expr.?:
+        return []
+    val expr = where_expr
+    if expr.kind != SqlExprKind.BinaryOp:
+        return []
+    # Skip AND/OR — those are handled by _extract_int_range
+    val op = expr.value
+    if op == "AND" or op == "OR":
+        return []
+    _extract_bound(expr, col_map)
+
+fn _dbval_is_int(v: DbValue) -> bool:
+    match v:
+        DbValue.Integer(_): true
+        _: false
+
+fn _dbval_as_i64(v: DbValue) -> i64:
+    match v:
+        DbValue.Integer(value): value
+        _: 0
+
+fn _dbval_cmp(a: DbValue, b: DbValue) -> i64:
+    if _dbval_is_int(a) and _dbval_is_int(b):
+        val ai = _dbval_as_i64(a)
+        val bi = _dbval_as_i64(b)
+        if ai > bi:
+            return 1
+        if ai < bi:
+            return -1
+        return 0
+    val at = a.to_text()
+    val bt = b.to_text()
+    if at > bt:
+        return 1
+    if at < bt:
+        return -1
+    0
+
+fn _dbval_truthy(v: DbValue) -> bool:
+    match v:
+        DbValue.Bool(value): value
+        DbValue.Integer(value): value != 0
+        DbValue.Null: false
+        _: true
+
+fn _text_tokens(value: text) -> [text]:
+    val lowered = value.to_lower()
+    val parts = lowered.split(" ")
+    var result: [text] = []
+    var i: i32 = 0
+    while i < parts.len() as i32:
+        val token = parts[i].trim()
+        if token != "":
+            result.push(token)
+        i = i + 1
+    result
+
+fn _row_search_text(row_vals: [DbValue], col_names: [text], selected_cols: [text]) -> text:
+    var result = ""
+    var ci: i32 = 0
+    while ci < col_names.len() as i32:
+        var include_col = selected_cols.len() == 0
+        var si: i32 = 0
+        while si < selected_cols.len() as i32:
+            if selected_cols[si] == col_names[ci]:
+                include_col = true
+            si = si + 1
+        if include_col:
+            if result != "":
+                result = result + " "
+            result = result + row_vals[ci].to_text()
+        ci = ci + 1
+    result
+
+fn _same_text_list(a: [text], b: [text]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: i32 = 0
+    while i < a.len() as i32:
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+fn _count_term(tokens: [text], term: text) -> i64:
+    var count: i64 = 0
+    var i: i32 = 0
+    while i < tokens.len() as i32:
+        if tokens[i] == term:
+            count = count + 1
+        i = i + 1
+    count
+
+fn _contains_term(tokens: [text], term: text) -> bool:
+    _count_term(tokens, term) > 0
+
+fn _result_score_at(results: [PureSearchResult], idx: i32) -> f64:
+    results[idx].score
+
+fn _push_ranked_result(results: [PureSearchResult], next: PureSearchResult, limit: i64) -> [PureSearchResult]:
+    var ranked: [PureSearchResult] = []
+    var inserted = false
+    var i: i32 = 0
+    while i < results.len() as i32:
+        if not inserted and next.score > _result_score_at(results, i):
+            ranked.push(next)
+            inserted = true
+        ranked.push(results[i])
+        i = i + 1
+    if not inserted:
+        ranked.push(next)
+    if limit <= 0 or ranked.len() <= limit:
+        return ranked
+    var trimmed: [PureSearchResult] = []
+    var ti: i32 = 0
+    while ti < limit as i32:
+        trimmed.push(ranked[ti])
+        ti = ti + 1
+    trimmed
+
+fn _document_frequency(docs: [[text]], term: text) -> i64:
+    var count: i64 = 0
+    var i: i32 = 0
+    while i < docs.len() as i32:
+        if _contains_term(docs[i], term):
+            count = count + 1
+        i = i + 1
+    count
+
+fn _term_frequency_score(doc: [text], terms: [text]) -> f64:
+    var score = 0.0
+    var i: i32 = 0
+    while i < terms.len() as i32:
+        score = score + (_count_term(doc, terms[i]) as f64)
+        i = i + 1
+    score
+
+fn _contains_score(doc: [text], terms: [text]) -> f64:
+    var score = 0.0
+    var i: i32 = 0
+    while i < terms.len() as i32:
+        if _contains_term(doc, terms[i]):
+            score = score + 1.0
+        i = i + 1
+    score
+
+fn _fts_match_value(value: text, query: text) -> bool:
+    val doc = _text_tokens(value)
+    val terms = _text_tokens(query)
+    if terms.len() == 0:
+        return false
+    var i: i32 = 0
+    while i < terms.len() as i32:
+        if _contains_term(doc, terms[i]):
+            return true
+        i = i + 1
+    false
+
+fn _bm25_score(docs: [[text]], doc_index: i32, terms: [text], total_len: i64) -> f64:
+    val doc = docs[doc_index]
+    val doc_count = docs.len() as f64
+    if doc_count <= 0.0:
+        return 0.0
+    var avg_len = (total_len as f64) / doc_count
+    if avg_len <= 0.0:
+        avg_len = 1.0
+    val k1 = 1.2
+    val b = 0.75
+    val doc_len = doc.len() as f64
+    var score = 0.0
+    var i: i32 = 0
+    while i < terms.len() as i32:
+        val tf = _count_term(doc, terms[i]) as f64
+        if tf > 0.0:
+            val df = _document_frequency(docs, terms[i]) as f64
+            val idf = (((doc_count - df + 0.5) / (df + 0.5)) + 1.0).log()
+            val denom = tf + k1 * (1.0 - b + b * (doc_len / avg_len))
+            score = score + idf * ((tf * (k1 + 1.0)) / denom)
+        i = i + 1
+    score
+
+fn _search_score(docs: [[text]], doc_index: i32, terms: [text], algorithm: PureSearchAlgorithm, total_len: i64) -> f64:
+    val doc = docs[doc_index]
+    match algorithm:
+        PureSearchAlgorithm.Contains:
+            _contains_score(doc, terms)
+        PureSearchAlgorithm.TermFrequency:
+            _term_frequency_score(doc, terms)
+        PureSearchAlgorithm.Bm25:
+            _bm25_score(docs, doc_index, terms, total_len)
+
+fn _eval_expr(expr: SqlExpr, cols: [text], vals: [DbValue], params: [DbValue]) -> DbValue:
+    if expr.kind == SqlExprKind.BinaryOp:
+        val lv = _eval_expr(expr.left, cols, vals, params)
+        val rv = _eval_expr(expr.right, cols, vals, params)
+        return _apply_binop(expr.value, lv, rv)
+    if expr.kind == SqlExprKind.Column:
+        val idx = _find_idx(cols, expr.value)
+        if idx >= 0:
+            return vals[idx]
+        return DbValue.Null
+    if expr.kind == SqlExprKind.Literal:
+        return _parse_literal(expr.value)
+    if expr.kind == SqlExprKind.Placeholder:
+        if _param_idx < params.len():
+            val v = params[_param_idx]
+            _param_idx = _param_idx + 1
+            return v
+        return DbValue.Null
+    if expr.kind == SqlExprKind.IsNull:
+        val inner = _eval_expr(expr.left, cols, vals, params)
+        return DbValue.Bool(value: inner.is_null())
+    if expr.kind == SqlExprKind.IsNotNull:
+        val inner = _eval_expr(expr.left, cols, vals, params)
+        return DbValue.Bool(value: not inner.is_null())
+    if expr.kind == SqlExprKind.UnaryOp:
+        val uval = _eval_expr(expr.left, cols, vals, params)
+        val uop = expr.value.to_upper()
+        if uop == "NOT":
+            return DbValue.Bool(value: not _dbval_truthy(uval))
+        if uop == "-":
+            match uval:
+                DbValue.Integer(value):
+                    return DbValue.Integer(value: 0 - value)
+                DbValue.Real(value):
+                    return DbValue.Real(value: 0.0 - value)
+                _:
+                    return DbValue.Null
+        return DbValue.Null
+    if expr.kind == SqlExprKind.Between:
+        val bval = _eval_expr(expr.left, cols, vals, params)
+        val lo = _eval_expr(expr.args[0], cols, vals, params)
+        val hi = _eval_expr(expr.args[1], cols, vals, params)
+        val ge_lo = _dbval_cmp(lo, bval) <= 0
+        val le_hi = _dbval_cmp(bval, hi) <= 0
+        return DbValue.Bool(value: ge_lo and le_hi)
+    if expr.kind == SqlExprKind.InList:
+        val target = _eval_expr(expr.left, cols, vals, params)
+        var found = false
+        var ini: i32 = 0
+        while ini < expr.args.len() as i32:
+            val item = _eval_expr(expr.args[ini], cols, vals, params)
+            if _dbval_eq(target, item):
+                found = true
+            ini = ini + 1
+        return DbValue.Bool(value: found)
+    if expr.kind == SqlExprKind.FunctionCall:
+        val fname = expr.value.to_lower()
+        if fname == "fts_match":
+            if expr.args.len() < 2:
+                return DbValue.Bool(value: false)
+            val target = _eval_expr(expr.args[0], cols, vals, params)
+            val query = _eval_expr(expr.args[1], cols, vals, params)
+            return DbValue.Bool(value: _fts_match_value(target.to_text(), query.to_text()))
+        # ── String functions ─────────────────────────────────────────
+        if fname == "length":
+            if expr.args.len() < 1:
+                return DbValue.Null
+            val lv = _eval_expr(expr.args[0], cols, vals, params)
+            if lv.is_null():
+                return DbValue.Null
+            val lt = lv.to_text()
+            return DbValue.Integer(value: lt.len())
+        if fname == "upper":
+            if expr.args.len() < 1:
+                return DbValue.Null
+            val uv = _eval_expr(expr.args[0], cols, vals, params)
+            if uv.is_null():
+                return DbValue.Null
+            val ut = uv.to_text()
+            return DbValue.Text(value: ut.to_upper())
+        if fname == "lower":
+            if expr.args.len() < 1:
+                return DbValue.Null
+            val lwv = _eval_expr(expr.args[0], cols, vals, params)
+            if lwv.is_null():
+                return DbValue.Null
+            val lwt = lwv.to_text()
+            return DbValue.Text(value: lwt.to_lower())
+        if fname == "trim":
+            if expr.args.len() < 1:
+                return DbValue.Null
+            val trv = _eval_expr(expr.args[0], cols, vals, params)
+            if trv.is_null():
+                return DbValue.Null
+            val trt = trv.to_text()
+            return DbValue.Text(value: trt.trim())
+        if fname == "substr" or fname == "substring":
+            if expr.args.len() < 2:
+                return DbValue.Null
+            val sv = _eval_expr(expr.args[0], cols, vals, params)
+            if sv.is_null():
+                return DbValue.Null
+            val st = sv.to_text()
+            val start_v = _eval_expr(expr.args[1], cols, vals, params)
+            val start_i = _dbval_as_i64(start_v) - 1
+            if start_i < 0:
+                return DbValue.Text(value: st)
+            if expr.args.len() >= 3:
+                val len_v = _eval_expr(expr.args[2], cols, vals, params)
+                val slen = _dbval_as_i64(len_v)
+                var end_i = start_i + slen
+                if end_i > st.len():
+                    end_i = st.len()
+                return DbValue.Text(value: st.slice(start_i, end_i))
+            return DbValue.Text(value: st.slice(start_i, st.len()))
+        if fname == "replace":
+            if expr.args.len() < 3:
+                return DbValue.Null
+            val rpv = _eval_expr(expr.args[0], cols, vals, params)
+            if rpv.is_null():
+                return DbValue.Null
+            val rpt = rpv.to_text()
+            val from_v = _eval_expr(expr.args[1], cols, vals, params)
+            val to_v = _eval_expr(expr.args[2], cols, vals, params)
+            val from_t = from_v.to_text()
+            val to_t = to_v.to_text()
+            return DbValue.Text(value: rpt.replace(from_t, to_t))
+        # ── Math functions ───────────────────────────────────────────
+        if fname == "abs":
+            if expr.args.len() < 1:
+                return DbValue.Null
+            val abv = _eval_expr(expr.args[0], cols, vals, params)
+            if abv.is_null():
+                return DbValue.Null
+            if _dbval_is_int(abv):
+                val ai = _dbval_as_i64(abv)
+                if ai < 0:
+                    return DbValue.Integer(value: 0 - ai)
+                return abv
+            return abv
+        if fname == "max":
+            if expr.args.len() < 2:
+                return DbValue.Null
+            val mxa = _eval_expr(expr.args[0], cols, vals, params)
+            val mxb = _eval_expr(expr.args[1], cols, vals, params)
+            if mxa.is_null():
+                return mxb
+            if mxb.is_null():
+                return mxa
+            if _dbval_cmp(mxa, mxb) >= 0:
+                return mxa
+            return mxb
+        if fname == "min":
+            if expr.args.len() < 2:
+                return DbValue.Null
+            val mna = _eval_expr(expr.args[0], cols, vals, params)
+            val mnb = _eval_expr(expr.args[1], cols, vals, params)
+            if mna.is_null():
+                return mnb
+            if mnb.is_null():
+                return mna
+            if _dbval_cmp(mna, mnb) <= 0:
+                return mna
+            return mnb
+        # ── CASE WHEN expression ────────────────────────────────────
+        if fname == "case":
+            val nargs = expr.args.len() as i32
+            val has_else = (nargs % 2) != 0
+            var pair_count = nargs / 2
+            var cwi: i32 = 0
+            while cwi < pair_count:
+                val cond_idx = cwi * 2
+                val then_idx = cond_idx + 1
+                val cond_val = _eval_expr(expr.args[cond_idx], cols, vals, params)
+                if _dbval_truthy(cond_val):
+                    return _eval_expr(expr.args[then_idx], cols, vals, params)
+                cwi = cwi + 1
+            if has_else:
+                val else_idx = nargs - 1
+                return _eval_expr(expr.args[else_idx], cols, vals, params)
+            return DbValue.Null
+        # ── NULL handling functions ──────────────────────────────────
+        if fname == "coalesce":
+            var ci: i32 = 0
+            while ci < expr.args.len() as i32:
+                val cv = _eval_expr(expr.args[ci], cols, vals, params)
+                if not cv.is_null():
+                    return cv
+                ci = ci + 1
+            return DbValue.Null
+        if fname == "ifnull":
+            if expr.args.len() < 2:
+                return DbValue.Null
+            val ifv = _eval_expr(expr.args[0], cols, vals, params)
+            if not ifv.is_null():
+                return ifv
+            return _eval_expr(expr.args[1], cols, vals, params)
+        # Aggregate functions are evaluated in _do_select, not here.
+        # Return Null as placeholder — real eval happens in aggregate path.
+        return DbValue.Null
+    if expr.kind == SqlExprKind.Star:
+        return DbValue.Text(value: "*")
+    DbValue.Null
+
+fn _apply_binop(op: text, a: DbValue, b: DbValue) -> DbValue:
+    if op == "=":
+        return DbValue.Bool(value: _dbval_eq(a, b))
+    if op == "AND":
+        return DbValue.Bool(value: _dbval_truthy(a) and _dbval_truthy(b))
+    if op == "OR":
+        return DbValue.Bool(value: _dbval_truthy(a) or _dbval_truthy(b))
+    if op == ">":
+        return DbValue.Bool(value: _dbval_cmp(a, b) > 0)
+    if op == "<":
+        return DbValue.Bool(value: _dbval_cmp(a, b) < 0)
+    if op == "!=":
+        return DbValue.Bool(value: not _dbval_eq(a, b))
+    if op == ">=":
+        return DbValue.Bool(value: _dbval_cmp(a, b) >= 0)
+    if op == "<=":
+        return DbValue.Bool(value: _dbval_cmp(a, b) <= 0)
+    if op == "+":
+        if _dbval_is_int(a) and _dbval_is_int(b):
+            return DbValue.Integer(value: _dbval_as_i64(a) + _dbval_as_i64(b))
+        return DbValue.Null
+    if op == "-":
+        if _dbval_is_int(a) and _dbval_is_int(b):
+            return DbValue.Integer(value: _dbval_as_i64(a) - _dbval_as_i64(b))
+        return DbValue.Null
+    if op == "*":
+        if _dbval_is_int(a) and _dbval_is_int(b):
+            return DbValue.Integer(value: _dbval_as_i64(a) * _dbval_as_i64(b))
+        return DbValue.Null
+    if op == "LIKE":
+        val av = a.to_text()
+        val bv = b.to_text()
+        return DbValue.Bool(value: _like_match(bv, av))
+    if op == "MATCH":
+        return DbValue.Bool(value: _fts_match_value(a.to_text(), b.to_text()))
+    DbValue.Null
+
+fn _check_where(where_expr: SqlExpr?, cols: [text], vals: [DbValue], params: [DbValue]) -> bool:
+    if not where_expr.?:
+        return true
+    val result = _eval_expr(where_expr, cols, vals, params)
+    _dbval_truthy(result)
+
+fn _eval_expr_fast(expr: SqlExpr, cm: Dict<text, i32>, vals: [DbValue], params: [DbValue]) -> DbValue:
+    if expr.kind == SqlExprKind.BinaryOp:
+        val lv = _eval_expr_fast(expr.left, cm, vals, params)
+        val rv = _eval_expr_fast(expr.right, cm, vals, params)
+        return _apply_binop(expr.value, lv, rv)
+    if expr.kind == SqlExprKind.Column:
+        val idx = _col_idx(cm, expr.value)
+        if idx >= 0:
+            return vals[idx]
+        return DbValue.Null
+    if expr.kind == SqlExprKind.Literal:
+        return _parse_literal(expr.value)
+    if expr.kind == SqlExprKind.Placeholder:
+        if _param_idx < params.len():
+            val v = params[_param_idx]
+            _param_idx = _param_idx + 1
+            return v
+        return DbValue.Null
+    if expr.kind == SqlExprKind.IsNull:
+        val inner = _eval_expr_fast(expr.left, cm, vals, params)
+        return DbValue.Bool(value: inner.is_null())
+    if expr.kind == SqlExprKind.IsNotNull:
+        val inner = _eval_expr_fast(expr.left, cm, vals, params)
+        return DbValue.Bool(value: not inner.is_null())
+    if expr.kind == SqlExprKind.UnaryOp:
+        val uval = _eval_expr_fast(expr.left, cm, vals, params)
+        val uop = expr.value.to_upper()
+        if uop == "NOT":
+            return DbValue.Bool(value: not _dbval_truthy(uval))
+        if uop == "-":
+            match uval:
+                DbValue.Integer(value):
+                    return DbValue.Integer(value: 0 - value)
+                DbValue.Real(value):
+                    return DbValue.Real(value: 0.0 - value)
+                _:
+                    return DbValue.Null
+        return DbValue.Null
+    if expr.kind == SqlExprKind.Between:
+        val bval = _eval_expr_fast(expr.left, cm, vals, params)
+        val lo = _eval_expr_fast(expr.args[0], cm, vals, params)
+        val hi = _eval_expr_fast(expr.args[1], cm, vals, params)
+        val ge_lo = _dbval_cmp(lo, bval) <= 0
+        val le_hi = _dbval_cmp(bval, hi) <= 0
+        return DbValue.Bool(value: ge_lo and le_hi)
+    if expr.kind == SqlExprKind.InList:
+        val target = _eval_expr_fast(expr.left, cm, vals, params)
+        var found = false
+        var ini: i32 = 0
+        while ini < expr.args.len() as i32:
+            val item = _eval_expr_fast(expr.args[ini], cm, vals, params)
+            if _dbval_eq(target, item):
+                found = true
+            ini = ini + 1
+        return DbValue.Bool(value: found)
+    if expr.kind == SqlExprKind.FunctionCall:
+        val fname = expr.value.to_lower()
+        if fname == "fts_match":
+            if expr.args.len() < 2:
+                return DbValue.Bool(value: false)
+            val target = _eval_expr_fast(expr.args[0], cm, vals, params)
+            val query = _eval_expr_fast(expr.args[1], cm, vals, params)
+            return DbValue.Bool(value: _fts_match_value(target.to_text(), query.to_text()))
+        if fname == "length":
+            if expr.args.len() < 1:
+                return DbValue.Null
+            val lv = _eval_expr_fast(expr.args[0], cm, vals, params)
+            if lv.is_null():
+                return DbValue.Null
+            return DbValue.Integer(value: lv.to_text().len())
+        if fname == "upper":
+            if expr.args.len() < 1:
+                return DbValue.Null
+            val uv = _eval_expr_fast(expr.args[0], cm, vals, params)
+            if uv.is_null():
+                return DbValue.Null
+            return DbValue.Text(value: uv.to_text().to_upper())
+        if fname == "lower":
+            if expr.args.len() < 1:
+                return DbValue.Null
+            val lwv = _eval_expr_fast(expr.args[0], cm, vals, params)
+            if lwv.is_null():
+                return DbValue.Null
+            return DbValue.Text(value: lwv.to_text().to_lower())
+        if fname == "trim":
+            if expr.args.len() < 1:
+                return DbValue.Null
+            val trv = _eval_expr_fast(expr.args[0], cm, vals, params)
+            if trv.is_null():
+                return DbValue.Null
+            return DbValue.Text(value: trv.to_text().trim())
+        if fname == "substr" or fname == "substring":
+            if expr.args.len() < 2:
+                return DbValue.Null
+            val sv = _eval_expr_fast(expr.args[0], cm, vals, params)
+            if sv.is_null():
+                return DbValue.Null
+            val st = sv.to_text()
+            val start_v = _eval_expr_fast(expr.args[1], cm, vals, params)
+            val start_i = _dbval_as_i64(start_v) - 1
+            if start_i < 0:
+                return DbValue.Text(value: st)
+            if expr.args.len() >= 3:
+                val len_v = _eval_expr_fast(expr.args[2], cm, vals, params)
+                val slen = _dbval_as_i64(len_v)
+                var end_i = start_i + slen
+                if end_i > st.len():
+                    end_i = st.len()
+                return DbValue.Text(value: st.slice(start_i, end_i))
+            return DbValue.Text(value: st.slice(start_i, st.len()))
+        if fname == "replace":
+            if expr.args.len() < 3:
+                return DbValue.Null
+            val rpv = _eval_expr_fast(expr.args[0], cm, vals, params)
+            if rpv.is_null():
+                return DbValue.Null
+            val rpt = rpv.to_text()
+            val from_v = _eval_expr_fast(expr.args[1], cm, vals, params)
+            val to_v = _eval_expr_fast(expr.args[2], cm, vals, params)
+            val from_t = from_v.to_text()
+            val to_t = to_v.to_text()
+            return DbValue.Text(value: rpt.replace(from_t, to_t))
+        if fname == "abs":
+            if expr.args.len() < 1:
+                return DbValue.Null
+            val abv = _eval_expr_fast(expr.args[0], cm, vals, params)
+            if abv.is_null():
+                return DbValue.Null
+            if _dbval_is_int(abv):
+                val ai = _dbval_as_i64(abv)
+                if ai < 0:
+                    return DbValue.Integer(value: 0 - ai)
+                return abv
+            return abv
+        if fname == "coalesce":
+            var ci: i32 = 0
+            while ci < expr.args.len() as i32:
+                val cv = _eval_expr_fast(expr.args[ci], cm, vals, params)
+                if not cv.is_null():
+                    return cv
+                ci = ci + 1
+            return DbValue.Null
+        if fname == "ifnull":
+            if expr.args.len() < 2:
+                return DbValue.Null
+            val ifv = _eval_expr_fast(expr.args[0], cm, vals, params)
+            if not ifv.is_null():
+                return ifv
+            return _eval_expr_fast(expr.args[1], cm, vals, params)
+        if fname == "case":
+            val nargs = expr.args.len() as i32
+            val has_else = (nargs % 2) != 0
+            var pair_count = nargs / 2
+            var cwi: i32 = 0
+            while cwi < pair_count:
+                val cond_idx = cwi * 2
+                val then_idx = cond_idx + 1
+                val cond_val = _eval_expr_fast(expr.args[cond_idx], cm, vals, params)
+                if _dbval_truthy(cond_val):
+                    return _eval_expr_fast(expr.args[then_idx], cm, vals, params)
+                cwi = cwi + 1
+            if has_else:
+                val else_idx = nargs - 1
+                return _eval_expr_fast(expr.args[else_idx], cm, vals, params)
+            return DbValue.Null
+        return DbValue.Null
+    DbValue.Null
+
+fn _check_where_fast(where_expr: SqlExpr?, cm: Dict<text, i32>, vals: [DbValue], params: [DbValue]) -> bool:
+    if not where_expr.?:
+        return true
+    val result = _eval_expr_fast(where_expr, cm, vals, params)
+    _dbval_truthy(result)
+
+# ── LIKE pattern matching ────────────────────────────────────────────────────
+# % matches any sequence, _ matches single character.
+
+fn _like_match(pattern: text, value: text) -> bool:
+    val plen = pattern.len()
+    val vlen = value.len()
+    var pi: i64 = 0
+    var vi: i64 = 0
+    var star_pi: i64 = -1
+    var star_vi: i64 = -1
+    var ok = true
+    while vi < vlen and ok:
+        var done = false
+        if pi < plen and not done:
+            val pc = pattern.char_at(pi)
+            if pc == "_" and not done:
+                pi = pi + 1
+                vi = vi + 1
+                done = true
+            if pc == "%" and not done:
+                star_pi = pi
+                star_vi = vi
+                pi = pi + 1
+                done = true
+            if not done:
+                val vc = value.char_at(vi)
+                if pc == vc:
+                    pi = pi + 1
+                    vi = vi + 1
+                    done = true
+        if not done:
+            if star_pi >= 0:
+                pi = star_pi + 1
+                star_vi = star_vi + 1
+                vi = star_vi
+                done = true
+            else:
+                ok = false
+    if not ok:
+        return false
+    while pi < plen:
+        if pattern.char_at(pi) != "%":
+            return false
+        pi = pi + 1
+    true
+
+fn _expr_to_dbvalue(expr: SqlExpr, params: [DbValue]) -> DbValue:
+    if expr.kind == SqlExprKind.Literal:
+        return _parse_literal(expr.value)
+    if expr.kind == SqlExprKind.Placeholder:
+        if _param_idx < params.len():
+            val v = params[_param_idx]
+            _param_idx = _param_idx + 1
+            return v
+        return DbValue.Null
+    DbValue.Text(value: expr.value)
+
+# ── Aggregate helpers ────────────────────────────────────────────────────────
+
+fn _unwrap_as_expr(expr: SqlExpr) -> SqlExpr:
+    if expr.kind == SqlExprKind.BinaryOp and expr.value == "AS":
+        return expr.left
+    expr
+
+fn _get_as_alias(expr: SqlExpr) -> text:
+    if expr.kind == SqlExprKind.BinaryOp and expr.value == "AS":
+        return expr.right.value
+    ""
+
+fn _is_agg_name(name: text) -> bool:
+    val up = name.to_upper()
+    if up == "COUNT":
+        return true
+    if up == "SUM":
+        return true
+    if up == "AVG":
+        return true
+    if up == "MIN":
+        return true
+    if up == "MAX":
+        return true
+    false
+
+fn _is_agg_expr(expr: SqlExpr) -> bool:
+    val inner = _unwrap_as_expr(expr)
+    if inner.kind == SqlExprKind.FunctionCall:
+        return _is_agg_name(inner.value)
+    false
+
+fn _has_any_agg(columns: [SqlExpr]) -> bool:
+    var i: i32 = 0
+    while i < columns.len() as i32:
+        if _is_agg_expr(columns[i]):
+            return true
+        i = i + 1
+    false
+
+fn _compute_agg(name: text, vals: [DbValue]) -> DbValue:
+    val up = name.to_upper()
+    if up == "COUNT":
+        return DbValue.Integer(value: vals.len() as i64)
+    if up == "SUM":
+        var s: i64 = 0
+        var i: i32 = 0
+        while i < vals.len() as i32:
+            s = s + _dbval_as_i64(vals[i])
+            i = i + 1
+        return DbValue.Integer(value: s)
+    if up == "AVG":
+        if vals.len() == 0:
+            return DbValue.Null
+        var s: i64 = 0
+        var i: i32 = 0
+        while i < vals.len() as i32:
+            s = s + _dbval_as_i64(vals[i])
+            i = i + 1
+        return DbValue.Integer(value: s / vals.len() as i64)
+    if up == "MIN":
+        if vals.len() == 0:
+            return DbValue.Null
+        var best = vals[0]
+        var i: i32 = 1
+        while i < vals.len() as i32:
+            if _dbval_cmp(vals[i], best) < 0:
+                best = vals[i]
+            i = i + 1
+        return best
+    if up == "MAX":
+        if vals.len() == 0:
+            return DbValue.Null
+        var best = vals[0]
+        var i: i32 = 1
+        while i < vals.len() as i32:
+            if _dbval_cmp(vals[i], best) > 0:
+                best = vals[i]
+            i = i + 1
+        return best
+    DbValue.Null
+
+fn _eval_agg_col(expr: SqlExpr, col_names: [text], all_rows: [[DbValue]]) -> DbValue:
+    val inner = _unwrap_as_expr(expr)
+    val fname = inner.value.to_upper()
+    # COUNT(*)
+    if inner.args.len() > 0:
+        val arg0 = inner.args[0]
+        if arg0.kind == SqlExprKind.Star:
+            if fname == "COUNT":
+                return DbValue.Integer(value: all_rows.len() as i64)
+    # Collect column values
+    var col_vals: [DbValue] = []
+    if inner.args.len() > 0:
+        val arg0 = inner.args[0]
+        if arg0.kind != SqlExprKind.Star:
+            val cidx = _find_idx(col_names, arg0.value)
+            if cidx >= 0:
+                var ri: i32 = 0
+                while ri < all_rows.len() as i32:
+                    val rv = all_rows[ri]
+                    if not rv[cidx].is_null():
+                        col_vals.push(rv[cidx])
+                    ri = ri + 1
+    if fname == "COUNT":
+        return DbValue.Integer(value: col_vals.len() as i64)
+    _compute_agg(fname, col_vals)
+
+fn _serialize_group_key(exprs: [SqlExpr], col_names: [text], row_vals: [DbValue], params: [DbValue]) -> text:
+    var parts: [text] = []
+    var i: i32 = 0
+    while i < exprs.len() as i32:
+        val v = _eval_expr(exprs[i], col_names, row_vals, params)
+        parts.push(v.to_text())
+        i = i + 1
+    var result = ""
+    var j: i32 = 0
+    while j < parts.len() as i32:
+        if j > 0:
+            result = result + "\x00" + parts[j]
+        else:
+            result = parts[j]
+        j = j + 1
+    result
+
+fn _agg_col_name(expr: SqlExpr) -> text:
+    val alias = _get_as_alias(expr)
+    if alias != "":
+        return alias
+    val inner = _unwrap_as_expr(expr)
+    if inner.kind == SqlExprKind.FunctionCall:
+        if inner.args.len() > 0:
+            val arg0 = inner.args[0]
+            if arg0.kind == SqlExprKind.Star:
+                return inner.value.to_upper() + "(*)"
+            return inner.value.to_upper() + "(" + arg0.value + ")"
+        return inner.value.to_upper() + "()"
+    inner.value
+
+# ── DROP TABLE parser ────────────────────────────────────────────────────────
+
+fn _parse_drop_table(sql: text) -> text:
+    val trimmed = sql.trim()
+    val upper = trimmed.to_upper()
+    if not upper.starts_with("DROP TABLE"):
+        return ""
+    var rest = trimmed.slice(10, trimmed.len()).trim()
+    val rest_up = rest.to_upper()
+    if rest_up.starts_with("IF EXISTS"):
+        rest = rest.slice(9, rest.len()).trim()
+    # Strip trailing semicolon
+    if rest.ends_with(";"):
+        rest = rest.slice(0, rest.len() - 1).trim()
+    rest
+
+# ── CREATE INDEX parser ──────────────────────────────────────────────────────
+# Returns [is_unique, index_name, table_name, col1, col2, ...]
+# Returns [] if not a CREATE INDEX statement.
+
+fn _parse_create_index(sql: text) -> [text]:
+    val trimmed = sql.trim()
+    var upper = trimmed.to_upper()
+    if upper.ends_with(";"):
+        upper = upper.slice(0, upper.len() - 1).trim()
+    var is_unique = "false"
+    var rest = trimmed
+    if upper.starts_with("CREATE UNIQUE INDEX"):
+        is_unique = "true"
+        rest = trimmed.slice(19, trimmed.len()).trim()
+    elif upper.starts_with("CREATE INDEX"):
+        rest = trimmed.slice(12, trimmed.len()).trim()
+    else:
+        return []
+    # Strip trailing semicolon from rest too
+    if rest.ends_with(";"):
+        rest = rest.slice(0, rest.len() - 1).trim()
+    # rest = "idx_name ON table (col1, col2)"
+    val parts = rest.split(" ")
+    if parts.len() < 3:
+        return []
+    val idx_name = parts[0]
+    val on_word = parts[1].to_upper()
+    if on_word != "ON":
+        return []
+    # Find the table name and columns in parentheses
+    # Rejoin remainder after "ON"
+    var after_on = ""
+    var pi: i32 = 2
+    while pi < parts.len() as i32:
+        if after_on != "":
+            after_on = after_on + " "
+        after_on = after_on + parts[pi]
+        pi = pi + 1
+    # Find open paren
+    val paren_start = after_on.index_of("(")
+    if paren_start < 0:
+        return []
+    val tbl_name = after_on.slice(0, paren_start).trim()
+    if tbl_name == "":
+        return []
+    val paren_end = after_on.index_of(")")
+    if paren_end < 0:
+        return []
+    val cols_str = after_on.slice(paren_start + 1, paren_end).trim()
+    val col_parts = cols_str.split(",")
+    var result: [text] = []
+    result.push(is_unique)
+    result.push(idx_name)
+    result.push(tbl_name)
+    var ci: i32 = 0
+    while ci < col_parts.len() as i32:
+        val col = col_parts[ci].trim()
+        if col != "":
+            result.push(col)
+        ci = ci + 1
+    result
+
+# ── DROP INDEX parser ───────────────────────────────────────────────────────
+
+fn _parse_drop_index(sql: text) -> text:
+    val trimmed = sql.trim()
+    val upper = trimmed.to_upper()
+    if not upper.starts_with("DROP INDEX"):
+        return ""
+    var rest = trimmed.slice(10, trimmed.len()).trim()
+    if rest.ends_with(";"):
+        rest = rest.slice(0, rest.len() - 1).trim()
+    rest
+
+fn _parse_txn_command(sql: text) -> text:
+    val trimmed = sql.trim()
+    var low = trimmed.to_lower()
+    # Strip trailing semicolon
+    if low.ends_with(";"):
+        low = low.slice(0, low.len() - 1).trim()
+    if low == "begin" or low == "begin transaction":
+        return "BEGIN"
+    if low == "commit" or low == "end transaction":
+        return "COMMIT"
+    if low == "rollback":
+        return "ROLLBACK"
+    ""
+
+fn _parse_alter_table(sql: text) -> [text]:
+    val trimmed = sql.trim()
+    val upper = trimmed.to_upper()
+    if not upper.starts_with("ALTER TABLE"):
+        return []
+    var rest = trimmed.slice(11, trimmed.len()).trim()
+    # Strip trailing semicolon
+    if rest.ends_with(";"):
+        rest = rest.slice(0, rest.len() - 1).trim()
+    # Extract table name (first token)
+    val parts = rest.split(" ")
+    if parts.len() < 4:
+        return []
+    val tbl_name = parts[0]
+    # Expect ADD COLUMN
+    val p1 = parts[1].to_upper()
+    val p2 = parts[2].to_upper()
+    if p1 != "ADD" or p2 != "COLUMN":
+        return []
+    val col_name = parts[3]
+    var col_type = "TEXT"
+    if parts.len() >= 5:
+        col_type = parts[4].to_upper()
+    var result: [text] = []
+    result.push(tbl_name)
+    result.push(col_name)
+    result.push(col_type)
+    result
+
+fn _join_text(values: [text], sep: text) -> text:
+    var result = ""
+    var i: i32 = 0
+    while i < values.len() as i32:
+        if i > 0:
+            result = result + sep
+        result = result + values[i]
+        i = i + 1
+    result
+
+fn _split_csv(value: text) -> [text]:
+    if value == "":
+        return []
+    value.split(",")
+

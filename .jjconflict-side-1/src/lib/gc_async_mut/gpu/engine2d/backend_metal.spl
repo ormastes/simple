@@ -1,0 +1,607 @@
+# 2D Engine — Metal backend facade.
+#
+# Probes Metal strictly and exposes a RenderBackend-compatible surface. The
+# current Simple-level readback path keeps a CPU mirror for deterministic parity;
+# native command encoding lives behind the rt_metal_* runtime functions and
+# MetalSession.
+
+use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended}
+use std.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gpu.engine2d.backend_probe.{BackendProbeResult}
+use std.gpu.engine2d.glyph.{glyph_data, glyph_height, glyph_advance}
+use std.gc_async_mut.gpu.engine2d.metal_session.{MetalSession}
+use std.nogc_sync_mut.env.platform.{is_macos}
+use std.nogc_sync_mut.io.metal_sffi.{
+    metal_sffi_alloc_buffer, metal_sffi_free_buffer,
+    metal_sffi_create_command_buffer, metal_sffi_commit_command_buffer,
+    metal_sffi_wait_completed, metal_sffi_dispatch_compute,
+    metal_sffi_create_compute_encoder, metal_sffi_end_compute_encoder,
+    metal_sffi_set_buffer, metal_sffi_set_bytes
+}
+
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64) -> i64
+extern fn rt_ptr_write_i32(ptr: i64, offset: i64, value: i64) -> i64
+extern fn rt_ptr_read_i64(ptr: i64, offset: i64) -> i64
+extern fn rt_metal_buffer_download(data_ptr: i64, buffer: i64, size: i64) -> i64
+extern fn rt_metal_set_bytes(encoder: i64, data_ptr: i64, length: i64, index: i64) -> i64
+
+fn _metal_status_message(code: i64) -> text:
+    if code == 1:
+        return "Metal SFFI not available"
+    if code == 2:
+        return "Metal runtime init failed"
+    if code == 3:
+        return "No Metal devices found"
+    if code == 4:
+        return "Metal device creation failed"
+    if code == 5:
+        return "Metal command queue creation failed"
+    if code == 6:
+        return "Metal shader compilation failed"
+    if code == 7:
+        return "Metal compute pipeline creation failed"
+    "Metal initialization failed"
+
+fn _metal_i64(v: i32) -> i64:
+    v as i64
+
+fn _metal_i32_to_u8(v: i32) -> u8:
+    v as u8
+
+fn _metal_pack_i32_le(buf: [u8], offset: i32, v: i32) -> i32:
+    buf[offset] = _metal_i32_to_u8(v & 0xFF)
+    buf[offset + 1] = _metal_i32_to_u8((v >> 8) & 0xFF)
+    buf[offset + 2] = _metal_i32_to_u8((v >> 16) & 0xFF)
+    buf[offset + 3] = _metal_i32_to_u8((v >> 24) & 0xFF)
+    offset + 4
+
+fn _metal_pack_u32_le(buf: [u8], offset: i32, v: u32) -> i32:
+    _metal_pack_i32_le(buf, offset, v as i32)
+
+fn _metal_pack_clear_params(color: u32, fb_w: i32, fb_h: i32) -> [u8]:
+    var buf: [u8] = [0u8; 12]
+    var off = 0
+    off = _metal_pack_u32_le(buf, off, color)
+    off = _metal_pack_i32_le(buf, off, fb_w)
+    off = _metal_pack_i32_le(buf, off, fb_h)
+    buf
+
+fn _metal_pack_rect_params(x: i32, y: i32, w: i32, h: i32, color: u32, fb_w: i32, fb_h: i32) -> [u8]:
+    var buf: [u8] = [0u8; 28]
+    var off = 0
+    off = _metal_pack_i32_le(buf, off, x)
+    off = _metal_pack_i32_le(buf, off, y)
+    off = _metal_pack_i32_le(buf, off, w)
+    off = _metal_pack_i32_le(buf, off, h)
+    off = _metal_pack_u32_le(buf, off, color)
+    off = _metal_pack_i32_le(buf, off, fb_w)
+    off = _metal_pack_i32_le(buf, off, fb_h)
+    buf
+
+fn probe_metal() -> BackendProbeResult:
+    if not is_macos():
+        var r = BackendProbeResult.unavailable("metal", "Metal requires macOS")
+        r.api_name = "metal"
+        r.feature_gate = "macos"
+        r.shader_format = "msl"
+        return r
+    var session = MetalSession.create("legacy_no_session")
+    if session.init():
+        session.release()
+        var ok = BackendProbeResult.success("metal", "Metal initialized")
+        ok.api_name = "metal"
+        ok.feature_gate = "metal_runtime"
+        ok.shader_format = "msl"
+        return ok
+    val status = session.error_code()
+    var fail = BackendProbeResult.failed("metal", _metal_status_message(status))
+    fail.api_name = "metal"
+    fail.feature_gate = "metal_runtime"
+    fail.shader_format = "msl"
+    fail
+
+class MetalBackend:
+    mirror: SoftwareBackend
+    session: MetalSession
+    command_queue: i64
+    d_framebuffer: i64
+    w: i32
+    h: i32
+    dirty: bool
+    initialized: bool
+    gpu_frame_complete: bool
+    last_probe: BackendProbeResult
+
+    static fn create() -> MetalBackend:
+        make_metal_backend()
+
+fn make_metal_backend():
+    MetalBackend(
+        mirror: SoftwareBackend.create(),
+        session: MetalSession.create("legacy_no_session"),
+        command_queue: 0,
+        d_framebuffer: 0,
+        w: 0,
+        h: 0,
+        dirty: false,
+        initialized: false,
+        gpu_frame_complete: false,
+        last_probe: BackendProbeResult.unavailable("metal", "not probed")
+    )
+
+impl RenderBackend for MetalBackend:
+    fn name() -> text:
+        "metal"
+
+    me init(width: i32, height: i32) -> bool:
+        if not is_macos():
+            self.last_probe = probe_metal()
+            self.initialized = false
+            self.gpu_frame_complete = false
+            return false
+        if not self.session.init():
+            val status = self.session.error_code()
+            self.last_probe = BackendProbeResult.failed("metal", _metal_status_message(status))
+            self.last_probe.api_name = "metal"
+            self.last_probe.feature_gate = "metal_runtime"
+            self.last_probe.shader_format = "msl"
+            self.initialized = false
+            self.gpu_frame_complete = false
+            return false
+        val total = width * height
+        val bytes = _metal_i64(total) * 4
+        self.d_framebuffer = metal_sffi_alloc_buffer(self.session.device, bytes)
+        if self.d_framebuffer == 0:
+            self.session.release()
+            self.last_probe = BackendProbeResult.failed("metal", "Metal framebuffer allocation failed")
+            self.last_probe.api_name = "metal"
+            self.last_probe.feature_gate = "metal_runtime"
+            self.last_probe.shader_format = "msl"
+            self.initialized = false
+            self.gpu_frame_complete = false
+            return false
+        if not self.mirror.init(width, height):
+            metal_sffi_free_buffer(self.d_framebuffer)
+            self.d_framebuffer = 0
+            self.session.release()
+            self.last_probe = BackendProbeResult.failed("metal", "Metal mirror surface allocation failed")
+            self.last_probe.api_name = "metal"
+            self.last_probe.feature_gate = "metal_runtime"
+            self.last_probe.shader_format = "msl"
+            self.initialized = false
+            self.gpu_frame_complete = false
+            return false
+        self.command_queue = self.session.command_queue
+        self.w = width
+        self.h = height
+        self.dirty = false
+        self.initialized = true
+        self.gpu_frame_complete = false
+        self.last_probe = BackendProbeResult.success("metal", "Metal initialized")
+        self.last_probe.api_name = "metal"
+        self.last_probe.feature_gate = "metal_runtime"
+        self.last_probe.shader_format = "msl"
+        self.initialized
+
+    me shutdown():
+        self.mirror.shutdown()
+        if self.d_framebuffer != 0:
+            metal_sffi_free_buffer(self.d_framebuffer)
+            self.d_framebuffer = 0
+        self.session.release()
+        self.command_queue = 0
+        self.w = 0
+        self.h = 0
+        self.dirty = false
+        self.initialized = false
+        self.gpu_frame_complete = false
+
+    me clear(color: u32):
+        self.mirror.clear(color)
+        if self.initialized and self.d_framebuffer != 0 and self.session.pipe_clear != 0:
+            self.gpu_frame_complete = self._dispatch_metal_clear(color)
+            self.dirty = true
+        else:
+            self.gpu_frame_complete = false
+    me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        self.mirror.draw_rect(x, y, w, h, color)
+        if self.initialized and self.d_framebuffer != 0 and self.session.pipe_rect_outline != 0:
+            self.gpu_frame_complete = self.gpu_frame_complete and self._dispatch_metal_rect_outline(x, y, w, h, color)
+            self.dirty = true
+        else:
+            self.gpu_frame_complete = false
+    me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
+        self.mirror.draw_rect_filled(x, y, w, h, color)
+        if self.initialized and self.d_framebuffer != 0 and self.session.pipe_rect_filled != 0:
+            self.gpu_frame_complete = self.gpu_frame_complete and self._dispatch_metal_rect_filled(x, y, w, h, color)
+            self.dirty = true
+        else:
+            self.gpu_frame_complete = false
+    me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
+        self.mirror.draw_line(x1, y1, x2, y2, color, thickness)
+        if self.initialized and self.d_framebuffer != 0 and self.session.pipe_line != 0:
+            self.gpu_frame_complete = self.gpu_frame_complete and self._dispatch_metal_line(x1, y1, x2, y2, color, thickness)
+            self.dirty = true
+        else:
+            self.gpu_frame_complete = false
+    me draw_circle(cx: i32, cy: i32, r: i32, color: u32):
+        self.mirror.draw_circle(cx, cy, r, color)
+        if self.initialized and self.d_framebuffer != 0 and self.session.pipe_circle != 0:
+            self.gpu_frame_complete = self.gpu_frame_complete and self._dispatch_metal_circle(cx, cy, r, color, false)
+            self.dirty = true
+        else:
+            self.gpu_frame_complete = false
+    me draw_circle_filled(cx: i32, cy: i32, r: i32, color: u32):
+        self.mirror.draw_circle_filled(cx, cy, r, color)
+        if self.initialized and self.d_framebuffer != 0 and self.session.pipe_circle_filled != 0:
+            self.gpu_frame_complete = self.gpu_frame_complete and self._dispatch_metal_circle(cx, cy, r, color, true)
+            self.dirty = true
+        else:
+            self.gpu_frame_complete = false
+    me draw_rounded_rect(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32):
+        self.mirror.draw_rounded_rect(x, y, w, h, radius, color)
+        if self.initialized and self.d_framebuffer != 0 and self.session.pipe_rounded_rect != 0:
+            self.gpu_frame_complete = self.gpu_frame_complete and self._dispatch_metal_rounded_rect(x, y, w, h, radius, color)
+            self.dirty = true
+        else:
+            self.gpu_frame_complete = false
+    me draw_triangle_filled(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32):
+        self.mirror.draw_triangle_filled(x1, y1, x2, y2, x3, y3, color)
+        self.gpu_frame_complete = false
+    me draw_gradient_rect(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32):
+        self.mirror.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
+        if self.initialized and self.d_framebuffer != 0 and self.session.pipe_gradient != 0:
+            self.gpu_frame_complete = self.gpu_frame_complete and self._dispatch_metal_gradient_rect(x, y, w, h, top_color, bottom_color)
+            self.dirty = true
+        else:
+            self.gpu_frame_complete = false
+    me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
+        self.mirror.draw_text(x, y, text_val, color, font_size)
+        if self.initialized and self.d_framebuffer != 0 and self.session.pipe_rect_filled != 0:
+            self.gpu_frame_complete = self.gpu_frame_complete and self._dispatch_metal_text(x, y, text_val, color, font_size)
+            self.dirty = true
+        else:
+            self.gpu_frame_complete = false
+    me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        self.mirror.draw_image(x, y, w, h, pixels)
+        self.gpu_frame_complete = false
+    me set_clip(x: i32, y: i32, w: i32, h: i32):
+        self.mirror.set_clip(x, y, w, h)
+        self.gpu_frame_complete = false
+    me clear_clip():
+        self.mirror.clear_clip()
+        self.gpu_frame_complete = false
+    me set_mask(mask_pixels: [u8], w: i32, h: i32):
+        self.mirror.set_mask(mask_pixels, w, h)
+        self.gpu_frame_complete = false
+    me clear_mask():
+        self.mirror.clear_mask()
+        self.gpu_frame_complete = false
+    me present():
+        self.mirror.present()
+    fn read_pixels() -> [u32]:
+        if self.gpu_frame_complete:
+            val gpu_pixels = self.read_pixels_gpu_only()
+            if gpu_pixels.len() == (self.w * self.h):
+                return gpu_pixels
+        self.mirror.read_pixels()
+    fn width() -> i32:
+        if self.w > 0:
+            return self.w
+        self.mirror.width()
+    fn height() -> i32:
+        if self.h > 0:
+            return self.h
+        self.mirror.height()
+
+impl MetalBackend:
+    me read_pixels_gpu_only() -> [u32]:
+        if not self.initialized or self.d_framebuffer == 0:
+            return []
+        val total_i32 = self.w * self.h
+        val total_pixels = _metal_i64(total_i32)
+        val byte_size = total_pixels * 4
+        val host = rt_alloc(byte_size + 8)
+        if host == 0:
+            return []
+        val ok = rt_metal_buffer_download(host, self.d_framebuffer, byte_size)
+        if ok == 0:
+            rt_free(host)
+            return []
+        var pixels: [u32] = [0u32; total_i32]
+        var i: i64 = 0
+        while i < total_pixels:
+            val pair = rt_ptr_read_i64(host, i * 4)
+            pixels[i as i32] = (pair & 0xFFFFFFFF) as u32
+            i = i + 1
+            if i < total_pixels:
+                pixels[i as i32] = ((pair >> 32) & 0xFFFFFFFF) as u32
+                i = i + 1
+        rt_free(host)
+        pixels
+
+    me _dispatch_metal_clear(color: u32) -> bool:
+        val params = rt_alloc(12)
+        if params == 0:
+            return false
+        rt_ptr_write_i32(params, 0, color as i64)
+        rt_ptr_write_i32(params, 4, self.w as i64)
+        rt_ptr_write_i32(params, 8, self.h as i64)
+        val pipeline = self.session.pipe_clear
+        val threads = _metal_i64(self.w) * _metal_i64(self.h)
+        val ok = self._dispatch_metal_1d(pipeline, threads, 256, params, 12)
+        rt_free(params)
+        ok
+
+    me _dispatch_metal_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32) -> bool:
+        if w <= 0 or h <= 0:
+            return true
+        val params = rt_alloc(28)
+        if params == 0:
+            return false
+        rt_ptr_write_i32(params, 0, x as i64)
+        rt_ptr_write_i32(params, 4, y as i64)
+        rt_ptr_write_i32(params, 8, w as i64)
+        rt_ptr_write_i32(params, 12, h as i64)
+        rt_ptr_write_i32(params, 16, color as i64)
+        rt_ptr_write_i32(params, 20, self.w as i64)
+        rt_ptr_write_i32(params, 24, self.h as i64)
+        val pipeline = self.session.pipe_rect_filled
+        val ok = self._dispatch_metal_2d(pipeline, w, h, params, 28)
+        rt_free(params)
+        ok
+
+    me _dispatch_metal_rect_outline(x: i32, y: i32, w: i32, h: i32, color: u32) -> bool:
+        if w <= 0 or h <= 0:
+            return true
+        val params = rt_alloc(28)
+        if params == 0:
+            return false
+        rt_ptr_write_i32(params, 0, x as i64)
+        rt_ptr_write_i32(params, 4, y as i64)
+        rt_ptr_write_i32(params, 8, w as i64)
+        rt_ptr_write_i32(params, 12, h as i64)
+        rt_ptr_write_i32(params, 16, color as i64)
+        rt_ptr_write_i32(params, 20, self.w as i64)
+        rt_ptr_write_i32(params, 24, self.h as i64)
+        val pipeline = self.session.pipe_rect_outline
+        val ok = self._dispatch_metal_2d(pipeline, w, h, params, 28)
+        rt_free(params)
+        ok
+
+    me _dispatch_metal_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32) -> bool:
+        val params = rt_alloc(32)
+        if params == 0:
+            return false
+        rt_ptr_write_i32(params, 0, x1 as i64)
+        rt_ptr_write_i32(params, 4, y1 as i64)
+        rt_ptr_write_i32(params, 8, x2 as i64)
+        rt_ptr_write_i32(params, 12, y2 as i64)
+        rt_ptr_write_i32(params, 16, color as i64)
+        rt_ptr_write_i32(params, 20, thickness as i64)
+        rt_ptr_write_i32(params, 24, self.w as i64)
+        rt_ptr_write_i32(params, 28, self.h as i64)
+        var dx = x2 - x1
+        if dx < 0:
+            dx = 0 - dx
+        var dy = y2 - y1
+        if dy < 0:
+            dy = 0 - dy
+        var steps = dx
+        if dy > steps:
+            steps = dy
+        if steps <= 0:
+            steps = 1
+        val pipeline = self.session.pipe_line
+        val ok = self._dispatch_metal_1d(pipeline, (steps + 1) as i64, 256, params, 32)
+        rt_free(params)
+        ok
+
+    me _dispatch_metal_circle(cx: i32, cy: i32, r: i32, color: u32, filled: bool) -> bool:
+        if r <= 0:
+            return true
+        val params = rt_alloc(28)
+        if params == 0:
+            return false
+        rt_ptr_write_i32(params, 0, cx as i64)
+        rt_ptr_write_i32(params, 4, cy as i64)
+        rt_ptr_write_i32(params, 8, r as i64)
+        rt_ptr_write_i32(params, 12, color as i64)
+        rt_ptr_write_i32(params, 16, self.w as i64)
+        rt_ptr_write_i32(params, 20, self.h as i64)
+        if filled:
+            rt_ptr_write_i32(params, 24, 1)
+        else:
+            rt_ptr_write_i32(params, 24, 0)
+        val pipeline = if filled: self.session.pipe_circle_filled else: self.session.pipe_circle
+        val extent = 2 * r + 1
+        val ok = self._dispatch_metal_2d(pipeline, extent, extent, params, 28)
+        rt_free(params)
+        ok
+
+    me _dispatch_metal_rounded_rect(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32) -> bool:
+        if w <= 0 or h <= 0:
+            return true
+        val params = rt_alloc(32)
+        if params == 0:
+            return false
+        rt_ptr_write_i32(params, 0, x as i64)
+        rt_ptr_write_i32(params, 4, y as i64)
+        rt_ptr_write_i32(params, 8, w as i64)
+        rt_ptr_write_i32(params, 12, h as i64)
+        rt_ptr_write_i32(params, 16, radius as i64)
+        rt_ptr_write_i32(params, 20, color as i64)
+        rt_ptr_write_i32(params, 24, self.w as i64)
+        rt_ptr_write_i32(params, 28, self.h as i64)
+        val pipeline = self.session.pipe_rounded_rect
+        val ok = self._dispatch_metal_2d(pipeline, w, h, params, 32)
+        rt_free(params)
+        ok
+
+    me _dispatch_metal_gradient_rect(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32) -> bool:
+        if w <= 0 or h <= 0:
+            return true
+        val params = rt_alloc(32)
+        if params == 0:
+            return false
+        rt_ptr_write_i32(params, 0, x as i64)
+        rt_ptr_write_i32(params, 4, y as i64)
+        rt_ptr_write_i32(params, 8, w as i64)
+        rt_ptr_write_i32(params, 12, h as i64)
+        rt_ptr_write_i32(params, 16, top_color as i64)
+        rt_ptr_write_i32(params, 20, bottom_color as i64)
+        rt_ptr_write_i32(params, 24, self.w as i64)
+        rt_ptr_write_i32(params, 28, self.h as i64)
+        val pipeline = self.session.pipe_gradient
+        val ok = self._dispatch_metal_2d(pipeline, w, h, params, 32)
+        rt_free(params)
+        ok
+
+    me _dispatch_metal_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32) -> bool:
+        val gh = glyph_height()
+        var scale = font_size / gh
+        if scale < 1:
+            scale = 1
+        val advance = glyph_advance(scale)
+        var ok = true
+        var i: i64 = 0
+        var cursor_x = x
+        while i < text_val.len():
+            val code = text_val.char_code_at(i)
+            val ch = "{code as char}"
+            val bitmap = glyph_data(ch)
+            var gy = 0
+            while gy < gh:
+                val row_data = bitmap[gy]
+                var gx = 0
+                while gx < 5:
+                    val bit = (row_data >> (4 - gx)) & 1
+                    if bit != 0:
+                        ok = ok and self._dispatch_metal_rect_filled(cursor_x + gx * scale, y + gy * scale, scale, scale, color)
+                    gx = gx + 1
+                gy = gy + 1
+            cursor_x = cursor_x + advance
+            i = i + 1
+        ok
+
+    me _dispatch_metal_1d(pipeline: i64, threads: i64, block_x: i64, params: i64, params_len: i64) -> bool:
+        # TODO: [runtime][P2] Interpreter loses the `self` binding when a struct
+        # field is passed inline as a call argument after a prior extern call in
+        # the same method ("variable `self` not found"). Hoisting self.* into
+        # locals first is the workaround applied here and in _dispatch_metal_2d.
+        val q = self.command_queue
+        val fb = self.d_framebuffer
+        val cmd = metal_sffi_create_command_buffer(q)
+        if cmd == 0:
+            return false
+        val encoder = metal_sffi_create_compute_encoder(cmd)
+        if encoder == 0:
+            return false
+        metal_sffi_set_buffer(encoder, fb, 0, 0)
+        rt_metal_set_bytes(encoder, params, params_len, 1)
+        metal_sffi_dispatch_compute(encoder, pipeline, threads, 1, 1, block_x, 1, 1)
+        metal_sffi_end_compute_encoder(encoder)
+        metal_sffi_commit_command_buffer(cmd)
+        metal_sffi_wait_completed(cmd)
+
+    me _dispatch_metal_2d(pipeline: i64, w: i32, h: i32, params: i64, params_len: i64) -> bool:
+        val q = self.command_queue
+        val fb = self.d_framebuffer
+        val cmd = metal_sffi_create_command_buffer(q)
+        if cmd == 0:
+            return false
+        val encoder = metal_sffi_create_compute_encoder(cmd)
+        if encoder == 0:
+            return false
+        metal_sffi_set_buffer(encoder, fb, 0, 0)
+        rt_metal_set_bytes(encoder, params, params_len, 1)
+        val block_x = 16
+        val block_y = 16
+        val grid_x = ((_metal_i64(w) + block_x - 1) / block_x) * block_x
+        val grid_y = ((_metal_i64(h) + block_y - 1) / block_y) * block_y
+        metal_sffi_dispatch_compute(encoder, pipeline, grid_x, grid_y, 1, block_x, block_y, 1)
+        metal_sffi_end_compute_encoder(encoder)
+        metal_sffi_commit_command_buffer(cmd)
+        metal_sffi_wait_completed(cmd)
+
+impl Engine2DExtended for MetalBackend:
+    me draw_text_bg(x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32):
+        self.mirror.draw_text_bg(x, y, text_val, fg, bg, font_size)
+        self.gpu_frame_complete = false
+
+    me draw_ellipse(cx: i32, cy: i32, rx: i32, ry: i32, color: u32):
+        self.mirror.draw_ellipse(cx, cy, rx, ry, color)
+        self.gpu_frame_complete = false
+
+    me draw_ellipse_filled(cx: i32, cy: i32, rx: i32, ry: i32, color: u32):
+        self.mirror.draw_ellipse_filled(cx, cy, rx, ry, color)
+        self.gpu_frame_complete = false
+
+    me draw_arc(cx: i32, cy: i32, r: i32, start_deg: i32, end_deg: i32, color: u32, thickness: i32):
+        self.mirror.draw_arc(cx, cy, r, start_deg, end_deg, color, thickness)
+        self.gpu_frame_complete = false
+
+    me draw_bezier(x1: i32, y1: i32, cx1: i32, cy1: i32, cx2: i32, cy2: i32, x2: i32, y2: i32, color: u32, thickness: i32):
+        self.mirror.draw_bezier(x1, y1, cx1, cy1, cx2, cy2, x2, y2, color, thickness)
+        self.gpu_frame_complete = false
+
+    me draw_polygon_filled(xs: [i32], ys: [i32], count: i32, color: u32):
+        self.mirror.draw_polygon_filled(xs, ys, count, color)
+        self.gpu_frame_complete = false
+
+    me draw_polyline(xs: [i32], ys: [i32], count: i32, color: u32, thickness: i32):
+        self.mirror.draw_polyline(xs, ys, count, color, thickness)
+        self.gpu_frame_complete = false
+
+    me draw_rect_thick(x: i32, y: i32, w: i32, h: i32, color: u32, thickness: i32):
+        self.mirror.draw_rect_thick(x, y, w, h, color, thickness)
+        self.gpu_frame_complete = false
+
+    me draw_circle_thick(cx: i32, cy: i32, r: i32, color: u32, thickness: i32):
+        self.mirror.draw_circle_thick(cx, cy, r, color, thickness)
+        self.gpu_frame_complete = false
+
+    me draw_rounded_rect_outline(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32, thickness: i32):
+        self.mirror.draw_rounded_rect_outline(x, y, w, h, radius, color, thickness)
+        self.gpu_frame_complete = false
+
+    me draw_gradient_rect_h(x: i32, y: i32, w: i32, h: i32, left_color: u32, right_color: u32):
+        self.mirror.draw_gradient_rect_h(x, y, w, h, left_color, right_color)
+        self.gpu_frame_complete = false
+
+    me draw_radial_gradient(cx: i32, cy: i32, r: i32, center_color: u32, edge_color: u32):
+        self.mirror.draw_radial_gradient(cx, cy, r, center_color, edge_color)
+        self.gpu_frame_complete = false
+
+    me draw_rect_blend(x: i32, y: i32, w: i32, h: i32, color: u32):
+        self.mirror.draw_rect_blend(x, y, w, h, color)
+        self.gpu_frame_complete = false
+
+    me draw_image_blend(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        self.mirror.draw_image_blend(x, y, w, h, pixels)
+        self.gpu_frame_complete = false
+
+    me draw_image_scaled(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
+        self.mirror.draw_image_scaled(dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
+        self.gpu_frame_complete = false
+
+    me draw_triangle_outline(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32, thickness: i32):
+        self.mirror.draw_triangle_outline(x1, y1, x2, y2, x3, y3, color, thickness)
+        self.gpu_frame_complete = false
+
+    me draw_blur_rect(x: i32, y: i32, w: i32, h: i32, radius: i32):
+        self.mirror.draw_blur_rect(x, y, w, h, radius)
+        self.gpu_frame_complete = false
+
+    me draw_shadow_rect(x: i32, y: i32, w: i32, h: i32, offset_x: i32, offset_y: i32, blur_r: i32, color: u32):
+        self.mirror.draw_shadow_rect(x, y, w, h, offset_x, offset_y, blur_r, color)
+        self.gpu_frame_complete = false
+
+    me draw_image_transform(dst_x: i32, dst_y: i32, src_w: i32, src_h: i32, a: i32, b: i32, c: i32, d: i32, tx: i32, ty: i32, pixels: [u32]):
+        self.mirror.draw_image_transform(dst_x, dst_y, src_w, src_h, a, b, c, d, tx, ty, pixels)
+        self.gpu_frame_complete = false
+
+    me draw_rect_blend_mode(x: i32, y: i32, w: i32, h: i32, color: u32, mode: i32):
+        self.mirror.draw_rect_blend(x, y, w, h, color)
+        self.gpu_frame_complete = false

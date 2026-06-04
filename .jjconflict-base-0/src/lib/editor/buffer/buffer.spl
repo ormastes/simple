@@ -1,0 +1,473 @@
+# Editor Buffer — mutable text buffer with cursor, viewport, and decorations.
+#
+# Provides: EditorBuffer, EditCommand, EditResult, edit_ok, edit_fail,
+#           SemanticToken, InlayHintDeco, CodeLensDeco, SelectionRangeDeco, FoldRangeDeco.
+
+use std.editor.buffer.piece_table.{PieceTable}
+use std.editor.common.types.{EditorViewport, EditorBufferId}
+
+struct EditCommand:
+    name: text
+    payload: text
+    count: i64
+
+struct EditResult:
+    ok: bool
+    message: text
+    redraw: bool
+    quit: bool
+
+fn edit_ok(message: text) -> EditResult:
+    EditResult(ok: true, message: message, redraw: true, quit: false)
+
+fn edit_fail(message: text) -> EditResult:
+    EditResult(ok: false, message: message, redraw: false, quit: false)
+
+# Stable identifier for a buffer (matches EditorBufferId in common/types).
+struct SemanticToken:
+    row: i64
+    col: i64
+    length: i64
+    token_type: i64
+
+struct InlayHintDeco:
+    row: i64
+    col: i64
+    label: text
+
+struct CodeLensDeco:
+    row: i64
+    label: text
+    command_name: text
+    command_payload: text
+
+struct SelectionRangeDeco:
+    start_row: i64
+    start_col: i64
+    end_row: i64
+    end_col: i64
+
+struct SelectionRangeState:
+    active: bool
+    start_row: i64
+    start_col: i64
+    end_row: i64
+    end_col: i64
+
+struct FoldRangeDeco:
+    start_row: i64
+    end_row: i64
+
+class EditorBuffer:
+    table: PieceTable
+    id: EditorBufferId
+    path: text
+    cursor_row: i64
+    cursor_col: i64
+    dirty: bool
+    viewport: EditorViewport
+    semantic_tokens: [SemanticToken]
+    inlay_hints: [InlayHintDeco]
+    code_lenses: [CodeLensDeco]
+    selection_range: SelectionRangeState
+    selection_ranges: [SelectionRangeDeco]
+    fold_ranges: [FoldRangeDeco]
+    folded_ranges: [FoldRangeDeco]
+    undo_text: text
+    undo_cursor_row: i64
+    undo_cursor_col: i64
+    undo_available: bool
+
+    static fn from_text(id: EditorBufferId, content: text) -> EditorBuffer:
+        EditorBuffer(
+            table: PieceTable.new(content),
+            id: id,
+            path: "",
+            cursor_row: 0,
+            cursor_col: 0,
+            dirty: false,
+            viewport: EditorViewport(top_row: 0, left_col: 0, width: 80, height: 24),
+            semantic_tokens: [],
+            inlay_hints: [],
+            code_lenses: [],
+            selection_range: SelectionRangeState(active: false, start_row: 0, start_col: 0, end_row: 0, end_col: 0),
+            selection_ranges: [],
+            fold_ranges: [],
+            folded_ranges: [],
+            undo_text: "",
+            undo_cursor_row: 0,
+            undo_cursor_col: 0,
+            undo_available: false
+        )
+
+    static fn new() -> EditorBuffer:
+        EditorBuffer.from_text(EditorBufferId(value: 0), "")
+
+    # --- cursor accessors (controllers use the *_value getters) ---
+    fn cursor_row_value() -> i64:
+        me.cursor_row
+
+    fn cursor_col_value() -> i64:
+        me.cursor_col
+
+    me move_cursor(row: i64, col: i64):
+        var r = row
+        var c = col
+        if r < 0:
+            r = 0
+        val max_row = me.table.line_count() - 1
+        if r > max_row:
+            r = max_row
+        if c < 0:
+            c = 0
+        val line_len = me.table.line_at(r).len()
+        if c > line_len:
+            c = line_len
+        me.cursor_row = r
+        me.cursor_col = c
+
+    me move_relative(line_delta: i64, col_delta: i64):
+        me.move_cursor(me.cursor_row + line_delta, me.cursor_col + col_delta)
+
+    me move_to_line_start():
+        me.cursor_col = 0
+
+    me move_to_line_end():
+        me.cursor_col = me.table.line_at(me.cursor_row).len()
+
+    me insert_at_cursor(text_to_insert: text):
+        if me.has_active_selection_range():
+            me.push_undo_snapshot()
+            me.replace_selection_ranges(text_to_insert)
+            me.dirty = true
+            return
+        me.table.insert(me.cursor_row, me.cursor_col, text_to_insert)
+        var newlines = 0
+        var last_len = 0
+        var i = 0
+        while i < text_to_insert.len():
+            if text_to_insert.char_at(i) == "\n":
+                newlines = newlines + 1
+                last_len = 0
+            else:
+                last_len = last_len + 1
+            i = i + 1
+        if newlines == 0:
+            me.cursor_col = me.cursor_col + text_to_insert.len()
+        else:
+            me.cursor_row = me.cursor_row + newlines
+            me.cursor_col = last_len
+        me.dirty = true
+
+    me delete_before_cursor():
+        if me.has_active_selection_range():
+            me.push_undo_snapshot()
+            me.replace_selection_ranges("")
+            me.dirty = true
+            return
+        if me.cursor_col > 0:
+            me.table.delete(me.cursor_row, me.cursor_col - 1, 1)
+            me.cursor_col = me.cursor_col - 1
+            me.dirty = true
+
+    me delete_at_cursor():
+        if me.has_active_selection_range():
+            me.push_undo_snapshot()
+            me.replace_selection_ranges("")
+            me.dirty = true
+            return
+        val line = me.table.line_at(me.cursor_row)
+        if me.cursor_col < line.len():
+            me.table.delete(me.cursor_row, me.cursor_col, 1)
+            me.dirty = true
+
+    # --- whole-buffer replacement (used by LSP/format/workspace edits) ---
+    me replace_content(content: text):
+        me.table = PieceTable.new(content)
+        me.dirty = true
+        val max_row = me.table.line_count() - 1
+        if me.cursor_row > max_row:
+            me.cursor_row = if max_row >= 0 then max_row else: 0
+        val line_len = me.table.line_at(me.cursor_row).len()
+        if me.cursor_col > line_len:
+            me.cursor_col = line_len
+
+    fn line_count() -> i64:
+        me.table.line_count()
+
+    fn line_at(n: i64) -> text:
+        me.table.line_at(n)
+
+    fn line_with_inlay_hints(row: i64) -> text:
+        val line = me.line_at(row)
+        var result = ""
+        var col = 0
+        while col <= line.len():
+            for hint in me.inlay_hints:
+                if hint.row == row and hint.col == col and hint.label != "":
+                    result = result + hint.label
+            if col < line.len():
+                result = result + line.char_at(col)
+            col = col + 1
+        result
+
+    fn full_text() -> text:
+        me.table.to_text()
+
+    fn to_text() -> text:
+        me.table.to_text()
+
+    # --- persistence ---
+    me save() -> bool:
+        if me.path == "":
+            return false
+        val ok = rt_file_write_text(me.path, me.to_text())
+        if ok:
+            me.dirty = false
+        ok
+
+    me save_as(path: text) -> bool:
+        me.path = path
+        me.save()
+
+    # --- undo/redo (snapshot stack lives elsewhere; safe no-op stubs) ---
+    me push_undo_snapshot():
+        me.undo_text = me.to_text()
+        me.undo_cursor_row = me.cursor_row
+        me.undo_cursor_col = me.cursor_col
+        me.undo_available = true
+
+    me undo():
+        if not me.undo_available:
+            return
+        me.table = PieceTable.new(me.undo_text)
+        me.cursor_row = me.undo_cursor_row
+        me.cursor_col = me.undo_cursor_col
+        me.undo_available = false
+        me.clear_selection_range()
+        me.dirty = true
+
+    me redo():
+        return
+
+    # --- viewport ---
+    me ensure_cursor_visible():
+        if me.cursor_row < me.viewport.top_row:
+            me.viewport.top_row = me.cursor_row
+        elif me.cursor_row >= me.viewport.top_row + me.viewport.height:
+            me.viewport.top_row = me.cursor_row - me.viewport.height + 1
+        if me.viewport.top_row < 0:
+            me.viewport.top_row = 0
+
+    fn visible_line_at(screen_row: i64) -> i64:
+        var row = me.viewport.top_row
+        var visible = 0
+        while row < me.line_count():
+            if visible == screen_row:
+                return row
+            visible = visible + 1
+            val folded_end = me.folded_end_line_for_header(row)
+            if folded_end > row:
+                row = folded_end + 1
+            else:
+                row = row + 1
+        row
+
+    # --- folds ---
+    me clear_folds():
+        me.fold_ranges = []
+        me.folded_ranges = []
+
+    me fold_range(start_row: i64, end_row: i64):
+        me.fold_ranges.push(FoldRangeDeco(start_row: start_row, end_row: end_row))
+        me.folded_ranges = me.fold_ranges
+
+    me toggle_fold_range(start_row: i64, end_row: i64):
+        if me.has_fold_range(start_row, end_row):
+            var kept: [FoldRangeDeco] = []
+            for f in me.fold_ranges:
+                if f.start_row != start_row or f.end_row != end_row:
+                    kept.push(f)
+            me.fold_ranges = kept
+            me.folded_ranges = me.fold_ranges
+        else:
+            me.fold_range(start_row, end_row)
+
+    fn has_fold_range(start_row: i64, end_row: i64) -> bool:
+        for f in me.fold_ranges:
+            if f.start_row == start_row and f.end_row == end_row:
+                return true
+        false
+
+    fn is_line_folded(row: i64) -> bool:
+        for f in me.fold_ranges:
+            if row > f.start_row and row <= f.end_row:
+                return true
+        false
+
+    fn folded_end_line_for_header(start_row: i64) -> i64:
+        for f in me.fold_ranges:
+            if f.start_row == start_row:
+                return f.end_row
+        -1
+
+    fn fold_state() -> text:
+        var parts: [text] = []
+        for f in me.fold_ranges:
+            parts.push(f.start_row.to_text() + "-" + f.end_row.to_text())
+        parts.join(",")
+
+    me restore_fold_state(state: text):
+        me.clear_folds()
+        if state == "":
+            return
+        val parts = state.split(",")
+        for part in parts:
+            val trimmed = part.trim()
+            if trimmed == "":
+                continue
+            val pair = trimmed.split("-")
+            if pair.len() != 2:
+                continue
+            val start_row = pair[0].to_int() ?? -1
+            val end_row = pair[1].to_int() ?? -1
+            if start_row >= 0 and end_row >= start_row:
+                me.fold_range(start_row, end_row)
+        for f in me.fold_ranges:
+            if me.cursor_row > f.start_row and me.cursor_row <= f.end_row:
+                me.cursor_row = f.start_row
+                me.cursor_col = 0
+
+    me unfold_range(start_row: i64, end_row: i64):
+        var kept: [FoldRangeDeco] = []
+        for f in me.fold_ranges:
+            if f.start_row != start_row or f.end_row != end_row:
+                kept.push(f)
+        me.fold_ranges = kept
+        me.folded_ranges = me.fold_ranges
+
+    me unfold_range_start(start_row: i64):
+        var kept: [FoldRangeDeco] = []
+        for f in me.fold_ranges:
+            if f.start_row != start_row:
+                kept.push(f)
+        me.fold_ranges = kept
+        me.folded_ranges = me.fold_ranges
+
+    fn line_with_fold_marker(row: i64) -> text:
+        val end_row = me.folded_end_line_for_header(row)
+        val line_text: text = me.table.line_at(row)
+        if end_row >= row:
+            val text_seed: text = line_text.slice(0, 0)
+            val marked: text = text_seed + "[+" + (end_row - row).to_text() + " folded | za] " + line_text
+            return marked
+        return line_text
+
+    # --- semantic tokens ---
+    me clear_semantic_tokens():
+        me.semantic_tokens = []
+
+    me add_semantic_token(row: i64, col: i64, length: i64, token_type: i64):
+        me.semantic_tokens.push(SemanticToken(row: row, col: col, length: length, token_type: token_type))
+
+    fn semantic_token_type_at(row: i64, col: i64) -> i64:
+        for tok in me.semantic_tokens:
+            if tok.row == row and col >= tok.col and col < tok.col + tok.length:
+                return tok.token_type
+        -1
+
+    # --- inlay hints ---
+    me clear_inlay_hints():
+        me.inlay_hints = []
+
+    me add_inlay_hint(row: i64, col: i64, label: text):
+        me.inlay_hints.push(InlayHintDeco(row: row, col: col, label: label))
+
+    fn has_inlay_hints() -> bool:
+        me.inlay_hints.len() > 0
+
+    # --- code lenses ---
+    me clear_code_lenses():
+        me.code_lenses = []
+
+    me add_code_lens(row: i64, label: text, command_name: text, command_payload: text):
+        me.code_lenses.push(CodeLensDeco(row: row, label: label, command_name: command_name, command_payload: command_payload))
+
+    fn line_with_code_lenses(row: i64) -> text:
+        var line = me.line_at(row)
+        for lens in me.code_lenses:
+            if lens.row == row and lens.label != "":
+                line = line + "  [" + lens.label + "]"
+        line
+
+    # --- selection ranges ---
+    me clear_selection_range():
+        me.selection_range = SelectionRangeState(active: false, start_row: 0, start_col: 0, end_row: 0, end_col: 0)
+        me.selection_ranges = []
+
+    me set_primary_selection_range(start_row: i64, start_col: i64, end_row: i64, end_col: i64):
+        me.selection_range = SelectionRangeState(active: true, start_row: start_row, start_col: start_col, end_row: end_row, end_col: end_col)
+        me.selection_ranges = [SelectionRangeDeco(start_row: start_row, start_col: start_col, end_row: end_row, end_col: end_col)]
+
+    me set_selection_range(start_row: i64, start_col: i64, end_row: i64, end_col: i64):
+        me.set_primary_selection_range(start_row, start_col, end_row, end_col)
+
+    me add_selection_range(start_row: i64, start_col: i64, end_row: i64, end_col: i64):
+        if not me.selection_range.active:
+            me.selection_range = SelectionRangeState(active: true, start_row: start_row, start_col: start_col, end_row: end_row, end_col: end_col)
+        me.selection_ranges.push(SelectionRangeDeco(start_row: start_row, start_col: start_col, end_row: end_row, end_col: end_col))
+
+    fn has_active_selection_range() -> bool:
+        me.selection_range.active or me.selection_ranges.len() > 0
+
+    fn selection_range_count() -> i64:
+        me.selection_ranges.len()
+
+    fn line_has_selection(row: i64) -> bool:
+        for sel in me.selection_ranges:
+            if row >= sel.start_row and row <= sel.end_row:
+                return true
+        false
+
+    fn position_selected(row: i64, col: i64) -> bool:
+        for sel in me.selection_ranges:
+            if row < sel.start_row or row > sel.end_row:
+                continue
+            val after_start = row > sel.start_row or col >= sel.start_col
+            val before_end = row < sel.end_row or col < sel.end_col
+            if after_start and before_end:
+                return true
+        false
+
+    me replace_selection_ranges(replacement: text):
+        if me.selection_ranges.len() == 0:
+            return
+        val current_text = me.to_text()
+        var lines = current_text.split("\n")
+        var first_row = me.selection_ranges[0].start_row
+        var first_col = me.selection_ranges[0].start_col
+        var i = me.selection_ranges.len() - 1
+        while i >= 0:
+            val sel = me.selection_ranges[i]
+            if sel.start_row == sel.end_row and sel.start_row >= 0 and sel.start_row < lines.len():
+                val line = lines[sel.start_row]
+                var start_col = sel.start_col
+                var end_col = sel.end_col
+                if start_col < 0:
+                    start_col = 0
+                if end_col < start_col:
+                    end_col = start_col
+                if start_col > line.len():
+                    start_col = line.len()
+                if end_col > line.len():
+                    end_col = line.len()
+                lines[sel.start_row] = line.slice(0, start_col) + replacement + line.slice(end_col, line.len())
+                first_row = sel.start_row
+                first_col = start_col
+            i = i - 1
+        me.table = PieceTable.new(lines.join("\n"))
+        me.cursor_row = first_row
+        me.cursor_col = first_col + replacement.len()
+        me.clear_selection_range()
+
+extern fn rt_file_write_text(path: text, content: text) -> bool

@@ -1,0 +1,107 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_ROOT="${BUILD_ROOT:-build/electron_generated_gui_web_parity_matrix_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/electron_generated_gui_web_parity_matrix_evidence_$(date -u +%F).md}"
+TIMEOUT_SECS="${ELECTRON_BITMAP_TIMEOUT_SECS:-20}"
+
+mkdir -p "$BUILD_ROOT" "$(dirname -- "$REPORT_PATH")"
+rm -f "$BUILD_ROOT/evidence.env" "$REPORT_PATH"
+
+field_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" | tail -n 1
+}
+
+run_case() {
+    width="$1"
+    height="$2"
+    label="${width}x${height}"
+    case_dir="$BUILD_ROOT/$label"
+    case_report="$case_dir/report.md"
+    mkdir -p "$case_dir"
+
+    set +e
+    BUILD_DIR="$case_dir" REPORT_PATH="$case_report" ELECTRON_BITMAP_WIDTH="$width" ELECTRON_BITMAP_HEIGHT="$height" ELECTRON_BITMAP_TIMEOUT_SECS="$TIMEOUT_SECS" \
+        sh scripts/check-electron-generated-gui-web-parity-evidence.shs >"$case_dir/stdout.env" 2>"$case_dir/stderr.log"
+    code=$?
+    set -e
+
+    env_file="$case_dir/evidence.env"
+    status=""
+    mismatch=""
+    simple_checksum=""
+    electron_checksum=""
+    simple_weighted=""
+    electron_weighted=""
+    tolerance=""
+    watchdog=""
+    if [ -s "$env_file" ]; then
+        status="$(field_of electron_generated_gui_web_status "$env_file")"
+        mismatch="$(field_of electron_generated_gui_web_mismatch_count "$env_file")"
+        simple_checksum="$(field_of electron_generated_gui_web_simple_checksum "$env_file")"
+        electron_checksum="$(field_of electron_generated_gui_web_electron_checksum "$env_file")"
+        simple_weighted="$(field_of electron_generated_gui_web_simple_weighted_checksum "$env_file")"
+        electron_weighted="$(field_of electron_generated_gui_web_electron_weighted_checksum "$env_file")"
+        tolerance="$(field_of electron_generated_gui_web_blur_or_tolerance_used "$env_file")"
+        watchdog="$(field_of electron_generated_gui_web_watchdog_teardown "$env_file")"
+    fi
+
+    {
+        echo "electron_generated_gui_web_matrix_case=${label}"
+        echo "electron_generated_gui_web_matrix_${label}_exit_code=$code"
+        echo "electron_generated_gui_web_matrix_${label}_status=$status"
+        echo "electron_generated_gui_web_matrix_${label}_mismatch_count=$mismatch"
+        echo "electron_generated_gui_web_matrix_${label}_simple_checksum=$simple_checksum"
+        echo "electron_generated_gui_web_matrix_${label}_electron_checksum=$electron_checksum"
+        echo "electron_generated_gui_web_matrix_${label}_simple_weighted_checksum=$simple_weighted"
+        echo "electron_generated_gui_web_matrix_${label}_electron_weighted_checksum=$electron_weighted"
+        echo "electron_generated_gui_web_matrix_${label}_blur_or_tolerance_used=$tolerance"
+        echo "electron_generated_gui_web_matrix_${label}_watchdog_teardown=$watchdog"
+        echo "electron_generated_gui_web_matrix_${label}_report=$case_report"
+    } >>"$BUILD_ROOT/evidence.env"
+
+    if [ "$code" -ne 0 ] || [ "$status" != "pass" ] || [ "$mismatch" != "0" ] || [ "$simple_checksum" != "$electron_checksum" ] || [ "$simple_weighted" != "$electron_weighted" ] || [ "$tolerance" != "false" ]; then
+        return 1
+    fi
+    return 0
+}
+
+status=pass
+reason=pass
+for case_size in 80x64 96x72 128x96 160x120; do
+    width="$(printf '%s' "$case_size" | sed 's/x.*//')"
+    height="$(printf '%s' "$case_size" | sed 's/.*x//')"
+    if [ "$status" = "pass" ]; then
+        run_case "$width" "$height" || {
+            status=fail
+            reason="case-${case_size}-failed"
+        }
+    fi
+done
+
+{
+    echo "electron_generated_gui_web_matrix_status=$status"
+    echo "electron_generated_gui_web_matrix_reason=$reason"
+    cat "$BUILD_ROOT/evidence.env"
+} >"$BUILD_ROOT/evidence.final.env"
+mv "$BUILD_ROOT/evidence.final.env" "$BUILD_ROOT/evidence.env"
+
+{
+    echo "# Electron Generated GUI Web Parity Matrix Evidence"
+    echo
+    echo "- status: $status"
+    echo "- reason: $reason"
+    echo "- cases: 80x64, 96x72, 128x96, 160x120"
+    echo "- timeout seconds: $TIMEOUT_SECS"
+    echo
+    echo "## Raw Evidence"
+    sed 's/^/- /' "$BUILD_ROOT/evidence.env"
+} >"$REPORT_PATH"
+
+cat "$BUILD_ROOT/evidence.env"
+[ "$status" = "pass" ]

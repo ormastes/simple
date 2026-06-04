@@ -1,0 +1,508 @@
+# SimpleOS board hardening catalog.
+#
+# This keeps board/protection facts in Simple instead of shell-only scripts so
+# QEMU, build-only, and real-board verification can share the same contract.
+
+enum SimpleOsProtectionMode:
+    Off
+    Detect
+    Enforce
+    FaultTest
+
+enum SimpleOsProtectionKind:
+    None
+    Pmsav7Mpu
+    Pmsav8Mpu
+    X86PagingIommu
+    RiscvSv32
+    RiscvSv39
+
+class SimpleOsBoardHardeningConfig:
+    board_id: text
+    cpu: text
+    qemu_system: text
+    qemu_machine: text
+    qemu_cpu: text
+    physical_script: text
+    linker_script: text
+    flash_base: u64
+    ram_base: u64
+    ram_size: u64
+    uart: text
+    protection_kind: SimpleOsProtectionKind
+    qemu_fidelity: text
+    build_profile: text
+
+class SimpleOsProtectionEvidence:
+    board_id: text
+    mode: SimpleOsProtectionMode
+    support_probe: bool
+    kind_contract: bool
+    protection_enabled: bool
+    region_contract: bool
+    fault_recovered: bool
+    qemu_checked: bool
+    real_board_checked: bool
+
+pub fn simpleos_protection_mode_from_text(value: text) -> SimpleOsProtectionMode?:
+    if value == "off":
+        return SimpleOsProtectionMode.Off
+    if value == "detect":
+        return SimpleOsProtectionMode.Detect
+    if value == "enforce":
+        return SimpleOsProtectionMode.Enforce
+    if value == "fault-test":
+        return SimpleOsProtectionMode.FaultTest
+    nil
+
+pub fn simpleos_protection_mode_name(mode: SimpleOsProtectionMode) -> text:
+    match mode:
+        SimpleOsProtectionMode.Off: "off"
+        SimpleOsProtectionMode.Detect: "detect"
+        SimpleOsProtectionMode.Enforce: "enforce"
+        SimpleOsProtectionMode.FaultTest: "fault-test"
+
+pub fn simpleos_protection_kind_name(kind: SimpleOsProtectionKind) -> text:
+    match kind:
+        SimpleOsProtectionKind.None: "none"
+        SimpleOsProtectionKind.Pmsav7Mpu: "pmsav7-mpu"
+        SimpleOsProtectionKind.Pmsav8Mpu: "pmsav8-mpu"
+        SimpleOsProtectionKind.X86PagingIommu: "x86-paging-iommu"
+        SimpleOsProtectionKind.RiscvSv32: "riscv-sv32"
+        SimpleOsProtectionKind.RiscvSv39: "riscv-sv39"
+
+pub fn simpleos_protection_mode_accepts_hardening(mode: SimpleOsProtectionMode) -> bool:
+    val name = simpleos_protection_mode_name(mode)
+    name == "enforce" or name == "fault-test"
+
+pub fn simpleos_protection_evidence(
+    board_id: text,
+    mode: SimpleOsProtectionMode,
+    support_probe: bool,
+    kind_contract: bool,
+    protection_enabled: bool,
+    region_contract: bool,
+    fault_recovered: bool,
+    qemu_checked: bool,
+    real_board_checked: bool
+) -> SimpleOsProtectionEvidence:
+    SimpleOsProtectionEvidence(
+        board_id: board_id,
+        mode: mode,
+        support_probe: support_probe,
+        kind_contract: kind_contract,
+        protection_enabled: protection_enabled,
+        region_contract: region_contract,
+        fault_recovered: fault_recovered,
+        qemu_checked: qemu_checked,
+        real_board_checked: real_board_checked
+    )
+
+pub fn simpleos_protection_evidence_from_serial(
+    board_id: text,
+    mode: SimpleOsProtectionMode,
+    runtime: text,
+    serial_output: text
+) -> SimpleOsProtectionEvidence:
+    val qemu_checked = runtime == "qemu"
+    val real_board_checked = runtime == "real-board"
+    simpleos_protection_evidence(
+        board_id,
+        mode,
+        simpleos_serial_has_protection_probe(serial_output),
+        simpleos_serial_has_protection_kind_contract(board_id, serial_output),
+        simpleos_serial_has_protection_enabled(serial_output),
+        simpleos_serial_has_region_contract(serial_output),
+        simpleos_serial_has_fault_recovery(serial_output),
+        qemu_checked,
+        real_board_checked
+    )
+
+pub fn simpleos_serial_has_protection_probe(serial_output: text) -> bool:
+    serial_output.contains("protection_probe=pass") or
+        serial_output.contains("MPU_TYPE") or
+        serial_output.contains("[MPU]") or
+        serial_output.contains("[PAGING]") or
+        serial_output.contains("[harden]")
+
+pub fn simpleos_serial_has_protection_kind_contract(board_id: text, serial_output: text) -> bool:
+    val kind = simpleos_protection_kind_name(simpleos_board_protection_kind_for_id(board_id))
+    if kind == "none":
+        return true
+    if serial_output.contains("kind=" + kind) or serial_output.contains("protection_kind=" + kind):
+        return true
+    if board_id == "mps2-an505" and kind == "pmsav8-mpu":
+        return serial_output.contains("[MPU] Enabled") and serial_output.contains("regions")
+    if board_id == "stm32u585-uno-q" and kind == "pmsav8-mpu":
+        return serial_output.contains("region_contract=pass") or
+            (serial_output.contains("[MPU] Enabled") and serial_output.contains("regions"))
+    if kind == "x86-paging-iommu":
+        return serial_output.contains("[harden] text_write_trap=pass") or serial_output.contains("[PAGING] x86_64")
+    if kind == "riscv-sv39":
+        return serial_output.contains("Sv39") or serial_output.contains("satp_mode=Sv39")
+    false
+
+pub fn simpleos_serial_has_selected_protection_mode(mode: SimpleOsProtectionMode, serial_output: text) -> bool:
+    val mode_name = simpleos_protection_mode_name(mode)
+    serial_output.contains("protection=" + mode_name) or
+        serial_output.contains("protection_mode=" + mode_name) or
+        serial_output.contains("mode=" + mode_name)
+
+pub fn simpleos_serial_has_protection_enabled(serial_output: text) -> bool:
+    serial_output.contains("protection_enabled=pass") or
+        serial_output.contains("[MPU] Enabled") or
+        serial_output.contains("[PAGING] MMU enabled") or
+        serial_output.contains("[harden] text_write_trap=pass")
+
+pub fn simpleos_serial_has_region_contract(serial_output: text) -> bool:
+    serial_output.contains("region_contract=pass") or
+        serial_output.contains("page_contract=pass") or
+        (serial_output.contains("[MPU] Enabled") and serial_output.contains("regions")) or
+        serial_output.contains("[harden] text_write_trap=pass")
+
+pub fn simpleos_serial_has_fault_recovery(serial_output: text) -> bool:
+    serial_output.contains("fault_recovered=pass") or
+        serial_output.contains("fault-test=pass") or
+        serial_output.contains("sandbox violation caught") or
+        serial_output.contains("[fault-test] recovered")
+
+fn _board(
+    board_id: text,
+    cpu: text,
+    qemu_system: text,
+    qemu_machine: text,
+    qemu_cpu: text,
+    physical_script: text,
+    linker_script: text,
+    flash_base: u64,
+    ram_base: u64,
+    ram_size: u64,
+    uart: text,
+    protection_kind: SimpleOsProtectionKind,
+    qemu_fidelity: text,
+    build_profile: text
+) -> SimpleOsBoardHardeningConfig:
+    SimpleOsBoardHardeningConfig(
+        board_id: board_id,
+        cpu: cpu,
+        qemu_system: qemu_system,
+        qemu_machine: qemu_machine,
+        qemu_cpu: qemu_cpu,
+        physical_script: physical_script,
+        linker_script: linker_script,
+        flash_base: flash_base,
+        ram_base: ram_base,
+        ram_size: ram_size,
+        uart: uart,
+        protection_kind: protection_kind,
+        qemu_fidelity: qemu_fidelity,
+        build_profile: build_profile
+    )
+
+pub fn simpleos_board_hardening_configs() -> [SimpleOsBoardHardeningConfig]:
+    [
+        _board(
+            "mps2-an505",
+            "cortex-m33",
+            "qemu-system-arm",
+            "mps2-an505",
+            "cortex-m33",
+            "",
+            "src/compiler/70.backend/baremetal/cortex_m33/linker.ld",
+            0x10000000u64,
+            0x20000000u64,
+            0x00008000u64,
+            "CMSDK APB UART0 @ 0x40200000",
+            SimpleOsProtectionKind.Pmsav8Mpu,
+            "faithful-qemu-board",
+            "c-shim-board-bringup"
+        ),
+        _board(
+            "ra4m1-uno-r4",
+            "cortex-m4",
+            "",
+            "",
+            "",
+            "scripts/os/run_simpleos_ra4m1.shs",
+            "src/compiler/70.backend/baremetal/cortex_m33/linker_ra4m1.ld",
+            0x00000000u64,
+            0x20000000u64,
+            0x00008000u64,
+            "SCI2 @ 0x40070040",
+            SimpleOsProtectionKind.Pmsav7Mpu,
+            "no-faithful-qemu-target",
+            "c-shim-board-bringup"
+        ),
+        _board(
+            "stm32u585-uno-q",
+            "cortex-m33",
+            "",
+            "",
+            "",
+            "scripts/os/run_simpleos_stm32u585.shs",
+            "src/compiler/70.backend/baremetal/cortex_m33/linker_stm32u585.ld",
+            0x08000000u64,
+            0x20000000u64,
+            0x000C0000u64,
+            "USART1 @ 0x40013800",
+            SimpleOsProtectionKind.Pmsav8Mpu,
+            "cpu-class-only-via-an505",
+            "c-shim-board-bringup"
+        ),
+        _board(
+            "x86_64-q35",
+            "x86_64",
+            "qemu-system-x86_64",
+            "q35",
+            "qemu64",
+            "",
+            "examples/simple_os/arch/x86_64/linker.ld",
+            0x00100000u64,
+            0x00100000u64,
+            0x20000000u64,
+            "COM1 @ 0x3f8",
+            SimpleOsProtectionKind.X86PagingIommu,
+            "faithful-qemu-platform",
+            "simple-kernel"
+        ),
+        _board(
+            "riscv64-virt",
+            "rv64gc",
+            "qemu-system-riscv64",
+            "virt",
+            "rv64",
+            "",
+            "src/os/kernel/arch/riscv64/linker.ld",
+            0x80200000u64,
+            0x80000000u64,
+            0x08000000u64,
+            "16550/virt UART",
+            SimpleOsProtectionKind.RiscvSv39,
+            "faithful-qemu-platform",
+            "simple-kernel"
+        ),
+        _board(
+            "xck26-ml-carrier",
+            "rv64gc",
+            "",
+            "",
+            "",
+            "scripts/mlk_s02_100t_generated_linux.shs",
+            "src/os/kernel/arch/riscv64/fpga_linker.ld",
+            0x80200000u64,
+            0x80000000u64,
+            0x08000000u64,
+            "board UART via generated-linux wrapper",
+            SimpleOsProtectionKind.RiscvSv39,
+            "physical-or-generated-wrapper",
+            "board-bundle"
+        )
+    ]
+
+pub fn simpleos_board_hardening_config(board_id: text) -> SimpleOsBoardHardeningConfig?:
+    for config in simpleos_board_hardening_configs():
+        if config.board_id == board_id:
+            return config
+    nil
+
+pub fn simpleos_board_known(board_id: text) -> bool:
+    board_id == "mps2-an505" or
+        board_id == "ra4m1-uno-r4" or
+        board_id == "stm32u585-uno-q" or
+        board_id == "x86_64-q35" or
+        board_id == "riscv64-virt" or
+        board_id == "xck26-ml-carrier"
+
+pub fn simpleos_board_cpu(board_id: text) -> text:
+    if board_id == "mps2-an505":
+        return "cortex-m33"
+    if board_id == "ra4m1-uno-r4":
+        return "cortex-m4"
+    if board_id == "stm32u585-uno-q":
+        return "cortex-m33"
+    if board_id == "x86_64-q35":
+        return "x86_64"
+    if board_id == "riscv64-virt":
+        return "rv64gc"
+    if board_id == "xck26-ml-carrier":
+        return "rv64gc"
+    ""
+
+pub fn simpleos_board_physical_script(board_id: text) -> text:
+    if board_id == "ra4m1-uno-r4":
+        return "scripts/os/run_simpleos_ra4m1.shs"
+    if board_id == "stm32u585-uno-q":
+        return "scripts/os/run_simpleos_stm32u585.shs"
+    if board_id == "xck26-ml-carrier":
+        return "scripts/mlk_s02_100t_generated_linux.shs"
+    ""
+
+pub fn simpleos_board_physical_build_only_command_for_id_with_mode(board_id: text, mode: SimpleOsProtectionMode) -> [text]:
+    val script = simpleos_board_physical_script(board_id)
+    if script == "":
+        return []
+    ["sh", script, "--build-only", "--protection=" + simpleos_protection_mode_name(mode)]
+
+pub fn simpleos_board_physical_serial_check_command_for_id_with_mode(board_id: text, mode: SimpleOsProtectionMode, serial_log_path: text) -> [text]:
+    if simpleos_board_physical_script(board_id) == "":
+        return []
+    [
+        "bin/release/x86_64-unknown-linux-gnu/simple",
+        "run",
+        "src/app/simpleos_board_serial_check/main.spl",
+        "--board", board_id,
+        "--mode", simpleos_protection_mode_name(mode),
+        "--serial-log", serial_log_path
+    ]
+
+pub fn simpleos_board_protection_kind_for_id(board_id: text) -> SimpleOsProtectionKind:
+    if board_id == "ra4m1-uno-r4":
+        return SimpleOsProtectionKind.Pmsav7Mpu
+    if board_id == "mps2-an505" or board_id == "stm32u585-uno-q":
+        return SimpleOsProtectionKind.Pmsav8Mpu
+    if board_id == "x86_64-q35":
+        return SimpleOsProtectionKind.X86PagingIommu
+    if board_id == "riscv64-virt" or board_id == "xck26-ml-carrier":
+        return SimpleOsProtectionKind.RiscvSv39
+    SimpleOsProtectionKind.None
+
+pub fn simpleos_board_has_qemu_id(board_id: text) -> bool:
+    board_id == "mps2-an505" or board_id == "x86_64-q35" or board_id == "riscv64-virt"
+
+pub fn simpleos_board_supports_protection_mode_id(board_id: text, mode: SimpleOsProtectionMode) -> bool:
+    if mode == SimpleOsProtectionMode.Off:
+        return simpleos_board_known(board_id)
+    simpleos_protection_kind_name(simpleos_board_protection_kind_for_id(board_id)) != "none"
+
+pub fn simpleos_board_protection_marker_for_id(board_id: text, mode: SimpleOsProtectionMode) -> text:
+    "board={board_id} protection={simpleos_protection_mode_name(mode)} kind={simpleos_protection_kind_name(simpleos_board_protection_kind_for_id(board_id))}"
+
+pub fn simpleos_protection_evidence_reason(evidence: SimpleOsProtectionEvidence) -> text:
+    if not simpleos_board_known(evidence.board_id):
+        return "unknown-board:" + evidence.board_id
+    if not simpleos_board_supports_protection_mode_id(evidence.board_id, evidence.mode):
+        return "unsupported-protection-mode:" + simpleos_protection_mode_name(evidence.mode)
+    if not evidence.qemu_checked and not evidence.real_board_checked:
+        return "missing-runtime-check"
+    if evidence.mode == SimpleOsProtectionMode.Off:
+        return "ready"
+    if not evidence.support_probe:
+        return "missing-protection-probe"
+    if not evidence.kind_contract:
+        return "missing-protection-kind-contract:" + simpleos_protection_kind_name(simpleos_board_protection_kind_for_id(evidence.board_id))
+    if evidence.mode == SimpleOsProtectionMode.Detect:
+        return "ready"
+    if not evidence.protection_enabled:
+        return "missing-protection-enable"
+    if not evidence.region_contract:
+        return "missing-region-contract"
+    if evidence.mode == SimpleOsProtectionMode.FaultTest and not evidence.fault_recovered:
+        return "missing-fault-recovery"
+    "ready"
+
+pub fn simpleos_protection_evidence_ready(evidence: SimpleOsProtectionEvidence) -> bool:
+    simpleos_protection_evidence_reason(evidence) == "ready"
+
+pub fn simpleos_protection_evidence_accepts_hardening(evidence: SimpleOsProtectionEvidence) -> bool:
+    simpleos_protection_evidence_ready(evidence) and simpleos_protection_mode_accepts_hardening(evidence.mode)
+
+pub fn simpleos_protection_evidence_marker(evidence: SimpleOsProtectionEvidence) -> text:
+    simpleos_board_protection_marker_for_id(evidence.board_id, evidence.mode) +
+        " runtime=" + (if evidence.qemu_checked: "qemu" else: if evidence.real_board_checked: "real-board" else: "none") +
+        " reason=" + simpleos_protection_evidence_reason(evidence)
+
+pub fn simpleos_physical_serial_acceptance_reason(board_id: text, mode_text: text, serial_output: text) -> text:
+    if simpleos_board_physical_script(board_id) == "":
+        return "missing-physical-board-script:" + board_id
+    if serial_output.contains("REAL_BOARD_NOT_RUN"):
+        return "real-board-not-run"
+    if not serial_output.contains("board=" + board_id):
+        return "missing-physical-board-marker:" + board_id
+    val mode = simpleos_protection_mode_from_text(mode_text)
+    if val parsed_mode = mode:
+        if not simpleos_serial_has_selected_protection_mode(parsed_mode, serial_output):
+            return "missing-selected-protection-mode:" + mode_text
+        val evidence = simpleos_protection_evidence_from_serial(board_id, parsed_mode, "real-board", serial_output)
+        if simpleos_protection_evidence_accepts_hardening(evidence):
+            return "ready"
+        val reason = simpleos_protection_evidence_reason(evidence)
+        if reason == "ready":
+            return "diagnostic-protection-mode:" + mode_text
+        return reason
+    "unsupported-protection-mode:" + mode_text
+
+pub fn simpleos_physical_serial_accepts_hardening(board_id: text, mode_text: text, serial_output: text) -> bool:
+    simpleos_physical_serial_acceptance_reason(board_id, mode_text, serial_output) == "ready"
+
+pub fn simpleos_board_qemu_command_for_id(board_id: text, elf_path: text) -> [text]:
+    if board_id == "mps2-an505":
+        return [
+            "qemu-system-arm",
+            "-machine", "mps2-an505",
+            "-cpu", "cortex-m33",
+            "-kernel", elf_path,
+            "-serial", "stdio",
+            "-monitor", "none",
+            "-display", "none",
+            "-no-reboot"
+        ]
+    if board_id == "x86_64-q35":
+        return [
+            "qemu-system-x86_64",
+            "-machine", "q35",
+            "-cpu", "qemu64",
+            "-kernel", elf_path,
+            "-serial", "stdio",
+            "-monitor", "none",
+            "-display", "none",
+            "-no-reboot"
+        ]
+    if board_id == "riscv64-virt":
+        return [
+            "qemu-system-riscv64",
+            "-machine", "virt",
+            "-cpu", "rv64",
+            "-kernel", elf_path,
+            "-serial", "stdio",
+            "-monitor", "none",
+            "-display", "none",
+            "-no-reboot"
+        ]
+    []
+
+pub fn simpleos_board_qemu_command_for_id_with_mode(board_id: text, elf_path: text, mode: SimpleOsProtectionMode) -> [text]:
+    val base = simpleos_board_qemu_command_for_id(board_id, elf_path)
+    if base.len() == 0:
+        return base
+    val mode_prefix = ["env", "SIMPLEOS_PROTECTION_MODE=" + simpleos_protection_mode_name(mode)]
+    if board_id == "mps2-an505" and mode == SimpleOsProtectionMode.FaultTest:
+        return mode_prefix + base + ["-semihosting-config", "enable=on,target=native"]
+    mode_prefix + base
+
+pub fn simpleos_board_qemu_requires_semihosting_for_mode(board_id: text, mode: SimpleOsProtectionMode) -> bool:
+    board_id == "mps2-an505" and mode == SimpleOsProtectionMode.FaultTest
+
+pub fn simpleos_board_has_qemu(config: SimpleOsBoardHardeningConfig) -> bool:
+    config.qemu_system != "" and config.qemu_machine != "" and config.qemu_cpu != ""
+
+pub fn simpleos_board_supports_protection_mode(config: SimpleOsBoardHardeningConfig, mode: SimpleOsProtectionMode) -> bool:
+    if mode == SimpleOsProtectionMode.Off:
+        return true
+    simpleos_protection_kind_name(config.protection_kind) != "none"
+
+pub fn simpleos_board_protection_marker(config: SimpleOsBoardHardeningConfig, mode: SimpleOsProtectionMode) -> text:
+    "board={config.board_id} protection={simpleos_protection_mode_name(mode)} kind={simpleos_protection_kind_name(config.protection_kind)} profile={config.build_profile}"
+
+pub fn simpleos_board_qemu_command(config: SimpleOsBoardHardeningConfig, elf_path: text) -> [text]:
+    if not simpleos_board_has_qemu(config):
+        return []
+    [
+        config.qemu_system,
+        "-machine", config.qemu_machine,
+        "-cpu", config.qemu_cpu,
+        "-kernel", elf_path,
+        "-serial", "stdio",
+        "-monitor", "none",
+        "-display", "none",
+        "-no-reboot"
+    ]

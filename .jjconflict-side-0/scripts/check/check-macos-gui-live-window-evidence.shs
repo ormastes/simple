@@ -1,0 +1,291 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/tmp/macos_gui_live_window_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/macos_gui_live_window_evidence_$(date -u +%F).md}"
+SAMPLE_SPL="${MACOS_GUI_LIVE_WINDOW_SAMPLE:-examples/ui/web_engine2d_gui.spl}"
+SIMPLE_BIN="${SIMPLE_BIN:-src/compiler_rust/target/release/simple}"
+CAPTURE_PNG="$BUILD_DIR/simplegui-window.png"
+CAPTURE_BMP="$BUILD_DIR/simplegui-window.bmp"
+EVIDENCE_ENV="$BUILD_DIR/evidence.env"
+LAUNCH_LOG="$BUILD_DIR/launch.log"
+WINDOW_INFO="$BUILD_DIR/window.env"
+TIMEOUT_SECS="${MACOS_GUI_LIVE_WINDOW_TIMEOUT_SECS:-45}"
+SIMPLE_GUI_DYNLIB_ARTIFACT="${SIMPLE_GUI_DYNLIB_ARTIFACT:-build/gui/pure_gui_hot.smf}"
+gui_smf_artifact_contract_out="$BUILD_DIR/gui-smf-artifact-contract.out"
+gui_smf_artifact_contract_row="GUI_SMF_ARTIFACT_CONTRACT status=missing artifact=$SIMPLE_GUI_DYNLIB_ARTIFACT sha256= size=0 smf_role=-1 arch=0 embedded_dynlib=false symbol=${SIMPLE_GUI_DYNLIB_SYMBOL:-gui_dynlib_hot_probe_tick} qemu_status=not-run qemu_reason=live-qemu-not-executed macos_status=not-run macos_reason=requires-macos-arm64"
+gui_smf_artifact_contract_status=missing
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$CAPTURE_PNG" "$CAPTURE_BMP" "$EVIDENCE_ENV" "$LAUNCH_LOG" "$WINDOW_INFO" "$REPORT_PATH" "$gui_smf_artifact_contract_out"
+
+append_env() {
+    env_key="$1"
+    env_value="$2"
+    echo "$env_key=$env_value" >>"$EVIDENCE_ENV"
+}
+
+file_byte_count() {
+    if [ -f "$1" ]; then
+        wc -c <"$1" | tr -d ' '
+    else
+        echo 0
+    fi
+}
+
+file_cksum_value() {
+    if [ -f "$1" ]; then
+        cksum "$1" | sed 's/ .*//'
+    else
+        echo 0
+    fi
+}
+
+host_os_name() {
+    case "$(uname -s)" in
+        Darwin) echo "macos" ;;
+        Linux) echo "linux" ;;
+        *) uname -s | tr '[:upper:]' '[:lower:]' ;;
+    esac
+}
+
+write_report() {
+    {
+        echo "# macOS GUI Live Window Evidence"
+        echo
+        echo "- GUI SMF artifact contract status: $gui_smf_artifact_contract_status"
+        echo "- GUI SMF artifact contract row: $gui_smf_artifact_contract_row"
+        echo "- GUI SMF artifact contract scope: contract-only; does not promote live macOS window evidence"
+        echo
+        echo "## Raw Evidence"
+        echo
+        sed 's/^/- /' "$EVIDENCE_ENV"
+        if [ -f "$gui_smf_artifact_contract_out" ]; then
+            echo
+            echo "## GUI SMF Artifact Contract Output"
+            sed 's/^/- /' "$gui_smf_artifact_contract_out"
+        fi
+    } >"$REPORT_PATH"
+}
+
+run_gui_smf_artifact_contract() {
+    if [ -n "$SIMPLE_GUI_DYNLIB_ARTIFACT" ]; then
+        set +e
+        SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SIMPLE_BIN" run src/app/gui_perf/smf_artifact_contract.spl --mode=interpreter --clean >"$gui_smf_artifact_contract_out" 2>&1
+        set -e
+        gui_smf_artifact_contract_row="$(sed -n '/^GUI_SMF_ARTIFACT_CONTRACT /p' "$gui_smf_artifact_contract_out" | tail -n 1)"
+        if [ -z "$gui_smf_artifact_contract_row" ]; then
+            gui_smf_artifact_contract_row="GUI_SMF_ARTIFACT_CONTRACT status=fail artifact=${SIMPLE_GUI_DYNLIB_ARTIFACT:-} sha256= size=0 smf_role=-1 arch=0 embedded_dynlib=false symbol=${SIMPLE_GUI_DYNLIB_SYMBOL:-gui_dynlib_hot_probe_tick} qemu_status=not-run qemu_reason=live-qemu-not-executed macos_status=not-run macos_reason=requires-macos-arm64"
+        fi
+        gui_smf_artifact_contract_status="$(printf '%s\n' "$gui_smf_artifact_contract_row" | sed -n 's/^GUI_SMF_ARTIFACT_CONTRACT status=\([^ ]*\).*/\1/p' | tail -n 1)"
+        if [ -z "$gui_smf_artifact_contract_status" ]; then
+            gui_smf_artifact_contract_status=fail
+        fi
+    fi
+}
+
+mark_gui_smf_macos_pass_if_ready() {
+    if [ "$gui_smf_artifact_contract_status" = pass ]; then
+        gui_smf_artifact_contract_row="$(printf '%s\n' "$gui_smf_artifact_contract_row" | sed 's/ macos_status=[^ ]*/ macos_status=pass/; s/ macos_reason=[^ ]*/ macos_reason=live-macos-window-artifact-verified/')"
+    fi
+}
+
+emit_skip() {
+    append_env "macos_gui_live_window_evidence_status" "skip"
+    append_env "macos_gui_live_window_evidence_reason" "requires-macos"
+    append_env "macos_gui_live_window_evidence_host_os" "$(host_os_name)"
+    append_env "macos_gui_live_window_evidence_launcher" "macos-gui-run"
+    append_env "macos_gui_live_window_evidence_window_found" "false"
+    append_env "macos_gui_live_window_evidence_window_title" ""
+    append_env "macos_gui_live_window_evidence_window_rect" ""
+    append_env "macos_gui_live_window_evidence_capture_path" ""
+    append_env "macos_gui_live_window_evidence_capture_bytes" "0"
+    append_env "macos_gui_live_window_evidence_capture_cksum" "0"
+    append_env "macos_gui_live_window_evidence_capture_width" "0"
+    append_env "macos_gui_live_window_evidence_capture_height" "0"
+    append_env "macos_gui_live_window_evidence_capture_total_pixels" "0"
+    append_env "macos_gui_live_window_evidence_non_background_pixels" "0"
+    append_env "macos_gui_live_window_evidence_non_background_ratio" "0.000000"
+    append_env "macos_gui_live_window_evidence_release_gate" "live-macos-window-visual-proof"
+    append_env "macos_gui_live_window_evidence_release_gate_status" "not-satisfied"
+    append_env "macos_gui_live_window_evidence_gui_smf_artifact_contract_status" "$gui_smf_artifact_contract_status"
+    append_env "macos_gui_live_window_evidence_gui_smf_artifact_contract_row" "$gui_smf_artifact_contract_row"
+    append_env "macos_gui_live_window_evidence_report_path" "$REPORT_PATH"
+    write_report
+    cat "$EVIDENCE_ENV"
+}
+
+emit_fail() {
+    fail_reason="$1"
+    append_env "macos_gui_live_window_evidence_status" "fail"
+    append_env "macos_gui_live_window_evidence_reason" "$fail_reason"
+    append_env "macos_gui_live_window_evidence_host_os" "$(host_os_name)"
+    append_env "macos_gui_live_window_evidence_launcher" "macos-gui-run"
+    append_env "macos_gui_live_window_evidence_window_found" "false"
+    append_env "macos_gui_live_window_evidence_window_title" ""
+    append_env "macos_gui_live_window_evidence_window_rect" ""
+    append_env "macos_gui_live_window_evidence_capture_path" "$CAPTURE_PNG"
+    append_env "macos_gui_live_window_evidence_capture_bytes" "$(file_byte_count "$CAPTURE_PNG")"
+    append_env "macos_gui_live_window_evidence_capture_cksum" "$(file_cksum_value "$CAPTURE_PNG")"
+    append_env "macos_gui_live_window_evidence_capture_width" "0"
+    append_env "macos_gui_live_window_evidence_capture_height" "0"
+    append_env "macos_gui_live_window_evidence_capture_total_pixels" "0"
+    append_env "macos_gui_live_window_evidence_non_background_pixels" "0"
+    append_env "macos_gui_live_window_evidence_non_background_ratio" "0.000000"
+    append_env "macos_gui_live_window_evidence_release_gate" "live-macos-window-visual-proof"
+    append_env "macos_gui_live_window_evidence_release_gate_status" "not-satisfied"
+    append_env "macos_gui_live_window_evidence_gui_smf_artifact_contract_status" "$gui_smf_artifact_contract_status"
+    append_env "macos_gui_live_window_evidence_gui_smf_artifact_contract_row" "$gui_smf_artifact_contract_row"
+    append_env "macos_gui_live_window_evidence_report_path" "$REPORT_PATH"
+    write_report
+    cat "$EVIDENCE_ENV"
+    exit 1
+}
+
+cleanup_macos_app() {
+    osascript -e 'tell application "SimpleGui" to quit' >/dev/null 2>&1 || true
+    pkill -x SimpleGui >/dev/null 2>&1 || true
+}
+
+run_gui_smf_artifact_contract
+
+if [ "$(uname -s)" != "Darwin" ]; then
+    emit_skip
+    exit 0
+fi
+
+trap cleanup_macos_app EXIT
+
+if [ ! -f "$SAMPLE_SPL" ]; then
+    emit_fail "missing-sample"
+fi
+
+set +e
+SIMPLE_LIB="${SIMPLE_LIB:-src}" SIMPLE_TIMEOUT_SECONDS="${SIMPLE_TIMEOUT_SECONDS:-120}" \
+    bash scripts/macos-gui-run.shs "$SAMPLE_SPL" >"$LAUNCH_LOG" 2>&1
+launch_code=$?
+set -e
+if [ "$launch_code" -ne 0 ]; then
+    cat "$LAUNCH_LOG" >&2 || true
+    emit_fail "launcher-failed"
+fi
+
+deadline=$(($(date +%s) + TIMEOUT_SECS))
+while [ "$(date +%s)" -lt "$deadline" ]; do
+    if osascript >"$WINDOW_INFO" 2>/dev/null <<'OSA'; then
+tell application "System Events"
+  repeat with proc in (processes whose name is "SimpleGui")
+    tell proc
+      if (count of windows) > 0 then
+        set p to position of window 1
+        set s to size of window 1
+        set AppleScript's text item delimiters to ","
+        return (item 1 of p as text) & "," & (item 2 of p as text) & "," & (item 1 of s as text) & "," & (item 2 of s as text)
+      end if
+    end tell
+  end repeat
+end tell
+error "SimpleGui window not ready"
+OSA
+        break
+    fi
+    sleep 1
+done
+
+if [ ! -s "$WINDOW_INFO" ]; then
+    emit_fail "window-not-found"
+fi
+
+window_rect="$(tr -d '\r\n ' <"$WINDOW_INFO")"
+case "$window_rect" in
+    *,*,*,*) ;;
+    *) emit_fail "invalid-window-rect" ;;
+esac
+
+if ! screencapture -x -R"$window_rect" "$CAPTURE_PNG" >/dev/null 2>&1; then
+    emit_fail "screencapture-failed"
+fi
+
+if [ ! -s "$CAPTURE_PNG" ]; then
+    emit_fail "capture-missing"
+fi
+
+if ! sips -s format bmp "$CAPTURE_PNG" --out "$CAPTURE_BMP" >/dev/null 2>&1; then
+    emit_fail "capture-convert-failed"
+fi
+
+capture_metrics="$(python3 - "$CAPTURE_BMP" <<'PY'
+import sys
+from pathlib import Path
+import struct
+
+data = Path(sys.argv[1]).read_bytes()
+if len(data) < 54 or data[:2] != b"BM":
+    print("0 0 0 0 0.000000")
+    raise SystemExit
+
+offset = struct.unpack_from("<I", data, 10)[0]
+width = struct.unpack_from("<i", data, 18)[0]
+height_raw = struct.unpack_from("<i", data, 22)[0]
+bits = struct.unpack_from("<H", data, 28)[0]
+compression = struct.unpack_from("<I", data, 30)[0]
+if width <= 0 or height_raw == 0 or bits not in (24, 32) or compression != 0:
+    print("0 0 0 0 0.000000")
+    raise SystemExit
+
+height = abs(height_raw)
+bytes_per_pixel = bits // 8
+stride = ((width * bits + 31) // 32) * 4
+count = 0
+for y in range(height):
+    row = offset + y * stride
+    for x in range(width):
+        pos = row + x * bytes_per_pixel
+        if pos + 2 >= len(data):
+            continue
+        b, g, r = data[pos], data[pos + 1], data[pos + 2]
+        if max(r, g, b) - min(r, g, b) > 12 or max(r, g, b) > 32:
+            count += 1
+total = width * height
+ratio = count / total if total > 0 else 0
+print(f"{width} {height} {total} {count} {ratio:.6f}")
+PY
+)"
+set -- $capture_metrics
+capture_width="${1:-0}"
+capture_height="${2:-0}"
+capture_total_pixels="${3:-0}"
+non_background_pixels="${4:-0}"
+non_background_ratio="${5:-0.000000}"
+
+if [ "${non_background_pixels:-0}" -le 0 ]; then
+    emit_fail "capture-has-no-visible-content"
+fi
+
+append_env "macos_gui_live_window_evidence_status" "pass"
+append_env "macos_gui_live_window_evidence_reason" "pass"
+append_env "macos_gui_live_window_evidence_host_os" "macos"
+append_env "macos_gui_live_window_evidence_launcher" "macos-gui-run"
+append_env "macos_gui_live_window_evidence_window_found" "true"
+append_env "macos_gui_live_window_evidence_window_title" "SimpleGui"
+append_env "macos_gui_live_window_evidence_window_rect" "$window_rect"
+append_env "macos_gui_live_window_evidence_capture_path" "$CAPTURE_PNG"
+append_env "macos_gui_live_window_evidence_capture_bytes" "$(file_byte_count "$CAPTURE_PNG")"
+append_env "macos_gui_live_window_evidence_capture_cksum" "$(file_cksum_value "$CAPTURE_PNG")"
+append_env "macos_gui_live_window_evidence_capture_width" "$capture_width"
+append_env "macos_gui_live_window_evidence_capture_height" "$capture_height"
+append_env "macos_gui_live_window_evidence_capture_total_pixels" "$capture_total_pixels"
+append_env "macos_gui_live_window_evidence_non_background_pixels" "$non_background_pixels"
+append_env "macos_gui_live_window_evidence_non_background_ratio" "$non_background_ratio"
+append_env "macos_gui_live_window_evidence_release_gate" "live-macos-window-visual-proof"
+append_env "macos_gui_live_window_evidence_release_gate_status" "satisfied"
+mark_gui_smf_macos_pass_if_ready
+append_env "macos_gui_live_window_evidence_gui_smf_artifact_contract_status" "$gui_smf_artifact_contract_status"
+append_env "macos_gui_live_window_evidence_gui_smf_artifact_contract_row" "$gui_smf_artifact_contract_row"
+append_env "macos_gui_live_window_evidence_report_path" "$REPORT_PATH"
+
+write_report
+cat "$EVIDENCE_ENV"

@@ -1,0 +1,192 @@
+class LibraryRole:
+    role_name: text
+    is_pic: bool
+    load_priority: int
+    version: int
+
+    me is_runtime() -> bool:
+        return role_name == "runtime"
+
+    me is_plugin() -> bool:
+        return role_name == "plugin"
+
+    me to_text() -> text:
+        return "role:" + role_name + " pic=" + is_pic.to_text() + " v" + version.to_text()
+
+    static fn runtime(ver: int) -> LibraryRole:
+        return LibraryRole(role_name: "runtime", is_pic: true, load_priority: 0, version: ver)
+
+    static fn plugin(ver: int) -> LibraryRole:
+        return LibraryRole(role_name: "plugin", is_pic: true, load_priority: 10, version: ver)
+
+
+class LinkNamespace:
+    namespace_name: text
+    process_id: int
+    lib_count: int
+    is_global: bool
+
+    me is_process_local() -> bool:
+        return is_global == false
+
+    me to_text() -> text:
+        return "ns:" + namespace_name + " pid=" + process_id.to_text() + " libs=" + lib_count.to_text()
+
+    me add_lib() -> LinkNamespace:
+        return LinkNamespace(namespace_name: namespace_name, process_id: process_id, lib_count: lib_count + 1, is_global: is_global)
+
+    static fn global_ns() -> LinkNamespace:
+        return LinkNamespace(namespace_name: "global", process_id: 0, lib_count: 0, is_global: true)
+
+    static fn process_ns(name: text, pid: int) -> LinkNamespace:
+        return LinkNamespace(namespace_name: name, process_id: pid, lib_count: 0, is_global: false)
+
+
+class DynLoadRequest:
+    library_name: text
+    search_path: text
+    load_mode: text
+    namespace_ref: text
+
+    me is_lazy() -> bool:
+        return load_mode == "lazy"
+
+    me is_eager() -> bool:
+        return load_mode == "eager"
+
+    me to_text() -> text:
+        return "load:" + library_name + " mode=" + load_mode + " ns=" + namespace_ref
+
+    static fn lazy(name: text, path: text, ns: text) -> DynLoadRequest:
+        return DynLoadRequest(library_name: name, search_path: path, load_mode: "lazy", namespace_ref: ns)
+
+    static fn eager(name: text, path: text, ns: text) -> DynLoadRequest:
+        return DynLoadRequest(library_name: name, search_path: path, load_mode: "eager", namespace_ref: ns)
+
+
+class DynLoadResult:
+    library_name: text
+    success: bool
+    handle_id: int
+    error_msg: text
+
+    me is_loaded() -> bool:
+        return success
+
+    me is_error() -> bool:
+        return success == false
+
+    me to_text() -> text:
+        if success:
+            return "loaded:" + library_name + " handle=" + handle_id.to_text()
+        return "error:" + library_name + " " + error_msg
+
+    static fn ok(name: text, handle: int) -> DynLoadResult:
+        return DynLoadResult(library_name: name, success: true, handle_id: handle, error_msg: "")
+
+    static fn fail(name: text, err: text) -> DynLoadResult:
+        return DynLoadResult(library_name: name, success: false, handle_id: 0, error_msg: err)
+
+
+class DynSymResult:
+    """Result of a symbol lookup in a loaded dynamic library."""
+    symbol_name: text
+    found: bool
+    offset: int
+    error_msg: text
+
+    me is_found() -> bool:
+        return found
+
+    me to_text() -> text:
+        if found:
+            return "sym:" + symbol_name + " offset=" + offset.to_text()
+        return "sym-error:" + symbol_name + " " + error_msg
+
+    static fn ok(name: text, off: int) -> DynSymResult:
+        return DynSymResult(symbol_name: name, found: true, offset: off, error_msg: "")
+
+    static fn fail(name: text, err: text) -> DynSymResult:
+        return DynSymResult(symbol_name: name, found: false, offset: 0, error_msg: err)
+
+
+class DynCloseResult:
+    """Result of closing a dynamic library handle."""
+    handle_id: int
+    success: bool
+    error_msg: text
+
+    me is_ok() -> bool:
+        return success
+
+    me to_text() -> text:
+        if success:
+            return "closed:handle=" + handle_id.to_text()
+        return "close-error:handle=" + handle_id.to_text() + " " + error_msg
+
+    static fn ok(handle: int) -> DynCloseResult:
+        return DynCloseResult(handle_id: handle, success: true, error_msg: "")
+
+    static fn fail(handle: int, err: text) -> DynCloseResult:
+        return DynCloseResult(handle_id: handle, success: false, error_msg: err)
+
+
+# ============================================================================
+# Dynamic library API — smf_dlopen / smf_dlsym / smf_dlclose
+#
+# These operate over DynLoadRequest/DynSymResult/DynCloseResult and are
+# intentionally decoupled from the kernel address-space mapper (Phase 5
+# dependency). The registry parameter is an opaque handle table represented
+# as a text-keyed association list encoded as "handle:name;handle:name;...".
+# Full integration with LinkNamespace and the kernel dylib_registry is a
+# follow-on step once user-space isolation (Phase 5 dep) is stable.
+# ============================================================================
+
+pub fn smf_dlopen(req: DynLoadRequest, next_handle: int) -> DynLoadResult:
+    """Open an SMF library package from the given search path.
+
+    Validates that the library name is non-empty and the search path is set.
+    Returns a handle on success; the caller is responsible for tracking the
+    handle-to-name mapping in a registry.
+    """
+    if req.library_name == "":
+        return DynLoadResult.fail("", "empty library name")
+    if req.search_path == "":
+        return DynLoadResult.fail(req.library_name, "empty search path")
+    if next_handle <= 0:
+        return DynLoadResult.fail(req.library_name, "invalid handle seed")
+    return DynLoadResult.ok(req.library_name, next_handle)
+
+pub fn smf_dlsym(handle_id: int, symbol_name: text, registry: text) -> DynSymResult:
+    """Look up a symbol by name in a loaded SMF library handle.
+
+    `registry` is a semicolon-separated list of "handle:sym_name:offset" entries.
+    Returns the offset on a match; returns failure if handle or symbol is absent.
+    """
+    if handle_id <= 0:
+        return DynSymResult.fail(symbol_name, "invalid handle")
+    if symbol_name == "":
+        return DynSymResult.fail("", "empty symbol name")
+    val handle_str = handle_id.to_text()
+    val entries = registry.split(";")
+    var idx = 0
+    while idx < entries.len():
+        val entry = entries[idx]
+        val parts = entry.split(":")
+        if parts.len() == 3:
+            if parts[0] == handle_str and parts[1] == symbol_name:
+                val off = parts[2].to_int()
+                return DynSymResult.ok(symbol_name, off)
+        idx = idx + 1
+    return DynSymResult.fail(symbol_name, "symbol not found in handle " + handle_str)
+
+pub fn smf_dlclose(handle_id: int) -> DynCloseResult:
+    """Release a loaded SMF library handle.
+
+    At this stage the function validates the handle and returns success.
+    Actual mapping teardown is deferred until the kernel address-space
+    isolation layer (Phase 5 dependency) is stable.
+    """
+    if handle_id <= 0:
+        return DynCloseResult.fail(handle_id, "invalid handle")
+    return DynCloseResult.ok(handle_id)

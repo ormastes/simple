@@ -1,0 +1,530 @@
+# Driver — VHDL Codegen (Source to Text)
+#
+# Extracted from driver_public_compile.spl. Contains:
+# - _simple_vhdl_source_to_text: main entry point for VHDL transpilation
+# - Multi-hardware source compilation (_simple_multi_hardware_vhdl_source_to_text)
+# - Function parsing (_simple_parse_vhdl_functions, _simple_function_record)
+# - Entity emission (_simple_emit_vhdl_function, _simple_single_output_vhdl)
+# - Tuple entity emission (_simple_anonymous_tuple_vhdl, _simple_labeled_tuple_vhdl)
+
+use compiler.driver.driver_compile_vhdl_util.{
+    _simple_split_top_level, _simple_find_matching_paren,
+    _simple_vhdl_identifier, _simple_param_vhdl_name,
+    _text_list_contains, _text_list_index,
+    _simple_type_to_vhdl, _simple_implicit_width_type_error,
+    _simple_decorator_payload, _simple_entity_generic_block,
+    _simple_clock_ports, _simple_clocked_assignment, _simple_clocked_labeled_assignments,
+    _simple_port_name_from_decl,
+    _simple_skip_enum_block,
+    _simple_vhdl_unsupported_parity_gap
+}
+
+use compiler.driver.driver_compile_vhdl_source_map.{
+    _simple_type_aliases_for_source, _simple_resolve_type_alias,
+    _simple_is_labeled_tuple_type_alias, _simple_labeled_tuple_labels_alias, _simple_labeled_tuple_types_alias,
+    _simple_is_anonymous_tuple_type_alias, _simple_anonymous_tuple_labels_alias, _simple_anonymous_tuple_types_alias
+}
+
+use compiler.driver.driver_compile_vhdl_expr.{
+    _simple_expr_to_vhdl, _simple_param_context, _simple_entity_type_declaration_block
+}
+
+use compiler.driver.driver_compile_vhdl_lowering.{
+    _simple_body_to_vhdl,
+    _simple_labeled_body_lowering, _simple_anonymous_body_lowering,
+    _simple_is_labeled_tuple_type, _simple_labeled_tuple_labels, _simple_labeled_tuple_types
+}
+
+fn _simple_vhdl_source_to_text(source: text) -> Result<text, text>:
+    val unsupported_gap = _simple_vhdl_unsupported_parity_gap(source)
+    if unsupported_gap != "":
+        return Err(unsupported_gap)
+
+    val aliases = _simple_type_aliases_for_source(source)
+    val multi_result = _simple_multi_hardware_vhdl_source_to_text(source)
+    if not multi_result.is_err():
+        return multi_result
+
+    val lines = source.split("\n")
+    var header = ""
+    var generic_text = ""
+    var clocked_text = ""
+    var is_hardware = false
+    var body_lines: [text] = []
+    var i = 0
+    while i < lines.len():
+        val raw_line = lines[i]
+        val line = raw_line.trim()
+        if line != "":
+            if line.starts_with("enum "):
+                i = _simple_skip_enum_block(lines, i)
+                continue
+            if line.starts_with("@generic("):
+                generic_text = _simple_decorator_payload(line, "@generic")
+                i = i + 1
+                continue
+            if line.starts_with("@clocked("):
+                clocked_text = _simple_decorator_payload(line, "@clocked")
+                i = i + 1
+                continue
+            if line == "@hardware":
+                is_hardware = true
+                i = i + 1
+                continue
+            if line.starts_with("type "):
+                i = i + 1
+                continue
+            if line.starts_with("@"):
+                i = i + 1
+                continue
+            if header == "":
+                header = line
+            else:
+                body_lines = body_lines.push(raw_line)
+        i = i + 1
+    if not header.starts_with("fn "):
+        return Err("VHDL subset fallback requires a single function declaration")
+    if body_lines.len() == 0:
+        return Err("VHDL subset fallback requires a single expression body")
+
+    val after_fn = header.substring(3).trim()
+    val name_end_opt = after_fn.find("(")
+    val ret_start_opt = after_fn.find("->")
+    if not name_end_opt.? or not ret_start_opt.?:
+        return Err("VHDL subset fallback could not parse function signature")
+    val name_end = name_end_opt.unwrap()
+    val params_end_opt = _simple_find_matching_paren(after_fn, name_end)
+    if not params_end_opt.?:
+        return Err("VHDL subset fallback could not parse function parameter list")
+    val params_end = params_end_opt.unwrap()
+    val ret_start = ret_start_opt.unwrap()
+
+    val fn_name = after_fn.substring(0, name_end).trim()
+    val params_text = after_fn.substring(name_end + 1, params_end).trim()
+    var return_type = after_fn.substring(ret_start + 2, after_fn.len()).trim()
+    if return_type.ends_with(":"):
+        return_type = return_type.substring(0, return_type.len() - 1).trim()
+
+    if _simple_is_labeled_tuple_type_alias(return_type, aliases[0], aliases[1]):
+        return _simple_labeled_tuple_vhdl(fn_name, params_text, return_type, body_lines, generic_text, clocked_text, [], [], [], [], aliases[0], aliases[1])
+    if is_hardware and _simple_is_anonymous_tuple_type_alias(return_type, aliases[0], aliases[1]):
+        return _simple_anonymous_tuple_vhdl(fn_name, params_text, return_type, body_lines, generic_text, clocked_text, [], [], [], [], aliases[0], aliases[1])
+
+    val resolved_return_type = _simple_resolve_type_alias(return_type, aliases[0], aliases[1])
+    val return_vhdl_type = _simple_type_to_vhdl(resolved_return_type)
+    if return_vhdl_type == "":
+        val implicit_width_error = _simple_implicit_width_type_error(resolved_return_type, "return type `{return_type}`")
+        if implicit_width_error != "":
+            return Err(implicit_width_error)
+        return Err("VHDL subset fallback unsupported return type: {return_type}")
+
+    val param_result = _simple_param_context(params_text, aliases[0], aliases[1])
+    if param_result.is_err():
+        return Err(param_result.unwrap_err())
+    val param_ctx = param_result.unwrap()
+    var ports = param_ctx[0].split("\n")
+    var param_names = param_ctx[1].split("\n")
+    var param_types = param_ctx[2].split("\n")
+    if param_ctx[0] == "":
+        ports = []
+    if param_ctx[1] == "":
+        param_names = []
+    if param_ctx[2] == "":
+        param_types = []
+    if clocked_text != "":
+        val clock_ports = _simple_clock_ports(clocked_text, param_names)
+        for clock_port in clock_ports:
+            ports = ports.push(clock_port)
+    ports = ports.push("        result_out : out {return_vhdl_type}")
+
+    val expr_result = _simple_body_to_vhdl(body_lines, resolved_return_type, param_names, param_types)
+    if expr_result.is_err():
+        return Err(expr_result.unwrap_err())
+    val expr = expr_result.unwrap()
+
+    var out = "library ieee;\n"
+    out = out + "use ieee.std_logic_1164.all;\n"
+    out = out + "use ieee.numeric_std.all;\n\n"
+    val decl_result = _simple_entity_type_declaration_block(fn_name, aliases[0], aliases[1])
+    if decl_result.is_err():
+        return Err(decl_result.unwrap_err())
+    out = out + decl_result.unwrap()
+    out = out + "entity {fn_name} is\n"
+    out = out + _simple_entity_generic_block(generic_text)
+    out = out + "    port (\n"
+    out = out + ports.join("\n") + "\n"
+    out = out + "    );\n"
+    out = out + "end entity {fn_name};\n\n"
+    out = out + "architecture rtl of {fn_name} is\n"
+    out = out + "begin\n"
+    if clocked_text != "":
+        out = out + _simple_clocked_assignment(clocked_text, "result_out", resolved_return_type, expr)
+    else:
+        out = out + "    result_out <= {expr};\n"
+    out = out + "end architecture rtl;\n"
+    Ok(out)
+
+fn _simple_multi_hardware_vhdl_source_to_text(source: text) -> Result<text, text>:
+    val aliases = _simple_type_aliases_for_source(source)
+    val parse_result = _simple_parse_vhdl_functions(source)
+    if parse_result.is_err():
+        return Err(parse_result.unwrap_err())
+    val records = parse_result.unwrap()
+    if records.len() == 0:
+        return Err("VHDL subset fallback requires a function declaration")
+    if records.len() == 1:
+        return Err("single function should use existing source facade path")
+
+    var names: [text] = []
+    var params: [text] = []
+    var returns: [text] = []
+    var bodies: [text] = []
+    var generics: [text] = []
+    var clocked: [text] = []
+    var hardware_flags: [text] = []
+    for record in records:
+        names = names.push(record[0])
+        params = params.push(record[1])
+        returns = returns.push(record[2])
+        bodies = bodies.push(record[3])
+        generics = generics.push(record[4])
+        clocked = clocked.push(record[5])
+        hardware_flags = hardware_flags.push(record[6])
+
+    var out = ""
+    var i = 0
+    while i < names.len():
+        if hardware_flags[i] == "hardware":
+            val body_lines = if bodies[i] == "": [] else: bodies[i].split("\n")
+            val entity_result = _simple_emit_vhdl_function(names[i], params[i], returns[i], body_lines, generics[i], clocked[i], names, params, returns, hardware_flags, aliases[0], aliases[1])
+            if entity_result.is_err():
+                return Err(entity_result.unwrap_err())
+            if out != "":
+                out = out + "\n"
+            out = out + entity_result.unwrap()
+        i = i + 1
+    if out == "":
+        return Err("VHDL subset fallback requires at least one @hardware function")
+    Ok(out)
+
+fn _simple_parse_vhdl_functions(source: text) -> Result<[[text]], text>:
+    val lines = source.split("\n")
+    var records: [[text]] = []
+    var current_header = ""
+    var current_body: [text] = []
+    var generic_text = ""
+    var clocked_text = ""
+    var hardware_flag = ""
+
+    var pending_generic = ""
+    var pending_clocked = ""
+    var pending_hardware = ""
+
+    var i = 0
+    while i < lines.len():
+        val raw = lines[i]
+        val line = raw.trim()
+        if line == "":
+            i = i + 1
+            continue
+        if line.starts_with("enum "):
+            i = _simple_skip_enum_block(lines, i)
+            continue
+        if line.starts_with("type "):
+            i = i + 1
+            continue
+        if line.starts_with("@") or line.starts_with("fn "):
+            if current_header != "":
+                val record_result = _simple_function_record(current_header, current_body, generic_text, clocked_text, hardware_flag)
+                if record_result.is_err():
+                    return Err(record_result.unwrap_err())
+                records = records.push(record_result.unwrap())
+                current_header = ""
+                current_body = []
+                generic_text = ""
+                clocked_text = ""
+                hardware_flag = ""
+            if line.starts_with("@generic("):
+                pending_generic = _simple_decorator_payload(line, "@generic")
+            elif line.starts_with("@clocked("):
+                pending_clocked = _simple_decorator_payload(line, "@clocked")
+            elif line == "@hardware":
+                pending_hardware = "hardware"
+            elif line.starts_with("@"):
+                pass
+            elif line.starts_with("fn "):
+                current_header = line
+                generic_text = pending_generic
+                clocked_text = pending_clocked
+                hardware_flag = pending_hardware
+                pending_generic = ""
+                pending_clocked = ""
+                pending_hardware = ""
+        else:
+            if current_header == "":
+                return Err("VHDL subset fallback found body text before a function declaration")
+            current_body = current_body.push(raw)
+        i = i + 1
+
+    if current_header != "":
+        val record_result = _simple_function_record(current_header, current_body, generic_text, clocked_text, hardware_flag)
+        if record_result.is_err():
+            return Err(record_result.unwrap_err())
+        records = records.push(record_result.unwrap())
+    Ok(records)
+
+fn _simple_function_record(header: text, body_lines: [text], generic_text: text, clocked_text: text, hardware_flag: text) -> Result<[text], text>:
+    if not header.starts_with("fn "):
+        return Err("VHDL subset fallback could not parse function declaration")
+    val after_fn = header.substring(3).trim()
+    val name_end_opt = after_fn.find("(")
+    val ret_start_opt = after_fn.find("->")
+    if not name_end_opt.? or not ret_start_opt.?:
+        return Err("VHDL subset fallback could not parse function signature")
+    val name_end = name_end_opt.unwrap()
+    val params_end_opt = _simple_find_matching_paren(after_fn, name_end)
+    if not params_end_opt.?:
+        return Err("VHDL subset fallback could not parse function parameter list")
+    val params_end = params_end_opt.unwrap()
+    val ret_start = ret_start_opt.unwrap()
+    val fn_name = after_fn.substring(0, name_end).trim()
+    val params_text = after_fn.substring(name_end + 1, params_end).trim()
+    var return_type = after_fn.substring(ret_start + 2, after_fn.len()).trim()
+    if return_type.ends_with(":"):
+        return_type = return_type.substring(0, return_type.len() - 1).trim()
+    Ok([fn_name, params_text, return_type, body_lines.join("\n"), generic_text, clocked_text, hardware_flag])
+
+fn _simple_emit_vhdl_function(fn_name: text, params_text: text, return_type: text, body_lines: [text], generic_text: text, clocked_text: text, all_names: [text], all_params: [text], all_returns: [text], hardware_flags: [text], alias_names: [text], alias_types: [text]) -> Result<text, text>:
+    if _simple_is_labeled_tuple_type_alias(return_type, alias_names, alias_types):
+        return _simple_labeled_tuple_vhdl(fn_name, params_text, return_type, body_lines, generic_text, clocked_text, all_names, all_params, all_returns, hardware_flags, alias_names, alias_types)
+    if _simple_is_anonymous_tuple_type_alias(return_type, alias_names, alias_types):
+        return _simple_anonymous_tuple_vhdl(fn_name, params_text, return_type, body_lines, generic_text, clocked_text, all_names, all_params, all_returns, hardware_flags, alias_names, alias_types)
+    return _simple_single_output_vhdl(fn_name, params_text, return_type, body_lines, generic_text, clocked_text, alias_names, alias_types)
+
+fn _simple_single_output_vhdl(fn_name: text, params_text: text, return_type: text, body_lines: [text], generic_text: text, clocked_text: text, alias_names: [text], alias_types: [text]) -> Result<text, text>:
+    val resolved_return_type = _simple_resolve_type_alias(return_type, alias_names, alias_types)
+    val return_vhdl_type = _simple_type_to_vhdl(resolved_return_type)
+    if return_vhdl_type == "":
+        val implicit_width_error = _simple_implicit_width_type_error(resolved_return_type, "return type `{return_type}`")
+        if implicit_width_error != "":
+            return Err(implicit_width_error)
+        return Err("VHDL subset fallback unsupported return type: {return_type}")
+
+    val param_result = _simple_param_context(params_text, alias_names, alias_types)
+    if param_result.is_err():
+        return Err(param_result.unwrap_err())
+    val param_ctx = param_result.unwrap()
+    var ports = param_ctx[0].split("\n")
+    var param_names = param_ctx[1].split("\n")
+    var param_types = param_ctx[2].split("\n")
+    if param_ctx[0] == "":
+        ports = []
+    if param_ctx[1] == "":
+        param_names = []
+    if param_ctx[2] == "":
+        param_types = []
+    if clocked_text != "":
+        val clock_ports = _simple_clock_ports(clocked_text, param_names)
+        for clock_port in clock_ports:
+            ports = ports.push(clock_port)
+    ports = ports.push("        result_out : out {return_vhdl_type}")
+
+    val expr_result = _simple_body_to_vhdl(body_lines, resolved_return_type, param_names, param_types)
+    if expr_result.is_err():
+        return Err(expr_result.unwrap_err())
+    val expr = expr_result.unwrap()
+
+    var out = "library ieee;\n"
+    out = out + "use ieee.std_logic_1164.all;\n"
+    out = out + "use ieee.numeric_std.all;\n\n"
+    val decl_result = _simple_entity_type_declaration_block(fn_name, alias_names, alias_types)
+    if decl_result.is_err():
+        return Err(decl_result.unwrap_err())
+    out = out + decl_result.unwrap()
+    out = out + "entity {fn_name} is\n"
+    out = out + _simple_entity_generic_block(generic_text)
+    out = out + "    port (\n"
+    out = out + ports.join("\n") + "\n"
+    out = out + "    );\n"
+    out = out + "end entity {fn_name};\n\n"
+    out = out + "architecture rtl of {fn_name} is\n"
+    out = out + "begin\n"
+    if clocked_text != "":
+        out = out + _simple_clocked_assignment(clocked_text, "result_out", resolved_return_type, expr)
+    else:
+        out = out + "    result_out <= {expr};\n"
+    out = out + "end architecture rtl;\n"
+    Ok(out)
+
+fn _simple_anonymous_tuple_vhdl(fn_name: text, params_text: text, return_type: text, body_lines: [text], generic_text: text, clocked_text: text, all_names: [text], all_params: [text], all_returns: [text], hardware_flags: [text], alias_names: [text], alias_types: [text]) -> Result<text, text>:
+    val labels = _simple_anonymous_tuple_labels_alias(return_type, alias_names, alias_types)
+    val return_types = _simple_anonymous_tuple_types_alias(return_type, alias_names, alias_types)
+    if labels.len() == 0 or labels.len() != return_types.len():
+        return Err("VHDL subset fallback could not parse anonymous tuple return type: {return_type}")
+
+    val param_result = _simple_param_context(params_text, alias_names, alias_types)
+    if param_result.is_err():
+        return Err(param_result.unwrap_err())
+    val param_ctx = param_result.unwrap()
+    var ports = param_ctx[0].split("\n")
+    var param_names = param_ctx[1].split("\n")
+    var param_types = param_ctx[2].split("\n")
+    var input_port_names = param_ctx[3].split("\n")
+    if param_ctx[0] == "":
+        ports = []
+    if param_ctx[1] == "":
+        param_names = []
+    if param_ctx[2] == "":
+        param_types = []
+    if param_ctx[3] == "":
+        input_port_names = []
+    if clocked_text != "":
+        val clock_ports = _simple_clock_ports(clocked_text, param_names)
+        for clock_port in clock_ports:
+            ports = ports.push(clock_port)
+            val clock_port_name = _simple_port_name_from_decl(clock_port)
+            if clock_port_name != "":
+                input_port_names = input_port_names.push(clock_port_name)
+
+    var sanitized: [text] = []
+    var i = 0
+    while i < labels.len():
+        val port_name = _simple_vhdl_identifier(labels[i])
+        if _text_list_contains(input_port_names, port_name):
+            return Err("VHDL subset fallback input/output port collision after VHDL sanitization: anonymous output `{labels[i]}` maps to input port `{port_name}`")
+        val resolved_type = _simple_resolve_type_alias(return_types[i], alias_names, alias_types)
+        val vhdl_type = _simple_type_to_vhdl(resolved_type)
+        if vhdl_type == "":
+            val implicit_width_error = _simple_implicit_width_type_error(resolved_type, "anonymous output `{labels[i]}` type `{return_types[i]}`")
+            if implicit_width_error != "":
+                return Err(implicit_width_error)
+            return Err("VHDL subset fallback unsupported anonymous output type: {return_types[i]}")
+        sanitized = sanitized.push(port_name)
+        val suffix = if i == labels.len() - 1: "" else: ";"
+        ports = ports.push("        {port_name} : out {vhdl_type}{suffix}")
+        i = i + 1
+
+    val lowering_result = _simple_anonymous_body_lowering(body_lines, labels, sanitized, return_types, param_names, param_types, all_names, all_params, all_returns, hardware_flags, alias_names, alias_types)
+    if lowering_result.is_err():
+        return Err(lowering_result.unwrap_err())
+    val lowering = lowering_result.unwrap()
+    val signal_decls = lowering[0]
+    val instances = lowering[1]
+    val assignments = lowering[2]
+
+    var out = "library ieee;\n"
+    out = out + "use ieee.std_logic_1164.all;\n"
+    out = out + "use ieee.numeric_std.all;\n\n"
+    val decl_result = _simple_entity_type_declaration_block(fn_name, alias_names, alias_types)
+    if decl_result.is_err():
+        return Err(decl_result.unwrap_err())
+    out = out + decl_result.unwrap()
+    out = out + "entity {fn_name} is\n"
+    out = out + _simple_entity_generic_block(generic_text)
+    out = out + "    port (\n"
+    out = out + ports.join("\n") + "\n"
+    out = out + "    );\n"
+    out = out + "end entity {fn_name};\n\n"
+    out = out + "architecture rtl of {fn_name} is\n"
+    if signal_decls != "":
+        out = out + signal_decls
+    out = out + "begin\n"
+    if instances != "":
+        out = out + instances
+    if clocked_text != "":
+        out = out + _simple_clocked_labeled_assignments(clocked_text, sanitized, return_types, assignments)
+    else:
+        out = out + assignments
+    out = out + "end architecture rtl;\n"
+    Ok(out)
+
+fn _simple_labeled_tuple_vhdl(fn_name: text, params_text: text, return_type: text, body_lines: [text], generic_text: text, clocked_text: text, all_names: [text], all_params: [text], all_returns: [text], hardware_flags: [text], alias_names: [text], alias_types: [text]) -> Result<text, text>:
+    val labels = _simple_labeled_tuple_labels_alias(return_type, alias_names, alias_types)
+    val return_types = _simple_labeled_tuple_types_alias(return_type, alias_names, alias_types)
+    if labels.len() == 0 or labels.len() != return_types.len():
+        return Err("VHDL subset fallback could not parse labeled tuple return type: {return_type}")
+
+    val param_result = _simple_param_context(params_text, alias_names, alias_types)
+    if param_result.is_err():
+        return Err(param_result.unwrap_err())
+    val param_ctx = param_result.unwrap()
+    var ports = param_ctx[0].split("\n")
+    var param_names = param_ctx[1].split("\n")
+    var param_types = param_ctx[2].split("\n")
+    var input_port_names = param_ctx[3].split("\n")
+    if param_ctx[0] == "":
+        ports = []
+    if param_ctx[1] == "":
+        param_names = []
+    if param_ctx[2] == "":
+        param_types = []
+    if param_ctx[3] == "":
+        input_port_names = []
+    if clocked_text != "":
+        val clock_ports = _simple_clock_ports(clocked_text, param_names)
+        for clock_port in clock_ports:
+            ports = ports.push(clock_port)
+            val clock_port_name = _simple_port_name_from_decl(clock_port)
+            if clock_port_name != "":
+                input_port_names = input_port_names.push(clock_port_name)
+
+    var sanitized: [text] = []
+    var i = 0
+    while i < labels.len():
+        val port_name = _simple_vhdl_identifier(labels[i])
+        if port_name == "":
+            return Err("VHDL subset fallback invalid output label: {labels[i]}")
+        if _text_list_contains(sanitized, port_name):
+            return Err("VHDL subset fallback duplicate output label after VHDL sanitization: {labels[i]}")
+        val input_collision_index = _text_list_index(input_port_names, port_name)
+        if input_collision_index >= 0:
+            val input_name = if input_collision_index < param_names.len(): param_names[input_collision_index] else: port_name
+            return Err("VHDL subset fallback input/output port collision after VHDL sanitization: input `{input_name}` and output `{labels[i]}` both map to `{port_name}`")
+        val vhdl_type = _simple_type_to_vhdl(_simple_resolve_type_alias(return_types[i], alias_names, alias_types))
+        if vhdl_type == "":
+            val implicit_width_error = _simple_implicit_width_type_error(_simple_resolve_type_alias(return_types[i], alias_names, alias_types), "output `{labels[i]}` type `{return_types[i]}`")
+            if implicit_width_error != "":
+                return Err(implicit_width_error)
+            return Err("VHDL subset fallback unsupported output type: {return_types[i]}")
+        sanitized = sanitized.push(port_name)
+        val suffix = if i == labels.len() - 1: "" else: ";"
+        ports = ports.push("        {port_name} : out {vhdl_type}{suffix}")
+        i = i + 1
+
+    val lowering_result = _simple_labeled_body_lowering(body_lines, labels, sanitized, return_types, param_names, param_types, all_names, all_params, all_returns, hardware_flags, alias_names, alias_types)
+    if lowering_result.is_err():
+        return Err(lowering_result.unwrap_err())
+    val lowering = lowering_result.unwrap()
+    val signal_decls = lowering[0]
+    val instances = lowering[1]
+    val assignments = lowering[2]
+
+    val assignment_result = Ok(assignments)
+    if assignment_result.is_err():
+        return Err(assignment_result.unwrap_err())
+
+    var out = "library ieee;\n"
+    out = out + "use ieee.std_logic_1164.all;\n"
+    out = out + "use ieee.numeric_std.all;\n\n"
+    val decl_result = _simple_entity_type_declaration_block(fn_name, alias_names, alias_types)
+    if decl_result.is_err():
+        return Err(decl_result.unwrap_err())
+    out = out + decl_result.unwrap()
+    out = out + "entity {fn_name} is\n"
+    out = out + _simple_entity_generic_block(generic_text)
+    out = out + "    port (\n"
+    out = out + ports.join("\n") + "\n"
+    out = out + "    );\n"
+    out = out + "end entity {fn_name};\n\n"
+    out = out + "architecture rtl of {fn_name} is\n"
+    if signal_decls != "":
+        out = out + signal_decls
+    out = out + "begin\n"
+    if instances != "":
+        out = out + instances
+    if clocked_text != "":
+        out = out + _simple_clocked_labeled_assignments(clocked_text, sanitized, return_types, assignment_result.unwrap())
+    else:
+        out = out + assignment_result.unwrap()
+    out = out + "end architecture rtl;\n"
+    Ok(out)

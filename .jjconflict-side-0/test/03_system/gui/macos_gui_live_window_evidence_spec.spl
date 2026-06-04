@@ -1,0 +1,297 @@
+# @tag:system, slow
+# @tag:gui
+# @tag:macos
+
+"""
+# macOS GUI Live Window Evidence Spec
+
+Runs the macOS live GUI window evidence wrapper. On macOS this must launch the
+sample through `scripts/macos-gui-run.shs`, detect a real `SimpleGui` window,
+capture its window rectangle, and fingerprint the capture. On non-macOS hosts it
+must skip explicitly so Linux CI cannot claim live macOS window evidence.
+"""
+
+use std.io_runtime.{getpid, time_now_unix_micros}
+use std.spec.*
+
+extern fn rt_platform_name() -> text
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+fn _run_id() -> text:
+    getpid().to_text() + "_" + time_now_unix_micros().to_text()
+
+fn _build_dir(run_id: text) -> text:
+    "build/tmp/macos_gui_live_window_evidence_spec_" + run_id
+
+fn _report_path(run_id: text) -> text:
+    "build/tmp/macos_gui_live_window_evidence_spec_" + run_id + ".md"
+
+fn _run_evidence(run_id: text) -> (text, text, i32):
+    rt_process_run_timeout(
+        "/bin/sh",
+        [
+            "-c",
+            "BUILD_DIR=" + _build_dir(run_id) + " REPORT_PATH=" + _report_path(run_id) +
+                " SIMPLE_LIB=src sh scripts/check/check-macos-gui-live-window-evidence.shs"
+        ],
+        180000
+    )
+
+fn _extract_field(output: text, prefix: text) -> text:
+    val lines = output.split("\n")
+    var i = 0
+    while i < lines.len():
+        if lines[i].starts_with(prefix):
+            return lines[i].substring(prefix.len())
+        i = i + 1
+    return ""
+
+fn _extract_i64_field(output: text, prefix: text) -> i64:
+    val value = _extract_field(output, prefix)
+    if value == "":
+        return 0
+    return value.to_i64()
+
+fn _window_rect_has_positive_size(rect: text) -> bool:
+    val parts = rect.split(",")
+    if parts.len() != 4:
+        return false
+    val width = parts[2].to_i64()
+    val height = parts[3].to_i64()
+    return width > 0 and height > 0
+
+fn _ratio_is_coherent(ratio: text, positive_sample: bool) -> bool:
+    if ratio == "":
+        return false
+    if positive_sample:
+        if ratio == "0.000000":
+            return false
+        return ratio.starts_with("0.") or ratio == "1.000000"
+    return ratio == "0.000000"
+
+fn _ratio_to_ppm(ratio: text) -> i64:
+    val parts = ratio.split(".")
+    if parts.len() != 2:
+        return -1
+    val whole = parts[0]
+    val fraction = parts[1]
+    if fraction.len() != 6:
+        return -1
+    if whole != "0" and whole != "1":
+        return -1
+    var ppm = 0
+    var i = 0
+    while i < 6:
+        val digit = fraction.substring(i, i + 1).to_i64()
+        if digit < 0 or digit > 9:
+            return -1
+        ppm = ppm * 10 + digit
+        i = i + 1
+    if whole == "1":
+        return 1000000 + ppm
+    return ppm
+
+fn _capture_fields_are_coherent(output: text, positive_sample: bool) -> bool:
+    val width = _extract_i64_field(output, "macos_gui_live_window_evidence_capture_width=")
+    val height = _extract_i64_field(output, "macos_gui_live_window_evidence_capture_height=")
+    val total_pixels = _extract_i64_field(output, "macos_gui_live_window_evidence_capture_total_pixels=")
+    val non_background_pixels = _extract_i64_field(output, "macos_gui_live_window_evidence_non_background_pixels=")
+    val ratio = _extract_field(output, "macos_gui_live_window_evidence_non_background_ratio=")
+    if width < 0 or height < 0 or total_pixels < 0 or non_background_pixels < 0:
+        return false
+    if total_pixels != width * height:
+        return false
+    if non_background_pixels > total_pixels:
+        return false
+    if positive_sample:
+        if width <= 0 or height <= 0 or total_pixels <= 0 or non_background_pixels <= 0:
+            return false
+        val expected_ratio_ppm = (non_background_pixels * 1000000 + (total_pixels / 2)) / total_pixels
+        return _ratio_is_coherent(ratio, true) and _ratio_to_ppm(ratio) == expected_ratio_ppm
+    if width != 0 or height != 0 or total_pixels != 0 or non_background_pixels != 0:
+        return false
+    return _ratio_is_coherent(ratio, false)
+
+fn _row_field(row: text, key: text) -> text:
+    val prefix = key + "="
+    val parts = row.split(" ")
+    var i = 0
+    while i < parts.len():
+        if parts[i].starts_with(prefix):
+            return parts[i].substring(prefix.len())
+        i = i + 1
+    return ""
+
+fn _row_i64_field(row: text, key: text) -> i64:
+    val value = _row_field(row, key)
+    if value == "":
+        return 0
+    return value.to_i64()
+
+fn _gui_smf_contract_row_is_macos_release_ready(row: text) -> bool:
+    if not row.starts_with("GUI_SMF_ARTIFACT_CONTRACT "):
+        return false
+    return _row_field(row, "status") == "pass" and
+        _row_field(row, "artifact") == "build/gui/pure_gui_hot.smf" and
+        _row_field(row, "sha256") != "" and
+        _row_i64_field(row, "size") > 0 and
+        _row_field(row, "smf_role") == "2" and
+        _row_field(row, "arch") == "3" and
+        _row_field(row, "embedded_dynlib") == "true" and
+        _row_field(row, "symbol") == "gui_dynlib_hot_probe_tick" and
+        _row_field(row, "qemu_status") == "not-run" and
+        _row_field(row, "qemu_reason") == "live-qemu-not-executed" and
+        _row_field(row, "macos_status") == "pass" and
+        _row_field(row, "macos_reason") == "live-macos-window-artifact-verified"
+
+describe "macOS GUI live window evidence":
+    it "validates synthetic positive capture metric coherence without macOS":
+        val sample = "macos_gui_live_window_evidence_capture_width=7\n" +
+            "macos_gui_live_window_evidence_capture_height=5\n" +
+            "macos_gui_live_window_evidence_capture_total_pixels=35\n" +
+            "macos_gui_live_window_evidence_non_background_pixels=12\n" +
+            "macos_gui_live_window_evidence_non_background_ratio=0.342857\n"
+        expect(_capture_fields_are_coherent(sample, true)).to_equal(true)
+
+    it "validates synthetic skip capture metric coherence without macOS":
+        val sample = "macos_gui_live_window_evidence_capture_width=0\n" +
+            "macos_gui_live_window_evidence_capture_height=0\n" +
+            "macos_gui_live_window_evidence_capture_total_pixels=0\n" +
+            "macos_gui_live_window_evidence_non_background_pixels=0\n" +
+            "macos_gui_live_window_evidence_non_background_ratio=0.000000\n"
+        expect(_capture_fields_are_coherent(sample, false)).to_equal(true)
+
+    it "rejects incoherent synthetic capture metrics without macOS":
+        val mismatched_total = "macos_gui_live_window_evidence_capture_width=7\n" +
+            "macos_gui_live_window_evidence_capture_height=5\n" +
+            "macos_gui_live_window_evidence_capture_total_pixels=36\n" +
+            "macos_gui_live_window_evidence_non_background_pixels=12\n" +
+            "macos_gui_live_window_evidence_non_background_ratio=0.342857\n"
+        val overflow_non_background = "macos_gui_live_window_evidence_capture_width=7\n" +
+            "macos_gui_live_window_evidence_capture_height=5\n" +
+            "macos_gui_live_window_evidence_capture_total_pixels=35\n" +
+            "macos_gui_live_window_evidence_non_background_pixels=36\n" +
+            "macos_gui_live_window_evidence_non_background_ratio=1.028571\n"
+        val zero_positive_ratio = "macos_gui_live_window_evidence_capture_width=7\n" +
+            "macos_gui_live_window_evidence_capture_height=5\n" +
+            "macos_gui_live_window_evidence_capture_total_pixels=35\n" +
+            "macos_gui_live_window_evidence_non_background_pixels=12\n" +
+            "macos_gui_live_window_evidence_non_background_ratio=0.000000\n"
+        val wrong_positive_ratio = "macos_gui_live_window_evidence_capture_width=7\n" +
+            "macos_gui_live_window_evidence_capture_height=5\n" +
+            "macos_gui_live_window_evidence_capture_total_pixels=35\n" +
+            "macos_gui_live_window_evidence_non_background_pixels=12\n" +
+            "macos_gui_live_window_evidence_non_background_ratio=0.999999\n"
+        expect(_capture_fields_are_coherent(mismatched_total, true)).to_equal(false)
+        expect(_capture_fields_are_coherent(overflow_non_background, true)).to_equal(false)
+        expect(_capture_fields_are_coherent(zero_positive_ratio, true)).to_equal(false)
+        expect(_capture_fields_are_coherent(wrong_positive_ratio, true)).to_equal(false)
+
+    slow_it "passes on macOS and reports an explicit requires-macos skip elsewhere":
+        val run_id = _run_id()
+        val result = _run_evidence(run_id)
+        val stdout = result[0]
+        val stderr = result[1]
+        val code = result[2]
+        val host_os = rt_platform_name()
+        if code != 0:
+            print "macos_gui_live_window_evidence stdout: " + stdout
+            print "macos_gui_live_window_evidence stderr: " + stderr
+        if host_os == "macos":
+            expect(code).to_equal(0)
+            expect(stdout).to_contain("macos_gui_live_window_evidence_status=pass")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_reason=pass")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_host_os=macos")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_launcher=macos-gui-run")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_window_found=true")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_window_title=SimpleGui")
+            expect(_extract_field(stdout, "macos_gui_live_window_evidence_window_title=")).to_equal("SimpleGui")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_window_rect=")
+            expect(_window_rect_has_positive_size(_extract_field(stdout, "macos_gui_live_window_evidence_window_rect="))).to_equal(true)
+            expect(stdout).to_contain("macos_gui_live_window_evidence_capture_path=" + _build_dir(run_id) + "/simplegui-window.png")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_capture_bytes=")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_capture_cksum=")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_capture_width=")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_capture_height=")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_capture_total_pixels=")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_non_background_pixels=")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_non_background_ratio=")
+            expect(_extract_i64_field(stdout, "macos_gui_live_window_evidence_capture_bytes=")).to_be_greater_than(0)
+            expect(_extract_i64_field(stdout, "macos_gui_live_window_evidence_capture_cksum=")).to_be_greater_than(0)
+            expect(_extract_i64_field(stdout, "macos_gui_live_window_evidence_capture_width=")).to_be_greater_than(0)
+            expect(_extract_i64_field(stdout, "macos_gui_live_window_evidence_capture_height=")).to_be_greater_than(0)
+            expect(_extract_i64_field(stdout, "macos_gui_live_window_evidence_capture_total_pixels=")).to_be_greater_than(0)
+            expect(_extract_i64_field(stdout, "macos_gui_live_window_evidence_non_background_pixels=")).to_be_greater_than(0)
+            expect(_extract_field(stdout, "macos_gui_live_window_evidence_non_background_ratio=") == "0.000000").to_equal(false)
+            expect(_capture_fields_are_coherent(stdout, true)).to_equal(true)
+            expect(stdout).to_contain("macos_gui_live_window_evidence_release_gate=live-macos-window-visual-proof")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_release_gate_status=satisfied")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_gui_smf_artifact_contract_status=pass")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_gui_smf_artifact_contract_row=GUI_SMF_ARTIFACT_CONTRACT status=pass artifact=build/gui/pure_gui_hot.smf")
+            val smf_row = _extract_field(stdout, "macos_gui_live_window_evidence_gui_smf_artifact_contract_row=")
+            expect(_gui_smf_contract_row_is_macos_release_ready(smf_row)).to_equal(true)
+            val report = rt_file_read_text(_report_path(run_id))
+            expect(report).to_contain("# macOS GUI Live Window Evidence")
+            expect(report).to_contain("GUI SMF artifact contract status: pass")
+            expect(report).to_contain("GUI SMF artifact contract row: GUI_SMF_ARTIFACT_CONTRACT status=pass artifact=build/gui/pure_gui_hot.smf")
+            expect(report).to_contain("GUI SMF artifact contract scope: contract-only; does not promote live macOS window evidence")
+            expect(report).to_contain("macos_gui_live_window_evidence_status=pass")
+            expect(report).to_contain("macos_gui_live_window_evidence_window_rect=")
+            expect(report).to_contain("macos_gui_live_window_evidence_capture_cksum=")
+            expect(report).to_contain("macos_gui_live_window_evidence_capture_total_pixels=")
+            expect(report).to_contain("macos_gui_live_window_evidence_non_background_ratio=")
+            expect(report).to_contain("macos_gui_live_window_evidence_release_gate_status=satisfied")
+            expect(report).to_contain("macos_gui_live_window_evidence_gui_smf_artifact_contract_status=pass")
+            expect(report).to_contain("macos_gui_live_window_evidence_gui_smf_artifact_contract_row=GUI_SMF_ARTIFACT_CONTRACT status=pass artifact=build/gui/pure_gui_hot.smf")
+        else:
+            expect(code).to_equal(0)
+            expect(stdout).to_contain("macos_gui_live_window_evidence_status=skip")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_reason=requires-macos")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_host_os=")
+            expect(_extract_field(stdout, "macos_gui_live_window_evidence_host_os=") == "macos").to_equal(false)
+            expect(_extract_field(stdout, "macos_gui_live_window_evidence_host_os=") == "").to_equal(false)
+            expect(stdout).to_contain("macos_gui_live_window_evidence_launcher=macos-gui-run")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_window_found=false")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_window_rect=")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_capture_path=")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_capture_bytes=0")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_capture_cksum=0")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_capture_width=0")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_capture_height=0")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_capture_total_pixels=0")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_non_background_pixels=0")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_non_background_ratio=0.000000")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_release_gate=live-macos-window-visual-proof")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_release_gate_status=not-satisfied")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_gui_smf_artifact_contract_status=fail")
+            expect(stdout).to_contain("macos_gui_live_window_evidence_gui_smf_artifact_contract_row=GUI_SMF_ARTIFACT_CONTRACT status=fail artifact=build/gui/pure_gui_hot.smf")
+            expect(stdout).to_contain("qemu_status=not-run")
+            expect(stdout).to_contain("macos_status=not-run")
+            val smf_row = _extract_field(stdout, "macos_gui_live_window_evidence_gui_smf_artifact_contract_row=")
+            expect(_row_field(smf_row, "macos_status") == "pass").to_equal(false)
+            expect(_extract_field(stdout, "macos_gui_live_window_evidence_window_title=")).to_equal("")
+            expect(_extract_field(stdout, "macos_gui_live_window_evidence_window_rect=")).to_equal("")
+            expect(_extract_field(stdout, "macos_gui_live_window_evidence_capture_path=")).to_equal("")
+            expect(_extract_i64_field(stdout, "macos_gui_live_window_evidence_capture_bytes=")).to_equal(0)
+            expect(_extract_i64_field(stdout, "macos_gui_live_window_evidence_capture_cksum=")).to_equal(0)
+            expect(_extract_i64_field(stdout, "macos_gui_live_window_evidence_capture_width=")).to_equal(0)
+            expect(_extract_i64_field(stdout, "macos_gui_live_window_evidence_capture_height=")).to_equal(0)
+            expect(_extract_i64_field(stdout, "macos_gui_live_window_evidence_capture_total_pixels=")).to_equal(0)
+            expect(_extract_i64_field(stdout, "macos_gui_live_window_evidence_non_background_pixels=")).to_equal(0)
+            expect(_extract_field(stdout, "macos_gui_live_window_evidence_non_background_ratio=")).to_equal("0.000000")
+            expect(_capture_fields_are_coherent(stdout, false)).to_equal(true)
+            val report = rt_file_read_text(_report_path(run_id))
+            expect(report).to_contain("# macOS GUI Live Window Evidence")
+            expect(report).to_contain("macos_gui_live_window_evidence_status=skip")
+            expect(report).to_contain("macos_gui_live_window_evidence_reason=requires-macos")
+            expect(report).to_contain("GUI SMF artifact contract status: fail")
+            expect(report).to_contain("GUI SMF artifact contract row: GUI_SMF_ARTIFACT_CONTRACT status=fail artifact=build/gui/pure_gui_hot.smf")
+            expect(report).to_contain("GUI SMF artifact contract scope: contract-only; does not promote live macOS window evidence")
+            expect(report).to_contain("macos_gui_live_window_evidence_window_rect=")
+            expect(report).to_contain("macos_gui_live_window_evidence_capture_width=0")
+            expect(report).to_contain("macos_gui_live_window_evidence_capture_height=0")
+            expect(report).to_contain("macos_gui_live_window_evidence_capture_total_pixels=0")
+            expect(report).to_contain("macos_gui_live_window_evidence_non_background_ratio=0.000000")
+            expect(report).to_contain("macos_gui_live_window_evidence_release_gate_status=not-satisfied")
+            expect(report).to_contain("macos_gui_live_window_evidence_gui_smf_artifact_contract_status=fail")

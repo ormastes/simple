@@ -1,0 +1,104 @@
+# DBFS Namespace B-Tree — facade over std.storage.shared.btree.
+#
+# Provides DentryKey/BTreeValue domain types and MVCC snapshot reads.
+# Core B-tree algorithm lives in BTree<V> from the shared layer.
+#
+# DentryKey maps to BTreeKey { a: parent_ino, b: name_hash }.
+# BTreeValue carries gen for MVCC visibility.
+#
+# Maps to: AC-3, AC-9, D2, D3.
+
+use std.io_runtime
+use std.storage.shared.btree.{BTree, BTreeKey, BTreeNode, BTreeSnapshot, BTreePredEntry}
+
+pub struct DentryKey:
+    parent_ino: i64
+    name_hash:  i64
+
+pub struct Ino:
+    value: i64
+
+# @tag(parent_ino=parent_ino, name_hash=name_hash)
+pub fn ns_dentry_key(parent_ino: i64, name_hash: i64) -> DentryKey:
+    DentryKey(parent_ino: parent_ino, name_hash: name_hash)
+
+pub fn ns_ino(value: i64) -> Ino:
+    Ino(value: value)
+
+pub struct BTreeValue:
+    value: i64
+    gen:   i64
+
+fn dentry_to_btk(dk: DentryKey) -> BTreeKey:
+    BTreeKey(a: dk.parent_ino, b: dk.name_hash)
+
+fn btk_to_dentry(bk: BTreeKey) -> DentryKey:
+    ns_dentry_key(bk.a, bk.b)
+
+pub struct NsBTreeSnapshot:
+    gen: i64
+
+pub struct NsBTree:
+    inner: BTree<BTreeValue>
+
+    static fn new() -> NsBTree:
+        NsBTree(inner: BTree<BTreeValue>.new(4))
+
+    fn cmp_key(a: DentryKey, b: DentryKey) -> i64:
+        if a.parent_ino < b.parent_ino:
+            return -1
+        if a.parent_ino > b.parent_ino:
+            return 1
+        if a.name_hash < b.name_hash:
+            return -1
+        if a.name_hash > b.name_hash:
+            return 1
+        0
+
+    fn lookup(key: DentryKey) -> Option<BTreeValue>:
+        self.inner.lookup(dentry_to_btk(key))
+
+    fn current_gen() -> i64:
+        self.inner.current_gen()
+
+    fn lookup_at_gen(key: DentryKey, target_gen: i64) -> Option<BTreeValue>:
+        val opt = self.inner.lookup(dentry_to_btk(key))
+        match opt:
+            case None: None
+            case Some(v):
+                if v.gen <= target_gen:
+                    Some(v)
+                else:
+                    None
+
+    me fn insert(key: DentryKey, ino: Ino) -> Result<(), text>:
+        val cur_gen = me.inner.next_gen
+        val val_to_insert = BTreeValue(value: ino.value, gen: cur_gen)
+        me.inner.insert(dentry_to_btk(key), val_to_insert)
+
+    me fn delete(key: DentryKey) -> Result<(), text>:
+        me.inner.delete(dentry_to_btk(key))
+
+    fn range_scan(lo: DentryKey, hi: DentryKey) -> Result<[(DentryKey, BTreeValue)], text>:
+        val raw = self.inner.range_scan(dentry_to_btk(lo), dentry_to_btk(hi))?
+        var result: [(DentryKey, BTreeValue)] = []
+        for pair in raw:
+            result.push((btk_to_dentry(pair.0), pair.1))
+        Ok(result)
+
+    fn snapshot() -> NsBTreeSnapshot:
+        NsBTreeSnapshot(gen: self.inner.next_gen - 1)
+
+    fn lookup_at_snapshot(key: DentryKey, snap: NsBTreeSnapshot) -> Option<BTreeValue>:
+        val opt = self.inner.lookup(dentry_to_btk(key))
+        match opt:
+            case None: None
+            case Some(v):
+                if v.gen <= snap.gen:
+                    Some(v)
+                else:
+                    None
+
+pub struct BTreeScanEntry:
+    key: DentryKey
+    val: BTreeValue

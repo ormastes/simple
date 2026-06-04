@@ -1,0 +1,653 @@
+# Pure Simple image metadata probes for web/browser image routing.
+#
+# This file intentionally performs signature and lightweight metadata parsing
+# only. Decoders that cannot return real pixels must fail closed in callers.
+
+pub class ImageInfo:
+    format: text
+    width: i64
+    height: i64
+    supported: bool
+    reason: text
+
+pub class ImageColorProfileInfo:
+    format: text
+    has_profile: bool
+    profile_kind: text
+    profile_length: i64
+    profile_offset: i64
+    requires_color_transform: bool
+    initializes_transform_now: bool
+    reason: text
+
+pub class ImageColorTransformResult:
+    pixels: [i64]
+    applied: bool
+    supported: bool
+    reason: text
+
+pub fn image_info_unknown(reason: text) -> ImageInfo:
+    ImageInfo(format: "unknown", width: 0, height: 0, supported: false, reason: reason)
+
+pub fn image_color_profile_unknown(reason: text) -> ImageColorProfileInfo:
+    ImageColorProfileInfo(
+        format: "unknown",
+        has_profile: false,
+        profile_kind: "none",
+        profile_length: 0,
+        profile_offset: 0,
+        requires_color_transform: false,
+        initializes_transform_now: false,
+        reason: reason
+    )
+
+pub fn image_color_transform_result(pixels: [i64], applied: bool, supported: bool, reason: text) -> ImageColorTransformResult:
+    ImageColorTransformResult(pixels: pixels, applied: applied, supported: supported, reason: reason)
+
+fn _byte_at(data: text, offset: i64) -> i64:
+    if offset < 0 or offset >= data.len():
+        return 0
+    data[offset:offset + 1].char_code_at(0)
+
+fn _read_u16_le(data: text, offset: i64) -> i64:
+    _byte_at(data, offset) | (_byte_at(data, offset + 1) << 8)
+
+fn _read_u16_be(data: text, offset: i64) -> i64:
+    (_byte_at(data, offset) << 8) | _byte_at(data, offset + 1)
+
+fn _read_u32_le(data: text, offset: i64) -> i64:
+    _byte_at(data, offset) |
+    (_byte_at(data, offset + 1) << 8) |
+    (_byte_at(data, offset + 2) << 16) |
+    (_byte_at(data, offset + 3) << 24)
+
+fn _read_u32_be(data: text, offset: i64) -> i64:
+    (_byte_at(data, offset) << 24) |
+    (_byte_at(data, offset + 1) << 16) |
+    (_byte_at(data, offset + 2) << 8) |
+    _byte_at(data, offset + 3)
+
+fn _read_u64_be(data: text, offset: i64) -> i64:
+    (_read_u32_be(data, offset) << 32) | _read_u32_be(data, offset + 4)
+
+fn _read_u16(data: text, offset: i64, little: bool) -> i64:
+    if little:
+        return _read_u16_le(data, offset)
+    _read_u16_be(data, offset)
+
+fn _read_u32(data: text, offset: i64, little: bool) -> i64:
+    if little:
+        return _read_u32_le(data, offset)
+    _read_u32_be(data, offset)
+
+pub fn image_is_tiff(data: text) -> bool:
+    if data.len() < 4:
+        return false
+    val b0 = _byte_at(data, 0)
+    val b1 = _byte_at(data, 1)
+    val b2 = _byte_at(data, 2)
+    val b3 = _byte_at(data, 3)
+    (b0 == 73 and b1 == 73 and b2 == 42 and b3 == 0) or
+    (b0 == 77 and b1 == 77 and b2 == 0 and b3 == 42)
+
+pub fn image_is_jpeg_xl(data: text) -> bool:
+    if data.len() >= 2 and _byte_at(data, 0) == 255 and _byte_at(data, 1) == 10:
+        return true
+    _jpeg_xl_is_container_signature(data)
+
+pub fn image_is_jpeg(data: text) -> bool:
+    data.len() >= 2 and _byte_at(data, 0) == 255 and _byte_at(data, 1) == 216
+
+fn _tiff_entry_value(data: text, entry: i64, little: bool) -> i64:
+    val typ = _read_u16(data, entry + 2, little)
+    val count = _read_u32(data, entry + 4, little)
+    if count != 1:
+        return 0
+    if typ == 3:
+        return _read_u16(data, entry + 8, little)
+    if typ == 4:
+        return _read_u32(data, entry + 8, little)
+    0
+
+pub fn tiff_image_info(data: text) -> ImageInfo:
+    if not image_is_tiff(data):
+        return image_info_unknown("not-tiff")
+    val little = _byte_at(data, 0) == 73
+    val ifd = _read_u32(data, 4, little)
+    if ifd <= 0 or ifd + 2 > data.len():
+        return ImageInfo(format: "tiff", width: 0, height: 0, supported: false, reason: "tiff-invalid-ifd-offset")
+    val count = _read_u16(data, ifd, little)
+    var width: i64 = 0
+    var height: i64 = 0
+    var i: i64 = 0
+    while i < count:
+        val entry = ifd + 2 + (i * 12)
+        if entry + 12 > data.len():
+            return ImageInfo(format: "tiff", width: width, height: height, supported: false, reason: "tiff-truncated-ifd")
+        val tag = _read_u16(data, entry, little)
+        val value = _tiff_entry_value(data, entry, little)
+        if tag == 256:
+            width = value
+        if tag == 257:
+            height = value
+        i = i + 1
+    if width <= 0 or height <= 0:
+        return ImageInfo(format: "tiff", width: width, height: height, supported: false, reason: "tiff-missing-dimensions")
+    ImageInfo(format: "tiff", width: width, height: height, supported: true, reason: "tiff-baseline-metadata")
+
+pub fn jpeg_xl_image_info(data: text) -> ImageInfo:
+    if data.len() >= 2 and _byte_at(data, 0) == 255 and _byte_at(data, 1) == 10:
+        return _jpeg_xl_codestream_info_at(data, 0, data.len())
+    if _jpeg_xl_is_container_signature(data):
+        return _jpeg_xl_container_info(data)
+    image_info_unknown("not-jpegxl")
+
+fn _jpeg_xl_is_container_signature(data: text) -> bool:
+    data.len() >= 12 and
+        _byte_at(data, 0) == 0 and
+        _byte_at(data, 1) == 0 and
+        _byte_at(data, 2) == 0 and
+        _byte_at(data, 3) == 12 and
+        _byte_at(data, 4) == 74 and
+        _byte_at(data, 5) == 88 and
+        _byte_at(data, 6) == 76 and
+        _byte_at(data, 7) == 32 and
+        _byte_at(data, 8) == 13 and
+        _byte_at(data, 9) == 10 and
+        _byte_at(data, 10) == 135 and
+        _byte_at(data, 11) == 10
+
+fn _jpeg_xl_box_type_at(data: text, offset: i64, a: i64, b: i64, c: i64, d: i64) -> bool:
+    _byte_at(data, offset) == a and
+        _byte_at(data, offset + 1) == b and
+        _byte_at(data, offset + 2) == c and
+        _byte_at(data, offset + 3) == d
+
+fn _jpeg_xl_container_info(data: text) -> ImageInfo:
+    var offset = 12
+    var saw_full_codestream = false
+    var saw_partial_codestream = false
+    var saw_file_type = false
+    var full_codestream_offset = 0
+    var full_codestream_length = 0
+    var partial_codestream = ""
+    while offset + 8 <= data.len():
+        val box_size = _read_u32_be(data, offset)
+        val box_type = offset + 4
+        var payload_offset = offset + 8
+        var effective_box_size = box_size
+        if box_size == 1:
+            if offset + 16 > data.len():
+                return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-large-box-header-truncated")
+            effective_box_size = _read_u64_be(data, offset + 8)
+            payload_offset = offset + 16
+            if effective_box_size < 16:
+                return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-invalid-box-size")
+        if effective_box_size != 0 and effective_box_size < 8:
+            return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-invalid-box-size")
+        var next_offset = data.len()
+        if effective_box_size != 0:
+            next_offset = offset + effective_box_size
+        if next_offset > data.len():
+            return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-truncated-box")
+        if _jpeg_xl_box_type_at(data, box_type, 102, 116, 121, 112):
+            saw_file_type = true
+        if _jpeg_xl_box_type_at(data, box_type, 106, 120, 108, 99):
+            saw_full_codestream = true
+            full_codestream_offset = payload_offset
+            full_codestream_length = next_offset - full_codestream_offset
+        if _jpeg_xl_box_type_at(data, box_type, 106, 120, 108, 112):
+            saw_partial_codestream = true
+            val partial_payload_offset = payload_offset
+            val partial_payload_length = next_offset - partial_payload_offset
+            if partial_payload_length < 4:
+                return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-partial-codestream-truncated")
+            partial_codestream = partial_codestream + data.slice(partial_payload_offset + 4, next_offset)
+        if box_size == 0:
+            offset = data.len()
+        else:
+            offset = next_offset
+    if offset != data.len():
+        return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-truncated-box-header")
+    if saw_full_codestream:
+        if saw_file_type:
+            val codestream = _jpeg_xl_codestream_info_at(data, full_codestream_offset, full_codestream_length)
+            if codestream.supported:
+                return codestream
+            return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-container-full-codestream-decoder-pending")
+        return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-container-codestream-without-ftyp")
+    if saw_partial_codestream:
+        if saw_file_type and partial_codestream.len() > 0:
+            val codestream = _jpeg_xl_codestream_info_at(partial_codestream, 0, partial_codestream.len())
+            if codestream.supported:
+                return codestream
+        return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-container-partial-codestream-stitching-pending")
+    ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-container-missing-codestream")
+
+fn _jpeg_xl_read_bit(data: text, start: i64, length: i64, bit_pos: i64) -> i64:
+    val byte_offset = start + (bit_pos / 8)
+    if bit_pos < 0 or bit_pos >= length * 8 or byte_offset >= data.len():
+        return 0
+    val value = _byte_at(data, byte_offset)
+    (value / (1 << (bit_pos % 8))) % 2
+
+fn _jpeg_xl_read_bits(data: text, start: i64, length: i64, bit_pos: i64, count: i64) -> i64:
+    var out = 0
+    var i = 0
+    while i < count:
+        out = out | (_jpeg_xl_read_bit(data, start, length, bit_pos + i) << i)
+        i = i + 1
+    out
+
+fn _jpeg_xl_width_from_ratio(height: i64, ratio: i64) -> i64:
+    if ratio == 1:
+        return height
+    if ratio == 2:
+        return (height * 12) / 10
+    if ratio == 3:
+        return (height * 4) / 3
+    if ratio == 4:
+        return (height * 3) / 2
+    if ratio == 5:
+        return (height * 16) / 9
+    if ratio == 6:
+        return (height * 5) / 4
+    if ratio == 7:
+        return height * 2
+    0
+
+fn _jpeg_xl_read_u32_choice(data: text, start: i64, length: i64, bit_pos: i64, c0: i64, c1: i64, c2: i64, c3: i64, u0: i64, u1: i64, u2: i64, u3: i64) -> (value: i64, next_bit: i64):
+    val choice = _jpeg_xl_read_bits(data, start, length, bit_pos, 2)
+    var value = c0
+    var bit_count = u0
+    if choice == 1:
+        value = c1
+        bit_count = u1
+    if choice == 2:
+        value = c2
+        bit_count = u2
+    if choice == 3:
+        value = c3
+        bit_count = u3
+    if bit_count > 0:
+        value = value + _jpeg_xl_read_bits(data, start, length, bit_pos + 2, bit_count)
+    (value: value, next_bit: bit_pos + 2 + bit_count)
+
+fn _jpeg_xl_codestream_info_at(data: text, start: i64, length: i64) -> ImageInfo:
+    if length < 2 or start < 0 or start + length > data.len():
+        return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-codestream-truncated")
+    if _byte_at(data, start) != 255 or _byte_at(data, start + 1) != 10:
+        return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-codestream-missing-signature")
+    if length < 4:
+        return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-codestream-size-header-truncated")
+    val bits_start = start + 2
+    val bits_length = length - 2
+    val small = _jpeg_xl_read_bit(data, bits_start, bits_length, 0)
+    if small == 1:
+        val ysize_div8_minus_1 = _jpeg_xl_read_bits(data, bits_start, bits_length, 1, 5)
+        val height = (ysize_div8_minus_1 + 1) * 8
+        val ratio = _jpeg_xl_read_bits(data, bits_start, bits_length, 6, 3)
+        var width = _jpeg_xl_width_from_ratio(height, ratio)
+        if width == 0:
+            if bits_length * 8 < 14:
+                return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-codestream-size-header-truncated")
+            val xsize_div8_minus_1 = _jpeg_xl_read_bits(data, bits_start, bits_length, 9, 5)
+            width = (xsize_div8_minus_1 + 1) * 8
+        return ImageInfo(format: "jpegxl", width: width, height: height, supported: true, reason: "jpegxl-small-codestream-metadata")
+    val height_header = _jpeg_xl_read_u32_choice(data, bits_start, bits_length, 1, 0, 0, 0, 0, 9, 13, 18, 30)
+    if bits_length * 8 < height_header.next_bit + 3:
+        return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-codestream-size-header-truncated")
+    val height = height_header.value + 1
+    val ratio = _jpeg_xl_read_bits(data, bits_start, bits_length, height_header.next_bit, 3)
+    var width = _jpeg_xl_width_from_ratio(height, ratio)
+    if width == 0:
+        val width_header = _jpeg_xl_read_u32_choice(data, bits_start, bits_length, height_header.next_bit + 3, 0, 0, 0, 0, 9, 13, 18, 30)
+        if bits_length * 8 < width_header.next_bit:
+            return ImageInfo(format: "jpegxl", width: 0, height: 0, supported: false, reason: "jpegxl-codestream-size-header-truncated")
+        width = width_header.value + 1
+    ImageInfo(format: "jpegxl", width: width, height: height, supported: true, reason: "jpegxl-large-codestream-metadata")
+
+fn _jpeg_xl_codestream_size_header_next_bit(data: text, start: i64, length: i64) -> (supported: bool, next_bit: i64):
+    if length < 4 or start < 0 or start + length > data.len():
+        return (supported: false, next_bit: 0)
+    if _byte_at(data, start) != 255 or _byte_at(data, start + 1) != 10:
+        return (supported: false, next_bit: 0)
+    val bits_start = start + 2
+    val bits_length = length - 2
+    val small = _jpeg_xl_read_bit(data, bits_start, bits_length, 0)
+    if small == 1:
+        val ratio = _jpeg_xl_read_bits(data, bits_start, bits_length, 6, 3)
+        if ratio == 0:
+            if bits_length * 8 < 14:
+                return (supported: false, next_bit: 0)
+            return (supported: true, next_bit: 14)
+        return (supported: true, next_bit: 9)
+    val height_header = _jpeg_xl_read_u32_choice(data, bits_start, bits_length, 1, 0, 0, 0, 0, 9, 13, 18, 30)
+    if bits_length * 8 < height_header.next_bit + 3:
+        return (supported: false, next_bit: 0)
+    val ratio = _jpeg_xl_read_bits(data, bits_start, bits_length, height_header.next_bit, 3)
+    if ratio == 0:
+        val width_header = _jpeg_xl_read_u32_choice(data, bits_start, bits_length, height_header.next_bit + 3, 0, 0, 0, 0, 9, 13, 18, 30)
+        if bits_length * 8 < width_header.next_bit:
+            return (supported: false, next_bit: 0)
+        return (supported: true, next_bit: width_header.next_bit)
+    (supported: true, next_bit: height_header.next_bit + 3)
+
+fn _profile_result(format: text, kind: text, length: i64, offset: i64, reason: text) -> ImageColorProfileInfo:
+    ImageColorProfileInfo(
+        format: format,
+        has_profile: true,
+        profile_kind: kind,
+        profile_length: length,
+        profile_offset: offset,
+        requires_color_transform: true,
+        initializes_transform_now: false,
+        reason: reason
+    )
+
+fn _is_png_signature(data: text) -> bool:
+    data.len() >= 8 and
+        _byte_at(data, 0) == 137 and
+        _byte_at(data, 1) == 80 and
+        _byte_at(data, 2) == 78 and
+        _byte_at(data, 3) == 71 and
+        _byte_at(data, 4) == 13 and
+        _byte_at(data, 5) == 10 and
+        _byte_at(data, 6) == 26 and
+        _byte_at(data, 7) == 10
+
+fn _chunk_type_at(data: text, offset: i64, a: i64, b: i64, c: i64, d: i64) -> bool:
+    _byte_at(data, offset) == a and
+        _byte_at(data, offset + 1) == b and
+        _byte_at(data, offset + 2) == c and
+        _byte_at(data, offset + 3) == d
+
+pub fn png_color_profile_info(data: text) -> ImageColorProfileInfo:
+    if not _is_png_signature(data):
+        return image_color_profile_unknown("not-png")
+    var offset = 8
+    while offset + 12 <= data.len():
+        val chunk_len = _read_u32_be(data, offset)
+        val chunk_type = offset + 4
+        val chunk_data = offset + 8
+        if chunk_len < 0 or chunk_data + chunk_len + 4 > data.len():
+            return image_color_profile_unknown("png-truncated-chunk")
+        if _chunk_type_at(data, chunk_type, 105, 67, 67, 80):
+            # iCCP: profile name, NUL, compression method, compressed profile.
+            var name_end = chunk_data
+            while name_end < chunk_data + chunk_len and _byte_at(data, name_end) != 0:
+                name_end = name_end + 1
+            if name_end + 2 > chunk_data + chunk_len:
+                return image_color_profile_unknown("png-iccp-truncated")
+            val profile_offset = name_end + 2
+            val profile_length = chunk_data + chunk_len - profile_offset
+            return _profile_result("png", "icc-compressed", profile_length, profile_offset, "png-iccp-lazy")
+        if _chunk_type_at(data, chunk_type, 73, 69, 78, 68):
+            return image_color_profile_unknown("png-no-profile")
+        offset = offset + 12 + chunk_len
+    image_color_profile_unknown("png-no-profile")
+
+pub fn tiff_color_profile_info(data: text) -> ImageColorProfileInfo:
+    if not image_is_tiff(data):
+        return image_color_profile_unknown("not-tiff")
+    val little = _byte_at(data, 0) == 73
+    val ifd = _read_u32(data, 4, little)
+    if ifd <= 0 or ifd + 2 > data.len():
+        return image_color_profile_unknown("tiff-invalid-ifd-offset")
+    val count = _read_u16(data, ifd, little)
+    var i = 0
+    while i < count:
+        val entry = ifd + 2 + (i * 12)
+        if entry + 12 > data.len():
+            return image_color_profile_unknown("tiff-truncated-ifd")
+        val tag = _read_u16(data, entry, little)
+        val typ = _read_u16(data, entry + 2, little)
+        val value_count = _read_u32(data, entry + 4, little)
+        if tag == 34675:
+            var profile_offset = entry + 8
+            if value_count > 4:
+                profile_offset = _read_u32(data, entry + 8, little)
+            if profile_offset < 0 or profile_offset + value_count > data.len():
+                return image_color_profile_unknown("tiff-icc-out-of-range")
+            return _profile_result("tiff", "icc", value_count, profile_offset, "tiff-icc-lazy")
+        i = i + 1
+    image_color_profile_unknown("tiff-no-profile")
+
+fn _jpeg_segment_has_icc_header(data: text, offset: i64, segment_len: i64) -> bool:
+    if segment_len < 16:
+        return false
+    _byte_at(data, offset) == 73 and
+        _byte_at(data, offset + 1) == 67 and
+        _byte_at(data, offset + 2) == 67 and
+        _byte_at(data, offset + 3) == 95 and
+        _byte_at(data, offset + 4) == 80 and
+        _byte_at(data, offset + 5) == 82 and
+        _byte_at(data, offset + 6) == 79 and
+        _byte_at(data, offset + 7) == 70 and
+        _byte_at(data, offset + 8) == 73 and
+        _byte_at(data, offset + 9) == 76 and
+        _byte_at(data, offset + 10) == 69 and
+        _byte_at(data, offset + 11) == 0
+
+pub fn jpeg_color_profile_info(data: text) -> ImageColorProfileInfo:
+    if not image_is_jpeg(data):
+        return image_color_profile_unknown("not-jpeg")
+    var offset = 2
+    while offset + 4 <= data.len():
+        if _byte_at(data, offset) != 255:
+            return image_color_profile_unknown("jpeg-marker-sync-lost")
+        val marker = _byte_at(data, offset + 1)
+        if marker == 217 or marker == 218:
+            return image_color_profile_unknown("jpeg-no-profile")
+        val segment_len = _read_u16_be(data, offset + 2)
+        if segment_len < 2 or offset + 2 + segment_len > data.len():
+            return image_color_profile_unknown("jpeg-truncated-segment")
+        val segment_data = offset + 4
+        val payload_len = segment_len - 2
+        if marker == 226 and _jpeg_segment_has_icc_header(data, segment_data, payload_len):
+            val profile_offset = segment_data + 14
+            val profile_length = payload_len - 14
+            return _profile_result("jpeg", "icc", profile_length, profile_offset, "jpeg-app2-icc-lazy")
+        offset = offset + 2 + segment_len
+    image_color_profile_unknown("jpeg-no-profile")
+
+fn _jpeg_xl_structured_color_result(reason: text) -> ImageColorProfileInfo:
+    ImageColorProfileInfo(
+        format: "jpegxl",
+        has_profile: true,
+        profile_kind: "structured-color-default-srgb",
+        profile_length: 0,
+        profile_offset: 0,
+        requires_color_transform: false,
+        initializes_transform_now: false,
+        reason: reason
+    )
+
+fn _jpeg_xl_structured_color_pending(reason: text) -> ImageColorProfileInfo:
+    ImageColorProfileInfo(
+        format: "jpegxl",
+        has_profile: true,
+        profile_kind: "structured-color-nondefault-pending",
+        profile_length: 0,
+        profile_offset: 0,
+        requires_color_transform: true,
+        initializes_transform_now: false,
+        reason: reason
+    )
+
+fn _jpeg_xl_color_profile_info_at(data: text, start: i64, length: i64) -> ImageColorProfileInfo:
+    val info = _jpeg_xl_codestream_info_at(data, start, length)
+    if info.supported:
+        val size_header = _jpeg_xl_codestream_size_header_next_bit(data, start, length)
+        val bits_start = start + 2
+        val bits_length = length - 2
+        # Bounded fixtures use one extra UTF-8 byte for 0xFF; require at least
+        # two bytes beyond the minimal codestream fixture before treating
+        # following bits as an explicit color header.
+        val has_explicit_color_header = length >= 6
+        val available_bits = bits_length * 8
+        val required_color_bits = size_header.next_bit + 8
+        if size_header.supported and has_explicit_color_header and available_bits >= required_color_bits:
+            val all_default = _jpeg_xl_read_bit(data, bits_start, bits_length, size_header.next_bit)
+            if all_default == 0:
+                return _jpeg_xl_structured_color_pending("jpegxl-structured-nondefault-color-pending")
+        return _jpeg_xl_structured_color_result("jpegxl-structured-default-srgb-lazy")
+    ImageColorProfileInfo(
+        format: "jpegxl",
+        has_profile: false,
+        profile_kind: "color-metadata-pending",
+        profile_length: 0,
+        profile_offset: 0,
+        requires_color_transform: false,
+        initializes_transform_now: false,
+        reason: info.reason
+    )
+
+fn _jpeg_xl_container_color_profile_info(data: text) -> ImageColorProfileInfo:
+    var offset = 12
+    var saw_file_type = false
+    var partial_codestream = ""
+    while offset + 8 <= data.len():
+        val box_size = _read_u32_be(data, offset)
+        val box_type = offset + 4
+        var payload_offset = offset + 8
+        var effective_box_size = box_size
+        if box_size == 1:
+            if offset + 16 > data.len():
+                return image_color_profile_unknown("jpegxl-large-box-header-truncated")
+            effective_box_size = _read_u64_be(data, offset + 8)
+            payload_offset = offset + 16
+            if effective_box_size < 16:
+                return image_color_profile_unknown("jpegxl-invalid-box-size")
+        if effective_box_size != 0 and effective_box_size < 8:
+            return image_color_profile_unknown("jpegxl-invalid-box-size")
+        var next_offset = data.len()
+        if effective_box_size != 0:
+            next_offset = offset + effective_box_size
+        if next_offset > data.len():
+            return ImageColorProfileInfo(
+                format: "jpegxl",
+                has_profile: false,
+                profile_kind: "container-color-metadata-pending",
+                profile_length: 0,
+                profile_offset: 0,
+                requires_color_transform: false,
+                initializes_transform_now: false,
+                reason: "jpegxl-truncated-box"
+            )
+        if _jpeg_xl_box_type_at(data, box_type, 102, 116, 121, 112):
+            saw_file_type = true
+        if _jpeg_xl_box_type_at(data, box_type, 106, 120, 108, 99):
+            if not saw_file_type:
+                return ImageColorProfileInfo(
+                    format: "jpegxl",
+                    has_profile: false,
+                    profile_kind: "container-color-metadata-pending",
+                    profile_length: 0,
+                    profile_offset: 0,
+                    requires_color_transform: false,
+                    initializes_transform_now: false,
+                    reason: "jpegxl-container-codestream-without-ftyp"
+                )
+            return _jpeg_xl_color_profile_info_at(data, payload_offset, next_offset - payload_offset)
+        if _jpeg_xl_box_type_at(data, box_type, 106, 120, 108, 112):
+            val partial_payload_length = next_offset - payload_offset
+            if partial_payload_length < 4:
+                return image_color_profile_unknown("jpegxl-partial-codestream-truncated")
+            partial_codestream = partial_codestream + data.slice(payload_offset + 4, next_offset)
+        if box_size == 0:
+            offset = data.len()
+        else:
+            offset = next_offset
+    if partial_codestream.len() > 0:
+        if not saw_file_type:
+            return ImageColorProfileInfo(
+                format: "jpegxl",
+                has_profile: false,
+                profile_kind: "container-color-metadata-pending",
+                profile_length: 0,
+                profile_offset: 0,
+                requires_color_transform: false,
+                initializes_transform_now: false,
+                reason: "jpegxl-container-codestream-without-ftyp"
+            )
+        return _jpeg_xl_color_profile_info_at(partial_codestream, 0, partial_codestream.len())
+    ImageColorProfileInfo(
+        format: "jpegxl",
+        has_profile: false,
+        profile_kind: "container-color-metadata-pending",
+        profile_length: 0,
+        profile_offset: 0,
+        requires_color_transform: false,
+        initializes_transform_now: false,
+        reason: "jpegxl-container-color-metadata-pending"
+    )
+
+pub fn jpeg_xl_color_profile_info(data: text) -> ImageColorProfileInfo:
+    if data.len() >= 2 and _byte_at(data, 0) == 255 and _byte_at(data, 1) == 10:
+        return _jpeg_xl_color_profile_info_at(data, 0, data.len())
+    if _jpeg_xl_is_container_signature(data):
+        return _jpeg_xl_container_color_profile_info(data)
+    image_color_profile_unknown("not-jpegxl")
+
+pub fn detect_image_color_profile_info(data: text) -> ImageColorProfileInfo:
+    if _is_png_signature(data):
+        return png_color_profile_info(data)
+    if image_is_tiff(data):
+        return tiff_color_profile_info(data)
+    if image_is_jpeg(data):
+        return jpeg_color_profile_info(data)
+    if image_is_jpeg_xl(data):
+        return jpeg_xl_color_profile_info(data)
+    image_color_profile_unknown("unknown-signature")
+
+fn _icc_tag_at(data: text, offset: i64, a: i64, b: i64, c: i64, d: i64) -> bool:
+    _byte_at(data, offset) == a and
+        _byte_at(data, offset + 1) == b and
+        _byte_at(data, offset + 2) == c and
+        _byte_at(data, offset + 3) == d
+
+fn _has_valid_icc_header(data: text, profile: ImageColorProfileInfo) -> bool:
+    if not profile.has_profile:
+        return false
+    if profile.profile_length < 48:
+        return false
+    if profile.profile_offset < 0 or profile.profile_offset + 48 > data.len():
+        return false
+    _icc_tag_at(data, profile.profile_offset + 36, 97, 99, 115, 112)
+
+fn _icc_header_is_rgb(data: text, profile: ImageColorProfileInfo) -> bool:
+    if not _has_valid_icc_header(data, profile):
+        return false
+    _icc_tag_at(data, profile.profile_offset + 16, 82, 71, 66, 32)
+
+fn _icc_header_uses_xyz_pcs(data: text, profile: ImageColorProfileInfo) -> bool:
+    _icc_tag_at(data, profile.profile_offset + 20, 88, 89, 90, 32)
+
+fn _icc_header_uses_lab_pcs(data: text, profile: ImageColorProfileInfo) -> bool:
+    _icc_tag_at(data, profile.profile_offset + 20, 76, 97, 98, 32)
+
+pub fn apply_detected_image_color_profile_to_rgba(raw_data: text, pixels: [i64]) -> ImageColorTransformResult:
+    val profile = detect_image_color_profile_info(raw_data)
+    if not profile.has_profile:
+        return image_color_transform_result(pixels, false, true, "no-profile")
+    if profile.format == "jpegxl" and profile.profile_kind == "structured-color-nondefault-pending":
+        return image_color_transform_result(pixels, false, false, "jpegxl-structured-color-transform-pending")
+    if profile.profile_kind == "icc-compressed":
+        return image_color_transform_result(pixels, false, false, "compressed-icc-transform-pending")
+    if not _icc_header_is_rgb(raw_data, profile):
+        return image_color_transform_result(pixels, false, false, "unsupported-icc-profile")
+    if _icc_header_uses_lab_pcs(raw_data, profile):
+        return image_color_transform_result(pixels, false, false, "icc-rgb-lab-transform-pending")
+    if _icc_header_uses_xyz_pcs(raw_data, profile):
+        # sRGB-compatible RGB/XYZ ICC profiles need no pixel rewrite for the
+        # current packed sRGB framebuffer, but this still executes the gate.
+        return image_color_transform_result(pixels, true, true, "icc-srgb-identity-applied")
+    image_color_transform_result(pixels, false, false, "unsupported-icc-profile")
+
+pub fn detect_image_info(data: text) -> ImageInfo:
+    if image_is_tiff(data):
+        return tiff_image_info(data)
+    if image_is_jpeg_xl(data):
+        return jpeg_xl_image_info(data)
+    image_info_unknown("unknown-signature")

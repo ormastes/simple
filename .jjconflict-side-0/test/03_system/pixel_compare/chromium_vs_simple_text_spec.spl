@@ -1,0 +1,127 @@
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer.spl 80%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer.spl 60%
+# @tag: rendering, pixel-compare, text, chromium
+
+# Pixel-level comparison: real Chromium capture vs Simple web renderer
+#
+# Phase 1: Simple text — "Hello World" in monospace on white background.
+# Reference: ARGB pixel buffer captured from real Electron/Chromium via
+# tools/electron-live-bitmap/capture_html_argb.js under xvfb.
+
+use std.spipe.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+
+val W: i32 = 320
+val H: i32 = 240
+
+fn abs_diff_i32(a: i32, b: i32) -> i32:
+    if a > b:
+        return a - b
+    b - a
+
+fn load_electron_argb(path: text) -> [u32]:
+    val json_text = rt_file_read_text(path)
+    val marker = "\"pixels\":["
+    val start = json_text.index_of(marker)
+    if start < 0:
+        return []
+    val rest = json_text.substring(start + marker.len())
+    val end_idx = rest.index_of("]")
+    if end_idx < 0:
+        return []
+    val nums_text = rest.substring(0, end_idx)
+    val parts = nums_text.split(",")
+    var pixels: [u32] = []
+    var i = 0
+    while i < parts.len():
+        val trimmed = parts[i].trim()
+        if trimmed.len() > 0:
+            pixels = pixels + [trimmed.to_i64().to_u32()]
+        i = i + 1
+    pixels
+
+fn diff_pixels(name: text, chrome: [u32], simple: [u32], w: i32, h: i32) -> i32:
+    val total = w * h
+    if chrome.len() != total:
+        print("WARN: chrome pixel count " + chrome.len().to_text() + " != expected " + total.to_text())
+        return -1
+    if simple.len() != total:
+        print("WARN: simple pixel count " + simple.len().to_text() + " != expected " + total.to_text())
+        return -1
+    var differing = 0
+    var max_channel_delta = 0
+    var total_channel_delta: i64 = 0
+    var bg_diff = 0
+    var text_diff = 0
+    var i = 0
+    while i < total:
+        val cp = chrome[i]
+        val sp = simple[i]
+        if cp != sp:
+            val cr = (cp >> 16) & 0xFF
+            val cg = (cp >> 8) & 0xFF
+            val cb = cp & 0xFF
+            val sr = (sp >> 16) & 0xFF
+            val sg = (sp >> 8) & 0xFF
+            val sb = sp & 0xFF
+            val dr = abs_diff_i32(cr.to_i32(), sr.to_i32())
+            val dg = abs_diff_i32(cg.to_i32(), sg.to_i32())
+            val db = abs_diff_i32(cb.to_i32(), sb.to_i32())
+            val d = dr + dg + db
+            total_channel_delta = total_channel_delta + d.to_i64()
+            if d > max_channel_delta:
+                max_channel_delta = d
+            differing = differing + 1
+            if cp == 0xFFFFFFFFu32 or sp == 0xFFFFFFFFu32:
+                bg_diff = bg_diff + 1
+            else:
+                text_diff = text_diff + 1
+        i = i + 1
+    print(name + ": " + differing.to_text() + "/" + total.to_text() + " pixels differ")
+    print(name + ": max_channel_delta=" + max_channel_delta.to_text() + " total_delta=" + total_channel_delta.to_text())
+    print(name + ": bg_diff=" + bg_diff.to_text() + " text_diff=" + text_diff.to_text())
+    # Sample first few differing pixels
+    var samples = 0
+    i = 0
+    while i < total and samples < 5:
+        val cp2 = chrome[i]
+        val sp2 = simple[i]
+        if cp2 != sp2:
+            val row = i / w
+            val col = i - (row * w)
+            print("  px[" + col.to_text() + "," + row.to_text() + "] chrome=0x" + cp2.to_text() + " simple=0x" + sp2.to_text())
+            samples = samples + 1
+        i = i + 1
+    differing
+
+var electron_path = "build/pixel_compare/electron_simple_text.json"
+var html_fixture_path = "test/fixtures/pixel_compare/simple_text.html"
+
+describe "Chromium vs Simple — simple text":
+
+    it "electron capture file exists":
+        expect(rt_file_exists(electron_path)).to_equal(true)
+
+    it "Simple renderer produces non-empty pixels":
+        var html = rt_file_read_text(html_fixture_path)
+        var pixels = simple_web_render_html_to_pixels(html, W, H)
+        expect(pixels.len()).to_equal(W * H)
+        var non_white = 0
+        var i = 0
+        while i < pixels.len():
+            if pixels[i] != 0xFFFFFFFFu32:
+                non_white = non_white + 1
+            i = i + 1
+        print("simple non-white pixels: " + non_white.to_text())
+        expect(non_white).to_be_greater_than(0)
+
+    it "pixel diff diagnostic — simple text":
+        var html = rt_file_read_text(html_fixture_path)
+        var chrome = load_electron_argb(electron_path)
+        var simple = simple_web_render_html_to_pixels(html, W, H)
+        var d = diff_pixels("simple_text", chrome, simple, W, H)
+        print("differing_pixels=" + d.to_text())
+        expect(d).to_be_greater_than(-1)

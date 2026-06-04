@@ -1,0 +1,142 @@
+# Editor Command Palette — fuzzy-search UI for editor commands and actions.
+#
+# Provides: PaletteEntry, PaletteState, and compatibility CommandPalette helpers.
+
+struct PaletteEntry:
+    description: text
+    name: text
+    command_name: text
+    command_payload: text
+
+struct PaletteScore:
+    score: i64
+    entry: PaletteEntry
+
+struct PaletteState:
+    entries: [PaletteEntry]
+    filtered: [PaletteEntry]
+    query: text
+    selected_index: i64
+    visible: bool
+
+struct CommandPalette:
+    entries: [PaletteEntry]
+    filtered: [PaletteEntry]
+    query: text
+    selected: i64
+    visible: bool
+
+fn _empty_palette_entry() -> PaletteEntry:
+    PaletteEntry(description: "", name: "", command_name: "", command_payload: "")
+
+fn fuzzy_match(query: text, candidate: text) -> bool:
+    val q = query.lower()
+    val c = candidate.lower()
+    if q == "":
+        return true
+    var qi = 0
+    var ci = 0
+    while qi < q.len() and ci < c.len():
+        if q.char_at(qi) == c.char_at(ci):
+            qi = qi + 1
+        ci = ci + 1
+    qi == q.len()
+
+fn fuzzy_score(query: text, candidate: text) -> i64:
+    val q = query.lower()
+    val c = candidate.lower()
+    if q == "":
+        return 0
+    var score: i64 = 0
+    var qi = 0
+    var ci = 0
+    var streak: i64 = 0
+    while qi < q.len() and ci < c.len():
+        if q.char_at(qi) == c.char_at(ci):
+            streak = streak + 1
+            score = score + 10 + streak
+            qi = qi + 1
+        else:
+            streak = 0
+            score = score - 1
+        ci = ci + 1
+    if qi < q.len():
+        return -1
+    score
+
+fn _palette_filter(entries: [PaletteEntry], query: text) -> [PaletteEntry]:
+    if query == "":
+        return entries
+    var scored: [PaletteScore] = []
+    for entry in entries:
+        val haystack = entry.name + " " + entry.description + " " + entry.command_name
+        if fuzzy_match(query, haystack):
+            val sc = fuzzy_score(query, haystack)
+            scored.push(PaletteScore(score: sc, entry: entry))
+    var out: [PaletteEntry] = []
+    while scored.len() > 0:
+        var best_i = 0
+        var best_score = scored[0].score
+        var i = 1
+        while i < scored.len():
+            if scored[i].score > best_score:
+                best_score = scored[i].score
+                best_i = i
+            i = i + 1
+        out.push(scored[best_i].entry)
+        scored = scored.remove_at(best_i)
+    out
+
+fn palette_new(entries: [PaletteEntry]) -> PaletteState:
+    PaletteState(entries: entries, filtered: entries, query: "", selected_index: 0, visible: false)
+
+fn palette_show(state: PaletteState) -> PaletteState:
+    PaletteState(entries: state.entries, filtered: state.entries, query: "", selected_index: 0, visible: true)
+
+fn palette_hide(state: PaletteState) -> PaletteState:
+    PaletteState(entries: state.entries, filtered: state.filtered, query: state.query, selected_index: state.selected_index, visible: false)
+
+fn palette_update_query(state: PaletteState, query: text) -> PaletteState:
+    val filtered = _palette_filter(state.entries, query)
+    PaletteState(entries: state.entries, filtered: filtered, query: query, selected_index: 0, visible: state.visible)
+
+fn palette_selected(state: PaletteState) -> PaletteEntry:
+    if state.filtered.len() == 0:
+        return _empty_palette_entry()
+    var idx = state.selected_index
+    if idx < 0:
+        idx = 0
+    if idx >= state.filtered.len():
+        idx = state.filtered.len() - 1
+    state.filtered[idx]
+
+fn palette_select_next(state: PaletteState) -> PaletteState:
+    var idx = state.selected_index
+    if state.filtered.len() > 0:
+        idx = idx + 1
+        if idx >= state.filtered.len():
+            idx = state.filtered.len() - 1
+    PaletteState(entries: state.entries, filtered: state.filtered, query: state.query, selected_index: idx, visible: state.visible)
+
+fn palette_select_prev(state: PaletteState) -> PaletteState:
+    var idx = state.selected_index - 1
+    if idx < 0:
+        idx = 0
+    PaletteState(entries: state.entries, filtered: state.filtered, query: state.query, selected_index: idx, visible: state.visible)
+
+fn palette_query(state: PaletteState) -> text:
+    state.query
+
+fn command_palette_new(entries: [PaletteEntry]) -> CommandPalette:
+    CommandPalette(entries: entries, filtered: entries, query: "", selected: 0, visible: false)
+
+fn command_palette_open(palette: CommandPalette) -> CommandPalette:
+    CommandPalette(entries: palette.entries, filtered: palette.entries, query: "", selected: 0, visible: true)
+
+fn command_palette_close(palette: CommandPalette) -> CommandPalette:
+    CommandPalette(entries: palette.entries, filtered: palette.filtered, query: palette.query,
+                   selected: palette.selected, visible: false)
+
+fn command_palette_filter(palette: CommandPalette, query: text) -> CommandPalette:
+    val filtered = _palette_filter(palette.entries, query)
+    CommandPalette(entries: palette.entries, filtered: filtered, query: query, selected: 0, visible: palette.visible)

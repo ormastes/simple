@@ -1,0 +1,401 @@
+# Query Builder for SDN Databases
+#
+# Provides fluent query interface with filtering, sorting, and limiting.
+
+use nogc_async_mut.database.core.{SdnTable, SdnRow}
+use std.db.accel.{
+    accel_capability_report,
+    DB_ACCEL_DEFAULT_BATCH_SIZE, RowBitmap,
+    row_bitmap_indices, text_equals_span
+}
+use std.db.prefix_index.{
+    PrefixIndex,
+    prefix_index_insert, prefix_index_lookup_prefix, prefix_index_new,
+    prefix_index_sort
+}
+
+val QUERY_ACCEL_SIMD_ACTIVE = accel_capability_report().simd_active
+
+# ============================================================================
+# Compare Operators
+# ============================================================================
+
+enum CompareOp:
+    Eq           # Equal
+    Ne           # Not equal
+    Gt           # Greater than
+    Ge           # Greater or equal
+    Lt           # Less than
+    Le           # Less or equal
+    Contains     # String contains
+    StartsWith   # String starts with
+    EndsWith     # String ends with
+    InSet        # Any-of equality
+
+# ============================================================================
+# Filter
+# ============================================================================
+
+struct Filter:
+    field: text
+    op: CompareOp
+    value: text
+    any_values: [text]
+
+    # Check if row matches filter
+    fn matches(row: SdnRow) -> bool:
+        val field_value = row.get(self.field)
+        if not field_value.?:
+            return false
+
+        val fv = field_value.unwrap()
+        self.matches_value(fv)
+
+    fn matches_value(fv: text) -> bool:
+        if self.op == CompareOp.Eq:
+            return text_equals_span(fv, self.value)
+        if self.op == CompareOp.Ne:
+            return not text_equals_span(fv, self.value)
+        if self.op == CompareOp.Gt:
+            return fv > self.value
+        if self.op == CompareOp.Ge:
+            return fv >= self.value
+        if self.op == CompareOp.Lt:
+            return fv < self.value
+        if self.op == CompareOp.Le:
+            return fv <= self.value
+        if self.op == CompareOp.Contains:
+            return fv.contains(self.value)
+        if self.op == CompareOp.StartsWith:
+            return fv.starts_with(self.value)
+        if self.op == CompareOp.EndsWith:
+            return fv.ends_with(self.value)
+        for candidate in self.any_values:
+            if text_equals_span(fv, candidate):
+                return true
+        false
+
+# ============================================================================
+# QueryBuilder
+# ============================================================================
+
+class QueryBuilder:
+    table: SdnTable
+    filters: [Filter]
+    sort_field: text
+    has_sort_field: bool
+    sort_desc: bool
+    limit_count: i64
+    has_limit_count: bool
+    prefix_indexes: Dict<text, PrefixIndex>
+    prefix_index_builds: i64
+
+    # Create query builder for table
+    static fn for_table(table: SdnTable) -> QueryBuilder:
+        QueryBuilder(
+            table: table,
+            filters: [],
+            sort_field: "",
+            has_sort_field: false,
+            sort_desc: false,
+            limit_count: 0,
+            has_limit_count: false,
+            prefix_indexes: {},
+            prefix_index_builds: 0
+        )
+
+    # Add filter condition
+    me filter_by(field: text, op: CompareOp, value: text) -> QueryBuilder:
+        self.filters.push(Filter(field: field, op: op, value: value, any_values: []))
+        self
+
+    # Filter by multiple values (field IN (values))
+    me filter_in(field: text, values: [text]) -> QueryBuilder:
+        self.filters.push(Filter(field: field, op: CompareOp.InSet, value: "", any_values: values))
+        self
+
+    # Exclude soft-deleted rows (valid=true)
+    me only_valid() -> QueryBuilder:
+        self.filter_by("valid", CompareOp.Eq, "true")
+
+    # Sort results
+    me order_by(field: text, desc: bool) -> QueryBuilder:
+        self.sort_field = field
+        self.has_sort_field = true
+        self.sort_desc = desc
+        self
+
+    # Limit results
+    me take(n: i64) -> QueryBuilder:
+        self.limit_count = n
+        self.has_limit_count = true
+        self
+
+    # Execute query
+    me execute() -> [SdnRow]:
+        if self.has_limit_count and self.limit_count == 0:
+            return []
+
+        var row_ids = all_row_ids(self.table.rows.len())
+
+        if self.filters.len() > 0:
+            if QUERY_ACCEL_SIMD_ACTIVE and self.filters.len() > 2:
+                val bitmap = self.execute_bitmap()
+                row_ids = row_bitmap_indices(bitmap)
+            else:
+                row_ids = self.execute_scalar_row_ids()
+
+        # Apply sorting (merge sort - O(n log n) stable sort)
+        if self.has_sort_field:
+            row_ids = merge_sort_row_ids(self.table.rows, row_ids, self.sort_field, self.sort_desc)
+
+        # Apply limit
+        if self.has_limit_count:
+            row_ids = row_ids.take(self.limit_count)
+
+        var results: [SdnRow] = [SdnRow.empty(); row_ids.len()]
+        var result_idx = 0
+        for row_idx in row_ids:
+            val copied_row = SdnRow.empty()
+            for column in self.table.columns:
+                if val Some(value) = self.table.rows[row_idx].get(column):
+                    copied_row.set(column, value)
+            results[result_idx as i32] = copied_row
+            result_idx = result_idx + 1
+        results
+
+    # Count results
+    me count() -> i64:
+        self.execute().len()
+
+    # Check if any match
+    me exists() -> bool:
+        self.count() > 0
+
+    fn prefix_index_build_count() -> i64:
+        self.prefix_index_builds
+
+    me execute_scalar_row_ids() -> [i64]:
+        var results: [i64] = []
+        val stop_early = self.has_limit_count and not self.has_sort_field and self.limit_count > 0
+        val filter_count = self.filters.len()
+        var row_idx = 0
+
+        if filter_count == 1:
+            val filter0 = self.filters[0]
+            if filter0.op == CompareOp.StartsWith:
+                return self.execute_prefix_index_row_ids(filter0)
+            val field0 = filter0.field
+            for row in self.table.rows:
+                if val Some(fv0) = row.get(field0):
+                    if value_matches_filter_fast(fv0, filter0):
+                        results.push(row_idx)
+                        if stop_early and results.len() >= self.limit_count:
+                            break
+                row_idx = row_idx + 1
+            return results
+
+        if filter_count == 2:
+            val filter0 = self.filters[0]
+            val filter1 = self.filters[1]
+            val field0 = filter0.field
+            val field1 = filter1.field
+            row_idx = 0
+            for row in self.table.rows:
+                if val Some(fv0) = row.get(field0):
+                    if value_matches_filter_fast(fv0, filter0):
+                        if val Some(fv1) = row.get(field1):
+                            if value_matches_filter_fast(fv1, filter1):
+                                results.push(row_idx)
+                                if stop_early and results.len() >= self.limit_count:
+                                    break
+                row_idx = row_idx + 1
+            return results
+
+        row_idx = 0
+        for row in self.table.rows:
+            if row_matches_all_filters_fast(row, self.filters):
+                results.push(row_idx)
+                if stop_early and results.len() >= self.limit_count:
+                    break
+            row_idx = row_idx + 1
+        results
+
+    me prefix_index_for_field(field: text) -> PrefixIndex:
+        if self.prefix_indexes.contains_key(field):
+            return self.prefix_indexes[field]
+        var idx = prefix_index_new()
+        var row_idx = 0
+        for row in self.table.rows:
+            if val Some(fv) = row.get(field):
+                idx = prefix_index_insert(idx, fv, row_idx)
+            row_idx = row_idx + 1
+        val sorted_idx = prefix_index_sort(idx)
+        self.prefix_indexes[field] = sorted_idx
+        self.prefix_index_builds = self.prefix_index_builds + 1
+        sorted_idx
+
+    me execute_prefix_index_row_ids(filter: Filter) -> [i64]:
+        val sorted_idx = self.prefix_index_for_field(filter.field)
+        val candidates = sort_row_ids_ascending(prefix_index_lookup_prefix(sorted_idx, filter.value))
+        var results: [i64] = []
+        for candidate in candidates:
+            if candidate >= 0 and candidate < self.table.rows.len():
+                val row = self.table.rows[candidate]
+                if row_matches_filter_fast(row, filter):
+                    results.push(candidate)
+                    if self.has_limit_count and not self.has_sort_field and results.len() >= self.limit_count:
+                        return results
+        results
+
+    fn execute_bitmap() -> RowBitmap:
+        var bitmap: RowBitmap = RowBitmap.full(self.table.rows.len())
+        for filter in self.filters:
+            bitmap = bitmap.and_with(self.execute_filter_bitmap(filter))
+        bitmap
+
+    fn execute_filter_bitmap(filter: Filter) -> RowBitmap:
+        val total_rows = self.table.rows.len()
+        var bitmap: RowBitmap = RowBitmap.empty(total_rows)
+        var start = 0
+        while start < total_rows:
+            val batch_len = if start + DB_ACCEL_DEFAULT_BATCH_SIZE > total_rows:
+                total_rows - start
+            else:
+                DB_ACCEL_DEFAULT_BATCH_SIZE
+            bitmap = self.fill_batch_bitmap(filter, start, batch_len, bitmap)
+            start = start + batch_len
+        bitmap
+
+    fn fill_batch_bitmap(filter: Filter, start: i64, batch_len: i64, bitmap: RowBitmap) -> RowBitmap:
+        var updated: RowBitmap = bitmap
+        val batch_end = start + batch_len
+        var row_idx = 0
+        for row in self.table.rows:
+            if row_idx < start or row_idx >= batch_end:
+                row_idx = row_idx + 1
+                continue
+            if val Some(fv) = row.get(filter.field):
+                if filter.matches_value(fv):
+                    updated.set(row_idx)
+            row_idx = row_idx + 1
+        updated
+
+# ============================================================================
+# Extension for SdnDatabase
+# ============================================================================
+
+# Add query() method to SdnDatabase
+# Note: In actual implementation, this would be in mod.spl as method on SdnDatabase
+# For now, we provide standalone function
+
+use nogc_async_mut.database.core.{SdnDatabase}
+
+# Stable insertion sort for row indices.
+# Native recursion over temporary arrays is still fragile here, so keep the
+# sort iterative until that path is fixed more generally.
+fn merge_sort_row_ids(rows: [SdnRow], row_ids: [i64], field: text, desc: bool) -> [i64]:
+    var sorted = row_ids
+    var i = 1
+    while i < sorted.len():
+        val key = sorted[i]
+        val key_value = rows[key].get(field) ?? ""
+        var j = i - 1
+        while j >= 0:
+            val current_value = rows[sorted[j]].get(field) ?? ""
+            val should_shift = if desc:
+                current_value < key_value
+            else:
+                current_value > key_value
+            if not should_shift:
+                break
+            sorted[j + 1] = sorted[j]
+            j = j - 1
+        sorted[j + 1] = key
+        i = i + 1
+    sorted
+
+fn merge_row_ids(rows: [SdnRow], left: [i64], right: [i64], field: text, desc: bool) -> [i64]:
+    var result: [i64] = []
+    var i = 0
+    var j = 0
+    while i < left.len() and j < right.len():
+        val a = rows[left[i]].get(field) ?? ""
+        val b = rows[right[j]].get(field) ?? ""
+        val take_left = if desc: a >= b else: a <= b
+        if take_left:
+            result.push(left[i])
+            i = i + 1
+        else:
+            result.push(right[j])
+            j = j + 1
+    while i < left.len():
+        result.push(left[i])
+        i = i + 1
+    while j < right.len():
+        result.push(right[j])
+        j = j + 1
+    result
+
+fn all_row_ids(row_count: i64) -> [i64]:
+    var row_ids: [i64] = []
+    var row_idx = 0
+    while row_idx < row_count:
+        row_ids.push(row_idx)
+        row_idx = row_idx + 1
+    row_ids
+
+fn sort_row_ids_ascending(row_ids: [i64]) -> [i64]:
+    var sorted = row_ids
+    var i = 1
+    while i < sorted.len():
+        val key = sorted[i]
+        var j = i - 1
+        while j >= 0 and sorted[j] > key:
+            sorted[j + 1] = sorted[j]
+            j = j - 1
+        sorted[j + 1] = key
+        i = i + 1
+    sorted
+
+fn query_table(db: SdnDatabase, table_name: text) -> QueryBuilder?:
+    val table = db.get_table(table_name)?
+    Some(QueryBuilder.for_table(table))
+
+fn row_matches_all_filters_fast(row: SdnRow, filters: [Filter]) -> bool:
+    for filter in filters:
+        if not row_matches_filter_fast(row, filter):
+            return false
+    true
+
+fn row_matches_filter_fast(row: SdnRow, filter: Filter) -> bool:
+    val field_value = row.get(filter.field)
+    if not field_value.?:
+        return false
+
+    val fv = field_value.unwrap()
+    value_matches_filter_fast(fv, filter)
+
+fn value_matches_filter_fast(fv: text, filter: Filter) -> bool:
+    if filter.op == CompareOp.Eq:
+        return text_equals_span(fv, filter.value)
+    if filter.op == CompareOp.Ne:
+        return not text_equals_span(fv, filter.value)
+    if filter.op == CompareOp.Gt:
+        return fv > filter.value
+    if filter.op == CompareOp.Ge:
+        return fv >= filter.value
+    if filter.op == CompareOp.Lt:
+        return fv < filter.value
+    if filter.op == CompareOp.Le:
+        return fv <= filter.value
+    if filter.op == CompareOp.Contains:
+        return fv.contains(filter.value)
+    if filter.op == CompareOp.StartsWith:
+        return fv.starts_with(filter.value)
+    if filter.op == CompareOp.EndsWith:
+        return fv.ends_with(filter.value)
+    for candidate in filter.any_values:
+        if text_equals_span(fv, candidate):
+            return true
+    false

@@ -1,0 +1,165 @@
+# zstd/xxh64.spl — XXH64 hash for Zstd content checksum verification
+#
+# RFC 8878 §3.1.1: the content checksum is the lower 32 bits of
+# XXH64(uncompressed_content, seed=0).
+#
+# Reference: https://github.com/Cyan4973/xxHash/blob/dev/doc/xxhash_spec.md
+#
+# Only the pure-Simple interpreter-compatible subset is used:
+#   - No 64-bit overflow helpers; i64 arithmetic wraps in Simple's semantics
+#   - Bit masks used to stay within 64-bit range for the low 32-bit result
+#
+# Limitations:
+#   - Simple's i64 is signed; all intermediate values are treated as bit
+#     patterns.  xxh64_rotl uses bit-level manipulation.
+#   - We compute the final hash modulo 2^64 implicitly through i64 wrap,
+#     then mask to 32 bits for the checksum comparison.
+
+# ---------------------------------------------------------------------------
+# XXH64 prime constants (as i64 bit patterns)
+# ---------------------------------------------------------------------------
+
+val XXH_PRIME64_1 = 0x9E3779B185EBCA87  # -7046029288634856313
+val XXH_PRIME64_2 = 0xC2B2AE3D27D4EB4F  # -4417276706812531889
+val XXH_PRIME64_3 = 0x165667B19E3779F9  #  1609587929392839161
+val XXH_PRIME64_4 = 0x85EBCA77C2B2AE63  # -8796714557099683229
+val XXH_PRIME64_5 = 0x27D4EB2F165667C5  #  2870177450012600261
+
+# ---------------------------------------------------------------------------
+# Helper: rotate left 64-bit
+# Simple does not have unsigned right-shift; we use signed i64 with mask.
+# rotl64(v, r) = (v << r) | ((v >> (64 - r)) & ((1 << r) - 1))
+# ---------------------------------------------------------------------------
+
+fn xxh64_rotl(v: i64, r: i64) -> i64:
+    val left  = v << r
+    # arithmetic right-shift fills sign bits; mask them away
+    val shift = 64 - r
+    val right_raw = v >> shift
+    # mask: (1 << r) - 1   for r in 1..63
+    # use (1 << r) - 1 but (1 << 64) overflows, handled by r < 64 always
+    val mask = (1 << r) - 1
+    left | (right_raw & mask)
+
+# ---------------------------------------------------------------------------
+# XXH64 round (mixing step used per 32-byte stripe)
+# ---------------------------------------------------------------------------
+
+fn xxh64_round(acc: i64, input: i64) -> i64:
+    val a1 = acc + (input * XXH_PRIME64_2)
+    val a2 = xxh64_rotl(a1, 31)
+    a2 * XXH_PRIME64_1
+
+# ---------------------------------------------------------------------------
+# XXH64 merge accumulator into hash (final merge step)
+# ---------------------------------------------------------------------------
+
+fn xxh64_merge_acc(h: i64, acc: i64) -> i64:
+    val m1 = h ^ xxh64_round(0, acc)
+    val m2 = m1 * XXH_PRIME64_1
+    m2 + XXH_PRIME64_4
+
+# ---------------------------------------------------------------------------
+# Read a little-endian u64 from data[pos..pos+8]
+# Returns the 64-bit value as i64 bit pattern
+# ---------------------------------------------------------------------------
+
+fn xxh64_read_u64_le(data: [u8], pos: i64) -> i64:
+    val b0 = data[pos]
+    val b1 = data[pos + 1]
+    val b2 = data[pos + 2]
+    val b3 = data[pos + 3]
+    val b4 = data[pos + 4]
+    val b5 = data[pos + 5]
+    val b6 = data[pos + 6]
+    val b7 = data[pos + 7]
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) |
+        (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56)
+
+# ---------------------------------------------------------------------------
+# Read a little-endian u32 from data[pos..pos+4]
+# ---------------------------------------------------------------------------
+
+fn xxh64_read_u32_le(data: [u8], pos: i64) -> i64:
+    val b0 = data[pos]
+    val b1 = data[pos + 1]
+    val b2 = data[pos + 2]
+    val b3 = data[pos + 3]
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+
+# ---------------------------------------------------------------------------
+# XXH64 avalanche (final mixing)
+# ---------------------------------------------------------------------------
+
+fn xxh64_avalanche(h: i64) -> i64:
+    val h1 = h ^ (h >> 33)
+    val h2 = h1 * XXH_PRIME64_2
+    val h3 = h2 ^ (h2 >> 29)
+    val h4 = h3 * XXH_PRIME64_3
+    h4 ^ (h4 >> 32)
+
+# ---------------------------------------------------------------------------
+# Public: compute XXH64(data, seed=0) and return lower 32 bits
+# This is the value stored as the Zstd content checksum.
+# ---------------------------------------------------------------------------
+
+fn xxh64_checksum_lower32(data: [u8]) -> i64:
+    val length = data.len()
+    var h64: i64 = 0
+
+    if length >= 32:
+        # Initialise four accumulators
+        var v1 = XXH_PRIME64_1 + XXH_PRIME64_2
+        var v2 = XXH_PRIME64_2
+        var v3: i64 = 0
+        var v4 = 0 - XXH_PRIME64_1
+
+        var pos = 0
+        while pos + 32 <= length:
+            val lane0 = xxh64_read_u64_le(data, pos)
+            val lane1 = xxh64_read_u64_le(data, pos + 8)
+            val lane2 = xxh64_read_u64_le(data, pos + 16)
+            val lane3 = xxh64_read_u64_le(data, pos + 24)
+            v1 = xxh64_round(v1, lane0)
+            v2 = xxh64_round(v2, lane1)
+            v3 = xxh64_round(v3, lane2)
+            v4 = xxh64_round(v4, lane3)
+            pos = pos + 32
+
+        # Merge accumulators
+        val merged = xxh64_rotl(v1, 1) + xxh64_rotl(v2, 7) +
+                     xxh64_rotl(v3, 12) + xxh64_rotl(v4, 18)
+        val m1 = xxh64_merge_acc(merged, v1)
+        val m2 = xxh64_merge_acc(m1, v2)
+        val m3 = xxh64_merge_acc(m2, v3)
+        h64 = xxh64_merge_acc(m3, v4)
+    else:
+        h64 = XXH_PRIME64_5
+
+    h64 = h64 + length
+
+    # Process remaining bytes in 8-byte chunks
+    var rem = 0
+    # Skip past the 32-byte-aligned portion already consumed
+    var tail = (length / 32) * 32
+
+    while tail + 8 <= length:
+        val lane = xxh64_read_u64_le(data, tail)
+        val k1   = xxh64_round(0, lane)
+        h64  = xxh64_rotl(h64 ^ k1, 27) * XXH_PRIME64_1 + XXH_PRIME64_4
+        tail = tail + 8
+
+    if tail + 4 <= length:
+        val lane32 = xxh64_read_u32_le(data, tail)
+        h64  = xxh64_rotl(h64 ^ (lane32 * XXH_PRIME64_1), 23) * XXH_PRIME64_2 + XXH_PRIME64_3
+        tail = tail + 4
+
+    var i = tail
+    while i < length:
+        val b = data[i]
+        h64 = xxh64_rotl(h64 ^ (b * XXH_PRIME64_5), 11) * XXH_PRIME64_1
+        i = i + 1
+
+    val final_hash = xxh64_avalanche(h64)
+    # Return lower 32 bits only (Zstd checksum is 4 bytes)
+    final_hash & 0xFFFFFFFF

@@ -1,0 +1,188 @@
+# Simple LSP MCP Server - Simple-native replacement for the Python shim
+#
+# Uses shared mcp_sdk for JSON, transport, and shell helpers.
+
+use .json_helpers.{read_stdin_message, write_stdout_message, LB, RB, extract_field, extract_id, jsonrpc_result, jsonrpc_error, has_method}
+use .protocol
+use .tools
+use .startup_log
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
+
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_exit(code: i64)
+
+val SERVER_NAME = "simple-lsp-mcp"
+val SERVER_VERSION = "0.9.8"
+
+var TOOLS_CACHE = ""
+var INIT_CACHE = ""
+
+fn print_usage():
+    print "{SERVER_NAME} {SERVER_VERSION}"
+    print ""
+    print "Usage: simple_lsp_mcp_server [options]"
+    print ""
+    print "Runs the Simple LSP MCP JSON-RPC server over stdin/stdout."
+    print ""
+    print "Options:"
+    print "  -v, --version         Show version"
+    print "  -h, --help            Show this help"
+    print ""
+    print "Shared log options:"
+    for line in log_options_help():
+        print "  {line}"
+
+fn simple_lsp_mcp_is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn simple_lsp_mcp_clean_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if simple_lsp_mcp_is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
+        i = i + 1
+    cleaned
+
+fn simple_lsp_mcp_get_args() -> [text]:
+    val all_args = rt_cli_get_args()
+    var args: [text] = []
+    var found = false
+    var i = 0
+    while i < all_args.len():
+        if found:
+            args.push(all_args[i])
+        elif all_args[i] == "simple-lsp-mcp" or all_args[i] == "simple_lsp_mcp" or all_args[i] == "simple_lsp_mcp_server":
+            found = true
+        i = i + 1
+    if found:
+        return args
+
+    var start_idx = 0
+    i = 0
+    while i < all_args.len():
+        if all_args[i].ends_with("main.spl"):
+            start_idx = i + 1
+        i = i + 1
+    i = start_idx
+    while i < all_args.len():
+        args.push(all_args[i])
+        i = i + 1
+    args
+
+fn main() -> i64:
+    val raw_args = simple_lsp_mcp_get_args()
+    val log_opts = parse_log_options(raw_args)
+    if not log_opts.valid:
+        error("simple-lsp-mcp", log_opts.error)
+        return 1
+
+    val args = simple_lsp_mcp_clean_args(raw_args)
+    if args.len() == 0:
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"simple-lsp-mcp\",\"status\":\"ready\"}"
+            return 0
+    else:
+        val arg = args[0]
+        if arg == "--version" or arg == "-v":
+            if log_opts.log_mode == "json":
+                print "{\"command\":\"simple-lsp-mcp\",\"status\":\"version\",\"version\":\"{SERVER_VERSION}\"}"
+            else:
+                print "{SERVER_NAME} {SERVER_VERSION}"
+            return 0
+        if arg == "--help" or arg == "-h":
+            val progress = render_progress(log_opts.progress, 0, 1, "usage")
+            if progress != "":
+                print progress
+            print_usage()
+            return 0
+        if arg.starts_with("-"):
+            if log_opts.log_mode == "json":
+                print "{\"command\":\"simple-lsp-mcp\",\"status\":\"error\",\"error\":\"unknown option\"}"
+                return 1
+            print "Error: Unknown option: {arg}"
+            print_usage()
+            return 1
+
+    while true:
+        val msg = read_stdin_message()
+        if msg == "":
+            rt_exit(0)
+            return 0
+
+        val method = detect_mcp_method(msg)
+        val id = extract_id(msg)
+        var response = ""
+
+        if method == "initialize":
+            response = make_init_response(id)
+        elif method == "initialized" or method == "notifications/initialized" or method == "notifications/cancelled" or method == "notifications/roots/list_changed":
+            response = ""
+        elif method == "shutdown":
+            response = jsonrpc_result(id, "null")
+        elif method == "ping":
+            response = jsonrpc_result(id, LB() + RB())
+        elif method == "tools/list":
+            response = make_tools_list(id)
+        elif method == "tools/call":
+            response = handle_tool_call(id, msg)
+        elif method == "resources/list":
+            response = handle_resources_list(id)
+        elif method == "resources/templates/list":
+            response = handle_resource_templates_list(id)
+        elif method == "prompts/list":
+            response = handle_prompts_list(id)
+        elif method == "roots/list":
+            response = handle_roots_list(id)
+        elif method == "logging/setLevel" or method == "logging/setlevel":
+            response = handle_logging_set_level(id, msg)
+        else:
+            if id != "" and id != "null":
+                response = jsonrpc_error(id, -32601, "Method not found: " + method)
+
+        if response != "":
+            write_stdout_message(response)
+    0
+
+fn detect_mcp_method(msg: text) -> text:
+    if has_method(msg, "initialize"):
+        return "initialize"
+    if has_method(msg, "initialized"):
+        return "initialized"
+    if has_method(msg, "notifications/initialized"):
+        return "notifications/initialized"
+    if has_method(msg, "notifications/cancelled"):
+        return "notifications/cancelled"
+    if has_method(msg, "notifications/roots/list_changed"):
+        return "notifications/roots/list_changed"
+    if has_method(msg, "shutdown"):
+        return "shutdown"
+    if has_method(msg, "ping"):
+        return "ping"
+    if has_method(msg, "tools/list"):
+        return "tools/list"
+    if has_method(msg, "tools/call"):
+        return "tools/call"
+    if has_method(msg, "resources/list"):
+        return "resources/list"
+    if has_method(msg, "resources/templates/list"):
+        return "resources/templates/list"
+    if has_method(msg, "prompts/list"):
+        return "prompts/list"
+    if has_method(msg, "roots/list"):
+        return "roots/list"
+    if has_method(msg, "logging/setLevel"):
+        return "logging/setLevel"
+    if has_method(msg, "logging/setlevel"):
+        return "logging/setLevel"
+    extract_field(msg, "method")

@@ -1,0 +1,477 @@
+#!/bin/sh
+set -eu
+
+# Validate the AI CLI JS/Node-compatible QEMU lane contract.
+#
+# This script intentionally does not mark Phase 6 complete by generating host
+# files alone. Default mode requires staged runtime artifacts and real serial
+# logs. Use --contract-only for a CI-safe contract check, or
+# --stage-smoke-package to materialize host-side package files without guest
+# validation.
+#
+# Usage:
+#   sh scripts/check-ai-cli-qemu-lanes.shs --contract-only
+#   sh scripts/check-ai-cli-qemu-lanes.shs --stage-smoke-package --target x86 --app codex
+#   sh scripts/check-ai-cli-qemu-lanes.shs --stage-smoke-package --populate-fat32-image build/os/fat32-x86_64.img --target x86 --app codex
+#   sh scripts/check-ai-cli-qemu-lanes.shs --target x86 --app codex --validate-log-only
+#   sh scripts/check-ai-cli-qemu-lanes.shs --target all --app all
+#
+# Env knobs:
+#   AI_CLI_QEMU_BUILD_DIR       default: build/ai-cli-qemu-lanes
+#   AI_CLI_QEMU_STAGING_ROOT    default: build/os/ai-cli-runtime-staging
+#   AI_CLI_QEMU_SERIAL_ROOT     default: build/os
+#   AI_CLI_QEMU_IMPORT_MANIFEST default: build/ai-cli-qemu-lanes/reports/ai-cli-disk-import.tsv
+#   SIMPLE_BIN                  default: bin/simple
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${AI_CLI_QEMU_BUILD_DIR:-build/ai-cli-qemu-lanes}"
+STAGING_ROOT="${AI_CLI_QEMU_STAGING_ROOT:-build/os/ai-cli-runtime-staging}"
+SERIAL_ROOT="${AI_CLI_QEMU_SERIAL_ROOT:-build/os}"
+IMPORT_MANIFEST="${AI_CLI_QEMU_IMPORT_MANIFEST:-$BUILD_DIR/reports/ai-cli-disk-import.tsv}"
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+TARGET_FILTER="all"
+APP_FILTER="all"
+CONTRACT_ONLY=0
+VALIDATE_LOG_ONLY=0
+STAGE_SMOKE_PACKAGE=0
+POPULATE_FAT32_IMAGE=""
+
+usage() {
+    sed -n '3,18p' "$0"
+}
+
+while [ "$#" -gt 0 ]; do
+    arg="$1"
+    shift
+    case "$arg" in
+        --target=*) TARGET_FILTER="${arg#--target=}" ;;
+        --target)
+            if [ "$#" -eq 0 ]; then
+                echo "[ai-cli-qemu] --target requires a value" >&2
+                exit 2
+            fi
+            TARGET_FILTER="$1"
+            shift
+            ;;
+        --app=*) APP_FILTER="${arg#--app=}" ;;
+        --app)
+            if [ "$#" -eq 0 ]; then
+                echo "[ai-cli-qemu] --app requires a value" >&2
+                exit 2
+            fi
+            APP_FILTER="$1"
+            shift
+            ;;
+        --contract-only) CONTRACT_ONLY=1 ;;
+        --stage-smoke-package) STAGE_SMOKE_PACKAGE=1 ;;
+        --populate-fat32-image=*) POPULATE_FAT32_IMAGE="${arg#--populate-fat32-image=}" ;;
+        --populate-fat32-image)
+            if [ "$#" -eq 0 ]; then
+                echo "[ai-cli-qemu] --populate-fat32-image requires a path" >&2
+                exit 2
+            fi
+            POPULATE_FAT32_IMAGE="$1"
+            shift
+            ;;
+        --validate-log-only) VALIDATE_LOG_ONLY=1 ;;
+        --help|-h) usage; exit 0 ;;
+        *) echo "[ai-cli-qemu] unknown argument: $arg" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+case "$TARGET_FILTER" in
+    x86|x86_64) TARGET_FILTER="x86" ;;
+    riscv|riscv64) TARGET_FILTER="riscv" ;;
+    arm|arm64) TARGET_FILTER="arm" ;;
+    all) ;;
+    *) echo "[ai-cli-qemu] invalid target: $TARGET_FILTER" >&2; exit 2 ;;
+esac
+
+case "$APP_FILTER" in
+    codex|claude|gemini|all) ;;
+    *) echo "[ai-cli-qemu] invalid app: $APP_FILTER" >&2; exit 2 ;;
+esac
+
+mkdir -p "$BUILD_DIR/expected-markers" "$BUILD_DIR/reports"
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+    echo "[ai-cli-qemu] missing Simple runner: $SIMPLE_BIN" >&2
+    exit 3
+fi
+
+target_selected() {
+    [ "$TARGET_FILTER" = "all" ] || [ "$TARGET_FILTER" = "$1" ]
+}
+
+app_selected() {
+    [ "$APP_FILTER" = "all" ] || [ "$APP_FILTER" = "$1" ]
+}
+
+scenario_for_target() {
+    case "$1" in
+        riscv) printf '%s\n' "riscv64-hosted" ;;
+        arm) printf '%s\n' "arm64-virtio-fat32-smf" ;;
+        *) printf '%s\n' "x64-desktop-disk" ;;
+    esac
+}
+
+serial_for_target() {
+    case "$1" in
+        riscv) printf '%s\n' "$SERIAL_ROOT/ai-cli-riscv64.serial.log" ;;
+        arm) printf '%s\n' "$SERIAL_ROOT/ai-cli-arm64.serial.log" ;;
+        *) printf '%s\n' "$SERIAL_ROOT/ai-cli-x86_64.serial.log" ;;
+    esac
+}
+
+qemu_for_target() {
+    case "$1" in
+        riscv) printf '%s\n' "qemu-system-riscv64" ;;
+        arm) printf '%s\n' "qemu-system-aarch64" ;;
+        *) printf '%s\n' "qemu-system-x86_64" ;;
+    esac
+}
+
+machine_for_target() {
+    case "$1" in
+        riscv|arm) printf '%s\n' "virt" ;;
+        *) printf '%s\n' "q35" ;;
+    esac
+}
+
+runtime_path_for_target() {
+    printf '%s\n' "$STAGING_ROOT/sys/runtime/node-compatible/$1/runtime.smf"
+}
+
+app_entry_for_app() {
+    printf '%s\n' "$STAGING_ROOT/sys/apps/$1/$1.js"
+}
+
+marker_file_for() {
+    printf '%s\n' "$BUILD_DIR/expected-markers/$1-$2.markers"
+}
+
+disk_manifest_for_app() {
+    case "$1" in
+        codex) printf '%s\n' "CODEX.APP" ;;
+        claude) printf '%s\n' "CLAUDE.APP" ;;
+        gemini) printf '%s\n' "GEMINI.APP" ;;
+        *) printf '%s\n' "AICLI.APP" ;;
+    esac
+}
+
+write_expected_markers() {
+    app="$1"
+    target="$2"
+    marker_file="$(marker_file_for "$app" "$target")"
+    marker_src="$BUILD_DIR/expected-markers/$app-$target-markers.spl"
+
+    case "$app" in
+        claude) manifest_fn="claude_cli_smoke_manifest" ;;
+        gemini) manifest_fn="gemini_cli_smoke_manifest" ;;
+        *) manifest_fn="codex_cli_smoke_manifest" ;;
+    esac
+
+    cat >"$marker_src" <<SIMPLE
+use os.ai_cli_js_node_contract.{ai_cli_qemu_lane, codex_cli_smoke_manifest, claude_cli_smoke_manifest, gemini_cli_smoke_manifest}
+
+fn main() -> i64:
+    val lane = ai_cli_qemu_lane(${manifest_fn}(), "$target")
+    for marker in lane.marker_fragments:
+        print marker
+    return 0
+SIMPLE
+
+    SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SIMPLE_BIN" run "$marker_src" --mode=interpreter --clean >"$marker_file"
+    printf '%s\n' "$marker_file"
+}
+
+validate_serial_markers() {
+    app="$1"
+    target="$2"
+    serial_log="$(serial_for_target "$target")"
+    marker_file="$(write_expected_markers "$app" "$target")"
+
+    if [ ! -s "$serial_log" ]; then
+        echo "[ai-cli-qemu] missing serial log app=$app target=$target path=$serial_log"
+        return 1
+    fi
+
+    missing=0
+    while IFS= read -r marker; do
+        [ -n "$marker" ] || continue
+        if ! grep -a -F -q "$marker" "$serial_log"; then
+            echo "[ai-cli-qemu] missing marker app=$app target=$target marker=$marker"
+            missing=1
+        fi
+    done <"$marker_file"
+    return "$missing"
+}
+
+validate_runtime_artifacts() {
+    app="$1"
+    target="$2"
+    runtime_path="$(runtime_path_for_target "$target")"
+    entry_path="$(app_entry_for_app "$app")"
+    missing=0
+
+    if [ ! -s "$runtime_path" ]; then
+        echo "[ai-cli-qemu] missing runtime artifact target=$target path=$runtime_path"
+        missing=1
+    fi
+    if [ ! -s "$entry_path" ]; then
+        echo "[ai-cli-qemu] missing CLI bundle app=$app path=$entry_path"
+        missing=1
+    fi
+    return "$missing"
+}
+
+file_digest() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        cksum "$1" | awk '{print "cksum:" $1 ":" $2}'
+    fi
+}
+
+append_import_entry() {
+    app="$1"
+    target="$2"
+    rel="$3"
+    host_path="$STAGING_ROOT/$rel"
+    guest_path="/$rel"
+
+    if [ ! -s "$host_path" ]; then
+        echo "[ai-cli-qemu] staged file missing for import manifest: $host_path" >&2
+        return 1
+    fi
+    bytes="$(wc -c <"$host_path" | tr -d ' ')"
+    digest="$(file_digest "$host_path")"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$app" "$target" "$guest_path" "$host_path" "$bytes" "$digest" >>"$IMPORT_MANIFEST"
+}
+
+populate_fat32_image() {
+    image_path="$1"
+    populate_src="$BUILD_DIR/populate-fat32-image.spl"
+    populate_log="$BUILD_DIR/populate-fat32-image.log"
+
+    case "$image_path:$STAGING_ROOT" in
+        *\"*|*\$*|*\`*|*\\*|*"
+"*)
+            echo "[ai-cli-qemu] unsupported shell-sensitive character in image or staging path" >&2
+            return 2
+            ;;
+    esac
+    if [ ! -s "$image_path" ]; then
+        echo "[ai-cli-qemu] missing FAT32 image: $image_path" >&2
+        return 1
+    fi
+    if [ ! -d "$STAGING_ROOT" ]; then
+        echo "[ai-cli-qemu] missing staging root: $STAGING_ROOT" >&2
+        return 1
+    fi
+
+    cat >"$populate_src" <<SIMPLE
+use os.port.host_fat32_tree_populator.{populate_host_tree_into_fat32_image}
+
+fn main() -> i64:
+    val result = populate_host_tree_into_fat32_image("$image_path", "$STAGING_ROOT")
+    if result.is_err():
+        print "fat32_image_populate_error=" + result.unwrap_err()
+        return 1
+    print "fat32_image_populate_status=host-image-populated"
+    return 0
+SIMPLE
+
+    SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SIMPLE_BIN" run "$populate_src" --mode=interpreter --clean >"$populate_log"
+    populate_code=$?
+    cat "$populate_log"
+    return "$populate_code"
+}
+
+stage_smoke_package() {
+    app="$1"
+    target="$2"
+    stage_src="$BUILD_DIR/stage-$app-$target.spl"
+    stage_out="$BUILD_DIR/stage-$app-$target.out"
+    disk_manifest="$(disk_manifest_for_app "$app")"
+
+    mkdir -p "$BUILD_DIR" "$STAGING_ROOT/sys/apps/$app" "$STAGING_ROOT/sys/runtime/node-compatible/$target"
+
+    case "$app" in
+        claude) manifest_fn="claude_cli_smoke_manifest" ;;
+        gemini) manifest_fn="gemini_cli_smoke_manifest" ;;
+        *) manifest_fn="codex_cli_smoke_manifest" ;;
+    esac
+
+    cat >"$stage_src" <<SIMPLE
+use os.ai_cli_js_node_contract.{ai_cli_qemu_lane, ai_cli_runtime_smoke_package, codex_cli_smoke_manifest, claude_cli_smoke_manifest, gemini_cli_smoke_manifest}
+
+fn _emit_file(path: text, content: text):
+    print "@@AI_CLI_FILE " + path
+    print content
+    print "@@AI_CLI_END"
+
+fn main() -> i64:
+    val manifest = ${manifest_fn}()
+    val lane = ai_cli_qemu_lane(manifest, "$target")
+    val package = ai_cli_runtime_smoke_package(manifest, lane)
+    _emit_file("sys/apps/$app/AI_MANIFEST.SDN", package.manifest_sdn)
+    _emit_file("sys/apps/$app/launch.spl", package.launcher_source)
+    _emit_file("sys/apps/$app/qemu_markers.txt", package.marker_payload)
+    _emit_file("sys/apps/$app/$disk_manifest", package.package_index_sdn)
+    _emit_file("sys/apps/$app/$app.js", package.entry_source)
+    _emit_file("sys/runtime/node-compatible/$target/runtime.smf", package.runtime_stub_source)
+    return 0
+SIMPLE
+
+    SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SIMPLE_BIN" run "$stage_src" --mode=interpreter --clean >"$stage_out"
+
+    awk -v root="$STAGING_ROOT" '
+        function close_current() {
+            if (out != "") {
+                close(out)
+                out = ""
+            }
+        }
+        /^@@AI_CLI_FILE / {
+            close_current()
+            rel = substr($0, 15)
+            if (rel ~ /^\// || rel ~ /\.\./) {
+                print "[ai-cli-qemu] unsafe staged path: " rel > "/dev/stderr"
+                exit 2
+            }
+            out = root "/" rel
+            dir = out
+            sub(/\/[^\/]*$/, "", dir)
+            system("mkdir -p \"" dir "\"")
+            next
+        }
+        /^@@AI_CLI_END$/ {
+            close_current()
+            next
+        }
+        {
+            if (out != "") {
+                print $0 > out
+            }
+        }
+        END { close_current() }
+    ' "$stage_out"
+
+    append_import_entry "$app" "$target" "sys/apps/$app/AI_MANIFEST.SDN"
+    append_import_entry "$app" "$target" "sys/apps/$app/launch.spl"
+    append_import_entry "$app" "$target" "sys/apps/$app/qemu_markers.txt"
+    append_import_entry "$app" "$target" "sys/apps/$app/$disk_manifest"
+    append_import_entry "$app" "$target" "sys/apps/$app/$app.js"
+    append_import_entry "$app" "$target" "sys/runtime/node-compatible/$target/runtime.smf"
+}
+
+report_path="$BUILD_DIR/reports/ai-cli-qemu-lanes.env"
+rm -f "$report_path"
+
+echo "check=ai_cli_qemu_lanes" | tee -a "$report_path"
+echo "contract_only=$CONTRACT_ONLY" | tee -a "$report_path"
+echo "validate_log_only=$VALIDATE_LOG_ONLY" | tee -a "$report_path"
+echo "stage_smoke_package=$STAGE_SMOKE_PACKAGE" | tee -a "$report_path"
+echo "staging_root=$STAGING_ROOT" | tee -a "$report_path"
+echo "serial_root=$SERIAL_ROOT" | tee -a "$report_path"
+if [ -n "$POPULATE_FAT32_IMAGE" ]; then
+    echo "populate_fat32_image=$POPULATE_FAT32_IMAGE" | tee -a "$report_path"
+fi
+
+if [ "$STAGE_SMOKE_PACKAGE" -eq 1 ]; then
+    mkdir -p "$(dirname -- "$IMPORT_MANIFEST")"
+    printf 'app\ttarget\tguest_path\thost_path\tbytes\tdigest\n' >"$IMPORT_MANIFEST"
+    echo "import_manifest=$IMPORT_MANIFEST" | tee -a "$report_path"
+fi
+
+total=0
+contract_count=0
+runtime_failures=0
+serial_failures=0
+stage_count=0
+populate_status="not-run"
+
+for app in codex claude gemini; do
+    app_selected "$app" || continue
+    for target in riscv x86 arm; do
+        target_selected "$target" || continue
+        total=$((total + 1))
+        marker_file="$(write_expected_markers "$app" "$target")"
+        contract_count=$((contract_count + 1))
+        echo "lane=$app/$target qemu=$(qemu_for_target "$target") machine=$(machine_for_target "$target") scenario=$(scenario_for_target "$target") serial=$(serial_for_target "$target") markers=$marker_file runtime=$(runtime_path_for_target "$target")"
+
+        if [ "$STAGE_SMOKE_PACKAGE" -eq 1 ]; then
+            stage_smoke_package "$app" "$target"
+            stage_count=$((stage_count + 1))
+            echo "staged_smoke_package=$app/$target root=$STAGING_ROOT"
+            continue
+        fi
+
+        if [ "$CONTRACT_ONLY" -eq 1 ]; then
+            continue
+        fi
+        if [ "$VALIDATE_LOG_ONLY" -eq 0 ]; then
+            if ! validate_runtime_artifacts "$app" "$target"; then
+                runtime_failures=$((runtime_failures + 1))
+            fi
+        fi
+        if ! validate_serial_markers "$app" "$target"; then
+            serial_failures=$((serial_failures + 1))
+        fi
+    done
+done
+
+if [ "$total" -eq 0 ]; then
+    echo "[ai-cli-qemu] no lanes selected" >&2
+    exit 2
+fi
+
+{
+    echo "lane_count=$total"
+    echo "contract_count=$contract_count"
+    echo "runtime_failures=$runtime_failures"
+    echo "serial_failures=$serial_failures"
+    echo "stage_count=$stage_count"
+} | tee -a "$report_path"
+
+if [ -n "$POPULATE_FAT32_IMAGE" ]; then
+    if populate_fat32_image "$POPULATE_FAT32_IMAGE"; then
+        populate_status="host-image-populated"
+    else
+        populate_status="host-image-populate-failed"
+    fi
+fi
+
+if [ "$STAGE_SMOKE_PACKAGE" -eq 1 ]; then
+    echo "fat32_populate_status=$populate_status" | tee -a "$report_path"
+    if [ "$populate_status" = "host-image-populate-failed" ]; then
+        echo "ai_cli_qemu_lanes_status=fail" | tee -a "$report_path"
+        echo "ai_cli_qemu_lanes_reason=host-fat32-image-populate-failed" | tee -a "$report_path"
+        exit 1
+    fi
+    echo "ai_cli_qemu_lanes_status=stage-smoke-package" | tee -a "$report_path"
+    if [ "$populate_status" = "host-image-populated" ]; then
+        echo "ai_cli_qemu_lanes_reason=host-package-materialized-and-image-populated-no-guest-validation" | tee -a "$report_path"
+    else
+        echo "ai_cli_qemu_lanes_reason=host-package-materialized-no-guest-validation" | tee -a "$report_path"
+    fi
+    exit 0
+fi
+
+if [ "$CONTRACT_ONLY" -eq 1 ]; then
+    echo "ai_cli_qemu_lanes_status=contract-only" | tee -a "$report_path"
+    echo "ai_cli_qemu_lanes_reason=guest-runtime-provisioning-still-required" | tee -a "$report_path"
+    exit 0
+fi
+
+if [ "$runtime_failures" -ne 0 ] || [ "$serial_failures" -ne 0 ]; then
+    echo "ai_cli_qemu_lanes_status=fail" | tee -a "$report_path"
+    echo "ai_cli_qemu_lanes_reason=missing-runtime-or-guest-serial-evidence" | tee -a "$report_path"
+    exit 1
+fi
+
+echo "ai_cli_qemu_lanes_status=pass" | tee -a "$report_path"
+echo "ai_cli_qemu_lanes_reason=all-selected-lanes-have-runtime-and-serial-markers" | tee -a "$report_path"

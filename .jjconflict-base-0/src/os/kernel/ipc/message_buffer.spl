@@ -1,0 +1,335 @@
+# IPC Message Buffer — shared-memory zero-copy message passing
+#
+# L4-style IPC: sender writes to buffer, kernel transfers page mapping
+# to receiver's address space. No data copying for large messages.
+#
+# Small messages (≤ 64 bytes) use inline registers (fast path).
+# Large messages use shared buffer pages (slow path, zero-copy).
+#
+# All fields use primitive types for baremetal ABI safety.
+
+use os.kernel.types.bitfield.{bits_get, bits_set}
+
+# Buffer pool configuration
+val MAX_BUFFERS: u64 = 256
+val BUFFER_PAGE_SIZE: u64 = 4096
+
+# Buffer states
+val BUF_FREE: u8 = 0
+val BUF_ALLOCATED: u8 = 1
+val BUF_SENDING: u8 = 2
+val BUF_RECEIVED: u8 = 3
+
+# Message header layout (first 32 bytes of buffer page)
+# [0:3]   method_id: u32
+# [4:5]   cap_count: u16
+# [6:7]   flags: u16
+# [8:11]  payload_len: u32
+# [12:15] sender_badge: u32
+# [16:23] sender_endpoint: u64
+# [24:31] reserved
+
+val MSG_HDR_METHOD: u64 = 0
+val MSG_HDR_CAP_COUNT: u64 = 4
+val MSG_HDR_FLAGS: u64 = 6
+val MSG_HDR_PAYLOAD_LEN: u64 = 8
+val MSG_HDR_BADGE: u64 = 12
+val MSG_HDR_ENDPOINT: u64 = 16
+val MSG_HDR_SIZE: u64 = 32
+
+# Inline message (register-based fast path, no buffer needed)
+val MAX_INLINE_PAYLOAD: u64 = 64
+
+struct InlineMessage:
+    method_id: u32
+    cap_count: u16
+    flags: u16
+    payload_len: u32
+    badge: u32
+    # Up to 64 bytes of inline payload (8 x u64 registers)
+    r0: u64
+    r1: u64
+    r2: u64
+    r3: u64
+    r4: u64
+    r5: u64
+    r6: u64
+    r7: u64
+
+# Buffer descriptor
+struct MessageBufferDesc:
+    phys_addr: u64    # physical page address
+    state: u8         # BUF_FREE, BUF_ALLOCATED, etc.
+    owner_thread: u64 # thread that allocated this buffer
+    msg_len: u64      # current message length (header + payload)
+
+# Buffer pool — fixed array, no heap allocation
+var buffer_pool_phys: [u64; 256]    # physical addresses
+var buffer_pool_state: [u8; 256]    # states
+var buffer_pool_owner: [u64; 256]   # owners
+var buffer_pool_msglen: [u64; 256]  # message lengths
+var buffer_pool_count: u64 = 0
+
+fn msg_buffer_init(pool_phys_start: u64, pool_page_count: u64):
+    """Initialize the message buffer pool from a physical memory region.
+
+    Each buffer is one 4KB page. The pool_phys_start must be page-aligned.
+    """
+    var count: u64 = pool_page_count
+    if count > MAX_BUFFERS:
+        count = MAX_BUFFERS
+    var i: u64 = 0
+    while i < count:
+        buffer_pool_phys[i] = pool_phys_start + i * BUFFER_PAGE_SIZE
+        buffer_pool_state[i] = BUF_FREE
+        buffer_pool_owner[i] = 0
+        buffer_pool_msglen[i] = 0
+        i = i + 1
+    buffer_pool_count = count
+
+fn msg_buffer_alloc(thread_id: u64) -> u64:
+    """Allocate a message buffer for a thread. Returns buffer index, or MAX_BUFFERS on failure."""
+    var i: u64 = 0
+    while i < buffer_pool_count:
+        if buffer_pool_state[i] == BUF_FREE:
+            buffer_pool_state[i] = BUF_ALLOCATED
+            buffer_pool_owner[i] = thread_id
+            buffer_pool_msglen[i] = 0
+            return i
+        i = i + 1
+    MAX_BUFFERS
+
+fn msg_buffer_free(buf_idx: u64):
+    """Free a message buffer back to the pool."""
+    if buf_idx < buffer_pool_count:
+        buffer_pool_state[buf_idx] = BUF_FREE
+        buffer_pool_owner[buf_idx] = 0
+        buffer_pool_msglen[buf_idx] = 0
+
+fn msg_buffer_phys(buf_idx: u64) -> u64:
+    """Get the physical address of a buffer page."""
+    if buf_idx < buffer_pool_count:
+        buffer_pool_phys[buf_idx]
+    else:
+        0
+
+fn msg_buffer_set_sending(buf_idx: u64, msg_len: u64):
+    """Mark buffer as containing a message ready to send."""
+    if buf_idx < buffer_pool_count:
+        buffer_pool_state[buf_idx] = BUF_SENDING
+        buffer_pool_msglen[buf_idx] = msg_len
+
+fn msg_buffer_set_received(buf_idx: u64):
+    """Mark buffer as received by the destination thread."""
+    if buf_idx < buffer_pool_count:
+        buffer_pool_state[buf_idx] = BUF_RECEIVED
+
+fn msg_buffer_get_len(buf_idx: u64) -> u64:
+    """Get the message length in a buffer."""
+    if buf_idx < buffer_pool_count:
+        buffer_pool_msglen[buf_idx]
+    else:
+        0
+
+fn msg_buffer_is_owned_by(buf_idx: u64, thread_id: u64) -> bool:
+    """Check if a buffer is owned by a specific thread."""
+    if buf_idx < buffer_pool_count:
+        buffer_pool_owner[buf_idx] == thread_id
+    else:
+        false
+
+# ===========================================================================
+# Per-endpoint pending message queues (flat arrays for baremetal safety)
+# ===========================================================================
+
+val MAX_ENDPOINTS: u64 = 64
+val MAX_PENDING_PER_EP: u64 = 16
+val MAX_INLINE_PER_EP: u64 = 4
+
+# Flat pending buffer queue: ep_pending_bufs[endpoint * MAX_PENDING_PER_EP + offset]
+var ep_pending_bufs: [u64; 1024]     # 64 * 16
+var ep_pending_head: [u64; 64]
+var ep_pending_tail: [u64; 64]
+var ep_pending_count: [u64; 64]
+
+# Flat inline message queue: 4 inline messages per endpoint, each as 8 x u64 registers
+var ep_inline_r0: [u64; 256]         # 64 * 4
+var ep_inline_r1: [u64; 256]
+var ep_inline_r2: [u64; 256]
+var ep_inline_r3: [u64; 256]
+var ep_inline_r4: [u64; 256]
+var ep_inline_r5: [u64; 256]
+var ep_inline_r6: [u64; 256]
+var ep_inline_r7: [u64; 256]
+var ep_inline_method_id: [u32; 256]
+var ep_inline_cap_count: [u16; 256]
+var ep_inline_flags: [u16; 256]
+var ep_inline_payload_len: [u32; 256]
+var ep_inline_badge: [u32; 256]
+var ep_inline_head: [u64; 64]
+var ep_inline_tail: [u64; 64]
+var ep_inline_count: [u64; 64]
+
+# Per-endpoint receive waiter (thread blocked waiting for a message; 0 = none)
+var ep_recv_waiter: [u64; 64]
+
+# Last received inline message (for receiver to pick up after wakeup)
+var ep_waiter_inline_r0: [u64; 64]
+var ep_waiter_inline_r1: [u64; 64]
+var ep_waiter_inline_r2: [u64; 64]
+var ep_waiter_inline_r3: [u64; 64]
+var ep_waiter_inline_r4: [u64; 64]
+var ep_waiter_inline_r5: [u64; 64]
+var ep_waiter_inline_r6: [u64; 64]
+var ep_waiter_inline_r7: [u64; 64]
+var ep_waiter_inline_method_id: [u32; 64]
+var ep_waiter_inline_cap_count: [u16; 64]
+var ep_waiter_inline_flags: [u16; 64]
+var ep_waiter_inline_payload_len: [u32; 64]
+var ep_waiter_inline_badge: [u32; 64]
+var ep_waiter_has_inline: [u8; 64]   # 1 if waiter received inline msg, 0 otherwise
+
+fn msg_endpoint_init():
+    """Initialize per-endpoint pending queues and waiter state."""
+    var i: u64 = 0
+    while i < MAX_ENDPOINTS:
+        ep_pending_head[i] = 0
+        ep_pending_tail[i] = 0
+        ep_pending_count[i] = 0
+        ep_inline_head[i] = 0
+        ep_inline_tail[i] = 0
+        ep_inline_count[i] = 0
+        ep_recv_waiter[i] = 0
+        ep_waiter_has_inline[i] = 0
+        i = i + 1
+
+# ===========================================================================
+# IPC Send/Recv with buffer transfer
+# ===========================================================================
+
+fn ipc_send_inline(endpoint_id: u64, msg: InlineMessage) -> u64:
+    """Send an inline message (≤ 64 bytes payload). Returns 0 on success.
+
+    If a receiver is waiting on this endpoint, the message is delivered
+    directly to the waiter's slot. Otherwise it is enqueued in the
+    per-endpoint inline pending queue.
+
+    Returns:
+      0 = success
+      1 = invalid endpoint
+      3 = queue full (no waiter and inline queue at capacity)
+    """
+    if endpoint_id >= MAX_ENDPOINTS:
+        return 1
+
+    # Fast path: deliver directly to a waiting receiver
+    val waiter = ep_recv_waiter[endpoint_id]
+    if waiter != 0:
+        ep_waiter_inline_r0[endpoint_id] = msg.r0
+        ep_waiter_inline_r1[endpoint_id] = msg.r1
+        ep_waiter_inline_r2[endpoint_id] = msg.r2
+        ep_waiter_inline_r3[endpoint_id] = msg.r3
+        ep_waiter_inline_r4[endpoint_id] = msg.r4
+        ep_waiter_inline_r5[endpoint_id] = msg.r5
+        ep_waiter_inline_r6[endpoint_id] = msg.r6
+        ep_waiter_inline_r7[endpoint_id] = msg.r7
+        ep_waiter_inline_method_id[endpoint_id] = msg.method_id
+        ep_waiter_inline_cap_count[endpoint_id] = msg.cap_count
+        ep_waiter_inline_flags[endpoint_id] = msg.flags
+        ep_waiter_inline_payload_len[endpoint_id] = msg.payload_len
+        ep_waiter_inline_badge[endpoint_id] = msg.badge
+        ep_waiter_has_inline[endpoint_id] = 1
+        ep_recv_waiter[endpoint_id] = 0  # clear waiter (caller unblocks thread)
+        return 0
+
+    # Slow path: enqueue in inline pending queue
+    if ep_inline_count[endpoint_id] >= MAX_INLINE_PER_EP:
+        return 3  # queue full
+
+    val slot = endpoint_id * MAX_INLINE_PER_EP + ep_inline_tail[endpoint_id]
+    ep_inline_r0[slot] = msg.r0
+    ep_inline_r1[slot] = msg.r1
+    ep_inline_r2[slot] = msg.r2
+    ep_inline_r3[slot] = msg.r3
+    ep_inline_r4[slot] = msg.r4
+    ep_inline_r5[slot] = msg.r5
+    ep_inline_r6[slot] = msg.r6
+    ep_inline_r7[slot] = msg.r7
+    ep_inline_method_id[slot] = msg.method_id
+    ep_inline_cap_count[slot] = msg.cap_count
+    ep_inline_flags[slot] = msg.flags
+    ep_inline_payload_len[slot] = msg.payload_len
+    ep_inline_badge[slot] = msg.badge
+    ep_inline_tail[endpoint_id] = (ep_inline_tail[endpoint_id] + 1) % MAX_INLINE_PER_EP
+    ep_inline_count[endpoint_id] = ep_inline_count[endpoint_id] + 1
+    0
+
+fn ipc_send_buffer(endpoint_id: u64, buf_idx: u64) -> u64:
+    """Send a buffered message. Transfers buffer ownership to receiver.
+
+    If a receiver is waiting, the buffer is transferred directly.
+    Otherwise the buffer index is enqueued in the endpoint's pending queue.
+
+    Returns:
+      0 = success
+      1 = invalid buffer index
+      2 = buffer not in sending state
+      3 = queue full (no waiter and pending queue at capacity)
+      4 = invalid endpoint
+    """
+    if buf_idx >= buffer_pool_count:
+        return 1  # invalid buffer
+    if buffer_pool_state[buf_idx] != BUF_SENDING:
+        return 2  # buffer not in sending state
+    if endpoint_id >= MAX_ENDPOINTS:
+        return 4
+
+    # Fast path: deliver directly to a waiting receiver
+    val waiter = ep_recv_waiter[endpoint_id]
+    if waiter != 0:
+        buffer_pool_owner[buf_idx] = waiter
+        msg_buffer_set_received(buf_idx)
+        ep_recv_waiter[endpoint_id] = 0  # clear waiter (caller unblocks thread)
+        return 0
+
+    # Slow path: enqueue buffer index in pending queue
+    if ep_pending_count[endpoint_id] >= MAX_PENDING_PER_EP:
+        return 3  # queue full
+
+    val slot = endpoint_id * MAX_PENDING_PER_EP + ep_pending_tail[endpoint_id]
+    ep_pending_bufs[slot] = buf_idx
+    ep_pending_tail[endpoint_id] = (ep_pending_tail[endpoint_id] + 1) % MAX_PENDING_PER_EP
+    ep_pending_count[endpoint_id] = ep_pending_count[endpoint_id] + 1
+    0
+
+fn ipc_recv_buffer(endpoint_id: u64, thread_id: u64) -> u64:
+    """Receive a buffered message. Returns buffer index, or MAX_BUFFERS if none.
+
+    Checks the buffer pending queue first. If a buffer is available, its
+    ownership is transferred to the receiving thread and the index is returned.
+    If no buffer is pending, the thread is registered as a waiter and
+    MAX_BUFFERS is returned — the caller must block the thread.
+
+    Note: callers should check the inline queue (via ipc_recv_inline) before
+    calling this function if inline messages are expected.
+
+    Returns:
+      < MAX_BUFFERS = buffer index (success, ownership transferred)
+      MAX_BUFFERS   = no message available, thread registered as waiter
+    """
+    if endpoint_id >= MAX_ENDPOINTS:
+        return MAX_BUFFERS
+
+    # Check buffer pending queue
+    if ep_pending_count[endpoint_id] > 0:
+        val slot = endpoint_id * MAX_PENDING_PER_EP + ep_pending_head[endpoint_id]
+        val buf_idx = ep_pending_bufs[slot]
+        ep_pending_head[endpoint_id] = (ep_pending_head[endpoint_id] + 1) % MAX_PENDING_PER_EP
+        ep_pending_count[endpoint_id] = ep_pending_count[endpoint_id] - 1
+        buffer_pool_owner[buf_idx] = thread_id
+        msg_buffer_set_received(buf_idx)
+        return buf_idx
+
+    # No pending messages — register thread as waiter
+    ep_recv_waiter[endpoint_id] = thread_id
+    MAX_BUFFERS

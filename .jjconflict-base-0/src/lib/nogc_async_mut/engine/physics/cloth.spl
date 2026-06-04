@@ -1,0 +1,137 @@
+# Cloth Simulation — particle-based with Verlet integration and PBD constraints
+
+fn _cloth_sqrt(n: f64) -> f64:
+    if n <= 0.0:
+        return 0.0
+    var x = n * 0.5
+    if n < 1.0:
+        x = 1.0
+    var i = 0
+    while i < 5:
+        x = 0.5 * (x + n / x)
+        i = i + 1
+    x
+
+struct ClothParticle:
+    x: f64
+    y: f64
+    prev_x: f64
+    prev_y: f64
+    mass: f64
+    pinned: bool
+
+struct ClothConstraint:
+    p1_index: i32
+    p2_index: i32
+    rest_length: f64
+
+class ClothSimulation:
+    particles: [ClothParticle]
+    constraints: [ClothConstraint]
+    gravity_x: f64
+    gravity_y: f64
+    damping: f64
+    solver_iterations: i32
+
+impl ClothSimulation:
+    static fn new(gravity_y: f64, damping: f64, iterations: i32) -> ClothSimulation:
+        ClothSimulation(
+            particles: [],
+            constraints: [],
+            gravity_x: 0.0,
+            gravity_y: gravity_y,
+            damping: damping,
+            solver_iterations: iterations
+        )
+
+    me add_particle(x: f64, y: f64, mass: f64, pinned: bool) -> i32:
+        val idx: i32 = self.particles.len()
+        val p = ClothParticle(x: x, y: y, prev_x: x, prev_y: y, mass: mass, pinned: pinned)
+        self.particles.push(p)
+        idx
+
+    me add_constraint(p1: i32, p2: i32) -> i32:
+        val a = self.particles[p1]
+        val b = self.particles[p2]
+        val dx = b.x - a.x
+        val dy = b.y - a.y
+        val rest = _cloth_sqrt(dx * dx + dy * dy)
+        val idx: i32 = self.constraints.len()
+        val c = ClothConstraint(p1_index: p1, p2_index: p2, rest_length: rest)
+        self.constraints.push(c)
+        idx
+
+    me pin_particle(index: i32):
+        if index >= 0 and index < self.particles.len():
+            val old = self.particles[index]
+            self.particles[index] = ClothParticle(
+                x: old.x, y: old.y, prev_x: old.prev_x, prev_y: old.prev_y,
+                mass: old.mass, pinned: true
+            )
+
+    me unpin_particle(index: i32):
+        if index >= 0 and index < self.particles.len():
+            val old = self.particles[index]
+            self.particles[index] = ClothParticle(
+                x: old.x, y: old.y, prev_x: old.prev_x, prev_y: old.prev_y,
+                mass: old.mass, pinned: false
+            )
+
+    me simulate(dt: f64):
+        val dt2 = dt * dt
+        # Verlet integration
+        var i = 0
+        while i < self.particles.len():
+            val p = self.particles[i]
+            if not p.pinned:
+                val vx = (p.x - p.prev_x) * self.damping
+                val vy = (p.y - p.prev_y) * self.damping
+                val nx = p.x + vx + self.gravity_x * dt2
+                val ny = p.y + vy + self.gravity_y * dt2
+                self.particles[i] = ClothParticle(
+                    x: nx, y: ny, prev_x: p.x, prev_y: p.y,
+                    mass: p.mass, pinned: false
+                )
+            i = i + 1
+
+        # Constraint solving
+        var iter = 0
+        while iter < self.solver_iterations:
+            var ci = 0
+            while ci < self.constraints.len():
+                val c = self.constraints[ci]
+                val a = self.particles[c.p1_index]
+                val b = self.particles[c.p2_index]
+                val dx = b.x - a.x
+                val dy = b.y - a.y
+                val d = _cloth_sqrt(dx * dx + dy * dy)
+                if d > 0.0001:
+                    val diff = (d - c.rest_length) / d
+                    val offset_x = dx * diff * 0.5
+                    val offset_y = dy * diff * 0.5
+                    if not a.pinned:
+                        self.particles[c.p1_index] = ClothParticle(
+                            x: a.x + offset_x, y: a.y + offset_y,
+                            prev_x: a.prev_x, prev_y: a.prev_y,
+                            mass: a.mass, pinned: false
+                        )
+                    if not b.pinned:
+                        val b2 = self.particles[c.p2_index]
+                        self.particles[c.p2_index] = ClothParticle(
+                            x: b2.x - offset_x, y: b2.y - offset_y,
+                            prev_x: b2.prev_x, prev_y: b2.prev_y,
+                            mass: b2.mass, pinned: false
+                        )
+                ci = ci + 1
+            iter = iter + 1
+
+    fn particle_count() -> i32:
+        self.particles.len()
+
+    fn constraint_count() -> i32:
+        self.constraints.len()
+
+    fn get_particle(index: i32) -> ClothParticle?:
+        if index < 0 or index >= self.particles.len():
+            return nil
+        self.particles[index]

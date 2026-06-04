@@ -1,0 +1,304 @@
+# Physics2 — PhysicsWorld3D (Multi-Backend)
+#
+# 3D physics world with the same backend dispatch as world2d.
+# Uses quaternion rotation, 3D collision detection, and TGS solver.
+
+use std.common.engine.ids.{NodeId}
+use std.common.math.{math_sqrt, math_abs}
+use std.nogc_sync_mut.engine.physics.config.{PhysicsConfig3D, Vec3}
+use std.nogc_sync_mut.engine.physics.backend.{PhysicsBackend, select_backend}
+use std.nogc_sync_mut.engine.physics.data.solver_body3d.{SolverBodyStore3D}
+use std.nogc_sync_mut.engine.physics.data.constraint.{ContactConstraintSoA}
+use std.nogc_sync_mut.engine.physics.narrowphase.collision3d.{collide_sphere_sphere, collide_aabb_aabb_3d, NarrowContact3D}
+
+enum ShapeType3D:
+    Sphere
+    Box
+    Capsule
+
+struct Collider3D:
+    body_index: i64
+    node_id: NodeId
+    shape_type: ShapeType3D
+    radius: f64
+    half_x: f64
+    half_y: f64
+    half_z: f64
+
+struct Transform3D:
+    node_id: NodeId
+    x: f64
+    y: f64
+    z: f64
+    rot_w: f64
+    rot_x: f64
+    rot_y: f64
+    rot_z: f64
+
+class PhysicsWorld3D:
+    config: PhysicsConfig3D
+    active_backend: PhysicsBackend
+    bodies: SolverBodyStore3D
+    colliders: [Collider3D]
+    collider_count: i64
+    constraints: ContactConstraintSoA
+    accumulator: f64
+    node_to_body: [i64]
+    max_node_index: i64
+
+impl PhysicsWorld3D:
+    static fn create(config: PhysicsConfig3D) -> PhysicsWorld3D:
+        val backend = select_backend(config.backend)
+        PhysicsWorld3D(
+            config: config,
+            active_backend: backend,
+            bodies: SolverBodyStore3D.create(),
+            colliders: [],
+            collider_count: 0,
+            constraints: ContactConstraintSoA.create(),
+            accumulator: 0.0,
+            node_to_body: [],
+            max_node_index: 0
+        )
+
+    me add_dynamic_body(node_id: NodeId, x: f64, y: f64, z: f64, mass: f64) -> i64:
+        val idx = self.bodies.add_dynamic(node_id, x, y, z, mass)
+        self.ensure_node_map(node_id.to_index())
+        self.node_to_body[node_id.to_index()] = idx
+        idx
+
+    me add_static_body(node_id: NodeId, x: f64, y: f64, z: f64) -> i64:
+        val idx = self.bodies.add_static(node_id, x, y, z)
+        self.ensure_node_map(node_id.to_index())
+        self.node_to_body[node_id.to_index()] = idx
+        idx
+
+    me add_sphere_collider(node_id: NodeId, radius: f64) -> i64:
+        val body_idx = self.node_to_body[node_id.to_index()]
+        val c = Collider3D(
+            body_index: body_idx, node_id: node_id,
+            shape_type: ShapeType3D.Sphere,
+            radius: radius, half_x: radius, half_y: radius, half_z: radius
+        )
+        self.colliders.push(c)
+        val idx = self.collider_count
+        self.collider_count = self.collider_count + 1
+        idx
+
+    me add_box_collider(node_id: NodeId, hx: f64, hy: f64, hz: f64) -> i64:
+        val body_idx = self.node_to_body[node_id.to_index()]
+        val c = Collider3D(
+            body_index: body_idx, node_id: node_id,
+            shape_type: ShapeType3D.Box,
+            radius: 0.0, half_x: hx, half_y: hy, half_z: hz
+        )
+        self.colliders.push(c)
+        val idx = self.collider_count
+        self.collider_count = self.collider_count + 1
+        idx
+
+    me step(dt: f64):
+        self.accumulator = self.accumulator + dt
+        val fixed_dt = self.config.fixed_timestep
+        while self.accumulator >= fixed_dt:
+            self.bodies.save_prev_transforms()
+            self.fixed_step(fixed_dt)
+            self.accumulator = self.accumulator - fixed_dt
+
+    me fixed_step(dt: f64):
+        val sub_dt = dt / self.config.sub_steps.to_f64()
+        var sub = 0
+        while sub < self.config.sub_steps:
+            self.bodies.integrate(sub_dt, self.config.gravity.x, self.config.gravity.y, self.config.gravity.z)
+            self.detect_contacts()
+            self.solve_contacts()
+            sub = sub + 1
+
+    me detect_contacts():
+        self.constraints.clear()
+        var i = 0
+        while i < self.collider_count:
+            var j = i + 1
+            while j < self.collider_count:
+                val ca = self.colliders[i]
+                val cb = self.colliders[j]
+                val ai = ca.body_index
+                val bi = cb.body_index
+                if self.bodies.inv_mass[ai] == 0.0 and self.bodies.inv_mass[bi] == 0.0:
+                    j = j + 1
+                    continue
+                val contact = self.collide_3d(ca, cb)
+                if contact.has_contact:
+                    self.constraints.add(
+                        ai, bi,
+                        contact.normal_x, contact.normal_y,
+                        contact.point_x, contact.point_y,
+                        contact.penetration,
+                        self.config.restitution,
+                        self.config.friction,
+                        contact.feature_id_a, contact.feature_id_b
+                    )
+                j = j + 1
+            i = i + 1
+
+    me collide_3d(ca: Collider3D, cb: Collider3D) -> NarrowContact3D:
+        val ax = self.bodies.pos_x[ca.body_index]
+        val ay = self.bodies.pos_y[ca.body_index]
+        val az = self.bodies.pos_z[ca.body_index]
+        val bx = self.bodies.pos_x[cb.body_index]
+        val by = self.bodies.pos_y[cb.body_index]
+        val bz = self.bodies.pos_z[cb.body_index]
+        if ca.shape_type == ShapeType3D.Sphere and cb.shape_type == ShapeType3D.Sphere:
+            return collide_sphere_sphere(ax, ay, az, ca.radius, bx, by, bz, cb.radius)
+        if ca.shape_type == ShapeType3D.Box and cb.shape_type == ShapeType3D.Box:
+            return collide_aabb_aabb_3d(ax, ay, az, ca.half_x, ca.half_y, ca.half_z, bx, by, bz, cb.half_x, cb.half_y, cb.half_z)
+        NarrowContact3D(
+            point_x: 0.0, point_y: 0.0, point_z: 0.0,
+            normal_x: 0.0, normal_y: 1.0, normal_z: 0.0,
+            penetration: 0.0, feature_id_a: 0, feature_id_b: 0,
+            has_contact: false
+        )
+
+    me solve_contacts():
+        if self.constraints.count == 0:
+            return
+        self.solve_velocity_inline_3d(self.config.velocity_iterations)
+        self.solve_position_inline_3d(self.config.position_iterations, self.config.baumgarte_factor, self.config.slop)
+
+    me solve_velocity_inline_3d(iterations: i64):
+        var iter = 0
+        while iter < iterations:
+            var ci = 0
+            while ci < self.constraints.count:
+                val a = self.constraints.body_a[ci]
+                val b = self.constraints.body_b[ci]
+                val nx = self.constraints.normal_x[ci]
+                val ny = self.constraints.normal_y[ci]
+                val px = self.constraints.point_x[ci]
+                val py = self.constraints.point_y[ci]
+                val ra_x = px - self.bodies.pos_x[a]
+                val ra_y = py - self.bodies.pos_y[a]
+                val rb_x = px - self.bodies.pos_x[b]
+                val rb_y = py - self.bodies.pos_y[b]
+                val va_x = self.bodies.vel_x[a] + (-self.bodies.ang_vel_z[a] * ra_y)
+                val va_y = self.bodies.vel_y[a] + (self.bodies.ang_vel_z[a] * ra_x)
+                val vb_x = self.bodies.vel_x[b] + (-self.bodies.ang_vel_z[b] * rb_y)
+                val vb_y = self.bodies.vel_y[b] + (self.bodies.ang_vel_z[b] * rb_x)
+                val rel_vx = vb_x - va_x
+                val rel_vy = vb_y - va_y
+                val vn = rel_vx * nx + rel_vy * ny
+                val ra_cross_n = ra_x * ny - ra_y * nx
+                val rb_cross_n = rb_x * ny - rb_y * nx
+                val eff_mass = self.bodies.inv_mass[a] + self.bodies.inv_mass[b] + (ra_cross_n * ra_cross_n * self.bodies.inv_inertia_z[a]) + (rb_cross_n * rb_cross_n * self.bodies.inv_inertia_z[b])
+                if eff_mass > 0.0:
+                    val restitution = self.constraints.restitution[ci]
+                    val bias = if vn < -1.0: restitution * vn else: 0.0
+                    val lambda_raw = -(vn + bias) / eff_mass
+                    val old_lambda = self.constraints.lambda_n[ci]
+                    var new_lambda = old_lambda + lambda_raw
+                    if new_lambda < 0.0:
+                        new_lambda = 0.0
+                    self.constraints.lambda_n[ci] = new_lambda
+                    val j = new_lambda - old_lambda
+                    val jx = nx * j
+                    val jy = ny * j
+                    self.bodies.vel_x[a] = self.bodies.vel_x[a] - jx * self.bodies.inv_mass[a]
+                    self.bodies.vel_y[a] = self.bodies.vel_y[a] - jy * self.bodies.inv_mass[a]
+                    self.bodies.ang_vel_z[a] = self.bodies.ang_vel_z[a] - ra_cross_n * j * self.bodies.inv_inertia_z[a]
+                    self.bodies.vel_x[b] = self.bodies.vel_x[b] + jx * self.bodies.inv_mass[b]
+                    self.bodies.vel_y[b] = self.bodies.vel_y[b] + jy * self.bodies.inv_mass[b]
+                    self.bodies.ang_vel_z[b] = self.bodies.ang_vel_z[b] + rb_cross_n * j * self.bodies.inv_inertia_z[b]
+                    val tx = rel_vx - vn * nx
+                    val ty = rel_vy - vn * ny
+                    val t_len_sq = tx * tx + ty * ty
+                    if t_len_sq > 0.0000001:
+                        val t_len = math_sqrt(t_len_sq)
+                        val tnx = tx / t_len
+                        val tny = ty / t_len
+                        val vt = rel_vx * tnx + rel_vy * tny
+                        val ra_cross_t = ra_x * tny - ra_y * tnx
+                        val rb_cross_t = rb_x * tny - rb_y * tnx
+                        val eff_mass_t = self.bodies.inv_mass[a] + self.bodies.inv_mass[b] + (ra_cross_t * ra_cross_t * self.bodies.inv_inertia_z[a]) + (rb_cross_t * rb_cross_t * self.bodies.inv_inertia_z[b])
+                        if eff_mass_t > 0.0:
+                            val friction = self.constraints.friction[ci]
+                            val max_friction = math_abs(new_lambda) * friction
+                            val jt_raw = -vt / eff_mass_t
+                            val old_lambda_t = self.constraints.lambda_t[ci]
+                            var new_lambda_t = old_lambda_t + jt_raw
+                            if new_lambda_t > max_friction:
+                                new_lambda_t = max_friction
+                            if new_lambda_t < -max_friction:
+                                new_lambda_t = -max_friction
+                            self.constraints.lambda_t[ci] = new_lambda_t
+                            val jt = new_lambda_t - old_lambda_t
+                            self.bodies.vel_x[a] = self.bodies.vel_x[a] - tnx * jt * self.bodies.inv_mass[a]
+                            self.bodies.vel_y[a] = self.bodies.vel_y[a] - tny * jt * self.bodies.inv_mass[a]
+                            self.bodies.ang_vel_z[a] = self.bodies.ang_vel_z[a] - ra_cross_t * jt * self.bodies.inv_inertia_z[a]
+                            self.bodies.vel_x[b] = self.bodies.vel_x[b] + tnx * jt * self.bodies.inv_mass[b]
+                            self.bodies.vel_y[b] = self.bodies.vel_y[b] + tny * jt * self.bodies.inv_mass[b]
+                            self.bodies.ang_vel_z[b] = self.bodies.ang_vel_z[b] + rb_cross_t * jt * self.bodies.inv_inertia_z[b]
+                ci = ci + 1
+            iter = iter + 1
+
+    me solve_position_inline_3d(iterations: i64, baumgarte: f64, slop: f64):
+        var iter = 0
+        while iter < iterations:
+            var ci = 0
+            while ci < self.constraints.count:
+                val pen = self.constraints.penetration[ci]
+                if pen > slop:
+                    val a = self.constraints.body_a[ci]
+                    val b = self.constraints.body_b[ci]
+                    val nx = self.constraints.normal_x[ci]
+                    val ny = self.constraints.normal_y[ci]
+                    val inv_mass_sum = self.bodies.inv_mass[a] + self.bodies.inv_mass[b]
+                    if inv_mass_sum > 0.0:
+                        val correction = (pen - slop) * baumgarte / inv_mass_sum
+                        self.bodies.pos_x[a] = self.bodies.pos_x[a] - nx * correction * self.bodies.inv_mass[a]
+                        self.bodies.pos_y[a] = self.bodies.pos_y[a] - ny * correction * self.bodies.inv_mass[a]
+                        self.bodies.pos_x[b] = self.bodies.pos_x[b] + nx * correction * self.bodies.inv_mass[b]
+                        self.bodies.pos_y[b] = self.bodies.pos_y[b] + ny * correction * self.bodies.inv_mass[b]
+                ci = ci + 1
+            iter = iter + 1
+
+    me get_position(node_id: NodeId) -> Vec3:
+        val idx = self.node_to_body[node_id.to_index()]
+        self.bodies.get_position(idx)
+
+    me get_velocity(node_id: NodeId) -> Vec3:
+        val idx = self.node_to_body[node_id.to_index()]
+        self.bodies.get_velocity(idx)
+
+    me apply_force(node_id: NodeId, fx: f64, fy: f64, fz: f64):
+        val idx = self.node_to_body[node_id.to_index()]
+        self.bodies.apply_force_at(idx, fx, fy, fz)
+
+    me get_all_dynamic_transforms() -> [Transform3D]:
+        var result: [Transform3D] = []
+        var i = 0
+        while i < self.bodies.body_count:
+            if self.bodies.is_dynamic(i):
+                result.push(Transform3D(
+                    node_id: self.bodies.node_ids[i],
+                    x: self.bodies.pos_x[i],
+                    y: self.bodies.pos_y[i],
+                    z: self.bodies.pos_z[i],
+                    rot_w: self.bodies.rot_w[i],
+                    rot_x: self.bodies.rot_x[i],
+                    rot_y: self.bodies.rot_y[i],
+                    rot_z: self.bodies.rot_z[i]
+                ))
+            i = i + 1
+        result
+
+    me body_count() -> i64:
+        self.bodies.body_count
+
+    me destroy():
+        pass_dn
+
+    me ensure_node_map(idx: i64):
+        while self.node_to_body.len() <= idx:
+            self.node_to_body.push(-1)
+        if idx >= self.max_node_index:
+            self.max_node_index = idx + 1

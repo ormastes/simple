@@ -1,0 +1,114 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+. "$ROOT_DIR/scripts/generated-2d-readback-lib.shs"
+
+BUILD_DIR="${BUILD_DIR:-build/metal_generated_2d_readback}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/metal_generated_2d_readback_$(date -u +%F).md}"
+TOOLCHAIN_BUILD_DIR="${TOOLCHAIN_BUILD_DIR:-$BUILD_DIR/toolchains}"
+METALLIB_PATH="${METALLIB_PATH:-$TOOLCHAIN_BUILD_DIR/simple_2d_optimization.metallib}"
+METAL_TOOL="${METAL_TOOL:-metal}"
+METALLIB_TOOL="${METALLIB_TOOL:-metallib}"
+METAL_RUNTIME_PROBE="${METAL_RUNTIME_PROBE:-system_profiler}"
+
+resolve_darwin_tool() {
+    tool="$1"
+    if generated_2d_have "$tool"; then
+        printf '%s\n' "$tool"
+        return 0
+    fi
+    if [ "$(uname -s)" = "Darwin" ] && generated_2d_have xcrun; then
+        xcrun --find "$tool" 2>/dev/null && return 0
+    fi
+    printf '%s\n' "$tool"
+}
+
+METAL_TOOL="$(resolve_darwin_tool "$METAL_TOOL")"
+METALLIB_TOOL="$(resolve_darwin_tool "$METALLIB_TOOL")"
+
+mkdir -p "$BUILD_DIR" "$TOOLCHAIN_BUILD_DIR" "$(dirname "$REPORT_PATH")"
+
+has_metal_runtime() {
+    [ "$(uname -s)" = "Darwin" ] || return 1
+    generated_2d_have "$METAL_RUNTIME_PROBE" || return 1
+    return 0
+}
+
+emit_env() {
+    status="$1"
+    reason="$2"
+    readback="$3"
+    submit="$4"
+    bytes="$(generated_2d_bytes_of "$METALLIB_PATH")"
+    {
+        echo "metal_generated_2d_readback_status=$status"
+        echo "metal_generated_2d_readback_reason=$reason"
+        echo "metal_generated_2d_readback_metallib=$METALLIB_PATH"
+        echo "metal_generated_2d_readback_metallib_bytes=$bytes"
+        echo "metal_generated_2d_readback_runtime_present=$runtime_present"
+        echo "metal_generated_2d_readback_metal_tool_present=$metal_tool_present"
+        echo "metal_generated_2d_readback_metallib_tool_present=$metallib_tool_present"
+        echo "metal_generated_2d_readback_module_verified=$module_verified"
+        echo "metal_generated_2d_readback_submit_attempted=$submit"
+        echo "metal_generated_2d_readback_readback_available=$readback"
+        echo "metal_generated_2d_readback_expected_checksum=0"
+        echo "metal_generated_2d_readback_actual_checksum=0"
+        echo "metal_generated_2d_readback_ops=fill,copy,alpha,scroll"
+    } >"$BUILD_DIR/evidence.env"
+}
+
+runtime_present=false
+if has_metal_runtime; then
+    runtime_present=true
+fi
+
+metal_tool_present=false
+if generated_2d_have "$METAL_TOOL"; then
+    metal_tool_present=true
+fi
+
+metallib_tool_present=false
+if generated_2d_have "$METALLIB_TOOL"; then
+    metallib_tool_present=true
+fi
+
+module_verified=false
+if ! generated_2d_module_verified "$METALLIB_PATH"; then
+    REPORT_PATH="$BUILD_DIR/toolchains.md" BUILD_DIR="$TOOLCHAIN_BUILD_DIR" METAL_TOOL="$METAL_TOOL" METALLIB_TOOL="$METALLIB_TOOL" sh scripts/check-portable-compute-toolchains.shs >/dev/null
+fi
+
+if generated_2d_module_verified "$METALLIB_PATH"; then
+    module_verified=true
+fi
+
+if [ "$module_verified" != "true" ]; then
+    reason="missing-verified-metallib"
+    if [ "$metal_tool_present" != "true" ]; then
+        reason="missing-primary-tool"
+    elif [ "$metallib_tool_present" != "true" ]; then
+        reason="missing-metallib-tool"
+    fi
+    emit_env "unavailable" "$reason" "false" "false"
+elif [ "$runtime_present" != "true" ]; then
+    emit_env "unavailable" "missing-metal-runtime" "false" "false"
+else
+    if "$METAL_RUNTIME_PROBE" SPDisplaysDataType >"$BUILD_DIR/metal_probe.out" 2>"$BUILD_DIR/metal_probe.err"; then
+        emit_env "unavailable" "missing-metal-submit-readback-harness" "false" "false"
+    else
+        emit_env "unavailable" "metal-runtime-probe-failed" "false" "false"
+    fi
+fi
+
+. "$BUILD_DIR/evidence.env"
+generated_2d_report_from_env "$REPORT_PATH" "Metal Generated 2D Readback Evidence" "$BUILD_DIR/evidence.env" "Generated Metal evidence is intentionally fail-closed until a verified metallib module, Metal runtime device/pipeline/encoder handles, submit, synchronization, and readback checksum are all present."
+
+cat "$BUILD_DIR/evidence.env"
+echo "report_path=$REPORT_PATH"
+
+if [ "$metal_generated_2d_readback_status" = "pass" ]; then
+    exit 0
+fi
+exit 1

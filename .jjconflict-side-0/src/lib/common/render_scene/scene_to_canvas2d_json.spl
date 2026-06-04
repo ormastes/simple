@@ -1,0 +1,74 @@
+use std.common.render_scene.scene.{RenderScene, SceneCommand}
+
+fn _json_escape(s: text) -> text:
+    var out = ""
+    var i = 0
+    while i < s.len():
+        val ch = s.slice(i, i + 1)
+        if ch == "\\":
+            out = out + "\\\\"
+        elif ch == "\"":
+            out = out + "\\\""
+        elif ch == "\n":
+            out = out + "\\n"
+        elif ch == "\r":
+            out = out + "\\r"
+        elif ch == "\t":
+            out = out + "\\t"
+        else:
+            out = out + ch
+        i = i + 1
+    out
+
+fn _color_json(color: i32) -> text:
+    "\"color\":" + color.to_text()
+
+fn _command_to_json(cmd: SceneCommand, offset_x: i32, offset_y: i32, scale: i32) -> text:
+    val x = (cmd.x + offset_x) * scale
+    val y = (cmd.y + offset_y) * scale
+    val w = cmd.width * scale
+    val h = cmd.height * scale
+    if cmd.kind == "fill_rect":
+        return "{\"op\":\"fillRect\",\"x\":" + x.to_text() + ",\"y\":" + y.to_text() + ",\"w\":" + w.to_text() + ",\"h\":" + h.to_text() + "," + _color_json(cmd.color) + "}"
+    if cmd.kind == "stroke_rect":
+        val sw = cmd.stroke_width * scale
+        return "{\"op\":\"strokeRect\",\"x\":" + x.to_text() + ",\"y\":" + y.to_text() + ",\"w\":" + w.to_text() + ",\"h\":" + h.to_text() + ",\"strokeWidth\":" + sw.to_text() + "," + _color_json(cmd.color) + "}"
+    if cmd.kind == "text":
+        val fs = cmd.font_size * scale
+        return "{\"op\":\"fillText\",\"x\":" + x.to_text() + ",\"y\":" + y.to_text() + ",\"fontSize\":" + fs.to_text() + ",\"text\":\"" + _json_escape(cmd.text_val) + "\"," + _color_json(cmd.color) + "}"
+    if cmd.kind == "line":
+        val x2 = (cmd.width + offset_x) * scale
+        val y2 = (cmd.height + offset_y) * scale
+        val sw2 = cmd.stroke_width * scale
+        return "{\"op\":\"line\",\"x\":" + x.to_text() + ",\"y\":" + y.to_text() + ",\"x2\":" + x2.to_text() + ",\"y2\":" + y2.to_text() + ",\"strokeWidth\":" + sw2.to_text() + "," + _color_json(cmd.color) + "}"
+    if cmd.kind == "circle" or cmd.kind == "circle_filled":
+        return "{\"op\":\"circle\",\"filled\":" + (if cmd.kind == "circle_filled": "true" else: "false") + ",\"x\":" + x.to_text() + ",\"y\":" + y.to_text() + ",\"r\":" + w.to_text() + "," + _color_json(cmd.color) + "}"
+    if cmd.kind == "rounded_rect":
+        val radius = cmd.border_radius * scale
+        return "{\"op\":\"roundRect\",\"x\":" + x.to_text() + ",\"y\":" + y.to_text() + ",\"w\":" + w.to_text() + ",\"h\":" + h.to_text() + ",\"radius\":" + radius.to_text() + "," + _color_json(cmd.color) + "}"
+    if cmd.kind == "gradient_rect":
+        return "{\"op\":\"linearGradientRect\",\"x\":" + x.to_text() + ",\"y\":" + y.to_text() + ",\"w\":" + w.to_text() + ",\"h\":" + h.to_text() + ",\"color1\":" + cmd.color.to_text() + ",\"color2\":" + cmd.color2.to_text() + "}"
+    if cmd.kind == "image":
+        return "{\"op\":\"drawImage\",\"x\":" + x.to_text() + ",\"y\":" + y.to_text() + ",\"w\":" + w.to_text() + ",\"h\":" + h.to_text() + ",\"pixelWidth\":" + cmd.pixel_width.to_text() + ",\"pixelHeight\":" + cmd.pixel_height.to_text() + "}"
+    if cmd.kind == "clip_push":
+        return "{\"op\":\"pushClip\",\"x\":" + x.to_text() + ",\"y\":" + y.to_text() + ",\"w\":" + w.to_text() + ",\"h\":" + h.to_text() + "}"
+    if cmd.kind == "clip_pop":
+        return "{\"op\":\"popClip\"}"
+    "{\"op\":\"unknown\",\"kind\":\"" + _json_escape(cmd.kind) + "\"}"
+
+fn render_scene_to_canvas2d_ops_with_offset_and_scale(scene: RenderScene, offset_x: i32, offset_y: i32, scale: i32) -> text:
+    val safe_scale = if scale > 0: scale else: 1
+    var json = "{\"width\":" + (scene.viewport_w * safe_scale).to_text() + ",\"height\":" + (scene.viewport_h * safe_scale).to_text() + ",\"devicePixelRatio\":" + safe_scale.to_text() + ",\"ops\":["
+    var i = 0
+    while i < scene.commands.len():
+        if i > 0:
+            json = json + ","
+        json = json + _command_to_json(scene.commands[i], offset_x, offset_y, safe_scale)
+        i = i + 1
+    json + "]}"
+
+fn render_scene_to_canvas2d_ops_with_offset(scene: RenderScene, offset_x: i32, offset_y: i32) -> text:
+    render_scene_to_canvas2d_ops_with_offset_and_scale(scene, offset_x, offset_y, 1)
+
+fn render_scene_to_canvas2d_ops(scene: RenderScene) -> text:
+    render_scene_to_canvas2d_ops_with_offset(scene, 0, 0)

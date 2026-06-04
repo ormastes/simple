@@ -1,0 +1,79 @@
+# @tag:system, slow
+# @tag:gui
+# @tag:engine2d
+# @tag:simd
+# @tag:bitmap
+
+"""
+# CPU SIMD Engine2D Diagram Evidence Spec
+
+Runs the CPU SIMD Engine2D evidence wrapper and verifies that the SIMD-backed
+fill/copy/alpha/blit/scroll path renders a deterministic diagram exactly
+matching the scalar reference bitmap with no blur or tolerance.
+"""
+
+use std.io_runtime.{getpid, time_now_unix_micros}
+use std.spec.*
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+fn _run_id() -> text:
+    getpid().to_text() + "_" + time_now_unix_micros().to_text()
+
+fn _build_dir(run_id: text) -> text:
+    "build/tmp/cpu_simd_engine2d_diagram_evidence_spec_" + run_id
+
+fn _report_path(run_id: text) -> text:
+    "build/tmp/cpu_simd_engine2d_diagram_evidence_spec_" + run_id + ".md"
+
+fn _run_evidence(run_id: text) -> (text, text, i32):
+    rt_process_run_timeout(
+        "/bin/sh",
+        [
+            "-c",
+            "SIMPLE_BIN=src/compiler_rust/target/release/simple SIMPLE_LIB=src " +
+                "BUILD_DIR=" + _build_dir(run_id) + " REPORT_PATH=" + _report_path(run_id) +
+                " sh scripts/check/check-cpu-simd-engine2d-evidence.shs"
+        ],
+        120000
+    )
+
+describe "CPU SIMD Engine2D diagram evidence":
+    slow_it "renders the SIMD-backed diagram exactly like the scalar reference":
+        val run_id = _run_id()
+        val result = _run_evidence(run_id)
+        val stdout = result[0]
+        val stderr = result[1]
+        val code = result[2]
+        if code != 0:
+            print "cpu simd engine2d evidence stdout: " + stdout
+            print "cpu simd engine2d evidence stderr: " + stderr
+        expect(code).to_equal(0)
+        expect(stdout).to_contain("cpu_simd_evidence_status=pass")
+        expect(stdout).to_contain("cpu_simd_evidence_reason=runtime-evidence-verified")
+        expect(stdout).to_contain("cpu_simd_evidence_policy=exact-bitmap-no-blur-no-tolerance")
+        expect(stdout).to_contain("cpu_simd_evidence_blur_or_tolerance_used=false")
+        expect(stdout).to_contain("cpu_simd_evidence_diagram_pixel_count=192")
+        expect(stdout).to_contain("cpu_simd_evidence_diagram_mismatch_count=0")
+        expect(stdout).to_contain("cpu_simd_evidence_fill_mismatch_count=0")
+        expect(stdout).to_contain("cpu_simd_evidence_copy_mismatch_count=0")
+        expect(stdout).to_contain("cpu_simd_evidence_alpha_mismatch_count=0")
+        expect(stdout).to_contain("cpu_simd_evidence_scroll_mismatch_count=0")
+        expect(stdout).to_contain("cpu_simd_evidence_diagram_fill_hits=9")
+        expect(stdout).to_contain("cpu_simd_evidence_diagram_copy_hits=7")
+        expect(stdout).to_contain("cpu_simd_evidence_diagram_alpha_hits=9")
+        expect(stdout).to_contain("cpu_simd_evidence_diagram_blit_hits=1")
+        expect(stdout).to_contain("cpu_simd_evidence_diagram_scroll_hits=7")
+        expect(stdout).to_contain("cpu_simd_evidence_general_status=Initialized")
+        expect(stdout).to_contain("cpu_simd_evidence_log_bytes=")
+        expect(stdout).to_contain("cpu_simd_evidence_log_cksum=")
+
+        val report = rt_file_read_text(_report_path(run_id))
+        expect(report).to_contain("# CPU SIMD Engine2D Evidence")
+        expect(report).to_contain("- status: pass")
+        expect(report).to_contain("- diagram pixel count: 192")
+        expect(report).to_contain("- diagram mismatch count: 0")
+        expect(report).to_contain("- policy: exact bitmap, no blur, no tolerance")
+        expect(report).to_contain("- evidence_log_bytes: ")
+        expect(report).to_contain("- evidence_log_cksum: ")

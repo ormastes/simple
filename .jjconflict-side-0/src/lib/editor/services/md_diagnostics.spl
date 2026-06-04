@@ -1,0 +1,693 @@
+# Markdown Diagnostics
+#
+# Lint checks for markdown content: duplicate headings, broken anchor links,
+# empty headings, inconsistent list markers, missing alt text, unclosed code
+# fences, heading level skips, trailing whitespace, and broken local file links.
+#
+# NOTE: Checks that walk block structure skip content inside code fences to
+# avoid false positives on example code embedded in documents.
+
+use std.common.markdown.{markdown_slugify}
+
+struct MdPropertySchemaRule:
+    key: text
+    required: bool
+    allowed_values: [text]
+
+fn md_diagnose(content: text, path: text) -> [EditorDiagnostic]:
+    var results: [EditorDiagnostic] = []
+    val dup = md_check_duplicate_headings(content, path)
+    for d in dup:
+        results.push(d)
+    val broken = md_check_broken_heading_links(content, path)
+    for d in broken:
+        results.push(d)
+    val empty = md_check_empty_headings(content, path)
+    for d in empty:
+        results.push(d)
+    val markers = md_check_inconsistent_list_markers(content, path)
+    for d in markers:
+        results.push(d)
+    val alt = md_check_missing_alt_text(content, path)
+    for d in alt:
+        results.push(d)
+    val fences = md_check_unclosed_code_fences(content, path)
+    for d in fences:
+        results.push(d)
+    val skip = md_check_heading_level_skip(content, path)
+    for d in skip:
+        results.push(d)
+    val trailing = md_check_trailing_whitespace(content, path)
+    for d in trailing:
+        results.push(d)
+    results
+
+fn md_property_schema_rule(key: text, required: bool, allowed_values: [text]) -> MdPropertySchemaRule:
+    MdPropertySchemaRule(key: key, required: required, allowed_values: allowed_values)
+
+fn md_check_frontmatter_property_schema(content: text, path: text, rules: [MdPropertySchemaRule]) -> [EditorDiagnostic]:
+    var results: [EditorDiagnostic] = []
+    val lines = content.split("\n")
+    if lines.len() == 0 or lines[0].trim() != "---":
+        for rule in rules:
+            if rule.required:
+                results.push(EditorDiagnostic(
+                    path: path,
+                    line: 0,
+                    col: 0,
+                    end_line: 0,
+                    end_col: 0,
+                    severity: "warning",
+                    message: "Missing required frontmatter property: " + rule.key,
+                    source: "markdown-properties"
+                ))
+        return results
+    var keys: [text] = []
+    var values: [text] = []
+    var prop_lines: [i64] = []
+    var i = 1
+    while i < lines.len():
+        val trimmed = lines[i].trim()
+        if trimmed == "---":
+            break
+        val sep = _md_diag_find_char(trimmed, ":", 0)
+        if sep > 0:
+            val key = trimmed.slice(0, sep).trim()
+            val value = trimmed.slice(sep + 1, trimmed.len()).trim()
+            keys.push(key)
+            values.push(value)
+            prop_lines.push(i)
+            if _md_diag_property_seen_before(keys, key, keys.len() - 1):
+                results.push(EditorDiagnostic(
+                    path: path,
+                    line: i,
+                    col: 0,
+                    end_line: i,
+                    end_col: lines[i].len(),
+                    severity: "warning",
+                    message: "Duplicate frontmatter property: " + key,
+                    source: "markdown-properties"
+                ))
+        i = i + 1
+    for rule in rules:
+        var found = false
+        var j = 0
+        while j < keys.len():
+            if keys[j] == rule.key:
+                found = true
+                if rule.required and values[j] == "":
+                    results.push(EditorDiagnostic(
+                        path: path,
+                        line: prop_lines[j],
+                        col: 0,
+                        end_line: prop_lines[j],
+                        end_col: lines[prop_lines[j]].len(),
+                        severity: "warning",
+                        message: "Frontmatter property requires a value: " + rule.key,
+                        source: "markdown-properties"
+                    ))
+                if rule.allowed_values.len() > 0 and not _md_diag_value_allowed(values[j], rule.allowed_values):
+                    results.push(EditorDiagnostic(
+                        path: path,
+                        line: prop_lines[j],
+                        col: 0,
+                        end_line: prop_lines[j],
+                        end_col: lines[prop_lines[j]].len(),
+                        severity: "warning",
+                        message: "Invalid frontmatter value for " + rule.key + ": " + values[j],
+                        source: "markdown-properties"
+                    ))
+                break
+            j = j + 1
+        if not found and rule.required:
+            results.push(EditorDiagnostic(
+                path: path,
+                line: 0,
+                col: 0,
+                end_line: 0,
+                end_col: 0,
+                severity: "warning",
+                message: "Missing required frontmatter property: " + rule.key,
+                source: "markdown-properties"
+            ))
+    results
+
+fn md_check_duplicate_headings(content: text, path: text) -> [EditorDiagnostic]:
+    var results: [EditorDiagnostic] = []
+    val lines = content.split("\n")
+    val total = lines.len()
+    # Collect (level, text, line_number) for all headings outside code fences
+    var heading_levels: [i64] = []
+    var heading_texts: [text] = []
+    var heading_lines: [i64] = []
+    var in_fence = false
+    var i = 0
+    while i < total:
+        val line = lines[i]
+        val trimmed = line.trim()
+        if trimmed.starts_with("```"):
+            if in_fence:
+                in_fence = false
+            else:
+                in_fence = true
+            i = i + 1
+            continue
+        if not in_fence:
+            val lvl = _md_diag_heading_level(line)
+            if lvl > 0:
+                val htext = _md_diag_heading_text(line, lvl)
+                heading_levels.push(lvl)
+                heading_texts.push(htext)
+                heading_lines.push(i)
+        i = i + 1
+    # For each heading, check if an earlier heading has same level and text
+    var j = 0
+    while j < heading_texts.len():
+        val cur_lvl = heading_levels[j]
+        val cur_text = heading_texts[j]
+        val cur_line = heading_lines[j]
+        var k = 0
+        while k < j:
+            if heading_levels[k] == cur_lvl and heading_texts[k] == cur_text:
+                val d = EditorDiagnostic(
+                    path: path,
+                    line: cur_line,
+                    col: 0,
+                    end_line: cur_line,
+                    end_col: lines[cur_line].len(),
+                    severity: "warning",
+                    message: "Duplicate heading: \"" + cur_text + "\" at level " + cur_lvl.to_text(),
+                    source: "markdown"
+                )
+                results.push(d)
+                break
+            k = k + 1
+        j = j + 1
+    results
+
+fn md_check_broken_heading_links(content: text, path: text) -> [EditorDiagnostic]:
+    var results: [EditorDiagnostic] = []
+    val lines = content.split("\n")
+    val total = lines.len()
+    # Collect valid heading slugs
+    var valid_slugs: [text] = []
+    var in_fence = false
+    var i = 0
+    while i < total:
+        val line = lines[i]
+        val trimmed = line.trim()
+        if trimmed.starts_with("```"):
+            if in_fence:
+                in_fence = false
+            else:
+                in_fence = true
+            i = i + 1
+            continue
+        if not in_fence:
+            val lvl = _md_diag_heading_level(line)
+            if lvl > 0:
+                val htext = _md_diag_heading_text(line, lvl)
+                val slug = markdown_slugify(htext)
+                valid_slugs.push(slug)
+        i = i + 1
+    # Find all links with # prefix in URL and check against valid slugs
+    val link_positions = _md_diag_find_links_with_positions(content)
+    var j = 0
+    while j < link_positions.len():
+        val item = link_positions[j]
+        val link_line = item.0
+        val link_col = item.1
+        val link_url = item.3
+        if link_url.starts_with("#"):
+            val anchor = link_url.slice(1, link_url.len())
+            var found = false
+            var k = 0
+            while k < valid_slugs.len():
+                if valid_slugs[k] == anchor:
+                    found = true
+                    break
+                k = k + 1
+            if not found:
+                val d = EditorDiagnostic(
+                    path: path,
+                    line: link_line,
+                    col: link_col,
+                    end_line: link_line,
+                    end_col: link_col + link_url.len() + 2,
+                    severity: "error",
+                    message: "Broken heading anchor: \"" + link_url + "\" does not match any heading",
+                    source: "markdown"
+                )
+                results.push(d)
+        j = j + 1
+    results
+
+fn md_check_empty_headings(content: text, path: text) -> [EditorDiagnostic]:
+    var results: [EditorDiagnostic] = []
+    val lines = content.split("\n")
+    val total = lines.len()
+    var in_fence = false
+    var i = 0
+    while i < total:
+        val line = lines[i]
+        val trimmed = line.trim()
+        if trimmed.starts_with("```"):
+            if in_fence:
+                in_fence = false
+            else:
+                in_fence = true
+            i = i + 1
+            continue
+        if not in_fence:
+            val lvl = _md_diag_heading_level(line)
+            if lvl > 0:
+                val htext = _md_diag_heading_text(line, lvl)
+                val htrimmed = htext.trim()
+                if htrimmed.len() == 0:
+                    val d = EditorDiagnostic(
+                        path: path,
+                        line: i,
+                        col: 0,
+                        end_line: i,
+                        end_col: line.len(),
+                        severity: "warning",
+                        message: "Empty heading at level " + lvl.to_text(),
+                        source: "markdown"
+                    )
+                    results.push(d)
+        i = i + 1
+    results
+
+fn md_check_inconsistent_list_markers(content: text, path: text) -> [EditorDiagnostic]:
+    var results: [EditorDiagnostic] = []
+    val lines = content.split("\n")
+    val total = lines.len()
+    var in_fence = false
+    # Track the first marker seen in the current list block
+    var list_marker = ""
+    var list_start_line = 0
+    var i = 0
+    while i < total:
+        val line = lines[i]
+        val trimmed = line.trim()
+        if trimmed.starts_with("```"):
+            if in_fence:
+                in_fence = false
+            else:
+                in_fence = true
+                list_marker = ""
+            i = i + 1
+            continue
+        if not in_fence:
+            val marker = _md_diag_list_marker(trimmed)
+            if marker != "":
+                if list_marker == "":
+                    list_marker = marker
+                    list_start_line = i
+                elif list_marker != marker:
+                    val d = EditorDiagnostic(
+                        path: path,
+                        line: i,
+                        col: 0,
+                        end_line: i,
+                        end_col: line.len(),
+                        severity: "hint",
+                        message: "Inconsistent list marker: \"" + marker + "\" mixed with \"" + list_marker + "\" (first used at line " + (list_start_line + 1).to_text() + ")",
+                        source: "markdown"
+                    )
+                    results.push(d)
+            else:
+                if trimmed.len() == 0:
+                    list_marker = ""
+        i = i + 1
+    results
+
+fn md_check_missing_alt_text(content: text, path: text) -> [EditorDiagnostic]:
+    var results: [EditorDiagnostic] = []
+    val image_positions = _md_diag_find_images_with_positions(content)
+    var i = 0
+    while i < image_positions.len():
+        val item = image_positions[i]
+        val img_line = item.0
+        val img_col = item.1
+        val alt_text = item.2
+        val alt_trimmed = alt_text.trim()
+        if alt_trimmed.len() == 0:
+            val lines = content.split("\n")
+            var end_col = img_col + 4
+            if img_line < lines.len():
+                end_col = lines[img_line].len()
+            val d = EditorDiagnostic(
+                path: path,
+                line: img_line,
+                col: img_col,
+                end_line: img_line,
+                end_col: end_col,
+                severity: "info",
+                message: "Image is missing alt text",
+                source: "markdown"
+            )
+            results.push(d)
+        i = i + 1
+    results
+
+fn md_check_unclosed_code_fences(content: text, path: text) -> [EditorDiagnostic]:
+    var results: [EditorDiagnostic] = []
+    val lines = content.split("\n")
+    val total = lines.len()
+    var in_fence = false
+    var fence_start_line = 0
+    var i = 0
+    while i < total:
+        val line = lines[i]
+        val trimmed = line.trim()
+        if trimmed.starts_with("```"):
+            if in_fence:
+                in_fence = false
+            else:
+                in_fence = true
+                fence_start_line = i
+        i = i + 1
+    if in_fence:
+        val d = EditorDiagnostic(
+            path: path,
+            line: fence_start_line,
+            col: 0,
+            end_line: fence_start_line,
+            end_col: lines[fence_start_line].len(),
+            severity: "error",
+            message: "Unclosed code fence starting here",
+            source: "markdown"
+        )
+        results.push(d)
+    results
+
+fn md_check_heading_level_skip(content: text, path: text) -> [EditorDiagnostic]:
+    var results: [EditorDiagnostic] = []
+    val lines = content.split("\n")
+    val total = lines.len()
+    var in_fence = false
+    var prev_level = 0
+    var i = 0
+    while i < total:
+        val line = lines[i]
+        val trimmed = line.trim()
+        if trimmed.starts_with("```"):
+            if in_fence:
+                in_fence = false
+            else:
+                in_fence = true
+            i = i + 1
+            continue
+        if not in_fence:
+            val lvl = _md_diag_heading_level(line)
+            if lvl > 0:
+                if prev_level > 0 and lvl > prev_level + 1:
+                    val d = EditorDiagnostic(
+                        path: path,
+                        line: i,
+                        col: 0,
+                        end_line: i,
+                        end_col: line.len(),
+                        severity: "warning",
+                        message: "Heading level skip: jumped from h" + prev_level.to_text() + " to h" + lvl.to_text(),
+                        source: "markdown"
+                    )
+                    results.push(d)
+                prev_level = lvl
+        i = i + 1
+    results
+
+fn md_check_trailing_whitespace(content: text, path: text) -> [EditorDiagnostic]:
+    # Flag lines that end with exactly 1 trailing space.
+    # Lines ending with 2+ trailing spaces are intentional hard line breaks in markdown.
+    var results: [EditorDiagnostic] = []
+    val lines = content.split("\n")
+    val total = lines.len()
+    var i = 0
+    while i < total:
+        val line = lines[i]
+        val line_len = line.len()
+        if line_len > 0 and line.char_at(line_len - 1) == " ":
+            val trailing = _md_diag_count_trailing_spaces(line)
+            if trailing == 1:
+                val d = EditorDiagnostic(
+                    path: path,
+                    line: i,
+                    col: line_len - 1,
+                    end_line: i,
+                    end_col: line_len,
+                    severity: "hint",
+                    message: "Trailing whitespace",
+                    source: "markdown"
+                )
+                results.push(d)
+        i = i + 1
+    results
+
+fn md_validate_local_links(content: text, path: text, existing_files: [text]) -> [EditorDiagnostic]:
+    var results: [EditorDiagnostic] = []
+    val link_positions = _md_diag_find_links_with_positions(content)
+    var i = 0
+    while i < link_positions.len():
+        val item = link_positions[i]
+        val link_line = item.0
+        val link_col = item.1
+        val link_url = item.3
+        # Skip http/https links, anchors, mailto, and empty urls
+        val is_external = (
+            link_url.starts_with("http://") or
+            link_url.starts_with("https://") or
+            link_url.starts_with("#") or
+            link_url.starts_with("mailto:") or
+            link_url.len() == 0
+        )
+        if not is_external:
+            # Strip anchor fragment from local path
+            val local_path = _md_diag_strip_fragment(link_url)
+            var found = false
+            var k = 0
+            while k < existing_files.len():
+                if existing_files[k] == local_path:
+                    found = true
+                    break
+                k = k + 1
+            if not found:
+                val d = EditorDiagnostic(
+                    path: path,
+                    line: link_line,
+                    col: link_col,
+                    end_line: link_line,
+                    end_col: link_col + link_url.len() + 2,
+                    severity: "warning",
+                    message: "Local link target not found: \"" + local_path + "\"",
+                    source: "markdown"
+                )
+                results.push(d)
+        i = i + 1
+    results
+
+# =============================================================================
+# Private Helpers
+# =============================================================================
+
+fn _md_diag_find_links_with_positions(content: text) -> [(i64, i64, text, text)]:
+    # Returns (line, col, display_text, url) for each [text](url) link in content.
+    # Does not descend into code fences.
+    var results: [(i64, i64, text, text)] = []
+    val lines = content.split("\n")
+    val total = lines.len()
+    var in_fence = false
+    var line_idx = 0
+    while line_idx < total:
+        val line = lines[line_idx]
+        val trimmed = line.trim()
+        if trimmed.starts_with("```"):
+            if in_fence:
+                in_fence = false
+            else:
+                in_fence = true
+            line_idx = line_idx + 1
+            continue
+        if not in_fence:
+            var col = 0
+            val line_len = line.len()
+            while col < line_len:
+                val ch = line.char_at(col)
+                # Detect image prefix to skip (handled separately)
+                var is_image = false
+                if col > 0 and line.char_at(col - 1) == "!":
+                    is_image = true
+                if ch == "[" and not is_image:
+                    val link_start_col = col
+                    # Extract display text
+                    var display = ""
+                    var j = col + 1
+                    var depth = 1
+                    while j < line_len and depth > 0:
+                        val c = line.char_at(j)
+                        if c == "[":
+                            depth = depth + 1
+                        elif c == "]":
+                            depth = depth - 1
+                            if depth == 0:
+                                break
+                        if depth > 0:
+                            display = display + c
+                        j = j + 1
+                    # j should now point at ']'
+                    if j < line_len and line.char_at(j) == "]":
+                        val after_bracket = j + 1
+                        if after_bracket < line_len and line.char_at(after_bracket) == "(":
+                            var url = ""
+                            var k = after_bracket + 1
+                            while k < line_len and line.char_at(k) != ")":
+                                url = url + line.char_at(k)
+                                k = k + 1
+                            # Strip optional title from url
+                            val url_clean = _md_diag_strip_url_title(url)
+                            val entry = (line_idx, link_start_col, display, url_clean)
+                            results.push(entry)
+                            col = k + 1
+                            continue
+                col = col + 1
+        line_idx = line_idx + 1
+    results
+
+fn _md_diag_find_images_with_positions(content: text) -> [(i64, i64, text, text)]:
+    # Returns (line, col, alt_text, url) for each ![alt](url) image in content.
+    # Does not descend into code fences.
+    var results: [(i64, i64, text, text)] = []
+    val lines = content.split("\n")
+    val total = lines.len()
+    var in_fence = false
+    var line_idx = 0
+    while line_idx < total:
+        val line = lines[line_idx]
+        val trimmed = line.trim()
+        if trimmed.starts_with("```"):
+            if in_fence:
+                in_fence = false
+            else:
+                in_fence = true
+            line_idx = line_idx + 1
+            continue
+        if not in_fence:
+            var col = 0
+            val line_len = line.len()
+            while col < line_len:
+                val ch = line.char_at(col)
+                if ch == "!" and col + 1 < line_len and line.char_at(col + 1) == "[":
+                    val img_start_col = col
+                    # Extract alt text
+                    var alt = ""
+                    var j = col + 2
+                    while j < line_len and line.char_at(j) != "]":
+                        alt = alt + line.char_at(j)
+                        j = j + 1
+                    # j should point at ']'
+                    if j < line_len and line.char_at(j) == "]":
+                        val after_bracket = j + 1
+                        if after_bracket < line_len and line.char_at(after_bracket) == "(":
+                            var url = ""
+                            var k = after_bracket + 1
+                            while k < line_len and line.char_at(k) != ")":
+                                url = url + line.char_at(k)
+                                k = k + 1
+                            val url_clean = _md_diag_strip_url_title(url)
+                            val entry = (img_start_col, img_start_col, alt, url_clean)
+                            # NOTE: first element is line_idx, second is col
+                            val correct_entry = (line_idx, img_start_col, alt, url_clean)
+                            results.push(correct_entry)
+                            col = k + 1
+                            continue
+                col = col + 1
+        line_idx = line_idx + 1
+    results
+
+fn _md_diag_heading_level(line: text) -> i64:
+    # Returns 1-6 for heading lines, 0 for non-headings.
+    var count = 0
+    val line_len = line.len()
+    while count < line_len and count < 6:
+        if line.char_at(count) == "#":
+            count = count + 1
+        else:
+            break
+    if count == 0:
+        return 0
+    # Must be followed by a space or end of line
+    if count < line_len and line.char_at(count) != " ":
+        return 0
+    count
+
+fn _md_diag_heading_text(line: text, level: i64) -> text:
+    # Returns the text after "### " for a heading line.
+    val line_len = line.len()
+    var start = level
+    # Skip the space after hashes
+    if start < line_len and line.char_at(start) == " ":
+        start = start + 1
+    if start >= line_len:
+        return ""
+    line.slice(start, line_len)
+
+fn _md_diag_list_marker(trimmed: text) -> text:
+    # Returns "-", "*", or "+" if the trimmed line starts an unordered list item.
+    # Returns "" otherwise.
+    if trimmed.len() == 0:
+        return ""
+    val first = trimmed.char_at(0)
+    if first == "-" or first == "*" or first == "+":
+        if trimmed.len() == 1 or trimmed.char_at(1) == " ":
+            return first
+    ""
+
+fn _md_diag_count_trailing_spaces(line: text) -> i64:
+    var count = 0
+    var i = line.len() - 1
+    while i >= 0 and line.char_at(i) == " ":
+        count = count + 1
+        i = i - 1
+    count
+
+fn _md_diag_strip_url_title(url: text) -> text:
+    # Strips optional title like: url "title" or url 'title'
+    # Returns just the url portion (up to the first space).
+    var i = 0
+    val url_len = url.len()
+    while i < url_len and url.char_at(i) != " ":
+        i = i + 1
+    url.slice(0, i).trim()
+
+fn _md_diag_strip_fragment(url: text) -> text:
+    # Returns url with #fragment removed.
+    var i = 0
+    val url_len = url.len()
+    while i < url_len:
+        if url.char_at(i) == "#":
+            return url.slice(0, i)
+        i = i + 1
+    url
+
+fn _md_diag_find_char(haystack: text, needle: text, start: i64) -> i64:
+    var i = start
+    while i < haystack.len():
+        if haystack.char_at(i) == needle:
+            return i
+        i = i + 1
+    -1
+
+fn _md_diag_property_seen_before(keys: [text], key: text, before: i64) -> bool:
+    var i = 0
+    while i < before:
+        if keys[i] == key:
+            return true
+        i = i + 1
+    false
+
+fn _md_diag_value_allowed(value: text, allowed: [text]) -> bool:
+    for item in allowed:
+        if value == item:
+            return true
+    false

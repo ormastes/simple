@@ -1,0 +1,787 @@
+use app.spipe_docgen.parser.{extract_test_structure, extract_test_structure_with_path}
+use app.spipe_docgen.parser.{parse_spipe_file, extract_metadata}
+use app.spipe_docgen.generator.{generate_feature_doc}
+use app.spipe_docgen.common.{SspecDoc, FeatureMetadata}
+use app.io.mod (file_write)
+use std.io_runtime.{read_file}
+
+describe "spipe docgen scenario body extraction":
+
+    it "renders scenario bodies as dedented Simple code fences":
+        val source = "describe \"Math Block Arithmetic\":\n" +
+            "    it \"evaluates addition\":\n" +
+            "        val result = m{ 2 + 3 }\n" +
+            "        expect(result).to_equal(5)\n"
+        val structure = extract_test_structure(source)
+        expect(structure == "x").to_equal(false)
+        expect(structure).to_contain("#### evaluates addition")
+        expect(structure.contains("### evaluates addition")).to_equal(false)
+        expect(structure).to_contain("val result = m{ 2 + 3 }")
+        expect(structure).to_contain("expect(result).to_equal(5)")
+        expect(structure).to_contain("<summary>Executable SPipe</summary>")
+        expect(structure).to_contain("Runnable source: 2 lines folded for reproduction.")
+        expect(structure).to_contain("Reproduction: this block contains the complete executable scenario source.")
+        expect(structure).to_contain("<summary>Rendered scenario source</summary>")
+        expect(structure).to_contain("> val result = $2 + 3$<br>\n> expect(result).to_equal(5)")
+        expect(structure.contains("Rendered `m{...}`")).to_equal(false)
+        expect(structure.contains("**Plain text**")).to_equal(false)
+        expect(structure.contains("<summary>Raw scenario source</summary>")).to_equal(false)
+        expect(structure.contains("```latex")).to_equal(false)
+
+    it "strips leading scenario docstrings from rendered code":
+        val source = "describe \"Docstring bodies\":\n" +
+            "    it \"keeps runnable code only\":\n" +
+            "        \"\"\"\n" +
+            "        Explains the scenario.\n" +
+            "        \"\"\"\n" +
+            "        val result = 1\n" +
+            "        expect(result).to_equal(1)\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("#### keeps runnable code only")
+        expect(structure).to_contain("<summary>Executable SPipe</summary>")
+        expect(structure).to_contain("Runnable source: 2 lines folded for reproduction.")
+        expect(structure).to_contain("```simple\nval result = 1\nexpect(result).to_equal(1)\n```")
+        expect(structure.contains("Explains the scenario.")).to_equal(false)
+
+    it "does not emit a code fence for single-line pass scenarios":
+        val source = "describe \"Empty bodies\":\n" +
+            "    it \"has no multiline body\": pass\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("#### has no multiline body")
+        expect(structure.contains("```simple")).to_equal(false)
+        expect(structure.contains("<summary>Executable SPipe</summary>")).to_equal(false)
+        expect(structure.contains("Raw scenario source")).to_equal(false)
+
+    it "renders skip_it scenarios with skipped marker and body":
+        val source = "describe \"Skipped scenarios\":\n" +
+            "    skip_it \"documents underscore skipped scenarios\":\n" +
+            "        expect(\"reason\").to_equal(\"reason\")\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("#### documents underscore skipped scenarios _(skipped)_")
+        expect(structure).to_contain("```simple\nexpect(\"reason\").to_equal(\"reason\")\n```")
+
+    it "folds scenarios marked as advanced manual content":
+        val source = "describe \"Manual visibility\":\n" +
+            "    # @manual: folded\n" +
+            "    it \"documents an edge case without dominating the manual\":\n" +
+            "        expect(\"edge\").to_equal(\"edge\")\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("<details>")
+        expect(structure).to_contain("<summary>Advanced: documents an edge case without dominating the manual</summary>")
+        expect(structure).to_contain("#### documents an edge case without dominating the manual")
+        expect(structure).to_contain("```simple\nexpect(\"edge\").to_equal(\"edge\")\n```")
+
+    it "skips scenarios marked as hidden manual content":
+        val source = "describe \"Manual visibility\":\n" +
+            "    # @manual: skip\n" +
+            "    it \"keeps helper-only checks out of the manual\":\n" +
+            "        expect(\"helper\").to_equal(\"helper\")\n" +
+            "    it \"keeps primary scenario visible\":\n" +
+            "        expect(\"primary\").to_equal(\"primary\")\n"
+        val structure = extract_test_structure(source)
+        expect(structure.contains("keeps helper-only checks out of the manual")).to_equal(false)
+        expect(structure.contains("expect(\"helper\").to_equal(\"helper\")")).to_equal(false)
+        expect(structure).to_contain("#### keeps primary scenario visible")
+
+    it "folds all scenarios when file manual metadata is folded":
+        val source = "# @manual-file: folded\n" +
+            "describe \"Manual visibility\":\n" +
+            "    it \"keeps detailed file collapsed\":\n" +
+            "        expect(\"detail\").to_equal(\"detail\")\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("<summary>Advanced: keeps detailed file collapsed</summary>")
+        expect(structure).to_contain("#### keeps detailed file collapsed")
+
+    it "skips all scenarios when file manual metadata is skip":
+        val source = "# @manual-file: skip\n" +
+            "describe \"Manual visibility\":\n" +
+            "    it \"keeps generated helper file out of the manual\":\n" +
+            "        expect(\"helper\").to_equal(\"helper\")\n"
+        val structure = extract_test_structure(source)
+        expect(structure.contains("keeps generated helper file out of the manual")).to_equal(false)
+        expect(structure.contains("expect(\"helper\").to_equal(\"helper\")")).to_equal(false)
+
+    it "lets scenario manual metadata override folded file default":
+        val source = "# @manual-file: folded\n" +
+            "describe \"Manual visibility\":\n" +
+            "    # @manual: show\n" +
+            "    it \"shows the primary flow in a detailed file\":\n" +
+            "        expect(\"primary\").to_equal(\"primary\")\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("#### shows the primary flow in a detailed file")
+        expect(structure.contains("<summary>Advanced: shows the primary flow in a detailed file</summary>")).to_equal(false)
+
+    it "folds scenarios from folder manual config":
+        file_write("build/sspec-manual.sdn", "manual: folded\n")
+        val source = "describe \"Folder visibility\":\n" +
+            "    it \"keeps folder detail collapsed\":\n" +
+            "        expect(\"folder\").to_equal(\"folder\")\n"
+        val structure = extract_test_structure_with_path(source, "build/folder_visibility_spec.spl")
+        expect(structure).to_contain("#### keeps folder detail collapsed")
+        expect(structure).to_contain("<summary>Advanced: keeps folder detail collapsed</summary>")
+
+    it "hides inline setup scenarios from top-level manual output":
+        val source = "describe \"Inline setup\":\n" +
+            "    # @inline\n" +
+            "    it \"app is open\":\n" +
+            "        expect(\"open\").to_equal(\"open\")\n" +
+            "    it \"user continues from setup\":\n" +
+            "        expect(\"continue\").to_equal(\"continue\")\n"
+        val structure = extract_test_structure(source)
+        expect(structure.contains("app is open")).to_equal(false)
+        expect(structure.contains("expect(\"open\").to_equal(\"open\")")).to_equal(false)
+        expect(structure).to_contain("#### user continues from setup")
+
+    it "expands prev inline setup without rendering Previous label":
+        val source = "describe \"Inline setup\":\n" +
+            "    # @inline\n" +
+            "    it \"app is open\":\n" +
+            "        user.open_app()\n" +
+            "    # @prev(\"app is open\")\n" +
+            "    it \"user logs in\":\n" +
+            "        user.enter_login(\"demo\")\n"
+        val structure = extract_test_structure(source)
+        expect(structure.contains("#### app is open")).to_equal(false)
+        expect(structure).to_contain("#### user logs in")
+        expect(structure).to_contain("```simple\nuser.open_app()\nuser.enter_login(\"demo\")\n```")
+        expect(structure.contains("Previous:")).to_equal(false)
+
+    it "expands bare prev from the nearest previous scenario":
+        val source = "describe \"Previous setup\":\n" +
+            "    # @inline\n" +
+            "    it \"server is running\":\n" +
+            "        admin.start_server()\n" +
+            "    # @prev\n" +
+            "    it \"operator sends request\":\n" +
+            "        operator.send_request()\n"
+        val structure = extract_test_structure(source)
+        expect(structure.contains("#### server is running")).to_equal(false)
+        expect(structure).to_contain("#### operator sends request")
+        expect(structure).to_contain("```simple\nadmin.start_server()\noperator.send_request()\n```")
+
+    it "expands include scenario body at the call site":
+        val source = "describe \"Inline include\":\n" +
+            "    # @inline\n" +
+            "    it \"user confirms dialog\":\n" +
+            "        user.confirm_dialog()\n" +
+            "    it \"user completes checkout\":\n" +
+            "        user.add_item()\n" +
+            "        # @include(\"user confirms dialog\")\n" +
+            "        user.finish_checkout()\n"
+        val structure = extract_test_structure(source)
+        expect(structure.contains("#### user confirms dialog")).to_equal(false)
+        expect(structure).to_contain("#### user completes checkout")
+        expect(structure).to_contain("```simple\nuser.add_item()\nuser.confirm_dialog()\nuser.finish_checkout()\n```")
+        expect(structure.contains("# @include")).to_equal(false)
+
+    it "renders warning for missing prev scenario target":
+        val source = "describe \"Missing previous\":\n" +
+            "    # @prev(\"app is open\")\n" +
+            "    it \"user logs in\":\n" +
+            "        user.enter_login(\"demo\")\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("**Manual warnings:**\n- missing prev scenario: app is open")
+        expect(structure.contains("# @manual-warning")).to_equal(false)
+
+    it "renders warning for missing include target and removes metadata from source":
+        val source = "describe \"Missing include\":\n" +
+            "    it \"user finishes flow\":\n" +
+            "        user.start_flow()\n" +
+            "        # @include(\"dialog confirmed\")\n" +
+            "        user.finish_flow()\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("**Manual warnings:**\n- missing include scenario: dialog confirmed")
+        expect(structure).to_contain("```simple\nuser.start_flow()\nuser.finish_flow()\n```")
+        expect(structure.contains("# @include")).to_equal(false)
+
+    it "renders warning for prev scenario expansion cycles":
+        val source = "describe \"Previous cycle\":\n" +
+            "    # @prev(\"second setup\")\n" +
+            "    it \"first setup\":\n" +
+            "        setup.first()\n" +
+            "    # @prev(\"first setup\")\n" +
+            "    it \"second setup\":\n" +
+            "        setup.second()\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("**Manual warnings:**\n- cycle detected in prev expansion: first setup -> second setup")
+        expect(structure).to_contain("**Manual warnings:**\n- cycle detected in prev expansion: second setup -> first setup")
+        expect(structure).to_contain("```simple\nsetup.first()\n```")
+        expect(structure).to_contain("```simple\nsetup.second()\n```")
+
+    it "renders warning for include scenario expansion cycles":
+        val source = "describe \"Include cycle\":\n" +
+            "    it \"first branch\":\n" +
+            "        # @include(\"second branch\")\n" +
+            "        flow.first()\n" +
+            "    it \"second branch\":\n" +
+            "        # @include(\"first branch\")\n" +
+            "        flow.second()\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("**Manual warnings:**\n- cycle detected in include expansion: first branch -> second branch")
+        expect(structure).to_contain("**Manual warnings:**\n- cycle detected in include expansion: second branch -> first branch")
+        expect(structure).to_contain("```simple\nflow.first()\n```")
+        expect(structure).to_contain("```simple\nflow.second()\n```")
+        expect(structure.contains("# @include")).to_equal(false)
+
+    it "folds slow scenarios by default but allows manual show override":
+        val source = "describe \"Slow manual visibility\":\n" +
+            "    slow_it \"keeps stress detail folded\":\n" +
+            "        expect(\"stress\").to_equal(\"stress\")\n" +
+            "    # @manual: show\n" +
+            "    slow_it \"shows important slow operator flow\":\n" +
+            "        expect(\"operator\").to_equal(\"operator\")\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("<summary>Advanced: keeps stress detail folded</summary>")
+        expect(structure).to_contain("#### keeps stress detail folded _(slow)_")
+        expect(structure).to_contain("#### shows important slow operator flow _(slow)_")
+        expect(structure.contains("<summary>Advanced: shows important slow operator flow</summary>")).to_equal(false)
+
+    it "folds intensive detail scenarios by default but allows manual show override":
+        val source = "describe \"Manual visibility\":\n" +
+            "    it \"covers protocol matrix lock rows\":\n" +
+            "        expect(\"matrix\").to_equal(\"matrix\")\n" +
+            "    pending \"documents schema inventory gaps\":\n" +
+            "        expect(\"schema\").to_equal(\"schema\")\n" +
+            "    skip_it \"records OOM skip details\":\n" +
+            "        expect(\"oom\").to_equal(\"oom\")\n" +
+            "    # @manual: show\n" +
+            "    it \"shows primary matrix operator flow\":\n" +
+            "        expect(\"operator\").to_equal(\"operator\")\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("<summary>Advanced: covers protocol matrix lock rows</summary>")
+        expect(structure).to_contain("<summary>Advanced: documents schema inventory gaps</summary>")
+        expect(structure).to_contain("<summary>Advanced: records OOM skip details</summary>")
+        expect(structure).to_contain("#### records OOM skip details _(skipped)_")
+        expect(structure).to_contain("#### shows primary matrix operator flow")
+        expect(structure.contains("<summary>Advanced: shows primary matrix operator flow</summary>")).to_equal(false)
+
+    it "renders bare capture as after step tui scenario evidence":
+        val source = "describe \"Capture policy\":\n" +
+            "    # @capture\n" +
+            "    it \"captures app after every step\":\n" +
+            "        user.open_app()\n" +
+            "        expect(\"open\").to_equal(\"open\")\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("#### captures app after every step")
+        expect(structure).to_contain("1. User open app\n   - TUI capture: after_step")
+        expect(structure.contains("**Scenario capture:** tui after_step")).to_equal(false)
+        expect(structure).to_contain("```simple\nuser.open_app()\nexpect(\"open\").to_equal(\"open\")\n```")
+
+    it "renders explicit capture kind and mode from enum-like metadata":
+        val source = "describe \"Capture policy\":\n" +
+            "    # @capture(after_scenario, gui)\n" +
+            "    it \"captures the final rendered window\":\n" +
+            "        user.open_app()\n" +
+            "        user.finish_flow()\n" +
+            "        expect(\"done\").to_equal(\"done\")\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("1. User open app\n\n2. User finish flow\n   - GUI capture: after_scenario (HTML preferred when available)")
+        expect(structure.contains("1. User open app\n   - GUI capture: after_scenario")).to_equal(false)
+        expect(structure.contains("**Scenario capture:** gui after_scenario")).to_equal(false)
+
+    it "renders step capture metadata without keeping metadata in source code":
+        val source = "describe \"Capture policy\":\n" +
+            "    it \"captures request evidence for submit\":\n" +
+            "        user.open_app()\n" +
+            "        # @capture(api)\n" +
+            "        user.submit_login()\n" +
+            "        expect(\"ok\").to_equal(\"ok\")\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("1. User open app")
+        expect(structure).to_contain("2. User submit login\n   - API capture: after_step")
+        expect(structure.contains("**Step captures:**")).to_equal(false)
+        expect(structure).to_contain("```simple\nuser.open_app()\nuser.submit_login()\nexpect(\"ok\").to_equal(\"ok\")\n```")
+        expect(structure.contains("# @capture(api)")).to_equal(false)
+
+    it "lets step capture off suppress inherited scenario capture":
+        val source = "describe \"Capture policy\":\n" +
+            "    # @capture\n" +
+            "    it \"skips capture for a sensitive step\":\n" +
+            "        user.open_app()\n" +
+            "        # @capture(off)\n" +
+            "        user.enter_password()\n" +
+            "        user.submit_login()\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("1. User open app\n   - TUI capture: after_step")
+        expect(structure).to_contain("2. User enter password\n\n3. User submit login\n   - TUI capture: after_step")
+        expect(structure.contains("Capture: off")).to_equal(false)
+        expect(structure.contains("# @capture(off)")).to_equal(false)
+
+    it "falls back to capture summary when no manual step can be derived":
+        val source = "describe \"Capture policy\":\n" +
+            "    # @capture(api)\n" +
+            "    it \"captures assertion-only evidence\":\n" +
+            "        expect(\"ok\").to_equal(\"ok\")\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("**Scenario capture:** api after_step")
+        expect(structure.contains("1. ")).to_equal(false)
+
+    it "does not render fallback capture summaries for capture off":
+        val source = "describe \"Capture policy\":\n" +
+            "    # @capture(off)\n" +
+            "    it \"keeps assertion-only capture off silent\":\n" +
+            "        # @capture(off)\n" +
+            "        expect(\"ok\").to_equal(\"ok\")\n"
+        val structure = extract_test_structure(source)
+        expect(structure.contains("Scenario capture")).to_equal(false)
+        expect(structure.contains("Step captures")).to_equal(false)
+        expect(structure.contains("off before")).to_equal(false)
+        expect(structure.contains("# @capture(off)")).to_equal(false)
+
+    it "renders explicit step metadata before folded executable source":
+        val source = "describe \"Manual steps\":\n" +
+            "    it \"uses readable manual step text\":\n" +
+            "        user.open_app()\n" +
+            "        # @step: Submit login form\n" +
+            "        user.submit_login()\n" +
+            "        expect(\"ok\").to_equal(\"ok\")\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("1. User open app")
+        expect(structure).to_contain("2. Submit login form")
+        expect(structure).to_contain("```simple\nuser.open_app()\nuser.submit_login()\nexpect(\"ok\").to_equal(\"ok\")\n```")
+        expect(structure.contains("# @step: Submit login form")).to_equal(false)
+
+    it "renders expected result bullets from contains assertions":
+        val source = "describe \"Manual expected results\":\n" +
+            "    it \"summarizes protocol assertions\":\n" +
+            "        # @step: Operator lists MCP tools\n" +
+            "        val output = send_mcp(input)\n" +
+            "        expect(output.contains(\"debug_create_session\")).to_equal(true)\n" +
+            "        expect(output.contains(\"\\\"protocolVersion\\\":\\\"2025-06-18\\\"\")).to_equal(true)\n" +
+            "        expect(output.contains(\"error\")).to_equal(false)\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("1. Operator lists MCP tools")
+        expect(structure.contains("   - Evidence:")).to_equal(false)
+        expect(structure).to_contain("   - Expected: output contains `debug_create_session`")
+        expect(structure).to_contain("   - Expected: output contains `\"protocolVersion\":\"2025-06-18\"`")
+        expect(structure).to_contain("   - Expected: output does not contain `error`")
+
+    it "places exec capture and evidence under the producing step":
+        val source = "describe \"Manual expected results\":\n" +
+            "    it \"summarizes command output\":\n" +
+            "        # @step: Operator runs the smoke command\n" +
+            "        # @capture(exec)\n" +
+            "        val output = run_smoke()\n" +
+            "        expect(output.contains(\"PASS smoke\")).to_equal(true)\n" +
+            "        expect(output.contains(\"panic\")).to_equal(false)\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("1. Operator runs the smoke command\n   - Exec capture: after_step\n   - Evidence: execution result verified by 2 expected checks")
+        expect(structure).to_contain("   - Expected: output contains `PASS smoke`")
+        expect(structure).to_contain("   - Expected: output does not contain `panic`")
+        expect(structure.contains("# @capture(exec)")).to_equal(false)
+
+    it "keeps concrete scenario helper provider evidence manual-readable":
+        val source = "describe \"MCP manual provider evidence\":\n" +
+            "    it \"summarizes protocol provider artifacts\":\n" +
+            "        # @step: Operator records the MCP tools/list provider evidence\n" +
+            "        # @capture(protocol)\n" +
+            "        val protocol_evidence = capture_api_protocol_fields(\"MCP tools/list protocol exchange\", \"JSON-RPC\", \"stdio:tools/list\", [\"jsonrpc\", \"method\", \"id\"], [\"2.0\", \"tools/list\", \"2\"], [\"transport\"], [\"stdio\"], [\"protocolVersion\", \"result.tools\", \"error\"], [\"2025-06-18\", \"present\", \"absent\"])\n" +
+            "        expect(protocol_evidence.body.contains(\"params: jsonrpc=2.0; method=tools/list; id=2\")).to_equal(true)\n" +
+            "        expect(protocol_evidence.body.contains(\"response fields: protocolVersion=2025-06-18; result.tools=present; error=absent\")).to_equal(true)\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("1. Operator records the MCP tools/list provider evidence\n   - Protocol capture: after_step\n   - Evidence: protocol response verified by 2 expected checks")
+        expect(structure).to_contain("   - Expected: protocol_evidence.body contains `params: jsonrpc=2.0; method=tools/list; id=2`")
+        expect(structure).to_contain("   - Expected: protocol_evidence.body contains `response fields: protocolVersion=2025-06-18; result.tools=present; error=absent`")
+        expect(structure).to_contain("capture_api_protocol_fields(\"MCP tools/list protocol exchange\"")
+        expect(structure.contains("# @capture(protocol)")).to_equal(false)
+
+    it "places concrete provider artifacts under the producing step":
+        val source = "describe \"Manual artifacts\":\n" +
+            "    it \"captures provider output\":\n" +
+            "        # @step: Operator opens the captured screen\n" +
+            "        # @capture(tui)\n" +
+            "        # @artifact(\"artifacts/screen.ansi\")\n" +
+            "        ui.open_screen()\n" +
+            "        # @step: Operator reviews protocol payload\n" +
+            "        # @artifact: artifacts/protocol.json\n" +
+            "        operator.review_payload()\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("1. Operator opens the captured screen\n   - TUI capture: after_step\n   - Artifact: text `artifacts/screen.ansi`")
+        expect(structure).to_contain("2. Operator reviews protocol payload\n   - Artifact: json `artifacts/protocol.json`")
+        expect(structure.contains("# @artifact")).to_equal(false)
+        expect(structure).to_contain("```simple\nui.open_screen()\noperator.review_payload()\n```")
+
+    it "summarizes long expected result values but keeps full source folded":
+        val source = "describe \"Manual expected results\":\n" +
+            "    it \"summarizes long json fragments\":\n" +
+            "        # @step: Operator checks protocol payload\n" +
+            "        val output = send_mcp(input)\n" +
+            "        expect(output.contains(\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"result\\\":{\\\"tools\\\":[{\\\"name\\\":\\\"debug_create_session\\\",\\\"description\\\":\\\"Create a debug session with a long schema payload\\\"}]}}\")).to_equal(true)\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("1. Operator checks protocol payload")
+        expect(structure).to_contain("full value in folded executable source")
+        expect(structure.contains("Create a debug session with a long schema payload`")).to_equal(false)
+        expect(structure).to_contain("expect(output.contains(\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"result\\\":{\\\"tools\\\":[{\\\"name\\\":\\\"debug_create_session\\\",\\\"description\\\":\\\"Create a debug session with a long schema payload\\\"}]}}\")).to_equal(true)")
+
+    it "summarizes long direct json equality values but keeps full source folded":
+        val source = "describe \"Manual expected results\":\n" +
+            "    it \"summarizes large json payload equality\":\n" +
+            "        # @step: Operator verifies the exact payload\n" +
+            "        val payload = read_payload()\n" +
+            "        expect(payload).to_equal(\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"result\\\":{\\\"tools\\\":[{\\\"name\\\":\\\"debug_create_session\\\",\\\"description\\\":\\\"Create a debug session with a long schema payload\\\"}]}}\")\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("1. Operator verifies the exact payload")
+        expect(structure).to_contain("   - Expected: payload equals `{\"jsonrpc\":\"2.0\",\"result\":{\"tools\":[{\"name\":\"debug_create_session\",\"des... (full value in folded executable source)`")
+        expect(structure.contains("Create a debug session with a long schema payload`")).to_equal(false)
+        expect(structure).to_contain("expect(payload).to_equal(\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"result\\\":{\\\"tools\\\":[{\\\"name\\\":\\\"debug_create_session\\\",\\\"description\\\":\\\"Create a debug session with a long schema payload\\\"}]}}\")")
+
+    it "renders quoted step metadata before folded executable source":
+        val source = "describe \"Manual steps\":\n" +
+            "    it \"uses quoted manual step text\":\n" +
+            "        # @step(\"Open the dashboard\")\n" +
+            "        user.open_dashboard()\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("1. Open the dashboard")
+        expect(structure).to_contain("```simple\nuser.open_dashboard()\n```")
+        expect(structure.contains("# @step(\"Open the dashboard\")")).to_equal(false)
+
+    it "allows capture metadata between step label and action":
+        val source = "describe \"Manual steps\":\n" +
+            "    it \"captures a labeled action\":\n" +
+            "        # @step: Submit login form\n" +
+            "        # @capture(api)\n" +
+            "        user.submit_login()\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("1. Submit login form\n   - API capture: after_step")
+        expect(structure.contains("unused step metadata")).to_equal(false)
+        expect(structure).to_contain("```simple\nuser.submit_login()\n```")
+        expect(structure.contains("# @step: Submit login form")).to_equal(false)
+        expect(structure.contains("# @capture(api)")).to_equal(false)
+
+    it "allows step metadata before executable setup lines":
+        val source = "describe \"Manual steps\":\n" +
+            "    # @capture(after_scenario, protocol)\n" +
+            "    it \"labels protocol setup prose\":\n" +
+            "        # @step: Operator sends an initialize request\n" +
+            "        val input = init_request(\"1\")\n" +
+            "        val output = send_mcp(input)\n" +
+            "        # @step: Operator verifies the initialize response\n" +
+            "        val ok = output.contains(\"protocolVersion\")\n" +
+            "        expect(ok).to_equal(true)\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("1. Operator sends an initialize request")
+        expect(structure).to_contain("2. Operator verifies the initialize response\n   - Protocol capture: after_scenario\n   - Evidence: protocol response verified by 1 expected check")
+        expect(structure).to_contain("```simple\nval input = init_request(\"1\")\nval output = send_mcp(input)\nval ok = output.contains(\"protocolVersion\")\nexpect(ok).to_equal(true)\n```")
+        expect(structure.contains("unused step metadata")).to_equal(false)
+        expect(structure.contains("# @step: Operator")).to_equal(false)
+
+    it "keeps prev executable source stable with step-local capture metadata":
+        val source = "describe \"Manual steps\":\n" +
+            "    # @inline\n" +
+            "    it \"setup protocol\":\n" +
+            "        # @step: Operator initializes protocol\n" +
+            "        # @capture(protocol)\n" +
+            "        val init = build_init()\n" +
+            "        val req = build_request()\n" +
+            "        val input = init + req\n" +
+            "    # @prev(\"setup protocol\")\n" +
+            "    it \"uses protocol setup\":\n" +
+            "        # @step: Operator checks response\n" +
+            "        val output = send(input)\n" +
+            "        expect(output).to_equal(\"ok\")\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("1. Operator initializes protocol\n   - Protocol capture: after_step")
+        expect(structure).to_contain("2. Operator checks response")
+        expect(structure).to_contain("```simple\nval init = build_init()\nval req = build_request()\nval input = init + req\n\nval output = send(input)\nexpect(output).to_equal(\"ok\")\n```")
+        expect(structure.contains("val req = build_request()\nval req = build_request()")).to_equal(false)
+
+    it "allows capture off between step label and action":
+        val source = "describe \"Manual steps\":\n" +
+            "    # @capture\n" +
+            "    it \"labels a sensitive action without capture\":\n" +
+            "        # @step: Enter password\n" +
+            "        # @capture(off)\n" +
+            "        user.enter_password()\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("1. Enter password")
+        expect(structure.contains("TUI capture: after_step")).to_equal(false)
+        expect(structure.contains("Capture: off")).to_equal(false)
+        expect(structure.contains("unused step metadata")).to_equal(false)
+        expect(structure).to_contain("```simple\nuser.enter_password()\n```")
+        expect(structure.contains("# @step: Enter password")).to_equal(false)
+        expect(structure.contains("# @capture(off)")).to_equal(false)
+
+    it "does not derive manual steps from control flow lines":
+        val source = "describe \"Manual steps\":\n" +
+            "    it \"keeps control flow as executable detail\":\n" +
+            "        if user.needs_login():\n" +
+            "            user.open_login()\n" +
+            "        expect(\"ready\").to_equal(\"ready\")\n"
+        val structure = extract_test_structure(source)
+        expect(structure.contains("1. if user needs login")).to_equal(false)
+        expect(structure).to_contain("1. User open login")
+        expect(structure).to_contain("```simple\nif user.needs_login():\n    user.open_login()\nexpect(\"ready\").to_equal(\"ready\")\n```")
+
+    it "renders checker-style calls as readable manual steps":
+        val source = "describe \"Manual steps\":\n" +
+            "    it \"shows checker helper prose\":\n" +
+            "        Then_login_succeeds()\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("1. Then login succeeds")
+        expect(structure).to_contain("```simple\nThen_login_succeeds()\n```")
+
+    it "warns about empty step metadata without leaking it into source":
+        val source = "describe \"Manual steps\":\n" +
+            "    it \"keeps empty step metadata actionable\":\n" +
+            "        # @step\n" +
+            "        user.open_app()\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("**Manual warnings:**\n- invalid step metadata value: empty (expected # @step: Text or # @step(\"Text\"))")
+        expect(structure).to_contain("1. User open app")
+        expect(structure).to_contain("```simple\nuser.open_app()\n```")
+        expect(structure.contains("```simple\n# @step")).to_equal(false)
+
+    it "warns about unused step metadata without leaking it into source":
+        val source = "describe \"Manual steps\":\n" +
+            "    it \"keeps unused step metadata actionable\":\n" +
+            "        # @step: Review final status\n" +
+            "        expect(\"ok\").to_equal(\"ok\")\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("**Manual warnings:**\n- unused step metadata: Review final status (expected a following executable manual step)")
+        expect(structure).to_contain("```simple\nexpect(\"ok\").to_equal(\"ok\")\n```")
+        expect(structure.contains("```simple\n# @step")).to_equal(false)
+
+    it "renders multiple manual warnings without blanking entries":
+        val source = "describe \"Manual warnings\":\n" +
+            "    # @manual: spotlight\n" +
+            "    # @capture(video)\n" +
+            "    it \"keeps all warnings visible\":\n" +
+            "        # @step\n" +
+            "        user.open_app()\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("- invalid manual visibility metadata: # @manual: spotlight (expected show, folded, detail, or skip)")
+        expect(structure).to_contain("- invalid capture metadata value: video (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)")
+        expect(structure).to_contain("- invalid step metadata value: empty (expected # @step: Text or # @step(\"Text\"))")
+        expect(structure).to_contain("1. User open app")
+
+    it "warns about invalid scenario manual metadata":
+        val source = "describe \"Manual metadata diagnostics\":\n" +
+            "    # @manual: spotlight\n" +
+            "    it \"keeps invalid manual metadata actionable\":\n" +
+            "        expect(\"visible\").to_equal(\"visible\")\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("#### keeps invalid manual metadata actionable")
+        expect(structure).to_contain("**Manual warnings:**\n- invalid manual visibility metadata: # @manual: spotlight (expected show, folded, detail, or skip)")
+        expect(structure).to_contain("expect(\"visible\").to_equal(\"visible\")")
+
+    it "warns about invalid scenario capture metadata without rendering a false capture":
+        val source = "describe \"Capture metadata diagnostics\":\n" +
+            "    # @capture(video)\n" +
+            "    it \"keeps invalid scenario capture actionable\":\n" +
+            "        user.open_app()\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("#### keeps invalid scenario capture actionable")
+        expect(structure).to_contain("**Manual warnings:**\n- invalid capture metadata value: video (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)")
+        expect(structure.contains("**Scenario capture:** tui after_step")).to_equal(false)
+        expect(structure.contains("# @capture(video)")).to_equal(false)
+
+    it "warns about invalid step capture metadata and strips it from source":
+        val source = "describe \"Capture metadata diagnostics\":\n" +
+            "    it \"keeps invalid step capture actionable\":\n" +
+            "        user.open_app()\n" +
+            "        # @capture(video)\n" +
+            "        user.capture_screen()\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("**Manual warnings:**\n- invalid capture metadata value: video (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)")
+        expect(structure).to_contain("```simple\nuser.open_app()\nuser.capture_screen()\n```")
+        expect(structure.contains("# @capture(video)")).to_equal(false)
+
+    it "captures the math_blocks golden scenario body":
+        val source = read_file("test/feature/usage/math_blocks_spec.spl")
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain("#### evaluates addition")
+        expect(structure).to_contain("```simple\nval result = m{ 2 + 3 }\nexpect(result).to_equal(5)\n```")
+        expect(structure).to_contain("#### evaluates sqrt of 16")
+        expect(structure).to_contain("sqrt")
+
+    it "generates through the pure Simple generator path":
+        val parsed_result = parse_spipe_file("test/feature/usage/math_blocks_spec.spl")
+        match parsed_result:
+            case Err(e):
+                expect(e).to_equal("")
+            case Ok(parsed):
+                val metadata = extract_metadata(parsed)
+                val doc = SspecDoc(
+                    file_path: parsed.file_path,
+                    raw_content: parsed.raw_content,
+                    doc_blocks: parsed.doc_blocks,
+                    feature_title: parsed.feature_title,
+                    feature_ids: parsed.feature_ids,
+                    metadata: metadata
+                )
+                val result = generate_feature_doc(doc, "/tmp")
+                match result:
+                    case Err(e):
+                        expect(e).to_equal("")
+                    case Ok(path):
+                        expect(path).to_contain("/feature/usage/math_blocks_spec.md")
+
+    it "mirrors the source spec folder under the output directory":
+        val parsed_result = parse_spipe_file("test/feature/usage/math_blocks_spec.spl")
+        match parsed_result:
+            case Err(e):
+                expect(e).to_equal("")
+            case Ok(parsed):
+                val metadata = extract_metadata(parsed)
+                val doc = SspecDoc(
+                    file_path: parsed.file_path,
+                    raw_content: parsed.raw_content,
+                    doc_blocks: parsed.doc_blocks,
+                    feature_title: parsed.feature_title,
+                    feature_ids: parsed.feature_ids,
+                    metadata: metadata
+                )
+                val result = generate_feature_doc(doc, "/tmp")
+                match result:
+                    case Err(e):
+                        expect(e).to_equal("")
+                    case Ok(path):
+                        expect(path).to_equal("/tmp/feature/usage/math_blocks_spec.md")
+
+    it "generates auto docs with scenarios immediately after the title":
+        val doc = SspecDoc(
+            file_path: "test/feature/app/manual_first_spec.spl",
+            raw_content: "describe \"Manual First\":\n    it \"operator performs the primary flow\":\n        user.open_app()\n        val status = \"open\"\n        expect(status).to_equal(\"open\")\n",
+            doc_blocks: [],
+            feature_title: "Manual First",
+            feature_ids: [],
+            metadata: FeatureMetadata.empty()
+        )
+        val result = generate_feature_doc(doc, "/tmp")
+        match result:
+            case Err(e):
+                expect(e).to_equal("")
+            case Ok(path):
+                val generated = read_file(path)
+                val before_scenarios = generated.split("## Scenarios")[0]
+                val after_scenarios_parts = generated.split("## Scenarios")
+                expect(before_scenarios).to_equal("# Manual First\n\n")
+                expect(before_scenarios.contains("## At a Glance")).to_equal(false)
+                expect(before_scenarios.contains("## Overview")).to_equal(false)
+                expect(before_scenarios.contains("## Scenario Summary")).to_equal(false)
+                expect(after_scenarios_parts.len()).to_be_greater_than(1)
+                expect(after_scenarios_parts[1]).to_contain("#### operator performs the primary flow")
+                expect(after_scenarios_parts[1]).to_contain("## At a Glance")
+                expect(after_scenarios_parts[1]).to_contain("## Overview")
+                expect(after_scenarios_parts[1]).to_contain("## Scenario Summary")
+
+    it "links screenshots and embeds TUI capture evidence in generated docs":
+        val tui_path = "/tmp/spipe_docgen_ui_capture.txt"
+        file_write(tui_path, "Simple UI\n[OK] Ready\n")
+        val metadata = FeatureMetadata(
+            id: "ui.capture",
+            category: "Application",
+            difficulty: "Medium",
+            status: "Active",
+            doc_type: "SSPEC",
+            source_doc: "",
+            requirement: "N/A",
+            plan: "N/A",
+            design: "N/A",
+            research: "N/A",
+            related: [],
+            dependencies: [],
+            artifacts: [],
+            screenshots: ["doc/06_spec/image/feature/app/ui_capture_spec/main.png", "N/A"],
+            tui_captures: [tui_path, "doc/06_spec/image/feature/app/ui_capture_spec/tui.png"],
+            logs: []
+        )
+        val doc = SspecDoc(
+            file_path: "test/feature/app/ui_capture_spec.spl",
+            raw_content: "describe \"UI Capture\":\n    it \"captures the visible state\":\n        val visible = \"Ready\"\n        expect(visible).to_equal(\"Ready\")\n",
+            doc_blocks: [],
+            feature_title: "UI Capture",
+            feature_ids: ["ui.capture"],
+            metadata: metadata
+        )
+        val result = generate_feature_doc(doc, "/tmp")
+        match result:
+            case Err(e):
+                expect(e).to_equal("")
+            case Ok(path):
+                val generated = read_file(path)
+                expect(generated).to_contain("| `main.png` | Screenshot | `doc/06_spec/image/feature/app/ui_capture_spec/main.png` |")
+                expect(generated.contains("![Screenshots: main.png](doc/06_spec/image/feature/app/ui_capture_spec/main.png)")).to_equal(false)
+                expect(generated).to_contain("![TUI Captures: tui.png](doc/06_spec/image/feature/app/ui_capture_spec/tui.png)")
+                expect(generated).to_contain("<summary>spipe_docgen_ui_capture.txt</summary>")
+                expect(generated).to_contain("Display policy: `embed_tui`")
+                expect(generated).to_contain("Simple UI")
+                expect(generated.contains("`N/A`")).to_equal(false)
+
+    it "lets users link all evidence instead of embedding TUI captures":
+        val tui_path = "/tmp/spipe_docgen_ui_capture_links.txt"
+        file_write(tui_path, "Simple UI\n[OK] Ready\n")
+        val metadata = FeatureMetadata(
+            id: "ui.capture.links",
+            category: "Application",
+            difficulty: "Medium",
+            status: "Active",
+            doc_type: "SSPEC",
+            source_doc: "",
+            requirement: "N/A",
+            plan: "N/A",
+            design: "N/A",
+            research: "N/A",
+            related: [],
+            dependencies: [],
+            artifacts: [],
+            screenshots: ["doc/06_spec/image/feature/app/ui_capture_spec/main.png"],
+            tui_captures: [tui_path, "doc/06_spec/image/feature/app/ui_capture_spec/tui.png"],
+            logs: []
+        )
+        val doc = SspecDoc(
+            file_path: "test/feature/app/ui_capture_spec.spl",
+            raw_content: "# @evidence-display: links\n" +
+                "describe \"UI Capture\":\n    it \"captures the visible state\":\n        val visible = \"Ready\"\n        expect(visible).to_equal(\"Ready\")\n",
+            doc_blocks: [],
+            feature_title: "UI Capture",
+            feature_ids: ["ui.capture.links"],
+            metadata: metadata
+        )
+        val result = generate_feature_doc(doc, "/tmp")
+        match result:
+            case Err(e):
+                expect(e).to_equal("")
+            case Ok(path):
+                val generated = read_file(path)
+                expect(generated).to_contain("Display policy: `links`")
+                expect(generated).to_contain("| `tui.png` | TUI capture | `doc/06_spec/image/feature/app/ui_capture_spec/tui.png` |")
+                expect(generated.contains("![TUI Captures: tui.png]")).to_equal(false)
+                expect(generated.contains("<summary>spipe_docgen_ui_capture_links.txt</summary>")).to_equal(false)
+
+    it "lets users embed all image evidence when requested":
+        val metadata = FeatureMetadata(
+            id: "ui.capture.embed_all",
+            category: "Application",
+            difficulty: "Medium",
+            status: "Active",
+            doc_type: "SSPEC",
+            source_doc: "",
+            requirement: "N/A",
+            plan: "N/A",
+            design: "N/A",
+            research: "N/A",
+            related: [],
+            dependencies: [],
+            artifacts: [],
+            screenshots: ["doc/06_spec/image/feature/app/ui_capture_spec/main.png"],
+            tui_captures: [],
+            logs: []
+        )
+        val doc = SspecDoc(
+            file_path: "test/feature/app/ui_capture_spec.spl",
+            raw_content: "# @evidence-display: embed_all\n" +
+                "describe \"UI Capture\":\n    it \"captures the visible state\":\n        val visible = \"Ready\"\n        expect(visible).to_equal(\"Ready\")\n",
+            doc_blocks: [],
+            feature_title: "UI Capture",
+            feature_ids: ["ui.capture.embed_all"],
+            metadata: metadata
+        )
+        val result = generate_feature_doc(doc, "/tmp")
+        match result:
+            case Err(e):
+                expect(e).to_equal("")
+            case Ok(path):
+                val generated = read_file(path)
+                expect(generated).to_contain("Display policy: `embed_all`")
+                expect(generated).to_contain("![Screenshots: main.png](doc/06_spec/image/feature/app/ui_capture_spec/main.png)")

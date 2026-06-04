@@ -1,0 +1,120 @@
+"""
+# Atomic Lock via O_EXCL Specification
+
+**Feature:** F2 — Atomic lock creation via O_EXCL (crash safety P0)
+**ACs:** AC-5 (hardening fix), AC-7 (new tests)
+**Status:** Failing (no implementation yet)
+
+Tests that rt_file_create_excl provides atomic file creation semantics,
+and that FileLock.try_create_lock uses it to prevent TOCTOU race conditions.
+"""
+
+# @cover src/lib/nogc_sync_mut/database/atomic.spl
+# @cover src/runtime/rt_file.c
+
+use std.spec
+use std.database.atomic.{FileLock}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+
+# ============================================================================
+# Module-level helpers
+# ============================================================================
+
+extern fn rt_file_create_excl(path: text, content: text) -> bool
+
+fn test_lock_path() -> text:
+    "/tmp/simple_db_test_excl_lock_spec.lock"
+
+fn cleanup_lock(path: text):
+    if rt_file_exists(path):
+        rt_file_delete(path)
+
+# ============================================================================
+# rt_file_create_excl extern tests
+# ============================================================================
+
+describe "rt_file_create_excl":
+    describe "basic semantics":
+        it "creates file and returns true when file does not exist":
+            val path = "/tmp/simple_db_test_excl_create.lock"
+            cleanup_lock(path)
+            val result = rt_file_create_excl(path, "pid:12345")
+            expect(result).to_equal(true)
+            expect(rt_file_exists(path)).to_equal(true)
+            cleanup_lock(path)
+
+        it "returns false when file already exists":
+            val path = "/tmp/simple_db_test_excl_exists.lock"
+            cleanup_lock(path)
+            # First create succeeds
+            val first = rt_file_create_excl(path, "pid:111")
+            expect(first).to_equal(true)
+            # Second create must fail (O_EXCL semantics)
+            val second = rt_file_create_excl(path, "pid:222")
+            expect(second).to_equal(false)
+            cleanup_lock(path)
+
+        it "writes content to created file":
+            val path = "/tmp/simple_db_test_excl_content.lock"
+            cleanup_lock(path)
+            rt_file_create_excl(path, "test_content_here")
+            expect(rt_file_exists(path)).to_equal(true)
+            cleanup_lock(path)
+
+    describe "edge cases":
+        it "handles empty content":
+            val path = "/tmp/simple_db_test_excl_empty.lock"
+            cleanup_lock(path)
+            val result = rt_file_create_excl(path, "")
+            expect(result).to_equal(true)
+            cleanup_lock(path)
+
+        it "returns false for invalid directory path":
+            val result = rt_file_create_excl("/nonexistent_dir_abc/test.lock", "x")
+            expect(result).to_equal(false)
+
+# ============================================================================
+# FileLock integration with O_EXCL
+# ============================================================================
+
+describe "FileLock with O_EXCL":
+    it "sequential lock on same path: first succeeds, second fails":
+        val path = test_lock_path()
+        cleanup_lock(path)
+        cleanup_lock(path + ".lock")
+        val lock1 = FileLock.for_file(path)
+        val acquired = lock1.acquire()
+        expect(acquired).to_equal(true)
+        # Second lock attempt on same path must fail (short timeout)
+        val lock2 = FileLock.for_file(path)
+        val second = lock2.try_acquire(500)
+        expect(second).to_equal(false)
+        lock1.release()
+        cleanup_lock(path + ".lock")
+
+    it "lock can be acquired after previous lock is released":
+        val path = test_lock_path()
+        cleanup_lock(path)
+        cleanup_lock(path + ".lock")
+        val lock1 = FileLock.for_file(path)
+        lock1.acquire()
+        lock1.release()
+        # After release, new lock should succeed
+        val lock2 = FileLock.for_file(path)
+        val acquired = lock2.try_acquire(2000)
+        expect(acquired).to_equal(true)
+        lock2.release()
+        cleanup_lock(path + ".lock")
+
+    it "lock file is removed after release":
+        val path = test_lock_path()
+        val lock_file = path + ".lock"
+        cleanup_lock(path)
+        cleanup_lock(lock_file)
+        val lock = FileLock.for_file(path)
+        lock.acquire()
+        expect(rt_file_exists(lock_file)).to_equal(true)
+        lock.release()
+        expect(rt_file_exists(lock_file)).to_equal(false)

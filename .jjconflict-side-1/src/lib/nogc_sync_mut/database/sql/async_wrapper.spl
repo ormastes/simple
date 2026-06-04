@@ -1,0 +1,132 @@
+# Typed SQL Database Library - Async Wrapper
+#
+# Async wrapper around Database using thread_spawn + HostFuture.
+# SQLite is fundamentally synchronous. This wrapper runs sync operations
+# on a spawned thread and returns HostFuture<T> so the caller can do
+# other work while waiting.
+#
+# Note: SQLite is single-writer, so concurrent async writes still serialize.
+
+use std.database.sql.types.{DbValue, DbRow, DbError}
+use std.database.sql.connection.{Database}
+use std.async_host.future.{HostFuture}
+use std.async_host.promise.{HostPromise}
+use std.concurrent.thread.{thread_spawn, thread_spawn2}
+
+# ============================================================================
+# AsyncDatabase — async wrapper around Database
+# ============================================================================
+
+class AsyncDatabase:
+    """Async wrapper around Database.
+
+    SQLite is fundamentally synchronous. This wrapper runs sync operations
+    on a spawned thread and returns HostFuture<T> so the caller can do
+    other work while waiting.
+
+    Note: SQLite is single-writer, so concurrent async writes still serialize.
+    """
+    inner: Database
+
+    # ------------------------------------------------------------------
+    # Open a file-backed database asynchronously.
+    # The open itself is synchronous (fast for SQLite).
+    # ------------------------------------------------------------------
+    static fn open(path: text) -> Result<AsyncDatabase, DbError>:
+        val db = Database.open(path)?
+        Ok(AsyncDatabase(inner: db))
+
+    # ------------------------------------------------------------------
+    # Open an in-memory database.
+    # ------------------------------------------------------------------
+    static fn memory() -> Result<AsyncDatabase, DbError>:
+        val db = Database.memory()?
+        Ok(AsyncDatabase(inner: db))
+
+    # ------------------------------------------------------------------
+    # Execute SQL asynchronously. Returns a future resolving to
+    # the number of affected rows.
+    # ------------------------------------------------------------------
+    fn async_exec(sql: text, params: [DbValue]) -> HostFuture<Result<i64, DbError>>:
+        val pair = HostPromise.new()
+        val future = pair.0
+        var promise = pair.1
+
+        val db = self.inner
+        thread_spawn2(db, [sql, params], \db_ref, args:
+            val exec_sql = args[0]
+            val exec_params = args[1]
+            var db_mut = db_ref
+            val result = db_mut.exec(exec_sql, exec_params)
+            promise.complete(result)
+        )
+
+        future
+
+    # ------------------------------------------------------------------
+    # Query rows asynchronously.
+    # ------------------------------------------------------------------
+    fn async_query(sql: text, params: [DbValue]) -> HostFuture<Result<[DbRow], DbError>>:
+        val pair = HostPromise.new()
+        val future = pair.0
+        var promise = pair.1
+
+        val db = self.inner
+        thread_spawn2(db, [sql, params], \db_ref, args:
+            val query_sql = args[0]
+            val query_params = args[1]
+            val result = db_ref.query(query_sql, query_params)
+            promise.complete(result)
+        )
+
+        future
+
+    # ------------------------------------------------------------------
+    # Query a single row asynchronously.
+    # ------------------------------------------------------------------
+    fn async_query_one(sql: text, params: [DbValue]) -> HostFuture<Result<DbRow?, DbError>>:
+        val pair = HostPromise.new()
+        val future = pair.0
+        var promise = pair.1
+
+        val db = self.inner
+        thread_spawn2(db, [sql, params], \db_ref, args:
+            val query_sql = args[0]
+            val query_params = args[1]
+            val result = db_ref.query_one(query_sql, query_params)
+            promise.complete(result)
+        )
+
+        future
+
+    # ------------------------------------------------------------------
+    # Close the database synchronously.
+    # Cannot close async safely — must ensure no pending operations.
+    # ------------------------------------------------------------------
+    me close() -> Result<(), DbError>:
+        self.inner.close()
+
+    # ------------------------------------------------------------------
+    # Access to the underlying sync Database for direct operations.
+    # ------------------------------------------------------------------
+    fn inner_db() -> Database:
+        self.inner
+
+    # ------------------------------------------------------------------
+    # Synchronous exec convenience (delegates to inner).
+    # Use when async overhead is not needed.
+    # ------------------------------------------------------------------
+    me exec(sql: text, params: [DbValue]) -> Result<i64, DbError>:
+        self.inner.exec(sql, params)
+
+    # ------------------------------------------------------------------
+    # Synchronous query convenience (delegates to inner).
+    # ------------------------------------------------------------------
+    fn query(sql: text, params: [DbValue]) -> Result<[DbRow], DbError>:
+        self.inner.query(sql, params)
+
+    # ------------------------------------------------------------------
+    # Synchronous query_one convenience (delegates to inner).
+    # ------------------------------------------------------------------
+    fn query_one(sql: text, params: [DbValue]) -> Result<DbRow?, DbError>:
+        self.inner.query_one(sql, params)

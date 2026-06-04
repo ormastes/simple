@@ -1,0 +1,76 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+MODE="${1:---check}"
+
+usage() {
+  cat <<'USAGE'
+Usage: sh scripts/check-spipe-submodule-gitlinks.shs [--check|--repair]
+
+Checks that .spipe/spipe is represented in the parent index as a gitlink.
+examples/spipe is accepted as the current tracked example tree. --repair
+restores only the .spipe/spipe gitlink to the current submodule HEAD.
+USAGE
+}
+
+case "$MODE" in
+  --check|--repair) ;;
+  -h|--help) usage; exit 0 ;;
+  *) usage >&2; exit 2 ;;
+esac
+
+failures=0
+
+check_one() {
+  path="$1"
+  entries="$(git ls-files --stage "$path" | wc -l | tr -d ' ')"
+  mode="$(git ls-files --stage "$path" | awk 'NR == 1 { print $1 }')"
+  if [ "$entries" = "1" ] && [ "$mode" = "160000" ]; then
+    echo "gitlink_ok $path"
+    return
+  fi
+  failures=$((failures + 1))
+  echo "gitlink_bad $path entries=$entries mode=${mode:-missing}"
+}
+
+check_tracked_tree() {
+  path="$1"
+  entries="$(git ls-files --stage "$path" | wc -l | tr -d ' ')"
+  mode="$(git ls-files --stage "$path" | awk 'NR == 1 { print $1 }')"
+  if [ "$entries" -gt 1 ] && [ "$mode" != "160000" ]; then
+    echo "tracked_tree_ok $path entries=$entries"
+    return
+  fi
+  failures=$((failures + 1))
+  echo "tracked_tree_bad $path entries=$entries mode=${mode:-missing}"
+}
+
+repair_one() {
+  path="$1"
+  if [ ! -d "$path" ]; then
+    echo "gitlink_repair_missing_worktree $path" >&2
+    failures=$((failures + 1))
+    return
+  fi
+  head="$(git -C "$path" rev-parse HEAD)"
+  git ls-files -z "$path" | xargs -0 -r git update-index --force-remove --
+  git update-index --add --cacheinfo "160000,$head,$path"
+  echo "gitlink_repaired $path $head"
+}
+
+if [ "$MODE" = "--repair" ]; then
+  repair_one ".spipe/spipe"
+fi
+
+check_one ".spipe/spipe"
+check_tracked_tree "examples/spipe"
+
+if [ "$failures" -eq 0 ]; then
+  echo "STATUS: PASS spipe-submodule-gitlinks"
+else
+  echo "STATUS: FAIL spipe-submodule-gitlinks"
+  exit 1
+fi

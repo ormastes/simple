@@ -1,0 +1,307 @@
+# Pure GUI SMF/dynlib hot-response probe core.
+#
+# Side-effect-free functions for unit tests and CLI wrappers. Direct Simple
+# fallback measurements are reported as call_source=direct_simple and cannot
+# satisfy the acceptance gate. Current SMF registry symbols are reported as
+# registry_symbol_only until the loader maps executable SMF code into process
+# memory; this prevents timing an unsafe raw ELF/SMF virtual address call.
+
+use std.sffi.dynamic.{spl_dlopen, spl_dlsym, spl_dlclose, spl_wffi_call_i64}
+use std.gui.pure_core.{GuiInputEvent, gui_pointer_event, gui_key_event, gui_dispatch_events}
+use std.gui.pure_smf_dynlib_perf.{GuiDynlibPerfReport, gui_dynlib_perf_report}
+use app.gui_perf.smf_dynlib_artifact.{gui_smf_parse_header}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_platform_name() -> text
+extern fn rt_file_read_bytes(path: text) -> [u8]?
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+
+class GuiDynlibProbeConfig:
+    artifact_path: text
+    symbol_name: text
+    iterations: i32
+    warmup_count: i32
+    threshold_us: i64
+
+class GuiDynlibProbeLoadEvidence:
+    loader_mode: text
+    call_source: text
+    symbol_resolved: bool
+    fallback_used: bool
+    dynlib_path: text
+
+fn gui_dynlib_probe_default_config() -> GuiDynlibProbeConfig:
+    GuiDynlibProbeConfig(
+        artifact_path: "",
+        symbol_name: "gui_dynlib_hot_probe_tick",
+        iterations: 128,
+        warmup_count: 16,
+        threshold_us: 1000
+    )
+
+fn _env_or(key: text, fallback: text) -> text:
+    val value = rt_env_get(key) ?? ""
+    if value == "":
+        return fallback
+    value
+
+fn gui_dynlib_probe_config_from_env() -> GuiDynlibProbeConfig:
+    val base = gui_dynlib_probe_default_config()
+    GuiDynlibProbeConfig(
+        artifact_path: _env_or("SIMPLE_GUI_DYNLIB_ARTIFACT", base.artifact_path),
+        symbol_name: _env_or("SIMPLE_GUI_DYNLIB_SYMBOL", base.symbol_name),
+        iterations: base.iterations,
+        warmup_count: base.warmup_count,
+        threshold_us: base.threshold_us
+    )
+
+fn gui_dynlib_probe_host_arch_from_env(host_os: text) -> text:
+    val env_arch = _env_or("SIMPLE_GUI_DYNLIB_ARCH", "")
+    if env_arch != "":
+        return env_arch
+    if host_os == "macos":
+        return "arm64"
+    "x86_64"
+
+fn gui_dynlib_probe_evidence_token(value: text) -> text:
+    val trimmed = value.trim()
+    if trimmed == "":
+        return "unknown"
+    val no_spaces = trimmed.replace(" ", "_")
+    val no_tabs = no_spaces.replace("\t", "_")
+    no_tabs.replace("\n", "_")
+
+fn gui_dynlib_probe_host_profile_from_env(host_os: text, host_arch: text) -> text:
+    val env_profile = _env_or("SIMPLE_GUI_DYNLIB_HOST_PROFILE", "")
+    if env_profile != "":
+        return gui_dynlib_probe_evidence_token(env_profile)
+    gui_dynlib_probe_evidence_token(host_os + "-" + host_arch)
+
+fn gui_dynlib_probe_host_cpu_from_env() -> text:
+    gui_dynlib_probe_evidence_token(_env_or("SIMPLE_GUI_DYNLIB_HOST_CPU", "unknown"))
+
+fn gui_dynlib_probe_is_host_dynlib_path(path: text) -> bool:
+    path.ends_with(".so") or path.ends_with(".dylib")
+
+fn gui_dynlib_probe_is_smf_dynlib_path(path: text) -> bool:
+    path.ends_with(".smf")
+
+fn gui_dynlib_probe_host_dynlib_extension(host_os: text) -> text:
+    if host_os == "macos":
+        return ".dylib"
+    ".so"
+
+fn gui_dynlib_probe_smf_cache_path(path: text, host_os: text) -> text:
+    path + ".extracted" + gui_dynlib_probe_host_dynlib_extension(host_os)
+
+fn gui_dynlib_probe_bytes_equal(left: [u8], right: [u8]) -> bool:
+    if left.len() != right.len():
+        return false
+    var i = 0
+    while i < left.len():
+        if left[i] != right[i]:
+            return false
+        i = i + 1
+    true
+
+fn gui_dynlib_probe_write_cache_bytes_verified(cache_path: text, bytes: [u8]) -> bool:
+    if bytes.len() == 0:
+        return false
+    if not rt_file_write_bytes(cache_path, bytes):
+        return false
+    val reread = rt_file_read_bytes(cache_path) ?? []
+    gui_dynlib_probe_bytes_equal(bytes, reread)
+
+fn _gui_dynlib_probe_arch_code(host_arch: text) -> i64:
+    val normalized = host_arch.trim().lower()
+    if normalized == "x86_64" or normalized == "amd64":
+        return 1
+    if normalized == "x86":
+        return 2
+    if normalized == "arm64" or normalized == "aarch64":
+        return 3
+    if normalized == "arm32" or normalized == "arm":
+        return 4
+    if normalized == "riscv64" or normalized == "rv64":
+        return 5
+    if normalized == "riscv32" or normalized == "rv32":
+        return 6
+    -1
+
+fn _gui_dynlib_probe_has_native_library_magic(bytes: [u8]) -> bool:
+    if bytes.len() < 4:
+        return false
+    val b0 = bytes[0]
+    val b1 = bytes[1]
+    val b2 = bytes[2]
+    val b3 = bytes[3]
+    val elf = b0 == 0x7Fu8 and b1 == 0x45u8 and b2 == 0x4Cu8 and b3 == 0x46u8
+    val macho = (b0 == 0xFEu8 and b1 == 0xEDu8 and b2 == 0xFAu8 and (b3 == 0xCEu8 or b3 == 0xCFu8)) or
+        ((b0 == 0xCEu8 or b0 == 0xCFu8) and b1 == 0xFAu8 and b2 == 0xEDu8 and b3 == 0xFEu8) or
+        (b0 == 0xCAu8 and b1 == 0xFEu8 and b2 == 0xBAu8 and b3 == 0xBEu8) or
+        (b0 == 0xBEu8 and b1 == 0xBAu8 and b2 == 0xFEu8 and b3 == 0xCAu8)
+    elf or macho
+
+fn _gui_dynlib_probe_copy_range(bytes: [u8], off: i64, size: i64) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < size:
+        out.push(bytes[(off + i) as i32])
+        i = i + 1
+    out
+
+fn gui_dynlib_probe_extract_smf_library_bytes_for_host_arch(bytes: [u8], host_arch: text) -> [u8]:
+    val arch_code = _gui_dynlib_probe_arch_code(host_arch)
+    if arch_code < 0:
+        return []
+    val header = gui_smf_parse_header(bytes)
+    if header == nil:
+        return []
+    val parsed = header.unwrap()
+    if parsed.role != 2:
+        return []
+    if parsed.arch != 0 and parsed.arch != arch_code:
+        return []
+    if parsed.abi != 0 and parsed.abi != 1:
+        return []
+    if parsed.stub_size <= 0 or parsed.stub_size > parsed.header_offset:
+        return []
+    val stub = _gui_dynlib_probe_copy_range(bytes, 0, parsed.stub_size)
+    if not _gui_dynlib_probe_has_native_library_magic(stub):
+        return []
+    stub
+
+fn gui_dynlib_probe_load_host_evidence(config: GuiDynlibProbeConfig) -> GuiDynlibProbeLoadEvidence:
+    val handle = spl_dlopen(config.artifact_path)
+    if handle == 0:
+        return GuiDynlibProbeLoadEvidence(loader_mode: "host_dynlib", call_source: "direct_simple", symbol_resolved: false, fallback_used: true, dynlib_path: "")
+    val sym = spl_dlsym(handle, config.symbol_name)
+    spl_dlclose(handle)
+    if sym == 0:
+        return GuiDynlibProbeLoadEvidence(loader_mode: "host_dynlib", call_source: "direct_simple", symbol_resolved: false, fallback_used: true, dynlib_path: "")
+    GuiDynlibProbeLoadEvidence(loader_mode: "host_dynlib", call_source: "dynlib_symbol_call", symbol_resolved: true, fallback_used: false, dynlib_path: config.artifact_path)
+
+fn gui_dynlib_probe_extract_smf_library_to_cache(artifact_path: text) -> text:
+    val host_os = rt_platform_name()
+    val cache_path = gui_dynlib_probe_smf_cache_path(artifact_path, host_os)
+    val smf_bytes = rt_file_read_bytes(artifact_path) ?? []
+    if smf_bytes.len() == 0:
+        return ""
+    val stub = gui_dynlib_probe_extract_smf_library_bytes_for_host_arch(smf_bytes, gui_dynlib_probe_host_arch_from_env(host_os))
+    if stub.len() == 0:
+        return ""
+    if not gui_dynlib_probe_write_cache_bytes_verified(cache_path, stub):
+        return ""
+    cache_path
+
+fn gui_dynlib_probe_load_smf_host_evidence(config: GuiDynlibProbeConfig) -> GuiDynlibProbeLoadEvidence:
+    val cache_path = gui_dynlib_probe_extract_smf_library_to_cache(config.artifact_path)
+    if cache_path == "":
+        return GuiDynlibProbeLoadEvidence(loader_mode: "smf_dynlib", call_source: "direct_simple", symbol_resolved: false, fallback_used: true, dynlib_path: "")
+    val handle = spl_dlopen(cache_path)
+    if handle == 0:
+        return GuiDynlibProbeLoadEvidence(loader_mode: "smf_dynlib", call_source: "direct_simple", symbol_resolved: false, fallback_used: true, dynlib_path: "")
+    val sym = spl_dlsym(handle, config.symbol_name)
+    spl_dlclose(handle)
+    if sym == 0:
+        return GuiDynlibProbeLoadEvidence(loader_mode: "smf_dynlib", call_source: "direct_simple", symbol_resolved: false, fallback_used: true, dynlib_path: "")
+    GuiDynlibProbeLoadEvidence(loader_mode: "smf_dynlib", call_source: "dynlib_symbol_call", symbol_resolved: true, fallback_used: false, dynlib_path: cache_path)
+
+fn gui_dynlib_probe_load_evidence(config: GuiDynlibProbeConfig) -> GuiDynlibProbeLoadEvidence:
+    if config.artifact_path == "":
+        return GuiDynlibProbeLoadEvidence(loader_mode: "direct_simple", call_source: "direct_simple", symbol_resolved: false, fallback_used: true, dynlib_path: "")
+    if gui_dynlib_probe_is_host_dynlib_path(config.artifact_path):
+        return gui_dynlib_probe_load_host_evidence(config)
+    if gui_dynlib_probe_is_smf_dynlib_path(config.artifact_path):
+        val smf_host = gui_dynlib_probe_load_smf_host_evidence(config)
+        if smf_host.call_source == "dynlib_symbol_call":
+            return smf_host
+        return smf_host
+    GuiDynlibProbeLoadEvidence(loader_mode: "direct_simple", call_source: "direct_simple", symbol_resolved: false, fallback_used: true, dynlib_path: "")
+
+fn gui_dynlib_probe_workload(iteration: i32) -> [GuiInputEvent]:
+    [
+        gui_pointer_event("pointer_move", "button.save", 12 + iteration, 24),
+        gui_pointer_event("pointer_down", "button.save", 12, 24),
+        gui_pointer_event("pointer_up", "button.save", 12, 24),
+        gui_key_event("input.name", "A", "a")
+    ]
+
+fn gui_dynlib_probe_direct_samples(iterations: i32, warmup_count: i32) -> [i64]:
+    var samples: [i64] = []
+    var i = 0
+    val total = iterations + warmup_count
+    while i < total:
+        val events = gui_dynlib_probe_workload(i)
+        val t0 = rt_time_now_unix_micros()
+        val batch = gui_dispatch_events(events, 0)
+        val t1 = rt_time_now_unix_micros()
+        if batch.commands.len() > 0 and i >= warmup_count:
+            var elapsed = t1 - t0
+            if elapsed < 0:
+                elapsed = 0
+            samples.push(elapsed)
+        i = i + 1
+    samples
+
+fn gui_dynlib_probe_dynlib_samples(dynlib_path: text, symbol_name: text, iterations: i32, warmup_count: i32) -> [i64]:
+    var samples: [i64] = []
+    if dynlib_path == "":
+        return samples
+    val handle = spl_dlopen(dynlib_path)
+    if handle == 0:
+        return samples
+    val sym = spl_dlsym(handle, symbol_name)
+    if sym == 0:
+        spl_dlclose(handle)
+        return samples
+    var i = 0
+    val total = iterations + warmup_count
+    var args: [i64] = [0, 12, 24, 65]
+    while i < total:
+        args[0] = i.to_i64()
+        args[1] = 12 + i.to_i64()
+        val t0 = rt_time_now_unix_micros()
+        val command_count = spl_wffi_call_i64(sym, args, 4)
+        val t1 = rt_time_now_unix_micros()
+        if command_count > 0 and i >= warmup_count:
+            var elapsed = t1 - t0
+            if elapsed < 0:
+                elapsed = 0
+            samples.push(elapsed)
+        i = i + 1
+    spl_dlclose(handle)
+    samples
+
+fn gui_dynlib_probe_report(config: GuiDynlibProbeConfig, evidence: GuiDynlibProbeLoadEvidence, samples_us: [i64]) -> GuiDynlibPerfReport:
+    val host_os = rt_platform_name()
+    val host_arch = gui_dynlib_probe_host_arch_from_env(host_os)
+    gui_dynlib_perf_report(
+        config.artifact_path,
+        evidence.dynlib_path,
+        host_os,
+        host_arch,
+        gui_dynlib_probe_host_profile_from_env(host_os, host_arch),
+        gui_dynlib_probe_host_cpu_from_env(),
+        evidence.loader_mode,
+        config.symbol_name,
+        evidence.call_source,
+        evidence.symbol_resolved,
+        evidence.fallback_used,
+        config.iterations,
+        config.warmup_count,
+        samples_us,
+        config.threshold_us
+    )
+
+fn gui_dynlib_probe_run(config: GuiDynlibProbeConfig) -> GuiDynlibPerfReport:
+    val evidence = gui_dynlib_probe_load_evidence(config)
+    if evidence.loader_mode == "host_dynlib" and evidence.call_source == "dynlib_symbol_call":
+        val host_samples = gui_dynlib_probe_dynlib_samples(evidence.dynlib_path, config.symbol_name, config.iterations, config.warmup_count)
+        return gui_dynlib_probe_report(config, evidence, host_samples)
+    if evidence.loader_mode == "smf_dynlib" and evidence.call_source == "dynlib_symbol_call" and gui_dynlib_probe_is_smf_dynlib_path(config.artifact_path):
+        val smf_samples = gui_dynlib_probe_dynlib_samples(evidence.dynlib_path, config.symbol_name, config.iterations, config.warmup_count)
+        return gui_dynlib_probe_report(config, evidence, smf_samples)
+    val samples = gui_dynlib_probe_direct_samples(config.iterations, config.warmup_count)
+    gui_dynlib_probe_report(config, evidence, samples)

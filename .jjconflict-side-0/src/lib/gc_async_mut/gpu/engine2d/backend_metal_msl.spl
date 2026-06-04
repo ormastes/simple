@@ -1,0 +1,442 @@
+# 2D Engine — Metal Backend MSL Shader Source
+#
+# Embedded MSL (Metal Shading Language) compute kernels for 2D rendering.
+# No imports required — this file returns a single text literal.
+
+# ============================================================================
+# MSL Kernel Source
+# ============================================================================
+
+fn _engine2d_msl() -> text:
+    """Embedded MSL source for 2D rendering compute kernels.
+
+    These kernels operate on a u32 framebuffer in device memory.
+    Each pixel is ARGB packed as a 32-bit unsigned integer.
+
+    Buffer layout:
+    - buffer(0): device uint* framebuffer
+    - buffer(1): constant params (push constants via setBytes)
+    - buffer(2): device uint* source (blit only)
+
+    Kernel list:
+    - kernel_clear: Fill entire framebuffer with a color
+    - kernel_draw_rect_filled: Fill a rectangle region
+    - kernel_draw_rect_outline: Draw rectangle border (1px)
+    - kernel_draw_circle_filled: Fill a circle (distance check)
+    - kernel_draw_circle: Draw circle outline
+    - kernel_draw_line: Bresenham line on GPU (1 thread per step)
+    - kernel_draw_rounded_rect: Filled rect with rounded corners
+    - kernel_draw_triangle_filled: Barycentric triangle fill
+    - kernel_draw_gradient_rect: Vertical gradient fill
+    - kernel_blit_image: Copy source pixels to framebuffer region
+    """
+    r"""
+#include <metal_stdlib>
+using namespace metal;
+
+// ---- Parameter structs (match _pack_*_params byte layout) ----
+
+struct ClearParams {
+    uint color;
+    int width;
+    int height;
+};
+
+struct RectParams {
+    int x;
+    int y;
+    int w;
+    int h;
+    uint color;
+    int fb_w;
+    int fb_h;
+};
+
+struct LineParams {
+    int x1;
+    int y1;
+    int x2;
+    int y2;
+    uint color;
+    int thickness;
+    int fb_w;
+    int fb_h;
+};
+
+struct CircleParams {
+    int cx;
+    int cy;
+    int r;
+    uint color;
+    int fb_w;
+    int fb_h;
+    int filled;
+};
+
+struct RoundedRectParams {
+    int x;
+    int y;
+    int w;
+    int h;
+    int radius;
+    uint color;
+    int fb_w;
+    int fb_h;
+};
+
+struct TriangleParams {
+    int x1;
+    int y1;
+    int x2;
+    int y2;
+    int x3;
+    int y3;
+    uint color;
+    int fb_w;
+    int fb_h;
+    int min_x;
+    int min_y;
+};
+
+struct GradientParams {
+    int x;
+    int y;
+    int w;
+    int h;
+    uint top_color;
+    uint bottom_color;
+    int fb_w;
+    int fb_h;
+};
+
+struct BlitParams {
+    int x;
+    int y;
+    int w;
+    int h;
+    int fb_w;
+    int fb_h;
+};
+
+// ---- Helper: extract ARGB channels ----
+
+static inline uint4 unpack_argb(uint c) {
+    return uint4(
+        (c >> 16) & 0xFF,  // R
+        (c >> 8)  & 0xFF,  // G
+        c         & 0xFF,  // B
+        (c >> 24) & 0xFF   // A
+    );
+}
+
+static inline uint pack_argb(uint r, uint g, uint b, uint a) {
+    return (a << 24) | (r << 16) | (g << 8) | b;
+}
+
+static inline uint lerp_channel(uint a, uint b, int t, int max_t) {
+    if (max_t <= 0) return a;
+    return (uint)((int)a + ((int)b - (int)a) * t / max_t);
+}
+
+// ---- kernel_clear ----
+
+kernel void kernel_clear(
+    device uint* fb        [[buffer(0)]],
+    constant ClearParams& p [[buffer(1)]],
+    uint tid               [[thread_position_in_grid]]
+) {
+    int total = p.width * p.height;
+    if ((int)tid >= total) return;
+    fb[tid] = p.color;
+}
+
+// ---- kernel_draw_rect_filled ----
+
+kernel void kernel_draw_rect_filled(
+    device uint* fb        [[buffer(0)]],
+    constant RectParams& p [[buffer(1)]],
+    uint2 tid              [[thread_position_in_grid]]
+) {
+    int lx = (int)tid.x;
+    int ly = (int)tid.y;
+    if (lx >= p.w || ly >= p.h) return;
+
+    int px = p.x + lx;
+    int py = p.y + ly;
+    if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
+
+    int idx = py * p.fb_w + px;
+    fb[idx] = p.color;
+}
+
+// ---- kernel_draw_rect_outline ----
+
+kernel void kernel_draw_rect_outline(
+    device uint* fb        [[buffer(0)]],
+    constant RectParams& p [[buffer(1)]],
+    uint2 tid              [[thread_position_in_grid]]
+) {
+    int lx = (int)tid.x;
+    int ly = (int)tid.y;
+    if (lx >= p.w || ly >= p.h) return;
+
+    // Only draw border pixels
+    bool on_border = (lx == 0 || lx == p.w - 1 || ly == 0 || ly == p.h - 1);
+    if (!on_border) return;
+
+    int px = p.x + lx;
+    int py = p.y + ly;
+    if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
+
+    int idx = py * p.fb_w + px;
+    fb[idx] = p.color;
+}
+
+// ---- kernel_draw_line ----
+
+kernel void kernel_draw_line(
+    device uint* fb         [[buffer(0)]],
+    constant LineParams& p  [[buffer(1)]],
+    uint tid                [[thread_position_in_grid]]
+) {
+    int dx = p.x2 - p.x1;
+    int dy = p.y2 - p.y1;
+    int adx = dx < 0 ? -dx : dx;
+    int ady = dy < 0 ? -dy : dy;
+    int steps = adx > ady ? adx : ady;
+    if (steps == 0) steps = 1;
+    if ((int)tid > steps) return;
+
+    int t = (int)tid;
+    int px = p.x1 + dx * t / steps;
+    int py = p.y1 + dy * t / steps;
+
+    // Draw thickness
+    int half_w = p.thickness / 2;
+    for (int off = -half_w; off <= half_w; off++) {
+        int fx, fy;
+        if (adx >= ady) {
+            fx = px;
+            fy = py + off;
+        } else {
+            fx = px + off;
+            fy = py;
+        }
+        if (fx >= 0 && fx < p.fb_w && fy >= 0 && fy < p.fb_h) {
+            int idx = fy * p.fb_w + fx;
+            fb[idx] = p.color;
+        }
+    }
+}
+
+// ---- kernel_draw_circle ----
+
+kernel void kernel_draw_circle(
+    device uint* fb           [[buffer(0)]],
+    constant CircleParams& p  [[buffer(1)]],
+    uint2 tid                 [[thread_position_in_grid]]
+) {
+    int bw = 2 * p.r + 1;
+    int bh = 2 * p.r + 1;
+    int lx = (int)tid.x;
+    int ly = (int)tid.y;
+    if (lx >= bw || ly >= bh) return;
+
+    int dx = lx - p.r;
+    int dy = ly - p.r;
+    int dist_sq = dx * dx + dy * dy;
+    int r_sq = p.r * p.r;
+
+    // Outline: draw pixels near the circle edge
+    int inner_r = (p.r - 1) * (p.r - 1);
+    if (dist_sq > r_sq || dist_sq < inner_r) return;
+
+    int px = p.cx - p.r + lx;
+    int py = p.cy - p.r + ly;
+    if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
+
+    int idx = py * p.fb_w + px;
+    fb[idx] = p.color;
+}
+
+// ---- kernel_draw_circle_filled ----
+
+kernel void kernel_draw_circle_filled(
+    device uint* fb           [[buffer(0)]],
+    constant CircleParams& p  [[buffer(1)]],
+    uint2 tid                 [[thread_position_in_grid]]
+) {
+    int bw = 2 * p.r + 1;
+    int bh = 2 * p.r + 1;
+    int lx = (int)tid.x;
+    int ly = (int)tid.y;
+    if (lx >= bw || ly >= bh) return;
+
+    int dx = lx - p.r;
+    int dy = ly - p.r;
+    int dist_sq = dx * dx + dy * dy;
+    int r_sq = p.r * p.r;
+    if (dist_sq > r_sq) return;
+
+    int px = p.cx - p.r + lx;
+    int py = p.cy - p.r + ly;
+    if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
+
+    int idx = py * p.fb_w + px;
+    fb[idx] = p.color;
+}
+
+// ---- kernel_draw_rounded_rect ----
+
+kernel void kernel_draw_rounded_rect(
+    device uint* fb                  [[buffer(0)]],
+    constant RoundedRectParams& p    [[buffer(1)]],
+    uint2 tid                        [[thread_position_in_grid]]
+) {
+    int lx = (int)tid.x;
+    int ly = (int)tid.y;
+    if (lx >= p.w || ly >= p.h) return;
+
+    int r = p.radius;
+    if (r > p.w / 2) r = p.w / 2;
+    if (r > p.h / 2) r = p.h / 2;
+
+    // Check if pixel is inside the rounded rect
+    bool inside = true;
+
+    // Top-left corner
+    if (lx < r && ly < r) {
+        int dx = lx - r;
+        int dy = ly - r;
+        if (dx * dx + dy * dy > r * r) inside = false;
+    }
+    // Top-right corner
+    else if (lx >= p.w - r && ly < r) {
+        int dx = lx - (p.w - 1 - r);
+        int dy = ly - r;
+        if (dx * dx + dy * dy > r * r) inside = false;
+    }
+    // Bottom-left corner
+    else if (lx < r && ly >= p.h - r) {
+        int dx = lx - r;
+        int dy = ly - (p.h - 1 - r);
+        if (dx * dx + dy * dy > r * r) inside = false;
+    }
+    // Bottom-right corner
+    else if (lx >= p.w - r && ly >= p.h - r) {
+        int dx = lx - (p.w - 1 - r);
+        int dy = ly - (p.h - 1 - r);
+        if (dx * dx + dy * dy > r * r) inside = false;
+    }
+
+    if (!inside) return;
+
+    int px = p.x + lx;
+    int py = p.y + ly;
+    if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
+
+    int idx = py * p.fb_w + px;
+    fb[idx] = p.color;
+}
+
+// ---- kernel_draw_triangle_filled ----
+
+kernel void kernel_draw_triangle_filled(
+    device uint* fb               [[buffer(0)]],
+    constant TriangleParams& p    [[buffer(1)]],
+    uint2 tid                     [[thread_position_in_grid]]
+) {
+    int bw = 0;  // computed from bounding box
+    int bh = 0;
+    int max_x = p.x1;
+    if (p.x2 > max_x) max_x = p.x2;
+    if (p.x3 > max_x) max_x = p.x3;
+    int max_y = p.y1;
+    if (p.y2 > max_y) max_y = p.y2;
+    if (p.y3 > max_y) max_y = p.y3;
+    bw = max_x - p.min_x + 1;
+    bh = max_y - p.min_y + 1;
+
+    int lx = (int)tid.x;
+    int ly = (int)tid.y;
+    if (lx >= bw || ly >= bh) return;
+
+    int px = p.min_x + lx;
+    int py = p.min_y + ly;
+
+    // Barycentric coordinate test (2x area method)
+    int d = (p.y2 - p.y3) * (p.x1 - p.x3) + (p.x3 - p.x2) * (p.y1 - p.y3);
+    if (d == 0) return;
+
+    int w1_num = (p.y2 - p.y3) * (px - p.x3) + (p.x3 - p.x2) * (py - p.y3);
+    int w2_num = (p.y3 - p.y1) * (px - p.x3) + (p.x1 - p.x3) * (py - p.y3);
+
+    // Check signs for inside test
+    bool inside;
+    if (d > 0) {
+        int w3_num = d - w1_num - w2_num;
+        inside = (w1_num >= 0 && w2_num >= 0 && w3_num >= 0);
+    } else {
+        int w3_num = d - w1_num - w2_num;
+        inside = (w1_num <= 0 && w2_num <= 0 && w3_num <= 0);
+    }
+    if (!inside) return;
+
+    if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
+
+    int idx = py * p.fb_w + px;
+    fb[idx] = p.color;
+}
+
+// ---- kernel_draw_gradient_rect ----
+
+kernel void kernel_draw_gradient_rect(
+    device uint* fb               [[buffer(0)]],
+    constant GradientParams& p    [[buffer(1)]],
+    uint2 tid                     [[thread_position_in_grid]]
+) {
+    int lx = (int)tid.x;
+    int ly = (int)tid.y;
+    if (lx >= p.w || ly >= p.h) return;
+
+    // Interpolate between top_color and bottom_color
+    uint4 tc = unpack_argb(p.top_color);
+    uint4 bc = unpack_argb(p.bottom_color);
+    int max_t = p.h - 1;
+    if (max_t < 1) max_t = 1;
+
+    uint r = lerp_channel(tc.x, bc.x, ly, max_t);
+    uint g = lerp_channel(tc.y, bc.y, ly, max_t);
+    uint b = lerp_channel(tc.z, bc.z, ly, max_t);
+    uint a = lerp_channel(tc.w, bc.w, ly, max_t);
+    uint c = pack_argb(r, g, b, a);
+
+    int px = p.x + lx;
+    int py = p.y + ly;
+    if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
+
+    int idx = py * p.fb_w + px;
+    fb[idx] = c;
+}
+
+// ---- kernel_blit_image ----
+
+kernel void kernel_blit_image(
+    device uint* fb             [[buffer(0)]],
+    constant BlitParams& p      [[buffer(1)]],
+    device const uint* src      [[buffer(2)]],
+    uint2 tid                   [[thread_position_in_grid]]
+) {
+    int lx = (int)tid.x;
+    int ly = (int)tid.y;
+    if (lx >= p.w || ly >= p.h) return;
+
+    int px = p.x + lx;
+    int py = p.y + ly;
+    if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
+
+    int src_idx = ly * p.w + lx;
+    int dst_idx = py * p.fb_w + px;
+    fb[dst_idx] = src[src_idx];
+}
+"""

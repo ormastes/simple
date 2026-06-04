@@ -1,0 +1,1463 @@
+# JsInterpreter — native function dispatch (setTimeout, fetch, Promise, Response, Blob, Storage).
+
+use std.js.engine.js_error.{JsError, script_error, Logger, LogLevel, BrowserResult, BrowserError, js_nan, js_infinity, js_neg_infinity, is_nan}
+use std.js.types.js_types.JsValue
+use std.js.types.ast_types.JsExpression
+use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64, _digit_val}
+use std.js.engine.vm_object_store.{ObjectStore}
+use std.js.engine.runtime.{dispatch_native, NATIVE_BLOB_TEXT, NATIVE_FETCH, NATIVE_JSON_PARSE, NATIVE_NODE_BUFFER_ALLOC, NATIVE_NODE_BUFFER_BYTE_LENGTH, NATIVE_NODE_BUFFER_COMPARE, NATIVE_NODE_BUFFER_CONCAT, NATIVE_NODE_BUFFER_EQUALS, NATIVE_NODE_BUFFER_FROM, NATIVE_NODE_BUFFER_IS_BUFFER, NATIVE_NODE_BUFFER_READ_UINT16_BE, NATIVE_NODE_BUFFER_READ_UINT16_LE, NATIVE_NODE_BUFFER_READ_UINT32_BE, NATIVE_NODE_BUFFER_READ_UINT32_LE, NATIVE_NODE_BUFFER_READ_UINT8, NATIVE_NODE_BUFFER_SLICE, NATIVE_NODE_BUFFER_SUBARRAY, NATIVE_NODE_BUFFER_TO_STRING, NATIVE_NODE_BUFFER_WRITE_UINT16_BE, NATIVE_NODE_BUFFER_WRITE_UINT16_LE, NATIVE_NODE_BUFFER_WRITE_UINT32_BE, NATIVE_NODE_BUFFER_WRITE_UINT32_LE, NATIVE_NODE_BUFFER_WRITE_UINT8, NATIVE_NODE_OS_ARCH, NATIVE_NODE_OS_ENDIANNESS, NATIVE_NODE_OS_HOMEDIR, NATIVE_NODE_OS_PLATFORM, NATIVE_NODE_OS_RELEASE, NATIVE_NODE_OS_TMPDIR, NATIVE_NODE_OS_TYPE, NATIVE_NODE_PATH_BASENAME, NATIVE_NODE_PATH_DIRNAME, NATIVE_NODE_PATH_EXTNAME, NATIVE_NODE_PATH_IS_ABSOLUTE, NATIVE_NODE_PATH_JOIN, NATIVE_NODE_PATH_NORMALIZE, NATIVE_NODE_PROCESS_CWD, NATIVE_NODE_PROCESS_EXIT, NATIVE_NODE_PROCESS_NEXT_TICK, NATIVE_NODE_REQUIRE, NATIVE_PROMISE_CATCH, NATIVE_PROMISE_FINALLY, NATIVE_PROMISE_REJECT, NATIVE_PROMISE_RESOLVE, NATIVE_PROMISE_THEN, NATIVE_RESPONSE_ARRAY_BUFFER, NATIVE_RESPONSE_BLOB, NATIVE_RESPONSE_JSON, NATIVE_RESPONSE_TEXT, NATIVE_SET_TIMEOUT, NATIVE_SET_INTERVAL, NATIVE_CLEAR_TIMEOUT, NATIVE_CLEAR_INTERVAL, NATIVE_STORAGE_GET_ITEM, NATIVE_STORAGE_SET_ITEM, NATIVE_STORAGE_REMOVE_ITEM, NATIVE_STORAGE_CLEAR, NATIVE_STORAGE_KEY, NATIVE_WEBASSEMBLY_INSTANTIATE, NATIVE_WEBASSEMBLY_INSTANTIATE_CATCH, NATIVE_WEBASSEMBLY_INSTANTIATE_THEN, NATIVE_WEBASSEMBLY_INSTANCE_CONSTRUCTOR, NATIVE_WEBASSEMBLY_MODULE_CONSTRUCTOR, NATIVE_WEBASSEMBLY_VALIDATE, NATIVE_NAVIGATOR_GPU_REQUEST_ADAPTER}
+use std.js.engine.parser.{JsParser}
+use std.js.builtins.json.{json_is_valid}
+use std.js.node.path_module.{path_join, path_dirname, path_basename, path_extname, path_isAbsolute, path_normalize}
+use std.js.node.buffer_module.{buffer_byteLength, NodeBuffer}
+use std.js.node.os_module.{os_platform, os_arch, os_type, os_release, os_homedir, os_tmpdir, os_endianness, os_eol}
+use std.js.node.process_module.{process_cwd, process_exit, process_nextTick}
+use std.gc_async_mut.js.engine.interpreter.{JsInterpreter, PendingAsyncRequest, PendingPromiseTask, PromiseHandlerRecord, PromiseHandlerRegistration, PendingTimerTask}
+use std.gc_async_mut.js.engine.interpreter.{filter_response_headers_for_script, parse_non_negative_i64_text, text_equals_exact, _simple_fetch_state, _simple_fetch_value, _simple_fetch_marker, _simple_fetch_base_url, _simple_fetch_cookie_header, _resolve_fetch_url}
+use std.gc_async_mut.js.engine.interpreter_string_methods.{JsInterpreter}
+use std.gc_async_mut.js.engine.interpreter_object.{JsInterpreter}
+
+impl JsInterpreter:
+    me _dispatch_native_with_receiver(native_id: i64, this_val: JsValue, arg_vals: [JsValue], env: i64) -> JsValue:
+        if native_id == NATIVE_SET_TIMEOUT:
+            return self._native_set_timer(arg_vals, false)
+        if native_id == NATIVE_SET_INTERVAL:
+            return self._native_set_timer(arg_vals, true)
+        if native_id == NATIVE_CLEAR_TIMEOUT or native_id == NATIVE_CLEAR_INTERVAL:
+            return self._native_clear_timer(arg_vals)
+        if native_id == NATIVE_FETCH:
+            return self._native_fetch(this_val, arg_vals, env)
+        if native_id == NATIVE_PROMISE_THEN:
+            return self._native_promise_then(this_val, arg_vals)
+        if native_id == NATIVE_PROMISE_CATCH:
+            return self._native_promise_catch(this_val, arg_vals)
+        if native_id == NATIVE_PROMISE_FINALLY:
+            return self._native_promise_finally(this_val, arg_vals)
+        if native_id == NATIVE_PROMISE_RESOLVE:
+            return self._native_promise_resolve(arg_vals)
+        if native_id == NATIVE_PROMISE_REJECT:
+            return self._native_promise_reject(arg_vals)
+        if native_id == NATIVE_RESPONSE_TEXT:
+            return self._native_response_text(this_val)
+        if native_id == NATIVE_RESPONSE_JSON:
+            return self._native_response_json(this_val)
+        if native_id == NATIVE_RESPONSE_BLOB:
+            return self._native_response_blob(this_val)
+        if native_id == NATIVE_RESPONSE_ARRAY_BUFFER:
+            return self._native_response_array_buffer(this_val)
+        if native_id == NATIVE_BLOB_TEXT:
+            return self._native_blob_text(this_val)
+        if native_id == NATIVE_STORAGE_GET_ITEM:
+            return self._native_storage_get_item(this_val, arg_vals)
+        if native_id == NATIVE_STORAGE_SET_ITEM:
+            return self._native_storage_set_item(this_val, arg_vals)
+        if native_id == NATIVE_STORAGE_REMOVE_ITEM:
+            return self._native_storage_remove_item(this_val, arg_vals)
+        if native_id == NATIVE_STORAGE_CLEAR:
+            return self._native_storage_clear(this_val)
+        if native_id == NATIVE_STORAGE_KEY:
+            return self._native_storage_key(this_val, arg_vals)
+        if native_id == NATIVE_NAVIGATOR_GPU_REQUEST_ADAPTER:
+            return self._native_navigator_gpu_request_adapter(this_val, arg_vals)
+        if native_id == NATIVE_WEBASSEMBLY_VALIDATE:
+            return self._native_webassembly_validate(arg_vals)
+        if native_id == NATIVE_WEBASSEMBLY_INSTANTIATE:
+            return self._native_webassembly_instantiate(this_val, arg_vals)
+        if native_id == NATIVE_WEBASSEMBLY_INSTANTIATE_THEN:
+            return self._native_webassembly_instantiate_then(this_val, arg_vals)
+        if native_id == NATIVE_WEBASSEMBLY_INSTANTIATE_CATCH:
+            return self._native_webassembly_instantiate_catch(this_val, arg_vals)
+        if native_id == NATIVE_WEBASSEMBLY_MODULE_CONSTRUCTOR:
+            return self._native_webassembly_module(arg_vals)
+        if native_id == NATIVE_WEBASSEMBLY_INSTANCE_CONSTRUCTOR:
+            return self._native_webassembly_instance(arg_vals)
+        if native_id == NATIVE_NODE_REQUIRE:
+            return self._native_node_require(arg_vals)
+        if native_id == NATIVE_NODE_PATH_JOIN:
+            return path_join(arg_vals)
+        if native_id == NATIVE_NODE_PATH_DIRNAME:
+            return path_dirname(arg_vals)
+        if native_id == NATIVE_NODE_PATH_BASENAME:
+            return path_basename(arg_vals)
+        if native_id == NATIVE_NODE_PATH_EXTNAME:
+            return path_extname(arg_vals)
+        if native_id == NATIVE_NODE_PATH_IS_ABSOLUTE:
+            return path_isAbsolute(arg_vals)
+        if native_id == NATIVE_NODE_PATH_NORMALIZE:
+            return path_normalize(arg_vals)
+        if native_id == NATIVE_NODE_BUFFER_BYTE_LENGTH:
+            return buffer_byteLength(arg_vals)
+        if native_id == NATIVE_NODE_BUFFER_FROM:
+            return self._native_node_buffer_from(arg_vals)
+        if native_id == NATIVE_NODE_BUFFER_ALLOC:
+            return self._native_node_buffer_alloc(arg_vals)
+        if native_id == NATIVE_NODE_BUFFER_CONCAT:
+            return self._native_node_buffer_concat(arg_vals)
+        if native_id == NATIVE_NODE_BUFFER_COMPARE:
+            return self._native_node_buffer_compare(arg_vals)
+        if native_id == NATIVE_NODE_BUFFER_EQUALS:
+            return self._native_node_buffer_equals(this_val, arg_vals)
+        if native_id == NATIVE_NODE_BUFFER_SLICE:
+            return self._native_node_buffer_slice(this_val, arg_vals)
+        if native_id == NATIVE_NODE_BUFFER_SUBARRAY:
+            return self._native_node_buffer_slice(this_val, arg_vals)
+        if native_id == NATIVE_NODE_BUFFER_READ_UINT8:
+            return self._native_node_buffer_read_uint8(this_val, arg_vals)
+        if native_id == NATIVE_NODE_BUFFER_READ_UINT16_LE:
+            return self._native_node_buffer_read_uint16_le(this_val, arg_vals)
+        if native_id == NATIVE_NODE_BUFFER_READ_UINT16_BE:
+            return self._native_node_buffer_read_uint16_be(this_val, arg_vals)
+        if native_id == NATIVE_NODE_BUFFER_READ_UINT32_LE:
+            return self._native_node_buffer_read_uint32_le(this_val, arg_vals)
+        if native_id == NATIVE_NODE_BUFFER_READ_UINT32_BE:
+            return self._native_node_buffer_read_uint32_be(this_val, arg_vals)
+        if native_id == NATIVE_NODE_BUFFER_WRITE_UINT8:
+            return self._native_node_buffer_write_uint8(this_val, arg_vals)
+        if native_id == NATIVE_NODE_BUFFER_WRITE_UINT16_LE:
+            return self._native_node_buffer_write_uint16_le(this_val, arg_vals)
+        if native_id == NATIVE_NODE_BUFFER_WRITE_UINT16_BE:
+            return self._native_node_buffer_write_uint16_be(this_val, arg_vals)
+        if native_id == NATIVE_NODE_BUFFER_WRITE_UINT32_LE:
+            return self._native_node_buffer_write_uint32_le(this_val, arg_vals)
+        if native_id == NATIVE_NODE_BUFFER_WRITE_UINT32_BE:
+            return self._native_node_buffer_write_uint32_be(this_val, arg_vals)
+        if native_id == NATIVE_NODE_BUFFER_IS_BUFFER:
+            return self._native_node_buffer_is_buffer(arg_vals)
+        if native_id == NATIVE_NODE_BUFFER_TO_STRING:
+            return self._native_node_buffer_to_string(this_val, arg_vals)
+        if native_id == NATIVE_NODE_OS_PLATFORM:
+            return os_platform(arg_vals)
+        if native_id == NATIVE_NODE_OS_ARCH:
+            return os_arch(arg_vals)
+        if native_id == NATIVE_NODE_OS_TYPE:
+            return os_type(arg_vals)
+        if native_id == NATIVE_NODE_OS_RELEASE:
+            return os_release(arg_vals)
+        if native_id == NATIVE_NODE_OS_HOMEDIR:
+            return os_homedir(arg_vals)
+        if native_id == NATIVE_NODE_OS_TMPDIR:
+            return os_tmpdir(arg_vals)
+        if native_id == NATIVE_NODE_OS_ENDIANNESS:
+            return os_endianness(arg_vals)
+        if native_id == NATIVE_NODE_PROCESS_CWD:
+            return process_cwd(arg_vals)
+        if native_id == NATIVE_NODE_PROCESS_NEXT_TICK:
+            return process_nextTick(arg_vals)
+        if native_id == NATIVE_NODE_PROCESS_EXIT:
+            return process_exit(arg_vals)
+        dispatch_native(native_id, arg_vals, self.logger)
+
+    me _native_node_require(arg_vals: [JsValue]) -> JsValue:
+        if arg_vals.len() == 0:
+            return JsValue.Undefined
+        var specifier = ""
+        match arg_vals.get(0):
+            JsValue.String(v):
+                specifier = v
+            _:
+                return JsValue.Undefined
+        val canonical = self._native_node_require_canonical_specifier(specifier)
+        var cache_key = canonical
+        if cache_key == "":
+            cache_key = specifier
+        var i = self.node_require_cache_names.len() - 1
+        while i >= 0:
+            if self.node_require_cache_names.get(i) == cache_key:
+                return self.node_require_cache_values.get(i)
+            i = i - 1
+        if canonical == "":
+            return self._native_node_require_cached(cache_key, self._native_node_denied_module(specifier))
+        var module_value = JsValue.Undefined
+        if canonical == "path":
+            module_value = self._native_node_path_module()
+        elif canonical == "buffer":
+            module_value = self._native_node_buffer_module()
+        elif canonical == "process":
+            match self.lookup_global_value("process"):
+                Some(v):
+                    module_value = v
+                _:
+                    module_value = self._native_node_denied_module(specifier)
+        elif canonical == "os":
+            module_value = self._native_node_os_module()
+        else:
+            return self._native_node_require_cached(cache_key, self._native_node_denied_module(specifier))
+        self._native_node_require_cached(cache_key, module_value)
+
+    me _native_node_require_canonical_specifier(specifier: text) -> text:
+        if specifier.starts_with("node:"):
+            return specifier.substring(5, specifier.len())
+        if specifier == "path" or specifier == "buffer" or specifier == "process" or specifier == "os":
+            return specifier
+        ""
+
+    me _native_node_require_cached(canonical: text, module_value: JsValue) -> JsValue:
+        var names = self.node_require_cache_names
+        var values = self.node_require_cache_values
+        names.push(canonical)
+        values.push(module_value)
+        self.node_require_cache_names = names
+        self.node_require_cache_values = values
+        module_value
+
+    me _native_node_require_function() -> JsValue:
+        JsValue.Function(id: self._register_native("require", NATIVE_NODE_REQUIRE))
+
+    me _native_node_path_module() -> JsValue:
+        val module_id = self.create_object()
+        self._define_method_on(module_id, "join", NATIVE_NODE_PATH_JOIN)
+        self._define_method_on(module_id, "dirname", NATIVE_NODE_PATH_DIRNAME)
+        self._define_method_on(module_id, "basename", NATIVE_NODE_PATH_BASENAME)
+        self._define_method_on(module_id, "extname", NATIVE_NODE_PATH_EXTNAME)
+        self._define_method_on(module_id, "isAbsolute", NATIVE_NODE_PATH_IS_ABSOLUTE)
+        self._define_method_on(module_id, "normalize", NATIVE_NODE_PATH_NORMALIZE)
+        self.set_object_property(module_id, "posix", JsValue.Object(id: module_id))
+        JsValue.Object(id: module_id)
+
+    me _native_node_os_module() -> JsValue:
+        val module_id = self.create_object()
+        self._define_method_on(module_id, "platform", NATIVE_NODE_OS_PLATFORM)
+        self._define_method_on(module_id, "arch", NATIVE_NODE_OS_ARCH)
+        self._define_method_on(module_id, "type", NATIVE_NODE_OS_TYPE)
+        self._define_method_on(module_id, "release", NATIVE_NODE_OS_RELEASE)
+        self._define_method_on(module_id, "homedir", NATIVE_NODE_OS_HOMEDIR)
+        self._define_method_on(module_id, "tmpdir", NATIVE_NODE_OS_TMPDIR)
+        self._define_method_on(module_id, "endianness", NATIVE_NODE_OS_ENDIANNESS)
+        self.set_object_property(module_id, "EOL", os_eol([]))
+        JsValue.Object(id: module_id)
+
+    me _native_node_buffer_module() -> JsValue:
+        val module_id = self.create_object()
+        val buffer_id = self.create_object()
+        self._define_method_on(buffer_id, "byteLength", NATIVE_NODE_BUFFER_BYTE_LENGTH)
+        self._define_method_on(buffer_id, "from", NATIVE_NODE_BUFFER_FROM)
+        self._define_method_on(buffer_id, "alloc", NATIVE_NODE_BUFFER_ALLOC)
+        self._define_method_on(buffer_id, "concat", NATIVE_NODE_BUFFER_CONCAT)
+        self._define_method_on(buffer_id, "compare", NATIVE_NODE_BUFFER_COMPARE)
+        self._define_method_on(buffer_id, "isBuffer", NATIVE_NODE_BUFFER_IS_BUFFER)
+        self.set_object_property(module_id, "Buffer", JsValue.Object(id: buffer_id))
+        JsValue.Object(id: module_id)
+
+    me _native_node_buffer_global() -> JsValue:
+        val buffer_id = self.create_object()
+        self._define_method_on(buffer_id, "byteLength", NATIVE_NODE_BUFFER_BYTE_LENGTH)
+        self._define_method_on(buffer_id, "from", NATIVE_NODE_BUFFER_FROM)
+        self._define_method_on(buffer_id, "alloc", NATIVE_NODE_BUFFER_ALLOC)
+        self._define_method_on(buffer_id, "concat", NATIVE_NODE_BUFFER_CONCAT)
+        self._define_method_on(buffer_id, "compare", NATIVE_NODE_BUFFER_COMPARE)
+        self._define_method_on(buffer_id, "isBuffer", NATIVE_NODE_BUFFER_IS_BUFFER)
+        JsValue.Object(id: buffer_id)
+
+    me _native_node_buffer_from(arg_vals: [JsValue]) -> JsValue:
+        var value = ""
+        var encoding = "utf8"
+        if arg_vals.len() > 0:
+            match arg_vals.get(0):
+                JsValue.String(v):
+                    value = v
+                JsValue.Array(arr_id):
+                    return self._native_node_buffer_value(NodeBuffer.from_bytes(self._native_node_buffer_array_bytes(arr_id)))
+                _: pass_dn
+        if arg_vals.len() > 1:
+            match arg_vals.get(1):
+                JsValue.String(v): encoding = v
+                _: pass_dn
+        self._native_node_buffer_value(NodeBuffer.from_text(value, encoding))
+
+    me _native_node_buffer_alloc(arg_vals: [JsValue]) -> JsValue:
+        var size = 0
+        var fill = 0
+        if arg_vals.len() > 0:
+            size = f64_to_i64(to_number(arg_vals.get(0)))
+        if arg_vals.len() > 1:
+            fill = f64_to_i64(to_number(arg_vals.get(1)))
+        self._native_node_buffer_value(NodeBuffer.alloc(size, fill))
+
+    me _native_node_buffer_array_bytes(arr_id: i64) -> [i64]:
+        var values: [i64] = []
+        val arr_len = self.object_store.array_length(arr_id)
+        var i = 0
+        while i < arr_len:
+            values.push(f64_to_i64(to_number(self.object_store.get_by_index(arr_id, i))))
+            i = i + 1
+        values
+
+    me _native_node_buffer_value(buffer: NodeBuffer) -> JsValue:
+        val obj_id = self.create_object()
+        self.set_object_property(obj_id, "__simple_node_buffer", JsValue.Boolean(v: true))
+        self.set_object_property(obj_id, "__simple_node_buffer_utf8", JsValue.String(v: buffer.to_string("utf8")))
+        self.set_object_property(obj_id, "__simple_node_buffer_hex", JsValue.String(v: buffer.to_string("hex")))
+        self.set_object_property(obj_id, "__simple_node_buffer_base64", JsValue.String(v: buffer.to_string("base64")))
+        self.set_object_property(obj_id, "length", JsValue.Number(v: buffer.length().to_f64()))
+        self._define_method_on(obj_id, "toString", NATIVE_NODE_BUFFER_TO_STRING)
+        self._define_method_on(obj_id, "equals", NATIVE_NODE_BUFFER_EQUALS)
+        self._define_method_on(obj_id, "slice", NATIVE_NODE_BUFFER_SLICE)
+        self._define_method_on(obj_id, "subarray", NATIVE_NODE_BUFFER_SUBARRAY)
+        self._define_method_on(obj_id, "readUInt8", NATIVE_NODE_BUFFER_READ_UINT8)
+        self._define_method_on(obj_id, "readUInt16LE", NATIVE_NODE_BUFFER_READ_UINT16_LE)
+        self._define_method_on(obj_id, "readUInt16BE", NATIVE_NODE_BUFFER_READ_UINT16_BE)
+        self._define_method_on(obj_id, "readUInt32LE", NATIVE_NODE_BUFFER_READ_UINT32_LE)
+        self._define_method_on(obj_id, "readUInt32BE", NATIVE_NODE_BUFFER_READ_UINT32_BE)
+        self._define_method_on(obj_id, "writeUInt8", NATIVE_NODE_BUFFER_WRITE_UINT8)
+        self._define_method_on(obj_id, "writeUInt16LE", NATIVE_NODE_BUFFER_WRITE_UINT16_LE)
+        self._define_method_on(obj_id, "writeUInt16BE", NATIVE_NODE_BUFFER_WRITE_UINT16_BE)
+        self._define_method_on(obj_id, "writeUInt32LE", NATIVE_NODE_BUFFER_WRITE_UINT32_LE)
+        self._define_method_on(obj_id, "writeUInt32BE", NATIVE_NODE_BUFFER_WRITE_UINT32_BE)
+        JsValue.Object(id: obj_id)
+
+    me _native_node_buffer_store(obj_id: i64, buffer: NodeBuffer):
+        self.set_object_property(obj_id, "__simple_node_buffer_utf8", JsValue.String(v: buffer.to_string("utf8")))
+        self.set_object_property(obj_id, "__simple_node_buffer_hex", JsValue.String(v: buffer.to_string("hex")))
+        self.set_object_property(obj_id, "__simple_node_buffer_base64", JsValue.String(v: buffer.to_string("base64")))
+        self.set_object_property(obj_id, "length", JsValue.Number(v: buffer.length().to_f64()))
+
+    me _native_node_buffer_concat(arg_vals: [JsValue]) -> JsValue:
+        var buffers: [NodeBuffer] = []
+        if arg_vals.len() > 0:
+            match arg_vals.get(0):
+                JsValue.Array(arr_id):
+                    val arr_len = self.object_store.array_length(arr_id)
+                    var i = 0
+                    while i < arr_len:
+                        val item = self.object_store.get_by_index(arr_id, i)
+                        val item_id = _get_obj_id(item)
+                        if item_id >= 0:
+                            match self.get_object_property(item_id, "__simple_node_buffer_hex"):
+                                JsValue.String(hex):
+                                    buffers.push(NodeBuffer.from_text(hex, "hex"))
+                                _:
+                                    pass_dn
+                        i = i + 1
+                _:
+                    pass_dn
+        self._native_node_buffer_value(NodeBuffer.concat(buffers))
+
+    me _native_node_buffer_compare(arg_vals: [JsValue]) -> JsValue:
+        if arg_vals.len() < 2:
+            return JsValue.Number(v: 0.0)
+        val left = self._native_node_buffer_arg(arg_vals[0])
+        val right = self._native_node_buffer_arg(arg_vals[1])
+        JsValue.Number(v: left.compare(right).to_f64())
+
+    me _native_node_buffer_equals(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        if arg_vals.len() == 0:
+            return JsValue.Boolean(v: false)
+        val left = self._native_node_buffer_arg(this_val)
+        val right = self._native_node_buffer_arg(arg_vals[0])
+        JsValue.Boolean(v: left.equals(right))
+
+    me _native_node_buffer_slice(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val buffer = self._native_node_buffer_arg(this_val)
+        var start = 0
+        var end = buffer.length()
+        if arg_vals.len() > 0:
+            start = f64_to_i64(to_number(arg_vals[0]))
+        if arg_vals.len() > 1:
+            end = f64_to_i64(to_number(arg_vals[1]))
+        self._native_node_buffer_value(buffer.slice(start, end))
+
+    me _native_node_buffer_read_uint8(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val buffer = self._native_node_buffer_arg(this_val)
+        var offset = 0
+        if arg_vals.len() > 0:
+            offset = f64_to_i64(to_number(arg_vals[0]))
+        JsValue.Number(v: buffer.read_uint8(offset).to_f64())
+
+    me _native_node_buffer_read_uint16_le(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val buffer = self._native_node_buffer_arg(this_val)
+        var offset = 0
+        if arg_vals.len() > 0:
+            offset = f64_to_i64(to_number(arg_vals[0]))
+        JsValue.Number(v: buffer.read_uint16_le(offset).to_f64())
+
+    me _native_node_buffer_read_uint16_be(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val buffer = self._native_node_buffer_arg(this_val)
+        var offset = 0
+        if arg_vals.len() > 0:
+            offset = f64_to_i64(to_number(arg_vals[0]))
+        JsValue.Number(v: buffer.read_uint16_be(offset).to_f64())
+
+    me _native_node_buffer_read_uint32_le(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val buffer = self._native_node_buffer_arg(this_val)
+        var offset = 0
+        if arg_vals.len() > 0:
+            offset = f64_to_i64(to_number(arg_vals[0]))
+        JsValue.Number(v: buffer.read_uint32_le(offset).to_f64())
+
+    me _native_node_buffer_read_uint32_be(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val buffer = self._native_node_buffer_arg(this_val)
+        var offset = 0
+        if arg_vals.len() > 0:
+            offset = f64_to_i64(to_number(arg_vals[0]))
+        JsValue.Number(v: buffer.read_uint32_be(offset).to_f64())
+
+    me _native_node_buffer_write_uint8(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val obj_id = _get_obj_id(this_val)
+        if obj_id < 0:
+            return JsValue.Number(v: 0.0)
+        val value = if arg_vals.len() > 0: f64_to_i64(to_number(arg_vals[0])) else: 0
+        val offset = if arg_vals.len() > 1: f64_to_i64(to_number(arg_vals[1])) else: 0
+        self._native_node_buffer_store(obj_id, self._native_node_buffer_arg(this_val).write_uint8(value, offset))
+        JsValue.Number(v: (offset + 1).to_f64())
+
+    me _native_node_buffer_write_uint16_le(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val obj_id = _get_obj_id(this_val)
+        if obj_id < 0:
+            return JsValue.Number(v: 0.0)
+        val value = if arg_vals.len() > 0: f64_to_i64(to_number(arg_vals[0])) else: 0
+        val offset = if arg_vals.len() > 1: f64_to_i64(to_number(arg_vals[1])) else: 0
+        self._native_node_buffer_store(obj_id, self._native_node_buffer_arg(this_val).write_uint16_le(value, offset))
+        JsValue.Number(v: (offset + 2).to_f64())
+
+    me _native_node_buffer_write_uint16_be(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val obj_id = _get_obj_id(this_val)
+        if obj_id < 0:
+            return JsValue.Number(v: 0.0)
+        val value = if arg_vals.len() > 0: f64_to_i64(to_number(arg_vals[0])) else: 0
+        val offset = if arg_vals.len() > 1: f64_to_i64(to_number(arg_vals[1])) else: 0
+        self._native_node_buffer_store(obj_id, self._native_node_buffer_arg(this_val).write_uint16_be(value, offset))
+        JsValue.Number(v: (offset + 2).to_f64())
+
+    me _native_node_buffer_write_uint32_le(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val obj_id = _get_obj_id(this_val)
+        if obj_id < 0:
+            return JsValue.Number(v: 0.0)
+        val value = if arg_vals.len() > 0: f64_to_i64(to_number(arg_vals[0])) else: 0
+        val offset = if arg_vals.len() > 1: f64_to_i64(to_number(arg_vals[1])) else: 0
+        self._native_node_buffer_store(obj_id, self._native_node_buffer_arg(this_val).write_uint32_le(value, offset))
+        JsValue.Number(v: (offset + 4).to_f64())
+
+    me _native_node_buffer_write_uint32_be(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val obj_id = _get_obj_id(this_val)
+        if obj_id < 0:
+            return JsValue.Number(v: 0.0)
+        val value = if arg_vals.len() > 0: f64_to_i64(to_number(arg_vals[0])) else: 0
+        val offset = if arg_vals.len() > 1: f64_to_i64(to_number(arg_vals[1])) else: 0
+        self._native_node_buffer_store(obj_id, self._native_node_buffer_arg(this_val).write_uint32_be(value, offset))
+        JsValue.Number(v: (offset + 4).to_f64())
+
+    me _native_node_buffer_is_buffer(arg_vals: [JsValue]) -> JsValue:
+        if arg_vals.len() == 0:
+            return JsValue.Boolean(v: false)
+        val obj_id = _get_obj_id(arg_vals[0])
+        if obj_id < 0:
+            return JsValue.Boolean(v: false)
+        match self.get_object_property(obj_id, "__simple_node_buffer"):
+            JsValue.Boolean(v):
+                return JsValue.Boolean(v: v)
+            _:
+                return JsValue.Boolean(v: false)
+
+    me _native_node_buffer_arg(value: JsValue) -> NodeBuffer:
+        val obj_id = _get_obj_id(value)
+        if obj_id < 0:
+            return NodeBuffer.from_text("", "utf8")
+        match self.get_object_property(obj_id, "__simple_node_buffer_hex"):
+            JsValue.String(hex):
+                return NodeBuffer.from_text(hex, "hex")
+            _:
+                return NodeBuffer.from_text("", "utf8")
+
+    me _native_node_buffer_to_string(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        var encoding = "utf8"
+        if arg_vals.len() > 0:
+            match arg_vals.get(0):
+                JsValue.String(v): encoding = v.trim().lower()
+                _: pass_dn
+        val obj_id = _get_obj_id(this_val)
+        if obj_id < 0:
+            return JsValue.String(v: "")
+        if encoding == "hex":
+            return self.get_object_property(obj_id, "__simple_node_buffer_hex")
+        if encoding == "base64":
+            return self.get_object_property(obj_id, "__simple_node_buffer_base64")
+        self.get_object_property(obj_id, "__simple_node_buffer_utf8")
+
+    me _native_node_denied_module(specifier: text) -> JsValue:
+        val module_id = self.create_object()
+        self.set_object_property(module_id, "status", JsValue.String(v: "denied"))
+        self.set_object_property(module_id, "specifier", JsValue.String(v: specifier))
+        self.set_object_property(module_id, "error", JsValue.String(v: "module-denied"))
+        JsValue.Object(id: module_id)
+
+    me _native_webassembly_validate(arg_vals: [JsValue]) -> JsValue:
+        JsValue.Boolean(v: self._native_webassembly_valid_hex_payload(arg_vals))
+
+    me _native_webassembly_module(arg_vals: [JsValue]) -> JsValue:
+        val payload_hex = self._native_webassembly_payload_hex(arg_vals)
+        val module_id = self._native_webassembly_create_module_object(payload_hex)
+        JsValue.Object(id: module_id)
+
+    me _native_webassembly_instance(arg_vals: [JsValue]) -> JsValue:
+        val instance_id = self.create_object()
+        val exports_id = self.create_object()
+        var valid_module = false
+        var module_id = -1
+        if arg_vals.len() > 0:
+            match arg_vals.get(0):
+                JsValue.Object(id):
+                    module_id = id
+                    match self.get_object_property(id, "__simple_wasm_module"):
+                        JsValue.Boolean(v):
+                            valid_module = v
+                        _:
+                            pass_dn
+                _:
+                    pass_dn
+        val imports_value = if arg_vals.len() > 1: arg_vals.get(1) else: JsValue.Undefined
+        val imports_satisfied = valid_module and module_id >= 0 and self._native_webassembly_imports_satisfied(module_id, imports_value)
+        self.set_object_property(instance_id, "exports", JsValue.Object(id: exports_id))
+        self.set_object_property(instance_id, "status", JsValue.String(v: if imports_satisfied: "instantiated" else: "invalid"))
+        self.set_object_property(instance_id, "moduleValid", JsValue.Boolean(v: valid_module))
+        if valid_module and not imports_satisfied:
+            self.set_object_property(instance_id, "error", JsValue.String(v: "unsupported-wasm-imports"))
+        else if not valid_module:
+            self.set_object_property(instance_id, "error", JsValue.String(v: "invalid-wasm-module"))
+        JsValue.Object(id: instance_id)
+
+    me _native_webassembly_requires_imports(module_id: i64) -> bool:
+        if module_id < 0:
+            return false
+        match self.get_object_property(module_id, "hasImportSection"):
+            JsValue.Boolean(v): v
+            _: false
+
+    me _native_webassembly_imports_satisfied(module_id: i64, imports_value: JsValue) -> bool:
+        if not self._native_webassembly_requires_imports(module_id):
+            return true
+        var import_count = 0
+        match self.get_object_property(module_id, "importCount"):
+            JsValue.Number(v): import_count = f64_to_i64(v)
+            _: pass_dn
+        if import_count != 1:
+            return false
+        var import_kind = ""
+        var module_name = ""
+        var field_name = ""
+        match self.get_object_property(module_id, "firstImportKind"):
+            JsValue.String(v): import_kind = v
+            _: pass_dn
+        match self.get_object_property(module_id, "firstImportModuleName"):
+            JsValue.String(v): module_name = v
+            _: pass_dn
+        match self.get_object_property(module_id, "firstImportFieldName"):
+            JsValue.String(v): field_name = v
+            _: pass_dn
+        if import_kind != "function" or module_name == "" or field_name == "":
+            return false
+        val imports_id = _get_obj_id(imports_value)
+        if imports_id < 0:
+            return false
+        val module_key = "" + module_name
+        val field_key = "" + field_name
+        val import_module_id = _get_obj_id(self.get_object_property(imports_id, module_key))
+        if import_module_id >= 0:
+            if _get_fn_id(self.get_object_property(import_module_id, field_key)) >= 0:
+                return true
+        false
+
+    me _native_webassembly_instantiate(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val payload_hex = self._native_webassembly_payload_hex(arg_vals)
+        val result_id = self.create_object()
+        self._define_method_on(result_id, "then", NATIVE_WEBASSEMBLY_INSTANTIATE_THEN)
+        self._define_method_on(result_id, "catch", NATIVE_WEBASSEMBLY_INSTANTIATE_CATCH)
+        val module_id = self._native_webassembly_create_module_object(payload_hex)
+        val instance_id = self.create_object()
+        val exports_id = self.create_object()
+        var validated = false
+        match self.get_object_property(module_id, "validated"):
+            JsValue.Boolean(v):
+                validated = v
+            _:
+                pass_dn
+        self.set_object_property(result_id, "module", JsValue.Object(id: module_id))
+        val imports_value = if arg_vals.len() > 1: arg_vals.get(1) else: JsValue.Undefined
+        val imports_satisfied = validated and self._native_webassembly_imports_satisfied(module_id, imports_value)
+        if validated and imports_satisfied:
+            self.set_object_property(instance_id, "exports", JsValue.Object(id: exports_id))
+            self.set_object_property(result_id, "instance", JsValue.Object(id: instance_id))
+            self.set_object_property(result_id, "status", JsValue.String(v: "instantiated"))
+        else:
+            self.set_object_property(result_id, "instance", JsValue.Null)
+            self.set_object_property(result_id, "status", JsValue.String(v: "invalid"))
+            if validated and not imports_satisfied:
+                self.set_object_property(result_id, "error", JsValue.String(v: "unsupported-wasm-imports"))
+            else:
+                match self.get_object_property(module_id, "error"):
+                    JsValue.String(v):
+                        self.set_object_property(result_id, "error", JsValue.String(v: v))
+                    _:
+                        self.set_object_property(result_id, "error", JsValue.String(v: "invalid-wasm-header"))
+        JsValue.Object(id: result_id)
+
+    me _native_webassembly_instantiate_then(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val result_id = _get_obj_id(this_val)
+        if result_id < 0:
+            return JsValue.Undefined
+        var status = ""
+        match self.get_object_property(result_id, "status"):
+            JsValue.String(v): status = v
+            _: pass_dn
+        if status == "instantiated" and arg_vals.len() > 0:
+            val callback_id = _get_fn_id(arg_vals[0])
+            if callback_id >= 0:
+                val callback_result = self._invoke_promise_callback(callback_id, [this_val])
+                match callback_result:
+                    Ok(v): return v
+                    Err(e): return JsValue.String(v: e.message)
+        if status != "instantiated" and arg_vals.len() > 1:
+            val callback_id = _get_fn_id(arg_vals[1])
+            if callback_id >= 0:
+                val callback_result = self._invoke_promise_callback(callback_id, [this_val])
+                match callback_result:
+                    Ok(v): return v
+                    Err(e): return JsValue.String(v: e.message)
+        this_val
+
+    me _native_webassembly_instantiate_catch(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val result_id = _get_obj_id(this_val)
+        if result_id < 0:
+            return JsValue.Undefined
+        var status = ""
+        match self.get_object_property(result_id, "status"):
+            JsValue.String(v): status = v
+            _: pass_dn
+        if status != "instantiated" and arg_vals.len() > 0:
+            val callback_id = _get_fn_id(arg_vals[0])
+            if callback_id >= 0:
+                val callback_result = self._invoke_promise_callback(callback_id, [this_val])
+                match callback_result:
+                    Ok(v): return v
+                    Err(e): return JsValue.String(v: e.message)
+        this_val
+
+    me _native_webassembly_create_module_object(payload_hex: text) -> i64:
+        val has_valid_header = self._native_webassembly_valid_header(payload_hex)
+        var sections_valid = false
+        if has_valid_header:
+            sections_valid = self._native_webassembly_sections_valid(payload_hex)
+        var validated = false
+        if has_valid_header and sections_valid:
+            validated = true
+        val module_id = self.create_object()
+        self.set_object_property(module_id, "__simple_wasm_module", JsValue.Boolean(v: validated))
+        self.set_object_property(module_id, "target", JsValue.String(v: "wasm32"))
+        self.set_object_property(module_id, "validated", JsValue.Boolean(v: validated))
+        self.set_object_property(module_id, "byteLength", JsValue.Number(v: ((payload_hex.len() / 2) as f64)))
+        self._native_webassembly_attach_section_metadata(module_id, payload_hex, validated)
+        if not validated:
+            if has_valid_header:
+                self.set_object_property(module_id, "error", JsValue.String(v: "invalid-wasm-section"))
+            else:
+                self.set_object_property(module_id, "error", JsValue.String(v: "invalid-wasm-header"))
+        module_id
+
+    me _native_webassembly_payload_hex(arg_vals: [JsValue]) -> text:
+        if arg_vals.len() == 0:
+            return ""
+        match arg_vals[0]:
+            JsValue.String(v): self._native_webassembly_normalize_hex(v)
+            JsValue.Array(id): self._native_webassembly_payload_hex_from_indexed(id)
+            JsValue.Object(id): self._native_webassembly_payload_hex_from_indexed(id)
+            _: ""
+
+    me _native_webassembly_payload_hex_from_indexed(obj_id: i64) -> text:
+        var length = 0
+        match self.get_object_property(obj_id, "byteLength"):
+            JsValue.Number(v):
+                length = f64_to_i64(v)
+            _:
+                match self.get_object_property(obj_id, "length"):
+                    JsValue.Number(v2):
+                        length = f64_to_i64(v2)
+                    _:
+                        length = self.object_store.array_length(obj_id)
+        if length <= 0:
+            return ""
+        var out = ""
+        var i = 0
+        while i < length:
+            val item = self.get_object_property(obj_id, "{i}")
+            match item:
+                JsValue.Number(v):
+                    val byte = f64_to_i64(v)
+                    if byte < 0 or byte > 255:
+                        return ""
+                    out = out + self._native_webassembly_byte_to_hex(byte)
+                _:
+                    return ""
+            i = i + 1
+        out
+
+    me _native_webassembly_byte_to_hex(byte: i64) -> text:
+        self._native_webassembly_nibble_to_hex(byte / 16) + self._native_webassembly_nibble_to_hex(byte % 16)
+
+    me _native_webassembly_nibble_to_hex(n: i64) -> text:
+        if n == 0:
+            return "0"
+        if n == 1:
+            return "1"
+        if n == 2:
+            return "2"
+        if n == 3:
+            return "3"
+        if n == 4:
+            return "4"
+        if n == 5:
+            return "5"
+        if n == 6:
+            return "6"
+        if n == 7:
+            return "7"
+        if n == 8:
+            return "8"
+        if n == 9:
+            return "9"
+        if n == 10:
+            return "a"
+        if n == 11:
+            return "b"
+        if n == 12:
+            return "c"
+        if n == 13:
+            return "d"
+        if n == 14:
+            return "e"
+        "f"
+
+    me _native_webassembly_normalize_hex(raw: text) -> text:
+        var s = raw.trim().lower()
+        if s.starts_with("0x"):
+            s = s.substring(2)
+        var out = ""
+        var i = 0
+        while i < s.len():
+            val ch = s.substring(i, i + 1)
+            if ch == " " or ch == "\n" or ch == "\r" or ch == "\t" or ch == "_":
+                i = i + 1
+                continue
+            if not self._native_webassembly_is_hex_digit(ch):
+                return ""
+            out = out + ch
+            i = i + 1
+        out
+
+    me _native_webassembly_is_hex_digit(ch: text) -> bool:
+        (ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")
+
+    me _native_webassembly_valid_hex_payload(arg_vals: [JsValue]) -> bool:
+        val hex = self._native_webassembly_payload_hex(arg_vals)
+        self._native_webassembly_valid_header(hex) and self._native_webassembly_sections_valid(hex)
+
+    me _native_webassembly_valid_header(hex: text) -> bool:
+        if hex.len() < 16:
+            return false
+        if (hex.len() % 2) != 0:
+            return false
+        if not hex.starts_with("0061736d01000000"):
+            return false
+        true
+
+    me _native_webassembly_attach_section_metadata(module_id: i64, hex: text, validated: bool):
+        self.set_object_property(module_id, "sectionCount", JsValue.Number(v: 0.0))
+        self.set_object_property(module_id, "hasTypeSection", JsValue.Boolean(v: false))
+        self.set_object_property(module_id, "hasImportSection", JsValue.Boolean(v: false))
+        self.set_object_property(module_id, "hasMemorySection", JsValue.Boolean(v: false))
+        self.set_object_property(module_id, "hasExportSection", JsValue.Boolean(v: false))
+        self.set_object_property(module_id, "importCount", JsValue.Number(v: 0.0))
+        self.set_object_property(module_id, "firstImportModuleName", JsValue.String(v: ""))
+        self.set_object_property(module_id, "firstImportFieldName", JsValue.String(v: ""))
+        self.set_object_property(module_id, "firstImportKind", JsValue.String(v: ""))
+        if not validated:
+            return
+        self.set_object_property(module_id, "sectionCount", JsValue.Number(v: self._native_webassembly_section_count(hex).to_f64()))
+        self.set_object_property(module_id, "hasTypeSection", JsValue.Boolean(v: self._native_webassembly_has_section(hex, 1)))
+        self.set_object_property(module_id, "hasImportSection", JsValue.Boolean(v: self._native_webassembly_has_section(hex, 2)))
+        self.set_object_property(module_id, "hasMemorySection", JsValue.Boolean(v: self._native_webassembly_has_section(hex, 5)))
+        self.set_object_property(module_id, "hasExportSection", JsValue.Boolean(v: self._native_webassembly_has_section(hex, 7)))
+        self.set_object_property(module_id, "importCount", JsValue.Number(v: self._native_webassembly_import_count(hex).to_f64()))
+        self.set_object_property(module_id, "firstImportModuleName", JsValue.String(v: self._native_webassembly_import_module_name_at(hex, 0)))
+        self.set_object_property(module_id, "firstImportFieldName", JsValue.String(v: self._native_webassembly_import_field_name_at(hex, 0)))
+        self.set_object_property(module_id, "firstImportKind", JsValue.String(v: self._native_webassembly_import_kind_at(hex, 0)))
+
+    me _native_webassembly_sections_valid(hex: text) -> bool:
+        if not self._native_webassembly_valid_header(hex):
+            return false
+        val byte_len = hex.len() / 2
+        var pos = 8
+        while pos < byte_len:
+            val section_id = self._native_webassembly_hex_byte_at(hex, pos)
+            if section_id < 0:
+                return false
+            pos = pos + 1
+            val payload_len = self._native_webassembly_read_leb_value(hex, pos)
+            val next_pos = self._native_webassembly_read_leb_next(hex, pos)
+            if payload_len < 0 or next_pos < 0:
+                return false
+            if next_pos + payload_len > byte_len:
+                return false
+            pos = next_pos + payload_len
+        pos == byte_len
+
+    me _native_webassembly_section_count(hex: text) -> i64:
+        if not self._native_webassembly_sections_valid(hex):
+            return 0
+        val byte_len = hex.len() / 2
+        var pos = 8
+        var count = 0
+        while pos < byte_len:
+            pos = pos + 1
+            val payload_len = self._native_webassembly_read_leb_value(hex, pos)
+            val next_pos = self._native_webassembly_read_leb_next(hex, pos)
+            pos = next_pos + payload_len
+            count = count + 1
+        count
+
+    me _native_webassembly_has_section(hex: text, wanted_id: i64) -> bool:
+        if not self._native_webassembly_sections_valid(hex):
+            return false
+        val byte_len = hex.len() / 2
+        var pos = 8
+        while pos < byte_len:
+            val section_id = self._native_webassembly_hex_byte_at(hex, pos)
+            pos = pos + 1
+            val payload_len = self._native_webassembly_read_leb_value(hex, pos)
+            val next_pos = self._native_webassembly_read_leb_next(hex, pos)
+            if section_id == wanted_id:
+                return true
+            pos = next_pos + payload_len
+        false
+
+    me _native_webassembly_section_payload_start(hex: text, wanted_id: i64) -> i64:
+        if not self._native_webassembly_sections_valid(hex):
+            return -1
+        val byte_len = hex.len() / 2
+        var pos = 8
+        while pos < byte_len:
+            val section_id = self._native_webassembly_hex_byte_at(hex, pos)
+            pos = pos + 1
+            val payload_len = self._native_webassembly_read_leb_value(hex, pos)
+            val next_pos = self._native_webassembly_read_leb_next(hex, pos)
+            if payload_len < 0 or next_pos < 0:
+                return -1
+            if section_id == wanted_id:
+                return next_pos
+            pos = next_pos + payload_len
+        -1
+
+    me _native_webassembly_section_payload_end(hex: text, wanted_id: i64) -> i64:
+        if not self._native_webassembly_sections_valid(hex):
+            return -1
+        val byte_len = hex.len() / 2
+        var pos = 8
+        while pos < byte_len:
+            val section_id = self._native_webassembly_hex_byte_at(hex, pos)
+            pos = pos + 1
+            val payload_len = self._native_webassembly_read_leb_value(hex, pos)
+            val next_pos = self._native_webassembly_read_leb_next(hex, pos)
+            if payload_len < 0 or next_pos < 0:
+                return -1
+            if section_id == wanted_id:
+                return next_pos + payload_len
+            pos = next_pos + payload_len
+        -1
+
+    me _native_webassembly_import_count(hex: text) -> i64:
+        val start = self._native_webassembly_section_payload_start(hex, 2)
+        if start < 0:
+            return 0
+        val count = self._native_webassembly_read_leb_value(hex, start)
+        if count < 0:
+            return 0
+        count
+
+    me _native_webassembly_import_module_name_at(hex: text, wanted_index: i64) -> text:
+        val pos = self._native_webassembly_import_entry_pos(hex, wanted_index)
+        val end = self._native_webassembly_section_payload_end(hex, 2)
+        if pos < 0 or end <= pos:
+            return ""
+        self._native_webassembly_name_at(hex, pos, end)
+
+    me _native_webassembly_import_field_name_at(hex: text, wanted_index: i64) -> text:
+        val pos = self._native_webassembly_import_entry_pos(hex, wanted_index)
+        val end = self._native_webassembly_section_payload_end(hex, 2)
+        if pos < 0 or end <= pos:
+            return ""
+        val module_len = self._native_webassembly_read_leb_value(hex, pos)
+        val module_start = self._native_webassembly_read_leb_next(hex, pos)
+        if module_len < 0 or module_start < 0:
+            return ""
+        self._native_webassembly_name_at(hex, module_start + module_len, end)
+
+    me _native_webassembly_import_kind_at(hex: text, wanted_index: i64) -> text:
+        val pos = self._native_webassembly_import_entry_pos(hex, wanted_index)
+        val end = self._native_webassembly_section_payload_end(hex, 2)
+        if pos < 0 or end <= pos:
+            return ""
+        val module_len = self._native_webassembly_read_leb_value(hex, pos)
+        val module_start = self._native_webassembly_read_leb_next(hex, pos)
+        if module_len < 0 or module_start < 0:
+            return ""
+        val field_pos = module_start + module_len
+        val field_len = self._native_webassembly_read_leb_value(hex, field_pos)
+        val field_start = self._native_webassembly_read_leb_next(hex, field_pos)
+        if field_len < 0 or field_start < 0:
+            return ""
+        val kind_pos = field_start + field_len
+        if kind_pos >= end:
+            return ""
+        val kind = self._native_webassembly_hex_byte_at(hex, kind_pos)
+        if kind == 0:
+            return "function"
+        if kind == 1:
+            return "table"
+        if kind == 2:
+            return "memory"
+        if kind == 3:
+            return "global"
+        ""
+
+    me _native_webassembly_import_entry_pos(hex: text, wanted_index: i64) -> i64:
+        val start = self._native_webassembly_section_payload_start(hex, 2)
+        val end = self._native_webassembly_section_payload_end(hex, 2)
+        if start < 0 or end <= start:
+            return -1
+        val count = self._native_webassembly_read_leb_value(hex, start)
+        var pos = self._native_webassembly_read_leb_next(hex, start)
+        if count < 0 or pos < 0:
+            return -1
+        var index = 0
+        while index < count and pos < end:
+            if index == wanted_index:
+                return pos
+            pos = self._native_webassembly_import_entry_next(hex, pos, end)
+            if pos < 0:
+                return -1
+            index = index + 1
+        -1
+
+    me _native_webassembly_import_entry_next(hex: text, pos: i64, end: i64) -> i64:
+        val module_len = self._native_webassembly_read_leb_value(hex, pos)
+        val module_start = self._native_webassembly_read_leb_next(hex, pos)
+        if module_len < 0 or module_start < 0:
+            return -1
+        val field_pos = module_start + module_len
+        val field_len = self._native_webassembly_read_leb_value(hex, field_pos)
+        val field_start = self._native_webassembly_read_leb_next(hex, field_pos)
+        if field_len < 0 or field_start < 0:
+            return -1
+        val kind_pos = field_start + field_len
+        if kind_pos >= end:
+            return -1
+        val kind = self._native_webassembly_hex_byte_at(hex, kind_pos)
+        val desc_pos = kind_pos + 1
+        if kind == 0:
+            return self._native_webassembly_read_leb_next(hex, desc_pos)
+        -1
+
+    me _native_webassembly_name_at(hex: text, pos: i64, end: i64) -> text:
+        val name_len = self._native_webassembly_read_leb_value(hex, pos)
+        val name_start = self._native_webassembly_read_leb_next(hex, pos)
+        if name_len < 0 or name_start < 0 or name_start + name_len > end:
+            return ""
+        var out = ""
+        var i = 0
+        while i < name_len:
+            val byte = self._native_webassembly_hex_byte_at(hex, name_start + i)
+            if byte < 0:
+                return ""
+            out = out + byte.chr()
+            i = i + 1
+        out
+
+    me _native_webassembly_read_leb_value(hex: text, pos: i64) -> i64:
+        val byte_len = hex.len() / 2
+        var cursor = pos
+        var shift = 0
+        var value = 0
+        var read_count = 0
+        while cursor < byte_len and read_count < 5:
+            val b = self._native_webassembly_hex_byte_at(hex, cursor)
+            if b < 0:
+                return -1
+            value = value + ((b % 128) * self._native_webassembly_pow2(shift))
+            cursor = cursor + 1
+            read_count = read_count + 1
+            if b < 128:
+                return value
+            shift = shift + 7
+        -1
+
+    me _native_webassembly_read_leb_next(hex: text, pos: i64) -> i64:
+        val byte_len = hex.len() / 2
+        var cursor = pos
+        var read_count = 0
+        while cursor < byte_len and read_count < 5:
+            val b = self._native_webassembly_hex_byte_at(hex, cursor)
+            if b < 0:
+                return -1
+            cursor = cursor + 1
+            read_count = read_count + 1
+            if b < 128:
+                return cursor
+        -1
+
+    me _native_webassembly_pow2(exp: i64) -> i64:
+        var value = 1
+        var i = 0
+        while i < exp:
+            value = value * 2
+            i = i + 1
+        value
+
+    me _native_webassembly_hex_byte_at(hex: text, byte_index: i64) -> i64:
+        val char_index = byte_index * 2
+        if char_index < 0 or char_index + 2 > hex.len():
+            return -1
+        val hi = self._native_webassembly_hex_value(hex.slice(char_index, char_index + 1))
+        val lo = self._native_webassembly_hex_value(hex.slice(char_index + 1, char_index + 2))
+        if hi < 0 or lo < 0:
+            return -1
+        hi * 16 + lo
+
+    me _native_webassembly_hex_value(ch: text) -> i64:
+        if ch == "0":
+            return 0
+        if ch == "1":
+            return 1
+        if ch == "2":
+            return 2
+        if ch == "3":
+            return 3
+        if ch == "4":
+            return 4
+        if ch == "5":
+            return 5
+        if ch == "6":
+            return 6
+        if ch == "7":
+            return 7
+        if ch == "8":
+            return 8
+        if ch == "9":
+            return 9
+        if ch == "a":
+            return 10
+        if ch == "b":
+            return 11
+        if ch == "c":
+            return 12
+        if ch == "d":
+            return 13
+        if ch == "e":
+            return 14
+        if ch == "f":
+            return 15
+        -1
+
+    me _native_set_timer(arg_vals: [JsValue], is_interval: bool) -> JsValue:
+        val timer_id = self.next_timer_id
+        self.next_timer_id = self.next_timer_id + 1
+        var callback_id = -1
+        if arg_vals.len() > 0:
+            match arg_vals[0]:
+                JsValue.Function(id): callback_id = id
+                _: pass_dn
+        var delay_ms = 0
+        if arg_vals.len() > 1:
+            delay_ms = f64_to_i64(to_number(arg_vals[1]))
+            if delay_ms < 0:
+                delay_ms = 0
+        if is_interval and delay_ms < 1:
+            delay_ms = 1
+        self.pending_timer_tasks = self.pending_timer_tasks + [PendingTimerTask.create(timer_id, callback_id, delay_ms, 0, is_interval)]
+        JsValue.Number(v: (timer_id as f64))
+
+    me _native_clear_timer(arg_vals: [JsValue]) -> JsValue:
+        if arg_vals.len() == 0:
+            return JsValue.Undefined
+        val timer_id = f64_to_i64(to_number(arg_vals[0]))
+        var rest: [PendingTimerTask] = []
+        var i = 0
+        while i < self.pending_timer_tasks.len():
+            val task = self.pending_timer_tasks[i]
+            if task.id != timer_id:
+                rest = rest + [task]
+            i = i + 1
+        self.pending_timer_tasks = rest
+        JsValue.Undefined
+
+    me _native_fetch(this_val: JsValue, arg_vals: [JsValue], env: i64) -> JsValue:
+        var host_obj_id = _get_obj_id(this_val)
+        if host_obj_id < 0:
+            match self.lookup_global_value("window"):
+                Some(window_val):
+                    host_obj_id = _get_obj_id(window_val)
+                _:
+                    pass_dn
+        if host_obj_id < 0:
+            return JsValue.Undefined
+        if not _simple_fetch_marker(host_obj_id, self.object_store):
+            return JsValue.Undefined
+
+        var request_url = _simple_fetch_base_url(host_obj_id, self.object_store)
+        if arg_vals.len() > 0:
+            request_url = _resolve_fetch_url(request_url, js_to_string(arg_vals.get(0)))
+
+        var method = "GET"
+        var headers_text = ""
+        var body = ""
+        var content_type = ""
+        if arg_vals.len() > 1:
+            match arg_vals.get(1):
+                JsValue.Object(opts_id):
+                    match self.get_object_property(opts_id, "method"):
+                        JsValue.String(v):
+                            if v.trim() != "":
+                                method = v.trim().upper()
+                        JsValue.Number(v):
+                            method = "{v}".upper()
+                        _: pass_dn
+                    match self.get_object_property(opts_id, "headers"):
+                        JsValue.Undefined: pass_dn
+                        header_value: headers_text = self._serialize_fetch_headers(header_value)
+                    match self.get_object_property(opts_id, "body"):
+                        JsValue.String(v): body = v
+                        JsValue.Number(v): body = "{v}"
+                        JsValue.Boolean(v): body = if v: "true" else: "false"
+                        _: pass_dn
+                    match self.get_object_property(opts_id, "contentType"):
+                        JsValue.String(v): content_type = v
+                        _: pass_dn
+                JsValue.String(v):
+                    headers_text = v
+                _:
+                    pass_dn
+
+        val cookie_header = _simple_fetch_cookie_header(host_obj_id, self.object_store)
+        if cookie_header != "":
+            if headers_text != "":
+                headers_text = headers_text + "\n"
+            headers_text = headers_text + "Cookie: " + cookie_header
+        if content_type != "":
+            if headers_text != "":
+                headers_text = headers_text + "\n"
+            headers_text = headers_text + "Content-Type: " + content_type
+
+        val promise_id = self._create_pending_promise_object()
+        val request_obj_id = self.create_object()
+        val request_id = "fetch-{self.next_async_request_seq}"
+        self.next_async_request_seq = self.next_async_request_seq + 1
+        self.set_object_property(promise_id, "__simple_request_id", JsValue.String(v: request_id))
+        self.set_object_property(request_obj_id, "request_id", JsValue.String(v: request_id))
+        self.set_object_property(request_obj_id, "kind", JsValue.String(v: "fetch"))
+        self.set_object_property(request_obj_id, "url", JsValue.String(v: request_url))
+        self.set_object_property(request_obj_id, "method", JsValue.String(v: if method.trim() != "": method else: "GET"))
+        self.set_object_property(request_obj_id, "headers", JsValue.String(v: headers_text))
+        self.set_object_property(request_obj_id, "body", JsValue.String(v: body))
+        self.set_object_property(request_obj_id, "content_type", JsValue.String(v: content_type))
+        self.set_object_property(request_obj_id, "promise_id", JsValue.String(v: "{promise_id}"))
+        val request_record = PendingAsyncRequest.create(request_obj_id)
+        self.pending_async_requests = self.pending_async_requests + [request_record]
+        self.pending_async_request_registry = self.pending_async_request_registry + [request_record]
+        JsValue.Object(id: promise_id)
+
+    me _native_promise_then(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val promise_id = _get_obj_id(this_val)
+        if promise_id < 0:
+            return JsValue.Undefined
+        var on_fulfilled = -1
+        var on_rejected = -1
+        if arg_vals.len() > 0:
+            on_fulfilled = _get_fn_id(arg_vals.get(0))
+        if arg_vals.len() > 1:
+            on_rejected = _get_fn_id(arg_vals.get(1))
+        val next_promise_id = self._create_pending_promise_object()
+        val handler_id = self._create_promise_handler(on_fulfilled, on_rejected, next_promise_id, "then")
+        self._append_handler(promise_id, handler_id)
+        match _simple_fetch_state(promise_id, self.object_store):
+            "pending": JsValue.Object(id: next_promise_id)
+            _:
+                self._settle_already_settled_promise_then(promise_id, on_fulfilled, on_rejected, next_promise_id)
+                JsValue.Object(id: next_promise_id)
+
+    me _settle_already_settled_promise_then(promise_id: i64, on_fulfilled: i64, on_rejected: i64, next_promise_id: i64):
+        val state = _simple_fetch_state(promise_id, self.object_store)
+        var settled_value = _simple_fetch_value(promise_id, self.object_store)
+        match settled_value:
+            JsValue.Object(id: settled_obj_id):
+                match self.get_object_property(settled_obj_id, "__simple_promise_host"):
+                    JsValue.Boolean(is_host):
+                        if is_host and _simple_fetch_state(settled_obj_id, self.object_store) == "fulfilled":
+                            settled_value = _simple_fetch_value(settled_obj_id, self.object_store)
+                    _:
+                        pass_dn
+            _:
+                pass_dn
+        var callback_id = if state == "fulfilled": on_fulfilled else: on_rejected
+        var propagate_rejection = state == "rejected"
+        var next_value = settled_value
+        if callback_id >= 0:
+            val result = self._invoke_promise_callback(callback_id, [settled_value])
+            match result:
+                Ok(callback_result):
+                    next_value = callback_result
+                    propagate_rejection = state == "rejected" and on_rejected < 0
+                Err(e):
+                    next_value = JsValue.String(v: e.message)
+                    propagate_rejection = true
+        val _ = self._resolve_promise_from_callback_result(next_promise_id, next_value, propagate_rejection)
+
+    me _native_promise_catch(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val promise_id = _get_obj_id(this_val)
+        if promise_id < 0:
+            return JsValue.Undefined
+        var on_rejected = -1
+        if arg_vals.len() > 0:
+            on_rejected = _get_fn_id(arg_vals.get(0))
+        val next_promise_id = self._create_pending_promise_object()
+        val handler_id = self._create_promise_handler(-1, on_rejected, next_promise_id, "then")
+        self._append_handler(promise_id, handler_id)
+        match _simple_fetch_state(promise_id, self.object_store):
+            "pending": JsValue.Object(id: next_promise_id)
+            _:
+                self._run_promise_task(promise_id, handler_id)
+                JsValue.Object(id: next_promise_id)
+
+    me _native_promise_finally(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val promise_id = _get_obj_id(this_val)
+        if promise_id < 0:
+            return JsValue.Undefined
+        var on_finally = -1
+        if arg_vals.len() > 0:
+            on_finally = _get_fn_id(arg_vals.get(0))
+        val next_promise_id = self._create_pending_promise_object()
+        val handler_id = self._create_promise_handler(on_finally, on_finally, next_promise_id, "finally")
+        self._append_handler(promise_id, handler_id)
+        match _simple_fetch_state(promise_id, self.object_store):
+            "pending": JsValue.Object(id: next_promise_id)
+            _:
+                self._run_promise_task(promise_id, handler_id)
+                JsValue.Object(id: next_promise_id)
+
+    me _native_promise_resolve(arg_vals: [JsValue]) -> JsValue:
+        val value = if arg_vals.len() > 0: arg_vals.get(0) else: JsValue.Undefined
+        match value:
+            JsValue.Object(id: obj_id):
+                match self.get_object_property(obj_id, "__simple_promise_host"):
+                    JsValue.Boolean(is_host):
+                        if is_host:
+                            return value
+                    _:
+                        pass_dn
+            _:
+                pass_dn
+        JsValue.Object(id: self._create_settled_promise_object(value, false))
+
+    me _native_promise_reject(arg_vals: [JsValue]) -> JsValue:
+        val value = if arg_vals.len() > 0: arg_vals.get(0) else: JsValue.Undefined
+        JsValue.Object(id: self._create_settled_promise_object(value, true))
+
+    me _native_response_text(this_val: JsValue) -> JsValue:
+        val response_id = _get_obj_id(this_val)
+        if response_id < 0:
+            return JsValue.Undefined
+        self.set_object_property(response_id, "bodyUsed", JsValue.Boolean(v: true))
+        match self.get_object_property(response_id, "body"):
+            JsValue.String(v): JsValue.Object(id: self._create_settled_promise_object(JsValue.String(v: v), false))
+            _: JsValue.Undefined
+
+    me _native_response_json(this_val: JsValue) -> JsValue:
+        val response_id = _get_obj_id(this_val)
+        if response_id < 0:
+            return JsValue.Undefined
+        self.set_object_property(response_id, "bodyUsed", JsValue.Boolean(v: true))
+        match self.get_object_property(response_id, "body"):
+            JsValue.String(v):
+                match self._json_parse_allocated(v, self.global_env):
+                    Ok(value): JsValue.Object(id: self._create_settled_promise_object(value, false))
+                    Err(e): JsValue.Object(id: self._create_settled_promise_object(JsValue.String(v: e.message), true))
+            _: JsValue.Undefined
+
+    me _native_response_blob(this_val: JsValue) -> JsValue:
+        val response_id = _get_obj_id(this_val)
+        if response_id < 0:
+            return JsValue.Undefined
+        self.set_object_property(response_id, "bodyUsed", JsValue.Boolean(v: true))
+        var body = ""
+        match self.get_object_property(response_id, "body"):
+            JsValue.String(v): body = v
+            _: pass_dn
+        var blob_type = self._response_content_type(response_id)
+        if blob_type == "":
+            blob_type = "application/octet-stream"
+        val blob_id = self.create_object()
+        self.set_object_property(blob_id, "__simple_blob_host", JsValue.Boolean(v: true))
+        self.set_object_property(blob_id, "size", JsValue.Number(v: body.len().to_f64()))
+        self.set_object_property(blob_id, "type", JsValue.String(v: blob_type))
+        self.set_object_property(blob_id, "__body__", JsValue.String(v: body))
+        self._define_method_on(blob_id, "text", NATIVE_BLOB_TEXT)
+        JsValue.Object(id: self._create_settled_promise_object(JsValue.Object(id: blob_id), false))
+
+    me _native_response_array_buffer(this_val: JsValue) -> JsValue:
+        val response_id = _get_obj_id(this_val)
+        if response_id < 0:
+            return JsValue.Undefined
+        self.set_object_property(response_id, "bodyUsed", JsValue.Boolean(v: true))
+        var body = ""
+        match self.get_object_property(response_id, "body"):
+            JsValue.String(v): body = v
+            _: pass_dn
+        val body_hex = self._native_webassembly_normalize_hex(body)
+        val use_hex_body = self._native_webassembly_valid_header(body_hex)
+        val byte_len = if use_hex_body: body_hex.len() / 2 else: body.bytes().len()
+        val buffer_id = self.create_object()
+        self.set_object_property(buffer_id, "__simple_array_buffer", JsValue.Boolean(v: true))
+        self.set_object_property(buffer_id, "byteLength", JsValue.Number(v: byte_len.to_f64()))
+        var i = 0
+        if use_hex_body:
+            while i < byte_len:
+                val byte = self._native_webassembly_hex_byte_at(body_hex, i)
+                self.set_object_property(buffer_id, i.to_text(), JsValue.Number(v: byte.to_f64()))
+                i = i + 1
+        else:
+            val bytes = body.bytes()
+            while i < bytes.len():
+                self.set_object_property(buffer_id, i.to_text(), JsValue.Number(v: (bytes[i] as i64).to_f64()))
+                i = i + 1
+        JsValue.Object(id: self._create_settled_promise_object(JsValue.Object(id: buffer_id), false))
+
+    me _native_blob_text(this_val: JsValue) -> JsValue:
+        val blob_id = _get_obj_id(this_val)
+        if blob_id < 0:
+            return JsValue.Undefined
+        match self.get_object_property(blob_id, "__body__"):
+            JsValue.String(v): JsValue.Object(id: self._create_settled_promise_object(JsValue.String(v: v), false))
+            _: JsValue.Object(id: self._create_settled_promise_object(JsValue.String(v: ""), false))
+
+    me _native_navigator_gpu_request_adapter(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val gpu_id = _get_obj_id(this_val)
+        if gpu_id < 0:
+            return JsValue.Object(id: self._create_settled_promise_object(JsValue.Null, false))
+        match self.get_object_property(gpu_id, "__simple_webgpu_host"):
+            JsValue.Boolean(is_host):
+                if not is_host:
+                    return JsValue.Object(id: self._create_settled_promise_object(JsValue.Null, false))
+            _:
+                return JsValue.Object(id: self._create_settled_promise_object(JsValue.Null, false))
+
+        val adapter_id = self.create_object()
+        self.set_object_property(adapter_id, "__simple_webgpu_adapter_host", JsValue.Boolean(v: true))
+        self.set_object_property(adapter_id, "name", JsValue.String(v: "Simple WebGPU Software Adapter"))
+        self.set_object_property(adapter_id, "requestAdapterStatus", JsValue.String(v: "available"))
+        self.set_object_property(adapter_id, "isFallbackAdapter", JsValue.Boolean(v: true))
+        self.set_object_property(adapter_id, "features", JsValue.String(v: "texture-compression-bc,timestamp-query"))
+        self.set_object_property(adapter_id, "limitsProfile", JsValue.String(v: "mvp"))
+        JsValue.Object(id: self._create_settled_promise_object(JsValue.Object(id: adapter_id), false))
+
+    me _response_content_type(response_id: i64) -> text:
+        match self.get_object_property(response_id, "headersText"):
+            JsValue.String(headers):
+                for line in headers.split("\n"):
+                    val trimmed = line.trim()
+                    if trimmed.lower().starts_with("content-type:"):
+                        return trimmed.slice(13, trimmed.len()).trim()
+            _: pass_dn
+        ""
+
+    me _json_parse_allocated(source: text, env: i64) -> BrowserResult<JsValue>:
+        if not json_is_valid(source):
+            return Err(script_error("invalid-json"))
+        var parser = JsParser.create(source, self.logger)
+        val expr = parser.parse_assignment()?
+        self.eval_expression(expr, env)
+
+    me _storage_api_property(key: text) -> bool:
+        key == "__proto__" or
+        key == "getItem" or
+        key == "setItem" or
+        key == "removeItem" or
+        key == "clear" or
+        key == "key" or
+        key == "length"
+
+    me _storage_internal_prefix() -> text:
+        "__simple_storage_data:"
+
+    me _storage_internal_key(key: text) -> text:
+        self._storage_internal_prefix() + key
+
+    me _storage_public_key_from_internal(key: text) -> text:
+        val prefix = self._storage_internal_prefix()
+        if key.starts_with(prefix):
+            return key.slice(prefix.len(), key.len())
+        key
+
+    me _storage_property_key(key: text) -> text:
+        if self._storage_api_property(key):
+            return self._storage_internal_key(key)
+        key
+
+    me _storage_keys(storage_id: i64) -> [text]:
+        val obj = self.object_store.get_object(storage_id)
+        var keys: [text] = []
+        for prop in obj.properties:
+            if prop.key.starts_with(self._storage_internal_prefix()):
+                keys.push(self._storage_public_key_from_internal(prop.key))
+            else if not self._storage_api_property(prop.key):
+                keys.push(prop.key)
+        keys
+
+    me _sync_storage_length(storage_id: i64):
+        val keys = self._storage_keys(storage_id)
+        self.set_object_property(storage_id, "length", JsValue.Number(v: keys.len().to_f64()))
+
+    me _native_storage_get_item(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val storage_id = _get_obj_id(this_val)
+        if storage_id < 0:
+            return JsValue.Undefined
+        val key = if arg_vals.len() > 0: js_to_string(arg_vals.get(0)) else: ""
+        val stored = self.get_object_property(storage_id, self._storage_property_key(key))
+        if val JsValue.Undefined = stored:
+            return JsValue.Null
+        if val JsValue.String(v) = stored:
+            return JsValue.String(v: v)
+        JsValue.String(v: js_to_string(stored))
+
+    me _native_storage_set_item(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val storage_id = _get_obj_id(this_val)
+        if storage_id < 0:
+            return JsValue.Undefined
+        val key = if arg_vals.len() > 0: js_to_string(arg_vals.get(0)) else: ""
+        val value = if arg_vals.len() > 1: js_to_string(arg_vals.get(1)) else: ""
+        self.set_object_property(storage_id, self._storage_property_key(key), JsValue.String(v: value))
+        self._sync_storage_length(storage_id)
+        JsValue.Undefined
+
+    me _native_storage_remove_item(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val storage_id = _get_obj_id(this_val)
+        if storage_id < 0:
+            return JsValue.Undefined
+        val key = if arg_vals.len() > 0: js_to_string(arg_vals.get(0)) else: ""
+        self.object_store.remove_property(storage_id, self._storage_property_key(key))
+        self._sync_storage_length(storage_id)
+        JsValue.Undefined
+
+    me _native_storage_clear(this_val: JsValue) -> JsValue:
+        val storage_id = _get_obj_id(this_val)
+        if storage_id < 0:
+            return JsValue.Undefined
+        for key in self._storage_keys(storage_id):
+            self.object_store.remove_property(storage_id, self._storage_property_key(key))
+        self._sync_storage_length(storage_id)
+        JsValue.Undefined
+
+    me _native_storage_key(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val storage_id = _get_obj_id(this_val)
+        if storage_id < 0:
+            return JsValue.Undefined
+        val idx = if arg_vals.len() > 0: f64_to_i64(to_number(arg_vals.get(0))) else: -1
+        val keys = self._storage_keys(storage_id)
+        if idx < 0 or idx >= keys.len():
+            return JsValue.Null
+        JsValue.String(v: keys.get(idx))

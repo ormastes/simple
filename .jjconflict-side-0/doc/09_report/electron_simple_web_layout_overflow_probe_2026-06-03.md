@@ -1,0 +1,90 @@
+# Electron Simple Web Layout Bitmap Evidence
+
+- status: pass
+- reason: pass
+- scene: simple-web-layout-overflow-hidden-matrix
+- dimensions: 96x64
+- Simple checksum: 26369074358080
+- Electron checksum: 26369074358080
+- Simple weighted checksum: 81041980097037120
+- Electron weighted checksum: 81041980097037120
+- mismatch count: 0
+- same pixels: 6144
+- Chrome extra text pixels: 0
+- Simple extra text pixels: 0
+- text color delta pixels: 0
+- surface geometry pixels: 0
+- blur/tolerance used: false
+- Electron frame us: 21639
+- HTML path: build/electron_simple_web_layout_overflow_probe/scene.html
+- expected ARGB path: build/electron_simple_web_layout_overflow_probe/expected-argb.json
+- captured ARGB path: build/electron_simple_web_layout_overflow_probe/electron-argb.json
+- captured ARGB written: true
+
+## Raw Evidence
+- electron_simple_web_layout_status=pass
+- electron_simple_web_layout_reason=pass
+- electron_simple_web_layout_scene=simple-web-layout-overflow-hidden-matrix
+- electron_simple_web_layout_width=96
+- electron_simple_web_layout_height=64
+- electron_simple_web_layout_iterations=3
+- electron_simple_web_layout_simple_checksum=26369074358080
+- electron_simple_web_layout_electron_checksum=26369074358080
+- electron_simple_web_layout_simple_weighted_checksum=81041980097037120
+- electron_simple_web_layout_electron_weighted_checksum=81041980097037120
+- electron_simple_web_layout_mismatch_count=0
+- electron_simple_web_layout_same_pixels=6144
+- electron_simple_web_layout_chrome_extra_text_pixels=0
+- electron_simple_web_layout_simple_extra_text_pixels=0
+- electron_simple_web_layout_text_color_delta_pixels=0
+- electron_simple_web_layout_surface_geometry_pixels=0
+- electron_simple_web_layout_blur_or_tolerance_used=false
+- electron_simple_web_layout_electron_frame_us=21639
+- electron_simple_web_layout_html_path=build/electron_simple_web_layout_overflow_probe/scene.html
+- electron_simple_web_layout_expected_argb_path=build/electron_simple_web_layout_overflow_probe/expected-argb.json
+- electron_simple_web_layout_captured_argb_path=build/electron_simple_web_layout_overflow_probe/electron-argb.json
+- electron_simple_web_layout_captured_argb_written=true
+- electron_simple_web_layout_exit_code=0
+
+## Simple Output
+- [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown variable: simple_web_file_render_url_to_pixels
+- [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
+- simple_status=pass
+- simple_reason=pass
+- renderer=pure-simple-web-layout-renderer
+- scene=simple-web-layout-overflow-hidden-matrix
+- width=96
+- height=64
+- checksum=26369074358080
+- weighted_checksum=81041980097037120
+- expected_argb_path=build/electron_simple_web_layout_overflow_probe/expected-argb.json
+- blur_or_tolerance_used=false
+- simple_status=pass
+- simple_reason=pass
+- renderer=pure-simple-web-layout-renderer
+- scene=simple-web-layout-overflow-hidden-matrix
+- width=96
+- height=64
+- checksum=26369074358080
+- weighted_checksum=81041980097037120
+- expected_argb_path=build/electron_simple_web_layout_overflow_probe/expected-argb.json
+- blur_or_tolerance_used=false
+
+## Electron Output
+- renderer=electron-live-capture-page
+- scene=simple-web-layout-overflow-hidden-matrix
+- width=96
+- height=64
+- iterations=3
+- checksum=26369074358080
+- expected_checksum=26369074358080
+- weighted_checksum=81041980097037120
+- expected_weighted_checksum=81041980097037120
+- mismatch_count=0
+- frame_us=21639
+- capture_native_width=96
+- capture_native_height=64
+- capture_downsampled=false
+- captured_argb_path=build/electron_simple_web_layout_overflow_probe/electron-argb.json
+- captured_argb_written=true
+- blur_or_tolerance_used=false

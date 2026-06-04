@@ -1,0 +1,134 @@
+# Bit-level CPU-vs-Metal engine2d parity harness.
+#
+# Renders identical draw scripts on the CPU (software/SIMD) backend and the
+# Metal GPU backend, downloads BOTH framebuffers from their own backend, and
+# asserts pixel-exact equality. This is NOT a spec because the test runner
+# currently segfaults when the engine2d GPU module graph is imported; it is run
+# directly via `bin/simple run ... --mode=interpreter`.
+#
+# Guards against the false-greens this area has a history of:
+#   - Metal must run on the GPU (gpu_frame_complete == true and read_pixels
+#     downloads the GPU framebuffer, not the CPU mirror).
+#   - The two framebuffers are produced independently (one per backend), never
+#     one renderer compared against itself.
+#
+# Output: one line per scene "<name>: MATCH|DIVERGE ..." and a final
+# "PARITY: pass|fail" line consumed by the check script.
+
+use std.gc_async_mut.gpu.engine2d.backend_cpu.{CpuBackend}
+use std.gc_async_mut.gpu.engine2d.backend_metal.{MetalBackend}
+use std.nogc_sync_mut.env.platform.{is_macos}
+
+var _failures = 0
+
+fn compare(name: text, cpu_px: [u32], metal_px: [u32], gpu_ok: bool):
+    if not gpu_ok:
+        _failures = _failures + 1
+        print("{name}: DIVERGE reason=metal-fell-back-to-cpu-mirror gpu_ok=false")
+        return
+    if cpu_px.len() != metal_px.len():
+        _failures = _failures + 1
+        print("{name}: DIVERGE reason=length cpu={cpu_px.len()} metal={metal_px.len()}")
+        return
+    var mismatches = 0
+    var first_idx = -1
+    var first_cpu: u32 = 0u32
+    var first_metal: u32 = 0u32
+    var i = 0
+    while i < cpu_px.len():
+        if cpu_px[i] != metal_px[i]:
+            mismatches = mismatches + 1
+            if first_idx < 0:
+                first_idx = i
+                first_cpu = cpu_px[i]
+                first_metal = metal_px[i]
+        i = i + 1
+    if mismatches == 0:
+        print("{name}: MATCH mismatches=0/{cpu_px.len()} gpu_ok=true")
+    else:
+        _failures = _failures + 1
+        print("{name}: DIVERGE mismatches={mismatches}/{cpu_px.len()} gpu_ok=true first_idx={first_idx} cpu={first_cpu.to_text()} metal={first_metal.to_text()}")
+
+# ---- scene: clear ----
+fn cpu_clear(w: i32, h: i32) -> [u32]:
+    var b = CpuBackend.create()
+    b.init(w, h)
+    b.clear(0x10203040 as u32)
+    b.present()
+    b.read_pixels()
+
+fn metal_clear(w: i32, h: i32) -> MetalBackend:
+    var b = MetalBackend.create()
+    b.init(w, h)
+    b.clear(0x10203040 as u32)
+    b.present()
+    b
+
+# ---- scene: rects (filled + outline) ----
+fn cpu_rects(w: i32, h: i32) -> [u32]:
+    var b = CpuBackend.create()
+    b.init(w, h)
+    b.clear(0xFF000000 as u32)
+    b.draw_rect_filled(2, 2, 10, 6, 0xFF112233 as u32)
+    b.draw_rect_filled(20, 5, 8, 8, 0xFFAABBCC as u32)
+    b.draw_rect_filled(28, 28, 8, 8, 0xFF445566 as u32)
+    b.draw_rect(1, 1, 30, 30, 0xFFFFFFFF as u32)
+    b.present()
+    b.read_pixels()
+
+fn metal_rects(w: i32, h: i32) -> MetalBackend:
+    var b = MetalBackend.create()
+    b.init(w, h)
+    b.clear(0xFF000000 as u32)
+    b.draw_rect_filled(2, 2, 10, 6, 0xFF112233 as u32)
+    b.draw_rect_filled(20, 5, 8, 8, 0xFFAABBCC as u32)
+    b.draw_rect_filled(28, 28, 8, 8, 0xFF445566 as u32)
+    b.draw_rect(1, 1, 30, 30, 0xFFFFFFFF as u32)
+    b.present()
+    b
+
+# ---- scene: vertical gradient ----
+fn cpu_gradient(w: i32, h: i32) -> [u32]:
+    var b = CpuBackend.create()
+    b.init(w, h)
+    b.clear(0xFF000000 as u32)
+    b.draw_gradient_rect(0, 0, 32, 32, 0xFFFF0000 as u32, 0xFF0000FF as u32)
+    b.present()
+    b.read_pixels()
+
+fn metal_gradient(w: i32, h: i32) -> MetalBackend:
+    var b = MetalBackend.create()
+    b.init(w, h)
+    b.clear(0xFF000000 as u32)
+    b.draw_gradient_rect(0, 0, 32, 32, 0xFFFF0000 as u32, 0xFF0000FF as u32)
+    b.present()
+    b
+
+fn main():
+    if not is_macos():
+        print("PARITY: skip reason=not-macos")
+        return
+
+    val c1 = cpu_clear(32, 32)
+    var m1 = metal_clear(32, 32)
+    compare("clear", c1, m1.read_pixels(), m1.gpu_frame_complete)
+
+    val c2 = cpu_rects(32, 32)
+    var m2 = metal_rects(32, 32)
+    compare("rects", c2, m2.read_pixels(), m2.gpu_frame_complete)
+
+    val c3 = cpu_gradient(32, 32)
+    var m3 = metal_gradient(32, 32)
+    compare("gradient", c3, m3.read_pixels(), m3.gpu_frame_complete)
+
+    # Scope: only the ops that share an exact integer algorithm on CPU and the
+    # Metal GPU are asserted here. line/circle/rounded_rect use different
+    # rasterization on each backend and diverge (tracked in
+    # doc/08_tracking/bug/engine2d_cpu_metal_primitive_raster_divergence_2026-06-03.md);
+    # triangle is not GPU-dispatched on Metal (mirror tautology), so it is
+    # excluded rather than compared.
+    print("SCOPE: asserts clear,rect_filled,rect_outline,gradient (bit-exact); excludes line,circle,rounded_rect (algorithm divergence), triangle (no GPU dispatch)")
+    if _failures == 0:
+        print("PARITY: pass")
+    else:
+        print("PARITY: fail failures={_failures}")

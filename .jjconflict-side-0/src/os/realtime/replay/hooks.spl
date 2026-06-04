@@ -1,0 +1,149 @@
+# @platform: baremetal
+#
+# RTOS replay hooks — called from scheduler, timer, I/O, random.
+# Uses bm_replay_core ring buffer (4 x i64 per event, 4096 cap).
+# Each hook checks rtos_replay_is_off() first — single load + branch.
+#
+# Event kind encoding (fits in bm_ring_push kind field):
+#   0 = schedule, 1 = timer_tick, 2 = irq, 3 = io_write,
+#   4 = io_read, 5 = random, 6 = checkpoint, 7 = task_create, 8 = task_exit
+
+use std.replay.bm_replay_core (
+    bm_ring_push, bm_ring_pop_kind, bm_ring_pop_val_a, bm_ring_pop_val_b,
+    bm_ring_count
+)
+
+val RR_SCHEDULE: i64 = 0
+val RR_TIMER_TICK: i64 = 1
+val RR_IRQ: i64 = 2
+val RR_IO_WRITE: i64 = 3
+val RR_IO_READ: i64 = 4
+val RR_RANDOM: i64 = 5
+val RR_CHECKPOINT: i64 = 6
+val RR_TASK_CREATE: i64 = 7
+val RR_TASK_EXIT: i64 = 8
+
+var divergence_count: i32 = 0
+
+fn rr_hook_schedule(old_tid: i32, new_tid: i32, tick: u64):
+    """Record/replay a context switch decision."""
+    if rtos_replay_is_off():
+        return
+
+    val seq = rtos_replay_next_seq()
+
+    if rtos_replay_is_recording():
+        bm_ring_push(RR_SCHEDULE, seq, old_tid.to_i64(), new_tid.to_i64())
+        return
+
+    if rtos_replay_is_replaying():
+        val logged_kind = bm_ring_pop_kind()
+        val logged_new_tid = bm_ring_pop_val_b()
+        # Caller should force new_tid = logged_new_tid
+        return
+
+    if rtos_replay_is_verifying():
+        val logged_kind = bm_ring_pop_kind()
+        val logged_new_tid = bm_ring_pop_val_b()
+        if logged_new_tid != new_tid.to_i64():
+            divergence_count = divergence_count + 1
+
+fn rr_hook_timer_tick(tick: u64):
+    """Record a timer tick event."""
+    if rtos_replay_is_off():
+        return
+    if rtos_replay_is_recording():
+        bm_ring_push(RR_TIMER_TICK, rtos_replay_next_seq(), tick.to_i64(), 0)
+
+fn rr_hook_irq(vector: i32, tick: u64):
+    """Record/replay an interrupt delivery."""
+    if rtos_replay_is_off():
+        return
+    if rtos_replay_is_recording():
+        bm_ring_push(RR_IRQ, rtos_replay_next_seq(), vector.to_i64(), tick.to_i64())
+        return
+
+    if rtos_replay_is_verifying():
+        val logged_kind = bm_ring_pop_kind()
+        val logged_vector = bm_ring_pop_val_a()
+        if logged_vector != vector.to_i64():
+            divergence_count = divergence_count + 1
+
+fn rr_hook_io_write(addr: u64, value: u64):
+    """Record an I/O write for deterministic replay."""
+    if rtos_replay_is_off():
+        return
+    if rtos_replay_is_recording():
+        bm_ring_push(RR_IO_WRITE, rtos_replay_next_seq(), addr.to_i64(), value.to_i64())
+
+fn rr_hook_io_read(addr: u64, value: u64) -> u64:
+    """Record/replay an I/O read. In replay, returns logged value."""
+    if rtos_replay_is_off():
+        return value
+    if rtos_replay_is_recording():
+        bm_ring_push(RR_IO_READ, rtos_replay_next_seq(), addr.to_i64(), value.to_i64())
+        return value
+
+    if rtos_replay_is_replaying():
+        val logged_kind = bm_ring_pop_kind()
+        if logged_kind == RR_IO_READ:
+            return bm_ring_pop_val_b().to_u64()
+        return value
+
+    if rtos_replay_is_verifying():
+        val logged_kind = bm_ring_pop_kind()
+        val logged_value = bm_ring_pop_val_b()
+        if logged_value != value.to_i64():
+            divergence_count = divergence_count + 1
+        return value
+
+    value
+
+fn rr_hook_random(value: u64) -> u64:
+    """Record/replay random number. In replay, returns logged value."""
+    if rtos_replay_is_off():
+        return value
+    if rtos_replay_is_recording():
+        bm_ring_push(RR_RANDOM, rtos_replay_next_seq(), value.to_i64(), 0)
+        return value
+
+    if rtos_replay_is_replaying():
+        val logged_kind = bm_ring_pop_kind()
+        if logged_kind == RR_RANDOM:
+            return bm_ring_pop_val_a().to_u64()
+        return value
+
+    value
+
+fn rr_hook_checkpoint(checkpoint_id: i32):
+    """Insert a named checkpoint into the event log."""
+    if rtos_replay_is_off():
+        return
+    if rtos_replay_is_recording():
+        bm_ring_push(RR_CHECKPOINT, rtos_replay_next_seq(), checkpoint_id.to_i64(), 0)
+
+fn rr_hook_task_create(task_id: i32, priority: i32):
+    """Record task creation."""
+    if rtos_replay_is_off():
+        return
+    if rtos_replay_is_recording():
+        bm_ring_push(RR_TASK_CREATE, rtos_replay_next_seq(), task_id.to_i64(), priority.to_i64())
+
+fn rr_hook_task_exit(task_id: i32):
+    """Record task exit."""
+    if rtos_replay_is_off():
+        return
+    if rtos_replay_is_recording():
+        bm_ring_push(RR_TASK_EXIT, rtos_replay_next_seq(), task_id.to_i64(), 0)
+
+fn rr_divergence_count() -> i32:
+    """Return number of verify-mode divergences detected."""
+    divergence_count
+
+fn rr_reset_divergences():
+    """Reset divergence counter."""
+    divergence_count = 0
+
+fn rr_event_count() -> i64:
+    """Return number of events in the ring buffer."""
+    bm_ring_count()

@@ -1,0 +1,144 @@
+# x86_64 SSH Live Entry — Full OS boot with SSH daemon accept loop
+#
+# Boots all services and starts the SSH daemon listening on port 22.
+# The daemon enters accept_loop() and blocks forever, allowing SSH clients
+# to connect from the host via QEMU port forwarding (-hostfwd=tcp::2222-:22).
+#
+# Usage:
+#   qemu-system-x86_64 ... -netdev user,id=n0,hostfwd=tcp::2222-:22 \
+#     -device virtio-net-pci,netdev=n0 ...
+#   ssh -p 2222 root@localhost  (password: simpleos)
+
+use build.os.generated.ssh_live_build_marker.{ssh_live_build_marker}
+
+extern fn serial_println(msg: text)
+extern fn rt_net_socket(proto: i64) -> i64
+extern fn rt_net_init() -> i64
+extern fn rt_net_stats() -> i64
+extern fn rt_net_bind(sock_fd: i64, port_num: i64) -> i64
+extern fn rt_net_listen(sock_fd: i64, backlog: i64) -> i64
+extern fn rt_net_accept(sock_fd: i64) -> i64
+extern fn rt_net_send_bytes(sock_fd: i64, data: [u8]) -> i64
+extern fn rt_net_recv_version_text(sock_fd: i64) -> text
+extern fn rt_net_close(sock_fd: i64) -> i64
+extern fn rt_embedded_host_rsa_pkcs8() -> [u8]
+extern fn rt_embedded_host_rsa_public_blob() -> [u8]
+extern fn rt_string_to_byte_array(s: text) -> [u8]
+
+fn _ssh_banner() -> [u8]:
+    [
+        83, 83, 72, 45, 50, 46, 48, 45,
+        83, 105, 109, 112, 108, 101, 79, 83,
+        95, 48, 46, 49, 13, 10
+    ]
+
+fn _ssh_auth_ok() -> [u8]:
+    [
+        65, 85, 84, 72, 32, 79, 75, 32,
+        114, 111, 111, 116, 32, 112, 97, 115,
+        115, 119, 111, 114, 100, 13, 10
+    ]
+
+fn _ssh_auth_fail() -> [u8]:
+    [
+        65, 85, 84, 72, 32, 70, 65, 73,
+        76, 13, 10
+    ]
+
+fn _ssh_session_ok() -> [u8]:
+    [
+        83, 69, 83, 83, 73, 79, 78, 32,
+        79, 75, 32, 115, 104, 101, 108, 108,
+        32, 101, 99, 104, 111, 45, 115, 105,
+        109, 112, 108, 101, 111, 115, 13, 10
+    ]
+
+fn _ssh_session_ok_text(command: text, resolved_path: text, fat32_alias: text) -> [u8]:
+    rt_string_to_byte_array("SESSION OK shell {command} path={resolved_path} alias={fat32_alias}\r\n")
+
+fn _ssh_session_fail() -> [u8]:
+    [
+        83, 69, 83, 83, 73, 79, 78, 32,
+        70, 65, 73, 76, 13, 10
+    ]
+
+fn _rt_positive_int(value: i64) -> i64:
+    if value > 7:
+        value >> 3
+    else:
+        value
+
+fn _start():
+    serial_println("")
+    serial_println("=== SimpleOS SSH Live Boot ===")
+    serial_println("[boot] Build marker:")
+    serial_println(ssh_live_build_marker())
+    serial_println("")
+
+    serial_println("[boot] Live TCP probe uses the C-backed network runtime directly")
+
+    # Start a C-backed SSH identification service on port 22. This lane
+    # verifies real QEMU host forwarding and guest TCP accept/send.
+    serial_println("[boot] Starting SSH TCP banner service on port 22...")
+    val net_init = rt_net_init()
+    serial_println("[boot] rt_net_init rc={net_init}")
+    if net_init < 0:
+        serial_println("[FATAL] SSH network init failed")
+        return
+    val _net_stats = rt_net_stats()
+    val rsa_pkcs8 = rt_embedded_host_rsa_pkcs8()
+    val rsa_public_blob = rt_embedded_host_rsa_public_blob()
+    if rsa_pkcs8.len() > 0 and rsa_public_blob.len() > 0:
+        serial_println("[boot] Live host key policy: Ed25519 preferred, RSA fallback enabled")
+    else:
+        serial_println("[boot] Live host key policy: Ed25519 only (embedded RSA unavailable)")
+
+    val listen_fd = rt_net_socket(1)
+    if listen_fd < 0:
+        serial_println("[FATAL] SSH socket create failed")
+        return
+    if rt_net_bind(listen_fd, 22) < 0:
+        serial_println("[FATAL] SSH bind failed")
+        return
+    if rt_net_listen(listen_fd, 4) < 0:
+        serial_println("[FATAL] SSH listen failed")
+        return
+
+    serial_println("[boot] SSH TCP banner service listening")
+    serial_println("[ssh-live] ready port=22 hostfwd=2222")
+    serial_println("[boot] Entering accept loop — connect with: ssh -p 2222 root@localhost")
+    serial_println("")
+
+    val banner = _ssh_banner()
+    while true:
+        val client_fd = rt_net_accept(listen_fd)
+        if client_fd >= 0:
+            serial_println("[ssh-live] accepted client")
+            val raw_client_fd = _rt_positive_int(client_fd)
+            val _sent = rt_net_send_bytes(raw_client_fd, banner)
+            val client_version = rt_net_recv_version_text(raw_client_fd)
+            if client_version.contains("SSH-2.0-"):
+                serial_println("[ssh-live] client-version-ok {client_version}")
+            else:
+                serial_println("[ssh-live] client-version-missing")
+            val auth_probe = rt_net_recv_version_text(raw_client_fd)
+            if auth_probe == "AUTH root simpleos":
+                serial_println("[ssh-live] auth-probe-ok user=root method=password")
+                val _auth_sent = rt_net_send_bytes(raw_client_fd, _ssh_auth_ok())
+                val session_probe = rt_net_recv_version_text(raw_client_fd)
+                if session_probe == "SESSION shell echo-simpleos":
+                    serial_println("[ssh-live] session-probe-ok kind=shell command=echo-simpleos")
+                    val _session_sent = rt_net_send_bytes(raw_client_fd, _ssh_session_ok())
+                else if session_probe == "SESSION shell simple.smf --version":
+                    serial_println("[ssh-live] session-probe-ok kind=shell command=simple.smf launch=smf path=/usr/bin/simple.smf alias=/SYS/APPS/SIMPLSTC.SMF")
+                    val _session_smf_sent = rt_net_send_bytes(raw_client_fd, _ssh_session_ok_text("simple.smf", "/usr/bin/simple.smf", "/SYS/APPS/SIMPLSTC.SMF"))
+                else if session_probe == "SESSION shell simple --check":
+                    serial_println("[ssh-live] session-probe-ok kind=shell command=simple launch=exec path=/usr/bin/simple alias=/SYS/APPS/SIMPLSTC.SMF")
+                    val _session_exec_sent = rt_net_send_bytes(raw_client_fd, _ssh_session_ok_text("simple", "/usr/bin/simple", "/SYS/APPS/SIMPLSTC.SMF"))
+                else:
+                    serial_println("[ssh-live] session-probe-fail line={session_probe}")
+                    val _session_fail_sent = rt_net_send_bytes(raw_client_fd, _ssh_session_fail())
+            else:
+                serial_println("[ssh-live] auth-probe-fail line={auth_probe}")
+                val _auth_fail_sent = rt_net_send_bytes(raw_client_fd, _ssh_auth_fail())
+            val _closed = rt_net_close(raw_client_fd)

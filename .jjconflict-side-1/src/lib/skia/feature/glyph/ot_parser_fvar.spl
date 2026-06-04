@@ -1,0 +1,116 @@
+# OpenType variable font axis parsers: fvar, avar
+
+use std.skia.feature.glyph.ot_parser.{OtFont, OtTable, find_table, read_u16_be, read_i16_be, read_u32_be, read_fixed_1616, read_f2dot14}
+
+# ===== fvar/avar (variable fonts, partial) =====
+
+class FvarAxis:
+    tag: u32
+    min_value: f64
+    default_value: f64
+    max_value: f64
+
+fn parse_fvar_axes(font: OtFont) -> [FvarAxis]:
+    # Tag 'fvar' = 0x66766172
+    val fvar_tag: u32 = 1719034226
+    val maybe_tbl = find_table(font, fvar_tag)
+    if maybe_tbl == None:
+        return []
+    val tbl = maybe_tbl.unwrap()
+    val base = tbl.offset as i64
+    val blob = font.blob
+    if base + 15 >= blob.len() as i64:
+        return []
+    # fvar header: majorVersion(2), minorVersion(2), offsetToAxesArray(2), reserved(2), axisCount(2), axisSize(2), ...
+    val axes_offset = read_u16_be(blob, base + 4) as i64
+    val axis_count = read_u16_be(blob, base + 8) as i64
+    val axis_size = read_u16_be(blob, base + 10) as i64
+    val axes_abs = base + axes_offset
+    var axes: [FvarAxis] = []
+    var i: i64 = 0
+    while i < axis_count:
+        val abase = axes_abs + i * axis_size
+        if abase + 13 >= blob.len() as i64:
+            i = i + 1
+            continue
+        val tag = read_u32_be(blob, abase)
+        val min_val = read_fixed_1616(blob, abase + 4)
+        val default_val = read_fixed_1616(blob, abase + 8)
+        val max_val = read_fixed_1616(blob, abase + 12)
+        val axis = FvarAxis(tag: tag, min_value: min_val, default_value: default_val, max_value: max_val)
+        axes.append(axis)
+        i = i + 1
+    axes
+
+fn parse_avar_mapping(font: OtFont, axis_index: u32, normalized: f64) -> f64:
+    # avar table layout: majorVersion(u16=1), minorVersion(u16=0), reserved(u16=0), axisCount(u16)
+    # then axisCount × SegmentMap records.
+    # Each SegmentMap: positionMapCount(u16), then positionMapCount × AxisValueMap (fromCoord F2DOT14, toCoord F2DOT14).
+    # Tag 'avar' = 0x61766172
+    val avar_tag: u32 = 1634492786
+    val maybe_tbl = find_table(font, avar_tag)
+    if maybe_tbl == None:
+        return normalized
+    val tbl = maybe_tbl.unwrap()
+    val base = tbl.offset as i64
+    val blob = font.blob
+    if base + 7 >= blob.len() as i64:
+        return normalized
+    val axis_count = read_u16_be(blob, base + 6) as i64
+    if (axis_index as i64) >= axis_count:
+        return normalized
+    # Walk SegmentMap records to reach axis_index
+    var pos: i64 = base + 8
+    var ai: i64 = 0
+    while ai < (axis_index as i64):
+        if pos + 1 >= blob.len() as i64:
+            return normalized
+        val pmc = read_u16_be(blob, pos) as i64
+        pos = pos + 2 + pmc * 4
+        ai = ai + 1
+    # Now pos points at the SegmentMap for axis_index
+    if pos + 1 >= blob.len() as i64:
+        return normalized
+    val map_count = read_u16_be(blob, pos) as i64
+    if map_count < 2:
+        return normalized
+    pos = pos + 2
+    # Read all (from, to) pairs
+    var from_coords: [f64] = []
+    var to_coords: [f64] = []
+    var mi: i64 = 0
+    while mi < map_count:
+        val entry_off = pos + mi * 4
+        if entry_off + 3 >= blob.len() as i64:
+            return normalized
+        val from_val = read_f2dot14(blob, entry_off)
+        val to_val = read_f2dot14(blob, entry_off + 2)
+        from_coords.append(from_val)
+        to_coords.append(to_val)
+        mi = mi + 1
+    # Binary search: find segment where from_coords[i] <= normalized < from_coords[i+1]
+    if normalized <= from_coords[0]:
+        return to_coords[0]
+    if normalized >= from_coords[map_count - 1]:
+        return to_coords[map_count - 1]
+    var lo: i64 = 0
+    var hi: i64 = map_count - 2
+    var seg: i64 = 0
+    while lo <= hi:
+        val mid = (lo + hi) / 2
+        if from_coords[mid] <= normalized and normalized <= from_coords[mid + 1]:
+            seg = mid
+            lo = hi + 1  # break
+        else if from_coords[mid + 1] < normalized:
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    val f0 = from_coords[seg]
+    val f1 = from_coords[seg + 1]
+    val t0 = to_coords[seg]
+    val t1 = to_coords[seg + 1]
+    val range = f1 - f0
+    if range == 0.0:
+        return t0
+    val t = (normalized - f0) / range
+    t0 + t * (t1 - t0)

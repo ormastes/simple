@@ -1,0 +1,83 @@
+# HIP Backend Contract
+#
+# First-class compiler-side HIP target contract. Generic MIR-to-HIP lowering is
+# a later compiler slice; generated Engine2D HIP kernels share the portable
+# CUDA/HIP/OpenCL source generator so the public backend surface is honest.
+
+use compiler.mir.mir_data.{MirModule}
+use compiler.mir.mir_instructions.{MirFunction}
+use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, CompileOptions, CompileError, compileerror_backend_error}
+use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
+use compiler.backend.gpu_backend_metadata.{gpu_backend_accepts_kernel_metadata}
+use compiler.backend.gpu_portable_compute.{
+    PortableComputeCompilePlan,
+    PortableComputeCompiledArtifactEvidence,
+    PortableComputeTarget,
+    emit_portable_2d_optimization_module,
+    portable_compute_2d_optimization_compile_plan,
+    portable_compute_compiled_artifact_evidence
+}
+
+class HipBackendCompileContract:
+    source: text
+    plan: PortableComputeCompilePlan
+    evidence: PortableComputeCompiledArtifactEvidence
+    ready: bool
+    status: text
+    diagnostic: text
+
+    static fn create(output_stem: text, artifact_magic: text, exported_symbols: text, byte_count: i64) -> HipBackendCompileContract:
+        val module = emit_portable_2d_optimization_module(PortableComputeTarget.Hip)
+        val plan = portable_compute_2d_optimization_compile_plan(PortableComputeTarget.Hip, output_stem)
+        val evidence = portable_compute_compiled_artifact_evidence(plan, artifact_magic, exported_symbols, byte_count)
+        val status = if evidence.artifact_valid:
+            "compiled_artifact_verified"
+        else:
+            evidence.reason
+        HipBackendCompileContract(
+            source: module.source,
+            plan: plan,
+            evidence: evidence,
+            ready: evidence.artifact_valid,
+            status: status,
+            diagnostic: if evidence.artifact_valid: "" else: "HIP artifact rejected: {evidence.reason}"
+        )
+
+    fn summary() -> text:
+        "HipBackendCompileContract[source={self.plan.source_format} binary={self.plan.binary_format} entry={self.plan.entry_name} ready={self.ready.to_text()} status={self.status}]"
+
+class HipBackend:
+    options: CompileOptions
+
+    static fn create(options: CompileOptions) -> HipBackend:
+        HipBackend(options: options)
+
+    static fn generated_2d_contract(output_stem: text, artifact_magic: text, exported_symbols: text, byte_count: i64) -> HipBackendCompileContract:
+        HipBackendCompileContract.create(output_stem, artifact_magic, exported_symbols, byte_count)
+
+    static fn accepts_gpu_kernel(func: MirFunction) -> bool:
+        if not func.is_kernel:
+            return true
+        gpu_backend_accepts_kernel_metadata(BackendKind.Hip, func.gpu_target, func.gpu_backend_order)
+
+impl Codegen for HipBackend:
+    fn backend_kind() -> BackendKind:
+        BackendKind.Hip
+
+    fn backend_name() -> text:
+        "hip"
+
+    fn supports_target(target: CodegenTarget) -> bool:
+        target == CodegenTarget.HipHsaco
+
+    fn output_kind() -> CodegenOutputKind:
+        CodegenOutputKind.GpuCode
+
+    fn compile_module(module: MirModule) -> Result<CodegenOutput, CompileError>:
+        Err(compileerror_backend_error(
+            BackendKind.Hip,
+            "HIP MIR lowering is not implemented yet; use generated portable compute HIP/HSACO contracts for Engine2D offload"
+        ))
+
+fn hip_backend_2d_compile_contract(output_stem: text, artifact_magic: text, exported_symbols: text, byte_count: i64) -> HipBackendCompileContract:
+    HipBackend.generated_2d_contract(output_stem, artifact_magic, exported_symbols, byte_count)

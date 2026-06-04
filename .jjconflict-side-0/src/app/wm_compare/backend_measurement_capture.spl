@@ -1,0 +1,151 @@
+# Host measurement capture helpers for wm_compare backend evidence.
+
+use app.wm_compare.backend_measurement_report.{BackendMeasurementRecord}
+use app.wm_compare.backend_measurement_report.{backend_measurement_from_probe}
+use std.gpu.engine2d.backend_probe.{StrictBackendFactory}
+
+pub struct HostCommandMeasurement:
+    command: text
+    host: text
+    sample_count: i32
+    p50_us: i64
+    p95_us: i64
+    max_rss_kb: i64
+    binary_size_bytes: i64
+    baseline_binary_size_bytes: i64
+    render_readback_scope: text
+
+fn _field_after(line: text, key: text) -> text:
+    val marker = key + "="
+    val idx = line.index_of(marker)
+    if idx == -1:
+        return ""
+    val rest = line.substring(idx + marker.len())
+    var end = 0
+    while end < rest.len():
+        val c = rest.char_at(end)
+        if c == " " or c == "\n" or c == "\t":
+            break
+        end = end + 1
+    rest.substring(0, end)
+
+fn _elapsed_seconds_to_us(value: text) -> i64:
+    if value == "":
+        return 0
+    val dot = value.index_of(".")
+    if dot == -1:
+        return value.to_i64() * 1000000
+    val seconds = value.substring(0, dot).to_i64()
+    var frac = value.substring(dot + 1)
+    while frac.len() < 6:
+        frac = frac + "0"
+    if frac.len() > 6:
+        frac = frac.substring(0, 6)
+    seconds * 1000000 + frac.to_i64()
+
+fn _sort_i64(values: [i64]) -> [i64]:
+    var out = values
+    var i = 0
+    while i < out.len():
+        var j = i + 1
+        while j < out.len():
+            if out[j] < out[i]:
+                val tmp = out[i]
+                out[i] = out[j]
+                out[j] = tmp
+            j = j + 1
+        i = i + 1
+    out
+
+fn _percentile_nearest_rank(sorted: [i64], pct: i32) -> i64:
+    if sorted.len() == 0:
+        return 0
+    var idx = ((sorted.len() * pct) + 99) / 100
+    if idx <= 0:
+        idx = 1
+    if idx > sorted.len():
+        idx = sorted.len()
+    sorted[idx - 1]
+
+pub fn parse_usr_bin_time_measurements(command: text, host: text,
+                                       time_output: text,
+                                       binary_size_bytes: i64,
+                                       baseline_binary_size_bytes: i64,
+                                       render_readback_scope: text) -> HostCommandMeasurement:
+    val lines = time_output.split("\n")
+    var elapsed: [i64] = []
+    var max_rss: i64 = 0
+    for line in lines:
+        val elapsed_text = _field_after(line, "elapsed_s")
+        if elapsed_text != "":
+            elapsed.push(_elapsed_seconds_to_us(elapsed_text))
+        val rss_text = _field_after(line, "max_rss_kb")
+        if rss_text != "":
+            val rss = rss_text.to_i64()
+            if rss > max_rss:
+                max_rss = rss
+    val sorted = _sort_i64(elapsed)
+    HostCommandMeasurement(
+        command: command,
+        host: host,
+        sample_count: sorted.len(),
+        p50_us: _percentile_nearest_rank(sorted, 50),
+        p95_us: _percentile_nearest_rank(sorted, 95),
+        max_rss_kb: max_rss,
+        binary_size_bytes: binary_size_bytes,
+        baseline_binary_size_bytes: baseline_binary_size_bytes,
+        render_readback_scope: render_readback_scope
+    )
+
+pub fn host_measurement_record(requested_backend: text, selected_backend: text,
+                               status: text, measurement: HostCommandMeasurement,
+                               scalar_baseline_compared: bool,
+                               fallback_used: bool,
+                               unavailable_reason: text) -> BackendMeasurementRecord:
+    BackendMeasurementRecord(
+        requested_backend: requested_backend,
+        selected_backend: selected_backend,
+        status: status,
+        command: measurement.command,
+        host: measurement.host,
+        warmup_count: 0,
+        sample_count: measurement.sample_count,
+        p50_us: measurement.p50_us,
+        p95_us: measurement.p95_us,
+        max_rss_kb: measurement.max_rss_kb,
+        binary_size_bytes: measurement.binary_size_bytes,
+        baseline_binary_size_bytes: measurement.baseline_binary_size_bytes,
+        render_readback_scope: measurement.render_readback_scope,
+        scalar_baseline_compared: scalar_baseline_compared,
+        fallback_used: fallback_used,
+        unavailable_reason: unavailable_reason
+    )
+
+pub fn current_host_backend_measurement_matrix(command: text, host: text,
+                                               time_output: text,
+                                               binary_size_bytes: i64,
+                                               baseline_binary_size_bytes: i64,
+                                               render_readback_scope: text) -> [BackendMeasurementRecord]:
+    val measurement = parse_usr_bin_time_measurements(
+        command, host, time_output,
+        binary_size_bytes, baseline_binary_size_bytes,
+        render_readback_scope
+    )
+    val factory = StrictBackendFactory.strict()
+    val metal = backend_measurement_from_probe(
+        factory.create_backend("metal"),
+        "", host, 0, 0, 0, 0, 0, 0, 0, "", false
+    )
+    val vulkan = backend_measurement_from_probe(
+        factory.create_backend("vulkan"),
+        "", host, 0, 0, 0, 0, 0, 0, 0, "", false
+    )
+    val cuda = backend_measurement_from_probe(
+        factory.create_backend("cuda"),
+        "", host, 0, 0, 0, 0, 0, 0, 0, "", false
+    )
+    val cpu_simd = host_measurement_record(
+        "cpu_simd", "cpu_simd", "Initialized",
+        measurement, true, false, "host measurement"
+    )
+    [metal, vulkan, cuda, cpu_simd]

@@ -1,0 +1,269 @@
+# LLVM-lib FFI Performance Benchmarks
+#
+# Self-contained benchmark that directly tests FFI call patterns.
+# Tests the performance impact of P0/P1 optimizations:
+#   P0: FFI pointer caching (dlsym results cached in dict)
+#   P1: Scratch buffer for small arrays (pre-allocated buffer vs alloc/free)
+#
+# Run (requires natively compiled Simple binary, NOT interpreter):
+#   /path/to/native_simple test test/perf/llvm_lib_ffi_perf_spec.spl
+#
+# tag: ["only-compiled"]  # Requires native-compiled binary
+
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64)
+extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
+extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
+extern fn spl_dlopen(path: text) -> i64
+extern fn spl_dlsym(handle: i64, name: text) -> i64
+extern fn spl_wffi_call_i64(fptr: i64, args: [i64], nargs: i64) -> i64
+
+# ============================================================================
+# Benchmark harness
+# ============================================================================
+
+val WARMUP = 5
+val ITERS = 200
+
+fn _arr_len(a: [i64]) -> i64:
+    a.len()
+
+fn _arr_get(a: [i64], i: i64) -> i64:
+    a[i]
+
+fn run_bench(name: text, f: fn() -> i64):
+    var w = 0
+    while w < WARMUP:
+        f()
+        w = w + 1
+
+    var times: [i64] = []
+    var i = 0
+    while i < ITERS:
+        val t0 = rt_time_now_unix_micros()
+        f()
+        val t1 = rt_time_now_unix_micros()
+        val elapsed = t1 - t0
+        if elapsed > 0:
+            times.push(elapsed)
+        i = i + 1
+
+    val n = _arr_len(times)
+    if n == 0:
+        print "[bench] {name}: avg=0us min=0us max=0us iters=0"
+        return
+
+    var total: i64 = 0
+    val first_t = _arr_get(times, 0)
+    var min_t = first_t
+    var max_t = first_t
+    var idx = 0
+    while idx < n:
+        val t = _arr_get(times, idx)
+        total = total + t
+        if t < min_t:
+            min_t = t
+        if t > max_t:
+            max_t = t
+        idx = idx + 1
+
+    val avg = total / n
+    print "[bench] {name}: avg={avg}us min={min_t}us max={max_t}us iters={n}"
+
+# ============================================================================
+# Scratch buffer benchmarks (no LLVM dependency needed)
+# ============================================================================
+
+var _scratch: i64 = 0
+
+fn bench_scratch_write_4() -> i64:
+    if _scratch == 0:
+        _scratch = rt_alloc(64)
+    rt_ptr_write_i64(_scratch, 0, 100)
+    rt_ptr_write_i64(_scratch, 8, 200)
+    rt_ptr_write_i64(_scratch, 16, 300)
+    rt_ptr_write_i64(_scratch, 24, 400)
+    0
+
+fn bench_alloc_free_4() -> i64:
+    val ptr = rt_alloc(32)
+    rt_ptr_write_i64(ptr, 0, 100)
+    rt_ptr_write_i64(ptr, 8, 200)
+    rt_ptr_write_i64(ptr, 16, 300)
+    rt_ptr_write_i64(ptr, 24, 400)
+    rt_free(ptr)
+    0
+
+fn bench_scratch_write_8() -> i64:
+    if _scratch == 0:
+        _scratch = rt_alloc(64)
+    rt_ptr_write_i64(_scratch, 0, 1)
+    rt_ptr_write_i64(_scratch, 8, 2)
+    rt_ptr_write_i64(_scratch, 16, 3)
+    rt_ptr_write_i64(_scratch, 24, 4)
+    rt_ptr_write_i64(_scratch, 32, 5)
+    rt_ptr_write_i64(_scratch, 40, 6)
+    rt_ptr_write_i64(_scratch, 48, 7)
+    rt_ptr_write_i64(_scratch, 56, 8)
+    0
+
+fn bench_alloc_free_8() -> i64:
+    val ptr = rt_alloc(64)
+    rt_ptr_write_i64(ptr, 0, 1)
+    rt_ptr_write_i64(ptr, 8, 2)
+    rt_ptr_write_i64(ptr, 16, 3)
+    rt_ptr_write_i64(ptr, 24, 4)
+    rt_ptr_write_i64(ptr, 32, 5)
+    rt_ptr_write_i64(ptr, 40, 6)
+    rt_ptr_write_i64(ptr, 48, 7)
+    rt_ptr_write_i64(ptr, 56, 8)
+    rt_free(ptr)
+    0
+
+# ============================================================================
+# FFI caching benchmarks (requires libLLVM)
+# ============================================================================
+
+var _llvm_handle: i64 = 0
+var _fp_ctx_create: i64 = 0
+var _fp_ctx_dispose: i64 = 0
+var _fp_mod_create: i64 = 0
+var _fp_mod_dispose: i64 = 0
+var _fp_int_type: i64 = 0
+var _fp_const_int: i64 = 0
+var _fp_fn_type: i64 = 0
+var _fp_add_fn: i64 = 0
+var _fp_append_bb: i64 = 0
+var _fp_create_builder: i64 = 0
+var _fp_pos_builder: i64 = 0
+var _fp_build_add: i64 = 0
+var _fp_build_ret: i64 = 0
+var _fp_dispose_builder: i64 = 0
+var _ffi_scratch: i64 = 0
+
+fn load_llvm() -> bool:
+    val paths = [
+        "libLLVM-18.so", "libLLVM-17.so", "libLLVM-19.so", "libLLVM.so",
+        "libLLVM-18.dylib", "libLLVM-17.dylib", "libLLVM-19.dylib", "libLLVM.dylib",
+        "/opt/homebrew/opt/llvm@18/lib/libLLVM.dylib",
+        "/opt/homebrew/opt/llvm/lib/libLLVM.dylib",
+        "/usr/local/opt/llvm@18/lib/libLLVM.dylib",
+        "/usr/local/opt/llvm/lib/libLLVM.dylib"
+    ]
+    for path in paths:
+        val h = spl_dlopen(path)
+        if h != 0:
+            _llvm_handle = h
+            _fp_ctx_create = spl_dlsym(h, "LLVMContextCreate")
+            _fp_ctx_dispose = spl_dlsym(h, "LLVMContextDispose")
+            _fp_mod_create = spl_dlsym(h, "LLVMModuleCreateWithNameInContext")
+            _fp_mod_dispose = spl_dlsym(h, "LLVMDisposeModule")
+            _fp_int_type = spl_dlsym(h, "LLVMInt64TypeInContext")
+            _fp_const_int = spl_dlsym(h, "LLVMConstInt")
+            _fp_fn_type = spl_dlsym(h, "LLVMFunctionType")
+            _fp_add_fn = spl_dlsym(h, "LLVMAddFunction")
+            _fp_append_bb = spl_dlsym(h, "LLVMAppendBasicBlockInContext")
+            _fp_create_builder = spl_dlsym(h, "LLVMCreateBuilderInContext")
+            _fp_pos_builder = spl_dlsym(h, "LLVMPositionBuilderAtEnd")
+            _fp_build_add = spl_dlsym(h, "LLVMBuildAdd")
+            _fp_build_ret = spl_dlsym(h, "LLVMBuildRet")
+            _fp_dispose_builder = spl_dlsym(h, "LLVMDisposeBuilder")
+            _ffi_scratch = rt_alloc(16)
+            return true
+    false
+
+fn bench_cached_ctx() -> i64:
+    val ctx = spl_wffi_call_i64(_fp_ctx_create, [], 0)
+    spl_wffi_call_i64(_fp_ctx_dispose, [ctx], 1)
+    0
+
+fn bench_uncached_ctx() -> i64:
+    val fp1 = spl_dlsym(_llvm_handle, "LLVMContextCreate")
+    val ctx = spl_wffi_call_i64(fp1, [], 0)
+    val fp2 = spl_dlsym(_llvm_handle, "LLVMContextDispose")
+    spl_wffi_call_i64(fp2, [ctx], 1)
+    0
+
+fn bench_cached_build_fn() -> i64:
+    val ctx = spl_wffi_call_i64(_fp_ctx_create, [], 0)
+    val m = spl_wffi_call_i64(_fp_mod_create, ["bench".ptr(), ctx], 2)
+    val i64_ty = spl_wffi_call_i64(_fp_int_type, [ctx], 1)
+    rt_ptr_write_i64(_ffi_scratch, 0, i64_ty)
+    rt_ptr_write_i64(_ffi_scratch, 8, i64_ty)
+    val fn_ty = spl_wffi_call_i64(_fp_fn_type, [i64_ty, _ffi_scratch, 2, 0], 4)
+    val func = spl_wffi_call_i64(_fp_add_fn, [m, "add".ptr(), fn_ty], 3)
+    val bb = spl_wffi_call_i64(_fp_append_bb, [ctx, func, "entry".ptr()], 3)
+    val builder = spl_wffi_call_i64(_fp_create_builder, [ctx], 1)
+    spl_wffi_call_i64(_fp_pos_builder, [builder, bb], 2)
+    val a = spl_wffi_call_i64(_fp_const_int, [i64_ty, 42, 0], 3)
+    val b = spl_wffi_call_i64(_fp_const_int, [i64_ty, 58, 0], 3)
+    val sum = spl_wffi_call_i64(_fp_build_add, [builder, a, b, "sum".ptr()], 4)
+    spl_wffi_call_i64(_fp_build_ret, [builder, sum], 2)
+    spl_wffi_call_i64(_fp_dispose_builder, [builder], 1)
+    spl_wffi_call_i64(_fp_mod_dispose, [m], 1)
+    spl_wffi_call_i64(_fp_ctx_dispose, [ctx], 1)
+    0
+
+fn bench_uncached_build_fn() -> i64:
+    val h = _llvm_handle
+    val ctx = spl_wffi_call_i64(spl_dlsym(h, "LLVMContextCreate"), [], 0)
+    val m = spl_wffi_call_i64(spl_dlsym(h, "LLVMModuleCreateWithNameInContext"), ["bench".ptr(), ctx], 2)
+    val i64_ty = spl_wffi_call_i64(spl_dlsym(h, "LLVMInt64TypeInContext"), [ctx], 1)
+    val param_buf = rt_alloc(16)
+    rt_ptr_write_i64(param_buf, 0, i64_ty)
+    rt_ptr_write_i64(param_buf, 8, i64_ty)
+    val fn_ty = spl_wffi_call_i64(spl_dlsym(h, "LLVMFunctionType"), [i64_ty, param_buf, 2, 0], 4)
+    rt_free(param_buf)
+    val func = spl_wffi_call_i64(spl_dlsym(h, "LLVMAddFunction"), [m, "add".ptr(), fn_ty], 3)
+    val bb = spl_wffi_call_i64(spl_dlsym(h, "LLVMAppendBasicBlockInContext"), [ctx, func, "entry".ptr()], 3)
+    val builder = spl_wffi_call_i64(spl_dlsym(h, "LLVMCreateBuilderInContext"), [ctx], 1)
+    spl_wffi_call_i64(spl_dlsym(h, "LLVMPositionBuilderAtEnd"), [builder, bb], 2)
+    val a = spl_wffi_call_i64(spl_dlsym(h, "LLVMConstInt"), [i64_ty, 42, 0], 3)
+    val b = spl_wffi_call_i64(spl_dlsym(h, "LLVMConstInt"), [i64_ty, 58, 0], 3)
+    val sum = spl_wffi_call_i64(spl_dlsym(h, "LLVMBuildAdd"), [builder, a, b, "sum".ptr()], 4)
+    spl_wffi_call_i64(spl_dlsym(h, "LLVMBuildRet"), [builder, sum], 2)
+    spl_wffi_call_i64(spl_dlsym(h, "LLVMDisposeBuilder"), [builder], 1)
+    spl_wffi_call_i64(spl_dlsym(h, "LLVMDisposeModule"), [m], 1)
+    spl_wffi_call_i64(spl_dlsym(h, "LLVMContextDispose"), [ctx], 1)
+    0
+
+# ============================================================================
+# Test spec
+# ============================================================================
+
+describe "LLVM-lib FFI Performance":
+    slow_it "benchmarks scratch buffer vs alloc/free (P1)":
+        print ""
+        print "=== P1: Scratch Buffer vs Alloc/Free ==="
+        run_bench("P1/scratch_write_4", bench_scratch_write_4)
+        run_bench("P1/alloc_free_4", bench_alloc_free_4)
+        run_bench("P1/scratch_write_8", bench_scratch_write_8)
+        run_bench("P1/alloc_free_8", bench_alloc_free_8)
+        expect(true).to_equal(true)
+
+    slow_it "benchmarks cached vs uncached FFI calls (P0)":
+        val _llvm_ok = load_llvm()
+        if not _llvm_ok:
+            print "[skip] libLLVM not available"
+            expect(true).to_equal(true)
+        else:
+            print ""
+            print "=== P0: Cached vs Uncached FFI Calls ==="
+            run_bench("P0/cached_ctx_create_dispose", bench_cached_ctx)
+            run_bench("P0/uncached_ctx_create_dispose", bench_uncached_ctx)
+            expect(true).to_equal(true)
+
+    slow_it "benchmarks full IR gen cached vs uncached":
+        var _llvm_ok2 = _llvm_handle != 0
+        if not _llvm_ok2:
+            _llvm_ok2 = load_llvm()
+        if not _llvm_ok2:
+            print "[skip] libLLVM not available"
+            expect(true).to_equal(true)
+        else:
+            print ""
+            print "=== Full IR Generation: Cached vs Uncached ==="
+            run_bench("full/cached_build_add_fn", bench_cached_build_fn)
+            run_bench("full/uncached_build_add_fn", bench_uncached_build_fn)
+            expect(true).to_equal(true)

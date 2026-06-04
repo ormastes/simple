@@ -1,0 +1,114 @@
+# # Environment Config Unit Tests
+#
+# **Feature ID:** #APP-ENV-001
+# **Category:** App | Env
+# **Status:** Implemented
+#
+# @cover src/lib/nogc_sync_mut/env/variables.spl 60%
+# @cover src/lib/nogc_sync_mut/env/platform.spl 40%
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_env_remove(key: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn env_val(key: text) -> text:
+    val v = rt_env_get(key)
+    if v == nil:
+        ""
+    else:
+        v
+
+describe "Environment Variables":
+    it "HOME is set and non-empty":
+        val home = env_val("HOME")
+        expect(home != "").to_equal(true)
+        expect(home.starts_with("/")).to_equal(true)
+
+    it "PATH is set and contains separator":
+        val path = env_val("PATH")
+        expect(path != "").to_equal(true)
+        expect(path.contains(":") or path.contains(";")).to_equal(true)
+
+    it "USER is set":
+        val user = env_val("USER")
+        expect(user != "").to_equal(true)
+        expect(user.len() > 0).to_equal(true)
+
+    it "missing variable returns nil or empty":
+        val missing = rt_env_get("__SIMPLE_TEST_NONEXISTENT_VAR_XYZ__")
+        val is_empty = missing == nil or missing == ""
+        expect(is_empty).to_equal(true)
+
+    it "set and read back a variable":
+        rt_env_set("__SIMPLE_TEST_ENV_ROUND_TRIP__", "hello42")
+        val readback = env_val("__SIMPLE_TEST_ENV_ROUND_TRIP__")
+        expect(readback).to_equal("hello42")
+        rt_env_remove("__SIMPLE_TEST_ENV_ROUND_TRIP__")
+
+    it "remove clears a variable":
+        rt_env_set("__SIMPLE_TEST_ENV_REMOVE__", "present")
+        rt_env_remove("__SIMPLE_TEST_ENV_REMOVE__")
+        val after = rt_env_get("__SIMPLE_TEST_ENV_REMOVE__")
+        val gone = after == nil or after == ""
+        expect(gone).to_equal(true)
+
+describe "Platform Detection":
+    it "uname returns a known OS":
+        val result = rt_process_run("/bin/sh", ["-c", "uname -s"])
+        val os_name = result[0].trim()
+        val code = result[2]
+        expect(code).to_equal(0)
+        val known = (os_name == "Linux" or os_name == "Darwin" or
+            os_name == "FreeBSD" or os_name == "OpenBSD" or os_name == "NetBSD")
+        expect(known).to_equal(true)
+
+    it "uname -m returns a known architecture":
+        val result = rt_process_run("/bin/sh", ["-c", "uname -m"])
+        val arch = result[0].trim()
+        val code = result[2]
+        expect(code).to_equal(0)
+        expect(arch.len() > 0).to_equal(true)
+
+    it "PWD or working directory is accessible":
+        val pwd = env_val("PWD")
+        expect(pwd != "").to_equal(true)
+        expect(pwd.starts_with("/")).to_equal(true)
+
+describe "Configuration Sources":
+    it "env var set takes precedence over missing":
+        rt_env_set("__SIMPLE_TEST_PRIORITY__", "from_env")
+        val value = env_val("__SIMPLE_TEST_PRIORITY__")
+        expect(value).to_equal("from_env")
+        rt_env_remove("__SIMPLE_TEST_PRIORITY__")
+
+    it "missing env var falls back to default":
+        val raw = rt_env_get("__SIMPLE_TEST_MISSING_CONFIG__")
+        val is_empty = raw == nil or raw == ""
+        expect(is_empty).to_equal(true)
+        val fallback = if is_empty: "default_value" else: raw
+        expect(fallback).to_equal("default_value")
+
+    it "overwrite replaces previous value":
+        rt_env_set("__SIMPLE_TEST_OVERWRITE__", "first")
+        rt_env_set("__SIMPLE_TEST_OVERWRITE__", "second")
+        val value = env_val("__SIMPLE_TEST_OVERWRITE__")
+        expect(value).to_equal("second")
+        rt_env_remove("__SIMPLE_TEST_OVERWRITE__")
+
+describe "Build Environment":
+    it "SHELL is set on unix":
+        val shell = env_val("SHELL")
+        val has_shell = shell != ""
+        expect(has_shell).to_equal(true)
+
+    it "LANG or LC variables exist":
+        val lang = env_val("LANG")
+        val lc_all = env_val("LC_ALL")
+        val has_locale = lang != "" or lc_all != ""
+        expect(has_locale).to_equal(true)
+
+    it "TERM is set in interactive sessions":
+        val term = env_val("TERM")
+        val has_term = term != ""
+        expect(has_term).to_equal(true)

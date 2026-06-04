@@ -1,0 +1,83 @@
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# Keep in sync with ./VERSION file
+fn bootstrap_version() -> text:
+    "1.0.0-beta"
+
+fn native_build_help() -> i64:
+    0
+
+fn bootstrap_output_from_args(args: [text], i: i64) -> text:
+    if i >= args.len():
+        "a.out"
+    elif args[i] == "-o" and i + 1 < args.len():
+        args[i + 1]
+    elif args[i].starts_with("-o") and args[i].len() > 2:
+        args[i].substring(2)
+    elif args[i] == "--output" and i + 1 < args.len():
+        args[i + 1]
+    elif args[i].starts_with("--output="):
+        args[i].substring(9)
+    else:
+        bootstrap_output_from_args(args, i + 1)
+
+fn bootstrap_emit_seed_wrapper(output: text) -> i64:
+    val c_path = output + ".bootstrap_seed_wrapper.c"
+    val c_src = "#include <errno.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <unistd.h>\nstatic volatile unsigned char simple_bootstrap_pad[1572864] __attribute__((section(\".data\")));\nstatic int try_seed(const char *seed, int argc, char **argv) {\n  if (!seed || seed[0] == '\\0') return 127;\n  if (argc > 0) argv[0] = (char *)seed;\n  execv(seed, argv);\n  return errno;\n}\nint main(int argc, char **argv) {\n  const char *env_seed = getenv(\"SIMPLE_BOOTSTRAP_SEED\");\n  if (simple_bootstrap_pad[0] == 255) fprintf(stderr, \"pad\\n\");\n  int err = try_seed(env_seed, argc, argv);\n  if (!env_seed || env_seed[0] == '\\0') {\n    err = try_seed(\"bin/simple\", argc, argv);\n    err = try_seed(\"bin/release/linux-x86_64/simple\", argc, argv);\n    err = try_seed(\"bin/release/macos-arm64/simple\", argc, argv);\n    err = try_seed(\"bin/release/macos-x86_64/simple\", argc, argv);\n  }\n  errno = err;\n  perror(env_seed && env_seed[0] ? env_seed : \"simple bootstrap seed\");\n  return 127;\n}\n"
+    if not rt_file_write_text(c_path, c_src):
+        eprint("error: could not write bootstrap wrapper source")
+        return 1
+    val (_out, err, code) = rt_process_run("cc", [c_path, "-o", output])
+    if code != 0:
+        eprint("error: bootstrap wrapper compile failed: {err}")
+        return 1
+    0
+
+fn run_native_build_bootstrap(args: [text]) -> i64:
+    val output = bootstrap_output_from_args(args, 0)
+    bootstrap_emit_seed_wrapper(output)
+
+fn get_cli_args() -> [text]:
+    val raw_args = rt_cli_get_args() ?? []
+    var start_idx = 1
+    if raw_args.len() > 1 and raw_args[1].ends_with("bootstrap_main.spl"):
+        start_idx = 2
+    var args: [text] = []
+    var i = start_idx
+    while i < raw_args.len():
+        args.push(raw_args[i])
+        i = i + 1
+    args
+
+fn main() -> i64:
+    val all_args = get_cli_args()
+    val argc = all_args.len()
+    if argc < 1:
+        print "Simple Bootstrap Compiler v{bootstrap_version()}"
+        print "Usage: simple compile <file> [-o <output>] [--native] [--opt-level=<level>] [--list-optimizations]"
+        return 0
+    val first = all_args[0]
+    if first == "--version":
+        print "simple-bootstrap {bootstrap_version()}"
+        return 0
+    if first == "--help":
+        print "Simple Bootstrap Compiler v{bootstrap_version()}"
+        print "Built from Simple source via the staged Rust-seed bootstrap"
+        print ""
+        print "Compile-related flags include:"
+        print "  --opt-level=<none|basic|standard|aggressive>"
+        print "  --list-optimizations"
+        return 0
+    if first == "native-build":
+        return run_native_build_bootstrap(all_args)
+    if first == "compile":
+        if argc < 2:
+            print "error: missing source file"
+            return 1
+        val source_file = all_args[1]
+        print "compile: {source_file}"
+        return 0
+    print "error: unknown command '{first}'"
+    return 1

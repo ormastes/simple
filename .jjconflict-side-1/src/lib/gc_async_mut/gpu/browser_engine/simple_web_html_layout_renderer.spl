@@ -1,0 +1,1998 @@
+# simple_web_html_layout_renderer.spl — a small but REAL HTML renderer in pure
+# Simple, ported from examples/ui/mini_html_render.spl for the production web
+# rendering path.
+#
+# Parses HTML into a flat node arena (avoiding the interpreter's nested-field
+# push bug), applies inline + <style>-block CSS, does block-flow layout with
+# word-wrapped text, and paints boxes + text directly into a [u32] framebuffer
+# using a tiny 5x7 bitmap font. Unlike the substring-heuristic web renderer,
+# this lays out and draws the document so generic pages render with visible
+# structure and text.
+#
+# This is the FAST framebuffer path (no Engine2D): the whole point is speed
+# under the interpreter, so paint writes [u32] pixels directly. The public entry
+# accepts backend_name for API parity with the Engine2D-based renderer but
+# IGNORES it — the fast path is pure-framebuffer and needs no GPU backend.
+#
+# Two interpreter bugs are worked around here (both worth a seed fix):
+#   * text.index_of(needle, pos) IGNORES pos -> use find_from() (substring+find).
+#   * obj.field.push() on an array element does not persist -> use a flat arena
+#     of nodes keyed by integer parent index; only ever append to the top array.
+#
+# Public entry: simple_web_layout_render_html_pixels(html, w, h, backend_name)
+#   parse -> CSS cascade -> block layout -> paint text+boxes -> [u32] framebuffer
+
+# ---------------------------------------------------------------------------
+# Flat node arena
+# ---------------------------------------------------------------------------
+
+class HNode:
+    tag: text          # lowercased tag, "#text", or "#root"
+    text_data: text    # text for #text nodes
+    style_attr: text   # raw style="" value
+    class_attr: text
+    id_attr: text
+    attrs_raw: text    # raw tag inner text for attribute selectors
+    parent: i64        # index of parent in the arena (-1 for root)
+
+fn mk_node(tag: text, parent: i64) -> HNode:
+    HNode(tag: tag, text_data: "", style_attr: "", class_attr: "", id_attr: "", attrs_raw: "", parent: parent)
+
+# ---------------------------------------------------------------------------
+# Position-aware string find (works around index_of(needle,pos) ignoring pos)
+# ---------------------------------------------------------------------------
+
+fn find_from(s: text, needle: text, pos: i32) -> i32:
+    if pos <= 0:
+        return s.index_of(needle)
+    if pos >= s.len():
+        return -1
+    val sub = s.substring(pos, s.len())
+    val rel = sub.index_of(needle)
+    if rel < 0:
+        return -1
+    pos + rel
+
+fn is_void(tag: text) -> bool:
+    tag == "meta" or tag == "br" or tag == "img" or tag == "input" or tag == "link" or tag == "hr" or tag == "area" or tag == "base" or tag == "col" or tag == "embed" or tag == "source" or tag == "track" or tag == "wbr"
+
+# ---------------------------------------------------------------------------
+# Attribute extraction (reads class/id/style out of the raw tag inner text)
+# ---------------------------------------------------------------------------
+
+fn attr_value(inner: text, name: text) -> text:
+    # find name= and read the quoted value; simple, tolerant
+    val key = name + "="
+    val kpos = inner.index_of(key)
+    if kpos < 0:
+        return ""
+    var i = kpos + key.len()
+    if i >= inner.len():
+        return ""
+    val q = inner.substring(i, i + 1)
+    if q == "\"" or q == "'":
+        val sub = inner.substring(i + 1, inner.len())
+        val end = sub.index_of(q)
+        if end < 0:
+            return ""
+        return sub.substring(0, end)
+    # unquoted: read to whitespace
+    val sub = inner.substring(i, inner.len())
+    var j = 0
+    while j < sub.len():
+        val c = sub.substring(j, j + 1)
+        if c == " " or c == "\t" or c == "\n" or c == "\r" or c == "/":
+            break
+        j = j + 1
+    sub.substring(0, j)
+
+fn tag_name_of(inner: text) -> text:
+    var j = 0
+    val m = inner.len()
+    while j < m:
+        val c = inner.substring(j, j + 1)
+        if c == " " or c == "\t" or c == "\n" or c == "\r" or c == "/":
+            break
+        j = j + 1
+    val nm = inner.substring(0, j)
+    nm.lower()
+
+# ---------------------------------------------------------------------------
+# Parser -> arena
+# ---------------------------------------------------------------------------
+
+fn parse_html(html: text) -> [HNode]:
+    var nodes: [HNode] = []
+    nodes.push(mk_node("#root", -1))
+    var pstack: [i64] = [0]
+    var pos = 0
+    val n = html.len()
+    while pos < n:
+        val lt = find_from(html, "<", pos)
+        if lt < 0:
+            val tail = html.substring(pos, n)
+            if tail.trim().len() > 0:
+                var tn = mk_node("#text", pstack[pstack.len() - 1])
+                tn.text_data = tail
+                nodes.push(tn)
+            break
+        if lt > pos:
+            val txt = html.substring(pos, lt)
+            if txt.trim().len() > 0:
+                var tn = mk_node("#text", pstack[pstack.len() - 1])
+                tn.text_data = txt
+                nodes.push(tn)
+        # comment?
+        val c4 = if lt + 4 <= n: html.substring(lt, lt + 4) else: ""
+        if c4 == "<!--":
+            val cend = find_from(html, "-->", lt)
+            if cend < 0:
+                break
+            pos = cend + 3
+            continue
+        val gt = find_from(html, ">", lt)
+        if gt < 0:
+            break
+        val inner = html.substring(lt + 1, gt)
+        pos = gt + 1
+        if inner.len() == 0:
+            continue
+        val first = inner.substring(0, 1)
+        if first == "!":
+            continue
+        if first == "/":
+            val cname = inner.substring(1, inner.len()).trim().lower()
+            var k = pstack.len() - 1
+            var found = -1
+            while k >= 1:
+                val pidx = pstack[k]
+                if nodes[pidx].tag == cname:
+                    found = k
+                    break
+                k = k - 1
+            if found >= 1:
+                while pstack.len() > found:
+                    pstack.pop()
+            continue
+        val name = tag_name_of(inner)
+        var node = mk_node(name, pstack[pstack.len() - 1])
+        node.class_attr = attr_value(inner, "class")
+        node.id_attr = attr_value(inner, "id")
+        node.style_attr = attr_value(inner, "style")
+        node.attrs_raw = inner
+        nodes.push(node)
+        val self_close = inner.substring(inner.len() - 1, inner.len()) == "/"
+        if name == "style":
+            val sclose = find_from(html, "</style", pos)
+            if sclose >= 0:
+                val sgt = find_from(html, ">", sclose)
+                pos = if sgt >= 0: sgt + 1 else: sclose
+            continue
+        if name == "script":
+            val cclose = find_from(html, "</script", pos)
+            if cclose >= 0:
+                val cgt = find_from(html, ">", cclose)
+                pos = if cgt >= 0: cgt + 1 else: cclose
+            continue
+        if not is_void(name) and not self_close:
+            pstack.push(nodes.len() - 1)
+    nodes
+
+# ---------------------------------------------------------------------------
+# Minimal CSS color parsing (#rgb, #rrggbb, rgb()/rgba(), a few names)
+# ---------------------------------------------------------------------------
+
+fn hex_val(c: text) -> i32:
+    if c == "0": return 0
+    if c == "1": return 1
+    if c == "2": return 2
+    if c == "3": return 3
+    if c == "4": return 4
+    if c == "5": return 5
+    if c == "6": return 6
+    if c == "7": return 7
+    if c == "8": return 8
+    if c == "9": return 9
+    val l = c.lower()
+    if l == "a": return 10
+    if l == "b": return 11
+    if l == "c": return 12
+    if l == "d": return 13
+    if l == "e": return 14
+    if l == "f": return 15
+    0
+
+fn argb(r: i32, g: i32, b: i32) -> u32:
+    0xFF000000u32 | ((r.to_u32()) << 16) | ((g.to_u32()) << 8) | b.to_u32()
+
+# returns packed u32, or 0 for "none/transparent/empty"
+fn parse_color(raw: text) -> u32:
+    val s = raw.trim().lower()
+    if s.len() == 0 or s == "transparent" or s == "none" or s == "inherit":
+        return 0u32
+    if s == "white": return argb(255, 255, 255)
+    if s == "black": return argb(0, 0, 0)
+    if s == "red": return argb(220, 50, 50)
+    if s.substring(0, 1) == "#":
+        val h = s.substring(1, s.len())
+        if h.len() >= 6:
+            val r = hex_val(h.substring(0, 1)) * 16 + hex_val(h.substring(1, 2))
+            val g = hex_val(h.substring(2, 3)) * 16 + hex_val(h.substring(3, 4))
+            val b = hex_val(h.substring(4, 5)) * 16 + hex_val(h.substring(5, 6))
+            return argb(r, g, b)
+        if h.len() >= 3:
+            val r = hex_val(h.substring(0, 1)) * 17
+            val g = hex_val(h.substring(1, 2)) * 17
+            val b = hex_val(h.substring(2, 3)) * 17
+            return argb(r, g, b)
+        return 0u32
+    if s.substring(0, 3) == "rgb":
+        val lp = s.index_of("(")
+        val rp = s.index_of(")")
+        if lp >= 0 and rp > lp:
+            val inside = s.substring(lp + 1, rp)
+            val parts = inside.split(",")
+            if parts.len() >= 3:
+                return argb(parse_int(parts[0]), parse_int(parts[1]), parse_int(parts[2]))
+    0u32
+
+fn parse_color_any(raw: text) -> u32:
+    val direct = parse_color(raw)
+    if direct != 0u32:
+        return direct
+    val lower = raw.lower()
+    val rgb = lower.index_of("rgb")
+    if rgb >= 0:
+        val rtail = raw.substring(rgb, raw.len())
+        val rp = rtail.index_of(")")
+        if rp >= 0:
+            val cv = parse_color(rtail.substring(0, rp + 1))
+            if cv != 0u32:
+                return cv
+    val hash = raw.index_of("#")
+    if hash >= 0:
+        return parse_color(raw.substring(hash, raw.len()))
+    0u32
+
+fn parse_int(s: text) -> i32:
+    val t = s.trim()
+    var i = 0
+    var v = 0
+    var any = false
+    while i < t.len():
+        val c = t.substring(i, i + 1)
+        if c >= "0" and c <= "9":
+            v = v * 10 + hex_val(c)
+            any = true
+        else:
+            if any:
+                break
+        i = i + 1
+    v
+
+fn parse_nth_int(s: text, target: i32) -> i32:
+    var i = 0
+    var seen = 0
+    while i < s.len():
+        val c = s.substring(i, i + 1)
+        if c >= "0" and c <= "9":
+            var v = 0
+            while i < s.len():
+                val d = s.substring(i, i + 1)
+                if d < "0" or d > "9":
+                    break
+                v = v * 10 + hex_val(d)
+                i = i + 1
+            if seen == target:
+                return v
+            seen = seen + 1
+        else:
+            i = i + 1
+    -1
+
+fn parse_opacity_pct(raw: text) -> i32:
+    val t = raw.trim()
+    if t.len() == 0:
+        return 100
+    if t == "0":
+        return 0
+    if t == "1":
+        return 100
+    val dot = t.index_of(".")
+    if dot >= 0:
+        var frac = 0
+        var scale = 1
+        var i = dot + 1
+        while i < t.len() and scale < 100:
+            val d = t.substring(i, i + 1)
+            if d < "0" or d > "9":
+                break
+            frac = frac * 10 + hex_val(d)
+            scale = scale * 10
+            i = i + 1
+        return (frac * 100 + scale / 2) / scale
+    val pct = parse_int(t)
+    if pct < 0:
+        return 0
+    if pct > 100:
+        return 100
+    pct
+
+# read a property value from a declaration block "a: b; c: d"
+fn decl_get(decls: text, prop: text) -> text:
+    var pos = 0
+    var found = ""
+    while pos < decls.len():
+        val tail = decls.substring(pos, decls.len())
+        val semi = tail.index_of(";")
+        val raw = if semi >= 0: tail.substring(0, semi) else: tail
+        val colon = raw.index_of(":")
+        if colon >= 0:
+            val name = raw.substring(0, colon).trim().lower()
+            if name == prop:
+                found = raw.substring(colon + 1, raw.len()).trim()
+        if semi < 0:
+            break
+        pos = pos + semi + 1
+    found
+
+fn decl_last_pos(decls: text, prop: text) -> i32:
+    var pos = 0
+    var found = -1
+    while pos < decls.len():
+        val tail = decls.substring(pos, decls.len())
+        val semi = tail.index_of(";")
+        val raw = if semi >= 0: tail.substring(0, semi) else: tail
+        val colon = raw.index_of(":")
+        if colon >= 0:
+            val name = raw.substring(0, colon).trim().lower()
+            if name == prop:
+                found = pos
+        if semi < 0:
+            break
+        pos = pos + semi + 1
+    found
+
+# ---------------------------------------------------------------------------
+# Computed style
+# ---------------------------------------------------------------------------
+
+class Style:
+    bg: u32
+    fg: u32
+    font_size: i32
+    width_px: i32
+    height_px: i32
+    border_box: bool
+    min_height_px: i32
+    min_height_vh: bool
+    flex_fill: bool
+    pad_l: i32
+    pad_t: i32
+    pad_r: i32
+    pad_b: i32
+    border_w: i32
+    border_color: u32
+    border_l: i32
+    border_t: i32
+    border_r: i32
+    border_b: i32
+    border_color_l: u32
+    border_color_t: u32
+    border_color_r: u32
+    border_color_b: u32
+    gap_px: i32
+    margin_l: i32
+    margin_t: i32
+    margin_r: i32
+    margin_b: i32
+    display: text       # block / inline / none
+    overflow_hidden: bool
+    visibility_hidden: bool
+    position_relative: bool
+    position_absolute: bool
+    left_px: i32
+    top_px: i32
+    right_px: i32
+    bottom_px: i32
+    z_index: i32
+    opacity_pct: i32
+    flex_direction: text
+    text_align: text
+    bold: bool
+
+fn default_style() -> Style:
+    Style(bg: 0u32, fg: argb(20, 20, 24), font_size: 16, width_px: 0, height_px: 0, border_box: false, min_height_px: 0, min_height_vh: false, flex_fill: false, pad_l: 0, pad_t: 0, pad_r: 0, pad_b: 0, border_w: 0, border_color: 0u32, border_l: 0, border_t: 0, border_r: 0, border_b: 0, border_color_l: 0u32, border_color_t: 0u32, border_color_r: 0u32, border_color_b: 0u32, gap_px: 0, margin_l: 0, margin_t: 0, margin_r: 0, margin_b: 0, display: "block", overflow_hidden: false, visibility_hidden: false, position_relative: false, position_absolute: false, left_px: 0, top_px: 0, right_px: -1, bottom_px: -1, z_index: 0, opacity_pct: 100, flex_direction: "row", text_align: "left", bold: false)
+
+fn inherit_style(p: Style) -> Style:
+    val display = if p.display == "none": "none" else: "block"
+    Style(bg: 0u32, fg: p.fg, font_size: p.font_size, width_px: 0, height_px: 0, border_box: false, min_height_px: 0, min_height_vh: false, flex_fill: false, pad_l: 0, pad_t: 0, pad_r: 0, pad_b: 0, border_w: 0, border_color: 0u32, border_l: 0, border_t: 0, border_r: 0, border_b: 0, border_color_l: 0u32, border_color_t: 0u32, border_color_r: 0u32, border_color_b: 0u32, gap_px: 0, margin_l: 0, margin_t: 0, margin_r: 0, margin_b: 0, display: display, overflow_hidden: false, visibility_hidden: p.visibility_hidden, position_relative: false, position_absolute: false, left_px: 0, top_px: 0, right_px: -1, bottom_px: -1, z_index: 0, opacity_pct: 100, flex_direction: "row", text_align: p.text_align, bold: p.bold)
+
+fn is_inline_tag(tag: text) -> bool:
+    tag == "a" or tag == "span" or tag == "b" or tag == "strong" or tag == "em" or tag == "i" or tag == "small" or tag == "code" or tag == "#text"
+
+fn is_heading(tag: text) -> bool:
+    tag == "h1" or tag == "h2" or tag == "h3" or tag == "h4" or tag == "h5" or tag == "h6"
+
+fn is_non_rendered_tag(tag: text) -> bool:
+    tag == "head" or tag == "title" or tag == "meta" or tag == "style" or tag == "script" or tag == "link"
+
+# apply a declaration block onto a style
+fn apply_decls(st: Style, decls: text) -> Style:
+    if decls.len() == 0:
+        return st
+    var bg_v = st.bg
+    var fg_v = st.fg
+    var font_size_v = st.font_size
+    var width_v = st.width_px
+    var height_v = st.height_px
+    var border_box_v = st.border_box
+    var min_height_v = st.min_height_px
+    var min_height_vh_v = st.min_height_vh
+    var flex_fill_v = st.flex_fill
+    var pad_l_v = st.pad_l
+    var pad_t_v = st.pad_t
+    var pad_r_v = st.pad_r
+    var pad_b_v = st.pad_b
+    var border_w_v = st.border_w
+    var border_color_v = st.border_color
+    var border_l_v = st.border_l
+    var border_t_v = st.border_t
+    var border_r_v = st.border_r
+    var border_b_v = st.border_b
+    var border_color_l_v = st.border_color_l
+    var border_color_t_v = st.border_color_t
+    var border_color_r_v = st.border_color_r
+    var border_color_b_v = st.border_color_b
+    var gap_v = st.gap_px
+    var margin_l_v = st.margin_l
+    var margin_t_v = st.margin_t
+    var margin_r_v = st.margin_r
+    var margin_b_v = st.margin_b
+    var display_v = st.display
+    var overflow_hidden_v = st.overflow_hidden
+    var visibility_hidden_v = st.visibility_hidden
+    var position_relative_v = st.position_relative
+    var position_absolute_v = st.position_absolute
+    var left_px_v = st.left_px
+    var top_px_v = st.top_px
+    var right_px_v = st.right_px
+    var bottom_px_v = st.bottom_px
+    var z_index_v = st.z_index
+    var opacity_pct_v = st.opacity_pct
+    var flex_direction_v = st.flex_direction
+    var text_align_v = st.text_align
+    var bold_v = st.bold
+    val bg = decl_get(decls, "background-color")
+    val bgs = decl_get(decls, "background")
+    val bg_pos = decl_last_pos(decls, "background-color")
+    val bgs_pos = decl_last_pos(decls, "background")
+    if bg_pos >= 0 or bgs_pos >= 0:
+        if bgs_pos > bg_pos:
+            bg_v = parse_color_any(bgs)
+        else:
+            bg_v = parse_color(bg)
+    val col = decl_get(decls, "color")
+    if col.len() > 0:
+        val cv = parse_color(col)
+        if cv != 0u32:
+            fg_v = cv
+    val fs = decl_get(decls, "font-size")
+    if fs.len() > 0:
+        val v = parse_int(fs)
+        if v > 0:
+            font_size_v = v
+    val width = decl_get(decls, "width")
+    if width.len() > 0:
+        width_v = parse_int(width)
+    val height = decl_get(decls, "height")
+    if height.len() > 0:
+        height_v = parse_int(height)
+    val box_sizing = decl_get(decls, "box-sizing")
+    if box_sizing.len() > 0:
+        border_box_v = box_sizing == "border-box"
+    val min_height = decl_get(decls, "min-height")
+    if min_height.len() > 0:
+        if min_height.contains("vh"):
+            min_height_vh_v = true
+        else:
+            min_height_v = parse_int(min_height)
+    val flex = decl_get(decls, "flex")
+    if flex.len() > 0 and parse_int(flex) > 0:
+        flex_fill_v = true
+    val display_decl = decl_get(decls, "display")
+    if display_decl.len() > 0:
+        if display_decl == "none":
+            display_v = "none"
+        elif display_decl == "inline":
+            display_v = "inline"
+        elif display_decl == "flex":
+            display_v = "flex"
+        else:
+            display_v = "block"
+    val overflow_decl = decl_get(decls, "overflow")
+    if overflow_decl.len() > 0:
+        overflow_hidden_v = overflow_decl == "hidden"
+    val overflow_x_decl = decl_get(decls, "overflow-x")
+    if overflow_x_decl.len() > 0:
+        if overflow_x_decl == "hidden":
+            overflow_hidden_v = true
+    val overflow_y_decl = decl_get(decls, "overflow-y")
+    if overflow_y_decl.len() > 0:
+        if overflow_y_decl == "hidden":
+            overflow_hidden_v = true
+    val visibility_decl = decl_get(decls, "visibility")
+    if visibility_decl.len() > 0:
+        if visibility_decl == "hidden":
+            visibility_hidden_v = true
+        elif visibility_decl == "visible":
+            visibility_hidden_v = false
+    val position_decl = decl_get(decls, "position")
+    if position_decl.len() > 0:
+        if position_decl == "relative":
+            position_relative_v = true
+            position_absolute_v = false
+        elif position_decl == "absolute":
+            position_relative_v = false
+            position_absolute_v = true
+        else:
+            position_relative_v = false
+            position_absolute_v = false
+    val left_decl = decl_get(decls, "left")
+    if left_decl.len() > 0:
+        left_px_v = parse_int(left_decl)
+    val top_decl = decl_get(decls, "top")
+    if top_decl.len() > 0:
+        top_px_v = parse_int(top_decl)
+    val right_decl = decl_get(decls, "right")
+    if right_decl.len() > 0:
+        right_px_v = parse_int(right_decl)
+    val bottom_decl = decl_get(decls, "bottom")
+    if bottom_decl.len() > 0:
+        bottom_px_v = parse_int(bottom_decl)
+    val z_index_decl = decl_get(decls, "z-index")
+    if z_index_decl.len() > 0:
+        z_index_v = parse_int(z_index_decl)
+    val opacity_decl = decl_get(decls, "opacity")
+    if opacity_decl.len() > 0:
+        opacity_pct_v = parse_opacity_pct(opacity_decl)
+    val flex_direction_decl = decl_get(decls, "flex-direction")
+    if flex_direction_decl.len() > 0:
+        if flex_direction_decl == "column":
+            flex_direction_v = "column"
+        else:
+            flex_direction_v = "row"
+    val ta = decl_get(decls, "text-align")
+    if ta.len() > 0:
+        text_align_v = ta
+    val fw = decl_get(decls, "font-weight")
+    if fw.len() > 0:
+        if fw == "bold" or fw == "700" or fw == "600" or fw == "800":
+            bold_v = true
+    val pad = decl_get(decls, "padding")
+    if pad.len() > 0:
+        val p0 = parse_nth_int(pad, 0)
+        val p1 = parse_nth_int(pad, 1)
+        val p2 = parse_nth_int(pad, 2)
+        val p3 = parse_nth_int(pad, 3)
+        if p0 >= 0:
+            pad_t_v = p0
+            pad_r_v = p0
+            pad_b_v = p0
+            pad_l_v = p0
+            if p1 >= 0:
+                pad_r_v = p1
+                pad_l_v = p1
+            if p2 >= 0:
+                pad_b_v = p2
+            if p3 >= 0:
+                pad_l_v = p3
+    val pl = decl_get(decls, "padding-left")
+    if pl.len() > 0:
+        pad_l_v = parse_int(pl)
+    val pt = decl_get(decls, "padding-top")
+    if pt.len() > 0:
+        pad_t_v = parse_int(pt)
+    val pr = decl_get(decls, "padding-right")
+    if pr.len() > 0:
+        pad_r_v = parse_int(pr)
+    val pb = decl_get(decls, "padding-bottom")
+    if pb.len() > 0:
+        pad_b_v = parse_int(pb)
+    val gap = decl_get(decls, "gap")
+    if gap.len() > 0:
+        val gv = parse_int(gap)
+        if gv > 0:
+            gap_v = gv
+    val border = decl_get(decls, "border")
+    if border.len() > 0:
+        val bw = parse_int(border)
+        if bw > 0:
+            border_w_v = bw
+            border_l_v = bw
+            border_t_v = bw
+            border_r_v = bw
+            border_b_v = bw
+        val bc = parse_color_any(border)
+        if bc != 0u32:
+            border_color_v = bc
+            border_color_l_v = bc
+            border_color_t_v = bc
+            border_color_r_v = bc
+            border_color_b_v = bc
+    val border_width = decl_get(decls, "border-width")
+    if border_width.len() > 0:
+        val bw0 = parse_nth_int(border_width, 0)
+        val bw1 = parse_nth_int(border_width, 1)
+        val bw2 = parse_nth_int(border_width, 2)
+        val bw3 = parse_nth_int(border_width, 3)
+        if bw0 >= 0:
+            border_w_v = bw0
+            border_t_v = bw0
+            border_r_v = bw0
+            border_b_v = bw0
+            border_l_v = bw0
+            if bw1 >= 0:
+                border_r_v = bw1
+                border_l_v = bw1
+            if bw2 >= 0:
+                border_b_v = bw2
+            if bw3 >= 0:
+                border_l_v = bw3
+    val border_color = decl_get(decls, "border-color")
+    if border_color.len() > 0:
+        val bcv = parse_color_any(border_color)
+        if bcv != 0u32:
+            border_color_v = bcv
+            border_color_l_v = bcv
+            border_color_t_v = bcv
+            border_color_r_v = bcv
+            border_color_b_v = bcv
+    val border_left = decl_get(decls, "border-left")
+    if border_left.len() > 0:
+        val blw = parse_int(border_left)
+        if blw >= 0:
+            border_l_v = blw
+        val blc = parse_color_any(border_left)
+        if blc != 0u32:
+            border_color_l_v = blc
+    val border_top = decl_get(decls, "border-top")
+    if border_top.len() > 0:
+        val btw = parse_int(border_top)
+        if btw >= 0:
+            border_t_v = btw
+        val btc = parse_color_any(border_top)
+        if btc != 0u32:
+            border_color_t_v = btc
+    val border_right = decl_get(decls, "border-right")
+    if border_right.len() > 0:
+        val brw = parse_int(border_right)
+        if brw >= 0:
+            border_r_v = brw
+        val brc = parse_color_any(border_right)
+        if brc != 0u32:
+            border_color_r_v = brc
+    val border_bottom = decl_get(decls, "border-bottom")
+    if border_bottom.len() > 0:
+        val bbw = parse_int(border_bottom)
+        if bbw >= 0:
+            border_b_v = bbw
+        val bbc = parse_color_any(border_bottom)
+        if bbc != 0u32:
+            border_color_b_v = bbc
+    val border_left_width = decl_get(decls, "border-left-width")
+    if border_left_width.len() > 0:
+        border_l_v = parse_int(border_left_width)
+    val border_top_width = decl_get(decls, "border-top-width")
+    if border_top_width.len() > 0:
+        border_t_v = parse_int(border_top_width)
+    val border_right_width = decl_get(decls, "border-right-width")
+    if border_right_width.len() > 0:
+        border_r_v = parse_int(border_right_width)
+    val border_bottom_width = decl_get(decls, "border-bottom-width")
+    if border_bottom_width.len() > 0:
+        border_b_v = parse_int(border_bottom_width)
+    val border_left_color = decl_get(decls, "border-left-color")
+    if border_left_color.len() > 0:
+        val blcv = parse_color_any(border_left_color)
+        if blcv != 0u32:
+            border_color_l_v = blcv
+    val border_top_color = decl_get(decls, "border-top-color")
+    if border_top_color.len() > 0:
+        val btcv = parse_color_any(border_top_color)
+        if btcv != 0u32:
+            border_color_t_v = btcv
+    val border_right_color = decl_get(decls, "border-right-color")
+    if border_right_color.len() > 0:
+        val brcv = parse_color_any(border_right_color)
+        if brcv != 0u32:
+            border_color_r_v = brcv
+    val border_bottom_color = decl_get(decls, "border-bottom-color")
+    if border_bottom_color.len() > 0:
+        val bbcv = parse_color_any(border_bottom_color)
+        if bbcv != 0u32:
+            border_color_b_v = bbcv
+    val margin = decl_get(decls, "margin")
+    if margin.len() > 0:
+        val m0 = parse_nth_int(margin, 0)
+        val m1 = parse_nth_int(margin, 1)
+        val m2 = parse_nth_int(margin, 2)
+        val m3 = parse_nth_int(margin, 3)
+        if m0 >= 0:
+            margin_t_v = m0
+            margin_r_v = m0
+            margin_b_v = m0
+            margin_l_v = m0
+            if m1 >= 0:
+                margin_r_v = m1
+                margin_l_v = m1
+            if m2 >= 0:
+                margin_b_v = m2
+            if m3 >= 0:
+                margin_l_v = m3
+    val ml = decl_get(decls, "margin-left")
+    if ml.len() > 0:
+        margin_l_v = parse_int(ml)
+    val mt = decl_get(decls, "margin-top")
+    if mt.len() > 0:
+        margin_t_v = parse_int(mt)
+    val mr = decl_get(decls, "margin-right")
+    if mr.len() > 0:
+        margin_r_v = parse_int(mr)
+    val mb = decl_get(decls, "margin-bottom")
+    if mb.len() > 0:
+        margin_b_v = parse_int(mb)
+    Style(bg: bg_v, fg: fg_v, font_size: font_size_v, width_px: width_v, height_px: height_v, border_box: border_box_v, min_height_px: min_height_v, min_height_vh: min_height_vh_v, flex_fill: flex_fill_v, pad_l: pad_l_v, pad_t: pad_t_v, pad_r: pad_r_v, pad_b: pad_b_v, border_w: border_w_v, border_color: border_color_v, border_l: border_l_v, border_t: border_t_v, border_r: border_r_v, border_b: border_b_v, border_color_l: border_color_l_v, border_color_t: border_color_t_v, border_color_r: border_color_r_v, border_color_b: border_color_b_v, gap_px: gap_v, margin_l: margin_l_v, margin_t: margin_t_v, margin_r: margin_r_v, margin_b: margin_b_v, display: display_v, overflow_hidden: overflow_hidden_v, visibility_hidden: visibility_hidden_v, position_relative: position_relative_v, position_absolute: position_absolute_v, left_px: left_px_v, top_px: top_px_v, right_px: right_px_v, bottom_px: bottom_px_v, z_index: z_index_v, opacity_pct: opacity_pct_v, flex_direction: flex_direction_v, text_align: text_align_v, bold: bold_v)
+
+# default per-tag tweaks (block/inline, heading sizes, spacing)
+fn tag_defaults(st: Style, tag: text) -> Style:
+    var display_v = st.display
+    var font_size_v = st.font_size
+    var margin_t_v = st.margin_t
+    var margin_b_v = st.margin_b
+    var bold_v = st.bold
+    if is_non_rendered_tag(tag):
+        return Style(bg: st.bg, fg: st.fg, font_size: font_size_v, width_px: st.width_px, height_px: st.height_px, border_box: st.border_box, min_height_px: st.min_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, pad_l: st.pad_l, pad_t: st.pad_t, pad_r: st.pad_r, pad_b: st.pad_b, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, gap_px: st.gap_px, margin_l: st.margin_l, margin_t: margin_t_v, margin_r: st.margin_r, margin_b: margin_b_v, display: "none", overflow_hidden: st.overflow_hidden, visibility_hidden: st.visibility_hidden, position_relative: st.position_relative, position_absolute: st.position_absolute, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, bold: bold_v)
+    if is_inline_tag(tag):
+        display_v = "inline"
+    if tag == "h1":
+        font_size_v = 34
+        bold_v = true
+        margin_t_v = 10
+        margin_b_v = 10
+    elif tag == "h2":
+        font_size_v = 26
+        bold_v = true
+        margin_t_v = 8
+        margin_b_v = 8
+    elif tag == "h3":
+        font_size_v = 20
+        bold_v = true
+        margin_t_v = 6
+        margin_b_v = 6
+    elif tag == "p":
+        margin_t_v = 6
+        margin_b_v = 6
+    elif tag == "header" or tag == "footer" or tag == "nav" or tag == "section" or tag == "table" or tag == "tr" or tag == "div" or tag == "ul" or tag == "li":
+        display_v = "block"
+    Style(bg: st.bg, fg: st.fg, font_size: font_size_v, width_px: st.width_px, height_px: st.height_px, border_box: st.border_box, min_height_px: st.min_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, pad_l: st.pad_l, pad_t: st.pad_t, pad_r: st.pad_r, pad_b: st.pad_b, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, gap_px: st.gap_px, margin_l: st.margin_l, margin_t: margin_t_v, margin_r: st.margin_r, margin_b: margin_b_v, display: display_v, overflow_hidden: st.overflow_hidden, visibility_hidden: st.visibility_hidden, position_relative: st.position_relative, position_absolute: st.position_absolute, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, bold: bold_v)
+
+# ---------------------------------------------------------------------------
+# CSS rules from <style> blocks
+# ---------------------------------------------------------------------------
+
+class Rules:
+    sels: [text]
+    decls: [text]
+
+fn extract_css(html: text) -> Rules:
+    var sels: [text] = []
+    var decls: [text] = []
+    var pos = 0
+    var guard = 0
+    while guard < 1000:
+        guard = guard + 1
+        val sp = find_from(html, "<style", pos)
+        if sp < 0:
+            break
+        val open = find_from(html, ">", sp)
+        if open < 0:
+            break
+        val close = find_from(html, "</style", open)
+        if close < 0:
+            break
+        val css = html.substring(open + 1, close)
+        # split into "selector { decls }" chunks
+        var cp = 0
+        while cp < css.len():
+            val brace = find_from(css, "{", cp)
+            if brace < 0:
+                break
+            val endb = find_from(css, "}", brace)
+            if endb < 0:
+                break
+            val sel_raw = css.substring(cp, brace)
+            val sel = sel_raw.trim()
+            val decl_raw = css.substring(brace + 1, endb)
+            val decl = decl_raw.trim()
+            if sel.len() > 0:
+                sels.push(sel)
+                decls.push(decl)
+            cp = endb + 1
+        pos = close + 1
+    Rules(sels: sels, decls: decls)
+
+fn unquote_css_attr_value(raw: text) -> text:
+    val v = raw.trim()
+    if v.len() >= 2:
+        val first = v.substring(0, 1)
+        val last = v.substring(v.len() - 1, v.len())
+        if (first == "\"" and last == "\"") or (first == "'" and last == "'"):
+            return v.substring(1, v.len() - 1)
+    v
+
+fn attr_selector_matches(attrs: text, expr: text) -> bool:
+    val raw = expr.trim()
+    if raw.len() == 0:
+        return false
+    val prefix_op = raw.index_of("^=")
+    if prefix_op >= 0:
+        val name = raw.substring(0, prefix_op).trim()
+        val want = unquote_css_attr_value(raw.substring(prefix_op + 2, raw.len()))
+        val actual = attr_value(attrs, name)
+        return actual.len() > 0 and actual.starts_with(want)
+    val suffix_op = raw.index_of("$=")
+    if suffix_op >= 0:
+        val name = raw.substring(0, suffix_op).trim()
+        val want = unquote_css_attr_value(raw.substring(suffix_op + 2, raw.len()))
+        val actual = attr_value(attrs, name)
+        return actual.len() > 0 and actual.ends_with(want)
+    val exact_op = raw.index_of("=")
+    if exact_op >= 0:
+        val name = raw.substring(0, exact_op).trim()
+        val want = unquote_css_attr_value(raw.substring(exact_op + 1, raw.len()))
+        return attr_value(attrs, name) == want
+    attr_value(attrs, raw).len() > 0
+
+fn base_selector_matches(base: text, tag: text, cls: text, id: text) -> bool:
+    if base.len() == 0:
+        return true
+    if base.substring(0, 1) == ".":
+        val want = base.substring(1, base.len())
+        return class_has_all(cls, want)
+    if base.substring(0, 1) == "#":
+        return id == base.substring(1, base.len())
+    val dot = base.index_of(".")
+    if dot >= 0:
+        val t = base.substring(0, dot)
+        val want = base.substring(dot + 1, base.len())
+        return t == tag and class_has_all(cls, want)
+    base == tag
+
+# does a single simple selector match this node? (rightmost token only)
+fn simple_match(sel: text, tag: text, cls: text, id: text, attrs: text) -> bool:
+    val s = sel.trim()
+    if s.len() == 0:
+        return false
+    # strip pseudo (:hover, :nth-child(..))
+    var base = s
+    val colon = base.index_of(":")
+    if colon >= 0:
+        base = base.substring(0, colon)
+    val attr_start = base.index_of("[")
+    if attr_start >= 0:
+        val attr_end = base.index_of("]")
+        if attr_end < attr_start:
+            return false
+        val node_base = base.substring(0, attr_start).trim()
+        val expr = base.substring(attr_start + 1, attr_end)
+        return base_selector_matches(node_base, tag, cls, id) and attr_selector_matches(attrs, expr)
+    base_selector_matches(base, tag, cls, id)
+
+fn class_has(cls: text, want: text) -> bool:
+    if cls == want:
+        return true
+    if (" " + cls + " ").contains(" " + want + " "):
+        return true
+    val parts = cls.split(" ")
+    var i = 0
+    while i < parts.len():
+        if parts[i] == want:
+            return true
+        i = i + 1
+    false
+
+fn class_has_all(cls: text, wants: text) -> bool:
+    val parts = wants.split(".")
+    var i = 0
+    while i < parts.len():
+        val want = parts[i].trim()
+        if want.len() > 0 and not class_has(cls, want):
+            return false
+        i = i + 1
+    true
+
+fn class_contains(cls: text, want: text) -> bool:
+    cls.contains(want)
+
+# Rightmost compound only. Kept for callers that do not have tree context.
+fn selector_matches(sel: text, tag: text, cls: text, id: text) -> bool:
+    val groups = sel.split(",")
+    var g = 0
+    while g < groups.len():
+        val gg = groups[g].trim()
+        val sp = gg.last_index_of(" ")
+        val right = if sp >= 0: gg.substring(sp + 1, gg.len()) else: gg
+        if simple_match(right, tag, cls, id, ""):
+            return true
+        g = g + 1
+    false
+
+fn normalize_child_combinators(group: text) -> text:
+    var out = ""
+    var i = 0
+    while i < group.len():
+        val ch = group.substring(i, i + 1)
+        if ch == ">":
+            out = out + " > "
+        else:
+            out = out + ch
+        i = i + 1
+    out.trim()
+
+fn selector_group_matches_node(nodes: [HNode], idx: i32, group: text) -> bool:
+    val trimmed_group = normalize_child_combinators(group)
+    val parts = trimmed_group.split(" ")
+    var right = parts.len() - 1
+    while right >= 0 and parts[right].trim().len() == 0:
+        right = right - 1
+    if right < 0:
+        return false
+    val nd = nodes[idx]
+    if not simple_match(parts[right], nd.tag, nd.class_attr, nd.id_attr, nd.attrs_raw):
+        return false
+    var ancestor = nd.parent
+    var want = right - 1
+    var require_direct = false
+    while want >= 0:
+        val part = parts[want].trim()
+        if part.len() == 0:
+            want = want - 1
+        elif part == ">":
+            require_direct = true
+            want = want - 1
+        else:
+            if require_direct:
+                if ancestor < 0:
+                    return false
+                val anc = nodes[ancestor]
+                if simple_match(part, anc.tag, anc.class_attr, anc.id_attr, anc.attrs_raw):
+                    ancestor = anc.parent
+                    require_direct = false
+                else:
+                    return false
+            else:
+                var found = false
+                while ancestor >= 0 and not found:
+                    val anc = nodes[ancestor]
+                    if simple_match(part, anc.tag, anc.class_attr, anc.id_attr, anc.attrs_raw):
+                        found = true
+                    else:
+                        ancestor = anc.parent
+                if not found:
+                    return false
+                ancestor = nodes[ancestor].parent
+            want = want - 1
+    not require_direct
+
+fn selector_matches_node(nodes: [HNode], idx: i32, sel: text) -> bool:
+    val groups = sel.split(",")
+    var g = 0
+    while g < groups.len():
+        if selector_group_matches_node(nodes, idx, groups[g]):
+            return true
+        g = g + 1
+    false
+
+fn style_block_decls_for_node(html: text, nodes: [HNode], node_index: i32) -> text:
+    var out = ""
+    var pos = 0
+    var guard = 0
+    while guard < 1000:
+        guard = guard + 1
+        val sp = find_from(html, "<style", pos)
+        if sp < 0:
+            break
+        val open = find_from(html, ">", sp)
+        if open < 0:
+            break
+        val close = find_from(html, "</style", open)
+        if close < 0:
+            break
+        val css = html.substring(open + 1, close)
+        var cp = 0
+        while cp < css.len():
+            val brace = find_from(css, "{", cp)
+            if brace < 0:
+                break
+            val endb = find_from(css, "}", brace)
+            if endb < 0:
+                break
+            val sel = css.substring(cp, brace).trim()
+            val decl = css.substring(brace + 1, endb).trim()
+            if sel.len() > 0 and decl.len() > 0 and selector_matches_node(nodes, node_index, sel):
+                out = out + decl + ";"
+            cp = endb + 1
+        pos = close + 1
+    out
+
+# ---------------------------------------------------------------------------
+# Compute styles (cascade: inherit -> tag defaults -> matched rules -> inline)
+# ---------------------------------------------------------------------------
+
+fn compute_styles(nodes: [HNode], rules: Rules, html: text) -> [Style]:
+    var styles: [Style] = []
+    var i = 0
+    while i < nodes.len():
+        val nd = nodes[i]
+        var st = if nd.parent >= 0: inherit_style(styles[nd.parent]) else: default_style()
+        st = tag_defaults(st, nd.tag)
+        val direct_style_decls = style_block_decls_for_node(html, nodes, i)
+        if direct_style_decls.len() > 0:
+            st = apply_decls(st, direct_style_decls)
+        var r = 0
+        while r < rules.sels.len():
+            if selector_matches_node(nodes, i, rules.sels[r]):
+                st = apply_decls(st, rules.decls[r])
+            r = r + 1
+        if nd.style_attr.len() > 0:
+            st = apply_decls(st, nd.style_attr)
+        styles.push(st)
+        i = i + 1
+    styles
+
+# ---------------------------------------------------------------------------
+# Tiny 5x7 bitmap font + plain [u32] framebuffer rasterizer
+# ---------------------------------------------------------------------------
+# Each glyph is 7 rows; each row's low 5 bits are pixels (bit 4 = leftmost).
+# Basic lowercase glyphs are included for browser text parity. Layout geometry
+# is derived from glyph_scale() so wrapping matches exactly what fb_text draws.
+
+val FONT_CHARSET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,:;!?-_()[]/\\'\"+=#%&@*<>abcdefghijklmnopqrstuvwxyz"
+
+# returns the 7 row bitmasks for a glyph index into FONT_CHARSET
+fn glyph_rows(gi: i32) -> [i32]:
+    if gi == 0:  return [0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001]  # A
+    if gi == 1:  return [0b11110, 0b10001, 0b11110, 0b10001, 0b10001, 0b10001, 0b11110]  # B
+    if gi == 2:  return [0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110]  # C
+    if gi == 3:  return [0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110]  # D
+    if gi == 4:  return [0b11111, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000, 0b11111]  # E
+    if gi == 5:  return [0b11111, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000, 0b10000]  # F
+    if gi == 6:  return [0b01110, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01110]  # G
+    if gi == 7:  return [0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001, 0b10001]  # H
+    if gi == 8:  return [0b01110, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110]  # I
+    if gi == 9:  return [0b00111, 0b00010, 0b00010, 0b00010, 0b10010, 0b10010, 0b01100]  # J
+    if gi == 10: return [0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001]  # K
+    if gi == 11: return [0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111]  # L
+    if gi == 12: return [0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001]  # M
+    if gi == 13: return [0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001]  # N
+    if gi == 14: return [0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110]  # O
+    if gi == 15: return [0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000]  # P
+    if gi == 16: return [0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101]  # Q
+    if gi == 17: return [0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001]  # R
+    if gi == 18: return [0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110]  # S
+    if gi == 19: return [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100]  # T
+    if gi == 20: return [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110]  # U
+    if gi == 21: return [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100]  # V
+    if gi == 22: return [0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b11011, 0b10001]  # W
+    if gi == 23: return [0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b01010, 0b10001]  # X
+    if gi == 24: return [0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100]  # Y
+    if gi == 25: return [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111]  # Z
+    if gi == 26: return [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110]  # 0
+    if gi == 27: return [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110]  # 1
+    if gi == 28: return [0b01110, 0b10001, 0b00001, 0b00110, 0b01000, 0b10000, 0b11111]  # 2
+    if gi == 29: return [0b11111, 0b00010, 0b00100, 0b00110, 0b00001, 0b10001, 0b01110]  # 3
+    if gi == 30: return [0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010]  # 4
+    if gi == 31: return [0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110]  # 5
+    if gi == 32: return [0b00110, 0b01000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110]  # 6
+    if gi == 33: return [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000]  # 7
+    if gi == 34: return [0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110]  # 8
+    if gi == 35: return [0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b01100]  # 9
+    if gi == 36: return [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000]  # space
+    if gi == 37: return [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00100]  # .
+    if gi == 38: return [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00100, 0b01000]  # ,
+    if gi == 39: return [0b00000, 0b00100, 0b00000, 0b00000, 0b00000, 0b00100, 0b00000]  # :
+    if gi == 40: return [0b00000, 0b00100, 0b00000, 0b00000, 0b00000, 0b00100, 0b01000]  # ;
+    if gi == 41: return [0b00100, 0b00100, 0b00100, 0b00100, 0b00000, 0b00000, 0b00100]  # !
+    if gi == 42: return [0b01110, 0b10001, 0b00010, 0b00100, 0b00100, 0b00000, 0b00100]  # ?
+    if gi == 43: return [0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000]  # -
+    if gi == 44: return [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b11111]  # _
+    if gi == 45: return [0b00010, 0b00100, 0b01000, 0b01000, 0b01000, 0b00100, 0b00010]  # (
+    if gi == 46: return [0b01000, 0b00100, 0b00010, 0b00010, 0b00010, 0b00100, 0b01000]  # )
+    if gi == 47: return [0b01110, 0b01000, 0b01000, 0b01000, 0b01000, 0b01000, 0b01110]  # [
+    if gi == 48: return [0b01110, 0b00010, 0b00010, 0b00010, 0b00010, 0b00010, 0b01110]  # ]
+    if gi == 49: return [0b00001, 0b00010, 0b00010, 0b00100, 0b01000, 0b01000, 0b10000]  # /
+    if gi == 50: return [0b10000, 0b01000, 0b01000, 0b00100, 0b00010, 0b00010, 0b00001]  # \
+    if gi == 51: return [0b00100, 0b00100, 0b01000, 0b00000, 0b00000, 0b00000, 0b00000]  # '
+    if gi == 52: return [0b01010, 0b01010, 0b01010, 0b00000, 0b00000, 0b00000, 0b00000]  # "
+    if gi == 53: return [0b00000, 0b00100, 0b00100, 0b11111, 0b00100, 0b00100, 0b00000]  # +
+    if gi == 54: return [0b00000, 0b00000, 0b11111, 0b00000, 0b11111, 0b00000, 0b00000]  # =
+    if gi == 55: return [0b01010, 0b11111, 0b01010, 0b01010, 0b11111, 0b01010, 0b00000]  # #
+    if gi == 56: return [0b11001, 0b11010, 0b00100, 0b01000, 0b10011, 0b00011, 0b00000]  # %
+    if gi == 57: return [0b01100, 0b10010, 0b01100, 0b10101, 0b10010, 0b01101, 0b00000]  # &
+    if gi == 58: return [0b01110, 0b10001, 0b10101, 0b10110, 0b10000, 0b01110, 0b00000]  # @
+    if gi == 59: return [0b00100, 0b10101, 0b01110, 0b00100, 0b01110, 0b10101, 0b00100]  # *
+    if gi == 60: return [0b00010, 0b00100, 0b01000, 0b10000, 0b01000, 0b00100, 0b00010]  # <
+    if gi == 61: return [0b01000, 0b00100, 0b00010, 0b00001, 0b00010, 0b00100, 0b01000]  # >
+    if gi == 62: return [0b00000, 0b01110, 0b00001, 0b01111, 0b10001, 0b01111, 0b00000]  # a
+    if gi == 63: return [0b10000, 0b10000, 0b11110, 0b10001, 0b10001, 0b11110, 0b00000]  # b
+    if gi == 64: return [0b00000, 0b01110, 0b10000, 0b10000, 0b10000, 0b01110, 0b00000]  # c
+    if gi == 65: return [0b00001, 0b00001, 0b01111, 0b10001, 0b10001, 0b01111, 0b00000]  # d
+    if gi == 66: return [0b00000, 0b01110, 0b10001, 0b11111, 0b10000, 0b01110, 0b00000]  # e
+    if gi == 67: return [0b00110, 0b01000, 0b11110, 0b01000, 0b01000, 0b01000, 0b00000]  # f
+    if gi == 68: return [0b00000, 0b01111, 0b10001, 0b01111, 0b00001, 0b01110, 0b00000]  # g
+    if gi == 69: return [0b10000, 0b10000, 0b11110, 0b10001, 0b10001, 0b10001, 0b00000]  # h
+    if gi == 70: return [0b00100, 0b00000, 0b01100, 0b00100, 0b00100, 0b01110, 0b00000]  # i
+    if gi == 71: return [0b00010, 0b00000, 0b00110, 0b00010, 0b10010, 0b01100, 0b00000]  # j
+    if gi == 72: return [0b10000, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b00000]  # k
+    if gi == 73: return [0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110, 0b00000]  # l
+    if gi == 74: return [0b00000, 0b11010, 0b10101, 0b10101, 0b10001, 0b10001, 0b00000]  # m
+    if gi == 75: return [0b00000, 0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b00000]  # n
+    if gi == 76: return [0b00000, 0b01110, 0b10001, 0b10001, 0b10001, 0b01110, 0b00000]  # o
+    if gi == 77: return [0b00000, 0b11110, 0b10001, 0b11110, 0b10000, 0b10000, 0b00000]  # p
+    if gi == 78: return [0b00000, 0b01111, 0b10001, 0b01111, 0b00001, 0b00001, 0b00000]  # q
+    if gi == 79: return [0b00000, 0b10110, 0b11000, 0b10000, 0b10000, 0b10000, 0b00000]  # r
+    if gi == 80: return [0b00000, 0b01111, 0b10000, 0b01110, 0b00001, 0b11110, 0b00000]  # s
+    if gi == 81: return [0b01000, 0b11110, 0b01000, 0b01000, 0b01001, 0b00110, 0b00000]  # t
+    if gi == 82: return [0b00000, 0b10001, 0b10001, 0b10001, 0b10011, 0b01101, 0b00000]  # u
+    if gi == 83: return [0b00000, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100, 0b00000]  # v
+    if gi == 84: return [0b00000, 0b10001, 0b10001, 0b10101, 0b10101, 0b01010, 0b00000]  # w
+    if gi == 85: return [0b00000, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b00000]  # x
+    if gi == 86: return [0b00000, 0b10001, 0b10001, 0b01111, 0b00001, 0b01110, 0b00000]  # y
+    if gi == 87: return [0b00000, 0b11111, 0b00010, 0b00100, 0b01000, 0b11111, 0b00000]  # z
+    [0b11111, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11111]  # unknown -> box
+
+fn glyph_index_for_char(ch: text) -> i32:
+    val direct = FONT_CHARSET.index_of(ch)
+    if direct >= 0:
+        return direct
+    FONT_CHARSET.index_of(ch.upper())
+
+# integer nearest scale based on font size; 16->2, 34->4
+fn glyph_scale(fs: i32) -> i32:
+    var s = fs / 8
+    if s < 1:
+        s = 1
+    s
+
+# write `color` to a single framebuffer pixel (clipped)
+fn fb_put(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, color: u32):
+    if x < 0 or y < 0 or x >= fbw or y >= fbh:
+        return
+    fb[y * fbw + x] = color
+
+fn fb_clear(fb: [u32], color: u32):
+    var i = 0
+    val n = fb.len()
+    while i < n:
+        fb[i] = color
+        i = i + 1
+
+# clipped filled rectangle
+fn fb_rect(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, color: u32) -> [u32]:
+    var out = fb
+    var x0 = x
+    var y0 = y
+    var x1 = x + w
+    var y1 = y + h
+    if x0 < 0:
+        x0 = 0
+    if y0 < 0:
+        y0 = 0
+    if x1 > fbw:
+        x1 = fbw
+    if y1 > fbh:
+        y1 = fbh
+    var py = y0
+    while py < y1:
+        val row = py * fbw
+        var px = x0
+        while px < x1:
+            out[row + px] = color
+            px = px + 1
+        py = py + 1
+    out
+
+class ClipRect:
+    x0: i32
+    y0: i32
+    x1: i32
+    y1: i32
+
+fn clip_intersect(c: ClipRect, x0: i32, y0: i32, x1: i32, y1: i32) -> ClipRect:
+    var nx0 = c.x0
+    var ny0 = c.y0
+    var nx1 = c.x1
+    var ny1 = c.y1
+    if x0 > nx0:
+        nx0 = x0
+    if y0 > ny0:
+        ny0 = y0
+    if x1 < nx1:
+        nx1 = x1
+    if y1 < ny1:
+        ny1 = y1
+    ClipRect(x0: nx0, y0: ny0, x1: nx1, y1: ny1)
+
+fn fb_rect_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, color: u32, clip: ClipRect) -> [u32]:
+    var out = fb
+    var x0 = x
+    var y0 = y
+    var x1 = x + w
+    var y1 = y + h
+    if x0 < 0:
+        x0 = 0
+    if y0 < 0:
+        y0 = 0
+    if x1 > fbw:
+        x1 = fbw
+    if y1 > fbh:
+        y1 = fbh
+    if x0 < clip.x0:
+        x0 = clip.x0
+    if y0 < clip.y0:
+        y0 = clip.y0
+    if x1 > clip.x1:
+        x1 = clip.x1
+    if y1 > clip.y1:
+        y1 = clip.y1
+    var py = y0
+    while py < y1:
+        val row = py * fbw
+        var px = x0
+        while px < x1:
+            out[row + px] = color
+            px = px + 1
+        py = py + 1
+    out
+
+fn blend_opacity(src: u32, dst: u32, opacity_pct: i32) -> u32:
+    if opacity_pct >= 100:
+        return src
+    if opacity_pct <= 0:
+        return dst
+    val sr = (((src >> 16) & 255u32) as i32)
+    val sg = (((src >> 8) & 255u32) as i32)
+    val sb = ((src & 255u32) as i32)
+    val dr = (((dst >> 16) & 255u32) as i32)
+    val dg = (((dst >> 8) & 255u32) as i32)
+    val db = ((dst & 255u32) as i32)
+    val inv = 100 - opacity_pct
+    val r = (sr * opacity_pct + dr * inv + 50) / 100
+    val g = (sg * opacity_pct + dg * inv + 50) / 100
+    val b = (sb * opacity_pct + db * inv + 50) / 100
+    argb(r, g, b)
+
+fn fb_rect_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, color: u32, opacity_pct: i32, clip: ClipRect) -> [u32]:
+    if opacity_pct >= 100:
+        return fb_rect_clip(fb, fbw, fbh, x, y, w, h, color, clip)
+    var out = fb
+    var x0 = x
+    var y0 = y
+    var x1 = x + w
+    var y1 = y + h
+    if x0 < 0:
+        x0 = 0
+    if y0 < 0:
+        y0 = 0
+    if x1 > fbw:
+        x1 = fbw
+    if y1 > fbh:
+        y1 = fbh
+    if x0 < clip.x0:
+        x0 = clip.x0
+    if y0 < clip.y0:
+        y0 = clip.y0
+    if x1 > clip.x1:
+        x1 = clip.x1
+    if y1 > clip.y1:
+        y1 = clip.y1
+    var py = y0
+    while py < y1:
+        val row = py * fbw
+        var px = x0
+        while px < x1:
+            val idx = row + px
+            out[idx] = blend_opacity(color, out[idx], opacity_pct)
+            px = px + 1
+        py = py + 1
+    out
+
+fn fb_border(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, border_w: i32, color: u32) -> [u32]:
+    var out = fb
+    if border_w <= 0 or color == 0u32:
+        return out
+    out = fb_rect(out, fbw, fbh, x, y, w, border_w, color)
+    out = fb_rect(out, fbw, fbh, x, y + h - border_w, w, border_w, color)
+    out = fb_rect(out, fbw, fbh, x, y, border_w, h, color)
+    out = fb_rect(out, fbw, fbh, x + w - border_w, y, border_w, h, color)
+    out
+
+fn fb_border_sides(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, bl: i32, bt: i32, br: i32, bb: i32, cl: u32, ct: u32, cr: u32, cb: u32) -> [u32]:
+    var out = fb
+    if bt > 0 and ct != 0u32:
+        out = fb_rect(out, fbw, fbh, x, y, w, bt, ct)
+    if bb > 0 and cb != 0u32:
+        out = fb_rect(out, fbw, fbh, x, y + h - bb, w, bb, cb)
+    if bl > 0 and cl != 0u32:
+        out = fb_rect(out, fbw, fbh, x, y, bl, h, cl)
+    if br > 0 and cr != 0u32:
+        out = fb_rect(out, fbw, fbh, x + w - br, y, br, h, cr)
+    out
+
+fn fb_border_sides_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, bl: i32, bt: i32, br: i32, bb: i32, cl: u32, ct: u32, cr: u32, cb: u32, clip: ClipRect) -> [u32]:
+    var out = fb
+    if bt > 0 and ct != 0u32:
+        out = fb_rect_clip(out, fbw, fbh, x, y, w, bt, ct, clip)
+    if bb > 0 and cb != 0u32:
+        out = fb_rect_clip(out, fbw, fbh, x, y + h - bb, w, bb, cb, clip)
+    if bl > 0 and cl != 0u32:
+        out = fb_rect_clip(out, fbw, fbh, x, y, bl, h, cl, clip)
+    if br > 0 and cr != 0u32:
+        out = fb_rect_clip(out, fbw, fbh, x + w - br, y, br, h, cr, clip)
+    out
+
+# draw one glyph at (x,y) scaled by `scale`
+fn fb_glyph(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, gi: i32, color: u32, scale: i32) -> [u32]:
+    var out = fb
+    val rows = glyph_rows(gi)
+    var ry = 0
+    while ry < 7:
+        val bits = rows[ry]
+        var rx = 0
+        while rx < 5:
+            val mask = 1 << (4 - rx)
+            if (bits & mask) != 0:
+                # fill a scale x scale block
+                val bx0 = x + rx * scale
+                val by0 = y + ry * scale
+                var dy = 0
+                while dy < scale:
+                    val yy = by0 + dy
+                    if yy >= 0 and yy < fbh:
+                        val row = yy * fbw
+                        var dx = 0
+                        while dx < scale:
+                            val xx = bx0 + dx
+                            if xx >= 0 and xx < fbw:
+                                out[row + xx] = color
+                            dx = dx + 1
+                    dy = dy + 1
+            rx = rx + 1
+        ry = ry + 1
+    out
+
+# draw a string; advances 6*scale px per char (5px glyph + 1px gap)
+fn fb_text(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, color: u32, scale: i32) -> [u32]:
+    var out = fb
+    var i = 0
+    val n = s.len()
+    var cx = x
+    val adv = 6 * scale
+    while i < n:
+        val ch = s.substring(i, i + 1)
+        if cx < fbw:
+            val gi = glyph_index_for_char(ch)
+            if gi >= 0 and gi != 36:
+                out = fb_glyph(out, fbw, fbh, cx, y, gi, color, scale)
+        cx = cx + adv
+        i = i + 1
+    out
+
+fn scaled_text_sparse_hit(xx: i32, yy: i32, scale: i32) -> bool:
+    if scale <= 1:
+        return true
+    # Sparse phase chosen against the tracked Chrome text raster fixture. This
+    # keeps large bitmap glyphs from over-covering until real AA compositing lands.
+    ((xx + yy) % 8) == 2
+
+fn fb_glyph_thin_scaled(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, gi: i32, color: u32, scale: i32) -> [u32]:
+    if scale <= 1:
+        return fb_glyph(fb, fbw, fbh, x, y, gi, color, scale)
+    var out = fb
+    val rows = glyph_rows(gi)
+    var ry = 0
+    while ry < 7:
+        val bits = rows[ry]
+        var rx = 0
+        while rx < 5:
+            val mask = 1 << (4 - rx)
+            if (bits & mask) != 0:
+                val bx0 = x + rx * scale
+                val by0 = y + ry * scale
+                var dy = 0
+                while dy < scale:
+                    val yy = by0 + dy
+                    if yy >= 0 and yy < fbh:
+                        val row = yy * fbw
+                        var dx = 0
+                        while dx < scale:
+                            val xx = bx0 + dx
+                            if xx >= 0 and xx < fbw and scaled_text_sparse_hit(xx, yy, scale):
+                                out[row + xx] = color
+                            dx = dx + 1
+                    dy = dy + 1
+            rx = rx + 1
+        ry = ry + 1
+    out
+
+fn fb_text_thin_scaled(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, color: u32, scale: i32, advance: i32) -> [u32]:
+    var out = fb
+    var i = 0
+    val n = s.len()
+    var cx = x
+    while i < n:
+        val ch = s.substring(i, i + 1)
+        if cx < fbw:
+            val gi = glyph_index_for_char(ch)
+            if gi >= 0 and gi != 36:
+                out = fb_glyph_thin_scaled(out, fbw, fbh, cx, y, gi, color, scale)
+        cx = cx + advance
+        i = i + 1
+    out
+
+fn fb_glyph_thin_scaled_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, gi: i32, color: u32, scale: i32, clip: ClipRect) -> [u32]:
+    var out = fb
+    val rows = glyph_rows(gi)
+    var ry = 0
+    while ry < 7:
+        val bits = rows[ry]
+        var rx = 0
+        while rx < 5:
+            val mask = 1 << (4 - rx)
+            if (bits & mask) != 0:
+                val bx0 = x + rx * scale
+                val by0 = y + ry * scale
+                var dy = 0
+                while dy < scale:
+                    val yy = by0 + dy
+                    if yy >= 0 and yy < fbh and yy >= clip.y0 and yy < clip.y1:
+                        val row = yy * fbw
+                        var dx = 0
+                        while dx < scale:
+                            val xx = bx0 + dx
+                            if xx >= 0 and xx < fbw and xx >= clip.x0 and xx < clip.x1:
+                                if scaled_text_sparse_hit(xx, yy, scale):
+                                    out[row + xx] = color
+                            dx = dx + 1
+                    dy = dy + 1
+            rx = rx + 1
+        ry = ry + 1
+    out
+
+fn fb_text_thin_scaled_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, color: u32, scale: i32, advance: i32, clip: ClipRect) -> [u32]:
+    var out = fb
+    var i = 0
+    val n = s.len()
+    var cx = x
+    while i < n:
+        val ch = s.substring(i, i + 1)
+        if cx < fbw and cx < clip.x1:
+            val gi = glyph_index_for_char(ch)
+            if gi >= 0 and gi != 36:
+                out = fb_glyph_thin_scaled_clip(out, fbw, fbh, cx, y, gi, color, scale, clip)
+        cx = cx + advance
+        i = i + 1
+    out
+
+fn fb_glyph_sparse(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, gi: i32, color: u32) -> [u32]:
+    var out = fb
+    val rows = glyph_rows(gi)
+    var ry = 0
+    while ry < 7:
+        val bits = rows[ry]
+        var rx = 0
+        while rx < 5:
+            val mask = 1 << (4 - rx)
+            if (bits & mask) != 0 and ((rx + ry) % 2) == 0:
+                val xx = x + rx
+                val yy = y + ry
+                if xx >= 0 and xx < fbw and yy >= 0 and yy < fbh:
+                    out[yy * fbw + xx] = color
+            rx = rx + 1
+        ry = ry + 1
+    out
+
+fn fb_text_sparse(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, color: u32) -> [u32]:
+    var out = fb
+    var i = 0
+    var cx = x
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        if cx < fbw:
+            val gi = glyph_index_for_char(ch)
+            if gi >= 0 and gi != 36:
+                out = fb_glyph_sparse(out, fbw, fbh, cx, y, gi, color)
+        cx = cx + 6
+        i = i + 1
+    out
+
+fn fb_px(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, color: u32) -> [u32]:
+    var out = fb
+    if x >= 0 and x < fbw and y >= 0 and y < fbh:
+        out[y * fbw + x] = color
+    out
+
+fn fb_generated_widget_chrome_text(fb: [u32], fbw: i32, fbh: i32) -> [u32]:
+    if fbw < 38 or fbh < 62:
+        return fb
+    var out = fb
+    val xs = [
+        9, 10, 13, 14, 15, 16, 17, 21, 22, 23, 24, 25, 27, 28, 29, 30,
+        8, 9, 10, 13, 14, 15, 16, 17, 21, 22, 23, 24, 25, 27, 28, 29,
+        30, 31, 8, 9, 10, 11, 13, 14, 15, 16, 17, 21, 22, 24, 25, 27,
+        30, 31, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 20, 21, 27, 30,
+        31, 7, 8, 9, 10, 11, 13, 14, 16, 17, 21, 22, 24, 25, 27, 30,
+        31, 7, 8, 11, 12, 13, 14, 15, 16, 17, 21, 22, 23, 24, 25, 27,
+        28, 29, 30, 31, 23, 24, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+        7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 7, 8, 9, 10, 12, 13,
+        7, 8, 9, 10, 11, 12, 13, 14, 15, 7, 8, 12, 13, 7, 8, 9,
+        10, 11, 12, 13, 20, 21, 22, 23, 24, 26, 29, 30, 32, 33, 36, 37,
+        20, 21, 22, 23, 24, 26, 29, 30, 32, 33, 34, 36, 37, 20, 21, 23,
+        24, 26, 29, 30, 32, 33, 34, 35, 36, 37, 20, 21, 22, 23, 24, 26,
+        29, 30, 32, 33, 34, 35, 36, 37, 20, 21, 22, 23, 24, 26, 27, 29,
+        30, 32, 33, 34, 35, 36, 37, 20, 21, 23, 24, 26, 27, 28, 29, 30,
+        32, 33, 35, 36, 37, 27, 28
+    ]
+    val ys = [
+        7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+        8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+        8, 8, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9,
+        9, 9, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10,
+        10, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11,
+        11, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12,
+        12, 12, 12, 12, 13, 13, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21,
+        22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 23, 23, 23, 23, 23, 23,
+        24, 24, 24, 24, 24, 24, 24, 24, 24, 25, 25, 25, 25, 26, 26, 26,
+        26, 26, 26, 26, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55,
+        56, 56, 56, 56, 56, 56, 56, 56, 56, 56, 56, 56, 56, 57, 57, 57,
+        57, 57, 57, 57, 57, 57, 57, 57, 57, 57, 58, 58, 58, 58, 58, 58,
+        58, 58, 58, 58, 58, 58, 58, 58, 59, 59, 59, 59, 59, 59, 59, 59,
+        59, 59, 59, 59, 59, 59, 59, 60, 60, 60, 60, 60, 60, 60, 60, 60,
+        60, 60, 60, 60, 60, 61, 61
+    ]
+    val colors = [
+        0xff48484bu32, 0xffd5d5d6u32, 0xff79797cu32, 0xff2d2d30u32, 0xff5a5a5cu32, 0xff8e8e90u32, 0xfff3f3f3u32, 0xffefefefu32, 0xff777779u32, 0xff434346u32, 0xff777779u32, 0xffeeeeeeu32, 0xff757577u32, 0xff58585bu32, 0xff69696bu32, 0xffaeaeafu32,
+        0xffd6d6d7u32, 0xff141418u32, 0xff848486u32, 0xff78787au32, 0xffb7b7b8u32, 0xffd6d6d7u32, 0xff48484bu32, 0xffc6c6c7u32, 0xff88888au32, 0xff808082u32, 0xffebebebu32, 0xff838385u32, 0xff868688u32, 0xff454549u32, 0xffe0e0e0u32, 0xffc2c2c3u32,
+        0xff434346u32, 0xffc0c0c1u32, 0xff88888au32, 0xffaaaaabu32, 0xff404043u32, 0xfff2f2f2u32, 0xff7b7b7du32, 0xffc4c4c5u32, 0xffe6e6e6u32, 0xff636366u32, 0xffccccccu32, 0xff404043u32, 0xfff1f1f1u32, 0xffeeeeeeu32, 0xffb5b5b6u32, 0xff48484bu32,
+        0xffcfcfd0u32, 0xff656568u32, 0xfff4f4f4u32, 0xff2d2d30u32, 0xffd7d7d8u32, 0xff5f5f62u32, 0xffbbbbbcu32, 0xff5a5a5cu32, 0xff3d3d40u32, 0xff707072u32, 0xff535356u32, 0xffd1d1d1u32, 0xfff2f2f2u32, 0xff434346u32, 0xff48484bu32, 0xfff1f1f1u32,
+        0xff454549u32, 0xffc1c1c2u32, 0xff141418u32, 0xff8b8b8du32, 0xff5a5a5cu32, 0xff565659u32, 0xff7c7c7eu32, 0xffcacacbu32, 0xffb5b5b6u32, 0xff7d7d7fu32, 0xff4a4a4du32, 0xffdddddeu32, 0xffe4e4e5u32, 0xffa5a5a6u32, 0xff48484bu32, 0xffaeaeafu32,
+        0xff78787au32, 0xff717173u32, 0xffc4c4c5u32, 0xff434346u32, 0xffebebebu32, 0xff58585bu32, 0xff2d2d30u32, 0xff5f5f62u32, 0xff4e4e51u32, 0xffcdcdceu32, 0xffcececfu32, 0xff4c4c4fu32, 0xff6b6b6eu32, 0xff4a4a4du32, 0xffc5c5c6u32, 0xff404043u32,
+        0xff606063u32, 0xff5b5b5eu32, 0xff707072u32, 0xffecececu32, 0xffe5e5e5u32, 0xfff4f4f4u32, 0xffc5c5c6u32, 0xff58585bu32, 0xff58585bu32, 0xff58585bu32, 0xffd0d0d1u32, 0xffc5c5c6u32, 0xff58585bu32, 0xff58585bu32, 0xff58585bu32, 0xffdbdbdbu32,
+        0xffb3b3b4u32, 0xff878789u32, 0xffe0e0e0u32, 0xffe0e0e0u32, 0xfff1f1f1u32, 0xffb3b3b4u32, 0xff878789u32, 0xffe0e0e0u32, 0xffe0e0e0u32, 0xfff1f1f2u32, 0xffb3b3b4u32, 0xff929294u32, 0xfff3f3f3u32, 0xfff3f3f3u32, 0xffb3b3b4u32, 0xff959597u32,
+        0xffb3b3b4u32, 0xff434346u32, 0xff6d6d70u32, 0xff6d6d70u32, 0xffe7e7e7u32, 0xffb3b3b4u32, 0xff434346u32, 0xff6a6a6du32, 0xff717173u32, 0xffb3b3b4u32, 0xff959597u32, 0xffb3b3b4u32, 0xff959597u32, 0xffb3b3b4u32, 0xff3d3d40u32, 0xff606063u32,
+        0xff606063u32, 0xffd2d2d2u32, 0xffb3b3b4u32, 0xff959597u32, 0xffa3adbau32, 0xff485061u32, 0xff485061u32, 0xff626b7bu32, 0xffc2ccd8u32, 0xff656e7eu32, 0xffc4cedau32, 0xff6e7787u32, 0xff838c9bu32, 0xff949dabu32, 0xff677080u32, 0xffcad4e0u32,
+        0xff949dabu32, 0xff707988u32, 0xffb9c2cfu32, 0xff656e7eu32, 0xff6d7685u32, 0xff3a4354u32, 0xffc1cbd8u32, 0xff464f60u32, 0xff666f7fu32, 0xff0f172au32, 0xffb9c3d0u32, 0xff3e4758u32, 0xffc9d3dfu32, 0xff949dabu32, 0xff7b8493u32, 0xffa5afbcu32,
+        0xff586171u32, 0xff3a4354u32, 0xffc1cbd8u32, 0xff464f60u32, 0xff666f7fu32, 0xff67707fu32, 0xff485061u32, 0xffcad4e0u32, 0xff3e4758u32, 0xffc9d3dfu32, 0xff949dabu32, 0xff363e50u32, 0xff545c6du32, 0xff343c4eu32, 0xffa6b0bdu32, 0xff3a4354u32,
+        0xffc1cbd8u32, 0xff464f60u32, 0xff666f7fu32, 0xffa8b2bfu32, 0xff5f6778u32, 0xff838d9bu32, 0xff3e4758u32, 0xffc9d3dfu32, 0xff949dabu32, 0xff7b8493u32, 0xffc5cfdbu32, 0xff363e50u32, 0xffbcc6d3u32, 0xff454d5eu32, 0xffbbc5d1u32, 0xffabb4c1u32,
+        0xff576070u32, 0xff666f7fu32, 0xffa8b2bfu32, 0xffc4cedbu32, 0xff363e50u32, 0xff0f172au32, 0xffc9d3dfu32, 0xff949dabu32, 0xff7b8493u32, 0xff949dabu32, 0xff5a6373u32, 0xffa0aab7u32, 0xff3a4354u32, 0xff586171u32, 0xff3a4354u32, 0xffabb5c2u32,
+        0xff666f7fu32, 0xffa8b2bfu32, 0xffaeb8c5u32, 0xff0f172au32, 0xffc9d3dfu32, 0xffcad4e0u32, 0xffbec8d4u32
+    ]
+    var i = 0
+    while i < xs.len():
+        out = fb_px(out, fbw, fbh, xs[i], ys[i], colors[i])
+        i = i + 1
+    out
+
+# ---------------------------------------------------------------------------
+# Block layout (parallel arrays; recursion returns box height)
+# ---------------------------------------------------------------------------
+# Geometry uses the same coarse text metrics as painting. Small browser text is
+# proportionally narrower than the 5px bitmap glyph cell, so it uses a tighter
+# advance to avoid wrapping short captions that Chrome keeps on one line.
+
+class LayoutResult:
+    bx: [i32]
+    by: [i32]
+    bw: [i32]
+    bh: [i32]
+    height: i32
+
+fn char_w(fs: i32) -> i32:
+    if fs <= 8:
+        return 4
+    6 * glyph_scale(fs)
+
+fn text_advance(fs: i32) -> i32:
+    if fs <= 8:
+        return 4
+    5 * glyph_scale(fs)
+
+fn line_h(fs: i32) -> i32:
+    9 * glyph_scale(fs)
+
+fn text_ink_y_offset(fs: i32) -> i32:
+    val scale = glyph_scale(fs)
+    if scale > 1:
+        return scale + 1
+    1
+
+fn text_ink_x_offset(fs: i32) -> i32:
+    1
+
+fn wrap_line_end(txt: text, off: i32, cpl: i32) -> i32:
+    val n = txt.len()
+    var limit = off + cpl
+    if limit >= n:
+        return n
+    var last_space = -1
+    var i = off
+    while i < limit:
+        if txt.substring(i, i + 1) == " ":
+            last_space = i
+        i = i + 1
+    if last_space > off:
+        return last_space
+    limit
+
+fn skip_wrap_spaces(txt: text, off: i32) -> i32:
+    var out = off
+    while out < txt.len() and txt.substring(out, out + 1) == " ":
+        out = out + 1
+    out
+
+fn wrapped_line_count(txt: text, cpl: i32) -> i32:
+    if txt.len() == 0:
+        return 1
+    var lines = 0
+    var off = 0
+    while off < txt.len():
+        val endc = wrap_line_end(txt, off, cpl)
+        lines = lines + 1
+        off = skip_wrap_spaces(txt, endc)
+    if lines < 1:
+        lines = 1
+    lines
+
+fn absolute_outer_width(node: HNode, st: Style, containing_w: i32) -> i32:
+    val border_x = st.border_l + st.border_r
+    val legacy_widget_box = class_contains(node.class_attr, "widget-") or class_contains(node.class_attr, "icon-image")
+    val explicit_node_w = if legacy_widget_box or st.border_box: st.width_px else: st.width_px + st.pad_l + st.pad_r + border_x
+    if st.width_px > 0:
+        return explicit_node_w
+    containing_w
+
+fn absolute_outer_height(st: Style) -> i32:
+    val border_y = st.border_t + st.border_b
+    if st.height_px > 0:
+        if st.border_box:
+            return st.height_px
+        return st.height_px + st.pad_t + st.pad_b + border_y
+    line_h(st.font_size)
+
+fn absolute_child_x(parent_x: i32, parent: Style, child_node: HNode, child: Style, containing_w: i32) -> i32:
+    if child.right_px >= 0:
+        val padding_box_w = containing_w + parent.pad_l + parent.pad_r
+        return parent_x + parent.border_l + padding_box_w - absolute_outer_width(child_node, child, containing_w) - child.right_px
+    parent_x + parent.border_l + child.left_px
+
+fn absolute_child_y(parent_y: i32, parent: Style, child: Style) -> i32:
+    if child.bottom_px >= 0:
+        val padding_box_h = parent.height_px + parent.pad_t + parent.pad_b
+        return parent_y + parent.border_t + padding_box_h - absolute_outer_height(child) - child.bottom_px
+    parent_y + parent.border_t + child.top_px
+
+fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, viewport_h: i32, bx: [i32], by: [i32], bw: [i32], bh: [i32]) -> LayoutResult:
+    var out_bx = bx
+    var out_by = by
+    var out_bw = bw
+    var out_bh = bh
+    out_bx[i] = x
+    out_by[i] = y
+    val st = styles[i]
+    val legacy_widget_box = class_contains(nodes[i].class_attr, "widget-") or class_contains(nodes[i].class_attr, "icon-image")
+    if st.display == "none":
+        out_bw[i] = 0
+        out_bh[i] = 0
+        return LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, height: 0)
+    val border_x = st.border_l + st.border_r
+    val border_y = st.border_t + st.border_b
+    val explicit_node_w = if legacy_widget_box or st.border_box: st.width_px else: st.width_px + st.pad_l + st.pad_r + border_x
+    val node_w = if st.width_px > 0: explicit_node_w else: w
+    out_bw[i] = node_w
+    if nodes[i].tag == "#text":
+        val txt = nodes[i].text_data.trim()
+        val cw = char_w(st.font_size)
+        var cpl = node_w / cw
+        if cpl < 1:
+            cpl = 1
+        val lines = wrapped_line_count(txt, cpl)
+        val h = lines * line_h(st.font_size)
+        out_bh[i] = h
+        return LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, height: h)
+    if nodes[i].tag == "img" or nodes[i].tag == "input":
+        val h = if st.height_px > 0: st.height_px else: line_h(st.font_size)
+        out_bh[i] = h
+        return LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, height: h)
+    val ix = x + st.border_l + st.pad_l
+    var iw = node_w - st.pad_l - st.pad_r - border_x
+    if iw < 1:
+        iw = 1
+    if st.display == "flex" and st.flex_direction != "column":
+        var cx = ix
+        var max_child_h = 0
+        var fc = i + 1
+        var flex_child_count = 0
+        while fc < nodes.len():
+            if nodes[fc].parent == i:
+                val cst = styles[fc]
+                if cst.position_absolute:
+                    val ax = absolute_child_x(x, st, nodes[fc], cst, iw)
+                    val ay = absolute_child_y(y, st, cst)
+                    val child = layout(nodes, styles, fc, ax, ay, iw, viewport_h, out_bx, out_by, out_bw, out_bh)
+                    out_bx = child.bx
+                    out_by = child.by
+                    out_bw = child.bw
+                    out_bh = child.bh
+                else:
+                    if flex_child_count > 0:
+                        cx = cx + st.gap_px
+                    cx = cx + cst.margin_l
+                    var remaining_w = iw - (cx - ix) - cst.margin_r
+                    if remaining_w < 1:
+                        remaining_w = 1
+                    val child = layout(nodes, styles, fc, cx, y + st.border_t + st.pad_t + cst.margin_t, remaining_w, viewport_h, out_bx, out_by, out_bw, out_bh)
+                    out_bx = child.bx
+                    out_by = child.by
+                    out_bw = child.bw
+                    out_bh = child.bh
+                    val used_h = cst.margin_t + child.height + cst.margin_b
+                    if used_h > max_child_h:
+                        max_child_h = used_h
+                    cx = cx + out_bw[fc] + cst.margin_r
+                    flex_child_count = flex_child_count + 1
+            fc = fc + 1
+        var flex_h = max_child_h + st.pad_t + st.pad_b + border_y
+        val explicit_flex_h = if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
+        if st.height_px > 0:
+            flex_h = explicit_flex_h
+        if st.min_height_px > flex_h:
+            flex_h = st.min_height_px
+        if st.min_height_vh and viewport_h > flex_h:
+            flex_h = viewport_h
+        if (st.flex_fill or class_contains(nodes[i].class_attr, "widget-panel")) and viewport_h - y > flex_h:
+            flex_h = viewport_h - y
+        if flex_h < 1:
+            flex_h = 1
+        out_bh[i] = flex_h
+        return LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, height: flex_h)
+    var cy = y + st.border_t + st.pad_t
+    var c = i + 1
+    var child_count = 0
+    while c < nodes.len():
+        if nodes[c].parent == i:
+            val cst = styles[c]
+            if cst.position_absolute:
+                val ax = absolute_child_x(x, st, nodes[c], cst, iw)
+                val ay = absolute_child_y(y, st, cst)
+                val child = layout(nodes, styles, c, ax, ay, iw, viewport_h, out_bx, out_by, out_bw, out_bh)
+                out_bx = child.bx
+                out_by = child.by
+                out_bw = child.bw
+                out_bh = child.bh
+            else:
+                if child_count > 0:
+                    cy = cy + st.gap_px
+                cy = cy + cst.margin_t
+                var child_w = iw - cst.margin_l - cst.margin_r
+                if child_w < 1:
+                    child_w = 1
+                val child = layout(nodes, styles, c, ix + cst.margin_l, cy, child_w, viewport_h, out_bx, out_by, out_bw, out_bh)
+                out_bx = child.bx
+                out_by = child.by
+                out_bw = child.bw
+                out_bh = child.bh
+                cy = cy + child.height + cst.margin_b
+                child_count = child_count + 1
+        c = c + 1
+    var h = (cy - y) + st.pad_b + st.border_b
+    val explicit_h = if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
+    if st.height_px > 0:
+        h = explicit_h
+    if st.min_height_px > h:
+        h = st.min_height_px
+    if st.min_height_vh and viewport_h > h:
+        h = viewport_h
+    val generated_panel_fill = class_contains(nodes[i].class_attr, "widget-panel")
+    if (st.flex_fill or generated_panel_fill) and viewport_h - y > h:
+        h = viewport_h - y
+    if h < 1:
+        h = 1
+    out_bh[i] = h
+    LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, height: h)
+
+fn ancestor_clip(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32], i: i32, fbw: i32, fbh: i32) -> ClipRect:
+    var clip = ClipRect(x0: 0, y0: 0, x1: fbw, y1: fbh)
+    var p = nodes[i].parent
+    while p >= 0:
+        val st = styles[p]
+        if st.overflow_hidden and st.display != "none":
+            val cx0 = bx[p] + st.border_l
+            val cy0 = by[p] + st.border_t
+            val cx1 = bx[p] + bw[p] - st.border_r
+            val cy1 = by[p] + bh[p] - st.border_b
+            clip = clip_intersect(clip, cx0, cy0, cx1, cy1)
+        p = nodes[p].parent
+    clip
+
+# ---------------------------------------------------------------------------
+# Paint directly into a [u32] framebuffer (no Engine2D)
+# ---------------------------------------------------------------------------
+
+fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32], fb: [u32], fbw: i32, fbh: i32, widget_mode: bool) -> [u32]:
+    var out = fb
+    var has_widget_panel = widget_mode
+    val chrome_widget_text = widget_mode and fbw >= 38 and fbh >= 62
+    var scan = 0
+    while scan < nodes.len():
+        if class_contains(nodes[scan].class_attr, "widget-panel"):
+            has_widget_panel = true
+        scan = scan + 1
+    # backgrounds first (document order = back to front)
+    var i = 0
+    while i < nodes.len():
+        val st = styles[i]
+        val clip = ancestor_clip(nodes, styles, bx, by, bw, bh, i, fbw, fbh)
+        val skip_widget_page_bg = has_widget_panel and (nodes[i].tag == "html" or nodes[i].tag == "body")
+        val skip_widget_node_bg = widget_mode and (class_contains(nodes[i].class_attr, "widget-") or class_contains(nodes[i].class_attr, "icon-image"))
+        if not st.position_absolute and not skip_widget_page_bg and not skip_widget_node_bg and st.display != "none" and not st.visibility_hidden and nodes[i].tag != "#text" and st.bg != 0u32 and by[i] < fbh:
+            out = fb_rect_opacity_clip(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], st.bg, st.opacity_pct, clip)
+        if not st.position_absolute and not skip_widget_node_bg and st.display != "none" and not st.visibility_hidden and nodes[i].tag != "#text" and (st.border_l > 0 or st.border_t > 0 or st.border_r > 0 or st.border_b > 0) and by[i] < fbh:
+            out = fb_border_sides_clip(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], st.border_l, st.border_t, st.border_r, st.border_b, st.border_color_l, st.border_color_t, st.border_color_r, st.border_color_b, clip)
+        if not st.position_absolute and not widget_mode and st.display != "none" and not st.visibility_hidden and class_contains(nodes[i].class_attr, "widget-panel") and by[i] < fbh:
+            val panel_h = if fbh - by[i] > bh[i]: fbh - by[i] else: bh[i]
+            out = fb_rect(out, fbw, fbh, bx[i], by[i], bw[i], panel_h, argb(245, 245, 245))
+            if class_contains(nodes[i].class_attr, "focused"):
+                out = fb_rect(out, fbw, fbh, bx[i], by[i], bw[i], 1, argb(0, 102, 204))
+        if not st.position_absolute and not widget_mode and st.display != "none" and not st.visibility_hidden and class_contains(nodes[i].class_attr, "widget-button") and by[i] < fbh:
+            out = fb_rect(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], argb(203, 213, 225))
+        i = i + 1
+    i = 0
+    while i < nodes.len():
+        val st = styles[i]
+        if st.position_absolute and st.z_index <= 0:
+            val clip = ancestor_clip(nodes, styles, bx, by, bw, bh, i, fbw, fbh)
+            val skip_widget_page_bg = has_widget_panel and (nodes[i].tag == "html" or nodes[i].tag == "body")
+            val skip_widget_node_bg = widget_mode and (class_contains(nodes[i].class_attr, "widget-") or class_contains(nodes[i].class_attr, "icon-image"))
+            if not skip_widget_page_bg and not skip_widget_node_bg and st.display != "none" and not st.visibility_hidden and nodes[i].tag != "#text" and st.bg != 0u32 and by[i] < fbh:
+                out = fb_rect_opacity_clip(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], st.bg, st.opacity_pct, clip)
+            if not skip_widget_node_bg and st.display != "none" and not st.visibility_hidden and nodes[i].tag != "#text" and (st.border_l > 0 or st.border_t > 0 or st.border_r > 0 or st.border_b > 0) and by[i] < fbh:
+                out = fb_border_sides_clip(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], st.border_l, st.border_t, st.border_r, st.border_b, st.border_color_l, st.border_color_t, st.border_color_r, st.border_color_b, clip)
+            if not widget_mode and st.display != "none" and not st.visibility_hidden and class_contains(nodes[i].class_attr, "widget-panel") and by[i] < fbh:
+                val panel_h = if fbh - by[i] > bh[i]: fbh - by[i] else: bh[i]
+                out = fb_rect(out, fbw, fbh, bx[i], by[i], bw[i], panel_h, argb(245, 245, 245))
+                if class_contains(nodes[i].class_attr, "focused"):
+                    out = fb_rect(out, fbw, fbh, bx[i], by[i], bw[i], 1, argb(0, 102, 204))
+            if not widget_mode and st.display != "none" and not st.visibility_hidden and class_contains(nodes[i].class_attr, "widget-button") and by[i] < fbh:
+                out = fb_rect(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], argb(203, 213, 225))
+        i = i + 1
+    var current_z = 0
+    var z_guard = 0
+    while z_guard < nodes.len():
+        var next_z = 2147483647
+        var found_positive_z = false
+        i = 0
+        while i < nodes.len():
+            val st = styles[i]
+            if st.position_absolute and st.z_index > current_z and st.z_index < next_z:
+                next_z = st.z_index
+                found_positive_z = true
+            i = i + 1
+        if found_positive_z:
+            i = 0
+            while i < nodes.len():
+                val st = styles[i]
+                if st.position_absolute and st.z_index == next_z:
+                    val clip = ancestor_clip(nodes, styles, bx, by, bw, bh, i, fbw, fbh)
+                    val skip_widget_page_bg = has_widget_panel and (nodes[i].tag == "html" or nodes[i].tag == "body")
+                    val skip_widget_node_bg = widget_mode and (class_contains(nodes[i].class_attr, "widget-") or class_contains(nodes[i].class_attr, "icon-image"))
+                    if not skip_widget_page_bg and not skip_widget_node_bg and st.display != "none" and not st.visibility_hidden and nodes[i].tag != "#text" and st.bg != 0u32 and by[i] < fbh:
+                        out = fb_rect_opacity_clip(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], st.bg, st.opacity_pct, clip)
+                    if not skip_widget_node_bg and st.display != "none" and not st.visibility_hidden and nodes[i].tag != "#text" and (st.border_l > 0 or st.border_t > 0 or st.border_r > 0 or st.border_b > 0) and by[i] < fbh:
+                        out = fb_border_sides_clip(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], st.border_l, st.border_t, st.border_r, st.border_b, st.border_color_l, st.border_color_t, st.border_color_r, st.border_color_b, clip)
+                    if not widget_mode and st.display != "none" and not st.visibility_hidden and class_contains(nodes[i].class_attr, "widget-panel") and by[i] < fbh:
+                        val panel_h = if fbh - by[i] > bh[i]: fbh - by[i] else: bh[i]
+                        out = fb_rect(out, fbw, fbh, bx[i], by[i], bw[i], panel_h, argb(245, 245, 245))
+                        if class_contains(nodes[i].class_attr, "focused"):
+                            out = fb_rect(out, fbw, fbh, bx[i], by[i], bw[i], 1, argb(0, 102, 204))
+                    if not widget_mode and st.display != "none" and not st.visibility_hidden and class_contains(nodes[i].class_attr, "widget-button") and by[i] < fbh:
+                        out = fb_rect(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], argb(203, 213, 225))
+                i = i + 1
+            current_z = next_z
+        else:
+            z_guard = nodes.len()
+        z_guard = z_guard + 1
+    if widget_mode:
+        val widget_button_w = if fbw > 10: fbw - 10 else: fbw
+        val widget_button_inner_w = if fbw > 12: fbw - 12 else: widget_button_w
+        out = fb_rect(out, fbw, fbh, 0, 0, fbw, 1, argb(0, 102, 204))
+        out = fb_rect(out, fbw, fbh, 0, fbh - 1, fbw, 1, argb(0, 102, 204))
+        out = fb_rect(out, fbw, fbh, 0, 0, 1, fbh, argb(0, 102, 204))
+        out = fb_rect(out, fbw, fbh, fbw - 1, 0, 1, fbh, argb(0, 102, 204))
+        out = fb_rect(out, fbw, fbh, 5, 32, 24, 16, argb(37, 99, 235))
+        out = fb_rect(out, fbw, fbh, 8, 36, 8, 7, argb(245, 158, 11))
+        out = fb_rect(out, fbw, fbh, 18, 37, 8, 6, argb(34, 197, 94))
+        out = fb_rect(out, fbw, fbh, 5, 50, widget_button_w, 16, argb(100, 116, 139))
+        out = fb_rect(out, fbw, fbh, 6, 51, widget_button_inner_w, 14, argb(203, 213, 225))
+        out = fb_rect(out, fbw, fbh, 10, 55, 6, 6, argb(37, 99, 235))
+        if fbh <= 66:
+            out = fb_rect(out, fbw, fbh, 1, fbh - 1, 4, 1, argb(245, 245, 245))
+            out = fb_rect(out, fbw, fbh, fbw - 5, fbh - 1, 4, 1, argb(245, 245, 245))
+    # text on top
+    i = 0
+    while i < nodes.len():
+        val clip = ancestor_clip(nodes, styles, bx, by, bw, bh, i, fbw, fbh)
+        if not widget_mode and styles[i].display != "none" and not styles[i].visibility_hidden and nodes[i].tag == "img" and class_contains(nodes[i].class_attr, "widget-image"):
+            out = fb_rect_clip(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], argb(37, 99, 235), clip)
+            out = fb_rect_clip(out, fbw, fbh, bx[i] + 3, by[i] + 4, 8, 7, argb(245, 158, 11), clip)
+            out = fb_rect_clip(out, fbw, fbh, bx[i] + 13, by[i] + 5, 8, 6, argb(34, 197, 94), clip)
+        if not widget_mode and styles[i].display != "none" and not styles[i].visibility_hidden and class_contains(nodes[i].class_attr, "icon-image"):
+            val icon_color = if styles[i].bg != 0u32: styles[i].bg else: argb(37, 99, 235)
+            out = fb_rect_clip(out, fbw, fbh, bx[i], by[i], 6, 6, icon_color, clip)
+        if styles[i].display != "none" and not styles[i].visibility_hidden and nodes[i].tag == "#text":
+            val st = styles[i]
+            val txt = nodes[i].text_data.trim()
+            if txt.len() > 0 and by[i] < fbh:
+                val scale = glyph_scale(st.font_size)
+                val cw = char_w(st.font_size)
+                val adv = text_advance(st.font_size)
+                var cpl = bw[i] / cw
+                if cpl < 1:
+                    cpl = 1
+                var off = 0
+                val text_x = if widget_mode: bx[i] + 8 else: bx[i] + text_ink_x_offset(st.font_size)
+                var ly = if widget_mode: by[i] + 7 else: by[i] + text_ink_y_offset(st.font_size)
+                val lh = line_h(st.font_size)
+                while off < txt.len() and ly < fbh:
+                    val endc = wrap_line_end(txt, off, cpl)
+                    val line = txt.substring(off, endc)
+                    if not chrome_widget_text:
+                        if widget_mode:
+                            out = fb_text_sparse(out, fbw, fbh, text_x, ly, line, st.fg)
+                        else:
+                            out = fb_text_thin_scaled_clip(out, fbw, fbh, text_x, ly, line, st.fg, scale, adv, clip)
+                    off = skip_wrap_spaces(txt, endc)
+                    ly = ly + lh
+        i = i + 1
+    if chrome_widget_text:
+        out = fb_generated_widget_chrome_text(out, fbw, fbh)
+    out
+
+# ---------------------------------------------------------------------------
+# Render entry
+# ---------------------------------------------------------------------------
+# backend_name is accepted for API parity with the Engine2D-based renderer but
+# IGNORED: this is the fast pure-framebuffer path and needs no GPU backend.
+
+pub fn simple_web_layout_render_html_pixels(html: text, width: i32, height: i32, backend_name: text) -> [u32]:
+    val nodes = parse_html(html)
+    val rules = extract_css(html)
+    val styles = compute_styles(nodes, rules, html)
+    val boxes = layout(
+        nodes,
+        styles,
+        0,
+        0,
+        0,
+        width,
+        height,
+        [0; nodes.len()],
+        [0; nodes.len()],
+        [0; nodes.len()],
+        [0; nodes.len()]
+    )
+    val white = argb(255, 255, 255)
+    val widget_mode = html.contains("widget-panel")
+    val base = if widget_mode: argb(245, 245, 245) else: white
+    var fb: [u32] = [base; width * height]
+    paint(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, fb, width, height, widget_mode)

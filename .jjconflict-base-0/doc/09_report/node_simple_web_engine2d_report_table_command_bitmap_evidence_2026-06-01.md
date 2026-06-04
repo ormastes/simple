@@ -1,0 +1,240 @@
+# Simple Web Engine2D JS Bitmap Evidence
+
+- status: pass
+- reason: pass
+- baseline runtime: node
+- scene: simple-web-engine2d-report-table-command
+- dimensions: 96x64
+- iterations per trial: 1000
+- trials: 3
+- simple checksum: 26352420716954
+- baseline checksum: 26352420716954
+- simple weighted checksum: 80972288783489291
+- baseline weighted checksum: 80972288783489291
+- mismatch count: 0
+- blur/tolerance used: false
+- optimized path: static-pixel-cache
+- simple cache hits: 1000
+- simple cache stores: 1
+- best simple frame us: 5
+- best baseline frame us: 81
+- baseline/simple speedup x1000: 16200
+- simple ARGB path: build/node_simple_web_engine2d_report_table_command_bitmap_evidence/simple-argb.json
+- baseline ARGB path: build/node_simple_web_engine2d_report_table_command_bitmap_evidence/node-argb.json
+
+## Simple Output
+- ## trial 1
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+-
+- Use angle brackets: pp<...> instead of pp[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown type: any
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+-
+- Use angle brackets: pp<...> instead of pp[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_provider' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_opencl' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.sffi.dynamic' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_kernels' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.opengl_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.env.types' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.rocm_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- renderer=pure-simple-web-engine2d-cache
+- scene=simple-web-engine2d-report-table-command
+- width=96
+- height=64
+- iterations=1000
+- checksum=26352420716954
+- weighted_checksum=80972288783489291
+- total_checksum=26352420716954000
+- frame_us=5
+- backend_name=software
+- optimized_path=static-pixel-cache
+- cache_hits=1000
+- cache_stores=1
+- argb_path=build/node_simple_web_engine2d_report_table_command_bitmap_evidence/simple-argb.json
+- blur_or_tolerance_used=false
+- renderer=pure-simple-web-engine2d-cache
+- scene=simple-web-engine2d-report-table-command
+- width=96
+- height=64
+- iterations=1000
+- checksum=26352420716954
+- weighted_checksum=80972288783489291
+- total_checksum=26352420716954000
+- frame_us=5
+- backend_name=software
+- optimized_path=static-pixel-cache
+- cache_hits=1000
+- cache_stores=1
+- argb_path=build/node_simple_web_engine2d_report_table_command_bitmap_evidence/simple-argb.json
+- blur_or_tolerance_used=false
+- ## trial 2
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+-
+- Use angle brackets: pp<...> instead of pp[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown type: any
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+-
+- Use angle brackets: pp<...> instead of pp[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_provider' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_opencl' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.sffi.dynamic' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_kernels' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.opengl_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.env.types' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.rocm_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- renderer=pure-simple-web-engine2d-cache
+- scene=simple-web-engine2d-report-table-command
+- width=96
+- height=64
+- iterations=1000
+- checksum=26352420716954
+- weighted_checksum=80972288783489291
+- total_checksum=26352420716954000
+- frame_us=5
+- backend_name=software
+- optimized_path=static-pixel-cache
+- cache_hits=1000
+- cache_stores=1
+- argb_path=build/node_simple_web_engine2d_report_table_command_bitmap_evidence/simple-argb.json
+- blur_or_tolerance_used=false
+- renderer=pure-simple-web-engine2d-cache
+- scene=simple-web-engine2d-report-table-command
+- width=96
+- height=64
+- iterations=1000
+- checksum=26352420716954
+- weighted_checksum=80972288783489291
+- total_checksum=26352420716954000
+- frame_us=5
+- backend_name=software
+- optimized_path=static-pixel-cache
+- cache_hits=1000
+- cache_stores=1
+- argb_path=build/node_simple_web_engine2d_report_table_command_bitmap_evidence/simple-argb.json
+- blur_or_tolerance_used=false
+- ## trial 3
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+-
+- Use angle brackets: pp<...> instead of pp[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown type: any
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+-
+- Use angle brackets: pp<...> instead of pp[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_provider' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_opencl' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.sffi.dynamic' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_kernels' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.opengl_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.env.types' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.rocm_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- renderer=pure-simple-web-engine2d-cache
+- scene=simple-web-engine2d-report-table-command
+- width=96
+- height=64
+- iterations=1000
+- checksum=26352420716954
+- weighted_checksum=80972288783489291
+- total_checksum=26352420716954000
+- frame_us=5
+- backend_name=software
+- optimized_path=static-pixel-cache
+- cache_hits=1000
+- cache_stores=1
+- argb_path=build/node_simple_web_engine2d_report_table_command_bitmap_evidence/simple-argb.json
+- blur_or_tolerance_used=false
+- renderer=pure-simple-web-engine2d-cache
+- scene=simple-web-engine2d-report-table-command
+- width=96
+- height=64
+- iterations=1000
+- checksum=26352420716954
+- weighted_checksum=80972288783489291
+- total_checksum=26352420716954000
+- frame_us=5
+- backend_name=software
+- optimized_path=static-pixel-cache
+- cache_hits=1000
+- cache_stores=1
+- argb_path=build/node_simple_web_engine2d_report_table_command_bitmap_evidence/simple-argb.json
+- blur_or_tolerance_used=false
+
+## Baseline Output
+- ## trial 1
+- renderer=node-simple-web-engine2d-baseline
+- scene=simple-web-engine2d-report-table-command
+- width=96
+- height=64
+- iterations=1000
+- checksum=26352420716954
+- weighted_checksum=80972288783489291
+- total_checksum=26352420716954000
+- frame_us=90
+- blur_or_tolerance_used=false
+- ## trial 2
+- renderer=node-simple-web-engine2d-baseline
+- scene=simple-web-engine2d-report-table-command
+- width=96
+- height=64
+- iterations=1000
+- checksum=26352420716954
+- weighted_checksum=80972288783489291
+- total_checksum=26352420716954000
+- frame_us=81
+- blur_or_tolerance_used=false
+- ## trial 3
+- renderer=node-simple-web-engine2d-baseline
+- scene=simple-web-engine2d-report-table-command
+- width=96
+- height=64
+- iterations=1000
+- checksum=26352420716954
+- weighted_checksum=80972288783489291
+- total_checksum=26352420716954000
+- frame_us=81
+- blur_or_tolerance_used=false

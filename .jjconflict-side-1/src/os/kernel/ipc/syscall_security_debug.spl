@@ -1,0 +1,130 @@
+# Security and Debug Syscall Handlers — split from syscall.spl.
+# Contains _handle_pledge, _handle_unveil, _handle_cap_grant,
+# and all arch-specific variants of _handle_debug_write.
+
+use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
+use os.kernel.types.task_types.{TaskId}
+use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.boot.mmio.{mmio_write8}
+
+# ============================================================================
+# Security Syscall Handlers
+# ============================================================================
+
+fn _handle_pledge(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
+    """Restrict the current task's capabilities (monotonic shrink).
+
+    Args:
+      arg0: pointer to allowed capability list (userspace)
+      arg1: count of allowed capabilities
+    """
+    var sched = scheduler
+    val current = sched.get_current()
+    var ipc_mgr = ipc
+
+    # In a real kernel, we would parse the capability list from userspace.
+    # For now, pledge with empty list (maximum restriction).
+    ipc_mgr.cap_manager.pledge(current, [])
+    sched.restrict_isolation(current, false, 0, 1u32)
+    SyscallResult(value: 0)
+
+fn _handle_unveil(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
+    """Restrict file access to specific paths.
+
+    Args:
+      arg0: pointer to path string (userspace)
+      arg1: path length
+      arg2: pointer to permissions string (userspace)
+      arg3: permissions length
+    """
+    var sched = scheduler
+    val current = sched.get_current()
+    var ipc_mgr = ipc
+
+    # In a real kernel, we would copy path and perms from userspace.
+    ipc_mgr.cap_manager.unveil(current, "/", "r")
+    sched.restrict_isolation(current, false, 0, 1u32)
+    SyscallResult(value: 0)
+
+fn _handle_cap_grant(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
+    """Grant a capability from the current task to another.
+
+    Args:
+      arg0: target task ID
+      arg1: capability kind (encoded)
+      arg2: capability generation
+    """
+    var sched = scheduler
+    val current = sched.get_current()
+    val target = TaskId(id: args.arg0)
+
+    val cap = CapabilityToken(
+        kind: CapabilityKind.ProcessSpawn,  # Simplified — real kernel decodes arg1
+        generation: args.arg2,
+        owner: current.id
+    )
+
+    var ipc_mgr = ipc
+    val ok = ipc_mgr.cap_grant(current, target, cap)
+    if ok:
+        SyscallResult(value: 0)
+    else:
+        SyscallResult(value: -1)
+
+# ============================================================================
+# Debug Syscall Handler
+# ============================================================================
+
+@cfg(riscv64)
+fn _handle_debug_write(args: SyscallArgs) -> SyscallResult:
+    """Write a byte to the serial debug port (RV64 — 16550 UART MMIO)."""
+    val uart_base: u64 = 0x10000000
+    val byte_val = (args.arg0 & 0xFF).to_u8()
+    mmio_write8(uart_base, byte_val.to_u32())
+    SyscallResult(value: 0)
+
+@cfg(riscv32)
+fn _handle_debug_write(args: SyscallArgs) -> SyscallResult:
+    """Write a byte to the serial debug port (RV32 — 16550 UART MMIO)."""
+    val uart_base: u64 = 0x10000000
+    val byte_val = (args.arg0 & 0xFF).to_u8()
+    mmio_write8(uart_base, byte_val.to_u32())
+    SyscallResult(value: 0)
+
+@cfg(x86_64)
+fn _handle_debug_write(args: SyscallArgs) -> SyscallResult:
+    """Write a byte to the serial debug port (x86_64 — COM1 port I/O)."""
+    val byte_val = args.arg0
+    asm:
+        "mov dx, 0x3F8"
+        "mov al, dil"
+        "out dx, al"
+    SyscallResult(value: 0)
+
+@cfg(x86)
+fn _handle_debug_write(args: SyscallArgs) -> SyscallResult:
+    """Write a byte to the serial debug port (x86 — COM1 port I/O)."""
+    val byte_val = args.arg0
+    asm:
+        "mov dx, 0x3F8"
+        "mov al, dil"
+        "out dx, al"
+    SyscallResult(value: 0)
+
+@cfg(arm64)
+fn _handle_debug_write(args: SyscallArgs) -> SyscallResult:
+    """Write a byte to the serial debug port (ARM64 — PL011 UART MMIO)."""
+    val uart_base: u64 = 0x09000000
+    val byte_val = (args.arg0 & 0xFF).to_u8()
+    mmio_write8(uart_base, byte_val.to_u32())
+    SyscallResult(value: 0)
+
+@cfg(arm32)
+fn _handle_debug_write(args: SyscallArgs) -> SyscallResult:
+    """Write a byte to the serial debug port (ARM32 — PL011 UART MMIO)."""
+    val uart_base: u64 = 0x09000000
+    val byte_val = (args.arg0 & 0xFF).to_u8()
+    mmio_write8(uart_base, byte_val.to_u32())
+    SyscallResult(value: 0)

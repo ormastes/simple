@@ -1,0 +1,56 @@
+use std.spec
+use std.db.cardinality_estimator.{
+    learned_cardinality_new,
+    learned_cardinality_estimate,
+    learned_cardinality_record,
+    learned_cardinality_observation_count
+}
+use std.db.db_persistence.{db_table_new}
+use std.db.db_query.{db_table_prefix_scan}
+
+describe "DB learned cardinality estimator":
+    it "is disabled unless explicitly opted in":
+        val estimator = learned_cardinality_new(false)
+        val estimate = learned_cardinality_estimate(estimator, "prefix:key:user", 1000, 100, 12)
+
+        expect(estimate.source).to_equal("disabled")
+        expect(estimate.estimated_rows).to_equal(100)
+        expect(estimate.observation_count).to_equal(0)
+
+    it "coexists with BRIN and conventional estimates before learning":
+        val estimator = learned_cardinality_new(true)
+        val brin_estimate = learned_cardinality_estimate(estimator, "range:id:10..20", 1000, 200, 32)
+        val conventional_estimate = learned_cardinality_estimate(estimator, "prefix:key:admin", 1000, 50, -1)
+
+        expect(brin_estimate.source).to_equal("brin")
+        expect(brin_estimate.estimated_rows).to_equal(32)
+        expect(conventional_estimate.source).to_equal("conventional")
+        expect(conventional_estimate.estimated_rows).to_equal(50)
+
+    it "records estimation error against exact scan counts and learns later estimates":
+        var estimator = learned_cardinality_new(true)
+        val first = learned_cardinality_estimate(estimator, "prefix:key:user", 1000, 100, -1)
+        estimator = learned_cardinality_record(estimator, first, 24)
+        val learned = learned_cardinality_estimate(estimator, "prefix:key:user", 1000, 100, -1)
+
+        expect(learned_cardinality_observation_count(estimator)).to_equal(1)
+        expect(learned.source).to_equal("learned")
+        expect(learned.estimated_rows).to_equal(24)
+        expect(learned.observation_count).to_equal(1)
+        expect(learned.abs_error).to_equal(76)
+
+    it "does not alter query execution correctness when disabled":
+        val table = db_table_new("users")
+        table.insert("user/alice", "a")
+        table.insert("user/bob", "b")
+        table.insert("admin/root", "r")
+        val before = db_table_prefix_scan(table, "user/")
+        val estimator = learned_cardinality_new(false)
+        val estimate = learned_cardinality_estimate(estimator, "prefix:key:user/", table.row_count(), 1, -1)
+        val after = db_table_prefix_scan(table, "user/")
+
+        expect(estimate.source).to_equal("disabled")
+        expect(before.count).to_equal(2)
+        expect(after.count).to_equal(2)
+        expect(before.ids[0]).to_equal(after.ids[0])
+        expect(before.ids[1]).to_equal(after.ids[1])

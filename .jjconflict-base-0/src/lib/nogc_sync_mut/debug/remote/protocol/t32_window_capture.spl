@@ -1,0 +1,201 @@
+# T32 Window Capture — text export via WinPrint and parsing
+# Captures TRACE32 window contents to text files, parses tabular output,
+# and provides screenshot support.
+
+use std.io.{shell, ProcessResult}
+use std.nogc_sync_mut.debug.remote.protocol.trace32.{Trace32Client, Trace32Parser}
+
+extern fn rt_file_read_text(path: text) -> text
+
+# Capture a window's text content via WinPrint to a temp file and read it back
+fn t32_capture_window_text(client: Trace32Client, window_name: text) -> Result<text, text>:
+    val tmp_path = "/tmp/t32_capture_{window_name}.txt"
+    # Set printer output to file
+    client.run_command("PRinTer.FILE {tmp_path}")?
+    # Print the window content
+    client.run_command("WinPrint.{window_name}")?
+    # Reset printer to default
+    client.run_command("PRinTer.FILE off")?
+    # Read captured file
+    val content = rt_file_read_text(tmp_path) ?? ""
+    if content.len() == 0:
+        return Err("captured file is empty or unreadable: {tmp_path}")
+    Ok(content)
+
+# Capture a window's text content to a user-specified file path
+fn t32_capture_window_to_file(client: Trace32Client, window_name: text, output_path: text) -> Result<text, text>:
+    client.run_command("PRinTer.FILE {output_path}")?
+    client.run_command("WinPrint.{window_name}")?
+    client.run_command("PRinTer.FILE off")?
+    # Read and return the captured content
+    val content = rt_file_read_text(output_path) ?? ""
+    if content.len() == 0:
+        return Err("captured file is empty or unreadable: {output_path}")
+    Ok(content)
+
+# Parse generic tabular text output: first line = headers, rest = data rows
+# Each row becomes a Dict mapping header names to cell values
+fn t32_parse_tabular(raw: text, separator: text) -> [Dict<text, text>]:
+    var rows: [Dict<text, text>] = []
+    val lines = raw.split("\n")
+    if lines.len() < 2:
+        return rows
+
+    # First non-empty line is the header
+    var header_line = ""
+    var data_start = 0
+    var line_idx = 0
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.len() > 0:
+            header_line = trimmed
+            data_start = line_idx + 1
+            break
+        line_idx = line_idx + 1
+
+    if header_line.len() == 0:
+        return rows
+
+    var headers: [text] = []
+    if separator == " ":
+        headers = Trace32Parser.tokenize_whitespace(header_line)
+    else:
+        val raw_headers = header_line.split(separator)
+        for h in raw_headers:
+            headers.push(h.trim())
+
+    # Parse data rows
+    var row_idx = 0
+    for line in lines:
+        if row_idx < data_start:
+            row_idx = row_idx + 1
+            continue
+        val trimmed = line.trim()
+        if trimmed.len() == 0:
+            row_idx = row_idx + 1
+            continue
+        # Skip separator lines (--- dashes)
+        if trimmed.starts_with("---"):
+            row_idx = row_idx + 1
+            continue
+
+        var cells: [text] = []
+        if separator == " ":
+            cells = Trace32Parser.tokenize_whitespace(trimmed)
+        else:
+            val raw_cells = trimmed.split(separator)
+            for c in raw_cells:
+                cells.push(c.trim())
+
+        var row: Dict<text, text> = {}
+        var col_idx = 0
+        for header in headers:
+            if col_idx < cells.len():
+                row[header] = cells[col_idx]
+            else:
+                row[header] = ""
+            col_idx = col_idx + 1
+        rows.push(row)
+        row_idx = row_idx + 1
+    rows
+
+# Parse Break.List window output into structured breakpoint entries
+# Expected columns: enabled, address, symbol, type
+fn t32_parse_break_list(raw: text) -> [Dict<text, text>]:
+    var entries: [Dict<text, text>] = []
+    val lines = raw.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.len() == 0:
+            continue
+        if trimmed.starts_with("---"):
+            continue
+        # Skip header-like lines
+        if (trimmed.starts_with("enabled") or
+            trimmed.starts_with("Enabled")):
+            continue
+
+        val parts = Trace32Parser.tokenize_whitespace(trimmed)
+        if parts.len() >= 3:
+            var entry: Dict<text, text> = {}
+            entry["enabled"] = parts[0]
+            entry["address"] = parts[1]
+            entry["symbol"] = parts[2]
+            if parts.len() >= 4:
+                entry["type"] = parts[3]
+            else:
+                entry["type"] = ""
+            entries.push(entry)
+    entries
+
+# Parse Register.view output into name=value pairs
+fn t32_parse_register_view(raw: text) -> [Dict<text, text>]:
+    var entries: [Dict<text, text>] = []
+    val lines = raw.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.len() == 0:
+            continue
+        if trimmed.starts_with("---"):
+            continue
+
+        # Register view can have "NAME  VALUE" or "NAME=VALUE" format
+        val tokens = Trace32Parser.tokenize_whitespace(trimmed)
+        for token in tokens:
+            val eq_parts = token.split("=")
+            if eq_parts.len() == 2:
+                var entry: Dict<text, text> = {}
+                entry["name"] = eq_parts[0]
+                entry["value"] = eq_parts[1]
+                entries.push(entry)
+            elif tokens.len() >= 2:
+                # Whitespace-separated name value pairs
+                var pair_idx = 0
+                while pair_idx + 1 < tokens.len():
+                    var entry: Dict<text, text> = {}
+                    entry["name"] = tokens[pair_idx]
+                    entry["value"] = tokens[pair_idx + 1]
+                    entries.push(entry)
+                    pair_idx = pair_idx + 2
+                break
+    entries
+
+# Parse Var.View / Var.Watch output into structured entries
+# Expected columns: name, type, value
+fn t32_parse_var_watch(raw: text) -> [Dict<text, text>]:
+    var entries: [Dict<text, text>] = []
+    val lines = raw.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.len() == 0:
+            continue
+        if trimmed.starts_with("---"):
+            continue
+        if (trimmed.starts_with("name") or
+            trimmed.starts_with("Name")):
+            continue
+
+        val parts = Trace32Parser.tokenize_whitespace(trimmed)
+        if parts.len() >= 3:
+            var entry: Dict<text, text> = {}
+            entry["name"] = parts[0]
+            entry["type"] = parts[1]
+            entry["value"] = parts[2]
+            entries.push(entry)
+        elif parts.len() == 2:
+            var entry: Dict<text, text> = {}
+            entry["name"] = parts[0]
+            entry["type"] = ""
+            entry["value"] = parts[1]
+            entries.push(entry)
+    entries
+
+# Take a screenshot of a window to an image file
+fn t32_take_screenshot(client: Trace32Client, window_name: text, output_path: text) -> Result<text, text>:
+    # Name the window first to ensure correct targeting
+    client.run_command("WinPOS ,,,,,, {window_name}")?
+    client.screenshot(output_path)
+
+# Assign a name to the current/top window via WinPOS
+fn t32_assign_window_name(client: Trace32Client, name: text) -> Result<text, text>:
+    client.assign_window_name(name)

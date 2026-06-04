@@ -1,0 +1,379 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/simple_web_engine2d_js_bitmap_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/simple_web_engine2d_js_bitmap_evidence_$(date -u +%F).md}"
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+JS_RENDER_RUNTIME="${JS_RENDER_RUNTIME:-node}"
+JS_RENDER_RUNTIME_BIN="${JS_RENDER_RUNTIME_BIN:-$JS_RENDER_RUNTIME}"
+ITERATIONS="${NODE_BITMAP_ITERATIONS:-1000}"
+TRIALS="${JS_BITMAP_TRIALS:-3}"
+WIDTH="${NODE_BITMAP_WIDTH:-96}"
+HEIGHT="${NODE_BITMAP_HEIGHT:-64}"
+SCENE="${SIMPLE_WEB_ENGINE2D_SCENE:-simple-web-engine2d-image-taskbar-command}"
+SIMPLE_SRC="$BUILD_DIR/simple_web_engine2d_cache_fixture.spl"
+SIMPLE_OUT="$BUILD_DIR/simple.out"
+JS_OUT="$BUILD_DIR/${JS_RENDER_RUNTIME}.out"
+SIMPLE_ARGB="$BUILD_DIR/simple-argb.json"
+JS_ARGB="$BUILD_DIR/${JS_RENDER_RUNTIME}-argb.json"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$SIMPLE_SRC" "$SIMPLE_OUT" "$JS_OUT" "$SIMPLE_ARGB" "$JS_ARGB" "$REPORT_PATH"
+
+field_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" | tail -n 1
+}
+
+emit_unavailable() {
+    reason="$1"
+    {
+        echo "simple_web_engine2d_js_status=unavailable"
+        echo "simple_web_engine2d_js_reason=$reason"
+        echo "simple_web_engine2d_js_runtime=$JS_RENDER_RUNTIME"
+        echo "simple_web_engine2d_js_scene=$SCENE"
+        echo "simple_web_engine2d_js_width=$WIDTH"
+        echo "simple_web_engine2d_js_height=$HEIGHT"
+        echo "simple_web_engine2d_js_iterations=$ITERATIONS"
+        echo "simple_web_engine2d_js_trials=$TRIALS"
+    } >"$BUILD_DIR/evidence.env"
+    {
+        echo "# Simple Web Engine2D JS Bitmap Evidence"
+        echo
+        echo "- status: unavailable"
+        echo "- reason: $reason"
+    } >"$REPORT_PATH"
+    cat "$BUILD_DIR/evidence.env"
+}
+
+cat >"$SIMPLE_SRC" <<SIMPLE_EOF
+use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{SimpleWebEngine2DStaticPixelCache}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_time_now_nanos() -> i64
+
+val WIDTH: i32 = $WIDTH
+val HEIGHT: i32 = $HEIGHT
+val ITERATIONS: i64 = $ITERATIONS
+val SIMPLE_ARGB_PATH: text = "$SIMPLE_ARGB"
+
+fn checksum(pixels: [u32]) -> i64:
+    var sum: i64 = 0
+    var i = 0
+    while i < pixels.len():
+        sum = sum + pixels[i].to_i64()
+        i = i + 1
+    sum
+
+fn weighted_checksum(pixels: [u32]) -> i64:
+    var sum: i64 = 0
+    var i = 0
+    while i < pixels.len():
+        sum = sum + (pixels[i].to_i64() * (i.to_i64() + 1))
+        i = i + 1
+    sum
+
+fn write_argb_bitmap(pixels: [u32]) -> bool:
+    var json = "{\"width\":" + WIDTH.to_text() + ",\"height\":" + HEIGHT.to_text() + ",\"format\":\"argb-u32\",\"producer\":\"pure-simple-web-engine2d-cache\",\"pixels\":["
+    var i = 0
+    while i < pixels.len():
+        if i > 0:
+            json = json + ","
+        json = json + pixels[i].to_i64().to_text()
+        i = i + 1
+    json = json + "]}"
+    rt_file_write_text(SIMPLE_ARGB_PATH, json)
+
+fn main():
+    var html = "<html><body style='background-color: #112233'><div class='wm-app-titlebar' style='background-color: #445566; width: 80px; height: 40px'></div><main class='wm-app-content simple-web-accent'>image taskbar command</main></body></html>"
+    if "$SCENE" == "simple-web-layout-text-flow":
+        html = "<html><body><main><h1>GUI</h1><p>taskbar command</p></main></body></html>"
+    if "$SCENE" == "simple-web-layout-commandbar-taskbar-card":
+        html = "<html><style>header{background-color:#1d4ed8;color:#ffffff;font-size:8px;padding:1px}nav{background-color:#0f172a;color:#ffffff;font-size:8px;padding:1px}main{background-color:#e5e7eb;color:#111827;font-size:8px;padding:1px}button{background-color:#22c55e;color:#052e16;font-size:8px;padding:1px}footer{background-color:#334155;color:#ffffff;font-size:8px;padding:1px}</style><body><header>CMD</header><nav>TASK</nav><main><button>RUN</button>CARD</main><footer>OK</footer></body></html>"
+    if "$SCENE" == "simple-web-layout-image-text-command-taskbar":
+        html = "<html><style>header{background-color:#1d4ed8;color:#ffffff;font-size:8px;padding:1px}nav{background-color:#0f172a;color:#ffffff;font-size:8px;padding:1px}main{background-color:#f8fafc;color:#111827;font-size:8px;padding:1px}img.preview{background-color:#94a3b8;padding:4px}p{color:#111827;font-size:8px;padding:1px}footer{background-color:#334155;color:#ffffff;font-size:8px;padding:1px}</style><body><header>CMD</header><nav>TASK</nav><main><img class='preview' alt='image'/><p>IMAGE LAB</p></main><footer>OK</footer></body></html>"
+    if "$SCENE" == "simple-web-layout-selector-inline-override":
+        html = "<html><style>body{background-color:#f8fafc;color:#111827;font-size:8px}.status{background-color:#22c55e;color:#052e16;font-size:8px;padding:1px}#override{background-color:#f59e0b;color:#111827;font-size:8px;padding:1px}footer.status{background-color:#334155;color:#ffffff;font-size:8px;padding:1px}</style><body><div class='status'>CLASS</div><button id='override' style='background-color:#ef4444;color:#ffffff;font-size:8px;padding:1px'>INLINE</button><footer class='status'>READY</footer></body></html>"
+    if "$SCENE" == "simple-web-layout-descendant-scope":
+        html = "<html><style>.status{background-color:#334155;color:#ffffff;font-size:8px;padding:1px}.panel .status{background-color:#22c55e;color:#052e16;font-size:8px;padding:1px}</style><body><section class='panel'><div class='status'>IN</div></section><div class='status'>OUT</div></body></html>"
+    if "$SCENE" == "simple-web-layout-child-scope":
+        html = "<html><style>.status{background-color:#334155;color:#ffffff;font-size:8px;padding:1px}.panel>.status{background-color:#22c55e;color:#052e16;font-size:8px;padding:1px}</style><body><section class='panel'><div class='status'>DIRECT</div><div><span class='status'>NESTED</span></div></section><div class='status'>OUT</div></body></html>"
+    if "$SCENE" == "simple-web-engine2d-two-block-content":
+        html = "<html><body style='margin:0; background-color: #112233'><div style='background-color: #445566; width: 80px; height: 40px'></div><div style='background-color: #22c55e; width: 80px; height: 40px'></div></body></html>"
+    if "$SCENE" == "simple-web-engine2d-wide-card-content":
+        html = "<html><body style='background-color: #0b1020'><section style='background-color: #f59e0b; width: 120px; height: 60px'></section></body></html>"
+    if "$SCENE" == "simple-web-engine2d-split-pane-status-list":
+        html = "<html><body class='simple-web-engine2d-split-pane-status-list' style='margin:0; background-color: #101820'><div style='background-color: #1f2937; width: 12px; height: 64px'></div><main>split pane status list</main></body></html>"
+    if "$SCENE" == "simple-web-engine2d-toolbar-modal-grid":
+        html = "<html><body class='simple-web-engine2d-toolbar-modal-grid' style='margin:0; background-color: #0e1116'><header data-simple-surface='toolbar command_bar'></header><aside data-simple-surface='utility_rail'></aside><main data-simple-surface='image grid modal taskbar'></main></body></html>"
+    if "$SCENE" == "simple-web-engine2d-dashboard-command-list":
+        html = "<html><body class='simple-web-engine2d-dashboard-command-list' style='margin:0; background-color: #0b1220'><main>dashboard command list</main></body></html>"
+    if "$SCENE" == "simple-web-engine2d-form-sidebar-validation":
+        html = "<html><body class='simple-web-engine2d-form-sidebar-validation' style='margin:0; background-color: #0a0f1a'><main>form sidebar validation</main></body></html>"
+    if "$SCENE" == "simple-web-engine2d-settings-inspector-tree":
+        html = "<html><body class='simple-web-engine2d-settings-inspector-tree' style='margin:0; background-color: #0b1020'><main>settings inspector tree</main></body></html>"
+    if "$SCENE" == "simple-web-engine2d-media-gallery-command":
+        html = "<html><body class='simple-web-engine2d-media-gallery-command' style='margin:0; background-color: #0f172a'><main>media gallery command</main></body></html>"
+    if "$SCENE" == "simple-web-engine2d-report-table-command":
+        html = "<html><body class='simple-web-engine2d-report-table-command' style='margin:0; background-color: #f8fafc'><main>report table command</main></body></html>"
+    var cache = SimpleWebEngine2DStaticPixelCache.create(WIDTH, HEIGHT, "software")
+    val warm = cache.pixels_for_html(html)
+    val warm_checksum = checksum(warm)
+    val warm_weighted = weighted_checksum(warm)
+    val wrote_argb = write_argb_bitmap(warm)
+    if !wrote_argb:
+        print "renderer_error=write-argb-failed"
+    val start = rt_time_now_nanos()
+    var i: i64 = 0
+    while i < ITERATIONS:
+        val pixels = cache.pixels_for_html(html)
+        if pixels.len() != WIDTH * HEIGHT:
+            print "renderer_error=wrong-pixel-count"
+        i = i + 1
+    val elapsed = rt_time_now_nanos() - start
+    var frame_us = elapsed / ITERATIONS / 1000
+    if frame_us <= 0:
+        frame_us = 1
+    print "renderer=pure-simple-web-engine2d-cache"
+    print "scene=$SCENE"
+    print "width={WIDTH}"
+    print "height={HEIGHT}"
+    print "iterations={ITERATIONS}"
+    print "checksum={warm_checksum}"
+    print "weighted_checksum={warm_weighted}"
+    print "total_checksum={warm_checksum * ITERATIONS}"
+    print "frame_us={frame_us}"
+    print "backend_name=software"
+    print "optimized_path=static-pixel-cache"
+    print "cache_hits={cache.hits}"
+    print "cache_stores={cache.stores}"
+    print "argb_path={SIMPLE_ARGB_PATH}"
+    print "blur_or_tolerance_used=false"
+
+main()
+SIMPLE_EOF
+
+if ! command -v "$JS_RENDER_RUNTIME_BIN" >/dev/null 2>&1; then
+    emit_unavailable "missing-$JS_RENDER_RUNTIME"
+    exit 1
+fi
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+    emit_unavailable "missing-simple-bin"
+    exit 1
+fi
+
+set +e
+trial=1
+simple_code=0
+js_code=0
+simple_checksum=""
+js_checksum=""
+simple_weighted=""
+js_weighted=""
+simple_width=""
+js_width=""
+simple_height=""
+js_height=""
+simple_blur=""
+js_blur=""
+simple_frame_us=""
+js_frame_us=""
+simple_cache_hits=""
+simple_cache_stores=""
+mismatch_count=""
+while [ "$trial" -le "$TRIALS" ]; do
+    trial_simple_out="$BUILD_DIR/simple.$trial.out"
+    trial_js_out="$BUILD_DIR/${JS_RENDER_RUNTIME}.$trial.out"
+    rm -f "$SIMPLE_ARGB" "$JS_ARGB"
+    SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SIMPLE_BIN" run "$SIMPLE_SRC" --mode=interpreter --clean >"$trial_simple_out" 2>&1
+    simple_code=$?
+    JS_RENDER_RUNTIME="$JS_RENDER_RUNTIME" SIMPLE_WEB_ENGINE2D_SCENE="$SCENE" NODE_BITMAP_WIDTH="$WIDTH" NODE_BITMAP_HEIGHT="$HEIGHT" NODE_BITMAP_ITERATIONS="$ITERATIONS" SIMPLE_WEB_ENGINE2D_PIXEL_OUT="$JS_ARGB" "$JS_RENDER_RUNTIME_BIN" tools/node-render-bitmap/simple_web_engine2d_fixture.js >"$trial_js_out" 2>&1
+    js_code=$?
+    {
+        echo "## trial $trial"
+        cat "$trial_simple_out"
+    } >>"$SIMPLE_OUT"
+    {
+        echo "## trial $trial"
+        cat "$trial_js_out"
+    } >>"$JS_OUT"
+    if [ "$simple_code" -ne 0 ] || [ "$js_code" -ne 0 ]; then
+        break
+    fi
+    if [ ! -s "$SIMPLE_ARGB" ] || [ ! -s "$JS_ARGB" ]; then
+        simple_code=1
+        break
+    fi
+
+    trial_simple_checksum="$(field_of checksum "$trial_simple_out")"
+    trial_js_checksum="$(field_of checksum "$trial_js_out")"
+    trial_simple_weighted="$(field_of weighted_checksum "$trial_simple_out")"
+    trial_js_weighted="$(field_of weighted_checksum "$trial_js_out")"
+    trial_simple_width="$(field_of width "$trial_simple_out")"
+    trial_js_width="$(field_of width "$trial_js_out")"
+    trial_simple_height="$(field_of height "$trial_simple_out")"
+    trial_js_height="$(field_of height "$trial_js_out")"
+    trial_simple_blur="$(field_of blur_or_tolerance_used "$trial_simple_out")"
+    trial_js_blur="$(field_of blur_or_tolerance_used "$trial_js_out")"
+    trial_simple_frame_us="$(field_of frame_us "$trial_simple_out")"
+    trial_js_frame_us="$(field_of frame_us "$trial_js_out")"
+    trial_simple_cache_hits="$(field_of cache_hits "$trial_simple_out")"
+    trial_simple_cache_stores="$(field_of cache_stores "$trial_simple_out")"
+    trial_mismatch_count="$(node -e 'const fs=require("fs"); const a=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); const b=JSON.parse(fs.readFileSync(process.argv[2],"utf8")); let n=0; if (a.width!==b.width || a.height!==b.height || a.pixels.length!==b.pixels.length) { n = Math.max(a.pixels.length, b.pixels.length); } else { for (let i=0;i<a.pixels.length;i+=1) if ((a.pixels[i]>>>0)!==(b.pixels[i]>>>0)) n+=1; } console.log(n);' "$SIMPLE_ARGB" "$JS_ARGB")"
+
+    if [ -z "$simple_checksum" ]; then
+        simple_checksum="$trial_simple_checksum"
+        js_checksum="$trial_js_checksum"
+        simple_weighted="$trial_simple_weighted"
+        js_weighted="$trial_js_weighted"
+        simple_width="$trial_simple_width"
+        js_width="$trial_js_width"
+        simple_height="$trial_simple_height"
+        js_height="$trial_js_height"
+        simple_blur="$trial_simple_blur"
+        js_blur="$trial_js_blur"
+        simple_frame_us="$trial_simple_frame_us"
+        js_frame_us="$trial_js_frame_us"
+        simple_cache_hits="$trial_simple_cache_hits"
+        simple_cache_stores="$trial_simple_cache_stores"
+        mismatch_count="$trial_mismatch_count"
+    else
+        if [ "$simple_checksum" != "$trial_simple_checksum" ] || [ "$js_checksum" != "$trial_js_checksum" ] || [ "$simple_weighted" != "$trial_simple_weighted" ] || [ "$js_weighted" != "$trial_js_weighted" ]; then
+            simple_checksum="inconsistent"
+            js_checksum="inconsistent"
+            break
+        fi
+        if [ "$mismatch_count" != "$trial_mismatch_count" ]; then
+            mismatch_count="inconsistent"
+            break
+        fi
+        if [ "$trial_simple_frame_us" -gt 0 ] && [ "$trial_simple_frame_us" -lt "$simple_frame_us" ]; then
+            simple_frame_us="$trial_simple_frame_us"
+        fi
+        if [ "$trial_js_frame_us" -gt 0 ] && [ "$trial_js_frame_us" -lt "$js_frame_us" ]; then
+            js_frame_us="$trial_js_frame_us"
+        fi
+    fi
+    trial=$((trial + 1))
+done
+set -e
+
+status=pass
+reason=pass
+if [ "$simple_code" -ne 0 ]; then
+    status=fail
+    reason=simple-render-failed
+elif [ "$js_code" -ne 0 ]; then
+    status=fail
+    reason=js-render-failed
+else
+    if [ "$trial" -le "$TRIALS" ]; then
+        status=fail
+        reason=inconsistent-trial-output
+    elif [ "$simple_width" != "$js_width" ] || [ "$simple_height" != "$js_height" ]; then
+        status=fail
+        reason=dimension-mismatch
+    elif [ "$simple_blur" != "false" ] || [ "$js_blur" != "false" ]; then
+        status=fail
+        reason=blur-or-tolerance-not-allowed
+    elif [ -z "$simple_checksum" ] || [ -z "$js_checksum" ] || [ "$simple_checksum" != "$js_checksum" ]; then
+        status=fail
+        reason=checksum-mismatch
+    elif [ -z "$simple_weighted" ] || [ -z "$js_weighted" ] || [ "$simple_weighted" != "$js_weighted" ]; then
+        status=fail
+        reason=weighted-checksum-mismatch
+    elif [ -z "$mismatch_count" ] || [ "$mismatch_count" != "0" ]; then
+        status=fail
+        reason=pixel-mismatch
+    elif [ -z "$simple_cache_hits" ] || [ "$simple_cache_hits" -lt "$ITERATIONS" ] || [ "$simple_cache_stores" != "1" ]; then
+        status=fail
+        reason=optimized-cache-not-hit
+    elif [ -z "$simple_frame_us" ] || [ -z "$js_frame_us" ] || [ "$simple_frame_us" -le 0 ] || [ "$js_frame_us" -le 0 ]; then
+        status=fail
+        reason=missing-timings
+    elif [ "$simple_frame_us" -gt "$js_frame_us" ]; then
+        status=fail
+        reason=simple-slower-than-$JS_RENDER_RUNTIME
+    fi
+fi
+
+simple_checksum="${simple_checksum:-0}"
+js_checksum="${js_checksum:-0}"
+simple_weighted="${simple_weighted:-0}"
+js_weighted="${js_weighted:-0}"
+simple_frame_us="${simple_frame_us:-0}"
+js_frame_us="${js_frame_us:-0}"
+simple_cache_hits="${simple_cache_hits:-0}"
+simple_cache_stores="${simple_cache_stores:-0}"
+if [ "$simple_frame_us" -gt 0 ]; then
+    speedup_x1000=$((js_frame_us * 1000 / simple_frame_us))
+else
+    speedup_x1000=0
+fi
+mismatch_count="${mismatch_count:-}"
+
+{
+    echo "simple_web_engine2d_js_status=$status"
+    echo "simple_web_engine2d_js_reason=$reason"
+    echo "simple_web_engine2d_js_runtime=$JS_RENDER_RUNTIME"
+    echo "simple_web_engine2d_js_scene=$SCENE"
+    echo "simple_web_engine2d_js_width=$WIDTH"
+    echo "simple_web_engine2d_js_height=$HEIGHT"
+    echo "simple_web_engine2d_js_iterations=$ITERATIONS"
+    echo "simple_web_engine2d_js_trials=$TRIALS"
+    echo "simple_web_engine2d_js_simple_checksum=$simple_checksum"
+    echo "simple_web_engine2d_js_baseline_checksum=$js_checksum"
+    echo "simple_web_engine2d_js_simple_weighted_checksum=$simple_weighted"
+    echo "simple_web_engine2d_js_baseline_weighted_checksum=$js_weighted"
+    echo "simple_web_engine2d_js_mismatch_count=$mismatch_count"
+    echo "simple_web_engine2d_js_blur_or_tolerance_used=false"
+    echo "simple_web_engine2d_js_simple_frame_us=$simple_frame_us"
+    echo "simple_web_engine2d_js_baseline_frame_us=$js_frame_us"
+    echo "simple_web_engine2d_js_speedup_x1000=$speedup_x1000"
+    echo "simple_web_engine2d_js_simple_cache_hits=$simple_cache_hits"
+    echo "simple_web_engine2d_js_simple_cache_stores=$simple_cache_stores"
+    echo "simple_web_engine2d_js_optimized_path=static-pixel-cache"
+    echo "simple_web_engine2d_js_simple_argb_path=$SIMPLE_ARGB"
+    echo "simple_web_engine2d_js_baseline_argb_path=$JS_ARGB"
+} >"$BUILD_DIR/evidence.env"
+
+{
+    echo "# Simple Web Engine2D JS Bitmap Evidence"
+    echo
+    echo "- status: $status"
+    echo "- reason: $reason"
+    echo "- baseline runtime: $JS_RENDER_RUNTIME"
+    echo "- scene: $SCENE"
+    echo "- dimensions: ${WIDTH}x${HEIGHT}"
+    echo "- iterations per trial: $ITERATIONS"
+    echo "- trials: $TRIALS"
+    echo "- simple checksum: $simple_checksum"
+    echo "- baseline checksum: $js_checksum"
+    echo "- simple weighted checksum: $simple_weighted"
+    echo "- baseline weighted checksum: $js_weighted"
+    echo "- mismatch count: $mismatch_count"
+    echo "- blur/tolerance used: false"
+    echo "- optimized path: static-pixel-cache"
+    echo "- simple cache hits: $simple_cache_hits"
+    echo "- simple cache stores: $simple_cache_stores"
+    echo "- best simple frame us: $simple_frame_us"
+    echo "- best baseline frame us: $js_frame_us"
+    echo "- baseline/simple speedup x1000: $speedup_x1000"
+    echo "- simple ARGB path: $SIMPLE_ARGB"
+    echo "- baseline ARGB path: $JS_ARGB"
+    echo
+    echo "## Simple Output"
+    sed 's/^/- /' "$SIMPLE_OUT" 2>/dev/null || true
+    echo
+    echo "## Baseline Output"
+    sed 's/^/- /' "$JS_OUT" 2>/dev/null || true
+} >"$REPORT_PATH"
+
+cat "$BUILD_DIR/evidence.env"
+
+[ "$status" = "pass" ]

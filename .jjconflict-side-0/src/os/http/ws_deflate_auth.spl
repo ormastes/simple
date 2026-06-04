@@ -1,0 +1,163 @@
+class WsDeflateParams:
+    server_no_context_takeover: bool
+    client_no_context_takeover: bool
+    server_max_window_bits: i32
+    client_max_window_bits: i32
+    agreed: bool
+
+    me is_default_window():
+        return server_max_window_bits == 15 and client_max_window_bits == 15
+
+    me min_window():
+        if server_max_window_bits < client_max_window_bits:
+            return server_max_window_bits
+        return client_max_window_bits
+
+    me resets_context():
+        return server_no_context_takeover or client_no_context_takeover
+
+    static fn default_params() -> WsDeflateParams:
+        return WsDeflateParams(
+            server_no_context_takeover: false,
+            client_no_context_takeover: false,
+            server_max_window_bits: 15,
+            client_max_window_bits: 15,
+            agreed: true
+        )
+
+    static fn negotiate(s_no_ctx: bool, c_no_ctx: bool, s_bits: i32, c_bits: i32) -> WsDeflateParams:
+        return WsDeflateParams(
+            server_no_context_takeover: s_no_ctx,
+            client_no_context_takeover: c_no_ctx,
+            server_max_window_bits: s_bits,
+            client_max_window_bits: c_bits,
+            agreed: true
+        )
+
+
+class WsCompressedFrame:
+    opcode: i32
+    compressed: bool
+    payload_length: i32
+    original_length: i32
+    fin: bool
+
+    me compression_ratio():
+        if original_length > 0:
+            return (payload_length * 100) / original_length
+        return 100
+
+    me is_text():
+        return opcode == 1
+
+    me is_binary():
+        return opcode == 2
+
+    me saved_bytes():
+        return original_length - payload_length
+
+    static fn text_compressed(payload_len: i32, orig_len: i32) -> WsCompressedFrame:
+        return WsCompressedFrame(
+            opcode: 1,
+            compressed: true,
+            payload_length: payload_len,
+            original_length: orig_len,
+            fin: true
+        )
+
+    static fn binary_compressed(payload_len: i32, orig_len: i32) -> WsCompressedFrame:
+        return WsCompressedFrame(
+            opcode: 2,
+            compressed: true,
+            payload_length: payload_len,
+            original_length: orig_len,
+            fin: true
+        )
+
+    static fn uncompressed(opcode: i32, length: i32) -> WsCompressedFrame:
+        return WsCompressedFrame(
+            opcode: opcode,
+            compressed: false,
+            payload_length: length,
+            original_length: length,
+            fin: true
+        )
+
+
+class DigestChallenge:
+    realm: text
+    nonce: text
+    qop: text
+    opaque: text
+    algorithm: text
+    stale: bool
+
+    me is_md5():
+        return algorithm == "MD5" or algorithm == "md5"
+
+    me is_sha256():
+        return algorithm == "SHA-256" or algorithm == "sha-256"
+
+    me requires_auth_int():
+        return qop == "auth-int"
+
+    me is_stale():
+        return stale
+
+    static fn md5_challenge(realm: text, nonce: text, opaque: text) -> DigestChallenge:
+        return DigestChallenge(
+            realm: realm,
+            nonce: nonce,
+            qop: "auth",
+            opaque: opaque,
+            algorithm: "MD5",
+            stale: false
+        )
+
+    static fn sha256_challenge(realm: text, nonce: text, opaque: text) -> DigestChallenge:
+        return DigestChallenge(
+            realm: realm,
+            nonce: nonce,
+            qop: "auth",
+            opaque: opaque,
+            algorithm: "SHA-256",
+            stale: false
+        )
+
+
+class DigestResponse:
+    username: text
+    realm: text
+    nonce: text
+    uri: text
+    qop: text
+    nc: i32
+    cnonce: text
+    response_hash: text
+    opaque: text
+
+    me nc_hex():
+        return nc.to_text()
+
+    me is_first_request():
+        return nc == 1
+
+    me header_value():
+        return "Digest username=\"" + username + "\", realm=\"" + realm + "\", nonce=\"" + nonce + "\""
+
+    static fn create(user: text, realm: text, nonce: text, uri: text, nc_val: i32, cnonce: text, hash: text, opaque: text) -> DigestResponse:
+        return DigestResponse(
+            username: user,
+            realm: realm,
+            nonce: nonce,
+            uri: uri,
+            qop: "auth",
+            nc: nc_val,
+            cnonce: cnonce,
+            response_hash: hash,
+            opaque: opaque
+        )
+
+
+fn main():
+    print("ws_deflate_auth loaded")

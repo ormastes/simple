@@ -1,0 +1,69 @@
+# @tag: sys, wm_compare, backend, measurement, performance
+
+use std.spec.{describe, it, expect}
+use app.wm_compare.backend_measurement_capture.{
+    parse_usr_bin_time_measurements,
+    host_measurement_record,
+    current_host_backend_measurement_matrix}
+use app.wm_compare.backend_measurement_report.{
+    backend_measurement_initialized_valid,
+    backend_measurement_matrix_valid,
+    backend_measurement_matrix_sdn,
+    backend_measurement_record_sdn}
+
+describe "wm_compare backend measurement capture":
+
+    it "parses repeated /usr/bin/time samples into p50 p95 and max RSS":
+        val output = "sample=1 elapsed_s=37.71 max_rss_kb=929240\nsample=2 elapsed_s=38.58 max_rss_kb=930308\nsample=3 elapsed_s=38.89 max_rss_kb=930160\n"
+        val measurement = parse_usr_bin_time_measurements(
+            "simple test backend_measurement_report_spec",
+            "linux-x86_64",
+            output,
+            454623792,
+            454623792,
+            "backend-measurement-spec-startup"
+        )
+        expect(measurement.sample_count).to_equal(3)
+        expect(measurement.p50_us).to_equal(38580000)
+        expect(measurement.p95_us).to_equal(38890000)
+        expect(measurement.max_rss_kb).to_equal(930308)
+
+    it "converts host measurements into backend measurement records":
+        val output = "sample=1 elapsed_s=1.00 max_rss_kb=100\nsample=2 elapsed_s=2.00 max_rss_kb=200\n"
+        val measurement = parse_usr_bin_time_measurements(
+            "simple test representative comparison",
+            "linux-x86_64",
+            output,
+            1000,
+            1000,
+            "render+readback"
+        )
+        val record = host_measurement_record(
+            "cpu_simd", "cpu_simd", "Initialized",
+            measurement,
+            true,
+            false,
+            "host measurement"
+        )
+        expect(backend_measurement_initialized_valid(record)).to_equal(true)
+        val sdn = backend_measurement_record_sdn(record)
+        expect(sdn).to_contain("p50_us: 1000000")
+        expect(sdn).to_contain("p95_us: 2000000")
+
+    it "builds a current-host backend matrix with explicit unavailable GPU lanes":
+        val output = "sample=1 elapsed_s=37.71 max_rss_kb=929240\nsample=2 elapsed_s=38.58 max_rss_kb=930308\nsample=3 elapsed_s=38.89 max_rss_kb=930160\n"
+        val records = current_host_backend_measurement_matrix(
+            "simple test backend_measurement_report_spec",
+            "linux-x86_64",
+            output,
+            454623792,
+            454623792,
+            "backend-measurement-spec-startup"
+        )
+        expect(records.len()).to_equal(4)
+        expect(backend_measurement_matrix_valid(records)).to_equal(true)
+        val sdn = backend_measurement_matrix_sdn(records)
+        expect(sdn).to_contain("metal_status:")
+        expect(sdn).to_contain("vulkan_status:")
+        expect(sdn).to_contain("cuda_status:")
+        expect(sdn).to_contain("cpu_simd_status: \"Initialized\"")

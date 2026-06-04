@@ -1,0 +1,254 @@
+# Base58 / Base58Check Encoder-Decoder Specification
+#
+# Test vectors sourced from:
+#   - Bitcoin BIP-0058 and well-known Bitcoin address examples
+#   - https://en.bitcoin.it/wiki/Base58Check_encoding
+#
+# NOTE: All module-level helper functions are used to avoid the it-block
+# var-mutation footgun (see .claude/memory/feedback_it_block_var_mutation.md).
+#
+# ============================================================================
+
+use std.spipe.*
+use std.common.encoding.base58.{base58_encode, base58_decode,
+    base58check_encode, base58check_decode, Base58Error}
+
+# ============================================================================
+# Encode helpers
+# ============================================================================
+
+fn _enc_empty() -> text:
+    base58_encode([])
+
+fn _enc_zero_one() -> text:
+    var bs: [u8] = []
+    bs.push(0)
+    base58_encode(bs)
+
+fn _enc_zero_three() -> text:
+    var bs: [u8] = []
+    bs.push(0)
+    bs.push(0)
+    bs.push(0)
+    base58_encode(bs)
+
+fn _enc_zero_zero_one() -> text:
+    # [0x00, 0x00, 0x01] → "112"
+    var bs: [u8] = []
+    bs.push(0)
+    bs.push(0)
+    bs.push(1)
+    base58_encode(bs)
+
+fn _enc_0x61() -> text:
+    # [0x61] = [97] → "2g"
+    var bs: [u8] = []
+    bs.push(0x61)
+    base58_encode(bs)
+
+fn _enc_hello_world() -> text:
+    # "Hello World!" bytes
+    var bs: [u8] = []
+    bs.push(0x48)  # H
+    bs.push(0x65)  # e
+    bs.push(0x6C)  # l
+    bs.push(0x6C)  # l
+    bs.push(0x6F)  # o
+    bs.push(0x20)  # space
+    bs.push(0x57)  # W
+    bs.push(0x6F)  # o
+    bs.push(0x72)  # r
+    bs.push(0x6C)  # l
+    bs.push(0x64)  # d
+    bs.push(0x21)  # !
+    base58_encode(bs)
+
+# ============================================================================
+# Decode helpers
+# ============================================================================
+
+fn _dec_empty_ok() -> bool:
+    val r = base58_decode("")
+    r.is_ok() and r.unwrap().len() == 0
+
+fn _dec_one_ok() -> bool:
+    val r = base58_decode("1")
+    if r.is_ok():
+        val b = r.unwrap()
+        b.len() == 1 and (b[0].to_i64() & 0xFF) == 0
+    else:
+        false
+
+fn _dec_two_g() -> bool:
+    # "2g" → [0x61]
+    val r = base58_decode("2g")
+    if r.is_ok():
+        val b = r.unwrap()
+        b.len() == 1 and (b[0].to_i64() & 0xFF) == 0x61
+    else:
+        false
+
+fn _dec_invalid_char_0() -> bool:
+    val r = base58_decode("0OIl")
+    if r.is_ok():
+        false
+    else:
+        match r.unwrap_err():
+            case Base58Error.InvalidChar:
+                true
+            case _:
+                false
+
+# ============================================================================
+# Base58Check helpers
+# ============================================================================
+
+fn _check_encode_p2pkh() -> text:
+    # Canonical P2PKH example from Bitcoin wiki:
+    # version=0x00, payload=010966776006953D5567439E5E39F86A0D273BEE
+    # Expected: "16UwLL9Risc3QfPqBUvKofHmBQ7wMtjvM"
+    var payload: [u8] = []
+    payload.push(0x01)
+    payload.push(0x09)
+    payload.push(0x66)
+    payload.push(0x77)
+    payload.push(0x60)
+    payload.push(0x06)
+    payload.push(0x95)
+    payload.push(0x3D)
+    payload.push(0x55)
+    payload.push(0x67)
+    payload.push(0x43)
+    payload.push(0x9E)
+    payload.push(0x5E)
+    payload.push(0x39)
+    payload.push(0xF8)
+    payload.push(0x6A)
+    payload.push(0x0D)
+    payload.push(0x27)
+    payload.push(0x3B)
+    payload.push(0xEE)
+    base58check_encode(payload, 0)
+
+fn _check_decode_p2pkh_ok() -> bool:
+    val r = base58check_decode("16UwLL9Risc3QfPqBUvKofHmBQ7wMtjvM")
+    if r.is_ok():
+        val t = r.unwrap()
+        t.0 == 0
+    else:
+        false
+
+fn _check_decode_p2pkh_payload_len() -> i64:
+    val r = base58check_decode("16UwLL9Risc3QfPqBUvKofHmBQ7wMtjvM")
+    if r.is_ok():
+        r.unwrap().1.len()
+    else:
+        -1
+
+fn _check_decode_bad_checksum() -> bool:
+    # Mutate last char N→M (valid base58 char but wrong checksum)
+    val r = base58check_decode("16UwLL9Risc3QfPqBUvKofHmBQ7wMtjvN")
+    if r.is_ok():
+        false
+    else:
+        match r.unwrap_err():
+            case Base58Error.InvalidChecksum:
+                true
+            case _:
+                false
+
+fn _check_roundtrip() -> bool:
+    # Encode a known payload, then decode, and re-encode; compare strings
+    var payload: [u8] = []
+    payload.push(0xDE)
+    payload.push(0xAD)
+    payload.push(0xBE)
+    payload.push(0xEF)
+    payload.push(0xCA)
+    payload.push(0xFE)
+    val encoded = base58check_encode(payload, 0x05)
+    val r = base58check_decode(encoded)
+    if r.is_ok():
+        val t = r.unwrap()
+        val re_encoded = base58check_encode(t.1, t.0)
+        re_encoded == encoded
+    else:
+        false
+
+fn _check_invalid_char_error() -> bool:
+    # '0' is not in alphabet → InvalidChar propagates through base58check_decode
+    val r = base58check_decode("0invalid")
+    if r.is_ok():
+        false
+    else:
+        match r.unwrap_err():
+            case Base58Error.InvalidChar:
+                true
+            case _:
+                false
+
+# ============================================================================
+# Spec: Encoder
+# ============================================================================
+
+describe "Base58 encode":
+
+    it "empty input encodes to empty string":
+        expect(_enc_empty()).to_equal("")
+
+    it "single zero byte encodes to '1'":
+        expect(_enc_zero_one()).to_equal("1")
+
+    it "three zero bytes encode to '111'":
+        expect(_enc_zero_three()).to_equal("111")
+
+    it "[0x00, 0x00, 0x01] encodes to '112'":
+        expect(_enc_zero_zero_one()).to_equal("112")
+
+    it "[0x61] encodes to '2g'":
+        expect(_enc_0x61()).to_equal("2g")
+
+    it "Hello World! encodes to '2NEpo7TZRRrLZSi2U'":
+        expect(_enc_hello_world()).to_equal("2NEpo7TZRRrLZSi2U")
+
+# ============================================================================
+# Spec: Decoder
+# ============================================================================
+
+describe "Base58 decode":
+
+    it "empty string decodes to empty bytes":
+        expect(_dec_empty_ok()).to_equal(true)
+
+    it "'1' decodes to [0x00]":
+        expect(_dec_one_ok()).to_equal(true)
+
+    it "'2g' decodes to [0x61]":
+        expect(_dec_two_g()).to_equal(true)
+
+    it "excluded chars 0OIl return InvalidChar":
+        expect(_dec_invalid_char_0()).to_equal(true)
+
+# ============================================================================
+# Spec: Base58Check
+# ============================================================================
+
+describe "Base58Check":
+
+    it "canonical P2PKH address encodes correctly":
+        expect(_check_encode_p2pkh()).to_equal("16UwLL9Risc3QfPqBUvKofHmBQ7wMtjvM")
+
+    it "canonical P2PKH address decodes with version 0":
+        expect(_check_decode_p2pkh_ok()).to_equal(true)
+
+    it "canonical P2PKH payload is 20 bytes":
+        expect(_check_decode_p2pkh_payload_len()).to_equal(20)
+
+    it "mutated last char returns InvalidChecksum":
+        expect(_check_decode_bad_checksum()).to_equal(true)
+
+    it "base58check round-trip is lossless":
+        expect(_check_roundtrip()).to_equal(true)
+
+    it "base58check propagates InvalidChar from bad input":
+        expect(_check_invalid_char_error()).to_equal(true)

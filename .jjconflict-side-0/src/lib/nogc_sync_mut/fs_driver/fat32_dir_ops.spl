@@ -1,0 +1,500 @@
+# FAT32 — directory mutation operations (create_file, mkdir, unlink, rename).
+#
+# Free-function helpers that implement the body of Fat32Core directory-mutation
+# methods.  Fat32Core.{create_file,mkdir,unlink,rename} delegate here to keep
+# fat32_core.spl under the 800-line limit.
+
+use std.fs_driver.types.{FileHandle, DirEntry, Inode}
+use std.fs_driver.fat32_core.{
+    Fat32Core, OpenFile,
+    FAT32_FREE, FAT32_EOC, FAT32_DIR_ENTRY_SIZE,
+    FAT32_ATTR_DIRECTORY, FAT32_ATTR_LONG_NAME
+}
+use std.fs_driver.fat32_parsers.{_read_u16_le, _read_u32_le, _parse_short_name, _split_path, _lower_text}
+
+fn fat32_create_file(core: Fat32Core, path: text) -> Result<[u32], text>:
+    if not core.mounted:
+        return Err("filesystem not mounted")
+    val parts = _split_path(path)
+    if parts.len() == 0:
+        return Err("invalid path")
+    var dir_cluster = core.root_cluster
+    var pi = 0
+    while pi < parts.len() - 1:
+        val part = parts[pi]
+        if part == "":
+            pi = pi + 1
+            continue
+        val entry_rc = core.find_entry_in_dir(dir_cluster, part)
+        if entry_rc.is_err():
+            return Err(entry_rc.unwrap_err())
+        val entry = entry_rc.unwrap()
+        if not entry.is_dir:
+            return Err("not a directory in path")
+        dir_cluster = entry.inode.id.to_u32()
+        pi = pi + 1
+    val name = parts[parts.len() - 1]
+    val alloc_rc = core.alloc_cluster()
+    if alloc_rc.is_err():
+        return Err(alloc_rc.unwrap_err())
+    val new_cluster = alloc_rc.unwrap()
+    val dir_rc = core.read_cluster(dir_cluster)
+    if dir_rc.is_err():
+        return Err(dir_rc.unwrap_err())
+    var dir_data = dir_rc.unwrap()
+    val epc = (core.bytes_per_sector * core.sectors_per_cluster) / FAT32_DIR_ENTRY_SIZE
+    var ei: u32 = 0
+    var slot_off: i32 = -1
+    while ei < epc:
+        val off = (ei * FAT32_DIR_ENTRY_SIZE).to_i32()
+        val fb = dir_data[off]
+        if fb == 0x00 or fb == 0xE5:
+            slot_off = off
+            ei = epc
+        ei = ei + 1
+    if slot_off < 0:
+        return Err("directory full")
+    var ni = 0
+    while ni < 11:
+        dir_data[slot_off + ni] = 0x20
+        ni = ni + 1
+    # Split on dot for 8.3 encoding
+    var base_part = name
+    var ext_part = ""
+    var di: i64 = 0
+    while di < name.len():
+        var db: u8 = name.char_at(di) as u8
+        if db == 0x2E:
+            base_part = name.slice(0, di)
+            ext_part = name.slice(di + 1, name.len())
+        di = di + 1
+    # Write base (up to 8 chars, uppercased)
+    var ci = 0
+    while ci < base_part.len() and ci < 8:
+        var b: u8 = base_part.char_at(ci) as u8
+        if b >= 0x61 and b <= 0x7A:
+            b = b - 32
+        dir_data[slot_off + ci] = b
+        ci = ci + 1
+    # Write extension (up to 3 chars, uppercased)
+    var exi = 0
+    while exi < ext_part.len() and exi < 3:
+        var b: u8 = ext_part.char_at(exi) as u8
+        if b >= 0x61 and b <= 0x7A:
+            b = b - 32
+        dir_data[slot_off + 8 + exi] = b
+        exi = exi + 1
+    dir_data[slot_off + 11] = 0x20
+    dir_data[slot_off + 20] = ((new_cluster >> 16) & 0xFF).to_u8()
+    dir_data[slot_off + 21] = ((new_cluster >> 24) & 0xFF).to_u8()
+    dir_data[slot_off + 26] = (new_cluster & 0xFF).to_u8()
+    dir_data[slot_off + 27] = ((new_cluster >> 8) & 0xFF).to_u8()
+    dir_data[slot_off + 28] = 0
+    dir_data[slot_off + 29] = 0
+    dir_data[slot_off + 30] = 0
+    dir_data[slot_off + 31] = 0
+    val wrc = core.write_cluster(dir_cluster, dir_data)
+    if wrc.is_err():
+        return Err(wrc.unwrap_err())
+    Ok([new_cluster, dir_cluster])
+
+fn fat32_mkdir(core: Fat32Core, path: text) -> Result<(), text>:
+    if not core.mounted:
+        return Err("filesystem not mounted")
+    val parts = _split_path(path)
+    if parts.len() == 0:
+        return Err("invalid path")
+    var dir_cluster = core.root_cluster
+    var pi = 0
+    while pi < parts.len() - 1:
+        val part = parts[pi]
+        if part == "":
+            pi = pi + 1
+            continue
+        val entry_rc = core.find_entry_in_dir(dir_cluster, part)
+        if entry_rc.is_err():
+            return Err(entry_rc.unwrap_err())
+        val entry = entry_rc.unwrap()
+        if not entry.is_dir:
+            return Err("not a directory in path")
+        dir_cluster = entry.inode.id.to_u32()
+        pi = pi + 1
+    val name = parts[parts.len() - 1]
+    val alloc_rc = core.alloc_cluster()
+    if alloc_rc.is_err():
+        return Err(alloc_rc.unwrap_err())
+    val new_cluster = alloc_rc.unwrap()
+    val dir_rc = core.read_cluster(dir_cluster)
+    if dir_rc.is_err():
+        return Err(dir_rc.unwrap_err())
+    var dir_data = dir_rc.unwrap()
+    val epc = (core.bytes_per_sector * core.sectors_per_cluster) / FAT32_DIR_ENTRY_SIZE
+    var ei: u32 = 0
+    var slot_off: i32 = -1
+    while ei < epc:
+        val off = (ei * FAT32_DIR_ENTRY_SIZE).to_i32()
+        val fb = dir_data[off]
+        if fb == 0x00 or fb == 0xE5:
+            slot_off = off
+            ei = epc
+        ei = ei + 1
+    if slot_off < 0:
+        return Err("directory full")
+    var ni = 0
+    while ni < 11:
+        dir_data[slot_off + ni] = 0x20
+        ni = ni + 1
+    # Split on dot for 8.3 encoding
+    var base_part = name
+    var ext_part = ""
+    var di: i64 = 0
+    while di < name.len():
+        var db: u8 = name.char_at(di) as u8
+        if db == 0x2E:
+            base_part = name.slice(0, di)
+            ext_part = name.slice(di + 1, name.len())
+        di = di + 1
+    # Write base (up to 8 chars, uppercased)
+    var ci = 0
+    while ci < base_part.len() and ci < 8:
+        var b: u8 = base_part.char_at(ci) as u8
+        if b >= 0x61 and b <= 0x7A:
+            b = b - 32
+        dir_data[slot_off + ci] = b
+        ci = ci + 1
+    # Write extension (up to 3 chars, uppercased)
+    var exi = 0
+    while exi < ext_part.len() and exi < 3:
+        var b: u8 = ext_part.char_at(exi) as u8
+        if b >= 0x61 and b <= 0x7A:
+            b = b - 32
+        dir_data[slot_off + 8 + exi] = b
+        exi = exi + 1
+    dir_data[slot_off + 11] = FAT32_ATTR_DIRECTORY
+    dir_data[slot_off + 20] = ((new_cluster >> 16) & 0xFF).to_u8()
+    dir_data[slot_off + 21] = ((new_cluster >> 24) & 0xFF).to_u8()
+    dir_data[slot_off + 26] = (new_cluster & 0xFF).to_u8()
+    dir_data[slot_off + 27] = ((new_cluster >> 8) & 0xFF).to_u8()
+    dir_data[slot_off + 28] = 0
+    dir_data[slot_off + 29] = 0
+    dir_data[slot_off + 30] = 0
+    dir_data[slot_off + 31] = 0
+    val wrc = core.write_cluster(dir_cluster, dir_data)
+    if wrc.is_err():
+        return Err(wrc.unwrap_err())
+    core.invalidate_path_prefix(path)
+    core.invalidate_dir_cache(dir_cluster)
+    Ok(())
+
+fn fat32_unlink(core: Fat32Core, path: text) -> Result<(), text>:
+    if not core.mounted:
+        return Err("filesystem not mounted")
+    val parts = _split_path(path)
+    if parts.len() == 0:
+        return Err("invalid path")
+    var dir_cluster = core.root_cluster
+    var pi = 0
+    while pi < parts.len() - 1:
+        val part = parts[pi]
+        if part == "":
+            pi = pi + 1
+            continue
+        val entry_rc = core.find_entry_in_dir(dir_cluster, part)
+        if entry_rc.is_err():
+            return Err(entry_rc.unwrap_err())
+        val entry = entry_rc.unwrap()
+        if not entry.is_dir:
+            return Err("not a directory in path")
+        dir_cluster = entry.inode.id.to_u32()
+        pi = pi + 1
+    val target = _lower_text(parts[parts.len() - 1])
+    val chain_rc = core.follow_chain(dir_cluster)
+    if chain_rc.is_err():
+        return Err(chain_rc.unwrap_err())
+    val chain = chain_rc.unwrap()
+    var ci = 0
+    while ci < chain.len():
+        val cdata_rc = core.read_cluster(chain[ci])
+        if cdata_rc.is_err():
+            return Err(cdata_rc.unwrap_err())
+        var cdata = cdata_rc.unwrap()
+        val epc = (core.bytes_per_sector * core.sectors_per_cluster) / FAT32_DIR_ENTRY_SIZE
+        var ei: u32 = 0
+        while ei < epc:
+            val off = (ei * FAT32_DIR_ENTRY_SIZE).to_i32()
+            val fb = cdata[off]
+            if fb == 0x00:
+                return Err("file not found")
+            if fb == 0xE5 or cdata[off + 11] == FAT32_ATTR_LONG_NAME:
+                ei = ei + 1
+                continue
+            val ename = _parse_short_name(cdata, off)
+            if ename == target:
+                val hi = _read_u16_le(cdata, off + 20).to_u32()
+                val lo = _read_u16_le(cdata, off + 26).to_u32()
+                val file_cluster = (hi << 16) | lo
+                cdata[off] = 0xE5
+                val wrc = core.write_cluster(chain[ci], cdata)
+                if wrc.is_err():
+                    return Err(wrc.unwrap_err())
+                if file_cluster >= 2:
+                    core.invalidate_chain(file_cluster)
+                    val fchain_rc = core.follow_chain(file_cluster)
+                    if fchain_rc.is_ok():
+                        val fchain = fchain_rc.unwrap()
+                        var fi = 0
+                        while fi < fchain.len():
+                            val free_rc = core.write_fat_entry(fchain[fi], FAT32_FREE)
+                            fi = fi + 1
+                    core.invalidate_chain(file_cluster)
+                core.invalidate_path_prefix(path)
+                core.invalidate_dir_cache(dir_cluster)
+                return Ok(())
+            ei = ei + 1
+        ci = ci + 1
+    Err("file not found")
+
+fn fat32_rename(core: Fat32Core, old_path: text, new_path: text) -> Result<(), text>:
+    if not core.mounted:
+        return Err("filesystem not mounted")
+    val old_parts = _split_path(old_path)
+    if old_parts.len() == 0:
+        return Err("invalid old path")
+    val new_parts = _split_path(new_path)
+    if new_parts.len() == 0:
+        return Err("invalid new path")
+    var old_dir_cluster = core.root_cluster
+    var pi = 0
+    while pi < old_parts.len() - 1:
+        val part = old_parts[pi]
+        if part == "":
+            pi = pi + 1
+            continue
+        val entry_rc = core.find_entry_in_dir(old_dir_cluster, part)
+        if entry_rc.is_err():
+            return Err(entry_rc.unwrap_err())
+        old_dir_cluster = entry_rc.unwrap().inode.id.to_u32()
+        pi = pi + 1
+    val old_name = _lower_text(old_parts[old_parts.len() - 1])
+    var new_dir_cluster = core.root_cluster
+    pi = 0
+    while pi < new_parts.len() - 1:
+        val part = new_parts[pi]
+        if part == "":
+            pi = pi + 1
+            continue
+        val entry_rc = core.find_entry_in_dir(new_dir_cluster, part)
+        if entry_rc.is_err():
+            return Err(entry_rc.unwrap_err())
+        new_dir_cluster = entry_rc.unwrap().inode.id.to_u32()
+        pi = pi + 1
+    val new_name = new_parts[new_parts.len() - 1]
+    val old_chain_rc = core.follow_chain(old_dir_cluster)
+    if old_chain_rc.is_err():
+        return Err(old_chain_rc.unwrap_err())
+    val old_chain = old_chain_rc.unwrap()
+    var old_ci = 0
+    var found_cluster: u32 = 0
+    var found_size: u32 = 0
+    var found_attr: u8 = 0
+    var found: bool = false
+    while old_ci < old_chain.len() and not found:
+        val cdata_rc = core.read_cluster(old_chain[old_ci])
+        if cdata_rc.is_err():
+            return Err(cdata_rc.unwrap_err())
+        var cdata = cdata_rc.unwrap()
+        val epc = (core.bytes_per_sector * core.sectors_per_cluster) / FAT32_DIR_ENTRY_SIZE
+        var ei: u32 = 0
+        while ei < epc:
+            val off = (ei * FAT32_DIR_ENTRY_SIZE).to_i32()
+            val fb = cdata[off]
+            if fb == 0x00:
+                ei = epc
+                old_ci = old_chain.len()
+                continue
+            if fb == 0xE5 or cdata[off + 11] == FAT32_ATTR_LONG_NAME:
+                ei = ei + 1
+                continue
+            val ename = _parse_short_name(cdata, off)
+            if ename == old_name:
+                val hi = _read_u16_le(cdata, off + 20).to_u32()
+                val lo = _read_u16_le(cdata, off + 26).to_u32()
+                found_cluster = (hi << 16) | lo
+                found_size = _read_u32_le(cdata, off + 28)
+                found_attr = cdata[off + 11]
+                cdata[off] = 0xE5
+                val wrc = core.write_cluster(old_chain[old_ci], cdata)
+                if wrc.is_err():
+                    return Err(wrc.unwrap_err())
+                found = true
+                ei = epc
+            else:
+                ei = ei + 1
+        old_ci = old_ci + 1
+    if not found:
+        return Err("file not found")
+    val new_chain_rc = core.follow_chain(new_dir_cluster)
+    if new_chain_rc.is_err():
+        return Err(new_chain_rc.unwrap_err())
+    val new_chain = new_chain_rc.unwrap()
+    var new_ci = 0
+    var placed: bool = false
+    while new_ci < new_chain.len() and not placed:
+        val cdata_rc = core.read_cluster(new_chain[new_ci])
+        if cdata_rc.is_err():
+            return Err(cdata_rc.unwrap_err())
+        var cdata = cdata_rc.unwrap()
+        val epc = (core.bytes_per_sector * core.sectors_per_cluster) / FAT32_DIR_ENTRY_SIZE
+        var ei: u32 = 0
+        while ei < epc:
+            val off = (ei * FAT32_DIR_ENTRY_SIZE).to_i32()
+            val fb = cdata[off]
+            if fb == 0x00 or fb == 0xE5:
+                var ni = 0
+                while ni < 11:
+                    cdata[off + ni] = 0x20
+                    ni = ni + 1
+                # Split on dot for 8.3 encoding
+                var rn_base = new_name
+                var rn_ext = ""
+                var rn_di: i64 = 0
+                while rn_di < new_name.len():
+                    var rn_db: u8 = new_name.char_at(rn_di) as u8
+                    if rn_db == 0x2E:
+                        rn_base = new_name.slice(0, rn_di)
+                        rn_ext = new_name.slice(rn_di + 1, new_name.len())
+                    rn_di = rn_di + 1
+                # Write base (up to 8 chars, uppercased)
+                var nci = 0
+                while nci < rn_base.len() and nci < 8:
+                    var nb: u8 = rn_base.char_at(nci) as u8
+                    if nb >= 0x61 and nb <= 0x7A:
+                        nb = nb - 32
+                    cdata[off + nci] = nb
+                    nci = nci + 1
+                # Write extension (up to 3 chars, uppercased)
+                var rn_exi = 0
+                while rn_exi < rn_ext.len() and rn_exi < 3:
+                    var nb: u8 = rn_ext.char_at(rn_exi) as u8
+                    if nb >= 0x61 and nb <= 0x7A:
+                        nb = nb - 32
+                    cdata[off + 8 + rn_exi] = nb
+                    rn_exi = rn_exi + 1
+                cdata[off + 11] = found_attr
+                cdata[off + 20] = ((found_cluster >> 16) & 0xFF).to_u8()
+                cdata[off + 21] = ((found_cluster >> 24) & 0xFF).to_u8()
+                cdata[off + 26] = (found_cluster & 0xFF).to_u8()
+                cdata[off + 27] = ((found_cluster >> 8) & 0xFF).to_u8()
+                cdata[off + 28] = (found_size & 0xFF).to_u8()
+                cdata[off + 29] = ((found_size >> 8) & 0xFF).to_u8()
+                cdata[off + 30] = ((found_size >> 16) & 0xFF).to_u8()
+                cdata[off + 31] = ((found_size >> 24) & 0xFF).to_u8()
+                val wrc = core.write_cluster(new_chain[new_ci], cdata)
+                if wrc.is_err():
+                    return Err(wrc.unwrap_err())
+                placed = true
+                ei = epc
+            else:
+                ei = ei + 1
+        new_ci = new_ci + 1
+    if not placed:
+        return Err("destination directory full")
+    core.invalidate_path_prefix(old_path)
+    core.invalidate_path_prefix(new_path)
+    core.invalidate_dir_cache(old_dir_cluster)
+    core.invalidate_dir_cache(new_dir_cluster)
+    Ok(())
+
+fn fat32_truncate_path(core: Fat32Core, path: text, new_size: i64) -> Result<(), text>:
+    """Truncate or extend a file by path, updating FAT chains and the directory entry."""
+    if not core.mounted:
+        return Err("filesystem not mounted")
+    if new_size < 0:
+        return Err("invalid truncation size")
+    val parts = _split_path(path)
+    if parts.len() == 0:
+        return Err("invalid path")
+    # Walk to the parent directory cluster
+    var dir_cluster = core.root_cluster
+    var pi = 0
+    while pi < parts.len() - 1:
+        val part = parts[pi]
+        if part == "":
+            pi = pi + 1
+            continue
+        val entry_rc = core.find_entry_in_dir(dir_cluster, part)
+        if entry_rc.is_err():
+            return Err(entry_rc.unwrap_err())
+        val entry = entry_rc.unwrap()
+        if not entry.is_dir:
+            return Err("not a directory in path")
+        dir_cluster = entry.inode.id.to_u32()
+        pi = pi + 1
+    val target = _lower_text(parts[parts.len() - 1])
+    # Scan directory entries to find the file
+    val chain_rc = core.follow_chain(dir_cluster)
+    if chain_rc.is_err():
+        return Err(chain_rc.unwrap_err())
+    val chain = chain_rc.unwrap()
+    var ci = 0
+    while ci < chain.len():
+        val cdata_rc = core.read_cluster(chain[ci])
+        if cdata_rc.is_err():
+            return Err(cdata_rc.unwrap_err())
+        var cdata = cdata_rc.unwrap()
+        val epc = (core.bytes_per_sector * core.sectors_per_cluster) / FAT32_DIR_ENTRY_SIZE
+        var ei: u32 = 0
+        while ei < epc:
+            val off = (ei * FAT32_DIR_ENTRY_SIZE).to_i32()
+            val fb = cdata[off]
+            if fb == 0x00:
+                return Err("file not found")
+            if fb == 0xE5 or cdata[off + 11] == FAT32_ATTR_LONG_NAME:
+                ei = ei + 1
+                continue
+            val ename = _parse_short_name(cdata, off)
+            if ename == target:
+                # Check it is not a directory
+                if (cdata[off + 11] & FAT32_ATTR_DIRECTORY) != 0:
+                    return Err("cannot truncate directory")
+                val hi = _read_u16_le(cdata, off + 20).to_u32()
+                val lo = _read_u16_le(cdata, off + 26).to_u32()
+                val file_cluster = (hi << 16) | lo
+                # Truncate the cluster chain
+                val trunc_rc = core.truncate_chain(file_cluster, new_size.to_u64())
+                if trunc_rc.is_err():
+                    return Err(trunc_rc.unwrap_err())
+                val new_first = trunc_rc.unwrap()
+                # Update the directory entry: first cluster and file size
+                val size_u32 = new_size.to_u32()
+                cdata[off + 20] = ((new_first >> 16) & 0xFF).to_u8()
+                cdata[off + 21] = ((new_first >> 24) & 0xFF).to_u8()
+                cdata[off + 26] = (new_first & 0xFF).to_u8()
+                cdata[off + 27] = ((new_first >> 8) & 0xFF).to_u8()
+                cdata[off + 28] = (size_u32 & 0xFF).to_u8()
+                cdata[off + 29] = ((size_u32 >> 8) & 0xFF).to_u8()
+                cdata[off + 30] = ((size_u32 >> 16) & 0xFF).to_u8()
+                cdata[off + 31] = ((size_u32 >> 24) & 0xFF).to_u8()
+                val wrc = core.write_cluster(chain[ci], cdata)
+                if wrc.is_err():
+                    return Err(wrc.unwrap_err())
+                core.invalidate_path_prefix(path)
+                core.invalidate_dir_cache(dir_cluster)
+                # Update any matching open file handles
+                var fi = 0
+                while fi < core.open_files.len():
+                    var of = core.open_files[fi]
+                    if of.is_open and of.start_cluster == file_cluster:
+                        of.start_cluster = new_first
+                        of.current_cluster = new_first
+                        of.size = new_size
+                        if of.position > new_size:
+                            of.position = new_size
+                        var files = core.open_files
+                        files[fi] = of
+                        core.open_files = files
+                    fi = fi + 1
+                return Ok(())
+            ei = ei + 1
+        ci = ci + 1
+    Err("file not found")

@@ -1,0 +1,143 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
+VIVADO="${VIVADO:-/home/ormastes/Xilinx/2025.2/Vivado/bin/vivado}"
+OPENFPGALOADER="${OPENFPGALOADER:-openFPGALoader}"
+UART_BAUD="${UART_BAUD:-115200}"
+UART_SAMPLE_SECONDS="${UART_SAMPLE_SECONDS:-3}"
+LOCAL_ONLY=0
+
+if [ "${1:-}" = "--local-only" ]; then
+    LOCAL_ONLY=1
+fi
+
+pass() {
+    printf 'PASS %s\n' "$1"
+}
+
+fail() {
+    printf 'FAIL %s\n' "$1"
+}
+
+info() {
+    printf 'INFO %s\n' "$1"
+}
+
+uart_bytes=0
+for dev in /dev/ttyUSB0 /dev/ttyUSB1 /dev/ttyUSB2 /dev/ttyUSB3; do
+    if [ -e "$dev" ]; then
+        info "uart_device=$dev"
+        stty -F "$dev" "$UART_BAUD" cs8 -cstopb -parenb -ixon -ixoff raw -echo 2>/dev/null || true
+        bytes="$(timeout "${UART_SAMPLE_SECONDS}s" dd if="$dev" bs=1 count=256 2>/dev/null | wc -c | tr -d ' ')"
+        info "uart_sample_bytes[$dev]=$bytes"
+        if [ "${bytes:-0}" -gt 0 ]; then
+            uart_bytes=$((uart_bytes + bytes))
+        fi
+    fi
+done
+
+if [ "$uart_bytes" -gt 0 ]; then
+    pass "uart_boot_log_detected"
+else
+    fail "uart_boot_log_detected"
+fi
+
+if command -v "$OPENFPGALOADER" >/dev/null 2>&1; then
+    if "$OPENFPGALOADER" -c ft4232 --detect >/tmp/kria_openfpgaloader.$$ 2>&1; then
+        if rg -q 'xc|xck|xilinx|artix|zynq' /tmp/kria_openfpgaloader.$$; then
+            pass "openfpgaloader_chain_detected"
+        else
+            fail "openfpgaloader_chain_detected_empty"
+        fi
+    else
+        fail "openfpgaloader_ft4232_detect"
+    fi
+    rm -f /tmp/kria_openfpgaloader.$$
+else
+    fail "openfpgaloader_available"
+fi
+
+if [ -x "$VIVADO" ]; then
+    tcl="$(mktemp /tmp/kria_vivado_detect.XXXXXX.tcl)"
+    out="$(mktemp /tmp/kria_vivado_detect.XXXXXX.out)"
+    printf '%s\n' \
+        'open_hw_manager' \
+        'connect_hw_server -allow_non_jtag' \
+        'open_hw_target' \
+        'puts "HW_TARGETS=[get_hw_targets]"' \
+        'puts "HW_DEVICES=[get_hw_devices]"' \
+        'close_hw_manager' >"$tcl"
+    if timeout 75s "$VIVADO" -mode batch -nojournal -nolog -notrace -source "$tcl" >"$out" 2>&1; then
+        devices="$(rg 'HW_DEVICES=' "$out" | tail -n 1 | sed 's/^.*HW_DEVICES=//')"
+        info "vivado_hw_devices=$devices"
+        if printf '%s\n' "$devices" | rg -q 'xck26_0.*arm_dap_1'; then
+            pass "vivado_kria_k26_detected"
+        else
+            fail "vivado_kria_k26_detected"
+        fi
+    else
+        fail "vivado_hw_detect"
+    fi
+    rm -f "$tcl" "$out"
+else
+    fail "vivado_available"
+fi
+
+hello_output="$(timeout 60s "$SIMPLE_BINARY" run examples/01_getting_started/hello_native.spl 2>/tmp/kria_simple_hello.$$ | rg -v 'WARN|simple_compiler|ThreadId|evalu' | tail -n 1 || true)"
+if [ "$hello_output" = "Hello World" ]; then
+    pass "simple_hello_world"
+else
+    fail "simple_hello_world"
+    info "simple_hello_output=$hello_output"
+fi
+rm -f /tmp/kria_simple_hello.$$
+
+if command -v ghdl >/dev/null 2>&1 && command -v riscv64-linux-gnu-as >/dev/null 2>&1 && command -v riscv64-linux-gnu-ld >/dev/null 2>&1; then
+    tmp="$(mktemp -d /tmp/kria_riscv_hello.XXXXXX)"
+    riscv64-linux-gnu-as -march=rv32i -mabi=ilp32 \
+        -o "$tmp/hello.o" examples/09_embedded/baremetal/baremetal/hello_riscv32_semihost.s
+    riscv64-linux-gnu-ld -m elf32lriscv -Ttext=0x80000000 --no-relax \
+        -o "$tmp/hello.elf" "$tmp/hello.o"
+    if timeout 120s bash src/lib/nogc_async_mut_noalloc/baremetal/ghdl_runner.shs "$tmp/hello.elf" --timeout=30 >/tmp/kria_ghdl_hello.$$ 2>&1; then
+        if rg -q 'Test PASSED' /tmp/kria_ghdl_hello.$$; then
+            pass "riscv_fpga_ghdl_hello"
+        else
+            fail "riscv_fpga_ghdl_hello"
+        fi
+    else
+        fail "riscv_fpga_ghdl_hello"
+    fi
+    rm -rf "$tmp" /tmp/kria_ghdl_hello.$$
+else
+    fail "riscv_ghdl_toolchain_available"
+fi
+
+if timeout 120s "$SIMPLE_BINARY" test test/02_integration/app/web_stack_sample_persistence_spec.spl --mode=interpreter >/tmp/kria_web_persist.$$ 2>&1; then
+    pass "web_stack_db_persistence_spec"
+else
+    fail "web_stack_db_persistence_spec"
+fi
+rm -f /tmp/kria_web_persist.$$
+
+if timeout 120s "$SIMPLE_BINARY" test test/02_integration/app/web_stack_sample_spec.spl --mode=interpreter >/tmp/kria_web_contract.$$ 2>&1; then
+    pass "web_stack_source_contract_spec"
+else
+    fail "web_stack_source_contract_spec"
+fi
+rm -f /tmp/kria_web_contract.$$
+
+fail "physical_rv64_bitstream_loaded"
+fail "simpleos_started_on_fpga"
+fail "board_web_server_with_db_responded"
+
+if [ "$LOCAL_ONLY" = "1" ]; then
+    info "local_only=true"
+    exit 0
+fi
+
+info "full_hardware_goal=false"
+exit 2

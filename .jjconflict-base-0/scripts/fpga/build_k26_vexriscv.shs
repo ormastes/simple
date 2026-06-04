@@ -1,0 +1,51 @@
+#!/bin/sh
+# Build K26 VexRiscv-SMP bitstream via Vivado 2025.2
+# Usage: sh scripts/fpga/build_k26_vexriscv.shs [--synth-only]
+
+set -e
+
+VIVADO_SETTINGS="$HOME/Xilinx/2025.2/Vivado/settings64.sh"
+BUILD_DIR="build/fpga/k26"
+TCL_FILE="$BUILD_DIR/build_vexriscv.tcl"
+
+if [ ! -f "$VIVADO_SETTINGS" ]; then
+    echo "ERROR: Vivado not found at $VIVADO_SETTINGS"
+    echo "Install Vivado 2025.2 or set VIVADO_SETTINGS env var"
+    exit 1
+fi
+
+# shellcheck disable=SC1090
+. "$VIVADO_SETTINGS"
+
+mkdir -p "$BUILD_DIR"
+
+# Generate TCL if not present (use synthesis_wrapper.spl generator)
+if [ ! -f "$TCL_FILE" ]; then
+    echo "Generating Vivado TCL project..."
+    bin/simple scripts/fpga/rv64_vhdl_driver.spl 2>&1 | tail -20
+fi
+
+SYNTH_ONLY=""
+if [ "$1" = "--synth-only" ]; then
+    SYNTH_ONLY="1"
+fi
+
+echo "=== K26 VexRiscv-SMP Build ==="
+echo "Part:    xck26-sfvc784-2lv-c"
+echo "Build:   $BUILD_DIR"
+
+if [ -n "$SYNTH_ONLY" ]; then
+    echo "Mode:    synthesis only"
+    vivado -mode batch -source "$TCL_FILE" -tclargs synth_only \
+        -journal "$BUILD_DIR/vivado.jou" -log "$BUILD_DIR/vivado.log" 2>&1 | tail -40
+else
+    echo "Mode:    full (synth + impl + bitstream)"
+    vivado -mode batch -source "$TCL_FILE" \
+        -journal "$BUILD_DIR/vivado.jou" -log "$BUILD_DIR/vivado.log" 2>&1 | tail -40
+fi
+
+if [ -f "$BUILD_DIR/k26_vexriscv.bit" ]; then
+    echo "SUCCESS: Bitstream at $BUILD_DIR/k26_vexriscv.bit"
+else
+    echo "WARNING: Bitstream not found — check Vivado logs in $BUILD_DIR"
+fi

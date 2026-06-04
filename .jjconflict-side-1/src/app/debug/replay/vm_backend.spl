@@ -1,0 +1,137 @@
+# SReplay — VM Replay Debug Backend
+#
+# Integrates VmReplayDriver with the debug coordinator,
+# exposing reverse-step and reverse-continue via checkpoint + forward replay.
+
+use std.nogc_sync_mut.replay.vm.vm_types.{VmConfig, VmState, VmReplayMode}
+use std.nogc_sync_mut.replay.vm.replay_driver.{VmReplayDriver}
+use std.nogc_sync_mut.replay.vm.qemu_bridge.{QemuBridge}
+
+# ============================================================================
+# VM Replay Backend
+# ============================================================================
+
+class VmReplayBackend:
+    driver: VmReplayDriver
+    bridge: Option<QemuBridge>
+    auto_checkpoint_interval: i64
+    steps_since_checkpoint: i64
+    breakpoints: [i64]
+
+impl VmReplayBackend:
+    static fn create_standalone(config: VmConfig) -> VmReplayBackend:
+        VmReplayBackend(
+            driver: VmReplayDriver.create(config),
+            bridge: None,
+            auto_checkpoint_interval: 10000,
+            steps_since_checkpoint: 0,
+            breakpoints: []
+        )
+
+    static fn create_with_bridge(config: VmConfig, qmp_socket: text, gdb_port: i32) -> VmReplayBackend:
+        VmReplayBackend(
+            driver: VmReplayDriver.create(config),
+            bridge: Some(QemuBridge.create(qmp_socket, gdb_port)),
+            auto_checkpoint_interval: 10000,
+            steps_since_checkpoint: 0,
+            breakpoints: []
+        )
+
+    fn start(entry_addr: i64) -> Result<Nil, text>:
+        self.driver.start(entry_addr)
+        self.driver.save_snapshot()
+        self.steps_since_checkpoint = 0
+        Ok(nil)
+
+    fn stop() -> Result<Nil, text>:
+        self.driver.stop()
+        Ok(nil)
+
+    fn step_forward() -> Result<VmState, text>:
+        val state = self.driver.step()
+        self.steps_since_checkpoint = self.steps_since_checkpoint + 1
+        if self.steps_since_checkpoint >= self.auto_checkpoint_interval:
+            self.driver.save_snapshot()
+            self.steps_since_checkpoint = 0
+        Ok(state)
+
+    fn continue_forward() -> Result<VmState, text>:
+        var state = self.driver.step()
+        while state == VmState.Running:
+            self.steps_since_checkpoint = self.steps_since_checkpoint + 1
+            if self.steps_since_checkpoint >= self.auto_checkpoint_interval:
+                self.driver.save_snapshot()
+                self.steps_since_checkpoint = 0
+            val pc = self.driver.get_pc()
+            for bp in self.breakpoints:
+                if pc == bp:
+                    return Ok(state)
+            state = self.driver.step()
+        Ok(state)
+
+    fn reverse_step() -> Result<VmState, text>:
+        val target_cycle = self.driver.get_cycle_count() - 1
+        if target_cycle < 0:
+            return Err("already at start")
+        self.reverse_to_cycle(target_cycle)
+
+    fn reverse_continue() -> Result<VmState, text>:
+        val current_pc = self.driver.get_pc()
+        val target_cycle = self.find_previous_breakpoint_cycle(current_pc)
+        if target_cycle < 0:
+            return Err("no previous breakpoint hit")
+        self.reverse_to_cycle(target_cycle)
+
+    fn reverse_to_cycle(target_cycle: i64) -> Result<VmState, text>:
+        var best_snap_id = -1
+        var best_snap_cycle: i64 = -1
+        var i = 0
+        while i < self.driver.snapshots.len():
+            val snap = self.driver.snapshots[i]
+            if snap.cycle_count <= target_cycle and snap.cycle_count > best_snap_cycle:
+                best_snap_id = snap.snapshot_id
+                best_snap_cycle = snap.cycle_count
+            i = i + 1
+        if best_snap_id < 0:
+            return Err("no checkpoint before cycle {target_cycle}")
+        self.driver.restore_snapshot(best_snap_id)?
+        val steps_needed = target_cycle - best_snap_cycle
+        self.driver.run_steps(steps_needed)
+        self.steps_since_checkpoint = steps_needed
+        Ok(self.driver.state)
+
+    fn find_previous_breakpoint_cycle(current_pc: i64) -> i64:
+        -1
+
+    fn add_breakpoint(addr: i64):
+        self.breakpoints.push(addr)
+
+    fn remove_breakpoint(addr: i64):
+        var new_bps: [i64] = []
+        for bp in self.breakpoints:
+            if bp != addr:
+                new_bps.push(bp)
+        self.breakpoints = new_bps
+
+    fn get_pc() -> i64:
+        self.driver.get_pc()
+
+    fn get_cycle_count() -> i64:
+        self.driver.get_cycle_count()
+
+    fn read_register(idx: i32) -> i64:
+        self.driver.read_register(idx)
+
+    fn read_memory(addr: i64, size: i32) -> i64:
+        self.driver.read_memory(addr, size)
+
+    fn load_binary(addr: i64, data: [i32]):
+        self.driver.load_binary(addr, data)
+
+    fn save_checkpoint() -> i32:
+        val id = self.driver.save_snapshot()
+        self.steps_since_checkpoint = 0
+        id
+
+    fn io_event_count() -> i64:
+        self.driver.io_event_count()

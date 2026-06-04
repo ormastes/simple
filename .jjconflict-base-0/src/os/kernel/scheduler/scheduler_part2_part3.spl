@@ -1,0 +1,104 @@
+# Part 3 of src/os/kernel/scheduler/scheduler_part2.spl
+use os.kernel.scheduler.scheduler_part2.*
+# Part 2 of src/os/kernel/scheduler/scheduler.spl
+use os.kernel.scheduler.scheduler.*
+# Preemptive Scheduler — Computation Dimension
+#
+# Priority-based preemptive scheduler with round-robin within same priority.
+# Fixed-size task table (MAX_TASKS slots). Timer interrupt drives preemption.
+#
+# Hub file: imports types from scheduler_types.spl; algorithm bodies live in
+# scheduler_task_mgmt.spl, scheduler_algorithm.spl, and scheduler_exec.spl.
+#
+# Consumes: SchedulerInputPort (interrupts, memory)
+# Produces: SchedulerOutputPort (task lifecycle, blocking)
+
+use os.kernel.types.task_types.{
+    TaskId, TaskState, TaskPriority, TaskContext, BlockReason,
+    UserProcessImage, AddressSpace,
+    SchedulerPolicy, TaskScheduleConfig, TaskIsolationProfile,
+    SchedulerTopology, SchedulerDomain,
+    scheduler_flat_topology,
+    scheduler_detect_platform_topology, default_task_schedule, default_task_isolation,
+    user_process_image_entry, user_process_image_stack_top,
+    user_process_image_stack_size, user_process_image_segments,
+    user_process_image_file_bytes, user_process_image_initial_sp,
+    user_process_image_initial_stack_bytes
+}
+use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.loader.executable_source.{resolve_executable_bytes}
+use os.kernel.loader.process_image.{build_user_process_image}
+use os.kernel.fd_io.{posix_close_task_fds_with_backends}
+use os.kernel.ipc.notif_global.{notification_clear_waiter_global}
+use os.kernel.replay.hooks.{replay_hook_schedule}
+
+# Forward declaration: implemented by IpcManager wiring in kernel main.
+use os.kernel.scheduler.capability_bridge.{cap_init_task_record}
+extern fn serial_println(msg: text)
+use os.kernel.log.klog_api.{log_raw_println}
+
+# Types from scheduler_types.spl
+use os.kernel.scheduler.scheduler_types.{
+    TaskControlBlock, WaitCollectResult,
+    SchedulerPreemptionReason, SchedulerPreemptionDecision,
+    SchedulerTraceKind, SchedulerTraceEvent, PiMutex,
+    ReadyQueue, CpuRunQueue,
+    MAX_TASKS, PRIORITY_LEVELS, TIME_SLICE_TICKS, SCHED_TICK_NS,
+    DEADLINE_BANDWIDTH_SCALE, DEADLINE_CPU_BANDWIDTH_CAP,
+    DEFAULT_SCHED_CPUS, SCHED_TRACE_CAPACITY, SCHED_RT_BASE_PRIORITY_UNSET,
+    sched_exec_arch,
+    task_control_pid, task_control_parent_pid, task_control_memory_pages,
+    task_control_name, task_control_state_code, task_control_priority_code,
+    task_control_ticks_remaining,
+    wait_collect_result_pid, wait_collect_result_status, wait_collect_result_error,
+    _priority_to_index, _affinity_allows_cpu, _deadline_util,
+    _account_task_tick, _account_fair_tick,
+    Scheduler, SchedulerBootstrapUserTaskResult
+}
+
+# Task management free functions
+use os.kernel.scheduler.scheduler_task_mgmt.{
+    sched_create_task_impl,
+    sched_exit_task_by_id_with_code_impl,
+    sched_block_task_impl, sched_unblock_task_impl,
+    sched_wake_expired_sleepers_impl,
+    sched_set_task_name_impl,
+    sched_restrict_isolation_impl,
+    sched_wait_for_collect_impl,
+    sched_release_task_address_space,
+    _find_slot_in, _find_empty_slot_in
+}
+
+# Algorithm free functions
+use os.kernel.scheduler.scheduler_algorithm.{
+    sched_class_rank, sched_wakeup_preemption_decision,
+    sched_replenish_rt, sched_rt_budget_available,
+    sched_replenish_deadline_slot, sched_deadline_cpu_util,
+    sched_normalize_cpu, sched_select_wake_cpu, sched_least_loaded_allowed_cpu,
+    sched_load_spread, sched_select_cpu_for_config,
+    sched_scan_migration_queue, sched_pick_migration_candidate,
+    sched_select_deadline_cpu,
+    sched_pick_rt_best, sched_pick_deadline_best, sched_pick_fair_best
+}
+
+# Exec / user-task creation free functions
+use os.kernel.scheduler.scheduler_exec.{
+    sched_new_with_topology_impl,
+    sched_create_user_task_pid_impl,
+    sched_create_bootstrap_user_task_pid_impl,
+    sched_clone_task_impl,
+    sched_exec_image_impl
+}
+
+
+# Module-level task-id counter shared across all task-creation paths.
+impl Scheduler:
+    fn _normalize_cpu(cpu_id: u32) -> u32:
+        sched_normalize_cpu(self.cpu_runqueues.len() as i64, cpu_id)
+
+    fn _find_slot(id: TaskId) -> i32:
+        _find_slot_in(self.tasks, id)
+
+    fn _find_empty_slot() -> i32:
+        _find_empty_slot_in(self.tasks)

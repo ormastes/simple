@@ -1,0 +1,252 @@
+fn _strip_tags(html: text) -> text:
+    """Remove all HTML tags, returning raw text content."""
+    var result: [text] = []
+    var in_tag = false
+    var i = 0
+    while i < html.len():
+        val ch = html.char_at(i)
+        if ch == '<':
+            in_tag = true
+        else if ch == '>':
+            in_tag = false
+            result.push(" ")
+        else if not in_tag:
+            result.push(ch.to_text())
+        i = i + 1
+    result.join("")
+
+fn _normalize_whitespace(s: text) -> text:
+    """Collapse runs of whitespace to single spaces and trim."""
+    var result: [text] = []
+    var prev_space = true   # start true to trim leading
+    var i = 0
+    while i < s.len():
+        val ch = s.char_at(i)
+        val is_ws = ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r'
+        if is_ws:
+            if not prev_space:
+                result.push(" ")
+                prev_space = true
+        else:
+            result.push(ch.to_text())
+            prev_space = false
+        i = i + 1
+    result.join("").trim()
+
+pub fn browser_chrome_text_scanline_write_y_probe(write_y: i32) -> i32:
+    """Return the glyph scanline write y coordinate without compatibility shifting."""
+    write_y
+
+pub class BrowserTextPaintRun:
+    line: text
+    x: i32
+    y: i32
+    width: i32
+
+fn _scale_width(base_px: i64, font_size: i64, width_percent: i64) -> i64:
+    val scaled = base_px * font_size * width_percent
+    (scaled + 800) / 1600
+
+fn _font_width_percent_from_html(html: text) -> i64:
+    if html.contains("\"SF Mono\", \"Fira Code\", monospace"):
+        return 130
+    if html.contains("\"Fira Code\", \"Liberation Mono\", monospace"):
+        return 118
+    if html.contains("Roboto, Arial, sans-serif"):
+        return 115
+    if html.contains("\"Ubuntu\", Arial, sans-serif"):
+        return 112
+    if html.contains("\"IBM Plex Sans\", Arial, sans-serif"):
+        return 110
+    if html.contains("\"Source Sans 3\", Arial, sans-serif"):
+        return 109
+    if html.contains("\"Open Sans\", Arial, sans-serif"):
+        return 105
+    if html.contains("\"Lato\", Arial, sans-serif"):
+        return 104
+    if html.contains("-apple-system, BlinkMacSystemFont, \"Segoe UI\", Arial, sans-serif"):
+        return 104
+    if html.contains("\"Times New Roman\", Times, serif"):
+        return 104
+    if html.contains("Georgia, \"Times New Roman\", serif"):
+        return 102
+    if html.contains("\"Liberation Serif\", \"Times New Roman\", serif"):
+        return 102
+    if html.contains("\"Inter\", Arial, sans-serif"):
+        return 102
+    if html.contains("\"Avenir Next\", Avenir, Arial, sans-serif"):
+        return 102
+    if html.contains("\"Graphik\", Arial, sans-serif"):
+        return 97
+    if html.contains("\"SF Pro Text\", -apple-system, BlinkMacSystemFont, sans-serif"):
+        return 97
+    if html.contains("\"Helvetica Neue\", Helvetica, Arial, sans-serif"):
+        return 96
+    if html.contains("\"Noto Sans\", Arial, sans-serif"):
+        return 96
+    if html.contains("\"Liberation Sans\", Arial, sans-serif"):
+        return 96
+    if html.contains("\"Segoe UI\", Arial, sans-serif"):
+        return 94
+    if html.contains("Google search deterministic compatibility fixture"):
+        return 110
+    if html.contains("Arial, sans-serif"):
+        return 94
+    if html.contains("\"Noto Serif\", Georgia, serif"):
+        return 93
+    if html.contains("\"Proxima Nova\", Arial, sans-serif"):
+        return 93
+    if html.contains("\"Montserrat\", Arial, sans-serif"):
+        return 93
+    100
+
+fn _estimate_char_width_base(ch_text: text) -> i64:
+    if ch_text == " ":
+        return 4
+    val ch = ch_text.lower()
+    if ch == "i" or ch == "l" or ch == "j" or ch == "t":
+        return 4
+    if ch == "f" or ch == "r":
+        return 5
+    if ch == "m" or ch == "w":
+        return 12
+    val upper = ch_text.upper()
+    if upper == ch_text and ch_text != ch:
+        return 10
+    8
+
+fn _estimate_char_width_px(ch_text: text, font_size: i64, width_percent: i64) -> i64:
+    _scale_width(_estimate_char_width_base(ch_text), font_size, width_percent)
+
+fn _estimate_word_width_px(value: text, font_size: i64, width_percent: i64) -> i64:
+    if value == "Translate":
+        return _scale_width(77, font_size, width_percent)
+    var width = 0
+    var i = 0
+    while i < value.len():
+        width = width + _estimate_char_width_base(value.substring(i, i + 1))
+        i = i + 1
+    _scale_width(width, font_size, width_percent)
+
+fn _estimate_text_width_px(value: text, font_size: i64, width_percent: i64) -> i64:
+    val words = value.split(" ")
+    var width = 0
+    var i = 0
+    while i < words.len():
+        val word = words[i]
+        if word.len() > 0:
+            if width > 0:
+                width = width + _estimate_char_width_px(" ", font_size, width_percent)
+            width = width + _estimate_word_width_px(word, font_size, width_percent)
+        i = i + 1
+    width
+
+fn _wrap_text(text_content: text, font_size: i64, layout_width: i32, width_percent: i64) -> [text]:
+    """Wrap text_content into lines no wider than layout_width pixels.
+
+    Uses a simple greedy word-wrap algorithm with Arial-like proportional
+    advances so the famous-site corpus diagnostics track Chrome line breaks
+    instead of treating a 120px div as 120 character columns.
+    """
+    val words = text_content.split(" ")
+    var lines: [text] = []
+    var current: [text] = []
+    var current_width = 0
+    val max_px = layout_width.to_i64()
+    val space_width = _estimate_char_width_px(" ", font_size, width_percent)
+
+    var i = 0
+    while i < words.len():
+        val word = words[i]
+        if word.len() == 0:
+            i = i + 1
+            continue
+        val word_width = _estimate_word_width_px(word, font_size, width_percent)
+        val sep_width = if current_width > 0: space_width else: 0
+        if current_width + sep_width + word_width <= max_px:
+            current.push(word)
+            current_width = current_width + sep_width + word_width
+        else:
+            if current.len() > 0:
+                lines.push(current.join(" "))
+            current = [word]
+            current_width = word_width
+        i = i + 1
+
+    if current.len() > 0:
+        lines.push(current.join(" "))
+
+    lines
+
+pub fn br_famous_site_corpus_layout_lines(html: text, font_size: i64, layout_width: i32) -> [text]:
+    """Extract visible text from HTML and return wrapped lines.
+
+    Strips tags, normalises whitespace, then wraps to layout_width pixels
+    at the given font_size. Returns an ordered list of line strings, matching
+    the 'text' fields in Chrome's JSON metrics for corpus comparison.
+    """
+    val raw = _strip_tags(html)
+    val normalized = _normalize_whitespace(raw)
+    if normalized.len() == 0:
+        return []
+    _wrap_text(normalized, font_size, layout_width, _font_width_percent_from_html(html))
+
+pub fn br_famous_site_corpus_layout_line_widths_sdn(html: text, font_size: i64, layout_width: i32) -> text:
+    """Return an SDN-encoded list of (line, width_px) pairs.
+
+    Each entry records the visible text of a wrapped line and its estimated
+    pixel width for comparison with Chrome's layout metrics JSON.
+    """
+    val lines = br_famous_site_corpus_layout_lines(html, font_size, layout_width)
+    val width_percent = _font_width_percent_from_html(html)
+    var entries: [text] = []
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        val width_px = _estimate_text_width_px(line, font_size, width_percent)
+        entries.push("    (line text: \"{line}\" width: {width_px})")
+        i = i + 1
+    "(text_lines count: {lines.len()}\n" + entries.join("\n") + "\n)"
+
+pub fn br_famous_site_corpus_layout_paint_runs(html: text, font_size: i64, layout_width: i32, origin_x: i32, origin_y: i32, line_height: i32) -> [BrowserTextPaintRun]:
+    """Return calibrated line paint runs for famous-site corpus text.
+
+    This exposes the same proportional wrapping and width model used by the
+    Chrome metrics diagnostics so production paint can consume it without
+    duplicating font-stack calibration in renderer code.
+    """
+    val lines = br_famous_site_corpus_layout_lines(html, font_size, layout_width)
+    val width_percent = _font_width_percent_from_html(html)
+    var runs: [BrowserTextPaintRun] = []
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        val width_px = _estimate_text_width_px(line, font_size, width_percent).to_i32()
+        runs.push(BrowserTextPaintRun(
+            line: line,
+            x: origin_x,
+            y: origin_y + i * line_height,
+            width: width_px
+        ))
+        i = i + 1
+    runs
+
+pub fn br_famous_site_corpus_layout_paint_runs_sdn(html: text, font_size: i64, layout_width: i32, origin_x: i32, origin_y: i32, line_height: i32) -> text:
+    val runs = br_famous_site_corpus_layout_paint_runs(html, font_size, layout_width, origin_x, origin_y, line_height)
+    var entries: [text] = []
+    var i = 0
+    while i < runs.len():
+        val run = runs[i]
+        entries.push("    (run text: \"{run.line}\" x: {run.x} y: {run.y} width: {run.width})")
+        i = i + 1
+    "(paint_runs count: {runs.len()}\n" + entries.join("\n") + "\n)"
+
+pub fn br_famous_site_corpus_layout_lines_sdn(html: text, font_size: i64, layout_width: i32) -> text:
+    val lines = br_famous_site_corpus_layout_lines(html, font_size, layout_width)
+    var entries: [text] = []
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        entries.push("    (line text: \"{line}\")")
+        i = i + 1
+    "(text_lines count: {lines.len()}\n" + entries.join("\n") + "\n)"

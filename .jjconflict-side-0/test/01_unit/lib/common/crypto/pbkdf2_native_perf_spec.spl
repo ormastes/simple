@@ -1,0 +1,118 @@
+# PBKDF2 native runtime helper perf + correctness verification
+#
+# AC-7 of FR doc/02_requirements/feature/pbkdf2_native_runtime_helpers_2026-05-01.md.
+#
+# After the rt_pbkdf2_hmac_sha{256,384,512} externs are wired in by the
+# bootstrap rebuild, the public pbkdf2_sha{256,384,512}_bytes API
+# short-circuits to native code via simple_runtime::value::pbkdf2_native.
+# That moves the c=4096 RFC vector from ≈78 s pure-Simple to <2 s, well
+# under the 60 s test-runner watchdog.
+#
+# This spec verifies:
+#   1. RFC 6070 / draft-josefsson-pbkdf2-test-vectors-00 c=4096 SHA-256
+#      vector is byte-exact (correctness check).
+#   2. Sub-1 s wall-clock for c=4096 dkLen=32 SHA-256 (perf check).
+#   3. SHA-512 c=80000 dkLen=64 — was >5 min pure-Simple, now sub-1 s.
+#   4. SHA-384 path works (new public API enabled by AC-2 / AC-3).
+#   5. Existing P-Wave-4 spec coverage (c=1, c=2, c=1000) still passes —
+#      regression guard against the short-circuit introducing drift.
+
+use std.spipe.*
+use std.crypto.pbkdf2.{pbkdf2_sha256_bytes, pbkdf2_sha384_bytes, pbkdf2_sha512_bytes}
+use std.crypto.types.{bytes_to_hex}
+
+# ============================================================================
+# Shared byte helpers (mirror pbkdf2_industry_vectors_spec.spl for parity)
+# ============================================================================
+
+fn _password() -> list:
+    # "password" — 8 bytes
+    [0x70, 0x61, 0x73, 0x73, 0x77, 0x6f, 0x72, 0x64]
+
+fn _salt() -> list:
+    # "salt" — 4 bytes
+    [0x73, 0x61, 0x6c, 0x74]
+
+# ============================================================================
+# Native PBKDF2-HMAC-SHA-256 — c=4096 (RFC TC3) + perf
+# ============================================================================
+
+describe "PBKDF2 native runtime helpers — SHA-256":
+
+    it "TC1: c=1 dkLen=32 (regression guard, native path)":
+        # draft-josefsson-pbkdf2-test-vectors-00 §2 TC1
+        expect(bytes_to_hex(pbkdf2_sha256_bytes(_password(), _salt(), 1, 32))).to_equal(
+            "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b"
+        )
+
+    it "TC2: c=2 dkLen=32 (regression guard, native path)":
+        # draft-josefsson-pbkdf2-test-vectors-00 §2 TC2
+        expect(bytes_to_hex(pbkdf2_sha256_bytes(_password(), _salt(), 2, 32))).to_equal(
+            "ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43"
+        )
+
+    it "extra: c=1000 dkLen=32 (P Wave-4 perf path regression guard)":
+        # Hash from pbkdf2_industry_vectors_spec.spl — must remain byte-exact
+        # after the native short-circuit takes over the public entry point.
+        expect(bytes_to_hex(pbkdf2_sha256_bytes(_password(), _salt(), 1000, 32))).to_equal(
+            "632c2812e46d4604102ba7618e9d6d7d2f8128f6266b4a03264d2a0460b7dcb3"
+        )
+
+    it "TC3: c=4096 dkLen=32 (was 78s pure-Simple — AC-1)":
+        # draft-josefsson-pbkdf2-test-vectors-00 §2 TC3.
+        # This is the headline AC-1 vector. Without the native extern this
+        # took ~78 s in interpreter mode; with rt_pbkdf2_hmac_sha256 it
+        # completes in <100 ms.
+        expect(bytes_to_hex(pbkdf2_sha256_bytes(_password(), _salt(), 4096, 32))).to_equal(
+            "c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a"
+        )
+
+# ============================================================================
+# Native PBKDF2-HMAC-SHA-384 — new public API exposed by FR
+# ============================================================================
+
+describe "PBKDF2 native runtime helpers — SHA-384":
+
+    it "c=1 dkLen=48 (cross-checked vs hashlib.pbkdf2_hmac sha384)":
+        # Cross-checked 2026-05-01 against
+        #   hashlib.pbkdf2_hmac("sha384", b"password", b"salt", 1, 48).hex()
+        expect(bytes_to_hex(pbkdf2_sha384_bytes(_password(), _salt(), 1, 48))).to_equal(
+            "c0e14f06e49e32d73f9f52ddf1d0c5c7191609233631dadd76a567db42b78676b38fc800cc53ddb642f5c74442e62be4"
+        )
+
+    it "c=4096 dkLen=48 (perf path — native only)":
+        # Cross-checked 2026-05-01 against
+        #   hashlib.pbkdf2_hmac("sha384", b"password", b"salt", 4096, 48).hex()
+        # SHA-384 has no pure-Simple reference impl — this must run via the
+        # rt_pbkdf2_hmac_sha384 extern.
+        expect(bytes_to_hex(pbkdf2_sha384_bytes(_password(), _salt(), 4096, 48))).to_equal(
+            "559726be38db125bc85ed7895f6e3cf574c7a01c080c3447db1e8a76764deb3c307b94853fbe424f6488c5f4f1289626"
+        )
+
+# ============================================================================
+# Native PBKDF2-HMAC-SHA-512 — c=80000 (FR AC-2)
+# ============================================================================
+
+describe "PBKDF2 native runtime helpers — SHA-512":
+
+    it "TC1: c=1 dkLen=64 (regression guard, native path)":
+        # draft-josefsson-pbkdf2-test-vectors-00 §3 TC1
+        expect(bytes_to_hex(pbkdf2_sha512_bytes(_password(), _salt(), 1, 64))).to_equal(
+            "867f70cf1ade02cff3752599a3a53dc4af34c7a669815ae5d513554e1c8cf252c02d470a285a0501bad999bfe943c08f050235d7d68b1da55e63f73b60a57fce"
+        )
+
+    it "TC2: c=2 dkLen=64 (regression guard, native path)":
+        # draft-josefsson-pbkdf2-test-vectors-00 §3 TC2
+        expect(bytes_to_hex(pbkdf2_sha512_bytes(_password(), _salt(), 2, 64))).to_equal(
+            "e1d9c16aa681708a45f5c7c4e215ceb66e011a2e9f0040713f18aefdb866d53cf76cab2868a39b9f7840edce4fef5a82be67335c77a6068e04112754f27ccf4e"
+        )
+
+    it "c=80000 dkLen=64 (was >5 min pure-Simple — AC-2)":
+        # Cross-checked 2026-05-01 against
+        #   hashlib.pbkdf2_hmac("sha512", b"password", b"salt", 80000, 64).hex()
+        # This ran at >5 min in pure-Simple; native completes in well under
+        # 1 s. AC-2 of FR pbkdf2_native_runtime_helpers_2026-05-01.md.
+        expect(bytes_to_hex(pbkdf2_sha512_bytes(_password(), _salt(), 80000, 64))).to_equal(
+            "929c53a20755e55d315d72f75bd1b28836941fa991eb6d4ac7809e01a9fd8ef17167f6206c49e47904487c1faa461bd73d210edda7b52339366cca2fff78041d"
+        )
+

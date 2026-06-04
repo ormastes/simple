@@ -1,0 +1,122 @@
+# Ghost Variable Erasure
+#
+# Ghost variable erasure pass for MIR.
+#
+# Ghost variables exist only for verification purposes and must be erased
+# before code generation. This module provides the erasure pass.
+#
+# Ghost erasure rules:
+# - Ghost parameters are removed from function signatures
+# - Ghost locals are removed from the locals list
+# - Instructions that only use/define ghost variables are removed
+# - Uses of ghost variables in non-ghost code result in errors
+#
+# Port of rust/compiler/src/mir/ghost_erasure.rs (234 lines)
+
+
+use compiler.mir.mir_instructions.{MirFunction, MirModule, MirInst, VReg}
+use compiler.mir.mir_types.{MirLocal}
+
+# ============================================================================
+# Statistics and Errors
+# ============================================================================
+
+struct GhostErasureStats:
+    """Statistics from ghost erasure."""
+    ghost_params_erased: usize    # Number of ghost parameters erased
+    ghost_locals_erased: usize    # Number of ghost locals erased
+    instructions_erased: usize    # Number of instructions erased
+    functions_processed: usize    # Number of functions processed
+
+
+# ============================================================================
+# GhostErasureStats Methods (was: impl GhostErasureStats:)
+# ============================================================================
+
+fn ghosterasurestats_new() -> GhostErasureStats:
+        GhostErasureStats(
+            ghost_params_erased: 0,
+            ghost_locals_erased: 0,
+            instructions_erased: 0,
+            functions_processed: 0
+        )
+
+
+struct GhostErasureError:
+    """Error during ghost erasure."""
+    function_name: text
+    message: text
+
+
+# ============================================================================
+# GhostErasureError Methods (was: impl GhostErasureError:)
+# ============================================================================
+
+# ============================================================================
+# Module-Level Erasure
+# ============================================================================
+
+fn erase_ghost_from_module(module: MirModule) -> (GhostErasureStats, [GhostErasureError]):
+    """Erase ghost variables from a MIR module.
+
+    This is a post-MIR-lowering pass that removes all ghost variables
+    and related instructions before code generation.
+
+    CRITICAL: Two-pass accumulation - stats and errors collected separately.
+    """
+    var stats = ghosterasurestats_new()
+    var errors: [GhostErasureError] = []
+
+    for func in module.functions:
+        val _destruct_0 = erase_ghost_from_function(func)
+        val func_stats = _destruct_0[0]
+        val func_errors = _destruct_0[1]
+
+        # Accumulate stats
+        stats.ghost_params_erased = stats.ghost_params_erased + func_stats.ghost_params_erased
+        stats.ghost_locals_erased = stats.ghost_locals_erased + func_stats.ghost_locals_erased
+        stats.instructions_erased = stats.instructions_erased + func_stats.instructions_erased
+        stats.functions_processed = stats.functions_processed + 1
+
+        # Accumulate errors
+        errors = errors_concat(errors, func_errors)
+
+    [stats, errors]
+
+# ============================================================================
+# Function-Level Erasure
+# ============================================================================
+
+fn erase_ghost_from_function(func: MirFunction) -> (GhostErasureStats, [GhostErasureError]):
+    """Erase ghost variables from a single MIR function.
+
+    Stub: MirFunction.params blocked by seed parser bug with duplicate
+    [MirLocal] fields. Ghost erasure is not yet wired into any pipeline.
+    """
+    var stats = ghosterasurestats_new()
+    val errors: [GhostErasureError] = []
+    var ghost_count = 0
+    for l in func.locals:
+        if l.is_ghost:
+            ghost_count = ghost_count + 1
+    stats.ghost_locals_erased = ghost_count
+    [stats, errors]
+
+# ============================================================================
+# Query Functions
+# ============================================================================
+
+fn has_ghost_variables(func: MirFunction) -> bool:
+    """Check if a function has any ghost variables."""
+    for l in func.locals:
+        if l.is_ghost:
+            return true
+    false
+
+fn ghost_variable_count(func: MirFunction) -> usize:
+    """Get the count of ghost variables in a function."""
+    var count = 0
+    for l in func.locals:
+        if l.is_ghost:
+            count = count + 1
+    count

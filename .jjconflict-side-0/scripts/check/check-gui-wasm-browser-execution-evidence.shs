@@ -1,0 +1,236 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/gui_wasm_browser_execution_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/gui_wasm_browser_execution_evidence_$(date -u +%F).md}"
+ARTIFACT_BUILD_DIR="${GUI_WASM_ARTIFACT_BUILD_DIR:-build/gui_wasm_cli_artifact}"
+ARTIFACT_REPORT_PATH="${GUI_WASM_ARTIFACT_REPORT_PATH:-doc/09_report/gui_wasm_cli_artifact_$(date -u +%F).md}"
+TIMEOUT_SECS="${GUI_WASM_EXEC_TIMEOUT_SECS:-60}"
+ELECTRON_APP_PATH="$ROOT_DIR/tools/electron-wasm-gui-exec"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$BUILD_DIR"/*_browser_proof.json "$BUILD_DIR"/*.electron.out "$BUILD_DIR"/*.electron.err "$BUILD_DIR/evidence.env" "$REPORT_PATH"
+
+have() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+sanitize_electron_log() {
+    sed -E \
+        -e 's/\[[0-9]+:[0-9]{4}\/[0-9]{6}\.[0-9]+:/[electron:/' \
+        -e 's/0x[0-9a-fA-F]+/0xADDR/g' \
+        -e 's/RenderWorker-[^]]+/RenderWorker-ADDR/g'
+}
+
+emit_unavailable() {
+    reason="$1"
+    {
+        echo "gui_wasm_browser_execution_status=unavailable"
+        echo "gui_wasm_browser_execution_reason=$reason"
+        echo "gui_wasm_browser_execution_targets=hello,widget_matrix,builder_matrix"
+    } >"$BUILD_DIR/evidence.env"
+    {
+        echo "# GUI WASM Browser Execution Evidence"
+        echo
+        echo "- status: unavailable"
+        echo "- reason: $reason"
+    } >"$REPORT_PATH"
+    cat "$BUILD_DIR/evidence.env"
+}
+
+for required in node npm xvfb-run; do
+    if ! have "$required"; then
+        emit_unavailable "missing-command:$required"
+        exit 1
+    fi
+done
+
+if [ ! -x "tools/electron-shell/node_modules/.bin/electron" ] && [ ! -x "tools/electron-shell/node_modules/electron/dist/electron" ]; then
+    emit_unavailable "missing-electron-dependency"
+    exit 1
+fi
+
+BUILD_DIR="$ARTIFACT_BUILD_DIR" \
+REPORT_PATH="$ARTIFACT_REPORT_PATH" \
+    sh scripts/check-gui-wasm-cli-artifact.shs >"$BUILD_DIR/artifact.out" 2>"$BUILD_DIR/artifact.err"
+
+overall_status=pass
+overall_reason=pass
+targets="hello widget_matrix builder_matrix"
+
+run_probe() {
+    name="$1"
+    wasm_path="$2"
+    proof_path="$BUILD_DIR/${name}_browser_proof.json"
+    electron_out="$BUILD_DIR/${name}.electron.out"
+    electron_err="$BUILD_DIR/${name}.electron.err"
+
+    if [ ! -s "$wasm_path" ]; then
+        echo "${name}|fail|missing-wasm-artifact|$wasm_path|$proof_path|0|false|false|missing||missing|missing|missing|missing|missing|missing|missing|0|0/0|0/0|0/0|0/0|0/0|1"
+        return
+    fi
+
+    case "$wasm_path" in
+        /*) abs_wasm_path="$wasm_path" ;;
+        *) abs_wasm_path="$ROOT_DIR/$wasm_path" ;;
+    esac
+    case "$proof_path" in
+        /*) abs_proof_path="$proof_path" ;;
+        *) abs_proof_path="$ROOT_DIR/$proof_path" ;;
+    esac
+
+    set +e
+    if have timeout; then
+        timeout "$TIMEOUT_SECS" env GUI_WASM_EXEC_WASM_PATH="$abs_wasm_path" GUI_WASM_EXEC_PROOF_PATH="$abs_proof_path" \
+            xvfb-run -a --server-args="-screen 0 1280x720x24" \
+            npm --prefix tools/electron-shell exec -- electron --no-sandbox "$ELECTRON_APP_PATH" >"$electron_out" 2>"$electron_err"
+    else
+        GUI_WASM_EXEC_WASM_PATH="$abs_wasm_path" GUI_WASM_EXEC_PROOF_PATH="$abs_proof_path" \
+            xvfb-run -a --server-args="-screen 0 1280x720x24" \
+            npm --prefix tools/electron-shell exec -- electron --no-sandbox "$ELECTRON_APP_PATH" >"$electron_out" 2>"$electron_err"
+    fi
+    electron_code=$?
+    set -e
+
+    if [ ! -s "$proof_path" ]; then
+        echo "${name}|fail|missing-electron-proof|$wasm_path|$proof_path|0|false|false|missing||missing|missing|missing|missing|missing|missing|missing|0|0/0|0/0|0/0|0/0|0/0|$electron_code"
+        return
+    fi
+
+    item_status="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); const req=['spl_main','simple_app_init','simple_app_render','simple_app_event','simple_app_render_probe','simple_app_event_probe']; const calls=p.call_results||{}; const renderOk=Array.isArray(p.render_behavior)&&p.render_behavior.length===p.expected_render_behavior_count&&p.render_behavior.every(x=>x.present===true); const eventOk=Array.isArray(p.event_behavior)&&p.event_behavior.length===p.expected_event_behavior_count&&p.event_behavior.every(x=>x.present===true); const rr=p.retained_render||{}; const retainedOk=rr.mounted===true&&rr.selector_count===rr.present_count&&rr.selector_count===rr.nonzero_box_count&&rr.text_length>0; const em=p.retained_event_mutation||{}; const mutationOk=em.mutation_count>0&&em.mutation_count===em.matched_count&&em.mutation_count===em.app_event_call_count; const ok=p.browser_ready===true&&p.validate_result===true&&p.instantiate_result===true&&p.import_count===0&&p.simple_gui_custom_section_count===1&&req.every(n=>(p.export_names||[]).includes(n))&&calls.spl_main==='called'&&calls.simple_app_init==='1'&&calls.simple_app_render==='called'&&calls.simple_app_event==='called'&&calls.simple_app_render_probe===p.expected_render_probe&&calls.simple_app_event_probe===p.expected_event_probe&&renderOk&&eventOk&&retainedOk&&mutationOk; console.log(ok?'pass':'fail')" "$proof_path")"
+    item_reason=pass
+    if [ "$item_status" != "pass" ]; then
+        item_reason=browser-wasm-execution-failed
+    elif [ "$electron_code" -ne 0 ]; then
+        item_status=fail
+        item_reason="electron-exit-$electron_code"
+    fi
+
+    byte_size="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(String(p.byte_size||0))" "$proof_path")"
+    validate_result="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(String(p.validate_result))" "$proof_path")"
+    instantiate_result="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(String(p.instantiate_result))" "$proof_path")"
+    import_count="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(String(p.import_count))" "$proof_path")"
+    import_names="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log((p.import_names||[]).join(','))" "$proof_path")"
+    export_names="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log((p.export_names||[]).join(','))" "$proof_path")"
+    call_spl_main="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(p.call_results&&p.call_results.spl_main||'')" "$proof_path")"
+    call_init="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(p.call_results&&p.call_results.simple_app_init||'')" "$proof_path")"
+    call_render="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(p.call_results&&p.call_results.simple_app_render||'')" "$proof_path")"
+    call_event="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(p.call_results&&p.call_results.simple_app_event||'')" "$proof_path")"
+    render_probe="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(p.call_results&&p.call_results.simple_app_render_probe||'')" "$proof_path")"
+    event_probe="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(p.call_results&&p.call_results.simple_app_event_probe||'')" "$proof_path")"
+    custom_sections="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(String(p.simple_gui_custom_section_count||0))" "$proof_path")"
+    render_behavior="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); const rows=p.render_behavior||[]; console.log(rows.filter(x=>x.present).length + '/' + rows.length)" "$proof_path")"
+    event_behavior="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); const rows=p.event_behavior||[]; console.log(rows.filter(x=>x.present).length + '/' + rows.length)" "$proof_path")"
+    retained_selectors="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); const rr=p.retained_render||{}; console.log(String(rr.present_count||0) + '/' + String(rr.selector_count||0))" "$proof_path")"
+    retained_boxes="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); const rr=p.retained_render||{}; console.log(String(rr.nonzero_box_count||0) + '/' + String(rr.selector_count||0))" "$proof_path")"
+    retained_mutations="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); const em=p.retained_event_mutation||{}; console.log(String(em.matched_count||0) + '/' + String(em.mutation_count||0))" "$proof_path")"
+
+    echo "${name}|${item_status}|${item_reason}|${wasm_path}|${proof_path}|${byte_size}|${validate_result}|${instantiate_result}|${import_count}|${import_names}|${export_names}|${call_spl_main}|${call_init}|${call_render}|${call_event}|${render_probe}|${event_probe}|${custom_sections}|${render_behavior}|${event_behavior}|${retained_selectors}|${retained_boxes}|${retained_mutations}|${electron_code}"
+}
+
+results=""
+results="${results}$(run_probe "hello" "$ARTIFACT_BUILD_DIR/hello_wasm_gui.wasm")
+"
+results="${results}$(run_probe "widget_matrix" "$ARTIFACT_BUILD_DIR/widget_matrix_wasm_gui.wasm")
+"
+results="${results}$(run_probe "builder_matrix" "$ARTIFACT_BUILD_DIR/builder_matrix_wasm_gui.wasm")
+"
+
+failure_reason="$(printf '%s' "$results" | awk -F'|' '$2=="fail"{print $1 "-" $3; exit}')"
+if [ -n "$failure_reason" ]; then
+    overall_status=fail
+    overall_reason="$failure_reason"
+fi
+
+{
+    echo "gui_wasm_browser_execution_status=$overall_status"
+    echo "gui_wasm_browser_execution_reason=$overall_reason"
+    echo "gui_wasm_browser_execution_targets=hello,widget_matrix,builder_matrix"
+    printf '%s' "$results" | while IFS='|' read -r name item_status item_reason wasm_path proof_path byte_size validate_result instantiate_result import_count import_names export_names call_spl_main call_init call_render call_event render_probe event_probe custom_sections render_behavior event_behavior retained_selectors retained_boxes retained_mutations electron_code; do
+        [ -n "$name" ] || continue
+        echo "gui_wasm_browser_execution_${name}_status=$item_status"
+        echo "gui_wasm_browser_execution_${name}_reason=$item_reason"
+        echo "gui_wasm_browser_execution_${name}_wasm_path=$wasm_path"
+        echo "gui_wasm_browser_execution_${name}_proof_path=$proof_path"
+        echo "gui_wasm_browser_execution_${name}_byte_size=$byte_size"
+        echo "gui_wasm_browser_execution_${name}_validate=$validate_result"
+        echo "gui_wasm_browser_execution_${name}_instantiate=$instantiate_result"
+        echo "gui_wasm_browser_execution_${name}_import_count=$import_count"
+        echo "gui_wasm_browser_execution_${name}_imports=$import_names"
+        echo "gui_wasm_browser_execution_${name}_exports=$export_names"
+        echo "gui_wasm_browser_execution_${name}_call_spl_main=$call_spl_main"
+        echo "gui_wasm_browser_execution_${name}_call_simple_app_init=$call_init"
+        echo "gui_wasm_browser_execution_${name}_call_simple_app_render=$call_render"
+        echo "gui_wasm_browser_execution_${name}_call_simple_app_event=$call_event"
+        echo "gui_wasm_browser_execution_${name}_simple_app_render_probe=$render_probe"
+        echo "gui_wasm_browser_execution_${name}_simple_app_event_probe=$event_probe"
+        echo "gui_wasm_browser_execution_${name}_simple_gui_custom_sections=$custom_sections"
+        echo "gui_wasm_browser_execution_${name}_render_behavior_markers=$render_behavior"
+        echo "gui_wasm_browser_execution_${name}_event_behavior_markers=$event_behavior"
+        echo "gui_wasm_browser_execution_${name}_retained_selectors=$retained_selectors"
+        echo "gui_wasm_browser_execution_${name}_retained_nonzero_boxes=$retained_boxes"
+        echo "gui_wasm_browser_execution_${name}_retained_event_mutations=$retained_mutations"
+        echo "gui_wasm_browser_execution_${name}_electron_exit_code=$electron_code"
+    done
+} >"$BUILD_DIR/evidence.env"
+
+{
+    echo "# GUI WASM Browser Execution Evidence"
+    echo
+    echo "- status: $overall_status"
+    echo "- reason: $overall_reason"
+    echo "- targets: hello, widget_matrix, builder_matrix"
+    printf '%s' "$results" | while IFS='|' read -r name item_status item_reason wasm_path proof_path byte_size validate_result instantiate_result import_count import_names export_names call_spl_main call_init call_render call_event render_probe event_probe custom_sections render_behavior event_behavior retained_selectors retained_boxes retained_mutations electron_code; do
+        [ -n "$name" ] || continue
+        echo
+        echo "## $name"
+        echo "- status: $item_status"
+        echo "- reason: $item_reason"
+        echo "- wasm path: $wasm_path"
+        echo "- proof path: $proof_path"
+        echo "- byte size: $byte_size"
+        echo "- WebAssembly.validate: $validate_result"
+        echo "- WebAssembly.instantiate: $instantiate_result"
+        echo "- import count: $import_count"
+        echo "- imports: $import_names"
+        echo "- exports: $export_names"
+        echo "- spl_main call: $call_spl_main"
+        echo "- simple_app_init ready code: $call_init"
+        echo "- simple_app_render call: $call_render"
+        echo "- simple_app_event call: $call_event"
+        echo "- simple_app_render_probe: $render_probe"
+        echo "- simple_app_event_probe: $event_probe"
+        echo "- simple.gui custom sections: $custom_sections"
+        echo "- render behavior markers: $render_behavior"
+        echo "- event behavior markers: $event_behavior"
+        echo "- retained selectors: $retained_selectors"
+        echo "- retained nonzero boxes: $retained_boxes"
+        echo "- retained event mutations: $retained_mutations"
+        echo "- Electron exit code: $electron_code"
+    done
+    echo
+    echo "## Raw Evidence"
+    sed 's/^/- /' "$BUILD_DIR/evidence.env"
+    echo
+    echo "## Electron Output"
+    for out in "$BUILD_DIR"/*.electron.out; do
+        [ -f "$out" ] || continue
+        echo
+        echo "### $(basename "$out")"
+        sanitize_electron_log <"$out" | sed 's/^/- /' 2>/dev/null || true
+    done
+    echo
+    echo "## Electron Error"
+    for err in "$BUILD_DIR"/*.electron.err; do
+        [ -f "$err" ] || continue
+        echo
+        echo "### $(basename "$err")"
+        sanitize_electron_log <"$err" | sed 's/^/- /' 2>/dev/null || true
+    done
+} >"$REPORT_PATH"
+
+cat "$BUILD_DIR/evidence.env"
+[ "$overall_status" = "pass" ]
