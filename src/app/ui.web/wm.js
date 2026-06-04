@@ -110,12 +110,14 @@ class SimpleWindowManager {
     this._clipboardKindFilter = 'all';
     this._screenCaptureOverlay = null;
     this._screenCaptureMode = 'selection';
+    this._screenCaptureFeedbackTimer = 0;
     this._quickSettings = null;
     this._quickSettingsActiveIndex = 0;
     this._quickSettingsFeedbackTimers = new Map();
     this._notificationCenter = null;
     this._notificationFilter = 'all';
     this._notificationCenterActiveIndex = 0;
+    this._notificationActionFeedbackTimers = new Map();
     this._liveActivity = null;
     this._liveActivityPaused = false;
     this._hotCorners = null;
@@ -3247,7 +3249,7 @@ class SimpleWindowManager {
       const action = target?.closest('[data-capture-action]');
       if (!action || !overlay.contains(action)) return;
       if (action.dataset.captureAction === 'capture') this._captureScreenSelection();
-      if (action.dataset.captureAction === 'cancel') this._toggleScreenCapture(false);
+      if (action.dataset.captureAction === 'cancel') this._cancelScreenCapture();
     });
     document.body.appendChild(overlay);
     this._screenCaptureOverlay = overlay;
@@ -3311,12 +3313,51 @@ class SimpleWindowManager {
     const value = String(mode || 'selection');
     this._screenCaptureMode = value === 'window' || value === 'screen' ? value : 'selection';
     this._renderScreenCapture();
+    this._markScreenCaptureFeedback('mode', this._screenCaptureMode);
   }
 
   _captureScreenSelection() {
+    this._markScreenCaptureFeedback('capture', this._screenCaptureMode);
     this._sendWindowCmd('screen_capture', { capture_mode: this._screenCaptureMode });
     this._showSystemHud('Capture', this._screenCaptureMode, 1800);
-    this._toggleScreenCapture(false);
+    setTimeout(() => this._toggleScreenCapture(false), 180);
+  }
+
+  _cancelScreenCapture() {
+    this._markScreenCaptureFeedback('cancel', 'cancel');
+    setTimeout(() => this._toggleScreenCapture(false), 180);
+  }
+
+  _markScreenCaptureFeedback(feedback, value = '') {
+    if (!this._screenCaptureOverlay || !this._screenCaptureOverlay.isConnected) return;
+    const overlay = this._screenCaptureOverlay;
+    const kind = String(feedback || 'capture');
+    const targetValue = String(value || '');
+    if (this._screenCaptureFeedbackTimer) clearTimeout(this._screenCaptureFeedbackTimer);
+    const targets = [];
+    const selection = overlay.querySelector('.wm-capture-selection');
+    if (selection) targets.push(selection);
+    const mode = targetValue ? overlay.querySelector(`.wm-capture-mode[data-capture-mode="${targetValue}"]`) : null;
+    if (mode) targets.push(mode);
+    const action = overlay.querySelector(`.wm-capture-action[data-capture-action="${kind === 'cancel' ? 'cancel' : 'capture'}"]`);
+    if (action) targets.push(action);
+    overlay.dataset.captureFeedback = kind;
+    overlay.dataset.captureFeedbackValue = targetValue;
+    for (const target of targets) {
+      target.classList.remove('action-feedback');
+      void target.offsetWidth;
+      target.classList.add('action-feedback');
+      target.dataset.captureFeedback = kind;
+    }
+    this._screenCaptureFeedbackTimer = setTimeout(() => {
+      delete overlay.dataset.captureFeedback;
+      delete overlay.dataset.captureFeedbackValue;
+      for (const target of targets) {
+        target.classList.remove('action-feedback');
+        delete target.dataset.captureFeedback;
+      }
+      this._screenCaptureFeedbackTimer = 0;
+    }, 560);
   }
 
   _ensureQuickSettings() {
@@ -3834,25 +3875,65 @@ class SimpleWindowManager {
   }
 
   _openNotification(notificationId) {
+    this._markNotificationActionFeedback(notificationId, 'open');
     this._sendWindowCmd('notification_open', { notification_id: String(notificationId || '') });
-    this._toggleNotificationCenter(false);
+    setTimeout(() => this._toggleNotificationCenter(false), 180);
     this._showSystemHud('Notification', 'opened', 1400);
   }
 
   _snoozeNotification(notificationId) {
+    this._markNotificationActionFeedback(notificationId, 'snooze');
     this._sendWindowCmd('notification_snooze', { notification_id: String(notificationId || ''), minutes: 60 });
     this._showSystemHud('Notification', 'snoozed 1h', 1400);
   }
 
   _ackNotification(notificationId) {
+    this._markNotificationActionFeedback(notificationId, 'ack');
     this._sendWindowCmd('notification_ack', { notification_id: String(notificationId || '') });
     this._showSystemHud('Notification', 'done', 1400);
   }
 
   _clearNotifications() {
+    this._markNotificationActionFeedback('', 'clear');
     this._sendWindowCmd('notification_clear', {});
-    this._toggleNotificationCenter(false);
+    setTimeout(() => this._toggleNotificationCenter(false), 180);
     this._showSystemHud('Notifications', 'cleared', 1400);
+  }
+
+  _markNotificationActionFeedback(notificationId, action = '') {
+    if (!this._notificationCenter || !this._notificationCenter.isConnected) return;
+    const feedback = String(action || 'open');
+    const id = String(notificationId || '');
+    const safeId = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(id) : id.replace(/["\\]/g, '\\$&');
+    const key = `${id}:${feedback}`;
+    const existing = this._notificationActionFeedbackTimers.get(key);
+    if (existing) clearTimeout(existing);
+    const targets = [];
+    if (feedback === 'clear') {
+      targets.push(this._notificationCenter);
+      const clear = this._notificationCenter.querySelector('.wm-notification-clear');
+      if (clear) targets.push(clear);
+    } else if (id) {
+      const card = this._notificationCenter.querySelector(`.wm-notification-card[data-notification-id="${safeId}"]`);
+      if (card) targets.push(card);
+      const button = card?.querySelector(`.wm-notification-action[data-notification-action="${feedback}"]`);
+      if (button) targets.push(button);
+    }
+    if (!targets.length) return;
+    for (const target of targets) {
+      target.classList.remove('action-feedback');
+      void target.offsetWidth;
+      target.classList.add('action-feedback');
+      target.dataset.notificationFeedback = feedback;
+    }
+    const timer = setTimeout(() => {
+      for (const target of targets) {
+        target.classList.remove('action-feedback');
+        delete target.dataset.notificationFeedback;
+      }
+      this._notificationActionFeedbackTimers.delete(key);
+    }, 560);
+    this._notificationActionFeedbackTimers.set(key, timer);
   }
 
   _ensureLiveActivity() {

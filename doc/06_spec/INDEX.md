@@ -4,11 +4,11 @@
 
 ## Quick Stats
 
-- **Total Features:** 3
+- **Total Features:** 1
 - **Complete Documentation:** 0 (0%)
-- **Stubs Remaining:** 3
+- **Stubs Remaining:** 1
 - **Total Lines:** 0
-- **Warnings:** 3
+- **Warnings:** 1
 
 ---
 
@@ -16,12 +16,5 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Backend Gpu Target Contract Specification](01_unit/compiler/backend/backend_gpu_target_contract_spec.md) | Auto-generated | N/A | 7 | 0% | 0 lines |
-
-## Standard Library (2 features)
-
-| Feature | Status | Difficulty | Tests | Coverage | Details |
-|---------|--------|------------|-------|----------|----------|
-| [Backend Opencl Facade Specification](01_unit/lib/gpu/engine2d/backend_opencl_facade_spec.md) | Auto-generated | N/A | 3 | 0% | 0 lines |
-| [Opencl Session Contract Specification](01_unit/lib/gpu/engine2d/opencl_session_contract_spec.md) | Auto-generated | N/A | 6 | 0% | 0 lines |
+| [Gpu Target Metadata Specification](01_unit/compiler/mir/gpu_target_metadata_spec.md) | Auto-generated | N/A | 5 | 0% | 0 lines |
 

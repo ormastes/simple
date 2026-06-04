@@ -53,7 +53,7 @@ val opencl = parse_gpu_kernel_target("opencl-spirv")
 
 expect(auto_target.valid).to_equal(true)
 expect(auto_target.normalized_target).to_equal("auto")
-expect(auto_target.backend_order).to_equal("cuda,opencl")
+expect(auto_target.backend_order).to_equal(gpu_target_metadata_default_backend_order())
 expect(cuda.normalized_target).to_equal("cuda")
 expect(opencl.normalized_target).to_equal("opencl")
 expect(opencl.summary()).to_contain("valid=true")
@@ -61,17 +61,18 @@ expect(opencl.summary()).to_contain("valid=true")
 
 </details>
 
-#### normalizes explicit HIP and ROCm target metadata without adding HIP to auto
+#### normalizes explicit HIP ROCm and Vulkan target metadata through common aliases
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val hip = parse_gpu_kernel_target("hip-cpp")
 val rocm = parse_gpu_kernel_target("rocm")
+val spirv = parse_gpu_kernel_target("spirv")
 val auto_target = parse_gpu_kernel_target("auto")
 
 expect(hip.valid).to_equal(true)
@@ -79,7 +80,10 @@ expect(hip.normalized_target).to_equal("hip")
 expect(hip.backend_order).to_equal("hip")
 expect(rocm.valid).to_equal(true)
 expect(rocm.normalized_target).to_equal("hip")
-expect(auto_target.backend_order).to_equal("cuda,opencl")
+expect(spirv.valid).to_equal(true)
+expect(spirv.normalized_target).to_equal("vulkan")
+expect(normalize_gpu_target_metadata_name("cl")).to_equal("opencl")
+expect(auto_target.backend_order).to_equal("cuda,hip,opencl")
 ```
 
 </details>
@@ -103,7 +107,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val err = check_gpu_kernel_target("metal")
 var checker = GpuKernelChecker.create("bad_kernel")
-checker.check_target("vulkan", 7)
+checker.check_target("metal", 7)
 
 expect(err.?).to_equal(true)
 expect(checker.has_errors()).to_equal(true)

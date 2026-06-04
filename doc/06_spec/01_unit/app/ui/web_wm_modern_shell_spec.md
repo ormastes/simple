@@ -60,7 +60,7 @@ Verifies the first modern Simple Web WM slice at the contract level.
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 671 lines folded for reproduction.
+Runnable source: 679 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -727,6 +727,14 @@ expect(html).to_contain("@keyframes wm-taskbar-attention")
 expect(html).to_contain("@keyframes wm-taskbar-badge-pulse")
 expect(html).to_contain(".wm-notification-actions")
 expect(html).to_contain(".wm-notification-action:hover")
+expect(html).to_contain(".wm-notification-card.action-feedback")
+expect(html).to_contain(".wm-notification-center.action-feedback")
+expect(html).to_contain(".wm-notification-action.action-feedback")
+expect(html).to_contain(".wm-notification-clear.action-feedback")
+expect(html).to_contain(".wm-notification-card[data-notification-feedback='open'] .wm-notification-action[data-notification-action='open']")
+expect(html).to_contain(".wm-notification-center[data-notification-feedback='clear'] .wm-notification-clear")
+expect(html).to_contain(":root[data-wm-motion=off] .wm-notification-card.action-feedback")
+expect(html).to_contain("@keyframes wm-notification-action-feedback")
 expect(html).to_contain(".wm-notification-filters")
 expect(html).to_contain(".wm-notification-filter.active")
 expect(html).to_contain(".wm-notification-card.selected")
@@ -744,7 +752,7 @@ expect(html).to_contain("border-radius: 999px")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 1326 lines folded for reproduction.
+Runnable source: 1331 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1683,6 +1691,11 @@ expect(js).to_contain("notification_count")
 expect(js).to_contain("_makeNotificationAction")
 expect(js).to_contain("_openNotification")
 expect(js).to_contain("_snoozeNotification")
+expect(js).to_contain("_markNotificationActionFeedback")
+expect(js).to_contain("_notificationActionFeedbackTimers")
+expect(js).to_contain("dataset.notificationFeedback")
+expect(js).to_contain("classList.add('action-feedback')")
+expect(js).to_contain("setTimeout(() => this._toggleNotificationCenter(false), 180)")
 expect(js).to_contain("notification_open")
 expect(js).to_contain("notification_snooze")
 expect(js).to_contain("minutes: 60")
@@ -2083,7 +2096,7 @@ expect(retained).to_contain("Maximize window")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 1297 lines folded for reproduction.
+Runnable source: 1303 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -2318,6 +2331,12 @@ expect(preview).to_contain("id=\"wm-notification-card-1\"")
 expect(preview).to_contain("data-notification-index=\"1\"")
 expect(preview).to_contain("aria-selected=\"false\"")
 expect(preview).to_contain("data-focus-filtered=\"true\"")
+expect(preview).to_contain("wm-notification-center action-feedback")
+expect(preview).to_contain("wm-notification-clear action-feedback")
+expect(preview).to_contain("wm-notification-card unread quiet selected action-feedback")
+expect(preview).to_contain("data-notification-feedback=\"open\"")
+expect(preview).to_contain("data-notification-feedback=\"clear\"")
+expect(preview).to_contain("wm-notification-action action-feedback")
 expect(preview).to_contain("class=\"wm-notification-actions\"")
 expect(preview).to_contain("role=\"group\" aria-label=\"Build finished actions\"")
 expect(preview).to_contain("data-notification-action=\"open\"")
