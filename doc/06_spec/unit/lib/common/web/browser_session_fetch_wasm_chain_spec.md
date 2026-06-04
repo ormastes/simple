@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 213 | 213 | 0 | 0 |
+| 214 | 214 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1421,6 +1421,136 @@ match session.take_pending_request():
                         expect("unexpected second commit js error: {err}").to_equal("")
             Err(err):
                 expect("unexpected second commit error: {err}").to_equal("")
+    nil:
+        expect("missing compiled fetch request").to_equal("")
+```
+
+</details>
+
+#### compares fetched arrayBuffer direct and compiled fetch error catches
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `queued`
+
+3. Err
+   - Expected: "unexpected queue error: {err}" equals ``
+
+4. Ok
+   - Expected: _display_js(value) equals ``
+
+5. Err
+   - Expected: "unexpected pre-commit js error: {err}" equals ``
+
+6. Some
+   - Expected: request.kind equals `fetch`
+   - Expected: request.url equals `https://example.com/direct-down.wasm`
+
+7. Ok
+   - Expected: "expected first fetch commit error" equals ``
+
+8. Err
+   - Expected: err equals `network-down`
+
+9. Ok
+   - Expected: _display_js(value) equals `directArrayBufferFetchError:network-down`
+
+10. Err
+   - Expected: "unexpected first commit js error: {js_err}" equals ``
+   - Expected: "missing direct fetch request" equals ``
+
+11. Some
+   - Expected: request.kind equals `fetch`
+   - Expected: request.url equals `https://example.com/compiled-down.wasm`
+
+12. Ok
+   - Expected: "expected second fetch commit error" equals ``
+
+13. Err
+   - Expected: err equals `network-down`
+
+14. Ok
+   - Expected: _display_js(value) equals `directArrayBufferFetchError:network-down:compiledArrayBufferFetchError:networ... (full value in folded executable source)`
+
+15. Err
+   - Expected: "unexpected second commit js error: {js_err}" equals ``
+   - Expected: "missing compiled fetch request" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 68 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val queued = session.eval_script("var out = ''; window.fetch('/direct-down.wasm').then(function(r) { return r.arrayBuffer(); }).then(function(bytes) { return WebAssembly.instantiate(bytes); }).then(function(result) { out = 'unexpectedDirect:' + result.status; }).catch(function(err) { out = 'directArrayBufferFetchError:' + err; }); window.fetch('/compiled-down.wasm').then(function(r) { return r.arrayBuffer(); }).then(function(bytes) { return WebAssembly.compile(bytes); }).then(function(module) { out = out + ':unexpectedCompiled:' + module.byteLength; }).catch(function(err) { out = out + ':compiledArrayBufferFetchError:' + err; }); 'queued'")
+match queued:
+    Ok(value):
+        expect(_display_js(value)).to_equal("queued")
+    Err(err):
+        expect("unexpected queue error: {err}").to_equal("")
+match session.eval_script("out"):
+    Ok(value):
+        expect(_display_js(value)).to_equal("")
+    Err(err):
+        expect("unexpected pre-commit js error: {err}").to_equal("")
+
+match session.take_pending_request():
+    Some(request):
+        expect(request.kind).to_equal("fetch")
+        expect(request.url).to_equal("https://example.com/direct-down.wasm")
+        val committed = session.commit_network_response(BrowserResponse.create(
+            request_id: request.id,
+            kind: "fetch",
+            url: request.url,
+            status: 0,
+            headers: "",
+            body: "",
+            error: "network-down"
+        ))
+        match committed:
+            Ok(_):
+                expect("expected first fetch commit error").to_equal("")
+            Err(err):
+                expect(err).to_equal("network-down")
+                match session.eval_script("out"):
+                    Ok(value):
+                        expect(_display_js(value)).to_equal("directArrayBufferFetchError:network-down")
+                    Err(js_err):
+                        expect("unexpected first commit js error: {js_err}").to_equal("")
+    nil:
+        expect("missing direct fetch request").to_equal("")
+
+match session.take_pending_request():
+    Some(request):
+        expect(request.kind).to_equal("fetch")
+        expect(request.url).to_equal("https://example.com/compiled-down.wasm")
+        val committed = session.commit_network_response(BrowserResponse.create(
+            request_id: request.id,
+            kind: "fetch",
+            url: request.url,
+            status: 0,
+            headers: "",
+            body: "",
+            error: "network-down"
+        ))
+        match committed:
+            Ok(_):
+                expect("expected second fetch commit error").to_equal("")
+            Err(err):
+                expect(err).to_equal("network-down")
+                match session.eval_script("out"):
+                    Ok(value):
+                        expect(_display_js(value)).to_equal("directArrayBufferFetchError:network-down:compiledArrayBufferFetchError:network-down")
+                    Err(js_err):
+                        expect("unexpected second commit js error: {js_err}").to_equal("")
     nil:
         expect("missing compiled fetch request").to_equal("")
 ```
@@ -11547,8 +11677,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 213 |
-| Active scenarios | 213 |
+| Total scenarios | 214 |
+| Active scenarios | 214 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
