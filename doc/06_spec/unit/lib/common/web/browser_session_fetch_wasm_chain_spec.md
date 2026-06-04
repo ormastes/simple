@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 224 | 224 | 0 | 0 |
+| 225 | 225 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -12105,6 +12105,39 @@ match result:
 
 </details>
 
+#### keeps Uint8Array slice copied buffer writes isolated in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `0:3:3:false:4,3,4:1,2,255,4,5:3`
+
+3. Err
+   - Expected: "unexpected uint8 slice copied buffer js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var b = new Uint8Array(5); b[0] = 1; b[1] = 2; b[2] = 3; b[3] = 4; b[4] = 5; var sl = b.slice(1, 4); sl[0] = 260; b[2] = -1; sl.byteOffset + ':' + sl.byteLength + ':' + sl.length + ':' + (sl.buffer === b.buffer) + ':' + sl.toString() + ':' + b.toString() + ':' + sl.at(1)")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("0:3:3:false:4,3,4:1,2,255,4,5:3")
+    Err(err):
+        expect("unexpected uint8 slice copied buffer js error: {err}").to_equal("")
+```
+
+</details>
+
 #### copies overlapping Uint8Array subarray windows through set in browser scripts
 
 1. var session = BrowserSession new
@@ -12751,8 +12784,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 224 |
-| Active scenarios | 224 |
+| Total scenarios | 225 |
+| Active scenarios | 225 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
