@@ -5457,18 +5457,78 @@ BrowserSession multiple WebAssembly function export continuation:
  - `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
  - `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
  
- BrowserSession scripts now fetch a bounded `i32.add` function body module,
- convert the response through `arrayBuffer()`, compile the fetched bytes with
- `WebAssembly.compile(bytes)`, pass the compiled module into
- `WebAssembly.instantiate(module)`, read the exported `run` function, and call it
- twice with different argument pairs through normal browser script dispatch. The
- focused assertion checks the queued pre-commit state, fetch URL, fetched byte
- length, compiled module byte length, instantiated status, final module byte
- length, exported function type, and both argument-driven return values. The
- focused fetch/WASM chain spec now passes `123/123`; broader browser/WASM
- semantics remain open.
- 
- BrowserSession fetched invalid arrayBuffer instantiate catch continuation:
+BrowserSession scripts now fetch a bounded `i32.add` function body module,
+convert the response through `arrayBuffer()`, compile the fetched bytes with
+`WebAssembly.compile(bytes)`, pass the compiled module into
+`WebAssembly.instantiate(module)`, read the exported `run` function, and call it
+twice with different argument pairs through normal browser script dispatch. The
+focused assertion checks the queued pre-commit state, fetch URL, fetched byte
+length, compiled module byte length, instantiated status, final module byte
+length, exported function type, and both argument-driven return values. The
+focused fetch/WASM chain spec now passes `123/123`; broader browser/WASM
+semantics remain open.
+
+BrowserSession fetched arrayBuffer direct/compiled function-body parity continuation:
+
+Completion checklist:
+
+- Add a BrowserSession browser-script scenario that queues one
+  `window.fetch('/direct.wasm').then(r => r.arrayBuffer())` chain into
+  `WebAssembly.instantiate(bytes)` and one
+  `window.fetch('/compiled.wasm').then(r => r.arrayBuffer())` chain into
+  `WebAssembly.compile(bytes)` followed by `WebAssembly.instantiate(module)`.
+- Verify the initial script result is `queued` and the shared `out` variable is
+  empty before either network response is committed.
+- Verify the first pending network request is a fetch for
+  `https://example.com/direct.wasm`.
+- Commit the function-body module response for `/direct.wasm` and verify the
+  direct arrayBuffer instantiate path reports fetched byte length `41`, status
+  `instantiated`, module byte length `41`, exported `run` type `function`, and
+  argument-driven return values `42` and `42`.
+- Verify the second pending network request is a fetch for
+  `https://example.com/compiled.wasm`.
+- Commit the same function-body module response for `/compiled.wasm` and verify
+  the final output keeps the direct arrayBuffer evidence and appends compiled
+  arrayBuffer fetched byte length `41`, compiled module byte length `41`,
+  instantiated status `instantiated`, result module byte length `41`, exported
+  `run` type `function`, and matching argument-driven return values `42` and
+  `42`.
+- Regenerate the mirrored scenario manual for the changed SPipe spec and move
+  docgen's old `01_unit` output onto the tracked `unit` manual path.
+- Remove generated docgen noise from adjacent specs, restore generated tracking
+  index churn, and keep only the intended source/manual/plan files in the commit.
+- Record focused pass count, adjacent pass counts, `src/lib` warning count,
+  docgen/manual evidence, diff hygiene, and `doc/06_spec` layout evidence before
+  pushing.
+
+Test checklist:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+- `git diff --check`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+BrowserSession scripts now compare fetched-arrayBuffer direct instantiate and
+compiled instantiate function-body paths in one queued script. The first network
+commit completes only the direct `WebAssembly.instantiate(bytes)` path and
+records fetched byte length `41`, status `instantiated`, module byte length
+`41`, exported `run` type `function`, and return values `42` and `42`; the
+second commit appends the `WebAssembly.compile(bytes)` plus
+`WebAssembly.instantiate(module)` path with matching byte lengths, status, export
+type, and return values. The focused fetch/WASM chain spec is now passing
+`205/205`; the native WASM host spec remained `107/107`, the WebGPU JS/WASM
+system spec remained `106/106`, Node API conformance remained `275/275`, and
+`src/lib` completed with the current `399 warning(s)` across `5927` files after
+the payment CLI stub return type was aligned with its integer status literal.
+Docgen regenerated the mirrored manual, diff hygiene passed, and the
+`doc/06_spec` layout gate printed `0`.
+
+BrowserSession fetched invalid arrayBuffer instantiate catch continuation:
  
  - `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
  - `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
