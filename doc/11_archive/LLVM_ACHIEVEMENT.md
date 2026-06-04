@@ -328,7 +328,7 @@ cargo build --features llvm --target riscv32-unknown-linux-gnu
    - Build instructions
    - Usage examples
 
-2. **doc/04_architecture/infra/support.md** (6.4 KB)
+2. **doc/04_architecture/infra/architecture_docs/flows/support.md** (6.4 KB)
    - Complete 6-architecture matrix
    - ISA features and performance
    - Cross-compilation guide

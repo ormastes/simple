@@ -11,7 +11,7 @@ Verifies that the pure GUI SMF artifact can pass through the SimpleOS dynload re
 | Requirements | N/A |
 | Plan | doc/03_plan/gui_hardening_current_plan_2026-06-01.md |
 | Design | doc/05_design/gui_color_image_pipeline_8k.md |
-| Research | doc/01_research/ui/gui_color_image_pipeline_8k.md |
+| Research | doc/01_research/ui/graphics/gui/gui_color_image_pipeline_8k.md |
 | Source | `test/01_unit/app/gui_perf/simpleos_smf_dynload_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
@@ -38,7 +38,7 @@ status=simpleos-dynload-pass` and includes
 **Requirements:** N/A
 **Plan:** doc/03_plan/gui_hardening_current_plan_2026-06-01.md
 **Design:** doc/05_design/gui_color_image_pipeline_8k.md
-**Research:** doc/01_research/ui/gui_color_image_pipeline_8k.md
+**Research:** doc/01_research/ui/graphics/gui/gui_color_image_pipeline_8k.md
 
 ## Scenarios
 
@@ -172,5 +172,5 @@ expect(evidence.handle).to_be_less_than(0)
 
 - **Plan:** [doc/03_plan/gui_hardening_current_plan_2026-06-01.md](doc/03_plan/gui_hardening_current_plan_2026-06-01.md)
 - **Design:** [doc/05_design/gui_color_image_pipeline_8k.md](doc/05_design/gui_color_image_pipeline_8k.md)
-- **Research:** [doc/01_research/ui/gui_color_image_pipeline_8k.md](doc/01_research/ui/gui_color_image_pipeline_8k.md)
+- **Research:** [doc/01_research/ui/graphics/gui/gui_color_image_pipeline_8k.md](doc/01_research/ui/graphics/gui/gui_color_image_pipeline_8k.md)
 

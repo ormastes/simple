@@ -25,7 +25,7 @@ Final requirements must not be written until the user selects options.
 
 Exit evidence:
 
-- Size baseline in `doc/01_research/runtime/rust_runtime_minimization.md` or a follow-up dated report.
+- Size baseline in `doc/01_research/runtime/execution/rust_runtime_minimization.md` or a follow-up dated report.
 - Updated docs point to the C-core ABI plan.
 
 ## Phase 1 - File I/O Core

@@ -7,7 +7,7 @@ the tree today — each claim is grounded in a file/symbol, and the
 designed seam for a running one.
 
 Architecture background (read-only, pipeline-owned):
-`doc/04_architecture/app/kairos_like_simple_mcp_llm_dashboard.md` and
+`doc/04_architecture/app/ui/kairos_like_simple_mcp_llm_dashboard.md` and
 `doc/05_design/kairos_like_simple_mcp_llm_dashboard.md` (KAIROS three-plane
 model). Editor surface details: `doc/07_guide/editor_tui.md`.
 
@@ -208,5 +208,5 @@ plane (MCP assistant) and the operator plane (dashboard).
 
 ## See also
 - `doc/07_guide/editor_tui.md` — editor components, rendering, status/blockers
-- `doc/04_architecture/app/kairos_like_simple_mcp_llm_dashboard.md` — three-plane architecture
-- `doc/04_architecture/app/mcp_lsp_dap_index.md` — MCP/LSP/DAP status index
+- `doc/04_architecture/app/ui/kairos_like_simple_mcp_llm_dashboard.md` — three-plane architecture
+- `doc/04_architecture/app/mcp/mcp_lsp_dap_index.md` — MCP/LSP/DAP status index

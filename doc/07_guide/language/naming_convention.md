@@ -2,7 +2,7 @@
 
 **Canonical reference.** This document supersedes the naming table in
 `coding_style.md` and consolidates the verb families, alias policy, and
-predicate gate from `doc/01_research/lib/naming.md`.
+predicate gate from `doc/01_research/lib/best_practices/naming.md`.
 
 ---
 

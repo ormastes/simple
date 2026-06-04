@@ -60,4 +60,4 @@ The VHDL backend generates synthesizable VHDL-2008 code from Simple MIR, coverin
 
 ## Support Matrix
 
-See `doc/04_architecture/hardware/vhdl_support_matrix.md` for detailed capability table.
+See `doc/04_architecture/hardware/vhdl/vhdl_support_matrix.md` for detailed capability table.

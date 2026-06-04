@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-04
 **Feature:** Math Blocks (m{}, loss{}, nograd{}) Autograd Pipeline
-**Support Matrix:** [doc/04_architecture/compiler/math_blocks_backend_support_matrix.md](../04_architecture/math_blocks_backend_support_matrix.md)
+**Support Matrix:** [doc/04_architecture/compiler/graphics/math_blocks_backend_support_matrix.md](../04_architecture/math_blocks_backend_support_matrix.md)
 
 ## Summary
 
@@ -56,7 +56,7 @@ The compiler now provides:
 ### Created (2)
 | File | Purpose |
 |------|---------|
-| `doc/04_architecture/compiler/math_blocks_backend_support_matrix.md` | Backend support matrix |
+| `doc/04_architecture/compiler/graphics/math_blocks_backend_support_matrix.md` | Backend support matrix |
 | `doc/09_report/math_blocks_autograd_completion_2026-04-04.md` | This completion report |
 
 ### Pre-existing Key Files (unchanged)

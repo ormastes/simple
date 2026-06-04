@@ -327,7 +327,7 @@ raw reassignment, escape, borrow-safety, and JIT fact extraction.
 Update:
 
 - `doc/07_guide/compiler_optimization_plugin.md`
-- `doc/04_architecture/compiler/simple_optimization_plugin.md`
+- `doc/04_architecture/compiler/perf/simple_optimization_plugin.md`
 - `doc/06_spec/app/compiler/feature/simple_optimization_plugin_spec.md`
 - `doc/09_report/verify/optimization_plugin_jit_hotspot_perf_evidence_2026-05-24.md`
 

@@ -26,7 +26,7 @@ The AOP completion slice is verified for the implemented scope:
 - [aop_spec.spl](test/03_system/feature/usage/aop_spec.spl)
 - [aop.md](doc/02_requirements/feature/usage/aop.md)
 - [aop_spec.md](doc/06_spec/app/compiler/feature/aop_spec.md)
-- [aop.md](doc/01_research/infra/aop.md)
+- [aop.md](doc/01_research/infra/aop/aop.md)
 
 ## Verification Evidence
 

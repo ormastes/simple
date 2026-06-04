@@ -106,7 +106,7 @@ For near-term mobile support, shared-library output plus exported C ABI is a mor
 
 The main hosted platform documentation currently lists hosted support around Linux/macOS/Windows/FreeBSD, not Android/iOS:
 
-- `doc/07_guide/platform/platforms.md`
+- `doc/07_guide/platform/misc/platforms.md`
 
 That means Android/iOS support should be treated as new platform work, not an extension of a supported lane.
 

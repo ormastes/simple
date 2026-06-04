@@ -11,7 +11,7 @@ Verifies that SimpleOS dynload evidence, not just an artifact contract, is requi
 | Requirements | N/A |
 | Plan | doc/03_plan/gui_hardening_current_plan_2026-06-01.md |
 | Design | doc/05_design/gui_color_image_pipeline_8k.md |
-| Research | doc/01_research/ui/gui_color_image_pipeline_8k.md |
+| Research | doc/01_research/ui/graphics/gui/gui_color_image_pipeline_8k.md |
 | Source | `test/01_unit/app/gui_perf/qemu_arm64_smf_loader_parity_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
@@ -31,7 +31,7 @@ status=loader-contract-pass` and includes `loader=smf_dynlib`,
 **Requirements:** N/A
 **Plan:** doc/03_plan/gui_hardening_current_plan_2026-06-01.md
 **Design:** doc/05_design/gui_color_image_pipeline_8k.md
-**Research:** doc/01_research/ui/gui_color_image_pipeline_8k.md
+**Research:** doc/01_research/ui/graphics/gui/gui_color_image_pipeline_8k.md
 
 ## Scenarios
 
@@ -195,5 +195,5 @@ expect(parity.reason).to_equal("missing-smf-dynlib-or-command-batch")
 
 - **Plan:** [doc/03_plan/gui_hardening_current_plan_2026-06-01.md](doc/03_plan/gui_hardening_current_plan_2026-06-01.md)
 - **Design:** [doc/05_design/gui_color_image_pipeline_8k.md](doc/05_design/gui_color_image_pipeline_8k.md)
-- **Research:** [doc/01_research/ui/gui_color_image_pipeline_8k.md](doc/01_research/ui/gui_color_image_pipeline_8k.md)
+- **Research:** [doc/01_research/ui/graphics/gui/gui_color_image_pipeline_8k.md](doc/01_research/ui/graphics/gui/gui_color_image_pipeline_8k.md)
 

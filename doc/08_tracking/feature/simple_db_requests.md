@@ -6,7 +6,7 @@ the Phase 1 scan/bitmap tranche.
 - **Target:** simple-db
 - **Owning design docs:**
   - `doc/05_design/simple_db_shared_accel_simd.md`
-  - `doc/04_architecture/compiler/simple_db_shared_accel_simd.md`
+  - `doc/04_architecture/compiler/perf/simple_db_shared_accel_simd.md`
 
 ## Open Requests
 
@@ -161,7 +161,7 @@ the Phase 1 scan/bitmap tranche.
 - **Related-design-doc:** `doc/05_design/simple_db_wco_joins.md`
 - **Related-issue:** none
 - **Progress 2026-05-29:** Completed research in
-  `doc/01_research/lib/simple_db_wco_joins_2026-05-29.md`. Current Simple DB
+  `doc/01_research/lib/simple_db/simple_db_wco_joins_2026-05-29.md`. Current Simple DB
   workloads are unary lookup/filter, DBFS namespace lookup, SDN filter chains,
   posting-list token set operations, and BRIN refine; none require WCO joins
   yet. The design decision in `doc/05_design/simple_db_wco_joins.md` defers

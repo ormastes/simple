@@ -77,7 +77,7 @@ Completed comprehensive research on parser/lexer/treesitter duplications across 
 
 ### 4. File Locations Reference
 
-**File:** `doc/04_architecture/compiler/parser_file_locations_2026-02-04.md` (567 lines)
+**File:** `doc/04_architecture/compiler/misc/parser_file_locations_2026-02-04.md` (567 lines)
 
 **Contents:**
 - Quick reference table (What to Use When)
@@ -282,7 +282,7 @@ Completed comprehensive research on parser/lexer/treesitter duplications across 
 - **Research Analysis:** `doc/01_research/parser_duplication_analysis_2026-02-04.md`
 - **Architecture Design:** `doc/05_design/parser_architecture_unified_2026-02-04.md`
 - **Implementation Plan:** `doc/03_plan/parser_merge_plan_2026-02-04.md`
-- **File Locations:** `doc/04_architecture/compiler/parser_file_locations_2026-02-04.md`
+- **File Locations:** `doc/04_architecture/compiler/misc/parser_file_locations_2026-02-04.md`
 - **Completion Report:** `doc/09_report/parser_duplication_research_complete_2026-02-04.md` (this file)
 
 ---

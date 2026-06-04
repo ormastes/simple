@@ -47,7 +47,7 @@ Parent feature ship commits on `origin/main`:
         READ, returns `[]` when the tail page is unmapped
   - [x] No regression in `test/01_unit/os/kernel/ipc/` or
         `test/01_unit/os/kernel/fs/win_vfs/`
-- **Related-upfront:** `doc/04_architecture/compiler/mdsoc_architecture_tobe.md` (MDSOC+
+- **Related-upfront:** `doc/04_architecture/compiler/mdsoc/mdsoc_architecture_tobe.md` (MDSOC+
   boundary rules around kernel ↔ user memory)
 - **Related-design-doc:** `doc/05_design/spm_pt_walk_user_copy.md`
 - **Related-issue:** none
@@ -94,7 +94,7 @@ Parent feature ship commits on `origin/main`:
   identity-mapped case today. Implemented by threading `caller.id` into case
   110 and exposing `spm_priv_check_for_task` for direct SPipe coverage. Test:
   `test/03_system/spm_priv_check_task_mirror_spec.spl`. Research and plan:
-  `doc/01_research/os/spm_priv_check_task_mirror.md`,
+  `doc/01_research/os/spm/spm_priv_check_task_mirror.md`,
   `doc/03_plan/sys_test/spm_priv_check_task_mirror.md`.
 
 ### FR-SPM-0003 — Rebind syscall for SPM port when real SPM task id is known
@@ -141,7 +141,7 @@ Parent feature ship commits on `origin/main`:
   state, assigns the caller task id, is idempotent for the same task, and
   rejects a second real owner with `-2`. Test:
   `test/03_system/spm_claim_rebind_spec.spl`. Research/design/plan:
-  `doc/01_research/app/spm_claim_rebind.md`,
+  `doc/01_research/app/misc/spm_claim_rebind.md`,
   `doc/05_design/spm_claim_rebind.md`,
   `doc/03_plan/sys_test/spm_claim_rebind.md`.
 

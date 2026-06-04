@@ -3,7 +3,7 @@
 Tracker for requests filed against the `std.driver` framework and its
 companion compiler/runtime surfaces (SMF loader, per-arch DMA impls,
 grammar extensions). The upfront design lives in
-`doc/04_architecture/os/driver_architecture.md` — items in this tracker
+`doc/04_architecture/os/driver/driver_architecture.md` — items in this tracker
 extend that design with work that did not fit Phases A–E of the initial
 rollout (landed locally 2026-04-18; see memory
 `project_driver_framework.md`).
@@ -51,8 +51,8 @@ or `Rejected` (one-line reason).
   - [x] Example: `examples/09_embedded/simple_os/src/drivers/null_block.spl` is
         rewritten to use `@driver(...)` and passes the existing
         `test/01_unit/lib/driver/null_block_driver_test.spl`.
-- **Related-upfront:** `doc/04_architecture/os/driver_architecture.md §3` (unified grammar)
-- **Related-design-doc:** `doc/04_architecture/os/driver_architecture.md §3`
+- **Related-upfront:** `doc/04_architecture/os/driver/driver_architecture.md §3` (unified grammar)
+- **Related-design-doc:** `doc/04_architecture/os/driver/driver_architecture.md §3`
 - **Related-issue:** none
 - **Notes:** The procedural registration path works today; this item is
   sugar, not a blocker. Keep the two paths interchangeable so legacy
@@ -136,7 +136,7 @@ or `Rejected` (one-line reason).
         on a regression suite (new `test/01_unit/compiler/shr_signedness_test.spl`).
   - [x] Memory note `feedback_cranelift_shr_bug.md` is marked resolved
         with the commit that closes it.
-- **Related-upfront:** `doc/04_architecture/os/driver_architecture.md §2` (feasibility audit flags this as the one known bug)
+- **Related-upfront:** `doc/04_architecture/os/driver/driver_architecture.md §2` (feasibility audit flags this as the one known bug)
 - **Related-design-doc:** tbd
 - **Related-issue:** none
 - **Notes:** Division workaround stays valid until this lands.
@@ -195,7 +195,7 @@ or `Rejected` (one-line reason).
         unit test.
         (Verified 2026-05-29 with `bin/simple check` on the SimpleOS wrapper,
         stdlib null-block driver, and unit test, plus focused interpreter specs.)
-- **Related-upfront:** `doc/04_architecture/os/driver_architecture.md §2 table` (listed as papercut, not blocker)
+- **Related-upfront:** `doc/04_architecture/os/driver/driver_architecture.md §2 table` (listed as papercut, not blocker)
 - **Related-design-doc:** tbd
 - **Related-issue:** none
 - **Notes:** Lower priority because the shift+mask workaround is
@@ -233,8 +233,8 @@ or `Rejected` (one-line reason).
         `decode_manifest`, confirm all fields match.
   - [x] Builds with `--driver-mode=dynamic` produce a `.lsm` whose
         DRVS section matches the driver's `@driver(...)` literal.
-- **Related-upfront:** `doc/04_architecture/os/driver_architecture.md §4` (static vs dynamic one pipeline)
-- **Related-design-doc:** `doc/04_architecture/os/driver_architecture.md §4`
+- **Related-upfront:** `doc/04_architecture/os/driver/driver_architecture.md §4` (static vs dynamic one pipeline)
+- **Related-design-doc:** `doc/04_architecture/os/driver/driver_architecture.md §4`
 - **Related-issue:** none
 - **Notes:** Pair this with FR-DRIVER-0001 — the writer depends on
   the attribute being in HIR.
@@ -287,7 +287,7 @@ or `Rejected` (one-line reason).
   - [x] Cache-line-size constant per-arch is exposed via a new
         `rt_dma_cache_line_size()` extern so drivers can align hot
         structures.
-- **Related-upfront:** `doc/04_architecture/os/driver_architecture.md §7` (DMA all 6 arches)
+- **Related-upfront:** `doc/04_architecture/os/driver/driver_architecture.md §7` (DMA all 6 arches)
 - **Related-design-doc:** tbd
 - **Related-issue:** none
 - **Notes:** User directive (project memory `project_driver_framework.md`)
@@ -337,7 +337,7 @@ or `Rejected` (one-line reason).
         assertions with real-path assertions.
         *(`test/01_unit/lib/driver/registry_integration_test.spl`
         tolerates soft-failures; asserts `initialized_count >= 1`.)*
-- **Related-upfront:** `doc/04_architecture/os/driver_architecture.md §6`
+- **Related-upfront:** `doc/04_architecture/os/driver/driver_architecture.md §6`
 - **Related-design-doc:** tbd
 - **Related-issue:** none
 - **Notes:** FS half of this FR was reopened as FR-DRIVER-0007 because it was
@@ -382,7 +382,7 @@ or `Rejected` (one-line reason).
         `readdir`, and `ftruncate` forwarding. Remaining FAT32 file-I/O
         failures are tracked under the FAT32 repair queue rather than this
         driver-framework porting request.
-- **Related-upfront:** `doc/04_architecture/os/driver_architecture.md §6`;
+- **Related-upfront:** `doc/04_architecture/os/driver/driver_architecture.md §6`;
   FR-DRIVER-0006 (parent).
 - **Related-design-doc:** `doc/05_design/fs_driver_interface.md`
 - **Related-issue:** none
@@ -435,7 +435,7 @@ or `Rejected` (one-line reason).
   - [x] Write preserves adjacent fields (test: set `b`, check `a` unchanged).
   - [x] Compiled-mode (`bin/simple compile`) produces byte-identical output for the same bitfield round-trip.
   - [x] The five skip-patterns listed above are each replaced with real lowering; no `Node::Bitfield(_) => {}` remains in the Rust seed.
-- **Related-upfront:** `doc/04_architecture/os/driver_architecture.md §2` (listed as papercut, not blocker — accurate for driver authors, but every concrete driver pays the cost without this FR)
+- **Related-upfront:** `doc/04_architecture/os/driver/driver_architecture.md §2` (listed as papercut, not blocker — accurate for driver authors, but every concrete driver pays the cost without this FR)
 - **Related-design-doc:** tbd
 - **Related-issue:** none
 - **Notes:** Effort: 2–3 days (estimate from Track-4 scope-mismatch
@@ -567,5 +567,5 @@ or `Rejected` (one-line reason).
   `src/os/drivers/gpu/display_boundary.spl`; SPipe coverage is
   `test/03_system/driver_display_acceleration_boundary_spec.spl`. Research and
   test plan:
-  `doc/01_research/os/driver_display_acceleration_boundary.md`,
+  `doc/01_research/os/driver/driver_display_acceleration_boundary.md`,
   `doc/03_plan/sys_test/driver_display_acceleration_boundary.md`.

@@ -13,7 +13,7 @@ Add `@platform` for structs/classes/custom primitive types whose size, field off
 - `src/lib/common/target.spl` defines `TargetArch`, `Endian`, and `PointerSize`, including architecture bit and pointer-byte logic.
 - `src/compiler/linker/smf_enums.spl` defines SMF `Platform` and `Arch` enums.
 - `src/compiler/80.driver/smf_binary_helpers.spl` maps text OS/arch names to SMF enums.
-- Prior docs already prefer limiting conditional compilation to platform/FFI boundaries: `doc/01_research/language/missing_language_features_2026-02-17.md`.
+- Prior docs already prefer limiting conditional compilation to platform/FFI boundaries: `doc/01_research/language/types/missing_language_features_2026-02-17.md`.
 
 ## Local Gap
 

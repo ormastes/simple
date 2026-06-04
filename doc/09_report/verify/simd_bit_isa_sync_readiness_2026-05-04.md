@@ -10,7 +10,7 @@ Scope: follow-up readiness pass for the feature-only SIMD / matrix / bit-ISA syn
 
 ## Documentation Corrections
 
-- `doc/04_architecture/compiler/security_ext_optimization_layer.md` previously described the pattern-idiom pass as x86-only and still sharing the `"vectorization"` dispatch key. That is now stale against the current implementation.
+- `doc/04_architecture/compiler/perf/security_ext_optimization_layer.md` previously described the pattern-idiom pass as x86-only and still sharing the `"vectorization"` dispatch key. That is now stale against the current implementation.
 - Older AES readiness notes should be read narrowly:
   - SIMD AES-NI extern wiring still has open/stale tracking notes.
   - The scalar/block/TLS AES runtime and interpreter paths are implemented and registered.

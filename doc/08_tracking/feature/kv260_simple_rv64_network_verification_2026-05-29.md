@@ -37,7 +37,7 @@
   - [ ] Guide docs clearly list QEMU-only, RTL-sim-only, and physical-KV260
         evidence separately.
 - **Related-upfront:** `doc/03_plan/agent_tasks/riscv64_fpga_simpleos_launch.md`
-- **Related-design-doc:** `doc/07_guide/hardware/kv260_rv64gc_fpga_boot.md`
+- **Related-design-doc:** `doc/07_guide/hardware/fpga/kv260_rv64gc_fpga_boot.md`
 - **Related-issue:** none
 - **Notes:** As of 2026-05-29, verified physical evidence covers JTAG
   programming, merged USB PS UART sanity, and the current bitstream reaching

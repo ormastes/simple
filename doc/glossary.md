@@ -236,7 +236,7 @@ Simple Optimization Plugin is the named extension point for reusable compiler an
 
 See:
 - `doc/07_guide/compiler_optimization_plugin.md`
-- `doc/04_architecture/compiler/simple_optimization_plugin.md`
+- `doc/04_architecture/compiler/perf/simple_optimization_plugin.md`
 - `doc/06_spec/app/compiler/feature/simple_optimization_plugin_spec.md`
 
 ## Fully shared frontend
@@ -531,7 +531,7 @@ Hardware description at the register-and-combinational-logic abstraction. In Sim
 
 ## VHDL Backend
 
-The compiler backend that lowers MIR to VHDL-2008 entity/architecture pairs. Each function becomes one VHDL entity. The backend enforces the VHDL Hardware Subset Contract: floating-point, pointers, dynamic allocation, and runtime features produce hard compile errors. Defined in `src/compiler/70.backend/backend/vhdl/`. Contract documented in `doc/04_architecture/hardware/vhdl_hardware_subset_contract.md`.
+The compiler backend that lowers MIR to VHDL-2008 entity/architecture pairs. Each function becomes one VHDL entity. The backend enforces the VHDL Hardware Subset Contract: floating-point, pointers, dynamic allocation, and runtime features produce hard compile errors. Defined in `src/compiler/70.backend/backend/vhdl/`. Contract documented in `doc/04_architecture/hardware/vhdl/vhdl_hardware_subset_contract.md`.
 
 ## VHDL Hardware Subset Contract
 

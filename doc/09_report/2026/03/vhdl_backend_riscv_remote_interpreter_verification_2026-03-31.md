@@ -21,8 +21,8 @@ This report remains valid for the verified VHDL/GHDL slice it covers. It is not 
 
 Current blocker documentation now lives in:
 
-- `doc/01_research/hardware/rv64_user_mode_exec.md`
-- `doc/01_research/hardware/rv64_user_mode_exec.md`
+- `doc/01_research/hardware/riscv/rv64_user_mode_exec.md`
+- `doc/01_research/hardware/riscv/rv64_user_mode_exec.md`
 - `doc/02_requirements/feature/rv64_user_mode_exec.md`
 - `doc/03_plan/rv64_user_mode_exec.md`
 

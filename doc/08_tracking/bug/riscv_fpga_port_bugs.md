@@ -76,8 +76,8 @@ Bug ID format: `BUG-RISCV-FPGA-NNN` (three-digit sequential)
 
 ## Related Docs
 
-- `doc/07_guide/platform/riscv_fpga_simpleos_guide.md` — Overall FPGA guide
-- `doc/07_guide/platform/de10nano_quartus_setup.md` — DE10-Nano Quartus setup
+- `doc/07_guide/platform/simpleos/riscv_fpga_simpleos_guide.md` — Overall FPGA guide
+- `doc/07_guide/platform/misc/de10nano_quartus_setup.md` — DE10-Nano Quartus setup
 - `src/os/kernel/arch/riscv64/platform/board_memory_map.spl` — Memory map trait
 - `src/os/kernel/arch/riscv64/platform/kria_memory_map.spl` — K26 addresses
 - `src/os/kernel/arch/riscv64/platform/litex_memory_map.spl` — LiteX/DE10-Nano addresses

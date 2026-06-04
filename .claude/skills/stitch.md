@@ -59,7 +59,7 @@ overrideNeutralColor: "#1E1E23"
 { "xs": "4px", "sm": "8px", "md": "12px", "lg": "20px", "xl": "32px" }
 ```
 
-**Token enums (typed-core Phase 4):** The spacing values above map directly to the `Spacing` enum (`Spacing.Xs`/`Sm`/`Md`/`Lg`/`Xl`). Co-located token enums `Radius`, `Elevation`, `SurfaceRole`, and `TextRole` live in `src/lib/common/ui/design_tokens.spl`. When authoring widget code, pass `Spacing.Md` (etc.) to fluent helpers instead of raw pixel strings — the `ThemeRegistry` resolver converts them. See `doc/05_design/ui/ui_typed_core_rfc.md` Phase 4 for the full mapping.
+**Token enums (typed-core Phase 4):** The spacing values above map directly to the `Spacing` enum (`Spacing.Xs`/`Sm`/`Md`/`Lg`/`Xl`). Co-located token enums `Radius`, `Elevation`, `SurfaceRole`, and `TextRole` live in `src/lib/common/ui/design_tokens.spl`. When authoring widget code, pass `Spacing.Md` (etc.) to fluent helpers instead of raw pixel strings — the `ThemeRegistry` resolver converts them. See `doc/05_design/ui/access/ui_typed_core_rfc.md` Phase 4 for the full mapping.
 
 ## designMd (Glassmorphism CSS Rules)
 
@@ -364,7 +364,7 @@ Surface mapping: bg=0, sidebar/toolbar/statusbar=1, window/cards=2, command pale
 
 ## Related Documentation
 
-- **Full design system reference:** [`doc/05_design/ui/stitch_design_system.md`](doc/05_design/ui/stitch_design_system.md) — all 3 design systems with complete token tables, Material Design 3 named colors, component specs, interaction states, and Stitch API configuration
+- **Full design system reference:** [`doc/05_design/ui/misc/stitch_design_system.md`](doc/05_design/ui/misc/stitch_design_system.md) — all 3 design systems with complete token tables, Material Design 3 named colors, component specs, interaction states, and Stitch API configuration
 - **UI skill:** `.claude/skills/ui.md` — workflow for TUI/GUI mockup design, explains what Stitch is and how to use it
 - **Local glass tokens:** `src/lib/common/ui/glass_tokens.spl` (CSS), `glass_numeric_tokens.spl` (u64 baremetal)
 - **Theme sharing:** GUI lib uses CSS tokens, window manager uses numeric tokens, Stitch uses designMd — all must stay in sync
@@ -377,4 +377,4 @@ Surface mapping: bg=0, sidebar/toolbar/statusbar=1, window/cards=2, command pale
 | Design system | Cloud (asset ID in output) |
 | Screen designs | Stitch cloud (screen IDs in output) |
 | Screen code | `mcp__stitch__get_screen` to retrieve |
-| Design system doc | `doc/05_design/ui/stitch_design_system.md` |
+| Design system doc | `doc/05_design/ui/misc/stitch_design_system.md` |

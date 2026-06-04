@@ -40,7 +40,7 @@ bin/                # Binaries (bin/simple → release/<triple>/simple symlink)
   Root FILE.md links to child manifests via `## Child Manifests`. Enforced by
   `scripts/check-workspace-root-guard.shs` (lint + pre-commit hook).
   See `doc/07_guide/workspace/file_manifest.md`.
-- **Detailed:** `doc/04_architecture/compiler/file_class_structure.md` (2,649 files, 623K lines)
+- **Detailed:** `doc/04_architecture/compiler/misc/file_class_structure.md` (2,649 files, 623K lines)
 - **Glossary:** `doc/glossary.md`
 
 ## Auto-Generated Docs

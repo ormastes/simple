@@ -105,7 +105,7 @@ This document consolidates findings from the repository regarding grammar specif
 
 ### Alternatives & Pragmatic Guidance
 - Runtime AOP in release builds should remain disabled (already validated by #1034-1035); prefer compile-time weaving.
-- For cross-cutting concerns in Rust-hosted components (compiler code), continue using tracing (`#[tracing::instrument]`) — doc/04_architecture/infra/dev.md endorses this as a pragmatic AOP alternative.
+- For cross-cutting concerns in Rust-hosted components (compiler code), continue using tracing (`#[tracing::instrument]`) — doc/04_architecture/infra/architecture_docs/dev_docs/dev.md endorses this as a pragmatic AOP alternative.
 - Keep DI/mocking via unified predicates regardless of weaving enablement (as documented).
 
 ---

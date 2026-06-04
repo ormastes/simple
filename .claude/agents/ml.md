@@ -43,5 +43,5 @@ result = x ** 2
 ## See Also
 
 - `/deeplearning` - Full ML infrastructure guide
-- `doc/05_design/language/pipeline_operators_design.md`
+- `doc/05_design/language/language_features/syntax_features/pipeline_operators_design.md`
 - `doc/07_guide/ml/tensor_dimensions.md`

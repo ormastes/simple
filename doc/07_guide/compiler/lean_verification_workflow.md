@@ -2,7 +2,7 @@
 
 **Status:** Active
 **Date:** 2026-04-04
-**Contract:** [doc/04_architecture/infra/lean_verification_contract.md](../04_architecture/lean_verification_contract.md)
+**Contract:** [doc/04_architecture/infra/misc/lean_verification_contract.md](../04_architecture/lean_verification_contract.md)
 
 This guide describes how to use the Simple compiler's Lean 4 formal verification workflow. The workflow translates annotated Simple source code into Lean 4 proof obligations, checks them with the Lean toolchain, caches results incrementally, and reports verification status at multiple levels.
 
@@ -428,7 +428,7 @@ The status command reports Lean availability, version match against `lean-toolch
 
 ## Reference
 
-- **Contract:** [doc/04_architecture/infra/lean_verification_contract.md](../04_architecture/lean_verification_contract.md) -- authoritative feature matrix and state model
+- **Contract:** [doc/04_architecture/infra/misc/lean_verification_contract.md](../04_architecture/lean_verification_contract.md) -- authoritative feature matrix and state model
 - **Support matrix:** Section 5 of the contract document
 - **Verification checker rules:** V-UNSAFE, V-EFFECT, V-REFLECT, V-GHOST, V-TRUSTED, V-PARTIAL
 - **Cache directory:** `build/verification-cache/`

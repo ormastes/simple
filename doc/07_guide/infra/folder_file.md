@@ -3,7 +3,7 @@
 **Quick Navigation:** Where to find what you're looking for
 
 **Last Updated:** 2026-02-16
-**For detailed analysis:** See [doc/04_architecture/compiler/file_class_structure.md](../../architecture/file_class_structure.md)
+**For detailed analysis:** See [doc/04_architecture/compiler/misc/file_class_structure.md](../../architecture/file_class_structure.md)
 
 ---
 
@@ -216,7 +216,7 @@ bin/
 -> `README.md`, `doc/07_guide/quick_reference/syntax_quick_reference.md`
 
 **...contribute code**
--> `CLAUDE.md`, `doc/04_architecture/infra/overview.md`
+-> `CLAUDE.md`, `doc/04_architecture/infra/architecture_docs/overview/overview.md`
 
 **...write traceable docs and tests**
 -> `doc/07_guide/writing/traceability.md`
@@ -234,7 +234,7 @@ bin/
 -> `src/compiler/`, tests in `test/01_unit/compiler/`
 
 **...understand the architecture**
--> `doc/04_architecture/infra/overview.md`, `doc/04_architecture/compiler/file_class_structure.md`
+-> `doc/04_architecture/infra/architecture_docs/overview/overview.md`, `doc/04_architecture/compiler/misc/file_class_structure.md`
 
 **...check project status**
 -> `doc/EXECUTIVE_SUMMARY.md`, `CHANGELOG.md`

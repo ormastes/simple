@@ -11,8 +11,8 @@
 ## Research Artifacts Created
 
 - `.spipe/gui-lib-mac-qemu-arm64-perf/state.md`
-- `doc/01_research/ui/gui_lib_mac_qemu_arm64_perf.md`
-- `doc/01_research/ui/gui_lib_mac_qemu_arm64_perf.md`
+- `doc/01_research/ui/graphics/gui/gui_lib_mac_qemu_arm64_perf.md`
+- `doc/01_research/ui/graphics/gui/gui_lib_mac_qemu_arm64_perf.md`
 - `doc/02_requirements/feature/gui_lib_mac_qemu_arm64_perf_options.md`
 - `doc/02_requirements/nfr/gui_lib_mac_qemu_arm64_perf_options.md`
 - `doc/03_plan/agent_tasks/gui_lib_mac_qemu_arm64_perf.md`

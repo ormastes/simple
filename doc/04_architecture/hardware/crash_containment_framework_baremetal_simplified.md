@@ -126,4 +126,4 @@ where:
 
 See the main architecture doc:
 
-- [`doc/04_architecture/infra/crash_containment_framework.md`](doc/04_architecture/infra/crash_containment_framework.md)
+- [`doc/04_architecture/infra/misc/crash_containment_framework.md`](doc/04_architecture/infra/misc/crash_containment_framework.md)

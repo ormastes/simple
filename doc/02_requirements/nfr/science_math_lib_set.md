@@ -4,7 +4,7 @@
 **Date:** 2026-05-05
 **Status:** User-selected phased sequence.
 **Selection:** NFR-A -> NFR-B -> NFR-C -> NFR-D.
-**Research:** `doc/01_research/lib/science_math_lib_set.md`, `doc/01_research/lib/science_math_lib_set.md`
+**Research:** `doc/01_research/lib/science/science_math_lib_set.md`, `doc/01_research/lib/science/science_math_lib_set.md`
 **Design:** `doc/04_architecture/lib/science_math_lib_set.md`, `doc/05_design/science_math_lib_set.md`
 
 ## Phase NFR-A: Portable Correctness Baseline

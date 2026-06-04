@@ -367,7 +367,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   release and bootstrap binaries, with no `CompileOptions.*` field accessor
   failures and no `no mode matched` warning. Artifact refresh research and
   regression plan:
-  `doc/01_research/compiler/compiler_release_compile_options_artifact.md`,
+  `doc/01_research/compiler/optimization/compiler_release_compile_options_artifact.md`,
   `doc/03_plan/sys_test/compiler_release_compile_options_artifact.md`.
 
 ---
@@ -451,7 +451,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   - [x] Nested braces inside payloads are preserved.
   - [x] Domain blocks appear in lightweight outline/LSP metadata.
 - **Related-upfront:** `doc/02_requirements/feature/all_regions.md`
-- **Related-design-doc:** `doc/04_architecture/infra/all_regions.md`; `doc/05_design/all_regions.md`
+- **Related-design-doc:** `doc/04_architecture/infra/architecture_docs/overview/all_regions.md`; `doc/05_design/all_regions.md`
 - **Notes:** This is the enabling layer only; it must not claim CSS, MusicXML,
   IFC, STEP, or RTL semantics. Partial implementation added Rust parser raw
   capture and `HirModule.domain_blocks`. 2026-05-29 follow-ups surface approved
@@ -506,7 +506,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   - [x] Generated CSS/theme output integrates with existing Simple UI/theme code.
   - [x] Browser compatibility tests cover margin, line height, flex/grid-relevant behavior selected by design.
 - **Related-upfront:** `doc/02_requirements/feature/all_regions.md`
-- **Related-design-doc:** `doc/04_architecture/infra/all_regions.md`; `doc/04_architecture/ui/simple_theme_system.md`
+- **Related-design-doc:** `doc/04_architecture/infra/architecture_docs/overview/all_regions.md`; `doc/04_architecture/ui/simple_theme_system.md`
 - **Notes:**
   External anchors: WHATWG HTML and W3C CSS Display/Flex/Grid/Cascade.
   Implemented 2026-05-29 as the pure Simple typed authoring/model surface in

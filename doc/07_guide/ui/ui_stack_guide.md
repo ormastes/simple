@@ -162,7 +162,7 @@ For static-shell and binary-cache planning, use
 static-shell cacheability, dynamic-island count, and render plan. Dynamic
 markers currently include `data-simple-dynamic`, `data-live`, `data-ui-patch`,
 and WebSocket-backed JS. The first milestone is documented in
-`doc/04_architecture/ui/html_css_binary_caching.md` and
+`doc/04_architecture/ui/web/html_css_binary_caching.md` and
 `doc/05_design/html_css_binary_caching.md`.
 
 For renderer-owned static HTML reuse, use `src/app/ui.web/render_cache.spl`.

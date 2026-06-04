@@ -73,4 +73,4 @@ The `cli Name:` keyword provides language-level declarative argument parsing wit
 
 ## Support Matrix
 
-See `doc/04_architecture/app/cli_keyword_support_matrix.md` for detailed capability table.
+See `doc/04_architecture/app/compiler/cli_keyword_support_matrix.md` for detailed capability table.

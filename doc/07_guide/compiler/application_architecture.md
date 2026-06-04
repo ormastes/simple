@@ -212,6 +212,6 @@ Simple extends Clean Architecture with dimensions:
 
 - Architecture overview: `doc/07_guide/architecture.md`
 - Compiler architecture: `doc/07_guide/architecture/compiler_architecture.md`
-- File structure: `doc/04_architecture/compiler/file_class_structure.md`
+- File structure: `doc/04_architecture/compiler/misc/file_class_structure.md`
 - LLM dashboard web login operator guide: `doc/07_guide/tooling/llm_dashboard_web_login.md`
-- Assistant/dashboard architecture slice: `doc/04_architecture/app/kairos_like_simple_mcp_llm_dashboard.md`
+- Assistant/dashboard architecture slice: `doc/04_architecture/app/ui/kairos_like_simple_mcp_llm_dashboard.md`

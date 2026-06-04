@@ -12,15 +12,15 @@ The VHDL backend has been moved from **experimental** to **supported with a clea
 
 | Phase | Goal | Status | Deliverable |
 |-------|------|--------|-------------|
-| 1 | Freeze supported subset | Done | `doc/04_architecture/hardware/vhdl_hardware_subset_contract.md` |
+| 1 | Freeze supported subset | Done | `doc/04_architecture/hardware/vhdl/vhdl_hardware_subset_contract.md` |
 | 2 | Strict subset validation | Done | Fixed `HardwareCodegen.compile_process()` in `vhdl_backend.spl` |
 | 3 | Complete emission | Done | Verified: all supported subset types emit valid VHDL |
 | 4 | CLI path authoritative | Done | Verified: `--backend=vhdl` → `compile_vhdl()` → `aot_vhdl_file()` fully wired |
 | 5 | GHDL validation gate | Done | `test/02_integration/compiler/vhdl_backend_e2e_spec.spl` (12 tests) |
 | 6 | Separate demos from examples | Done | `examples/09_embedded/vhdl/` reorganized (backend/builder/simulation) |
-| 7 | Simulation milestone decision | Done | `doc/04_architecture/hardware/vhdl_simulation_milestone_decision.md` |
+| 7 | Simulation milestone decision | Done | `doc/04_architecture/hardware/vhdl/vhdl_simulation_milestone_decision.md` |
 | 8 | riscv32_sim_vhdl quarantine | Done | Quarantined as follow-on milestone |
-| 9 | Support matrix | Done | `doc/04_architecture/hardware/vhdl_support_matrix.md` |
+| 9 | Support matrix | Done | `doc/04_architecture/hardware/vhdl/vhdl_support_matrix.md` |
 
 ## Test Results
 
@@ -46,9 +46,9 @@ The VHDL backend has been moved from **experimental** to **supported with a clea
 - `doc/03_plan/vhdl_backend_completion_plan_2026-04-04.md` — Status: Draft → In Progress
 
 ### New Files
-- `doc/04_architecture/hardware/vhdl_hardware_subset_contract.md` — Formal supported subset contract (Phase 1)
-- `doc/04_architecture/hardware/vhdl_simulation_milestone_decision.md` — Simulation milestone decision (Phase 7-8)
-- `doc/04_architecture/hardware/vhdl_support_matrix.md` — Full support matrix (Phase 9)
+- `doc/04_architecture/hardware/vhdl/vhdl_hardware_subset_contract.md` — Formal supported subset contract (Phase 1)
+- `doc/04_architecture/hardware/vhdl/vhdl_simulation_milestone_decision.md` — Simulation milestone decision (Phase 7-8)
+- `doc/04_architecture/hardware/vhdl/vhdl_support_matrix.md` — Full support matrix (Phase 9)
 - `doc/08_tracking/bug/vhdl_backend_limitations.md` — Known limitations (Phase 11)
 - `test/02_integration/compiler/vhdl_backend_e2e_spec.spl` — E2E integration tests with GHDL validation (Phase 5)
 - `examples/09_embedded/vhdl/README.md` — Example classification (Phase 6)

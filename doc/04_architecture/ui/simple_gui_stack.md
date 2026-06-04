@@ -4,7 +4,7 @@
 Status: draft-v1 (2026-05-28)
 Owners: `src/os/gui`, `src/os/desktop`, `src/os/compositor`, `src/app/ui.web`, `src/app/ui.electron`, `src/lib/gc_async_mut/gpu/engine2d`
 Related:
-- `doc/04_architecture/compiler/gui_layer_contract.md`
+- `doc/04_architecture/compiler/graphics/gui_layer_contract.md`
 - `doc/04_architecture/ml/compositor_gpu_architecture.md`
 - `doc/04_architecture/ui/ui_web_protocol.md`
 - `doc/06_spec/runtime/rt_gui_glass_contract.md`
@@ -114,7 +114,7 @@ display/input mechanisms.
 
 Existing implementations include framebuffer/GPU/host/browser/Engine2D-backed
 compositor paths. The locked method surface is documented in
-`doc/04_architecture/compiler/gui_layer_contract.md`.
+`doc/04_architecture/compiler/graphics/gui_layer_contract.md`.
 
 ### Host and Web Shell Adapters
 

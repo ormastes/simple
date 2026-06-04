@@ -34,7 +34,7 @@ scripts/local-container-test.shs quick path/to/spec.spl    # Single test
 scripts/ci-test.sh                                         # CI-style
 ```
 
-**Troubleshooting:** See `doc/07_guide/infra/container_testing.md`
+**Troubleshooting:** See `doc/07_guide/infra/testing/container_testing.md`
 
 ## Coverage Target Annotations
 

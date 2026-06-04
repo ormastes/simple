@@ -6,7 +6,7 @@ Date: 2026-05-24
 ## Existing Surfaces
 
 - `doc/07_guide/compiler_optimization_plugin.md` already defines Simple Optimization Plugin as the common optimizer extension point for compiler and interpreter work.
-- `doc/04_architecture/compiler/simple_optimization_plugin.md` defines provider metadata, built-in vs dynamic providers, optimization plans, and lookup responsibilities.
+- `doc/04_architecture/compiler/perf/simple_optimization_plugin.md` defines provider metadata, built-in vs dynamic providers, optimization plans, and lookup responsibilities.
 - `doc/06_spec/app/compiler/feature/simple_optimization_plugin_spec.md` lists requirements and validation commands for the plugin contract.
 - `src/compiler/60.mir_opt/mir_opt/pattern/rule_engine.spl` provides the current in-source provider schema:
   - `OptimizerProviderKind`

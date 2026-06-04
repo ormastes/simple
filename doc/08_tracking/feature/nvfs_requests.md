@@ -86,7 +86,7 @@ keep the `[UPFRONT]` list focused on the load-bearing seven.
   - [x] `Fat32Driver.truncate("/foo.txt", 0)` returns `Ok(())` and frees all clusters
   - [x] `Fat32Driver.ftruncate(handle, n)` shrinks or extends the file to `n` bytes
   - [x] All existing `fs_test_entry.spl` tests pass after the change
-- **Related-upfront:** `doc/01_research/os/storage_fat32_statfs_truncate.md`;
+- **Related-upfront:** `doc/01_research/os/fs/storage_fat32_statfs_truncate.md`;
   `doc/03_plan/sys_test/storage_fat32_statfs_truncate.md`
 - **Related-design-doc:** `doc/05_design/storage_fat32_statfs_truncate.md`;
   background: `doc/05_design/simpleos_fs_migration.md §M4`
@@ -122,7 +122,7 @@ keep the `[UPFRONT]` list focused on the load-bearing seven.
   - [x] `pwrite(h, 0, buf)` writes at offset 0 without changing the cursor
   - [x] Round-trip: `write(h, 10, a)` then `pread(h, 0, b)` reads from 0, cursor
         remains at 10 for the next sequential read
-- **Related-upfront:** `doc/01_research/os/storage_fat32_positional_cursor.md`,
+- **Related-upfront:** `doc/01_research/os/fs/storage_fat32_positional_cursor.md`,
   `doc/03_plan/sys_test/storage_fat32_positional_cursor.md`
 - **Related-design-doc:** `doc/05_design/storage_fat32_positional_cursor.md`;
   background: `doc/05_design/simpleos_fs_migration.md §M4`
@@ -160,7 +160,7 @@ keep the `[UPFRONT]` list focused on the load-bearing seven.
   - [x] `opendir(path) -> Result<DirHandle, FsError>` added to `FsDriver` trait
         (currently missing; DirHandle exists but no way to obtain one)
   - [x] All existing tests pass
-- **Related-upfront:** `doc/01_research/os/storage_fat32_handle_metadata.md`;
+- **Related-upfront:** `doc/01_research/os/fs/storage_fat32_handle_metadata.md`;
   `doc/03_plan/sys_test/storage_fat32_handle_metadata.md`
 - **Related-design-doc:** `doc/05_design/storage_fat32_handle_metadata.md`;
   background: `doc/05_design/fs_driver_interface.md §2`
@@ -1006,7 +1006,7 @@ not applicable for the structural reasons above. Verification:
   - [x] `bin/simple test examples/11_advanced/simple_db/test/02_integration/storage/simple_db_nvfs_e2e_test.spl`
         passes
 - **Related-upfront:** `from_simple_db.md §S1` (arena_create per storage class);
-  `doc/01_research/lib/simple_db_nvfs_constants.md`;
+  `doc/01_research/lib/simple_db/simple_db_nvfs_constants.md`;
   `doc/03_plan/sys_test/simple_db_nvfs_constants.md`
 - **Related-design-doc:** `doc/05_design/simple_db_nvfs_constants.md`;
   background: `doc/05_design/nvfs_design.md §4.1`

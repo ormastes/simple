@@ -7,9 +7,9 @@ lifecycle, and SOSIX sharing surfaces.
 
 - **Target:** simpleos-os
 - **Owning architecture docs:**
-  - `doc/04_architecture/os/scheduler_process_isolation.md`
+  - `doc/04_architecture/os/scheduler/scheduler_process_isolation.md`
   - `doc/04_architecture/os/sosix_process_sharing.md`
-  - `doc/07_guide/platform/sosix_process_scheduler.md`
+  - `doc/07_guide/platform/misc/sosix_process_scheduler.md`
 
 ## Schema
 
@@ -185,8 +185,8 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
         domains.
   - [x] Scheduler specs cover flat fallback and at least one synthetic
         multi-domain topology.
-- **Related-upfront:** `doc/04_architecture/os/scheduler_process_isolation.md`
-- **Related-design-doc:** `doc/07_guide/platform/sosix_process_scheduler.md`
+- **Related-upfront:** `doc/04_architecture/os/scheduler/scheduler_process_isolation.md`
+- **Related-design-doc:** `doc/07_guide/platform/misc/sosix_process_scheduler.md`
 - **Related-issue:** none
 - **Notes:** Synthetic topology construction, scheduler install hooks, x86_64
   CPUID shape probing, ACPI MADT APIC-ID enumeration, per-CPU APIC metadata,
@@ -202,7 +202,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   `[smp] AP reached 64-bit entry`, and `[smp-probe] done`.
   Status closed on 2026-05-30 because all listed acceptance criteria are now
   checked and the entry links the architecture/design guide
-  `doc/07_guide/platform/sosix_process_scheduler.md`. Focused non-live
+  `doc/07_guide/platform/misc/sosix_process_scheduler.md`. Focused non-live
   verification was rerun with:
   `SIMPLE_LIB=/tmp/simple-final-sync/src /home/ormastes/dev/pub/simple/src/compiler_rust/target/debug/simple check test/01_unit/os/kernel/scheduler/topology_spec.spl test/01_unit/os/kernel/scheduler/scheduler_spec.spl test/01_unit/os/kernel/arch/x86_64_topology_spec.spl test/03_system/simpleos_smp_ap_live_spec.spl`.
   Interpreter-mode focused specs passed for scheduler topology (7/7) and
@@ -233,7 +233,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
         and affinity-blocked wakeups.
   - [x] Existing scheduler class pick order remains deadline, RT, fair,
         background, idle.
-- **Related-upfront:** `doc/04_architecture/os/scheduler_process_isolation.md`
+- **Related-upfront:** `doc/04_architecture/os/scheduler/scheduler_process_isolation.md`
 - **Related-design-doc:** `doc/05_design/scheduler_process_isolation.md`
 - **Related-issue:** none
 - **Notes:** Per-CPU current mirrors, preemption-pending slots, idle pull, and
@@ -257,7 +257,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   - [x] Priority-inheritance mutex tests cover boosting, nested waiters, and
         priority restoration on unlock.
   - [x] `schedctl` exposes only safe RT policy transitions.
-- **Related-upfront:** `doc/04_architecture/os/scheduler_process_isolation.md`
+- **Related-upfront:** `doc/04_architecture/os/scheduler/scheduler_process_isolation.md`
 - **Related-design-doc:** `doc/05_design/scheduler_process_isolation.md`
 - **Related-issue:** none
 - **Notes:** Per-CPU RT bandwidth and scheduler-owned PI mutex helpers are
@@ -280,7 +280,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   - [x] Missed deadlines increment an observable counter.
   - [x] Scheduler trace output records admit, replenish, overrun, and miss
         events.
-- **Related-upfront:** `doc/04_architecture/os/scheduler_process_isolation.md`
+- **Related-upfront:** `doc/04_architecture/os/scheduler/scheduler_process_isolation.md`
 - **Related-design-doc:** `doc/05_design/scheduler_process_isolation.md`
 - **Related-issue:** none
 - **Notes:** CBS runtime accounting, replenishment, overrun traces, and miss
@@ -307,8 +307,8 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
         value without partial image replacement.
   - [x] Specs cover empty vectors, multi-argument vectors, invalid pointers,
         and missing NUL termination.
-- **Related-upfront:** `doc/04_architecture/os/scheduler_process_isolation.md`
-- **Related-design-doc:** `doc/07_guide/platform/sosix_process_scheduler.md`
+- **Related-upfront:** `doc/04_architecture/os/scheduler/scheduler_process_isolation.md`
+- **Related-design-doc:** `doc/07_guide/platform/misc/sosix_process_scheduler.md`
 - **Related-issue:** none
 - **Notes:** VMM copy-in helpers now back exec argv/envp vector copying.
   `test/01_unit/os/kernel/memory/vmm_copyin_spec.spl` passes as of 2026-05-29
@@ -335,7 +335,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
   - [x] Specs cover valid snapshots, invalid fd, out-of-range reads, and
         failure cleanup.
 - **Related-upfront:** `doc/04_architecture/os/sosix_process_sharing.md`
-- **Related-design-doc:** `doc/07_guide/platform/sosix_process_scheduler.md`
+- **Related-design-doc:** `doc/07_guide/platform/misc/sosix_process_scheduler.md`
 - **Related-issue:** none
 - **Notes:** `posix_pread_exact_bytes` provides the synchronous fd/offset/len
   snapshot helper used by syscall 121. Unit coverage exercises validation,
@@ -361,7 +361,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
         excludes unrelated entry modules or compiles `wm_entry.spl` within the
         configured timeout.
   - [x] Add a focused regression check for the selected fix.
-- **Related-upfront:** `doc/04_architecture/os/scheduler_process_isolation.md`
+- **Related-upfront:** `doc/04_architecture/os/scheduler/scheduler_process_isolation.md`
 - **Related-design-doc:** none
 - **Related-issue:** none
 - **Notes:** During AP trampoline verification, full native-build progressed
@@ -412,7 +412,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
         `[vfs] mounted fat32 device=nvme0 volume=simpleos`,
         `[phase-3-mount] fat32 ok`, process-backed browser/hello/clang/rust/
         wine markers, container namespace/rootfs markers, and `TEST PASSED`.)
-- **Related-upfront:** `doc/04_architecture/os/scheduler_process_isolation.md`
+- **Related-upfront:** `doc/04_architecture/os/scheduler/scheduler_process_isolation.md`
 - **Related-design-doc:** `doc/05_design/simpleos_fr_sos_024_phase3_ring3_entry.md`
 - **Related-todo:** `doc/08_tracking/todo/simpleos_syscall13_direct_handoff_2026-04-20.md`
 - **Related-issue:** none
