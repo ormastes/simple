@@ -5739,3 +5739,44 @@ object. The focused fetch/WASM chain spec now passes `175/175`; the native WASM
 host spec remained `107/107`, the WebGPU JS/WASM system spec remained
 `106/106`, Node API conformance remained `275/275`, and `src/lib` completed
 with the current `399 warning(s)`. Broader browser/WASM semantics remain open.
+
+BrowserSession WebAssembly compiled/instantiated export descriptor parity continuation:
+
+Completion checklist:
+
+- Add a BrowserSession browser-script scenario that reads export descriptors
+  from both a compiled module and an instantiated module in the same script
+  evaluation.
+- Verify the compiled module promise exposes `WebAssembly.Module.exports(...)`
+  with two descriptors.
+- Verify the compiled descriptor names and kinds are `tbl:table` and
+  `answer:global`.
+- Verify the instantiate promise resolves to `status=instantiated` and exposes
+  the same byte length and export descriptor names/kinds from `result.module`.
+- Verify the two promise callbacks preserve deterministic ordered output across
+  compiled and instantiated descriptor paths.
+- Regenerate the mirrored scenario manual for the changed SPipe spec.
+- Restore generated index/manual noise from docgen and adjacent specs.
+- Record command evidence, pass counts, warning count, and remaining open scope.
+- Run diff hygiene and doc layout gates before committing and pushing.
+
+Test checklist:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+
+BrowserSession scripts now compare compiled and instantiated WebAssembly export
+descriptors in the same script evaluation. The focused assertion verifies the
+compiled module promise exposes two descriptors, `tbl:table` and
+`answer:global`, then verifies the instantiate promise resolves to
+`status=instantiated` with matching byte length and descriptor names/kinds from
+`result.module`. The focused fetch/WASM chain spec now passes `176/176`; the
+native WASM host spec remained `107/107`, the WebGPU JS/WASM system spec
+remained `106/106`, Node API conformance remained `275/275`, and `src/lib`
+completed with the current `399 warning(s)`. Broader browser/WASM semantics
+remain open.

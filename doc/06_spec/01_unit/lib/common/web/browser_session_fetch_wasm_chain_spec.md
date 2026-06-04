@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 175 | 175 | 0 | 0 |
+| 176 | 176 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -2667,6 +2667,39 @@ match result:
         expect(_display_js(value)).to_equal("40:2:tbl:table:answer:global")
     Err(err):
         expect("unexpected compiled export descriptor js error: {err}").to_equal("")
+```
+
+</details>
+
+#### compares compiled and instantiated WebAssembly module export descriptors in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `compile:40:2:tbl:table:answer:global:instantiate:instantiated:40:2:tbl:table:... (full value in folded executable source)`
+
+3. Err
+   - Expected: "unexpected combined export descriptor js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var out = ''; var wasm = '0061736d010000000404017000010606017f00412a0b0710020374626c010006616e737765720300'; WebAssembly.compile(wasm).then(function(module) { var exports = WebAssembly.Module.exports(module); out = 'compile:' + module.byteLength + ':' + exports.length + ':' + exports[0].name + ':' + exports[0].kind + ':' + exports[1].name + ':' + exports[1].kind; }); WebAssembly.instantiate(wasm).then(function(result) { var exports = WebAssembly.Module.exports(result.module); out = out + ':instantiate:' + result.status + ':' + result.module.byteLength + ':' + exports.length + ':' + exports[0].name + ':' + exports[0].kind + ':' + exports[1].name + ':' + exports[1].kind; }); out")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("compile:40:2:tbl:table:answer:global:instantiate:instantiated:40:2:tbl:table:answer:global")
+    Err(err):
+        expect("unexpected combined export descriptor js error: {err}").to_equal("")
 ```
 
 </details>
@@ -8325,8 +8358,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 175 |
-| Active scenarios | 175 |
+| Total scenarios | 176 |
+| Active scenarios | 176 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
