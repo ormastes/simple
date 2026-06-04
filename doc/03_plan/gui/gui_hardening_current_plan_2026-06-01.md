@@ -5522,6 +5522,68 @@ remained `106/106`, Node API conformance remained `275/275`, and `src/lib`
 completed with the current `405 warning(s)` across `5936` files. Broader
 typed-array prototype parity and production GUI pixel parity remain open.
 
+BrowserSession Uint8Array nonzero-offset sort/iterator helper continuation:
+
+Detailed completion checklist:
+
+- Confirm the fresh worktree starts from synchronized `main`/`origin/main`.
+- Confirm existing BrowserSession coverage already exercises numeric sort,
+  comparator sort, keys/values/entries iterators, and `Symbol.iterator` on
+  zero-offset typed arrays.
+- Confirm existing BrowserSession coverage already exercises nonzero-offset
+  callback, mutation/search, `set`, `slice`, constructor copy, and shared
+  subarray storage.
+- Add one BrowserSession browser-script scenario using `base.subarray(2, 7)` as
+  the receiver for sort and iterator helpers.
+- Verify `Uint8Array.prototype.values.call(view).next()` reads the logical view
+  window before mutation.
+- Verify `Uint8Array.prototype.sort.call(view)` sorts only the logical view
+  window numerically and returns the receiver.
+- Verify `Uint8Array.prototype.sort.apply(view, [compareFn])` sorts only the
+  logical view window with comparator callback ordering and returns the receiver.
+- Verify `keys.call`, `values.apply`, `entries.call`, and
+  `Symbol.iterator.apply` all report logical view indices and bytes after sort.
+- Verify base-buffer bytes outside the view window remain unchanged while the
+  shared base buffer reflects the sorted view-window bytes.
+- Regenerate the mirrored SPipe scenario manual and move old-path docgen output
+  onto `doc/06_spec/unit/...`.
+- Restore generated index, tracking, and adjacent old-path manual noise.
+- Record focused and manual scenario counts after docgen.
+- Run the focused BrowserSession check and interpreter spec.
+- Run native WASM host, WebGPU JS/WASM, and Node API conformance regressions.
+- Run `src/lib` check, diff hygiene, and executable-spec layout guard.
+- Commit only the focused spec, generated manual, and plan evidence.
+- Fetch/rebase with file-count guard and push `HEAD:main` with `GITHUB_TOKEN`
+  unset.
+
+Detailed test checklist:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+- `git diff --check`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+BrowserSession scripts now prove sort and iterator helpers operate on the
+logical window of a nonzero-offset `subarray` receiver. The focused assertion
+verifies `values.call(view).next()` reads the initial view-window byte,
+`sort.call(view)` sorts only the view window numerically and returns the
+receiver, `sort.apply(view, [compareFn])` sorts only the view window with
+comparator ordering and returns the receiver, and `keys.call`, `values.apply`,
+`entries.call`, and `Symbol.iterator.apply` report logical view indices and
+bytes after sorting. The assertion also verifies base-buffer bytes outside the
+view stay unchanged while the shared base buffer reflects the sorted
+view-window bytes. The focused fetch/WASM chain spec now passes `232/232`, and
+the generated manual records `Total scenarios | 232 |`. The native WASM host
+spec remained `107/107`, the WebGPU JS/WASM system spec remained `106/106`,
+Node API conformance remained `275/275`, and `src/lib` completed with the
+current `405 warning(s)` across `5936` files. Broader typed-array prototype
+parity and production GUI pixel parity remain open.
+
 BrowserSession Uint8Array prototype slice copied-buffer continuation:
 
 Detailed completion checklist:

@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 231 | 231 | 0 | 0 |
+| 232 | 232 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -10851,6 +10851,39 @@ match result:
 
 </details>
 
+#### dispatches Uint8Array sort and iterators over nonzero-offset views
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `true:2:5:30:true:true:0,1:255,30:0=255:255,30:255,30,8,7,4:10,20,255,30,8,7,4,90`
+
+3. Err
+   - Expected: "unexpected uint8 view sort/iterator helper js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var base = new Uint8Array(8); base[0] = 10; base[1] = 20; base[2] = 30; base[3] = 260; base[4] = -1; base[5] = 7; base[6] = 8; base[7] = 90; var view = base.subarray(2, 7); var firstValue = Uint8Array.prototype.values.call(view).next(); var sortRet = Uint8Array.prototype.sort.call(view); var cmpRet = Uint8Array.prototype.sort.apply(view, [function(x, y) { return y - x; }]); var keys = Uint8Array.prototype.keys.call(view); var k0 = keys.next(); var k1 = keys.next(); var values = Uint8Array.prototype.values.apply(view, []); var v0 = values.next(); var v1 = values.next(); var entries = Uint8Array.prototype.entries.call(view); var e0 = entries.next(); var sym = Uint8Array.prototype[Symbol.iterator].apply(view, []); var s0 = sym.next(); var s1 = sym.next(); (view.buffer === base.buffer) + ':' + view.byteOffset + ':' + view.length + ':' + firstValue.value + ':' + (sortRet === view) + ':' + (cmpRet === view) + ':' + k0.value + ',' + k1.value + ':' + v0.value + ',' + v1.value + ':' + e0.value[0] + '=' + e0.value[1] + ':' + s0.value + ',' + s1.value + ':' + view.toString() + ':' + base.toString()")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("true:2:5:30:true:true:0,1:255,30:0=255:255,30:255,30,8,7,4:10,20,255,30,8,7,4,90")
+    Err(err):
+        expect("unexpected uint8 view sort/iterator helper js error: {err}").to_equal("")
+```
+
+</details>
+
 #### reduces Uint8Array values with accumulator callbacks in browser scripts
 
 1. var session = BrowserSession new
@@ -12982,8 +13015,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 231 |
-| Active scenarios | 231 |
+| Total scenarios | 232 |
+| Active scenarios | 232 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
