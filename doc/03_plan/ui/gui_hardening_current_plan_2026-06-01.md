@@ -4883,6 +4883,61 @@ JS/WASM system spec remained `106/106`, Node API conformance remained
 `5910` files. Diff hygiene and the `doc/06_spec` layout gate passed before
 push.
 
+BrowserSession combined streaming multiple-function export continuation:
+
+Completion checklist:
+
+- Add a BrowserSession browser-script scenario that queues both
+  `WebAssembly.compileStreaming(window.fetch('/compile.wasm'))` followed by
+  `WebAssembly.instantiate(module)` and
+  `WebAssembly.instantiateStreaming(window.fetch('/instantiate.wasm'))` for the
+  same two-function export module in one script.
+- Verify the initial script result is `queued` and the shared `out` variable is
+  empty before any network response is committed.
+- Verify the first pending network request is a fetch for
+  `https://example.com/compile.wasm`.
+- Commit the two-function module response for `/compile.wasm` and verify the
+  compile-streaming path reports status `instantiated`, module byte length `47`,
+  function export count `2`, exported `init` type `function`, exported `render`
+  type `function`, and both synthesized call results as `undefined`.
+- Verify the second pending network request is a fetch for
+  `https://example.com/instantiate.wasm`.
+- Commit the same two-function module response for `/instantiate.wasm` and
+  verify the final output keeps the compile-streaming evidence and appends
+  instantiate-streaming status `instantiated`, byte length `47`, function export
+  count `2`, both export types as `function`, and both synthesized call results
+  as `undefined`.
+- Regenerate the mirrored scenario manual for the changed SPipe spec and move
+  docgen's old `01_unit` output onto the tracked `unit` manual path.
+- Remove generated docgen noise from adjacent specs, restore generated tracking
+  index churn, and keep only the intended source/manual/plan files in the commit.
+- Record focused pass count, adjacent pass counts, `src/lib` warning count,
+  docgen/manual evidence, diff hygiene, and `doc/06_spec` layout evidence before
+  pushing.
+
+Test checklist:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+- `git diff --check`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+BrowserSession scripts now compare both streaming entry points against the same
+two-function export module in one queued script. The scenario proves the first
+network commit completes only the compile-streaming chain, then the second
+network commit appends the instantiate-streaming chain while preserving the
+compile-streaming multiple-export evidence. The focused fetch/WASM chain spec
+is now passing `197/197`; the native WASM host spec remained `107/107`, the
+WebGPU JS/WASM system spec remained `106/106`, Node API conformance remained
+`275/275`, and `src/lib` completed with the current `399 warning(s)` across
+`5910` files. Diff hygiene and the `doc/06_spec` layout gate passed before
+push.
+
 BrowserSession multiple WebAssembly function export continuation:
 
 - `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
