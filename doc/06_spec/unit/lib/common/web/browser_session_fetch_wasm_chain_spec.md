@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 147 | 147 | 0 | 0 |
+| 148 | 148 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -2337,6 +2337,39 @@ match result:
         expect(_display_js(value)).to_equal("25:instantiated:131072:65536:4:1:131072:4")
     Err(err):
         expect("unexpected instance constructor memory export js error: {err}").to_equal("")
+```
+
+</details>
+
+#### constructs WebAssembly Instance multiple function exports in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `47:2:instantiated:function:function:undefined:undefined`
+
+3. Err
+   - Expected: "unexpected instance constructor multiple function export js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var module = new WebAssembly.Module('0061736d01000000010401600000030302000007110204696e697400000672656e64657200010a070202000b02000b'); var instance = new WebAssembly.Instance(module); var exports = instance.exports; module.byteLength + ':' + module.functionExportCount + ':' + instance.status + ':' + typeof exports.init + ':' + typeof exports.render + ':' + exports.init() + ':' + exports.render()")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("47:2:instantiated:function:function:undefined:undefined")
+    Err(err):
+        expect("unexpected instance constructor multiple function export js error: {err}").to_equal("")
 ```
 
 </details>
@@ -7308,8 +7341,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 147 |
-| Active scenarios | 147 |
+| Total scenarios | 148 |
+| Active scenarios | 148 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
