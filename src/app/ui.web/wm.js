@@ -12094,8 +12094,10 @@ class SimpleWindowManager {
     panel.addEventListener('click', (event) => {
       const choice = event.target.closest('[data-snap-layout]');
       if (!choice || !panel.contains(choice)) return;
+      this._setSnapLayoutSelection(Number(choice.dataset.snapLayoutIndex || '0') || 0, false);
       this._applySnapLayoutChoice(panel.dataset.windowIdHint || '', choice.dataset.snapLayout || '');
     });
+    panel.addEventListener('keydown', (event) => this._handleSnapLayoutPaletteKeydown(event));
     document.body.appendChild(panel);
     this._snapLayoutPalette = panel;
     return panel;
@@ -12111,6 +12113,7 @@ class SimpleWindowManager {
     }
     this._renderSnapLayoutPalette(winEl, anchorEl);
     panel.hidden = false;
+    this._setSnapLayoutSelection(Number(panel.dataset.snapLayoutActiveIndex || '0') || 0, true);
     return true;
   }
 
@@ -12118,15 +12121,22 @@ class SimpleWindowManager {
     const panel = this._ensureSnapLayoutPalette();
     const surfaceId = winEl?.dataset?.surfaceId || '';
     panel.dataset.windowIdHint = surfaceId;
+    panel.dataset.snapLayoutActiveIndex = panel.dataset.snapLayoutActiveIndex || '0';
     panel.innerHTML = '';
     const title = document.createElement('div');
     title.className = 'wm-snap-layout-title';
     title.textContent = 'Snap layouts';
     panel.appendChild(title);
     const grid = document.createElement('div');
+    grid.id = 'wm-snap-layout-grid';
     grid.className = 'wm-snap-layout-grid';
-    for (const layout of this._snapLayoutItems()) grid.appendChild(this._makeSnapLayoutChoice(layout));
+    grid.setAttribute('role', 'listbox');
+    grid.setAttribute('aria-label', 'Available snap layouts');
+    const activeIndex = Math.max(0, Math.min(this._snapLayoutItems().length - 1, Number(panel.dataset.snapLayoutActiveIndex || '0') || 0));
+    grid.setAttribute('aria-activedescendant', `wm-snap-layout-choice-${activeIndex}`);
+    this._snapLayoutItems().forEach((layout, index) => grid.appendChild(this._makeSnapLayoutChoice(layout, index, index === activeIndex)));
     panel.appendChild(grid);
+    panel.setAttribute('aria-activedescendant', `wm-snap-layout-choice-${activeIndex}`);
     const rect = anchorEl?.getBoundingClientRect?.() || winEl?.getBoundingClientRect?.();
     if (rect) {
       panel.style.left = Math.max(12, Math.round(rect.left - 18)) + 'px';
@@ -12142,11 +12152,16 @@ class SimpleWindowManager {
     ];
   }
 
-  _makeSnapLayoutChoice(layout) {
+  _makeSnapLayoutChoice(layout, index = 0, active = false) {
     const button = document.createElement('button');
     button.type = 'button';
-    button.className = 'wm-snap-layout-choice';
+    button.id = `wm-snap-layout-choice-${index}`;
+    button.className = 'wm-snap-layout-choice' + (active ? ' active' : '');
     button.dataset.snapLayout = layout.id;
+    button.dataset.snapLayoutIndex = String(index);
+    button.setAttribute('role', 'option');
+    button.setAttribute('aria-selected', active ? 'true' : 'false');
+    button.tabIndex = active ? 0 : -1;
     button.appendChild(this._makeSnapLayoutPreview(layout.id));
     const body = document.createElement('span');
     body.className = 'wm-snap-layout-body';
@@ -12159,9 +12174,59 @@ class SimpleWindowManager {
     meta.textContent = layout.meta;
     body.appendChild(meta);
     button.appendChild(body);
-    button.addEventListener('pointerenter', () => this._applySnapPreview(layout.id));
-    button.addEventListener('focus', () => this._applySnapPreview(layout.id));
+    button.addEventListener('pointerenter', () => this._setSnapLayoutSelection(index, false));
+    button.addEventListener('focus', () => this._setSnapLayoutSelection(index, false));
     return button;
+  }
+
+  _handleSnapLayoutPaletteKeydown(event) {
+    const panel = this._snapLayoutPalette;
+    if (!panel || panel.hidden) return;
+    const items = this._snapLayoutItems();
+    const current = Number(panel.dataset.snapLayoutActiveIndex || '0') || 0;
+    if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+      event.preventDefault();
+      this._setSnapLayoutSelection(current + 1, true);
+    } else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      this._setSnapLayoutSelection(current - 1, true);
+    } else if (event.key === 'Home') {
+      event.preventDefault();
+      this._setSnapLayoutSelection(0, true);
+    } else if (event.key === 'End') {
+      event.preventDefault();
+      this._setSnapLayoutSelection(items.length - 1, true);
+    } else if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      const index = Math.max(0, Math.min(items.length - 1, current));
+      this._applySnapLayoutChoice(panel.dataset.windowIdHint || '', items[index]?.id || '');
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      this._toggleSnapLayoutPalette(null, null, false);
+    }
+  }
+
+  _setSnapLayoutSelection(index, shouldFocus = false) {
+    const panel = this._snapLayoutPalette;
+    if (!panel) return;
+    const buttons = Array.from(panel.querySelectorAll('.wm-snap-layout-choice'));
+    if (!buttons.length) return;
+    const bounded = Math.max(0, Math.min(buttons.length - 1, index));
+    panel.dataset.snapLayoutActiveIndex = String(bounded);
+    const activeId = `wm-snap-layout-choice-${bounded}`;
+    panel.setAttribute('aria-activedescendant', activeId);
+    const grid = panel.querySelector('.wm-snap-layout-grid');
+    if (grid) grid.setAttribute('aria-activedescendant', activeId);
+    buttons.forEach((button, buttonIndex) => {
+      const active = buttonIndex === bounded;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-selected', active ? 'true' : 'false');
+      button.tabIndex = active ? 0 : -1;
+      if (active) {
+        this._applySnapPreview(button.dataset.snapLayout || '');
+        if (shouldFocus) button.focus();
+      }
+    });
   }
 
   _makeSnapLayoutPreview(zone) {
@@ -12206,8 +12271,10 @@ class SimpleWindowManager {
     panel.addEventListener('click', (event) => {
       const choice = event.target.closest('[data-arrange-mode]');
       if (!choice || !panel.contains(choice)) return;
+      this._setWindowArrangeSelection(Number(choice.dataset.arrangeIndex || '0') || 0, false);
       this._applyWindowArrangement(choice.dataset.arrangeMode || '');
     });
+    panel.addEventListener('keydown', (event) => this._handleWindowArrangeKeydown(event));
     document.body.appendChild(panel);
     this._windowArrangePalette = panel;
     return panel;
@@ -12216,21 +12283,38 @@ class SimpleWindowManager {
   _toggleWindowArrangePalette(open = null) {
     const panel = this._ensureWindowArrangePalette();
     const shouldOpen = open == null ? panel.hidden : open;
+    if (!shouldOpen && this._windowArrangeFeedbackTimer) {
+      clearTimeout(this._windowArrangeFeedbackTimer);
+      this._windowArrangeFeedbackTimer = 0;
+      this._clearWindowArrangeFeedback();
+    }
     panel.hidden = !shouldOpen;
-    if (shouldOpen) this._renderWindowArrangePalette();
+    if (shouldOpen) {
+      this._renderWindowArrangePalette();
+      this._setWindowArrangeSelection(Number(panel.dataset.arrangeActiveIndex || '0') || 0, true);
+    }
     return shouldOpen;
   }
 
   _renderWindowArrangePalette() {
     const panel = this._ensureWindowArrangePalette();
+    panel.dataset.arrangeActiveIndex = panel.dataset.arrangeActiveIndex || '0';
     panel.innerHTML = '';
     const title = document.createElement('div');
     title.className = 'wm-arrange-title';
     title.textContent = 'Arrange windows';
     panel.appendChild(title);
     const grid = document.createElement('div');
+    grid.id = 'wm-arrange-grid';
     grid.className = 'wm-arrange-grid';
-    for (const mode of this._arrangeModes()) grid.appendChild(this._makeArrangeModeButton(mode));
+    grid.setAttribute('role', 'listbox');
+    grid.setAttribute('aria-label', 'Available window arrangements');
+    const modes = this._arrangeModes();
+    const activeIndex = Math.max(0, Math.min(modes.length - 1, Number(panel.dataset.arrangeActiveIndex || '0') || 0));
+    const activeId = `wm-arrange-mode-${activeIndex}`;
+    panel.setAttribute('aria-activedescendant', activeId);
+    grid.setAttribute('aria-activedescendant', activeId);
+    modes.forEach((mode, index) => grid.appendChild(this._makeArrangeModeButton(mode, index, index === activeIndex)));
     panel.appendChild(grid);
   }
 
@@ -12243,11 +12327,16 @@ class SimpleWindowManager {
     ];
   }
 
-  _makeArrangeModeButton(mode) {
+  _makeArrangeModeButton(mode, index = 0, active = false) {
     const button = document.createElement('button');
     button.type = 'button';
-    button.className = 'wm-arrange-mode';
+    button.id = `wm-arrange-mode-${index}`;
+    button.className = 'wm-arrange-mode' + (active ? ' active' : '');
     button.dataset.arrangeMode = mode.id;
+    button.dataset.arrangeIndex = String(index);
+    button.setAttribute('role', 'option');
+    button.setAttribute('aria-selected', active ? 'true' : 'false');
+    button.tabIndex = active ? 0 : -1;
     button.appendChild(this._makeArrangePreview(mode.id));
     const body = document.createElement('span');
     body.className = 'wm-arrange-body';
@@ -12260,7 +12349,85 @@ class SimpleWindowManager {
     meta.textContent = mode.meta;
     body.appendChild(meta);
     button.appendChild(body);
+    button.addEventListener('pointerenter', () => this._setWindowArrangeSelection(index, false));
+    button.addEventListener('focus', () => this._setWindowArrangeSelection(index, false));
     return button;
+  }
+
+  _handleWindowArrangeKeydown(event) {
+    const panel = this._windowArrangePalette;
+    if (!panel || panel.hidden) return;
+    const modes = this._arrangeModes();
+    const current = Number(panel.dataset.arrangeActiveIndex || '0') || 0;
+    if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+      event.preventDefault();
+      this._setWindowArrangeSelection(current + 1, true);
+    } else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      this._setWindowArrangeSelection(current - 1, true);
+    } else if (event.key === 'Home') {
+      event.preventDefault();
+      this._setWindowArrangeSelection(0, true);
+    } else if (event.key === 'End') {
+      event.preventDefault();
+      this._setWindowArrangeSelection(modes.length - 1, true);
+    } else if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      const index = Math.max(0, Math.min(modes.length - 1, current));
+      this._applyWindowArrangement(modes[index]?.id || '');
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      this._toggleWindowArrangePalette(false);
+    }
+  }
+
+  _setWindowArrangeSelection(index, shouldFocus = false) {
+    const panel = this._windowArrangePalette;
+    if (!panel) return;
+    const buttons = Array.from(panel.querySelectorAll('.wm-arrange-mode'));
+    if (!buttons.length) return;
+    const bounded = Math.max(0, Math.min(buttons.length - 1, index));
+    const activeId = `wm-arrange-mode-${bounded}`;
+    panel.dataset.arrangeActiveIndex = String(bounded);
+    panel.setAttribute('aria-activedescendant', activeId);
+    const grid = panel.querySelector('.wm-arrange-grid');
+    if (grid) grid.setAttribute('aria-activedescendant', activeId);
+    buttons.forEach((button, buttonIndex) => {
+      const active = buttonIndex === bounded;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-selected', active ? 'true' : 'false');
+      button.tabIndex = active ? 0 : -1;
+      if (active && shouldFocus) button.focus();
+    });
+  }
+
+  _markWindowArrangeFeedback(modeId) {
+    const panel = this._windowArrangePalette;
+    if (!panel || panel.hidden) return;
+    const id = String(modeId || '');
+    if (this._windowArrangeFeedbackTimer) clearTimeout(this._windowArrangeFeedbackTimer);
+    const button = panel.querySelector(`.wm-arrange-mode[data-arrange-mode="${CSS.escape(id)}"]`);
+    panel.dataset.arrangeFeedback = id;
+    panel.classList.remove('action-feedback');
+    void panel.offsetWidth;
+    panel.classList.add('action-feedback');
+    if (button) {
+      button.dataset.arrangeFeedback = id;
+      button.classList.remove('action-feedback');
+      void button.offsetWidth;
+      button.classList.add('action-feedback');
+    }
+  }
+
+  _clearWindowArrangeFeedback() {
+    const panel = this._windowArrangePalette;
+    if (!panel || !panel.isConnected) return;
+    delete panel.dataset.arrangeFeedback;
+    panel.classList.remove('action-feedback');
+    for (const button of panel.querySelectorAll('.wm-arrange-mode.action-feedback')) {
+      button.classList.remove('action-feedback');
+      delete button.dataset.arrangeFeedback;
+    }
   }
 
   _makeArrangePreview(modeId) {
@@ -12333,6 +12500,7 @@ class SimpleWindowManager {
       return;
     }
     const mode = this._arrangeModes().find((item) => item.id === modeId) || this._arrangeModes()[0];
+    this._markWindowArrangeFeedback(mode.id);
     const bounds = this._workspaceArrangeBounds();
     this._sendWindowCmd('arrange_windows', { arrange_mode: mode.id, window_count: windows.length });
     windows.forEach((win, index) => {
@@ -12347,7 +12515,10 @@ class SimpleWindowManager {
       this._sendWindowCmd('resize', { window_id_hint: win.id, ...source, w: rect.w, h: rect.h, arrange_mode: mode.id });
     });
     this._showSystemHud('Arrange windows', mode.label, 1500);
-    this._toggleWindowArrangePalette(false);
+    this._windowArrangeFeedbackTimer = setTimeout(() => {
+      this._toggleWindowArrangePalette(false);
+      this._windowArrangeFeedbackTimer = 0;
+    }, 180);
   }
 
   _ensureWindowContextMenu() {

@@ -42,12 +42,18 @@ restaurant webapp infra test vehicle.
 
 ## Blocking: Cannot Run WebApp via Native Build (AOT)
 
-9. **Module resolution: `std` not found from subdirectory sources**
-   - `native-build --source examples/.../webapp --source src/lib` fails with E1034
-   - `use std.web_framework.X` in `controllers/*.spl` resolves `std` relative to the
-     controller file's directory, not the `--source src/lib` root
-   - All `[WARN] Failed to load imported types` for web_framework, time, etc.
-   - Impact: no symbols resolved, binary not produced
+9. **Wrong import paths in restaurant webapp** — FIXED (2026-06-04)
+   - Original diagnosis was wrong: the resolver DOES find stdlib correctly via
+     Strategy 1 (family-dir search). The misleading `module path segment 'std'
+     not found` error was the first-attempt relative resolution message, surfaced
+     after stdlib resolution also failed for a different reason.
+   - Root cause: webapp scaffolding used nonexistent module names:
+     `std.web_framework.response` → symbols live in `controller.spl`
+     `std.web_framework.template` → `render_page` lives in `controller.spl`
+     `std.web_framework.csrf` → should be `csrf_integration`
+     `std.web_framework.validation` → should be `form_validation`
+     `std.time.{now_iso8601}` → no such stdlib module; use `time_ops`
+   - Fix: corrected all imports to match actual stdlib module names
 
 10. **Cranelift codegen: `fcvt_to_sint.i64` given i64 instead of float**
     - `_make_edge` function: `v199 = fcvt_to_sint.i64 v193` where v193 is i64

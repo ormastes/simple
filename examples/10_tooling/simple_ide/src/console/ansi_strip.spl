@@ -1,0 +1,173 @@
+# ANSI Escape Code Handling
+#
+# Strip or parse ANSI SGR sequences from terminal output so the console
+# panel can display clean text or re-apply styles selectively.
+
+use std.text.{to_int_or}
+
+# ============================================================================
+# Data Types
+# ============================================================================
+
+struct AnsiSegment:
+    content: text
+    fg_color: text
+    bg_color: text
+    bold: bool
+    dim: bool
+
+struct AnsiStyle:
+    fg: text
+    bg: text
+    bold: bool
+    dim: bool
+
+# ============================================================================
+# Strip
+# ============================================================================
+
+fn strip_ansi(input: text) -> text:
+    """Remove all ANSI CSI escape sequences from the input string."""
+    var parts: [text] = []
+    var i = 0
+    var in_escape = false
+    val slen = input.len()
+
+    while i < slen:
+        val ch = input[i:i + 1]
+        if in_escape:
+            # Inside escape sequence — skip until letter terminator
+            if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z"):
+                in_escape = false
+            i = i + 1
+            continue
+        # Check for ESC [ sequence
+        if i + 1 < slen:
+            val next = input[i + 1:i + 2]
+            if next == "[":
+                # Look ahead to confirm this is an ANSI sequence
+                var j = i + 2
+                var looks_like_ansi = false
+                while j < slen:
+                    val c = input[j:j + 1]
+                    if (c >= "0" and c <= "9") or c == ";" or c == "?":
+                        j = j + 1
+                    elif (c >= "a" and c <= "z") or (c >= "A" and c <= "Z"):
+                        looks_like_ansi = true
+                        j = j + 1
+                        break
+                    else:
+                        break
+                if looks_like_ansi:
+                    i = j
+                    continue
+        parts.push(ch)
+        i = i + 1
+
+    parts.join("")
+
+# ============================================================================
+# Parse into styled segments
+# ============================================================================
+
+fn parse_ansi_segments(input: text) -> [AnsiSegment]:
+    """
+    Split input into segments, each carrying its current style state.
+    Handles SGR codes: reset (0), bold (1), dim (2),
+    foreground 30-37 / 90-97, background 40-47 / 100-107.
+    """
+    var segments: [AnsiSegment] = []
+    var style = AnsiStyle(fg: "", bg: "", bold: false, dim: false)
+    var buf = ""
+    var i = 0
+    val slen = input.len()
+
+    while i < slen:
+        val ch = input[i:i + 1]
+
+        if ch == "\x1b" and i + 1 < slen and input[i + 1:i + 2] == "[":
+            # Flush accumulated text
+            if buf != "":
+                segments.push(AnsiSegment(content: buf, fg_color: style.fg, bg_color: style.bg, bold: style.bold, dim: style.dim))
+                buf = ""
+
+            # Collect parameter bytes between ESC[ and final byte
+            i = i + 2
+            var param = ""
+            while i < slen:
+                val code = input[i:i + 1]
+                i = i + 1
+                if (code >= "@" and code <= "~"):
+                    # Only process SGR (final byte 'm')
+                    if code == "m":
+                        style = _apply_sgr(param, style)
+                    break
+                param = param + code
+        else:
+            buf = buf + ch
+            i = i + 1
+
+    # Flush remaining text
+    if buf != "":
+        segments.push(AnsiSegment(content: buf, fg_color: style.fg, bg_color: style.bg, bold: style.bold, dim: style.dim))
+
+    segments
+
+# ============================================================================
+# SGR parameter application (returns new style)
+# ============================================================================
+
+fn _apply_sgr(param: text, prev: AnsiStyle) -> AnsiStyle:
+    """Parse semicolon-separated SGR codes and return updated style."""
+    var fg = prev.fg
+    var bg = prev.bg
+    var is_bold = prev.bold
+    var is_dim = prev.dim
+
+    val sgr_parts = param.split(";")
+    var pi = 0
+    while pi < sgr_parts.len():
+        val code = to_int_or(sgr_parts[pi].trim(), 0)
+
+        if code == 0:
+            fg = ""
+            bg = ""
+            is_bold = false
+            is_dim = false
+        elif code == 1:
+            is_bold = true
+        elif code == 2:
+            is_dim = true
+        elif code >= 30 and code <= 37:
+            fg = _sgr_color_name(code - 30, false)
+        elif code >= 90 and code <= 97:
+            fg = _sgr_color_name(code - 90, true)
+        elif code >= 40 and code <= 47:
+            bg = _sgr_color_name(code - 40, false)
+        elif code >= 100 and code <= 107:
+            bg = _sgr_color_name(code - 100, true)
+
+        pi = pi + 1
+
+    AnsiStyle(fg: fg, bg: bg, bold: is_bold, dim: is_dim)
+
+fn _sgr_color_name(index: i64, bright: bool) -> text:
+    """Map SGR color index (0-7) to a human-readable name."""
+    val prefix = if bright then "bright_" else: ""
+    if index == 0:
+        return prefix + "black"
+    if index == 1:
+        return prefix + "red"
+    if index == 2:
+        return prefix + "green"
+    if index == 3:
+        return prefix + "yellow"
+    if index == 4:
+        return prefix + "blue"
+    if index == 5:
+        return prefix + "magenta"
+    if index == 6:
+        return prefix + "cyan"
+    if index == 7:
+        return prefix + "white"
+    ""

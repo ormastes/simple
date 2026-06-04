@@ -564,7 +564,7 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                             hasDragRuntime: !!(wm && wm.bindDrag),
                             hasDragEvents: !!(wm && wm.notifyMove),
                             dragMoved: dragMoved,
-                            hasWindowEventRuntime: !!(wm && wm.bindWindowEvents && wm.sendWindowAction && wm.sendWindowInput),
+                            hasWindowEventRuntime: !!(wm && wm.bindWindowEvents && wm.sendWindowAction && wm.sendWindowKey && wm.sendWindowInput && wm.sendWindowMouse),
                             bodyClickRouted: bodyClickRouted,
                             bodyInputRouted: bodyInputRouted,
                             htmlRenderable: document.body.innerHTML.indexOf('simple-app-window') >= 0 && document.body.innerHTML.indexOf('<pre class="simple-app-pre">') >= 0
@@ -1605,6 +1605,7 @@ mod tests {
         assert!(js.contains("send_window_keypress"));
         assert!(js.contains("send_window_input"));
         assert!(js.contains("send_window_mouse"));
+        assert!(include_str!("lib.rs").contains("hasWindowEventRuntime: !!(wm && wm.bindWindowEvents && wm.sendWindowAction && wm.sendWindowKey && wm.sendWindowInput && wm.sendWindowMouse)"));
         assert!(js.contains("body.tabIndex = 0"));
         assert!(js.contains("bindDrag"));
         assert!(js.contains("notifyMove"));

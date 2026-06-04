@@ -10,7 +10,7 @@
 - Electron weighted checksum: 80792557145241600
 - mismatch count: 0
 - blur/tolerance used: false
-- Electron frame us: 36748
+- Electron frame us: 33212
 - expected ARGB path: build/electron_simple_web_engine2d_image_taskbar_command_bitmap_evidence/expected-argb.json
 - captured ARGB path: build/electron_simple_web_engine2d_image_taskbar_command_bitmap_evidence/electron-argb.json
 - captured ARGB written: true
@@ -28,7 +28,7 @@
 - electron_simple_web_engine2d_electron_weighted_checksum=80792557145241600
 - electron_simple_web_engine2d_mismatch_count=0
 - electron_simple_web_engine2d_blur_or_tolerance_used=false
-- electron_simple_web_engine2d_electron_frame_us=36748
+- electron_simple_web_engine2d_electron_frame_us=33212
 - electron_simple_web_engine2d_expected_argb_path=build/electron_simple_web_engine2d_image_taskbar_command_bitmap_evidence/expected-argb.json
 - electron_simple_web_engine2d_captured_argb_path=build/electron_simple_web_engine2d_image_taskbar_command_bitmap_evidence/electron-argb.json
 - electron_simple_web_engine2d_captured_argb_written=true
@@ -167,15 +167,10 @@
 - blur_or_tolerance_used=false
 
 ## Electron Output
-- [3136763:0604/102554.667640:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
-- [3136763:0604/102554.667862:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
-- [3136763:0604/102554.667935:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
-- [3136763:0604/102554.668034:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
-- [3136763:0604/102554.668062:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
-- [3136763:0604/102554.754193:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
-- [3136950:0604/102555.337467:ERROR:viz_main_impl.cc(181)] Exiting GPU process due to errors during initialization
-- [3137120:0604/102555.765630:ERROR:shared_image_manager.cc(255)] SharedImageManager::ProduceSkia: Trying to produce a Skia representation from an incompatible backing: GLTextureImageBacking
-- [3137120:0604/102555.765826:ERROR:raster_decoder.cc(1968)] [.RenderWorker-0x394400024100]GL ERROR :GL_INVALID_VALUE : glCopySubTexture: unknown mailbox
+- [3384728:0604/123000.477929:ERROR:viz_main_impl.cc(181)] Exiting GPU process due to errors during initialization
+- [3384882:0604/123000.867105:ERROR:shared_image_manager.cc(255)] SharedImageManager::ProduceSkia: Trying to produce a Skia representation from an incompatible backing: GLTextureImageBacking
+- [3384882:0604/123000.867289:ERROR:raster_decoder.cc(1968)] [.RenderWorker-0x3c2400024100]GL ERROR :GL_INVALID_VALUE : glCopySubTexture: unknown mailbox
+- [3384690:0604/123000.935103:ERROR:object_proxy.cc(576)] Failed to call method: org.freedesktop.DBus.StartServiceByName: object_path= /org/freedesktop/DBus: org.freedesktop.DBus.Error.NoReply: Did not receive a reply. Possible causes include: the remote application did not send a reply, the message bus security policy blocked the reply, the reply timeout expired, or the network connection was broken.
 - renderer=electron-live-capture-page
 - scene=simple-web-engine2d-image-taskbar-command
 - width=96
@@ -186,13 +181,10 @@
 - weighted_checksum=80792557145241600
 - expected_weighted_checksum=80792557145241600
 - mismatch_count=0
-- frame_us=36748
+- frame_us=33212
 - capture_native_width=96
 - capture_native_height=64
 - capture_downsampled=false
 - captured_argb_path=build/electron_simple_web_engine2d_image_taskbar_command_bitmap_evidence/electron-argb.json
 - captured_argb_written=true
 - blur_or_tolerance_used=false
-- __CM_FS__:111386
-- __CM_FS__:1279
-- __CM_FS__:2717297

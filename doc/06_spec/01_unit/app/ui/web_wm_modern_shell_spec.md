@@ -60,7 +60,7 @@ Verifies the first modern Simple Web WM slice at the contract level.
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 773 lines folded for reproduction.
+Runnable source: 776 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -427,11 +427,14 @@ expect(html).to_contain(":root[data-wm-motion=off] .wm-window.snap-committed")
 expect(html).to_contain(".wm-snap-layout-palette")
 expect(html).to_contain(".wm-snap-layout-grid")
 expect(html).to_contain(".wm-snap-layout-choice")
+expect(html).to_contain(".wm-snap-layout-choice.active")
 expect(html).to_contain(".wm-snap-layout-preview")
 expect(html).to_contain("@keyframes wm-snap-layout-palette-in")
 expect(html).to_contain(".wm-window-arrange-palette")
 expect(html).to_contain(".wm-arrange-grid")
 expect(html).to_contain(".wm-arrange-mode")
+expect(html).to_contain(".wm-arrange-mode:focus-visible")
+expect(html).to_contain(".wm-arrange-mode.active")
 expect(html).to_contain(".wm-arrange-preview")
 expect(html).to_contain("@keyframes wm-window-arrange-in")
 expect(html).to_contain("data-desktop-peek='true'")
@@ -846,7 +849,7 @@ expect(html).to_contain("@keyframes wm-hot-corner-activate")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 1442 lines folded for reproduction.
+Runnable source: 1459 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1942,6 +1945,19 @@ expect(js).to_contain("_toggleSnapLayoutPalette")
 expect(js).to_contain("_renderSnapLayoutPalette")
 expect(js).to_contain("_snapLayoutItems")
 expect(js).to_contain("_applySnapLayoutChoice")
+expect(js).to_contain("_handleSnapLayoutPaletteKeydown")
+expect(js).to_contain("_setSnapLayoutSelection")
+expect(js).to_contain("dataset.snapLayoutActiveIndex")
+expect(js).to_contain("dataset.snapLayoutIndex")
+expect(js).to_contain("aria-activedescendant")
+expect(js).to_contain("aria-selected")
+expect(js).to_contain("tabIndex")
+expect(js).to_contain("event.key === 'ArrowRight'")
+expect(js).to_contain("event.key === 'ArrowLeft'")
+expect(js).to_contain("event.key === 'Home'")
+expect(js).to_contain("event.key === 'End'")
+expect(js).to_contain("event.key === 'Enter'")
+expect(js).to_contain("event.key === 'Escape'")
 expect(js).to_contain("wm-snap-layout-palette")
 expect(js).to_contain("snap_zone")
 expect(js).to_contain("_ensureWindowArrangePalette")
@@ -1949,6 +1965,10 @@ expect(js).to_contain("_toggleWindowArrangePalette")
 expect(js).to_contain("_renderWindowArrangePalette")
 expect(js).to_contain("_arrangeModes")
 expect(js).to_contain("_makeArrangeModeButton")
+expect(js).to_contain("_handleWindowArrangeKeydown")
+expect(js).to_contain("_setWindowArrangeSelection")
+expect(js).to_contain("dataset.arrangeActiveIndex")
+expect(js).to_contain("dataset.arrangeIndex")
 expect(js).to_contain("_arrangeRectForIndex")
 expect(js).to_contain("_applyWindowArrangement")
 expect(js).to_contain("Arrange windows")
@@ -2301,7 +2321,7 @@ expect(retained).to_contain("Maximize window")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 1373 lines folded for reproduction.
+Runnable source: 1389 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -2333,6 +2353,14 @@ expect(preview).to_contain("data-direction=\"se\"")
 expect(preview).to_contain("wm-resize-handle wm-resize-n")
 expect(preview).to_contain("role=\"dialog\" aria-label=\"Snap layout chooser\"")
 expect(preview).to_contain("data-window-id-hint=\"simple.ide\"")
+expect(preview).to_contain("data-snap-layout-active-index=\"0\"")
+expect(preview).to_contain("aria-activedescendant=\"wm-snap-layout-choice-0\"")
+expect(preview).to_contain("id=\"wm-snap-layout-grid\"")
+expect(preview).to_contain("role=\"listbox\" aria-label=\"Available snap layouts\"")
+expect(preview).to_contain("id=\"wm-snap-layout-choice-0\"")
+expect(preview).to_contain("role=\"option\" aria-selected=\"true\"")
+expect(preview).to_contain("tabindex=\"0\"")
+expect(preview).to_contain("data-snap-layout-index=\"0\"")
 expect(preview).to_contain("data-snap-layout=\"left\"")
 expect(preview).to_contain("data-snap-layout=\"right\"")
 expect(preview).to_contain("data-snap-layout=\"full\"")
@@ -2341,6 +2369,14 @@ expect(preview).to_contain("Right half")
 expect(preview).to_contain("Fullscreen")
 expect(preview).to_contain("role=\"dialog\" aria-label=\"Window arrangement\"")
 expect(preview).to_contain("data-arrange-source=\"workspace\"")
+expect(preview).to_contain("data-arrange-active-index=\"0\"")
+expect(preview).to_contain("aria-activedescendant=\"wm-arrange-mode-0\"")
+expect(preview).to_contain("id=\"wm-arrange-grid\"")
+expect(preview).to_contain("role=\"listbox\" aria-label=\"Available window arrangements\"")
+expect(preview).to_contain("id=\"wm-arrange-mode-0\"")
+expect(preview).to_contain("role=\"option\" aria-selected=\"true\"")
+expect(preview).to_contain("tabindex=\"0\"")
+expect(preview).to_contain("data-arrange-index=\"0\"")
 expect(preview).to_contain("data-arrange-mode=\"tile_grid\"")
 expect(preview).to_contain("data-arrange-mode=\"cascade\"")
 expect(preview).to_contain("data-arrange-mode=\"focus_left\"")

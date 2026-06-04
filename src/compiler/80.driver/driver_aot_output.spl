@@ -443,6 +443,32 @@ impl CompilerDriver:
         driver_log_info(log, "PTX assembly written to {output}")
         CompileResult.Success(output)
 
+    me compile_to_opencl(output: text) -> CompileResult:
+        """Compile all MIR modules to OpenCL C source."""
+        val ctx: CompileContext = _extract_driver_ctx(self)
+        val log = ctx.logger
+        val is_release = ctx.options.release
+        val driver_opt_level = driver_effective_mir_opt_level(ctx)
+        driver_log_debug(log, "AOT OpenCL: generating OpenCL C to {output}")
+
+        var all_source = ""
+        val keys = ctx.mir_modules.keys()
+        for name in keys:
+            driver_log_trace(log, "translating module to OpenCL C: {name}")
+            val mir_module = ctx.mir_modules[name]
+            val compiled = compile_module_with_backend("opencl", mir_module, is_release, driver_opt_level)
+            if compiled.is_err():
+                val err = compiled.unwrap_err()
+                return CompileResult.CodegenError("OpenCL compile error in {name}: {err}")
+            val module_result: CompiledModule = compiled.unwrap()
+            val source = module_result.assembly ?? ""
+            all_source = all_source + source
+
+        if not rt_file_write_text(output, all_source):
+            return CompileResult.CodegenError("Failed to write OpenCL source to {output}")
+        driver_log_info(log, "OpenCL C source written to {output}")
+        CompileResult.Success(output)
+
     me compile_to_vhdl(output: text) -> CompileResult:
         """Compile all MIR modules to VHDL source (VHDL backend)."""
         val ctx: CompileContext = _extract_driver_ctx(self)
