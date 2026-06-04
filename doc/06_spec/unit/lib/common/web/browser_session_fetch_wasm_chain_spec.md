@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 247 | 247 | 0 | 0 |
+| 248 | 248 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -13260,6 +13260,39 @@ match result:
 
 </details>
 
+#### reports TextDecoder constructor option properties in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `utf-8:true:true:false:false:asm`
+
+3. Err
+   - Expected: "unexpected text decoder option property js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var configured = new TextDecoder('utf8', { fatal: true, ignoreBOM: true }); var defaults = new TextDecoder(); var bytes = new Uint8Array(3); bytes[0] = 97; bytes[1] = 115; bytes[2] = 109; configured.encoding + ':' + configured.fatal + ':' + configured.ignoreBOM + ':' + defaults.fatal + ':' + defaults.ignoreBOM + ':' + configured.decode(bytes)")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("utf-8:true:true:false:false:asm")
+    Err(err):
+        expect("unexpected text decoder option property js error: {err}").to_equal("")
+```
+
+</details>
+
 #### replaces invalid browser TextDecoder bytes before WASM validation
 
 1. var session = BrowserSession new
@@ -13510,8 +13543,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 247 |
-| Active scenarios | 247 |
+| Total scenarios | 248 |
+| Active scenarios | 248 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

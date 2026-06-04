@@ -4198,15 +4198,79 @@ BrowserSession TextEncoder/TextDecoder WASM header continuation:
  - `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
  - `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
  
- BrowserSession scripts now report partial `TextEncoder.encodeInto` writes into a
- short caller-provided `Uint8Array`, decode the written bytes through
- `TextDecoder`, and reject the short typed-array payload through
- `WebAssembly.validate`. The read/written counts, bounded destination storage,
- decoded text, and invalid WASM validation result all agree in the
- browser-session path. The focused fetch/WASM chain spec now passes `84/84`;
- broader browser/WASM semantics remain open.
- 
- BrowserSession invalid TextDecoder WASM validation continuation:
+BrowserSession scripts now report partial `TextEncoder.encodeInto` writes into a
+short caller-provided `Uint8Array`, decode the written bytes through
+`TextDecoder`, and reject the short typed-array payload through
+`WebAssembly.validate`. The read/written counts, bounded destination storage,
+decoded text, and invalid WASM validation result all agree in the
+browser-session path. The focused fetch/WASM chain spec now passes `84/84`;
+broader browser/WASM semantics remain open.
+
+BrowserSession TextDecoder constructor option property continuation:
+
+Completion checklist:
+
+- [x] Start from clean temp worktree `/tmp/simple-gui-hardening-next35` on
+  pushed `main`.
+- [x] Leave the primary detached dirty checkout untouched.
+- [x] Confirm existing text codec coverage exercises encoder output,
+  `encodeInto`, invalid decode, and truncated decode, but not constructor
+  option properties.
+- [x] Read `fatal` from the second `TextDecoder(label, options)` argument when
+  it is an object.
+- [x] Read `ignoreBOM` from the second `TextDecoder(label, options)` argument
+  when it is an object.
+- [x] Preserve default `fatal == false` and `ignoreBOM == false` behavior.
+- [x] Keep `utf8` label normalization to `utf-8`.
+- [x] Add a browser-script scenario that constructs configured and default
+  decoders.
+- [x] Verify configured option properties are observable from browser scripts.
+- [x] Verify configured decoders still decode a simple typed-array payload.
+- [x] Refresh generated scenario manual after executable spec changes.
+- [x] Run focused compile and focused fetch/WASM chain spec.
+- [x] Run adjacent browser/WASM and JS conformance checks.
+- [x] Run shared lib check because runtime source changed.
+- [x] Run final layout, whitespace, file-count, and status gates.
+- [ ] Commit runtime/test/manual/plan update.
+- [ ] Push guarded main update after fetch/rebase/file-count safety check.
+- [ ] Commit and push sync-complete checklist update.
+
+Tests checklist:
+
+- [x] `new TextDecoder('utf8', { fatal: true, ignoreBOM: true })` exposes
+  `encoding == "utf-8"`.
+- [x] Configured decoder exposes `fatal == true`.
+- [x] Configured decoder exposes `ignoreBOM == true`.
+- [x] Default decoder still exposes `fatal == false`.
+- [x] Default decoder still exposes `ignoreBOM == false`.
+- [x] Configured decoder still decodes an ASCII `Uint8Array` payload.
+- [x] Focused spec result recorded: changed-file compile passed, fetch/WASM
+  chain `248/248`, generated manual `Total scenarios | 248 |`.
+- [x] Adjacent spec results recorded: WASM host `107/107`, WebGPU JS/WASM
+  `106/106`, Node API conformance `275/275`.
+- [x] Shared lib result recorded: `src/lib` check passed with current `405
+  warning(s)` across `5936` files.
+
+Commands run:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/interpreter_native.spl test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --force-rebuild --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+- `git diff --check`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+BrowserSession scripts now preserve bounded `TextDecoder` constructor option
+properties for `fatal` and `ignoreBOM`. The scenario proves configured
+properties are observable, defaults remain false, `utf8` still normalizes to
+`utf-8`, and configured decoders still decode typed-array ASCII payloads. This
+does not claim full fatal decode exception semantics; that broader browser API
+parity remains open.
+
+BrowserSession invalid TextDecoder WASM validation continuation:
  
  - `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
  - `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
