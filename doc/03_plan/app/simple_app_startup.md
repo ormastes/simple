@@ -13,13 +13,15 @@ Covered:
 - native dynlib and role-2 SMF dynlib dependency policy
 - explicit SimpleOS launch metadata and VFS prewarm policy
 - SimpleOS WM hover prefetch of executable/SMF bytes without execution
-- build-emitted launch metadata sidecar rendering and parsing
+- embedded SMF `.launch_meta` rendering and parsing
+- embedded native `SIMPLE_LAUNCH_V1` trailer rendering and parsing
+- build-emitted launch metadata sidecar rendering and parsing as auxiliary check input
 
 Excluded:
 
 - live macOS `.dylib` acceptance evidence
 - process-callable SimpleOS shared-library mapping
-- full SMF binary manifest encoder changes
+- platform-native section variants for ELF, Mach-O, and PE launch metadata
 
 ## Execution
 
@@ -54,6 +56,8 @@ Generated/manual docs mirror the executable paths:
 | REQ-003 | Mmap/cache startup strategy | `test/03_system/app/simple/feature/simple_app_startup_spec.spl` | `doc/06_spec/03_system/app/simple/feature/simple_app_startup_spec.md` | Full |
 | REQ-004 | Conditional native/SMF dynlib loading | `test/03_system/app/simple/feature/simple_app_startup_spec.spl` | `doc/06_spec/03_system/app/simple/feature/simple_app_startup_spec.md` | Full |
 | REQ-005 | Build launch metadata sidecar | `test/03_system/app/simple/feature/simple_app_startup_spec.spl` | `doc/06_spec/03_system/app/simple/feature/simple_app_startup_spec.md` | Full |
+| REQ-006 | Embedded SMF launch metadata | `test/03_system/app/simple/feature/simple_app_startup_spec.spl` | `doc/06_spec/03_system/app/simple/feature/simple_app_startup_spec.md` | Full |
+| REQ-007 | Embedded native launch metadata | `test/03_system/app/simple/feature/simple_app_startup_spec.spl` | `doc/06_spec/03_system/app/simple/feature/simple_app_startup_spec.md` | Full |
 | REQ-100 | SimpleOS launch metadata and VFS prewarm | `test/03_system/app/simpleos/feature/simple_app_startup_spec.spl` | `doc/06_spec/03_system/app/simpleos/feature/simple_app_startup_spec.md` | Full |
 | REQ-101 | SimpleOS hover prefetch | `test/03_system/app/simpleos/feature/simple_app_startup_spec.spl` | `doc/06_spec/03_system/app/simpleos/feature/simple_app_startup_spec.md` | Full |
 | REQ-102 | SimpleOS launcher icon prefetch | `test/03_system/app/simpleos/feature/simple_app_startup_spec.spl` | `doc/06_spec/03_system/app/simpleos/feature/simple_app_startup_spec.md` | Full |

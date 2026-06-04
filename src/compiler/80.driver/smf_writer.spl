@@ -47,6 +47,7 @@ struct SmfBuildOptions:
     target: Target
     deps: [SmfDependencyEntry]  # Dependency interface hashes for staleness checking
     driver_manifest_bytes: [u8] # Concatenated DRVS records from @driver/@native_lib
+    launch_metadata_bytes: [u8] # SDN launch metadata for startup policy
 
 impl SmfBuildOptions:
     static fn create(target: Target) -> SmfBuildOptions:
@@ -56,11 +57,12 @@ impl SmfBuildOptions:
             note_sdn: nil,
             target: target,
             deps: [],
-            driver_manifest_bytes: []
+            driver_manifest_bytes: [],
+            launch_metadata_bytes: []
         )
 
     fn has_any_sections() -> bool:
-        self.templates.? or self.metadata.? or self.note_sdn.? or self.deps.len() > 0 or self.driver_manifest_bytes.len() > 0
+        self.templates.? or self.metadata.? or self.note_sdn.? or self.deps.len() > 0 or self.driver_manifest_bytes.len() > 0 or self.launch_metadata_bytes.len() > 0
 
 # ============================================================================
 # Dependency Tracking for SMF Staleness
@@ -164,7 +166,8 @@ fn generate_smf_with_templates(
         note_sdn: nil,
         target: target,
         deps: [],
-        driver_manifest_bytes: []
+        driver_manifest_bytes: [],
+        launch_metadata_bytes: []
     )
     generate_smf_with_options(object_code, options)
 
@@ -184,7 +187,8 @@ fn generate_smf_with_all_sections(
         note_sdn: note_sdn,
         target: target,
         deps: [],
-        driver_manifest_bytes: []
+        driver_manifest_bytes: [],
+        launch_metadata_bytes: []
     )
     generate_smf_with_options(object_code, options)
 
@@ -197,6 +201,11 @@ fn generate_smf_with_options(object_code: [u8], options: SmfBuildOptions) -> [u8
         return build_smf_with_code_for_target(code_bytes, options.target)
 
     # Build SMF with template sections
+    build_smf_with_templates_internal(code_bytes, options)
+
+fn generate_smf_with_raw_code_options(code_bytes: [u8], options: SmfBuildOptions) -> [u8]:
+    if not options.has_any_sections():
+        return build_smf_with_code_for_target(code_bytes, options.target)
     build_smf_with_templates_internal(code_bytes, options)
 
 # Build an SMF module with code and optional template sections
@@ -238,6 +247,7 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
         []
     val has_deps = not deps_bytes.is_empty()
     val has_driver_manifest = options.driver_manifest_bytes.len() > 0
+    val has_launch_metadata = options.launch_metadata_bytes.len() > 0
 
     # Calculate section count
     var section_count = 1  # Code section
@@ -251,6 +261,8 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
         section_count = section_count + 1  # note.deps section
     if has_driver_manifest:
         section_count = section_count + 1  # .drv_manifest section
+    if has_launch_metadata:
+        section_count = section_count + 1  # .launch_meta section
 
     # Calculate offsets (sections come FIRST now, not after header)
     val header_size = 128  # SmfHeader::SIZE (written at END)
@@ -261,7 +273,8 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
     val note_sdn_offset = metadata_offset + metadata_bytes.len()
     val deps_offset = note_sdn_offset + note_sdn_bytes.len()
     val driver_manifest_offset = deps_offset + deps_bytes.len()
-    val section_table_offset = driver_manifest_offset + options.driver_manifest_bytes.len()
+    val launch_metadata_offset = driver_manifest_offset + options.driver_manifest_bytes.len()
+    val section_table_offset = launch_metadata_offset + options.launch_metadata_bytes.len()
     val section_table_size = section_count * section_entry_size
     val symbol_table_offset = section_table_offset + section_table_size
     val string_table_offset = symbol_table_offset + 56  # One symbol
@@ -289,6 +302,10 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
     # Write .drv_manifest section payload
     if has_driver_manifest:
         buf = buf.concat(options.driver_manifest_bytes)
+
+    # Write .launch_meta section payload
+    if has_launch_metadata:
+        buf = buf.concat(options.launch_metadata_bytes)
 
     # 2. Write section table
 
@@ -351,6 +368,16 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
             name: ".drv_manifest"
         ))
 
+    # .launch_meta section (startup launch metadata SDN)
+    if has_launch_metadata:
+        buf = buf.concat(build_section_entry(
+            section_type: 15,  # SectionType::LaunchMetadata
+            flags: 0x01,  # READ
+            offset: launch_metadata_offset,
+            size: options.launch_metadata_bytes.len(),
+            name: ".launch_meta"
+        ))
+
     # 3. Write symbol table
     buf = buf.concat(build_symbol_entry("main", 0, code_bytes.len()))
 
@@ -394,6 +421,7 @@ fn smf_name_bytes(name: text) -> [u8]:
         "note.sdn": [110, 111, 116, 101, 46, 115, 100, 110]
         "note.deps": [110, 111, 116, 101, 46, 100, 101, 112, 115]
         ".drv_manifest": [46, 100, 114, 118, 95, 109, 97, 110, 105, 102, 101, 115, 116]
+        ".launch_meta": [46, 108, 97, 117, 110, 99, 104, 95, 109, 101, 116, 97]
         _: []
 
 fn smf_name_hash(name: text) -> i32:
@@ -498,7 +526,15 @@ fn build_symbol_entry(name: text, value: i32, size: i32) -> [u8]:
 # Build an SMF module with the given code bytes for a specific target architecture
 fn build_smf_with_code_for_target(code_bytes: [u8], target: Target) -> [u8]:
     # Delegate to simple SMF builder
-    val options = SmfBuildOptions(templates: nil, metadata: nil, note_sdn: nil, target: target)
+    val options = SmfBuildOptions(
+        templates: nil,
+        metadata: nil,
+        note_sdn: nil,
+        target: target,
+        deps: [],
+        driver_manifest_bytes: [],
+        launch_metadata_bytes: []
+    )
     build_smf_with_templates_internal(code_bytes, options)
 
 # Helper to convert code bytes to a minimal object format
@@ -535,14 +571,29 @@ fn build_smf_with_relocations(object_code: [u8], options: SmfBuildOptions) -> [u
         # addend (i64)
         reloc_bytes = reloc_bytes + (u64_to_bytes(reloc.addend))
 
+    val deps_bytes = if options.deps.len() > 0:
+        serialize_smf_dependencies(options.deps)
+    else:
+        []
+    val has_deps = deps_bytes.len() > 0
+    val has_driver_manifest = options.driver_manifest_bytes.len() > 0
+    val has_launch_metadata = options.launch_metadata_bytes.len() > 0
+
     # Build SMF with Code + Reloc sections
     var buf: [u8] = []
     val code_offset = 0
     val reloc_offset = code_bytes.len()
-    val section_table_offset = reloc_offset + reloc_bytes.len()
+    val deps_offset = reloc_offset + reloc_bytes.len()
+    val driver_manifest_offset = deps_offset + deps_bytes.len()
+    val launch_metadata_offset = driver_manifest_offset + options.driver_manifest_bytes.len()
+    val section_table_offset = launch_metadata_offset + options.launch_metadata_bytes.len()
 
     var section_count = 2  # Code + Reloc
-    if options.has_any_sections():
+    if has_deps:
+        section_count = section_count + 1
+    if has_driver_manifest:
+        section_count = section_count + 1
+    if has_launch_metadata:
         section_count = section_count + 1
 
     val section_entry_size = 64
@@ -556,6 +607,15 @@ fn build_smf_with_relocations(object_code: [u8], options: SmfBuildOptions) -> [u
 
     # Write reloc section
     buf = buf + (reloc_bytes)
+
+    if has_deps:
+        buf = buf + (deps_bytes)
+
+    if has_driver_manifest:
+        buf = buf + (options.driver_manifest_bytes)
+
+    if has_launch_metadata:
+        buf = buf + (options.launch_metadata_bytes)
 
     # Write section table - Code section
     buf = buf + (build_section_entry(
@@ -574,6 +634,33 @@ fn build_smf_with_relocations(object_code: [u8], options: SmfBuildOptions) -> [u
         size: reloc_bytes.len(),
         name: "rela"
     ))
+
+    if has_deps:
+        buf = buf + (build_section_entry(
+            section_type: 7,
+            flags: 0x01,
+            offset: deps_offset,
+            size: deps_bytes.len(),
+            name: "note.deps"
+        ))
+
+    if has_driver_manifest:
+        buf = buf + (build_section_entry(
+            section_type: 14,
+            flags: 0x01,
+            offset: driver_manifest_offset,
+            size: options.driver_manifest_bytes.len(),
+            name: ".drv_manifest"
+        ))
+
+    if has_launch_metadata:
+        buf = buf + (build_section_entry(
+            section_type: 15,
+            flags: 0x01,
+            offset: launch_metadata_offset,
+            size: options.launch_metadata_bytes.len(),
+            name: ".launch_meta"
+        ))
 
     # Write symbol table
     buf = buf + (build_symbol_entry("main", 0, code_bytes.len()))

@@ -80,15 +80,20 @@ fn read_ascii(buf: [u8], at: i32, max_len: i32) -> text:
     # because the loader path may run before std text helpers are set up.
     var end: i32 = at
     var limit: i32 = at + max_len
+    var chars: [text] = []
     while end < limit:
         if buf[end] == 0:
             break
+        chars.push(driver_ascii_char(buf[end]))
         end = end + 1
-    return text_from_utf8_slice(buf, at, end - at)
+    return chars.join("")
 
-# Must be provided by the lower-level text module; declared here so the
-# loader compiles before std.text is re-exported into baremetal mode.
-extern fn text_from_utf8_slice(buf: [u8], at: i32, len: i32) -> text
+fn driver_ascii_char(b: u8) -> text:
+    val ascii_table = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    val idx = (b as i32) - 32
+    if idx >= 0 and idx < (ascii_table.len() as i32):
+        return ascii_table.slice(idx, idx + 1)
+    "?"
 
 fn kind_from_byte(b: i32) -> ManifestKind:
     match b:
@@ -124,42 +129,52 @@ fn class_from_byte(b: i32) -> DriverClass:
 # wire contract live side-by-side; any future layout change must update
 # both in one commit.
 fn encode_manifest(m: DriverManifest) -> [u8]:
-    val total: i32 = m.byte_size()
     var buf: [u8] = []
-    var i: i32 = 0
-    while i < total:
-        buf.append(0 as u8)
-        i = i + 1
-
-    # offset 0 — magic (u32 LE)
-    write_u32_le(buf, 0, DRVS_MAGIC)
-    # offset 4 — kind (u8)
-    buf[4] = kind_to_byte(m.kind) as u8
-    # offset 5 — class (u8)
-    buf[5] = class_to_byte(m.dclass) as u8
-    # offset 6 — abi_rev (u16 LE)
-    write_u16_le(buf, 6, m.abi_rev)
-    # offset 8 — vendor (u32 LE)
-    write_u32_le(buf, 8, m.vendor)
-    # offset 12 — device_count (u32 LE)
+    buf = buf.concat(driver_u32_le_bytes(DRVS_MAGIC))
+    buf = buf.push(kind_to_byte(m.kind) as u8)
+    buf = buf.push(class_to_byte(m.dclass) as u8)
+    buf = buf.concat(driver_u16_le_bytes(m.abi_rev))
+    buf = buf.concat(driver_u32_le_bytes(m.vendor))
     val device_count: i32 = m.device_ids.len() as i32
-    write_u32_le(buf, 12, device_count)
-    # offset 16 — version (16 ASCII bytes, zero-padded)
-    write_ascii(buf, 16, DRVS_VERSION_LEN, m.version)
-    # offset 32 — name (32 ASCII bytes, zero-padded)
-    write_ascii(buf, 32, DRVS_NAME_LEN, m.name)
+    buf = buf.concat(driver_u32_le_bytes(device_count))
+    buf = buf.concat(driver_fixed_ascii_bytes(m.version, DRVS_VERSION_LEN))
+    buf = buf.concat(driver_fixed_ascii_bytes(m.name, DRVS_NAME_LEN))
 
-    # offset 64 — device_id pairs (u32 reserved, u32 id), N = device_count
     var j: i32 = 0
     while j < device_count:
-        val base: i32 = DRVS_HEADER_BYTES + j * 8
-        # reserved u32 stays zero (no-op)
-        write_u32_le(buf, base + 4, m.device_ids[j])
+        buf = buf.concat(driver_u32_le_bytes(0))
+        buf = buf.concat(driver_u32_le_bytes(m.device_ids[j]))
         j = j + 1
 
     return buf
 
 # --- Little-endian byte writers — mirror of the readers above ---
+
+fn driver_u16_le_bytes(value: i32) -> [u8]:
+    [
+        (value & 0xff) as u8,
+        ((value >> 8) & 0xff) as u8
+    ]
+
+fn driver_u32_le_bytes(value: i32) -> [u8]:
+    [
+        (value & 0xff) as u8,
+        ((value >> 8) & 0xff) as u8,
+        ((value >> 16) & 0xff) as u8,
+        ((value >> 24) & 0xff) as u8
+    ]
+
+fn driver_fixed_ascii_bytes(s: text, max_len: i32) -> [u8]:
+    val src: [u8] = rt_text_to_bytes(s)
+    var out: [u8] = []
+    var i: i32 = 0
+    while i < max_len:
+        if i < (src.len() as i32):
+            out = out.push(src[i])
+        else:
+            out = out.push(0 as u8)
+        i = i + 1
+    out
 
 fn write_u16_le(buf: [u8], at: i32, value: i32):
     buf[at]     = (value        & 0xff) as u8

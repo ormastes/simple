@@ -14,8 +14,8 @@ use compiler.backend.llvm_backend_tools.{llvm_bootstrap_last_object_path}
 use compiler.backend.backend_types.{CompiledModule}
 use compiler.backend.linker.linker_wrapper.{link_to_native, link_to_smf, link_to_self_contained, NativeLinkConfig, SelfContainedConfig, write_elf_bytes_to_file}
 use compiler.backend.backend.llvm_native_link.{link_llvm_native, NativeLinkOptions}
-use compiler.driver.smf_writer.{generate_smf_with_templates, generate_smf_with_options, Target, build_smf_with_elf_embedded, build_smf_with_relocations, SmfBuildOptions, SmfDependencyEntry}
-use compiler.driver.smf_binary_helpers.{u32_to_bytes}
+use compiler.driver.smf_writer.{generate_smf_with_templates, generate_smf_with_options, generate_smf_with_raw_code_options, Target, build_smf_with_relocations, SmfBuildOptions, SmfDependencyEntry}
+use compiler.driver.smf_binary_helpers.{u32_to_bytes, u64_to_bytes}
 use compiler.backend.backend.cmake_gen.{generate_cmake_for_modules}
 use driver_types.{CompileResult, CompileOptions, OutputFormat, compileoptions_effective_mir_opt_level, CompileContext}
 use compiler.driver.driver.{CompilerDriver}
@@ -33,6 +33,9 @@ extern fn rt_path_parent(path: text) -> text
 extern fn rt_env_get(key: text) -> text
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_file_copy(src: text, dst: text) -> bool
+extern fn rt_file_size(path: text) -> i64
+extern fn rt_file_read_bytes_range(path: text, offset: i64, count: i64) -> [u8]
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
 
 fn driver_log_debug(log: Logger, message: text):
     if log.level >= 10:
@@ -58,6 +61,53 @@ fn driver_effective_mir_opt_level(ctx: CompileContext) -> i64:
 
 fn _extract_driver_ctx(driver: CompilerDriver) -> CompileContext:
     driver.ctx
+
+fn driver_native_launch_trailer_magic() -> [u8]:
+    # "SIMPLE_LAUNCH_V1" = 16 bytes.
+    [83, 73, 77, 80, 76, 69, 95, 76, 65, 85, 78, 67, 72, 95, 86, 49]
+
+fn driver_render_native_launch_metadata(ctx: CompileContext) -> text:
+    val target = Target.host()
+    "simple_launch_metadata:\n" +
+        "  entry_kind: \"native\"\n" +
+        "  target_os: \"" + target.os + "\"\n" +
+        "  target_arch: \"" + target.arch + "\"\n" +
+        "  target_abi: \"native\"\n" +
+        "  uses_arg_parser: false\n" +
+        "  mmap_hint: false\n"
+
+fn driver_render_smf_launch_metadata(ctx: CompileContext) -> text:
+    val target = Target.host()
+    "simple_launch_metadata:\n" +
+        "  entry_kind: \"smf\"\n" +
+        "  target_os: \"" + target.os + "\"\n" +
+        "  target_arch: \"" + target.arch + "\"\n" +
+        "  target_abi: \"smf\"\n" +
+        "  uses_arg_parser: true\n" +
+        "  mmap_hint: true\n"
+
+fn driver_native_launch_metadata_trailer(ctx: CompileContext) -> [u8]:
+    val payload = driver_render_native_launch_metadata(ctx).to_bytes()
+    var out: [u8] = []
+    out = out.concat(payload)
+    out = out.concat(u64_to_bytes(payload.len()))
+    out = out.concat(driver_native_launch_trailer_magic())
+    out
+
+fn driver_append_native_launch_metadata(output: text, ctx: CompileContext) -> bool:
+    val size = rt_file_size(output)
+    if size <= 0:
+        return false
+    val existing = rt_file_read_bytes_range(output, 0, size)
+    if existing.len() <= 0:
+        return false
+    val embedded = existing.concat(driver_native_launch_metadata_trailer(ctx))
+    rt_file_write_bytes(output, embedded)
+
+fn driver_native_success_with_launch_metadata(ctx: CompileContext, output: text) -> CompileResult:
+    if not driver_append_native_launch_metadata(output, ctx):
+        return CompileResult.CodegenError("Failed to embed native launch metadata in {output}")
+    CompileResult.Success(output)
 
 pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: text, output: text) -> CompileResult:
     """Bootstrap-stable native output path.
@@ -85,7 +135,7 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
                 )
                 match link_llvm_native([obj_path], output, llvm_opts):
                     case Ok(_):
-                        return CompileResult.Success(output)
+                        return driver_native_success_with_launch_metadata(ctx, output)
                     case Err(e):
                         return CompileResult.CodegenError("LLVM native linking failed: {e}")
             val direct_config = NativeLinkConfig(
@@ -99,7 +149,7 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
             )
             match link_to_native([obj_path], output, direct_config):
                 case Ok(_):
-                    return CompileResult.Success(output)
+                    return driver_native_success_with_launch_metadata(ctx, output)
                 case Err(e):
                     return CompileResult.CodegenError("Linking failed: {e}")
         case Err(e):
@@ -145,7 +195,7 @@ impl CompilerDriver:
                         )
                         match link_llvm_native([obj_path], output, llvm_opts):
                             case Ok(_):
-                                return CompileResult.Success(output)
+                                return driver_native_success_with_launch_metadata(ctx, output)
                             case Err(e):
                                 return CompileResult.CodegenError("LLVM native linking failed: {e}")
                     val direct_config = NativeLinkConfig(
@@ -159,7 +209,7 @@ impl CompilerDriver:
                     )
                     match link_to_native([obj_path], output, direct_config):
                         case Ok(_):
-                            return CompileResult.Success(output)
+                            return driver_native_success_with_launch_metadata(ctx, output)
                         case Err(e):
                             return CompileResult.CodegenError("Linking failed: {e}")
                 case Err(e):
@@ -263,7 +313,7 @@ impl CompilerDriver:
             match link_llvm_native(object_files, output, llvm_opts):
                 case Ok(_):
                     driver_log_info(log, "Native executable written to {output} (backend: LLVM)")
-                    CompileResult.Success(output)
+                    driver_native_success_with_launch_metadata(ctx, output)
                 case Err(e):
                     CompileResult.CodegenError("LLVM native linking failed: {e}")
         else:
@@ -276,7 +326,7 @@ impl CompilerDriver:
             match link_to_native(object_files, output, link_config):
                 case Ok(_):
                     driver_log_info(log, "Native executable written to {output} (backend: {effective_backend})")
-                    CompileResult.Success(output)
+                    driver_native_success_with_launch_metadata(ctx, output)
                 case Err(e):
                     CompileResult.CodegenError("Linking failed: {e}")
 
@@ -523,24 +573,31 @@ impl CompilerDriver:
         # Collect dependency interface hashes for staleness tracking
         val deps = collect_dependency_hashes(ctx)
         val driver_manifest_bytes = collect_driver_manifest_bytes(ctx.mir_modules)
+        val launch_metadata_bytes = driver_render_smf_launch_metadata(ctx).to_bytes()
 
         # Wrap object code into SMF format
         val target = Target.host()
         val smf_mode = ctx.options.smf_output_mode
         val smf_bytes = if smf_mode == "elf_embedded":
             # Phase 1: Store full ELF .o in Code section (native linker can read it)
-            build_smf_with_elf_embedded(all_object_bytes, target)
+            var opts: SmfBuildOptions = SmfBuildOptions.create(target)
+            opts.deps = deps
+            opts.driver_manifest_bytes = driver_manifest_bytes
+            opts.launch_metadata_bytes = launch_metadata_bytes
+            generate_smf_with_raw_code_options(all_object_bytes, opts)
         elif smf_mode == "reloc_sections":
             # Phase 2: Extract .text + relocations into separate sections
             var opts: SmfBuildOptions = SmfBuildOptions.create(target)
             opts.deps = deps
             opts.driver_manifest_bytes = driver_manifest_bytes
+            opts.launch_metadata_bytes = launch_metadata_bytes
             build_smf_with_relocations(all_object_bytes, opts)
         else:
             # Default: strip ELF to raw .text bytes, with dependency tracking
             var opts: SmfBuildOptions = SmfBuildOptions.create(target)
             opts.deps = deps
             opts.driver_manifest_bytes = driver_manifest_bytes
+            opts.launch_metadata_bytes = launch_metadata_bytes
             generate_smf_with_options(all_object_bytes, opts)
         CompileResult.Success(smf_bytes)
 
@@ -611,8 +668,6 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
 # ============================================================================
 # Dependency Collection for SMF Staleness Tracking
 # ============================================================================
-
-extern fn rt_file_read_bytes_range(path: text, offset: i64, count: i64) -> [u8]
 
 fn collect_driver_manifest_bytes(modules: Dict<text, MirModule>) -> [u8]:
     var payload: [u8] = []

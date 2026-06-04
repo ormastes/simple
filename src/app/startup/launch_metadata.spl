@@ -194,3 +194,115 @@ pub fn parse_launch_metadata_sidecar(content: text, fallback_kind: text) -> Laun
     metadata.required_native_dynlibs = native_dynlibs
     metadata.required_smf_dynlibs = smf_dynlibs
     metadata
+
+fn _launch_meta_le_u32(bytes: [u8], offset: i64) -> i64:
+    (bytes[offset] as i64) |
+    ((bytes[offset + 1] as i64) << 8) |
+    ((bytes[offset + 2] as i64) << 16) |
+    ((bytes[offset + 3] as i64) << 24)
+
+fn _launch_meta_le_u64(bytes: [u8], offset: i64) -> i64:
+    (bytes[offset] as i64) |
+    ((bytes[offset + 1] as i64) << 8) |
+    ((bytes[offset + 2] as i64) << 16) |
+    ((bytes[offset + 3] as i64) << 24) |
+    ((bytes[offset + 4] as i64) << 32) |
+    ((bytes[offset + 5] as i64) << 40) |
+    ((bytes[offset + 6] as i64) << 48) |
+    ((bytes[offset + 7] as i64) << 56)
+
+fn _launch_meta_char_from_byte(b: u8) -> text:
+    if b == 10u8:
+        return "\n"
+    if b == 13u8:
+        return "\r"
+    if b == 9u8:
+        return "\t"
+    val ascii_table = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    val idx = (b as i64) - 32
+    if idx >= 0 and idx < ascii_table.len():
+        return ascii_table.slice(idx, idx + 1)
+    "?"
+
+fn _launch_meta_bytes_to_text(bytes: [u8], offset: i64, size: i64) -> text:
+    var parts: [text] = []
+    var i: i64 = 0
+    while i < size:
+        parts.push(_launch_meta_char_from_byte(bytes[offset + i]))
+        i = i + 1
+    parts.join("")
+
+pub fn parse_launch_metadata_from_smf_bytes(bytes: [u8], fallback_kind: text) -> LaunchMetadata:
+    if bytes.len() < 128:
+        return launch_metadata_default(fallback_kind)
+
+    val header = bytes.len() - 128
+    val section_count = _launch_meta_le_u32(bytes, header + 16)
+    val section_table = _launch_meta_le_u64(bytes, header + 20)
+    val section_entry_size = 64
+
+    if section_count <= 0 or section_table < 0 or section_table >= bytes.len():
+        return launch_metadata_default(fallback_kind)
+
+    var i: i64 = 0
+    while i < section_count:
+        val entry = section_table + (i * section_entry_size)
+        if entry + section_entry_size > bytes.len():
+            break
+        val section_type = bytes[entry] as i64
+        if section_type == 15:
+            val payload_offset = _launch_meta_le_u64(bytes, entry + 8)
+            val payload_size = _launch_meta_le_u64(bytes, entry + 16)
+            if payload_offset >= 0 and payload_size >= 0 and payload_offset + payload_size <= bytes.len():
+                val content = _launch_meta_bytes_to_text(bytes, payload_offset, payload_size)
+                return parse_launch_metadata_sidecar(content, fallback_kind)
+            return launch_metadata_default(fallback_kind)
+        i = i + 1
+
+    launch_metadata_default(fallback_kind)
+
+pub fn native_launch_metadata_trailer_magic() -> [u8]:
+    # "SIMPLE_LAUNCH_V1" = 16 bytes.
+    [83, 73, 77, 80, 76, 69, 95, 76, 65, 85, 78, 67, 72, 95, 86, 49]
+
+pub fn render_native_launch_metadata_trailer(metadata: LaunchMetadata) -> [u8]:
+    val payload = render_launch_metadata_sidecar(metadata).bytes()
+    var out: [u8] = []
+    out = out.concat(payload)
+    out = out.concat([
+        (payload.len() & 0xFF).to_u8(),
+        ((payload.len() >> 8) & 0xFF).to_u8(),
+        ((payload.len() >> 16) & 0xFF).to_u8(),
+        ((payload.len() >> 24) & 0xFF).to_u8(),
+        ((payload.len() >> 32) & 0xFF).to_u8(),
+        ((payload.len() >> 40) & 0xFF).to_u8(),
+        ((payload.len() >> 48) & 0xFF).to_u8(),
+        ((payload.len() >> 56) & 0xFF).to_u8()
+    ])
+    out = out.concat(native_launch_metadata_trailer_magic())
+    out
+
+pub fn has_native_launch_metadata_trailer(bytes: [u8]) -> bool:
+    val magic = native_launch_metadata_trailer_magic()
+    val trailer_size = magic.len() + 8
+    if bytes.len() < trailer_size:
+        return false
+    val magic_offset = bytes.len() - magic.len()
+    var i: i64 = 0
+    while i < magic.len():
+        if bytes[magic_offset + i] != magic[i]:
+            return false
+        i = i + 1
+    true
+
+pub fn parse_launch_metadata_from_native_bytes(bytes: [u8], fallback_kind: text) -> LaunchMetadata:
+    if not has_native_launch_metadata_trailer(bytes):
+        return launch_metadata_default(fallback_kind)
+    val magic = native_launch_metadata_trailer_magic()
+    val size_offset = bytes.len() - magic.len() - 8
+    val payload_size = _launch_meta_le_u64(bytes, size_offset)
+    if payload_size < 0 or payload_size > size_offset:
+        return launch_metadata_default(fallback_kind)
+    val payload_offset = size_offset - payload_size
+    val content = _launch_meta_bytes_to_text(bytes, payload_offset, payload_size)
+    parse_launch_metadata_sidecar(content, fallback_kind)

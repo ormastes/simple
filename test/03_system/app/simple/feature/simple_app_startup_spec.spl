@@ -9,12 +9,17 @@ use app.startup.launch_metadata.{
     startup_detect_launch_kind,
     launch_metadata_for_simpleos_path,
     render_launch_metadata_sidecar,
+    render_native_launch_metadata_trailer,
     parse_launch_metadata_sidecar,
+    parse_launch_metadata_from_smf_bytes,
+    parse_launch_metadata_from_native_bytes,
+    has_native_launch_metadata_trailer,
     launch_metadata_sidecar_path,
     startup_normalize_program_args,
     startup_plan_from_metadata,
     startup_feature_summary
 }
+use compiler.driver.smf_writer.{SmfBuildOptions, Target, generate_smf_with_options}
 
 fn _metadata(kind: text, uses_args: bool, mmap_hint: bool, native_dynlibs: [text], smf_dynlibs: [text]) -> LaunchMetadata:
     LaunchMetadata(
@@ -140,3 +145,45 @@ describe "simple app startup metadata":
 
         it "should name sidecars next to the artifact path":
             expect(launch_metadata_sidecar_path("build/app")).to_equal("build/app.simple_launch.sdn")
+
+    describe "REQ-006: embedded SMF launch metadata":
+        it "should parse embedded SMF metadata for SimpleOS startup":
+            var opts = SmfBuildOptions.create(Target.x86_64_unknown_linux_gnu())
+            val sidecar =
+                "simple_launch_metadata:\n" +
+                "  entry_kind: \"smf\"\n" +
+                "  target_os: \"simpleos\"\n" +
+                "  target_arch: \"multiarch\"\n" +
+                "  target_abi: \"simpleos\"\n" +
+                "  uses_arg_parser: true\n" +
+                "  mmap_hint: true\n" +
+                "  smf_dynlib: \"/sys/lib/gui_hot.smf\"\n"
+            opts.launch_metadata_bytes = sidecar.bytes()
+
+            val smf = generate_smf_with_options([0xC3], opts)
+            val metadata = parse_launch_metadata_from_smf_bytes(smf, "smf")
+            val plan = startup_plan_from_metadata("/sys/apps/simple.smf", ["--open", "doc.spl"], metadata, false, true)
+
+            expect(metadata.entry_kind).to_equal("smf")
+            expect(metadata.target_os).to_equal("simpleos")
+            expect(plan.include_arg_parser).to_equal(true)
+            expect(plan.include_mmap_cache).to_equal(true)
+            expect(plan.cache_strategy).to_equal("simpleos_vfs_prewarm")
+            expect(plan.include_dynlib_loader).to_equal(true)
+            expect(plan.load_smf_dynlibs[0]).to_equal("/sys/lib/gui_hot.smf")
+            expect(plan.program_args[0]).to_equal("/sys/apps/simple.smf")
+
+    describe "REQ-007: embedded native launch metadata":
+        it "should parse native launch metadata from the binary trailer":
+            val metadata = launch_metadata_for_native_build("macos", "aarch64", "macho")
+            val binary = [0xCF, 0xFA, 0xED, 0xFE].concat(render_native_launch_metadata_trailer(metadata))
+            val parsed = parse_launch_metadata_from_native_bytes(binary, "native")
+            val plan = startup_plan_from_metadata("build/app", [], parsed, true, false)
+
+            expect(has_native_launch_metadata_trailer(binary)).to_equal(true)
+            expect(parsed.entry_kind).to_equal("native")
+            expect(parsed.target_os).to_equal("macos")
+            expect(parsed.target_arch).to_equal("aarch64")
+            expect(parsed.target_abi).to_equal("macho")
+            expect(plan.include_arg_parser).to_equal(false)
+            expect(plan.include_mmap_cache).to_equal(false)

@@ -9,10 +9,10 @@ loading.
 
 - One metadata contract covers `native | script | smf`: target OS/arch/ABI, arg
   parser policy, mmap/cache hint, native dynlibs, and SMF dynlibs.
-- Pure Simple `llvm-lib` native builds emit `<output>.simple_launch.sdn`;
-  embedded native sections are still follow-up work.
+- Native builds append an embedded `SIMPLE_LAUNCH_V1` metadata trailer; sidecar
+  metadata is auxiliary for explicit checks.
 - Scripts use generated module-graph metadata; SMF files carry metadata in the
-  SMF manifest/header.
+  embedded `.launch_meta` SMF section.
 - SimpleOS paths use `launch_metadata_for_simpleos_path(...)` and
   `simple launch-meta check --simpleos /sys/apps/app.smf`.
 - SimpleOS WM hover prefetch warms/checks executable bytes but must not launch,
@@ -32,6 +32,6 @@ loading.
 ## Open Next
 
 - [full architecture](simple_app_startup.md)
-- [test plan](../03_plan/sys_test/simple_app_startup.md)
+- [test plan](../../03_plan/app/simple_app_startup.md)
 - [startup policy](../../src/app/startup/launch_metadata.spl)
 - [SimpleOS launcher](../../src/os/services/launcher/launcher.spl)
