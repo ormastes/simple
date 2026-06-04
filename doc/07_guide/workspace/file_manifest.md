@@ -38,6 +38,22 @@ Links to child FILE.md files that enforce subdirectories:
 Only linked manifests enforce. An orphan FILE.md (not referenced by its parent)
 is documentary only.
 
+### Submodules (optional)
+
+Directories containing git submodules should declare them in a `## Submodules`
+section listing path, upstream URL, and a short description:
+
+```markdown
+## Submodules
+
+| Path | URL | Description |
+|---|---|---|
+| `07_ml/svllm` | `ormastes/svllm` | Simple vLLM inference engine |
+```
+
+This section is documentary (not enforced by the root guard) but helps tools
+and contributors discover which entries are external repositories.
+
 ## How to Add a New Entry
 
 1. Open the FILE.md in the target directory
