@@ -10163,7 +10163,7 @@ match result:
 1. var session = BrowserSession new
 
 2. Ok
-   - Expected: _display_js(value) equals `1,4,255,7:1|4|255|7`
+   - Expected: _display_js(value) equals `1,4,255,7:1,4,255,7:1|4|255|7`
 
 3. Err
    - Expected: "unexpected uint8 toString js error: {err}" equals ``
@@ -10181,10 +10181,10 @@ session.open_html(
     "https://example.com/webgpu-wasm.html",
     "<html><body>WASM GPU</body></html>"
 )
-val result = session.eval_script("var b = new Uint8Array(4); b[0] = 1; b[1] = 260; b[2] = -1; b[3] = 7; b.toString() + ':' + b.join('|')")
+val result = session.eval_script("var b = new Uint8Array(4); b[0] = 1; b[1] = 260; b[2] = -1; b[3] = 7; b.toString() + ':' + b.toLocaleString() + ':' + b.join('|')")
 match result:
     Ok(value):
-        expect(_display_js(value)).to_equal("1,4,255,7:1|4|255|7")
+        expect(_display_js(value)).to_equal("1,4,255,7:1,4,255,7:1|4|255|7")
     Err(err):
         expect("unexpected uint8 toString js error: {err}").to_equal("")
 ```
@@ -10196,7 +10196,7 @@ match result:
 1. var session = BrowserSession new
 
 2. Ok
-   - Expected: _display_js(value) equals `1|4|255|7:1,4,255,7:1,4,255,7`
+   - Expected: _display_js(value) equals `1|4|255|7:1,4,255,7:1,4,255,7:1,4,255,7:1,4,255,7`
 
 3. Err
    - Expected: "unexpected uint8 string apply dispatch js error: {err}" equals ``
@@ -10214,10 +10214,10 @@ session.open_html(
     "https://example.com/webgpu-wasm.html",
     "<html><body>WASM GPU</body></html>"
 )
-val result = session.eval_script("var b = new Uint8Array(4); b[0] = 1; b[1] = 260; b[2] = -1; b[3] = 7; Uint8Array.prototype.join.apply(b, ['|']) + ':' + Uint8Array.prototype.join.apply(b, []) + ':' + Uint8Array.prototype.toString.apply(b, [])")
+val result = session.eval_script("var b = new Uint8Array(4); b[0] = 1; b[1] = 260; b[2] = -1; b[3] = 7; Uint8Array.prototype.join.apply(b, ['|']) + ':' + Uint8Array.prototype.join.apply(b, []) + ':' + Uint8Array.prototype.toString.apply(b, []) + ':' + Uint8Array.prototype.toLocaleString.call(b) + ':' + Uint8Array.prototype.toLocaleString.apply(b, [])")
 match result:
     Ok(value):
-        expect(_display_js(value)).to_equal("1|4|255|7:1,4,255,7:1,4,255,7")
+        expect(_display_js(value)).to_equal("1|4|255|7:1,4,255,7:1,4,255,7:1,4,255,7:1,4,255,7")
     Err(err):
         expect("unexpected uint8 string apply dispatch js error: {err}").to_equal("")
 ```
