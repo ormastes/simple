@@ -2078,18 +2078,81 @@
  - `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
  - `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
  
- BrowserSession typed-array prototype coverage now includes bounded
- `Uint8Array.from` from indexed sources. The browser script scenario proves
- copying from an existing typed array, byte normalization, source immutability,
- array-literal construction with mapper callback value/index delivery, result
- byte coercion, `length`, `at`, and `toString` behavior with
- `4,255:4,255:4,0,9:3:0`. Focused checks passed, the fetch/WASM chain spec
- passed `30/30`, the native WASM host spec passed `107/107`, and Node API
- conformance remained `213/213`. The generated scenario manual was refreshed
- with the existing docgen warnings. Broader typed-array prototype parity and
- production GUI pixel parity remain open.
- 
- BrowserSession Uint8Array of continuation:
+BrowserSession typed-array prototype coverage now includes bounded
+`Uint8Array.from` from indexed sources. The browser script scenario proves
+copying from an existing typed array, byte normalization, source immutability,
+array-literal construction with mapper callback value/index delivery, result
+byte coercion, `length`, `at`, and `toString` behavior with
+`4,255:4,255:4,0,9:3:0`. Focused checks passed, the fetch/WASM chain spec
+passed `30/30`, the native WASM host spec passed `107/107`, and Node API
+conformance remained `213/213`. The generated scenario manual was refreshed
+with the existing docgen warnings. Broader typed-array prototype parity and
+production GUI pixel parity remain open.
+
+BrowserSession Uint8Array from nonzero-offset view continuation:
+
+Completion checklist:
+
+- [x] Start from clean detached temp worktree
+  `/tmp/simple-gui-hardening-next37` on pushed `origin/main`.
+- [x] Leave the primary detached dirty checkout untouched.
+- [x] Confirm existing `Uint8Array.from` coverage exercises typed-array copies
+  and array-literal mapper callback delivery, but not nonzero-offset source
+  views.
+- [x] Confirm indexed typed-array reads already route through view-relative
+  storage and `byteOffset`.
+- [x] Add one BrowserSession scenario that calls `Uint8Array.from(view, mapFn)`
+  where `view = base.subarray(2, 5)`.
+- [x] Verify the source view still aliases the base buffer and reports
+  `byteOffset == 2` and `length == 3`.
+- [x] Verify mapper callback values observe normalized view-relative bytes.
+- [x] Verify the returned typed array uses independent storage with
+  `byteOffset == 0` and `byteLength == 3`.
+- [x] Mutate the returned copy and source backing storage after construction to
+  prove result/source isolation.
+- [x] Refresh generated scenario manual after executable spec changes.
+- [x] Run focused compile and focused fetch/WASM chain spec.
+- [x] Run adjacent browser/WASM and JS conformance checks.
+- [x] Run final layout, whitespace, file-count, and status gates.
+- [ ] Commit test/manual/plan update.
+- [ ] Push guarded main update after fetch/rebase/file-count safety check.
+- [ ] Commit and push sync-complete checklist update.
+
+Tests checklist:
+
+- [x] `Uint8Array.from(view, mapFn)` reads bytes from a nonzero-offset
+  `subarray` source.
+- [x] Mapper callback receives normalized values `4`, `255`, and `7` plus
+  indexes `0`, `1`, and `2`.
+- [x] The mapped result starts as `8,255,16`, then remains independent after
+  `copy[0] = 99`.
+- [x] Later source mutation changes `view` and `base`, but not copied result
+  bytes.
+- [x] Focused spec result recorded: fetch/WASM chain spec passed `250/250`
+  with `--timeout 240`.
+- [x] Adjacent spec results recorded: WASM host `107/107`, WebGPU JS/WASM
+  system `106/106`, Node API conformance `275/275`.
+
+Commands run:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout 240 --clean --force-rebuild --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout 240 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout 240 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout 240 --clean --format json`
+
+Generated manual evidence:
+
+- `doc/06_spec/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.md`
+  reports `Total scenarios | 250 |`.
+
+BrowserSession now proves `Uint8Array.from(view, mapFn)` reads normalized bytes
+through nonzero-offset source views, produces independent zero-offset copied
+storage, and keeps copied results isolated from later returned-copy and source
+mutations. This is a coverage-only continuation; no runtime change was required.
+
+BrowserSession Uint8Array of continuation:
  
  - `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/interpreter_eval.spl test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
  - `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
