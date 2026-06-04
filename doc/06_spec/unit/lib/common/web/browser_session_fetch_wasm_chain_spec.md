@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 181 | 181 | 0 | 0 |
+| 182 | 182 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -2176,6 +2176,39 @@ match result:
 
 </details>
 
+#### routes decorated WebAssembly hex promise results through browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `compile:true:8:0:wasm32:instantiate:instantiated:true:8:0:object`
+
+3. Err
+   - Expected: "unexpected decorated wasm promise js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var out = ''; var decorated = '0x0061_736d 0100_0000'; WebAssembly.compile(decorated).then(function(module) { out = 'compile:' + module.validated + ':' + module.byteLength + ':' + module.sectionCount + ':' + module.target; }); WebAssembly.instantiate(decorated).then(function(result) { out = out + ':instantiate:' + result.status + ':' + result.module.validated + ':' + result.module.byteLength + ':' + result.module.sectionCount + ':' + typeof result.instance.exports; }); out")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("compile:true:8:0:wasm32:instantiate:instantiated:true:8:0:object")
+    Err(err):
+        expect("unexpected decorated wasm promise js error: {err}").to_equal("")
+```
+
+</details>
+
 #### rejects decorated WebAssembly hex strings with non-hex characters
 
 1. var session = BrowserSession new
@@ -2407,6 +2440,39 @@ match result:
 
 </details>
 
+#### routes uppercase decorated WebAssembly hex promise results through browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `compile:true:8:0:wasm32:instantiate:instantiated:true:8:0:object`
+
+3. Err
+   - Expected: "unexpected uppercase decorated wasm promise js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var out = ''; var decorated = '0X0061_736D 0100_0000'; WebAssembly.compile(decorated).then(function(module) { out = 'compile:' + module.validated + ':' + module.byteLength + ':' + module.sectionCount + ':' + module.target; }); WebAssembly.instantiate(decorated).then(function(result) { out = out + ':instantiate:' + result.status + ':' + result.module.validated + ':' + result.module.byteLength + ':' + result.module.sectionCount + ':' + typeof result.instance.exports; }); out")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("compile:true:8:0:wasm32:instantiate:instantiated:true:8:0:object")
+    Err(err):
+        expect("unexpected uppercase decorated wasm promise js error: {err}").to_equal("")
+```
+
+</details>
+
 #### normalizes control whitespace decorated WebAssembly hex strings in browser scripts
 
 1. var session = BrowserSession new
@@ -2440,6 +2506,39 @@ match result:
 
 </details>
 
+#### routes control whitespace decorated WebAssembly hex promise results through browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `compile:true:8:0:wasm32:instantiate:instantiated:true:8:0:object`
+
+3. Err
+   - Expected: "unexpected control whitespace decorated wasm promise js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var out = ''; var decorated = '0x0061\\n736d\\t0100\\r0000'; WebAssembly.compile(decorated).then(function(module) { out = 'compile:' + module.validated + ':' + module.byteLength + ':' + module.sectionCount + ':' + module.target; }); WebAssembly.instantiate(decorated).then(function(result) { out = out + ':instantiate:' + result.status + ':' + result.module.validated + ':' + result.module.byteLength + ':' + result.module.sectionCount + ':' + typeof result.instance.exports; }); out")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("compile:true:8:0:wasm32:instantiate:instantiated:true:8:0:object")
+    Err(err):
+        expect("unexpected control whitespace decorated wasm promise js error: {err}").to_equal("")
+```
+
+</details>
+
 #### normalizes padded decorated WebAssembly hex strings in browser scripts
 
 1. var session = BrowserSession new
@@ -2469,6 +2568,39 @@ match result:
         expect(_display_js(value)).to_equal("true:true:8:0:wasm32")
     Err(err):
         expect("unexpected padded decorated wasm hex js error: {err}").to_equal("")
+```
+
+</details>
+
+#### routes padded decorated WebAssembly hex promise results through browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `compile:true:8:0:wasm32:instantiate:instantiated:true:8:0:object`
+
+3. Err
+   - Expected: "unexpected padded decorated wasm promise js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var out = ''; var decorated = '  \\t0x0061_736d 0100_0000\\n  '; WebAssembly.compile(decorated).then(function(module) { out = 'compile:' + module.validated + ':' + module.byteLength + ':' + module.sectionCount + ':' + module.target; }); WebAssembly.instantiate(decorated).then(function(result) { out = out + ':instantiate:' + result.status + ':' + result.module.validated + ':' + result.module.byteLength + ':' + result.module.sectionCount + ':' + typeof result.instance.exports; }); out")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("compile:true:8:0:wasm32:instantiate:instantiated:true:8:0:object")
+    Err(err):
+        expect("unexpected padded decorated wasm promise js error: {err}").to_equal("")
 ```
 
 </details>
@@ -2539,6 +2671,39 @@ match result:
 
 </details>
 
+#### compares compiled and instantiated WebAssembly module export descriptors in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `compile:40:2:tbl:table:answer:global:instantiate:instantiated:40:2:tbl:table:... (full value in folded executable source)`
+
+3. Err
+   - Expected: "unexpected combined export descriptor js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var out = ''; var wasm = '0061736d010000000404017000010606017f00412a0b0710020374626c010006616e737765720300'; WebAssembly.compile(wasm).then(function(module) { var exports = WebAssembly.Module.exports(module); out = 'compile:' + module.byteLength + ':' + exports.length + ':' + exports[0].name + ':' + exports[0].kind + ':' + exports[1].name + ':' + exports[1].kind; }); WebAssembly.instantiate(wasm).then(function(result) { var exports = WebAssembly.Module.exports(result.module); out = out + ':instantiate:' + result.status + ':' + result.module.byteLength + ':' + exports.length + ':' + exports[0].name + ':' + exports[0].kind + ':' + exports[1].name + ':' + exports[1].kind; }); out")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("compile:40:2:tbl:table:answer:global:instantiate:instantiated:40:2:tbl:table:answer:global")
+    Err(err):
+        expect("unexpected combined export descriptor js error: {err}").to_equal("")
+```
+
+</details>
+
 #### exposes instantiated WebAssembly module import descriptors in browser scripts
 
 1. var session = BrowserSession new
@@ -2605,6 +2770,39 @@ match result:
 
 </details>
 
+#### compares compiled and instantiated WebAssembly module import descriptors in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `compile:1:27:1:env:foo:function:instantiate:instantiated:1:27:1:env:foo:funct... (full value in folded executable source)`
+
+3. Err
+   - Expected: "unexpected combined import descriptor js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var out = ''; var wasm = '0061736d01000000010401600000020b0103656e7603666f6f0000'; var imports = { env: { foo: function() { return 7; } } }; WebAssembly.compile(wasm).then(function(module) { var descriptors = WebAssembly.Module.imports(module); out = 'compile:' + module.importCount + ':' + module.byteLength + ':' + descriptors.length + ':' + descriptors[0].module + ':' + descriptors[0].name + ':' + descriptors[0].kind; }); WebAssembly.instantiate(wasm, imports).then(function(result) { var descriptors = WebAssembly.Module.imports(result.module); out = out + ':instantiate:' + result.status + ':' + result.module.importCount + ':' + result.module.byteLength + ':' + descriptors.length + ':' + descriptors[0].module + ':' + descriptors[0].name + ':' + descriptors[0].kind + ':' + typeof result.instance.exports; }); out")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("compile:1:27:1:env:foo:function:instantiate:instantiated:1:27:1:env:foo:function:object")
+    Err(err):
+        expect("unexpected combined import descriptor js error: {err}").to_equal("")
+```
+
+</details>
+
 #### invokes direct WebAssembly instantiate imports through exported functions
 
 1. var session = BrowserSession new
@@ -2667,6 +2865,39 @@ match result:
         expect(_display_js(value)).to_equal("instantiated:1:52:42:1")
     Err(err):
         expect("unexpected compiled instantiate import call js error: {err}").to_equal("")
+```
+
+</details>
+
+#### compares direct and compiled WebAssembly import calls in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `direct:instantiated:1:42:1:compiled:instantiated:1:52:42:1`
+
+3. Err
+   - Expected: "unexpected combined import call js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var out = ''; var wasm = '0061736d0100000001060160017f017f020b0103656e7603666f6f0000030201000707010372756e00010a08010600200010000b'; var directCalls = 0; var compiledCalls = 0; var directImports = { env: { foo: function(x) { directCalls = directCalls + 1; return x + 2; } } }; var compiledImports = { env: { foo: function(x) { compiledCalls = compiledCalls + 1; return x + 3; } } }; WebAssembly.instantiate(wasm, directImports).then(function(result) { out = 'direct:' + result.status + ':' + result.module.importCount + ':' + result.instance.exports.run(40) + ':' + directCalls; }); WebAssembly.compile(wasm).then(function(module) { return WebAssembly.instantiate(module, compiledImports); }).then(function(result) { out = out + ':compiled:' + result.status + ':' + result.module.importCount + ':' + result.module.byteLength + ':' + result.instance.exports.run(39) + ':' + compiledCalls; }); out")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("direct:instantiated:1:42:1:compiled:instantiated:1:52:42:1")
+    Err(err):
+        expect("unexpected combined import call js error: {err}").to_equal("")
 ```
 
 </details>
@@ -2832,6 +3063,39 @@ match result:
         expect(_display_js(value)).to_equal("25:instantiated:131072:65536:4:1:131072:4")
     Err(err):
         expect("unexpected instance constructor memory export js error: {err}").to_equal("")
+```
+
+</details>
+
+#### compares constructor and compiled WebAssembly memory exports in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `ctor:25:instantiated:131072:65536:4:1:131072:4:compiled:instantiated:25:13107... (full value in folded executable source)`
+
+3. Err
+   - Expected: "unexpected constructor/compiled memory export js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var out = ''; var wasm = '0061736d010000000503010001070a01066d656d6f72790200'; var module = new WebAssembly.Module(wasm); var instance = new WebAssembly.Instance(module); var memory = instance.exports.memory; var bytes = new Uint8Array(memory.buffer); bytes[6] = 260; var old = memory.grow(1); var grown = new Uint8Array(memory.buffer); out = 'ctor:' + module.byteLength + ':' + instance.status + ':' + memory.byteLength + ':' + memory.pageSize + ':' + bytes[6] + ':' + old + ':' + grown.length + ':' + grown[6]; WebAssembly.compile(wasm).then(function(module) { return WebAssembly.instantiate(module); }).then(function(result) { var memory = result.instance.exports.memory; var bytes = new Uint8Array(memory.buffer); bytes[7] = 260; var old = memory.grow(1); var grown = new Uint8Array(memory.buffer); out = out + ':compiled:' + result.status + ':' + result.module.byteLength + ':' + memory.byteLength + ':' + memory.pageSize + ':' + bytes[7] + ':' + old + ':' + grown.length + ':' + grown[7]; }); out")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("ctor:25:instantiated:131072:65536:4:1:131072:4:compiled:instantiated:25:131072:65536:4:1:131072:4")
+    Err(err):
+        expect("unexpected constructor/compiled memory export js error: {err}").to_equal("")
 ```
 
 </details>
@@ -3162,6 +3426,39 @@ match result:
         expect(_display_js(value)).to_equal("instantiated:41:function:42:42")
     Err(err):
         expect("unexpected function export body argument js error: {err}").to_equal("")
+```
+
+</details>
+
+#### compares direct and compiled WebAssembly function export bodies in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `direct:instantiated:41:function:42:42:compiled:instantiated:41:function:42:42`
+
+3. Err
+   - Expected: "unexpected combined function export body js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var out = ''; var wasm = '0061736d0100000001070160027f7f017f030201000707010372756e00000a09010700200020016a0b'; WebAssembly.instantiate(wasm).then(function(result) { out = 'direct:' + result.status + ':' + result.module.byteLength + ':' + typeof result.instance.exports.run + ':' + result.instance.exports.run(40, 2) + ':' + result.instance.exports.run(7, 35); }); WebAssembly.compile(wasm).then(function(module) { return WebAssembly.instantiate(module); }).then(function(result) { out = out + ':compiled:' + result.status + ':' + result.module.byteLength + ':' + typeof result.instance.exports.run + ':' + result.instance.exports.run(39, 3) + ':' + result.instance.exports.run(8, 34); }); out")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("direct:instantiated:41:function:42:42:compiled:instantiated:41:function:42:42")
+    Err(err):
+        expect("unexpected combined function export body js error: {err}").to_equal("")
 ```
 
 </details>
@@ -5431,6 +5728,39 @@ match result:
         expect(_display_js(value)).to_equal("instantiated:table:funcref:null:1:2:global:i32:false:42")
     Err(err):
         expect("unexpected instantiated table/global export js error: {err}").to_equal("")
+```
+
+</details>
+
+#### compares direct and compiled WebAssembly table and global exports in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `direct:instantiated:40:table:funcref:null:1:2:global:i32:false:42:compiled:in... (full value in folded executable source)`
+
+3. Err
+   - Expected: "unexpected combined table/global export js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var out = ''; var wasm = '0061736d010000000404017000010606017f00412a0b0710020374626c010006616e737765720300'; WebAssembly.instantiate(wasm).then(function(result) { var table = result.instance.exports.tbl; var global = result.instance.exports.answer; var before = table.get(0); var old = table.grow(1, null); out = 'direct:' + result.status + ':' + result.module.byteLength + ':' + table.kind + ':' + table.element + ':' + before + ':' + old + ':' + table.length + ':' + global.kind + ':' + global.valueType + ':' + global.mutable + ':' + global.value; }); WebAssembly.compile(wasm).then(function(module) { return WebAssembly.instantiate(module); }).then(function(result) { var table = result.instance.exports.tbl; var global = result.instance.exports.answer; var before = table.get(0); var old = table.grow(1, null); out = out + ':compiled:' + result.status + ':' + result.module.byteLength + ':' + table.kind + ':' + table.element + ':' + before + ':' + old + ':' + table.length + ':' + global.kind + ':' + global.valueType + ':' + global.mutable + ':' + global.value; }); out")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("direct:instantiated:40:table:funcref:null:1:2:global:i32:false:42:compiled:instantiated:40:table:funcref:null:1:2:global:i32:false:42")
+    Err(err):
+        expect("unexpected combined table/global export js error: {err}").to_equal("")
 ```
 
 </details>
@@ -8226,8 +8556,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 181 |
-| Active scenarios | 181 |
+| Total scenarios | 182 |
+| Active scenarios | 182 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
