@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 233 | 233 | 0 | 0 |
+| 234 | 234 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -12336,6 +12336,39 @@ match result:
 
 </details>
 
+#### copies nested Uint8Array view slice bytes into isolated buffers
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `true:false:0:2:2:255,7:123,7:4,66,7:30,4,66,7,8:10,20,30,4,66,7,8,90`
+
+3. Err
+   - Expected: "unexpected nested uint8 view slice copied buffer js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var base = new Uint8Array(8); base[0] = 10; base[1] = 20; base[2] = 30; base[3] = 260; base[4] = -1; base[5] = 7; base[6] = 8; base[7] = 90; var view = base.subarray(2, 7); var nested = view.subarray(1, -1); var copy = nested.slice(1); var copyBefore = copy.toString(); copy[0] = 123; nested[1] = 66; (nested.buffer === view.buffer) + ':' + (copy.buffer === nested.buffer) + ':' + copy.byteOffset + ':' + copy.byteLength + ':' + copy.length + ':' + copyBefore + ':' + copy.toString() + ':' + nested.toString() + ':' + view.toString() + ':' + base.toString()")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("true:false:0:2:2:255,7:123,7:4,66,7:30,4,66,7,8:10,20,30,4,66,7,8,90")
+    Err(err):
+        expect("unexpected nested uint8 view slice copied buffer js error: {err}").to_equal("")
+```
+
+</details>
+
 #### copies overlapping Uint8Array subarray windows through set in browser scripts
 
 1. var session = BrowserSession new
@@ -13048,8 +13081,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 233 |
-| Active scenarios | 233 |
+| Total scenarios | 234 |
+| Active scenarios | 234 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

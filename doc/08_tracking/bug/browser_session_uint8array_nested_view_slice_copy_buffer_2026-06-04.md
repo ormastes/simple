@@ -2,11 +2,16 @@
 
 Date: 2026-06-04
 
+## Status
+
+Fixed in the BrowserSession Uint8Array nested-view slice copied-buffer
+continuation on 2026-06-04.
+
 ## Summary
 
 `Uint8Array.prototype.slice.call(view, ...)` is covered for nonzero-offset views,
-but a direct `nested.slice(...)` call on a `subarray(...)` of another nonzero
-offset view currently behaves as a shared-buffer view in BrowserSession scripts.
+and direct `nested.slice(...)` calls on a `subarray(...)` of another nonzero
+offset view now route through the copied-buffer path in BrowserSession scripts.
 
 ## Evidence
 
@@ -26,17 +31,34 @@ copy.buffer === view.buffer
 ```
 
 The expected JavaScript behavior is `false`, because `slice(...)` should return
-a copied buffer. The BrowserSession probe failed that expectation, indicating
-the direct nested-view `slice(...)` path still aliases the source buffer.
+a copied buffer. The BrowserSession probe initially failed that expectation.
+The regression now checks the nested source still shares the original view
+buffer, the slice result does not share the source buffer, the copied view has
+byte offset `0`, and source mutation does not change the copied result.
 
 ## Impact
 
-Browser scripts that slice a nested typed-array view can observe source-buffer
-mutations through what should be a copied result.
+Before the fix, browser scripts that sliced a nested typed-array view could
+observe source-buffer mutations through what should have been a copied result.
+The direct nested-view slice path now uses copied storage.
 
-## Follow-up
+## Fix
 
-- Route direct `slice(...)` on typed-array view objects through the same copied
-  buffer path already used by prototype-dispatched slice coverage.
-- Add a regression that proves `nested.slice(...)` returns byte offset `0`,
-  has an independent buffer, and remains unchanged after source view mutation.
+- Added direct-member typed-array `slice` routing through the copied-buffer
+  helper.
+- Added `NATIVE_UINT8_ARRAY_SLICE` so `slice` and `subarray` are distinct in
+  instance/prototype native method tables.
+- Updated the private `__simple_uint8_slice_copy` marker to be a trailing marker
+  so `slice()`, `slice(start)`, and `slice(start, end)` all normalize arguments
+  correctly.
+- Added `copies nested Uint8Array view slice bytes into isolated buffers` to
+  `test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`.
+
+## Verification
+
+- Focused BrowserSession check: passed.
+- Focused BrowserSession interpreter spec: `234/234` passed with
+  `--force-rebuild`.
+- Generated manual:
+  `doc/06_spec/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.md`
+  records `Total scenarios | 234 |`.

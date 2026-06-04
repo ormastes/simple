@@ -8911,3 +8911,82 @@ closure kept the focused fetch/WASM chain spec at `229/229`, native WASM host at
 `src/lib` at the current `405 warning(s)` across `5936` files. Diff hygiene and
 the executable-spec layout guard also passed. Broader browser/WASM semantics
 remain open.
+
+BrowserSession Uint8Array nested-view slice copied-buffer fix:
+
+Detailed completion checklist:
+
+- Confirm the fresh worktree starts from synchronized `main`/`origin/main`.
+- Confirm the previous range/string helper slice recorded
+  `browser_session_uint8array_nested_view_slice_copy_buffer_2026-06-04.md` as
+  an open copied-buffer gap.
+- Reproduce the gap by adding a focused nested-view direct `slice(...)`
+  regression to the BrowserSession fetch/WASM chain spec.
+- Verify the regression fails before the runtime fix with `233/234` passing.
+- Confirm first-level nonzero-offset `view.slice(...)` already uses a copied
+  buffer while `nested.slice(1)` still aliases because the slice copy marker was
+  only recognized at argument index `2`.
+- Add a direct-member typed-array `slice` evaluator branch so direct calls route
+  through the copied-buffer helper instead of generic subarray behavior.
+- Add a dedicated `NATIVE_UINT8_ARRAY_SLICE` registration so instance and
+  prototype method tables no longer encode `slice` as the same native id as
+  `subarray`.
+- Update `_native_uint8_array_subarray(...)` to treat
+  `__simple_uint8_slice_copy` as a trailing private marker and exclude it from
+  `start`/`end` argument normalization.
+- Verify `slice()`, `slice(start)`, and `slice(start, end)` can all request
+  copied storage without forcing a fake end argument.
+- Remove temporary nested-slice probe specs and standalone probe programs before
+  committing.
+- Regenerate the mirrored SPipe scenario manual and move old-path docgen output
+  onto `doc/06_spec/unit/...`.
+- Restore generated index, tracking, and temporary doc-format output noise.
+- Mark the nested-view slice bug note fixed with command evidence.
+- Record focused and manual scenario counts after docgen.
+- Run the focused BrowserSession check and interpreter spec with force rebuild.
+- Run native WASM host, WebGPU JS/WASM, and Node API conformance regressions.
+- Run required `src/compiler`, `src/lib`, MCP, LSP, and MCP stdio checks for
+  shared `src/lib` JavaScript runtime changes.
+- Run diff hygiene and executable-spec layout guard.
+- Commit only the runtime fix, focused spec, generated manual, bug note, and
+  plan evidence.
+- Fetch/rebase with file-count guard and push `HEAD:main` with `GITHUB_TOKEN`
+  unset.
+
+Detailed test checklist:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib/nogc_sync_mut/js/engine/interpreter_eval.spl src/lib/nogc_sync_mut/js/engine/interpreter_native.spl src/lib/nogc_sync_mut/js/engine/runtime.spl test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --force-rebuild --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/compiler`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/app/mcp`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/app/simple_lsp_mcp`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter`
+- `git diff --check`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+BrowserSession scripts now prove direct `nested.slice(1)` on a `subarray(...)`
+of a nonzero-offset `Uint8Array` view returns copied storage. The regression
+verifies the nested source still shares the original view buffer, the slice
+result does not share that buffer, the slice result has byte offset `0`, byte
+length `2`, and length `2`, the copied bytes start as `255,7`, and later source
+view mutation does not change the copied slice. The runtime fix routes direct
+typed-array `slice` through a copied-buffer helper and makes the private copy
+marker trailing so one-argument slices are handled correctly. The focused
+fetch/WASM chain spec now passes `234/234`, and the generated manual records
+`Total scenarios | 234 |`. Broader typed-array prototype parity and production
+GUI pixel parity remain open.
+
+Verification update: native WASM host remained `107/107`, WebGPU JS/WASM
+remained `106/106`, and Node API conformance remained `275/275`. Required
+shared-runtime checks passed for `src/compiler` with `14 warning(s)` across
+`2627` files, `src/lib` with the current `405 warning(s)` across `5936` files,
+`src/app/mcp` with `2 warning(s)` across `27` files, and
+`src/app/simple_lsp_mcp` with all `5` files passing. The AGENTS.md MCP stdio
+path `test/integration/app/mcp_stdio_integration_spec.spl` is not present in
+this checkout; the current equivalent
+`test/02_integration/app/mcp_stdio_integration_spec.spl` passed `5/5`.
