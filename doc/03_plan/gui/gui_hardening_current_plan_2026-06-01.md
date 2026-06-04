@@ -5738,8 +5738,8 @@ Detailed completion checklist:
 - [x] Run required shared-runtime checks for `src/compiler`, `src/lib`, MCP, LSP,
   and MCP stdio.
 - [x] Run final diff hygiene and executable-spec layout guards.
-- [ ] Commit only the `with` runtime/spec/manual/plan update.
-- [ ] Fetch/rebase with file-count guard and push `HEAD:main` with
+- [x] Commit only the `with` runtime/spec/manual/plan update.
+- [x] Fetch/rebase with file-count guard and push `HEAD:main` with
   `GITHUB_TOKEN` unset.
 
 Detailed test checklist:
@@ -5768,7 +5768,9 @@ shared-runtime regressions passed at `107/107`, `106/106`, `275/275`, compiler
 `14 warning(s)` across `2627 file(s)`, lib `405 warning(s)` across
 `5936 file(s)`, MCP `2 warning(s)` across `27 file(s)`, LSP MCP `5 file(s)`,
 and MCP stdio `5/5`. Broader typed-array prototype parity and production GUI
-pixel parity remain open.
+pixel parity remain open. Final sync guards passed with file count stable at
+`78091`, and the runtime/spec continuation was pushed to `origin/main` as
+`3d99a6fd9f`.
 
 BrowserSession Uint8Array prototype slice copied-buffer continuation:
 
