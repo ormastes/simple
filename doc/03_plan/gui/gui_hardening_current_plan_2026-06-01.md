@@ -2114,9 +2114,9 @@ Completion checklist:
 - [x] Run focused compile and focused fetch/WASM chain spec.
 - [x] Run adjacent browser/WASM and JS conformance checks.
 - [x] Run final layout, whitespace, file-count, and status gates.
-- [ ] Commit test/manual/plan update.
-- [ ] Push guarded main update after fetch/rebase/file-count safety check.
-- [ ] Commit and push sync-complete checklist update.
+- [x] Commit test/manual/plan update.
+- [x] Push guarded main update after fetch/rebase/file-count safety check.
+- [x] Commit and push sync-complete checklist update.
 
 Tests checklist:
 
@@ -2151,6 +2151,10 @@ BrowserSession now proves `Uint8Array.from(view, mapFn)` reads normalized bytes
 through nonzero-offset source views, produces independent zero-offset copied
 storage, and keeps copied results isolated from later returned-copy and source
 mutations. This is a coverage-only continuation; no runtime change was required.
+
+Sync evidence: coverage commit `58b5712f99` pushed to `main` after guarded
+fetch/rebase with file count stable at `78119`; sync-complete checklist update
+was committed and pushed immediately afterward.
 
 BrowserSession Uint8Array of continuation:
  
