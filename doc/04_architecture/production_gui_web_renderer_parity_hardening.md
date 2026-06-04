@@ -61,6 +61,9 @@ This slice adds a production parity harness in `app.wm_compare`:
   to carry `right` and `bottom` offsets for `position:absolute` boxes, resolving
   them from the containing block padding box without reintroducing normal-flow
   contribution.
+- The display contents manifest case extends computed style and layout to carry
+  `display:contents`, suppressing the wrapper box, margins, padding, border,
+  and background while laying out its children in the wrapper position.
 - The opacity manifest case extends computed style and paint to carry CSS
   `opacity` values, blending clipped leaf backgrounds over the existing
   framebuffer while preserving exact behavior for fully opaque boxes.

@@ -98,16 +98,19 @@ that do not advance normal sibling flow.
 The eleventh exact case, `position_right_bottom_matrix`, applies the same
 policy to `right` and `bottom` offsets for absolute children measured from the
 containing block padding box.
-The twelfth exact case, `position_overlap_matrix`, applies the same policy to
+The twelfth exact case, `display_contents_matrix`, applies the same policy to
+`display:contents`, where the wrapper box, margins, padding, border, and
+background are suppressed but its child boxes remain in layout.
+The thirteenth exact case, `position_overlap_matrix`, applies the same policy to
 an absolute child that appears before a later normal-flow sibling in the DOM but
 must paint above the sibling where their backgrounds overlap.
-The thirteenth exact case, `position_z_index_matrix`, applies the same policy to
+The fourteenth exact case, `position_z_index_matrix`, applies the same policy to
 positive `z-index` ordering across overlapping absolute boxes where DOM order
 and z-index order disagree.
-The fourteenth exact case, `opacity_matrix`, applies the same policy to
+The fifteenth exact case, `opacity_matrix`, applies the same policy to
 text-free leaf background opacity blending for half, zero, and full opacity
 boxes over a non-white page background.
-The fifteenth exact case, `background_shorthand_matrix`, applies the same
+The sixteenth exact case, `background_shorthand_matrix`, applies the same
 policy to URL fallback color extraction, `rgb(...)` shorthand colors, and
 declaration-order overrides between `background` and `background-color`.
 The `text_raster_track` case uses policy `track-text-divergence`: it passes the

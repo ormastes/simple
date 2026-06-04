@@ -27,7 +27,7 @@ simple_web_renderer_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 45 | 45 | 0 | 0 |
+| 46 | 46 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -336,6 +336,29 @@ expect(_count_color(pixels, 0xFF1D4ED8u32)).to_equal(144)
 expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(72)
 expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(0)
 expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(0)
+expect(_count_color(pixels, 0xFF7F1D1Du32)).to_equal(0)
+```
+
+</details>
+
+#### matches Chrome display contents wrapper suppression
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;width:96px;height:64px;overflow:hidden;background-color:#f8fafc}.shell{background-color:#e5e7eb;padding:4px;width:60px;height:44px}.contents{display:contents;margin-top:20px;background-color:#ef4444;border:3px solid #7f1d1d;padding:6px;width:40px;height:24px}.first{background-color:#1d4ed8;width:24px;height:8px}.second{background-color:#22c55e;width:18px;height:8px;margin-top:4px}.after{background-color:#f59e0b;width:12px;height:6px;margin-top:4px}</style></head><body><section class='shell'><div class='contents'><div class='first'></div><div class='second'></div></div><div class='after'></div></section></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 96, 64)
+expect(pixels.len()).to_equal(96 * 64)
+expect(_count_color(pixels, 0xFFF8FAFCu32)).to_equal(2608)
+expect(_count_color(pixels, 0xFFE5E7EBu32)).to_equal(3128)
+expect(_count_color(pixels, 0xFF1D4ED8u32)).to_equal(192)
+expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(144)
+expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(72)
+expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(0)
 expect(_count_color(pixels, 0xFF7F1D1Du32)).to_equal(0)
 ```
 
@@ -941,8 +964,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 45 |
-| Active scenarios | 45 |
+| Total scenarios | 46 |
+| Active scenarios | 46 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

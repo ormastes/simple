@@ -83,6 +83,10 @@
   containing block padding box, then promote `position_right_bottom_matrix` as
   the fifteenth exact text-free manifest case while keeping the tracked text
   mismatch at 997.
+- Add `display:contents` support that suppresses the wrapper box while laying
+  out its children in place, then promote `display_contents_matrix` as the
+  sixteenth exact text-free manifest case while keeping the tracked text
+  mismatch at 997.
 - Include the layout manifest in the aggregate production renderer parity gate.
 
 ## Next Agent Tasks
@@ -93,9 +97,9 @@
 - Reduce focused renderer spec runtime or split the exact layout cases into a
   separate focused spec. The latest default-timeout interpreter run hit the
   120s limit, while
-  `SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl --mode=interpreter --clean --timeout 180`
-  passed 45/45 but was flagged `[PERF BUG]` at 138.907 seconds after the
-  absolute right/bottom exact-case update.
+  `SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl --mode=interpreter --clean --timeout 300`
+  passed 46/46 but was flagged `[PERF BUG]` at 255.812 seconds after the
+  display contents exact-case update.
 
 ## Verified Diagnostics — Claude (2026-06-02)
 
