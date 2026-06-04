@@ -552,6 +552,19 @@ impl Lowerer {
 
     /// Look up the return type of a method from pre-registered signatures.
     fn lookup_method_return_type(&self, recv_ty: TypeId, method: &str) -> TypeId {
+        // Optional unwrap: `T?` is represented as `Pointer { inner: T }`
+        // (type_resolver.rs). `.unwrap()`/`.expect(...)` on such a value yields
+        // the inner `T`. Genuine `Option<T>`/`Result<T,E>` enum cases are already
+        // consumed by `lower_builtin_method_call` before this fall-through, so the
+        // only remaining unwrap target whose type is otherwise ANY is the nullable
+        // pointer. Type-only upgrade (the call stays a dynamic MethodCall); a
+        // struct inner lets `parsed.field` lower to a FieldGet instead of crashing
+        // with "struct 'ANY' field 'X'".
+        if matches!(method, "unwrap" | "expect") {
+            if let Some(HirType::Pointer { inner, .. }) = self.module.types.get(recv_ty) {
+                return *inner;
+            }
+        }
         // If receiver type is known, look up "TypeName.method"
         if recv_ty != TypeId::ANY && recv_ty != TypeId::VOID {
             if let Some(hir_ty) = self.module.types.get(recv_ty) {

@@ -263,7 +263,10 @@ pub struct NativeBuildConfig {
 impl Default for NativeBuildConfig {
     fn default() -> Self {
         Self {
-            file_timeout: 60,
+            // Large legitimate files (3000+-line controllers, big re-export hubs)
+            // need more than 60s for full parse->lowering->codegen; they compile
+            // fine, just slowly. Raised to avoid spurious bootstrap aborts.
+            file_timeout: 300,
             stack_size: 16 * 1024 * 1024,
             parallel: true,
             strip: false,

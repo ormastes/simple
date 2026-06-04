@@ -74,7 +74,8 @@ pub fn handle_native_build(args: &[String]) -> i32 {
     let mut verbose = false;
     let mut strip = false;
     let mut threads: Option<usize> = None;
-    let mut timeout: u64 = 60;
+    // Large legitimate files need >60s; raised to avoid spurious bootstrap aborts.
+    let mut timeout: u64 = 300;
     let mut incremental = true;
     let mut clean = false;
     let mut cache_dir: Option<PathBuf> = None;
