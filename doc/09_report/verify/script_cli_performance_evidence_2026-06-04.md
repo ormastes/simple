@@ -46,12 +46,13 @@ PASS:
 - `cargo build -p simple-driver --manifest-path src/compiler_rust/Cargo.toml --release`
 - `cargo test -p simple-driver --manifest-path src/compiler_rust/Cargo.toml --lib exec_core::tests -- --nocapture`
   - 5 passed, 0 failed.
+- `SIMPLE_LIB=src bin/simple test test/02_integration/app/startup_argparse_mmap_perf_spec.spl --mode=interpreter --clean`
+  - 1 file, 2 examples passed.
 - Script runtime smoke: `bin/simple run <cli-args fixture> a b` printed `2`.
 - `find doc/06_spec -name '*_spec.spl' | wc -l` printed `0`.
 
-Known current blocker:
+Resolved test import issue:
 
-- `SIMPLE_LIB=src bin/simple test test/02_integration/app/startup_argparse_mmap_perf_spec.spl --mode=interpreter --clean`
-  fails before timing assertions with `semantic: unknown extern function: shell`.
-  The same failure reproduces with `src/compiler_rust/target/debug/simple`, so it
-  is not caused by the deployed release binary update.
+- The perf spec now imports `shell` from `app.io.process_ops`, matching existing
+  process-op unit tests and avoiding the broad `app.io` compatibility shim for
+  this hot-path regression check.

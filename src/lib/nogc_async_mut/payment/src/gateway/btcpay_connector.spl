@@ -1,0 +1,131 @@
+use std.io_runtime
+use std.nogc_sync_mut.http_client.{http_post, response_get_status_code, response_get_body}
+use std.json.{json_parse, json_object_get, json_serialize}
+
+# BTCPayGateway — connector for BTCPay Server (open-source, self-hosted).
+# Greenfield API v1: https://docs.btcpayserver.org/API/Greenfield/v1/
+# No third-party fees, no vendor lock-in. Supports BTC + Lightning.
+# References: BTCPay Server Greenfield API, NiceHash REST client patterns.
+
+struct BTCPayConfig:
+    val instance_url: text
+    val api_key: text
+    val store_id: text
+
+fn new_btcpay_config(instance_url: text, api_key: text, store_id: text) -> BTCPayConfig:
+    return BTCPayConfig {
+        instance_url: instance_url,
+        api_key: api_key,
+        store_id: store_id
+    }
+
+fn _btcpay_post(config: BTCPayConfig, path: text, json_body: text) -> (int, text):
+    val url = config.instance_url + path
+    val response = http_post(url, json_body)
+    val status = response_get_status_code(response)
+    val resp_body = response_get_body(response)
+    return (status, resp_body)
+
+fn _btcpay_get(config: BTCPayConfig, path: text) -> (int, text):
+    val url = config.instance_url + path
+    val response = http_post(url, "")
+    val status = response_get_status_code(response)
+    val resp_body = response_get_body(response)
+    return (status, resp_body)
+
+fn _cents_to_decimal(cents: int) -> text:
+    val dollars = cents / 100
+    val remainder = cents % 100
+    val rem_str = if remainder < 10: "0" + _int_to_text(remainder) else: _int_to_text(remainder)
+    return _int_to_text(dollars) + "." + rem_str
+
+struct BTCPayGateway:
+    val config: BTCPayConfig
+
+fn new_btcpay_gateway(instance_url: text, api_key: text, store_id: text) -> BTCPayGateway:
+    return BTCPayGateway { config: new_btcpay_config(instance_url, api_key, store_id) }
+
+fn btcpay_create_invoice(gw: BTCPayGateway, amount_cents: int, currency: text, order_id: text) -> PaymentResult:
+    val amount_str = _cents_to_decimal(amount_cents)
+    val json_body = "{\"amount\":\"" + amount_str + "\",\"currency\":\"" + currency + "\",\"metadata\":{\"orderId\":\"" + order_id + "\"}}"
+    val path = "/api/v1/stores/" + gw.config.store_id + "/invoices"
+    val resp = _btcpay_post(gw.config, path, json_body)
+    val status = resp[0]
+    val resp_body = resp[1]
+    if status < 200 or status >= 300:
+        return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: "", error_message: "BTCPay invoice creation failed: " + resp_body }
+    val parsed = json_parse(resp_body)
+    val invoice_id = json_object_get(parsed, "id")
+    val invoice_status = json_object_get(parsed, "status")
+    return PaymentResult { success: true, status: PaymentStatus.Created, transaction_id: invoice_id, error_message: "" }
+
+fn btcpay_get_invoice_status(gw: BTCPayGateway, invoice_id: text) -> PaymentResult:
+    val path = "/api/v1/stores/" + gw.config.store_id + "/invoices/" + invoice_id
+    val resp = _btcpay_get(gw.config, path)
+    val status = resp[0]
+    val resp_body = resp[1]
+    if status < 200 or status >= 300:
+        return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: invoice_id, error_message: "status check failed" }
+    val parsed = json_parse(resp_body)
+    val inv_status = json_object_get(parsed, "status")
+    if inv_status == "New":
+        return PaymentResult { success: true, status: PaymentStatus.Created, transaction_id: invoice_id, error_message: "" }
+    if inv_status == "Processing":
+        return PaymentResult { success: true, status: PaymentStatus.Authorized, transaction_id: invoice_id, error_message: "" }
+    if inv_status == "Settled":
+        return PaymentResult { success: true, status: PaymentStatus.Settled, transaction_id: invoice_id, error_message: "" }
+    if inv_status == "Expired":
+        return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: invoice_id, error_message: "invoice expired" }
+    if inv_status == "Invalid":
+        return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: invoice_id, error_message: "invoice invalid" }
+    return PaymentResult { success: true, status: PaymentStatus.Created, transaction_id: invoice_id, error_message: "" }
+
+fn btcpay_refund_invoice(gw: BTCPayGateway, invoice_id: text, payment_method: text) -> PaymentResult:
+    val json_body = "{\"refundVariant\":\"CurrentRate\",\"paymentMethod\":\"" + payment_method + "\"}"
+    val path = "/api/v1/stores/" + gw.config.store_id + "/invoices/" + invoice_id + "/refund"
+    val resp = _btcpay_post(gw.config, path, json_body)
+    val status = resp[0]
+    val resp_body = resp[1]
+    if status < 200 or status >= 300:
+        return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: invoice_id, error_message: "refund failed: " + resp_body }
+    return PaymentResult { success: true, status: PaymentStatus.Refunded, transaction_id: invoice_id, error_message: "" }
+
+fn btcpay_mark_settled(gw: BTCPayGateway, invoice_id: text) -> PaymentResult:
+    val path = "/api/v1/stores/" + gw.config.store_id + "/invoices/" + invoice_id + "/status"
+    val json_body = "{\"status\":\"Settled\"}"
+    val resp = _btcpay_post(gw.config, path, json_body)
+    val status = resp[0]
+    if status < 200 or status >= 300:
+        return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: invoice_id, error_message: "mark settled failed" }
+    return PaymentResult { success: true, status: PaymentStatus.Settled, transaction_id: invoice_id, error_message: "" }
+
+impl Gateway for BTCPayGateway:
+    fn name(self) -> text:
+        return "btcpay"
+
+    fn authorize(self, req: AuthorizeRequest) -> PaymentResult:
+        return btcpay_create_invoice(self, req.amount.cents, req.amount.currency, req.merchant_ref)
+
+    fn capture(self, req: CaptureRequest) -> PaymentResult:
+        return btcpay_mark_settled(self, req.transaction_id)
+
+    fn charge(self, req: ChargeRequest) -> PaymentResult:
+        val invoice = btcpay_create_invoice(self, req.amount.cents, req.amount.currency, req.merchant_ref)
+        if !invoice.success:
+            return invoice
+        return invoice
+
+    fn refund(self, req: RefundRequest) -> PaymentResult:
+        return btcpay_refund_invoice(self, req.transaction_id, "BTC")
+
+    fn void_payment(self, req: VoidRequest) -> PaymentResult:
+        val path = "/api/v1/stores/" + self.config.store_id + "/invoices/" + req.transaction_id + "/status"
+        val json_body = "{\"status\":\"Invalid\"}"
+        val resp = _btcpay_post(self.config, path, json_body)
+        val status = resp[0]
+        if status < 200 or status >= 300:
+            return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: req.transaction_id, error_message: "void failed" }
+        return PaymentResult { success: true, status: PaymentStatus.Voided, transaction_id: req.transaction_id, error_message: "" }
+
+    fn tokenize(self, req: TokenizeRequest) -> TokenizeResult:
+        return TokenizeResult { success: false, token: "", error_message: "BTCPay Server uses invoice-based flow, not card tokenization" }
