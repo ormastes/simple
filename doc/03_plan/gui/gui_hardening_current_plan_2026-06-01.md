@@ -5720,6 +5720,71 @@ API conformance remained `275/275`, and `src/lib` completed with the current
 with `Total scenarios | 208 |`; diff hygiene and the `doc/06_spec` layout gate
 are checked before push.
 
+BrowserSession fetched arrayBuffer direct/compiled import-call parity continuation:
+
+Completion checklist:
+
+- Add a BrowserSession browser-script scenario that queues one
+  `window.fetch('/direct.wasm').then(r => r.arrayBuffer())` chain into
+  `WebAssembly.instantiate(bytes, imports)` and one
+  `window.fetch('/compiled.wasm').then(r => r.arrayBuffer())` chain into
+  `WebAssembly.compile(bytes)` followed by
+  `WebAssembly.instantiate(module, imports)`.
+- Use one shared imports object whose `env.foo` host function increments a
+  shared call counter and returns `x + 2`, so direct and compiled paths prove
+  they are using the same host import state.
+- Verify the initial script result is `queued` and the shared `out` variable is
+  empty before either network response is committed.
+- Verify the first pending network request is a fetch for
+  `https://example.com/direct.wasm`.
+- Commit the imported-function module response for `/direct.wasm` and verify
+  the direct arrayBuffer instantiate path reports fetched byte length `52`,
+  status `instantiated`, import count `1`, module byte length `52`, exported
+  `run(40)` result `42`, and shared import call count `1`.
+- Verify the second pending network request is a fetch for
+  `https://example.com/compiled.wasm`.
+- Commit the same imported-function module response for `/compiled.wasm` and
+  verify the final output keeps the direct arrayBuffer evidence and appends
+  compiled arrayBuffer fetched byte length `52`, compiled module byte length
+  `52`, instantiated status `instantiated`, import count `1`, result module
+  byte length `52`, exported `run(40)` result `42`, and shared import call count
+  `2`.
+- Regenerate the mirrored scenario manual for the changed SPipe spec and move
+  docgen's old `01_unit` output onto the tracked `unit` manual path.
+- Remove generated docgen noise from adjacent specs, restore generated tracking
+  index churn, and keep only the intended source/manual/plan files in the
+  commit.
+- Record focused pass count, adjacent pass counts, `src/lib` warning count,
+  docgen/manual evidence, diff hygiene, and `doc/06_spec` layout evidence before
+  pushing.
+
+Test checklist:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+- `git diff --check`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+BrowserSession scripts now compare fetched-arrayBuffer direct instantiate and
+compiled instantiate import-call paths in one queued script. The first network
+commit completes only the direct `WebAssembly.instantiate(bytes, imports)` path
+and records fetched byte length `52`, status `instantiated`, import count `1`,
+module byte length `52`, exported `run(40)` result `42`, and shared host import
+call count `1`; the second commit appends the `WebAssembly.compile(bytes)` plus
+`WebAssembly.instantiate(module, imports)` path with matching byte lengths,
+status, import count, result module byte length, exported `run(40)` result `42`,
+and shared host import call count `2`. The focused fetch/WASM chain spec is now
+passing `209/209`; the native WASM host spec remained `107/107`, the WebGPU
+JS/WASM system spec remained `106/106`, Node API conformance remained `275/275`,
+and `src/lib` completed with the current `405 warning(s)` across `5936` files.
+Docgen regenerated the mirrored manual with `Total scenarios | 209 |`; diff
+hygiene and the `doc/06_spec` layout gate are checked before push.
+
 BrowserSession fetched invalid arrayBuffer instantiate catch continuation:
  
  - `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
