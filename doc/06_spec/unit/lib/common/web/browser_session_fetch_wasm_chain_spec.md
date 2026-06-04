@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 148 | 148 | 0 | 0 |
+| 149 | 149 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -2370,6 +2370,39 @@ match result:
         expect(_display_js(value)).to_equal("47:2:instantiated:function:function:undefined:undefined")
     Err(err):
         expect("unexpected instance constructor multiple function export js error: {err}").to_equal("")
+```
+
+</details>
+
+#### constructs WebAssembly Instance modules with descriptor metadata
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `instantiated:40:2:tbl:table:answer:global:instantiated:1:27:1:env:foo:functio... (full value in folded executable source)`
+
+3. Err
+   - Expected: "unexpected instance constructor descriptor metadata js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var tableGlobal = new WebAssembly.Module('0061736d010000000404017000010606017f00412a0b0710020374626c010006616e737765720300'); var exports = WebAssembly.Module.exports(tableGlobal); var exportedInstance = new WebAssembly.Instance(tableGlobal); var imported = new WebAssembly.Module('0061736d01000000010401600000020b0103656e7603666f6f0000'); var imports = WebAssembly.Module.imports(imported); var importedInstance = new WebAssembly.Instance(imported, { env: { foo: function() { return 7; } } }); exportedInstance.status + ':' + tableGlobal.byteLength + ':' + exports.length + ':' + exports[0].name + ':' + exports[0].kind + ':' + exports[1].name + ':' + exports[1].kind + ':' + importedInstance.status + ':' + imported.importCount + ':' + imported.byteLength + ':' + imports.length + ':' + imports[0].module + ':' + imports[0].name + ':' + imports[0].kind + ':' + typeof importedInstance.exports")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("instantiated:40:2:tbl:table:answer:global:instantiated:1:27:1:env:foo:function:object")
+    Err(err):
+        expect("unexpected instance constructor descriptor metadata js error: {err}").to_equal("")
 ```
 
 </details>
@@ -7341,8 +7374,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 148 |
-| Active scenarios | 148 |
+| Total scenarios | 149 |
+| Active scenarios | 149 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
