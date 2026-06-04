@@ -1,0 +1,109 @@
+use std.spec
+use std.io_runtime
+
+describe "Vault — tokenized card storage":
+
+    describe "store_token":
+        it "stores card and returns opaque token":
+            val vault = new_memory_vault()
+            val req = StoreRequest {
+                card_number: "4111111111111111",
+                expiry_month: 12,
+                expiry_year: 2028,
+                cardholder_name: "Test User"
+            }
+            val result = vault.store_token(req)
+            expect result.success == true
+            expect result.token.token_id != ""
+            expect result.token.card_last4 == "1111"
+            expect result.token.card_brand == "Visa"
+
+        it "never exposes raw PAN in stored token":
+            val vault = new_memory_vault()
+            val req = StoreRequest {
+                card_number: "5500000000000004",
+                expiry_month: 6,
+                expiry_year: 2027,
+                cardholder_name: "MC User"
+            }
+            val result = vault.store_token(req)
+            expect result.success == true
+            val retrieved = vault.retrieve(result.token.token_id)
+            expect retrieved.success == true
+            # token must NOT contain raw card number
+            expect retrieved.token.token_id.contains("5500000000000004") == false
+
+        it "rejects invalid card number":
+            val vault = new_memory_vault()
+            val req = StoreRequest {
+                card_number: "0000000000000000",
+                expiry_month: 12,
+                expiry_year: 2028,
+                cardholder_name: "Bad Card"
+            }
+            val result = vault.store_token(req)
+            expect result.success == false
+
+    describe "retrieve":
+        it "retrieves stored token metadata by ID":
+            val vault = new_memory_vault()
+            val req = StoreRequest {
+                card_number: "4111111111111111",
+                expiry_month: 3,
+                expiry_year: 2029,
+                cardholder_name: "Retrieve Test"
+            }
+            val stored = vault.store_token(req)
+            val retrieved = vault.retrieve(stored.token.token_id)
+            expect retrieved.success == true
+            expect retrieved.token.card_last4 == "1111"
+
+        it "returns failure for unknown token ID":
+            val vault = new_memory_vault()
+            val result = vault.retrieve("tok_nonexistent")
+            expect result.success == false
+
+    describe "delete":
+        it "deletes a stored token":
+            val vault = new_memory_vault()
+            val req = StoreRequest {
+                card_number: "4111111111111111",
+                expiry_month: 12,
+                expiry_year: 2028,
+                cardholder_name: "Delete Test"
+            }
+            val stored = vault.store_token(req)
+            val del = vault.delete(stored.token.token_id)
+            expect del.success == true
+            val check = vault.retrieve(stored.token.token_id)
+            expect check.success == false
+
+        it "returns failure when deleting unknown token":
+            val vault = new_memory_vault()
+            val result = vault.delete("tok_nonexistent")
+            expect result.success == false
+
+    describe "list_tokens":
+        it "lists all stored tokens":
+            val vault = new_memory_vault()
+            val req1 = StoreRequest {
+                card_number: "4111111111111111",
+                expiry_month: 12,
+                expiry_year: 2028,
+                cardholder_name: "User A"
+            }
+            val req2 = StoreRequest {
+                card_number: "5500000000000004",
+                expiry_month: 6,
+                expiry_year: 2027,
+                cardholder_name: "User B"
+            }
+            vault.store_token(req1)
+            vault.store_token(req2)
+            val tokens = vault.list_tokens()
+            expect tokens.length() == 2
+
+        it "returns empty list when no tokens stored":
+            val vault = new_memory_vault()
+            val tokens = vault.list_tokens()
+            expect tokens.length() == 0

@@ -1,0 +1,80 @@
+use std.spec
+use std.io_runtime
+
+describe "Agent payment tool — LLM-safe interface":
+
+    describe "validate_agent_request":
+        it "rejects request with raw card number in token field":
+            val req = PaymentToolRequest {
+                action: "charge",
+                token: "4111111111111111",
+                amount_cents: 1000,
+                currency: "USD"
+            }
+            expect validate_agent_request(req) == false
+
+        it "accepts request with opaque vault token":
+            val req = PaymentToolRequest {
+                action: "charge",
+                token: "tok_abc123def456",
+                amount_cents: 1000,
+                currency: "USD"
+            }
+            expect validate_agent_request(req) == true
+
+        it "rejects empty token":
+            val req = PaymentToolRequest {
+                action: "charge",
+                token: "",
+                amount_cents: 1000,
+                currency: "USD"
+            }
+            expect validate_agent_request(req) == false
+
+        it "rejects request with CVV-like data":
+            val req = PaymentToolRequest {
+                action: "charge",
+                token: "123",
+                amount_cents: 1000,
+                currency: "USD"
+            }
+            expect validate_agent_request(req) == false
+
+    describe "handle_payment_tool":
+        it "returns not-implemented for charge action":
+            val req = PaymentToolRequest {
+                action: "charge",
+                token: "tok_test_123",
+                amount_cents: 2000,
+                currency: "USD"
+            }
+            val result = handle_payment_tool(req)
+            expect result.success == false
+
+        it "returns not-implemented for refund action":
+            val req = PaymentToolRequest {
+                action: "refund",
+                token: "tok_test_123",
+                amount_cents: 500,
+                currency: "USD"
+            }
+            val result = handle_payment_tool(req)
+            expect result.success == false
+
+    describe "list_payment_methods_for_agent":
+        it "returns empty list when no methods stored":
+            val methods = list_payment_methods_for_agent()
+            expect methods.length() == 0
+
+    describe "security guardrails":
+        it "agent never receives raw PAN in any response":
+            val req = PaymentToolRequest {
+                action: "list",
+                token: "",
+                amount_cents: 0,
+                currency: ""
+            }
+            val result = handle_payment_tool(req)
+            # response message must not contain anything that looks like a card number
+            expect result.message.contains("4111") == false
+            expect result.message.contains("5500") == false

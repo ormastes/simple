@@ -1,0 +1,149 @@
+use std.spec
+use std.io_runtime
+
+describe "Gateway trait — payment connector abstraction":
+
+    describe "authorize":
+        it "returns Authorized status on valid token and amount":
+            val gw = new_mock_gateway()
+            val req = AuthorizeRequest {
+                token: "tok_test_visa_1234",
+                amount: Amount { cents: 1000, currency: "USD" },
+                merchant_ref: "order-001",
+                idempotency_key: "idem-001"
+            }
+            val result = gw.authorize(req)
+            expect result.success == true
+            expect result.status == PaymentStatus.Authorized
+            expect result.transaction_id != ""
+
+        it "returns Failed on invalid token":
+            val gw = new_mock_gateway()
+            val req = AuthorizeRequest {
+                token: "",
+                amount: Amount { cents: 1000, currency: "USD" },
+                merchant_ref: "order-002",
+                idempotency_key: "idem-002"
+            }
+            val result = gw.authorize(req)
+            expect result.success == false
+            expect result.status == PaymentStatus.Failed
+
+        it "rejects negative amounts":
+            val gw = new_mock_gateway()
+            val req = AuthorizeRequest {
+                token: "tok_test_visa_1234",
+                amount: Amount { cents: -100, currency: "USD" },
+                merchant_ref: "order-003",
+                idempotency_key: "idem-003"
+            }
+            val result = gw.authorize(req)
+            expect result.success == false
+
+    describe "capture":
+        it "captures a previously authorized transaction":
+            val gw = new_mock_gateway()
+            val auth_req = AuthorizeRequest {
+                token: "tok_test_visa_1234",
+                amount: Amount { cents: 2000, currency: "USD" },
+                merchant_ref: "order-010",
+                idempotency_key: "idem-010"
+            }
+            val auth = gw.authorize(auth_req)
+            val cap_req = CaptureRequest {
+                transaction_id: auth.transaction_id,
+                amount: Amount { cents: 2000, currency: "USD" }
+            }
+            val result = gw.capture(cap_req)
+            expect result.success == true
+            expect result.status == PaymentStatus.Captured
+
+    describe "charge":
+        it "authorize + capture in one step":
+            val gw = new_mock_gateway()
+            val req = ChargeRequest {
+                token: "tok_test_mc_5678",
+                amount: Amount { cents: 5000, currency: "EUR" },
+                merchant_ref: "order-020",
+                idempotency_key: "idem-020"
+            }
+            val result = gw.charge(req)
+            expect result.success == true
+            expect result.status == PaymentStatus.Captured
+
+    describe "refund":
+        it "refunds a captured transaction":
+            val gw = new_mock_gateway()
+            val req = RefundRequest {
+                transaction_id: "txn_captured_001",
+                amount: Amount { cents: 1000, currency: "USD" },
+                reason: "customer request"
+            }
+            val result = gw.refund(req)
+            expect result.success == true
+            expect result.status == PaymentStatus.Refunded
+
+    describe "void":
+        it "voids an authorized but uncaptured transaction":
+            val gw = new_mock_gateway()
+            val req = VoidRequest {
+                transaction_id: "txn_auth_001",
+                reason: "order canceled"
+            }
+            val result = gw.void_payment(req)
+            expect result.success == true
+            expect result.status == PaymentStatus.Voided
+
+    describe "tokenize":
+        it "returns opaque token from card data":
+            val gw = new_mock_gateway()
+            val req = TokenizeRequest {
+                card_number: "4111111111111111",
+                expiry_month: 12,
+                expiry_year: 2028,
+                cardholder_name: "Test User"
+            }
+            val result = gw.tokenize(req)
+            expect result.success == true
+            expect result.token != ""
+
+    describe "failing gateway":
+        it "returns failure on all operations when in fail mode":
+            val gw = new_failing_mock_gateway()
+            val req = ChargeRequest {
+                token: "tok_test",
+                amount: Amount { cents: 100, currency: "USD" },
+                merchant_ref: "order-fail",
+                idempotency_key: "idem-fail"
+            }
+            val result = gw.charge(req)
+            expect result.success == false
+            expect result.status == PaymentStatus.Failed
+
+    describe "idempotency":
+        it "same idempotency key returns same result":
+            val gw = new_mock_gateway()
+            val req = ChargeRequest {
+                token: "tok_test_visa_1234",
+                amount: Amount { cents: 1000, currency: "USD" },
+                merchant_ref: "order-idem",
+                idempotency_key: "idem-same"
+            }
+            val r1 = gw.charge(req)
+            val r2 = gw.charge(req)
+            expect r1.transaction_id == r2.transaction_id
+
+    describe "connector registry":
+        it "registers and lists connectors":
+            var reg = new_connector_registry()
+            reg = reg.register("stripe", 1)
+            reg = reg.register("paypal", 2)
+            val names = reg.list_connectors()
+            expect names.length() == 2
+
+        it "routes to highest priority connector":
+            var reg = new_connector_registry()
+            reg = reg.register("stripe", 1)
+            reg = reg.register("paypal", 2)
+            val chosen = reg.route(Amount { cents: 1000, currency: "USD" })
+            expect chosen == "stripe"
