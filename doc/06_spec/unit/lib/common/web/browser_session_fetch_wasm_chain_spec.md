@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 159 | 159 | 0 | 0 |
+| 160 | 160 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -2073,6 +2073,39 @@ match result:
         expect(_display_js(value)).to_equal("false:false:invalid-wasm-header:0:0")
     Err(err):
         expect("unexpected invalid decorated wasm hex js error: {err}").to_equal("")
+```
+
+</details>
+
+#### normalizes uppercase decorated WebAssembly hex strings in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `true:true:8:0:wasm32`
+
+3. Err
+   - Expected: "unexpected uppercase decorated wasm hex js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var decorated = '0X0061_736D 0100_0000'; var module = new WebAssembly.Module(decorated); WebAssembly.validate(decorated) + ':' + module.validated + ':' + module.byteLength + ':' + module.sectionCount + ':' + module.target")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("true:true:8:0:wasm32")
+    Err(err):
+        expect("unexpected uppercase decorated wasm hex js error: {err}").to_equal("")
 ```
 
 </details>
@@ -7797,8 +7830,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 159 |
-| Active scenarios | 159 |
+| Total scenarios | 160 |
+| Active scenarios | 160 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
