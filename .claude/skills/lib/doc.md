@@ -11,16 +11,16 @@ REQUIREMENTS -> NFR;  RESEARCH -> DESIGN -> ADR;  GUIDES <- OPERATIONS
 
 | Type | Location | Answers |
 |------|----------|---------|
-| Research | `doc/01_research/<domain>/` | What to choose and why |
-| Requirement | `doc/02_requirements/<domain>/` | What must system do |
+| Research | `doc/01_research/<domain>/<topic>/` | What to choose and why |
+| Requirement | `doc/02_requirements/<domain>/<topic>/` | What must system do |
 | NFR / SLO | `doc/02_requirements/nfr/` | How well must it work |
-| Plan | `doc/03_plan/<domain>/` | What and when |
-| Architecture | `doc/04_architecture/<domain>/` | System structure |
+| Plan | `doc/03_plan/<domain>/<topic>/` | What and when |
+| Architecture | `doc/04_architecture/<domain>/<topic>/` | System structure |
 | ADR | `doc/04_architecture/adr/` | Why this decision |
-| Design | `doc/05_design/<domain>/` | How it is built |
+| Design | `doc/05_design/<domain>/<topic>/` | How it is built |
 | Feature Spec | `doc/06_spec/` | How user experiences it |
 | BDD Tests | `test/*_spec.spl` | Executable scenarios |
-| Guide / Runbook | `doc/07_guide/<domain>/` | How to use/operate |
+| Guide / Runbook | `doc/07_guide/<domain>/<topic>/` | How to use/operate |
 | Rule | `doc/04_architecture/rule/` | Engineering standards |
 | Tracking | `doc/08_tracking/` | Bugs, tests, build status |
 | Report | `doc/09_report/` | Session/completion reports |
@@ -68,16 +68,16 @@ See `doc/06_spec/FILE.md` for full manifest.
 
 ## Documentation Workflow (New Features)
 
-1. **Research** -> `doc/01_research/<domain>/<feature>.md` (if non-obvious)
-2. **Requirements** -> `doc/02_requirements/<domain>/<feature>.md` (REQ-NNN)
+1. **Research** -> `doc/01_research/<domain>/<topic>/<feature>.md` (if non-obvious)
+2. **Requirements** -> `doc/02_requirements/<domain>/<topic>/<feature>.md` (REQ-NNN)
 3. **NFR** -> `doc/02_requirements/nfr/<feature>.md`
-4. **Plan** -> `doc/03_plan/<domain>/<feature>.md`
-5. **Architecture** -> `doc/04_architecture/<domain>/<feature>.md`
-6. **Design** -> `doc/05_design/<domain>/<feature>.md`
+4. **Plan** -> `doc/03_plan/<domain>/<topic>/<feature>.md`
+5. **Architecture** -> `doc/04_architecture/<domain>/<topic>/<feature>.md`
+6. **Design** -> `doc/05_design/<domain>/<topic>/<feature>.md`
 7. **ADR** -> `doc/04_architecture/adr/ADR-NNN-title.md` (major decisions)
 8. **Feature Spec** -> `doc/06_spec/{category}/{domain}/{subdomain}/<feature>_spec.md` (generated from test)
 9. **BDD Tests** -> `test/*_spec.spl` (link Requirements + Design in docstring)
-10. **Guide** -> `doc/07_guide/<domain>/<feature>_guide.md` (if applicable)
+10. **Guide** -> `doc/07_guide/<domain>/<topic>/<feature>_guide.md` (if applicable)
 11. **Report** -> `doc/09_report/<feature>_complete_YYYY-MM-DD.md`
 
 ## Research Document Format

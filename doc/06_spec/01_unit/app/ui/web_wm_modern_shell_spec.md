@@ -60,7 +60,7 @@ Verifies the first modern Simple Web WM slice at the contract level.
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 740 lines folded for reproduction.
+Runnable source: 747 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -697,6 +697,13 @@ expect(html).to_contain(".wm-quality-title-command-policy-value")
 expect(html).to_contain(".wm-command-palette")
 expect(html).to_contain(".wm-command-palette-input")
 expect(html).to_contain(".wm-command-item")
+expect(html).to_contain(".wm-command-item.action-feedback")
+expect(html).to_contain(".wm-command-palette[data-command-item-feedback='activate'] .wm-command-item[data-command-feedback='activate']")
+expect(html).to_contain(".wm-command-item .wm-taskbar-icon.action-feedback")
+expect(html).to_contain(".wm-command-shortcut.action-feedback")
+expect(html).to_contain("@keyframes wm-command-item-feedback")
+expect(html).to_contain("@keyframes wm-command-item-part-feedback")
+expect(html).to_contain(":root[data-wm-motion=off] .wm-command-item.action-feedback")
 expect(html).to_contain(".wm-app-launcher")
 expect(html).to_contain(".wm-app-launcher[hidden]")
 expect(html).to_contain(".wm-app-launcher-tile")
@@ -813,7 +820,7 @@ expect(html).to_contain("@keyframes wm-hot-corner-activate")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 1404 lines folded for reproduction.
+Runnable source: 1411 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -875,15 +882,22 @@ expect(js).to_contain("_setCommandPaletteSelection")
 expect(js).to_contain("_syncCommandPaletteSelection")
 expect(js).to_contain("_handleCommandPaletteKeydown")
 expect(js).to_contain("_executeCommandPaletteAction")
+expect(js).to_contain("_markCommandItemFeedback")
+expect(js).to_contain("_clearCommandItemFeedback")
+expect(js).to_contain("_commandItemFeedbackTimer")
 expect(js).to_contain("_executeCommandPaletteRecent")
 expect(js).to_contain("_markCommandRecentFeedback")
 expect(js).to_contain("_clearCommandRecentFeedback")
 expect(js).to_contain("_commandRecentFeedbackTimer")
+expect(js).to_contain("dataset.commandItemFeedback")
+expect(js).to_contain("dataset.commandItemIndex")
 expect(js).to_contain("dataset.commandRecentFeedback")
 expect(js).to_contain("dataset.commandRecentIndex")
 expect(js).to_contain("dataset.commandFeedback")
+expect(js).to_contain("command_palette_item")
 expect(js).to_contain("command_palette_recent")
 expect(js).to_contain("command_label")
+expect(js).to_contain("command_category")
 expect(js).to_contain("aria-activedescendant")
 expect(js).to_contain("aria-selected")
 expect(js).to_contain("tabIndex")
@@ -2230,7 +2244,7 @@ expect(retained).to_contain("Maximize window")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 1347 lines folded for reproduction.
+Runnable source: 1352 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -3497,6 +3511,8 @@ expect(preview).to_contain("data-command-kind=\"path\"")
 expect(preview).to_contain("wm-command-palette action-feedback")
 expect(preview).to_contain("data-command-recent-feedback=\"activate\"")
 expect(preview).to_contain("data-command-recent-index=\"0\"")
+expect(preview).to_contain("data-command-item-feedback=\"activate\"")
+expect(preview).to_contain("data-command-item-index=\"0\"")
 expect(preview).to_contain("wm-command-palette-input")
 expect(preview).to_contain("aria-controls=\"wm-command-palette-list\"")
 expect(preview).to_contain("aria-activedescendant=\"wm-command-item-0\"")
@@ -3507,7 +3523,10 @@ expect(preview).to_contain("wm-command-recent-icon wm-round-icon action-feedback
 expect(preview).to_contain("wm-command-section")
 expect(preview).to_contain("data-command-category=\"Apps\"")
 expect(preview).to_contain("data-command-category=\"System\"")
-expect(preview).to_contain("wm-command-item active")
+expect(preview).to_contain("wm-command-item active action-feedback")
+expect(preview).to_contain("data-command-feedback=\"activate\"")
+expect(preview).to_contain("wm-taskbar-icon wm-round-icon action-feedback")
+expect(preview).to_contain("wm-command-shortcut action-feedback")
 expect(preview).to_contain("id=\"wm-command-palette-list\"")
 expect(preview).to_contain("role=\"listbox\" aria-label=\"Available commands\"")
 expect(preview).to_contain("id=\"wm-command-item-0\"")

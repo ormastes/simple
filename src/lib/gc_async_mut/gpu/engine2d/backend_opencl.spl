@@ -61,6 +61,44 @@ fn opencl_2d_generated_source() -> text:
     "    long py = y + dy;\n" +
     "    if (px >= 0 && py >= 0 && px < surface_width && py < surface_height) { dst[py * surface_width + px] = (uint)color; }\n" +
     "}\n" +
+    "__kernel void simple_2d_line_u32(__global uint* dst, long surface_width, long surface_height, long x1, long y1, long x2, long y2, long color, long thickness) {\n" +
+    "    long i = get_global_id(0);\n" +
+    "    long dx = x2 - x1;\n" +
+    "    long dy = y2 - y1;\n" +
+    "    long adx = dx < 0 ? -dx : dx;\n" +
+    "    long ady = dy < 0 ? -dy : dy;\n" +
+    "    long steps = adx > ady ? adx : ady;\n" +
+    "    if (steps == 0) { steps = 1; }\n" +
+    "    if (i > steps) { return; }\n" +
+    "    long px = x1 + (dx * i) / steps;\n" +
+    "    long py = y1 + (dy * i) / steps;\n" +
+    "    if (px >= 0 && py >= 0 && px < surface_width && py < surface_height) { dst[py * surface_width + px] = (uint)color; }\n" +
+    "}\n" +
+    "__kernel void simple_2d_gradient_rect_u32(__global uint* dst, long surface_width, long surface_height, long x, long y, long w, long h, long top_color, long bottom_color) {\n" +
+    "    long i = get_global_id(0);\n" +
+    "    long count = w * h;\n" +
+    "    if (i >= count) { return; }\n" +
+    "    long dx = i % w;\n" +
+    "    long dy = i / w;\n" +
+    "    long px = x + dx;\n" +
+    "    long py = y + dy;\n" +
+    "    if (px < 0 || py < 0 || px >= surface_width || py >= surface_height) { return; }\n" +
+    "    long max_t = h - 1;\n" +
+    "    if (max_t < 1) { max_t = 1; }\n" +
+    "    long tr = (top_color >> 16) & 255;\n" +
+    "    long tg = (top_color >> 8) & 255;\n" +
+    "    long tb = top_color & 255;\n" +
+    "    long ta = (top_color >> 24) & 255;\n" +
+    "    long br = (bottom_color >> 16) & 255;\n" +
+    "    long bg = (bottom_color >> 8) & 255;\n" +
+    "    long bb = bottom_color & 255;\n" +
+    "    long ba = (bottom_color >> 24) & 255;\n" +
+    "    long rr = tr + ((br - tr) * dy) / max_t;\n" +
+    "    long gg = tg + ((bg - tg) * dy) / max_t;\n" +
+    "    long bv = tb + ((bb - tb) * dy) / max_t;\n" +
+    "    long av = ta + ((ba - ta) * dy) / max_t;\n" +
+    "    dst[py * surface_width + px] = (uint)((av << 24) | (rr << 16) | (gg << 8) | bv);\n" +
+    "}\n" +
     "__kernel void simple_2d_blit_image_u32(__global uint* dst, __global const uint* src, long x, long y, long w, long h, long surface_width, long surface_height) {\n" +
     "    long i = get_global_id(0);\n" +
     "    long count = w * h;\n" +
@@ -341,6 +379,12 @@ impl RenderBackend for OpenClBackend:
         self.device_current = false
 
     me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
+        if self._can_use_device_draw() and thickness == 1 and self._ensure_device_current():
+            val rc = self.session.launch_line_u32(self.d_framebuffer, _i64(self.width()), _i64(self.height()), _i64(x1), _i64(y1), _i64(x2), _i64(y2), _i64_from_u32(color), _i64(thickness))
+            if rc == 0:
+                self.device_current = true
+                self.mirror.draw_line(x1, y1, x2, y2, color, thickness)
+                return
         self.mirror.draw_line(x1, y1, x2, y2, color, thickness)
         self.device_current = false
 
@@ -361,6 +405,14 @@ impl RenderBackend for OpenClBackend:
         self.device_current = false
 
     me draw_gradient_rect(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32):
+        if w <= 0 or h <= 0:
+            return
+        if self._can_use_device_draw() and self._ensure_device_current():
+            val rc = self.session.launch_gradient_rect_u32(self.d_framebuffer, _i64(self.width()), _i64(self.height()), _i64(x), _i64(y), _i64(w), _i64(h), _i64_from_u32(top_color), _i64_from_u32(bottom_color))
+            if rc == 0:
+                self.device_current = true
+                self.mirror.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
+                return
         self.mirror.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
         self.device_current = false
 

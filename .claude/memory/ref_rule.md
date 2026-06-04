@@ -32,14 +32,14 @@ type: reference
 ## Doc Folder Map
 | Folder | Purpose |
 |--------|---------|
-| `doc/01_research/<domain>/` | Research and options |
-| `doc/02_requirements/<domain>/` | Functional requirements |
-| `doc/03_plan/<domain>/` | Plans, scope, milestones |
-| `doc/04_architecture/<domain>/` | Architecture overviews |
+| `doc/01_research/<domain>/<topic>/` | Research and options |
+| `doc/02_requirements/<domain>/<topic>/` | Functional requirements |
+| `doc/03_plan/<domain>/<topic>/` | Plans, scope, milestones |
+| `doc/04_architecture/<domain>/<topic>/` | Architecture overviews |
 | `doc/04_architecture/adr/` | ADRs |
 | `doc/04_architecture/rule/` | Full rules: `README.md` |
-| `doc/05_design/<domain>/` | Design documents |
-| `doc/07_guide/<domain>/` | Developer guides |
+| `doc/05_design/<domain>/<topic>/` | Design documents |
+| `doc/07_guide/<domain>/<topic>/` | Developer guides |
 
 Domains: `language`, `compiler`, `lib`, `app`, `os`, `hardware`, `platform`, `runtime`, `ui`, `ml`, `infra`
 

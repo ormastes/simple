@@ -15,10 +15,10 @@ This preserves intent across the multi-LLM pipeline.
 
 | Artifact | Path |
 |----------|------|
-| Research | `doc/01_research/<domain>/<feature>.md` |
-| Feature requirements (draft) | `doc/02_requirements/<domain>/<feature>_draft.md` |
+| Research | `doc/01_research/<domain>/<topic>/<feature>.md` |
+| Feature requirements (draft) | `doc/02_requirements/<domain>/<topic>/<feature>_draft.md` |
 | NFR requirements (draft) | `doc/02_requirements/nfr/<feature>_draft.md` |
-| Requirement options | `doc/02_requirements/<domain>/<feature>_options.md` |
+| Requirement options | `doc/02_requirements/<domain>/<topic>/<feature>_options.md` |
 
 ### Domain directories (same across all doc phases)
 `language/`, `compiler/`, `lib/`, `app/`, `os/`, `hardware/`, `platform/`, `runtime/`, `ui/`, `ml/`, `infra/`

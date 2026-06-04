@@ -40,6 +40,6 @@ type: reference
 4. Export public API
 
 ## Doc Locations
-- Design decisions: `doc/05_design/<domain>/` (language, compiler, lib, app, os, hardware, platform, runtime, ui, ml, infra)
+- Design decisions: `doc/05_design/<domain>/<topic>/` (language, compiler, lib, app, os, hardware, platform, runtime, ui, ml, infra)
 - Specs: `doc/06_spec/`
 - Writing guides: `doc/07_guide/infra/design_writing.md`, `doc/07_guide/infra/architecture_writing.md`
