@@ -6221,6 +6221,71 @@ Test checklist:
 - `git diff --check`
 - `find doc/06_spec -name '*_spec.spl' | wc -l`
 
+BrowserSession scripts now compare compileStreaming base module metadata and
+instantiateStreaming base module metadata in one queued script. The first
+network commit completes only `WebAssembly.compileStreaming(...)` and records
+module byte length `11`, section count `1`, and `hasTypeSection=true`. The
+second network commit appends `WebAssembly.instantiateStreaming(...)` evidence
+with instantiated status, module byte length `11`, section count `1`, and an
+instance exports object. The focused fetch/WASM chain spec is now passing
+`216/216`; adjacent WASM host, WebGPU JS/WASM, and Node API specs remain passing
+at `107/107`, `106/106`, and `275/275`; `src/lib` remains passing with
+`405 warning(s)` across `5936` files. Docgen regenerated the mirrored manual
+with `Total scenarios | 216 |`; diff hygiene and the `doc/06_spec` layout gate
+are checked before push.
+
+BrowserSession fetched arrayBuffer direct/compiled memory-maximum parity
+continuation:
+
+Completion checklist:
+
+- Add one same-script BrowserSession scenario that queues both
+  `window.fetch('/direct.wasm')` and `window.fetch('/compiled.wasm')`, so the
+  direct fetched-arrayBuffer memory maximum path and compiled fetched-arrayBuffer
+  memory maximum path run through the same event/promise scheduler.
+- Verify the pre-commit script result is exactly `queued`, and verify `out`
+  remains empty before any network response is committed.
+- Verify the first pending network request is a fetch for
+  `https://example.com/direct.wasm`.
+- Commit the one-page maximum memory module response for `/direct.wasm` and
+  verify the direct `arrayBuffer()` byte length is `26`.
+- Verify `WebAssembly.instantiate(bytes)` returns `status=instantiated`,
+  preserves module byte length `26`, exposes memory byte length and page size
+  `65536`, returns `1` for `memory.grow(0)`, returns `-1` for
+  `memory.grow(1)`, and preserves the clamped byte evidence `18`.
+- Verify the second pending network request is a fetch for
+  `https://example.com/compiled.wasm`.
+- Commit the same one-page maximum memory module response for `/compiled.wasm`
+  and verify the compiled `arrayBuffer()` byte length and compiled module byte
+  length are both `26`.
+- Verify `WebAssembly.compile(bytes)` plus `WebAssembly.instantiate(module)`
+  preserves instantiated status, module byte length `26`, memory byte length and
+  page size `65536`, grow-zero result `1`, grow-failure result `-1`, and clamped
+  byte evidence `20`.
+- Verify the final output preserves the direct memory-maximum evidence and
+  appends the compiled memory-maximum evidence in deterministic order.
+- Regenerate the mirrored scenario manual and confirm its total scenario count
+  increments from `216` to `217`.
+- Move docgen's old `01_unit` output onto the tracked `unit` manual path, remove
+  generated adjacent-spec noise, restore generated tracking-index churn, and keep
+  only the intended spec/manual/plan files in the commit.
+- Confirm no executable `*_spec.spl` files remain under `doc/06_spec` before
+  commit or push.
+- Push only after the local focused, adjacent, `src/lib`, diff, and layout gates
+  pass against the rebased `main` worktree.
+
+Test checklist:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+- `git diff --check`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
 BrowserSession fetched invalid arrayBuffer instantiate catch continuation:
  
  - `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
