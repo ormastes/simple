@@ -93,6 +93,7 @@ class SimpleWindowManager {
     this._topMenuBar = null;
     this._desktopWidgets = null;
     this._desktopItems = null;
+    this._desktopItemsFeedbackTimer = 0;
     this._windowOverview = null;
     this._overviewSearchQuery = '';
     this._stageRail = null;
@@ -2223,6 +2224,26 @@ class SimpleWindowManager {
     shelf.setAttribute('aria-label', 'Desktop items');
     shelf.addEventListener('pointerdown', (event) => event.stopPropagation());
     shelf.addEventListener('mousedown', (event) => event.stopPropagation());
+    shelf.addEventListener('click', (event) => {
+      const target = event.target && event.target.closest ? event.target : null;
+      const item = target ? target.closest('.wm-desktop-item') : null;
+      if (item && shelf.contains(item)) {
+        this._activateDesktopItem(item.dataset.desktopItem || '');
+        return;
+      }
+      const drop = target ? target.closest('.wm-desktop-drop-target') : null;
+      if (drop && shelf.contains(drop)) this._activateDesktopDropTarget();
+    });
+    shelf.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      const target = event.target && event.target.closest ? event.target : null;
+      const item = target ? target.closest('.wm-desktop-item') : null;
+      const drop = target ? target.closest('.wm-desktop-drop-target') : null;
+      if ((!item || !shelf.contains(item)) && (!drop || !shelf.contains(drop))) return;
+      event.preventDefault();
+      if (item) this._activateDesktopItem(item.dataset.desktopItem || '');
+      else this._activateDesktopDropTarget();
+    });
     shelf.appendChild(this._makeDesktopItem('report', 'Quality report', 'Markdown', 'R'));
     shelf.appendChild(this._makeDesktopItem('screenshot', 'Screenshot', 'PNG image', 'S'));
     shelf.appendChild(this._makeDesktopDropTarget());
@@ -2255,12 +2276,61 @@ class SimpleWindowManager {
     target.dataset.dropTarget = 'desktop';
     target.setAttribute('role', 'button');
     target.setAttribute('aria-label', 'Drop files on desktop');
+    target.tabIndex = 0;
     target.appendChild(this._makeRoundIcon('wm-desktop-drop-icon', '+'));
     const label = document.createElement('span');
     label.className = 'wm-desktop-drop-label';
     label.textContent = 'Drop files';
     target.appendChild(label);
     return target;
+  }
+
+  _activateDesktopItem(itemId) {
+    const id = String(itemId || 'report');
+    this._markDesktopItemFeedback('open', id);
+    this._sendWindowCmd('desktop_item_open', { desktop_item: id });
+  }
+
+  _activateDesktopDropTarget() {
+    this._markDesktopItemFeedback('drop', 'desktop');
+    this._sendWindowCmd('desktop_drop_target', { drop_target: 'desktop' });
+  }
+
+  _markDesktopItemFeedback(action, targetId) {
+    if (!this._desktopItems || !this._desktopItems.isConnected || !this._feedbackAllows('standard')) return;
+    const shelf = this._desktopItems;
+    const kind = String(action || 'open');
+    const id = String(targetId || '');
+    window.clearTimeout(this._desktopItemsFeedbackTimer);
+    this._clearDesktopItemFeedback();
+    shelf.dataset.desktopFeedback = kind;
+    shelf.dataset.desktopFeedbackId = id;
+    shelf.classList.add('action-feedback');
+    const safeId = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(id) : id.replace(/["\\]/g, '\\$&');
+    const selector = kind === 'drop'
+      ? `.wm-desktop-drop-target[data-drop-target="${safeId}"]`
+      : `.wm-desktop-item[data-desktop-item="${safeId}"]`;
+    const target = shelf.querySelector(selector);
+    if (target) {
+      target.dataset.desktopFeedback = kind;
+      target.classList.add('action-feedback');
+      const icon = target.querySelector('.wm-desktop-item-icon, .wm-desktop-drop-icon');
+      if (icon) icon.classList.add('action-feedback');
+    }
+    this._desktopItemsFeedbackTimer = window.setTimeout(() => this._clearDesktopItemFeedback(), 560);
+  }
+
+  _clearDesktopItemFeedback() {
+    if (!this._desktopItems) return;
+    window.clearTimeout(this._desktopItemsFeedbackTimer);
+    this._desktopItemsFeedbackTimer = 0;
+    delete this._desktopItems.dataset.desktopFeedback;
+    delete this._desktopItems.dataset.desktopFeedbackId;
+    this._desktopItems.classList.remove('action-feedback');
+    this._desktopItems.querySelectorAll('.action-feedback[data-desktop-feedback], .wm-desktop-item-icon.action-feedback, .wm-desktop-drop-icon.action-feedback').forEach((node) => {
+      node.classList.remove('action-feedback');
+      if (node.dataset && node.dataset.desktopFeedback) delete node.dataset.desktopFeedback;
+    });
   }
 
   _toggleDesktopItems() {
