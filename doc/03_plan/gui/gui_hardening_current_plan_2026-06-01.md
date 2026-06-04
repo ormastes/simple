@@ -5584,6 +5584,68 @@ Node API conformance remained `275/275`, and `src/lib` completed with the
 current `405 warning(s)` across `5936` files. Broader typed-array prototype
 parity and production GUI pixel parity remain open.
 
+BrowserSession Uint8Array nonzero-offset range/string helper continuation:
+
+Detailed completion checklist:
+
+- Confirm the fresh worktree starts from synchronized `main`/`origin/main`.
+- Confirm existing BrowserSession coverage already exercises `at`, `join`,
+  `toString`, `subarray`, and `slice` on zero-offset typed arrays.
+- Confirm existing BrowserSession coverage already exercises nonzero-offset
+  callback, mutation/search, sort/iterator, `set`, `slice`, constructor copy,
+  and shared subarray storage.
+- Add one BrowserSession browser-script scenario using `base.subarray(2, 7)` as
+  the receiver for direct range and string helpers.
+- Verify `view.join('-')` and `view.toString()` read the logical view bytes and
+  not the backing buffer prefix.
+- Verify positive, negative, and out-of-range `view.at(...)` use logical view
+  indexing and preserve `undefined` for out-of-range reads.
+- Verify `view.subarray(...)` returns a nested view with shared backing buffer,
+  expected byte offset, and expected logical length.
+- Verify mutating the nested shared view changes the original view/base buffer
+  through the shared backing buffer.
+- Record the direct nested-view `slice(...)` copied-buffer gap exposed while
+  probing this slice.
+- Regenerate the mirrored SPipe scenario manual and move old-path docgen output
+  onto `doc/06_spec/unit/...`.
+- Restore generated index, tracking, and adjacent old-path manual noise.
+- Record focused and manual scenario counts after docgen.
+- Run the focused BrowserSession check and interpreter spec.
+- Run native WASM host, WebGPU JS/WASM, and Node API conformance regressions.
+- Run `src/lib` check, diff hygiene, and executable-spec layout guard.
+- Commit only the focused spec, generated manual, and plan evidence.
+- Fetch/rebase with file-count guard and push `HEAD:main` with `GITHUB_TOKEN`
+  unset.
+
+Detailed test checklist:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+- `git diff --check`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+BrowserSession scripts now prove direct range and string helpers operate on the
+logical window of a nonzero-offset `subarray` receiver. The focused assertion
+verifies `view.join('-')` and `view.toString()` read the view bytes instead of
+the backing-buffer prefix, positive/negative/out-of-range `view.at(...)` uses
+logical view indexing, `view.subarray(...)` returns a nested shared view with
+the expected byte offset and length, and mutating that nested view updates the
+original view/base buffer through shared storage. A direct nested-view
+`slice(...)` copied-buffer gap was exposed while probing this slice and is
+recorded in
+`doc/08_tracking/bug/browser_session_uint8array_nested_view_slice_copy_buffer_2026-06-04.md`.
+The focused fetch/WASM chain spec now passes `233/233`, and the generated
+manual records `Total scenarios | 233 |`. The native WASM host spec remained
+`107/107`, the WebGPU JS/WASM system spec remained `106/106`, Node API
+conformance remained `275/275`, and `src/lib` completed with the current
+`405 warning(s)` across `5936` files. Broader typed-array prototype parity and
+production GUI pixel parity remain open.
+
 BrowserSession Uint8Array prototype slice copied-buffer continuation:
 
 Detailed completion checklist:

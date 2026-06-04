@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 232 | 232 | 0 | 0 |
+| 233 | 233 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -10884,6 +10884,39 @@ match result:
 
 </details>
 
+#### dispatches Uint8Array range and string helpers over nonzero-offset views
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `true:2:5:5:30-4-255-7-8:30,4,255,7,8:30:8:255:undefined:true:3:3:4,255,7:4,99... (full value in folded executable source)`
+
+3. Err
+   - Expected: "unexpected uint8 view range/string helper js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var base = new Uint8Array(8); base[0] = 10; base[1] = 20; base[2] = 30; base[3] = 260; base[4] = -1; base[5] = 7; base[6] = 8; base[7] = 90; var view = base.subarray(2, 7); var joined = view.join('-'); var str = view.toString(); var a0 = view.at(0); var an1 = view.at(-1); var an3 = view.at(-3); var miss = view.at(9); var nested = view.subarray(1, -1); var nestedBefore = nested.toString(); nested[1] = 99; (view.buffer === base.buffer) + ':' + view.byteOffset + ':' + view.byteLength + ':' + view.length + ':' + joined + ':' + str + ':' + a0 + ':' + an1 + ':' + an3 + ':' + miss + ':' + (nested.buffer === view.buffer) + ':' + nested.byteOffset + ':' + nested.length + ':' + nestedBefore + ':' + nested.toString() + ':' + view.toString() + ':' + base.toString()")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("true:2:5:5:30-4-255-7-8:30,4,255,7,8:30:8:255:undefined:true:3:3:4,255,7:4,99,7:30,4,99,7,8:10,20,30,4,99,7,8,90")
+    Err(err):
+        expect("unexpected uint8 view range/string helper js error: {err}").to_equal("")
+```
+
+</details>
+
 #### reduces Uint8Array values with accumulator callbacks in browser scripts
 
 1. var session = BrowserSession new
@@ -13015,8 +13048,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 232 |
-| Active scenarios | 232 |
+| Total scenarios | 233 |
+| Active scenarios | 233 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
