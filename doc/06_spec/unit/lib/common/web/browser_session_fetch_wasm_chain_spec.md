@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 227 | 227 | 0 | 0 |
+| 228 | 228 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -12237,6 +12237,39 @@ match result:
 
 </details>
 
+#### writes Uint8Array set bytes through nonzero-offset source and target views
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `2:5:1:3:undefined:undefined:undefined:10,4,255,77,123:1,2,10,4,255,77,123,8:1... (full value in folded executable source)`
+
+3. Err
+   - Expected: "unexpected uint8 set view window js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var base = new Uint8Array(8); base[0] = 1; base[1] = 2; base[2] = 3; base[3] = 4; base[4] = 5; base[5] = 6; base[6] = 7; base[7] = 8; var target = base.subarray(2, 7); var srcBase = new Uint8Array(5); srcBase[0] = 10; srcBase[1] = 260; srcBase[2] = -1; srcBase[3] = 77; srcBase[4] = 88; var src = srcBase.subarray(1, 4); var ret1 = target.set(src, 1); var callSrc = srcBase.subarray(0, 2); var ret2 = Uint8Array.prototype.set.call(target, callSrc, 0); var applySrc = srcBase.subarray(3, 5); var ret3 = Uint8Array.prototype.set.apply(target, [applySrc, 3]); src[0] = 99; target[4] = 123; target.byteOffset + ':' + target.length + ':' + src.byteOffset + ':' + src.length + ':' + ret1 + ':' + ret2 + ':' + ret3 + ':' + target.toString() + ':' + base.toString() + ':' + srcBase.toString()")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("2:5:1:3:undefined:undefined:undefined:10,4,255,77,123:1,2,10,4,255,77,123,8:10,99,255,77,88")
+    Err(err):
+        expect("unexpected uint8 set view window js error: {err}").to_equal("")
+```
+
+</details>
+
 #### reports ArrayBuffer and typed-array constructor metadata in browser scripts
 
 1. var session = BrowserSession new
@@ -12850,8 +12883,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 227 |
-| Active scenarios | 227 |
+| Total scenarios | 228 |
+| Active scenarios | 228 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

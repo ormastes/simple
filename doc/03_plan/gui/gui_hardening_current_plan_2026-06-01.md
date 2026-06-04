@@ -5199,6 +5199,65 @@ Test checklist:
 - `git diff --check`
 - `find doc/06_spec -name '*_spec.spl' | wc -l`
 
+BrowserSession Uint8Array nonzero-offset set source/target continuation:
+
+Detailed completion checklist:
+
+- Confirm the fresh worktree starts from synchronized `main`/`origin/main`.
+- Confirm the prior nonzero-offset `Uint8Array.slice` copied-buffer scenario and
+  `227`-scenario generated manual are present.
+- Add one BrowserSession browser-script scenario that creates a nonzero-offset
+  target view through `base.subarray(2, 7)`.
+- Add one separate nonzero-offset source view through `srcBase.subarray(1, 4)`.
+- Verify direct `target.set(src, 1)` writes through the target window rather
+  than writing at base-buffer index zero.
+- Verify `Uint8Array.prototype.set.call(target, callSrc, 0)` dispatches through
+  the generic helper path on the same nonzero-offset target view.
+- Verify `Uint8Array.prototype.set.apply(target, [applySrc, 3])` dispatches
+  through the generic helper path and writes the requested apply source window.
+- Verify every `set` form returns `undefined`, matching browser typed-array
+  semantics.
+- Verify later writes through the original source view and target view mutate
+  only their backing buffers and preserve the already-copied target bytes.
+- Verify byte coercion still applies for values `260`, `-1`, and later `123`
+  writes.
+- Regenerate the mirrored SPipe scenario manual and move old-path docgen output
+  onto `doc/06_spec/unit/...`.
+- Restore generated index, tracking, and adjacent old-path manual noise.
+- Record focused and manual scenario counts after docgen.
+- Run the focused BrowserSession check and interpreter spec.
+- Run native WASM host, WebGPU JS/WASM, and Node API conformance regressions.
+- Run `src/lib` check, diff hygiene, and executable-spec layout guard.
+- Commit only the focused spec, generated manual, and plan evidence.
+- Fetch/rebase with file-count guard and push `HEAD:main` with `GITHUB_TOKEN`
+  unset.
+
+Detailed test checklist:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+- `git diff --check`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+BrowserSession scripts now prove `Uint8Array.set` writes through nonzero-offset
+source and target views. The focused assertion verifies direct
+`target.set(src, 1)`, `Uint8Array.prototype.set.call(target, callSrc, 0)`, and
+`Uint8Array.prototype.set.apply(target, [applySrc, 3])` all return `undefined`,
+copy bytes from the requested source windows, and write to the target view
+window rather than base-buffer index zero. The runtime now exposes a dedicated
+`Uint8Array.set` native dispatch id on instance/prototype method surfaces. The
+focused fetch/WASM chain spec now passes `228/228`, and the generated manual
+records `Total scenarios | 228 |`. The native WASM host spec remained
+`107/107`, the WebGPU JS/WASM system spec remained `106/106`, Node API
+conformance remained `275/275`, and `src/lib` completed with the current
+`405 warning(s)` across `5936` files. Broader browser/WASM semantics remain
+open.
+
 BrowserSession Uint8Array nonzero-offset slice copy continuation:
 
 Detailed completion checklist:
