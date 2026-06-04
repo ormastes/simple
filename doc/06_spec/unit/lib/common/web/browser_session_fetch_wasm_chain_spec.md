@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 149 | 149 | 0 | 0 |
+| 150 | 150 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -2403,6 +2403,39 @@ match result:
         expect(_display_js(value)).to_equal("instantiated:40:2:tbl:table:answer:global:instantiated:1:27:1:env:foo:function:object")
     Err(err):
         expect("unexpected instance constructor descriptor metadata js error: {err}").to_equal("")
+```
+
+</details>
+
+#### returns invalid WebAssembly Instance metadata for missing imports
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `1:invalid:true:unsupported-wasm-imports:object`
+
+3. Err
+   - Expected: "unexpected instance constructor missing import js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var module = new WebAssembly.Module('0061736d01000000010401600000020b0103656e7603666f6f0000'); var instance = new WebAssembly.Instance(module, {}); module.importCount + ':' + instance.status + ':' + instance.moduleValid + ':' + instance.error + ':' + typeof instance.exports")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("1:invalid:true:unsupported-wasm-imports:object")
+    Err(err):
+        expect("unexpected instance constructor missing import js error: {err}").to_equal("")
 ```
 
 </details>
@@ -7374,8 +7407,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 149 |
-| Active scenarios | 149 |
+| Total scenarios | 150 |
+| Active scenarios | 150 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
