@@ -43,7 +43,7 @@ backend_opencl_facade_spec -> std
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -55,6 +55,8 @@ expect(source).to_contain("__kernel void simple_2d_alpha_u32")
 expect(source).to_contain("__kernel void simple_2d_scroll_u32")
 expect(source).to_contain("__kernel void simple_2d_rect_filled_u32")
 expect(source).to_contain("__kernel void simple_2d_rect_outline_u32")
+expect(source).to_contain("__kernel void simple_2d_blit_image_u32")
+expect(source).to_contain("__kernel void simple_2d_blit_nonzero_u32")
 ```
 
 </details>

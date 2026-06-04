@@ -60,7 +60,7 @@ Verifies the first modern Simple Web WM slice at the contract level.
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 733 lines folded for reproduction.
+Runnable source: 740 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -765,6 +765,13 @@ expect(html).to_contain(".wm-quality-computed-productivity-metric.warn")
 expect(html).to_contain(".wm-quality-computed-productivity-indicator")
 expect(html).to_contain(".wm-quality-computed-productivity-value")
 expect(html).to_contain(".wm-command-palette-input { width: 100%; height: 44px")
+expect(html).to_contain(".wm-command-palette.action-feedback")
+expect(html).to_contain(".wm-command-recent.action-feedback")
+expect(html).to_contain(".wm-command-palette[data-command-recent-feedback='activate'] .wm-command-recent[data-command-feedback='recent']")
+expect(html).to_contain(".wm-command-recent-icon.action-feedback")
+expect(html).to_contain(":root[data-wm-motion=off] .wm-command-palette.action-feedback")
+expect(html).to_contain("@keyframes wm-command-recent-feedback")
+expect(html).to_contain("@keyframes wm-command-recent-icon-feedback")
 expect(html).to_contain("min-height: 44px")
 expect(html).to_contain(".wm-taskbar-icon")
 expect(html).to_contain(".wm-taskbar-badge")
@@ -806,7 +813,7 @@ expect(html).to_contain("@keyframes wm-hot-corner-activate")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 1395 lines folded for reproduction.
+Runnable source: 1404 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -868,6 +875,15 @@ expect(js).to_contain("_setCommandPaletteSelection")
 expect(js).to_contain("_syncCommandPaletteSelection")
 expect(js).to_contain("_handleCommandPaletteKeydown")
 expect(js).to_contain("_executeCommandPaletteAction")
+expect(js).to_contain("_executeCommandPaletteRecent")
+expect(js).to_contain("_markCommandRecentFeedback")
+expect(js).to_contain("_clearCommandRecentFeedback")
+expect(js).to_contain("_commandRecentFeedbackTimer")
+expect(js).to_contain("dataset.commandRecentFeedback")
+expect(js).to_contain("dataset.commandRecentIndex")
+expect(js).to_contain("dataset.commandFeedback")
+expect(js).to_contain("command_palette_recent")
+expect(js).to_contain("command_label")
 expect(js).to_contain("aria-activedescendant")
 expect(js).to_contain("aria-selected")
 expect(js).to_contain("tabIndex")
@@ -2214,7 +2230,7 @@ expect(retained).to_contain("Maximize window")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 1343 lines folded for reproduction.
+Runnable source: 1347 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -3478,12 +3494,16 @@ expect(preview).to_contain("Focus Simple IDE")
 expect(preview).to_contain("wm-title-input wm-command-bar command-submitted")
 expect(preview).to_contain("data-command-feedback=\"submitted\"")
 expect(preview).to_contain("data-command-kind=\"path\"")
-expect(preview).to_contain("wm-command-palette")
+expect(preview).to_contain("wm-command-palette action-feedback")
+expect(preview).to_contain("data-command-recent-feedback=\"activate\"")
+expect(preview).to_contain("data-command-recent-index=\"0\"")
 expect(preview).to_contain("wm-command-palette-input")
 expect(preview).to_contain("aria-controls=\"wm-command-palette-list\"")
 expect(preview).to_contain("aria-activedescendant=\"wm-command-item-0\"")
 expect(preview).to_contain("aria-label=\"Recent commands\"")
-expect(preview).to_contain("wm-command-recent")
+expect(preview).to_contain("wm-command-recent action-feedback")
+expect(preview).to_contain("data-command-feedback=\"recent\"")
+expect(preview).to_contain("wm-command-recent-icon wm-round-icon action-feedback")
 expect(preview).to_contain("wm-command-section")
 expect(preview).to_contain("data-command-category=\"Apps\"")
 expect(preview).to_contain("data-command-category=\"System\"")
