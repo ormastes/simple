@@ -246,23 +246,36 @@ pub(crate) fn build_import_map(
                             let mangled = format!("{}__{}", prefix, f.name);
                             fn_arities.insert(mangled.clone(), f.params.len());
                             raw_to_mangled.entry(f.name.clone()).or_default().push(mangled);
-                            // Record a named (uppercase) return type so callers
-                            // reached via the global import map get a real result
-                            // type instead of ANY. Skip on bare-name collision to
-                            // avoid mis-typing a same-named function elsewhere.
-                            if let Some(simple_parser::Type::Simple(tn)) = &f.return_type {
-                                if tn.chars().next().is_some_and(|c| c.is_uppercase()) {
-                                    match fn_return_types.entry(f.name.clone()) {
-                                        std::collections::hash_map::Entry::Occupied(mut e) => {
-                                            if e.get() != &simple_parser::Type::Simple(tn.clone()) {
-                                                // Conflicting return types for the same bare
-                                                // name: mark ambiguous by removing the entry.
-                                                e.insert(simple_parser::Type::Simple(String::new()));
-                                            }
+                            // Record a named return type so callers reached via the
+                            // global import map get a real result type instead of ANY.
+                            // Handles `-> Struct` and `-> [Struct]` (the array element
+                            // type is what indexing `result[i].field` needs). Skip on
+                            // bare-name collision to avoid mis-typing a same-named
+                            // function defined elsewhere.
+                            let is_named_upper = |t: &simple_parser::Type| {
+                                matches!(t, simple_parser::Type::Simple(n)
+                                    if n.chars().next().is_some_and(|c| c.is_uppercase()))
+                            };
+                            let captured: Option<simple_parser::Type> = match &f.return_type {
+                                Some(t) if is_named_upper(t) => Some(t.clone()),
+                                Some(t @ simple_parser::Type::Array { element, .. })
+                                    if is_named_upper(element.as_ref()) =>
+                                {
+                                    Some(t.clone())
+                                }
+                                _ => None,
+                            };
+                            if let Some(cap) = captured {
+                                match fn_return_types.entry(f.name.clone()) {
+                                    std::collections::hash_map::Entry::Occupied(mut e) => {
+                                        if e.get() != &cap {
+                                            // Conflicting return types for the same bare
+                                            // name: mark ambiguous (dropped before return).
+                                            e.insert(simple_parser::Type::Simple(String::new()));
                                         }
-                                        std::collections::hash_map::Entry::Vacant(e) => {
-                                            e.insert(simple_parser::Type::Simple(tn.clone()));
-                                        }
+                                    }
+                                    std::collections::hash_map::Entry::Vacant(e) => {
+                                        e.insert(cap);
                                     }
                                 }
                             }
