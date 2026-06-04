@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 222 | 222 | 0 | 0 |
+| 223 | 223 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -12072,6 +12072,39 @@ match result:
 
 </details>
 
+#### preserves Uint8Array subarray shared buffer writes in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `1:3:3:true:4,255,4:1,4,255,4,5:255`
+
+3. Err
+   - Expected: "unexpected uint8 subarray shared buffer js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var b = new Uint8Array(5); b[0] = 1; b[1] = 2; b[2] = 3; b[3] = 4; b[4] = 5; var sub = b.subarray(1, 4); sub[0] = 260; b[2] = -1; sub.byteOffset + ':' + sub.byteLength + ':' + sub.length + ':' + (sub.buffer === b.buffer) + ':' + sub.toString() + ':' + b.toString() + ':' + sub.at(1)")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("1:3:3:true:4,255,4:1,4,255,4,5:255")
+    Err(err):
+        expect("unexpected uint8 subarray shared buffer js error: {err}").to_equal("")
+```
+
+</details>
+
 #### reports ArrayBuffer and typed-array constructor metadata in browser scripts
 
 1. var session = BrowserSession new
@@ -12685,8 +12718,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 222 |
-| Active scenarios | 222 |
+| Total scenarios | 223 |
+| Active scenarios | 223 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

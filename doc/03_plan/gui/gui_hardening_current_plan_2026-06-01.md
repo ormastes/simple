@@ -313,7 +313,7 @@
    `doc/06_spec/system/app/browser/feature/webgpu_js_wasm_simple_spec.md`:
    JS/WebEngine/WASM BrowserSession evidence. Current focused checks pass the
    WebGPU/JS/WASM system spec `106/106`, the native WASM host spec `107/107`,
-   and the fetch-to-WASM chain spec `222/222`. The coverage includes secure WebGPU
+   and the fetch-to-WASM chain spec `223/223`. The coverage includes secure WebGPU
    globals, fetched `arrayBuffer()` to `WebAssembly.instantiate`, compile
    thenables, bounded WASM exports, traps, table/global metadata, imported
    function binding, and `Uint8Array`/`DataView` access to WebAssembly.Memory.
@@ -5198,6 +5198,58 @@ Test checklist:
 - `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
 - `git diff --check`
 - `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+BrowserSession Uint8Array subarray shared-buffer parity continuation:
+
+Detailed completion checklist:
+
+- Confirm the fresh worktree starts from synchronized `main`/`origin/main`.
+- Confirm the current BrowserSession typed-array section already covers broad
+  `Uint8Array` prototype helpers before adding a narrower storage-aliasing
+  assertion.
+- Add one BrowserSession scenario proving `Uint8Array.subarray(...)` keeps the
+  same `ArrayBuffer` backing store rather than returning an isolated copy.
+- Verify the subarray reports `byteOffset=1`, `byteLength=3`, `length=3`, and
+  strict buffer identity with the source view.
+- Verify writing through the subarray normalizes `260` to `4` and mutates the
+  source view at the corresponding backing index.
+- Verify writing through the source view normalizes `-1` to `255` and is
+  visible through the subarray.
+- Regenerate the mirrored SPipe scenario manual and move old-path docgen output
+  onto `doc/06_spec/unit/...`.
+- Restore generated index, tracking, and adjacent old-path manual noise.
+- Record focused and manual scenario counts after docgen.
+- Run the focused BrowserSession check and interpreter spec.
+- Run native WASM host, WebGPU JS/WASM, and Node API conformance regressions.
+- Run `src/lib` check, diff hygiene, and executable-spec layout guard.
+- Commit only the focused spec, generated manual, and plan evidence.
+- Fetch/rebase with file-count guard and push `HEAD:main` with `GITHUB_TOKEN`
+  unset.
+
+Detailed test checklist:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+- `git diff --check`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+BrowserSession scripts now prove `Uint8Array.subarray(...)` preserves shared
+`ArrayBuffer` storage in browser scripts. The focused assertion verifies the
+subarray reports `byteOffset=1`, `byteLength=3`, `length=3`, and strict
+buffer identity with the source view; writing `260` through the subarray
+normalizes to `4` and mutates the source view, while writing `-1` through the
+source normalizes to `255` and is visible through the subarray. The focused
+fetch/WASM chain spec now passes `223/223`, and the generated manual records
+`Total scenarios | 223 |`. The native WASM host spec remained `107/107`, the
+WebGPU JS/WASM system spec remained `106/106`, Node API conformance remained
+`275/275`, and `src/lib` completed with the current `405 warning(s)` across
+`5936` files. Broader typed-array prototype parity and production GUI pixel
+parity remain open.
 
 BrowserSession scripts now compare raw compileStreaming base module metadata
 and compileStreaming-instantiated base module metadata in the same script
