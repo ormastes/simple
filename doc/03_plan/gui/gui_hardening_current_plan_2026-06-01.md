@@ -9082,8 +9082,8 @@ Detailed completion checklist:
 - [x] Run required shared-runtime checks for `src/compiler`, `src/lib`, MCP, LSP,
   and MCP stdio.
 - [x] Run final diff hygiene and executable-spec layout guards.
-- [ ] Commit only the `toLocaleString` runtime/spec/manual/plan update.
-- [ ] Fetch/rebase with file-count guard and push `HEAD:main` with
+- [x] Commit only the `toLocaleString` runtime/spec/manual/plan update.
+- [x] Fetch/rebase with file-count guard and push `HEAD:main` with
   `GITHUB_TOKEN` unset.
 
 Detailed test checklist:
@@ -9110,5 +9110,7 @@ fetch/WASM chain spec remains `235/235`, and the generated manual remains at
 `Total scenarios | 235 |`. Adjacent native WASM host, WebGPU JS/WASM, and Node
 API conformance regressions passed at `107/107`, `106/106`, and `275/275`.
 Required shared-runtime checks passed for `src/compiler`, `src/lib`, MCP, LSP,
-and the current MCP stdio integration path. Broader typed-array prototype parity
-and production GUI pixel parity remain open.
+and the current MCP stdio integration path. Final sync guards passed with file
+count stable at `78091`, and the runtime/spec continuation was pushed to
+`origin/main`. Broader typed-array prototype parity and production GUI pixel
+parity remain open.
