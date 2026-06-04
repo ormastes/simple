@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 186 | 186 | 0 | 0 |
+| 187 | 187 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -3294,6 +3294,39 @@ match result:
         expect(_display_js(value)).to_equal("instantiated:40:2:tbl:table:answer:global:instantiated:1:27:1:env:foo:function:object")
     Err(err):
         expect("unexpected instance constructor descriptor metadata js error: {err}").to_equal("")
+```
+
+</details>
+
+#### compares constructor and compiled WebAssembly descriptor metadata in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `ctor:40:2:tbl:table:answer:global:27:1:1:env:foo:function:instantiated:object... (full value in folded executable source)`
+
+3. Err
+   - Expected: "unexpected constructor/compiled descriptor metadata js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var out = ''; var exportWasm = '0061736d010000000404017000010606017f00412a0b0710020374626c010006616e737765720300'; var importWasm = '0061736d01000000010401600000020b0103656e7603666f6f0000'; var tableGlobal = new WebAssembly.Module(exportWasm); var exports = WebAssembly.Module.exports(tableGlobal); var imported = new WebAssembly.Module(importWasm); var imports = WebAssembly.Module.imports(imported); var importedInstance = new WebAssembly.Instance(imported, { env: { foo: function() { return 7; } } }); out = 'ctor:' + tableGlobal.byteLength + ':' + exports.length + ':' + exports[0].name + ':' + exports[0].kind + ':' + exports[1].name + ':' + exports[1].kind + ':' + imported.byteLength + ':' + imported.importCount + ':' + imports.length + ':' + imports[0].module + ':' + imports[0].name + ':' + imports[0].kind + ':' + importedInstance.status + ':' + typeof importedInstance.exports; WebAssembly.compile(exportWasm).then(function(module) { var exports = WebAssembly.Module.exports(module); out = out + ':compiledExports:' + module.byteLength + ':' + exports.length + ':' + exports[0].name + ':' + exports[0].kind + ':' + exports[1].name + ':' + exports[1].kind; return WebAssembly.compile(importWasm); }).then(function(module) { var imports = WebAssembly.Module.imports(module); out = out + ':compiledImports:' + module.importCount + ':' + module.byteLength + ':' + imports.length + ':' + imports[0].module + ':' + imports[0].name + ':' + imports[0].kind; }); out")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("ctor:40:2:tbl:table:answer:global:27:1:1:env:foo:function:instantiated:object:compiledExports:40:2:tbl:table:answer:global:compiledImports:1:27:1:env:foo:function")
+    Err(err):
+        expect("unexpected constructor/compiled descriptor metadata js error: {err}").to_equal("")
 ```
 
 </details>
@@ -8688,8 +8721,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 186 |
-| Active scenarios | 186 |
+| Total scenarios | 187 |
+| Active scenarios | 187 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

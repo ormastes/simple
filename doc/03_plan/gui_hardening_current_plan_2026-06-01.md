@@ -6223,3 +6223,49 @@ fetch/WASM chain spec now passes `186/186`; the native WASM host spec remained
 conformance remained `275/275`, and `src/lib` completed with the current
 `399 warning(s)` across `5903` files. Broader browser/WASM semantics remain
 open.
+
+BrowserSession WebAssembly constructor/compiled descriptor metadata parity continuation:
+
+Completion checklist:
+
+- Add a BrowserSession browser-script scenario that reads export and import
+  descriptors through synchronous `new WebAssembly.Module(...)` constructor
+  modules, then compares those descriptors with chained `WebAssembly.compile`
+  module descriptors in the same script evaluation.
+- Verify the constructor export module exposes byte length `40`, two exports,
+  `tbl:table`, and `answer:global`.
+- Verify the constructor import module exposes byte length `27`, import count
+  `1`, one `env:foo:function` descriptor, and an instantiated import-backed
+  instance with exports object metadata.
+- Verify the compiled export module exposes matching byte length, export count,
+  export names, and export kinds.
+- Verify the compiled import module exposes matching import count, byte length,
+  descriptor count, module/name/kind, and deterministic output ordering.
+- Regenerate the mirrored scenario manual for the changed SPipe spec and move
+  the generated old `01_unit` output onto the tracked `unit` manual path.
+- Restore generated index/manual noise from docgen and adjacent specs.
+- Record command evidence, pass counts, warning count, and remaining open scope.
+- Run diff hygiene and doc layout gates before committing and pushing.
+
+Test checklist:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+
+BrowserSession scripts now compare constructor-created and compiled
+WebAssembly descriptor metadata paths in the same script evaluation. The
+focused assertion verifies the constructor export module exposes byte length
+`40`, two exports, `tbl:table`, and `answer:global`; verifies the constructor
+import module exposes byte length `27`, import count `1`, one
+`env:foo:function` descriptor, and an instantiated import-backed instance; then
+verifies chained compiled modules expose matching export and import descriptor
+metadata. The focused fetch/WASM chain spec now passes `187/187`; the native
+WASM host spec remained `107/107`, the WebGPU JS/WASM system spec remained
+`106/106`, Node API conformance remained `275/275`, and `src/lib` completed
+with the current `399 warning(s)` across `5903` files. Broader browser/WASM
+semantics remain open.
