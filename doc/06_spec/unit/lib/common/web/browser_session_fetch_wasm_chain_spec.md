@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 152 | 152 | 0 | 0 |
+| 153 | 153 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -2502,6 +2502,39 @@ match result:
         expect(_display_js(value)).to_equal("false:invalid-wasm-section:0:invalid:false:invalid-wasm-module")
     Err(err):
         expect("unexpected instance constructor truncated module js error: {err}").to_equal("")
+```
+
+</details>
+
+#### returns invalid WebAssembly Instance metadata for missing module arguments
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `invalid:false:invalid-wasm-module:object`
+
+3. Err
+   - Expected: "unexpected instance constructor missing module js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var instance = new WebAssembly.Instance(); instance.status + ':' + instance.moduleValid + ':' + instance.error + ':' + typeof instance.exports")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("invalid:false:invalid-wasm-module:object")
+    Err(err):
+        expect("unexpected instance constructor missing module js error: {err}").to_equal("")
 ```
 
 </details>
@@ -7473,8 +7506,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 152 |
-| Active scenarios | 152 |
+| Total scenarios | 153 |
+| Active scenarios | 153 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
