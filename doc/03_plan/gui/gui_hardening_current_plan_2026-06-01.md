@@ -3874,6 +3874,69 @@ dispatch, and full browser/WASM semantics remain open.
 Sync evidence: implementation commit `d27ded2251` pushed to `main` after guarded
 fetch/rebase with file count stable at `78091`.
 
+BrowserSession Uint8Array nonzero-offset reverse-search coverage continuation:
+
+Completion checklist:
+
+- [x] Start from clean temp worktree `/tmp/simple-gui-hardening-next33` on
+  pushed `main`.
+- [x] Leave the primary detached dirty checkout untouched.
+- [x] Confirm iterator and broad nonzero-offset helper coverage already exists.
+- [x] Add focused nonzero-offset `subarray` coverage for direct `findLast`.
+- [x] Add focused nonzero-offset `subarray` coverage for direct
+  `findLastIndex`.
+- [x] Add focused nonzero-offset `subarray` coverage for prototype
+  `findLast.call`.
+- [x] Add focused nonzero-offset `subarray` coverage for prototype
+  `findLast.apply` miss behavior.
+- [x] Add focused nonzero-offset `subarray` coverage for prototype
+  `findLastIndex.call/apply`.
+- [x] Verify callback receiver identity stays view-relative.
+- [x] Verify returned indexes are view-relative while backing storage remains
+  shared with the base `Uint8Array`.
+- [x] Refresh generated scenario manual after executable spec changes.
+- [x] Run focused compile and focused fetch/WASM chain spec.
+- [x] Run adjacent browser/WASM and JS conformance checks.
+- [x] Run final layout, whitespace, file-count, and status gates.
+- [ ] Commit test/manual/plan update.
+- [ ] Push guarded main update after fetch/rebase/file-count safety check.
+- [ ] Commit and push sync-complete checklist update.
+
+Tests checklist:
+
+- [x] Direct `view.findLast(callback)` returns the last matching normalized byte.
+- [x] Direct `view.findLastIndex(callback)` returns the view-relative last
+  matching index.
+- [x] Prototype `findLast.call(view, callback)` dispatches through the
+  nonzero-offset view receiver.
+- [x] Prototype `findLast.apply(view, [callback])` preserves `undefined` miss
+  behavior.
+- [x] Prototype `findLastIndex.call/apply` preserves view-relative index and
+  `-1` miss behavior.
+- [x] Mutating the base after callback dispatch is visible through the view,
+  proving the scenario uses shared backing storage.
+- [x] Focused spec result recorded: changed spec compile passed, fetch/WASM
+  chain `246/246`, generated manual `Total scenarios | 246 |`.
+- [x] Adjacent spec results recorded: WASM host `107/107`, WebGPU JS/WASM
+  `106/106`, Node API conformance `275/275`.
+
+Commands run:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --force-rebuild --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `git diff --check`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+BrowserSession test coverage now explicitly proves `Uint8Array.findLast` and
+`findLastIndex` direct/prototype dispatch over nonzero-offset views. The
+scenario covers normalized bytes, view-relative indexes, callback receiver
+identity, miss behavior, and shared backing storage with the base typed array.
+This is a coverage-only continuation; no runtime source change was required.
+
 BrowserSession Uint8Array prototype transform apply continuation:
  
  - `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`

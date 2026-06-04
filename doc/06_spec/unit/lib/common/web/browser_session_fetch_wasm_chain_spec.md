@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 245 | 245 | 0 | 0 |
+| 246 | 246 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -10884,6 +10884,39 @@ match result:
 
 </details>
 
+#### dispatches Uint8Array reverse search helpers over nonzero-offset views
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `true:2:5:4:3:255:4:undefined:-1:4,255,7,44,8:10,20,4,255,7,44,8,90`
+
+3. Err
+   - Expected: "unexpected uint8 view reverse search helper js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var base = new Uint8Array(8); base[0] = 10; base[1] = 20; base[2] = 260; base[3] = -1; base[4] = 7; base[5] = 260; base[6] = 8; base[7] = 90; var view = base.subarray(2, 7); var direct = view.findLast(function(v, i, arr) { return v == 4 && arr === view && arr.at(i) == 4; }); var directIndex = view.findLastIndex(function(v, i, arr) { return v == 4 && arr === view && arr.at(i) == 4; }); var callFound = Uint8Array.prototype.findLast.call(view, function(v, i, arr) { return i < 4 && v == 255 && arr.at(i) == 255; }); var applyIndex = Uint8Array.prototype.findLastIndex.apply(view, [function(v, i, arr) { return v == 8 && arr.at(i) == 8; }]); var miss = Uint8Array.prototype.findLast.apply(view, [function(v) { return v == 99; }]); var missIndex = Uint8Array.prototype.findLastIndex.call(view, function(v) { return v == 99; }); base[5] = 44; (view.buffer === base.buffer) + ':' + view.byteOffset + ':' + view.length + ':' + direct + ':' + directIndex + ':' + callFound + ':' + applyIndex + ':' + miss + ':' + missIndex + ':' + view.toString() + ':' + base.toString()")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("true:2:5:4:3:255:4:undefined:-1:4,255,7,44,8:10,20,4,255,7,44,8,90")
+    Err(err):
+        expect("unexpected uint8 view reverse search helper js error: {err}").to_equal("")
+```
+
+</details>
+
 #### dispatches Uint8Array mutating and search helpers over nonzero-offset views
 
 1. var session = BrowserSession new
@@ -13444,8 +13477,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 245 |
-| Active scenarios | 245 |
+| Total scenarios | 246 |
+| Active scenarios | 246 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
