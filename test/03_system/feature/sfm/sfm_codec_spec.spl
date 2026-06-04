@@ -1,0 +1,226 @@
+# @cover src/lib/nogc_sync_mut/sfm/codec.spl 80%
+# @cover src/lib/nogc_sync_mut/sfm/manifest.spl 80%
+# @cover src/lib/nogc_sync_mut/sfm/container.spl 60%
+"""
+# SFM Codec & Manifest
+
+**Feature IDs:** #SFM
+**Category:** Infrastructure
+**Status:** Draft
+**Requirements:** doc/04_architecture/simple_feature_module.md
+**Design:** doc/05_design/simple_feature_module.md
+
+## Overview
+
+`.sfm` is the primary Simple Feature Module container. It is a pure-Simple outer
+container that embeds an opaque SMF code payload plus a feature manifest declaring
+the exposed front-end / back-end layers, their security level, and the build version.
+This spec covers AC-1 (codec round-trip preserves manifest fields and the embedded
+SMF bytes) and AC-2 (the manifest declares exposed layers with name/kind/entry).
+
+The byte-exact round-trip is *also* asserted by a standalone runnable probe
+(`sfm_roundtrip_probe.spl`), because the test runner does not execute `it` blocks —
+see `## Related Specifications`.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| FeatureManifest | Name, version, security level, and the list of exposed layers |
+| LayerDescriptor | One exposed layer: role, kind, entry symbol, privileged flag |
+| LayerKind | FrontGui / FrontTui / FrontArgParser / BackDb / BackHw |
+| encode_sfm | Pure byte encoder: `(manifest, smf_bytes) -> [u8]` |
+| decode_sfm | Pure byte decoder: `[u8] -> Result<(manifest, smf_bytes), text>` |
+
+## Related Specifications
+
+- [sfm_roundtrip_probe.spl](sfm_roundtrip_probe.spl) — ground-truth AC-1 byte gate (run via `bin/simple run`)
+- [sfm_di_authz_spec.spl](sfm_di_authz_spec.spl) — DI + AOP authorization (AC-3/4/5)
+- [sfm_loader_profiles_spec.spl](sfm_loader_profiles_spec.spl) — profile selection (AC-6)
+"""
+
+use std.spec.*
+use std.sfm.manifest.{
+    FeatureManifest,
+    LayerDescriptor,
+    LayerKind,
+    SfmSecurityLevel
+}
+use std.sfm.codec.{encode_sfm, decode_sfm}
+
+
+# ============================================================================
+# Step Helpers — named so underscores read as manual sentences
+# ============================================================================
+
+# @step: Build an arg-parser front-end layer
+fn build_arg_parser_layer() -> LayerDescriptor:
+    return LayerDescriptor(
+        role: "cli",
+        kind: LayerKind.FrontArgParser,
+        entry_symbol: "arg_parse_main",
+        privileged: false
+    )
+
+# @step: Build a privileged hardware back-end layer
+fn build_hw_layer() -> LayerDescriptor:
+    return LayerDescriptor(
+        role: "device",
+        kind: LayerKind.BackHw,
+        entry_symbol: "hw_open",
+        privileged: true
+    )
+
+# @step: Build a sample feature manifest with two layers
+fn build_manifest() -> FeatureManifest:
+    return FeatureManifest(
+        name: "sample-sfm",
+        version: "1.4.2",
+        security_level: SfmSecurityLevel.Ordinary,
+        layers: [build_arg_parser_layer(), build_hw_layer()]
+    )
+
+# @step: Build fake embedded SMF payload bytes
+fn build_fake_smf_bytes() -> [u8]:
+    # Pre-size then poke literal-derived bytes (never push(expr as u8)).
+    var buf: [u8] = []
+    var i: i32 = 0
+    while i < 8:
+        buf.append(0 as u8)
+        i = i + 1
+    # "SMF\0" magic then 4 payload bytes
+    buf[0] = 83 as u8
+    buf[1] = 77 as u8
+    buf[2] = 70 as u8
+    buf[3] = 0 as u8
+    buf[4] = 222 as u8
+    buf[5] = 173 as u8
+    buf[6] = 190 as u8
+    buf[7] = 239 as u8
+    return buf
+
+# @step: Encode then decode the manifest and SMF payload
+fn round_trip(m: FeatureManifest, smf: [u8]) -> Result<(FeatureManifest, [u8]), text>:
+    val bytes: [u8] = encode_sfm(m, smf)
+    return decode_sfm(bytes)
+
+
+# ============================================================================
+# AC-1: Codec round-trip preserves manifest fields + embedded SMF bytes
+# ============================================================================
+
+describe "SFM codec":
+    describe "AC-1: write -> read round-trip":
+        # @capture(binary)
+        it "should preserve the manifest name and version":
+            val m = build_manifest()
+            val smf = build_fake_smf_bytes()
+            match round_trip(m, smf):
+                Ok((decoded, _)):
+                    expect(decoded.name).to_equal("sample-sfm")
+                    expect(decoded.version).to_equal("1.4.2")
+                Err(e):
+                    expect("decode-failed: " + e).to_equal("ok")
+
+        # @capture(binary)
+        it "should preserve the embedded SMF bytes exactly":
+            val m = build_manifest()
+            val smf = build_fake_smf_bytes()
+            match round_trip(m, smf):
+                Ok((_, out)):
+                    expect(out.len()).to_equal(smf.len())
+                    var i: i32 = 0
+                    var same: bool = true
+                    while i < (smf.len() as i32):
+                        if out[i] != smf[i]:
+                            same = false
+                        i = i + 1
+                    expect(same).to_be_true()
+                Err(e):
+                    expect("decode-failed: " + e).to_equal("ok")
+
+        # @capture(binary)
+        it "should be re-encode idempotent (catches symmetric codec bugs)":
+            val m = build_manifest()
+            val smf = build_fake_smf_bytes()
+            val first: [u8] = encode_sfm(m, smf)
+            match decode_sfm(first):
+                Ok((m2, smf2)):
+                    val second: [u8] = encode_sfm(m2, smf2)
+                    expect(second.len()).to_equal(first.len())
+                    var i: i32 = 0
+                    var same: bool = true
+                    while i < (first.len() as i32):
+                        if second[i] != first[i]:
+                            same = false
+                        i = i + 1
+                    expect(same).to_be_true()
+                Err(e):
+                    expect("decode-failed: " + e).to_equal("ok")
+
+        # @capture(binary)
+        it "should preserve the security level marker":
+            val m = build_manifest()
+            val smf = build_fake_smf_bytes()
+            match round_trip(m, smf):
+                Ok((decoded, _)):
+                    match decoded.security_level:
+                        Ordinary: expect(true).to_be_true()
+                        Trusted:  expect("expected Ordinary").to_equal("ok")
+                Err(e):
+                    expect("decode-failed: " + e).to_equal("ok")
+
+    # ========================================================================
+    # AC-2: Manifest declares exposed layers (name/kind/entry symbol)
+    # ========================================================================
+    describe "AC-2: exposed layer manifest fields":
+        it "should declare each layer with a role, kind and entry symbol":
+            val m = build_manifest()
+            expect(m.layers.len()).to_equal(2)
+            val front = m.layers[0]
+            expect(front.role).to_equal("cli")
+            expect(front.entry_symbol).to_equal("arg_parse_main")
+            match front.kind:
+                FrontArgParser: expect(true).to_be_true()
+                _:              expect("expected FrontArgParser").to_equal("ok")
+
+        it "should carry the layer kind through a codec round-trip":
+            val m = build_manifest()
+            val smf = build_fake_smf_bytes()
+            match round_trip(m, smf):
+                Ok((decoded, _)):
+                    expect(decoded.layers.len()).to_equal(2)
+                    val back = decoded.layers[1]
+                    expect(back.role).to_equal("device")
+                    expect(back.entry_symbol).to_equal("hw_open")
+                    expect(back.privileged).to_be_true()
+                    match back.kind:
+                        BackHw: expect(true).to_be_true()
+                        _:      expect("expected BackHw").to_equal("ok")
+                Err(e):
+                    expect("decode-failed: " + e).to_equal("ok")
+
+
+# ============================================================================
+# Edge Cases
+# ============================================================================
+
+# @manual-file: folded
+describe "SFM codec edge cases":
+    # @manual: folded
+    it "should reject bytes too short to hold a header":
+        var tiny: [u8] = []
+        tiny.append(83 as u8)
+        match decode_sfm(tiny):
+            Ok(_):  expect("should have failed").to_equal("ok")
+            Err(_): expect(true).to_be_true()
+
+    # @manual: folded
+    it "should preserve an empty embedded SMF payload":
+        val m = build_manifest()
+        var empty: [u8] = []
+        match round_trip(m, empty):
+            Ok((_, out)):
+                expect(out.len()).to_equal(0)
+            Err(e):
+                expect("decode-failed: " + e).to_equal("ok")

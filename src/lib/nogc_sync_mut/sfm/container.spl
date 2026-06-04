@@ -1,0 +1,40 @@
+# SFM file container wrappers over the pure-byte codec.
+#
+# `write_sfm_file` / `read_sfm_file` are the thin FFI layer: they encode/decode
+# in memory (codec.spl) and only cross the runtime boundary to touch the file.
+# `rt_file_read_bytes` returns [i64] (file_ops.spl ABI) — converted to [u8] via
+# pre-size + index-poke before handing to the pure decoder. We do NOT redeclare
+# the extern as ->[u8] (that triggers the known SFFI signature-conflict hazard).
+
+use std.sfm.manifest.{FeatureManifest, LayerDescriptor}
+use std.sfm.codec.{encode_sfm, decode_sfm}
+
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+# The interpreter marshals SFFI [i64] returns wrapped as Option::Some([...]) at
+# the call site (see signature_sffi.spl TODO). Declare as optional and unwrap.
+extern fn rt_file_read_bytes(path: text) -> [i64]?
+
+# AC-1 file side: encode the container and write the bytes to `path`.
+fn write_sfm_file(path: text, m: FeatureManifest, smf_bytes: [u8]) -> Result<(), text>:
+    val bytes: [u8] = encode_sfm(m, smf_bytes)
+    val ok: bool = rt_file_write_bytes(path, bytes)
+    if not ok:
+        return Err("sfm: failed to write " + path)
+    return Ok(())
+
+# AC-1 file side: read the container bytes and decode -> (manifest, embedded SMF).
+fn read_sfm_file(path: text) -> Result<(FeatureManifest, [u8]), text>:
+    val raw_opt = rt_file_read_bytes(path)
+    if raw_opt.is_none():
+        return Err("sfm: empty or unreadable file " + path)
+    val raw: [i64] = raw_opt.unwrap()
+    val n: i32 = raw.len() as i32
+    if n == 0:
+        return Err("sfm: empty or unreadable file " + path)
+    var bytes: [u8] = []
+    var i: i32 = 0
+    while i < n:
+        bytes.append(0 as u8)
+        bytes[i] = (raw[i] & 0xff) as u8
+        i = i + 1
+    return decode_sfm(bytes)
