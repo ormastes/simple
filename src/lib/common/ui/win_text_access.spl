@@ -17,6 +17,7 @@ use std.nogc_sync_mut.play.types.{WindowInfo}
 val WIN_TEXT_SOURCE_TRACE32 = "trace32"
 val WIN_TEXT_SOURCE_SIMPLE_UI = "simple_ui"
 val WIN_TEXT_SOURCE_HOST_WM = "host_wm"
+val WIN_TEXT_SOURCE_COMPOSITOR = "compositor"
 
 val WIN_TEXT_CONFIDENCE_HIGH = "high"
 val WIN_TEXT_CONFIDENCE_MEDIUM = "medium"
@@ -249,3 +250,48 @@ pub fn win_text_merge_snapshots(mode: text, snapshots: [WinTextSnapshot]) -> Win
             sources = sources.push(source)
     val active_surface = if surfaces.len() > 0: surfaces[0].surface_id else: ""
     win_text_snapshot_from_parts(mode: mode, active_surface: active_surface, surfaces: surfaces, nodes: nodes, sources: sources)
+
+pub struct GttiSurface:
+    window_id: text
+    title: text
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+    visible: bool
+    focused: bool
+    app_id: text
+
+pub fn win_text_compositor_snapshot(gtti_surfaces: [GttiSurface], wm_mode: text, captured_at_ms: i64, max_age_ms: i64, now_ms: i64) -> WinTextSnapshot:
+    val source = win_text_source(
+        source_id: "compositor",
+        source_kind: "simpleos_compositor",
+        confidence: "high",
+        capabilities: ["list", "focus", "query_text", "screenshot"],
+        captured_at_ms: captured_at_ms,
+        max_age_ms: max_age_ms,
+        now_ms: now_ms
+    )
+    var surfaces: [UiAccessSurface] = []
+    var nodes: [UiAccessNode] = []
+    for gs in gtti_surfaces:
+        val surface_id = "compositor:{gs.window_id}"
+        surfaces = surfaces.push(UiAccessSurface(
+            surface_id: surface_id,
+            title: gs.title,
+            active: gs.focused,
+            window_id: gs.window_id,
+            app_id: if gs.app_id != "": gs.app_id else: "compositor",
+            root_canonical_id: ui_access_canonical_id(surface_id, "root")
+        ))
+        nodes = nodes.push(win_text_make_node(surface_id: surface_id, widget_id: "root", kind: "compositor_window", text_value: gs.title, action_names: ["focus", "screenshot"], props: [
+            UiAccessProp(key: "source", value: "compositor"),
+            UiAccessProp(key: "wm_mode", value: wm_mode),
+            UiAccessProp(key: "x", value: "{gs.x}"),
+            UiAccessProp(key: "y", value: "{gs.y}"),
+            UiAccessProp(key: "width", value: "{gs.width}"),
+            UiAccessProp(key: "height", value: "{gs.height}"),
+            UiAccessProp(key: "visible", value: if gs.visible: "true" else: "false")
+        ]))
+    val active_surface = if surfaces.len() > 0: surfaces[0].surface_id else: ""
+    win_text_snapshot_from_parts(mode: "compositor", active_surface: active_surface, surfaces: surfaces, nodes: nodes, sources: [source])

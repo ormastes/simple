@@ -1,7 +1,7 @@
 # Shared UI Contract Completion Report
 
 **Date:** 2026-04-04  
-**Contract:** [doc/04_architecture/shared_ui_contract.md](../04_architecture/shared_ui_contract.md) (292 lines)  
+**Contract:** [doc/04_architecture/ui/shared_ui_contract.md](../04_architecture/shared_ui_contract.md) (292 lines)  
 **Prior commit:** `58aa209f6f` — initial cross-surface test suite and widget state semantics
 
 ## Summary
@@ -18,7 +18,7 @@ The test API now provides:
 ## Implementation
 
 ### Phase 1: Initial Contract + Test Suite (prior)
-- Created `doc/04_architecture/shared_ui_contract.md` — 292-line authoritative contract
+- Created `doc/04_architecture/ui/shared_ui_contract.md` — 292-line authoritative contract
 - Created `src/app/ui.test_api/handler.spl` — shared HTTP request handler
 - Created `src/lib/nogc_sync_mut/ui_test/` — client, types, http, parse modules
 - Created `src/lib/common/ui/` — 36+ widget/event/state files
@@ -64,7 +64,7 @@ The test API now provides:
 ### Contract
 | File | Purpose |
 |------|---------|
-| `doc/04_architecture/shared_ui_contract.md` | 292-line authoritative Protocol V1 contract |
+| `doc/04_architecture/ui/shared_ui_contract.md` | 292-line authoritative Protocol V1 contract |
 
 ## Test Summary
 

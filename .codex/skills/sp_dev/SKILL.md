@@ -46,4 +46,4 @@ For SPipe LLM-backed app/server work, use the fine-tune registry commands under
 `.spipe/llm-finetune-process/`. If an artifact exists but misses its target eval,
 record the failed eval, create or link the retry attempt, and file remaining
 retry/verification/safety/deployment work in `doc/08_tracking/todo/todo_db.sdn`
-and `doc/08_tracking/feature_request/` before reporting the handoff state.
+and `doc/08_tracking/feature/` before reporting the handoff state.

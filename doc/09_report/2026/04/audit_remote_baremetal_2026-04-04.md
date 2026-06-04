@@ -44,7 +44,7 @@ Complete pipeline in `src/lib/nogc_sync_mut/debug/remote/exec/` via `RemoteExecu
 **Source:** `src/lib/nogc_sync_mut/debug/remote/exec/` (6 adapters + manager), `connection_matrix.spl`, `src/compiler/80.driver/build/baremetal.spl`, `src/runtime/startup/baremetal/` (6 arch)
 **Tests:** `qemu_rv32_jit_e2e_spec.spl`, `trace32_stm32h7_jit_e2e_spec.spl`, `ch32v307_jit_e2e_spec.spl`, connection_matrix (4 pass), semihost (11 pass), remote_baremetal_qemu (4 pass)
 **Verification reports:** `doc/09_report/2026/03/remote_baremetal_completion_verification_2026-03-31.md` (PASS), `vhdl_backend_riscv_remote_interpreter_verification_2026-03-31.md` (PASS)
-**Docs:** `doc/07_guide/backend/baremetal.md`, `doc/04_architecture/bare_metal_integration.md`
+**Docs:** `doc/07_guide/backend/baremetal.md`, `doc/04_architecture/hardware/bare_metal_integration.md`
 
 ## Recommended README Wording
 

@@ -5,7 +5,7 @@
 **Created:** 2026-03-28
 **Plan:** [phase4_sffi_implementation_plan.md](/doc/05_design/phase4_sffi_implementation_plan.md)
 **Related design:** [sffi_external_library_pattern.md](/doc/05_design/sffi_external_library_pattern.md), [cpp_wrapper_generator_design.md](/doc/05_design/cpp_wrapper_generator_design.md), [phase4_sffi_implementation_plan.md](/doc/05_design/phase4_sffi_implementation_plan.md)
-**Related research:** [sffi_dynamic_loading_2026-02-21.md](/doc/01_research/local/sffi_dynamic_loading_2026-02-21.md)
+**Related research:** [sffi_dynamic_loading_2026-02-21.md](/doc/01_research/platform/sffi_dynamic_loading_2026-02-21.md)
 **NFR:** [sffi_bidirectional_interop.md](/doc/02_requirements/nfr/sffi_bidirectional_interop.md)
 
 ## Overview

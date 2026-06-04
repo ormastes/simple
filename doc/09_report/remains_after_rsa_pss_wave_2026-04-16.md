@@ -38,7 +38,7 @@ Per-layer state:
    - **Do not collide** — parallel-scope-partition memory rule applies. Wait for their commit; pick up whatever remains.
 
 3. **`qemu-system-x86_64` not installed on dev host.** Blocks `os_tls_spec.spl` and `os_tls_system_spec.spl` end-to-end runs.
-   - Ops, not code. Install path documented at `doc/01_research/local/qemu_install_notes.md`.
+   - Ops, not code. Install path documented at `doc/01_research/os/qemu_install_notes.md`.
 
 ### B. Tractable follow-ons (each a sonnet-agent wave when prioritized)
 
@@ -63,7 +63,7 @@ Per-layer state:
 
 ### C. Phase 2 (deferred by design)
 
-Cross-reference: `doc/01_research/local/tls13_phase2_backlog.md`.
+Cross-reference: `doc/01_research/lib/tls13_phase2_backlog.md`.
 
 Advisor-recommended priority order for when Phase 2 starts:
 
@@ -96,5 +96,5 @@ Everything else is additive and can wait for a Phase 2 kickoff with decisions fr
 ## Related reports
 
 - `doc/09_report/crypto_spec_remains_2026-04-16.md` — concurrent session's diagnostic for Poly1305 (fixed this session) + interpreter Option<[u8]> wrapping (in-flight).
-- `doc/01_research/local/tls13_phase2_backlog.md` — Phase 2 design backlog.
-- `doc/01_research/local/qemu_install_notes.md` — QEMU install commands per OS.
+- `doc/01_research/lib/tls13_phase2_backlog.md` — Phase 2 design backlog.
+- `doc/01_research/os/qemu_install_notes.md` — QEMU install commands per OS.

@@ -81,4 +81,4 @@ user.enter_login("demo")
 ## Related
 
 - `doc/03_plan/sspec_scenario_manual_capture_plan.md`
-- `doc/08_tracking/feature_request/sspec_scenario_manual_requests.md`
+- `doc/08_tracking/feature/sspec_scenario_manual_requests.md`

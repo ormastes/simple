@@ -11,7 +11,7 @@ This report captures (a) commits whose `jj describe` titles do not match their t
 - 24 parallel agents (Opus orchestrator + advisor each).
 - ~60 commits landed on `main` (HEAD `voqupwqqwzxt` at audit time).
 - 12 bug docs filed today under `doc/08_tracking/bug/*_2026-05-01.md` (verified count; the wave kickoff brief said 10).
-- 5 feature requests filed today under `doc/08_tracking/feature_request/*_2026-05-01.md` (verified count).
+- 5 feature requests filed today under `doc/08_tracking/feature/*_2026-05-01.md` (verified count).
 - All 3 plan trees (compression, cipher/crypto-recovery, SIMD) advanced.
 
 ## Mislabeled commits
@@ -30,7 +30,7 @@ Verified against `jj show --summary` and `git show --name-only` against HEAD `vo
 
 T7 reported that `ecdh_p256.spl` had been auto-snapshotted into `kt` (riscv-hal) and `zk` (pbkdf2-vectors), and used `jj squash --from <them> --to @` to extract the file. Verified at audit time:
 
-- `ktptyxlqnkot` (kt) post-squash contains exactly **one file**: `M doc/08_tracking/feature_request/simd_int_intrinsics_for_crypto_2026-05-01.md`. The HalSmp/HalCache implementation that the title claims is **not** present here — it landed via change `pkrosyyskmsn 178aeab` (`feat(os/riscv): real HalSmp/HalCache/DTB/CMO/per-CPU production modules`). kt's title and content disagree, but kt is durable as a tiny doc-only commit; T7's extract did not over-strip.
+- `ktptyxlqnkot` (kt) post-squash contains exactly **one file**: `M doc/08_tracking/feature/simd_int_intrinsics_for_crypto_2026-05-01.md`. The HalSmp/HalCache implementation that the title claims is **not** present here — it landed via change `pkrosyyskmsn 178aeab` (`feat(os/riscv): real HalSmp/HalCache/DTB/CMO/per-CPU production modules`). kt's title and content disagree, but kt is durable as a tiny doc-only commit; T7's extract did not over-strip.
 - `zkxuxttwpzpw` (zk) still carries 30+ files including the riscv_fpga_linux design tree, `portable_simd_fp_modules_spec.md`, and the SIMD FR doc — i.e. the squash pulled `ecdh_p256.spl` out of zk but did not undo the broader bundle. zk's pbkdf2 vectors are durable.
 
 **Net recovery**: the ecdh_p256.spl file content is durable on HEAD (via `xqxspqnmyyqk feat(crypto): P-256 ECDH ephemeral keypair gen`); kt/zk titles remain misleading but their tree contents are non-destructive (FR cross-link, doc tree, test file). No source-code recovery is required.

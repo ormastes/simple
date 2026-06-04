@@ -16,7 +16,17 @@ src/
   compiler/         # Unified compiler — numbered layers (00-99)
   i18n/             # Internationalization
 test/               # Test files
-doc/                # Documentation (00_llm_process through 11_archive)
+doc/                # Documentation — each phase organized by feature domain
+  01_research/<domain>/   # Research by feature domain
+  02_requirements/<domain>/ # Requirements by feature domain (+nfr/, +feature/ auto-gen)
+  03_plan/<domain>/       # Plans by feature domain
+  04_architecture/<domain>/ # Architecture by feature domain (+adr/, +format/, +rule/)
+  05_design/<domain>/     # Design by feature domain
+  06_spec/                # Specs — generated from sspec, mirrors test/ paths
+  07_guide/<domain>/      # Guides by feature domain (+quick_reference/)
+  08_tracking/            # Bugs, tests, todos (operational)
+  09_report/              # Reports (temporal)
+  # Domains: language, compiler, lib, app, os, hardware, platform, runtime, ui, ml, infra
 bin/                # Binaries (bin/simple → release/<triple>/simple symlink)
 .claude/            # Agents, skills, templates, rules
 ```
@@ -26,7 +36,7 @@ bin/                # Binaries (bin/simple → release/<triple>/simple symlink)
   Root FILE.md links to child manifests via `## Child Manifests`. Enforced by
   `scripts/check-workspace-root-guard.shs` (lint + pre-commit hook).
   See `doc/07_guide/workspace/file_manifest.md`.
-- **Detailed:** `doc/04_architecture/file_class_structure.md` (2,649 files, 623K lines)
+- **Detailed:** `doc/04_architecture/compiler/file_class_structure.md` (2,649 files, 623K lines)
 - **Glossary:** `doc/glossary.md`
 
 ## Auto-Generated Docs

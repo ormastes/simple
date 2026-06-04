@@ -4,15 +4,10 @@
 #
 # Parses HTML into a flat node arena (avoiding the interpreter's nested-field
 # push bug), applies inline + <style>-block CSS, does block-flow layout with
-# word-wrapped text, and paints boxes + text directly into a [u32] framebuffer
-# using a tiny 5x7 bitmap font. Unlike the substring-heuristic web renderer,
-# this lays out and draws the document so generic pages render with visible
-# structure and text.
-#
-# This is the FAST framebuffer path (no Engine2D): the whole point is speed
-# under the interpreter, so paint writes [u32] pixels directly. The public entry
-# accepts backend_name for API parity with the Engine2D-based renderer but
-# IGNORES it — the fast path is pure-framebuffer and needs no GPU backend.
+# word-wrapped text, and paints boxes + text into a staging [u32] framebuffer
+# using a tiny 5x7 bitmap font. The final frame is presented through Engine2D
+# so generic Simple Web rendering shares the same backend interface as GUI/WM
+# surfaces while preserving this renderer's pixel-exact text and CSS fixtures.
 #
 # Two interpreter bugs are worked around here (both worth a seed fix):
 #   * text.index_of(needle, pos) IGNORES pos -> use find_from() (substring+find).
@@ -20,7 +15,9 @@
 #     of nodes keyed by integer parent index; only ever append to the top array.
 #
 # Public entry: simple_web_layout_render_html_pixels(html, w, h, backend_name)
-#   parse -> CSS cascade -> block layout -> paint text+boxes -> [u32] framebuffer
+#   parse -> CSS cascade -> block layout -> paint text+boxes -> Engine2D -> [u32]
+
+use std.gpu.engine2d.engine.{Engine2D}
 
 # ---------------------------------------------------------------------------
 # Flat node arena
@@ -2107,7 +2104,7 @@ fn ancestor_clip(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32
     clip
 
 # ---------------------------------------------------------------------------
-# Paint directly into a [u32] framebuffer (no Engine2D)
+# Paint into a staging [u32] framebuffer before Engine2D presentation.
 # ---------------------------------------------------------------------------
 
 fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32], fb: [u32], fbw: i32, fbh: i32, widget_mode: bool) -> [u32]:
@@ -2254,8 +2251,33 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
 # ---------------------------------------------------------------------------
 # Render entry
 # ---------------------------------------------------------------------------
-# backend_name is accepted for API parity with the Engine2D-based renderer but
-# IGNORED: this is the fast pure-framebuffer path and needs no GPU backend.
+
+fn present_layout_pixels_with_engine2d(pixels: [u32], width: i32, height: i32, backend_name: text, base: u32) -> [u32]:
+    if width <= 0 or height <= 0:
+        return []
+    var engine = Engine2D.create_with_backend(width, height, backend_name)
+    engine.clear(base)
+    if backend_name.trim().lower() == "vulkan":
+        draw_layout_pixel_runs(engine, pixels, width, height)
+    else:
+        engine.draw_image(0, 0, width, height, pixels)
+    engine.present()
+    val rendered = engine.read_pixels()
+    engine.shutdown()
+    rendered
+
+fn draw_layout_pixel_runs(engine: Engine2D, pixels: [u32], width: i32, height: i32):
+    var y = 0
+    while y < height:
+        var x = 0
+        while x < width:
+            val color = pixels[y * width + x]
+            var run_w = 1
+            while x + run_w < width and pixels[y * width + x + run_w] == color:
+                run_w = run_w + 1
+            engine.draw_rect_filled(x, y, run_w, 1, color)
+            x = x + run_w
+        y = y + 1
 
 pub fn simple_web_layout_render_html_pixels(html: text, width: i32, height: i32, backend_name: text) -> [u32]:
     val nodes = parse_html(html)
@@ -2278,4 +2300,5 @@ pub fn simple_web_layout_render_html_pixels(html: text, width: i32, height: i32,
     val widget_mode = html.contains("widget-panel")
     val base = if widget_mode: argb(245, 245, 245) else: white
     var fb: [u32] = [base; width * height]
-    paint(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, fb, width, height, widget_mode)
+    val painted = paint(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, fb, width, height, widget_mode)
+    present_layout_pixels_with_engine2d(painted, width, height, backend_name, base)

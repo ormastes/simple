@@ -90,6 +90,6 @@ native-build route. Items 1 and 3 are tractable; item 2 needs design.
 
 ## See also
 
-- `doc/08_tracking/feature_request/editor_markdown_editing_subsystem_2026-05-28.md`
+- `doc/08_tracking/feature/editor_markdown_editing_subsystem_2026-05-28.md`
   (editor render path — separate, native-route concern).
 - `doc/08_tracking/bug/seed_octal_string_escape_misdecode_2026-05-28.md`.

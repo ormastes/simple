@@ -27,7 +27,7 @@ opencl_session_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -61,7 +61,7 @@ expect(session.is_valid()).to_equal(false)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -69,6 +69,11 @@ val session = OpenClSession.create()
 
 expect(session.init()).to_equal(1)
 expect(session.load_module("")).to_equal(0)
+expect(session.alloc(16)).to_equal(0)
+expect(session.write_buffer(1, 1, 16)).to_equal(false)
+expect(session.read_buffer(1, 1, 16)).to_equal(false)
+expect(session.set_kernel_arg_i64(1, 0, 1)).to_equal(false)
+expect(session.set_kernel_arg_buffer(1, 0, 1)).to_equal(false)
 expect(session.synchronize()).to_equal(1)
 expect(session.launch_kernel("simple_2d_fill_u32", 1, 1, 1, 1)).to_equal(1)
 expect(session.fill_kernel(64, 64, 4096)).to_equal(1)
@@ -123,13 +128,12 @@ expect(session.ref_count).to_equal(0)
    - Expected: session.queue equals `0`
    - Expected: session.program equals `0`
    - Expected: session.kernel_cache equals `0`
-   - Expected: session.generation equals `generation_before + 1`
 
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -160,7 +164,51 @@ expect(session.context).to_equal(0)
 expect(session.queue).to_equal(0)
 expect(session.program).to_equal(0)
 expect(session.kernel_cache).to_equal(0)
-expect(session.generation).to_equal(generation_before + 1)
+```
+
+</details>
+
+#### fails closed for OpenCL session buffer and kernel argument operations without valid handles
+
+1. var session = OpenClSession create with ffi
+   - Expected: session.alloc(16) equals `0`
+   - Expected: session.write_buffer(1, 1, 16) is false
+   - Expected: session.read_buffer(1, 1, 16) is false
+   - Expected: session.set_kernel_arg_i64(1, 0, 1) is false
+   - Expected: session.set_kernel_arg_buffer(1, 0, 1) is false
+   - Expected: session.alloc(0) equals `0`
+   - Expected: session.alloc(16) equals `0`
+   - Expected: session.write_buffer(1, 1, 16) is false
+   - Expected: session.read_buffer(1, 1, 16) is false
+   - Expected: session.set_kernel_arg_i64(1, -1, 1) is false
+   - Expected: session.set_kernel_arg_buffer(1, 0, 0) is false
+   - Expected: session.generation equals `generation_before`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = OpenClSession.create_with_ffi(OpenClFfi.create_static())
+val generation_before = session.generation
+expect(session.alloc(16)).to_equal(0)
+expect(session.write_buffer(1, 1, 16)).to_equal(false)
+expect(session.read_buffer(1, 1, 16)).to_equal(false)
+expect(session.set_kernel_arg_i64(1, 0, 1)).to_equal(false)
+expect(session.set_kernel_arg_buffer(1, 0, 1)).to_equal(false)
+
+session.context = 1
+session.queue = 2
+expect(session.alloc(0)).to_equal(0)
+expect(session.alloc(16)).to_equal(0)
+expect(session.write_buffer(1, 1, 16)).to_equal(false)
+expect(session.read_buffer(1, 1, 16)).to_equal(false)
+expect(session.set_kernel_arg_i64(1, -1, 1)).to_equal(false)
+expect(session.set_kernel_arg_buffer(1, 0, 0)).to_equal(false)
+expect(session.generation).to_equal(generation_before)
 ```
 
 </details>
@@ -225,8 +273,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

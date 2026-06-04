@@ -1,7 +1,7 @@
 //! SIMD u64x2 + PCLMUL (carryless multiply) intrinsics — Phase 3 of the
 //! SIMD int-intrinsics-for-crypto feature.
 //!
-//! Phase 3 of `doc/08_tracking/feature_request/simd_int_intrinsics_for_crypto_2026-05-01.md`.
+//! Phase 3 of `doc/08_tracking/feature/simd_int_intrinsics_for_crypto_2026-05-01.md`.
 //!
 //! Exposes the GF(2)[x] carryless multiply primitive plus a u64x2 XOR — the
 //! two innermost ops for GHASH (AES-GCM authentication tag) and Polyval.

@@ -1,18 +1,16 @@
 #!/bin/sh
-# Idempotent installer: wire workspace root guard into .git/hooks/pre-commit
+# Idempotent installer: wire repo-managed tracking hooks into .git/hooks
 set -eu
 
-ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-HOOK_FILE="$ROOT_DIR/.git/hooks/pre-commit"
-GUARD_MARKER="check-workspace-root-guard"
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 MODE="check"
 
 usage() {
     cat <<'EOF'
 Usage: sh scripts/install-workspace-guard-hook.shs [--check|--apply]
 
-  --check   Report whether the guard is wired (default)
-  --apply   Append the guard call if missing
+  --check   Report whether pre-commit and pre-push hooks are wired (default)
+  --apply   Install/update hooks from scripts/hooks/
 EOF
 }
 
@@ -26,39 +24,37 @@ while [ "$#" -gt 0 ]; do
     shift
 done
 
-if [ ! -f "$HOOK_FILE" ]; then
-    if [ "$MODE" = "check" ]; then
-        echo "workspace-guard-hook: NOT INSTALLED (no pre-commit hook)"
-        exit 1
+check_hook() {
+    name="$1"
+    src="$ROOT_DIR/scripts/hooks/$name"
+    dst="$ROOT_DIR/.git/hooks/$name"
+    if [ ! -f "$dst" ]; then
+        echo "$name: NOT INSTALLED"
+        return 1
     fi
-    cat > "$HOOK_FILE" <<'HOOK'
-#!/bin/sh
-set -e
+    if ! cmp -s "$src" "$dst"; then
+        echo "$name: OUTDATED"
+        return 1
+    fi
+    echo "$name: INSTALLED"
+    return 0
+}
 
-# Workspace root guard (FILE.md enforcement)
-ROOT_DIR="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
-sh "$ROOT_DIR/scripts/check-workspace-root-guard.shs" audit --staged
-HOOK
-    chmod +x "$HOOK_FILE"
-    echo "workspace-guard-hook: INSTALLED (created new hook)"
-    exit 0
-fi
-
-if grep -q "$GUARD_MARKER" "$HOOK_FILE" 2>/dev/null; then
-    echo "workspace-guard-hook: INSTALLED"
-    exit 0
-fi
+install_hook() {
+    name="$1"
+    src="$ROOT_DIR/scripts/hooks/$name"
+    dst="$ROOT_DIR/.git/hooks/$name"
+    cp "$src" "$dst"
+    chmod +x "$dst"
+    echo "$name: INSTALLED"
+}
 
 if [ "$MODE" = "check" ]; then
-    echo "workspace-guard-hook: NOT INSTALLED"
-    exit 1
+    ok=0
+    check_hook pre-commit || ok=1
+    check_hook pre-push || ok=1
+    exit "$ok"
 fi
 
-cat >> "$HOOK_FILE" <<'GUARD'
-
-# Workspace root guard (FILE.md enforcement)
-ROOT_DIR_GUARD="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
-sh "$ROOT_DIR_GUARD/scripts/check-workspace-root-guard.shs" audit --staged
-GUARD
-
-echo "workspace-guard-hook: INSTALLED (appended to existing hook)"
+install_hook pre-commit
+install_hook pre-push

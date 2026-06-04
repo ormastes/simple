@@ -14,7 +14,7 @@
 | 1 | Plan | `/.claude/plans/parsed-questing-goose.md` |
 | 2 | Requirements | `doc/02_requirements/feature/usage/sffi_bidirectional_interop.md` |
 | 3 | NFR | `doc/02_requirements/nfr/sffi_bidirectional_interop.md` |
-| 4 | Architecture | `doc/04_architecture/sffi_bidirectional_interop.md` |
+| 4 | Architecture | `doc/04_architecture/platform/sffi_bidirectional_interop.md` |
 | 5 | Design | `doc/05_design/sffi_bidirectional_interop.md` |
 | 6 | System Test | `test/03_system/sffi_bidirectional_interop_spec.spl` |
 | 7 | (related) SFFI External Lib Pattern | `doc/05_design/sffi_external_library_pattern.md` |

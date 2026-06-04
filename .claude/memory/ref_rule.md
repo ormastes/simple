@@ -32,13 +32,15 @@ type: reference
 ## Doc Folder Map
 | Folder | Purpose |
 |--------|---------|
-| `doc/03_plan/` | Plans, scope, milestones |
-| `doc/02_requirements/feature/` | Functional requirements |
-| `doc/05_design/` | Design documents |
-| `doc/04_architecture/` | Architecture overviews |
+| `doc/01_research/<domain>/` | Research and options |
+| `doc/02_requirements/<domain>/` | Functional requirements |
+| `doc/03_plan/<domain>/` | Plans, scope, milestones |
+| `doc/04_architecture/<domain>/` | Architecture overviews |
 | `doc/04_architecture/adr/` | ADRs |
-| `doc/01_research/` | Research and options |
-| `doc/07_guide/` | Developer guides |
 | `doc/04_architecture/rule/` | Full rules: `README.md` |
+| `doc/05_design/<domain>/` | Design documents |
+| `doc/07_guide/<domain>/` | Developer guides |
+
+Domains: `language`, `compiler`, `lib`, `app`, `os`, `hardware`, `platform`, `runtime`, `ui`, `ml`, `infra`
 
 ## Override: Only via ADR in `doc/04_architecture/adr/`

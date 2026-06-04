@@ -80,9 +80,9 @@ This feature establishes that package for **both layers**:
 
 ## Dependencies
 
-- `doc/04_architecture/simpleos_interfaces.md`
-- `doc/04_architecture/lean_verification_contract.md`
-- `doc/04_architecture/rv64_user_mode_exec.md`
+- `doc/04_architecture/os/simpleos_interfaces.md`
+- `doc/04_architecture/infra/lean_verification_contract.md`
+- `doc/04_architecture/hardware/rv64_user_mode_exec.md`
 - `src/os/kernel/arch/riscv64/trap_model.spl`
 - `src/os/crash_policy.spl`
 - `src/os/desktop/app_switcher.spl`

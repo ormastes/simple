@@ -14,6 +14,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use simple_sdn::{parse_document, SdnValue};
+
 use crate::bug_db::{
     add_bug, generate_bug_report, load_bug_db, save_bug_db, update_bug_status, mark_bug_fixed, BugStatus, Priority,
     Severity,
@@ -23,6 +25,11 @@ use crate::task_db::{generate_task_docs, load_task_db};
 use crate::test_db::{generate_test_result_docs, load_test_db};
 use crate::todo_db::{generate_todo_docs, load_todo_db, save_todo_db, update_todo_db_incremental_parallel};
 
+const TRACKING_FEATURE_DB: &str = "doc/08_tracking/feature/feature_db.sdn";
+const TRACKING_BUG_DB: &str = "doc/08_tracking/bug/bug_db.sdn";
+const TRACKING_TASK_DB: &str = "doc/08_tracking/task/task_db.sdn";
+const TRACKING_TODO_DB: &str = "doc/08_tracking/todo/todo_db.sdn";
+
 /// Run feature-gen command
 pub fn run_feature_gen(args: &[String]) -> i32 {
     let db_path = args
@@ -30,14 +37,14 @@ pub fn run_feature_gen(args: &[String]) -> i32 {
         .position(|a| a == "--db")
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("doc/feature/feature_db.sdn"));
+        .unwrap_or_else(|| PathBuf::from("doc/08_tracking/feature/feature_db.sdn"));
 
     let output_dir = args
         .iter()
         .position(|a| a == "-o" || a == "--output")
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("doc/feature"));
+        .unwrap_or_else(|| PathBuf::from("doc/08_tracking/feature"));
 
     println!("Generating feature docs from {}...", db_path.display());
 
@@ -57,9 +64,290 @@ pub fn run_feature_gen(args: &[String]) -> i32 {
     let count = db.records.values().filter(|r| r.valid).count();
     println!("Generated docs for {} features", count);
     println!("  -> {}/feature.md", output_dir.display());
-    println!("  -> {}/category/*.md", output_dir.display());
+    println!("  -> {}/request_feature.md", output_dir.display());
+    println!("  -> {}/current_feature.md", output_dir.display());
+    println!("  -> {}/done_feature.md", output_dir.display());
 
     0
+}
+
+/// Run tracking export/import/sync/check command.
+pub fn run_tracking(args: &[String]) -> i32 {
+    let command = args
+        .iter()
+        .filter(|arg| arg.as_str() != "tracking")
+        .find(|arg| !arg.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("export");
+    let target = parse_named_arg(args, "target").unwrap_or_else(|| "github".to_string());
+    let kind = parse_named_arg(args, "kind").unwrap_or_else(|| "all".to_string());
+    let format = parse_named_arg(args, "format").unwrap_or_else(|| "markdown".to_string());
+
+    match command {
+        "export" => {
+            if format == "json" {
+                println!(
+                    "{{\"command\":\"tracking\",\"target\":\"{}\",\"kind\":\"{}\",\"feature_rows\":{},\"bug_rows\":{},\"task_rows\":{},\"todo_rows\":{}}}",
+                    json_escape(&target),
+                    json_escape(&kind),
+                    count_table_rows(TRACKING_FEATURE_DB, "features"),
+                    count_table_rows(TRACKING_BUG_DB, "bugs") + count_table_rows(TRACKING_BUG_DB, "bugs_active"),
+                    count_table_rows(TRACKING_TASK_DB, "tasks"),
+                    count_table_rows(TRACKING_TODO_DB, "todos")
+                );
+            } else {
+                println!("# Tracking Export\n");
+                println!("- Target: {}", target);
+                println!("- Kind: {}", kind);
+                println!("- Source: local SDN/text databases\n");
+                println!("| Kind | Database | Rows | External mapping |");
+                println!("|------|----------|------|------------------|");
+                if kind == "all" || kind == "feature" {
+                    println!("| feature | `{}` | {} | GitHub issue/project fields via external_* columns |", TRACKING_FEATURE_DB, count_table_rows(TRACKING_FEATURE_DB, "features"));
+                }
+                if kind == "all" || kind == "bug" {
+                    println!("| bug | `{}` | {} | GitHub issue labels severity/status |", TRACKING_BUG_DB, count_table_rows(TRACKING_BUG_DB, "bugs") + count_table_rows(TRACKING_BUG_DB, "bugs_active"));
+                }
+                if kind == "all" || kind == "task" {
+                    println!("| task | `{}` | {} | GitHub issue or project item |", TRACKING_TASK_DB, count_table_rows(TRACKING_TASK_DB, "tasks"));
+                }
+                if kind == "all" || kind == "todo" {
+                    println!("| todo | `{}` | {} | GitHub issue only when linked |", TRACKING_TODO_DB, count_table_rows(TRACKING_TODO_DB, "todos"));
+                }
+            }
+            0
+        }
+        "import" => {
+            println!("tracking import: no network side effects are run by default");
+            println!("target={} kind={}", target, kind);
+            0
+        }
+        "sync" => {
+            println!("tracking sync: explicit GitHub/task-system sync entrypoint");
+            println!("target={} kind={}", target, kind);
+            println!("Local DB rows remain source-of-truth for offline work; external IDs are stored in external_* columns.");
+            0
+        }
+        "check" => {
+            let issues = if kind == "all" || kind == "feature" {
+                count_done_traceability_issues(TRACKING_FEATURE_DB)
+            } else {
+                0
+            };
+            if issues == 0 {
+                println!("tracking: clean");
+                0
+            } else {
+                eprintln!("tracking: {} done feature(s) missing required pipeline artifacts", issues);
+                1
+            }
+        }
+        _ => {
+            eprintln!("Unknown tracking command: {}", command);
+            eprintln!("Usage: simple tracking <export|import|sync|check> [--target=github] [--kind=feature]");
+            1
+        }
+    }
+}
+
+/// Lightweight database sanity check used by hooks.
+pub fn run_check_dbs(args: &[String]) -> i32 {
+    let strict = args.iter().any(|arg| arg == "--strict");
+    let mut issues = 0usize;
+    for (name, path, table) in [
+        ("bug", TRACKING_BUG_DB, "bugs"),
+        ("feature", TRACKING_FEATURE_DB, "features"),
+        ("task", TRACKING_TASK_DB, "tasks"),
+        ("todo", TRACKING_TODO_DB, "todos"),
+        ("test", "doc/08_tracking/test/test_db.sdn", "strings"),
+    ] {
+        if count_table_rows(path, table) == 0 && !table_exists(path, table) {
+            eprintln!("check-dbs: {} missing or invalid table {} in {}", name, table, path);
+            issues += 1;
+        } else {
+            println!("check-dbs: {} ok", name);
+        }
+    }
+    if strict {
+        let feature_issues = count_done_traceability_issues(TRACKING_FEATURE_DB);
+        if feature_issues > 0 {
+            eprintln!("check-dbs: {} done feature(s) missing required pipeline artifacts", feature_issues);
+            issues += feature_issues;
+        }
+    }
+    if issues == 0 {
+        println!("check-dbs: clean");
+        0
+    } else {
+        1
+    }
+}
+
+/// Lightweight traceability gate for hooks.
+pub fn run_traceability_check(_args: &[String]) -> i32 {
+    let spec_count = count_doc06_executable_specs();
+    if spec_count > 0 {
+        eprintln!(
+            "traceability-check: doc/06_spec contains {} executable *_spec.spl file(s)",
+            spec_count
+        );
+        return 1;
+    }
+    let feature_issues = count_done_traceability_issues(TRACKING_FEATURE_DB);
+    if feature_issues > 0 {
+        eprintln!(
+            "traceability-check: {} done feature(s) missing required pipeline artifacts",
+            feature_issues
+        );
+        return 1;
+    }
+    println!("traceability: clean");
+    0
+}
+
+fn parse_named_arg(args: &[String], name: &str) -> Option<String> {
+    let prefix = format!("--{}=", name);
+    for (idx, arg) in args.iter().enumerate() {
+        if let Some(value) = arg.strip_prefix(&prefix) {
+            return Some(value.to_string());
+        }
+        if arg == &format!("--{}", name) {
+            if let Some(value) = args.get(idx + 1) {
+                return Some(value.clone());
+            }
+        }
+    }
+    None
+}
+
+fn count_table_rows(path: &str, table_name: &str) -> usize {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(_) => return 0,
+    };
+    let doc = match parse_document(&content) {
+        Ok(doc) => doc,
+        Err(_) => return 0,
+    };
+    let root = doc.root();
+    let table = match root {
+        SdnValue::Dict(dict) => dict.get(table_name),
+        _ => None,
+    };
+    match table {
+        Some(SdnValue::Table { rows, .. }) => rows.len(),
+        _ => 0,
+    }
+}
+
+fn table_exists(path: &str, table_name: &str) -> bool {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(_) => return false,
+    };
+    let doc = match parse_document(&content) {
+        Ok(doc) => doc,
+        Err(_) => return false,
+    };
+    let root = doc.root();
+    let table = match root {
+        SdnValue::Dict(dict) => dict.get(table_name),
+        _ => None,
+    };
+    matches!(table, Some(SdnValue::Table { .. }))
+}
+
+fn count_doc06_executable_specs() -> usize {
+    fn walk(path: &Path, count: &mut usize) {
+        let entries = match fs::read_dir(path) {
+            Ok(entries) => entries,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, count);
+            } else if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.ends_with("_spec.spl"))
+                .unwrap_or(false)
+            {
+                *count += 1;
+            }
+        }
+    }
+    let mut count = 0usize;
+    walk(Path::new("doc/06_spec"), &mut count);
+    count
+}
+
+fn count_done_traceability_issues(path: &str) -> usize {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(_) => return 1,
+    };
+    let doc = match parse_document(&content) {
+        Ok(doc) => doc,
+        Err(_) => return 1,
+    };
+    let root = doc.root();
+    let table = match root {
+        SdnValue::Dict(dict) => dict.get("features"),
+        _ => None,
+    };
+    let (fields, rows) = match table {
+        Some(SdnValue::Table { fields: Some(fields), rows, .. }) => (fields, rows),
+        _ => return 1,
+    };
+    let required = [
+        "requirement",
+        "research",
+        "plan",
+        "architecture",
+        "design",
+        "system_spec",
+        "spec_doc",
+        "implementation",
+    ];
+    let mut issues = 0usize;
+    for row in rows {
+        let mut map = std::collections::BTreeMap::new();
+        for (idx, field) in fields.iter().enumerate() {
+            if let Some(value) = row.get(idx) {
+                map.insert(field.as_str(), sdn_doc_value_to_string(value));
+            }
+        }
+        if map.get("valid").map(|v| v == "false").unwrap_or(false) {
+            continue;
+        }
+        if map.get("status").map(|v| v.as_str()) != Some("done") {
+            continue;
+        }
+        if required.iter().any(|field| is_blank_tracking_value(map.get(field).map(|s| s.as_str()).unwrap_or(""))) {
+            issues += 1;
+        }
+    }
+    issues
+}
+
+fn is_blank_tracking_value(value: &str) -> bool {
+    value.is_empty() || value == "none" || value == "tbd" || value == "-"
+}
+
+fn sdn_doc_value_to_string(value: &SdnValue) -> String {
+    match value {
+        SdnValue::Null => "".to_string(),
+        SdnValue::Bool(b) => b.to_string(),
+        SdnValue::Int(i) => i.to_string(),
+        SdnValue::Float(f) => f.to_string(),
+        SdnValue::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn json_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 /// Run task-gen command
@@ -69,14 +357,14 @@ pub fn run_task_gen(args: &[String]) -> i32 {
         .position(|a| a == "--db")
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("doc/task/task_db.sdn"));
+        .unwrap_or_else(|| PathBuf::from("doc/08_tracking/task/task_db.sdn"));
 
     let output_dir = args
         .iter()
         .position(|a| a == "-o" || a == "--output")
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("doc/task"));
+        .unwrap_or_else(|| PathBuf::from("doc/08_tracking/task"));
 
     println!("Generating task docs from {}...", db_path.display());
 
@@ -331,7 +619,7 @@ pub fn run_todo_scan(args: &[String]) -> i32 {
         .position(|a| a == "--db")
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("doc/todo/todo_db.sdn"));
+        .unwrap_or_else(|| PathBuf::from("doc/08_tracking/todo/todo_db.sdn"));
 
     let scan_path = args
         .iter()
@@ -410,7 +698,7 @@ pub fn run_todo_gen(args: &[String]) -> i32 {
         .position(|a| a == "--db")
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("doc/todo/todo_db.sdn"));
+        .unwrap_or_else(|| PathBuf::from("doc/08_tracking/todo/todo_db.sdn"));
 
     let output_dir = args
         .iter()
@@ -486,7 +774,7 @@ pub fn run_bug_add(args: &[String]) -> i32 {
         .position(|a| a == "--db")
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("doc/bug/bug_db.sdn"));
+        .unwrap_or_else(|| PathBuf::from("doc/08_tracking/bug/bug_db.sdn"));
 
     // Parse arguments
     let bug_id = match args.iter().position(|a| a == "--id").and_then(|i| args.get(i + 1)) {
@@ -588,14 +876,14 @@ pub fn run_bug_gen(args: &[String]) -> i32 {
         .position(|a| a == "--db")
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("doc/bug/bug_db.sdn"));
+        .unwrap_or_else(|| PathBuf::from("doc/08_tracking/bug/bug_db.sdn"));
 
     let output_dir = args
         .iter()
         .position(|a| a == "-o" || a == "--output")
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("doc/bug"));
+        .unwrap_or_else(|| PathBuf::from("doc/08_tracking/bug"));
 
     println!("Generating bug report from {}...", db_path.display());
 
@@ -626,7 +914,7 @@ pub fn run_bug_update(args: &[String]) -> i32 {
         .position(|a| a == "--db")
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("doc/bug/bug_db.sdn"));
+        .unwrap_or_else(|| PathBuf::from("doc/08_tracking/bug/bug_db.sdn"));
 
     let bug_id = match args.iter().position(|a| a == "--id").and_then(|i| args.get(i + 1)) {
         Some(id) => id,
@@ -741,12 +1029,12 @@ pub fn print_doc_gen_help() {
     eprintln!("  --verified-by <ids>      Comma-separated test IDs that verify fix");
     eprintln!();
     eprintln!("Defaults:");
-    eprintln!("  feature-gen:     doc/feature/feature_db.sdn -> doc/feature/");
-    eprintln!("  task-gen:        doc/task/task_db.sdn -> doc/task/");
+    eprintln!("  feature-gen:     doc/08_tracking/feature/feature_db.sdn -> doc/08_tracking/feature/");
+    eprintln!("  task-gen:        doc/08_tracking/task/task_db.sdn -> doc/08_tracking/task/");
     eprintln!("  spec-gen:        tests/spec/ -> doc/06_spec/");
-    eprintln!("  todo-scan:       . -> doc/todo/todo_db.sdn");
-    eprintln!("  todo-gen:        doc/todo/todo_db.sdn -> doc/TODO.md");
+    eprintln!("  todo-scan:       . -> doc/08_tracking/todo/todo_db.sdn");
+    eprintln!("  todo-gen:        doc/08_tracking/todo/todo_db.sdn -> doc/TODO.md");
     eprintln!("  test-result-gen: doc/08_tracking/test/test_db.sdn -> doc/08_tracking/test/");
-    eprintln!("  bug-add/update:  doc/bug/bug_db.sdn");
-    eprintln!("  bug-gen:         doc/bug/bug_db.sdn -> doc/bug/");
+    eprintln!("  bug-add/update:  doc/08_tracking/bug/bug_db.sdn");
+    eprintln!("  bug-gen:         doc/08_tracking/bug/bug_db.sdn -> doc/08_tracking/bug/");
 }

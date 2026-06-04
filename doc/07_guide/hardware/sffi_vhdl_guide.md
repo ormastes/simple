@@ -130,7 +130,7 @@ fn adder(a: i32, b: i32) -> i32:
     a + b
 ```
 
-**Hardware subset rules** (full reference: `doc/04_architecture/vhdl_hardware_subset_contract.md`):
+**Hardware subset rules** (full reference: `doc/04_architecture/hardware/vhdl_hardware_subset_contract.md`):
 
 | Allowed | NOT allowed |
 |---------|-------------|
@@ -538,8 +538,8 @@ current placeholder stubs in `riscv_fpga_linux.spl:write_stub_rtl()`.
 | `doc/07_guide/ffi/sffi.md` | Software SFFI (C/C++/Rust) |
 | `doc/07_guide/hardware/simple_generated_fpga_rtl.md` | FPGA bundle generation |
 | `doc/07_guide/hardware/xilinx_fpga_board_bringup.md` | Board bringup workflow |
-| `doc/04_architecture/vhdl_hardware_subset_contract.md` | Full hardware subset spec |
-| `doc/04_architecture/riscv_architecture.md` | RISC-V system architecture |
+| `doc/04_architecture/hardware/vhdl_hardware_subset_contract.md` | Full hardware subset spec |
+| `doc/04_architecture/hardware/riscv_architecture.md` | RISC-V system architecture |
 | `doc/05_design/VHDL_BACKEND_DESIGN.md` | VHDL backend design rationale |
 | `doc/05_design/rtl_riscv_mdsoc_capsules.md` | RTL capsule organization |
 | `doc/07_guide/riscv_guide.md` | RISC-V comprehensive guide |

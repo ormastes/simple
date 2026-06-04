@@ -441,7 +441,7 @@ Users get performance improvements with zero code changes.
    - Configuration tests
    - Execution strategy tests
 
-3. **`doc/04_architecture/jit_interpreter_integration.md`** (650 lines)
+3. **`doc/04_architecture/runtime/jit_interpreter_integration.md`** (650 lines)
    - Comprehensive architecture documentation
    - Usage examples
    - Troubleshooting guide
@@ -475,7 +475,7 @@ All tasks completed:
    - Same FFI layer
 
 ✅ **Task #4:** Document JIT integration architecture
-   - Created `doc/04_architecture/jit_interpreter_integration.md`
+   - Created `doc/04_architecture/runtime/jit_interpreter_integration.md`
    - Comprehensive examples
    - Troubleshooting guide
 

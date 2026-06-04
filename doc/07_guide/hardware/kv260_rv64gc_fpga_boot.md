@@ -216,7 +216,7 @@ KV260 Simple RV64 FPGA target yet. The current evidence is split this way:
 Existing QEMU evidence is useful as a software baseline, but it must not be
 used to claim physical FPGA web or SSH readiness. Full physical verification is
 tracked as
-`doc/08_tracking/feature_request/kv260_simple_rv64_network_verification_2026-05-29.md`.
+`doc/08_tracking/feature/kv260_simple_rv64_network_verification_2026-05-29.md`.
 
 The required physical verification should produce all of these artifacts:
 

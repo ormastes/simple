@@ -1,6 +1,8 @@
 # doc/ Manifest
 
-Project documentation organized by numbered categories.
+Project documentation organized by numbered phases (MDSOC primary axis).
+Each phase uses a unified feature-domain taxonomy as secondary axis:
+`language/`, `compiler/`, `lib/`, `app/`, `os/`, `hardware/`, `platform/`, `runtime/`, `ui/`, `ml/`, `infra/`
 
 ## Allowed Entries
 

@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-11  
 **Status:** Draft  
-**Source:** Research in `doc/01_research/local/ssh_serial_transport.md` and `doc/01_research/domain/ssh_serial_transport.md`
+**Source:** Research in `doc/01_research/hardware/ssh_serial_transport.md` and `doc/01_research/hardware/ssh_serial_transport.md`
 
 ---
 

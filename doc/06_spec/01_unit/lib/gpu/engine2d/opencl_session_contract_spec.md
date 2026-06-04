@@ -61,7 +61,7 @@ expect(session.is_valid()).to_equal(false)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -76,6 +76,9 @@ expect(session.set_kernel_arg_i64(1, 0, 1)).to_equal(false)
 expect(session.set_kernel_arg_buffer(1, 0, 1)).to_equal(false)
 expect(session.synchronize()).to_equal(1)
 expect(session.launch_kernel("simple_2d_fill_u32", 1, 1, 1, 1)).to_equal(1)
+expect(session.launch_fill_u32(1, 4, 4, 0xff112233 as i64)).to_equal(1)
+expect(session.launch_rect_filled_u32(1, 4, 4, 1, 1, 2, 2, 0xff445566 as i64)).to_equal(1)
+expect(session.launch_rect_outline_u32(1, 4, 4, 0, 0, 4, 4, 0xff778899 as i64)).to_equal(1)
 expect(session.fill_kernel(64, 64, 4096)).to_equal(1)
 expect(session.copy_kernel(64, 64, 4096)).to_equal(1)
 expect(session.alpha_blend_kernel(64, 64, 4096)).to_equal(1)
@@ -182,13 +185,18 @@ expect(session.kernel_cache).to_equal(0)
    - Expected: session.read_buffer(1, 1, 16) is false
    - Expected: session.set_kernel_arg_i64(1, -1, 1) is false
    - Expected: session.set_kernel_arg_buffer(1, 0, 0) is false
+   - Expected: session.launch_fill_u32(0, 4, 4, 1) equals `1`
+   - Expected: session.launch_fill_u32(1, 0, 4, 1) equals `1`
+   - Expected: session.launch_rect_filled_u32(0, 4, 4, 1, 1, 2, 2, 1) equals `1`
+   - Expected: session.launch_rect_filled_u32(1, 4, 4, 1, 1, 0, 2, 1) equals `1`
+   - Expected: session.launch_rect_outline_u32(1, 4, 4, 1, 1, 2, 0, 1) equals `1`
    - Expected: session.generation equals `generation_before`
 
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -208,6 +216,11 @@ expect(session.write_buffer(1, 1, 16)).to_equal(false)
 expect(session.read_buffer(1, 1, 16)).to_equal(false)
 expect(session.set_kernel_arg_i64(1, -1, 1)).to_equal(false)
 expect(session.set_kernel_arg_buffer(1, 0, 0)).to_equal(false)
+expect(session.launch_fill_u32(0, 4, 4, 1)).to_equal(1)
+expect(session.launch_fill_u32(1, 0, 4, 1)).to_equal(1)
+expect(session.launch_rect_filled_u32(0, 4, 4, 1, 1, 2, 2, 1)).to_equal(1)
+expect(session.launch_rect_filled_u32(1, 4, 4, 1, 1, 0, 2, 1)).to_equal(1)
+expect(session.launch_rect_outline_u32(1, 4, 4, 1, 1, 2, 0, 1)).to_equal(1)
 expect(session.generation).to_equal(generation_before)
 ```
 

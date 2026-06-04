@@ -48,7 +48,7 @@ The implementation spans the full compiler pipeline: frontend attribute parsing,
 |------|-------------|
 | `doc/02_requirements/feature/usage/sffi_bidirectional_interop.md` | 12 functional requirements (REQ-SFFI-BIDIR001 through BIDIR012) |
 | `doc/02_requirements/nfr/sffi_bidirectional_interop.md` | 4 non-functional requirements (NFR-SFFI-001 through 004) |
-| `doc/04_architecture/sffi_bidirectional_interop.md` | Component architecture, data flow, three-tier SFFI model |
+| `doc/04_architecture/platform/sffi_bidirectional_interop.md` | Component architecture, data flow, three-tier SFFI model |
 | `doc/05_design/sffi_bidirectional_interop.md` | Detailed design: attribute syntax, wrapper patterns, header format, linker flags |
 | `doc/09_report/2026/03/sffi_bidirectional_doc_consistency_2026-03-28.md` | Cross-reference and terminology audit (15 issues found, all errors fixed) |
 
@@ -163,7 +163,7 @@ Data flows from `@export("C")` annotation at the frontend through every intermed
 | Plan | `.claude/plans/parsed-questing-goose.md` |
 | Requirements | `doc/02_requirements/feature/usage/sffi_bidirectional_interop.md` |
 | NFR | `doc/02_requirements/nfr/sffi_bidirectional_interop.md` |
-| Architecture | `doc/04_architecture/sffi_bidirectional_interop.md` |
+| Architecture | `doc/04_architecture/platform/sffi_bidirectional_interop.md` |
 | Design | `doc/05_design/sffi_bidirectional_interop.md` |
 | Doc Consistency Audit | `doc/09_report/2026/03/sffi_bidirectional_doc_consistency_2026-03-28.md` |
 | SFFI External Library Pattern | `doc/05_design/sffi_external_library_pattern.md` |

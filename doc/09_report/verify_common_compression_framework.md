@@ -1,6 +1,6 @@
 === Verification Report: common_compression_framework ===
 
-[PASS] doc/04_architecture/common_compression_framework.md:1 — architecture
+[PASS] doc/04_architecture/lib/common_compression_framework.md:1 — architecture
 describes the currently landed compression subset rather than the older
 full-scope target.
 [PASS] doc/05_design/common_compression_framework.md:1 — design documents the
@@ -34,7 +34,7 @@ design.
 lane is not part of the focused closure gate, and prior fresh runs in this
 session family reported stalls after the first four passing cases. Do not cite
 it as a green gate until it is re-stabilized.
-[WARN] doc/01_research/local/common_compression_framework.md:1 — the research
+[WARN] doc/01_research/lib/common_compression_framework.md:1 — the research
 artifact still captures the original full-completion intent and should be read
 as background, not as current support documentation.
 

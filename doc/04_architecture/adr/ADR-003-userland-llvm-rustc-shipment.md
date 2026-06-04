@@ -4,7 +4,7 @@
 **Status:** Accepted
 **Supersedes:** the implicit "Simple binary only" stance recorded in
 `doc/02_requirements/feature/app/bootstrap.md` and the bootstrap-strategy
-research note `doc/01_research/local/bootstrap_strategy_research_2026-02-23.md`.
+research note `doc/01_research/compiler/bootstrap_strategy_research_2026-02-23.md`.
 
 ## Context
 
@@ -110,9 +110,9 @@ LLVM/rustc binaries are physically shipped in the OS image.
 ## References
 
 - Implementation plan: `~/.claude/plans/complete-porting-llvm-rust-reactive-cosmos.md`
-- Frozen contracts: `doc/04_architecture/simpleos_interfaces.md`
+- Frozen contracts: `doc/04_architecture/os/simpleos_interfaces.md`
 - Bootstrap requirement (amended in this cycle):
   `doc/02_requirements/feature/app/bootstrap.md`
-- Prior ADR (still in effect): `doc/04_architecture/adr_rust_llvm_exclusion.md`
+- Prior ADR (still in effect): `doc/04_architecture/compiler/adr_rust_llvm_exclusion.md`
 - TLS prerequisite (must land before Wave 2 syscalls):
   `doc/03_plan/agent_tasks/tls_live_bug_fix_restart.md`

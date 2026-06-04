@@ -4,8 +4,8 @@
 **Date:** 2026-05-05
 **Status:** User-selected phased sequence.
 **Selection:** A -> B -> C -> D.
-**Research:** `doc/01_research/local/science_math_lib_set.md`, `doc/01_research/domain/science_math_lib_set.md`
-**Design:** `doc/04_architecture/science_math_lib_set.md`, `doc/05_design/science_math_lib_set.md`
+**Research:** `doc/01_research/lib/science_math_lib_set.md`, `doc/01_research/lib/science_math_lib_set.md`
+**Design:** `doc/04_architecture/lib/science_math_lib_set.md`, `doc/05_design/science_math_lib_set.md`
 
 ## Phase A: Scalar Science Core
 

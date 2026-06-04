@@ -23,13 +23,13 @@ Spawn parallel agents:
 - Merge results into research summary
 
 ### Output
-- `doc/01_research/local/<feature>.md`
+- `doc/01_research/<domain>/<feature>.md`
 
 ## Domain Research
 
 ### Tools
 - **Web Search:** Search for external references, API docs, papers
-- **Obsidian CLI:** Search existing `doc/01_research/domain/` for prior work
+- **Obsidian CLI:** Search existing `doc/01_research/` for prior work
 
 ### Workflow
 1. Search existing research docs for prior analysis
@@ -37,12 +37,12 @@ Spawn parallel agents:
 3. Synthesize into research document
 
 ### Output
-- `doc/01_research/domain/<feature>.md`
+- `doc/01_research/<domain>/<feature>.md`
 
 ## Requirement Samples
 
 Generate draft requirement options:
-- Feature requirements -> `doc/02_requirements/feature/<feature>_draft.md`
+- Feature requirements -> `doc/02_requirements/<domain>/<feature>_draft.md`
 - NFR requirements -> `doc/02_requirements/nfr/<feature>_draft.md`
 
 ## Handoff

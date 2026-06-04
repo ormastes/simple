@@ -106,7 +106,7 @@
  
  | FR | File | Requests |
  |----|------|---------|
- | L4 | `doc/08_tracking/feature_request/simd_u32x4_i64x4_intrinsics_2026-05-02.md` | Vec4u32 + Vec4i64 intrinsics; needs new rt_* externs |
+ | L4 | `doc/08_tracking/feature/simd_u32x4_i64x4_intrinsics_2026-05-02.md` | Vec4u32 + Vec4i64 intrinsics; needs new rt_* externs |
  
  ### 3.3 Impact Summary
  
@@ -327,7 +327,7 @@
  
  | File | Status | Area |
  |------|--------|------|
- | `doc/08_tracking/feature_request/simd_u32x4_i64x4_intrinsics_2026-05-02.md` (L4) | Open FR | Vec4u32 + Vec4i64 new externs needed |
+ | `doc/08_tracking/feature/simd_u32x4_i64x4_intrinsics_2026-05-02.md` (L4) | Open FR | Vec4u32 + Vec4i64 new externs needed |
  | Salsa20/20 + HSalsa20 + XSalsa20 FR (`5f6b7c6b0e`) | Open FR | NaCl-compatible Salsa suite |
  
  ---

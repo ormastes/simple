@@ -1,6 +1,6 @@
 //! SIMD AES round intrinsics (Phase 2 of the SIMD int-intrinsics feature).
 //!
-//! Phase 2 of `doc/08_tracking/feature_request/simd_int_intrinsics_for_crypto_2026-05-01.md`.
+//! Phase 2 of `doc/08_tracking/feature/simd_int_intrinsics_for_crypto_2026-05-01.md`.
 //!
 //! Exposes round-level primitives `aes_round_u8x16` and `aes_round_last_u8x16`
 //! plus `extern "C"` symbols `rt_simd_aes_round_u8x16` and

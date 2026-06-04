@@ -12,7 +12,8 @@ use common.ui.widget.{UITree, UIState, UIEvent, WidgetNode, WidgetRect, widget_s
 use common.ui.widget.{UIMode}
 use common.layout.box_model.{LayoutBox, BoxKind, BoxModel}
 use common.ui.semantic_contract.{SEMANTIC_UI_STAGE_RENDERER, SEMANTIC_UI_STATUS_AVAILABLE, SemanticUiSnapshot, semantic_ui_snapshot_from_state_with_capabilities, semantic_ui_snapshot_to_json}
-use common.ui.web_render_api.{WEB_RENDER_TARGET_PURE_SIMPLE, WebRenderHostWindowCommand, WebRenderPatchEnvelope, WebRenderRequest, WebRenderSnapshotEnvelope, web_render_body_html, web_render_full_html, web_render_capabilities_for_target, web_render_host_window_command_to_json, web_render_input_envelope_from_event, web_render_input_envelope_to_json, web_render_patch_envelope_to_json, web_render_snapshot_envelope_to_json, web_render_optimization_profile}
+use common.ui.semantic_contract.{semantic_ui_snapshot_transport_json}
+use common.ui.web_render_api.{WEB_RENDER_TARGET_PURE_SIMPLE, WebRenderHostWindowCommand, WebRenderPatchEnvelope, WebRenderRequest, WebRenderSnapshotEnvelope, web_render_body_html, web_render_full_html, web_render_capabilities_for_target, web_render_host_window_command_to_json, web_render_input_envelope_from_event, web_render_input_envelope_to_json, web_render_ipc_json_with_html_and_semantic, web_render_patch_envelope_to_json, web_render_snapshot_envelope_to_json, web_render_optimization_profile}
 use app.ui.render.html_widgets.{render_html_tree}
 use app.ui.web.html.{generate_css}
 use app.ui.browser.event_bridge.{translate_key_event, translate_mouse_event, hit_test}
@@ -20,6 +21,13 @@ use std.gc_async_mut.ui.web_render_pixel_backend.{web_render_html_request_to_pix
 
 # Runtime SFFI for snapshot writing (P3 ASCII PPM)
 extern fn rt_file_write_text(path: text, content: text) -> bool
+
+fn browser_semantic_render_ipc_json(state: UIState, viewport_w: i32, viewport_h: i32) -> text:
+    val theme = state.tree.theme_name()
+    val css = generate_css(theme)
+    val body_html = render_html_tree(state.tree.root_node(), state)
+    val req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "", body_html, css, "", viewport_w, viewport_h)
+    web_render_ipc_json_with_html_and_semantic(req, web_render_full_html(req), semantic_ui_snapshot_to_json(browser_semantic_snapshot(state)))
 
 # =========================================================================
 # Framebuffer — CPU-side pixel buffer for software and GPU readback
@@ -289,6 +297,15 @@ class BrowserBackend:
 
     fn host_window_command_json(cmd: WebRenderHostWindowCommand) -> text:
         web_render_host_window_command_to_json(cmd)
+
+    fn semantic_snapshot_json(state: UIState) -> text:
+        semantic_ui_snapshot_to_json(browser_semantic_snapshot(state))
+
+    fn semantic_snapshot_envelope_json(state: UIState, surface_id: text, revision: u64) -> text:
+        semantic_ui_snapshot_transport_json(WEB_RENDER_TARGET_PURE_SIMPLE, surface_id, revision, browser_semantic_snapshot(state))
+
+    fn semantic_render_ipc_json(state: UIState) -> text:
+        browser_semantic_render_ipc_json(state, self.viewport_width(), self.viewport_height())
 
     me resize(w: i32, h: i32):
         """Resize the framebuffer."""

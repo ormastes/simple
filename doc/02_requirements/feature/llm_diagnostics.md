@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-06
 **Feature:** llm_diagnostics
-**Research:** `doc/01_research/local/llm_diagnostics.md`
+**Research:** `doc/01_research/ml/llm_diagnostics.md`
 **Priority:** High (foundation for LLM dashboard)
 
 ---

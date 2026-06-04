@@ -1,0 +1,210 @@
+# Tracking sync/export/import command
+
+use std.cli.cli_util.{get_cli_args, parse_csv_fields}
+use std.cli.log_modes.{parse_log_options, log_options_help}
+use app.io.mod.{file_exists, file_read}
+use std.log.{error}
+
+val FEATURE_DB_PATH = "doc/08_tracking/feature/feature_db.sdn"
+val BUG_DB_PATH = "doc/08_tracking/bug/bug_db.sdn"
+val TASK_DB_PATH = "doc/08_tracking/task/task_db.sdn"
+val TODO_DB_PATH = "doc/08_tracking/todo/todo_db.sdn"
+
+fn print_help():
+    print "Usage: simple tracking <export|import|sync|check> [options]"
+    print ""
+    print "Local tracking stays in SDN/text DBs. GitHub is the primary external target;"
+    print "other task systems can consume the same JSON/Markdown export shape."
+    print ""
+    print "Options:"
+    print "  --target=<name>    github (default) or generic"
+    print "  --kind=<name>      all (default), bug, feature, task, todo"
+    print "  --format=<name>    markdown (default) or json"
+    for line in log_options_help():
+        print "  {line}"
+    print "  -h, --help         Show this help"
+
+fn _is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn _json_escape(value: text) -> text:
+    val slashes = value.replace("\\", "\\\\")
+    val quotes = slashes.replace("\"", "\\\"")
+    quotes.replace("\n", "\\n")
+
+fn parse_flag(args: [text], name: text, fallback: text) -> text:
+    val prefix = "--{name}="
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg.starts_with(prefix):
+            return arg[prefix.len():]
+        if arg == "--{name}" and i + 1 < args.len():
+            return args[i + 1]
+        i = i + 1
+    fallback
+
+fn first_command(args: [text]) -> text:
+    for arg in args:
+        if arg == "-h" or arg == "--help":
+            return "help"
+        if _is_log_option(arg):
+            continue
+        if not arg.starts_with("--"):
+            return arg
+    "export"
+
+fn table_count(path: text, table_name: text) -> i64:
+    if not file_exists(path):
+        return 0
+    val content = file_read(path)
+    val lines = content.split("\n")
+    var in_table = false
+    var count = 0
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("{table_name} |"):
+            in_table = true
+            continue
+        if not in_table or trimmed == "" or trimmed.starts_with("#"):
+            if in_table and trimmed != "" and not trimmed.starts_with("#") and not trimmed.starts_with(" "):
+                in_table = false
+            continue
+        val fields = parse_csv_fields(trimmed)
+        if fields.len() > 0:
+            count = count + 1
+    count
+
+fn is_blank_artifact(value: text) -> bool:
+    value == "" or value == "none" or value == "tbd" or value == "-"
+
+fn done_traceability_issue_count() -> i64:
+    if not file_exists(FEATURE_DB_PATH):
+        return 1
+    val content = file_read(FEATURE_DB_PATH)
+    val lines = content.split("\n")
+    var in_table = false
+    var issues = 0
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("features |"):
+            in_table = true
+            continue
+        if not in_table or trimmed == "" or trimmed.starts_with("#"):
+            if in_table and trimmed != "" and not trimmed.starts_with("#") and not trimmed.starts_with(" "):
+                in_table = false
+            continue
+        val fields = parse_csv_fields(trimmed)
+        if fields.len() >= 27 and fields[26] == "true" and fields[6] == "done":
+            if is_blank_artifact(fields[9]) or is_blank_artifact(fields[10]) or is_blank_artifact(fields[11]) or
+                is_blank_artifact(fields[12]) or is_blank_artifact(fields[13]) or is_blank_artifact(fields[14]) or
+                is_blank_artifact(fields[15]) or is_blank_artifact(fields[16]):
+                issues = issues + 1
+    issues
+
+fn print_tracking_check(kind: text) -> i64:
+    var issues = 0
+    if kind == "all" or kind == "feature":
+        val feature_issues = done_traceability_issue_count()
+        issues = issues + feature_issues
+        if feature_issues == 0:
+            print "feature tracking: done traceability clean"
+        else:
+            print "feature tracking: {feature_issues} done feature(s) missing required pipeline artifacts"
+    if issues == 0:
+        print "tracking: clean"
+        return 0
+    print "tracking: {issues} issue(s)"
+    1
+
+fn print_markdown_export(target: text, kind: text):
+    print "# Tracking Export"
+    print ""
+    print "- Target: {target}"
+    print "- Kind: {kind}"
+    print "- Source: local SDN/text databases"
+    print ""
+    print "| Kind | Database | Rows | External mapping |"
+    print "|------|----------|------|------------------|"
+    if kind == "all" or kind == "feature":
+        print "| feature | `{FEATURE_DB_PATH}` | {table_count(FEATURE_DB_PATH, \"features\")} | GitHub issue/project fields via external_* columns |"
+    if kind == "all" or kind == "bug":
+        print "| bug | `{BUG_DB_PATH}` | {table_count(BUG_DB_PATH, \"bugs\") + table_count(BUG_DB_PATH, \"bugs_active\")} | GitHub issue labels severity/status |"
+    if kind == "all" or kind == "task":
+        print "| task | `{TASK_DB_PATH}` | {table_count(TASK_DB_PATH, \"tasks\")} | GitHub issue or project item |"
+    if kind == "all" or kind == "todo":
+        print "| todo | `{TODO_DB_PATH}` | {table_count(TODO_DB_PATH, \"todos\")} | GitHub issue only when issue/external field is set |"
+    print ""
+
+fn print_json_export(target: text, kind: text):
+    print "{"
+    print "  \"command\": \"tracking\","
+    print "  \"target\": \"{_json_escape(target)}\","
+    print "  \"kind\": \"{_json_escape(kind)}\","
+    print "  \"databases\": ["
+    var first = true
+    if kind == "all" or kind == "feature":
+        print "    {\"kind\":\"feature\",\"path\":\"{FEATURE_DB_PATH}\",\"rows\":{table_count(FEATURE_DB_PATH, \"features\")}}"
+        first = false
+    if kind == "all" or kind == "bug":
+        val comma = if first: "" else: ","
+        print "{comma}    {\"kind\":\"bug\",\"path\":\"{BUG_DB_PATH}\",\"rows\":{table_count(BUG_DB_PATH, \"bugs\") + table_count(BUG_DB_PATH, \"bugs_active\")}}"
+        first = false
+    if kind == "all" or kind == "task":
+        val comma = if first: "" else: ","
+        print "{comma}    {\"kind\":\"task\",\"path\":\"{TASK_DB_PATH}\",\"rows\":{table_count(TASK_DB_PATH, \"tasks\")}}"
+        first = false
+    if kind == "all" or kind == "todo":
+        val comma = if first: "" else: ","
+        print "{comma}    {\"kind\":\"todo\",\"path\":\"{TODO_DB_PATH}\",\"rows\":{table_count(TODO_DB_PATH, \"todos\")}}"
+    print "  ]"
+    print "}"
+
+fn main() -> i64:
+    val args = get_cli_args()
+    val log_opts = parse_log_options(args)
+    if not log_opts.valid:
+        error("tracking", log_opts.error)
+        return 1
+
+    val command = first_command(args)
+    if command == "help":
+        print_help()
+        return 0
+
+    val target = parse_flag(args, "target", "github")
+    val kind = parse_flag(args, "kind", "all")
+    var format = parse_flag(args, "format", if log_opts.log_mode == "json": "json" else: "markdown")
+    if format == "":
+        format = "markdown"
+
+    if command == "export":
+        if format == "json":
+            print_json_export(target, kind)
+        else:
+            print_markdown_export(target, kind)
+        return 0
+
+    if command == "import":
+        print "tracking import: no network side effects are run by default"
+        print "target={target} kind={kind}"
+        print "Use the connector/gh adapter to write external IDs back into local DB rows."
+        return 0
+
+    if command == "sync":
+        print "tracking sync: explicit GitHub/task-system sync entrypoint"
+        print "target={target} kind={kind}"
+        print "Local DB rows remain source-of-truth for offline work; external IDs are stored in external_* columns."
+        return 0
+
+    if command == "check":
+        return print_tracking_check(kind)
+
+    print "Unknown tracking command: {command}"
+    print_help()
+    1

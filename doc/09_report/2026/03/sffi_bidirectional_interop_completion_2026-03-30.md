@@ -11,7 +11,7 @@ Implementation and verification were completed against these repo-tracked artifa
 - `doc/05_design/phase4_sffi_implementation_plan.md`
 - `doc/02_requirements/feature/usage/sffi_bidirectional_interop.md`
 - `doc/02_requirements/nfr/sffi_bidirectional_interop.md`
-- `doc/04_architecture/sffi_bidirectional_interop.md`
+- `doc/04_architecture/platform/sffi_bidirectional_interop.md`
 - `doc/05_design/sffi_bidirectional_interop.md`
 
 ## Implemented

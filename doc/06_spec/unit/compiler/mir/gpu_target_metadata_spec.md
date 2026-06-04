@@ -1,8 +1,65 @@
 # Gpu Target Metadata Specification
 
+> <details>
+
+<!-- sdn-diagram:id=gpu_target_metadata_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=gpu_target_metadata_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+gpu_target_metadata_spec -> std
+gpu_target_metadata_spec -> compiler
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=gpu_target_metadata_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 4 | 4 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Gpu Target Metadata Specification
+
 ## Scenarios
 
 ### MIR GPU target metadata
+
+#### lowers frontend-shaped gpu attribute metadata into MIR
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val parsed_attr = parse_function_attrs([make_gpu_source_attr("opencl")])
+val lowerer = MirLowering.new(SymbolTable.new())
+val fn_ = make_mir_function("gpu_kernel")
+
+val result = lowerer.apply_function_attr_to_mir(fn_, parsed_attr)
+
+expect(result.is_kernel).to_equal(true)
+expect(result.gpu_target).to_equal("opencl")
+expect(result.gpu_backend_order).to_equal("opencl")
+```
+
+</details>
 
 #### propagates normalized OpenCL target metadata from function attrs
 
@@ -26,6 +83,28 @@ expect(result.gpu_backend_order).to_equal("opencl")
 
 </details>
 
+#### propagates normalized ROCm target metadata as HIP from function attrs
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val lowerer = MirLowering.new(SymbolTable.new())
+val fn_ = make_mir_function("gpu_kernel")
+val attr = make_gpu_attr("rocm", "")
+
+val result = lowerer.apply_function_attr_to_mir(fn_, attr)
+
+expect(result.is_kernel).to_equal(true)
+expect(result.gpu_target).to_equal("hip")
+expect(result.gpu_backend_order).to_equal("hip")
+```
+
+</details>
+
 #### preserves explicit backend order through MirFunction copies
 
 <details>
@@ -36,7 +115,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val fn_ = make_mir_function("gpu_kernel")
-val attr = make_gpu_attr("auto", "opencl,cuda")
+val attr = make_gpu_attr("auto", "hip,opencl,cuda")
 val lowerer = MirLowering.new(SymbolTable.new())
 val tagged = lowerer.apply_function_attr_to_mir(fn_, attr)
 
@@ -44,7 +123,7 @@ val copied = MirFunction.with_blocks(tagged, [empty_block("replacement")])
 
 expect(copied.is_kernel).to_equal(true)
 expect(copied.gpu_target).to_equal("auto")
-expect(copied.gpu_backend_order).to_equal("opencl,cuda")
+expect(copied.gpu_backend_order).to_equal("hip,opencl,cuda")
 ```
 
 </details>
@@ -68,8 +147,11 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
+
+</details>

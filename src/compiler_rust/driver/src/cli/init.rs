@@ -186,9 +186,11 @@ pub fn cleanup_stale_db_files(metrics: &mut StartupMetrics) {
 
     // Check for stale .sdn.tmp and .cache.tmp files in common database locations
     let db_locations = vec![
-        PathBuf::from("doc/todo"),
-        PathBuf::from("doc/feature"),
-        PathBuf::from("doc/task"),
+        PathBuf::from("doc/08_tracking/todo"),
+        PathBuf::from("doc/08_tracking/feature"),
+        PathBuf::from("doc/08_tracking/task"),
+        PathBuf::from("doc/08_tracking/bug"),
+        PathBuf::from("doc/08_tracking/test"),
         PathBuf::from(".simple"),
     ];
 

@@ -213,4 +213,4 @@ project layout and be built from inside.)
 
 ## See also
 - `editor_jit_run_route_blockers_2026-05-28.md`
-- `feature_request/editor_markdown_editing_subsystem_2026-05-28.md`
+- `feature/editor_markdown_editing_subsystem_2026-05-28.md`

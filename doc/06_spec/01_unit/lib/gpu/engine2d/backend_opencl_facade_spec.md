@@ -43,7 +43,7 @@ backend_opencl_facade_spec -> std
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -53,6 +53,8 @@ expect(source).to_contain("__kernel void simple_2d_fill_u32")
 expect(source).to_contain("__kernel void simple_2d_copy_u32")
 expect(source).to_contain("__kernel void simple_2d_alpha_u32")
 expect(source).to_contain("__kernel void simple_2d_scroll_u32")
+expect(source).to_contain("__kernel void simple_2d_rect_filled_u32")
+expect(source).to_contain("__kernel void simple_2d_rect_outline_u32")
 ```
 
 </details>
@@ -71,17 +73,27 @@ expect(source).to_contain("__kernel void simple_2d_scroll_u32")
    - Expected: backend.last_probe.feature_gate equals `opencl_2d_render`
 
 2. backend clear
-   - Expected: backend.read_pixels().len() equals `16`
+   - Expected: cleared.len() equals `16`
+   - Expected: cleared[0] equals `0xff112233u32`
+   - Expected: cleared[15] equals `0xff112233u32`
+
+3. backend draw rect filled
+   - Expected: filled[0] equals `0xff112233u32`
+   - Expected: filled[5] equals `0xff445566u32`
+   - Expected: filled[6] equals `0xff445566u32`
+   - Expected: filled[9] equals `0xff445566u32`
+   - Expected: filled[10] equals `0xff445566u32`
+   - Expected: filled[15] equals `0xff112233u32`
    - Expected: backend.last_probe.status equals `BackendStatus.Unavailable`
    - Expected: backend.last_probe.has_graphics is false
 
-3. backend shutdown
+4. backend shutdown
 
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -99,7 +111,18 @@ if ok:
     expect(backend.last_probe.status).to_equal(BackendStatus.Initialized)
     expect(backend.last_probe.feature_gate).to_equal("opencl_2d_render")
     backend.clear(0xff112233u32)
-    expect(backend.read_pixels().len()).to_equal(16)
+    val cleared = backend.read_pixels()
+    expect(cleared.len()).to_equal(16)
+    expect(cleared[0]).to_equal(0xff112233u32)
+    expect(cleared[15]).to_equal(0xff112233u32)
+    backend.draw_rect_filled(1, 1, 2, 2, 0xff445566u32)
+    val filled = backend.read_pixels()
+    expect(filled[0]).to_equal(0xff112233u32)
+    expect(filled[5]).to_equal(0xff445566u32)
+    expect(filled[6]).to_equal(0xff445566u32)
+    expect(filled[9]).to_equal(0xff445566u32)
+    expect(filled[10]).to_equal(0xff445566u32)
+    expect(filled[15]).to_equal(0xff112233u32)
 else:
     expect(backend.last_probe.status).to_equal(BackendStatus.Unavailable)
     expect(backend.last_probe.has_graphics).to_equal(false)

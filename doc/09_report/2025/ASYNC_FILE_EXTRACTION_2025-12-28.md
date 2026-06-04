@@ -283,6 +283,6 @@ Successfully extracted async file loading operations from the monolithic `file_i
 - #1769: Progressive prefaulting (#1769)
 
 ## References
-- Architecture: `doc/04_architecture/memory_model_implementation.md`
+- Architecture: `doc/04_architecture/language/memory_model_implementation.md`
 - Specs: `doc/06_spec/` (various)
 - Related Work: File I/O optimization patterns from Mold linker

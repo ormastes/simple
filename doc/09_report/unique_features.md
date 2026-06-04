@@ -243,7 +243,7 @@ Qualification:
 
 Implemented with qualifiers:
 
-- shared UI contract: [`doc/04_architecture/shared_ui_contract.md`](../04_architecture/shared_ui_contract.md)
+- shared UI contract: [`doc/04_architecture/ui/shared_ui_contract.md`](../04_architecture/shared_ui_contract.md)
 - shared UI test client: `src/lib/nogc_sync_mut/ui_test/client.spl` — click, type, submit, drag, focus_next/prev, check_enabled/selected
 - shared test API handler: `src/app/ui.test_api/handler.spl` — Protocol V1, structured error model, versioned responses
 - cross-surface contract suite: `test/03_system/ui/shared_ui_contract_spec.spl` — 21 tests across both surfaces

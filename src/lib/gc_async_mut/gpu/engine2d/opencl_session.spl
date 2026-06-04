@@ -159,7 +159,7 @@ class OpenClSession:
         val kernel = self.ffi.create_kernel(self.program, name)
         if kernel == 0:
             return 1
-        self.kernel_cache = kernel
+        self._cache_kernel(kernel)
         if self.ffi.enqueue_ndrange(self.queue, kernel, gx, gy, 1, lx, ly, 1):
             0
         else:
@@ -204,6 +204,34 @@ class OpenClSession:
         if self.kernel_cache == 0:
             return self._evidence(operation, false, "missing-kernel", "opencl-generated-2d-kernel-create-failed", 0, false, 0, 0)
         self._evidence(operation, false, "submit-failed", "opencl-generated-2d-kernel-submit-failed", self.kernel_cache, false, 0, 0)
+
+    me launch_fill_u32(dst: i64, width: i64, height: i64, color: i64) -> i64:
+        if self.ffi == nil or self.queue == 0 or self.program == 0 or dst == 0 or width <= 0 or height <= 0:
+            return 1
+        val kernel = self.ffi.create_kernel(self.program, "simple_2d_fill_u32")
+        if kernel == 0:
+            return 1
+        self._cache_kernel(kernel)
+        if not self.set_kernel_arg_buffer(kernel, 0, dst):
+            return 1
+        if not self.set_kernel_arg_i64(kernel, 1, width):
+            return 1
+        if not self.set_kernel_arg_i64(kernel, 2, height):
+            return 1
+        if not self.set_kernel_arg_i64(kernel, 3, color):
+            return 1
+        val local_size = 256
+        val global_size = _ceil_div_i64(width * height, local_size)
+        if self.ffi.enqueue_ndrange(self.queue, kernel, global_size, 1, 1, local_size, 1, 1):
+            0
+        else:
+            1
+
+    me launch_rect_filled_u32(dst: i64, surface_width: i64, surface_height: i64, x: i64, y: i64, w: i64, h: i64, color: i64) -> i64:
+        self._launch_rect_u32("simple_2d_rect_filled_u32", dst, surface_width, surface_height, x, y, w, h, color)
+
+    me launch_rect_outline_u32(dst: i64, surface_width: i64, surface_height: i64, x: i64, y: i64, w: i64, h: i64, color: i64) -> i64:
+        self._launch_rect_u32("simple_2d_rect_outline_u32", dst, surface_width, surface_height, x, y, w, h, color)
 
     me fill_kernel(width: i64, height: i64, args_ptr: i64) -> i64:
         self.launch_generated_2d(GENERATED_2D_FILL, width, height, args_ptr)
@@ -279,6 +307,41 @@ class OpenClSession:
         self.ref_count = 0
         self._cleanup()
 
+    me _cache_kernel(kernel: i64):
+        if self.ffi != nil and self.kernel_cache != 0:
+            self.ffi.release_kernel(self.kernel_cache)
+        self.kernel_cache = kernel
+
+    me _launch_rect_u32(name: text, dst: i64, surface_width: i64, surface_height: i64, x: i64, y: i64, w: i64, h: i64, color: i64) -> i64:
+        if self.ffi == nil or self.queue == 0 or self.program == 0 or dst == 0 or surface_width <= 0 or surface_height <= 0 or w <= 0 or h <= 0:
+            return 1
+        val kernel = self.ffi.create_kernel(self.program, name)
+        if kernel == 0:
+            return 1
+        self._cache_kernel(kernel)
+        if not self.set_kernel_arg_buffer(kernel, 0, dst):
+            return 1
+        if not self.set_kernel_arg_i64(kernel, 1, surface_width):
+            return 1
+        if not self.set_kernel_arg_i64(kernel, 2, surface_height):
+            return 1
+        if not self.set_kernel_arg_i64(kernel, 3, x):
+            return 1
+        if not self.set_kernel_arg_i64(kernel, 4, y):
+            return 1
+        if not self.set_kernel_arg_i64(kernel, 5, w):
+            return 1
+        if not self.set_kernel_arg_i64(kernel, 6, h):
+            return 1
+        if not self.set_kernel_arg_i64(kernel, 7, color):
+            return 1
+        val local_size = 256
+        val global_size = _ceil_div_i64(w * h, local_size)
+        if self.ffi.enqueue_ndrange(self.queue, kernel, global_size, 1, 1, local_size, 1, 1):
+            0
+        else:
+            1
+
     me _cleanup():
         if self.ffi != nil:
             if self.kernel_cache != 0:
@@ -314,3 +377,6 @@ class OpenClSession:
             expected_checksum,
             actual_checksum
         )
+
+fn _ceil_div_i64(value: i64, divisor: i64) -> i64:
+    (value + divisor - 1) / divisor

@@ -98,67 +98,46 @@ impl Record for FeatureRecord {
     fn field_names() -> &'static [&'static str] {
         &[
             "id",
-            "category",
-            "name",
+            "group",
+            "device",
+            "component",
+            "title",
             "description",
-            "spec",
-            "interpreter",
-            "jit",
-            "smf_cranelift",
-            "smf_llvm",
-            "platforms",
             "status",
+            "priority",
+            "source_file",
+            "requirement",
+            "research",
+            "plan",
+            "architecture",
+            "design",
+            "system_spec",
+            "spec_doc",
+            "implementation",
+            "unit_tests",
+            "integration_tests",
+            "guide",
+            "external_system",
+            "external_id",
+            "external_url",
+            "last_synced_at",
+            "created_at",
+            "updated_at",
             "valid",
         ]
     }
 
     fn from_sdn_row(row: &[String]) -> Result<Self, String> {
-        let mut modes = ModeSupport::with_defaults();
-
-        // Parse individual mode support from columns
-        if let Some(val) = row.get(5) {
-            if val == "not_supported" {
-                modes
-                    .modes
-                    .insert("interpreter".to_string(), SupportStatus::NotSupported);
-            }
-        }
-        if let Some(val) = row.get(6) {
-            if val == "not_supported" {
-                modes.modes.insert("jit".to_string(), SupportStatus::NotSupported);
-            }
-        }
-        if let Some(val) = row.get(7) {
-            if val == "not_supported" {
-                modes
-                    .modes
-                    .insert("smf_cranelift".to_string(), SupportStatus::NotSupported);
-            }
-        }
-        if let Some(val) = row.get(8) {
-            if val == "not_supported" {
-                modes.modes.insert("smf_llvm".to_string(), SupportStatus::NotSupported);
-            }
-        }
-
         Ok(FeatureRecord {
             id: row.first().cloned().unwrap_or_default(),
             category: row.get(1).cloned().unwrap_or_default(),
-            name: row.get(2).cloned().unwrap_or_default(),
-            description: row.get(3).cloned().unwrap_or_default(),
-            spec: row.get(4).cloned().unwrap_or_default(),
-            modes,
-            platforms: row
-                .get(9)
-                .map(|s| {
-                    s.split(',')
-                        .map(|x| x.trim().to_string())
-                        .filter(|x| !x.is_empty())
-                        .collect()
-                })
-                .unwrap_or_default(),
-            status: row.get(10).cloned().unwrap_or_else(|| "planned".to_string()),
-            valid: row.get(11).map(|s| s == "true").unwrap_or(true),
+            name: row.get(4).cloned().unwrap_or_default(),
+            description: row.get(5).cloned().unwrap_or_default(),
+            spec: row.get(9).cloned().unwrap_or_default(),
+            modes: ModeSupport::with_defaults(),
+            platforms: Vec::new(),
+            status: normalize_tracking_status(row.get(6).map(String::as_str).unwrap_or("request")).to_string(),
+            valid: row.get(26).map(|s| s == "true").unwrap_or(true),
         })
     }
 
@@ -166,15 +145,30 @@ impl Record for FeatureRecord {
         vec![
             self.id.clone(),
             self.category.clone(),
+            String::new(),
+            self.category.clone(),
             self.name.clone(),
             self.description.clone(),
+            normalize_tracking_status(&self.status).to_string(),
+            "P2".to_string(),
             self.spec.clone(),
-            mode_status(&self.modes, "interpreter"),
-            mode_status(&self.modes, "jit"),
-            mode_status(&self.modes, "smf_cranelift"),
-            mode_status(&self.modes, "smf_llvm"),
-            self.platforms.join(","),
-            self.status.clone(),
+            self.spec.clone(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            self.spec.clone(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
             self.valid.to_string(),
         ]
     }
@@ -369,7 +363,7 @@ pub fn update_feature_db_from_spipe(db_path: &Path, specs: &[PathBuf], failed_sp
     }
 
     save_feature_db(db_path, &db).map_err(|e| e.to_string())?;
-    let docs_dir = Path::new("doc/feature");
+    let docs_dir = Path::new("doc/08_tracking/feature");
     let _ = generate_feature_docs(&db, docs_dir);
     Ok(())
 }
@@ -394,7 +388,7 @@ impl FeatureDb {
             spec: path.display().to_string(),
             modes: ModeSupport::with_defaults(),
             platforms: item.platforms.clone(),
-            status: "planned".to_string(),
+            status: "request".to_string(),
             valid: true,
         });
 
@@ -413,11 +407,11 @@ impl FeatureDb {
             entry.platforms = item.platforms.clone();
         }
         if item.ignored {
-            entry.status = "ignored".to_string();
+            entry.status = "rejected".to_string();
         } else if failed {
-            entry.status = "failed".to_string();
-        } else if entry.status == "ignored" || entry.status == "failed" {
-            entry.status = "planned".to_string();
+            entry.status = "blocked".to_string();
+        } else if entry.status == "ignored" || entry.status == "failed" || entry.status == "planned" {
+            entry.status = "request".to_string();
         }
         entry.valid = true;
     }
@@ -464,13 +458,27 @@ fn parse_feature_db(doc: &SdnDocument) -> Result<FeatureDb, String> {
         }
         let record = FeatureRecord {
             id: id.clone(),
-            category: row_map.get("category").cloned().unwrap_or_default(),
-            name: row_map.get("name").cloned().unwrap_or_default(),
+            category: row_map
+                .get("group")
+                .or_else(|| row_map.get("category"))
+                .cloned()
+                .unwrap_or_default(),
+            name: row_map
+                .get("title")
+                .or_else(|| row_map.get("name"))
+                .cloned()
+                .unwrap_or_default(),
             description: row_map.get("description").cloned().unwrap_or_default(),
-            spec: row_map.get("spec").cloned().unwrap_or_default(),
+            spec: row_map
+                .get("requirement")
+                .or_else(|| row_map.get("spec"))
+                .cloned()
+                .unwrap_or_default(),
             modes: parse_modes(&row_map),
             platforms: parse_list_field(row_map.get("platforms")),
-            status: row_map.get("status").cloned().unwrap_or_else(|| "planned".to_string()),
+            status: normalize_tracking_status(
+                row_map.get("status").map(String::as_str).unwrap_or("request")
+            ).to_string(),
             valid: parse_bool_field(row_map.get("valid")).unwrap_or(true),
         };
         db.records.insert(id, record);
@@ -487,8 +495,11 @@ pub fn generate_feature_docs(db: &FeatureDb, output_dir: &Path) -> Result<(), St
     let last_id = all_records.last().map(|record| record.id.clone()).unwrap_or_default();
 
     generate_feature_index(output_dir, &records, &last_id)?;
-    generate_category_docs(output_dir, &records)?;
+    generate_group_docs(output_dir, &records)?;
     generate_pending_features(output_dir, &records)?;
+    generate_status_features(output_dir, &records, "request", "Requested Features", "request_feature.md")?;
+    generate_status_features(output_dir, &records, "current", "Current Features", "current_feature.md")?;
+    generate_status_features(output_dir, &records, "done", "Done Features", "done_feature.md")?;
 
     Ok(())
 }
@@ -509,18 +520,18 @@ fn generate_feature_index(output_dir: &Path, records: &[&FeatureRecord], last_id
     }
 
     let mut md = String::new();
-    md.push_str("# Feature Categories\n\n");
+    md.push_str("# Feature Tracking\n\n");
     if !last_id.is_empty() {
         md.push_str(&format!("Last ID: `{}`\n\n", last_id));
     }
-    md.push_str("| Category | Features | Skips | Ignores | Fails |\n");
-    md.push_str("|----------|----------|-------|---------|-------|\n");
+    md.push_str("| Group | Features | Request | Current | Done | Blocked | Rejected |\n");
+    md.push_str("|-------|----------|---------|---------|------|---------|----------|\n");
 
     for (category, counts) in &categories {
-        let link = category_link(category);
+        let link = group_link(category);
         md.push_str(&format!(
-            "| [{}]({}) | {} | {} | {} | {} |\n",
-            category, link, counts.total, counts.skipped, counts.ignored, counts.failed
+            "| [{}]({}) | {} | {} | {} | {} | {} | {} |\n",
+            category, link, counts.total, counts.request, counts.current, counts.done, counts.blocked, counts.rejected
         ));
     }
 
@@ -529,7 +540,37 @@ fn generate_feature_index(output_dir: &Path, records: &[&FeatureRecord], last_id
     Ok(())
 }
 
-fn generate_category_docs(output_dir: &Path, records: &[&FeatureRecord]) -> Result<(), String> {
+fn generate_status_features(
+    output_dir: &Path,
+    records: &[&FeatureRecord],
+    status: &str,
+    title: &str,
+    file_name: &str,
+) -> Result<(), String> {
+    let mut md = String::new();
+    md.push_str(&format!("# {}\n\n", title));
+    md.push_str("| ID | Group | Title | Requirement |\n");
+    md.push_str("|----|-------|-------|-------------|\n");
+    for record in records {
+        if record.status != status {
+            continue;
+        }
+        let spec = if record.spec.is_empty() {
+            "-".to_string()
+        } else {
+            format!("[link]({})", record.spec)
+        };
+        md.push_str(&format!(
+            "| {} | {} | {} | {} |\n",
+            record.id, record.category, record.name, spec
+        ));
+    }
+    let path = output_dir.join(file_name);
+    fs::write(&path, md).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn generate_group_docs(output_dir: &Path, records: &[&FeatureRecord]) -> Result<(), String> {
     let mut categories: BTreeMap<String, Vec<&FeatureRecord>> = BTreeMap::new();
     for record in records {
         let category = if record.category.is_empty() {
@@ -541,7 +582,7 @@ fn generate_category_docs(output_dir: &Path, records: &[&FeatureRecord]) -> Resu
     }
 
     for (category, items) in &categories {
-        let path = category_doc_path(output_dir, category);
+        let path = group_doc_path(output_dir, category);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
@@ -553,7 +594,7 @@ fn generate_category_docs(output_dir: &Path, records: &[&FeatureRecord]) -> Resu
         if !subcategories.is_empty() {
             md.push_str("## Subcategories\n\n");
             for sub in subcategories {
-                let link = category_link(&sub);
+                let link = group_link(&sub);
                 md.push_str(&format!("- [{}]({})\n", sub, link));
             }
             md.push('\n');
@@ -823,27 +864,23 @@ fn group_by_category<'a>(features: &[&'a FeatureRecord]) -> BTreeMap<String, Vec
 #[derive(Default)]
 struct CategoryCounts {
     total: usize,
-    skipped: usize,
-    ignored: usize,
-    failed: usize,
+    request: usize,
+    current: usize,
+    done: usize,
+    blocked: usize,
+    rejected: usize,
 }
 
 impl CategoryCounts {
     fn add(&mut self, record: &FeatureRecord) {
         self.total += 1;
-        if record.status == "ignored" {
-            self.ignored += 1;
-        }
-        if record.status == "failed" {
-            self.failed += 1;
-        }
-        if record
-            .modes
-            .modes
-            .values()
-            .any(|status| *status == SupportStatus::NotSupported)
-        {
-            self.skipped += 1;
+        match record.status.as_str() {
+            "request" | "planned" => self.request += 1,
+            "current" | "in_progress" => self.current += 1,
+            "done" | "complete" => self.done += 1,
+            "blocked" => self.blocked += 1,
+            "rejected" | "failed" | "ignored" => self.rejected += 1,
+            _ => self.request += 1,
         }
     }
 }
@@ -877,9 +914,9 @@ fn collect_subcategories(category: &str, records: &[&FeatureRecord]) -> Vec<Stri
     subs.keys().cloned().collect()
 }
 
-fn category_doc_path(output_dir: &Path, category: &str) -> PathBuf {
+fn group_doc_path(output_dir: &Path, category: &str) -> PathBuf {
     let parts = split_category(category);
-    let mut path = output_dir.join("category");
+    let mut path = output_dir.join("group");
     for part in &parts[..parts.len().saturating_sub(1)] {
         path = path.join(slugify(part));
     }
@@ -887,9 +924,9 @@ fn category_doc_path(output_dir: &Path, category: &str) -> PathBuf {
     path.join(format!("{}.md", slugify(&file_name)))
 }
 
-pub fn category_link(category: &str) -> String {
+pub fn group_link(category: &str) -> String {
     let parts = split_category(category);
-    let mut link = String::from("category");
+    let mut link = String::from("group");
     if !parts.is_empty() {
         for part in &parts[..parts.len().saturating_sub(1)] {
             link.push('/');
@@ -970,16 +1007,31 @@ pub fn save_feature_db(path: &Path, db: &FeatureDb) -> Result<(), std::io::Error
 
     let mut fields = vec![
         "id".to_string(),
-        "category".to_string(),
-        "name".to_string(),
+        "group".to_string(),
+        "device".to_string(),
+        "component".to_string(),
+        "title".to_string(),
         "description".to_string(),
-        "spec".to_string(),
-        "mode_interpreter".to_string(),
-        "mode_jit".to_string(),
-        "mode_smf_cranelift".to_string(),
-        "mode_smf_llvm".to_string(),
-        "platforms".to_string(),
         "status".to_string(),
+        "priority".to_string(),
+        "source_file".to_string(),
+        "requirement".to_string(),
+        "research".to_string(),
+        "plan".to_string(),
+        "architecture".to_string(),
+        "design".to_string(),
+        "system_spec".to_string(),
+        "spec_doc".to_string(),
+        "implementation".to_string(),
+        "unit_tests".to_string(),
+        "integration_tests".to_string(),
+        "guide".to_string(),
+        "external_system".to_string(),
+        "external_id".to_string(),
+        "external_url".to_string(),
+        "last_synced_at".to_string(),
+        "created_at".to_string(),
+        "updated_at".to_string(),
         "valid".to_string(),
     ];
 
@@ -988,15 +1040,30 @@ pub fn save_feature_db(path: &Path, db: &FeatureDb) -> Result<(), std::io::Error
         let row = vec![
             SdnValue::String(record.id.clone()),
             SdnValue::String(record.category.clone()),
+            SdnValue::String(String::new()),
+            SdnValue::String(record.category.clone()),
             SdnValue::String(record.name.clone()),
             SdnValue::String(record.description.clone()),
+            SdnValue::String(normalize_tracking_status(&record.status).to_string()),
+            SdnValue::String("P2".to_string()),
             SdnValue::String(record.spec.clone()),
-            SdnValue::String(mode_status(&record.modes, "interpreter")),
-            SdnValue::String(mode_status(&record.modes, "jit")),
-            SdnValue::String(mode_status(&record.modes, "smf_cranelift")),
-            SdnValue::String(mode_status(&record.modes, "smf_llvm")),
-            SdnValue::String(record.platforms.join(",")),
-            SdnValue::String(record.status.clone()),
+            SdnValue::String(record.spec.clone()),
+            SdnValue::String(String::new()),
+            SdnValue::String(String::new()),
+            SdnValue::String(String::new()),
+            SdnValue::String(String::new()),
+            SdnValue::String(record.spec.clone()),
+            SdnValue::String(String::new()),
+            SdnValue::String(String::new()),
+            SdnValue::String(String::new()),
+            SdnValue::String(String::new()),
+            SdnValue::String(String::new()),
+            SdnValue::String(String::new()),
+            SdnValue::String(String::new()),
+            SdnValue::String(String::new()),
+            SdnValue::String(String::new()),
+            SdnValue::String(String::new()),
+            SdnValue::String(String::new()),
             SdnValue::Bool(record.valid),
         ];
         rows.push(row);
@@ -1060,6 +1127,17 @@ fn mode_status(modes: &ModeSupport, key: &str) -> String {
         .unwrap_or(SupportStatus::Supported)
         .as_str()
         .to_string()
+}
+
+fn normalize_tracking_status(status: &str) -> &'static str {
+    match status {
+        "done" | "complete" => "done",
+        "current" | "in_progress" => "current",
+        "blocked" | "failed" => "blocked",
+        "rejected" | "ignored" => "rejected",
+        "request" | "planned" => "request",
+        _ => "request",
+    }
 }
 
 fn parse_bool_field(value: Option<&String>) -> Option<bool> {

@@ -89,7 +89,10 @@ use simple_driver::cli::test_runner;
 use simple_driver::cli::verify::run_verify;
 #[cfg(feature = "tui")]
 use simple_driver::cli::tui::run_tui_repl;
-use simple_driver::cli::doc_gen::{run_feature_gen, run_spec_gen, run_task_gen, run_todo_gen, run_todo_scan};
+use simple_driver::cli::doc_gen::{
+    run_check_dbs, run_feature_gen, run_spec_gen, run_task_gen, run_todo_gen, run_todo_scan,
+    run_traceability_check, run_tracking,
+};
 use simple_driver::cli::qualify_ignore::{handle_qualify_ignore, parse_qualify_ignore_args};
 
 // Import our new command modules
@@ -553,6 +556,27 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         app_path: "src/app/todo_gen/main.spl",
         rust_handler: Handler::Args(run_todo_gen),
         env_override: "SIMPLE_TODO_GEN_RUST",
+        needs_rust_flags: &[],
+    },
+    CommandEntry {
+        name: "check-dbs",
+        app_path: "src/app/cli/check_dbs.spl",
+        rust_handler: Handler::Args(run_check_dbs),
+        env_override: "SIMPLE_CHECK_DBS_RUST",
+        needs_rust_flags: &[],
+    },
+    CommandEntry {
+        name: "traceability-check",
+        app_path: "src/app/traceability/main.spl",
+        rust_handler: Handler::Args(run_traceability_check),
+        env_override: "SIMPLE_TRACEABILITY_CHECK_RUST",
+        needs_rust_flags: &[],
+    },
+    CommandEntry {
+        name: "tracking",
+        app_path: "src/app/tracking/main.spl",
+        rust_handler: Handler::Args(run_tracking),
+        env_override: "SIMPLE_TRACKING_RUST",
         needs_rust_flags: &[],
     },
     CommandEntry {

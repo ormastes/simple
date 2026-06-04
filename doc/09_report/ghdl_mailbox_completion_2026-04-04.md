@@ -37,7 +37,7 @@ Base address: `0x80FF0000`
 
 | File | Purpose |
 |------|---------|
-| `doc/04_architecture/ghdl_rv32_mailbox_protocol.md` | Protocol specification |
+| `doc/04_architecture/hardware/ghdl_rv32_mailbox_protocol.md` | Protocol specification |
 | `examples/09_embedded/fpga_riscv/rtl/rv32i_pkg.vhd` | VHDL constants (mailbox addresses, commands) |
 | `examples/09_embedded/fpga_riscv/rtl/tb_mailbox.vhd` | VHDL testbench with MMIO decode |
 | `examples/09_embedded/fpga_riscv/sw/mailbox.h` | Target-side C header (inline MMIO functions) |
@@ -83,7 +83,7 @@ Base address: `0x80FF0000`
 
 ## References
 
-- Protocol: `doc/04_architecture/ghdl_rv32_mailbox_protocol.md`
+- Protocol: `doc/04_architecture/hardware/ghdl_rv32_mailbox_protocol.md`
 - Lane matrix: `doc/08_tracking/lane_matrix.md`
 - Semihost lane report: `doc/09_report/remote_baremetal_completion_2026-04-04.md`
 - Closure plan: `doc/03_plan/distinctive_features_completion_closure_plan_2026-04-04.md`

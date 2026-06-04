@@ -1,5 +1,5 @@
 # Feature: NVFS feature-request workflow
-# Anchors: doc/08_tracking/feature_request/README.md, TEMPLATE.md, nvfs_requests.md
+# Anchors: doc/08_tracking/feature/README.md, TEMPLATE.md, nvfs_requests.md
 #          doc/05_design/nvfs/from_spostgre.md (upfront primary channel)
 #          memory: feedback_svllm_drives_nvfs_design.md
 # Status: pending — README/TEMPLATE/nvfs_requests.md exist; scenarios lock the schema.
@@ -10,9 +10,9 @@ Feature: NVFS feature-request tracker enforces the primary vs secondary channel 
   So that requests cannot silently drop and upfront items do not get duplicated as backlog
 
   Background:
-    Given "doc/08_tracking/feature_request/README.md" exists
-    And   "doc/08_tracking/feature_request/TEMPLATE.md" exists
-    And   "doc/08_tracking/feature_request/nvfs_requests.md" exists
+    Given "doc/08_tracking/feature/README.md" exists
+    And   "doc/08_tracking/feature/TEMPLATE.md" exists
+    And   "doc/08_tracking/feature/nvfs_requests.md" exists
 
   Scenario: README distinguishes primary upfront channel from secondary tracker channel
     Given the README describes the tracker's purpose

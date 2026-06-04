@@ -2,7 +2,7 @@
 
 **Date:** 2026-03-29
 **Status:** Draft
-**Research:** `doc/01_research/domain/t32_terminal_power_remote_2026-03-29.md`
+**Research:** `doc/01_research/hardware/t32_terminal_power_remote_2026-03-29.md`
 
 ---
 

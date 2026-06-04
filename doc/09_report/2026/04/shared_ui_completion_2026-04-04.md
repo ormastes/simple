@@ -11,7 +11,7 @@ Completed the shared UI feature, moving from "real shared test surface" to a ful
 ## What Was Done
 
 ### Phase 1: Shared UI Contract Definition
-- Created `doc/04_architecture/shared_ui_contract.md` — authoritative contract document
+- Created `doc/04_architecture/ui/shared_ui_contract.md` — authoritative contract document
 - Defines protocol (version 1), data model (ElementInfo, UIStateInfo), interaction semantics, session lifecycle, error model, support matrix, deviations register
 
 ### Phase 2: Protocol + Core Handler Parity
@@ -62,7 +62,7 @@ Completed the shared UI feature, moving from "real shared test surface" to a ful
   - Updated key files table
 
 ## Files Created
-- `doc/04_architecture/shared_ui_contract.md` — Shared UI contract (source of truth)
+- `doc/04_architecture/ui/shared_ui_contract.md` — Shared UI contract (source of truth)
 - `test/03_system/ui/shared_ui_contract_spec.spl` — Cross-surface contract test suite
 - `doc/09_report/2026/04/shared_ui_completion_2026-04-04.md` — This report
 

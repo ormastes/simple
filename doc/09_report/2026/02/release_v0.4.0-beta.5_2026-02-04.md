@@ -92,7 +92,7 @@ cargo build --release
 
 - **Completion Report:** `doc/09_report/simple_module_unfold_2026-02-04.md`
 - **Refactoring Plan:** `doc/03_plan/module_refactoring_2026-02-04.md`
-- **Architecture:** `doc/04_architecture/modules.md`
+- **Architecture:** `doc/04_architecture/language/modules.md`
 
 ## Download
 

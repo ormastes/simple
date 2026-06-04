@@ -24,6 +24,6 @@ Selected scope: Feature Option B, Engine2D + WM unified test facade.
 
 ## Traceability
 
-- `doc/01_research/local/graphical_backend_equality.md`
+- `doc/01_research/ui/graphical_backend_equality.md`
 - `doc/03_plan/graphical_backend_equality.md`
 - `test/03_system/wm_compare/graphical_backend_equality_spec.spl`

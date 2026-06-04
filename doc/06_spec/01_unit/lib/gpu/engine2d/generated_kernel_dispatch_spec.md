@@ -200,18 +200,22 @@ expect(metal.args_layout).to_equal("src,dst,width,height,delta_y")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val unsupported = generated_2d_launch_plan("cpu", GENERATED_2D_FILL, 64, 64)
 val invalid = generated_2d_launch_plan("cuda", GENERATED_2D_COPY, 0, 64)
+val rect = generated_2d_launch_plan("opencl", "rect_filled", 64, 64)
 
 expect(unsupported.dispatch_ready).to_equal(false)
 expect(unsupported.reason).to_equal("backend-inactive")
 expect(unsupported.launch_api).to_equal("none")
 expect(invalid.dispatch_ready).to_equal(false)
 expect(invalid.reason).to_equal("invalid-dimensions")
+expect(rect.dispatch_ready).to_equal(false)
+expect(rect.reason).to_equal("unsupported-operation")
+expect(rect.launch_api).to_equal("none")
 ```
 
 </details>

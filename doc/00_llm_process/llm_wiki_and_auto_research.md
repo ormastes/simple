@@ -13,7 +13,7 @@ self-healing update step. The Simple equivalents are:
 
 | Karpathy concept | Simple artifact |
 |------------------|-----------------|
-| Raw sources (notes, transcripts) | `doc/01_research/local/`, `doc/01_research/domain/`, `doc/02_requirements/` |
+| Raw sources (notes, transcripts) | `doc/01_research/<domain>/` (language, compiler, lib, app, os, hardware, platform, runtime, ui, ml, infra), `doc/02_requirements/` |
 | The wiki — concept pages + cross-links | Expert tree: `feature_expert/<feature>/skill.md`, `layer_expert/<layer>/skill.md`, plus submodule-linked `domain_expert/`, `tool_expert/`, `project_expert/` |
 | Wiki structure (downstream knowledge) | `doc/04_architecture/`, `doc/05_design/`, `doc/06_spec/` (mirrored from `test/` paths) |
 | The interface | Claude Code + the pipeline skills `/research` `/design` `/impl` `/verify` `/release` |

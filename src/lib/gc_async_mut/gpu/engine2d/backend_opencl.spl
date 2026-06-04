@@ -10,27 +10,78 @@ use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
 use std.gc_async_mut.gpu.engine2d.opencl_session.{OpenClSession}
 use std.gpu.engine2d.sffi_opencl.{OpenClFfi}
 
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64, size: i64)
+extern fn rt_ptr_read_i32(addr: i64, offset: i64) -> i32
+extern fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64) -> i64
+
 fn opencl_2d_generated_source() -> text:
-    "__kernel void simple_2d_fill_u32(__global uint* dst, uint width, uint height, uint color) {\n" +
-    "    uint i = get_global_id(0);\n" +
-    "    uint count = width * height;\n" +
-    "    if (i < count) { dst[i] = color; }\n" +
+    "__kernel void simple_2d_fill_u32(__global uint* dst, long width, long height, long color) {\n" +
+    "    long i = get_global_id(0);\n" +
+    "    long count = width * height;\n" +
+    "    if (i < count) { dst[i] = (uint)color; }\n" +
     "}\n" +
-    "__kernel void simple_2d_copy_u32(__global const uint* src, __global uint* dst, uint width, uint height) {\n" +
-    "    uint i = get_global_id(0);\n" +
-    "    uint count = width * height;\n" +
+    "__kernel void simple_2d_copy_u32(__global const uint* src, __global uint* dst, long width, long height) {\n" +
+    "    long i = get_global_id(0);\n" +
+    "    long count = width * height;\n" +
     "    if (i < count) { dst[i] = src[i]; }\n" +
     "}\n" +
-    "__kernel void simple_2d_alpha_u32(__global const uint* src, __global uint* dst, uint width, uint height, uchar alpha) {\n" +
-    "    uint i = get_global_id(0);\n" +
-    "    uint count = width * height;\n" +
+    "__kernel void simple_2d_alpha_u32(__global const uint* src, __global uint* dst, long width, long height, long alpha) {\n" +
+    "    long i = get_global_id(0);\n" +
+    "    long count = width * height;\n" +
     "    if (i < count) { dst[i] = src[i]; }\n" +
     "}\n" +
-    "__kernel void simple_2d_scroll_u32(__global const uint* src, __global uint* dst, uint width, uint height, int delta_y) {\n" +
-    "    uint i = get_global_id(0);\n" +
-    "    uint count = width * height;\n" +
+    "__kernel void simple_2d_scroll_u32(__global const uint* src, __global uint* dst, long width, long height, long delta_y) {\n" +
+    "    long i = get_global_id(0);\n" +
+    "    long count = width * height;\n" +
     "    if (i < count) { dst[i] = src[i]; }\n" +
+    "}\n" +
+    "__kernel void simple_2d_rect_filled_u32(__global uint* dst, long surface_width, long surface_height, long x, long y, long w, long h, long color) {\n" +
+    "    long i = get_global_id(0);\n" +
+    "    long count = w * h;\n" +
+    "    if (i >= count) { return; }\n" +
+    "    long dx = i % w;\n" +
+    "    long dy = i / w;\n" +
+    "    long px = x + dx;\n" +
+    "    long py = y + dy;\n" +
+    "    if (px >= 0 && py >= 0 && px < surface_width && py < surface_height) { dst[py * surface_width + px] = (uint)color; }\n" +
+    "}\n" +
+    "__kernel void simple_2d_rect_outline_u32(__global uint* dst, long surface_width, long surface_height, long x, long y, long w, long h, long color) {\n" +
+    "    long i = get_global_id(0);\n" +
+    "    long count = w * h;\n" +
+    "    if (i >= count) { return; }\n" +
+    "    long dx = i % w;\n" +
+    "    long dy = i / w;\n" +
+    "    if (dx != 0 && dy != 0 && dx + 1 < w && dy + 1 < h) { return; }\n" +
+    "    long px = x + dx;\n" +
+    "    long py = y + dy;\n" +
+    "    if (px >= 0 && py >= 0 && px < surface_width && py < surface_height) { dst[py * surface_width + px] = (uint)color; }\n" +
     "}\n"
+
+fn _i64(v: i32) -> i64:
+    v as i64
+
+fn _i64_from_u32(v: u32) -> i64:
+    v as i64
+
+fn _read_u32_pixels_from_host(ptr: i64, count: i32) -> [u32]:
+    var out: [u32] = []
+    var idx = 0
+    while idx < count:
+        out.push(rt_ptr_read_i32(ptr, _i64(idx) * 4) as u32)
+        idx = idx + 1
+    out
+
+fn _write_u32_pixels_to_host(ptr: i64, pixels: [u32], count: i32):
+    var idx = 0
+    while idx < count:
+        val pixel = pixels[idx] as i64
+        val base = _i64(idx) * 4
+        rt_ptr_write_u8(ptr, base, pixel & 0xFF)
+        rt_ptr_write_u8(ptr, base + 1, (pixel >> 8) & 0xFF)
+        rt_ptr_write_u8(ptr, base + 2, (pixel >> 16) & 0xFF)
+        rt_ptr_write_u8(ptr, base + 3, (pixel >> 24) & 0xFF)
+        idx = idx + 1
 
 fn _opencl_probe_failure(message: text, gate: text) -> BackendProbeResult:
     var failed = BackendProbeResult.unavailable("opencl", message)
@@ -57,6 +108,11 @@ class OpenClBackend:
     session: OpenClSession
     owns_session: bool
     initialized: bool
+    d_framebuffer: i64
+    framebuffer_bytes: i64
+    readback_ptr: i64
+    host_staging_ptr: i64
+    device_current: bool
     last_probe: BackendProbeResult
 
     static fn create() -> OpenClBackend:
@@ -65,6 +121,11 @@ class OpenClBackend:
             session: OpenClSession.create(),
             owns_session: false,
             initialized: false,
+            d_framebuffer: 0,
+            framebuffer_bytes: 0,
+            readback_ptr: 0,
+            host_staging_ptr: 0,
+            device_current: false,
             last_probe: BackendProbeResult.unavailable("opencl", "not probed")
         )
 
@@ -86,15 +147,64 @@ class OpenClBackend:
             self.owns_session = false
             self.initialized = false
             return false
+        self.framebuffer_bytes = _i64(width) * _i64(height) * 4
+        self.d_framebuffer = self.session.alloc(self.framebuffer_bytes)
+        if self.d_framebuffer == 0:
+            self.last_probe = _opencl_probe_failure("OpenCL device framebuffer allocation failed", "opencl_surface")
+            self.session.release()
+            self.owns_session = false
+            self.initialized = false
+            return false
+        self.readback_ptr = rt_alloc(self.framebuffer_bytes)
+        self.host_staging_ptr = rt_alloc(self.framebuffer_bytes)
+        if self.readback_ptr == 0 or self.host_staging_ptr == 0:
+            self.last_probe = _opencl_probe_failure("OpenCL host staging allocation failed", "opencl_surface")
+            self._cleanup_opencl_surface()
+            self.session.release()
+            self.owns_session = false
+            self.initialized = false
+            return false
         if not self.mirror.init(width, height):
             self.last_probe = _opencl_probe_failure("OpenCL host mirror surface allocation failed", "opencl_surface")
+            self._cleanup_opencl_surface()
             self.session.release()
             self.owns_session = false
             self.initialized = false
             return false
         self.last_probe = _opencl_render_ready()
         self.initialized = true
+        self.device_current = false
         true
+
+    me _cleanup_opencl_surface():
+        if self.d_framebuffer != 0:
+            self.session.free(self.d_framebuffer)
+            self.d_framebuffer = 0
+        if self.readback_ptr != 0:
+            rt_free(self.readback_ptr, self.framebuffer_bytes)
+            self.readback_ptr = 0
+        if self.host_staging_ptr != 0:
+            rt_free(self.host_staging_ptr, self.framebuffer_bytes)
+            self.host_staging_ptr = 0
+        self.framebuffer_bytes = 0
+        self.device_current = false
+
+    me _copy_mirror_to_device() -> bool:
+        if not self.initialized or self.d_framebuffer == 0 or self.host_staging_ptr == 0 or self.framebuffer_bytes <= 0:
+            return false
+        val pixels = self.mirror.read_pixels()
+        if pixels.len() != self.width() * self.height():
+            return false
+        _write_u32_pixels_to_host(self.host_staging_ptr, pixels, pixels.len())
+        val ok = self.session.write_buffer(self.d_framebuffer, self.host_staging_ptr, self.framebuffer_bytes)
+        if ok:
+            self.device_current = true
+        ok
+
+    me _ensure_device_current() -> bool:
+        if self.device_current:
+            return true
+        self._copy_mirror_to_device()
 
 impl RenderBackend for OpenClBackend:
     fn name() -> text:
@@ -116,19 +226,41 @@ impl RenderBackend for OpenClBackend:
 
     me shutdown():
         self.mirror.shutdown()
+        self._cleanup_opencl_surface()
         if self.owns_session:
             self.session.release()
             self.owns_session = false
         self.initialized = false
 
     me clear(color: u32):
+        if self.initialized and self.d_framebuffer != 0:
+            val rc = self.session.launch_fill_u32(self.d_framebuffer, _i64(self.width()), _i64(self.height()), _i64_from_u32(color))
+            if rc == 0:
+                self.device_current = true
+                self.mirror.clear(color)
+                return
         self.mirror.clear(color)
+        self.device_current = false
 
     me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        if self.initialized and self.d_framebuffer != 0 and self._ensure_device_current():
+            val rc = self.session.launch_rect_outline_u32(self.d_framebuffer, _i64(self.width()), _i64(self.height()), _i64(x), _i64(y), _i64(w), _i64(h), _i64_from_u32(color))
+            if rc == 0:
+                self.device_current = true
+                self.mirror.draw_rect(x, y, w, h, color)
+                return
         self.mirror.draw_rect(x, y, w, h, color)
+        self.device_current = false
 
     me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
+        if self.initialized and self.d_framebuffer != 0 and self._ensure_device_current():
+            val rc = self.session.launch_rect_filled_u32(self.d_framebuffer, _i64(self.width()), _i64(self.height()), _i64(x), _i64(y), _i64(w), _i64(h), _i64_from_u32(color))
+            if rc == 0:
+                self.device_current = true
+                self.mirror.draw_rect_filled(x, y, w, h, color)
+                return
         self.mirror.draw_rect_filled(x, y, w, h, color)
+        self.device_current = false
 
     me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
         self.mirror.draw_line(x1, y1, x2, y2, color, thickness)
@@ -172,6 +304,10 @@ impl RenderBackend for OpenClBackend:
         self.mirror.present()
 
     fn read_pixels() -> [u32]:
+        if self.initialized and self.device_current and self.readback_ptr != 0 and self.d_framebuffer != 0:
+            self.session.synchronize()
+            if self.session.read_buffer(self.d_framebuffer, self.readback_ptr, self.framebuffer_bytes):
+                return _read_u32_pixels_from_host(self.readback_ptr, self.width() * self.height())
         self.mirror.read_pixels()
 
     fn width() -> i32:

@@ -78,6 +78,8 @@ class SimpleWindowManager {
     this._electronWindows = new Map();
     this._electronActiveWindowId = '';
     this._electronZCounter = 20;
+    this._focusAcquiredTimers = new WeakMap();
+    this._trafficCommandTimers = new WeakMap();
     this._commandPalette = null;
     this._commandPaletteInput = null;
     this._commandPaletteList = null;
@@ -122,6 +124,8 @@ class SimpleWindowManager {
     this._resizeHud = null;
     this._resizeHudTimer = 0;
     this._gestureHints = null;
+    this._trackpadGestureAccum = { x: 0, y: 0, lastAt: 0 };
+    this._trackpadGestureLastActionAt = 0;
     this._systemHud = null;
     this._systemHudTimer = 0;
     this._privacyIndicator = null;
@@ -178,6 +182,7 @@ class SimpleWindowManager {
     this._qualityEnergyPolicyActiveIndex = 0;
     this._taskbarPreview = null;
     this._taskbarPreviewHideTimer = 0;
+    this._launchFeedbackTimers = new Map();
     this._wmTooltip = null;
     this._wmTooltipAnchor = null;
     this._windowContextMenu = null;
@@ -1185,8 +1190,39 @@ class SimpleWindowManager {
     });
   }
 
-  _sendLaunch(appId) {
+  _sendLaunch(appId, sourceEl = null) {
+    this._markLaunchFeedback(appId, sourceEl);
     this._sendWindowCmd('launch', { app_id: appId });
+  }
+
+  _markLaunchFeedback(appId, sourceEl = null) {
+    const id = String(appId || '').trim();
+    if (!id) return;
+    this._clearLaunchFeedback(id);
+    const selector = `[data-app-id="${CSS.escape(id)}"]`;
+    const targets = new Set(Array.from(document.querySelectorAll(selector)));
+    if (sourceEl instanceof Element) targets.add(sourceEl);
+    targets.forEach((el) => {
+      el.classList.add('launching');
+      el.dataset.launchFeedback = 'active';
+      el.setAttribute('aria-busy', 'true');
+    });
+    const timer = window.setTimeout(() => this._clearLaunchFeedback(id), 760);
+    this._launchFeedbackTimers.set(id, timer);
+  }
+
+  _clearLaunchFeedback(appId) {
+    const id = String(appId || '').trim();
+    if (!id) return;
+    const timer = this._launchFeedbackTimers.get(id);
+    if (timer) window.clearTimeout(timer);
+    this._launchFeedbackTimers.delete(id);
+    const selector = `[data-app-id="${CSS.escape(id)}"]`;
+    document.querySelectorAll(selector).forEach((el) => {
+      el.classList.remove('launching');
+      delete el.dataset.launchFeedback;
+      el.removeAttribute('aria-busy');
+    });
   }
 
   _ensureTopMenuBar() {
@@ -1814,6 +1850,7 @@ class SimpleWindowManager {
   _activateTaskbarItem(el, ev) {
     const action = el.dataset.action;
     if (action === 'launch' && el.dataset.appId) {
+      this._markLaunchFeedback(el.dataset.appId, el);
       this._sendHostWmPointer(ev, 'down');
     } else if (action === 'focus' && el.dataset.windowIdHint) {
       if (this.transport === 'electron-ipc' && this._electronWindows.has(el.dataset.windowIdHint)) {
@@ -4075,11 +4112,15 @@ class SimpleWindowManager {
   }
 
   _gestureHintItems() {
+    return this._trackpadGestureItems().map((item) => ({ gesture: item.gesture, action: item.label }));
+  }
+
+  _trackpadGestureItems() {
     return [
-      { gesture: 'Three-finger swipe up', action: 'Window overview' },
-      { gesture: 'Three-finger swipe left', action: 'Previous workspace' },
-      { gesture: 'Three-finger swipe right', action: 'Next workspace' },
-      { gesture: 'Pinch open', action: 'App launcher' }
+      { gesture: 'Three-finger swipe up', action: 'overview', label: 'Window overview' },
+      { gesture: 'Three-finger swipe left', action: 'workspace_previous', label: 'Previous workspace' },
+      { gesture: 'Three-finger swipe right', action: 'workspace_next', label: 'Next workspace' },
+      { gesture: 'Pinch open', action: 'launcher', label: 'App launcher' }
     ];
   }
 
@@ -4100,6 +4141,63 @@ class SimpleWindowManager {
     body.appendChild(action);
     row.appendChild(body);
     return row;
+  }
+
+  _shouldHandleShellTrackpadGesture(event) {
+    const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+    if (!target) return false;
+    if (target.closest('input, textarea, select, [contenteditable="true"]')) return false;
+    if (target.closest('[data-canonical-id], .wm-window, .wm-command-palette, .wm-shortcut-overlay, .wm-clipboard-history, .wm-screen-capture-overlay')) return false;
+    return !!target.closest('#wm-desktop, #wm-taskbar, .wm-top-menu-bar, .wm-hot-corner-zone');
+  }
+
+  _normalizedWheelDelta(value, deltaMode) {
+    const unit = deltaMode === 1 ? 16 : deltaMode === 2 ? 120 : 1;
+    return Number(value || 0) * unit;
+  }
+
+  _handleTrackpadGesture(event) {
+    if (!this._shouldHandleShellTrackpadGesture(event)) return false;
+    const now = window.performance && typeof window.performance.now === 'function' ? window.performance.now() : Date.now();
+    if (now - this._trackpadGestureLastActionAt < 420) return false;
+    const dx = this._normalizedWheelDelta(event.deltaX, event.deltaMode);
+    const dy = this._normalizedWheelDelta(event.deltaY, event.deltaMode);
+    if (Math.abs(dx) < 4 && Math.abs(dy) < 4) return false;
+    if (now - this._trackpadGestureAccum.lastAt > 260) this._trackpadGestureAccum = { x: 0, y: 0, lastAt: now };
+    this._trackpadGestureAccum.x += dx;
+    this._trackpadGestureAccum.y += dy;
+    this._trackpadGestureAccum.lastAt = now;
+    const x = this._trackpadGestureAccum.x;
+    const y = this._trackpadGestureAccum.y;
+    let action = '';
+    if ((event.ctrlKey || event.metaKey) && y < -42) action = 'launcher';
+    else if (Math.abs(x) >= 110 && Math.abs(x) > Math.abs(y) * 1.18) action = x > 0 ? 'workspace_next' : 'workspace_previous';
+    else if (Math.abs(y) >= 135 && Math.abs(y) > Math.abs(x) * 1.18) action = y < 0 ? 'overview' : 'desktop_peek';
+    if (!action) return false;
+    event.preventDefault();
+    this._trackpadGestureAccum = { x: 0, y: 0, lastAt: now };
+    this._trackpadGestureLastActionAt = now;
+    this._activateTrackpadGesture(action);
+    return true;
+  }
+
+  _activateTrackpadGesture(action) {
+    const value = String(action || '');
+    if (value === 'overview') this._toggleWindowOverview(true);
+    if (value === 'workspace_previous') this._switchRelativeWorkspace(-1);
+    if (value === 'workspace_next') this._switchRelativeWorkspace(1);
+    if (value === 'launcher') this._toggleAppLauncher(true);
+    if (value === 'desktop_peek') this._toggleDesktopPeek();
+    this._sendWindowCmd('trackpad_gesture', { gesture_action: value });
+    this._showSystemHud('Trackpad', value.replace('_', ' '), 1300);
+  }
+
+  _switchRelativeWorkspace(delta) {
+    const items = this._workspaceItems();
+    if (!items.length) return;
+    const current = this._workspaceIndex(this._activeWorkspaceId);
+    const next = (current + delta + items.length) % items.length;
+    this._switchWorkspace(items[next].id);
   }
 
   _ensureSystemHud() {
@@ -7023,6 +7121,7 @@ class SimpleWindowManager {
     const gestures = this._ensureGestureHints();
     this._renderGestureHints();
     const gestureRows = gestures.querySelectorAll('[data-gesture-hint]').length;
+    const gestureRuntime = this._trackpadGestureItems().length;
     const resize = this._ensureResizeHud();
     const resizeLive = resize.getAttribute('role') === 'status' && resize.getAttribute('aria-live') === 'polite';
     const focus = this._normalizeFocusMode(document.documentElement.dataset.wmFocusMode || this._focusMode);
@@ -7031,8 +7130,8 @@ class SimpleWindowManager {
       workspaceOk: workspaceCards >= 3 && workspaceActions >= 9,
       corners: String(cornerZones) + ' zones',
       cornersOk: cornerZones >= 4,
-      gestures: String(gestureRows) + ' hints',
-      gesturesOk: gestureRows >= 4 && resizeLive,
+      gestures: String(gestureRuntime) + ' runtime',
+      gesturesOk: gestureRows >= 4 && gestureRuntime >= 4 && resizeLive,
       focus: this._focusModeLabel(focus),
       focusOk: ['off', 'work', 'deep'].includes(focus)
     };
@@ -7145,6 +7244,7 @@ class SimpleWindowManager {
     preview.appendChild(this._makeQualityComputedLifecycleMetric('Close', closeMs + 'ms', 'close', mode === 'none' ? closeMs === 0 : closeMs >= 70));
     preview.appendChild(this._makeQualityComputedLifecycleMetric('Minimize', minimizeMs + 'ms', 'minimize', mode === 'none' ? minimizeMs === 0 : minimizeMs >= 80));
     preview.appendChild(this._makeQualityComputedLifecycleMetric('Mode', mode, 'mode', ['mac', 'fade', 'none'].includes(mode)));
+    preview.appendChild(this._makeQualityLifecycleTimeline(openMs, closeMs, minimizeMs, mode));
     preview.appendChild(this._makeQualityWindowTransitionPolicy(mode));
     return preview;
   }
@@ -7166,6 +7266,44 @@ class SimpleWindowManager {
     metric.appendChild(name);
     metric.appendChild(result);
     return metric;
+  }
+
+  _makeQualityLifecycleTimeline(openMs, closeMs, minimizeMs, mode) {
+    const timeline = document.createElement('div');
+    timeline.className = 'wm-quality-lifecycle-timeline';
+    timeline.dataset.lifecycleTimeline = mode;
+    [
+      ['open', 'Open', openMs + 'ms', 'scale from titlebar'],
+      ['minimize', 'Minimize', minimizeMs + 'ms', 'dock return'],
+      ['restore', 'Restore', openMs + 'ms', 'spring back'],
+      ['close', 'Close', closeMs + 'ms', 'fade shrink']
+    ].forEach(([kind, label, value, detail]) => {
+      timeline.appendChild(this._makeQualityLifecycleTimelineStep(kind, label, value, detail, mode));
+    });
+    return timeline;
+  }
+
+  _makeQualityLifecycleTimelineStep(kind, label, value, detail, mode) {
+    const step = document.createElement('span');
+    step.className = 'wm-quality-lifecycle-step' + (mode === 'none' ? ' disabled' : '');
+    step.dataset.lifecycleStep = kind;
+    const rail = document.createElement('span');
+    rail.className = 'wm-quality-lifecycle-rail';
+    rail.setAttribute('aria-hidden', 'true');
+    const name = document.createElement('span');
+    name.className = 'wm-quality-lifecycle-label';
+    name.textContent = label;
+    const timing = document.createElement('strong');
+    timing.className = 'wm-quality-lifecycle-value';
+    timing.textContent = mode === 'none' ? 'off' : value;
+    const hint = document.createElement('span');
+    hint.className = 'wm-quality-lifecycle-detail';
+    hint.textContent = mode === 'none' ? 'motion disabled' : detail;
+    step.appendChild(rail);
+    step.appendChild(name);
+    step.appendChild(timing);
+    step.appendChild(hint);
+    return step;
   }
 
   _makeQualityWindowTransitionPolicy(activeMode) {
@@ -10106,7 +10244,8 @@ class SimpleWindowManager {
     if (!this._appLauncher || this._appLauncher.hidden) return false;
     const app = this._appLauncherItems[this._appLauncherActiveIndex];
     if (!app || !app.app_id) return false;
-    this._sendLaunch(app.app_id);
+    const tile = this._appLauncherGrid?.querySelector(`.wm-app-launcher-tile[data-app-id="${CSS.escape(app.app_id)}"]`);
+    this._sendLaunch(app.app_id, tile);
     this._toggleAppLauncher(false);
     return true;
   }
@@ -10699,7 +10838,9 @@ class SimpleWindowManager {
     if (!entry) return;
     for (const item of this._electronWindows.values()) item.winEl.classList.remove('focused');
     entry.winEl.classList.add('focused');
+    this._markWindowFocusAcquired(entry.winEl);
     entry.winEl.classList.remove('minimized', 'minimizing');
+    this._clearWindowMinimizeTarget(entry.winEl);
     entry.winEl.style.display = '';
     if (entry.minimized) this._markWindowLifecycle(entry.winEl, 'restoring');
     entry.winEl.style.zIndex = String(++this._electronZCounter);
@@ -10712,6 +10853,7 @@ class SimpleWindowManager {
     const entry = this._electronWindows.get(String(windowId || ''));
     if (!entry) return;
     entry.minimized = true;
+    this._setWindowMinimizeTarget(entry.winEl, windowId);
     this._markWindowLifecycle(entry.winEl, 'minimizing');
     setTimeout(() => {
       if (entry.minimized) {
@@ -10775,6 +10917,71 @@ class SimpleWindowManager {
     winEl.classList.remove('opening', 'restoring', 'closing', 'minimizing', 'minimized');
     winEl.classList.add(className);
     setTimeout(() => winEl.classList.remove(className), WM_EXIT_ANIMATION_MS + 80);
+  }
+
+  _markWindowFocusAcquired(winEl) {
+    if (!winEl) return;
+    const prior = this._focusAcquiredTimers.get(winEl);
+    if (prior) window.clearTimeout(prior);
+    winEl.classList.remove('focus-acquired');
+    // Restart the CSS keyframe even when focus returns to the same window.
+    void winEl.offsetWidth;
+    winEl.classList.add('focus-acquired');
+    winEl.dataset.focusTransition = 'acquired';
+    const timer = window.setTimeout(() => {
+      winEl.classList.remove('focus-acquired');
+      delete winEl.dataset.focusTransition;
+      this._focusAcquiredTimers.delete(winEl);
+    }, 420);
+    this._focusAcquiredTimers.set(winEl, timer);
+  }
+
+  _markTrafficCommandFeedback(button, action = '') {
+    if (!button) return;
+    const prior = this._trafficCommandTimers.get(button);
+    if (prior) window.clearTimeout(prior);
+    const command = String(action || button.dataset.action || 'window').trim() || 'window';
+    const winEl = button.closest('.wm-window');
+    button.classList.remove('commanding');
+    void button.offsetWidth;
+    button.classList.add('commanding');
+    button.dataset.windowCommandFeedback = command;
+    if (winEl) winEl.dataset.windowCommandFeedback = command;
+    const timer = window.setTimeout(() => {
+      button.classList.remove('commanding');
+      delete button.dataset.windowCommandFeedback;
+      if (winEl && winEl.dataset.windowCommandFeedback === command) delete winEl.dataset.windowCommandFeedback;
+      this._trafficCommandTimers.delete(button);
+    }, 320);
+    this._trafficCommandTimers.set(button, timer);
+  }
+
+  _setWindowMinimizeTarget(winEl, windowId) {
+    if (!winEl) return;
+    const id = String(windowId || winEl.dataset.surfaceId || winEl.dataset.canonicalId || '').trim();
+    const taskbarItem = id && this.taskbar
+      ? this.taskbar.querySelector(`.wm-taskbar-item[data-window-id-hint="${CSS.escape(id)}"]`)
+      : null;
+    const winRect = winEl.getBoundingClientRect();
+    const targetRect = taskbarItem
+      ? taskbarItem.getBoundingClientRect()
+      : (this.taskbar ? this.taskbar.getBoundingClientRect() : null);
+    if (!targetRect || !winRect.width || !winRect.height) {
+      this._clearWindowMinimizeTarget(winEl);
+      return;
+    }
+    const deltaX = Math.round((targetRect.left + targetRect.width / 2) - (winRect.left + winRect.width / 2));
+    const deltaY = Math.round((targetRect.top + targetRect.height / 2) - (winRect.top + winRect.height));
+    winEl.style.setProperty('--wm-minimize-target-x', `${deltaX}px`);
+    winEl.style.setProperty('--wm-minimize-target-y', `${deltaY}px`);
+    winEl.dataset.minimizeTarget = taskbarItem ? 'dock-item' : 'dock';
+  }
+
+  _clearWindowMinimizeTarget(winEl) {
+    if (!winEl) return;
+    winEl.style.removeProperty('--wm-minimize-target-x');
+    winEl.style.removeProperty('--wm-minimize-target-y');
+    delete winEl.dataset.minimizeTarget;
   }
 
   _renderElectronTaskbar() {
@@ -11692,6 +11899,7 @@ class SimpleWindowManager {
       if (!win) return;
       const surfaceId = win.dataset.surfaceId ?? '';
       const action = btn.dataset.action;
+      this._markTrafficCommandFeedback(btn, action);
       if (this.transport === 'electron-ipc' && this._electronWindows.has(surfaceId)) {
         if (action === 'close') this._electronCloseWindow(surfaceId);
         else if (action === 'minimize') this._electronMinimizeWindow(surfaceId);
@@ -11754,6 +11962,7 @@ class SimpleWindowManager {
     });
 
     document.addEventListener('wheel', (e) => {
+      if (this._handleTrackpadGesture(e)) return;
       const widget = e.target.closest('[data-canonical-id]');
       if (!widget) return;
       const cid = widget.dataset.canonicalId ?? '';

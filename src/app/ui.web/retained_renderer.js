@@ -75,6 +75,7 @@ export class RetainedRenderer {
     this.surfaceRoots = new Map();       // surface_id -> root canonical id
     this.surfaceBodies = new Map();      // surface_id -> body HTMLElement
     this.activeSurface = null;
+    this._focusAcquiredTimers = new WeakMap();
     this.protocolVersion = 1;
     this.snapshotRevision = 0;
     this.lastSequence = -1;
@@ -326,11 +327,15 @@ export class RetainedRenderer {
   setFocus(surfaceId, widgetId) {
     // Remove focused class from all surface roots.
     for (const el of this.surfaces.values()) {
-      el.classList.remove('focused');
+      el.classList.remove('focused', 'focus-acquired');
+      delete el.dataset.focusTransition;
     }
     const cid = _canonicalId(surfaceId, widgetId);
     const el = this.nodes.get(cid) ?? this.surfaces.get(surfaceId);
-    if (el) el.classList.add('focused');
+    if (el) {
+      el.classList.add('focused');
+      this._markFocusAcquired(el);
+    }
     this.activeSurface = surfaceId;
   }
 
@@ -517,6 +522,22 @@ export class RetainedRenderer {
     el.classList.remove('opening', 'restoring', 'closing', 'minimizing', 'minimized');
     el.classList.add(className);
     setTimeout(() => el.classList.remove(className), WM_EXIT_ANIMATION_MS + 80);
+  }
+
+  _markFocusAcquired(el) {
+    if (!el) return;
+    const prior = this._focusAcquiredTimers.get(el);
+    if (prior) clearTimeout(prior);
+    el.classList.remove('focus-acquired');
+    void el.offsetWidth;
+    el.classList.add('focus-acquired');
+    el.dataset.focusTransition = 'acquired';
+    const timer = setTimeout(() => {
+      el.classList.remove('focus-acquired');
+      delete el.dataset.focusTransition;
+      this._focusAcquiredTimers.delete(el);
+    }, 420);
+    this._focusAcquiredTimers.set(el, timer);
   }
 
   _makeSurfaceIcon(surface) {

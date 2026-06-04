@@ -4,4 +4,51 @@ set -eu
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
+if [ -n "${SIMPLE_BIN:-}" ]; then
+    SIMPLE="$SIMPLE_BIN"
+elif [ -x src/compiler_rust/target/debug/simple ]; then
+    SIMPLE="src/compiler_rust/target/debug/simple"
+else
+    SIMPLE="./bin/simple"
+fi
+
 sh scripts/check-workspace-root-guard.shs audit --staged
+
+run_tracking_generation() {
+    if [ ! -x "$SIMPLE" ]; then
+        echo "tracking hook: $SIMPLE is not executable" >&2
+        exit 1
+    fi
+
+    "$SIMPLE" todo-scan --log-mode=json --progress=summary >/dev/null
+    "$SIMPLE" todo-gen --log-mode=json --progress=summary >/dev/null
+    "$SIMPLE" feature-gen --db doc/08_tracking/feature/feature_db.sdn -o doc/08_tracking/feature >/dev/null
+    "$SIMPLE" task-gen --db doc/08_tracking/task/task_db.sdn -o doc/08_tracking/task >/dev/null
+    "$SIMPLE" bug-gen --db doc/08_tracking/bug/bug_db.sdn -o doc/08_tracking/bug >/dev/null
+}
+
+run_tracking_checks() {
+    "$SIMPLE" check-dbs --strict
+    "$SIMPLE" tracking check --kind=feature
+    "$SIMPLE" traceability-check --scope=all
+}
+
+require_generated_tracking_staged() {
+    changed="$(git diff --name-only -- \
+        doc/TODO.md \
+        doc/08_tracking/bug/bug_db.sdn \
+        doc/08_tracking/bug/recent_bugs.md \
+        doc/08_tracking/bug/bug_report.md \
+        doc/08_tracking/feature \
+        doc/08_tracking/task \
+        doc/08_tracking/todo/todo_db.sdn || true)"
+    if [ -n "$changed" ]; then
+        echo "tracking hook: generated tracking files changed; review and stage them:" >&2
+        echo "$changed" >&2
+        exit 1
+    fi
+}
+
+run_tracking_generation
+require_generated_tracking_staged
+run_tracking_checks

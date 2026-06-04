@@ -1,7 +1,7 @@
 //! SIMD byte (u8x16) operations.
 //!
 //! Phase 2 SEED of the SIMD int-intrinsics feature
-//! (`doc/08_tracking/feature_request/simd_int_intrinsics_for_crypto_2026-05-01.md`).
+//! (`doc/08_tracking/feature/simd_int_intrinsics_for_crypto_2026-05-01.md`).
 //!
 //! Currently exposes the `add_u8x16` lane kernel + `rt_simd_add_u8x16` extern
 //! "C" symbol. AES round / PCLMUL / shuffle ops are deferred to follow-up

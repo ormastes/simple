@@ -1,7 +1,7 @@
 //! SIMD integer bitwise / shift / arithmetic operations for i32x4 and i32x8.
 //!
 //! Phase 1 of the SIMD int-intrinsics feature
-//! (`doc/08_tracking/feature_request/simd_int_intrinsics_for_crypto_2026-05-01.md`).
+//! (`doc/08_tracking/feature/simd_int_intrinsics_for_crypto_2026-05-01.md`).
 //!
 //! These SFFI symbols back the `rt_simd_{add,sub,mul,xor,and,or,shl,shr}_i32x{4,8}`
 //! extern declarations in `src/lib/nogc_sync_mut/simd.spl`. They operate on

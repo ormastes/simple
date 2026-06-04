@@ -1,25 +1,29 @@
 # Simple CLI - feature-gen command
-# Generates feature documentation from feature_db.sdn
+# Generates tracking feature documentation from doc/08_tracking/feature/feature_db.sdn
 
 use std.cli.cli_util.{get_cli_args, parse_csv_fields}
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use app.io.mod.{file_exists, file_read, file_write, dir_create}
 use std.log.{error}
 
-val FEATURE_DB_PATH = "doc/02_requirements/feature/feature_db.sdn"
-val FEATURE_MD_PATH = "doc/02_requirements/feature/feature.md"
-val PENDING_MD_PATH = "doc/02_requirements/feature/pending_feature.md"
-val CATEGORY_DIR = "doc/02_requirements/feature/category"
+val FEATURE_DB_PATH = "doc/08_tracking/feature/feature_db.sdn"
+val FEATURE_MD_PATH = "doc/08_tracking/feature/feature.md"
+val REQUEST_MD_PATH = "doc/08_tracking/feature/request_feature.md"
+val CURRENT_MD_PATH = "doc/08_tracking/feature/current_feature.md"
+val DONE_MD_PATH = "doc/08_tracking/feature/done_feature.md"
+val GROUP_DIR = "doc/08_tracking/feature/group"
 
 fn print_help():
     print "Usage: simple feature-gen [options]"
     print ""
-    print "Generate feature documentation from feature_db.sdn."
+    print "Generate feature tracking documentation from feature_db.sdn."
     print ""
     print "Outputs:"
-    print "  doc/02_requirements/feature/feature.md           Category index"
-    print "  doc/02_requirements/feature/pending_feature.md   Incomplete features"
-    print "  doc/02_requirements/feature/category/*.md        Per-category pages"
+    print "  doc/08_tracking/feature/feature.md           Group/status index"
+    print "  doc/08_tracking/feature/request_feature.md   Requested features"
+    print "  doc/08_tracking/feature/current_feature.md   Current feature work"
+    print "  doc/08_tracking/feature/done_feature.md      Done feature records"
+    print "  doc/08_tracking/feature/group/*.md           Per-group pages"
     print ""
     print "Options:"
     print "  --json       Output summary as JSON"
@@ -35,28 +39,48 @@ fn _is_log_option(arg: text) -> bool:
         arg == "--progress" or arg.starts_with("--log-mode=") or
         arg.starts_with("--surface=") or arg.starts_with("--progress=")
 
+fn _json_escape(value: text) -> text:
+    val slashes = value.replace("\\", "\\\\")
+    val quotes = slashes.replace("\"", "\\\"")
+    quotes.replace("\n", "\\n")
+
 struct Feature:
     id: text
-    category: text
-    name: text
+    group: text
+    device: text
+    component: text
+    title: text
     description: text
-    spec: text
-    mode_interpreter: text
-    mode_jit: text
-    mode_smf_cranelift: text
-    mode_smf_llvm: text
-    platforms: text
     status: text
+    priority: text
+    source_file: text
+    requirement: text
+    research: text
+    plan: text
+    architecture: text
+    design: text
+    system_spec: text
+    spec_doc: text
+    implementation: text
+    unit_tests: text
+    integration_tests: text
+    guide: text
+    external_system: text
+    external_id: text
+    external_url: text
+    last_synced_at: text
+    created_at: text
+    updated_at: text
     valid: bool
 
 fn load_features() -> [Feature]:
     if not file_exists(FEATURE_DB_PATH):
-        error("feature_gen", "{FEATURE_DB_PATH} not found")
+        error("feature-gen", "{FEATURE_DB_PATH} not found")
         return []
 
     val content = file_read(FEATURE_DB_PATH)
     val lines = content.split("\n")
-    var features = []
+    var features: [Feature] = []
     var in_table = false
 
     for line in lines:
@@ -70,216 +94,154 @@ fn load_features() -> [Feature]:
             continue
 
         val fields = parse_csv_fields(trimmed)
-        if fields.len() >= 12:
+        if fields.len() >= 27:
             features.push(Feature(
                 id: fields[0],
-                category: fields[1],
-                name: fields[2],
-                description: fields[3],
-                spec: fields[4],
-                mode_interpreter: fields[5],
-                mode_jit: fields[6],
-                mode_smf_cranelift: fields[7],
-                mode_smf_llvm: fields[8],
-                platforms: fields[9],
-                status: fields[10],
-                valid: fields[11] == "true"
+                group: fields[1],
+                device: fields[2],
+                component: fields[3],
+                title: fields[4],
+                description: fields[5],
+                status: fields[6],
+                priority: fields[7],
+                source_file: fields[8],
+                requirement: fields[9],
+                research: fields[10],
+                plan: fields[11],
+                architecture: fields[12],
+                design: fields[13],
+                system_spec: fields[14],
+                spec_doc: fields[15],
+                implementation: fields[16],
+                unit_tests: fields[17],
+                integration_tests: fields[18],
+                guide: fields[19],
+                external_system: fields[20],
+                external_id: fields[21],
+                external_url: fields[22],
+                last_synced_at: fields[23],
+                created_at: fields[24],
+                updated_at: fields[25],
+                valid: fields[26] == "true"
             ))
 
     features
 
-fn get_categories(features: [Feature]) -> [text]:
-    var cats: [text] = []
+fn normalize_group(group: text) -> text:
+    if group == "":
+        return "general"
+    group
+
+fn get_groups(features: [Feature]) -> [text]:
+    var groups: [text] = []
     for f in features:
         if f.valid:
-            var already_seen = false
-            for c in cats:
-                if c == f.category:
-                    already_seen = true
-            if not already_seen:
-                cats.push(f.category)
-    cats
+            val group = normalize_group(f.group)
+            if not groups.contains(group):
+                groups.push(group)
+    groups
 
-fn count_status(features: [Feature], category: text, status: text) -> i64:
+fn count_group_status(features: [Feature], group: text, status: text) -> i64:
     var count = 0
     for f in features:
-        if f.valid and f.category == category and f.status == status:
+        if f.valid and normalize_group(f.group) == group and f.status == status:
             count = count + 1
     count
 
-fn count_all_valid(features: [Feature], category: text) -> i64:
+fn count_group_total(features: [Feature], group: text) -> i64:
     var count = 0
     for f in features:
-        if f.valid and f.category == category:
+        if f.valid and normalize_group(f.group) == group:
             count = count + 1
     count
 
-fn find_last_id(features: [Feature]) -> text:
-    var last = ""
+fn count_status(features: [Feature], status: text) -> i64:
+    var count = 0
+    for f in features:
+        if f.valid and f.status == status:
+            count = count + 1
+    count
+
+fn count_valid(features: [Feature]) -> i64:
+    var count = 0
     for f in features:
         if f.valid:
-            last = f.id
-    if last == "":
-        return "0"
-    last
+            count = count + 1
+    count
 
-fn sanitize_category(cat: text) -> text:
-    cat.replace(" ", "_")
+fn sanitize_name(name: text) -> text:
+    name.replace(" ", "_").replace("/", "_").replace("\\", "_")
 
-# --- Generate feature.md ---
+fn link_or_dash(path: text) -> text:
+    if path == "" or path == "none" or path == "tbd":
+        return "-"
+    "[link]({path})"
 
 fn generate_feature_md(features: [Feature]) -> text:
-    val cats = get_categories(features)
-    val last_id = find_last_id(features)
+    val groups = get_groups(features)
+    val total = count_valid(features)
+    val request = count_status(features, "request")
+    val current = count_status(features, "current")
+    val done = count_status(features, "done")
+    val blocked = count_status(features, "blocked")
+    val rejected = count_status(features, "rejected")
 
     var lines: [text] = []
-    lines.push("# Feature Categories")
+    lines.push("# Feature Tracking")
     lines.push("")
-    lines.push("Last ID: `{last_id}`")
+    lines.push("**Database:** `{FEATURE_DB_PATH}`")
+    lines.push("**Generated:** 2026-06-04")
     lines.push("")
-    lines.push("| Category | Features | Skips | Ignores | Fails |")
-    lines.push("|----------|----------|-------|---------|-------|")
-
-    for cat in cats:
-        val total = count_all_valid(features, cat)
-        val complete = count_status(features, cat, "complete")
-        val skipped = count_status(features, cat, "skipped")
-        val ignored = count_status(features, cat, "ignored")
-        val failed = count_status(features, cat, "failed")
-        val safe_cat = sanitize_category(cat)
-        lines.push("| [{cat}](category/{safe_cat}.md) | {total} | {skipped} | {ignored} | {failed} |")
-
+    lines.push("| Total | Request | Current | Done | Blocked | Rejected |")
+    lines.push("|-------|---------|---------|------|---------|----------|")
+    lines.push("| {total} | {request} | {current} | {done} | {blocked} | {rejected} |")
+    lines.push("")
+    lines.push("## Groups")
+    lines.push("")
+    lines.push("| Group | Total | Request | Current | Done | Blocked | Rejected |")
+    lines.push("|-------|-------|---------|---------|------|---------|----------|")
+    for group in groups:
+        val safe = sanitize_name(group)
+        lines.push("| [{group}](group/{safe}.md) | {count_group_total(features, group)} | {count_group_status(features, group, \"request\")} | {count_group_status(features, group, \"current\")} | {count_group_status(features, group, \"done\")} | {count_group_status(features, group, \"blocked\")} | {count_group_status(features, group, \"rejected\")} |")
     lines.push("")
     lines.join("\n")
 
-# --- Generate pending_feature.md ---
-
-fn generate_pending_md(features: [Feature]) -> text:
-    var pending: [Feature] = []
-    for f in features:
-        if f.valid and f.status != "complete":
-            pending.push(f)
-
-    var total_valid = 0
-    for f in features:
-        if f.valid:
-            total_valid = total_valid + 1
-    val complete_count = total_valid - pending.len()
-    var pct = 0
-    if total_valid > 0:
-        pct = (complete_count * 100) / total_valid
-
-    var failed = 0
-    var in_progress = 0
-    var planned = 0
-    var ignored = 0
-    for f in pending:
-        if f.status == "failed":
-            failed = failed + 1
-        elif f.status == "in_progress":
-            in_progress = in_progress + 1
-        elif f.status == "planned":
-            planned = planned + 1
-        elif f.status == "ignored":
-            ignored = ignored + 1
-
+fn generate_status_md(features: [Feature], status: text, title: text) -> text:
     var lines: [text] = []
-    lines.push("# Pending Features")
+    lines.push("# {title}")
     lines.push("")
-    lines.push("**Generated:** 2026-02-03")
-    lines.push("**Total Pending:** {pending.len()} features")
+    lines.push("**Database:** `{FEATURE_DB_PATH}`")
     lines.push("")
-    lines.push("## Summary")
+    lines.push("| ID | Group | Priority | Title | Requirement | External |")
+    lines.push("|----|-------|----------|-------|-------------|----------|")
+    for f in features:
+        if f.valid and f.status == status:
+            lines.push("| {f.id} | {normalize_group(f.group)} | {f.priority} | {f.title} | {link_or_dash(f.requirement)} | {link_or_dash(f.external_url)} |")
     lines.push("")
-    lines.push("| Status | Count | Priority |")
-    lines.push("|--------|-------|---------|")
-    lines.push("| Failed | {failed} | \U0001F534 Critical |")
-    lines.push("| In Progress | {in_progress} | \U0001F7E1 High |")
-    lines.push("| Planned | {planned} | \U0001F7E2 Medium |")
-    lines.push("| Ignored | {ignored} | \u26AA Low |")
-    lines.push("")
-    lines.push("**Completion:** {pct}.0% ({complete_count} complete / {total_valid} total)")
-    lines.push("")
-    lines.push("---")
-    lines.push("")
-    lines.push("## Progress by Category")
-    lines.push("")
-    lines.push("| Category | Total | Complete | Pending | % Complete |")
-    lines.push("|----------|-------|----------|---------|------------|")
-
-    val cats = get_categories(features)
-    for cat in cats:
-        val total = count_all_valid(features, cat)
-        val comp = count_status(features, cat, "complete")
-        val pend = total - comp
-        if pend > 0:
-            var cat_pct = 0
-            if total > 0:
-                cat_pct = (comp * 100) / total
-            lines.push("| {cat} | {total} | {comp} | {pend} | {cat_pct}% |")
-
-    lines.push("")
-    lines.push("---")
-    lines.push("")
-    lines.push("## Implementation Priority")
-    lines.push("")
-
-    # Critical (failed)
-    lines.push("### Critical (Do First)")
-    lines.push("")
-    for f in pending:
-        if f.status == "failed":
-            lines.push("- **{f.id}** {f.name} ({f.category}): {f.description}")
-    lines.push("")
-
-    # High (in_progress)
-    lines.push("### High (Next Sprint)")
-    for f in pending:
-        if f.status == "in_progress":
-            lines.push("- **{f.id}** {f.name} ({f.category}): {f.description}")
-    lines.push("3. Planned features with dependencies")
-    lines.push("")
-
-    # Medium (planned)
-    lines.push("### Medium (Backlog)")
-    lines.push("")
-    for f in pending:
-        if f.status == "planned":
-            lines.push("- **{f.id}** {f.name} ({f.category}): {f.description}")
-    lines.push("")
-
-    # Low (ignored)
-    lines.push("### Low (Future)")
-    lines.push("")
-    for f in pending:
-        if f.status == "ignored":
-            lines.push("- **{f.id}** {f.name} ({f.category}): {f.description}")
-    lines.push("")
-
     lines.join("\n")
 
-# --- Generate category/*.md ---
-
-fn generate_category_md(features: [Feature], category: text) -> text:
+fn generate_group_md(features: [Feature], group: text) -> text:
     var lines: [text] = []
-    lines.push("# {category}")
+    lines.push("# Feature Group: {group}")
     lines.push("")
-    lines.push("## Features")
-    lines.push("")
-    lines.push("| ID | Feature | Description | Modes | Platforms | Spec |")
-    lines.push("|----|---------|-------------|-------|-----------|------|")
-
+    lines.push("| ID | Status | Device | Component | Priority | Title | Pipeline Evidence |")
+    lines.push("|----|--------|--------|-----------|----------|-------|-------------------|")
     for f in features:
-        if f.valid and f.category == category:
-            val modes = "interpreter:{f.mode_interpreter}, jit:{f.mode_jit}, smf_cranelift:{f.mode_smf_cranelift}, smf_llvm:{f.mode_smf_llvm}"
-            var plat = f.platforms
-            if plat == "":
-                plat = "-"
-            var spec_link = "-"
-            if f.spec != "":
-                spec_link = "[{f.spec}](../../{f.spec}#feature-{f.id})"
-            lines.push("| <a id=\"feature-{f.id}\"></a>{f.id} | {f.name} | {f.description} | {modes} | {plat} | {spec_link} |")
-
+        if f.valid and normalize_group(f.group) == group:
+            var evidence = ""
+            if f.requirement != "": evidence = evidence + " req"
+            if f.research != "": evidence = evidence + " research"
+            if f.plan != "": evidence = evidence + " plan"
+            if f.architecture != "": evidence = evidence + " arch"
+            if f.design != "": evidence = evidence + " design"
+            if f.system_spec != "": evidence = evidence + " system_spec"
+            if f.spec_doc != "": evidence = evidence + " spec_doc"
+            if f.implementation != "": evidence = evidence + " impl"
+            if f.unit_tests != "": evidence = evidence + " unit"
+            if f.integration_tests != "": evidence = evidence + " integration"
+            if f.guide != "": evidence = evidence + " guide"
+            if evidence == "": evidence = "-"
+            lines.push("| {f.id} | {f.status} | {f.device} | {f.component} | {f.priority} | {f.title} | {evidence.trim()} |")
     lines.push("")
     lines.join("\n")
 
@@ -291,7 +253,6 @@ fn main() -> i64:
         return 1
 
     var as_json = log_opts.log_mode == "json"
-
     var ai = 0
     while ai < args.len():
         val arg = args[ai]
@@ -309,40 +270,29 @@ fn main() -> i64:
     val features = load_features()
     if features.len() == 0:
         if as_json:
-            print "{\"command\":\"feature-gen\",\"status\":\"error\",\"features\":0,\"categories\":0}"
+            print "{\"command\":\"feature-gen\",\"status\":\"error\",\"features\":0,\"groups\":0}"
         else:
             print "No features found in {FEATURE_DB_PATH}"
         return 1
 
-    # Generate feature.md
-    val feature_md = generate_feature_md(features)
-    file_write(FEATURE_MD_PATH, feature_md)
-    if not as_json:
-        print "Generated {FEATURE_MD_PATH}"
+    file_write(FEATURE_MD_PATH, generate_feature_md(features))
+    file_write(REQUEST_MD_PATH, generate_status_md(features, "request", "Requested Features"))
+    file_write(CURRENT_MD_PATH, generate_status_md(features, "current", "Current Features"))
+    file_write(DONE_MD_PATH, generate_status_md(features, "done", "Done Features"))
 
-    # Generate pending_feature.md
-    val pending_md = generate_pending_md(features)
-    file_write(PENDING_MD_PATH, pending_md)
-    if not as_json:
-        print "Generated {PENDING_MD_PATH}"
-
-    # Generate category pages
-    dir_create(CATEGORY_DIR, true)
-    val cats = get_categories(features)
-    for cat in cats:
-        val safe_cat = sanitize_category(cat)
-        val path = "{CATEGORY_DIR}/{safe_cat}.md"
-        val cat_md = generate_category_md(features, cat)
-        file_write(path, cat_md)
-        if not as_json:
-            print "Generated {path}"
+    dir_create(GROUP_DIR, true)
+    val groups = get_groups(features)
+    for group in groups:
+        val safe = sanitize_name(group)
+        file_write("{GROUP_DIR}/{safe}.md", generate_group_md(features, group))
 
     if log_opts.progress != "summary" and not as_json:
         val progress_line = render_progress(log_opts.progress, features.len(), features.len(), "feature-gen")
         if progress_line != "":
             print progress_line
     if as_json:
-        print "{\"command\":\"feature-gen\",\"status\":\"ok\",\"features\":{features.len()},\"categories\":{cats.len()}}"
+        val db_json = _json_escape(FEATURE_DB_PATH)
+        print "{\"command\":\"feature-gen\",\"status\":\"ok\",\"features\":{features.len()},\"groups\":{groups.len()},\"db\":\"{db_json}\"}"
     else:
-        print "Done. Generated docs for {features.len()} features in {cats.len()} categories."
+        print "Done. Generated tracking docs for {features.len()} features in {groups.len()} groups."
     0

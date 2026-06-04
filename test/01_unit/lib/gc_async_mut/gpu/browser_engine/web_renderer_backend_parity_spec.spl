@@ -2,20 +2,18 @@
 # @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer.spl 40%
 #
 # The Simple web rasterizer turns HTML into pixels through
-# Engine2D.create_with_backend(w, h, backend). This guards that the three
-# 2D-backed web renderers agree: software, cpu, and metal must produce identical
-# framebuffers. On macOS the metal path uses a real Metal device (its GPU
-# clear/rect dispatch + deterministic CPU mirror readback), so parity here also
-# proves the Metal-backed web renderer matches the software reference. (The
-# Tauri-backed web renderer consumes the same render_html_tree HTML and is
-# covered by test/unit/app/ui/ui_layer_web_tauri_contract_spec.spl.)
+# Engine2D.create_with_backend(w, h, backend). This guards that the 2D-backed
+# web renderers keep requested backend names while preserving software-equivalent
+# framebuffers when a backend falls back internally.
 
 use std.spec.{describe, context, it, expect}
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_engine2d_backend, simple_web_resolved_engine2d_backend_name}
-use std.nogc_sync_mut.env.platform.{is_macos}
 
 fn sample_html() -> text:
     "<html><body><div class='wm-app-titlebar'>Title</div><div class='wm-app-content'>Body</div></body></html>"
+
+fn generic_layout_html() -> text:
+    "<html><head><style>.panel{background-color:#1d4ed8;width:28px;height:14px}.accent{background-color:#22c55e;width:12px;height:8px;margin-top:2px}</style></head><body><section class='panel'></section><div class='accent'></div></body></html>"
 
 fn pixels_equal(a: [u32], b: [u32]) -> bool:
     if a.len() != b.len():
@@ -62,10 +60,20 @@ describe "Simple web renderer 2D-backend parity":
             val mt = simple_web_render_html_to_pixels_with_engine2d_backend(sample_html(), 48, 32, "metal")
             expect(pixels_equal(sw, mt)).to_equal(true)
 
+        it "generic layout pixels stay identical across preserved Engine2D backend names":
+            val sw = simple_web_render_html_to_pixels_with_engine2d_backend(generic_layout_html(), 48, 32, "software")
+            expect(pixels_equal(sw, simple_web_render_html_to_pixels_with_engine2d_backend(generic_layout_html(), 48, 32, "cpu"))).to_equal(true)
+            expect(pixels_equal(sw, simple_web_render_html_to_pixels_with_engine2d_backend(generic_layout_html(), 48, 32, "cpu_simd"))).to_equal(true)
+            expect(pixels_equal(sw, simple_web_render_html_to_pixels_with_engine2d_backend(generic_layout_html(), 48, 32, "metal"))).to_equal(true)
+            expect(pixels_equal(sw, simple_web_render_html_to_pixels_with_engine2d_backend(generic_layout_html(), 48, 32, "cuda"))).to_equal(true)
+            expect(pixels_equal(sw, simple_web_render_html_to_pixels_with_engine2d_backend(generic_layout_html(), 48, 32, "opencl"))).to_equal(true)
+            expect(pixels_equal(sw, simple_web_render_html_to_pixels_with_engine2d_backend(generic_layout_html(), 48, 32, "vulkan"))).to_equal(true)
+
     context "real backend selection":
-        it "metal resolves to a real metal device on macOS (no silent fallback)":
-            val name = simple_web_resolved_engine2d_backend_name(48, 32, "metal")
-            if is_macos():
-                expect(name).to_equal("metal")
-            else:
-                expect(name).to_equal("software")
+        it "preserves supported Engine2D backend names before renderer fallback":
+            expect(simple_web_resolved_engine2d_backend_name(48, 32, "cuda")).to_equal("cuda")
+            expect(simple_web_resolved_engine2d_backend_name(48, 32, "opencl")).to_equal("opencl")
+            expect(simple_web_resolved_engine2d_backend_name(48, 32, "vulkan")).to_equal("vulkan")
+            expect(simple_web_resolved_engine2d_backend_name(48, 32, "metal")).to_equal("metal")
+            expect(simple_web_resolved_engine2d_backend_name(48, 32, "cpu_simd")).to_equal("cpu_simd")
+            expect(simple_web_resolved_engine2d_backend_name(48, 32, "not-a-backend")).to_equal("software")

@@ -118,10 +118,10 @@ For each source file in scope:
 ### Phase 6 — Architecture & Design Doc Verification
 
 1. **Architecture doc** (`doc/04_architecture/`):
-   - If new modules/layers were added → verify `doc/04_architecture/overview.md` or relevant arch doc is updated
+   - If new modules/layers were added → verify `doc/04_architecture/infra/overview.md` or relevant arch doc is updated
    - If compiler pipeline changed → verify pipeline docs reflect the change
    - If new ADR-worthy decision was made → check `doc/04_architecture/adr/` has a record
-   - Check `doc/04_architecture/file_class_structure.md` references new files
+   - Check `doc/04_architecture/compiler/file_class_structure.md` references new files
 
 2. **Design doc** (`doc/05_design/`):
    - If a new feature was implemented → verify `doc/05_design/<feature>.md` exists
@@ -132,7 +132,7 @@ For each source file in scope:
 ```
 [PASS] doc/05_design/batch_processing.md — exists, cross-references REQ doc
 [FAIL] doc/05_design/new_parser.md — MISSING (new parser module has no design doc)
-[WARN] doc/04_architecture/overview.md — not updated for new module "optimizer_v2"
+[WARN] doc/04_architecture/infra/overview.md — not updated for new module "optimizer_v2"
 ```
 
 ---

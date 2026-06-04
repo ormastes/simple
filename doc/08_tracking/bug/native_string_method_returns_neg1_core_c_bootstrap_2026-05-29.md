@@ -118,5 +118,5 @@ This closes the deployment gap for `.len()`, `.slice()`, and `.substring()`.
 
 ## See also
 
-- `doc/08_tracking/feature_request/editor_markdown_editing_subsystem_2026-05-28.md`
+- `doc/08_tracking/feature/editor_markdown_editing_subsystem_2026-05-28.md`
 - `doc/08_tracking/bug/editor_jit_run_route_blockers_2026-05-28.md`

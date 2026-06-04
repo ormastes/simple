@@ -371,4 +371,4 @@ Semantic difference justifies separate implementations. Attempting to unify woul
 - Phases 1-4 Summary: `doc/09_report/semantic_deduplication_complete_2026-02-16.md`
 - Phase 4 Report: `doc/09_report/phase4_mcp_protocol_consolidation_2026-02-16.md`
 - Original Plan: `.claude/plans/calm-nibbling-octopus.md`
-- Architecture: `doc/04_architecture/file_class_structure.md`
+- Architecture: `doc/04_architecture/compiler/file_class_structure.md`

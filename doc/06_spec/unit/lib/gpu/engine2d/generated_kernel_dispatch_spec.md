@@ -1,5 +1,39 @@
 # Generated Kernel Dispatch Specification
 
+> <details>
+
+<!-- sdn-diagram:id=generated_kernel_dispatch_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=generated_kernel_dispatch_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+generated_kernel_dispatch_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=generated_kernel_dispatch_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 19 | 19 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Generated Kernel Dispatch Specification
+
 ## Scenarios
 
 ### Engine2D generated 2D kernel dispatch metadata
@@ -486,3 +520,6 @@ Tests covering:
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
+
+</details>

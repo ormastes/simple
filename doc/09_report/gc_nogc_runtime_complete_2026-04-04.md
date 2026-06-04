@@ -11,7 +11,7 @@ Completed the GC/no-GC runtime-family feature across all 7 agent workstreams. Th
 ## Agent Results
 
 ### Agent 1: Runtime Contract Audit (Phase 1)
-- **Deliverable:** `doc/04_architecture/runtime_family_support_matrix.md`
+- **Deliverable:** `doc/04_architecture/runtime/runtime_family_support_matrix.md`
 - Classified 9 families: 5 public, 1 advanced-scoped, 3 internal-only
 - Identified 10 gaps with agent assignments
 - Answered 5 critical early decisions
@@ -32,7 +32,7 @@ Completed the GC/no-GC runtime-family feature across all 7 agent workstreams. Th
 ### Agent 4: Stdlib Family Parity (Phase 2c)
 - **Gap 4 fixed:** Created `src/lib/nogc_async_mut_noalloc/__init__.spl` (root init with 13 sub-module exports)
 - **Gap 9 confirmed:** 3 missing families (gc_sync_immut, gc_sync_mut, nogc_sync_immut) remain internal-only — no directories created
-- **Deliverable:** `doc/04_architecture/runtime_family_stdlib_surface.md`
+- **Deliverable:** `doc/04_architecture/lib/runtime_family_stdlib_surface.md`
 - Found accidental duplication: `nogc_sync_mut` has both `compress/` and `compression/`
 
 ### Agent 5: Target Presets & Baremetal Mapping (Phase 2d)
@@ -67,8 +67,8 @@ Completed the GC/no-GC runtime-family feature across all 7 agent workstreams. Th
 ## Files Created/Modified
 
 ### New files (11)
-- `doc/04_architecture/runtime_family_support_matrix.md`
-- `doc/04_architecture/runtime_family_stdlib_surface.md`
+- `doc/04_architecture/runtime/runtime_family_support_matrix.md`
+- `doc/04_architecture/lib/runtime_family_stdlib_surface.md`
 - `doc/09_report/gc_nogc_runtime_complete_2026-04-04.md` (this file)
 - `src/compiler/35.semantics/gc_boundary_check.spl`
 - `src/lib/nogc_async_mut_noalloc/__init__.spl`

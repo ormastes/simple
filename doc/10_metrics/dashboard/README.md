@@ -157,8 +157,8 @@ Collection performance targets:
 
 The dashboard reuses existing data sources:
 
-- `doc/todo/todo_db.sdn` → `tables/todos.sdn` (extended schema)
-- `doc/02_requirements/feature/feature_db.sdn` → `tables/features.sdn` (compatible)
-- `doc/task/task_db.sdn` → `tables/plans.sdn` (integrated)
+- `doc/08_tracking/todo/todo_db.sdn` → `tables/todos.sdn` (extended schema)
+- `doc/08_tracking/feature/feature_db.sdn` → `tables/features.sdn` (compatible)
+- `doc/08_tracking/task/task_db.sdn` → `tables/plans.sdn` (integrated)
 
 Migration is automatic during first collection.

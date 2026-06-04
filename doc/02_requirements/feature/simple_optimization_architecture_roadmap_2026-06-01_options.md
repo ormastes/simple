@@ -3,7 +3,7 @@
 Date: 2026-06-01
 
 Scope: Lane E persistent SMF profile (`.sprof`) work from
-`doc/01_research/local/simple_optimization_architecture_roadmap_2026-06-01.md`.
+`doc/01_research/compiler/simple_optimization_architecture_roadmap_2026-06-01.md`.
 These are requirement options only. Final requirements must be selected before
 implementation.
 

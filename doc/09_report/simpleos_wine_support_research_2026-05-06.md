@@ -39,7 +39,7 @@ SimpleOS has promising pieces: x86_64 boot, FAT32 desktop disk proof, GUI/WM sca
 
 ## Evidence
 
-- Local research: `doc/01_research/local/simpleos_wine_support.md`
-- Domain research: `doc/01_research/domain/simpleos_wine_support.md`
+- Local research: `doc/01_research/os/simpleos_wine_support.md`
+- Domain research: `doc/01_research/os/simpleos_wine_support.md`
 - Key local blockers: `doc/09_report/simpleos_implementation_status_2026-04-04.md`, `doc/03_plan/agent_tasks/simpleos_missing_os_subsystems_report.md`, `doc/09_report/fr_sos_024_desktop_disk_live_2026-04-22.md`
 - External sources: WineHQ, Wine build-dependencies wiki, Wine source-tree wiki, Wine Developer Guide.

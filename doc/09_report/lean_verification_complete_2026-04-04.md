@@ -5,7 +5,7 @@
 
 ## Summary
 
-Completed the Lean verification product workflow for the Simple language compiler. The implementation covers the full path from annotated Simple source code to formal Lean 4 proof obligations, including generation, checking, caching, reporting, and public documentation. All features are bounded by the contract in `doc/04_architecture/lean_verification_contract.md`.
+Completed the Lean verification product workflow for the Simple language compiler. The implementation covers the full path from annotated Simple source code to formal Lean 4 proof obligations, including generation, checking, caching, reporting, and public documentation. All features are bounded by the contract in `doc/04_architecture/infra/lean_verification_contract.md`.
 
 ## What Was Built
 
@@ -77,7 +77,7 @@ Completed the Lean verification product workflow for the Simple language compile
 
 - **User guide**: `doc/07_guide/lean_verification_workflow.md` -- quick start, feature reference, commands, states, cache, reporting, limitations, examples
 - **Completion report**: this document
-- **Contract document**: `doc/04_architecture/lean_verification_contract.md` (created in Phase 0, referenced throughout)
+- **Contract document**: `doc/04_architecture/infra/lean_verification_contract.md` (created in Phase 0, referenced throughout)
 
 ## Files Created
 
@@ -164,7 +164,7 @@ Completed the Lean verification product workflow for the Simple language compile
 
 | File | Purpose |
 |------|---------|
-| `doc/04_architecture/lean_verification_contract.md` | Authoritative contract (feature matrix, state model, commands) |
+| `doc/04_architecture/infra/lean_verification_contract.md` | Authoritative contract (feature matrix, state model, commands) |
 | `doc/07_guide/lean_verification_workflow.md` | User guide |
 | `doc/09_report/lean_verification_complete_2026-04-04.md` | This completion report |
 

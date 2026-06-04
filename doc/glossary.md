@@ -233,7 +233,7 @@ Simple Optimization Plugin is the named extension point for reusable compiler an
 
 See:
 - `doc/07_guide/compiler_optimization_plugin.md`
-- `doc/04_architecture/simple_optimization_plugin.md`
+- `doc/04_architecture/compiler/simple_optimization_plugin.md`
 - `doc/06_spec/app/compiler/feature/simple_optimization_plugin_spec.md`
 
 ## Fully shared frontend
@@ -366,6 +366,34 @@ describe "Parser deplyomeent coverage":
 
 ---
 
+## Simple Gui Texture Tree Interface (SGTTI)
+
+Unified read-only interface for inspecting GUI state as a texture/widget tree
+hierarchy. SGTTI normalizes surfaces from four sources — TRACE32 text windows,
+Simple UI access snapshots, host WM top-level windows, and **SimpleOS compositor
+surfaces** — into one `WinTextSnapshot` tree that the `win_text_access` core
+exposes through snapshot/query/action operations.
+
+Consumers access SGTTI through the `play_wm_text_*` MCP tools or the
+`win_text_*` API in `common.ui.win_text_access`. Each source produces
+`UiAccessNode` trees with source-specific props; the shared query/action layer
+handles filtering, find, and routing uniformly.
+
+The compositor source (`WIN_TEXT_SOURCE_COMPOSITOR`) bridges `Compositor`
+surfaces into access nodes, including in **hidden WM mode** where the compositor
+populates its surface tree without rendering to a display backend — enabling
+headless GUI testing.
+
+Key paths:
+
+- **Common core:** `src/lib/common/ui/win_text_access.spl`
+- **Compositor adapter:** `src/os/compositor/gtti.spl`
+- **WM hidden mode:** `src/os/compositor/wm_core.spl` (`WM_MODE_HIDDEN`)
+- **MCP tools:** `src/app/mcp/main_lazy_play_tools.spl` (`play_wm_text_*`)
+- **Hub re-exports:** `src/lib/common/ui/access.spl`
+
+---
+
 ## MDSOC+ (Architecture)
 
 **MDSOC outer + ECS business layer.** Default architecture for SimpleOS userland services and apps since 2026-04-17. The MDSOC capsule boundary (manifest, ports, capabilities, lifecycle) stays unchanged; inside a capsule, mutable domain state is modelled with an ECS `World`. Kernel (`src/os/kernel/`) and drivers (`src/os/drivers/`) stay MDSOC-only and do **not** use ECS. See `mdsoc_architecture_tobe.md#mdsoc-plus-ecs-business-layer`.
@@ -477,7 +505,7 @@ Key paths:
 - **Research:** `doc/01_research/simple_db_research.md`
 - **Design:** `doc/05_design/simple_db_design.md`, `doc/05_design/nvfs/from_simple_db.md`
 - **Accel / SIMD:** `doc/05_design/simple_db_shared_accel_simd.md`
-- **Feature requests:** `doc/08_tracking/feature_request/simple_db_requests.md`
+- **Feature requests:** `doc/08_tracking/feature/simple_db_requests.md`
 - **Guide:** `doc/07_guide/simple_db.md`
 
 ## DBFS (Database Filesystem)
@@ -500,7 +528,7 @@ Hardware description at the register-and-combinational-logic abstraction. In Sim
 
 ## VHDL Backend
 
-The compiler backend that lowers MIR to VHDL-2008 entity/architecture pairs. Each function becomes one VHDL entity. The backend enforces the VHDL Hardware Subset Contract: floating-point, pointers, dynamic allocation, and runtime features produce hard compile errors. Defined in `src/compiler/70.backend/backend/vhdl/`. Contract documented in `doc/04_architecture/vhdl_hardware_subset_contract.md`.
+The compiler backend that lowers MIR to VHDL-2008 entity/architecture pairs. Each function becomes one VHDL entity. The backend enforces the VHDL Hardware Subset Contract: floating-point, pointers, dynamic allocation, and runtime features produce hard compile errors. Defined in `src/compiler/70.backend/backend/vhdl/`. Contract documented in `doc/04_architecture/hardware/vhdl_hardware_subset_contract.md`.
 
 ## VHDL Hardware Subset Contract
 
@@ -542,7 +570,7 @@ A 3-instruction magic sequence (`SLLI zero,zero,0x1f` → `EBREAK` → `SRAI zer
 
 ## Mailbox Protocol
 
-MMIO-based proof channel for GHDL simulation tests. Software writes command (PUTC/EXIT/RESULT) + arguments to the mailbox at 0x80FF0000, then writes trigger magic (0x0000DEAD). The testbench monitors trigger and checks results. Spec in `doc/04_architecture/ghdl_rv32_mailbox_protocol.md`. Constants in `rv32i_rtl/pkg.spl`.
+MMIO-based proof channel for GHDL simulation tests. Software writes command (PUTC/EXIT/RESULT) + arguments to the mailbox at 0x80FF0000, then writes trigger magic (0x0000DEAD). The testbench monitors trigger and checks results. Spec in `doc/04_architecture/hardware/ghdl_rv32_mailbox_protocol.md`. Constants in `rv32i_rtl/pkg.spl`.
 
 ## FPGA Synthesis Flow
 

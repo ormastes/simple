@@ -49,4 +49,4 @@ bin/simple lint file.spl --fix     # Auto-fix
 
 ## MDSOC+ for OS Userland
 
-When writing code under `src/os/services/` or `src/os/apps/`: use **MDSOC+** — MDSOC capsule outer + ECS business layer inner. Model processes, sockets, windows, files, tabs, etc. as ECS entities with components, not as nested structs. Stdlib: `use std.ecs`. Kernel/drivers stay MDSOC-only. See `ref_architecture.md` §MDSOC+ and `doc/04_architecture/mdsoc_architecture_tobe.md` §Part 3.
+When writing code under `src/os/services/` or `src/os/apps/`: use **MDSOC+** — MDSOC capsule outer + ECS business layer inner. Model processes, sockets, windows, files, tabs, etc. as ECS entities with components, not as nested structs. Stdlib: `use std.ecs`. Kernel/drivers stay MDSOC-only. See `ref_architecture.md` §MDSOC+ and `doc/04_architecture/compiler/mdsoc_architecture_tobe.md` §Part 3.

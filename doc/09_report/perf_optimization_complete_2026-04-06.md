@@ -25,7 +25,7 @@ Full performance audit and optimization of Simple compiler data structures, inte
 | `src/compiler/60.mir_opt/mir_opt/tco.spl` | Tail call optimization MIR pass |
 | `src/compiler/60.mir_opt/mir_opt/gvn.spl` | Global value numbering MIR pass |
 | `test/03_system/perf_optimization_spec.spl` | System tests (12 specs) |
-| `doc/01_research/local/perf_diagnostics_2026-04-06.md` | Audit findings |
+| `doc/01_research/compiler/perf_diagnostics_2026-04-06.md` | Audit findings |
 | `doc/08_tracking/bug/perf_optimization_limitations.md` | Known limitations |
 
 ## Test Results

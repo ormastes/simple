@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-04  
 **Plan:** [doc/03_plan/sffi_bidirectional_multi_agent_completion_plan_2026-04-04.md](../03_plan/sffi_bidirectional_multi_agent_completion_plan_2026-04-04.md)  
-**Support Matrix:** [doc/04_architecture/sffi_bidirectional_support_matrix.md](../04_architecture/sffi_bidirectional_support_matrix.md)  
+**Support Matrix:** [doc/04_architecture/platform/sffi_bidirectional_support_matrix.md](../04_architecture/sffi_bidirectional_support_matrix.md)  
 **Design:** [doc/05_design/sffi_bidirectional_interop.md](../05_design/sffi_bidirectional_interop.md)
 
 ## Summary
