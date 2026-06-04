@@ -1,67 +1,153 @@
 use std.io_runtime
 
+struct MockTransaction:
+    val id: text
+    val token: text
+    val amount: Amount
+    val status: PaymentStatus
+
 struct MockGateway:
     val fail_mode: bool
+    val transactions: list<MockTransaction>
+    val next_id: int
+    val idempotency_map: list<text>
+    val idempotency_results: list<PaymentResult>
 
 fn new_mock_gateway() -> MockGateway:
-    return MockGateway { fail_mode: false }
+    return MockGateway {
+        fail_mode: false,
+        transactions: [],
+        next_id: 1,
+        idempotency_map: [],
+        idempotency_results: []
+    }
 
 fn new_failing_mock_gateway() -> MockGateway:
-    return MockGateway { fail_mode: true }
+    return MockGateway {
+        fail_mode: true,
+        transactions: [],
+        next_id: 1,
+        idempotency_map: [],
+        idempotency_results: []
+    }
+
+fn _generate_txn_id(gw: MockGateway) -> text:
+    val id_num = gw.next_id
+    return "txn_mock_" + _int_to_text(id_num)
+
+fn _int_to_text(n: int) -> text:
+    if n == 0: return "0"
+    var result = ""
+    var v = n
+    while v > 0:
+        val digit = v % 10
+        val ch = _digit_to_char(digit)
+        result = ch + result
+        v = v / 10
+    return result
+
+fn _digit_to_char(d: int) -> text:
+    if d == 0: return "0"
+    if d == 1: return "1"
+    if d == 2: return "2"
+    if d == 3: return "3"
+    if d == 4: return "4"
+    if d == 5: return "5"
+    if d == 6: return "6"
+    if d == 7: return "7"
+    if d == 8: return "8"
+    if d == 9: return "9"
+    return "?"
+
+fn _find_idempotent(gw: MockGateway, key: text) -> PaymentResult:
+    var i = 0
+    while i < gw.idempotency_map.length():
+        if gw.idempotency_map[i] == key:
+            return gw.idempotency_results[i]
+        i = i + 1
+    return PaymentResult {
+        success: false,
+        status: PaymentStatus.Failed,
+        transaction_id: "",
+        error_message: "__NOT_FOUND__"
+    }
+
+fn _find_transaction(gw: MockGateway, txn_id: text) -> MockTransaction:
+    var i = 0
+    while i < gw.transactions.length():
+        if gw.transactions[i].id == txn_id:
+            return gw.transactions[i]
+        i = i + 1
+    return MockTransaction {
+        id: "",
+        token: "",
+        amount: Amount { cents: 0, currency: "" },
+        status: PaymentStatus.Failed
+    }
 
 impl Gateway for MockGateway:
     fn name(self) -> text:
         return "mock"
 
     fn authorize(self, req: AuthorizeRequest) -> PaymentResult:
-        # TODO(M2): implement mock authorize with fake transaction IDs
-        return PaymentResult {
-            success: false,
-            status: PaymentStatus.Failed,
-            transaction_id: "",
-            error_message: "TODO: not implemented"
-        }
+        if self.fail_mode:
+            return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: "", error_message: "gateway in fail mode" }
+        if req.token == "":
+            return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: "", error_message: "empty token" }
+        if req.amount.cents <= 0:
+            return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: "", error_message: "invalid amount" }
+        val cached = _find_idempotent(self, req.idempotency_key)
+        if cached.error_message != "__NOT_FOUND__":
+            return cached
+        val txn_id = _generate_txn_id(self)
+        val result = PaymentResult { success: true, status: PaymentStatus.Authorized, transaction_id: txn_id, error_message: "" }
+        return result
 
     fn capture(self, req: CaptureRequest) -> PaymentResult:
-        # TODO(M2): implement mock capture
-        return PaymentResult {
-            success: false,
-            status: PaymentStatus.Failed,
-            transaction_id: "",
-            error_message: "TODO: not implemented"
-        }
+        if self.fail_mode:
+            return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: "", error_message: "gateway in fail mode" }
+        if req.transaction_id == "":
+            return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: "", error_message: "missing transaction_id" }
+        val result = PaymentResult { success: true, status: PaymentStatus.Captured, transaction_id: req.transaction_id, error_message: "" }
+        return result
 
     fn charge(self, req: ChargeRequest) -> PaymentResult:
-        # TODO(M2): implement mock charge (authorize + capture)
-        return PaymentResult {
-            success: false,
-            status: PaymentStatus.Failed,
-            transaction_id: "",
-            error_message: "TODO: not implemented"
-        }
+        if self.fail_mode:
+            return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: "", error_message: "gateway in fail mode" }
+        if req.token == "":
+            return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: "", error_message: "empty token" }
+        if req.amount.cents <= 0:
+            return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: "", error_message: "invalid amount" }
+        val cached = _find_idempotent(self, req.idempotency_key)
+        if cached.error_message != "__NOT_FOUND__":
+            return cached
+        val txn_id = _generate_txn_id(self)
+        val result = PaymentResult { success: true, status: PaymentStatus.Captured, transaction_id: txn_id, error_message: "" }
+        return result
 
     fn refund(self, req: RefundRequest) -> PaymentResult:
-        # TODO(M2): implement mock refund
-        return PaymentResult {
-            success: false,
-            status: PaymentStatus.Failed,
-            transaction_id: "",
-            error_message: "TODO: not implemented"
-        }
+        if self.fail_mode:
+            return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: "", error_message: "gateway in fail mode" }
+        if req.transaction_id == "":
+            return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: "", error_message: "missing transaction_id" }
+        val result = PaymentResult { success: true, status: PaymentStatus.Refunded, transaction_id: req.transaction_id, error_message: "" }
+        return result
 
     fn void_payment(self, req: VoidRequest) -> PaymentResult:
-        # TODO(M2): implement mock void
-        return PaymentResult {
-            success: false,
-            status: PaymentStatus.Failed,
-            transaction_id: "",
-            error_message: "TODO: not implemented"
-        }
+        if self.fail_mode:
+            return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: "", error_message: "gateway in fail mode" }
+        if req.transaction_id == "":
+            return PaymentResult { success: false, status: PaymentStatus.Failed, transaction_id: "", error_message: "missing transaction_id" }
+        val result = PaymentResult { success: true, status: PaymentStatus.Voided, transaction_id: req.transaction_id, error_message: "" }
+        return result
 
     fn tokenize(self, req: TokenizeRequest) -> TokenizeResult:
-        # TODO(M2): implement mock tokenize — return fake token
-        return TokenizeResult {
-            success: false,
-            token: "",
-            error_message: "TODO: not implemented"
-        }
+        if self.fail_mode:
+            return TokenizeResult { success: false, token: "", error_message: "gateway in fail mode" }
+        if req.card_number == "":
+            return TokenizeResult { success: false, token: "", error_message: "empty card number" }
+        if !luhn_check(req.card_number):
+            return TokenizeResult { success: false, token: "", error_message: "invalid card number" }
+        val last4 = extract_last4(req.card_number)
+        val tok = "tok_mock_" + last4
+        return TokenizeResult { success: true, token: tok, error_message: "" }

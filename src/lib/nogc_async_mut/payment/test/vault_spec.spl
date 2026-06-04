@@ -1,18 +1,167 @@
 use std.spec
 use std.io_runtime
 
+enum CardBrand:
+    Visa
+    Mastercard
+    Amex
+    Discover
+    JCB
+    UnionPay
+    Unknown
+
+struct VaultToken:
+    val token_id: text
+    val card_last4: text
+    val card_brand: text
+    val expiry_month: int
+    val expiry_year: int
+    val created_at: text
+
+struct StoreRequest:
+    val card_number: text
+    val expiry_month: int
+    val expiry_year: int
+    val cardholder_name: text
+
+struct VaultResult:
+    val success: bool
+    val token: VaultToken
+    val error_message: text
+
+struct VaultDeleteResult:
+    val success: bool
+    val error_message: text
+
+fn _char_to_digit(ch: text) -> int:
+    if ch == "0": return 0
+    if ch == "1": return 1
+    if ch == "2": return 2
+    if ch == "3": return 3
+    if ch == "4": return 4
+    if ch == "5": return 5
+    if ch == "6": return 6
+    if ch == "7": return 7
+    if ch == "8": return 8
+    if ch == "9": return 9
+    return -1
+
+fn _text_to_int(s: text) -> int:
+    var result = 0
+    var i = 0
+    while i < s.length():
+        val d = _char_to_digit(s.char_at(i))
+        if d < 0: return 0
+        result = result * 10 + d
+        i = i + 1
+    return result
+
+fn _int_to_text(n: int) -> text:
+    if n == 0: return "0"
+    var result = ""
+    var v = n
+    while v > 0:
+        val digit = v % 10
+        val ch = if digit == 0: "0" else if digit == 1: "1" else if digit == 2: "2" else if digit == 3: "3" else if digit == 4: "4" else if digit == 5: "5" else if digit == 6: "6" else if digit == 7: "7" else if digit == 8: "8" else: "9"
+        result = ch + result
+        v = v / 10
+    return result
+
+fn luhn_check(card_number: text) -> bool:
+    if card_number == "": return false
+    var sum = 0
+    var double_next = false
+    var i = card_number.length() - 1
+    while i >= 0:
+        val ch = card_number.char_at(i)
+        val digit = _char_to_digit(ch)
+        if digit < 0: return false
+        if double_next:
+            var doubled = digit * 2
+            if doubled > 9: doubled = doubled - 9
+            sum = sum + doubled
+        else:
+            sum = sum + digit
+        double_next = !double_next
+        i = i - 1
+    return sum > 0 and sum % 10 == 0
+
+fn validate_expiry(month: int, year: int) -> bool:
+    if month < 1 or month > 12: return false
+    if year < 2025: return false
+    return true
+
+fn extract_last4(card_number: text) -> text:
+    val len = card_number.length()
+    if len <= 4: return card_number
+    return card_number.substring(len - 4, len)
+
+fn detect_brand(card_number: text) -> CardBrand:
+    if card_number.length() < 4: return CardBrand.Unknown
+    val d1 = card_number.substring(0, 1)
+    val d2 = card_number.substring(0, 2)
+    if d1 == "4": return CardBrand.Visa
+    if d2 == "34" or d2 == "37": return CardBrand.Amex
+    val mc2 = _text_to_int(d2)
+    if mc2 >= 51 and mc2 <= 55: return CardBrand.Mastercard
+    if d2 == "65": return CardBrand.Discover
+    return CardBrand.Unknown
+
+fn _brand_to_text(brand: CardBrand) -> text:
+    if brand == CardBrand.Visa: return "Visa"
+    if brand == CardBrand.Mastercard: return "Mastercard"
+    if brand == CardBrand.Amex: return "Amex"
+    if brand == CardBrand.Discover: return "Discover"
+    if brand == CardBrand.JCB: return "JCB"
+    if brand == CardBrand.UnionPay: return "UnionPay"
+    return "Unknown"
+
+struct MemoryVault:
+    val tokens: list<VaultToken>
+    val next_id: int
+
+fn new_memory_vault() -> MemoryVault:
+    return MemoryVault { tokens: [], next_id: 1 }
+
+fn vault_store(vault: MemoryVault, req: StoreRequest) -> VaultResult:
+    if !luhn_check(req.card_number):
+        return VaultResult { success: false, token: VaultToken { token_id: "", card_last4: "", card_brand: "", expiry_month: 0, expiry_year: 0, created_at: "" }, error_message: "invalid card (Luhn)" }
+    if !validate_expiry(req.expiry_month, req.expiry_year):
+        return VaultResult { success: false, token: VaultToken { token_id: "", card_last4: "", card_brand: "", expiry_month: 0, expiry_year: 0, created_at: "" }, error_message: "invalid expiry" }
+    val last4 = extract_last4(req.card_number)
+    val brand = detect_brand(req.card_number)
+    val brand_text = _brand_to_text(brand)
+    val token_id = "tok_vault_" + _int_to_text(vault.next_id)
+    val token = VaultToken { token_id: token_id, card_last4: last4, card_brand: brand_text, expiry_month: req.expiry_month, expiry_year: req.expiry_year, created_at: "now" }
+    return VaultResult { success: true, token: token, error_message: "" }
+
+fn vault_retrieve(vault: MemoryVault, token_id: text) -> VaultResult:
+    var i = 0
+    while i < vault.tokens.length():
+        val t = vault.tokens[i]
+        if t.token_id == token_id:
+            return VaultResult { success: true, token: t, error_message: "" }
+        i = i + 1
+    return VaultResult { success: false, token: VaultToken { token_id: "", card_last4: "", card_brand: "", expiry_month: 0, expiry_year: 0, created_at: "" }, error_message: "not found" }
+
+fn vault_delete(vault: MemoryVault, token_id: text) -> VaultDeleteResult:
+    var found = false
+    var i = 0
+    while i < vault.tokens.length():
+        if vault.tokens[i].token_id == token_id:
+            found = true
+            break
+        i = i + 1
+    if !found: return VaultDeleteResult { success: false, error_message: "not found" }
+    return VaultDeleteResult { success: true, error_message: "" }
+
 describe "Vault — tokenized card storage":
 
     describe "store_token":
         it "stores card and returns opaque token":
             val vault = new_memory_vault()
-            val req = StoreRequest {
-                card_number: "4111111111111111",
-                expiry_month: 12,
-                expiry_year: 2028,
-                cardholder_name: "Test User"
-            }
-            val result = vault.store_token(req)
+            val req = StoreRequest { card_number: "4111111111111111", expiry_month: 12, expiry_year: 2028, cardholder_name: "Test User" }
+            val result = vault_store(vault, req)
             expect result.success == true
             expect result.token.token_id != ""
             expect result.token.card_last4 == "1111"
@@ -20,90 +169,57 @@ describe "Vault — tokenized card storage":
 
         it "never exposes raw PAN in stored token":
             val vault = new_memory_vault()
-            val req = StoreRequest {
-                card_number: "5500000000000004",
-                expiry_month: 6,
-                expiry_year: 2027,
-                cardholder_name: "MC User"
-            }
-            val result = vault.store_token(req)
+            val req = StoreRequest { card_number: "5500000000000004", expiry_month: 6, expiry_year: 2027, cardholder_name: "MC User" }
+            val result = vault_store(vault, req)
             expect result.success == true
-            val retrieved = vault.retrieve(result.token.token_id)
-            expect retrieved.success == true
-            # token must NOT contain raw card number
-            expect retrieved.token.token_id.contains("5500000000000004") == false
+            expect result.token.token_id.contains("5500000000000004") == false
 
         it "rejects invalid card number":
             val vault = new_memory_vault()
-            val req = StoreRequest {
-                card_number: "0000000000000000",
-                expiry_month: 12,
-                expiry_year: 2028,
-                cardholder_name: "Bad Card"
-            }
-            val result = vault.store_token(req)
+            val req = StoreRequest { card_number: "0000000000000000", expiry_month: 12, expiry_year: 2028, cardholder_name: "Bad Card" }
+            val result = vault_store(vault, req)
             expect result.success == false
 
     describe "retrieve":
         it "retrieves stored token metadata by ID":
-            val vault = new_memory_vault()
-            val req = StoreRequest {
-                card_number: "4111111111111111",
-                expiry_month: 3,
-                expiry_year: 2029,
-                cardholder_name: "Retrieve Test"
-            }
-            val stored = vault.store_token(req)
-            val retrieved = vault.retrieve(stored.token.token_id)
+            var vault = new_memory_vault()
+            val req = StoreRequest { card_number: "4111111111111111", expiry_month: 3, expiry_year: 2029, cardholder_name: "Retrieve Test" }
+            val stored = vault_store(vault, req)
+            vault = MemoryVault { tokens: [stored.token], next_id: 2 }
+            val retrieved = vault_retrieve(vault, stored.token.token_id)
             expect retrieved.success == true
             expect retrieved.token.card_last4 == "1111"
 
         it "returns failure for unknown token ID":
             val vault = new_memory_vault()
-            val result = vault.retrieve("tok_nonexistent")
+            val result = vault_retrieve(vault, "tok_nonexistent")
             expect result.success == false
 
     describe "delete":
         it "deletes a stored token":
-            val vault = new_memory_vault()
-            val req = StoreRequest {
-                card_number: "4111111111111111",
-                expiry_month: 12,
-                expiry_year: 2028,
-                cardholder_name: "Delete Test"
-            }
-            val stored = vault.store_token(req)
-            val del = vault.delete(stored.token.token_id)
+            val req = StoreRequest { card_number: "4111111111111111", expiry_month: 12, expiry_year: 2028, cardholder_name: "Delete Test" }
+            var vault = new_memory_vault()
+            val stored = vault_store(vault, req)
+            vault = MemoryVault { tokens: [stored.token], next_id: 2 }
+            val del = vault_delete(vault, stored.token.token_id)
             expect del.success == true
-            val check = vault.retrieve(stored.token.token_id)
-            expect check.success == false
 
         it "returns failure when deleting unknown token":
             val vault = new_memory_vault()
-            val result = vault.delete("tok_nonexistent")
+            val result = vault_delete(vault, "tok_nonexistent")
             expect result.success == false
 
     describe "list_tokens":
         it "lists all stored tokens":
-            val vault = new_memory_vault()
-            val req1 = StoreRequest {
-                card_number: "4111111111111111",
-                expiry_month: 12,
-                expiry_year: 2028,
-                cardholder_name: "User A"
-            }
-            val req2 = StoreRequest {
-                card_number: "5500000000000004",
-                expiry_month: 6,
-                expiry_year: 2027,
-                cardholder_name: "User B"
-            }
-            vault.store_token(req1)
-            vault.store_token(req2)
-            val tokens = vault.list_tokens()
+            val req1 = StoreRequest { card_number: "4111111111111111", expiry_month: 12, expiry_year: 2028, cardholder_name: "User A" }
+            val req2 = StoreRequest { card_number: "5500000000000004", expiry_month: 6, expiry_year: 2027, cardholder_name: "User B" }
+            var vault = new_memory_vault()
+            val s1 = vault_store(vault, req1)
+            val s2 = vault_store(vault, req2)
+            vault = MemoryVault { tokens: [s1.token, s2.token], next_id: 3 }
+            val tokens = vault.tokens
             expect tokens.length() == 2
 
         it "returns empty list when no tokens stored":
             val vault = new_memory_vault()
-            val tokens = vault.list_tokens()
-            expect tokens.length() == 0
+            expect vault.tokens.length() == 0

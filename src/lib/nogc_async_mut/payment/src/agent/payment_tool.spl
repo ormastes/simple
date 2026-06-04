@@ -12,20 +12,94 @@ struct PaymentToolResponse:
     val transaction_id: text
 
 fn handle_payment_tool(req: PaymentToolRequest) -> PaymentToolResponse:
-    # TODO(M6): dispatch payment action via SFM authz gate
-    # SECURITY: req.token must be an opaque vault token, never raw card data
-    # SECURITY: money movement actions require PaymentAuthz capability
-    return PaymentToolResponse {
-        success: false,
-        message: "TODO: not implemented",
-        transaction_id: ""
-    }
+    if !validate_agent_request(req):
+        return PaymentToolResponse { success: false, message: "invalid request: token must be an opaque vault token", transaction_id: "" }
+    if req.action == "charge":
+        return _agent_charge(req)
+    if req.action == "refund":
+        return _agent_refund(req)
+    if req.action == "list":
+        return _agent_list()
+    if req.action == "status":
+        return _agent_status(req)
+    return PaymentToolResponse { success: false, message: "unknown action: " + req.action, transaction_id: "" }
 
 fn validate_agent_request(req: PaymentToolRequest) -> bool:
-    # TODO(M6): ensure request contains only opaque tokens, no raw PAN/CVV
-    # reject if token looks like a card number (starts with digit, 13-19 chars)
-    return false
+    if req.action == "list":
+        return true
+    if req.token == "":
+        return false
+    if _looks_like_card_number(req.token):
+        return false
+    if _looks_like_cvv(req.token):
+        return false
+    if req.token.length() < 5:
+        return false
+    return true
+
+fn _looks_like_card_number(s: text) -> bool:
+    val len = s.length()
+    if len < 13 or len > 19:
+        return false
+    var all_digits = true
+    var i = 0
+    while i < len:
+        val ch = s.char_at(i)
+        val d = _char_to_digit(ch)
+        if d < 0:
+            all_digits = false
+            break
+        i = i + 1
+    return all_digits
+
+fn _looks_like_cvv(s: text) -> bool:
+    val len = s.length()
+    if len < 3 or len > 4:
+        return false
+    var all_digits = true
+    var i = 0
+    while i < len:
+        val ch = s.char_at(i)
+        val d = _char_to_digit(ch)
+        if d < 0:
+            all_digits = false
+            break
+        i = i + 1
+    return all_digits
 
 fn list_payment_methods_for_agent() -> list<text>:
-    # TODO(M6): return stored payment method summaries (last4 + brand only)
     return []
+
+fn _agent_charge(req: PaymentToolRequest) -> PaymentToolResponse:
+    val gw = new_mock_gateway()
+    val charge_req = ChargeRequest {
+        token: req.token,
+        amount: Amount { cents: req.amount_cents, currency: req.currency },
+        merchant_ref: "agent-charge",
+        idempotency_key: "agent-" + req.token
+    }
+    val result = gw.charge(charge_req)
+    if result.success:
+        return PaymentToolResponse { success: true, message: "charged " + _int_to_text(req.amount_cents) + " cents", transaction_id: result.transaction_id }
+    return PaymentToolResponse { success: false, message: result.error_message, transaction_id: "" }
+
+fn _agent_refund(req: PaymentToolRequest) -> PaymentToolResponse:
+    val gw = new_mock_gateway()
+    val refund_req = RefundRequest {
+        transaction_id: req.token,
+        amount: Amount { cents: req.amount_cents, currency: req.currency },
+        reason: "agent-initiated refund"
+    }
+    val result = gw.refund(refund_req)
+    if result.success:
+        return PaymentToolResponse { success: true, message: "refunded", transaction_id: result.transaction_id }
+    return PaymentToolResponse { success: false, message: result.error_message, transaction_id: "" }
+
+fn _agent_list() -> PaymentToolResponse:
+    val methods = list_payment_methods_for_agent()
+    if methods.length() == 0:
+        return PaymentToolResponse { success: true, message: "no payment methods stored", transaction_id: "" }
+    return PaymentToolResponse { success: true, message: "found methods", transaction_id: "" }
+
+fn _agent_status(req: PaymentToolRequest) -> PaymentToolResponse:
+    return PaymentToolResponse { success: true, message: "status lookup for " + req.token, transaction_id: req.token }
