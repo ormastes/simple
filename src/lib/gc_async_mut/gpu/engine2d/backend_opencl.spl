@@ -14,6 +14,9 @@ extern fn rt_alloc(size: i64) -> i64
 extern fn rt_free(ptr: i64, size: i64)
 extern fn rt_ptr_read_i32(addr: i64, offset: i64) -> i32
 extern fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64) -> i64
+extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
+
+val OPENCL_2D_CLEAR_ARG_BYTES: i64 = 32
 
 fn opencl_2d_generated_source() -> text:
     "__kernel void simple_2d_fill_u32(__global uint* dst, long width, long height, long color) {\n" +
@@ -83,6 +86,12 @@ fn _write_u32_pixels_to_host(ptr: i64, pixels: [u32], count: i32):
         rt_ptr_write_u8(ptr, base + 3, (pixel >> 24) & 0xFF)
         idx = idx + 1
 
+fn _write_opencl_clear_args(args_ptr: i64, d_framebuffer: i64, color: u32, width: i32, height: i32):
+    rt_ptr_write_i64(args_ptr, 0, d_framebuffer)
+    rt_ptr_write_i64(args_ptr, 8, _i64(width))
+    rt_ptr_write_i64(args_ptr, 16, _i64(height))
+    rt_ptr_write_i64(args_ptr, 24, _i64_from_u32(color))
+
 fn _opencl_probe_failure(message: text, gate: text) -> BackendProbeResult:
     var failed = BackendProbeResult.unavailable("opencl", message)
     failed.api_name = "opencl"
@@ -110,6 +119,7 @@ class OpenClBackend:
     initialized: bool
     d_framebuffer: i64
     framebuffer_bytes: i64
+    clear_args_ptr: i64
     readback_ptr: i64
     host_staging_ptr: i64
     device_current: bool
@@ -123,6 +133,7 @@ class OpenClBackend:
             initialized: false,
             d_framebuffer: 0,
             framebuffer_bytes: 0,
+            clear_args_ptr: 0,
             readback_ptr: 0,
             host_staging_ptr: 0,
             device_current: false,
@@ -155,9 +166,10 @@ class OpenClBackend:
             self.owns_session = false
             self.initialized = false
             return false
+        self.clear_args_ptr = rt_alloc(OPENCL_2D_CLEAR_ARG_BYTES)
         self.readback_ptr = rt_alloc(self.framebuffer_bytes)
         self.host_staging_ptr = rt_alloc(self.framebuffer_bytes)
-        if self.readback_ptr == 0 or self.host_staging_ptr == 0:
+        if self.clear_args_ptr == 0 or self.readback_ptr == 0 or self.host_staging_ptr == 0:
             self.last_probe = _opencl_probe_failure("OpenCL host staging allocation failed", "opencl_surface")
             self._cleanup_opencl_surface()
             self.session.release()
@@ -183,6 +195,9 @@ class OpenClBackend:
         if self.readback_ptr != 0:
             rt_free(self.readback_ptr, self.framebuffer_bytes)
             self.readback_ptr = 0
+        if self.clear_args_ptr != 0:
+            rt_free(self.clear_args_ptr, OPENCL_2D_CLEAR_ARG_BYTES)
+            self.clear_args_ptr = 0
         if self.host_staging_ptr != 0:
             rt_free(self.host_staging_ptr, self.framebuffer_bytes)
             self.host_staging_ptr = 0
@@ -233,8 +248,9 @@ impl RenderBackend for OpenClBackend:
         self.initialized = false
 
     me clear(color: u32):
-        if self.initialized and self.d_framebuffer != 0:
-            val rc = self.session.launch_fill_u32(self.d_framebuffer, _i64(self.width()), _i64(self.height()), _i64_from_u32(color))
+        if self.initialized and self.d_framebuffer != 0 and self.clear_args_ptr != 0:
+            _write_opencl_clear_args(self.clear_args_ptr, self.d_framebuffer, color, self.width(), self.height())
+            val rc = self.session.fill_kernel(_i64(self.width()), _i64(self.height()), self.clear_args_ptr)
             if rc == 0:
                 self.device_current = true
                 self.mirror.clear(color)

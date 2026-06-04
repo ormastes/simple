@@ -3,8 +3,13 @@
 
 use std.spec.{describe, it, expect}
 use std.gc_async_mut.gpu.engine2d.backend_session.{BackendSessionKind}
+use std.gc_async_mut.gpu.engine2d.generated_kernel_dispatch.{GENERATED_2D_FILL}
 use std.gc_async_mut.gpu.engine2d.opencl_session.{OpenClSession}
 use std.gpu.engine2d.sffi_opencl.{OpenClFfi}
+
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64, size: i64)
+extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
 
 describe "OpenClSession compute contract":
 
@@ -94,6 +99,23 @@ describe "OpenClSession compute contract":
         expect(session.launch_rect_filled_u32(1, 4, 4, 1, 1, 0, 2, 1)).to_equal(1)
         expect(session.launch_rect_outline_u32(1, 4, 4, 1, 1, 2, 0, 1)).to_equal(1)
         expect(session.generation).to_equal(generation_before)
+
+    it "validates generated fill packed args before submitting OpenCL work":
+        var session = OpenClSession.create_with_ffi(OpenClFfi.create_static())
+        session.queue = 1
+        session.program = 2
+        val args = rt_alloc(32)
+        rt_ptr_write_i64(args, 0, 1234)
+        rt_ptr_write_i64(args, 8, 4)
+        rt_ptr_write_i64(args, 16, 4)
+        rt_ptr_write_i64(args, 24, 0xff112233 as i64)
+
+        expect(session.fill_kernel(8, 4, args)).to_equal(1)
+        val missing_args = session.launch_generated_2d_evidence(GENERATED_2D_FILL, 4, 4, 0)
+        expect(missing_args.success).to_equal(false)
+        expect(missing_args.reason).to_equal("missing-generated-2d-args-pointer")
+
+        rt_free(args, 32)
 
     it "cleans up through injected OpenCL FFI release hooks":
         var session = OpenClSession.create_with_ffi(OpenClFfi.create_static())

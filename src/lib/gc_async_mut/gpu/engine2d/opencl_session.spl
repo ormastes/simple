@@ -9,6 +9,8 @@ use std.gc_async_mut.gpu.engine2d.generated_kernel_dispatch.{
 }
 use std.gc_async_mut.gpu.engine2d.sffi_opencl.{OpenClFfi}
 
+extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
+
 class OpenClSessionEvidence:
     operation: text
     success: bool
@@ -185,6 +187,8 @@ class OpenClSession:
         val plan = generated_2d_launch_plan("opencl", op, width, height)
         if not plan.dispatch_ready:
             return 1
+        if op == GENERATED_2D_FILL:
+            return self._launch_generated_fill_u32(plan.entry_name, args_ptr, width, height, plan.grid_x, plan.grid_y, plan.block_x, plan.block_y)
         self.launch_kernel(plan.entry_name, plan.grid_x, plan.grid_y, plan.block_x, plan.block_y)
 
     me launch_generated_2d_evidence(op: text, width: i64, height: i64, args_ptr: i64) -> OpenClSessionEvidence:
@@ -198,7 +202,7 @@ class OpenClSession:
             return self._evidence(operation, false, "missing-ffi", "missing-opencl-ffi", 0, false, 0, 0)
         if self.queue == 0 or self.program == 0:
             return self._evidence(operation, false, "missing-program-or-queue", "missing-opencl-program-or-queue", 0, false, 0, 0)
-        val rc = self.launch_kernel(plan.entry_name, plan.grid_x, plan.grid_y, plan.block_x, plan.block_y)
+        val rc = self.launch_generated_2d(op, width, height, args_ptr)
         if rc == 0:
             return self._evidence(operation, true, "submitted", "opencl-generated-2d-kernel-submitted", self.kernel_cache, true, 0, 0)
         if self.kernel_cache == 0:
@@ -223,6 +227,32 @@ class OpenClSession:
         val local_size = 256
         val global_size = _ceil_div_i64(width * height, local_size)
         if self.ffi.enqueue_ndrange(self.queue, kernel, global_size, 1, 1, local_size, 1, 1):
+            0
+        else:
+            1
+
+    me _launch_generated_fill_u32(entry_name: text, args_ptr: i64, width: i64, height: i64, grid_x: i64, grid_y: i64, block_x: i64, block_y: i64) -> i64:
+        if self.ffi == nil or self.queue == 0 or self.program == 0 or args_ptr == 0 or width <= 0 or height <= 0:
+            return 1
+        val dst = rt_ptr_read_i64(args_ptr, 0)
+        val arg_width = rt_ptr_read_i64(args_ptr, 8)
+        val arg_height = rt_ptr_read_i64(args_ptr, 16)
+        val color = rt_ptr_read_i64(args_ptr, 24)
+        if dst == 0 or arg_width != width or arg_height != height:
+            return 1
+        val kernel = self.ffi.create_kernel(self.program, entry_name)
+        if kernel == 0:
+            return 1
+        self._cache_kernel(kernel)
+        if not self.set_kernel_arg_buffer(kernel, 0, dst):
+            return 1
+        if not self.set_kernel_arg_i64(kernel, 1, width):
+            return 1
+        if not self.set_kernel_arg_i64(kernel, 2, height):
+            return 1
+        if not self.set_kernel_arg_i64(kernel, 3, color):
+            return 1
+        if self.ffi.enqueue_ndrange(self.queue, kernel, grid_x, grid_y, 1, block_x, block_y, 1):
             0
         else:
             1

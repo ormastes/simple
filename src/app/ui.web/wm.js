@@ -99,10 +99,12 @@ class SimpleWindowManager {
     this._windowSwitcher = null;
     this._windowSwitcherItems = [];
     this._windowSwitcherActiveIndex = 0;
+    this._windowSwitcherActivationTimer = 0;
     this._workspaceSwitcher = null;
     this._activeWorkspaceId = 'main';
     this._workspaceSwitcherActiveIndex = 0;
     this._customWorkspaces = null;
+    this._workspaceSwitcherActivationTimer = 0;
     this._workspaceTransitionTimer = 0;
     this._clipboardHistory = null;
     this._clipboardHistoryActiveIndex = 0;
@@ -124,6 +126,7 @@ class SimpleWindowManager {
     this._hotCorners = null;
     this._hotCornerHint = null;
     this._activeHotCorner = '';
+    this._hotCornerFeedbackTimer = 0;
     this._desktopPeekActive = false;
     this._desktopPeekWindowIds = [];
     this._resizeHud = null;
@@ -2429,6 +2432,10 @@ class SimpleWindowManager {
     if (shouldOpen) {
       this._renderWindowSwitcher();
       this._focusWindowSwitcherActiveCard();
+    } else {
+      if (this._windowSwitcherActivationTimer) clearTimeout(this._windowSwitcherActivationTimer);
+      this._windowSwitcherActivationTimer = 0;
+      this._clearWindowSwitcherActivationFeedback();
     }
     return shouldOpen;
   }
@@ -2539,6 +2546,48 @@ class SimpleWindowManager {
   _activateWindowSwitcherSelection() {
     if (!this._windowSwitcher || this._windowSwitcher.hidden) return;
     const win = this._windowSwitcherItems[this._windowSwitcherActiveIndex];
+    if (!win) return;
+    if (!this._feedbackAllows('standard')) {
+      this._focusAndCloseWindowSwitcher(win);
+      return;
+    }
+    this._markWindowSwitcherActivationFeedback(win.id);
+    if (this._windowSwitcherActivationTimer) clearTimeout(this._windowSwitcherActivationTimer);
+    this._windowSwitcherActivationTimer = setTimeout(() => {
+      this._windowSwitcherActivationTimer = 0;
+      this._focusAndCloseWindowSwitcher(win);
+    }, 160);
+  }
+
+  _markWindowSwitcherActivationFeedback(windowId) {
+    if (!this._windowSwitcher || !this._windowSwitcher.isConnected) return;
+    const id = String(windowId || '');
+    if (!id) return;
+    const switcher = this._windowSwitcher;
+    this._clearWindowSwitcherActivationFeedback();
+    const card = switcher.querySelector(`.wm-window-switcher-card[data-switch-window="${id}"]`);
+    switcher.dataset.switcherFeedback = 'activate';
+    switcher.dataset.switcherFeedbackWindow = id;
+    if (!card) return;
+    card.classList.remove('action-feedback');
+    void card.offsetWidth;
+    card.classList.add('action-feedback');
+    card.dataset.switcherFeedback = 'activate';
+  }
+
+  _clearWindowSwitcherActivationFeedback() {
+    if (!this._windowSwitcher || !this._windowSwitcher.isConnected) return;
+    const switcher = this._windowSwitcher;
+    delete switcher.dataset.switcherFeedback;
+    delete switcher.dataset.switcherFeedbackWindow;
+    const cards = switcher.querySelectorAll('.wm-window-switcher-card.action-feedback');
+    cards.forEach((card) => {
+      card.classList.remove('action-feedback');
+      delete card.dataset.switcherFeedback;
+    });
+  }
+
+  _focusAndCloseWindowSwitcher(win) {
     if (!win) return;
     this._focusWindowById(win.id);
     this._toggleWindowSwitcher(false);
@@ -2730,8 +2779,7 @@ class SimpleWindowManager {
       if (!item || !switcher.contains(item)) return;
       const card = item.closest('.wm-workspace-card');
       this._workspaceSwitcherActiveIndex = Number(card?.dataset.workspaceIndex || '0') || 0;
-      this._switchWorkspace(card?.dataset.workspaceId || 'main');
-      this._toggleWorkspaceSwitcher(false);
+      this._activateWorkspaceSwitcherSelection();
     });
     switcher.addEventListener('keydown', (event) => {
       if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
@@ -2764,6 +2812,11 @@ class SimpleWindowManager {
     const shouldOpen = open == null ? switcher.hidden : open;
     switcher.hidden = !shouldOpen;
     if (shouldOpen) this._renderWorkspaceSwitcher();
+    if (!shouldOpen) {
+      if (this._workspaceSwitcherActivationTimer) window.clearTimeout(this._workspaceSwitcherActivationTimer);
+      this._workspaceSwitcherActivationTimer = 0;
+      this._clearWorkspaceSwitcherActivationFeedback();
+    }
     return shouldOpen;
   }
 
@@ -2878,8 +2931,48 @@ class SimpleWindowManager {
 
   _activateWorkspaceSwitcherSelection() {
     const switcher = this._ensureWorkspaceSwitcher();
+    if (switcher.hidden) return;
     const card = switcher.querySelector(`.wm-workspace-card[data-workspace-index="${this._workspaceSwitcherActiveIndex}"]`);
     const workspaceId = card?.dataset.workspaceId || 'main';
+    if (!this._feedbackAllows('standard')) {
+      this._switchAndCloseWorkspaceSwitcher(workspaceId);
+      return;
+    }
+    this._markWorkspaceSwitcherActivationFeedback(workspaceId);
+    if (this._workspaceSwitcherActivationTimer) window.clearTimeout(this._workspaceSwitcherActivationTimer);
+    this._workspaceSwitcherActivationTimer = window.setTimeout(() => {
+      this._workspaceSwitcherActivationTimer = 0;
+      this._switchAndCloseWorkspaceSwitcher(workspaceId);
+    }, 160);
+  }
+
+  _markWorkspaceSwitcherActivationFeedback(workspaceId) {
+    const switcher = this._ensureWorkspaceSwitcher();
+    const id = String(workspaceId || 'main');
+    this._clearWorkspaceSwitcherActivationFeedback();
+    const card = switcher.querySelector(`.wm-workspace-card[data-workspace-id="${id}"]`);
+    switcher.dataset.workspaceFeedback = 'activate';
+    switcher.dataset.workspaceFeedbackId = id;
+    if (!card) return;
+    card.classList.remove('action-feedback');
+    void card.offsetWidth;
+    card.classList.add('action-feedback');
+    card.dataset.workspaceFeedback = 'activate';
+  }
+
+  _clearWorkspaceSwitcherActivationFeedback() {
+    if (!this._workspaceSwitcher || !this._workspaceSwitcher.isConnected) return;
+    const switcher = this._workspaceSwitcher;
+    delete switcher.dataset.workspaceFeedback;
+    delete switcher.dataset.workspaceFeedbackId;
+    const cards = switcher.querySelectorAll('.wm-workspace-card.action-feedback');
+    cards.forEach((card) => {
+      card.classList.remove('action-feedback');
+      delete card.dataset.workspaceFeedback;
+    });
+  }
+
+  _switchAndCloseWorkspaceSwitcher(workspaceId) {
     this._switchWorkspace(workspaceId);
     this._toggleWorkspaceSwitcher(false);
   }
@@ -4128,7 +4221,7 @@ class SimpleWindowManager {
 
   _hideHotCornerHint() {
     this._activeHotCorner = '';
-    if (this._hotCornerHint) this._hotCornerHint.hidden = true;
+    if (this._hotCornerHint && !this._hotCornerHint.classList.contains('action-feedback')) this._hotCornerHint.hidden = true;
   }
 
   _updateHotCornerPreview(event) {
@@ -4151,12 +4244,53 @@ class SimpleWindowManager {
 
   _activateHotCorner(action) {
     const value = String(action || '');
+    this._markHotCornerFeedback(value);
     this._sendWindowCmd('hot_corner', { corner_action: value });
     if (value === 'overview') this._toggleWindowOverview(true);
     if (value === 'launcher') this._toggleAppLauncher(true);
     if (value === 'desktop_peek') this._toggleDesktopPeek();
     if (value === 'control_center') this._toggleControlCenter(true);
     this._showSystemHud('Hot corner', value.replace('_', ' '), 1400);
+  }
+
+  _markHotCornerFeedback(action) {
+    const layer = this._ensureHotCorners();
+    const value = String(action || '');
+    if (!value || !layer) return;
+    if (this._hotCornerFeedbackTimer) clearTimeout(this._hotCornerFeedbackTimer);
+    const previous = layer.querySelectorAll('[data-hot-corner-feedback]');
+    previous.forEach((item) => {
+      item.classList.remove('action-feedback');
+      delete item.dataset.hotCornerFeedback;
+    });
+    delete layer.dataset.hotCornerFeedback;
+    const item = this._hotCornerItems().find((candidate) => candidate.action === value);
+    const zone = layer.querySelector(`.wm-hot-corner-zone[data-hot-corner-action="${value}"]`);
+    const hint = this._hotCornerHint;
+    const targets = [];
+    layer.dataset.hotCornerFeedback = value;
+    if (zone) targets.push(zone);
+    if (hint) {
+      hint.hidden = false;
+      hint.dataset.hotCornerAction = value;
+      hint.textContent = item ? item.label : value.replace('_', ' ');
+      targets.push(hint);
+    }
+    for (const target of targets) {
+      target.classList.remove('action-feedback');
+      void target.offsetWidth;
+      target.classList.add('action-feedback');
+      target.dataset.hotCornerFeedback = value;
+    }
+    this._hotCornerFeedbackTimer = setTimeout(() => {
+      delete layer.dataset.hotCornerFeedback;
+      for (const target of targets) {
+        target.classList.remove('action-feedback');
+        delete target.dataset.hotCornerFeedback;
+      }
+      if (hint && this._activeHotCorner !== value) hint.hidden = true;
+      this._hotCornerFeedbackTimer = 0;
+    }, 560);
   }
 
   _toggleDesktopPeek(open = null) {

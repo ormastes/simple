@@ -60,7 +60,7 @@ Verifies the first modern Simple Web WM slice at the contract level.
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 691 lines folded for reproduction.
+Runnable source: 700 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -474,9 +474,13 @@ expect(html).to_contain(".wm-window-switcher[hidden]")
 expect(html).to_contain(".wm-window-switcher-list")
 expect(html).to_contain(".wm-window-switcher-card")
 expect(html).to_contain(".wm-window-switcher-card:hover")
+expect(html).to_contain(".wm-window-switcher-card.action-feedback")
+expect(html).to_contain(".wm-window-switcher[data-switcher-feedback='activate'] .wm-window-switcher-card[data-switcher-feedback='activate']")
 expect(html).to_contain(".wm-window-switcher-card:focus-visible")
 expect(html).to_contain(".wm-switcher-icon")
 expect(html).to_contain("@keyframes wm-window-switcher-in")
+expect(html).to_contain("@keyframes wm-window-switcher-activate")
+expect(html).to_contain(":root[data-wm-motion=off] .wm-window-switcher-card.action-feedback")
 expect(html).to_contain(".wm-workspace-switcher")
 expect(html).to_contain(".wm-workspace-switcher[hidden]")
 expect(html).to_contain(".wm-workspace-grid")
@@ -755,6 +759,11 @@ expect(html).to_contain(".wm-notification-empty")
 expect(html).to_contain("grid-column: 1 / -1")
 expect(html).to_contain("translateY(-3px) scale(1.04)")
 expect(html).to_contain("border-radius: 999px")
+expect(html).to_contain(".wm-hot-corner-zone.action-feedback")
+expect(html).to_contain(".wm-hot-corners[data-hot-corner-feedback='desktop_peek'] .wm-hot-corner-desktop")
+expect(html).to_contain(".wm-hot-corner-hint.action-feedback")
+expect(html).to_contain(":root[data-wm-motion=off] .wm-hot-corner-zone.action-feedback")
+expect(html).to_contain("@keyframes wm-hot-corner-activate")
 ```
 
 </details>
@@ -764,7 +773,7 @@ expect(html).to_contain("border-radius: 999px")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 1343 lines folded for reproduction.
+Runnable source: 1354 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1404,6 +1413,10 @@ expect(js).to_contain("querySelectorAll('.wm-workspace-card')")
 expect(js).to_contain("querySelectorAll('[data-workspace-action]')")
 expect(js).to_contain("_ensureHotCorners()")
 expect(js).to_contain("querySelectorAll('[data-hot-corner-action]')")
+expect(js).to_contain("_markHotCornerFeedback")
+expect(js).to_contain("_hotCornerFeedbackTimer")
+expect(js).to_contain("dataset.hotCornerFeedback")
+expect(js).to_contain("classList.add('action-feedback')")
 expect(js).to_contain("_ensureGestureHints()")
 expect(js).to_contain("_renderGestureHints()")
 expect(js).to_contain("querySelectorAll('[data-gesture-hint]')")
@@ -1868,6 +1881,13 @@ expect(js).to_contain("_handleWindowSwitcherKeydown")
 expect(js).to_contain("_moveWindowSwitcherSelection")
 expect(js).to_contain("_focusWindowSwitcherActiveCard")
 expect(js).to_contain("_activateWindowSwitcherSelection")
+expect(js).to_contain("_markWindowSwitcherActivationFeedback")
+expect(js).to_contain("_clearWindowSwitcherActivationFeedback")
+expect(js).to_contain("_focusAndCloseWindowSwitcher")
+expect(js).to_contain("_windowSwitcherActivationTimer")
+expect(js).to_contain("dataset.switcherFeedback")
+expect(js).to_contain("classList.add('action-feedback')")
+expect(js).to_contain("_feedbackAllows('standard')")
 expect(js).to_contain("aria-activedescendant")
 expect(js).to_contain("ArrowRight")
 expect(js).to_contain("ArrowLeft")
@@ -2120,7 +2140,7 @@ expect(retained).to_contain("Maximize window")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 1313 lines folded for reproduction.
+Runnable source: 1318 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -2170,6 +2190,9 @@ expect(preview).to_contain("Peek desktop")
 expect(preview).to_contain("Cmd Shift M")
 expect(preview).to_contain("data-hot-corner-action=\"desktop_peek\"")
 expect(preview).to_contain("aria-label=\"Peek desktop\"")
+expect(preview).to_contain("data-hot-corner-feedback=\"desktop_peek\"")
+expect(preview).to_contain("wm-hot-corner-zone wm-hot-corner-desktop action-feedback")
+expect(preview).to_contain("wm-hot-corner-hint action-feedback")
 expect(preview).to_contain("wm-desktop-widgets")
 expect(preview).to_contain("role=\"menubar\" aria-label=\"Simple desktop menu bar\"")
 expect(preview).to_contain("aria-label=\"Application menu\"")
@@ -2239,9 +2262,11 @@ expect(preview).to_contain("Show stage rail")
 expect(preview).to_contain("Cmd Shift O")
 expect(preview).to_contain("aria-label=\"Window switcher\"")
 expect(preview).to_contain("data-switcher-shortcut=\"Meta Tab\"")
+expect(preview).to_contain("data-switcher-feedback=\"activate\"")
+expect(preview).to_contain("data-switcher-feedback-window=\"simple.ide\"")
 expect(preview).to_contain("aria-activedescendant=\"wm-window-switcher-card-0\"")
 expect(preview).to_contain("id=\"wm-window-switcher-card-0\"")
-expect(preview).to_contain("wm-window-switcher-card active")
+expect(preview).to_contain("wm-window-switcher-card active action-feedback")
 expect(preview).to_contain("data-switch-window=\"simple.ide\"")
 expect(preview).to_contain("data-switch-window=\"simple.browser\"")
 expect(preview).to_contain("data-switch-window=\"simple.terminal\"")

@@ -27,7 +27,7 @@ opencl_session_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -226,6 +226,50 @@ expect(session.generation).to_equal(generation_before)
 
 </details>
 
+#### validates generated fill packed args before submitting OpenCL work
+
+1. var session = OpenClSession create with ffi
+
+2. rt ptr write i64
+
+3. rt ptr write i64
+
+4. rt ptr write i64
+
+5. rt ptr write i64
+   - Expected: session.fill_kernel(8, 4, args) equals `1`
+   - Expected: missing_args.success is false
+   - Expected: missing_args.reason equals `missing-generated-2d-args-pointer`
+
+6. rt free
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = OpenClSession.create_with_ffi(OpenClFfi.create_static())
+session.queue = 1
+session.program = 2
+val args = rt_alloc(32)
+rt_ptr_write_i64(args, 0, 1234)
+rt_ptr_write_i64(args, 8, 4)
+rt_ptr_write_i64(args, 16, 4)
+rt_ptr_write_i64(args, 24, 0xff112233 as i64)
+
+expect(session.fill_kernel(8, 4, args)).to_equal(1)
+val missing_args = session.launch_generated_2d_evidence(GENERATED_2D_FILL, 4, 4, 0)
+expect(missing_args.success).to_equal(false)
+expect(missing_args.reason).to_equal("missing-generated-2d-args-pointer")
+
+rt_free(args, 32)
+```
+
+</details>
+
 #### cleans up through injected OpenCL FFI release hooks
 
 1. var session = OpenClSession create with ffi
@@ -286,8 +330,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
