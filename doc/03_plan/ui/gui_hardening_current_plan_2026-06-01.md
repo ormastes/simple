@@ -4671,6 +4671,53 @@ length, grown memory byte length, page size, byte coercion, grow return value,
 grown view length, and preserved byte contents. The focused fetch/WASM chain
 spec now passes `113/113`; broader browser/WASM semantics remain open.
 
+BrowserSession compileStreaming memory maximum failure continuation:
+
+Completion checklist:
+
+- Add a BrowserSession browser-script scenario that queues
+  `WebAssembly.compileStreaming(window.fetch('/mod.wasm'))` for a module
+  exporting memory with `initial=1` and `maximum=1`, then instantiates the
+  streamed module.
+- Verify the pre-commit script result is `queued` and `out` remains empty until
+  the pending fetch response is committed.
+- Verify the captured pending request is a fetch to
+  `https://example.com/mod.wasm`.
+- Commit the max-limited memory module response and verify the compiled
+  streaming instantiate result exposes status `instantiated`, module byte
+  length `26`, memory byte length `65536`, page size `65536`, zero-grow return
+  `1`, failed grow return `-1`, unchanged buffer length `65536`, and preserved
+  wrapped byte value `20`.
+- Regenerate the mirrored scenario manual for the changed SPipe spec and move
+  the generated old `01_unit` output onto the tracked `unit` manual path.
+- Restore generated tracking/doc index noise from docgen and adjacent specs.
+- Record command evidence, pass counts, warning counts, and remaining open
+  browser/WASM scope.
+- Run diff hygiene and doc layout gates before committing and pushing.
+
+Test checklist:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+
+BrowserSession scripts now compile a max-limited memory module through
+`WebAssembly.compileStreaming(window.fetch('/mod.wasm'))`, pass the streamed
+module into `WebAssembly.instantiate(module)`, read the compiled streamed
+exported memory, perform a zero grow, then attempt a grow past maximum. The
+focused assertion verifies the compiled streamed memory preserves the module
+maximum, returns `1` from zero-grow, returns `-1` from the failed grow, keeps
+the buffer at `65536` bytes, and preserves the pre-failure byte write. The
+focused fetch/WASM chain spec now passes `193/193`; the native WASM host spec
+remained `107/107`, the WebGPU JS/WASM system spec remained `106/106`, Node API
+conformance remained `275/275`, and `src/lib` completed with the current
+`399 warning(s)` across `5903` files. Broader browser/WASM semantics remain
+open.
+
 BrowserSession multiple WebAssembly function export continuation:
 
 - `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
