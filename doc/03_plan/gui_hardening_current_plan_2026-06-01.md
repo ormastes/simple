@@ -4385,6 +4385,23 @@ system spec remained `106/106`, Node API conformance remained `275/275`, and
 `src/lib` completed with the existing `447 warning(s)`. Broader browser/WASM
 semantics remain open.
 
+BrowserSession WebAssembly Instance constructor invalid-module continuation:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+
+BrowserSession scripts now construct an invalid `WebAssembly.Module('00')`,
+pass it to `new WebAssembly.Instance(module)`, and verify the invalid source
+module is reflected on the returned instance metadata instead of producing a
+spurious instantiated object. The focused assertion checks module validation,
+module error, invalid instance status, invalid module metadata,
+`invalid-wasm-module`, and the empty exports object surface. The focused
+fetch/WASM chain spec now passes `151/151`; the native WASM host spec remained
+`107/107`, the WebGPU JS/WASM system spec remained `106/106`, Node API
+conformance remained `275/275`, and `src/lib` completed with the existing
+`447 warning(s)`. Broader browser/WASM semantics remain open.
+
 BrowserSession instantiated WebAssembly table/global export continuation:
 
 - `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
