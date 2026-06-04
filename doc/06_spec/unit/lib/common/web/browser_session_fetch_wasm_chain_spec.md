@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 246 | 246 | 0 | 0 |
+| 247 | 247 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -13161,6 +13161,39 @@ match result:
 
 </details>
 
+#### dispatches windowed DataView 32-bit prototype helpers with call and apply
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `2:8:16909060:-3:10,20,4,3,2,1,255,255,255,253,30,40`
+
+3. Err
+   - Expected: "unexpected dataview window 32-bit prototype js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var buffer = new ArrayBuffer(12); var bytes = new Uint8Array(buffer); bytes[0] = 10; bytes[1] = 20; bytes[10] = 30; bytes[11] = 40; var view = new DataView(buffer, 2, 8); DataView.prototype.setUint32.apply(view, [0, 16909060, true]); DataView.prototype.setInt32.call(view, 4, -3, false); view.byteOffset + ':' + view.byteLength + ':' + DataView.prototype.getUint32.call(view, 0, true) + ':' + DataView.prototype.getInt32.apply(view, [4, false]) + ':' + bytes.toString()")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("2:8:16909060:-3:10,20,4,3,2,1,255,255,255,253,30,40")
+    Err(err):
+        expect("unexpected dataview window 32-bit prototype js error: {err}").to_equal("")
+```
+
+</details>
+
 #### encodes browser TextEncoder bytes into WASM validation buffers
 
 1. var session = BrowserSession new
@@ -13477,8 +13510,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 246 |
-| Active scenarios | 246 |
+| Total scenarios | 247 |
+| Active scenarios | 247 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

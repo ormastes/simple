@@ -4106,16 +4106,76 @@ BrowserSession Uint8Array prototype transform apply continuation:
  - `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
  - `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
  
- BrowserSession scripts now dispatch bounded `DataView.prototype.setUint16.apply`,
- `setInt8.call`, `getUint8.call`, `getUint16.apply`, and `getInt8.call` against
- a DataView window with a nonzero ArrayBuffer byte offset. The prototype
- dispatch path preserves the view byte offset, byte length, little-endian write,
- signed read, and backing Uint8Array storage parity with direct DataView helpers.
- The focused fetch/WASM chain spec now passes `82/82`; broader typed-array,
- DataView, general `Function.prototype.call/apply` dispatch, and full
- browser/WASM semantics remain open.
- 
- BrowserSession TextEncoder/TextDecoder WASM header continuation:
+BrowserSession scripts now dispatch bounded `DataView.prototype.setUint16.apply`,
+`setInt8.call`, `getUint8.call`, `getUint16.apply`, and `getInt8.call` against
+a DataView window with a nonzero ArrayBuffer byte offset. The prototype
+dispatch path preserves the view byte offset, byte length, little-endian write,
+signed read, and backing Uint8Array storage parity with direct DataView helpers.
+The focused fetch/WASM chain spec now passes `82/82`; broader typed-array,
+DataView, general `Function.prototype.call/apply` dispatch, and full
+browser/WASM semantics remain open.
+
+BrowserSession windowed DataView 32-bit prototype dispatch continuation:
+
+Completion checklist:
+
+- [x] Start from clean temp worktree `/tmp/simple-gui-hardening-next34` on
+  pushed `main`.
+- [x] Leave the primary detached dirty checkout untouched.
+- [x] Confirm prior windowed DataView coverage exercises 8-bit and 16-bit
+  prototype helper dispatch only.
+- [x] Add one browser-script scenario using `new DataView(buffer, 2, 8)`.
+- [x] Verify `DataView.prototype.setUint32.apply(view, [...])` writes through
+  the nonzero view byte offset.
+- [x] Verify `DataView.prototype.setInt32.call(view, ...)` writes through the
+  nonzero view byte offset.
+- [x] Verify `DataView.prototype.getUint32.call(view, ...)` reads the
+  view-relative 32-bit little-endian value.
+- [x] Verify `DataView.prototype.getInt32.apply(view, [...])` reads the
+  view-relative signed 32-bit big-endian value.
+- [x] Verify bytes outside the window remain unchanged in the backing
+  `Uint8Array`.
+- [x] Refresh generated scenario manual after executable spec changes.
+- [x] Run focused compile and focused fetch/WASM chain spec.
+- [x] Run adjacent browser/WASM and JS conformance checks.
+- [x] Run final layout, whitespace, file-count, and status gates.
+- [ ] Commit test/manual/plan update.
+- [ ] Push guarded main update after fetch/rebase/file-count safety check.
+- [ ] Commit and push sync-complete checklist update.
+
+Tests checklist:
+
+- [x] Windowed 32-bit unsigned write/read uses the view-relative offset.
+- [x] Windowed 32-bit signed write/read uses the view-relative offset.
+- [x] Prototype `call` and `apply` dispatch both work on the nonzero-offset
+  DataView receiver.
+- [x] Backing storage bytes match little-endian unsigned and big-endian signed
+  writes.
+- [x] Guard bytes before and after the DataView window are preserved.
+- [x] Focused spec result recorded: changed spec compile passed, fetch/WASM
+  chain `247/247`, generated manual `Total scenarios | 247 |`.
+- [x] Adjacent spec results recorded: WASM host `107/107`, WebGPU JS/WASM
+  `106/106`, Node API conformance `275/275`.
+
+Commands run:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --force-rebuild --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `git diff --check`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+BrowserSession test coverage now explicitly proves windowed 32-bit DataView
+prototype dispatch over nonzero-offset `ArrayBuffer` windows. The scenario
+covers `setUint32.apply`, `setInt32.call`, `getUint32.call`, and
+`getInt32.apply`, verifies view-relative 32-bit offsets, and keeps backing
+storage guard bytes outside the DataView window unchanged. This is a
+coverage-only continuation; no runtime source change was required.
+
+BrowserSession TextEncoder/TextDecoder WASM header continuation:
  
  - `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
  - `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
