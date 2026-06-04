@@ -128,6 +128,25 @@ fn opencl_2d_generated_source() -> text:
     "    long r_sq = r * r;\n" +
     "    if (dist_sq <= r_sq) { dst[py * surface_width + px] = (uint)color; }\n" +
     "}\n" +
+    "__kernel void simple_2d_rounded_rect_u32(__global uint* dst, long surface_width, long surface_height, long x, long y, long w, long h, long radius, long color) {\n" +
+    "    long i = get_global_id(0);\n" +
+    "    long count = w * h;\n" +
+    "    if (i >= count) { return; }\n" +
+    "    long dx = i % w;\n" +
+    "    long dy = i / w;\n" +
+    "    long px = x + dx;\n" +
+    "    long py = y + dy;\n" +
+    "    if (px < 0 || py < 0 || px >= surface_width || py >= surface_height) { return; }\n" +
+    "    long cdx = 0;\n" +
+    "    long cdy = 0;\n" +
+    "    int in_corner = 0;\n" +
+    "    if (radius > 0 && dx < radius && dy < radius) { cdx = dx - radius; cdy = dy - radius; in_corner = 1; }\n" +
+    "    else if (radius > 0 && dx >= w - radius && dy < radius) { cdx = dx - (w - 1 - radius); cdy = dy - radius; in_corner = 1; }\n" +
+    "    else if (radius > 0 && dx < radius && dy >= h - radius) { cdx = dx - radius; cdy = dy - (h - 1 - radius); in_corner = 1; }\n" +
+    "    else if (radius > 0 && dx >= w - radius && dy >= h - radius) { cdx = dx - (w - 1 - radius); cdy = dy - (h - 1 - radius); in_corner = 1; }\n" +
+    "    if (in_corner != 0 && cdx * cdx + cdy * cdy > radius * radius) { return; }\n" +
+    "    dst[py * surface_width + px] = (uint)color;\n" +
+    "}\n" +
     "__kernel void simple_2d_blit_image_u32(__global uint* dst, __global const uint* src, long x, long y, long w, long h, long surface_width, long surface_height) {\n" +
     "    long i = get_global_id(0);\n" +
     "    long count = w * h;\n" +
@@ -448,6 +467,21 @@ impl RenderBackend for OpenClBackend:
         self.device_current = false
 
     me draw_rounded_rect(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32):
+        if w <= 0 or h <= 0:
+            return
+        var r = radius
+        if r < 0:
+            r = 0
+        if r > w / 2:
+            r = w / 2
+        if r > h / 2:
+            r = h / 2
+        if self._can_use_device_draw() and self._ensure_device_current():
+            val rc = self.session.launch_rounded_rect_u32(self.d_framebuffer, _i64(self.width()), _i64(self.height()), _i64(x), _i64(y), _i64(w), _i64(h), _i64(r), _i64_from_u32(color))
+            if rc == 0:
+                self.device_current = true
+                self.mirror.draw_rounded_rect(x, y, w, h, radius, color)
+                return
         self.mirror.draw_rounded_rect(x, y, w, h, radius, color)
         self.device_current = false
 

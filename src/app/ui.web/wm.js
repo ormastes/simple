@@ -83,9 +83,11 @@ class SimpleWindowManager {
     this._titleCommandFeedbackTimers = new WeakMap();
     this._commandPalette = null;
     this._commandPaletteInput = null;
+    this._commandPaletteStatus = null;
     this._commandPaletteList = null;
     this._commandPaletteItems = [];
     this._commandPaletteActiveIndex = 0;
+    this._commandQueryFeedbackTimer = 0;
     this._commandItemFeedbackTimer = 0;
     this._commandSelectionFeedbackTimer = 0;
     this._commandRecentFeedbackTimer = 0;
@@ -1371,6 +1373,13 @@ class SimpleWindowManager {
     input.setAttribute('aria-activedescendant', 'wm-command-item-0');
     palette.appendChild(input);
 
+    const status = document.createElement('div');
+    status.className = 'wm-command-query-status';
+    status.setAttribute('role', 'status');
+    status.setAttribute('aria-live', 'polite');
+    status.dataset.commandResultCount = '0';
+    palette.appendChild(status);
+
     const list = document.createElement('div');
     list.id = 'wm-command-palette-list';
     list.className = 'wm-command-palette-list';
@@ -1382,10 +1391,12 @@ class SimpleWindowManager {
 
     this._commandPalette = palette;
     this._commandPaletteInput = input;
+    this._commandPaletteStatus = status;
     this._commandPaletteList = list;
     input.addEventListener('input', () => {
       this._commandPaletteActiveIndex = 0;
-      this._renderCommandPaletteItems();
+      const count = this._renderCommandPaletteItems();
+      this._markCommandQueryFeedback(input.value, count);
     });
     input.addEventListener('keydown', (event) => this._handleCommandPaletteKeydown(event, false));
     list.addEventListener('click', (event) => {
@@ -1482,7 +1493,7 @@ class SimpleWindowManager {
   }
 
   _renderCommandPaletteItems() {
-    if (!this._commandPaletteList) return;
+    if (!this._commandPaletteList) return 0;
     this._clearCommandSelectionFeedback();
     this._clearCommandItemFeedback();
     this._clearCommandRecentFeedback();
@@ -1491,6 +1502,7 @@ class SimpleWindowManager {
       .filter((command) => !query || command.label.toLowerCase().includes(query));
     this._commandPaletteItems = commands;
     this._commandPaletteActiveIndex = Math.min(this._commandPaletteActiveIndex, Math.max(commands.length - 1, 0));
+    this._updateCommandPaletteQueryStatus(query, commands.length);
     this._commandPaletteList.innerHTML = '';
     if (commands.length) {
       this._commandPaletteList.setAttribute('aria-activedescendant', `wm-command-item-${this._commandPaletteActiveIndex}`);
@@ -1500,6 +1512,13 @@ class SimpleWindowManager {
       this._commandPaletteInput?.removeAttribute('aria-activedescendant');
     }
     if (!query) this._renderCommandPaletteRecents(commands);
+    if (!commands.length) {
+      const empty = document.createElement('div');
+      empty.className = 'wm-command-empty';
+      empty.textContent = query ? 'No matching commands' : 'No commands available';
+      this._commandPaletteList.appendChild(empty);
+      return commands.length;
+    }
     let lastCategory = '';
     commands.forEach((command, index) => {
       const active = index === this._commandPaletteActiveIndex;
@@ -1531,6 +1550,23 @@ class SimpleWindowManager {
       item.appendChild(shortcut);
       this._commandPaletteList.appendChild(item);
     });
+    return commands.length;
+  }
+
+  _updateCommandPaletteQueryStatus(query, count) {
+    if (!this._commandPalette) return;
+    const state = query ? 'filtered' : 'all';
+    this._commandPalette.dataset.commandQueryState = state;
+    this._commandPalette.dataset.commandResultCount = String(count);
+    if (this._commandPaletteList) {
+      this._commandPaletteList.dataset.commandQueryState = state;
+      this._commandPaletteList.dataset.commandResultCount = String(count);
+    }
+    if (!this._commandPaletteStatus) return;
+    this._commandPaletteStatus.dataset.commandQueryState = state;
+    this._commandPaletteStatus.dataset.commandResultCount = String(count);
+    const suffix = count === 1 ? 'command' : 'commands';
+    this._commandPaletteStatus.textContent = query ? `${count} ${suffix} matching ${this._commandPaletteInput?.value.trim() || query}` : `${count} ${suffix} available`;
   }
 
   _renderCommandPaletteRecents(commands) {
@@ -1648,6 +1684,7 @@ class SimpleWindowManager {
 
   _markCommandItemFeedback(index, command) {
     if (!this._commandPalette || !this._feedbackAllows('standard')) return false;
+    this._clearCommandQueryFeedback();
     window.clearTimeout(this._commandItemFeedbackTimer);
     this._clearCommandSelectionFeedback();
     this._clearCommandItemFeedback();
@@ -1711,10 +1748,40 @@ class SimpleWindowManager {
     });
   }
 
+  _markCommandQueryFeedback(rawQuery, count) {
+    if (!this._commandPalette || !this._feedbackAllows('standard')) return;
+    window.clearTimeout(this._commandQueryFeedbackTimer);
+    this._clearCommandQueryFeedback();
+    const query = String(rawQuery || '').trim();
+    this._commandPalette.dataset.commandQueryFeedback = query ? 'filtered' : 'all';
+    this._commandPalette.dataset.commandResultCount = String(count || 0);
+    this._commandPalette.classList.add('query-feedback');
+    this._commandPaletteInput?.classList.add('query-feedback');
+    if (this._commandPaletteStatus) {
+      this._commandPaletteStatus.dataset.commandQueryFeedback = query ? 'filtered' : 'all';
+      this._commandPaletteStatus.classList.add('action-feedback');
+    }
+    this._commandQueryFeedbackTimer = window.setTimeout(() => this._clearCommandQueryFeedback(), 420);
+  }
+
+  _clearCommandQueryFeedback() {
+    window.clearTimeout(this._commandQueryFeedbackTimer);
+    this._commandQueryFeedbackTimer = 0;
+    if (!this._commandPalette) return;
+    delete this._commandPalette.dataset.commandQueryFeedback;
+    this._commandPalette.classList.remove('query-feedback');
+    this._commandPaletteInput?.classList.remove('query-feedback');
+    if (this._commandPaletteStatus) {
+      delete this._commandPaletteStatus.dataset.commandQueryFeedback;
+      this._commandPaletteStatus.classList.remove('action-feedback');
+    }
+  }
+
   _executeCommandPaletteRecent(index) {
     if (!this._commandPalette || this._commandPalette.hidden) return;
     const command = this._commandPaletteItems[index];
     if (!command) return;
+    this._clearCommandQueryFeedback();
     this._clearCommandSelectionFeedback();
     this._clearCommandItemFeedback();
     this._commandPaletteActiveIndex = index;

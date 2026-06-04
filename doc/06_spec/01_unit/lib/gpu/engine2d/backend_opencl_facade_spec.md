@@ -43,7 +43,7 @@ backend_opencl_facade_spec -> std
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -57,6 +57,9 @@ expect(source).to_contain("__kernel void simple_2d_rect_filled_u32")
 expect(source).to_contain("__kernel void simple_2d_rect_outline_u32")
 expect(source).to_contain("__kernel void simple_2d_line_u32")
 expect(source).to_contain("__kernel void simple_2d_gradient_rect_u32")
+expect(source).to_contain("__kernel void simple_2d_circle_u32")
+expect(source).to_contain("__kernel void simple_2d_circle_filled_u32")
+expect(source).to_contain("__kernel void simple_2d_rounded_rect_u32")
 expect(source).to_contain("__kernel void simple_2d_blit_image_u32")
 expect(source).to_contain("__kernel void simple_2d_blit_nonzero_u32")
 ```
@@ -98,16 +101,26 @@ expect(source).to_contain("__kernel void simple_2d_blit_nonzero_u32")
 5. backend draw gradient rect
    - Expected: gradient[0] equals `0xffff0000u32`
    - Expected: gradient[15] equals `0xff0000ffu32`
+
+6. backend draw circle
+   - Expected: circle[5] equals `0xffabcdefu32`
+
+7. backend draw circle filled
+   - Expected: filled_circle[10] equals `0xff135724u32`
+
+8. backend draw rounded rect
+   - Expected: rounded[5] equals `0xff2468acu32`
+   - Expected: rounded[10] equals `0xff2468acu32`
    - Expected: backend.last_probe.status equals `BackendStatus.Unavailable`
    - Expected: backend.last_probe.has_graphics is false
 
-6. backend shutdown
+9. backend shutdown
 
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 50 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -147,6 +160,16 @@ if ok:
     val gradient = backend.read_pixels()
     expect(gradient[0]).to_equal(0xffff0000u32)
     expect(gradient[15]).to_equal(0xff0000ffu32)
+    backend.draw_circle(1, 1, 1, 0xffabcdefu32)
+    val circle = backend.read_pixels()
+    expect(circle[5]).to_equal(0xffabcdefu32)
+    backend.draw_circle_filled(2, 2, 1, 0xff135724u32)
+    val filled_circle = backend.read_pixels()
+    expect(filled_circle[10]).to_equal(0xff135724u32)
+    backend.draw_rounded_rect(0, 0, 4, 4, 1, 0xff2468acu32)
+    val rounded = backend.read_pixels()
+    expect(rounded[5]).to_equal(0xff2468acu32)
+    expect(rounded[10]).to_equal(0xff2468acu32)
 else:
     expect(backend.last_probe.status).to_equal(BackendStatus.Unavailable)
     expect(backend.last_probe.has_graphics).to_equal(false)
