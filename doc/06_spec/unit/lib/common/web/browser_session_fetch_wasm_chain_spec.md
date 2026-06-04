@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 182 | 182 | 0 | 0 |
+| 183 | 183 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -3030,6 +3030,39 @@ match result:
         expect(_display_js(value)).to_equal("40:instantiated:table:funcref:null:1:2:global:i32:false:42")
     Err(err):
         expect("unexpected instance constructor table/global export js error: {err}").to_equal("")
+```
+
+</details>
+
+#### compares constructor and compiled WebAssembly table and global exports in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `ctor:40:instantiated:table:funcref:null:1:2:global:i32:false:42:compiled:inst... (full value in folded executable source)`
+
+3. Err
+   - Expected: "unexpected constructor/compiled table/global export js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var out = ''; var wasm = '0061736d010000000404017000010606017f00412a0b0710020374626c010006616e737765720300'; var module = new WebAssembly.Module(wasm); var instance = new WebAssembly.Instance(module); var table = instance.exports.tbl; var global = instance.exports.answer; var before = table.get(0); var old = table.grow(1, null); out = 'ctor:' + module.byteLength + ':' + instance.status + ':' + table.kind + ':' + table.element + ':' + before + ':' + old + ':' + table.length + ':' + global.kind + ':' + global.valueType + ':' + global.mutable + ':' + global.value; WebAssembly.compile(wasm).then(function(module) { return WebAssembly.instantiate(module); }).then(function(result) { var table = result.instance.exports.tbl; var global = result.instance.exports.answer; var before = table.get(0); var old = table.grow(1, null); out = out + ':compiled:' + result.status + ':' + result.module.byteLength + ':' + table.kind + ':' + table.element + ':' + before + ':' + old + ':' + table.length + ':' + global.kind + ':' + global.valueType + ':' + global.mutable + ':' + global.value; }); out")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("ctor:40:instantiated:table:funcref:null:1:2:global:i32:false:42:compiled:instantiated:40:table:funcref:null:1:2:global:i32:false:42")
+    Err(err):
+        expect("unexpected constructor/compiled table/global export js error: {err}").to_equal("")
 ```
 
 </details>
@@ -8556,8 +8589,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 182 |
-| Active scenarios | 182 |
+| Total scenarios | 183 |
+| Active scenarios | 183 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
