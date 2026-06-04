@@ -5868,3 +5868,45 @@ fetch/WASM chain spec now passes `178/178`; the native WASM host spec remained
 `107/107`, the WebGPU JS/WASM system spec remained `106/106`, Node API
 conformance remained `275/275`, and `src/lib` completed with the current
 `399 warning(s)`. Broader browser/WASM semantics remain open.
+
+BrowserSession WebAssembly direct/compiled function-body parity continuation:
+
+Completion checklist:
+
+- Add a BrowserSession browser-script scenario that invokes the same exported
+  function body through direct `WebAssembly.instantiate(...)` and through
+  `WebAssembly.compile(...).then(module => WebAssembly.instantiate(module))` in
+  the same script evaluation.
+- Verify the direct instantiate promise resolves to `status=instantiated`,
+  byte length `41`, exported `run` type `function`, and two argument-driven
+  return values of `42`.
+- Verify the compiled instantiate promise resolves to `status=instantiated`,
+  byte length `41`, exported `run` type `function`, and two argument-driven
+  return values of `42`.
+- Verify the direct and compiled promise callbacks preserve deterministic
+  ordered output in one script evaluation.
+- Regenerate the mirrored scenario manual for the changed SPipe spec.
+- Restore generated index/manual noise from docgen and adjacent specs.
+- Record command evidence, pass counts, warning count, and remaining open scope.
+- Run diff hygiene and doc layout gates before committing and pushing.
+
+Test checklist:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+
+BrowserSession scripts now compare direct and compiled WebAssembly function-body
+paths in the same script evaluation. The focused assertion verifies the direct
+instantiate promise resolves to `status=instantiated`, byte length `41`,
+exported `run` type `function`, and two argument-driven return values of `42`,
+then verifies the compiled instantiate promise resolves with the same status,
+byte length, export type, and two argument-driven return values. The focused
+fetch/WASM chain spec now passes `179/179`; the native WASM host spec remained
+`107/107`, the WebGPU JS/WASM system spec remained `106/106`, Node API
+conformance remained `275/275`, and `src/lib` completed with the current
+`399 warning(s)`. Broader browser/WASM semantics remain open.

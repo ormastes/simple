@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 178 | 178 | 0 | 0 |
+| 179 | 179 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -3393,6 +3393,39 @@ match result:
         expect(_display_js(value)).to_equal("instantiated:41:function:42:42")
     Err(err):
         expect("unexpected function export body argument js error: {err}").to_equal("")
+```
+
+</details>
+
+#### compares direct and compiled WebAssembly function export bodies in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `direct:instantiated:41:function:42:42:compiled:instantiated:41:function:42:42`
+
+3. Err
+   - Expected: "unexpected combined function export body js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var out = ''; var wasm = '0061736d0100000001070160027f7f017f030201000707010372756e00000a09010700200020016a0b'; WebAssembly.instantiate(wasm).then(function(result) { out = 'direct:' + result.status + ':' + result.module.byteLength + ':' + typeof result.instance.exports.run + ':' + result.instance.exports.run(40, 2) + ':' + result.instance.exports.run(7, 35); }); WebAssembly.compile(wasm).then(function(module) { return WebAssembly.instantiate(module); }).then(function(result) { out = out + ':compiled:' + result.status + ':' + result.module.byteLength + ':' + typeof result.instance.exports.run + ':' + result.instance.exports.run(39, 3) + ':' + result.instance.exports.run(8, 34); }); out")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("direct:instantiated:41:function:42:42:compiled:instantiated:41:function:42:42")
+    Err(err):
+        expect("unexpected combined function export body js error: {err}").to_equal("")
 ```
 
 </details>
@@ -8424,8 +8457,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 178 |
-| Active scenarios | 178 |
+| Total scenarios | 179 |
+| Active scenarios | 179 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
