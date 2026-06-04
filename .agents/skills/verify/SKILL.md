@@ -45,6 +45,10 @@ not create, rewrite, or weaken SPipe after verification.
 ### 3. Feature Requirements
 - Every REQ-NNN traced to source code
 - Every BDD scenario has matching `it` block
+- Any `doc/08_tracking/feature/feature_db.sdn` row with `status=done` fills
+  `requirement`, `research`, `plan`, `architecture`, `design`, `system_spec`,
+  `spec_doc`, `implementation`, `unit_tests`, `integration_tests`, and `guide`;
+  confirm with `<runtime> lint doc/08_tracking/feature/feature_db.sdn`
 
 ### 4. NFR
 - Performance benchmarks exist

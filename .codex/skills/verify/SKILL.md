@@ -88,6 +88,10 @@ Scan for stub patterns — any match is a **FAIL**:
 - Requirement, research, architecture/design, generated spec, plan,
   implementation, guide, and executable test links use the same feature slug or
   an explicit documented alias
+- Any `doc/08_tracking/feature/feature_db.sdn` row with `status=done` fills
+  `requirement`, `research`, `plan`, `architecture`, `design`, `system_spec`,
+  `spec_doc`, `implementation`, `unit_tests`, `integration_tests`, and `guide`;
+  confirm with `<runtime> lint doc/08_tracking/feature/feature_db.sdn`
 - No orphan requirements (REQ without implementation)
 - No orphan tests (tests without corresponding REQ)
 

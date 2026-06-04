@@ -20,12 +20,12 @@ A feature row may use `status=done` only when the row links the required
 pipeline artifacts:
 
 `requirement`, `research`, `plan`, `architecture`, `design`, `system_spec`,
-`spec_doc`, and `implementation`.
+`spec_doc`, `implementation`, `unit_tests`, `integration_tests`, and `guide`.
 
-Unit tests, integration tests, and guide links are filled when applicable. Run:
+Run:
 
 ```bash
-bin/simple tracking check --kind=feature
+<runtime> lint doc/08_tracking/feature/feature_db.sdn
 ```
 
 ## External Sync

@@ -28,6 +28,11 @@ skill at `.claude/skills/spipe_doc_wiki_refactor.md` so stale docs, command
 references, wiki-style process knowledge, and feature/layer expert links are
 cleaned before completion.
 
+Before marking a feature tracking row `status=done`, fill `requirement`,
+`research`, `plan`, `architecture`, `design`, `system_spec`, `spec_doc`,
+`implementation`, `unit_tests`, `integration_tests`, and `guide`, then run
+`<runtime> lint doc/08_tracking/feature/feature_db.sdn`.
+
 For scenario-oriented work, the SPipe loop also includes generated manual
 review. After specs are written or changed, generate the mirrored
 `doc/06_spec/...` document and read it as a scenario manual. Update step
