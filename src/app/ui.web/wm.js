@@ -155,6 +155,8 @@ class SimpleWindowManager {
     this._qualityContrastPolicyActiveIndex = 0;
     this._qualityDensityPolicyActiveIndex = 1;
     this._qualityBackdropPolicyActiveIndex = 0;
+    this._qualityWallpaperPolicyActiveIndex = 0;
+    this._qualityTitleCommandPolicyActiveIndex = 1;
     this._taskbarPreview = null;
     this._taskbarPreviewHideTimer = 0;
     this._wmTooltip = null;
@@ -4898,6 +4900,20 @@ class SimpleWindowManager {
         this._activateQualityBackdropPolicySelection();
         return;
       }
+      const wallpaperPolicy = event.target.closest('.wm-quality-wallpaper-policy-item');
+      if (wallpaperPolicy && panel.contains(wallpaperPolicy)) {
+        this._qualityWallpaperPolicyActiveIndex = Number(wallpaperPolicy.dataset.wallpaperPolicyIndex || '0') || 0;
+        this._syncQualityWallpaperPolicySelection(false);
+        this._activateQualityWallpaperPolicySelection();
+        return;
+      }
+      const titleCommandPolicy = event.target.closest('.wm-quality-title-command-policy-item');
+      if (titleCommandPolicy && panel.contains(titleCommandPolicy)) {
+        this._qualityTitleCommandPolicyActiveIndex = Number(titleCommandPolicy.dataset.titleCommandPolicyIndex || '0') || 0;
+        this._syncQualityTitleCommandPolicySelection(false);
+        this._activateQualityTitleCommandPolicySelection();
+        return;
+      }
       const mode = event.target.closest('[data-quality-mode]');
       if (mode && panel.contains(mode)) {
         this._setQualityAuditMode(mode.dataset.qualityMode || 'full');
@@ -4917,22 +4933,30 @@ class SimpleWindowManager {
       const contrastPolicy = target ? target.closest('.wm-quality-contrast-policy-item') : null;
       const densityPolicy = target ? target.closest('.wm-quality-density-policy-item') : null;
       const backdropPolicy = target ? target.closest('.wm-quality-backdrop-policy-item') : null;
-      if ((!contrastPolicy || !panel.contains(contrastPolicy)) && (!densityPolicy || !panel.contains(densityPolicy)) && (!backdropPolicy || !panel.contains(backdropPolicy))) return;
+      const wallpaperPolicy = target ? target.closest('.wm-quality-wallpaper-policy-item') : null;
+      const titleCommandPolicy = target ? target.closest('.wm-quality-title-command-policy-item') : null;
+      if ((!contrastPolicy || !panel.contains(contrastPolicy)) && (!densityPolicy || !panel.contains(densityPolicy)) && (!backdropPolicy || !panel.contains(backdropPolicy)) && (!wallpaperPolicy || !panel.contains(wallpaperPolicy)) && (!titleCommandPolicy || !panel.contains(titleCommandPolicy))) return;
       const moveSelection = (delta) => {
         if (contrastPolicy) this._moveQualityContrastPolicySelection(delta);
         if (densityPolicy) this._moveQualityDensityPolicySelection(delta);
         if (backdropPolicy) this._moveQualityBackdropPolicySelection(delta);
+        if (wallpaperPolicy) this._moveQualityWallpaperPolicySelection(delta);
+        if (titleCommandPolicy) this._moveQualityTitleCommandPolicySelection(delta);
       };
       const setSelection = (index) => {
         if (contrastPolicy) this._setQualityContrastPolicySelection(index);
         if (densityPolicy) this._setQualityDensityPolicySelection(index);
         if (backdropPolicy) this._setQualityBackdropPolicySelection(index);
+        if (wallpaperPolicy) this._setQualityWallpaperPolicySelection(index);
+        if (titleCommandPolicy) this._setQualityTitleCommandPolicySelection(index);
       };
-      const itemCount = contrastPolicy ? this._qualityContrastPolicyItems().length : densityPolicy ? this._qualityDensityPolicyItems().length : this._qualityBackdropPolicyItems().length;
+      const itemCount = contrastPolicy ? this._qualityContrastPolicyItems().length : densityPolicy ? this._qualityDensityPolicyItems().length : backdropPolicy ? this._qualityBackdropPolicyItems().length : wallpaperPolicy ? this._qualityWallpaperPolicyItems().length : this._qualityTitleCommandPolicyItems().length;
       const activateSelection = () => {
         if (contrastPolicy) this._activateQualityContrastPolicySelection();
         if (densityPolicy) this._activateQualityDensityPolicySelection();
         if (backdropPolicy) this._activateQualityBackdropPolicySelection();
+        if (wallpaperPolicy) this._activateQualityWallpaperPolicySelection();
+        if (titleCommandPolicy) this._activateQualityTitleCommandPolicySelection();
       };
       if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
         event.preventDefault();
@@ -5753,6 +5777,7 @@ class SimpleWindowManager {
     preview.appendChild(this._makeQualityComputedCommandMetric('Modes', modes.length + ' modes', 'modes', modes.length >= 4));
     preview.appendChild(this._makeQualityComputedCommandMetric('Suggest', suggestions.length + ' options', 'suggestions', suggestions.length >= 4));
     preview.appendChild(this._makeQualityComputedCommandMetric('Payload', contextText, 'payload', !!input && !!contextText));
+    preview.appendChild(this._makeQualityTitleCommandPolicy(kind));
     return preview;
   }
 
@@ -5774,6 +5799,84 @@ class SimpleWindowManager {
     metric.appendChild(name);
     metric.appendChild(result);
     return metric;
+  }
+
+  _makeQualityTitleCommandPolicy(activeKind) {
+    const modes = this._titleCommandModes();
+    const currentIndex = modes.findIndex((mode) => mode.id === activeKind);
+    if (currentIndex >= 0) this._qualityTitleCommandPolicyActiveIndex = currentIndex;
+    const policy = document.createElement('div');
+    policy.className = 'wm-quality-title-command-policy';
+    policy.setAttribute('role', 'listbox');
+    policy.setAttribute('aria-label', 'Title command mode policy');
+    policy.dataset.titleCommandPolicyActiveIndex = String(this._qualityTitleCommandPolicyActiveIndex);
+    policy.setAttribute('aria-activedescendant', `wm-quality-title-command-policy-${this._qualityTitleCommandPolicyActiveIndex}`);
+    modes.forEach((mode, index) => {
+      const selected = index === this._qualityTitleCommandPolicyActiveIndex;
+      const item = document.createElement('button');
+      item.id = `wm-quality-title-command-policy-${index}`;
+      item.className = 'wm-quality-title-command-policy-item' + (selected ? ' selected' : '');
+      item.dataset.titleCommandPolicy = mode.id;
+      item.dataset.titleCommandPolicyIndex = String(index);
+      item.tabIndex = selected ? 0 : -1;
+      item.setAttribute('role', 'option');
+      item.setAttribute('aria-selected', selected ? 'true' : 'false');
+      const name = document.createElement('span');
+      name.className = 'wm-quality-title-command-policy-label';
+      name.textContent = mode.label;
+      const result = document.createElement('strong');
+      result.className = 'wm-quality-title-command-policy-value';
+      result.textContent = mode.id === 'path' ? 'IDE path input' : mode.id === 'url' ? 'browser URL input' : mode.id === 'search' ? 'workspace search input' : 'command runner input';
+      item.appendChild(name);
+      item.appendChild(result);
+      policy.appendChild(item);
+    });
+    return policy;
+  }
+
+  _qualityTitleCommandPolicyItems() {
+    if (!this._qualityInspector) return [];
+    return Array.from(this._qualityInspector.querySelectorAll('.wm-quality-title-command-policy-item'));
+  }
+
+  _moveQualityTitleCommandPolicySelection(delta) {
+    const items = this._qualityTitleCommandPolicyItems();
+    if (!items.length) return;
+    const next = (this._qualityTitleCommandPolicyActiveIndex + delta + items.length) % items.length;
+    this._setQualityTitleCommandPolicySelection(next);
+  }
+
+  _setQualityTitleCommandPolicySelection(index) {
+    const items = this._qualityTitleCommandPolicyItems();
+    if (!items.length) return;
+    this._qualityTitleCommandPolicyActiveIndex = Math.max(0, Math.min(index, items.length - 1));
+    this._syncQualityTitleCommandPolicySelection();
+  }
+
+  _syncQualityTitleCommandPolicySelection(shouldFocus = true) {
+    const items = this._qualityTitleCommandPolicyItems();
+    if (!items.length) return;
+    const policy = items[0].closest('.wm-quality-title-command-policy');
+    items.forEach((item, index) => {
+      const selected = index === this._qualityTitleCommandPolicyActiveIndex;
+      item.classList.toggle('selected', selected);
+      item.tabIndex = selected ? 0 : -1;
+      item.setAttribute('aria-selected', selected ? 'true' : 'false');
+      if (selected && policy) policy.setAttribute('aria-activedescendant', item.id);
+      if (selected && shouldFocus) item.focus();
+    });
+    if (policy) policy.dataset.titleCommandPolicyActiveIndex = String(this._qualityTitleCommandPolicyActiveIndex);
+  }
+
+  _activateQualityTitleCommandPolicySelection() {
+    const item = this._qualityTitleCommandPolicyItems()[this._qualityTitleCommandPolicyActiveIndex];
+    if (!item) return;
+    const modeId = item.dataset.titleCommandPolicy || 'path';
+    const mode = this._titleCommandModes().find((entry) => entry.id === modeId);
+    this._focusActiveTitleInput();
+    const applied = this._applyTitleCommandMode(mode);
+    this._sendWindowCmd('quality_title_command_policy', { title_command_mode: modeId, applied });
+    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
   }
 
   _makeQualityIconPreview() {
@@ -6709,6 +6812,7 @@ class SimpleWindowManager {
     preview.appendChild(this._makeQualityComputedWallpaperMetric('Swatches', swatches.length + ' live', 'swatches', swatches.length >= 3 || !this._wallpaperPicker?.hidden));
     preview.appendChild(this._makeQualityComputedWallpaperMetric('Motion', motion, 'motion', motion === 'static' || duration >= 0));
     preview.appendChild(this._makeQualityComputedWallpaperMetric('Duration', duration + 'ms', 'duration', motion === 'static' ? duration === 0 : duration >= 12000));
+    preview.appendChild(this._makeQualityWallpaperPolicy());
     return preview;
   }
 
@@ -6729,6 +6833,87 @@ class SimpleWindowManager {
     metric.appendChild(name);
     metric.appendChild(result);
     return metric;
+  }
+
+  _makeQualityWallpaperPolicy() {
+    const entries = [
+      ['aurora', 'Aurora', 'animated aurora wallpaper'],
+      ['mesh', 'Mesh', 'soft gradient mesh'],
+      ['solid', 'Solid', 'quiet static background']
+    ];
+    const wallpaper = this._normalizeWallpaperPreference(document.documentElement.dataset.wmWallpaper || this._readWallpaperPreference());
+    const currentIndex = entries.findIndex(([mode]) => mode === wallpaper);
+    if (currentIndex >= 0) this._qualityWallpaperPolicyActiveIndex = currentIndex;
+    const policy = document.createElement('div');
+    policy.className = 'wm-quality-wallpaper-policy';
+    policy.setAttribute('role', 'listbox');
+    policy.setAttribute('aria-label', 'Animated wallpaper policy');
+    policy.dataset.wallpaperPolicyActiveIndex = String(this._qualityWallpaperPolicyActiveIndex);
+    policy.setAttribute('aria-activedescendant', `wm-quality-wallpaper-policy-${this._qualityWallpaperPolicyActiveIndex}`);
+    entries.forEach(([mode, label, value], index) => {
+      const selected = index === this._qualityWallpaperPolicyActiveIndex;
+      const item = document.createElement('button');
+      item.id = `wm-quality-wallpaper-policy-${index}`;
+      item.className = 'wm-quality-wallpaper-policy-item' + (selected ? ' selected' : '');
+      item.dataset.wallpaperPolicy = mode;
+      item.dataset.wallpaperPolicyIndex = String(index);
+      item.tabIndex = selected ? 0 : -1;
+      item.setAttribute('role', 'option');
+      item.setAttribute('aria-selected', selected ? 'true' : 'false');
+      const name = document.createElement('span');
+      name.className = 'wm-quality-wallpaper-policy-label';
+      name.textContent = label;
+      const result = document.createElement('strong');
+      result.className = 'wm-quality-wallpaper-policy-value';
+      result.textContent = value;
+      item.appendChild(name);
+      item.appendChild(result);
+      policy.appendChild(item);
+    });
+    return policy;
+  }
+
+  _qualityWallpaperPolicyItems() {
+    if (!this._qualityInspector) return [];
+    return Array.from(this._qualityInspector.querySelectorAll('.wm-quality-wallpaper-policy-item'));
+  }
+
+  _moveQualityWallpaperPolicySelection(delta) {
+    const items = this._qualityWallpaperPolicyItems();
+    if (!items.length) return;
+    const next = (this._qualityWallpaperPolicyActiveIndex + delta + items.length) % items.length;
+    this._setQualityWallpaperPolicySelection(next);
+  }
+
+  _setQualityWallpaperPolicySelection(index) {
+    const items = this._qualityWallpaperPolicyItems();
+    if (!items.length) return;
+    this._qualityWallpaperPolicyActiveIndex = Math.max(0, Math.min(index, items.length - 1));
+    this._syncQualityWallpaperPolicySelection();
+  }
+
+  _syncQualityWallpaperPolicySelection(shouldFocus = true) {
+    const items = this._qualityWallpaperPolicyItems();
+    if (!items.length) return;
+    const policy = items[0].closest('.wm-quality-wallpaper-policy');
+    items.forEach((item, index) => {
+      const selected = index === this._qualityWallpaperPolicyActiveIndex;
+      item.classList.toggle('selected', selected);
+      item.tabIndex = selected ? 0 : -1;
+      item.setAttribute('aria-selected', selected ? 'true' : 'false');
+      if (selected && policy) policy.setAttribute('aria-activedescendant', item.id);
+      if (selected && shouldFocus) item.focus();
+    });
+    if (policy) policy.dataset.wallpaperPolicyActiveIndex = String(this._qualityWallpaperPolicyActiveIndex);
+  }
+
+  _activateQualityWallpaperPolicySelection() {
+    const item = this._qualityWallpaperPolicyItems()[this._qualityWallpaperPolicyActiveIndex];
+    if (!item) return;
+    const wallpaper = item.dataset.wallpaperPolicy || 'aurora';
+    this.setWallpaperPreference(wallpaper);
+    this._sendWindowCmd('quality_wallpaper_policy', { wallpaper_policy: wallpaper });
+    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
   }
 
   _makeQualityComputedMotionPreview() {

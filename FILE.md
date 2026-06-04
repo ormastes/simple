@@ -43,10 +43,8 @@ FILE.md files) are allowed.
 | `.spipe` | SPipe state files |
 | `.simple` | Simple language config |
 | `.vscode` | VS Code settings |
-| `build` | Build output (mutable) |
+| `build` | Build output (mutable, includes target/ and bootstrap/) |
 | `tmp` | Temporary files (mutable) |
-| `target` | Cargo/build target (mutable) |
-| `bootstrap` | Bootstrap artifacts (mutable) |
 
 **No other files at root.**
 
