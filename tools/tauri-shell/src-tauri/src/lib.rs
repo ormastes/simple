@@ -32,6 +32,9 @@ struct MdiProof {
     has_drag_runtime: bool,
     has_drag_events: bool,
     drag_moved: bool,
+    has_window_event_runtime: bool,
+    body_click_routed: bool,
+    body_input_routed: bool,
     html_renderable: bool,
 }
 
@@ -111,6 +114,18 @@ enum ShellMessage {
         dy: f64,
         button: String,
     },
+    #[serde(rename = "keypress")]
+    Keypress {
+        key: String,
+        #[serde(rename = "windowId", skip_serializing_if = "Option::is_none")]
+        window_id: Option<String>,
+    },
+    #[serde(rename = "action")]
+    Action {
+        name: String,
+        #[serde(rename = "windowId", skip_serializing_if = "Option::is_none")]
+        window_id: Option<String>,
+    },
     #[serde(rename = "quit")]
     Quit,
 }
@@ -151,18 +166,33 @@ fn js_escape(text: &str) -> String {
 }
 
 fn shell_input_message(event_type: &str, key: &str, value: &str, x: f64, y: f64) -> ShellMessage {
+    shell_input_message_for("main", event_type, "", key, value, x, y, 0.0, 0.0, "")
+}
+
+fn shell_input_message_for(
+    surface_id: &str,
+    event_type: &str,
+    target_id: &str,
+    key: &str,
+    value: &str,
+    x: f64,
+    y: f64,
+    dx: f64,
+    dy: f64,
+    button: &str,
+) -> ShellMessage {
     ShellMessage::Input {
         target: "tauri".to_string(),
-        surface_id: "main".to_string(),
+        surface_id: surface_id.to_string(),
         event_type: event_type.to_string(),
-        target_id: "".to_string(),
+        target_id: target_id.to_string(),
         key: key.to_string(),
         value: value.to_string(),
         x,
         y,
-        dx: 0.0,
-        dy: 0.0,
-        button: "".to_string(),
+        dx,
+        dy,
+        button: button.to_string(),
     }
 }
 
@@ -307,7 +337,7 @@ fn tauri_mdi_init_script() -> &'static str {
             if (!document.getElementById('simple-tauri-wm-style')) {
                 var style = document.createElement('style');
                 style.id = 'simple-tauri-wm-style';
-                style.textContent = '#wm-desktop{position:fixed;inset:0;overflow:hidden;pointer-events:none}.wm-window{position:absolute;display:flex;flex-direction:column;background:#111827;color:#e5e7eb;border:1px solid rgba(255,255,255,.18);box-shadow:0 18px 45px rgba(0,0,0,.42);border-radius:8px;overflow:hidden;pointer-events:auto}.wm-titlebar{height:32px;display:flex;align-items:center;gap:10px;padding:0 10px;background:#0f172a;border-bottom:1px solid rgba(255,255,255,.12);user-select:none;cursor:grab}.wm-titlebar:active{cursor:grabbing}.wm-traffic-lights{display:flex;gap:6px}.wm-traffic-lights button{width:13px;height:13px;border-radius:50%;border:0;font-size:0;padding:0}.wm-traffic-lights button[data-action=close]{background:#ff5f57}.wm-traffic-lights button[data-action=minimize]{background:#febc2e}.wm-traffic-lights button[data-action=maximize]{background:#28c840}.wm-title{font:600 12px system-ui,sans-serif;color:#e5e7eb}.wm-body{flex:1;min-height:0;overflow:hidden;background:#0b0d10}';
+                style.textContent = '#wm-desktop{position:fixed;inset:0;overflow:hidden;z-index:10000;pointer-events:none}.wm-window{position:absolute;display:flex;flex-direction:column;background:#111827;color:#e5e7eb;border:1px solid rgba(255,255,255,.18);box-shadow:0 18px 45px rgba(0,0,0,.42);border-radius:8px;overflow:hidden;pointer-events:auto}.wm-titlebar{height:32px;display:flex;align-items:center;gap:10px;padding:0 10px;background:#0f172a;border-bottom:1px solid rgba(255,255,255,.12);user-select:none;cursor:grab}.wm-titlebar:active{cursor:grabbing}.wm-traffic-lights{display:flex;gap:6px}.wm-traffic-lights button{width:13px;height:13px;border-radius:50%;border:0;font-size:0;padding:0;cursor:pointer}.wm-traffic-lights button[data-action=close]{background:#ff5f57}.wm-traffic-lights button[data-action=minimize]{background:#febc2e}.wm-traffic-lights button[data-action=maximize]{background:#28c840}.wm-title{font:600 12px system-ui,sans-serif;color:#e5e7eb}.wm-body{flex:1;min-height:0;overflow:auto;background:#0b0d10;pointer-events:auto}.wm-body *{pointer-events:auto}';
                 document.head.appendChild(style);
             }
             var desktop = document.getElementById('wm-desktop');
@@ -321,31 +351,152 @@ fn tauri_mdi_init_script() -> &'static str {
                     windows: {},
                     z: 20,
                     drag: null,
+                    lastEvent: null,
+                    invoke: function(name, payload) {
+                        var inv = window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke
+                            ? window.__TAURI_INTERNALS__.invoke
+                            : (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke ? window.__TAURI__.core.invoke : null);
+                        if (inv) inv(name, payload || {});
+                    },
+                    elementId: function(el) {
+                        if (!el) return '';
+                        return el.getAttribute('data-target-id') || el.getAttribute('data-widget-id') || el.getAttribute('data-id') || el.id || el.name || '';
+                    },
+                    sendWindowAction: function(id, action) {
+                        this.lastEvent = { kind: 'action', windowId: id, action: action };
+                        this.invoke('send_window_action', { windowId: id, name: action });
+                    },
+                    sendWindowKey: function(id, key) {
+                        this.lastEvent = { kind: 'key', windowId: id, key: key };
+                        this.invoke('send_window_keypress', { windowId: id, key: key });
+                    },
+                    sendWindowInput: function(id, targetId, value) {
+                        this.lastEvent = { kind: 'input', windowId: id, targetId: targetId, value: value };
+                        this.invoke('send_window_input', { windowId: id, targetId: targetId, value: value });
+                    },
+                    sendWindowMouse: function(id, kind, ev) {
+                        var rect = this.windows[id] && this.windows[id].body ? this.windows[id].body.getBoundingClientRect() : { left: 0, top: 0 };
+                        this.lastEvent = { kind: kind, windowId: id };
+                        this.invoke('send_window_mouse', {
+                            windowId: id,
+                            kind: kind,
+                            x: ev.clientX - rect.left,
+                            y: ev.clientY - rect.top,
+                            button: ev.button === 2 ? 'right' : (ev.button === 1 ? 'middle' : 'left')
+                        });
+                    },
                     bindDrag: function(id, win, titlebar) {
                         var self = this;
-                        titlebar.addEventListener('pointerdown', function(ev) {
-                            if (ev.target && ev.target.closest && ev.target.closest('button')) return;
+                        function isControl(ev) {
+                            if (ev.target && ev.target.closest && ev.target.closest('button')) return true;
+                            return false;
+                        }
+                        function begin(ev, pointerId, isMouse) {
+                            if (isControl(ev)) return;
                             self.focus(id);
                             var rect = win.getBoundingClientRect();
-                            self.drag = { id: id, win: win, pointerId: ev.pointerId, startX: ev.clientX, startY: ev.clientY, left: rect.left, top: rect.top };
-                            titlebar.setPointerCapture(ev.pointerId);
+                            self.drag = { id: id, win: win, pointerId: pointerId, mouse: !!isMouse, startX: ev.clientX, startY: ev.clientY, left: rect.left, top: rect.top };
                             ev.preventDefault();
-                        });
-                        titlebar.addEventListener('pointermove', function(ev) {
+                        }
+                        function move(ev, pointerId, isMouse) {
                             var drag = self.drag;
-                            if (!drag || drag.id !== id || drag.pointerId !== ev.pointerId) return;
+                            if (!drag || drag.id !== id || drag.pointerId !== pointerId || drag.mouse !== !!isMouse) return;
                             win.style.left = Math.max(0, drag.left + ev.clientX - drag.startX) + 'px';
                             win.style.top = Math.max(0, drag.top + ev.clientY - drag.startY) + 'px';
-                        });
-                        titlebar.addEventListener('pointerup', function(ev) {
-                            if (self.drag && self.drag.pointerId === ev.pointerId) {
+                            ev.preventDefault();
+                        }
+                        function finish(ev, pointerId, isMouse) {
+                            if (self.drag && self.drag.id === id && self.drag.pointerId === pointerId && self.drag.mouse === !!isMouse) {
                                 self.drag = null;
-                                try { titlebar.releasePointerCapture(ev.pointerId); } catch (_) {}
                                 self.notifyMove(id, win);
                             }
+                        }
+                        function cancel(pointerId) {
+                            if (self.drag && self.drag.id === id && self.drag.pointerId === pointerId) self.drag = null;
+                        }
+                        titlebar.addEventListener('pointerdown', function(ev) {
+                            begin(ev, ev.pointerId, false);
+                            if (!self.drag || self.drag.id !== id || self.drag.pointerId !== ev.pointerId) return;
+                            try { titlebar.setPointerCapture(ev.pointerId); } catch (_) {}
+                        });
+                        titlebar.addEventListener('pointermove', function(ev) {
+                            move(ev, ev.pointerId, false);
+                        });
+                        document.addEventListener('pointermove', function(ev) {
+                            move(ev, ev.pointerId, false);
+                        });
+                        titlebar.addEventListener('pointerup', function(ev) {
+                            try { titlebar.releasePointerCapture(ev.pointerId); } catch (_) {}
+                            finish(ev, ev.pointerId, false);
+                        });
+                        document.addEventListener('pointerup', function(ev) {
+                            try { titlebar.releasePointerCapture(ev.pointerId); } catch (_) {}
+                            finish(ev, ev.pointerId, false);
                         });
                         titlebar.addEventListener('pointercancel', function(ev) {
-                            if (self.drag && self.drag.pointerId === ev.pointerId) self.drag = null;
+                            cancel(ev.pointerId);
+                        });
+                        document.addEventListener('pointercancel', function(ev) {
+                            cancel(ev.pointerId);
+                        });
+                        titlebar.addEventListener('mousedown', function(ev) {
+                            if (ev.button !== 0) return;
+                            begin(ev, 'mouse', true);
+                        });
+                        document.addEventListener('mousemove', function(ev) {
+                            move(ev, 'mouse', true);
+                        });
+                        document.addEventListener('mouseup', function(ev) {
+                            finish(ev, 'mouse', true);
+                        });
+                    },
+                    bindWindowEvents: function(id, win, body) {
+                        var self = this;
+                        body.tabIndex = 0;
+                        win.addEventListener('pointerdown', function() {
+                            self.focus(id);
+                        });
+                        body.addEventListener('pointerdown', function(ev) {
+                            self.focus(id);
+                            body.focus();
+                            self.sendWindowMouse(id, 'mouse_down', ev);
+                        });
+                        body.addEventListener('pointerup', function(ev) {
+                            self.sendWindowMouse(id, 'mouse_up', ev);
+                        });
+                        body.addEventListener('pointermove', function(ev) {
+                            self.sendWindowMouse(id, 'mouse_move', ev);
+                        });
+                        win.addEventListener('click', function(ev) {
+                            var actionEl = ev.target && ev.target.closest ? ev.target.closest('[data-action]') : null;
+                            if (!actionEl || !win.contains(actionEl)) return;
+                            var action = actionEl.getAttribute('data-action') || '';
+                            if (!action) return;
+                            if (action === 'close') {
+                                win.remove();
+                                delete self.windows[id];
+                            } else if (action === 'minimize') {
+                                win.style.display = 'none';
+                            } else if (action === 'maximize') {
+                                win.style.left = '0px';
+                                win.style.top = '0px';
+                                win.style.width = '100vw';
+                                win.style.height = '100vh';
+                            }
+                            self.sendWindowAction(id, action);
+                            ev.preventDefault();
+                        });
+                        body.addEventListener('keydown', function(ev) {
+                            var key = ev.key || '';
+                            if (key.length === 1 || ['Enter','Escape','Backspace','Tab','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].indexOf(key) >= 0) {
+                                self.sendWindowKey(id, key);
+                            }
+                        });
+                        body.addEventListener('input', function(ev) {
+                            var target = ev.target;
+                            var editable = target && (target.matches && target.matches('input,textarea,select') || target.isContentEditable);
+                            if (!editable) return;
+                            self.sendWindowInput(id, self.elementId(target), target.isContentEditable ? target.textContent : target.value);
                         });
                     },
                     focus: function(id) {
@@ -357,12 +508,7 @@ fn tauri_mdi_init_script() -> &'static str {
                     notifyMove: function(id, win) {
                         var left = parseInt(win.style.left || '0', 10) || 0;
                         var top = parseInt(win.style.top || '0', 10) || 0;
-                        var invoke = window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke
-                            ? window.__TAURI_INTERNALS__.invoke
-                            : (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke ? window.__TAURI__.core.invoke : null);
-                        if (invoke) {
-                            invoke('send_action', { name: 'wm_move:' + id + ':' + left + ':' + top });
-                        }
+                        this.invoke('send_action', { name: 'wm_move:' + id + ':' + left + ':' + top });
                     },
                     receiveMessage: function(msg) {
                         if (!msg || !msg.type) return;
@@ -392,6 +538,7 @@ fn tauri_mdi_init_script() -> &'static str {
                                 title.textContent = msg.title || id;
                                 var body = document.createElement('div');
                                 body.className = 'wm-body';
+                                body.dataset.surfaceId = id;
                                 body.innerHTML = msg.html || '';
                                 titlebar.appendChild(lights);
                                 titlebar.appendChild(title);
@@ -400,6 +547,7 @@ fn tauri_mdi_init_script() -> &'static str {
                                 desktop.appendChild(win);
                                 existing = this.windows[id] = { win: win, body: body, title: title };
                                 this.bindDrag(id, win, titlebar);
+                                this.bindWindowEvents(id, win, body);
                             } else {
                                 existing.body.innerHTML = msg.html || '';
                                 existing.title.textContent = msg.title || id;
@@ -442,19 +590,45 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
             (function() {
                 var wm = window.__SIMPLE_TAURI_WM__;
                 var dragMoved = false;
+                var bodyClickRouted = false;
+                var bodyInputRouted = false;
                 if (wm && wm.windows && wm.windows.terminal) {
                     var terminal = wm.windows.terminal.win;
+                    var body = wm.windows.terminal.body;
                     var titlebar = terminal.querySelector('.wm-titlebar');
                     var beforeLeft = parseInt(terminal.style.left || '0', 10) || 0;
                     var beforeTop = parseInt(terminal.style.top || '0', 10) || 0;
                     if (titlebar && typeof PointerEvent === 'function') {
                         titlebar.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 37, clientX: beforeLeft + 12, clientY: beforeTop + 12, bubbles: true }));
-                        titlebar.dispatchEvent(new PointerEvent('pointermove', { pointerId: 37, clientX: beforeLeft + 72, clientY: beforeTop + 42, bubbles: true }));
-                        titlebar.dispatchEvent(new PointerEvent('pointerup', { pointerId: 37, clientX: beforeLeft + 72, clientY: beforeTop + 42, bubbles: true }));
+                        document.dispatchEvent(new PointerEvent('pointermove', { pointerId: 37, clientX: beforeLeft + 72, clientY: beforeTop + 42, bubbles: true }));
+                        document.dispatchEvent(new PointerEvent('pointerup', { pointerId: 37, clientX: beforeLeft + 72, clientY: beforeTop + 42, bubbles: true }));
+                    }
+                    var afterPointerLeft = parseInt(terminal.style.left || '0', 10) || 0;
+                    var afterPointerTop = parseInt(terminal.style.top || '0', 10) || 0;
+                    if (titlebar && !(afterPointerLeft > beforeLeft && afterPointerTop > beforeTop)) {
+                        titlebar.dispatchEvent(new MouseEvent('mousedown', { button: 0, clientX: beforeLeft + 12, clientY: beforeTop + 12, bubbles: true }));
+                        document.dispatchEvent(new MouseEvent('mousemove', { button: 0, clientX: beforeLeft + 72, clientY: beforeTop + 42, bubbles: true }));
+                        document.dispatchEvent(new MouseEvent('mouseup', { button: 0, clientX: beforeLeft + 72, clientY: beforeTop + 42, bubbles: true }));
                     }
                     var afterLeft = parseInt(terminal.style.left || '0', 10) || 0;
                     var afterTop = parseInt(terminal.style.top || '0', 10) || 0;
                     dragMoved = afterLeft > beforeLeft && afterTop > beforeTop;
+                    if (body) {
+                        var probeButton = document.createElement('button');
+                        probeButton.setAttribute('data-action', 'proof_click');
+                        body.appendChild(probeButton);
+                        probeButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                        bodyClickRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'action' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.action === 'proof_click');
+                        probeButton.remove();
+
+                        var probeInput = document.createElement('input');
+                        probeInput.setAttribute('data-target-id', 'proof_input');
+                        body.appendChild(probeInput);
+                        probeInput.value = 'ok';
+                        probeInput.dispatchEvent(new Event('input', { bubbles: true }));
+                        bodyInputRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'input' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.targetId === 'proof_input' && wm.lastEvent.value === 'ok');
+                        probeInput.remove();
+                    }
                 }
                 var invoke = window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke
                     ? window.__TAURI_INTERNALS__.invoke
@@ -468,6 +642,9 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                             hasDragRuntime: !!(wm && wm.bindDrag),
                             hasDragEvents: !!(wm && wm.notifyMove),
                             dragMoved: dragMoved,
+                            hasWindowEventRuntime: !!(wm && wm.bindWindowEvents && wm.sendWindowAction && wm.sendWindowInput),
+                            bodyClickRouted: bodyClickRouted,
+                            bodyInputRouted: bodyInputRouted,
                             htmlRenderable: document.body.innerHTML.indexOf('simple-app-window') >= 0 && document.body.innerHTML.indexOf('<pre class="simple-app-pre">') >= 0
                         }
                     });
@@ -483,6 +660,9 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
             has_drag_runtime: true,
             has_drag_events: true,
             drag_moved: false,
+            has_window_event_runtime: true,
+            body_click_routed: false,
+            body_input_routed: false,
             html_renderable: false,
         };
         let _ = fs::write(path, serde_json::to_string(&proof).unwrap_or_default());
@@ -631,10 +811,37 @@ fn handle_subprocess_message(msg: SubprocessMessage, app: &AppHandle) {
 
                         if (!window._evtBound) {{
                             window._evtBound = true;
+                            window._simpleTargetId = function(el) {{
+                                if (!el) return '';
+                                return el.getAttribute('data-target-id') || el.getAttribute('data-widget-id') || el.getAttribute('data-id') || el.id || el.name || '';
+                            }};
                             document.addEventListener('click', function(e) {{
                                 var btn = e.target.closest('[data-action]');
                                 if (btn && window.__TAURI_INTERNALS__) {{
                                     window.__TAURI_INTERNALS__.invoke('send_action', {{ name: btn.getAttribute('data-action') }});
+                                }}
+                            }});
+                            document.addEventListener('input', function(e) {{
+                                var target = e.target;
+                                var editable = target && ((target.matches && target.matches('input,textarea,select')) || target.isContentEditable);
+                                if (editable && window.__TAURI_INTERNALS__) {{
+                                    window.__TAURI_INTERNALS__.invoke('send_window_input', {{
+                                        windowId: 'main',
+                                        targetId: window._simpleTargetId(target),
+                                        value: target.isContentEditable ? target.textContent : target.value
+                                    }});
+                                }}
+                            }});
+                            document.addEventListener('change', function(e) {{
+                                var target = e.target;
+                                var editable = target && target.matches && target.matches('input,textarea,select');
+                                if (editable && window.__TAURI_INTERNALS__) {{
+                                    var value = target.type === 'checkbox' ? String(!!target.checked) : target.value;
+                                    window.__TAURI_INTERNALS__.invoke('send_window_input', {{
+                                        windowId: 'main',
+                                        targetId: window._simpleTargetId(target),
+                                        value: value
+                                    }});
                                 }}
                             }});
                             document.addEventListener('keydown', function(e) {{
@@ -761,8 +968,58 @@ fn send_keypress(key: String, state: tauri::State<'_, Arc<SimpleProcess>>) {
 }
 
 #[tauri::command]
+fn send_window_keypress(
+    window_id: String,
+    key: String,
+    state: tauri::State<'_, Arc<SimpleProcess>>,
+) {
+    state.send(&ShellMessage::Keypress {
+        key,
+        window_id: Some(window_id),
+    });
+}
+
+#[tauri::command]
 fn send_action(name: String, state: tauri::State<'_, Arc<SimpleProcess>>) {
     state.send(&shell_input_message("action", "", &name, 0.0, 0.0));
+}
+
+#[tauri::command]
+fn send_window_action(
+    window_id: String,
+    name: String,
+    state: tauri::State<'_, Arc<SimpleProcess>>,
+) {
+    state.send(&ShellMessage::Action {
+        name,
+        window_id: Some(window_id),
+    });
+}
+
+#[tauri::command]
+fn send_window_input(
+    window_id: String,
+    target_id: String,
+    value: String,
+    state: tauri::State<'_, Arc<SimpleProcess>>,
+) {
+    state.send(&shell_input_message_for(
+        &window_id, "input", &target_id, "", &value, 0.0, 0.0, 0.0, 0.0, "",
+    ));
+}
+
+#[tauri::command]
+fn send_window_mouse(
+    window_id: String,
+    kind: String,
+    x: f64,
+    y: f64,
+    button: String,
+    state: tauri::State<'_, Arc<SimpleProcess>>,
+) {
+    state.send(&shell_input_message_for(
+        &window_id, &kind, "", "", "", x, y, 0.0, 0.0, &button,
+    ));
 }
 
 #[tauri::command]
@@ -924,6 +1181,32 @@ fn shared_wm_requested() -> bool {
     env::args().any(|arg| arg == "--shared-wm")
 }
 
+fn simple_subprocess_args_for(entry: Option<&str>, shared_wm: bool) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(entry) = entry {
+        if entry.ends_with(".ui.sdn") {
+            args.extend([
+                "run".to_string(),
+                "src/app/ui/main.spl".to_string(),
+                "tauri".to_string(),
+                entry.to_string(),
+            ]);
+        } else {
+            args.extend(["run".to_string(), entry.to_string()]);
+        }
+    } else if shared_wm {
+        args.extend([
+            "run".to_string(),
+            "src/app/ui/main.spl".to_string(),
+            "tauri".to_string(),
+        ]);
+    }
+    if shared_wm {
+        args.push("--shared-wm".to_string());
+    }
+    args
+}
+
 fn log_entry_file_status(entry_file: &Option<String>) {
     if let Some(entry) = entry_file {
         let path = std::path::Path::new(entry);
@@ -939,43 +1222,13 @@ fn log_entry_file_status(entry_file: &Option<String>) {
 }
 
 fn html_data_url(html: &str) -> String {
-    format!(
-        "data:text/html;charset=utf-8,{}",
-        urlencoding::encode(html)
-    )
+    format!("data:text/html;charset=utf-8,{}", urlencoding::encode(html))
 }
 
 fn shared_wm_data_url() -> String {
     html_data_url(&format!(
         "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Simple Window Manager</title></head><body style=\"margin:0\">{}</body></html>",
         shared_wm_boot_html()
-    ))
-}
-
-fn render_ui_entry_data_url(simple_bin: &str, entry: &str) -> Result<String, String> {
-    let output = Command::new(simple_bin)
-        .args(["run", "src/app/ui.tauri/tauri_entry.spl", entry])
-        .output()
-        .map_err(|err| format!("Failed to run Tauri render entry.\n\n{}", err))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        if !line.trim_start().starts_with('{') {
-            continue;
-        }
-        if let Ok(SubprocessMessage::Render { html, .. }) =
-            serde_json::from_str::<SubprocessMessage>(line.trim())
-        {
-            return Ok(html_data_url(&html));
-        }
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    Err(format!(
-        "Tauri render entry did not produce a render IPC frame.\n\nstatus: {:?}\nstdout:\n{}\n\nstderr:\n{}",
-        output.status.code(),
-        stdout.lines().take(12).collect::<Vec<_>>().join("\n"),
-        stderr.lines().take(12).collect::<Vec<_>>().join("\n")
     ))
 }
 
@@ -1034,40 +1287,33 @@ pub fn run() {
 
         if let Some(simple_bin) = simple_bin.as_ref() {
             if ui_entry {
-                if let Some(ref entry) = entry_file {
-                    match render_ui_entry_data_url(simple_bin, entry) {
-                        Ok(url) => initial_url = Some(url),
-                        Err(err) => {
-                            eprintln!("[tauri-shell] initial Tauri render failed: {}", err);
-                            startup_error = Some(err);
-                        }
-                    }
-                }
-            } else {
+                initial_url = Some(html_data_url(mdi_shell_html()));
+            }
+            {
                 let mut cmd = Command::new(simple_bin);
-                if let Some(ref entry) = entry_file {
-                    if entry.ends_with(".ui.sdn") {
-                        cmd.args(["run", "src/app/ui.tauri/tauri_entry.spl", entry]);
-                        if shared_wm_requested {
-                            cmd.arg("--shared-wm");
-                        }
-                    } else {
-                        cmd.arg("run").arg(entry);
-                        initial_url = Some(html_data_url(mdi_shell_html()));
-                        if shared_wm_requested {
-                            cmd.arg("--shared-wm");
-                        }
-                    }
-                } else if shared_wm_requested {
-                    cmd.args(["ui", "tauri", "--shared-wm"]);
+                cmd.args(simple_subprocess_args_for(
+                    entry_file.as_deref(),
+                    shared_wm_requested,
+                ));
+                if entry_file
+                    .as_ref()
+                    .map(|entry| !entry.ends_with(".ui.sdn"))
+                    .unwrap_or(false)
+                {
+                    initial_url = Some(html_data_url(mdi_shell_html()));
                 }
                 cmd.stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
+                    .env(
+                        "SIMPLE_LIB",
+                        env::var("SIMPLE_LIB").unwrap_or_else(|_| "src".to_string()),
+                    )
                     .env("SIMPLE_UI_BACKEND", "tauri")
                     .env(
                         "SIMPLE_EXECUTION_MODE",
-                        env::var("SIMPLE_EXECUTION_MODE").unwrap_or_else(|_| "interpret".to_string()),
+                        env::var("SIMPLE_EXECUTION_MODE")
+                            .unwrap_or_else(|_| "interpret".to_string()),
                     )
                     .env(
                         "SIMPLE_TIMEOUT_SECONDS",
@@ -1114,7 +1360,11 @@ pub fn run() {
         .manage(process_for_tauri.clone())
         .invoke_handler(tauri::generate_handler![
             send_keypress,
+            send_window_keypress,
             send_action,
+            send_window_action,
+            send_window_input,
+            send_window_mouse,
             send_resize,
             report_mdi_proof,
         ])
@@ -1135,7 +1385,9 @@ pub fn run() {
 
             let builder = WebviewWindowBuilder::new(app, "main", url);
             #[cfg(desktop)]
-            let builder = builder.title("Simple Window Manager").inner_size(1280.0, 720.0);
+            let builder = builder
+                .title("Simple Window Manager")
+                .inner_size(1280.0, 720.0);
             let _win = builder.build()?;
 
             eprintln!("[tauri-shell] window created");
@@ -1244,7 +1496,8 @@ pub fn run() {
 mod tests {
     use super::{
         mdi_shell_html, render_envelope_metadata_js, resolve_simple_binary_from,
-        shell_input_message, tauri_mdi_init_script, SubprocessMessage,
+        shell_input_message, shell_input_message_for, simple_subprocess_args_for,
+        tauri_mdi_init_script, ShellMessage, SubprocessMessage,
     };
     use crate::{ANDROID_RUNTIME_AARCH64, ANDROID_RUNTIME_X86_64};
 
@@ -1269,6 +1522,26 @@ mod tests {
         assert_eq!(
             resolve_simple_binary_from(&args, Some("/data/local/tmp/simple".to_string()), true),
             Some("/data/local/tmp/simple".to_string())
+        );
+    }
+
+    #[test]
+    fn ui_sdn_launches_live_simple_tauri_runtime() {
+        assert_eq!(
+            simple_subprocess_args_for(Some("examples/06_io/ui/demo.ui.sdn"), false),
+            vec![
+                "run".to_string(),
+                "src/app/ui/main.spl".to_string(),
+                "tauri".to_string(),
+                "examples/06_io/ui/demo.ui.sdn".to_string()
+            ]
+        );
+        assert_eq!(
+            simple_subprocess_args_for(Some("examples/01_getting_started/hello_native.spl"), false),
+            vec![
+                "run".to_string(),
+                "examples/01_getting_started/hello_native.spl".to_string()
+            ]
         );
     }
 
@@ -1320,6 +1593,36 @@ mod tests {
     }
 
     #[test]
+    fn serializes_mdi_window_scoped_events() {
+        let key_json = serde_json::to_string(&ShellMessage::Keypress {
+            key: "Enter".to_string(),
+            window_id: Some("terminal".to_string()),
+        })
+        .expect("window keypress should serialize");
+        assert!(key_json.contains(r#""type":"keypress""#));
+        assert!(key_json.contains(r#""windowId":"terminal""#));
+        assert!(key_json.contains(r#""key":"Enter""#));
+
+        let input_json = serde_json::to_string(&shell_input_message_for(
+            "terminal",
+            "input",
+            "proof_input",
+            "",
+            "ok",
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            "",
+        ))
+        .expect("window input should serialize");
+        assert!(input_json.contains(r#""type":"input""#));
+        assert!(input_json.contains(r#""surface_id":"terminal""#));
+        assert!(input_json.contains(r#""target_id":"proof_input""#));
+        assert!(input_json.contains(r#""value":"ok""#));
+    }
+
+    #[test]
     fn parses_mdi_window_messages_from_simple_stdout() {
         let msg: SubprocessMessage = serde_json::from_str(
             r#"{"type":"openWindow","windowId":"files","title":"Files","html":"<img class=\"simple-picture\" />","x":10,"y":20,"width":300,"height":200}"#,
@@ -1352,8 +1655,21 @@ mod tests {
     fn tauri_mdi_bootstrap_has_drag_and_desktop_root() {
         assert!(mdi_shell_html().contains("wm-desktop"));
         let js = tauri_mdi_init_script();
+        assert!(js.contains("#wm-desktop{position:fixed;inset:0;overflow:hidden;z-index:10000"));
         assert!(js.contains("pointerdown"));
         assert!(js.contains("pointermove"));
+        assert!(js.contains("document.addEventListener('pointermove'"));
+        assert!(js.contains("document.addEventListener('pointerup'"));
+        assert!(js.contains("document.addEventListener('mousemove'"));
+        assert!(js.contains("document.addEventListener('mouseup'"));
+        assert!(js.contains("setPointerCapture"));
+        assert!(js.contains("releasePointerCapture"));
+        assert!(js.contains("bindWindowEvents"));
+        assert!(js.contains("send_window_action"));
+        assert!(js.contains("send_window_keypress"));
+        assert!(js.contains("send_window_input"));
+        assert!(js.contains("send_window_mouse"));
+        assert!(js.contains("body.tabIndex = 0"));
         assert!(js.contains("bindDrag"));
         assert!(js.contains("notifyMove"));
         assert!(js.contains("wm_move:"));
