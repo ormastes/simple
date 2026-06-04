@@ -55,19 +55,27 @@ restaurant webapp infra test vehicle.
      `std.time.{now_iso8601}` → no such stdlib module; use `time_ops`
    - Fix: corrected all imports to match actual stdlib module names
 
-10. **Cranelift codegen: `fcvt_to_sint.i64` given i64 instead of float**
-    - `_make_edge` function: `v199 = fcvt_to_sint.i64 v193` where v193 is i64
-    - Cranelift verifier rejects: arg must be float type for fcvt_to_sint
-    - Falls back to stub (CODEGEN-STUB-FALLBACK), but may cascade
-    - Root cause: codegen emitting float conversion on integer-typed value
+10. **Cranelift codegen: float/int type mismatches in multiple functions**
+    - `fcvt_to_sint.i64` with i64 arg, `fpromote.f64` with i64 arg, return type mismatches
+    - Affects: `_make_edge`, `dyn_torch_tensor_copy_values`, `ComponentStats.get_metric`,
+      `_bm_shade_vertex`, `_bm_rasterize_triangle`, and several GPU/SIMD functions
+    - Falls back to stub (CODEGEN-STUB-FALLBACK) — non-fatal for webapp code
+    - Root cause: codegen emitting float operations on integer-typed values
+
+11. **Native build links all of `--source src/lib` including wrong-arch code**
+    - RISC-V inline assembly (csrs, csrw, mie) compiled on x86_64 → 20+ asm errors
+    - Linking fails: `fatal error: too many errors emitted`
+    - Root cause: `native-build --source src/lib` compiles ALL lib files including
+      `nogc_async_mut_noalloc/` baremetal code, not just webapp-reachable modules
+    - Binary not produced despite successful compilation of webapp files
 
 ## Conclusion
 
-**Both execution paths blocked.** Interpreter mode: generics HIR lowering (3) +
-`?` operator typing (8). Native build: module resolution from subdirectories (9)
-+ Cranelift codegen type error (10). Bugs 5-7 resolved.
+**Interpreter path blocked** by generics (3) + `?` operator (8).
+**Native build:** import resolution (9) FIXED. Compilation succeeds for webapp
+files. Linking blocked by wrong-arch code (11) and Cranelift codegen stubs (10).
+Bugs 5-7, 9 resolved.
 
-The restaurant webapp code is correct — all 43 SPipe specs pass. These are
-compiler infrastructure bugs, which is exactly what this infra test vehicle was
-designed to surface. Priority fix order: (9) module resolution → (3) generics →
-(8) `?` typing → (10) Cranelift codegen.
+The restaurant webapp code is correct — all 43 SPipe specs pass. Remaining
+blockers are all pre-existing compiler issues, not webapp bugs. Priority:
+(11) arch-filtered linking → (10) Cranelift codegen → (3) generics → (8) `?` typing.

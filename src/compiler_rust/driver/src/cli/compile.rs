@@ -82,6 +82,38 @@ pub fn compile_file_to_vhdl(source: &Path, output: Option<PathBuf>) -> i32 {
     }
 }
 
+/// Compile a source file to OpenCL C source output.
+pub fn compile_file_to_opencl(source: &Path, output: Option<PathBuf>) -> i32 {
+    use simple_compiler::pipeline::CompilerPipeline;
+
+    let watchdog = ExamplesWatchdogGuard::for_path(source);
+    let out_path = output.unwrap_or_else(|| source.with_extension("cl"));
+
+    let mut pipeline = match CompilerPipeline::new() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: failed to create compiler pipeline: {}", e);
+            return 1;
+        }
+    };
+
+    match pipeline.compile_file_to_opencl(source, &out_path) {
+        Ok(()) => {
+            println!("Compiled {} -> {}", source.display(), out_path.display());
+            0
+        }
+        Err(e) => {
+            let message = e.to_string();
+            if watchdog.is_active() && is_timeout_error(&message) {
+                eprintln!("error: {}", timeout_error_message(source, watchdog.timeout_secs()));
+            } else {
+                eprintln!("error: {}", message);
+            }
+            1
+        }
+    }
+}
+
 fn looks_like_vhdl(text: &str) -> bool {
     let vhdl = text.trim_start();
     vhdl.starts_with("library ")

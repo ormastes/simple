@@ -7,7 +7,7 @@ use simple_compiler::ProjectContext;
 use simple_compiler::optimizations::{format_optimization_guide, NativeOptimizationLevel};
 use simple_compiler::{default_native_codegen_backend, is_native_codegen_backend_available};
 use crate::cli::compile::{
-    compile_dynamic_driver_library, compile_file, compile_file_native, compile_file_to_ptx, compile_file_to_vhdl,
+    compile_dynamic_driver_library, compile_file, compile_file_native, compile_file_to_opencl, compile_file_to_ptx, compile_file_to_vhdl,
     list_linkers, list_targets, NativeStripMode,
 };
 use crate::cli::wasm_helpers::compile_to_wasm_for_target;
@@ -62,6 +62,9 @@ pub fn handle_compile(args: &[String]) -> i32 {
     if let Some(ref b) = backend {
         if b == "cuda" || b == "ptx" {
             return compile_file_to_ptx(&source, output);
+        }
+        if b == "opencl" || b == "opencl-c" || b == "opencl-spirv" || b == "cl" {
+            return compile_file_to_opencl(&source, output);
         }
         if b == "vhdl" {
             return compile_file_to_vhdl(&source, output);
