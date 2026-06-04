@@ -4139,9 +4139,9 @@ Completion checklist:
 - [x] Run focused compile and focused fetch/WASM chain spec.
 - [x] Run adjacent browser/WASM and JS conformance checks.
 - [x] Run final layout, whitespace, file-count, and status gates.
-- [ ] Commit test/manual/plan update.
-- [ ] Push guarded main update after fetch/rebase/file-count safety check.
-- [ ] Commit and push sync-complete checklist update.
+- [x] Commit test/manual/plan update.
+- [x] Push guarded main update after fetch/rebase/file-count safety check.
+- [x] Commit and push sync-complete checklist update.
 
 Tests checklist:
 
@@ -4174,6 +4174,9 @@ covers `setUint32.apply`, `setInt32.call`, `getUint32.call`, and
 `getInt32.apply`, verifies view-relative 32-bit offsets, and keeps backing
 storage guard bytes outside the DataView window unchanged. This is a
 coverage-only continuation; no runtime source change was required.
+
+Sync evidence: coverage commit `91664a890d` pushed to `main` after guarded
+fetch/rebase with file count stable at `78091`.
 
 BrowserSession TextEncoder/TextDecoder WASM header continuation:
  
