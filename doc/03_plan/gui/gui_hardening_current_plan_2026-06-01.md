@@ -3823,9 +3823,9 @@ Completion checklist:
 - [x] Run adjacent browser/WASM and JS conformance checks.
 - [x] Run shared compiler/lib/MCP/LSP smoke checks.
 - [x] Run final layout, whitespace, file-count, and status gates.
-- [ ] Commit implementation and spec/doc updates.
-- [ ] Push guarded main update after fetch/rebase/file-count safety check.
-- [ ] Commit and push sync-complete checklist update.
+- [x] Commit implementation and spec/doc updates.
+- [x] Push guarded main update after fetch/rebase/file-count safety check.
+- [x] Commit and push sync-complete checklist update.
 
 Tests checklist:
 
@@ -3870,6 +3870,9 @@ callbacks receive normalized byte value, index, and receiver arguments, return
 the last matching byte or index, and preserve `undefined`/`-1` misses. Broader
 typed-array/DataView prototype parity, general `Function.prototype.call/apply`
 dispatch, and full browser/WASM semantics remain open.
+
+Sync evidence: implementation commit `d27ded2251` pushed to `main` after guarded
+fetch/rebase with file count stable at `78091`.
 
 BrowserSession Uint8Array prototype transform apply continuation:
  
