@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 174 | 174 | 0 | 0 |
+| 175 | 175 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -2172,6 +2172,39 @@ match result:
         expect(_display_js(value)).to_equal("instantiated:true:8:0:object")
     Err(err):
         expect("unexpected decorated wasm instantiate js error: {err}").to_equal("")
+```
+
+</details>
+
+#### routes decorated WebAssembly hex promise results through browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `compile:true:8:0:wasm32:instantiate:instantiated:true:8:0:object`
+
+3. Err
+   - Expected: "unexpected decorated wasm promise js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var out = ''; var decorated = '0x0061_736d 0100_0000'; WebAssembly.compile(decorated).then(function(module) { out = 'compile:' + module.validated + ':' + module.byteLength + ':' + module.sectionCount + ':' + module.target; }); WebAssembly.instantiate(decorated).then(function(result) { out = out + ':instantiate:' + result.status + ':' + result.module.validated + ':' + result.module.byteLength + ':' + result.module.sectionCount + ':' + typeof result.instance.exports; }); out")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("compile:true:8:0:wasm32:instantiate:instantiated:true:8:0:object")
+    Err(err):
+        expect("unexpected decorated wasm promise js error: {err}").to_equal("")
 ```
 
 </details>
@@ -8292,8 +8325,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 174 |
-| Active scenarios | 174 |
+| Total scenarios | 175 |
+| Active scenarios | 175 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

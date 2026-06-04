@@ -5695,3 +5695,47 @@ fetch/WASM chain spec now passes `174/174`; the native WASM host spec remained
 `107/107`, the WebGPU JS/WASM system spec remained `106/106`, Node API
 conformance remained `275/275`, and `src/lib` completed with the current
 `399 warning(s)`. Broader browser/WASM semantics remain open.
+
+BrowserSession WebAssembly canonical decorated-hex combined promise continuation:
+
+Completion checklist:
+
+- Add a BrowserSession browser-script scenario that passes a canonical `0x`
+  decorated WASM hex payload through both `WebAssembly.compile(...)` and
+  `WebAssembly.instantiate(...)` in the same script evaluation.
+- Verify the compile promise `then(...)` callback receives a normalized module
+  with `validated=true`, byte length `8`, section count `0`, and target
+  `wasm32`.
+- Verify the instantiate promise `then(...)` callback receives an
+  `instantiated` result with the same normalized module metadata.
+- Verify canonical `0x` prefix, underscores, and internal spaces preserve
+  deterministic ordered callback output across both promise paths.
+- Verify the instantiated result exposes an instance exports object for the
+  valid empty module payload.
+- Regenerate the mirrored scenario manual for the changed SPipe spec.
+- Restore generated index/manual noise from docgen and adjacent specs.
+- Record command evidence, pass counts, warning count, and remaining open scope.
+- Run diff hygiene and doc layout gates before committing and pushing.
+
+Test checklist:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+
+BrowserSession scripts now route canonical `0x` decorated WASM hex payloads
+through both `WebAssembly.compile(...).then(...)` and
+`WebAssembly.instantiate(...).then(...)` in the same script evaluation. The
+focused assertion verifies canonical `0x` prefix, underscores, and internal
+spaces normalize through promise resolution with deterministic ordered callback
+output: compile receives normalized module metadata (`validated=true`, byte
+length `8`, section count `0`, target `wasm32`), and instantiate receives an
+`instantiated` result with matching module metadata plus an instance exports
+object. The focused fetch/WASM chain spec now passes `175/175`; the native WASM
+host spec remained `107/107`, the WebGPU JS/WASM system spec remained
+`106/106`, Node API conformance remained `275/275`, and `src/lib` completed
+with the current `399 warning(s)`. Broader browser/WASM semantics remain open.
