@@ -5656,6 +5656,70 @@ conformance remained `275/275`, and `src/lib` completed with the current
 with `Total scenarios | 207 |`; diff hygiene and the `doc/06_spec` layout gate
 are checked before push.
 
+BrowserSession fetched arrayBuffer direct/compiled memory parity continuation:
+
+Completion checklist:
+
+- Add a BrowserSession browser-script scenario that queues one
+  `window.fetch('/direct.wasm').then(r => r.arrayBuffer())` chain into
+  `WebAssembly.instantiate(bytes)` and one
+  `window.fetch('/compiled.wasm').then(r => r.arrayBuffer())` chain into
+  `WebAssembly.compile(bytes)` followed by `WebAssembly.instantiate(module)`.
+- Verify the initial script result is `queued` and the shared `out` variable is
+  empty before either network response is committed.
+- Verify the first pending network request is a fetch for
+  `https://example.com/direct.wasm`.
+- Commit the memory-export module response for `/direct.wasm` and verify the
+  direct arrayBuffer instantiate path reports fetched byte length `25`, status
+  `instantiated`, module byte length `25`, grown memory byte length `131072`,
+  page size `65536`, byte coercion result `4`, grow result `1`, grown typed
+  array length `131072`, and preserved byte value `4`.
+- Verify the second pending network request is a fetch for
+  `https://example.com/compiled.wasm`.
+- Commit the same memory-export module response for `/compiled.wasm` and verify
+  the final output keeps the direct arrayBuffer evidence and appends compiled
+  arrayBuffer fetched byte length `25`, compiled module byte length `25`,
+  instantiated status `instantiated`, result module byte length `25`, grown
+  memory byte length `131072`, page size `65536`, byte coercion result `4`,
+  grow result `1`, grown typed array length `131072`, and preserved byte value
+  `4`.
+- Regenerate the mirrored scenario manual for the changed SPipe spec and move
+  docgen's old `01_unit` output onto the tracked `unit` manual path.
+- Remove generated docgen noise from adjacent specs, restore generated tracking
+  index churn, and keep only the intended source/manual/plan files in the
+  commit.
+- Record focused pass count, adjacent pass counts, `src/lib` warning count,
+  docgen/manual evidence, diff hygiene, and `doc/06_spec` layout evidence before
+  pushing.
+
+Test checklist:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+- `git diff --check`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
+
+BrowserSession scripts now compare fetched-arrayBuffer direct instantiate and
+compiled instantiate memory export paths in one queued script. The first network
+commit completes only the direct `WebAssembly.instantiate(bytes)` path and
+records fetched byte length `25`, status `instantiated`, module byte length
+`25`, grown memory byte length `131072`, page size `65536`, byte coercion result
+`4`, grow result `1`, grown typed-array length `131072`, and preserved byte
+value `4`; the second commit appends the `WebAssembly.compile(bytes)` plus
+`WebAssembly.instantiate(module)` path with matching fetched/compiled/result
+byte lengths, status, grown memory evidence, and byte preservation evidence.
+The focused fetch/WASM chain spec is now passing `208/208`; the native WASM host
+spec remained `107/107`, the WebGPU JS/WASM system spec remained `106/106`, Node
+API conformance remained `275/275`, and `src/lib` completed with the current
+`405 warning(s)` across `5936` files. Docgen regenerated the mirrored manual
+with `Total scenarios | 208 |`; diff hygiene and the `doc/06_spec` layout gate
+are checked before push.
+
 BrowserSession fetched invalid arrayBuffer instantiate catch continuation:
  
  - `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
