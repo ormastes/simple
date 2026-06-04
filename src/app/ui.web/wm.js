@@ -1542,15 +1542,42 @@ class SimpleWindowManager {
       item.setAttribute('aria-label', command.label);
       item.appendChild(this._makeRoundIcon('wm-taskbar-icon', command.icon));
       const label = document.createElement('span');
-      label.textContent = command.label;
+      label.className = 'wm-command-label';
+      this._appendCommandLabelMatch(label, command.label, query);
       item.appendChild(label);
+      const meta = document.createElement('span');
+      meta.className = 'wm-command-meta';
+      const categoryBadge = document.createElement('span');
+      categoryBadge.className = 'wm-command-category-badge';
+      categoryBadge.dataset.commandCategory = category;
+      categoryBadge.textContent = category;
+      meta.appendChild(categoryBadge);
       const shortcut = document.createElement('span');
       shortcut.className = 'wm-command-shortcut';
       shortcut.textContent = command.shortcut;
-      item.appendChild(shortcut);
+      meta.appendChild(shortcut);
+      item.appendChild(meta);
       this._commandPaletteList.appendChild(item);
     });
     return commands.length;
+  }
+
+  _appendCommandLabelMatch(labelEl, label, query) {
+    const text = String(label || '');
+    const needle = String(query || '').trim().toLowerCase();
+    const matchIndex = needle ? text.toLowerCase().indexOf(needle) : -1;
+    if (matchIndex < 0) {
+      labelEl.textContent = text;
+      return;
+    }
+    if (matchIndex > 0) labelEl.appendChild(document.createTextNode(text.slice(0, matchIndex)));
+    const match = document.createElement('span');
+    match.className = 'wm-command-match';
+    match.dataset.commandMatch = 'query';
+    match.textContent = text.slice(matchIndex, matchIndex + needle.length);
+    labelEl.appendChild(match);
+    const rest = text.slice(matchIndex + needle.length);
+    if (rest) labelEl.appendChild(document.createTextNode(rest));
   }
 
   _updateCommandPaletteQueryStatus(query, count) {

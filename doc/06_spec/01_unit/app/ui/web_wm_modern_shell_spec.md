@@ -60,7 +60,7 @@ Verifies the first modern Simple Web WM slice at the contract level.
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 754 lines folded for reproduction.
+Runnable source: 769 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -696,7 +696,16 @@ expect(html).to_contain(".wm-quality-title-command-policy-label")
 expect(html).to_contain(".wm-quality-title-command-policy-value")
 expect(html).to_contain(".wm-command-palette")
 expect(html).to_contain(".wm-command-palette-input")
+expect(html).to_contain(".wm-command-palette-input.query-feedback")
+expect(html).to_contain(".wm-command-palette.query-feedback .wm-command-palette-input")
+expect(html).to_contain(".wm-command-query-status")
+expect(html).to_contain(".wm-command-query-status.action-feedback")
+expect(html).to_contain(".wm-command-empty")
 expect(html).to_contain(".wm-command-item")
+expect(html).to_contain(".wm-command-label")
+expect(html).to_contain(".wm-command-match")
+expect(html).to_contain(".wm-command-meta")
+expect(html).to_contain(".wm-command-category-badge")
 expect(html).to_contain(".wm-command-item.selection-feedback")
 expect(html).to_contain(".wm-command-palette[data-command-selection-feedback='keyboard'] .wm-command-item[data-command-selection-feedback='select']")
 expect(html).to_contain(".wm-command-item .wm-taskbar-icon.selection-feedback")
@@ -705,10 +714,16 @@ expect(html).to_contain(".wm-command-item.action-feedback")
 expect(html).to_contain(".wm-command-palette[data-command-item-feedback='activate'] .wm-command-item[data-command-feedback='activate']")
 expect(html).to_contain(".wm-command-item .wm-taskbar-icon.action-feedback")
 expect(html).to_contain(".wm-command-shortcut.action-feedback")
+expect(html).to_contain("@keyframes wm-command-query-feedback")
+expect(html).to_contain("@keyframes wm-command-query-status-feedback")
+expect(html).to_contain("@keyframes wm-command-match-feedback")
 expect(html).to_contain("@keyframes wm-command-selection-feedback")
 expect(html).to_contain("@keyframes wm-command-selection-part-feedback")
 expect(html).to_contain("@keyframes wm-command-item-feedback")
 expect(html).to_contain("@keyframes wm-command-item-part-feedback")
+expect(html).to_contain(":root[data-wm-motion=off] .wm-command-palette.query-feedback .wm-command-palette-input")
+expect(html).to_contain(":root[data-wm-motion=off] .wm-command-query-status.action-feedback")
+expect(html).to_contain(":root[data-wm-motion=off] .wm-command-match")
 expect(html).to_contain(":root[data-wm-motion=off] .wm-command-item.selection-feedback")
 expect(html).to_contain(":root[data-wm-motion=off] .wm-command-item.action-feedback")
 expect(html).to_contain(".wm-app-launcher")
@@ -827,7 +842,7 @@ expect(html).to_contain("@keyframes wm-hot-corner-activate")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 1416 lines folded for reproduction.
+Runnable source: 1435 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -889,6 +904,19 @@ expect(js).to_contain("_setCommandPaletteSelection")
 expect(js).to_contain("_syncCommandPaletteSelection")
 expect(js).to_contain("_handleCommandPaletteKeydown")
 expect(js).to_contain("_executeCommandPaletteAction")
+expect(js).to_contain("_appendCommandLabelMatch")
+expect(js).to_contain("dataset.commandMatch")
+expect(js).to_contain("wm-command-label")
+expect(js).to_contain("wm-command-match")
+expect(js).to_contain("document.createTextNode")
+expect(js).to_contain("wm-command-meta")
+expect(js).to_contain("wm-command-category-badge")
+expect(js).to_contain("categoryBadge.dataset.commandCategory")
+expect(js).to_contain("_updateCommandPaletteQueryStatus")
+expect(js).to_contain("_markCommandQueryFeedback")
+expect(js).to_contain("_clearCommandQueryFeedback")
+expect(js).to_contain("_commandPaletteStatus")
+expect(js).to_contain("_commandQueryFeedbackTimer")
 expect(js).to_contain("_markCommandSelectionFeedback")
 expect(js).to_contain("_clearCommandSelectionFeedback")
 expect(js).to_contain("_commandSelectionFeedbackTimer")
@@ -899,6 +927,9 @@ expect(js).to_contain("_executeCommandPaletteRecent")
 expect(js).to_contain("_markCommandRecentFeedback")
 expect(js).to_contain("_clearCommandRecentFeedback")
 expect(js).to_contain("_commandRecentFeedbackTimer")
+expect(js).to_contain("dataset.commandQueryState")
+expect(js).to_contain("dataset.commandResultCount")
+expect(js).to_contain("dataset.commandQueryFeedback")
 expect(js).to_contain("dataset.commandItemFeedback")
 expect(js).to_contain("dataset.commandItemIndex")
 expect(js).to_contain("dataset.commandSelectionFeedback")
@@ -910,6 +941,9 @@ expect(js).to_contain("command_palette_item")
 expect(js).to_contain("command_palette_recent")
 expect(js).to_contain("command_label")
 expect(js).to_contain("command_category")
+expect(js).to_contain("wm-command-query-status")
+expect(js).to_contain("wm-command-empty")
+expect(js).to_contain("No matching commands")
 expect(js).to_contain("aria-activedescendant")
 expect(js).to_contain("aria-selected")
 expect(js).to_contain("tabIndex")
@@ -2256,7 +2290,7 @@ expect(retained).to_contain("Maximize window")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 1355 lines folded for reproduction.
+Runnable source: 1368 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -3520,7 +3554,20 @@ expect(preview).to_contain("Focus Simple IDE")
 expect(preview).to_contain("wm-title-input wm-command-bar command-submitted")
 expect(preview).to_contain("data-command-feedback=\"submitted\"")
 expect(preview).to_contain("data-command-kind=\"path\"")
-expect(preview).to_contain("wm-command-palette action-feedback")
+expect(preview).to_contain("wm-command-palette action-feedback query-feedback")
+expect(preview).to_contain("wm-command-palette-input query-feedback")
+expect(preview).to_contain("data-command-query-state=\"filtered\"")
+expect(preview).to_contain("data-command-query-feedback=\"filtered\"")
+expect(preview).to_contain("data-command-result-count=\"15\"")
+expect(preview).to_contain("wm-command-query-status action-feedback")
+expect(preview).to_contain("role=\"status\" aria-live=\"polite\"")
+expect(preview).to_contain("15 commands matching Open Simple IDE")
+expect(preview).to_contain("wm-command-label")
+expect(preview).to_contain("wm-command-match")
+expect(preview).to_contain("data-command-match=\"query\"")
+expect(preview).to_contain("wm-command-meta")
+expect(preview).to_contain("wm-command-category-badge")
+expect(preview).to_contain("data-command-category=\"Apps\"")
 expect(preview).to_contain("data-command-recent-feedback=\"activate\"")
 expect(preview).to_contain("data-command-recent-index=\"0\"")
 expect(preview).to_contain("data-command-selection-feedback=\"keyboard\"")

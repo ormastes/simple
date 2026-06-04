@@ -72,6 +72,16 @@ assert(wmInit.includes('bindDrag'));
 assert(wmInit.includes('notifyMove'));
 assert(wmInit.includes('wm_move:'));
 assert(wmInit.includes('cursor:grab'));
+assert(wmInit.includes('bindWindowEvents'));
+assert(wmInit.includes('sendWindowAction'));
+assert(wmInit.includes('sendWindowKey'));
+assert(wmInit.includes('sendWindowInput'));
+assert(wmInit.includes('sendWindowMouse'));
+assert(wmInit.includes('body.tabIndex = 0'));
+assert(wmInit.includes('event_type: eventType'));
+assert(wmInit.includes("type: 'input'"));
+assert(wmInit.includes("sendWindowMouse(id, 'mouse_down'"));
+assert(wmInit.includes("target_id: targetId"));
 
 const bridgeSource = require('fs').readFileSync(require('path').join(__dirname, '../../../../src/app/ui.electron/bridge.js'), 'utf8');
 assert(bridgeSource.includes("SIMPLE_UI_BACKEND: 'electron'"));

@@ -43,7 +43,7 @@ backend_opencl_facade_spec -> std
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -60,6 +60,7 @@ expect(source).to_contain("__kernel void simple_2d_gradient_rect_u32")
 expect(source).to_contain("__kernel void simple_2d_circle_u32")
 expect(source).to_contain("__kernel void simple_2d_circle_filled_u32")
 expect(source).to_contain("__kernel void simple_2d_rounded_rect_u32")
+expect(source).to_contain("__kernel void simple_2d_triangle_filled_u32")
 expect(source).to_contain("__kernel void simple_2d_blit_image_u32")
 expect(source).to_contain("__kernel void simple_2d_blit_nonzero_u32")
 ```
@@ -111,16 +112,21 @@ expect(source).to_contain("__kernel void simple_2d_blit_nonzero_u32")
 8. backend draw rounded rect
    - Expected: rounded[5] equals `0xff2468acu32`
    - Expected: rounded[10] equals `0xff2468acu32`
+
+9. backend draw triangle filled
+   - Expected: triangle[0] equals `0xff55aa11u32`
+   - Expected: triangle[1] equals `0xff55aa11u32`
+   - Expected: triangle[4] equals `0xff55aa11u32`
    - Expected: backend.last_probe.status equals `BackendStatus.Unavailable`
    - Expected: backend.last_probe.has_graphics is false
 
-9. backend shutdown
+10. backend shutdown
 
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 50 lines folded for reproduction.
+Runnable source: 55 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -170,6 +176,11 @@ if ok:
     val rounded = backend.read_pixels()
     expect(rounded[5]).to_equal(0xff2468acu32)
     expect(rounded[10]).to_equal(0xff2468acu32)
+    backend.draw_triangle_filled(0, 0, 3, 0, 0, 3, 0xff55aa11u32)
+    val triangle = backend.read_pixels()
+    expect(triangle[0]).to_equal(0xff55aa11u32)
+    expect(triangle[1]).to_equal(0xff55aa11u32)
+    expect(triangle[4]).to_equal(0xff55aa11u32)
 else:
     expect(backend.last_probe.status).to_equal(BackendStatus.Unavailable)
     expect(backend.last_probe.has_graphics).to_equal(false)

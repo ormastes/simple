@@ -1031,11 +1031,34 @@ fn bundled_mobile_runtime_asset() -> Option<BundledRuntimeAsset> {
             filename: "simple-i686-linux-android",
         });
     }
+    #[cfg(all(target_os = "ios", target_arch = "aarch64", not(target_abi = "sim")))]
+    {
+        return IOS_RUNTIME_AARCH64.map(|bytes| BundledRuntimeAsset {
+            bytes,
+            filename: "simple-aarch64-apple-ios",
+        });
+    }
+    #[cfg(all(target_os = "ios", target_arch = "aarch64", target_abi = "sim"))]
+    {
+        return IOS_RUNTIME_AARCH64_SIM.map(|bytes| BundledRuntimeAsset {
+            bytes,
+            filename: "simple-aarch64-apple-ios-sim",
+        });
+    }
+    #[cfg(all(target_os = "ios", target_arch = "x86_64"))]
+    {
+        return IOS_RUNTIME_X86_64_SIM.map(|bytes| BundledRuntimeAsset {
+            bytes,
+            filename: "simple-x86_64-apple-ios-sim",
+        });
+    }
     #[cfg(not(any(
         all(target_os = "android", target_arch = "aarch64"),
         all(target_os = "android", target_arch = "x86_64"),
         all(target_os = "android", target_arch = "arm"),
         all(target_os = "android", target_arch = "x86"),
+        all(target_os = "ios", target_arch = "aarch64"),
+        all(target_os = "ios", target_arch = "x86_64"),
     )))]
     None
 }
@@ -1252,12 +1275,12 @@ pub fn run() {
                 }
             }
         } else {
-            // No bundled Simple runtime on mobile: the embedded frontendDist
-            // (app://index.html) is a complete static render and is the intended
-            // UI, so we let it display instead of overlaying a startup error.
-            // The diagnostic still goes to stderr/logcat for anyone wiring up a
-            // live runtime via SIMPLE_BIN / a bundled runtime / --url.
-            eprintln!("[tauri-shell] mobile mode has no bundled Simple binary; showing embedded static UI (set SIMPLE_BIN / a bundled runtime / --url for a live Simple subprocess)");
+            // No bundled Simple runtime on mobile: keep the fallback explicit so
+            // it cannot be mistaken for live MDI subprocess/event behavior.
+            startup_error.get_or_insert_with(|| {
+                "Mobile shell started without a bundled Simple runtime.\n\nProvide a target-compatible runtime with SIMPLE_BIN or one of the build-time bundled runtime variables:\n- SIMPLE_ANDROID_RUNTIME_AARCH64\n- SIMPLE_ANDROID_RUNTIME_X86_64\n- SIMPLE_ANDROID_RUNTIME_ARMV7\n- SIMPLE_ANDROID_RUNTIME_I686\n- SIMPLE_IOS_RUNTIME_AARCH64\n- SIMPLE_IOS_RUNTIME_AARCH64_SIM\n- SIMPLE_IOS_RUNTIME_X86_64_SIM\n\nOr use --url / SIMPLE_DASHBOARD_URL to attach the shell to an external UI service.".to_string()
+            });
+            eprintln!("[tauri-shell] mobile mode has no bundled Simple binary; live MDI subprocess/event bridge unavailable");
         }
     }
 
@@ -1406,7 +1429,10 @@ mod tests {
         shell_input_message, shell_input_message_for, simple_subprocess_args_for,
         tauri_mdi_init_script, ShellMessage, SubprocessMessage,
     };
-    use crate::{ANDROID_RUNTIME_AARCH64, ANDROID_RUNTIME_X86_64};
+    use crate::{
+        ANDROID_RUNTIME_AARCH64, ANDROID_RUNTIME_X86_64, IOS_RUNTIME_AARCH64,
+        IOS_RUNTIME_AARCH64_SIM, IOS_RUNTIME_X86_64_SIM,
+    };
 
     #[test]
     fn desktop_defaults_to_repo_binary() {
@@ -1456,6 +1482,9 @@ mod tests {
     fn bundled_runtime_constants_are_absent_without_env() {
         assert!(ANDROID_RUNTIME_AARCH64.is_none() || !ANDROID_RUNTIME_AARCH64.unwrap().is_empty());
         assert!(ANDROID_RUNTIME_X86_64.is_none() || !ANDROID_RUNTIME_X86_64.unwrap().is_empty());
+        assert!(IOS_RUNTIME_AARCH64.is_none() || !IOS_RUNTIME_AARCH64.unwrap().is_empty());
+        assert!(IOS_RUNTIME_AARCH64_SIM.is_none() || !IOS_RUNTIME_AARCH64_SIM.unwrap().is_empty());
+        assert!(IOS_RUNTIME_X86_64_SIM.is_none() || !IOS_RUNTIME_X86_64_SIM.unwrap().is_empty());
     }
 
     #[test]

@@ -208,6 +208,51 @@ function electronWmInitScript() {
                     windows: {},
                     z: 20,
                     drag: null,
+                    lastEvent: null,
+                    elementId: function(el) {
+                        if (!el) return '';
+                        return el.getAttribute('data-target-id') || el.getAttribute('data-widget-id') || el.getAttribute('data-id') || el.id || el.name || '';
+                    },
+                    sendWindowEvent: function(id, eventType, fields) {
+                        var payload = Object.assign({
+                            type: 'input',
+                            target: 'electron',
+                            surface_id: id,
+                            event_type: eventType,
+                            target_id: '',
+                            key: '',
+                            value: '',
+                            x: 0,
+                            y: 0,
+                            dx: 0,
+                            dy: 0,
+                            button: ''
+                        }, fields || {});
+                        if (window.simpleElectron && window.simpleElectron.sendInput) {
+                            window.simpleElectron.sendInput(payload);
+                        }
+                    },
+                    sendWindowAction: function(id, action) {
+                        this.lastEvent = { kind: 'action', windowId: id, action: action };
+                        this.sendWindowEvent(id, 'action', { value: action });
+                    },
+                    sendWindowKey: function(id, key) {
+                        this.lastEvent = { kind: 'key', windowId: id, key: key };
+                        this.sendWindowEvent(id, 'key', { key: key });
+                    },
+                    sendWindowInput: function(id, targetId, value) {
+                        this.lastEvent = { kind: 'input', windowId: id, targetId: targetId, value: value };
+                        this.sendWindowEvent(id, 'input', { target_id: targetId, value: value });
+                    },
+                    sendWindowMouse: function(id, kind, ev) {
+                        var rect = this.windows[id] && this.windows[id].body ? this.windows[id].body.getBoundingClientRect() : { left: 0, top: 0 };
+                        this.lastEvent = { kind: kind, windowId: id };
+                        this.sendWindowEvent(id, kind, {
+                            x: ev.clientX - rect.left,
+                            y: ev.clientY - rect.top,
+                            button: ev.button === 2 ? 'right' : (ev.button === 1 ? 'middle' : 'left')
+                        });
+                    },
                     bindDrag: function(id, win, titlebar) {
                         var self = this;
                         titlebar.addEventListener('pointerdown', function(ev) {
@@ -248,11 +293,13 @@ function electronWmInitScript() {
                     focus: function(id) {
                         var existing = this.windows[id];
                         if (!existing) return;
+                        existing.win.style.display = '';
                         existing.win.style.zIndex = String(++this.z);
                     },
                     notifyMove: function(id, win) {
                         var left = parseInt(win.style.left || '0', 10) || 0;
                         var top = parseInt(win.style.top || '0', 10) || 0;
+                        this.lastEvent = { kind: 'action', windowId: id, action: 'wm_move:' + id + ':' + left + ':' + top };
                         if (window.simpleElectron && window.simpleElectron.sendInput) {
                             window.simpleElectron.sendInput({
                                 type: 'input',
@@ -269,6 +316,55 @@ function electronWmInitScript() {
                                 button: ''
                             });
                         }
+                    },
+                    bindWindowEvents: function(id, win, body) {
+                        var self = this;
+                        body.tabIndex = 0;
+                        win.addEventListener('pointerdown', function() {
+                            self.focus(id);
+                        });
+                        body.addEventListener('pointerdown', function(ev) {
+                            self.focus(id);
+                            body.focus();
+                            self.sendWindowMouse(id, 'mouse_down', ev);
+                        });
+                        body.addEventListener('pointerup', function(ev) {
+                            self.sendWindowMouse(id, 'mouse_up', ev);
+                        });
+                        body.addEventListener('pointermove', function(ev) {
+                            self.sendWindowMouse(id, 'mouse_move', ev);
+                        });
+                        win.addEventListener('click', function(ev) {
+                            var actionEl = ev.target && ev.target.closest ? ev.target.closest('[data-action]') : null;
+                            if (!actionEl || !win.contains(actionEl)) return;
+                            var action = actionEl.getAttribute('data-action') || '';
+                            if (!action) return;
+                            if (action === 'close') {
+                                win.remove();
+                                delete self.windows[id];
+                            } else if (action === 'minimize') {
+                                win.style.display = 'none';
+                            } else if (action === 'maximize') {
+                                win.style.left = '0px';
+                                win.style.top = '0px';
+                                win.style.width = '100vw';
+                                win.style.height = '100vh';
+                            }
+                            self.sendWindowAction(id, action);
+                            ev.preventDefault();
+                        });
+                        body.addEventListener('keydown', function(ev) {
+                            var key = ev.key || '';
+                            if (key.length === 1 || ['Enter','Escape','Backspace','Tab','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].indexOf(key) >= 0) {
+                                self.sendWindowKey(id, key);
+                            }
+                        });
+                        body.addEventListener('input', function(ev) {
+                            var target = ev.target;
+                            var editable = target && ((target.matches && target.matches('input,textarea,select')) || target.isContentEditable);
+                            if (!editable) return;
+                            self.sendWindowInput(id, self.elementId(target), target.isContentEditable ? target.textContent : target.value);
+                        });
                     },
                     receiveElectronMessage: function(msg) {
                         if (!msg || !msg.type) return;
@@ -306,6 +402,7 @@ function electronWmInitScript() {
                                 desktop.appendChild(win);
                                 existing = this.windows[id] = { win: win, body: body, title: title };
                                 this.bindDrag(id, win, titlebar);
+                                this.bindWindowEvents(id, win, body);
                             } else {
                                 existing.body.innerHTML = msg.html || '';
                                 existing.title.textContent = msg.title || id;
@@ -340,24 +437,43 @@ function maybeWriteMdiProof(win) {
         return;
     }
     win.webContents.executeJavaScript(`
-        (function() {
-            var wm = window.__SIMPLE_ELECTRON_WM__;
-            var dragMoved = false;
-            var dragBefore = null;
-            var dragAfter = null;
-            if (wm && wm.windows && wm.windows.terminal) {
-                var terminal = wm.windows.terminal.win;
-                var titlebar = terminal.querySelector('.wm-titlebar');
-                dragBefore = { left: parseInt(terminal.style.left || '0', 10) || 0, top: parseInt(terminal.style.top || '0', 10) || 0 };
+            (function() {
+                var wm = window.__SIMPLE_ELECTRON_WM__;
+                var dragMoved = false;
+                var bodyClickRouted = false;
+                var bodyInputRouted = false;
+                var dragBefore = null;
+                var dragAfter = null;
+                if (wm && wm.windows && wm.windows.terminal) {
+                    var terminal = wm.windows.terminal.win;
+                    var body = wm.windows.terminal.body;
+                    var titlebar = terminal.querySelector('.wm-titlebar');
+                    dragBefore = { left: parseInt(terminal.style.left || '0', 10) || 0, top: parseInt(terminal.style.top || '0', 10) || 0 };
                 if (titlebar && typeof PointerEvent === 'function') {
                     titlebar.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 37, clientX: dragBefore.left + 12, clientY: dragBefore.top + 12, bubbles: true }));
                     titlebar.dispatchEvent(new PointerEvent('pointermove', { pointerId: 37, clientX: dragBefore.left + 72, clientY: dragBefore.top + 42, bubbles: true }));
                     titlebar.dispatchEvent(new PointerEvent('pointerup', { pointerId: 37, clientX: dragBefore.left + 72, clientY: dragBefore.top + 42, bubbles: true }));
+                    }
+                    dragAfter = { left: parseInt(terminal.style.left || '0', 10) || 0, top: parseInt(terminal.style.top || '0', 10) || 0 };
+                    dragMoved = dragAfter.left > dragBefore.left && dragAfter.top > dragBefore.top;
+                    if (body) {
+                        var probeButton = document.createElement('button');
+                        probeButton.setAttribute('data-action', 'proof_click');
+                        body.appendChild(probeButton);
+                        probeButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                        bodyClickRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'action' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.action === 'proof_click');
+                        probeButton.remove();
+
+                        var probeInput = document.createElement('input');
+                        probeInput.setAttribute('data-target-id', 'proof_input');
+                        body.appendChild(probeInput);
+                        probeInput.value = 'ok';
+                        probeInput.dispatchEvent(new Event('input', { bubbles: true }));
+                        bodyInputRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'input' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.targetId === 'proof_input' && wm.lastEvent.value === 'ok');
+                        probeInput.remove();
+                    }
                 }
-                dragAfter = { left: parseInt(terminal.style.left || '0', 10) || 0, top: parseInt(terminal.style.top || '0', 10) || 0 };
-                dragMoved = dragAfter.left > dragBefore.left && dragAfter.top > dragBefore.top;
-            }
-            return {
+                return {
             count: window.__SIMPLE_ELECTRON_WM__ ? Object.keys(window.__SIMPLE_ELECTRON_WM__.windows || {}).length : 0,
             text: document.body.innerText,
             hasDesktop: !!document.getElementById('wm-desktop'),
@@ -365,6 +481,9 @@ function maybeWriteMdiProof(win) {
             hasDragRuntime: !!(window.__SIMPLE_ELECTRON_WM__ && window.__SIMPLE_ELECTRON_WM__.bindDrag),
             hasDragEvents: !!(window.__SIMPLE_ELECTRON_WM__ && window.__SIMPLE_ELECTRON_WM__.notifyMove),
             dragMoved: dragMoved,
+            hasWindowEventRuntime: !!(wm && wm.bindWindowEvents && wm.sendWindowAction && wm.sendWindowInput && wm.sendWindowMouse),
+            bodyClickRouted: bodyClickRouted,
+            bodyInputRouted: bodyInputRouted,
             dragBefore: dragBefore,
             dragAfter: dragAfter,
             htmlRenderable: document.body.innerHTML.indexOf('simple-app-window') >= 0 && document.body.innerHTML.indexOf('<pre class="simple-app-pre">') >= 0

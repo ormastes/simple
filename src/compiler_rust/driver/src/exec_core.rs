@@ -613,8 +613,8 @@ impl ExecCore {
 
         match extension {
             "smf" => self.run_smf(path),
-            "spl" | "simple" | "sscript" | "" => {
-                if self.execution_mode.is_jit() && should_force_interpreter_for_source(path) {
+            "spl" | "simple" | "sscript" | "shs" | "" => {
+                if self.execution_mode.is_jit() && should_prefer_interpreter_for_source(path, extension) {
                     return self.run_file_interpreted_with_args(path, args);
                 }
                 if self.execution_mode.is_jit() {
@@ -741,23 +741,6 @@ impl ExecCore {
         use simple_compiler::set_interpreter_args;
         use std::collections::HashSet;
 
-        // Parse source to collect error hints
-        let source = std::fs::read_to_string(path).map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
-        // Normalize CRLF → LF
-        let source = if source.contains('\r') {
-            source.replace('\r', "")
-        } else {
-            source
-        };
-        let mut parser = Parser::new(&source);
-        let parse_result = parser.parse();
-
-        // Display error hints (even if parsing failed)
-        self.display_error_hints(&parser, &source);
-
-        // Now check if parsing succeeded
-        let _ast = parse_result.map_err(|e| format!("parse error: {}", e))?;
-
         // Set interpreter arguments
         set_interpreter_args(args);
 
@@ -782,10 +765,29 @@ fn should_force_interpreter_for_source(path: &Path) -> bool {
     normalized.ends_with("src/app/simpleos_nvme_serial_check/main.spl")
 }
 
+fn should_prefer_interpreter_for_source(path: &Path, extension: &str) -> bool {
+    if should_force_interpreter_for_source(path) || extension == "shs" {
+        return true;
+    }
+    if std::env::var_os("SIMPLE_EXECUTION_MODE").is_some() {
+        return false;
+    }
+    source_uses_cli_args(path)
+}
+
+fn source_uses_cli_args(path: &Path) -> bool {
+    let Ok(source) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    source.contains("get_cli_args") || source.contains("std.cli")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::should_force_interpreter_for_source;
+    use super::{should_force_interpreter_for_source, should_prefer_interpreter_for_source, source_uses_cli_args};
+    use std::fs;
     use std::path::Path;
+    use tempfile::tempdir;
 
     #[test]
     fn forces_interpreter_for_physical_nvme_serial_checker() {
@@ -803,6 +805,35 @@ mod tests {
         assert!(!should_force_interpreter_for_source(Path::new(
             "src/app/simpleos_nvme_serial_check/helper.spl"
         )));
+    }
+
+    #[test]
+    fn detects_cli_arg_scripts_for_interpreter_fast_path() {
+        let dir = tempdir().unwrap();
+        let script = dir.path().join("cli_args.spl");
+        fs::write(
+            &script,
+            "use std.cli.cli_util (get_cli_args)\nfn main():\n    val args = get_cli_args()\n",
+        )
+        .unwrap();
+
+        assert!(source_uses_cli_args(&script));
+        assert!(should_prefer_interpreter_for_source(&script, "spl"));
+    }
+
+    #[test]
+    fn keeps_plain_sources_on_jit_path() {
+        let dir = tempdir().unwrap();
+        let script = dir.path().join("plain.spl");
+        fs::write(&script, "fn main():\n    print \"ok\"\n").unwrap();
+
+        assert!(!source_uses_cli_args(&script));
+        assert!(!should_prefer_interpreter_for_source(&script, "spl"));
+    }
+
+    #[test]
+    fn shell_scripts_use_interpreter_path() {
+        assert!(should_prefer_interpreter_for_source(Path::new("scripts/check.shs"), "shs"));
     }
 }
 

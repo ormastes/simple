@@ -24,6 +24,9 @@ fn write_mobile_runtime_assets(out_dir: &Path) {
         runtime_include_line("SIMPLE_ANDROID_RUNTIME_X86_64", "ANDROID_RUNTIME_X86_64"),
         runtime_include_line("SIMPLE_ANDROID_RUNTIME_ARMV7", "ANDROID_RUNTIME_ARMV7"),
         runtime_include_line("SIMPLE_ANDROID_RUNTIME_I686", "ANDROID_RUNTIME_I686"),
+        runtime_include_line("SIMPLE_IOS_RUNTIME_AARCH64", "IOS_RUNTIME_AARCH64"),
+        runtime_include_line("SIMPLE_IOS_RUNTIME_AARCH64_SIM", "IOS_RUNTIME_AARCH64_SIM"),
+        runtime_include_line("SIMPLE_IOS_RUNTIME_X86_64_SIM", "IOS_RUNTIME_X86_64_SIM"),
     ]
     .join("");
 
