@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 161 | 161 | 0 | 0 |
+| 162 | 162 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -2139,6 +2139,39 @@ match result:
         expect(_display_js(value)).to_equal("true:true:8:0:wasm32")
     Err(err):
         expect("unexpected control whitespace decorated wasm hex js error: {err}").to_equal("")
+```
+
+</details>
+
+#### normalizes padded decorated WebAssembly hex strings in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `true:true:8:0:wasm32`
+
+3. Err
+   - Expected: "unexpected padded decorated wasm hex js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var decorated = '  \\t0x0061_736d 0100_0000\\n  '; var module = new WebAssembly.Module(decorated); WebAssembly.validate(decorated) + ':' + module.validated + ':' + module.byteLength + ':' + module.sectionCount + ':' + module.target")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("true:true:8:0:wasm32")
+    Err(err):
+        expect("unexpected padded decorated wasm hex js error: {err}").to_equal("")
 ```
 
 </details>
@@ -7863,8 +7896,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 161 |
-| Active scenarios | 161 |
+| Total scenarios | 162 |
+| Active scenarios | 162 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
