@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 166 | 166 | 0 | 0 |
+| 167 | 167 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -2106,6 +2106,39 @@ match result:
         expect(_display_js(value)).to_equal("true:8:0:wasm32")
     Err(err):
         expect("unexpected decorated wasm compile js error: {err}").to_equal("")
+```
+
+</details>
+
+#### instantiates decorated WebAssembly hex strings in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `instantiated:true:8:0:object`
+
+3. Err
+   - Expected: "unexpected decorated wasm instantiate js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var out = ''; var decorated = '0x0061_736d 0100_0000'; WebAssembly.instantiate(decorated).then(function(result) { out = result.status + ':' + result.module.validated + ':' + result.module.byteLength + ':' + result.module.sectionCount + ':' + typeof result.instance.exports; }); out")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("instantiated:true:8:0:object")
+    Err(err):
+        expect("unexpected decorated wasm instantiate js error: {err}").to_equal("")
 ```
 
 </details>
@@ -8028,8 +8061,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 166 |
-| Active scenarios | 166 |
+| Total scenarios | 167 |
+| Active scenarios | 167 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
