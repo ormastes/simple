@@ -1,0 +1,117 @@
+# Part 3 of src/os/userlib/window.spl
+use os.userlib.window.*
+# Window Client Library — user-space API for window management
+#
+# Provides a high-level interface for applications to create and manage
+# windows through the compositor's IPC service. Handles connection
+# setup, request serialization, and event polling.
+#
+# Usage:
+#   var client = WindowClient.new()
+#   client.connect()
+#   val wid = client.create_window("My App", 100, 100, 640, 480)
+#   while true:
+#       val event = client.poll_event()
+#       if event != nil:
+#           handle_event(event)
+#   client.destroy_window()
+#   client.disconnect()
+#
+# Multi-window usage:
+#   val inspector = client.create_window("Inspector", 700, 120, 320, 220)
+#   client.set_title_for(inspector, "Inspector — Live")
+#   client.resize_window(inspector, 360, 240)
+#   client.focus_window(inspector)
+#
+# Wire protocol:
+#   Outgoing requests to compositor use the same encoding as wm_service.spl.
+#   Incoming events (input, close, focus) are pushed by the WM service.
+
+use os.userlib.syscall_raw.{syscall}
+use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_DESTROY_WINDOW, COMP_UPDATE_TREE, COMP_FOCUS, COMP_RESIZE, COMP_MOVE, COMP_SET_TITLE, COMP_MINIMIZE, COMP_MAXIMIZE, COMP_RESTORE, COMP_INPUT_EVENT, COMP_CLOSE_REQUEST, COMP_FOCUS_CHANGED}
+use common.window_protocol.window_protocol.{WmCreateRequest, WmCreateResponse, WmInputEvent, WmCloseRequest, WmResizeRequest, WmMoveRequest, WmFocusEvent, WM_STATUS_OK, WM_STATUS_ERROR, WM_EVENT_CLOSE, WM_EVENT_FOCUS, WM_EVENT_RESIZE, wm_input_event}
+use common.window_protocol.geometry.{WindowId, Point, Px, KeyCode, Modifiers, WmEventType}
+use os.userlib.process.{getpid}
+
+use os.kernel.log.klog_api.{log_raw_println}
+extern fn rt_get_args() -> [text]
+extern fn rt_host_wm_client_connect(app_id: text, process_id: i64) -> i64
+extern fn rt_host_wm_client_request(client_id: i64, method: i64, window_id: i64, title: text, x: i64, y: i64, w: i64, h: i64, content: text, process_id: i64, app_id: text, timeout_ms: i64) -> (i64, i64)
+extern fn rt_host_wm_client_poll_event(client_id: i64, blocking: bool) -> (i64, i64, i64, i64, i64, i64)
+
+# Syscall numbers — canonical values from src/os/kernel/ipc/syscall.spl
+# dispatcher cases 20..23. Keep in sync with test/01_unit/os/kernel/ipc/
+# syscall_number_consistency_spec.spl.
+extern fn mmio_read8(addr: u64) -> u8
+extern fn mmio_read32(addr: u64) -> u32
+extern fn mmio_read64(addr: u64) -> u64
+
+fn _read_u8_at(addr: u64) -> u8:
+    mmio_read8(addr)
+
+fn _read_u32_at(addr: u64) -> u32:
+    mmio_read32(addr)
+
+fn _read_u64_at(addr: u64) -> u64:
+    mmio_read64(addr)
+
+fn _read_i32_at(addr: u64) -> i32:
+    mmio_read32(addr).to_i32()
+
+# ============================================================================
+# Serialization Helpers
+# ============================================================================
+
+fn _push_u32(buf: [u8], value: u32):
+    buf.push((value & 0xFF).to_u8())
+    buf.push(((value >> 8) & 0xFF).to_u8())
+    buf.push(((value >> 16) & 0xFF).to_u8())
+    buf.push(((value >> 24) & 0xFF).to_u8())
+
+fn _push_i32(buf: [u8], value: i32):
+    val u = value.to_u32()
+    buf.push((u & 0xFF).to_u8())
+    buf.push(((u >> 8) & 0xFF).to_u8())
+    buf.push(((u >> 16) & 0xFF).to_u8())
+    buf.push(((u >> 24) & 0xFF).to_u8())
+
+fn _push_u64(buf: [u8], value: u64):
+    buf.push((value & 0xFF).to_u8())
+    buf.push(((value >> 8) & 0xFF).to_u8())
+    buf.push(((value >> 16) & 0xFF).to_u8())
+    buf.push(((value >> 24) & 0xFF).to_u8())
+    buf.push(((value >> 32) & 0xFF).to_u8())
+    buf.push(((value >> 40) & 0xFF).to_u8())
+    buf.push(((value >> 48) & 0xFF).to_u8())
+    buf.push(((value >> 56) & 0xFF).to_u8())
+
+fn _decode_i32(data: [u8], offset: i32) -> i32:
+    """Decode a little-endian i32 from a byte array."""
+    val b0 = data[offset].to_u32()
+    val b1 = data[offset + 1].to_u32()
+    val b2 = data[offset + 2].to_u32()
+    val b3 = data[offset + 3].to_u32()
+    (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)).to_i32()
+
+fn _decode_u64(data: [u8], offset: i32) -> u64:
+    """Decode a little-endian u64 from a byte array."""
+    val b0 = data[offset].to_u64()
+    val b1 = data[offset + 1].to_u64()
+    val b2 = data[offset + 2].to_u64()
+    val b3 = data[offset + 3].to_u64()
+    val b4 = data[offset + 4].to_u64()
+    val b5 = data[offset + 5].to_u64()
+    val b6 = data[offset + 6].to_u64()
+    val b7 = data[offset + 7].to_u64()
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56)
+
+# ============================================================================
+# IPC Send Helper
+# ============================================================================
+
+fn _ipc_send(dst_port: u64, src_port: u64, data: [u8]):
+    """Send data via IPC syscall."""
+    extern fn unsafe_addr_of(ref: any) -> u64
+    val data_ptr = unsafe_addr_of(data)
+    val data_len = data.len().to_u64()
+    syscall(SYS_IPC_SEND, dst_port, src_port, data_ptr, data_len, 0)

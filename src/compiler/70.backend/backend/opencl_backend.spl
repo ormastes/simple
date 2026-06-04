@@ -1,0 +1,833 @@
+# OpenCL Backend Contract
+#
+# First-class compiler-side OpenCL target contract. Full MIR lowering is still
+# a separate compiler slice; this module exposes generated portable-compute
+# OpenCL C source, SPIR-V artifact evidence, and honest diagnostics for generic
+# MIR compilation attempts.
+
+use compiler.mir.mir_data.{MirModule}
+use compiler.mir.mir_instructions.{MirFunction, MirInst, MirTerminator, MirOperand, MirBinOp, MirUnaryOp, AggregateKind, GpuBarrierScope, GpuMemoryScope, GpuAtomicOpKind, SwitchCase, BlockId}
+use compiler.mir.mir_types.{MirLocal, MirType, MirTypeKind, LocalKind, MirConstValue}
+use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, CompileOptions, CompileError, compileerror_backend_error}
+use compiler.backend.gpu_backend_metadata.{gpu_backend_accepts_kernel_metadata}
+use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
+use compiler.backend.gpu_portable_compute.{
+    PortableComputeCompilePlan,
+    PortableComputeCompiledArtifactEvidence,
+    PortableComputeTarget,
+    emit_portable_2d_optimization_module,
+    portable_compute_2d_optimization_compile_plan,
+    portable_compute_compiled_artifact_evidence
+}
+
+class OpenClBackendCompileContract:
+    source: text
+    plan: PortableComputeCompilePlan
+    evidence: PortableComputeCompiledArtifactEvidence
+    ready: bool
+    status: text
+    diagnostic: text
+
+    static fn create(output_stem: text, artifact_magic: text, exported_symbols: text, byte_count: i64) -> OpenClBackendCompileContract:
+        val module = emit_portable_2d_optimization_module(PortableComputeTarget.OpenCl)
+        val plan = portable_compute_2d_optimization_compile_plan(PortableComputeTarget.OpenCl, output_stem)
+        val evidence = portable_compute_compiled_artifact_evidence(plan, artifact_magic, exported_symbols, byte_count)
+        val status = if evidence.artifact_valid:
+            "compiled_artifact_verified"
+        else:
+            evidence.reason
+        OpenClBackendCompileContract(
+            source: module.source,
+            plan: plan,
+            evidence: evidence,
+            ready: evidence.artifact_valid,
+            status: status,
+            diagnostic: if evidence.artifact_valid: "" else: "OpenCL artifact rejected: {evidence.reason}"
+        )
+
+    fn summary() -> text:
+        "OpenClBackendCompileContract[source={self.plan.source_format} binary={self.plan.binary_format} entry={self.plan.entry_name} ready={self.ready.to_text()} status={self.status}]"
+
+class OpenClBackendKernelPlan:
+    accepted_kernel_count: i64
+    rejected_kernel_count: i64
+    rejected_kernel_names: text
+    ready: bool
+    diagnostic: text
+
+    static fn create(accepted_kernel_count: i64, rejected_kernel_count: i64, rejected_kernel_names: text) -> OpenClBackendKernelPlan:
+        OpenClBackendKernelPlan(
+            accepted_kernel_count: accepted_kernel_count,
+            rejected_kernel_count: rejected_kernel_count,
+            rejected_kernel_names: rejected_kernel_names,
+            ready: rejected_kernel_count == 0,
+            diagnostic: if rejected_kernel_count == 0:
+                ""
+            else:
+                "OpenCL backend rejected CUDA-only kernel(s): {rejected_kernel_names}"
+        )
+
+    fn summary() -> text:
+        "OpenClBackendKernelPlan[accepted={self.accepted_kernel_count} rejected={self.rejected_kernel_count} ready={self.ready.to_text()}]"
+
+class OpenClBackend:
+    options: CompileOptions
+
+    static fn create(options: CompileOptions) -> OpenClBackend:
+        OpenClBackend(options: options)
+
+    static fn generated_2d_contract(output_stem: text, artifact_magic: text, exported_symbols: text, byte_count: i64) -> OpenClBackendCompileContract:
+        OpenClBackendCompileContract.create(output_stem, artifact_magic, exported_symbols, byte_count)
+
+    static fn accepts_gpu_kernel(func: MirFunction) -> bool:
+        if not func.is_kernel:
+            return true
+        gpu_backend_accepts_kernel_metadata(BackendKind.OpenCl, func.gpu_target, func.gpu_backend_order)
+
+    static fn plan_module_kernels(module: MirModule) -> OpenClBackendKernelPlan:
+        var accepted = 0
+        var rejected = 0
+        var rejected_names: [text] = []
+        for symbol in module.functions.keys():
+            val func: MirFunction = module.functions[symbol]
+            if func.is_kernel:
+                if OpenClBackend.accepts_gpu_kernel(func):
+                    accepted = accepted + 1
+                else:
+                    rejected = rejected + 1
+                    rejected_names.push(func.name)
+        OpenClBackendKernelPlan.create(accepted, rejected, rejected_names.join(","))
+
+    static fn compile_module_to_opencl_source(module: MirModule) -> Result<text, CompileError>:
+        val plan = OpenClBackend.plan_module_kernels(module)
+        if not plan.ready:
+            return Err(compileerror_backend_error(BackendKind.OpenCl, plan.diagnostic))
+        if plan.accepted_kernel_count == 0:
+            return Err(compileerror_backend_error(
+                BackendKind.OpenCl,
+                "OpenCL backend requires at least one @gpu/@gpu_kernel MIR function"
+            ))
+        var kernels: [text] = []
+        for symbol in module.functions.keys():
+            val func: MirFunction = module.functions[symbol]
+            if not func.is_kernel:
+                kernels.push(OpenClBackend.emit_device_function_source(func))
+        for symbol in module.functions.keys():
+            val func: MirFunction = module.functions[symbol]
+            if func.is_kernel and OpenClBackend.accepts_gpu_kernel(func):
+                kernels.push(OpenClBackend.emit_kernel_source(func))
+        Ok(kernels.join("\n"))
+
+    static fn emit_kernel_source(func: MirFunction) -> text:
+        val params = OpenClBackend.emit_kernel_params(func)
+        OpenClBackend.emit_function_body(func, "__kernel void {func.name}({params})")
+
+    static fn emit_device_function_source(func: MirFunction) -> text:
+        val params = OpenClBackend.emit_kernel_params(func)
+        val return_type = OpenClBackend.opencl_type(func.signature.return_type, false)
+        OpenClBackend.emit_function_body(func, "{return_type} {func.name}({params})")
+
+    static fn emit_function_body(func: MirFunction, signature: text) -> text:
+        var lines: [text] = []
+        lines.push("{signature} {")
+        for block in func.blocks:
+            lines.push("BB{block.id.id}:")
+            if block.label.?:
+                lines.push("    // {block.label.unwrap()}")
+            for inst in block.instructions:
+                lines.push("    {OpenClBackend.emit_instruction(func, inst)}")
+            lines.push("    {OpenClBackend.emit_terminator(func, block.terminator)}")
+        lines.push("}")
+        lines.join("\n")
+
+    static fn emit_kernel_params(func: MirFunction) -> text:
+        var params: [text] = []
+        for local in func.locals:
+            match local.kind:
+                case Arg(_):
+                    params.push(OpenClBackend.emit_param(local))
+                case _:
+                    ()
+        params.join(", ")
+
+    static fn emit_param(local: MirLocal) -> text:
+        "{OpenClBackend.opencl_type(local.type_, true)} {OpenClBackend.local_name(local)}"
+
+    static fn local_name(local: MirLocal) -> text:
+        if local.name.?:
+            return local.name.unwrap()
+        "v{local.id.id}"
+
+    static fn local_id_name(id) -> text:
+        "v{id.id}"
+
+    static fn local_id_name_for_func(func: MirFunction, id) -> text:
+        for local in func.locals:
+            if local.id.id == id.id:
+                return OpenClBackend.local_name(local)
+        OpenClBackend.local_id_name(id)
+
+    static fn local_id_type(func: MirFunction, id) -> MirType:
+        for local in func.locals:
+            if local.id.id == id.id:
+                return local.type_
+        MirType(kind: MirTypeKind.U64)
+
+    static fn opencl_type(type_: MirType, as_param: bool) -> text:
+        match type_.kind:
+            case I8: "char"
+            case I16: "short"
+            case I32: "int"
+            case I64: "long"
+            case U8: "uchar"
+            case U16: "ushort"
+            case U32: "uint"
+            case U64: "ulong"
+            case F32: "float"
+            case F64: "double"
+            case Bool: "bool"
+            case Unit: "void"
+            case Vec4f: "float4"
+            case Vec8f: "float8"
+            case Vec4d: "double4"
+            case Vec4i: "int4"
+            case Vec8i: "int8"
+            case Ptr(pointee, _):
+                val inner = OpenClBackend.opencl_type(pointee, false)
+                "__global {inner}*"
+            case Ref(referent, _):
+                val inner = OpenClBackend.opencl_type(referent, false)
+                "__global {inner}*"
+            case _:
+                "ulong"
+
+    static fn emit_instruction(func: MirFunction, inst: MirInst) -> text:
+        match inst.kind:
+            case Const(dest, value, type_):
+                "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest)} = {OpenClBackend.emit_const_value(value)};"
+            case Copy(dest, src):
+                val type_ = OpenClBackend.local_id_type(func, dest)
+                "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest)} = {OpenClBackend.local_id_name_for_func(func, src)};"
+            case Move(dest, src):
+                val type_ = OpenClBackend.local_id_type(func, dest)
+                "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest)} = {OpenClBackend.local_id_name_for_func(func, src)};"
+            case BinOp(dest, op, left, right):
+                val type_ = OpenClBackend.local_id_type(func, dest)
+                "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest)} = {OpenClBackend.emit_operand(func, left)} {OpenClBackend.emit_binop(op)} {OpenClBackend.emit_operand(func, right)};"
+            case CheckedBinOp(dest, op, left, right):
+                val type_ = OpenClBackend.local_id_type(func, dest)
+                "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest)} = {OpenClBackend.emit_operand(func, left)} {OpenClBackend.emit_binop(op)} {OpenClBackend.emit_operand(func, right)};"
+            case Cast(dest, operand, target):
+                val target_type = OpenClBackend.opencl_type(target, false)
+                "{target_type} {OpenClBackend.local_id_name_for_func(func, dest)} = ({target_type})({OpenClBackend.emit_operand(func, operand)});"
+            case Bitcast(dest, operand, target):
+                val target_type = OpenClBackend.opencl_type(target, false)
+                "{target_type} {OpenClBackend.local_id_name_for_func(func, dest)} = {OpenClBackend.emit_bitcast_expr(target, OpenClBackend.emit_operand(func, operand))};"
+            case UnaryOp(dest, op, operand):
+                val type_ = OpenClBackend.local_id_type(func, dest)
+                "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest)} = {OpenClBackend.emit_unaryop(op)}{OpenClBackend.emit_operand(func, operand)};"
+            case Intrinsic(dest, name, args):
+                OpenClBackend.emit_intrinsic(func, dest, name, args)
+            case SimdAddF32x4(dest, a, b):
+                OpenClBackend.emit_simd_binop(func, dest, a, b, "+")
+            case SimdSubF32x4(dest, a, b):
+                OpenClBackend.emit_simd_binop(func, dest, a, b, "-")
+            case SimdMulF32x4(dest, a, b):
+                OpenClBackend.emit_simd_binop(func, dest, a, b, "*")
+            case SimdDivF32x4(dest, a, b):
+                OpenClBackend.emit_simd_binop(func, dest, a, b, "/")
+            case SimdFmaF32x4(dest, a, b, c):
+                OpenClBackend.emit_simd_fma(func, dest, a, b, c)
+            case SimdAddF32x8(dest, a, b):
+                OpenClBackend.emit_simd_binop(func, dest, a, b, "+")
+            case SimdSubF32x8(dest, a, b):
+                OpenClBackend.emit_simd_binop(func, dest, a, b, "-")
+            case SimdMulF32x8(dest, a, b):
+                OpenClBackend.emit_simd_binop(func, dest, a, b, "*")
+            case SimdDivF32x8(dest, a, b):
+                OpenClBackend.emit_simd_binop(func, dest, a, b, "/")
+            case SimdFmaF32x8(dest, a, b, c):
+                OpenClBackend.emit_simd_fma(func, dest, a, b, c)
+            case SimdAddF64x4(dest, a, b):
+                OpenClBackend.emit_simd_binop(func, dest, a, b, "+")
+            case SimdSubF64x4(dest, a, b):
+                OpenClBackend.emit_simd_binop(func, dest, a, b, "-")
+            case SimdMulF64x4(dest, a, b):
+                OpenClBackend.emit_simd_binop(func, dest, a, b, "*")
+            case SimdDivF64x4(dest, a, b):
+                OpenClBackend.emit_simd_binop(func, dest, a, b, "/")
+            case SimdFmaF64x4(dest, a, b, c):
+                OpenClBackend.emit_simd_fma(func, dest, a, b, c)
+            case SimdAddI32x4(dest, a, b):
+                OpenClBackend.emit_simd_binop(func, dest, a, b, "+")
+            case SimdSubI32x4(dest, a, b):
+                OpenClBackend.emit_simd_binop(func, dest, a, b, "-")
+            case SimdMulI32x4(dest, a, b):
+                OpenClBackend.emit_simd_binop(func, dest, a, b, "*")
+            case SimdXorI32x4(dest, a, b):
+                OpenClBackend.emit_simd_binop(func, dest, a, b, "^")
+            case SimdAndI32x4(dest, a, b):
+                OpenClBackend.emit_simd_binop(func, dest, a, b, "&")
+            case SimdOrI32x4(dest, a, b):
+                OpenClBackend.emit_simd_binop(func, dest, a, b, "|")
+            case SimdShlI32x4(dest, a, b):
+                OpenClBackend.emit_simd_binop(func, dest, a, b, "<<")
+            case SimdShrI32x4(dest, a, b):
+                OpenClBackend.emit_simd_binop(func, dest, a, b, ">>")
+            case SimdAddI32x8(dest, a, b):
+                OpenClBackend.emit_simd_binop(func, dest, a, b, "+")
+            case SimdSubI32x8(dest, a, b):
+                OpenClBackend.emit_simd_binop(func, dest, a, b, "-")
+            case SimdMulI32x8(dest, a, b):
+                OpenClBackend.emit_simd_binop(func, dest, a, b, "*")
+            case SimdXorI32x8(dest, a, b):
+                OpenClBackend.emit_simd_binop(func, dest, a, b, "^")
+            case SimdAndI32x8(dest, a, b):
+                OpenClBackend.emit_simd_binop(func, dest, a, b, "&")
+            case SimdOrI32x8(dest, a, b):
+                OpenClBackend.emit_simd_binop(func, dest, a, b, "|")
+            case SimdShlI32x8(dest, a, b):
+                OpenClBackend.emit_simd_binop(func, dest, a, b, "<<")
+            case SimdShrI32x8(dest, a, b):
+                OpenClBackend.emit_simd_binop(func, dest, a, b, ">>")
+            case SimdHaddF32x4(dest, a):
+                OpenClBackend.emit_simd_hreduce_f32x4(func, dest, a, "+")
+            case SimdHmaxF32x4(dest, a):
+                OpenClBackend.emit_simd_hreduce_f32x4(func, dest, a, "max")
+            case SimdHminF32x4(dest, a):
+                OpenClBackend.emit_simd_hreduce_f32x4(func, dest, a, "min")
+            case MirSimdSplat(dest, value, vec_type):
+                OpenClBackend.emit_simd_splat(func, dest, value, vec_type)
+            case MirSimdLoad(dest, ptr, _, vec_type):
+                OpenClBackend.emit_simd_load(func, dest, ptr, vec_type)
+            case MirSimdStore(value, ptr, _):
+                OpenClBackend.emit_simd_store(func, value, ptr)
+            case MirSimdGather(dest, base, indices, vec_type):
+                OpenClBackend.emit_simd_gather(func, dest, base, indices, vec_type)
+            case MirSimdScatter(value, base, indices):
+                OpenClBackend.emit_simd_scatter(func, value, base, indices)
+            case MirSimdBinop(dest, lhs, rhs, op):
+                OpenClBackend.emit_simd_named_binop(func, dest, lhs, rhs, op)
+            case MirSimdTernop(dest, a, b, c, op):
+                OpenClBackend.emit_simd_named_ternop(func, dest, a, b, c, op)
+            case MirSimdUnop(dest, src, op):
+                OpenClBackend.emit_simd_named_unop(func, dest, src, op)
+            case MirSimdReduce(dest, src, op):
+                OpenClBackend.emit_simd_reduce(func, dest, src, op)
+            case MirSimdCmp(dest, lhs, rhs, op):
+                OpenClBackend.emit_simd_cmp(func, dest, lhs, rhs, op)
+            case MirSimdSelect(dest, mask, t, f):
+                OpenClBackend.emit_simd_select(func, dest, mask, t, f)
+            case MirSimdMaskOp(dest, lhs, rhs, op):
+                OpenClBackend.emit_simd_mask_op(func, dest, lhs, rhs, op)
+            case Call(dest, callee, args):
+                OpenClBackend.emit_call(func, dest, callee, args)
+            case CallIndirect(_, _, _, _):
+                "// unsupported OpenCL indirect call"
+            case Aggregate(dest, kind, operands):
+                OpenClBackend.emit_aggregate(func, dest, kind, operands)
+            case GetField(dest, base, field):
+                val type_ = OpenClBackend.local_id_type(func, dest)
+                "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest)} = {OpenClBackend.emit_operand(func, base)}[{field}];"
+            case SetField(base, field, value):
+                "{OpenClBackend.emit_operand(func, base)}[{field}] = {OpenClBackend.emit_operand(func, value)};"
+            case Alloc(dest, type_):
+                val type_name = OpenClBackend.opencl_type(type_, false)
+                val name = OpenClBackend.local_id_name_for_func(func, dest)
+                "__private {type_name} {name}_slot; __private {type_name}* {name} = &{name}_slot;"
+            case Load(dest, ptr):
+                val type_ = OpenClBackend.local_id_type(func, dest)
+                "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest)} = *{OpenClBackend.emit_operand(func, ptr)};"
+            case Store(ptr, value):
+                "*{OpenClBackend.emit_operand(func, ptr)} = {OpenClBackend.emit_operand(func, value)};"
+            case GetElementPtr(dest, base, indices):
+                val type_ = OpenClBackend.local_id_type(func, dest)
+                "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest)} = {OpenClBackend.emit_gep_expr(func, base, indices)};"
+            case GpuGlobalId(dest, dim):
+                "{OpenClBackend.opencl_type(OpenClBackend.local_id_type(func, dest), false)} {OpenClBackend.local_id_name_for_func(func, dest)} = get_global_id({dim});"
+            case GpuLocalId(dest, dim):
+                "{OpenClBackend.opencl_type(OpenClBackend.local_id_type(func, dest), false)} {OpenClBackend.local_id_name_for_func(func, dest)} = get_local_id({dim});"
+            case GpuBlockId(dest, dim):
+                "{OpenClBackend.opencl_type(OpenClBackend.local_id_type(func, dest), false)} {OpenClBackend.local_id_name_for_func(func, dest)} = get_group_id({dim});"
+            case GpuBlockDim(dest, dim):
+                "{OpenClBackend.opencl_type(OpenClBackend.local_id_type(func, dest), false)} {OpenClBackend.local_id_name_for_func(func, dest)} = get_local_size({dim});"
+            case GpuGridDim(dest, dim):
+                "{OpenClBackend.opencl_type(OpenClBackend.local_id_type(func, dest), false)} {OpenClBackend.local_id_name_for_func(func, dest)} = get_num_groups({dim});"
+            case GpuBarrier(scope):
+                OpenClBackend.emit_barrier(scope)
+            case GpuMemFence(scope):
+                OpenClBackend.emit_mem_fence(scope)
+            case GpuSharedAlloc(dest, type_, size):
+                "__local {OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest)}[{size}];"
+            case GpuAtomicOp(dest, op, ptr, value):
+                OpenClBackend.emit_atomic_op(func, dest, op, ptr, value)
+            case GpuAtomicCas(dest, ptr, expected, desired):
+                OpenClBackend.emit_atomic_cas(func, dest, ptr, expected, desired)
+            case DebugValue(_, name):
+                "// debug value: {name}"
+            case Nop:
+                "// nop"
+            case _:
+                "// unsupported MIR instruction for OpenCL subset"
+
+    static fn emit_operand(func: MirFunction, operand: MirOperand) -> text:
+        match operand.kind:
+            case Copy(local):
+                OpenClBackend.local_id_name_for_func(func, local)
+            case Move(local):
+                OpenClBackend.local_id_name_for_func(func, local)
+            case Const(value, _):
+                OpenClBackend.emit_const_value(value)
+
+    static fn operand_type(func: MirFunction, operand: MirOperand) -> MirType:
+        match operand.kind:
+            case Copy(local):
+                OpenClBackend.local_id_type(func, local)
+            case Move(local):
+                OpenClBackend.local_id_type(func, local)
+            case Const(_, type_):
+                type_
+
+    static fn emit_callable(func: MirFunction, operand: MirOperand) -> text:
+        match operand.kind:
+            case Const(value, _):
+                match value:
+                    case Str(name):
+                        name
+                    case _:
+                        OpenClBackend.emit_operand(func, operand)
+            case _:
+                OpenClBackend.emit_operand(func, operand)
+
+    static fn emit_call(func: MirFunction, dest, callee: MirOperand, args: [MirOperand]) -> text:
+        var rendered_args: [text] = []
+        for arg in args:
+            rendered_args.push(OpenClBackend.emit_operand(func, arg))
+        val expr = "{OpenClBackend.emit_callable(func, callee)}({rendered_args.join(\", \")})"
+        if dest.?:
+            val dest_id = dest.unwrap()
+            val type_ = OpenClBackend.local_id_type(func, dest_id)
+            return "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest_id)} = {expr};"
+        "{expr};"
+
+    static fn emit_simd_binop(func: MirFunction, dest, a: MirOperand, b: MirOperand, op: text) -> text:
+        val type_ = OpenClBackend.local_id_type(func, dest)
+        "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest)} = {OpenClBackend.emit_operand(func, a)} {op} {OpenClBackend.emit_operand(func, b)};"
+
+    static fn emit_simd_fma(func: MirFunction, dest, a: MirOperand, b: MirOperand, c: MirOperand) -> text:
+        val type_ = OpenClBackend.local_id_type(func, dest)
+        "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest)} = fma({OpenClBackend.emit_operand(func, a)}, {OpenClBackend.emit_operand(func, b)}, {OpenClBackend.emit_operand(func, c)});"
+
+    static fn emit_simd_hreduce_f32x4(func: MirFunction, dest, a: MirOperand, op: text) -> text:
+        val type_ = OpenClBackend.local_id_type(func, dest)
+        val name = OpenClBackend.local_id_name_for_func(func, dest)
+        val value = OpenClBackend.emit_operand(func, a)
+        if op == "max":
+            return "{OpenClBackend.opencl_type(type_, false)} {name} = fmax(fmax({value}.s0, {value}.s1), fmax({value}.s2, {value}.s3));"
+        if op == "min":
+            return "{OpenClBackend.opencl_type(type_, false)} {name} = fmin(fmin({value}.s0, {value}.s1), fmin({value}.s2, {value}.s3));"
+        "{OpenClBackend.opencl_type(type_, false)} {name} = {value}.s0 + {value}.s1 + {value}.s2 + {value}.s3;"
+
+    static fn simd_lane_suffixes(type_: MirType) -> [text]:
+        match type_.kind:
+            case Vec4f | Vec4d | Vec4i:
+                ["s0", "s1", "s2", "s3"]
+            case Vec8f | Vec8i:
+                ["s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7"]
+            case _:
+                []
+
+    static fn simd_scalar_type(type_: MirType) -> text:
+        match type_.kind:
+            case Vec4f | Vec8f:
+                "float"
+            case Vec4d:
+                "double"
+            case Vec4i | Vec8i:
+                "int"
+            case _:
+                OpenClBackend.opencl_type(type_, false)
+
+    static fn simd_is_float_type(type_: MirType) -> bool:
+        match type_.kind:
+            case F32 | F64 | Vec4f | Vec8f | Vec4d:
+                true
+            case _:
+                false
+
+    static fn emit_simd_splat(func: MirFunction, dest, value: MirOperand, vec_type: MirType) -> text:
+        val type_name = OpenClBackend.opencl_type(vec_type, false)
+        "{type_name} {OpenClBackend.local_id_name_for_func(func, dest)} = ({type_name})({OpenClBackend.emit_operand(func, value)});"
+
+    static fn emit_simd_load(func: MirFunction, dest, ptr: MirOperand, vec_type: MirType) -> text:
+        "{OpenClBackend.opencl_type(vec_type, false)} {OpenClBackend.local_id_name_for_func(func, dest)} = *{OpenClBackend.emit_operand(func, ptr)};"
+
+    static fn emit_simd_store(func: MirFunction, value: MirOperand, ptr: MirOperand) -> text:
+        "*{OpenClBackend.emit_operand(func, ptr)} = {OpenClBackend.emit_operand(func, value)};"
+
+    static fn emit_simd_gather(func: MirFunction, dest, base: MirOperand, indices: MirOperand, vec_type: MirType) -> text:
+        val type_name = OpenClBackend.opencl_type(vec_type, false)
+        val base_name = OpenClBackend.emit_operand(func, base)
+        val index_name = OpenClBackend.emit_operand(func, indices)
+        var lanes: [text] = []
+        for lane in OpenClBackend.simd_lane_suffixes(vec_type):
+            lanes.push("{base_name}[{index_name}.{lane}]")
+        "{type_name} {OpenClBackend.local_id_name_for_func(func, dest)} = ({type_name})({lanes.join(\", \")});"
+
+    static fn emit_simd_scatter(func: MirFunction, value: MirOperand, base: MirOperand, indices: MirOperand) -> text:
+        val value_name = OpenClBackend.emit_operand(func, value)
+        val base_name = OpenClBackend.emit_operand(func, base)
+        val index_name = OpenClBackend.emit_operand(func, indices)
+        val value_type = OpenClBackend.operand_type(func, value)
+        var stores: [text] = []
+        for lane in OpenClBackend.simd_lane_suffixes(value_type):
+            stores.push("{base_name}[{index_name}.{lane}] = {value_name}.{lane};")
+        stores.join(" ")
+
+    static fn emit_simd_named_binop(func: MirFunction, dest, lhs: MirOperand, rhs: MirOperand, op: text) -> text:
+        val type_ = OpenClBackend.local_id_type(func, dest)
+        val type_name = OpenClBackend.opencl_type(type_, false)
+        val name = OpenClBackend.local_id_name_for_func(func, dest)
+        val left = OpenClBackend.emit_operand(func, lhs)
+        val right = OpenClBackend.emit_operand(func, rhs)
+        if op == "Min" or op == "min":
+            val min_name = if OpenClBackend.simd_is_float_type(type_): "fmin" else: "min"
+            return "{type_name} {name} = {min_name}({left}, {right});"
+        if op == "Max" or op == "max":
+            val max_name = if OpenClBackend.simd_is_float_type(type_): "fmax" else: "max"
+            return "{type_name} {name} = {max_name}({left}, {right});"
+        if op == "Andnot" or op == "andnot":
+            return "{type_name} {name} = {left} & ~{right};"
+        val symbol = OpenClBackend.simd_binop_symbol(op)
+        if symbol == "":
+            return "// unsupported OpenCL SIMD binop: {op}"
+        "{type_name} {name} = {left} {symbol} {right};"
+
+    static fn simd_binop_symbol(op: text) -> text:
+        if op == "Add" or op == "add":
+            return "+"
+        if op == "Sub" or op == "sub":
+            return "-"
+        if op == "Mul" or op == "mul":
+            return "*"
+        if op == "And" or op == "and":
+            return "&"
+        if op == "Or" or op == "or":
+            return "|"
+        if op == "Xor" or op == "xor":
+            return "^"
+        if op == "Shl" or op == "shl":
+            return "<<"
+        if op == "ShrLogical" or op == "shr_logical" or op == "ShrArith" or op == "shr_arith":
+            return ">>"
+        if op == "CmpEq" or op == "cmp_eq":
+            return "=="
+        if op == "CmpLt" or op == "cmp_lt":
+            return "<"
+        if op == "CmpLe" or op == "cmp_le":
+            return "<="
+        ""
+
+    static fn emit_simd_named_ternop(func: MirFunction, dest, a: MirOperand, b: MirOperand, c: MirOperand, op: text) -> text:
+        val type_ = OpenClBackend.local_id_type(func, dest)
+        val type_name = OpenClBackend.opencl_type(type_, false)
+        val name = OpenClBackend.local_id_name_for_func(func, dest)
+        val aa = OpenClBackend.emit_operand(func, a)
+        val bb = OpenClBackend.emit_operand(func, b)
+        val cc = OpenClBackend.emit_operand(func, c)
+        if op == "Fma" or op == "fma":
+            return "{type_name} {name} = fma({aa}, {bb}, {cc});"
+        if op == "Fnmadd" or op == "fnmadd":
+            return "{type_name} {name} = fma(-{aa}, {bb}, {cc});"
+        "// unsupported OpenCL SIMD ternop: {op}"
+
+    static fn emit_simd_named_unop(func: MirFunction, dest, src: MirOperand, op: text) -> text:
+        val type_ = OpenClBackend.local_id_type(func, dest)
+        val type_name = OpenClBackend.opencl_type(type_, false)
+        val name = OpenClBackend.local_id_name_for_func(func, dest)
+        val value = OpenClBackend.emit_operand(func, src)
+        if op == "Neg" or op == "neg":
+            return "{type_name} {name} = -{value};"
+        if op == "Abs" or op == "abs":
+            val abs_name = if OpenClBackend.simd_is_float_type(type_): "fabs" else: "abs"
+            return "{type_name} {name} = {abs_name}({value});"
+        if op == "Sqrt" or op == "sqrt":
+            return "{type_name} {name} = sqrt({value});"
+        if op == "Recip" or op == "recip":
+            return "{type_name} {name} = ({type_name})(1.0) / {value};"
+        if op == "RecipSqrt" or op == "recip_sqrt":
+            return "{type_name} {name} = rsqrt({value});"
+        "// unsupported OpenCL SIMD unop: {op}"
+
+    static fn emit_simd_reduce(func: MirFunction, dest, src: MirOperand, op: text) -> text:
+        val dest_type = OpenClBackend.local_id_type(func, dest)
+        val src_type = OpenClBackend.operand_type(func, src)
+        val type_name = OpenClBackend.opencl_type(dest_type, false)
+        val name = OpenClBackend.local_id_name_for_func(func, dest)
+        val value = OpenClBackend.emit_operand(func, src)
+        var lanes: [text] = []
+        for lane in OpenClBackend.simd_lane_suffixes(src_type):
+            lanes.push("{value}.{lane}")
+        if lanes.len() == 0:
+            return "// unsupported OpenCL SIMD reduce: {op}"
+        if op == "Sum" or op == "sum":
+            return "{type_name} {name} = {lanes.join(\" + \")};"
+        if op == "And" or op == "and":
+            return "{type_name} {name} = {lanes.join(\" & \")};"
+        if op == "Or" or op == "or":
+            return "{type_name} {name} = {lanes.join(\" | \")};"
+        if op == "Xor" or op == "xor":
+            return "{type_name} {name} = {lanes.join(\" ^ \")};"
+        if op == "Min" or op == "min":
+            val min_name = if OpenClBackend.simd_is_float_type(src_type): "fmin" else: "min"
+            return "{type_name} {name} = {OpenClBackend.emit_simd_reduce_call(lanes, min_name)};"
+        if op == "Max" or op == "max":
+            val max_name = if OpenClBackend.simd_is_float_type(src_type): "fmax" else: "max"
+            return "{type_name} {name} = {OpenClBackend.emit_simd_reduce_call(lanes, max_name)};"
+        "// unsupported OpenCL SIMD reduce: {op}"
+
+    static fn emit_simd_reduce_call(lanes: [text], fn_name: text) -> text:
+        var expr = lanes[0]
+        var i = 1
+        while i < lanes.len():
+            expr = "{fn_name}({expr}, {lanes[i]})"
+            i = i + 1
+        expr
+
+    static fn emit_simd_cmp(func: MirFunction, dest, lhs: MirOperand, rhs: MirOperand, op: text) -> text:
+        val symbol = OpenClBackend.simd_cmp_symbol(op)
+        if symbol == "":
+            return "// unsupported OpenCL SIMD cmp: {op}"
+        val type_ = OpenClBackend.local_id_type(func, dest)
+        "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest)} = {OpenClBackend.emit_operand(func, lhs)} {symbol} {OpenClBackend.emit_operand(func, rhs)};"
+
+    static fn simd_cmp_symbol(op: text) -> text:
+        if op == "Eq" or op == "eq":
+            return "=="
+        if op == "Ne" or op == "ne":
+            return "!="
+        if op == "Lt" or op == "lt":
+            return "<"
+        if op == "Le" or op == "le":
+            return "<="
+        if op == "Gt" or op == "gt":
+            return ">"
+        if op == "Ge" or op == "ge":
+            return ">="
+        ""
+
+    static fn emit_simd_select(func: MirFunction, dest, mask: MirOperand, t: MirOperand, f: MirOperand) -> text:
+        val type_ = OpenClBackend.local_id_type(func, dest)
+        "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest)} = select({OpenClBackend.emit_operand(func, f)}, {OpenClBackend.emit_operand(func, t)}, {OpenClBackend.emit_operand(func, mask)});"
+
+    static fn emit_simd_mask_op(func: MirFunction, dest, lhs: MirOperand, rhs: MirOperand, op: text) -> text:
+        val type_ = OpenClBackend.local_id_type(func, dest)
+        val type_name = OpenClBackend.opencl_type(type_, false)
+        val name = OpenClBackend.local_id_name_for_func(func, dest)
+        val left = OpenClBackend.emit_operand(func, lhs)
+        val right = OpenClBackend.emit_operand(func, rhs)
+        if op == "Not" or op == "not":
+            return "{type_name} {name} = ~{left};"
+        if op == "And" or op == "and":
+            return "{type_name} {name} = {left} & {right};"
+        if op == "Or" or op == "or":
+            return "{type_name} {name} = {left} | {right};"
+        if op == "Xor" or op == "xor":
+            return "{type_name} {name} = {left} ^ {right};"
+        "// unsupported OpenCL SIMD mask op: {op}"
+
+    static fn emit_aggregate(func: MirFunction, dest, kind: AggregateKind, operands: [MirOperand]) -> text:
+        match kind:
+            case Array(element):
+                var rendered: [text] = []
+                for operand in operands:
+                    rendered.push(OpenClBackend.emit_operand(func, operand))
+                val elem_type = OpenClBackend.opencl_type(element, false)
+                "{elem_type} {OpenClBackend.local_id_name_for_func(func, dest)}[{operands.len()}] = {{ {rendered.join(\", \")} }};"
+            case _:
+                "// unsupported OpenCL aggregate"
+
+    static fn emit_gep_expr(func: MirFunction, base: MirOperand, indices: [MirOperand]) -> text:
+        var expr = OpenClBackend.emit_operand(func, base)
+        for index in indices:
+            expr = "({expr} + {OpenClBackend.emit_operand(func, index)})"
+        expr
+
+    static fn emit_const_value(value: MirConstValue) -> text:
+        match value:
+            case Int(v):
+                v.to_text()
+            case Float(v):
+                v.to_text()
+            case Bool(v):
+                if v: "true" else: "false"
+            case Str(v):
+                "\"{v}\""
+            case Zero:
+                "0"
+            case _:
+                "0"
+
+    static fn emit_bitcast_expr(target: MirType, expr: text) -> text:
+        match target.kind:
+            case F32:
+                "as_float({expr})"
+            case F64:
+                "as_double({expr})"
+            case I32:
+                "as_int({expr})"
+            case U32:
+                "as_uint({expr})"
+            case I64:
+                "as_long({expr})"
+            case U64:
+                "as_ulong({expr})"
+            case _:
+                "({OpenClBackend.opencl_type(target, false)})({expr})"
+
+    static fn emit_binop(op: MirBinOp) -> text:
+        match op:
+            case Add: "+"
+            case Sub: "-"
+            case Mul: "*"
+            case Div: "/"
+            case Rem: "%"
+            case BitAnd: "&"
+            case BitOr: "|"
+            case BitXor: "^"
+            case Shl: "<<"
+            case Shr: ">>"
+            case Eq: "=="
+            case Ne: "!="
+            case Lt: "<"
+            case Le: "<="
+            case Gt: ">"
+            case Ge: ">="
+            case _: "+"
+
+    static fn emit_unaryop(op: MirUnaryOp) -> text:
+        match op:
+            case Neg: "-"
+            case Not: "!"
+            case BitNot: "~"
+            case Transpose: ""
+
+    static fn emit_atomic_builtin(op: GpuAtomicOpKind) -> text:
+        match op:
+            case Add: "atomic_add"
+            case Sub: "atomic_sub"
+            case And: "atomic_and"
+            case Or: "atomic_or"
+            case Xor: "atomic_xor"
+            case Min: "atomic_min"
+            case Max: "atomic_max"
+            case Exchange: "atomic_xchg"
+            case CompareExchange: ""
+
+    static fn emit_atomic_op(func: MirFunction, dest, op: GpuAtomicOpKind, ptr: MirOperand, value: MirOperand) -> text:
+        val builtin = OpenClBackend.emit_atomic_builtin(op)
+        if builtin == "":
+            return "// unsupported OpenCL atomic operation"
+        val type_ = OpenClBackend.local_id_type(func, dest)
+        "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest)} = {builtin}({OpenClBackend.emit_operand(func, ptr)}, {OpenClBackend.emit_operand(func, value)});"
+
+    static fn emit_atomic_cas(func: MirFunction, dest, ptr: MirOperand, expected: MirOperand, desired: MirOperand) -> text:
+        val type_ = OpenClBackend.local_id_type(func, dest)
+        "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest)} = atomic_cmpxchg({OpenClBackend.emit_operand(func, ptr)}, {OpenClBackend.emit_operand(func, expected)}, {OpenClBackend.emit_operand(func, desired)});"
+
+    static fn emit_intrinsic(func: MirFunction, dest, name: text, args: [MirOperand]) -> text:
+        if name == "gpu_atomic_add_i32" or name == "gpu_atomic_add_i64":
+            return OpenClBackend.emit_atomic_intrinsic(func, dest, "atomic_add", name, args)
+        if name == "gpu_atomic_min_i64":
+            return OpenClBackend.emit_atomic_intrinsic(func, dest, "atomic_min", name, args)
+        if name == "gpu_atomic_max_i64":
+            return OpenClBackend.emit_atomic_intrinsic(func, dest, "atomic_max", name, args)
+        if name == "gpu_atomic_cas_i64":
+            return OpenClBackend.emit_atomic_cas_intrinsic(func, dest, name, args)
+        "// unsupported OpenCL intrinsic: {name}"
+
+    static fn emit_atomic_intrinsic(func: MirFunction, dest, builtin: text, name: text, args: [MirOperand]) -> text:
+        if not dest.?:
+            return "// OpenCL atomic intrinsic missing destination: {name}"
+        if args.len() < 2:
+            return "// OpenCL atomic intrinsic missing arguments: {name}"
+        val dest_id = dest.unwrap()
+        val type_ = OpenClBackend.local_id_type(func, dest_id)
+        "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest_id)} = {builtin}({OpenClBackend.emit_operand(func, args[0])}, {OpenClBackend.emit_operand(func, args[1])});"
+
+    static fn emit_atomic_cas_intrinsic(func: MirFunction, dest, name: text, args: [MirOperand]) -> text:
+        if not dest.?:
+            return "// OpenCL atomic intrinsic missing destination: {name}"
+        if args.len() < 3:
+            return "// OpenCL atomic intrinsic missing arguments: {name}"
+        val dest_id = dest.unwrap()
+        val type_ = OpenClBackend.local_id_type(func, dest_id)
+        "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest_id)} = atomic_cmpxchg({OpenClBackend.emit_operand(func, args[0])}, {OpenClBackend.emit_operand(func, args[1])}, {OpenClBackend.emit_operand(func, args[2])});"
+
+    static fn emit_barrier(scope: GpuBarrierScope) -> text:
+        match scope:
+            case Workgroup:
+                "barrier(CLK_LOCAL_MEM_FENCE);"
+            case Device:
+                "mem_fence(CLK_GLOBAL_MEM_FENCE);"
+            case Subgroup:
+                "// subgroup barrier deferred"
+
+    static fn emit_mem_fence(scope: GpuMemoryScope) -> text:
+        match scope:
+            case Workgroup:
+                "mem_fence(CLK_LOCAL_MEM_FENCE);"
+            case Device:
+                "mem_fence(CLK_GLOBAL_MEM_FENCE);"
+            case All:
+                "mem_fence(CLK_LOCAL_MEM_FENCE | CLK_GLOBAL_MEM_FENCE);"
+            case QueueFamily:
+                "// queue-family fence deferred for OpenCL"
+
+    static fn emit_switch_terminator(func: MirFunction, value: MirOperand, targets: [SwitchCase], default: BlockId) -> text:
+        var parts: [text] = []
+        parts.push("switch ({OpenClBackend.emit_operand(func, value)}) {")
+        for target in targets:
+            parts.push("case {target.value}: goto BB{target.target.id};")
+        parts.push("default: goto BB{default.id};")
+        parts.push("}")
+        parts.join(" ")
+
+    static fn emit_terminator(func: MirFunction, term: MirTerminator) -> text:
+        match term:
+            case Ret(value):
+                if value.?:
+                    return "return {OpenClBackend.emit_operand(func, value.unwrap())};"
+                "return;"
+            case Unreachable:
+                "// unreachable"
+            case Abort(message):
+                "// abort: {message}"
+            case Goto(target):
+                "goto BB{target.id};"
+            case If(cond, then_, else_):
+                "if ({OpenClBackend.emit_operand(func, cond)}) { goto BB{then_.id}; } else { goto BB{else_.id}; }"
+            case Switch(value, targets, default):
+                OpenClBackend.emit_switch_terminator(func, value, targets, default)
+            case CallTerminator(_, _, _, normal, _):
+                "// unsupported OpenCL call terminator: normal BB{normal.id}"
+
+impl Codegen for OpenClBackend:
+    fn backend_kind() -> BackendKind:
+        BackendKind.OpenCl
+
+    fn backend_name() -> text:
+        "opencl"
+
+    fn supports_target(target: CodegenTarget) -> bool:
+        target == CodegenTarget.OpenClC or target == CodegenTarget.OpenClSpirv
+
+    fn output_kind() -> CodegenOutputKind:
+        CodegenOutputKind.GpuCode
+
+    fn compile_module(module: MirModule) -> Result<CodegenOutput, CompileError>:
+        val source = OpenClBackend.compile_module_to_opencl_source(module)?
+        Ok(CodegenOutput.gpu_output(module.name, source))
+
+fn opencl_backend_2d_compile_contract(output_stem: text, artifact_magic: text, exported_symbols: text, byte_count: i64) -> OpenClBackendCompileContract:
+    OpenClBackend.generated_2d_contract(output_stem, artifact_magic, exported_symbols, byte_count)
