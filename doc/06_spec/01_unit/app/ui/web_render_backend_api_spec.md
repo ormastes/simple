@@ -29,7 +29,7 @@ web_render_backend_api_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -122,12 +122,14 @@ match tauri_result:
 3. backend render frame
    - Expected: backend.web_render_target equals `pure_simple`
    - Expected: backend.last_artifact_pixels equals `64 * 48`
+   - Expected: backend.last_artifact_engine2d_status equals `WEB_RENDER_ENGINE2D_STATUS_RENDERED`
+   - Expected: backend.last_artifact_engine2d_backend equals `software`
 
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -147,6 +149,9 @@ match backend_result:
         expect(backend.last_artifact_html).to_contain("<div id=\"app\">")
         expect(backend.last_artifact_html).to_contain("widget-button")
         expect(backend.last_artifact_pixels).to_equal(64 * 48)
+        expect(backend.last_artifact_engine2d_status).to_equal(WEB_RENDER_ENGINE2D_STATUS_RENDERED)
+        expect(backend.last_artifact_engine2d_backend).to_equal("software")
+        expect(backend.last_artifact_engine2d_reason).to_contain("Engine2D")
         val ppm = backend.snapshot_ppm_text()
         expect(ppm).to_start_with("P3\n64 48\n255\n")
         expect(ppm).to_contain("255\n")
@@ -321,6 +326,38 @@ expect(web_render_pixel_default_page_html("about:blank")).to_contain("<div id=\"
 
 </details>
 
+#### records Engine2D provenance on shared web render artifacts
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val req = web_render_url_request(WEB_RENDER_TARGET_PURE_SIMPLE, "about:blank", 32, 16)
+val base = web_render_to_artifact(req)
+expect(base.engine2d_status).to_equal(WEB_RENDER_ENGINE2D_STATUS_NOT_REQUESTED)
+expect(base.engine2d_reason).to_equal("pixel output not requested")
+
+val pixel = web_render_pixel_artifact(req, [1u32, 2u32, 3u32])
+expect(pixel.engine2d_status).to_equal(WEB_RENDER_ENGINE2D_STATUS_COMPATIBILITY)
+expect(pixel.engine2d_backend).to_equal("unknown")
+expect(pixel.engine2d_reason).to_contain("did not report Engine2D")
+
+val rendered = web_render_engine2d_rendered_artifact(pixel, "software")
+expect(rendered.engine2d_status).to_equal(WEB_RENDER_ENGINE2D_STATUS_RENDERED)
+expect(rendered.engine2d_backend).to_equal("software")
+expect(rendered.pixels.len()).to_equal(3)
+
+val unavailable = web_render_engine2d_unavailable_artifact(base, "opencl", "opencl ICD unavailable")
+expect(unavailable.engine2d_status).to_equal(WEB_RENDER_ENGINE2D_STATUS_UNAVAILABLE)
+expect(unavailable.engine2d_backend).to_equal("opencl")
+expect(unavailable.engine2d_reason).to_equal("opencl ICD unavailable")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -340,8 +377,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

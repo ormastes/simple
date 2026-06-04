@@ -90,7 +90,7 @@ mod pty_process {
                     libc::_exit(1);
                 }
 
-                libc::ioctl(slave_fd, libc::TIOCSCTTY as libc::c_ulong, 0 as libc::c_int);
+                libc::ioctl(slave_fd, libc::TIOCSCTTY as _, 0 as libc::c_int);
                 libc::dup2(slave_fd, libc::STDIN_FILENO);
                 libc::dup2(slave_fd, libc::STDOUT_FILENO);
                 libc::dup2(slave_fd, libc::STDERR_FILENO);
@@ -269,10 +269,7 @@ pub extern "C" fn native_pty_read(fd: i64, timeout_ms: i64) -> RuntimeValue {
                     return string_to_runtime_value("");
                 } else {
                     // Error or would block
-                    #[cfg(target_os = "linux")]
-                    let errno = *libc::__errno_location();
-                    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
-                    let errno = *libc::__error();
+                    let errno = nix::errno::Errno::last_raw();
                     if errno == libc::EAGAIN || errno == libc::EWOULDBLOCK {
                         // No data available, check timeout
                         if start.elapsed() >= timeout_duration {

@@ -8,7 +8,7 @@
 use common.ui.builder.{button, panel, text_widget, build_tree_with_title}
 use common.ui.state.{init_state}
 use common.ui.widget.{UIEvent}
-use common.ui.web_render_api.{WEB_RENDER_TARGET_ELECTRON, WEB_RENDER_TARGET_PURE_SIMPLE, WEB_RENDER_TARGET_TAURI, WEB_RENDER_TARGET_TUI_WEB, WebRenderHostWindowCommand, WebRenderRequest, web_render_cache_key, web_render_dynamic_region_count, web_render_ipc_json, web_render_ipc_json_with_html, web_render_optimization_profile, web_render_to_artifact, web_render_transport_bundle, web_render_url_request}
+use common.ui.web_render_api.{WEB_RENDER_ENGINE2D_STATUS_COMPATIBILITY, WEB_RENDER_ENGINE2D_STATUS_NOT_REQUESTED, WEB_RENDER_ENGINE2D_STATUS_RENDERED, WEB_RENDER_ENGINE2D_STATUS_UNAVAILABLE, WEB_RENDER_TARGET_ELECTRON, WEB_RENDER_TARGET_PURE_SIMPLE, WEB_RENDER_TARGET_TAURI, WEB_RENDER_TARGET_TUI_WEB, WebRenderHostWindowCommand, WebRenderRequest, web_render_cache_key, web_render_dynamic_region_count, web_render_engine2d_rendered_artifact, web_render_engine2d_unavailable_artifact, web_render_ipc_json, web_render_ipc_json_with_html, web_render_optimization_profile, web_render_pixel_artifact, web_render_to_artifact, web_render_transport_bundle, web_render_url_request}
 use app.ui.web.backend.{WebBackend, web_render_patch_transport_json, web_render_snapshot_transport_json}
 use app.ui.electron.backend.{ElectronBackend, electron_render_ipc_json}
 use app.ui.tauri.backend.{TauriBackend, tauri_render_ipc_json}
@@ -91,6 +91,9 @@ describe "web render backends use the shared common API":
                 expect(backend.last_artifact_html).to_contain("<div id=\"app\">")
                 expect(backend.last_artifact_html).to_contain("widget-button")
                 expect(backend.last_artifact_pixels).to_equal(64 * 48)
+                expect(backend.last_artifact_engine2d_status).to_equal(WEB_RENDER_ENGINE2D_STATUS_RENDERED)
+                expect(backend.last_artifact_engine2d_backend).to_equal("software")
+                expect(backend.last_artifact_engine2d_reason).to_contain("Engine2D")
                 val ppm = backend.snapshot_ppm_text()
                 expect(ppm).to_start_with("P3\n64 48\n255\n")
                 expect(ppm).to_contain("255\n")
@@ -191,3 +194,24 @@ describe "web render backends use the shared common API":
         expect(pixel_req.body_html).to_equal(req.body_html)
         expect(pixel_req.wants_pixels).to_equal(true)
         expect(web_render_pixel_default_page_html("about:blank")).to_contain("<div id=\"app\"><main class='simple-web-default'>")
+
+    it "records Engine2D provenance on shared web render artifacts":
+        val req = web_render_url_request(WEB_RENDER_TARGET_PURE_SIMPLE, "about:blank", 32, 16)
+        val base = web_render_to_artifact(req)
+        expect(base.engine2d_status).to_equal(WEB_RENDER_ENGINE2D_STATUS_NOT_REQUESTED)
+        expect(base.engine2d_reason).to_equal("pixel output not requested")
+
+        val pixel = web_render_pixel_artifact(req, [1u32, 2u32, 3u32])
+        expect(pixel.engine2d_status).to_equal(WEB_RENDER_ENGINE2D_STATUS_COMPATIBILITY)
+        expect(pixel.engine2d_backend).to_equal("unknown")
+        expect(pixel.engine2d_reason).to_contain("did not report Engine2D")
+
+        val rendered = web_render_engine2d_rendered_artifact(pixel, "software")
+        expect(rendered.engine2d_status).to_equal(WEB_RENDER_ENGINE2D_STATUS_RENDERED)
+        expect(rendered.engine2d_backend).to_equal("software")
+        expect(rendered.pixels.len()).to_equal(3)
+
+        val unavailable = web_render_engine2d_unavailable_artifact(base, "opencl", "opencl ICD unavailable")
+        expect(unavailable.engine2d_status).to_equal(WEB_RENDER_ENGINE2D_STATUS_UNAVAILABLE)
+        expect(unavailable.engine2d_backend).to_equal("opencl")
+        expect(unavailable.engine2d_reason).to_equal("opencl ICD unavailable")

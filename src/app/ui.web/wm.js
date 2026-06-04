@@ -103,6 +103,7 @@ class SimpleWindowManager {
     this._desktopItemsFeedbackTimer = 0;
     this._windowOverview = null;
     this._overviewSearchQuery = '';
+    this._windowOverviewActivationTimer = 0;
     this._stageRail = null;
     this._windowSwitcher = null;
     this._windowSwitcherItems = [];
@@ -149,8 +150,10 @@ class SimpleWindowManager {
     this._controlCenterFeedbackTimer = 0;
     this._widgetGallery = null;
     this._widgetGalleryActiveIndex = 0;
+    this._widgetGalleryFeedbackTimer = 0;
     this._wallpaperPicker = null;
     this._wallpaperPickerActiveIndex = 0;
+    this._wallpaperPickerFeedbackTimer = 0;
     this._accentPalette = null;
     this._accentPaletteActiveIndex = 0;
     this._accentPaletteFeedbackTimer = 0;
@@ -174,7 +177,10 @@ class SimpleWindowManager {
     this._dockStack = null;
     this._dockStackMode = 'fan';
     this._dockStackActiveIndex = 0;
+    this._dockStackModeFeedbackTimer = 0;
+    this._dockStackItemFeedbackTimer = 0;
     this._stageRailActiveIndex = 0;
+    this._stageRailActionFeedbackTimer = 0;
     this._qualityInspector = null;
     this._qualityFilter = 'all';
     this._selectedQualityCheck = 'color';
@@ -219,6 +225,7 @@ class SimpleWindowManager {
     this._appLauncherItems = [];
     this._appLauncherActiveIndex = 0;
     this._appLauncherCategory = 'all';
+    this._appLauncherCategoryFeedbackTimer = 0;
     this._launcherApps = [];
     this._shortcutOverlay = null;
     this._shortcutOverlayActiveIndex = 0;
@@ -2707,8 +2714,7 @@ class SimpleWindowManager {
       const target = event.target instanceof Element ? event.target : event.target?.parentElement;
       const card = target?.closest('.wm-overview-card');
       if (!card || !overview.contains(card)) return;
-      this._focusWindowById(card.dataset.windowIdHint || '');
-      this._toggleWindowOverview(false);
+      this._activateWindowOverviewCard(card);
     });
     document.body.appendChild(overview);
     this._windowOverview = overview;
@@ -2723,6 +2729,10 @@ class SimpleWindowManager {
       this._overviewSearchQuery = '';
       this._renderWindowOverview();
       overview.querySelector('.wm-overview-search')?.focus();
+    } else {
+      if (this._windowOverviewActivationTimer) window.clearTimeout(this._windowOverviewActivationTimer);
+      this._windowOverviewActivationTimer = 0;
+      this._clearWindowOverviewActivationFeedback();
     }
     return shouldOpen;
   }
@@ -2805,6 +2815,41 @@ class SimpleWindowManager {
     meta.textContent = win.minimized ? 'Minimized' : (win.active ? 'Active' : 'Open');
     card.appendChild(meta);
     return card;
+  }
+
+  _activateWindowOverviewCard(card) {
+    if (!card) return;
+    const windowId = card.dataset.windowIdHint || '';
+    if (!windowId) return;
+    this._markWindowOverviewActivationFeedback(card, windowId);
+    this._windowOverviewActivationTimer = window.setTimeout(() => {
+      this._windowOverviewActivationTimer = 0;
+      this._focusWindowById(windowId);
+      this._toggleWindowOverview(false);
+    }, 150);
+  }
+
+  _markWindowOverviewActivationFeedback(card, windowId) {
+    const overview = this._ensureWindowOverview();
+    if (this._windowOverviewActivationTimer) window.clearTimeout(this._windowOverviewActivationTimer);
+    this._clearWindowOverviewActivationFeedback();
+    overview.dataset.overviewFeedback = 'activate';
+    overview.dataset.overviewFeedbackWindow = windowId;
+    card.dataset.overviewFeedback = 'activate';
+    card.classList.add('action-feedback');
+    card.setAttribute('aria-busy', 'true');
+  }
+
+  _clearWindowOverviewActivationFeedback() {
+    const overview = this._windowOverview;
+    if (!overview) return;
+    delete overview.dataset.overviewFeedback;
+    delete overview.dataset.overviewFeedbackWindow;
+    overview.querySelectorAll('.wm-overview-card').forEach((card) => {
+      delete card.dataset.overviewFeedback;
+      card.classList.remove('action-feedback');
+      card.removeAttribute('aria-busy');
+    });
   }
 
   _focusWindowById(windowId) {
@@ -3024,7 +3069,7 @@ class SimpleWindowManager {
       const action = target?.closest('[data-stage-action]');
       if (action && rail.contains(action)) {
         this._stageRailActiveIndex = Number(action.closest('.wm-stage-rail-item')?.dataset.stageIndex || '0') || 0;
-        this._activateStageRailAction(action.dataset.stageAction || '', action.closest('.wm-stage-rail-item')?.dataset.windowIdHint || '');
+        this._activateStageRailAction(action.dataset.stageAction || '', action.closest('.wm-stage-rail-item')?.dataset.windowIdHint || '', action);
         return;
       }
       const item = target?.closest('.wm-stage-rail-focus');
@@ -3166,13 +3211,54 @@ class SimpleWindowManager {
     if (windowId) this._focusWindowById(windowId);
   }
 
-  _activateStageRailAction(action, windowId) {
+  _activateStageRailAction(action, windowId, sourceEl = null) {
     const id = String(windowId || '');
     if (!id) return;
     if (action === 'minimize' || action === 'close') {
-      this._sendWindowCmd(action, { window_id_hint: id });
-      if (action === 'close') this._renderStageRail();
+      this._markStageRailActionFeedback(action, id, sourceEl);
+      this._stageRailActionFeedbackTimer = window.setTimeout(() => {
+        this._sendWindowCmd(action, { window_id_hint: id });
+        this._clearStageRailActionFeedback();
+        this._stageRailActionFeedbackTimer = 0;
+        if (action === 'close') this._renderStageRail();
+      }, 150);
     }
+  }
+
+  _markStageRailActionFeedback(action, windowId, sourceEl = null) {
+    const rail = this._ensureStageRail();
+    window.clearTimeout(this._stageRailActionFeedbackTimer);
+    this._clearStageRailActionFeedback();
+    rail.dataset.stageFeedback = action;
+    rail.dataset.stageFeedbackWindow = windowId;
+    const safeId = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(windowId) : windowId.replace(/"/g, '\\"');
+    const item = rail.querySelector(`.wm-stage-rail-item[data-window-id-hint="${safeId}"]`);
+    const button = sourceEl && rail.contains(sourceEl) ? sourceEl : item?.querySelector(`[data-stage-action="${action}"]`);
+    if (item) {
+      item.dataset.stageFeedback = action;
+      item.classList.add('action-feedback');
+    }
+    if (button) {
+      button.dataset.stageFeedback = action;
+      button.classList.add('action-feedback');
+      button.setAttribute('aria-busy', 'true');
+    }
+  }
+
+  _clearStageRailActionFeedback() {
+    const rail = this._stageRail;
+    if (!rail) return;
+    delete rail.dataset.stageFeedback;
+    delete rail.dataset.stageFeedbackWindow;
+    rail.querySelectorAll('.wm-stage-rail-item').forEach((item) => {
+      delete item.dataset.stageFeedback;
+      item.classList.remove('action-feedback');
+    });
+    rail.querySelectorAll('.wm-stage-rail-action').forEach((button) => {
+      delete button.dataset.stageFeedback;
+      button.classList.remove('action-feedback');
+      button.removeAttribute('aria-busy');
+    });
   }
 
   _ensureWorkspaceSwitcher() {
@@ -5504,6 +5590,43 @@ class SimpleWindowManager {
     if (value) value.textContent = 'wallpaper: ' + wallpaper;
     this._sendWindowCmd('wallpaper_pick', { wallpaper_id: wallpaper });
     this._renderWallpaperPicker();
+    this._markWallpaperPickerFeedback(wallpaper);
+  }
+
+  _markWallpaperPickerFeedback(wallpaper) {
+    const picker = this._ensureWallpaperPicker();
+    if (this._wallpaperPickerFeedbackTimer) window.clearTimeout(this._wallpaperPickerFeedbackTimer);
+    this._clearWallpaperPickerFeedback();
+    const id = this._normalizeWallpaperPreference(wallpaper);
+    picker.dataset.wallpaperFeedback = 'pick';
+    picker.dataset.wallpaperFeedbackChoice = id;
+    picker.classList.add('action-feedback');
+    const choice = picker.querySelector(`.wm-wallpaper-choice[data-wallpaper-choice="${CSS.escape(id)}"]`);
+    if (choice) {
+      choice.dataset.wallpaperFeedback = 'pick';
+      choice.classList.add('action-feedback');
+      choice.setAttribute('aria-busy', 'true');
+      const swatch = choice.querySelector('.wm-wallpaper-swatch');
+      if (swatch) swatch.classList.add('action-feedback');
+    }
+    this._wallpaperPickerFeedbackTimer = window.setTimeout(() => {
+      this._clearWallpaperPickerFeedback();
+      this._wallpaperPickerFeedbackTimer = 0;
+    }, 620);
+  }
+
+  _clearWallpaperPickerFeedback() {
+    const picker = this._wallpaperPicker;
+    if (!picker) return;
+    delete picker.dataset.wallpaperFeedback;
+    delete picker.dataset.wallpaperFeedbackChoice;
+    picker.classList.remove('action-feedback');
+    picker.querySelectorAll('.wm-wallpaper-choice').forEach((choice) => {
+      delete choice.dataset.wallpaperFeedback;
+      choice.classList.remove('action-feedback');
+      choice.removeAttribute('aria-busy');
+    });
+    picker.querySelectorAll('.wm-wallpaper-swatch.action-feedback').forEach((swatch) => swatch.classList.remove('action-feedback'));
   }
 
   _ensureAccentPalette() {
@@ -5838,6 +5961,44 @@ class SimpleWindowManager {
     this._dockStackMode = mode === 'grid' ? 'grid' : 'fan';
     this._sendWindowCmd('dock_stack_mode', { stack_mode: this._dockStackMode });
     this._renderDockStack();
+    this._markDockStackModeFeedback(this._dockStackMode);
+  }
+
+  _markDockStackModeFeedback(mode) {
+    const stack = this._ensureDockStack();
+    const activeMode = mode === 'grid' ? 'grid' : 'fan';
+    if (this._dockStackModeFeedbackTimer) window.clearTimeout(this._dockStackModeFeedbackTimer);
+    this._clearDockStackModeFeedback();
+    stack.dataset.stackFeedback = 'mode';
+    stack.dataset.stackFeedbackMode = activeMode;
+    stack.classList.add('action-feedback');
+    stack.setAttribute('aria-busy', 'true');
+    const modeButton = stack.querySelector(`.wm-dock-stack-mode[data-stack-mode="${activeMode}"]`);
+    if (modeButton) {
+      modeButton.dataset.stackFeedback = 'mode';
+      modeButton.classList.add('action-feedback');
+      modeButton.setAttribute('aria-busy', 'true');
+    }
+    this._dockStackModeFeedbackTimer = window.setTimeout(() => {
+      this._clearDockStackModeFeedback();
+      this._dockStackModeFeedbackTimer = 0;
+    }, 520);
+  }
+
+  _clearDockStackModeFeedback() {
+    if (!this._dockStack || !this._dockStack.isConnected) return;
+    const stack = this._dockStack;
+    delete stack.dataset.stackFeedback;
+    delete stack.dataset.stackFeedbackMode;
+    if (!stack.dataset.stackItemFeedback) {
+      stack.classList.remove('action-feedback');
+      stack.removeAttribute('aria-busy');
+    }
+    stack.querySelectorAll('.wm-dock-stack-mode.action-feedback').forEach((modeButton) => {
+      modeButton.classList.remove('action-feedback');
+      modeButton.removeAttribute('aria-busy');
+      delete modeButton.dataset.stackFeedback;
+    });
   }
 
   _moveDockStackSelection(delta) {
@@ -5874,8 +6035,51 @@ class SimpleWindowManager {
 
   _openDockStackItem(itemId) {
     const item = this._dockStackItems().find((candidate) => candidate.id === itemId) || this._dockStackItems()[0];
+    this._markDockStackItemFeedback(item.id);
     this._sendWindowCmd('dock_stack_open', { stack_item: item.id });
     this._showSystemHud('Dock stack', item.label, 1600);
+  }
+
+  _markDockStackItemFeedback(itemId) {
+    const stack = this._ensureDockStack();
+    const selectedId = itemId || this._dockStackItems()[0].id;
+    if (this._dockStackItemFeedbackTimer) window.clearTimeout(this._dockStackItemFeedbackTimer);
+    this._clearDockStackItemFeedback();
+    stack.dataset.stackItemFeedback = 'open';
+    stack.dataset.stackItemFeedbackId = selectedId;
+    stack.classList.add('action-feedback');
+    stack.setAttribute('aria-busy', 'true');
+    const itemButton = Array.from(stack.querySelectorAll('.wm-dock-stack-item')).find((candidate) => candidate.dataset.stackItem === selectedId);
+    if (itemButton) {
+      itemButton.dataset.stackItemFeedback = 'open';
+      itemButton.classList.add('action-feedback');
+      itemButton.setAttribute('aria-busy', 'true');
+      const icon = itemButton.querySelector('.wm-dock-stack-icon');
+      if (icon) icon.classList.add('action-feedback');
+    }
+    this._dockStackItemFeedbackTimer = window.setTimeout(() => {
+      this._clearDockStackItemFeedback();
+      this._dockStackItemFeedbackTimer = 0;
+    }, 560);
+  }
+
+  _clearDockStackItemFeedback() {
+    if (!this._dockStack || !this._dockStack.isConnected) return;
+    const stack = this._dockStack;
+    delete stack.dataset.stackItemFeedback;
+    delete stack.dataset.stackItemFeedbackId;
+    if (!stack.dataset.stackFeedback) {
+      stack.classList.remove('action-feedback');
+      stack.removeAttribute('aria-busy');
+    }
+    stack.querySelectorAll('.wm-dock-stack-item.action-feedback').forEach((itemButton) => {
+      itemButton.classList.remove('action-feedback');
+      itemButton.removeAttribute('aria-busy');
+      delete itemButton.dataset.stackItemFeedback;
+    });
+    stack.querySelectorAll('.wm-dock-stack-icon.action-feedback').forEach((icon) => {
+      icon.classList.remove('action-feedback');
+    });
   }
 
   _ensureQualityInspector() {
@@ -10778,8 +10982,44 @@ class SimpleWindowManager {
     const added = this._addWidgetFromGallery(kind);
     const status = gallery.querySelector('.wm-widget-gallery-status');
     if (status) status.textContent = added ? `${kind || 'widget'} widget added` : 'Widget could not be added';
-    if (added) this._toggleWidgetGallery(false);
+    this._markWidgetGalleryFeedback(kind, added);
+    if (added) {
+      this._widgetGalleryFeedbackTimer = window.setTimeout(() => {
+        this._toggleWidgetGallery(false);
+        this._clearWidgetGalleryFeedback();
+      }, 180);
+    } else {
+      this._widgetGalleryFeedbackTimer = window.setTimeout(() => this._clearWidgetGalleryFeedback(), 560);
+    }
     return added;
+  }
+
+  _markWidgetGalleryFeedback(kind, added) {
+    const gallery = this._ensureWidgetGallery();
+    window.clearTimeout(this._widgetGalleryFeedbackTimer);
+    this._clearWidgetGalleryFeedback();
+    const feedback = added ? 'added' : 'failed';
+    gallery.dataset.widgetFeedback = feedback;
+    gallery.dataset.widgetFeedbackKind = String(kind || '');
+    const selectorKind = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(String(kind || '')) : String(kind || '').replace(/"/g, '\\"');
+    const card = gallery.querySelector(`.wm-widget-gallery-card[data-widget-kind="${selectorKind}"]`);
+    if (card) {
+      card.dataset.widgetFeedback = feedback;
+      card.classList.add('action-feedback');
+      card.setAttribute('aria-busy', added ? 'true' : 'false');
+    }
+  }
+
+  _clearWidgetGalleryFeedback() {
+    const gallery = this._widgetGallery;
+    if (!gallery) return;
+    delete gallery.dataset.widgetFeedback;
+    delete gallery.dataset.widgetFeedbackKind;
+    gallery.querySelectorAll('.wm-widget-gallery-card').forEach((card) => {
+      delete card.dataset.widgetFeedback;
+      card.classList.remove('action-feedback');
+      card.removeAttribute('aria-busy');
+    });
   }
 
   _addWidgetFromGallery(kind) {
@@ -10998,10 +11238,48 @@ class SimpleWindowManager {
 
   _setAppLauncherCategory(categoryId) {
     const next = this._appLauncherCategories().some((category) => category.id === categoryId) ? categoryId : 'all';
-    if (this._appLauncherCategory === next) return;
+    if (this._appLauncherCategory === next) {
+      this._markAppLauncherCategoryFeedback(next);
+      return;
+    }
     this._appLauncherCategory = next;
     this._appLauncherActiveIndex = 0;
     this._renderAppLauncher();
+    this._markAppLauncherCategoryFeedback(next);
+  }
+
+  _markAppLauncherCategoryFeedback(categoryId) {
+    if (!this._appLauncher || !this._appLauncher.isConnected || !this._appLauncherFilters) return;
+    if (this._appLauncherCategoryFeedbackTimer) window.clearTimeout(this._appLauncherCategoryFeedbackTimer);
+    this._clearAppLauncherCategoryFeedback();
+    const id = this._appLauncherCategories().some((category) => category.id === categoryId) ? categoryId : 'all';
+    this._appLauncher.dataset.categoryFeedback = id;
+    this._appLauncherFilters.dataset.categoryFeedback = id;
+    this._appLauncher.classList.add('category-feedback');
+    const button = this._appLauncherFilters.querySelector(`.wm-app-launcher-filter[data-app-category="${CSS.escape(id)}"]`);
+    if (button) {
+      button.dataset.categoryFeedback = id;
+      button.classList.add('action-feedback');
+      button.setAttribute('aria-busy', 'true');
+    }
+    this._appLauncherCategoryFeedbackTimer = window.setTimeout(() => {
+      this._clearAppLauncherCategoryFeedback();
+      this._appLauncherCategoryFeedbackTimer = 0;
+    }, 560);
+  }
+
+  _clearAppLauncherCategoryFeedback() {
+    if (!this._appLauncher) return;
+    delete this._appLauncher.dataset.categoryFeedback;
+    this._appLauncher.classList.remove('category-feedback');
+    if (this._appLauncherFilters) {
+      delete this._appLauncherFilters.dataset.categoryFeedback;
+      this._appLauncherFilters.querySelectorAll('.wm-app-launcher-filter').forEach((button) => {
+        delete button.dataset.categoryFeedback;
+        button.classList.remove('action-feedback');
+        button.removeAttribute('aria-busy');
+      });
+    }
   }
 
   _appLauncherCategoryForApp(appId, label = '', explicit = '') {
@@ -12107,6 +12385,11 @@ class SimpleWindowManager {
     const panel = this._ensureSnapLayoutPalette();
     const shouldOpen = open == null ? panel.hidden : open;
     if (!shouldOpen) {
+      if (this._snapLayoutFeedbackTimer) {
+        clearTimeout(this._snapLayoutFeedbackTimer);
+        this._snapLayoutFeedbackTimer = 0;
+      }
+      this._clearSnapLayoutFeedback();
       panel.hidden = true;
       this._clearSnapPreview();
       return false;
@@ -12229,6 +12512,35 @@ class SimpleWindowManager {
     });
   }
 
+  _markSnapLayoutFeedback(zone) {
+    const panel = this._snapLayoutPalette;
+    if (!panel || panel.hidden) return;
+    const id = String(zone || '');
+    if (this._snapLayoutFeedbackTimer) clearTimeout(this._snapLayoutFeedbackTimer);
+    const button = panel.querySelector(`.wm-snap-layout-choice[data-snap-layout="${CSS.escape(id)}"]`);
+    panel.dataset.snapLayoutFeedback = id;
+    panel.classList.remove('action-feedback');
+    void panel.offsetWidth;
+    panel.classList.add('action-feedback');
+    if (button) {
+      button.dataset.snapLayoutFeedback = id;
+      button.classList.remove('action-feedback');
+      void button.offsetWidth;
+      button.classList.add('action-feedback');
+    }
+  }
+
+  _clearSnapLayoutFeedback() {
+    const panel = this._snapLayoutPalette;
+    if (!panel || !panel.isConnected) return;
+    delete panel.dataset.snapLayoutFeedback;
+    panel.classList.remove('action-feedback');
+    for (const button of panel.querySelectorAll('.wm-snap-layout-choice.action-feedback')) {
+      button.classList.remove('action-feedback');
+      delete button.dataset.snapLayoutFeedback;
+    }
+  }
+
   _makeSnapLayoutPreview(zone) {
     const preview = document.createElement('span');
     preview.className = 'wm-snap-layout-preview';
@@ -12244,6 +12556,7 @@ class SimpleWindowManager {
   _applySnapLayoutChoice(windowId, zone) {
     const rect = this._snapRectForZone(zone);
     if (!windowId || !rect) return;
+    this._markSnapLayoutFeedback(zone);
     const isElectronWindow = this.transport === 'electron-ipc' && this._electronWindows.has(windowId);
     if (isElectronWindow) {
       this._electronMoveWindow(windowId, rect.x, rect.y);
@@ -12255,7 +12568,10 @@ class SimpleWindowManager {
     this._sendWindowCmd('move', { window_id_hint: windowId, ...source, x: rect.x, y: rect.y, snap_zone: zone });
     this._sendWindowCmd('resize', { window_id_hint: windowId, ...source, w: rect.w, h: rect.h, snap_zone: zone });
     this._showSystemHud('Snap layout', zone, 1500);
-    this._toggleSnapLayoutPalette(null, null, false);
+    this._snapLayoutFeedbackTimer = setTimeout(() => {
+      this._toggleSnapLayoutPalette(null, null, false);
+      this._snapLayoutFeedbackTimer = 0;
+    }, 180);
   }
 
   _ensureWindowArrangePalette() {
@@ -12556,6 +12872,11 @@ class SimpleWindowManager {
 
   _hideWindowContextMenu() {
     if (!this._windowContextMenu) return;
+    if (this._windowContextActionFeedbackTimer) {
+      clearTimeout(this._windowContextActionFeedbackTimer);
+      this._windowContextActionFeedbackTimer = 0;
+    }
+    this._clearWindowContextActionFeedback();
     this._windowContextMenu.hidden = true;
     this._windowContextMenuWindowId = '';
   }
@@ -12697,8 +13018,48 @@ class SimpleWindowManager {
     items[next].focus({ preventScroll: true });
   }
 
+  _markWindowContextActionFeedback(action, workspaceId = '') {
+    const menu = this._windowContextMenu;
+    if (!menu || menu.hidden) return;
+    const targetAction = String(action || '');
+    const targetWorkspace = String(workspaceId || '');
+    if (this._windowContextActionFeedbackTimer) clearTimeout(this._windowContextActionFeedbackTimer);
+    const items = Array.from(menu.querySelectorAll('.wm-window-context-item'));
+    const target = items.find((item) => {
+      if (item.dataset.contextAction !== targetAction) return false;
+      if (targetAction !== 'move_workspace') return true;
+      return (item.dataset.contextWorkspaceId || '') === targetWorkspace;
+    });
+    menu.dataset.contextFeedback = targetAction;
+    if (targetWorkspace) menu.dataset.contextFeedbackWorkspace = targetWorkspace;
+    menu.classList.remove('action-feedback');
+    void menu.offsetWidth;
+    menu.classList.add('action-feedback');
+    if (target) {
+      target.dataset.contextFeedback = targetAction;
+      if (targetWorkspace) target.dataset.contextFeedbackWorkspace = targetWorkspace;
+      target.classList.remove('action-feedback');
+      void target.offsetWidth;
+      target.classList.add('action-feedback');
+    }
+  }
+
+  _clearWindowContextActionFeedback() {
+    const menu = this._windowContextMenu;
+    if (!menu || !menu.isConnected) return;
+    delete menu.dataset.contextFeedback;
+    delete menu.dataset.contextFeedbackWorkspace;
+    menu.classList.remove('action-feedback');
+    for (const item of menu.querySelectorAll('.wm-window-context-item.action-feedback')) {
+      item.classList.remove('action-feedback');
+      delete item.dataset.contextFeedback;
+      delete item.dataset.contextFeedbackWorkspace;
+    }
+  }
+
   _activateWindowContextAction(action, windowId, workspaceId = '') {
     if (!action || !windowId) return;
+    this._markWindowContextActionFeedback(action, workspaceId);
     const isElectronWindow = this.transport === 'electron-ipc' && this._electronWindows.has(windowId);
     const source = isElectronWindow ? { source: HOST_NATIVE_EVENT_SOURCE } : {};
     if (action === 'focus') {
@@ -12730,7 +13091,10 @@ class SimpleWindowManager {
       this._sendWindowCmd('window_copy_title', { window_id_hint: windowId, title });
       this._showSystemHud('Copied', title, 1400);
     }
-    this._hideWindowContextMenu();
+    this._windowContextActionFeedbackTimer = setTimeout(() => {
+      this._hideWindowContextMenu();
+      this._windowContextActionFeedbackTimer = 0;
+    }, 160);
   }
 
   // -------------------------------------------------------------------------

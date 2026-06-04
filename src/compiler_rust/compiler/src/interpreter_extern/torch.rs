@@ -9,7 +9,7 @@ use std::sync::OnceLock;
 
 #[cfg(not(feature = "pytorch"))]
 fn torch_runtime_name() -> &'static str {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         "libsimple_runtime.so"
     }

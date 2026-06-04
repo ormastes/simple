@@ -4,8 +4,13 @@ use std.spec.{describe, it, expect}
 use app.wm_compare.backend_measurement_capture.{
     parse_usr_bin_time_measurements,
     host_measurement_record,
+    host_comparison_sample,
+    current_host_backend_comparison_samples,
     current_host_backend_measurement_matrix}
 use app.wm_compare.backend_measurement_report.{
+    backend_comparison_initialized_valid,
+    backend_comparison_samples_sdn,
+    backend_comparison_samples_valid,
     backend_measurement_initialized_valid,
     backend_measurement_matrix_valid,
     backend_measurement_matrix_sdn,
@@ -50,6 +55,37 @@ describe "wm_compare backend measurement capture":
         expect(sdn).to_contain("p50_us: 1000000")
         expect(sdn).to_contain("p95_us: 2000000")
 
+    it "converts host measurements into normalized comparison samples":
+        val output = "sample=1 elapsed_s=1.00 max_rss_kb=100\nsample=2 elapsed_s=2.00 max_rss_kb=200\n"
+        val measurement = parse_usr_bin_time_measurements(
+            "simple test representative comparison",
+            "linux-x86_64",
+            output,
+            1000,
+            1000,
+            "render+readback"
+        )
+        val record = host_measurement_record(
+            "cpu_simd", "cpu_simd", "Initialized",
+            measurement,
+            true,
+            false,
+            "host measurement"
+        )
+        val sample = host_comparison_sample(
+            record,
+            "wm_compare:cpu",
+            "cpu_simd",
+            "simple-web",
+            1200,
+            "sha256:cpu",
+            "nonzero_pixels:16",
+            "host-cpu"
+        )
+        expect(backend_comparison_initialized_valid(sample)).to_equal(true)
+        expect(sample.cold_start_us).to_equal(2000000)
+        expect(sample.warm_start_us).to_equal(1000000)
+
     it "builds a current-host backend matrix with explicit unavailable GPU lanes":
         val output = "sample=1 elapsed_s=37.71 max_rss_kb=929240\nsample=2 elapsed_s=38.58 max_rss_kb=930308\nsample=3 elapsed_s=38.89 max_rss_kb=930160\n"
         val records = current_host_backend_measurement_matrix(
@@ -67,3 +103,29 @@ describe "wm_compare backend measurement capture":
         expect(sdn).to_contain("vulkan_status:")
         expect(sdn).to_contain("cuda_status:")
         expect(sdn).to_contain("cpu_simd_status: \"Initialized\"")
+
+    it "builds normalized current-host comparison samples for GPU and CPU lanes":
+        val output = "sample=1 elapsed_s=37.71 max_rss_kb=929240\nsample=2 elapsed_s=38.58 max_rss_kb=930308\nsample=3 elapsed_s=38.89 max_rss_kb=930160\n"
+        val samples = current_host_backend_comparison_samples(
+            "simple test backend_measurement_report_spec",
+            "linux-x86_64",
+            output,
+            454623792,
+            454623792,
+            455000000,
+            "backend-measurement-spec-startup",
+            "wm_compare:startup",
+            "simple-web",
+            "sha256:startup",
+            "nonzero_pixels:256"
+        )
+        expect(samples.len()).to_equal(6)
+        expect(backend_comparison_samples_valid(samples)).to_equal(true)
+        val sdn = backend_comparison_samples_sdn(samples)
+        expect(sdn).to_contain("backend_family: \"metal\"")
+        expect(sdn).to_contain("backend_family: \"vulkan\"")
+        expect(sdn).to_contain("backend_family: \"cuda\"")
+        expect(sdn).to_contain("backend_family: \"opencl\"")
+        expect(sdn).to_contain("backend_family: \"hip\"")
+        expect(sdn).to_contain("backend_family: \"cpu_simd\"")
+        expect(sdn).to_contain("fixture_id: \"wm_compare:startup\"")

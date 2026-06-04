@@ -1,8 +1,8 @@
 <!-- codex-design -->
 # Accelerated Shared UI Backend Architecture - Detail Design
 
-Date: 2026-06-03
-Status: Candidate design pending requirement selection
+Date: 2026-06-04
+Status: Active detail design for staged implementation
 
 ## Core Data Structures
 
@@ -78,11 +78,44 @@ Status: Candidate design pending requirement selection
 
 ## Implementation Sequence
 
-1. Requirements selection for feature/NFR options.
-2. Shared UI semantic contract update.
-3. OpenCL runtime completion against existing `opencl_session.spl`.
-4. OpenCL compiler artifact design and GPU checker target validation.
-5. Normalized performance harness and report schema.
-6. Backend-by-backend implementation: CPU SIMD, CUDA, OpenCL, Vulkan, Metal,
+1. Freeze the shared semantic UI contract and prove adapter equivalence before
+   adding more host-specific render behavior.
+2. Route pure Simple GUI/web render requests through the shared web render API
+   and require any pixel/capture path to report whether it reached Engine2D.
+3. Add Engine2D backend conformance tests for CPU, Metal, CUDA, OpenCL, Vulkan,
+   and software unavailable states. Hardware absence is a typed result, not a
+   hidden pass.
+4. Complete OpenCL runtime evidence against existing `opencl_session.spl` and
+   keep ICD unavailable, artifact unavailable, build failure, enqueue failure,
+   and readback mismatch as separate states.
+5. Extend compiler artifact metadata and GPU checker target validation now that
+   the Rust CLI can emit CUDA PTX, OpenCL C, and HIP C++ artifacts.
+6. Add normalized performance harness and report schema for startup, package
+   size, frame latency, RSS, artifact build/load/submit/sync/readback, and
+   fallback reason.
+7. Backend-by-backend implementation: CPU SIMD, CUDA, OpenCL, Vulkan, Metal,
    WebGPU, pure Simple shell, Tauri, Electron, NodeJS/browser.
-7. System tests and generated manuals.
+8. System tests, generated manuals, and release verification.
+
+## Current Implementation Evidence
+
+| Area | Evidence | Status |
+|---|---|---|
+| CUDA compiler output | `bin/simple compile --backend=cuda|ptx` routes to PTX | Present |
+| OpenCL compiler output | `test/03_system/compiler/opencl_backend_cli_smoke_spec.spl` | Present |
+| HIP compiler output | `test/03_system/compiler/hip_backend_cli_smoke_spec.spl` | Present |
+| Kernel metadata | Rust parser preserves `kernel` as an attribute | Present |
+| OpenCL/HIP runtime trait | `src/compiler_rust/gpu/src/backend/{rocm,cuda}.rs` | Partial runtime support |
+| Pure Simple HIP backend | `src/compiler/70.backend/backend/hip_backend.spl` reports generic MIR lowering unavailable | Honest contract |
+| Shared UI requirements | `doc/02_requirements/ui/misc/shared_wm_renderer_unification.md` | Selected full convergence path |
+
+## Verification Gates
+
+- `bin/simple check` for new specs before running them.
+- CLI smoke specs for each emitted GPU artifact format.
+- Engine2D conformance spec must assert both capability metadata and rendering
+  or typed unavailable state.
+- Semantic UI parity spec must compare state and command result before pixels.
+- Performance samples must include fixture ID, backend ID, device/host facts,
+  sample count, cold/warm startup, binary size, p50/p95 latency, max RSS, and
+  fallback reason.

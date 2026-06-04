@@ -66,6 +66,7 @@ impl<'a> Parser<'a> {
         // 'me' indicates a mutable method (modifies self)
         // Also accept 'me fn' as equivalent to 'me'
         let mut is_generator = false;
+        let mut is_kernel = false;
         let is_me_method = if self.check(&TokenKind::Me) {
             self.advance();
             // Optionally consume 'fn' after 'me' (me fn is equivalent to me)
@@ -78,6 +79,7 @@ impl<'a> Parser<'a> {
             self.advance();
             false
         } else if self.check(&TokenKind::Kernel) {
+            is_kernel = true;
             self.advance();
             false
         } else {
@@ -225,6 +227,17 @@ impl<'a> Parser<'a> {
         } else {
             vec![]
         };
+
+        let mut attributes = attributes;
+        if is_kernel && !attributes.iter().any(|attr| attr.name == "kernel") {
+            attributes.push(Attribute {
+                span: start_span,
+                name: "kernel".to_string(),
+                value: None,
+                args: None,
+                named_args: None,
+            });
+        }
 
         Ok(Node::Function(FunctionDef {
             span: Span::new(

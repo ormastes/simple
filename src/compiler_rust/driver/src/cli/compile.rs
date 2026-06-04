@@ -84,10 +84,32 @@ pub fn compile_file_to_vhdl(source: &Path, output: Option<PathBuf>) -> i32 {
 
 /// Compile a source file to OpenCL C source output.
 pub fn compile_file_to_opencl(source: &Path, output: Option<PathBuf>) -> i32 {
+    compile_file_to_gpu_source(source, output, "cl", "OpenCL", |pipeline, source, output| {
+        pipeline.compile_file_to_opencl(source, output)
+    })
+}
+
+/// Compile a source file to HIP C++ source output.
+pub fn compile_file_to_hip(source: &Path, output: Option<PathBuf>) -> i32 {
+    compile_file_to_gpu_source(source, output, "hip.cpp", "HIP", |pipeline, source, output| {
+        pipeline.compile_file_to_hip(source, output)
+    })
+}
+
+fn compile_file_to_gpu_source<F>(
+    source: &Path,
+    output: Option<PathBuf>,
+    extension: &str,
+    label: &str,
+    compile: F,
+) -> i32
+where
+    F: FnOnce(&mut simple_compiler::pipeline::CompilerPipeline, &Path, &Path) -> Result<(), simple_compiler::CompileError>,
+{
     use simple_compiler::pipeline::CompilerPipeline;
 
     let watchdog = ExamplesWatchdogGuard::for_path(source);
-    let out_path = output.unwrap_or_else(|| source.with_extension("cl"));
+    let out_path = output.unwrap_or_else(|| source.with_extension(extension));
 
     let mut pipeline = match CompilerPipeline::new() {
         Ok(p) => p,
@@ -97,7 +119,7 @@ pub fn compile_file_to_opencl(source: &Path, output: Option<PathBuf>) -> i32 {
         }
     };
 
-    match pipeline.compile_file_to_opencl(source, &out_path) {
+    match compile(&mut pipeline, source, &out_path) {
         Ok(()) => {
             println!("Compiled {} -> {}", source.display(), out_path.display());
             0
@@ -107,7 +129,7 @@ pub fn compile_file_to_opencl(source: &Path, output: Option<PathBuf>) -> i32 {
             if watchdog.is_active() && is_timeout_error(&message) {
                 eprintln!("error: {}", timeout_error_message(source, watchdog.timeout_secs()));
             } else {
-                eprintln!("error: {}", message);
+                eprintln!("error: {} compilation failed: {}", label, message);
             }
             1
         }

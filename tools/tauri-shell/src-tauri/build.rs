@@ -27,6 +27,7 @@ fn write_mobile_runtime_assets(out_dir: &Path) {
         runtime_include_line("SIMPLE_IOS_RUNTIME_AARCH64", "IOS_RUNTIME_AARCH64"),
         runtime_include_line("SIMPLE_IOS_RUNTIME_AARCH64_SIM", "IOS_RUNTIME_AARCH64_SIM"),
         runtime_include_line("SIMPLE_IOS_RUNTIME_X86_64_SIM", "IOS_RUNTIME_X86_64_SIM"),
+        runtime_include_line("SIMPLE_MOBILE_ENTRY_SOURCE", "MOBILE_ENTRY_SOURCE"),
     ]
     .join("");
 
@@ -34,8 +35,42 @@ fn write_mobile_runtime_assets(out_dir: &Path) {
     fs::write(output_path, generated).expect("failed to write mobile runtime asset map");
 }
 
+fn copy_android_runtime_to_jni_libs(var: &str, abi: &str) {
+    println!("cargo:rerun-if-env-changed={}", var);
+    let Ok(path) = env::var(var) else {
+        return;
+    };
+    if path.trim().is_empty() {
+        return;
+    }
+
+    let runtime_path = PathBuf::from(path.trim());
+    println!("cargo:rerun-if-changed={}", runtime_path.display());
+    let target_dir = PathBuf::from("gen")
+        .join("android")
+        .join("app")
+        .join("src")
+        .join("main")
+        .join("jniLibs")
+        .join(abi);
+    fs::create_dir_all(&target_dir).expect("failed to create Android jniLibs runtime dir");
+    fs::copy(
+        &runtime_path,
+        target_dir.join("libsimple_mobile_runtime_exec.so"),
+    )
+    .expect("failed to copy Android Simple runtime into jniLibs");
+}
+
+fn copy_android_runtimes_to_jni_libs() {
+    copy_android_runtime_to_jni_libs("SIMPLE_ANDROID_RUNTIME_AARCH64", "arm64-v8a");
+    copy_android_runtime_to_jni_libs("SIMPLE_ANDROID_RUNTIME_X86_64", "x86_64");
+    copy_android_runtime_to_jni_libs("SIMPLE_ANDROID_RUNTIME_ARMV7", "armeabi-v7a");
+    copy_android_runtime_to_jni_libs("SIMPLE_ANDROID_RUNTIME_I686", "x86");
+}
+
 fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR missing"));
     write_mobile_runtime_assets(&out_dir);
+    copy_android_runtimes_to_jni_libs();
     tauri_build::build();
 }

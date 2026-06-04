@@ -132,7 +132,7 @@ mod unix_impl {
                 // TIOCSCTTY is available on Linux, macOS, and BSDs via libc.
                 #[cfg(not(target_os = "windows"))]
                 {
-                    libc::ioctl(slave_fd, libc::TIOCSCTTY as libc::c_ulong, 0 as libc::c_int);
+                    libc::ioctl(slave_fd, libc::TIOCSCTTY as _, 0 as libc::c_int);
                 }
 
                 // Wire stdio.

@@ -165,6 +165,14 @@ fn js_escape(text: &str) -> String {
         .replace("${", "\\${")
 }
 
+fn html_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
 fn shell_input_message(event_type: &str, key: &str, value: &str, x: f64, y: f64) -> ShellMessage {
     shell_input_message_for("main", event_type, "", key, value, x, y, 0.0, 0.0, "")
 }
@@ -251,6 +259,14 @@ fn show_error(app: &AppHandle, title: &str, detail: &str) {
 
 fn mdi_shell_html() -> &'static str {
     r#"<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Simple Window Manager</title></head><body style="margin:0;background:#0b0d10;color:#e5e7eb"><div id="app"></div><div id="wm-desktop"></div></body></html>"#
+}
+
+fn startup_error_shell_html(message: &str) -> String {
+    let escaped = html_escape(message);
+    format!(
+        r#"<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Simple Window Manager Startup Error</title><style>body{{margin:0;min-height:100vh;background:#0b0d10;color:#e5e7eb;font:15px system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;display:flex;align-items:flex-start;justify-content:center;padding:32px 16px;box-sizing:border-box}}main{{width:min(760px,100%);border:1px solid rgba(255,180,171,.42);background:#210c12;border-radius:8px;padding:20px;box-sizing:border-box}}h1{{font-size:20px;line-height:1.25;margin:0 0 12px;color:#fff0ee}}p{{margin:0 0 14px;color:#ffdad6}}pre{{white-space:pre-wrap;overflow-wrap:anywhere;margin:0;color:#ffd7d2;font:13px ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace;line-height:1.45}}</style></head><body><main id="tauri-startup-error-shell"><h1>Simple Window Manager startup error</h1><p>The Tauri shell launched, but live MDI cannot start on this mobile package.</p><pre>{}</pre></main></body></html>"#,
+        escaped
+    )
 }
 
 fn tauri_mdi_init_script() -> &'static str {
@@ -496,13 +512,29 @@ fn eval_tauri_mdi_message(app: &AppHandle, msg_json: String) {
             msg_json
         );
         let _ = win.eval(&js);
+        if cfg!(mobile) {
+            let handle = app.clone();
+            let delayed_msg = msg_json;
+            thread::spawn(move || {
+                thread::sleep(std::time::Duration::from_millis(1800));
+                if let Some(win) = handle.get_webview_window("main") {
+                    let js = format!(
+                        "{}\nwindow.__SIMPLE_TAURI_WM__.receiveMessage({});",
+                        tauri_mdi_init_script(),
+                        delayed_msg
+                    );
+                    let _ = win.eval(&js);
+                }
+            });
+        }
     }
 }
 
 fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
-    let Ok(path) = env::var("SIMPLE_TAURI_MDI_PROOF_PATH") else {
+    let proof_requested = env::var("SIMPLE_TAURI_MDI_PROOF_PATH").is_ok() || cfg!(mobile);
+    if !proof_requested {
         return;
-    };
+    }
     let count = MDI_OPEN_WINDOW_COUNT.load(Ordering::SeqCst);
     if count < 4 {
         return;
@@ -574,6 +606,15 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
             })();
         "#;
         let _ = win.eval(js);
+        if cfg!(mobile) {
+            let handle = app.clone();
+            thread::spawn(move || {
+                thread::sleep(std::time::Duration::from_millis(2600));
+                if let Some(win) = handle.get_webview_window("main") {
+                    let _ = win.eval(js);
+                }
+            });
+        }
     } else {
         let proof = MdiProof {
             count,
@@ -587,8 +628,15 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
             body_input_routed: false,
             html_renderable: false,
         };
-        let _ = fs::write(path, serde_json::to_string(&proof).unwrap_or_default());
-        app.exit(0);
+        if let Ok(path) = env::var("SIMPLE_TAURI_MDI_PROOF_PATH") {
+            let _ = fs::write(path, serde_json::to_string(&proof).unwrap_or_default());
+            app.exit(0);
+        } else {
+            eprintln!(
+                "[tauri-shell] mdi proof: {}",
+                serde_json::to_string(&proof).unwrap_or_default()
+            );
+        }
     }
 }
 
@@ -639,7 +687,12 @@ fn read_subprocess_stdout(
 
         match serde_json::from_str::<SubprocessMessage>(trimmed) {
             Ok(msg) => {
-                if matches!(msg, SubprocessMessage::Render { .. }) {
+                if matches!(
+                    msg,
+                    SubprocessMessage::Render { .. }
+                        | SubprocessMessage::OpenWindow { .. }
+                        | SubprocessMessage::RenderWindow { .. }
+                ) {
                     render_seen = true;
                 }
                 handle_subprocess_message(msg, &app);
@@ -957,10 +1010,12 @@ fn send_resize(width: u32, height: u32, state: tauri::State<'_, Arc<SimpleProces
 
 #[tauri::command]
 fn report_mdi_proof(proof: MdiProof, app: AppHandle) {
+    let proof_json = serde_json::to_string(&proof).unwrap_or_default();
+    eprintln!("[tauri-shell] mdi proof: {}", proof_json);
     if let Ok(path) = env::var("SIMPLE_TAURI_MDI_PROOF_PATH") {
-        let _ = fs::write(path, serde_json::to_string(&proof).unwrap_or_default());
+        let _ = fs::write(path, proof_json);
+        app.exit(0);
     }
-    app.exit(0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1084,7 +1139,73 @@ fn mark_executable(_path: &PathBuf) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "android")]
+fn packaged_android_runtime_path() -> Option<String> {
+    let abi = match std::env::consts::ARCH {
+        "aarch64" => "arm64-v8a",
+        "arm" => "armeabi-v7a",
+        "x86" => "x86",
+        "x86_64" => "x86_64",
+        _ => return None,
+    };
+    let filename = "libsimple_mobile_runtime_exec.so";
+    if let Ok(paths) = env::var("LD_LIBRARY_PATH") {
+        for path in paths.split(':').filter(|path| !path.trim().is_empty()) {
+            let candidate = PathBuf::from(path).join(filename);
+            if candidate.exists() {
+                return Some(candidate.to_string_lossy().into_owned());
+            }
+        }
+    }
+    if let Ok(maps) = fs::read_to_string("/proc/self/maps") {
+        for line in maps.lines() {
+            let Some(path) = line.split_whitespace().last() else {
+                continue;
+            };
+            if !path.ends_with("libsimple_tauri_shell_lib.so") {
+                continue;
+            }
+            let candidate = PathBuf::from(path)
+                .parent()
+                .map(|dir| dir.join(filename));
+            if let Some(candidate) = candidate {
+                if candidate.exists() {
+                    return Some(candidate.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    let roots = fs::read_dir("/data/app").ok()?;
+    for root in roots.flatten() {
+        let root_path = root.path();
+        let app_dirs: Vec<PathBuf> = match fs::read_dir(&root_path) {
+            Ok(entries) => entries.flatten().map(|entry| entry.path()).collect(),
+            Err(_) => vec![root_path],
+        };
+        for app_dir in app_dirs {
+            let name = app_dir.file_name().and_then(|name| name.to_str()).unwrap_or("");
+            if !name.starts_with("com.simple.ui") {
+                continue;
+            }
+            let candidate = app_dir.join("lib").join(abi).join(filename);
+            if candidate.exists() {
+                return Some(candidate.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "android"))]
+fn packaged_android_runtime_path() -> Option<String> {
+    None
+}
+
 fn prepare_bundled_mobile_runtime() -> Result<Option<String>, String> {
+    if let Some(path) = packaged_android_runtime_path() {
+        return Ok(Some(path));
+    }
+
     let Some(asset) = bundled_mobile_runtime_asset() else {
         return Ok(None);
     };
@@ -1106,6 +1227,29 @@ fn prepare_bundled_mobile_runtime() -> Result<Option<String>, String> {
     }
 
     Ok(Some(runtime_path.to_string_lossy().into_owned()))
+}
+
+fn prepare_bundled_mobile_entry() -> Result<Option<String>, String> {
+    let Some(bytes) = MOBILE_ENTRY_SOURCE else {
+        return Ok(None);
+    };
+
+    let mut entry_dir = env::temp_dir();
+    entry_dir.push("simple-tauri-shell");
+    fs::create_dir_all(&entry_dir)
+        .map_err(|e| format!("failed to create mobile entry dir: {}", e))?;
+
+    let entry_path = entry_dir.join("simple-mobile-mdi-smoke.spl");
+    let should_write = match fs::metadata(&entry_path) {
+        Ok(meta) => meta.len() != bytes.len() as u64,
+        Err(_) => true,
+    };
+    if should_write {
+        fs::write(&entry_path, bytes)
+            .map_err(|e| format!("failed to extract bundled mobile entry: {}", e))?;
+    }
+
+    Ok(Some(entry_path.to_string_lossy().into_owned()))
 }
 
 fn resolve_entry_file() -> Option<String> {
@@ -1170,6 +1314,18 @@ fn html_data_url(html: &str) -> String {
     format!("data:text/html;charset=utf-8,{}", urlencoding::encode(html))
 }
 
+fn inline_shell_document_script(html: &str) -> String {
+    format!(
+        r#"(function() {{
+            var parsed = new DOMParser().parseFromString(`{}`, 'text/html');
+            if (parsed.title) document.title = parsed.title;
+            if (parsed.head) document.head.innerHTML = parsed.head.innerHTML;
+            if (parsed.body) document.body.innerHTML = parsed.body.innerHTML;
+        }})();"#,
+        js_escape(html)
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Shared entry point for desktop and mobile
 // ---------------------------------------------------------------------------
@@ -1199,7 +1355,19 @@ pub fn run() {
                 }
             },
         };
-    let entry_file = resolve_entry_file();
+    let mut entry_file = resolve_entry_file();
+    if entry_file.is_none() {
+        match prepare_bundled_mobile_entry() {
+            Ok(path) => entry_file = path,
+            Err(err) => {
+                eprintln!("[tauri-shell] bundled mobile entry extraction failed: {}", err);
+                startup_error = Some(format!(
+                    "Bundled mobile entry extraction failed.\n\n{}",
+                    err
+                ));
+            }
+        }
+    }
 
     eprintln!("[tauri-shell] binary: {:?}", simple_bin);
     eprintln!("[tauri-shell] entry: {:?}", entry_file);
@@ -1212,6 +1380,8 @@ pub fn run() {
     let mut child_stdin = None;
     let mut child_slot = None;
     let mut initial_url: Option<String> = None;
+    let mut initial_inline_html: Option<String> = None;
+    let mut startup_error_page_rendered = false;
 
     // In URL mode, skip subprocess spawning entirely. Shared-WM mode must still
     // spawn the Simple process; otherwise the user only sees a static Rust
@@ -1224,7 +1394,11 @@ pub fn run() {
 
         if let Some(simple_bin) = simple_bin.as_ref() {
             if ui_entry || shared_wm_requested {
-                initial_url = Some(html_data_url(mdi_shell_html()));
+                if cfg!(mobile) {
+                    initial_inline_html = Some(mdi_shell_html().to_string());
+                } else {
+                    initial_url = Some(html_data_url(mdi_shell_html()));
+                }
             }
             {
                 let mut cmd = Command::new(simple_bin);
@@ -1237,7 +1411,11 @@ pub fn run() {
                     .map(|entry| !entry.ends_with(".ui.sdn"))
                     .unwrap_or(false)
                 {
-                    initial_url = Some(html_data_url(mdi_shell_html()));
+                    if cfg!(mobile) {
+                        initial_inline_html = Some(mdi_shell_html().to_string());
+                    } else {
+                        initial_url = Some(html_data_url(mdi_shell_html()));
+                    }
                 }
                 cmd.stdin(Stdio::piped())
                     .stdout(Stdio::piped())
@@ -1284,6 +1462,18 @@ pub fn run() {
         }
     }
 
+    if initial_url.is_none() && initial_inline_html.is_none() {
+        if let Some(message) = startup_error.as_ref() {
+            let html = startup_error_shell_html(message);
+            if cfg!(mobile) {
+                initial_inline_html = Some(html);
+            } else {
+                initial_url = Some(html_data_url(&html));
+            }
+            startup_error_page_rendered = true;
+        }
+    }
+
     let process = Arc::new(SimpleProcess {
         stdin: Arc::new(Mutex::new(child_stdin)),
         child: Mutex::new(child_slot),
@@ -1315,6 +1505,13 @@ pub fn run() {
             } else if let Some(ref initial_url) = initial_url {
                 eprintln!("[tauri-shell] creating window from initial data URL");
                 WebviewUrl::External(initial_url.parse().expect("invalid initial data URL"))
+            } else if initial_inline_html.is_some() {
+                eprintln!("[tauri-shell] creating window from mobile inline shell placeholder");
+                WebviewUrl::External(
+                    "http://tauri.localhost/inline-shell.html"
+                        .parse()
+                        .expect("invalid mobile inline placeholder URL"),
+                )
             } else {
                 eprintln!("[tauri-shell] creating window from app://index.html");
                 WebviewUrl::App("index.html".into())
@@ -1326,18 +1523,40 @@ pub fn run() {
                 .title("Simple Window Manager")
                 .inner_size(1280.0, 720.0);
             let _win = builder.build()?;
+            if let Some(ref html) = initial_inline_html {
+                let js = inline_shell_document_script(html);
+                match _win.eval(&js) {
+                    Ok(_) => eprintln!("[tauri-shell] inline shell eval OK"),
+                    Err(e) => eprintln!("[tauri-shell] inline shell eval FAIL: {}", e),
+                }
+                let delayed_handle = app.handle().clone();
+                let delayed_html = html.clone();
+                thread::spawn(move || {
+                    thread::sleep(std::time::Duration::from_millis(1200));
+                    if let Some(win) = delayed_handle.get_webview_window("main") {
+                        let js = inline_shell_document_script(&delayed_html);
+                        match win.eval(&js) {
+                            Ok(_) => eprintln!("[tauri-shell] delayed inline shell eval OK"),
+                            Err(e) => eprintln!("[tauri-shell] delayed inline shell eval FAIL: {}", e),
+                        }
+                    }
+                });
+            }
 
             eprintln!("[tauri-shell] window created");
 
             let stderr_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
             let suppress_status_updates = shared_wm_requested;
+            let suppress_startup_error_dialog = startup_error_page_rendered;
 
             if let Some(message) = startup_error.clone() {
-                let handle = app.handle().clone();
-                thread::spawn(move || {
-                    thread::sleep(std::time::Duration::from_millis(500));
-                    show_error(&handle, "Startup Error", &message);
-                });
+                if !suppress_startup_error_dialog {
+                    let handle = app.handle().clone();
+                    thread::spawn(move || {
+                        thread::sleep(std::time::Duration::from_millis(500));
+                        show_error(&handle, "Startup Error", &message);
+                    });
+                }
             } else {
                 if let Some(stdout) = child_stdout {
                     let handle = app.handle().clone();
@@ -1425,9 +1644,10 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        mdi_shell_html, render_envelope_metadata_js, resolve_simple_binary_from,
-        shell_input_message, shell_input_message_for, simple_subprocess_args_for,
-        tauri_mdi_init_script, ShellMessage, SubprocessMessage,
+        inline_shell_document_script, mdi_shell_html, render_envelope_metadata_js,
+        resolve_simple_binary_from, shell_input_message, shell_input_message_for,
+        simple_subprocess_args_for, startup_error_shell_html, tauri_mdi_init_script, ShellMessage,
+        SubprocessMessage,
     };
     use crate::{
         ANDROID_RUNTIME_AARCH64, ANDROID_RUNTIME_X86_64, IOS_RUNTIME_AARCH64,
@@ -1456,6 +1676,26 @@ mod tests {
             resolve_simple_binary_from(&args, Some("/data/local/tmp/simple".to_string()), true),
             Some("/data/local/tmp/simple".to_string())
         );
+    }
+
+    #[test]
+    fn startup_error_shell_renders_mobile_runtime_failure() {
+        let html = startup_error_shell_html(
+            "Mobile shell started without a bundled Simple runtime.\n<runtime missing>",
+        );
+        assert!(html.contains("tauri-startup-error-shell"));
+        assert!(html.contains("live MDI cannot start on this mobile package"));
+        assert!(html.contains("Mobile shell started without a bundled Simple runtime."));
+        assert!(html.contains("&lt;runtime missing&gt;"));
+        assert!(!html.contains("<runtime missing>"));
+    }
+
+    #[test]
+    fn inline_shell_document_script_escapes_template_input() {
+        let js = inline_shell_document_script("<main>${value}`ok</main>");
+        assert!(js.contains("new DOMParser().parseFromString(`"));
+        assert!(js.contains("document.body.innerHTML = parsed.body.innerHTML"));
+        assert!(js.contains("\\${value}\\`ok"));
     }
 
     #[test]

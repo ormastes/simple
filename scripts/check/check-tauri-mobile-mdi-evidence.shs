@@ -1,0 +1,116 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
+BUILD_DIR="$ROOT_DIR/build/tauri_android_mdi"
+SIMPLE_BIN="${SIMPLE_BIN:-$ROOT_DIR/src/compiler_rust/target/release/simple}"
+SMOKE_SOURCE="$ROOT_DIR/examples/06_io/ui/tauri_mobile_mdi_smoke.spl"
+ANDROID_RUNTIME="$ROOT_DIR/src/compiler_rust/target/x86_64-linux-android/release/simple"
+ANDROID_APK="$ROOT_DIR/tools/tauri-shell/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk"
+ANDROID_SCREENSHOT="${ANDROID_SCREENSHOT:-$BUILD_DIR/android_emulator_screenshot_live_mdi_final.png}"
+ANDROID_LOGCAT="${ANDROID_LOGCAT:-$BUILD_DIR/emulator_logcat_live_mdi_final.txt}"
+
+mkdir -p "$BUILD_DIR"
+
+fail() {
+    echo "status=fail"
+    echo "reason=$1"
+    exit 1
+}
+
+pass_line() {
+    echo "$1=pass"
+}
+
+test -x "$SIMPLE_BIN" || fail "host Simple runtime missing: $SIMPLE_BIN"
+test -f "$SMOKE_SOURCE" || fail "mobile MDI smoke source missing: $SMOKE_SOURCE"
+
+"$SIMPLE_BIN" check "$SMOKE_SOURCE" > "$BUILD_DIR/mobile_mdi_smoke_check.log" 2>&1 \
+    || fail "mobile MDI smoke source check failed"
+pass_line "smoke_source_check"
+
+"$SIMPLE_BIN" run "$SMOKE_SOURCE" --mode=interpreter --clean \
+    > "$BUILD_DIR/mobile_mdi_smoke_run.out" 2> "$BUILD_DIR/mobile_mdi_smoke_run.err" \
+    || fail "mobile MDI smoke source run failed"
+
+open_count="$(grep -c '"type":"openWindow"' "$BUILD_DIR/mobile_mdi_smoke_run.out" || true)"
+if [ "$open_count" -lt 4 ]; then
+    fail "mobile MDI smoke emitted $open_count openWindow messages, expected at least 4"
+fi
+grep -q 'simple-picture' "$BUILD_DIR/mobile_mdi_smoke_run.out" \
+    || fail "mobile MDI smoke output missing taskbar/icon image marker"
+pass_line "smoke_source_ipc"
+
+test -x "$ANDROID_RUNTIME" || fail "Android x86_64 Simple runtime missing: $ANDROID_RUNTIME"
+pass_line "android_runtime_artifact"
+
+test -f "$ANDROID_APK" || fail "Android APK missing: $ANDROID_APK"
+unzip -l "$ANDROID_APK" | grep -q 'lib/x86_64/libsimple_mobile_runtime_exec.so' \
+    || fail "Android APK missing packaged native Simple runtime"
+pass_line "android_apk_runtime_packaging"
+
+test -s "$ANDROID_SCREENSHOT" || fail "Android live MDI screenshot missing: $ANDROID_SCREENSHOT"
+test -s "$ANDROID_LOGCAT" || fail "Android live MDI logcat missing: $ANDROID_LOGCAT"
+
+python3 - "$ANDROID_LOGCAT" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+log = Path(sys.argv[1]).read_text(errors="ignore")
+for forbidden in ["F DEBUG", "panicked", "InvalidUri", "Cannot redefine", "parse error", "Permission denied"]:
+    if forbidden in log:
+        raise SystemExit(f"forbidden log marker present: {forbidden}")
+
+required = [
+    "libsimple_mobile_runtime_exec.so",
+    "subprocess pid=",
+    "openWindow id=terminal",
+    "openWindow id=files",
+    "openWindow id=tasks",
+    "openWindow id=settings",
+]
+for marker in required:
+    if marker not in log:
+        raise SystemExit(f"required log marker missing: {marker}")
+
+matches = re.findall(r"\[tauri-shell\] mdi proof: (\{.*?\})", log)
+if not matches:
+    raise SystemExit("MDI proof JSON missing")
+proof = json.loads(matches[-1])
+checks = {
+    "count": proof.get("count", 0) >= 4,
+    "hasDesktop": proof.get("hasDesktop") is True,
+    "imageCount": proof.get("imageCount", 0) >= 1,
+    "hasDragRuntime": proof.get("hasDragRuntime") is True,
+    "hasDragEvents": proof.get("hasDragEvents") is True,
+    "dragMoved": proof.get("dragMoved") is True,
+    "hasWindowEventRuntime": proof.get("hasWindowEventRuntime") is True,
+    "bodyClickRouted": proof.get("bodyClickRouted") is True,
+    "bodyInputRouted": proof.get("bodyInputRouted") is True,
+    "htmlRenderable": proof.get("htmlRenderable") is True,
+}
+failed = [name for name, ok in checks.items() if not ok]
+if failed:
+    raise SystemExit("MDI proof failed fields: " + ", ".join(failed))
+print("android_logcat_proof=pass")
+PY
+
+echo "android_screenshot=$ANDROID_SCREENSHOT"
+echo "android_logcat=$ANDROID_LOGCAT"
+
+if [ "$(uname -s)" = "Darwin" ] && command -v xcrun >/dev/null 2>&1 && command -v xcodebuild >/dev/null 2>&1; then
+    echo "ios_tooling=available"
+else
+    echo "ios_tooling=unavailable"
+    echo "ios_reason=xcrun/xcodebuild require macOS with Xcode; current host $(uname -s)"
+fi
+
+doc_spec_count="$(find "$ROOT_DIR/doc/06_spec" -name '*_spec.spl' | wc -l | tr -d ' ')"
+echo "doc06_spec_spl_count=$doc_spec_count"
+if [ "$doc_spec_count" != "0" ]; then
+    fail "doc/06_spec contains executable .spl specs"
+fi
+
+echo "status=pass"

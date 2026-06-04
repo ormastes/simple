@@ -1,8 +1,8 @@
 # Host measurement capture helpers for wm_compare backend evidence.
 
-use app.wm_compare.backend_measurement_report.{BackendMeasurementRecord}
-use app.wm_compare.backend_measurement_report.{backend_measurement_from_probe}
-use std.gpu.engine2d.backend_probe.{StrictBackendFactory}
+use app.wm_compare.backend_measurement_report.{BackendComparisonSample, BackendMeasurementRecord}
+use app.wm_compare.backend_measurement_report.{backend_comparison_from_measurement, backend_measurement_from_probe}
+use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus, StrictBackendFactory}
 
 pub struct HostCommandMeasurement:
     command: text
@@ -121,6 +121,81 @@ pub fn host_measurement_record(requested_backend: text, selected_backend: text,
         unavailable_reason: unavailable_reason
     )
 
+fn _empty_measurement(command: text, host: text) -> HostCommandMeasurement:
+    HostCommandMeasurement(
+        command: command,
+        host: host,
+        sample_count: 0,
+        p50_us: 0,
+        p95_us: 0,
+        max_rss_kb: 0,
+        binary_size_bytes: 0,
+        baseline_binary_size_bytes: 0,
+        render_readback_scope: ""
+    )
+
+fn _gpu_probe_measurement_record(probe: BackendProbeResult, command: text, host: text) -> BackendMeasurementRecord:
+    if probe.status == BackendStatus.Initialized:
+        return host_measurement_record(
+            probe.requested_name,
+            probe.selected_name,
+            "Failed",
+            _empty_measurement(command, host),
+            false,
+            false,
+            "backend-specific measurement missing"
+        )
+    backend_measurement_from_probe(
+        probe,
+        command,
+        host,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        "",
+        false
+    )
+
+pub fn host_comparison_sample(record: BackendMeasurementRecord,
+                              fixture_id: text,
+                              backend_family: text,
+                              shell: text,
+                              package_size_bytes: i64,
+                              checksum: text,
+                              pixel_proof: text,
+                              device_id: text) -> BackendComparisonSample:
+    backend_comparison_from_measurement(
+        record,
+        fixture_id,
+        backend_family,
+        shell,
+        record.p95_us,
+        record.p50_us,
+        package_size_bytes,
+        record.p95_us,
+        0,
+        0,
+        0,
+        0,
+        0,
+        checksum,
+        pixel_proof,
+        device_id
+    )
+
+fn _gpu_probe_comparison_sample(probe: BackendProbeResult,
+                                family: text,
+                                command: text,
+                                host: text,
+                                fixture_id: text,
+                                shell: text) -> BackendComparisonSample:
+    val record = _gpu_probe_measurement_record(probe, command, host)
+    host_comparison_sample(record, fixture_id, family, shell, 0, "", "", "")
+
 pub fn current_host_backend_measurement_matrix(command: text, host: text,
                                                time_output: text,
                                                binary_size_bytes: i64,
@@ -149,3 +224,50 @@ pub fn current_host_backend_measurement_matrix(command: text, host: text,
         measurement, true, false, "host measurement"
     )
     [metal, vulkan, cuda, cpu_simd]
+
+pub fn current_host_backend_comparison_samples(command: text, host: text,
+                                               time_output: text,
+                                               binary_size_bytes: i64,
+                                               baseline_binary_size_bytes: i64,
+                                               package_size_bytes: i64,
+                                               render_readback_scope: text,
+                                               fixture_id: text,
+                                               shell: text,
+                                               checksum: text,
+                                               pixel_proof: text) -> [BackendComparisonSample]:
+    val measurement = parse_usr_bin_time_measurements(
+        command, host, time_output,
+        binary_size_bytes, baseline_binary_size_bytes,
+        render_readback_scope
+    )
+    val factory = StrictBackendFactory.strict()
+    val metal = _gpu_probe_comparison_sample(
+        factory.create_backend("metal"), "metal", command, host, fixture_id, shell
+    )
+    val vulkan = _gpu_probe_comparison_sample(
+        factory.create_backend("vulkan"), "vulkan", command, host, fixture_id, shell
+    )
+    val cuda = _gpu_probe_comparison_sample(
+        factory.create_backend("cuda"), "cuda", command, host, fixture_id, shell
+    )
+    val opencl = _gpu_probe_comparison_sample(
+        factory.create_backend("opencl"), "opencl", command, host, fixture_id, shell
+    )
+    val rocm = _gpu_probe_comparison_sample(
+        factory.create_backend("rocm"), "hip", command, host, fixture_id, shell
+    )
+    val cpu_record = host_measurement_record(
+        "cpu_simd", "cpu_simd", "Initialized",
+        measurement, true, false, "host measurement"
+    )
+    val cpu_simd = host_comparison_sample(
+        cpu_record,
+        fixture_id,
+        "cpu_simd",
+        shell,
+        package_size_bytes,
+        checksum,
+        pixel_proof,
+        "host-cpu"
+    )
+    [metal, vulkan, cuda, opencl, rocm, cpu_simd]

@@ -1,8 +1,8 @@
 <!-- codex-design -->
 # Accelerated Shared UI Backend Architecture
 
-Date: 2026-06-03
-Status: Candidate architecture pending requirement selection
+Date: 2026-06-04
+Status: Active rollout architecture for full shared UI and GPU backend convergence
 
 ## Layer Stack
 
@@ -31,8 +31,20 @@ Application UI model
 
 ## OpenCL Like CUDA Support
 
-CUDA remains the NVPTX/PTX target in `src/compiler_rust/compiler/src/codegen/llvm/gpu.rs`.
-OpenCL should be added as a sibling target, not as a CUDA branch:
+CUDA remains the NVPTX/PTX output path for `--backend=cuda|ptx`. OpenCL and
+HIP now have sibling source-emission paths in
+`src/compiler_rust/compiler/src/pipeline/codegen.rs` rather than being CUDA
+branches. The current compiler evidence is:
+
+- `--backend=cuda|ptx` emits PTX.
+- `--backend=opencl|opencl-c|opencl-spirv|cl` emits OpenCL C source.
+- `--backend=hip|rocm|hip-cpp|hipcc` emits HIP C++ source.
+- `kernel` syntax is preserved as backend-visible function metadata.
+- Smoke specs cover OpenCL and HIP CLI artifact emission under
+  `test/03_system/compiler/`.
+
+Remaining OpenCL/CUDA/HIP convergence work must be added as shared backend
+contracts, not as backend-specific UI shortcuts:
 
 1. Extend the GPU target model with `OpenCL(id)` and `Auto([CUDA, OpenCL, ...])`.
 2. Extend `gpu_checker.spl` with target capability checks for address spaces,
@@ -91,3 +103,16 @@ formats, but release evidence must include the normalized schema.
 - Hot request handlers may not perform full-tree scans, repeated file rereads,
   subprocess retries, or driver probing. Capability probes run at startup or
   explicit reindex/probe time and are cached with invalidation metadata.
+
+## Active Rollout Boundary
+
+This architecture is not complete until every layer has direct evidence:
+
+| Layer | Current accepted proof | Missing proof |
+|---|---|---|
+| Semantic UI | Shared contract files and adapter tests | Cross-surface TUI/Web/Electron/Tauri/headless command equivalence |
+| Web render API | Web/Electron/Tauri adapter references | Pure Simple web renderer pixel path through Engine2D |
+| Engine2D | CPU/Metal/CUDA/OpenCL contract files and existing specs | One conformance spec proving typed unavailable states plus successful CPU path |
+| Compiler offload | CUDA PTX, OpenCL C, HIP C++ CLI smoke specs | Shared target metadata, subset diagnostics, runtime dispatch evidence |
+| Runtime GPU | CUDA/HIP runtime trait support, OpenCL contracts | OpenCL ICD load/build/enqueue/readback evidence |
+| Perf evidence | Existing startup/size/perf scripts | Normalized report schema across UI shells and GPU backends |
