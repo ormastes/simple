@@ -1305,6 +1305,9 @@ fn collect_feature_tracking_db_diagnostics(path: &Path, source: &str) -> Vec<Dia
             "system_spec",
             "spec_doc",
             "implementation",
+            "unit_tests",
+            "integration_tests",
+            "guide",
         ];
         let missing: Vec<&str> = required
             .iter()
@@ -1326,7 +1329,7 @@ fn collect_feature_tracking_db_diagnostics(path: &Path, source: &str) -> Vec<Dia
             .with_code("TRK001".to_string())
             .with_file(path.display().to_string())
             .with_label(line_span(source, line_idx), "done feature row")
-            .with_help("Populate requirement, research, plan, architecture, design, system_spec, spec_doc, and implementation before status=done"),
+            .with_help("Populate requirement, research, plan, architecture, design, system_spec, spec_doc, implementation, unit_tests, integration_tests, and guide before status=done"),
         );
     }
     diagnostics

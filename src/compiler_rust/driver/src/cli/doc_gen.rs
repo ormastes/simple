@@ -397,6 +397,9 @@ fn count_done_traceability_issues(path: &str) -> usize {
         "system_spec",
         "spec_doc",
         "implementation",
+        "unit_tests",
+        "integration_tests",
+        "guide",
     ];
     let mut issues = 0usize;
     for row in rows {
