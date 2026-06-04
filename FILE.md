@@ -58,6 +58,7 @@ FILE.md files) are allowed.
 | `scripts/FILE.md` | `scripts/` directory |
 | `test/FILE.md` | `test/` directory |
 | `bin/FILE.md` | `bin/` directory |
+| `examples/FILE.md` | `examples/` directory |
 
 ## src/
 

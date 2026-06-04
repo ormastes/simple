@@ -37,8 +37,8 @@
 
 - `sh scripts/setup/install-spipe-dev-command.shs --check`: PASS.
 - `sh scripts/check/check-simpleos-arm64-wm-qemu-readiness.shs`: ready; QEMU aarch64 present; `virt` machine present; `ramfb` device present; dry-run parse true.
-- `bash -n bin/simple && bash -n scripts/macos-gui-run.shs`: PASS.
-- `SIMPLE_TIMEOUT_SECONDS=30 scripts/macos-gui-run.shs examples/simple_os/hosted/gui_test.spl`: rejected as release evidence. It only proves macOS `.app` registration and event delivery for a smoke surface; it is not a real shared WM, does not render Simple Web MDI content, and must not be used as the manual-inspection path.
+- `bash -n bin/simple && bash -n scripts/gui/macos-gui-run.shs`: PASS.
+- `SIMPLE_TIMEOUT_SECONDS=30 scripts/gui/macos-gui-run.shs examples/simple_os/hosted/gui_test.spl`: rejected as release evidence. It only proves macOS `.app` registration and event delivery for a smoke surface; it is not a real shared WM, does not render Simple Web MDI content, and must not be used as the manual-inspection path.
 - `bin/simple test test/05_perf/graphics_2d/metal_smoke_spec.spl --mode=interpreter`: PASS, 12 tests.
 - `bin/simple test test/02_integration/rendering/perf_smoke_spec.spl --mode=interpreter`: PASS, 16 tests.
 - `sh scripts/check/check-metal-generated-2d-readback.shs`: unavailable, reason `missing-metal-submit-readback-harness`; report `doc/09_report/metal_generated_2d_readback_2026-06-01.md`.
