@@ -5199,6 +5199,27 @@ Test checklist:
 - `git diff --check`
 - `find doc/06_spec -name '*_spec.spl' | wc -l`
 
+Result:
+
+BrowserSession scripts already compare compileStreaming and instantiateStreaming
+missing-import rejection paths in the same queued browser script. The executable
+scenario verifies the initial `queued` return, an empty shared `out` before
+network commits, the first pending fetch for `https://example.com/compile.wasm`,
+and the compileStreaming instantiate rejection
+`compileStreamMissingImports:invalid:unsupported-wasm-imports` after committing
+the imported-function module response. It then verifies the second pending fetch
+for `https://example.com/instantiate.wasm` and the deterministic final output
+`compileStreamMissingImports:invalid:unsupported-wasm-imports:instantiateStreamMissingImports:invalid:unsupported-wasm-imports`
+after committing the same `application/wasm` response through
+instantiateStreaming. Current manual evidence records this scenario under
+"compares compileStreaming and instantiateStreaming missing import rejections in
+browser scripts", and the generated manual now records `Total scenarios | 229 |`.
+Fresh verification for this plan-evidence closure kept the focused fetch/WASM
+chain spec at `229/229`, native WASM host at `107/107`, WebGPU JS/WASM at
+`106/106`, Node API conformance at `275/275`, and `src/lib` at the current
+`405 warning(s)` across `5936` files. Diff hygiene and the executable-spec
+layout guard also passed. Broader browser/WASM semantics remain open.
+
 BrowserSession Uint8Array constructor nonzero-offset copy continuation:
 
 Detailed completion checklist:
