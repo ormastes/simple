@@ -60,7 +60,7 @@ Verifies the first modern Simple Web WM slice at the contract level.
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 769 lines folded for reproduction.
+Runnable source: 773 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -406,6 +406,10 @@ expect(html).to_contain("@keyframes wm-snap-pulse")
 expect(html).to_contain(".wm-snap-preview")
 expect(html).to_contain(".wm-snap-preview.active")
 expect(html).to_contain(".wm-snap-preview.active::after")
+expect(html).to_contain(".wm-snap-preview-content")
+expect(html).to_contain(".wm-snap-preview-label")
+expect(html).to_contain(".wm-snap-preview-hint")
+expect(html).to_contain(".wm-snap-preview.active .wm-snap-preview-content")
 expect(html).to_contain(".wm-window.dragging")
 expect(html).to_contain(".wm-window.snap-committed")
 expect(html).to_contain("data-snap-commit-zone")
@@ -842,7 +846,7 @@ expect(html).to_contain("@keyframes wm-hot-corner-activate")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 1435 lines folded for reproduction.
+Runnable source: 1442 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1926,6 +1930,13 @@ expect(js).to_contain("dataset.snapCommitZone")
 expect(js).to_contain("snap-committed")
 expect(js).to_contain("_wmSnapCommitTimer")
 expect(js).to_contain("dataset.snapZone = snapZone || 'free'")
+expect(js).to_contain("_snapZoneLabel")
+expect(js).to_contain("_snapZoneHint")
+expect(js).to_contain("wm-snap-preview-content")
+expect(js).to_contain("wm-snap-preview-label")
+expect(js).to_contain("wm-snap-preview-hint")
+expect(js).to_contain("this._snapZoneLabel(zone)")
+expect(js).to_contain("this._snapZoneHint(zone)")
 expect(js).to_contain("_ensureSnapLayoutPalette")
 expect(js).to_contain("_toggleSnapLayoutPalette")
 expect(js).to_contain("_renderSnapLayoutPalette")
@@ -2290,7 +2301,7 @@ expect(retained).to_contain("Maximize window")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 1368 lines folded for reproduction.
+Runnable source: 1373 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -2307,6 +2318,11 @@ expect(preview).to_contain("data-wm-snap-target=\"right\"")
 expect(preview).to_contain("wm-snap-preview active")
 expect(preview).to_contain("data-snap-zone=\"right\"")
 expect(preview).to_contain("aria-hidden=\"true\"")
+expect(preview).to_contain("wm-snap-preview-content")
+expect(preview).to_contain("wm-snap-preview-label")
+expect(preview).to_contain("wm-snap-preview-hint")
+expect(preview).to_contain("Snap right")
+expect(preview).to_contain("Release or press Right")
 expect(preview).to_contain("wm-ghost drag-lifted")
 expect(preview).to_contain("wm-ghost drag-lifted resize-active")
 expect(preview).to_contain("data-drag-feedback=\"lifted\"")

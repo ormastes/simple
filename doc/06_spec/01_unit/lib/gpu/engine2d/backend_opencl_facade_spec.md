@@ -27,7 +27,7 @@ backend_opencl_facade_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -254,6 +254,95 @@ backend.shutdown()
 
 </details>
 
+#### shares the CUDA HIP advanced facade methods through emulator logic
+
+1. var backend = OpenClBackend create
+   - Expected: backend.mirror.init(16, 16) is true
+
+2. backend clear
+
+3. backend draw ellipse
+
+4. backend draw ellipse filled
+
+5. backend draw arc
+
+6. backend draw bezier
+
+7. backend draw polygon filled
+
+8. backend draw polyline
+
+9. backend draw rect thick
+
+10. backend draw circle thick
+
+11. backend draw rounded rect outline
+
+12. backend draw gradient rect h
+
+13. backend draw radial gradient
+
+14. backend draw rect blend
+
+15. backend draw image blend
+
+16. backend draw image scaled
+
+17. backend draw triangle outline
+
+18. backend draw blur rect
+
+19. backend draw shadow rect
+
+20. backend draw image transform
+
+21. backend draw rect blend mode
+   - Expected: pixels.len() equals `256`
+
+22. backend shutdown
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 29 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var backend = OpenClBackend.create()
+expect(backend.mirror.init(16, 16)).to_equal(true)
+
+backend.clear(0xff000000u32)
+backend.draw_ellipse(8, 8, 5, 3, 0xff112233u32)
+backend.draw_ellipse_filled(8, 8, 2, 2, 0xff223344u32)
+backend.draw_arc(8, 8, 5, 0, 180, 0xff334455u32, 1)
+backend.draw_bezier(1, 1, 3, 12, 12, 3, 14, 14, 0xff445566u32, 1)
+backend.draw_polygon_filled([1, 8, 14], [14, 2, 14], 3, 0xff556677u32)
+backend.draw_polyline([1, 4, 8, 12], [1, 6, 1, 6], 4, 0xff667788u32, 1)
+backend.draw_rect_thick(1, 1, 6, 6, 0xff778899u32, 2)
+backend.draw_circle_thick(8, 8, 4, 0xff8899aau32, 2)
+backend.draw_rounded_rect_outline(2, 2, 10, 8, 2, 0xff99aabbu32, 1)
+backend.draw_gradient_rect_h(0, 0, 4, 4, 0xffaa0000u32, 0xff00aau32)
+backend.draw_radial_gradient(8, 8, 4, 0xff00bb00u32, 0xff0000bbu32)
+backend.draw_rect_blend(2, 2, 4, 4, 0x80ffffffu32)
+backend.draw_image_blend(0, 0, 2, 2, [0x80ff0000u32, 0x8000ff00u32, 0x800000ffu32, 0x80ffffffu32])
+backend.draw_image_scaled(12, 0, 4, 4, 2, 2, [0xffff0000u32, 0xff00ff00u32, 0xff0000ffu32, 0xffffffffu32])
+backend.draw_triangle_outline(0, 15, 8, 8, 15, 15, 0xffabcdefu32, 1)
+backend.draw_blur_rect(0, 0, 4, 4, 1)
+backend.draw_shadow_rect(2, 2, 3, 3, 1, 1, 1, 0x80000000u32)
+backend.draw_image_transform(4, 4, 2, 2, 256, 0, 0, 256, 0, 0, [0xff135724u32, 0xff246813u32, 0xff357924u32, 0xff468135u32])
+backend.draw_rect_blend_mode(10, 10, 3, 3, 0x80ffffffu32, 1)
+
+val pixels = backend.read_pixels()
+expect(pixels.len()).to_equal(256)
+expect(pixels[8 * 16 + 8]).to_be_greater_than(0u32)
+
+backend.shutdown()
+```
+
+</details>
+
 #### blocks OpenCL device draws while software clip state is active
 
 1. var backend = OpenClBackend create
@@ -351,8 +440,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

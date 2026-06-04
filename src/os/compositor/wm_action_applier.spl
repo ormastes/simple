@@ -218,13 +218,27 @@ fn wm_lifecycle_focus_window(windows: [WmLifecycleWindowState], window_id: i64) 
     out.push(selected)
     out
 
+fn wm_lifecycle_focus_top_visible_window(windows: [WmLifecycleWindowState]) -> [WmLifecycleWindowState]:
+    var i = windows.len() - 1
+    while i >= 0:
+        val win = windows[i]
+        if not win.minimized:
+            return wm_lifecycle_focus_window(windows, win.id)
+        i = i - 1
+    windows
+
 fn wm_lifecycle_destroy_window(windows: [WmLifecycleWindowState], window_id: i64) -> [WmLifecycleWindowState]:
     var out: [WmLifecycleWindowState] = []
+    var destroyed_focused = false
     var i = 0
     while i < windows.len():
         if windows[i].id != window_id:
             out.push(windows[i])
+        elif windows[i].focused:
+            destroyed_focused = true
         i = i + 1
+    if destroyed_focused:
+        return wm_lifecycle_focus_top_visible_window(out)
     out
 
 fn wm_taskbar_item_width(screen_width: i32, count: i32) -> i32:
@@ -307,6 +321,8 @@ fn wm_lifecycle_left_button(interaction: WmPointerInteractionState, down: bool) 
     else:
         out.resizing = false
         out.resize_window_id = 0
+        out.dragging = false
+        out.drag_window_id = 0
     out
 
 fn apply_wm_action_to_lifecycle_windows(windows: [WmLifecycleWindowState], next_window_id: i64, desktop_width: i32, desktop_height: i32, action: WmAction) -> WmLifecycleApplyResult:
@@ -341,6 +357,8 @@ fn apply_wm_action_to_lifecycle_windows(windows: [WmLifecycleWindowState], next_
     elif action.kind == "minimize":
         win.minimized = true
         win.focused = false
+        out_windows[i] = win
+        return WmLifecycleApplyResult(windows: wm_lifecycle_focus_top_visible_window(out_windows), next_window_id: next_id, window_id: action.window_id.to_i64(), applied: true)
     elif action.kind == "maximize":
         win.minimized = false
         win.focused = true
@@ -348,9 +366,13 @@ fn apply_wm_action_to_lifecycle_windows(windows: [WmLifecycleWindowState], next_
         win.y = 48
         win.w = desktop_width
         win.h = desktop_height - 96
+        out_windows[i] = win
+        return WmLifecycleApplyResult(windows: wm_lifecycle_focus_window(out_windows, action.window_id.to_i64()), next_window_id: next_id, window_id: action.window_id.to_i64(), applied: true)
     elif action.kind == "restore":
         win.minimized = false
         win.focused = true
+        out_windows[i] = win
+        return WmLifecycleApplyResult(windows: wm_lifecycle_focus_window(out_windows, action.window_id.to_i64()), next_window_id: next_id, window_id: action.window_id.to_i64(), applied: true)
     out_windows[i] = win
     WmLifecycleApplyResult(windows: out_windows, next_window_id: next_id, window_id: action.window_id.to_i64(), applied: true)
 
