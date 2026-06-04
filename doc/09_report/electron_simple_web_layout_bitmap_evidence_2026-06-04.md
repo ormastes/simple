@@ -1,50 +1,50 @@
 # Electron Simple Web Layout Bitmap Evidence
 
-- status: pass
-- reason: pass-with-electron-teardown-warning
-- scene: simple-web-layout-text-raster-track
+- status: divergent
+- reason: checksum-mismatch
+- scene: simple-web-layout-line-height-text-track
 - dimensions: 96x64
-- Simple checksum: 26373942971146
-- Electron checksum: 26373942971146
-- Simple weighted checksum: 81035858932942091
-- Electron weighted checksum: 81035858932942091
-- mismatch count: 0
-- same pixels: 6144
-- Chrome extra text pixels: 0
-- Simple extra text pixels: 0
-- text color delta pixels: 0
+- Simple checksum: 26376978354760
+- Electron checksum: 26377444653601
+- Simple weighted checksum: 81046902830500320
+- Electron weighted checksum: 81047415413379956
+- mismatch count: 438
+- same pixels: 5706
+- Chrome extra text pixels: 247
+- Simple extra text pixels: 76
+- text color delta pixels: 115
 - surface geometry pixels: 0
 - blur/tolerance used: false
-- Electron frame us: 21746
+- Electron frame us: 18672
 - HTML path: build/electron_simple_web_layout_bitmap_evidence/scene.html
 - expected ARGB path: build/electron_simple_web_layout_bitmap_evidence/expected-argb.json
 - captured ARGB path: build/electron_simple_web_layout_bitmap_evidence/electron-argb.json
 - captured ARGB written: true
 
 ## Raw Evidence
-- electron_simple_web_layout_status=pass
-- electron_simple_web_layout_reason=pass-with-electron-teardown-warning
-- electron_simple_web_layout_scene=simple-web-layout-text-raster-track
+- electron_simple_web_layout_status=divergent
+- electron_simple_web_layout_reason=checksum-mismatch
+- electron_simple_web_layout_scene=simple-web-layout-line-height-text-track
 - electron_simple_web_layout_width=96
 - electron_simple_web_layout_height=64
 - electron_simple_web_layout_iterations=3
-- electron_simple_web_layout_simple_checksum=26373942971146
-- electron_simple_web_layout_electron_checksum=26373942971146
-- electron_simple_web_layout_simple_weighted_checksum=81035858932942091
-- electron_simple_web_layout_electron_weighted_checksum=81035858932942091
-- electron_simple_web_layout_mismatch_count=0
-- electron_simple_web_layout_same_pixels=6144
-- electron_simple_web_layout_chrome_extra_text_pixels=0
-- electron_simple_web_layout_simple_extra_text_pixels=0
-- electron_simple_web_layout_text_color_delta_pixels=0
+- electron_simple_web_layout_simple_checksum=26376978354760
+- electron_simple_web_layout_electron_checksum=26377444653601
+- electron_simple_web_layout_simple_weighted_checksum=81046902830500320
+- electron_simple_web_layout_electron_weighted_checksum=81047415413379956
+- electron_simple_web_layout_mismatch_count=438
+- electron_simple_web_layout_same_pixels=5706
+- electron_simple_web_layout_chrome_extra_text_pixels=247
+- electron_simple_web_layout_simple_extra_text_pixels=76
+- electron_simple_web_layout_text_color_delta_pixels=115
 - electron_simple_web_layout_surface_geometry_pixels=0
 - electron_simple_web_layout_blur_or_tolerance_used=false
-- electron_simple_web_layout_electron_frame_us=21746
+- electron_simple_web_layout_electron_frame_us=18672
 - electron_simple_web_layout_html_path=build/electron_simple_web_layout_bitmap_evidence/scene.html
 - electron_simple_web_layout_expected_argb_path=build/electron_simple_web_layout_bitmap_evidence/expected-argb.json
 - electron_simple_web_layout_captured_argb_path=build/electron_simple_web_layout_bitmap_evidence/electron-argb.json
 - electron_simple_web_layout_captured_argb_written=true
-- electron_simple_web_layout_exit_code=124
+- electron_simple_web_layout_exit_code=2
 
 ## Simple Output
 - [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown variable: simple_web_file_render_url_to_pixels
@@ -52,36 +52,36 @@
 - simple_status=pass
 - simple_reason=pass
 - renderer=pure-simple-web-layout-renderer
-- scene=simple-web-layout-text-raster-track
+- scene=simple-web-layout-line-height-text-track
 - width=96
 - height=64
-- checksum=26373942971146
-- weighted_checksum=81035858932942091
+- checksum=26376978354760
+- weighted_checksum=81046902830500320
 - expected_argb_path=build/electron_simple_web_layout_bitmap_evidence/expected-argb.json
 - blur_or_tolerance_used=false
 - simple_status=pass
 - simple_reason=pass
 - renderer=pure-simple-web-layout-renderer
-- scene=simple-web-layout-text-raster-track
+- scene=simple-web-layout-line-height-text-track
 - width=96
 - height=64
-- checksum=26373942971146
-- weighted_checksum=81035858932942091
+- checksum=26376978354760
+- weighted_checksum=81046902830500320
 - expected_argb_path=build/electron_simple_web_layout_bitmap_evidence/expected-argb.json
 - blur_or_tolerance_used=false
 
 ## Electron Output
 - renderer=electron-live-capture-page
-- scene=simple-web-layout-text-raster-track
+- scene=simple-web-layout-line-height-text-track
 - width=96
 - height=64
 - iterations=3
-- checksum=26373942971146
-- expected_checksum=26373942971146
-- weighted_checksum=81035858932942091
-- expected_weighted_checksum=81035858932942091
-- mismatch_count=0
-- frame_us=21746
+- checksum=26377444653601
+- expected_checksum=26376978354760
+- weighted_checksum=81047415413379956
+- expected_weighted_checksum=81046902830500320
+- mismatch_count=438
+- frame_us=18672
 - capture_native_width=96
 - capture_native_height=64
 - capture_downsampled=false

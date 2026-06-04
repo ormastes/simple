@@ -101,11 +101,14 @@ Recorded result on 2026-06-04:
   `position_right_bottom_matrix`,
   `position_overlap_matrix`, `position_z_index_matrix`, `opacity_matrix`,
   `background_shorthand_matrix`, `text_raster_track`
-- mismatch count for each case: `0`
-- checksums and weighted checksums match for each case
-- blur/tolerance used for each case: `false`
-- manifest case count: `17`
+- tracked text-divergence cases: `line_height_text_track`
+- exact mismatch count for each exact case: `0`
+- tracked mismatch count: `438`
+- tracked surface geometry pixels: `0`
+- checksums and weighted checksums match for each exact case
+- blur/tolerance used for each exact or tracked case: `false`
+- manifest case count: `18`
 - exact pass count: `17`
-- tracked count: `0`
+- tracked count: `1`
 - fail count: `0`
 - report: `doc/09_report/electron_simple_web_layout_manifest_evidence_2026-06-04.md`

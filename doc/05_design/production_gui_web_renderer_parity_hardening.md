@@ -119,6 +119,12 @@ after the generic non-widget text path has painted. The evidence still records
 the former tracked residual buckets and requires Chrome extra text, Simple
 extra bitmap coverage, text color delta, and surface geometry pixels to remain
 `0`.
+The `line_height_text_track` case uses the tracked text-divergence policy. It
+exercises explicit CSS `line-height` through parsed style, inheritance to text
+nodes, wrapped text block height, and paint line advance. Its evidence must keep
+surface geometry pixels at `0`; the remaining mismatch is expected to stay in
+text coverage/color residual buckets until generic Chrome text rastering
+replaces the bitmap approximation.
 The current non-widget text path combines browser-like word wrapping,
 lowercase 5x7 glyph lookup, tighter 8px metrics, tighter large-font paint
 advance, a one-pixel browser text ink inset, and a scoped coverage-thinning

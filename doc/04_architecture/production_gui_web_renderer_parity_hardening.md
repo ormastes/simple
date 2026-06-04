@@ -75,6 +75,10 @@ This slice adds a production parity harness in `app.wm_compare`:
   a scoped calibrated Chrome text overlay for the canonical `text_raster_track`
   scene so the current manifest can require no-tolerance exact pixels while
   keeping the generic text renderer limitations explicit.
+- The `line_height_text_track` manifest case covers generic CSS `line-height`
+  parsing, inheritance, wrapped text layout height, and paint line advance. It
+  remains tracked text divergence while requiring surface geometry pixels to
+  stay at `0`.
 - Generic non-widget text uses browser-like word wrapping, lowercase bitmap
   glyph lookup, tighter small-font metrics, tighter large-font paint advance,
   one-pixel browser text ink inset, and coverage thinning as interim Chrome

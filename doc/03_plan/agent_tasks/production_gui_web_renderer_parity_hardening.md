@@ -90,13 +90,17 @@
 - Add a scoped Chrome text raster overlay for the canonical `text_raster_track`
   fixture/corpus gate, promoting it to exact parity with mismatch and all
   tracked text residual buckets at `0`.
+- Add generic CSS `line-height` parsing/inheritance for wrapped text layout and
+  add `line_height_text_track` as the next text-heavy tracked divergence case:
+  mismatch `438`, surface geometry `0`, no blur/tolerance, and remaining
+  residuals confined to text raster coverage/color differences.
 - Include the layout manifest in the aggregate production renderer parity gate.
 
 ## Next Agent Tasks
 
 - Continue replacing the bitmap glyph, sparse coverage heuristics, and scoped
   fixture text overlays with a generic Chrome text raster/compositing model,
-  then expand the CSS/layout manifest with more text-heavy cases.
+  then promote the line-height text case from tracked divergence to exact.
 - Reduce focused renderer spec runtime or split the exact layout cases into a
   separate focused spec. The latest default-timeout interpreter run hit the
   120s limit, while
