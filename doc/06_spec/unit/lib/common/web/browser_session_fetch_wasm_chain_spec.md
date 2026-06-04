@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 230 | 230 | 0 | 0 |
+| 231 | 231 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -10818,6 +10818,39 @@ match result:
 
 </details>
 
+#### dispatches Uint8Array mutating and search helpers over nonzero-offset views
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `true:2:5:true:true:1:2:3:0:true:true:true:70,4,70,4,4:10,20,70,4,70,4,4,80`
+
+3. Err
+   - Expected: "unexpected uint8 view mutating/search helper js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var base = new Uint8Array(8); base[0] = 10; base[1] = 20; base[2] = 30; base[3] = 40; base[4] = 50; base[5] = 60; base[6] = 70; base[7] = 80; var view = base.subarray(2, 7); var fillRet = Uint8Array.prototype.fill.call(view, 260, 1, 4); var includes = Uint8Array.prototype.includes.call(view, 4); var first = Uint8Array.prototype.indexOf.call(view, 4); var second = Uint8Array.prototype.indexOf.apply(view, [4, 2]); var last = Uint8Array.prototype.lastIndexOf.call(view, 4); var lastFrom = Uint8Array.prototype.lastIndexOf.apply(view, [30, -4]); var tail = Uint8Array.prototype.includes.apply(view, [70, -1]); var copyRet = Uint8Array.prototype.copyWithin.apply(view, [0, 2, 5]); var revRet = Uint8Array.prototype.reverse.call(view); (view.buffer === base.buffer) + ':' + view.byteOffset + ':' + view.length + ':' + (fillRet === view) + ':' + includes + ':' + first + ':' + second + ':' + last + ':' + lastFrom + ':' + tail + ':' + (copyRet === view) + ':' + (revRet === view) + ':' + view.toString() + ':' + base.toString()")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("true:2:5:true:true:1:2:3:0:true:true:true:70,4,70,4,4:10,20,70,4,70,4,4,80")
+    Err(err):
+        expect("unexpected uint8 view mutating/search helper js error: {err}").to_equal("")
+```
+
+</details>
+
 #### reduces Uint8Array values with accumulator callbacks in browser scripts
 
 1. var session = BrowserSession new
@@ -12949,8 +12982,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 230 |
-| Active scenarios | 230 |
+| Total scenarios | 231 |
+| Active scenarios | 231 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
