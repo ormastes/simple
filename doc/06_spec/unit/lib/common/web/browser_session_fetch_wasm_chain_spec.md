@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 183 | 183 | 0 | 0 |
+| 184 | 184 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -2964,6 +2964,39 @@ match result:
         expect(_display_js(value)).to_equal("1:52:instantiated:function:42:1")
     Err(err):
         expect("unexpected instance constructor import call js error: {err}").to_equal("")
+```
+
+</details>
+
+#### compares constructor and compiled WebAssembly import calls in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `ctor:1:52:instantiated:function:42:1:compiled:instantiated:1:52:42:1`
+
+3. Err
+   - Expected: "unexpected constructor/compiled import call js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var out = ''; var wasm = '0061736d0100000001060160017f017f020b0103656e7603666f6f0000030201000707010372756e00010a08010600200010000b'; var ctorCalls = 0; var compiledCalls = 0; var ctorImports = { env: { foo: function(x) { ctorCalls = ctorCalls + 1; return x + 5; } } }; var compiledImports = { env: { foo: function(x) { compiledCalls = compiledCalls + 1; return x + 3; } } }; var module = new WebAssembly.Module(wasm); var instance = new WebAssembly.Instance(module, ctorImports); out = 'ctor:' + module.importCount + ':' + module.byteLength + ':' + instance.status + ':' + typeof instance.exports.run + ':' + instance.exports.run(37) + ':' + ctorCalls; WebAssembly.compile(wasm).then(function(module) { return WebAssembly.instantiate(module, compiledImports); }).then(function(result) { out = out + ':compiled:' + result.status + ':' + result.module.importCount + ':' + result.module.byteLength + ':' + result.instance.exports.run(39) + ':' + compiledCalls; }); out")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("ctor:1:52:instantiated:function:42:1:compiled:instantiated:1:52:42:1")
+    Err(err):
+        expect("unexpected constructor/compiled import call js error: {err}").to_equal("")
 ```
 
 </details>
@@ -8589,8 +8622,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 183 |
-| Active scenarios | 183 |
+| Total scenarios | 184 |
+| Active scenarios | 184 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

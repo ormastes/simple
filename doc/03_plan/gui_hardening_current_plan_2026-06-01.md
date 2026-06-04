@@ -6088,3 +6088,48 @@ focused fetch/WASM chain spec now passes `183/183`; the native WASM host spec
 remained `107/107`, the WebGPU JS/WASM system spec remained `106/106`, Node API
 conformance remained `275/275`, and `src/lib` completed with the current
 `399 warning(s)`. Broader browser/WASM semantics remain open.
+
+BrowserSession WebAssembly constructor/compiled import-call parity continuation:
+
+Completion checklist:
+
+- Add a BrowserSession browser-script scenario that invokes the same imported
+  function module through synchronous `new WebAssembly.Module(...)` plus
+  `new WebAssembly.Instance(...)`, then compares that path with
+  `WebAssembly.compile(...).then(module => WebAssembly.instantiate(...))` in
+  the same script evaluation.
+- Verify the constructor path exposes import count `1`, module byte length
+  `52`, instance status `instantiated`, exported `run` type `function`,
+  exported return value `42`, and constructor host import call count `1`.
+- Verify the compiled instantiate promise resolves with status
+  `instantiated`, import count `1`, byte length `52`, exported return value
+  `42`, and compiled host import call count `1`.
+- Verify separate import objects keep constructor and compiled host call
+  counters independent while preserving deterministic ordered output.
+- Regenerate the mirrored scenario manual for the changed SPipe spec and move
+  the generated old `01_unit` output onto the tracked `unit` manual path.
+- Restore generated index/manual noise from docgen and adjacent specs.
+- Record command evidence, pass counts, warning count, and remaining open scope.
+- Run diff hygiene and doc layout gates before committing and pushing.
+
+Test checklist:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+
+BrowserSession scripts now compare constructor-created and compiled
+WebAssembly import-call paths in the same script evaluation. The focused
+assertion verifies the constructor path exposes import count `1`, module byte
+length `52`, instance status `instantiated`, exported `run` type `function`,
+exported return value `42`, and constructor host import call count `1`, then
+verifies the compiled instantiate promise resolves with matching import count,
+byte length, exported return value, and independent host import call count. The
+focused fetch/WASM chain spec now passes `184/184`; the native WASM host spec
+remained `107/107`, the WebGPU JS/WASM system spec remained `106/106`, Node API
+conformance remained `275/275`, and `src/lib` completed with the current
+`399 warning(s)`. Broader browser/WASM semantics remain open.
