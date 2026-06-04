@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 189 | 189 | 0 | 0 |
+| 190 | 190 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -3195,6 +3195,39 @@ match result:
         expect(_display_js(value)).to_equal("ctor:25:instantiated:131072:65536:4:1:131072:4:compiled:instantiated:25:131072:65536:4:1:131072:4")
     Err(err):
         expect("unexpected constructor/compiled memory export js error: {err}").to_equal("")
+```
+
+</details>
+
+#### compares constructor and compiled WebAssembly memory maximum failures in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `ctor:26:instantiated:65536:65536:1:-1:65536:9:compiled:instantiated:26:65536:... (full value in folded executable source)`
+
+3. Err
+   - Expected: "unexpected constructor/compiled memory maximum failure js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var out = ''; var wasm = '0061736d01000000050401010101070a01066d656d6f72790200'; var module = new WebAssembly.Module(wasm); var instance = new WebAssembly.Instance(module); var memory = instance.exports.memory; var bytes = new Uint8Array(memory.buffer); bytes[8] = 265; var zero = memory.grow(0); var fail = memory.grow(1); var after = new Uint8Array(memory.buffer); out = 'ctor:' + module.byteLength + ':' + instance.status + ':' + memory.byteLength + ':' + memory.pageSize + ':' + zero + ':' + fail + ':' + after.length + ':' + after[8]; WebAssembly.compile(wasm).then(function(module) { return WebAssembly.instantiate(module); }).then(function(result) { var memory = result.instance.exports.memory; var bytes = new Uint8Array(memory.buffer); bytes[9] = 267; var zero = memory.grow(0); var fail = memory.grow(1); var after = new Uint8Array(memory.buffer); out = out + ':compiled:' + result.status + ':' + result.module.byteLength + ':' + memory.byteLength + ':' + memory.pageSize + ':' + zero + ':' + fail + ':' + after.length + ':' + after[9]; }); out")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("ctor:26:instantiated:65536:65536:1:-1:65536:9:compiled:instantiated:26:65536:65536:1:-1:65536:11")
+    Err(err):
+        expect("unexpected constructor/compiled memory maximum failure js error: {err}").to_equal("")
 ```
 
 </details>
@@ -8787,8 +8820,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 189 |
-| Active scenarios | 189 |
+| Total scenarios | 190 |
+| Active scenarios | 190 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

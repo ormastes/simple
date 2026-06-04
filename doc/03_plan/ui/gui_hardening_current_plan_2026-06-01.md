@@ -5528,6 +5528,65 @@ conformance remained `275/275`, and `src/lib` completed with the current
 `399 warning(s)` across `5903` files. Broader browser/WASM semantics remain
 open.
 
+BrowserSession WebAssembly constructor/compiled memory maximum parity continuation:
+
+Completion checklist:
+
+- Add a BrowserSession browser-script scenario that instantiates a memory
+  export module with `initial=1` and `maximum=1` through synchronous
+  `new WebAssembly.Module(...)` plus `new WebAssembly.Instance(...)`, then
+  compares that path with
+  `WebAssembly.compile(...).then(module => WebAssembly.instantiate(module))`.
+- Verify the constructor path exposes module byte length `26`, instance status
+  `instantiated`, memory byte length `65536`, page size `65536`, zero-grow
+  return `1`, failed grow return `-1`, unchanged buffer length `65536`, and
+  preserved wrapped byte value `9`.
+- Verify the compiled instantiate path exposes matching status, byte length,
+  memory sizing, zero-grow return, failed-grow return, unchanged buffer length,
+  and preserved wrapped byte value `11`.
+- Fix BrowserSession WebAssembly runtime export construction so parsed
+  `memoryMaxPages` is preserved when creating exported module memory objects
+  instead of defaulting exported module memory to unbounded growth.
+- Regenerate the mirrored scenario manual for the changed SPipe spec and move
+  the generated old `01_unit` output onto the tracked `unit` manual path.
+- Restore generated tracking/doc index noise from docgen and adjacent specs.
+- Record command evidence, pass counts, warning counts, stale-path note, and
+  remaining open scope.
+- Run diff hygiene, doc layout gates, focused tests, adjacent browser/WASM
+  tests, `src/lib`, compiler, MCP, LSP, and current-path MCP stdio checks before
+  committing and pushing.
+
+Test checklist:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/compiler`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/app/mcp`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/app/simple_lsp_mcp`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+
+BrowserSession scripts now compare constructor-created and compiled
+WebAssembly memory maximum behavior in the same script evaluation. The focused
+assertion verifies constructor and compiled paths both preserve the module
+memory maximum, return `1` from zero-grow, return `-1` from a grow past maximum,
+keep the buffer at `65536` bytes, and preserve pre-failure byte writes. The
+runtime now threads parsed `memoryMaxPages` into exported module memory
+construction. The focused fetch/WASM chain spec now passes `190/190`; the
+native WASM host spec remained `107/107`, the WebGPU JS/WASM system spec
+remained `106/106`, Node API conformance remained `275/275`, `src/lib`
+completed with the current `399 warning(s)` across `5903` files, `src/compiler`
+completed with the current `14 warning(s)` across `2625` files, `src/app/mcp`
+passed `27` checked files, `src/app/simple_lsp_mcp` passed `5` checked files,
+and the current-path MCP stdio integration spec passed `5/5`. The older
+`test/integration/app/mcp_stdio_integration_spec.spl` instruction path is stale
+in the reorged tree; the current path is `test/02_integration/app/...`.
+Broader browser/WASM semantics remain open.
+
 BrowserSession WebAssembly constructor/compiled function-body parity continuation:
 
 Completion checklist:
