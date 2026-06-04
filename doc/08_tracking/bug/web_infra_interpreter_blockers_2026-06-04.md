@@ -72,20 +72,18 @@ restaurant webapp infra test vehicle.
     - Result: RISC-V asm errors eliminated, Cranelift codegen stubs reduced
       from ~20 to near-zero for webapp-reachable code.
 
-12. **Linker STB_GLOBAL binding conflicts in _stubs.s**
-    - Stubs assembly declares `.globl` for symbols that are also defined in
-      compiled object files, causing `changed binding to STB_GLOBAL` errors
-    - Affects ~30 symbols (SIMD, database WAL, HTTP, JIT modules)
-    - Root cause: stub generator doesn't check if symbol is already compiled
-    - Binary not produced until this is resolved
+12. **Linker STB_GLOBAL binding conflicts in _stubs.s** — FIXED (2026-06-04)
+    - Root cause: `generate_builtin_trampoline_asm` emitted `.weak sym` then
+      `.globl sym` for ELF Weak strategy — newer clang rejects binding change.
+    - Fix: split match arms; `Weak` emits only `.weak` (still externally visible
+      on ELF). `StrongWithAllowMultiple` keeps `.globl` for FreeBSD.
+    - Result: **native-build produces a 655KB linked ELF binary** (99 files,
+      0.4s compile, 11.8s link). Runtime segfaults from 717 stubbed symbols.
 
 ## Conclusion
 
-**Interpreter path blocked** by generics (3) + `?` operator (8).
-**Native build:** bugs 9, 11 FIXED. Entry-closure discovery now compiles only
-reachable modules. Linking blocked by stub binding conflicts (12). Cranelift
-codegen stubs (10) mostly eliminated by entry-closure (no longer compiling
-GPU/baremetal code). Bugs 5-7, 9, 11 resolved.
+**Native build works!** Bugs 5-7, 9, 11, 12 all fixed. Entry-closure +
+weak-only stubs produce a linked ELF binary. Runtime needs more symbol coverage.
+**Interpreter path** still blocked by generics (3) + `?` operator (8).
 
-The restaurant webapp code is correct — all 43 SPipe specs pass. Next priority:
-(12) stub binding fix → (3) generics → (8) `?` typing.
+Next priority: runtime symbol coverage → (3) generics → (8) `?` typing.

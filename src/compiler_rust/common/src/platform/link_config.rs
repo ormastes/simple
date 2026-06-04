@@ -240,9 +240,11 @@ impl PlatformLinkConfig {
                     sym, jmp_prefix, real_fn
                 )
             }
-            StubStrategy::StrongWithAllowMultiple | StubStrategy::Weak => {
-                // Use weak for trampolines on ELF regardless
-                format!(".weak {0}\n.globl {0}\n{0}:\n  {1} {2}\n\n", sym, jmp_prefix, real_fn)
+            StubStrategy::StrongWithAllowMultiple => {
+                format!(".globl {0}\n{0}:\n  {1} {2}\n\n", sym, jmp_prefix, real_fn)
+            }
+            StubStrategy::Weak => {
+                format!(".weak {0}\n{0}:\n  {1} {2}\n\n", sym, jmp_prefix, real_fn)
             }
         }
     }
