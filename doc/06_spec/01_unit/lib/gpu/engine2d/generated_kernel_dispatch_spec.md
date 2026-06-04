@@ -27,7 +27,7 @@ generated_kernel_dispatch_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 19 | 19 | 0 | 0 |
+| 23 | 23 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -312,6 +312,122 @@ expect(bad_plan.reason).to_equal("backend-inactive")
 
 </details>
 
+#### shares generated session launch preflight for CUDA HIP and OpenCL sessions
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val cuda_ready = generated_2d_session_launch_gate("cuda", GENERATED_2D_FILL, 16, 16, true, true, 2048)
+val hip_missing_module = generated_2d_session_launch_gate("rocm", GENERATED_2D_ALPHA, 16, 16, true, false, 2048)
+val opencl_missing_args = generated_2d_session_launch_gate("opencl", GENERATED_2D_COPY, 16, 16, true, true, 0)
+val cuda_bad_dims = generated_2d_session_launch_gate("cuda", GENERATED_2D_FILL, 0, 16, true, true, 2048)
+
+expect(cuda_ready.ready).to_equal(true)
+expect(cuda_ready.reason).to_equal("ready")
+expect(cuda_ready.plan.launch_api).to_equal("rt_cuda_launch_kernel")
+expect(hip_missing_module.ready).to_equal(false)
+expect(hip_missing_module.reason).to_equal("module-not-loaded")
+expect(hip_missing_module.plan.launch_api).to_equal("rt_rocm_launch_kernel")
+expect(opencl_missing_args.ready).to_equal(false)
+expect(opencl_missing_args.reason).to_equal("missing-args-pointer")
+expect(opencl_missing_args.plan.launch_api).to_equal("clEnqueueNDRangeKernel")
+expect(cuda_bad_dims.ready).to_equal(false)
+expect(cuda_bad_dims.reason).to_equal("invalid-dimensions")
+```
+
+</details>
+
+#### records shared generated session runtime provenance for CUDA HIP and OpenCL
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val cuda_ready = generated_2d_session_runtime_provenance("cuda", GENERATED_2D_FILL, 16, 16, true, true, 2048)
+val hip_missing_module = generated_2d_session_runtime_provenance("rocm", GENERATED_2D_ALPHA, 16, 16, true, false, 2048)
+val opencl_unavailable = generated_2d_session_runtime_provenance("opencl", GENERATED_2D_COPY, 16, 16, false, false, 2048)
+val opencl_missing_args = generated_2d_session_runtime_provenance("opencl", GENERATED_2D_COPY, 16, 16, true, true, 0)
+val unsupported = generated_2d_session_runtime_provenance("opencl", "rect_filled", 16, 16, true, true, 2048)
+
+expect(cuda_ready.ready).to_equal(true)
+expect(cuda_ready.typed_status).to_equal("ready")
+expect(cuda_ready.launch_api).to_equal("rt_cuda_launch_kernel")
+expect(hip_missing_module.ready).to_equal(false)
+expect(hip_missing_module.typed_status).to_equal("hip-module-unavailable")
+expect(hip_missing_module.launch_api).to_equal("rt_rocm_launch_kernel")
+expect(opencl_unavailable.ready).to_equal(false)
+expect(opencl_unavailable.typed_status).to_equal("opencl-runtime-or-queue-unavailable")
+expect(opencl_unavailable.launch_api).to_equal("clEnqueueNDRangeKernel")
+expect(opencl_missing_args.typed_status).to_equal("args-unavailable")
+expect(unsupported.typed_status).to_equal("plan-not-ready:unsupported-operation")
+expect(opencl_unavailable.diagnostic_text()).to_contain("backend=opencl")
+expect(opencl_unavailable.diagnostic_text()).to_contain("artifact=simple_2d_optimization.spirv")
+```
+
+</details>
+
+#### compares CPU SIMD CUDA and OpenCL provenance for vector font and image blit operations
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 21 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val cpu_vector = generated_2d_operation_provenance("cpu_simd_x86", "vector", 64, 32, false, false, 0)
+val cuda_text = generated_2d_operation_provenance("cuda", "text_blit", 64, 32, true, true, 2048)
+val opencl_image = generated_2d_operation_provenance("opencl", "image_blit", 64, 32, false, false, 2048)
+val scalar_alpha = generated_2d_operation_provenance("cpu", "alpha_blend", 64, 32, false, false, 0)
+
+expect(cpu_vector.ready).to_equal(true)
+expect(cpu_vector.compute_target).to_equal("cpu_simd")
+expect(cpu_vector.generated_artifact_required).to_equal(false)
+expect(cpu_vector.generated_operation).to_equal(GENERATED_2D_FILL)
+expect(cpu_vector.typed_status).to_equal("cpu-simd-baseline-ready")
+expect(cuda_text.ready).to_equal(true)
+expect(cuda_text.generated_operation).to_equal(GENERATED_2D_COPY)
+expect(cuda_text.cpu_preprocess_required).to_equal(true)
+expect(cuda_text.artifact_name).to_equal("simple_2d_optimization.ptx")
+expect(opencl_image.ready).to_equal(false)
+expect(opencl_image.generated_operation).to_equal(GENERATED_2D_COPY)
+expect(opencl_image.launch_api).to_equal("clEnqueueNDRangeKernel")
+expect(opencl_image.typed_status).to_equal("opencl-runtime-or-queue-unavailable")
+expect(opencl_image.artifact_name).to_equal("simple_2d_optimization.spirv")
+expect(scalar_alpha.compute_target).to_equal("cpu_scalar")
+expect(scalar_alpha.generated_operation).to_equal(GENERATED_2D_ALPHA)
+```
+
+</details>
+
+#### fails operation provenance closed for unsupported families and invalid dimensions
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val unsupported = generated_2d_operation_provenance("opencl", "bezier_path", 64, 32, true, true, 2048)
+val invalid = generated_2d_operation_provenance("cuda", "image_blit", 0, 32, true, true, 2048)
+
+expect(unsupported.ready).to_equal(false)
+expect(unsupported.compute_target).to_equal("unsupported")
+expect(unsupported.typed_status).to_equal("plan-not-ready:unsupported-operation-family")
+expect(invalid.ready).to_equal(false)
+expect(invalid.reason).to_equal("invalid-dimensions")
+```
+
+</details>
+
 #### requires generated artifacts to load before building runtime execution requests
 
 <details>
@@ -519,8 +635,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 19 |
-| Active scenarios | 19 |
+| Total scenarios | 23 |
+| Active scenarios | 23 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -70,7 +70,7 @@ Key files identified:
 
 **NvfsDriver** (`src/lib/nogc_sync_mut/fs_driver/nvfs_driver.spl`):
 - Thin wrapper around `DbFsDriver.new_hosted()` — delegates ALL ops to DbFsDriver.
-- Real CoW engine + extent map live in `examples/nvfs/` submodule, not stdlib.
+- Real CoW engine + extent map live in `src/os/services/nvfs/` submodule, not stdlib.
 - Superblock impl in `src/lib/nogc_sync_mut/fs_driver/nvfs_superblock.spl`: dual-replica write, magic validation (`NVFS_MAGIC`), `_nvfs_checksum()` computation, `_nvfs_sb_from_bytes()` with length guard (`buf.len() < 54`).
 - Hardening gaps: no checksum verification on read (only computed on write), no generation-mismatch detection between replicas, `nvfs_superblock_read_from_disk()` falls back silently on short read.
 
@@ -127,7 +127,7 @@ Key files identified:
 
 #### Constraints
 - **C boundary is minimal:** only 4 `rt_*` externs across all FS code (`rt_bytes_alloc`, `rt_text_to_bytes`, `rt_socket_set_nonblocking`). "vs C" comparison (AC-6/AC-7) must use Linux POSIX syscalls on ext4/FAT32 as the C baseline, not internal externs.
-- **NvfsDriver delegates to DbFsDriver:** real CoW/extent-map lives in `examples/nvfs/` submodule. Hardening AC-2 scope limited to stdlib superblock + DbFsDriver layer unless examples/ is pulled in.
+- **NvfsDriver delegates to DbFsDriver:** real CoW/extent-map lives in `src/os/services/nvfs/` submodule. Hardening AC-2 scope limited to stdlib superblock + DbFsDriver layer unless examples/ is pulled in.
 - **text-typed API byte corruption:** `NvfsDriver.write_handle(handle, content: text)` uses `rt_text_to_bytes` which goes through `String::from_utf8_lossy` — silently corrupts arbitrary bytes (known issue, memory note `feedback_text_only_byte_cliffs.md`).
 - **Bench harness incomplete for ACs:** FAT32 absent from all workloads; must extend harness before AC-6/AC-7 claims.
 
@@ -163,7 +163,7 @@ Key files identified:
 
 - **D-3: RamFS lookup — sorted array + binary search.** No HashMap exists in stdlib. `[InodeEntry]` will be kept sorted by `id` field; `find_inode_idx` replaced with binary search (O(log n)). Insertion uses `insert_sorted`. Rationale: simplest delta, no new data structure needed, sufficient for 1000-file metadata_storm benchmark target.
 
-- **D-4: NvfsDriver hardening boundary — stdlib only.** AC-2 scope is `nvfs_superblock.spl` (checksum-on-read, dual-replica gen check, short-read rejection) plus DbFsDriver layer (already has `closed: bool`; add generation check). `examples/nvfs/` submodule CoW/extent-map is out of scope.
+- **D-4: NvfsDriver hardening boundary — stdlib only.** AC-2 scope is `nvfs_superblock.spl` (checksum-on-read, dual-replica gen check, short-read rejection) plus DbFsDriver layer (already has `closed: bool`; add generation check). `src/os/services/nvfs/` submodule CoW/extent-map is out of scope.
 
 - **D-5: MIR pass scope — pattern recognition + conservative transform.** The 3 new FS passes (syscall_batch, write_coalesce, read_ahead_hoist) recognize MIR patterns (adjacent `rt_*` calls with contiguous offsets) and emit stat counters. Actual transform is conservative (merge only when provably safe). Verified via `OptimizationStats` output. This avoids over-promising full syscall batching transforms.
 

@@ -28,7 +28,7 @@ backend_measurement_report_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 12 | 12 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -80,7 +80,7 @@ expect(sdn).to_contain("binary_size_delta_bytes: 10000")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -95,13 +95,22 @@ expect(sdn).to_contain("cold_start_us: 42000")
 expect(sdn).to_contain("warm_start_us: 9000")
 expect(sdn).to_contain("package_size_bytes: 1250000")
 expect(sdn).to_contain("artifact_build_us: 310")
+expect(sdn).to_contain("offload_tag_kind: \"@gpu\"")
+expect(sdn).to_contain("operation_family: \"text_blit\"")
+expect(sdn).to_contain("generated_entry_symbol: \"simple_2d_copy_u32\"")
+expect(sdn).to_contain("generated_binary_format: \"ptx\"")
+expect(sdn).to_contain("generated_artifact_path_suffix: \"simple_2d_optimization.ptx\"")
+expect(sdn).to_contain("runtime_compute_target: \"cuda\"")
+expect(sdn).to_contain("runtime_execution_path: \"generated_2d_kernel\"")
+expect(sdn).to_contain("runtime_launch_api: \"rt_cuda_launch_kernel\"")
+expect(sdn).to_contain("runtime_status: \"ready\"")
 expect(sdn).to_contain("checksum: \"sha256:1234\"")
 expect(sdn).to_contain("pixel_proof: \"nonzero_pixels:4096\"")
 ```
 
 </details>
 
-#### rejects initialized comparison samples without pixel proof or fallback reason
+#### rejects initialized comparison samples without pixel proof fallback reason compiler metadata or runtime provenance
 
 1. var missing proof =  initialized sample
    - Expected: backend_comparison_sample_valid(missing_proof) is false
@@ -109,11 +118,17 @@ expect(sdn).to_contain("pixel_proof: \"nonzero_pixels:4096\"")
 2. var missing reason =  initialized sample
    - Expected: backend_comparison_sample_valid(missing_reason) is false
 
+3. var missing metadata =  initialized sample
+   - Expected: backend_comparison_sample_valid(missing_metadata) is false
+
+4. var missing runtime =  initialized sample
+   - Expected: backend_comparison_sample_valid(missing_runtime) is false
+
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -125,6 +140,14 @@ var missing_reason = _initialized_sample()
 missing_reason.fallback_used = true
 missing_reason.fallback_reason = ""
 expect(backend_comparison_sample_valid(missing_reason)).to_equal(false)
+
+var missing_metadata = _initialized_sample()
+missing_metadata.generated_entry_symbol = ""
+expect(backend_comparison_sample_valid(missing_metadata)).to_equal(false)
+
+var missing_runtime = _initialized_sample()
+missing_runtime.runtime_status = ""
+expect(backend_comparison_sample_valid(missing_runtime)).to_equal(false)
 ```
 
 </details>
@@ -139,6 +162,36 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val probe = BackendProbeResult.success("cuda", "initialized for measurement")
+val record = backend_measurement_from_probe(
+    probe,
+    "simple test representative comparison",
+    "local-linux",
+    1,
+    5,
+    1000,
+    1200,
+    64000,
+    1000000,
+    990000,
+    "render+readback",
+    false
+)
+expect(backend_measurement_initialized_valid(record)).to_equal(false)
+expect(backend_measurement_satisfies_lane(record)).to_equal(false)
+```
+
+</details>
+
+#### rejects initialized OpenCL lane evidence without scalar baseline comparison
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val probe = BackendProbeResult.success("opencl", "initialized for measurement")
 val record = backend_measurement_from_probe(
     probe,
     "simple test representative comparison",
@@ -267,6 +320,74 @@ expect(backend_measurement_satisfies_lane(record)).to_equal(false)
 
 </details>
 
+#### rejects fallback evidence for OpenCL like CUDA and Vulkan
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val record = BackendMeasurementRecord(
+    requested_backend: "opencl",
+    selected_backend: "cpu",
+    status: "Initialized",
+    command: "simple test representative comparison",
+    host: "local-linux",
+    warmup_count: 1,
+    sample_count: 5,
+    p50_us: 1000,
+    p95_us: 1200,
+    max_rss_kb: 64000,
+    binary_size_bytes: 1000000,
+    baseline_binary_size_bytes: 990000,
+    render_readback_scope: "render+readback",
+    scalar_baseline_compared: true,
+    fallback_used: true,
+    unavailable_reason: "fallback to CPU"
+)
+expect(backend_measurement_satisfies_lane(record)).to_equal(false)
+```
+
+</details>
+
+#### requires OpenCL initialized samples to carry GPU artifact timings
+
+1.  initialized record
+   - Expected: backend_comparison_sample_valid(sample) is false
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val sample = backend_comparison_from_measurement(
+    _initialized_record("opencl"),
+    "wm_compare:button_grid:64",
+    "opencl",
+    "simple-web",
+    42000,
+    9000,
+    1250000,
+    1800,
+    0,
+    0,
+    0,
+    0,
+    0,
+    "sha256:opencl",
+    "nonzero_pixels:4096",
+    "opencl:0"
+)
+expect(backend_comparison_sample_valid(sample)).to_equal(false)
+```
+
+</details>
+
 <details>
 <summary>Advanced: requires Metal Vulkan CUDA OpenCL HIP and CPU SIMD lanes in the matrix</summary>
 
@@ -349,8 +470,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

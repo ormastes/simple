@@ -1870,7 +1870,10 @@ fn generate_gpu_source(module: &mir::MirModule, dialect: GpuSourceDialect) -> St
         dialect.label()
     ));
 
-    let has_kernels = module.functions.iter().any(|func| is_gpu_kernel_for_backend(func, dialect.backend_name()));
+    let has_kernels = module
+        .functions
+        .iter()
+        .any(|func| is_gpu_kernel_for_backend(func, dialect.backend_name()));
     for func in &module.functions {
         if has_kernels && is_gpu_kernel_function(func) && !is_gpu_kernel_for_backend(func, dialect.backend_name()) {
             out.push_str(&format!(
@@ -1903,7 +1906,9 @@ fn gpu_function_matches_backend(func: &MirFunction, backend: &str) -> bool {
         .filter_map(|attr| attr.strip_prefix("gpu_target_"))
         .collect();
     if !explicit_targets.is_empty() {
-        return explicit_targets.iter().any(|target| *target == "auto" || *target == backend);
+        return explicit_targets
+            .iter()
+            .any(|target| *target == "auto" || *target == backend);
     }
 
     let backend_order: Vec<&str> = func
@@ -1912,7 +1917,9 @@ fn gpu_function_matches_backend(func: &MirFunction, backend: &str) -> bool {
         .filter_map(|attr| attr.strip_prefix("gpu_backend_"))
         .collect();
     if !backend_order.is_empty() {
-        return backend_order.iter().any(|candidate| *candidate == "auto" || *candidate == backend);
+        return backend_order
+            .iter()
+            .any(|candidate| *candidate == "auto" || *candidate == backend);
     }
 
     true
@@ -2108,7 +2115,10 @@ fn emit_gpu_source_terminator(out: &mut String, term: &Terminator, is_kernel: bo
             default,
         } => {
             for (value, target) in cases {
-                out.push_str(&format!("    if (v{} == {}) goto BB{};\n", discriminant.0, value, target.0));
+                out.push_str(&format!(
+                    "    if (v{} == {}) goto BB{};\n",
+                    discriminant.0, value, target.0
+                ));
             }
             out.push_str(&format!("    goto BB{};\n", default.0));
         }

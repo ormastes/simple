@@ -5,7 +5,10 @@
 use std.gc_async_mut.gpu.engine2d.backend_session.{BackendSessionKind}
 use std.gc_async_mut.gpu.engine2d.generated_kernel_dispatch.{
     GENERATED_2D_ALPHA, GENERATED_2D_COPY, GENERATED_2D_FILL, GENERATED_2D_SCROLL,
-    generated_2d_launch_plan
+    Generated2DSessionRuntimeProvenance,
+    generated_2d_launch_plan,
+    generated_2d_session_launch_gate,
+    generated_2d_session_runtime_provenance
 }
 use std.gc_async_mut.gpu.engine2d.sffi_opencl.{OpenClFfi}
 
@@ -180,27 +183,23 @@ class OpenClSession:
         self._evidence("launch_kernel", false, "submit-failed", "opencl-kernel-submit-failed", self.kernel_cache, false, 0, 0)
 
     me launch_generated_2d(op: text, width: i64, height: i64, args_ptr: i64) -> i64:
-        if self.ffi == nil or self.queue == 0 or self.program == 0:
-            return 1
-        if args_ptr == 0:
-            return 1
-        val plan = generated_2d_launch_plan("opencl", op, width, height)
-        if not plan.dispatch_ready:
+        val gate = generated_2d_session_launch_gate("opencl", op, width, height, self.ffi != nil and self.queue != 0, self.program != 0, args_ptr)
+        if not gate.ready:
             return 1
         if op == GENERATED_2D_FILL:
-            return self._launch_generated_fill_u32(plan.entry_name, args_ptr, width, height, plan.grid_x, plan.grid_y, plan.block_x, plan.block_y)
-        self.launch_kernel(plan.entry_name, plan.grid_x, plan.grid_y, plan.block_x, plan.block_y)
+            return self._launch_generated_fill_u32(gate.plan.entry_name, args_ptr, width, height, gate.plan.grid_x, gate.plan.grid_y, gate.plan.block_x, gate.plan.block_y)
+        self.launch_kernel(gate.plan.entry_name, gate.plan.grid_x, gate.plan.grid_y, gate.plan.block_x, gate.plan.block_y)
 
     me launch_generated_2d_evidence(op: text, width: i64, height: i64, args_ptr: i64) -> OpenClSessionEvidence:
-        val plan = generated_2d_launch_plan("opencl", op, width, height)
         val operation = "launch_generated_2d:{op}"
-        if not plan.dispatch_ready:
-            return self._evidence(operation, false, "plan-not-ready", plan.reason, 0, false, 0, 0)
-        if args_ptr == 0:
+        val gate = generated_2d_session_launch_gate("opencl", op, width, height, self.ffi != nil and self.queue != 0, self.program != 0, args_ptr)
+        if not gate.plan.dispatch_ready:
+            return self._evidence(operation, false, "plan-not-ready", gate.plan.reason, 0, false, 0, 0)
+        if gate.reason == "missing-args-pointer":
             return self._evidence(operation, false, "missing-args-pointer", "missing-generated-2d-args-pointer", 0, false, 0, 0)
-        if self.ffi == nil:
+        if gate.reason == "runtime-not-ready" and self.ffi == nil:
             return self._evidence(operation, false, "missing-ffi", "missing-opencl-ffi", 0, false, 0, 0)
-        if self.queue == 0 or self.program == 0:
+        if gate.reason == "runtime-not-ready" or gate.reason == "module-not-loaded":
             return self._evidence(operation, false, "missing-program-or-queue", "missing-opencl-program-or-queue", 0, false, 0, 0)
         val rc = self.launch_generated_2d(op, width, height, args_ptr)
         if rc == 0:
@@ -208,6 +207,9 @@ class OpenClSession:
         if self.kernel_cache == 0:
             return self._evidence(operation, false, "missing-kernel", "opencl-generated-2d-kernel-create-failed", 0, false, 0, 0)
         self._evidence(operation, false, "submit-failed", "opencl-generated-2d-kernel-submit-failed", self.kernel_cache, false, 0, 0)
+
+    me launch_generated_2d_runtime_provenance(op: text, width: i64, height: i64, args_ptr: i64) -> Generated2DSessionRuntimeProvenance:
+        generated_2d_session_runtime_provenance("opencl", op, width, height, self.ffi != nil and self.queue != 0, self.program != 0, args_ptr)
 
     me launch_fill_u32(dst: i64, width: i64, height: i64, color: i64) -> i64:
         if self.ffi == nil or self.queue == 0 or self.program == 0 or dst == 0 or width <= 0 or height <= 0:
@@ -317,6 +319,21 @@ class OpenClSession:
         if self.ffi == nil or self.queue == 0 or buffer == 0 or host_ptr == 0 or size <= 0:
             return false
         self.ffi.read_buffer(self.queue, buffer, host_ptr, size)
+
+    me read_buffer_evidence(buffer: i64, host_ptr: i64, size: i64, expected_checksum: i64, actual_checksum: i64) -> OpenClSessionEvidence:
+        if self.ffi == nil:
+            return self._evidence("read_buffer", false, "missing-ffi", "missing-opencl-ffi", 0, false, expected_checksum, actual_checksum)
+        if self.queue == 0:
+            return self._evidence("read_buffer", false, "missing-queue", "missing-opencl-queue", 0, false, expected_checksum, actual_checksum)
+        if buffer == 0:
+            return self._evidence("read_buffer", false, "missing-buffer", "missing-opencl-device-buffer", 0, false, expected_checksum, actual_checksum)
+        if host_ptr == 0:
+            return self._evidence("read_buffer", false, "missing-host-buffer", "missing-opencl-host-readback-buffer", 0, false, expected_checksum, actual_checksum)
+        if size <= 0:
+            return self._evidence("read_buffer", false, "invalid-size", "invalid-opencl-readback-size", 0, false, expected_checksum, actual_checksum)
+        if not self.read_buffer(buffer, host_ptr, size):
+            return self._evidence("read_buffer", false, "readback-failed", "opencl-buffer-read-failed", 0, false, expected_checksum, actual_checksum)
+        self.readback_evidence(true, expected_checksum, actual_checksum)
 
     me set_kernel_arg_i64(kernel: i64, index: i64, value: i64) -> bool:
         if self.ffi == nil or kernel == 0 or index < 0:

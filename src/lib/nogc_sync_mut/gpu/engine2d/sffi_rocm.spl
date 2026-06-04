@@ -3,9 +3,9 @@
 @tag:stdlib
 @tag:gpu
 
-Wraps HIP runtime API functions behind a RocmFfi class. Dynamic-first
-since no Rust runtime exists for rt_rocm_*. The static path resolves
-to extern fn stubs that will link-error unless the runtime is built.
+Wraps HIP runtime API functions behind a RocmFfi class. The static path
+uses interpreter-owned rt_rocm_* hooks; dynamic mode remains available for
+integer-only probes through DynLib.
 
 Usage:
     val sffi = RocmFfi.create(GpuFfiMode.Dynamic)  # primary path
@@ -17,7 +17,7 @@ use std.sffi.dynamic.{DynLib}
 use std.gpu.engine2d.sffi_dispatch.{GpuFfiMode, FfiDispatchBase, try_load_gpu_lib}
 
 # ============================================================================
-# Static extern declarations (no runtime impl yet — will link-error)
+# Static extern declarations
 # ============================================================================
 
 extern fn rt_rocm_init() -> bool
@@ -137,12 +137,39 @@ impl FfiDispatchBase for RocmFfi:
                 else:
                     false
 
+    fn module_load(source: text) -> i64:
+        match self._mode:
+            case Static: rt_rocm_module_load(source)
+            case Dynamic:
+                # DynLib only supports integer arguments; HIP module loading
+                # needs a text/image pointer contract owned by the runtime.
+                0
+
+    fn kernel_get(module: i64, name: text) -> i64:
+        match self._mode:
+            case Static: rt_rocm_kernel_get(module, name)
+            case Dynamic:
+                0
+
+    fn launch_kernel_args(kernel: i64, gx: i64, gy: i64, gz: i64, bx: i64, by: i64, bz: i64, shared_mem: i64, args_ptr: i64) -> bool:
+        match self._mode:
+            case Static: rt_rocm_launch_kernel(kernel, gx, gy, gz, bx, by, bz, shared_mem, args_ptr)
+            case Dynamic:
+                false
+
     fn launch_kernel(name: text, gx: i64, gy: i64, gz: i64, bx: i64, by: i64, bz: i64, shared_mem: i64) -> bool:
         # A kernel name alone is not enough for HIP dispatch. Launching with
         # module/kernel handle 0 can report misleading success or crash in real
         # runtimes, so this convenience path fails closed until RocmSession owns
         # a loaded module and explicit kernel handle.
         false
+
+    fn read_pixels(buffer: i64, pixels: [u32], byte_size: i64) -> bool:
+        match self._mode:
+            case Static:
+                rt_engine2d_rocm_download_pixels(buffer, pixels, byte_size) == 0
+            case Dynamic:
+                false
 
     fn synchronize() -> bool:
         match self._mode:

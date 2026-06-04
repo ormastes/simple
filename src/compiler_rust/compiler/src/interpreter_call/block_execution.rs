@@ -477,14 +477,14 @@ pub(super) fn exec_block_closure(
                     impl_methods,
                 )?;
                 let iter_values = get_iterator_values(&iterable)?;
-                'for_loop_own: for val in iter_values {
-                    if let simple_parser::ast::Pattern::Identifier(ref name) = for_stmt.pattern {
-                        local_env.insert(name.clone(), val);
-                    } else if let simple_parser::ast::Pattern::MutIdentifier(ref name) = for_stmt.pattern {
-                        local_env.insert(name.clone(), val);
-                    } else if let simple_parser::ast::Pattern::MoveIdentifier(ref name) = for_stmt.pattern {
-                        local_env.insert(name.clone(), val);
-                    }
+                let is_dict_iteration = matches!(&iterable, Value::Dict(_));
+                'for_loop_own: for (index, val) in iter_values.into_iter().enumerate() {
+                    let bind_value = if for_stmt.auto_enumerate && !is_dict_iteration {
+                        Value::Tuple(vec![Value::Int(index as i64), val])
+                    } else {
+                        val
+                    };
+                    bind_pattern_value(&for_stmt.pattern, bind_value, false, &mut local_env);
                     match exec_block_closure_mut(
                         &for_stmt.body.statements,
                         &mut local_env,
@@ -1132,14 +1132,14 @@ fn exec_block_closure_mut(
             Node::For(for_stmt) => {
                 let iterable = evaluate_expr(&for_stmt.iterable, local_env, functions, classes, enums, impl_methods)?;
                 let iter_values = get_iterator_values(&iterable)?;
-                'for_loop: for val in iter_values {
-                    if let simple_parser::ast::Pattern::Identifier(ref name) = for_stmt.pattern {
-                        local_env.insert(name.clone(), val);
-                    } else if let simple_parser::ast::Pattern::MutIdentifier(ref name) = for_stmt.pattern {
-                        local_env.insert(name.clone(), val);
-                    } else if let simple_parser::ast::Pattern::MoveIdentifier(ref name) = for_stmt.pattern {
-                        local_env.insert(name.clone(), val);
-                    }
+                let is_dict_iteration = matches!(&iterable, Value::Dict(_));
+                'for_loop: for (index, val) in iter_values.into_iter().enumerate() {
+                    let bind_value = if for_stmt.auto_enumerate && !is_dict_iteration {
+                        Value::Tuple(vec![Value::Int(index as i64), val])
+                    } else {
+                        val
+                    };
+                    bind_pattern_value(&for_stmt.pattern, bind_value, false, local_env);
                     match exec_block_closure_mut(
                         &for_stmt.body.statements,
                         local_env,

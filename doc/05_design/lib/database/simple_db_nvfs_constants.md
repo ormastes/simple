@@ -1,6 +1,6 @@
 # Design — simple_db_nvfs_constants
 
-The implementation introduces a narrow `examples/11_advanced/nvfs/src/core/constants.spl` module as
+The implementation introduces a narrow `src/os/services/nvfs/src/core/constants.spl` module as
 the canonical source for cross-submodule integer ordinals still required by arena APIs.
 
 Constants:

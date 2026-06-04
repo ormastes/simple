@@ -1040,12 +1040,8 @@ fn exec_assignment(
                 // value semantics.
                 let case2_unique = match env.get(obj_name) {
                     Some(Value::Object { fields, .. }) => match fields.get(field_name) {
-                        Some(Value::Array(arc)) => {
-                            Arc::strong_count(arc) == 1 && Arc::weak_count(arc) == 0
-                        }
-                        Some(Value::Dict(arc)) => {
-                            Arc::strong_count(arc) == 1 && Arc::weak_count(arc) == 0
-                        }
+                        Some(Value::Array(arc)) => Arc::strong_count(arc) == 1 && Arc::weak_count(arc) == 0,
+                        Some(Value::Dict(arc)) => Arc::strong_count(arc) == 1 && Arc::weak_count(arc) == 0,
                         _ => false,
                     },
                     _ => false,

@@ -27,7 +27,7 @@ cuda_session_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -104,6 +104,39 @@ expect(session.launch_generated_2d("unsupported", 64, 64, 4096)).to_equal(1)
 
 </details>
 
+#### reports shared generated 2D runtime provenance without hardware
+
+1. var session = CudaSession create
+   - Expected: missing_runtime.ready is false
+   - Expected: missing_runtime.typed_status equals `cuda-runtime-unavailable`
+   - Expected: missing_module.typed_status equals `cuda-module-unavailable`
+   - Expected: missing_args.typed_status equals `args-unavailable`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = CudaSession.create()
+val missing_runtime = session.launch_generated_2d_runtime_provenance(GENERATED_2D_FILL, 64, 64, 4096)
+session.is_initialized = true
+session.ctx = 7
+val missing_module = session.launch_generated_2d_runtime_provenance(GENERATED_2D_FILL, 64, 64, 4096)
+session.module_cache = 11
+val missing_args = session.launch_generated_2d_runtime_provenance(GENERATED_2D_FILL, 64, 64, 0)
+
+expect(missing_runtime.ready).to_equal(false)
+expect(missing_runtime.typed_status).to_equal("cuda-runtime-unavailable")
+expect(missing_module.typed_status).to_equal("cuda-module-unavailable")
+expect(missing_args.typed_status).to_equal("args-unavailable")
+expect(missing_args.diagnostic_text()).to_contain("launch=rt_cuda_launch_kernel")
+```
+
+</details>
+
 #### shutdown is safe on an uninitialized session
 
 1. var session = CudaSession create
@@ -148,8 +181,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

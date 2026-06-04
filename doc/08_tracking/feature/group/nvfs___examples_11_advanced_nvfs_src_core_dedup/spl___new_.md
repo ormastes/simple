@@ -1,4 +1,4 @@
-# nvfs__(examples/11_advanced/nvfs/src/core/dedup.spl_—_new)
+# nvfs__(src/os/services/nvfs/src/core/dedup.spl_—_new)
 
 ## Features
 

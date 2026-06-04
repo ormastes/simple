@@ -1,6 +1,6 @@
 # Web Render Backend Api Specification
 
-> 1. Err
+> <details>
 
 <!-- sdn-diagram:id=web_render_backend_api_spec.arch -->
 <details class="sdn-source">
@@ -29,7 +29,7 @@ web_render_backend_api_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -39,6 +39,26 @@ web_render_backend_api_spec -> std
 ## Scenarios
 
 ### web render backends use the shared common API
+
+#### keeps headless as an explicit no-display render target
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val req = WebRenderRequest.html(WEB_RENDER_TARGET_HEADLESS, "Headless", "<main>headless</main>", "", "", 80, 24)
+val artifact = web_render_to_artifact(req)
+
+expect(artifact.target).to_equal(WEB_RENDER_TARGET_HEADLESS)
+expect(artifact.capability_summary).to_equal("headless")
+expect(web_render_capability_summary(WEB_RENDER_TARGET_HEADLESS)).to_equal("headless")
+expect(web_render_capabilities_for_target(WEB_RENDER_TARGET_HEADLESS).len()).to_equal(0)
+```
+
+</details>
 
 #### keeps render_html as body-only HTML for web electron and tauri
 
@@ -155,6 +175,86 @@ match backend_result:
         val ppm = backend.snapshot_ppm_text()
         expect(ppm).to_start_with("P3\n64 48\n255\n")
         expect(ppm).to_contain("255\n")
+```
+
+</details>
+
+#### records shared render request provenance across GUI web and headless targets
+
+1. web render request provenance evidence
+
+2. web render request provenance evidence
+
+3. web render request provenance evidence
+
+4. web render request provenance evidence
+
+5. web render request provenance evidence
+
+6. web render request provenance evidence
+   - Expected: matrix.len() equals `6`
+   - Expected: row.surface_id equals `main`
+   - Expected: row.request_has_body is true
+   - Expected: row.semantic_attached is true
+   - Expected: row.artifact_target_matches is true
+   - Expected: row.artifact_dimensions_match is true
+   - Expected: row.artifact_has_html is true
+   - Expected: row.ready is true
+   - Expected: row.reason equals `pass`
+   - Expected: matrix[0].target equals `WEB_RENDER_TARGET_SIMPLE_WEB`
+   - Expected: matrix[2].artifact_has_ipc_or_pixels is true
+   - Expected: matrix[3].artifact_has_ipc_or_pixels is true
+   - Expected: matrix[4].target equals `WEB_RENDER_TARGET_HEADLESS`
+   - Expected: matrix[5].target equals `WEB_RENDER_TARGET_PURE_SIMPLE`
+   - Expected: matrix[5].engine2d_status equals `WEB_RENDER_ENGINE2D_STATUS_RENDERED`
+   - Expected: matrix[5].engine2d_backend equals `software`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 38 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val state = sample_state()
+val body = WebBackend.new(4015).render_html(state)
+val css = generate_css(state.tree.theme_name())
+val semantic_json = WebBackend.new(4016).semantic_snapshot_json(state)
+val web_req = web_render_adapter_request(WEB_RENDER_TARGET_SIMPLE_WEB, "main", "", body, css, "", 1280, 720)
+val tui_req = web_render_adapter_request(WEB_RENDER_TARGET_TUI_WEB, "main", "", body, "", "", 120, 40)
+val electron_req = web_render_adapter_request(WEB_RENDER_TARGET_ELECTRON, "main", "", body, css, "", 1280, 720)
+val tauri_req = web_render_adapter_request(WEB_RENDER_TARGET_TAURI, "main", "", body, css, "", 1280, 720)
+val headless_req = web_render_adapter_request(WEB_RENDER_TARGET_HEADLESS, "main", "", body, "", "", 80, 24)
+val pure_req = web_render_adapter_request(WEB_RENDER_TARGET_PURE_SIMPLE, "main", "", body, css, "", 64, 48).with_pixel_output()
+val pure_artifact = web_render_engine2d_rendered_artifact(web_render_pixel_artifact(pure_req, [1u32, 2u32, 3u32, 4u32]), "software")
+val matrix = [
+    web_render_request_provenance_evidence(web_req, web_render_to_artifact(web_req), semantic_json),
+    web_render_request_provenance_evidence(tui_req, web_render_to_artifact(tui_req), semantic_json),
+    web_render_request_provenance_evidence(electron_req, web_render_to_artifact(electron_req), semantic_json),
+    web_render_request_provenance_evidence(tauri_req, web_render_to_artifact(tauri_req), semantic_json),
+    web_render_request_provenance_evidence(headless_req, web_render_to_artifact(headless_req), semantic_json),
+    web_render_request_provenance_evidence(pure_req, pure_artifact, semantic_json)
+]
+
+expect(matrix.len()).to_equal(6)
+for row in matrix:
+    expect(row.surface_id).to_equal("main")
+    expect(row.request_has_body).to_equal(true)
+    expect(row.semantic_attached).to_equal(true)
+    expect(row.artifact_target_matches).to_equal(true)
+    expect(row.artifact_dimensions_match).to_equal(true)
+    expect(row.artifact_has_html).to_equal(true)
+    expect(row.ready).to_equal(true)
+    expect(row.reason).to_equal("pass")
+expect(matrix[0].target).to_equal(WEB_RENDER_TARGET_SIMPLE_WEB)
+expect(matrix[2].artifact_has_ipc_or_pixels).to_equal(true)
+expect(matrix[3].artifact_has_ipc_or_pixels).to_equal(true)
+expect(matrix[4].target).to_equal(WEB_RENDER_TARGET_HEADLESS)
+expect(matrix[5].target).to_equal(WEB_RENDER_TARGET_PURE_SIMPLE)
+expect(matrix[5].engine2d_status).to_equal(WEB_RENDER_ENGINE2D_STATUS_RENDERED)
+expect(matrix[5].engine2d_backend).to_equal("software")
+expect(matrix[5].summary()).to_contain("engine2d_status=engine2d_rendered")
 ```
 
 </details>
@@ -377,8 +477,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

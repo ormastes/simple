@@ -1355,9 +1355,7 @@ fn require_u32_value(name: &str, value: &Value) -> Result<u32, CompileError> {
 fn unpack_u32_array(name: &str, value: &Value) -> Result<Vec<u32>, CompileError> {
     match value {
         Value::Array(items) => items.iter().map(|item| require_u32_value(name, item)).collect(),
-        Value::FrozenArray(items) => {
-            items.iter().map(|item| require_u32_value(name, item)).collect()
-        }
+        Value::FrozenArray(items) => items.iter().map(|item| require_u32_value(name, item)).collect(),
         other => Err(CompileError::runtime(format!(
             "{name}: expected [u32] array, got {:?}",
             other
@@ -1369,7 +1367,10 @@ fn pack_u32_array(pixels: Vec<u32>) -> Value {
     Value::array(
         pixels
             .into_iter()
-            .map(|p| Value::UInt { value: p as u64, width: 32 })
+            .map(|p| Value::UInt {
+                value: p as u64,
+                width: 32,
+            })
             .collect(),
     )
 }

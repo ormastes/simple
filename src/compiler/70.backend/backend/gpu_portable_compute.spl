@@ -113,6 +113,112 @@ class PortableComputeCompileResult:
     fn summary() -> text:
         "PortableComputeCompileResult[target={self.invocation.plan.target_name()} entry={self.invocation.plan.entry_name} status={self.status} ready={self.ready.to_text()} diagnostic={self.diagnostic}]"
 
+class PortableComputeBackendTargetRequest:
+    backend_order: text
+    targets: [PortableComputeTarget]
+    unsupported_backend_names: text
+    ready: bool
+    diagnostic: text
+
+    fn target_names() -> text:
+        portable_compute_target_names(self.targets)
+
+    fn summary() -> text:
+        "PortableComputeBackendTargetRequest[backends={self.backend_order} targets={self.target_names()} ready={self.ready.to_text()} unsupported={self.unsupported_backend_names}]"
+
+class PortableComputeBackendTargetDiagnostic:
+    backend_name: text
+    normalized_backend_name: text
+    accepted: bool
+    target_name: text
+    status: text
+    diagnostic: text
+
+    fn summary() -> text:
+        "PortableComputeBackendTargetDiagnostic[backend={self.backend_name} normalized={self.normalized_backend_name} accepted={self.accepted.to_text()} target={self.target_name} status={self.status}]"
+
+class PortableComputeBackendArtifactPlan:
+    request: PortableComputeBackendTargetRequest
+    artifacts: [PortableComputeArtifact]
+    plans: [PortableComputeCompilePlan]
+    ready: bool
+    diagnostic: text
+
+    fn target_names() -> text:
+        self.request.target_names()
+
+    fn summary() -> text:
+        "PortableComputeBackendArtifactPlan[targets={self.target_names()} artifacts={self.artifacts.len()} plans={self.plans.len()} ready={self.ready.to_text()}]"
+
+class PortableComputeOperationMetadata:
+    tag_kind: text
+    backend_order: text
+    target_name: text
+    operation_family: text
+    generated_operation: text
+    entry_symbol: text
+    source_format: text
+    binary_format: text
+    artifact_path_suffix: text
+    cpu_preprocess_required: bool
+    ready: bool
+    status: text
+    diagnostic: text
+
+    static fn create(tag_kind: text, backend_order: text, target: PortableComputeTarget, operation_family: text, output_stem: text) -> PortableComputeOperationMetadata:
+        val generated = portable_compute_operation_generated_name(operation_family)
+        if generated == "":
+            return PortableComputeOperationMetadata.unavailable(tag_kind, backend_order, portable_compute_target_name(target), operation_family, "unsupported-operation-family", "unsupported generated 2D operation family: {operation_family}")
+        val target_name = portable_compute_target_name(target)
+        val binary = portable_compute_binary_format(target)
+        PortableComputeOperationMetadata(
+            tag_kind: tag_kind,
+            backend_order: backend_order,
+            target_name: target_name,
+            operation_family: operation_family,
+            generated_operation: generated,
+            entry_symbol: generated,
+            source_format: portable_compute_source_format(target),
+            binary_format: binary,
+            artifact_path_suffix: "{output_stem}.{binary}",
+            cpu_preprocess_required: portable_compute_operation_needs_cpu_preprocess(operation_family),
+            ready: true,
+            status: "metadata-ready",
+            diagnostic: ""
+        )
+
+    static fn unavailable(tag_kind: text, backend_order: text, target_name: text, operation_family: text, status: text, diagnostic: text) -> PortableComputeOperationMetadata:
+        PortableComputeOperationMetadata(
+            tag_kind: tag_kind,
+            backend_order: backend_order,
+            target_name: target_name,
+            operation_family: operation_family,
+            generated_operation: "",
+            entry_symbol: "",
+            source_format: "none",
+            binary_format: "none",
+            artifact_path_suffix: "",
+            cpu_preprocess_required: false,
+            ready: false,
+            status: status,
+            diagnostic: diagnostic
+        )
+
+    fn summary() -> text:
+        "PortableComputeOperationMetadata[tag={self.tag_kind} backend_order={self.backend_order} target={self.target_name} family={self.operation_family} op={self.generated_operation} entry={self.entry_symbol} binary={self.binary_format} ready={self.ready.to_text()} status={self.status}]"
+
+class PortableComputeOperationMetadataPlan:
+    request: PortableComputeBackendTargetRequest
+    rows: [PortableComputeOperationMetadata]
+    ready: bool
+    diagnostic: text
+
+    fn target_names() -> text:
+        self.request.target_names()
+
+    fn summary() -> text:
+        "PortableComputeOperationMetadataPlan[targets={self.target_names()} rows={self.rows.len()} ready={self.ready.to_text()} diagnostic={self.diagnostic}]"
+
 fn portable_compute_target_name(target: PortableComputeTarget) -> text:
     match target:
         case Cuda: "cuda"
@@ -140,6 +246,124 @@ fn portable_compute_tool_hint(target: PortableComputeTarget) -> text:
         case Hip: "hiprtc-or-hipcc"
         case OpenCl: "opencl-c-to-spirv"
         case Metal: "metal-and-metallib"
+
+fn portable_compute_target_names(targets: [PortableComputeTarget]) -> text:
+    var names: [text] = []
+    for target in targets:
+        names.push(portable_compute_target_name(target))
+    names.join(",")
+
+fn portable_compute_backend_name_is_auto(name: text) -> bool:
+    val clean = name.trim().lower()
+    clean == "" or clean == "auto" or clean == "all" or clean == "*"
+
+fn portable_compute_backend_name_is_cuda(name: text) -> bool:
+    val clean = name.trim().lower()
+    clean == "cuda" or clean == "ptx" or clean == "cuda-ptx" or clean == "nvptx"
+
+fn portable_compute_backend_name_is_hip(name: text) -> bool:
+    val clean = name.trim().lower()
+    clean == "hip" or clean == "rocm" or clean == "hip-cpp" or clean == "hipcc" or clean == "hsaco"
+
+fn portable_compute_backend_name_is_opencl(name: text) -> bool:
+    val clean = name.trim().lower()
+    clean == "opencl" or clean == "opencl-c" or clean == "opencl-spirv" or clean == "cl" or clean == "spirv"
+
+fn portable_compute_backend_name_is_metal(name: text) -> bool:
+    val clean = name.trim().lower()
+    clean == "metal" or clean == "msl" or clean == "metallib" or clean == "metal-shading-language"
+
+fn portable_compute_backend_name_is_vulkan(name: text) -> bool:
+    val clean = name.trim().lower()
+    clean == "vulkan" or clean == "vulkan-spirv"
+
+fn portable_compute_backend_target_diagnostic(backend_name: text) -> PortableComputeBackendTargetDiagnostic:
+    val clean = backend_name.trim().lower()
+    if portable_compute_backend_name_is_auto(clean):
+        return PortableComputeBackendTargetDiagnostic(
+            backend_name: backend_name,
+            normalized_backend_name: "auto",
+            accepted: true,
+            target_name: "cuda,hip,opencl,metal",
+            status: "accepted-auto",
+            diagnostic: ""
+        )
+    if portable_compute_backend_name_is_cuda(clean):
+        return PortableComputeBackendTargetDiagnostic(backend_name: backend_name, normalized_backend_name: "cuda", accepted: true, target_name: "cuda", status: "accepted", diagnostic: "")
+    if portable_compute_backend_name_is_hip(clean):
+        return PortableComputeBackendTargetDiagnostic(backend_name: backend_name, normalized_backend_name: "hip", accepted: true, target_name: "hip", status: "accepted", diagnostic: "")
+    if portable_compute_backend_name_is_opencl(clean):
+        return PortableComputeBackendTargetDiagnostic(backend_name: backend_name, normalized_backend_name: "opencl", accepted: true, target_name: "opencl", status: "accepted", diagnostic: "")
+    if portable_compute_backend_name_is_metal(clean):
+        return PortableComputeBackendTargetDiagnostic(backend_name: backend_name, normalized_backend_name: "metal", accepted: true, target_name: "metal", status: "accepted", diagnostic: "")
+    if portable_compute_backend_name_is_vulkan(clean):
+        return PortableComputeBackendTargetDiagnostic(
+            backend_name: backend_name,
+            normalized_backend_name: "vulkan",
+            accepted: false,
+            target_name: "vulkan",
+            status: "unsupported-vulkan-spirv",
+            diagnostic: "Vulkan SPIR-V is compiled by the Vulkan backend, not the portable generated 2D CUDA/HIP/OpenCL/Metal emitter"
+        )
+    PortableComputeBackendTargetDiagnostic(
+        backend_name: backend_name,
+        normalized_backend_name: clean,
+        accepted: false,
+        target_name: "",
+        status: "unsupported-backend",
+        diagnostic: "unsupported portable compute backend: {clean}"
+    )
+
+fn portable_compute_targets_contain(targets: [PortableComputeTarget], target: PortableComputeTarget) -> bool:
+    for item in targets:
+        if item == target:
+            return true
+    false
+
+fn portable_compute_push_target_once(targets: [PortableComputeTarget], target: PortableComputeTarget) -> [PortableComputeTarget]:
+    var out = targets
+    if not portable_compute_targets_contain(out, target):
+        out.push(target)
+    out
+
+fn portable_compute_all_targets() -> [PortableComputeTarget]:
+    [PortableComputeTarget.Cuda, PortableComputeTarget.Hip, PortableComputeTarget.OpenCl, PortableComputeTarget.Metal]
+
+fn portable_compute_backend_targets_from_order(backend_order: text) -> PortableComputeBackendTargetRequest:
+    var targets: [PortableComputeTarget] = []
+    var unsupported: [text] = []
+    var saw_auto = false
+    val parts = backend_order.split(",")
+    for part in parts:
+        val clean = part.trim().lower()
+        if portable_compute_backend_name_is_auto(clean):
+            saw_auto = true
+        elif portable_compute_backend_name_is_cuda(clean):
+            targets = portable_compute_push_target_once(targets, PortableComputeTarget.Cuda)
+        elif portable_compute_backend_name_is_hip(clean):
+            targets = portable_compute_push_target_once(targets, PortableComputeTarget.Hip)
+        elif portable_compute_backend_name_is_opencl(clean):
+            targets = portable_compute_push_target_once(targets, PortableComputeTarget.OpenCl)
+        elif portable_compute_backend_name_is_metal(clean):
+            targets = portable_compute_push_target_once(targets, PortableComputeTarget.Metal)
+        else:
+            unsupported.push(clean)
+    if saw_auto or backend_order.trim() == "":
+        targets = portable_compute_all_targets()
+    val ready = targets.len() > 0 and unsupported.len() == 0
+    val unsupported_names = unsupported.join(",")
+    PortableComputeBackendTargetRequest(
+        backend_order: backend_order,
+        targets: targets,
+        unsupported_backend_names: unsupported_names,
+        ready: ready,
+        diagnostic: if ready:
+            ""
+        elif targets.len() == 0:
+            "no portable compute backends selected"
+        else:
+            "unsupported portable compute backend(s): {unsupported_names}"
+    )
 
 fn portable_compute_expected_artifact_magic(target: PortableComputeTarget) -> text:
     match target:
@@ -392,6 +616,22 @@ fn emit_portable_2d_optimization_kernels(target: PortableComputeTarget) -> [Port
 fn portable_compute_2d_required_symbols() -> text:
     "simple_2d_fill_u32 simple_2d_copy_u32 simple_2d_alpha_u32 simple_2d_scroll_u32"
 
+fn portable_compute_operation_generated_name(operation_family: text) -> text:
+    val clean = operation_family.trim().lower()
+    if clean == "vector" or clean == "rect" or clean == "rect_filled" or clean == "fill":
+        return "simple_2d_fill_u32"
+    if clean == "image" or clean == "image_blit" or clean == "copy" or clean == "font" or clean == "text" or clean == "text_blit":
+        return "simple_2d_copy_u32"
+    if clean == "alpha" or clean == "alpha_blend" or clean == "image_alpha":
+        return "simple_2d_alpha_u32"
+    if clean == "scroll":
+        return "simple_2d_scroll_u32"
+    ""
+
+fn portable_compute_operation_needs_cpu_preprocess(operation_family: text) -> bool:
+    val clean = operation_family.trim().lower()
+    clean == "font" or clean == "text" or clean == "text_blit"
+
 fn emit_portable_2d_optimization_module(target: PortableComputeTarget) -> PortableComputeArtifact:
     val fill = emit_portable_2d_fill_u32_kernel(target)
     val copy = emit_portable_2d_copy_u32_kernel(target)
@@ -404,11 +644,70 @@ fn emit_portable_2d_optimization_module(target: PortableComputeTarget) -> Portab
         binary_format: portable_compute_binary_format(target)
     )
 
+fn portable_compute_operation_metadata(tag_kind: text, backend_order: text, operation_family: text, output_stem: text) -> PortableComputeOperationMetadataPlan:
+    val request = portable_compute_backend_targets_from_order(backend_order)
+    var rows: [PortableComputeOperationMetadata] = []
+    for target in request.targets:
+        rows.push(PortableComputeOperationMetadata.create(tag_kind, backend_order, target, operation_family, output_stem))
+    if request.unsupported_backend_names != "":
+        val unsupported = request.unsupported_backend_names.split(",")
+        for backend_name in unsupported:
+            val diagnostic = portable_compute_backend_target_diagnostic(backend_name)
+            rows.push(PortableComputeOperationMetadata.unavailable(
+                tag_kind,
+                backend_order,
+                diagnostic.normalized_backend_name,
+                operation_family,
+                diagnostic.status,
+                diagnostic.diagnostic
+            ))
+    val operation_supported = portable_compute_operation_generated_name(operation_family) != ""
+    val row_ready = portable_compute_operation_rows_ready(rows)
+    PortableComputeOperationMetadataPlan(
+        request: request,
+        rows: rows,
+        ready: request.ready and operation_supported and row_ready and rows.len() > 0,
+        diagnostic: portable_compute_operation_metadata_plan_diagnostic(request, operation_family, rows)
+    )
+
+fn portable_compute_operation_rows_ready(rows: [PortableComputeOperationMetadata]) -> bool:
+    if rows.len() == 0:
+        return false
+    for row in rows:
+        if not row.ready:
+            return false
+    true
+
+fn portable_compute_operation_metadata_plan_diagnostic(request: PortableComputeBackendTargetRequest, operation_family: text, rows: [PortableComputeOperationMetadata]) -> text:
+    if portable_compute_operation_generated_name(operation_family) == "":
+        return "unsupported generated 2D operation family: {operation_family}"
+    if not request.ready:
+        return request.diagnostic
+    for row in rows:
+        if not row.ready:
+            return row.diagnostic
+    ""
+
 fn portable_compute_2d_optimization_compile_plan(target: PortableComputeTarget, output_stem: text) -> PortableComputeCompilePlan:
     portable_compute_compile_plan_with_required_symbols(
         emit_portable_2d_optimization_module(target),
         output_stem,
         portable_compute_2d_required_symbols()
+    )
+
+fn portable_compute_2d_optimization_backend_plan(backend_order: text, output_stem: text) -> PortableComputeBackendArtifactPlan:
+    val request = portable_compute_backend_targets_from_order(backend_order)
+    var artifacts: [PortableComputeArtifact] = []
+    var plans: [PortableComputeCompilePlan] = []
+    for target in request.targets:
+        artifacts.push(emit_portable_2d_optimization_module(target))
+        plans.push(portable_compute_2d_optimization_compile_plan(target, output_stem))
+    PortableComputeBackendArtifactPlan(
+        request: request,
+        artifacts: artifacts,
+        plans: plans,
+        ready: request.ready and artifacts.len() == plans.len() and plans.len() > 0,
+        diagnostic: if request.ready: "" else: request.diagnostic
     )
 
 fn emit_portable_compute_smoke_matrix() -> [PortableComputeArtifact]:

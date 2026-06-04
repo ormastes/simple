@@ -306,32 +306,32 @@ Features specified but not yet implemented
 | FR-NVFS-N6b-001 | Raw send / encrypted replication stream (btrfs-send style) | Stream a sealed MODEL_IMMUTABLE arena between peers without decrypting the payload.  Ciphertext + key metadata travel over the wire as a self-describing byte stream (magic `NVSR`, 16-byte header, per-arena begin/extent/end records). | - |
 | FR-STORAGE-0004 | MountTable.resolve() uses slice() which is broken in baremetal Cranelift | Rewrite `MountTable.resolve(path)` in `src/lib/nogc_sync_mut/fs_driver/mount_table.spl:129` so it does NOT call `path.raw.slice(mp_len, …)`. Cranelift's baremetal codegen has a known-broken `slice()` operation (per the hazard comment already in `shell_serial_entry.spl`); any baremetal caller routed through the mount ta | - |
 
-### nvfs__(examples/11_advanced/nvfs/src/core/arena.spl_or_new_constants.spl) (1)
+### nvfs__(src/os/services/nvfs/src/core/arena.spl_or_new_constants.spl) (1)
 
 | ID | Feature | Description | Spec |
 |----|---------|-------------|------|
-| FR-SPOSTGRE-M2-002 | Add named StorageClass and DurabilityClass constants to NVFS core | `examples/11_advanced/nvfs/src/core/arena.spl` uses `class_tag: i32` as an opaque ordinal with no named constants. Consumers (Simple DB, future callers) must either duplicate ordinal assignments or rely on comments that say "matching nvfs i" | - |
+| FR-SPOSTGRE-M2-002 | Add named StorageClass and DurabilityClass constants to NVFS core | `src/os/services/nvfs/src/core/arena.spl` uses `class_tag: i32` as an opaque ordinal with no named constants. Consumers (Simple DB, future callers) must either duplicate ordinal assignments or rely on comments that say "matching nvfs i" | - |
 
-### nvfs__(examples/11_advanced/nvfs/src/core/compression.spl_—_new) (1)
+### nvfs__(src/os/services/nvfs/src/core/compression.spl_—_new) (1)
 
 | ID | Feature | Description | Spec |
 |----|---------|-------------|------|
 | FR-NVFS-N7a-001 | Inline compression: per-arena LZ4/Zstd, class-aware defaults | Add an inline compression layer (N7a) between the logical block and the physical device. Compression is per-dataset, per-arena, and opt-in via mount option `compress=<algo>` | - |
 
-### nvfs__(examples/11_advanced/nvfs/src/core/dedup.spl_—_new) (1)
+### nvfs__(src/os/services/nvfs/src/core/dedup.spl_—_new) (1)
 
 | ID | Feature | Description | Spec |
 |----|---------|-------------|------|
 | FR-NVFS-N7b-001 | Inline deduplication: content-addressable DDT extending reflink machinery | Add an inline deduplication layer (N7b) backed by a content-addressable Deduplication Table (DDT). The DDT maps `content_hash (u8[32]) → DedupEntry` where DedupEntry carries the canonical logical_page_no, birth_gen, refcount, and flags (56  | - |
 
-### nvfs__(examples/11_advanced/nvfs/src/core/encryption.spl) (2)
+### nvfs__(src/os/services/nvfs/src/core/encryption.spl) (2)
 
 | ID | Feature | Description | Spec |
 |----|---------|-------------|------|
 | FR-NVFS-N6a-001 | Wire real AES-128-GCM into NVFS leaf DEK encrypt/decrypt | `encryption.spl` stubs (`_aes128_encrypt_stub` / `_aes128_decrypt_stub`) use XOR + checksum instead of real AES-128-GCM. Replace with calls to | - |
 | FR-NVFS-N6a-002 | KDF hardening: salted derivation for per-arena dataset keys | `_derive_data_key_bytes` used a plain XOR of master_key bytes and arena_id with no domain separation or salt. Upgrade to a salted derivation that includes | - |
 
-### nvfs__(examples/11_advanced/nvfs/src/core/encryption.spl_+_arena.spl) (1)
+### nvfs__(src/os/services/nvfs/src/core/encryption.spl_+_arena.spl) (1)
 
 | ID | Feature | Description | Spec |
 |----|---------|-------------|------|
@@ -633,11 +633,11 @@ Features specified but not yet implemented
 | lzma2 | 1 | 0 | 1 | 0.0% |
 | network_tests,_qemu_scenarios,_and_smoke_scripts | 1 | 0 | 1 | 0.0% |
 | nvfs | 10 | 0 | 10 | 0.0% |
-| nvfs__(examples/11_advanced/nvfs/src/core/arena.spl_or_new_constants.spl) | 1 | 0 | 1 | 0.0% |
-| nvfs__(examples/11_advanced/nvfs/src/core/compression.spl_—_new) | 1 | 0 | 1 | 0.0% |
-| nvfs__(examples/11_advanced/nvfs/src/core/dedup.spl_—_new) | 1 | 0 | 1 | 0.0% |
-| nvfs__(examples/11_advanced/nvfs/src/core/encryption.spl) | 2 | 0 | 2 | 0.0% |
-| nvfs__(examples/11_advanced/nvfs/src/core/encryption.spl_+_arena.spl) | 1 | 0 | 1 | 0.0% |
+| nvfs__(src/os/services/nvfs/src/core/arena.spl_or_new_constants.spl) | 1 | 0 | 1 | 0.0% |
+| nvfs__(src/os/services/nvfs/src/core/compression.spl_—_new) | 1 | 0 | 1 | 0.0% |
+| nvfs__(src/os/services/nvfs/src/core/dedup.spl_—_new) | 1 | 0 | 1 | 0.0% |
+| nvfs__(src/os/services/nvfs/src/core/encryption.spl) | 2 | 0 | 2 | 0.0% |
+| nvfs__(src/os/services/nvfs/src/core/encryption.spl_+_arena.spl) | 1 | 0 | 1 | 0.0% |
 | nvme,_virtio-blk,_vfs/fs-driver_interface | 1 | 0 | 1 | 0.0% |
 | os-kernel_(src/os/kernel/ipc/spm_port.spl_+ | 1 | 0 | 1 | 0.0% |
 | os-kernel_(src/os/kernel/ipc/syscall.spl_+ | 1 | 0 | 1 | 0.0% |

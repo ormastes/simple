@@ -51,12 +51,12 @@
 | FR-NVFS-N4a-001 | nvfs | Scrub repair path: detect + repair from reflink peers | - |
 | FR-NVFS-N4b-001 | nvfs | Proactive scrub scheduler + META_DURABLE replica repair | - |
 | FR-NVFS-N5b-001 | nvfs | B-tree rebalancing on delete (merge / rotate) | - |
-| FR-NVFS-N6a-001 | nvfs__(examples/11_advanced/nvfs/src/core/encryption.spl) | Wire real AES-128-GCM into NVFS leaf DEK encrypt/decrypt | - |
-| FR-NVFS-N6a-002 | nvfs__(examples/11_advanced/nvfs/src/core/encryption.spl) | KDF hardening: salted derivation for per-arena dataset keys | - |
-| FR-NVFS-N6a-003 | nvfs__(examples/11_advanced/nvfs/src/core/encryption.spl_+_arena.spl) | DEK rotation on arena seal | - |
+| FR-NVFS-N6a-001 | nvfs__(src/os/services/nvfs/src/core/encryption.spl) | Wire real AES-128-GCM into NVFS leaf DEK encrypt/decrypt | - |
+| FR-NVFS-N6a-002 | nvfs__(src/os/services/nvfs/src/core/encryption.spl) | KDF hardening: salted derivation for per-arena dataset keys | - |
+| FR-NVFS-N6a-003 | nvfs__(src/os/services/nvfs/src/core/encryption.spl_+_arena.spl) | DEK rotation on arena seal | - |
 | FR-NVFS-N6b-001 | nvfs | Raw send / encrypted replication stream (btrfs-send style) | - |
-| FR-NVFS-N7a-001 | nvfs__(examples/11_advanced/nvfs/src/core/compression.spl_—_new) | Inline compression: per-arena LZ4/Zstd, class-aware defaults | - |
-| FR-NVFS-N7b-001 | nvfs__(examples/11_advanced/nvfs/src/core/dedup.spl_—_new) | Inline deduplication: content-addressable DDT extending reflink machinery | - |
+| FR-NVFS-N7a-001 | nvfs__(src/os/services/nvfs/src/core/compression.spl_—_new) | Inline compression: per-arena LZ4/Zstd, class-aware defaults | - |
+| FR-NVFS-N7b-001 | nvfs__(src/os/services/nvfs/src/core/dedup.spl_—_new) | Inline deduplication: content-addressable DDT extending reflink machinery | - |
 | FR-PLUG-0001 | plugin_/_runtime | WFFI f64 calling-convention extern | [link](doc/02_requirements/feature/runtime_api_block_sugar_plugins.md) |
 | FR-PLUG-0005 | plugin_/_compiler_/_di | DI runtime-slot plugin loader integration | - |
 | FR-SIMPLE-DB-0001 | simple-db | Add ART / SP-GiST-like prefix index for text and hierarchical keys | - |
@@ -79,7 +79,7 @@
 | FR-SPM-0002 | os-kernel_(src/os/kernel/ipc/syscall.spl_+ | Caller-TaskId → privilege-mirror lookup for `sys_priv_check` (case 110) | - |
 | FR-SPM-0003 | os-kernel_(src/os/kernel/ipc/spm_port.spl_+ | Rebind syscall for SPM port when real SPM task id is known | - |
 | FR-SPOSTGRE-M2-001 | simple_db__(examples/11_advanced/simple_db/src/engine/nvfs_shim.spl) | Replace duplicated NVFS constants/types in nvfs_shim.spl with real cross-submodule imports | - |
-| FR-SPOSTGRE-M2-002 | nvfs__(examples/11_advanced/nvfs/src/core/arena.spl_or_new_constants.spl) | Add named StorageClass and DurabilityClass constants to NVFS core | - |
+| FR-SPOSTGRE-M2-002 | nvfs__(src/os/services/nvfs/src/core/arena.spl_or_new_constants.spl) | Add named StorageClass and DurabilityClass constants to NVFS core | - |
 | FR-SPOSTGRE-M4-001 | simple_db__(examples/11_advanced/simple_db/src/engine/tier_cache.spl) | L2 NVMe tier cache (Aurora Optimized Reads pattern) | - |
 | FR-SSPEC-MANUAL-0001 | sspec-manual | Add scenario-step manual metadata | - |
 | FR-SSPEC-MANUAL-0002 | sspec-manual | Add typed capture and evidence artifacts | - |

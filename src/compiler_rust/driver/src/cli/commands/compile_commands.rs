@@ -7,8 +7,8 @@ use simple_compiler::ProjectContext;
 use simple_compiler::optimizations::{format_optimization_guide, NativeOptimizationLevel};
 use simple_compiler::{default_native_codegen_backend, is_native_codegen_backend_available};
 use crate::cli::compile::{
-    compile_dynamic_driver_library, compile_file, compile_file_native, compile_file_to_hip, compile_file_to_opencl, compile_file_to_ptx, compile_file_to_vhdl,
-    list_linkers, list_targets, NativeStripMode,
+    compile_dynamic_driver_library, compile_file, compile_file_native, compile_file_to_hip, compile_file_to_opencl,
+    compile_file_to_ptx, compile_file_to_vhdl, list_linkers, list_targets, NativeStripMode,
 };
 use crate::cli::wasm_helpers::compile_to_wasm_for_target;
 use crate::CompileOptions;

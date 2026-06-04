@@ -341,7 +341,7 @@ No `extends`, no virtual methods, no superclass chains. Traits + composition + m
 
 - `jj` (Jujutsu) colocated with git, no branches, work on `main`.
 - `jj commit -m ...` for new commits; `jj bookmark set main -r @- && jj git push --bookmark main` to push.
-- Submodules via git (`examples/Simple DB`, `examples/11_advanced/nvfs`) pointing at private `ormastes/*` repos.
+- Submodules via git (`examples/Simple DB`, `src/os/services/nvfs`) pointing at private `ormastes/*` repos.
 
 ### 10.7 Primary sources
 
@@ -742,8 +742,8 @@ Symlink: `src/app/Simple DB -> ../../examples/11_advanced/simple_db/src/tool` (t
 | `fs/nvfs/` (contracts) | `nogc_sync_mut` | Matches engine family. |
 | `examples/11_advanced/simple_db/engine/` | `nogc_sync_mut` (M1-M2), `nogc_async_mut` (M3+) | Sync initially; AIO path at M3. |
 | `examples/11_advanced/simple_db/business/` | `nogc_sync_mut` | ECS over engine; runtime family matches engine. |
-| `examples/11_advanced/nvfs/core/` | `nogc_sync_mut` | NVFS impl; sync-mut for filesystem kernel idiom. |
-| `examples/11_advanced/nvfs/driver/` | `nogc_sync_mut_noalloc` (future) | When real NVMe driver lands, no-alloc for IRQ context. |
+| `src/os/services/nvfs/core/` | `nogc_sync_mut` | NVFS impl; sync-mut for filesystem kernel idiom. |
+| `src/os/services/nvfs/driver/` | `nogc_sync_mut_noalloc` (future) | When real NVMe driver lands, no-alloc for IRQ context. |
 
 ### F.3 Capability declaration per module
 
@@ -762,7 +762,7 @@ Capabilities: [
 NVFS runs with a narrower set:
 
 ```
-Module: examples/11_advanced/nvfs/core/
+Module: src/os/services/nvfs/core/
 Capabilities: [
   BlockDeviceAccess,      // raw NVMe handle
   DmaBufferAlloc,         // pinned buffers
@@ -806,7 +806,7 @@ Benchmarks report SMART counters, host I/O counters, SSD model, preconditioning 
 - `src/lib/nogc_sync_mut/storage/*.spl` (shared primitives, Phase 5 output)
 - `src/lib/nogc_sync_mut/fs/nvfs/*.spl` (NVFS trait contracts, Phase 5 output)
 - `examples/11_advanced/simple_db/src/` (engine skeleton, Phase 5 output)
-- `examples/11_advanced/nvfs/src/` (NVFS impl skeleton, Phase 5 output)
+- `src/os/services/nvfs/src/` (NVFS impl skeleton, Phase 5 output)
 
 ## Appendix I — Terminology and acronyms
 

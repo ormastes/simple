@@ -1,0 +1,74 @@
+# Shared generated Engine2D GPU backend compile contract.
+#
+# CUDA, HIP/ROCm, OpenCL, and future generated 2D compiler adapters use the
+# portable compute emitter. This module keeps artifact validation and public
+# readiness diagnostics in one shape so backend-specific modules do not repeat
+# the same contract logic.
+
+use compiler.backend.gpu_portable_compute.{
+    PortableComputeCompilePlan,
+    PortableComputeCompiledArtifactEvidence,
+    PortableComputeTarget,
+    emit_portable_2d_optimization_module,
+    portable_compute_2d_optimization_compile_plan,
+    portable_compute_compiled_artifact_evidence,
+    portable_compute_target_name
+}
+
+class GpuGenerated2DBackendCompileContract:
+    backend_name: text
+    source: text
+    plan: PortableComputeCompilePlan
+    evidence: PortableComputeCompiledArtifactEvidence
+    ready: bool
+    status: text
+    diagnostic: text
+
+    static fn create(backend_name: text, target: PortableComputeTarget, output_stem: text, artifact_magic: text, exported_symbols: text, byte_count: i64) -> GpuGenerated2DBackendCompileContract:
+        val clean_backend = if backend_name == "": portable_compute_target_name(target) else: backend_name
+        val module = emit_portable_2d_optimization_module(target)
+        val plan = portable_compute_2d_optimization_compile_plan(target, output_stem)
+        val evidence = portable_compute_compiled_artifact_evidence(plan, artifact_magic, exported_symbols, byte_count)
+        val status = if evidence.artifact_valid:
+            "compiled_artifact_verified"
+        else:
+            evidence.reason
+        GpuGenerated2DBackendCompileContract(
+            backend_name: clean_backend,
+            source: module.source,
+            plan: plan,
+            evidence: evidence,
+            ready: evidence.artifact_valid,
+            status: status,
+            diagnostic: if evidence.artifact_valid: "" else: "{gpu_generated_2d_backend_diagnostic_label(clean_backend)} artifact rejected: {evidence.reason}"
+        )
+
+    fn summary() -> text:
+        "GpuGenerated2DBackendCompileContract[backend={self.backend_name} source={self.plan.source_format} binary={self.plan.binary_format} entry={self.plan.entry_name} ready={self.ready.to_text()} status={self.status}]"
+
+fn gpu_generated_2d_backend_compile_contract(backend_name: text, target: PortableComputeTarget, output_stem: text, artifact_magic: text, exported_symbols: text, byte_count: i64) -> GpuGenerated2DBackendCompileContract:
+    GpuGenerated2DBackendCompileContract.create(backend_name, target, output_stem, artifact_magic, exported_symbols, byte_count)
+
+fn gpu_generated_2d_backend_diagnostic_label(backend_name: text) -> text:
+    val clean = backend_name.trim().lower()
+    if clean == "cuda":
+        return "CUDA"
+    if clean == "hip" or clean == "rocm":
+        return "HIP"
+    if clean == "opencl":
+        return "OpenCL"
+    if clean == "metal" or clean == "msl":
+        return "Metal"
+    clean.upper()
+
+fn cuda_generated_2d_compile_contract(output_stem: text, artifact_magic: text, exported_symbols: text, byte_count: i64) -> GpuGenerated2DBackendCompileContract:
+    gpu_generated_2d_backend_compile_contract("cuda", PortableComputeTarget.Cuda, output_stem, artifact_magic, exported_symbols, byte_count)
+
+fn hip_generated_2d_compile_contract(output_stem: text, artifact_magic: text, exported_symbols: text, byte_count: i64) -> GpuGenerated2DBackendCompileContract:
+    gpu_generated_2d_backend_compile_contract("hip", PortableComputeTarget.Hip, output_stem, artifact_magic, exported_symbols, byte_count)
+
+fn opencl_generated_2d_compile_contract(output_stem: text, artifact_magic: text, exported_symbols: text, byte_count: i64) -> GpuGenerated2DBackendCompileContract:
+    gpu_generated_2d_backend_compile_contract("opencl", PortableComputeTarget.OpenCl, output_stem, artifact_magic, exported_symbols, byte_count)
+
+fn metal_generated_2d_compile_contract(output_stem: text, artifact_magic: text, exported_symbols: text, byte_count: i64) -> GpuGenerated2DBackendCompileContract:
+    gpu_generated_2d_backend_compile_contract("metal", PortableComputeTarget.Metal, output_stem, artifact_magic, exported_symbols, byte_count)

@@ -27,7 +27,7 @@ opencl_session_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -316,6 +316,38 @@ rt_free(args, 32)
 
 </details>
 
+#### reports shared generated 2D runtime provenance as typed OpenCL unavailable states
+
+1. var session = OpenClSession create
+   - Expected: missing_runtime.ready is false
+   - Expected: missing_runtime.typed_status equals `opencl-runtime-or-queue-unavailable`
+   - Expected: missing_program.typed_status equals `opencl-runtime-or-queue-unavailable`
+   - Expected: missing_args.typed_status equals `opencl-runtime-or-queue-unavailable`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = OpenClSession.create()
+val missing_runtime = session.launch_generated_2d_runtime_provenance(GENERATED_2D_FILL, 4, 4, 4096)
+session.queue = 3
+val missing_program = session.launch_generated_2d_runtime_provenance(GENERATED_2D_FILL, 4, 4, 4096)
+session.program = 5
+val missing_args = session.launch_generated_2d_runtime_provenance(GENERATED_2D_FILL, 4, 4, 0)
+
+expect(missing_runtime.ready).to_equal(false)
+expect(missing_runtime.typed_status).to_equal("opencl-runtime-or-queue-unavailable")
+expect(missing_program.typed_status).to_equal("opencl-runtime-or-queue-unavailable")
+expect(missing_args.typed_status).to_equal("opencl-runtime-or-queue-unavailable")
+expect(missing_runtime.diagnostic_text()).to_contain("artifact=simple_2d_optimization.spirv")
+```
+
+</details>
+
 #### cleans up through injected OpenCL FFI release hooks
 
 1. var session = OpenClSession create with ffi
@@ -376,8 +408,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

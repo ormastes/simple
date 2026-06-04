@@ -211,7 +211,9 @@ fn collect_spipe_quality_diagnostics(path: &Path, source: &str) -> Vec<Diagnosti
                     .with_code("SPIPE007")
                     .with_file(path.display().to_string())
                     .with_label(line_span(source, idx), "")
-                    .with_help("Use expect_not(condition) instead of expect(condition).to_equal(false) or .to_be(false)"),
+                    .with_help(
+                        "Use expect_not(condition) instead of expect(condition).to_equal(false) or .to_be(false)",
+                    ),
             );
         } else if is_true_boolean_wrapper_assertion(&normalized) && !allow_boolean_wrapper {
             diagnostics.push(
@@ -1272,11 +1274,13 @@ fn collect_feature_tracking_db_diagnostics(path: &Path, source: &str) -> Vec<Dia
             ..
         }) => (fields, rows),
         _ => {
-            return vec![Diagnostic::error("Feature tracking database is missing the features table")
-                .with_code("TRK000".to_string())
-                .with_file(path.display().to_string())
-                .with_label(Span::new(0, 0, 1, 1), "missing features table")
-                .with_help("Add a features table with the canonical tracking columns")];
+            return vec![
+                Diagnostic::error("Feature tracking database is missing the features table")
+                    .with_code("TRK000".to_string())
+                    .with_file(path.display().to_string())
+                    .with_label(Span::new(0, 0, 1, 1), "missing features table")
+                    .with_help("Add a features table with the canonical tracking columns"),
+            ];
         }
     };
 

@@ -1,4 +1,4 @@
-# nvfs__(examples/11_advanced/nvfs/src/core/encryption.spl_+_arena.spl)
+# nvfs__(src/os/services/nvfs/src/core/encryption.spl_+_arena.spl)
 
 ## Features
 

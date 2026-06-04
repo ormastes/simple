@@ -1,8 +1,8 @@
 # SimpleOS NVFS Submodule Migration — Detail Design
 
 ## File Movement
-- Copy `examples/11_advanced/nvfs/src/*` to `src/os/services/nvfs/*`.
-- Copy usable `examples/11_advanced/nvfs/test/unit/*` to `test/01_unit/os/services/nvfs/*`.
+- Copy `src/os/services/nvfs/src/*` to `src/os/services/nvfs/*`.
+- Copy usable `src/os/services/nvfs/test/unit/*` to `test/01_unit/os/services/nvfs/*`.
 - Remove obsolete skip-only tests that existed only because the submodule was not linked.
 
 ## Adaptation
@@ -12,6 +12,6 @@
 - Replace migrated executable `pass_todo` sites with real in-memory extent behavior or `Err(FsError.Unsupported)` for unsupported async scrub.
 
 ## Cleanup
-- Remove the `examples/nvfs` section from `.gitmodules`.
-- Remove the `examples/11_advanced/nvfs` gitlink and working tree.
+- Remove the `src/os/services/nvfs` section from `.gitmodules`.
+- Remove the `src/os/services/nvfs` gitlink and working tree.
 - Retire the remote GitHub project after verification.

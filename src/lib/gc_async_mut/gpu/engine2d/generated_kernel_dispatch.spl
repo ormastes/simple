@@ -96,6 +96,170 @@ class Generated2DKernelExecutionRequest:
     fn summary() -> text:
         "Generated2DKernelExecutionRequest[backend={self.plan.backend_name} op={self.plan.operation} handle={self.handle_kind} call={self.call_shape()} submit={self.can_submit.to_text()} reason={self.reason}]"
 
+class Generated2DSessionLaunchGate:
+    """Shared generated-kernel preflight for concrete CUDA/HIP/OpenCL sessions."""
+    plan: Generated2DKernelLaunchPlan
+    runtime_ready: bool
+    module_ready: bool
+    args_ptr: i64
+    ready: bool
+    status_code: text
+    reason: text
+
+    static fn create(plan: Generated2DKernelLaunchPlan, runtime_ready: bool, module_ready: bool, args_ptr: i64) -> Generated2DSessionLaunchGate:
+        val reason = _session_launch_gate_reason(plan, runtime_ready, module_ready, args_ptr)
+        Generated2DSessionLaunchGate(
+            plan: plan,
+            runtime_ready: runtime_ready,
+            module_ready: module_ready,
+            args_ptr: args_ptr,
+            ready: reason == "ready",
+            status_code: if reason == "ready": "ready" else: "not-ready",
+            reason: reason
+        )
+
+    fn summary() -> text:
+        "Generated2DSessionLaunchGate[backend={self.plan.backend_name} op={self.plan.operation} runtime={self.runtime_ready.to_text()} module={self.module_ready.to_text()} args={self.args_ptr} ready={self.ready.to_text()} reason={self.reason}]"
+
+class Generated2DSessionRuntimeProvenance:
+    """Shared runtime provenance for CUDA/HIP/OpenCL generated Engine2D sessions."""
+    gate: Generated2DSessionLaunchGate
+    backend_name: text
+    compute_target: text
+    operation: text
+    width: i64
+    height: i64
+    launch_api: text
+    entry_name: text
+    artifact_name: text
+    typed_status: text
+    ready: bool
+    reason: text
+
+    static fn create(backend: text, op: text, width: i64, height: i64, runtime_ready: bool, module_ready: bool, args_ptr: i64) -> Generated2DSessionRuntimeProvenance:
+        val gate = generated_2d_session_launch_gate(backend, op, width, height, runtime_ready, module_ready, args_ptr)
+        val typed_status = _session_runtime_provenance_status(gate)
+        Generated2DSessionRuntimeProvenance(
+            gate: gate,
+            backend_name: gate.plan.backend_name,
+            compute_target: gate.plan.compute_target,
+            operation: gate.plan.operation,
+            width: width,
+            height: height,
+            launch_api: gate.plan.launch_api,
+            entry_name: gate.plan.entry_name,
+            artifact_name: gate.plan.artifact_name,
+            typed_status: typed_status,
+            ready: gate.ready,
+            reason: gate.reason
+        )
+
+    fn diagnostic_text() -> text:
+        "Generated2DSessionRuntimeProvenance[backend={self.backend_name} target={self.compute_target} op={self.operation} size={self.width}x{self.height} launch={self.launch_api} entry={self.entry_name} artifact={self.artifact_name} runtime={self.gate.runtime_ready.to_text()} module={self.gate.module_ready.to_text()} args={self.gate.args_ptr} ready={self.ready.to_text()} status={self.typed_status} reason={self.reason}]"
+
+    fn summary() -> text:
+        self.diagnostic_text()
+
+class Generated2DOperationProvenance:
+    """Comparable CPU/CUDA/OpenCL operation evidence for renderer measurements."""
+    backend_name: text
+    operation_family: text
+    generated_operation: text
+    width: i64
+    height: i64
+    compute_target: text
+    execution_path: text
+    launch_api: text
+    entry_name: text
+    artifact_name: text
+    runtime_ready: bool
+    module_ready: bool
+    args_ready: bool
+    ready: bool
+    generated_artifact_required: bool
+    cpu_preprocess_required: bool
+    typed_status: text
+    reason: text
+
+    static fn create(backend: text, operation_family: text, width: i64, height: i64, runtime_ready: bool, module_ready: bool, args_ptr: i64) -> Generated2DOperationProvenance:
+        val op = _operation_family_generated_op(operation_family)
+        if op == "":
+            return Generated2DOperationProvenance.unavailable(backend, operation_family, width, height, "unsupported-operation-family")
+        if width <= 0 or height <= 0:
+            return Generated2DOperationProvenance.unavailable(backend, operation_family, width, height, "invalid-dimensions")
+        if _is_cpu_operation_backend(backend):
+            val target = _cpu_operation_target(backend)
+            val status = if target == "cpu_simd": "cpu-simd-baseline-ready" else: "cpu-scalar-baseline-ready"
+            return Generated2DOperationProvenance(
+                backend_name: backend,
+                operation_family: operation_family,
+                generated_operation: op,
+                width: width,
+                height: height,
+                compute_target: target,
+                execution_path: "engine2d-" + target,
+                launch_api: "RenderBackend",
+                entry_name: _cpu_operation_entry(operation_family),
+                artifact_name: "",
+                runtime_ready: true,
+                module_ready: true,
+                args_ready: true,
+                ready: true,
+                generated_artifact_required: false,
+                cpu_preprocess_required: _operation_family_needs_cpu_preprocess(operation_family),
+                typed_status: status,
+                reason: "ready"
+            )
+        val runtime = generated_2d_session_runtime_provenance(backend, op, width, height, runtime_ready, module_ready, args_ptr)
+        Generated2DOperationProvenance(
+            backend_name: runtime.backend_name,
+            operation_family: operation_family,
+            generated_operation: op,
+            width: width,
+            height: height,
+            compute_target: runtime.compute_target,
+            execution_path: "generated_2d_kernel",
+            launch_api: runtime.launch_api,
+            entry_name: runtime.entry_name,
+            artifact_name: runtime.artifact_name,
+            runtime_ready: runtime.gate.runtime_ready,
+            module_ready: runtime.gate.module_ready,
+            args_ready: runtime.gate.args_ptr != 0,
+            ready: runtime.ready,
+            generated_artifact_required: true,
+            cpu_preprocess_required: _operation_family_needs_cpu_preprocess(operation_family),
+            typed_status: runtime.typed_status,
+            reason: runtime.reason
+        )
+
+    static fn unavailable(backend: text, operation_family: text, width: i64, height: i64, reason: text) -> Generated2DOperationProvenance:
+        Generated2DOperationProvenance(
+            backend_name: backend,
+            operation_family: operation_family,
+            generated_operation: "",
+            width: width,
+            height: height,
+            compute_target: "unsupported",
+            execution_path: "none",
+            launch_api: "none",
+            entry_name: "",
+            artifact_name: "",
+            runtime_ready: false,
+            module_ready: false,
+            args_ready: false,
+            ready: false,
+            generated_artifact_required: false,
+            cpu_preprocess_required: false,
+            typed_status: "plan-not-ready:" + reason,
+            reason: reason
+        )
+
+    fn diagnostic_text() -> text:
+        "Generated2DOperationProvenance[backend={self.backend_name} family={self.operation_family} op={self.generated_operation} target={self.compute_target} path={self.execution_path} launch={self.launch_api} entry={self.entry_name} artifact={self.artifact_name} runtime={self.runtime_ready.to_text()} module={self.module_ready.to_text()} args={self.args_ready.to_text()} generated_artifact={self.generated_artifact_required.to_text()} cpu_preprocess={self.cpu_preprocess_required.to_text()} ready={self.ready.to_text()} status={self.typed_status} reason={self.reason}]"
+
+    fn summary() -> text:
+        self.diagnostic_text()
+
 class Generated2DModuleArtifactEvidence:
     plan: Generated2DKernelLaunchPlan
     artifact_magic: text
@@ -397,6 +561,42 @@ fn _kernel_args_layout(op: text) -> text:
         return "src,dst,width,height,delta_y"
     ""
 
+fn _operation_family_generated_op(operation_family: text) -> text:
+    val clean = operation_family.lower()
+    if clean == "vector" or clean == "rect" or clean == "rect_filled" or clean == "fill":
+        return GENERATED_2D_FILL
+    if clean == "image" or clean == "image_blit" or clean == "copy" or clean == "font" or clean == "text" or clean == "text_blit":
+        return GENERATED_2D_COPY
+    if clean == "alpha" or clean == "alpha_blend" or clean == "image_alpha":
+        return GENERATED_2D_ALPHA
+    if clean == "scroll":
+        return GENERATED_2D_SCROLL
+    ""
+
+fn _operation_family_needs_cpu_preprocess(operation_family: text) -> bool:
+    val clean = operation_family.lower()
+    clean == "font" or clean == "text" or clean == "text_blit"
+
+fn _is_cpu_operation_backend(backend: text) -> bool:
+    backend == "cpu" or backend == "software" or backend == "cpu_simd" or backend == "simd_cpu" or backend == "cpu_simd_x86" or backend == "cpu_simd_arm" or backend == "cpu_simd_riscv"
+
+fn _cpu_operation_target(backend: text) -> text:
+    if backend == "cpu" or backend == "software":
+        return "cpu_scalar"
+    "cpu_simd"
+
+fn _cpu_operation_entry(operation_family: text) -> text:
+    val clean = operation_family.lower()
+    if clean == "font" or clean == "text" or clean == "text_blit":
+        return "RenderBackend.draw_text_or_text_blit"
+    if clean == "image" or clean == "image_blit" or clean == "copy":
+        return "RenderBackend.draw_image"
+    if clean == "alpha" or clean == "alpha_blend" or clean == "image_alpha":
+        return "RenderBackend.draw_image_blend"
+    if clean == "scroll":
+        return "RenderBackend.scroll_or_copy"
+    "RenderBackend.draw_rect_filled"
+
 fn _execution_handle_kind(plan: Generated2DKernelLaunchPlan) -> text:
     if plan.compute_target == "cuda":
         return "cuda-kernel-args"
@@ -419,6 +619,17 @@ fn _execution_request_reason(plan: Generated2DKernelLaunchPlan, module_or_queue_
     else:
         if args_ptr <= 0:
             return "missing-args-pointer"
+    "ready"
+
+fn _session_launch_gate_reason(plan: Generated2DKernelLaunchPlan, runtime_ready: bool, module_ready: bool, args_ptr: i64) -> text:
+    if not plan.dispatch_ready:
+        return plan.reason
+    if not runtime_ready:
+        return "runtime-not-ready"
+    if not module_ready:
+        return "module-not-loaded"
+    if args_ptr == 0:
+        return "missing-args-pointer"
     "ready"
 
 fn _artifact_load_reason(plan: Generated2DKernelLaunchPlan, artifact_valid: bool, runtime_available: bool, module_or_queue_handle: i64, kernel_or_pipeline_handle: i64) -> text:
@@ -471,6 +682,31 @@ fn _module_artifact_reason(plan: Generated2DKernelLaunchPlan, artifact_magic: te
         return "missing-entry-symbol:simple_2d_scroll_u32"
     "pass"
 
+fn _session_runtime_provenance_status(gate: Generated2DSessionLaunchGate) -> text:
+    if gate.ready:
+        return "ready"
+    if not gate.plan.dispatch_ready:
+        return "plan-not-ready:" + gate.plan.reason
+    if not gate.runtime_ready:
+        if gate.plan.backend_name == "cuda":
+            return "cuda-runtime-unavailable"
+        if gate.plan.backend_name == "rocm":
+            return "hip-runtime-unavailable"
+        if gate.plan.backend_name == "opencl":
+            return "opencl-runtime-or-queue-unavailable"
+        return "runtime-unavailable"
+    if not gate.module_ready:
+        if gate.plan.backend_name == "cuda":
+            return "cuda-module-unavailable"
+        if gate.plan.backend_name == "rocm":
+            return "hip-module-unavailable"
+        if gate.plan.backend_name == "opencl":
+            return "opencl-program-unavailable"
+        return "module-unavailable"
+    if gate.args_ptr == 0:
+        return "args-unavailable"
+    "not-ready:" + gate.reason
+
 fn generated_2d_dispatch_for_backend(backend: text) -> Generated2DKernelDispatch:
     Generated2DKernelDispatch.for_backend(backend)
 
@@ -480,6 +716,16 @@ fn generated_2d_launch_plan(backend: text, op: text, width: i64, height: i64) ->
 fn generated_2d_execution_request(backend: text, op: text, width: i64, height: i64, module_or_queue_handle: i64, kernel_or_pipeline_handle: i64, args_ptr: i64) -> Generated2DKernelExecutionRequest:
     val plan = generated_2d_launch_plan(backend, op, width, height)
     Generated2DKernelExecutionRequest.create(plan, module_or_queue_handle, kernel_or_pipeline_handle, args_ptr, 0)
+
+fn generated_2d_session_launch_gate(backend: text, op: text, width: i64, height: i64, runtime_ready: bool, module_ready: bool, args_ptr: i64) -> Generated2DSessionLaunchGate:
+    val plan = generated_2d_launch_plan(backend, op, width, height)
+    Generated2DSessionLaunchGate.create(plan, runtime_ready, module_ready, args_ptr)
+
+fn generated_2d_session_runtime_provenance(backend: text, op: text, width: i64, height: i64, runtime_ready: bool, module_ready: bool, args_ptr: i64) -> Generated2DSessionRuntimeProvenance:
+    Generated2DSessionRuntimeProvenance.create(backend, op, width, height, runtime_ready, module_ready, args_ptr)
+
+fn generated_2d_operation_provenance(backend: text, operation_family: text, width: i64, height: i64, runtime_ready: bool, module_ready: bool, args_ptr: i64) -> Generated2DOperationProvenance:
+    Generated2DOperationProvenance.create(backend, operation_family, width, height, runtime_ready, module_ready, args_ptr)
 
 fn generated_2d_artifact_load_evidence(backend: text, op: text, width: i64, height: i64, artifact_valid: bool, runtime_available: bool, module_or_queue_handle: i64, kernel_or_pipeline_handle: i64) -> Generated2DKernelArtifactLoadEvidence:
     val plan = generated_2d_launch_plan(backend, op, width, height)

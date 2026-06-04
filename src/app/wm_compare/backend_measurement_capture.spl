@@ -1,7 +1,9 @@
 # Host measurement capture helpers for wm_compare backend evidence.
 
 use app.wm_compare.backend_measurement_report.{BackendComparisonSample, BackendMeasurementRecord}
-use app.wm_compare.backend_measurement_report.{backend_comparison_from_measurement, backend_measurement_from_probe}
+use app.wm_compare.backend_measurement_report.{backend_comparison_from_measurement, backend_comparison_from_measurement_with_runtime_metadata, backend_measurement_from_probe}
+use compiler.backend.gpu_portable_compute.{portable_compute_operation_metadata}
+use std.gpu.engine2d.generated_kernel_dispatch.{generated_2d_operation_provenance}
 use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus, StrictBackendFactory}
 
 pub struct HostCommandMeasurement:
@@ -14,6 +16,39 @@ pub struct HostCommandMeasurement:
     binary_size_bytes: i64
     baseline_binary_size_bytes: i64
     render_readback_scope: text
+
+pub struct InitializedGpuRuntimeMeasurement:
+    backend: text
+    operation_family: text
+    fixture_id: text
+    shell: text
+    command: text
+    host: text
+    warmup_count: i32
+    sample_count: i32
+    p50_frame_us: i64
+    p95_frame_us: i64
+    max_rss_kb: i64
+    binary_size_bytes: i64
+    baseline_binary_size_bytes: i64
+    render_readback_scope: text
+    cold_start_us: i64
+    warm_start_us: i64
+    package_size_bytes: i64
+    p95_input_to_paint_us: i64
+    artifact_build_us: i64
+    artifact_load_us: i64
+    artifact_submit_us: i64
+    artifact_sync_us: i64
+    artifact_readback_us: i64
+    checksum: text
+    pixel_proof: text
+    device_id: text
+    width: i64
+    height: i64
+    runtime_ready: bool
+    module_ready: bool
+    args_ptr: i64
 
 fn _field_after(line: text, key: text) -> text:
     val marker = key + "="
@@ -168,7 +203,7 @@ pub fn host_comparison_sample(record: BackendMeasurementRecord,
                               checksum: text,
                               pixel_proof: text,
                               device_id: text) -> BackendComparisonSample:
-    backend_comparison_from_measurement(
+    backend_comparison_from_measurement_with_runtime_metadata(
         record,
         fixture_id,
         backend_family,
@@ -184,7 +219,157 @@ pub fn host_comparison_sample(record: BackendMeasurementRecord,
         0,
         checksum,
         pixel_proof,
-        device_id
+        device_id,
+        "baseline",
+        "cpu_simd",
+        "cpu_simd_baseline",
+        "RenderBackend",
+        "engine2d-cpu",
+        "none",
+        "",
+        "cpu_simd",
+        "engine2d-cpu-simd",
+        "RenderBackend",
+        "RenderBackend",
+        "",
+        "cpu-simd-baseline-ready"
+    )
+
+pub fn initialized_gpu_comparison_sample_from_measurement(evidence: InitializedGpuRuntimeMeasurement) -> BackendComparisonSample:
+    val measurement = HostCommandMeasurement(
+        command: evidence.command,
+        host: evidence.host,
+        sample_count: evidence.sample_count,
+        p50_us: evidence.p50_frame_us,
+        p95_us: evidence.p95_frame_us,
+        max_rss_kb: evidence.max_rss_kb,
+        binary_size_bytes: evidence.binary_size_bytes,
+        baseline_binary_size_bytes: evidence.baseline_binary_size_bytes,
+        render_readback_scope: evidence.render_readback_scope
+    )
+    var record = host_measurement_record(
+        evidence.backend,
+        evidence.backend,
+        "Initialized",
+        measurement,
+        true,
+        false,
+        ""
+    )
+    record.warmup_count = evidence.warmup_count
+    val metadata = portable_compute_operation_metadata("@gpu", evidence.backend, evidence.operation_family, "simple_2d_optimization")
+    val runtime = generated_2d_operation_provenance(
+        evidence.backend,
+        evidence.operation_family,
+        evidence.width,
+        evidence.height,
+        evidence.runtime_ready,
+        evidence.module_ready,
+        evidence.args_ptr
+    )
+    if metadata.rows.len() == 0:
+        return backend_comparison_from_measurement_with_runtime_metadata(
+            record,
+            evidence.fixture_id,
+            evidence.backend,
+            evidence.shell,
+            evidence.cold_start_us,
+            evidence.warm_start_us,
+            evidence.package_size_bytes,
+            evidence.p95_input_to_paint_us,
+            evidence.artifact_build_us,
+            evidence.artifact_load_us,
+            evidence.artifact_submit_us,
+            evidence.artifact_sync_us,
+            evidence.artifact_readback_us,
+            evidence.checksum,
+            evidence.pixel_proof,
+            evidence.device_id,
+            "",
+            evidence.operation_family,
+            "",
+            "",
+            "",
+            "",
+            "",
+            runtime.compute_target,
+            runtime.execution_path,
+            runtime.launch_api,
+            runtime.entry_name,
+            runtime.artifact_name,
+            runtime.typed_status
+        )
+    val row = metadata.rows[0]
+    backend_comparison_from_measurement_with_runtime_metadata(
+        record,
+        evidence.fixture_id,
+        evidence.backend,
+        evidence.shell,
+        evidence.cold_start_us,
+        evidence.warm_start_us,
+        evidence.package_size_bytes,
+        evidence.p95_input_to_paint_us,
+        evidence.artifact_build_us,
+        evidence.artifact_load_us,
+        evidence.artifact_submit_us,
+        evidence.artifact_sync_us,
+        evidence.artifact_readback_us,
+        evidence.checksum,
+        evidence.pixel_proof,
+        evidence.device_id,
+        row.tag_kind,
+        row.operation_family,
+        row.generated_operation,
+        row.entry_symbol,
+        row.source_format,
+        row.binary_format,
+        row.artifact_path_suffix,
+        runtime.compute_target,
+        runtime.execution_path,
+        runtime.launch_api,
+        runtime.entry_name,
+        runtime.artifact_name,
+        runtime.typed_status
+    )
+
+pub fn initialized_gpu_comparison_sample_fixture(backend: text,
+                                                 operation_family: text,
+                                                 fixture_id: text,
+                                                 shell: text) -> BackendComparisonSample:
+    initialized_gpu_comparison_sample_from_measurement(
+        InitializedGpuRuntimeMeasurement(
+        backend: backend,
+        operation_family: operation_family,
+        fixture_id: fixture_id,
+        shell: shell,
+        command: "simple wm_compare initialized gpu fixture",
+        host: "host-safe-fixture",
+        warmup_count: 0,
+        sample_count: 5,
+        p50_frame_us: 900,
+        p95_frame_us: 1200,
+        max_rss_kb: 64000,
+        binary_size_bytes: 1000000,
+        baseline_binary_size_bytes: 990000,
+        render_readback_scope: "render+readback",
+        cold_start_us: 42000,
+        warm_start_us: 9000,
+        package_size_bytes: 1250000,
+        p95_input_to_paint_us: 1800,
+        artifact_build_us: 310,
+        artifact_load_us: 75,
+        artifact_submit_us: 140,
+        artifact_sync_us: 25,
+        artifact_readback_us: 110,
+        checksum: "sha256:" + backend + ":fixture",
+        pixel_proof: "nonzero_pixels:4096",
+        device_id: backend + ":fixture",
+        width: 64,
+        height: 64,
+        runtime_ready: true,
+        module_ready: true,
+        args_ptr: 4096
+        )
     )
 
 fn _gpu_probe_comparison_sample(probe: BackendProbeResult,
@@ -192,9 +377,93 @@ fn _gpu_probe_comparison_sample(probe: BackendProbeResult,
                                 command: text,
                                 host: text,
                                 fixture_id: text,
-                                shell: text) -> BackendComparisonSample:
+                                shell: text,
+                                operation_family: text) -> BackendComparisonSample:
     val record = _gpu_probe_measurement_record(probe, command, host)
+    val metadata = portable_compute_operation_metadata("@gpu", probe.requested_name, operation_family, "simple_2d_optimization")
+    if metadata.rows.len() > 0:
+        val row = metadata.rows[0]
+        val runtime = generated_2d_operation_provenance(probe.requested_name, operation_family, 64, 64, false, false, 0)
+        return backend_comparison_from_measurement_with_runtime_metadata(
+            record,
+            fixture_id,
+            family,
+            shell,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            "",
+            "",
+            "",
+            row.tag_kind,
+            row.operation_family,
+            row.generated_operation,
+            row.entry_symbol,
+            row.source_format,
+            row.binary_format,
+            row.artifact_path_suffix,
+            runtime.compute_target,
+            runtime.execution_path,
+            runtime.launch_api,
+            runtime.entry_name,
+            runtime.artifact_name,
+            runtime.typed_status
+        )
     host_comparison_sample(record, fixture_id, family, shell, 0, "", "", "")
+
+fn _generated_runtime_ready(evidence: InitializedGpuRuntimeMeasurement) -> bool:
+    evidence.runtime_ready and evidence.module_ready and evidence.args_ptr != 0
+
+fn _initialized_gpu_runner_not_ready_probe(evidence: InitializedGpuRuntimeMeasurement) -> BackendProbeResult:
+    val reason = if not evidence.runtime_ready:
+        "generated Engine2D runtime not ready"
+    elif not evidence.module_ready:
+        "generated Engine2D module not loaded"
+    elif evidence.args_ptr == 0:
+        "generated Engine2D args pointer missing"
+    else:
+        "generated Engine2D session not ready"
+    var probe = BackendProbeResult.failed(evidence.backend, reason)
+    probe.api_name = evidence.backend
+    probe.feature_gate = "generated_engine2d_runtime"
+    probe.has_compute = true
+    probe.has_graphics = false
+    probe.has_present = false
+    probe
+
+pub fn initialized_gpu_runner_comparison_sample_from_probe(evidence: InitializedGpuRuntimeMeasurement,
+                                                           probe: BackendProbeResult) -> BackendComparisonSample:
+    if probe.status != BackendStatus.Initialized:
+        return _gpu_probe_comparison_sample(
+            probe,
+            evidence.backend,
+            evidence.command,
+            evidence.host,
+            evidence.fixture_id,
+            evidence.shell,
+            evidence.operation_family
+        )
+    if not _generated_runtime_ready(evidence):
+        return _gpu_probe_comparison_sample(
+            _initialized_gpu_runner_not_ready_probe(evidence),
+            evidence.backend,
+            evidence.command,
+            evidence.host,
+            evidence.fixture_id,
+            evidence.shell,
+            evidence.operation_family
+        )
+    initialized_gpu_comparison_sample_from_measurement(evidence)
+
+pub fn initialized_gpu_runner_comparison_sample(evidence: InitializedGpuRuntimeMeasurement) -> BackendComparisonSample:
+    val probe = StrictBackendFactory.strict().create_backend(evidence.backend)
+    initialized_gpu_runner_comparison_sample_from_probe(evidence, probe)
 
 pub fn current_host_backend_measurement_matrix(command: text, host: text,
                                                time_output: text,
@@ -241,6 +510,7 @@ pub fn current_host_backend_comparison_samples(command: text, host: text,
                                                render_readback_scope: text,
                                                fixture_id: text,
                                                shell: text,
+                                               operation_family: text,
                                                checksum: text,
                                                pixel_proof: text) -> [BackendComparisonSample]:
     val measurement = parse_usr_bin_time_measurements(
@@ -250,19 +520,19 @@ pub fn current_host_backend_comparison_samples(command: text, host: text,
     )
     val factory = StrictBackendFactory.strict()
     val metal = _gpu_probe_comparison_sample(
-        factory.create_backend("metal"), "metal", command, host, fixture_id, shell
+        factory.create_backend("metal"), "metal", command, host, fixture_id, shell, operation_family
     )
     val vulkan = _gpu_probe_comparison_sample(
-        factory.create_backend("vulkan"), "vulkan", command, host, fixture_id, shell
+        factory.create_backend("vulkan"), "vulkan", command, host, fixture_id, shell, operation_family
     )
     val cuda = _gpu_probe_comparison_sample(
-        factory.create_backend("cuda"), "cuda", command, host, fixture_id, shell
+        factory.create_backend("cuda"), "cuda", command, host, fixture_id, shell, operation_family
     )
     val opencl = _gpu_probe_comparison_sample(
-        factory.create_backend("opencl"), "opencl", command, host, fixture_id, shell
+        factory.create_backend("opencl"), "opencl", command, host, fixture_id, shell, operation_family
     )
     val rocm = _gpu_probe_comparison_sample(
-        factory.create_backend("rocm"), "hip", command, host, fixture_id, shell
+        factory.create_backend("rocm"), "hip", command, host, fixture_id, shell, operation_family
     )
     val cpu_record = host_measurement_record(
         "cpu_simd", "cpu_simd", "Initialized",

@@ -136,7 +136,7 @@ stub warnings before use; an earlier stale hosted runtime bundle stubbed
 
 ## Submodule Import Limitation
 
-`examples/nvfs` and `examples/spostgre` are separate git submodules. Their
+`src/os/services/nvfs` and `examples/spostgre` are separate git submodules. Their
 packages are not resolvable via `use os.services.nvfs.*` from main-repo
 `bin/simple run`. NVFS and WAL scenarios run against local shims that mirror
 the real API exactly:

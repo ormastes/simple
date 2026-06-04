@@ -833,7 +833,10 @@ mod tests {
 
     #[test]
     fn shell_scripts_use_interpreter_path() {
-        assert!(should_prefer_interpreter_for_source(Path::new("scripts/check.shs"), "shs"));
+        assert!(should_prefer_interpreter_for_source(
+            Path::new("scripts/check.shs"),
+            "shs"
+        ));
     }
 }
 

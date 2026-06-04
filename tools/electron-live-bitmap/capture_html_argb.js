@@ -7,6 +7,9 @@
 //   ELECTRON_CAPTURE_WIDTH=320 \
 //   ELECTRON_CAPTURE_HEIGHT=240 \
 //   ELECTRON_CAPTURE_OUTPUT=build/pixel_compare/captured.json \
+//   ELECTRON_CAPTURE_AUDIT_SELECTORS="#app,.widget-panel" \
+//   ELECTRON_CAPTURE_AUDIT_OUTPUT=build/pixel_compare/audit.json \
+//   ELECTRON_CAPTURE_FAIL_ON_AUDIT=1 \
 //   xvfb-run --auto-servernum electron --no-sandbox --disable-gpu capture_html_argb.js
 
 const { app, BrowserWindow } = require("electron");
@@ -18,6 +21,14 @@ const width = Number(process.env.ELECTRON_CAPTURE_WIDTH || 320);
 const height = Number(process.env.ELECTRON_CAPTURE_HEIGHT || 240);
 const outputPath = process.env.ELECTRON_CAPTURE_OUTPUT || "build/pixel_compare/captured.json";
 const settleMs = Number(process.env.ELECTRON_CAPTURE_SETTLE_MS || 1500);
+const auditSelectors = (process.env.ELECTRON_CAPTURE_AUDIT_SELECTORS || "")
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean);
+const auditOutputPath = process.env.ELECTRON_CAPTURE_AUDIT_OUTPUT || "";
+const contrastMinX100 = Number(process.env.ELECTRON_CAPTURE_CONTRAST_MIN_X100 || 450);
+const touchMinPx = Number(process.env.ELECTRON_CAPTURE_TOUCH_MIN_PX || 44);
+const failOnAudit = /^(1|true|yes)$/i.test(process.env.ELECTRON_CAPTURE_FAIL_ON_AUDIT || "");
 
 function bitmapToLogicalArgb(image) {
   const size = image.getSize();
@@ -66,6 +77,249 @@ function bitmapToLogicalArgb(image) {
   return { pixels, nativeWidth: nw, nativeHeight: nh, downsampled: true };
 }
 
+async function collectAudit(win, selectors) {
+  if (!selectors.length) return null;
+  return win.webContents.executeJavaScript(`
+    (() => {
+      const selectors = ${JSON.stringify(selectors)};
+      const contrastMinX100 = ${JSON.stringify(contrastMinX100)};
+      const touchMinPx = ${JSON.stringify(touchMinPx)};
+      const viewport = { width: window.innerWidth, height: window.innerHeight };
+      const items = [];
+      const entries = [];
+      function parseRgb(value) {
+        const match = String(value || "").match(/rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)(?:,\\s*([0-9.]+))?\\)/);
+        if (!match) return null;
+        return {
+          r: Number(match[1]),
+          g: Number(match[2]),
+          b: Number(match[3]),
+          a: match[4] === undefined ? 1 : Number(match[4])
+        };
+      }
+      function luminance(c) {
+        function channel(v) {
+          const s = v / 255;
+          return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+        }
+        return 0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b);
+      }
+      function composite(fg, bg) {
+        if (!fg) return bg;
+        if (!bg) return fg;
+        const a = fg.a + bg.a * (1 - fg.a);
+        if (a <= 0) return { r: 0, g: 0, b: 0, a: 0 };
+        return {
+          r: Math.round((fg.r * fg.a + bg.r * bg.a * (1 - fg.a)) / a),
+          g: Math.round((fg.g * fg.a + bg.g * bg.a * (1 - fg.a)) / a),
+          b: Math.round((fg.b * fg.a + bg.b * bg.a * (1 - fg.a)) / a),
+          a
+        };
+      }
+      function effectiveBackground(el, style) {
+        let bg = parseRgb(style.backgroundColor);
+        let parent = el.parentElement;
+        while ((!bg || bg.a < 1) && parent) {
+          const parentBg = parseRgb(window.getComputedStyle(parent).backgroundColor);
+          if (parentBg && parentBg.a > 0) bg = composite(bg || { r: 0, g: 0, b: 0, a: 0 }, parentBg);
+          parent = parent.parentElement;
+        }
+        if (!bg || bg.a < 1) bg = composite(bg || { r: 0, g: 0, b: 0, a: 0 }, parseRgb(window.getComputedStyle(document.body).backgroundColor) || { r: 10, g: 10, b: 15, a: 1 });
+        return bg;
+      }
+      function contrastRatioX100(fg, bg) {
+        if (!fg || !bg || fg.a === 0 || bg.a === 0) return null;
+        const a = luminance(fg);
+        const b = luminance(bg);
+        const hi = Math.max(a, b);
+        const lo = Math.min(a, b);
+        return Math.round(((hi + 0.05) / (lo + 0.05)) * 100);
+      }
+      function isInteractive(el) {
+        const tag = el.tagName.toLowerCase();
+        const role = String(el.getAttribute("role") || "");
+        return tag === "button" || tag === "input" || tag === "select" || tag === "textarea" ||
+          role === "button" || role === "option" || role === "menuitem" || el.hasAttribute("tabindex");
+      }
+      function rectOf(el) {
+        const r = el.getBoundingClientRect();
+        return {
+          left: Math.round(r.left),
+          top: Math.round(r.top),
+          right: Math.round(r.right),
+          bottom: Math.round(r.bottom),
+          width: Math.round(r.width),
+          height: Math.round(r.height)
+        };
+      }
+      function intersectsRect(a, b) {
+        const left = Math.max(a.left, b.left);
+        const top = Math.max(a.top, b.top);
+        const right = Math.min(a.right, b.right);
+        const bottom = Math.min(a.bottom, b.bottom);
+        return {
+          left,
+          top,
+          right,
+          bottom,
+          width: Math.max(0, right - left),
+          height: Math.max(0, bottom - top)
+        };
+      }
+      function clipsOverflow(style) {
+        const clips = value => value === "hidden" || value === "auto" || value === "scroll" || value === "clip";
+        return clips(style.overflowX) || clips(style.overflowY);
+      }
+      function visibleRectOf(el, rect) {
+        let visible = intersectsRect(rect, { left: 0, top: 0, right: viewport.width, bottom: viewport.height });
+        let parent = el.parentElement;
+        while (visible.width > 0 && visible.height > 0 && parent && parent !== document.documentElement) {
+          const parentStyle = window.getComputedStyle(parent);
+          if (clipsOverflow(parentStyle)) visible = intersectsRect(visible, rectOf(parent));
+          parent = parent.parentElement;
+        }
+        return visible;
+      }
+      function overlaps(a, b) {
+        return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+      }
+      function containsElement(a, b) {
+        return a !== b && a.contains(b);
+      }
+      function hasClass(item, name) {
+        return String(item.className || "").split(/\\s+/).includes(name);
+      }
+      function isOverlay(item) {
+        return hasClass(item, "wm-command-palette") ||
+          hasClass(item, "wm-effect-controls") ||
+          hasClass(item, "wm-quality-inspector");
+      }
+      function isOverlayContent(item) {
+        return isOverlay(item) ||
+          hasClass(item, "wm-command-item") ||
+          hasClass(item, "wm-effect-control") ||
+          hasClass(item, "wm-command-palette-input") ||
+          hasClass(item, "wm-title-input");
+      }
+      function isWindowChrome(item) {
+        return hasClass(item, "wm-window") ||
+          hasClass(item, "wm-titlebar") ||
+          hasClass(item, "wm-taskbar-item") ||
+          hasClass(item, "wm-btn-close") ||
+          hasClass(item, "wm-btn-minimize") ||
+          hasClass(item, "wm-btn-maximize");
+      }
+      function allowedOverlayOverlap(a, b) {
+        if (a.selector === "#wm-desktop" && hasClass(b, "wm-taskbar-item")) return true;
+        if (b.selector === "#wm-desktop" && hasClass(a, "wm-taskbar-item")) return true;
+        return (isOverlayContent(a) && isWindowChrome(b)) || (isOverlayContent(b) && isWindowChrome(a));
+      }
+      function isTextClipped(el, style) {
+        const overflowedX = el.scrollWidth > el.clientWidth + 1;
+        const overflowedY = el.scrollHeight > el.clientHeight + 1;
+        if (!overflowedX && !overflowedY) return false;
+        const visibleOrScrollable = value => value === "visible" || value === "auto" || value === "scroll";
+        if ((overflowedX && visibleOrScrollable(style.overflowX)) || (overflowedY && visibleOrScrollable(style.overflowY))) return false;
+        if (style.textOverflow === "ellipsis") return false;
+        return Array.from(el.childNodes).some(node => node.nodeType === Node.TEXT_NODE && node.textContent.trim().length > 0) ||
+          (el.children.length === 0 && String(el.textContent || "").trim().length > 0);
+      }
+      for (const selector of selectors) {
+        const nodes = Array.from(document.querySelectorAll(selector));
+        nodes.slice(0, 12).forEach((el, index) => {
+          const style = window.getComputedStyle(el);
+          const rawRect = rectOf(el);
+          const rect = visibleRectOf(el, rawRect);
+          if (rect.width <= 0 || rect.height <= 0) return;
+          const effectiveBg = effectiveBackground(el, style);
+          const contrastX100 = contrastRatioX100(parseRgb(style.color), effectiveBg);
+          const interactive = isInteractive(el);
+          const item = {
+            selector,
+            index,
+            tag: el.tagName.toLowerCase(),
+            className: String(el.className || ""),
+            rect,
+            rawRect,
+            display: style.display,
+            position: style.position,
+            opacity: style.opacity,
+            transform: style.transform,
+            borderRadius: style.borderRadius,
+            backgroundColor: style.backgroundColor,
+            effectiveBackgroundColor: effectiveBg ? "rgba(" + effectiveBg.r + ", " + effectiveBg.g + ", " + effectiveBg.b + ", " + effectiveBg.a + ")" : "",
+            color: style.color,
+            overflowX: style.overflowX,
+            overflowY: style.overflowY,
+            contrastX100,
+            contrastOk: contrastX100 === null ? null : contrastX100 >= contrastMinX100,
+            interactive,
+            touchOk: interactive ? rect.height >= touchMinPx && rect.width >= touchMinPx : null,
+            clipped: isTextClipped(el, style)
+          };
+          items.push(item);
+          entries.push({ el, item });
+        });
+      }
+      const overlapPairs = [];
+      const containedOverlapPairs = [];
+      const allowedOverlayOverlapPairs = [];
+      const unexpectedOverlapPairs = [];
+      for (let i = 0; i < items.length; i++) {
+        for (let j = i + 1; j < items.length; j++) {
+          if (overlaps(items[i].rect, items[j].rect)) {
+            const pair = {
+              a: items[i].selector + "[" + items[i].index + "]",
+              b: items[j].selector + "[" + items[j].index + "]"
+            };
+            overlapPairs.push(pair);
+            if (containsElement(entries[i].el, entries[j].el) || containsElement(entries[j].el, entries[i].el)) {
+              containedOverlapPairs.push(pair);
+            } else if (allowedOverlayOverlap(items[i], items[j])) {
+              allowedOverlayOverlapPairs.push(pair);
+            } else {
+              unexpectedOverlapPairs.push(pair);
+            }
+          }
+        }
+      }
+      const clippedCount = items.filter(item => item.clipped).length;
+      const unexpectedOverlapCount = unexpectedOverlapPairs.length;
+      const contrastChecked = items.filter(item => item.contrastX100 !== null).length;
+      const contrastFailures = items.filter(item => item.contrastOk === false).length;
+      const touchChecked = items.filter(item => item.interactive).length;
+      const touchFailures = items.filter(item => item.touchOk === false).length;
+      const failureReasons = [];
+      if (unexpectedOverlapCount > 0) failureReasons.push("unexpected-overlap");
+      if (clippedCount > 0) failureReasons.push("text-clipping");
+      if (contrastFailures > 0) failureReasons.push("contrast");
+      if (touchFailures > 0) failureReasons.push("touch-target");
+      return {
+        producer: "electron-chromium-dom-audit",
+        viewport,
+        selectors,
+        thresholds: {
+          contrastMinX100,
+          touchMinPx
+        },
+        items,
+        overlapPairs,
+        containedOverlapPairs,
+        allowedOverlayOverlapPairs,
+        unexpectedOverlapPairs,
+        clippedCount,
+        unexpectedOverlapCount,
+        contrastChecked,
+        contrastFailures,
+        touchChecked,
+        touchFailures,
+        failureReasons,
+        pass: failureReasons.length === 0
+      };
+    })()
+  `);
+}
+
 async function main() {
   if (!htmlPath) {
     console.error("ELECTRON_CAPTURE_HTML is required");
@@ -92,6 +346,7 @@ async function main() {
   await win.loadFile(absHtml);
   await new Promise(r => setTimeout(r, settleMs));
 
+  const audit = await collectAudit(win, auditSelectors);
   const image = await win.capturePage({ x: 0, y: 0, width, height });
   const result = bitmapToLogicalArgb(image);
 
@@ -105,14 +360,41 @@ async function main() {
     downsampled: result.downsampled,
     pixels: Array.from(result.pixels, v => v >>> 0),
   };
+  if (audit) payload.audit = audit;
 
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   fs.writeFileSync(outputPath, JSON.stringify(payload));
+  if (audit && auditOutputPath) {
+    fs.mkdirSync(path.dirname(auditOutputPath), { recursive: true });
+    fs.writeFileSync(auditOutputPath, JSON.stringify(audit, null, 2));
+  }
   console.log("captured=" + outputPath);
   console.log("size=" + width + "x" + height);
   console.log("native=" + result.nativeWidth + "x" + result.nativeHeight);
   console.log("downsampled=" + result.downsampled);
   console.log("pixels=" + result.pixels.length);
+  if (audit) {
+    console.log("audit_items=" + audit.items.length);
+    console.log("audit_overlaps=" + audit.overlapPairs.length);
+    console.log("audit_contained_overlaps=" + audit.containedOverlapPairs.length);
+    console.log("audit_allowed_overlaps=" + audit.allowedOverlayOverlapPairs.length);
+    console.log("audit_unexpected_overlaps=" + audit.unexpectedOverlapCount);
+    console.log("audit_clipped=" + audit.clippedCount);
+    console.log("audit_contrast_checked=" + audit.contrastChecked);
+    console.log("audit_contrast_failures=" + audit.contrastFailures);
+    console.log("audit_touch_checked=" + audit.touchChecked);
+    console.log("audit_touch_failures=" + audit.touchFailures);
+    console.log("audit_pass=" + audit.pass);
+    console.log("audit_failure_reasons=" + audit.failureReasons.join(","));
+    console.log("audit_fail_on_audit=" + failOnAudit);
+    if (auditOutputPath) console.log("audit=" + auditOutputPath);
+    if (failOnAudit && !audit.pass) {
+      console.error("audit_failed=" + audit.failureReasons.join(","));
+      process.exitCode = 2;
+      app.exit(2);
+      return;
+    }
+  }
 
   app.quit();
 }

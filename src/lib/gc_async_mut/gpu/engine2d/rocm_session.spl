@@ -7,13 +7,47 @@
 use std.gc_async_mut.gpu.engine2d.backend_session.{BackendSessionKind}
 use std.gc_async_mut.gpu.engine2d.generated_kernel_dispatch.{
     GENERATED_2D_ALPHA, GENERATED_2D_COPY, GENERATED_2D_FILL, GENERATED_2D_SCROLL,
-    generated_2d_launch_plan
+    Generated2DSessionRuntimeProvenance,
+    generated_2d_session_launch_gate,
+    generated_2d_session_runtime_provenance
 }
 use std.gc_async_mut.gpu.engine2d.sffi_rocm.{RocmFfi}
+
+class RocmSessionEvidence:
+    operation: text
+    success: bool
+    status_code: text
+    reason: text
+    device: i64
+    module: i64
+    kernel: i64
+    generation: i64
+    readback_available: bool
+    expected_checksum: i64
+    actual_checksum: i64
+
+    static fn create(operation: text, success: bool, status_code: text, reason: text, device: i64, module: i64, kernel: i64, generation: i64, readback_available: bool, expected_checksum: i64, actual_checksum: i64) -> RocmSessionEvidence:
+        RocmSessionEvidence(
+            operation: operation,
+            success: success,
+            status_code: status_code,
+            reason: reason,
+            device: device,
+            module: module,
+            kernel: kernel,
+            generation: generation,
+            readback_available: readback_available,
+            expected_checksum: expected_checksum,
+            actual_checksum: actual_checksum
+        )
+
+    fn diagnostic_text() -> text:
+        "RocmSessionEvidence[op={self.operation} success={self.success.to_text()} status={self.status_code} reason={self.reason} device={self.device} module={self.module} kernel={self.kernel} generation={self.generation} readback={self.readback_available.to_text()} expected={self.expected_checksum} actual={self.actual_checksum}]"
 
 class RocmSession:
     device: i64
     module_cache: i64
+    kernel_cache: i64
     stream: i64
     ref_count: i64
     is_initialized: bool
@@ -24,12 +58,25 @@ class RocmSession:
         RocmSession(
             device: 0,
             module_cache: 0,
+            kernel_cache: 0,
             stream: 0,
             ref_count: 0,
             is_initialized: false,
             generation: 0,
             ffi: nil
         )
+
+    me init_evidence() -> RocmSessionEvidence:
+        val rc = self.init()
+        if rc == 0:
+            return self._evidence("init", true, "initialized", "rocm-session-initialized", 0, true, 0, 0)
+        if self.ffi == nil:
+            return self._evidence("init", false, "missing-ffi", "missing-rocm-ffi", 0, false, 0, 0)
+        if not self.ffi.is_available():
+            return self._evidence("init", false, "runtime-unavailable", "rocm-runtime-unavailable", 0, false, 0, 0)
+        if self.ffi.device_count() < 1:
+            return self._evidence("init", false, "device-unavailable", "rocm-device-unavailable", 0, false, 0, 0)
+        self._evidence("init", false, "init-failed", "rocm-init-failed", 0, false, 0, 0)
 
     static fn create_with_ffi(ffi: RocmFfi) -> RocmSession:
         val session = RocmSession.create()
@@ -76,8 +123,23 @@ class RocmSession:
     me load_module(source: text) -> i64:
         if self.ffi == nil:
             return 0
-        # RocmFfi does not expose a text-safe dynamic module loader yet.
-        0
+        if source == "":
+            return 0
+        val module = self.ffi.module_load(source)
+        if module == 0:
+            return 0
+        self.module_cache = module
+        module
+
+    me load_module_evidence(source: text) -> RocmSessionEvidence:
+        val module = self.load_module(source)
+        if module != 0:
+            return self._evidence("load_module", true, "loaded", "rocm-module-loaded", 0, true, 0, 0)
+        if self.ffi == nil:
+            return self._evidence("load_module", false, "missing-ffi", "missing-rocm-ffi", 0, false, 0, 0)
+        if source == "":
+            return self._evidence("load_module", false, "empty-source", "missing-rocm-module-source", 0, false, 0, 0)
+        self._evidence("load_module", false, "load-failed", "rocm-generated-module-load-failed", 0, false, 0, 0)
 
     me synchronize() -> i64:
         if self.ffi == nil:
@@ -86,6 +148,14 @@ class RocmSession:
             0
         else:
             1
+
+    me synchronize_evidence() -> RocmSessionEvidence:
+        val rc = self.synchronize()
+        if rc == 0:
+            return self._evidence("synchronize", true, "synchronized", "rocm-device-synchronized", 0, true, 0, 0)
+        if self.ffi == nil:
+            return self._evidence("synchronize", false, "missing-ffi", "missing-rocm-ffi", 0, false, 0, 0)
+        self._evidence("synchronize", false, "sync-failed", "rocm-device-sync-failed", 0, false, 0, 0)
 
     me shutdown():
         self.ref_count = 0
@@ -96,22 +166,50 @@ class RocmSession:
             return 1
         if self.module_cache == 0:
             return 1
+        val kernel = self.ffi.kernel_get(self.module_cache, name)
+        if kernel == 0:
+            return 1
+        self.kernel_cache = kernel
         if self.ffi.launch_kernel(name, gx, gy, 1, bx, by, 1, 0):
             0
         else:
             1
 
     me launch_generated_2d(op: text, width: i64, height: i64, args_ptr: i64) -> i64:
-        if self.ffi == nil:
+        val gate = generated_2d_session_launch_gate("rocm", op, width, height, self.is_valid(), self.module_cache != 0, args_ptr)
+        if not gate.ready:
             return 1
-        if self.module_cache == 0:
+        val kernel = self.ffi.kernel_get(self.module_cache, gate.plan.entry_name)
+        if kernel == 0:
             return 1
-        if args_ptr == 0:
-            return 1
-        val plan = generated_2d_launch_plan("rocm", op, width, height)
-        if not plan.dispatch_ready:
-            return 1
-        self.launch_kernel(plan.entry_name, plan.grid_x, plan.grid_y, plan.block_x, plan.block_y)
+        self.kernel_cache = kernel
+        if self.ffi.launch_kernel_args(kernel, gate.plan.grid_x, gate.plan.grid_y, gate.plan.grid_z, gate.plan.block_x, gate.plan.block_y, gate.plan.block_z, 0, args_ptr):
+            0
+        else:
+            1
+
+    me launch_generated_2d_evidence(op: text, width: i64, height: i64, args_ptr: i64) -> RocmSessionEvidence:
+        val operation = "launch_generated_2d:{op}"
+        val gate = generated_2d_session_launch_gate("rocm", op, width, height, self.is_valid(), self.module_cache != 0, args_ptr)
+        if not gate.plan.dispatch_ready:
+            return self._evidence(operation, false, "plan-not-ready", gate.plan.reason, 0, false, 0, 0)
+        if gate.reason == "missing-args-pointer":
+            return self._evidence(operation, false, "missing-args-pointer", "missing-generated-2d-args-pointer", 0, false, 0, 0)
+        if gate.reason == "runtime-not-ready" and self.ffi == nil:
+            return self._evidence(operation, false, "missing-ffi", "missing-rocm-ffi", 0, false, 0, 0)
+        if gate.reason == "runtime-not-ready":
+            return self._evidence(operation, false, "runtime-not-ready", "rocm-runtime-not-ready", 0, false, 0, 0)
+        if gate.reason == "module-not-loaded":
+            return self._evidence(operation, false, "missing-module", "missing-rocm-generated-module", 0, false, 0, 0)
+        val rc = self.launch_generated_2d(op, width, height, args_ptr)
+        if rc == 0:
+            return self._evidence(operation, true, "submitted", "rocm-generated-2d-kernel-submitted", self.kernel_cache, true, 0, 0)
+        if self.kernel_cache == 0:
+            return self._evidence(operation, false, "missing-kernel", "rocm-generated-2d-kernel-get-failed", 0, false, 0, 0)
+        self._evidence(operation, false, "submit-failed", "rocm-generated-2d-kernel-submit-failed", self.kernel_cache, false, 0, 0)
+
+    me launch_generated_2d_runtime_provenance(op: text, width: i64, height: i64, args_ptr: i64) -> Generated2DSessionRuntimeProvenance:
+        generated_2d_session_runtime_provenance("rocm", op, width, height, self.is_valid(), self.module_cache != 0, args_ptr)
 
     me fill_kernel(width: i64, height: i64, args_ptr: i64) -> i64:
         self.launch_generated_2d(GENERATED_2D_FILL, width, height, args_ptr)
@@ -125,9 +223,60 @@ class RocmSession:
     me scroll_kernel(width: i64, height: i64, args_ptr: i64) -> i64:
         self.launch_generated_2d(GENERATED_2D_SCROLL, width, height, args_ptr)
 
+    me alloc(size: i64) -> i64:
+        if self.ffi == nil or size <= 0:
+            return 0
+        self.ffi.mem_alloc(size)
+
+    me free(ptr: i64):
+        if self.ffi == nil or ptr == 0:
+            return
+        self.ffi.mem_free(ptr)
+
+    me read_pixels(buffer: i64, pixels: [u32], byte_size: i64) -> bool:
+        if self.ffi == nil or buffer == 0 or byte_size <= 0:
+            return false
+        self.ffi.read_pixels(buffer, pixels, byte_size)
+
+    me read_pixels_evidence(buffer: i64, pixels: [u32], byte_size: i64, expected_checksum: i64, actual_checksum: i64) -> RocmSessionEvidence:
+        if self.ffi == nil:
+            return self._evidence("read_pixels", false, "missing-ffi", "missing-rocm-ffi", 0, false, expected_checksum, actual_checksum)
+        if buffer == 0:
+            return self._evidence("read_pixels", false, "missing-buffer", "missing-rocm-device-buffer", 0, false, expected_checksum, actual_checksum)
+        if byte_size <= 0:
+            return self._evidence("read_pixels", false, "invalid-size", "invalid-rocm-readback-size", 0, false, expected_checksum, actual_checksum)
+        if not self.read_pixels(buffer, pixels, byte_size):
+            return self._evidence("read_pixels", false, "readback-failed", "rocm-device-readback-failed", 0, false, expected_checksum, actual_checksum)
+        self.readback_evidence(true, expected_checksum, actual_checksum)
+
+    fn readback_evidence(readback_available: bool, expected_checksum: i64, actual_checksum: i64) -> RocmSessionEvidence:
+        if not readback_available:
+            return self._evidence("readback", false, "readback-unavailable", "rocm-device-readback-required", 0, false, expected_checksum, actual_checksum)
+        if expected_checksum == 0 or actual_checksum == 0:
+            return self._evidence("readback", false, "invalid-checksum", "rocm-device-readback-checksum-required", 0, true, expected_checksum, actual_checksum)
+        if expected_checksum == actual_checksum:
+            return self._evidence("readback", true, "readback-matched", "rocm-readback-checksum-matched", 0, true, expected_checksum, actual_checksum)
+        self._evidence("readback", false, "readback-mismatch", "rocm-device-readback-checksum-mismatch", 0, true, expected_checksum, actual_checksum)
+
     me _cleanup():
         self.module_cache = 0
+        self.kernel_cache = 0
         self.device = 0
         self.stream = 0
         self.is_initialized = false
         self.generation = self.generation + 1
+
+    fn _evidence(operation: text, success: bool, status_code: text, reason: text, kernel: i64, readback_available: bool, expected_checksum: i64, actual_checksum: i64) -> RocmSessionEvidence:
+        RocmSessionEvidence.create(
+            operation,
+            success,
+            status_code,
+            reason,
+            self.device,
+            self.module_cache,
+            kernel,
+            self.generation,
+            readback_available,
+            expected_checksum,
+            actual_checksum
+        )

@@ -161,6 +161,7 @@ class SimpleWindowManager {
     this._contrastMode = 'comfortable';
     this._feedbackMode = 'standard';
     this._energyMode = 'standard';
+    this._motionMode = 'standard';
     this._animationStyle = 'spring';
     this._dockMagnificationMode = 'standard';
     this._dockVisibilityMode = 'shown';
@@ -186,24 +187,46 @@ class SimpleWindowManager {
     this._selectedQualityCheck = 'color';
     this._qualityAuditMode = 'full';
     this._qualityContrastPolicyActiveIndex = 0;
+    this._qualityContrastPolicyFeedbackTimer = 0;
     this._qualityAccentPolicyActiveIndex = 0;
+    this._qualityAccentPolicyFeedbackTimer = 0;
     this._qualityDensityPolicyActiveIndex = 1;
+    this._qualityDensityPolicyFeedbackTimer = 0;
     this._qualitySurfaceDepthPolicyActiveIndex = 0;
+    this._qualitySurfaceDepthPolicyFeedbackTimer = 0;
     this._qualityTrafficSidePolicyActiveIndex = 0;
+    this._qualityTrafficSidePolicyFeedbackTimer = 0;
     this._qualityWidgetStackPolicyActiveIndex = 0;
+    this._qualityWidgetStackPolicyFeedbackTimer = 0;
     this._qualityIconMaskPolicyActiveIndex = 0;
+    this._qualityIconMaskPolicyFeedbackTimer = 0;
     this._qualityCornerRadiusPolicyActiveIndex = 0;
+    this._qualityCornerRadiusPolicyFeedbackTimer = 0;
     this._qualityMaterialPolicyActiveIndex = 0;
+    this._qualityMaterialPolicyFeedbackTimer = 0;
     this._qualityDockMagnificationPolicyActiveIndex = 0;
+    this._qualityDockMagnificationPolicyFeedbackTimer = 0;
     this._qualityDockVisibilityPolicyActiveIndex = 0;
+    this._qualityDockVisibilityPolicyFeedbackTimer = 0;
     this._qualityBackdropPolicyActiveIndex = 0;
+    this._qualityBackdropPolicyFeedbackTimer = 0;
     this._qualityWallpaperPolicyActiveIndex = 0;
+    this._qualityWallpaperPolicyFeedbackTimer = 0;
     this._qualityTitleCommandPolicyActiveIndex = 1;
+    this._qualityTitleCommandPolicyFeedbackTimer = 0;
     this._qualityWindowTransitionPolicyActiveIndex = 0;
+    this._qualityWindowTransitionPolicyFeedbackTimer = 0;
+    this._qualityMotionPolicyActiveIndex = 0;
+    this._qualityMotionPolicyFeedbackTimer = 0;
     this._qualityAnimationStylePolicyActiveIndex = 0;
+    this._qualityAnimationStylePolicyFeedbackTimer = 0;
     this._qualityChromeVerbosityPolicyActiveIndex = 0;
+    this._qualityChromeVerbosityPolicyFeedbackTimer = 0;
     this._qualityFeedbackPolicyActiveIndex = 0;
+    this._qualityFeedbackPolicyFeedbackTimer = 0;
     this._qualityEnergyPolicyActiveIndex = 0;
+    this._qualityEnergyPolicyFeedbackTimer = 0;
+    this._browserAuditResult = options.browserAuditResult || null;
     this._taskbarPreview = null;
     this._taskbarPreviewHideTimer = 0;
     this._launchFeedbackTimers = new Map();
@@ -281,6 +304,7 @@ class SimpleWindowManager {
     window.simpleWmSetBackdropMotion = (preference) => this.setBackdropMotionPreference(preference);
     window.simpleWmSetBackdropIntensity = (preference) => this.setBackdropIntensityPreference(preference);
     window.simpleWmSetQuietMode = (preference) => this.setQuietModePreference(preference);
+    window.simpleWmSetBrowserAuditResult = (audit) => this.setBrowserAuditResult(audit);
 
     // Load renderer then begin auth.
     this._init();
@@ -341,6 +365,7 @@ class SimpleWindowManager {
 
   _applyMotionPreference(preference) {
     const motion = this._normalizeMotionPreference(preference || this._readMotionPreference());
+    this._motionMode = motion;
     document.documentElement.dataset.wmMotion = motion;
     if (motion === 'off') this._resetDesktopBackdropPointer();
     return motion;
@@ -2428,25 +2453,45 @@ class SimpleWindowManager {
   _makeRoundIcon(baseClass, raw) {
     const icon = document.createElement('span');
     icon.className = `${baseClass} wm-round-icon`;
-    const value = String(raw || 'S');
+    const source = this._normalizeIconSource(raw);
+    const value = source.value;
     icon.dataset.iconSource = value;
     icon.dataset.iconMask = this._iconMaskMode || 'circle';
-    if (this._isImageIcon(value)) {
+    icon.dataset.iconKind = source.kind;
+    if (source.kind === 'image') {
       icon.classList.add('wm-icon-normalized-square');
-      icon.dataset.iconNormalized = this._iconMaskMode === 'square' ? 'square-preserved' : this._iconMaskMode === 'rounded' ? 'square-to-rounded' : 'square-to-round';
+      icon.dataset.iconNormalized = source.conversion;
       const img = document.createElement('img');
       img.className = 'wm-icon-image';
       img.src = value;
       img.alt = '';
       icon.appendChild(img);
     } else {
-      icon.dataset.iconNormalized = 'glyph-to-round';
+      icon.dataset.iconNormalized = source.conversion;
       const glyph = document.createElement('span');
       glyph.className = 'wm-icon-glyph';
-      glyph.textContent = value.trim().slice(0, 1).toUpperCase() || 'S';
+      glyph.textContent = source.glyph;
       icon.appendChild(glyph);
     }
     return icon;
+  }
+
+  _normalizeIconSource(raw) {
+    const value = String(raw || 'S').trim() || 'S';
+    if (this._isImageIcon(value)) {
+      return {
+        value,
+        kind: 'image',
+        glyph: '',
+        conversion: this._iconMaskMode === 'square' ? 'square-preserved' : this._iconMaskMode === 'rounded' ? 'square-to-rounded' : 'square-to-round'
+      };
+    }
+    return {
+      value,
+      kind: 'glyph',
+      glyph: value.slice(0, 1).toUpperCase() || 'S',
+      conversion: 'glyph-to-round'
+    };
   }
 
   _ensureDesktopWidgets() {
@@ -6222,6 +6267,13 @@ class SimpleWindowManager {
         this._activateQualityAnimationStylePolicySelection();
         return;
       }
+      const motionPolicy = event.target.closest('.wm-quality-motion-policy-item');
+      if (motionPolicy && panel.contains(motionPolicy)) {
+        this._qualityMotionPolicyActiveIndex = Number(motionPolicy.dataset.motionPolicyIndex || '0') || 0;
+        this._syncQualityMotionPolicySelection(false);
+        this._activateQualityMotionPolicySelection();
+        return;
+      }
       const chromeVerbosityPolicy = event.target.closest('.wm-quality-chrome-verbosity-policy-item');
       if (chromeVerbosityPolicy && panel.contains(chromeVerbosityPolicy)) {
         this._qualityChromeVerbosityPolicyActiveIndex = Number(chromeVerbosityPolicy.dataset.chromeVerbosityPolicyIndex || '0') || 0;
@@ -6275,10 +6327,11 @@ class SimpleWindowManager {
       const titleCommandPolicy = target ? target.closest('.wm-quality-title-command-policy-item') : null;
       const windowTransitionPolicy = target ? target.closest('.wm-quality-window-transition-policy-item') : null;
       const animationStylePolicy = target ? target.closest('.wm-quality-animation-style-policy-item') : null;
+      const motionPolicy = target ? target.closest('.wm-quality-motion-policy-item') : null;
       const chromeVerbosityPolicy = target ? target.closest('.wm-quality-chrome-verbosity-policy-item') : null;
       const feedbackPolicy = target ? target.closest('.wm-quality-feedback-policy-item') : null;
       const energyPolicy = target ? target.closest('.wm-quality-energy-policy-item') : null;
-      if ((!contrastPolicy || !panel.contains(contrastPolicy)) && (!accentPolicy || !panel.contains(accentPolicy)) && (!densityPolicy || !panel.contains(densityPolicy)) && (!surfaceDepthPolicy || !panel.contains(surfaceDepthPolicy)) && (!trafficSidePolicy || !panel.contains(trafficSidePolicy)) && (!widgetStackPolicy || !panel.contains(widgetStackPolicy)) && (!iconMaskPolicy || !panel.contains(iconMaskPolicy)) && (!cornerRadiusPolicy || !panel.contains(cornerRadiusPolicy)) && (!materialPolicy || !panel.contains(materialPolicy)) && (!dockMagnificationPolicy || !panel.contains(dockMagnificationPolicy)) && (!dockVisibilityPolicy || !panel.contains(dockVisibilityPolicy)) && (!backdropPolicy || !panel.contains(backdropPolicy)) && (!wallpaperPolicy || !panel.contains(wallpaperPolicy)) && (!titleCommandPolicy || !panel.contains(titleCommandPolicy)) && (!windowTransitionPolicy || !panel.contains(windowTransitionPolicy)) && (!animationStylePolicy || !panel.contains(animationStylePolicy)) && (!chromeVerbosityPolicy || !panel.contains(chromeVerbosityPolicy)) && (!feedbackPolicy || !panel.contains(feedbackPolicy)) && (!energyPolicy || !panel.contains(energyPolicy))) return;
+      if ((!contrastPolicy || !panel.contains(contrastPolicy)) && (!accentPolicy || !panel.contains(accentPolicy)) && (!densityPolicy || !panel.contains(densityPolicy)) && (!surfaceDepthPolicy || !panel.contains(surfaceDepthPolicy)) && (!trafficSidePolicy || !panel.contains(trafficSidePolicy)) && (!widgetStackPolicy || !panel.contains(widgetStackPolicy)) && (!iconMaskPolicy || !panel.contains(iconMaskPolicy)) && (!cornerRadiusPolicy || !panel.contains(cornerRadiusPolicy)) && (!materialPolicy || !panel.contains(materialPolicy)) && (!dockMagnificationPolicy || !panel.contains(dockMagnificationPolicy)) && (!dockVisibilityPolicy || !panel.contains(dockVisibilityPolicy)) && (!backdropPolicy || !panel.contains(backdropPolicy)) && (!wallpaperPolicy || !panel.contains(wallpaperPolicy)) && (!titleCommandPolicy || !panel.contains(titleCommandPolicy)) && (!windowTransitionPolicy || !panel.contains(windowTransitionPolicy)) && (!animationStylePolicy || !panel.contains(animationStylePolicy)) && (!motionPolicy || !panel.contains(motionPolicy)) && (!chromeVerbosityPolicy || !panel.contains(chromeVerbosityPolicy)) && (!feedbackPolicy || !panel.contains(feedbackPolicy)) && (!energyPolicy || !panel.contains(energyPolicy))) return;
       const moveSelection = (delta) => {
         if (contrastPolicy) this._moveQualityContrastPolicySelection(delta);
         if (accentPolicy) this._moveQualityAccentPolicySelection(delta);
@@ -6296,6 +6349,7 @@ class SimpleWindowManager {
         if (titleCommandPolicy) this._moveQualityTitleCommandPolicySelection(delta);
         if (windowTransitionPolicy) this._moveQualityWindowTransitionPolicySelection(delta);
         if (animationStylePolicy) this._moveQualityAnimationStylePolicySelection(delta);
+        if (motionPolicy) this._moveQualityMotionPolicySelection(delta);
         if (chromeVerbosityPolicy) this._moveQualityChromeVerbosityPolicySelection(delta);
         if (feedbackPolicy) this._moveQualityFeedbackPolicySelection(delta);
         if (energyPolicy) this._moveQualityEnergyPolicySelection(delta);
@@ -6317,11 +6371,12 @@ class SimpleWindowManager {
         if (titleCommandPolicy) this._setQualityTitleCommandPolicySelection(index);
         if (windowTransitionPolicy) this._setQualityWindowTransitionPolicySelection(index);
         if (animationStylePolicy) this._setQualityAnimationStylePolicySelection(index);
+        if (motionPolicy) this._setQualityMotionPolicySelection(index);
         if (chromeVerbosityPolicy) this._setQualityChromeVerbosityPolicySelection(index);
         if (feedbackPolicy) this._setQualityFeedbackPolicySelection(index);
         if (energyPolicy) this._setQualityEnergyPolicySelection(index);
       };
-      const itemCount = contrastPolicy ? this._qualityContrastPolicyItems().length : accentPolicy ? this._qualityAccentPolicyItems().length : densityPolicy ? this._qualityDensityPolicyItems().length : surfaceDepthPolicy ? this._qualitySurfaceDepthPolicyItems().length : trafficSidePolicy ? this._qualityTrafficSidePolicyItems().length : widgetStackPolicy ? this._qualityWidgetStackPolicyItems().length : iconMaskPolicy ? this._qualityIconMaskPolicyItems().length : cornerRadiusPolicy ? this._qualityCornerRadiusPolicyItems().length : materialPolicy ? this._qualityMaterialPolicyItems().length : dockMagnificationPolicy ? this._qualityDockMagnificationPolicyItems().length : dockVisibilityPolicy ? this._qualityDockVisibilityPolicyItems().length : backdropPolicy ? this._qualityBackdropPolicyItems().length : wallpaperPolicy ? this._qualityWallpaperPolicyItems().length : titleCommandPolicy ? this._qualityTitleCommandPolicyItems().length : windowTransitionPolicy ? this._qualityWindowTransitionPolicyItems().length : animationStylePolicy ? this._qualityAnimationStylePolicyItems().length : chromeVerbosityPolicy ? this._qualityChromeVerbosityPolicyItems().length : feedbackPolicy ? this._qualityFeedbackPolicyItems().length : this._qualityEnergyPolicyItems().length;
+      const itemCount = contrastPolicy ? this._qualityContrastPolicyItems().length : accentPolicy ? this._qualityAccentPolicyItems().length : densityPolicy ? this._qualityDensityPolicyItems().length : surfaceDepthPolicy ? this._qualitySurfaceDepthPolicyItems().length : trafficSidePolicy ? this._qualityTrafficSidePolicyItems().length : widgetStackPolicy ? this._qualityWidgetStackPolicyItems().length : iconMaskPolicy ? this._qualityIconMaskPolicyItems().length : cornerRadiusPolicy ? this._qualityCornerRadiusPolicyItems().length : materialPolicy ? this._qualityMaterialPolicyItems().length : dockMagnificationPolicy ? this._qualityDockMagnificationPolicyItems().length : dockVisibilityPolicy ? this._qualityDockVisibilityPolicyItems().length : backdropPolicy ? this._qualityBackdropPolicyItems().length : wallpaperPolicy ? this._qualityWallpaperPolicyItems().length : titleCommandPolicy ? this._qualityTitleCommandPolicyItems().length : windowTransitionPolicy ? this._qualityWindowTransitionPolicyItems().length : animationStylePolicy ? this._qualityAnimationStylePolicyItems().length : motionPolicy ? this._qualityMotionPolicyItems().length : chromeVerbosityPolicy ? this._qualityChromeVerbosityPolicyItems().length : feedbackPolicy ? this._qualityFeedbackPolicyItems().length : this._qualityEnergyPolicyItems().length;
       const activateSelection = () => {
         if (contrastPolicy) this._activateQualityContrastPolicySelection();
         if (accentPolicy) this._activateQualityAccentPolicySelection();
@@ -6339,6 +6394,7 @@ class SimpleWindowManager {
         if (titleCommandPolicy) this._activateQualityTitleCommandPolicySelection();
         if (windowTransitionPolicy) this._activateQualityWindowTransitionPolicySelection();
         if (animationStylePolicy) this._activateQualityAnimationStylePolicySelection();
+        if (motionPolicy) this._activateQualityMotionPolicySelection();
         if (chromeVerbosityPolicy) this._activateQualityChromeVerbosityPolicySelection();
         if (feedbackPolicy) this._activateQualityFeedbackPolicySelection();
         if (energyPolicy) this._activateQualityEnergyPolicySelection();
@@ -6457,6 +6513,7 @@ class SimpleWindowManager {
     panel.appendChild(this._makeQualityRecommendations(items));
     panel.appendChild(this._makeQualityReportPreview(items));
     panel.appendChild(this._makeQualityEvidencePreview());
+    panel.appendChild(this._makeQualityBrowserAuditPreview());
     panel.appendChild(this._makeQualityActions());
   }
 
@@ -6470,8 +6527,8 @@ class SimpleWindowManager {
     const contrast = this._qualityContrastRatio(root.getPropertyValue('--ui-bg') || body.backgroundColor, root.getPropertyValue('--ui-text') || body.color);
     return [
       { key: 'color', category: 'visual', label: 'Color contrast', value: contrast + ':1', threshold: '>= 4.5:1', source: '--ui-bg / --ui-text', fix: 'Adjust theme contrast tokens', good: contrast >= 4.5 },
-      { key: 'touch', category: 'layout', label: 'Touch target', value: this._qualityElementMinHeight(taskbarItem) + 'px', threshold: '>= 34px', source: '.wm-taskbar-item', fix: 'Raise taskbar hit area', good: this._qualityElementMinHeight(taskbarItem) >= 34 },
-      { key: 'titlebar', category: 'layout', label: 'Titlebar height', value: this._qualityElementHeight(titlebar) + 'px', threshold: '>= 38px', source: '.wm-titlebar', fix: 'Increase titlebar height token', good: this._qualityElementHeight(titlebar) >= 38 },
+      { key: 'touch', category: 'layout', label: 'Touch target', value: this._qualityElementMinHeight(taskbarItem) + 'px', threshold: '>= 44px', source: '.wm-taskbar-item', fix: 'Raise taskbar hit area', good: this._qualityElementMinHeight(taskbarItem) >= 44 },
+      { key: 'titlebar', category: 'layout', label: 'Titlebar height', value: this._qualityElementHeight(titlebar) + 'px', threshold: '>= 44px', source: '.wm-titlebar', fix: 'Increase titlebar height token', good: this._qualityElementHeight(titlebar) >= 44 },
       { key: 'input', category: 'layout', label: 'Title input', value: this._qualityElementWidth(titleInput) + 'px', threshold: '>= 140px', source: '.wm-title-input', fix: 'Widen command input track', good: this._qualityElementWidth(titleInput) >= 140 },
       { key: 'bounds', category: 'layout', label: 'Command bounds', value: this._qualityElementWidth(command) + 'px', threshold: '<= 680px', source: '.wm-command-palette', fix: 'Clamp command palette width', good: this._qualityElementWidth(command) <= 680 },
       { key: 'motion', category: 'motion', label: 'Motion mode', value: this._normalizeMotionPreference(this._readMotionPreference()), threshold: 'standard or reduced', source: 'simple.wm.motion', fix: 'Use motion preference toggle', good: true },
@@ -6711,13 +6768,50 @@ class SimpleWindowManager {
     if (policy) policy.dataset.contrastPolicyActiveIndex = String(this._qualityContrastPolicyActiveIndex);
   }
 
+  _markQualityContrastPolicyFeedback(item, contrastMode = '') {
+    if (this._qualityContrastPolicyFeedbackTimer) window.clearTimeout(this._qualityContrastPolicyFeedbackTimer);
+    const policy = this._qualityInspector ? this._qualityInspector.querySelector('.wm-quality-contrast-policy') : null;
+    if (policy) {
+      policy.querySelectorAll('.wm-quality-contrast-policy-item.action-feedback, .wm-quality-contrast-policy-item[aria-busy]').forEach((node) => {
+        node.classList.remove('action-feedback');
+        delete node.dataset.contrastFeedback;
+        node.removeAttribute('aria-busy');
+      });
+    }
+    if (!item) return;
+    const feedback = contrastMode || item.dataset.contrastPolicy || 'comfortable';
+    if (policy) {
+      policy.dataset.contrastFeedback = feedback;
+      policy.setAttribute('aria-busy', 'true');
+    }
+    item.dataset.contrastFeedback = feedback;
+    item.setAttribute('aria-busy', 'true');
+    item.classList.remove('action-feedback');
+    void item.offsetWidth;
+    item.classList.add('action-feedback');
+    this._qualityContrastPolicyFeedbackTimer = window.setTimeout(() => {
+      item.classList.remove('action-feedback');
+      delete item.dataset.contrastFeedback;
+      item.removeAttribute('aria-busy');
+      if (policy) {
+        delete policy.dataset.contrastFeedback;
+        policy.removeAttribute('aria-busy');
+      }
+      this._qualityContrastPolicyFeedbackTimer = 0;
+    }, 420);
+  }
+
   _activateQualityContrastPolicySelection() {
     const item = this._qualityContrastPolicyItems()[this._qualityContrastPolicyActiveIndex];
     if (!item) return;
     const contrast = item.dataset.contrastPolicy || 'comfortable';
     this.setContrastPreference(contrast);
     this._sendWindowCmd('quality_contrast_policy', { contrast_policy: contrast });
-    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
+    if (this._qualityInspector && !this._qualityInspector.hidden) {
+      this._renderQualityInspector();
+      const nextItem = this._qualityContrastPolicyItems()[this._qualityContrastPolicyActiveIndex];
+      this._markQualityContrastPolicyFeedback(nextItem, contrast);
+    }
   }
 
   _makeQualityAccentPolicy() {
@@ -6792,13 +6886,50 @@ class SimpleWindowManager {
     if (policy) policy.dataset.accentPolicyActiveIndex = String(this._qualityAccentPolicyActiveIndex);
   }
 
+  _markQualityAccentPolicyFeedback(item, accentMode = '') {
+    if (this._qualityAccentPolicyFeedbackTimer) window.clearTimeout(this._qualityAccentPolicyFeedbackTimer);
+    const policy = this._qualityInspector ? this._qualityInspector.querySelector('.wm-quality-accent-policy') : null;
+    if (policy) {
+      policy.querySelectorAll('.wm-quality-accent-policy-item.action-feedback, .wm-quality-accent-policy-item[aria-busy]').forEach((node) => {
+        node.classList.remove('action-feedback');
+        delete node.dataset.accentFeedback;
+        node.removeAttribute('aria-busy');
+      });
+    }
+    if (!item) return;
+    const feedback = accentMode || item.dataset.accentPolicy || 'blue';
+    if (policy) {
+      policy.dataset.accentFeedback = feedback;
+      policy.setAttribute('aria-busy', 'true');
+    }
+    item.dataset.accentFeedback = feedback;
+    item.setAttribute('aria-busy', 'true');
+    item.classList.remove('action-feedback');
+    void item.offsetWidth;
+    item.classList.add('action-feedback');
+    this._qualityAccentPolicyFeedbackTimer = window.setTimeout(() => {
+      item.classList.remove('action-feedback');
+      delete item.dataset.accentFeedback;
+      item.removeAttribute('aria-busy');
+      if (policy) {
+        delete policy.dataset.accentFeedback;
+        policy.removeAttribute('aria-busy');
+      }
+      this._qualityAccentPolicyFeedbackTimer = 0;
+    }, 420);
+  }
+
   _activateQualityAccentPolicySelection() {
     const item = this._qualityAccentPolicyItems()[this._qualityAccentPolicyActiveIndex];
     if (!item) return;
     const accent = item.dataset.accentPolicy || 'blue';
     this.setAccentPreference(accent);
     this._sendWindowCmd('quality_accent_policy', { accent_policy: accent });
-    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
+    if (this._qualityInspector && !this._qualityInspector.hidden) {
+      this._renderQualityInspector();
+      const nextItem = this._qualityAccentPolicyItems()[this._qualityAccentPolicyActiveIndex];
+      this._markQualityAccentPolicyFeedback(nextItem, accent);
+    }
   }
 
   _makeQualityComputedColorPreview() {
@@ -6921,7 +7052,7 @@ class SimpleWindowManager {
     preview.dataset.qualityComputedLayout = 'live';
     [
       ['Window', '.wm-window.focused, .wm-window', 'window', 200, 120],
-      ['Titlebar', '.wm-titlebar', 'titlebar', 0, 38],
+      ['Titlebar', '.wm-titlebar', 'titlebar', 0, 44],
       ['Taskbar', '#wm-taskbar', 'taskbar', 180, 34],
       ['Widget', '.wm-desktop-widget, .widget-panel', 'widget', 160, 44]
     ].forEach(([label, selector, kind, minWidth, minHeight]) => {
@@ -7058,13 +7189,50 @@ class SimpleWindowManager {
     if (policy) policy.dataset.densityPolicyActiveIndex = String(this._qualityDensityPolicyActiveIndex);
   }
 
+  _markQualityDensityPolicyFeedback(item, density = '') {
+    if (this._qualityDensityPolicyFeedbackTimer) window.clearTimeout(this._qualityDensityPolicyFeedbackTimer);
+    const policy = this._qualityInspector ? this._qualityInspector.querySelector('.wm-quality-density-policy') : null;
+    if (policy) {
+      policy.querySelectorAll('.wm-quality-density-policy-item.action-feedback, .wm-quality-density-policy-item[aria-busy]').forEach((node) => {
+        node.classList.remove('action-feedback');
+        delete node.dataset.densityFeedback;
+        node.removeAttribute('aria-busy');
+      });
+    }
+    if (!item) return;
+    const feedback = density || item.dataset.densityPolicy || 'comfortable';
+    if (policy) {
+      policy.dataset.densityFeedback = feedback;
+      policy.setAttribute('aria-busy', 'true');
+    }
+    item.dataset.densityFeedback = feedback;
+    item.setAttribute('aria-busy', 'true');
+    item.classList.remove('action-feedback');
+    void item.offsetWidth;
+    item.classList.add('action-feedback');
+    this._qualityDensityPolicyFeedbackTimer = window.setTimeout(() => {
+      item.classList.remove('action-feedback');
+      delete item.dataset.densityFeedback;
+      item.removeAttribute('aria-busy');
+      if (policy) {
+        delete policy.dataset.densityFeedback;
+        policy.removeAttribute('aria-busy');
+      }
+      this._qualityDensityPolicyFeedbackTimer = 0;
+    }, 420);
+  }
+
   _activateQualityDensityPolicySelection() {
     const item = this._qualityDensityPolicyItems()[this._qualityDensityPolicyActiveIndex];
     if (!item) return;
     const density = item.dataset.densityPolicy || 'comfortable';
     this.setDensityPreference(density);
     this._sendWindowCmd('quality_density_policy', { density_policy: density });
-    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
+    if (this._qualityInspector && !this._qualityInspector.hidden) {
+      this._renderQualityInspector();
+      const nextItem = this._qualityDensityPolicyItems()[this._qualityDensityPolicyActiveIndex];
+      this._markQualityDensityPolicyFeedback(nextItem, density);
+    }
   }
 
   _qualityComputedGeometry(selector, minWidth, minHeight) {
@@ -7199,13 +7367,50 @@ class SimpleWindowManager {
     if (policy) policy.dataset.cornerRadiusPolicyActiveIndex = String(this._qualityCornerRadiusPolicyActiveIndex);
   }
 
+  _markQualityCornerRadiusPolicyFeedback(item, radiusMode = '') {
+    if (this._qualityCornerRadiusPolicyFeedbackTimer) window.clearTimeout(this._qualityCornerRadiusPolicyFeedbackTimer);
+    const policy = this._qualityInspector ? this._qualityInspector.querySelector('.wm-quality-corner-radius-policy') : null;
+    if (policy) {
+      policy.querySelectorAll('.wm-quality-corner-radius-policy-item.action-feedback, .wm-quality-corner-radius-policy-item[aria-busy]').forEach((node) => {
+        node.classList.remove('action-feedback');
+        delete node.dataset.cornerRadiusFeedback;
+        node.removeAttribute('aria-busy');
+      });
+    }
+    if (!item) return;
+    const feedback = radiusMode || item.dataset.cornerRadiusPolicy || 'round';
+    if (policy) {
+      policy.dataset.cornerRadiusFeedback = feedback;
+      policy.setAttribute('aria-busy', 'true');
+    }
+    item.dataset.cornerRadiusFeedback = feedback;
+    item.setAttribute('aria-busy', 'true');
+    item.classList.remove('action-feedback');
+    void item.offsetWidth;
+    item.classList.add('action-feedback');
+    this._qualityCornerRadiusPolicyFeedbackTimer = window.setTimeout(() => {
+      item.classList.remove('action-feedback');
+      delete item.dataset.cornerRadiusFeedback;
+      item.removeAttribute('aria-busy');
+      if (policy) {
+        delete policy.dataset.cornerRadiusFeedback;
+        policy.removeAttribute('aria-busy');
+      }
+      this._qualityCornerRadiusPolicyFeedbackTimer = 0;
+    }, 420);
+  }
+
   _activateQualityCornerRadiusPolicySelection() {
     const item = this._qualityCornerRadiusPolicyItems()[this._qualityCornerRadiusPolicyActiveIndex];
     if (!item) return;
     const radius = item.dataset.cornerRadiusPolicy || 'round';
     this.setCornerRadiusPreference(radius);
     this._sendWindowCmd('quality_corner_radius_policy', { corner_radius_policy: radius });
-    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
+    if (this._qualityInspector && !this._qualityInspector.hidden) {
+      this._renderQualityInspector();
+      const nextItem = this._qualityCornerRadiusPolicyItems()[this._qualityCornerRadiusPolicyActiveIndex];
+      this._markQualityCornerRadiusPolicyFeedback(nextItem, radius);
+    }
   }
 
   _makeQualityTitlebarPreview() {
@@ -7248,11 +7453,13 @@ class SimpleWindowManager {
     preview.dataset.qualityComputedTitlebar = 'live';
     const titlebar = document.querySelector('.wm-titlebar');
     const controls = titlebar ? titlebar.querySelectorAll('.wm-traffic-lights button') : [];
-    const icon = titlebar?.querySelector('.wm-titlebar-icon');
+    const icon = titlebar?.querySelector('.wm-titlebar-icon, .wm-title-icon');
+    const title = titlebar?.querySelector('.wm-title, .wm-title-text');
     const input = titlebar?.querySelector('.wm-title-input, .wm-command-bar');
     const context = titlebar?.querySelector('.wm-title-context');
     preview.appendChild(this._makeQualityComputedTitlebarMetric('Traffic', controls.length + ' left', 'traffic', controls.length === 3 && this._trafficSideMode === 'left'));
     preview.appendChild(this._makeQualityComputedTitlebarMetric('Icon', icon ? this._qualityElementWidth(icon) + 'px' : 'missing', 'icon', !!icon));
+    preview.appendChild(this._makeQualityComputedTitlebarMetric('Title', title ? this._qualityVisibleText(title, 'visible') : 'missing', 'title', !!title));
     preview.appendChild(this._makeQualityComputedTitlebarMetric('Input', input ? this._qualityElementWidth(input) + 'px' : 'missing', 'input', this._qualityElementWidth(input) >= 140));
     preview.appendChild(this._makeQualityComputedTitlebarMetric('Context', context ? this._qualityVisibleText(context, 'visible') : 'missing', 'context', !!context));
     return preview;
@@ -7324,11 +7531,9 @@ class SimpleWindowManager {
     if (!button) return { label: 'missing', good: false };
     const rect = button.getBoundingClientRect();
     const style = getComputedStyle(button);
-    const before = getComputedStyle(button, '::before');
     const size = Math.max(rect.width || parseFloat(style.width) || 0, rect.height || parseFloat(style.height) || 0);
-    const inset = parseFloat(before.inset || before.top || '0');
-    const target = Math.round(size + Math.abs(Number.isNaN(inset) ? 0 : inset) * 2);
-    return { label: target + 'px', good: target >= 28 };
+    const target = Math.round(size);
+    return { label: target + 'px', good: target >= 44 };
   }
 
   _qualityTrafficMotionEvidence(button) {
@@ -7412,13 +7617,50 @@ class SimpleWindowManager {
     if (policy) policy.dataset.trafficSidePolicyActiveIndex = String(this._qualityTrafficSidePolicyActiveIndex);
   }
 
+  _markQualityTrafficSidePolicyFeedback(item, trafficSide = '') {
+    if (this._qualityTrafficSidePolicyFeedbackTimer) window.clearTimeout(this._qualityTrafficSidePolicyFeedbackTimer);
+    const policy = this._qualityInspector ? this._qualityInspector.querySelector('.wm-quality-traffic-side-policy') : null;
+    if (policy) {
+      policy.querySelectorAll('.wm-quality-traffic-side-policy-item.action-feedback, .wm-quality-traffic-side-policy-item[aria-busy]').forEach((node) => {
+        node.classList.remove('action-feedback');
+        delete node.dataset.trafficSideFeedback;
+        node.removeAttribute('aria-busy');
+      });
+    }
+    if (!item) return;
+    const feedback = trafficSide || item.dataset.trafficSidePolicy || 'left';
+    if (policy) {
+      policy.dataset.trafficSideFeedback = feedback;
+      policy.setAttribute('aria-busy', 'true');
+    }
+    item.dataset.trafficSideFeedback = feedback;
+    item.setAttribute('aria-busy', 'true');
+    item.classList.remove('action-feedback');
+    void item.offsetWidth;
+    item.classList.add('action-feedback');
+    this._qualityTrafficSidePolicyFeedbackTimer = window.setTimeout(() => {
+      item.classList.remove('action-feedback');
+      delete item.dataset.trafficSideFeedback;
+      item.removeAttribute('aria-busy');
+      if (policy) {
+        delete policy.dataset.trafficSideFeedback;
+        policy.removeAttribute('aria-busy');
+      }
+      this._qualityTrafficSidePolicyFeedbackTimer = 0;
+    }, 420);
+  }
+
   _activateQualityTrafficSidePolicySelection() {
     const item = this._qualityTrafficSidePolicyItems()[this._qualityTrafficSidePolicyActiveIndex];
     if (!item) return;
     const side = item.dataset.trafficSidePolicy || 'left';
     this.setTrafficSidePreference(side);
     this._sendWindowCmd('quality_traffic_side_policy', { traffic_side_policy: side });
-    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
+    if (this._qualityInspector && !this._qualityInspector.hidden) {
+      this._renderQualityInspector();
+      const nextItem = this._qualityTrafficSidePolicyItems()[this._qualityTrafficSidePolicyActiveIndex];
+      this._markQualityTrafficSidePolicyFeedback(nextItem, side);
+    }
   }
 
   _makeQualityComputedCommandPreview() {
@@ -7528,6 +7770,39 @@ class SimpleWindowManager {
     if (policy) policy.dataset.titleCommandPolicyActiveIndex = String(this._qualityTitleCommandPolicyActiveIndex);
   }
 
+  _markQualityTitleCommandPolicyFeedback(item, mode = '') {
+    if (this._qualityTitleCommandPolicyFeedbackTimer) window.clearTimeout(this._qualityTitleCommandPolicyFeedbackTimer);
+    const policy = this._qualityInspector ? this._qualityInspector.querySelector('.wm-quality-title-command-policy') : null;
+    if (policy) {
+      policy.querySelectorAll('.wm-quality-title-command-policy-item.action-feedback, .wm-quality-title-command-policy-item[aria-busy]').forEach((node) => {
+        node.classList.remove('action-feedback');
+        delete node.dataset.titleCommandFeedback;
+        node.removeAttribute('aria-busy');
+      });
+    }
+    if (!item) return;
+    const feedback = mode || item.dataset.titleCommandPolicy || 'path';
+    if (policy) {
+      policy.dataset.titleCommandFeedback = feedback;
+      policy.setAttribute('aria-busy', 'true');
+    }
+    item.dataset.titleCommandFeedback = feedback;
+    item.setAttribute('aria-busy', 'true');
+    item.classList.remove('action-feedback');
+    void item.offsetWidth;
+    item.classList.add('action-feedback');
+    this._qualityTitleCommandPolicyFeedbackTimer = window.setTimeout(() => {
+      item.classList.remove('action-feedback');
+      delete item.dataset.titleCommandFeedback;
+      item.removeAttribute('aria-busy');
+      if (policy) {
+        delete policy.dataset.titleCommandFeedback;
+        policy.removeAttribute('aria-busy');
+      }
+      this._qualityTitleCommandPolicyFeedbackTimer = 0;
+    }, 420);
+  }
+
   _activateQualityTitleCommandPolicySelection() {
     const item = this._qualityTitleCommandPolicyItems()[this._qualityTitleCommandPolicyActiveIndex];
     if (!item) return;
@@ -7536,7 +7811,11 @@ class SimpleWindowManager {
     this._focusActiveTitleInput();
     const applied = this._applyTitleCommandMode(mode);
     this._sendWindowCmd('quality_title_command_policy', { title_command_mode: modeId, applied });
-    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
+    if (this._qualityInspector && !this._qualityInspector.hidden) {
+      this._renderQualityInspector();
+      const nextItem = this._qualityTitleCommandPolicyItems()[this._qualityTitleCommandPolicyActiveIndex];
+      this._markQualityTitleCommandPolicyFeedback(nextItem, modeId);
+    }
   }
 
   _makeQualityIconPreview() {
@@ -7643,13 +7922,50 @@ class SimpleWindowManager {
     if (policy) policy.dataset.iconMaskPolicyActiveIndex = String(this._qualityIconMaskPolicyActiveIndex);
   }
 
+  _markQualityIconMaskPolicyFeedback(item, maskMode = '') {
+    if (this._qualityIconMaskPolicyFeedbackTimer) window.clearTimeout(this._qualityIconMaskPolicyFeedbackTimer);
+    const policy = this._qualityInspector ? this._qualityInspector.querySelector('.wm-quality-icon-mask-policy') : null;
+    if (policy) {
+      policy.querySelectorAll('.wm-quality-icon-mask-policy-item.action-feedback, .wm-quality-icon-mask-policy-item[aria-busy]').forEach((node) => {
+        node.classList.remove('action-feedback');
+        delete node.dataset.iconMaskFeedback;
+        node.removeAttribute('aria-busy');
+      });
+    }
+    if (!item) return;
+    const feedback = maskMode || item.dataset.iconMaskPolicy || 'circle';
+    if (policy) {
+      policy.dataset.iconMaskFeedback = feedback;
+      policy.setAttribute('aria-busy', 'true');
+    }
+    item.dataset.iconMaskFeedback = feedback;
+    item.setAttribute('aria-busy', 'true');
+    item.classList.remove('action-feedback');
+    void item.offsetWidth;
+    item.classList.add('action-feedback');
+    this._qualityIconMaskPolicyFeedbackTimer = window.setTimeout(() => {
+      item.classList.remove('action-feedback');
+      delete item.dataset.iconMaskFeedback;
+      item.removeAttribute('aria-busy');
+      if (policy) {
+        delete policy.dataset.iconMaskFeedback;
+        policy.removeAttribute('aria-busy');
+      }
+      this._qualityIconMaskPolicyFeedbackTimer = 0;
+    }, 420);
+  }
+
   _activateQualityIconMaskPolicySelection() {
     const item = this._qualityIconMaskPolicyItems()[this._qualityIconMaskPolicyActiveIndex];
     if (!item) return;
     const mask = item.dataset.iconMaskPolicy || 'circle';
     this.setIconMaskPreference(mask);
     this._sendWindowCmd('quality_icon_mask_policy', { icon_mask_policy: mask });
-    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
+    if (this._qualityInspector && !this._qualityInspector.hidden) {
+      this._renderQualityInspector();
+      const nextItem = this._qualityIconMaskPolicyItems()[this._qualityIconMaskPolicyActiveIndex];
+      this._markQualityIconMaskPolicyFeedback(nextItem, mask);
+    }
   }
 
   _makeQualityComputedIconPreview() {
@@ -7949,13 +8265,50 @@ class SimpleWindowManager {
     if (policy) policy.dataset.surfaceDepthPolicyActiveIndex = String(this._qualitySurfaceDepthPolicyActiveIndex);
   }
 
+  _markQualitySurfaceDepthPolicyFeedback(item, depthMode = '') {
+    if (this._qualitySurfaceDepthPolicyFeedbackTimer) window.clearTimeout(this._qualitySurfaceDepthPolicyFeedbackTimer);
+    const policy = this._qualityInspector ? this._qualityInspector.querySelector('.wm-quality-surface-depth-policy') : null;
+    if (policy) {
+      policy.querySelectorAll('.wm-quality-surface-depth-policy-item.action-feedback, .wm-quality-surface-depth-policy-item[aria-busy]').forEach((node) => {
+        node.classList.remove('action-feedback');
+        delete node.dataset.surfaceDepthFeedback;
+        node.removeAttribute('aria-busy');
+      });
+    }
+    if (!item) return;
+    const feedback = depthMode || item.dataset.surfaceDepthPolicy || 'layered';
+    if (policy) {
+      policy.dataset.surfaceDepthFeedback = feedback;
+      policy.setAttribute('aria-busy', 'true');
+    }
+    item.dataset.surfaceDepthFeedback = feedback;
+    item.setAttribute('aria-busy', 'true');
+    item.classList.remove('action-feedback');
+    void item.offsetWidth;
+    item.classList.add('action-feedback');
+    this._qualitySurfaceDepthPolicyFeedbackTimer = window.setTimeout(() => {
+      item.classList.remove('action-feedback');
+      delete item.dataset.surfaceDepthFeedback;
+      item.removeAttribute('aria-busy');
+      if (policy) {
+        delete policy.dataset.surfaceDepthFeedback;
+        policy.removeAttribute('aria-busy');
+      }
+      this._qualitySurfaceDepthPolicyFeedbackTimer = 0;
+    }, 420);
+  }
+
   _activateQualitySurfaceDepthPolicySelection() {
     const item = this._qualitySurfaceDepthPolicyItems()[this._qualitySurfaceDepthPolicyActiveIndex];
     if (!item) return;
     const depth = item.dataset.surfaceDepthPolicy || 'layered';
     this.setSurfaceDepthPreference(depth);
     this._sendWindowCmd('quality_surface_depth_policy', { surface_depth_policy: depth });
-    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
+    if (this._qualityInspector && !this._qualityInspector.hidden) {
+      this._renderQualityInspector();
+      const nextItem = this._qualitySurfaceDepthPolicyItems()[this._qualitySurfaceDepthPolicyActiveIndex];
+      this._markQualitySurfaceDepthPolicyFeedback(nextItem, depth);
+    }
   }
 
   _makeQualityInteractionPreview() {
@@ -8395,13 +8748,50 @@ class SimpleWindowManager {
     if (policy) policy.dataset.windowTransitionPolicyActiveIndex = String(this._qualityWindowTransitionPolicyActiveIndex);
   }
 
+  _markQualityWindowTransitionPolicyFeedback(item, transitionMode = '') {
+    if (this._qualityWindowTransitionPolicyFeedbackTimer) window.clearTimeout(this._qualityWindowTransitionPolicyFeedbackTimer);
+    const policy = this._qualityInspector ? this._qualityInspector.querySelector('.wm-quality-window-transition-policy') : null;
+    if (policy) {
+      policy.querySelectorAll('.wm-quality-window-transition-policy-item.action-feedback, .wm-quality-window-transition-policy-item[aria-busy]').forEach((node) => {
+        node.classList.remove('action-feedback');
+        delete node.dataset.windowTransitionFeedback;
+        node.removeAttribute('aria-busy');
+      });
+    }
+    if (!item) return;
+    const feedback = transitionMode || item.dataset.windowTransitionPolicy || 'mac';
+    if (policy) {
+      policy.dataset.windowTransitionFeedback = feedback;
+      policy.setAttribute('aria-busy', 'true');
+    }
+    item.dataset.windowTransitionFeedback = feedback;
+    item.setAttribute('aria-busy', 'true');
+    item.classList.remove('action-feedback');
+    void item.offsetWidth;
+    item.classList.add('action-feedback');
+    this._qualityWindowTransitionPolicyFeedbackTimer = window.setTimeout(() => {
+      item.classList.remove('action-feedback');
+      delete item.dataset.windowTransitionFeedback;
+      item.removeAttribute('aria-busy');
+      if (policy) {
+        delete policy.dataset.windowTransitionFeedback;
+        policy.removeAttribute('aria-busy');
+      }
+      this._qualityWindowTransitionPolicyFeedbackTimer = 0;
+    }, 420);
+  }
+
   _activateQualityWindowTransitionPolicySelection() {
     const item = this._qualityWindowTransitionPolicyItems()[this._qualityWindowTransitionPolicyActiveIndex];
     if (!item) return;
     const transition = item.dataset.windowTransitionPolicy || 'mac';
     this.setWindowTransitionPreference(transition);
     this._sendWindowCmd('quality_window_transition_policy', { window_transition_policy: transition });
-    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
+    if (this._qualityInspector && !this._qualityInspector.hidden) {
+      this._renderQualityInspector();
+      const nextItem = this._qualityWindowTransitionPolicyItems()[this._qualityWindowTransitionPolicyActiveIndex];
+      this._markQualityWindowTransitionPolicyFeedback(nextItem, transition);
+    }
   }
 
   _makeQualityVerbosityPreview() {
@@ -8507,13 +8897,50 @@ class SimpleWindowManager {
     if (policy) policy.dataset.chromeVerbosityPolicyActiveIndex = String(this._qualityChromeVerbosityPolicyActiveIndex);
   }
 
+  _markQualityChromeVerbosityPolicyFeedback(item, chrome = '') {
+    if (this._qualityChromeVerbosityPolicyFeedbackTimer) window.clearTimeout(this._qualityChromeVerbosityPolicyFeedbackTimer);
+    const policy = this._qualityInspector ? this._qualityInspector.querySelector('.wm-quality-chrome-verbosity-policy') : null;
+    if (policy) {
+      policy.querySelectorAll('.wm-quality-chrome-verbosity-policy-item.action-feedback, .wm-quality-chrome-verbosity-policy-item[aria-busy]').forEach((node) => {
+        node.classList.remove('action-feedback');
+        delete node.dataset.chromeVerbosityFeedback;
+        node.removeAttribute('aria-busy');
+      });
+    }
+    if (!item) return;
+    const feedback = chrome || item.dataset.chromeVerbosityPolicy || 'full';
+    if (policy) {
+      policy.dataset.chromeVerbosityFeedback = feedback;
+      policy.setAttribute('aria-busy', 'true');
+    }
+    item.dataset.chromeVerbosityFeedback = feedback;
+    item.setAttribute('aria-busy', 'true');
+    item.classList.remove('action-feedback');
+    void item.offsetWidth;
+    item.classList.add('action-feedback');
+    this._qualityChromeVerbosityPolicyFeedbackTimer = window.setTimeout(() => {
+      item.classList.remove('action-feedback');
+      delete item.dataset.chromeVerbosityFeedback;
+      item.removeAttribute('aria-busy');
+      if (policy) {
+        delete policy.dataset.chromeVerbosityFeedback;
+        policy.removeAttribute('aria-busy');
+      }
+      this._qualityChromeVerbosityPolicyFeedbackTimer = 0;
+    }, 420);
+  }
+
   _activateQualityChromeVerbosityPolicySelection() {
     const item = this._qualityChromeVerbosityPolicyItems()[this._qualityChromeVerbosityPolicyActiveIndex];
     if (!item) return;
     const chrome = item.dataset.chromeVerbosityPolicy || 'full';
     this.setChromeVerbosityPreference(chrome);
     this._sendWindowCmd('quality_chrome_verbosity_policy', { chrome_verbosity_policy: chrome });
-    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
+    if (this._qualityInspector && !this._qualityInspector.hidden) {
+      this._renderQualityInspector();
+      const nextItem = this._qualityChromeVerbosityPolicyItems()[this._qualityChromeVerbosityPolicyActiveIndex];
+      this._markQualityChromeVerbosityPolicyFeedback(nextItem, chrome);
+    }
   }
 
   _makeQualityComputedPersonalizationPreview() {
@@ -8799,13 +9226,50 @@ class SimpleWindowManager {
     if (policy) policy.dataset.energyPolicyActiveIndex = String(this._qualityEnergyPolicyActiveIndex);
   }
 
+  _markQualityEnergyPolicyFeedback(item, energy = '') {
+    if (this._qualityEnergyPolicyFeedbackTimer) window.clearTimeout(this._qualityEnergyPolicyFeedbackTimer);
+    const policy = this._qualityInspector ? this._qualityInspector.querySelector('.wm-quality-energy-policy') : null;
+    if (policy) {
+      policy.querySelectorAll('.wm-quality-energy-policy-item.action-feedback, .wm-quality-energy-policy-item[aria-busy]').forEach((node) => {
+        node.classList.remove('action-feedback');
+        delete node.dataset.energyFeedback;
+        node.removeAttribute('aria-busy');
+      });
+    }
+    if (!item) return;
+    const feedback = energy || item.dataset.energyPolicy || 'standard';
+    if (policy) {
+      policy.dataset.energyFeedback = feedback;
+      policy.setAttribute('aria-busy', 'true');
+    }
+    item.dataset.energyFeedback = feedback;
+    item.setAttribute('aria-busy', 'true');
+    item.classList.remove('action-feedback');
+    void item.offsetWidth;
+    item.classList.add('action-feedback');
+    this._qualityEnergyPolicyFeedbackTimer = window.setTimeout(() => {
+      item.classList.remove('action-feedback');
+      delete item.dataset.energyFeedback;
+      item.removeAttribute('aria-busy');
+      if (policy) {
+        delete policy.dataset.energyFeedback;
+        policy.removeAttribute('aria-busy');
+      }
+      this._qualityEnergyPolicyFeedbackTimer = 0;
+    }, 420);
+  }
+
   _activateQualityEnergyPolicySelection() {
     const item = this._qualityEnergyPolicyItems()[this._qualityEnergyPolicyActiveIndex];
     if (!item) return;
     const energy = item.dataset.energyPolicy || 'standard';
     this.setEnergyPreference(energy);
     this._sendWindowCmd('quality_energy_policy', { energy_policy: energy });
-    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
+    if (this._qualityInspector && !this._qualityInspector.hidden) {
+      this._renderQualityInspector();
+      const nextItem = this._qualityEnergyPolicyItems()[this._qualityEnergyPolicyActiveIndex];
+      this._markQualityEnergyPolicyFeedback(nextItem, energy);
+    }
   }
 
   _makeQualityComputedBackdropPreview() {
@@ -8919,13 +9383,50 @@ class SimpleWindowManager {
     if (policy) policy.dataset.backdropPolicyActiveIndex = String(this._qualityBackdropPolicyActiveIndex);
   }
 
+  _markQualityBackdropPolicyFeedback(item, motion = '') {
+    if (this._qualityBackdropPolicyFeedbackTimer) window.clearTimeout(this._qualityBackdropPolicyFeedbackTimer);
+    const policy = this._qualityInspector ? this._qualityInspector.querySelector('.wm-quality-backdrop-policy') : null;
+    if (policy) {
+      policy.querySelectorAll('.wm-quality-backdrop-policy-item.action-feedback, .wm-quality-backdrop-policy-item[aria-busy]').forEach((node) => {
+        node.classList.remove('action-feedback');
+        delete node.dataset.backdropFeedback;
+        node.removeAttribute('aria-busy');
+      });
+    }
+    if (!item) return;
+    const feedback = motion || item.dataset.backdropPolicy || 'ambient';
+    if (policy) {
+      policy.dataset.backdropFeedback = feedback;
+      policy.setAttribute('aria-busy', 'true');
+    }
+    item.dataset.backdropFeedback = feedback;
+    item.setAttribute('aria-busy', 'true');
+    item.classList.remove('action-feedback');
+    void item.offsetWidth;
+    item.classList.add('action-feedback');
+    this._qualityBackdropPolicyFeedbackTimer = window.setTimeout(() => {
+      item.classList.remove('action-feedback');
+      delete item.dataset.backdropFeedback;
+      item.removeAttribute('aria-busy');
+      if (policy) {
+        delete policy.dataset.backdropFeedback;
+        policy.removeAttribute('aria-busy');
+      }
+      this._qualityBackdropPolicyFeedbackTimer = 0;
+    }, 420);
+  }
+
   _activateQualityBackdropPolicySelection() {
     const item = this._qualityBackdropPolicyItems()[this._qualityBackdropPolicyActiveIndex];
     if (!item) return;
     const motion = item.dataset.backdropPolicy || 'ambient';
     this.setBackdropMotionPreference(motion);
     this._sendWindowCmd('quality_backdrop_policy', { backdrop_policy: motion });
-    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
+    if (this._qualityInspector && !this._qualityInspector.hidden) {
+      this._renderQualityInspector();
+      const nextItem = this._qualityBackdropPolicyItems()[this._qualityBackdropPolicyActiveIndex];
+      this._markQualityBackdropPolicyFeedback(nextItem, motion);
+    }
   }
 
   _makeQualityComputedWallpaperPreview() {
@@ -9039,13 +9540,50 @@ class SimpleWindowManager {
     if (policy) policy.dataset.wallpaperPolicyActiveIndex = String(this._qualityWallpaperPolicyActiveIndex);
   }
 
+  _markQualityWallpaperPolicyFeedback(item, wallpaper = '') {
+    if (this._qualityWallpaperPolicyFeedbackTimer) window.clearTimeout(this._qualityWallpaperPolicyFeedbackTimer);
+    const policy = this._qualityInspector ? this._qualityInspector.querySelector('.wm-quality-wallpaper-policy') : null;
+    if (policy) {
+      policy.querySelectorAll('.wm-quality-wallpaper-policy-item.action-feedback, .wm-quality-wallpaper-policy-item[aria-busy]').forEach((node) => {
+        node.classList.remove('action-feedback');
+        delete node.dataset.wallpaperFeedback;
+        node.removeAttribute('aria-busy');
+      });
+    }
+    if (!item) return;
+    const feedback = wallpaper || item.dataset.wallpaperPolicy || 'aurora';
+    if (policy) {
+      policy.dataset.wallpaperFeedback = feedback;
+      policy.setAttribute('aria-busy', 'true');
+    }
+    item.dataset.wallpaperFeedback = feedback;
+    item.setAttribute('aria-busy', 'true');
+    item.classList.remove('action-feedback');
+    void item.offsetWidth;
+    item.classList.add('action-feedback');
+    this._qualityWallpaperPolicyFeedbackTimer = window.setTimeout(() => {
+      item.classList.remove('action-feedback');
+      delete item.dataset.wallpaperFeedback;
+      item.removeAttribute('aria-busy');
+      if (policy) {
+        delete policy.dataset.wallpaperFeedback;
+        policy.removeAttribute('aria-busy');
+      }
+      this._qualityWallpaperPolicyFeedbackTimer = 0;
+    }, 420);
+  }
+
   _activateQualityWallpaperPolicySelection() {
     const item = this._qualityWallpaperPolicyItems()[this._qualityWallpaperPolicyActiveIndex];
     if (!item) return;
     const wallpaper = item.dataset.wallpaperPolicy || 'aurora';
     this.setWallpaperPreference(wallpaper);
     this._sendWindowCmd('quality_wallpaper_policy', { wallpaper_policy: wallpaper });
-    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
+    if (this._qualityInspector && !this._qualityInspector.hidden) {
+      this._renderQualityInspector();
+      const nextItem = this._qualityWallpaperPolicyItems()[this._qualityWallpaperPolicyActiveIndex];
+      this._markQualityWallpaperPolicyFeedback(nextItem, wallpaper);
+    }
   }
 
   _makeQualityComputedMotionPreview() {
@@ -9376,13 +9914,50 @@ class SimpleWindowManager {
     if (policy) policy.dataset.dockMagnificationPolicyActiveIndex = String(this._qualityDockMagnificationPolicyActiveIndex);
   }
 
+  _markQualityDockMagnificationPolicyFeedback(item, magnificationMode = '') {
+    if (this._qualityDockMagnificationPolicyFeedbackTimer) window.clearTimeout(this._qualityDockMagnificationPolicyFeedbackTimer);
+    const policy = this._qualityInspector ? this._qualityInspector.querySelector('.wm-quality-dock-magnification-policy') : null;
+    if (policy) {
+      policy.querySelectorAll('.wm-quality-dock-magnification-policy-item.action-feedback, .wm-quality-dock-magnification-policy-item[aria-busy]').forEach((node) => {
+        node.classList.remove('action-feedback');
+        delete node.dataset.dockMagnificationFeedback;
+        node.removeAttribute('aria-busy');
+      });
+    }
+    if (!item) return;
+    const feedback = magnificationMode || item.dataset.dockMagnificationPolicy || 'standard';
+    if (policy) {
+      policy.dataset.dockMagnificationFeedback = feedback;
+      policy.setAttribute('aria-busy', 'true');
+    }
+    item.dataset.dockMagnificationFeedback = feedback;
+    item.setAttribute('aria-busy', 'true');
+    item.classList.remove('action-feedback');
+    void item.offsetWidth;
+    item.classList.add('action-feedback');
+    this._qualityDockMagnificationPolicyFeedbackTimer = window.setTimeout(() => {
+      item.classList.remove('action-feedback');
+      delete item.dataset.dockMagnificationFeedback;
+      item.removeAttribute('aria-busy');
+      if (policy) {
+        delete policy.dataset.dockMagnificationFeedback;
+        policy.removeAttribute('aria-busy');
+      }
+      this._qualityDockMagnificationPolicyFeedbackTimer = 0;
+    }, 420);
+  }
+
   _activateQualityDockMagnificationPolicySelection() {
     const item = this._qualityDockMagnificationPolicyItems()[this._qualityDockMagnificationPolicyActiveIndex];
     if (!item) return;
     const magnification = item.dataset.dockMagnificationPolicy || 'standard';
     this.setDockMagnificationPreference(magnification);
     this._sendWindowCmd('quality_dock_magnification_policy', { dock_magnification_policy: magnification });
-    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
+    if (this._qualityInspector && !this._qualityInspector.hidden) {
+      this._renderQualityInspector();
+      const nextItem = this._qualityDockMagnificationPolicyItems()[this._qualityDockMagnificationPolicyActiveIndex];
+      this._markQualityDockMagnificationPolicyFeedback(nextItem, magnification);
+    }
   }
 
   _makeQualityDockVisibilityPolicy() {
@@ -9458,13 +10033,50 @@ class SimpleWindowManager {
     if (policy) policy.dataset.dockVisibilityPolicyActiveIndex = String(this._qualityDockVisibilityPolicyActiveIndex);
   }
 
+  _markQualityDockVisibilityPolicyFeedback(item, visibilityMode = '') {
+    if (this._qualityDockVisibilityPolicyFeedbackTimer) window.clearTimeout(this._qualityDockVisibilityPolicyFeedbackTimer);
+    const policy = this._qualityInspector ? this._qualityInspector.querySelector('.wm-quality-dock-visibility-policy') : null;
+    if (policy) {
+      policy.querySelectorAll('.wm-quality-dock-visibility-policy-item.action-feedback, .wm-quality-dock-visibility-policy-item[aria-busy]').forEach((node) => {
+        node.classList.remove('action-feedback');
+        delete node.dataset.dockVisibilityFeedback;
+        node.removeAttribute('aria-busy');
+      });
+    }
+    if (!item) return;
+    const feedback = visibilityMode || item.dataset.dockVisibilityPolicy || 'shown';
+    if (policy) {
+      policy.dataset.dockVisibilityFeedback = feedback;
+      policy.setAttribute('aria-busy', 'true');
+    }
+    item.dataset.dockVisibilityFeedback = feedback;
+    item.setAttribute('aria-busy', 'true');
+    item.classList.remove('action-feedback');
+    void item.offsetWidth;
+    item.classList.add('action-feedback');
+    this._qualityDockVisibilityPolicyFeedbackTimer = window.setTimeout(() => {
+      item.classList.remove('action-feedback');
+      delete item.dataset.dockVisibilityFeedback;
+      item.removeAttribute('aria-busy');
+      if (policy) {
+        delete policy.dataset.dockVisibilityFeedback;
+        policy.removeAttribute('aria-busy');
+      }
+      this._qualityDockVisibilityPolicyFeedbackTimer = 0;
+    }, 420);
+  }
+
   _activateQualityDockVisibilityPolicySelection() {
     const item = this._qualityDockVisibilityPolicyItems()[this._qualityDockVisibilityPolicyActiveIndex];
     if (!item) return;
     const visibility = item.dataset.dockVisibilityPolicy || 'shown';
     this.setDockVisibilityPreference(visibility);
     this._sendWindowCmd('quality_dock_visibility_policy', { dock_visibility_policy: visibility });
-    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
+    if (this._qualityInspector && !this._qualityInspector.hidden) {
+      this._renderQualityInspector();
+      const nextItem = this._qualityDockVisibilityPolicyItems()[this._qualityDockVisibilityPolicyActiveIndex];
+      this._markQualityDockVisibilityPolicyFeedback(nextItem, visibility);
+    }
   }
 
   _makeQualityComputedDockPreview() {
@@ -9781,13 +10393,50 @@ class SimpleWindowManager {
     if (policy) policy.dataset.feedbackPolicyActiveIndex = String(this._qualityFeedbackPolicyActiveIndex);
   }
 
+  _markQualityFeedbackPolicyFeedback(item, feedbackMode = '') {
+    if (this._qualityFeedbackPolicyFeedbackTimer) window.clearTimeout(this._qualityFeedbackPolicyFeedbackTimer);
+    const policy = this._qualityInspector ? this._qualityInspector.querySelector('.wm-quality-feedback-policy') : null;
+    if (policy) {
+      policy.querySelectorAll('.wm-quality-feedback-policy-item.action-feedback, .wm-quality-feedback-policy-item[aria-busy]').forEach((node) => {
+        node.classList.remove('action-feedback');
+        delete node.dataset.feedbackFeedback;
+        node.removeAttribute('aria-busy');
+      });
+    }
+    if (!item) return;
+    const feedback = feedbackMode || item.dataset.feedbackPolicy || 'standard';
+    if (policy) {
+      policy.dataset.feedbackFeedback = feedback;
+      policy.setAttribute('aria-busy', 'true');
+    }
+    item.dataset.feedbackFeedback = feedback;
+    item.setAttribute('aria-busy', 'true');
+    item.classList.remove('action-feedback');
+    void item.offsetWidth;
+    item.classList.add('action-feedback');
+    this._qualityFeedbackPolicyFeedbackTimer = window.setTimeout(() => {
+      item.classList.remove('action-feedback');
+      delete item.dataset.feedbackFeedback;
+      item.removeAttribute('aria-busy');
+      if (policy) {
+        delete policy.dataset.feedbackFeedback;
+        policy.removeAttribute('aria-busy');
+      }
+      this._qualityFeedbackPolicyFeedbackTimer = 0;
+    }, 420);
+  }
+
   _activateQualityFeedbackPolicySelection() {
     const item = this._qualityFeedbackPolicyItems()[this._qualityFeedbackPolicyActiveIndex];
     if (!item) return;
     const feedback = item.dataset.feedbackPolicy || 'standard';
     this.setFeedbackPreference(feedback);
     this._sendWindowCmd('quality_feedback_policy', { feedback_policy: feedback });
-    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
+    if (this._qualityInspector && !this._qualityInspector.hidden) {
+      this._renderQualityInspector();
+      const nextItem = this._qualityFeedbackPolicyItems()[this._qualityFeedbackPolicyActiveIndex];
+      this._markQualityFeedbackPolicyFeedback(nextItem, feedback);
+    }
   }
 
   _qualityStatusSnapshot() {
@@ -9907,16 +10556,30 @@ class SimpleWindowManager {
   }
 
   _makeQualityMotionPolicy() {
-    const policy = document.createElement('div');
-    policy.className = 'wm-quality-motion-policy';
-    [
+    const entries = [
       ['standard', 'Standard', 'Full animation'],
       ['reduced', 'Reduced', 'Short, no blur'],
       ['off', 'Off', 'No animation']
-    ].forEach(([mode, label, value]) => {
-      const item = document.createElement('span');
-      item.className = 'wm-quality-motion-policy-item';
+    ];
+    const mode = this._normalizeMotionPreference(this._readMotionPreference());
+    const currentIndex = entries.findIndex(([motion]) => motion === mode);
+    if (currentIndex >= 0) this._qualityMotionPolicyActiveIndex = currentIndex;
+    const policy = document.createElement('div');
+    policy.className = 'wm-quality-motion-policy';
+    policy.setAttribute('role', 'listbox');
+    policy.setAttribute('aria-label', 'Motion policy');
+    policy.dataset.motionPolicyActiveIndex = String(this._qualityMotionPolicyActiveIndex);
+    policy.setAttribute('aria-activedescendant', `wm-quality-motion-policy-${this._qualityMotionPolicyActiveIndex}`);
+    entries.forEach(([mode, label, value], index) => {
+      const selected = index === this._qualityMotionPolicyActiveIndex;
+      const item = document.createElement('button');
+      item.id = `wm-quality-motion-policy-${index}`;
+      item.className = 'wm-quality-motion-policy-item' + (selected ? ' selected' : '');
       item.dataset.motionPolicy = mode;
+      item.dataset.motionPolicyIndex = String(index);
+      item.tabIndex = selected ? 0 : -1;
+      item.setAttribute('role', 'option');
+      item.setAttribute('aria-selected', selected ? 'true' : 'false');
       const name = document.createElement('span');
       name.className = 'wm-quality-motion-policy-label';
       name.textContent = label;
@@ -9928,6 +10591,86 @@ class SimpleWindowManager {
       policy.appendChild(item);
     });
     return policy;
+  }
+
+  _qualityMotionPolicyItems() {
+    if (!this._qualityInspector) return [];
+    return Array.from(this._qualityInspector.querySelectorAll('.wm-quality-motion-policy-item'));
+  }
+
+  _moveQualityMotionPolicySelection(delta) {
+    const items = this._qualityMotionPolicyItems();
+    if (!items.length) return;
+    const next = (this._qualityMotionPolicyActiveIndex + delta + items.length) % items.length;
+    this._setQualityMotionPolicySelection(next);
+  }
+
+  _setQualityMotionPolicySelection(index) {
+    const items = this._qualityMotionPolicyItems();
+    if (!items.length) return;
+    this._qualityMotionPolicyActiveIndex = Math.max(0, Math.min(index, items.length - 1));
+    this._syncQualityMotionPolicySelection();
+  }
+
+  _syncQualityMotionPolicySelection(shouldFocus = true) {
+    const items = this._qualityMotionPolicyItems();
+    if (!items.length) return;
+    const policy = items[0].closest('.wm-quality-motion-policy');
+    items.forEach((item, index) => {
+      const selected = index === this._qualityMotionPolicyActiveIndex;
+      item.classList.toggle('selected', selected);
+      item.tabIndex = selected ? 0 : -1;
+      item.setAttribute('aria-selected', selected ? 'true' : 'false');
+      if (selected && policy) policy.setAttribute('aria-activedescendant', item.id);
+      if (selected && shouldFocus) item.focus();
+    });
+    if (policy) policy.dataset.motionPolicyActiveIndex = String(this._qualityMotionPolicyActiveIndex);
+  }
+
+  _markQualityMotionPolicyFeedback(item, motion = '') {
+    if (this._qualityMotionPolicyFeedbackTimer) window.clearTimeout(this._qualityMotionPolicyFeedbackTimer);
+    const policy = this._qualityInspector ? this._qualityInspector.querySelector('.wm-quality-motion-policy') : null;
+    if (policy) {
+      policy.querySelectorAll('.wm-quality-motion-policy-item.action-feedback, .wm-quality-motion-policy-item[aria-busy]').forEach((node) => {
+        node.classList.remove('action-feedback');
+        delete node.dataset.motionFeedback;
+        node.removeAttribute('aria-busy');
+      });
+    }
+    if (!item) return;
+    const feedback = motion || item.dataset.motionPolicy || 'standard';
+    if (policy) {
+      policy.dataset.motionFeedback = feedback;
+      policy.setAttribute('aria-busy', 'true');
+    }
+    item.dataset.motionFeedback = feedback;
+    item.setAttribute('aria-busy', 'true');
+    item.classList.remove('action-feedback');
+    void item.offsetWidth;
+    item.classList.add('action-feedback');
+    this._qualityMotionPolicyFeedbackTimer = window.setTimeout(() => {
+      item.classList.remove('action-feedback');
+      delete item.dataset.motionFeedback;
+      item.removeAttribute('aria-busy');
+      if (policy) {
+        delete policy.dataset.motionFeedback;
+        policy.removeAttribute('aria-busy');
+      }
+      this._qualityMotionPolicyFeedbackTimer = 0;
+    }, 420);
+  }
+
+  _activateQualityMotionPolicySelection() {
+    const item = this._qualityMotionPolicyItems()[this._qualityMotionPolicyActiveIndex];
+    if (!item) return;
+    const motion = item.dataset.motionPolicy || 'standard';
+    this.setMotionPreference(motion);
+    this._sendWindowCmd('quality_motion_policy', { motion_policy: motion });
+    if (this._qualityInspector && !this._qualityInspector.hidden) {
+      this._renderQualityInspector();
+      const nextItem = this._qualityMotionPolicyItems()[this._qualityMotionPolicyActiveIndex];
+      this._markQualityMotionPolicyFeedback(nextItem, motion);
+    }
   }
 
   _makeQualityAnimationPreview() {
@@ -10034,13 +10777,50 @@ class SimpleWindowManager {
     if (policy) policy.dataset.animationStylePolicyActiveIndex = String(this._qualityAnimationStylePolicyActiveIndex);
   }
 
+  _markQualityAnimationStylePolicyFeedback(item, animationStyle = '') {
+    if (this._qualityAnimationStylePolicyFeedbackTimer) window.clearTimeout(this._qualityAnimationStylePolicyFeedbackTimer);
+    const policy = this._qualityInspector ? this._qualityInspector.querySelector('.wm-quality-animation-style-policy') : null;
+    if (policy) {
+      policy.querySelectorAll('.wm-quality-animation-style-policy-item.action-feedback, .wm-quality-animation-style-policy-item[aria-busy]').forEach((node) => {
+        node.classList.remove('action-feedback');
+        delete node.dataset.animationStyleFeedback;
+        node.removeAttribute('aria-busy');
+      });
+    }
+    if (!item) return;
+    const feedback = animationStyle || item.dataset.animationStylePolicy || 'spring';
+    if (policy) {
+      policy.dataset.animationStyleFeedback = feedback;
+      policy.setAttribute('aria-busy', 'true');
+    }
+    item.dataset.animationStyleFeedback = feedback;
+    item.setAttribute('aria-busy', 'true');
+    item.classList.remove('action-feedback');
+    void item.offsetWidth;
+    item.classList.add('action-feedback');
+    this._qualityAnimationStylePolicyFeedbackTimer = window.setTimeout(() => {
+      item.classList.remove('action-feedback');
+      delete item.dataset.animationStyleFeedback;
+      item.removeAttribute('aria-busy');
+      if (policy) {
+        delete policy.dataset.animationStyleFeedback;
+        policy.removeAttribute('aria-busy');
+      }
+      this._qualityAnimationStylePolicyFeedbackTimer = 0;
+    }, 420);
+  }
+
   _activateQualityAnimationStylePolicySelection() {
     const item = this._qualityAnimationStylePolicyItems()[this._qualityAnimationStylePolicyActiveIndex];
     if (!item) return;
     const style = item.dataset.animationStylePolicy || 'spring';
     this.setAnimationStyle(style);
     this._sendWindowCmd('quality_animation_style_policy', { animation_style_policy: style });
-    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
+    if (this._qualityInspector && !this._qualityInspector.hidden) {
+      this._renderQualityInspector();
+      const nextItem = this._qualityAnimationStylePolicyItems()[this._qualityAnimationStylePolicyActiveIndex];
+      this._markQualityAnimationStylePolicyFeedback(nextItem, style);
+    }
   }
 
   _makeQualityWidgetPreview() {
@@ -10190,6 +10970,39 @@ class SimpleWindowManager {
     if (policy) policy.dataset.widgetStackPolicyActiveIndex = String(this._qualityWidgetStackPolicyActiveIndex);
   }
 
+  _markQualityWidgetStackPolicyFeedback(item, stackMode = '') {
+    if (this._qualityWidgetStackPolicyFeedbackTimer) window.clearTimeout(this._qualityWidgetStackPolicyFeedbackTimer);
+    const policy = this._qualityInspector ? this._qualityInspector.querySelector('.wm-quality-widget-stack-policy') : null;
+    if (policy) {
+      policy.querySelectorAll('.wm-quality-widget-stack-policy-item.action-feedback, .wm-quality-widget-stack-policy-item[aria-busy]').forEach((node) => {
+        node.classList.remove('action-feedback');
+        delete node.dataset.widgetStackFeedback;
+        node.removeAttribute('aria-busy');
+      });
+    }
+    if (!item) return;
+    const feedback = stackMode || item.dataset.widgetStackPolicy || 'visible';
+    if (policy) {
+      policy.dataset.widgetStackFeedback = feedback;
+      policy.setAttribute('aria-busy', 'true');
+    }
+    item.dataset.widgetStackFeedback = feedback;
+    item.setAttribute('aria-busy', 'true');
+    item.classList.remove('action-feedback');
+    void item.offsetWidth;
+    item.classList.add('action-feedback');
+    this._qualityWidgetStackPolicyFeedbackTimer = window.setTimeout(() => {
+      item.classList.remove('action-feedback');
+      delete item.dataset.widgetStackFeedback;
+      item.removeAttribute('aria-busy');
+      if (policy) {
+        delete policy.dataset.widgetStackFeedback;
+        policy.removeAttribute('aria-busy');
+      }
+      this._qualityWidgetStackPolicyFeedbackTimer = 0;
+    }, 420);
+  }
+
   _activateQualityWidgetStackPolicySelection() {
     const item = this._qualityWidgetStackPolicyItems()[this._qualityWidgetStackPolicyActiveIndex];
     if (!item) return;
@@ -10206,7 +11019,11 @@ class SimpleWindowManager {
       this._toggleWidgetGallery(false);
     }
     this._sendWindowCmd('quality_widget_stack_policy', { widget_stack_policy: mode });
-    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
+    if (this._qualityInspector && !this._qualityInspector.hidden) {
+      this._renderQualityInspector();
+      const nextItem = this._qualityWidgetStackPolicyItems()[this._qualityWidgetStackPolicyActiveIndex];
+      this._markQualityWidgetStackPolicyFeedback(nextItem, mode);
+    }
   }
 
   _makeQualityMaterialPreview() {
@@ -10309,13 +11126,50 @@ class SimpleWindowManager {
     if (policy) policy.dataset.materialPolicyActiveIndex = String(this._qualityMaterialPolicyActiveIndex);
   }
 
+  _markQualityMaterialPolicyFeedback(item, materialMode = '') {
+    if (this._qualityMaterialPolicyFeedbackTimer) window.clearTimeout(this._qualityMaterialPolicyFeedbackTimer);
+    const policy = this._qualityInspector ? this._qualityInspector.querySelector('.wm-quality-material-policy') : null;
+    if (policy) {
+      policy.querySelectorAll('.wm-quality-material-policy-item.action-feedback, .wm-quality-material-policy-item[aria-busy]').forEach((node) => {
+        node.classList.remove('action-feedback');
+        delete node.dataset.materialFeedback;
+        node.removeAttribute('aria-busy');
+      });
+    }
+    if (!item) return;
+    const feedback = materialMode || item.dataset.materialPolicy || 'standard';
+    if (policy) {
+      policy.dataset.materialFeedback = feedback;
+      policy.setAttribute('aria-busy', 'true');
+    }
+    item.dataset.materialFeedback = feedback;
+    item.setAttribute('aria-busy', 'true');
+    item.classList.remove('action-feedback');
+    void item.offsetWidth;
+    item.classList.add('action-feedback');
+    this._qualityMaterialPolicyFeedbackTimer = window.setTimeout(() => {
+      item.classList.remove('action-feedback');
+      delete item.dataset.materialFeedback;
+      item.removeAttribute('aria-busy');
+      if (policy) {
+        delete policy.dataset.materialFeedback;
+        policy.removeAttribute('aria-busy');
+      }
+      this._qualityMaterialPolicyFeedbackTimer = 0;
+    }, 420);
+  }
+
   _activateQualityMaterialPolicySelection() {
     const item = this._qualityMaterialPolicyItems()[this._qualityMaterialPolicyActiveIndex];
     if (!item) return;
     const material = item.dataset.materialPolicy || 'standard';
     this.setTransparencyPreference(material);
     this._sendWindowCmd('quality_material_policy', { material_policy: material });
-    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
+    if (this._qualityInspector && !this._qualityInspector.hidden) {
+      this._renderQualityInspector();
+      const nextItem = this._qualityMaterialPolicyItems()[this._qualityMaterialPolicyActiveIndex];
+      this._markQualityMaterialPolicyFeedback(nextItem, material);
+    }
   }
 
   _makeQualityComputedMaterialPreview() {
@@ -10559,6 +11413,7 @@ class SimpleWindowManager {
     const passed = checks.filter((item) => item.good).length;
     const total = Math.max(1, checks.length);
     const score = Math.round((passed / total) * 100);
+    const browserAudit = this._normalizeBrowserAuditResult(this._browserAuditResult);
     const lines = [
       'Simple WM quality report',
       'Score: ' + score + '%',
@@ -10566,7 +11421,8 @@ class SimpleWindowManager {
       'Motion: ' + this._normalizeMotionPreference(this._readMotionPreference()),
       'Material: ' + this._normalizeTransparencyPreference(this._readTransparencyPreference()),
       'Density: ' + this._densityMode,
-      'Window motion: ' + this._windowTransitionMode
+      'Window motion: ' + this._windowTransitionMode,
+      'Browser audit: ' + browserAudit.status + ' (' + browserAudit.summary + ')'
     ];
     checks.forEach((item) => {
       lines.push((item.good ? 'PASS ' : 'WARN ') + item.label + ': ' + item.value + ' target ' + (item.threshold || 'n/a'));
@@ -10694,6 +11550,78 @@ class SimpleWindowManager {
       preview.appendChild(this._makeQualityEvidenceItem(kind, label, value));
     });
     return preview;
+  }
+
+  setBrowserAuditResult(audit) {
+    this._browserAuditResult = audit || null;
+    this._sendWindowCmd('quality_browser_audit', this._normalizeBrowserAuditResult(this._browserAuditResult));
+    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
+  }
+
+  _normalizeBrowserAuditResult(audit) {
+    const source = audit && typeof audit === 'object' ? audit : {};
+    const failureReasons = Array.isArray(source.failureReasons) ? source.failureReasons.filter(Boolean).map(String) : [];
+    const unexpectedOverlapCount = Number(source.unexpectedOverlapCount || 0) || 0;
+    const clippedCount = Number(source.clippedCount || 0) || 0;
+    const contrastFailures = Number(source.contrastFailures || 0) || 0;
+    const touchFailures = Number(source.touchFailures || 0) || 0;
+    const items = Array.isArray(source.items) ? source.items.length : Number(source.items || source.itemCount || 0) || 0;
+    const pass = source.pass === true || (source.pass !== false && failureReasons.length === 0 && unexpectedOverlapCount === 0 && clippedCount === 0 && contrastFailures === 0 && touchFailures === 0 && items > 0);
+    const status = items > 0 ? (pass ? 'pass' : 'fail') : 'not-run';
+    const summary = items > 0 ? [
+      'items ' + items,
+      'overlaps ' + unexpectedOverlapCount,
+      'clipped ' + clippedCount,
+      'contrast ' + contrastFailures,
+      'touch ' + touchFailures
+    ].join(' / ') : 'run browser audit';
+    return {
+      status,
+      pass,
+      items,
+      unexpectedOverlapCount,
+      clippedCount,
+      contrastFailures,
+      touchFailures,
+      failureReasons,
+      summary
+    };
+  }
+
+  _makeQualityBrowserAuditPreview() {
+    const audit = this._normalizeBrowserAuditResult(this._browserAuditResult);
+    const preview = document.createElement('div');
+    preview.className = 'wm-quality-browser-audit-preview ' + audit.status;
+    preview.dataset.qualityBrowserAudit = audit.status;
+    preview.setAttribute('role', 'status');
+    preview.setAttribute('aria-live', 'polite');
+    preview.appendChild(this._makeQualityBrowserAuditMetric('Status', audit.status, 'status'));
+    preview.appendChild(this._makeQualityBrowserAuditMetric('Items', String(audit.items), 'items'));
+    preview.appendChild(this._makeQualityBrowserAuditMetric('Overlap', String(audit.unexpectedOverlapCount), 'overlap'));
+    preview.appendChild(this._makeQualityBrowserAuditMetric('Clip', String(audit.clippedCount), 'clip'));
+    preview.appendChild(this._makeQualityBrowserAuditMetric('Contrast', String(audit.contrastFailures), 'contrast'));
+    preview.appendChild(this._makeQualityBrowserAuditMetric('Touch', String(audit.touchFailures), 'touch'));
+    const reasons = document.createElement('div');
+    reasons.className = 'wm-quality-browser-audit-reasons';
+    reasons.dataset.browserAuditReasons = audit.failureReasons.length ? audit.failureReasons.join(',') : 'none';
+    reasons.textContent = audit.failureReasons.length ? audit.failureReasons.join(', ') : audit.summary;
+    preview.appendChild(reasons);
+    return preview;
+  }
+
+  _makeQualityBrowserAuditMetric(label, value, metric) {
+    const item = document.createElement('span');
+    item.className = 'wm-quality-browser-audit-metric';
+    item.dataset.browserAuditMetric = metric;
+    const name = document.createElement('span');
+    name.className = 'wm-quality-browser-audit-label';
+    name.textContent = label;
+    const result = document.createElement('strong');
+    result.className = 'wm-quality-browser-audit-value';
+    result.textContent = value;
+    item.appendChild(name);
+    item.appendChild(result);
+    return item;
   }
 
   _makeQualityEvidenceItem(kind, label, value) {
@@ -11616,20 +12544,13 @@ class SimpleWindowManager {
     const lights = document.createElement('div');
     lights.className = 'wm-traffic-lights';
     for (const [action, label, aria] of [['close', 'x', 'Close window'], ['minimize', '-', 'Minimize window'], ['maximize', '+', 'Maximize window']]) {
-      const btn = document.createElement('button');
-      btn.dataset.action = action;
-      btn.textContent = label;
-      btn.className = `wm-btn-${action}`;
-      btn.setAttribute('aria-label', aria);
-      if (action === 'maximize') {
-        btn.setAttribute('aria-haspopup', 'dialog');
-        btn.setAttribute('aria-controls', 'wm-snap-layout-palette');
-      }
-      lights.appendChild(btn);
+      lights.appendChild(this._makeTrafficButton(action, label, aria));
     }
-    const icon = this._makeRoundIcon('wm-titlebar-icon', msg.icon || msg.title || windowId || 'S');
+    const icon = this._makeRoundIcon('wm-titlebar-icon wm-title-icon', msg.icon || msg.title || windowId || 'S');
+    icon.dataset.titlebarSlot = 'icon';
     const title = document.createElement('div');
-    title.className = 'wm-title';
+    title.className = 'wm-title wm-title-text';
+    title.dataset.titlebarSlot = 'title';
     title.textContent = msg.title || windowId;
     const command = this._makeTitleInput(msg);
     const context = document.createElement('div');
@@ -11648,7 +12569,7 @@ class SimpleWindowManager {
     body.innerHTML = msg.html || '';
     winEl.appendChild(body);
     this.desktop.appendChild(winEl);
-    this._markWindowLifecycle(winEl, 'opening');
+    this._animateWindowOpen(winEl);
     this._electronWindows.set(windowId, {
       winEl,
       body,
@@ -11984,7 +12905,7 @@ class SimpleWindowManager {
     const key = String(windowId || '');
     const entry = this._electronWindows.get(key);
     if (!entry) return;
-    this._animateRemoveWindow(entry.winEl);
+    this._animateWindowClose(entry.winEl);
     this._electronWindows.delete(key);
     if (this._electronActiveWindowId === key) {
       this._electronActiveWindowId = '';
@@ -12015,7 +12936,7 @@ class SimpleWindowManager {
     entry.winEl.classList.remove('minimized', 'minimizing');
     this._clearWindowMinimizeTarget(entry.winEl);
     entry.winEl.style.display = '';
-    if (entry.minimized) this._markWindowLifecycle(entry.winEl, 'restoring');
+    if (entry.minimized) this._animateWindowRestore(entry.winEl);
     entry.winEl.style.zIndex = String(++this._electronZCounter);
     entry.minimized = false;
     this._electronActiveWindowId = String(windowId || '');
@@ -12027,7 +12948,7 @@ class SimpleWindowManager {
     if (!entry) return;
     entry.minimized = true;
     this._setWindowMinimizeTarget(entry.winEl, windowId);
-    this._markWindowLifecycle(entry.winEl, 'minimizing');
+    this._animateWindowMinimize(entry.winEl);
     setTimeout(() => {
       if (entry.minimized) {
         entry.winEl.classList.remove('minimizing');
@@ -12059,6 +12980,14 @@ class SimpleWindowManager {
     this._electronFocusWindow(windowId);
   }
 
+  _maximizeWindow(windowId) {
+    this._electronMaximizeWindow(windowId);
+  }
+
+  _minimizeWindow(windowId) {
+    this._electronMinimizeWindow(windowId);
+  }
+
   _electronUnmaximizeWindow(windowId) {
     const entry = this._electronWindows.get(String(windowId || ''));
     if (!entry || !entry.restoreBounds) return;
@@ -12078,18 +13007,54 @@ class SimpleWindowManager {
     this._renderElectronTaskbar();
   }
 
-  _animateRemoveWindow(winEl) {
+  _makeTrafficButton(action, label, aria) {
+    const command = String(action || 'window').trim() || 'window';
+    const btn = document.createElement('button');
+    btn.dataset.action = command;
+    btn.dataset.trafficButton = command;
+    btn.setAttribute('data-traffic-button', command);
+    btn.textContent = label || '';
+    btn.className = `wm-btn-${command}`;
+    btn.setAttribute('aria-label', aria || command);
+    if (command === 'maximize') {
+      btn.setAttribute('aria-haspopup', 'dialog');
+      btn.setAttribute('aria-controls', 'wm-snap-layout-palette');
+    }
+    return btn;
+  }
+
+  _animateWindowOpen(winEl) {
+    this._markWindowLifecycle(winEl, 'opening', 'wm-window-opening');
+  }
+
+  _animateWindowRestore(winEl) {
+    this._markWindowLifecycle(winEl, 'restoring', 'wm-window-restore');
+  }
+
+  _animateWindowMinimize(winEl) {
+    this._markWindowLifecycle(winEl, 'minimizing', 'wm-window-minimize');
+  }
+
+  _animateWindowClose(winEl) {
     if (!winEl) return;
-    winEl.classList.remove('opening', 'restoring', 'minimizing');
-    winEl.classList.add('closing');
+    winEl.classList.remove('opening', 'restoring', 'minimizing', 'wm-window-opening', 'wm-window-restore', 'wm-window-minimize');
+    winEl.classList.add('closing', 'wm-window-closing');
     setTimeout(() => winEl.remove(), WM_EXIT_ANIMATION_MS);
   }
 
-  _markWindowLifecycle(winEl, className) {
+  _animateRemoveWindow(winEl) {
+    this._animateWindowClose(winEl);
+  }
+
+  _markWindowLifecycle(winEl, className, aliasClass = '') {
     if (!winEl) return;
-    winEl.classList.remove('opening', 'restoring', 'closing', 'minimizing', 'minimized');
+    winEl.classList.remove('opening', 'restoring', 'closing', 'minimizing', 'minimized', 'wm-window-opening', 'wm-window-closing', 'wm-window-restore', 'wm-window-minimize');
     winEl.classList.add(className);
-    setTimeout(() => winEl.classList.remove(className), WM_EXIT_ANIMATION_MS + 80);
+    if (aliasClass) winEl.classList.add(aliasClass);
+    setTimeout(() => {
+      winEl.classList.remove(className);
+      if (aliasClass) winEl.classList.remove(aliasClass);
+    }, WM_EXIT_ANIMATION_MS + 80);
   }
 
   _markWindowFocusAcquired(winEl) {

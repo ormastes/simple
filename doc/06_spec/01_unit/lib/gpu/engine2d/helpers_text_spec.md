@@ -62,16 +62,23 @@ expect(payload.pixels.len()).to_equal(0)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val payload = text_blit_buffer("I", 0xff111111u32, 0xff222222u32, 7)
+var fg_count = 0
+var idx = 0
+while idx < payload.pixels.len():
+    if payload.pixels[idx] == 0xff111111u32:
+        fg_count = fg_count + 1
+    idx = idx + 1
 
 expect(payload.is_empty()).to_equal(false)
 expect(payload.width > 0).to_equal(true)
 expect(payload.height > 0).to_equal(true)
 expect(payload.pixels.len()).to_equal(payload.width * payload.height)
+expect(fg_count > 0).to_equal(true)
 ```
 
 </details>
@@ -81,23 +88,27 @@ expect(payload.pixels.len()).to_equal(payload.width * payload.height)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val payload = text_transparent_blit_buffer("A", 0xff111111u32, 7)
 val opaque = text_blit_buffer("A", 0xff111111u32, 0xff222222u32, 7)
 var differing_count = 0
+var fg_count = 0
 var idx = 0
 while idx < payload.pixels.len():
     if payload.pixels[idx] != opaque.pixels[idx]:
         differing_count = differing_count + 1
+    if payload.pixels[idx] == 0xff111111u32:
+        fg_count = fg_count + 1
     idx = idx + 1
 
 expect(payload.is_empty()).to_equal(false)
 expect(payload.width).to_equal(opaque.width)
 expect(payload.height).to_equal(opaque.height)
 expect(differing_count > 0).to_equal(true)
+expect(fg_count > 0).to_equal(true)
 ```
 
 </details>

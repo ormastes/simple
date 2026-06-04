@@ -221,6 +221,38 @@ class SemanticUiRenderTransportBundle:
             patch_json: web_render_patch_envelope_to_json(WebRenderPatchEnvelope(target: target, surface_id: surface_id, from_sequence: from_sequence, to_sequence: to_sequence, patches_json: patches_json, snapshot_json: semantic_json))
         )
 
+class SemanticUiRenderTargetEvidence:
+    target: text
+    surface_id: text
+    command_type: text
+    input_has_target: bool
+    input_has_event: bool
+    snapshot_has_target: bool
+    snapshot_has_semantic: bool
+    patch_has_target: bool
+    patch_has_snapshot: bool
+    ready: bool
+    reason: text
+
+    fn summary() -> text:
+        "SemanticUiRenderTargetEvidence[target={self.target} command={self.command_type} ready={self.ready.to_text()} reason={self.reason}]"
+
+class SemanticUiCommandDispatchEvidence:
+    target: text
+    surface_id: text
+    command_type: text
+    dispatch_ok: bool
+    affected_id: text
+    snapshot_revision: i64
+    revision_advanced: bool
+    recent_event_matches: bool
+    read_after_write_observed: bool
+    ready: bool
+    reason: text
+
+    fn summary() -> text:
+        "SemanticUiCommandDispatchEvidence[target={self.target} command={self.command_type} ready={self.ready.to_text()} revision={self.snapshot_revision} reason={self.reason}]"
+
 fn semantic_ui_elements_from_access(nodes: [UiAccessNode]) -> [SemanticElementInfo]:
     var out: [SemanticElementInfo] = []
     for node in nodes:
@@ -289,17 +321,68 @@ fn semantic_ui_snapshot_transport_json(target: text, surface_id: text, revision:
 fn semantic_ui_render_transport_bundle(target: text, surface_id: text, snapshot: SemanticUiSnapshot, command: SemanticUiCommand, revision: u64, from_sequence: u64, to_sequence: u64, patches_json: text) -> SemanticUiRenderTransportBundle:
     SemanticUiRenderTransportBundle.create(target, surface_id, snapshot, command, revision, from_sequence, to_sequence, patches_json)
 
+fn semantic_ui_render_target_evidence(target: text, surface_id: text, snapshot: SemanticUiSnapshot, command: SemanticUiCommand, revision: u64, from_sequence: u64, to_sequence: u64, patches_json: text) -> SemanticUiRenderTargetEvidence:
+    val bundle = semantic_ui_render_transport_bundle(target, surface_id, snapshot, command, revision, from_sequence, to_sequence, patches_json)
+    val target_fragment = "\"target\":\"" + escape_json(target) + "\""
+    val input_has_target = bundle.input_json.contains(target_fragment)
+    val input_has_event = bundle.input_json.contains("\"event_type\":\"" + semantic_ui_command_to_event_kind(command) + "\"")
+    val snapshot_has_target = bundle.snapshot_json.contains(target_fragment)
+    val snapshot_has_semantic = bundle.snapshot_json.contains("\"snapshot\":{\"protocol_version\"")
+    val patch_has_target = bundle.patch_json.contains(target_fragment)
+    val patch_has_snapshot = bundle.patch_json.contains("\"snapshot\":{\"protocol_version\"")
+    val ready = input_has_target and input_has_event and snapshot_has_target and snapshot_has_semantic and patch_has_target and patch_has_snapshot
+    SemanticUiRenderTargetEvidence(
+        target: target,
+        surface_id: surface_id,
+        command_type: command.command_type,
+        input_has_target: input_has_target,
+        input_has_event: input_has_event,
+        snapshot_has_target: snapshot_has_target,
+        snapshot_has_semantic: snapshot_has_semantic,
+        patch_has_target: patch_has_target,
+        patch_has_snapshot: patch_has_snapshot,
+        ready: ready,
+        reason: if ready: "pass" else: "semantic-render-transport-mismatch"
+    )
+
+fn semantic_ui_render_target_evidence_matrix(targets: [text], surface_id: text, snapshot: SemanticUiSnapshot, command: SemanticUiCommand, revision: u64, from_sequence: u64, to_sequence: u64, patches_json: text) -> [SemanticUiRenderTargetEvidence]:
+    var out: [SemanticUiRenderTargetEvidence] = []
+    for target in targets:
+        out.push(semantic_ui_render_target_evidence(target, surface_id, snapshot, command, revision, from_sequence, to_sequence, patches_json))
+    out
+
+fn semantic_ui_command_dispatch_evidence(target: text, surface_id: text, before_snapshot: SemanticUiSnapshot, after_snapshot: SemanticUiSnapshot, command: SemanticUiCommand, result: SemanticUiDispatchResult) -> SemanticUiCommandDispatchEvidence:
+    val revision_advanced = result.snapshot_revision > before_snapshot.recent_events.len().to_i64() and after_snapshot.recent_events.len() > before_snapshot.recent_events.len()
+    val recent_event_matches = _semantic_ui_recent_event_matches(after_snapshot, command)
+    val read_after_write_observed = _semantic_ui_read_after_write_observed(after_snapshot, command, result)
+    val ready = result.ok and revision_advanced and recent_event_matches and read_after_write_observed
+    SemanticUiCommandDispatchEvidence(
+        target: target,
+        surface_id: surface_id,
+        command_type: command.command_type,
+        dispatch_ok: result.ok,
+        affected_id: result.affected_id,
+        snapshot_revision: result.snapshot_revision,
+        revision_advanced: revision_advanced,
+        recent_event_matches: recent_event_matches,
+        read_after_write_observed: read_after_write_observed,
+        ready: ready,
+        reason: if ready: "pass" else: _semantic_ui_dispatch_reason(result, revision_advanced, recent_event_matches, read_after_write_observed)
+    )
+
+fn semantic_ui_command_dispatch_evidence_matrix(targets: [text], surface_id: text, before_snapshot: SemanticUiSnapshot, after_snapshots: [SemanticUiSnapshot], command: SemanticUiCommand, results: [SemanticUiDispatchResult]) -> [SemanticUiCommandDispatchEvidence]:
+    var out: [SemanticUiCommandDispatchEvidence] = []
+    var i = 0
+    while i < targets.len():
+        if i < after_snapshots.len() and i < results.len():
+            out.push(semantic_ui_command_dispatch_evidence(targets[i], surface_id, before_snapshot, after_snapshots[i], command, results[i]))
+        i = i + 1
+    out
+
 fn _semantic_ui_command_event_or_action(command: SemanticUiCommand) -> UIEvent:
-    if command.command_type == "click":
-        return UIEvent.Action(name: "click_" + command.target_id)
-    if command.command_type == "type":
-        return UIEvent.InputChange(target_id: command.target_id, value: command.value)
-    if command.command_type == "key":
-        return UIEvent.KeyPress(key: command.key)
-    if command.command_type == "action":
-        return UIEvent.Action(name: command.value)
-    if command.command_type == "focus":
-        return UIEvent.FocusEvent(target_id: command.target_id, kind: "focus")
+    val event = semantic_ui_command_to_event(command)
+    if event != nil:
+        return event
     UIEvent.Action(name: command.command_type)
 
 fn _semantic_ui_capabilities_json(caps: [SemanticUiCapability]) -> text:
@@ -335,6 +418,34 @@ fn semantic_ui_command_to_event_kind(command: SemanticUiCommand) -> text:
         return "key"
     command.command_type
 
+fn semantic_ui_command_to_access_event_kind(command: SemanticUiCommand) -> text:
+    if command.command_type == "click":
+        return "action"
+    if command.command_type == "type":
+        return "input_change"
+    if command.command_type == "key":
+        return "key_press"
+    if command.command_type == "action":
+        return "action"
+    if command.command_type == "focus":
+        return "focus_focus"
+    command.command_type
+
+fn semantic_ui_command_to_access_payload(command: SemanticUiCommand) -> text:
+    if command.command_type == "click":
+        return "click_" + command.target_id
+    if command.command_type == "type":
+        return command.value
+    if command.command_type == "key":
+        return command.key
+    if command.command_type == "action":
+        return command.value
+    if command.command_type == "focus":
+        return command.target_id
+    if command.command_type == "focus_next" or command.command_type == "focus_prev" or command.command_type == "quit":
+        return command.command_type
+    command.value
+
 fn semantic_ui_command_to_event(command: SemanticUiCommand) -> UIEvent?:
     if command.command_type == "click":
         return UIEvent.Action(name: "click_" + command.target_id)
@@ -356,6 +467,32 @@ fn semantic_ui_command_to_event(command: SemanticUiCommand) -> UIEvent?:
 
 fn semantic_ui_stage_at_least(stage: text, required: text) -> bool:
     _semantic_stage_rank(stage) >= _semantic_stage_rank(required)
+
+fn _semantic_ui_recent_event_matches(snapshot: SemanticUiSnapshot, command: SemanticUiCommand) -> bool:
+    if snapshot.recent_events.len() == 0:
+        return false
+    val event = snapshot.recent_events[snapshot.recent_events.len() - 1]
+    event.event_kind == semantic_ui_command_to_access_event_kind(command) and event.payload == semantic_ui_command_to_access_payload(command)
+
+fn _semantic_ui_read_after_write_observed(snapshot: SemanticUiSnapshot, command: SemanticUiCommand, result: SemanticUiDispatchResult) -> bool:
+    if not result.ok:
+        return false
+    if command.command_type == "focus":
+        return snapshot.state.focused_id == result.affected_id
+    if command.target_id == "":
+        return result.affected_id != ""
+    result.affected_id == "main#" + command.target_id or result.affected_id == command.target_id
+
+fn _semantic_ui_dispatch_reason(result: SemanticUiDispatchResult, revision_advanced: bool, recent_event_matches: bool, read_after_write_observed: bool) -> text:
+    if not result.ok:
+        return result.reason
+    if not revision_advanced:
+        return "snapshot-revision-not-advanced"
+    if not recent_event_matches:
+        return "recent-event-mismatch"
+    if not read_after_write_observed:
+        return "read-after-write-mismatch"
+    "semantic-command-dispatch-mismatch"
 
 fn _semantic_stage_rank(stage: text) -> i32:
     if stage == SEMANTIC_UI_STAGE_PROTOCOL:

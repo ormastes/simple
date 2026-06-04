@@ -2,7 +2,7 @@
 # SimpleOS NVFS Submodule Migration — Local Research
 
 ## Findings
-- The old NVFS project was registered as a git submodule at `examples/11_advanced/nvfs` with URL `https://github.com/ormastes/simple-nvfs.git`.
+- The old NVFS project was registered as a git submodule at `src/os/services/nvfs` with URL `https://github.com/ormastes/simple-nvfs.git`.
 - SimpleOS already has the canonical storage/VFS surface for FAT32, NVFS, and DBFS:
   - `src/os/services/fat32/`
   - `src/os/services/vfs/`

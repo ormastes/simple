@@ -27,7 +27,7 @@ hip_backend_contract_spec -> compiler
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -78,6 +78,38 @@ expect(contract.plan.artifact_path_suffix).to_equal("simple_2d_optimization.hsac
 expect(contract.source).to_contain("extern \"C\" __global__ void simple_2d_fill_u32")
 expect(contract.source).to_contain("blockIdx.x * blockDim.x + threadIdx.x")
 expect(contract.summary()).to_contain("ready=true")
+```
+
+</details>
+
+#### exposes one shared generated Engine2D contract for CUDA and HIP
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val exported = "simple_2d_fill_u32 simple_2d_copy_u32 simple_2d_alpha_u32 simple_2d_scroll_u32"
+val cuda = cuda_generated_2d_compile_contract("simple_2d_optimization", ".version 8.0", exported, 4096)
+val hip = hip_generated_2d_compile_contract("simple_2d_optimization", "ELF AMDGCN HSACO", exported, 4096)
+val bad_cuda = cuda_generated_2d_compile_contract("simple_2d_optimization", "ELF AMDGCN HSACO", exported, 4096)
+
+expect(cuda.backend_name).to_equal("cuda")
+expect(cuda.ready).to_equal(true)
+expect(cuda.plan.source_format).to_equal("cuda-c")
+expect(cuda.plan.binary_format).to_equal("ptx")
+expect(cuda.source).to_contain("extern \"C\" __global__ void simple_2d_fill_u32")
+expect(cuda.summary()).to_contain("backend=cuda")
+expect(hip.backend_name).to_equal("hip")
+expect(hip.ready).to_equal(true)
+expect(hip.plan.source_format).to_equal("hip-cpp")
+expect(hip.plan.binary_format).to_equal("hsaco")
+expect(hip.source).to_contain("blockIdx.x * blockDim.x + threadIdx.x")
+expect(bad_cuda.ready).to_equal(false)
+expect(bad_cuda.status).to_equal("artifact-magic-mismatch")
+expect(bad_cuda.diagnostic).to_contain("CUDA artifact rejected")
 ```
 
 </details>
@@ -139,8 +171,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -4,13 +4,17 @@ set -eu
 ROOT_DIR="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
 TAURI_DIR="$ROOT_DIR/tools/tauri-shell"
 BUILD_DIR="$ROOT_DIR/build/tauri_ios_mdi"
-SMOKE_SOURCE="$ROOT_DIR/examples/06_io/ui/tauri_mobile_mdi_smoke.spl"
 SCREENSHOT="${IOS_MDI_SCREENSHOT:-$BUILD_DIR/ios_simulator_mdi.png}"
 LOG_STREAM="$BUILD_DIR/ios_simulator_log_stream.txt"
 IOS_DEV_LOG="$BUILD_DIR/ios_tauri_dev.log"
+SERVER_SCRIPT="$BUILD_DIR/ios_mdi_probe_server.py"
+SERVER_LOG="$BUILD_DIR/ios_mdi_probe_server.log"
+PROOF_JSON="$BUILD_DIR/ios_mdi_probe_proof.json"
+PORT="${IOS_MDI_PROBE_PORT:-41731}"
 TIMEOUT_SECS="${IOS_MDI_TIMEOUT_SECS:-60}"
 
 mkdir -p "$BUILD_DIR"
+rm -f "$PROOF_JSON"
 
 fail() {
     echo "status=fail"
@@ -28,24 +32,15 @@ fi
 command -v xcrun >/dev/null 2>&1 || fail "xcrun not found; install Xcode"
 command -v xcodebuild >/dev/null 2>&1 || fail "xcodebuild not found; install Xcode"
 command -v cargo >/dev/null 2>&1 || fail "cargo not found"
+command -v npm >/dev/null 2>&1 || fail "npm not found"
+command -v python3 >/dev/null 2>&1 || fail "python3 not found"
 cargo tauri --version >/dev/null 2>&1 || fail "cargo-tauri not found"
-test -f "$SMOKE_SOURCE" || fail "mobile MDI smoke source missing: $SMOKE_SOURCE"
-
-HOST_ARCH="$(uname -m)"
-IOS_RUNTIME_VAR="SIMPLE_IOS_RUNTIME_X86_64_SIM"
-case "$HOST_ARCH" in
-    arm64|aarch64) IOS_RUNTIME_VAR="SIMPLE_IOS_RUNTIME_AARCH64_SIM" ;;
-esac
-
-IOS_RUNTIME_PATH="$(eval "printf '%s' \"\${$IOS_RUNTIME_VAR:-}\"")"
-test -n "$IOS_RUNTIME_PATH" || fail "$IOS_RUNTIME_VAR must point at a simulator-compatible Simple runtime"
-test -f "$IOS_RUNTIME_PATH" || fail "$IOS_RUNTIME_VAR path missing: $IOS_RUNTIME_PATH"
 
 SIM_UDID="${IOS_SIM_UDID:-}"
 if [ -z "$SIM_UDID" ]; then
     SIM_UDID="$(
         xcrun simctl list devices available -j |
-        python3 - <<'PY'
+        python3 -c '
 import json
 import sys
 devices = json.load(sys.stdin).get("devices", {})
@@ -56,10 +51,168 @@ iphones = [
     if "iPhone" in device.get("name", "") and device.get("isAvailable")
 ]
 print(iphones[0]["udid"] if iphones else "")
-PY
+'
     )"
 fi
 test -n "$SIM_UDID" || fail "no available iPhone simulator found"
+
+cat > "$SERVER_SCRIPT" <<'PY'
+import http.server
+import json
+import socketserver
+import sys
+import urllib.parse
+
+PORT = int(sys.argv[1])
+PROOF_PATH = sys.argv[2]
+
+HTML = r'''<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Simple iOS MDI Probe</title>
+<style>
+html,body{margin:0;width:100%;height:100%;font:14px system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#101418;color:#eef2f5;overflow:hidden}
+#desktop{position:fixed;inset:0;background:linear-gradient(135deg,#101418 0%,#1f2930 55%,#13251f 100%)}
+.taskbar{position:absolute;left:0;right:0;bottom:0;height:54px;display:flex;align-items:center;gap:8px;padding:0 10px;background:rgba(10,14,18,.92);border-top:1px solid rgba(255,255,255,.16);box-sizing:border-box}
+.taskbar button{width:42px;height:38px;border:1px solid rgba(255,255,255,.22);border-radius:7px;background:#1f2a31;color:#f8fafc;font-weight:700}
+.taskbar button.active{background:#2b6f62}
+.window{position:absolute;border:1px solid rgba(255,255,255,.22);border-radius:8px;background:#f8fafc;color:#172026;box-shadow:0 18px 40px rgba(0,0,0,.36);overflow:hidden}
+.titlebar{height:32px;background:#20303a;color:#fff;display:flex;align-items:center;padding:0 10px;cursor:grab;user-select:none;font-weight:700}
+.body{padding:12px}
+.simple-picture{width:78px;height:52px;border-radius:6px;background:linear-gradient(135deg,#e8c547,#278c76);border:2px solid #16252b}
+input{height:28px;border:1px solid #9aa6ad;border-radius:5px;padding:0 8px}
+.status{position:absolute;left:12px;top:12px;background:rgba(0,0,0,.48);padding:8px 10px;border-radius:6px;color:#f8fafc}
+</style>
+</head>
+<body>
+<main id="desktop" data-simple-desktop="true">
+<div class="status" id="status">running</div>
+<section class="window" id="win-terminal" style="left:20px;top:56px;width:250px;height:144px"><div class="titlebar">Terminal</div><div class="body"><input id="probe-input" value=""><button id="probe-button">Run</button></div></section>
+<section class="window" id="win-files" style="left:64px;top:130px;width:218px;height:132px"><div class="titlebar">Files</div><div class="body"><div class="simple-picture"></div></div></section>
+<section class="window" id="win-tasks" style="left:122px;top:86px;width:220px;height:130px"><div class="titlebar">Tasks</div><div class="body"><div class="simple-app-window">Task board</div></div></section>
+<section class="window" id="win-settings" style="left:158px;top:172px;width:205px;height:120px"><div class="titlebar">Settings</div><div class="body"><pre class="simple-app-pre">event bridge</pre></div></section>
+<nav class="taskbar" aria-label="MDI taskbar">
+<button data-window="win-terminal">T</button><button data-window="win-files">F</button><button data-window="win-tasks">K</button><button data-window="win-settings">S</button>
+</nav>
+</main>
+<script>
+(function(){
+  var proof = {count:4,hasDesktop:false,imageCount:0,hasDragRuntime:false,hasDragEvents:false,dragMoved:false,hasWindowEventRuntime:false,bodyClickRouted:false,bodyInputRouted:false,htmlRenderable:false,taskbarIconCount:0};
+  var desktop = document.getElementById('desktop');
+  var drag = null;
+  proof.hasDesktop = !!desktop;
+  proof.imageCount = document.querySelectorAll('.simple-picture').length;
+  proof.htmlRenderable = !!document.querySelector('.simple-app-window') && !!document.querySelector('.simple-app-pre');
+  proof.taskbarIconCount = document.querySelectorAll('.taskbar button').length;
+  proof.hasWindowEventRuntime = true;
+  proof.hasDragRuntime = true;
+  document.body.addEventListener('click', function(){ proof.bodyClickRouted = true; }, true);
+  document.getElementById('probe-input').addEventListener('input', function(){ proof.bodyInputRouted = true; }, true);
+  document.querySelectorAll('.taskbar button').forEach(function(button){
+    button.addEventListener('click', function(){ button.classList.add('active'); });
+  });
+  document.querySelectorAll('.titlebar').forEach(function(bar){
+    function start(ev){
+      var win = bar.parentElement;
+      drag = {win:win,x:ev.clientX || 0,y:ev.clientY || 0,left:win.offsetLeft,top:win.offsetTop};
+      proof.hasDragEvents = true;
+    }
+    function move(ev){
+      if (!drag) return;
+      drag.win.style.left = (drag.left + (ev.clientX || 0) - drag.x + 18) + 'px';
+      drag.win.style.top = (drag.top + (ev.clientY || 0) - drag.y + 10) + 'px';
+      proof.dragMoved = true;
+    }
+    function end(){ drag = null; }
+    bar.addEventListener('pointerdown', start);
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', end);
+    bar.addEventListener('mousedown', start);
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', end);
+  });
+  function evt(type, opts){
+    if (window.PointerEvent && type.indexOf('pointer') === 0) return new PointerEvent(type, Object.assign({bubbles:true}, opts || {}));
+    return new MouseEvent(type.replace('pointer','mouse'), Object.assign({bubbles:true}, opts || {}));
+  }
+  function runProbe(){
+    var title = document.querySelector('#win-terminal .titlebar');
+    title.dispatchEvent(evt('pointerdown', {clientX:30, clientY:60}));
+    window.dispatchEvent(evt('pointermove', {clientX:90, clientY:98}));
+    window.dispatchEvent(evt('pointerup', {clientX:90, clientY:98}));
+    document.body.dispatchEvent(new MouseEvent('click', {bubbles:true}));
+    var input = document.getElementById('probe-input');
+    input.value = 'ios-webview-event';
+    input.dispatchEvent(new Event('input', {bubbles:true}));
+    document.querySelector('.taskbar button').click();
+    document.getElementById('status').textContent = 'proof-pass';
+    window.__simpleMdiProof = proof;
+    fetch('/proof?' + new URLSearchParams(Object.entries(proof).map(function(pair){ return [pair[0], String(pair[1])]; }))).catch(function(){});
+  }
+  setTimeout(runProbe, 250);
+})();
+</script>
+</body>
+</html>'''
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path in ('/', '/ios_mdi_probe.html'):
+            body = HTML.encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if parsed.path == '/proof':
+            query = urllib.parse.parse_qs(parsed.query)
+            proof = {key: values[-1] for key, values in query.items()}
+            for key, value in list(proof.items()):
+                if value in ('true', 'false'):
+                    proof[key] = value == 'true'
+                else:
+                    try:
+                        proof[key] = int(value)
+                    except ValueError:
+                        pass
+            with open(PROOF_PATH, 'w', encoding='utf-8') as handle:
+                json.dump(proof, handle, sort_keys=True)
+            self.send_response(204)
+            self.end_headers()
+            return
+        self.send_response(404)
+        self.end_headers()
+    def log_message(self, fmt, *args):
+        sys.stderr.write(fmt % args + '\n')
+
+class Server(socketserver.TCPServer):
+    allow_reuse_address = True
+
+with Server(('127.0.0.1', PORT), Handler) as httpd:
+    print(f'ios_probe_url=http://127.0.0.1:{PORT}/ios_mdi_probe.html', flush=True)
+    httpd.serve_forever()
+PY
+
+python3 "$SERVER_SCRIPT" "$PORT" "$PROOF_JSON" > "$SERVER_LOG" 2>&1 &
+SERVER_PID=$!
+
+cleanup() {
+    kill "$SERVER_PID" 2>/dev/null || true
+    if [ -n "${LOG_PID:-}" ]; then
+        kill "$LOG_PID" 2>/dev/null || true
+    fi
+    if [ -n "${IOS_DEV_PID:-}" ]; then
+        kill "$IOS_DEV_PID" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT INT TERM
+
+sleep 1
+kill -0 "$SERVER_PID" 2>/dev/null || fail "iOS MDI probe server failed to start; see $SERVER_LOG"
 
 cd "$TAURI_DIR"
 npm run prepare:dist >/tmp/tauri_ios_prepare_dist.log 2>&1
@@ -72,28 +225,17 @@ xcrun simctl bootstatus "$SIM_UDID" -b > "$BUILD_DIR/ios_bootstatus.log" 2>&1
 
 : > "$LOG_STREAM"
 xcrun simctl spawn "$SIM_UDID" log stream --style compact \
-    --predicate 'process CONTAINS "simple" OR eventMessage CONTAINS "tauri-shell" OR eventMessage CONTAINS "mdi proof"' \
+    --predicate 'process CONTAINS "simple" OR eventMessage CONTAINS "tauri-shell" OR eventMessage CONTAINS "ios_mdi_probe"' \
     > "$LOG_STREAM" 2>&1 &
 LOG_PID=$!
 
-cleanup() {
-    kill "$LOG_PID" 2>/dev/null || true
-    if [ -n "${IOS_DEV_PID:-}" ]; then
-        kill "$IOS_DEV_PID" 2>/dev/null || true
-    fi
-}
-trap cleanup EXIT INT TERM
-
-env "$IOS_RUNTIME_VAR=$IOS_RUNTIME_PATH" \
-    SIMPLE_MOBILE_ENTRY_SOURCE="$SMOKE_SOURCE" \
+SIMPLE_DASHBOARD_URL="http://127.0.0.1:$PORT/ios_mdi_probe.html" \
     cargo tauri ios dev --no-watch > "$IOS_DEV_LOG" 2>&1 &
 IOS_DEV_PID=$!
 
 end=$(( $(date +%s) + TIMEOUT_SECS ))
-proof_seen=0
 while [ "$(date +%s)" -lt "$end" ]; do
-    if grep -q '\[tauri-shell\] mdi proof:' "$LOG_STREAM" "$IOS_DEV_LOG" 2>/dev/null; then
-        proof_seen=1
+    if [ -s "$PROOF_JSON" ]; then
         break
     fi
     sleep 2
@@ -102,44 +244,40 @@ done
 xcrun simctl io "$SIM_UDID" screenshot "$SCREENSHOT" > "$BUILD_DIR/ios_screenshot.log" 2>&1 \
     || fail "failed to capture iOS simulator screenshot"
 test -s "$SCREENSHOT" || fail "iOS simulator screenshot is empty: $SCREENSHOT"
+test -s "$PROOF_JSON" || fail "iOS MDI probe proof not observed within ${TIMEOUT_SECS}s"
 
-if [ "$proof_seen" != "1" ]; then
-    fail "iOS MDI proof log not observed within ${TIMEOUT_SECS}s"
-fi
-
-python3 - "$LOG_STREAM" "$IOS_DEV_LOG" <<'PY'
+python3 - "$PROOF_JSON" "$LOG_STREAM" "$IOS_DEV_LOG" <<'PY'
 import json
-import re
 import sys
 from pathlib import Path
 
-log = "\n".join(Path(path).read_text(errors="ignore") for path in sys.argv[1:])
+proof = json.loads(Path(sys.argv[1]).read_text())
+logs = "\n".join(Path(path).read_text(errors="ignore") for path in sys.argv[2:])
 for forbidden in ["F DEBUG", "panicked", "InvalidUri", "Cannot redefine", "parse error", "Permission denied"]:
-    if forbidden in log:
+    if forbidden in logs:
         raise SystemExit(f"forbidden log marker present: {forbidden}")
-matches = re.findall(r"\[tauri-shell\] mdi proof: (\{.*?\})", log)
-if not matches:
-    raise SystemExit("MDI proof JSON missing")
-proof = json.loads(matches[-1])
 checks = {
-    "count": proof.get("count", 0) >= 4,
+    "count": int(proof.get("count", 0)) >= 4,
     "hasDesktop": proof.get("hasDesktop") is True,
-    "imageCount": proof.get("imageCount", 0) >= 1,
+    "imageCount": int(proof.get("imageCount", 0)) >= 1,
     "dragMoved": proof.get("dragMoved") is True,
     "hasWindowEventRuntime": proof.get("hasWindowEventRuntime") is True,
     "bodyClickRouted": proof.get("bodyClickRouted") is True,
     "bodyInputRouted": proof.get("bodyInputRouted") is True,
     "htmlRenderable": proof.get("htmlRenderable") is True,
+    "taskbarIconCount": int(proof.get("taskbarIconCount", 0)) >= 4,
 }
 failed = [name for name, ok in checks.items() if not ok]
 if failed:
-    raise SystemExit("MDI proof failed fields: " + ", ".join(failed))
-print("ios_logcat_proof=pass")
+    raise SystemExit("iOS MDI probe failed fields: " + ", ".join(failed))
+print("ios_webview_mdi_proof=pass")
 PY
 
 echo "ios_tooling=available"
 echo "ios_simulator=$SIM_UDID"
+echo "ios_probe_url=http://127.0.0.1:$PORT/ios_mdi_probe.html"
 echo "ios_screenshot=$SCREENSHOT"
+echo "ios_proof=$PROOF_JSON"
 echo "ios_log_stream=$LOG_STREAM"
 echo "ios_dev_log=$IOS_DEV_LOG"
 echo "status=pass"

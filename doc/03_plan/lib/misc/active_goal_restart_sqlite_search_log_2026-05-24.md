@@ -74,7 +74,7 @@ Known unrelated dirty items before this slice:
 - `examples/10_tooling/trace32_tools`
 - `examples/10_tooling/korean_stock_mcp`
 - `examples/10_tooling/llm_cli_tools`
-- `examples/11_advanced/nvfs`
+- `src/os/services/nvfs`
 - `examples/10_tooling/obsidian-search`
 - `examples/08_gpu/simple_cuda_example`
 - `examples/07_ml/simple_deeplearning_study`

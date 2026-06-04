@@ -192,7 +192,7 @@ keep the `[UPFRONT]` list focused on the load-bearing seven.
 - **Notes:** This is the single blocker for Phase 9-M2 (SimpleOS fs call-site retrofit). Until it's resolved, the two direct-FAT32 call sites (`shell_serial_entry.spl`, `fs_test_entry.spl`) cannot be routed through the mount table without reintroducing a known codegen bug. Option A: fix Cranelift `slice()` in baremetal backend (big yak-shave). Option B: add a C extern. Option C: rewrite `MountTable.resolve()` in pure Simple without slice (recommended — self-contained).
   - **Implemented-by:** 2026-04-18, rewrote MountTable.resolve to use str_char_at indexed-char-copy (mount_table.spl +6 lines); 5/5 resolve tests pass.
   - **Completion update (2026-04-22):** stale `pass_todo` resolve coverage replaced with
-    real MountTable/RamFs tests in `examples/11_advanced/nvfs/test/01_unit/fs_driver/mount_table_test.spl`;
+    real MountTable/RamFs tests in `src/os/services/nvfs/test/01_unit/fs_driver/mount_table_test.spl`;
     completion docs: `doc/05_design/nvfs_completion.md`.
 
 ### FR-HOT-001 — HOT: integrate pd_upper/pd_lower free-space check before chaining
@@ -426,9 +426,9 @@ append under this heading.
 - **Related-design-doc:** `doc/05_design/nvfs_design_v2.md §17`
 - **Related-issue:** none
 - **Implemented-by:** N5a agent, 2026-04-17.
-  Files: `examples/11_advanced/nvfs/src/core/pmap_btree.spl` (new, node-pool B-tree),
-  `examples/11_advanced/nvfs/src/driver/fs_driver_impl.spl` (wired), 
-  `examples/11_advanced/nvfs/test/01_unit/pmap_btree_test.spl` (8 tests).
+  Files: `src/os/services/nvfs/src/core/pmap_btree.spl` (new, node-pool B-tree),
+  `src/os/services/nvfs/src/driver/fs_driver_impl.spl` (wired), 
+  `src/os/services/nvfs/test/01_unit/pmap_btree_test.spl` (8 tests).
   Delete rebalancing tracked as FR-NVFS-N5b-001.
 
 ---
@@ -452,10 +452,10 @@ append under this heading.
   - [x] Existing pmap_btree_test.spl still passes (8 tests)
   - [x] New pmap_btree_rebalance_test.spl: 8 tests (borrow-left, borrow-right, merge, delete-all, large-scale)
 - **Files-changed:**
-  - `examples/11_advanced/nvfs/src/core/pmap_btree.spl` — replaced leaf-only remove with
+  - `src/os/services/nvfs/src/core/pmap_btree.spl` — replaced leaf-only remove with
     full rebalancing: `btree_borrow_from_left`, `btree_borrow_from_right`,
     `btree_merge_with_right`, `_delete_recursive`, `pmap_btree_is_empty`.
-  - `examples/11_advanced/nvfs/test/01_unit/pmap_btree_rebalance_test.spl` — 8 new tests.
+  - `src/os/services/nvfs/test/01_unit/pmap_btree_rebalance_test.spl` — 8 new tests.
 - **Related-upfront:** none
 - **Related-design-doc:** `doc/05_design/nvfs_design_v2.md §17`
 - **Related-issue:** none
@@ -494,7 +494,7 @@ append under this heading.
 
 - **Filed-on:** 2026-04-17
 - **Filed-by:** N6a scaffolding agent (session simple-db-nvfs-storage)
-- **Target:** nvfs  (examples/11_advanced/nvfs/src/core/encryption.spl)
+- **Target:** nvfs  (src/os/services/nvfs/src/core/encryption.spl)
 - **Priority:** P1
 - **Status:** Implemented
 - **Implemented-on:** 2026-04-18
@@ -503,7 +503,7 @@ append under this heading.
   `encryption.spl` stubs (`_aes128_encrypt_stub` / `_aes128_decrypt_stub`) use
   XOR + checksum instead of real AES-128-GCM. Replace with calls to
   `aes128_gcm_encrypt` / `aes128_gcm_decrypt` from the vendored
-  `examples/11_advanced/nvfs/src/core/crypto/aes128_gcm.spl`. Keep 3-level key hierarchy
+  `src/os/services/nvfs/src/core/crypto/aes128_gcm.spl`. Keep 3-level key hierarchy
   (wrapping → master → data DEK) intact; only the leaf DEK performs AES-GCM.
   Also upgrade `keystore_generate_master` to use AES-GCM for wrapped_key storage.
 - **Acceptance-criteria:**
@@ -528,7 +528,7 @@ append under this heading.
 
 - **Filed-on:** 2026-04-18
 - **Filed-by:** 9-n6a-002-003 agent
-- **Target:** nvfs  (examples/11_advanced/nvfs/src/core/encryption.spl)
+- **Target:** nvfs  (src/os/services/nvfs/src/core/encryption.spl)
 - **Priority:** P1
 - **Status:** Implemented
 - **Implemented-on:** 2026-04-18
@@ -560,7 +560,7 @@ append under this heading.
 
 - **Filed-on:** 2026-04-18
 - **Filed-by:** 9-n6a-002-003 agent
-- **Target:** nvfs  (examples/11_advanced/nvfs/src/core/encryption.spl + arena.spl)
+- **Target:** nvfs  (src/os/services/nvfs/src/core/encryption.spl + arena.spl)
 - **Priority:** P1
 - **Status:** Implemented
 - **Implemented-on:** 2026-04-18
@@ -612,11 +612,11 @@ append under this heading.
   - [x] Encrypted roundtrip with correct key: decrypts to original plaintext
   - [x] Encrypted roundtrip with wrong key: `ok=false` (GCM tag mismatch)
   - [x] Encrypted stream + no key: `ok=true`, `encrypted_opaque=true`, ciphertext stored
-  - [x] 4 unit tests in `examples/11_advanced/nvfs/test/01_unit/send_test.spl`
+  - [x] 4 unit tests in `src/os/services/nvfs/test/01_unit/send_test.spl`
 - **Files-changed:**
-  - `examples/11_advanced/nvfs/src/core/send.spl` (new) — SendStream, RecvStream, send_arena, receive_arena
-  - `examples/11_advanced/nvfs/test/01_unit/send_test.spl` (new) — 4 tests
-  - `examples/11_advanced/nvfs/src/core/__init__.spl` — docstring updated to list send module
+  - `src/os/services/nvfs/src/core/send.spl` (new) — SendStream, RecvStream, send_arena, receive_arena
+  - `src/os/services/nvfs/test/01_unit/send_test.spl` (new) — 4 tests
+  - `src/os/services/nvfs/src/core/__init__.spl` — docstring updated to list send module
   - `doc/05_design/nvfs/send_format.md` (new) — wire format spec
 - **Related-upfront:** none
 - **Related-design-doc:** `doc/05_design/nvfs/send_format.md`; `nvfs_design_v2.md §14`
@@ -631,7 +631,7 @@ append under this heading.
 
 - **Filed-on:** 2026-04-18
 - **Filed-by:** nvfs-v3-design agent
-- **Target:** nvfs  (examples/11_advanced/nvfs/src/core/compression.spl — new)
+- **Target:** nvfs  (src/os/services/nvfs/src/core/compression.spl — new)
 - **Priority:** P2
 - **Status:** Implemented
 - **Implemented-on:** 2026-04-18
@@ -666,13 +666,13 @@ append under this heading.
 - **Related-design-doc:** `doc/05_design/nvfs_design.md §V3-2, §V3-5, §V3-6, §V3-7`
 - **Related-issue:** none
 - **Files-changed:**
-  - `examples/11_advanced/nvfs/src/core/compression.spl` (new) — CompressAlgo enum, compress_extent,
+  - `src/os/services/nvfs/src/core/compression.spl` (new) — CompressAlgo enum, compress_extent,
     decompress_extent, class_default_algo; in-repo RLE compression frame with raw fallback
-  - `examples/11_advanced/nvfs/src/core/pmap.spl` — v2→v3 (80→88 bytes): added compress_algo + compressed_len
+  - `src/os/services/nvfs/src/core/pmap.spl` — v2→v3 (80→88 bytes): added compress_algo + compressed_len
     fields to PmapEntry; encode writes 88 bytes; decode dispatches on buf len (v2/v3 compat)
-  - `examples/11_advanced/nvfs/src/core/arena.spl` — added arena_append_compressed and arena_read_extent
-  - `examples/11_advanced/nvfs/test/01_unit/core/compression_test.spl` (new) — compression, SLO, and upgrade coverage
-  - `examples/11_advanced/nvfs/src/tool/nvfs_upgrade.spl` — offline pmap v2-to-v3 record upgrade helper
+  - `src/os/services/nvfs/src/core/arena.spl` — added arena_append_compressed and arena_read_extent
+  - `src/os/services/nvfs/test/01_unit/core/compression_test.spl` (new) — compression, SLO, and upgrade coverage
+  - `src/os/services/nvfs/src/tool/nvfs_upgrade.spl` — offline pmap v2-to-v3 record upgrade helper
 - **Notes:** Compression must occur before encryption (§V3-4.1 enforces ordering).
   Completion update 2026-04-22 added deterministic RLE compression, incompressible
   raw fallback, SLO model helpers, and `nvfs_upgrade_batch`. OQ-11 (compressed ARC)
@@ -684,7 +684,7 @@ append under this heading.
 
 - **Filed-on:** 2026-04-18
 - **Filed-by:** nvfs-v3-design agent
-- **Target:** nvfs  (examples/11_advanced/nvfs/src/core/dedup.spl — new)
+- **Target:** nvfs  (src/os/services/nvfs/src/core/dedup.spl — new)
 - **Priority:** P2
 - **Status:** Implemented
 - **Implemented-on:** 2026-04-18
@@ -705,7 +705,7 @@ append under this heading.
   on unlink/CoW; entry freed at refcount=0). Full spec: `doc/05_design/nvfs_design.md
   §V3-3, §V3-4`.
 - **Implementation-notes:**
-  N7b DDT implemented in `examples/11_advanced/nvfs/src/core/dedup.spl` (DedupTable,
+  N7b DDT implemented in `src/os/services/nvfs/src/core/dedup.spl` (DedupTable,
   DedupEntry 56-byte encoding contract, DEDUP_TREE_OBJECTID=12, default 256 MB
   hot-cache config, stats, refcount checks, DHK-keyed hash path, dedup_insert_or_bump,
   dedup_release, dedup_class_enabled). Sibling DedupRefcountTable added to reflink.spl;
@@ -730,7 +730,7 @@ append under this heading.
 - **Notes:** DDT reference counting is error-prone (comparable to delayed-ref queue,
   v2 §5 OQ-1). Comprehensive crash-consistency tests are required before N7b ships.
   Completion update 2026-04-22 adds stats/refcount/keyed-hash coverage in
-  `examples/11_advanced/nvfs/test/01_unit/core/dedup_test.spl`.
+  `src/os/services/nvfs/test/01_unit/core/dedup_test.spl`.
 
 ---
 
@@ -948,14 +948,14 @@ Closed entries are moved here from `## Open Requests` (never deleted) with
 **Investigation result (2026-04-18):** Full import was **not yet possible**. Root cause:
 
 1. **Constants not defined in NVFS.** `STORAGE_CLASS_DB_WAL`, `STORAGE_CLASS_META_DURABLE`,
-   `DURABILITY_DATA_DURABLE` have **no canonical definition** in `examples/11_advanced/nvfs/src/core/`.
+   `DURABILITY_DATA_DURABLE` have **no canonical definition** in `src/os/services/nvfs/src/core/`.
    The nvfs arena uses `class_tag: i32` as an opaque passthrough — named ordinals are absent.
    The shim's 3 `val` declarations are the *only* definitions in the codebase. There is
    nothing to import.
 
 2. **PmapEntry fields diverge completely.** `examples/11_advanced/simple_db/src/engine/pmap.spl::PmapEntry`
    has fields `{rel_id, blk, arena_id, offset, generation}` (Simple DB logical mapping).
-   `examples/11_advanced/nvfs/src/core/pmap.spl::PmapEntry` has fields `{logical, phys, offset, len,
+   `src/os/services/nvfs/src/core/pmap.spl::PmapEntry` has fields `{logical, phys, offset, len,
    birth_gen, checksum_algo, compress_algo, compressed_len, checksum}` (physical pmap v3).
    These are structurally unrelated; import would require a rename that misrepresents semantics.
 
@@ -968,7 +968,7 @@ Closed entries are moved here from `## Open Requests` (never deleted) with
 **Follow-up:** FR-SPOSTGRE-M2-002 tracks adding named StorageClass constants to NVFS.
 
 **Resolution (2026-04-22):** FR-SPOSTGRE-M2-002 added
-`examples/11_advanced/nvfs/src/core/constants.spl`; `nvfs_shim.spl` now imports the requested
+`src/os/services/nvfs/src/core/constants.spl`; `nvfs_shim.spl` now imports the requested
 storage and durability constants from NVFS. The Pmap/Superblock type portions remain
 not applicable for the structural reasons above. Verification:
 `bin/simple test examples/11_advanced/simple_db/test/01_unit/engine`,
@@ -980,11 +980,11 @@ not applicable for the structural reasons above. Verification:
 
 - **Filed-on:** 2026-04-18
 - **Filed-by:** 12-e2-cross-submodule-imports agent (session simple-db-nvfs-storage)
-- **Target:** nvfs  (examples/11_advanced/nvfs/src/core/arena.spl or new constants.spl)
+- **Target:** nvfs  (src/os/services/nvfs/src/core/arena.spl or new constants.spl)
 - **Priority:** P2
 - **Status:** Implemented (2026-04-22)
 - **Requested-semantics:**
-  `examples/11_advanced/nvfs/src/core/arena.spl` uses `class_tag: i32` as an opaque ordinal with no
+  `src/os/services/nvfs/src/core/arena.spl` uses `class_tag: i32` as an opaque ordinal with no
   named constants. Consumers (Simple DB, future callers) must either duplicate ordinal
   assignments or rely on comments that say "matching nvfs intent". Add a canonical
   `constants.spl` (or extend `arena.spl`) that exports:
@@ -997,7 +997,7 @@ not applicable for the structural reasons above. Verification:
   Then `nvfs_shim.spl` and `tier_cache.spl` can replace their local `val` declarations with
   `use examples.nvfs.src.core.constants.{STORAGE_CLASS_DB_WAL, ...}`.
 - **Acceptance-criteria:**
-  - [x] `examples/11_advanced/nvfs/src/core/constants.spl` (or equivalent) exports all 4 named ordinals
+  - [x] `src/os/services/nvfs/src/core/constants.spl` (or equivalent) exports all 4 named ordinals
   - [x] `nvfs_shim.spl` imports instead of re-declaring STORAGE_CLASS_DB_WAL and
         STORAGE_CLASS_META_DURABLE
   - [x] `tier_cache.spl` imports STORAGE_CLASS_DB_TEMP instead of re-declaring it

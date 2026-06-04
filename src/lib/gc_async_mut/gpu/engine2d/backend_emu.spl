@@ -21,6 +21,19 @@ Usage:
 use std.gpu.engine2d.backend.{RenderBackend}
 use std.gpu.engine2d.glyph.{glyph_data, glyph_width, glyph_height, glyph_advance}
 use std.gpu.engine2d.color.{color_r, color_g, color_b, color_a, rgba}
+use std.gpu.engine2d.backend_emu_math.{
+    _emu_abs, _emu_min, _emu_max, _emu_isqrt, _emu_blend_over,
+    _emu_sin_approx, _emu_cos_approx, _emu_sort_i32
+}
+
+export use std.gpu.engine2d.backend_emu_math.{
+    _emu_abs, _emu_min, _emu_max, _emu_isqrt, _emu_blend_over,
+    _emu_overlay_ch, _emu_sin_approx, _emu_cos_approx, _emu_sort_i32
+}
+export use std.gpu.engine2d.backend_emu_adv.{
+    emu_draw_image_scaled, emu_draw_blur_rect, emu_draw_shadow_rect,
+    emu_draw_image_transform, emu_draw_rect_blend_mode
+}
 
 # ============================================================================
 # Rectangle Outline — 4 filled edges
@@ -671,27 +684,6 @@ fn emu_draw_image_blend(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32,
             px = px + 1
         py = py + 1
     core.draw_image(x, y, w, h, result)
-
-# ============================================================================
-# Scaled Image — Nearest-neighbor resample
-# ============================================================================
-
-fn emu_draw_image_scaled(mut core: RenderBackend, dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
-    if dst_w <= 0 or dst_h <= 0 or src_w <= 0 or src_h <= 0:
-        return
-    var result: [u32] = [0u32; dst_w * dst_h]
-    var dy: i32 = 0
-    while dy < dst_h:
-        val sy = dy * src_h / dst_h
-        var dx: i32 = 0
-        while dx < dst_w:
-            val sx = dx * src_w / dst_w
-            result[dy * dst_w + dx] = pixels[sy * src_w + sx]
-            dx = dx + 1
-        dy = dy + 1
-    core.draw_image(dst_x, dst_y, dst_w, dst_h, result)
-
-# ============================================================================
 # Triangle Outline — 3 line segments
 # ============================================================================
 
@@ -701,219 +693,3 @@ fn emu_draw_triangle_outline(mut core: RenderBackend, x1: i32, y1: i32, x2: i32,
     emu_draw_line(core, x3, y3, x1, y1, color, thickness)
 
 # ============================================================================
-# Box Blur — Separable convolution on framebuffer region
-# ============================================================================
-
-fn emu_draw_blur_rect(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32, radius: i32):
-    if w <= 0 or h <= 0 or radius <= 0:
-        return
-    val fb = core.read_pixels()
-    val fb_w = core.width()
-    val fb_h = core.height()
-    var temp: [u32] = [0u32; w * h]
-    var py: i32 = 0
-    while py < h:
-        var px: i32 = 0
-        while px < w:
-            var sr: i32 = 0
-            var sg: i32 = 0
-            var sb: i32 = 0
-            var sa: i32 = 0
-            var cnt: i32 = 0
-            var ky = -radius
-            while ky <= radius:
-                var kx = -radius
-                while kx <= radius:
-                    val fx = x + px + kx
-                    val fy = y + py + ky
-                    if fx >= 0 and fx < fb_w and fy >= 0 and fy < fb_h:
-                        val p = fb[fy * fb_w + fx]
-                        sr = sr + color_r(p)
-                        sg = sg + color_g(p)
-                        sb = sb + color_b(p)
-                        sa = sa + color_a(p)
-                        cnt = cnt + 1
-                    kx = kx + 1
-                ky = ky + 1
-            if cnt > 0:
-                temp[py * w + px] = rgba(sr / cnt, sg / cnt, sb / cnt, sa / cnt)
-            px = px + 1
-        py = py + 1
-    core.draw_image(x, y, w, h, temp)
-
-# ============================================================================
-# Drop Shadow — Offset + blur + blend compose
-# ============================================================================
-
-fn emu_draw_shadow_rect(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32, offset_x: i32, offset_y: i32, blur_r: i32, color: u32):
-    if w <= 0 or h <= 0:
-        return
-    val sx = x + offset_x
-    val sy = y + offset_y
-    val sw = w + 2 * blur_r
-    val sh = h + 2 * blur_r
-    core.draw_rect_filled(sx - blur_r, sy - blur_r, sw, sh, color)
-    if blur_r > 0:
-        emu_draw_blur_rect(core, sx - blur_r, sy - blur_r, sw, sh, blur_r)
-
-# ============================================================================
-# Affine Transform Image — Per-pixel inverse transform sample
-# ============================================================================
-
-fn emu_draw_image_transform(mut core: RenderBackend, dst_x: i32, dst_y: i32, src_w: i32, src_h: i32, a: i32, b: i32, c: i32, d: i32, tx: i32, ty: i32, pixels: [u32]):
-    if src_w <= 0 or src_h <= 0:
-        return
-    val det = a * d - b * c
-    if det == 0:
-        return
-    val bx1 = _emu_min(_emu_min(0, a * src_w), _emu_min(b * src_h, a * src_w + b * src_h)) / 256
-    val by1 = _emu_min(_emu_min(0, c * src_w), _emu_min(d * src_h, c * src_w + d * src_h)) / 256
-    val bx2 = _emu_max(_emu_max(0, a * src_w), _emu_max(b * src_h, a * src_w + b * src_h)) / 256
-    val by2 = _emu_max(_emu_max(0, c * src_w), _emu_max(d * src_h, c * src_w + d * src_h)) / 256
-    val out_w = bx2 - bx1 + 1
-    val out_h = by2 - by1 + 1
-    if out_w <= 0 or out_h <= 0:
-        return
-    var result: [u32] = [0u32; out_w * out_h]
-    var py: i32 = 0
-    while py < out_h:
-        var px: i32 = 0
-        while px < out_w:
-            val ox = (bx1 + px) * 256 - tx
-            val oy = (by1 + py) * 256 - ty
-            val sx = (d * ox - b * oy) / det
-            val sy = (-c * ox + a * oy) / det
-            if sx >= 0 and sx < src_w and sy >= 0 and sy < src_h:
-                result[py * out_w + px] = pixels[sy * src_w + sx]
-            px = px + 1
-        py = py + 1
-    core.draw_image(dst_x + bx1, dst_y + by1, out_w, out_h, result)
-
-# ============================================================================
-# Blend Mode Rect — Read + compute + write with mode selection
-# mode: 0=src-over, 1=multiply, 2=screen, 3=overlay
-# ============================================================================
-
-fn emu_draw_rect_blend_mode(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32, color: u32, mode: i32):
-    if w <= 0 or h <= 0:
-        return
-    val fb = core.read_pixels()
-    val fb_w = core.width()
-    val fb_h = core.height()
-    val sr = color_r(color)
-    val sg = color_g(color)
-    val sb = color_b(color)
-    val sa = color_a(color)
-    var result: [u32] = [0u32; w * h]
-    var py: i32 = 0
-    while py < h:
-        var px: i32 = 0
-        while px < w:
-            val fx = x + px
-            val fy = y + py
-            if fx >= 0 and fx < fb_w and fy >= 0 and fy < fb_h:
-                val dst = fb[fy * fb_w + fx]
-                val dr = color_r(dst)
-                val dg = color_g(dst)
-                val db = color_b(dst)
-                val da = color_a(dst)
-                var rr: i32 = sr
-                var rg: i32 = sg
-                var rb: i32 = sb
-                if mode == 1:
-                    rr = sr * dr / 255
-                    rg = sg * dg / 255
-                    rb = sb * db / 255
-                else if mode == 2:
-                    rr = 255 - (255 - sr) * (255 - dr) / 255
-                    rg = 255 - (255 - sg) * (255 - dg) / 255
-                    rb = 255 - (255 - sb) * (255 - db) / 255
-                else if mode == 3:
-                    rr = _emu_overlay_ch(sr, dr)
-                    rg = _emu_overlay_ch(sg, dg)
-                    rb = _emu_overlay_ch(sb, db)
-                val out_r = dr + (rr - dr) * sa / 255
-                val out_g = dg + (rg - dg) * sa / 255
-                val out_b = db + (rb - db) * sa / 255
-                result[py * w + px] = rgba(out_r, out_g, out_b, _emu_max(sa, da))
-            px = px + 1
-        py = py + 1
-    core.draw_image(x, y, w, h, result)
-
-# ============================================================================
-# Internal helpers (stateless, pure)
-# ============================================================================
-
-fn _emu_abs(v: i32) -> i32:
-    if v < 0:
-        -v
-    else:
-        v
-
-fn _emu_min(a: i32, b: i32) -> i32:
-    if a < b:
-        a
-    else:
-        b
-
-fn _emu_max(a: i32, b: i32) -> i32:
-    if a > b:
-        a
-    else:
-        b
-
-fn _emu_isqrt(n: i32) -> i32:
-    if n <= 0:
-        return 0
-    var x = n
-    var y = (x + 1) / 2
-    while y < x:
-        x = y
-        y = (x + n / x) / 2
-    x
-
-fn _emu_blend_over(sr: i32, sg: i32, sb: i32, sa: i32, dst: u32) -> u32:
-    val dr = color_r(dst)
-    val dg = color_g(dst)
-    val db = color_b(dst)
-    val da = color_a(dst)
-    val inv_a = 255 - sa
-    val out_r = (sr * sa + dr * inv_a) / 255
-    val out_g = (sg * sa + dg * inv_a) / 255
-    val out_b = (sb * sa + db * inv_a) / 255
-    val out_a = sa + da * inv_a / 255
-    rgba(out_r, out_g, out_b, out_a)
-
-fn _emu_overlay_ch(s: i32, d: i32) -> i32:
-    if d < 128:
-        2 * s * d / 255
-    else:
-        255 - 2 * (255 - s) * (255 - d) / 255
-
-fn _emu_sin_approx(deg: i32) -> i32:
-    var d = deg % 360
-    if d < 0:
-        d = d + 360
-    var sign: i32 = 1
-    if d >= 180:
-        sign = -1
-        d = d - 180
-    if d > 90:
-        d = 180 - d
-    val x = d * 1000 / 90
-    val result = x * (2000 - x) / 2000
-    sign * result * 1000 / 500
-
-fn _emu_cos_approx(deg: i32) -> i32:
-    _emu_sin_approx(deg + 90)
-
-fn _emu_sort_i32(arr: [i32]):
-    var i: i32 = 1
-    while i < arr.len():
-        val key = arr[i]
-        var j = i - 1
-        while j >= 0 and arr[j] > key:
-            arr[j + 1] = arr[j]
-            j = j - 1
-        arr[j + 1] = key
-        i = i + 1

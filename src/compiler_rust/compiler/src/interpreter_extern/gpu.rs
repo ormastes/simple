@@ -266,7 +266,7 @@ use simple_runtime::metal_graphics_runtime::{
     rt_metal_set_viewport, rt_metal_present, rt_metal_wait_completed,
 };
 
-fn arg_i64(args: &[Value], index: usize, name: &str, expected: usize) -> Result<i64, CompileError> {
+pub(super) fn arg_i64(args: &[Value], index: usize, name: &str, expected: usize) -> Result<i64, CompileError> {
     args.get(index)
         .ok_or_else(|| {
             let ctx = ErrorContext::new()
@@ -277,7 +277,7 @@ fn arg_i64(args: &[Value], index: usize, name: &str, expected: usize) -> Result<
         .as_int()
 }
 
-fn arg_text(args: &[Value], index: usize, name: &str, expected: usize) -> Result<String, CompileError> {
+pub(super) fn arg_text(args: &[Value], index: usize, name: &str, expected: usize) -> Result<String, CompileError> {
     match args.get(index) {
         Some(Value::Str(s)) => Ok(s.clone()),
         Some(other) => Err(CompileError::semantic(format!(
@@ -296,7 +296,7 @@ fn arg_text(args: &[Value], index: usize, name: &str, expected: usize) -> Result
     }
 }
 
-fn c_string_or_error(text: String, name: &str) -> Result<CString, CompileError> {
+pub(super) fn c_string_or_error(text: String, name: &str) -> Result<CString, CompileError> {
     CString::new(text).map_err(|_| CompileError::semantic(format!("{name} does not accept embedded NUL bytes")))
 }
 
@@ -308,7 +308,12 @@ fn c_ptr_to_string(ptr: *const std::os::raw::c_char) -> String {
     }
 }
 
-fn arg_bytes_ptr(args: &[Value], index: usize, name: &str, expected: usize) -> Result<(Vec<u8>, i64), CompileError> {
+pub(super) fn arg_bytes_ptr(
+    args: &[Value],
+    index: usize,
+    name: &str,
+    expected: usize,
+) -> Result<(Vec<u8>, i64), CompileError> {
     let value = args.get(index).ok_or_else(|| {
         let ctx = ErrorContext::new()
             .with_code(codes::ARGUMENT_COUNT_MISMATCH)
@@ -335,6 +340,43 @@ fn arg_bytes_ptr(args: &[Value], index: usize, name: &str, expected: usize) -> R
         Value::Int(ptr) => Ok((Vec::new(), *ptr)),
         other => Err(CompileError::semantic(format!(
             "{name} argument {index} must be [u8] or raw pointer, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+pub(super) fn arg_u32_bytes_ptr(
+    args: &[Value],
+    index: usize,
+    name: &str,
+    expected: usize,
+) -> Result<(Vec<u8>, i64), CompileError> {
+    let value = args.get(index).ok_or_else(|| {
+        let ctx = ErrorContext::new()
+            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+            .with_help(format!("{name} requires exactly {expected} argument(s)"));
+        CompileError::semantic_with_context(format!("{name} expects {expected} arguments"), ctx)
+    })?;
+    match value {
+        Value::Array(items) | Value::FrozenArray(items) => {
+            let mut bytes = Vec::with_capacity(items.len() * 4);
+            for item in items.iter() {
+                bytes.extend_from_slice(&(item.as_int()? as u32).to_ne_bytes());
+            }
+            let ptr = bytes.as_ptr() as i64;
+            Ok((bytes, ptr))
+        }
+        Value::FixedSizeArray { data, .. } => {
+            let mut bytes = Vec::with_capacity(data.len() * 4);
+            for item in data.iter() {
+                bytes.extend_from_slice(&(item.as_int()? as u32).to_ne_bytes());
+            }
+            let ptr = bytes.as_ptr() as i64;
+            Ok((bytes, ptr))
+        }
+        Value::Int(ptr) => Ok((Vec::new(), *ptr)),
+        other => Err(CompileError::semantic(format!(
+            "{name} argument {index} must be [u32] or raw pointer, got {}",
             other.type_name()
         ))),
     }

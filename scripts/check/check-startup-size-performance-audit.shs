@@ -1,15 +1,19 @@
 #!/bin/sh
 set -eu
 
-ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
 BUILD_DIR="${BUILD_DIR:-build/startup_size_perf_audit}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/startup_size_performance_audit_2026-05-27.md}"
+NORMALIZED_REPORT_PATH="${NORMALIZED_REPORT_PATH:-doc/09_report/startup_size_performance_audit_backend_samples_2026-05-27.sdn}"
+NORMALIZED_CUDA_REPORT_PATH="${NORMALIZED_CUDA_REPORT_PATH:-doc/09_report/startup_size_performance_audit_cuda_device_samples_2026-05-27.sdn}"
+NORMALIZED_OPENCL_REPORT_PATH="${NORMALIZED_OPENCL_REPORT_PATH:-doc/09_report/startup_size_performance_audit_opencl_device_samples_2026-05-27.sdn}"
+NORMALIZED_ROCM_REPORT_PATH="${NORMALIZED_ROCM_REPORT_PATH:-doc/09_report/startup_size_performance_audit_rocm_device_samples_2026-05-27.sdn}"
 RUNS="${RUNS:-20}"
 
-mkdir -p "$BUILD_DIR" "$(dirname "$REPORT_PATH")"
+mkdir -p "$BUILD_DIR" "$(dirname "$REPORT_PATH")" "$(dirname "$NORMALIZED_REPORT_PATH")" "$(dirname "$NORMALIZED_CUDA_REPORT_PATH")" "$(dirname "$NORMALIZED_OPENCL_REPORT_PATH")" "$(dirname "$NORMALIZED_ROCM_REPORT_PATH")"
 
 have() {
     command -v "$1" >/dev/null 2>&1
@@ -531,6 +535,89 @@ run_status() {
     fi
 }
 
+time_samples() {
+    cmd="$1"
+    out_path="$2"
+    runs="$3"
+    : >"$out_path"
+    if [ ! -x /usr/bin/time ] || ! have date; then
+        echo "sample=1 elapsed_s=0.000 max_rss_kb=0" >"$out_path"
+        return 0
+    fi
+    i=1
+    while [ "$i" -le "$runs" ]; do
+        start_ns="$(date +%s%N)"
+        time_line="$({ /usr/bin/time -f "max_rss_kb=%M" sh -c "$cmd" >/dev/null; } 2>&1 || true)"
+        end_ns="$(date +%s%N)"
+        elapsed_ns=$((end_ns - start_ns))
+        if [ "$elapsed_ns" -le 0 ]; then
+            elapsed_ns=1000
+        fi
+        elapsed_s="$(awk "BEGIN {printf \"%.6f\", $elapsed_ns / 1000000000}")"
+        max_rss="$(printf '%s\n' "$time_line" | sed -n 's/.*max_rss_kb=\([0-9][0-9]*\).*/\1/p' | tail -1)"
+        if [ -z "$max_rss" ]; then
+            max_rss=0
+        fi
+        echo "sample=$i elapsed_s=$elapsed_s max_rss_kb=$max_rss" >>"$out_path"
+        i=$((i + 1))
+    done
+}
+
+write_normalized_backend_samples() {
+    sample_runs="${NORMALIZED_RUNS:-3}"
+    time_path="$BUILD_DIR/simple_tui_standalone.time"
+    if [ ! -x "$BUILD_DIR/simple_tui_standalone" ] || [ ! -x "$SIMPLE_BINARY" ]; then
+        echo "normalized_backend_samples_status=skip"
+        return 0
+    fi
+    time_samples "$BUILD_DIR/simple_tui_standalone" "$time_path" "$sample_runs"
+    with_timeout env SIMPLE_LIB="$ROOT_DIR/src" "$SIMPLE_BINARY" run src/app/wm_compare/backend_measurement_export.spl \
+        --time-output "$time_path" \
+        --out "$NORMALIZED_REPORT_PATH" \
+        --command "$BUILD_DIR/simple_tui_standalone" \
+        --host "$(uname -s)-$(uname -m)" \
+        --binary-size-bytes "$(bytes_of "$BUILD_DIR/simple_tui_standalone")" \
+        --baseline-binary-size-bytes "$(bytes_of "$BUILD_DIR/tui_termios_c")" \
+        --package-size-bytes "$(bytes_of "$BUILD_DIR/simple_tui_standalone")" \
+        --scope "startup-size-audit" \
+        --fixture "startup-size:simple_tui_standalone" \
+        --shell "simple-tui" \
+        --operation-family "text_blit" \
+        --checksum "sha256:startup-size-unmeasured" \
+        --pixel-proof "startup-size-only" >/tmp/startup_size_perf_backend_samples.$$ 2>&1 || {
+            echo "normalized_backend_samples_status=failed"
+            return 0
+        }
+    echo "normalized_backend_samples_status=ok"
+}
+
+write_gpu_device_backend_samples() {
+    label="$1"
+    flag="$2"
+    out_path="$3"
+    if [ ! -x "$SIMPLE_BINARY" ]; then
+        echo "${label}_device_backend_samples_status=skip"
+        return 0
+    fi
+    with_timeout env SIMPLE_LIB="$ROOT_DIR/src" "$SIMPLE_BINARY" run src/app/wm_compare/backend_measurement_export.spl \
+        "$flag" true \
+        --out "$out_path" \
+        --command "$label-device-buffer-measurement" \
+        --host "$(uname -s)-$(uname -m)" \
+        --binary-size-bytes "$(bytes_of "$BUILD_DIR/simple_tui_standalone")" \
+        --baseline-binary-size-bytes "$(bytes_of "$BUILD_DIR/tui_termios_c")" \
+        --package-size-bytes "$(bytes_of "$BUILD_DIR/simple_tui_standalone")" \
+        --fixture "startup-size:$label-device-buffer" \
+        --shell "simple-web" \
+        --width 64 \
+        --height 64 \
+        --color 4278255360 >/tmp/startup_size_perf_${label}_samples.$$ 2>&1 || {
+            echo "${label}_device_backend_samples_status=failed"
+            return 0
+        }
+    echo "${label}_device_backend_samples_status=ok"
+}
+
 row() {
     name="$1"
     path="$2"
@@ -594,6 +681,33 @@ write_report() {
         echo
         echo "- Do not rewrite the TUI from scratch while the standalone and audited app TUI lanes remain below the C termios baseline."
         echo "- Continue dependency refactoring: keep TUI off GUI/web stacks, keep TLS/compression out of default TCP/UDP/plain-HTTP runtime paths, and keep mmap/network probes on the core-C startup lane."
+        echo
+        echo "## Normalized Backend Samples"
+        echo
+        echo "- SDN artifact: \`$NORMALIZED_REPORT_PATH\`"
+        if [ -f "$NORMALIZED_REPORT_PATH" ]; then
+            echo "- Status: generated"
+        else
+            echo "- Status: unavailable"
+        fi
+        echo "- CUDA device SDN artifact: \`$NORMALIZED_CUDA_REPORT_PATH\`"
+        if [ -f "$NORMALIZED_CUDA_REPORT_PATH" ]; then
+            echo "- CUDA device status: generated"
+        else
+            echo "- CUDA device status: unavailable"
+        fi
+        echo "- OpenCL device SDN artifact: \`$NORMALIZED_OPENCL_REPORT_PATH\`"
+        if [ -f "$NORMALIZED_OPENCL_REPORT_PATH" ]; then
+            echo "- OpenCL device status: generated"
+        else
+            echo "- OpenCL device status: unavailable"
+        fi
+        echo "- ROCm/HIP device SDN artifact: \`$NORMALIZED_ROCM_REPORT_PATH\`"
+        if [ -f "$NORMALIZED_ROCM_REPORT_PATH" ]; then
+            echo "- ROCm/HIP device status: generated"
+        else
+            echo "- ROCm/HIP device status: unavailable"
+        fi
     } >"$REPORT_PATH"
 }
 
@@ -652,6 +766,10 @@ check_network_size_gate() {
 if [ "${SKIP_BUILD:-0}" != "1" ]; then
     build_all
 fi
+write_normalized_backend_samples
+write_gpu_device_backend_samples "cuda" "--measure-cuda-device-buffer" "$NORMALIZED_CUDA_REPORT_PATH"
+write_gpu_device_backend_samples "opencl" "--measure-opencl-device-buffer" "$NORMALIZED_OPENCL_REPORT_PATH"
+write_gpu_device_backend_samples "rocm" "--measure-rocm-device-buffer" "$NORMALIZED_ROCM_REPORT_PATH"
 write_report
 
 echo "startup_size_perf_audit_ready=true"

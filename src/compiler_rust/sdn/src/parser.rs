@@ -1246,7 +1246,8 @@ mod tests {
 
     #[test]
     fn test_parse_test_db_runs_file() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../doc/08_tracking/test/test_db_runs.sdn");
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../doc/08_tracking/test/test_db_runs.sdn");
         if !path.exists() {
             return;
         }

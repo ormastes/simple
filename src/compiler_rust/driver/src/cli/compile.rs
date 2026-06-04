@@ -104,7 +104,11 @@ fn compile_file_to_gpu_source<F>(
     compile: F,
 ) -> i32
 where
-    F: FnOnce(&mut simple_compiler::pipeline::CompilerPipeline, &Path, &Path) -> Result<(), simple_compiler::CompileError>,
+    F: FnOnce(
+        &mut simple_compiler::pipeline::CompilerPipeline,
+        &Path,
+        &Path,
+    ) -> Result<(), simple_compiler::CompileError>,
 {
     use simple_compiler::pipeline::CompilerPipeline;
 
