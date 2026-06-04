@@ -5587,6 +5587,51 @@ and the current-path MCP stdio integration spec passed `5/5`. The older
 in the reorged tree; the current path is `test/02_integration/app/...`.
 Broader browser/WASM semantics remain open.
 
+BrowserSession WebAssembly direct/compiled memory maximum parity continuation:
+
+Completion checklist:
+
+- Add a BrowserSession browser-script scenario that instantiates the same
+  max-limited memory export module through direct
+  `WebAssembly.instantiate(...)` and through
+  `WebAssembly.compile(...).then(module => WebAssembly.instantiate(module))` in
+  the same script evaluation.
+- Verify the direct instantiate path exposes status `instantiated`, module
+  byte length `26`, memory byte length `65536`, page size `65536`, zero-grow
+  return `1`, failed grow return `-1`, unchanged buffer length `65536`, and
+  preserved wrapped byte value `14`.
+- Verify the compiled instantiate path exposes matching status, byte length,
+  memory sizing, zero-grow return, failed-grow return, unchanged buffer length,
+  and preserved wrapped byte value `16`.
+- Verify both promise callbacks preserve deterministic ordered output in one
+  script evaluation after the exported memory maximum runtime fix.
+- Regenerate the mirrored scenario manual for the changed SPipe spec and move
+  the generated old `01_unit` output onto the tracked `unit` manual path.
+- Restore generated tracking/doc index noise from docgen and adjacent specs.
+- Record command evidence, pass counts, warning counts, and remaining open
+  browser/WASM scope.
+- Run diff hygiene and doc layout gates before committing and pushing.
+
+Test checklist:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+
+BrowserSession scripts now compare direct and compiled WebAssembly memory
+maximum behavior in the same script evaluation. The focused assertion verifies
+direct and compiled paths both preserve the module memory maximum, return `1`
+from zero-grow, return `-1` from a grow past maximum, keep the buffer at
+`65536` bytes, and preserve pre-failure byte writes. The focused fetch/WASM
+chain spec now passes `191/191`; the native WASM host spec remained `107/107`,
+the WebGPU JS/WASM system spec remained `106/106`, Node API conformance
+remained `275/275`, and `src/lib` completed with the current `399 warning(s)`
+across `5903` files. Broader browser/WASM semantics remain open.
+
 BrowserSession WebAssembly constructor/compiled function-body parity continuation:
 
 Completion checklist:

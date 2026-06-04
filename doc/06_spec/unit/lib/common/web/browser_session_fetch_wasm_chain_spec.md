@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 190 | 190 | 0 | 0 |
+| 191 | 191 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -6095,6 +6095,39 @@ match result:
 
 </details>
 
+#### compares direct and compiled WebAssembly memory maximum failures in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `direct:instantiated:26:65536:65536:1:-1:65536:14:compiled:instantiated:26:655... (full value in folded executable source)`
+
+3. Err
+   - Expected: "unexpected direct/compiled memory maximum failure js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var out = ''; var wasm = '0061736d01000000050401010101070a01066d656d6f72790200'; WebAssembly.instantiate(wasm).then(function(result) { var memory = result.instance.exports.memory; var bytes = new Uint8Array(memory.buffer); bytes[10] = 270; var zero = memory.grow(0); var fail = memory.grow(1); var after = new Uint8Array(memory.buffer); out = 'direct:' + result.status + ':' + result.module.byteLength + ':' + memory.byteLength + ':' + memory.pageSize + ':' + zero + ':' + fail + ':' + after.length + ':' + after[10]; }); WebAssembly.compile(wasm).then(function(module) { return WebAssembly.instantiate(module); }).then(function(result) { var memory = result.instance.exports.memory; var bytes = new Uint8Array(memory.buffer); bytes[11] = 272; var zero = memory.grow(0); var fail = memory.grow(1); var after = new Uint8Array(memory.buffer); out = out + ':compiled:' + result.status + ':' + result.module.byteLength + ':' + memory.byteLength + ':' + memory.pageSize + ':' + zero + ':' + fail + ':' + after.length + ':' + after[11]; }); out")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("direct:instantiated:26:65536:65536:1:-1:65536:14:compiled:instantiated:26:65536:65536:1:-1:65536:16")
+    Err(err):
+        expect("unexpected direct/compiled memory maximum failure js error: {err}").to_equal("")
+```
+
+</details>
+
 #### mutates WebAssembly Global values in browser scripts
 
 1. var session = BrowserSession new
@@ -8820,8 +8853,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 190 |
-| Active scenarios | 190 |
+| Total scenarios | 191 |
+| Active scenarios | 191 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
