@@ -56,7 +56,7 @@ DI container keyed by `Any` (typed resolve disabled in the DI lib). `resolve_lay
 returns the registered layer. Access is intercepted by an AOP **Around** aspect
 (`authz.spl`): it reads the module's `SfmSecurityLevel` and denies privileged-layer
 access unless the module is `Trusted`; authorized access proceeds. An Ordinary
-module cannot self-grant Trusted — the marker lives in the signed manifest.
+module cannot self-grant Trusted — the marker lives in the manifest.
 
 ## VERSION.md build wiring
 `std.sfm.version.read_version_md` reads repo-root `VERSION.md` (first non-comment

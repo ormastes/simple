@@ -25,4 +25,6 @@ Each phase uses a unified feature-domain taxonomy as secondary axis:
 | `test` | Documentation test files |
 | `TODO.md` | TODO tracking |
 | `glossary.md` | Project glossary (key terms, acronyms, concepts) |
+| `simple_feature_module_glossary.md` | SFM sub-glossary (`.sfm` feature-module terms) |
+| `simple_feature_module_glossary_tldr.md` | TLDR for the SFM sub-glossary |
 | `FILE.md` | This manifest |

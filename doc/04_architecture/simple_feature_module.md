@@ -3,7 +3,7 @@
 SFM (`.sfm`) is the primary feature-module format: a **pure-Simple outer container**
 that embeds an existing SMF binary as an opaque code payload and adds a feature
 manifest on top. Fits MDSOC+: the manifest is the capsule boundary (exposed
-layers + capabilities + security level); the embedded SMF is the code unit.
+layers + security level); the embedded SMF is the code unit.
 
 <!-- sdn-diagram:id=simple_feature_module.arch -->
 <details class="sdn-source">
