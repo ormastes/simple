@@ -313,7 +313,7 @@
    `doc/06_spec/system/app/browser/feature/webgpu_js_wasm_simple_spec.md`:
    JS/WebEngine/WASM BrowserSession evidence. Current focused checks pass the
    WebGPU/JS/WASM system spec `106/106`, the native WASM host spec `107/107`,
-   and the fetch-to-WASM chain spec `221/221`. The coverage includes secure WebGPU
+   and the fetch-to-WASM chain spec `222/222`. The coverage includes secure WebGPU
    globals, fetched `arrayBuffer()` to `WebAssembly.instantiate`, compile
    thenables, bounded WASM exports, traps, table/global metadata, imported
    function binding, and `Uint8Array`/`DataView` access to WebAssembly.Memory.
@@ -5199,6 +5199,19 @@ Test checklist:
 - `git diff --check`
 - `find doc/06_spec -name '*_spec.spl' | wc -l`
 
+BrowserSession scripts now compare raw compileStreaming base module metadata
+and compileStreaming-instantiated base module metadata in the same script
+evaluation. The focused assertion verifies the raw compileStreaming path
+reports byte length `11`, section count `1`, and `hasTypeSection=true`, then
+verifies the compileStreaming-instantiated path resolves with
+`status=instantiated`, byte length `11`, section count `1`,
+`hasTypeSection=true`, and exported instance object metadata. The focused
+fetch/WASM chain spec now passes `222/222`, and the generated manual records
+`Total scenarios | 222 |`. The native WASM host spec remained `107/107`, the
+WebGPU JS/WASM system spec remained `106/106`, Node API conformance remained
+`275/275`, and `src/lib` completed with the current `405 warning(s)` across
+`5936` files. Broader browser/WASM semantics remain open.
+
 BrowserSession scripts now compare raw compileStreaming module import
 descriptors and compileStreaming-instantiated module import descriptors in the
 same script evaluation. The focused assertion verifies the raw
@@ -5212,6 +5225,49 @@ native WASM host spec remained `107/107`, the WebGPU JS/WASM system spec
 remained `106/106`, Node API conformance remained `275/275`, and `src/lib`
 completed with the current `405 warning(s)` across `5936` files. Broader
 browser/WASM semantics remain open.
+
+BrowserSession WebAssembly compileStreaming module/instantiated base metadata
+parity continuation:
+
+Detailed completion checklist:
+
+- Confirm the fresh worktree starts from synchronized `main`/`origin/main`.
+- Confirm the prior compileStreaming export/import descriptor parity slices are
+  present before extending base metadata parity.
+- Add one same-script BrowserSession scenario that compares raw base metadata
+  from `WebAssembly.compileStreaming(...)` with base metadata from a separate
+  `compileStreaming(...).then(module => WebAssembly.instantiate(module))` path
+  using the same module bytes.
+- Verify the raw compiled-module side reports byte length `11`, section count
+  `1`, and `hasTypeSection=true`.
+- Verify the compileStreaming-instantiated side reports `status=instantiated`,
+  byte length `11`, section count `1`, `hasTypeSection=true`, and exported
+  instance object metadata.
+- Verify the scenario has two real asynchronous fetch boundaries, a pre-commit
+  empty `out` assertion, committed `application/wasm` responses, ordered
+  intermediate output after the first commit, and deterministic final output.
+- Regenerate the mirrored SPipe scenario manual and move old-path docgen output
+  onto `doc/06_spec/unit/...`.
+- Restore generated index, tracking, and adjacent old-path manual noise.
+- Record focused and manual scenario counts after docgen.
+- Run the focused BrowserSession check and interpreter spec.
+- Run native WASM host, WebGPU JS/WASM, and Node API conformance regressions.
+- Run `src/lib` check, diff hygiene, and executable-spec layout guard.
+- Commit only the focused spec, generated manual, and plan evidence.
+- Fetch/rebase with file-count guard and push `HEAD:main` with `GITHUB_TOKEN`
+  unset.
+
+Detailed test checklist:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+- `git diff --check`
+- `find doc/06_spec -name '*_spec.spl' | wc -l`
 
 BrowserSession scripts now compare both streaming entry points against the same
 imported-function module with missing imports in one queued script. The scenario
