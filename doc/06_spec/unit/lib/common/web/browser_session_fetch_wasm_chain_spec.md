@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 237 | 237 | 0 | 0 |
+| 240 | 240 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -11478,6 +11478,72 @@ match result:
 
 </details>
 
+#### copies Uint8Array values in sorted order without mutating source
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `9,4,7,255:4,255,7,1:false:false:0:4`
+
+3. Err
+   - Expected: "unexpected uint8 toSorted js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var b = new Uint8Array(4); b[0] = 260; b[1] = -1; b[2] = 7; b[3] = 1; var copy = b.toSorted(); copy[0] = 9; copy.toString() + ':' + b.toString() + ':' + (copy === b) + ':' + (copy.buffer === b.buffer) + ':' + copy.byteOffset + ':' + copy.byteLength")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("9,4,7,255:4,255,7,1:false:false:0:4")
+    Err(err):
+        expect("unexpected uint8 toSorted js error: {err}").to_equal("")
+```
+
+</details>
+
+#### copies Uint8Array comparator sorted values without mutating source
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `255,7,4,1:1,4,255,7:false:false`
+
+3. Err
+   - Expected: "unexpected uint8 comparator toSorted js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var b = new Uint8Array(4); b[0] = 1; b[1] = 260; b[2] = -1; b[3] = 7; var copy = b.toSorted(function(x, y) { return y - x; }); copy.toString() + ':' + b.toString() + ':' + (copy === b) + ':' + (copy.buffer === b.buffer)")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("255,7,4,1:1,4,255,7:false:false")
+    Err(err):
+        expect("unexpected uint8 comparator toSorted js error: {err}").to_equal("")
+```
+
+</details>
+
 #### dispatches Uint8Array prototype sort with call in browser scripts
 
 1. var session = BrowserSession new
@@ -11639,6 +11705,39 @@ match result:
         expect(_display_js(value)).to_equal("11,12,255,4,3:11,8,13,4,3:3,4,255,8,11:false:false:false:false")
     Err(err):
         expect("unexpected uint8 prototype toReversed dispatch js error: {err}").to_equal("")
+```
+
+</details>
+
+#### dispatches Uint8Array prototype toSorted with call and apply
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `3,12,8,11,255:255,11,13,4,3:3,4,255,8,11:false:false:false:false`
+
+3. Err
+   - Expected: "unexpected uint8 prototype toSorted dispatch js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var b = new Uint8Array(5); b[0] = 3; b[1] = 260; b[2] = -1; b[3] = 8; b[4] = 11; var callCopy = Uint8Array.prototype.toSorted.call(b); var applyCopy = Uint8Array.prototype.toSorted.apply(b, [function(x, y) { return y - x; }]); callCopy[1] = 12; applyCopy[2] = 13; callCopy.toString() + ':' + applyCopy.toString() + ':' + b.toString() + ':' + (callCopy === b) + ':' + (applyCopy === b) + ':' + (callCopy.buffer === b.buffer) + ':' + (applyCopy.buffer === b.buffer)")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("3,12,8,11,255:255,11,13,4,3:3,4,255,8,11:false:false:false:false")
+    Err(err):
+        expect("unexpected uint8 prototype toSorted dispatch js error: {err}").to_equal("")
 ```
 
 </details>
@@ -13180,8 +13279,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 237 |
-| Active scenarios | 237 |
+| Total scenarios | 240 |
+| Active scenarios | 240 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
