@@ -16,5 +16,5 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Opencl Session Contract Specification](01_unit/lib/gpu/engine2d/opencl_session_contract_spec.md) | Auto-generated | N/A | 7 | 0% | 0 lines |
+| [Backend Opencl Facade Specification](01_unit/lib/gpu/engine2d/backend_opencl_facade_spec.md) | Auto-generated | N/A | 5 | 0% | 0 lines |
 

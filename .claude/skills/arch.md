@@ -3,14 +3,14 @@
 ## Prerequisites
 | Artifact | Path | If missing |
 |----------|------|-----------|
-| Requirements | `doc/02_requirements/feature/<feature>.md` | Run `/research` first |
-| NFR | `doc/02_requirements/nfr/<feature>.md` | Run `/research` first |
+| Requirements | `doc/02_requirements/<domain>/<topic>/<feature>.md` | Run `/research` first |
+| NFR | `doc/02_requirements/nfr/<feature>.md` | Run `/research` first (auto-generated, flat) |
 
 ## Phase 1: Architecture
 
 1. Evaluate architecture patterns (ask user which to use)
 2. Apply MDSOC pattern where appropriate (see `src/compiler/85.mdsoc/`)
-3. Output: `doc/04_architecture/<feature>.md`
+3. Output: `doc/04_architecture/<domain>/<topic>/<feature>.md`
 
 ## Phase 2: System Test Design
 
@@ -22,7 +22,7 @@
    - `"""..."""` docstrings for generated docs
 3. Matchers (built-in only): `to_equal`, `to_be`, `to_be_nil`, `to_contain`, `to_start_with`, `to_end_with`, `to_be_greater_than`, `to_be_less_than`
 4. Verify every REQ-NNN has at least one test
-5. Test plan: `doc/03_plan/sys_test/<feature>.md`
+5. Test plan: `doc/03_plan/<domain>/<topic>/<feature>.md`
 
 ## Quality Check
 
@@ -33,10 +33,10 @@
 ## Outputs
 | Artifact | Location |
 |----------|----------|
-| Architecture | `doc/04_architecture/<feature>.md` |
+| Architecture | `doc/04_architecture/<domain>/<topic>/<feature>.md` |
 | System tests | `test/03_system/app/<app_name>/feature/<feature>_spec.spl` |
 | Generated spec docs | `doc/06_spec/system/app/<app_name>/feature/<feature>_spec.md` |
-| Test plan | `doc/03_plan/sys_test/<feature>.md` |
+| Test plan | `doc/03_plan/<domain>/<topic>/<feature>.md` |
 
 ## Critical Rules
 

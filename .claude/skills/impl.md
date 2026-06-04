@@ -14,10 +14,10 @@ Before starting, check what exists — missing artifacts are created in phases 1
 
 | Artifact | Path | Phase |
 |----------|------|-------|
-| Research | `doc/01_research/<domain>/<feature>.md` | 1-2 |
-| Requirements | `doc/02_requirements/<domain>/<feature>.md` | 1-3 |
-| Architecture | `doc/04_architecture/<feature>.md` | 4 |
-| Design | `doc/05_design/<domain>/<feature>.md` | 4 |
+| Research | `doc/01_research/<domain>/<topic>/<feature>.md` | 1-2 |
+| Requirements | `doc/02_requirements/<domain>/<topic>/<feature>.md` | 1-3 |
+| Architecture | `doc/04_architecture/<domain>/<topic>/<feature>.md` | 4 |
+| Design | `doc/05_design/<domain>/<topic>/<feature>.md` | 4 |
 | System tests | `test/03_system/app/<app_name>/feature/<feature>_spec.spl` | 6 |
 | Generated spec docs | `doc/06_spec/system/app/<app_name>/feature/<feature>_spec.md` | 6 |
 
@@ -29,10 +29,10 @@ Before starting, check what exists — missing artifacts are created in phases 1
 
 | # | Phase | Agent | Output |
 |---|-------|-------|--------|
-| 1 | Requirements | main | `doc/02_requirements/<domain>/<feature>.md` |
-| 2 | Research | research-team | `doc/01_research/<domain>/<feature>.md` |
+| 1 | Requirements | main | `doc/02_requirements/<domain>/<topic>/<feature>.md` |
+| 2 | Research | research-team | `doc/01_research/<domain>/<topic>/<feature>.md` |
 | 3 | Req Update | main | Updated requirement doc |
-| 4 | Plan + Design | design-team | `doc/03_plan/<feature>.md`, `doc/05_design/<domain>/<feature>.md` |
+| 4 | Plan + Design | design-team | `doc/03_plan/<domain>/<topic>/<feature>.md`, `doc/05_design/<domain>/<topic>/<feature>.md` |
 | 5 | Model Selection | main | Task-to-model assignment |
 | 6 | System Test | test-agent | `test/03_system/<feature>_spec.spl` |
 | 7 | Doc Consistency | review-agent | Cross-ref validation |
@@ -62,15 +62,15 @@ review-team:    explore -> docs          (sequential)
 1. Local research: search `src/` and `doc/` for related code and prior work
 2. Domain research: web search for external knowledge
 3. Generate requirement options, ask user to select
-4. Write final: `doc/02_requirements/<domain>/<feature>.md` and `doc/02_requirements/<domain>/<feature>_nfr.md`
+4. Write final: `doc/02_requirements/<domain>/<topic>/<feature>.md` and `doc/02_requirements/<domain>/<topic>/<feature>_nfr.md`
 
 ### Phase 4-5: Plan + Design + Model Selection
 **Preferred:** Run `/design_gemini` (Step 3) -> `/design_codex` (Step 4) -> `/design_claude` (Step 5) before starting impl.
 **Skip if artifacts exist.** Otherwise do them inline:
-1. Architecture: `doc/04_architecture/<feature>.md`
-2. Detail design: `doc/05_design/<domain>/<feature>.md`
-3. Agent tasks: `doc/03_plan/agent_tasks/<feature>.md`
-4. UI design (if applicable): `doc/05_design/ui/<feature>_tui.md`, `_gui.md`
+1. Architecture: `doc/04_architecture/<domain>/<topic>/<feature>.md`
+2. Detail design: `doc/05_design/<domain>/<topic>/<feature>.md`
+3. Agent tasks: `doc/03_plan/<domain>/<topic>/<feature>.md`
+4. UI design (if applicable): `doc/05_design/ui/<topic>/<feature>_tui.md`, `_gui.md`
 
 ### Phase 6-7: System Test + Doc Consistency
 1. Create `test/03_system/<feature>_spec.spl` (SPipe BDD, fail-first). See `/spipe`

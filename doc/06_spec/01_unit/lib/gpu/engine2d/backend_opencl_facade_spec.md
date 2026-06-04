@@ -27,7 +27,7 @@ backend_opencl_facade_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -133,6 +133,109 @@ backend.shutdown()
 
 </details>
 
+#### marks OpenCL device pixels stale after mirror-only primitive fallbacks
+
+1. var backend = OpenClBackend create
+   - Expected: backend.mirror.init(8, 8) is true
+
+2. backend draw line
+   - Expected: backend.device_current is false
+
+3. backend draw circle
+   - Expected: backend.device_current is false
+
+4. backend draw circle filled
+   - Expected: backend.device_current is false
+
+5. backend draw rounded rect
+   - Expected: backend.device_current is false
+
+6. backend draw triangle filled
+   - Expected: backend.device_current is false
+
+7. backend draw gradient rect
+   - Expected: backend.device_current is false
+
+8. backend shutdown
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 28 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var backend = OpenClBackend.create()
+expect(backend.mirror.init(8, 8)).to_equal(true)
+
+backend.device_current = true
+backend.draw_line(0, 0, 7, 7, 0xff112233u32, 1)
+expect(backend.device_current).to_equal(false)
+
+backend.device_current = true
+backend.draw_circle(4, 4, 3, 0xff112233u32)
+expect(backend.device_current).to_equal(false)
+
+backend.device_current = true
+backend.draw_circle_filled(4, 4, 2, 0xff112233u32)
+expect(backend.device_current).to_equal(false)
+
+backend.device_current = true
+backend.draw_rounded_rect(1, 1, 4, 4, 1, 0xff112233u32)
+expect(backend.device_current).to_equal(false)
+
+backend.device_current = true
+backend.draw_triangle_filled(1, 1, 6, 1, 3, 6, 0xff112233u32)
+expect(backend.device_current).to_equal(false)
+
+backend.device_current = true
+backend.draw_gradient_rect(1, 1, 4, 4, 0xff112233u32, 0xff445566u32)
+expect(backend.device_current).to_equal(false)
+
+backend.shutdown()
+```
+
+</details>
+
+#### blocks OpenCL device draws while software clip state is active
+
+1. var backend = OpenClBackend create
+   - Expected: backend.mirror.init(8, 8) is true
+   - Expected: backend._can_use_device_draw() is true
+
+2. backend set clip
+   - Expected: backend._can_use_device_draw() is false
+
+3. backend clear clip
+   - Expected: backend._can_use_device_draw() is true
+
+4. backend shutdown
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var backend = OpenClBackend.create()
+expect(backend.mirror.init(8, 8)).to_equal(true)
+backend.initialized = true
+backend.d_framebuffer = 1
+
+expect(backend._can_use_device_draw()).to_equal(true)
+backend.set_clip(1, 1, 4, 4)
+expect(backend._can_use_device_draw()).to_equal(false)
+backend.clear_clip()
+expect(backend._can_use_device_draw()).to_equal(true)
+
+backend.shutdown()
+```
+
+</details>
+
 #### routes Engine2D opencl probing through the render backend facade
 
 1. engine shutdown
@@ -192,8 +295,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

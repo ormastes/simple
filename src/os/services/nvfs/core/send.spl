@@ -213,11 +213,9 @@ fn _read_stream_header(s: &mut RecvStream) -> Result<StreamHeader, FsError>:
         case Err(e): return Err(e)
         case Ok(v): v
     # Validate magic
-    if (magic.len() as i64 < 4 or
-        magic[0] != NVSR_MAGIC_0 or
-        magic[1] != NVSR_MAGIC_1 or
-        magic[2] != NVSR_MAGIC_2 or
-        magic[3] != NVSR_MAGIC_3):
+    val magic_short = magic.len() < 4
+    val magic_mismatch = not magic_short and (magic[0] != NVSR_MAGIC_0 or magic[1] != NVSR_MAGIC_1 or magic[2] != NVSR_MAGIC_2 or magic[3] != NVSR_MAGIC_3)
+    if magic_short or magic_mismatch:
         return Err(FsError.Corrupt)
     val ver_res = _read_u16_le(s)
     val version = match ver_res:
@@ -401,7 +399,10 @@ pub fn receive_arena(
         case Ok(v): v
 
     val stream_encrypted = (hdr.flags & NVSR_FLAG_ENCRYPTED) != 0u16
-    val no_key_opaque = stream_encrypted and (match key: case None: true case Some(_): false)
+    val key_missing = match key:
+        case None: true
+        case Some(_): false
+    val no_key_opaque = stream_encrypted and key_missing
 
     # Create a fresh arena to receive the data.
     val new_arena_id = arena_create_impl(0, 0)
@@ -430,27 +431,37 @@ pub fn receive_arena(
                     if rtype == RECORD_EXTENT:
                         val aid_res = _read_u64_le(stream)
                         val _sent_arena_id = match aid_res:
-                            case Err(_): error = -2; 0u64
+                            case Err(_):
+                                error = -2
+                                0u64
                             case Ok(v): v
 
                         val loff_res = _read_u64_le(stream)
                         val _logical_off = match loff_res:
-                            case Err(_): error = -2; 0u64
+                            case Err(_):
+                                error = -2
+                                0u64
                             case Ok(v): v
 
                         val pptr_res = _read_u64_le(stream)
                         val _phys_ptr = match pptr_res:
-                            case Err(_): error = -2; 0u64
+                            case Err(_):
+                                error = -2
+                                0u64
                             case Ok(v): v
 
                         val len_res = _read_u32_le(stream)
                         val payload_len = match len_res:
-                            case Err(_): error = -2; 0u32
+                            case Err(_):
+                                error = -2
+                                0u32
                             case Ok(v): v
 
                         val bgen_res = _read_u32_le(stream)
                         val _birth_gen = match bgen_res:
-                            case Err(_): error = -2; 0u32
+                            case Err(_):
+                                error = -2
+                                0u32
                             case Ok(v): v
 
                         # 32-byte checksum (ignored for algo=0)
@@ -461,14 +472,18 @@ pub fn receive_arena(
                         if stream_encrypted:
                             val nonce_res = _read_bytes(stream, 12)
                             nonce = match nonce_res:
-                                case Err(_): error = -2; []
+                                case Err(_):
+                                    error = -2
+                                    []
                                 case Ok(v): v
 
                         # Payload
                         if error == 0:
                             val payload_res = _read_bytes(stream, payload_len as i64)
                             val payload = match payload_res:
-                                case Err(_): error = -2; []
+                                case Err(_):
+                                    error = -2
+                                    []
                                 case Ok(v): v
 
                             if error == 0:

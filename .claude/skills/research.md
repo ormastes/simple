@@ -23,7 +23,7 @@ Spawn parallel agents:
 - Merge results into research summary
 
 ### Output
-- `doc/01_research/<domain>/<feature>.md`
+- `doc/01_research/<domain>/<topic>/<feature>.md`
 
 ## Domain Research
 
@@ -37,12 +37,12 @@ Spawn parallel agents:
 3. Synthesize into research document
 
 ### Output
-- `doc/01_research/<domain>/<feature>.md`
+- `doc/01_research/<domain>/<topic>/<feature>.md`
 
 ## Requirement Samples
 
 Generate draft requirement options:
-- Feature requirements -> `doc/02_requirements/<domain>/<feature>_draft.md`
+- Feature requirements -> `doc/02_requirements/<domain>/<topic>/<feature>_draft.md`
 - NFR requirements -> `doc/02_requirements/nfr/<feature>_draft.md`
 
 ## Handoff

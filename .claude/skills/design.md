@@ -3,14 +3,14 @@
 ## Prerequisites
 | Artifact | Path | If missing |
 |----------|------|-----------|
-| Requirements | `doc/02_requirements/feature/<feature>.md` | Run `/research` first |
-| Architecture | `doc/04_architecture/<feature>.md` | Run `/arch` first |
+| Requirements | `doc/02_requirements/<domain>/<topic>/<feature>.md` | Run `/research` first |
+| Architecture | `doc/04_architecture/<domain>/<topic>/<feature>.md` | Run `/arch` first |
 
 ## Workflow
 
 1. Create detailed design: data structures, algorithms, module interactions, error handling
-2. Output: `doc/05_design/<feature>.md`
-3. Agent task breakdown: `doc/03_plan/agent_tasks/<feature>.md`
+2. Output: `doc/05_design/<domain>/<topic>/<feature>.md`
+3. Agent task breakdown: `doc/03_plan/<domain>/<topic>/<feature>.md`
 
 ## Quality Check
 
@@ -20,8 +20,8 @@
 ## Outputs
 | Artifact | Location |
 |----------|----------|
-| Detail design | `doc/05_design/<feature>.md` |
-| Agent tasks | `doc/03_plan/agent_tasks/<feature>.md` |
+| Detail design | `doc/05_design/<domain>/<topic>/<feature>.md` |
+| Agent tasks | `doc/03_plan/<domain>/<topic>/<feature>.md` |
 
 ## Critical Rules
 

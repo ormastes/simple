@@ -86,13 +86,13 @@ For each source file in scope:
 
 ### Phase 4 — Feature Requirement Verification
 
-1. **Find requirement doc:** `doc/02_requirements/feature/<feature>.md`
+1. **Find requirement doc:** `doc/02_requirements/<domain>/<topic>/<feature>.md`
    - Extract all REQ-NNN statements
    - For each REQ: trace to source code implementing it
    - Verify implementation matches the "shall" statement
    - Flag requirements with no corresponding implementation
 
-2. **Find feature spec:** `doc/02_requirements/feature/<feature>.md`
+2. **Find feature spec:** `doc/02_requirements/<domain>/<topic>/<feature>.md`
    - Extract all BDD scenarios (Given/When/Then)
    - Verify each scenario has a corresponding `it` block in `*_spec.spl`
    - Verify acceptance criteria checkboxes
@@ -124,7 +124,7 @@ For each source file in scope:
    - Check `doc/04_architecture/compiler/file_class_structure.md` references new files
 
 2. **Design doc** (`doc/05_design/`):
-   - If a new feature was implemented → verify `doc/05_design/<feature>.md` exists
+   - If a new feature was implemented → verify `doc/05_design/<domain>/<topic>/<feature>.md` exists
    - Design doc must describe: data structures, algorithms, module interactions, error handling strategy
    - Design doc must cross-reference: requirements, feature spec, test files
 

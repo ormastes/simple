@@ -3,7 +3,7 @@
 ## Prerequisites
 | Artifact | Path | If missing |
 |----------|------|-----------|
-| Requirements | `doc/02_requirements/<domain>/<feature>.md` | Run `/research` first |
+| Requirements | `doc/02_requirements/<domain>/<topic>/<feature>.md` | Run `/research` first |
 | Design system reference | `doc/05_design/ui/stitch_design_system.md` | Extract from Stitch MCP |
 
 ## Stitch MCP — Google's AI UI Design Tool

@@ -86,6 +86,7 @@ class SimpleWindowManager {
     this._commandPaletteList = null;
     this._commandPaletteItems = [];
     this._commandPaletteActiveIndex = 0;
+    this._commandItemFeedbackTimer = 0;
     this._commandRecentFeedbackTimer = 0;
     this._snapPreview = null;
     this._snapLayoutPalette = null;
@@ -1481,6 +1482,7 @@ class SimpleWindowManager {
 
   _renderCommandPaletteItems() {
     if (!this._commandPaletteList) return;
+    this._clearCommandItemFeedback();
     this._clearCommandRecentFeedback();
     const query = String(this._commandPaletteInput?.value || '').trim().toLowerCase();
     const commands = this._commandPaletteCommands()
@@ -1625,14 +1627,62 @@ class SimpleWindowManager {
     if (!this._commandPalette || this._commandPalette.hidden) return;
     const command = this._commandPaletteItems[this._commandPaletteActiveIndex];
     if (!command) return;
-    command.action();
-    this._toggleCommandPalette(false);
+    const index = this._commandPaletteActiveIndex;
+    const delayed = this._markCommandItemFeedback(index, command);
+    this._sendWindowCmd('command_palette_item', {
+      command_label: command.label,
+      command_category: command.category || 'Commands'
+    });
+    const run = () => {
+      if (!this._commandPalette || this._commandPalette.hidden) return;
+      command.action();
+      this._toggleCommandPalette(false);
+    };
+    if (delayed) window.setTimeout(run, 160);
+    else run();
+  }
+
+  _markCommandItemFeedback(index, command) {
+    if (!this._commandPalette || !this._feedbackAllows('standard')) return false;
+    window.clearTimeout(this._commandItemFeedbackTimer);
+    this._clearCommandItemFeedback();
+    const palette = this._commandPalette;
+    palette.dataset.commandItemFeedback = 'activate';
+    palette.dataset.commandItemIndex = String(index);
+    palette.classList.add('action-feedback');
+    const item = palette.querySelector(`.wm-command-item[data-command-index="${index}"]`);
+    if (!item) return false;
+    item.dataset.commandFeedback = 'activate';
+    item.classList.add('action-feedback');
+    item.setAttribute('aria-label', `${command.label}, activated`);
+    item.querySelector('.wm-taskbar-icon')?.classList.add('action-feedback');
+    item.querySelector('.wm-command-shortcut')?.classList.add('action-feedback');
+    this._commandItemFeedbackTimer = window.setTimeout(() => this._clearCommandItemFeedback(), 560);
+    return true;
+  }
+
+  _clearCommandItemFeedback() {
+    window.clearTimeout(this._commandItemFeedbackTimer);
+    this._commandItemFeedbackTimer = 0;
+    if (!this._commandPalette) return;
+    delete this._commandPalette.dataset.commandItemFeedback;
+    delete this._commandPalette.dataset.commandItemIndex;
+    this._commandPalette.classList.remove('action-feedback');
+    this._commandPalette.querySelectorAll('.wm-command-item.action-feedback, .wm-taskbar-icon.action-feedback, .wm-command-shortcut.action-feedback').forEach((node) => {
+      node.classList.remove('action-feedback');
+      if (node.dataset && node.dataset.commandFeedback) delete node.dataset.commandFeedback;
+      if (node.classList.contains('wm-command-item')) {
+        const label = Array.from(node.children).find((child) => child.tagName === 'SPAN' && !child.classList.contains('wm-taskbar-icon') && !child.classList.contains('wm-command-shortcut'))?.textContent || '';
+        if (label) node.setAttribute('aria-label', label);
+      }
+    });
   }
 
   _executeCommandPaletteRecent(index) {
     if (!this._commandPalette || this._commandPalette.hidden) return;
     const command = this._commandPaletteItems[index];
     if (!command) return;
+    this._clearCommandItemFeedback();
     this._commandPaletteActiveIndex = index;
     this._markCommandRecentFeedback(index, command);
     this._sendWindowCmd('command_palette_recent', {
