@@ -8990,3 +8990,61 @@ shared-runtime checks passed for `src/compiler` with `14 warning(s)` across
 path `test/integration/app/mcp_stdio_integration_spec.spl` is not present in
 this checkout; the current equivalent
 `test/02_integration/app/mcp_stdio_integration_spec.spl` passed `5/5`.
+
+BrowserSession Uint8Array nested-view slice edge-range continuation:
+
+Detailed completion checklist:
+
+- [x] Start from clean temp worktree `/tmp/simple-gui-hardening-next27` on
+  `main` at `origin/main` after the nested-view copied-buffer fix.
+- [x] Leave the primary detached dirty checkout untouched.
+- [x] Add a BrowserSession regression for a nested `Uint8Array` view that calls
+  direct `slice()`, `slice(-2)`, and `slice(1, 3)`.
+- [x] Assert each slice result is isolated from the nested source buffer with
+  `buffer === nested.buffer` reporting `false`.
+- [x] Assert each copied result has `byteOffset` `0`, preserving copied-buffer
+  behavior for full, negative-start, and bounded-range slices.
+- [x] Assert `byteLength` and `length` metadata remain `4,2,2` for the three
+  edge-range copies.
+- [x] Assert byte normalization still matches `Uint8Array` semantics for
+  overflow and negative assignments: `260 -> 4`, `-1 -> 255`.
+- [x] Mutate the three copied slice results and the nested source after capture
+  to prove copied results and source windows do not alias unexpectedly.
+- [x] Confirm the parent `view` and `base` arrays reflect only the intended
+  nested-source mutation, not copied-result mutations.
+- [x] Run the focused spec-file check before broader regressions.
+- [x] Run the focused BrowserSession fetch/WASM chain interpreter spec.
+- [x] Regenerate the mirrored SPipe scenario manual.
+- [x] Move old-path docgen output from `doc/06_spec/01_unit/...` to the tracked
+  `doc/06_spec/unit/...` manual location.
+- [x] Restore generated index/tracking noise and remove stale old-path manual
+  output.
+- [x] Run adjacent native WASM host regression.
+- [x] Run adjacent WebGPU JS/WASM browser-system regression.
+- [x] Run adjacent Node API conformance regression.
+- [x] Run final diff hygiene and executable-spec layout guards.
+- [ ] Commit only the edge-range spec/manual/plan/bug-note update.
+- [ ] Fetch/rebase with file-count guard and push `HEAD:main` with
+  `GITHUB_TOKEN` unset.
+
+Detailed test checklist:
+
+- [x] `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- [x] `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --force-rebuild --format json`
+- [x] `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- [x] `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json` - `107/107` passed.
+- [x] `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json` - `106/106` passed.
+- [x] `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json` - `275/275` passed.
+- [x] `git diff --check` - passed.
+- [x] `find doc/06_spec -name '*_spec.spl' | wc -l` - `0`.
+
+BrowserSession scripts now cover nested-view direct slice edge ranges after the
+copied-buffer fix. The new regression proves `slice()`, `slice(-2)`, and
+`slice(1, 3)` all return isolated zero-offset buffers from a nested
+`subarray(...)` source, preserve expected metadata, normalize byte assignments,
+and remain independent after copied-result and source mutations. The focused
+fetch/WASM chain spec now passes `235/235`, and the generated manual records
+`Total scenarios | 235 |`. Adjacent native WASM host, WebGPU JS/WASM, and Node
+API conformance regressions passed at `107/107`, `106/106`, and `275/275`.
+Final sync guards are in progress for this continuation. Broader typed-array
+prototype parity and production GUI pixel parity remain open.

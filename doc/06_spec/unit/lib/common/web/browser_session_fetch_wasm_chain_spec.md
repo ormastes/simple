@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 234 | 234 | 0 | 0 |
+| 235 | 235 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -12369,6 +12369,39 @@ match result:
 
 </details>
 
+#### copies nested Uint8Array view slice edge ranges into isolated buffers
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `false:false:false:0,0,0:4,2,2:4,2,2:40,250,4,255|4,255|250,4:123,250,4,255:4,... (full value in folded executable source)`
+
+3. Err
+   - Expected: "unexpected nested uint8 view slice edge range copied buffer js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var base = new Uint8Array(9); base[0] = 1; base[1] = 2; base[2] = 30; base[3] = 40; base[4] = 250; base[5] = 260; base[6] = -1; base[7] = 80; base[8] = 90; var view = base.subarray(2, 8); var nested = view.subarray(1, -1); var all = nested.slice(); var tail = nested.slice(-2); var middle = nested.slice(1, 3); var before = all.toString() + '|' + tail.toString() + '|' + middle.toString(); all[0] = 123; tail[1] = 124; middle[0] = 125; nested[1] = 66; (all.buffer === nested.buffer) + ':' + (tail.buffer === nested.buffer) + ':' + (middle.buffer === nested.buffer) + ':' + all.byteOffset + ',' + tail.byteOffset + ',' + middle.byteOffset + ':' + all.byteLength + ',' + tail.byteLength + ',' + middle.byteLength + ':' + all.length + ',' + tail.length + ',' + middle.length + ':' + before + ':' + all.toString() + ':' + tail.toString() + ':' + middle.toString() + ':' + nested.toString() + ':' + view.toString() + ':' + base.toString()")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("false:false:false:0,0,0:4,2,2:4,2,2:40,250,4,255|4,255|250,4:123,250,4,255:4,124:125,4:40,66,4,255:30,40,66,4,255,80:1,2,30,40,66,4,255,80,90")
+    Err(err):
+        expect("unexpected nested uint8 view slice edge range copied buffer js error: {err}").to_equal("")
+```
+
+</details>
+
 #### copies overlapping Uint8Array subarray windows through set in browser scripts
 
 1. var session = BrowserSession new
@@ -13081,8 +13114,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 234 |
-| Active scenarios | 234 |
+| Total scenarios | 235 |
+| Active scenarios | 235 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

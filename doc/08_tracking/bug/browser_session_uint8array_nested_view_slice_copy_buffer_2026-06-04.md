@@ -53,6 +53,9 @@ The direct nested-view slice path now uses copied storage.
   correctly.
 - Added `copies nested Uint8Array view slice bytes into isolated buffers` to
   `test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`.
+- Added `copies nested Uint8Array view slice edge ranges into isolated buffers`
+  to cover direct `slice()`, `slice(-2)`, and `slice(1, 3)` on nested
+  nonzero-offset views.
 
 ## Verification
 
@@ -62,3 +65,9 @@ The direct nested-view slice path now uses copied storage.
 - Generated manual:
   `doc/06_spec/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.md`
   records `Total scenarios | 234 |`.
+- Edge-range continuation focused BrowserSession check: passed.
+- Edge-range continuation focused BrowserSession interpreter spec: `235/235`
+  passed.
+- Edge-range generated manual:
+  `doc/06_spec/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.md`
+  records `Total scenarios | 235 |`.
