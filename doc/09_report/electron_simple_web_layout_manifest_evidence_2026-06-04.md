@@ -24,3 +24,33 @@
   - dimensions: 96x64
   - report: build/electron_simple_web_layout_manifest_evidence/attribute_selector_box_matrix/report.md
   - description: Text-free attribute selector matrix covering presence, exact value, prefix, suffix, and non-matching attribute selectors.
+- border_box_matrix: status=pass reason=pass policy=exact exit=0 mismatch=0 blur_or_tolerance=false
+  - scene: simple-web-layout-border-box-matrix
+  - dimensions: 96x64
+  - report: build/electron_simple_web_layout_manifest_evidence/border_box_matrix/report.md
+  - description: Text-free box-sizing matrix covering border-box explicit outer width/height with padding and borders beside default content-box sizing.
+- padding_longhand_matrix: status=pass reason=pass policy=exact exit=0 mismatch=0 blur_or_tolerance=false
+  - scene: simple-web-layout-padding-longhand-matrix
+  - dimensions: 96x64
+  - report: build/electron_simple_web_layout_manifest_evidence/padding_longhand_matrix/report.md
+  - description: Text-free padding longhand matrix covering padding-top/right/bottom/left and shorthand-plus-longhand side overrides.
+- border_side_matrix: status=pass reason=pass policy=exact exit=0 mismatch=0 blur_or_tolerance=false
+  - scene: simple-web-layout-border-side-matrix
+  - dimensions: 96x64
+  - report: build/electron_simple_web_layout_manifest_evidence/border_side_matrix/report.md
+  - description: Text-free asymmetric border-side matrix covering border-left/top/right/bottom and border-width side shorthand geometry.
+- overflow_hidden_matrix: status=pass reason=pass policy=exact exit=0 mismatch=0 blur_or_tolerance=false
+  - scene: simple-web-layout-overflow-hidden-matrix
+  - dimensions: 96x64
+  - report: build/electron_simple_web_layout_manifest_evidence/overflow_hidden_matrix/report.md
+  - description: Text-free overflow hidden matrix covering ancestor padding-box clipping for oversized descendants and later overflowing siblings.
+- visibility_hidden_matrix: status=pass reason=pass policy=exact exit=0 mismatch=0 blur_or_tolerance=false
+  - scene: simple-web-layout-visibility-hidden-matrix
+  - dimensions: 96x64
+  - report: build/electron_simple_web_layout_manifest_evidence/visibility_hidden_matrix/report.md
+  - description: Text-free visibility hidden matrix covering layout-preserving paint suppression for hidden boxes and inherited hidden descendants.
+- display_contents_matrix: status=pass reason=pass policy=exact exit=0 mismatch=0 blur_or_tolerance=false
+  - scene: simple-web-layout-display-contents-matrix
+  - dimensions: 96x64
+  - report: build/electron_simple_web_layout_manifest_evidence/display_contents_matrix/report.md
+  - description: Text-free display contents matrix covering wrapper box suppression while preserving child layout participation.

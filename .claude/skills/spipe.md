@@ -71,6 +71,17 @@ SPipe verify and implementation phases enforce these quality gates:
 - **Naming**: files use descriptive names, never numbered copies (`_1`, `_v2`)
 - **Docs**: every new doc produces a `xxxx_tldr.md` (≤30 lines + diagram)
 
+## Feature Module Packaging (`.sfm`)
+
+When a feature ships a runnable module, package it as a **Simple Feature Module**
+(`.sfm`): embed the compiled SMF as an opaque payload plus a feature manifest
+(exposed front-end/back-end layers + `SfmSecurityLevel`; mark `Trusted` only when
+privileged layers must be gated). Consume it via `std.sfm`: `sfm_load` parses the
+container, `sfm_resolve` resolves a manifest layer (DI wires layers from the
+manifest; an AOP authz aspect enforces the security level). See
+[`doc/04_architecture/simple_feature_module.md`](../../doc/04_architecture/simple_feature_module.md)
+and [`doc/05_design/simple_feature_module.md`](../../doc/05_design/simple_feature_module.md).
+
 ## Run
 
 ```
