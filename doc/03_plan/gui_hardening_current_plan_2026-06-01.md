@@ -5217,3 +5217,41 @@ native WASM host spec remained `107/107`, the WebGPU JS/WASM system spec
 remained `106/106`, Node API conformance remained `275/275`, and `src/lib`
 completed with the existing `447 warning(s)`. Broader browser/WASM semantics
 remain open.
+
+BrowserSession WebAssembly odd-length decorated-hex rejection continuation:
+
+Completion checklist:
+
+- Add a BrowserSession browser-script scenario that normalizes a decorated WASM
+  hex payload to an odd number of hex nibbles after removing underscores.
+- Verify `WebAssembly.validate(...)` rejects the odd-length normalized payload.
+- Verify `new WebAssembly.Module(...)` reports `validated=false` and
+  `error=invalid-wasm-header`.
+- Verify module metadata remains deterministic for the rejected payload:
+  byte length `8` from complete byte pairs and section count `0`.
+- Regenerate the mirrored scenario manual for the changed SPipe spec.
+- Restore generated index/manual noise from docgen and adjacent specs.
+- Record the initial failed expectation, corrected behavior, final pass counts,
+  warning count, and remaining open scope.
+- Run diff hygiene and doc layout gates before committing and pushing.
+
+Test checklist:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+
+BrowserSession scripts now pass a decorated WASM hex payload that normalizes to
+an odd-length hex stream through `WebAssembly.validate(...)` and
+`new WebAssembly.Module(...)`. The first focused run caught an overly strict
+expected byte length (`162/163`); the corrected assertion records the current
+engine contract: validation fails with `invalid-wasm-header`, `validated` stays
+false, complete byte pairs still report byte length `8`, and section count
+remains `0`. The focused fetch/WASM chain spec now passes `163/163`; the native
+WASM host spec remained `107/107`, the WebGPU JS/WASM system spec remained
+`106/106`, Node API conformance remained `275/275`, and `src/lib` completed
+with the existing `447 warning(s)`. Broader browser/WASM semantics remain open.
