@@ -100,6 +100,7 @@ class SimpleWindowManager {
     this._activeWorkspaceId = 'main';
     this._workspaceSwitcherActiveIndex = 0;
     this._customWorkspaces = null;
+    this._workspaceTransitionTimer = 0;
     this._clipboardHistory = null;
     this._clipboardHistoryActiveIndex = 0;
     this._clipboardSearchQuery = '';
@@ -221,6 +222,11 @@ class SimpleWindowManager {
     this._applyBackdropMotionPreference(options.backdropMotion || '');
     this._applyBackdropIntensityPreference(options.backdropIntensity || '');
     this._applyQuietModePreference(options.quietMode || '');
+    if (this.desktop) {
+      this.desktop.dataset.wmWorkspace = this._activeWorkspaceId;
+      this.desktop.dataset.wmWorkspaceTransition = 'idle';
+      this.desktop.dataset.wmWorkspaceDirection = 'none';
+    }
     window.simpleWmSetMotion = (preference) => this.setMotionPreference(preference);
     window.simpleWmSetTransparency = (preference) => this.setTransparencyPreference(preference);
     window.simpleWmSetWallpaper = (preference) => this.setWallpaperPreference(preference);
@@ -2728,6 +2734,12 @@ class SimpleWindowManager {
     ];
   }
 
+  _workspaceIndex(workspaceId) {
+    const items = this._workspaceItems();
+    const index = items.findIndex((workspace) => workspace.id === workspaceId);
+    return index >= 0 ? index : 0;
+  }
+
   _makeWorkspaceCard(workspace, index) {
     const card = document.createElement('div');
     const active = index === this._workspaceSwitcherActiveIndex;
@@ -2850,10 +2862,28 @@ class SimpleWindowManager {
 
   _switchWorkspace(workspaceId) {
     const id = String(workspaceId || 'main');
+    const previousId = this._activeWorkspaceId;
     this._activeWorkspaceId = id;
     document.documentElement.dataset.wmWorkspace = id;
+    this._startWorkspaceTransition(previousId, id);
     this._sendWindowCmd('switch_workspace', { workspace_id: id });
     this._showSystemHud('Workspace', id, 1800);
+  }
+
+  _startWorkspaceTransition(previousId, nextId) {
+    if (!this.desktop) return;
+    const previousIndex = this._workspaceIndex(previousId);
+    const nextIndex = this._workspaceIndex(nextId);
+    const direction = nextIndex < previousIndex ? 'back' : nextIndex > previousIndex ? 'forward' : 'same';
+    this.desktop.dataset.wmWorkspace = nextId;
+    this.desktop.dataset.wmWorkspaceTransition = 'enter';
+    this.desktop.dataset.wmWorkspaceDirection = direction;
+    if (this._workspaceTransitionTimer) window.clearTimeout(this._workspaceTransitionTimer);
+    this._workspaceTransitionTimer = window.setTimeout(() => {
+      if (!this.desktop) return;
+      this.desktop.dataset.wmWorkspaceTransition = 'idle';
+      this.desktop.dataset.wmWorkspaceDirection = 'none';
+    }, 260);
   }
 
   _ensureClipboardHistory() {

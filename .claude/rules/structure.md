@@ -27,7 +27,7 @@ bin/                # Binaries (bin/simple → release/<triple>/simple symlink)
   `scripts/check-workspace-root-guard.shs` (lint + pre-commit hook).
   See `doc/07_guide/workspace/file_manifest.md`.
 - **Detailed:** `doc/04_architecture/file_class_structure.md` (2,649 files, 623K lines)
-- **Glossary:** `doc/04_architecture/glossary.md`
+- **Glossary:** `doc/glossary.md`
 
 ## Auto-Generated Docs
 | What | Where | When |

@@ -348,7 +348,7 @@ No `extends`, no virtual methods, no superclass chains. Traits + composition + m
 - `CLAUDE.md`
 - `.claude/rules/language.md`, `.claude/rules/structure.md`, `.claude/rules/code-style.md`, `.claude/rules/vcs.md`
 - `doc/04_architecture/mdsoc_architecture_tobe.md`
-- `doc/04_architecture/glossary.md`
+- `doc/glossary.md`
 - `src/lib/nogc_sync_mut/ecs/*.spl` (idiomatic ECS usage)
 
 ## 11. NVFS interface assumptions from Simple DB

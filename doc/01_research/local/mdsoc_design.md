@@ -684,6 +684,6 @@ VIOLATION: src/feature/Checkout/app/CheckoutUseCase.spl
 ### Canonical binding
 
 - Spec authority: `doc/04_architecture/mdsoc_architecture_tobe.md` §Part 3.
-- Glossary: `doc/04_architecture/glossary.md` (MDSOC+, ECS, Entity, Component, System, World, Query, ComponentStore, Change Detection).
+- Glossary: `doc/glossary.md` (MDSOC+, ECS, Entity, Component, System, World, Query, ComponentStore, Change Detection).
 - Stdlib: `src/lib/nogc_sync_mut/ecs/`, `src/lib/gc_async_mut/ecs/`.
 - Reference port: `src/os/services/wm/`.

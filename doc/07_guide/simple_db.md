@@ -275,7 +275,7 @@ test/03_system/simple_db_nvfs_constants_spec.spl  # full tier NVFS constants
 | DB synchronization | `doc/05_design/database_synchronization_implementation.md` |
 | Unified DB design | `doc/05_design/unified_database_design.md` |
 | Feature requests | `doc/08_tracking/feature_request/simple_db_requests.md` |
-| Glossary | `doc/04_architecture/glossary.md` (see: Simple DB, DBFS, SDN) |
+| Glossary | `doc/glossary.md` (see: Simple DB, DBFS, SDN) |
 
 ## Example Repository
 

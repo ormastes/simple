@@ -1,0 +1,46 @@
+# @cover src/lib/common/ui/semantic_contract.spl
+# @cover src/lib/common/ui/web_render_api.spl
+# @cover src/app/ui.electron/backend.spl
+# @cover src/app/ui.tauri/backend.spl
+# @cover src/app/ui.browser/backend.spl
+# @tag: unit, ui, semantic_contract, web_render_api
+
+use std.spec.{describe, it, expect}
+use common.ui.builder.{button, panel, text_widget, build_tree_with_title}
+use common.ui.state.{init_state}
+use common.ui.semantic_contract.{semantic_ui_snapshot_to_json}
+use common.ui.web_render_api.{WEB_RENDER_TARGET_ELECTRON, WebRenderRequest, web_render_ipc_json_with_html_and_semantic}
+use app.ui.web.backend.{WebBackend}
+use app.ui.electron.backend.{ElectronBackend, electron_semantic_render_ipc_json, electron_semantic_snapshot}
+use app.ui.tauri.backend.{TauriBackend, tauri_semantic_render_ipc_json}
+
+fn sample_state():
+    val root = panel("web_render_root", "Web Render", [
+        text_widget("web_render_copy", "Shared API"),
+        button("web_render_action", "Run", "run")
+    ])
+    val tree = build_tree_with_title(root, "Web Render", "dark")
+    init_state(tree)
+
+describe "semantic render transport bridge":
+    it "attaches semantic snapshots at the shared render IPC boundary":
+        val state = sample_state()
+        val body = WebBackend.new(4020).render_html(state)
+        val req = WebRenderRequest.html(WEB_RENDER_TARGET_ELECTRON, "", body, "", "", 1280, 720)
+        val semantic_json = semantic_ui_snapshot_to_json(electron_semantic_snapshot(state))
+        val ipc = web_render_ipc_json_with_html_and_semantic(req, "<html><body><div id=\"app\">" + body + "</div></body></html>", semantic_json)
+
+        expect(ipc).to_contain("\"semantic\":{\"protocol_version\"")
+        expect(ipc).to_contain("\"stage\":\"S3\"")
+        expect(ipc).to_contain("\"element_count\":3")
+        expect(electron_semantic_render_ipc_json(state, 1280, 720)).to_contain("\"semantic\":{\"protocol_version\"")
+        expect(tauri_semantic_render_ipc_json(state, 1280, 720)).to_contain("\"target\":\"tauri\"")
+
+    it "exposes backend semantic snapshot envelopes through one target-aware shape":
+        val state = sample_state()
+        val electron = ElectronBackend.new(4021).unwrap()
+
+        val electron_json = electron.semantic_snapshot_json(state)
+        expect(electron_json.len()).to_be_greater_than(0)
+        expect(electron_json).to_contain("stage")
+        expect(electron.semantic_snapshot_envelope_json(state, "main", 10u64)).to_contain("snapshot")

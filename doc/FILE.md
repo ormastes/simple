@@ -22,4 +22,5 @@ Project documentation organized by numbered categories.
 | `README.md` | Documentation readme |
 | `test` | Documentation test files |
 | `TODO.md` | TODO tracking |
+| `glossary.md` | Project glossary (key terms, acronyms, concepts) |
 | `FILE.md` | This manifest |

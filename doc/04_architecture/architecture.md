@@ -103,4 +103,4 @@ Default architecture is MDSOC+ (MDSOC outer + ECS business layer for userland; k
 - [SimpleOS Desktop Architecture](simpleos_desktop_architecture.md)
 - [SIMD AOT Architecture](simd_aot_architecture.md)
 - [File/Class Structure](file_class_structure.md)
-- [Glossary](glossary.md)
+- [Glossary](../glossary.md)

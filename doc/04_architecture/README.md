@@ -10,7 +10,7 @@
 - [Module Details](architecture_modules.md) - Module Details, Type/Struct Listing
 - [Data Flows](architecture_flows.md) - Data Flow, Execution, Memory Management
 - [Development Guide](architecture_dev.md) - Feature Guidance, Code Quality, Verification
-- [Glossary](glossary.md) - Key concepts (Crate, Virtual Crate, module terms)
+- [Glossary](../glossary.md) - Key concepts (Crate, Virtual Crate, module terms)
 - [Dependency Graphs](dependency_graphs.md) - Crate and module dependency graphs
 
 ## MDSOC Reports

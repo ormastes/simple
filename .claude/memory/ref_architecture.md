@@ -103,4 +103,4 @@ Canonical ECS:
 
 Stdlib location: `src/lib/nogc_sync_mut/ecs/` (default) and `src/lib/gc_async_mut/ecs/` (GC variant for apps).
 
-Doc authority: `doc/04_architecture/mdsoc_architecture_tobe.md` §Part 3 and `doc/04_architecture/glossary.md` (MDSOC+ / ECS terms).
+Doc authority: `doc/04_architecture/mdsoc_architecture_tobe.md` §Part 3 and `doc/glossary.md` (MDSOC+ / ECS terms).
