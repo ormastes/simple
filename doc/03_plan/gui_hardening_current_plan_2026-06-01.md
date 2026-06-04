@@ -6269,3 +6269,48 @@ WASM host spec remained `107/107`, the WebGPU JS/WASM system spec remained
 `106/106`, Node API conformance remained `275/275`, and `src/lib` completed
 with the current `399 warning(s)` across `5903` files. Broader browser/WASM
 semantics remain open.
+
+BrowserSession WebAssembly constructor/compiled invalid metadata parity continuation:
+
+Completion checklist:
+
+- Add a BrowserSession browser-script scenario that reads invalid module and
+  instance metadata through synchronous `new WebAssembly.Module(...)` plus
+  `new WebAssembly.Instance(...)`, then compares those failures with chained
+  `WebAssembly.compile(...).catch(...)` errors in the same script evaluation.
+- Verify the constructor invalid-header module exposes
+  `validated=false:error=invalid-wasm-header`, and its instance exposes
+  `status=invalid`, `moduleValid=false`, and `error=invalid-wasm-module`.
+- Verify the constructor truncated-section module exposes
+  `validated=false:error=invalid-wasm-section`, section count `0`, and an
+  invalid instance with `moduleValid=false:error=invalid-wasm-module`.
+- Verify the compiled invalid-header promise catch reports
+  `invalid:invalid-wasm-header`.
+- Verify the compiled truncated-section promise catch reports
+  `invalid:invalid-wasm-section` and preserves deterministic chained output.
+- Regenerate the mirrored scenario manual for the changed SPipe spec and move
+  the generated old `01_unit` output onto the tracked `unit` manual path.
+- Restore generated index/manual noise from docgen and adjacent specs.
+- Record command evidence, pass counts, warning count, and remaining open scope.
+- Run diff hygiene and doc layout gates before committing and pushing.
+
+Test checklist:
+
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/feature/js/node_api_conformance_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
+- `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check src/lib`
+
+BrowserSession scripts now compare constructor-created and compiled
+WebAssembly invalid-module metadata paths in the same script evaluation. The
+focused assertion verifies the constructor invalid-header and truncated-section
+modules expose invalid module metadata plus invalid instance metadata, then
+verifies chained compiled promise catches report matching invalid-header and
+invalid-section errors. The focused fetch/WASM chain spec now passes
+`188/188`; the native WASM host spec remained `107/107`, the WebGPU JS/WASM
+system spec remained `106/106`, Node API conformance remained `275/275`, and
+`src/lib` completed with the current `399 warning(s)` across `5903` files.
+Broader browser/WASM semantics remain open.

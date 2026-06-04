@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 187 | 187 | 0 | 0 |
+| 188 | 188 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -3426,6 +3426,39 @@ match result:
         expect(_display_js(value)).to_equal("false:invalid-wasm-section:0:invalid:false:invalid-wasm-module")
     Err(err):
         expect("unexpected instance constructor truncated module js error: {err}").to_equal("")
+```
+
+</details>
+
+#### compares constructor and compiled WebAssembly invalid module metadata in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `ctorInvalid:false:invalid-wasm-header:invalid:false:invalid-wasm-module:ctorT... (full value in folded executable source)`
+
+3. Err
+   - Expected: "unexpected constructor/compiled invalid module metadata js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val result = session.eval_script("var out = ''; var invalidModule = new WebAssembly.Module('00'); var invalidInstance = new WebAssembly.Instance(invalidModule); var truncatedModule = new WebAssembly.Module('0061736d010000000105'); var truncatedInstance = new WebAssembly.Instance(truncatedModule); out = 'ctorInvalid:' + invalidModule.validated + ':' + invalidModule.error + ':' + invalidInstance.status + ':' + invalidInstance.moduleValid + ':' + invalidInstance.error + ':ctorTruncated:' + truncatedModule.validated + ':' + truncatedModule.error + ':' + truncatedModule.sectionCount + ':' + truncatedInstance.status + ':' + truncatedInstance.moduleValid + ':' + truncatedInstance.error; WebAssembly.compile('00').catch(function(err) { out = out + ':compileInvalid:' + err.status + ':' + err.error; return WebAssembly.compile('0061736d010000000105'); }).catch(function(err) { out = out + ':compileTruncated:' + err.status + ':' + err.error; }); out")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("ctorInvalid:false:invalid-wasm-header:invalid:false:invalid-wasm-module:ctorTruncated:false:invalid-wasm-section:0:invalid:false:invalid-wasm-module:compileInvalid:invalid:invalid-wasm-header:compileTruncated:invalid:invalid-wasm-section")
+    Err(err):
+        expect("unexpected constructor/compiled invalid module metadata js error: {err}").to_equal("")
 ```
 
 </details>
@@ -8721,8 +8754,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 187 |
-| Active scenarios | 187 |
+| Total scenarios | 188 |
+| Active scenarios | 188 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
