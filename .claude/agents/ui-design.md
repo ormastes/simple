@@ -57,13 +57,13 @@ Mutating (create / update / generate):
 | `12496218458601315145` | Simple OS UI | SimpleOS Obsidian (FIDELITY, ROUND_EIGHT) | `fafd2be98b5d434ca0d9ab6c3c5d2598` (Obsidian), `8fe8c918253a418db456fc51badcaffe` (Celestial Ether) |
 | `14134637940805933672` | Simple OS UI | SimpleOS Glass (TONAL_SPOT, ROUND_TWELVE) | `365508527354896466` |
 
-Snapshot: `doc/05_design/stitch_snapshots/` (pulled 2026-04-12, mode `reconcile`).
+Snapshot: `doc/05_design/ui/stitch_snapshots/` (pulled 2026-04-12, mode `reconcile`).
 
 ### Workflow
 
 1. **Describe** — User provides a UI description or theme change request
-2. **Pull baseline** — `list_projects` then `get_project` for each known ID; save results under `doc/05_design/stitch_snapshots/`
-3. **Generate or edit** — `generate_screen_from_text` for new screens, `edit_screens` for focused changes
+2. **Pull baseline** — `list_projects` then `get_project` for each known ID; save results under `doc/05_design/ui/stitch_snapshots/`
+3. **Generate or edit** — `generate_screen_from_text` for new screens, `edit_screens` for focused changes; save results under `doc/05_design/ui/stitch_snapshots/`
 4. **Retrieve code** — `get_screen` returns HTML/CSS
 5. **Integrate** — place generated HTML into the project or sync tokens into `src/lib/common/ui/glass_tokens.spl`
 6. **Refine** — iterate on feedback; re-apply design system via `apply_design_system`
@@ -103,4 +103,4 @@ Snapshot: `doc/05_design/stitch_snapshots/` (pulled 2026-04-12, mode `reconcile`
 | API key | `.security/env.sh` |
 | Web app templates | `src/app/web/` |
 | Example outputs | `examples/` |
-| Design docs | `doc/05_design/` |
+| Design docs | `doc/05_design/<domain>/` |

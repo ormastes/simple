@@ -39,7 +39,7 @@ pub use .functions.*
 
 ## Import Resolution
 - `use std.X` and `use lib.X` both resolve from `src/lib/`; resolver strips leading `std`/`std_lib`. Prefer `use std.X` in new code.
-- **Two independent axes** (full detail: `doc/07_guide/architecture/module_resolver.md`):
+- **Two independent axes** (full detail: `doc/07_guide/compiler/module_resolver.md`):
   - **Memory-model family** — chosen by fixed fallback order, NOT a config knob:
     `nogc_async_mut → nogc_sync_mut → nogc_async_immut → common → gc_async_mut → nogc_async_mut_noalloc`. First match wins; host default `async_nogc_mut`.
   - **SIMD tier** — `variants/<tier>/` (avx512/avx2/sse2…) prepended via `stdlib_variant.rs`, hardware-selected. Orthogonal to family.

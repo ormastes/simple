@@ -76,6 +76,7 @@ export class RetainedRenderer {
     this.surfaceBodies = new Map();      // surface_id -> body HTMLElement
     this.activeSurface = null;
     this._focusAcquiredTimers = new WeakMap();
+    this._titleCommandFeedbackTimers = new WeakMap();
     this.protocolVersion = 1;
     this.snapshotRevision = 0;
     this.lastSequence = -1;
@@ -582,7 +583,44 @@ export class RetainedRenderer {
     input.addEventListener('pointerdown', (event) => event.stopPropagation());
     input.addEventListener('mousedown', (event) => event.stopPropagation());
     input.addEventListener('dblclick', (event) => event.stopPropagation());
+    input.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter') return;
+      const commandText = String(input.value || '').trim();
+      if (!commandText) return;
+      input.dataset.lastSubmittedValue = commandText;
+      this._markTitleCommandSubmitted(input, this._titleCommandKind(commandText), commandText);
+    });
     return input;
+  }
+
+  _titleCommandKind(value) {
+    const commandText = String(value || '').trim();
+    if (!commandText) return 'empty';
+    if (commandText.startsWith('/') || commandText.startsWith('./') || commandText.includes('/')) return 'path';
+    if (commandText.startsWith('http://') || commandText.startsWith('https://')) return 'url';
+    if (commandText.includes(' ')) return 'search';
+    return 'command';
+  }
+
+  _markTitleCommandSubmitted(input, commandKind = '', commandText = '') {
+    if (!input) return;
+    const prior = this._titleCommandFeedbackTimers.get(input);
+    if (prior) clearTimeout(prior);
+    const kind = String(commandKind || this._titleCommandKind(commandText || input.value || '') || 'command');
+    const winEl = input.closest('.wm-window');
+    input.classList.remove('command-submitted');
+    void input.offsetWidth;
+    input.classList.add('command-submitted');
+    input.dataset.commandFeedback = 'submitted';
+    input.dataset.commandKind = kind;
+    if (winEl) winEl.dataset.titleCommandFeedback = kind;
+    const timer = setTimeout(() => {
+      input.classList.remove('command-submitted');
+      delete input.dataset.commandFeedback;
+      if (winEl && winEl.dataset.titleCommandFeedback === kind) delete winEl.dataset.titleCommandFeedback;
+      this._titleCommandFeedbackTimers.delete(input);
+    }, 560);
+    this._titleCommandFeedbackTimers.set(input, timer);
   }
 
   _surfaceWindowForCanonical(canonicalId) {

@@ -28,7 +28,7 @@ sh scripts/setup/install-spipe-dev-command.shs --apply
 - [`.claude/agents/spipe/verify.md`](../agents/spipe/verify.md) — SPipe verification phase
 - [`.claude/skills/lib/spipe_phases.md`](lib/spipe_phases.md) — phase map
 - [`.claude/skills/lib/spipe_diagrams.md`](lib/spipe_diagrams.md) — diagram & concision rules (≤30 lines + ≥1 SDN diagram)
-- [`doc/07_guide/testing/sspec_scenario_manual.md`](../../doc/07_guide/testing/sspec_scenario_manual.md) — scenario manual, capture, inline/previous scenario, and environmental-test guidance
+- [`doc/07_guide/infra/sspec_scenario_manual.md`](../../doc/07_guide/infra/sspec_scenario_manual.md) — scenario manual, capture, inline/previous scenario, and environmental-test guidance
 
 ## Scenario Manual Quality
 

@@ -43,7 +43,7 @@ cp .claude/templates/spipe_template.spl \
 
 ## Complete Workflow
 
-See `doc/07_guide/testing/testing.md` for full testing guide.
+See `doc/07_guide/infra/testing.md` for full testing guide.
 
 ### Quick Steps
 
@@ -110,5 +110,5 @@ describe "MyFeature":
 ## See Also
 
 - `/spipe` skill - Quick reference
-- `doc/07_guide/testing/testing.md` - Testing guide (includes SPipe)
+- `doc/07_guide/infra/testing.md` - Testing guide (includes SPipe)
 - `doc/06_spec/spipe_format.md` - Format specification

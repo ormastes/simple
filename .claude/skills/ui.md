@@ -3,8 +3,8 @@
 ## Prerequisites
 | Artifact | Path | If missing |
 |----------|------|-----------|
-| Requirements | `doc/02_requirements/feature/<feature>.md` | Run `/research` first |
-| Design system reference | `doc/05_design/stitch_design_system.md` | Extract from Stitch MCP |
+| Requirements | `doc/02_requirements/<domain>/<feature>.md` | Run `/research` first |
+| Design system reference | `doc/05_design/ui/stitch_design_system.md` | Extract from Stitch MCP |
 
 ## Stitch MCP — Google's AI UI Design Tool
 
@@ -19,7 +19,7 @@
 - `get_screen` — retrieve generated HTML/CSS code
 
 **Design system reference:** All SimpleOS design systems (Obsidian dark, Celestial Ether light, Glass original) are documented with full token tables, component specs, and Stitch API configuration in:
-> **[`doc/05_design/stitch_design_system.md`](doc/05_design/stitch_design_system.md)**
+> **[`doc/05_design/ui/stitch_design_system.md`](doc/05_design/ui/stitch_design_system.md)**
 
 **Existing Stitch projects:**
 - Project `12496218458601315145` — "Simple OS UI" (Obsidian + Celestial Ether design systems, 17 screens)
@@ -38,17 +38,17 @@ Drift will cause rendered mockups to disagree with the Electron shell.
 ```
 bin/simple theme-sync dump-local --theme=obsidian --out=/tmp/local_obsidian.sdn
 bin/simple theme-sync diff --local=/tmp/local_obsidian.sdn \
-    --remote=doc/05_design/stitch_snapshots/12496218458601315145/design_systems/obsidian_active.sdn
+    --remote=doc/05_design/ui/stitch_snapshots/12496218458601315145/design_systems/obsidian_active.sdn
 ```
 
 If drift is detected, resolve it via `/theme_sync` before proceeding.
 
 ## Workflow
 
-1. **TUI mockups** (box-drawing, ANSI colors): `doc/05_design/<feature>_tui.md`
-2. **GUI mockups** (web patterns, responsive): `doc/05_design/<feature>_gui.md`
+1. **TUI mockups** (box-drawing, ANSI colors): `doc/05_design/ui/<feature>_tui.md`
+2. **GUI mockups** (web patterns, responsive): `doc/05_design/ui/<feature>_gui.md`
 3. For Gemini GUI prototyping: start Stitch MCP, then use its tools
-4. For theme consistency: read `doc/05_design/stitch_design_system.md` for tokens, components, and DO/DON'T rules
+4. For theme consistency: read `doc/05_design/ui/stitch_design_system.md` for tokens, components, and DO/DON'T rules
 5. Present component lists to user for confirmation
 
 Skip if feature has no UI component.
@@ -90,15 +90,15 @@ Two rendering paths for mobile targets:
 ## Outputs
 | Artifact | Location |
 |----------|----------|
-| UI design (TUI) | `doc/05_design/<feature>_tui.md` |
-| UI design (GUI) | `doc/05_design/<feature>_gui.md` |
-| Design system ref | `doc/05_design/stitch_design_system.md` |
+| UI design (TUI) | `doc/05_design/ui/<feature>_tui.md` |
+| UI design (GUI) | `doc/05_design/ui/<feature>_gui.md` |
+| Design system ref | `doc/05_design/ui/stitch_design_system.md` |
 
 ---
 
 ## Typed Widget Authoring
 
-Phases 1-6 of the typed-core RFC (`doc/05_design/ui_typed_core_rfc.md`) replaced stringly-typed fields with enums and fluent helpers. Use these when constructing `WidgetNode` in Simple code.
+Phases 1-6 of the typed-core RFC (`doc/05_design/ui/ui_typed_core_rfc.md`) replaced stringly-typed fields with enums and fluent helpers. Use these when constructing `WidgetNode` in Simple code.
 
 ### WidgetKind and LayoutKind (Phase 2)
 
@@ -169,7 +169,7 @@ The wire event `UIEvent.Action(name: text)` is preserved verbatim — `IntoActio
 
 ## Fluent Chain Patterns
 
-Phase 3 of the typed-core RFC (`doc/05_design/ui_typed_core_rfc.md`) adds 26 fluent methods on `WidgetNode`. These mirror the existing `with_*` free-function helpers.
+Phase 3 of the typed-core RFC (`doc/05_design/ui/ui_typed_core_rfc.md`) adds 26 fluent methods on `WidgetNode`. These mirror the existing `with_*` free-function helpers.
 
 ### Available Methods (representative sample)
 
@@ -215,4 +215,4 @@ val node = WidgetNode(...)
 
 ### Migration Path
 
-Once `doc/05_design/compiler_rfc_method_chain_fix.md` lands, the chain form above will compile. The intermediate-var form will continue to work unchanged — no migration needed when the fix ships.
+Once `doc/05_design/compiler/compiler_rfc_method_chain_fix.md` lands, the chain form above will compile. The intermediate-var form will continue to work unchanged — no migration needed when the fix ships.

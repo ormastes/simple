@@ -34,7 +34,7 @@ scripts/local-container-test.shs quick path/to/spec.spl    # Single test
 scripts/ci-test.sh                                         # CI-style
 ```
 
-**Troubleshooting:** See `doc/07_guide/testing/container_testing.md`
+**Troubleshooting:** See `doc/07_guide/infra/container_testing.md`
 
 ## Coverage Target Annotations
 
@@ -106,4 +106,4 @@ Key files: `src/lib/nogc_sync_mut/ui_test/client.spl`, `src/app/ui.test_api/hand
 ## See Also
 
 - `/spipe` skill, `.claude/templates/spipe_template.spl`
-- `doc/07_guide/testing/testing.md`
+- `doc/07_guide/infra/testing.md`

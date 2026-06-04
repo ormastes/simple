@@ -103,13 +103,14 @@ expect(rocm.?).to_equal(true)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(CudaBackend.accepts_gpu_kernel_target(make_gpu_kernel("cuda_kernel", "cuda"))).to_equal(true)
-expect(CudaBackend.accepts_gpu_kernel_target(make_gpu_kernel("auto_kernel", "auto"))).to_equal(true)
-expect(CudaBackend.accepts_gpu_kernel_target(make_gpu_kernel("opencl_kernel", "opencl"))).to_equal(false)
+expect(CudaBackend.accepts_gpu_kernel(make_gpu_kernel("cuda_kernel", "cuda"))).to_equal(true)
+expect(CudaBackend.accepts_gpu_kernel(make_gpu_kernel("auto_kernel", "auto"))).to_equal(true)
+expect(CudaBackend.accepts_gpu_kernel(make_gpu_kernel("opencl_kernel", "opencl"))).to_equal(false)
+expect(CudaBackend.accepts_gpu_kernel_target(make_gpu_kernel("cuda_compat_kernel", "cuda"))).to_equal(true)
 ```
 
 </details>
@@ -148,11 +149,11 @@ val rocm_only = make_gpu_kernel_with_order("rocm_only", "auto", "rocm")
 val cuda_opencl = make_gpu_kernel_with_order("cuda_opencl", "auto", "opencl,cuda")
 val all_gpu = make_gpu_kernel_with_order("all_gpu", "auto", "hip,opencl,cuda")
 
-expect(CudaBackend.accepts_gpu_kernel_target(cuda_only)).to_equal(true)
-expect(CudaBackend.accepts_gpu_kernel_target(hip_only)).to_equal(false)
-expect(CudaBackend.accepts_gpu_kernel_target(opencl_only)).to_equal(false)
-expect(CudaBackend.accepts_gpu_kernel_target(cuda_opencl)).to_equal(true)
-expect(CudaBackend.accepts_gpu_kernel_target(all_gpu)).to_equal(true)
+expect(CudaBackend.accepts_gpu_kernel(cuda_only)).to_equal(true)
+expect(CudaBackend.accepts_gpu_kernel(hip_only)).to_equal(false)
+expect(CudaBackend.accepts_gpu_kernel(opencl_only)).to_equal(false)
+expect(CudaBackend.accepts_gpu_kernel(cuda_opencl)).to_equal(true)
+expect(CudaBackend.accepts_gpu_kernel(all_gpu)).to_equal(true)
 expect(OpenClBackend.accepts_gpu_kernel(cuda_only)).to_equal(false)
 expect(OpenClBackend.accepts_gpu_kernel(hip_only)).to_equal(false)
 expect(OpenClBackend.accepts_gpu_kernel(opencl_only)).to_equal(true)
