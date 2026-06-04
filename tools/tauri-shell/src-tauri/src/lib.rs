@@ -249,84 +249,6 @@ fn show_error(app: &AppHandle, title: &str, detail: &str) {
     }
 }
 
-fn shared_wm_boot_html() -> &'static str {
-    r#"<div style="height:100vh;width:100vw;overflow:hidden;background:linear-gradient(180deg,#111827 0%,#172033 52%,#201529 100%);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#e5e7eb">
-  <div style="height:30px;background:rgba(8,13,24,.94);border-bottom:1px solid rgba(255,255,255,.08);display:flex;align-items:center;padding:0 14px;font-size:13px">
-    <strong style="color:#f8fafc">Simple Window Manager</strong>
-    <span style="margin-left:10px;color:#94a3b8">Example MDI on Tauri</span>
-    <span style="margin-left:auto;color:#38bdf8">shared-wm</span>
-  </div>
-  <div style="position:relative;height:calc(100vh - 78px);background:
-      radial-gradient(circle at 18% 22%,rgba(56,189,248,.18),transparent 28%),
-      radial-gradient(circle at 76% 35%,rgba(168,85,247,.16),transparent 32%),
-      linear-gradient(135deg,rgba(15,23,42,.95),rgba(30,41,59,.92))">
-    <div style="position:absolute;left:54px;top:58px;width:420px;height:268px;background:#0f172a;border:1px solid rgba(148,163,184,.35);box-shadow:0 24px 70px rgba(0,0,0,.38)">
-      <div style="height:32px;background:#2563eb;display:flex;align-items:center;padding:0 12px;font-size:13px">
-        <span style="width:10px;height:10px;border-radius:50%;background:#fb7185;margin-right:7px"></span>
-        <span style="width:10px;height:10px;border-radius:50%;background:#facc15;margin-right:7px"></span>
-        <span style="width:10px;height:10px;border-radius:50%;background:#4ade80;margin-right:12px"></span>
-        Terminal
-      </div>
-      <div style="padding:18px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#86efac;font-size:13px;line-height:1.8">
-        <div>$ simple wm --backend tauri</div>
-        <div>host compositor: running</div>
-        <div>windows: 3</div>
-        <div>renderer: simple-web</div>
-      </div>
-    </div>
-    <div style="position:absolute;left:360px;top:126px;width:390px;height:246px;background:#f8fafc;color:#1f2937;border:1px solid rgba(15,23,42,.22);box-shadow:0 26px 80px rgba(0,0,0,.32)">
-      <div style="height:32px;background:#334155;color:#f8fafc;display:flex;align-items:center;padding:0 12px;font-size:13px">Hello Tauri UI</div>
-      <div style="padding:22px">
-        <div style="height:46px;background:#dbeafe;border-left:5px solid #2563eb;margin-bottom:18px"></div>
-        <div style="display:flex;gap:12px">
-          <div style="width:86px;height:34px;background:#ef4444"></div>
-          <div style="width:86px;height:34px;background:#22c55e"></div>
-          <div style="width:86px;height:34px;background:#3b82f6"></div>
-        </div>
-      </div>
-    </div>
-    <div style="position:absolute;left:690px;top:270px;width:320px;height:210px;background:#111827;border:1px solid rgba(148,163,184,.35);box-shadow:0 22px 70px rgba(0,0,0,.34)">
-      <div style="height:32px;background:#475569;display:flex;align-items:center;padding:0 12px;font-size:13px">File Manager</div>
-      <div style="padding:16px;display:grid;grid-template-columns:repeat(3,1fr);gap:12px">
-        <div style="height:46px;background:#38bdf8"></div><div style="height:46px;background:#a78bfa"></div><div style="height:46px;background:#34d399"></div>
-        <div style="height:46px;background:#f59e0b"></div><div style="height:46px;background:#f472b6"></div><div style="height:46px;background:#60a5fa"></div>
-      </div>
-    </div>
-  </div>
-  <div style="height:48px;background:rgba(8,13,24,.96);border-top:1px solid rgba(255,255,255,.08);display:flex;align-items:center;justify-content:center;gap:18px">
-    <span style="width:34px;height:34px;background:#38bdf8;display:inline-block"></span>
-    <span style="width:34px;height:34px;background:#22c55e;display:inline-block"></span>
-    <span style="width:34px;height:34px;background:#ef4444;display:inline-block"></span>
-    <span style="width:34px;height:34px;background:#f59e0b;display:inline-block"></span>
-    <span style="width:34px;height:34px;background:#a855f7;display:inline-block"></span>
-  </div>
-</div>"#
-}
-
-fn show_shared_wm_boot(app: &AppHandle) {
-    if let Some(win) = app.get_webview_window("main") {
-        let escaped = js_escape(shared_wm_boot_html());
-        let js = format!(
-            r#"
-            (function() {{
-                var app = document.getElementById('app');
-                if (!app) {{
-                    document.body.innerHTML = '<div id="app"></div>';
-                    app = document.getElementById('app');
-                }}
-                app.innerHTML = `{}`;
-                var dbg = document.getElementById('debug');
-                if (dbg) dbg.style.display = 'none';
-                document.body.style.background = '#111827';
-                document.body.style.overflow = 'hidden';
-            }})();
-            "#,
-            escaped
-        );
-        let _ = win.eval(&js);
-    }
-}
-
 fn mdi_shell_html() -> &'static str {
     r#"<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Simple Window Manager</title></head><body style="margin:0;background:#0b0d10;color:#e5e7eb"><div id="app"></div><div id="wm-desktop"></div></body></html>"#
 }
@@ -1225,13 +1147,6 @@ fn html_data_url(html: &str) -> String {
     format!("data:text/html;charset=utf-8,{}", urlencoding::encode(html))
 }
 
-fn shared_wm_data_url() -> String {
-    html_data_url(&format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Simple Window Manager</title></head><body style=\"margin:0\">{}</body></html>",
-        shared_wm_boot_html()
-    ))
-}
-
 // ---------------------------------------------------------------------------
 // Shared entry point for desktop and mobile
 // ---------------------------------------------------------------------------
@@ -1275,18 +1190,17 @@ pub fn run() {
     let mut child_slot = None;
     let mut initial_url: Option<String> = None;
 
-    // In URL mode, skip subprocess spawning entirely
-    if external_url.is_none() && shared_wm_requested {
-        eprintln!("[tauri-shell] shared WM visual mode: using data URL WM scene");
-        initial_url = Some(shared_wm_data_url());
-    } else if external_url.is_none() {
+    // In URL mode, skip subprocess spawning entirely. Shared-WM mode must still
+    // spawn the Simple process; otherwise the user only sees a static Rust
+    // mockup with no live MDI drag/input bridge.
+    if external_url.is_none() {
         let ui_entry = entry_file
             .as_ref()
             .map(|entry| entry.ends_with(".ui.sdn"))
             .unwrap_or(false);
 
         if let Some(simple_bin) = simple_bin.as_ref() {
-            if ui_entry {
+            if ui_entry || shared_wm_requested {
                 initial_url = Some(html_data_url(mdi_shell_html()));
             }
             {
@@ -1402,13 +1316,6 @@ pub fn run() {
                     show_error(&handle, "Startup Error", &message);
                 });
             } else {
-                if shared_wm_requested {
-                    let handle = app.handle().clone();
-                    thread::spawn(move || {
-                        thread::sleep(std::time::Duration::from_millis(500));
-                        show_shared_wm_boot(&handle);
-                    });
-                }
                 if let Some(stdout) = child_stdout {
                     let handle = app.handle().clone();
                     let suppress = suppress_status_updates;
