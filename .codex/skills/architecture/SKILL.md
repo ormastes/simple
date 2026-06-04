@@ -123,6 +123,7 @@ Proposed | Accepted | Deprecated | Superseded by ADR-XXX
 | Artifact | Path |
 |----------|------|
 | Architecture docs | `doc/04_architecture/<feature>.md` |
+| Architecture TLDRs | `doc/04_architecture/<feature>_tldr.md` for long docs |
 | ADRs | `doc/04_architecture/adr/ADR-NNN.md` |
 | Refactoring plans | `doc/03_plan/design/<feature>_refactor.md` |
 
@@ -139,3 +140,7 @@ Proposed | Accepted | Deprecated | Superseded by ADR-XXX
 - Prefer tree-private by default; allow sibling access only through extracted common nodes
 - Use exact repo paths in documentation, not assumptions
 - Always inspect the real module tree before documenting
+- For long architecture docs, create or update a same-directory TLDR companion:
+  `xxxxx.md` -> `xxxxx_tldr.md`. Keep it one screen, with purpose, core
+  structure/decision, startup or hot-path implications, cache/index and
+  invalidation notes when relevant, and next paths to inspect.

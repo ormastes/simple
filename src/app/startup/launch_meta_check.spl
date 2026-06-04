@@ -1,0 +1,58 @@
+# Launch metadata checker.
+
+use std.cli.cli_util (get_cli_args)
+use app.startup.launch_metadata.{launch_metadata_for_path, launch_metadata_for_simpleos_path, startup_plan_from_metadata, startup_feature_summary}
+
+extern fn rt_file_exists(path: text) -> bool
+
+fn _print_help():
+    print "Usage: simple launch-meta check [--simpleos] <path>"
+    print ""
+    print "Checks Simple startup metadata policy for native, script, SMF, and SimpleOS launch paths."
+
+fn _strip_entry_arg(args: [text]) -> [text]:
+    if args.len() > 0 and args[0].ends_with("launch_meta_check.spl"):
+        return args[1:]
+    args
+
+fn _is_simpleos_virtual_path(path: text) -> bool:
+    path.starts_with("/sys/apps/") or path.starts_with("/sys/lib/")
+
+fn _check_path(path: text, target: text) -> i64:
+    if path == "":
+        print "launch-meta: missing path"
+        return 2
+    val simpleos_target = target == "simpleos"
+    if not simpleos_target and not rt_file_exists(path):
+        print "launch-meta: path not found: {path}"
+        return 2
+    if simpleos_target and not _is_simpleos_virtual_path(path):
+        print "launch-meta: SimpleOS paths must be under /sys/apps or /sys/lib: {path}"
+        return 2
+    val metadata = if simpleos_target: launch_metadata_for_simpleos_path(path) else: launch_metadata_for_path(path)
+    val plan = startup_plan_from_metadata(path, [], metadata, not simpleos_target, simpleos_target)
+    print "launch-meta: ok {path}"
+    print startup_feature_summary(plan)
+    0
+
+fn main() -> i64:
+    val args = _strip_entry_arg(get_cli_args())
+    if args.len() == 0:
+        _print_help()
+        return 1
+    if args[0] == "-h" or args[0] == "--help":
+        _print_help()
+        return 0
+    if args[0] != "check":
+        print "launch-meta: unknown command: {args[0]}"
+        _print_help()
+        return 1
+    if args.len() < 2:
+        print "launch-meta: check requires a path"
+        return 2
+    if args[1] == "--simpleos":
+        if args.len() < 3:
+            print "launch-meta: check --simpleos requires a path"
+            return 2
+        return _check_path(args[2], "simpleos")
+    _check_path(args[1], "host")

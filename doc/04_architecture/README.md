@@ -1,5 +1,49 @@
 # Architecture (Index)
 
+## Folder Organization
+
+`doc/04_architecture/` is the source of truth for architecture decisions,
+system structure, runtime boundaries, and long-lived technical direction.
+
+| Location | Use |
+|----------|-----|
+| `README.md` | Human entrypoint and folder policy |
+| `*_tldr.md` | One-screen companion summaries for long architecture docs |
+| `<feature>.md` | Feature, platform, runtime, or subsystem architecture |
+| `adr/ADR-NNN-*.md` | Architecture Decision Records |
+| `format/*.md` | File-format and wire-format architecture |
+| `rule/*.md` | Architecture-adjacent engineering rules |
+
+Keep existing architecture files in place unless a user explicitly asks for a
+move. New architecture docs should use stable lowercase slugs, match the related
+research/requirements/design/test slug when one exists, and link to source,
+tests, reports, or generated specs with concrete paths.
+
+## TLDR Companion Policy
+
+Long architecture documents should have a same-directory TLDR file with the
+same base name plus `_tldr.md`.
+
+Examples:
+
+| Original | TLDR |
+|----------|------|
+| `simpleos_launch_modes.md` | `simpleos_launch_modes_tldr.md` |
+| `README.md` | `README_tldr.md` |
+| `format/smf_specification.md` | `format/smf_specification_tldr.md` |
+
+Do not create `*_tldr_tldr.md`. Do not put executable SPipe specs under
+`doc/06_spec`; generated/manual spec docs stay there, while architecture TLDRs
+stay beside their architecture source document.
+
+TLDR files should fit on one screen and answer:
+
+- what the architecture doc is for
+- the core decision or structure
+- startup, hot-path, cache/index, invalidation, and RSS/latency implications
+  when relevant
+- the few paths a maintainer should open next
+
 ## Core Documentation
 
 - [Architecture Overview](overview.md) - High-level architecture and module dependencies
@@ -12,6 +56,9 @@
 - [Development Guide](architecture_dev.md) - Feature Guidance, Code Quality, Verification
 - [Glossary](../glossary.md) - Key concepts (Crate, Virtual Crate, module terms)
 - [Dependency Graphs](dependency_graphs.md) - Crate and module dependency graphs
+- [Architecture Folder TLDR](README_tldr.md) - One-screen organization and TLDR policy
+- [Simple App Startup](simple_app_startup.md) - Metadata-driven native/script/SMF/SimpleOS startup, mmap/cache, dynlib, and arg parser policy
+- [Simple App Startup TLDR](simple_app_startup_tldr.md) - One-screen startup architecture summary
 
 ## MDSOC Reports
 

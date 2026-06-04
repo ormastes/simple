@@ -48,6 +48,11 @@ use os.services.launcher.launcher_registry.{
 use os.userlib.syscall_raw.{syscall}
 use os.kernel.process_compat.{posix_spawn_with_args, posix_kill}
 use os.userlib.process.{spawn, get_task_info}
+use os.kernel.loader.app_registry.{app_registry_cached_bytes, app_registry_cache_bytes}
+
+var launcher_prefetch_requests: i64 = 0
+var launcher_last_prefetch_path: text = ""
+var launcher_last_prefetch_cache_hit: bool = false
 
 fn log_raw_println(msg: text):
     # The generic kernel log facade lowers through `print`, which is not safe
@@ -120,6 +125,9 @@ fn launcher_init():
     process_count = 0
     process_sequence = 1
     launcher_last_launch_pid = 0
+    launcher_prefetch_requests = 0
+    launcher_last_prefetch_path = ""
+    launcher_last_prefetch_cache_hit = false
 
     _launcher_seed_default_app("Hello World", "/sys/apps/hello_world.smf", "H", 0x48, MOD_META)
     _launcher_seed_default_app("Calculator", "/sys/apps/calculator.smf", "=", 0x41, MOD_META | MOD_SHIFT)
@@ -228,6 +236,44 @@ fn launcher_launch_by_index(idx: u64) -> i64:
     val path = _app_path(idx)
     log_raw_println("[launcher] Launching: {name}")
     launcher_launch_path_with_args(path, [])
+
+fn launcher_prefetch_reset_for_test():
+    launcher_prefetch_requests = 0
+    launcher_last_prefetch_path = ""
+    launcher_last_prefetch_cache_hit = false
+
+fn launcher_prefetch_count() -> i64:
+    launcher_prefetch_requests
+
+fn launcher_prefetch_last_path() -> text:
+    launcher_last_prefetch_path
+
+fn launcher_prefetch_last_cache_hit() -> bool:
+    launcher_last_prefetch_cache_hit
+
+fn launcher_prefetch_app_path(path: text) -> bool:
+    """Best-effort executable prefetch for WM hover.
+
+    Hover prefetch is a cache/read-ahead hint only. It must not spawn the app,
+    call into dynlibs, or map process-callable executable code.
+    """
+    if path == "":
+        return false
+    launcher_prefetch_requests = launcher_prefetch_requests + 1
+    launcher_last_prefetch_path = path
+    val cached = app_registry_cached_bytes(path)
+    launcher_last_prefetch_cache_hit = cached.len() > 0
+    if launcher_last_prefetch_cache_hit:
+        app_registry_cache_bytes(path, cached)
+    launcher_last_prefetch_cache_hit
+
+fn launcher_prefetch_app_index(idx: u64) -> bool:
+    if idx >= app_count:
+        return false
+    launcher_prefetch_app_path(_app_path(idx))
+
+fn launcher_hover_executable_icon(path: text) -> bool:
+    launcher_prefetch_app_path(path)
 
 fn _launch_seeded_app(path: text) -> i64:
     """Launch one of the seeded desktop apps using canonical metadata.

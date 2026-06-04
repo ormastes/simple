@@ -1,0 +1,90 @@
+# codex-system-test
+#
+# SimpleOS startup prefetch system spec.
+
+use std.spec.*
+use os.services.launcher.launcher.{
+    launcher_init,
+    launcher_get_running_app_count,
+    launcher_hover_executable_icon,
+    launcher_prefetch_app_index,
+    launcher_prefetch_count,
+    launcher_prefetch_last_path,
+    launcher_prefetch_last_cache_hit
+}
+use os.kernel.loader.app_registry.{
+    app_registry_load_hardcoded_fallback,
+    app_registry_cache_bytes,
+    app_registry_cached_bytes
+}
+use app.startup.launch_metadata.{launch_metadata_for_simpleos_path, startup_plan_from_metadata}
+
+describe "SimpleOS app startup prefetch":
+    describe "REQ-100: SimpleOS launch metadata":
+        it "should plan SMF launch through SimpleOS VFS prewarm":
+            val metadata = launch_metadata_for_simpleos_path("/sys/apps/simple.smf")
+            val plan = startup_plan_from_metadata("/sys/apps/simple.smf", [], metadata, false, true)
+            expect(plan.target_os).to_equal("simpleos")
+            expect(plan.entry_kind).to_equal("smf")
+            expect(plan.cache_strategy).to_equal("simpleos_vfs_prewarm")
+            expect(plan.include_mmap_cache).to_equal(true)
+
+        it "should plan native SimpleOS app launch without app arg parser":
+            val metadata = launch_metadata_for_simpleos_path("/sys/apps/native_tool")
+            val plan = startup_plan_from_metadata("/sys/apps/native_tool", [], metadata, false, true)
+            expect(plan.target_os).to_equal("simpleos")
+            expect(plan.entry_kind).to_equal("native")
+            expect(plan.include_arg_parser).to_equal(false)
+
+    describe "REQ-101: WM hover prefetch":
+        it "should prefetch cached executable bytes on hover without launching":
+            launcher_init()
+            app_registry_load_hardcoded_fallback()
+            app_registry_cache_bytes("/sys/apps/simple", [1u8, 2u8, 3u8])
+
+            val hit = launcher_hover_executable_icon("/sys/apps/simple.smf")
+
+            expect(hit).to_equal(true)
+            expect(launcher_prefetch_count()).to_equal(1)
+            expect(launcher_prefetch_last_path()).to_equal("/sys/apps/simple.smf")
+            expect(launcher_prefetch_last_cache_hit()).to_equal(true)
+            expect(launcher_get_running_app_count()).to_equal(0)
+            expect(app_registry_cached_bytes("/sys/apps/simple").len()).to_equal(3)
+
+        it "should record a miss for an executable that is not warmed yet":
+            launcher_init()
+            app_registry_load_hardcoded_fallback()
+
+            val hit = launcher_hover_executable_icon("/sys/apps/editor.smf")
+
+            expect(hit).to_equal(false)
+            expect(launcher_prefetch_count()).to_equal(1)
+            expect(launcher_prefetch_last_path()).to_equal("/sys/apps/editor.smf")
+            expect(launcher_prefetch_last_cache_hit()).to_equal(false)
+            expect(launcher_get_running_app_count()).to_equal(0)
+
+        it "should reject empty hover paths without recording a prefetch":
+            launcher_init()
+            val hit = launcher_hover_executable_icon("")
+            expect(hit).to_equal(false)
+            expect(launcher_prefetch_count()).to_equal(0)
+            expect(launcher_prefetch_last_path()).to_equal("")
+
+    describe "REQ-102: launcher icon index prefetch":
+        it "should prefetch the executable path for a seeded launcher icon":
+            launcher_init()
+            app_registry_load_hardcoded_fallback()
+            app_registry_cache_bytes("/sys/apps/simple", [9u8])
+
+            val hit = launcher_prefetch_app_index(11)
+
+            expect(hit).to_equal(true)
+            expect(launcher_prefetch_count()).to_equal(1)
+            expect(launcher_prefetch_last_path()).to_equal("/sys/apps/simple.smf")
+            expect(launcher_get_running_app_count()).to_equal(0)
+
+        it "should reject out-of-range icon indexes":
+            launcher_init()
+            val hit = launcher_prefetch_app_index(999u64)
+            expect(hit).to_equal(false)
+            expect(launcher_prefetch_count()).to_equal(0)
