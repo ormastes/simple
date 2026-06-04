@@ -104,6 +104,22 @@ fn round_trip(m: FeatureManifest, smf: [u8]) -> Result<(FeatureManifest, [u8]), 
     val bytes: [u8] = encode_sfm(m, smf)
     return decode_sfm(bytes)
 
+# @step: Compare two byte buffers for exact equality
+fn bytes_equal(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: i32 = 0
+    while i < (a.len() as i32):
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    return true
+
+# @step: Re-encode a decoded manifest+payload and check it matches the first encoding
+fn reencode_matches(m2: FeatureManifest, smf2: [u8], first: [u8]) -> bool:
+    val second: [u8] = encode_sfm(m2, smf2)
+    return bytes_equal(second, first)
+
 
 # ============================================================================
 # AC-1: Codec round-trip preserves manifest fields + embedded SMF bytes
@@ -129,13 +145,7 @@ describe "SFM codec":
             match round_trip(m, smf):
                 Ok((_, out)):
                     expect(out.len()).to_equal(smf.len())
-                    var i: i32 = 0
-                    var same: bool = true
-                    while i < (smf.len() as i32):
-                        if out[i] != smf[i]:
-                            same = false
-                        i = i + 1
-                    expect(same).to_be_true()
+                    assert_true(bytes_equal(out, smf))
                 Err(e):
                     expect("decode-failed: " + e).to_equal("ok")
 
@@ -146,15 +156,7 @@ describe "SFM codec":
             val first: [u8] = encode_sfm(m, smf)
             match decode_sfm(first):
                 Ok((m2, smf2)):
-                    val second: [u8] = encode_sfm(m2, smf2)
-                    expect(second.len()).to_equal(first.len())
-                    var i: i32 = 0
-                    var same: bool = true
-                    while i < (first.len() as i32):
-                        if second[i] != first[i]:
-                            same = false
-                        i = i + 1
-                    expect(same).to_be_true()
+                    assert_true(reencode_matches(m2, smf2, first))
                 Err(e):
                     expect("decode-failed: " + e).to_equal("ok")
 
@@ -165,7 +167,7 @@ describe "SFM codec":
             match round_trip(m, smf):
                 Ok((decoded, _)):
                     match decoded.security_level:
-                        Ordinary: expect(true).to_be_true()
+                        Ordinary: assert_true(true)
                         Trusted:  expect("expected Ordinary").to_equal("ok")
                 Err(e):
                     expect("decode-failed: " + e).to_equal("ok")
@@ -181,7 +183,7 @@ describe "SFM codec":
             expect(front.role).to_equal("cli")
             expect(front.entry_symbol).to_equal("arg_parse_main")
             match front.kind:
-                FrontArgParser: expect(true).to_be_true()
+                FrontArgParser: assert_true(true)
                 _:              expect("expected FrontArgParser").to_equal("ok")
 
         it "should carry the layer kind through a codec round-trip":
@@ -193,9 +195,9 @@ describe "SFM codec":
                     val back = decoded.layers[1]
                     expect(back.role).to_equal("device")
                     expect(back.entry_symbol).to_equal("hw_open")
-                    expect(back.privileged).to_be_true()
+                    assert_true(back.privileged)
                     match back.kind:
-                        BackHw: expect(true).to_be_true()
+                        BackHw: assert_true(true)
                         _:      expect("expected BackHw").to_equal("ok")
                 Err(e):
                     expect("decode-failed: " + e).to_equal("ok")
@@ -213,7 +215,7 @@ describe "SFM codec edge cases":
         tiny.append(83 as u8)
         match decode_sfm(tiny):
             Ok(_):  expect("should have failed").to_equal("ok")
-            Err(_): expect(true).to_be_true()
+            Err(_): assert_true(true)
 
     # @manual: folded
     it "should preserve an empty embedded SMF payload":
