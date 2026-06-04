@@ -34,6 +34,14 @@ For MCP scalar adapter payloads, use `play_wm_text_snapshot`,
 For CLI planning/discovery, use `simple play wm-text-snapshot`,
 `simple play wm-text-find`, and `simple play wm-text-act`.
 
+## SPipe GUI Test Know-How
+
+GUI SPipe tests should verify behavior through the actual access surface when
+available, not just through screenshots. Use snapshot/find/action/history or the
+`wm-text-*` adapters to open a surface, locate the target by visible text or
+role, perform the interaction, and assert the post-action surface state. Keep
+screenshots as visual evidence for layout, theme, and pixel regressions.
+
 ## Procedure
 
 ### Phase 1: Snapshot

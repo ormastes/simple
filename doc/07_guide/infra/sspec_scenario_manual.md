@@ -93,6 +93,14 @@ Use `# @capture(html)` when the relevant evidence is an HTML document or
 visible HTML text. Use `# @capture(gui)` for graphical GUI evidence, but when
 the GUI is backed by Simple Web or another HTML-rendered surface, capture the
 HTML text first and keep screenshots as fallback evidence.
+Interactive GUI scenarios should drive the actual surface when a Simple UI
+access adapter exists. Use `ui_access_snapshot`/`ui_access_find` to discover
+the target, `ui_access_act` to perform the gesture or command, and
+`ui_access_history`/`ui_access_observe` to assert the result. CLI and MCP
+wrappers such as `simple play wm-text-*` and `play_wm_text_*` are acceptable
+front doors to the same contract. Keep screenshots as visual evidence for
+layout or theme checks, not as the only proof that drag, click, focus, or text
+entry works.
 Concrete provider artifacts may be attached to the next manual step with
 `# @artifact("path/to/artifact")` or `# @artifact: path/to/artifact`; generated
 docs render the artifact under the producing step and omit the metadata from

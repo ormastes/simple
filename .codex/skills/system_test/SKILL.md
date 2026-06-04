@@ -97,6 +97,12 @@ describe "<Feature Name>":
 - For Simple Web or HTML-backed GUI surfaces, prefer `html` capture and
   visible-text HTML checks; use `gui` screenshot capture as fallback evidence
   when HTML cannot be captured.
+- GUI behavior specs must also drive or query the actual surface through the
+  Simple UI access contract when the repository exposes it: `ui_access_snapshot`,
+  `ui_access_surface`, `ui_access_find`, `ui_access_act`, `ui_access_history`,
+  `ui_access_observe`, or `ui_access_state`. CLI/MCP wrappers such as
+  `simple play wm-text-*` and `play_wm_text_*` are acceptable adapters. A
+  screenshot-only pass is evidence, not interaction coverage.
 - Evidence display is user-selectable with `# @evidence-display: embed_tui`,
   `links`, or `embed_all`. Default to `embed_tui`: embed TUI evidence and link
   screenshots, logs, protocol dumps, binary artifacts, and other non-TUI files.
