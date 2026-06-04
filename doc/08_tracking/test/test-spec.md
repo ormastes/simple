@@ -1,12 +1,12 @@
 # Test Specification
 
-*Generated: 2026-06-03 08:02:41*
+*Generated: 2026-06-04 01:50:52*
 
-## test/unit/lib/gpu/engine2d
+## test/unit/compiler/codegen
 
-❌ **opencl_session_contract_spec.spl** (147ms)
-  - Source: `test/unit/lib/gpu/engine2d/opencl_session_contract_spec.spl`
-  - Generated doc: `doc/06_spec/opencl_session_contract_spec.md`
+❌ **opencl_backend_contract_spec.spl** (740ms)
+  - Source: `test/unit/compiler/codegen/opencl_backend_contract_spec.spl`
+  - Generated doc: `doc/06_spec/opencl_backend_contract_spec.md`
 
 
 ---
@@ -14,6 +14,6 @@
 ## Summary
 
 - **Total:** 1 tests
-- **Passed:** 5 ✅
+- **Passed:** 7 ✅
 - **Failed:** 1 ❌
-- **Duration:** 151ms
+- **Duration:** 746ms

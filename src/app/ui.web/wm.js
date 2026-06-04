@@ -152,6 +152,9 @@ class SimpleWindowManager {
     this._qualityFilter = 'all';
     this._selectedQualityCheck = 'color';
     this._qualityAuditMode = 'full';
+    this._qualityContrastPolicyActiveIndex = 0;
+    this._qualityDensityPolicyActiveIndex = 1;
+    this._qualityBackdropPolicyActiveIndex = 0;
     this._taskbarPreview = null;
     this._taskbarPreviewHideTimer = 0;
     this._wmTooltip = null;
@@ -4874,6 +4877,27 @@ class SimpleWindowManager {
         this._selectQualityCheck(check.dataset.qualityCheck || 'color');
         return;
       }
+      const contrastPolicy = event.target.closest('.wm-quality-contrast-policy-item');
+      if (contrastPolicy && panel.contains(contrastPolicy)) {
+        this._qualityContrastPolicyActiveIndex = Number(contrastPolicy.dataset.contrastPolicyIndex || '0') || 0;
+        this._syncQualityContrastPolicySelection(false);
+        this._activateQualityContrastPolicySelection();
+        return;
+      }
+      const densityPolicy = event.target.closest('.wm-quality-density-policy-item');
+      if (densityPolicy && panel.contains(densityPolicy)) {
+        this._qualityDensityPolicyActiveIndex = Number(densityPolicy.dataset.densityPolicyIndex || '0') || 0;
+        this._syncQualityDensityPolicySelection(false);
+        this._activateQualityDensityPolicySelection();
+        return;
+      }
+      const backdropPolicy = event.target.closest('.wm-quality-backdrop-policy-item');
+      if (backdropPolicy && panel.contains(backdropPolicy)) {
+        this._qualityBackdropPolicyActiveIndex = Number(backdropPolicy.dataset.backdropPolicyIndex || '0') || 0;
+        this._syncQualityBackdropPolicySelection(false);
+        this._activateQualityBackdropPolicySelection();
+        return;
+      }
       const mode = event.target.closest('[data-quality-mode]');
       if (mode && panel.contains(mode)) {
         this._setQualityAuditMode(mode.dataset.qualityMode || 'full');
@@ -4887,6 +4911,53 @@ class SimpleWindowManager {
       const action = event.target.closest('[data-quality-action]');
       if (!action || !panel.contains(action)) return;
       this._activateQualityInspectorAction(action.dataset.qualityAction || '');
+    });
+    panel.addEventListener('keydown', (event) => {
+      const target = event.target instanceof Element ? event.target : null;
+      const contrastPolicy = target ? target.closest('.wm-quality-contrast-policy-item') : null;
+      const densityPolicy = target ? target.closest('.wm-quality-density-policy-item') : null;
+      const backdropPolicy = target ? target.closest('.wm-quality-backdrop-policy-item') : null;
+      if ((!contrastPolicy || !panel.contains(contrastPolicy)) && (!densityPolicy || !panel.contains(densityPolicy)) && (!backdropPolicy || !panel.contains(backdropPolicy))) return;
+      const moveSelection = (delta) => {
+        if (contrastPolicy) this._moveQualityContrastPolicySelection(delta);
+        if (densityPolicy) this._moveQualityDensityPolicySelection(delta);
+        if (backdropPolicy) this._moveQualityBackdropPolicySelection(delta);
+      };
+      const setSelection = (index) => {
+        if (contrastPolicy) this._setQualityContrastPolicySelection(index);
+        if (densityPolicy) this._setQualityDensityPolicySelection(index);
+        if (backdropPolicy) this._setQualityBackdropPolicySelection(index);
+      };
+      const itemCount = contrastPolicy ? this._qualityContrastPolicyItems().length : densityPolicy ? this._qualityDensityPolicyItems().length : this._qualityBackdropPolicyItems().length;
+      const activateSelection = () => {
+        if (contrastPolicy) this._activateQualityContrastPolicySelection();
+        if (densityPolicy) this._activateQualityDensityPolicySelection();
+        if (backdropPolicy) this._activateQualityBackdropPolicySelection();
+      };
+      if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+        event.preventDefault();
+        moveSelection(1);
+        return;
+      }
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+        event.preventDefault();
+        moveSelection(-1);
+        return;
+      }
+      if (event.key === 'Home') {
+        event.preventDefault();
+        setSelection(0);
+        return;
+      }
+      if (event.key === 'End') {
+        event.preventDefault();
+        setSelection(itemCount - 1);
+        return;
+      }
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        activateSelection();
+      }
     });
     document.body.appendChild(panel);
     this._qualityInspector = panel;
@@ -5135,6 +5206,7 @@ class SimpleWindowManager {
     preview.appendChild(this._makeQualityColorMetric('Text', text, text));
     preview.appendChild(this._makeQualityColorMetric('Accent', accent, accent));
     preview.appendChild(this._makeQualityColorMetric('Contrast', contrast + ':1', accent));
+    preview.appendChild(this._makeQualityContrastPolicy());
     return preview;
   }
 
@@ -5155,6 +5227,86 @@ class SimpleWindowManager {
     metric.appendChild(name);
     metric.appendChild(result);
     return metric;
+  }
+
+  _makeQualityContrastPolicy() {
+    const entries = [
+      ['comfortable', 'Comfortable', '4.5:1 target'],
+      ['high', 'High', 'Stronger text']
+    ];
+    const current = this._normalizeContrastPreference(this._readContrastPreference());
+    const currentIndex = entries.findIndex(([mode]) => mode === current);
+    if (currentIndex >= 0) this._qualityContrastPolicyActiveIndex = currentIndex;
+    const policy = document.createElement('div');
+    policy.className = 'wm-quality-contrast-policy';
+    policy.setAttribute('role', 'listbox');
+    policy.setAttribute('aria-label', 'Contrast policy');
+    policy.dataset.contrastPolicyActiveIndex = String(this._qualityContrastPolicyActiveIndex);
+    policy.setAttribute('aria-activedescendant', `wm-quality-contrast-policy-${this._qualityContrastPolicyActiveIndex}`);
+    entries.forEach(([mode, label, value], index) => {
+      const selected = index === this._qualityContrastPolicyActiveIndex;
+      const item = document.createElement('button');
+      item.id = `wm-quality-contrast-policy-${index}`;
+      item.className = 'wm-quality-contrast-policy-item' + (selected ? ' selected' : '');
+      item.dataset.contrastPolicy = mode;
+      item.dataset.contrastPolicyIndex = String(index);
+      item.tabIndex = selected ? 0 : -1;
+      item.setAttribute('role', 'option');
+      item.setAttribute('aria-selected', selected ? 'true' : 'false');
+      const name = document.createElement('span');
+      name.className = 'wm-quality-contrast-policy-label';
+      name.textContent = label;
+      const result = document.createElement('strong');
+      result.className = 'wm-quality-contrast-policy-value';
+      result.textContent = value;
+      item.appendChild(name);
+      item.appendChild(result);
+      policy.appendChild(item);
+    });
+    return policy;
+  }
+
+  _qualityContrastPolicyItems() {
+    if (!this._qualityInspector) return [];
+    return Array.from(this._qualityInspector.querySelectorAll('.wm-quality-contrast-policy-item'));
+  }
+
+  _moveQualityContrastPolicySelection(delta) {
+    const items = this._qualityContrastPolicyItems();
+    if (!items.length) return;
+    const next = (this._qualityContrastPolicyActiveIndex + delta + items.length) % items.length;
+    this._setQualityContrastPolicySelection(next);
+  }
+
+  _setQualityContrastPolicySelection(index) {
+    const items = this._qualityContrastPolicyItems();
+    if (!items.length) return;
+    this._qualityContrastPolicyActiveIndex = Math.max(0, Math.min(index, items.length - 1));
+    this._syncQualityContrastPolicySelection();
+  }
+
+  _syncQualityContrastPolicySelection(shouldFocus = true) {
+    const items = this._qualityContrastPolicyItems();
+    if (!items.length) return;
+    const policy = items[0].closest('.wm-quality-contrast-policy');
+    items.forEach((item, index) => {
+      const selected = index === this._qualityContrastPolicyActiveIndex;
+      item.classList.toggle('selected', selected);
+      item.tabIndex = selected ? 0 : -1;
+      item.setAttribute('aria-selected', selected ? 'true' : 'false');
+      if (selected && policy) policy.setAttribute('aria-activedescendant', item.id);
+      if (selected && shouldFocus) item.focus();
+    });
+    if (policy) policy.dataset.contrastPolicyActiveIndex = String(this._qualityContrastPolicyActiveIndex);
+  }
+
+  _activateQualityContrastPolicySelection() {
+    const item = this._qualityContrastPolicyItems()[this._qualityContrastPolicyActiveIndex];
+    if (!item) return;
+    const contrast = item.dataset.contrastPolicy || 'comfortable';
+    this.setContrastPreference(contrast);
+    this._sendWindowCmd('quality_contrast_policy', { contrast_policy: contrast });
+    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
   }
 
   _makeQualityComputedColorPreview() {
@@ -5289,6 +5441,7 @@ class SimpleWindowManager {
     preview.appendChild(this._makeQualityComputedDensityMetric('Safe', safe + 'px', 'safe', safe >= 12 && safe <= 24));
     preview.appendChild(this._makeQualityComputedDensityMetric('Gap', gap + 'px', 'gap', gap >= 8 && gap <= 18));
     preview.appendChild(this._makeQualityComputedDensityMetric('Touch', touch + 'px', 'touch', touch >= 44));
+    preview.appendChild(this._makeQualityDensityPolicy());
     return preview;
   }
 
@@ -5309,6 +5462,87 @@ class SimpleWindowManager {
     metric.appendChild(name);
     metric.appendChild(result);
     return metric;
+  }
+
+  _makeQualityDensityPolicy() {
+    const entries = [
+      ['compact', 'Compact', '12 / 8 / 44'],
+      ['comfortable', 'Comfortable', '16 / 12 / 44'],
+      ['spacious', 'Spacious', '20 / 16 / 48']
+    ];
+    const mode = this._normalizeThreeMode(this._readDensityPreference() || this._densityMode, 'comfortable', 'compact', 'spacious');
+    const currentIndex = entries.findIndex(([density]) => density === mode);
+    if (currentIndex >= 0) this._qualityDensityPolicyActiveIndex = currentIndex;
+    const policy = document.createElement('div');
+    policy.className = 'wm-quality-density-policy';
+    policy.setAttribute('role', 'listbox');
+    policy.setAttribute('aria-label', 'Layout density policy');
+    policy.dataset.densityPolicyActiveIndex = String(this._qualityDensityPolicyActiveIndex);
+    policy.setAttribute('aria-activedescendant', `wm-quality-density-policy-${this._qualityDensityPolicyActiveIndex}`);
+    entries.forEach(([density, label, value], index) => {
+      const selected = index === this._qualityDensityPolicyActiveIndex;
+      const item = document.createElement('button');
+      item.id = `wm-quality-density-policy-${index}`;
+      item.className = 'wm-quality-density-policy-item' + (selected ? ' selected' : '');
+      item.dataset.densityPolicy = density;
+      item.dataset.densityPolicyIndex = String(index);
+      item.tabIndex = selected ? 0 : -1;
+      item.setAttribute('role', 'option');
+      item.setAttribute('aria-selected', selected ? 'true' : 'false');
+      const name = document.createElement('span');
+      name.className = 'wm-quality-density-policy-label';
+      name.textContent = label;
+      const result = document.createElement('strong');
+      result.className = 'wm-quality-density-policy-value';
+      result.textContent = value;
+      item.appendChild(name);
+      item.appendChild(result);
+      policy.appendChild(item);
+    });
+    return policy;
+  }
+
+  _qualityDensityPolicyItems() {
+    if (!this._qualityInspector) return [];
+    return Array.from(this._qualityInspector.querySelectorAll('.wm-quality-density-policy-item'));
+  }
+
+  _moveQualityDensityPolicySelection(delta) {
+    const items = this._qualityDensityPolicyItems();
+    if (!items.length) return;
+    const next = (this._qualityDensityPolicyActiveIndex + delta + items.length) % items.length;
+    this._setQualityDensityPolicySelection(next);
+  }
+
+  _setQualityDensityPolicySelection(index) {
+    const items = this._qualityDensityPolicyItems();
+    if (!items.length) return;
+    this._qualityDensityPolicyActiveIndex = Math.max(0, Math.min(index, items.length - 1));
+    this._syncQualityDensityPolicySelection();
+  }
+
+  _syncQualityDensityPolicySelection(shouldFocus = true) {
+    const items = this._qualityDensityPolicyItems();
+    if (!items.length) return;
+    const policy = items[0].closest('.wm-quality-density-policy');
+    items.forEach((item, index) => {
+      const selected = index === this._qualityDensityPolicyActiveIndex;
+      item.classList.toggle('selected', selected);
+      item.tabIndex = selected ? 0 : -1;
+      item.setAttribute('aria-selected', selected ? 'true' : 'false');
+      if (selected && policy) policy.setAttribute('aria-activedescendant', item.id);
+      if (selected && shouldFocus) item.focus();
+    });
+    if (policy) policy.dataset.densityPolicyActiveIndex = String(this._qualityDensityPolicyActiveIndex);
+  }
+
+  _activateQualityDensityPolicySelection() {
+    const item = this._qualityDensityPolicyItems()[this._qualityDensityPolicyActiveIndex];
+    if (!item) return;
+    const density = item.dataset.densityPolicy || 'comfortable';
+    this.setDensityPreference(density);
+    this._sendWindowCmd('quality_density_policy', { density_policy: density });
+    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
   }
 
   _qualityComputedGeometry(selector, minWidth, minHeight) {
@@ -6355,6 +6589,7 @@ class SimpleWindowManager {
     preview.appendChild(this._makeQualityComputedBackdropMetric('Opacity', opacity + '%', 'opacity', opacity >= 18 && opacity <= 100));
     preview.appendChild(this._makeQualityComputedBackdropMetric('Drift', (driftScale / 100).toFixed(2) + 'x', 'drift', motionMode === 'off' || driftScale >= 100));
     preview.appendChild(this._makeQualityComputedBackdropMetric('Energy', this._energyLabel(), 'energy', this._energyMode !== 'critical' || duration === 0));
+    preview.appendChild(this._makeQualityBackdropPolicy());
     return preview;
   }
 
@@ -6375,6 +6610,87 @@ class SimpleWindowManager {
     metric.appendChild(name);
     metric.appendChild(result);
     return metric;
+  }
+
+  _makeQualityBackdropPolicy() {
+    const entries = [
+      ['ambient', 'Ambient', '24s drift'],
+      ['subtle', 'Subtle', '42s drift'],
+      ['static', 'Static', 'No drift']
+    ];
+    const mode = this._normalizeThreeMode(this._readBackdropMotionPreference() || this._backdropMotionMode, 'ambient', 'subtle', 'static');
+    const currentIndex = entries.findIndex(([motion]) => motion === mode);
+    if (currentIndex >= 0) this._qualityBackdropPolicyActiveIndex = currentIndex;
+    const policy = document.createElement('div');
+    policy.className = 'wm-quality-backdrop-policy';
+    policy.setAttribute('role', 'listbox');
+    policy.setAttribute('aria-label', 'Backdrop motion policy');
+    policy.dataset.backdropPolicyActiveIndex = String(this._qualityBackdropPolicyActiveIndex);
+    policy.setAttribute('aria-activedescendant', `wm-quality-backdrop-policy-${this._qualityBackdropPolicyActiveIndex}`);
+    entries.forEach(([motion, label, value], index) => {
+      const selected = index === this._qualityBackdropPolicyActiveIndex;
+      const item = document.createElement('button');
+      item.id = `wm-quality-backdrop-policy-${index}`;
+      item.className = 'wm-quality-backdrop-policy-item' + (selected ? ' selected' : '');
+      item.dataset.backdropPolicy = motion;
+      item.dataset.backdropPolicyIndex = String(index);
+      item.tabIndex = selected ? 0 : -1;
+      item.setAttribute('role', 'option');
+      item.setAttribute('aria-selected', selected ? 'true' : 'false');
+      const name = document.createElement('span');
+      name.className = 'wm-quality-backdrop-policy-label';
+      name.textContent = label;
+      const result = document.createElement('strong');
+      result.className = 'wm-quality-backdrop-policy-value';
+      result.textContent = value;
+      item.appendChild(name);
+      item.appendChild(result);
+      policy.appendChild(item);
+    });
+    return policy;
+  }
+
+  _qualityBackdropPolicyItems() {
+    if (!this._qualityInspector) return [];
+    return Array.from(this._qualityInspector.querySelectorAll('.wm-quality-backdrop-policy-item'));
+  }
+
+  _moveQualityBackdropPolicySelection(delta) {
+    const items = this._qualityBackdropPolicyItems();
+    if (!items.length) return;
+    const next = (this._qualityBackdropPolicyActiveIndex + delta + items.length) % items.length;
+    this._setQualityBackdropPolicySelection(next);
+  }
+
+  _setQualityBackdropPolicySelection(index) {
+    const items = this._qualityBackdropPolicyItems();
+    if (!items.length) return;
+    this._qualityBackdropPolicyActiveIndex = Math.max(0, Math.min(index, items.length - 1));
+    this._syncQualityBackdropPolicySelection();
+  }
+
+  _syncQualityBackdropPolicySelection(shouldFocus = true) {
+    const items = this._qualityBackdropPolicyItems();
+    if (!items.length) return;
+    const policy = items[0].closest('.wm-quality-backdrop-policy');
+    items.forEach((item, index) => {
+      const selected = index === this._qualityBackdropPolicyActiveIndex;
+      item.classList.toggle('selected', selected);
+      item.tabIndex = selected ? 0 : -1;
+      item.setAttribute('aria-selected', selected ? 'true' : 'false');
+      if (selected && policy) policy.setAttribute('aria-activedescendant', item.id);
+      if (selected && shouldFocus) item.focus();
+    });
+    if (policy) policy.dataset.backdropPolicyActiveIndex = String(this._qualityBackdropPolicyActiveIndex);
+  }
+
+  _activateQualityBackdropPolicySelection() {
+    const item = this._qualityBackdropPolicyItems()[this._qualityBackdropPolicyActiveIndex];
+    if (!item) return;
+    const motion = item.dataset.backdropPolicy || 'ambient';
+    this.setBackdropMotionPreference(motion);
+    this._sendWindowCmd('quality_backdrop_policy', { backdrop_policy: motion });
+    if (this._qualityInspector && !this._qualityInspector.hidden) this._renderQualityInspector();
   }
 
   _makeQualityComputedWallpaperPreview() {

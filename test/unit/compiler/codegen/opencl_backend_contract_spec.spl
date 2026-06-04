@@ -8,7 +8,7 @@ use compiler.common.attributes.{vhdl_hardware_metadata_default}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.mir_data.{MirFunction, MirModule, MirSignature, BlockId, LocalId}
-use compiler.mir.mir_instructions.{MirBlock, MirInst, MirInstKind, MirTerminator, MirOperand, MirBinOp, GpuBarrierScope}
+use compiler.mir.mir_instructions.{MirBlock, MirInst, MirInstKind, MirTerminator, MirOperand, MirBinOp, GpuBarrierScope, GpuMemoryScope, GpuAtomicOpKind, SwitchCase}
 use compiler.mir.mir_types.{MirLocal, MirType, MirTypeKind, LocalKind}
 
 fn empty_kernel_block() -> MirBlock:
@@ -37,6 +37,9 @@ fn u32_type() -> MirType:
 fn u64_type() -> MirType:
     MirType(kind: MirTypeKind.U64)
 
+fn bool_type() -> MirType:
+    MirType(kind: MirTypeKind.Bool)
+
 fn global_u32_ptr_type() -> MirType:
     MirType.ptr(u32_type(), true)
 
@@ -59,6 +62,88 @@ fn opencl_vector_add_block() -> MirBlock:
             MirInst(kind: MirInstKind.BinOp(LocalId(id: 9), MirBinOp.Add, MirOperand.copy(LocalId(id: 7)), MirOperand.copy(LocalId(id: 8))), span: nil),
             MirInst(kind: MirInstKind.GetElementPtr(LocalId(id: 6), MirOperand.copy(LocalId(id: 2)), [MirOperand.copy(LocalId(id: 3))]), span: nil),
             MirInst(kind: MirInstKind.Store(MirOperand.copy(LocalId(id: 6)), MirOperand.copy(LocalId(id: 9))), span: nil)
+        ],
+        terminator: MirTerminator.Ret(nil)
+    )
+
+fn opencl_branch_blocks() -> [MirBlock]:
+    [
+        MirBlock(
+            id: BlockId.entry(),
+            label: Some("entry"),
+            instructions: [],
+            terminator: MirTerminator.If(MirOperand.copy(LocalId(id: 0)), BlockId(id: 1), BlockId(id: 2))
+        ),
+        MirBlock(
+            id: BlockId(id: 1),
+            label: Some("then"),
+            instructions: [],
+            terminator: MirTerminator.Goto(BlockId(id: 3))
+        ),
+        MirBlock(
+            id: BlockId(id: 2),
+            label: Some("else"),
+            instructions: [],
+            terminator: MirTerminator.Goto(BlockId(id: 3))
+        ),
+        MirBlock(
+            id: BlockId(id: 3),
+            label: Some("merge"),
+            instructions: [],
+            terminator: MirTerminator.Ret(nil)
+        )
+    ]
+
+fn opencl_switch_blocks() -> [MirBlock]:
+    [
+        MirBlock(
+            id: BlockId.entry(),
+            label: Some("entry"),
+            instructions: [],
+            terminator: MirTerminator.Switch(
+                MirOperand.copy(LocalId(id: 0)),
+                [
+                    SwitchCase(value: 1, target: BlockId(id: 1)),
+                    SwitchCase(value: 2, target: BlockId(id: 2))
+                ],
+                BlockId(id: 3)
+            )
+        ),
+        MirBlock(
+            id: BlockId(id: 1),
+            label: Some("case_one"),
+            instructions: [],
+            terminator: MirTerminator.Goto(BlockId(id: 4))
+        ),
+        MirBlock(
+            id: BlockId(id: 2),
+            label: Some("case_two"),
+            instructions: [],
+            terminator: MirTerminator.Goto(BlockId(id: 4))
+        ),
+        MirBlock(
+            id: BlockId(id: 3),
+            label: Some("default"),
+            instructions: [],
+            terminator: MirTerminator.Goto(BlockId(id: 4))
+        ),
+        MirBlock(
+            id: BlockId(id: 4),
+            label: Some("merge"),
+            instructions: [],
+            terminator: MirTerminator.Ret(nil)
+        )
+    ]
+
+fn opencl_atomic_block() -> MirBlock:
+    MirBlock(
+        id: BlockId.entry(),
+        label: Some("entry"),
+        instructions: [
+            MirInst(kind: MirInstKind.GpuAtomicOp(LocalId(id: 2), GpuAtomicOpKind.Add, MirOperand.copy(LocalId(id: 0)), MirOperand.copy(LocalId(id: 1))), span: nil),
+            MirInst(kind: MirInstKind.GpuAtomicCas(LocalId(id: 3), MirOperand.copy(LocalId(id: 0)), MirOperand.copy(LocalId(id: 1)), MirOperand.copy(LocalId(id: 2))), span: nil),
+            MirInst(kind: MirInstKind.GpuMemFence(GpuMemoryScope.All), span: nil),
+            MirInst(kind: MirInstKind.GpuSharedAlloc(LocalId(id: 4), u32_type(), 32), span: nil)
         ],
         terminator: MirTerminator.Ret(nil)
     )
@@ -134,6 +219,95 @@ fn make_opencl_vector_add_kernel() -> MirFunction:
             temp_local(9, u32_type())
         ],
         blocks: [opencl_vector_add_block()],
+        entry_block: BlockId.entry(),
+        span: Span.empty(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: true,
+        gpu_target: "opencl",
+        gpu_backend_order: "opencl",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false
+    )
+
+fn make_opencl_branch_kernel() -> MirFunction:
+    MirFunction(
+        symbol: SymbolId(id: 6),
+        name: "opencl_branch_kernel",
+        signature: MirSignature(params: [bool_type()], return_type: MirType.unit(), is_variadic: false),
+        locals: [
+            arg_local(0, 0, "flag", bool_type())
+        ],
+        blocks: opencl_branch_blocks(),
+        entry_block: BlockId.entry(),
+        span: Span.empty(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: true,
+        gpu_target: "opencl",
+        gpu_backend_order: "opencl",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false
+    )
+
+fn make_opencl_switch_kernel() -> MirFunction:
+    MirFunction(
+        symbol: SymbolId(id: 7),
+        name: "opencl_switch_kernel",
+        signature: MirSignature(params: [u32_type()], return_type: MirType.unit(), is_variadic: false),
+        locals: [
+            arg_local(0, 0, "selector", u32_type())
+        ],
+        blocks: opencl_switch_blocks(),
+        entry_block: BlockId.entry(),
+        span: Span.empty(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: true,
+        gpu_target: "opencl",
+        gpu_backend_order: "opencl",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false
+    )
+
+fn make_opencl_atomic_kernel() -> MirFunction:
+    val ptr_u32 = global_u32_ptr_type()
+    MirFunction(
+        symbol: SymbolId(id: 8),
+        name: "opencl_atomic_u32",
+        signature: MirSignature(params: [ptr_u32, u32_type()], return_type: MirType.unit(), is_variadic: false),
+        locals: [
+            arg_local(0, 0, "accum", ptr_u32),
+            arg_local(1, 1, "value", u32_type()),
+            temp_local(2, u32_type()),
+            temp_local(3, u32_type()),
+            temp_local(4, u32_type())
+        ],
+        blocks: [opencl_atomic_block()],
         entry_block: BlockId.entry(),
         span: Span.empty(),
         generic_params: [],
@@ -229,3 +403,37 @@ describe "OpenCL backend contract":
         expect(source).to_contain("uint v9 = v7 + v8;")
         expect(source).to_contain("__global uint* v6 = (out + v3);")
         expect(source).to_contain("*v6 = v9;")
+
+    it "emits OpenCL C labels gotos and conditional branches":
+        val module = make_kernel_module([make_opencl_branch_kernel()])
+        val source = OpenClBackend.compile_module_to_opencl_source(module).unwrap()
+
+        expect(source).to_contain("__kernel void opencl_branch_kernel(bool flag)")
+        expect(source).to_contain("BB0:")
+        expect(source).to_contain("if (flag) { goto BB1; } else { goto BB2; }")
+        expect(source).to_contain("BB1:")
+        expect(source).to_contain("goto BB3;")
+        expect(source).to_contain("BB2:")
+        expect(source).to_contain("BB3:")
+        expect(source).to_contain("return;")
+
+    it "emits OpenCL C switch terminators with case and default gotos":
+        val module = make_kernel_module([make_opencl_switch_kernel()])
+        val source = OpenClBackend.compile_module_to_opencl_source(module).unwrap()
+
+        expect(source).to_contain("__kernel void opencl_switch_kernel(uint selector)")
+        expect(source).to_contain("switch (selector)")
+        expect(source).to_contain("case 1")
+        expect(source).to_contain("case 2")
+        expect(source).to_contain("default")
+        expect(source).to_contain("goto")
+
+    it "emits OpenCL C atomics fences and local memory for GPU kernels":
+        val module = make_kernel_module([make_opencl_atomic_kernel()])
+        val source = OpenClBackend.compile_module_to_opencl_source(module).unwrap()
+
+        expect(source).to_contain("__kernel void opencl_atomic_u32(__global uint* accum, uint value)")
+        expect(source).to_contain("uint v2 = atomic_add(accum, value);")
+        expect(source).to_contain("uint v3 = atomic_cmpxchg(accum, value, v2);")
+        expect(source).to_contain("mem_fence(CLK_LOCAL_MEM_FENCE | CLK_GLOBAL_MEM_FENCE);")
+        expect(source).to_contain("__local uint v4[32];")

@@ -6,7 +6,7 @@
 # MIR compilation attempts.
 
 use compiler.mir.mir_data.{MirModule}
-use compiler.mir.mir_instructions.{MirFunction, MirInst, MirTerminator, MirOperand, MirBinOp, MirUnaryOp, GpuBarrierScope, GpuMemoryScope}
+use compiler.mir.mir_instructions.{MirFunction, MirInst, MirTerminator, MirOperand, MirBinOp, MirUnaryOp, GpuBarrierScope, GpuMemoryScope, GpuAtomicOpKind, SwitchCase, BlockId}
 use compiler.mir.mir_types.{MirLocal, MirType, MirTypeKind, LocalKind, MirConstValue}
 use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, CompileOptions, CompileError, compileerror_backend_error}
 use compiler.backend.gpu_backend_metadata.{gpu_backend_accepts_kernel_metadata}
@@ -119,11 +119,12 @@ class OpenClBackend:
         var lines: [text] = []
         lines.push("__kernel void {func.name}({params}) {")
         for block in func.blocks:
+            lines.push("BB{block.id.id}:")
             if block.label.?:
                 lines.push("    // {block.label.unwrap()}")
             for inst in block.instructions:
                 lines.push("    {OpenClBackend.emit_instruction(func, inst)}")
-            lines.push("    {OpenClBackend.emit_terminator(block.terminator)}")
+            lines.push("    {OpenClBackend.emit_terminator(func, block.terminator)}")
         lines.push("}")
         lines.join("\n")
 
@@ -199,6 +200,8 @@ class OpenClBackend:
             case UnaryOp(dest, op, operand):
                 val type_ = OpenClBackend.local_id_type(func, dest)
                 "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest)} = {OpenClBackend.emit_unaryop(op)}{OpenClBackend.emit_operand(func, operand)};"
+            case Intrinsic(dest, name, args):
+                OpenClBackend.emit_intrinsic(func, dest, name, args)
             case Load(dest, ptr):
                 val type_ = OpenClBackend.local_id_type(func, dest)
                 "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest)} = *{OpenClBackend.emit_operand(func, ptr)};"
@@ -223,6 +226,10 @@ class OpenClBackend:
                 OpenClBackend.emit_mem_fence(scope)
             case GpuSharedAlloc(dest, type_, size):
                 "__local {OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest)}[{size}];"
+            case GpuAtomicOp(dest, op, ptr, value):
+                OpenClBackend.emit_atomic_op(func, dest, op, ptr, value)
+            case GpuAtomicCas(dest, ptr, expected, desired):
+                OpenClBackend.emit_atomic_cas(func, dest, ptr, expected, desired)
             case DebugValue(_, name):
                 "// debug value: {name}"
             case Nop:
@@ -287,6 +294,58 @@ class OpenClBackend:
             case BitNot: "~"
             case Transpose: ""
 
+    static fn emit_atomic_builtin(op: GpuAtomicOpKind) -> text:
+        match op:
+            case Add: "atomic_add"
+            case Sub: "atomic_sub"
+            case And: "atomic_and"
+            case Or: "atomic_or"
+            case Xor: "atomic_xor"
+            case Min: "atomic_min"
+            case Max: "atomic_max"
+            case Exchange: "atomic_xchg"
+            case CompareExchange: ""
+
+    static fn emit_atomic_op(func: MirFunction, dest, op: GpuAtomicOpKind, ptr: MirOperand, value: MirOperand) -> text:
+        val builtin = OpenClBackend.emit_atomic_builtin(op)
+        if builtin == "":
+            return "// unsupported OpenCL atomic operation"
+        val type_ = OpenClBackend.local_id_type(func, dest)
+        "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest)} = {builtin}({OpenClBackend.emit_operand(func, ptr)}, {OpenClBackend.emit_operand(func, value)});"
+
+    static fn emit_atomic_cas(func: MirFunction, dest, ptr: MirOperand, expected: MirOperand, desired: MirOperand) -> text:
+        val type_ = OpenClBackend.local_id_type(func, dest)
+        "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest)} = atomic_cmpxchg({OpenClBackend.emit_operand(func, ptr)}, {OpenClBackend.emit_operand(func, expected)}, {OpenClBackend.emit_operand(func, desired)});"
+
+    static fn emit_intrinsic(func: MirFunction, dest, name: text, args: [MirOperand]) -> text:
+        if name == "gpu_atomic_add_i32" or name == "gpu_atomic_add_i64":
+            return OpenClBackend.emit_atomic_intrinsic(func, dest, "atomic_add", name, args)
+        if name == "gpu_atomic_min_i64":
+            return OpenClBackend.emit_atomic_intrinsic(func, dest, "atomic_min", name, args)
+        if name == "gpu_atomic_max_i64":
+            return OpenClBackend.emit_atomic_intrinsic(func, dest, "atomic_max", name, args)
+        if name == "gpu_atomic_cas_i64":
+            return OpenClBackend.emit_atomic_cas_intrinsic(func, dest, name, args)
+        "// unsupported OpenCL intrinsic: {name}"
+
+    static fn emit_atomic_intrinsic(func: MirFunction, dest, builtin: text, name: text, args: [MirOperand]) -> text:
+        if not dest.?:
+            return "// OpenCL atomic intrinsic missing destination: {name}"
+        if args.len() < 2:
+            return "// OpenCL atomic intrinsic missing arguments: {name}"
+        val dest_id = dest.unwrap()
+        val type_ = OpenClBackend.local_id_type(func, dest_id)
+        "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest_id)} = {builtin}({OpenClBackend.emit_operand(func, args[0])}, {OpenClBackend.emit_operand(func, args[1])});"
+
+    static fn emit_atomic_cas_intrinsic(func: MirFunction, dest, name: text, args: [MirOperand]) -> text:
+        if not dest.?:
+            return "// OpenCL atomic intrinsic missing destination: {name}"
+        if args.len() < 3:
+            return "// OpenCL atomic intrinsic missing arguments: {name}"
+        val dest_id = dest.unwrap()
+        val type_ = OpenClBackend.local_id_type(func, dest_id)
+        "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest_id)} = atomic_cmpxchg({OpenClBackend.emit_operand(func, args[0])}, {OpenClBackend.emit_operand(func, args[1])}, {OpenClBackend.emit_operand(func, args[2])});"
+
     static fn emit_barrier(scope: GpuBarrierScope) -> text:
         match scope:
             case Workgroup:
@@ -307,7 +366,16 @@ class OpenClBackend:
             case QueueFamily:
                 "// queue-family fence deferred for OpenCL"
 
-    static fn emit_terminator(term: MirTerminator) -> text:
+    static fn emit_switch_terminator(func: MirFunction, value: MirOperand, targets: [SwitchCase], default: BlockId) -> text:
+        var parts: [text] = []
+        parts.push("switch ({OpenClBackend.emit_operand(func, value)}) {")
+        for target in targets:
+            parts.push("case {target.value}: goto BB{target.target.id};")
+        parts.push("default: goto BB{default.id};")
+        parts.push("}")
+        parts.join(" ")
+
+    static fn emit_terminator(func: MirFunction, term: MirTerminator) -> text:
         match term:
             case Ret(_):
                 "return;"
@@ -316,13 +384,13 @@ class OpenClBackend:
             case Abort(message):
                 "// abort: {message}"
             case Goto(target):
-                "// goto BB{target.id}"
-            case If(_, then_, else_):
-                "// if terminator deferred: BB{then_.id} else BB{else_.id}"
-            case Switch(_, _, default):
-                "// switch terminator deferred: default BB{default.id}"
+                "goto BB{target.id};"
+            case If(cond, then_, else_):
+                "if ({OpenClBackend.emit_operand(func, cond)}) { goto BB{then_.id}; } else { goto BB{else_.id}; }"
+            case Switch(value, targets, default):
+                OpenClBackend.emit_switch_terminator(func, value, targets, default)
             case CallTerminator(_, _, _, normal, _):
-                "// call terminator deferred: normal BB{normal.id}"
+                "// unsupported OpenCL call terminator: normal BB{normal.id}"
 
 impl Codegen for OpenClBackend:
     fn backend_kind() -> BackendKind:

@@ -125,7 +125,7 @@ Secrets are masked automatically when `mask_secrets: true` (default).
 ```simple
 val config = AuditConfig(
     enabled: true,
-    log_file: "security_audit.log",  # File path (append mode)
+    log_file: "tmp/security_audit.log",  # File path (append mode)
     log_to_stdout: false,
     min_severity: SecuritySeverity.Warning,  # Skip Info events
     mask_secrets: true

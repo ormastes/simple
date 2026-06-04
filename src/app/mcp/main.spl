@@ -82,8 +82,6 @@ use .tool_table
 use .cli_passthrough
 use .dap_bridge
 use .startup_log
-use std.editor.core.session.{EditSession}
-use std.editor.mcp.session_tools.{EditorMcpSessionBridge}
 
 val SERVER_NAME = "simple-mcp-full"
 val SERVER_VERSION = "4.0.0"
@@ -154,68 +152,6 @@ fn mcp_get_cli_args() -> [text]:
         i = i + 1
     args
 
-fn start_server():
-    var running = true
-    var editor_bridge = EditorMcpSessionBridge(session: EditSession.new())
-    while running:
-        var line = read_stdin_message()
-        if line == "":
-            running = false
-        else:
-            var method = extract_field(line, "method")
-            var id = extract_id(line)
-            var response = ""
-            if method == "initialize":
-                response = make_init_response(id)
-            elif method == "initialized" or method == "notifications/initialized":
-                response = ""
-            elif method == "shutdown":
-                response = make_json_result(id, "null")
-            elif method == "tools/list":
-                response = make_json_result(id, _mcp_static_tools_result())
-            elif method == "tools/call":
-                var tool_name = extract_nested(line, "name")
-                if is_editor_mcp_tool(tool_name):
-                    val result = editor_bridge.dispatch(tool_name, editor_mcp_args(tool_name, line))
-                    response = editor_mcp_response(id, result)
-                else:
-                    response = dispatch_tool(id, tool_name, line)
-            elif method == "resources/list":
-                response = handle_resources_list(id)
-            elif method == "resources/templates/list":
-                response = handle_resource_templates_list(id)
-            elif method == "resources/read":
-                val uri = extract_nested(line, "uri")
-                response = handle_resources_read(id, uri)
-            elif method == "prompts/list":
-                response = handle_prompts_list(id)
-            elif method == "prompts/get":
-                val prompt_name = extract_nested(line, "name")
-                response = handle_prompts_get(id, prompt_name, line)
-            elif method == "completion/complete" or method == "completions/complete":
-                response = handle_completion_req(id, line)
-            elif method == "logging/setLevel":
-                val level = extract_nested(line, "level")
-                if level != "":
-                    MCP_LOG_LEVEL = level
-                response = make_json_result(id, jo1(jp("level", js(MCP_LOG_LEVEL))))
-            elif method == "roots/list":
-                val cwd = get_cwd()
-                var root = LB()
-                root = root + jp("uri", js("file://" + cwd))
-                root = root + "," + jp("name", js("workspace"))
-                root = root + RB()
-                response = make_json_result(id, jo1(jp("roots", "[" + root + "]")))
-            elif method == "ping":
-                response = make_json_result(id, LB() + RB())
-            elif method == "notifications/cancelled" or method == "notifications/roots/list_changed":
-                response = ""
-            else:
-                if id != "" and id != "null":
-                    response = make_error(id, -32601, "Method not found: " + method)
-            if response != "":
-                write_stdout_message(response)
-
 fn main() -> i64:
     val raw_args = mcp_get_cli_args()
     val log_opts = parse_log_options(raw_args)
@@ -249,7 +185,6 @@ fn main() -> i64:
             print progress
         return 0
 
-    var editor_bridge = EditorMcpSessionBridge(session: EditSession.new())
     while true:
         var line = read_stdin_message()
         if line == "":
@@ -268,11 +203,7 @@ fn main() -> i64:
             response = make_json_result(id, _mcp_static_tools_result())
         elif method == "tools/call":
             var tool_name = extract_nested(line, "name")
-            if is_editor_mcp_tool(tool_name):
-                val result = editor_bridge.dispatch(tool_name, editor_mcp_args(tool_name, line))
-                response = editor_mcp_response(id, result)
-            else:
-                response = dispatch_tool(id, tool_name, line)
+            response = dispatch_tool(id, tool_name, line)
         elif method == "resources/list":
             response = handle_resources_list(id)
         elif method == "resources/templates/list":

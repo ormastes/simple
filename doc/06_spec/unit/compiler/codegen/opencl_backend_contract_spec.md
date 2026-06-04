@@ -27,7 +27,7 @@ opencl_backend_contract_spec -> compiler
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -173,6 +173,73 @@ expect(source).to_contain("*v6 = v9;")
 
 </details>
 
+#### emits OpenCL C labels gotos and conditional branches
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val module = make_kernel_module([make_opencl_branch_kernel()])
+val source = OpenClBackend.compile_module_to_opencl_source(module).unwrap()
+
+expect(source).to_contain("__kernel void opencl_branch_kernel(bool flag)")
+expect(source).to_contain("BB0:")
+expect(source).to_contain("if (flag) { goto BB1; } else { goto BB2; }")
+expect(source).to_contain("BB1:")
+expect(source).to_contain("goto BB3;")
+expect(source).to_contain("BB2:")
+expect(source).to_contain("BB3:")
+expect(source).to_contain("return;")
+```
+
+</details>
+
+#### emits OpenCL C switch terminators with case and default gotos
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val module = make_kernel_module([make_opencl_switch_kernel()])
+val source = OpenClBackend.compile_module_to_opencl_source(module).unwrap()
+
+expect(source).to_contain("__kernel void opencl_switch_kernel(uint selector)")
+expect(source).to_contain("switch (selector)")
+expect(source).to_contain("case 1")
+expect(source).to_contain("case 2")
+expect(source).to_contain("default")
+expect(source).to_contain("goto")
+```
+
+</details>
+
+#### emits OpenCL C atomics fences and local memory for GPU kernels
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val module = make_kernel_module([make_opencl_atomic_kernel()])
+val source = OpenClBackend.compile_module_to_opencl_source(module).unwrap()
+
+expect(source).to_contain("__kernel void opencl_atomic_u32(__global uint* accum, uint value)")
+expect(source).to_contain("uint v2 = atomic_add(accum, value);")
+expect(source).to_contain("uint v3 = atomic_cmpxchg(accum, value, v2);")
+expect(source).to_contain("mem_fence(CLK_LOCAL_MEM_FENCE | CLK_GLOBAL_MEM_FENCE);")
+expect(source).to_contain("__local uint v4[32];")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -192,8 +259,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
