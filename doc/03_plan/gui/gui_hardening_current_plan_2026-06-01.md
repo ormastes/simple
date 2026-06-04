@@ -3898,9 +3898,9 @@ Completion checklist:
 - [x] Run focused compile and focused fetch/WASM chain spec.
 - [x] Run adjacent browser/WASM and JS conformance checks.
 - [x] Run final layout, whitespace, file-count, and status gates.
-- [ ] Commit test/manual/plan update.
-- [ ] Push guarded main update after fetch/rebase/file-count safety check.
-- [ ] Commit and push sync-complete checklist update.
+- [x] Commit test/manual/plan update.
+- [x] Push guarded main update after fetch/rebase/file-count safety check.
+- [x] Commit and push sync-complete checklist update.
 
 Tests checklist:
 
@@ -3936,6 +3936,9 @@ BrowserSession test coverage now explicitly proves `Uint8Array.findLast` and
 scenario covers normalized bytes, view-relative indexes, callback receiver
 identity, miss behavior, and shared backing storage with the base typed array.
 This is a coverage-only continuation; no runtime source change was required.
+
+Sync evidence: coverage commit `4099ef5131` pushed to `main` after guarded
+fetch/rebase with file count stable at `78091`.
 
 BrowserSession Uint8Array prototype transform apply continuation:
  
