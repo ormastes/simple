@@ -27,7 +27,7 @@ browser_session_fetch_wasm_chain_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 203 | 203 | 0 | 0 |
+| 204 | 204 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -5258,6 +5258,136 @@ match session.take_pending_request():
 
 </details>
 
+#### compares compileStreaming and instantiateStreaming fetch error rejections in browser scripts
+
+1. var session = BrowserSession new
+
+2. Ok
+   - Expected: _display_js(value) equals `queued`
+
+3. Err
+   - Expected: "unexpected queue error: {err}" equals ``
+
+4. Ok
+   - Expected: _display_js(value) equals ``
+
+5. Err
+   - Expected: "unexpected pre-commit js error: {err}" equals ``
+
+6. Some
+   - Expected: request.kind equals `fetch`
+   - Expected: request.url equals `https://example.com/compile.wasm`
+
+7. Ok
+   - Expected: "expected first fetch commit error" equals ``
+
+8. Err
+   - Expected: err equals `network-down`
+
+9. Ok
+   - Expected: _display_js(value) equals `compileStreamFetchError:network-down`
+
+10. Err
+   - Expected: "unexpected first commit js error: {js_err}" equals ``
+   - Expected: "missing compile fetch request" equals ``
+
+11. Some
+   - Expected: request.kind equals `fetch`
+   - Expected: request.url equals `https://example.com/instantiate.wasm`
+
+12. Ok
+   - Expected: "expected second fetch commit error" equals ``
+
+13. Err
+   - Expected: err equals `network-down`
+
+14. Ok
+   - Expected: _display_js(value) equals `compileStreamFetchError:network-down:instantiateStreamFetchError:network-down`
+
+15. Err
+   - Expected: "unexpected second commit js error: {js_err}" equals ``
+   - Expected: "missing instantiate fetch request" equals ``
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 68 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/webgpu-wasm.html",
+    "<html><body>WASM GPU</body></html>"
+)
+val queued = session.eval_script("var out = ''; WebAssembly.compileStreaming(window.fetch('/compile.wasm')).then(function(module) { out = 'unexpectedCompile:' + module.byteLength; }).catch(function(err) { out = 'compileStreamFetchError:' + err; }); WebAssembly.instantiateStreaming(window.fetch('/instantiate.wasm'), {}).then(function(result) { out = out + ':unexpectedInstantiate:' + result.status; }).catch(function(err) { out = out + ':instantiateStreamFetchError:' + err; }); 'queued'")
+match queued:
+    Ok(value):
+        expect(_display_js(value)).to_equal("queued")
+    Err(err):
+        expect("unexpected queue error: {err}").to_equal("")
+match session.eval_script("out"):
+    Ok(value):
+        expect(_display_js(value)).to_equal("")
+    Err(err):
+        expect("unexpected pre-commit js error: {err}").to_equal("")
+
+match session.take_pending_request():
+    Some(request):
+        expect(request.kind).to_equal("fetch")
+        expect(request.url).to_equal("https://example.com/compile.wasm")
+        val committed = session.commit_network_response(BrowserResponse.create(
+            request_id: request.id,
+            kind: "fetch",
+            url: request.url,
+            status: 0,
+            headers: "",
+            body: "",
+            error: "network-down"
+        ))
+        match committed:
+            Ok(_):
+                expect("expected first fetch commit error").to_equal("")
+            Err(err):
+                expect(err).to_equal("network-down")
+                match session.eval_script("out"):
+                    Ok(value):
+                        expect(_display_js(value)).to_equal("compileStreamFetchError:network-down")
+                    Err(js_err):
+                        expect("unexpected first commit js error: {js_err}").to_equal("")
+    nil:
+        expect("missing compile fetch request").to_equal("")
+
+match session.take_pending_request():
+    Some(request):
+        expect(request.kind).to_equal("fetch")
+        expect(request.url).to_equal("https://example.com/instantiate.wasm")
+        val committed = session.commit_network_response(BrowserResponse.create(
+            request_id: request.id,
+            kind: "fetch",
+            url: request.url,
+            status: 0,
+            headers: "",
+            body: "",
+            error: "network-down"
+        ))
+        match committed:
+            Ok(_):
+                expect("expected second fetch commit error").to_equal("")
+            Err(err):
+                expect(err).to_equal("network-down")
+                match session.eval_script("out"):
+                    Ok(value):
+                        expect(_display_js(value)).to_equal("compileStreamFetchError:network-down:instantiateStreamFetchError:network-down")
+                    Err(js_err):
+                        expect("unexpected second commit js error: {js_err}").to_equal("")
+    nil:
+        expect("missing instantiate fetch request").to_equal("")
+```
+
+</details>
+
 #### exposes compileStreaming module export descriptors
 
 1. var session = BrowserSession new
@@ -10283,8 +10413,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 203 |
-| Active scenarios | 203 |
+| Total scenarios | 204 |
+| Active scenarios | 204 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
