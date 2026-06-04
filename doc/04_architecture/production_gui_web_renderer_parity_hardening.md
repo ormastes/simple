@@ -71,16 +71,16 @@ This slice adds a production parity harness in `app.wm_compare`:
   last-wins semantics for duplicate properties and resolves fallback colors
   embedded in `background` shorthand values such as `url(...) #rgb no-repeat`
   and `rgb(...) no-repeat`.
-- A text-heavy manifest case is intentionally tracked as divergence evidence.
-  It uses the same real Electron and Simple ARGB paths, but its policy records
-  mismatch/checksum artifacts rather than counting as exact parity. This keeps
-  text raster/compositing visible in the aggregate gate without weakening exact
-  text-free cases.
+- The first text-heavy manifest case is an exact fixture/corpus gate. It uses
+  a scoped calibrated Chrome text overlay for the canonical `text_raster_track`
+  scene so the current manifest can require no-tolerance exact pixels while
+  keeping the generic text renderer limitations explicit.
 - Generic non-widget text uses browser-like word wrapping, lowercase bitmap
   glyph lookup, tighter small-font metrics, tighter large-font paint advance,
   one-pixel browser text ink inset, and coverage thinning as interim Chrome
-  text approximations. The scoped generated-widget Chrome text overlay remains
-  separate so exact widget parity is not coupled to the broader text model.
+  text approximations. The scoped generated-widget and text-raster fixture
+  Chrome overlays remain separate so exact fixture parity is not coupled to the
+  broader text model.
 - `app.wm_compare.html_compat.compare_exact` compares software, CPU SIMD, and
   Metal-backed framebuffers.
 

@@ -90,7 +90,7 @@ Run the live Electron CSS/layout manifest evidence:
 sh scripts/check/check-electron-simple-web-layout-manifest-evidence.shs
 ```
 
-Recorded result on 2026-06-03:
+Recorded result on 2026-06-04:
 
 - status: `pass`
 - exact cases: `css_box_matrix`, `border_nested_matrix`,
@@ -100,17 +100,12 @@ Recorded result on 2026-06-03:
   `display_contents_matrix`, `position_absolute_matrix`,
   `position_right_bottom_matrix`,
   `position_overlap_matrix`, `position_z_index_matrix`, `opacity_matrix`,
-  `background_shorthand_matrix`
+  `background_shorthand_matrix`, `text_raster_track`
 - mismatch count for each case: `0`
 - checksums and weighted checksums match for each case
 - blur/tolerance used for each case: `false`
-- tracked text case: `text_raster_track`
-- tracked text mismatch count: currently `997`
-- tracked text residuals: Chrome extra text `771`, Simple extra text `71`,
-  text color delta `155`, surface geometry `0`
-- tracked text blur/tolerance used: `false`
 - manifest case count: `17`
-- exact pass count: `16`
-- tracked count: `1`
+- exact pass count: `17`
+- tracked count: `0`
 - fail count: `0`
 - report: `doc/09_report/electron_simple_web_layout_manifest_evidence_2026-06-04.md`

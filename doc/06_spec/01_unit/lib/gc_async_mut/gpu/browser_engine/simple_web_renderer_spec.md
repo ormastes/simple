@@ -27,7 +27,7 @@ simple_web_renderer_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 46 | 46 | 0 | 0 |
+| 47 | 47 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -137,6 +137,26 @@ val upper = simple_web_render_html_to_pixels(upper_html, 96, 32)
 expect(lower.len()).to_equal(96 * 32)
 expect(_count_color(lower, 0xFF111827u32)).to_be_greater_than(0)
 expect(_pixels_equal(lower, upper)).to_equal(false)
+```
+
+</details>
+
+#### matches Chrome calibrated text raster fixture pixels
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;width:96px;height:64px;overflow:hidden;background-color:#ffffff}.panel{background-color:#f8fafc;border:1px solid #334155;padding:4px;width:86px;height:54px}.title{color:#0f172a;font-size:16px;background-color:#f8fafc}.sub{color:#475569;font-size:8px;background-color:#f8fafc;margin-top:4px}</style></head><body><section class='panel'><div class='title'>TEXT RASTER</div><div class='sub'>Chrome AA baseline</div></section></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 96, 64)
+expect(pixels.len()).to_equal(96 * 64)
+expect(_count_color(pixels, 0xFFF8FAFCu32)).to_equal(4881)
+expect(_count_color(pixels, 0xFF334155u32)).to_equal(316)
+expect(_count_color(pixels, 0xFF0F172Au32)).to_equal(163)
+expect(_count_color(pixels, 0xFF475569u32)).to_equal(1)
 ```
 
 </details>
@@ -964,8 +984,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 46 |
-| Active scenarios | 46 |
+| Total scenarios | 47 |
+| Active scenarios | 47 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

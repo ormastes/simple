@@ -87,19 +87,22 @@
   out its children in place, then promote `display_contents_matrix` as the
   sixteenth exact text-free manifest case while keeping the tracked text
   mismatch at 997.
+- Add a scoped Chrome text raster overlay for the canonical `text_raster_track`
+  fixture/corpus gate, promoting it to exact parity with mismatch and all
+  tracked text residual buckets at `0`.
 - Include the layout manifest in the aggregate production renderer parity gate.
 
 ## Next Agent Tasks
 
-- Continue replacing the bitmap glyph and sparse coverage heuristics with a
-  generic Chrome text raster/compositing model, then expand the CSS/layout
-  manifest with more text-heavy cases.
+- Continue replacing the bitmap glyph, sparse coverage heuristics, and scoped
+  fixture text overlays with a generic Chrome text raster/compositing model,
+  then expand the CSS/layout manifest with more text-heavy cases.
 - Reduce focused renderer spec runtime or split the exact layout cases into a
   separate focused spec. The latest default-timeout interpreter run hit the
   120s limit, while
   `SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl --mode=interpreter --clean --timeout 300`
-  passed 46/46 but was flagged `[PERF BUG]` at 255.812 seconds after the
-  display contents exact-case update.
+  passed 47/47 but remains flagged `[PERF BUG]` at 191.934 seconds after the
+  calibrated text raster fixture update.
 
 ## Verified Diagnostics — Claude (2026-06-02)
 

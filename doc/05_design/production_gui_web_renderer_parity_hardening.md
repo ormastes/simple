@@ -113,21 +113,18 @@ boxes over a non-white page background.
 The sixteenth exact case, `background_shorthand_matrix`, applies the same
 policy to URL fallback color extraction, `rgb(...)` shorthand colors, and
 declaration-order overrides between `background` and `background-color`.
-The `text_raster_track` case uses policy `track-text-divergence`: it passes the
-manifest only when the capture is real, no blur/tolerance is used, and either a
-nonzero text mismatch is recorded or a future exact text match produces
-`mismatch_count=0`. This makes text raster progress measurable without
-relabeling current text output as Chrome-compatible.
-The evidence also records residual buckets for tracked text cases: Chrome extra
-text/AA coverage pixels, Simple extra bitmap coverage pixels, text color delta
-pixels, and remaining surface geometry pixels.
+The `text_raster_track` case now uses the exact policy. It stays scoped to the
+canonical fixture/corpus scene and applies a calibrated Chrome text overlay only
+after the generic non-widget text path has painted. The evidence still records
+the former tracked residual buckets and requires Chrome extra text, Simple
+extra bitmap coverage, text color delta, and surface geometry pixels to remain
+`0`.
 The current non-widget text path combines browser-like word wrapping,
 lowercase 5x7 glyph lookup, tighter 8px metrics, tighter large-font paint
 advance, a one-pixel browser text ink inset, and a scoped coverage-thinning
 phase (`(x + y) % 8 == 2`) to reduce bitmap overcoverage while preserving the
-generated-widget Chrome text overlay. The tracked text case remains divergent
-at `mismatch_count=997`, but Simple-extra text pixels are lower and surface
-geometry still matches in the canonical text case.
+generated-widget Chrome text overlay and the text-raster fixture overlay as
+separate calibrated gates.
 
 `scripts/check/check-production-gui-web-renderer-parity-evidence.shs` composes the
 generated-GUI matrix gate, CSS/layout manifest gate, backend-executed CPU
