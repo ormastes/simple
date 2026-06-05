@@ -177,6 +177,69 @@ Current result on this Linux host:
 
 ## Remaining Work
 
+2026-06-05 QEMU/GTK capture refresh:
+
+1. The canonical real-QEMU WM capture command is now:
+   `QEMU_AUTO_LAUNCH_SIMPLEOS_DESKTOP=1 timeout 180 sh scripts/check/check-qemu-gtk-wm-capture-evidence.shs`.
+   The wrapper runs from the repository root, launches the SimpleOS desktop
+   through `src/app/test/simpleos_desktop_qmp_launch.spl`, captures a live QMP
+   screendump, and chains the host GTK/GL exact-scene baseline through
+   `scripts/check/check-gtk-gl-wm-scene-bitmap-evidence.shs`.
+2. Latest evidence is
+   `doc/09_report/qemu_gtk_wm_capture_evidence_2026-06-05.md`: live QEMU bitmap
+   capture passes with `786432` pixels, `0` sample mismatches, `0` full-scene
+   mismatches, and host GTK/GL scene mismatch count `0` with
+   `blur/tolerance used: false`.
+3. The QEMU guest now emits
+   `[desktop-e2e] qemu-perf sample_origin=qemu-guest simple_frame_cycles=...
+   iterations=16 timing_unit=tsc scope=simple-vga-paint`, and the wrapper pairs
+   that guest Simple paint timing with the host GTK/GL baseline. The 2026-06-05
+   report records `qemu-side perf status: pass` and
+   `qemu-side perf release blocker: none`.
+
+2026-06-05 layered GUI/WebRenderer/Engine2D parity refresh:
+
+1. `scripts/check/check-layered-simple-gui-web-engine2d-bitmap-evidence.shs`
+   now passes for `image_taskbar_command` and `toolbar_modal_grid` across
+   Node, Bun, and Electron GUI lanes.
+2. Latest evidence is
+   `doc/09_report/layered_simple_gui_web_engine2d_bitmap_evidence_2026-06-05.md`:
+   every lane reports `mismatch_count=0`, `blur_or_tolerance_used=false`, and
+   Electron writes captured ARGB for both GUI scenes.
+3. The Electron Engine2D wrapper now pins Chromium software/offscreen capture
+   flags on headless Linux after `UnknownVizError` was observed in the default
+   GPU-backed offscreen path. This keeps the exact bitmap policy and does not
+   introduce blur or tolerance.
+
+2026-06-05 production Electron/Tauri/Chrome/WebRenderer parity refresh:
+
+1. `scripts/check/check-production-gui-web-renderer-parity-evidence.shs` now
+   requires live Tauri/WebKitGTK and Chrome/Chromium surface captures; Tauri or
+   Chrome `unavailable` rows no longer satisfy the production parity gate.
+2. Latest evidence is
+   `doc/09_report/production_gui_web_renderer_parity_evidence_2026-06-05.md`:
+   Electron matrix and layout manifest pass, Tauri live capture passes `18/18`
+   rows with `0` failures and `0` mismatches, Chrome live capture has `0`
+   mismatches, `no_fake_capture=true`, and `blur_or_tolerance_used=false`.
+3. The pure Simple backend row in the same report passes with
+   `production_gui_web_renderer_parity_backend_exact=true` and
+   `production_gui_web_renderer_parity_backend_cpu_simd_different_pixels=0`.
+
+2026-06-05 SimpleOS hardening matrix refresh:
+
+1. `scripts/check/check-simpleos-hardening-evidence-matrix.shs` now points at
+   the current QEMU/GTK, layered GUI/WebRenderer/Engine2D, CPU SIMD, and shared
+   WM evidence reports.
+2. Latest matrix evidence is
+   `doc/09_report/simpleos_hardening_evidence_matrix_2026-06-05.md`: all
+   `9/9` artifact rows pass, including the QEMU host counterpart, GUI SMF
+   artifact contract, live MDI framebuffer rows, and production
+   Electron/Tauri/Chrome/WebRenderer parity.
+3. The aggregate matrix status is now `pass`: the QEMU guest Simple paint
+   marker supplies `simple_frame_cycles` and `iterations`, while the host
+   GTK/GL baseline supplies the GTK timing field. The release gate is
+   `guest-simple-frame-plus-host-gtk-baseline`.
+
 2026-05-29 parallel restart expansion:
 
 1. Use `doc/03_plan/gui_renderer_restart_plan_2026-05-29.md` as the active
@@ -222,6 +285,10 @@ Existing GUI/WM continuation:
 - The current live SimpleOS GUI proof is a bounded x86_64 WM input/framebuffer
   smoke. It proves the focused QEMU lane, shared compositor adapter path, and
   marker pixels, but not a full desktop session or multi-architecture GUI run.
+- The 2026-06-05 QEMU desktop capture proves live QMP screendump pixels and
+  host GTK/GL exact-scene parity for the focused x86_64 desktop lane. It still
+  does not prove guest-side Simple-vs-GTK performance until the QEMU guest emits
+  the required `[desktop-e2e] qemu-perf sample_origin=qemu-guest ...` marker.
 - ARM64 WM coverage is currently guide/source, host-readiness, and canonical
   QEMU target/command contract coverage only. It proves this host has
   `qemu-system-aarch64` with `virt` and `ramfb`, and that the runner can build

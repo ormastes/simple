@@ -65,6 +65,7 @@ extern fn serial_println(msg: text)
 extern fn rt_gui_set_fb(addr: u64, width: u64)
 extern fn rt_gui_fill4(xy: u64, wh: u64, color: u64, unused: u64) -> u64
 extern fn rt_port_outb(port: u64, value: u64)
+extern fn rt_rdtsc() -> i64
 extern fn rt_hlt()
 
 fn pack(hi: i64, lo: i64) -> u64:
@@ -247,6 +248,18 @@ fn _paint_probe_scene(include_apps: bool):
         rt_gui_fill4(pack(180, 180), pack(340, 26), 0xFFE74C3C, 0)
         rt_gui_fill4(pack(560, 220), pack(280, 200), 0xFF1E1E2E, 0)
         rt_gui_fill4(pack(560, 220), pack(280, 26), 0xFF27AE60, 0)
+
+fn _emit_qemu_guest_simple_perf_marker():
+    val iterations: i64 = 16
+    val start_cycles = rt_rdtsc()
+    var i: i64 = 0
+    while i < iterations:
+        _paint_probe_scene(false)
+        i = i + 1
+    val end_cycles = rt_rdtsc()
+    val total_cycles = if end_cycles > start_cycles: end_cycles - start_cycles else: 1
+    val frame_cycles = if iterations > 0: total_cycles / iterations else: total_cycles
+    serial_println("[desktop-e2e] qemu-perf sample_origin=qemu-guest simple_frame_cycles={frame_cycles} iterations={iterations} timing_unit=tsc scope=simple-vga-paint")
 
 fn _direct_qemu_memory_bootstrap():
     if pmm_init_identity_range(0x20000000, 0x100000, 0x14000000):
@@ -578,6 +591,7 @@ fn desktop_e2e_main() -> bool:
     # beyond a ~2s delay between desktop-ready and shortcut:ok.
     _paint_settle()
     serial_println("[desktop-e2e] paint-settle:done")
+    _emit_qemu_guest_simple_perf_marker()
     if not vfs_mounted:
         serial_println("[desktop-e2e] storage-backed-launch:skip reason=no-vfs")
     elif not _emit_storage_backed_smoke_markers():

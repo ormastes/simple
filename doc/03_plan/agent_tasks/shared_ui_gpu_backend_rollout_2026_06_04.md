@@ -116,8 +116,9 @@ Current evidence:
   same no-tolerance pixel contract as the Simple renderer: target must be
   `tauri`, dimensions and pixel count must match, checksum and reference
   checksum must be identical, mismatch count must be `0`, and blur/tolerance is
-  rejected. This closes the shared-artifact Tauri parity gap without claiming a
-  live WebKit screenshot until the Tauri shell exposes a capture hook.
+  rejected. Live WebKitGTK proof is now supplied by
+  `check-tauri-simple-web-layout-bitmap-evidence.shs`, which captures the
+  Tauri shell under Xvfb for the production surface manifest.
 - `WEB_RENDER_TARGET_CHROME` and `WEB_RENDER_TARGET_CHROMIUM` are now explicit
   shared web render targets with browser capability summaries, so standalone
   Chrome/Chromium no longer has to be hidden behind the Electron target.
@@ -149,8 +150,10 @@ Current evidence:
   consumes the Electron layout manifest, records Electron as live capture, runs
   the Tauri and Chrome probes for every manifest row, and fails closed unless
   live pass rows have exact case counts, zero failures, zero mismatches, and
-  `no_fake_capture=true`. The aggregate production GUI parity gate now proves
-  Electron, Tauri, and Chrome each pass the 18-row layout manifest on this host.
+  `no_fake_capture=true`. Tauri and Chrome `unavailable` rows are failures in
+  this production parity lane. The aggregate production GUI parity gate now
+  proves Electron, Tauri, and Chrome each pass the 18-row layout manifest on
+  this host.
 - Covered by
   `test/01_unit/app/ui/web_render_node_fixture_evidence_spec.spl` and
   `test/01_unit/app/ui/web_render_backend_api_spec.spl`.
@@ -419,4 +422,3 @@ on the current Linux/Xvfb host:
 3. `check-production-gui-web-renderer-parity-evidence.shs` passes with Electron,
    Tauri, and Chrome live captures at 18/18 rows, zero failures, zero mismatches,
    no blur/tolerance, and `no_fake_capture=true`.
-   occurred.

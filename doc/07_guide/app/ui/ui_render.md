@@ -141,6 +141,50 @@ Related design artifacts:
 - `doc/05_design/html_css_binary_caching.md`
 - `test/03_system/app/ui/feature/html_css_binary_caching_spec.spl`
 
+## Renderer Module Imports
+
+Use backend-specific renderer modules at call sites:
+
+- HTML output: `app.ui.render.html_widgets`
+- TUI tree output: `app.ui.render.tui_widgets`
+- Three-argument TUI menu/tooltip compatibility wrappers:
+  `app.ui.render.widgets`
+
+`app.ui.render.widgets` is intentionally TUI-only. Do not import HTML renderer
+symbols from it; that would pull HTML/CSS implementation code into TUI-oriented
+closures.
+
+### Bitmap parity evidence
+
+For exact-pixel Simple GUI/WebRenderer/Engine2D parity across JS hosts and the
+Electron GUI shell, use:
+
+```bash
+sh scripts/check/check-layered-simple-gui-web-engine2d-bitmap-evidence.shs
+```
+
+The layered wrapper covers `image_taskbar_command` and `toolbar_modal_grid`
+through WebRenderer->Engine2D Node, WebRenderer->Engine2D Bun, and Simple
+GUI->Simple WebRenderer Electron lanes. Required pass fields are
+`mismatch_count=0` and `blur_or_tolerance_used=false` for every available lane.
+The Electron Engine2D wrapper uses Chromium software/offscreen capture flags on
+headless Linux to avoid `UnknownVizError`; this changes the capture backend, not
+the exact-pixel comparison policy.
+
+For production GUI/WebRenderer parity across generated GUI layouts, Electron,
+Tauri/WebKitGTK, Chrome/Chromium, and the pure Simple Engine2D backends, use:
+
+```bash
+sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs
+```
+
+The production wrapper is a live-capture gate for the browser shells: Electron,
+Tauri, and Chrome must each pass every layout-manifest row with matching
+dimensions, `mismatch_count=0`, `blur_or_tolerance=false`, and
+`no_fake_capture=true`. Tauri `unavailable` rows are failures for this parity
+lane; on headless Linux the wrapper expects the Tauri shell to run under Xvfb
+and `dbus-run-session`.
+
 ---
 
 ## Environment Variables

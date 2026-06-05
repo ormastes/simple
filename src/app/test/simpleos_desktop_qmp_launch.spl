@@ -1,13 +1,34 @@
-use os.qemu_runner.{OsTarget, get_desktop_browser_target, _x64_nvme_disk_args, build_os, ensure_desktop_disk_image}
-use test.system.qemu.os.common.qemu_os_harness.{
-    can_run_target, spawn_guest_with_qmp, stop_guest, wait_for_serial_marker,
-    read_serial_log, read_qemu_stderr_log, QemuGuestHandle}
+use os.qemu_runner.{OsTarget, get_desktop_browser_target, _x64_nvme_disk_args, build_os, build_qemu_command, ensure_desktop_disk_image}
 use std.nogc_sync_mut.sffi.io.{dir_create_all}
 
 extern fn rt_env_get(key: text) -> text?
 extern fn rt_getpid() -> i64
 extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
+extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
 extern fn rt_process_is_running(pid: i64) -> bool
+extern fn rt_process_kill(pid: i64) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_thread_sleep(ms: i64)
+
+class QemuGuestHandle:
+    pid: i64
+    qmp_socket: text
+    serial_log: text
+    stderr_log: text
+    qemu_bin: text
+
+    static fn create(pid: i64, qmp_socket: text, serial_log: text, stderr_log: text, qemu_bin: text) -> QemuGuestHandle:
+        QemuGuestHandle(
+            pid: pid,
+            qmp_socket: qmp_socket,
+            serial_log: serial_log,
+            stderr_log: stderr_log,
+            qemu_bin: qemu_bin
+        )
 
 fn _desktop_qmp_capture_target() -> OsTarget:
     val base = get_desktop_browser_target()
@@ -32,6 +53,170 @@ fn _timeout_ms() -> i64:
 fn _bool_text(value: bool) -> text:
     if value: "true" else: "false"
 
+fn _shell_quote(value: text) -> text:
+    val escaped = value.replace("'", "'\"'\"'")
+    "'{escaped}'"
+
+fn _shell_command(cmd_parts: [text]) -> text:
+    var shell_cmd = ""
+    var idx = 0
+    while idx < cmd_parts.len():
+        if idx > 0:
+            shell_cmd = shell_cmd + " "
+        shell_cmd = shell_cmd + _shell_quote(cmd_parts[idx])
+        idx = idx + 1
+    shell_cmd
+
+fn _args_with_serial_file(args: [text], serial_log: text) -> [text]:
+    var rewritten: [text] = []
+    var idx = 0
+    while idx < args.len():
+        val arg = args[idx]
+        if arg == "-serial" and idx + 1 < args.len():
+            rewritten.push("-serial")
+            rewritten.push("file:{serial_log}")
+            idx = idx + 2
+            continue
+        rewritten.push(arg)
+        idx = idx + 1
+    rewritten
+
+fn _target_with_qmp(target: OsTarget, qmp_socket: text) -> OsTarget:
+    var extras = target.qemu_extra
+    extras.push("-qmp")
+    extras.push("unix:{qmp_socket},server,nowait")
+    OsTarget(
+        arch: target.arch,
+        entry: target.entry,
+        linker_script: target.linker_script,
+        target_triple: target.target_triple,
+        output: target.output,
+        qemu_system: target.qemu_system,
+        qemu_machine: target.qemu_machine,
+        qemu_cpu: target.qemu_cpu,
+        qemu_memory: target.qemu_memory,
+        qemu_bios: target.qemu_bios,
+        qemu_extra: extras,
+        gui_mode: target.gui_mode
+    )
+
+fn _qemu_available(qemu_system: text) -> bool:
+    val qemu_check = rt_process_run_timeout("which", [qemu_system], 5000)
+    qemu_check[2] == 0
+
+fn can_run_target(target: OsTarget) -> bool:
+    if not _qemu_available(target.qemu_system):
+        print "SKIP: {target.qemu_system} not found on PATH"
+        return false
+    if not rt_file_exists(target.output):
+        print "SKIP: Kernel not built: {target.output}"
+        return false
+    true
+
+fn _wait_for_qmp_socket(socket_path: text, timeout_ms: i64) -> bool:
+    var waited = 0
+    while waited <= timeout_ms:
+        if rt_file_exists(socket_path):
+            rt_thread_sleep(200)
+            return true
+        rt_thread_sleep(100)
+        waited = waited + 100
+    false
+
+fn _cleanup_stale_guest_identity(qmp_socket: text, serial_log: text, stderr_log: text):
+    val cleanup_cmd =
+        "pkill -f " + _shell_quote("qemu-system.*" + qmp_socket) + " >/dev/null 2>&1 || true; " +
+        "pkill -f " + _shell_quote("qemu-system.*" + serial_log) + " >/dev/null 2>&1 || true; " +
+        "pkill -f " + _shell_quote("qemu-system.*" + stderr_log) + " >/dev/null 2>&1 || true"
+    rt_process_run_timeout("/bin/sh", ["-c", cleanup_cmd], 5000)
+
+fn _tail_lines(data: text, max_lines: i64) -> text:
+    if max_lines <= 0:
+        return ""
+    var idx = data.len().to_i64() - 1
+    var seen = 0
+    while idx >= 0:
+        if data.char_at(idx as u64) == "\n":
+            seen = seen + 1
+            if seen >= max_lines:
+                return data.slice((idx + 1) as u64, data.len())
+        idx = idx - 1
+    data
+
+fn read_qemu_stderr_log_path(path: text) -> text:
+    if not rt_file_exists(path):
+        return ""
+    rt_file_read_text(path) ?? ""
+
+fn read_qemu_stderr_log(handle: QemuGuestHandle) -> text:
+    read_qemu_stderr_log_path(handle.stderr_log)
+
+fn read_serial_log(handle: QemuGuestHandle) -> text:
+    if not rt_file_exists(handle.serial_log):
+        return ""
+    val (stdout, _stderr, exit_code) = rt_process_run_timeout(
+        "/bin/sh",
+        ["-c", "tr -cd '\\11\\12\\15\\40-\\176' < " + _shell_quote(handle.serial_log)],
+        5000)
+    if exit_code == 0 and stdout != "":
+        return stdout
+    rt_file_read_text(handle.serial_log) ?? ""
+
+fn spawn_guest_with_qmp(target: OsTarget, qmp_socket: text, serial_log: text) -> Result<QemuGuestHandle, text>:
+    val stderr_log = serial_log + ".stderr"
+    _cleanup_stale_guest_identity(qmp_socket, serial_log, stderr_log)
+    if rt_file_exists(qmp_socket):
+        rt_file_delete(qmp_socket)
+    if rt_file_exists(serial_log):
+        rt_file_delete(serial_log)
+    if rt_file_exists(stderr_log):
+        rt_file_delete(stderr_log)
+
+    val target_with_qmp = _target_with_qmp(target, qmp_socket)
+    val cmd_parts = build_qemu_command(target_with_qmp)
+    val qemu_bin = cmd_parts[0]
+    val qemu_args = _args_with_serial_file(cmd_parts.slice(1), serial_log)
+    var shell_parts: [text] = [qemu_bin]
+    var arg_idx = 0
+    while arg_idx < qemu_args.len():
+        shell_parts.push(qemu_args[arg_idx])
+        arg_idx = arg_idx + 1
+    val shell_cmd = _shell_command(shell_parts)
+    val pid = rt_process_spawn_async("/bin/sh", ["-c", "if command -v setsid >/dev/null 2>&1; then exec setsid {shell_cmd} 2> {_shell_quote(stderr_log)}; else exec {shell_cmd} 2> {_shell_quote(stderr_log)}; fi"])
+    if pid <= 0:
+        return Err("failed to spawn {qemu_bin}")
+    if not _wait_for_qmp_socket(qmp_socket, 10000):
+        rt_process_kill(pid)
+        rt_process_wait(pid, 2000)
+        _cleanup_stale_guest_identity(qmp_socket, serial_log, stderr_log)
+        val stderr_tail = _tail_lines(read_qemu_stderr_log_path(stderr_log), 40)
+        return Err("QMP socket did not appear at {qmp_socket}\nqemu stderr:\n{stderr_tail}")
+    Ok(QemuGuestHandle.create(pid, qmp_socket, serial_log, stderr_log, qemu_bin))
+
+fn stop_guest(handle: QemuGuestHandle) -> bool:
+    var stopped = true
+    if handle.pid > 0 and rt_process_is_running(handle.pid):
+        stopped = rt_process_kill(handle.pid)
+        rt_process_wait(handle.pid, 2000)
+    _cleanup_stale_guest_identity(handle.qmp_socket, handle.serial_log, handle.stderr_log)
+    if rt_file_exists(handle.qmp_socket):
+        rt_file_delete(handle.qmp_socket)
+    if rt_file_exists(handle.serial_log):
+        rt_file_delete(handle.serial_log)
+    if rt_file_exists(handle.stderr_log):
+        rt_file_delete(handle.stderr_log)
+    stopped
+
+fn wait_for_serial_marker(handle: QemuGuestHandle, marker: text, timeout_ms: i64) -> bool:
+    var waited = 0
+    while waited <= timeout_ms:
+        val serial_output = read_serial_log(handle)
+        if serial_output.contains(marker):
+            return true
+        rt_thread_sleep(100)
+        waited = waited + 100
+    read_serial_log(handle).contains(marker)
+
 fn _field_from_marker_line(line: text, key: text) -> text:
     val prefix = key + "="
     val parts = line.split(" ")
@@ -48,7 +233,7 @@ fn _guest_perf_marker_line(serial_text: text) -> text:
     var i = 0
     while i < lines.len():
         val line = lines[i]
-        if line.contains("sample_origin=qemu-guest") and line.contains("simple_frame_us=") and line.contains("gtk_frame_us=") and line.contains("iterations="):
+        if line.contains("sample_origin=qemu-guest") and line.contains("simple_frame_cycles=") and line.contains("iterations="):
             found = line
         i = i + 1
     return found
@@ -57,17 +242,17 @@ fn _print_guest_perf_marker(serial_text: text):
     val line = _guest_perf_marker_line(serial_text)
     if line == "":
         print "simpleos_desktop_qmp_guest_perf_marker_present=false"
-        print "simpleos_desktop_qmp_guest_perf_pending_marker=[desktop-e2e] qemu-perf sample_origin=qemu-guest simple_frame_us=<positive> gtk_frame_us=<positive> iterations=<positive>"
+        print "simpleos_desktop_qmp_guest_perf_pending_marker=[desktop-e2e] qemu-perf sample_origin=qemu-guest simple_frame_cycles=<positive> iterations=<positive> timing_unit=tsc"
         return
     val sample_origin = _field_from_marker_line(line, "sample_origin")
-    val simple_frame_us = _field_from_marker_line(line, "simple_frame_us")
-    val gtk_frame_us = _field_from_marker_line(line, "gtk_frame_us")
+    val simple_frame_cycles = _field_from_marker_line(line, "simple_frame_cycles")
     val iterations = _field_from_marker_line(line, "iterations")
+    val timing_unit = _field_from_marker_line(line, "timing_unit")
     print "simpleos_desktop_qmp_guest_perf_marker_present=true"
     print "simpleos_desktop_qmp_guest_perf_sample_origin={sample_origin}"
-    print "simpleos_desktop_qmp_guest_perf_simple_frame_us={simple_frame_us}"
-    print "simpleos_desktop_qmp_guest_perf_gtk_frame_us={gtk_frame_us}"
+    print "simpleos_desktop_qmp_guest_perf_simple_frame_cycles={simple_frame_cycles}"
     print "simpleos_desktop_qmp_guest_perf_iterations={iterations}"
+    print "simpleos_desktop_qmp_guest_perf_timing_unit={timing_unit}"
     print "simpleos_desktop_qmp_guest_perf_marker_line={line}"
 
 fn _print_launch_failure_context(handle_pid: i64, qmp_socket: text, serial_log: text, stderr_log: text, marker: text, timeout_ms: i64):
@@ -91,7 +276,7 @@ fn main() -> i64:
     val serial_log = rt_env_get("SIMPLEOS_DESKTOP_QMP_SERIAL_LOG") ?? "build/os/simpleos_desktop_qmp_{token}.log"
     dir_create_all("build/os")
 
-    if not build_os(build_target):
+    if not rt_file_exists(build_target.output) and not build_os(build_target):
         print "simpleos_desktop_qmp_status=unavailable"
         print "simpleos_desktop_qmp_reason=desktop-build-failed"
         return 1
@@ -107,12 +292,7 @@ fn main() -> i64:
 
     match spawn_guest_with_qmp(target, qmp_socket, serial_log):
         Ok(handle):
-            # QemuGuestHandle is defined in test/ (outside the bootstrap source
-            # set), so its fields can't be typed here. Use the known local values:
-            # qmp_socket/serial_log are the exact spawn inputs, handle_stderr_log
-            # mirrors the harness derivation (serial_log + ".stderr"). The guest
-            # pid is internal to spawn and not exposed to this app.
-            val handle_pid = 0
+            val handle_pid = handle.pid
             val handle_stderr_log = serial_log + ".stderr"
             val saw_launcher = wait_for_serial_marker(handle, "[desktop-e2e] launcher-ready", _timeout_ms())
             if not saw_launcher:
@@ -126,6 +306,13 @@ fn main() -> i64:
                 print "simpleos_desktop_qmp_status=unavailable"
                 print "simpleos_desktop_qmp_reason=paint-settle-marker-missing"
                 _print_launch_failure_context(handle_pid, qmp_socket, serial_log, handle_stderr_log, "[desktop-e2e] paint-settle:done", 30000)
+                stop_guest(handle)
+                return 1
+            val saw_perf = wait_for_serial_marker(handle, "[desktop-e2e] qemu-perf", 10000)
+            if not saw_perf:
+                print "simpleos_desktop_qmp_status=unavailable"
+                print "simpleos_desktop_qmp_reason=qemu-perf-marker-missing"
+                _print_launch_failure_context(handle_pid, qmp_socket, serial_log, handle_stderr_log, "[desktop-e2e] qemu-perf", 10000)
                 stop_guest(handle)
                 return 1
             print "simpleos_desktop_qmp_status=pass"

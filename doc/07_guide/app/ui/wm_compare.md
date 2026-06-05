@@ -42,6 +42,42 @@ Current source-B behavior is important:
 
 ## Typical Commands
 
+### Capture real SimpleOS QEMU and host GTK WM parity evidence
+
+Use this wrapper when the task asks for a real GUI/WM lane instead of a fake
+QMP capture. It runs from the repository root, launches the SimpleOS desktop
+under QEMU when `QEMU_AUTO_LAUNCH_SIMPLEOS_DESKTOP=1`, captures the framebuffer
+through QMP `screendump`, and also runs the host GTK/GL exact-scene baseline:
+
+```bash
+QEMU_AUTO_LAUNCH_SIMPLEOS_DESKTOP=1 \
+  BUILD_DIR=build/qemu_gtk_wm_capture_evidence \
+  REPORT_PATH=doc/09_report/qemu_gtk_wm_capture_evidence_$(date -u +%F).md \
+  timeout 180 sh scripts/check/check-qemu-gtk-wm-capture-evidence.shs
+```
+
+The wrapper chains the host scene baseline through:
+
+```bash
+sh scripts/check/check-gtk-gl-wm-scene-bitmap-evidence.shs
+```
+
+Current passing evidence requires:
+
+- `qemu live bitmap status: pass`
+- `live capture full-scene mismatches: 0`
+- `host GTK GL WM scene status: pass`
+- `host GTK GL WM scene mismatch count: 0`
+- `host GTK GL WM scene blur/tolerance used: false`
+
+The host GTK baseline does not by itself promote guest-side performance. A
+release-grade pass requires both a host GTK baseline and a QEMU guest Simple
+paint marker shaped like:
+
+```text
+[desktop-e2e] qemu-perf sample_origin=qemu-guest simple_frame_cycles=<positive> iterations=<positive> timing_unit=tsc
+```
+
 ### Capture live source B
 
 ```bash
@@ -85,6 +121,12 @@ Use `wm_compare` today for:
 
 Do not over-interpret B-vs-D as proof of WM equivalence unless both sides are
 known to render the same scene through comparable pipelines.
+
+For the SimpleOS desktop/GTK lane, prefer
+`scripts/check/check-qemu-gtk-wm-capture-evidence.shs` over ad hoc `wm_compare`
+captures. That wrapper now owns the canonical real-QEMU QMP screendump plus
+host GTK/GL exact-scene evidence and writes the release-auditable report under
+`doc/09_report/`.
 
 ---
 

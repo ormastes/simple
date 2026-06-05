@@ -1,0 +1,97 @@
+# @tag:system
+# @tag:gui
+# @tag:tauri
+# @tag:web
+
+"""
+# Tauri/Chrome Surface Manifest Gate Spec
+
+## Overview
+
+This scenario verifies that the production surface-manifest wrapper fails
+closed when live browser-shell capture evidence is unavailable. The renderer
+parity lane requires real Electron, Tauri/WebKitGTK, and Chrome/Chromium
+captures; an unavailable Tauri or Chrome row must not promote the aggregate
+manifest to pass.
+
+## Acceptance Criteria
+
+- The Tauri/Chrome manifest wrapper exits nonzero when a manifest row cannot
+  produce live capture proof.
+- The wrapper emits `tauri_chrome_simple_web_layout_manifest_status=fail`.
+- The wrapper still records per-lane live-capture status fields so the missing
+  shell proof is visible in the evidence report.
+
+## Examples
+
+```bash
+SIMPLE_LIB=src src/compiler_rust/target/release/simple test \
+  test/03_system/gui/tauri_chrome_surface_manifest_gate_spec.spl \
+  --mode=interpreter --clean --format json
+```
+
+**Requirements:** doc/03_plan/agent_tasks/shared_ui_gpu_backend_rollout_2026_06_04.md
+**Plan:** doc/03_plan/agent_tasks/shared_ui_gpu_backend_rollout_2026_06_04.md
+**Design:** doc/07_guide/app/ui/ui_render.md
+**Research:** N/A
+"""
+
+use std.io_runtime.{getpid, time_now_unix_micros}
+use std.spec.*
+
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+fn _run_id() -> text:
+    getpid().to_text() + "_" + time_now_unix_micros().to_text()
+
+fn _build_dir(run_id: text) -> text:
+    "build/tmp/tauri_chrome_surface_manifest_gate_spec_" + run_id
+
+fn _layout_env_path(run_id: text) -> text:
+    _build_dir(run_id) + "/layout.env"
+
+fn _report_path(run_id: text) -> text:
+    _build_dir(run_id) + "/report.md"
+
+fn _run_manifest(run_id: text) -> (text, text, i32):
+    rt_process_run_timeout(
+        "/bin/sh",
+        [
+            "-c",
+            "mkdir -p " + _build_dir(run_id) +
+                " && BUILD_DIR=" + _build_dir(run_id) +
+                " REPORT_PATH=" + _report_path(run_id) +
+                " LAYOUT_ENV=" + _layout_env_path(run_id) +
+                " sh scripts/check/check-tauri-chrome-simple-web-layout-manifest-evidence.shs"
+        ],
+        120000
+    )
+
+describe "Tauri/Chrome surface manifest gate":
+    it "fails closed when live shell captures are unavailable":
+        val run_id = _run_id()
+        val layout_env = _layout_env_path(run_id)
+        rt_process_run_timeout("/bin/sh", ["-c", "mkdir -p " + _build_dir(run_id)], 5000)
+        expect(rt_file_write_text(layout_env,
+            "electron_simple_web_layout_manifest_status=pass\n" +
+            "electron_simple_web_layout_manifest_reason=pass\n" +
+            "electron_simple_web_layout_manifest_case=missing_shell_capture\n" +
+            "electron_simple_web_layout_manifest_case_count=1\n" +
+            "electron_simple_web_layout_manifest_pass_count=1\n" +
+            "electron_simple_web_layout_manifest_fail_count=0\n" +
+            "case_missing_shell_capture_electron_simple_web_layout_html_path=" + _build_dir(run_id) + "/missing.html\n" +
+            "case_missing_shell_capture_electron_simple_web_layout_expected_argb_path=" + _build_dir(run_id) + "/missing-argb.json\n" +
+            "case_missing_shell_capture_electron_simple_web_layout_width=96\n" +
+            "case_missing_shell_capture_electron_simple_web_layout_height=64\n"
+        )).to_equal(true)
+        val result = _run_manifest(run_id)
+        val stdout = result[0]
+        val code = result[2]
+        expect(code).to_equal(1)
+        expect(stdout).to_contain("tauri_chrome_simple_web_layout_manifest_status=fail")
+        expect(stdout).to_contain("live-surface-capture-required")
+        expect(stdout).to_contain("tauri_chrome_simple_web_layout_manifest_tauri_capture_status=unavailable")
+        expect(stdout).to_contain("tauri_chrome_simple_web_layout_manifest_tauri_live_capture=false")
+        expect(stdout).to_contain("tauri_chrome_simple_web_layout_manifest_no_fake_capture=true")
+        expect(stdout).to_contain("tauri_chrome_simple_web_layout_manifest_blur_or_tolerance_used=false")

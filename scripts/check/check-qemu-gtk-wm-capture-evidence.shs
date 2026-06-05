@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 BUILD_DIR="${BUILD_DIR:-build/qemu_gtk_wm_capture_evidence}"
@@ -30,9 +30,9 @@ AUTO_QMP_SERIAL_BYTES=""
 AUTO_QMP_STDERR_BYTES=""
 AUTO_QMP_GUEST_PERF_MARKER_PRESENT=""
 AUTO_QMP_GUEST_PERF_SAMPLE_ORIGIN=""
-AUTO_QMP_GUEST_PERF_SIMPLE_FRAME_US=""
-AUTO_QMP_GUEST_PERF_GTK_FRAME_US=""
+AUTO_QMP_GUEST_PERF_SIMPLE_FRAME_CYCLES=""
 AUTO_QMP_GUEST_PERF_ITERATIONS=""
+AUTO_QMP_GUEST_PERF_TIMING_UNIT=""
 AUTO_QMP_GUEST_PERF_PENDING_MARKER=""
 AUTO_QMP_EXIT_CODE=0
 
@@ -71,32 +71,27 @@ parse_guest_perf_marker_file() {
     if [ ! -f "$marker_file" ]; then
         return 0
     fi
-    marker_line="$(grep -a 'sample_origin=qemu-guest' "$marker_file" | grep -a 'simple_frame_us=' | grep -a 'gtk_frame_us=' | grep -a 'iterations=' | tail -n 1 || true)"
+    marker_line="$(grep -a 'sample_origin=qemu-guest' "$marker_file" | grep -a 'simple_frame_cycles=' | grep -a 'iterations=' | tail -n 1 || true)"
     if [ -z "$marker_line" ]; then
         return 0
     fi
     marker_sample_origin="$(field_from_marker_line "$marker_line" sample_origin)"
-    marker_simple_frame_us="$(field_from_marker_line "$marker_line" simple_frame_us)"
-    marker_gtk_frame_us="$(field_from_marker_line "$marker_line" gtk_frame_us)"
+    marker_simple_frame_cycles="$(field_from_marker_line "$marker_line" simple_frame_cycles)"
     marker_iterations="$(field_from_marker_line "$marker_line" iterations)"
+    marker_timing_unit="$(field_from_marker_line "$marker_line" timing_unit)"
     qemu_perf_harness_marker_line="$marker_line"
     qemu_perf_harness_sample_origin="$marker_sample_origin"
-    perf_simple_frame_us="${marker_simple_frame_us:-0}"
-    perf_gtk_frame_us="${marker_gtk_frame_us:-0}"
+    perf_simple_frame_cycles="${marker_simple_frame_cycles:-0}"
     perf_iterations="${marker_iterations:-0}"
+    perf_timing_unit="${marker_timing_unit:-tsc}"
     if [ "$marker_sample_origin" = "$qemu_perf_harness_required_sample_origin" ] \
-        && is_positive_int "$marker_simple_frame_us" \
-        && is_positive_int "$marker_gtk_frame_us" \
+        && is_positive_int "$marker_simple_frame_cycles" \
         && is_positive_int "$marker_iterations"; then
         qemu_perf_harness_status=pass
         qemu_perf_harness_reason=pass
-        perf_status=pass
-        perf_reason=pass
-        perf_comparison_available=true
-        perf_release_blocker=none
     else
         qemu_perf_harness_status=fail
-        qemu_perf_harness_reason=qemu-side-gtk-simple-perf-marker-invalid
+        qemu_perf_harness_reason=qemu-side-simple-perf-marker-invalid
         perf_status=fail
         perf_reason="$qemu_perf_harness_reason"
         perf_comparison_available=false
@@ -136,18 +131,20 @@ host_wm_report_path="$WM_HOST_REPORT_PATH"
 perf_status=unavailable
 perf_reason=missing-qmp-socket
 perf_simple_frame_us=0
+perf_simple_frame_cycles=0
 perf_gtk_frame_us=0
 perf_iterations=0
+perf_timing_unit=
 perf_comparison_available=false
 perf_scope=qemu-live-bitmap-plus-host-gtk-baseline
-perf_release_gate=guest-side-simple-vs-gtk-performance
+perf_release_gate=guest-simple-frame-plus-host-gtk-baseline
 perf_release_blocker=missing-qmp-socket
 perf_required_for_release=true
 qemu_perf_harness_status=unwired
-qemu_perf_harness_reason=qemu-side-gtk-simple-perf-harness-not-wired
+qemu_perf_harness_reason=qemu-side-simple-perf-harness-not-wired
 qemu_perf_harness_sample_origin=none
 qemu_perf_harness_required_sample_origin=qemu-guest
-qemu_perf_harness_pending_marker="[desktop-e2e] qemu-perf sample_origin=qemu-guest simple_frame_us=<positive> gtk_frame_us=<positive> iterations=<positive>"
+qemu_perf_harness_pending_marker="[desktop-e2e] qemu-perf sample_origin=qemu-guest simple_frame_cycles=<positive> iterations=<positive> timing_unit=tsc"
 qemu_perf_harness_marker_line=""
 qemu_live_status=unavailable
 qemu_live_reason=missing-qmp-socket
@@ -188,7 +185,7 @@ run_gtk_scene_evidence() {
 	    REPORT_PATH="$GTK_SCENE_REPORT_PATH" \
 	    BUILD_DIR="$BUILD_DIR/gtk-gl" \
 	    SIMPLE_BIN="$SIMPLE_BIN" \
-	        sh scripts/check-gtk-gl-wm-scene-bitmap-evidence.shs >"$BUILD_DIR/gtk-gl.out" 2>&1
+	        sh scripts/check/check-gtk-gl-wm-scene-bitmap-evidence.shs >"$BUILD_DIR/gtk-gl.out" 2>&1
     gtk_scene_exit_code=$?
     set -e
     gtk_scene_status="$(sed -n 's/^gtk_gl_wm_scene_status=//p' "$BUILD_DIR/gtk-gl.out" | tail -n 1)"
@@ -241,9 +238,9 @@ if [ -z "${QEMU_QMP_SOCKET:-}" ] && [ "$AUTO_QMP_LAUNCH" = "1" ]; then
     AUTO_QMP_STDERR_BYTES="$(sed -n 's/^simpleos_desktop_qmp_stderr_bytes=//p' "$AUTO_QMP_OUT" | tail -n 1)"
     AUTO_QMP_GUEST_PERF_MARKER_PRESENT="$(sed -n 's/^simpleos_desktop_qmp_guest_perf_marker_present=//p' "$AUTO_QMP_OUT" | tail -n 1)"
     AUTO_QMP_GUEST_PERF_SAMPLE_ORIGIN="$(sed -n 's/^simpleos_desktop_qmp_guest_perf_sample_origin=//p' "$AUTO_QMP_OUT" | tail -n 1)"
-    AUTO_QMP_GUEST_PERF_SIMPLE_FRAME_US="$(sed -n 's/^simpleos_desktop_qmp_guest_perf_simple_frame_us=//p' "$AUTO_QMP_OUT" | tail -n 1)"
-    AUTO_QMP_GUEST_PERF_GTK_FRAME_US="$(sed -n 's/^simpleos_desktop_qmp_guest_perf_gtk_frame_us=//p' "$AUTO_QMP_OUT" | tail -n 1)"
+    AUTO_QMP_GUEST_PERF_SIMPLE_FRAME_CYCLES="$(sed -n 's/^simpleos_desktop_qmp_guest_perf_simple_frame_cycles=//p' "$AUTO_QMP_OUT" | tail -n 1)"
     AUTO_QMP_GUEST_PERF_ITERATIONS="$(sed -n 's/^simpleos_desktop_qmp_guest_perf_iterations=//p' "$AUTO_QMP_OUT" | tail -n 1)"
+    AUTO_QMP_GUEST_PERF_TIMING_UNIT="$(sed -n 's/^simpleos_desktop_qmp_guest_perf_timing_unit=//p' "$AUTO_QMP_OUT" | tail -n 1)"
     AUTO_QMP_GUEST_PERF_PENDING_MARKER="$(sed -n 's/^simpleos_desktop_qmp_guest_perf_pending_marker=//p' "$AUTO_QMP_OUT" | tail -n 1)"
     if [ -z "$AUTO_QMP_STATUS" ]; then
         AUTO_QMP_STATUS=unavailable
@@ -371,24 +368,25 @@ if [ "$FORCE_QEMU_LIVE_AND_HOST_PERF_FOR_TEST" = "1" ]; then
     host_perf_comparison_available=true
     if [ "$qemu_perf_harness_status" = "pass" ]; then
         qemu_perf_harness_status=unwired
-        qemu_perf_harness_reason=qemu-side-gtk-simple-perf-harness-not-wired
+        qemu_perf_harness_reason=qemu-side-simple-perf-harness-not-wired
         qemu_perf_harness_sample_origin=none
         qemu_perf_harness_marker_line=""
     fi
 fi
 
 if [ "$status" = "pass" ] && [ "$qemu_live_status" = "pass" ]; then
-    if [ "$qemu_perf_harness_status" = "pass" ]; then
+    if [ "$qemu_perf_harness_status" = "pass" ] && [ "$host_perf_status" = "pass" ] && [ "$host_perf_comparison_available" = "true" ]; then
         perf_status=pass
         perf_reason=pass
         perf_comparison_available=true
         perf_release_blocker=none
-    elif [ "$host_perf_status" = "pass" ] && [ "$host_perf_comparison_available" = "true" ]; then
+        perf_gtk_frame_us="$host_perf_gtk_frame_us"
+    elif [ "$qemu_perf_harness_status" != "pass" ]; then
         perf_status=unavailable
         perf_reason="$qemu_perf_harness_reason"
-        perf_simple_frame_us=0
         perf_gtk_frame_us=0
         perf_iterations=0
+        perf_timing_unit=
         perf_comparison_available=false
         perf_release_blocker="$qemu_perf_harness_reason"
     else
@@ -406,8 +404,10 @@ if [ "$FORCE_QEMU_LIVE_AND_HOST_PERF_FOR_TEST" = "1" ]; then
     perf_status=unavailable
     perf_reason=forced-live-host-perf-for-test-not-release-evidence
     perf_simple_frame_us=0
+    perf_simple_frame_cycles=0
     perf_gtk_frame_us=0
     perf_iterations=0
+    perf_timing_unit=
     perf_comparison_available=false
     perf_release_blocker=forced-live-host-perf-for-test-not-release-evidence
 fi
@@ -493,9 +493,9 @@ fi
     echo "qemu_gtk_wm_capture_auto_qmp_stderr_bytes=$AUTO_QMP_STDERR_BYTES"
     echo "qemu_gtk_wm_capture_auto_qmp_guest_perf_marker_present=$AUTO_QMP_GUEST_PERF_MARKER_PRESENT"
     echo "qemu_gtk_wm_capture_auto_qmp_guest_perf_sample_origin=$AUTO_QMP_GUEST_PERF_SAMPLE_ORIGIN"
-    echo "qemu_gtk_wm_capture_auto_qmp_guest_perf_simple_frame_us=$AUTO_QMP_GUEST_PERF_SIMPLE_FRAME_US"
-    echo "qemu_gtk_wm_capture_auto_qmp_guest_perf_gtk_frame_us=$AUTO_QMP_GUEST_PERF_GTK_FRAME_US"
+    echo "qemu_gtk_wm_capture_auto_qmp_guest_perf_simple_frame_cycles=$AUTO_QMP_GUEST_PERF_SIMPLE_FRAME_CYCLES"
     echo "qemu_gtk_wm_capture_auto_qmp_guest_perf_iterations=$AUTO_QMP_GUEST_PERF_ITERATIONS"
+    echo "qemu_gtk_wm_capture_auto_qmp_guest_perf_timing_unit=$AUTO_QMP_GUEST_PERF_TIMING_UNIT"
     echo "qemu_gtk_wm_capture_auto_qmp_guest_perf_pending_marker=$AUTO_QMP_GUEST_PERF_PENDING_MARKER"
     echo "qemu_gtk_wm_capture_qmp_socket=${QEMU_QMP_SOCKET:-}"
     echo "qemu_gtk_wm_capture_wm_exit_code=$wm_exit_code"
@@ -515,8 +515,10 @@ fi
     echo "qemu_gtk_wm_capture_perf_status=$perf_status"
     echo "qemu_gtk_wm_capture_perf_reason=$perf_reason"
     echo "qemu_gtk_wm_capture_perf_simple_frame_us=$perf_simple_frame_us"
+    echo "qemu_gtk_wm_capture_perf_simple_frame_cycles=$perf_simple_frame_cycles"
     echo "qemu_gtk_wm_capture_perf_gtk_frame_us=$perf_gtk_frame_us"
     echo "qemu_gtk_wm_capture_perf_iterations=$perf_iterations"
+    echo "qemu_gtk_wm_capture_perf_timing_unit=$perf_timing_unit"
     echo "qemu_gtk_wm_capture_perf_comparison_available=$perf_comparison_available"
     echo "qemu_gtk_wm_capture_perf_scope=$perf_scope"
     echo "qemu_gtk_wm_capture_perf_release_gate=$perf_release_gate"
@@ -601,9 +603,9 @@ fi
     echo "- auto QMP stderr bytes: $AUTO_QMP_STDERR_BYTES"
     echo "- auto QMP guest perf marker present: $AUTO_QMP_GUEST_PERF_MARKER_PRESENT"
     echo "- auto QMP guest perf sample origin: $AUTO_QMP_GUEST_PERF_SAMPLE_ORIGIN"
-    echo "- auto QMP guest perf simple frame us: $AUTO_QMP_GUEST_PERF_SIMPLE_FRAME_US"
-    echo "- auto QMP guest perf GTK frame us: $AUTO_QMP_GUEST_PERF_GTK_FRAME_US"
+    echo "- auto QMP guest perf simple frame cycles: $AUTO_QMP_GUEST_PERF_SIMPLE_FRAME_CYCLES"
     echo "- auto QMP guest perf iterations: $AUTO_QMP_GUEST_PERF_ITERATIONS"
+    echo "- auto QMP guest perf timing unit: $AUTO_QMP_GUEST_PERF_TIMING_UNIT"
     echo "- auto QMP guest perf pending marker: $AUTO_QMP_GUEST_PERF_PENDING_MARKER"
     echo "- qmp socket: ${QEMU_QMP_SOCKET:-}"
     echo "- host WM smoke status: $host_wm_status"
@@ -622,6 +624,10 @@ fi
     fi
     echo "- qemu-side perf status: $perf_status"
     echo "- qemu-side perf reason: $perf_reason"
+    echo "- qemu-side perf simple frame cycles: $perf_simple_frame_cycles"
+    echo "- qemu-side perf host GTK frame us: $perf_gtk_frame_us"
+    echo "- qemu-side perf iterations: $perf_iterations"
+    echo "- qemu-side perf timing unit: $perf_timing_unit"
     echo "- qemu-side perf comparison available: $perf_comparison_available"
     echo "- qemu-side perf scope: $perf_scope"
     echo "- qemu-side perf release gate: $perf_release_gate"
