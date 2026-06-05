@@ -103,6 +103,18 @@ MCP, Render, Test API — all thin. GUI policy stays in Simple.
 - event cache: stale translations are rejected when scene layout keys change;
   WM Draw IR uses the same scene key.
 
+## GUI Sanity Apps
+
+Three on-screen apps sanity-check the pure-Simple drawing lane (macOS = Engine2D
+CPU/NEON + Metal); launch with `scripts/gui/macos-gui-run.shs <app>`:
+
+- **2D**: `engine2d_cpu_simd_gui.spl` / `engine2d_metal_gui.spl`
+- **widgets**: `widget_showcase_gui.spl`
+- **HTML**: `web_text_gui.spl` (or `web_render_file_gui.spl <file.html>`)
+
+Verify the framebuffer (`read_pixels` → PPM), not the screenshot. Details +
+caveats in [source](simple_gui_stack.md) → "GUI Sanity Apps".
+
 ## Open Next
 
 - [source](simple_gui_stack.md)

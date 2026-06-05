@@ -296,11 +296,38 @@ Rust-seed change**:
    de-registers). Needs a gui-feature driver:
    `cd src/compiler_rust && CARGO_TARGET_DIR=target/gui cargo build -p simple-driver --features gui`.
 
+### GUI sanity apps (one per lane)
+
+After any GUI / engine2d / web-render change, sanity-check these three on-screen
+apps (on macOS the pure-Simple drawing lane = Engine2D CPU/NEON + Metal):
+
+| Lane | App | Renders |
+|------|-----|---------|
+| 2D | `engine2d_cpu_simd_gui.spl` (CPU) / `engine2d_metal_gui.spl` (Metal) | text, rect, circle, line, gradient, rounded-rect |
+| GUI widgets | `widget_showcase_gui.spl` | button, checkbox, text field, progress bar, list (legible labels) |
+| HTML | `web_text_gui.spl` / `web_render_file_gui.spl <file.html>` | web layout → Engine2D CPU, legible glyph text |
+
+```bash
+scripts/gui/macos-gui-run.shs examples/06_io/ui/engine2d_cpu_simd_gui.spl
+scripts/gui/macos-gui-run.shs examples/06_io/ui/widget_showcase_gui.spl
+scripts/gui/macos-gui-run.shs examples/06_io/ui/web_text_gui.spl
+```
+
+**Verify the framebuffer, not the screenshot.** Dump `read_pixels()` to a P3 PPM
+via `rt_file_write_text` and inspect it — that is the ground truth, independent of
+window-server/compositor/permission state; region screen-capture is flaky. See
+`doc/04_architecture/ui/simple_gui_stack.md` → "GUI Sanity Apps".
+
 Notes:
 - Linux/Windows run a continuous `event_loop.run()` on a dedicated thread and do
   not need the `.app` bundle.
 - The per-pixel software render (e.g. the host WM at 1024×768) is slow in the
-  interpreter; verify at small resolution or use the compiled path.
+  interpreter; verify at small resolution or use the compiled path. The web-layout
+  lane is interpreter-bound (~1.5 ms/px) — keep web sanity surfaces small.
+- `macos-gui-run.shs` lives under `scripts/gui/`, so it computes repo-root as
+  `dirname/../..` (two levels). The same applies to the capture gate under
+  `scripts/check/`; using `dirname/..` resolves repo-root to `scripts/` and breaks
+  every GUI launch ("no GUI-enabled driver found").
 - Full root cause + recipe:
   [`doc/08_tracking/bug/macos_winit_window_not_displayed_2026-05-28.md`](../08_tracking/bug/macos_winit_window_not_displayed_2026-05-28.md).
 
