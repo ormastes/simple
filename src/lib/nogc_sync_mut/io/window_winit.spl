@@ -1,0 +1,82 @@
+# Winit Windowing SFFI Wrapper
+#
+# Typed, leak-safe wrapper over the raw `rt_winit_*` extern surface so GUI apps
+# do not declare externs inline. Mirrors the struct/`is_valid` convention used by
+# window_sffi.spl (SDL2).
+#
+# Pixel buffers are passed as [i64] packed RGBA (one pixel per i64).
+#
+# IMPORTANT (memory): the runtime stores every polled event in a global map and
+# only releases it when `rt_winit_event_free` is called. `winit_poll_close_requested`
+# therefore DRAINS and FREES every pending event each call — never poll without
+# freeing, or the event map grows unbounded over a long present loop.
+
+# ============================================================================
+# Tier 1: Raw extern declarations (winit_sffi runtime)
+# ============================================================================
+extern fn rt_winit_event_loop_new() -> i64
+extern fn rt_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64
+extern fn rt_winit_window_present_rgba(win: i64, w: i64, h: i64, pixels: [i64])
+extern fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64
+extern fn rt_winit_event_get_type(ev: i64) -> i64
+extern fn rt_winit_event_free(ev: i64)
+extern fn rt_winit_window_free(win: i64)
+extern fn rt_winit_event_loop_free(el: i64)
+
+# Event type returned by rt_winit_event_get_type for a close request.
+val EVT_CLOSE: i64 = 3
+
+# ============================================================================
+# Tier 2: Typed handles
+# ============================================================================
+struct WinitLoop:
+    handle: i64
+    is_valid: bool
+
+struct WinitWindow:
+    handle: i64
+    is_valid: bool
+
+# ============================================================================
+# Tier 3: Safe API
+# ============================================================================
+
+# Create the native event loop. Returns an invalid handle when no GUI runtime
+# is available (handle == 0).
+fn winit_loop_new() -> WinitLoop:
+    val h = rt_winit_event_loop_new()
+    WinitLoop(handle: h, is_valid: h != 0)
+
+fn winit_loop_free(lp: WinitLoop):
+    if lp.is_valid:
+        rt_winit_event_loop_free(lp.handle)
+
+fn winit_window_new(lp: WinitLoop, w: i64, h: i64, title: text) -> WinitWindow:
+    if not lp.is_valid:
+        WinitWindow(handle: 0, is_valid: false)
+    else:
+        val win = rt_winit_window_new(lp.handle, w, h, title)
+        WinitWindow(handle: win, is_valid: win != 0)
+
+fn winit_window_free(win: WinitWindow):
+    if win.is_valid:
+        rt_winit_window_free(win.handle)
+
+fn winit_present_rgba(win: WinitWindow, w: i64, h: i64, pixels: [i64]):
+    if win.is_valid:
+        rt_winit_window_present_rgba(win.handle, w, h, pixels)
+
+# Drain every pending event, freeing each one, and report whether a window-close
+# was requested. Freeing each event is mandatory: the runtime never reclaims
+# polled events on its own, so a non-draining poll leaks the global event map.
+fn winit_poll_close_requested(lp: WinitLoop) -> bool:
+    if not lp.is_valid:
+        return false
+    var close_requested = false
+    var ev = rt_winit_event_loop_poll_events(lp.handle, 1)
+    while ev != 0:
+        if rt_winit_event_get_type(ev) == EVT_CLOSE:
+            close_requested = true
+        rt_winit_event_free(ev)
+        ev = rt_winit_event_loop_poll_events(lp.handle, 1)
+    close_requested
