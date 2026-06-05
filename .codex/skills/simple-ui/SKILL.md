@@ -42,6 +42,13 @@ available, not just through screenshots. Use snapshot/find/action/history or the
 role, perform the interaction, and assert the post-action surface state. Keep
 screenshots as visual evidence for layout, theme, and pixel regressions.
 
+For MDI/window-manager work, also prove event propagation when practical:
+assert the dispatch action/target, local coordinates, focus or drag state,
+stale event-cache rejection after layout movement, and any Draw IR event target
+handoff (`DrawIrEventTargetContext`) if rendering or backend routing changed.
+When the renderer/backend architecture changes, distinguish drawing backend
+evidence from processing/offload backend evidence.
+
 ## Procedure
 
 ### Phase 1: Snapshot

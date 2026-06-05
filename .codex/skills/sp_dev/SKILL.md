@@ -34,6 +34,17 @@ Web, Electron/Tauri, QEMU, or backend readback evidence, update the relevant
 `doc/03_plan`, `doc/07_guide`, and `doc/09_report` references so future agents
 can find the canonical wrapper instead of repeating stale commands.
 
+For UI, GUI, MDI/window-manager, Draw IR, Simple 2D, or Engine2D backend-lane
+work, keep the stack architecture current in
+`doc/04_architecture/ui/simple_gui_stack.md` and its TLDR companion. If the work
+changes shared UI contracts, event propagation, Draw IR source/event metadata,
+or the drawing-vs-processing backend split, update the generated/manual spec
+docs under `doc/06_spec`, the relevant `doc/07_guide` process note when one
+exists, and cite the canonical implementation paths such as
+`src/lib/common/ui/draw_ir.spl`,
+`src/lib/common/ui/window_scene_draw_ir.spl`, and
+`src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl`.
+
 For Simple Web/Electron renderer parity, keep the canonical wrapper documented
 as `scripts/check/check-production-gui-web-renderer-parity-evidence.shs`.
 Generated-GUI evidence may record explicit `text_normalization_pixels` for
