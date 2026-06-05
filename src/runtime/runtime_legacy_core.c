@@ -23,6 +23,21 @@
 #include <unistd.h>
 #endif
 
+int64_t rt_thread_available_parallelism(void) {
+#if defined(_WIN32)
+    SYSTEM_INFO info;
+    GetSystemInfo(&info);
+    return info.dwNumberOfProcessors > 0 ? (int64_t)info.dwNumberOfProcessors : 1;
+#else
+    long count = sysconf(_SC_NPROCESSORS_ONLN);
+    return count > 0 ? (int64_t)count : 1;
+#endif
+}
+
+int64_t spl_thread_cpu_count(void) {
+    return rt_thread_available_parallelism();
+}
+
 static SplValue spl_value_nil(void) {
     SplValue v;
     memset(&v, 0, sizeof(v));

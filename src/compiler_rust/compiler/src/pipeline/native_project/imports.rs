@@ -62,6 +62,10 @@ fn sanitize_mangled(name: String) -> String {
     }
 }
 
+fn has_concrete_body(body: &simple_parser::ast::Block) -> bool {
+    !body.statements.is_empty() && !matches!(body.statements.as_slice(), [simple_parser::ast::Node::Pass(_)])
+}
+
 /// Try alternate name forms to resolve a call target through use_map/import_map.
 pub(crate) fn resolve_name_variants(
     name: &str,
@@ -395,9 +399,6 @@ pub(crate) fn build_import_map(
                             }
                         }
                         for v in &e.variants {
-                            let raw = format!("{}.{}", e.name, v.name);
-                            let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, e.name, v.name));
-                            raw_to_mangled.entry(raw).or_default().push(mangled);
                             if let Some(ref fields) = v.fields {
                                 let named: Vec<(String, simple_parser::Type)> = fields
                                     .iter()
@@ -411,7 +412,7 @@ pub(crate) fn build_import_map(
                     }
                     simple_parser::ast::Node::Trait(t) => {
                         for m in &t.methods {
-                            if !m.body.statements.is_empty() {
+                            if has_concrete_body(&m.body) {
                                 let raw = format!("{}.{}", t.name, m.name);
                                 let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, t.name, m.name));
                                 raw_to_mangled.entry(m.name.clone()).or_default().push(mangled.clone());

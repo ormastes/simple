@@ -137,6 +137,8 @@ pub struct InstrContext<'a, M: Module> {
     pub vreg_types: &'a mut HashMap<VReg, TypeId>,
     /// Mangled function name → declared parameter count for cross-module free functions.
     pub fn_arities: &'a std::sync::Arc<std::collections::HashMap<String, usize>>,
+    /// Global enum definitions: enum name -> [(variant name, payload arity)].
+    pub enum_defs: &'a std::sync::Arc<std::collections::HashMap<String, Vec<(String, Option<usize>)>>>,
 }
 
 impl<'a, M: Module> InstrContext<'a, M> {
@@ -194,6 +196,8 @@ impl<'a, M: Module> InstrContext<'a, M> {
             Box::leak(Box::new(std::collections::HashMap::new()));
         let fn_arities: &'static std::sync::Arc<std::collections::HashMap<String, usize>> =
             Box::leak(Box::new(std::sync::Arc::new(std::collections::HashMap::new())));
+        let enum_defs: &'static std::sync::Arc<std::collections::HashMap<String, Vec<(String, Option<usize>)>>> =
+            Box::leak(Box::new(std::sync::Arc::new(std::collections::HashMap::new())));
         let data_exports: &'static std::sync::Arc<std::collections::HashSet<String>> =
             Box::leak(Box::new(std::sync::Arc::new(std::collections::HashSet::new())));
         let vtable_data_ids: &'static std::collections::BTreeMap<String, cranelift_module::DataId> =
@@ -235,6 +239,7 @@ impl<'a, M: Module> InstrContext<'a, M> {
             vtable_type_ids,
             vreg_types,
             fn_arities,
+            enum_defs,
         }
     }
 }
@@ -654,6 +659,7 @@ pub fn compile_instruction<M: Module>(
             capture_offsets,
             capture_types: _,
             captures,
+            lambda_params: _,
             body_block: _,
         } => {
             compile_closure_create(

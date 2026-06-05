@@ -20,13 +20,15 @@ use compiler.loader.compiler_sffi.{
     compiler_instantiate_template,
     compiler_get_stats,
     serialize_types_json,
-    parse_types_json
+    parse_types_json,
+    compiler_result_json_success,
+    compiler_result_json_code,
+    compiler_result_json_error
 }
 use .smf_cache.{SmfCache, CacheStats}
 
 # Executable memory mapping is handled via compiler_shared.loader.object_mapper
 
-extern fn json_parse(input: text) -> Result<JsonValue, SimpleError>
 extern fn rt_file_write_text(path: text, content: text) -> bool
 
 # ============================================================================
@@ -322,36 +324,11 @@ impl JitInstantiator:
         # Call compiler SFFI to instantiate template
         val result_text = compiler_instantiate_template(self.compiler_ctx_handle, template_json, types_json)
 
-        # Parse the JSON result to extract code bytes
-        val parsed = json_parse(result_text)
-        var code_result: Result<[u8], text> = Err("Failed to parse compilation result")
-
-        if parsed.is_ok():
-            val root = parsed.unwrap()
-            val success_val = root.get("success")
-            val is_success = if success_val.?:
-                success_val.unwrap().as_bool() ?? false
-            else:
-                false
-
-            if is_success:
-                var code_bytes: [u8] = []
-                val code_val = root.get("code")
-                if code_val.?:
-                    val code_arr = code_val.unwrap().as_array()
-                    if code_arr.?:
-                        for elem in code_arr.unwrap():
-                            val n = elem.as_number()
-                            if n.?:
-                                code_bytes.push(n.unwrap() as u8)
-                code_result = Ok(code_bytes)
-            else:
-                val error_val = root.get("error")
-                val error_msg = if error_val.?:
-                    error_val.unwrap().as_string() ?? "Unknown compilation error"
-                else:
-                    "Unknown compilation error"
-                code_result = Err(error_msg)
+        # Parse the generated JSON result to extract code bytes.
+        val code_result = if compiler_result_json_success(result_text):
+            Ok(compiler_result_json_code(result_text))
+        else:
+            Err(compiler_result_json_error(result_text))
 
         match code_result:
             case Ok(compiled_code):

@@ -3,9 +3,10 @@
 use super::super::common::*;
 use super::helpers::*;
 use crate::hir;
-use crate::mir::lower::{ContractMode, MirLowerer};
+use crate::mir::lower::{lower_to_mir, ContractMode, MirLowerer};
 use crate::mir::function::MirFunction;
 use crate::mir::{CallTarget, MirInst};
+use simple_parser::Parser;
 
 // =============================================================================
 // Method call lowering (lowering_expr.rs lines 972-973)
@@ -55,6 +56,59 @@ fn imported_style_result_unwrap_call_lowers_to_enum_payload() {
         )),
         "FailSafeResult.unwrap should lower to rt_enum_payload, not a direct dotted call"
     );
+}
+
+#[test]
+fn sanitized_enum_constructor_call_lowers_to_enum_with() {
+    let mut parser = Parser::new(
+        "enum Type:\n    Int(bits: i32, signed: bool)\n    Var(id: i64)\n\nfn test() -> Type:\n    return Type.Int(bits: 64, signed: true)\n",
+    );
+    let ast = parser.parse().expect("parse failed");
+    let mut hir_module = hir::lower(&ast).expect("hir lower failed");
+
+    let test_fn = hir_module.functions.iter_mut().find(|f| f.name == "test").unwrap();
+    let hir::HirStmt::Return(Some(expr)) = &mut test_fn.body[0] else {
+        panic!("expected return");
+    };
+    let hir::HirExprKind::Call { func, .. } = &mut expr.kind else {
+        panic!("expected enum constructor call");
+    };
+    func.kind = hir::HirExprKind::Global("Type_dot_Int".to_string());
+
+    let mir = lower_to_mir(&hir_module).unwrap();
+    assert!(has_inst(&mir, |i| matches!(
+        i,
+        MirInst::EnumWith { enum_name, variant_name, .. }
+            if enum_name == "Type" && variant_name == "Int"
+    )));
+    assert!(!has_inst(&mir, |i| matches!(
+        i,
+        MirInst::Call { target, .. } if target.name() == "Type_dot_Int"
+    )));
+}
+
+#[test]
+fn sanitized_enum_unit_global_lowers_to_enum_unit() {
+    let mut parser = Parser::new("enum Tag:\n    Ready\n\nfn test() -> Tag:\n    return Tag.Ready\n");
+    let ast = parser.parse().expect("parse failed");
+    let mut hir_module = hir::lower(&ast).expect("hir lower failed");
+
+    let test_fn = hir_module.functions.iter_mut().find(|f| f.name == "test").unwrap();
+    let hir::HirStmt::Return(Some(expr)) = &mut test_fn.body[0] else {
+        panic!("expected return");
+    };
+    expr.kind = hir::HirExprKind::Global("Tag_dot_Ready".to_string());
+
+    let mir = lower_to_mir(&hir_module).unwrap();
+    assert!(has_inst(&mir, |i| matches!(
+        i,
+        MirInst::EnumUnit { enum_name, variant_name, .. }
+            if enum_name == "Tag" && variant_name == "Ready"
+    )));
+    assert!(!has_inst(&mir, |i| matches!(
+        i,
+        MirInst::GlobalLoad { global_name, .. } if global_name == "Tag_dot_Ready"
+    )));
 }
 
 // =============================================================================

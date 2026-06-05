@@ -24,7 +24,10 @@ pub use simple_driver;
 // features.
 use spl_hosted_runtime as _;
 
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use simple_compiler::optimizations::{format_optimization_guide, NativeOptimizationLevel};
 use simple_compiler::pipeline::{NativeBuildConfig, NativeProjectBuilder};
@@ -601,6 +604,347 @@ fn stub_make_string(s: &str) -> i64 {
     from_rv(rt_string_new(s.as_ptr(), s.len() as u64))
 }
 
+#[derive(Clone, Copy)]
+enum NativeStoredValue {
+    Int(i64),
+    Bool(bool),
+    Nil,
+    Raw(i64),
+}
+
+impl NativeStoredValue {
+    fn from_abi(value: i64) -> Self {
+        let runtime_value = to_rv(value);
+        if runtime_value.is_int() {
+            Self::Int(runtime_value.as_int())
+        } else if runtime_value.is_bool() {
+            Self::Bool(runtime_value.as_bool())
+        } else if runtime_value.is_nil() {
+            Self::Nil
+        } else {
+            Self::Raw(value)
+        }
+    }
+
+    fn direct_abi(self) -> i64 {
+        match self {
+            Self::Int(value) => value,
+            Self::Bool(value) => i64::from(value),
+            Self::Nil => 0,
+            Self::Raw(value) => value,
+        }
+    }
+
+    fn runtime_value(self) -> RuntimeValue {
+        match self {
+            Self::Int(value) => RuntimeValue::from_int(value),
+            Self::Bool(value) => RuntimeValue::from_bool(value),
+            Self::Nil => RuntimeValue::NIL,
+            Self::Raw(value) => to_rv(value),
+        }
+    }
+}
+
+type NativeMapRegistry<T> = OnceLock<Mutex<HashMap<i64, T>>>;
+
+static NEXT_HASHMAP_HANDLE: AtomicI64 = AtomicI64::new(1);
+static HASHMAP_REGISTRY: NativeMapRegistry<HashMap<String, NativeStoredValue>> = OnceLock::new();
+static NEXT_BTREEMAP_HANDLE: AtomicI64 = AtomicI64::new(200_000);
+static BTREEMAP_REGISTRY: NativeMapRegistry<BTreeMap<String, NativeStoredValue>> = OnceLock::new();
+
+fn hashmap_registry() -> &'static Mutex<HashMap<i64, HashMap<String, NativeStoredValue>>> {
+    HASHMAP_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn btreemap_registry() -> &'static Mutex<HashMap<i64, BTreeMap<String, NativeStoredValue>>> {
+    BTREEMAP_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn stub_extract_key(key: i64) -> Option<String> {
+    stub_extract_path(key)
+}
+
+fn native_array_from_raw_values(values: impl IntoIterator<Item = i64>) -> i64 {
+    let array = rt_array_new_impl(0);
+    for value in values {
+        rt_array_push_impl(array, to_rv(value));
+    }
+    from_rv(array)
+}
+
+fn native_array_from_stored_values(values: impl IntoIterator<Item = NativeStoredValue>) -> i64 {
+    let array = rt_array_new_impl(0);
+    for value in values {
+        rt_array_push_impl(array, value.runtime_value());
+    }
+    from_rv(array)
+}
+
+fn native_entry_pair(key: &str, value: NativeStoredValue) -> RuntimeValue {
+    let pair = rt_array_new_impl(2);
+    rt_array_push_impl(pair, to_rv(stub_make_string(key)));
+    rt_array_push_impl(pair, value.runtime_value());
+    pair
+}
+
+#[no_mangle]
+pub extern "C" fn __rt_hashmap_new() -> i64 {
+    let handle = NEXT_HASHMAP_HANDLE.fetch_add(1, Ordering::Relaxed);
+    hashmap_registry().lock().unwrap().insert(handle, HashMap::new());
+    handle
+}
+
+#[no_mangle]
+pub extern "C" fn __rt_hashmap_insert(handle: i64, key: i64, value: i64) -> i64 {
+    let Some(key) = stub_extract_key(key) else {
+        return 0;
+    };
+    let mut registry = hashmap_registry().lock().unwrap();
+    let Some(map) = registry.get_mut(&handle) else {
+        return 0;
+    };
+    let was_new = !map.contains_key(&key);
+    map.insert(key, NativeStoredValue::from_abi(value));
+    i64::from(was_new)
+}
+
+#[no_mangle]
+pub extern "C" fn __rt_hashmap_get(handle: i64, key: i64) -> i64 {
+    let Some(key) = stub_extract_key(key) else {
+        return 0;
+    };
+    hashmap_registry()
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .and_then(|map| map.get(&key).copied())
+        .map(NativeStoredValue::direct_abi)
+        .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn __rt_hashmap_remove(handle: i64, key: i64) -> i64 {
+    let Some(key) = stub_extract_key(key) else {
+        return 0;
+    };
+    hashmap_registry()
+        .lock()
+        .unwrap()
+        .get_mut(&handle)
+        .and_then(|map| map.remove(&key))
+        .map(NativeStoredValue::direct_abi)
+        .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn __rt_hashmap_len(handle: i64) -> i64 {
+    hashmap_registry()
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .map(|map| map.len() as i64)
+        .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn __rt_hashmap_clear(handle: i64) -> i64 {
+    if let Some(map) = hashmap_registry().lock().unwrap().get_mut(&handle) {
+        map.clear();
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn __rt_hashmap_contains_key(handle: i64, key: i64) -> i64 {
+    let Some(key) = stub_extract_key(key) else {
+        return 0;
+    };
+    hashmap_registry()
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .map(|map| i64::from(map.contains_key(&key)))
+        .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn __rt_hashmap_keys(handle: i64) -> i64 {
+    let keys: Vec<String> = hashmap_registry()
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .map(|map| map.keys().cloned().collect())
+        .unwrap_or_default();
+    native_array_from_raw_values(keys.iter().map(|key| stub_make_string(key)))
+}
+
+#[no_mangle]
+pub extern "C" fn __rt_hashmap_values(handle: i64) -> i64 {
+    let values: Vec<NativeStoredValue> = hashmap_registry()
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .map(|map| map.values().copied().collect())
+        .unwrap_or_default();
+    native_array_from_stored_values(values)
+}
+
+#[no_mangle]
+pub extern "C" fn __rt_hashmap_entries(handle: i64) -> i64 {
+    let entries: Vec<(String, NativeStoredValue)> = hashmap_registry()
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .map(|map| map.iter().map(|(key, value)| (key.clone(), *value)).collect())
+        .unwrap_or_default();
+    let array = rt_array_new_impl(0);
+    for (key, value) in entries {
+        rt_array_push_impl(array, native_entry_pair(&key, value));
+    }
+    from_rv(array)
+}
+
+#[no_mangle]
+pub extern "C" fn __rt_btreemap_new() -> i64 {
+    let handle = NEXT_BTREEMAP_HANDLE.fetch_add(1, Ordering::Relaxed);
+    btreemap_registry().lock().unwrap().insert(handle, BTreeMap::new());
+    handle
+}
+
+#[no_mangle]
+pub extern "C" fn __rt_btreemap_insert(handle: i64, key: i64, value: i64) -> i64 {
+    let Some(key) = stub_extract_key(key) else {
+        return 0;
+    };
+    let mut registry = btreemap_registry().lock().unwrap();
+    let Some(map) = registry.get_mut(&handle) else {
+        return 0;
+    };
+    let was_new = !map.contains_key(&key);
+    map.insert(key, NativeStoredValue::from_abi(value));
+    i64::from(was_new)
+}
+
+#[no_mangle]
+pub extern "C" fn __rt_btreemap_get(handle: i64, key: i64) -> i64 {
+    let Some(key) = stub_extract_key(key) else {
+        return 0;
+    };
+    btreemap_registry()
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .and_then(|map| map.get(&key).copied())
+        .map(NativeStoredValue::direct_abi)
+        .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn __rt_btreemap_remove(handle: i64, key: i64) -> i64 {
+    let Some(key) = stub_extract_key(key) else {
+        return 0;
+    };
+    btreemap_registry()
+        .lock()
+        .unwrap()
+        .get_mut(&handle)
+        .and_then(|map| map.remove(&key))
+        .map(NativeStoredValue::direct_abi)
+        .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn __rt_btreemap_len(handle: i64) -> i64 {
+    btreemap_registry()
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .map(|map| map.len() as i64)
+        .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn __rt_btreemap_clear(handle: i64) -> i64 {
+    if let Some(map) = btreemap_registry().lock().unwrap().get_mut(&handle) {
+        map.clear();
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn __rt_btreemap_contains_key(handle: i64, key: i64) -> i64 {
+    let Some(key) = stub_extract_key(key) else {
+        return 0;
+    };
+    btreemap_registry()
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .map(|map| i64::from(map.contains_key(&key)))
+        .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn __rt_btreemap_keys(handle: i64) -> i64 {
+    let keys: Vec<String> = btreemap_registry()
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .map(|map| map.keys().cloned().collect())
+        .unwrap_or_default();
+    native_array_from_raw_values(keys.iter().map(|key| stub_make_string(key)))
+}
+
+#[no_mangle]
+pub extern "C" fn __rt_btreemap_values(handle: i64) -> i64 {
+    let values: Vec<NativeStoredValue> = btreemap_registry()
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .map(|map| map.values().copied().collect())
+        .unwrap_or_default();
+    native_array_from_stored_values(values)
+}
+
+#[no_mangle]
+pub extern "C" fn __rt_btreemap_entries(handle: i64) -> i64 {
+    let entries: Vec<(String, NativeStoredValue)> = btreemap_registry()
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .map(|map| map.iter().map(|(key, value)| (key.clone(), *value)).collect())
+        .unwrap_or_default();
+    let array = rt_array_new_impl(0);
+    for (key, value) in entries {
+        rt_array_push_impl(array, native_entry_pair(&key, value));
+    }
+    from_rv(array)
+}
+
+#[no_mangle]
+pub extern "C" fn __rt_btreemap_first_key(handle: i64) -> i64 {
+    btreemap_registry()
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .and_then(|map| map.keys().next().map(|key| stub_make_string(key)))
+        .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn __rt_btreemap_last_key(handle: i64) -> i64 {
+    btreemap_registry()
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .and_then(|map| map.keys().next_back().map(|key| stub_make_string(key)))
+        .unwrap_or(0)
+}
+
 // -- File I/O stubs --
 //
 // `rt_file_size`, `rt_file_delete`, `rt_file_lock`, `rt_file_unlock`, and
@@ -624,9 +968,9 @@ pub extern "C" fn rt_file_atomic_write(path: i64, content: i64) -> i64 {
 
 // -- Process/System stubs --
 //
-// `rt_getpid`, `rt_thread_available_parallelism`, and `spl_thread_cpu_count`
-// are provided by the bundled `simple-runtime` (duplicate symbols fail the
-// macOS link), so they are not redefined here.
+// `rt_getpid` and `rt_thread_available_parallelism` are provided by the
+// bundled `simple-runtime` (duplicate symbols fail the macOS link), so they are
+// not redefined here.
 
 #[no_mangle]
 pub extern "C" fn rt_hostname() -> i64 {
@@ -638,6 +982,11 @@ pub extern "C" fn rt_system_cpu_count() -> i64 {
     std::thread::available_parallelism()
         .map(|n| n.get() as i64)
         .unwrap_or(1)
+}
+
+#[no_mangle]
+pub extern "C" fn spl_thread_cpu_count() -> i64 {
+    rt_system_cpu_count()
 }
 
 #[no_mangle]
@@ -725,6 +1074,11 @@ pub extern "C" fn spl_println(val: i64) -> i64 {
         println!("{}", val);
     }
     0
+}
+
+#[no_mangle]
+pub extern "C" fn spl_str_ptr(val: i64) -> i64 {
+    rt_string_data(to_rv(val)) as i64
 }
 
 #[no_mangle]
@@ -1312,19 +1666,7 @@ noop_stubs!(
     rc_box_size,
     rc_box_strong_count,
     rc_box_weak_count,
-    // BTreeMap/BTreeSet (prefixed with __ in interpreter)
-    __rt_btreemap_new,
-    __rt_btreemap_insert,
-    __rt_btreemap_get,
-    __rt_btreemap_remove,
-    __rt_btreemap_len,
-    __rt_btreemap_clear,
-    __rt_btreemap_contains_key,
-    __rt_btreemap_keys,
-    __rt_btreemap_values,
-    __rt_btreemap_entries,
-    __rt_btreemap_first_key,
-    __rt_btreemap_last_key,
+    // BTreeSet (prefixed with __ in interpreter)
     __rt_btreeset_new,
     __rt_btreeset_insert,
     __rt_btreeset_remove,
@@ -1340,17 +1682,7 @@ noop_stubs!(
     __rt_btreeset_symmetric_difference,
     __rt_btreeset_is_subset,
     __rt_btreeset_is_superset,
-    // HashMap/HashSet (prefixed with __ in interpreter)
-    __rt_hashmap_new,
-    __rt_hashmap_insert,
-    __rt_hashmap_get,
-    __rt_hashmap_remove,
-    __rt_hashmap_len,
-    __rt_hashmap_clear,
-    __rt_hashmap_contains_key,
-    __rt_hashmap_keys,
-    __rt_hashmap_values,
-    __rt_hashmap_entries,
+    // HashSet (prefixed with __ in interpreter)
     __rt_hashset_new,
     __rt_hashset_insert,
     __rt_hashset_remove,
@@ -1518,4 +1850,69 @@ pub extern "C" fn rt_cli_run_file(path: RuntimeValue, args: RuntimeValue, gc_log
     let args_vec = extract_rt_string_array(args);
     let path = std::path::Path::new(&path_str);
     simple_driver::cli::basic::run_file_with_args(path, gc_log != 0, gc_off != 0, args_vec) as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn array_values(raw_array: i64) -> Vec<RuntimeValue> {
+        let array = to_rv(raw_array);
+        let len = rt_array_len(array);
+        (0..len).map(|idx| rt_array_get(array, idx)).collect()
+    }
+
+    #[test]
+    fn native_hashmap_shim_round_trips_scalar_and_collection_values() {
+        let handle = __rt_hashmap_new();
+        let key = stub_make_string("answer");
+        let value = from_rv(RuntimeValue::from_int(42));
+
+        assert_eq!(__rt_hashmap_insert(handle, key, value), 1);
+        assert_eq!(__rt_hashmap_get(handle, key), 42);
+        assert_eq!(__rt_hashmap_contains_key(handle, key), 1);
+        assert_eq!(__rt_hashmap_len(handle), 1);
+
+        let values = array_values(__rt_hashmap_values(handle));
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0].as_int(), 42);
+
+        let entries = array_values(__rt_hashmap_entries(handle));
+        assert_eq!(entries.len(), 1);
+        let pair = array_values(from_rv(entries[0]));
+        assert_eq!(extract_rt_string(pair[0]).as_deref(), Some("answer"));
+        assert_eq!(pair[1].as_int(), 42);
+    }
+
+    #[test]
+    fn native_btreemap_shim_keeps_keys_ordered_and_string_values_raw() {
+        let handle = __rt_btreemap_new();
+        let beta = stub_make_string("beta");
+        let alpha = stub_make_string("alpha");
+        let text_value = stub_make_string("value");
+
+        assert_eq!(
+            __rt_btreemap_insert(handle, beta, from_rv(RuntimeValue::from_int(2))),
+            1
+        );
+        assert_eq!(__rt_btreemap_insert(handle, alpha, text_value), 1);
+        assert_eq!(
+            extract_rt_string(to_rv(__rt_btreemap_get(handle, alpha))).as_deref(),
+            Some("value")
+        );
+        assert_eq!(
+            extract_rt_string(to_rv(__rt_btreemap_first_key(handle))).as_deref(),
+            Some("alpha")
+        );
+        assert_eq!(
+            extract_rt_string(to_rv(__rt_btreemap_last_key(handle))).as_deref(),
+            Some("beta")
+        );
+
+        let keys: Vec<String> = array_values(__rt_btreemap_keys(handle))
+            .into_iter()
+            .filter_map(extract_rt_string)
+            .collect();
+        assert_eq!(keys, vec!["alpha".to_string(), "beta".to_string()]);
+    }
 }

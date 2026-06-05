@@ -40,6 +40,12 @@ impl Lowerer {
                 }
             }
 
+            if let Some((type_name, member)) = name.split_once("::").or_else(|| name.split_once('.')) {
+                if let Some(type_id) = self.static_enum_variant_type(type_name, member) {
+                    return self.lower_static_enum_variant_call(type_name, member, type_id, args, ctx);
+                }
+            }
+
             // Short enum-constructor grammar: Some(x), None(), Ok(x), Err(x).
             // Lower these as regular calls to the bare constructor symbol so MIR
             // can canonicalize them into Option*/Result* instructions.

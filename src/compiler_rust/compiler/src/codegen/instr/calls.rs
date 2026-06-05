@@ -13,8 +13,8 @@ use crate::mir::{CallTarget, VReg};
 
 use super::core::{compile_builtin_io_call, vreg_is_signed};
 use super::helpers::{
-    adapted_call, call_runtime_3, create_cstring_constant, get_vreg_or_default, inline_runtime_array_len_value,
-    inline_runtime_len_value,
+    adapted_call, call_runtime_1, call_runtime_2, call_runtime_3, create_cstring_constant, get_vreg_or_default,
+    inline_runtime_array_len_value, inline_runtime_len_value,
 };
 use super::{InstrContext, InstrResult};
 
@@ -2111,6 +2111,83 @@ fn tag_int_as_runtime_value(
     builder.ins().ishl(value, three)
 }
 
+fn runtime_payload_value<M: Module>(
+    ctx: &InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    arg: VReg,
+) -> cranelift_codegen::ir::Value {
+    let value = get_vreg_or_default(ctx, builder, &arg);
+    if matches!(
+        ctx.vreg_types.get(&arg).copied(),
+        Some(
+            TypeId::I8
+                | TypeId::I16
+                | TypeId::I32
+                | TypeId::I64
+                | TypeId::U8
+                | TypeId::U16
+                | TypeId::U32
+                | TypeId::U64
+                | TypeId::BOOL
+        )
+    ) {
+        tag_int_as_runtime_value(builder, value)
+    } else {
+        value
+    }
+}
+
+fn known_enum_variant_name<'a, M: Module>(ctx: &InstrContext<'_, M>, func_name: &'a str) -> Option<&'a str> {
+    let split = func_name
+        .rsplit_once("::")
+        .or_else(|| func_name.rsplit_once('.'))
+        .or_else(|| func_name.rsplit_once("_dot_"))?;
+    let enum_name = split.0;
+    let variant_name = split.1;
+    let enum_tail = enum_name.rsplit("__").next().unwrap_or(enum_name);
+    let variants = ctx.enum_defs.get(enum_name).or_else(|| ctx.enum_defs.get(enum_tail))?;
+    variants
+        .iter()
+        .any(|(candidate, _)| candidate == variant_name)
+        .then_some(variant_name)
+}
+
+fn compile_known_enum_constructor_call<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: &Option<VReg>,
+    variant_name: &str,
+    args: &[VReg],
+) -> bool {
+    let Some(dest) = dest else {
+        return true;
+    };
+
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    variant_name.hash(&mut hasher);
+    let disc = (hasher.finish() & 0xFFFFFFFF) as i64;
+    let enum_id_val = builder.ins().iconst(types::I32, 0);
+    let disc_val = builder.ins().iconst(types::I32, disc);
+    let payload_val = match args {
+        [] => builder.ins().iconst(types::I64, 3),
+        [single] => get_vreg_or_default(ctx, builder, single),
+        many => {
+            let capacity = builder.ins().iconst(types::I64, many.len() as i64);
+            let array = call_runtime_1(ctx, builder, "rt_array_new", capacity);
+            for arg in many {
+                let payload = runtime_payload_value(ctx, builder, *arg);
+                let _ = call_runtime_2(ctx, builder, "rt_array_push", array, payload);
+            }
+            array
+        }
+    };
+    let result = call_runtime_3(ctx, builder, "rt_enum_new", enum_id_val, disc_val, payload_val);
+    ctx.vreg_values.insert(*dest, result);
+    true
+}
+
 /// Check if a runtime function returns a RuntimeValue that should be untagged to raw i64.
 /// These are functions that return RuntimeValue containing integers that need to be extracted.
 ///
@@ -2848,6 +2925,12 @@ pub fn compile_call<M: Module>(
             }
         }
     } else {
+        if let Some(variant_name) = known_enum_variant_name(ctx, func_name) {
+            if compile_known_enum_constructor_call(ctx, builder, dest, variant_name, args) {
+                return Ok(());
+            }
+        }
+
         // Before falling through to cross-module import, check if this is a qualified
         // builtin method call like "ALPHA_LOWER.contains" or "items.push".
         // The parser sometimes treats `val.method(args)` as a qualified function call

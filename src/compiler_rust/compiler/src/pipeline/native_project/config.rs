@@ -115,12 +115,18 @@ impl NativeProjectBuilder {
             if is_compiler_like_entry(entry_file) {
                 return NativeRuntimeLane::RustHosted;
             }
-        } else if self.source_dirs.iter().any(|p| is_compiler_like_entry(p)) {
+        }
+        if self.source_dirs.iter().any(|p| is_compiler_like_entry(p)) {
             return NativeRuntimeLane::RustHosted;
         }
-        if runtime_path_has_abi_complete_simple_core(self.config.runtime_path.as_deref())
-            || find_abi_complete_simple_core_runtime_library().is_some()
-        {
+        if let Some(runtime_path) = self.config.runtime_path.as_deref() {
+            return if runtime_path_has_abi_complete_simple_core(Some(runtime_path)) {
+                NativeRuntimeLane::SimpleCore
+            } else {
+                NativeRuntimeLane::CoreCBootstrap
+            };
+        }
+        if find_abi_complete_simple_core_runtime_library().is_some() {
             NativeRuntimeLane::SimpleCore
         } else {
             NativeRuntimeLane::CoreCBootstrap

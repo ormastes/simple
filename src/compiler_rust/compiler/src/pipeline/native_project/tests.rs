@@ -666,6 +666,33 @@ fn test_runtime_bundle_auto_prefers_hosted_runtime_for_compiler_entry() {
 }
 
 #[test]
+fn test_runtime_bundle_auto_prefers_hosted_runtime_for_compiler_source_root() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = temp.path().join("libsimple_runtime.a");
+    let native_all = temp.path().join("libsimple_native_all.a");
+    std::fs::write(&runtime, b"runtime").unwrap();
+    std::fs::write(&native_all, b"all").unwrap();
+
+    let config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
+
+    let mut builder = NativeProjectBuilder::new(
+        PathBuf::from("/project"),
+        PathBuf::from("/project/bin/simple_lsp_mcp_server"),
+    )
+    .config(config);
+    builder.entry_file = Some(PathBuf::from("/project/src/app/simple_lsp_mcp/main.spl"));
+    builder.source_dirs.push(PathBuf::from("/project/src/compiler"));
+
+    let (selected, is_native_all) = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
+    assert_eq!(selected, native_all);
+    assert!(is_native_all);
+}
+
+#[test]
 fn test_runtime_bundle_auto_falls_back_to_core_c_when_simple_core_is_incomplete() {
     let _guard = runtime_bundle_env_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
@@ -707,6 +734,14 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
     assert!(
         core_c_symbols.contains("simd_text_init"),
         "core-c runtime archive must include runtime_simd_utf8.c because runtime_native.c calls simd_text_init"
+    );
+    assert!(
+        core_c_symbols.contains("rt_thread_available_parallelism"),
+        "core-c runtime archive must include the thread parallelism ABI used by std.thread_sffi"
+    );
+    assert!(
+        core_c_symbols.contains("spl_thread_cpu_count"),
+        "core-c runtime archive must include the legacy thread CPU-count ABI used by std.thread_sffi"
     );
     let core_c_members = archive_members(&core_c).expect("core-c runtime archive members should be readable");
     let https_object = format!("runtime_https_openssl_core.{}", test_host_object_extension());
@@ -1045,6 +1080,60 @@ fn test_build_use_map_glob_import_populates_symbol_entries() {
     let use_map = super::imports::build_use_map_from_ast(&ast, &result.all_mangled, &result.re_exports);
 
     assert_eq!(use_map.get("log_info"), Some(&expected));
+}
+
+#[test]
+fn test_build_import_map_skips_pass_only_trait_methods() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    let src_root = project_root.join("src");
+    let lib_root = src_root.join("lib");
+    std::fs::create_dir_all(lib_root.join("common")).unwrap();
+
+    let trait_path = lib_root.join("common/reader.spl");
+    std::fs::write(
+        &trait_path,
+        "trait Reader:\n    fn path(self) -> text:\n        pass\n    fn label(self) -> text:\n        return \"reader\"\n",
+    )
+    .unwrap();
+
+    let file_sources = vec![(trait_path.clone(), std::fs::read_to_string(&trait_path).unwrap())];
+    let result = super::imports::build_import_map(&file_sources, std::slice::from_ref(&lib_root), &src_root);
+    let prefix = module_prefix_from_path(&trait_path, &lib_root);
+
+    assert!(!result.all_mangled.contains_key("Reader.path"));
+    assert!(!result.all_mangled.contains_key("path"));
+    assert_eq!(
+        result.all_mangled.get("Reader.label"),
+        Some(&vec![format!("{}__Reader_dot_label", prefix)])
+    );
+}
+
+#[test]
+fn test_build_import_map_records_enum_defs_without_callable_variant_symbols() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    let src_root = project_root.join("src");
+    let lib_root = src_root.join("lib");
+    std::fs::create_dir_all(lib_root.join("types")).unwrap();
+
+    let enum_path = lib_root.join("types/inference.spl");
+    std::fs::write(
+        &enum_path,
+        "enum Type:\n    Int(bits: i32, signed: bool)\n    Var(id: i64)\n",
+    )
+    .unwrap();
+
+    let file_sources = vec![(enum_path.clone(), std::fs::read_to_string(&enum_path).unwrap())];
+    let result = super::imports::build_import_map(&file_sources, std::slice::from_ref(&lib_root), &src_root);
+
+    assert!(result.all_mangled.contains_key("Type"));
+    assert!(!result.all_mangled.contains_key("Type.Int"));
+    assert!(!result.all_mangled.contains_key("Type.Var"));
+    assert_eq!(
+        result.enum_defs.get("Type"),
+        Some(&vec![("Int".to_string(), Some(2)), ("Var".to_string(), Some(1))])
+    );
 }
 
 #[test]

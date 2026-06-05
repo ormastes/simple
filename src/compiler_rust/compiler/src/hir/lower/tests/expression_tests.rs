@@ -236,6 +236,31 @@ fn test_lower_static_enum_variant_constructor_call() {
 }
 
 #[test]
+fn test_lower_global_enum_variant_constructor_identifier_call() {
+    let source = "fn test() -> Type:\n    return Type.Int(bits: 64, signed: true)\n";
+    let mut parser = Parser::new(source);
+    let module = parser.parse().expect("parse failed");
+
+    let mut lowerer = Lowerer::new();
+    lowerer.set_global_enum_defs(Arc::new(HashMap::from([(
+        "Type".to_string(),
+        vec![("Int".to_string(), Some(2))],
+    )])));
+    lowerer.register_global_enums();
+    let lowered = lowerer.lower_module(&module).unwrap();
+
+    let func = lowered.functions.iter().find(|f| f.name == "test").unwrap();
+    let HirStmt::Return(Some(expr)) = &func.body[0] else {
+        panic!("Expected return statement");
+    };
+    let HirExprKind::Call { func, args } = &expr.kind else {
+        panic!("Expected enum variant constructor call");
+    };
+    assert_eq!(func.kind, HirExprKind::Global("Type::Int".to_string()));
+    assert_eq!(args.len(), 2);
+}
+
+#[test]
 fn test_lower_static_enum_unit_variant_value() {
     let module = parse_and_lower(
         "enum FsError:\n    InvalidArg\n    Transient(code: i32)\n\nfn test() -> FsError:\n    return FsError.InvalidArg\n",

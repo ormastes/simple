@@ -6,6 +6,22 @@ use crate::mir::effects::CallTarget;
 use crate::mir::instructions::{MirInst, VReg};
 
 impl<'a> MirLowerer<'a> {
+    pub(super) fn split_enum_qualified_name<'b>(name: &'b str) -> Option<(&'b str, &'b str)> {
+        name.split_once("::")
+            .or_else(|| name.split_once('.'))
+            .or_else(|| name.split_once("_dot_"))
+    }
+
+    pub(super) fn is_known_enum_type_for_variant(&self, enum_name: &str, fallback_ty: TypeId) -> bool {
+        if let Some(registry) = self.type_registry {
+            if let Some(type_id) = registry.lookup(enum_name) {
+                return matches!(registry.get(type_id), Some(crate::hir::HirType::Enum { .. }));
+            }
+            return matches!(registry.get(fallback_ty), Some(crate::hir::HirType::Enum { .. }));
+        }
+        false
+    }
+
     fn enum_payload_type_for_call_receiver(&self, ty: TypeId) -> Option<TypeId> {
         let registry = self.type_registry?;
         match registry.get(ty) {
@@ -157,7 +173,7 @@ impl<'a> MirLowerer<'a> {
             }
 
             // Check if this is an enum variant constructor (e.g., "Color::Blue" or "Color.Blue")
-            if let Some((enum_name, variant_name)) = name.split_once("::").or_else(|| name.split_once('.')) {
+            if let Some((enum_name, variant_name)) = Self::split_enum_qualified_name(name) {
                 if arg_regs.len() == 1 {
                     let receiver = args.first();
                     match variant_name {
@@ -250,16 +266,7 @@ impl<'a> MirLowerer<'a> {
                 }
 
                 // Check if this is an enum type via the type registry or callee type
-                let is_enum = if let Some(registry) = self.type_registry {
-                    if let Some(type_id) = registry.lookup(enum_name) {
-                        matches!(registry.get(type_id), Some(crate::hir::HirType::Enum { .. }))
-                    } else {
-                        // Also check the callee's type - if it resolves to an enum
-                        matches!(registry.get(callee.ty), Some(crate::hir::HirType::Enum { .. }))
-                    }
-                } else {
-                    false
-                };
+                let is_enum = self.is_known_enum_type_for_variant(enum_name, callee.ty);
 
                 if is_enum && !arg_regs.is_empty() {
                     // For single-arg variants, use the arg directly as payload
@@ -332,6 +339,18 @@ impl<'a> MirLowerer<'a> {
                             enum_name: enum_name.to_string(),
                             variant_name: variant_name.to_string(),
                             payload: payload_reg,
+                        });
+                        dest
+                    });
+                }
+                if is_enum {
+                    return self.with_func(|func, current_block| {
+                        let dest = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::EnumUnit {
+                            dest,
+                            enum_name: enum_name.to_string(),
+                            variant_name: variant_name.to_string(),
                         });
                         dest
                     });

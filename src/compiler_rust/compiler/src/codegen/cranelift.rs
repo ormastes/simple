@@ -113,6 +113,13 @@ impl Codegen {
         self.backend.set_fn_arities(arities);
     }
 
+    pub fn set_enum_defs(
+        &mut self,
+        defs: std::sync::Arc<std::collections::HashMap<String, Vec<(String, Option<usize>)>>>,
+    ) {
+        self.backend.set_enum_defs(defs);
+    }
+
     /// Get a reference to the inner backend for accessing mangling and resolution state.
     pub fn backend(&self) -> &CodegenBackend<ObjectModule> {
         &self.backend
