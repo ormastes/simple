@@ -100,7 +100,7 @@ sh scripts/check/check-cross-language-perf.shs
 | **Warm throughput** | `fib(35)` recursive, in-process loop (10 warmup + 20 measured) | Steady-state single-thread perf (JIT reaches hotspot) |
 | **Parallel** | 100 workers × LCG 100K iters via channel (`channel_new`/`channel_from_id`/`send`/`recv` from `std.concurrent.channel` — same semantic as Go's goroutine + chan). Workers pass channel id (not object) due to native struct-closure codegen limitation. | Concurrency model overhead |
 | **Parallel binary size** | Binary/script sizes for parallel workloads across languages | Deployment footprint for concurrent programs |
-| **Parallel peak RSS** | `/usr/bin/time -v` peak RSS with 100 workers, per-worker proxy | Memory cost per concurrent task (OS thread 8MB vs goroutine 2-8KB) |
+| **Parallel peak RSS** | `/usr/bin/time -v` peak RSS with 100 workers, baseline subtracted, per-worker delta | Memory cost per concurrent task (baseline = hello world RSS for each language) |
 
 ### Languages compared
 

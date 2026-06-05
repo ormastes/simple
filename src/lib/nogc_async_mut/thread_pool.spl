@@ -3,7 +3,7 @@
 # Simple thread pool for parallel task execution.
 # Built on top of SFFI threading primitives.
 
-use std.thread_sffi.{thread_cpu_count, thread_sleep, ThreadHandle}
+use std.thread_sffi.{thread_cpu_count, thread_sleep, thread_yield, ThreadHandle}
 use std.async_host.thread_safe_queue.{ThreadSafeQueue}
 
 # Direct import of thread creation SFFI
@@ -88,6 +88,7 @@ class ThreadPool:
             # Continue anyway - pool can still work without threads for testing
 
         pool.worker_handles = handles
+        GLOBAL_POOLS[pool_id] = pool
         pool
 
     static fn default() -> ThreadPool:
@@ -108,6 +109,24 @@ class ThreadPool:
         """
         if not self.shutdown_requested:
             self.task_queue.push(task_id)
+
+    me submit_value(callback: fn() -> i64) -> TaskHandle:
+        """Submit a value-returning task and return a join handle."""
+        val task_id = next_task_id()
+        register_value_task_callback(task_id, callback)
+
+        if self.shutdown_requested:
+            mark_task_failed(task_id)
+            return TaskHandle(task_id: task_id)
+
+        if self.worker_handles.is_empty():
+            # Interpreter and unlinked-runtime fallback: preserve semantics without
+            # claiming OS-thread execution when the worker hook is unavailable.
+            mark_task_done(task_id, callback())
+            return TaskHandle(task_id: task_id)
+
+        self.task_queue.push(task_id)
+        TaskHandle(task_id: task_id)
 
     me submit_batch(task_ids: [usize]):
         """Submit multiple tasks.
@@ -218,6 +237,8 @@ class ThreadPool:
 # Global pool registry for worker threads to access their pools
 var GLOBAL_POOLS: [ThreadPool] = []
 var GLOBAL_POOL_ID_COUNTER: i64 = 0
+var GLOBAL_NEXT_TASK_ID: usize = 1
+var GLOBAL_DEFAULT_POOL_ID: i64 = -1
 
 fn register_pool(pool: ThreadPool) -> i64:
     """Register pool and return unique ID.
@@ -253,6 +274,31 @@ fn get_pool(pool_id: i64) -> ThreadPool:
             ThreadPool.default()
 
 var GLOBAL_TASK_CALLBACKS: Dict<usize, fn()> = {}
+var GLOBAL_TASK_VALUE_IDS: [usize] = []
+var GLOBAL_TASK_VALUE_CALLBACKS: [fn() -> i64] = []
+var GLOBAL_TASK_RESULT_IDS: [usize] = []
+var GLOBAL_TASK_RESULTS: [i64] = []
+var GLOBAL_TASK_DONE: [usize] = []
+
+class TaskHandle:
+    """Join handle for a pool-backed value task."""
+    task_id: usize
+
+    fn is_done() -> bool:
+        task_is_done(self.task_id)
+
+    fn join() -> i64:
+        while not self.is_done():
+            thread_yield()
+        task_result(self.task_id)
+
+    fn id() -> usize:
+        self.task_id
+
+fn next_task_id() -> usize:
+    val task_id = GLOBAL_NEXT_TASK_ID
+    GLOBAL_NEXT_TASK_ID = GLOBAL_NEXT_TASK_ID + 1
+    task_id
 
 fn register_task_callback(task_id: usize, callback: fn()):
     """Register a callback for a task ID."""
@@ -261,6 +307,60 @@ fn register_task_callback(task_id: usize, callback: fn()):
 fn get_task_callback(task_id: usize) -> Option<fn()>:
     """Get callback for a task ID."""
     GLOBAL_TASK_CALLBACKS.get(task_id)
+
+fn register_value_task_callback(task_id: usize, callback: fn() -> i64):
+    """Register a value-returning callback for a task ID."""
+    GLOBAL_TASK_VALUE_IDS = GLOBAL_TASK_VALUE_IDS + [task_id]
+    GLOBAL_TASK_VALUE_CALLBACKS = GLOBAL_TASK_VALUE_CALLBACKS + [callback]
+
+fn get_value_task_callback(task_id: usize) -> Option<fn() -> i64>:
+    """Get a value-returning callback for a task ID."""
+    for i in 0..GLOBAL_TASK_VALUE_IDS.len():
+        if GLOBAL_TASK_VALUE_IDS[i] == task_id:
+            return Some(GLOBAL_TASK_VALUE_CALLBACKS[i])
+    nil
+
+fn mark_task_done(task_id: usize, result: i64):
+    """Record task completion and result."""
+    var updated = false
+    for i in 0..GLOBAL_TASK_RESULT_IDS.len():
+        if GLOBAL_TASK_RESULT_IDS[i] == task_id:
+            GLOBAL_TASK_RESULTS[i] = result
+            updated = true
+    if not updated:
+        GLOBAL_TASK_RESULT_IDS = GLOBAL_TASK_RESULT_IDS + [task_id]
+        GLOBAL_TASK_RESULTS = GLOBAL_TASK_RESULTS + [result]
+    if not task_is_done(task_id):
+        GLOBAL_TASK_DONE = GLOBAL_TASK_DONE.push(task_id)
+
+fn mark_task_failed(task_id: usize):
+    """Record failed submission as a completed zero-result task."""
+    mark_task_done(task_id, 0)
+
+fn task_is_done(task_id: usize) -> bool:
+    for done_id in GLOBAL_TASK_DONE:
+        if done_id == task_id:
+            return true
+    false
+
+fn task_result(task_id: usize) -> i64:
+    for i in 0..GLOBAL_TASK_RESULT_IDS.len():
+        if GLOBAL_TASK_RESULT_IDS[i] == task_id:
+            return GLOBAL_TASK_RESULTS[i]
+    0
+
+fn default_go_pool() -> ThreadPool:
+    """Return the process-global pool used by go()."""
+    if GLOBAL_DEFAULT_POOL_ID < 0:
+        val pool = ThreadPool.default()
+        GLOBAL_DEFAULT_POOL_ID = GLOBAL_POOL_ID_COUNTER - 1
+        return pool
+    get_pool(GLOBAL_DEFAULT_POOL_ID)
+
+fn task_spawn(closure: fn() -> i64) -> TaskHandle:
+    """Submit a closure to the shared pool-backed task facade."""
+    var pool = default_go_pool()
+    pool.submit_value(closure)
 
 fn worker_loop_entry(pool_id: i64):
     """Worker thread entry point.
@@ -279,18 +379,19 @@ fn worker_loop_entry(pool_id: i64):
         val task_id = pool.task_queue.pop_blocking(100)
 
         if task_id != 0:
-            # Execute task callback if registered
-            val callback = get_task_callback(task_id)
-            match callback:
+            val value_callback = get_value_task_callback(task_id)
+            match value_callback:
                 case Some(cb):
-                    cb()
-                    GLOBAL_TASK_CALLBACKS.remove(task_id)
+                    mark_task_done(task_id, cb())
                 case nil:
-                    pass
+                    val callback = get_task_callback(task_id)
+                    match callback:
+                        case Some(cb):
+                            cb()
+                            GLOBAL_TASK_CALLBACKS.remove(task_id)
+                        case nil:
+                            pass
             pool.tasks_completed = pool.tasks_completed + 1
-
-        # Small yield to reduce CPU spinning
-        thread_sleep(1)
 
     # Worker exiting
 
@@ -337,4 +438,3 @@ impl TaskResult:
         match self:
             case Failed(_, _): true
             case _: false
-

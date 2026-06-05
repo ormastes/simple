@@ -37,6 +37,7 @@ User constraints: memory-conscious (parallel agents crash tmux), pure Simple whe
 - REQ-THR-003: Thread-pool idle waiting must use a blocking primitive, not millisecond sleep polling.
 - REQ-THR-004: Green-thread identity must integrate with existing runtime task identity hooks before scheduler-aware channels are considered complete.
 - REQ-THR-005: Tier 2 preemption requires compiler-emitted safe points or stack checks; do not simulate it only with external timer interrupts.
+- REQ-THR-006: Simple exposes OS threads and green threads as distinct APIs: `thread_spawn` for OS threads and `green_spawn`/`green_run_*` for cooperative green threads.
 
 ## Non-Goals
 
@@ -57,19 +58,25 @@ User constraints: memory-conscious (parallel agents crash tmux), pure Simple whe
 
 **Simple Stdlib**:
 4. Fix `thread_pool.spl` — replace `thread_sleep(1)` poll loop with condvar-based blocking
-5. New `src/lib/nogc_sync_mut/concurrent/go.spl`:
+5. New pool-backed task facade in `src/lib/nogc_sync_mut/concurrent/thread.spl` or equivalent:
    ```
-   fn go(closure: () -> i64) -> TaskHandle   # pool-backed, not OS thread
+   fn task_spawn(closure: () -> i64) -> TaskHandle   # pool-backed, not OS thread
    class TaskHandle: join() -> i64, is_done() -> bool
    ```
-   - Default pool: auto-created on first `go()`, sized to `thread_available_parallelism()`
+   - Default pool: auto-created on first `task_spawn()`, sized to `thread_available_parallelism()`
    - `thread_spawn` unchanged (always OS thread, backward compat)
+   - `go` is reserved/parser-owned; lowering the language form to task spawn is a separate compiler lane.
 
 **Codegen**: None needed.
 
 ### Tier 1: Stackful Green Threads + M:N Scheduler
 
 **Goal**: 10K+ concurrent tasks, scheduler-aware channels. Go's GMP model.
+
+**Current implemented seed** — `src/lib/nogc_async_mut/concurrent/green_thread.spl`:
+1. Provides `GreenThreadHandle`, `green_spawn`, `green_run_one`, `green_run_all`, and `green_ready_count`.
+2. Runs green-thread closures cooperatively to completion on the current OS thread.
+3. Separates the green-thread API from OS-thread `thread_spawn`; stack switching, parking, scheduler-aware channels, and preemption remain Tier 1/Tier 2 follow-up work.
 
 **C Runtime** — new `src/runtime/runtime_green.c`:
 1. **Slab stack allocator**: One `mmap` per slab (8MB = 1024×8KB stacks), guard page per slab boundary. Live-G cap (default 100K) with backpressure.
@@ -84,7 +91,7 @@ User constraints: memory-conscious (parallel agents crash tmux), pure Simple whe
    - Global queue: `ThreadSafeQueue` (existing), checked every 61 ticks for fairness
    - Work-stealing: random P order, 4 attempts
 6. **Scheduler-aware channel** (`green_channel.spl`): `recv()` calls `rt_green_park()`, `send()` calls `rt_green_unpark()`. Never touches condvar — all blocking is scheduler-mediated.
-7. Upgrade `go()` → green thread spawn (same API, different backend)
+7. Upgrade `task_spawn()` and the compiler-owned `go` form → green thread spawn (same semantics, different backend)
 
 **Codegen**: None — cooperative scheduling at explicit points (channel ops, yield).
 
@@ -153,10 +160,11 @@ Spawn these as separate lanes only after recording the baseline benchmark output
 **Scope**: `src/lib/nogc_sync_mut/concurrent/`, `src/lib/nogc_async_mut/concurrent/`, public module exports, examples.
 
 **Tasks**:
-1. Add `go(closure: () -> i64) -> TaskHandle` backed by the runtime pool.
+1. Add `task_spawn(closure: () -> i64) -> TaskHandle` backed by the runtime pool.
 2. Implement `TaskHandle.join()`, `TaskHandle.is_done()`, and error propagation consistent with existing Simple conventions.
 3. Keep `thread_spawn` documented and tested as the explicit OS-thread API.
 4. Add compatibility examples for CPU work, channel fan-in, and bounded task count.
+5. Do not define `fn go`; `go` is a reserved language form and must be lowered by the compiler lane if exposed as public syntax.
 
 **Gate**: no public API ambiguity between `go` and `thread_spawn`; docs and examples compile in interpreter and native modes where supported.
 
@@ -203,7 +211,7 @@ Phase 1 — Tier 0 (1-2 weeks)
   ├─ Fix channel send drop bug
   ├─ Add stack size config to pthread_create
   ├─ Fix thread_pool.spl sleep polling → condvar
-  ├─ Implement go() as pool submission
+  ├─ Implement task_spawn() as pool submission
   └─ Benchmark: target <9ms
 
 Phase 2 — Tier 1 (4-6 weeks)

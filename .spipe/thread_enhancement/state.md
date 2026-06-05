@@ -12,11 +12,12 @@ Implement the thread enhancement plan by delivering a pool-backed task-spawn sli
 ## Acceptance Criteria
 - AC-1: `doc/03_plan/runtime/thread_enhancement_plan.md` remains the source plan and records current implementation evidence, owned lanes, and remaining tier gates.
 - AC-2: A pool-backed task spawn API exists in Simple stdlib code without changing the explicit OS-thread `thread_spawn` API.
-- AC-3: Thread pool waiting does not rely on millisecond sleep polling in the implemented path.
-- AC-4: Channel full-buffer behavior has a regression test or explicit verification evidence showing no silent drop in the changed path.
-- AC-5: Spawn-agent lane outputs identify runtime, stdlib, compiler/preemption, and verification responsibilities with concrete files and gates.
-- AC-6: Focused thread/channel/spawn tests pass in at least interpreter mode; native or broader mode failures are recorded with exact commands and causes.
-- AC-7: Intensive verification includes the SPipe doc layout guard, relevant thread/channel tests, and the cross-language performance harness or a documented reason it cannot complete.
+- AC-3: A cooperative green-thread API exists with `GreenThreadHandle`, `green_spawn`, `green_run_one`, and `green_run_all`, separate from OS-thread `ThreadHandle`.
+- AC-4: Thread pool waiting does not rely on millisecond sleep polling in the implemented path.
+- AC-5: Channel full-buffer behavior has a regression test or explicit verification evidence showing no silent drop in the changed path.
+- AC-6: Spawn-agent lane outputs identify runtime, stdlib, compiler/preemption, and verification responsibilities with concrete files and gates.
+- AC-7: Focused thread/channel/spawn tests pass in at least interpreter mode; native or broader mode failures are recorded with exact commands and causes.
+- AC-8: Intensive verification includes the SPipe doc layout guard, relevant thread/channel tests, and the cross-language performance harness or a documented reason it cannot complete.
 
 ## Scope Exclusions
 - Full Tier 1 green-thread scheduler productionization is not required before the Tier 0 pool-backed spawn slice lands.
@@ -28,3 +29,4 @@ dev-done
 
 ## Log
 - dev: Created state file with 7 acceptance criteria (type: feature).
+- dev: Added explicit green-thread API acceptance criterion after user requested OS-thread and green-thread support.

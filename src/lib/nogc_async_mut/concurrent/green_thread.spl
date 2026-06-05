@@ -1,0 +1,79 @@
+# Cooperative Green Thread Module
+# @tag:stdlib
+# @tag:api
+#
+# Green threads are scheduled cooperatively in the current OS thread. They are
+# cheaper than OS threads, but they do not run in parallel and cannot preempt a
+# long-running closure.
+
+var GREEN_NEXT_ID: usize = 1
+var GREEN_READY: [usize] = []
+var GREEN_TASK_IDS: [usize] = []
+var GREEN_TASKS: [fn() -> i64] = []
+var GREEN_DONE_IDS: [usize] = []
+var GREEN_RESULT_IDS: [usize] = []
+var GREEN_RESULTS: [i64] = []
+
+class GreenThreadHandle:
+    """Handle for a cooperative green thread."""
+    task_id: usize
+
+    fn id() -> usize:
+        self.task_id
+
+    fn is_done() -> bool:
+        green_is_done(self.task_id)
+
+    fn join() -> i64:
+        while not self.is_done():
+            green_run_one()
+        green_result(self.task_id)
+
+fn green_spawn(task: fn() -> i64) -> GreenThreadHandle:
+    """Schedule a closure on the cooperative green-thread queue."""
+    val task_id = GREEN_NEXT_ID
+    GREEN_NEXT_ID = GREEN_NEXT_ID + 1
+    GREEN_TASK_IDS = GREEN_TASK_IDS + [task_id]
+    GREEN_TASKS = GREEN_TASKS + [task]
+    GREEN_READY = GREEN_READY + [task_id]
+    GreenThreadHandle(task_id: task_id)
+
+fn green_ready_count() -> usize:
+    GREEN_READY.len()
+
+fn green_is_done(task_id: usize) -> bool:
+    for done_id in GREEN_DONE_IDS:
+        if done_id == task_id:
+            return true
+    false
+
+fn green_result(task_id: usize) -> i64:
+    for i in 0..GREEN_RESULT_IDS.len():
+        if GREEN_RESULT_IDS[i] == task_id:
+            return GREEN_RESULTS[i]
+    0
+
+fn green_run_one() -> bool:
+    """Run one ready green thread to completion."""
+    if GREEN_READY.is_empty():
+        return false
+
+    val task_id = GREEN_READY[0]
+    GREEN_READY = GREEN_READY[1:]
+
+    for i in 0..GREEN_TASK_IDS.len():
+        if GREEN_TASK_IDS[i] == task_id:
+            val result = GREEN_TASKS[i]()
+            GREEN_DONE_IDS = GREEN_DONE_IDS + [task_id]
+            GREEN_RESULT_IDS = GREEN_RESULT_IDS + [task_id]
+            GREEN_RESULTS = GREEN_RESULTS + [result]
+            return true
+    false
+
+fn green_run_all() -> usize:
+    """Run all currently ready green threads."""
+    var ran: usize = 0
+    while green_run_one():
+        ran = ran + 1
+    ran
+

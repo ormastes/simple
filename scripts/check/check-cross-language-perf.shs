@@ -779,52 +779,90 @@ fi
 
 echo "=== Measuring parallel peak RSS ==="
 section "4c. Parallel Peak RSS (100 workers)"
-printf "| %-22s | %14s | %20s |\n" "Language" "Peak RSS" "RSS / worker" >>"$REPORT_PATH"
-printf "|%-24s|%16s|%22s|\n" "------------------------" "----------------" "----------------------" >>"$REPORT_PATH"
+printf "| %-22s | %14s | %14s | %20s |\n" "Language" "Peak RSS" "Baseline RSS" "Per-worker delta" >>"$REPORT_PATH"
+printf "|%-24s|%16s|%16s|%22s|\n" "------------------------" "----------------" "----------------" "----------------------" >>"$REPORT_PATH"
 
 par_rss_row() {
-    printf "| %-22s | %14s | %20s |\n" "$1" "$2" "$3" >>"$REPORT_PATH"
+    printf "| %-22s | %14s | %14s | %20s |\n" "$1" "$2" "$3" "$4" >>"$REPORT_PATH"
 }
 
 measure_rss() {
-    # Returns peak RSS in KB via /usr/bin/time -v
     _cmd="$1"
     /usr/bin/time -v sh -c "$_cmd" 2>&1 >/dev/null | grep "Maximum resident" | awk '{print $NF}'
 }
 
+rss_delta_per_worker() {
+    _total="$1"; _baseline="$2"; _workers="$3"
+    if [ -n "$_total" ] && [ -n "$_baseline" ] && [ "$_total" != "0" ] && [ "$_baseline" != "0" ]; then
+        _delta=$(( _total - _baseline ))
+        if [ "$_delta" -lt 0 ]; then _delta=0; fi
+        _per=$(( _delta / _workers ))
+        echo "$_per"
+    else
+        echo ""
+    fi
+}
+
+echo "  Measuring baselines (hello world)..."
+_base_simple_kb=""
+_base_c_kb=""
+_base_go_kb=""
+if [ -x "$BUILD_DIR/hello_simple_native" ]; then
+    _base_simple_kb=$(measure_rss "$BUILD_DIR/hello_simple_native")
+fi
+if [ -x "$BUILD_DIR/hello_c" ]; then
+    _base_c_kb=$(measure_rss "$BUILD_DIR/hello_c")
+fi
+if [ -x "$BUILD_DIR/fib_go" ]; then
+    _base_go_kb=$(measure_rss "$BUILD_DIR/fib_go 1")
+fi
+
+echo "  Measuring parallel RSS..."
 if [ -x "$BUILD_DIR/parallel_simple_native" ]; then
     _rss_kb=$(measure_rss "$BUILD_DIR/parallel_simple_native")
     if [ -n "$_rss_kb" ] && [ "$_rss_kb" != "0" ]; then
-        _rss_per=$(( _rss_kb / 100 ))
-        par_rss_row "Simple (native)" "$(human_bytes $((_rss_kb * 1024)))" "~${_rss_per}KB"
+        _per=$(rss_delta_per_worker "$_rss_kb" "$_base_simple_kb" 100)
+        _base_h=""; if [ -n "$_base_simple_kb" ]; then _base_h=$(human_bytes $((_base_simple_kb * 1024))); else _base_h="n/a"; fi
+        _per_h=""; if [ -n "$_per" ]; then _per_h="~${_per}KB"; else _per_h="n/a"; fi
+        par_rss_row "Simple (native)" "$(human_bytes $((_rss_kb * 1024)))" "$_base_h" "$_per_h"
     fi
 fi
 if [ -x "$BUILD_DIR/parallel_c" ]; then
     _rss_kb=$(measure_rss "$BUILD_DIR/parallel_c")
     if [ -n "$_rss_kb" ] && [ "$_rss_kb" != "0" ]; then
-        _rss_per=$(( _rss_kb / 100 ))
-        par_rss_row "C (pthreads)" "$(human_bytes $((_rss_kb * 1024)))" "~${_rss_per}KB"
+        _per=$(rss_delta_per_worker "$_rss_kb" "$_base_c_kb" 100)
+        _base_h=""; if [ -n "$_base_c_kb" ]; then _base_h=$(human_bytes $((_base_c_kb * 1024))); else _base_h="n/a"; fi
+        _per_h=""; if [ -n "$_per" ]; then _per_h="~${_per}KB"; else _per_h="n/a"; fi
+        par_rss_row "C (pthreads)" "$(human_bytes $((_rss_kb * 1024)))" "$_base_h" "$_per_h"
     fi
 fi
 if [ -x "$BUILD_DIR/parallel_go" ]; then
     _rss_kb=$(measure_rss "$BUILD_DIR/parallel_go")
     if [ -n "$_rss_kb" ] && [ "$_rss_kb" != "0" ]; then
-        _rss_per=$(( _rss_kb / 100 ))
-        par_rss_row "Go" "$(human_bytes $((_rss_kb * 1024)))" "~${_rss_per}KB"
+        _per=$(rss_delta_per_worker "$_rss_kb" "$_base_go_kb" 100)
+        _base_h=""; if [ -n "$_base_go_kb" ]; then _base_h=$(human_bytes $((_base_go_kb * 1024))); else _base_h="n/a"; fi
+        _per_h=""; if [ -n "$_per" ]; then _per_h="~${_per}KB"; else _per_h="n/a"; fi
+        par_rss_row "Go" "$(human_bytes $((_rss_kb * 1024)))" "$_base_h" "$_per_h"
     fi
 fi
 if have python3; then
+    _base_py_kb=$(measure_rss "python3 -c 'print(1)'")
     _rss_kb=$(measure_rss "python3 $BUILD_DIR/parallel.py")
     if [ -n "$_rss_kb" ] && [ "$_rss_kb" != "0" ]; then
-        _rss_per=$(( _rss_kb / 100 ))
-        par_rss_row "Python" "$(human_bytes $((_rss_kb * 1024)))" "~${_rss_per}KB"
+        _per=$(rss_delta_per_worker "$_rss_kb" "$_base_py_kb" 100)
+        _base_h=""; if [ -n "$_base_py_kb" ]; then _base_h=$(human_bytes $((_base_py_kb * 1024))); else _base_h="n/a"; fi
+        _per_h=""; if [ -n "$_per" ]; then _per_h="~${_per}KB"; else _per_h="n/a"; fi
+        par_rss_row "Python" "$(human_bytes $((_rss_kb * 1024)))" "$_base_h" "$_per_h"
     fi
 fi
 if have java; then
+    _base_java_kb=$(measure_rss "java -version")
     _rss_kb=$(measure_rss "java -cp $BUILD_DIR Parallel")
     if [ -n "$_rss_kb" ] && [ "$_rss_kb" != "0" ]; then
-        _rss_per=$(( _rss_kb / 100 ))
-        par_rss_row "Java" "$(human_bytes $((_rss_kb * 1024)))" "~${_rss_per}KB"
+        _per=$(rss_delta_per_worker "$_rss_kb" "$_base_java_kb" 100)
+        _base_h=""; if [ -n "$_base_java_kb" ]; then _base_h=$(human_bytes $((_base_java_kb * 1024))); else _base_h="n/a"; fi
+        _per_h=""; if [ -n "$_per" ]; then _per_h="~${_per}KB"; else _per_h="n/a"; fi
+        par_rss_row "Java" "$(human_bytes $((_rss_kb * 1024)))" "$_base_h" "$_per_h"
     fi
 fi
 
@@ -844,9 +882,10 @@ cat >>"$REPORT_PATH" <<'EOF'
 > Same semantic, same safety for result collection; Simple adds compile-time
 > enforcement for shared read-only data.
 >
-> **RSS note:** Per-worker RSS is a rough proxy: (total_RSS - baseline) / 100.
-> OS-thread languages (Simple, C) pay ~8MB default stack per thread.
-> Go uses 2-8KB goroutine stacks — 1000x less memory per concurrent task.
+> **RSS note:** Per-worker delta = (parallel_RSS - hello_baseline_RSS) / 100.
+> Baseline measures the runtime's fixed overhead (startup, GC, stdlib).
+> OS-thread languages (Simple, C) pay ~8MB default stack per thread but RSS
+> reflects only committed pages, not reserved virtual memory.
 EOF
 
 # ── footer ───────────────────────────────────────────────────────────────
