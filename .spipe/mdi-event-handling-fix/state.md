@@ -48,6 +48,7 @@ Investigate and fix wrong or dummy MDI behavior across Electron, Tauri, and pure
 - Shared HTML window content now exposes backend-neutral title-bar widget helpers (`html_titlebar_button`, `html_window_content_with_titlebar_widgets`, `html_window_info_with_titlebar_widgets`) so pure Simple HTML, Electron MDI chrome, and Tauri MDI chrome can share app-provided title-bar controls.
 - Shared MDI desktop rendering now emits a `qmake-theme-applied` CSS marker and QMake-style theme CSS for the shared taskbar/menu shell.
 - Electron and Tauri MDI runtimes now clone `[data-simple-titlebar-widget]` controls from app HTML into the host title bar and route click/input/key events through the existing window-scoped event delegate.
+- Electron MDI chrome now injects explicit `.wm-window`/`.wm-body` positioning CSS, reads `style.left/top` as the drag start position when present, and validates title-bar drag movement through the live Electron MDI proof.
 
 ## Current Passing Evidence
 
@@ -81,10 +82,16 @@ Investigate and fix wrong or dummy MDI behavior across Electron, Tauri, and pure
 - `bin/simple test test/01_unit/app/ui/wm_runtime_bridge_spec.spl --mode=interpreter --clean`: pass, 5 scenarios.
 - `python3 -m py_compile scripts/check/ios_mdi_probe_server.py && python3 scripts/check/ios_mdi_probe_server.py --self-test && node --check scripts/check/ios_mdi_probe_electron_self_test.js && node --check src/app/ui.electron/bridge.js`: pass.
 - `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/ui/html_window_spec.spl --mode=interpreter --clean --fail-fast`: pass, 7 scenarios including title-bar widget CSS/action/escaping coverage.
+- `SIMPLE_LIB=src bin/simple test test/01_unit/app/ui/ipc_protocol_spec.spl --mode=interpreter --clean --fail-fast`: pass, 20 scenarios.
+- `SIMPLE_LIB=src bin/simple check src/app/ui.ipc/protocol.spl src/lib/common/ui/html_window.spl src/app/ui_shared_mdi/main.spl src/lib/nogc_sync_mut/security/sanitize.spl src/lib/gc_async_mut/security/sanitize.spl src/lib/nogc_async_mut/security/sanitize.spl test/01_unit/app/ui/ipc_protocol_spec.spl test/01_unit/lib/common/ui/html_window_spec.spl`: pass, 8 files.
 - `SIMPLE_LIB=src bin/simple check src/lib/common/ui/html_window.spl src/app/ui_shared_mdi/main.spl test/01_unit/lib/common/ui/html_window_spec.spl`: pass.
 - `SIMPLE_LIB=src SIMPLE_MDI_FAST_PROOF=1 bin/simple run src/app/ui_shared_mdi/main.spl --mode=interpreter --clean`: pass; emits one `render` frame, four `openWindow` messages (`terminal`, `editor`, `browser`, `files`), and the Terminal title-bar widget marker `data-simple-titlebar-widget` without `Segmentation`, `CODEGEN`, panic, or error output.
+- `SIMPLE_MDI_FAST_PROOF=1 SIMPLE_UI_BACKEND=electron src/compiler_rust/target/release/simple run src/app/ui_shared_mdi/main.spl --mode=interpreter --clean`: pass; compact marker assertion reports `qmake_css_marker=present`, `titlebar_widget_marker=present`, `open_window_messages=4`, `output_lines=5`.
+- `SIMPLE_MDI_FAST_PROOF=1 sh scripts/check/check-electron-mdi-evidence.shs`: pass; JSON proof reports 4 windows, `dragMoved=true` from `{left:230,top:150}` to `{left:290,top:180}`, app action/input/key routing true, 6 visible taskbar items/icons/labels, HTML rendered, and screenshot semantic validation pass for `build/electron_mdi_evidence/electron_mdi.png`.
 - `node --check src/app/ui.electron/bridge.js`: pass.
 - `cd tools/tauri-shell/src-tauri && cargo test`: pass, 12 library tests plus binary/doc-test harnesses; Tauri MDI bootstrap assertions include `mountTitlebarWidgets`, `.wm-titlebar-widgets`, and `[data-simple-titlebar-widget]`.
+- `src/compiler_rust/target/release/simple check src/lib/gc_async_mut/security/sanitize.spl src/lib/nogc_async_mut/security/sanitize.spl src/lib/nogc_sync_mut/security/sanitize.spl`: pass, 3 files.
+- `git diff --check`: pass.
 - `sh -n scripts/check/check-wm-launch-capture-evidence.shs && sh -n scripts/check/check-electron-mdi-evidence.shs && sh -n scripts/check/check-tauri-ios-mobile-mdi-evidence.shs && sh -n scripts/check/check-tauri-mobile-mdi-evidence.shs && sh -n scripts/check/check-hosted-wm-capture-evidence.shs && sh -n scripts/check/check-qemu-gtk-wm-capture-evidence.shs`: pass.
 - `sh scripts/setup/install-spipe-dev-command.shs --check`: pass.
 - `sh scripts/check/check-spipe-submodule-gitlinks.shs --check`: pass; `.spipe/spipe` gitlink and `examples/05_stdlib/spipe` tracked-tree entries verified.
