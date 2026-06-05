@@ -989,6 +989,10 @@ expect(budget.len()).to_equal(2)
 
 ### MIR routing adapter
 
+> **Scope:** Routing verified via PatternIdiom (structural no-op in interpreter).
+> ConstantFolding/DCE crash with "object to int" in interpreter mode.
+> Transformation oracle requires `--mode=native`.
+
 #### nil-guard returns function unchanged for source plugin
 
 1. kind: MirInstKind Const
