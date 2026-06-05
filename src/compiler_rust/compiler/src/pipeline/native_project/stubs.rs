@@ -51,6 +51,28 @@ fn is_optional_weak_hook_symbol(sym: &str) -> bool {
     )
 }
 
+/// Return true for runtime-lifecycle symbols emitted by the compiler's own
+/// generated link objects rather than by external libraries.
+///
+/// `__simple_call_module_inits` is emitted with a real body by the init-caller
+/// object (see `generate_init_caller`), and `__simple_runtime_init` /
+/// `__simple_runtime_shutdown` are declared `__attribute__((weak))` in the
+/// generated `_main_stub` and called only behind `if (sym) sym();` null-guards.
+/// All three become resolvable (or safely NULL) at the final link, but the
+/// stub-classification pass runs before those generated objects are in the link
+/// set, so they appear undefined here. Exempt them so they are not counted as
+/// "needs stub".
+///
+/// Mach-O prepends an extra leading underscore (`___simple_runtime_init`), so we
+/// also check the once-stripped form (matching `is_system_symbol`'s convention).
+fn is_compiler_provided_runtime_symbol(sym: &str) -> bool {
+    fn matches_bare(name: &str) -> bool {
+        name.starts_with("__simple_runtime_") || name == "__simple_call_module_inits"
+    }
+    let stripped = sym.strip_prefix('_').unwrap_or(sym);
+    matches_bare(sym) || matches_bare(stripped)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FreestandingUnresolvedMode {
     DeferToLinker,
@@ -569,6 +591,7 @@ pub(crate) fn generate_stub_object(
             !s.starts_with("_ZSt") && !s.starts_with("_ZNSt") && !s.starts_with("ZSt") && !s.starts_with("ZNSt")
         })
         .filter(|s| !is_optional_weak_hook_symbol(s))
+        .filter(|s| !is_compiler_provided_runtime_symbol(s))
         .filter(|s| !is_system_symbol(s))
         .filter(|s| !s.starts_with('?') && !s.starts_with("__imp_"))
         .collect();
