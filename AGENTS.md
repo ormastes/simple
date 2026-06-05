@@ -11,7 +11,7 @@ In multi-LLM cooperative mode, Codex owns **Step 2 (research)** and **Step 4 (ar
 Step 1: Claude /research  →  Step 2: Codex $research  →  Step 3: Gemini /design (UI)
 →  Step 4: Codex $design (arch)  →  Step 5: Claude /design (quality)
 ```
-See: `doc/guide/llm_cooperative_dev_phase.md`
+See: `doc/07_guide/app/llm/llm_cooperative_dev_phase.md`
 
 ## Skills Reference
 
@@ -45,6 +45,21 @@ Before starting any step, **check if prerequisite artifacts exist**:
 | Implementation | `src/**/<feature>.spl` | Implement the feature |
 
 **Never fail because a prior step wasn't done by another LLM. Just do it.**
+
+---
+
+## Concurrent LLM Work
+
+Multiple Codex, Claude, or Gemini sessions may be active in this repository at
+the same time. Before editing, committing, or syncing, check the current
+worktree and active session scope. If another session owns a dirty file or a
+different feature lane, do not fold that work into your change unless the user
+explicitly asks for a combined commit.
+
+When asked to "find similar" or "go the found", inspect active process/session
+IDs and continue only the requested lane. Treat all unrelated dirty files as
+other-agent work: preserve them, avoid reverting them, and mention them
+separately in the final status.
 
 ---
 

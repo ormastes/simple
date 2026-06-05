@@ -33,6 +33,12 @@ Before marking a feature tracking row `status=done`, fill `requirement`,
 `implementation`, `unit_tests`, `integration_tests`, and `guide`, then run
 `<runtime> lint doc/08_tracking/feature/feature_db.sdn`.
 
+If other Codex, Claude, or Gemini sessions are active, identify the lane this
+`/sp_dev` invocation owns before editing or syncing. Do not absorb unrelated
+dirty files into the feature just because they are present in the shared
+checkout. Preserve other-agent work, report it separately, and commit only the
+intentional lane unless the user requests a combined integration.
+
 For scenario-oriented work, the SPipe loop also includes generated manual
 review. After specs are written or changed, generate the mirrored
 `doc/06_spec/...` document and read it as a scenario manual. Update step

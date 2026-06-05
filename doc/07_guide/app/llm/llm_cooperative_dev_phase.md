@@ -15,6 +15,20 @@ Every phase is **self-sufficient**. Any LLM can do any phase alone. If a prior p
 
 ---
 
+## Concurrent Session Hygiene
+
+The shared main checkout may contain work from several active LLM sessions. At
+the start of a phase, check the dirty file list and active session/process
+context before editing. Keep the current request in one feature lane, and leave
+unrelated dirty files untouched unless the user explicitly asks for a combined
+integration.
+
+For sync, commit only the lane you intentionally own, then use `jj git fetch`
+and `jj rebase -d main@origin`. If the file count drops after rebase, stop
+before setting the bookmark or pushing.
+
+---
+
 ## Phase 1: Research
 
 **Goal:** Understand the problem, explore the codebase, survey external knowledge, define requirements.
