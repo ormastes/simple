@@ -109,26 +109,30 @@ pub fn encode_ppm_p6(width: u32, height: u32, pixels: [u32]) -> [u8]:
 
     Alpha is discarded; channels are written as 8-bit RGB triplets.
     """
-    var out: [u8] = []
-    # Push plain integer values (not `expr as u8`): an explicit `as u8` cast on a
-    # pushed element produces a u8-tagged value that the [u8]->extern marshalling
-    # drops, so the resulting buffer reaches rt_file_write_bytes / socket writes
-    # as empty. Masked integers store and marshal correctly.
-    # Header: "P6\n<width> <height>\n255\n"
+    # Store masked integer values (never `expr as u8`): an explicit `as u8` cast on
+    # an element produces a u8-tagged value that the [u8]->extern marshalling drops,
+    # so the resulting buffer reaches rt_file_write_bytes / socket writes as empty.
+    # Masked integers store and marshal correctly.
+    #
+    # Pre-size the buffer and index-assign (O(n)) rather than repeated `out.push`
+    # reassignment, which is O(n^2) under the interpreter and times out on
+    # full-resolution frames. Header: "P6\n<width> <height>\n255\n".
     val header = "P6\n{width} {height}\n255\n"
-    var hi = 0
-    while hi < header.len():
-        out = out.push(header.char_at(hi) as i64)
-        hi = hi + 1
+    val hlen = header.len()
     val count = (width as i64) * (height as i64)
+    val total = hlen + (count as i32) * 3
+    var out: [u8] = [0; total]
+    var hi = 0
+    while hi < hlen:
+        out[hi] = header.char_at(hi) as i64
+        hi = hi + 1
     var i: i64 = 0
+    var o = hlen
     while i < count:
         val argb = pixels[i] as i64
-        val r = (argb >> 16) & 0xFF
-        val g = (argb >> 8) & 0xFF
-        val b = argb & 0xFF
-        out = out.push(r)
-        out = out.push(g)
-        out = out.push(b)
+        out[o] = (argb >> 16) & 0xFF
+        out[o + 1] = (argb >> 8) & 0xFF
+        out[o + 2] = argb & 0xFF
+        o = o + 3
         i = i + 1
     out

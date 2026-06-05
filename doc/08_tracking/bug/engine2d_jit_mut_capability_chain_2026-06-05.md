@@ -1,6 +1,39 @@
 # Engine2D/web GUI apps fall back to interpreter: W1006 `mut`-capability JIT-blocker chain
 
-**Status:** OPEN (partial) — 3 functions fixed; JIT does not yet flip to native.
+**Status:** OPEN — `mut` fixes REVERTED (they unmasked a latent JIT panic; see below).
+The real fix is driver-side (prefer interpreter for winit/graphics sources).
+
+## ⚠️ Why the `mut` fixes were reverted (2026-06-05)
+
+Adding `mut` to `render_glyph_to_buffer` / `render_text_to_buffer` / `_emu_sort_i32`
+let the JIT proceed *past* the W1006 bailout — and it then **panicked** (hard
+abort, not a graceful `Err`) at:
+
+```
+PANIC can't resolve symbol rt_winit_event_loop_new
+  vendor/cranelift-jit/src/backend.rs:345
+```
+
+i.e. the W1006 bailout was *masking* a pre-existing latent JIT linker panic: the
+JIT cannot resolve the winit/engine2d runtime externs (consistent with the known
+dual-handle-table split — JIT-resolved `rt_*` point at the wrong/empty symbol
+maps, so JIT could never correctly run these apps anyway). Net: the `mut` fixes
+gave **zero** runtime benefit and turned a working (interpreted) run into a hard
+panic in default JIT mode. Reverted to restore the graceful fallback.
+
+## Correct fix (tracked, not yet applied — requires GUI-driver rebuild)
+
+`src/compiler_rust/driver/src/exec_core.rs::should_prefer_interpreter_for_source`
+already short-circuits JIT for `.shs` / CLI-arg / specific sources. Extend it to
+also prefer the interpreter when the source uses the winit/engine2d graphics
+runtime (e.g. source imports `std.io.window_winit` or `gpu.engine2d.backend_*`),
+so these apps skip JIT entirely instead of panicking. (Belt-and-suspenders: wrap
+`run_file_jit` so an unresolved-symbol panic converts to the interpreter
+fallback.) The documented launch path `scripts/gui/macos-gui-run.shs` already sets
+`SIMPLE_EXECUTION_MODE=interpret`, so on-screen launches are unaffected; the panic
+only hits plain `bin/simple run <gui_app>.spl` in default JIT mode.
+
+## Original W1006 pattern (for the eventual JIT-enablement work)
 **Severity:** Perf — pure-Simple GUI lane (engine2d CPU + web layout) runs fully
 interpreted; `draw_text`/glyph rasterization is the dominant cost, making the GUI
 sanity apps slow (tens of seconds to minutes per frame at modest resolutions).
