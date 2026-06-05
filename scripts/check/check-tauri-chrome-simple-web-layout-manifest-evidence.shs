@@ -45,7 +45,7 @@ chrome_capture_reason() {
 }
 
 tauri_capture_reason() {
-    if command -v cargo >/dev/null 2>&1 && command -v xvfb-run >/dev/null 2>&1 && command -v xdotool >/dev/null 2>&1 && command -v import >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
+    if command -v cargo >/dev/null 2>&1 && command -v xvfb-run >/dev/null 2>&1 && command -v dbus-run-session >/dev/null 2>&1 && command -v xdotool >/dev/null 2>&1 && command -v import >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
         echo "tauri-live-capture-configured"
     else
         echo "tauri-xvfb-capture-prerequisite-unavailable"
@@ -53,43 +53,97 @@ tauri_capture_reason() {
 }
 
 run_tauri_capture() {
-    case_dir="$BUILD_DIR/tauri_layout"
-    mkdir -p "$case_dir"
-    html_path="$(field_of case_css_box_matrix_electron_simple_web_layout_html_path "$LAYOUT_ENV")"
-    expected_argb="$(field_of case_css_box_matrix_electron_simple_web_layout_expected_argb_path "$LAYOUT_ENV")"
-    width="$(field_of case_css_box_matrix_electron_simple_web_layout_width "$LAYOUT_ENV")"
-    height="$(field_of case_css_box_matrix_electron_simple_web_layout_height "$LAYOUT_ENV")"
-    if [ "$width" = "" ]; then
-        width=96
-    fi
-    if [ "$height" = "" ]; then
-        height=64
-    fi
-    set +e
-    BUILD_DIR="$case_dir" REPORT_PATH="$case_dir/report.md" TAURI_LAYOUT_HTML_PATH="$html_path" TAURI_LAYOUT_EXPECTED_ARGB_PATH="$expected_argb" TAURI_LAYOUT_WIDTH="$width" TAURI_LAYOUT_HEIGHT="$height" \
-        sh scripts/check/check-tauri-simple-web-layout-bitmap-evidence.shs >"$case_dir/stdout.env" 2>"$case_dir/stderr.log"
-    code=$?
-    set -e
-    env_file="$case_dir/evidence.env"
-    tauri_capture_status=""
-    tauri_capture_reason=""
-    tauri_live_capture=false
+    root_dir="$BUILD_DIR/tauri_layout"
+    mkdir -p "$root_dir"
+    tauri_case_count=0
+    tauri_pass_count=0
+    tauri_fail_count=0
     tauri_mismatch_count=0
-    if [ -s "$env_file" ]; then
-        tauri_capture_status="$(field_of tauri_simple_web_layout_status "$env_file")"
-        tauri_capture_reason="$(field_of tauri_simple_web_layout_reason "$env_file")"
-        tauri_mismatch_count="$(field_of tauri_simple_web_layout_mismatch_count "$env_file")"
+    tauri_capture_status="pass"
+    tauri_capture_reason="pass"
+    tauri_live_capture=false
+    tauri_exit_code=0
+    cases="$(sed -n 's/^electron_simple_web_layout_manifest_case=//p' "$LAYOUT_ENV")"
+    if [ "$cases" = "" ]; then
+        tauri_capture_status="unavailable"
+        tauri_capture_reason="tauri-layout-manifest-cases-missing"
     fi
-    if [ "$tauri_capture_status" = "pass" ]; then
-        tauri_live_capture=true
+    for case_name in $cases; do
+        case_dir="$root_dir/$case_name"
+        mkdir -p "$case_dir"
+        html_path="$(field_of "case_${case_name}_electron_simple_web_layout_html_path" "$LAYOUT_ENV")"
+        expected_argb="$(field_of "case_${case_name}_electron_simple_web_layout_expected_argb_path" "$LAYOUT_ENV")"
+        width="$(field_of "case_${case_name}_electron_simple_web_layout_width" "$LAYOUT_ENV")"
+        height="$(field_of "case_${case_name}_electron_simple_web_layout_height" "$LAYOUT_ENV")"
+        if [ "$width" = "" ]; then
+            width=96
+        fi
+        if [ "$height" = "" ]; then
+            height=64
+        fi
+        tauri_case_count=$((tauri_case_count + 1))
+        set +e
+        BUILD_DIR="$case_dir" REPORT_PATH="$case_dir/report.md" TAURI_LAYOUT_HTML_PATH="$html_path" TAURI_LAYOUT_EXPECTED_ARGB_PATH="$expected_argb" TAURI_LAYOUT_WIDTH="$width" TAURI_LAYOUT_HEIGHT="$height" \
+            sh scripts/check/check-tauri-simple-web-layout-bitmap-evidence.shs >"$case_dir/stdout.env" 2>"$case_dir/stderr.log"
+        code=$?
+        set -e
+        env_file="$case_dir/evidence.env"
+        case_status=""
+        case_reason=""
+        case_mismatch=0
+        if [ -s "$env_file" ]; then
+            case_status="$(field_of tauri_simple_web_layout_status "$env_file")"
+            case_reason="$(field_of tauri_simple_web_layout_reason "$env_file")"
+            case_mismatch="$(field_of tauri_simple_web_layout_mismatch_count "$env_file")"
+        fi
+        if [ "$case_mismatch" = "" ]; then
+            case_mismatch=0
+        fi
+        tauri_mismatch_count=$((tauri_mismatch_count + case_mismatch))
+        if [ "$case_status" = "pass" ]; then
+            tauri_pass_count=$((tauri_pass_count + 1))
+            tauri_live_capture=true
+        else
+            tauri_fail_count=$((tauri_fail_count + 1))
+            tauri_exit_code="$code"
+            if [ "$case_reason" = "" ]; then
+                case_reason="$(tauri_capture_reason)"
+            fi
+            if [ "$case_status" = "unavailable" ] && [ "$tauri_capture_status" = "pass" ]; then
+                tauri_capture_status="unavailable"
+                tauri_capture_reason="$case_reason"
+            elif [ "$case_status" != "unavailable" ]; then
+                tauri_capture_status="$case_status"
+                tauri_capture_reason="$case_reason"
+            fi
+        fi
+        {
+            echo "tauri_chrome_simple_web_layout_manifest_tauri_case=$case_name"
+            echo "tauri_chrome_simple_web_layout_manifest_tauri_case_${case_name}_exit_code=$code"
+            echo "tauri_chrome_simple_web_layout_manifest_tauri_case_${case_name}_report=$case_dir/report.md"
+            sed "s/^/tauri_chrome_simple_web_layout_manifest_tauri_case_${case_name}_detail_/" "$env_file" 2>/dev/null || true
+        } >>"$BUILD_DIR/evidence.env.tmp"
+        if [ "$tauri_capture_status" = "unavailable" ]; then
+            break
+        fi
+    done
+    if [ "$tauri_capture_status" = "pass" ] && [ "$tauri_pass_count" != "$tauri_case_count" ]; then
+        tauri_capture_status="fail"
+        tauri_capture_reason="tauri-layout-manifest-incomplete"
+    fi
+    if [ "$tauri_capture_status" = "pass" ] && [ "$tauri_mismatch_count" != "0" ]; then
+        tauri_capture_status="divergent"
+        tauri_capture_reason="tauri-layout-manifest-pixel-mismatch"
     fi
     if [ "$tauri_capture_reason" = "" ]; then
         tauri_capture_reason="$(tauri_capture_reason)"
     fi
     {
-        echo "tauri_chrome_simple_web_layout_manifest_tauri_capture_exit_code=$code"
-        echo "tauri_chrome_simple_web_layout_manifest_tauri_capture_report=$case_dir/report.md"
-        sed 's/^/tauri_chrome_simple_web_layout_manifest_tauri_detail_/' "$env_file" 2>/dev/null || true
+        echo "tauri_chrome_simple_web_layout_manifest_tauri_capture_exit_code=$tauri_exit_code"
+        echo "tauri_chrome_simple_web_layout_manifest_tauri_capture_report=$root_dir"
+        echo "tauri_chrome_simple_web_layout_manifest_tauri_case_count=$tauri_case_count"
+        echo "tauri_chrome_simple_web_layout_manifest_tauri_pass_count=$tauri_pass_count"
+        echo "tauri_chrome_simple_web_layout_manifest_tauri_fail_count=$tauri_fail_count"
     } >>"$BUILD_DIR/evidence.env.tmp"
 }
 
@@ -217,6 +271,9 @@ tauri_capture_status="unavailable"
 tauri_capture_reason="$(tauri_capture_reason)"
 tauri_live_capture=false
 tauri_mismatch_count=0
+tauri_case_count=0
+tauri_pass_count=0
+tauri_fail_count=0
 chrome_capture_status="unavailable"
 chrome_capture_reason="$(chrome_capture_reason)"
 chrome_live_capture=false
@@ -235,7 +292,7 @@ tauri_reason="$tauri_capture_reason"
 chrome_status="$chrome_capture_status"
 chrome_reason="$chrome_capture_reason"
 
-if [ "$tauri_status" = "pass" ] && { [ "$tauri_live_capture" != true ] || [ "$tauri_mismatch_count" != "0" ]; }; then
+if [ "$tauri_status" = "pass" ] && { [ "$tauri_live_capture" != true ] || [ "$tauri_mismatch_count" != "0" ] || [ "$tauri_pass_count" != "$tauri_case_count" ] || [ "$tauri_fail_count" != "0" ]; }; then
     status="fail"
     reason="surface-row-claims-live-capture-without-proof"
 elif [ "$tauri_status" != "pass" ] && [ "$tauri_status" != "unavailable" ]; then
@@ -267,6 +324,9 @@ fi
     echo "tauri_chrome_simple_web_layout_manifest_tauri_capture_status=$tauri_status"
     echo "tauri_chrome_simple_web_layout_manifest_tauri_capture_reason=$tauri_reason"
     echo "tauri_chrome_simple_web_layout_manifest_tauri_live_capture=$tauri_live_capture"
+    echo "tauri_chrome_simple_web_layout_manifest_tauri_case_count=$tauri_case_count"
+    echo "tauri_chrome_simple_web_layout_manifest_tauri_pass_count=$tauri_pass_count"
+    echo "tauri_chrome_simple_web_layout_manifest_tauri_fail_count=$tauri_fail_count"
     echo "tauri_chrome_simple_web_layout_manifest_tauri_mismatch_count=$tauri_mismatch_count"
     echo "tauri_chrome_simple_web_layout_manifest_chrome_target=chrome"
     echo "tauri_chrome_simple_web_layout_manifest_chrome_capture_status=$chrome_status"

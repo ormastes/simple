@@ -989,10 +989,6 @@ expect(budget.len()).to_equal(2)
 
 ### MIR routing adapter
 
-> **Verified:** WriteCoalesce transformation proven via instruction count oracle
-> (4 GEP+Store → 5 after `bulk_store_hint` insertion). Source plugin nil-guard
-> preserves count at 4 on the same module — discriminating pair.
-
 #### nil-guard returns function unchanged for source plugin
 
 1. kind: MirInstKind Const

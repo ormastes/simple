@@ -293,6 +293,12 @@ opt -verify-each -passes='default<O2>' input.ll -o output.bc
 
 ## Unified OptimizerPlugin Interface
 
+```text
+OptimizerPlugin ──→ MIR Optimizer (60.mir_opt)   ──→ MirPass Registry
+                ──→ Source Optimizer (90.tools)   ──→ Pattern Engine
+                ──→ Hotspot Optimizer (95.interp)  ──→ Tiered JIT
+```
+
 Three optimizer subsystems currently operate with different interfaces:
 
 | Subsystem | Location | Interface | When |

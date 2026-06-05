@@ -145,6 +145,17 @@ The first plan using this provider is
 
 ## Unified OptimizerPlugin Trait
 
+```text
+OptimizerPlugin ──→ MIR Optimizer (60.mir_opt)   ──→ MirPass Registry
+                ──→ Source Optimizer (90.tools)   ──→ Pattern Engine
+                ──→ Hotspot Optimizer (95.interp)  ──→ Tiered JIT
+```
+
+> **Verified (2026-06-05):** WriteCoalesce transformation proven via instruction
+> count oracle (4 GEP+Store → 5 after `bulk_store_hint` insertion). Source plugin
+> nil-guard preserves count at 4 on the same module — discriminating pair confirms
+> MIR routing adapter dispatches to the correct pass.
+
 All three optimizer subsystems converge on a common `OptimizerPlugin` trait:
 
 ```text

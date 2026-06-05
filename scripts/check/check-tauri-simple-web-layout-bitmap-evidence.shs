@@ -16,9 +16,11 @@ CAPTURED_ARGB="$BUILD_DIR/tauri-argb.json"
 TAURI_OUT="$BUILD_DIR/tauri.out"
 TAURI_ERR="$BUILD_DIR/tauri.err"
 TAURI_PROOF="$BUILD_DIR/tauri-proof.json"
+XVFB_SESSION_OUT="$BUILD_DIR/xvfb-session.out"
+XVFB_SESSION_ERR="$BUILD_DIR/xvfb-session.err"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
-rm -f "$CAPTURED_PNG" "$CAPTURED_RAW" "$CAPTURED_ARGB" "$TAURI_OUT" "$TAURI_ERR" "$TAURI_PROOF" "$BUILD_DIR/evidence.env" "$REPORT_PATH"
+rm -f "$CAPTURED_PNG" "$CAPTURED_RAW" "$CAPTURED_ARGB" "$TAURI_OUT" "$TAURI_ERR" "$TAURI_PROOF" "$XVFB_SESSION_OUT" "$XVFB_SESSION_ERR" "$BUILD_DIR/evidence.env" "$REPORT_PATH"
 
 field_of_json() {
     key="$1"
@@ -83,6 +85,11 @@ emit_fail() {
             echo "## Tauri stderr"
             sed 's/^/- /' "$TAURI_ERR"
         fi
+        if [ -s "$XVFB_SESSION_ERR" ]; then
+            echo
+            echo "## Xvfb session stderr"
+            sed 's/^/- /' "$XVFB_SESSION_ERR"
+        fi
     } >"$REPORT_PATH"
     cat "$BUILD_DIR/evidence.env"
 }
@@ -105,6 +112,7 @@ fi
 
 require_cmd cargo "cargo-unavailable"
 require_cmd xvfb-run "xvfb-run-unavailable"
+require_cmd dbus-run-session "dbus-run-session-unavailable"
 require_cmd xdotool "xdotool-unavailable"
 require_cmd import "imagemagick-import-unavailable"
 require_cmd convert "imagemagick-convert-unavailable"
@@ -114,6 +122,8 @@ HTML_ABS="$(cd "$(dirname -- "$HTML_PATH")" && pwd)/$(basename -- "$HTML_PATH")"
 PNG_ABS="$(cd "$BUILD_DIR" && pwd)/$(basename -- "$CAPTURED_PNG")"
 OUT_ABS="$(cd "$BUILD_DIR" && pwd)/$(basename -- "$TAURI_OUT")"
 ERR_ABS="$(cd "$BUILD_DIR" && pwd)/$(basename -- "$TAURI_ERR")"
+XVFB_SESSION_OUT_ABS="$(cd "$BUILD_DIR" && pwd)/$(basename -- "$XVFB_SESSION_OUT")"
+XVFB_SESSION_ERR_ABS="$(cd "$BUILD_DIR" && pwd)/$(basename -- "$XVFB_SESSION_ERR")"
 TAURI_URL="file://$HTML_ABS"
 SCREEN_WIDTH="${TAURI_SCREEN_WIDTH:-1280}"
 SCREEN_HEIGHT="${TAURI_SCREEN_HEIGHT:-1024}"
@@ -122,7 +132,7 @@ WAIT_STEPS="${TAURI_CAPTURE_WAIT_STEPS:-60}"
 set +e
 START_NS="$(date +%s%N)"
 TAURI_URL="$TAURI_URL" PNG_ABS="$PNG_ABS" OUT_ABS="$OUT_ABS" ERR_ABS="$ERR_ABS" WIDTH="$WIDTH" HEIGHT="$HEIGHT" WAIT_STEPS="$WAIT_STEPS" \
-    xvfb-run -a -s "-screen 0 ${SCREEN_WIDTH}x${SCREEN_HEIGHT}x24" sh -eu <<'CAPTURE'
+    xvfb-run -a -s "-screen 0 ${SCREEN_WIDTH}x${SCREEN_HEIGHT}x24" dbus-run-session -- sh -eu >"$XVFB_SESSION_OUT_ABS" 2>"$XVFB_SESSION_ERR_ABS" <<'CAPTURE'
 cd tools/tauri-shell
 npm run prepare:dist >/dev/null 2>&1 || true
 cargo run --manifest-path src-tauri/Cargo.toml -- --url "$TAURI_URL" >"$OUT_ABS" 2>"$ERR_ABS" &
@@ -181,7 +191,7 @@ if [ "$capture_code" -ne 0 ] || [ ! -s "$CAPTURED_PNG" ]; then
     exit 1
 fi
 
-if ! convert "$CAPTURED_PNG" -crop "${WIDTH}x${HEIGHT}+0+0" "rgba:$CAPTURED_RAW" >/dev/null 2>&1; then
+if ! convert "$CAPTURED_PNG" -crop "${WIDTH}x${HEIGHT}+0+0" -alpha set -depth 8 "rgba:$CAPTURED_RAW" >/dev/null 2>&1; then
     emit_fail "tauri-screenshot-rgba-convert-failed"
     exit 1
 fi
