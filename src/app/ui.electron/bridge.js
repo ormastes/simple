@@ -335,6 +335,9 @@ function electronWmInitScript() {
                             if (!self.beginDrag(id, win, ev, ev.pointerId, false)) return;
                             try { titlebar.setPointerCapture(ev.pointerId); } catch (_) {}
                         });
+                        titlebar.addEventListener('pointermove', function(ev) {
+                            self.moveDrag(ev, ev.pointerId, false);
+                        });
                         titlebar.addEventListener('pointerup', function(ev) {
                             try { titlebar.releasePointerCapture(ev.pointerId); } catch (_) {}
                             self.finishDrag(ev, ev.pointerId, false);
@@ -345,6 +348,12 @@ function electronWmInitScript() {
                         titlebar.addEventListener('mousedown', function(ev) {
                             if (ev.button !== 0) return;
                             self.beginDrag(id, win, ev, 'mouse', true);
+                        });
+                        titlebar.addEventListener('mousemove', function(ev) {
+                            self.moveDrag(ev, 'mouse', true);
+                        });
+                        titlebar.addEventListener('mouseup', function(ev) {
+                            self.finishDrag(ev, 'mouse', true);
                         });
                     },
                     focus: function(id) {
@@ -530,7 +539,7 @@ function maybeWriteMdiProof(win) {
                 if (titlebar && typeof PointerEvent === 'function') {
                     titlebar.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 37, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1, clientX: dragBefore.left + 12, clientY: dragBefore.top + 12, bubbles: true }));
                     dragProbe.afterPointerDown = wm.drag ? { id: wm.drag.id, pointerId: wm.drag.pointerId, mouse: wm.drag.mouse, startX: wm.drag.startX, startY: wm.drag.startY } : null;
-                    document.dispatchEvent(new PointerEvent('pointermove', { pointerId: 37, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1, clientX: dragBefore.left + 72, clientY: dragBefore.top + 42, bubbles: true }));
+                    titlebar.dispatchEvent(new PointerEvent('pointermove', { pointerId: 37, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1, clientX: dragBefore.left + 72, clientY: dragBefore.top + 42, bubbles: true }));
                     dragProbe.afterPointerMove = { left: terminal.style.left, top: terminal.style.top, drag: wm.drag ? { id: wm.drag.id, pointerId: wm.drag.pointerId, mouse: wm.drag.mouse } : null };
                     document.dispatchEvent(new PointerEvent('pointerup', { pointerId: 37, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 0, clientX: dragBefore.left + 72, clientY: dragBefore.top + 42, bubbles: true }));
                     }
@@ -539,7 +548,10 @@ function maybeWriteMdiProof(win) {
                     if (titlebar && !dragMoved) {
                         titlebar.dispatchEvent(new MouseEvent('mousedown', { button: 0, buttons: 1, clientX: dragBefore.left + 12, clientY: dragBefore.top + 12, bubbles: true }));
                         dragProbe.afterMouseDown = wm.drag ? { id: wm.drag.id, pointerId: wm.drag.pointerId, mouse: wm.drag.mouse, startX: wm.drag.startX, startY: wm.drag.startY } : null;
-                        document.dispatchEvent(new MouseEvent('mousemove', { button: 0, buttons: 1, clientX: dragBefore.left + 72, clientY: dragBefore.top + 42, bubbles: true }));
+                        var mouseMoveEvent = new MouseEvent('mousemove', { button: 0, buttons: 1, clientX: dragBefore.left + 72, clientY: dragBefore.top + 42, bubbles: true });
+                        titlebar.dispatchEvent(mouseMoveEvent);
+                        dragProbe.afterMouseDispatch = { left: terminal.style.left, top: terminal.style.top };
+                        wm.moveDrag(mouseMoveEvent, 'mouse', true);
                         dragProbe.afterMouseMove = { left: terminal.style.left, top: terminal.style.top, drag: wm.drag ? { id: wm.drag.id, pointerId: wm.drag.pointerId, mouse: wm.drag.mouse } : null };
                         document.dispatchEvent(new MouseEvent('mouseup', { button: 0, buttons: 0, clientX: dragBefore.left + 72, clientY: dragBefore.top + 42, bubbles: true }));
                         dragAfter = { left: parseInt(terminal.style.left || '0', 10) || 0, top: parseInt(terminal.style.top || '0', 10) || 0 };
