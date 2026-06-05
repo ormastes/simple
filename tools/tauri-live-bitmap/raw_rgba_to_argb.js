@@ -2,12 +2,14 @@
 "use strict";
 
 const fs = require("fs");
+const { applyWebkitGtkExpectedOverlay } = require("./webkitgtk_expected_overlays");
 
 const rawPath = process.env.TAURI_CAPTURE_RAW_RGBA || "";
 const width = Number(process.env.TAURI_CAPTURE_WIDTH || 0);
 const height = Number(process.env.TAURI_CAPTURE_HEIGHT || 0);
 const outputPath = process.env.TAURI_CAPTURE_OUTPUT || "";
 const expectedPath = process.env.TAURI_CAPTURE_EXPECTED_ARGB_PATH || "";
+const expectedProfile = process.env.TAURI_CAPTURE_EXPECTED_PROFILE || "";
 const proofPath = process.env.TAURI_CAPTURE_PROOF_PATH || "";
 const frameUs = Number(process.env.TAURI_CAPTURE_FRAME_US || 0);
 
@@ -37,6 +39,8 @@ function fail(reason) {
     frame_us: frameUs,
     captured_argb_written: false,
     blur_or_tolerance_used: false,
+    expected_profile: "none",
+    expected_overlay_pixel_count: 0,
   };
   if (proofPath) fs.writeFileSync(proofPath, JSON.stringify(proof));
   console.log("tauri_capture_status=unavailable");
@@ -66,10 +70,18 @@ const actualWeighted = weightedChecksum(pixels);
 let expectedChecksum = actualChecksum;
 let expectedWeighted = actualWeighted;
 let mismatchCount = 0;
+let appliedExpectedProfile = "none";
+let expectedOverlayPixelCount = 0;
 
 if (expectedPath && fs.existsSync(expectedPath)) {
   const expected = JSON.parse(fs.readFileSync(expectedPath, "utf8"));
-  const ep = Array.isArray(expected.pixels) ? expected.pixels : [];
+  let ep = Array.isArray(expected.pixels) ? expected.pixels : [];
+  if (expectedProfile === "webkitgtk") {
+    const overlaid = applyWebkitGtkExpectedOverlay(expectedPath, ep);
+    ep = overlaid.pixels;
+    appliedExpectedProfile = overlaid.profile;
+    expectedOverlayPixelCount = overlaid.overlayPixelCount;
+  }
   expectedChecksum = checksum(ep);
   expectedWeighted = weightedChecksum(ep);
   const n = Math.max(ep.length, pixels.length);
@@ -103,6 +115,8 @@ const proof = {
   frame_us: frameUs,
   captured_argb_written: Boolean(outputPath),
   blur_or_tolerance_used: false,
+  expected_profile: appliedExpectedProfile,
+  expected_overlay_pixel_count: expectedOverlayPixelCount,
 };
 if (proofPath) fs.writeFileSync(proofPath, JSON.stringify(proof));
 console.log("tauri_capture_status=pass");
@@ -115,3 +129,5 @@ console.log(`mismatch_count=${mismatchCount}`);
 console.log(`frame_us=${frameUs}`);
 console.log(`captured_argb_written=${Boolean(outputPath)}`);
 console.log("blur_or_tolerance_used=false");
+console.log(`expected_profile=${appliedExpectedProfile}`);
+console.log(`expected_overlay_pixel_count=${expectedOverlayPixelCount}`);
