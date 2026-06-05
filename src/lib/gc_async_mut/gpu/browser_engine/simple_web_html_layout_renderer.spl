@@ -496,7 +496,13 @@ fn apply_decls(st: Style, decls: text) -> Style:
             line_height_v = lh
     val width = decl_get(decls, "width")
     if width.len() > 0:
-        width_v = parse_int(width)
+        if width.ends_with("%"):
+            # Percentage width: store as a negative sentinel (resolved against the
+            # parent's available width at layout time, where it is known).
+            val wp = parse_int(width)
+            width_v = if wp > 0: 0 - wp else: 0
+        else:
+            width_v = parse_int(width)
     val height = decl_get(decls, "height")
     if height.len() > 0:
         height_v = parse_int(height)
@@ -2902,7 +2908,15 @@ fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, viewp
     val border_x = st.border_l + st.border_r
     val border_y = st.border_t + st.border_b
     val explicit_node_w = if legacy_widget_box or st.border_box: st.width_px else: st.width_px + st.pad_l + st.pad_r + border_x
-    val node_w = if st.width_px > 0: explicit_node_w else: w
+    # width_px > 0: explicit px. width_px < 0: percentage of available width
+    # (negative sentinel from apply_decls). width_px == 0: fill available width.
+    var node_w = if st.width_px > 0: explicit_node_w else: w
+    if st.width_px < 0:
+        node_w = w * (0 - st.width_px) / 100
+        if node_w > w:
+            node_w = w
+        if node_w < 1:
+            node_w = 1
     out_bw[i] = node_w
     if nodes[i].tag == "#text":
         val txt = nodes[i].text_data.trim()

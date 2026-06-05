@@ -31,15 +31,22 @@ independent of window-server/compositor/permission state. Screen capture by
 region is flaky (it can grab whatever window sits at those coordinates).
 
 - 2D + widgets: dump via the app's `read_pixels()` → P6 PPM.
-- Web/HTML headless dump at a realistic size (binary P6, O(1) push encoder):
+- Widgets headless dump: `SHOWCASE_PPM=/tmp/widgets.ppm … run
+  examples/06_io/ui/widget_showcase_gui.spl --mode=interpreter`.
+- Web/HTML headless dump at a realistic size (binary P6 via `encode_ppm_p6`):
   ```bash
-  PAGE_W=900 PAGE_H=760 SIMPLE_TIMEOUT_SECONDS=600 SIMPLE_LIB=src \
+  PAGE_W=440 PAGE_H=360 SIMPLE_TIMEOUT_SECONDS=1200 SIMPLE_LIB=src \
     src/compiler_rust/target/gui/debug/simple run \
-    examples/06_io/ui/web_render_page_ppm.spl <file.html> /tmp/out.ppm
+    examples/06_io/ui/web_render_page_ppm.spl <file.html> /tmp/out.ppm --mode=interpreter
   ```
-  Use `encode_ppm_p6(w,h,pixels)` (`common.image.ppm_decode`) — never the O(n²)
-  ASCII-P3 `ppm = ppm + ...` concat, and never `expr as u8` in a `.push` (the
-  `[u8]`→extern marshalling drops u8-tagged elements — push masked ints).
+  Always pass **`--mode=interpreter`** for these graphics apps: default JIT mode
+  panics resolving the winit/engine2d runtime externs (`rt_winit_event_loop_new`;
+  the rt_* handle-table split). The macos-gui-run.shs launcher already forces
+  interpret mode. Use `encode_ppm_p6(w,h,pixels)` (`common.image.ppm_decode`) — it
+  pre-sizes + index-assigns (O(n)); never the O(n²) ASCII-P3 `ppm = ppm + …`
+  concat, and never `expr as u8` in an element store (the `[u8]`→extern marshalling
+  drops u8-tagged elements — store masked ints). The web layout lane is
+  interpreter-bound (~1.5 ms/px): a 440×360 page ≈ a few minutes.
 
 ## Bit-level backend parity gates (numeric oracle)
 
