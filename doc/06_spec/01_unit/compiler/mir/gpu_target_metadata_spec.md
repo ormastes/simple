@@ -28,7 +28,7 @@ gpu_target_metadata_spec -> compiler
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -151,6 +151,66 @@ expect(result.gpu_backend_order).to_equal("hip,opencl,cuda")
 
 </details>
 
+#### preserves positional GPU target metadata through HIR and MIR lowering
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val attr = parse_function_attrs([make_gpu_source_attr("opencl")])
+
+val result = lower_hir_attr_function_to_mir(attr, "positional_opencl_kernel")
+
+expect(result.is_kernel).to_equal(true)
+expect(result.gpu_target).to_equal("opencl")
+expect(result.gpu_backend_order).to_equal("opencl")
+```
+
+</details>
+
+#### preserves named GPU target metadata through HIR and MIR lowering
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val attr = parse_function_attrs([make_gpu_source_attr_with_backends("opencl", "")])
+
+val result = lower_hir_attr_function_to_mir(attr, "named_opencl_kernel")
+
+expect(result.is_kernel).to_equal(true)
+expect(result.gpu_target).to_equal("opencl")
+expect(result.gpu_backend_order).to_equal("opencl")
+```
+
+</details>
+
+#### preserves named GPU backend order metadata through HIR and MIR lowering
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val attr = parse_function_attrs([make_gpu_source_attr_with_backends("auto", "rocm,cl,cuda")])
+
+val result = lower_hir_attr_function_to_mir(attr, "ordered_gpu_kernel")
+
+expect(result.is_kernel).to_equal(true)
+expect(result.gpu_target).to_equal("auto")
+expect(result.gpu_backend_order).to_equal("hip,opencl,cuda")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -170,8 +230,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
