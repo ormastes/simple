@@ -282,7 +282,7 @@ fn tauri_mdi_init_script() -> &'static str {
             if (!document.getElementById('simple-tauri-wm-style')) {
                 var style = document.createElement('style');
                 style.id = 'simple-tauri-wm-style';
-                style.textContent = '#wm-desktop{position:fixed;inset:0;overflow:hidden;z-index:10000;pointer-events:none}.wm-window{position:absolute;display:flex;flex-direction:column;background:#111827;color:#e5e7eb;border:1px solid rgba(255,255,255,.18);box-shadow:0 18px 45px rgba(0,0,0,.42);border-radius:8px;overflow:hidden;pointer-events:auto}.wm-titlebar{height:32px;display:flex;align-items:center;gap:10px;padding:0 10px;background:#0f172a;border-bottom:1px solid rgba(255,255,255,.12);user-select:none;cursor:grab}.wm-titlebar:active{cursor:grabbing}.wm-traffic-lights{display:flex;gap:6px}.wm-traffic-lights button{width:13px;height:13px;border-radius:50%;border:0;font-size:0;padding:0;cursor:pointer}.wm-traffic-lights button[data-action=close]{background:#ff5f57}.wm-traffic-lights button[data-action=minimize]{background:#febc2e}.wm-traffic-lights button[data-action=maximize]{background:#28c840}.wm-title{font:600 12px system-ui,sans-serif;color:#e5e7eb}.wm-body{flex:1;min-height:0;overflow:auto;background:#0b0d10;pointer-events:auto}.wm-body *{pointer-events:auto}';
+                style.textContent = '#wm-desktop{position:fixed;inset:0;overflow:hidden;z-index:10000;pointer-events:none}.wm-window{position:absolute;display:flex;flex-direction:column;background:#111827;color:#e5e7eb;border:1px solid rgba(255,255,255,.18);box-shadow:0 18px 45px rgba(0,0,0,.42);border-radius:8px;overflow:hidden;pointer-events:auto}.wm-titlebar{height:32px;display:flex;align-items:center;gap:10px;padding:0 10px;background:#0f172a;border-bottom:1px solid rgba(255,255,255,.12);user-select:none;cursor:grab}.wm-titlebar:active{cursor:grabbing}.wm-traffic-lights{display:flex;gap:6px}.wm-traffic-lights button{width:13px;height:13px;border-radius:50%;border:0;font-size:0;padding:0;cursor:pointer}.wm-traffic-lights button[data-action=close]{background:#ff5f57}.wm-traffic-lights button[data-action=minimize]{background:#febc2e}.wm-traffic-lights button[data-action=maximize]{background:#28c840}.wm-title{font:600 12px system-ui,sans-serif;color:#e5e7eb;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.wm-titlebar-widgets{display:flex;align-items:center;gap:6px;margin-left:auto}.wm-titlebar-widgets [data-simple-titlebar-widget]{min-height:24px}.wm-body{flex:1;min-height:0;overflow:auto;background:#0b0d10;pointer-events:auto}.wm-body *{pointer-events:auto}';
                 document.head.appendChild(style);
             }
             var desktop = document.getElementById('wm-desktop');
@@ -329,6 +329,21 @@ fn tauri_mdi_init_script() -> &'static str {
                             y: ev.clientY - rect.top,
                             button: ev.button === 2 ? 'right' : (ev.button === 1 ? 'middle' : 'left')
                         });
+                    },
+                    mountTitlebarWidgets: function(existing) {
+                        if (!existing || !existing.titlebar || !existing.body) return;
+                        var old = existing.titlebar.querySelector('.wm-titlebar-widgets');
+                        if (old) old.remove();
+                        var source = Array.from(existing.body.querySelectorAll('[data-simple-titlebar-widget]'));
+                        if (!source.length) return;
+                        var slot = document.createElement('div');
+                        slot.className = 'wm-titlebar-widgets';
+                        source.forEach(function(widget) {
+                            var clone = widget.cloneNode(true);
+                            clone.removeAttribute('id');
+                            slot.appendChild(clone);
+                        });
+                        existing.titlebar.appendChild(slot);
                     },
                     bindDrag: function(id, win, titlebar) {
                         var self = this;
@@ -431,13 +446,13 @@ fn tauri_mdi_init_script() -> &'static str {
                             self.sendWindowAction(id, action);
                             ev.preventDefault();
                         });
-                        body.addEventListener('keydown', function(ev) {
+                        win.addEventListener('keydown', function(ev) {
                             var key = ev.key || '';
                             if (key.length === 1 || ['Enter','Escape','Backspace','Tab','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].indexOf(key) >= 0) {
                                 self.sendWindowKey(id, key);
                             }
                         });
-                        body.addEventListener('input', function(ev) {
+                        win.addEventListener('input', function(ev) {
                             var target = ev.target;
                             var editable = target && (target.matches && target.matches('input,textarea,select') || target.isContentEditable);
                             if (!editable) return;
@@ -490,16 +505,18 @@ fn tauri_mdi_init_script() -> &'static str {
                                 win.appendChild(titlebar);
                                 win.appendChild(body);
                                 desktop.appendChild(win);
-                                existing = this.windows[id] = { win: win, body: body, title: title };
+                                existing = this.windows[id] = { win: win, body: body, title: title, titlebar: titlebar };
                                 this.bindDrag(id, win, titlebar);
                                 this.bindWindowEvents(id, win, body);
                             } else {
                                 existing.body.innerHTML = msg.html || '';
                                 existing.title.textContent = msg.title || id;
                             }
+                            this.mountTitlebarWidgets(existing);
                             this.focus(id);
                         } else if (msg.type === 'renderWindow' && this.windows[msg.windowId]) {
                             this.windows[msg.windowId].body.innerHTML = msg.html || '';
+                            this.mountTitlebarWidgets(this.windows[msg.windowId]);
                         } else if (msg.type === 'closeWindow' && this.windows[msg.windowId]) {
                             this.windows[msg.windowId].win.remove();
                             delete this.windows[msg.windowId];
@@ -1887,6 +1904,9 @@ mod tests {
         assert!(js.contains("setPointerCapture"));
         assert!(js.contains("releasePointerCapture"));
         assert!(js.contains("bindWindowEvents"));
+        assert!(js.contains("mountTitlebarWidgets"));
+        assert!(js.contains("wm-titlebar-widgets"));
+        assert!(js.contains("[data-simple-titlebar-widget]"));
         assert!(js.contains("send_window_action"));
         assert!(js.contains("send_window_keypress"));
         assert!(js.contains("send_window_input"));

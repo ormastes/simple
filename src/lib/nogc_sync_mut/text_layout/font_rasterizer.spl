@@ -150,38 +150,60 @@ fn vector_font_accelerator_stats() -> VectorFontAcceleratorStats:
 fn _vector_font_env_text(key: text) -> text:
     rt_env_get(key) ?? ""
 
+fn _vector_font_parse_i64_decimal(raw: text) -> i64:
+    if raw == "":
+        return -1
+    var value: i64 = 0
+    var i = 0
+    while i < raw.len():
+        val ch = raw.char_code_at(i)
+        if ch < 48 or ch > 57:
+            return -1
+        value = value * 10 + (ch - 48).to_i64()
+        i = i + 1
+    value
+
 fn _vector_font_env_i64(key: text) -> i64:
-    (_vector_font_env_text(key)).parse_i64() ?? 0
+    val parsed = _vector_font_parse_i64_decimal(_vector_font_env_text(key))
+    if parsed < 0:
+        return 0
+    parsed
+
+fn _vector_font_parse_u8_decimal(raw: text) -> i32:
+    val parsed = _vector_font_parse_i64_decimal(raw)
+    if parsed < 0 or parsed > 255:
+        return -1
+    parsed.to_i32()
 
 fn _vector_font_pixels_checksum(pixels: [u8], width: i32, height: i32, advance: i32) -> i64:
     var sum: i64 = 0
     var i = 0
     while i < pixels.len():
-        val alpha = pixels[i].to_i64()
+        val alpha = pixels[i].to_i32().to_i64()
         if alpha > 0:
             sum = sum + alpha * ((i + 1) as i64)
         i = i + 1
     sum + (width.to_i64() * 31) + (height.to_i64() * 17) + advance.to_i64()
 
-fn _vector_font_env_pixels(key: text, expected_len: i64) -> [u8]:
+fn _vector_font_env_pixels(key: text, expected_len: i32) -> [u8]:
     val raw = _vector_font_env_text(key)
     if raw == "" or expected_len <= 0:
         return []
     val parts = raw.split(",")
-    if parts.len().to_i64() != expected_len:
+    if parts.len() != expected_len:
         return []
     var pixels: [u8] = []
     var i = 0
     while i < parts.len():
-        val parsed = parts[i].parse_i64() ?? -1
+        val parsed = _vector_font_parse_u8_decimal(parts[i])
         if parsed < 0 or parsed > 255:
             return []
-        pixels.push(parsed.to_i32().to_u8())
+        pixels.push(parsed.to_u8())
         i = i + 1
     pixels
 
-fn _try_vector_font_glyph_slot(prefix: text, slot: i64, codepoint: i32, font_size: i32) -> CachedGlyph?:
-    val slot_prefix = prefix + "_VECTOR_FONT_GLYPH_" + slot.to_text()
+fn _try_vector_font_glyph_slot(prefix: text, slot: text, codepoint: i32, font_size: i32) -> CachedGlyph?:
+    val slot_prefix = prefix + "_VECTOR_FONT_GLYPH_" + slot
     if _vector_font_env_i64(slot_prefix + "_CODEPOINT") != codepoint.to_i64():
         return nil
     if _vector_font_env_i64(slot_prefix + "_FONT_SIZE") != font_size.to_i64():
@@ -192,9 +214,9 @@ fn _try_vector_font_glyph_slot(prefix: text, slot: i64, codepoint: i32, font_siz
     val expected_checksum = _vector_font_env_i64(slot_prefix + "_CHECKSUM")
     if width <= 0 or height <= 0 or advance <= 0 or expected_checksum <= 0:
         return nil
-    val expected_len = (width * height).to_i64()
+    val expected_len = width * height
     val pixels = _vector_font_env_pixels(slot_prefix + "_PIXELS", expected_len)
-    if pixels.len().to_i64() != expected_len:
+    if pixels.len() != expected_len:
         return nil
     val checksum = _vector_font_pixels_checksum(pixels, width, height, advance)
     if checksum != expected_checksum:
@@ -213,17 +235,43 @@ fn _try_vector_font_glyph_slot(prefix: text, slot: i64, codepoint: i32, font_siz
 fn _try_vector_font_glyph_from_backend(prefix: text, codepoint: i32, font_size: i32) -> CachedGlyph?:
     val status = _vector_font_env_text(prefix + "_VECTOR_FONT_STATUS")
     val reason = _vector_font_env_text(prefix + "_VECTOR_FONT_REASON")
-    if status != "pass" or not reason.contains("matched-cpu"):
+    if status != "pass" or (not reason.contains("matched-cpu") and not reason.contains("glyph-pixels-returned")):
         return nil
     var glyph_count = _vector_font_env_i64(prefix + "_VECTOR_FONT_GLYPH_COUNT")
     if glyph_count <= 0:
         glyph_count = 1
-    var slot: i64 = 0
-    while slot < glyph_count:
-        val glyph = _try_vector_font_glyph_slot(prefix, slot, codepoint, font_size)
-        if glyph != nil:
-            return glyph
-        slot = slot + 1
+    if glyph_count > 0:
+        val glyph0 = _try_vector_font_glyph_slot(prefix, "0", codepoint, font_size)
+        if glyph0 != nil:
+            return glyph0
+    if glyph_count > 1:
+        val glyph1 = _try_vector_font_glyph_slot(prefix, "1", codepoint, font_size)
+        if glyph1 != nil:
+            return glyph1
+    if glyph_count > 2:
+        val glyph2 = _try_vector_font_glyph_slot(prefix, "2", codepoint, font_size)
+        if glyph2 != nil:
+            return glyph2
+    if glyph_count > 3:
+        val glyph3 = _try_vector_font_glyph_slot(prefix, "3", codepoint, font_size)
+        if glyph3 != nil:
+            return glyph3
+    if glyph_count > 4:
+        val glyph4 = _try_vector_font_glyph_slot(prefix, "4", codepoint, font_size)
+        if glyph4 != nil:
+            return glyph4
+    if glyph_count > 5:
+        val glyph5 = _try_vector_font_glyph_slot(prefix, "5", codepoint, font_size)
+        if glyph5 != nil:
+            return glyph5
+    if glyph_count > 6:
+        val glyph6 = _try_vector_font_glyph_slot(prefix, "6", codepoint, font_size)
+        if glyph6 != nil:
+            return glyph6
+    if glyph_count > 7:
+        val glyph7 = _try_vector_font_glyph_slot(prefix, "7", codepoint, font_size)
+        if glyph7 != nil:
+            return glyph7
     nil
 
 fn _try_cuda_vector_font_glyph(codepoint: i32, font_size: i32) -> CachedGlyph?:
@@ -257,7 +305,10 @@ fn rasterize_vector_accelerated(cmds: [i32], codepoint: i32, font_size: i32) -> 
     val cuda_status = _vector_font_env_text("CUDA_VECTOR_FONT_STATUS")
     val cuda_checksum = _vector_font_env_i64("CUDA_VECTOR_FONT_CHECKSUM")
     val cuda_reason = _vector_font_env_text("CUDA_VECTOR_FONT_REASON")
-    if cuda_status == "pass" and cuda_checksum > 0 and cuda_reason.contains("matched-cpu"):
+    val opencl_status = _vector_font_env_text("OPENCL_VECTOR_FONT_STATUS")
+    val opencl_checksum = _vector_font_env_i64("OPENCL_VECTOR_FONT_CHECKSUM")
+    val opencl_reason = _vector_font_env_text("OPENCL_VECTOR_FONT_REASON")
+    if cuda_status == "pass" and cuda_checksum > 0 and (cuda_reason.contains("matched-cpu") or cuda_reason.contains("glyph-pixels-returned")):
         _vector_font_cuda_hits = _vector_font_cuda_hits + 1
         if _vector_font_gpu_returned_glyphs > 0 and _vector_font_opencl_hits > 0:
             _vector_font_accelerator_unavailable_reason = "cuda-opencl-vector-font-glyph-pixels-returned"
@@ -265,6 +316,14 @@ fn rasterize_vector_accelerated(cmds: [i32], codepoint: i32, font_size: i32) -> 
             _vector_font_accelerator_unavailable_reason = "cuda-vector-font-glyph-pixels-returned"
         else:
             _vector_font_accelerator_unavailable_reason = "cuda-vector-font-proof-matched-cpu-with-cpu-glyph-return"
+    else if opencl_status == "pass" and opencl_checksum > 0 and (opencl_reason.contains("matched-cpu") or opencl_reason.contains("glyph-pixels-returned")):
+        _vector_font_opencl_hits = _vector_font_opencl_hits + 1
+        if _vector_font_gpu_returned_glyphs > 0 and _vector_font_cuda_hits > 0:
+            _vector_font_accelerator_unavailable_reason = "cuda-opencl-vector-font-glyph-pixels-returned"
+        else if _vector_font_gpu_returned_glyphs > 0:
+            _vector_font_accelerator_unavailable_reason = "opencl-vector-font-glyph-pixels-returned"
+        else:
+            _vector_font_accelerator_unavailable_reason = "opencl-vector-font-proof-matched-cpu-with-cpu-glyph-return"
     else:
         _vector_font_accelerator_unavailable_reason = "production-gpu-dispatch-not-wired"
     _vector_font_cpu_fallback_hits = _vector_font_cpu_fallback_hits + 1

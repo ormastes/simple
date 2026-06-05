@@ -6,8 +6,8 @@
 
 use app.ui.ipc.protocol.{parse_ipc_message, build_ipc_render, build_ipc_open_window}
 use common.ui.widget.{UIEvent}
-use common.ui.html_window.{html_embedded_image_data_uri, html_picture, html_pre_block, html_window_info}
-use common.ui.window.{WindowInfo, new_window_manager_for_backend, normalize_window_backend}
+use common.ui.html_window.{html_embedded_image_data_uri, html_picture, html_pre_block, html_titlebar_button, html_window_content, html_window_content_with_titlebar_widgets}
+use common.ui.window.{normalize_window_backend}
 
 extern fn rt_stdin_read_line() -> text?
 extern fn rt_thread_sleep(ms: i64)
@@ -18,6 +18,12 @@ fn _emit_ipc(message: text):
     print message
     rt_stdout_flush()
 
+fn _qmake_mdi_css() -> text:
+    "body.qmake-theme-applied{--mdi-accent:rgb(52,211,153);--mdi-panel:rgb(17,24,39);--mdi-text:rgb(229,231,235);}" +
+    "body.qmake-theme-applied .widget-menubar{box-shadow:0 10px 30px rgba(0,0,0,.24);}" +
+    "body.qmake-theme-applied [data-simple-taskbar=mdi] .tab-bar-item{transition:background .12s ease,border-color .12s ease;}" +
+    "body.qmake-theme-applied [data-simple-taskbar=mdi] .tab-bar-item:hover{border-color:var(--mdi-accent);background:rgb(22,52,46);}"
+
 fn _build_desktop_html(css: text, backend: text) -> text:
     val bar_style = "position:absolute;top:0;left:0;right:0;height:30px;display:flex;align-items:center;gap:14px;padding:0 10px;box-sizing:border-box;background:rgba(14,21,29,.94);border-bottom:1px solid rgba(255,255,255,.12);color:#dbeafe;z-index:5;pointer-events:auto;font:13px system-ui,sans-serif;"
     val dock_style = "position:absolute;bottom:64px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:10px;padding:10px 12px;min-height:56px;background:rgba(9,14,20,.94);border:1px solid rgba(148,163,184,.34);border-radius:8px;box-shadow:0 16px 42px rgba(0,0,0,.45);box-sizing:border-box;z-index:5;pointer-events:auto;font:13px system-ui,sans-serif;"
@@ -27,10 +33,10 @@ fn _build_desktop_html(css: text, backend: text) -> text:
     val label_style = "font-weight:650;color:#e5e7eb;"
     val bar_html = "<div class=\"widget-menubar\" id=\"sysbar\" style=\"" + bar_style + "\"><span class=\"menu-item\">File</span><span class=\"menu-item\">Edit</span><span class=\"menu-item\">View</span><span class=\"menu-item\">Go</span><span class=\"menu-item\">Window</span><span class=\"menu-item\">Help</span><span class=\"menu-item\" id=\"wm-backend\" data-backend=\"" + backend + "\" style=\"margin-left:auto;\">Backend: " + backend + "</span></div>"
     val dock_html = "<div class=\"widget-tab-bar\" id=\"dock\" data-simple-taskbar=\"mdi\" style=\"" + dock_style + "\"><div class=\"tab-bar-item tab-bar-item-active\" data-action=\"app_terminal\" style=\"" + active_item_style + "\"><span class=\"tab-bar-icon\" data-simple-taskbar-icon=\"terminal\" style=\"" + icon_base + "background:#2563eb;\">&gt;</span><span class=\"tab-bar-label\" style=\"" + label_style + "\">Terminal</span></div><div class=\"tab-bar-item\" data-action=\"app_editor\" style=\"" + item_style + "\"><span class=\"tab-bar-icon\" data-simple-taskbar-icon=\"editor\" style=\"" + icon_base + "background:#16a34a;\">E</span><span class=\"tab-bar-label\" style=\"" + label_style + "\">Editor</span></div><div class=\"tab-bar-item\" data-action=\"app_browser\" style=\"" + item_style + "\"><span class=\"tab-bar-icon\" data-simple-taskbar-icon=\"browser\" style=\"" + icon_base + "background:#7c3aed;\">W</span><span class=\"tab-bar-label\" style=\"" + label_style + "\">Browser</span></div><div class=\"tab-bar-item\" data-action=\"app_files\" style=\"" + item_style + "\"><span class=\"tab-bar-icon\" data-simple-taskbar-icon=\"files\" style=\"" + icon_base + "background:#f59e0b;\">D</span><span class=\"tab-bar-label\" style=\"" + label_style + "\">Files</span></div><div class=\"tab-bar-item\" data-action=\"app_calc\" style=\"" + item_style + "\"><span class=\"tab-bar-icon\" data-simple-taskbar-icon=\"calc\" style=\"" + icon_base + "background:#dc2626;\">#</span><span class=\"tab-bar-label\" style=\"" + label_style + "\">Calc</span></div><div class=\"tab-bar-item\" data-action=\"app_settings\" style=\"" + item_style + "\"><span class=\"tab-bar-icon\" data-simple-taskbar-icon=\"settings\" style=\"" + icon_base + "background:#0891b2;\">*</span><span class=\"tab-bar-label\" style=\"" + label_style + "\">Settings</span></div></div>"
-    return "<html><head><style>" + css + "</style></head><body style=\"margin:0;width:100%;height:100%;background:#090d10;color:#e5e7eb;overflow:hidden;\">" + bar_html + dock_html + "</body></html>"
+    return "<html><head><style>" + css + "</style></head><body class=\"qmake-theme-applied\" style=\"margin:0;width:100%;height:100%;background:#090d10;color:#e5e7eb;overflow:hidden;\">" + bar_html + dock_html + "</body></html>"
 
-fn _open_mdi_window(info: WindowInfo):
-    _emit_ipc(build_ipc_open_window(info.id, info.title, info.html, info.x, info.y, info.width, info.height))
+fn _open_mdi_window(window_id: text, title_text: text, html_text: text, x: i32, y: i32, width: i32, height: i32):
+    _emit_ipc(build_ipc_open_window(window_id, title_text, html_text, x, y, width, height))
 
 fn _proof_sleep(ms: i64):
     if rt_env_get("SIMPLE_MDI_FAST_PROOF") == "1":
@@ -38,39 +44,35 @@ fn _proof_sleep(ms: i64):
     rt_thread_sleep(ms)
 
 fn run_shared_mdi_demo() -> i64:
-    val css = ""
+    val css = _qmake_mdi_css()
     val backend = normalize_window_backend(rt_env_get("SIMPLE_UI_BACKEND") ?? "simple")
     _emit_ipc(build_ipc_render(_build_desktop_html(css, backend)))
 
     _proof_sleep(300)
 
-    var wm = new_window_manager_for_backend(backend)
     val term_body = html_pre_block("$ simple --version\nSimple Language v0.9.5\n\n$ _") + "<button data-action=\"mdi_terminal_action\">Run</button><input data-target-id=\"mdi_terminal_input\" value=\"ready\">"
-    val term = html_window_info("terminal", "Terminal", term_body, "", 50, 60, 600, 400)
-    wm.open_info(term)
-    _open_mdi_window(term)
+    val titlebar_css = ".simple-titlebar-widget{background:rgb(18,58,52);border-color:rgb(52,211,153);color:rgb(236,254,255);}"
+    val term_html = html_window_content_with_titlebar_widgets("Terminal", term_body, html_titlebar_button("mdi_terminal_action", "Run"), titlebar_css)
+    _open_mdi_window("terminal", "Terminal", term_html, 50, 60, 600, 400)
 
     _proof_sleep(100)
 
-    val editor = html_window_info("editor", "Editor", html_pre_block("# hello.spl\n\nfn main() -> i64:\n    print \"Hello, World!\"\n    return 0"), "", 40, 500, 700, 400)
-    wm.open_info(editor)
-    _open_mdi_window(editor)
+    val editor_html = html_window_content("Editor", html_pre_block("# hello.spl\n\nfn main() -> i64:\n    print \"Hello, World!\"\n    return 0"), "")
+    _open_mdi_window("editor", "Editor", editor_html, 40, 500, 700, 400)
 
     _proof_sleep(100)
 
     val browser_url = rt_env_get("SIMPLE_BROWSER_URL") ?? "http://localhost:3333"
     val browser_body = "<iframe src=\"" + browser_url + "\" style=\"flex:1;width:100%;height:100%;border:none;background:transparent;\" sandbox=\"allow-scripts allow-same-origin allow-forms allow-popups\"></iframe>"
-    val browser = html_window_info("browser", "Browser", browser_body, "", 670, 60, 650, 450)
-    wm.open_info(browser)
-    _open_mdi_window(browser)
+    val browser_html = html_window_content("Browser", browser_body, "")
+    _open_mdi_window("browser", "Browser", browser_html, 670, 60, 650, 450)
 
     _proof_sleep(100)
 
     val folder_icon = html_embedded_image_data_uri("image/svg+xml", "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNjAiIGhlaWdodD0iOTAiIHZpZXdCb3g9IjAgMCAxNjAgOTAiPjxyZWN0IHg9IjgiIHk9IjI0IiB3aWR0aD0iMTQ0IiBoZWlnaHQ9IjU4IiByeD0iOCIiIGZpbGw9IiMzOGJkZjgiLz48cGF0aCBkPSJNOCAzMmgxNDR2NDJhOCA4IDAgMCAxLTggOEgxNmE4IDggMCAwIDEtOC04VjMyWiIgZmlsbD0iIzIyYzU1ZSIvPjxwYXRoIGQ9Ik04IDI0aDU0bDEwIDEyaDgwdjE0SDhWMjRaIiBmaWxsPSIjZmJiZjI0Ii8+PC9zdmc+")
     val files_body = html_picture(folder_icon, "Embedded folder picture") + html_pre_block("src/\n  compiler/\n  lib/\n  app/\nexamples/\n  ui/\n  simple_os/")
-    val files = html_window_info("files", "File Manager", files_body, "", 700, 520, 550, 350)
-    wm.open_info(files)
-    _open_mdi_window(files)
+    val files_html = html_window_content("File Manager", files_body, "")
+    _open_mdi_window("files", "File Manager", files_html, 700, 520, 550, 350)
 
     if rt_env_get("SIMPLE_MDI_STAY_OPEN") != "1":
         return 0

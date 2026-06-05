@@ -194,7 +194,7 @@ function electronWmInitScript() {
             if (!document.getElementById('simple-electron-wm-style')) {
                 var style = document.createElement('style');
                 style.id = 'simple-electron-wm-style';
-                style.textContent = '#wm-desktop{position:fixed;inset:0;overflow:hidden;isolation:isolate}#wm-desktop .wm-titlebar{display:flex;align-items:center;gap:8px;height:46px;padding:0 18px;background:linear-gradient(180deg,rgba(255,255,255,.12),rgba(255,255,255,.04));border-bottom:1px solid rgba(255,255,255,.12);user-select:none;cursor:grab}#wm-desktop .wm-titlebar:active{cursor:grabbing}#wm-desktop .wm-title{font:600 13px/1 var(--ui-font-label,system-ui,sans-serif);color:var(--ui-text,#e5e7eb);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}';
+                style.textContent = '#wm-desktop{position:fixed;inset:0;overflow:hidden;isolation:isolate}#wm-desktop .wm-titlebar{display:flex;align-items:center;gap:8px;height:46px;padding:0 18px;background:linear-gradient(180deg,rgba(255,255,255,.12),rgba(255,255,255,.04));border-bottom:1px solid rgba(255,255,255,.12);user-select:none;cursor:grab}#wm-desktop .wm-titlebar:active{cursor:grabbing}#wm-desktop .wm-title{font:600 13px/1 var(--ui-font-label,system-ui,sans-serif);color:var(--ui-text,#e5e7eb);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#wm-desktop .wm-titlebar-widgets{display:flex;align-items:center;gap:6px;margin-left:auto}#wm-desktop .wm-titlebar-widgets [data-simple-titlebar-widget]{min-height:24px}';
                 document.head.appendChild(style);
             }
             var desktop = document.getElementById('wm-desktop');
@@ -208,6 +208,7 @@ function electronWmInitScript() {
                     windows: {},
                     z: 20,
                     drag: null,
+                    dragEventsBound: false,
                     lastEvent: null,
                     elementId: function(el) {
                         if (!el) return '';
@@ -253,41 +254,97 @@ function electronWmInitScript() {
                             button: ev.button === 2 ? 'right' : (ev.button === 1 ? 'middle' : 'left')
                         });
                     },
+                    mountTitlebarWidgets: function(existing) {
+                        if (!existing || !existing.titlebar || !existing.body) return;
+                        var old = existing.titlebar.querySelector('.wm-titlebar-widgets');
+                        if (old) old.remove();
+                        var source = Array.from(existing.body.querySelectorAll('[data-simple-titlebar-widget]'));
+                        if (!source.length) return;
+                        var slot = document.createElement('div');
+                        slot.className = 'wm-titlebar-widgets';
+                        source.forEach(function(widget) {
+                            var clone = widget.cloneNode(true);
+                            clone.removeAttribute('id');
+                            slot.appendChild(clone);
+                        });
+                        existing.titlebar.appendChild(slot);
+                    },
+                    bindGlobalDragEvents: function() {
+                        var self = this;
+                        if (self.dragEventsBound) return;
+                        self.dragEventsBound = true;
+                        document.addEventListener('pointermove', function(ev) {
+                            self.moveDrag(ev, ev.pointerId, false);
+                        });
+                        document.addEventListener('pointerup', function(ev) {
+                            self.finishDrag(ev, ev.pointerId, false);
+                        });
+                        document.addEventListener('pointercancel', function(ev) {
+                            self.cancelDrag(ev.pointerId, false);
+                        });
+                        document.addEventListener('mousemove', function(ev) {
+                            self.moveDrag(ev, 'mouse', true);
+                        });
+                        document.addEventListener('mouseup', function(ev) {
+                            self.finishDrag(ev, 'mouse', true);
+                        });
+                    },
+                    isDragControl: function(ev) {
+                        if (ev.target && ev.target.closest && ev.target.closest('button')) return true;
+                        return false;
+                    },
+                    beginDrag: function(id, win, ev, pointerId, isMouse) {
+                        if (this.isDragControl(ev)) return false;
+                        this.focus(id);
+                        var rect = win.getBoundingClientRect();
+                        this.drag = {
+                            id: id,
+                            win: win,
+                            pointerId: pointerId,
+                            mouse: !!isMouse,
+                            startX: ev.clientX,
+                            startY: ev.clientY,
+                            left: rect.left,
+                            top: rect.top
+                        };
+                        ev.preventDefault();
+                        return true;
+                    },
+                    moveDrag: function(ev, pointerId, isMouse) {
+                        var drag = this.drag;
+                        if (!drag || drag.pointerId !== pointerId || drag.mouse !== !!isMouse) return;
+                        var nextLeft = Math.max(0, drag.left + ev.clientX - drag.startX);
+                        var nextTop = Math.max(0, drag.top + ev.clientY - drag.startY);
+                        drag.win.style.left = nextLeft + 'px';
+                        drag.win.style.top = nextTop + 'px';
+                        ev.preventDefault();
+                    },
+                    finishDrag: function(ev, pointerId, isMouse) {
+                        var drag = this.drag;
+                        if (!drag || drag.pointerId !== pointerId || drag.mouse !== !!isMouse) return;
+                        this.drag = null;
+                        this.notifyMove(drag.id, drag.win);
+                    },
+                    cancelDrag: function(pointerId, isMouse) {
+                        if (this.drag && this.drag.pointerId === pointerId && this.drag.mouse === !!isMouse) this.drag = null;
+                    },
                     bindDrag: function(id, win, titlebar) {
                         var self = this;
+                        self.bindGlobalDragEvents();
                         titlebar.addEventListener('pointerdown', function(ev) {
-                            if (ev.target && ev.target.closest && ev.target.closest('button')) return;
-                            self.focus(id);
-                            var rect = win.getBoundingClientRect();
-                            self.drag = {
-                                id: id,
-                                win: win,
-                                pointerId: ev.pointerId,
-                                startX: ev.clientX,
-                                startY: ev.clientY,
-                                left: rect.left,
-                                top: rect.top
-                            };
-                            titlebar.setPointerCapture(ev.pointerId);
-                            ev.preventDefault();
-                        });
-                        titlebar.addEventListener('pointermove', function(ev) {
-                            var drag = self.drag;
-                            if (!drag || drag.id !== id || drag.pointerId !== ev.pointerId) return;
-                            var nextLeft = Math.max(0, drag.left + ev.clientX - drag.startX);
-                            var nextTop = Math.max(0, drag.top + ev.clientY - drag.startY);
-                            win.style.left = nextLeft + 'px';
-                            win.style.top = nextTop + 'px';
+                            if (!self.beginDrag(id, win, ev, ev.pointerId, false)) return;
+                            try { titlebar.setPointerCapture(ev.pointerId); } catch (_) {}
                         });
                         titlebar.addEventListener('pointerup', function(ev) {
-                            if (self.drag && self.drag.pointerId === ev.pointerId) {
-                                self.drag = null;
-                                try { titlebar.releasePointerCapture(ev.pointerId); } catch (_) {}
-                                self.notifyMove(id, win);
-                            }
+                            try { titlebar.releasePointerCapture(ev.pointerId); } catch (_) {}
+                            self.finishDrag(ev, ev.pointerId, false);
                         });
                         titlebar.addEventListener('pointercancel', function(ev) {
-                            if (self.drag && self.drag.pointerId === ev.pointerId) self.drag = null;
+                            self.cancelDrag(ev.pointerId, false);
+                        });
+                        titlebar.addEventListener('mousedown', function(ev) {
+                            if (ev.button !== 0) return;
+                            self.beginDrag(id, win, ev, 'mouse', true);
                         });
                     },
                     focus: function(id) {
@@ -353,13 +410,13 @@ function electronWmInitScript() {
                             self.sendWindowAction(id, action);
                             ev.preventDefault();
                         });
-                        body.addEventListener('keydown', function(ev) {
+                        win.addEventListener('keydown', function(ev) {
                             var key = ev.key || '';
                             if (key.length === 1 || ['Enter','Escape','Backspace','Tab','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].indexOf(key) >= 0) {
                                 self.sendWindowKey(id, key);
                             }
                         });
-                        body.addEventListener('input', function(ev) {
+                        win.addEventListener('input', function(ev) {
                             var target = ev.target;
                             var editable = target && ((target.matches && target.matches('input,textarea,select')) || target.isContentEditable);
                             if (!editable) return;
@@ -400,16 +457,18 @@ function electronWmInitScript() {
                                 win.appendChild(titlebar);
                                 win.appendChild(body);
                                 desktop.appendChild(win);
-                                existing = this.windows[id] = { win: win, body: body, title: title };
+                                existing = this.windows[id] = { win: win, body: body, title: title, titlebar: titlebar };
                                 this.bindDrag(id, win, titlebar);
                                 this.bindWindowEvents(id, win, body);
                             } else {
                                 existing.body.innerHTML = msg.html || '';
                                 existing.title.textContent = msg.title || id;
                             }
+                            this.mountTitlebarWidgets(existing);
                             this.focus(id);
                         } else if (msg.type === 'renderWindow' && this.windows[msg.windowId]) {
                             this.windows[msg.windowId].body.innerHTML = msg.html || '';
+                            this.mountTitlebarWidgets(this.windows[msg.windowId]);
                         } else if (msg.type === 'closeWindow' && this.windows[msg.windowId]) {
                             this.windows[msg.windowId].win.remove();
                             delete this.windows[msg.windowId];
@@ -467,12 +526,19 @@ function maybeWriteMdiProof(win) {
                     var titlebar = terminal.querySelector('.wm-titlebar');
                     dragBefore = { left: parseInt(terminal.style.left || '0', 10) || 0, top: parseInt(terminal.style.top || '0', 10) || 0 };
                 if (titlebar && typeof PointerEvent === 'function') {
-                    titlebar.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 37, clientX: dragBefore.left + 12, clientY: dragBefore.top + 12, bubbles: true }));
-                    titlebar.dispatchEvent(new PointerEvent('pointermove', { pointerId: 37, clientX: dragBefore.left + 72, clientY: dragBefore.top + 42, bubbles: true }));
-                    titlebar.dispatchEvent(new PointerEvent('pointerup', { pointerId: 37, clientX: dragBefore.left + 72, clientY: dragBefore.top + 42, bubbles: true }));
+                    titlebar.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 37, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1, clientX: dragBefore.left + 12, clientY: dragBefore.top + 12, bubbles: true }));
+                    document.dispatchEvent(new PointerEvent('pointermove', { pointerId: 37, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1, clientX: dragBefore.left + 72, clientY: dragBefore.top + 42, bubbles: true }));
+                    document.dispatchEvent(new PointerEvent('pointerup', { pointerId: 37, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 0, clientX: dragBefore.left + 72, clientY: dragBefore.top + 42, bubbles: true }));
                     }
                     dragAfter = { left: parseInt(terminal.style.left || '0', 10) || 0, top: parseInt(terminal.style.top || '0', 10) || 0 };
                     dragMoved = dragAfter.left > dragBefore.left && dragAfter.top > dragBefore.top;
+                    if (titlebar && !dragMoved) {
+                        titlebar.dispatchEvent(new MouseEvent('mousedown', { button: 0, buttons: 1, clientX: dragBefore.left + 12, clientY: dragBefore.top + 12, bubbles: true }));
+                        document.dispatchEvent(new MouseEvent('mousemove', { button: 0, buttons: 1, clientX: dragBefore.left + 72, clientY: dragBefore.top + 42, bubbles: true }));
+                        document.dispatchEvent(new MouseEvent('mouseup', { button: 0, buttons: 0, clientX: dragBefore.left + 72, clientY: dragBefore.top + 42, bubbles: true }));
+                        dragAfter = { left: parseInt(terminal.style.left || '0', 10) || 0, top: parseInt(terminal.style.top || '0', 10) || 0 };
+                        dragMoved = dragAfter.left > dragBefore.left && dragAfter.top > dragBefore.top;
+                    }
                     if (body) {
                         var appButton = body.querySelector('[data-action]');
                         appActionControlFound = !!appButton;

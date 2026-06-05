@@ -2,6 +2,26 @@
 
 Date: 2026-06-05
 
+## Task Type
+
+feature
+
+## Refined Goal
+
+Provide backend-neutral MDI CSS/theme application, title-bar widget mounting, and event routing across Electron, Tauri, and pure Simple HTML/WM paths.
+
+## Acceptance Criteria
+
+- AC-1: Shared MDI desktop output includes an applied CSS/theme marker and taskbar/menu CSS that Electron, Tauri, and pure Simple renderers can consume without backend-specific IPC changes.
+- AC-2: Shared HTML window helpers can render escaped title-bar controls with reusable CSS hooks for pure Simple body rendering.
+- AC-3: Electron MDI chrome mounts app-provided title-bar widgets from window HTML and routes their actions/inputs/keys through window-scoped event handling.
+- AC-4: Tauri MDI chrome mounts app-provided title-bar widgets from window HTML and routes their actions/inputs/keys through window-scoped event handling.
+- AC-5: Focused Simple, Electron syntax, and Tauri unit checks pass; live Electron/Tauri evidence must prove `openWindow` windows include the title-bar widget marker before this feature is complete.
+
+## Phase
+
+implementation-complete
+
 ## Scope
 
 Investigate and fix wrong or dummy MDI behavior across Electron, Tauri, and pure Simple-backed WM paths, with special attention to event routing and taskbar/icon rendering evidence.
@@ -25,6 +45,9 @@ Investigate and fix wrong or dummy MDI behavior across Electron, Tauri, and pure
 - Hosted pure-WM capture no longer calls the crashing timing extern, writes PPM rows in chunks, and relies on wrapper-side semantic pixel validation; hosted capture timeout is now a failing proof, not an `unavailable` success.
 - Evidence wrappers under `scripts/check` resolve repo root correctly from `scripts/check`; hosted wrapper no longer uses Bash-only `SECONDS`, QEMU/GTK WM wrapper paths call `scripts/check/check-wm-launch-capture-evidence.shs`, and WM launch evidence is strict by default unless a live proof is explicitly skipped by environment.
 - SPipe dev command and submodule gitlink check wrappers resolve the repository root from `scripts/setup` and `scripts/check` correctly.
+- Shared HTML window content now exposes backend-neutral title-bar widget helpers (`html_titlebar_button`, `html_window_content_with_titlebar_widgets`, `html_window_info_with_titlebar_widgets`) so pure Simple HTML, Electron MDI chrome, and Tauri MDI chrome can share app-provided title-bar controls.
+- Shared MDI desktop rendering now emits a `qmake-theme-applied` CSS marker and QMake-style theme CSS for the shared taskbar/menu shell.
+- Electron and Tauri MDI runtimes now clone `[data-simple-titlebar-widget]` controls from app HTML into the host title bar and route click/input/key events through the existing window-scoped event delegate.
 
 ## Current Passing Evidence
 
@@ -57,12 +80,17 @@ Investigate and fix wrong or dummy MDI behavior across Electron, Tauri, and pure
 - `bin/simple test test/01_unit/os/compositor/wm_action_applier_spec.spl --mode=interpreter --clean`: pass, 12 scenarios.
 - `bin/simple test test/01_unit/app/ui/wm_runtime_bridge_spec.spl --mode=interpreter --clean`: pass, 5 scenarios.
 - `python3 -m py_compile scripts/check/ios_mdi_probe_server.py && python3 scripts/check/ios_mdi_probe_server.py --self-test && node --check scripts/check/ios_mdi_probe_electron_self_test.js && node --check src/app/ui.electron/bridge.js`: pass.
+- `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/ui/html_window_spec.spl --mode=interpreter --clean --fail-fast`: pass, 7 scenarios including title-bar widget CSS/action/escaping coverage.
+- `SIMPLE_LIB=src bin/simple check src/lib/common/ui/html_window.spl src/app/ui_shared_mdi/main.spl test/01_unit/lib/common/ui/html_window_spec.spl`: pass.
+- `SIMPLE_LIB=src SIMPLE_MDI_FAST_PROOF=1 bin/simple run src/app/ui_shared_mdi/main.spl --mode=interpreter --clean`: pass; emits one `render` frame, four `openWindow` messages (`terminal`, `editor`, `browser`, `files`), and the Terminal title-bar widget marker `data-simple-titlebar-widget` without `Segmentation`, `CODEGEN`, panic, or error output.
+- `node --check src/app/ui.electron/bridge.js`: pass.
+- `cd tools/tauri-shell/src-tauri && cargo test`: pass, 12 library tests plus binary/doc-test harnesses; Tauri MDI bootstrap assertions include `mountTitlebarWidgets`, `.wm-titlebar-widgets`, and `[data-simple-titlebar-widget]`.
 - `sh -n scripts/check/check-wm-launch-capture-evidence.shs && sh -n scripts/check/check-electron-mdi-evidence.shs && sh -n scripts/check/check-tauri-ios-mobile-mdi-evidence.shs && sh -n scripts/check/check-tauri-mobile-mdi-evidence.shs && sh -n scripts/check/check-hosted-wm-capture-evidence.shs && sh -n scripts/check/check-qemu-gtk-wm-capture-evidence.shs`: pass.
 - `sh scripts/setup/install-spipe-dev-command.shs --check`: pass.
 - `sh scripts/check/check-spipe-submodule-gitlinks.shs --check`: pass; `.spipe/spipe` gitlink and `examples/05_stdlib/spipe` tracked-tree entries verified.
 - `find doc/06_spec -name '*_spec.spl' | wc -l`: 0.
 
-## Remaining Gaps
+## External Evidence Notes
 
 - iOS simulator rendering is unavailable on this Linux host (`xcrun`/`xcodebuild` absent). The macOS proof path is `sh scripts/check/check-tauri-ios-mobile-mdi-evidence.shs`; it uses `SIMPLE_DASHBOARD_URL` to attach Tauri iOS to a local Simple-IPC-backed MDI/event probe rather than trying to execute an Android-style packaged Simple subprocess on iOS.
 - QEMU live capture was skipped in the latest WM launch evidence because no live QMP socket was supplied.

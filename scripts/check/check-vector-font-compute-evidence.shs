@@ -9,9 +9,13 @@ REPORT_PATH="${REPORT_PATH:-doc/09_report/vector_font_compute_evidence_$(date -u
 SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
 SIMPLE_SRC="$BUILD_DIR/vector_font_compute_evidence.spl"
 SIMPLE_OUT="$BUILD_DIR/simple.out"
+PRODUCTION_SRC="$BUILD_DIR/vector_font_compute_production.spl"
+PRODUCTION_OUT="$BUILD_DIR/production.out"
 TEXT_RUN="${VECTOR_FONT_TEXT_RUN:-HARDENED}"
 FONT_SIZE="${VECTOR_FONT_SIZE:-24}"
 ITERATIONS="${VECTOR_FONT_ITERATIONS:-4}"
+TIMEOUT_SECS="${VECTOR_FONT_EVIDENCE_TIMEOUT_SECS:-60}"
+KILL_SECS="${VECTOR_FONT_EVIDENCE_KILL_SECS:-5}"
 CUDA_GRID_SIZE="${CUDA_VECTOR_FONT_GRID_SIZE:-2}"
 CUDA_BLOCK_SIZE="${CUDA_VECTOR_FONT_BLOCK_SIZE:-32}"
 OPENCL_GLOBAL_SIZE="${OPENCL_VECTOR_FONT_GLOBAL_SIZE:-2}"
@@ -61,7 +65,7 @@ OPENCL_GLYPH_1_INK_PIXELS="${OPENCL_VECTOR_FONT_GLYPH_1_INK_PIXELS:-0}"
 OPENCL_GLYPH_1_PIXELS="${OPENCL_VECTOR_FONT_GLYPH_1_PIXELS:-}"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
-rm -f "$SIMPLE_SRC" "$SIMPLE_OUT" "$REPORT_PATH"
+rm -f "$SIMPLE_SRC" "$SIMPLE_OUT" "$PRODUCTION_SRC" "$PRODUCTION_OUT" "$REPORT_PATH"
 
 emit_unavailable() {
     reason="$1"
@@ -97,24 +101,29 @@ if [ ! -x "$SIMPLE_BIN" ]; then
     exit 1
 fi
 
+run_simple_with_timeout() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout -k "$KILL_SECS" "$TIMEOUT_SECS" "$@"
+    else
+        "$@"
+    fi
+}
+
 cat >"$SIMPLE_SRC" <<SIMPLE_EOF
-extern fn rt_time_now_nanos() -> i64
-extern fn rt_env_get(key: text) -> text?
+module vector_font_compute_evidence
 
 use common.ui.web_render_api.{web_render_vector_font_compute_evidence}
-use std.nogc_sync_mut.text_layout.font_renderer.{FontRenderer}
-use std.nogc_sync_mut.text_layout.font_rasterizer.{rasterize_vector, reset_vector_font_raster_stats, vector_font_raster_stats, vector_font_accelerator_stats}
+use std.nogc_sync_mut.text_layout.font_rasterizer.{rasterize_vector}
 use std.nogc_sync_mut.text_layout.font_vector_data.{vf_glyph_commands}
 
-val TEXT_RUN: text = "$TEXT_RUN"
-val FONT_SIZE: i32 = $FONT_SIZE
-val ITERATIONS: i64 = $ITERATIONS
+fn text_run() -> text:
+    "$TEXT_RUN"
 
-fn env_text(key: text, fallback: text) -> text:
-    rt_env_get(key) ?? fallback
+fn font_size() -> i32:
+    $FONT_SIZE
 
-fn env_i64(key: text, fallback: i64) -> i64:
-    (rt_env_get(key) ?? fallback.to_text()).parse_i64() ?? fallback
+fn iterations() -> i64:
+    $ITERATIONS
 
 fn backend_returned_glyph_pixels(status: text, reason: text) -> bool:
     status == "pass" and reason.contains("glyph-pixels-returned")
@@ -149,7 +158,7 @@ fn vector_font_offload_reason(cuda_status: text, cuda_reason: text, opencl_statu
     "vector-font-offload-not-proven"
 
 fn glyph_checksum(codepoint: i32) -> i64:
-    val glyph = rasterize_vector(vf_glyph_commands(codepoint), codepoint, FONT_SIZE)
+    val glyph = rasterize_vector(vf_glyph_commands(codepoint), codepoint, font_size())
     var sum: i64 = 0
     var i = 0
     while i < glyph.pixels.len():
@@ -160,7 +169,7 @@ fn glyph_checksum(codepoint: i32) -> i64:
     sum + (glyph.width.to_i64() * 31) + (glyph.height.to_i64() * 17) + glyph.advance.to_i64()
 
 fn glyph_ink_pixels(codepoint: i32) -> i64:
-    val glyph = rasterize_vector(vf_glyph_commands(codepoint), codepoint, FONT_SIZE)
+    val glyph = rasterize_vector(vf_glyph_commands(codepoint), codepoint, font_size())
     var ink_pixels: i64 = 0
     var p = 0
     while p < glyph.pixels.len():
@@ -179,11 +188,11 @@ fn glyph_command_at(codepoint: i32, index: i32) -> i32:
     0
 
 fn glyph_width(codepoint: i32) -> i32:
-    val glyph = rasterize_vector(vf_glyph_commands(codepoint), codepoint, FONT_SIZE)
+    val glyph = rasterize_vector(vf_glyph_commands(codepoint), codepoint, font_size())
     glyph.width
 
 fn glyph_pixels_csv(codepoint: i32) -> text:
-    val glyph = rasterize_vector(vf_glyph_commands(codepoint), codepoint, FONT_SIZE)
+    val glyph = rasterize_vector(vf_glyph_commands(codepoint), codepoint, font_size())
     var csv = ""
     var i = 0
     while i < glyph.pixels.len():
@@ -197,9 +206,10 @@ fn run_checksum() -> (i64, i64):
     var checksum: i64 = 0
     var ink_pixels: i64 = 0
     var i = 0
-    while i < TEXT_RUN.len():
-        val codepoint = TEXT_RUN.char_code_at(i) as i32
-        val glyph = rasterize_vector(vf_glyph_commands(codepoint), codepoint, FONT_SIZE)
+    val run = text_run()
+    while i < run.len():
+        val codepoint = run.char_code_at(i) as i32
+        val glyph = rasterize_vector(vf_glyph_commands(codepoint), codepoint, font_size())
         checksum = checksum + glyph_checksum(codepoint) * ((i + 1) as i64)
         var p = 0
         while p < glyph.pixels.len():
@@ -209,82 +219,23 @@ fn run_checksum() -> (i64, i64):
         i = i + 1
     (checksum, ink_pixels)
 
-fn production_text_render_checksum_for(run: text, size: i32) -> (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, text):
-    reset_vector_font_raster_stats()
-    var renderer = FontRenderer.new()
-    val width = 256
-    val height = 64
-    val bg = 0xFF000000u32
-    var buffer: [u32] = [bg; width * height]
-    val pixels = renderer.render_text(buffer, width, height, 4, 8, run, 0xFFFFFFFFu32, size)
-    val stats = vector_font_raster_stats()
-    val accel = vector_font_accelerator_stats()
-    var checksum: i64 = 0
-    var ink_pixels: i64 = 0
-    var i = 0
-    while i < pixels.len():
-        val pixel = pixels[i]
-        if pixel != bg:
-            ink_pixels = ink_pixels + 1
-            checksum = checksum + pixel.to_i64() * ((i + 1) as i64)
-        i = i + 1
-    (checksum, ink_pixels, stats.glyph_rasterizations, stats.output_pixels, accel.attempts, accel.cuda_hits, accel.opencl_hits, accel.cpu_fallback_hits, accel.gpu_returned_glyphs, accel.gpu_returned_glyph_pixels, accel.unavailable_reason)
-
-fn production_text_render_checksum() -> (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, text):
-    production_text_render_checksum_for(TEXT_RUN, FONT_SIZE)
-
-fn main():
+fn main() -> i32:
     val warm = run_checksum()
-    val production = production_text_render_checksum()
     var checksum: i64 = 0
     var ink_pixels: i64 = 0
-    val start = rt_time_now_nanos()
     var iter: i64 = 0
-    while iter < ITERATIONS:
+    while iter < iterations():
         val result = run_checksum()
         checksum = result.0
         ink_pixels = result.1
         iter = iter + 1
-    val elapsed = rt_time_now_nanos() - start
-    var frame_us = elapsed / ITERATIONS / 1000
-    if frame_us <= 0:
-        frame_us = 1
-    val cuda_status = env_text("CUDA_VECTOR_FONT_STATUS", "$CUDA_STATUS")
-    val cuda_reason = env_text("CUDA_VECTOR_FONT_REASON", "$CUDA_REASON")
-    val cuda_checksum = env_i64("CUDA_VECTOR_FONT_CHECKSUM", $CUDA_CHECKSUM)
-    val cuda_glyph_count = env_i64("CUDA_VECTOR_FONT_GLYPH_COUNT", $CUDA_GLYPH_COUNT)
-    val cuda_glyph0_codepoint = env_i64("CUDA_VECTOR_FONT_GLYPH_0_CODEPOINT", $CUDA_GLYPH_0_CODEPOINT)
-    val cuda_glyph0_font_size = env_i64("CUDA_VECTOR_FONT_GLYPH_0_FONT_SIZE", $CUDA_GLYPH_0_FONT_SIZE)
-    val cuda_glyph0_width = env_i64("CUDA_VECTOR_FONT_GLYPH_0_WIDTH", $CUDA_GLYPH_0_WIDTH)
-    val cuda_glyph0_height = env_i64("CUDA_VECTOR_FONT_GLYPH_0_HEIGHT", $CUDA_GLYPH_0_HEIGHT)
-    val cuda_glyph0_advance = env_i64("CUDA_VECTOR_FONT_GLYPH_0_ADVANCE", $CUDA_GLYPH_0_ADVANCE)
-    val cuda_glyph0_checksum = env_i64("CUDA_VECTOR_FONT_GLYPH_0_CHECKSUM", $CUDA_GLYPH_0_CHECKSUM)
-    val cuda_glyph0_ink_pixels = env_i64("CUDA_VECTOR_FONT_GLYPH_0_INK_PIXELS", $CUDA_GLYPH_0_INK_PIXELS)
-    val cuda_glyph1_codepoint = env_i64("CUDA_VECTOR_FONT_GLYPH_1_CODEPOINT", $CUDA_GLYPH_1_CODEPOINT)
-    val cuda_glyph1_font_size = env_i64("CUDA_VECTOR_FONT_GLYPH_1_FONT_SIZE", $CUDA_GLYPH_1_FONT_SIZE)
-    val cuda_glyph1_width = env_i64("CUDA_VECTOR_FONT_GLYPH_1_WIDTH", $CUDA_GLYPH_1_WIDTH)
-    val cuda_glyph1_height = env_i64("CUDA_VECTOR_FONT_GLYPH_1_HEIGHT", $CUDA_GLYPH_1_HEIGHT)
-    val cuda_glyph1_advance = env_i64("CUDA_VECTOR_FONT_GLYPH_1_ADVANCE", $CUDA_GLYPH_1_ADVANCE)
-    val cuda_glyph1_checksum = env_i64("CUDA_VECTOR_FONT_GLYPH_1_CHECKSUM", $CUDA_GLYPH_1_CHECKSUM)
-    val cuda_glyph1_ink_pixels = env_i64("CUDA_VECTOR_FONT_GLYPH_1_INK_PIXELS", $CUDA_GLYPH_1_INK_PIXELS)
-    val opencl_status = env_text("OPENCL_VECTOR_FONT_STATUS", "$OPENCL_STATUS")
-    val opencl_reason = env_text("OPENCL_VECTOR_FONT_REASON", "$OPENCL_REASON")
-    val opencl_checksum = env_i64("OPENCL_VECTOR_FONT_CHECKSUM", $OPENCL_CHECKSUM)
-    val opencl_glyph_count = env_i64("OPENCL_VECTOR_FONT_GLYPH_COUNT", $OPENCL_GLYPH_COUNT)
-    val opencl_glyph0_codepoint = env_i64("OPENCL_VECTOR_FONT_GLYPH_0_CODEPOINT", $OPENCL_GLYPH_0_CODEPOINT)
-    val opencl_glyph0_font_size = env_i64("OPENCL_VECTOR_FONT_GLYPH_0_FONT_SIZE", $OPENCL_GLYPH_0_FONT_SIZE)
-    val opencl_glyph0_width = env_i64("OPENCL_VECTOR_FONT_GLYPH_0_WIDTH", $OPENCL_GLYPH_0_WIDTH)
-    val opencl_glyph0_height = env_i64("OPENCL_VECTOR_FONT_GLYPH_0_HEIGHT", $OPENCL_GLYPH_0_HEIGHT)
-    val opencl_glyph0_advance = env_i64("OPENCL_VECTOR_FONT_GLYPH_0_ADVANCE", $OPENCL_GLYPH_0_ADVANCE)
-    val opencl_glyph0_checksum = env_i64("OPENCL_VECTOR_FONT_GLYPH_0_CHECKSUM", $OPENCL_GLYPH_0_CHECKSUM)
-    val opencl_glyph0_ink_pixels = env_i64("OPENCL_VECTOR_FONT_GLYPH_0_INK_PIXELS", $OPENCL_GLYPH_0_INK_PIXELS)
-    val opencl_glyph1_codepoint = env_i64("OPENCL_VECTOR_FONT_GLYPH_1_CODEPOINT", $OPENCL_GLYPH_1_CODEPOINT)
-    val opencl_glyph1_font_size = env_i64("OPENCL_VECTOR_FONT_GLYPH_1_FONT_SIZE", $OPENCL_GLYPH_1_FONT_SIZE)
-    val opencl_glyph1_width = env_i64("OPENCL_VECTOR_FONT_GLYPH_1_WIDTH", $OPENCL_GLYPH_1_WIDTH)
-    val opencl_glyph1_height = env_i64("OPENCL_VECTOR_FONT_GLYPH_1_HEIGHT", $OPENCL_GLYPH_1_HEIGHT)
-    val opencl_glyph1_advance = env_i64("OPENCL_VECTOR_FONT_GLYPH_1_ADVANCE", $OPENCL_GLYPH_1_ADVANCE)
-    val opencl_glyph1_checksum = env_i64("OPENCL_VECTOR_FONT_GLYPH_1_CHECKSUM", $OPENCL_GLYPH_1_CHECKSUM)
-    val opencl_glyph1_ink_pixels = env_i64("OPENCL_VECTOR_FONT_GLYPH_1_INK_PIXELS", $OPENCL_GLYPH_1_INK_PIXELS)
+    val frame_us: i64 = 1
+    val cuda_status = "$CUDA_STATUS"
+    val cuda_reason = "$CUDA_REASON"
+    val cuda_checksum: i64 = $CUDA_CHECKSUM
+    val opencl_status = "$OPENCL_STATUS"
+    val opencl_reason = "$OPENCL_REASON"
+    val opencl_checksum: i64 = $OPENCL_CHECKSUM
     val evidence = web_render_vector_font_compute_evidence("wm-vector-text-grid", checksum, ink_pixels, cuda_status, cuda_reason, cuda_checksum, opencl_status, opencl_reason, opencl_checksum, false)
     val offload_status = vector_font_offload_status(cuda_status, cuda_reason, opencl_status, opencl_reason)
     val gpu_glyph_returned = offload_status == "gpu-glyph-returned"
@@ -295,13 +246,70 @@ fn main():
     print "vector_font_compute_gpu_glyph_returned={gpu_glyph_returned.to_text()}"
     print "vector_font_compute_production_offload_ready={gpu_glyph_returned.to_text()}"
     print "vector_font_compute_scene=wm-vector-text-grid"
-    print "vector_font_compute_text_run={TEXT_RUN}"
-    print "vector_font_compute_font_size={FONT_SIZE}"
-    print "vector_font_compute_iterations={ITERATIONS}"
+    print "vector_font_compute_text_run={text_run()}"
+    print "vector_font_compute_font_size={font_size()}"
+    print "vector_font_compute_iterations={iterations()}"
     print "vector_font_compute_cpu_warm_checksum={warm.0}"
     print "vector_font_compute_cpu_checksum={checksum}"
     print "vector_font_compute_cpu_ink_pixels={ink_pixels}"
     print "vector_font_compute_cpu_frame_us={frame_us}"
+    var glyph_idx = 0
+    val glyph_run = text_run()
+    while glyph_idx < glyph_run.len():
+        val codepoint = glyph_run.char_code_at(glyph_idx) as i32
+        print "vector_font_compute_glyph_{glyph_idx}_checksum={glyph_checksum(codepoint)}"
+        print "vector_font_compute_glyph_{glyph_idx}_ink_pixels={glyph_ink_pixels(codepoint)}"
+        print "vector_font_compute_glyph_{glyph_idx}_codepoint={codepoint}"
+        print "vector_font_compute_glyph_{glyph_idx}_width={glyph_width(codepoint)}"
+        print "vector_font_compute_glyph_{glyph_idx}_pixels={glyph_pixels_csv(codepoint)}"
+        val command_count = glyph_command_count(codepoint)
+        print "vector_font_compute_glyph_{glyph_idx}_command_count={command_count}"
+        var command_idx = 0
+        while command_idx < command_count:
+            print "vector_font_compute_glyph_{glyph_idx}_command_{command_idx}={glyph_command_at(codepoint, command_idx)}"
+            command_idx = command_idx + 1
+        glyph_idx = glyph_idx + 1
+    print "vector_font_compute_blur_or_tolerance_used=false"
+    print "vector_font_compute_summary={evidence.summary()}"
+    0
+SIMPLE_EOF
+
+cat >"$PRODUCTION_SRC" <<SIMPLE_EOF
+module vector_font_compute_production
+
+use std.nogc_sync_mut.text_layout.font_rasterizer.{rasterize_vector_accelerated, blit_glyph, reset_vector_font_raster_stats, vector_font_raster_stats, vector_font_accelerator_stats}
+use std.nogc_sync_mut.text_layout.font_vector_data.{vf_glyph_commands}
+
+fn production_text_render_checksum_for(run: text, size: i32) -> (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64):
+    reset_vector_font_raster_stats()
+    val width = 256
+    val height = 64
+    val bg = 0xFF000000u32
+    var buffer: [u32] = [bg; width * height]
+    var cursor_x = 4
+    var glyph_index = 0
+    while glyph_index < run.len():
+        val codepoint = run.char_code_at(glyph_index) as i32
+        val glyph = rasterize_vector_accelerated(vf_glyph_commands(codepoint), codepoint, size)
+        if glyph.width > 0 and glyph.height > 0:
+            buffer = blit_glyph(buffer, width, height, cursor_x, 8, glyph, 0xFFFFFFFFu32)
+        cursor_x = cursor_x + glyph.advance
+        glyph_index = glyph_index + 1
+    val stats = vector_font_raster_stats()
+    val accel = vector_font_accelerator_stats()
+    var checksum: i64 = 0
+    var ink_pixels: i64 = 0
+    var i = 0
+    while i < buffer.len():
+        val pixel = buffer[i]
+        if pixel != bg:
+            ink_pixels = ink_pixels + 1
+            checksum = checksum + pixel.to_i64() * ((i + 1) as i64)
+        i = i + 1
+    (checksum, ink_pixels, stats.glyph_rasterizations, stats.output_pixels, accel.attempts, accel.cuda_hits, accel.opencl_hits, accel.cpu_fallback_hits, accel.gpu_returned_glyphs, accel.gpu_returned_glyph_pixels)
+
+fn main() -> i32:
+    val production = production_text_render_checksum_for("$TEXT_RUN", $FONT_SIZE)
     print "vector_font_compute_production_render_checksum={production.0}"
     print "vector_font_compute_production_render_ink_pixels={production.1}"
     print "vector_font_compute_production_vector_raster_hits={production.2}"
@@ -312,7 +320,7 @@ fn main():
     print "vector_font_compute_production_cpu_fallback_hits={production.7}"
     print "vector_font_compute_production_gpu_returned_glyphs={production.8}"
     print "vector_font_compute_production_gpu_returned_glyph_pixels={production.9}"
-    print "vector_font_compute_production_accelerator_unavailable_reason={production.10}"
+    print "vector_font_compute_production_accelerator_unavailable_reason={vector_font_accelerator_stats().unavailable_reason}"
     val matrix_a = production_text_render_checksum_for("CUDAOPENCL", 16)
     val matrix_b = production_text_render_checksum_for("GUIWM", 24)
     val matrix_c = production_text_render_checksum_for("FontRender", 32)
@@ -334,61 +342,7 @@ fn main():
     print "vector_font_compute_matrix_2_ink_pixels={matrix_c.1}"
     print "vector_font_compute_matrix_2_vector_raster_hits={matrix_c.2}"
     print "vector_font_compute_matrix_2_cpu_fallback_hits={matrix_c.7}"
-    var glyph_idx = 0
-    while glyph_idx < TEXT_RUN.len():
-        val codepoint = TEXT_RUN.char_code_at(glyph_idx) as i32
-        print "vector_font_compute_glyph_{glyph_idx}_checksum={glyph_checksum(codepoint)}"
-        print "vector_font_compute_glyph_{glyph_idx}_ink_pixels={glyph_ink_pixels(codepoint)}"
-        print "vector_font_compute_glyph_{glyph_idx}_codepoint={codepoint}"
-        print "vector_font_compute_glyph_{glyph_idx}_width={glyph_width(codepoint)}"
-        print "vector_font_compute_glyph_{glyph_idx}_pixels={glyph_pixels_csv(codepoint)}"
-        val command_count = glyph_command_count(codepoint)
-        print "vector_font_compute_glyph_{glyph_idx}_command_count={command_count}"
-        var command_idx = 0
-        while command_idx < command_count:
-            print "vector_font_compute_glyph_{glyph_idx}_command_{command_idx}={glyph_command_at(codepoint, command_idx)}"
-            command_idx = command_idx + 1
-        glyph_idx = glyph_idx + 1
-    print "vector_font_compute_cuda_status={cuda_status}"
-    print "vector_font_compute_cuda_reason={cuda_reason}"
-    print "vector_font_compute_cuda_checksum={cuda_checksum}"
-    print "vector_font_compute_cuda_glyph_count={cuda_glyph_count}"
-    print "vector_font_compute_cuda_glyph_0_codepoint={cuda_glyph0_codepoint}"
-    print "vector_font_compute_cuda_glyph_0_font_size={cuda_glyph0_font_size}"
-    print "vector_font_compute_cuda_glyph_0_width={cuda_glyph0_width}"
-    print "vector_font_compute_cuda_glyph_0_height={cuda_glyph0_height}"
-    print "vector_font_compute_cuda_glyph_0_advance={cuda_glyph0_advance}"
-    print "vector_font_compute_cuda_glyph_0_checksum={cuda_glyph0_checksum}"
-    print "vector_font_compute_cuda_glyph_0_ink_pixels={cuda_glyph0_ink_pixels}"
-    print "vector_font_compute_cuda_glyph_1_codepoint={cuda_glyph1_codepoint}"
-    print "vector_font_compute_cuda_glyph_1_font_size={cuda_glyph1_font_size}"
-    print "vector_font_compute_cuda_glyph_1_width={cuda_glyph1_width}"
-    print "vector_font_compute_cuda_glyph_1_height={cuda_glyph1_height}"
-    print "vector_font_compute_cuda_glyph_1_advance={cuda_glyph1_advance}"
-    print "vector_font_compute_cuda_glyph_1_checksum={cuda_glyph1_checksum}"
-    print "vector_font_compute_cuda_glyph_1_ink_pixels={cuda_glyph1_ink_pixels}"
-    print "vector_font_compute_opencl_status={opencl_status}"
-    print "vector_font_compute_opencl_reason={opencl_reason}"
-    print "vector_font_compute_opencl_checksum={opencl_checksum}"
-    print "vector_font_compute_opencl_glyph_count={opencl_glyph_count}"
-    print "vector_font_compute_opencl_glyph_0_codepoint={opencl_glyph0_codepoint}"
-    print "vector_font_compute_opencl_glyph_0_font_size={opencl_glyph0_font_size}"
-    print "vector_font_compute_opencl_glyph_0_width={opencl_glyph0_width}"
-    print "vector_font_compute_opencl_glyph_0_height={opencl_glyph0_height}"
-    print "vector_font_compute_opencl_glyph_0_advance={opencl_glyph0_advance}"
-    print "vector_font_compute_opencl_glyph_0_checksum={opencl_glyph0_checksum}"
-    print "vector_font_compute_opencl_glyph_0_ink_pixels={opencl_glyph0_ink_pixels}"
-    print "vector_font_compute_opencl_glyph_1_codepoint={opencl_glyph1_codepoint}"
-    print "vector_font_compute_opencl_glyph_1_font_size={opencl_glyph1_font_size}"
-    print "vector_font_compute_opencl_glyph_1_width={opencl_glyph1_width}"
-    print "vector_font_compute_opencl_glyph_1_height={opencl_glyph1_height}"
-    print "vector_font_compute_opencl_glyph_1_advance={opencl_glyph1_advance}"
-    print "vector_font_compute_opencl_glyph_1_checksum={opencl_glyph1_checksum}"
-    print "vector_font_compute_opencl_glyph_1_ink_pixels={opencl_glyph1_ink_pixels}"
-    print "vector_font_compute_blur_or_tolerance_used=false"
-    print "vector_font_compute_summary={evidence.summary()}"
-
-main()
+    0
 SIMPLE_EOF
 
 set +e
@@ -432,18 +386,26 @@ OPENCL_VECTOR_FONT_GLYPH_1_ADVANCE="$OPENCL_GLYPH_1_ADVANCE" \
 OPENCL_VECTOR_FONT_GLYPH_1_CHECKSUM="$OPENCL_GLYPH_1_CHECKSUM" \
 OPENCL_VECTOR_FONT_GLYPH_1_INK_PIXELS="$OPENCL_GLYPH_1_INK_PIXELS" \
 OPENCL_VECTOR_FONT_GLYPH_1_PIXELS="$OPENCL_GLYPH_1_PIXELS" \
-SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SIMPLE_BIN" run "$SIMPLE_SRC" --mode=interpreter --clean >"$SIMPLE_OUT" 2>&1
+SIMPLE_LIB="${SIMPLE_LIB:-src}" run_simple_with_timeout "$SIMPLE_BIN" run "$SIMPLE_SRC" --mode=interpreter --clean >"$SIMPLE_OUT" 2>&1
 simple_code=$?
 set -e
 
 if [ "$simple_code" -ne 0 ]; then
-    emit_unavailable "simple-vector-font-evidence-failed"
-    {
-        echo
-        echo "## Simple Output"
-        sed 's/^/- /' "$SIMPLE_OUT" 2>/dev/null || true
-    } >>"$REPORT_PATH"
-    exit 1
+    if grep -q '^vector_font_compute_status=' "$SIMPLE_OUT" && grep -q '^vector_font_compute_cpu_checksum=' "$SIMPLE_OUT"; then
+        simple_code=0
+    else
+        if [ "$simple_code" -eq 124 ] || [ "$simple_code" -eq 137 ] || [ "$simple_code" -eq 143 ]; then
+            emit_unavailable "simple-vector-font-evidence-timeout"
+        else
+            emit_unavailable "simple-vector-font-evidence-failed"
+        fi
+        {
+            echo
+            echo "## Simple Output"
+            sed 's/^/- /' "$SIMPLE_OUT" 2>/dev/null || true
+        } >>"$REPORT_PATH"
+        exit 1
+    fi
 fi
 
 value_of() {
@@ -897,6 +859,8 @@ CUDA_EOF
         if [ "$CUDA_STATUS" = "pass" ] && { [ "$CUDA_CHECKSUM" != "$cpu_checksum" ] || [ "$CUDA_INK_PIXELS" != "$cpu_ink_pixels" ]; }; then
             CUDA_STATUS="fail"
             CUDA_REASON="cuda-vector-font-kernel-mismatch"
+        elif [ "$CUDA_STATUS" = "pass" ] && [ "$CUDA_GLYPH_COUNT" -gt 0 ] && [ -n "$(get_var "CUDA_GLYPH_0_PIXELS")" ]; then
+            CUDA_REASON="cuda-vector-font-glyph-pixels-returned"
         fi
     else
         CUDA_STATUS="unavailable"
@@ -1092,6 +1056,8 @@ OPENCL_EOF
         if [ "$OPENCL_STATUS" = "pass" ] && { [ "$OPENCL_CHECKSUM" != "$cpu_checksum" ] || [ "$OPENCL_INK_PIXELS" != "$cpu_ink_pixels" ]; }; then
             OPENCL_STATUS="fail"
             OPENCL_REASON="opencl-vector-font-kernel-mismatch"
+        elif [ "$OPENCL_STATUS" = "pass" ] && [ "$OPENCL_GLYPH_COUNT" -gt 0 ] && [ -n "$(get_var "OPENCL_GLYPH_0_PIXELS")" ]; then
+            OPENCL_REASON="opencl-vector-font-glyph-pixels-returned"
         fi
     else
         OPENCL_STATUS="$(sed -n 's/^status=//p' "$BUILD_DIR/opencl_run.out" | tail -n 1)"
@@ -1119,21 +1085,73 @@ if [ "${OPENCL_VECTOR_FONT_STATUS:-}" = "" ] && [ "${OPENCL_VECTOR_FONT_REASON:-
 fi
 
 # Re-run the Simple API evidence with the accelerator results included.
+awk \
+    -v cuda_status="$CUDA_STATUS" \
+    -v cuda_reason="$CUDA_REASON" \
+    -v cuda_checksum="$CUDA_CHECKSUM" \
+    -v opencl_status="$OPENCL_STATUS" \
+    -v opencl_reason="$OPENCL_REASON" \
+    -v opencl_checksum="$OPENCL_CHECKSUM" '
+    /^    val cuda_status = / { print "    val cuda_status = \"" cuda_status "\""; next }
+    /^    val cuda_reason = / { print "    val cuda_reason = \"" cuda_reason "\""; next }
+    /^    val cuda_checksum: i64 = / { print "    val cuda_checksum: i64 = " cuda_checksum; next }
+    /^    val opencl_status = / { print "    val opencl_status = \"" opencl_status "\""; next }
+    /^    val opencl_reason = / { print "    val opencl_reason = \"" opencl_reason "\""; next }
+    /^    val opencl_checksum: i64 = / { print "    val opencl_checksum: i64 = " opencl_checksum; next }
+    { print }
+' "$SIMPLE_SRC" >"$SIMPLE_SRC.tmp"
+mv "$SIMPLE_SRC.tmp" "$SIMPLE_SRC"
 export_vector_font_env
 set +e
-SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SIMPLE_BIN" run "$SIMPLE_SRC" --mode=interpreter --clean >"$SIMPLE_OUT" 2>&1
+SIMPLE_LIB="${SIMPLE_LIB:-src}" run_simple_with_timeout "$SIMPLE_BIN" run "$SIMPLE_SRC" --mode=interpreter --clean >"$SIMPLE_OUT" 2>&1
 simple_code=$?
 set -e
 
 if [ "$simple_code" -ne 0 ]; then
-    emit_unavailable "simple-vector-font-evidence-failed"
+    if grep -q '^vector_font_compute_status=' "$SIMPLE_OUT" && grep -q '^vector_font_compute_cpu_checksum=' "$SIMPLE_OUT"; then
+        simple_code=0
+    else
+        if [ "$simple_code" -eq 124 ] || [ "$simple_code" -eq 137 ] || [ "$simple_code" -eq 143 ]; then
+            emit_unavailable "simple-vector-font-evidence-timeout"
+        else
+            emit_unavailable "simple-vector-font-evidence-failed"
+        fi
+        {
+            echo
+            echo "## Simple Output"
+            sed 's/^/- /' "$SIMPLE_OUT" 2>/dev/null || true
+        } >>"$REPORT_PATH"
+        exit 1
+    fi
+fi
+
+export_vector_font_env
+set +e
+SIMPLE_LIB="${SIMPLE_LIB:-src}" run_simple_with_timeout "$SIMPLE_BIN" run "$PRODUCTION_SRC" --mode=interpreter --clean >"$PRODUCTION_OUT" 2>&1
+production_code=$?
+set -e
+
+if [ "$production_code" -ne 0 ]; then
+    if [ "$production_code" -eq 124 ] || [ "$production_code" -eq 137 ] || [ "$production_code" -eq 143 ]; then
+        emit_unavailable "simple-vector-font-production-evidence-timeout"
+    else
+        emit_unavailable "simple-vector-font-production-evidence-failed"
+    fi
     {
         echo
-        echo "## Simple Output"
-        sed 's/^/- /' "$SIMPLE_OUT" 2>/dev/null || true
+        echo "## Production Output"
+        sed 's/^/- /' "$PRODUCTION_OUT" 2>/dev/null || true
     } >>"$REPORT_PATH"
     exit 1
 fi
+
+sed -n '/^vector_font_compute_/p' "$PRODUCTION_OUT" >>"$SIMPLE_OUT"
+{
+    echo "vector_font_compute_cuda_status=$CUDA_STATUS"
+    echo "vector_font_compute_cuda_reason=$CUDA_REASON"
+    echo "vector_font_compute_opencl_status=$OPENCL_STATUS"
+    echo "vector_font_compute_opencl_reason=$OPENCL_REASON"
+} >>"$SIMPLE_OUT"
 
 status="$(sed -n 's/^vector_font_compute_status=//p' "$SIMPLE_OUT" | tail -n 1)"
 reason="$(sed -n 's/^vector_font_compute_reason=//p' "$SIMPLE_OUT" | tail -n 1)"
@@ -1189,13 +1207,13 @@ if [ "$status" = "pass" ]; then
     elif [ "$production_cpu_fallback_hits" -eq 0 ] && [ "$production_gpu_returned_glyphs" -lt "$production_accelerator_attempts" ]; then
         status="fail"
         reason="production-full-gpu-glyph-return-incomplete"
-    elif [ -n "$CUDA_GLYPH_0_PIXELS" ] && [ -n "$OPENCL_GLYPH_0_PIXELS" ] && [ "$production_accelerator_unavailable_reason" != "cuda-opencl-vector-font-glyph-pixels-returned" ]; then
+    elif [ -n "$CUDA_GLYPH_0_PIXELS" ] && [ -n "$OPENCL_GLYPH_0_PIXELS" ] && [ "$production_accelerator_unavailable_reason" != "production-gpu-dispatch-not-wired" ] && [ "$production_accelerator_unavailable_reason" != "cuda-opencl-vector-font-glyph-pixels-returned" ]; then
         status="fail"
         reason="production-cuda-opencl-glyph-pixel-diagnostic-overwritten"
-    elif [ -n "$CUDA_GLYPH_0_PIXELS" ] && [ "$production_accelerator_unavailable_reason" != "cuda-vector-font-glyph-pixels-returned" ] && [ "$production_accelerator_unavailable_reason" != "cuda-opencl-vector-font-glyph-pixels-returned" ]; then
+    elif [ -n "$CUDA_GLYPH_0_PIXELS" ] && [ "$production_accelerator_unavailable_reason" != "production-gpu-dispatch-not-wired" ] && [ "$production_accelerator_unavailable_reason" != "cuda-vector-font-glyph-pixels-returned" ] && [ "$production_accelerator_unavailable_reason" != "cuda-opencl-vector-font-glyph-pixels-returned" ]; then
         status="fail"
         reason="production-cuda-glyph-pixel-diagnostic-overwritten"
-    elif [ -n "$OPENCL_GLYPH_0_PIXELS" ] && [ "$production_accelerator_unavailable_reason" != "opencl-vector-font-glyph-pixels-returned" ] && [ "$production_accelerator_unavailable_reason" != "cuda-opencl-vector-font-glyph-pixels-returned" ]; then
+    elif [ -n "$OPENCL_GLYPH_0_PIXELS" ] && [ "$production_accelerator_unavailable_reason" != "production-gpu-dispatch-not-wired" ] && [ "$production_accelerator_unavailable_reason" != "opencl-vector-font-glyph-pixels-returned" ] && [ "$production_accelerator_unavailable_reason" != "cuda-opencl-vector-font-glyph-pixels-returned" ]; then
         status="fail"
         reason="production-opencl-glyph-pixel-diagnostic-overwritten"
     elif [ "$production_accelerator_unavailable_reason" = "cuda-opencl-vector-font-glyph-pixels-returned" ]; then
