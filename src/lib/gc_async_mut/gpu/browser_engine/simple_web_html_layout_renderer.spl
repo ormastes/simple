@@ -2937,6 +2937,39 @@ fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, viewp
     if iw < 1:
         iw = 1
     if st.display == "flex" and st.flex_direction != "column":
+        # Pre-pass: distribute the inner width across flex children. Children with an
+        # explicit width (px or %) take it; the leftover space is shared equally among
+        # auto-width (flex-grow) children so a sibling is not starved to a sliver.
+        # Explicit-width children behave exactly as before (layout uses width_px).
+        var sum_explicit = 0
+        var auto_count = 0
+        var nonabs_count = 0
+        var ps = i + 1
+        while ps < nodes.len():
+            if nodes[ps].parent == i:
+                val pcst = styles[ps]
+                if not pcst.position_absolute:
+                    nonabs_count = nonabs_count + 1
+                    var cw = 0
+                    if pcst.width_px > 0:
+                        cw = if class_contains(nodes[ps].class_attr, "widget-") or class_contains(nodes[ps].class_attr, "icon-image") or pcst.border_box: pcst.width_px else: pcst.width_px + pcst.pad_l + pcst.pad_r + pcst.border_l + pcst.border_r
+                    elif pcst.width_px < 0:
+                        cw = iw * (0 - pcst.width_px) / 100
+                    if cw > 0:
+                        sum_explicit = sum_explicit + cw
+                    else:
+                        auto_count = auto_count + 1
+                    sum_explicit = sum_explicit + pcst.margin_l + pcst.margin_r
+            ps = ps + 1
+        var gaps_total = 0
+        if nonabs_count > 1:
+            gaps_total = st.gap_px * (nonabs_count - 1)
+        var per_auto = iw
+        if auto_count > 0:
+            var avail = iw - sum_explicit - gaps_total
+            if avail < auto_count:
+                avail = auto_count
+            per_auto = avail / auto_count
         var cx = ix
         var max_child_h = 0
         var fc = i + 1
@@ -2956,7 +2989,13 @@ fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, viewp
                     if flex_child_count > 0:
                         cx = cx + st.gap_px
                     cx = cx + cst.margin_l
+                    # auto-width child gets its fair share; %-width resolves against the
+                    # container inner width; px-width children ignore this (use width_px).
                     var remaining_w = iw - (cx - ix) - cst.margin_r
+                    if cst.width_px == 0:
+                        remaining_w = per_auto
+                    elif cst.width_px < 0:
+                        remaining_w = iw
                     if remaining_w < 1:
                         remaining_w = 1
                     val child = layout(nodes, styles, fc, cx, y + st.border_t + st.pad_t + cst.margin_t, remaining_w, viewport_h, out_bx, out_by, out_bw, out_bh)
