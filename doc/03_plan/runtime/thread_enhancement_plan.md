@@ -54,6 +54,7 @@ User constraints: memory-conscious (parallel agents crash tmux), pure Simple whe
 **C Runtime** (`src/runtime/runtime_thread.c`):
 1. Add `pthread_attr_setstacksize` — configurable stack (default 512KB vs current 2-8MB default)
 2. Add `rt_pool_submit(closure_ptr) -> i64` — submit to pre-created worker pool
+   - Status: implemented as a runtime-owned closure pool exported by `src/runtime/runtime_pool.c` for native core archives, with matching declarations in `src/runtime/runtime_thread.h`/`runtime_thread.c` for the hosted runtime lane. The Simple facade calls `rt_pool_submit` first and falls back to the existing registry path when the runtime returns `0` (interpreter/unavailable runtime).
 3. Fix: `runtime_native.c` channel `send()` silently drops when buffer full (line ~2581)
    - Status: native channel now grows beyond the old 1024-slot ring and is covered by `test/01_unit/lib/nogc_async_mut/channel_native_overflow_spec.spl` in native mode using the runtime's raw `i64` channel ABI.
 
@@ -67,8 +68,18 @@ User constraints: memory-conscious (parallel agents crash tmux), pure Simple whe
    - Default pool: auto-created on first `task_spawn()`, sized to `thread_available_parallelism()`
    - `thread_spawn` unchanged (always OS thread, backward compat)
    - `go` is reserved/parser-owned; lowering the language form to task spawn is a separate compiler lane.
+   - Status: `task_spawn`/`TaskHandle` live in `src/lib/nogc_async_mut/thread_pool.spl` and are re-exported by `std.nogc_async_mut.concurrent.thread`. `TaskHandle.join()` and `is_done()` dispatch to the native pool handle when present; registry-backed handles remain for interpreter fallback and older worker paths.
 
 **Codegen**: None needed.
+
+**Verification evidence (2026-06-05)**:
+- `/tmp/simple-thread-pool-target/debug/simple check src/lib/nogc_async_mut/thread_pool.spl test/01_unit/lib/nogc_async_mut/thread_pool_spec.spl test/01_unit/lib/nogc_async_mut/task_spawn_runtime_pool_spec.spl test/01_unit/lib/nogc_async_mut/task_spawn_runtime_pool_native.spl` passed.
+- `SIMPLE_LIB=src /tmp/simple-thread-pool-target/debug/simple test test/01_unit/lib/nogc_async_mut/thread_pool_spec.spl --mode=interpreter --clean --sequential --timeout 60` passed with 4 examples.
+- `SIMPLE_LIB=src /tmp/simple-thread-pool-target/debug/simple test test/01_unit/lib/nogc_async_mut/task_spawn_runtime_pool_spec.spl --mode=interpreter --clean --sequential --timeout 60` passed.
+- `SIMPLE_LIB=src /tmp/simple-thread-pool-target/debug/simple native-build --source src --source test/01_unit/lib/nogc_async_mut --entry test/01_unit/lib/nogc_async_mut/task_spawn_runtime_pool_native.spl --entry-closure --clean --timeout 120 -o build/thread_enhancement/task_spawn_runtime_pool_native` linked a direct native smoke with concrete `T rt_pool_*` symbols; `build/thread_enhancement/task_spawn_runtime_pool_native` exited `0`.
+- `SIMPLE_LIB=src /tmp/simple-thread-pool-target/debug/simple test test/01_unit/lib/nogc_async_mut/green_thread_spec.spl --mode=interpreter --clean --sequential --timeout 60` passed with 3 examples.
+- `find doc/06_spec -name '*_spec.spl' | wc -l` printed `0`.
+- Native SPipe BDD specs currently fail before test bodies if generated code calls unresolved `rt_bdd_*` symbols. Pool-native verification uses the direct entry-closure smoke until that runner lane is fixed.
 
 ### Tier 1: Stackful Green Threads + M:N Scheduler
 
@@ -243,6 +254,8 @@ Phase 3 — Tier 2 (8-12 weeks)
 
 - **Tier 0**: Run `sh scripts/check/check-cross-language-perf.shs` — Simple parallel should drop to <9ms
 - **Native channel overflow**: `SIMPLE_LIB=src bin/simple test test/01_unit/lib/nogc_async_mut/channel_native_overflow_spec.spl --mode=native --clean --force-rebuild --sequential --timeout 120`
+- **Cross-language perf evidence**: `RUN_TIMEOUT=30 sh scripts/check/check-cross-language-perf.shs` writes `doc/09_report/cross_language_perf_2026-06-05.md`. Current native OS-thread/channel result is 12.863ms for 100 workers, so the run is valid evidence but the Tier 0 `<9ms` target remains unmet until the pool-backed spawn path is benchmarked or optimized.
+- **Pool-backed task_spawn status**: the old Simple-worker queue path was proven unsafe for native `task_spawn` and remains only as an interpreter/unavailable-runtime fallback. The active native path is now the runtime-owned `rt_pool_submit`/`rt_pool_join`/`rt_pool_is_done` ABI, verified by `test/01_unit/lib/nogc_async_mut/task_spawn_runtime_pool_native.spl` through an entry-closure native smoke.
 - **Tier 1**: Spawn 10K green threads each sending to a channel, verify all results collected, measure total time
 - **Tier 2**: Run tight LCG loop in green thread, verify it yields within 10ms (preemption works)
 - All tiers: `bin/simple test` on thread/channel specs pass, LCG total = 107461963222 (matches C/Go)

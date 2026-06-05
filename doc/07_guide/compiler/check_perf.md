@@ -67,7 +67,7 @@ done
 
 ### Known caveats
 
-- `--mode=native` stub-generation may no-op unresolved `std.spec` calls — verify in interpreter mode for ground truth
+- `--mode=native` specs can no-op or segfault before test bodies when generated BDD calls (`rt_bdd_*` / `std.spec`) are unresolved — verify semantic ground truth in interpreter mode, and use a direct native entrypoint with hard `rt_exit` oracles when validating native runtime ABI paths
 - `--mode=smf` can swallow runtime errors and report PASSED — cross-check against interpreter
 - See memory: `feedback_compile_mode_false_greens.md`
 

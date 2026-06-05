@@ -8,6 +8,7 @@ fn main() {
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=../../runtime/runtime_memory.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_time.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_pool.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_value.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_db.c");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_DRIVER_HOOKS");
@@ -106,7 +107,12 @@ fn main() {
 fn compile_c_runtime_sources() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let runtime_c_dir = manifest_dir.join("../../runtime");
-    let c_sources = ["runtime_memory.c", "runtime_time.c", "runtime_db.c"];
+    let c_sources = [
+        "runtime_memory.c",
+        "runtime_time.c",
+        "runtime_db.c",
+        "runtime_pool.c",
+    ];
 
     let mut build = cc::Build::new();
     build.opt_level(2).warnings(false);
@@ -164,7 +170,12 @@ fn runtime_defines_symbol(root: &Path, c_root: &Path, symbol: &str, runtime_rege
 }
 
 fn c_runtime_defines_symbol(root: &Path, symbol: &str) -> bool {
-    const LINKED_C_SOURCES: &[&str] = &["runtime_memory.c", "runtime_time.c", "runtime_db.c"];
+    const LINKED_C_SOURCES: &[&str] = &[
+        "runtime_memory.c",
+        "runtime_time.c",
+        "runtime_db.c",
+        "runtime_pool.c",
+    ];
     for source in LINKED_C_SOURCES {
         let path = root.join(source);
         let Ok(file) = fs::read_to_string(path) else {

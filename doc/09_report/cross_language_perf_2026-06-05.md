@@ -61,3 +61,76 @@
 | C (pthreads)           |       10.402 |                               OS threads |
 | Go                     |        8.321 |           goroutines + chan result (M:N) |
 | Python                 |     2856.348 |                          threading (GIL) |
+| Bun                    |      715.255 |                           worker_threads |
+| Java                   |      177.851 |                               ThreadPool |
+| Erlang                 |     1477.809 |                    lightweight processes |
+
+### 4a. Thread Enhancement Follow-Up
+
+The table above is the OS-thread/channel baseline captured before the runtime-owned
+`task_spawn` pool path landed. On 2026-06-05, the new pool ABI was verified with a
+focused native smoke rather than this cross-language harness:
+
+- `rt_pool_submit`, `rt_pool_join`, and `rt_pool_is_done` resolve as native symbols in `build/thread_enhancement/task_spawn_runtime_pool_native`.
+- `build/thread_enhancement/task_spawn_runtime_pool_native` exited `0` after joining four pool-backed LCG tasks.
+- The harness still needs a dedicated `task_spawn` row before it can report the Tier 0 `<9ms` pool target.
+
+## 4b. Parallel Binary Sizes
+
+| Language               |         Binary |     Per-thread |                Notes |
+|------------------------|----------------|----------------|----------------------|
+| Simple (native)        |       146.3 KB | OS default (8MB) |        Cranelift AOT |
+| Simple (SMF)           |       145.9 KB | OS default (8MB) |    + runtime 42.8 MB |
+| C (pthreads)           |        15.8 KB | OS default (8MB) |              gcc -O2 |
+| Go                     |         1.8 MB | goroutine (2-8KB) |        static binary |
+| Python                 |        374.0 B | OS default (8MB) |        + interpreter |
+| Bun                    |        535.0 B | worker (isolate) |            + runtime |
+| Java                   |         2.7 KB |    JVM managed |                + JRE |
+| Erlang                 |         1.5 KB |  process (2KB) |            + BEAM VM |
+
+## 4c. Parallel Peak RSS (100 workers)
+
+| Language               |       Peak RSS |   Baseline RSS |     Per-worker delta |
+|------------------------|----------------|----------------|----------------------|
+| Simple (native)        |         2.5 MB |         2.0 MB |                 ~5KB |
+| C (pthreads)           |         2.0 MB |         2.0 MB |                 ~0KB |
+| Go                     |         2.0 MB |         2.0 MB |                 ~0KB |
+| Python                 |        10.2 MB |        10.2 MB |                 ~0KB |
+| Java                   |        47.7 MB |        43.0 MB |                ~48KB |
+
+> **Workload:** LCG (Linear Congruential Generator) with 100K iterations per worker.
+> Each worker reads shared constants (LCG_A, LCG_C, LCG_M, ITERS).
+>
+> **Design comparison — Simple channels vs Go channels:**
+> Both Simple and Go use the same pattern: workers send results through a channel,
+> main collects via recv. Simple's `val` constants captured by closures add a
+> **compile-time immutability guarantee** — the compiler rejects mutation of shared
+> data. Go relies on convention (don't mutate shared vars) or channels for all data
+> flow. C shares via globals with no safety guarantee.
+> Same semantic, same safety for result collection; Simple adds compile-time
+> enforcement for shared read-only data.
+>
+> **RSS note:** Per-worker delta = (parallel_RSS - hello_baseline_RSS) / 100.
+> Baseline measures the runtime's fixed overhead (startup, GC, stdlib).
+> OS-thread languages (Simple, C) pay ~8MB default stack per thread but RSS
+> reflects only committed pages, not reserved virtual memory.
+
+## Size Definition
+
+| Category | What "size" means |
+|----------|-------------------|
+| AOT (C, Go, Simple native) | Binary bytes on disk — self-contained |
+| VM/bytecode (Java, Erlang, Simple SMF) | `.class`/`.beam`/`.smf` bytes — requires runtime |
+| Interpreted (Python, Bun, Simple interp.) | Script bytes — requires interpreter binary |
+
+## How to Optimize Simple Performance
+
+All optimization in **pure Simple** (`.spl`) — do not modify Rust seed or C runtime.
+
+1. **Interpreter → SMF loader** — `simple compile file.spl -o file.smf` for ~2-5x dispatch speedup
+2. **SMF → native** — `simple compile file.spl --native -o file` for AOT via Cranelift (~4x slower than gcc -O2 for recursive workloads; no tail-call opt yet)
+3. **Use `val` over `var`** — immutable bindings enable more aggressive constant folding
+4. **Avoid deep recursion** — rewrite as iteration where possible (tail-call not yet optimized)
+5. **Use typed collections** — `List<i64>` avoids boxing overhead vs untyped `List`
+6. **Profile with `std.testing.benchmark`** — warmup + outlier detection built in
+7. **`bin/simple build check`** — lint catches perf anti-patterns (mcp_perf_lint)

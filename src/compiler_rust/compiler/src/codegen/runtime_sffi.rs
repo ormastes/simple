@@ -52,6 +52,7 @@ pub fn tier_of(name: &str) -> RuntimeFuncTier {
         || name.starts_with("rt_channel_")
         || name.starts_with("rt_executor_")
         || name.starts_with("rt_fiber_")
+        || name.starts_with("rt_pool_")
         || name.starts_with("rt_thread_")
         || name.starts_with("rt_generator_")
         || name == "rt_current_task_id"
@@ -639,6 +640,9 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_thread_is_done", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_thread_id", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_thread_free", &[I64], &[]),
+    RuntimeFuncSpec::new("rt_pool_submit", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_pool_join", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_pool_is_done", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_thread_available_parallelism", &[], &[I64]),
     RuntimeFuncSpec::new("spl_thread_cpu_count", &[], &[I64]),
     RuntimeFuncSpec::new("spl_thread_create", &[I64, I64], &[I64]),

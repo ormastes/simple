@@ -159,6 +159,11 @@ for mode in interpreter smf native; do
 done
 ```
 
+Native-mode SPipe specs are not always a reliable oracle for runtime ABI work:
+unresolved generated BDD calls (`rt_bdd_*` / `std.spec`) can no-op or segfault
+before `it` bodies execute. For native runtime hooks, pair interpreter SPipe
+coverage with a direct native entrypoint that uses hard `rt_exit` checks.
+
 Optimization must stay **pure Simple** (`.spl`) — do not modify Rust seed or C runtime.
 Mode escalation: interpreter (dev) → SMF (staging) → native (production).
 

@@ -20,5 +20,6 @@ Self-check:      bin/simple build check
 Bootstrap:       bin/simple build bootstrap
 
 Optimize: val>var, iteration>recursion, typed List<T>, mode escalation.
+Native SPipe: verify ground truth in interpreter; use direct native rt_exit smoke for runtime ABI hooks.
 Guide:    doc/07_guide/compiler/check_perf.md
 ```

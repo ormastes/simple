@@ -523,6 +523,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_channel_close", concurrency::rt_channel_close);
     insert_simple!("rt_channel_is_closed", concurrency::rt_channel_is_closed);
     insert_simple!("rt_channel_new", concurrency::rt_channel_new);
+    insert_simple!("rt_pool_is_done", concurrency::rt_pool_is_done);
+    insert_simple!("rt_pool_join", concurrency::rt_pool_join);
+    insert_simple!("rt_pool_submit", concurrency::rt_pool_submit);
     insert_simple!("rt_channel_recv", concurrency::rt_channel_recv);
     insert_simple!("rt_channel_send", concurrency::rt_channel_send);
     insert_simple!("rt_channel_try_recv", concurrency::rt_channel_try_recv);
@@ -1444,6 +1447,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         concurrency::rt_thread_available_parallelism
     );
     insert_simple!("spl_thread_cpu_count", concurrency::rt_thread_available_parallelism);
+    insert_simple!("spl_thread_pool_spawn_worker", concurrency::spl_thread_pool_spawn_worker);
     insert_simple!("spl_thread_join", concurrency::rt_thread_join);
     insert_simple!("spl_thread_detach", concurrency::rt_thread_free);
     insert_simple!("spl_thread_current_id", concurrency::rt_thread_id);

@@ -122,6 +122,27 @@ pub fn rt_thread_yield(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Nil)
 }
 
+/// Native runtime pool submission is unavailable in interpreter mode.
+/// Return 0 so the Simple stdlib can fall back to its synchronous task registry.
+pub fn rt_pool_submit(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// Defensive interpreter stub for native pool handles.
+pub fn rt_pool_is_done(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(1))
+}
+
+/// Defensive interpreter stub for native pool handles.
+pub fn rt_pool_join(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// Native worker spawning is unavailable in interpreter mode.
+pub fn spl_thread_pool_spawn_worker(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
 /// Spawn isolated thread with closure execution
 ///
 /// Accepts a closure and optional arguments. Executes the closure with full
