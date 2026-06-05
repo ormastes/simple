@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 BUILD_DIR="${BUILD_DIR:-build/vector_font_compute_evidence}"
@@ -68,6 +68,10 @@ emit_unavailable() {
     {
         echo "vector_font_compute_status=unavailable"
         echo "vector_font_compute_reason=$reason"
+        echo "vector_font_compute_offload_status=accelerator-unavailable"
+        echo "vector_font_compute_offload_reason=$reason"
+        echo "vector_font_compute_gpu_glyph_returned=false"
+        echo "vector_font_compute_production_offload_ready=false"
         echo "vector_font_compute_cpu_checksum=0"
         echo "vector_font_compute_cpu_ink_pixels=0"
         echo "vector_font_compute_cuda_status=$CUDA_STATUS"
@@ -80,6 +84,10 @@ emit_unavailable() {
         echo
         echo "- status: unavailable"
         echo "- reason: $reason"
+        echo "- offload status: accelerator-unavailable"
+        echo "- offload reason: $reason"
+        echo "- GPU glyph returned: false"
+        echo "- production offload ready: false"
     } >"$REPORT_PATH"
     cat "$BUILD_DIR/evidence.env"
 }
@@ -107,6 +115,38 @@ fn env_text(key: text, fallback: text) -> text:
 
 fn env_i64(key: text, fallback: i64) -> i64:
     (rt_env_get(key) ?? fallback.to_text()).parse_i64() ?? fallback
+
+fn backend_returned_glyph_pixels(status: text, reason: text) -> bool:
+    status == "pass" and reason.contains("glyph-pixels-returned")
+
+fn backend_proved_cpu_match(status: text, reason: text) -> bool:
+    status == "pass" and reason.contains("matched-cpu")
+
+fn vector_font_offload_status(cuda_status: text, cuda_reason: text, opencl_status: text, opencl_reason: text) -> text:
+    if backend_returned_glyph_pixels(cuda_status, cuda_reason) or backend_returned_glyph_pixels(opencl_status, opencl_reason):
+        return "gpu-glyph-returned"
+    if backend_proved_cpu_match(cuda_status, cuda_reason) or backend_proved_cpu_match(opencl_status, opencl_reason):
+        return "gpu-proof-with-cpu-glyph"
+    if cuda_status == "unavailable" and opencl_status == "unavailable":
+        return "accelerator-unavailable"
+    "not-proven"
+
+fn vector_font_offload_reason(cuda_status: text, cuda_reason: text, opencl_status: text, opencl_reason: text) -> text:
+    if backend_returned_glyph_pixels(cuda_status, cuda_reason):
+        if backend_returned_glyph_pixels(opencl_status, opencl_reason):
+            return "cuda-opencl-vector-font-glyph-pixels-returned"
+        return cuda_reason
+    if backend_returned_glyph_pixels(opencl_status, opencl_reason):
+        return opencl_reason
+    if backend_proved_cpu_match(cuda_status, cuda_reason):
+        return cuda_reason
+    if backend_proved_cpu_match(opencl_status, opencl_reason):
+        return opencl_reason
+    if cuda_status == "unavailable" and cuda_reason != "":
+        return cuda_reason
+    if opencl_status == "unavailable" and opencl_reason != "":
+        return opencl_reason
+    "vector-font-offload-not-proven"
 
 fn glyph_checksum(codepoint: i32) -> i64:
     val glyph = rasterize_vector(vf_glyph_commands(codepoint), codepoint, FONT_SIZE)
@@ -246,8 +286,14 @@ fn main():
     val opencl_glyph1_checksum = env_i64("OPENCL_VECTOR_FONT_GLYPH_1_CHECKSUM", $OPENCL_GLYPH_1_CHECKSUM)
     val opencl_glyph1_ink_pixels = env_i64("OPENCL_VECTOR_FONT_GLYPH_1_INK_PIXELS", $OPENCL_GLYPH_1_INK_PIXELS)
     val evidence = web_render_vector_font_compute_evidence("wm-vector-text-grid", checksum, ink_pixels, cuda_status, cuda_reason, cuda_checksum, opencl_status, opencl_reason, opencl_checksum, false)
+    val offload_status = vector_font_offload_status(cuda_status, cuda_reason, opencl_status, opencl_reason)
+    val gpu_glyph_returned = offload_status == "gpu-glyph-returned"
     print "vector_font_compute_status={evidence.status}"
     print "vector_font_compute_reason={evidence.reason}"
+    print "vector_font_compute_offload_status={offload_status}"
+    print "vector_font_compute_offload_reason={vector_font_offload_reason(cuda_status, cuda_reason, opencl_status, opencl_reason)}"
+    print "vector_font_compute_gpu_glyph_returned={gpu_glyph_returned.to_text()}"
+    print "vector_font_compute_production_offload_ready={gpu_glyph_returned.to_text()}"
     print "vector_font_compute_scene=wm-vector-text-grid"
     print "vector_font_compute_text_run={TEXT_RUN}"
     print "vector_font_compute_font_size={FONT_SIZE}"
@@ -1091,6 +1137,10 @@ fi
 
 status="$(sed -n 's/^vector_font_compute_status=//p' "$SIMPLE_OUT" | tail -n 1)"
 reason="$(sed -n 's/^vector_font_compute_reason=//p' "$SIMPLE_OUT" | tail -n 1)"
+offload_status="$(sed -n 's/^vector_font_compute_offload_status=//p' "$SIMPLE_OUT" | tail -n 1)"
+offload_reason="$(sed -n 's/^vector_font_compute_offload_reason=//p' "$SIMPLE_OUT" | tail -n 1)"
+gpu_glyph_returned="$(sed -n 's/^vector_font_compute_gpu_glyph_returned=//p' "$SIMPLE_OUT" | tail -n 1)"
+production_offload_ready="$(sed -n 's/^vector_font_compute_production_offload_ready=//p' "$SIMPLE_OUT" | tail -n 1)"
 cpu_checksum="$(sed -n 's/^vector_font_compute_cpu_checksum=//p' "$SIMPLE_OUT" | tail -n 1)"
 cpu_ink_pixels="$(sed -n 's/^vector_font_compute_cpu_ink_pixels=//p' "$SIMPLE_OUT" | tail -n 1)"
 cpu_frame_us="$(sed -n 's/^vector_font_compute_cpu_frame_us=//p' "$SIMPLE_OUT" | tail -n 1)"
@@ -1208,6 +1258,10 @@ fi
 
 {
     for key in \
+        vector_font_compute_offload_status \
+        vector_font_compute_offload_reason \
+        vector_font_compute_gpu_glyph_returned \
+        vector_font_compute_production_offload_ready \
         vector_font_compute_scene \
         vector_font_compute_text_run \
         vector_font_compute_font_size \
@@ -1307,6 +1361,10 @@ fi
     echo "vector_font_compute_opencl_local_size=$OPENCL_LOCAL_SIZE"
     echo "vector_font_compute_status=$status"
     echo "vector_font_compute_reason=$reason"
+    echo "vector_font_compute_offload_status=$offload_status"
+    echo "vector_font_compute_offload_reason=$offload_reason"
+    echo "vector_font_compute_gpu_glyph_returned=$gpu_glyph_returned"
+    echo "vector_font_compute_production_offload_ready=$production_offload_ready"
 } >"$BUILD_DIR/evidence.env"
 
 {
@@ -1314,6 +1372,10 @@ fi
     echo
     echo "- status: $status"
     echo "- reason: $reason"
+    echo "- offload status: $offload_status"
+    echo "- offload reason: $offload_reason"
+    echo "- GPU glyph returned: $gpu_glyph_returned"
+    echo "- production offload ready: $production_offload_ready"
     echo "- scene: wm-vector-text-grid"
     echo "- text run: $TEXT_RUN"
     echo "- font size: $FONT_SIZE"

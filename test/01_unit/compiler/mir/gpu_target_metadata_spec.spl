@@ -7,8 +7,10 @@ use compiler.common.attributes.{FunctionAttr, parse_function_attrs}
 use compiler.common.gpu_target_metadata.{normalize_gpu_backend_order_metadata}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
 use compiler.frontend.parser_types.{Attribute}
 use compiler.frontend.parser_types_expr.{Expr, ExprKind}
+use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_types.{SymbolId, SymbolTable}
 use compiler.mir.mir_data.{MirFunction, MirModule, MirSignature, MirBuilder, BlockId}
 use compiler.mir.mir_instructions.{MirBlock, MirTerminator}
@@ -84,6 +86,21 @@ fn make_gpu_source_attr_with_backends(target: text, backends: text) -> Attribute
         span: span
     )
 
+fn lower_source_function_to_mir(source: text, function_name: text) -> MirFunction:
+    val parsed_module = parse_and_build_module(source, "test_gpu_source_to_mir.spl")
+    val hir_lowering = HirLowering.new()
+    val hir_module = hir_lowering.lower_module(parsed_module)
+    val mir_lowering = MirLowering.new(hir_module.symbols)
+    val mir_module = mir_lowering.lower_module(hir_module)
+    val fn_keys = mir_module.functions.keys()
+    var idx = 0
+    while idx < fn_keys.len():
+        val fn_ = mir_module.functions[fn_keys[idx]]
+        if fn_.name == function_name:
+            return fn_
+        idx = idx + 1
+    panic("missing MIR function " + function_name)
+
 describe "MIR GPU target metadata":
     it "lowers frontend-shaped gpu attribute metadata into MIR":
         val parsed_attr = parse_function_attrs([make_gpu_source_attr("opencl")])
@@ -139,5 +156,32 @@ describe "MIR GPU target metadata":
 
         val result = lowerer.apply_function_attr_to_mir(fn_, attr)
 
+        expect(result.gpu_target).to_equal("auto")
+        expect(result.gpu_backend_order).to_equal("hip,opencl,cuda")
+
+    it "preserves positional source GPU target metadata through frontend HIR and MIR lowering":
+        val src = "@gpu(\"opencl\")\nfn positional_opencl_kernel(value: u32) -> u32:\n    value\n"
+
+        val result = lower_source_function_to_mir(src, "positional_opencl_kernel")
+
+        expect(result.is_kernel).to_equal(true)
+        expect(result.gpu_target).to_equal("opencl")
+        expect(result.gpu_backend_order).to_equal("opencl")
+
+    it "preserves named source GPU target metadata through frontend HIR and MIR lowering":
+        val src = "@gpu(target=\"opencl\")\nfn named_opencl_kernel(value: u32) -> u32:\n    value\n"
+
+        val result = lower_source_function_to_mir(src, "named_opencl_kernel")
+
+        expect(result.is_kernel).to_equal(true)
+        expect(result.gpu_target).to_equal("opencl")
+        expect(result.gpu_backend_order).to_equal("opencl")
+
+    it "preserves named source GPU backend order metadata through frontend HIR and MIR lowering":
+        val src = "@gpu(target=\"auto\", backends=\"rocm,cl,cuda\")\nfn ordered_gpu_kernel(value: u32) -> u32:\n    value\n"
+
+        val result = lower_source_function_to_mir(src, "ordered_gpu_kernel")
+
+        expect(result.is_kernel).to_equal(true)
         expect(result.gpu_target).to_equal("auto")
         expect(result.gpu_backend_order).to_equal("hip,opencl,cuda")

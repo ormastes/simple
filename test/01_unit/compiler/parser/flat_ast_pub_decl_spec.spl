@@ -6,6 +6,7 @@
 
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
 use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.parser_types_expr.{ExprKind}
 
 describe "Flat AST bridge public declaration parsing", tag: ["only-compiled"]:
     it "accepts top-level pub fn on the active frontend path":
@@ -26,6 +27,37 @@ describe "Flat AST bridge public declaration parsing", tag: ["only-compiled"]:
         expect(kernel.is_kernel).to_equal(true)
         expect(kernel.attributes.len()).to_equal(1)
         expect(kernel.attributes[0].name).to_equal("gpu")
+        expect(kernel.attributes[0].args.len()).to_equal(1)
+        match kernel.attributes[0].args[0].kind:
+            case StringLit(value, _):
+                expect(value).to_equal("opencl")
+            case _:
+                expect(false).to_equal(true)
+
+    it "preserves named GPU target decorator arguments on the active frontend path":
+        val src = "@gpu(target=\"opencl\")\nfn named_opencl_kernel(value: u32) -> u32:\n    value\n"
+        val module = parse_and_build_module(src, "test_named_gpu_opencl_fn.spl")
+
+        expect(module.functions.contains("named_opencl_kernel")).to_equal(true)
+        val kernel = module.functions["named_opencl_kernel"] ?? panic("missing named opencl kernel function")
+        expect(kernel.is_kernel).to_equal(true)
+        expect(kernel.attributes.len()).to_equal(1)
+        expect(kernel.attributes[0].name).to_equal("gpu")
+        expect(kernel.attributes[0].args.len()).to_equal(1)
+        match kernel.attributes[0].args[0].kind:
+            case Assign(left, _, right):
+                match left.kind:
+                    case Ident(name):
+                        expect(name).to_equal("target")
+                    case _:
+                        expect(false).to_equal(true)
+                match right.kind:
+                    case StringLit(value, _):
+                        expect(value).to_equal("opencl")
+                    case _:
+                        expect(false).to_equal(true)
+            case _:
+                expect(false).to_equal(true)
 
     it "accepts top-level pub const-style binding on the active frontend path":
         val src = "pub val answer: i64 = 42\n"

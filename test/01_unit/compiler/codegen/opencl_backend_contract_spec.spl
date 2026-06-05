@@ -142,6 +142,17 @@ fn opencl_call_block() -> MirBlock:
         terminator: MirTerminator.Ret(nil)
     )
 
+fn opencl_indirect_call_block() -> MirBlock:
+    val sig = MirSignature(params: [u32_type()], return_type: u32_type(), is_variadic: false)
+    MirBlock(
+        id: BlockId.entry(),
+        label: Some("entry"),
+        instructions: [
+            MirInst(kind: MirInstKind.CallIndirect(Some(LocalId(id: 2)), MirOperand.copy(LocalId(id: 0)), [MirOperand.copy(LocalId(id: 1))], sig), span: nil)
+        ],
+        terminator: MirTerminator.Ret(nil)
+    )
+
 fn opencl_array_aggregate_block() -> MirBlock:
     MirBlock(
         id: BlockId.entry(),
@@ -495,9 +506,40 @@ fn make_opencl_call_kernel() -> MirFunction:
         has_fast_math: false
     )
 
+fn make_opencl_indirect_call_kernel() -> MirFunction:
+    val callback_type = MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [u32_type()], return_type: u32_type(), is_variadic: false)))
+    MirFunction(
+        symbol: SymbolId(id: 18),
+        name: "opencl_indirect_call_u32",
+        signature: MirSignature(params: [callback_type, u32_type()], return_type: MirType.unit(), is_variadic: false),
+        locals: [
+            arg_local(0, 0, "callback", callback_type),
+            arg_local(1, 1, "value", u32_type()),
+            temp_local(2, u32_type())
+        ],
+        blocks: [opencl_indirect_call_block()],
+        entry_block: BlockId.entry(),
+        span: Span.empty(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: true,
+        gpu_target: "opencl",
+        gpu_backend_order: "opencl",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false
+    )
+
 fn make_opencl_array_aggregate_kernel() -> MirFunction:
     MirFunction(
-        symbol: SymbolId(id: 13),
+        symbol: SymbolId(id: 14),
         name: "opencl_array_aggregate_u32",
         signature: MirSignature(params: [u32_type(), u32_type(), u32_type()], return_type: MirType.unit(), is_variadic: false),
         locals: [
@@ -849,6 +891,13 @@ describe "OpenCL backend contract":
         expect(source).to_contain("__kernel void opencl_call_u32(uint left, uint right)")
         expect(source).to_contain("uint v2 = opencl_scale_u32(left, right);")
         expect(source).to_contain("return;")
+
+    it "rejects unsupported MIR instead of emitting invalid OpenCL comments":
+        val module = make_kernel_module([make_opencl_indirect_call_kernel()])
+        val result = OpenClBackend.compile_module_to_opencl_source(module)
+
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err().message).to_contain("OpenCL")
 
     it "emits OpenCL C array aggregates and field access":
         val module = make_kernel_module([make_opencl_array_aggregate_kernel()])
