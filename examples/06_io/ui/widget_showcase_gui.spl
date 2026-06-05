@@ -1,0 +1,110 @@
+# widget_showcase_gui.spl — GUI sanity app: a gallery of common widget visuals
+# (title, button, checkbox, text field, progress bar, list) drawn directly on
+# the pure-Simple Engine2D CPU lane and presented to an on-screen window.
+#
+# Draws widgets with engine2d primitives (rect/rounded_rect/line/text) rather
+# than the web layout path, so it renders fast and is a reliable visual sanity
+# check of widget chrome + legible glyph text on the CPU lane.
+#
+# Launch (window):
+#   SIMPLE_GUI_RUN_SKIP_NUDGE=1 scripts/gui/macos-gui-run.shs examples/06_io/ui/widget_showcase_gui.spl
+# Headless: bin/simple run examples/06_io/ui/widget_showcase_gui.spl
+
+use std.gpu.engine2d.backend_cpu.{CpuBackend}
+
+extern fn rt_winit_event_loop_new() -> i64
+extern fn rt_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64
+extern fn rt_winit_window_present_rgba(win: i64, w: i64, h: i64, pixels: [i64])
+extern fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64
+extern fn rt_winit_event_get_type(ev: i64) -> i64
+extern fn rt_winit_event_free(ev: i64)
+extern fn rt_winit_window_free(win: i64)
+extern fn rt_winit_event_loop_free(el: i64)
+extern fn rt_env_get(key: text) -> text
+
+val W: i32 = 220
+val H: i32 = 176
+val EVT_CLOSE: i64 = 3
+
+val BG: u32 = 0xFF1E1E28u32
+val FG: u32 = 0xFFE6E6F0u32
+val MUTED: u32 = 0xFF9090A0u32
+val ACCENT: u32 = 0xFF3B82F6u32
+
+fn build_frame() -> [u32]:
+    var b = CpuBackend.create()
+    if not b.init(W, H):
+        print "CPU backend failed to initialize"
+        return []
+    b.clear(BG)
+    # Title
+    b.draw_text(8, 6, "Widget Showcase", FG, 8)
+    b.draw_line(8, 22, W - 8, 22, 0xFF3A3A4Au32, 1)
+    # Button (filled rounded chrome + label)
+    b.draw_rect_filled(8, 30, 64, 20, ACCENT)
+    b.draw_rounded_rect(8, 30, 64, 20, 5, 0xFF1D4ED8u32)
+    b.draw_text(20, 35, "Run", 0xFFFFFFFFu32, 7)
+    # Checkbox (box + check fill + label)
+    b.draw_rect(86, 32, 14, 14, MUTED)
+    b.draw_rect_filled(89, 35, 8, 8, 0xFF22C55Eu32)
+    b.draw_text(106, 34, "Enable", FG, 7)
+    # Text field (outline + placeholder)
+    b.draw_rect(8, 60, 150, 18, MUTED)
+    b.draw_text(12, 64, "name...", MUTED, 7)
+    # Progress bar (track + 60% fill)
+    b.draw_rect_filled(8, 88, 150, 10, 0xFF2A2A38u32)
+    b.draw_rect_filled(8, 88, 90, 10, ACCENT)
+    b.draw_text(164, 86, "60%", MUTED, 7)
+    # List
+    b.draw_text(8, 108, "Items", MUTED, 7)
+    b.draw_text(12, 122, "- First item", FG, 7)
+    b.draw_text(12, 134, "- Second item", FG, 7)
+    b.draw_text(12, 146, "- Third item", FG, 7)
+    b.present()
+    val pixels = b.read_pixels()
+    b.shutdown()
+    pixels
+
+fn pack(src: [u32]) -> [i64]:
+    var out: [i64] = [0; src.len()]
+    var i = 0
+    while i < src.len():
+        out[i] = src[i].to_i64() & 0xFFFFFF
+        i = i + 1
+    out
+
+fn main() -> i64:
+    print "Widget showcase GUI — render {W}x{H} via Engine2D CPU lane"
+    val pixels = build_frame()
+    if pixels.len() < W * H:
+        return 1
+    print "rendered {pixels.len()} px"
+
+    if (rt_env_get("SIMPLE_GUI") ?? "") != "1":
+        print "No GUI requested (use scripts/gui/macos-gui-run.shs to open a window); headless only."
+        return 0
+
+    val el = rt_winit_event_loop_new()
+    if el == 0:
+        print "No GUI runtime available."
+        return 1
+    val win = rt_winit_window_new(el, W.to_i64(), H.to_i64(), "Simple Widget Showcase (CPU lane)")
+    if win == 0:
+        rt_winit_event_loop_free(el)
+        return 1
+
+    val packed = pack(pixels)
+    var running = true
+    var iters = 0
+    while running and iters < 2000000:
+        rt_winit_window_present_rgba(win, W.to_i64(), H.to_i64(), packed)
+        var ev = rt_winit_event_loop_poll_events(el, 1)
+        while ev != 0:
+            if rt_winit_event_get_type(ev) == EVT_CLOSE:
+                running = false
+            rt_winit_event_free(ev)
+            ev = rt_winit_event_loop_poll_events(el, 1)
+        iters = iters + 1
+    rt_winit_window_free(win)
+    rt_winit_event_loop_free(el)
+    return 0

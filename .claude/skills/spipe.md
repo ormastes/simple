@@ -70,6 +70,29 @@ test runner can't execute the `it` blocks (e.g. it segfaults importing a heavy
 module graph), run the same assertions through a `bin/simple run …` harness and
 keep the absolute oracle in it — don't downgrade to "files load".
 
+## GUI sanity tests (pure-Simple lane)
+
+After any GUI / engine2d / web-render change, sanity-check the three on-screen
+pure-Simple-lane apps (on macOS the lane = Engine2D CPU/NEON + Metal):
+
+- **2D rendering** — `examples/06_io/ui/engine2d_cpu_simd_gui.spl` (CPU) /
+  `engine2d_metal_gui.spl` (Metal): primitives (text/rect/circle/line/gradient/rounded).
+- **GUI widgets** — `examples/06_io/ui/widget_showcase_gui.spl`: button/checkbox/
+  text-field/progress/list chrome with legible labels.
+- **HTML rendering** — `examples/06_io/ui/web_text_gui.spl` (or
+  `web_render_file_gui.spl <file.html>`): web layout → Engine2D CPU, legible glyph text.
+
+Launch (macOS): `scripts/gui/macos-gui-run.shs <app.spl>` (wraps the GUI driver in
+a throwaway `.app` so the window-server registers it).
+
+**Verify the framebuffer, not the screenshot.** The ground truth is `read_pixels()`
+dumped to a P3 PPM via `rt_file_write_text` (then convert/inspect) — it proves the
+lane renders independent of window-server/compositor/permission state, and screen
+capture by region is flaky (it can grab whatever window is at those coordinates).
+This is the same "absolute oracle" rule above, applied to pixels. Reference:
+`doc/04_architecture/ui/simple_gui_stack.md` → "GUI Sanity Apps". Note the
+web-layout lane is interpreter-bound (~1.5 ms/px) — keep web sanity surfaces small.
+
 ## Template
 
 ```

@@ -1,0 +1,85 @@
+# web_text_gui.spl — render an HTML page with real text through the pure-Simple
+# web renderer (Engine2D CPU lane) and present it to an on-screen window.
+#
+# Uses class/id selectors so the page routes through the generic layout renderer
+# (which lays out and paints real glyph text), not the legacy corpus heuristic.
+#
+# Launch (window):
+#   SIMPLE_GUI_RUN_SKIP_NUDGE=1 scripts/gui/macos-gui-run.shs examples/06_io/ui/web_text_gui.spl
+# Headless: bin/simple run examples/06_io/ui/web_text_gui.spl
+
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend}
+
+extern fn rt_winit_event_loop_new() -> i64
+extern fn rt_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64
+extern fn rt_winit_window_present_rgba(win: i64, w: i64, h: i64, pixels: [i64])
+extern fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64
+extern fn rt_winit_event_get_type(ev: i64) -> i64
+extern fn rt_winit_event_free(ev: i64)
+extern fn rt_winit_window_free(win: i64)
+extern fn rt_winit_event_loop_free(el: i64)
+extern fn rt_env_get(key: text) -> text
+
+# Small canvas: the pure-Simple web-layout render is interpreter-bound
+# (~1.5 ms/pixel), so keep the sanity surface modest for a quick one-shot render.
+val W: i32 = 240
+val H: i32 = 150
+val EVT_CLOSE: i64 = 3
+
+fn page_html() -> text:
+    "<html><head><style>" +
+        ".page{background-color:#ffffff;color:#202024;padding:12px}" +
+        "h1{font-size:24px;color:#1a73e8}" +
+        "p{font-size:16px;color:#333333}" +
+        "</style></head><body>" +
+        "<div class='page'>" +
+        "<h1>Hello World</h1>" +
+        "<p>Simple web text on the CPU lane.</p>" +
+        "<p>Glyphs render solid and legible.</p>" +
+        "</div></body></html>"
+
+fn pack(src: [u32]) -> [i64]:
+    var out: [i64] = [0; src.len()]
+    var i = 0
+    while i < src.len():
+        out[i] = src[i].to_i64() & 0xFFFFFF
+        i = i + 1
+    out
+
+fn main() -> i64:
+    print "Web text GUI — render {W}x{H} via Engine2D CPU lane"
+    val pixels = simple_web_render_html_to_pixels_with_engine2d_backend(page_html(), W, H, "cpu_simd")
+    if pixels.len() < W * H:
+        print "render produced {pixels.len()} px (short)"
+        return 1
+    print "rendered {pixels.len()} px"
+
+    if (rt_env_get("SIMPLE_GUI") ?? "") != "1":
+        print "No GUI requested (use scripts/gui/macos-gui-run.shs to open a window); headless only."
+        return 0
+
+    val el = rt_winit_event_loop_new()
+    if el == 0:
+        print "No GUI runtime available."
+        return 1
+    val win = rt_winit_window_new(el, W.to_i64(), H.to_i64(), "Simple Web (CPU lane)")
+    if win == 0:
+        rt_winit_event_loop_free(el)
+        return 1
+
+    val packed = pack(pixels)
+    var running = true
+    var iters = 0
+    while running and iters < 2000000:
+        rt_winit_window_present_rgba(win, W.to_i64(), H.to_i64(), packed)
+        var ev = rt_winit_event_loop_poll_events(el, 1)
+        while ev != 0:
+            if rt_winit_event_get_type(ev) == EVT_CLOSE:
+                running = false
+            rt_winit_event_free(ev)
+            ev = rt_winit_event_loop_poll_events(el, 1)
+        iters = iters + 1
+    rt_winit_window_free(win)
+    rt_winit_event_loop_free(el)
+    return 0

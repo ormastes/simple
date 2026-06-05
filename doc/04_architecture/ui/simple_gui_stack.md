@@ -371,3 +371,39 @@ Every implementation of this architecture needs evidence for:
   across web bridge, SimpleOS WM, and standalone hosts;
 - `doc/06_spec` layout safety: executable specs stay under `test/**`, not
   under generated/manual spec docs.
+
+## GUI Sanity Apps (pure-Simple lane, macOS)
+
+Three small on-screen apps exercise the pure-Simple drawing lane (on macOS that
+is the Engine2D **CPU/aarch64-NEON** and **Metal** backends). They are the quick
+"does the GUI still render" sanity set after any GUI/engine2d/web change:
+
+| Lane | App | What it proves |
+|------|-----|----------------|
+| 2D rendering | `examples/06_io/ui/engine2d_cpu_simd_gui.spl` (CPU) / `engine2d_metal_gui.spl` (Metal) | Engine2D primitives: text, rect, circle, line, gradient, rounded-rect |
+| GUI widgets | `examples/06_io/ui/widget_showcase_gui.spl` | Widget chrome drawn on the CPU lane: button, checkbox, text field, progress bar, list, with legible labels |
+| HTML rendering | `examples/06_io/ui/web_text_gui.spl` (text page) / `web_render_file_gui.spl <file.html>` | Web layout → Engine2D CPU: real laid-out, legible glyph text |
+
+Launch on macOS (registers the process with the window server via a throwaway
+`.app` bundle, then nudges the window on-screen):
+
+```sh
+scripts/gui/macos-gui-run.shs examples/06_io/ui/engine2d_cpu_simd_gui.spl
+scripts/gui/macos-gui-run.shs examples/06_io/ui/widget_showcase_gui.spl
+scripts/gui/macos-gui-run.shs examples/06_io/ui/web_text_gui.spl
+```
+
+Verification approach (avoid screen-capture flakiness): the **framebuffer is the
+ground truth**. Run an app headless and dump `read_pixels()` to a P3 PPM via
+`rt_file_write_text`, then inspect/convert it — this proves the lane renders
+independent of window-server/compositor state. The live `.app` launch is the
+secondary, human-in-the-loop check. (See
+`scripts/check/check-macos-gui-live-window-evidence.shs` for the capture gate.)
+
+Caveats:
+- The **2D lane is fast**; the **web-layout lane is interpreter-bound (~1.5 ms/px)**,
+  so keep web/widget-via-web surfaces small (≤ ~160×120) for one-shot renders.
+- The launcher and capture gate compute repo-root from their own location; scripts
+  living under `scripts/gui/` and `scripts/check/` must use `dirname/../..` (two
+  levels), not `dirname/..` — getting this wrong silently resolves repo-root to
+  `scripts/` and breaks every GUI launch.
