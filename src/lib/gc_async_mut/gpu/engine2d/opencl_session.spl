@@ -10,6 +10,7 @@ use std.gc_async_mut.gpu.engine2d.generated_kernel_dispatch.{
     generated_2d_session_launch_gate,
     generated_2d_session_runtime_provenance
 }
+use std.gc_async_mut.gpu.engine2d.session_support.{gpu_session_launch_gate_status, gpu_session_readback_status}
 use std.gc_async_mut.gpu.engine2d.sffi_opencl.{OpenClFfi}
 
 extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
@@ -193,14 +194,18 @@ class OpenClSession:
     me launch_generated_2d_evidence(op: text, width: i64, height: i64, args_ptr: i64) -> OpenClSessionEvidence:
         val operation = "launch_generated_2d:{op}"
         val gate = generated_2d_session_launch_gate("opencl", op, width, height, self.ffi != nil and self.queue != 0, self.program != 0, args_ptr)
-        if not gate.plan.dispatch_ready:
-            return self._evidence(operation, false, "plan-not-ready", gate.plan.reason, 0, false, 0, 0)
-        if gate.reason == "missing-args-pointer":
-            return self._evidence(operation, false, "missing-args-pointer", "missing-generated-2d-args-pointer", 0, false, 0, 0)
-        if gate.reason == "runtime-not-ready" and self.ffi == nil:
-            return self._evidence(operation, false, "missing-ffi", "missing-opencl-ffi", 0, false, 0, 0)
-        if gate.reason == "runtime-not-ready" or gate.reason == "module-not-loaded":
-            return self._evidence(operation, false, "missing-program-or-queue", "missing-opencl-program-or-queue", 0, false, 0, 0)
+        val status = gpu_session_launch_gate_status(
+            "opencl",
+            gate,
+            self.ffi == nil,
+            "missing-opencl-ffi",
+            "missing-program-or-queue",
+            "missing-opencl-program-or-queue",
+            "missing-program-or-queue",
+            "missing-opencl-program-or-queue"
+        )
+        if not status.ready:
+            return self._evidence(operation, false, status.status_code, status.reason, 0, false, 0, 0)
         val rc = self.launch_generated_2d(op, width, height, args_ptr)
         if rc == 0:
             return self._evidence(operation, true, "submitted", "opencl-generated-2d-kernel-submitted", self.kernel_cache, true, 0, 0)
@@ -364,14 +369,17 @@ class OpenClSession:
         self._evidence("synchronize", false, "sync-failed", "opencl-queue-finish-failed", 0, false, 0, 0)
 
     fn readback_evidence(readback_available: bool, expected_checksum: i64, actual_checksum: i64) -> OpenClSessionEvidence:
-        if not readback_available:
-            return self._evidence("readback", false, "readback-unavailable", "device-readback-required", 0, false, expected_checksum, actual_checksum)
-        if expected_checksum == 0 or actual_checksum == 0:
-            return self._evidence("readback", false, "invalid-checksum", "device-readback-checksum-required", 0, true, expected_checksum, actual_checksum)
-        val checksum_delta = expected_checksum - actual_checksum
-        if checksum_delta == 0:
-            return self._evidence("readback", true, "readback-matched", "readback-checksum-matched", 0, true, expected_checksum, actual_checksum)
-        self._evidence("readback", false, "readback-mismatch", "device-readback-checksum-mismatch", 0, true, expected_checksum, actual_checksum)
+        val status = gpu_session_readback_status(
+            "opencl",
+            readback_available,
+            expected_checksum,
+            actual_checksum,
+            "device-readback-required",
+            "device-readback-checksum-required",
+            "readback-checksum-matched",
+            "device-readback-checksum-mismatch"
+        )
+        self._evidence("readback", status.success, status.status_code, status.reason, 0, status.readback_available, expected_checksum, actual_checksum)
 
     me shutdown():
         self.ref_count = 0

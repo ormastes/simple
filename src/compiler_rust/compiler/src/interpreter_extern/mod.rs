@@ -73,6 +73,7 @@ pub mod concurrency;
 pub mod tui;
 pub mod repl;
 pub mod gpu;
+pub mod gpu_rocm;
 pub mod simd;
 pub mod diagram;
 pub mod memory;
@@ -695,13 +696,16 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_cuda_sync", gpu::rt_cuda_sync_fn);
     insert_simple!(
         "rt_engine2d_rocm_download_pixels",
-        gpu::rt_engine2d_rocm_download_pixels_fn
+        gpu_rocm::rt_engine2d_rocm_download_pixels_fn
     );
     insert_simple!(
         "rt_engine2d_rocm_upload_host_buf",
-        gpu::rt_engine2d_rocm_upload_host_buf_fn
+        gpu_rocm::rt_engine2d_rocm_upload_host_buf_fn
     );
-    insert_simple!("rt_engine2d_rocm_upload_pixels", gpu::rt_engine2d_rocm_upload_pixels_fn);
+    insert_simple!(
+        "rt_engine2d_rocm_upload_pixels",
+        gpu_rocm::rt_engine2d_rocm_upload_pixels_fn
+    );
     insert_simple!("rt_metal_alloc_buffer", gpu::rt_metal_alloc_buffer_fn);
     insert_simple!("rt_metal_begin_render_pass", gpu::rt_metal_begin_render_pass_fn);
     insert_simple!("rt_metal_buffer_download", gpu::rt_metal_buffer_download_fn);
@@ -757,36 +761,39 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_metal_set_scissor", gpu::rt_metal_set_scissor_fn);
     insert_simple!("rt_metal_set_viewport", gpu::rt_metal_set_viewport_fn);
     insert_simple!("rt_metal_wait_completed", gpu::rt_metal_wait_completed_fn);
-    insert_simple!("rt_rocm_device_count", gpu::rt_rocm_device_count_fn);
-    insert_simple!("rt_rocm_device_get", gpu::rt_rocm_device_get_fn);
-    insert_simple!("rt_rocm_device_memory", gpu::rt_rocm_device_memory_fn);
-    insert_simple!("rt_rocm_device_name", gpu::rt_rocm_device_name_fn);
-    insert_simple!("rt_rocm_compile_hsaco", gpu::rt_rocm_compile_hsaco_fn);
-    insert_simple!("rt_rocm_create_stream", gpu::rt_rocm_create_stream_fn);
-    insert_simple!("rt_rocm_destroy_stream", gpu::rt_rocm_destroy_stream_fn);
-    insert_simple!("rt_rocm_free", gpu::rt_rocm_free_fn);
-    insert_simple!("rt_rocm_get_device", gpu::rt_rocm_get_device_fn);
-    insert_simple!("rt_rocm_get_function", gpu::rt_rocm_get_function_fn);
-    insert_simple!("rt_rocm_get_last_error", gpu::rt_rocm_get_last_error_fn);
-    insert_simple!("rt_rocm_init", gpu::rt_rocm_init_fn);
-    insert_simple!("rt_rocm_is_available", gpu::rt_rocm_is_available_fn);
-    insert_simple!("rt_rocm_kernel_get", gpu::rt_rocm_kernel_get_fn);
-    insert_simple!("rt_rocm_launch_kernel", gpu::rt_rocm_launch_kernel_fn);
-    insert_simple!("rt_rocm_malloc", gpu::rt_rocm_malloc_fn);
-    insert_simple!("rt_rocm_mem_alloc", gpu::rt_rocm_mem_alloc_fn);
-    insert_simple!("rt_rocm_mem_free", gpu::rt_rocm_mem_free_fn);
-    insert_simple!("rt_rocm_memcpy_d2d", gpu::rt_rocm_memcpy_d2d_fn);
-    insert_simple!("rt_rocm_memcpy_d2h", gpu::rt_rocm_memcpy_d2h_fn);
-    insert_simple!("rt_rocm_memcpy_dtoh", gpu::rt_rocm_memcpy_dtoh_fn);
-    insert_simple!("rt_rocm_memcpy_h2d", gpu::rt_rocm_memcpy_h2d_fn);
-    insert_simple!("rt_rocm_memcpy_htod", gpu::rt_rocm_memcpy_htod_fn);
-    insert_simple!("rt_rocm_memset", gpu::rt_rocm_memset_fn);
-    insert_simple!("rt_rocm_module_load", gpu::rt_rocm_module_load_fn);
-    insert_simple!("rt_rocm_set_device", gpu::rt_rocm_set_device_fn);
-    insert_simple!("rt_rocm_shutdown", gpu::rt_rocm_shutdown_fn);
-    insert_simple!("rt_rocm_stream_synchronize", gpu::rt_rocm_stream_synchronize_fn);
-    insert_simple!("rt_rocm_synchronize", gpu::rt_rocm_synchronize_fn);
-    insert_simple!("rt_rocm_unload_module", gpu::rt_rocm_unload_module_fn);
+    insert_simple!("rt_rocm_device_count", gpu_rocm::rt_rocm_device_count_fn);
+    insert_simple!("rt_rocm_device_get", gpu_rocm::rt_rocm_device_get_fn);
+    insert_simple!("rt_rocm_device_memory", gpu_rocm::rt_rocm_device_memory_fn);
+    insert_simple!("rt_rocm_device_name", gpu_rocm::rt_rocm_device_name_fn);
+    insert_simple!("rt_rocm_compile_hsaco", gpu_rocm::rt_rocm_compile_hsaco_fn);
+    insert_simple!("rt_rocm_create_stream", gpu_rocm::rt_rocm_create_stream_fn);
+    insert_simple!("rt_rocm_destroy_stream", gpu_rocm::rt_rocm_destroy_stream_fn);
+    insert_simple!("rt_rocm_free", gpu_rocm::rt_rocm_free_fn);
+    insert_simple!("rt_rocm_get_device", gpu_rocm::rt_rocm_get_device_fn);
+    insert_simple!("rt_rocm_get_function", gpu_rocm::rt_rocm_get_function_fn);
+    insert_simple!("rt_rocm_get_last_error", gpu_rocm::rt_rocm_get_last_error_fn);
+    insert_simple!("rt_rocm_init", gpu_rocm::rt_rocm_init_fn);
+    insert_simple!("rt_rocm_is_available", gpu_rocm::rt_rocm_is_available_fn);
+    insert_simple!("rt_rocm_kernel_get", gpu_rocm::rt_rocm_kernel_get_fn);
+    insert_simple!("rt_rocm_launch_kernel", gpu_rocm::rt_rocm_launch_kernel_fn);
+    insert_simple!("rt_rocm_malloc", gpu_rocm::rt_rocm_malloc_fn);
+    insert_simple!("rt_rocm_mem_alloc", gpu_rocm::rt_rocm_mem_alloc_fn);
+    insert_simple!("rt_rocm_mem_free", gpu_rocm::rt_rocm_mem_free_fn);
+    insert_simple!("rt_rocm_memcpy_d2d", gpu_rocm::rt_rocm_memcpy_d2d_fn);
+    insert_simple!("rt_rocm_memcpy_d2h", gpu_rocm::rt_rocm_memcpy_d2h_fn);
+    insert_simple!("rt_rocm_memcpy_dtoh", gpu_rocm::rt_rocm_memcpy_dtoh_fn);
+    insert_simple!("rt_rocm_memcpy_h2d", gpu_rocm::rt_rocm_memcpy_h2d_fn);
+    insert_simple!("rt_rocm_memcpy_htod", gpu_rocm::rt_rocm_memcpy_htod_fn);
+    insert_simple!("rt_rocm_memset", gpu_rocm::rt_rocm_memset_fn);
+    insert_simple!("rt_rocm_module_load", gpu_rocm::rt_rocm_module_load_fn);
+    insert_simple!("rt_rocm_set_device", gpu_rocm::rt_rocm_set_device_fn);
+    insert_simple!("rt_rocm_shutdown", gpu_rocm::rt_rocm_shutdown_fn);
+    insert_simple!(
+        "rt_rocm_stream_synchronize",
+        gpu_rocm::rt_rocm_stream_synchronize_fn
+    );
+    insert_simple!("rt_rocm_synchronize", gpu_rocm::rt_rocm_synchronize_fn);
+    insert_simple!("rt_rocm_unload_module", gpu_rocm::rt_rocm_unload_module_fn);
     insert_simple!("rt_current_dir", file_io::rt_current_dir);
     insert_simple!("rt_current_time_ms", time::rt_current_time_ms);
     insert_simple!("rt_db_accel_bitmap_and_words", simd::rt_db_accel_bitmap_and_words);

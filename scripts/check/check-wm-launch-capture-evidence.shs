@@ -9,15 +9,18 @@ REPORT_PATH="${REPORT_PATH:-$BUILD_DIR/report.md}"
 SIMPLE_BIN="${SIMPLE_BIN:-src/compiler_rust/target/release/simple}"
 TIMEOUT_SECS="${WM_CAPTURE_EVIDENCE_TIMEOUT_SECS:-180}"
 KILL_SECS="${WM_CAPTURE_EVIDENCE_TIMEOUT_KILL_SECS:-10}"
-STRICT_LIVE_CAPTURE="${STRICT_LIVE_CAPTURE:-0}"
-STRICT_QEMU_CAPTURE="${STRICT_QEMU_CAPTURE:-0}"
+RUN_ELECTRON_LIVE_SMOKE="${RUN_ELECTRON_LIVE_SMOKE:-1}"
+RUN_ELECTRON_MDI_EVIDENCE="${RUN_ELECTRON_MDI_EVIDENCE:-1}"
 RUN_QEMU_LIVE_CAPTURE="${RUN_QEMU_LIVE_CAPTURE:-1}"
+STRICT_LIVE_CAPTURE="${STRICT_LIVE_CAPTURE:-1}"
+STRICT_QEMU_CAPTURE="${STRICT_QEMU_CAPTURE:-$RUN_QEMU_LIVE_CAPTURE}"
 QEMU_QMP_SOCKET="${QEMU_QMP_SOCKET:-}"
 QEMU_SCREENDUMP_PATH="${QEMU_SCREENDUMP_PATH:-$BUILD_DIR/qemu_screendump.ppm}"
 CONTRACT_SRC="$BUILD_DIR/wm_launch_capture_contract.spl"
 CONTRACT_LOG="$BUILD_DIR/contract.log"
 SPEC_LOG="$BUILD_DIR/spec.log"
 ELECTRON_LOG="$BUILD_DIR/electron-live.log"
+ELECTRON_MDI_LOG="$BUILD_DIR/electron-mdi.log"
 QEMU_LOG="$BUILD_DIR/qemu-live.log"
 QEMU_SRC="$BUILD_DIR/qemu_live_capture_contract.spl"
 
@@ -39,7 +42,7 @@ field_of() {
 }
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
-rm -f "$CONTRACT_LOG" "$SPEC_LOG" "$ELECTRON_LOG" "$QEMU_LOG" "$REPORT_PATH"
+rm -f "$CONTRACT_LOG" "$SPEC_LOG" "$ELECTRON_LOG" "$ELECTRON_MDI_LOG" "$QEMU_LOG" "$REPORT_PATH"
 
 echo "check=wm_launch_capture_evidence"
 echo "strict_live_capture=$STRICT_LIVE_CAPTURE"
@@ -190,7 +193,7 @@ fi
 
 electron_live_status=unavailable
 electron_live_reason=not-run
-if [ "${RUN_ELECTRON_LIVE_SMOKE:-1}" = "1" ]; then
+if [ "$RUN_ELECTRON_LIVE_SMOKE" = "1" ]; then
     set +e
     run_with_timeout sh scripts/check/check-electron-live-smoke.shs >"$ELECTRON_LOG" 2>&1
     electron_code=$?
@@ -209,6 +212,29 @@ if [ "${RUN_ELECTRON_LIVE_SMOKE:-1}" = "1" ]; then
 else
     electron_live_status=skipped
     electron_live_reason=RUN_ELECTRON_LIVE_SMOKE=0
+fi
+
+electron_mdi_status=unavailable
+electron_mdi_reason=not-run
+if [ "$RUN_ELECTRON_MDI_EVIDENCE" = "1" ]; then
+    set +e
+    run_with_timeout sh scripts/check/check-electron-mdi-evidence.shs >"$ELECTRON_MDI_LOG" 2>&1
+    electron_mdi_code=$?
+    set -e
+    cat "$ELECTRON_MDI_LOG"
+    if [ "$electron_mdi_code" -eq 0 ] && grep -q "electron_mdi_json_proof=pass" "$ELECTRON_MDI_LOG" && grep -q "electron_mdi_screenshot=pass" "$ELECTRON_MDI_LOG"; then
+        electron_mdi_status=pass
+        electron_mdi_reason=mdi-json-and-screenshot-pass
+    else
+        electron_mdi_status=unavailable
+        electron_mdi_reason="$(sed -n 's/^error=//p; s/^reason=//p' "$ELECTRON_MDI_LOG" | tail -n 1)"
+        if [ -z "$electron_mdi_reason" ]; then
+            electron_mdi_reason=electron-mdi-evidence-not-available
+        fi
+    fi
+else
+    electron_mdi_status=skipped
+    electron_mdi_reason=RUN_ELECTRON_MDI_EVIDENCE=0
 fi
 
 qemu_live_status=unavailable
@@ -289,9 +315,12 @@ if [ "$contract_status" != "pass" ]; then
 elif [ "$spec_status" != "pass" ]; then
     status=fail
     reason="$spec_reason"
-elif [ "$STRICT_LIVE_CAPTURE" = "1" ] && [ "$electron_live_status" != "pass" ]; then
+elif [ "$STRICT_LIVE_CAPTURE" = "1" ] && [ "$RUN_ELECTRON_LIVE_SMOKE" = "1" ] && [ "$electron_live_status" != "pass" ]; then
     status=fail
     reason=electron-live-capture-unavailable
+elif [ "$STRICT_LIVE_CAPTURE" = "1" ] && [ "$RUN_ELECTRON_MDI_EVIDENCE" = "1" ] && [ "$electron_mdi_status" != "pass" ]; then
+    status=fail
+    reason=electron-mdi-evidence-unavailable
 elif [ "$STRICT_QEMU_CAPTURE" = "1" ] && [ "$qemu_live_status" != "pass" ]; then
     status=fail
     reason=qemu-live-capture-unavailable
@@ -308,6 +337,8 @@ fi
     echo "- spec_reason: $spec_reason"
     echo "- electron_live_status: $electron_live_status"
     echo "- electron_live_reason: $electron_live_reason"
+    echo "- electron_mdi_status: $electron_mdi_status"
+    echo "- electron_mdi_reason: $electron_mdi_reason"
     echo "- qemu_live_status: $qemu_live_status"
     echo "- qemu_live_reason: $qemu_live_reason"
     echo "- qemu_live_pixels: ${qemu_live_pixels:-0}"
@@ -332,6 +363,8 @@ echo "wm_launch_capture_contract_status=$contract_status"
 echo "wm_launch_capture_spec_status=$spec_status"
 echo "wm_launch_capture_electron_live_status=$electron_live_status"
 echo "wm_launch_capture_electron_live_reason=$electron_live_reason"
+echo "wm_launch_capture_electron_mdi_status=$electron_mdi_status"
+echo "wm_launch_capture_electron_mdi_reason=$electron_mdi_reason"
 echo "wm_launch_capture_qemu_live_status=$qemu_live_status"
 echo "wm_launch_capture_qemu_live_reason=$qemu_live_reason"
 echo "wm_launch_capture_qemu_live_pixels=${qemu_live_pixels:-0}"

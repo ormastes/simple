@@ -27,7 +27,7 @@ cuda_session_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -100,6 +100,39 @@ expect(session.launch_kernel_args("kernel_clear", 1, 1, 1, 1, 1, 1, 0)).to_equal
 expect(session.fill_kernel(64, 64, 0)).to_equal(1)
 expect(session.fill_kernel(0, 64, 4096)).to_equal(1)
 expect(session.launch_generated_2d("unsupported", 64, 64, 4096)).to_equal(1)
+```
+
+</details>
+
+#### supports injected CUDA FFI for the shared backend interface
+
+1. var session = CudaSession create with ffi
+   - Expected: session.kind() == BackendSessionKind.Cuda is true
+   - Expected: session.alloc(0) equals `0`
+   - Expected: session.launch_kernel("kernel_clear", 1, 1, 1, 1) equals `1`
+   - Expected: session.launch_kernel_args("kernel_clear", 1, 1, 1, 1, 1, 1, 0) equals `1`
+   - Expected: session.synchronize() equals `1`
+
+2. session shutdown
+   - Expected: session.ref_count equals `0`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = CudaSession.create_with_ffi(CudaFfi.create_static())
+
+expect(session.kind() == BackendSessionKind.Cuda).to_equal(true)
+expect(session.alloc(0)).to_equal(0)
+expect(session.launch_kernel("kernel_clear", 1, 1, 1, 1)).to_equal(1)
+expect(session.launch_kernel_args("kernel_clear", 1, 1, 1, 1, 1, 1, 0)).to_equal(1)
+expect(session.synchronize()).to_equal(1)
+session.shutdown()
+expect(session.ref_count).to_equal(0)
 ```
 
 </details>
@@ -181,8 +214,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

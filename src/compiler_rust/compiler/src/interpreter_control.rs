@@ -394,9 +394,15 @@ pub(super) fn exec_while(
 enum InlineIntOperand {
     Target,
     Index,
+    IndexPlus { delta: i64 },
+    IndexMinus { delta: i64 },
     IndexModulo { divisor: i64 },
     IndexTimes { factor: i64 },
     IndexBitAnd { mask: i64 },
+    IndexBitOr { mask: i64 },
+    IndexBitXor { mask: i64 },
+    IndexShiftLeft { bits: u32 },
+    IndexShiftRight { bits: u32 },
     Const(i64),
     EnvVar(String),
     LenOf(String),
@@ -448,6 +454,11 @@ enum DirectIntBranchPredicate {
     IndexModuloEquals {
         divisor: i64,
         remainder: i64,
+        match_when_equal: bool,
+    },
+    IndexBitAndEquals {
+        mask: i64,
+        expected: i64,
         match_when_equal: bool,
     },
 }
@@ -2114,6 +2125,18 @@ fn parse_index_branch_condition(expr: &Expr, index: &str) -> Option<DirectIntBra
             remainder,
             match_when_equal,
         })
+    } else if let Some((mask, expected)) = parse_index_bitand_static_equality(left, right, index) {
+        Some(DirectIntBranchPredicate::IndexBitAndEquals {
+            mask,
+            expected,
+            match_when_equal,
+        })
+    } else if let Some((mask, expected)) = parse_index_bitand_static_equality(right, left, index) {
+        Some(DirectIntBranchPredicate::IndexBitAndEquals {
+            mask,
+            expected,
+            match_when_equal,
+        })
     } else {
         None
     }
@@ -2134,6 +2157,24 @@ fn parse_index_modulo_static_equality(mod_expr: &Expr, expected_expr: &Expr, ind
     Some((divisor, remainder))
 }
 
+fn parse_index_bitand_static_equality(bitand_expr: &Expr, expected_expr: &Expr, index: &str) -> Option<(i64, i64)> {
+    let Expr::Binary { op, left, right } = bitand_expr else {
+        return None;
+    };
+    if *op != BinOp::BitAnd {
+        return None;
+    }
+    let mask = if matches!(left.as_ref(), Expr::Identifier(name) if name == index) {
+        parse_static_int(right)?
+    } else if matches!(right.as_ref(), Expr::Identifier(name) if name == index) {
+        parse_static_int(left)?
+    } else {
+        return None;
+    };
+    let expected = parse_static_int(expected_expr)?;
+    Some((mask, expected))
+}
+
 fn eval_direct_int_branch_predicate(predicate: &DirectIntBranchPredicate, index: i64) -> bool {
     match predicate {
         DirectIntBranchPredicate::IndexEquals {
@@ -2145,6 +2186,11 @@ fn eval_direct_int_branch_predicate(predicate: &DirectIntBranchPredicate, index:
             remainder,
             match_when_equal,
         } => (index % *divisor == *remainder) == *match_when_equal,
+        DirectIntBranchPredicate::IndexBitAndEquals {
+            mask,
+            expected,
+            match_when_equal,
+        } => (index & *mask == *expected) == *match_when_equal,
     }
 }
 
@@ -2197,6 +2243,21 @@ fn parse_direct_int_body_operand(expr: &Expr, index: &str) -> Option<InlineIntOp
         return None;
     };
     match op {
+        BinOp::Add if matches!(left.as_ref(), Expr::Identifier(name) if name == index) => {
+            Some(InlineIntOperand::IndexPlus {
+                delta: parse_static_int(right)?,
+            })
+        }
+        BinOp::Add if matches!(right.as_ref(), Expr::Identifier(name) if name == index) => {
+            Some(InlineIntOperand::IndexPlus {
+                delta: parse_static_int(left)?,
+            })
+        }
+        BinOp::Sub if matches!(left.as_ref(), Expr::Identifier(name) if name == index) => {
+            Some(InlineIntOperand::IndexMinus {
+                delta: parse_static_int(right)?,
+            })
+        }
         BinOp::Mod if matches!(left.as_ref(), Expr::Identifier(name) if name == index) => {
             let divisor = parse_static_int(right)?;
             if divisor == 0 {
@@ -2224,7 +2285,46 @@ fn parse_direct_int_body_operand(expr: &Expr, index: &str) -> Option<InlineIntOp
                 mask: parse_static_int(left)?,
             })
         }
+        BinOp::BitOr if matches!(left.as_ref(), Expr::Identifier(name) if name == index) => {
+            Some(InlineIntOperand::IndexBitOr {
+                mask: parse_static_int(right)?,
+            })
+        }
+        BinOp::BitOr if matches!(right.as_ref(), Expr::Identifier(name) if name == index) => {
+            Some(InlineIntOperand::IndexBitOr {
+                mask: parse_static_int(left)?,
+            })
+        }
+        BinOp::BitXor if matches!(left.as_ref(), Expr::Identifier(name) if name == index) => {
+            Some(InlineIntOperand::IndexBitXor {
+                mask: parse_static_int(right)?,
+            })
+        }
+        BinOp::BitXor if matches!(right.as_ref(), Expr::Identifier(name) if name == index) => {
+            Some(InlineIntOperand::IndexBitXor {
+                mask: parse_static_int(left)?,
+            })
+        }
+        BinOp::ShiftLeft if matches!(left.as_ref(), Expr::Identifier(name) if name == index) => {
+            Some(InlineIntOperand::IndexShiftLeft {
+                bits: parse_static_shift(right)?,
+            })
+        }
+        BinOp::ShiftRight if matches!(left.as_ref(), Expr::Identifier(name) if name == index) => {
+            Some(InlineIntOperand::IndexShiftRight {
+                bits: parse_static_shift(right)?,
+            })
+        }
         _ => None,
+    }
+}
+
+fn parse_static_shift(expr: &Expr) -> Option<u32> {
+    let bits = parse_static_int(expr)?;
+    if (0..64).contains(&bits) {
+        Some(bits as u32)
+    } else {
+        None
     }
 }
 
@@ -2298,6 +2398,8 @@ fn lower_stable_inline_operand(
     match operand {
         InlineIntOperand::EnvVar(name) if name == target => Ok(InlineIntOperand::Target),
         InlineIntOperand::EnvVar(name) if name == index => Ok(InlineIntOperand::Index),
+        InlineIntOperand::IndexPlus { delta } => Ok(InlineIntOperand::IndexPlus { delta }),
+        InlineIntOperand::IndexMinus { delta } => Ok(InlineIntOperand::IndexMinus { delta }),
         InlineIntOperand::EnvVar(name) => match env.get(&name) {
             Some(Value::Int(value)) => Ok(InlineIntOperand::Const(*value)),
             _ => Err(CompileError::runtime(format!(
@@ -2318,6 +2420,14 @@ fn lower_stable_inline_operand(
         InlineIntOperand::IndexModulo { divisor } => Ok(InlineIntOperand::IndexModulo { divisor }),
         InlineIntOperand::IndexTimes { factor } => Ok(InlineIntOperand::IndexTimes { factor }),
         InlineIntOperand::IndexBitAnd { mask } => Ok(InlineIntOperand::IndexBitAnd { mask }),
+        InlineIntOperand::IndexBitOr { mask } => Ok(InlineIntOperand::IndexBitOr { mask }),
+        InlineIntOperand::IndexBitXor { mask } => Ok(InlineIntOperand::IndexBitXor { mask }),
+        InlineIntOperand::IndexShiftLeft { bits } => {
+            Ok(InlineIntOperand::IndexShiftLeft { bits })
+        }
+        InlineIntOperand::IndexShiftRight { bits } => {
+            Ok(InlineIntOperand::IndexShiftRight { bits })
+        }
         InlineIntOperand::DictValue { dict, key } => match env.get(&dict) {
             Some(Value::Dict(values)) | Some(Value::FrozenDict(values)) => match values.get(&key) {
                 Some(Value::Int(value)) => Ok(InlineIntOperand::Const(*value)),
@@ -2342,9 +2452,15 @@ fn eval_stable_inline_operand(
     match operand {
         InlineIntOperand::Target => Ok(target),
         InlineIntOperand::Index => Ok(index),
+        InlineIntOperand::IndexPlus { delta } => Ok(index.wrapping_add(*delta)),
+        InlineIntOperand::IndexMinus { delta } => Ok(index.wrapping_sub(*delta)),
         InlineIntOperand::IndexModulo { divisor } => Ok(index % *divisor),
         InlineIntOperand::IndexTimes { factor } => Ok(index.wrapping_mul(*factor)),
         InlineIntOperand::IndexBitAnd { mask } => Ok(index & *mask),
+        InlineIntOperand::IndexBitOr { mask } => Ok(index | *mask),
+        InlineIntOperand::IndexBitXor { mask } => Ok(index ^ *mask),
+        InlineIntOperand::IndexShiftLeft { bits } => Ok(index << *bits),
+        InlineIntOperand::IndexShiftRight { bits } => Ok(index >> *bits),
         InlineIntOperand::Const(value) => Ok(*value),
         InlineIntOperand::EnvVar(name) => match env.get(name) {
             Some(Value::Int(value)) => Ok(*value),
@@ -2379,9 +2495,15 @@ fn eval_inline_operand(operand: &InlineIntOperand, target: i64, index: i64) -> i
     match operand {
         InlineIntOperand::Target => target,
         InlineIntOperand::Index => index,
+        InlineIntOperand::IndexPlus { delta } => index.wrapping_add(*delta),
+        InlineIntOperand::IndexMinus { delta } => index.wrapping_sub(*delta),
         InlineIntOperand::IndexModulo { divisor } => index % *divisor,
         InlineIntOperand::IndexTimes { factor } => index.wrapping_mul(*factor),
         InlineIntOperand::IndexBitAnd { mask } => index & *mask,
+        InlineIntOperand::IndexBitOr { mask } => index | *mask,
+        InlineIntOperand::IndexBitXor { mask } => index ^ *mask,
+        InlineIntOperand::IndexShiftLeft { bits } => index << *bits,
+        InlineIntOperand::IndexShiftRight { bits } => index >> *bits,
         InlineIntOperand::Const(value) => *value,
         InlineIntOperand::EnvVar(_) | InlineIntOperand::LenOf(_) | InlineIntOperand::DictValue { .. } => {
             unreachable!("stable integer operand was not lowered")

@@ -27,7 +27,7 @@ perf_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 35 | 35 | 0 | 0 |
+| 41 | 41 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -244,6 +244,56 @@ expect(i).to_equal(5)
 
 </details>
 
+#### direct counted while index plus sum preserves accumulator and final index
+
+1. sum = sum +
+   - Expected: sum equals `15`
+   - Expected: i equals `5`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var sum: i64 = 0
+var i: i64 = 0
+while i < 5:
+    sum = sum + (i + 1)
+    i = i + 1
+expect(sum).to_equal(15)
+expect(i).to_equal(5)
+```
+
+</details>
+
+#### direct counted while index minus sum preserves accumulator and final index
+
+1. sum = sum +
+   - Expected: sum equals `5`
+   - Expected: i equals `5`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var sum: i64 = 0
+var i: i64 = 0
+while i < 5:
+    sum = sum + (i - 1)
+    i = i + 1
+expect(sum).to_equal(5)
+expect(i).to_equal(5)
+```
+
+</details>
+
 #### direct counted while index bit and sum preserves accumulator and final index
 
 1. sum = sum +
@@ -264,6 +314,106 @@ while i < 5:
     sum = sum + (i & 1)
     i = i + 1
 expect(sum).to_equal(2)
+expect(i).to_equal(5)
+```
+
+</details>
+
+#### direct counted while index bit or sum preserves accumulator and final index
+
+1. sum = sum +
+   - Expected: sum equals `13`
+   - Expected: i equals `5`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var sum: i64 = 0
+var i: i64 = 0
+while i < 5:
+    sum = sum + (i | 1)
+    i = i + 1
+expect(sum).to_equal(13)
+expect(i).to_equal(5)
+```
+
+</details>
+
+#### direct counted while index bit xor sum preserves accumulator and final index
+
+1. sum = sum +
+   - Expected: sum equals `11`
+   - Expected: i equals `5`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var sum: i64 = 0
+var i: i64 = 0
+while i < 5:
+    sum = sum + (i xor 1)
+    i = i + 1
+expect(sum).to_equal(11)
+expect(i).to_equal(5)
+```
+
+</details>
+
+#### direct counted while index shift right sum preserves accumulator and final index
+
+1. sum = sum +
+   - Expected: sum equals `4`
+   - Expected: i equals `5`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var sum: i64 = 0
+var i: i64 = 0
+while i < 5:
+    sum = sum + (i >> 1)
+    i = i + 1
+expect(sum).to_equal(4)
+expect(i).to_equal(5)
+```
+
+</details>
+
+#### direct counted while index shift left sum preserves accumulator and final index
+
+1. sum = sum +
+   - Expected: sum equals `20`
+   - Expected: i equals `5`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var sum: i64 = 0
+var i: i64 = 0
+while i < 5:
+    sum = sum + (i << 1)
+    i = i + 1
+expect(sum).to_equal(20)
 expect(i).to_equal(5)
 ```
 
@@ -854,8 +1004,8 @@ expect(acc).to_equal(100)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 35 |
-| Active scenarios | 35 |
+| Total scenarios | 41 |
+| Active scenarios | 41 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

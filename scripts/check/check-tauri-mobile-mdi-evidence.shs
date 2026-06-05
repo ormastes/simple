@@ -9,6 +9,7 @@ ANDROID_RUNTIME="$ROOT_DIR/src/compiler_rust/target/x86_64-linux-android/release
 ANDROID_APK="$ROOT_DIR/tools/tauri-shell/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk"
 ANDROID_SCREENSHOT="${ANDROID_SCREENSHOT:-$BUILD_DIR/android_emulator_screenshot_live_mdi_final.png}"
 ANDROID_LOGCAT="${ANDROID_LOGCAT:-$BUILD_DIR/emulator_logcat_live_mdi_final.txt}"
+IOS_MDI_EVIDENCE="$ROOT_DIR/scripts/check/check-tauri-ios-mobile-mdi-evidence.shs"
 
 mkdir -p "$BUILD_DIR"
 
@@ -51,6 +52,12 @@ pass_line "android_apk_runtime_packaging"
 
 test -s "$ANDROID_SCREENSHOT" || fail "Android live MDI screenshot missing: $ANDROID_SCREENSHOT"
 test -s "$ANDROID_LOGCAT" || fail "Android live MDI logcat missing: $ANDROID_LOGCAT"
+python3 "$ROOT_DIR/scripts/check/ios_mdi_probe_server.py" --validate-screenshot \
+    "$ANDROID_SCREENSHOT" android_live_mdi_screenshot \
+    || fail "Android live MDI screenshot PNG validation failed"
+python3 "$ROOT_DIR/scripts/check/ios_mdi_probe_server.py" --validate-android-mdi-screenshot \
+    "$ANDROID_SCREENSHOT" \
+    || fail "Android live MDI screenshot semantic validation failed"
 
 python3 - "$ANDROID_LOGCAT" <<'PY'
 import json
@@ -87,8 +94,15 @@ checks = {
     "hasDragEvents": proof.get("hasDragEvents") is True,
     "dragMoved": proof.get("dragMoved") is True,
     "hasWindowEventRuntime": proof.get("hasWindowEventRuntime") is True,
+    "appActionControlFound": proof.get("appActionControlFound") is True,
+    "appInputControlFound": proof.get("appInputControlFound") is True,
     "bodyClickRouted": proof.get("bodyClickRouted") is True,
     "bodyInputRouted": proof.get("bodyInputRouted") is True,
+    "bodyKeyRouted": proof.get("bodyKeyRouted") is True,
+    "taskbarItemCount": proof.get("taskbarItemCount", 0) >= 4,
+    "taskbarIconCount": proof.get("taskbarIconCount", 0) >= 4,
+    "taskbarIconsVisible": proof.get("taskbarIconsVisible") is True,
+    "taskbarLabelsVisible": proof.get("taskbarLabelsVisible") is True,
     "htmlRenderable": proof.get("htmlRenderable") is True,
 }
 failed = [name for name, ok in checks.items() if not ok]
@@ -99,6 +113,18 @@ PY
 
 echo "android_screenshot=$ANDROID_SCREENSHOT"
 echo "android_logcat=$ANDROID_LOGCAT"
+
+sh "$IOS_MDI_EVIDENCE" --self-test > "$BUILD_DIR/ios_mdi_probe_self_test.log" 2>&1 \
+    || fail "iOS MDI probe self-test failed"
+pass_line "ios_mdi_probe_self_test"
+
+sh "$IOS_MDI_EVIDENCE" --browser-self-test > "$BUILD_DIR/ios_mdi_probe_browser_self_test.log" 2>&1 \
+    || fail "iOS MDI probe browser self-test failed"
+pass_line "ios_mdi_probe_browser_self_test"
+
+sh "$IOS_MDI_EVIDENCE" --tauri-url-self-test > "$BUILD_DIR/ios_mdi_probe_tauri_url_self_test.log" 2>&1 \
+    || fail "iOS MDI probe Tauri URL-mode self-test failed"
+pass_line "ios_mdi_probe_tauri_url_self_test"
 
 if [ "$(uname -s)" = "Darwin" ] && command -v xcrun >/dev/null 2>&1 && command -v xcodebuild >/dev/null 2>&1; then
     echo "ios_tooling=available"

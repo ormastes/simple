@@ -9,6 +9,7 @@
 //   ELECTRON_CAPTURE_OUTPUT=build/pixel_compare/captured.json \
 //   ELECTRON_CAPTURE_AUDIT_SELECTORS="#app,.widget-panel" \
 //   ELECTRON_CAPTURE_AUDIT_OUTPUT=build/pixel_compare/audit.json \
+//   ELECTRON_CAPTURE_MEDIA_FEATURES="prefers-contrast=more" \
 //   ELECTRON_CAPTURE_FAIL_ON_AUDIT=1 \
 //   xvfb-run --auto-servernum electron --no-sandbox --disable-gpu capture_html_argb.js
 
@@ -29,6 +30,30 @@ const auditOutputPath = process.env.ELECTRON_CAPTURE_AUDIT_OUTPUT || "";
 const contrastMinX100 = Number(process.env.ELECTRON_CAPTURE_CONTRAST_MIN_X100 || 450);
 const touchMinPx = Number(process.env.ELECTRON_CAPTURE_TOUCH_MIN_PX || 44);
 const failOnAudit = /^(1|true|yes)$/i.test(process.env.ELECTRON_CAPTURE_FAIL_ON_AUDIT || "");
+const emulatedMediaFeatures = parseMediaFeatures(process.env.ELECTRON_CAPTURE_MEDIA_FEATURES || "");
+
+function parseMediaFeatures(value) {
+  return String(value || "")
+    .split(",")
+    .map(part => part.trim())
+    .filter(Boolean)
+    .map(part => {
+      const eq = part.indexOf("=");
+      if (eq < 1) return null;
+      const name = part.slice(0, eq).trim();
+      const featureValue = part.slice(eq + 1).trim();
+      if (!name || !featureValue) return null;
+      return { name, value: featureValue };
+    })
+    .filter(Boolean);
+}
+
+async function applyEmulatedMediaFeatures(win, features) {
+  if (!features.length) return;
+  const dbg = win.webContents.debugger;
+  if (!dbg.isAttached()) dbg.attach("1.3");
+  await dbg.sendCommand("Emulation.setEmulatedMedia", { features });
+}
 
 function bitmapToLogicalArgb(image) {
   const size = image.getSize();
@@ -77,16 +102,44 @@ function bitmapToLogicalArgb(image) {
   return { pixels, nativeWidth: nw, nativeHeight: nh, downsampled: true };
 }
 
-async function collectAudit(win, selectors) {
+async function collectAudit(win, selectors, mediaFeatures) {
   if (!selectors.length) return null;
   return win.webContents.executeJavaScript(`
     (() => {
       const selectors = ${JSON.stringify(selectors)};
+      const mediaFeatures = ${JSON.stringify(mediaFeatures)};
       const contrastMinX100 = ${JSON.stringify(contrastMinX100)};
       const touchMinPx = ${JSON.stringify(touchMinPx)};
       const viewport = { width: window.innerWidth, height: window.innerHeight };
       const items = [];
       const entries = [];
+      const rootStyle = window.getComputedStyle(document.documentElement);
+      const mediaPreferenceResults = mediaFeatures.map(feature => {
+        const query = "(" + feature.name + ": " + feature.value + ")";
+        return {
+          name: feature.name,
+          value: feature.value,
+          query,
+          matches: window.matchMedia(query).matches
+        };
+      });
+      const rootQualityTokens = {
+        contrastPolicy: rootStyle.getPropertyValue("--ui-contrast-policy").trim(),
+        text: rootStyle.getPropertyValue("--ui-text").trim(),
+        dim: rootStyle.getPropertyValue("--ui-dim").trim(),
+        accent: rootStyle.getPropertyValue("--ui-accent").trim(),
+        glassOpacityFloorX100: rootStyle.getPropertyValue("--ui-glass-opacity-floor-x100").trim(),
+        windowAlphaX100: rootStyle.getPropertyValue("--ui-window-alpha-x100").trim(),
+        commandAlphaX100: rootStyle.getPropertyValue("--ui-command-alpha-x100").trim(),
+        taskbarAlphaX100: rootStyle.getPropertyValue("--ui-taskbar-alpha-x100").trim(),
+        widgetAlphaX100: rootStyle.getPropertyValue("--ui-widget-alpha-x100").trim(),
+        motionOpenMs: rootStyle.getPropertyValue("--ui-motion-open-ms").trim(),
+        motionCloseMs: rootStyle.getPropertyValue("--ui-motion-close-ms").trim(),
+        motionMinimizeMs: rootStyle.getPropertyValue("--ui-motion-minimize-ms").trim(),
+        wallpaperMotionMs: rootStyle.getPropertyValue("--ui-wallpaper-motion-ms").trim(),
+        backdropDurationMs: rootStyle.getPropertyValue("--ui-backdrop-duration-ms").trim(),
+        wallpaperState: rootStyle.getPropertyValue("--ui-wallpaper-state").trim()
+      };
       function parseRgb(value) {
         const match = String(value || "").match(/rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)(?:,\\s*([0-9.]+))?\\)/);
         if (!match) return null;
@@ -294,10 +347,42 @@ async function collectAudit(win, selectors) {
       if (clippedCount > 0) failureReasons.push("text-clipping");
       if (contrastFailures > 0) failureReasons.push("contrast");
       if (touchFailures > 0) failureReasons.push("touch-target");
+      const mediaPreferenceFailures = [];
+      mediaPreferenceResults.forEach(result => {
+        if (!result.matches) mediaPreferenceFailures.push(result.name + "=" + result.value + ":no-match");
+        if ((result.name === "prefers-contrast" && result.value === "more") ||
+            (result.name === "forced-colors" && result.value === "active")) {
+          if (rootQualityTokens.contrastPolicy !== "os-high") {
+            mediaPreferenceFailures.push(result.name + "=" + result.value + ":contrast-policy-" + rootQualityTokens.contrastPolicy);
+          }
+        }
+        if (result.name === "prefers-reduced-motion" && result.value === "reduce") {
+          if (rootQualityTokens.motionOpenMs !== "0" ||
+              rootQualityTokens.motionCloseMs !== "0" ||
+              rootQualityTokens.motionMinimizeMs !== "0") {
+            mediaPreferenceFailures.push("prefers-reduced-motion=reduce:lifecycle-motion-" +
+              rootQualityTokens.motionOpenMs + "-" +
+              rootQualityTokens.motionCloseMs + "-" +
+              rootQualityTokens.motionMinimizeMs);
+          }
+          if (rootQualityTokens.wallpaperMotionMs !== "0" ||
+              rootQualityTokens.backdropDurationMs !== "0" ||
+              rootQualityTokens.wallpaperState !== "wallpaper_static") {
+            mediaPreferenceFailures.push("prefers-reduced-motion=reduce:backdrop-motion-" +
+              rootQualityTokens.wallpaperMotionMs + "-" +
+              rootQualityTokens.backdropDurationMs + "-" +
+              rootQualityTokens.wallpaperState);
+          }
+        }
+      });
+      if (mediaPreferenceFailures.length > 0) failureReasons.push("media-preference");
       return {
         producer: "electron-chromium-dom-audit",
         viewport,
         selectors,
+        emulatedMediaFeatures: mediaFeatures,
+        mediaPreferenceResults,
+        rootQualityTokens,
         thresholds: {
           contrastMinX100,
           touchMinPx
@@ -313,6 +398,7 @@ async function collectAudit(win, selectors) {
         contrastFailures,
         touchChecked,
         touchFailures,
+        mediaPreferenceFailures,
         failureReasons,
         pass: failureReasons.length === 0
       };
@@ -344,9 +430,10 @@ async function main() {
 
   const absHtml = path.resolve(htmlPath);
   await win.loadFile(absHtml);
+  await applyEmulatedMediaFeatures(win, emulatedMediaFeatures);
   await new Promise(r => setTimeout(r, settleMs));
 
-  const audit = await collectAudit(win, auditSelectors);
+  const audit = await collectAudit(win, auditSelectors, emulatedMediaFeatures);
   const image = await win.capturePage({ x: 0, y: 0, width, height });
   const result = bitmapToLogicalArgb(image);
 
@@ -384,6 +471,8 @@ async function main() {
     console.log("audit_contrast_failures=" + audit.contrastFailures);
     console.log("audit_touch_checked=" + audit.touchChecked);
     console.log("audit_touch_failures=" + audit.touchFailures);
+    console.log("audit_media_features=" + audit.emulatedMediaFeatures.map(feature => feature.name + "=" + feature.value).join(","));
+    console.log("audit_media_preference_failures=" + audit.mediaPreferenceFailures.join(","));
     console.log("audit_pass=" + audit.pass);
     console.log("audit_failure_reasons=" + audit.failureReasons.join(","));
     console.log("audit_fail_on_audit=" + failOnAudit);

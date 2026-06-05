@@ -26,18 +26,32 @@ function renderEnvelopeMetadata(msg) {
 
 function renderEnvelopeScript(msg) {
     const metadata = renderEnvelopeMetadata(msg);
+    const bodyHtml = msg.body_html || msg.html || '';
+    const css = msg.css || '';
     return `
         window.__SIMPLE_WEB_RENDER_ENVELOPE__ = ${JSON.stringify(metadata)};
         (function() {
+            var cssText = ${JSON.stringify(css)};
+            if (cssText) {
+                var styleEl = document.getElementById('simple-server-css');
+                if (!styleEl) {
+                    styleEl = document.createElement('style');
+                    styleEl.id = 'simple-server-css';
+                    document.head.appendChild(styleEl);
+                }
+                if (styleEl.textContent !== cssText) {
+                    styleEl.textContent = cssText;
+                }
+            }
             var el = document.getElementById('app');
             if (!el) {
                 document.body.innerHTML = '<div id="app"></div>';
                 el = document.getElementById('app');
             }
-            el.innerHTML = ${JSON.stringify(msg.html || '')};
+            el.innerHTML = ${JSON.stringify(bodyHtml)};
         })();
         window.dispatchEvent(new CustomEvent('simple-render', {
-            detail: { html: ${JSON.stringify(msg.html || '')}, envelope: window.__SIMPLE_WEB_RENDER_ENVELOPE__ }
+            detail: { html: ${JSON.stringify(bodyHtml)}, envelope: window.__SIMPLE_WEB_RENDER_ENVELOPE__ }
         }));
     `;
 }

@@ -26,10 +26,45 @@ use std.gc_async_mut.gpu.engine2d.generated_kernel_dispatch.{
     generated_2d_session_launch_gate,
     generated_2d_session_runtime_provenance
 }
+use std.gc_async_mut.gpu.engine2d.session_support.{gpu_session_launch_gate_status}
+use std.gc_async_mut.gpu.engine2d.sffi_cuda.{CudaFfi}
 
 # ============================================================================
 # CudaSession
 # ============================================================================
+
+class CudaSessionEvidence:
+    operation: text
+    success: bool
+    status_code: text
+    reason: text
+    device: i64
+    context: i64
+    module: i64
+    kernel: i64
+    generation: i64
+    readback_available: bool
+    expected_checksum: i64
+    actual_checksum: i64
+
+    static fn create(operation: text, success: bool, status_code: text, reason: text, device: i64, context: i64, module: i64, kernel: i64, generation: i64, readback_available: bool, expected_checksum: i64, actual_checksum: i64) -> CudaSessionEvidence:
+        CudaSessionEvidence(
+            operation: operation,
+            success: success,
+            status_code: status_code,
+            reason: reason,
+            device: device,
+            context: context,
+            module: module,
+            kernel: kernel,
+            generation: generation,
+            readback_available: readback_available,
+            expected_checksum: expected_checksum,
+            actual_checksum: actual_checksum
+        )
+
+    fn diagnostic_text() -> text:
+        "CudaSessionEvidence[op={self.operation} success={self.success.to_text()} status={self.status_code} reason={self.reason} device={self.device} context={self.context} module={self.module} kernel={self.kernel} generation={self.generation} readback={self.readback_available.to_text()} expected={self.expected_checksum} actual={self.actual_checksum}]"
 
 class CudaSession:
     """Shared CUDA GPU context: device + context + PTX module cache + default stream.
@@ -48,10 +83,12 @@ class CudaSession:
     device: i64          # CUDA device handle
     ctx: i64             # retained primary/explicit context
     module_cache: i64    # PTX module cache (placeholder — first loaded module handle)
+    kernel_cache: i64    # last resolved CUDA function handle for injected FFI launches
     stream: i64          # default stream (0 = default CUDA stream)
     ref_count: i64       # reference counting
     is_initialized: bool
     generation: i64      # stale-resource detection; incremented on init and cleanup
+    ffi: CudaFfi?
 
     static fn create() -> CudaSession:
         """Return a zero-initialised, uninitialised session. Call init() before use."""
@@ -59,16 +96,25 @@ class CudaSession:
             device: 0,
             ctx: 0,
             module_cache: 0,
+            kernel_cache: 0,
             stream: 0,
             ref_count: 0,
             is_initialized: false,
-            generation: 0
+            generation: 0,
+            ffi: nil
         )
+
+    static fn create_with_ffi(ffi: CudaFfi) -> CudaSession:
+        val session = CudaSession.create()
+        session.ffi = ffi
+        session
 
     fn kind() -> BackendSessionKind:
         BackendSessionKind.Cuda
 
     fn is_available() -> bool:
+        if self.ffi != nil:
+            return self.ffi.is_available()
         cuda_available()
 
     me init() -> i64:
@@ -77,26 +123,36 @@ class CudaSession:
         Returns 0 (CUDA_SUCCESS) on success.  On failure all handles are zeroed
         and is_initialized remains false.
         """
-        if not cuda_available():
-            return 1
+        if self.ffi != nil:
+            if not self.ffi.init():
+                return 1
+            if self.ffi.device_count() < 1:
+                return 1
+        else:
+            if not cuda_available():
+                return 1
 
-        val init_result = cuda_init()
-        if init_result != CUDA_SUCCESS:
-            return init_result
+            val init_result = cuda_init()
+            if init_result != CUDA_SUCCESS:
+                return init_result
 
-        if cuda_device_count() < 1:
-            return 1
+            if cuda_device_count() < 1:
+                return 1
 
         # CUDA device (index 0 = first GPU)
         self.device = 0
 
         # Create primary CUDA context on device 0
-        self.ctx = cuda_ctx_create(self.device)
+        if self.ffi != nil:
+            self.ctx = self.ffi.ctx_create(self.device)
+        else:
+            self.ctx = cuda_ctx_create(self.device)
         if self.ctx == 0:
             self.device = 0
             return 1
 
         self.module_cache = 0
+        self.kernel_cache = 0
         self.stream = 0
         self.ref_count = 1
         self.is_initialized = true
@@ -121,10 +177,22 @@ class CudaSession:
 
     me load_module(ptx: text) -> i64:
         """Load a PTX module and return its handle. Wrapper over rt_cuda_module_load_data."""
-        cuda_module_load_data(ptx)
+        if self.ffi != nil:
+            val module = self.ffi.module_load_ptx(ptx)
+            if module != 0:
+                self.module_cache = module
+            return module
+        val module = cuda_module_load_data(ptx)
+        if module != 0:
+            self.module_cache = module
+        module
 
     me sync() -> i64:
         """Synchronize the default CUDA stream. Returns CUDA error code (0 = success)."""
+        if self.ffi != nil:
+            if self.ffi.synchronize():
+                return 0
+            return 1
         cuda_sync()
 
     me synchronize() -> i64:
@@ -138,12 +206,19 @@ class CudaSession:
 
     me alloc(size: i64) -> i64:
         """Allocate device memory of `size` bytes. Returns device pointer or 0 on failure."""
+        if size <= 0:
+            return 0
+        if self.ffi != nil:
+            return self.ffi.mem_alloc(size)
         cuda_mem_alloc(size)
 
     me free(ptr: i64):
         """Free device memory previously allocated with alloc()."""
         if ptr != 0:
-            cuda_mem_free(ptr)
+            if self.ffi != nil:
+                self.ffi.mem_free(ptr)
+            else:
+                cuda_mem_free(ptr)
 
     me launch_kernel(name: text, gx: i64, gy: i64, bx: i64, by: i64) -> i64:
         """Launch a kernel from the cached module with an empty argument block.
@@ -154,6 +229,14 @@ class CudaSession:
         """
         if self.module_cache == 0:
             return 1
+        if self.ffi != nil:
+            val kernel = self.ffi.kernel_get(self.module_cache, name)
+            if kernel <= 0:
+                return 1
+            self.kernel_cache = kernel
+            if self.ffi.launch_kernel(self.module_cache, name, gx, gy, 1, bx, by, 1, 0):
+                return 0
+            return 1
         cuda_launch_kernel(self.module_cache, name, gx, gy, 1, bx, by, 1, 0)
 
     me launch_kernel_args(name: text, gx: i64, gy: i64, gz: i64, bx: i64, by: i64, bz: i64, args_ptr: i64) -> i64:
@@ -161,6 +244,14 @@ class CudaSession:
         if self.module_cache == 0:
             return 1
         if args_ptr == 0:
+            return 1
+        if self.ffi != nil:
+            val kernel = self.ffi.kernel_get(self.module_cache, name)
+            if kernel <= 0:
+                return 1
+            self.kernel_cache = kernel
+            if self.ffi.launch_kernel(self.module_cache, name, gx, gy, gz, bx, by, bz, args_ptr):
+                return 0
             return 1
         cuda_launch_kernel(self.module_cache, name, gx, gy, gz, bx, by, bz, args_ptr)
 
@@ -175,8 +266,7 @@ class CudaSession:
         val gate = generated_2d_session_launch_gate("cuda", op, width, height, self.is_valid(), self.module_cache != 0, args_ptr)
         if not gate.ready:
             return 1
-        cuda_launch_kernel(
-            self.module_cache,
+        self.launch_kernel_args(
             gate.plan.entry_name,
             gate.plan.grid_x,
             gate.plan.grid_y,
@@ -186,6 +276,28 @@ class CudaSession:
             gate.plan.block_z,
             args_ptr
         )
+
+    me launch_generated_2d_evidence(op: text, width: i64, height: i64, args_ptr: i64) -> CudaSessionEvidence:
+        val operation = "launch_generated_2d:{op}"
+        val gate = generated_2d_session_launch_gate("cuda", op, width, height, self.is_valid(), self.module_cache != 0, args_ptr)
+        val status = gpu_session_launch_gate_status(
+            "cuda",
+            gate,
+            false,
+            "missing-cuda-ffi",
+            "runtime-not-ready",
+            "cuda-runtime-not-ready",
+            "missing-module",
+            "missing-cuda-generated-module"
+        )
+        if not status.ready:
+            return self._evidence(operation, false, status.status_code, status.reason, 0, false, 0, 0)
+        val rc = self.launch_generated_2d(op, width, height, args_ptr)
+        if rc == 0:
+            return self._evidence(operation, true, "submitted", "cuda-generated-2d-kernel-submitted", self.kernel_cache, true, 0, 0)
+        if self.kernel_cache <= 0:
+            return self._evidence(operation, false, "missing-kernel", "cuda-generated-2d-kernel-get-failed", 0, false, 0, 0)
+        self._evidence(operation, false, "submit-failed", "cuda-generated-2d-kernel-submit-failed", self.kernel_cache, false, 0, 0)
 
     me launch_generated_2d_runtime_provenance(op: text, width: i64, height: i64, args_ptr: i64) -> Generated2DSessionRuntimeProvenance:
         generated_2d_session_runtime_provenance("cuda", op, width, height, self.is_valid(), self.module_cache != 0, args_ptr)
@@ -205,12 +317,35 @@ class CudaSession:
     me _cleanup():
         """Destroy all GPU objects. Called automatically by release() on zero refcount."""
         if self.module_cache != 0:
-            cuda_module_unload(self.module_cache)
+            if self.ffi != nil:
+                self.ffi.module_unload(self.module_cache)
+            else:
+                cuda_module_unload(self.module_cache)
             self.module_cache = 0
         if self.ctx != 0:
-            cuda_ctx_destroy(self.ctx)
+            if self.ffi != nil:
+                self.ffi.ctx_destroy(self.ctx)
+            else:
+                cuda_ctx_destroy(self.ctx)
             self.ctx = 0
         self.device = 0
+        self.kernel_cache = 0
         self.stream = 0
         self.is_initialized = false
         self.generation = self.generation + 1
+
+    fn _evidence(operation: text, success: bool, status_code: text, reason: text, kernel: i64, readback_available: bool, expected_checksum: i64, actual_checksum: i64) -> CudaSessionEvidence:
+        CudaSessionEvidence.create(
+            operation,
+            success,
+            status_code,
+            reason,
+            self.device,
+            self.ctx,
+            self.module_cache,
+            kernel,
+            self.generation,
+            readback_available,
+            expected_checksum,
+            actual_checksum
+        )

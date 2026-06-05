@@ -1,0 +1,70 @@
+# Shared GPU compute session support.
+#
+# Backend sessions keep their backend-specific evidence structs, but common
+# decision logic lives here so CUDA, HIP/ROCm, and OpenCL do not drift.
+
+use std.gc_async_mut.gpu.engine2d.generated_kernel_dispatch.{Generated2DSessionLaunchGate}
+
+class GpuSessionLaunchStatus:
+    backend: text
+    success: bool
+    status_code: text
+    reason: text
+    ready: bool
+
+    static fn create(backend: text, success: bool, status_code: text, reason: text, ready: bool) -> GpuSessionLaunchStatus:
+        GpuSessionLaunchStatus(
+            backend: backend,
+            success: success,
+            status_code: status_code,
+            reason: reason,
+            ready: ready
+        )
+
+    fn diagnostic_text() -> text:
+        "GpuSessionLaunchStatus[backend={self.backend} success={self.success.to_text()} status={self.status_code} reason={self.reason} ready={self.ready.to_text()}]"
+
+class GpuSessionReadbackStatus:
+    backend: text
+    success: bool
+    status_code: text
+    reason: text
+    readback_available: bool
+    expected_checksum: i64
+    actual_checksum: i64
+
+    static fn create(backend: text, success: bool, status_code: text, reason: text, readback_available: bool, expected_checksum: i64, actual_checksum: i64) -> GpuSessionReadbackStatus:
+        GpuSessionReadbackStatus(
+            backend: backend,
+            success: success,
+            status_code: status_code,
+            reason: reason,
+            readback_available: readback_available,
+            expected_checksum: expected_checksum,
+            actual_checksum: actual_checksum
+        )
+
+    fn diagnostic_text() -> text:
+        "GpuSessionReadbackStatus[backend={self.backend} success={self.success.to_text()} status={self.status_code} reason={self.reason} readback={self.readback_available.to_text()} expected={self.expected_checksum} actual={self.actual_checksum}]"
+
+fn gpu_session_launch_gate_status(backend: text, gate: Generated2DSessionLaunchGate, missing_ffi: bool, missing_ffi_reason: text, runtime_status_code: text, runtime_reason: text, module_status_code: text, module_reason: text) -> GpuSessionLaunchStatus:
+    if not gate.plan.dispatch_ready:
+        return GpuSessionLaunchStatus.create(backend, false, "plan-not-ready", gate.plan.reason, false)
+    if gate.reason == "missing-args-pointer":
+        return GpuSessionLaunchStatus.create(backend, false, "missing-args-pointer", "missing-generated-2d-args-pointer", false)
+    if gate.reason == "runtime-not-ready" and missing_ffi:
+        return GpuSessionLaunchStatus.create(backend, false, "missing-ffi", missing_ffi_reason, false)
+    if gate.reason == "runtime-not-ready":
+        return GpuSessionLaunchStatus.create(backend, false, runtime_status_code, runtime_reason, false)
+    if gate.reason == "module-not-loaded":
+        return GpuSessionLaunchStatus.create(backend, false, module_status_code, module_reason, false)
+    GpuSessionLaunchStatus.create(backend, true, "ready", "ready", true)
+
+fn gpu_session_readback_status(backend: text, readback_available: bool, expected_checksum: i64, actual_checksum: i64, unavailable_reason: text, invalid_checksum_reason: text, matched_reason: text, mismatch_reason: text) -> GpuSessionReadbackStatus:
+    if not readback_available:
+        return GpuSessionReadbackStatus.create(backend, false, "readback-unavailable", unavailable_reason, false, expected_checksum, actual_checksum)
+    if expected_checksum == 0 or actual_checksum == 0:
+        return GpuSessionReadbackStatus.create(backend, false, "invalid-checksum", invalid_checksum_reason, true, expected_checksum, actual_checksum)
+    if expected_checksum == actual_checksum:
+        return GpuSessionReadbackStatus.create(backend, true, "readback-matched", matched_reason, true, expected_checksum, actual_checksum)
+    GpuSessionReadbackStatus.create(backend, false, "readback-mismatch", mismatch_reason, true, expected_checksum, actual_checksum)

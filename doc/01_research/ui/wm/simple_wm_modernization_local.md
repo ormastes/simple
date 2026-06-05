@@ -50,3 +50,18 @@ Recommended next feature set:
 3. Keep browser-audit evidence as a pass/fail gate with contrast, touch, clipping, and unexpected-overlap failures.
 4. Add real capture execution where host dependencies are available, but keep static command/report coverage so CI without Electron can still verify the contract.
 5. Treat any new decorative animation as suspect unless it communicates state or has a visible off/reduced path.
+
+## 2026-06-05 Codex Addendum: System Contrast Preference
+
+Sources consulted:
+
+- MDN, `prefers-contrast`: https://developer.mozilla.org/en-US/docs/Web/CSS/%40media/prefers-contrast
+- W3C Understanding WCAG 2.2 SC 2.5.8 Target Size Minimum: https://www.w3.org/WAI/WCAG22/Understanding/target-size-minimum.html
+- Material Design, Duration and easing: https://m1.material.io/motion/duration-easing.html
+
+Findings applied:
+
+- Modern shells should honor operating-system readability preferences in addition to app-local toggles. Simple WM already had a manual high-contrast policy; the generated CSS now also reacts to `prefers-contrast: more` and `forced-colors: active`.
+- The OS high-contrast path raises surface opacity and border visibility instead of only changing text color, because glass/translucency can reduce readability even when nominal foreground contrast is acceptable.
+- The existing 44 px shell touch target policy remains intentionally stricter than the WCAG 2.2 24 px minimum, matching the WM goal of desktop/tablet comfort rather than only minimum conformance.
+- Browser audit evidence should emulate relevant OS media preferences. A Chromium run with `prefers-contrast=more` caught and fixed a cascade specificity issue where `data-wm-contrast=comfortable` overrode the first media rule; the final rule now targets the explicit contrast states and the audit records `--ui-contrast-policy: os-high`.

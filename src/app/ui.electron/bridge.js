@@ -194,7 +194,7 @@ function electronWmInitScript() {
             if (!document.getElementById('simple-electron-wm-style')) {
                 var style = document.createElement('style');
                 style.id = 'simple-electron-wm-style';
-                style.textContent = '#wm-desktop{position:fixed;inset:0;overflow:hidden;pointer-events:none}.wm-window{position:absolute;display:flex;flex-direction:column;background:#111827;color:#e5e7eb;border:1px solid rgba(255,255,255,.18);box-shadow:0 18px 45px rgba(0,0,0,.42);border-radius:8px;overflow:hidden;pointer-events:auto}.wm-titlebar{height:32px;display:flex;align-items:center;gap:10px;padding:0 10px;background:#0f172a;border-bottom:1px solid rgba(255,255,255,.12);user-select:none;cursor:grab}.wm-titlebar:active{cursor:grabbing}.wm-traffic-lights{display:flex;gap:6px}.wm-traffic-lights button{width:13px;height:13px;border-radius:50%;border:0;font-size:0;padding:0}.wm-traffic-lights button[data-action=close]{background:#ff5f57}.wm-traffic-lights button[data-action=minimize]{background:#febc2e}.wm-traffic-lights button[data-action=maximize]{background:#28c840}.wm-title{font:600 12px system-ui,sans-serif;color:#e5e7eb}.wm-body{flex:1;min-height:0;overflow:hidden;background:#0b0d10}';
+                style.textContent = '#wm-desktop{position:fixed;inset:0;overflow:hidden;isolation:isolate}#wm-desktop .wm-titlebar{display:flex;align-items:center;gap:8px;height:46px;padding:0 18px;background:linear-gradient(180deg,rgba(255,255,255,.12),rgba(255,255,255,.04));border-bottom:1px solid rgba(255,255,255,.12);user-select:none;cursor:grab}#wm-desktop .wm-titlebar:active{cursor:grabbing}#wm-desktop .wm-title{font:600 13px/1 var(--ui-font-label,system-ui,sans-serif);color:var(--ui-text,#e5e7eb);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}';
                 document.head.appendChild(style);
             }
             var desktop = document.getElementById('wm-desktop');
@@ -442,8 +442,25 @@ function maybeWriteMdiProof(win) {
                 var dragMoved = false;
                 var bodyClickRouted = false;
                 var bodyInputRouted = false;
+                var bodyKeyRouted = false;
+                var appActionControlFound = false;
+                var appInputControlFound = false;
                 var dragBefore = null;
                 var dragAfter = null;
+                var taskbarItems = Array.from(document.querySelectorAll('#dock .tab-bar-item'));
+                var taskbarIcons = Array.from(document.querySelectorAll('#dock .tab-bar-icon'));
+                var taskbarIconsVisible = taskbarIcons.length >= 4 && taskbarIcons.every(function(icon) {
+                    var rect = icon.getBoundingClientRect();
+                    var style = window.getComputedStyle(icon);
+                    return rect.width >= 18 && rect.height >= 18 && style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+                });
+                var taskbarLabelsVisible = taskbarItems.length >= 4 && taskbarItems.every(function(item) {
+                    var label = item.querySelector('.tab-bar-label');
+                    if (!label) return false;
+                    var rect = label.getBoundingClientRect();
+                    var style = window.getComputedStyle(label);
+                    return rect.width >= 20 && rect.height >= 10 && style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+                });
                 if (wm && wm.windows && wm.windows.terminal) {
                     var terminal = wm.windows.terminal.win;
                     var body = wm.windows.terminal.body;
@@ -457,20 +474,28 @@ function maybeWriteMdiProof(win) {
                     dragAfter = { left: parseInt(terminal.style.left || '0', 10) || 0, top: parseInt(terminal.style.top || '0', 10) || 0 };
                     dragMoved = dragAfter.left > dragBefore.left && dragAfter.top > dragBefore.top;
                     if (body) {
-                        var probeButton = document.createElement('button');
-                        probeButton.setAttribute('data-action', 'proof_click');
-                        body.appendChild(probeButton);
-                        probeButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-                        bodyClickRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'action' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.action === 'proof_click');
-                        probeButton.remove();
+                        var appButton = body.querySelector('[data-action]');
+                        appActionControlFound = !!appButton;
+                        if (appButton) {
+                            var actionName = appButton.getAttribute('data-action') || '';
+                            appButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                            bodyClickRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'action' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.action === actionName);
+                        }
 
-                        var probeInput = document.createElement('input');
-                        probeInput.setAttribute('data-target-id', 'proof_input');
-                        body.appendChild(probeInput);
-                        probeInput.value = 'ok';
-                        probeInput.dispatchEvent(new Event('input', { bubbles: true }));
-                        bodyInputRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'input' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.targetId === 'proof_input' && wm.lastEvent.value === 'ok');
-                        probeInput.remove();
+                        var appInput = body.querySelector('input[data-target-id], textarea[data-target-id], select[data-target-id], [contenteditable][data-target-id]');
+                        appInputControlFound = !!appInput;
+                        if (appInput) {
+                            var targetId = appInput.getAttribute('data-target-id') || appInput.id || '';
+                            if (appInput.isContentEditable) {
+                                appInput.textContent = 'ok';
+                            } else {
+                                appInput.value = 'ok';
+                            }
+                            appInput.dispatchEvent(new Event('input', { bubbles: true }));
+                            bodyInputRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'input' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.targetId === targetId && wm.lastEvent.value === 'ok');
+                        }
+                        body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+                        bodyKeyRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'key' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.key === 'Enter');
                     }
                 }
                 return {
@@ -482,17 +507,40 @@ function maybeWriteMdiProof(win) {
             hasDragEvents: !!(window.__SIMPLE_ELECTRON_WM__ && window.__SIMPLE_ELECTRON_WM__.notifyMove),
             dragMoved: dragMoved,
             hasWindowEventRuntime: !!(wm && wm.bindWindowEvents && wm.sendWindowAction && wm.sendWindowInput && wm.sendWindowMouse),
+            appActionControlFound: appActionControlFound,
+            appInputControlFound: appInputControlFound,
             bodyClickRouted: bodyClickRouted,
             bodyInputRouted: bodyInputRouted,
+            bodyKeyRouted: bodyKeyRouted,
+            taskbarItemCount: taskbarItems.length,
+            taskbarIconCount: taskbarIcons.length,
+            taskbarIconsVisible: taskbarIconsVisible,
+            taskbarLabelsVisible: taskbarLabelsVisible,
             dragBefore: dragBefore,
             dragAfter: dragAfter,
             htmlRenderable: document.body.innerHTML.indexOf('simple-app-window') >= 0 && document.body.innerHTML.indexOf('<pre class="simple-app-pre">') >= 0
             };
         })();
     `).then(proof => {
-        fs.writeFileSync(process.env.SIMPLE_ELECTRON_MDI_PROOF_PATH, JSON.stringify(proof));
-        if (proof.count >= 4 && app) {
-            app.quit();
+        const screenshotPath = process.env.SIMPLE_ELECTRON_MDI_SCREENSHOT_PATH || '';
+        const finish = () => {
+            fs.writeFileSync(process.env.SIMPLE_ELECTRON_MDI_PROOF_PATH, JSON.stringify(proof));
+            if (proof.count >= 4 && app) {
+                app.quit();
+            }
+        };
+        if (screenshotPath) {
+            win.webContents.capturePage().then(image => {
+                fs.mkdirSync(path.dirname(screenshotPath), { recursive: true });
+                fs.writeFileSync(screenshotPath, image.toPNG());
+                proof.screenshotPath = screenshotPath;
+                finish();
+            }).catch(err => {
+                proof.screenshotError = String(err);
+                finish();
+            });
+        } else {
+            finish();
         }
     }).catch(err => {
         fs.writeFileSync(process.env.SIMPLE_ELECTRON_MDI_PROOF_PATH, JSON.stringify({ error: String(err) }));

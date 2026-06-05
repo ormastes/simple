@@ -27,14 +27,15 @@ extern fn rt_cuda_device_get(id: i64) -> i64
 extern fn rt_cuda_ctx_create(device: i64) -> i64
 extern fn rt_cuda_ctx_destroy(ctx: i64) -> i64
 extern fn rt_cuda_module_load(ptx: text) -> i64
+extern fn rt_cuda_module_load_data(ptx: text) -> i64
 extern fn rt_cuda_module_unload(module: i64) -> i64
-extern fn rt_cuda_kernel_get(module: i64, name: text) -> i64
-extern fn rt_cuda_launch_kernel(kernel: i64, gx: i64, gy: i64, gz: i64, bx: i64, by: i64, bz: i64, shared_mem: i64, args_ptr: i64) -> i64
+extern fn rt_cuda_module_get_function(module: i64, name: text) -> i64
+extern fn rt_cuda_launch_kernel(module: i64, name: text, gx: i64, gy: i64, gz: i64, bx: i64, by: i64, bz: i64, args_ptr: i64) -> i64
 extern fn rt_cuda_mem_alloc(size: i64) -> i64
 extern fn rt_cuda_mem_free(ptr: i64) -> i64
 extern fn rt_cuda_memcpy_htod(dst: i64, src: [u8], size: i64) -> i64
 extern fn rt_cuda_memcpy_dtoh(dst: [u8], src: i64, size: i64) -> i64
-extern fn rt_cuda_synchronize() -> i64
+extern fn rt_cuda_sync() -> i64
 extern fn rt_engine2d_pack_args_4(a: i64, b: i64, c: i64, d: i64) -> i64
 extern fn rt_engine2d_pack_args_8(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64) -> i64
 extern fn rt_engine2d_upload_pixels(d_dst: i64, pixels: [u32], count: i64) -> i64
@@ -143,27 +144,42 @@ impl FfiDispatchBase for CudaFfi:
                 else:
                     0
 
-    fn module_load_ptx(ptx: text) -> i64:
+    fn ctx_destroy(ctx: i64) -> bool:
         match self._mode:
-            case Static:
-                val module = rt_cuda_module_load(ptx)
-                if module < 0: 0 else: module
-            case Dynamic: 0
-
-    fn kernel_get(module: i64, name: text) -> i64:
-        match self._mode:
-            case Static: rt_cuda_kernel_get(module, name)
-            case Dynamic: 0
-
-    fn launch_kernel(kernel: i64, gx: i64, gy: i64, gz: i64, bx: i64, by: i64, bz: i64, shared_mem: i64, args_ptr: i64) -> bool:
-        match self._mode:
-            case Static: rt_cuda_launch_kernel(kernel, gx, gy, gz, bx, by, bz, shared_mem, args_ptr) == 0
+            case Static: rt_cuda_ctx_destroy(ctx) == 0
             case Dynamic:
                 if self._dyn_lib != nil:
-                    val result = self._dyn_lib.call_n("cuLaunchKernel", [kernel, gx, gy, gz, bx, by, bz, shared_mem, 0, args_ptr])
+                    val result = self._dyn_lib.call1("cuCtxDestroy", ctx)
                     result == 0
                 else:
                     false
+
+    fn module_load_ptx(ptx: text) -> i64:
+        match self._mode:
+            case Static:
+                val module = rt_cuda_module_load_data(ptx)
+                if module < 0: 0 else: module
+            case Dynamic: 0
+
+    fn module_unload(module: i64) -> bool:
+        match self._mode:
+            case Static: rt_cuda_module_unload(module) == 0
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call1("cuModuleUnload", module)
+                    result == 0
+                else:
+                    false
+
+    fn kernel_get(module: i64, name: text) -> i64:
+        match self._mode:
+            case Static: rt_cuda_module_get_function(module, name)
+            case Dynamic: 0
+
+    fn launch_kernel(module: i64, name: text, gx: i64, gy: i64, gz: i64, bx: i64, by: i64, bz: i64, args_ptr: i64) -> bool:
+        match self._mode:
+            case Static: rt_cuda_launch_kernel(module, name, gx, gy, gz, bx, by, bz, args_ptr) == 0
+            case Dynamic: false
 
     fn mem_alloc(size: i64) -> i64:
         match self._mode:
@@ -188,7 +204,7 @@ impl FfiDispatchBase for CudaFfi:
 
     fn synchronize() -> bool:
         match self._mode:
-            case Static: rt_cuda_synchronize() == 0
+            case Static: rt_cuda_sync() == 0
             case Dynamic:
                 if self._dyn_lib != nil:
                     val result = self._dyn_lib.call0("cuCtxSynchronize")

@@ -4,23 +4,194 @@ set -eu
 ROOT_DIR="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
 TAURI_DIR="$ROOT_DIR/tools/tauri-shell"
 BUILD_DIR="$ROOT_DIR/build/tauri_ios_mdi"
+PROBE_HELPER="$ROOT_DIR/scripts/check/ios_mdi_probe_server.py"
+ELECTRON_PROBE_RUNNER="$ROOT_DIR/scripts/check/ios_mdi_probe_electron_self_test.js"
+SIMPLE_BIN="${SIMPLE_BIN:-$ROOT_DIR/src/compiler_rust/target/release/simple}"
+SMOKE_SOURCE="$ROOT_DIR/examples/06_io/ui/tauri_mobile_mdi_smoke.spl"
 SCREENSHOT="${IOS_MDI_SCREENSHOT:-$BUILD_DIR/ios_simulator_mdi.png}"
 LOG_STREAM="$BUILD_DIR/ios_simulator_log_stream.txt"
 IOS_DEV_LOG="$BUILD_DIR/ios_tauri_dev.log"
-SERVER_SCRIPT="$BUILD_DIR/ios_mdi_probe_server.py"
 SERVER_LOG="$BUILD_DIR/ios_mdi_probe_server.log"
 PROOF_JSON="$BUILD_DIR/ios_mdi_probe_proof.json"
-PORT="${IOS_MDI_PROBE_PORT:-41731}"
+SIMPLE_IPC_OUT="$BUILD_DIR/ios_mdi_simple_ipc.out"
+BROWSER_PROOF_JSON="$BUILD_DIR/ios_mdi_probe_browser_proof.json"
+BROWSER_SCREENSHOT="$BUILD_DIR/ios_mdi_probe_browser.png"
+BROWSER_LOG="$BUILD_DIR/ios_mdi_probe_browser.log"
+BROWSER_SIMPLE_IPC_OUT="$BUILD_DIR/ios_mdi_probe_browser_simple_ipc.out"
+TAURI_URL_PROOF_JSON="$BUILD_DIR/ios_mdi_probe_tauri_url_proof.json"
+TAURI_URL_LOG="$BUILD_DIR/ios_mdi_probe_tauri_url.log"
+TAURI_URL_SIMPLE_IPC_OUT="$BUILD_DIR/ios_mdi_probe_tauri_url_simple_ipc.out"
+TAURI_URL_SCREENSHOT="$BUILD_DIR/ios_mdi_probe_tauri_url.png"
+PORT="${IOS_MDI_PROBE_PORT:-$((41000 + ($$ % 10000)))}"
+BROWSER_PORT="${IOS_MDI_BROWSER_PROBE_PORT:-$((42000 + ($$ % 10000)))}"
+TAURI_URL_PORT="${IOS_MDI_TAURI_URL_PROBE_PORT:-$((43000 + ($$ % 10000)))}"
 TIMEOUT_SECS="${IOS_MDI_TIMEOUT_SECS:-60}"
-
-mkdir -p "$BUILD_DIR"
-rm -f "$PROOF_JSON"
 
 fail() {
     echo "status=fail"
     echo "reason=$1"
     exit 1
 }
+
+capture_simple_ipc() {
+    output_path="$1"
+    test -x "$SIMPLE_BIN" || fail "host Simple runtime missing: $SIMPLE_BIN"
+    test -f "$SMOKE_SOURCE" || fail "mobile MDI smoke source missing: $SMOKE_SOURCE"
+    "$SIMPLE_BIN" check "$SMOKE_SOURCE" > "$output_path.check.log" 2>&1 \
+        || fail "mobile MDI smoke source check failed"
+    "$SIMPLE_BIN" run "$SMOKE_SOURCE" --mode=interpreter --clean \
+        > "$output_path" 2> "$output_path.err" \
+        || fail "mobile MDI smoke source run failed"
+    open_count="$(grep -c '"type":"openWindow"' "$output_path" || true)"
+    if [ "$open_count" -lt 4 ]; then
+        fail "mobile MDI smoke emitted $open_count openWindow messages, expected at least 4"
+    fi
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+    command -v python3 >/dev/null 2>&1 || fail "python3 not found"
+    python3 "$PROBE_HELPER" --self-test
+    echo "status=pass"
+    exit 0
+fi
+
+if [ "${1:-}" = "--browser-self-test" ]; then
+    command -v python3 >/dev/null 2>&1 || fail "python3 not found"
+    command -v xvfb-run >/dev/null 2>&1 || fail "xvfb-run not found"
+    test -f "$PROBE_HELPER" || fail "iOS MDI probe helper missing: $PROBE_HELPER"
+    test -f "$ELECTRON_PROBE_RUNNER" || fail "iOS MDI Electron probe runner missing: $ELECTRON_PROBE_RUNNER"
+    if [ -x "$ROOT_DIR/tools/electron-shell/node_modules/.bin/electron" ]; then
+        ELECTRON_BIN="$ROOT_DIR/tools/electron-shell/node_modules/.bin/electron"
+    elif [ -x "$ROOT_DIR/tools/electron-shell/node_modules/electron/dist/electron" ]; then
+        ELECTRON_BIN="$ROOT_DIR/tools/electron-shell/node_modules/electron/dist/electron"
+    else
+        fail "Electron dependency missing under tools/electron-shell/node_modules"
+    fi
+
+    mkdir -p "$BUILD_DIR"
+    rm -f "$BROWSER_PROOF_JSON" "$BROWSER_SCREENSHOT" "$BROWSER_SIMPLE_IPC_OUT"
+    capture_simple_ipc "$BROWSER_SIMPLE_IPC_OUT"
+
+    python3 "$PROBE_HELPER" "$BROWSER_PORT" "$BROWSER_PROOF_JSON" "$BROWSER_SIMPLE_IPC_OUT" > "$SERVER_LOG" 2>&1 &
+    SERVER_PID=$!
+    cleanup_browser() {
+        kill "$SERVER_PID" 2>/dev/null || true
+    }
+    trap cleanup_browser EXIT INT TERM
+
+    sleep 1
+    kill -0 "$SERVER_PID" 2>/dev/null || fail "iOS MDI probe server failed to start; see $SERVER_LOG"
+
+    BROWSER_URL="http://127.0.0.1:$BROWSER_PORT/ios_mdi_probe.html"
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$TIMEOUT_SECS" xvfb-run -a --server-args="-screen 0 420x880x24" \
+            "$ELECTRON_BIN" --no-sandbox --disable-gpu "$ELECTRON_PROBE_RUNNER" \
+            "$BROWSER_URL" "$BROWSER_PROOF_JSON" "$BROWSER_SCREENSHOT" "$((TIMEOUT_SECS * 1000))" \
+            > "$BROWSER_LOG" 2>&1 \
+            || fail "iOS MDI browser probe failed; see $BROWSER_LOG"
+    else
+        xvfb-run -a --server-args="-screen 0 420x880x24" \
+            "$ELECTRON_BIN" --no-sandbox --disable-gpu "$ELECTRON_PROBE_RUNNER" \
+            "$BROWSER_URL" "$BROWSER_PROOF_JSON" "$BROWSER_SCREENSHOT" "$((TIMEOUT_SECS * 1000))" \
+            > "$BROWSER_LOG" 2>&1 \
+            || fail "iOS MDI browser probe failed; see $BROWSER_LOG"
+    fi
+    test -s "$BROWSER_SCREENSHOT" || fail "iOS MDI browser screenshot is empty: $BROWSER_SCREENSHOT"
+    python3 "$PROBE_HELPER" --validate "$BROWSER_PROOF_JSON" "$BROWSER_LOG"
+    python3 "$PROBE_HELPER" --validate-screenshot "$BROWSER_SCREENSHOT"
+    python3 "$PROBE_HELPER" --validate-probe-mdi-screenshot "$BROWSER_SCREENSHOT" ios_mdi_probe_browser_screenshot_semantic
+    echo "ios_mdi_probe_browser_self_test=pass"
+    echo "ios_mdi_probe_browser_screenshot=$BROWSER_SCREENSHOT"
+    echo "status=pass"
+    exit 0
+fi
+
+if [ "${1:-}" = "--tauri-url-self-test" ]; then
+    command -v python3 >/dev/null 2>&1 || fail "python3 not found"
+    command -v xvfb-run >/dev/null 2>&1 || fail "xvfb-run not found"
+    command -v xwd >/dev/null 2>&1 || fail "xwd not found"
+    command -v convert >/dev/null 2>&1 || fail "convert not found"
+    command -v cargo >/dev/null 2>&1 || fail "cargo not found"
+    test -f "$PROBE_HELPER" || fail "iOS MDI probe helper missing: $PROBE_HELPER"
+
+    mkdir -p "$BUILD_DIR"
+    rm -f "$TAURI_URL_PROOF_JSON" "$TAURI_URL_SIMPLE_IPC_OUT" "$TAURI_URL_SCREENSHOT" "$TAURI_URL_SCREENSHOT.xwd"
+    capture_simple_ipc "$TAURI_URL_SIMPLE_IPC_OUT"
+
+    python3 "$PROBE_HELPER" "$TAURI_URL_PORT" "$TAURI_URL_PROOF_JSON" "$TAURI_URL_SIMPLE_IPC_OUT" > "$SERVER_LOG" 2>&1 &
+    SERVER_PID=$!
+    cleanup_tauri_url() {
+        kill "$SERVER_PID" 2>/dev/null || true
+    }
+    trap cleanup_tauri_url EXIT INT TERM
+
+    sleep 1
+    kill -0 "$SERVER_PID" 2>/dev/null || fail "iOS MDI probe server failed to start; see $SERVER_LOG"
+
+    TAURI_URL="http://127.0.0.1:$TAURI_URL_PORT/ios_mdi_probe.html"
+    tauri_url_code=0
+    WEBKIT_DISABLE_DMABUF_RENDERER=1 SIMPLE_DASHBOARD_URL="$TAURI_URL" \
+        xvfb-run -a --server-args="-screen 0 1280x720x24" \
+        sh -c '
+            cd "$1"
+            log="$2"
+            proof="$3"
+            screenshot="$4"
+            timeout_secs="$5"
+            cargo run --quiet > "$log" 2>&1 &
+            app_pid=$!
+            end=$(( $(date +%s) + timeout_secs ))
+            while [ "$(date +%s)" -lt "$end" ]; do
+                if [ -s "$proof" ]; then
+                    break
+                fi
+                if ! kill -0 "$app_pid" 2>/dev/null; then
+                    wait "$app_pid" 2>/dev/null || true
+                    exit 11
+                fi
+                sleep 1
+            done
+            if [ ! -s "$proof" ]; then
+                kill "$app_pid" 2>/dev/null || true
+                wait "$app_pid" 2>/dev/null || true
+                exit 12
+            fi
+            xwd -root -silent -out "$screenshot.xwd" || {
+                kill "$app_pid" 2>/dev/null || true
+                wait "$app_pid" 2>/dev/null || true
+                exit 13
+            }
+            convert "$screenshot.xwd" "$screenshot" || {
+                kill "$app_pid" 2>/dev/null || true
+                wait "$app_pid" 2>/dev/null || true
+                exit 14
+            }
+            kill "$app_pid" 2>/dev/null || true
+            wait "$app_pid" 2>/dev/null || true
+        ' tauri-url "$TAURI_DIR/src-tauri" "$TAURI_URL_LOG" "$TAURI_URL_PROOF_JSON" "$TAURI_URL_SCREENSHOT" "$TIMEOUT_SECS" \
+        || tauri_url_code=$?
+    if [ "$tauri_url_code" -ne 0 ]; then
+        fail "Tauri URL-mode probe failed with code $tauri_url_code; see $TAURI_URL_LOG"
+    fi
+    test -s "$TAURI_URL_PROOF_JSON" || fail "Tauri URL-mode proof not observed within ${TIMEOUT_SECS}s"
+    test -s "$TAURI_URL_SCREENSHOT" || fail "Tauri URL-mode screenshot is empty: $TAURI_URL_SCREENSHOT"
+
+    python3 "$PROBE_HELPER" --validate "$TAURI_URL_PROOF_JSON" "$TAURI_URL_LOG"
+    python3 "$PROBE_HELPER" --validate-screenshot "$TAURI_URL_SCREENSHOT" ios_mdi_probe_tauri_url_screenshot
+    python3 "$PROBE_HELPER" --validate-probe-mdi-screenshot "$TAURI_URL_SCREENSHOT" ios_mdi_probe_tauri_url_screenshot_semantic
+    grep -q 'external_url: Some' "$TAURI_URL_LOG" \
+        || fail "Tauri URL-mode log missing external_url marker; see $TAURI_URL_LOG"
+    grep -q 'ios_mdi_probe.html' "$TAURI_URL_LOG" \
+        || fail "Tauri URL-mode log missing probe URL marker; see $TAURI_URL_LOG"
+    echo "ios_mdi_probe_tauri_url_self_test=pass"
+    echo "ios_mdi_probe_tauri_url_log=$TAURI_URL_LOG"
+    echo "ios_mdi_probe_tauri_url_screenshot=$TAURI_URL_SCREENSHOT"
+    echo "status=pass"
+    exit 0
+fi
+
+mkdir -p "$BUILD_DIR"
+rm -f "$PROOF_JSON" "$SIMPLE_IPC_OUT"
 
 if [ "$(uname -s)" != "Darwin" ]; then
     echo "ios_tooling=unavailable"
@@ -35,6 +206,8 @@ command -v cargo >/dev/null 2>&1 || fail "cargo not found"
 command -v npm >/dev/null 2>&1 || fail "npm not found"
 command -v python3 >/dev/null 2>&1 || fail "python3 not found"
 cargo tauri --version >/dev/null 2>&1 || fail "cargo-tauri not found"
+test -f "$PROBE_HELPER" || fail "iOS MDI probe helper missing: $PROBE_HELPER"
+capture_simple_ipc "$SIMPLE_IPC_OUT"
 
 SIM_UDID="${IOS_SIM_UDID:-}"
 if [ -z "$SIM_UDID" ]; then
@@ -55,149 +228,23 @@ print(iphones[0]["udid"] if iphones else "")
     )"
 fi
 test -n "$SIM_UDID" || fail "no available iPhone simulator found"
-
-cat > "$SERVER_SCRIPT" <<'PY'
-import http.server
+SIM_NAME="$(
+    xcrun simctl list devices available -j |
+    python3 -c '
 import json
-import socketserver
 import sys
-import urllib.parse
+target = sys.argv[1]
+devices = json.load(sys.stdin).get("devices", {})
+for runtime, runtime_devices in devices.items():
+    for device in runtime_devices:
+        if device.get("udid") == target:
+            print(device.get("name", "") + " (" + runtime + ")")
+            raise SystemExit(0)
+print("")
+' "$SIM_UDID"
+)"
 
-PORT = int(sys.argv[1])
-PROOF_PATH = sys.argv[2]
-
-HTML = r'''<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Simple iOS MDI Probe</title>
-<style>
-html,body{margin:0;width:100%;height:100%;font:14px system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#101418;color:#eef2f5;overflow:hidden}
-#desktop{position:fixed;inset:0;background:linear-gradient(135deg,#101418 0%,#1f2930 55%,#13251f 100%)}
-.taskbar{position:absolute;left:0;right:0;bottom:0;height:54px;display:flex;align-items:center;gap:8px;padding:0 10px;background:rgba(10,14,18,.92);border-top:1px solid rgba(255,255,255,.16);box-sizing:border-box}
-.taskbar button{width:42px;height:38px;border:1px solid rgba(255,255,255,.22);border-radius:7px;background:#1f2a31;color:#f8fafc;font-weight:700}
-.taskbar button.active{background:#2b6f62}
-.window{position:absolute;border:1px solid rgba(255,255,255,.22);border-radius:8px;background:#f8fafc;color:#172026;box-shadow:0 18px 40px rgba(0,0,0,.36);overflow:hidden}
-.titlebar{height:32px;background:#20303a;color:#fff;display:flex;align-items:center;padding:0 10px;cursor:grab;user-select:none;font-weight:700}
-.body{padding:12px}
-.simple-picture{width:78px;height:52px;border-radius:6px;background:linear-gradient(135deg,#e8c547,#278c76);border:2px solid #16252b}
-input{height:28px;border:1px solid #9aa6ad;border-radius:5px;padding:0 8px}
-.status{position:absolute;left:12px;top:12px;background:rgba(0,0,0,.48);padding:8px 10px;border-radius:6px;color:#f8fafc}
-</style>
-</head>
-<body>
-<main id="desktop" data-simple-desktop="true">
-<div class="status" id="status">running</div>
-<section class="window" id="win-terminal" style="left:20px;top:56px;width:250px;height:144px"><div class="titlebar">Terminal</div><div class="body"><input id="probe-input" value=""><button id="probe-button">Run</button></div></section>
-<section class="window" id="win-files" style="left:64px;top:130px;width:218px;height:132px"><div class="titlebar">Files</div><div class="body"><div class="simple-picture"></div></div></section>
-<section class="window" id="win-tasks" style="left:122px;top:86px;width:220px;height:130px"><div class="titlebar">Tasks</div><div class="body"><div class="simple-app-window">Task board</div></div></section>
-<section class="window" id="win-settings" style="left:158px;top:172px;width:205px;height:120px"><div class="titlebar">Settings</div><div class="body"><pre class="simple-app-pre">event bridge</pre></div></section>
-<nav class="taskbar" aria-label="MDI taskbar">
-<button data-window="win-terminal">T</button><button data-window="win-files">F</button><button data-window="win-tasks">K</button><button data-window="win-settings">S</button>
-</nav>
-</main>
-<script>
-(function(){
-  var proof = {count:4,hasDesktop:false,imageCount:0,hasDragRuntime:false,hasDragEvents:false,dragMoved:false,hasWindowEventRuntime:false,bodyClickRouted:false,bodyInputRouted:false,htmlRenderable:false,taskbarIconCount:0};
-  var desktop = document.getElementById('desktop');
-  var drag = null;
-  proof.hasDesktop = !!desktop;
-  proof.imageCount = document.querySelectorAll('.simple-picture').length;
-  proof.htmlRenderable = !!document.querySelector('.simple-app-window') && !!document.querySelector('.simple-app-pre');
-  proof.taskbarIconCount = document.querySelectorAll('.taskbar button').length;
-  proof.hasWindowEventRuntime = true;
-  proof.hasDragRuntime = true;
-  document.body.addEventListener('click', function(){ proof.bodyClickRouted = true; }, true);
-  document.getElementById('probe-input').addEventListener('input', function(){ proof.bodyInputRouted = true; }, true);
-  document.querySelectorAll('.taskbar button').forEach(function(button){
-    button.addEventListener('click', function(){ button.classList.add('active'); });
-  });
-  document.querySelectorAll('.titlebar').forEach(function(bar){
-    function start(ev){
-      var win = bar.parentElement;
-      drag = {win:win,x:ev.clientX || 0,y:ev.clientY || 0,left:win.offsetLeft,top:win.offsetTop};
-      proof.hasDragEvents = true;
-    }
-    function move(ev){
-      if (!drag) return;
-      drag.win.style.left = (drag.left + (ev.clientX || 0) - drag.x + 18) + 'px';
-      drag.win.style.top = (drag.top + (ev.clientY || 0) - drag.y + 10) + 'px';
-      proof.dragMoved = true;
-    }
-    function end(){ drag = null; }
-    bar.addEventListener('pointerdown', start);
-    window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', end);
-    bar.addEventListener('mousedown', start);
-    window.addEventListener('mousemove', move);
-    window.addEventListener('mouseup', end);
-  });
-  function evt(type, opts){
-    if (window.PointerEvent && type.indexOf('pointer') === 0) return new PointerEvent(type, Object.assign({bubbles:true}, opts || {}));
-    return new MouseEvent(type.replace('pointer','mouse'), Object.assign({bubbles:true}, opts || {}));
-  }
-  function runProbe(){
-    var title = document.querySelector('#win-terminal .titlebar');
-    title.dispatchEvent(evt('pointerdown', {clientX:30, clientY:60}));
-    window.dispatchEvent(evt('pointermove', {clientX:90, clientY:98}));
-    window.dispatchEvent(evt('pointerup', {clientX:90, clientY:98}));
-    document.body.dispatchEvent(new MouseEvent('click', {bubbles:true}));
-    var input = document.getElementById('probe-input');
-    input.value = 'ios-webview-event';
-    input.dispatchEvent(new Event('input', {bubbles:true}));
-    document.querySelector('.taskbar button').click();
-    document.getElementById('status').textContent = 'proof-pass';
-    window.__simpleMdiProof = proof;
-    fetch('/proof?' + new URLSearchParams(Object.entries(proof).map(function(pair){ return [pair[0], String(pair[1])]; }))).catch(function(){});
-  }
-  setTimeout(runProbe, 250);
-})();
-</script>
-</body>
-</html>'''
-
-class Handler(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        parsed = urllib.parse.urlparse(self.path)
-        if parsed.path in ('/', '/ios_mdi_probe.html'):
-            body = HTML.encode('utf-8')
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/html; charset=utf-8')
-            self.send_header('Content-Length', str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
-        if parsed.path == '/proof':
-            query = urllib.parse.parse_qs(parsed.query)
-            proof = {key: values[-1] for key, values in query.items()}
-            for key, value in list(proof.items()):
-                if value in ('true', 'false'):
-                    proof[key] = value == 'true'
-                else:
-                    try:
-                        proof[key] = int(value)
-                    except ValueError:
-                        pass
-            with open(PROOF_PATH, 'w', encoding='utf-8') as handle:
-                json.dump(proof, handle, sort_keys=True)
-            self.send_response(204)
-            self.end_headers()
-            return
-        self.send_response(404)
-        self.end_headers()
-    def log_message(self, fmt, *args):
-        sys.stderr.write(fmt % args + '\n')
-
-class Server(socketserver.TCPServer):
-    allow_reuse_address = True
-
-with Server(('127.0.0.1', PORT), Handler) as httpd:
-    print(f'ios_probe_url=http://127.0.0.1:{PORT}/ios_mdi_probe.html', flush=True)
-    httpd.serve_forever()
-PY
-
-python3 "$SERVER_SCRIPT" "$PORT" "$PROOF_JSON" > "$SERVER_LOG" 2>&1 &
+python3 "$PROBE_HELPER" "$PORT" "$PROOF_JSON" "$SIMPLE_IPC_OUT" > "$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 
 cleanup() {
@@ -215,9 +262,11 @@ sleep 1
 kill -0 "$SERVER_PID" 2>/dev/null || fail "iOS MDI probe server failed to start; see $SERVER_LOG"
 
 cd "$TAURI_DIR"
-npm run prepare:dist >/tmp/tauri_ios_prepare_dist.log 2>&1
+npm run prepare:dist > "$BUILD_DIR/ios_prepare_dist.log" 2>&1 \
+    || fail "npm prepare:dist failed; see $BUILD_DIR/ios_prepare_dist.log"
 if [ ! -d "src-tauri/gen/apple" ]; then
-    cargo tauri ios init > "$BUILD_DIR/ios_init.log" 2>&1
+    cargo tauri ios init > "$BUILD_DIR/ios_init.log" 2>&1 \
+        || fail "cargo tauri ios init failed; see $BUILD_DIR/ios_init.log"
 fi
 
 xcrun simctl boot "$SIM_UDID" >/dev/null 2>&1 || true
@@ -246,36 +295,19 @@ xcrun simctl io "$SIM_UDID" screenshot "$SCREENSHOT" > "$BUILD_DIR/ios_screensho
 test -s "$SCREENSHOT" || fail "iOS simulator screenshot is empty: $SCREENSHOT"
 test -s "$PROOF_JSON" || fail "iOS MDI probe proof not observed within ${TIMEOUT_SECS}s"
 
-python3 - "$PROOF_JSON" "$LOG_STREAM" "$IOS_DEV_LOG" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-proof = json.loads(Path(sys.argv[1]).read_text())
-logs = "\n".join(Path(path).read_text(errors="ignore") for path in sys.argv[2:])
-for forbidden in ["F DEBUG", "panicked", "InvalidUri", "Cannot redefine", "parse error", "Permission denied"]:
-    if forbidden in logs:
-        raise SystemExit(f"forbidden log marker present: {forbidden}")
-checks = {
-    "count": int(proof.get("count", 0)) >= 4,
-    "hasDesktop": proof.get("hasDesktop") is True,
-    "imageCount": int(proof.get("imageCount", 0)) >= 1,
-    "dragMoved": proof.get("dragMoved") is True,
-    "hasWindowEventRuntime": proof.get("hasWindowEventRuntime") is True,
-    "bodyClickRouted": proof.get("bodyClickRouted") is True,
-    "bodyInputRouted": proof.get("bodyInputRouted") is True,
-    "htmlRenderable": proof.get("htmlRenderable") is True,
-    "taskbarIconCount": int(proof.get("taskbarIconCount", 0)) >= 4,
-}
-failed = [name for name, ok in checks.items() if not ok]
-if failed:
-    raise SystemExit("iOS MDI probe failed fields: " + ", ".join(failed))
-print("ios_webview_mdi_proof=pass")
-PY
+python3 "$PROBE_HELPER" --validate "$PROOF_JSON" "$LOG_STREAM" "$IOS_DEV_LOG"
+python3 "$PROBE_HELPER" --validate-screenshot "$SCREENSHOT"
+python3 "$PROBE_HELPER" --validate-probe-mdi-screenshot "$SCREENSHOT" ios_mdi_probe_simulator_screenshot_semantic
+grep -q 'external_url: Some' "$IOS_DEV_LOG" \
+    || fail "Tauri iOS log missing external_url marker; see $IOS_DEV_LOG"
+grep -q 'ios_mdi_probe.html' "$IOS_DEV_LOG" \
+    || fail "Tauri iOS log missing probe URL marker; see $IOS_DEV_LOG"
 
 echo "ios_tooling=available"
 echo "ios_simulator=$SIM_UDID"
+echo "ios_simulator_name=$SIM_NAME"
 echo "ios_probe_url=http://127.0.0.1:$PORT/ios_mdi_probe.html"
+echo "ios_simple_ipc=$SIMPLE_IPC_OUT"
 echo "ios_screenshot=$SCREENSHOT"
 echo "ios_proof=$PROOF_JSON"
 echo "ios_log_stream=$LOG_STREAM"

@@ -439,11 +439,17 @@ class WebRenderVectorFontComputeEvidence:
     opencl_reason: text
     opencl_checksum: i64
     blur_or_tolerance_used: bool
+    offload_status: text
+    offload_reason: text
+    gpu_glyph_returned: bool
+    production_offload_ready: bool
     status: text
     reason: text
 
     static fn create(scene_id: text, cpu_checksum: i64, cpu_ink_pixels: i64, cuda_status: text, cuda_reason: text, cuda_checksum: i64, opencl_status: text, opencl_reason: text, opencl_checksum: i64, blur_or_tolerance_used: bool) -> WebRenderVectorFontComputeEvidence:
         val reason = web_render_vector_font_compute_reason(scene_id, cpu_checksum, cpu_ink_pixels, cuda_status, cuda_reason, cuda_checksum, opencl_status, opencl_reason, opencl_checksum, blur_or_tolerance_used)
+        val offload_status = web_render_vector_font_compute_offload_status(cuda_status, cuda_reason, opencl_status, opencl_reason)
+        val offload_reason = web_render_vector_font_compute_offload_reason(cuda_status, cuda_reason, opencl_status, opencl_reason)
         WebRenderVectorFontComputeEvidence(
             scene_id: scene_id,
             cpu_checksum: cpu_checksum,
@@ -455,12 +461,48 @@ class WebRenderVectorFontComputeEvidence:
             opencl_reason: opencl_reason,
             opencl_checksum: opencl_checksum,
             blur_or_tolerance_used: blur_or_tolerance_used,
+            offload_status: offload_status,
+            offload_reason: offload_reason,
+            gpu_glyph_returned: offload_status == "gpu-glyph-returned",
+            production_offload_ready: offload_status == "gpu-glyph-returned",
             status: if reason == "pass": "pass" else: "fail",
             reason: reason
         )
 
     fn summary() -> text:
-        "WebRenderVectorFontComputeEvidence[scene={self.scene_id} cpu_checksum={self.cpu_checksum} cpu_ink_pixels={self.cpu_ink_pixels} cuda_status={self.cuda_status} cuda_reason={self.cuda_reason} cuda_checksum={self.cuda_checksum} opencl_status={self.opencl_status} opencl_reason={self.opencl_reason} opencl_checksum={self.opencl_checksum} blur_or_tolerance_used={self.blur_or_tolerance_used} status={self.status} reason={self.reason}]"
+        "WebRenderVectorFontComputeEvidence[scene={self.scene_id} cpu_checksum={self.cpu_checksum} cpu_ink_pixels={self.cpu_ink_pixels} cuda_status={self.cuda_status} cuda_reason={self.cuda_reason} cuda_checksum={self.cuda_checksum} opencl_status={self.opencl_status} opencl_reason={self.opencl_reason} opencl_checksum={self.opencl_checksum} offload_status={self.offload_status} offload_reason={self.offload_reason} gpu_glyph_returned={self.gpu_glyph_returned.to_text()} production_offload_ready={self.production_offload_ready.to_text()} blur_or_tolerance_used={self.blur_or_tolerance_used} status={self.status} reason={self.reason}]"
+
+fn web_render_vector_font_backend_returned_glyph_pixels(backend_status: text, backend_reason: text) -> bool:
+    backend_status == "pass" and backend_reason.contains("glyph-pixels-returned")
+
+fn web_render_vector_font_backend_proved_cpu_match(backend_status: text, backend_reason: text) -> bool:
+    backend_status == "pass" and backend_reason.contains("matched-cpu")
+
+fn web_render_vector_font_compute_offload_status(cuda_status: text, cuda_reason: text, opencl_status: text, opencl_reason: text) -> text:
+    if web_render_vector_font_backend_returned_glyph_pixels(cuda_status, cuda_reason) or web_render_vector_font_backend_returned_glyph_pixels(opencl_status, opencl_reason):
+        return "gpu-glyph-returned"
+    if web_render_vector_font_backend_proved_cpu_match(cuda_status, cuda_reason) or web_render_vector_font_backend_proved_cpu_match(opencl_status, opencl_reason):
+        return "gpu-proof-with-cpu-glyph"
+    if cuda_status == "unavailable" and opencl_status == "unavailable":
+        return "accelerator-unavailable"
+    "not-proven"
+
+fn web_render_vector_font_compute_offload_reason(cuda_status: text, cuda_reason: text, opencl_status: text, opencl_reason: text) -> text:
+    if web_render_vector_font_backend_returned_glyph_pixels(cuda_status, cuda_reason):
+        if web_render_vector_font_backend_returned_glyph_pixels(opencl_status, opencl_reason):
+            return "cuda-opencl-vector-font-glyph-pixels-returned"
+        return cuda_reason
+    if web_render_vector_font_backend_returned_glyph_pixels(opencl_status, opencl_reason):
+        return opencl_reason
+    if web_render_vector_font_backend_proved_cpu_match(cuda_status, cuda_reason):
+        return cuda_reason
+    if web_render_vector_font_backend_proved_cpu_match(opencl_status, opencl_reason):
+        return opencl_reason
+    if cuda_status == "unavailable" and cuda_reason != "":
+        return cuda_reason
+    if opencl_status == "unavailable" and opencl_reason != "":
+        return opencl_reason
+    "vector-font-offload-not-proven"
 
 fn web_render_vector_font_compute_backend_reason(backend: text, backend_status: text, backend_reason: text, backend_checksum: i64, cpu_checksum: i64) -> text:
     if backend_status == "":
@@ -539,11 +581,11 @@ fn web_render_ipc_json(req: WebRenderRequest) -> text:
     web_render_ipc_json_with_html(req, web_render_full_html(req))
 
 fn web_render_ipc_json_with_html(req: WebRenderRequest, full_html: text) -> text:
-    "{\"type\":\"render\",\"target\":\"" + escape_json(req.target) + "\",\"surface_id\":\"" + escape_json(req.surface_id) + "\",\"width\":" + str(req.viewport_w) + ",\"height\":" + str(req.viewport_h) + ",\"html\":\"" + escape_json(full_html) + "\"}"
+    "{\"type\":\"render\",\"target\":\"" + escape_json(req.target) + "\",\"surface_id\":\"" + escape_json(req.surface_id) + "\",\"width\":" + str(req.viewport_w) + ",\"height\":" + str(req.viewport_h) + ",\"html\":\"" + escape_json(full_html) + "\",\"css\":\"" + escape_json(req.css) + "\",\"body_html\":\"" + escape_json(req.body_html) + "\"}"
 
 fn web_render_ipc_json_with_html_and_semantic(req: WebRenderRequest, full_html: text, semantic_json: text) -> text:
     val semantic_part = if semantic_json != "": ",\"semantic\":" + semantic_json else: ""
-    "{\"type\":\"render\",\"target\":\"" + escape_json(req.target) + "\",\"surface_id\":\"" + escape_json(req.surface_id) + "\",\"width\":" + str(req.viewport_w) + ",\"height\":" + str(req.viewport_h) + ",\"html\":\"" + escape_json(full_html) + "\"" + semantic_part + "}"
+    "{\"type\":\"render\",\"target\":\"" + escape_json(req.target) + "\",\"surface_id\":\"" + escape_json(req.surface_id) + "\",\"width\":" + str(req.viewport_w) + ",\"height\":" + str(req.viewport_h) + ",\"html\":\"" + escape_json(full_html) + "\",\"css\":\"" + escape_json(req.css) + "\",\"body_html\":\"" + escape_json(req.body_html) + "\"" + semantic_part + "}"
 
 fn _web_render_index_of_from(haystack: text, marker: text, start: i64) -> i64:
     if marker == "":

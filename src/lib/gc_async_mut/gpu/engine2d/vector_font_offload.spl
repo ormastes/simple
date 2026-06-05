@@ -1,0 +1,69 @@
+# Engine2D vector-font offload evidence.
+#
+# Keeps GPU/session provenance in Engine2D while the shared font rasterizer stays
+# usable from nogc text-layout modules.
+
+use std.gpu.engine2d.generated_kernel_dispatch.{Generated2DOperationProvenance, generated_2d_operation_provenance}
+use std.nogc_sync_mut.text_layout.font_rasterizer.{VectorFontAcceleratorStats, vector_font_accelerator_stats}
+
+class VectorFontOffloadEvidence:
+    backend_name: text
+    width: i64
+    height: i64
+    generated: Generated2DOperationProvenance
+    accelerator: VectorFontAcceleratorStats
+    generated_ready: bool
+    cpu_preprocess_required: bool
+    gpu_glyph_returned: bool
+    production_ready: bool
+    status_code: text
+    reason: text
+
+    static fn create(backend: text, width: i64, height: i64, runtime_ready: bool, module_ready: bool, args_ptr: i64, accelerator: VectorFontAcceleratorStats) -> VectorFontOffloadEvidence:
+        val generated = generated_2d_operation_provenance(backend, "vector_font", width, height, runtime_ready, module_ready, args_ptr)
+        val gpu_glyph_returned = accelerator.gpu_returned_glyphs > 0 and accelerator.gpu_returned_glyph_pixels > 0
+        val status = _vector_font_offload_status(generated, accelerator, gpu_glyph_returned)
+        VectorFontOffloadEvidence(
+            backend_name: backend,
+            width: width,
+            height: height,
+            generated: generated,
+            accelerator: accelerator,
+            generated_ready: generated.ready,
+            cpu_preprocess_required: generated.cpu_preprocess_required,
+            gpu_glyph_returned: gpu_glyph_returned,
+            production_ready: status == "gpu-glyph-returned",
+            status_code: status,
+            reason: _vector_font_offload_reason(generated, accelerator, gpu_glyph_returned)
+        )
+
+    fn diagnostic_text() -> text:
+        "VectorFontOffloadEvidence[backend={self.backend_name} size={self.width}x{self.height} generated_ready={self.generated_ready.to_text()} cpu_preprocess={self.cpu_preprocess_required.to_text()} gpu_glyph_returned={self.gpu_glyph_returned.to_text()} production_ready={self.production_ready.to_text()} status={self.status_code} reason={self.reason} generated={self.generated.diagnostic_text()}]"
+
+fn _vector_font_offload_status(generated: Generated2DOperationProvenance, accelerator: VectorFontAcceleratorStats, gpu_glyph_returned: bool) -> text:
+    if not generated.ready:
+        return generated.typed_status
+    if gpu_glyph_returned:
+        return "gpu-glyph-returned"
+    if accelerator.cuda_hits > 0 or accelerator.opencl_hits > 0:
+        return "gpu-proof-with-cpu-glyph"
+    if accelerator.cpu_fallback_hits > 0:
+        return "cpu-fallback"
+    "awaiting-rasterizer-evidence"
+
+fn _vector_font_offload_reason(generated: Generated2DOperationProvenance, accelerator: VectorFontAcceleratorStats, gpu_glyph_returned: bool) -> text:
+    if not generated.ready:
+        return generated.reason
+    if gpu_glyph_returned:
+        return accelerator.unavailable_reason
+    if accelerator.unavailable_reason != "":
+        return accelerator.unavailable_reason
+    if accelerator.cpu_fallback_hits > 0:
+        return "vector-font-gpu-glyph-return-missing"
+    "vector-font-rasterizer-not-yet-observed"
+
+fn vector_font_offload_evidence(backend: text, width: i64, height: i64, runtime_ready: bool, module_ready: bool, args_ptr: i64, accelerator: VectorFontAcceleratorStats) -> VectorFontOffloadEvidence:
+    VectorFontOffloadEvidence.create(backend, width, height, runtime_ready, module_ready, args_ptr, accelerator)
+
+fn vector_font_current_offload_evidence(backend: text, width: i64, height: i64, runtime_ready: bool, module_ready: bool, args_ptr: i64) -> VectorFontOffloadEvidence:
+    vector_font_offload_evidence(backend, width, height, runtime_ready, module_ready, args_ptr, vector_font_accelerator_stats())

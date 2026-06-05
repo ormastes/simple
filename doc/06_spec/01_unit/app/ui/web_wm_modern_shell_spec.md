@@ -205,7 +205,7 @@ Verifies the modern Simple Web window-manager shell at the contract level. The s
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 897 lines folded for reproduction.
+Runnable source: 903 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -530,6 +530,12 @@ expect(html).to_contain(".wm-quality-computed-spatial-value")
 expect(html).to_contain(":root[data-wm-window-transition=none] .wm-quality-computed-spatial-path::after")
 expect(html).to_contain("data-wm-contrast=high")
 expect(html).to_contain("--ui-contrast-policy: high")
+expect(html).to_contain("@media (prefers-contrast: more), (forced-colors: active)")
+expect(html).to_contain(":root[data-wm-contrast=comfortable]")
+expect(html).to_contain(":root[data-wm-contrast=high]")
+expect(html).to_contain("--ui-contrast-policy: os-high")
+expect(html).to_contain("--ui-window-alpha-x100: 94")
+expect(html).to_contain("--ui-widget-alpha-x100: 94")
 expect(html).to_contain("data-wm-quiet-mode=on")
 expect(html).to_contain("--ui-quiet-mode: on")
 expect(html).to_contain("--ui-backdrop-duration-ms: 0")
@@ -1115,7 +1121,7 @@ expect(html).to_contain("@keyframes wm-hot-corner-activate")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 1638 lines folded for reproduction.
+Runnable source: 1640 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1159,6 +1165,8 @@ expect(js).to_contain("dataset.browserAuditMetric")
 expect(js).to_contain("dataset.browserAuditReasons")
 expect(js).to_contain("quality_browser_audit")
 expect(js).to_contain("Browser audit: ")
+expect(js).to_contain("threshold: '>= 44px'")
+expect(js).to_contain("_qualityElementMinHeight(taskbarItem) >= 44")
 expect(js).to_contain("_syncTitleCommandSuggestionPreview")
 expect(js).to_contain("_markTitleCommandSuggestionAccepted")
 expect(js).to_contain("_titleCommandSuggestionFeedbackTimer")
@@ -4289,7 +4297,7 @@ expect(preview).to_contain("contrast_ratio_x100=450")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 104 lines folded for reproduction.
+Runnable source: 119 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -4326,6 +4334,8 @@ expect(report).to_contain("overflow_policy=fail-on-text-clipping")
 expect(report).to_contain("computed_style_required=true")
 expect(report).to_contain("reduced_motion_required=true")
 expect(report).to_contain("reduced_transparency_required=true")
+expect(report).to_contain("media_features=prefers-contrast=more")
+expect(report).to_contain("os_contrast_required=true")
 val browser_audit = wm_modern_preview_browser_audit_command(path, "build/simple_wm_modern_preview_argb.json", 1360, 840)
 expect(browser_audit).to_contain("ELECTRON_CAPTURE_HTML=\"build/simple_wm_modern_preview.html\"")
 expect(browser_audit).to_contain("ELECTRON_CAPTURE_WIDTH=1360")
@@ -4335,6 +4345,7 @@ expect(browser_audit).to_contain("ELECTRON_CAPTURE_AUDIT_SELECTORS=\"#wm-desktop
 expect(browser_audit).to_contain("ELECTRON_CAPTURE_AUDIT_OUTPUT=\"build/simple_wm_modern_preview_audit.json\"")
 expect(browser_audit).to_contain("ELECTRON_CAPTURE_CONTRAST_MIN_X100=450")
 expect(browser_audit).to_contain("ELECTRON_CAPTURE_TOUCH_MIN_PX=44")
+expect(browser_audit).to_contain("ELECTRON_CAPTURE_MEDIA_FEATURES=\"prefers-contrast=more\"")
 expect(browser_audit).to_contain("ELECTRON_CAPTURE_FAIL_ON_AUDIT=1")
 expect(browser_audit).to_contain("ELECTRON_CAPTURE_SETTLE_MS=1500")
 expect(browser_audit).to_contain("xvfb-run --auto-servernum")
@@ -4343,7 +4354,11 @@ expect(browser_audit).to_contain("tools/electron-live-bitmap/capture_html_argb.j
 val capture_js = rt_file_read_text("tools/electron-live-bitmap/capture_html_argb.js")
 expect(capture_js).to_contain("ELECTRON_CAPTURE_AUDIT_SELECTORS")
 expect(capture_js).to_contain("ELECTRON_CAPTURE_AUDIT_OUTPUT")
+expect(capture_js).to_contain("ELECTRON_CAPTURE_MEDIA_FEATURES")
 expect(capture_js).to_contain("ELECTRON_CAPTURE_FAIL_ON_AUDIT")
+expect(capture_js).to_contain("parseMediaFeatures")
+expect(capture_js).to_contain("applyEmulatedMediaFeatures")
+expect(capture_js).to_contain("Emulation.setEmulatedMedia")
 expect(capture_js).to_contain("collectAudit")
 expect(capture_js).to_contain("getBoundingClientRect")
 expect(capture_js).to_contain("getComputedStyle")
@@ -4356,6 +4371,11 @@ expect(capture_js).to_contain("contrastRatioX100")
 expect(capture_js).to_contain("effectiveBackground")
 expect(capture_js).to_contain("contrastFailures")
 expect(capture_js).to_contain("touchFailures")
+expect(capture_js).to_contain("mediaPreferenceResults")
+expect(capture_js).to_contain("rootQualityTokens")
+expect(capture_js).to_contain("contrastPolicy")
+expect(capture_js).to_contain("os-high")
+expect(capture_js).to_contain("mediaPreferenceFailures")
 expect(capture_js).to_contain("overlapPairs")
 expect(capture_js).to_contain("containedOverlapPairs")
 expect(capture_js).to_contain("allowedOverlayOverlapPairs")
@@ -4373,10 +4393,13 @@ expect(capture_js).to_contain("audit_allowed_overlaps=")
 expect(capture_js).to_contain("audit_unexpected_overlaps=")
 expect(capture_js).to_contain("audit_contrast_failures=")
 expect(capture_js).to_contain("audit_touch_failures=")
+expect(capture_js).to_contain("audit_media_features=")
+expect(capture_js).to_contain("audit_media_preference_failures=")
 expect(capture_js).to_contain("failureReasons")
 expect(capture_js).to_contain("unexpected-overlap")
 expect(capture_js).to_contain("text-clipping")
 expect(capture_js).to_contain("touch-target")
+expect(capture_js).to_contain("media-preference")
 expect(capture_js).to_contain("pass: failureReasons.length === 0")
 expect(capture_js).to_contain("audit_pass=")
 expect(capture_js).to_contain("audit_failure_reasons=")
@@ -4406,13 +4429,14 @@ expect(wm_js).to_contain("dataset.browserAuditReasons")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 257 lines folded for reproduction.
+Runnable source: 259 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val report = wm_theme_quality_report("glass_dark")
 expect(report.passed)
 expect(report.color_checked)
+expect(report.contrast_preference_media_ready)
 expect(report.contrast_ratio_x100).to_be_greater_than(449)
 expect(report.contrast_ratio_x100).to_be_greater_than(1700)
 expect(report.contrast_ratio_x100).to_be_less_than(1900)
@@ -4557,6 +4581,7 @@ expect(wm_theme_quality_summary("glass_dark")).to_contain("status=pass")
 expect(wm_theme_quality_summary("glass_dark")).to_contain("lifecycle_motion=true")
 expect(wm_theme_quality_summary("glass_dark")).to_contain("lifecycle_motion_profile_ready=true")
 expect(wm_theme_quality_summary("glass_dark")).to_contain("contrast_ratio_x100=")
+expect(wm_theme_quality_summary("glass_dark")).to_contain("contrast_preference_media_ready=true")
 expect(wm_theme_quality_summary("glass_dark")).to_contain("titlebar_height_px=46")
 expect(wm_theme_quality_summary("glass_dark")).to_contain("system_hud_max_width_px=280")
 expect(wm_theme_quality_summary("glass_dark")).to_contain("privacy_indicator_max_width_px=300")

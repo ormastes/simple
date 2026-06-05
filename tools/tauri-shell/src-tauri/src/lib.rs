@@ -33,8 +33,15 @@ struct MdiProof {
     has_drag_events: bool,
     drag_moved: bool,
     has_window_event_runtime: bool,
+    app_action_control_found: bool,
+    app_input_control_found: bool,
     body_click_routed: bool,
     body_input_routed: bool,
+    body_key_routed: bool,
+    taskbar_item_count: usize,
+    taskbar_icon_count: usize,
+    taskbar_icons_visible: bool,
+    taskbar_labels_visible: bool,
     html_renderable: bool,
 }
 
@@ -546,6 +553,23 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                 var dragMoved = false;
                 var bodyClickRouted = false;
                 var bodyInputRouted = false;
+                var bodyKeyRouted = false;
+                var appActionControlFound = false;
+                var appInputControlFound = false;
+                var taskbarItems = Array.from(document.querySelectorAll('#dock .tab-bar-item'));
+                var taskbarIcons = Array.from(document.querySelectorAll('#dock .tab-bar-icon'));
+                var taskbarIconsVisible = taskbarIcons.length >= 4 && taskbarIcons.every(function(icon) {
+                    var rect = icon.getBoundingClientRect();
+                    var style = window.getComputedStyle(icon);
+                    return rect.width >= 18 && rect.height >= 18 && style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+                });
+                var taskbarLabelsVisible = taskbarItems.length >= 4 && taskbarItems.every(function(item) {
+                    var label = item.querySelector('.tab-bar-label');
+                    if (!label) return false;
+                    var rect = label.getBoundingClientRect();
+                    var style = window.getComputedStyle(label);
+                    return rect.width >= 20 && rect.height >= 10 && style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+                });
                 if (wm && wm.windows && wm.windows.terminal) {
                     var terminal = wm.windows.terminal.win;
                     var body = wm.windows.terminal.body;
@@ -568,20 +592,28 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                     var afterTop = parseInt(terminal.style.top || '0', 10) || 0;
                     dragMoved = afterLeft > beforeLeft && afterTop > beforeTop;
                     if (body) {
-                        var probeButton = document.createElement('button');
-                        probeButton.setAttribute('data-action', 'proof_click');
-                        body.appendChild(probeButton);
-                        probeButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-                        bodyClickRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'action' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.action === 'proof_click');
-                        probeButton.remove();
+                        var appButton = body.querySelector('[data-action]');
+                        appActionControlFound = !!appButton;
+                        if (appButton) {
+                            var actionName = appButton.getAttribute('data-action') || '';
+                            appButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                            bodyClickRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'action' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.action === actionName);
+                        }
 
-                        var probeInput = document.createElement('input');
-                        probeInput.setAttribute('data-target-id', 'proof_input');
-                        body.appendChild(probeInput);
-                        probeInput.value = 'ok';
-                        probeInput.dispatchEvent(new Event('input', { bubbles: true }));
-                        bodyInputRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'input' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.targetId === 'proof_input' && wm.lastEvent.value === 'ok');
-                        probeInput.remove();
+                        var appInput = body.querySelector('input[data-target-id], textarea[data-target-id], select[data-target-id], [contenteditable][data-target-id]');
+                        appInputControlFound = !!appInput;
+                        if (appInput) {
+                            var targetId = appInput.getAttribute('data-target-id') || appInput.id || '';
+                            if (appInput.isContentEditable) {
+                                appInput.textContent = 'ok';
+                            } else {
+                                appInput.value = 'ok';
+                            }
+                            appInput.dispatchEvent(new Event('input', { bubbles: true }));
+                            bodyInputRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'input' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.targetId === targetId && wm.lastEvent.value === 'ok');
+                        }
+                        body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+                        bodyKeyRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'key' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.key === 'Enter');
                     }
                 }
                 var invoke = window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke
@@ -597,8 +629,15 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                             hasDragEvents: !!(wm && wm.notifyMove),
                             dragMoved: dragMoved,
                             hasWindowEventRuntime: !!(wm && wm.bindWindowEvents && wm.sendWindowAction && wm.sendWindowKey && wm.sendWindowInput && wm.sendWindowMouse),
+                            appActionControlFound: appActionControlFound,
+                            appInputControlFound: appInputControlFound,
                             bodyClickRouted: bodyClickRouted,
                             bodyInputRouted: bodyInputRouted,
+                            bodyKeyRouted: bodyKeyRouted,
+                            taskbarItemCount: taskbarItems.length,
+                            taskbarIconCount: taskbarIcons.length,
+                            taskbarIconsVisible: taskbarIconsVisible,
+                            taskbarLabelsVisible: taskbarLabelsVisible,
                             htmlRenderable: document.body.innerHTML.indexOf('simple-app-window') >= 0 && document.body.innerHTML.indexOf('<pre class="simple-app-pre">') >= 0
                         }
                     });
@@ -624,8 +663,15 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
             has_drag_events: true,
             drag_moved: false,
             has_window_event_runtime: true,
+            app_action_control_found: false,
+            app_input_control_found: false,
             body_click_routed: false,
             body_input_routed: false,
+            body_key_routed: false,
+            taskbar_item_count: 0,
+            taskbar_icon_count: 0,
+            taskbar_icons_visible: false,
+            taskbar_labels_visible: false,
             html_renderable: false,
         };
         if let Ok(path) = env::var("SIMPLE_TAURI_MDI_PROOF_PATH") {
@@ -1852,6 +1898,10 @@ mod tests {
         assert!(js.contains("wm_move:"));
         assert!(js.contains("simple-tauri-wm-style"));
         let src = include_str!("lib.rs");
+        assert!(src.contains("taskbarItemCount: taskbarItems.length"));
+        assert!(src.contains("taskbarIconCount: taskbarIcons.length"));
+        assert!(src.contains("taskbarIconsVisible: taskbarIconsVisible"));
+        assert!(src.contains("taskbarLabelsVisible: taskbarLabelsVisible"));
         assert!(src.contains(r#".env("SIMPLE_UI_BACKEND", "tauri")"#));
         assert!(src.contains("SIMPLE_EXECUTION_MODE"));
         assert!(src.contains("SIMPLE_TIMEOUT_SECONDS"));

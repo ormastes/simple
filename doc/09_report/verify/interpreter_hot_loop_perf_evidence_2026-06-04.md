@@ -21,8 +21,11 @@ where they fit Simple semantics.
 - Java/Bun-style counted `while` specialization: loops shaped as
   `while i < bound:` with one direct integer arithmetic assignment followed by
   `i = i + 1` avoid repeated condition expression evaluation and generic block
-  dispatch, including simple index-modulo and index-times operands such as
-  `sum = sum + (i % 2)` and `sum = sum + (i * 2)`.
+  dispatch, including simple index-offset, index-modulo, index-times,
+  index-bitmask, index-bitwise, and index-shift operands such as
+  `sum = sum + (i + 1)`, `sum = sum + (i % 2)`,
+  `sum = sum + (i * 2)`, `sum = sum + (i & 1)`,
+  `sum = sum + (i xor 1)`, and `sum = sum + (i >> 1)`.
 - Java/Bun-style branchy counted `while` specialization: loops shaped as
   `while i < bound:` with a single `if i == n`, `if i != n`, or
   `if i % n == r` guarded integer assignment avoid generic condition evaluation
@@ -108,6 +111,10 @@ Rows are averages from the raw samples recorded in this run.
 | 200k direct counted `while` modulo match count, us | 1140 | 32849 | 2059 | 2335 | Simple faster than Python/Bun/Java |
 | 200k direct counted `while` modulo sum, us | 1232 | 35500 | 1810 | 2084 | Simple faster than Python/Bun/Java |
 | 200k direct counted `while` index-times sum, us | 1137 | 18291 | 1969 | 1958 | Simple faster than Python/Bun/Java |
+| 200k direct counted `while` index-plus sum, us | 1198 | 20217 | 1890 | 1803 | Simple faster than Python/Bun/Java |
+| 200k direct counted `while` index-bitand sum, us | 1436 | 15255 | 2779 | 2408 | Simple faster than Python/Bun/Java |
+| 200k direct counted `while` index-xor sum, us | 1315 | 18856 | 2498 | 2308 | Simple faster than Python/Bun/Java |
+| 200k direct counted `while` index-shift sum, us | 1503 | 17884 | 1938 | 2446 | Simple faster than Python/Bun/Java |
 | 200k direct counted float `while` sum, us | 598 | 23162 | 1372 | 1630 | Simple faster than Python/Bun/Java |
 | 200k indexed integer array sum, us | 1221 | 46807 | 2007 | 1686 | Simple faster than Python/Bun/Java |
 | 200k indexed integer array match count, us | 1528 | 49904 | 2140 | 2183 | Simple faster than Python/Bun/Java |
@@ -191,6 +198,38 @@ PASS:
 - Same-run references: Python `18254`, `18016`, `18865`, `18115`, `18207` us;
   Bun `1611`, `2164`, `1790`, `2084`, `2196` us; Java `1898`, `2138`, `1940`,
   `1876`, `1941` us.
+- 200k direct `while i < 200000: sum = sum + (i + 1); i = i + 1`
+  loop-only samples after the direct index-plus operand fast path: `1201`,
+  `1199`, `1208`, `1194`, `1189` us.
+- Generic-path Simple samples for equivalent index-plus sum arithmetic were
+  `185971`, `188023`, `188323`, `186167`, `187148` us.
+- Same-run references: Python `22870`, `18506`, `20298`, `19875`, `19539` us;
+  Bun `1939`, `1937`, `2283`, `1801`, `1494` us; Java `1796`, `1781`, `1795`,
+  `1785`, `1858` us.
+- 200k direct `while i < 200000: sum = sum + (i & 1); i = i + 1`
+  loop-only samples after the direct index-bitand operand fast path: `1211`,
+  `1284`, `1363`, `1649`, `1673` us.
+- Generic-path Simple samples for equivalent index-bitand sum arithmetic were
+  `275976`, `278002`, `234707`, `200586`, `246652` us.
+- Same-run references: Python `15853`, `16007`, `15429`, `14657`, `14330` us;
+  Bun `4881`, `2136`, `3070`, `1824`, `1986` us; Java `2066`, `3057`, `2228`,
+  `1918`, `2774` us.
+- 200k direct `while i < 200000: sum = sum + (i xor 1); i = i + 1`
+  loop-only samples after the direct index-xor operand fast path: `1750`,
+  `1191`, `1168`, `1172`, `1295` us.
+- Generic-path Simple samples for equivalent index-xor sum arithmetic were
+  `204919`, `200820`, `225067`, `321043`, `254727` us.
+- Same-run references: Python `24034`, `17538`, `16956`, `17918`, `17834` us;
+  Bun `2037`, `2225`, `4276`, `1793`, `2163` us; Java `2153`, `2104`, `1941`,
+  `2090`, `3256` us.
+- 200k direct `while i < 200000: sum = sum + (i >> 1); i = i + 1`
+  loop-only samples after the direct index-shift operand fast path: `1761`,
+  `1360`, `1411`, `1503`, `1484` us.
+- Generic-path Simple samples for equivalent index-shift sum arithmetic were
+  `289685`, `275075`, `260510`, `285577`, `298825` us.
+- Same-run references: Python `17716`, `17795`, `17834`, `17667`, `18409` us;
+  Bun `1907`, `2471`, `1746`, `1821`, `1747` us; Java `2254`, `1988`, `2269`,
+  `2880`, `2841` us.
 - 200k direct `while i < 200000: sum = sum + 1.0; i = i + 1` loop-only
   samples after the direct counted float fast path: `567`, `579`, `571`,
   `634`, `638` us.
@@ -314,7 +353,7 @@ PASS:
   Bun `1973`, `2281`, `2022`, `2994`, `2586` us; Java `6510`, `6475`, `6609`,
   `6471`, `6457` us.
 - `SIMPLE_LIB=src bin/simple test test/01_unit/app/interpreter/perf_spec.spl --mode=interpreter --clean`
-  - 34 passed, 0 failed.
+  - 41 passed, 0 failed.
 
 ## Notes
 
@@ -322,7 +361,10 @@ This proves parity or better for the measured one-argument and two-argument
 integer helper-call loops, counted integer range-for sum loop, indexed integer
 array sum loop, indexed integer array match-count loop, branchy direct counted
 while equality loop, branchy direct counted while modulo loop, direct counted
-while modulo sum loop, direct counted while index-times sum loop, direct counted float while sum loop, indexed float array
+while modulo sum loop, direct counted while index-times sum loop, direct counted
+while index-plus sum loop, direct counted while index-minus sum correctness,
+while index-bitand sum loop, direct counted while index-xor sum loop, direct
+counted while index-shift sum loop, direct counted float while sum loop, indexed float array
 sum loop, indexed float array match-count loop, repeated stable length loop,
 constant dict lookup loop, integer array foreach sum loop, float array foreach
 sum loop, string foreach count loop, and indexed ASCII string match-count loop.

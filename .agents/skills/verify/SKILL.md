@@ -52,6 +52,12 @@ not create, rewrite, or weaken SPipe after verification.
 
 ### 4. NFR
 - Performance benchmarks exist
+- GUI/MDI live evidence wrappers must fail when requested visual/event proof is
+  unavailable, times out, or only proves artifact existence. Electron, Tauri
+  mobile/iOS, hosted WM, QEMU/GTK WM, and pure WM proof must include non-dummy
+  event routing plus semantic screenshot/pixel checks for rendered windows and
+  taskbar/dock icon or label regions. Explicit skips may pass only when reported
+  as skipped, not as live proof.
 - For `simple run` script-startup changes, require evidence from
   `test/02_integration/app/startup_argparse_mmap_perf_spec.spl` and confirm CLI
   argument scripts still avoid unnecessary compile/JIT startup unless

@@ -1,0 +1,69 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/vector_font_offload.spl 90%
+# @tag: unit, gpu, engine2d, vector-font
+
+use std.gpu.engine2d.vector_font_offload.{vector_font_offload_evidence}
+use std.nogc_sync_mut.text_layout.font_rasterizer.{VectorFontAcceleratorStats}
+
+fn accel(attempts: i64, cuda_hits: i64, opencl_hits: i64, cpu_hits: i64, returned_glyphs: i64, returned_pixels: i64, reason: text) -> VectorFontAcceleratorStats:
+    VectorFontAcceleratorStats(
+        attempts: attempts,
+        cuda_hits: cuda_hits,
+        opencl_hits: opencl_hits,
+        cpu_fallback_hits: cpu_hits,
+        gpu_returned_glyphs: returned_glyphs,
+        gpu_returned_glyph_pixels: returned_pixels,
+        unavailable_reason: reason
+    )
+
+describe "Engine2D vector font offload evidence":
+
+    it "marks CUDA vector font evidence production ready only after GPU glyph pixels return":
+        val evidence = vector_font_offload_evidence(
+            "cuda", 48, 24, true, true, 4096,
+            accel(1, 1, 0, 0, 1, 128, "cuda-vector-font-glyph-pixels-returned")
+        )
+
+        expect(evidence.generated_ready).to_equal(true)
+        expect(evidence.generated.generated_operation).to_equal("copy")
+        expect(evidence.cpu_preprocess_required).to_equal(true)
+        expect(evidence.gpu_glyph_returned).to_equal(true)
+        expect(evidence.production_ready).to_equal(true)
+        expect(evidence.status_code).to_equal("gpu-glyph-returned")
+        expect(evidence.reason).to_equal("cuda-vector-font-glyph-pixels-returned")
+        expect(evidence.diagnostic_text()).to_contain("family=vector_font")
+
+    it "keeps generated-ready OpenCL evidence separate from missing glyph readback":
+        val evidence = vector_font_offload_evidence(
+            "opencl", 48, 24, true, true, 8192,
+            accel(1, 0, 1, 1, 0, 0, "opencl-vector-font-proof-matched-cpu-with-cpu-glyph-return")
+        )
+
+        expect(evidence.generated_ready).to_equal(true)
+        expect(evidence.gpu_glyph_returned).to_equal(false)
+        expect(evidence.production_ready).to_equal(false)
+        expect(evidence.status_code).to_equal("gpu-proof-with-cpu-glyph")
+        expect(evidence.reason).to_equal("opencl-vector-font-proof-matched-cpu-with-cpu-glyph-return")
+        expect(evidence.generated.launch_api).to_equal("clEnqueueNDRangeKernel")
+
+    it "fails closed when the generated backend runtime is unavailable":
+        val evidence = vector_font_offload_evidence(
+            "cuda", 48, 24, false, false, 4096,
+            accel(1, 0, 0, 1, 0, 0, "production-gpu-dispatch-not-wired")
+        )
+
+        expect(evidence.generated_ready).to_equal(false)
+        expect(evidence.production_ready).to_equal(false)
+        expect(evidence.status_code).to_equal("cuda-runtime-unavailable")
+        expect(evidence.reason).to_equal("runtime-not-ready")
+
+    it "reports CPU fallback as an incomplete vector font offload state":
+        val evidence = vector_font_offload_evidence(
+            "cuda", 48, 24, true, true, 4096,
+            accel(1, 0, 0, 1, 0, 0, "production-gpu-dispatch-not-wired")
+        )
+
+        expect(evidence.generated_ready).to_equal(true)
+        expect(evidence.gpu_glyph_returned).to_equal(false)
+        expect(evidence.production_ready).to_equal(false)
+        expect(evidence.status_code).to_equal("cpu-fallback")
+        expect(evidence.reason).to_equal("production-gpu-dispatch-not-wired")

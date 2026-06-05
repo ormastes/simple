@@ -11,6 +11,7 @@ use std.gc_async_mut.gpu.engine2d.generated_kernel_dispatch.{
     generated_2d_session_launch_gate,
     generated_2d_session_runtime_provenance
 }
+use std.gc_async_mut.gpu.engine2d.session_support.{gpu_session_launch_gate_status, gpu_session_readback_status}
 use std.gc_async_mut.gpu.engine2d.sffi_rocm.{RocmFfi}
 
 class RocmSessionEvidence:
@@ -191,16 +192,18 @@ class RocmSession:
     me launch_generated_2d_evidence(op: text, width: i64, height: i64, args_ptr: i64) -> RocmSessionEvidence:
         val operation = "launch_generated_2d:{op}"
         val gate = generated_2d_session_launch_gate("rocm", op, width, height, self.is_valid(), self.module_cache != 0, args_ptr)
-        if not gate.plan.dispatch_ready:
-            return self._evidence(operation, false, "plan-not-ready", gate.plan.reason, 0, false, 0, 0)
-        if gate.reason == "missing-args-pointer":
-            return self._evidence(operation, false, "missing-args-pointer", "missing-generated-2d-args-pointer", 0, false, 0, 0)
-        if gate.reason == "runtime-not-ready" and self.ffi == nil:
-            return self._evidence(operation, false, "missing-ffi", "missing-rocm-ffi", 0, false, 0, 0)
-        if gate.reason == "runtime-not-ready":
-            return self._evidence(operation, false, "runtime-not-ready", "rocm-runtime-not-ready", 0, false, 0, 0)
-        if gate.reason == "module-not-loaded":
-            return self._evidence(operation, false, "missing-module", "missing-rocm-generated-module", 0, false, 0, 0)
+        val status = gpu_session_launch_gate_status(
+            "rocm",
+            gate,
+            self.ffi == nil,
+            "missing-rocm-ffi",
+            "runtime-not-ready",
+            "rocm-runtime-not-ready",
+            "missing-module",
+            "missing-rocm-generated-module"
+        )
+        if not status.ready:
+            return self._evidence(operation, false, status.status_code, status.reason, 0, false, 0, 0)
         val rc = self.launch_generated_2d(op, width, height, args_ptr)
         if rc == 0:
             return self._evidence(operation, true, "submitted", "rocm-generated-2d-kernel-submitted", self.kernel_cache, true, 0, 0)
@@ -250,13 +253,17 @@ class RocmSession:
         self.readback_evidence(true, expected_checksum, actual_checksum)
 
     fn readback_evidence(readback_available: bool, expected_checksum: i64, actual_checksum: i64) -> RocmSessionEvidence:
-        if not readback_available:
-            return self._evidence("readback", false, "readback-unavailable", "rocm-device-readback-required", 0, false, expected_checksum, actual_checksum)
-        if expected_checksum == 0 or actual_checksum == 0:
-            return self._evidence("readback", false, "invalid-checksum", "rocm-device-readback-checksum-required", 0, true, expected_checksum, actual_checksum)
-        if expected_checksum == actual_checksum:
-            return self._evidence("readback", true, "readback-matched", "rocm-readback-checksum-matched", 0, true, expected_checksum, actual_checksum)
-        self._evidence("readback", false, "readback-mismatch", "rocm-device-readback-checksum-mismatch", 0, true, expected_checksum, actual_checksum)
+        val status = gpu_session_readback_status(
+            "rocm",
+            readback_available,
+            expected_checksum,
+            actual_checksum,
+            "rocm-device-readback-required",
+            "rocm-device-readback-checksum-required",
+            "rocm-readback-checksum-matched",
+            "rocm-device-readback-checksum-mismatch"
+        )
+        self._evidence("readback", status.success, status.status_code, status.reason, 0, status.readback_available, expected_checksum, actual_checksum)
 
     me _cleanup():
         self.module_cache = 0

@@ -102,6 +102,13 @@ Scan for stub patterns — any match is a **FAIL**:
 - **Reliability:** error handling complete, `Result<T, E>` + `?` used consistently
 - **Maintainability:** files under 800 lines, no duplication
 - **Artifact naming:** no newly added/renamed numbered copy/version/part files
+- **GUI/MDI evidence gates:** wrappers that claim live visual/event proof must
+  fail when requested evidence is unavailable, times out, or only proves file
+  existence. For Electron, Tauri mobile/iOS, hosted WM, QEMU/GTK WM, and pure WM
+  evidence, require non-dummy event routing plus semantic screenshot/pixel
+  checks for rendered windows and taskbar/dock icon or label regions. Explicit
+  environment-based skips may pass only when the report says `skipped`, not when
+  it claims live proof.
 - **Core/MCP regression gate:** when compiler/core/lib or MCP/LSP files changed, require passing:
   - `<runtime> check src/compiler`
   - `<runtime> check src/lib`

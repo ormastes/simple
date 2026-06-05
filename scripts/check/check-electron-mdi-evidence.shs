@@ -1,0 +1,91 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
+BUILD_DIR="$ROOT_DIR/build/electron_mdi_evidence"
+SIMPLE_BIN="${SIMPLE_BIN:-$ROOT_DIR/src/compiler_rust/target/release/simple}"
+ENTRY="$ROOT_DIR/examples/06_io/ui/electron_wm.spl"
+PROOF_PATH="$BUILD_DIR/electron_mdi_proof.json"
+SCREENSHOT_PATH="$BUILD_DIR/electron_mdi.png"
+LOG_PATH="$BUILD_DIR/electron_mdi.log"
+TIMEOUT_SECS="${ELECTRON_MDI_TIMEOUT_SECS:-60}"
+
+mkdir -p "$BUILD_DIR"
+rm -f "$PROOF_PATH" "$SCREENSHOT_PATH"
+
+fail() {
+    echo "status=fail"
+    echo "reason=$1"
+    exit 1
+}
+
+command -v node >/dev/null 2>&1 || fail "node not found"
+command -v npm >/dev/null 2>&1 || fail "npm not found"
+command -v xvfb-run >/dev/null 2>&1 || fail "xvfb-run not found"
+test -x "$SIMPLE_BIN" || fail "host Simple runtime missing: $SIMPLE_BIN"
+test -f "$ENTRY" || fail "Electron MDI entry missing: $ENTRY"
+
+if [ ! -x "$ROOT_DIR/tools/electron-shell/node_modules/.bin/electron" ] \
+    && [ ! -x "$ROOT_DIR/tools/electron-shell/node_modules/electron/dist/electron" ]; then
+    fail "Electron dependency missing under tools/electron-shell/node_modules"
+fi
+
+if command -v timeout >/dev/null 2>&1; then
+    timeout "$TIMEOUT_SECS" xvfb-run -a --server-args="-screen 0 1280x720x24" \
+        env SIMPLE_ELECTRON_MDI_PROOF_PATH="$PROOF_PATH" \
+            SIMPLE_ELECTRON_MDI_SCREENSHOT_PATH="$SCREENSHOT_PATH" \
+            npm --prefix "$ROOT_DIR/tools/electron-shell" exec -- electron --no-sandbox "$ROOT_DIR/tools/electron-shell" \
+            --simple-bin "$SIMPLE_BIN" --entry "$ENTRY" > "$LOG_PATH" 2>&1 \
+        || fail "Electron MDI proof run failed; see $LOG_PATH"
+else
+    xvfb-run -a --server-args="-screen 0 1280x720x24" \
+        env SIMPLE_ELECTRON_MDI_PROOF_PATH="$PROOF_PATH" \
+            SIMPLE_ELECTRON_MDI_SCREENSHOT_PATH="$SCREENSHOT_PATH" \
+            npm --prefix "$ROOT_DIR/tools/electron-shell" exec -- electron --no-sandbox "$ROOT_DIR/tools/electron-shell" \
+            --simple-bin "$SIMPLE_BIN" --entry "$ENTRY" > "$LOG_PATH" 2>&1 \
+        || fail "Electron MDI proof run failed; see $LOG_PATH"
+fi
+
+test -s "$PROOF_PATH" || fail "Electron MDI proof missing: $PROOF_PATH"
+test -s "$SCREENSHOT_PATH" || fail "Electron MDI screenshot missing: $SCREENSHOT_PATH"
+
+node - "$PROOF_PATH" "$SCREENSHOT_PATH" <<'NODE'
+const fs = require('fs');
+const [proofPath, screenshotPath] = process.argv.slice(2);
+const proof = JSON.parse(fs.readFileSync(proofPath, 'utf8'));
+const checks = {
+  count: proof.count >= 4,
+  hasDesktop: proof.hasDesktop === true,
+  imageCount: proof.imageCount >= 1,
+  hasDragRuntime: proof.hasDragRuntime === true,
+  hasDragEvents: proof.hasDragEvents === true,
+  dragMoved: proof.dragMoved === true,
+  hasWindowEventRuntime: proof.hasWindowEventRuntime === true,
+  appActionControlFound: proof.appActionControlFound === true,
+  appInputControlFound: proof.appInputControlFound === true,
+  bodyClickRouted: proof.bodyClickRouted === true,
+  bodyInputRouted: proof.bodyInputRouted === true,
+  bodyKeyRouted: proof.bodyKeyRouted === true,
+  taskbarItemCount: proof.taskbarItemCount >= 4,
+  taskbarIconCount: proof.taskbarIconCount >= 4,
+  taskbarIconsVisible: proof.taskbarIconsVisible === true,
+  taskbarLabelsVisible: proof.taskbarLabelsVisible === true,
+  htmlRenderable: proof.htmlRenderable === true,
+  screenshotPath: proof.screenshotPath === screenshotPath,
+};
+const failed = Object.entries(checks).filter(([, ok]) => !ok).map(([name]) => name);
+if (failed.length) {
+  console.error(`Electron MDI proof failed fields: ${failed.join(', ')}`);
+  process.exit(1);
+}
+console.log('electron_mdi_json_proof=pass');
+NODE
+
+python3 "$ROOT_DIR/scripts/check/ios_mdi_probe_server.py" --validate-screenshot \
+    "$SCREENSHOT_PATH" electron_mdi_screenshot
+python3 "$ROOT_DIR/scripts/check/ios_mdi_probe_server.py" --validate-electron-mdi-screenshot \
+    "$SCREENSHOT_PATH"
+
+echo "electron_mdi_screenshot=$SCREENSHOT_PATH"
+echo "electron_mdi_proof=$PROOF_PATH"
+echo "status=pass"

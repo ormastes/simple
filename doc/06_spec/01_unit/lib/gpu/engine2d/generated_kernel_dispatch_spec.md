@@ -378,13 +378,16 @@ expect(opencl_unavailable.diagnostic_text()).to_contain("artifact=simple_2d_opti
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 36 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val cpu_vector = generated_2d_operation_provenance("cpu_simd_x86", "vector", 64, 32, false, false, 0)
+val cpu_vector_font = generated_2d_operation_provenance("cpu_simd_x86", "vector_font", 64, 32, false, false, 0)
 val cuda_text = generated_2d_operation_provenance("cuda", "text_blit", 64, 32, true, true, 2048)
+val cuda_vector_font = generated_2d_operation_provenance("cuda", "vector_font", 64, 32, true, true, 2048)
 val opencl_image = generated_2d_operation_provenance("opencl", "image_blit", 64, 32, false, false, 2048)
+val opencl_glyph = generated_2d_operation_provenance("opencl", "glyph_raster", 64, 32, true, true, 2048)
 val scalar_alpha = generated_2d_operation_provenance("cpu", "alpha_blend", 64, 32, false, false, 0)
 
 expect(cpu_vector.ready).to_equal(true)
@@ -392,15 +395,27 @@ expect(cpu_vector.compute_target).to_equal("cpu_simd")
 expect(cpu_vector.generated_artifact_required).to_equal(false)
 expect(cpu_vector.generated_operation).to_equal(GENERATED_2D_FILL)
 expect(cpu_vector.typed_status).to_equal("cpu-simd-baseline-ready")
+expect(cpu_vector_font.ready).to_equal(true)
+expect(cpu_vector_font.generated_operation).to_equal(GENERATED_2D_COPY)
+expect(cpu_vector_font.cpu_preprocess_required).to_equal(true)
+expect(cpu_vector_font.entry_name).to_equal("FontRasterizer.rasterize_vector_accelerated")
 expect(cuda_text.ready).to_equal(true)
 expect(cuda_text.generated_operation).to_equal(GENERATED_2D_COPY)
 expect(cuda_text.cpu_preprocess_required).to_equal(true)
 expect(cuda_text.artifact_name).to_equal("simple_2d_optimization.ptx")
+expect(cuda_vector_font.ready).to_equal(true)
+expect(cuda_vector_font.generated_operation).to_equal(GENERATED_2D_COPY)
+expect(cuda_vector_font.cpu_preprocess_required).to_equal(true)
+expect(cuda_vector_font.diagnostic_text()).to_contain("family=vector_font")
 expect(opencl_image.ready).to_equal(false)
 expect(opencl_image.generated_operation).to_equal(GENERATED_2D_COPY)
 expect(opencl_image.launch_api).to_equal("clEnqueueNDRangeKernel")
 expect(opencl_image.typed_status).to_equal("opencl-runtime-or-queue-unavailable")
 expect(opencl_image.artifact_name).to_equal("simple_2d_optimization.spirv")
+expect(opencl_glyph.ready).to_equal(true)
+expect(opencl_glyph.generated_operation).to_equal(GENERATED_2D_COPY)
+expect(opencl_glyph.cpu_preprocess_required).to_equal(true)
+expect(opencl_glyph.entry_name).to_equal("simple_2d_copy_u32")
 expect(scalar_alpha.compute_target).to_equal("cpu_scalar")
 expect(scalar_alpha.generated_operation).to_equal(GENERATED_2D_ALPHA)
 ```
