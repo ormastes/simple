@@ -1338,6 +1338,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_simd_engine2d_neon_hits", simd::rt_simd_engine2d_neon_hits);
     insert_simple!("rt_simd_engine2d_neon_reset", simd::rt_simd_engine2d_neon_reset);
     insert_simple!("rt_simd_fill_row_u32", simd::rt_simd_fill_row_u32);
+    insert_simple!("rt_engine2d_simd_fill_row_u32", simd::rt_engine2d_simd_fill_row_u32);
+    insert_simple!("rt_engine2d_simd_copy_row_u32", simd::rt_engine2d_simd_copy_row_u32);
+    insert_simple!("rt_engine2d_simd_blend_row_u32", simd::rt_engine2d_simd_blend_row_u32);
     insert_simple!("rt_simd_aes_round_last_u8x16", simd::rt_simd_aes_round_last_u8x16);
     insert_simple!("rt_simd_aes_round_u8x16", simd::rt_simd_aes_round_u8x16);
     insert_simple!("rt_simd_and_i32x4", simd::rt_simd_and_i32x4);

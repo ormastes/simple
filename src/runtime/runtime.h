@@ -747,6 +747,11 @@ void     simd_text_init(void);
 int64_t  rt_engine2d_simd_fill_u32(SplArray* dst, int64_t offset, int64_t count, int64_t color);
 int64_t  rt_engine2d_simd_copy_u32(SplArray* dst, int64_t dst_off, SplArray* src, int64_t src_off, int64_t count);
 
+/* RETURN-style row kernels: build and return a NEW SplArray of packed i64 pixels. */
+SplArray* rt_engine2d_simd_fill_row_u32(int64_t count, int64_t color);
+SplArray* rt_engine2d_simd_copy_row_u32(SplArray* src);
+SplArray* rt_engine2d_simd_blend_row_u32(SplArray* dst, SplArray* src);
+
 /* ===== Generic OpenCL ICD Runtime Hooks ===== */
 
 bool     rt_opencl_is_available(void);

@@ -154,6 +154,9 @@ pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> 
         "runtime_legacy_core.c",
         "runtime_mcp_core.c",
         "runtime_simd_utf8.c",
+        // engine2d SIMD row kernels (C/NEON) backing rt_engine2d_simd_*_row_u32;
+        // replaces the Rust-seed engine2d_simd_ops backing for native builds.
+        "runtime_simd_dispatch.c",
         "runtime_value.h",
         "runtime.h",
         "runtime_fork.h",

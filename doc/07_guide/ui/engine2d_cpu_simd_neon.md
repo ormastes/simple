@@ -7,19 +7,29 @@ any other host they fall back to a scalar path that is bit-identical.
 
 ## Where the SIMD lives
 
-- Kernels: `src/compiler_rust/runtime/src/value/engine2d_simd_ops.rs`
-  - `fill_row_u32` → NEON `vdupq_n_u32` + `vst1q_u32` (SSE2 `_mm_set1_epi32` +
-    `_mm_storeu_si128`).
-  - `copy_row_u32` → NEON `vld1q_u32` + `vst1q_u32` (SSE2 load/store).
-  - A `SIMD_ROW_HITS` counter increments only when a real SIMD chunk runs, so
-    evidence can prove NEON executed instead of the scalar fallback.
-- Interpreter dispatch: `compiler/src/interpreter_extern/simd.rs`
-  (`rt_simd_fill_row_u32`, `rt_simd_copy_row_u32`,
-  `rt_simd_engine2d_neon_hits`, `rt_simd_engine2d_neon_reset`), registered in
-  `interpreter_extern/mod.rs` and allow-listed in
-  `common/src/runtime_symbols.rs` (`RUNTIME_SYMBOL_NAMES`).
+The production backing is **C** (the Rust seed is bootstrap-only): native builds
+run the C kernels; the interpreter is the seed and uses a thin Rust shim.
+
+- **Production kernels (C, native):**
+  `src/runtime/runtime_simd_dispatch.c` — `rt_engine2d_simd_fill_row_u32`,
+  `rt_engine2d_simd_copy_row_u32`, `rt_engine2d_simd_blend_row_u32`.
+  - fill → NEON `vdupq`/`vst1q` (AVX2 `_mm256_set1_epi64x` on x86); copy →
+    `vld1q`/`vst1q`; blend → NEON `mul.4s`/`mla.4s` per-channel multiply-
+    accumulate with a **scalar exact `/255` floor** (bit-identical to the Simple
+    reference — proven exhaustively over all 16.7M `(sa, s, d)` combinations).
+  - Pixels are packed `int64_t` (low 32 = `0xAARRGGBB`); 2 pixels per 128-bit
+    NEON vector. Compiled into the core-c runtime archive
+    (`pipeline/native_project/tools.rs` runtime input list).
+- **Interpreter shim (Rust *seed*):** `compiler/src/interpreter_extern/simd.rs`
+  implements the same three `rt_engine2d_simd_*_row_u32` externs (fill/copy reuse
+  the `engine2d_simd_ops.rs` NEON helpers so the hit counter advances; blend is a
+  bit-exact scalar loop), registered in `interpreter_extern/mod.rs` and
+  allow-listed in `common/src/runtime_symbols.rs`. The interpreter passes an
+  `Arc` clone, so these are **return-style** (a new row is returned and scattered
+  back) — the one signature that works in both interpreter and native.
 - Simple surface: `src/lib/nogc_sync_mut/gpu/engine2d/simd_kernels.spl`
-  (`extern fn` declarations + `native_simd_pixel_evidence()`).
+  (`extern fn` declarations + `native_simd_pixel_evidence()`); the other
+  `*/gpu/engine2d/simd_kernels.spl` are re-export facades over it.
 
 ## Proof it is genuine (not a scalar false-green)
 
@@ -42,12 +52,16 @@ Verified result on Apple aarch64: `executed=true bit_exact=true hits=2`.
 
 ## Interpreter vs AOT
 
-The live CPU-SIMD session (`cpu_simd_session.fill_span` → `simd_fill_row`)
-routes solid fills through the NEON kernel on aarch64, so the path literally
-named "CPU SIMD" genuinely executes NEON (verified: `fill_span` advances the
-NEON hit counter and stays bit-identical). Blend and blit stay scalar: an exact
-NEON divide-by-255 differs from the scalar floor (and Metal has no blend
-kernel), and a boxed-array copy is already memcpy-equivalent.
+The live CPU-SIMD session (`cpu_simd_session.fill_span` → `simd_fill_row`, and
+`alpha_blend_span` → `simd_blend_row`) routes solid fills and src-over blends
+through the C NEON kernels on aarch64, so the path literally named "CPU SIMD"
+genuinely executes NEON (verified: `fill_span` advances the NEON hit counter and
+stays bit-identical; the blend gate reports `alpha_mismatch_count=0`). The exact
+`/255` floor is reproduced (NEON multiply-accumulate + scalar divide), so the
+blend is byte-for-byte identical to the scalar reference — no quality loss.
+`blit`/`scroll` stay pure-Simple scalar: they are in-place sub-range copies that
+a return-style row kernel can't express without extra marshalling, and they were
+never Rust-backed.
 
 Under the tree-walking interpreter a `[u32]` array is a boxed `Vec<Value>`, so
 the fill kernel builds a packed NEON row in the runtime and then copies it into

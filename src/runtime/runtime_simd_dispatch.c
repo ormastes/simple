@@ -512,6 +512,177 @@ static int engine2d_span_bounds(SplArray* array, int64_t offset, int64_t count,
     return count > 0;
 }
 
+#if defined(__aarch64__) || defined(_M_ARM64)
+#  include <arm_neon.h>
+#endif
+
+/* ----------------------------------------------------------------------
+ * engine2d row kernels (RETURN-style) — build and return a NEW array.
+ *
+ * Pixels are stored as packed int64_t, one pixel per lane, low 32 bits =
+ * ARGB 0xAARRGGBB. The pure math lives in static raw-buffer helpers that
+ * operate on int64_t* so they can be NEON-vectorized and unit-tested
+ * directly; the SplArray entry points just allocate and delegate.
+ * -------------------------------------------------------------------- */
+
+static void engine2d_fill_into(int64_t* out, int64_t n, int64_t color) {
+    int64_t color_word = color & 0xffffffffLL;
+    int64_t i = 0;
+#if defined(__aarch64__) || defined(_M_ARM64)
+    uint64x2_t v = vdupq_n_u64((uint64_t)color_word);
+    for (; i + 2 <= n; i += 2) {
+        vst1q_u64((uint64_t*)(void*)(out + i), v);
+    }
+#elif defined(__x86_64__) || defined(_M_X64)
+    if (simd_detect_avx2()) {
+        __m256i v = _mm256_set1_epi64x(color_word);
+        for (; i + 4 <= n; i += 4) {
+            _mm256_storeu_si256((__m256i*)(void*)(out + i), v);
+        }
+    }
+#endif
+    for (; i < n; i++) {
+        out[i] = color_word;
+    }
+}
+
+static void engine2d_copy_into(int64_t* out, const int64_t* src, int64_t n) {
+    int64_t i = 0;
+#if defined(__aarch64__) || defined(_M_ARM64)
+    for (; i + 2 <= n; i += 2) {
+        uint64x2_t v = vld1q_u64((const uint64_t*)(const void*)(src + i));
+        vst1q_u64((uint64_t*)(void*)(out + i), v);
+    }
+#elif defined(__x86_64__) || defined(_M_X64)
+    if (simd_detect_avx2()) {
+        for (; i + 4 <= n; i += 4) {
+            __m256i v = _mm256_loadu_si256((const __m256i*)(const void*)(src + i));
+            _mm256_storeu_si256((__m256i*)(void*)(out + i), v);
+        }
+    }
+#endif
+    for (; i < n; i++) {
+        out[i] = src[i];
+    }
+}
+
+/* src-over blend of a single packed pixel, exact integer floor formula. */
+static inline int64_t engine2d_blend_pixel(int64_t s, int64_t d) {
+    uint32_t sp = (uint32_t)(uint64_t)s;
+    uint32_t dp = (uint32_t)(uint64_t)d;
+    uint32_t sa = (sp >> 24) & 0xFFu;
+    if (sa == 255u) return (int64_t)(uint64_t)sp;
+    if (sa == 0u) return (int64_t)(uint64_t)dp;
+    uint32_t inv = 255u - sa;
+    uint32_t r = (((sp >> 16) & 0xFFu) * sa + ((dp >> 16) & 0xFFu) * inv) / 255u;
+    uint32_t g = (((sp >> 8) & 0xFFu) * sa + ((dp >> 8) & 0xFFu) * inv) / 255u;
+    uint32_t b = ((sp & 0xFFu) * sa + (dp & 0xFFu) * inv) / 255u;
+    uint32_t out = (255u << 24) | (r << 16) | (g << 8) | b;
+    return (int64_t)(uint64_t)out;
+}
+
+static void engine2d_blend_into(int64_t* out, const int64_t* dst,
+                                const int64_t* src, int64_t n) {
+#if defined(__aarch64__) || defined(_M_ARM64)
+    int64_t i = 0;
+    for (; i + 2 <= n; i += 2) {
+        /* Vectorize the per-channel multiply-accumulate for both pixels.
+           u32 lanes suffice: max accumulator is 255*255*2 = 130050 < 2^32.
+           The /255 is done scalar to stay bit-exact with C truncating
+           division, and the sa==0 / sa==255 special lanes are patched
+           afterward (sa==0 must return dst's FULL pixel incl. its alpha). */
+        uint32_t s0 = (uint32_t)(uint64_t)src[i];
+        uint32_t d0 = (uint32_t)(uint64_t)dst[i];
+        uint32_t s1 = (uint32_t)(uint64_t)src[i + 1];
+        uint32_t d1 = (uint32_t)(uint64_t)dst[i + 1];
+        uint32_t sa0 = (s0 >> 24) & 0xFFu;
+        uint32_t sa1 = (s1 >> 24) & 0xFFu;
+
+        /* lane-0 channels in low half, lane-1 in high half: [r0 g0 b0 r1 g1 b1] */
+        /* src channels (R,G,B) for both pixels */
+        uint32x4_t src_rgb0 = { (s0 >> 16) & 0xFFu, (s0 >> 8) & 0xFFu, s0 & 0xFFu, 0 };
+        uint32x4_t dst_rgb0 = { (d0 >> 16) & 0xFFu, (d0 >> 8) & 0xFFu, d0 & 0xFFu, 0 };
+        uint32x4_t src_rgb1 = { (s1 >> 16) & 0xFFu, (s1 >> 8) & 0xFFu, s1 & 0xFFu, 0 };
+        uint32x4_t dst_rgb1 = { (d1 >> 16) & 0xFFu, (d1 >> 8) & 0xFFu, d1 & 0xFFu, 0 };
+
+        uint32x4_t sav0 = vdupq_n_u32(sa0);
+        uint32x4_t invv0 = vdupq_n_u32(255u - sa0);
+        uint32x4_t sav1 = vdupq_n_u32(sa1);
+        uint32x4_t invv1 = vdupq_n_u32(255u - sa1);
+
+        uint32x4_t acc0 = vmlaq_u32(vmulq_u32(src_rgb0, sav0), dst_rgb0, invv0);
+        uint32x4_t acc1 = vmlaq_u32(vmulq_u32(src_rgb1, sav1), dst_rgb1, invv1);
+
+        uint32_t a0[4], a1[4];
+        vst1q_u32(a0, acc0);
+        vst1q_u32(a1, acc1);
+
+        uint32_t r0 = a0[0] / 255u, g0 = a0[1] / 255u, b0 = a0[2] / 255u;
+        uint32_t r1 = a1[0] / 255u, g1 = a1[1] / 255u, b1 = a1[2] / 255u;
+        uint32_t o0 = (255u << 24) | (r0 << 16) | (g0 << 8) | b0;
+        uint32_t o1 = (255u << 24) | (r1 << 16) | (g1 << 8) | b1;
+        if (sa0 == 255u) o0 = s0; else if (sa0 == 0u) o0 = d0;
+        if (sa1 == 255u) o1 = s1; else if (sa1 == 0u) o1 = d1;
+        out[i] = (int64_t)(uint64_t)o0;
+        out[i + 1] = (int64_t)(uint64_t)o1;
+    }
+    for (; i < n; i++) {
+        out[i] = engine2d_blend_pixel(src[i], dst[i]);
+    }
+#else
+    for (int64_t i = 0; i < n; i++) {
+        out[i] = engine2d_blend_pixel(src[i], dst[i]);
+    }
+#endif
+}
+
+static SplArray* engine2d_new_pixel_array(int64_t n) {
+    if (n < 0) n = 0;
+    SplArray* a = rt_array_new(n);
+    if (!a) return NULL;
+    rt_array_set_len_known(rt_array_header_ptr(a), n);
+    return a;
+}
+
+SplArray* rt_engine2d_simd_fill_row_u32(int64_t count, int64_t color) {
+    int64_t n = engine2d_numeric_arg(count);
+    int64_t color_word = engine2d_numeric_arg(color) & 0xffffffffLL;
+    SplArray* a = engine2d_new_pixel_array(n);
+    if (!a) return NULL;
+    if (n <= 0) return a;
+    int64_t* out = (int64_t*)(uintptr_t)rt_array_data_ptr(a);
+    if (!out) return a;
+    engine2d_fill_into(out, n, color_word);
+    return a;
+}
+
+SplArray* rt_engine2d_simd_copy_row_u32(SplArray* src) {
+    int64_t n = rt_array_len(src);
+    SplArray* a = engine2d_new_pixel_array(n);
+    if (!a) return NULL;
+    if (n <= 0) return a;
+    const int64_t* src_data = (const int64_t*)(uintptr_t)rt_array_data_ptr(src);
+    int64_t* out = (int64_t*)(uintptr_t)rt_array_data_ptr(a);
+    if (!out || !src_data) return a;
+    engine2d_copy_into(out, src_data, n);
+    return a;
+}
+
+SplArray* rt_engine2d_simd_blend_row_u32(SplArray* dst, SplArray* src) {
+    int64_t dn = rt_array_len(dst);
+    int64_t sn = rt_array_len(src);
+    int64_t n = dn < sn ? dn : sn;
+    SplArray* a = engine2d_new_pixel_array(n);
+    if (!a) return NULL;
+    if (n <= 0) return a;
+    const int64_t* dst_data = (const int64_t*)(uintptr_t)rt_array_data_ptr(dst);
+    const int64_t* src_data = (const int64_t*)(uintptr_t)rt_array_data_ptr(src);
+    int64_t* out = (int64_t*)(uintptr_t)rt_array_data_ptr(a);
+    if (!out || !dst_data || !src_data) return a;
+    engine2d_blend_into(out, dst_data, src_data, n);
+    return a;
+}
+
 #if defined(__x86_64__) || defined(_M_X64)
 __attribute__((target("avx2")))
 static void engine2d_fill_u32_avx2(int64_t* data, int64_t count, int64_t color) {

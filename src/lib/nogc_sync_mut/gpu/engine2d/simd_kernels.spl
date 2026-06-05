@@ -89,8 +89,13 @@ extern fn rt_simd_has_rvv() -> bool
 # interpreter dispatch: compiler/src/interpreter_extern/simd.rs.
 # ============================================================================
 
-extern fn rt_simd_fill_row_u32(count: i64, color: u32) -> [u32]
-extern fn rt_simd_copy_row_u32(src: [u32]) -> [u32]
+# engine2d SIMD row kernels — C-backed in native builds (runtime_simd_dispatch.c,
+# aarch64 NEON / x86 AVX2 / scalar), with a Rust *seed* shim for interpreter mode
+# (the interpreter is the seed). Return-style so the same call works in both modes
+# (the interpreter passes an Arc clone, so in-place mutation can't propagate).
+extern fn rt_engine2d_simd_fill_row_u32(count: i64, color: u32) -> [u32]
+extern fn rt_engine2d_simd_copy_row_u32(src: [u32]) -> [u32]
+extern fn rt_engine2d_simd_blend_row_u32(dst_row: [u32], src_row: [u32]) -> [u32]
 extern fn rt_simd_engine2d_neon_hits() -> i64
 extern fn rt_simd_engine2d_neon_reset() -> i64
 
@@ -174,7 +179,7 @@ fn native_simd_pixel_evidence() -> NativeSimdPixelEvidence:
     rt_simd_engine2d_neon_reset()
     val count: i64 = 64
     val color: u32 = 0xFF8040C0
-    val native_fill = rt_simd_fill_row_u32(count, color)
+    val native_fill = rt_engine2d_simd_fill_row_u32(count, color)
 
     var ref_fill: [u32] = [0u32; 64]
     var i: i64 = 0
@@ -189,7 +194,7 @@ fn native_simd_pixel_evidence() -> NativeSimdPixelEvidence:
             fill_exact = false
         i = i + 1
 
-    val native_copy = rt_simd_copy_row_u32(native_fill)
+    val native_copy = rt_engine2d_simd_copy_row_u32(native_fill)
     var copy_exact = native_copy.len() == native_fill.len()
     i = 0
     while i < native_fill.len():
@@ -271,18 +276,19 @@ fn cpu_simd_runtime_evidence() -> CpuSimdRuntimeEvidence:
 # ============================================================================
 # Native-SIMD routing gate
 #
-# When the host has real SIMD (NEON on aarch64), the hot solid-fill row routes
-# through the native `rt_simd_fill_row_u32` kernel so the live CPU-SIMD render
-# path (cpu_simd_session.fill_span) genuinely executes NEON rather than a scalar
-# loop. Output is bit-identical to the scalar path.
+# When the host has real SIMD (NEON on aarch64), the hot fill/blend rows route
+# through the C-backed `rt_engine2d_simd_*_row_u32` kernels (runtime_simd_dispatch.c,
+# NEON/AVX2/scalar) so the live CPU-SIMD render path genuinely executes vector
+# code rather than a scalar loop. Output is bit-identical to the scalar path
+# (the C blend uses the same truncating /255 floor; verified exhaustively).
 #
 # Interpreter note: a `[u32]` framebuffer is a boxed array here, so the native
-# row is built with NEON and then copied into the framebuffer element-by-
-# element — the per-row marshalling is an interpreter artifact, not a win, but
-# it is the path that genuinely runs NEON. Under AOT the framebuffer is packed
-# and the same kernel fills it in place. (Blend stays scalar: Metal has no
-# blend kernel and an exact NEON divide-by-255 differs from the scalar floor;
-# blit stays scalar: a boxed-array copy is already memcpy-equivalent.)
+# row is built/blended with NEON and then copied into the framebuffer element-
+# by-element — the per-row marshalling is an interpreter artifact, not a win,
+# but it is the path that genuinely runs NEON. Under AOT the framebuffer is
+# packed i64 and the same kernels run over it. (blit/scroll stay pure-Simple
+# scalar: they are in-place sub-range copies that a return-style row kernel
+# can't express without extra marshalling, and they were never Rust-backed.)
 var _neon_rows_cached: bool = false
 var _neon_rows_detected: bool = false
 
@@ -301,8 +307,8 @@ pub fn simd_fill_row(buf: any, offset: i64, count: i64, color: u32):
     if count <= 0:
         return
     if _neon_pixel_rows_enabled():
-        # Genuine NEON: vdupq_n_u32 + vst1q_u32 build the row in the runtime.
-        val row = rt_simd_fill_row_u32(count, color)
+        # Genuine NEON (C kernel): vdupq + vst1q build the row in the runtime.
+        val row = rt_engine2d_simd_fill_row_u32(count, color)
         var j: i64 = 0
         while j < count:
             buf[(offset + j).to_i32()] = row[j.to_i32()]
@@ -323,6 +329,24 @@ pub fn _scalar_fill_row(buf: any, offset: i64, count: i64, color: u32):
 
 pub fn simd_blend_row(dst: any, src: [u32], offset: i64, count: i64):
     if count <= 0:
+        return
+    if _neon_pixel_rows_enabled():
+        # Gather aligned dst/src rows, src-over blend via the C NEON kernel,
+        # scatter back. Bit-identical to _scalar_blend_row (same floor /255).
+        val n = count.to_i32()
+        var dst_row: [u32] = [0u32; n]
+        var src_row: [u32] = [0u32; n]
+        var j: i64 = 0
+        while j < count:
+            val idx = (offset + j).to_i32()
+            dst_row[j.to_i32()] = dst[idx]
+            src_row[j.to_i32()] = src[idx]
+            j = j + 1
+        val blended = rt_engine2d_simd_blend_row_u32(dst_row, src_row)
+        j = 0
+        while j < count:
+            dst[(offset + j).to_i32()] = blended[j.to_i32()]
+            j = j + 1
         return
     _scalar_blend_row(dst, src, offset, count)
 

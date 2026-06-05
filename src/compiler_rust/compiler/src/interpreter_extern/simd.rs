@@ -1398,6 +1398,61 @@ pub fn rt_simd_copy_row_u32(args: &[Value]) -> Result<Value, CompileError> {
     Ok(pack_u32_array(sffi_copy_row_u32(&src)))
 }
 
+/// rt_engine2d_simd_fill_row_u32(count: i64, color: u32) -> [u32]
+pub fn rt_engine2d_simd_fill_row_u32(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::runtime(
+            "rt_engine2d_simd_fill_row_u32 expects 2 arguments (count, color)".to_string(),
+        ));
+    }
+    let count = require_u64_value("rt_engine2d_simd_fill_row_u32(count)", &args[0])? as usize;
+    let color = require_u32_value("rt_engine2d_simd_fill_row_u32(color)", &args[1])?;
+    Ok(pack_u32_array(sffi_fill_row_u32(count, color)))
+}
+
+/// rt_engine2d_simd_copy_row_u32(src: [u32]) -> [u32]
+pub fn rt_engine2d_simd_copy_row_u32(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime(
+            "rt_engine2d_simd_copy_row_u32 expects 1 argument (src)".to_string(),
+        ));
+    }
+    let src = unpack_u32_array("rt_engine2d_simd_copy_row_u32(src)", &args[0])?;
+    Ok(pack_u32_array(sffi_copy_row_u32(&src)))
+}
+
+/// rt_engine2d_simd_blend_row_u32(dst_row: [u32], src_row: [u32]) -> [u32]
+/// Src-over blend of src over dst, element-wise (truncating-integer, out alpha=255, 0xAARRGGBB).
+pub fn rt_engine2d_simd_blend_row_u32(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::runtime(
+            "rt_engine2d_simd_blend_row_u32 expects 2 arguments (dst_row, src_row)".to_string(),
+        ));
+    }
+    let dst = unpack_u32_array("rt_engine2d_simd_blend_row_u32(dst_row)", &args[0])?;
+    let src = unpack_u32_array("rt_engine2d_simd_blend_row_u32(src_row)", &args[1])?;
+    let n = dst.len().min(src.len());
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let d = dst[i];
+        let s = src[i];
+        let sa = (s >> 24) & 0xFF;
+        let pixel = if sa == 255 {
+            s
+        } else if sa == 0 {
+            d
+        } else {
+            let inv = 255 - sa;
+            let r = (((s >> 16) & 0xFF) * sa + ((d >> 16) & 0xFF) * inv) / 255;
+            let g = (((s >> 8) & 0xFF) * sa + ((d >> 8) & 0xFF) * inv) / 255;
+            let b = ((s & 0xFF) * sa + (d & 0xFF) * inv) / 255;
+            (255u32 << 24) | (r << 16) | (g << 8) | b
+        };
+        out.push(pixel);
+    }
+    Ok(pack_u32_array(out))
+}
+
 /// rt_simd_engine2d_neon_hits() -> i64
 pub fn rt_simd_engine2d_neon_hits(args: &[Value]) -> Result<Value, CompileError> {
     expect_no_args("rt_simd_engine2d_neon_hits", args)?;
