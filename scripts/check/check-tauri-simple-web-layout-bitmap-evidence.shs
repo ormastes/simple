@@ -54,6 +54,39 @@ emit_unavailable() {
     cat "$BUILD_DIR/evidence.env"
 }
 
+emit_fail() {
+    reason="$1"
+    {
+        echo "tauri_simple_web_layout_status=fail"
+        echo "tauri_simple_web_layout_reason=$reason"
+        echo "tauri_simple_web_layout_width=$WIDTH"
+        echo "tauri_simple_web_layout_height=$HEIGHT"
+        echo "tauri_simple_web_layout_html_path=$HTML_PATH"
+        echo "tauri_simple_web_layout_expected_argb_path=$EXPECTED_ARGB"
+        echo "tauri_simple_web_layout_captured_png_path=$CAPTURED_PNG"
+        echo "tauri_simple_web_layout_captured_argb_path=$CAPTURED_ARGB"
+        echo "tauri_simple_web_layout_captured_argb_written=false"
+        echo "tauri_simple_web_layout_mismatch_count=0"
+        echo "tauri_simple_web_layout_blur_or_tolerance_used=false"
+    } >"$BUILD_DIR/evidence.env"
+    {
+        echo "# Tauri Simple Web Layout Bitmap Evidence"
+        echo
+        echo "- status: fail"
+        echo "- reason: $reason"
+        echo "- blur/tolerance used: false"
+        echo
+        echo "## Raw Evidence"
+        sed 's/^/- /' "$BUILD_DIR/evidence.env"
+        if [ -s "$TAURI_ERR" ]; then
+            echo
+            echo "## Tauri stderr"
+            sed 's/^/- /' "$TAURI_ERR"
+        fi
+    } >"$REPORT_PATH"
+    cat "$BUILD_DIR/evidence.env"
+}
+
 require_cmd() {
     if ! command -v "$1" >/dev/null 2>&1; then
         emit_unavailable "$2"
@@ -137,12 +170,19 @@ if [ "$capture_code" -ne 0 ] || [ ! -s "$CAPTURED_PNG" ]; then
     elif [ "$capture_code" -eq 23 ]; then
         reason="tauri-process-exited-before-window"
     fi
-    emit_unavailable "$reason"
+    case "$reason" in
+        tauri-xvfb-window-unavailable)
+            emit_unavailable "$reason"
+            ;;
+        *)
+            emit_fail "$reason"
+            ;;
+    esac
     exit 1
 fi
 
 if ! convert "$CAPTURED_PNG" -crop "${WIDTH}x${HEIGHT}+0+0" "rgba:$CAPTURED_RAW" >/dev/null 2>&1; then
-    emit_unavailable "tauri-screenshot-rgba-convert-failed"
+    emit_fail "tauri-screenshot-rgba-convert-failed"
     exit 1
 fi
 
@@ -166,7 +206,14 @@ if [ "$proof_code" -ne 0 ]; then
     if [ "$reason" = "" ]; then
         reason="tauri-argb-conversion-failed"
     fi
-    emit_unavailable "$reason"
+    case "$reason" in
+        missing-raw-rgba-path|missing-dimensions|missing-raw-rgba-file)
+            emit_unavailable "$reason"
+            ;;
+        *)
+            emit_fail "$reason"
+            ;;
+    esac
     exit 1
 fi
 

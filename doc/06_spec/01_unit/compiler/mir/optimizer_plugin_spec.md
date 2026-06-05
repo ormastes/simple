@@ -989,9 +989,9 @@ expect(budget.len()).to_equal(2)
 
 ### MIR routing adapter
 
-> **Scope:** Routing verified via PatternIdiom (structural no-op in interpreter).
-> ConstantFolding/DCE crash with "object to int" in interpreter mode.
-> Transformation oracle requires `--mode=native`.
+> **Verified:** WriteCoalesce transformation proven via instruction count oracle
+> (4 GEP+Store → 5 after `bulk_store_hint` insertion). Source plugin nil-guard
+> preserves count at 4 on the same module — discriminating pair.
 
 #### nil-guard returns function unchanged for source plugin
 
@@ -1046,46 +1046,63 @@ expect(result.blocks.len()).to_equal(1)
 
 </details>
 
-#### MIR plugin routes through run_typed_pass_on_module
+#### WriteCoalesce via plugin transforms GEP+Store (inst count 4 to 5)
 
-1. kind: MirInstKind Const
+1. idx0 = idx0 push
 
-2. id: BlockId
+2. idx1 = idx1 push
 
-3. terminator: MirTerminator Ret
+3. insts = insts push
 
-4. locals = locals push
+4. insts = insts push
 
-5. symbol: SymbolId new
+5. insts = insts push
 
-6. locals: locals, blocks: [entry], entry block: BlockId new
+6. insts = insts push
 
-7. functions[SymbolId new
-   - Expected: result.name equals `route_module`
+7. locals = locals push
+
+8. locals = locals push
+
+9. locals = locals push
+
+10. locals = locals push
+
+11. symbol: SymbolId new
+
+12. locals: locals, blocks: [entry], entry block: BlockId new
+
+13. functions[SymbolId new
+   - Expected: before.inst_count equals `4`
+   - Expected: after.inst_count equals `5`
 
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val ret_type = MirType(kind: MirTypeKind.I64)
-val sig = MirSignature(params: [], return_type: ret_type, is_variadic: false)
-val const_inst = MirInst(
-    kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Int(42), ret_type),
-    span: nil
-)
-val entry = MirBlock(
-    id: BlockId(id: 0), label: Some("bb0"),
-    instructions: [const_inst],
-    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))))
-)
+val ty = MirType(kind: MirTypeKind.I64)
+val sig = MirSignature(params: [], return_type: ty, is_variadic: false)
+var idx0: [MirOperand] = []
+idx0 = idx0.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0))))
+var idx1: [MirOperand] = []
+idx1 = idx1.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(1))))
+var insts: [MirInst] = []
+insts = insts.push(MirInst(kind: MirInstKind.GetElementPtr(LocalId(id: 10), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), idx0), span: nil))
+insts = insts.push(MirInst(kind: MirInstKind.Store(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 10))), MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(42)))), span: nil))
+insts = insts.push(MirInst(kind: MirInstKind.GetElementPtr(LocalId(id: 11), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), idx1), span: nil))
+insts = insts.push(MirInst(kind: MirInstKind.Store(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 11))), MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(99)))), span: nil))
+val entry = MirBlock(id: BlockId(id: 0), label: Some("bb0"), instructions: insts, terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))))))
 var locals: [MirLocal] = []
-locals = locals.push(MirLocal(id: LocalId(id: 0), type_: ret_type, kind: LocalKind.Temp, name: nil))
+locals = locals.push(MirLocal(id: LocalId(id: 0), type_: ty, kind: LocalKind.Temp, name: nil))
+locals = locals.push(MirLocal(id: LocalId(id: 1), type_: ty, kind: LocalKind.Temp, name: nil))
+locals = locals.push(MirLocal(id: LocalId(id: 10), type_: ty, kind: LocalKind.Temp, name: nil))
+locals = locals.push(MirLocal(id: LocalId(id: 11), type_: ty, kind: LocalKind.Temp, name: nil))
 val func = MirFunction(
-    symbol: SymbolId.new(0), name: "route_fn", signature: sig,
+    symbol: SymbolId.new(0), name: "wc_fn", signature: sig,
     locals: locals, blocks: [entry], entry_block: BlockId.new(0),
     span: nil, generic_params: [], is_generic_template: false,
     specialization_of: nil, type_bindings: {}
@@ -1093,60 +1110,80 @@ val func = MirFunction(
 var functions: Dict<SymbolId, MirFunction> = {}
 functions[SymbolId.new(0)] = func
 val module = MirModule(
-    name: "route_module", functions: functions,
+    name: "wc_module", functions: functions,
     statics: {}, constants: {}, types: {}
 )
-val mir_plugin = optimizer_plugin_mir(
-    "pattern_idiom", [],
-    PassKind.PatternIdiom, PassScope.Module,
+val before = mir_inst_counter_count_module(module)
+expect(before.inst_count).to_equal(4)
+val wc_plugin = optimizer_plugin_mir(
+    "write_coalesce", [],
+    PassKind.WriteCoalesce, PassScope.Function,
     ApplyMode.Static, OptLevel.Speed, "cheap"
 )
-val result = optimizer_plugin_run_on_module(mir_plugin, module)
-expect(result.name).to_equal("route_module")
+val result = optimizer_plugin_run_on_module(wc_plugin, module)
+val after = mir_inst_counter_count_module(result)
+expect(after.inst_count).to_equal(5)
 ```
 
 </details>
 
-#### plugin adapter parity with direct run_typed_pass_on_module
+#### source plugin nil-guard does NOT transform same GEP+Store module
 
-1. kind: MirInstKind Const
+1. idx0 = idx0 push
 
-2. id: BlockId
+2. idx1 = idx1 push
 
-3. terminator: MirTerminator Ret
+3. insts = insts push
 
-4. locals = locals push
+4. insts = insts push
 
-5. symbol: SymbolId new
+5. insts = insts push
 
-6. locals: locals, blocks: [entry], entry block: BlockId new
+6. insts = insts push
 
-7. functions[SymbolId new
-   - Expected: direct.name equals `via_plugin.name`
+7. locals = locals push
+
+8. locals = locals push
+
+9. locals = locals push
+
+10. locals = locals push
+
+11. symbol: SymbolId new
+
+12. locals: locals, blocks: [entry], entry block: BlockId new
+
+13. functions[SymbolId new
+   - Expected: before.inst_count equals `4`
+   - Expected: after.inst_count equals `4`
 
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 33 lines folded for reproduction.
+Runnable source: 37 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val ret_type = MirType(kind: MirTypeKind.I64)
-val sig = MirSignature(params: [], return_type: ret_type, is_variadic: false)
-val const_inst = MirInst(
-    kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Int(99), ret_type),
-    span: nil
-)
-val entry = MirBlock(
-    id: BlockId(id: 0), label: Some("bb0"),
-    instructions: [const_inst],
-    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))))
-)
+val ty = MirType(kind: MirTypeKind.I64)
+val sig = MirSignature(params: [], return_type: ty, is_variadic: false)
+var idx0: [MirOperand] = []
+idx0 = idx0.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0))))
+var idx1: [MirOperand] = []
+idx1 = idx1.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(1))))
+var insts: [MirInst] = []
+insts = insts.push(MirInst(kind: MirInstKind.GetElementPtr(LocalId(id: 10), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), idx0), span: nil))
+insts = insts.push(MirInst(kind: MirInstKind.Store(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 10))), MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(42)))), span: nil))
+insts = insts.push(MirInst(kind: MirInstKind.GetElementPtr(LocalId(id: 11), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), idx1), span: nil))
+insts = insts.push(MirInst(kind: MirInstKind.Store(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 11))), MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(99)))), span: nil))
+val entry = MirBlock(id: BlockId(id: 0), label: Some("bb0"), instructions: insts, terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))))))
 var locals: [MirLocal] = []
-locals = locals.push(MirLocal(id: LocalId(id: 0), type_: ret_type, kind: LocalKind.Temp, name: nil))
+locals = locals.push(MirLocal(id: LocalId(id: 0), type_: ty, kind: LocalKind.Temp, name: nil))
+locals = locals.push(MirLocal(id: LocalId(id: 1), type_: ty, kind: LocalKind.Temp, name: nil))
+locals = locals.push(MirLocal(id: LocalId(id: 10), type_: ty, kind: LocalKind.Temp, name: nil))
+locals = locals.push(MirLocal(id: LocalId(id: 11), type_: ty, kind: LocalKind.Temp, name: nil))
 val func = MirFunction(
-    symbol: SymbolId.new(0), name: "parity_fn", signature: sig,
+    symbol: SymbolId.new(0), name: "nilguard_gep_fn", signature: sig,
     locals: locals, blocks: [entry], entry_block: BlockId.new(0),
     span: nil, generic_params: [], is_generic_template: false,
     specialization_of: nil, type_bindings: {}
@@ -1154,17 +1191,17 @@ val func = MirFunction(
 var functions: Dict<SymbolId, MirFunction> = {}
 functions[SymbolId.new(0)] = func
 val module = MirModule(
-    name: "parity_module", functions: functions,
+    name: "nilguard_gep_module", functions: functions,
     statics: {}, constants: {}, types: {}
 )
-val mir_plugin = optimizer_plugin_mir(
-    "pattern_idiom", [],
-    PassKind.PatternIdiom, PassScope.Module,
-    ApplyMode.Static, OptLevel.Speed, "cheap"
+val before = mir_inst_counter_count_module(module)
+expect(before.inst_count).to_equal(4)
+val src_plugin = optimizer_plugin_source(
+    "string_concat", [], ApplyMode.Static, OptLevel.Speed, ["concat"]
 )
-val direct = run_typed_pass_on_module(PassKind.PatternIdiom, module)
-val via_plugin = optimizer_plugin_run_on_module(mir_plugin, module)
-expect(direct.name).to_equal(via_plugin.name)
+val result = optimizer_plugin_run_on_module(src_plugin, module)
+val after = mir_inst_counter_count_module(result)
+expect(after.inst_count).to_equal(4)
 ```
 
 </details>

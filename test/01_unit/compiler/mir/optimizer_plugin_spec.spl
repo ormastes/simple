@@ -9,6 +9,9 @@ use compiler.mir.mir_instructions.{
     MirTerminator, MirOperand, MirOperandKind,
     BlockId
 }
+use compiler.mir_opt.mir_opt.mir_visitor.{
+    mir_inst_counter_new, mir_inst_counter_count_module
+}
 use compiler.mir.mir_types.{
     MirType, MirTypeKind, MirSignature,
     MirConstValue, LocalId, LocalKind, MirLocal
@@ -437,9 +440,8 @@ describe "OptimizerPlugin":
     # ====================================================================
 
     describe "MIR routing adapter":
-        # Routing verified via PatternIdiom (structural no-op in interpreter).
-        # ConstantFolding/DCE crash with "object to int" in interpreter mode.
-        # Transformation oracle requires --mode=native (see compile-mode false-greens memory).
+        # WriteCoalesce proves transformation (inst count 4→5 on GEP+Store pairs).
+        # ConstantFolding/DCE crash in interpreter; WriteCoalesce uses standalone fns.
 
         it "nil-guard returns function unchanged for source plugin":
             val ret_type = MirType(kind: MirTypeKind.I64)
@@ -468,22 +470,26 @@ describe "OptimizerPlugin":
             expect(result.name).to_equal("nilguard_fn")
             expect(result.blocks.len()).to_equal(1)
 
-        it "MIR plugin routes through run_typed_pass_on_module":
-            val ret_type = MirType(kind: MirTypeKind.I64)
-            val sig = MirSignature(params: [], return_type: ret_type, is_variadic: false)
-            val const_inst = MirInst(
-                kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Int(42), ret_type),
-                span: nil
-            )
-            val entry = MirBlock(
-                id: BlockId(id: 0), label: Some("bb0"),
-                instructions: [const_inst],
-                terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))))
-            )
+        it "WriteCoalesce via plugin transforms GEP+Store (inst count 4 to 5)":
+            val ty = MirType(kind: MirTypeKind.I64)
+            val sig = MirSignature(params: [], return_type: ty, is_variadic: false)
+            var idx0: [MirOperand] = []
+            idx0 = idx0.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0))))
+            var idx1: [MirOperand] = []
+            idx1 = idx1.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(1))))
+            var insts: [MirInst] = []
+            insts = insts.push(MirInst(kind: MirInstKind.GetElementPtr(LocalId(id: 10), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), idx0), span: nil))
+            insts = insts.push(MirInst(kind: MirInstKind.Store(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 10))), MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(42)))), span: nil))
+            insts = insts.push(MirInst(kind: MirInstKind.GetElementPtr(LocalId(id: 11), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), idx1), span: nil))
+            insts = insts.push(MirInst(kind: MirInstKind.Store(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 11))), MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(99)))), span: nil))
+            val entry = MirBlock(id: BlockId(id: 0), label: Some("bb0"), instructions: insts, terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))))))
             var locals: [MirLocal] = []
-            locals = locals.push(MirLocal(id: LocalId(id: 0), type_: ret_type, kind: LocalKind.Temp, name: nil))
+            locals = locals.push(MirLocal(id: LocalId(id: 0), type_: ty, kind: LocalKind.Temp, name: nil))
+            locals = locals.push(MirLocal(id: LocalId(id: 1), type_: ty, kind: LocalKind.Temp, name: nil))
+            locals = locals.push(MirLocal(id: LocalId(id: 10), type_: ty, kind: LocalKind.Temp, name: nil))
+            locals = locals.push(MirLocal(id: LocalId(id: 11), type_: ty, kind: LocalKind.Temp, name: nil))
             val func = MirFunction(
-                symbol: SymbolId.new(0), name: "route_fn", signature: sig,
+                symbol: SymbolId.new(0), name: "wc_fn", signature: sig,
                 locals: locals, blocks: [entry], entry_block: BlockId.new(0),
                 span: nil, generic_params: [], is_generic_template: false,
                 specialization_of: nil, type_bindings: {}
@@ -491,33 +497,40 @@ describe "OptimizerPlugin":
             var functions: Dict<SymbolId, MirFunction> = {}
             functions[SymbolId.new(0)] = func
             val module = MirModule(
-                name: "route_module", functions: functions,
+                name: "wc_module", functions: functions,
                 statics: {}, constants: {}, types: {}
             )
-            val mir_plugin = optimizer_plugin_mir(
-                "pattern_idiom", [],
-                PassKind.PatternIdiom, PassScope.Module,
+            val before = mir_inst_counter_count_module(module)
+            expect(before.inst_count).to_equal(4)
+            val wc_plugin = optimizer_plugin_mir(
+                "write_coalesce", [],
+                PassKind.WriteCoalesce, PassScope.Function,
                 ApplyMode.Static, OptLevel.Speed, "cheap"
             )
-            val result = optimizer_plugin_run_on_module(mir_plugin, module)
-            expect(result.name).to_equal("route_module")
+            val result = optimizer_plugin_run_on_module(wc_plugin, module)
+            val after = mir_inst_counter_count_module(result)
+            expect(after.inst_count).to_equal(5)
 
-        it "plugin adapter parity with direct run_typed_pass_on_module":
-            val ret_type = MirType(kind: MirTypeKind.I64)
-            val sig = MirSignature(params: [], return_type: ret_type, is_variadic: false)
-            val const_inst = MirInst(
-                kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Int(99), ret_type),
-                span: nil
-            )
-            val entry = MirBlock(
-                id: BlockId(id: 0), label: Some("bb0"),
-                instructions: [const_inst],
-                terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))))
-            )
+        it "source plugin nil-guard does NOT transform same GEP+Store module":
+            val ty = MirType(kind: MirTypeKind.I64)
+            val sig = MirSignature(params: [], return_type: ty, is_variadic: false)
+            var idx0: [MirOperand] = []
+            idx0 = idx0.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0))))
+            var idx1: [MirOperand] = []
+            idx1 = idx1.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(1))))
+            var insts: [MirInst] = []
+            insts = insts.push(MirInst(kind: MirInstKind.GetElementPtr(LocalId(id: 10), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), idx0), span: nil))
+            insts = insts.push(MirInst(kind: MirInstKind.Store(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 10))), MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(42)))), span: nil))
+            insts = insts.push(MirInst(kind: MirInstKind.GetElementPtr(LocalId(id: 11), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), idx1), span: nil))
+            insts = insts.push(MirInst(kind: MirInstKind.Store(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 11))), MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(99)))), span: nil))
+            val entry = MirBlock(id: BlockId(id: 0), label: Some("bb0"), instructions: insts, terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))))))
             var locals: [MirLocal] = []
-            locals = locals.push(MirLocal(id: LocalId(id: 0), type_: ret_type, kind: LocalKind.Temp, name: nil))
+            locals = locals.push(MirLocal(id: LocalId(id: 0), type_: ty, kind: LocalKind.Temp, name: nil))
+            locals = locals.push(MirLocal(id: LocalId(id: 1), type_: ty, kind: LocalKind.Temp, name: nil))
+            locals = locals.push(MirLocal(id: LocalId(id: 10), type_: ty, kind: LocalKind.Temp, name: nil))
+            locals = locals.push(MirLocal(id: LocalId(id: 11), type_: ty, kind: LocalKind.Temp, name: nil))
             val func = MirFunction(
-                symbol: SymbolId.new(0), name: "parity_fn", signature: sig,
+                symbol: SymbolId.new(0), name: "nilguard_gep_fn", signature: sig,
                 locals: locals, blocks: [entry], entry_block: BlockId.new(0),
                 span: nil, generic_params: [], is_generic_template: false,
                 specialization_of: nil, type_bindings: {}
@@ -525,15 +538,15 @@ describe "OptimizerPlugin":
             var functions: Dict<SymbolId, MirFunction> = {}
             functions[SymbolId.new(0)] = func
             val module = MirModule(
-                name: "parity_module", functions: functions,
+                name: "nilguard_gep_module", functions: functions,
                 statics: {}, constants: {}, types: {}
             )
-            val mir_plugin = optimizer_plugin_mir(
-                "pattern_idiom", [],
-                PassKind.PatternIdiom, PassScope.Module,
-                ApplyMode.Static, OptLevel.Speed, "cheap"
+            val before = mir_inst_counter_count_module(module)
+            expect(before.inst_count).to_equal(4)
+            val src_plugin = optimizer_plugin_source(
+                "string_concat", [], ApplyMode.Static, OptLevel.Speed, ["concat"]
             )
-            val direct = run_typed_pass_on_module(PassKind.PatternIdiom, module)
-            val via_plugin = optimizer_plugin_run_on_module(mir_plugin, module)
-            expect(direct.name).to_equal(via_plugin.name)
+            val result = optimizer_plugin_run_on_module(src_plugin, module)
+            val after = mir_inst_counter_count_module(result)
+            expect(after.inst_count).to_equal(4)
 
