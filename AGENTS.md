@@ -213,6 +213,12 @@ git push --tags
 Ask before pushing. Treat "pull" as `jj git fetch` plus `jj rebase`; do not use
 merge-style pulls.
 
+When pushing over HTTPS with GitHub CLI credentials, stale `GH_TOKEN` or
+`GITHUB_TOKEN` environment values can override the stored `gh` token. Do not
+print tokens or put them in remote URLs; use
+`env -u GITHUB_TOKEN -u GH_TOKEN gh auth setup-git` and run the push with the
+same variables unset when the stored credential is the intended auth source.
+
 ---
 
 ## MCP Registry Distribution

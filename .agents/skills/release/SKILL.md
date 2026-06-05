@@ -43,6 +43,11 @@ jj rebase -d main@origin
 FILE_COUNT_AFTER=$(git ls-files | wc -l | tr -d ' ')
 test "$FILE_COUNT_AFTER" -ge "$FILE_COUNT_BEFORE"
 jj bookmark set main -r @-
-jj git push --bookmark main
+env -u GITHUB_TOKEN -u GH_TOKEN jj git push --bookmark main
 git push --tags
 ```
+
+If HTTPS auth fails, do not print tokens or embed them in remote URLs. Run
+`env -u GITHUB_TOKEN -u GH_TOKEN gh auth setup-git` when the stored GitHub CLI
+credential should be used; stale `GH_TOKEN` or `GITHUB_TOKEN` values can
+override that credential.

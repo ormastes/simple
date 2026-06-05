@@ -41,11 +41,13 @@ It complements `.codex/skills/sync/SKILL.md`.
    jj git push --bookmark main
    ```
 
-If HTTPS push fails because an environment `GITHUB_TOKEN` is invalid, retry with
-that variable unset so Git can use the stored GitHub CLI credential:
+If HTTPS push fails because an environment `GH_TOKEN` or `GITHUB_TOKEN` is
+invalid, retry with those variables unset so Git can use the stored GitHub CLI
+credential. Do not print tokens and do not embed them in remote URLs.
 
 ```bash
-env -u GITHUB_TOKEN jj git push --bookmark main
+env -u GITHUB_TOKEN -u GH_TOKEN gh auth setup-git
+env -u GITHUB_TOKEN -u GH_TOKEN jj git push --bookmark main
 ```
 
 ## Orphan And Stale Heads

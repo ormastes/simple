@@ -44,6 +44,22 @@ jj bookmark set main -r @-
 jj git push --bookmark main
 ```
 
+## GitHub Token Auth
+
+If HTTPS push fails with `Invalid username or token`, check whether
+`GH_TOKEN` or `GITHUB_TOKEN` is set to a stale value. Those environment
+variables can override the stored GitHub CLI credential.
+
+Do not print tokens. Prefer the stored `gh` credential:
+
+```bash
+env -u GITHUB_TOKEN -u GH_TOKEN gh auth setup-git
+env -u GITHUB_TOKEN -u GH_TOKEN jj git push --bookmark main
+```
+
+If the user explicitly provides a fresh token through the environment, use it
+without echoing it and still avoid embedding it in remote URLs.
+
 ## Worktree Sync
 If on a jj workspace (not default), discover the workspace paths with
 `jj workspace list`, move to the default workspace path first, sync there,
