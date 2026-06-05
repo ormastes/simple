@@ -770,11 +770,18 @@ function bitmapToLogicalBgra(image) {
 
 async function main() {
   await app.whenReady();
+  // Create the offscreen window at the exact capture size. Previously it was
+  // created at 1280x720 and then shrunk via setContentSize(), which made
+  // Chromium allocate the OSR framebuffer + compositor surface at the large
+  // size (1280*720*4 = 3.7 MB) for a render that only needs width*height*4
+  // (e.g. 96*64*4 = 24 KB). Sizing the window up front avoids that per-run
+  // over-allocation. (This trims per-run buffer memory; it does NOT change the
+  // ~250 MB Chromium baseline — that is inherent to Electron, not a leak.)
   const win = new BrowserWindow({
     show: false,
     useContentSize: true,
-    width: 1280,
-    height: 720,
+    width,
+    height,
     backgroundColor: "#000000",
     webPreferences: {
       offscreen: true,
@@ -787,6 +794,11 @@ async function main() {
   win.webContents.setZoomFactor(1);
   // Drive the offscreen rendering pipeline (a consumer for paint frames keeps it
   // producing, which also lets requestAnimationFrame-based readiness fire).
+  // Frame rate stays at 30: capturePage latency is gated by the OSR frame
+  // clock, so a lower rate inflates the reported frame_us without reducing RSS
+  // (measured: dropping to 2fps left peak RSS at ~460 MB but pushed frame_us
+  // from 28 ms to 446 ms). Chromium's multiprocess baseline — not frame rate or
+  // OSR buffer size — dominates Electron's footprint.
   win.webContents.setFrameRate(30);
   win.webContents.on("paint", () => {});
   await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(fixtureHtml())}`);

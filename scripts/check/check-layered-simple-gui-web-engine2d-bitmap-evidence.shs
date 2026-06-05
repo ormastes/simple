@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 BUILD_DIR="${BUILD_DIR:-build/layered_simple_gui_web_engine2d_bitmap_evidence}"
@@ -169,14 +169,14 @@ reason=pass
 for scene in image_taskbar_command toolbar_modal_grid; do
     case "$scene" in
         image_taskbar_command)
-            node_script="scripts/check-node-simple-web-engine2d-image-taskbar-command-bitmap-evidence.shs"
-            bun_script="scripts/check-bun-simple-web-engine2d-image-taskbar-command-bitmap-evidence.shs"
-            electron_script="scripts/check-electron-simple-web-engine2d-image-taskbar-command-bitmap-evidence.shs"
+            node_script="scripts/check/check-node-simple-web-engine2d-image-taskbar-command-bitmap-evidence.shs"
+            bun_script="scripts/check/check-bun-simple-web-engine2d-image-taskbar-command-bitmap-evidence.shs"
+            electron_script="scripts/check/check-electron-simple-web-engine2d-image-taskbar-command-bitmap-evidence.shs"
             ;;
         toolbar_modal_grid)
-            node_script="scripts/check-node-simple-web-engine2d-toolbar-modal-grid-bitmap-evidence.shs"
-            bun_script="scripts/check-bun-simple-web-engine2d-toolbar-modal-grid-bitmap-evidence.shs"
-            electron_script="scripts/check-electron-simple-web-engine2d-toolbar-modal-grid-bitmap-evidence.shs"
+            node_script="scripts/check/check-node-simple-web-engine2d-toolbar-modal-grid-bitmap-evidence.shs"
+            bun_script="scripts/check/check-bun-simple-web-engine2d-toolbar-modal-grid-bitmap-evidence.shs"
+            electron_script="scripts/check/check-electron-simple-web-engine2d-toolbar-modal-grid-bitmap-evidence.shs"
             ;;
     esac
 
@@ -193,7 +193,18 @@ for scene in image_taskbar_command toolbar_modal_grid; do
     if run_checked "${scene}_bun" "$bun_script" "$scene_dir/bun" "$scene_dir/bun.md" "$scene_dir/bun.out"; then
         bun_result="$(check_js_layer "$scene" bun "$scene_dir/bun/evidence.env")"
     else
-        bun_result="${scene}-bun-script-failed"
+        # Bun is an optional 4th runtime, not one of the required lanes
+        # (pure-simple/node, electron). When it is simply not installed the bun
+        # script emits status=unavailable/reason=missing-bun and exits non-zero;
+        # treat that as a skip rather than a hard failure (matching how the rest
+        # of the suite handles missing optional runtimes). A bun that IS present
+        # but produces wrong pixels still fails via check_js_layer above.
+        bun_status="$(field_of simple_web_engine2d_js_status "$scene_dir/bun/evidence.env")"
+        if [ "$bun_status" = "unavailable" ]; then
+            bun_result="unavailable"
+        else
+            bun_result="${scene}-bun-script-failed"
+        fi
     fi
     append_env "layered_${scene}_bun_result" "$bun_result"
 
@@ -208,7 +219,7 @@ for scene in image_taskbar_command toolbar_modal_grid; do
         if [ "$node_result" != "pass" ]; then
             status=fail
             reason="$node_result"
-        elif [ "$bun_result" != "pass" ]; then
+        elif [ "$bun_result" != "pass" ] && [ "$bun_result" != "unavailable" ]; then
             status=fail
             reason="$bun_result"
         elif [ "$electron_result" != "pass" ]; then
