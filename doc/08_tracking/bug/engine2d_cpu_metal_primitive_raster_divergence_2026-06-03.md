@@ -30,6 +30,25 @@ The parity gate (`scripts/check/check-engine2d-cpu-metal-parity-evidence.shs`)
 and harness (`test/02_integration/rendering/engine2d_cpu_metal_parity_run.spl`)
 now assert all of these scenes.
 
+Because the harness clears-then-draws and both backends now share the new
+formula for `circle_filled`/`triangle`, an all-black-vs-all-black buffer would
+also report MATCH. An out-of-band absolute probe was run to rule that out:
+filled-circle center == fill color and triangle centroid == fill color on BOTH
+CpuBackend and MetalBackend (`gpu_frame_complete=true`), with the far corner ==
+background. So MATCH is correct-vs-correct, not empty-vs-empty.
+
+### Follow-up (out of scope here: CUDA, NVIDIA-host-only)
+
+This change moved the CPU reference for `circle_filled` (now the `dx²+dy²≤r²`
+distance test) and `triangle` (now integer barycentric). The CUDA PTX kernels:
+- `kernel_draw_circle_filled` already uses the same distance test → now matches.
+- triangle has no CUDA kernel → CUDA falls back to the (new) CPU mirror → matches.
+- `kernel_draw_circle` (annulus) and `kernel_draw_rounded_rect` (filled interior)
+  remain as they were and still differ from the CPU midpoint/outline — but this
+  is a *pre-existing* CUDA-vs-CPU semantic mismatch (cuda_strict even asserts
+  rounded_rect as a fill), not introduced by this fix. Aligning the CUDA kernels
+  is tracked as separate follow-up work.
+
 ## Summary
 
 The CPU (software) backend and the Metal GPU backend produce bit-identical
