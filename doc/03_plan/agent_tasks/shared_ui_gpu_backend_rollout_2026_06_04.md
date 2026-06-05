@@ -135,13 +135,22 @@ Current evidence:
 - `scripts/check/check-chrome-simple-web-layout-bitmap-evidence.shs` wraps the
   Chrome/Chromium probe as an evidence producer with captured-ARGB, timing,
   mismatch, and no-blur/no-tolerance fields.
+- `scripts/check/check-tauri-simple-web-layout-bitmap-evidence.shs` now attempts
+  a real desktop Tauri capture by launching `tools/tauri-shell` under Xvfb,
+  capturing the actual Tauri WebView window, converting the screenshot to ARGB,
+  and comparing it exactly with the pure Simple reference. On this Linux host
+  the Tauri process reaches external URL setup but no visible X window appears,
+  so the row remains typed unavailable as `tauri-xvfb-window-unavailable`.
+- `tools/tauri-live-bitmap/raw_rgba_to_argb.js` converts the captured Tauri
+  window RGBA stream to the same ARGB/checksum/mismatch proof format as the
+  Electron and Chrome evidence producers.
 - `scripts/check/check-tauri-chrome-simple-web-layout-manifest-evidence.shs`
   consumes the Electron layout manifest, records Electron as live capture, runs
-  the Chrome probe for the CSS box matrix reference row, and records Tauri plus
-  any host-unavailable Chrome result as typed unavailable on this Linux host
-  (`tauri-webkit-capture-hook-not-implemented`, `chrome-binary-unavailable`)
-  with `no_fake_capture=true`. The aggregate production GUI parity gate now
-  includes this surface manifest row.
+  the Tauri and Chrome probes for the CSS box matrix reference row, and records
+  any host-unavailable result as typed unavailable on this Linux host
+  (`tauri-xvfb-window-unavailable`, `chrome-binary-unavailable`) with
+  `no_fake_capture=true`. The aggregate production GUI parity gate now includes
+  this surface manifest row.
 - Covered by
   `test/01_unit/app/ui/web_render_node_fixture_evidence_spec.spl` and
   `test/01_unit/app/ui/web_render_backend_api_spec.spl`.
@@ -400,12 +409,13 @@ Current evidence:
 
 ## Current Next Slice
 
-The next smallest implementation slice is Team B live Tauri/WebKit capture plus
+The next smallest implementation slice is Team B live Tauri/WebKit unblock plus
 full browser manifest parity:
 
-1. Add a real Tauri WebKit/Wry capture hook for layout manifest HTML and replace
-   the typed `tauri-webkit-capture-hook-not-implemented` row with a live
-   no-tolerance capture row.
+1. Unblock the repo Tauri shell under Linux/Xvfb, or add a native Wry/WebKit
+   readback path, so `check-tauri-simple-web-layout-bitmap-evidence.shs`
+   observes a real window and replaces `tauri-xvfb-window-unavailable` with a
+   live no-tolerance capture row.
 2. Extend the Chrome/Chromium ARGB probe from the CSS box matrix smoke row to
    every layout manifest case, and require live standalone browser pixels where
    the host or CI lane has Chrome/Chromium.

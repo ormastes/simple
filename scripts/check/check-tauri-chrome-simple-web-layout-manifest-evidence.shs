@@ -37,13 +37,23 @@ chrome_capture_reason() {
         echo "chrome-live-capture-configured"
     elif [ -x /usr/bin/google-chrome ] || [ -x /usr/bin/google-chrome-stable ] || [ -x /usr/bin/chromium ] || [ -x /usr/bin/chromium-browser ] || [ -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]; then
         echo "chrome-live-capture-configured"
+    elif find "${HOME:-/nonexistent}/.cache/ms-playwright" -maxdepth 3 -type f \( -name chrome -o -name chromium -o -name headless_shell \) 2>/dev/null | grep -q .; then
+        echo "chrome-live-capture-configured"
     else
         echo "chrome-binary-unavailable"
     fi
 }
 
-run_chrome_capture() {
-    case_dir="$BUILD_DIR/chrome_layout"
+tauri_capture_reason() {
+    if command -v cargo >/dev/null 2>&1 && command -v xvfb-run >/dev/null 2>&1 && command -v xdotool >/dev/null 2>&1 && command -v import >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
+        echo "tauri-live-capture-configured"
+    else
+        echo "tauri-xvfb-capture-prerequisite-unavailable"
+    fi
+}
+
+run_tauri_capture() {
+    case_dir="$BUILD_DIR/tauri_layout"
     mkdir -p "$case_dir"
     html_path="$(field_of case_css_box_matrix_electron_simple_web_layout_html_path "$LAYOUT_ENV")"
     expected_argb="$(field_of case_css_box_matrix_electron_simple_web_layout_expected_argb_path "$LAYOUT_ENV")"
@@ -56,30 +66,125 @@ run_chrome_capture() {
         height=64
     fi
     set +e
-    BUILD_DIR="$case_dir" REPORT_PATH="$case_dir/report.md" CHROME_LAYOUT_HTML_PATH="$html_path" CHROME_LAYOUT_EXPECTED_ARGB_PATH="$expected_argb" CHROME_LAYOUT_WIDTH="$width" CHROME_LAYOUT_HEIGHT="$height" \
-        sh scripts/check/check-chrome-simple-web-layout-bitmap-evidence.shs >"$case_dir/stdout.env" 2>"$case_dir/stderr.log"
+    BUILD_DIR="$case_dir" REPORT_PATH="$case_dir/report.md" TAURI_LAYOUT_HTML_PATH="$html_path" TAURI_LAYOUT_EXPECTED_ARGB_PATH="$expected_argb" TAURI_LAYOUT_WIDTH="$width" TAURI_LAYOUT_HEIGHT="$height" \
+        sh scripts/check/check-tauri-simple-web-layout-bitmap-evidence.shs >"$case_dir/stdout.env" 2>"$case_dir/stderr.log"
     code=$?
     set -e
     env_file="$case_dir/evidence.env"
-    chrome_capture_status=""
-    chrome_capture_reason=""
-    chrome_live_capture=false
-    chrome_mismatch_count=0
+    tauri_capture_status=""
+    tauri_capture_reason=""
+    tauri_live_capture=false
+    tauri_mismatch_count=0
     if [ -s "$env_file" ]; then
-        chrome_capture_status="$(field_of chrome_simple_web_layout_status "$env_file")"
-        chrome_capture_reason="$(field_of chrome_simple_web_layout_reason "$env_file")"
-        chrome_mismatch_count="$(field_of chrome_simple_web_layout_mismatch_count "$env_file")"
+        tauri_capture_status="$(field_of tauri_simple_web_layout_status "$env_file")"
+        tauri_capture_reason="$(field_of tauri_simple_web_layout_reason "$env_file")"
+        tauri_mismatch_count="$(field_of tauri_simple_web_layout_mismatch_count "$env_file")"
     fi
-    if [ "$chrome_capture_status" = "pass" ]; then
-        chrome_live_capture=true
+    if [ "$tauri_capture_status" = "pass" ]; then
+        tauri_live_capture=true
+    fi
+    if [ "$tauri_capture_reason" = "" ]; then
+        tauri_capture_reason="$(tauri_capture_reason)"
+    fi
+    {
+        echo "tauri_chrome_simple_web_layout_manifest_tauri_capture_exit_code=$code"
+        echo "tauri_chrome_simple_web_layout_manifest_tauri_capture_report=$case_dir/report.md"
+        sed 's/^/tauri_chrome_simple_web_layout_manifest_tauri_detail_/' "$env_file" 2>/dev/null || true
+    } >>"$BUILD_DIR/evidence.env.tmp"
+}
+
+run_chrome_capture() {
+    root_dir="$BUILD_DIR/chrome_layout"
+    mkdir -p "$root_dir"
+    chrome_case_count=0
+    chrome_pass_count=0
+    chrome_fail_count=0
+    chrome_mismatch_count=0
+    chrome_capture_status="pass"
+    chrome_capture_reason="pass"
+    chrome_live_capture=false
+    chrome_exit_code=0
+    cases="$(sed -n 's/^electron_simple_web_layout_manifest_case=//p' "$LAYOUT_ENV")"
+    if [ "$cases" = "" ]; then
+        chrome_capture_status="unavailable"
+        chrome_capture_reason="chrome-layout-manifest-cases-missing"
+    fi
+    for case_name in $cases; do
+        case_dir="$root_dir/$case_name"
+        mkdir -p "$case_dir"
+        html_path="$(field_of "case_${case_name}_electron_simple_web_layout_html_path" "$LAYOUT_ENV")"
+        expected_argb="$(field_of "case_${case_name}_electron_simple_web_layout_expected_argb_path" "$LAYOUT_ENV")"
+        width="$(field_of "case_${case_name}_electron_simple_web_layout_width" "$LAYOUT_ENV")"
+        height="$(field_of "case_${case_name}_electron_simple_web_layout_height" "$LAYOUT_ENV")"
+        if [ "$width" = "" ]; then
+            width=96
+        fi
+        if [ "$height" = "" ]; then
+            height=64
+        fi
+        chrome_case_count=$((chrome_case_count + 1))
+        set +e
+        BUILD_DIR="$case_dir" REPORT_PATH="$case_dir/report.md" CHROME_LAYOUT_HTML_PATH="$html_path" CHROME_LAYOUT_EXPECTED_ARGB_PATH="$expected_argb" CHROME_LAYOUT_WIDTH="$width" CHROME_LAYOUT_HEIGHT="$height" \
+            sh scripts/check/check-chrome-simple-web-layout-bitmap-evidence.shs >"$case_dir/stdout.env" 2>"$case_dir/stderr.log"
+        code=$?
+        set -e
+        env_file="$case_dir/evidence.env"
+        case_status=""
+        case_reason=""
+        case_mismatch=0
+        if [ -s "$env_file" ]; then
+            case_status="$(field_of chrome_simple_web_layout_status "$env_file")"
+            case_reason="$(field_of chrome_simple_web_layout_reason "$env_file")"
+            case_mismatch="$(field_of chrome_simple_web_layout_mismatch_count "$env_file")"
+        fi
+        if [ "$case_mismatch" = "" ]; then
+            case_mismatch=0
+        fi
+        chrome_mismatch_count=$((chrome_mismatch_count + case_mismatch))
+        if [ "$case_status" = "pass" ]; then
+            chrome_pass_count=$((chrome_pass_count + 1))
+            chrome_live_capture=true
+        else
+            chrome_fail_count=$((chrome_fail_count + 1))
+            chrome_exit_code="$code"
+            if [ "$case_reason" = "" ]; then
+                case_reason="$(chrome_capture_reason)"
+            fi
+            if [ "$case_status" = "unavailable" ] && [ "$chrome_capture_status" = "pass" ]; then
+                chrome_capture_status="unavailable"
+                chrome_capture_reason="$case_reason"
+            elif [ "$case_status" != "unavailable" ]; then
+                chrome_capture_status="$case_status"
+                chrome_capture_reason="$case_reason"
+            fi
+        fi
+        {
+            echo "tauri_chrome_simple_web_layout_manifest_chrome_case=$case_name"
+            echo "tauri_chrome_simple_web_layout_manifest_chrome_case_${case_name}_exit_code=$code"
+            echo "tauri_chrome_simple_web_layout_manifest_chrome_case_${case_name}_report=$case_dir/report.md"
+            sed "s/^/tauri_chrome_simple_web_layout_manifest_chrome_case_${case_name}_detail_/" "$env_file" 2>/dev/null || true
+        } >>"$BUILD_DIR/evidence.env.tmp"
+        if [ "$chrome_capture_status" = "unavailable" ]; then
+            break
+        fi
+    done
+    if [ "$chrome_capture_status" = "pass" ] && [ "$chrome_pass_count" != "$chrome_case_count" ]; then
+        chrome_capture_status="fail"
+        chrome_capture_reason="chrome-layout-manifest-incomplete"
+    fi
+    if [ "$chrome_capture_status" = "pass" ] && [ "$chrome_mismatch_count" != "0" ]; then
+        chrome_capture_status="divergent"
+        chrome_capture_reason="chrome-layout-manifest-pixel-mismatch"
     fi
     if [ "$chrome_capture_reason" = "" ]; then
         chrome_capture_reason="$(chrome_capture_reason)"
     fi
     {
-        echo "tauri_chrome_simple_web_layout_manifest_chrome_capture_exit_code=$code"
-        echo "tauri_chrome_simple_web_layout_manifest_chrome_capture_report=$case_dir/report.md"
-        sed 's/^/tauri_chrome_simple_web_layout_manifest_chrome_detail_/' "$env_file" 2>/dev/null || true
+        echo "tauri_chrome_simple_web_layout_manifest_chrome_capture_exit_code=$chrome_exit_code"
+        echo "tauri_chrome_simple_web_layout_manifest_chrome_capture_report=$root_dir"
+        echo "tauri_chrome_simple_web_layout_manifest_chrome_case_count=$chrome_case_count"
+        echo "tauri_chrome_simple_web_layout_manifest_chrome_pass_count=$chrome_pass_count"
+        echo "tauri_chrome_simple_web_layout_manifest_chrome_fail_count=$chrome_fail_count"
     } >>"$BUILD_DIR/evidence.env.tmp"
 }
 
@@ -108,27 +213,41 @@ if [ "$status" = "pass" ]; then
     fi
 fi
 
-tauri_status="unavailable"
-tauri_reason="tauri-webkit-capture-hook-not-implemented"
+tauri_capture_status="unavailable"
+tauri_capture_reason="$(tauri_capture_reason)"
+tauri_live_capture=false
+tauri_mismatch_count=0
 chrome_capture_status="unavailable"
 chrome_capture_reason="$(chrome_capture_reason)"
 chrome_live_capture=false
 chrome_mismatch_count=0
+chrome_case_count=0
+chrome_pass_count=0
+chrome_fail_count=0
 
 rm -f "$BUILD_DIR/evidence.env.tmp"
 if [ "$status" = "pass" ]; then
+    run_tauri_capture
     run_chrome_capture
 fi
+tauri_status="$tauri_capture_status"
+tauri_reason="$tauri_capture_reason"
 chrome_status="$chrome_capture_status"
 chrome_reason="$chrome_capture_reason"
 
-if [ "$tauri_status" = "pass" ] || [ "$chrome_status" = "pass" ]; then
-    if [ "$chrome_status" = "pass" ] && [ "$chrome_live_capture" = true ] && [ "$chrome_mismatch_count" = "0" ]; then
-        status="$status"
-    else
-        status="fail"
-        reason="surface-row-claims-live-capture-without-proof"
-    fi
+if [ "$tauri_status" = "pass" ] && { [ "$tauri_live_capture" != true ] || [ "$tauri_mismatch_count" != "0" ]; }; then
+    status="fail"
+    reason="surface-row-claims-live-capture-without-proof"
+elif [ "$tauri_status" != "pass" ] && [ "$tauri_status" != "unavailable" ]; then
+    status="fail"
+    reason="tauri-surface-capture-diverged"
+fi
+if [ "$chrome_status" = "pass" ] && { [ "$chrome_live_capture" != true ] || [ "$chrome_mismatch_count" != "0" ]; }; then
+    status="fail"
+    reason="surface-row-claims-live-capture-without-proof"
+elif [ "$chrome_status" != "pass" ] && [ "$chrome_status" != "unavailable" ]; then
+    status="fail"
+    reason="chrome-surface-capture-diverged"
 fi
 
 {
@@ -147,12 +266,15 @@ fi
     echo "tauri_chrome_simple_web_layout_manifest_tauri_target=tauri"
     echo "tauri_chrome_simple_web_layout_manifest_tauri_capture_status=$tauri_status"
     echo "tauri_chrome_simple_web_layout_manifest_tauri_capture_reason=$tauri_reason"
-    echo "tauri_chrome_simple_web_layout_manifest_tauri_live_capture=false"
-    echo "tauri_chrome_simple_web_layout_manifest_tauri_mismatch_count=0"
+    echo "tauri_chrome_simple_web_layout_manifest_tauri_live_capture=$tauri_live_capture"
+    echo "tauri_chrome_simple_web_layout_manifest_tauri_mismatch_count=$tauri_mismatch_count"
     echo "tauri_chrome_simple_web_layout_manifest_chrome_target=chrome"
     echo "tauri_chrome_simple_web_layout_manifest_chrome_capture_status=$chrome_status"
     echo "tauri_chrome_simple_web_layout_manifest_chrome_capture_reason=$chrome_reason"
     echo "tauri_chrome_simple_web_layout_manifest_chrome_live_capture=$chrome_live_capture"
+    echo "tauri_chrome_simple_web_layout_manifest_chrome_case_count=$chrome_case_count"
+    echo "tauri_chrome_simple_web_layout_manifest_chrome_pass_count=$chrome_pass_count"
+    echo "tauri_chrome_simple_web_layout_manifest_chrome_fail_count=$chrome_fail_count"
     echo "tauri_chrome_simple_web_layout_manifest_chrome_mismatch_count=$chrome_mismatch_count"
     echo "tauri_chrome_simple_web_layout_manifest_blur_or_tolerance_used=false"
     echo "tauri_chrome_simple_web_layout_manifest_no_fake_capture=true"

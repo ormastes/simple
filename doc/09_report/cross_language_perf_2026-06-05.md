@@ -35,3 +35,64 @@
 | Python                 |       25.767 |    interpret |              |              |
 | Bun                    |       89.170 |          JIT |              |              |
 | Java                   |      154.938 |    JIT (JVM) |              |              |
+| Erlang                 |     1700.510 |      BEAM VM |              |              |
+
+## 3. Warm Throughput — fib(35) (in-process: 10 warmup + 20 measured)
+
+| Language               |     Avg (ms) |                                    Notes |
+|------------------------|--------------|------------------------------------------|
+| Simple (interpreter)   |       93.880 | tree-walk (outer-process, no in-proc timing) |
+| Simple (SMF loader)    |       82.994 | bytecode (outer-process, no in-proc timing) |
+| Simple (native)        |       74.506 |           AOT via Cranelift (in-process) |
+| C (gcc -O2)            |       17.352 |                             baseline AOT |
+| Go                     |       59.388 |                                  SSA AOT |
+| Python                 |     1906.721 |                         CPython bytecode |
+| Bun                    |       83.548 |        JavaScriptCore JIT (steady-state) |
+| Java                   |       54.325 |            HotSpot C2 JIT (steady-state) |
+| Erlang                 |      143.143 |                    BEAM (single-process) |
+
+## 4. Parallel — spawn 100 workers (20 runs avg)
+
+| Language               |     Avg (ms) |                        Concurrency model |
+|------------------------|--------------|------------------------------------------|
+| Simple (interpreter)   |          n/a |          extern thread FFI not supported |
+| Simple (SMF loader)    |         fail |              std thread_spawn (bytecode) |
+| Simple (native)        |       12.907 | channel + OS threads (same as Go pattern) |
+| C (pthreads)           |       10.091 |                               OS threads |
+| Go                     |        6.795 |           goroutines + chan result (M:N) |
+| Python                 |     3114.279 |                          threading (GIL) |
+| Bun                    |     1303.723 |                           worker_threads |
+| Java                   |      169.305 |                               ThreadPool |
+| Erlang                 |     1428.695 |                    lightweight processes |
+
+> **Workload:** LCG (Linear Congruential Generator) with 100K iterations per worker.
+> Each worker reads shared constants (LCG_A, LCG_C, LCG_M, ITERS).
+>
+> **Design comparison — Simple channels vs Go channels:**
+> Both Simple and Go use the same pattern: workers send results through a channel,
+> main collects via recv. Simple's `val` constants captured by closures add a
+> **compile-time immutability guarantee** — the compiler rejects mutation of shared
+> data. Go relies on convention (don't mutate shared vars) or channels for all data
+> flow. C shares via globals with no safety guarantee.
+> Same semantic, same safety for result collection; Simple adds compile-time
+> enforcement for shared read-only data.
+
+## Size Definition
+
+| Category | What "size" means |
+|----------|-------------------|
+| AOT (C, Go, Simple native) | Binary bytes on disk — self-contained |
+| VM/bytecode (Java, Erlang, Simple SMF) | `.class`/`.beam`/`.smf` bytes — requires runtime |
+| Interpreted (Python, Bun, Simple interp.) | Script bytes — requires interpreter binary |
+
+## How to Optimize Simple Performance
+
+All optimization in **pure Simple** (`.spl`) — do not modify Rust seed or C runtime.
+
+1. **Interpreter → SMF loader** — `simple compile file.spl -o file.smf` for ~2-5x dispatch speedup
+2. **SMF → native** — `simple compile file.spl --native -o file` for AOT via Cranelift (~4x slower than gcc -O2 for recursive workloads; no tail-call opt yet)
+3. **Use `val` over `var`** — immutable bindings enable more aggressive constant folding
+4. **Avoid deep recursion** — rewrite as iteration where possible (tail-call not yet optimized)
+5. **Use typed collections** — `List<i64>` avoids boxing overhead vs untyped `List`
+6. **Profile with `std.testing.benchmark`** — warmup + outlier detection built in
+7. **`bin/simple build check`** — lint catches perf anti-patterns (mcp_perf_lint)

@@ -98,7 +98,7 @@ sh scripts/check/check-cross-language-perf.shs
 | **Size** | hello + fib source/binary | Deployment footprint |
 | **Cold startup** | `hello world` (20 runs avg) | Time-to-first-output |
 | **Warm throughput** | `fib(35)` recursive, in-process loop (10 warmup + 20 measured) | Steady-state single-thread perf (JIT reaches hotspot) |
-| **Parallel** | Spawn 100 workers summing 0..999 | Concurrency model overhead |
+| **Parallel** | 100 workers summing 0..999 via channel (`channel_new`/`send`/`recv` from `std.concurrent.channel` — same semantic as Go's goroutine + chan). Simple's advantage is compile-time immutability: `val` constants captured by worker closures cannot be mutated (compiler rejects it), not a speed advantage. | Concurrency model overhead |
 
 ### Languages compared
 

@@ -45,6 +45,25 @@ function findChromeBinary() {
   for (const candidate of candidates) {
     if (executableExists(candidate)) return candidate;
   }
+  const home = process.env.HOME || "";
+  if (home) {
+    const cacheRoot = path.join(home, ".cache", "ms-playwright");
+    try {
+      const browserDirs = fs.readdirSync(cacheRoot).sort().reverse();
+      for (const dir of browserDirs) {
+        for (const rel of [
+          path.join("chrome-linux64", "chrome"),
+          path.join("chromium", "chrome-linux", "chrome"),
+          path.join("chrome-linux", "chrome"),
+        ]) {
+          const candidate = path.join(cacheRoot, dir, rel);
+          if (executableExists(candidate)) return candidate;
+        }
+      }
+    } catch (_err) {
+      // Playwright-managed Chromium is optional.
+    }
+  }
   for (const name of ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]) {
     const candidate = findOnPath(name);
     if (candidate) return candidate;
@@ -148,6 +167,7 @@ function decodePngRgba(buffer) {
       }
       for (let x = copyWidth; x < width; x += 1) pixels.push(0xffffffff);
     }
+    rawOffset += stride;
     prev = row;
   }
   while (pixels.length < width * height) pixels.push(0xffffffff);

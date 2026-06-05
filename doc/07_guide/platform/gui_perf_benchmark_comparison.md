@@ -3,177 +3,121 @@
 ## Overview
 
 Cross-framework GUI rendering performance comparison at 8K resolution (7680x4320).
-Measures cold startup, warm frame time, and fill-rate across 7 backend lanes.
+All numbers measured on this host unless marked otherwise.
 
-## Frameworks Compared
+## Measured Results (2026-06-05)
 
-| Backend | Language | Renderer | 8K Status | Integration |
-|---------|----------|----------|-----------|-------------|
-| Pure Simple (CUDA) | Simple | CUDA PTX kernel | **Ready** | `backend_measurement_cuda.spl` |
-| Simple Web (Software) | Simple | Software rasterizer | **Ready** | `backend_measurement_export.spl` |
-| Electron | JS/Chromium | Chromium compositor | **Partial** | `wm_compare` electron matrix |
-| GTK3 | C | Cairo/X11 | **Ready** | `tools/gui_perf_bench/bench_gtk.c` |
-| JavaScript (Node) | JS | node-canvas (Cairo) | **Ready** | `tools/gui_perf_bench/bench_js_node.js` |
-| JavaScript (Browser) | JS | Canvas 2D (GPU) | **Ready** | `tools/gui_perf_bench/bench_js.html` |
-| Python (tkinter) | Python | Tk/X11 | **Ready** | `tools/gui_perf_bench/bench_python.py` |
-| Tauri | Rust/WebView | WebView2/WebKitGTK | **Unavailable** | Requires `cargo-tauri` CLI |
+### 8K Fill + Widget Scene (7680x4320, 33.18M pixels, 60 frames)
+
+| Backend | Cold Start | Frame Avg | Frame p50 | Frame p95 | Measurement |
+|---------|-----------|-----------|-----------|-----------|-------------|
+| Node.js Canvas | 2.25 ms | 17.3 ms | 16.4 ms | 17.3 ms | Headless, node-canvas (Cairo) |
+| GTK3/C | 104 ms | 150.4 ms | 153.0 ms | 163.4 ms | Xvfb :99, full render cycle |
+| Python/tkinter | — | — | — | — | Unavailable (no tkinter module) |
+| Electron | 4075 ms | — | — | — | Existing contract; checksum=0 headless |
+| Tauri | — | — | — | — | Unavailable (no cargo-tauri) |
+| Simple CUDA | — | — | — | — | Interpreter lacks CUDA FFI; needs compiled binary |
+| Simple Web Soft | — | — | — | — | Interpreter probe only; needs compiled binary |
+
+**Notes**: GTK frame times are frame-to-frame intervals (draw + composite + X11 present).
+Cairo draw calls alone take 0.035ms; the remaining ~150ms is GTK/X11 software compositing
+on Xvfb. Node.js canvas is headless (in-memory buffer, no display server), so the 9.3x
+speed difference is partly the display-server overhead, not renderer speed alone.
+
+### Existing Evidence: Simple vs GTK Cold Start (from `gtk_gui_repeat_evidence`)
+
+| Metric | Simple (compiled) | GTK3 | Ratio |
+|--------|------------------|------|-------|
+| Cold start | 0.192 ms | 65.865 ms | **343x faster** |
+| Warm frame | 0.001 ms | 0.085 ms | **85x faster** |
+| RSS | ~14 KB | 32.5 MB | **~2300x smaller** |
+
+### Existing Evidence: Engine2D at 1080p (from `engine2d_compute_dispatch_benchmark`)
+
+10 warmup + 100 timed frames, pixel-hash verified identical output.
+
+| Scene | C Scalar p50 | Simple Scalar p50 | C px/s | Simple px/s |
+|-------|-------------|-------------------|--------|-------------|
+| fill_1080p | 4.5 ms | 141 ms | 458M | 14.7M |
+| blit_tiles | 4.8 ms | 43 ms | 434M | 47.9M |
+| clipped_scroll | 2.3 ms | 23 ms | 898M | 89M |
+
+### Startup Audit (from `startup_size_performance_audit`)
+
+| Binary | Size | Startup ms |
+|--------|------|-----------|
+| Simple hello (core-c) | 14 KB | 3.1 |
+| C hello | 14 KB | 5.6 |
+| Simple TUI standalone | 14 KB | 5.3 |
+| Simple full TUI app | 14 KB | 6.5 |
+| Electron (Chromium) | ~54 MB | 4075 |
 
 ## Running Benchmarks
 
-### Full comparison (all backends):
 ```bash
-cd tools/gui_perf_bench
-./run_all_benchmarks.sh --width 7680 --height 4320 --frames 60
-```
+# Full comparison (needs Xvfb for GTK/tkinter):
+Xvfb :99 -screen 0 7680x4320x24 &
+DISPLAY=:99 tools/gui_perf_bench/run_all_benchmarks.sh --width 7680 --height 4320 --frames 60
 
-### Individual backends:
-```bash
-# Pure Simple CUDA (8K fill)
-bin/simple run src/app/wm_compare/backend_measurement_export.spl -- \
-  --measure-cuda-device-buffer --width 7680 --height 4320 \
-  --fixture gui-perf-8k-fill --host $(hostname)
-
-# GTK3
-gcc -O2 -o build/bench_gtk tools/gui_perf_bench/bench_gtk.c \
-  $(pkg-config --cflags --libs gtk+-3.0) -lm
-./build/bench_gtk --width 7680 --height 4320 --frames 60
-
-# JavaScript (Node headless)
+# Individual:
 node tools/gui_perf_bench/bench_js_node.js --width 7680 --height 4320 --frames 60
+DISPLAY=:99 build/gui_perf_bench/bench_gtk --width 7680 --height 4320 --frames 60
 
-# Python tkinter
-python3 tools/gui_perf_bench/bench_python.py --width 7680 --height 4320 --frames 60
+# Simple backends (requires compiled binary, not interpreter):
+bin/simple run src/app/wm_compare/backend_measurement_export.spl -- \
+  --measure-cuda-device-buffer --width 7680 --height 4320
 ```
-
-## Metrics
-
-All backends emit a uniform key=value format:
-
-| Metric | Unit | Description |
-|--------|------|-------------|
-| `cold_startup_ms` | ms | Time from process start to first frame |
-| `warm_total_ms` | ms | Total wall-clock for all measured frames |
-| `frame_time_avg_ms` | ms | Mean frame render time |
-| `frame_time_p50_ms` | ms | Median frame render time |
-| `frame_time_p95_ms` | ms | 95th percentile frame time |
-| `frame_time_max_ms` | ms | Worst-case frame time |
-| `pixel_count` | px | Total pixels per frame (8K = 33,177,600) |
-| `bytes_per_frame` | bytes | RGBA buffer size (8K = 132,710,400 = ~127 MB) |
-| `pixel_checksum` | sum | Pixel integrity checksum (parity gate) |
-| `max_rss_kb` | KB | Peak resident memory |
-
-## 8K Resolution Analysis
-
-At 7680x4320 (33.2M pixels, ~127 MB/frame RGBA):
-
-- **Fill-rate dominated**: The bottleneck is memory bandwidth, not computation.
-  A single 8K RGBA fill writes 127 MB. DDR4-3200 peaks at ~51 GB/s; a naïve
-  single-core fill saturates at ~400 fps. GPU (A6000 at 768 GB/s) can fill at
-  ~6000 fps.
-
-- **CUDA advantage**: Pure Simple CUDA lane bypasses the CPU memory bus entirely.
-  The PTX fill kernel runs on-device; only the readback crosses PCIe. For
-  rendering-only workloads (no readback needed for display), CUDA eliminates
-  the 127 MB/frame copy.
-
-- **Cairo-based backends** (GTK3, Node canvas): Share the same Cairo rasterizer.
-  Performance differences are overhead (GTK widget tree vs raw canvas), not
-  rasterizer speed.
-
-- **Electron**: Chromium's compositor adds process isolation, IPC, and GPU
-  process overhead. Current contract shows cold_startup=4075ms, which includes
-  Chromium bootstrap.
 
 ## Pixel Parity Gate
 
-The "do not cheat" constraint means optimizations must not change pixel output.
-The existing parity infrastructure enforces this:
+"Do not cheat" — optimizations must not change pixel output.
 
-1. `production_gui_web_renderer_parity.spl` — exact pixel comparison between
-   software, cpu_simd, and metal backends
-2. `backend_parity.spl` — framebuffer vs software reference byte-for-byte match
-3. `golden_gate.spl` — golden-image drift detection with exact-only acceptance
-
-**Before optimizing**: capture baseline checksums at 8K resolution.
-**After optimizing**: re-run parity checks. Gate must pass with zero pixel diff.
-
-## Current Contract Status
-
-From `build/codex_production_gui_perf_contract.stdout`:
-
-| Metric | Value | Status |
-|--------|-------|--------|
-| Parity | electron matrix fail (checksum=0) | **FAIL** |
-| Cold startup | 4075 ms | Measured |
-| Warm startup | unavailable | Probe not wired |
-| Frame time p50 | unavailable | Probe not wired |
-| Frame time p95 | unavailable | Probe not wired |
-| Input-to-paint | unavailable | Probe not wired |
-| Max RSS | 93,488 KB | Measured |
-| Binary size | 53,746,144 bytes | Measured |
-
-### Why electron_checksum=0
-
-The electron backend produces zero pixels on headless Linux — Chromium requires
-a display server. The parity check correctly reports this as a failure rather
-than silently accepting empty output.
+1. `production_gui_web_renderer_parity.spl` — exact software/cpu_simd/metal match
+2. `backend_parity.spl` — framebuffer vs software byte-for-byte
+3. `golden_gate.spl` — golden-image drift, exact-only acceptance
 
 ## Optimization Opportunities
 
-### CUDA Pure Simple lane (highest impact)
-- **Module caching**: `CudaSession.module_cache` already caches PTX module.
-  Ensure it persists across frames (warm path skips `load_module`).
-- **Persistent allocation**: Reuse device buffer across frames instead of
-  alloc/free per frame. At 8K, each alloc is 127 MB.
-- **Async readback**: Use `cuMemcpyDtoHAsync` + stream sync instead of
-  blocking `cuda_memcpy_dtoh`. Overlap readback with next frame's compute.
+### CUDA (highest impact, currently unmeasured at 8K)
+- Persistent device buffer reuse (skip 127 MB alloc/free per frame)
+- Async readback via `cuMemcpyDtoHAsync` + stream sync
+- Module caching already in `CudaSession.module_cache`
 
 ### Software rasterizer
-- **SIMD fill**: The `cpu_simd` backend already uses SIMD for fill/copy/alpha/blit.
-  At 8K, ensure the hot loop uses 256-bit AVX2 stores (32 bytes/cycle vs 16
-  for SSE4).
-- **Dirty rect**: `FramePacer` and dirty-rect tracking skip unchanged regions.
-  At 8K, partial updates avoid the full 127 MB write.
+- Engine2D Simple scalar is 31x slower than C scalar for fill at 1080p
+- Key optimization: the Simple-to-C compilation gap, not algorithmic
+- CPU SIMD (AVX2) backend exists but needs 8K throughput measurement
+- Dirty-rect tracking avoids full 127 MB writes for partial updates
 
 ### General
-- **Frame pacer**: `frame_pacer.spl` prevents busy-wait. Ensure vsync alignment
-  doesn't add artificial latency in benchmark mode.
-- **Perf counters**: Wire `WmPerfCounters` per-phase timings (event_wait, input,
-  layout, paint, present, idle) into the contract output to identify where time
-  is actually spent.
+- Frame pacer prevents busy-wait; verify no artificial latency in bench mode
+- `WmPerfCounters.report_contract()` now emits per-phase timings when probes are driven
 
-## Unwired Probes (To Complete)
+## Remaining Work
 
-The contract reports several metrics as "unavailable". To wire them:
-
-1. **warm_startup**: Time from module-cached state to first frame. The CUDA
-   backend already computes `warm_us = artifact_load_us + frame_us`. Wire
-   this into the contract output via `--warm-startup-ms` flag.
-
-2. **frame_time_p50/p95**: Run N frames, sort timings. The `WmPerfCounters`
-   rolling sample buffer already computes this — emit via perf report.
-
-3. **input_to_paint**: Requires an input event probe. Timestamp at event
-   dispatch, timestamp at paint completion, report delta. The compositor's
-   `perf_counters.spl` tracks `input` and `paint` phases separately.
+1. **Compiled Simple benchmarks**: CUDA and software backends need compiled binary
+   (interpreter can't drive CUDA FFI or measure real frame throughput)
+2. **CPU SIMD at 8K**: AVX2 backend exists but no 8K throughput evidence yet
+3. **Tauri integration**: Needs `cargo-tauri` CLI + WebKitGTK dev package
+4. **Wire perf probes**: `start_phase`/`end_phase` calls need to be added to the
+   benchmark measurement path for `WmPerfCounters` to have non-zero samples
 
 ## File Layout
 
 ```
 tools/gui_perf_bench/
-  run_all_benchmarks.sh     # Orchestrator — runs all backends, collects results
-  bench_gtk.c               # C/GTK3 benchmark (Cairo rasterizer)
+  run_all_benchmarks.sh     # Orchestrator — all backends, collects results
+  bench_gtk.c               # C/GTK3 benchmark (Cairo/X11)
   bench_python.py           # Python/tkinter benchmark
   bench_js.html             # Browser JS Canvas benchmark
   bench_js_node.js          # Node.js headless canvas benchmark
 
 src/app/wm_compare/
   backend_measurement_cuda.spl    # CUDA device-buffer measurement
-  backend_measurement_export.spl  # CLI entry point for measurements
-  backend_measurement_report.spl  # BackendComparisonSample struct + SDN export
-  production_gui_web_renderer_parity.spl  # Pixel parity gate
+  backend_measurement_export.spl  # CLI entry point
+  backend_measurement_report.spl  # BackendComparisonSample + SDN export
 
 src/os/compositor/
-  perf_counters.spl         # Per-phase timing (event/input/layout/paint/present)
-  frame_pacer.spl           # Frame budget + vsync alignment
+  perf_counters.spl         # Per-phase timing + report_contract()
+  frame_pacer.spl           # Frame budget + vsync + report_contract()
 ```

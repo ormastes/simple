@@ -988,7 +988,6 @@ expect(budget.len()).to_equal(2)
 </details>
 
 ### MIR routing adapter
-_Plugin adapter routes through run_typed_pass_on_function/module._
 
 #### nil-guard returns function unchanged for source plugin
 

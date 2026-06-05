@@ -14,7 +14,8 @@ static int g_height = 4320;
 static int g_frames = 60;
 static int g_frame_count = 0;
 static double g_frame_times[4096];
-static struct timespec g_start, g_warm_start;
+static double g_draw_times[4096];
+static struct timespec g_start, g_warm_start, g_prev_frame_start;
 
 static double elapsed_ms(struct timespec *a, struct timespec *b) {
     return (b->tv_sec - a->tv_sec) * 1000.0 +
@@ -74,8 +75,12 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer data) {
     clock_gettime(CLOCK_MONOTONIC, &frame_end);
 
     if (g_frame_count < 4096) {
-        g_frame_times[g_frame_count] = elapsed_ms(&frame_start, &frame_end);
+        g_draw_times[g_frame_count] = elapsed_ms(&frame_start, &frame_end);
+        if (g_frame_count > 0) {
+            g_frame_times[g_frame_count - 1] = elapsed_ms(&g_prev_frame_start, &frame_start);
+        }
     }
+    g_prev_frame_start = frame_start;
     g_frame_count++;
 
     if (g_frame_count < g_frames) {
@@ -84,24 +89,34 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer data) {
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
 
-        // Compute stats
-        double total_frame = 0;
-        double max_frame = 0;
-        int n = g_frame_count < 4096 ? g_frame_count : 4096;
+        // Frame-to-frame interval stats (full render-present cycle)
+        int nf = g_frame_count > 1 ? g_frame_count - 1 : 0;
+        if (nf > 4096) nf = 4096;
         double sorted[4096];
-        memcpy(sorted, g_frame_times, n * sizeof(double));
-        for (int i = 0; i < n - 1; i++)
-            for (int j = i + 1; j < n; j++)
+        memcpy(sorted, g_frame_times, nf * sizeof(double));
+        for (int i = 0; i < nf - 1; i++)
+            for (int j = i + 1; j < nf; j++)
                 if (sorted[i] > sorted[j]) {
                     double t = sorted[i]; sorted[i] = sorted[j]; sorted[j] = t;
                 }
-        for (int i = 0; i < n; i++) total_frame += sorted[i];
+        double total_frame = 0;
+        for (int i = 0; i < nf; i++) total_frame += sorted[i];
+
+        // Draw-only stats (cairo calls only, for reference)
+        int nd = g_frame_count < 4096 ? g_frame_count : 4096;
+        double draw_sorted[4096];
+        memcpy(draw_sorted, g_draw_times, nd * sizeof(double));
+        for (int i = 0; i < nd - 1; i++)
+            for (int j = i + 1; j < nd; j++)
+                if (draw_sorted[i] > draw_sorted[j]) {
+                    double t = draw_sorted[i]; draw_sorted[i] = draw_sorted[j]; draw_sorted[j] = t;
+                }
 
         double cold_ms = elapsed_ms(&g_start, &g_warm_start);
         double warm_ms = elapsed_ms(&g_warm_start, &now);
-        double p50 = sorted[n / 2];
-        double p95 = sorted[(int)(n * 0.95)];
-        double avg = total_frame / n;
+        double p50 = nf > 0 ? sorted[nf / 2] : 0;
+        double p95 = nf > 0 ? sorted[(int)(nf * 0.95)] : 0;
+        double avg = nf > 0 ? total_frame / nf : 0;
 
         printf("gui_perf_benchmark_backend=gtk3\n");
         printf("gui_perf_benchmark_resolution=%dx%d\n", g_width, g_height);
@@ -111,7 +126,8 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer data) {
         printf("gui_perf_benchmark_frame_time_avg_ms=%.3f\n", avg);
         printf("gui_perf_benchmark_frame_time_p50_ms=%.3f\n", p50);
         printf("gui_perf_benchmark_frame_time_p95_ms=%.3f\n", p95);
-        printf("gui_perf_benchmark_frame_time_max_ms=%.3f\n", sorted[n - 1]);
+        printf("gui_perf_benchmark_frame_time_max_ms=%.3f\n", nf > 0 ? sorted[nf - 1] : 0);
+        printf("gui_perf_benchmark_draw_only_avg_ms=%.3f\n", nd > 0 ? draw_sorted[nd / 2] : 0);
         printf("gui_perf_benchmark_pixel_count=%ld\n", (long)g_width * g_height);
         printf("gui_perf_benchmark_bytes_per_frame=%ld\n", (long)g_width * g_height * 4);
         printf("gui_perf_benchmark_status=completed\n");
