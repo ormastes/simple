@@ -550,9 +550,9 @@ function maybeWriteMdiProof(win) {
                         dragProbe.afterMouseDown = wm.drag ? { id: wm.drag.id, pointerId: wm.drag.pointerId, mouse: wm.drag.mouse, startX: wm.drag.startX, startY: wm.drag.startY } : null;
                         var mouseMoveEvent = new MouseEvent('mousemove', { button: 0, buttons: 1, clientX: dragBefore.left + 72, clientY: dragBefore.top + 42, bubbles: true });
                         titlebar.dispatchEvent(mouseMoveEvent);
-                        dragProbe.afterMouseDispatch = { left: terminal.style.left, top: terminal.style.top };
+                        dragProbe.afterMouseDispatch = { left: terminal.style.left, top: terminal.style.top, eventX: mouseMoveEvent.clientX, eventY: mouseMoveEvent.clientY };
                         wm.moveDrag(mouseMoveEvent, 'mouse', true);
-                        dragProbe.afterMouseMove = { left: terminal.style.left, top: terminal.style.top, drag: wm.drag ? { id: wm.drag.id, pointerId: wm.drag.pointerId, mouse: wm.drag.mouse } : null };
+                        dragProbe.afterMouseMove = { left: terminal.style.left, top: terminal.style.top, drag: wm.drag ? { id: wm.drag.id, pointerId: wm.drag.pointerId, mouse: wm.drag.mouse, samePointer: wm.drag.pointerId === 'mouse', sameMouse: wm.drag.mouse === true, left: wm.drag.left, top: wm.drag.top, startX: wm.drag.startX, startY: wm.drag.startY, nextLeft: wm.drag.left + mouseMoveEvent.clientX - wm.drag.startX, nextTop: wm.drag.top + mouseMoveEvent.clientY - wm.drag.startY } : null };
                         document.dispatchEvent(new MouseEvent('mouseup', { button: 0, buttons: 0, clientX: dragBefore.left + 72, clientY: dragBefore.top + 42, bubbles: true }));
                         dragAfter = { left: parseInt(terminal.style.left || '0', 10) || 0, top: parseInt(terminal.style.top || '0', 10) || 0 };
                         dragMoved = dragAfter.left > dragBefore.left && dragAfter.top > dragBefore.top;
