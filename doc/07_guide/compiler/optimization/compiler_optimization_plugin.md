@@ -264,6 +264,10 @@ Simple Optimization Plugins are selected by Simple optimization level before bac
 
 LLVM optimization still uses LLVM's default pass pipelines for backend work. Simple Optimization Plugins should improve the IR facts and structure that LLVM receives, not duplicate LLVM CPU backend work.
 
+## Cross-Module Mutation Constraint
+
+Optimization passes that mutate counter or state fields on a pass object (e.g. `calls_hoisted`, `scalar_ops_hoisted`) MUST use `me` methods, not free functions that take `self: PassClass`. Free functions called across module boundaries lose field mutations due to an interpreter bug. Use extension `impl ClassName:` blocks when the class is defined in a different file. See glossary entry "Cross-Module Mutation Loss" and the workaround in `collection_opt.spl`.
+
 ## Safety Rules
 
 - The plugin may not change observable semantics.

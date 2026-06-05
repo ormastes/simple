@@ -618,3 +618,11 @@ The validation strategy for the RISC-V RTL + SimpleOS system:
 3. **FPGA (Kria K26)** — real hardware execution, proves deployment readiness
 
 Each layer validates the next: GHDL proves RTL matches spec, QEMU proves software works on the ISA, FPGA proves the synthesized RTL runs the software.
+
+## Extension Impl Block
+
+An `impl ClassName:` block defined in a file OTHER than where the class is declared. Simple supports this pattern — it adds `me` methods to an existing class without modifying the original file. Used by the collection optimization pass (`collection_opt.spl`) to extend `CollectionOptimization` defined in `collection_opt_core.spl`. This is the workaround for the cross-module mutation loss bug.
+
+## Cross-Module Mutation Loss (Interpreter Bug)
+
+Interpreter bug where a free function `fn foo(self: MyClass, ...)` called across module boundaries loses field mutations on `self`. The caller sees stale values even though class instances are reference types. Same function body defined as a `me` method propagates correctly. Workaround: use extension impl blocks to define `me` methods. TODO filed in `collection_opt.spl`.
