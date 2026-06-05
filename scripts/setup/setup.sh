@@ -5,8 +5,20 @@ set -eu
 # platform-specific release binaries.  Called by bootstrap-from-scratch.sh
 # after --deploy, or manually after a fresh clone.
 
-repo_root="$(cd "$(dirname "$0")/.." && pwd)"
-. "${repo_root}/scripts/platform-detect.sh"
+repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
+. "${repo_root}/scripts/setup/platform-detect.sh"
+
+# platform-detect emits the 3-part Rust triple (e.g. aarch64-apple-darwin), but
+# release binaries live under the 4-part Simple-native triple (…-macho on macOS).
+# Resolve PLATFORM_TRIPLE to whichever release dir actually exists.
+if [ ! -x "${repo_root}/bin/release/${PLATFORM_TRIPLE}/simple" ]; then
+  for cand in "${PLATFORM_TRIPLE}-macho" "${PLATFORM_ARCH}-apple-darwin-macho"; do
+    if [ -x "${repo_root}/bin/release/${cand}/simple" ]; then
+      PLATFORM_TRIPLE="${cand}"
+      break
+    fi
+  done
+fi
 
 release_dir="${repo_root}/bin/release/${PLATFORM_TRIPLE}"
 
