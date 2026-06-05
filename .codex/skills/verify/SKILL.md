@@ -75,6 +75,8 @@ Scan for stub patterns — any match is a **FAIL**:
 - Empty function bodies
 - Commented-out code blocks
 - `# TODO` / `# FIXME` converted to `# NOTE` — hidden work
+- Generated GPU backend source containing unsupported-operation placeholder
+  comments or marker text instead of a diagnostic
 
 **STUB001 = HARD FAIL.** No stubs in production code.
 

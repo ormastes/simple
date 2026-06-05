@@ -13,6 +13,20 @@ Simple supports GPU compute programming through CUDA and Vulkan backends. Write 
 - **Runtime API** (`std.gpu_runtime`) -- Works today with the interpreter, no compiler needed
 - **Full API** (`std.gpu`) -- Requires the compiler, type-safe generics, RAII
 
+## Generated Backend Validation
+
+Generated GPU backends must fail closed. If a MIR operation, intrinsic, call
+shape, or artifact path is outside the supported subset for CUDA, HIP, OpenCL,
+Metal, Vulkan, or ROCm, codegen returns a diagnostic instead of emitting source
+with placeholder comments such as unsupported-operation markers.
+
+The OpenCL contract is the reference example: accepted kernels emit concrete
+OpenCL C, while indirect or unsupported MIR calls are rejected before source is
+returned. Keep the executable contract and generated manual in sync:
+
+- `test/01_unit/compiler/codegen/opencl_backend_contract_spec.spl`
+- `doc/06_spec/01_unit/compiler/codegen/opencl_backend_contract_spec.md`
+
 ---
 
 ## Quick Start: Runtime API (Works Now)

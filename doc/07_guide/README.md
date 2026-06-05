@@ -91,11 +91,11 @@ User-facing guides for the Simple programming language. For specifications see `
 
 | Guide | Description |
 |-------|-------------|
-| [backend/backends.md](backend/backends.md) | Backend selection, capabilities, shared components |
-| [backend/gpu_programming.md](backend/gpu_programming.md) | GPU (CUDA + Vulkan), SIMD, config |
-| [backend/baremetal.md](backend/baremetal.md) | Baremetal, QEMU, semihosting, embedded |
-| [backend/llvm_backend_policy.md](backend/llvm_backend_policy.md) | LLVM backend policy |
-| [backend/llvm_optimization_workflow.md](backend/llvm_optimization_workflow.md) | LLVM optimization workflow, IR quality, verification, benchmark gate |
+| [compiler/backends/backends.md](compiler/backends/backends.md) | Backend selection, capabilities, shared components |
+| [compiler/backends/gpu_programming.md](compiler/backends/gpu_programming.md) | GPU (CUDA + Vulkan), SIMD, config |
+| [compiler/backends/baremetal.md](compiler/backends/baremetal.md) | Baremetal, QEMU, semihosting, embedded |
+| [compiler/llvm/llvm_backend_policy.md](compiler/llvm/llvm_backend_policy.md) | LLVM backend policy |
+| [compiler/llvm/llvm_optimization_workflow.md](compiler/llvm/llvm_optimization_workflow.md) | LLVM optimization workflow, IR quality, verification, benchmark gate |
 | [backend/trace32_docker_experiment.md](backend/trace32_docker_experiment.md) | TRACE32 Docker experiment |
 | [backend/trace32_linux_setup.md](backend/trace32_linux_setup.md) | TRACE32 Linux setup |
 

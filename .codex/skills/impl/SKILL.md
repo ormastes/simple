@@ -60,6 +60,9 @@ Skip if exist. See `design` skill for details.
 - Implement in `src/**/<feature>.spl`
 - Follow `/coding` rules strictly
 - Reference: `doc/07_guide/quick_reference/syntax_quick_reference.md`
+- For generated GPU backends, fail closed on unsupported MIR or artifact
+  states. Do not emit target source containing placeholder unsupported-operation
+  comments; return a typed diagnostic and add/refresh backend contract coverage.
 - Use short grammar deliberately:
   - Prefer expression-bodied functions for small pure helpers.
   - Prefer placeholder lambdas (`_`, `_1`, `_2`) and method references (`&:name`) only for single-expression transforms.
