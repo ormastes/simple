@@ -194,7 +194,7 @@ function electronWmInitScript() {
             if (!document.getElementById('simple-electron-wm-style')) {
                 var style = document.createElement('style');
                 style.id = 'simple-electron-wm-style';
-                style.textContent = '#wm-desktop{position:fixed;inset:0;overflow:hidden;isolation:isolate}#wm-desktop .wm-titlebar{display:flex;align-items:center;gap:8px;height:46px;padding:0 18px;background:linear-gradient(180deg,rgba(255,255,255,.12),rgba(255,255,255,.04));border-bottom:1px solid rgba(255,255,255,.12);user-select:none;cursor:grab}#wm-desktop .wm-titlebar:active{cursor:grabbing}#wm-desktop .wm-title{font:600 13px/1 var(--ui-font-label,system-ui,sans-serif);color:var(--ui-text,#e5e7eb);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#wm-desktop .wm-titlebar-widgets{display:flex;align-items:center;gap:6px;margin-left:auto}#wm-desktop .wm-titlebar-widgets [data-simple-titlebar-widget]{min-height:24px}';
+                style.textContent = '#wm-desktop{position:fixed;inset:0;overflow:hidden;isolation:isolate}#wm-desktop .wm-window{position:absolute;display:flex;flex-direction:column;overflow:hidden}#wm-desktop .wm-body{flex:1;min-height:0;overflow:auto}#wm-desktop .wm-titlebar{display:flex;align-items:center;gap:8px;height:46px;padding:0 18px;background:linear-gradient(180deg,rgba(255,255,255,.12),rgba(255,255,255,.04));border-bottom:1px solid rgba(255,255,255,.12);user-select:none;cursor:grab}#wm-desktop .wm-titlebar:active{cursor:grabbing}#wm-desktop .wm-title{font:600 13px/1 var(--ui-font-label,system-ui,sans-serif);color:var(--ui-text,#e5e7eb);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#wm-desktop .wm-titlebar-widgets{display:flex;align-items:center;gap:6px;margin-left:auto}#wm-desktop .wm-titlebar-widgets [data-simple-titlebar-widget]{min-height:24px}';
                 document.head.appendChild(style);
             }
             var desktop = document.getElementById('wm-desktop');
@@ -297,6 +297,8 @@ function electronWmInitScript() {
                         if (this.isDragControl(ev)) return false;
                         this.focus(id);
                         var rect = win.getBoundingClientRect();
+                        var styleLeft = parseInt(win.style.left || '', 10);
+                        var styleTop = parseInt(win.style.top || '', 10);
                         this.drag = {
                             id: id,
                             win: win,
@@ -304,8 +306,8 @@ function electronWmInitScript() {
                             mouse: !!isMouse,
                             startX: ev.clientX,
                             startY: ev.clientY,
-                            left: rect.left,
-                            top: rect.top
+                            left: isNaN(styleLeft) ? rect.left : styleLeft,
+                            top: isNaN(styleTop) ? rect.top : styleTop
                         };
                         ev.preventDefault();
                         return true;
@@ -515,7 +517,6 @@ function maybeWriteMdiProof(win) {
                 var appInputControlFound = false;
                 var dragBefore = null;
                 var dragAfter = null;
-                var dragProbe = {};
                 var taskbarItems = Array.from(document.querySelectorAll('#dock .tab-bar-item'));
                 var taskbarIcons = Array.from(document.querySelectorAll('#dock .tab-bar-icon'));
                 var taskbarIconsVisible = taskbarIcons.length >= 4 && taskbarIcons.every(function(icon) {
@@ -535,24 +536,16 @@ function maybeWriteMdiProof(win) {
                     var body = wm.windows.terminal.body;
                     var titlebar = terminal.querySelector('.wm-titlebar');
                     dragBefore = { left: parseInt(terminal.style.left || '0', 10) || 0, top: parseInt(terminal.style.top || '0', 10) || 0 };
-                    dragProbe.runtime = { hasBegin: typeof wm.beginDrag === 'function', hasMove: typeof wm.moveDrag === 'function', globalBound: wm.dragEventsBound };
                 if (titlebar && typeof PointerEvent === 'function') {
                     titlebar.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 37, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1, clientX: dragBefore.left + 12, clientY: dragBefore.top + 12, bubbles: true }));
-                    dragProbe.afterPointerDown = wm.drag ? { id: wm.drag.id, pointerId: wm.drag.pointerId, mouse: wm.drag.mouse, startX: wm.drag.startX, startY: wm.drag.startY } : null;
                     titlebar.dispatchEvent(new PointerEvent('pointermove', { pointerId: 37, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1, clientX: dragBefore.left + 72, clientY: dragBefore.top + 42, bubbles: true }));
-                    dragProbe.afterPointerMove = { left: terminal.style.left, top: terminal.style.top, drag: wm.drag ? { id: wm.drag.id, pointerId: wm.drag.pointerId, mouse: wm.drag.mouse } : null };
                     document.dispatchEvent(new PointerEvent('pointerup', { pointerId: 37, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 0, clientX: dragBefore.left + 72, clientY: dragBefore.top + 42, bubbles: true }));
                     }
                     dragAfter = { left: parseInt(terminal.style.left || '0', 10) || 0, top: parseInt(terminal.style.top || '0', 10) || 0 };
                     dragMoved = dragAfter.left > dragBefore.left && dragAfter.top > dragBefore.top;
                     if (titlebar && !dragMoved) {
                         titlebar.dispatchEvent(new MouseEvent('mousedown', { button: 0, buttons: 1, clientX: dragBefore.left + 12, clientY: dragBefore.top + 12, bubbles: true }));
-                        dragProbe.afterMouseDown = wm.drag ? { id: wm.drag.id, pointerId: wm.drag.pointerId, mouse: wm.drag.mouse, startX: wm.drag.startX, startY: wm.drag.startY } : null;
-                        var mouseMoveEvent = new MouseEvent('mousemove', { button: 0, buttons: 1, clientX: dragBefore.left + 72, clientY: dragBefore.top + 42, bubbles: true });
-                        titlebar.dispatchEvent(mouseMoveEvent);
-                        dragProbe.afterMouseDispatch = { left: terminal.style.left, top: terminal.style.top, eventX: mouseMoveEvent.clientX, eventY: mouseMoveEvent.clientY };
-                        wm.moveDrag(mouseMoveEvent, 'mouse', true);
-                        dragProbe.afterMouseMove = { left: terminal.style.left, top: terminal.style.top, drag: wm.drag ? { id: wm.drag.id, pointerId: wm.drag.pointerId, mouse: wm.drag.mouse, samePointer: wm.drag.pointerId === 'mouse', sameMouse: wm.drag.mouse === true, left: wm.drag.left, top: wm.drag.top, startX: wm.drag.startX, startY: wm.drag.startY, nextLeft: wm.drag.left + mouseMoveEvent.clientX - wm.drag.startX, nextTop: wm.drag.top + mouseMoveEvent.clientY - wm.drag.startY } : null };
+                        titlebar.dispatchEvent(new MouseEvent('mousemove', { button: 0, buttons: 1, clientX: dragBefore.left + 72, clientY: dragBefore.top + 42, bubbles: true }));
                         document.dispatchEvent(new MouseEvent('mouseup', { button: 0, buttons: 0, clientX: dragBefore.left + 72, clientY: dragBefore.top + 42, bubbles: true }));
                         dragAfter = { left: parseInt(terminal.style.left || '0', 10) || 0, top: parseInt(terminal.style.top || '0', 10) || 0 };
                         dragMoved = dragAfter.left > dragBefore.left && dragAfter.top > dragBefore.top;
@@ -602,7 +595,6 @@ function maybeWriteMdiProof(win) {
             taskbarLabelsVisible: taskbarLabelsVisible,
             dragBefore: dragBefore,
             dragAfter: dragAfter,
-            dragProbe: dragProbe,
             htmlRenderable: document.body.innerHTML.indexOf('simple-app-window') >= 0 && document.body.innerHTML.indexOf('<pre class="simple-app-pre">') >= 0
             };
         })();

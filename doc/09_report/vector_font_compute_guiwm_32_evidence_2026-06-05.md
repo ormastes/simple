@@ -276,5 +276,9 @@
 - vector_font_compute_matrix_2_cpu_fallback_hits=10
 - vector_font_compute_cuda_status=pass
 - vector_font_compute_cuda_reason=cuda-vector-font-glyph-pixels-returned
+- vector_font_compute_cuda_checksum=17421042
+- vector_font_compute_cuda_glyph_count=3
 - vector_font_compute_opencl_status=pass
 - vector_font_compute_opencl_reason=opencl-vector-font-glyph-pixels-returned
+- vector_font_compute_opencl_checksum=17421042
+- vector_font_compute_opencl_glyph_count=2
