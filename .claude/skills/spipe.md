@@ -28,6 +28,7 @@ sh scripts/setup/install-spipe-dev-command.shs --apply
 - [`.claude/agents/spipe/verify.md`](../agents/spipe/verify.md) — SPipe verification phase
 - [`.claude/skills/lib/spipe_phases.md`](lib/spipe_phases.md) — phase map
 - [`.claude/skills/lib/spipe_diagrams.md`](lib/spipe_diagrams.md) — diagram & concision rules (≤30 lines + ≥1 SDN diagram)
+- [`.claude/skills/lib/spipe_ui.md`](lib/spipe_ui.md) — **UI skill**: the 3 main GUI check apps + framebuffer capture/verify & backend-parity gates
 - [`doc/07_guide/infra/testing/sspec_scenario_manual.md`](../../doc/07_guide/infra/testing/sspec_scenario_manual.md) — scenario manual, capture, inline/previous scenario, and environmental-test guidance
 
 ## Scenario Manual Quality
@@ -72,26 +73,21 @@ keep the absolute oracle in it — don't downgrade to "files load".
 
 ## GUI sanity tests (pure-Simple lane)
 
-After any GUI / engine2d / web-render change, sanity-check the three on-screen
-pure-Simple-lane apps (on macOS the lane = Engine2D CPU/NEON + Metal):
+After any GUI / engine2d / web-render change, sanity-check the **three main GUI
+check apps** (one per surface; on macOS the lane = Engine2D CPU/NEON + Metal):
 
-- **2D rendering** — `examples/06_io/ui/engine2d_cpu_simd_gui.spl` (CPU) /
-  `engine2d_metal_gui.spl` (Metal): primitives (text/rect/circle/line/gradient/rounded).
-- **GUI widgets** — `examples/06_io/ui/widget_showcase_gui.spl`: button/checkbox/
-  text-field/progress/list chrome with legible labels.
-- **HTML rendering** — `examples/06_io/ui/web_text_gui.spl` (or
-  `web_render_file_gui.spl <file.html>`): web layout → Engine2D CPU, legible glyph text.
+1. **2D rendering** — `examples/06_io/ui/engine2d_shapes_gui.spl` (primitives;
+   backend variants `engine2d_cpu_simd_gui.spl` / `engine2d_metal_gui.spl`).
+2. **GUI widgets** — `examples/06_io/ui/widget_showcase_gui.spl` (full widget catalog).
+3. **HTML rendering** — `examples/06_io/ui/web_render_file_gui.spl <file.html>`
+   (real HTML+CSS → web layout → Engine2D; headless PPM via `web_render_page_ppm.spl`).
 
-Launch (macOS): `scripts/gui/macos-gui-run.shs <app.spl>` (wraps the GUI driver in
-a throwaway `.app` so the window-server registers it).
-
-**Verify the framebuffer, not the screenshot.** The ground truth is `read_pixels()`
-dumped to a P3 PPM via `rt_file_write_text` (then convert/inspect) — it proves the
-lane renders independent of window-server/compositor/permission state, and screen
-capture by region is flaky (it can grab whatever window is at those coordinates).
-This is the same "absolute oracle" rule above, applied to pixels. Reference:
-`doc/04_architecture/ui/simple_gui_stack.md` → "GUI Sanity Apps". Note the
-web-layout lane is interpreter-bound (~1.5 ms/px) — keep web sanity surfaces small.
+Launch (macOS): `scripts/gui/macos-gui-run.shs <app.spl>`. **Verify the
+framebuffer, not the screenshot** (`read_pixels()` → P6 PPM is the absolute
+oracle; region screen-capture is flaky). Full launch/capture/parity-gate details:
+**[`lib/spipe_ui.md`](lib/spipe_ui.md)** (the UI skill). Reference:
+`doc/04_architecture/ui/simple_gui_stack.md` → "GUI Sanity Apps". The web-layout
+lane is interpreter-bound (~1.5 ms/px) — keep web sanity surfaces ≤ ~900×760.
 
 ## Template
 
