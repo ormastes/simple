@@ -29,7 +29,7 @@ simple_app_startup_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -121,9 +121,11 @@ expect(app_registry_cached_bytes("/sys/apps/simple").len()).to_equal(3)
 
 #### should record a miss for an executable that is not warmed yet
 
-1. launcher init
+1.  clear vfs rootfs for test
 
-2. app registry load hardcoded fallback
+2. launcher init
+
+3. app registry load hardcoded fallback
    - Expected: hit is false
    - Expected: launcher_prefetch_count() equals `1`
    - Expected: launcher_prefetch_last_path() equals `/sys/apps/editor.smf`
@@ -134,10 +136,11 @@ expect(app_registry_cached_bytes("/sys/apps/simple").len()).to_equal(3)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+_clear_vfs_rootfs_for_test()
 launcher_init()
 app_registry_load_hardcoded_fallback()
 
@@ -148,6 +151,48 @@ expect(launcher_prefetch_count()).to_equal(1)
 expect(launcher_prefetch_last_path()).to_equal("/sys/apps/editor.smf")
 expect(launcher_prefetch_last_cache_hit()).to_equal(false)
 expect(launcher_get_running_app_count()).to_equal(0)
+```
+
+</details>
+
+#### should warm executable bytes through VFS when hover finds an app file
+
+1.  clear vfs rootfs for test
+   - Expected: _mount_hosted_rootfs_for_test(_dbfs_root()) is true
+   - Expected: g_vfs_write_file_text("/sys/apps/editor.smf", "SMF!!") is true
+
+2. launcher init
+
+3. app registry load hardcoded fallback
+   - Expected: hit is true
+   - Expected: launcher_prefetch_count() equals `1`
+   - Expected: launcher_prefetch_last_path() equals `/sys/apps/editor.smf`
+   - Expected: launcher_prefetch_last_cache_hit() is true
+   - Expected: launcher_get_running_app_count() equals `0`
+   - Expected: app_registry_cached_bytes("/sys/apps/editor").len() equals `5`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+_clear_vfs_rootfs_for_test()
+expect(_mount_hosted_rootfs_for_test(_dbfs_root())).to_equal(true)
+expect(g_vfs_write_file_text("/sys/apps/editor.smf", "SMF!!")).to_equal(true)
+launcher_init()
+app_registry_load_hardcoded_fallback()
+
+val hit = launcher_hover_executable_icon("/sys/apps/editor.smf")
+
+expect(hit).to_equal(true)
+expect(launcher_prefetch_count()).to_equal(1)
+expect(launcher_prefetch_last_path()).to_equal("/sys/apps/editor.smf")
+expect(launcher_prefetch_last_cache_hit()).to_equal(true)
+expect(launcher_get_running_app_count()).to_equal(0)
+expect(app_registry_cached_bytes("/sys/apps/editor").len()).to_equal(5)
 ```
 
 </details>
@@ -256,8 +301,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

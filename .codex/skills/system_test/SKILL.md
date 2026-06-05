@@ -122,6 +122,16 @@ describe "<Feature Name>":
   - Native specs must cover only compact forms intended to work in native mode.
   - Native short-grammar evidence must be run with `SIMPLE_NO_STUB_FALLBACK=1` so codegen stub fallback cannot masquerade as a pass.
   - A spec claiming walrus shorthand support must use the actual `:=` token, not `val` as a substitute.
+- Startup-sensitive specs must preserve the app startup fast path:
+  - If the change touches `simple run`, file-argument startup parsing,
+    `get_cli_args`, `std.cli`, `.shs` dispatch, mmap/read-ahead startup
+    loading, launch metadata, or startup dynlib policy, include
+    `test/02_integration/app/startup_argparse_mmap_perf_spec.spl` in the test
+    plan and traceability.
+  - Generated docs must mirror that spec at
+    `doc/06_spec/02_integration/app/startup_argparse_mmap_perf_spec.md`.
+  - Do not replace the compact startup path with a compile/JIT workaround just
+    to make a test pass; fix the fast path or record a concrete bug.
 
 ## Phase 3: Traceability Matrix
 

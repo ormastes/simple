@@ -73,6 +73,23 @@ screenshots.
 - Keep `test/shared/` import-free except for built-in BDD helpers such as
   `describe`, `context`, `it`, and `expect`.
 
+## Startup-Sensitive Specs
+
+Changes that touch `simple run`, direct file argv parsing, `get_cli_args`,
+`std.cli`, `.shs` dispatch, mmap/read-ahead startup loading, launch metadata,
+or startup dynlib policy must keep the startup performance evidence in the
+traceability set:
+
+```text
+test/02_integration/app/startup_argparse_mmap_perf_spec.spl
+doc/06_spec/02_integration/app/startup_argparse_mmap_perf_spec.md
+```
+
+Do not move the executable spec to `doc/06_spec`, and do not replace the fast
+script startup path with a compile/JIT workaround just to satisfy a test. The
+spec exists to protect arg parsing and mmap startup optimizations from being
+broken by otherwise plausible startup refactors.
+
 ## Move Checklist
 
 1. Move the executable spec and any adjacent `summary.txt` evidence together.

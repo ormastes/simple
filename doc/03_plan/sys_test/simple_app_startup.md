@@ -29,12 +29,13 @@ Excluded:
 
 Run executable specs from `test/` only:
 
+- `test/02_integration/app/startup_argparse_mmap_perf_spec.spl`
 - `test/03_system/app/simple/feature/simple_app_startup_spec.spl`
 - `test/03_system/app/simpleos/feature/simple_app_startup_spec.spl`
-- `test/02_integration/app/startup_argparse_mmap_perf_spec.spl`
 
 Generated/manual docs mirror the executable paths:
 
+- `doc/06_spec/02_integration/app/startup_argparse_mmap_perf_spec.md`
 - `doc/06_spec/03_system/app/simple/feature/simple_app_startup_spec.md`
 - `doc/06_spec/03_system/app/simpleos/feature/simple_app_startup_spec.md`
 
@@ -48,6 +49,8 @@ Generated/manual docs mirror the executable paths:
   declared.
 - SimpleOS hover prefetch records/warm-checks executable bytes, uses VFS to
   materialize bytes on cache miss when available, and does not launch a process.
+- `simple run` startup remains responsive for `.shs`, `get_cli_args`, and
+  `std.cli` script workloads.
 - `find doc/06_spec -name '*_spec.spl' | wc -l` prints `0`.
 
 ## Traceability

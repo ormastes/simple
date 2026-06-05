@@ -87,9 +87,16 @@ sh scripts/check/check-cross-language-perf.shs
 | `WARM_IN_PROCESS` | 10 | In-process warmup iterations (JIT reaches steady state) |
 | `FIB_N` | 35 | Fibonacci depth for throughput test |
 | `WORKERS` | 100 | Parallel worker count |
+| `RUN_TIMEOUT` | 30 | Per-command timeout in seconds for measured commands and RSS probes |
 | `SIMPLE_BINARY` | `bin/simple` | Path to Simple compiler |
 | `BUILD_DIR` | `build/cross_lang_perf` | Workload compile output |
 | `REPORT_PATH` | `doc/09_report/cross_language_perf_<date>.md` | Output report |
+
+The harness deletes a Simple output before recording a failed compile, so a
+failed native or SMF compile cannot leave a stale binary/bytecode file that is
+then measured as if it belonged to the current run. Long-running measured
+commands are bounded by `RUN_TIMEOUT`; set it higher for full reports on slow
+hosts, or lower it for smoke evidence.
 
 ### What it measures
 
@@ -130,7 +137,7 @@ sh scripts/check/check-cross-language-perf.shs
 
 **Warm throughput (fib35):** C ≈ Simple-native < Go < Java (after JIT) < Bun < Simple-SMF < Erlang < Simple-interp < Python
 
-**Parallel (100 workers):** Erlang ≈ Go < Java < Simple-native < C-pthreads < Bun < Python (GIL)
+**Parallel (100 workers):** Go and C are the current native baselines; Simple-native is the OS-thread/channel target; VM/worker-thread runtimes vary substantially by host and timeout settings.
 
 ### What matters per use case
 

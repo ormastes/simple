@@ -26,6 +26,7 @@ FIB_N="${FIB_N:-35}"
 WORKERS="${WORKERS:-100}"
 WARM_ITERS="${WARM_ITERS:-5}"
 WARM_IN_PROCESS="${WARM_IN_PROCESS:-10}"
+RUN_TIMEOUT="${RUN_TIMEOUT:-30}"
 
 mkdir -p "$BUILD_DIR" "$(dirname "$REPORT_PATH")"
 
@@ -38,6 +39,15 @@ export PATH
 # ── helpers ──────────────────────────────────────────────────────────────
 
 have() { command -v "$1" >/dev/null 2>&1; }
+
+run_bounded() {
+    _cmd="$1"
+    if have timeout; then
+        timeout "$RUN_TIMEOUT" sh -c "$_cmd"
+    else
+        sh -c "$_cmd"
+    fi
+}
 
 bytes_of() {
     if [ -f "$1" ]; then wc -c <"$1" | tr -d ' '; else echo "n/a"; fi
@@ -56,7 +66,7 @@ avg_ms() {
     i=0; total=0; ok=0
     while [ "$i" -lt "$_runs" ]; do
         start="$(date +%s%N)"
-        if eval "$_cmd" >/dev/null 2>&1; then
+        if run_bounded "$_cmd" >/dev/null 2>&1; then
             end="$(date +%s%N)"
             total=$((total + (end - start)))
             ok=$((ok + 1))
@@ -70,7 +80,7 @@ avg_ms() {
 # Extract in-process timing from program stdout (programs print "warm_ms: NNN.NNN")
 extract_warm_ms() {
     _cmd="$1"
-    _output=$(eval "$_cmd" 2>/dev/null) || { echo "fail"; return; }
+    _output=$(run_bounded "$_cmd" 2>/dev/null) || { echo "fail"; return; }
     echo "$_output" | grep 'warm_ms:' | tail -1 | sed 's/.*warm_ms: *//' | tr -d ' '
 }
 
@@ -517,6 +527,7 @@ if [ -x "$SIMPLE_BINARY" ]; then
             if "$SIMPLE_BINARY" compile "$_spl" --native -o "$_out" 2>/dev/null; then
                 : # ok
             else
+                rm -f "$_out"
                 echo "  [FAIL] Simple native: $_spl"
                 COMPILE_FAIL="$COMPILE_FAIL native:$_src"
             fi
@@ -535,6 +546,7 @@ if [ -x "$SIMPLE_BINARY" ]; then
             if "$SIMPLE_BINARY" compile "$_spl" -o "$_out" 2>/dev/null; then
                 : # ok
             else
+                rm -f "$_out"
                 echo "  [FAIL] Simple SMF: $_spl"
                 COMPILE_FAIL_SMF="$COMPILE_FAIL_SMF smf:$_src"
             fi
@@ -551,7 +563,7 @@ cat >"$REPORT_PATH" <<EOF
 **Date:** $(date +%Y-%m-%d)
 **Machine:** $(uname -m) / $(uname -s) $(uname -r)
 **CPU:** $(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs || sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "unknown")
-**Runs per measurement:** $RUNS | **Warmup (in-process):** $WARM_IN_PROCESS | **fib(N):** $FIB_N | **Workers:** $WORKERS
+**Runs per measurement:** $RUNS | **Warmup (in-process):** $WARM_IN_PROCESS | **fib(N):** $FIB_N | **Workers:** $WORKERS | **Per-run timeout:** ${RUN_TIMEOUT}s
 
 > Size for AOT = binary bytes. For VM/interpreted = script bytes (runtime not included).
 > "Runtime dep" column shows runtime size where applicable.
@@ -788,7 +800,11 @@ par_rss_row() {
 
 measure_rss() {
     _cmd="$1"
-    /usr/bin/time -v sh -c "$_cmd" 2>&1 >/dev/null | grep "Maximum resident" | awk '{print $NF}'
+    if have timeout; then
+        /usr/bin/time -v timeout "$RUN_TIMEOUT" sh -c "$_cmd" 2>&1 >/dev/null | grep "Maximum resident" | awk '{print $NF}'
+    else
+        /usr/bin/time -v sh -c "$_cmd" 2>&1 >/dev/null | grep "Maximum resident" | awk '{print $NF}'
+    fi
 }
 
 rss_delta_per_worker() {

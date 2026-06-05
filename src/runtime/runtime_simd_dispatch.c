@@ -516,6 +516,13 @@ static int engine2d_span_bounds(SplArray* array, int64_t offset, int64_t count,
 #  include <arm_neon.h>
 #endif
 
+#if defined(__x86_64__) || defined(_M_X64)
+__attribute__((target("avx2")))
+static void engine2d_fill_u32_avx2(int64_t* data, int64_t count, int64_t color);
+__attribute__((target("avx2")))
+static void engine2d_copy_u32_avx2(int64_t* dst, const int64_t* src, int64_t count);
+#endif
+
 /* ----------------------------------------------------------------------
  * engine2d row kernels (RETURN-style) — build and return a NEW array.
  *
@@ -535,10 +542,8 @@ static void engine2d_fill_into(int64_t* out, int64_t n, int64_t color) {
     }
 #elif defined(__x86_64__) || defined(_M_X64)
     if (simd_detect_avx2()) {
-        __m256i v = _mm256_set1_epi64x(color_word);
-        for (; i + 4 <= n; i += 4) {
-            _mm256_storeu_si256((__m256i*)(void*)(out + i), v);
-        }
+        engine2d_fill_u32_avx2(out, n, color_word);
+        return;
     }
 #endif
     for (; i < n; i++) {
@@ -555,10 +560,8 @@ static void engine2d_copy_into(int64_t* out, const int64_t* src, int64_t n) {
     }
 #elif defined(__x86_64__) || defined(_M_X64)
     if (simd_detect_avx2()) {
-        for (; i + 4 <= n; i += 4) {
-            __m256i v = _mm256_loadu_si256((const __m256i*)(const void*)(src + i));
-            _mm256_storeu_si256((__m256i*)(void*)(out + i), v);
-        }
+        engine2d_copy_u32_avx2(out, src, n);
+        return;
     }
 #endif
     for (; i < n; i++) {

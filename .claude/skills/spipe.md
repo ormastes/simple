@@ -47,6 +47,22 @@ tests, generated `doc/06_spec/...` must read like a scenario manual:
 Run `bin/simple spipe-docgen <spec> --output doc/06_spec` and revise the spec
 until the generated manual is usable without opening the source.
 
+## Startup-Sensitive Specs
+
+If a SPipe change touches `simple run`, direct file argv parsing,
+`get_cli_args`, `std.cli`, `.shs` dispatch, mmap/read-ahead startup loading,
+launch metadata, or startup dynlib policy, keep this executable integration
+spec in the evidence set:
+
+```text
+test/02_integration/app/startup_argparse_mmap_perf_spec.spl
+doc/06_spec/02_integration/app/startup_argparse_mmap_perf_spec.md
+```
+
+Do not move executable startup specs into `doc/06_spec`, and do not route
+script startup through compile/JIT as a workaround for a failing fast path. Fix
+the fast path or record a concrete bug.
+
 ## Equality is not correctness (false-green guard)
 
 A parity/equality assertion (`expect(a).to_equal(b)`, "backend A matches backend
@@ -130,7 +146,7 @@ and [`doc/05_design/infra/sfm/simple_feature_module.md`](../../doc/05_design/inf
 To verify correctness across execution modes and benchmark against other languages:
 
 - **Guide:** [`doc/07_guide/compiler/check_perf.md`](../../doc/07_guide/compiler/check_perf.md) — interpreter / SMF loader / native mode checks + cross-language perf matrix
-- **Harness:** `sh scripts/check/check-cross-language-perf.shs` — measures size, cold startup, warm throughput (fib35), parallel spawn + binary sizes + peak RSS (baseline-subtracted per-worker delta) against bun, python, go, erlang, java, C
+- **Harness:** `sh scripts/check/check-cross-language-perf.shs` — measures size, cold startup, warm throughput (fib35), parallel spawn + binary sizes + peak RSS (baseline-subtracted per-worker delta) against bun, python, go, erlang, java, C. Use `RUN_TIMEOUT=<seconds>` for bounded smoke or slow-host runs; the harness removes failed Simple outputs so stale native/SMF artifacts are not measured.
 - **GUI perf:** `sh scripts/check/check-gtk-gui-size-speed-baseline.shs` — frame time, binary size, cache hit rates, peak RSS (Simple vs GTK; GTK measured inside xvfb-run)
 - **Startup audit:** `sh scripts/check/check-startup-size-performance-audit.shs` — cold startup, binary size, ELF sections, library deps, peak RSS
 - **TL;DR:** [`doc/07_guide/compiler/check_perf_tldr.md`](../../doc/07_guide/compiler/check_perf_tldr.md)
