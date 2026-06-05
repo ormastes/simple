@@ -244,8 +244,8 @@ static DWORD WINAPI rt_isolated_wrapper_win(LPVOID raw) {
 }
 #endif
 
-int64_t rt_thread_spawn_isolated(int64_t closure_ptr, int64_t _unused) {
-    (void)_unused;
+int64_t rt_thread_spawn_isolated(int64_t arg0, int64_t arg1) {
+    int64_t closure_ptr = (arg1 != 0) ? arg1 : arg0;
     rt_closure_fn_t fn_ptr = *(rt_closure_fn_t*)(intptr_t)closure_ptr;
     RtThreadData* td = (RtThreadData*)SPL_MALLOC(sizeof(RtThreadData), "rt_thread");
     if (!td) return 0;

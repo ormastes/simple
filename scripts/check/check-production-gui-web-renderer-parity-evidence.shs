@@ -87,6 +87,47 @@ run_layout_manifest() {
     [ "$code" -eq 0 ] && [ "$status" = "pass" ] && [ "$fail_count" = "0" ]
 }
 
+run_surface_manifest() {
+    case_dir="$BUILD_ROOT/tauri_chrome_manifest"
+    mkdir -p "$case_dir"
+    layout_env="$BUILD_ROOT/layout_manifest/evidence.env"
+    set +e
+    BUILD_DIR="$case_dir" REPORT_PATH="$case_dir/report.md" LAYOUT_ENV="$layout_env" ELECTRON_BITMAP_TIMEOUT_SECS="$TIMEOUT_SECS" \
+        sh scripts/check/check-tauri-chrome-simple-web-layout-manifest-evidence.shs >"$case_dir/stdout.env" 2>"$case_dir/stderr.log"
+    code=$?
+    set -e
+    env_file="$case_dir/evidence.env"
+    status=""
+    reason=""
+    electron_status=""
+    tauri_status=""
+    chrome_status=""
+    fake_capture=""
+    tolerance=""
+    if [ -s "$env_file" ]; then
+        status="$(field_of tauri_chrome_simple_web_layout_manifest_status "$env_file")"
+        reason="$(field_of tauri_chrome_simple_web_layout_manifest_reason "$env_file")"
+        electron_status="$(field_of tauri_chrome_simple_web_layout_manifest_electron_capture_status "$env_file")"
+        tauri_status="$(field_of tauri_chrome_simple_web_layout_manifest_tauri_capture_status "$env_file")"
+        chrome_status="$(field_of tauri_chrome_simple_web_layout_manifest_chrome_capture_status "$env_file")"
+        fake_capture="$(field_of tauri_chrome_simple_web_layout_manifest_no_fake_capture "$env_file")"
+        tolerance="$(field_of tauri_chrome_simple_web_layout_manifest_blur_or_tolerance_used "$env_file")"
+    fi
+    {
+        echo "production_gui_web_renderer_parity_surface_manifest_exit_code=$code"
+        echo "production_gui_web_renderer_parity_surface_manifest_status=$status"
+        echo "production_gui_web_renderer_parity_surface_manifest_reason=$reason"
+        echo "production_gui_web_renderer_parity_surface_manifest_electron_capture_status=$electron_status"
+        echo "production_gui_web_renderer_parity_surface_manifest_tauri_capture_status=$tauri_status"
+        echo "production_gui_web_renderer_parity_surface_manifest_chrome_capture_status=$chrome_status"
+        echo "production_gui_web_renderer_parity_surface_manifest_no_fake_capture=$fake_capture"
+        echo "production_gui_web_renderer_parity_surface_manifest_blur_or_tolerance_used=$tolerance"
+        echo "production_gui_web_renderer_parity_surface_manifest_report=$case_dir/report.md"
+    } >>"$BUILD_ROOT/evidence.env"
+    append_prefixed_env "surface_" "$env_file"
+    [ "$code" -eq 0 ] && [ "$status" = "pass" ] && [ "$electron_status" = "pass" ] && [ "$tauri_status" = "unavailable" ] && [ "$chrome_status" = "unavailable" ] && [ "$fake_capture" = "true" ] && [ "$tolerance" = "false" ]
+}
+
 run_backend() {
     case_dir="$BUILD_ROOT/backend_executed"
     mkdir -p "$case_dir"
@@ -179,6 +220,12 @@ if [ "$status" = "pass" ]; then
     }
 fi
 if [ "$status" = "pass" ]; then
+    run_surface_manifest || {
+        status=fail
+        reason=tauri-chrome-layout-manifest-failed
+    }
+fi
+if [ "$status" = "pass" ]; then
     run_backend || {
         status=fail
         reason=backend-executed-parity-failed
@@ -205,6 +252,7 @@ mv "$BUILD_ROOT/evidence.final.env" "$BUILD_ROOT/evidence.env"
     echo "- reason: $reason"
     echo "- electron matrix: $(field_of production_gui_web_renderer_parity_matrix_status "$BUILD_ROOT/evidence.env")"
     echo "- electron CSS/layout manifest: $(field_of production_gui_web_renderer_parity_layout_manifest_status "$BUILD_ROOT/evidence.env")"
+    echo "- Tauri/Chrome surface manifest: $(field_of production_gui_web_renderer_parity_surface_manifest_status "$BUILD_ROOT/evidence.env")"
     echo "- backend-executed CPU SIMD/Metal parity: $(field_of production_gui_web_renderer_parity_backend_status "$BUILD_ROOT/evidence.env")"
     echo "- raw Metal framebuffer readback: $(field_of production_gui_web_renderer_parity_metal_readback_status "$BUILD_ROOT/evidence.env")"
     echo "- blur/tolerance used: false"

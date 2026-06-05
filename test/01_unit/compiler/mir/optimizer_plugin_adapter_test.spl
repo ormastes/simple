@@ -1,19 +1,23 @@
 # Adapter test harness for optimizer_plugin_run_on_function / run_on_module
-# Uses bin/simple run (not test runner) to exercise MIR type construction
-# run_typed_pass execution requires compiled mode; this tests routing logic
+# Uses bin/simple run (not test runner) to exercise factory functions and nil-guard
+# MIR routing through run_typed_pass is tested in optimizer_plugin_spec.spl
 
-use compiler.hir.hir_types.{SymbolId}
-use compiler.common.diagnostics.span.{Span}
-use compiler.mir.{
-    MirFunction, MirBlock, MirTerminator,
-    BlockId, MirType, MirTypeKind,
-    mir_signature_simple
+use compiler.mir.mir_instructions.{
+    MirModule, MirFunction,
+    MirBlock, MirInst, MirInstKind,
+    MirTerminator, MirOperand, MirOperandKind,
+    BlockId
 }
+use compiler.mir.mir_types.{
+    MirType, MirTypeKind, MirSignature,
+    MirConstValue, LocalId, LocalKind, MirLocal
+}
+use compiler.hir.hir_types.{SymbolId}
 use compiler.mir_opt.mir_opt.mod.{PassKind, PassScope, OptLevel}
 use compiler.mir_opt.optimizer_plugin.{
     ApplyMode, PluginScope,
     optimizer_plugin_source, optimizer_plugin_mir, optimizer_plugin_both,
-    optimizer_plugin_run_on_function,
+    optimizer_plugin_run_on_function, optimizer_plugin_run_on_module,
     plugin_scope_name, plugin_scope_includes_mir,
     optimizer_plugin_from_mir_descriptor, optimizer_plugin_from_dynamic_descriptor
 }
@@ -21,23 +25,32 @@ use compiler.mir_opt.optimizer_manifest.{DynamicPassDescriptor}
 use compiler.mir_opt.mir_opt.mod.{MirPassDescriptor}
 
 fn make_test_function() -> MirFunction:
-    val void_type = MirType(kind: MirTypeKind.Unit)
-    val sig = mir_signature_simple(void_type)
-    val entry_block = MirBlock(
-        id: BlockId(id: 0),
-        label: nil,
-        instructions: [],
-        terminator: MirTerminator.Ret(value: nil)
+    val ret_type = MirType(kind: MirTypeKind.I64)
+    val sig = MirSignature(params: [], return_type: ret_type, is_variadic: false)
+    val const_inst = MirInst(
+        kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Int(42), ret_type),
+        span: nil
     )
-    val span = Span(start: 0, end: 0, line: 1, col: 1, file: "test.spl")
+    val entry = MirBlock(
+        id: BlockId(id: 0), label: Some("bb0"),
+        instructions: [const_inst],
+        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))))
+    )
+    var locals: [MirLocal] = []
+    locals = locals.push(MirLocal(id: LocalId(id: 0), type_: ret_type, kind: LocalKind.Temp, name: nil))
     MirFunction(
-        symbol: SymbolId(id: 0),
-        name: "test_fn",
-        signature: sig,
-        locals: [],
-        blocks: [entry_block],
-        entry_block: BlockId(id: 0),
-        span: span
+        symbol: SymbolId.new(0), name: "test_fn", signature: sig,
+        locals: locals, blocks: [entry], entry_block: BlockId.new(0),
+        span: nil, generic_params: [], is_generic_template: false,
+        specialization_of: nil, type_bindings: {}
+    )
+
+fn make_test_module() -> MirModule:
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = make_test_function()
+    MirModule(
+        name: "test_module", functions: functions,
+        statics: {}, constants: {}, types: {}
     )
 
 fn main():
@@ -45,28 +58,30 @@ fn main():
     var failed = 0
 
     val func = make_test_function()
+    val module = make_test_module()
 
     # 1: nil-guard — source-only plugin returns function unchanged
     val src_plugin = optimizer_plugin_source(
         "string_concat", [], ApplyMode.Static, OptLevel.Speed, ["concat"]
     )
-    val result = optimizer_plugin_run_on_function(src_plugin, func)
-    if result.name == "test_fn":
+    val result1 = optimizer_plugin_run_on_function(src_plugin, func)
+    if result1.name == "test_fn" and result1.blocks.len() == 1:
         passed = passed + 1
         print("PASS: nil-guard returns function unchanged")
     else:
         failed = failed + 1
-        print("FAIL: nil-guard altered function name")
+        print("FAIL: nil-guard altered function")
 
-    # 2: nil-guard preserves block structure
-    if result.blocks.len() == 1:
+    # 2: nil-guard on module
+    val mod_result = optimizer_plugin_run_on_module(src_plugin, module)
+    if mod_result.name == "test_module":
         passed = passed + 1
-        print("PASS: nil-guard preserves block count")
+        print("PASS: nil-guard returns module unchanged")
     else:
         failed = failed + 1
-        print("FAIL: nil-guard changed block count")
+        print("FAIL: nil-guard altered module")
 
-    # 3: MIR plugin descriptor has correct pass_kind set
+    # 3: MIR plugin has pass_kind set
     val mir_plugin = optimizer_plugin_mir(
         "dce", ["dead_code_elimination"],
         PassKind.DeadCodeElimination, PassScope.Function,
@@ -79,7 +94,7 @@ fn main():
         failed = failed + 1
         print("FAIL: MIR plugin missing pass_kind")
 
-    # 4: source plugin has nil pass_kind (confirms nil-guard path)
+    # 4: source plugin has nil pass_kind
     if not src_plugin.mir_pass_kind.?:
         passed = passed + 1
         print("PASS: source plugin has nil pass_kind")
@@ -87,7 +102,7 @@ fn main():
         failed = failed + 1
         print("FAIL: source plugin should have nil pass_kind")
 
-    # 5: both-scope plugin can route through MIR
+    # 5: both-scope plugin has pass_kind and includes mir
     val both_plugin = optimizer_plugin_both(
         "strength_reduction", ["sr"],
         PassKind.StrengthReduction, PassScope.Function,
@@ -110,22 +125,14 @@ fn main():
         cost_class: "cheap"
     )
     val from_mir = optimizer_plugin_from_mir_descriptor(mir_desc, ApplyMode.Static, OptLevel.Speed)
-    if from_mir.name == "const_fold" and from_mir.cost_class == "cheap":
+    if from_mir.name == "const_fold" and from_mir.cost_class == "cheap" and plugin_scope_name(from_mir.plugin_scope) == "mir":
         passed = passed + 1
-        print("PASS: from_mir_descriptor preserves name + cost")
+        print("PASS: from_mir_descriptor preserves name + cost + scope")
     else:
         failed = failed + 1
         print("FAIL: from_mir_descriptor fields wrong")
 
-    # 7: from_mir_descriptor sets MIR scope
-    if plugin_scope_name(from_mir.plugin_scope) == "mir":
-        passed = passed + 1
-        print("PASS: from_mir_descriptor sets MIR scope")
-    else:
-        failed = failed + 1
-        print("FAIL: from_mir_descriptor wrong scope")
-
-    # 8: from_dynamic_descriptor factory
+    # 7: from_dynamic_descriptor factory
     val dyn_desc = DynamicPassDescriptor(
         name: "custom_pass",
         aliases: ["cp"],
@@ -133,20 +140,12 @@ fn main():
         cost_class: "medium"
     )
     val from_dyn = optimizer_plugin_from_dynamic_descriptor(dyn_desc, OptLevel.Speed)
-    if from_dyn.name == "custom_pass" and from_dyn.cost_class == "medium":
+    if from_dyn.name == "custom_pass" and from_dyn.cost_class == "medium" and not from_dyn.mir_pass_kind.?:
         passed = passed + 1
-        print("PASS: from_dynamic_descriptor preserves name + cost")
+        print("PASS: from_dynamic_descriptor preserves name + cost, nil pass_kind")
     else:
         failed = failed + 1
         print("FAIL: from_dynamic_descriptor fields wrong")
-
-    # 9: from_dynamic_descriptor forces Dynamic apply mode
-    if not from_dyn.mir_pass_kind.?:
-        passed = passed + 1
-        print("PASS: from_dynamic_descriptor has nil pass_kind (dynamic)")
-    else:
-        failed = failed + 1
-        print("FAIL: from_dynamic_descriptor should have nil pass_kind")
 
     print("")
     print("Adapter tests: {passed} passed, {failed} failed")

@@ -1,0 +1,156 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/chrome_simple_web_layout_bitmap_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/chrome_simple_web_layout_bitmap_evidence_$(date -u +%F).md}"
+HTML_PATH="${CHROME_LAYOUT_HTML_PATH:-}"
+EXPECTED_ARGB="${CHROME_LAYOUT_EXPECTED_ARGB_PATH:-}"
+WIDTH="${CHROME_LAYOUT_WIDTH:-96}"
+HEIGHT="${CHROME_LAYOUT_HEIGHT:-64}"
+CAPTURED_ARGB="$BUILD_DIR/chrome-argb.json"
+CHROME_OUT="$BUILD_DIR/chrome.out"
+CHROME_PROOF="$BUILD_DIR/chrome-proof.json"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$CAPTURED_ARGB" "$CHROME_OUT" "$CHROME_PROOF" "$BUILD_DIR/evidence.env" "$REPORT_PATH"
+
+field_of_json() {
+    key="$1"
+    file="$2"
+    node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(String(p[process.argv[2]] ?? ''))" "$file" "$key"
+}
+
+emit_unavailable() {
+    reason="$1"
+    {
+        echo "chrome_simple_web_layout_status=unavailable"
+        echo "chrome_simple_web_layout_reason=$reason"
+        echo "chrome_simple_web_layout_width=$WIDTH"
+        echo "chrome_simple_web_layout_height=$HEIGHT"
+        echo "chrome_simple_web_layout_html_path=$HTML_PATH"
+        echo "chrome_simple_web_layout_expected_argb_path=$EXPECTED_ARGB"
+        echo "chrome_simple_web_layout_captured_argb_path=$CAPTURED_ARGB"
+        echo "chrome_simple_web_layout_captured_argb_written=false"
+        echo "chrome_simple_web_layout_mismatch_count=0"
+        echo "chrome_simple_web_layout_blur_or_tolerance_used=false"
+    } >"$BUILD_DIR/evidence.env"
+    {
+        echo "# Chrome Simple Web Layout Bitmap Evidence"
+        echo
+        echo "- status: unavailable"
+        echo "- reason: $reason"
+        echo "- blur/tolerance used: false"
+        echo
+        echo "## Raw Evidence"
+        sed 's/^/- /' "$BUILD_DIR/evidence.env"
+    } >"$REPORT_PATH"
+    cat "$BUILD_DIR/evidence.env"
+}
+
+if [ "$HTML_PATH" = "" ] || [ ! -s "$HTML_PATH" ]; then
+    emit_unavailable "missing-layout-html"
+    exit 1
+fi
+if [ "$EXPECTED_ARGB" = "" ] || [ ! -s "$EXPECTED_ARGB" ]; then
+    emit_unavailable "missing-expected-argb"
+    exit 1
+fi
+
+set +e
+CHROME_CAPTURE_HTML="$HTML_PATH" \
+CHROME_CAPTURE_WIDTH="$WIDTH" \
+CHROME_CAPTURE_HEIGHT="$HEIGHT" \
+CHROME_CAPTURE_OUTPUT="$CAPTURED_ARGB" \
+CHROME_CAPTURE_EXPECTED_ARGB_PATH="$EXPECTED_ARGB" \
+CHROME_CAPTURE_PROOF_PATH="$CHROME_PROOF" \
+    node tools/chrome-live-bitmap/capture_html_argb.js >"$CHROME_OUT" 2>&1
+chrome_code=$?
+set -e
+
+if [ "$chrome_code" -ne 0 ]; then
+    reason="$(sed -n 's/^chrome_capture_reason=//p' "$CHROME_OUT" | tail -n 1)"
+    if [ "$reason" = "" ] && [ -s "$CHROME_PROOF" ]; then
+        reason="$(field_of_json reason "$CHROME_PROOF")"
+    fi
+    if [ "$reason" = "" ]; then
+        reason="chrome-capture-failed"
+    fi
+    emit_unavailable "$reason"
+    exit 1
+fi
+
+checksum="$(field_of_json checksum "$CHROME_PROOF")"
+expected_checksum="$(field_of_json expected_checksum "$CHROME_PROOF")"
+weighted="$(field_of_json weighted_checksum "$CHROME_PROOF")"
+expected_weighted="$(field_of_json expected_weighted_checksum "$CHROME_PROOF")"
+mismatch_count="$(field_of_json mismatch_count "$CHROME_PROOF")"
+frame_us="$(field_of_json frame_us "$CHROME_PROOF")"
+captured_argb_written="$(field_of_json captured_argb_written "$CHROME_PROOF")"
+blur_used="$(field_of_json blur_or_tolerance_used "$CHROME_PROOF")"
+chrome_bin="$(field_of_json chrome_bin "$CHROME_PROOF")"
+
+status=pass
+reason=pass
+if [ "$blur_used" != "false" ]; then
+    status=fail
+    reason=blur-or-tolerance-not-allowed
+elif [ "$checksum" != "$expected_checksum" ]; then
+    status=divergent
+    reason=checksum-mismatch
+elif [ "$weighted" != "$expected_weighted" ]; then
+    status=divergent
+    reason=weighted-checksum-mismatch
+elif [ "$mismatch_count" != "0" ]; then
+    status=divergent
+    reason=pixel-mismatch
+elif [ "$captured_argb_written" != "true" ] || [ ! -s "$CAPTURED_ARGB" ]; then
+    status=fail
+    reason=missing-captured-argb
+elif [ "$frame_us" = "" ] || [ "$frame_us" -le 0 ]; then
+    status=fail
+    reason=missing-chrome-timing
+fi
+
+{
+    echo "chrome_simple_web_layout_status=$status"
+    echo "chrome_simple_web_layout_reason=$reason"
+    echo "chrome_simple_web_layout_width=$WIDTH"
+    echo "chrome_simple_web_layout_height=$HEIGHT"
+    echo "chrome_simple_web_layout_html_path=$HTML_PATH"
+    echo "chrome_simple_web_layout_expected_argb_path=$EXPECTED_ARGB"
+    echo "chrome_simple_web_layout_captured_argb_path=$CAPTURED_ARGB"
+    echo "chrome_simple_web_layout_chrome_bin=$chrome_bin"
+    echo "chrome_simple_web_layout_simple_checksum=$expected_checksum"
+    echo "chrome_simple_web_layout_chrome_checksum=$checksum"
+    echo "chrome_simple_web_layout_simple_weighted_checksum=$expected_weighted"
+    echo "chrome_simple_web_layout_chrome_weighted_checksum=$weighted"
+    echo "chrome_simple_web_layout_mismatch_count=$mismatch_count"
+    echo "chrome_simple_web_layout_blur_or_tolerance_used=$blur_used"
+    echo "chrome_simple_web_layout_chrome_frame_us=$frame_us"
+    echo "chrome_simple_web_layout_captured_argb_written=$captured_argb_written"
+    echo "chrome_simple_web_layout_exit_code=$chrome_code"
+} >"$BUILD_DIR/evidence.env"
+
+{
+    echo "# Chrome Simple Web Layout Bitmap Evidence"
+    echo
+    echo "- status: $status"
+    echo "- reason: $reason"
+    echo "- dimensions: ${WIDTH}x${HEIGHT}"
+    echo "- mismatch count: $mismatch_count"
+    echo "- blur/tolerance used: $blur_used"
+    echo "- Chrome frame us: $frame_us"
+    echo "- captured ARGB path: $CAPTURED_ARGB"
+    echo
+    echo "## Raw Evidence"
+    sed 's/^/- /' "$BUILD_DIR/evidence.env"
+    echo
+    echo "## Chrome Output"
+    sed 's/^/- /' "$CHROME_OUT"
+} >"$REPORT_PATH"
+
+cat "$BUILD_DIR/evidence.env"
+[ "$status" = "pass" ]

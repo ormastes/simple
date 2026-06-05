@@ -12,9 +12,9 @@
 
 ---
 
-## Compiler (1 features)
+## Application (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Opencl Backend Contract Specification](01_unit/compiler/codegen/opencl_backend_contract_spec.md) | Auto-generated | N/A | 19 | 0% | 0 lines |
+| [Web Render Backend Api Specification](01_unit/app/ui/web_render_backend_api_spec.md) | Auto-generated | N/A | 11 | 0% | 0 lines |
 

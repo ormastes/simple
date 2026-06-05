@@ -27,7 +27,7 @@ optimizer_plugin_spec -> compiler
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 42 | 42 | 0 | 0 |
+| 45 | 45 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -93,7 +93,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(plugin_scope_includes_mir(PluginScope.Mir))
+expect(plugin_scope_includes_mir(PluginScope.Mir)).to_equal(true)
 ```
 
 </details>
@@ -107,7 +107,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(plugin_scope_includes_mir(PluginScope.Both))
+expect(plugin_scope_includes_mir(PluginScope.Both)).to_equal(true)
 ```
 
 </details>
@@ -121,7 +121,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(not plugin_scope_includes_mir(PluginScope.Source))
+expect(plugin_scope_includes_mir(PluginScope.Source)).to_equal(false)
 ```
 
 </details>
@@ -135,7 +135,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(plugin_scope_includes_source(PluginScope.Source))
+expect(plugin_scope_includes_source(PluginScope.Source)).to_equal(true)
 ```
 
 </details>
@@ -149,7 +149,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(plugin_scope_includes_source(PluginScope.Both))
+expect(plugin_scope_includes_source(PluginScope.Both)).to_equal(true)
 ```
 
 </details>
@@ -163,7 +163,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(not plugin_scope_includes_source(PluginScope.Mir))
+expect(plugin_scope_includes_source(PluginScope.Mir)).to_equal(false)
 ```
 
 </details>
@@ -221,7 +221,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(apply_mode_includes_static(ApplyMode.Static))
+expect(apply_mode_includes_static(ApplyMode.Static)).to_equal(true)
 ```
 
 </details>
@@ -235,7 +235,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(apply_mode_includes_static(ApplyMode.Both))
+expect(apply_mode_includes_static(ApplyMode.Both)).to_equal(true)
 ```
 
 </details>
@@ -249,7 +249,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(not apply_mode_includes_static(ApplyMode.Dynamic))
+expect(apply_mode_includes_static(ApplyMode.Dynamic)).to_equal(false)
 ```
 
 </details>
@@ -263,7 +263,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(apply_mode_includes_dynamic(ApplyMode.Dynamic))
+expect(apply_mode_includes_dynamic(ApplyMode.Dynamic)).to_equal(true)
 ```
 
 </details>
@@ -277,7 +277,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(apply_mode_includes_dynamic(ApplyMode.Both))
+expect(apply_mode_includes_dynamic(ApplyMode.Both)).to_equal(true)
 ```
 
 </details>
@@ -291,7 +291,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(not apply_mode_includes_dynamic(ApplyMode.Static))
+expect(apply_mode_includes_dynamic(ApplyMode.Static)).to_equal(false)
 ```
 
 </details>
@@ -316,7 +316,7 @@ expect(dce.name).to_equal("dead_code_elimination")
 expect(plugin_scope_name(dce.plugin_scope)).to_equal("mir")
 expect(apply_mode_name(dce.apply_mode)).to_equal("static")
 expect(dce.cost_class).to_equal("cheap")
-expect(dce.mir_pass_kind.?)
+expect(dce.mir_pass_kind.?).to_equal(true)
 expect(dce.source_patterns.len()).to_equal(0)
 ```
 
@@ -339,7 +339,7 @@ val src = optimizer_plugin_source(
 expect(src.name).to_equal("string_concat_loop")
 expect(plugin_scope_name(src.plugin_scope)).to_equal("source")
 expect(src.cost_class).to_equal("cheap")
-expect(not src.mir_pass_kind.?)
+expect(src.mir_pass_kind.?).to_equal(false)
 expect(src.source_patterns.len()).to_equal(1)
 ```
 
@@ -363,7 +363,7 @@ val sr = optimizer_plugin_both(
 expect(sr.name).to_equal("strength_reduction")
 expect(plugin_scope_name(sr.plugin_scope)).to_equal("both")
 expect(apply_mode_name(sr.apply_mode)).to_equal("both")
-expect(sr.mir_pass_kind.?)
+expect(sr.mir_pass_kind.?).to_equal(true)
 expect(sr.source_patterns.len()).to_equal(1)
 ```
 
@@ -383,9 +383,9 @@ val dce = optimizer_plugin_mir(
     PassKind.DeadCodeElimination, PassScope.Function,
     ApplyMode.Static, OptLevel.Speed, "cheap"
 )
-expect(optimizer_plugin_matches_name(dce, "dead_code_elimination"))
-expect(optimizer_plugin_matches_name(dce, "dce"))
-expect(not optimizer_plugin_matches_name(dce, "unknown"))
+expect(optimizer_plugin_matches_name(dce, "dead_code_elimination")).to_equal(true)
+expect(optimizer_plugin_matches_name(dce, "dce")).to_equal(true)
+expect(optimizer_plugin_matches_name(dce, "unknown")).to_equal(false)
 ```
 
 </details>
@@ -450,6 +450,7 @@ expect(optimizer_plugin_registry_count(reg)).to_equal(0)
 
 2. reg = optimizer plugin registry register
    - Expected: optimizer_plugin_registry_count(reg) equals `1`
+   - Expected: found.? is true
    - Expected: found_val.name equals `dead_code_elimination`
 
 
@@ -469,7 +470,7 @@ val dce = optimizer_plugin_mir(
 reg = optimizer_plugin_registry_register(reg, dce)
 expect(optimizer_plugin_registry_count(reg)).to_equal(1)
 val found = optimizer_plugin_registry_lookup(reg, "dead_code_elimination")
-expect(found.?)
+expect(found.?).to_equal(true)
 val found_val = found.unwrap()
 expect(found_val.name).to_equal("dead_code_elimination")
 ```
@@ -481,6 +482,7 @@ expect(found_val.name).to_equal("dead_code_elimination")
 1. var reg = optimizer plugin registry new
 
 2. reg = optimizer plugin registry register
+   - Expected: found.? is true
    - Expected: found_val.name equals `dead_code_elimination`
 
 
@@ -499,7 +501,7 @@ val dce = optimizer_plugin_mir(
 )
 reg = optimizer_plugin_registry_register(reg, dce)
 val found = optimizer_plugin_registry_lookup(reg, "dce")
-expect(found.?)
+expect(found.?).to_equal(true)
 val found_val = found.unwrap()
 expect(found_val.name).to_equal("dead_code_elimination")
 ```
@@ -517,7 +519,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val reg = optimizer_plugin_registry_new()
 val found = optimizer_plugin_registry_lookup(reg, "nonexistent")
-expect(not found.?)
+expect(found.?).to_equal(false)
 ```
 
 </details>
@@ -822,8 +824,8 @@ val plugin = optimizer_plugin_source(
 val lines = ["val x = 1", "result = result + text", "val y = 2"]
 val suggestions = optimizer_plugin_analyze_source(plugin, lines)
 expect(suggestions.len()).to_equal(1)
-expect(suggestions[0].contains("line 2"))
-expect(suggestions[0].contains("result = result +"))
+expect(suggestions[0].contains("line 2")).to_equal(true)
+expect(suggestions[0].contains("result = result +")).to_equal(true)
 ```
 
 </details>
@@ -985,6 +987,185 @@ expect(budget.len()).to_equal(2)
 
 </details>
 
+### MIR routing adapter
+_Plugin adapter routes through run_typed_pass_on_function/module._
+
+#### nil-guard returns function unchanged for source plugin
+
+1. kind: MirInstKind Const
+
+2. id: BlockId
+
+3. terminator: MirTerminator Ret
+
+4. locals = locals push
+
+5. symbol: SymbolId new
+
+6. locals: locals, blocks: [entry], entry block: BlockId new
+   - Expected: result.name equals `nilguard_fn`
+   - Expected: result.blocks.len() equals `1`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 25 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val ret_type = MirType(kind: MirTypeKind.I64)
+val sig = MirSignature(params: [], return_type: ret_type, is_variadic: false)
+val const_inst = MirInst(
+    kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Int(42), ret_type),
+    span: nil
+)
+val entry = MirBlock(
+    id: BlockId(id: 0), label: Some("bb0"),
+    instructions: [const_inst],
+    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))))
+)
+var locals: [MirLocal] = []
+locals = locals.push(MirLocal(id: LocalId(id: 0), type_: ret_type, kind: LocalKind.Temp, name: nil))
+val func = MirFunction(
+    symbol: SymbolId.new(0), name: "nilguard_fn", signature: sig,
+    locals: locals, blocks: [entry], entry_block: BlockId.new(0),
+    span: nil, generic_params: [], is_generic_template: false,
+    specialization_of: nil, type_bindings: {}
+)
+val src_plugin = optimizer_plugin_source(
+    "string_concat", [], ApplyMode.Static, OptLevel.Speed, ["concat"]
+)
+val result = optimizer_plugin_run_on_function(src_plugin, func)
+expect(result.name).to_equal("nilguard_fn")
+expect(result.blocks.len()).to_equal(1)
+```
+
+</details>
+
+#### MIR plugin routes through run_typed_pass_on_module
+
+1. kind: MirInstKind Const
+
+2. id: BlockId
+
+3. terminator: MirTerminator Ret
+
+4. locals = locals push
+
+5. symbol: SymbolId new
+
+6. locals: locals, blocks: [entry], entry block: BlockId new
+
+7. functions[SymbolId new
+   - Expected: result.name equals `route_module`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 32 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val ret_type = MirType(kind: MirTypeKind.I64)
+val sig = MirSignature(params: [], return_type: ret_type, is_variadic: false)
+val const_inst = MirInst(
+    kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Int(42), ret_type),
+    span: nil
+)
+val entry = MirBlock(
+    id: BlockId(id: 0), label: Some("bb0"),
+    instructions: [const_inst],
+    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))))
+)
+var locals: [MirLocal] = []
+locals = locals.push(MirLocal(id: LocalId(id: 0), type_: ret_type, kind: LocalKind.Temp, name: nil))
+val func = MirFunction(
+    symbol: SymbolId.new(0), name: "route_fn", signature: sig,
+    locals: locals, blocks: [entry], entry_block: BlockId.new(0),
+    span: nil, generic_params: [], is_generic_template: false,
+    specialization_of: nil, type_bindings: {}
+)
+var functions: Dict<SymbolId, MirFunction> = {}
+functions[SymbolId.new(0)] = func
+val module = MirModule(
+    name: "route_module", functions: functions,
+    statics: {}, constants: {}, types: {}
+)
+val mir_plugin = optimizer_plugin_mir(
+    "pattern_idiom", [],
+    PassKind.PatternIdiom, PassScope.Module,
+    ApplyMode.Static, OptLevel.Speed, "cheap"
+)
+val result = optimizer_plugin_run_on_module(mir_plugin, module)
+expect(result.name).to_equal("route_module")
+```
+
+</details>
+
+#### plugin adapter parity with direct run_typed_pass_on_module
+
+1. kind: MirInstKind Const
+
+2. id: BlockId
+
+3. terminator: MirTerminator Ret
+
+4. locals = locals push
+
+5. symbol: SymbolId new
+
+6. locals: locals, blocks: [entry], entry block: BlockId new
+
+7. functions[SymbolId new
+   - Expected: direct.name equals `via_plugin.name`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 33 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val ret_type = MirType(kind: MirTypeKind.I64)
+val sig = MirSignature(params: [], return_type: ret_type, is_variadic: false)
+val const_inst = MirInst(
+    kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Int(99), ret_type),
+    span: nil
+)
+val entry = MirBlock(
+    id: BlockId(id: 0), label: Some("bb0"),
+    instructions: [const_inst],
+    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))))
+)
+var locals: [MirLocal] = []
+locals = locals.push(MirLocal(id: LocalId(id: 0), type_: ret_type, kind: LocalKind.Temp, name: nil))
+val func = MirFunction(
+    symbol: SymbolId.new(0), name: "parity_fn", signature: sig,
+    locals: locals, blocks: [entry], entry_block: BlockId.new(0),
+    span: nil, generic_params: [], is_generic_template: false,
+    specialization_of: nil, type_bindings: {}
+)
+var functions: Dict<SymbolId, MirFunction> = {}
+functions[SymbolId.new(0)] = func
+val module = MirModule(
+    name: "parity_module", functions: functions,
+    statics: {}, constants: {}, types: {}
+)
+val mir_plugin = optimizer_plugin_mir(
+    "pattern_idiom", [],
+    PassKind.PatternIdiom, PassScope.Module,
+    ApplyMode.Static, OptLevel.Speed, "cheap"
+)
+val direct = run_typed_pass_on_module(PassKind.PatternIdiom, module)
+val via_plugin = optimizer_plugin_run_on_module(mir_plugin, module)
+expect(direct.name).to_equal(via_plugin.name)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -1006,13 +1187,14 @@ Tests covering:
 - OptimizerPluginRegistry
 - source analysis
 - combined registry queries
+- MIR routing adapter
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 42 |
-| Active scenarios | 42 |
+| Total scenarios | 45 |
+| Active scenarios | 45 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

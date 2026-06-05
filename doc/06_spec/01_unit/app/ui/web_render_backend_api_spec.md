@@ -29,7 +29,7 @@ web_render_backend_api_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 10 | 10 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -56,6 +56,27 @@ expect(artifact.target).to_equal(WEB_RENDER_TARGET_HEADLESS)
 expect(artifact.capability_summary).to_equal("headless")
 expect(web_render_capability_summary(WEB_RENDER_TARGET_HEADLESS)).to_equal("headless")
 expect(web_render_capabilities_for_target(WEB_RENDER_TARGET_HEADLESS).len()).to_equal(0)
+```
+
+</details>
+
+#### keeps standalone Chrome and Chromium as explicit browser render targets
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val chrome = web_render_adapter_request(WEB_RENDER_TARGET_CHROME, "main", "Chrome", "<main>fixture</main>", "", "", 1280, 720)
+val chromium = web_render_adapter_request(WEB_RENDER_TARGET_CHROMIUM, "main", "Chromium", "<main>fixture</main>", "", "", 1280, 720)
+
+expect(web_render_to_artifact(chrome).target).to_equal("chrome")
+expect(web_render_to_artifact(chromium).target).to_equal("chromium")
+expect(web_render_capability_summary(WEB_RENDER_TARGET_CHROME)).to_equal("mouse,color,images,notification")
+expect(web_render_capability_summary(WEB_RENDER_TARGET_CHROMIUM)).to_equal("mouse,color,images,notification")
+expect(web_render_capabilities_for_target(WEB_RENDER_TARGET_CHROME).len()).to_equal(4)
 ```
 
 </details>
@@ -477,8 +498,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 10 |
-| Active scenarios | 10 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

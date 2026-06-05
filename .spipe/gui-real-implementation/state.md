@@ -29,5 +29,14 @@ Existing direct-buffer demos may remain only if clearly labeled smoke-only and e
 ## Phase
 dev-done
 
+## 8K Multi-Framework Benchmark (2026-06-05)
+
+Cross-framework 8K (7680x4320) GUI perf comparison added:
+- 7 backends: Pure Simple CUDA, Simple Web Software, Electron, GTK3/C, JS/Node, JS/Browser, Python/tkinter
+- Runner: `tools/gui_perf_bench/run_all_benchmarks.sh`
+- Guide: `doc/07_guide/platform/gui_perf_benchmark_comparison.md`
+- Pixel parity gate enforced for all optimizations (exact match, no tolerance)
+
 ## Log
 - dev: Created state file with 12 acceptance criteria (type: feature).
+- benchmark: Added 8K multi-framework GUI perf comparison harness with 7 backends and guide doc.

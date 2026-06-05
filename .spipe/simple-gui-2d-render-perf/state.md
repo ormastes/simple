@@ -56,7 +56,31 @@ implementation-evidence-in-progress
   with Simple open 243 us, GTK open 77948 us, Simple frame 1 us, GTK frame
   28 us, vector checksum 212444 deterministic true.
 
+## 8K Multi-Framework Comparison (2026-06-05)
+
+7-backend benchmark harness added at `tools/gui_perf_bench/`:
+- **Pure Simple CUDA**: `backend_measurement_cuda.spl` at 7680x4320 via `--measure-cuda-device-buffer`
+- **Simple Web Software**: `backend_measurement_export.spl` with `--initialized-gpu-backend software`
+- **Electron**: Existing wm_compare matrix (cold=4075ms, parity=fail on headless)
+- **GTK3/C**: `tools/gui_perf_bench/bench_gtk.c` (Cairo rasterizer, same scene)
+- **JavaScript/Node**: `tools/gui_perf_bench/bench_js_node.js` (node-canvas, headless)
+- **JavaScript/Browser**: `tools/gui_perf_bench/bench_js.html` (Canvas 2D, GPU-backed)
+- **Python/tkinter**: `tools/gui_perf_bench/bench_python.py`
+- **Tauri**: unavailable (cargo-tauri not installed)
+
+Runner: `tools/gui_perf_bench/run_all_benchmarks.sh --width 7680 --height 4320 --frames 60`
+Guide: `doc/07_guide/platform/gui_perf_benchmark_comparison.md`
+
+All backends emit uniform `gui_perf_benchmark_*=value` metrics for direct comparison.
+Pixel parity gate: checksums captured before/after optimization, exact match required.
+
+Existing evidence (from GTK repeat evidence): Simple open 243 us vs GTK open 77948 us,
+Simple frame 1 us vs GTK frame 28 us — Simple already 320x faster at startup, 28x at frame.
+
 ## Remaining Work
 - AC-3 is advanced by retained framebuffer/cache, static pixel hot paths, and retained static-shell primitive command plans; broader fill/copy/blit/text optimization across dynamic GUI scenes still needs implementation and evidence.
 - AC-6 now has focused vector-font unavailable fallback evidence in the repeat script and tracked report; additional GPU/native unavailable combinations can extend the same probe pattern.
 - Native Simple executable size/speed evidence is intentionally skipped in the fast smoke run (`SKIP_SIMPLE_NATIVE=1`); a release-grade run should capture native artifact bytes or record an explicit native-build blocker.
+- Wire unwired probes into contract: warm_startup, frame_time_p50/p95, input_to_paint.
+- Run 8K benchmark on current hardware (RTX A6000 + TITAN RTX) and capture baseline numbers.
+- Tauri integration: requires cargo-tauri CLI + WebKitGTK dev headers.

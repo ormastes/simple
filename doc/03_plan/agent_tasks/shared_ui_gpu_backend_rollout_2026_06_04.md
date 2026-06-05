@@ -112,6 +112,36 @@ Current evidence:
   Node bitmap fixture evidence as an `engine2d_rendered` artifact and keeps
   target, dimension, or pixel-count mismatches as explicit compatibility
   provenance from `src/lib/common/ui/web_render_bitmap_evidence.spl`.
+- `WebRenderTauriBitmapParityEvidence` now records the Tauri target in the
+  same no-tolerance pixel contract as the Simple renderer: target must be
+  `tauri`, dimensions and pixel count must match, checksum and reference
+  checksum must be identical, mismatch count must be `0`, and blur/tolerance is
+  rejected. This closes the shared-artifact Tauri parity gap without claiming a
+  live WebKit screenshot until the Tauri shell exposes a capture hook.
+- `WEB_RENDER_TARGET_CHROME` and `WEB_RENDER_TARGET_CHROMIUM` are now explicit
+  shared web render targets with browser capability summaries, so standalone
+  Chrome/Chromium no longer has to be hidden behind the Electron target.
+- `WebRenderSurfaceManifestCaptureEvidence` validates one manifest-row contract
+  for Electron, Tauri, Chrome, and Chromium: live `pass` rows must carry real
+  capture, exact case counts, zero failures, zero mismatches, and no
+  blur/tolerance; `unavailable` rows must carry a reason and must not claim live
+  pixels.
+- `tools/chrome-live-bitmap/capture_html_argb.js` provides a standalone
+  Chrome/Chromium headless screenshot probe: it captures a layout HTML fixture,
+  decodes PNG to ARGB without tolerance, compares checksum/weighted
+  checksum/pixel mismatch against the pure Simple ARGB reference, and reports
+  `chrome-binary-unavailable` without claiming pixels when the host has no
+  browser binary.
+- `scripts/check/check-chrome-simple-web-layout-bitmap-evidence.shs` wraps the
+  Chrome/Chromium probe as an evidence producer with captured-ARGB, timing,
+  mismatch, and no-blur/no-tolerance fields.
+- `scripts/check/check-tauri-chrome-simple-web-layout-manifest-evidence.shs`
+  consumes the Electron layout manifest, records Electron as live capture, runs
+  the Chrome probe for the CSS box matrix reference row, and records Tauri plus
+  any host-unavailable Chrome result as typed unavailable on this Linux host
+  (`tauri-webkit-capture-hook-not-implemented`, `chrome-binary-unavailable`)
+  with `no_fake_capture=true`. The aggregate production GUI parity gate now
+  includes this surface manifest row.
 - Covered by
   `test/01_unit/app/ui/web_render_node_fixture_evidence_spec.spl` and
   `test/01_unit/app/ui/web_render_backend_api_spec.spl`.
@@ -370,14 +400,17 @@ Current evidence:
 
 ## Current Next Slice
 
-The next smallest implementation slice is Team E HIP/ROCm runtime-backed generated-session parity:
+The next smallest implementation slice is Team B live Tauri/WebKit capture plus
+full browser manifest parity:
 
-1. Finish runtime-backed HIP module/readback parity by feeding real HSACO images
-   into the static `rt_rocm_module_load` hook or adding a safe HIPRTC/hipcc
-   compilation step, then populate readback proof on AMD hosts.
-2. Connect initialized hardware rows to the normalized startup/bin-size
-   report so perf comparison includes compiler metadata, runtime provenance,
-   scalar baseline, and binary/package size evidence.
-3. Preserve strict failure for fallback-to-CPU, missing compiler metadata,
-   missing runtime-ready proof, missing artifact timings, or missing readback
-   proof.
+1. Add a real Tauri WebKit/Wry capture hook for layout manifest HTML and replace
+   the typed `tauri-webkit-capture-hook-not-implemented` row with a live
+   no-tolerance capture row.
+2. Extend the Chrome/Chromium ARGB probe from the CSS box matrix smoke row to
+   every layout manifest case, and require live standalone browser pixels where
+   the host or CI lane has Chrome/Chromium.
+3. Compare Electron, Tauri, Chrome/Chromium, and pure Simple renderer checksums
+   in one no-tolerance manifest report. Preserve strict failure for target
+   drift, dimension drift, checksum mismatch, nonzero pixel mismatch,
+   blur/tolerance usage, or fallback evidence that pretends live capture
+   occurred.

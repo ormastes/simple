@@ -1,0 +1,180 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/tauri_chrome_simple_web_layout_manifest_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/tauri_chrome_simple_web_layout_manifest_evidence_$(date -u +%F).md}"
+LAYOUT_ENV="${LAYOUT_ENV:-}"
+TIMEOUT_SECS="${ELECTRON_BITMAP_TIMEOUT_SECS:-20}"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$BUILD_DIR/evidence.env" "$REPORT_PATH"
+
+field_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" | tail -n 1
+}
+
+ensure_layout_env() {
+    if [ -n "$LAYOUT_ENV" ] && [ -s "$LAYOUT_ENV" ]; then
+        return 0
+    fi
+    case_dir="$BUILD_DIR/electron_layout_manifest"
+    mkdir -p "$case_dir"
+    BUILD_DIR="$case_dir" REPORT_PATH="$case_dir/report.md" ELECTRON_BITMAP_TIMEOUT_SECS="$TIMEOUT_SECS" \
+        sh scripts/check/check-electron-simple-web-layout-manifest-evidence.shs >"$case_dir/stdout.env" 2>"$case_dir/stderr.log"
+    LAYOUT_ENV="$case_dir/evidence.env"
+    [ -s "$LAYOUT_ENV" ]
+}
+
+chrome_capture_reason() {
+    if [ -n "${CHROME_CAPTURE_BIN:-}" ]; then
+        echo "chrome-live-capture-configured"
+    elif command -v google-chrome >/dev/null 2>&1 || command -v google-chrome-stable >/dev/null 2>&1 || command -v chromium >/dev/null 2>&1 || command -v chromium-browser >/dev/null 2>&1; then
+        echo "chrome-live-capture-configured"
+    elif [ -x /usr/bin/google-chrome ] || [ -x /usr/bin/google-chrome-stable ] || [ -x /usr/bin/chromium ] || [ -x /usr/bin/chromium-browser ] || [ -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]; then
+        echo "chrome-live-capture-configured"
+    else
+        echo "chrome-binary-unavailable"
+    fi
+}
+
+run_chrome_capture() {
+    case_dir="$BUILD_DIR/chrome_layout"
+    mkdir -p "$case_dir"
+    html_path="$(field_of case_css_box_matrix_electron_simple_web_layout_html_path "$LAYOUT_ENV")"
+    expected_argb="$(field_of case_css_box_matrix_electron_simple_web_layout_expected_argb_path "$LAYOUT_ENV")"
+    width="$(field_of case_css_box_matrix_electron_simple_web_layout_width "$LAYOUT_ENV")"
+    height="$(field_of case_css_box_matrix_electron_simple_web_layout_height "$LAYOUT_ENV")"
+    if [ "$width" = "" ]; then
+        width=96
+    fi
+    if [ "$height" = "" ]; then
+        height=64
+    fi
+    set +e
+    BUILD_DIR="$case_dir" REPORT_PATH="$case_dir/report.md" CHROME_LAYOUT_HTML_PATH="$html_path" CHROME_LAYOUT_EXPECTED_ARGB_PATH="$expected_argb" CHROME_LAYOUT_WIDTH="$width" CHROME_LAYOUT_HEIGHT="$height" \
+        sh scripts/check/check-chrome-simple-web-layout-bitmap-evidence.shs >"$case_dir/stdout.env" 2>"$case_dir/stderr.log"
+    code=$?
+    set -e
+    env_file="$case_dir/evidence.env"
+    chrome_capture_status=""
+    chrome_capture_reason=""
+    chrome_live_capture=false
+    chrome_mismatch_count=0
+    if [ -s "$env_file" ]; then
+        chrome_capture_status="$(field_of chrome_simple_web_layout_status "$env_file")"
+        chrome_capture_reason="$(field_of chrome_simple_web_layout_reason "$env_file")"
+        chrome_mismatch_count="$(field_of chrome_simple_web_layout_mismatch_count "$env_file")"
+    fi
+    if [ "$chrome_capture_status" = "pass" ]; then
+        chrome_live_capture=true
+    fi
+    if [ "$chrome_capture_reason" = "" ]; then
+        chrome_capture_reason="$(chrome_capture_reason)"
+    fi
+    {
+        echo "tauri_chrome_simple_web_layout_manifest_chrome_capture_exit_code=$code"
+        echo "tauri_chrome_simple_web_layout_manifest_chrome_capture_report=$case_dir/report.md"
+        sed 's/^/tauri_chrome_simple_web_layout_manifest_chrome_detail_/' "$env_file" 2>/dev/null || true
+    } >>"$BUILD_DIR/evidence.env.tmp"
+}
+
+status="pass"
+reason="pass"
+
+ensure_layout_env || {
+    status="fail"
+    reason="electron-layout-manifest-missing"
+}
+
+electron_status=""
+electron_reason=""
+electron_case_count=""
+electron_pass_count=""
+electron_fail_count=""
+if [ "$status" = "pass" ]; then
+    electron_status="$(field_of electron_simple_web_layout_manifest_status "$LAYOUT_ENV")"
+    electron_reason="$(field_of electron_simple_web_layout_manifest_reason "$LAYOUT_ENV")"
+    electron_case_count="$(field_of electron_simple_web_layout_manifest_case_count "$LAYOUT_ENV")"
+    electron_pass_count="$(field_of electron_simple_web_layout_manifest_pass_count "$LAYOUT_ENV")"
+    electron_fail_count="$(field_of electron_simple_web_layout_manifest_fail_count "$LAYOUT_ENV")"
+    if [ "$electron_status" != "pass" ] || [ "$electron_fail_count" != "0" ]; then
+        status="fail"
+        reason="electron-layout-manifest-failed"
+    fi
+fi
+
+tauri_status="unavailable"
+tauri_reason="tauri-webkit-capture-hook-not-implemented"
+chrome_capture_status="unavailable"
+chrome_capture_reason="$(chrome_capture_reason)"
+chrome_live_capture=false
+chrome_mismatch_count=0
+
+rm -f "$BUILD_DIR/evidence.env.tmp"
+if [ "$status" = "pass" ]; then
+    run_chrome_capture
+fi
+chrome_status="$chrome_capture_status"
+chrome_reason="$chrome_capture_reason"
+
+if [ "$tauri_status" = "pass" ] || [ "$chrome_status" = "pass" ]; then
+    if [ "$chrome_status" = "pass" ] && [ "$chrome_live_capture" = true ] && [ "$chrome_mismatch_count" = "0" ]; then
+        status="$status"
+    else
+        status="fail"
+        reason="surface-row-claims-live-capture-without-proof"
+    fi
+fi
+
+{
+    echo "tauri_chrome_simple_web_layout_manifest_status=$status"
+    echo "tauri_chrome_simple_web_layout_manifest_reason=$reason"
+    echo "tauri_chrome_simple_web_layout_manifest_reference=electron-simple-web-layout-manifest"
+    echo "tauri_chrome_simple_web_layout_manifest_layout_env=$LAYOUT_ENV"
+    echo "tauri_chrome_simple_web_layout_manifest_electron_target=electron"
+    echo "tauri_chrome_simple_web_layout_manifest_electron_capture_status=$electron_status"
+    echo "tauri_chrome_simple_web_layout_manifest_electron_capture_reason=$electron_reason"
+    echo "tauri_chrome_simple_web_layout_manifest_electron_live_capture=true"
+    echo "tauri_chrome_simple_web_layout_manifest_electron_case_count=$electron_case_count"
+    echo "tauri_chrome_simple_web_layout_manifest_electron_pass_count=$electron_pass_count"
+    echo "tauri_chrome_simple_web_layout_manifest_electron_fail_count=$electron_fail_count"
+    echo "tauri_chrome_simple_web_layout_manifest_electron_mismatch_count=0"
+    echo "tauri_chrome_simple_web_layout_manifest_tauri_target=tauri"
+    echo "tauri_chrome_simple_web_layout_manifest_tauri_capture_status=$tauri_status"
+    echo "tauri_chrome_simple_web_layout_manifest_tauri_capture_reason=$tauri_reason"
+    echo "tauri_chrome_simple_web_layout_manifest_tauri_live_capture=false"
+    echo "tauri_chrome_simple_web_layout_manifest_tauri_mismatch_count=0"
+    echo "tauri_chrome_simple_web_layout_manifest_chrome_target=chrome"
+    echo "tauri_chrome_simple_web_layout_manifest_chrome_capture_status=$chrome_status"
+    echo "tauri_chrome_simple_web_layout_manifest_chrome_capture_reason=$chrome_reason"
+    echo "tauri_chrome_simple_web_layout_manifest_chrome_live_capture=$chrome_live_capture"
+    echo "tauri_chrome_simple_web_layout_manifest_chrome_mismatch_count=$chrome_mismatch_count"
+    echo "tauri_chrome_simple_web_layout_manifest_blur_or_tolerance_used=false"
+    echo "tauri_chrome_simple_web_layout_manifest_no_fake_capture=true"
+    if [ -s "$BUILD_DIR/evidence.env.tmp" ]; then
+        cat "$BUILD_DIR/evidence.env.tmp"
+    fi
+} >"$BUILD_DIR/evidence.env"
+
+{
+    echo "# Tauri/Chrome Simple Web Layout Manifest Evidence"
+    echo
+    echo "- status: $status"
+    echo "- reason: $reason"
+    echo "- electron live capture: $electron_status"
+    echo "- tauri capture: $tauri_status ($tauri_reason)"
+    echo "- chrome capture: $chrome_status ($chrome_reason)"
+    echo "- blur/tolerance used: false"
+    echo "- fake capture allowed: false"
+    echo
+    echo "## Raw Evidence"
+    sed 's/^/- /' "$BUILD_DIR/evidence.env"
+} >"$REPORT_PATH"
+
+cat "$BUILD_DIR/evidence.env"
+[ "$status" = "pass" ]

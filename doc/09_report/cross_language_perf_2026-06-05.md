@@ -27,60 +27,11 @@
 
 | Language               |     Avg (ms) |         Mode |              |              |
 |------------------------|--------------|--------------|--------------|--------------|
-| Simple (interpreter)   |       25.636 |    interpret |              |              |
-| Simple (SMF loader)    |       25.155 |          smf |              |              |
-| Simple (native)        |        2.710 |       native |              |              |
-| C (gcc -O2)            |        2.879 |       native |              |              |
-| Go (compiled)          |       68.741 |       native |              |              |
-| Python                 |       24.578 |    interpret |              |              |
-| Bun                    |       86.271 |          JIT |              |              |
-| Java                   |      129.713 |    JIT (JVM) |              |              |
-| Erlang                 |         fail |      BEAM VM |              |              |
-
-## 3. Warm Throughput — fib(35) (in-process: 10 warmup + 20 measured)
-
-| Language               |     Avg (ms) |                                    Notes |
-|------------------------|--------------|------------------------------------------|
-| Simple (interpreter)   |       84.431 | tree-walk (outer-process, no in-proc timing) |
-| Simple (SMF loader)    |       79.157 | bytecode (outer-process, no in-proc timing) |
-| Simple (native)        |       55.379 |      AOT via LLVM/Cranelift (in-process) |
-| C (gcc -O2)            |       12.457 |                             baseline AOT |
-| Go                     |       50.872 |                                  SSA AOT |
-| Python                 |     1510.354 |                         CPython bytecode |
-| Bun                    |       59.364 |        JavaScriptCore JIT (steady-state) |
-| Java                   |       46.182 |            HotSpot C2 JIT (steady-state) |
-| Erlang                 |         fail |                    BEAM (single-process) |
-
-## 4. Parallel — spawn 100 workers (20 runs avg)
-
-| Language               |     Avg (ms) |                        Concurrency model |
-|------------------------|--------------|------------------------------------------|
-| Simple (interpreter)   |          n/a |       extern FFI segfault in interpreter |
-| Simple (SMF loader)    |         fail |              std thread_spawn (bytecode) |
-| Simple (native)        |          n/a |    codegen bug: rt_thread_join undefined |
-| C (pthreads)           |       10.123 |                               OS threads |
-| Go                     |        4.153 |                         goroutines (M:N) |
-| Python                 |       40.949 |                          threading (GIL) |
-| Bun                    |    13694.158 |                           worker_threads |
-| Java                   |       96.476 |                               ThreadPool |
-| Erlang                 |         fail |                    lightweight processes |
-
-## Size Definition
-
-| Category | What "size" means |
-|----------|-------------------|
-| AOT (C, Go, Simple native) | Binary bytes on disk — self-contained |
-| VM/bytecode (Java, Erlang, Simple SMF) | `.class`/`.beam`/`.smf` bytes — requires runtime |
-| Interpreted (Python, Bun, Simple interp.) | Script bytes — requires interpreter binary |
-
-## How to Optimize Simple Performance
-
-All optimization in **pure Simple** (`.spl`) — do not modify Rust seed or C runtime.
-
-1. **Interpreter → SMF loader** — `simple compile file.spl -o file.smf` for ~2-5x dispatch speedup
-2. **SMF → native** — `simple compile file.spl --native -o file` for AOT code approaching C-level numeric perf
-3. **Use `val` over `var`** — immutable bindings enable more aggressive constant folding
-4. **Avoid deep recursion** — rewrite as iteration where possible (tail-call not yet optimized)
-5. **Use typed collections** — `List<i64>` avoids boxing overhead vs untyped `List`
-6. **Profile with `std.testing.benchmark`** — warmup + outlier detection built in
-7. **`bin/simple build check`** — lint catches perf anti-patterns (mcp_perf_lint)
+| Simple (interpreter)   |       22.707 |    interpret |              |              |
+| Simple (SMF loader)    |       20.362 |          smf |              |              |
+| Simple (native)        |        2.977 |       native |              |              |
+| C (gcc -O2)            |        2.773 |       native |              |              |
+| Go (compiled)          |       60.222 |       native |              |              |
+| Python                 |       25.767 |    interpret |              |              |
+| Bun                    |       89.170 |          JIT |              |              |
+| Java                   |      154.938 |    JIT (JVM) |              |              |

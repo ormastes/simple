@@ -28,7 +28,7 @@ web_render_node_fixture_evidence_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -263,6 +263,250 @@ expect(artifact.engine2d_reason).to_equal("artifact-pixel-count-mismatch")
 
 </details>
 
+#### accepts Tauri bitmap parity when it matches the canonical Simple renderer exactly
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 27 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val evidence = web_render_tauri_bitmap_parity_evidence(
+    "simple-web-layout-commandbar-taskbar-card",
+    WEB_RENDER_TARGET_TAURI,
+    "tauri-wry-webkit-shared-web-renderer",
+    "tauri-shared-web-render-envelope",
+    "simple-web-engine2d-software",
+    2,
+    2,
+    120,
+    120,
+    0,
+    "argb-u32",
+    false
+)
+val req = WebRenderRequest.html(WEB_RENDER_TARGET_TAURI, "Tauri fixture", "<main>fixture</main>", "", "", 2, 2)
+val artifact = web_render_tauri_bitmap_parity_artifact(req, [1u32, 2u32, 3u32, 4u32], evidence)
+
+expect(evidence.status).to_equal("pass")
+expect(evidence.reason).to_equal("pass")
+expect(evidence.target).to_equal(WEB_RENDER_TARGET_TAURI)
+expect(evidence.summary()).to_contain("reference_renderer=simple-web-engine2d-software")
+expect(web_render_tauri_bitmap_parity_artifact_reason(req, [1u32, 2u32, 3u32, 4u32], evidence)).to_equal("pass")
+expect(artifact.target).to_equal(WEB_RENDER_TARGET_TAURI)
+expect(artifact.pixels.len()).to_equal(4)
+expect(artifact.engine2d_status).to_equal(WEB_RENDER_ENGINE2D_STATUS_COMPATIBILITY)
+expect(artifact.engine2d_backend).to_equal("simple-web-engine2d-software")
+expect(artifact.engine2d_reason).to_equal("tauri-shared-web-renderer-pixel-contract")
+```
+
+</details>
+
+#### rejects Tauri bitmap parity when checksums or no-tolerance policy diverge
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 49 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val checksum_mismatch = web_render_tauri_bitmap_parity_evidence(
+    "simple-web-layout-commandbar-taskbar-card",
+    WEB_RENDER_TARGET_TAURI,
+    "tauri-wry-webkit-shared-web-renderer",
+    "tauri-shared-web-render-envelope",
+    "simple-web-engine2d-software",
+    2,
+    2,
+    120,
+    121,
+    0,
+    "argb-u32",
+    false
+)
+val blurred = web_render_tauri_bitmap_parity_evidence(
+    "simple-web-layout-commandbar-taskbar-card",
+    WEB_RENDER_TARGET_TAURI,
+    "tauri-wry-webkit-shared-web-renderer",
+    "tauri-shared-web-render-envelope",
+    "simple-web-engine2d-software",
+    2,
+    2,
+    120,
+    120,
+    0,
+    "argb-u32",
+    true
+)
+val wrong_target = web_render_tauri_bitmap_parity_evidence(
+    "simple-web-layout-commandbar-taskbar-card",
+    WEB_RENDER_TARGET_ELECTRON,
+    "tauri-wry-webkit-shared-web-renderer",
+    "tauri-shared-web-render-envelope",
+    "simple-web-engine2d-software",
+    2,
+    2,
+    120,
+    120,
+    0,
+    "argb-u32",
+    false
+)
+
+expect(checksum_mismatch.status).to_equal("fail")
+expect(checksum_mismatch.reason).to_equal("checksum-mismatch")
+expect(blurred.status).to_equal("fail")
+expect(blurred.reason).to_equal("blur-or-tolerance-not-allowed")
+expect(wrong_target.status).to_equal("fail")
+expect(wrong_target.reason).to_equal("wrong-render-target")
+```
+
+</details>
+
+#### records live Electron layout manifest capture as exact no-tolerance evidence
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val evidence = web_render_surface_manifest_capture_evidence(
+    "simple-web-layout-manifest",
+    WEB_RENDER_TARGET_ELECTRON,
+    "electron-chromium-live-capture",
+    "simple-web-layout-renderer",
+    "pass",
+    "pass",
+    true,
+    18,
+    18,
+    0,
+    0,
+    false
+)
+
+expect(evidence.status).to_equal("pass")
+expect(evidence.reason).to_equal("pass")
+expect(evidence.live_capture).to_equal(true)
+expect(evidence.summary()).to_contain("target=electron")
+```
+
+</details>
+
+#### records Tauri and Chrome manifest rows as typed unavailable without claiming pixels
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 35 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val tauri = web_render_surface_manifest_capture_evidence(
+    "simple-web-layout-manifest",
+    WEB_RENDER_TARGET_TAURI,
+    "tauri-wry-webkit",
+    "simple-web-layout-renderer",
+    "unavailable",
+    "tauri-webkit-capture-hook-not-implemented",
+    false,
+    0,
+    0,
+    0,
+    0,
+    false
+)
+val chrome = web_render_surface_manifest_capture_evidence(
+    "simple-web-layout-manifest",
+    WEB_RENDER_TARGET_CHROME,
+    "standalone-chrome",
+    "simple-web-layout-renderer",
+    "unavailable",
+    "chrome-binary-unavailable",
+    false,
+    0,
+    0,
+    0,
+    0,
+    false
+)
+
+expect(tauri.status).to_equal("unavailable")
+expect(tauri.reason).to_equal("typed-unavailable")
+expect(tauri.live_capture).to_equal(false)
+expect(chrome.status).to_equal("unavailable")
+expect(chrome.reason).to_equal("typed-unavailable")
+expect(chrome.summary()).to_contain("target=chrome")
+```
+
+</details>
+
+#### rejects manifest evidence that pretends unavailable capture is live or exact
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 49 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val fake_live_unavailable = web_render_surface_manifest_capture_evidence(
+    "simple-web-layout-manifest",
+    WEB_RENDER_TARGET_TAURI,
+    "tauri-wry-webkit",
+    "simple-web-layout-renderer",
+    "unavailable",
+    "tauri-webkit-capture-hook-not-implemented",
+    true,
+    0,
+    0,
+    0,
+    0,
+    false
+)
+val fake_pass_without_capture = web_render_surface_manifest_capture_evidence(
+    "simple-web-layout-manifest",
+    WEB_RENDER_TARGET_CHROME,
+    "standalone-chrome",
+    "simple-web-layout-renderer",
+    "pass",
+    "pass",
+    false,
+    18,
+    18,
+    0,
+    0,
+    false
+)
+val fake_blurred = web_render_surface_manifest_capture_evidence(
+    "simple-web-layout-manifest",
+    WEB_RENDER_TARGET_ELECTRON,
+    "electron-chromium-live-capture",
+    "simple-web-layout-renderer",
+    "pass",
+    "pass",
+    true,
+    18,
+    18,
+    0,
+    0,
+    true
+)
+
+expect(fake_live_unavailable.status).to_equal("fail")
+expect(fake_live_unavailable.reason).to_equal("unavailable-cannot-claim-live-capture")
+expect(fake_pass_without_capture.status).to_equal("fail")
+expect(fake_pass_without_capture.reason).to_equal("pass-requires-live-capture")
+expect(fake_blurred.status).to_equal("fail")
+expect(fake_blurred.reason).to_equal("blur-or-tolerance-not-allowed")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -282,8 +526,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
