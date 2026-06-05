@@ -27,7 +27,7 @@ opencl_backend_contract_spec -> compiler
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 18 | 18 | 0 | 0 |
+| 19 | 19 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -259,6 +259,24 @@ expect(source).to_contain("return;")
 
 </details>
 
+#### rejects unsupported MIR instead of emitting invalid OpenCL comments
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val module = make_kernel_module([make_opencl_indirect_call_kernel()])
+val result = OpenClBackend.compile_module_to_opencl_source(module)
+
+expect(result.is_err()).to_equal(true)
+expect(result.unwrap_err().message).to_contain("OpenCL")
+```
+
+</details>
+
 #### emits OpenCL C array aggregates and field access
 
 <details>
@@ -460,8 +478,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 18 |
-| Active scenarios | 18 |
+| Total scenarios | 19 |
+| Active scenarios | 19 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
