@@ -913,7 +913,7 @@ fn try_compile_builtin_method_call<M: Module>(
         "pop" => "rt_array_pop",
         "clear" => "rt_array_clear",
         // Generic collection methods (work on String, Array, Tuple, Dict)
-        "len" => "rt_len",
+        "len" | "length" => "rt_len",
         // Result/Option methods
         "unwrap" | "unwrap_or" => "rt_enum_payload",
         "is_none" => {

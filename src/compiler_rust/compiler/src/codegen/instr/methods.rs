@@ -222,7 +222,7 @@ pub(crate) fn compile_builtin_method<M: Module>(
             let push_result = call_runtime_2(ctx, builder, "rt_array_push", receiver_val, arg_val);
             Some(push_result)
         }
-        ("Array", "len") | ("array", "len") => Some(call_len_method(ctx, builder, "rt_array_len", receiver_val)),
+        ("Array", "len") | ("array", "len") | ("Array", "length") | ("array", "length") => Some(call_len_method(ctx, builder, "rt_array_len", receiver_val)),
         ("Array", "get") | ("array", "get") => {
             let idx_val = ctx.get_vreg(&args[0])?;
             let wrapped_idx = wrap_value(ctx, builder, args[0], idx_val);
@@ -241,7 +241,7 @@ pub(crate) fn compile_builtin_method<M: Module>(
             let result_i8 = call_runtime_1(ctx, builder, "rt_array_clear", receiver_val);
             Some(super::helpers::safe_extend_to_i64(builder, result_i8))
         }
-        ("String", "len") | ("string", "len") => Some(call_len_method(ctx, builder, "rt_string_len", receiver_val)),
+        ("String", "len") | ("string", "len") | ("String", "length") | ("string", "length") => Some(call_len_method(ctx, builder, "rt_string_len", receiver_val)),
         ("String", "concat") | ("string", "concat") => {
             let arg_val = ctx.get_vreg(&args[0])?;
             Some(call_runtime_2(ctx, builder, "rt_string_concat", receiver_val, arg_val))
@@ -279,7 +279,7 @@ pub(crate) fn compile_builtin_method<M: Module>(
             let result_i8 = call_runtime_3(ctx, builder, "rt_dict_set", receiver_val, wrapped_key, wrapped_val);
             Some(super::helpers::safe_extend_to_i64(builder, result_i8))
         }
-        ("Dict", "len") | ("dict", "len") => Some(call_len_method(ctx, builder, "rt_dict_len", receiver_val)),
+        ("Dict", "len") | ("dict", "len") | ("Dict", "length") | ("dict", "length") => Some(call_len_method(ctx, builder, "rt_dict_len", receiver_val)),
         ("Dict", "clear") | ("dict", "clear") => {
             let result_i8 = call_runtime_1(ctx, builder, "rt_dict_clear", receiver_val);
             Some(super::helpers::safe_extend_to_i64(builder, result_i8))
@@ -290,7 +290,7 @@ pub(crate) fn compile_builtin_method<M: Module>(
             let idx_val = ctx.get_vreg(&args[0])?;
             Some(call_runtime_2(ctx, builder, "rt_tuple_get", receiver_val, idx_val))
         }
-        ("Tuple", "len") | ("tuple", "len") => Some(call_len_method(ctx, builder, "rt_tuple_len", receiver_val)),
+        ("Tuple", "len") | ("tuple", "len") | ("Tuple", "length") | ("tuple", "length") => Some(call_len_method(ctx, builder, "rt_tuple_len", receiver_val)),
         ("Tuple", "set") | ("tuple", "set") => {
             let idx_val = ctx.get_vreg(&args[0])?;
             let arg_val = ctx.get_vreg(&args[1])?;

@@ -2465,7 +2465,7 @@ pub fn sffi_alias_target(name: &str) -> Option<&'static str> {
         "rt_file_delete" => Some("rt_file_remove"),
         "rt_println" => Some("rt_println_value"),
         "rt_print" => Some("rt_print_value"),
-        "len" => Some("rt_len"),
+        "len" | "length" => Some("rt_len"),
         _ => None,
     }
 }
@@ -2857,7 +2857,7 @@ pub fn compile_call<M: Module>(
             let method_part = &func_name[dot_pos + 1..];
             let runtime_func: Option<&str> = match method_part {
                 "contains" | "contains_key" | "has_key" => Some("rt_contains"),
-                "len" => Some("rt_len"),
+                "len" | "length" => Some("rt_len"),
                 "starts_with" => Some("rt_string_starts_with"),
                 "ends_with" => Some("rt_string_ends_with"),
                 "concat" => Some("rt_string_concat"),
