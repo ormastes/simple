@@ -27,7 +27,7 @@ optimizer_plugin_spec -> compiler
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 45 | 45 | 0 | 0 |
+| 56 | 56 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1202,6 +1202,300 @@ expect(after.inst_count).to_equal(4)
 
 </details>
 
+### function-scope pass dispatch
+
+#### DCE pass returns function unchanged
+
+1. locals = locals push
+   - Expected: result.name equals `dce_probe`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val ty = MirType(kind: MirTypeKind.I64)
+val sig = MirSignature(params: [], return_type: ty, is_variadic: false)
+val inst = MirInst(kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Int(1), ty), span: nil)
+val blk = MirBlock(id: BlockId(id: 0), label: Some("bb0"), instructions: [inst], terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))))))
+var locals: [MirLocal] = []
+locals = locals.push(MirLocal(id: LocalId(id: 0), type_: ty, kind: LocalKind.Temp, name: nil))
+val func = MirFunction(symbol: SymbolId.new(0), name: "dce_probe", signature: sig, locals: locals, blocks: [blk], entry_block: BlockId.new(0), span: nil, generic_params: [], is_generic_template: false, specialization_of: nil, type_bindings: {})
+val result = run_typed_pass_on_function(PassKind.DeadCodeElimination, func)
+expect(result.name).to_equal("dce_probe")
+```
+
+</details>
+
+#### ConstantFolding pass returns function unchanged
+
+1. locals = locals push
+   - Expected: result.name equals `cf_probe`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val ty = MirType(kind: MirTypeKind.I64)
+val sig = MirSignature(params: [], return_type: ty, is_variadic: false)
+val inst = MirInst(kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Int(1), ty), span: nil)
+val blk = MirBlock(id: BlockId(id: 0), label: Some("bb0"), instructions: [inst], terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))))))
+var locals: [MirLocal] = []
+locals = locals.push(MirLocal(id: LocalId(id: 0), type_: ty, kind: LocalKind.Temp, name: nil))
+val func = MirFunction(symbol: SymbolId.new(0), name: "cf_probe", signature: sig, locals: locals, blocks: [blk], entry_block: BlockId.new(0), span: nil, generic_params: [], is_generic_template: false, specialization_of: nil, type_bindings: {})
+val result = run_typed_pass_on_function(PassKind.ConstantFolding, func)
+expect(result.name).to_equal("cf_probe")
+```
+
+</details>
+
+#### CopyPropagation pass returns function unchanged
+
+1. locals = locals push
+   - Expected: result.name equals `cp_probe`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val ty = MirType(kind: MirTypeKind.I64)
+val sig = MirSignature(params: [], return_type: ty, is_variadic: false)
+val inst = MirInst(kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Int(1), ty), span: nil)
+val blk = MirBlock(id: BlockId(id: 0), label: Some("bb0"), instructions: [inst], terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))))))
+var locals: [MirLocal] = []
+locals = locals.push(MirLocal(id: LocalId(id: 0), type_: ty, kind: LocalKind.Temp, name: nil))
+val func = MirFunction(symbol: SymbolId.new(0), name: "cp_probe", signature: sig, locals: locals, blocks: [blk], entry_block: BlockId.new(0), span: nil, generic_params: [], is_generic_template: false, specialization_of: nil, type_bindings: {})
+val result = run_typed_pass_on_function(PassKind.CopyPropagation, func)
+expect(result.name).to_equal("cp_probe")
+```
+
+</details>
+
+#### CSE pass returns function unchanged
+
+1. locals = locals push
+   - Expected: result.name equals `cse_probe`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val ty = MirType(kind: MirTypeKind.I64)
+val sig = MirSignature(params: [], return_type: ty, is_variadic: false)
+val inst = MirInst(kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Int(1), ty), span: nil)
+val blk = MirBlock(id: BlockId(id: 0), label: Some("bb0"), instructions: [inst], terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))))))
+var locals: [MirLocal] = []
+locals = locals.push(MirLocal(id: LocalId(id: 0), type_: ty, kind: LocalKind.Temp, name: nil))
+val func = MirFunction(symbol: SymbolId.new(0), name: "cse_probe", signature: sig, locals: locals, blocks: [blk], entry_block: BlockId.new(0), span: nil, generic_params: [], is_generic_template: false, specialization_of: nil, type_bindings: {})
+val result = run_typed_pass_on_function(PassKind.CommonSubexprElim, func)
+expect(result.name).to_equal("cse_probe")
+```
+
+</details>
+
+#### InlineSmallFunctions pass returns function unchanged
+
+1. locals = locals push
+   - Expected: result.name equals `isf_probe`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val ty = MirType(kind: MirTypeKind.I64)
+val sig = MirSignature(params: [], return_type: ty, is_variadic: false)
+val inst = MirInst(kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Int(1), ty), span: nil)
+val blk = MirBlock(id: BlockId(id: 0), label: Some("bb0"), instructions: [inst], terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))))))
+var locals: [MirLocal] = []
+locals = locals.push(MirLocal(id: LocalId(id: 0), type_: ty, kind: LocalKind.Temp, name: nil))
+val func = MirFunction(symbol: SymbolId.new(0), name: "isf_probe", signature: sig, locals: locals, blocks: [blk], entry_block: BlockId.new(0), span: nil, generic_params: [], is_generic_template: false, specialization_of: nil, type_bindings: {})
+val result = run_typed_pass_on_function(PassKind.InlineSmallFunctions, func)
+expect(result.name).to_equal("isf_probe")
+```
+
+</details>
+
+<details>
+<summary>Advanced: LoopInvariantMotion pass returns function unchanged</summary>
+
+#### LoopInvariantMotion pass returns function unchanged
+
+1. locals = locals push
+   - Expected: result.name equals `licm_probe`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val ty = MirType(kind: MirTypeKind.I64)
+val sig = MirSignature(params: [], return_type: ty, is_variadic: false)
+val inst = MirInst(kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Int(1), ty), span: nil)
+val blk = MirBlock(id: BlockId(id: 0), label: Some("bb0"), instructions: [inst], terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))))))
+var locals: [MirLocal] = []
+locals = locals.push(MirLocal(id: LocalId(id: 0), type_: ty, kind: LocalKind.Temp, name: nil))
+val func = MirFunction(symbol: SymbolId.new(0), name: "licm_probe", signature: sig, locals: locals, blocks: [blk], entry_block: BlockId.new(0), span: nil, generic_params: [], is_generic_template: false, specialization_of: nil, type_bindings: {})
+val result = run_typed_pass_on_function(PassKind.LoopInvariantMotion, func)
+expect(result.name).to_equal("licm_probe")
+```
+
+</details>
+
+
+</details>
+
+#### BoundsCheckElimination pass returns function unchanged
+
+1. locals = locals push
+   - Expected: result.name equals `bce_probe`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val ty = MirType(kind: MirTypeKind.I64)
+val sig = MirSignature(params: [], return_type: ty, is_variadic: false)
+val inst = MirInst(kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Int(1), ty), span: nil)
+val blk = MirBlock(id: BlockId(id: 0), label: Some("bb0"), instructions: [inst], terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))))))
+var locals: [MirLocal] = []
+locals = locals.push(MirLocal(id: LocalId(id: 0), type_: ty, kind: LocalKind.Temp, name: nil))
+val func = MirFunction(symbol: SymbolId.new(0), name: "bce_probe", signature: sig, locals: locals, blocks: [blk], entry_block: BlockId.new(0), span: nil, generic_params: [], is_generic_template: false, specialization_of: nil, type_bindings: {})
+val result = run_typed_pass_on_function(PassKind.BoundsCheckElimination, func)
+expect(result.name).to_equal("bce_probe")
+```
+
+</details>
+
+#### StrengthReduction pass returns function unchanged
+
+1. locals = locals push
+   - Expected: result.name equals `sr_probe`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val ty = MirType(kind: MirTypeKind.I64)
+val sig = MirSignature(params: [], return_type: ty, is_variadic: false)
+val inst = MirInst(kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Int(1), ty), span: nil)
+val blk = MirBlock(id: BlockId(id: 0), label: Some("bb0"), instructions: [inst], terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))))))
+var locals: [MirLocal] = []
+locals = locals.push(MirLocal(id: LocalId(id: 0), type_: ty, kind: LocalKind.Temp, name: nil))
+val func = MirFunction(symbol: SymbolId.new(0), name: "sr_probe", signature: sig, locals: locals, blocks: [blk], entry_block: BlockId.new(0), span: nil, generic_params: [], is_generic_template: false, specialization_of: nil, type_bindings: {})
+val result = run_typed_pass_on_function(PassKind.StrengthReduction, func)
+expect(result.name).to_equal("sr_probe")
+```
+
+</details>
+
+#### TailCallOptimization pass returns function unchanged
+
+1. locals = locals push
+   - Expected: result.name equals `tco_probe`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val ty = MirType(kind: MirTypeKind.I64)
+val sig = MirSignature(params: [], return_type: ty, is_variadic: false)
+val inst = MirInst(kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Int(1), ty), span: nil)
+val blk = MirBlock(id: BlockId(id: 0), label: Some("bb0"), instructions: [inst], terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))))))
+var locals: [MirLocal] = []
+locals = locals.push(MirLocal(id: LocalId(id: 0), type_: ty, kind: LocalKind.Temp, name: nil))
+val func = MirFunction(symbol: SymbolId.new(0), name: "tco_probe", signature: sig, locals: locals, blocks: [blk], entry_block: BlockId.new(0), span: nil, generic_params: [], is_generic_template: false, specialization_of: nil, type_bindings: {})
+val result = run_typed_pass_on_function(PassKind.TailCallOptimization, func)
+expect(result.name).to_equal("tco_probe")
+```
+
+</details>
+
+#### GlobalValueNumbering pass returns function unchanged
+
+1. locals = locals push
+   - Expected: result.name equals `gvn_probe`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val ty = MirType(kind: MirTypeKind.I64)
+val sig = MirSignature(params: [], return_type: ty, is_variadic: false)
+val inst = MirInst(kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Int(1), ty), span: nil)
+val blk = MirBlock(id: BlockId(id: 0), label: Some("bb0"), instructions: [inst], terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))))))
+var locals: [MirLocal] = []
+locals = locals.push(MirLocal(id: LocalId(id: 0), type_: ty, kind: LocalKind.Temp, name: nil))
+val func = MirFunction(symbol: SymbolId.new(0), name: "gvn_probe", signature: sig, locals: locals, blocks: [blk], entry_block: BlockId.new(0), span: nil, generic_params: [], is_generic_template: false, specialization_of: nil, type_bindings: {})
+val result = run_typed_pass_on_function(PassKind.GlobalValueNumbering, func)
+expect(result.name).to_equal("gvn_probe")
+```
+
+</details>
+
+#### TypedByteCanon pass returns function unchanged
+
+1. locals = locals push
+   - Expected: result.name equals `tbc_probe`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val ty = MirType(kind: MirTypeKind.I64)
+val sig = MirSignature(params: [], return_type: ty, is_variadic: false)
+val inst = MirInst(kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Int(1), ty), span: nil)
+val blk = MirBlock(id: BlockId(id: 0), label: Some("bb0"), instructions: [inst], terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))))))
+var locals: [MirLocal] = []
+locals = locals.push(MirLocal(id: LocalId(id: 0), type_: ty, kind: LocalKind.Temp, name: nil))
+val func = MirFunction(symbol: SymbolId.new(0), name: "tbc_probe", signature: sig, locals: locals, blocks: [blk], entry_block: BlockId.new(0), span: nil, generic_params: [], is_generic_template: false, specialization_of: nil, type_bindings: {})
+val result = run_typed_pass_on_function(PassKind.TypedByteCanon, func)
+expect(result.name).to_equal("tbc_probe")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -1224,13 +1518,14 @@ Tests covering:
 - source analysis
 - combined registry queries
 - MIR routing adapter
+- function-scope pass dispatch
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 45 |
-| Active scenarios | 45 |
+| Total scenarios | 56 |
+| Active scenarios | 56 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

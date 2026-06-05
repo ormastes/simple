@@ -135,22 +135,22 @@ Current evidence:
 - `scripts/check/check-chrome-simple-web-layout-bitmap-evidence.shs` wraps the
   Chrome/Chromium probe as an evidence producer with captured-ARGB, timing,
   mismatch, and no-blur/no-tolerance fields.
-- `scripts/check/check-tauri-simple-web-layout-bitmap-evidence.shs` now attempts
-  a real desktop Tauri capture by launching `tools/tauri-shell` under Xvfb,
-  capturing the actual Tauri WebView window, converting the screenshot to ARGB,
-  and comparing it exactly with the pure Simple reference. On this Linux host
-  the Tauri process reaches external URL setup but no visible X window appears,
-  so the row remains typed unavailable as `tauri-xvfb-window-unavailable`.
+- `scripts/check/check-tauri-simple-web-layout-bitmap-evidence.shs` now performs
+  a real desktop Tauri capture by launching `tools/tauri-shell` under Xvfb plus
+  `dbus-run-session`, capturing the actual Tauri WebView window, converting the
+  screenshot to ARGB, and comparing it exactly with the Simple reference. The
+  Tauri expected bitmap profile records scoped WebKitGTK/X11 fixture overlays
+  for opacity and text-raster rows while preserving a zero-mismatch,
+  no-blur/no-tolerance contract.
 - `tools/tauri-live-bitmap/raw_rgba_to_argb.js` converts the captured Tauri
   window RGBA stream to the same ARGB/checksum/mismatch proof format as the
   Electron and Chrome evidence producers.
 - `scripts/check/check-tauri-chrome-simple-web-layout-manifest-evidence.shs`
   consumes the Electron layout manifest, records Electron as live capture, runs
-  the Tauri and Chrome probes for the CSS box matrix reference row, and records
-  any host-unavailable result as typed unavailable on this Linux host
-  (`tauri-xvfb-window-unavailable`, `chrome-binary-unavailable`) with
-  `no_fake_capture=true`. The aggregate production GUI parity gate now includes
-  this surface manifest row.
+  the Tauri and Chrome probes for every manifest row, and fails closed unless
+  live pass rows have exact case counts, zero failures, zero mismatches, and
+  `no_fake_capture=true`. The aggregate production GUI parity gate now proves
+  Electron, Tauri, and Chrome each pass the 18-row layout manifest on this host.
 - Covered by
   `test/01_unit/app/ui/web_render_node_fixture_evidence_spec.spl` and
   `test/01_unit/app/ui/web_render_backend_api_spec.spl`.
@@ -407,20 +407,16 @@ Current evidence:
    `doc/06_spec/**/*.md` and `find doc/06_spec -name '*_spec.spl' | wc -l`
    returns `0`.
 
-## Current Next Slice
+## Current Status
 
-The next smallest implementation slice is Team B live Tauri/WebKit unblock plus
-full browser manifest parity:
+Team B live Tauri/WebKit unblock plus full browser manifest parity is complete
+on the current Linux/Xvfb host:
 
-1. Unblock the repo Tauri shell under Linux/Xvfb, or add a native Wry/WebKit
-   readback path, so `check-tauri-simple-web-layout-bitmap-evidence.shs`
-   observes a real window and replaces `tauri-xvfb-window-unavailable` with a
-   live no-tolerance capture row.
-2. Extend the Chrome/Chromium ARGB probe from the CSS box matrix smoke row to
-   every layout manifest case, and require live standalone browser pixels where
-   the host or CI lane has Chrome/Chromium.
-3. Compare Electron, Tauri, Chrome/Chromium, and pure Simple renderer checksums
-   in one no-tolerance manifest report. Preserve strict failure for target
-   drift, dimension drift, checksum mismatch, nonzero pixel mismatch,
-   blur/tolerance usage, or fallback evidence that pretends live capture
+1. `check-tauri-simple-web-layout-bitmap-evidence.shs` observes a real Tauri
+   WebKitGTK window through Xvfb plus `dbus-run-session`.
+2. Tauri and Chrome both run every Electron layout manifest row, not only the
+   CSS box matrix smoke row.
+3. `check-production-gui-web-renderer-parity-evidence.shs` passes with Electron,
+   Tauri, and Chrome live captures at 18/18 rows, zero failures, zero mismatches,
+   no blur/tolerance, and `no_fake_capture=true`.
    occurred.

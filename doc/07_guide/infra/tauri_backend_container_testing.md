@@ -127,6 +127,28 @@ Check stderr logs for these key lines:
 
 If `creating window` never appears, `dbus-run-session` is likely missing.
 
+### Pixel Parity Evidence
+
+The production GUI parity gate exercises the headless Tauri path together with
+Electron and Chrome:
+
+```bash
+ELECTRON_BITMAP_TIMEOUT_SECS=20 \
+  sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs
+```
+
+Expected desktop result on a host with the repo Tauri shell, Xvfb, D-Bus
+session support, ImageMagick, and Chrome/Chromium available:
+
+- Electron layout manifest: 18/18 live rows, zero mismatches.
+- Tauri WebKitGTK/X11 manifest: 18/18 live rows, zero mismatches.
+- Chrome/Chromium manifest: 18/18 live rows, zero mismatches.
+- `blur_or_tolerance_used=false` and `no_fake_capture=true`.
+
+Tauri uses scoped `tauri-webkitgtk-x11:*` expected profiles for the WebKitGTK
+opacity and text-raster fixture differences. These profiles are exact pixel
+targets, not tolerance or blur.
+
 ## Android Testing in Detail
 
 ### Build APK Only (no emulator)
