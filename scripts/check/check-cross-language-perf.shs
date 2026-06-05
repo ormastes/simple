@@ -1,0 +1,710 @@
+#!/bin/sh
+set -eu
+
+# Cross-language performance comparison harness
+# Compares Simple (interpreter / SMF loader / native) against
+# bun, python, go, erlang, java, and C.
+#
+# Dimensions: binary/runtime size, cold startup, warm throughput (fib35),
+#             parallel spawn-N (shows BEAM/goroutine strength).
+#
+# Warm throughput uses IN-PROCESS loops so JIT runtimes (Java HotSpot,
+# Bun/JSC) reach steady state within a single process — not relaunched.
+#
+# Usage:
+#   sh scripts/check/check-cross-language-perf.shs
+#   RUNS=50 WORKERS=100 sh scripts/check/check-cross-language-perf.shs
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
+BUILD_DIR="${BUILD_DIR:-build/cross_lang_perf}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/cross_language_perf_$(date +%Y-%m-%d).md}"
+RUNS="${RUNS:-20}"
+FIB_N="${FIB_N:-35}"
+WORKERS="${WORKERS:-100}"
+WARM_ITERS="${WARM_ITERS:-5}"
+WARM_IN_PROCESS="${WARM_IN_PROCESS:-10}"
+
+mkdir -p "$BUILD_DIR" "$(dirname "$REPORT_PATH")"
+
+# ── helpers ──────────────────────────────────────────────────────────────
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+bytes_of() {
+    if [ -f "$1" ]; then wc -c <"$1" | tr -d ' '; else echo "n/a"; fi
+}
+
+human_bytes() {
+    awk "BEGIN { b=$1; u=\"B\";
+      if(b>=1073741824){b/=1073741824;u=\"GB\"}
+      else if(b>=1048576){b/=1048576;u=\"MB\"}
+      else if(b>=1024){b/=1024;u=\"KB\"};
+      printf \"%.1f %s\", b, u }"
+}
+
+avg_ms() {
+    _cmd="$1"; _runs="$2"
+    i=0; total=0; ok=0
+    while [ "$i" -lt "$_runs" ]; do
+        start="$(date +%s%N)"
+        if eval "$_cmd" >/dev/null 2>&1; then
+            end="$(date +%s%N)"
+            total=$((total + (end - start)))
+            ok=$((ok + 1))
+        fi
+        i=$((i + 1))
+    done
+    if [ "$ok" -eq 0 ]; then echo "fail"
+    else awk "BEGIN {printf \"%.3f\", ($total / $ok) / 1000000}"; fi
+}
+
+# Extract in-process timing from program stdout (programs print "warm_ms: NNN.NNN")
+extract_warm_ms() {
+    _cmd="$1"
+    _output=$(eval "$_cmd" 2>/dev/null) || { echo "fail"; return; }
+    echo "$_output" | grep 'warm_ms:' | tail -1 | sed 's/.*warm_ms: *//' | tr -d ' '
+}
+
+section() { printf "\n## %s\n\n" "$1" >>"$REPORT_PATH"; }
+row() { printf "| %-22s | %12s | %12s | %12s | %12s |\n" "$@" >>"$REPORT_PATH"; }
+sep() { printf "|%-24s|%14s|%14s|%14s|%14s|\n" "------------------------" "--------------" "--------------" "--------------" "--------------" >>"$REPORT_PATH"; }
+
+# ── generate workload sources ────────────────────────────────────────────
+
+write_simple_hello() {
+    cat >"$BUILD_DIR/hello.spl" <<'SIMPLE'
+fn main():
+    println("Hello World")
+SIMPLE
+}
+
+write_simple_fib() {
+    cat >"$BUILD_DIR/fib.spl" <<'SIMPLE'
+fn fib(n: i64) -> i64:
+    if n < 2:
+        return n
+    return fib(n - 1) + fib(n - 2)
+
+fn main():
+    val n = 35
+    val result = fib(n)
+    println("fib({n}) = {result}")
+SIMPLE
+}
+
+# Warm fib: runs fib(35) WARM_IN_PROCESS times in-process, reports steady-state
+write_simple_fib_warm() {
+    cat >"$BUILD_DIR/fib_warm.spl" <<SIMPLE
+fn fib(n: i64) -> i64:
+    if n < 2:
+        return n
+    return fib(n - 1) + fib(n - 2)
+
+fn main():
+    val warmup = ${WARM_IN_PROCESS}
+    val measured = ${RUNS}
+    for i in 0..warmup:
+        fib(35)
+    val start = rt_time_monotonic_ns()
+    for i in 0..measured:
+        fib(35)
+    val elapsed = rt_time_monotonic_ns() - start
+    val avg_ns = elapsed / measured
+    val avg_ms_int = avg_ns / 1000000
+    val avg_ms_frac = (avg_ns % 1000000) / 1000
+    println("warm_ms: {avg_ms_int}.{avg_ms_frac}")
+SIMPLE
+}
+
+write_simple_parallel() {
+    cat >"$BUILD_DIR/parallel.spl" <<'SIMPLE'
+use std.concurrent.thread.{thread_spawn, ThreadHandle}
+
+fn main():
+    var handles: List<ThreadHandle> = []
+    for i in 0..100:
+        val h = thread_spawn(\:
+            var sum: i64 = 0
+            for j in 0..1000:
+                sum = sum + j
+            sum
+        )
+        handles.push(h)
+    var total: i64 = 0
+    for h in handles:
+        total = total + h.join()
+    println("total = {total}")
+SIMPLE
+}
+
+write_c_hello() {
+    cat >"$BUILD_DIR/hello.c" <<'C'
+#include <stdio.h>
+int main(void) { puts("Hello World"); return 0; }
+C
+}
+
+write_c_fib() {
+    cat >"$BUILD_DIR/fib.c" <<'C'
+#include <stdio.h>
+#include <stdint.h>
+static int64_t fib(int64_t n) { return n < 2 ? n : fib(n-1) + fib(n-2); }
+int main(void) { printf("fib(35) = %ld\n", fib(35)); return 0; }
+C
+}
+
+write_c_fib_warm() {
+    cat >"$BUILD_DIR/fib_warm.c" <<C
+#include <stdio.h>
+#include <stdint.h>
+#include <time.h>
+static int64_t fib(int64_t n) { return n < 2 ? n : fib(n-1) + fib(n-2); }
+int main(void) {
+    int warmup = ${WARM_IN_PROCESS}, measured = ${RUNS};
+    for (int i = 0; i < warmup; i++) fib(35);
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    for (int i = 0; i < measured; i++) fib(35);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    int64_t ns = (t1.tv_sec - t0.tv_sec)*1000000000LL + (t1.tv_nsec - t0.tv_nsec);
+    printf("warm_ms: %.3f\n", (double)ns / measured / 1e6);
+    return 0;
+}
+C
+}
+
+write_c_parallel() {
+    cat >"$BUILD_DIR/parallel.c" <<'C'
+#include <stdio.h>
+#include <stdint.h>
+#include <pthread.h>
+static void *worker(void *arg) {
+    int64_t sum = 0;
+    for (int i = 0; i < 1000; i++) sum += i;
+    return (void *)sum;
+}
+int main(void) {
+    enum { N = 100 };
+    pthread_t t[N]; int64_t total = 0;
+    for (int i = 0; i < N; i++) pthread_create(&t[i], NULL, worker, NULL);
+    for (int i = 0; i < N; i++) { void *r; pthread_join(t[i], &r); total += (int64_t)r; }
+    printf("total = %ld\n", total); return 0;
+}
+C
+}
+
+write_go_fib() {
+    cat >"$BUILD_DIR/fib.go" <<'GO'
+package main
+import "fmt"
+func fib(n int64) int64 { if n < 2 { return n }; return fib(n-1) + fib(n-2) }
+func main() { fmt.Printf("fib(35) = %d\n", fib(35)) }
+GO
+}
+
+write_go_fib_warm() {
+    cat >"$BUILD_DIR/fib_warm.go" <<GO
+package main
+import ("fmt"; "time")
+func fib(n int64) int64 { if n < 2 { return n }; return fib(n-1) + fib(n-2) }
+func main() {
+    warmup, measured := ${WARM_IN_PROCESS}, ${RUNS}
+    for i := 0; i < warmup; i++ { fib(35) }
+    start := time.Now()
+    for i := 0; i < measured; i++ { fib(35) }
+    elapsed := time.Since(start)
+    fmt.Printf("warm_ms: %.3f\n", float64(elapsed.Nanoseconds())/float64(measured)/1e6)
+}
+GO
+}
+
+write_go_parallel() {
+    cat >"$BUILD_DIR/parallel.go" <<'GO'
+package main
+import ("fmt"; "sync")
+func worker(ch chan<- int64) { var s int64; for i := 0; i < 1000; i++ { s += int64(i) }; ch <- s }
+func main() {
+    ch := make(chan int64, 100); var wg sync.WaitGroup
+    for i := 0; i < 100; i++ { wg.Add(1); go func() { defer wg.Done(); worker(ch) }() }
+    go func() { wg.Wait(); close(ch) }()
+    var total int64; for v := range ch { total += v }
+    fmt.Printf("total = %d\n", total)
+}
+GO
+}
+
+write_python_fib() {
+    cat >"$BUILD_DIR/fib.py" <<'PY'
+import sys
+sys.setrecursionlimit(100000)
+def fib(n):
+    if n < 2: return n
+    return fib(n-1) + fib(n-2)
+print(f"fib(35) = {fib(35)}")
+PY
+}
+
+write_python_fib_warm() {
+    cat >"$BUILD_DIR/fib_warm.py" <<PY
+import sys, time
+sys.setrecursionlimit(100000)
+def fib(n):
+    if n < 2: return n
+    return fib(n-1) + fib(n-2)
+warmup, measured = ${WARM_IN_PROCESS}, ${RUNS}
+for _ in range(warmup): fib(35)
+t0 = time.monotonic_ns()
+for _ in range(measured): fib(35)
+elapsed = time.monotonic_ns() - t0
+print(f"warm_ms: {elapsed / measured / 1e6:.3f}")
+PY
+}
+
+write_python_parallel() {
+    cat >"$BUILD_DIR/parallel.py" <<'PY'
+import threading
+def worker(results, idx):
+    s = sum(range(1000))
+    results[idx] = s
+results = [0]*100
+threads = [threading.Thread(target=worker, args=(results,i)) for i in range(100)]
+for t in threads: t.start()
+for t in threads: t.join()
+print(f"total = {sum(results)}")
+PY
+}
+
+write_bun_fib() {
+    cat >"$BUILD_DIR/fib.js" <<'JS'
+function fib(n) { return n < 2 ? n : fib(n-1) + fib(n-2); }
+console.log(`fib(35) = ${fib(35)}`);
+JS
+}
+
+write_bun_fib_warm() {
+    cat >"$BUILD_DIR/fib_warm.js" <<JS
+function fib(n) { return n < 2 ? n : fib(n-1) + fib(n-2); }
+const warmup = ${WARM_IN_PROCESS}, measured = ${RUNS};
+for (let i = 0; i < warmup; i++) fib(35);
+const t0 = process.hrtime.bigint();
+for (let i = 0; i < measured; i++) fib(35);
+const elapsed = Number(process.hrtime.bigint() - t0);
+console.log(\`warm_ms: \${(elapsed / measured / 1e6).toFixed(3)}\`);
+JS
+}
+
+write_bun_parallel() {
+    cat >"$BUILD_DIR/parallel.js" <<'JS'
+const { Worker, isMainThread, parentPort } = require("worker_threads");
+if (!isMainThread) {
+  let s = 0; for (let i = 0; i < 1000; i++) s += i;
+  parentPort.postMessage(s);
+} else {
+  const N = 100;
+  let total = 0, done = 0;
+  for (let i = 0; i < N; i++) {
+    const w = new Worker(__filename);
+    w.on("message", v => { total += v; if (++done === N) console.log(`total = ${total}`); });
+  }
+}
+JS
+}
+
+write_java_fib() {
+    cat >"$BUILD_DIR/Fib.java" <<'JAVA'
+public class Fib {
+    static long fib(long n) { return n < 2 ? n : fib(n-1) + fib(n-2); }
+    public static void main(String[] a) { System.out.printf("fib(35) = %d%n", fib(35)); }
+}
+JAVA
+}
+
+write_java_fib_warm() {
+    cat >"$BUILD_DIR/FibWarm.java" <<JAVA
+public class FibWarm {
+    static long fib(long n) { return n < 2 ? n : fib(n-1) + fib(n-2); }
+    public static void main(String[] a) {
+        int warmup = ${WARM_IN_PROCESS}, measured = ${RUNS};
+        for (int i = 0; i < warmup; i++) fib(35);
+        long t0 = System.nanoTime();
+        for (int i = 0; i < measured; i++) fib(35);
+        long elapsed = System.nanoTime() - t0;
+        System.out.printf("warm_ms: %.3f%n", (double)elapsed / measured / 1e6);
+    }
+}
+JAVA
+}
+
+write_java_parallel() {
+    cat >"$BUILD_DIR/Parallel.java" <<'JAVA'
+import java.util.concurrent.*;
+import java.util.stream.*;
+public class Parallel {
+    static long worker() { long s = 0; for (int i = 0; i < 1000; i++) s += i; return s; }
+    public static void main(String[] a) throws Exception {
+        var pool = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
+        var futures = IntStream.range(0,100).mapToObj(i -> pool.submit(Parallel::worker)).toList();
+        long total = 0; for (var f : futures) total += f.get();
+        pool.shutdown();
+        System.out.printf("total = %d%n", total);
+    }
+}
+JAVA
+}
+
+write_erlang_fib() {
+    cat >"$BUILD_DIR/fib.erl" <<'ERL'
+-module(fib).
+-export([main/1]).
+fib(N) when N < 2 -> N;
+fib(N) -> fib(N-1) + fib(N-2).
+main(_) -> io:format("fib(35) = ~w~n", [fib(35)]).
+ERL
+}
+
+write_erlang_fib_warm() {
+    cat >"$BUILD_DIR/fib_warm.erl" <<ERL
+-module(fib_warm).
+-export([main/1]).
+fib(N) when N < 2 -> N;
+fib(N) -> fib(N-1) + fib(N-2).
+run_n(0, _) -> ok;
+run_n(N, F) -> F(), run_n(N-1, F).
+main(_) ->
+    Warmup = ${WARM_IN_PROCESS}, Measured = ${RUNS},
+    F = fun() -> fib(35) end,
+    run_n(Warmup, F),
+    T0 = erlang:monotonic_time(nanosecond),
+    run_n(Measured, F),
+    T1 = erlang:monotonic_time(nanosecond),
+    AvgMs = (T1 - T0) / Measured / 1000000.0,
+    io:format("warm_ms: ~.3f~n", [AvgMs]).
+ERL
+}
+
+write_erlang_parallel() {
+    cat >"$BUILD_DIR/parallel.erl" <<'ERL'
+-module(parallel).
+-export([main/1]).
+worker(Parent) -> S = lists:sum(lists:seq(0,999)), Parent ! {self(), S}.
+main(_) ->
+    Self = self(),
+    Pids = [spawn(fun() -> worker(Self) end) || _ <- lists:seq(1,100)],
+    Total = lists:foldl(fun(Pid, Acc) -> receive {Pid, V} -> Acc + V end end, 0, Pids),
+    io:format("total = ~w~n", [Total]).
+ERL
+}
+
+# ── write all sources ────────────────────────────────────────────────────
+
+write_simple_hello
+write_simple_fib
+write_simple_fib_warm
+write_simple_parallel
+write_c_hello
+write_c_fib
+write_c_fib_warm
+write_c_parallel
+write_go_fib
+write_go_fib_warm
+write_go_parallel
+write_python_fib
+write_python_fib_warm
+write_python_parallel
+write_bun_fib
+write_bun_fib_warm
+write_bun_parallel
+write_java_fib
+write_java_fib_warm
+write_java_parallel
+write_erlang_fib
+write_erlang_fib_warm
+write_erlang_parallel
+
+# ── compile what we can ──────────────────────────────────────────────────
+
+echo "=== Compiling workloads ==="
+COMPILE_FAIL=""
+
+# C
+if have gcc; then
+    gcc -O2 -o "$BUILD_DIR/hello_c" "$BUILD_DIR/hello.c"
+    gcc -O2 -o "$BUILD_DIR/fib_c" "$BUILD_DIR/fib.c"
+    gcc -O2 -o "$BUILD_DIR/fib_warm_c" "$BUILD_DIR/fib_warm.c"
+    gcc -O2 -pthread -o "$BUILD_DIR/parallel_c" "$BUILD_DIR/parallel.c"
+    echo "  [ok] C (gcc)"
+else echo "  [skip] C — gcc not found"; fi
+
+# Go
+if have go; then
+    (cd "$BUILD_DIR" && go build -o fib_go fib.go && go build -o fib_warm_go fib_warm.go && go build -o parallel_go parallel.go)
+    echo "  [ok] Go"
+else echo "  [skip] Go — go not found"; fi
+
+# Java
+if have javac; then
+    javac -d "$BUILD_DIR" "$BUILD_DIR/Fib.java" "$BUILD_DIR/FibWarm.java" "$BUILD_DIR/Parallel.java"
+    echo "  [ok] Java (javac)"
+else echo "  [skip] Java — javac not found"; fi
+
+# Erlang
+if have erlc; then
+    erlc -o "$BUILD_DIR" "$BUILD_DIR/fib.erl" "$BUILD_DIR/fib_warm.erl" "$BUILD_DIR/parallel.erl"
+    echo "  [ok] Erlang (erlc)"
+else echo "  [skip] Erlang — erlc not found"; fi
+
+# Simple native
+if [ -x "$SIMPLE_BINARY" ]; then
+    for _src in hello fib fib_warm parallel; do
+        _spl="$BUILD_DIR/${_src}.spl"
+        _out="$BUILD_DIR/${_src}_simple_native"
+        if [ -f "$_spl" ]; then
+            if "$SIMPLE_BINARY" compile "$_spl" --native -o "$_out" 2>/dev/null; then
+                : # ok
+            else
+                echo "  [FAIL] Simple native: $_spl"
+                COMPILE_FAIL="$COMPILE_FAIL native:$_src"
+            fi
+        fi
+    done
+    echo "  [ok] Simple (native)${COMPILE_FAIL:+ — failures:$COMPILE_FAIL}"
+else echo "  [skip] Simple — $SIMPLE_BINARY not found"; fi
+
+# Simple SMF
+COMPILE_FAIL_SMF=""
+if [ -x "$SIMPLE_BINARY" ]; then
+    for _src in hello fib fib_warm parallel; do
+        _spl="$BUILD_DIR/${_src}.spl"
+        _out="$BUILD_DIR/${_src}_simple.smf"
+        if [ -f "$_spl" ]; then
+            if "$SIMPLE_BINARY" compile "$_spl" -o "$_out" 2>/dev/null; then
+                : # ok
+            else
+                echo "  [FAIL] Simple SMF: $_spl"
+                COMPILE_FAIL_SMF="$COMPILE_FAIL_SMF smf:$_src"
+            fi
+        fi
+    done
+    echo "  [ok] Simple (SMF)${COMPILE_FAIL_SMF:+ — failures:$COMPILE_FAIL_SMF}"
+fi
+
+# ── report header ────────────────────────────────────────────────────────
+
+cat >"$REPORT_PATH" <<EOF
+# Cross-Language Performance Comparison
+
+**Date:** $(date +%Y-%m-%d)
+**Machine:** $(uname -m) / $(uname -s) $(uname -r)
+**CPU:** $(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs || sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "unknown")
+**Runs per measurement:** $RUNS | **Warmup (in-process):** $WARM_IN_PROCESS | **fib(N):** $FIB_N | **Workers:** $WORKERS
+
+> Size for AOT = binary bytes. For VM/interpreted = script bytes (runtime not included).
+> "Runtime dep" column shows runtime size where applicable.
+> Warm throughput measured IN-PROCESS (JIT runtimes reach steady state).
+EOF
+
+# ── 1. Size ──────────────────────────────────────────────────────────────
+
+echo "=== Measuring sizes ==="
+section "1. Binary / Script Size"
+row "Language" "Hello" "Fib" "Runtime dep" >>"$REPORT_PATH"
+sep
+
+measure_size() {
+    _lang="$1"; _hello="$2"; _fib="$3"; _runtime="$4"
+    _hs=$(bytes_of "$_hello"); _fs=$(bytes_of "$_fib")
+    if [ "$_hs" = "n/a" ]; then _hh="n/a"; else _hh=$(human_bytes "$_hs"); fi
+    if [ "$_fs" = "n/a" ]; then _fh="n/a"; else _fh=$(human_bytes "$_fs"); fi
+    row "$_lang" "$_hh" "$_fh" "$_runtime"
+}
+
+_simple_rt="n/a"
+if [ -x "$SIMPLE_BINARY" ]; then
+    _sb=$(bytes_of "$(readlink -f "$SIMPLE_BINARY")")
+    if [ "$_sb" != "n/a" ]; then _simple_rt=$(human_bytes "$_sb"); fi
+fi
+
+measure_size "Simple (interpreter)" "$BUILD_DIR/hello.spl" "$BUILD_DIR/fib.spl" "$_simple_rt"
+measure_size "Simple (SMF loader)" "$BUILD_DIR/hello_simple.smf" "$BUILD_DIR/fib_simple.smf" "$_simple_rt"
+measure_size "Simple (native)" "$BUILD_DIR/hello_simple_native" "$BUILD_DIR/fib_simple_native" "none"
+measure_size "C (gcc -O2)" "$BUILD_DIR/hello_c" "$BUILD_DIR/fib_c" "libc"
+have go && measure_size "Go" "$BUILD_DIR/fib_go" "$BUILD_DIR/fib_go" "none (static)"
+have python3 && measure_size "Python" "$BUILD_DIR/fib.py" "$BUILD_DIR/fib.py" "$(python3 -c 'import sys;print(sys.executable)' 2>/dev/null || echo 'n/a')"
+have bun && measure_size "Bun" "$BUILD_DIR/fib.js" "$BUILD_DIR/fib.js" "$(which bun 2>/dev/null || echo 'n/a')"
+have java && measure_size "Java" "$BUILD_DIR/Fib.class" "$BUILD_DIR/Fib.class" "JRE"
+have erl && measure_size "Erlang" "$BUILD_DIR/fib.beam" "$BUILD_DIR/fib.beam" "BEAM VM"
+
+# ── 2. Cold startup (hello world) ───────────────────────────────────────
+
+echo "=== Measuring cold startup ==="
+section "2. Cold Startup — hello world ($RUNS runs avg)"
+row "Language" "Avg (ms)" "Mode" "" "" >>"$REPORT_PATH"
+sep
+
+if [ -x "$SIMPLE_BINARY" ]; then
+    ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/hello.spl" "$RUNS")
+    row "Simple (interpreter)" "$ms" "interpret" "" ""
+fi
+if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/hello_simple.smf" ]; then
+    ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/hello_simple.smf" "$RUNS")
+    row "Simple (SMF loader)" "$ms" "smf" "" ""
+fi
+if [ -x "$BUILD_DIR/hello_simple_native" ]; then
+    ms=$(avg_ms "$BUILD_DIR/hello_simple_native" "$RUNS")
+    row "Simple (native)" "$ms" "native" "" ""
+fi
+if [ -x "$BUILD_DIR/hello_c" ]; then
+    ms=$(avg_ms "$BUILD_DIR/hello_c" "$RUNS")
+    row "C (gcc -O2)" "$ms" "native" "" ""
+fi
+if have go && [ -f "$BUILD_DIR/fib_go" ]; then
+    ms=$(avg_ms "$BUILD_DIR/fib_go" "$RUNS")
+    row "Go (compiled)" "$ms" "native" "" ""
+fi
+if have python3; then
+    ms=$(avg_ms "python3 -c 'print(\"Hello World\")'" "$RUNS")
+    row "Python" "$ms" "interpret" "" ""
+fi
+if have bun; then
+    ms=$(avg_ms "bun $BUILD_DIR/fib.js" "$RUNS")
+    row "Bun" "$ms" "JIT" "" ""
+fi
+if have java; then
+    ms=$(avg_ms "java -cp $BUILD_DIR Fib" "$RUNS")
+    row "Java" "$ms" "JIT (JVM)" "" ""
+fi
+if have erl; then
+    ms=$(avg_ms "erl -noshell -pa $BUILD_DIR -s fib main -s init stop" "$RUNS")
+    row "Erlang" "$ms" "BEAM VM" "" ""
+fi
+
+# ── 3. Warm throughput — fib(35) in-process ──────────────────────────────
+
+echo "=== Measuring warm throughput — fib($FIB_N) in-process ==="
+section "3. Warm Throughput — fib($FIB_N) (in-process: $WARM_IN_PROCESS warmup + $RUNS measured)"
+printf "| %-22s | %12s | %40s |\n" "Language" "Avg (ms)" "Notes" >>"$REPORT_PATH"
+printf "|%-24s|%14s|%42s|\n" "------------------------" "--------------" "------------------------------------------" >>"$REPORT_PATH"
+
+warm_row() {
+    printf "| %-22s | %12s | %40s |\n" "$1" "$2" "$3" >>"$REPORT_PATH"
+}
+
+if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/fib_warm.spl" ]; then
+    ms=$(extract_warm_ms "$SIMPLE_BINARY $BUILD_DIR/fib_warm.spl")
+    warm_row "Simple (interpreter)" "$ms" "tree-walk, no JIT yet"
+fi
+if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/fib_warm_simple.smf" ]; then
+    ms=$(extract_warm_ms "$SIMPLE_BINARY $BUILD_DIR/fib_warm_simple.smf")
+    warm_row "Simple (SMF loader)" "$ms" "bytecode dispatch"
+fi
+if [ -x "$BUILD_DIR/fib_warm_simple_native" ]; then
+    ms=$(extract_warm_ms "$BUILD_DIR/fib_warm_simple_native")
+    warm_row "Simple (native)" "$ms" "AOT via LLVM/Cranelift"
+fi
+if [ -x "$BUILD_DIR/fib_warm_c" ]; then
+    ms=$(extract_warm_ms "$BUILD_DIR/fib_warm_c")
+    warm_row "C (gcc -O2)" "$ms" "baseline AOT"
+fi
+if [ -x "$BUILD_DIR/fib_warm_go" ]; then
+    ms=$(extract_warm_ms "$BUILD_DIR/fib_warm_go")
+    warm_row "Go" "$ms" "SSA AOT"
+fi
+if have python3; then
+    ms=$(extract_warm_ms "python3 $BUILD_DIR/fib_warm.py")
+    warm_row "Python" "$ms" "CPython bytecode"
+fi
+if have bun; then
+    ms=$(extract_warm_ms "bun $BUILD_DIR/fib_warm.js")
+    warm_row "Bun" "$ms" "JavaScriptCore JIT (steady-state)"
+fi
+if have java; then
+    ms=$(extract_warm_ms "java -cp $BUILD_DIR FibWarm")
+    warm_row "Java" "$ms" "HotSpot C2 JIT (steady-state)"
+fi
+if have erl; then
+    ms=$(extract_warm_ms "erl -noshell -pa $BUILD_DIR -s fib_warm main -s init stop")
+    warm_row "Erlang" "$ms" "BEAM (single-process)"
+fi
+
+# ── 4. Parallel — spawn 100 workers ─────────────────────────────────────
+
+echo "=== Measuring parallel — $WORKERS workers ==="
+section "4. Parallel — spawn $WORKERS workers ($RUNS runs avg)"
+printf "| %-22s | %12s | %40s |\n" "Language" "Avg (ms)" "Concurrency model" >>"$REPORT_PATH"
+printf "|%-24s|%14s|%42s|\n" "------------------------" "--------------" "------------------------------------------" >>"$REPORT_PATH"
+
+par_row() {
+    printf "| %-22s | %12s | %40s |\n" "$1" "$2" "$3" >>"$REPORT_PATH"
+}
+
+if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/parallel.spl" ]; then
+    ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/parallel.spl" "$RUNS")
+    par_row "Simple (interpreter)" "$ms" "std thread_spawn"
+fi
+if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/parallel_simple.smf" ]; then
+    ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/parallel_simple.smf" "$RUNS")
+    par_row "Simple (SMF loader)" "$ms" "std thread_spawn (bytecode)"
+fi
+if [ -x "$BUILD_DIR/parallel_simple_native" ]; then
+    ms=$(avg_ms "$BUILD_DIR/parallel_simple_native" "$RUNS")
+    par_row "Simple (native)" "$ms" "std thread_spawn (native)"
+fi
+if [ -x "$BUILD_DIR/parallel_c" ]; then
+    ms=$(avg_ms "$BUILD_DIR/parallel_c" "$RUNS")
+    par_row "C (pthreads)" "$ms" "OS threads"
+fi
+if [ -x "$BUILD_DIR/parallel_go" ]; then
+    ms=$(avg_ms "$BUILD_DIR/parallel_go" "$RUNS")
+    par_row "Go" "$ms" "goroutines (M:N)"
+fi
+if have python3; then
+    ms=$(avg_ms "python3 $BUILD_DIR/parallel.py" "$RUNS")
+    par_row "Python" "$ms" "threading (GIL)"
+fi
+if have bun; then
+    ms=$(avg_ms "bun $BUILD_DIR/parallel.js" "$RUNS")
+    par_row "Bun" "$ms" "worker_threads"
+fi
+if have java; then
+    ms=$(avg_ms "java -cp $BUILD_DIR Parallel" "$RUNS")
+    par_row "Java" "$ms" "ThreadPool"
+fi
+if have erl; then
+    ms=$(avg_ms "erl -noshell -pa $BUILD_DIR -s parallel main -s init stop" "$RUNS")
+    par_row "Erlang" "$ms" "lightweight processes"
+fi
+
+# ── footer ───────────────────────────────────────────────────────────────
+
+cat >>"$REPORT_PATH" <<'EOF'
+
+## Size Definition
+
+| Category | What "size" means |
+|----------|-------------------|
+| AOT (C, Go, Simple native) | Binary bytes on disk — self-contained |
+| VM/bytecode (Java, Erlang, Simple SMF) | `.class`/`.beam`/`.smf` bytes — requires runtime |
+| Interpreted (Python, Bun, Simple interp.) | Script bytes — requires interpreter binary |
+
+## How to Optimize Simple Performance
+
+All optimization in **pure Simple** (`.spl`) — do not modify Rust seed or C runtime.
+
+1. **Interpreter → SMF loader** — `simple compile file.spl -o file.smf` for ~2-5x dispatch speedup
+2. **SMF → native** — `simple compile file.spl --native -o file` for AOT code approaching C-level numeric perf
+3. **Use `val` over `var`** — immutable bindings enable more aggressive constant folding
+4. **Avoid deep recursion** — rewrite as iteration where possible (tail-call not yet optimized)
+5. **Use typed collections** — `List<i64>` avoids boxing overhead vs untyped `List`
+6. **Profile with `std.testing.benchmark`** — warmup + outlier detection built in
+7. **`bin/simple build check`** — lint catches perf anti-patterns (mcp_perf_lint)
+EOF
+
+echo ""
+echo "=== Report written to: $REPORT_PATH ==="
+if [ -n "$COMPILE_FAIL$COMPILE_FAIL_SMF" ]; then
+    echo "WARNING: Some Simple compilations failed — check output above"
+fi
+echo ""

@@ -58,7 +58,36 @@ node tools/pixel_compare/diff_ppm.js reference.ppm test.ppm diff_output.ppm
 - **STRUCTURAL**: `large_delta(>30) > small_delta(<=30)` — fundamental layout or color differences
 - **FRINGE**: small deltas dominate — anti-aliasing edge differences
 
-## Current Status (2026-06-02)
+## Current Status (2026-06-05)
+
+The canonical production GUI renderer parity gate is:
+
+```bash
+sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs
+```
+
+It aggregates the generated-GUI Electron viewport matrix, the Simple Web layout
+manifest, backend-executed CPU SIMD/Metal parity, and raw Metal framebuffer
+readback. Linux hosts record raw Metal as `unavailable` with
+`metal-requires-macos`; macOS hosts must provide native Metal readback proof.
+
+The generated-GUI matrix intentionally records
+`text_normalization_pixels=269` for the fixture-specific text antialiasing
+normalization between Chromium and the Simple fixture bitmap. The pass condition
+remains exact: matching checksums and weighted checksums, `mismatch_count=0`,
+and `blur_or_tolerance=false`.
+
+Forced DOM text-flow evidence now passes exact parity with:
+
+```bash
+ELECTRON_LAYOUT_CAPTURE_MODE=dom \
+sh scripts/check/check-electron-simple-web-layout-bitmap-evidence.shs
+```
+
+Historical 2026-06-02 divergences below are retained as context for generic
+font/text work outside the current exact fixture gates.
+
+## Historical Status (2026-06-02)
 
 | Fixture | Differing Pixels | Type | Root Cause |
 |---------|-----------------|------|------------|

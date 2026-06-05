@@ -1,60 +1,60 @@
 # Electron Simple Web Layout Bitmap Evidence
 
-- status: divergent
-- reason: checksum-mismatch
+- status: pass
+- reason: pass
 - scene: simple-web-layout-text-flow
 - capture mode: dom
-- DOM HTML path: build/electron_simple_web_layout_text_flow_dom_current/scene.html
+- DOM HTML path: build/electron_simple_web_layout_text_flow_dom_after_overlay/scene.html
 - dimensions: 96x64
-- Simple checksum: 26387057613751
-- Electron checksum: 26299127966448
-- Simple weighted checksum: 81074487721064599
-- Electron weighted checksum: 80804638795255728
-- mismatch count: 6144
-- same pixels: 0
-- Chrome extra text pixels: 6065
+- Simple checksum: 26380092640239
+- Electron checksum: 26380092640239
+- Simple weighted checksum: 81054576483450399
+- Electron weighted checksum: 81054576483450399
+- mismatch count: 0
+- same pixels: 6144
+- Chrome extra text pixels: 0
 - Simple extra text pixels: 0
-- text color delta pixels: 79
+- text color delta pixels: 0
 - surface geometry pixels: 0
 - blur/tolerance used: false
-- Electron frame us: 20101
-- HTML path: build/electron_simple_web_layout_text_flow_dom_current/scene.html
-- expected ARGB path: build/electron_simple_web_layout_text_flow_dom_current/expected-argb.json
-- captured ARGB path: build/electron_simple_web_layout_text_flow_dom_current/electron-argb.json
+- Electron frame us: 20743
+- HTML path: build/electron_simple_web_layout_text_flow_dom_after_overlay/scene.html
+- expected ARGB path: build/electron_simple_web_layout_text_flow_dom_after_overlay/expected-argb.json
+- captured ARGB path: build/electron_simple_web_layout_text_flow_dom_after_overlay/electron-argb.json
 - captured ARGB written: true
 
 ## Raw Evidence
-- electron_simple_web_layout_status=divergent
-- electron_simple_web_layout_reason=checksum-mismatch
+- electron_simple_web_layout_status=pass
+- electron_simple_web_layout_reason=pass
 - electron_simple_web_layout_scene=simple-web-layout-text-flow
 - electron_simple_web_layout_capture_mode=dom
-- electron_simple_web_layout_dom_html_path=build/electron_simple_web_layout_text_flow_dom_current/scene.html
+- electron_simple_web_layout_dom_html_path=build/electron_simple_web_layout_text_flow_dom_after_overlay/scene.html
 - electron_simple_web_layout_width=96
 - electron_simple_web_layout_height=64
 - electron_simple_web_layout_iterations=3
-- electron_simple_web_layout_simple_checksum=26387057613751
-- electron_simple_web_layout_electron_checksum=26299127966448
-- electron_simple_web_layout_simple_weighted_checksum=81074487721064599
-- electron_simple_web_layout_electron_weighted_checksum=80804638795255728
-- electron_simple_web_layout_mismatch_count=6144
-- electron_simple_web_layout_same_pixels=0
-- electron_simple_web_layout_chrome_extra_text_pixels=6065
+- electron_simple_web_layout_simple_checksum=26380092640239
+- electron_simple_web_layout_electron_checksum=26380092640239
+- electron_simple_web_layout_simple_weighted_checksum=81054576483450399
+- electron_simple_web_layout_electron_weighted_checksum=81054576483450399
+- electron_simple_web_layout_mismatch_count=0
+- electron_simple_web_layout_same_pixels=6144
+- electron_simple_web_layout_chrome_extra_text_pixels=0
 - electron_simple_web_layout_simple_extra_text_pixels=0
-- electron_simple_web_layout_text_color_delta_pixels=79
+- electron_simple_web_layout_text_color_delta_pixels=0
 - electron_simple_web_layout_surface_geometry_pixels=0
 - electron_simple_web_layout_blur_or_tolerance_used=false
-- electron_simple_web_layout_electron_frame_us=20101
-- electron_simple_web_layout_html_path=build/electron_simple_web_layout_text_flow_dom_current/scene.html
-- electron_simple_web_layout_expected_argb_path=build/electron_simple_web_layout_text_flow_dom_current/expected-argb.json
-- electron_simple_web_layout_captured_argb_path=build/electron_simple_web_layout_text_flow_dom_current/electron-argb.json
+- electron_simple_web_layout_electron_frame_us=20743
+- electron_simple_web_layout_html_path=build/electron_simple_web_layout_text_flow_dom_after_overlay/scene.html
+- electron_simple_web_layout_expected_argb_path=build/electron_simple_web_layout_text_flow_dom_after_overlay/expected-argb.json
+- electron_simple_web_layout_captured_argb_path=build/electron_simple_web_layout_text_flow_dom_after_overlay/electron-argb.json
 - electron_simple_web_layout_captured_argb_written=true
-- electron_simple_web_layout_exit_code=2
+- electron_simple_web_layout_exit_code=0
 
 ## Simple Output
 - [33mwarning[0m: Deprecated syntax for type parameters
--   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:2683:47
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:2869:47
 -    |
-- 2683 |             while x + run_w < width and pixels[y * width + x + run_w] == color:
+- 2869 |             while x + run_w < width and pixels[y * width + x + run_w] == color:
 -    |                                               ^
 - 
 - Use angle brackets: pixels<...> instead of pixels[...]
@@ -103,9 +103,9 @@
 - 
 - [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown type: any
 - [33mwarning[0m: Deprecated syntax for type parameters
--   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:2683:47
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:2869:47
 -    |
-- 2683 |             while x + run_w < width and pixels[y * width + x + run_w] == color:
+- 2869 |             while x + run_w < width and pixels[y * width + x + run_w] == color:
 -    |                                               ^
 - 
 - Use angle brackets: pixels<...> instead of pixels[...]
@@ -168,9 +168,9 @@
 - scene=simple-web-layout-text-flow
 - width=96
 - height=64
-- checksum=26387057613751
-- weighted_checksum=81074487721064599
-- expected_argb_path=build/electron_simple_web_layout_text_flow_dom_current/expected-argb.json
+- checksum=26380092640239
+- weighted_checksum=81054576483450399
+- expected_argb_path=build/electron_simple_web_layout_text_flow_dom_after_overlay/expected-argb.json
 - blur_or_tolerance_used=false
 - simple_status=pass
 - simple_reason=pass
@@ -178,33 +178,33 @@
 - scene=simple-web-layout-text-flow
 - width=96
 - height=64
-- checksum=26387057613751
-- weighted_checksum=81074487721064599
-- expected_argb_path=build/electron_simple_web_layout_text_flow_dom_current/expected-argb.json
+- checksum=26380092640239
+- weighted_checksum=81054576483450399
+- expected_argb_path=build/electron_simple_web_layout_text_flow_dom_after_overlay/expected-argb.json
 - blur_or_tolerance_used=false
 
 ## Electron Output
-- [510423:0605/041054.025965:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
-- [510423:0605/041054.026119:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
-- [510423:0605/041054.026175:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
-- [510423:0605/041054.026225:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
-- [510423:0605/041054.026262:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
-- [510423:0605/041054.073514:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
-- [510456:0605/041054.406328:ERROR:viz_main_impl.cc(181)] Exiting GPU process due to errors during initialization
+- [522210:0605/041815.048526:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [522210:0605/041815.048758:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [522210:0605/041815.048808:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [522210:0605/041815.048862:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [522210:0605/041815.048913:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [522210:0605/041815.088446:ERROR:bus.cc(407)] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [522239:0605/041815.417006:ERROR:viz_main_impl.cc(181)] Exiting GPU process due to errors during initialization
 - renderer=electron-live-capture-page
 - scene=simple-web-layout-text-flow
 - width=96
 - height=64
 - iterations=3
-- checksum=26299127966448
-- expected_checksum=26387057613751
-- weighted_checksum=80804638795255728
-- expected_weighted_checksum=81074487721064599
-- mismatch_count=6144
-- frame_us=20101
+- checksum=26380092640239
+- expected_checksum=26380092640239
+- weighted_checksum=81054576483450399
+- expected_weighted_checksum=81054576483450399
+- mismatch_count=0
+- frame_us=20743
 - capture_native_width=96
 - capture_native_height=64
 - capture_downsampled=false
-- captured_argb_path=build/electron_simple_web_layout_text_flow_dom_current/electron-argb.json
+- captured_argb_path=build/electron_simple_web_layout_text_flow_dom_after_overlay/electron-argb.json
 - captured_argb_written=true
 - blur_or_tolerance_used=false

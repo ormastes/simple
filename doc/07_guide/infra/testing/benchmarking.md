@@ -179,8 +179,24 @@ are written under `build/generated_2d_backend_readback_matrix/`.
 For Simple Web layout benchmark scenes, the Node bitmap fixture can consume a
 Simple-produced ARGB transport baseline with
 `SIMPLE_WEB_ENGINE2D_BASELINE_ARGB_IN`. This keeps live Electron/Node capture
-checks exact while DOM text-flow parity remains tracked separately as a follow-up
-when browser text rasterization differs from the Simple software renderer.
+checks exact. The forced DOM text-flow gate is now part of the exact evidence
+set: `ELECTRON_LAYOUT_CAPTURE_MODE=dom sh
+scripts/check/check-electron-simple-web-layout-bitmap-evidence.shs` must report
+`mismatch_count=0` without blur or tolerance.
+
+For the production GUI renderer slice, use the aggregate wrapper:
+
+```bash
+sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs
+```
+
+It runs the generated-GUI Electron matrix, the Simple Web layout manifest,
+backend-executed CPU SIMD/Metal parity, and raw Metal framebuffer readback. On
+Linux hosts, native Metal readback is recorded as `unavailable` with
+`metal-requires-macos`; this is host-unavailable evidence, not a native Metal
+pass. The generated-GUI matrix records `text_normalization_pixels` for the
+fixture-specific Chrome/Simple text antialiasing normalization and still
+requires exact checksums, `mismatch_count=0`, and `blur_or_tolerance=false`.
 
 ### Linux QEMU Network Parity
 

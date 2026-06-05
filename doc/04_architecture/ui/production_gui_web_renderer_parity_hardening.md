@@ -109,4 +109,6 @@ by `scripts/check/check-electron-simple-web-layout-manifest-evidence.shs`.
 release evidence for this slice: Electron/Chrome viewport matrix, Electron
 CSS/layout manifest, backend-executed CPU SIMD/Metal parity, and raw Metal
 framebuffer readback. It is the single command to prove this renderer parity
-slice.
+slice. On Linux, raw Metal readback is explicit host-unavailable evidence
+(`metal-requires-macos`); on macOS, the same gate must carry native Metal
+readback proof.

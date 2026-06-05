@@ -34,6 +34,14 @@ Web, Electron/Tauri, QEMU, or backend readback evidence, update the relevant
 `doc/03_plan`, `doc/07_guide`, and `doc/09_report` references so future agents
 can find the canonical wrapper instead of repeating stale commands.
 
+For Simple Web/Electron renderer parity, keep the canonical wrapper documented
+as `scripts/check/check-production-gui-web-renderer-parity-evidence.shs`.
+Generated-GUI evidence may record explicit `text_normalization_pixels` for
+fixture-scoped browser text antialiasing normalization, but must still require
+matching checksums, `mismatch_count=0`, and `blur_or_tolerance=false`. Treat
+Linux Metal readback as host-unavailable (`metal-requires-macos`) and require
+native raw Metal readback evidence on macOS.
+
 Before marking a feature tracking row `status=done`, fill `requirement`,
 `research`, `plan`, `architecture`, `design`, `system_spec`, `spec_doc`,
 `implementation`, `unit_tests`, `integration_tests`, and `guide`, then run

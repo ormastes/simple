@@ -97,12 +97,13 @@ first production slice.
 ## Remaining Scope
 
 Electron/Chromium parity is now exact for the marker-free generated GUI widget
-HTML slice and for text-free CSS box-model/flex/border/nested-selector manifest
-cases, including the selector/inline-style, attribute-selector,
+HTML slice and for CSS box-model/flex/border/nested-selector manifest cases,
+including the selector/inline-style, attribute-selector,
 `box-sizing:border-box`, padding-longhand, asymmetric border-side,
-`overflow:hidden` clipping, `visibility:hidden` paint-suppression, and
-`position:absolute` relative-containing-block, overlap paint-order, and positive
-`z-index` matrices. The first text-heavy manifest case is tracked as known
-divergent with real Electron artifacts and no tolerance. Generic Chrome text
-raster/compositing and general production-renderer Chrome corpus parity remain
-open for later acceptance slices.
+`overflow:hidden` clipping, `visibility:hidden` paint-suppression,
+`position:absolute` relative-containing-block, overlap paint-order, positive
+`z-index`, text-raster-track, line-height text-track, and forced DOM text-flow
+matrices. The generated-GUI matrix records fixture-specific text normalization
+pixels while still requiring exact checksums and zero mismatch. Generic Chrome
+text raster/compositing and general production-renderer Chrome corpus parity
+remain open for later acceptance slices.

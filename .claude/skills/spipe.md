@@ -106,6 +106,25 @@ manifest; an AOP authz aspect enforces the security level). See
 [`doc/04_architecture/infra/sfm/simple_feature_module.md`](../../doc/04_architecture/infra/sfm/simple_feature_module.md)
 and [`doc/05_design/infra/sfm/simple_feature_module.md`](../../doc/05_design/infra/sfm/simple_feature_module.md).
 
+## Performance Checking & Cross-Language Comparison
+
+To verify correctness across execution modes and benchmark against other languages:
+
+- **Guide:** [`doc/07_guide/compiler/check_perf.md`](../../doc/07_guide/compiler/check_perf.md) — interpreter / SMF loader / native mode checks + cross-language perf matrix
+- **Harness:** `sh scripts/check/check-cross-language-perf.shs` — measures size, cold startup, warm throughput (fib35), and parallel spawn against bun, python, go, erlang, java, C
+- **TL;DR:** [`doc/07_guide/compiler/check_perf_tldr.md`](../../doc/07_guide/compiler/check_perf_tldr.md)
+
+Correctness quick-check across all modes:
+
+```bash
+for mode in interpreter smf native; do
+    bin/simple test path/to/spec.spl --mode=$mode
+done
+```
+
+Optimization must stay **pure Simple** (`.spl`) — do not modify Rust seed or C runtime.
+Mode escalation: interpreter (dev) → SMF (staging) → native (production).
+
 ## Run
 
 ```
