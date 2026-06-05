@@ -147,7 +147,80 @@ fn _co_count_bitcast(block: MirBlock) -> i64:
                 ()
     count
 
+fn _dbg_bump_counter(opt: CollectionOptimization):
+    opt.pure_queries_reused = opt.pure_queries_reused + 1
+
+fn _dbg_call_pure_queries(self: CollectionOptimization, blocks: [MirBlock]) -> [MirBlock]:
+    self.canonicalize_collection_pure_queries(blocks)
+
+fn _dbg_call_with_detect(self: CollectionOptimization, blocks: [MirBlock], func: MirFunction) -> [MirBlock]:
+    self.detector.detect_loops(func)
+    self.canonicalize_collection_pure_queries(blocks)
+
+fn _dbg_call_with_concat(self: CollectionOptimization, blocks: [MirBlock], func: MirFunction) -> [MirBlock]:
+    var optimized_blocks = colopt_optimize_concat_all_blocks(self, blocks, func)
+    optimized_blocks = self.canonicalize_collection_pure_queries(optimized_blocks)
+    optimized_blocks
+
 describe "MIR Collection Optimization":
+    it "DEBUG propagation through fn call":
+        var opt = create_collection_opt_pass()
+        _dbg_bump_counter(opt)
+        print("DBG after fn bump: {opt.pure_queries_reused}")
+        expect(opt.pure_queries_reused).to_equal(1)
+
+    it "DEBUG me method counter via pure query dedup":
+        val c1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("contains"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val c2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("contains"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val blk = _co_block([c1, c2])
+
+        var opt = create_collection_opt_pass()
+        val result = opt.canonicalize_collection_pure_queries([blk])
+        print("DBG direct me-method counter: {opt.pure_queries_reused}")
+        expect(opt.pure_queries_reused).to_equal(1)
+
+    it "DEBUG counter via collection_opt_optimize_function":
+        val c1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("contains"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val c2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("contains"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val func = _co_function([_co_block([c1, c2])])
+
+        var opt = create_collection_opt_pass()
+        val optimized = collection_opt_optimize_function(opt, func)
+        print("DBG via optimize_function counter: {opt.pure_queries_reused}")
+        expect(opt.pure_queries_reused).to_equal(1)
+
+    it "DEBUG counter via direct fn wrapper":
+        val c1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("contains"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val c2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("contains"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val blocks = [_co_block([c1, c2])]
+
+        var opt = create_collection_opt_pass()
+        val result = _dbg_call_pure_queries(opt, blocks)
+        print("DBG via fn wrapper counter: {opt.pure_queries_reused}")
+        expect(opt.pure_queries_reused).to_equal(1)
+
+    it "DEBUG counter after detect_loops":
+        val c1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("contains"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val c2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("contains"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val blocks = [_co_block([c1, c2])]
+        val func = _co_function([_co_block([c1, c2])])
+
+        var opt = create_collection_opt_pass()
+        val result = _dbg_call_with_detect(opt, blocks, func)
+        print("DBG after detect_loops counter: {opt.pure_queries_reused}")
+        expect(opt.pure_queries_reused).to_equal(1)
+
+    it "DEBUG counter after concat_all":
+        val c1 = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("contains"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val c2 = MirInst(kind: MirInstKind.Call(_co_lid(11), _co_func("contains"), [_co_copy(1), _co_copy(2)]), span: nil)
+        val blocks = [_co_block([c1, c2])]
+        val func = _co_function([_co_block([c1, c2])])
+
+        var opt = create_collection_opt_pass()
+        val result = _dbg_call_with_concat(opt, blocks, func)
+        print("DBG after concat_all counter: {opt.pure_queries_reused}")
+        expect(opt.pure_queries_reused).to_equal(1)
+
     it "treats set membership tests as pure hoistable collection queries":
         var opt = create_collection_opt_pass()
 
@@ -170,6 +243,9 @@ describe "MIR Collection Optimization":
 
         var opt = create_collection_opt_pass()
         val optimized = collection_opt_optimize_function(opt, func)
+        print("DEBUG counter after call: {opt.pure_queries_reused}")
+        opt.pure_queries_reused = 42
+        print("DEBUG counter after direct set: {opt.pure_queries_reused}")
         val block = optimized.blocks[0]
 
         expect(_co_count_named_call(block, "is_subset")).to_equal(1)

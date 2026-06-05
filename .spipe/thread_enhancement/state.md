@@ -30,3 +30,11 @@ dev-done
 ## Log
 - dev: Created state file with 7 acceptance criteria (type: feature).
 - dev: Added explicit green-thread API acceptance criterion after user requested OS-thread and green-thread support.
+- impl: Added cooperative green-thread module at `src/lib/nogc_async_mut/concurrent/green_thread.spl`.
+- impl: Added focused OS-thread plus green-thread spec at `test/01_unit/lib/nogc_async_mut/green_thread_spec.spl`.
+- verify: `SIMPLE_LIB=src bin/simple test test/01_unit/lib/nogc_async_mut/green_thread_spec.spl --mode=interpreter --clean --sequential --timeout 60` passed with 3 examples.
+- verify: `SIMPLE_LIB=src bin/simple test test/01_unit/lib/nogc_async_mut/thread_pool_spec.spl --mode=interpreter --clean --sequential --timeout 60` passed with 4 examples.
+- verify: `find doc/06_spec -name '*_spec.spl' | wc -l` printed `0`.
+- impl: Changed native C channel send to grow the ring buffer instead of silently dropping when the old 1024-slot capacity is reached.
+- impl: Added `test/01_unit/lib/nogc_async_mut/channel_native_overflow_spec.spl`.
+- verify: `SIMPLE_LIB=src bin/simple test test/01_unit/lib/nogc_async_mut/channel_native_overflow_spec.spl --mode=native --clean --force-rebuild --sequential --timeout 120` passed with 1 example.

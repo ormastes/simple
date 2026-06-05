@@ -1795,7 +1795,12 @@ pub fn module_prefix_from_path(file_path: &std::path::Path, source_root: &std::p
             }
         }
     }
-    parts.join("__")
+    let prefix = parts.join("__");
+    if prefix.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        format!("m_{}", prefix)
+    } else {
+        prefix
+    }
 }
 
 #[cfg(test)]

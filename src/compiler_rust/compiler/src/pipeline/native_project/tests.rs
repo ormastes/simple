@@ -266,6 +266,14 @@ fn test_module_prefix_from_path() {
         module_prefix_from_path(&PathBuf::from("/project/src/lib/common/text.spl"), &source_root),
         "lib__common__text"
     );
+
+    assert_eq!(
+        module_prefix_from_path(
+            &PathBuf::from("/project/test/01_unit/lib/nogc_async_mut/concurrent_wrappers_spec.spl"),
+            &PathBuf::from("/project/test")
+        ),
+        "m_01_unit__lib__nogc_async_mut__concurrent_wrappers_spec"
+    );
 }
 
 #[test]

@@ -2550,7 +2550,8 @@ int64_t rt_io_udp_recv_from(int64_t f, int64_t s) { (void)f; (void)s; return 0; 
 typedef struct {
     pthread_mutex_t lock;
     pthread_cond_t  not_empty;
-    int64_t         queue[RT_CHAN_QSIZE];
+    int64_t*        queue;
+    int             capacity;
     int             head, tail, count;
     int             closed, in_use;
 } RtChannel;
@@ -2565,6 +2566,13 @@ int64_t rt_channel_new(void) {
             RtChannel* ch = &rt_channels[i];
             pthread_mutex_init(&ch->lock, NULL);
             pthread_cond_init(&ch->not_empty, NULL);
+            ch->queue = (int64_t*)malloc(sizeof(int64_t) * RT_CHAN_QSIZE);
+            if (!ch->queue) {
+                pthread_cond_destroy(&ch->not_empty);
+                pthread_mutex_destroy(&ch->lock);
+                return -1;
+            }
+            ch->capacity = RT_CHAN_QSIZE;
             ch->head = ch->tail = ch->count = 0;
             ch->closed = 0; ch->in_use = 1;
             return (int64_t)i;
@@ -2578,12 +2586,27 @@ void rt_channel_send(int64_t id, int64_t value) {
     RtChannel* ch = &rt_channels[id];
     if (!ch->in_use || ch->closed) return;
     pthread_mutex_lock(&ch->lock);
-    if (ch->count < RT_CHAN_QSIZE) {
-        ch->queue[ch->tail] = value;
-        ch->tail = (ch->tail + 1) % RT_CHAN_QSIZE;
-        ch->count++;
-        pthread_cond_signal(&ch->not_empty);
+    if (ch->count == ch->capacity) {
+        int new_capacity = ch->capacity * 2;
+        int64_t* grown = (int64_t*)malloc(sizeof(int64_t) * new_capacity);
+        if (!grown) {
+            pthread_mutex_unlock(&ch->lock);
+            fprintf(stderr, "rt_channel_send: failed to grow channel buffer\n");
+            abort();
+        }
+        for (int i = 0; i < ch->count; i++) {
+            grown[i] = ch->queue[(ch->head + i) % ch->capacity];
+        }
+        free(ch->queue);
+        ch->queue = grown;
+        ch->capacity = new_capacity;
+        ch->head = 0;
+        ch->tail = ch->count;
     }
+    ch->queue[ch->tail] = value;
+    ch->tail = (ch->tail + 1) % ch->capacity;
+    ch->count++;
+    pthread_cond_signal(&ch->not_empty);
     pthread_mutex_unlock(&ch->lock);
 }
 
@@ -2597,7 +2620,7 @@ int64_t rt_channel_recv(int64_t id) {
     int64_t val = 0;
     if (ch->count > 0) {
         val = ch->queue[ch->head];
-        ch->head = (ch->head + 1) % RT_CHAN_QSIZE;
+        ch->head = (ch->head + 1) % ch->capacity;
         ch->count--;
     }
     pthread_mutex_unlock(&ch->lock);
@@ -2612,7 +2635,7 @@ int64_t rt_channel_try_recv(int64_t id) {
     int64_t val = 0;
     if (ch->count > 0) {
         val = ch->queue[ch->head];
-        ch->head = (ch->head + 1) % RT_CHAN_QSIZE;
+        ch->head = (ch->head + 1) % ch->capacity;
         ch->count--;
     }
     pthread_mutex_unlock(&ch->lock);

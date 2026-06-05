@@ -55,6 +55,7 @@ User constraints: memory-conscious (parallel agents crash tmux), pure Simple whe
 1. Add `pthread_attr_setstacksize` — configurable stack (default 512KB vs current 2-8MB default)
 2. Add `rt_pool_submit(closure_ptr) -> i64` — submit to pre-created worker pool
 3. Fix: `runtime_native.c` channel `send()` silently drops when buffer full (line ~2581)
+   - Status: native channel now grows beyond the old 1024-slot ring and is covered by `test/01_unit/lib/nogc_async_mut/channel_native_overflow_spec.spl` in native mode.
 
 **Simple Stdlib**:
 4. Fix `thread_pool.spl` — replace `thread_sleep(1)` poll loop with condvar-based blocking
@@ -241,6 +242,7 @@ Phase 3 — Tier 2 (8-12 weeks)
 ## Verification
 
 - **Tier 0**: Run `sh scripts/check/check-cross-language-perf.shs` — Simple parallel should drop to <9ms
+- **Native channel overflow**: `SIMPLE_LIB=src bin/simple test test/01_unit/lib/nogc_async_mut/channel_native_overflow_spec.spl --mode=native --clean --force-rebuild --sequential --timeout 120`
 - **Tier 1**: Spawn 10K green threads each sending to a channel, verify all results collected, measure total time
 - **Tier 2**: Run tight LCG loop in green thread, verify it yields within 10ms (preemption works)
 - All tiers: `bin/simple test` on thread/channel specs pass, LCG total = 107461963222 (matches C/Go)
