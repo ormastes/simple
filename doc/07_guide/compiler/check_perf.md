@@ -98,7 +98,9 @@ sh scripts/check/check-cross-language-perf.shs
 | **Size** | hello + fib source/binary | Deployment footprint |
 | **Cold startup** | `hello world` (20 runs avg) | Time-to-first-output |
 | **Warm throughput** | `fib(35)` recursive, in-process loop (10 warmup + 20 measured) | Steady-state single-thread perf (JIT reaches hotspot) |
-| **Parallel** | 100 workers summing 0..999 via channel (`channel_new`/`send`/`recv` from `std.concurrent.channel` — same semantic as Go's goroutine + chan). Simple's advantage is compile-time immutability: `val` constants captured by worker closures cannot be mutated (compiler rejects it), not a speed advantage. | Concurrency model overhead |
+| **Parallel** | 100 workers × LCG 100K iters via channel (`channel_new`/`channel_from_id`/`send`/`recv` from `std.concurrent.channel` — same semantic as Go's goroutine + chan). Workers pass channel id (not object) due to native struct-closure codegen limitation. | Concurrency model overhead |
+| **Parallel binary size** | Binary/script sizes for parallel workloads across languages | Deployment footprint for concurrent programs |
+| **Parallel peak RSS** | `/usr/bin/time -v` peak RSS with 100 workers, per-worker proxy | Memory cost per concurrent task (OS thread 8MB vs goroutine 2-8KB) |
 
 ### Languages compared
 
@@ -171,6 +173,39 @@ bin/simple test test/bench/my_bench_spec.spl     # BenchSuite in std.testing.ben
 # Full audit (binary size + startup + GPU backends)
 sh scripts/check/check-startup-size-performance-audit.shs
 ```
+
+## GUI Performance Benchmarks
+
+### GTK GUI Size & Speed Baseline
+
+```bash
+sh scripts/check/check-gtk-gui-size-speed-baseline.shs
+```
+
+Measures: frame time (us), binary size, cache hit rates, peak RSS, vector text determinism.
+Compares Simple web renderer vs GTK widget loop.
+
+### Startup & Size Audit
+
+```bash
+sh scripts/check/check-startup-size-performance-audit.shs
+```
+
+Measures: cold startup (20 runs avg), binary size, ELF sections, loaded library deps, peak RSS.
+Covers: hello world, TUI, mmap, TCP/UDP/HTTP/HTTPS, CUDA/OpenCL/ROCm backends.
+
+### Qt Size Baseline
+
+```bash
+sh scripts/check/check-qt-gui-size-baseline.shs
+```
+
+Measures: binary size only (Qt minimal widget vs Simple web artifact).
+
+### Known GUI perf gaps
+
+- **FPS measurement** — not yet implemented; scripts measure frame latency (us/iteration) not sustained FPS
+- **User interaction latency** — scripts test static scenes only, not event-driven UI response time
 
 ### Benchmark template (pure Simple)
 

@@ -14,9 +14,10 @@
 └──────────────┴──────────────┴───────────────────────┘
 
 Cross-language:  sh scripts/check/check-cross-language-perf.shs
+GUI baseline:    sh scripts/check/check-gtk-gui-size-speed-baseline.shs
+Size audit:      sh scripts/check/check-startup-size-performance-audit.shs
 Self-check:      bin/simple build check
 Bootstrap:       bin/simple build bootstrap
-Size audit:      sh scripts/check/check-startup-size-performance-audit.shs
 
 Optimize: val>var, iteration>recursion, typed List<T>, mode escalation.
 Guide:    doc/07_guide/compiler/check_perf.md
