@@ -46,6 +46,30 @@ tests, generated `doc/06_spec/...` must read like a scenario manual:
 Run `bin/simple spipe-docgen <spec> --output doc/06_spec` and revise the spec
 until the generated manual is usable without opening the source.
 
+## Equality is not correctness (false-green guard)
+
+A parity/equality assertion (`expect(a).to_equal(b)`, "backend A matches backend
+B", "output == reference") passes whenever both sides are equal — **including
+when both are empty, both are wrong in the same way, or both come from the same
+code path.** Equality alone never proves the values are *right*.
+
+When the two sides share the code you just changed, or one side can silently fall
+back to mirroring the other, pair the equality check with an **absolute oracle**:
+
+- a known fixed point with a known value (filled shape center == draw color; a
+  far/background pixel == background; a counter == an independently computed total);
+- proof the producer actually ran (e.g. a GPU `gpu_frame_complete`/hit-counter
+  flag, not just "no error"), so a no-op fallback can't pass as success;
+- two *independently produced* artifacts, never one value compared to itself.
+
+This area of the codebase has a documented false-green history (software-vs-itself
+"GPU parity", scalar paths reporting `has_neon` without running NEON, all-black
+buffers matching all-black). See
+`doc/07_guide/ui/engine2d_cpu_metal_bit_parity.md` ("MATCH ≠ correct"). When the
+test runner can't execute the `it` blocks (e.g. it segfaults importing a heavy
+module graph), run the same assertions through a `bin/simple run …` harness and
+keep the absolute oracle in it — don't downgrade to "files load".
+
 ## Template
 
 ```

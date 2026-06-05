@@ -56,28 +56,58 @@ spec only compares CPU-vs-CPU paths, so neither regresses. The web/Chromium
 parity gates do not render gradients (the HTML layout renderer has no gradient
 path), so they are unaffected.
 
-## What is and is not bit-exact (measured)
+## Canonical math: primitive rasterization (line / circle / rounded_rect / triangle)
 
-The deterministic opaque ops are bit-exact CPU↔Metal on genuine GPU readback and
-are what the gate enforces:
+The primitive ops once used *different algorithms* on each backend (CPU
+Bresenham/midpoint vs GPU per-pixel/distance-field), diverging by 24/92/532
+pixels on a 32×32 scene, and `draw_triangle_filled` was never GPU-dispatched at
+all. They are now all bit-exact on genuine GPU readback. The rule that makes this
+possible: **the canonical algorithm must be expressible per-pixel so the GPU can
+run it, and the CPU follows the same rule** (the gradient integer-lerp pattern,
+generalized).
 
-| op             | result  | notes |
-|----------------|---------|-------|
-| clear          | MATCH   | byte write |
-| draw_rect_filled | MATCH | byte write |
-| draw_rect (outline) | MATCH | byte write |
-| draw_gradient_rect | MATCH | after the integer-lerp fix above |
+- **Filled shapes** get a per-pixel inclusion test, which is both clean and the
+  natural GPU form:
+  - `circle_filled`: `dx² + dy² ≤ r²`. The CPU emits it as one `isqrt(r² - dy²)`
+    span per row, so it stays a fast hline fill yet matches the GPU pixel-for-pixel.
+  - `triangle`: integer barycentric (edge-function / 2× area); inside when all
+    three weights share the sign of the determinant. GPU dispatch is now enabled
+    (`_dispatch_metal_triangle`), so it is no longer a CPU-mirror tautology.
+- **Thin shapes keep the higher-quality CPU algorithm (Bresenham / midpoint) and
+  the GPU reproduces it by recurrence-replay** — do *not* swap them for a
+  per-pixel distance field, which gaps at shallow line angles and at circle
+  diagonals (that would trade quality for parity). Each GPU thread replays the
+  integer recurrence to *its* step and writes that step's pixel(s):
+  - `line`: thread `t` replays `t` iterations of the `sw_bresenham` error loop
+    (1D dispatch, `steps+1` threads); thickness offsets translate the whole line.
+  - `circle` outline: thread `i` replays `i` midpoint iterations and emits the 8
+    symmetric pixels (1D dispatch, `r+1` threads, extras self-cull on `px < py`).
+  - `rounded_rect`: the MSL kernel was a *filled interior* test — a real shape
+    bug vs the CPU outline. It now draws the outline: straight edges plus the
+    four midpoint corner arcs replayed to match `sw_corner_arc` (1D dispatch,
+    `max(w,h)` threads).
 
-The primitive-rasterization ops use *different algorithms* on CPU (Bresenham /
-midpoint) and on the Metal GPU (per-pixel / distance-field), so they are not
-bit-exact and are **not** claimed by the gate (measured on a 32×32 scene):
+Replay is O(extent) per thread, but these primitives are small and are not the
+fill-rate bottleneck (filled/blit/gradient stay O(1) per pixel), so the cost is
+not a concern. The CPU triangle did move from O(height) scanline to O(bbox-area)
+barycentric — negligible for UI-sized triangles, noticeable for very large ones.
 
-| op              | CPU↔Metal | mismatches | note |
-|-----------------|-----------|------------|------|
-| draw_line       | DIVERGE   | 24/1024    | Bresenham vs GPU per-pixel line |
-| draw_circle(+filled) | DIVERGE | 92/1024 | midpoint vs GPU distance check |
-| draw_rounded_rect | DIVERGE | 532/1024  | different corner rasterization |
-| draw_triangle_filled | n/a   | —          | Metal does not GPU-dispatch it (`gpu_frame_complete=false`); any "match" is a CPU-mirror tautology, so it is excluded |
+## What is bit-exact (measured)
 
-Aligning these is tracked in
+All gate scenes are bit-exact CPU↔Metal on genuine GPU readback
+(`gpu_frame_complete=true`, `mismatches=0/1024`): `clear`, `draw_rect_filled`,
+`draw_rect` (outline), `draw_gradient_rect`, `draw_line`, `draw_circle`
+(+filled), `draw_rounded_rect`, `draw_triangle_filled`.
+
+### False-green guard: MATCH ≠ correct
+
+Because the harness clears-then-draws, an op that renders *nothing* (or the same
+wrong shape on both backends) still yields two equal buffers and prints `MATCH` —
+indistinguishable from all-black-vs-all-black. Equality alone is not proof. When
+a primitive's algorithm changes on **both** sides at once (here `circle_filled`
+and `triangle`), also run an *absolute* check: a filled shape's center/centroid
+must equal the draw color and a far pixel must equal the background, on both the
+CpuBackend and the MetalBackend. Only then is `MATCH` correct-vs-correct.
+
+Resolution and the (pre-existing, separate) CUDA cross-backend note are tracked in
 `doc/08_tracking/bug/engine2d_cpu_metal_primitive_raster_divergence_2026-06-03.md`.
