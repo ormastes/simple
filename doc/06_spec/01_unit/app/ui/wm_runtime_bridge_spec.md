@@ -79,15 +79,20 @@ expect(command.app_id).to_equal("demo.app")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val drag = host_wm_pointer_runtime_command(_scene(), _taskbar(), 90, 125, "left", "down", 1000, "09:41", 2)
+val translation = host_wm_pointer_runtime_translation(_scene(), _taskbar(), 90, 125, "left", "down", 1000, "09:41", 2, "gpu").translation
 val icon_wire = host_wm_pointer_runtime_wire(_scene(), _taskbar(), 780, 8, "left", "down", 1000, "09:41", 2)
 
 expect(drag.kind).to_equal("window_drag_begin")
 expect(drag.target_id).to_equal("surf2")
+expect(translation.component_kind).to_equal("window")
+expect(translation.backend_target).to_equal("gpu")
+expect(translation.local_x).to_equal(10)
+expect(translation.local_y).to_equal(5)
 expect(icon_wire).to_contain("kind=command_lane_icon")
 expect(icon_wire).to_contain("target=right_icon_1")
 ```
@@ -118,7 +123,7 @@ expect(command.handled).to_equal(false)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -131,6 +136,9 @@ expect(launched.launched_apps[0]).to_equal("browser")
 expect(focused.focused_window_id).to_equal("win1")
 expect(marker).to_contain("[host-wm] loop-step command=window_drag_begin")
 expect(marker).to_contain("target=surf2")
+expect(marker).to_contain("component=window")
+expect(marker).to_contain("local=10,5")
+expect(marker).to_contain("backend=cpu")
 ```
 
 </details>

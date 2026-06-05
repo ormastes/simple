@@ -9,6 +9,7 @@
 #include "runtime_memtrack.h"
 
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 
 /* ================================================================
@@ -203,6 +204,134 @@ bool spl_thread_join(spl_thread_handle handle) {
     free_handle(handle);
     return (result == WAIT_OBJECT_0);
 #endif
+}
+
+/* ================================================================
+ * rt_thread_* — Isolated thread API (native codegen)
+ *
+ * Cranelift `Any` = (type_tag: i64, value: i64).
+ * For closures, value is a heap pointer where [0] = fn_ptr.
+ * The closure calling convention is fn_ptr(closure_ptr).
+ * ================================================================ */
+
+typedef int64_t (*rt_closure_fn_t)(int64_t);
+
+typedef struct {
+    rt_closure_fn_t  entry;
+    int64_t          closure_ptr;
+    int64_t          result;
+    int              done;
+#ifdef SPL_THREAD_PTHREAD
+    pthread_t        thread;
+#else
+    HANDLE           thread;
+#endif
+} RtThreadData;
+
+static void* rt_isolated_wrapper(void* raw) {
+    RtThreadData* td = (RtThreadData*)raw;
+    fprintf(stderr, "[rt_wrapper] calling fn=0x%lx(closure=0x%lx)\n",
+            (unsigned long)(intptr_t)td->entry, (unsigned long)td->closure_ptr);
+    td->result = td->entry(td->closure_ptr);
+    fprintf(stderr, "[rt_wrapper] result=%ld\n", td->result);
+    td->done = 1;
+    return NULL;
+}
+
+#ifdef SPL_THREAD_WINDOWS
+static DWORD WINAPI rt_isolated_wrapper_win(LPVOID raw) {
+    RtThreadData* td = (RtThreadData*)raw;
+    td->result = td->entry(td->closure_ptr);
+    td->done = 1;
+    return 0;
+}
+#endif
+
+int64_t __attribute__((noinline,optimize("O0"))) rt_thread_spawn_isolated(int64_t arg0, int64_t arg1) {
+    fprintf(stderr, "[rt_spawn] arg0=0x%lx arg1=0x%lx\n", (unsigned long)arg0, (unsigned long)arg1);
+    fflush(stderr);
+    int64_t closure_ptr = (arg1 != 0) ? arg1 : arg0;
+    fprintf(stderr, "[rt_spawn] using closure_ptr=0x%lx\n", (unsigned long)closure_ptr);
+    fflush(stderr);
+    rt_closure_fn_t fn_ptr = *(rt_closure_fn_t*)(intptr_t)closure_ptr;
+    fprintf(stderr, "[rt_spawn] fn_ptr=0x%lx\n", (unsigned long)(intptr_t)fn_ptr);
+    fflush(stderr);
+    RtThreadData* td = (RtThreadData*)SPL_MALLOC(sizeof(RtThreadData), "rt_thread");
+    if (!td) return 0;
+    td->entry       = fn_ptr;
+    td->closure_ptr = closure_ptr;
+    td->result      = 0;
+    td->done        = 0;
+
+#ifdef SPL_THREAD_PTHREAD
+    if (pthread_create(&td->thread, NULL, rt_isolated_wrapper, td) != 0) {
+        SPL_FREE(td);
+        return 0;
+    }
+#else
+    td->thread = CreateThread(NULL, 0, rt_isolated_wrapper_win, td, 0, NULL);
+    if (td->thread == NULL) {
+        SPL_FREE(td);
+        return 0;
+    }
+#endif
+    return alloc_handle(HANDLE_THREAD, td);
+}
+
+int64_t rt_thread_spawn_isolated2(int64_t fn_ptr, int64_t data1, int64_t data2) {
+    (void)data2;
+    return rt_thread_spawn_isolated(fn_ptr, data1);
+}
+
+int64_t rt_thread_join(int64_t handle) {
+    RtThreadData* td = (RtThreadData*)get_handle(handle, HANDLE_THREAD);
+    if (!td) return 0;
+#ifdef SPL_THREAD_PTHREAD
+    pthread_join(td->thread, NULL);
+#else
+    WaitForSingleObject(td->thread, INFINITE);
+    CloseHandle(td->thread);
+#endif
+    int64_t result = td->result;
+    SPL_FREE(td);
+    free_handle(handle);
+    return result;
+}
+
+int64_t rt_thread_is_done(int64_t handle) {
+    RtThreadData* td = (RtThreadData*)get_handle(handle, HANDLE_THREAD);
+    if (!td) return 1;
+    return td->done ? 1 : 0;
+}
+
+int64_t rt_thread_id(int64_t handle) {
+    RtThreadData* td = (RtThreadData*)get_handle(handle, HANDLE_THREAD);
+    if (!td) return 0;
+#ifdef SPL_THREAD_PTHREAD
+    return (int64_t)(intptr_t)td->thread;
+#else
+    return (int64_t)GetThreadId(td->thread);
+#endif
+}
+
+void rt_thread_free(int64_t handle) {
+    RtThreadData* td = (RtThreadData*)get_handle(handle, HANDLE_THREAD);
+    if (!td) return;
+#ifdef SPL_THREAD_PTHREAD
+    pthread_detach(td->thread);
+#else
+    CloseHandle(td->thread);
+#endif
+    SPL_FREE(td);
+    free_handle(handle);
+}
+
+void rt_thread_sleep(int64_t millis) {
+    spl_thread_sleep(millis);
+}
+
+void rt_thread_yield(void) {
+    spl_thread_yield();
 }
 
 bool spl_thread_detach(spl_thread_handle handle) {

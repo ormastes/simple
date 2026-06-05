@@ -1,178 +1,310 @@
 <!-- codex-architecture -->
-# Simple GUI Stack Architecture
+# Simple UI, GUI, Web, and 2D Stack Architecture
 
-Status: draft-v1 (2026-05-28)
-Owners: `src/os/gui`, `src/os/desktop`, `src/os/compositor`, `src/app/ui.web`, `src/app/ui.electron`, `src/lib/gc_async_mut/gpu/engine2d`
+Status: draft-v3 (2026-06-05)
+Owners: `src/app/ui.web`, `src/app/ui.electron`, `src/lib/common/ui`,
+`src/lib/gc_async_mut/gpu/browser_engine`,
+`src/lib/gc_async_mut/gpu/engine2d`, `src/lib/nogc_sync_mut/gpu/engine2d`
+
 Related:
-- `doc/04_architecture/compiler/graphics/gui_layer_contract.md`
-- `doc/04_architecture/ml/compositor_gpu_architecture.md`
 - `doc/04_architecture/ui/ui_web_protocol.md`
-- `doc/06_spec/runtime/rt_gui_glass_contract.md`
+- `doc/04_architecture/ui/engine_2d.md`
+- `doc/04_architecture/compiler/graphics/accelerated_shared_ui_backend_architecture.md`
+- `doc/04_architecture/compiler/graphics/gui_layer_contract.md`
+- `doc/05_design/compiler/graphics/accelerated_shared_ui_backend_architecture.md`
 
 ## Purpose
 
-This document records the top-level architecture for Simple GUI. The existing
-documents lock the compositor and Engine2D method surfaces, and specify the
-`ui.web` wire protocol, but they do not describe the whole product stack in one
-place. This document fills that gap.
+This document is the canonical stack-level architecture for Simple UI surfaces:
+TUI, GUI, web, host wrappers, render IR, Engine2D, and accelerated draw
+execution. It records the next refactoring direction from the current renderer
+shape: keep UI semantics and event ownership in Simple, introduce a typed
+render/draw IR boundary, and allow a render optimization plugin to accelerate
+draw batches without taking over GUI policy.
 
-## Corrected Stack
+## Target Stack
 
-The proposed direction is close, but the layers should not be read as one
-strict linear chain where Tauri or Electron sit under the Simple web renderer.
-Tauri, Electron, a browser, and hosted native window backends are shell adapters
-or host surfaces. The Simple web renderer is a Simple-owned renderer/protocol
-client that can run inside those shells.
-
-```
-Simple app / GUI model
-  src/os/gui
-  src/os/userlib/window*.spl
-  src/os/desktop
-        |
-        v
-Window manager / desktop shell
-  host-backed mode: native host windows and event loop
-  SimpleOS-backed mode: kernel/driver/framebuffer/VirtIO-GPU surfaces
-        |
-        v
-Compositor contract
-  src/os/compositor/display_backend.spl
-  src/os/compositor/input_backend.spl
-        |
-        +-----------------------------+
-        |                             |
-        v                             v
-Host/web shell adapters          SimpleOS display backends
-  src/app/ui.web                   framebuffer
-  src/app/ui.electron              VirtIO-GPU
-  tools/tauri-shell                baremetal input
-  tools/electron-shell
-        |
-        v
-Simple web renderer / browser-engine path
-  src/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer.spl
-  src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_renderer.spl
-        |
-        v
-Simple 2D renderer / Engine2D
-  src/lib/gc_async_mut/gpu/engine2d
-  src/lib/nogc_sync_mut/gpu/engine2d
-        |
-        v
-Backend execution targets
-  CPU / SIMD
-  framebuffer
-  VirtIO-GPU
-  WebGPU
-  Vulkan
-  Metal
-  CUDA
-  ROCm
-```
-
-Short form:
+The stack is not a strict "Electron/Tauri under Simple" chain. Tauri,
+Electron, Chrome, browser windows, and native host windows are shells. They
+transport pixels, patches, input, and host commands around a Simple-owned UI
+and renderer contract.
 
 ```
-Simple GUI
-  -> window manager
-     -> host-backed shell adapters: browser | Tauri | Electron | native host
-     -> SimpleOS-backed display: framebuffer | VirtIO-GPU | baremetal input
-  -> compositor contract
-  -> optional Simple web renderer
-  -> Simple 2D renderer / Engine2D
-  -> CPU | WebGPU | Vulkan | Metal | CUDA | ROCm | framebuffer
+Simple code
+  |
+  v
+Simple UI API
+  |-------------------------------|
+  v                               v
+Simple TUI                    Simple GUI API
+                                  |
+                                  v
+                         Pure Simple GUI event handler
+                         event callback ids, focus,
+                         command routing, async dispatch
+                                  |
+                                  v
+                         Pure Simple GUI AST layer
+                         widgets, layout intent,
+                         style intent, accessibility
+                                  |
+                                  v
+                         Simple Web API / adapter
+                         snapshots, patches, commands,
+                         host-safe transport
+                                  |
+             -------------------------------------------
+             |                                         |
+             v                                         v
+      Optional HTML text/parser path             Direct typed render path
+      html-text -> html parser -> html-ast       GUI AST -> WebRender IR
+      source=html_ast, css identity             source=gui_ast, style rev
+             |                                         |
+             --------------------+--------------------|
+                                  v
+                         Render IR transfer
+                         style, surfaces, text runs,
+                         images, dirty regions,
+                         screen config, callback ids
+                                  |
+                                  v
+                              Draw IR
+                         single/composed batches,
+                         window/pane composition,
+                         callback id locality,
+                         source/style provenance
+                                  |
+                                  v
+                           Simple 2D API
+                                  |
+                                  v
+                    Render Optimization Plugin
+                    capability probe, cost model,
+                    batch selection, cache keys,
+                    fallback reason reporting
+                                  |
+             -------------------------------------------
+             |                    |                    |
+             v                    v                    v
+      CPU/SIMD backend     GPU backend plugin      Host wrapper surface
+      mandatory oracle     OpenCL/CUDA/HIP/        Tauri/Electron/
+                           Vulkan/Metal/WebGPU     Chrome/browser/native
+             |                    |                    |
+             ---------------- shared Engine2D API -----|
+                                  |
+                                  v
+                         Draw processing
+                         raster, glyph masks,
+                         gradients, alpha blend,
+                         compositing, scroll/copy
+                                  |
+                                  v
+                         Primitive draw layer
+                         rects, images, text,
+                         paths, framebuffer writes
+                                  |
+                                  v
+                         Framebuffer / texture
+                                  |
+                                  v
+                         Present to host window
 ```
 
-## Layer Responsibilities
+Event and redraw flow:
 
-### Simple GUI Model
+```
+Host window / input
+  |
+  v
+event callback id
+  |
+  v
+Pure Simple GUI event dispatcher
+  |
+  v
+Simple CPU / async task state update
+  |
+  v
+changed GUI AST + dirty region truth
+  |
+  v
+WebRender IR / Draw IR batch
+  |
+  v
+Render Optimization Plugin
+  |
+  v
+CPU or GPU draw execution
+```
 
-`src/os/gui` owns widget-level rendering helpers, input event forms, shapes, and
-shortcuts. `src/os/userlib/window*.spl` exposes the userland window API. This
-layer must describe UI and window intent, not host process details.
+## Ownership Rules
 
-### Window Manager and Desktop Shell
+Simple owns:
 
-`src/os/desktop` owns desktop shell state such as taskbar, dock, app switcher,
-z-order, app manifests, and shell process integration. This is where multiple
-app windows become a desktop.
+- widget tree and GUI AST;
+- event callback ids, focus, command routing, and state transitions;
+- layout policy and accessibility state;
+- dirty-region truth and cache invalidation decisions;
+- typed `WebRender IR` and `Draw IR` contracts;
+- CPU fallback behavior and conformance tests.
 
-The window manager can run in two broad modes:
+The render optimization plugin owns:
 
-- Host-backed: uses host OS windows, a browser/webview, Electron, Tauri, or a
-  native hosted backend for display and input.
-- SimpleOS-backed: uses SimpleOS display/input paths such as framebuffer,
-  VirtIO-GPU, PS/2 input, and baremetal shell code.
+- capability probing and backend selection;
+- cost estimation for CPU versus GPU execution;
+- draw-batch compilation or kernel selection;
+- execution, synchronization, and readback;
+- explicit fallback reports when a preferred backend cannot run.
 
-### Compositor Contract
+Shell wrappers own:
 
-`src/os/compositor/display_backend.spl` and
-`src/os/compositor/input_backend.spl` define the stable backend contract. This
-contract is the architecture boundary between GUI/window state and concrete
-display/input mechanisms.
+- process launch, window creation, webview/browser embedding, and host IPC;
+- forwarding input to Simple callback ids;
+- presenting textures, framebuffers, or browser patches supplied by Simple;
+- host-native commands only through the Simple UI protocol.
 
-Existing implementations include framebuffer/GPU/host/browser/Engine2D-backed
-compositor paths. The locked method surface is documented in
-`doc/04_architecture/compiler/graphics/gui_layer_contract.md`.
+## Boundaries
 
-### Host and Web Shell Adapters
+### Simple UI and TUI
 
-`src/app/ui.web` is a server-side Simple runtime surface. It owns session,
-snapshot, patch, taskbar, and window command protocol state. Browser, SimpleWeb,
-Electron, and Tauri shells are thin adapters that render patches, forward input,
-and execute host-native window commands when allowed.
+`Simple UI API` is the common entry point. The TUI path may render directly to
+terminal surfaces, but it should share command names, focus semantics, and event
+ids with GUI where practical. TUI code must not depend on GUI wrappers or GPU
+availability.
 
-Electron and Tauri are therefore not the core renderer. They are packaging and
-host-integration shells around the Simple-owned UI protocol and renderer path.
+### Simple GUI API
 
-### Simple Web Renderer
+The GUI API expresses UI intent. It should not call Electron, Tauri, Chrome,
+CUDA, Metal, Vulkan, or OpenCL APIs directly. GUI logic remains pure Simple
+unless an optimization plugin is invoked through a typed backend contract.
 
-The Simple web renderer path lives under
-`src/lib/gc_async_mut/gpu/browser_engine`. It turns browser/web content or web
-fixtures into renderable Simple surfaces. It can feed host-backed shells or test
-rendering paths, but it should not own application state or desktop policy.
+### Simple Web API
 
-### Simple 2D Renderer / Engine2D
+`src/app/ui.web` is the host-safe transport and web adapter boundary. It owns
+snapshots, patches, commands, taskbar/window messages, and session envelopes.
+It may accept HTML text for compatibility, but the preferred future path is a
+typed GUI AST to WebRender IR transfer that avoids string parsing on hot redraw
+paths.
 
-Engine2D is the shared 2D drawing execution layer. It provides CPU/software and
-GPU-capable backends and is consumed by compositor and graphics paths. The
-current architecture has both GC/async and no-GC/sync engine paths; the OS tier
-is the boundary that may select between them.
+### Render IR and Draw IR
 
-Backend families include CPU/SIMD, framebuffer, VirtIO-GPU, WebGPU, Vulkan,
-Metal, CUDA, and ROCm. Capability detection and fallback are required; GPU
-availability must never be assumed by GUI-level code.
+`WebRender IR` records renderable UI facts: style items, surfaces, text runs,
+images, dirty regions, screen config, and event callback ids. `Draw IR` lowers
+that into execution batches: primitive operations, composition grouping,
+callback locality, source/style provenance, and CPU/GPU placement hints.
 
-## Architectural Rules
+Draw IR consumers must not infer layout or style from raw HTML/CSS. Conversion
+layers resolve GUI AST style intent or HTML AST/CSS information before emitting
+Draw IR commands. The batch keeps the source identity (`manual`, `gui_ast`,
+`html_ast`, or `wm_scene`), HTML tag/node identity when present, CSS selector or
+class when present, and a style revision. That metadata is for diagnostics,
+cache invalidation, replay, and GPU batch grouping; primitive commands remain
+the execution truth.
 
-1. GUI and desktop code express UI/window intent; they do not call Electron,
-   Tauri, CUDA, Metal, or browser APIs directly.
-2. Shell adapters are replaceable host surfaces. They must speak Simple-owned
-   protocols and route host feedback back into Simple.
-3. `src/os/compositor` is the display/input boundary. New backends implement
-   the compositor contracts rather than adding special cases to GUI widgets.
-4. Engine2D is the drawing execution layer, not the window manager.
-5. GPU backends are selected through capability probing and explicit fallback.
-6. SimpleOS-backed GUI paths must keep baremetal constraints visible: no
-   mandatory GC/async imports in kernel/driver-adjacent paths.
-7. Web renderer state is not desktop state. `ui.web` and shell adapters may
-   transport and render it, but `src/os/desktop` remains authoritative for
-   desktop/window policy.
-8. Host-backed GUI and SimpleOS-backed GUI must share the GUI model, window
-   manager policy, desktop shell state, compositor command model, and Engine2D
-   drawing path. They may differ only at display, input, process-launch,
-   host-window, and GPU/device backend boundaries.
+This boundary is the best next refactoring target because it reduces coupling
+between `src/app/ui.web`, `src/lib/common/ui/web_render_api.spl`, and
+`src/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer.spl`.
 
-## Current Documentation Gap Closed
+The current bootstrap contract lives in `src/lib/common/ui/draw_ir.spl`. It
+defines `DrawIrEmbeddingConfig`, `DrawIrCommand`, `DrawIrBatch`,
+`DrawIrSourceInfo`, `DrawIrComposition`, `DrawIrEventTargetContext`,
+`Simple2dDrawIrPlan`, and `Simple2dDrawIrCompositionPlan` so the Simple 2D
+advanced boundary can accept explicit size, location, layer, transparency,
+surface/component identity, source/style provenance, event target context,
+backend target, and fallback metadata before GPU execution exists.
 
-Before this document, the repository had:
+Window-manager composition is projected by
+`src/lib/common/ui/window_scene_draw_ir.spl`. It converts `SharedWmScene`
+chrome, taskbar, and visible windows into ordered Draw IR batches keyed by
+`shared_wm_scene_layout_key(scene)`. The first Engine2D-facing acceptor lives in
+`src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl`; it executes supported
+`rect` and `text` Draw IR commands through the existing Engine2D facade and
+returns readback pixels plus CPU/GPU fallback metadata. Real GPU Draw IR
+execution remains a later plugin/backend job.
 
-- A locked compositor and Engine2D method contract.
-- A compositor/GPU three-layer note.
-- A detailed `ui.web` protocol spec.
+### Render Optimization Plugin
 
-It did not have a single stack-level description answering how Simple GUI,
-host-backed windows, SimpleOS-backed windows, Tauri/Electron, Simple web
-rendering, Engine2D, and GPU backends relate. This document is the canonical
-starting point for that question.
+The plugin is an acceleration boundary, not a GUI ownership boundary. It may be
+implemented by optimized Simple backends, host GPU libraries, or compiled
+kernel artifacts, but the input and output remain Simple-owned contracts.
+
+Required interface shape:
+
+```
+RenderOptimizationPlugin
+  supports(capabilities, draw_ir) -> SupportReport
+  estimate_cost(draw_ir, dirty_regions) -> CostReport
+  prepare(draw_ir, cache_key) -> PreparedBatch
+  execute(prepared_batch, target_surface) -> ExecuteReport
+  readback(surface, region) -> PixelEvidence
+```
+
+Fallback to the CPU/SIMD backend is mandatory. The CPU path is the correctness
+oracle for tests, screenshots, capture hashes, and unsupported GPU devices.
+
+### Event Target Translation
+
+Window-level event targeting is resolved through
+`src/lib/common/ui/window_scene.spl`. Pointer translation returns a component
+kind, local event coordinates, target id, callback/window identity, backend
+target metadata, and cache status. The cache key includes the scene layout key
+and pointer/backend input key; window movement, resize, layer, or composition
+changes must produce a new scene key so stale target translations are rejected.
+That same scene key is embedded in WM Draw IR composition so event targeting and
+draw processing invalidate together. The event-to-draw-processing handoff is
+represented by `DrawIrEventTargetContext`: it maps the translated event target
+and local coordinates onto a Draw IR batch, surface/component id, source kind,
+and backend target, while rejecting stale scene keys before the renderer or
+future GPU plugin receives the event context.
+
+### Engine2D and Primitive Draw
+
+Engine2D remains the shared drawing execution layer. It should expose stable
+primitive operations and backend sessions while hiding backend-specific device
+details from UI and wrapper code. Draw processing may use CPU scalar, CPU SIMD,
+OpenCL, CUDA, HIP, Vulkan, Metal, or WebGPU, but GUI code sees only the typed
+Simple 2D and plugin contracts.
+
+## Hot-Path Policy
+
+Hot redraw paths must avoid:
+
+- repeated full-tree scans;
+- repeated file reads;
+- subprocess retries;
+- HTML/CSS string parsing when a typed GUI AST or already-resolved HTML AST is
+  available;
+- re-resolving CSS for Draw IR batches whose `style_revision` has not changed;
+- device probing per frame;
+- hidden wrapper-specific renderer forks.
+
+Capability probes run at startup or explicit re-probe time. Plugin cache keys
+must include backend id, device capability version, shader/kernel artifact
+version, Draw IR schema version, source kind/id, style revision,
+style/font/image cache versions, and fallback reason metadata.
+
+## Migration Order
+
+1. Extract typed `WebRender IR` and `Draw IR` contracts under `src/lib/common/ui`.
+2. Split the large web-to-Engine2D renderer into parser/scan helpers, IR
+   extraction, and draw execution modules.
+3. Route GUI AST redraw through the typed IR path before the HTML parser path.
+4. Add the render optimization plugin interface with CPU fallback first.
+5. Add GPU backend implementations behind capability probes and evidence
+   reports.
+6. Keep Tauri, Electron, Chrome, and browser wrappers thin; they should not own
+   renderer policy.
+
+## Verification Requirements
+
+Every implementation of this architecture needs evidence for:
+
+- semantic equivalence across TUI, GUI, web, and wrapper paths where the command
+  model overlaps;
+- CPU fallback rendering for every Draw IR feature;
+- plugin fallback reason reporting;
+- pixel/capture/hash evidence for GPU execution claims;
+- warm redraw latency, input-to-paint latency, max RSS, cache-hit behavior, and
+  startup probe cost;
+- `doc/06_spec` layout safety: executable specs stay under `test/**`, not
+  under generated/manual spec docs.

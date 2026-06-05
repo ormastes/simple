@@ -54,6 +54,29 @@ struct SharedWmDispatchResult:
     window_id: text
     scene: SharedWmScene
 
+struct SharedWmEventTargetTranslation:
+    scene_key: text
+    input_key: text
+    action: text
+    target_id: text
+    app_id: text
+    window_id: text
+    component_kind: text
+    local_x: i32
+    local_y: i32
+    backend_target: text
+    cache_hit: bool
+    stale_cache_rejected: bool
+
+struct SharedWmEventTargetTranslationCache:
+    scene_key: text
+    input_key: text
+    translation: SharedWmEventTargetTranslation
+
+struct SharedWmEventTargetTranslationResult:
+    translation: SharedWmEventTargetTranslation
+    cache: SharedWmEventTargetTranslationCache
+
 fn _project_window(window: ManagedWindow, registry: UiWindowSurfaceRegistry) -> SharedWmWindow:
     val binding = registry.for_surface(window.surface_id)
     if binding != nil:
@@ -114,6 +137,12 @@ fn shared_wm_focused_window_id(scene: SharedWmScene) -> text:
                 best_id = window.window_id
                 best_z = window.z_index
     return best_id
+
+fn shared_wm_scene_layout_key(scene: SharedWmScene) -> text:
+    var key = "w={scene.width};h={scene.height};backend={scene.backend};count={scene.windows.len()}"
+    for window in scene.windows:
+        key = "{key};{window.surface_id}:{window.window_id}:{window.x},{window.y},{window.width},{window.height}:z{window.z_index}:min{window.minimized}:focus{window.focused}"
+    key
 
 fn _shared_wm_nonnegative(value: i32) -> i32:
     if value < 0:
@@ -274,6 +303,43 @@ fn _shared_wm_content_dispatch(scene: SharedWmScene, x: i32, y: i32) -> SharedWm
         return _shared_wm_dispatch_result("begin_drag_window", window.surface_id, window.app_id, window.window_id, focused_scene)
     _shared_wm_dispatch_result("focus_window", window.window_id, window.app_id, window.window_id, focused_scene)
 
+fn _shared_wm_component_kind(action: text) -> text:
+    if action == "begin_drag_window" or action == "focus_window":
+        return "window"
+    if action == "launch_app":
+        return "taskbar"
+    if action == "command_lane_clock" or action == "command_lane_icon" or action == "command_lane":
+        return "command_lane"
+    if action == "desktop_background":
+        return "desktop"
+    "unknown"
+
+fn _shared_wm_translation_local(scene: SharedWmScene, target_id: text, x: i32, y: i32) -> SharedWmRect:
+    for window in scene.windows:
+        if window.surface_id == target_id or window.window_id == target_id:
+            return SharedWmRect(x: x - window.x, y: y - window.y, width: window.width, height: window.height)
+    SharedWmRect(x: x, y: y, width: 0, height: 0)
+
+fn _shared_wm_pointer_input_key(x: i32, y: i32, button: text, kind: text, dpi_scale_milli: i32, clock_label: text, right_icon_count: i32, taskbar_count: i32, backend_target: text) -> text:
+    "x={x};y={y};button={button};kind={kind};dpi={dpi_scale_milli};clock={clock_label};right={right_icon_count};taskbar={taskbar_count};backend={backend_target}"
+
+fn _shared_wm_event_target_translation(scene_key: text, input_key: text, scene: SharedWmScene, result: SharedWmDispatchResult, x: i32, y: i32, backend_target: text, cache_hit: bool, stale_cache_rejected: bool) -> SharedWmEventTargetTranslation:
+    val local = _shared_wm_translation_local(scene, result.target_id, x, y)
+    SharedWmEventTargetTranslation(
+        scene_key: scene_key,
+        input_key: input_key,
+        action: result.action,
+        target_id: result.target_id,
+        app_id: result.app_id,
+        window_id: result.window_id,
+        component_kind: _shared_wm_component_kind(result.action),
+        local_x: local.x,
+        local_y: local.y,
+        backend_target: backend_target,
+        cache_hit: cache_hit,
+        stale_cache_rejected: stale_cache_rejected
+    )
+
 fn shared_wm_dispatch_pointer(scene: SharedWmScene, taskbar: TaskbarModel, x: i32, y: i32, button: text, kind: text, dpi_scale_milli: i32, clock_label: text, right_icon_count: i32) -> SharedWmDispatchResult:
     val chrome = shared_wm_scene_chrome(scene, dpi_scale_milli, clock_label, right_icon_count, taskbar.pinned.len() + taskbar.running.len())
     if kind != "down" or button != "left":
@@ -285,3 +351,58 @@ fn shared_wm_dispatch_pointer(scene: SharedWmScene, taskbar: TaskbarModel, x: i3
     if _shared_wm_rect_contains(chrome.content_area, x, y):
         return _shared_wm_content_dispatch(scene, x, y)
     _shared_wm_dispatch_result("outside", "", "", "", scene)
+
+fn shared_wm_translate_pointer_event(scene: SharedWmScene, taskbar: TaskbarModel, x: i32, y: i32, button: text, kind: text, dpi_scale_milli: i32, clock_label: text, right_icon_count: i32, backend_target: text) -> SharedWmEventTargetTranslationResult:
+    val scene_key = shared_wm_scene_layout_key(scene)
+    val input_key = _shared_wm_pointer_input_key(x, y, button, kind, dpi_scale_milli, clock_label, right_icon_count, taskbar.pinned.len() + taskbar.running.len(), backend_target)
+    val dispatch = shared_wm_dispatch_pointer(scene, taskbar, x, y, button, kind, dpi_scale_milli, clock_label, right_icon_count)
+    val translation = _shared_wm_event_target_translation(scene_key, input_key, scene, dispatch, x, y, backend_target, false, false)
+    SharedWmEventTargetTranslationResult(
+        translation: translation,
+        cache: SharedWmEventTargetTranslationCache(scene_key: scene_key, input_key: input_key, translation: translation)
+    )
+
+fn shared_wm_translate_pointer_event_cached(scene: SharedWmScene, taskbar: TaskbarModel, x: i32, y: i32, button: text, kind: text, dpi_scale_milli: i32, clock_label: text, right_icon_count: i32, backend_target: text, cache: SharedWmEventTargetTranslationCache) -> SharedWmEventTargetTranslationResult:
+    val scene_key = shared_wm_scene_layout_key(scene)
+    val input_key = _shared_wm_pointer_input_key(x, y, button, kind, dpi_scale_milli, clock_label, right_icon_count, taskbar.pinned.len() + taskbar.running.len(), backend_target)
+    if cache.scene_key == scene_key and cache.input_key == input_key:
+        val cached = cache.translation
+        val hit = SharedWmEventTargetTranslation(
+            scene_key: cached.scene_key,
+            input_key: cached.input_key,
+            action: cached.action,
+            target_id: cached.target_id,
+            app_id: cached.app_id,
+            window_id: cached.window_id,
+            component_kind: cached.component_kind,
+            local_x: cached.local_x,
+            local_y: cached.local_y,
+            backend_target: cached.backend_target,
+            cache_hit: true,
+            stale_cache_rejected: false
+        )
+        return SharedWmEventTargetTranslationResult(
+            translation: hit,
+            cache: SharedWmEventTargetTranslationCache(scene_key: scene_key, input_key: input_key, translation: hit)
+        )
+    val recomputed = shared_wm_translate_pointer_event(scene, taskbar, x, y, button, kind, dpi_scale_milli, clock_label, right_icon_count, backend_target)
+    val stale = cache.input_key == input_key and cache.scene_key != scene_key
+    val translated = recomputed.translation
+    val fresh = SharedWmEventTargetTranslation(
+        scene_key: translated.scene_key,
+        input_key: translated.input_key,
+        action: translated.action,
+        target_id: translated.target_id,
+        app_id: translated.app_id,
+        window_id: translated.window_id,
+        component_kind: translated.component_kind,
+        local_x: translated.local_x,
+        local_y: translated.local_y,
+        backend_target: translated.backend_target,
+        cache_hit: false,
+        stale_cache_rejected: stale
+    )
+    SharedWmEventTargetTranslationResult(
+        translation: fresh,
+        cache: SharedWmEventTargetTranslationCache(scene_key: scene_key, input_key: input_key, translation: fresh)
+    )

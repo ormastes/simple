@@ -3,7 +3,7 @@ use common.ui.builder.{column, label, build_tree_with_title}
 use common.ui.taskbar_model.{AppRef, TaskbarModel, TrayItem, WindowRef}
 use common.ui.window.{WindowManager}
 use common.ui.window_surface_registry.{UiWindowSurfaceRegistry, UI_SURFACE_KIND_SIMPLE_WEB}
-use common.ui.window_scene.{shared_wm_dispatch_pointer, shared_wm_focus_window_by_window_id, shared_wm_scene_chrome, shared_wm_drag_window, shared_wm_scene_from_window_manager, shared_wm_visible_windows, shared_wm_focused_window_id}
+use common.ui.window_scene.{shared_wm_dispatch_pointer, shared_wm_focus_window_by_window_id, shared_wm_scene_chrome, shared_wm_drag_window, shared_wm_scene_from_window_manager, shared_wm_scene_layout_key, shared_wm_translate_pointer_event, shared_wm_translate_pointer_event_cached, shared_wm_visible_windows, shared_wm_focused_window_id}
 
 fn _tree(title: text):
     build_tree_with_title(column("{title}_root", [label("{title}_label", title)]), title, "glass_dark")
@@ -144,3 +144,45 @@ describe "SharedWmScene":
         expect(focus.action).to_equal("focus_window")
         expect(focus.window_id).to_equal("win2")
         expect(background.action).to_equal("desktop_background")
+
+    it "translates pointer locations to draw component event targets with backend metadata":
+        var manager = WindowManager.new()
+        val _one = manager.open_window("surf1", "One", 10, 40, 300, 200, _tree("one"))
+        val _two = manager.open_window("surf2", "Two", 80, 120, 300, 200, _tree("two"))
+        var registry = UiWindowSurfaceRegistry.new()
+        registry.bind_with_kind("win1", "surf1", 42u64, "demo.app", "Window One", UI_SURFACE_KIND_SIMPLE_WEB)
+        registry.bind_with_kind("win2", "surf2", 43u64, "demo.two", "Window Two", UI_SURFACE_KIND_SIMPLE_WEB)
+        val scene = shared_wm_scene_from_window_manager(manager, registry, 800, 600)
+
+        val translated = shared_wm_translate_pointer_event(scene, _taskbar(), 90, 125, "left", "down", 1000, "09:41", 2, "gpu").translation
+
+        expect(translated.action).to_equal("begin_drag_window")
+        expect(translated.target_id).to_equal("surf2")
+        expect(translated.window_id).to_equal("win2")
+        expect(translated.component_kind).to_equal("window")
+        expect(translated.local_x).to_equal(10)
+        expect(translated.local_y).to_equal(5)
+        expect(translated.backend_target).to_equal("gpu")
+        expect(translated.cache_hit).to_equal(false)
+
+    it "caches event target translations and rejects stale scene layout cache after drag":
+        var manager = WindowManager.new()
+        val _one = manager.open_window("surf1", "One", 10, 40, 300, 200, _tree("one"))
+        val _two = manager.open_window("surf2", "Two", 80, 120, 300, 200, _tree("two"))
+        var registry = UiWindowSurfaceRegistry.new()
+        registry.bind_with_kind("win1", "surf1", 42u64, "demo.app", "Window One", UI_SURFACE_KIND_SIMPLE_WEB)
+        registry.bind_with_kind("win2", "surf2", 43u64, "demo.two", "Window Two", UI_SURFACE_KIND_SIMPLE_WEB)
+        val scene = shared_wm_scene_from_window_manager(manager, registry, 800, 600)
+
+        val first = shared_wm_translate_pointer_event(scene, _taskbar(), 90, 125, "left", "down", 1000, "09:41", 2, "cpu")
+        val second = shared_wm_translate_pointer_event_cached(scene, _taskbar(), 90, 125, "left", "down", 1000, "09:41", 2, "cpu", first.cache)
+        val moved = shared_wm_drag_window(scene, "surf2", 100, 0)
+        val stale_checked = shared_wm_translate_pointer_event_cached(moved, _taskbar(), 90, 125, "left", "down", 1000, "09:41", 2, "cpu", second.cache)
+
+        expect(second.translation.cache_hit).to_equal(true)
+        expect(second.translation.stale_cache_rejected).to_equal(false)
+        expect(shared_wm_scene_layout_key(scene) == shared_wm_scene_layout_key(moved)).to_equal(false)
+        expect(stale_checked.translation.cache_hit).to_equal(false)
+        expect(stale_checked.translation.stale_cache_rejected).to_equal(true)
+        expect(stale_checked.translation.action).to_equal("focus_window")
+        expect(stale_checked.translation.window_id).to_equal("win1")

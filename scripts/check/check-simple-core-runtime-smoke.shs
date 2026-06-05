@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
@@ -9,6 +9,7 @@ BUILD_DIR="${BUILD_DIR:-build/simple-core-smoke}"
 CORE_DIR="${SIMPLE_CORE_BUILD_DIR:-build/simple-core}"
 CORE_ARCHIVE="$CORE_DIR/libsimple_runtime.a"
 CORE_SOURCE_DIR="${SIMPLE_CORE_SOURCE_DIR:-src/runtime/simple_core}"
+CORE_ARCHIVE_PART_DIR="$BUILD_DIR/simple_core_archive_parts"
 HELLO_BIN="$BUILD_DIR/hello_simple_core"
 TUI_ENTRY="$BUILD_DIR/minimal_tui_smoke_entry.spl"
 TUI_BIN="$BUILD_DIR/minimal_tui_smoke_simple_core"
@@ -18,12 +19,23 @@ TUI_APP_BIN="$BUILD_DIR/minimal_tui_app_simple_core"
 mkdir -p "$BUILD_DIR" "$CORE_DIR"
 
 if "$SIMPLE_BINARY" native-build --help 2>/dev/null | rg -q -- '--emit-archive'; then
-    "$SIMPLE_BINARY" native-build \
-        --source "$CORE_SOURCE_DIR" \
-        --no-mangle \
-        --emit-archive \
-        --output "$CORE_ARCHIVE" \
-        --clean >/tmp/simple_core_archive_build.$$ 2>&1
+    rm -rf "$CORE_ARCHIVE_PART_DIR"
+    mkdir -p "$CORE_ARCHIVE_PART_DIR/objects"
+    for core_entry in "$CORE_SOURCE_DIR"/*.spl; do
+        part_name="$(basename "$core_entry" .spl)"
+        part_archive="$CORE_ARCHIVE_PART_DIR/$part_name.a"
+        "$SIMPLE_BINARY" native-build \
+            --source "$CORE_SOURCE_DIR" \
+            --entry "$core_entry" \
+            --no-mangle \
+            --emit-archive \
+            --output "$part_archive" \
+            --clean >>/tmp/simple_core_archive_build.$$ 2>&1
+        mkdir -p "$CORE_ARCHIVE_PART_DIR/objects/$part_name"
+        (cd "$CORE_ARCHIVE_PART_DIR/objects/$part_name" && ar x "../../$part_name.a")
+    done
+    rm -f "$CORE_ARCHIVE"
+    ar rcs "$CORE_ARCHIVE" "$CORE_ARCHIVE_PART_DIR"/objects/*/*.o
 else
     echo "simple_core_archive_capable=false"
     echo "error=selected_simple_binary_lacks_emit_archive:$SIMPLE_BINARY"

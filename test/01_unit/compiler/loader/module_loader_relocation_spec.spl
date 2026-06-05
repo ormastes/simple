@@ -1,23 +1,26 @@
 """Module Loader relocation application specification tests."""
 
-use app.io.{shell}
 use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
 use compiler.driver.smf_writer.{build_smf_with_relocations, SmfBuildOptions, Target}
 use compiler.loader.*
 use compiler.loader.smf_mmap_native.{native_mmap_read_bytes}
 use std.io_runtime.{file_read_bytes}
 
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
+
+fn run_sh(command: text) -> (text, text, i64):
+    rt_process_run("/bin/sh", ["-c", command])
 
 fn delete_if_exists(path: text):
     if rt_file_exists(path):
         rt_file_delete(path)
 
 fn cleanup_tmpdir(tmpdir: text):
-    _ = shell("rm -rf '{tmpdir}' >/dev/null 2>&1 || true")
+    _ = run_sh("rm -rf '{tmpdir}' >/dev/null 2>&1 || true")
 
 fn i32_to_le_bytes(value: i32) -> [u8]:
     var result: [u8] = []
@@ -47,7 +50,8 @@ fn patch_first_reloc_symbol_index_zero(smf_bytes: [u8], code_len: i64) -> [u8]:
 
 describe "Module Loader relocation application":
     it "applies a live relocation entry from a compiled object":
-        val tmpdir = shell("mktemp -d").stdout.trim()
+        val (tmp_stdout, _tmp_stderr, _tmp_code) = run_sh("mktemp -d")
+        val tmpdir = tmp_stdout.trim()
         if tmpdir == "":
             fail("failed to create a temporary directory")
 
@@ -62,10 +66,10 @@ describe "Module Loader relocation application":
         val source = "extern long external_value;\nlong main(void) { return (long)&external_value; }\n"
         expect(rt_file_write_text(src_path, source)).to_equal(true)
 
-        val compile = shell("cc -c -O0 -fno-pic -fno-pie -o '{obj_path}' '{src_path}' 2>&1")
-        if compile.exit_code != 0:
+        val (compile_stdout, compile_stderr, compile_code) = run_sh("cc -c -O0 -fno-pic -fno-pie -o '{obj_path}' '{src_path}' 2>&1")
+        if compile_code != 0:
             cleanup_tmpdir(tmpdir)
-            fail("cc failed: {compile.stdout}{compile.stderr}")
+            fail("cc failed: {compile_stdout}{compile_stderr}")
 
         val object_bytes = file_read_bytes(obj_path).unwrap()
         val smf_bytes = build_smf_with_relocations(object_bytes, SmfBuildOptions.create(Target.x86_64_unknown_linux_gnu()))
@@ -95,15 +99,21 @@ describe "Module Loader relocation application":
 
                 val loaded_symbol = module.symbols["main"]
                 val reloc = relocs[0]
-                val patch_len = if reloc.reloc_type == 1: 8 else: 4
+                val patch_len = match reloc.reloc_type:
+                    1: 8
+                    _: 4
                 val patch_bytes = native_mmap_read_bytes(loaded_symbol.address, reloc.offset, patch_len)
 
-                if reloc.reloc_type == 1:
-                    val expected_value = loaded_symbol.address + reloc.addend
-                    expect(patch_bytes).to_equal(i64_to_le_bytes(expected_value))
-                else:
-                    val expected_value = reloc.addend - reloc.offset
-                    expect(patch_bytes).to_equal(i32_to_le_bytes(expected_value as i32))
+                match reloc.reloc_type:
+                    1:
+                        val expected_value = loaded_symbol.address + reloc.addend
+                        expect(patch_bytes).to_equal(i64_to_le_bytes(expected_value))
+                    5:
+                        val expected_value = loaded_symbol.address + reloc.addend
+                        expect(patch_bytes).to_equal(i32_to_le_bytes(expected_value as i32))
+                    _:
+                        val expected_value = reloc.addend - reloc.offset
+                        expect(patch_bytes).to_equal(i32_to_le_bytes(expected_value as i32))
             case LoadResult.Error(message):
                 cleanup_tmpdir(tmpdir)
                 fail("loader rejected the relocation-bearing SMF: {message}")

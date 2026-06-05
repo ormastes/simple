@@ -1,0 +1,94 @@
+# Engine2D advanced Draw IR executor.
+#
+# This is the first Simple2D-facing Draw IR boundary. It executes the shared
+# Draw IR contract through the existing Engine2D facade and keeps GPU selection
+# as metadata/fallback policy; real GPU plugin migration is a later backend job.
+
+use common.ui.draw_ir.{
+    DRAW_IR_COMMAND_RECT,
+    DRAW_IR_COMMAND_TEXT,
+    DrawIrBatch,
+    DrawIrComposition,
+    Simple2dDrawIrCompositionPlan,
+    Simple2dDrawIrPlan,
+    simple_2d_draw_ir_adv_composition_plan,
+    simple_2d_draw_ir_adv_plan
+}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+
+struct Engine2dDrawIrAdvResult:
+    schema: text
+    unit_id: text
+    selected_backend: text
+    fallback_required: bool
+    fallback_reason: text
+    rendered_command_count: i32
+    skipped_command_count: i32
+    pixels: [u32]
+
+fn _engine2d_draw_ir_result_from_plan(plan: Simple2dDrawIrPlan, rendered: i32, skipped: i32, pixels: [u32]) -> Engine2dDrawIrAdvResult:
+    Engine2dDrawIrAdvResult(
+        schema: plan.schema,
+        unit_id: plan.batch_id,
+        selected_backend: plan.selected_backend,
+        fallback_required: plan.fallback_required,
+        fallback_reason: plan.fallback_reason,
+        rendered_command_count: rendered,
+        skipped_command_count: skipped,
+        pixels: pixels
+    )
+
+fn _engine2d_draw_ir_result_from_composition_plan(plan: Simple2dDrawIrCompositionPlan, rendered: i32, skipped: i32, pixels: [u32]) -> Engine2dDrawIrAdvResult:
+    Engine2dDrawIrAdvResult(
+        schema: plan.schema,
+        unit_id: plan.composition_id,
+        selected_backend: plan.selected_backend,
+        fallback_required: plan.fallback_required,
+        fallback_reason: plan.fallback_reason,
+        rendered_command_count: rendered,
+        skipped_command_count: skipped,
+        pixels: pixels
+    )
+
+fn engine2d_draw_ir_adv_batch(engine: Engine2D, batch: DrawIrBatch, gpu_available: bool) -> Engine2dDrawIrAdvResult:
+    val plan = simple_2d_draw_ir_adv_plan(batch, gpu_available)
+    if batch.embedding.clip:
+        engine.set_clip(batch.embedding.x, batch.embedding.y, batch.embedding.width, batch.embedding.height)
+    var rendered = 0
+    var skipped = 0
+    for command in batch.commands:
+        val x = batch.embedding.x + command.x
+        val y = batch.embedding.y + command.y
+        if command.kind == DRAW_IR_COMMAND_RECT:
+            engine.draw_rect_filled(x, y, command.width, command.height, command.color)
+            rendered = rendered + 1
+        elif command.kind == DRAW_IR_COMMAND_TEXT:
+            engine.draw_text(x, y, command.text_value, command.color, 12)
+            rendered = rendered + 1
+        else:
+            skipped = skipped + 1
+    if batch.embedding.clip:
+        engine.clear_clip()
+    _engine2d_draw_ir_result_from_plan(plan, rendered, skipped, engine.read_pixels())
+
+fn engine2d_draw_ir_adv_composition(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool) -> Engine2dDrawIrAdvResult:
+    val plan = simple_2d_draw_ir_adv_composition_plan(composition, gpu_available)
+    var rendered = 0
+    var skipped = 0
+    for batch in composition.batches:
+        if batch.embedding.clip:
+            engine.set_clip(batch.embedding.x, batch.embedding.y, batch.embedding.width, batch.embedding.height)
+        for command in batch.commands:
+            val x = batch.embedding.x + command.x
+            val y = batch.embedding.y + command.y
+            if command.kind == DRAW_IR_COMMAND_RECT:
+                engine.draw_rect_filled(x, y, command.width, command.height, command.color)
+                rendered = rendered + 1
+            elif command.kind == DRAW_IR_COMMAND_TEXT:
+                engine.draw_text(x, y, command.text_value, command.color, 12)
+                rendered = rendered + 1
+            else:
+                skipped = skipped + 1
+        if batch.embedding.clip:
+            engine.clear_clip()
+    _engine2d_draw_ir_result_from_composition_plan(plan, rendered, skipped, engine.read_pixels())

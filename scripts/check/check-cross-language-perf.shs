@@ -29,6 +29,12 @@ WARM_IN_PROCESS="${WARM_IN_PROCESS:-10}"
 
 mkdir -p "$BUILD_DIR" "$(dirname "$REPORT_PATH")"
 
+# ── PATH fixup for common non-PATH locations ─────────────────────────────
+for _d in /usr/lib/erlang/bin /usr/lib/go/bin /usr/local/go/bin /snap/go/current/bin; do
+    [ -d "$_d" ] && case ":$PATH:" in *":$_d:"*) ;; *) PATH="$_d:$PATH" ;; esac
+done
+export PATH
+
 # ── helpers ──────────────────────────────────────────────────────────────
 
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -96,8 +102,12 @@ SIMPLE
 }
 
 # Warm fib: runs fib(35) WARM_IN_PROCESS times in-process, reports steady-state
+# Uses extern rt_time_now_unix_micros — only works in native mode.
+# Interpreter/SMF fall back to outer-process measurement (shell-level timing).
 write_simple_fib_warm() {
     cat >"$BUILD_DIR/fib_warm.spl" <<SIMPLE
+extern fn rt_time_now_unix_micros() -> i64
+
 fn fib(n: i64) -> i64:
     if n < 2:
         return n
@@ -108,13 +118,13 @@ fn main():
     val measured = ${RUNS}
     for i in 0..warmup:
         fib(35)
-    val start = rt_time_monotonic_ns()
+    val start = rt_time_now_unix_micros()
     for i in 0..measured:
         fib(35)
-    val elapsed = rt_time_monotonic_ns() - start
-    val avg_ns = elapsed / measured
-    val avg_ms_int = avg_ns / 1000000
-    val avg_ms_frac = (avg_ns % 1000000) / 1000
+    val elapsed = rt_time_now_unix_micros() - start
+    val avg_us = elapsed / measured
+    val avg_ms_int = avg_us / 1000
+    val avg_ms_frac = avg_us % 1000
     println("warm_ms: {avg_ms_int}.{avg_ms_frac}")
 SIMPLE
 }
@@ -123,19 +133,21 @@ write_simple_parallel() {
     cat >"$BUILD_DIR/parallel.spl" <<'SIMPLE'
 use std.concurrent.thread.{thread_spawn, ThreadHandle}
 
+fn worker() -> i64:
+    var sum: i64 = 0
+    for j in 0..1000:
+        sum = sum + j
+    return sum
+
 fn main():
     var handles: List<ThreadHandle> = []
     for i in 0..100:
-        val h = thread_spawn(\:
-            var sum: i64 = 0
-            for j in 0..1000:
-                sum = sum + j
-            sum
-        )
+        val h = thread_spawn(\: worker())
         handles.push(h)
     var total: i64 = 0
     for h in handles:
-        total = total + h.join()
+        val r = h.join()
+        total = total + r
     println("total = {total}")
 SIMPLE
 }
@@ -577,7 +589,7 @@ if have java; then
     row "Java" "$ms" "JIT (JVM)" "" ""
 fi
 if have erl; then
-    ms=$(avg_ms "erl -noshell -pa $BUILD_DIR -s fib main -s init stop" "$RUNS")
+    ms=$(avg_ms "erl -noshell -pa $BUILD_DIR -eval 'fib:main([]).' -s init stop" "$RUNS")
     row "Erlang" "$ms" "BEAM VM" "" ""
 fi
 
@@ -592,17 +604,20 @@ warm_row() {
     printf "| %-22s | %12s | %40s |\n" "$1" "$2" "$3" >>"$REPORT_PATH"
 }
 
-if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/fib_warm.spl" ]; then
-    ms=$(extract_warm_ms "$SIMPLE_BINARY $BUILD_DIR/fib_warm.spl")
-    warm_row "Simple (interpreter)" "$ms" "tree-walk, no JIT yet"
+# Simple interpreter/SMF: extern fn calls segfault in interpreter and SMF loader
+# can't resolve time externs. Fall back to outer-process avg of fib.spl runs.
+if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/fib.spl" ]; then
+    ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/fib.spl" "$RUNS")
+    warm_row "Simple (interpreter)" "$ms" "tree-walk (outer-process, no in-proc timing)"
 fi
-if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/fib_warm_simple.smf" ]; then
-    ms=$(extract_warm_ms "$SIMPLE_BINARY $BUILD_DIR/fib_warm_simple.smf")
-    warm_row "Simple (SMF loader)" "$ms" "bytecode dispatch"
+if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/fib_simple.smf" ]; then
+    ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/fib_simple.smf" "$RUNS")
+    warm_row "Simple (SMF loader)" "$ms" "bytecode (outer-process, no in-proc timing)"
 fi
+# Simple native: in-process timing works via extern fn
 if [ -x "$BUILD_DIR/fib_warm_simple_native" ]; then
     ms=$(extract_warm_ms "$BUILD_DIR/fib_warm_simple_native")
-    warm_row "Simple (native)" "$ms" "AOT via LLVM/Cranelift"
+    warm_row "Simple (native)" "$ms" "AOT via LLVM/Cranelift (in-process)"
 fi
 if [ -x "$BUILD_DIR/fib_warm_c" ]; then
     ms=$(extract_warm_ms "$BUILD_DIR/fib_warm_c")
@@ -625,7 +640,7 @@ if have java; then
     warm_row "Java" "$ms" "HotSpot C2 JIT (steady-state)"
 fi
 if have erl; then
-    ms=$(extract_warm_ms "erl -noshell -pa $BUILD_DIR -s fib_warm main -s init stop")
+    ms=$(extract_warm_ms "erl -noshell -pa $BUILD_DIR -eval 'fib_warm:main([]).' -s init stop")
     warm_row "Erlang" "$ms" "BEAM (single-process)"
 fi
 
@@ -640,10 +655,10 @@ par_row() {
     printf "| %-22s | %12s | %40s |\n" "$1" "$2" "$3" >>"$REPORT_PATH"
 }
 
-if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/parallel.spl" ]; then
-    ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/parallel.spl" "$RUNS")
-    par_row "Simple (interpreter)" "$ms" "std thread_spawn"
-fi
+# Simple parallel: interpreter segfaults on extern FFI, native has rt_thread_join
+# symbol mismatch (codegen emits rt_thread_join, runtime exports spl_thread_join).
+# SMF compiled successfully — test it; skip interpreter/native with explanation.
+par_row "Simple (interpreter)" "n/a" "extern FFI segfault in interpreter"
 if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/parallel_simple.smf" ]; then
     ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/parallel_simple.smf" "$RUNS")
     par_row "Simple (SMF loader)" "$ms" "std thread_spawn (bytecode)"
@@ -651,6 +666,8 @@ fi
 if [ -x "$BUILD_DIR/parallel_simple_native" ]; then
     ms=$(avg_ms "$BUILD_DIR/parallel_simple_native" "$RUNS")
     par_row "Simple (native)" "$ms" "std thread_spawn (native)"
+else
+    par_row "Simple (native)" "n/a" "codegen bug: rt_thread_join undefined"
 fi
 if [ -x "$BUILD_DIR/parallel_c" ]; then
     ms=$(avg_ms "$BUILD_DIR/parallel_c" "$RUNS")
@@ -673,7 +690,7 @@ if have java; then
     par_row "Java" "$ms" "ThreadPool"
 fi
 if have erl; then
-    ms=$(avg_ms "erl -noshell -pa $BUILD_DIR -s parallel main -s init stop" "$RUNS")
+    ms=$(avg_ms "erl -noshell -pa $BUILD_DIR -eval 'parallel:main([]).' -s init stop" "$RUNS")
     par_row "Erlang" "$ms" "lightweight processes"
 fi
 

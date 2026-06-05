@@ -1,0 +1,101 @@
+# Shared WM to Draw IR projection.
+#
+# Converts the window-manager scene into ordered Draw IR batches. This keeps
+# window composition in pure Simple and leaves real GPU execution to later
+# backend/plugin work.
+
+use common.ui.draw_ir.{
+    DRAW_IR_SOURCE_WM_SCENE,
+    DrawIrBatch,
+    DrawIrComposition,
+    DrawIrSourceInfo,
+    draw_ir_batch_with_source,
+    draw_ir_composition,
+    draw_ir_embedding_config,
+    draw_ir_rect,
+    draw_ir_source_info,
+    draw_ir_text
+}
+use common.ui.taskbar_model.{TaskbarModel}
+use common.ui.window_scene.{SharedWmScene, SharedWmWindow, shared_wm_scene_chrome, shared_wm_scene_layout_key}
+
+val WM_DRAW_IR_COMPOSITION_ID: text = "wm-composite"
+val WM_DRAW_IR_DESKTOP_SURFACE: text = "wm-desktop"
+val WM_DRAW_IR_CHROME_SURFACE: text = "wm-chrome"
+
+fn _wm_draw_ir_source(source_id: text, style_key: text) -> DrawIrSourceInfo:
+    draw_ir_source_info(DRAW_IR_SOURCE_WM_SCENE, source_id, "", "", "", "", style_key, "wm-scene-v1")
+
+fn _wm_draw_ir_window_opacity(window: SharedWmWindow) -> i32:
+    if window.focused:
+        return 1000
+    930
+
+fn _wm_draw_ir_push_window_in_order(windows: [SharedWmWindow], window: SharedWmWindow) -> [SharedWmWindow]:
+    var ordered: [SharedWmWindow] = []
+    var inserted = false
+    for current in windows:
+        if not inserted and window.z_index < current.z_index:
+            ordered = ordered.push(window)
+            inserted = true
+        ordered = ordered.push(current)
+    if not inserted:
+        ordered = ordered.push(window)
+    ordered
+
+fn _wm_draw_ir_visible_windows_by_layer(scene: SharedWmScene) -> [SharedWmWindow]:
+    var ordered: [SharedWmWindow] = []
+    for window in scene.windows:
+        if not window.minimized:
+            ordered = _wm_draw_ir_push_window_in_order(ordered, window)
+    ordered
+
+fn _wm_draw_ir_desktop_batch(scene: SharedWmScene, backend_target: text) -> DrawIrBatch:
+    val embedding = draw_ir_embedding_config(WM_DRAW_IR_DESKTOP_SURFACE, "desktop", 0, 0, scene.width, scene.height, 0, 1000, false)
+    draw_ir_batch_with_source(
+        "wm-desktop",
+        backend_target,
+        embedding,
+        [draw_ir_rect("desktop-background", 0, 0, scene.width, scene.height, 0xff101418u32)],
+        _wm_draw_ir_source("wm.desktop", "wm.desktop")
+    )
+
+fn _wm_draw_ir_chrome_batch(scene: SharedWmScene, taskbar: TaskbarModel, backend_target: text, dpi_scale_milli: i32, clock_label: text, right_icon_count: i32) -> DrawIrBatch:
+    val chrome = shared_wm_scene_chrome(scene, dpi_scale_milli, clock_label, right_icon_count, taskbar.pinned.len() + taskbar.running.len())
+    val embedding = draw_ir_embedding_config(WM_DRAW_IR_CHROME_SURFACE, "wm-chrome", 0, 0, scene.width, scene.height, 1, 1000, false)
+    draw_ir_batch_with_source(
+        "wm-chrome",
+        backend_target,
+        embedding,
+        [
+            draw_ir_rect("command-lane", chrome.command_lane.x, chrome.command_lane.y, chrome.command_lane.width, chrome.command_lane.height, 0xff182027u32),
+            draw_ir_rect("taskbar", chrome.taskbar.x, chrome.taskbar.y, chrome.taskbar.width, chrome.taskbar.height, 0xff151a20u32),
+            draw_ir_text("clock", scene.width - 64, chrome.command_lane.y + 21, clock_label, 0xffffffffu32)
+        ],
+        _wm_draw_ir_source("wm.chrome", "wm.chrome")
+    )
+
+fn _wm_draw_ir_window_batch(window: SharedWmWindow, backend_target: text) -> DrawIrBatch:
+    val embedding = draw_ir_embedding_config(window.surface_id, window.window_id, window.x, window.y, window.width, window.height, window.z_index + 10, _wm_draw_ir_window_opacity(window), true)
+    val title_color = if window.focused: 0xff2f80edu32 else: 0xff25313au32
+    draw_ir_batch_with_source(
+        "window-{window.window_id}",
+        backend_target,
+        embedding,
+        [
+            draw_ir_rect("{window.window_id}-shadow", 4, 6, window.width, window.height, 0x33000000u32),
+            draw_ir_rect("{window.window_id}-body", 0, 0, window.width, window.height, 0xff20262du32),
+            draw_ir_rect("{window.window_id}-titlebar", 0, 0, window.width, 28, title_color),
+            draw_ir_text("{window.window_id}-title", 12, 19, window.title, 0xffffffffu32)
+        ],
+        _wm_draw_ir_source("wm.window.{window.window_id}", "wm.window")
+    )
+
+fn shared_wm_scene_draw_ir_composition(scene: SharedWmScene, taskbar: TaskbarModel, backend_target: text, dpi_scale_milli: i32, clock_label: text, right_icon_count: i32) -> DrawIrComposition:
+    var batches: [DrawIrBatch] = []
+    batches = batches.push(_wm_draw_ir_desktop_batch(scene, backend_target))
+    batches = batches.push(_wm_draw_ir_chrome_batch(scene, taskbar, backend_target, dpi_scale_milli, clock_label, right_icon_count))
+    val windows = _wm_draw_ir_visible_windows_by_layer(scene)
+    for window in windows:
+        batches = batches.push(_wm_draw_ir_window_batch(window, backend_target))
+    draw_ir_composition(WM_DRAW_IR_COMPOSITION_ID, shared_wm_scene_layout_key(scene), backend_target, batches)

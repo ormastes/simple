@@ -28,7 +28,7 @@ window_scene_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -322,6 +322,103 @@ expect(background.action).to_equal("desktop_background")
 
 </details>
 
+#### translates pointer locations to draw component event targets with backend metadata
+
+1. var manager = WindowManager new
+
+2. var registry = UiWindowSurfaceRegistry new
+
+3. registry bind with kind
+
+4. registry bind with kind
+   - Expected: translated.action equals `begin_drag_window`
+   - Expected: translated.target_id equals `surf2`
+   - Expected: translated.window_id equals `win2`
+   - Expected: translated.component_kind equals `window`
+   - Expected: translated.local_x equals `10`
+   - Expected: translated.local_y equals `5`
+   - Expected: translated.backend_target equals `gpu`
+   - Expected: translated.cache_hit is false
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var manager = WindowManager.new()
+val _one = manager.open_window("surf1", "One", 10, 40, 300, 200, _tree("one"))
+val _two = manager.open_window("surf2", "Two", 80, 120, 300, 200, _tree("two"))
+var registry = UiWindowSurfaceRegistry.new()
+registry.bind_with_kind("win1", "surf1", 42u64, "demo.app", "Window One", UI_SURFACE_KIND_SIMPLE_WEB)
+registry.bind_with_kind("win2", "surf2", 43u64, "demo.two", "Window Two", UI_SURFACE_KIND_SIMPLE_WEB)
+val scene = shared_wm_scene_from_window_manager(manager, registry, 800, 600)
+
+val translated = shared_wm_translate_pointer_event(scene, _taskbar(), 90, 125, "left", "down", 1000, "09:41", 2, "gpu").translation
+
+expect(translated.action).to_equal("begin_drag_window")
+expect(translated.target_id).to_equal("surf2")
+expect(translated.window_id).to_equal("win2")
+expect(translated.component_kind).to_equal("window")
+expect(translated.local_x).to_equal(10)
+expect(translated.local_y).to_equal(5)
+expect(translated.backend_target).to_equal("gpu")
+expect(translated.cache_hit).to_equal(false)
+```
+
+</details>
+
+#### caches event target translations and rejects stale scene layout cache after drag
+
+1. var manager = WindowManager new
+
+2. var registry = UiWindowSurfaceRegistry new
+
+3. registry bind with kind
+
+4. registry bind with kind
+   - Expected: second.translation.cache_hit is true
+   - Expected: second.translation.stale_cache_rejected is false
+   - Expected: shared_wm_scene_layout_key(scene) == shared_wm_scene_layout_key(moved) is false
+   - Expected: stale_checked.translation.cache_hit is false
+   - Expected: stale_checked.translation.stale_cache_rejected is true
+   - Expected: stale_checked.translation.action equals `focus_window`
+   - Expected: stale_checked.translation.window_id equals `win1`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var manager = WindowManager.new()
+val _one = manager.open_window("surf1", "One", 10, 40, 300, 200, _tree("one"))
+val _two = manager.open_window("surf2", "Two", 80, 120, 300, 200, _tree("two"))
+var registry = UiWindowSurfaceRegistry.new()
+registry.bind_with_kind("win1", "surf1", 42u64, "demo.app", "Window One", UI_SURFACE_KIND_SIMPLE_WEB)
+registry.bind_with_kind("win2", "surf2", 43u64, "demo.two", "Window Two", UI_SURFACE_KIND_SIMPLE_WEB)
+val scene = shared_wm_scene_from_window_manager(manager, registry, 800, 600)
+
+val first = shared_wm_translate_pointer_event(scene, _taskbar(), 90, 125, "left", "down", 1000, "09:41", 2, "cpu")
+val second = shared_wm_translate_pointer_event_cached(scene, _taskbar(), 90, 125, "left", "down", 1000, "09:41", 2, "cpu", first.cache)
+val moved = shared_wm_drag_window(scene, "surf2", 100, 0)
+val stale_checked = shared_wm_translate_pointer_event_cached(moved, _taskbar(), 90, 125, "left", "down", 1000, "09:41", 2, "cpu", second.cache)
+
+expect(second.translation.cache_hit).to_equal(true)
+expect(second.translation.stale_cache_rejected).to_equal(false)
+expect(shared_wm_scene_layout_key(scene) == shared_wm_scene_layout_key(moved)).to_equal(false)
+expect(stale_checked.translation.cache_hit).to_equal(false)
+expect(stale_checked.translation.stale_cache_rejected).to_equal(true)
+expect(stale_checked.translation.action).to_equal("focus_window")
+expect(stale_checked.translation.window_id).to_equal("win1")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -341,8 +438,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

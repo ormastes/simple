@@ -143,6 +143,31 @@ typed errors, and checksums.
 The first plan using this provider is
 `doc/03_plan/agent_tasks/pure_simple_lz4_zstd_speed_parity.md`.
 
+## Unified OptimizerPlugin Trait
+
+All three optimizer subsystems converge on a common `OptimizerPlugin` trait:
+
+```text
+trait OptimizerPlugin:
+    fn name() -> text
+    fn scope() -> PluginScope          # Mir | Source | Both
+    fn apply_mode() -> ApplyMode       # Static | Dynamic | Both
+    fn level() -> OptLevel
+    fn run_on_mir(module, config) -> OptResult       # MIR-level (optional)
+    fn analyze_source(source, config) -> [OptSuggestion]  # Source-level (optional)
+    fn cost_class() -> text            # "cheap" | "moderate" | "expensive"
+```
+
+**Static plugins** run during every compilation in the `OptimizationPipeline`. Current `MirPass` implementations (DCE, inline, const-fold, etc.) become static plugins.
+
+**Dynamic plugins** are loaded/triggered at runtime by the hotspot optimizer when profiling data crosses a threshold. Current `jit_hotspot_source_has_*` heuristics become dynamic plugins.
+
+**Both-mode plugins** (e.g., strength-reduction) run statically at compile time and can be re-applied dynamically with richer profile data.
+
+The hotspot optimizer becomes a pure scheduler that queries the unified `DynamicPassRegistry` — no optimization logic of its own.
+
+See: `doc/02_requirements/feature/unified_optimizer_plugin.md`
+
 ## Roadmap
 
 1. Keep hot built-in pattern providers on direct or indexed lookup.
@@ -153,6 +178,11 @@ The first plan using this provider is
 6. Add built-in compression loop/table providers for LZ4/Zstd parity before
    allowing dynamic compression plugins.
 7. Add optional LLVM pass-plugin bridging only for providers that genuinely need LLVM IR pass insertion.
+8. Unify MIR optimizer, source-level optimizer, and hotspot optimizer behind the
+   `OptimizerPlugin` trait (see unified_optimizer_plugin feature request).
+9. Refactor `jit_hotspot_source_has_*` functions into `OptimizerPlugin` instances
+   with `scope: Source, apply_mode: Dynamic`, eliminating duplication with
+   `90.tools/perf/optimizer.spl`.
 
 ## References
 
@@ -160,3 +190,5 @@ The first plan using this provider is
 - LLVM new pass plugins: https://llvm.org/docs/WritingAnLLVMNewPMPass.html
 - MLIR Pattern Rewriter: https://mlir.llvm.org/docs/PatternRewriter/
 - MLIR Declarative Rewrite Rules: https://mlir.llvm.org/docs/DeclarativeRewrites/
+- Unified optimizer plugin feature request: `doc/02_requirements/feature/unified_optimizer_plugin.md`
+- Architecture diagram: `doc/04_architecture/compiler/simple_compiler_arch.drawio`

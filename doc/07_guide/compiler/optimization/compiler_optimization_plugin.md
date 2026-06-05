@@ -52,6 +52,7 @@ Bad examples:
 | `hir` | HIR | type-aware simplification before MIR construction |
 | `mir` | MIR | general compiler optimizations and semantic rewrites |
 | `pattern` | MIR pattern engine | idiom recognition, exact-symbol lookup, intrinsic replacement |
+| `source` | source-level analysis | anti-pattern detection (string concat in loops, missing memoization) |
 | `interpreter` | interpreter runtime | dispatch caches and evaluated-form specialization |
 | `jit-hotspot` | JIT runtime planning | hot-loop/function specialization using profile facts and safe deopt guards |
 | `backend-metadata` | backend boundary | target-independent facts that help LLVM or native lowering |
@@ -159,7 +160,7 @@ Start with the smallest built-in provider that proves the optimization is genera
 
    ```text
    name: simple.opt.<domain>.<rule_set>
-   kind: mir | pattern | interpreter | jit-hotspot
+   kind: mir | pattern | source | interpreter | jit-hotspot
    load_mode: builtin
    lookup_kind: direct-exact | indexed-exact | pipeline-pass
    hot_path: true
@@ -289,6 +290,32 @@ For LLVM-affecting paths, also run IR verification when IR dump support is avail
 opt -verify input.ll -o /dev/null
 opt -verify-each -passes='default<O2>' input.ll -o output.bc
 ```
+
+## Unified OptimizerPlugin Interface
+
+Three optimizer subsystems currently operate with different interfaces:
+
+| Subsystem | Location | Interface | When |
+|---|---|---|---|
+| MIR optimizer | `60.mir_opt` | `trait MirPass` + `DynamicPassRegistry` | Compile-time (static pipeline) |
+| Source-level optimizer | `90.tools/perf/optimizer` | Standalone CLI | Manual invocation |
+| Hotspot optimizer | `95.interp/execution/tiered_jit` | Imports `mir_opt` directly + inline heuristics | Runtime (tiered JIT) |
+
+The unified `OptimizerPlugin` trait provides a common interface across all three:
+
+| Field | Values | Meaning |
+|---|---|---|
+| `scope` | `Mir`, `Source`, `Both` | Which IR level the plugin operates on |
+| `apply_mode` | `Static`, `Dynamic`, `Both` | Compile-time pipeline vs runtime hotspot-triggered |
+| `cost_class` | `cheap`, `moderate`, `expensive` | Budget hint for the hotspot scheduler |
+
+**Static apply**: Plugin runs during every compilation in `OptimizationPipeline` at the configured `OptLevel`. All current `MirPass` implementations are static plugins.
+
+**Dynamic apply**: Plugin is registered in `DynamicPassRegistry` and triggered at runtime when the hotspot optimizer's profiling thresholds are crossed. The tiered JIT queries the unified registry instead of hardcoding `jit_hotspot_source_has_*` heuristics.
+
+**Both-mode**: Plugin participates in both compile-time and runtime optimization. Example: strength-reduction runs statically and can be re-applied with richer profile data.
+
+See: `doc/02_requirements/feature/unified_optimizer_plugin.md`
 
 ## Minimal Example
 

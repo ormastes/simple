@@ -233,11 +233,22 @@ Simple Optimization Plugin is the named extension point for reusable compiler an
 - Hot and bootstrap-critical providers should be built into the compiler/interpreter.
 - Optional, experimental, or out-of-tree providers may load dynamically only through a stable manifest and ABI.
 - Providers must declare facts they require and facts they produce; they must not lie about overflow, aliasing, non-nullness, or target layout.
+- All three optimizer subsystems — MIR optimizer (`60.mir_opt`), source-level optimizer (`90.tools/perf`), and hotspot optimizer (`95.interp/execution`) — share the unified `OptimizerPlugin` trait. Plugins declare their `scope` (Mir/Source/Both) and `apply_mode` (Static/Dynamic/Both) to participate in compile-time pipelines and/or runtime JIT planning through the same registry.
 
 See:
-- `doc/07_guide/compiler_optimization_plugin.md`
+- `doc/07_guide/compiler/optimization/compiler_optimization_plugin.md`
 - `doc/04_architecture/compiler/perf/simple_optimization_plugin.md`
 - `doc/06_spec/app/compiler/feature/simple_optimization_plugin_spec.md`
+- `doc/02_requirements/feature/unified_optimizer_plugin.md`
+
+## MIR Optimizer
+The compile-time static optimization pass pipeline in `src/compiler/60.mir_opt/`. Runs deterministic passes (DCE, const-fold, inline, CSE, GVN, copy propagation, loop optimization, auto-vectorization, bounds-check elimination, tail-call optimization, strength reduction, string-builder optimization) on MIR before backend codegen. Passes implement `trait MirPass` and register via `DynamicPassRegistry` / `OptimizerManifest`. Controlled by `OptLevel` (nil/Size/Speed/Aggressive).
+
+## Source-Level Optimizer
+The developer-facing analysis tool in `src/compiler/90.tools/perf/optimizer.spl`. Detects source-level anti-patterns (string concatenation in loops, nested loops, missing memoization, dict lookup in tight loops) and emits human-readable suggestions. Currently a standalone CLI tool (`bin/simple perf/optimizer.spl <file>`). Planned: refactor patterns into `OptimizerPlugin` with `scope: Source` so the hotspot optimizer can reuse them at runtime.
+
+## Hotspot Optimizer
+Runtime profile-guided optimization in `src/compiler/95.interp/execution/tiered_jit.spl`. Monitors function execution counts via the tiered JIT (tier1/tier2 thresholds), detects hot functions, and triggers recompilation at `OptLevel.Aggressive` via the MIR optimizer pipeline. Uses `CLibParityRule` pattern rules and `OptimizationRuleProvider` from `60.mir_opt`. Currently also contains inline source-level heuristics (`jit_hotspot_source_has_*`) that duplicate `90.tools/perf` patterns — planned for unification via the `OptimizerPlugin` trait.
 
 ## Fully shared frontend
 Frontend must be one shared implementation: Lexer -> Treesitter -> Parser.

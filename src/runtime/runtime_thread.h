@@ -49,6 +49,15 @@ spl_thread_handle spl_thread_create(void* (*entry_point)(void*), void* arg);
  */
 bool spl_thread_join(spl_thread_handle handle);
 
+int64_t rt_thread_spawn_isolated(int64_t fn_ptr, int64_t env_ptr);
+int64_t rt_thread_spawn_isolated2(int64_t fn_ptr, int64_t data1, int64_t data2);
+int64_t rt_thread_join(int64_t handle);
+int64_t rt_thread_is_done(int64_t handle);
+int64_t rt_thread_id(int64_t handle);
+void    rt_thread_free(int64_t handle);
+void    rt_thread_sleep(int64_t millis);
+void    rt_thread_yield(void);
+
 /**
  * Detach thread (no join required).
  *
