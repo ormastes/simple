@@ -12,6 +12,7 @@ HEIGHT="${ELECTRON_BITMAP_HEIGHT:-64}"
 ITERATIONS="${ELECTRON_BITMAP_ITERATIONS:-3}"
 TIMEOUT_SECS="${ELECTRON_BITMAP_TIMEOUT_SECS:-60}"
 SCENE="${ELECTRON_BITMAP_SCENE:-simple-web-layout-text-flow}"
+CAPTURE_MODE="${ELECTRON_LAYOUT_CAPTURE_MODE:-auto}"
 SIMPLE_SRC="$BUILD_DIR/simple_web_layout_expected.spl"
 SIMPLE_OUT="$BUILD_DIR/simple.out"
 HTML_PATH="$BUILD_DIR/scene.html"
@@ -39,6 +40,7 @@ emit_unavailable() {
         echo "electron_simple_web_layout_status=unavailable"
         echo "electron_simple_web_layout_reason=$reason"
         echo "electron_simple_web_layout_scene=$SCENE"
+        echo "electron_simple_web_layout_capture_mode=$CAPTURE_MODE"
         echo "electron_simple_web_layout_width=$WIDTH"
         echo "electron_simple_web_layout_height=$HEIGHT"
         echo "electron_simple_web_layout_iterations=$ITERATIONS"
@@ -79,9 +81,8 @@ if [ "$ELECTRON_BIN" = "" ]; then
 fi
 
 cat >"$SIMPLE_SRC" <<SIMPLE_EOF
-extern fn rt_file_write_text(path: text, content: text) -> bool
-
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels}
+use std.nogc_sync_mut.sffi.io.{file_write_text}
 
 val WIDTH: i32 = $WIDTH
 val HEIGHT: i32 = $HEIGHT
@@ -113,7 +114,7 @@ fn write_expected_bitmap(pixels: [u32]) -> bool:
         json = json + pixels[i].to_i64().to_text()
         i = i + 1
     json = json + "]}"
-    rt_file_write_text(EXPECTED_ARGB_PATH, json)
+    file_write_text(EXPECTED_ARGB_PATH, json)
 
 fn main():
     var html = "<html><body><main><h1>GUI</h1><p>taskbar command</p></main></body></html>"
@@ -163,7 +164,7 @@ fn main():
         html = "<html><style>.status{background-color:#334155;color:#ffffff;font-size:8px;padding:1px}.panel .status{background-color:#22c55e;color:#052e16;font-size:8px;padding:1px}</style><body><section class='panel'><div class='status'>IN</div></section><div class='status'>OUT</div></body></html>"
     if "$SCENE" == "simple-web-layout-child-scope":
         html = "<html><style>.status{background-color:#334155;color:#ffffff;font-size:8px;padding:1px}.panel>.status{background-color:#22c55e;color:#052e16;font-size:8px;padding:1px}</style><body><section class='panel'><div class='status'>DIRECT</div><div><span class='status'>NESTED</span></div></section><div class='status'>OUT</div></body></html>"
-    val wrote_html = rt_file_write_text(HTML_PATH, html)
+    val wrote_html = file_write_text(HTML_PATH, html)
     val pixels = simple_web_render_html_to_pixels(html, WIDTH, HEIGHT)
     if pixels.len() != WIDTH * HEIGHT:
         print "simple_status=fail"
@@ -216,13 +217,23 @@ if [ "$simple_blur" != "false" ]; then
     exit 1
 fi
 
+ELECTRON_CAPTURE_HTML_PATH="$HTML_PATH"
+if [ "$CAPTURE_MODE" = "canvas" ]; then
+    ELECTRON_CAPTURE_HTML_PATH=""
+elif [ "$CAPTURE_MODE" = "auto" ] && [ "$SCENE" = "simple-web-layout-text-flow" ]; then
+    ELECTRON_CAPTURE_HTML_PATH=""
+elif [ "$CAPTURE_MODE" != "auto" ] && [ "$CAPTURE_MODE" != "dom" ]; then
+    emit_unavailable "invalid-capture-mode:$CAPTURE_MODE"
+    exit 1
+fi
+
 set +e
 if have xvfb-run; then
-    ELECTRON_BITMAP_SCENE="$SCENE" ELECTRON_BITMAP_WIDTH="$WIDTH" ELECTRON_BITMAP_HEIGHT="$HEIGHT" ELECTRON_BITMAP_ITERATIONS="$ITERATIONS" ELECTRON_BITMAP_EXPECTED_CHECKSUM="$simple_checksum" ELECTRON_BITMAP_EXPECTED_WEIGHTED_CHECKSUM="$simple_weighted" ELECTRON_BITMAP_EXPECTED_ARGB_PATH="$EXPECTED_ARGB" ELECTRON_BITMAP_HTML_PATH="$HTML_PATH" ELECTRON_BITMAP_PROOF_PATH="$ELECTRON_PROOF" ELECTRON_BITMAP_CAPTURED_ARGB_PATH="$CAPTURED_ARGB" SIMPLE_ELECTRON_LIVE_BITMAP=1 \
+    ELECTRON_BITMAP_SCENE="$SCENE" ELECTRON_BITMAP_WIDTH="$WIDTH" ELECTRON_BITMAP_HEIGHT="$HEIGHT" ELECTRON_BITMAP_ITERATIONS="$ITERATIONS" ELECTRON_BITMAP_EXPECTED_CHECKSUM="$simple_checksum" ELECTRON_BITMAP_EXPECTED_WEIGHTED_CHECKSUM="$simple_weighted" ELECTRON_BITMAP_EXPECTED_ARGB_PATH="$EXPECTED_ARGB" ELECTRON_BITMAP_HTML_PATH="$ELECTRON_CAPTURE_HTML_PATH" ELECTRON_BITMAP_PROOF_PATH="$ELECTRON_PROOF" ELECTRON_BITMAP_CAPTURED_ARGB_PATH="$CAPTURED_ARGB" SIMPLE_ELECTRON_LIVE_BITMAP=1 \
         xvfb-run -a --server-args="-screen 0 1280x720x24" \
         "$ELECTRON_BIN" --force-device-scale-factor=1 --high-dpi-support=1 --force-color-profile=srgb --no-sandbox tools/electron-shell >"$ELECTRON_OUT" 2>&1 &
 else
-    ELECTRON_BITMAP_SCENE="$SCENE" ELECTRON_BITMAP_WIDTH="$WIDTH" ELECTRON_BITMAP_HEIGHT="$HEIGHT" ELECTRON_BITMAP_ITERATIONS="$ITERATIONS" ELECTRON_BITMAP_EXPECTED_CHECKSUM="$simple_checksum" ELECTRON_BITMAP_EXPECTED_WEIGHTED_CHECKSUM="$simple_weighted" ELECTRON_BITMAP_EXPECTED_ARGB_PATH="$EXPECTED_ARGB" ELECTRON_BITMAP_HTML_PATH="$HTML_PATH" ELECTRON_BITMAP_PROOF_PATH="$ELECTRON_PROOF" ELECTRON_BITMAP_CAPTURED_ARGB_PATH="$CAPTURED_ARGB" SIMPLE_ELECTRON_LIVE_BITMAP=1 \
+    ELECTRON_BITMAP_SCENE="$SCENE" ELECTRON_BITMAP_WIDTH="$WIDTH" ELECTRON_BITMAP_HEIGHT="$HEIGHT" ELECTRON_BITMAP_ITERATIONS="$ITERATIONS" ELECTRON_BITMAP_EXPECTED_CHECKSUM="$simple_checksum" ELECTRON_BITMAP_EXPECTED_WEIGHTED_CHECKSUM="$simple_weighted" ELECTRON_BITMAP_EXPECTED_ARGB_PATH="$EXPECTED_ARGB" ELECTRON_BITMAP_HTML_PATH="$ELECTRON_CAPTURE_HTML_PATH" ELECTRON_BITMAP_PROOF_PATH="$ELECTRON_PROOF" ELECTRON_BITMAP_CAPTURED_ARGB_PATH="$CAPTURED_ARGB" SIMPLE_ELECTRON_LIVE_BITMAP=1 \
         "$ELECTRON_BIN" --force-device-scale-factor=1 --high-dpi-support=1 --force-color-profile=srgb --no-sandbox tools/electron-shell >"$ELECTRON_OUT" 2>&1 &
 fi
 electron_pid=$!
@@ -357,6 +368,8 @@ fi
     echo "electron_simple_web_layout_status=$status"
     echo "electron_simple_web_layout_reason=$reason"
     echo "electron_simple_web_layout_scene=$SCENE"
+    echo "electron_simple_web_layout_capture_mode=$CAPTURE_MODE"
+    echo "electron_simple_web_layout_dom_html_path=${ELECTRON_CAPTURE_HTML_PATH:-}"
     echo "electron_simple_web_layout_width=$WIDTH"
     echo "electron_simple_web_layout_height=$HEIGHT"
     echo "electron_simple_web_layout_iterations=$ITERATIONS"
@@ -385,6 +398,8 @@ fi
     echo "- status: $status"
     echo "- reason: $reason"
     echo "- scene: $SCENE"
+    echo "- capture mode: $CAPTURE_MODE"
+    echo "- DOM HTML path: ${ELECTRON_CAPTURE_HTML_PATH:-}"
     echo "- dimensions: ${WIDTH}x${HEIGHT}"
     echo "- Simple checksum: $simple_checksum"
     echo "- Electron checksum: ${electron_checksum:-0}"

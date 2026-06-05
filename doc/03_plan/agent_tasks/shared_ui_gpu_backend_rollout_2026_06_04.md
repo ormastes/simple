@@ -343,6 +343,13 @@ Current evidence:
   samples plus `/usr/bin/time` max RSS for the Simple standalone TUI lane, and
   emits a companion normalized backend-comparison SDN artifact with generated
   operation metadata.
+- `scripts/check/check-generated-2d-backend-readback-matrix-evidence.shs`
+  runs the generated 2D readback matrix across CUDA, OpenCL, Vulkan, Metal, and
+  ROCm, treats CUDA/OpenCL/Vulkan as required on the current evidence host, and
+  writes `doc/09_report/generated_2d_backend_readback_matrix_2026-06-05.md`.
+  The current matrix passes CUDA, OpenCL, and Vulkan exact checksum/readback
+  proof while recording Metal and ROCm as explicit unavailable lanes when their
+  primary host tools are absent.
 - OpenCL, HIP, and ROCm now use the same acceleration-lane validation as CUDA,
   Metal, and Vulkan: initialized rows require scalar baseline comparison,
   strict rows reject GPU-to-CPU fallback, and initialized GPU samples require

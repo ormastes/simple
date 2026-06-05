@@ -161,6 +161,27 @@ To check both Simple native backends explicitly, compile
 `--backend=llvm`; both binaries should print the same 11 `virt...` checksum
 labels.
 
+### Generated 2D Backend Readback Matrix
+
+Use the generated 2D backend matrix wrapper when changing Engine2D readback,
+backend measurement export, or Simple Web layout evidence paths:
+
+```bash
+sh scripts/check/check-generated-2d-backend-readback-matrix-evidence.shs
+```
+
+The wrapper runs CUDA, OpenCL, Vulkan, Metal, and ROCm lanes. Required lanes
+must pass exact checksum/readback proof; unavailable optional lanes are recorded
+as explicit host-unavailable evidence instead of hidden success. The companion
+report is written under `doc/09_report/`, and per-backend logs/evidence files
+are written under `build/generated_2d_backend_readback_matrix/`.
+
+For Simple Web layout benchmark scenes, the Node bitmap fixture can consume a
+Simple-produced ARGB transport baseline with
+`SIMPLE_WEB_ENGINE2D_BASELINE_ARGB_IN`. This keeps live Electron/Node capture
+checks exact while DOM text-flow parity remains tracked separately as a follow-up
+when browser text rasterization differs from the Simple software renderer.
+
 ### Linux QEMU Network Parity
 
 Use `scripts/qemu/linux_qemu_net_parity_bench.shs` when comparing the same

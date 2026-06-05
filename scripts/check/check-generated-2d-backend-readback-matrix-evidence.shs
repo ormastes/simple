@@ -1,0 +1,192 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/generated_2d_backend_readback_matrix}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/generated_2d_backend_readback_matrix_$(date -u +%F).md}"
+REQUIRED_BACKENDS="${GENERATED_2D_REQUIRED_BACKENDS:-cuda opencl vulkan}"
+ENV_PATH="$BUILD_DIR/evidence.env"
+ROWS_PATH="$BUILD_DIR/rows.md"
+PORTABLE_TOOLCHAIN_BUILD_DIR="${PORTABLE_TOOLCHAIN_BUILD_DIR:-build/portable_compute_toolchains}"
+CUDA_PTX_PATH="${CUDA_PTX_PATH:-$PORTABLE_TOOLCHAIN_BUILD_DIR/simple_2d_optimization.ptx}"
+OPENCL_SPIRV_PATH="${OPENCL_SPIRV_PATH:-$PORTABLE_TOOLCHAIN_BUILD_DIR/simple_2d_optimization.spirv}"
+METAL_METALLIB_PATH="${METAL_METALLIB_PATH:-$PORTABLE_TOOLCHAIN_BUILD_DIR/simple_2d_optimization.metallib}"
+ROCM_HSACO_PATH="${ROCM_HSACO_PATH:-$PORTABLE_TOOLCHAIN_BUILD_DIR/simple_2d_optimization.hsaco}"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$ENV_PATH" "$ROWS_PATH" "$REPORT_PATH"
+
+value_of() {
+    env_file="$1"
+    key="$2"
+    if [ -f "$env_file" ]; then
+        sed -n "s/^${key}=//p" "$env_file" | tail -n 1
+    fi
+}
+
+is_required_backend() {
+    backend="$1"
+    case " $REQUIRED_BACKENDS " in
+        *" $backend "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+is_clean_optional_unavailable() {
+    backend="$1"
+    unavailable_reason="$2"
+    case "$backend:$unavailable_reason" in
+        metal:missing-primary-tool | \
+        metal:missing-metallib-tool | \
+        metal:missing-verified-metallib | \
+        metal:missing-metal-runtime | \
+        rocm:missing-primary-tool | \
+        rocm:missing-verified-hsaco | \
+        rocm:missing-rocm-runtime-loader | \
+        rocm:missing-rocm-runtime-probe-tool)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+append_env() {
+    key="$1"
+    value="$2"
+    printf '%s=%s\n' "$key" "$value" >>"$ENV_PATH"
+}
+
+run_backend() {
+    backend="$1"
+    prefix="$2"
+    script="$3"
+    backend_dir="$BUILD_DIR/$backend"
+    backend_report="$backend_dir/report.md"
+    stdout_path="$backend_dir/stdout.log"
+    stderr_path="$backend_dir/stderr.log"
+    env_file="$backend_dir/evidence.env"
+
+    mkdir -p "$backend_dir"
+    rm -f "$stdout_path" "$stderr_path" "$env_file" "$backend_report"
+
+    set +e
+    BUILD_DIR="$backend_dir" \
+        SIMPLE_VULKAN_READBACK_WORK_DIR="$backend_dir" \
+        TOOLCHAIN_BUILD_DIR="$PORTABLE_TOOLCHAIN_BUILD_DIR" \
+        PTX_PATH="$CUDA_PTX_PATH" \
+        SPIRV_PATH="$OPENCL_SPIRV_PATH" \
+        METALLIB_PATH="$METAL_METALLIB_PATH" \
+        HSACO_PATH="$ROCM_HSACO_PATH" \
+        REPORT_PATH="$backend_report" \
+        sh "$script" >"$stdout_path" 2>"$stderr_path"
+    exit_code=$?
+    set -e
+
+    if [ ! -s "$env_file" ]; then
+        {
+            echo "${prefix}_status=fail"
+            echo "${prefix}_reason=missing-evidence-env"
+        } >"$env_file"
+    fi
+
+    backend_status="$(value_of "$env_file" "${prefix}_status")"
+    backend_reason="$(value_of "$env_file" "${prefix}_reason")"
+    expected="$(value_of "$env_file" "${prefix}_expected_checksum")"
+    actual="$(value_of "$env_file" "${prefix}_actual_checksum")"
+    mismatch="$(value_of "$env_file" "${prefix}_mismatch_count")"
+    ops="$(value_of "$env_file" "${prefix}_ops")"
+
+    if [ "$backend" = "vulkan" ]; then
+        expected="$(value_of "$env_file" "vulkan_engine2d_readback_rect_expected_checksum")"
+        actual="$(value_of "$env_file" "vulkan_engine2d_readback_rect_actual_checksum")"
+        mismatch="$(value_of "$env_file" "vulkan_engine2d_readback_rect_mismatches")"
+        ops="clear,rect"
+    fi
+
+    required=false
+    if is_required_backend "$backend"; then
+        required=true
+    fi
+
+    verdict=fail
+    if [ "$backend_status" = "pass" ]; then
+        verdict=pass
+    elif [ "$required" = "false" ] && [ "$backend_status" = "unavailable" ] && is_clean_optional_unavailable "$backend" "$backend_reason"; then
+        verdict=host-unavailable
+    fi
+
+    append_env "generated_2d_backend_matrix_${backend}_status" "$backend_status"
+    append_env "generated_2d_backend_matrix_${backend}_reason" "$backend_reason"
+    append_env "generated_2d_backend_matrix_${backend}_required" "$required"
+    append_env "generated_2d_backend_matrix_${backend}_verdict" "$verdict"
+    append_env "generated_2d_backend_matrix_${backend}_exit_code" "$exit_code"
+    append_env "generated_2d_backend_matrix_${backend}_evidence_env" "$env_file"
+    append_env "generated_2d_backend_matrix_${backend}_report" "$backend_report"
+    append_env "generated_2d_backend_matrix_${backend}_stdout" "$stdout_path"
+    append_env "generated_2d_backend_matrix_${backend}_stderr" "$stderr_path"
+
+    printf '| %s | %s | %s | %s | %s | %s | %s |\n' \
+        "$backend" "$required" "${backend_status:-missing}" "${backend_reason:-missing}" \
+        "${expected:-}" "${actual:-}" "${mismatch:-}" >>"$ROWS_PATH"
+
+    if [ "$verdict" = "fail" ]; then
+        return 1
+    fi
+    return 0
+}
+
+{
+    echo "generated_2d_backend_matrix_required_backends=$REQUIRED_BACKENDS"
+} >"$ENV_PATH"
+{
+    echo "| Backend | Required | Status | Reason | Expected checksum | Actual checksum | Mismatches |"
+    echo "| --- | --- | --- | --- | --- | --- | --- |"
+} >"$ROWS_PATH"
+
+overall=pass
+reason=all-required-readbacks-passed
+
+run_backend cuda cuda_generated_2d_readback scripts/check/check-cuda-generated-2d-readback.shs || overall=fail
+run_backend opencl opencl_generated_2d_readback scripts/check/check-opencl-generated-2d-readback.shs || overall=fail
+run_backend vulkan vulkan_engine2d_readback scripts/check/check-vulkan-engine2d-readback.shs || overall=fail
+run_backend metal metal_generated_2d_readback scripts/check/check-metal-generated-2d-readback.shs || overall=fail
+run_backend rocm rocm_generated_2d_readback scripts/check/check-rocm-generated-2d-readback.shs || overall=fail
+
+if [ "$overall" != "pass" ]; then
+    reason=backend-readback-matrix-failed
+fi
+
+tmp_env="$BUILD_DIR/evidence.tmp"
+{
+    echo "generated_2d_backend_matrix_status=$overall"
+    echo "generated_2d_backend_matrix_reason=$reason"
+    cat "$ENV_PATH"
+} >"$tmp_env"
+mv "$tmp_env" "$ENV_PATH"
+
+{
+    echo "# Generated 2D Backend Readback Matrix Evidence"
+    echo
+    echo "Date: $(date -u +%F)"
+    echo
+    echo "- status: $overall"
+    echo "- reason: $reason"
+    echo "- required backends: $REQUIRED_BACKENDS"
+    echo
+    cat "$ROWS_PATH"
+    echo
+    echo "## Raw Evidence"
+    sed 's/^/- /' "$ENV_PATH"
+} >"$REPORT_PATH"
+
+cat "$ENV_PATH"
+echo "report_path=$REPORT_PATH"
+
+if [ "$overall" = "pass" ]; then
+    exit 0
+fi
+exit 1

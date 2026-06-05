@@ -28,6 +28,12 @@ skill at `.claude/skills/spipe_doc_wiki_refactor.md` so stale docs, command
 references, wiki-style process knowledge, and feature/layer expert links are
 cleaned before completion.
 
+When implementation changes add or replace evidence wrappers, refresh the
+matching guide/process documentation in the same lane. For GPU, Engine2D, Simple
+Web, Electron/Tauri, QEMU, or backend readback evidence, update the relevant
+`doc/03_plan`, `doc/07_guide`, and `doc/09_report` references so future agents
+can find the canonical wrapper instead of repeating stale commands.
+
 Before marking a feature tracking row `status=done`, fill `requirement`,
 `research`, `plan`, `architecture`, `design`, `system_spec`, `spec_doc`,
 `implementation`, `unit_tests`, `integration_tests`, and `guide`, then run
@@ -50,6 +56,15 @@ Run `sh scripts/setup/install-spipe-dev-command.shs --check` on Unix-like hosts,
 `powershell -ExecutionPolicy Bypass -File scripts\install-spipe-dev-command.ps1 --check`
 on Windows, to verify that this repository still routes Codex development
 through `/sp_dev` and does not carry a separate `/dev` skill.
+
+Before handoff, run the generated-spec layout guard:
+
+```sh
+find doc/06_spec -name '*_spec.spl' | wc -l
+```
+
+The result must be `0`; executable SPipe belongs under `test/`, while
+`doc/06_spec` contains generated/manual Markdown and evidence assets only.
 
 ## LLM Fine-Tune Handoff
 

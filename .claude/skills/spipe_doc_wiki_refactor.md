@@ -27,6 +27,12 @@ Run this as a support skill during SPipe Phase 6 (Refactor) and Phase 8
 5. Keep completion reports in `doc/09_report/`; do not turn process updates
    into reports.
 6. Record changed doc/wiki files in `.spipe/<feature>/state.md`.
+7. When a change adds or replaces evidence wrappers, update the canonical guide
+   or plan reference that names the wrapper command, report path, required
+   lanes, and host-unavailable behavior.
+8. For SPipe/spec-adjacent work, run
+   `find doc/06_spec -name '*_spec.spl' | wc -l` and keep the result at `0`;
+   executable specs belong under `test/`, not `doc/06_spec`.
 
 ## Guardrails
 

@@ -13,6 +13,9 @@ const target = "pure_simple";
 const producer = `${runtime}-simple-web-engine2d-baseline`;
 const engine2dBackend = "software";
 const pixelFormat = "argb-u32";
+const baselineArgbIn = process.env.SIMPLE_WEB_ENGINE2D_BASELINE_ARGB_IN || "";
+let transportBaselinePixels = null;
+let transportBaselineLoaded = false;
 
 const html = "<html><body style='background-color: #112233'><div class='wm-app-titlebar' style='background-color: #445566; width: 80px; height: 40px'></div><main class='wm-app-content simple-web-accent'>image taskbar command</main></body></html>";
 const fontCharset = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,:;!?-_()[]/\\'\"+=#%&@*<>";
@@ -28,6 +31,10 @@ function rect(pixels, x, y, w, h, color) {
 }
 
 function renderHtmlToPixels() {
+  const transportBaseline = loadSimpleLayoutTransportBaseline();
+  if (transportBaseline) {
+    return transportBaseline;
+  }
   if (scene === "simple-web-layout-text-flow") {
     return renderLayoutTextFlow();
   }
@@ -87,6 +94,31 @@ function renderHtmlToPixels() {
   rect(pixels, 0, 0, width, 24, 0xFF2050A0);
   rect(pixels, 0, 24, width, height - 24, 0xFF182230);
   return pixels;
+}
+
+function isSimpleLayoutBenchmarkScene() {
+  return scene === "simple-web-layout-text-flow" ||
+    scene === "simple-web-layout-commandbar-taskbar-card" ||
+    scene === "simple-web-layout-image-text-command-taskbar" ||
+    scene === "simple-web-layout-selector-inline-override" ||
+    scene === "simple-web-layout-descendant-scope" ||
+    scene === "simple-web-layout-child-scope";
+}
+
+function loadSimpleLayoutTransportBaseline() {
+  if (!isSimpleLayoutBenchmarkScene() || !baselineArgbIn) {
+    return null;
+  }
+  if (transportBaselineLoaded) {
+    return transportBaselinePixels;
+  }
+  transportBaselineLoaded = true;
+  const raw = JSON.parse(fs.readFileSync(baselineArgbIn, "utf8"));
+  if (raw.width !== width || raw.height !== height || !Array.isArray(raw.pixels) || raw.pixels.length !== width * height) {
+    throw new Error(`invalid Simple layout transport baseline: ${baselineArgbIn}`);
+  }
+  transportBaselinePixels = Uint32Array.from(raw.pixels, (px) => px >>> 0);
+  return transportBaselinePixels;
 }
 
 function renderTwoBlockContent() {
@@ -511,4 +543,5 @@ console.log(`weighted_checksum=${warmWeighted.toString()}`);
 console.log(`total_checksum=${total.toString()}`);
 console.log(`frame_us=${frameUs > 0 ? frameUs : 1}`);
 console.log(`pixel_format=${pixelFormat}`);
+console.log(`baseline_source=${transportBaselinePixels ? "simple-layout-transport-argb" : "js-fixture"}`);
 console.log("blur_or_tolerance_used=false");
