@@ -104,6 +104,90 @@ fn metal_gradient(w: i32, h: i32) -> MetalBackend:
     b.present()
     b
 
+# ---- scene: lines (thin + thick, several slopes) ----
+fn _draw_lines(b: any):
+    b.clear(0xFF000000 as u32)
+    b.draw_line(1, 1, 30, 6, 0xFFFF8040 as u32, 1)
+    b.draw_line(2, 30, 28, 2, 0xFF40FF80 as u32, 1)
+    b.draw_line(0, 16, 31, 16, 0xFF4080FF as u32, 1)
+    b.draw_line(16, 0, 16, 31, 0xFFFFFF00 as u32, 1)
+    b.draw_line(4, 4, 26, 26, 0xFFFF00FF as u32, 3)
+
+fn cpu_lines(w: i32, h: i32) -> [u32]:
+    var b = CpuBackend.create()
+    b.init(w, h)
+    _draw_lines(b)
+    b.present()
+    b.read_pixels()
+
+fn metal_lines(w: i32, h: i32) -> MetalBackend:
+    var b = MetalBackend.create()
+    b.init(w, h)
+    _draw_lines(b)
+    b.present()
+    b
+
+# ---- scene: circles (outline + filled) ----
+fn _draw_circles(b: any):
+    b.clear(0xFF000000 as u32)
+    b.draw_circle(16, 16, 12, 0xFF00FFAA as u32)
+    b.draw_circle(16, 16, 7, 0xFFFFAA00 as u32)
+    b.draw_circle_filled(16, 16, 4, 0xFFAA00FF as u32)
+
+fn cpu_circles(w: i32, h: i32) -> [u32]:
+    var b = CpuBackend.create()
+    b.init(w, h)
+    _draw_circles(b)
+    b.present()
+    b.read_pixels()
+
+fn metal_circles(w: i32, h: i32) -> MetalBackend:
+    var b = MetalBackend.create()
+    b.init(w, h)
+    _draw_circles(b)
+    b.present()
+    b
+
+# ---- scene: rounded rect outline ----
+fn _draw_rounded(b: any):
+    b.clear(0xFF000000 as u32)
+    b.draw_rounded_rect(2, 2, 28, 24, 6, 0xFFFFFFFF as u32)
+    b.draw_rounded_rect(8, 8, 16, 14, 3, 0xFF00AAFF as u32)
+
+fn cpu_rounded(w: i32, h: i32) -> [u32]:
+    var b = CpuBackend.create()
+    b.init(w, h)
+    _draw_rounded(b)
+    b.present()
+    b.read_pixels()
+
+fn metal_rounded(w: i32, h: i32) -> MetalBackend:
+    var b = MetalBackend.create()
+    b.init(w, h)
+    _draw_rounded(b)
+    b.present()
+    b
+
+# ---- scene: triangles ----
+fn _draw_triangles(b: any):
+    b.clear(0xFF000000 as u32)
+    b.draw_triangle_filled(16, 2, 2, 28, 30, 28, 0xFFFF4040 as u32)
+    b.draw_triangle_filled(4, 4, 28, 8, 10, 24, 0xFF4040FF as u32)
+
+fn cpu_triangles(w: i32, h: i32) -> [u32]:
+    var b = CpuBackend.create()
+    b.init(w, h)
+    _draw_triangles(b)
+    b.present()
+    b.read_pixels()
+
+fn metal_triangles(w: i32, h: i32) -> MetalBackend:
+    var b = MetalBackend.create()
+    b.init(w, h)
+    _draw_triangles(b)
+    b.present()
+    b
+
 fn main():
     if not is_macos():
         print("PARITY: skip reason=not-macos")
@@ -121,13 +205,30 @@ fn main():
     var m3 = metal_gradient(32, 32)
     compare("gradient", c3, m3.read_pixels(), m3.gpu_frame_complete)
 
-    # Scope: only the ops that share an exact integer algorithm on CPU and the
-    # Metal GPU are asserted here. line/circle/rounded_rect use different
-    # rasterization on each backend and diverge (tracked in
-    # doc/08_tracking/bug/engine2d_cpu_metal_primitive_raster_divergence_2026-06-03.md);
-    # triangle is not GPU-dispatched on Metal (mirror tautology), so it is
-    # excluded rather than compared.
-    print("SCOPE: asserts clear,rect_filled,rect_outline,gradient (bit-exact); excludes line,circle,rounded_rect (algorithm divergence), triangle (no GPU dispatch)")
+    # Primitive rasterization, now aligned to a single canonical algorithm per op
+    # so CPU and the Metal GPU produce bit-identical output:
+    #   - line: GPU replays the CPU Bresenham loop per step
+    #   - circle outline: GPU replays the CPU midpoint loop per step
+    #   - circle filled: both use the per-pixel distance test (CPU as isqrt spans)
+    #   - rounded_rect outline: GPU replays edges + midpoint corner arcs
+    #   - triangle: both use the same integer barycentric (edge-function) fill
+    val c4 = cpu_lines(32, 32)
+    var m4 = metal_lines(32, 32)
+    compare("line", c4, m4.read_pixels(), m4.gpu_frame_complete)
+
+    val c5 = cpu_circles(32, 32)
+    var m5 = metal_circles(32, 32)
+    compare("circle", c5, m5.read_pixels(), m5.gpu_frame_complete)
+
+    val c6 = cpu_rounded(32, 32)
+    var m6 = metal_rounded(32, 32)
+    compare("rounded_rect", c6, m6.read_pixels(), m6.gpu_frame_complete)
+
+    val c7 = cpu_triangles(32, 32)
+    var m7 = metal_triangles(32, 32)
+    compare("triangle", c7, m7.read_pixels(), m7.gpu_frame_complete)
+
+    print("SCOPE: asserts clear,rect_filled,rect_outline,gradient,line,circle(+filled),rounded_rect,triangle (all bit-exact CPU vs Metal GPU)")
     if _failures == 0:
         print("PARITY: pass")
     else:

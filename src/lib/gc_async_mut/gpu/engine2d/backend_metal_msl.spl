@@ -25,7 +25,7 @@ fn _engine2d_msl() -> text:
     - kernel_draw_circle_filled: Fill a circle (distance check)
     - kernel_draw_circle: Draw circle outline
     - kernel_draw_line: Bresenham line on GPU (1 thread per step)
-    - kernel_draw_rounded_rect: Filled rect with rounded corners
+    - kernel_draw_rounded_rect: Rounded-rect outline (edges + corner arcs)
     - kernel_draw_triangle_filled: Barycentric triangle fill
     - kernel_draw_gradient_rect: Vertical gradient fill
     - kernel_blit_image: Copy source pixels to framebuffer region
@@ -138,6 +138,13 @@ static inline uint lerp_channel(uint a, uint b, int t, int max_t) {
     return (uint)((int)a + ((int)b - (int)a) * t / max_t);
 }
 
+// Bounds-checked single-pixel write (mirrors CPU sw_set_pixel framebuffer clip).
+static inline void plot(device uint* fb, int x, int y, int fb_w, int fb_h, uint color) {
+    if (x >= 0 && x < fb_w && y >= 0 && y < fb_h) {
+        fb[y * fb_w + x] = color;
+    }
+}
+
 // ---- kernel_clear ----
 
 kernel void kernel_clear(
@@ -199,64 +206,76 @@ kernel void kernel_draw_line(
     constant LineParams& p  [[buffer(1)]],
     uint tid                [[thread_position_in_grid]]
 ) {
+    // Bit-exact replay of the CPU sw_bresenham loop: thread t draws the pixel
+    // the CPU reaches after t error-stepping iterations. This visits exactly the
+    // same pixel set as the integer Bresenham reference (no DDA division skips).
     int dx = p.x2 - p.x1;
     int dy = p.y2 - p.y1;
     int adx = dx < 0 ? -dx : dx;
     int ady = dy < 0 ? -dy : dy;
+    int sx = dx < 0 ? -1 : 1;
+    int sy = dy < 0 ? -1 : 1;
     int steps = adx > ady ? adx : ady;
-    if (steps == 0) steps = 1;
     if ((int)tid > steps) return;
 
     int t = (int)tid;
-    int px = p.x1 + dx * t / steps;
-    int py = p.y1 + dy * t / steps;
+    int cx = p.x1;
+    int cy = p.y1;
+    int err = adx - ady;
+    for (int k = 0; k < t; k++) {
+        int e2 = 2 * err;
+        if (e2 > -ady) { err -= ady; cx += sx; }
+        if (e2 < adx)  { err += adx; cy += sy; }
+    }
 
-    // Draw thickness
+    // Thickness: CPU draws parallel offset copies of the line. Translating both
+    // endpoints by `off` translates every Bresenham pixel by the same offset, so
+    // a single thread can emit the base pixel plus each thickness offset.
     int half_w = p.thickness / 2;
     for (int off = -half_w; off <= half_w; off++) {
-        int fx, fy;
         if (adx >= ady) {
-            fx = px;
-            fy = py + off;
+            plot(fb, cx, cy + off, p.fb_w, p.fb_h, p.color);
         } else {
-            fx = px + off;
-            fy = py;
-        }
-        if (fx >= 0 && fx < p.fb_w && fy >= 0 && fy < p.fb_h) {
-            int idx = fy * p.fb_w + fx;
-            fb[idx] = p.color;
+            plot(fb, cx + off, cy, p.fb_w, p.fb_h, p.color);
         }
     }
 }
 
 // ---- kernel_draw_circle ----
 
+// 1D dispatch: thread i replays the CPU midpoint-circle loop i times and emits
+// the 8 symmetric pixels for iteration i. Produces the same 8-connected ring as
+// the CPU reference (a per-pixel distance annulus gaps near the diagonals).
 kernel void kernel_draw_circle(
     device uint* fb           [[buffer(0)]],
     constant CircleParams& p  [[buffer(1)]],
-    uint2 tid                 [[thread_position_in_grid]]
+    uint tid                  [[thread_position_in_grid]]
 ) {
-    int bw = 2 * p.r + 1;
-    int bh = 2 * p.r + 1;
-    int lx = (int)tid.x;
-    int ly = (int)tid.y;
-    if (lx >= bw || ly >= bh) return;
+    int i = (int)tid;
+    int px = p.r;
+    int py = 0;
+    int d = 1 - p.r;
+    for (int k = 0; k < i; k++) {
+        py += 1;
+        if (d <= 0) {
+            d += 2 * py + 1;
+        } else {
+            px -= 1;
+            d += 2 * py - 2 * px + 1;
+        }
+    }
+    if (px < py) return;  // CPU loop condition `while px >= py`
 
-    int dx = lx - p.r;
-    int dy = ly - p.r;
-    int dist_sq = dx * dx + dy * dy;
-    int r_sq = p.r * p.r;
-
-    // Outline: draw pixels near the circle edge
-    int inner_r = (p.r - 1) * (p.r - 1);
-    if (dist_sq > r_sq || dist_sq < inner_r) return;
-
-    int px = p.cx - p.r + lx;
-    int py = p.cy - p.r + ly;
-    if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
-
-    int idx = py * p.fb_w + px;
-    fb[idx] = p.color;
+    int cx = p.cx;
+    int cy = p.cy;
+    plot(fb, cx + px, cy + py, p.fb_w, p.fb_h, p.color);
+    plot(fb, cx - px, cy + py, p.fb_w, p.fb_h, p.color);
+    plot(fb, cx + px, cy - py, p.fb_w, p.fb_h, p.color);
+    plot(fb, cx - px, cy - py, p.fb_w, p.fb_h, p.color);
+    plot(fb, cx + py, cy + px, p.fb_w, p.fb_h, p.color);
+    plot(fb, cx - py, cy + px, p.fb_w, p.fb_h, p.color);
+    plot(fb, cx + py, cy - px, p.fb_w, p.fb_h, p.color);
+    plot(fb, cx - py, cy - px, p.fb_w, p.fb_h, p.color);
 }
 
 // ---- kernel_draw_circle_filled ----
@@ -288,55 +307,68 @@ kernel void kernel_draw_circle_filled(
 
 // ---- kernel_draw_rounded_rect ----
 
+// Rounded-rect OUTLINE (matches CPU draw_rounded_rect: straight edges + four
+// midpoint corner arcs). 1D dispatch; thread k covers edge pixel k on each side
+// (when in range) and corner-arc iteration k (replayed midpoint) on all four
+// corners. Bit-exact with the CPU reference.
 kernel void kernel_draw_rounded_rect(
     device uint* fb                  [[buffer(0)]],
     constant RoundedRectParams& p    [[buffer(1)]],
-    uint2 tid                        [[thread_position_in_grid]]
+    uint tid                         [[thread_position_in_grid]]
 ) {
-    int lx = (int)tid.x;
-    int ly = (int)tid.y;
-    if (lx >= p.w || ly >= p.h) return;
-
+    int k = (int)tid;
+    int x = p.x;
+    int y = p.y;
+    int w = p.w;
+    int h = p.h;
     int r = p.radius;
-    if (r > p.w / 2) r = p.w / 2;
-    if (r > p.h / 2) r = p.h / 2;
+    if (r > w / 2) r = w / 2;
+    if (r > h / 2) r = h / 2;
 
-    // Check if pixel is inside the rounded rect
-    bool inside = true;
-
-    // Top-left corner
-    if (lx < r && ly < r) {
-        int dx = lx - r;
-        int dy = ly - r;
-        if (dx * dx + dy * dy > r * r) inside = false;
+    // Top/bottom straight edges: cols [x+r, x+w-1-r]  (CPU sw_hline length w-2r)
+    if (k < w - 2 * r) {
+        int col = x + r + k;
+        plot(fb, col, y, p.fb_w, p.fb_h, p.color);
+        plot(fb, col, y + h - 1, p.fb_w, p.fb_h, p.color);
     }
-    // Top-right corner
-    else if (lx >= p.w - r && ly < r) {
-        int dx = lx - (p.w - 1 - r);
-        int dy = ly - r;
-        if (dx * dx + dy * dy > r * r) inside = false;
-    }
-    // Bottom-left corner
-    else if (lx < r && ly >= p.h - r) {
-        int dx = lx - r;
-        int dy = ly - (p.h - 1 - r);
-        if (dx * dx + dy * dy > r * r) inside = false;
-    }
-    // Bottom-right corner
-    else if (lx >= p.w - r && ly >= p.h - r) {
-        int dx = lx - (p.w - 1 - r);
-        int dy = ly - (p.h - 1 - r);
-        if (dx * dx + dy * dy > r * r) inside = false;
+    // Left/right straight edges: rows [y+r, y+h-1-r]  (CPU sw_vline length h-2r)
+    if (k < h - 2 * r) {
+        int row = y + r + k;
+        plot(fb, x, row, p.fb_w, p.fb_h, p.color);
+        plot(fb, x + w - 1, row, p.fb_w, p.fb_h, p.color);
     }
 
-    if (!inside) return;
-
-    int px = p.x + lx;
-    int py = p.y + ly;
-    if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
-
-    int idx = py * p.fb_w + px;
-    fb[idx] = p.color;
+    // Corner arcs: replay CPU sw_corner_arc midpoint loop to iteration k.
+    int px = r;
+    int py = 0;
+    int d = 1 - r;
+    for (int q = 0; q < k; q++) {
+        py += 1;
+        if (d <= 0) {
+            d += 2 * py + 1;
+        } else {
+            px -= 1;
+            d += 2 * py - 2 * px + 1;
+        }
+    }
+    if (px >= py) {
+        int tlx = x + r;
+        int tly = y + r;
+        int trx = x + w - 1 - r;
+        int bry = y + h - 1 - r;
+        // top-left (sx=-1, sy=-1)
+        plot(fb, tlx - px, tly - py, p.fb_w, p.fb_h, p.color);
+        plot(fb, tlx - py, tly - px, p.fb_w, p.fb_h, p.color);
+        // top-right (sx=+1, sy=-1)
+        plot(fb, trx + px, tly - py, p.fb_w, p.fb_h, p.color);
+        plot(fb, trx + py, tly - px, p.fb_w, p.fb_h, p.color);
+        // bottom-left (sx=-1, sy=+1)
+        plot(fb, tlx - px, bry + py, p.fb_w, p.fb_h, p.color);
+        plot(fb, tlx - py, bry + px, p.fb_w, p.fb_h, p.color);
+        // bottom-right (sx=+1, sy=+1)
+        plot(fb, trx + px, bry + py, p.fb_w, p.fb_h, p.color);
+        plot(fb, trx + py, bry + px, p.fb_w, p.fb_h, p.color);
+    }
 }
 
 // ---- kernel_draw_triangle_filled ----

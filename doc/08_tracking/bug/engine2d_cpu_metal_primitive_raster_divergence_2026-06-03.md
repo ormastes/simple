@@ -4,7 +4,31 @@
 - date: 2026-06-03
 - area: rendering / engine2d
 - severity: medium
-- status: open
+- status: resolved (2026-06-05)
+
+## Resolution (2026-06-05)
+
+All four primitives are now bit-exact CPU↔Metal with genuine GPU readback
+(`gpu_frame_complete=true`), verified by the extended parity harness
+(`line/circle/rounded_rect/triangle: MATCH mismatches=0/1024`):
+
+- line: the MSL `kernel_draw_line` now replays the CPU `sw_bresenham` error loop
+  per step (instead of a DDA division), visiting the same pixel set.
+- circle outline: `kernel_draw_circle` replays the CPU midpoint loop (1D dispatch,
+  thread = iteration) and emits the 8 symmetric pixels — keeps the 8-connected
+  ring (a per-pixel distance annulus gaps near the diagonals).
+- circle filled: both backends use the per-pixel distance test `dx²+dy² ≤ r²`;
+  the CPU emits it as `isqrt(r²-dy²)` spans so it stays a fast hline fill.
+- rounded_rect outline: `kernel_draw_rounded_rect` was a filled interior test
+  (shape mismatch vs the CPU outline); it now draws the outline — straight edges
+  plus midpoint corner arcs replayed to match `sw_corner_arc`.
+- triangle: GPU dispatch enabled (`_dispatch_metal_triangle`); both backends use
+  the same integer barycentric (edge-function) fill, so it is no longer a mirror
+  tautology.
+
+The parity gate (`scripts/check/check-engine2d-cpu-metal-parity-evidence.shs`)
+and harness (`test/02_integration/rendering/engine2d_cpu_metal_parity_run.spl`)
+now assert all of these scenes.
 
 ## Summary
 

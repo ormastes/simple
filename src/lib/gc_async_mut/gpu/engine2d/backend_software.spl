@@ -221,27 +221,21 @@ impl RenderBackend for SoftwareBackend:
                 d = d + 2 * py - 2 * px + 1
 
     me draw_circle_filled(cx: i32, cy: i32, r: i32, color: u32):
+        # Per-pixel disk: a pixel (dx, dy) is filled iff dx*dx + dy*dy <= r*r.
+        # Emitted as one horizontal span per row (half-width = floor(sqrt(r*r -
+        # dy*dy))) so it stays a fast hline fill while producing the identical
+        # pixel set as the Metal kernel_draw_circle_filled distance test — making
+        # CPU and GPU bit-exact for filled circles.
         val has_alpha = color_a(color) < 255
-        var px = r
-        var py = 0
-        var d = 1 - r
-        while px >= py:
+        val r_sq = r * r
+        var dy = 0 - r
+        while dy <= r:
+            val half = _sw_isqrt(r_sq - dy * dy)
             if has_alpha:
-                self.sw_hline_blend(cx - px, cy + py, 2 * px + 1, color)
-                self.sw_hline_blend(cx - px, cy - py, 2 * px + 1, color)
-                self.sw_hline_blend(cx - py, cy + px, 2 * py + 1, color)
-                self.sw_hline_blend(cx - py, cy - px, 2 * py + 1, color)
+                self.sw_hline_blend(cx - half, cy + dy, 2 * half + 1, color)
             else:
-                self.sw_hline(cx - px, cy + py, 2 * px + 1, color)
-                self.sw_hline(cx - px, cy - py, 2 * px + 1, color)
-                self.sw_hline(cx - py, cy + px, 2 * py + 1, color)
-                self.sw_hline(cx - py, cy - px, 2 * py + 1, color)
-            py = py + 1
-            if d <= 0:
-                d = d + 2 * py + 1
-            else:
-                px = px - 1
-                d = d + 2 * py - 2 * px + 1
+                self.sw_hline(cx - half, cy + dy, 2 * half + 1, color)
+            dy = dy + 1
 
     me draw_rounded_rect(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32):
         var r = radius
@@ -259,69 +253,46 @@ impl RenderBackend for SoftwareBackend:
         self.sw_corner_arc(x + w - 1 - r, y + h - 1 - r, r, color, 1, 1)
 
     me draw_triangle_filled(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32):
-        # Sort vertices by y
-        var vx1 = x1
-        var vy1 = y1
-        var vx2 = x2
-        var vy2 = y2
-        var vx3 = x3
-        var vy3 = y3
-
-        if vy1 > vy2:
-            var tx = vx1
-            var ty = vy1
-            vx1 = vx2
-            vy1 = vy2
-            vx2 = tx
-            vy2 = ty
-        if vy2 > vy3:
-            var tx = vx2
-            var ty = vy2
-            vx2 = vx3
-            vy2 = vy3
-            vx3 = tx
-            vy3 = ty
-        if vy1 > vy2:
-            var tx = vx1
-            var ty = vy1
-            vx1 = vx2
-            vy1 = vy2
-            vx2 = tx
-            vy2 = ty
+        # Integer barycentric (edge-function / 2x-area) fill, identical to the
+        # Metal kernel_draw_triangle_filled so CPU and GPU produce the same pixel
+        # set. A pixel is inside when all three edge weights share the sign of the
+        # triangle determinant. Iterates the same bounding box as the GPU kernel.
+        val d = (y2 - y3) * (x1 - x3) + (x3 - x2) * (y1 - y3)
+        if d == 0:
+            return
+        var min_x = x1
+        if x2 < min_x: min_x = x2
+        if x3 < min_x: min_x = x3
+        var max_x = x1
+        if x2 > max_x: max_x = x2
+        if x3 > max_x: max_x = x3
+        var min_y = y1
+        if y2 < min_y: min_y = y2
+        if y3 < min_y: min_y = y3
+        var max_y = y1
+        if y2 > max_y: max_y = y2
+        if y3 > max_y: max_y = y3
 
         val has_alpha = color_a(color) < 255
-
-        # Upper half
-        var y = vy1
-        while y <= vy2:
-            val xa = _sw_edge_x(vx1, vy1, vx3, vy3, y)
-            val xb = if vy1 == vy2: vx2 else: _sw_edge_x(vx1, vy1, vx2, vy2, y)
-            var left = xa
-            var right = xb
-            if left > right:
-                left = xb
-                right = xa
-            if has_alpha:
-                self.sw_hline_blend(left, y, right - left + 1, color)
-            else:
-                self.sw_hline(left, y, right - left + 1, color)
-            y = y + 1
-
-        # Lower half
-        y = vy2 + 1
-        while y <= vy3:
-            val xa = _sw_edge_x(vx1, vy1, vx3, vy3, y)
-            val xb = _sw_edge_x(vx2, vy2, vx3, vy3, y)
-            var left = xa
-            var right = xb
-            if left > right:
-                left = xb
-                right = xa
-            if has_alpha:
-                self.sw_hline_blend(left, y, right - left + 1, color)
-            else:
-                self.sw_hline(left, y, right - left + 1, color)
-            y = y + 1
+        var py = min_y
+        while py <= max_y:
+            var px = min_x
+            while px <= max_x:
+                val w1 = (y2 - y3) * (px - x3) + (x3 - x2) * (py - y3)
+                val w2 = (y3 - y1) * (px - x3) + (x1 - x3) * (py - y3)
+                val w3 = d - w1 - w2
+                var inside = false
+                if d > 0:
+                    inside = w1 >= 0 and w2 >= 0 and w3 >= 0
+                else:
+                    inside = w1 <= 0 and w2 <= 0 and w3 <= 0
+                if inside:
+                    if has_alpha:
+                        self.sw_set_pixel_blend(px, py, color)
+                    else:
+                        self.sw_set_pixel(px, py, color)
+                px = px + 1
+            py = py + 1
 
     me draw_gradient_rect(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32):
         if h <= 0:
@@ -549,7 +520,7 @@ impl Engine2DExtended for SoftwareBackend:
 # The compiler silently drops mutations when `self` or `self.field` is passed
 # to a free function. All helpers that write into `self.buf` or
 # `self.dirty_tiles` are therefore `me` methods so that writes persist.
-# Read-only helpers (_clip_span, _sw_mask_blocks, _sw_edge_x) remain free
+# Read-only helpers (_clip_span, _sw_mask_blocks, _sw_isqrt) remain free
 # functions since they never mutate.
 # See: doc/08_tracking/bug/self_pass_to_free_fn_mutation_loss_2026-05-29.md
 # ============================================================================
@@ -732,8 +703,14 @@ fn _sw_mask_blocks(backend: SoftwareBackend, x: i32, y: i32) -> bool:
 # Triangle Edge Interpolation
 # ============================================================================
 
-fn _sw_edge_x(x1: i32, y1: i32, x2: i32, y2: i32, y: i32) -> i32:
-    val dy = y2 - y1
-    if dy == 0:
-        return x1
-    x1 + (x2 - x1) * (y - y1) / dy
+# Integer floor square root (Newton). Used by draw_circle_filled to compute the
+# per-row span half-width that matches the Metal distance test exactly.
+fn _sw_isqrt(n: i32) -> i32:
+    if n <= 0:
+        return 0
+    var x = n
+    var y = (x + 1) / 2
+    while y < x:
+        x = y
+        y = (x + n / x) / 2
+    x
