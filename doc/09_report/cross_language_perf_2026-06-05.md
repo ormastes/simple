@@ -27,29 +27,29 @@
 
 | Language               |     Avg (ms) |         Mode |              |              |
 |------------------------|--------------|--------------|--------------|--------------|
-| Simple (interpreter)   |       22.707 |    interpret |              |              |
-| Simple (SMF loader)    |       20.362 |          smf |              |              |
-| Simple (native)        |        2.977 |       native |              |              |
-| C (gcc -O2)            |        2.773 |       native |              |              |
-| Go (compiled)          |       60.222 |       native |              |              |
-| Python                 |       25.767 |    interpret |              |              |
-| Bun                    |       89.170 |          JIT |              |              |
-| Java                   |      154.938 |    JIT (JVM) |              |              |
-| Erlang                 |     1700.510 |      BEAM VM |              |              |
+| Simple (interpreter)   |       26.378 |    interpret |              |              |
+| Simple (SMF loader)    |       19.717 |          smf |              |              |
+| Simple (native)        |        4.660 |       native |              |              |
+| C (gcc -O2)            |        3.366 |       native |              |              |
+| Go (compiled)          |       62.748 |       native |              |              |
+| Python                 |       25.732 |    interpret |              |              |
+| Bun                    |       91.925 |          JIT |              |              |
+| Java                   |      133.677 |    JIT (JVM) |              |              |
+| Erlang                 |     1496.866 |      BEAM VM |              |              |
 
 ## 3. Warm Throughput — fib(35) (in-process: 10 warmup + 20 measured)
 
 | Language               |     Avg (ms) |                                    Notes |
 |------------------------|--------------|------------------------------------------|
-| Simple (interpreter)   |       93.880 | tree-walk (outer-process, no in-proc timing) |
-| Simple (SMF loader)    |       82.994 | bytecode (outer-process, no in-proc timing) |
-| Simple (native)        |       74.506 |           AOT via Cranelift (in-process) |
-| C (gcc -O2)            |       17.352 |                             baseline AOT |
-| Go                     |       59.388 |                                  SSA AOT |
-| Python                 |     1906.721 |                         CPython bytecode |
-| Bun                    |       83.548 |        JavaScriptCore JIT (steady-state) |
-| Java                   |       54.325 |            HotSpot C2 JIT (steady-state) |
-| Erlang                 |      143.143 |                    BEAM (single-process) |
+| Simple (interpreter)   |       92.425 | tree-walk (outer-process, no in-proc timing) |
+| Simple (SMF loader)    |       89.876 | bytecode (outer-process, no in-proc timing) |
+| Simple (native)        |       57.182 |           AOT via Cranelift (in-process) |
+| C (gcc -O2)            |       12.261 |                             baseline AOT |
+| Go                     |       49.810 |                                  SSA AOT |
+| Python                 |     1643.529 |                         CPython bytecode |
+| Bun                    |       60.349 |        JavaScriptCore JIT (steady-state) |
+| Java                   |       47.164 |            HotSpot C2 JIT (steady-state) |
+| Erlang                 |      139.121 |                    BEAM (single-process) |
 
 ## 4. Parallel — spawn 100 workers (20 runs avg)
 
@@ -57,13 +57,36 @@
 |------------------------|--------------|------------------------------------------|
 | Simple (interpreter)   |          n/a |          extern thread FFI not supported |
 | Simple (SMF loader)    |         fail |              std thread_spawn (bytecode) |
-| Simple (native)        |       12.907 | channel + OS threads (same as Go pattern) |
-| C (pthreads)           |       10.091 |                               OS threads |
-| Go                     |        6.795 |           goroutines + chan result (M:N) |
-| Python                 |     3114.279 |                          threading (GIL) |
-| Bun                    |     1303.723 |                           worker_threads |
-| Java                   |      169.305 |                               ThreadPool |
-| Erlang                 |     1428.695 |                    lightweight processes |
+| Simple (native)        |       12.424 | channel + OS threads (same as Go pattern) |
+| C (pthreads)           |        9.077 |                               OS threads |
+| Go                     |        6.786 |           goroutines + chan result (M:N) |
+| Python                 |     2860.359 |                          threading (GIL) |
+| Bun                    |      930.975 |                           worker_threads |
+| Java                   |      167.486 |                               ThreadPool |
+| Erlang                 |     1370.559 |                    lightweight processes |
+
+## 4b. Parallel Binary Sizes
+
+| Language               |         Binary |     Per-thread |                Notes |
+|------------------------|----------------|----------------|----------------------|
+| Simple (native)        |       131.8 KB | OS default (8MB) |        Cranelift AOT |
+| Simple (SMF)           |       118.7 KB | OS default (8MB) |    + runtime 42.8 MB |
+| C (pthreads)           |        15.8 KB | OS default (8MB) |              gcc -O2 |
+| Go                     |         1.8 MB | goroutine (2-8KB) |        static binary |
+| Python                 |        374.0 B | OS default (8MB) |        + interpreter |
+| Bun                    |        535.0 B | worker (isolate) |            + runtime |
+| Java                   |         2.7 KB |    JVM managed |                + JRE |
+| Erlang                 |         1.5 KB |  process (2KB) |            + BEAM VM |
+
+## 4c. Parallel Peak RSS (100 workers)
+
+| Language               |       Peak RSS |         RSS / worker |
+|------------------------|----------------|----------------------|
+| Simple (native)        |         2.8 MB |                ~28KB |
+| C (pthreads)           |         1.8 MB |                ~17KB |
+| Go                     |         1.8 MB |                ~17KB |
+| Python                 |        10.2 MB |               ~104KB |
+| Java                   |        47.8 MB |               ~488KB |
 
 > **Workload:** LCG (Linear Congruential Generator) with 100K iterations per worker.
 > Each worker reads shared constants (LCG_A, LCG_C, LCG_M, ITERS).
@@ -76,6 +99,10 @@
 > flow. C shares via globals with no safety guarantee.
 > Same semantic, same safety for result collection; Simple adds compile-time
 > enforcement for shared read-only data.
+>
+> **RSS note:** Per-worker RSS is a rough proxy: (total_RSS - baseline) / 100.
+> OS-thread languages (Simple, C) pay ~8MB default stack per thread.
+> Go uses 2-8KB goroutine stacks — 1000x less memory per concurrent task.
 
 ## Size Definition
 

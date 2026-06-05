@@ -134,7 +134,7 @@ write_simple_parallel() {
     # Workers send results through a channel; main recvs and sums.
     # Unrolled: native codegen List iteration is broken (codegen bug).
     {
-        echo 'use std.concurrent.channel.{channel_new, Channel}'
+        echo 'use std.concurrent.channel.{channel_new, channel_from_id}'
         echo 'use std.concurrent.thread.{thread_spawn}'
         echo ''
         echo 'val LCG_A: i64 = 1103515245'
@@ -146,7 +146,7 @@ write_simple_parallel() {
         echo '    var x = seed'
         echo '    for i in 0..ITERS:'
         echo '        x = (x * LCG_A + LCG_C) % LCG_M'
-        echo '    val ch = Channel(_id: ch_id)'
+        echo '    val ch = channel_from_id(ch_id)'
         echo '    ch.send(x)'
         echo '    return 0'
         echo ''
@@ -731,6 +731,103 @@ if have erl; then
     par_row "Erlang" "$ms" "lightweight processes"
 fi
 
+# ── 4b. Parallel binary sizes ───────────────────────────────────────────
+
+echo "=== Measuring parallel binary sizes ==="
+section "4b. Parallel Binary Sizes"
+printf "| %-22s | %14s | %14s | %20s |\n" "Language" "Binary" "Per-thread" "Notes" >>"$REPORT_PATH"
+printf "|%-24s|%16s|%16s|%22s|\n" "------------------------" "----------------" "----------------" "----------------------" >>"$REPORT_PATH"
+
+par_size_row() {
+    printf "| %-22s | %14s | %14s | %20s |\n" "$1" "$2" "$3" "$4" >>"$REPORT_PATH"
+}
+
+if [ -x "$BUILD_DIR/parallel_simple_native" ]; then
+    _sz=$(bytes_of "$BUILD_DIR/parallel_simple_native")
+    par_size_row "Simple (native)" "$(human_bytes "$_sz")" "OS default (8MB)" "Cranelift AOT"
+fi
+if [ -f "$BUILD_DIR/parallel_simple.smf" ]; then
+    _sz=$(bytes_of "$BUILD_DIR/parallel_simple.smf")
+    par_size_row "Simple (SMF)" "$(human_bytes "$_sz")" "OS default (8MB)" "+ runtime $(human_bytes "$(bytes_of "$(readlink -f "$SIMPLE_BINARY")")")"
+fi
+if [ -x "$BUILD_DIR/parallel_c" ]; then
+    _sz=$(bytes_of "$BUILD_DIR/parallel_c")
+    par_size_row "C (pthreads)" "$(human_bytes "$_sz")" "OS default (8MB)" "gcc -O2"
+fi
+if [ -x "$BUILD_DIR/parallel_go" ]; then
+    _sz=$(bytes_of "$BUILD_DIR/parallel_go")
+    par_size_row "Go" "$(human_bytes "$_sz")" "goroutine (2-8KB)" "static binary"
+fi
+if have python3; then
+    _sz=$(bytes_of "$BUILD_DIR/parallel.py")
+    par_size_row "Python" "$(human_bytes "$_sz")" "OS default (8MB)" "+ interpreter"
+fi
+if have bun; then
+    _sz=$(bytes_of "$BUILD_DIR/parallel.js")
+    par_size_row "Bun" "$(human_bytes "$_sz")" "worker (isolate)" "+ runtime"
+fi
+if have java; then
+    _sz=$(bytes_of "$BUILD_DIR/Parallel.class")
+    par_size_row "Java" "$(human_bytes "$_sz")" "JVM managed" "+ JRE"
+fi
+if have erl; then
+    _sz=$(bytes_of "$BUILD_DIR/parallel.beam")
+    par_size_row "Erlang" "$(human_bytes "$_sz")" "process (2KB)" "+ BEAM VM"
+fi
+
+# ── 4c. Parallel peak RSS ──────────────────────────────────────────────
+
+echo "=== Measuring parallel peak RSS ==="
+section "4c. Parallel Peak RSS (100 workers)"
+printf "| %-22s | %14s | %20s |\n" "Language" "Peak RSS" "RSS / worker" >>"$REPORT_PATH"
+printf "|%-24s|%16s|%22s|\n" "------------------------" "----------------" "----------------------" >>"$REPORT_PATH"
+
+par_rss_row() {
+    printf "| %-22s | %14s | %20s |\n" "$1" "$2" "$3" >>"$REPORT_PATH"
+}
+
+measure_rss() {
+    # Returns peak RSS in KB via /usr/bin/time -v
+    _cmd="$1"
+    /usr/bin/time -v sh -c "$_cmd" 2>&1 >/dev/null | grep "Maximum resident" | awk '{print $NF}'
+}
+
+if [ -x "$BUILD_DIR/parallel_simple_native" ]; then
+    _rss_kb=$(measure_rss "$BUILD_DIR/parallel_simple_native")
+    if [ -n "$_rss_kb" ] && [ "$_rss_kb" != "0" ]; then
+        _rss_per=$(( _rss_kb / 100 ))
+        par_rss_row "Simple (native)" "$(human_bytes $((_rss_kb * 1024)))" "~${_rss_per}KB"
+    fi
+fi
+if [ -x "$BUILD_DIR/parallel_c" ]; then
+    _rss_kb=$(measure_rss "$BUILD_DIR/parallel_c")
+    if [ -n "$_rss_kb" ] && [ "$_rss_kb" != "0" ]; then
+        _rss_per=$(( _rss_kb / 100 ))
+        par_rss_row "C (pthreads)" "$(human_bytes $((_rss_kb * 1024)))" "~${_rss_per}KB"
+    fi
+fi
+if [ -x "$BUILD_DIR/parallel_go" ]; then
+    _rss_kb=$(measure_rss "$BUILD_DIR/parallel_go")
+    if [ -n "$_rss_kb" ] && [ "$_rss_kb" != "0" ]; then
+        _rss_per=$(( _rss_kb / 100 ))
+        par_rss_row "Go" "$(human_bytes $((_rss_kb * 1024)))" "~${_rss_per}KB"
+    fi
+fi
+if have python3; then
+    _rss_kb=$(measure_rss "python3 $BUILD_DIR/parallel.py")
+    if [ -n "$_rss_kb" ] && [ "$_rss_kb" != "0" ]; then
+        _rss_per=$(( _rss_kb / 100 ))
+        par_rss_row "Python" "$(human_bytes $((_rss_kb * 1024)))" "~${_rss_per}KB"
+    fi
+fi
+if have java; then
+    _rss_kb=$(measure_rss "java -cp $BUILD_DIR Parallel")
+    if [ -n "$_rss_kb" ] && [ "$_rss_kb" != "0" ]; then
+        _rss_per=$(( _rss_kb / 100 ))
+        par_rss_row "Java" "$(human_bytes $((_rss_kb * 1024)))" "~${_rss_per}KB"
+    fi
+fi
+
 # ── parallel design note ────────────────────────────────────────────────
 
 cat >>"$REPORT_PATH" <<'EOF'
@@ -746,6 +843,10 @@ cat >>"$REPORT_PATH" <<'EOF'
 > flow. C shares via globals with no safety guarantee.
 > Same semantic, same safety for result collection; Simple adds compile-time
 > enforcement for shared read-only data.
+>
+> **RSS note:** Per-worker RSS is a rough proxy: (total_RSS - baseline) / 100.
+> OS-thread languages (Simple, C) pay ~8MB default stack per thread.
+> Go uses 2-8KB goroutine stacks — 1000x less memory per concurrent task.
 EOF
 
 # ── footer ───────────────────────────────────────────────────────────────
