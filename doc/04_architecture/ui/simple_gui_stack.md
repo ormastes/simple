@@ -83,14 +83,15 @@ Simple TUI                    Simple GUI API
                     batch selection, cache keys,
                     fallback reason reporting
                                   |
-             -------------------------------------------
-             |                    |                    |
-             v                    v                    v
-      CPU/SIMD backend     GPU backend plugin      Host wrapper surface
-      mandatory oracle     OpenCL/CUDA/HIP/        Tauri/Electron/
-                           Vulkan/Metal/WebGPU     Chrome/browser/native
-             |                    |                    |
-             ---------------- shared Engine2D API -----|
+             ----------------------------------------------
+             |                                            |
+             v                                            v
+      Drawing backend lane                      Processing backend lane
+      primitive draw, framebuffer,              compute kernels, generated
+      present, readback                         artifacts, filters, SIMD/GPU
+      CPU/SIMD oracle, Vulkan/Metal             offload, sync evidence
+             |                                            |
+             ---------------- shared Engine2D API ---------|
                                   |
                                   v
                          Draw processing
@@ -242,6 +243,13 @@ RenderOptimizationPlugin
 Fallback to the CPU/SIMD backend is mandatory. The CPU path is the correctness
 oracle for tests, screenshots, capture hashes, and unsupported GPU devices.
 
+Backend selection is split into two explicit lanes. The drawing lane owns
+framebuffer-visible primitive rendering, present, and readback. The processing
+lane owns generated kernels, filter/layout compute, vector/font offload, and
+SIMD/GPU preparation work. A backend may implement both lanes on one device, but
+that is a `combined` lane plan rather than an implicit assumption. The current
+contract is in `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl`.
+
 ### Event Target Translation
 
 Window-level event targeting is resolved through
@@ -259,11 +267,13 @@ future GPU plugin receives the event context.
 
 ### Engine2D and Primitive Draw
 
-Engine2D remains the shared drawing execution layer. It should expose stable
-primitive operations and backend sessions while hiding backend-specific device
-details from UI and wrapper code. Draw processing may use CPU scalar, CPU SIMD,
-OpenCL, CUDA, HIP, Vulkan, Metal, or WebGPU, but GUI code sees only the typed
-Simple 2D and plugin contracts.
+Engine2D remains the shared drawing and processing execution layer. It should
+expose stable primitive operations and backend sessions while hiding
+backend-specific device details from UI and wrapper code. Drawing backends
+handle primitive draw, framebuffer ownership, present, and readback. Processing
+backends handle compute kernels, generated artifacts, filters, and offload.
+Draw processing may use CPU scalar, CPU SIMD, OpenCL, CUDA, HIP, Vulkan, Metal,
+or WebGPU, but GUI code sees only the typed Simple 2D and plugin contracts.
 
 ## Hot-Path Policy
 
@@ -290,10 +300,61 @@ style/font/image cache versions, and fallback reason metadata.
    extraction, and draw execution modules.
 3. Route GUI AST redraw through the typed IR path before the HTML parser path.
 4. Add the render optimization plugin interface with CPU fallback first.
-5. Add GPU backend implementations behind capability probes and evidence
+5. Split concrete backend implementations into drawing-lane and
+   processing-lane capabilities before adding direct GPU Draw IR execution.
+6. Add GPU backend implementations behind capability probes and evidence
    reports.
-6. Keep Tauri, Electron, Chrome, and browser wrappers thin; they should not own
+7. Keep Tauri, Electron, Chrome, and browser wrappers thin; they should not own
    renderer policy.
+
+### WM Runtime Dispatch
+
+`src/lib/common/ui/wm_runtime_dispatch.spl` converts backend-neutral
+`SharedWmDispatchResult` values into stable `WmRuntimeDispatchCommand` structs
+with kind, target_id, app_id, window_id, payload, and handled flag. This
+adapter lets host WM runtimes (web bridge, SimpleOS WM, native host) consume
+WM commands without depending on the internal window-scene dispatch model.
+`WmRuntimeShellState` tracks launched apps, focused window, drag surface, and
+last command for shell-side bookkeeping.
+
+The web host bridge in `src/app/ui.web/wm_runtime_bridge.spl` consumes these
+dispatch commands and forwards them to the web adapter protocol.
+
+## Source File Map
+
+| Layer | File | Purpose |
+|---|---|---|
+| Draw IR contract | `src/lib/common/ui/draw_ir.spl` | `DrawIrCommand`, `DrawIrBatch`, `DrawIrComposition`, `DrawIrSourceInfo`, `DrawIrEmbeddingConfig`, `DrawIrEventTargetContext`, `Simple2dDrawIrPlan` |
+| WM scene | `src/lib/common/ui/window_scene.spl` | `SharedWmScene`, `SharedWmWindow`, event target translation, scene layout keys, cache-safe pointer targeting |
+| WM → Draw IR | `src/lib/common/ui/window_scene_draw_ir.spl` | WM scene composition into ordered Draw IR batches (desktop, chrome, windows by z-order) |
+| WM dispatch | `src/lib/common/ui/wm_runtime_dispatch.spl` | `WmRuntimeDispatchCommand`, `WmRuntimeShellState`, backend-neutral WM command adapter |
+| Engine2D Draw IR | `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl` | `Engine2dDrawIrAdvResult`, first Simple2D-facing Draw IR executor (rect/text, CPU fallback, pixel readback) |
+| Backend lane | `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl` | Drawing vs processing lane split contract |
+| Web render API | `src/lib/common/ui/web_render_api.spl` | WebRender IR transport |
+| Web bridge | `src/app/ui.web/wm_bridge.spl` | Web host WM adapter |
+| Web WM bridge | `src/app/ui.web/wm_runtime_bridge.spl` | Web host WM runtime dispatch consumer |
+
+## Host Shell Targets
+
+| Shell | App path | Notes |
+|---|---|---|
+| Web | `src/app/ui.web` | Primary host; web adapter protocol |
+| TUI | `src/app/ui.tui` | Terminal surfaces |
+| TUI+Web | `src/app/ui.tui_web` | TUI over web transport |
+| Standalone | `src/app/ui.standalone` | Native window, no wrapper |
+| Tauri | `src/app/ui.tauri` | Tauri webview shell |
+| Electron | `src/app/ui.electron` | Electron shell |
+| Chromium | `src/app/ui.chromium` | Chromium embedding |
+| Browser | `src/app/ui.browser` | Browser-only target |
+| VS Code | `src/app/ui.vscode` | VS Code webview extension |
+| CLI | `src/app/ui.cli` | CLI-mode UI |
+| IPC | `src/app/ui.ipc` | IPC bridge |
+| MCP | `src/app/ui.mcp` | MCP UI integration |
+| Render | `src/app/ui.render` | Headless render target |
+| Test API | `src/app/ui.test_api` | Test harness |
+
+All shells are thin — they forward input and present frames. GUI policy,
+state, layout, event routing, and Draw IR remain Simple-owned.
 
 ## Verification Requirements
 
@@ -306,5 +367,7 @@ Every implementation of this architecture needs evidence for:
 - pixel/capture/hash evidence for GPU execution claims;
 - warm redraw latency, input-to-paint latency, max RSS, cache-hit behavior, and
   startup probe cost;
+- WM dispatch command parity: `wm_runtime_dispatch_command` output must match
+  across web bridge, SimpleOS WM, and standalone hosts;
 - `doc/06_spec` layout safety: executable specs stay under `test/**`, not
   under generated/manual spec docs.

@@ -22,8 +22,10 @@ Simple code
            (commands + source/style provenance)
         -> Simple 2D API
         -> Render Optimization Plugin
-           -> CPU/SIMD fallback
-           -> GPU plugin: OpenCL/CUDA/HIP/Vulkan/Metal/WebGPU
+           -> drawing backend lane
+              primitive draw, framebuffer, present, readback
+           -> processing backend lane
+              generated kernels, filters, SIMD/GPU offload
         -> Engine2D draw processing
         -> primitive draw
         -> framebuffer / texture
@@ -51,6 +53,9 @@ Host input
   schemas, cache invalidation, and CPU oracle behavior.
 - Plugin owns: capability probe, cost model, batch preparation, GPU/CPU
   execution, readback, and fallback reports.
+- Backend lane split: drawing backends own framebuffer-visible draw/present/
+  readback; processing backends own compute kernels, generated artifacts,
+  filters, and offload. Combined backends are explicit lane plans.
 - Wrappers own: host process/window/webview integration and input/present IPC.
 - Preferred next refactor: typed GUI AST -> WebRender IR -> Draw IR; resolve
   GUI/HTML AST and CSS before Draw IR, then keep source kind/id and style
@@ -62,6 +67,28 @@ Host input
   input location/component data to a Draw IR batch and rejects stale scene keys.
 - Simple2D hook: `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl` accepts
   Draw IR through Engine2D with CPU fallback metadata and pixel readback.
+- Engine2D split contract: `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl`.
+- WM dispatch adapter: `src/lib/common/ui/wm_runtime_dispatch.spl` converts
+  `SharedWmDispatchResult` to stable `WmRuntimeDispatchCommand` for host shells.
+- Web WM bridge: `src/app/ui.web/wm_runtime_bridge.spl` consumes dispatch
+  commands for the web host.
+
+## Source Files
+
+| File | What |
+|---|---|
+| `src/lib/common/ui/draw_ir.spl` | Draw IR contract (commands, batches, composition, event context) |
+| `src/lib/common/ui/window_scene.spl` | WM scene, event target translation, scene layout keys |
+| `src/lib/common/ui/window_scene_draw_ir.spl` | WM scene → Draw IR composition |
+| `src/lib/common/ui/wm_runtime_dispatch.spl` | WM dispatch command adapter for host shells |
+| `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl` | Engine2D Draw IR executor (rect/text, CPU fallback) |
+| `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl` | Drawing vs processing lane split |
+| `src/app/ui.web/wm_runtime_bridge.spl` | Web host WM runtime bridge |
+
+## Host Shells
+
+Web, TUI, Standalone, Tauri, Electron, Chromium, Browser, VS Code, CLI, IPC,
+MCP, Render, Test API — all thin. GUI policy stays in Simple.
 
 ## Operational Notes
 

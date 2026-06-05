@@ -29,6 +29,7 @@ Refactor the Simple UI render/event boundary so Simple 2D has a typed advanced D
 - AC-7: The change does not implement real GPU migration; GPU execution remains a later backend job behind the contract.
 - AC-8: Draw IR carries source/style provenance for manual, GUI AST, HTML AST/CSS, and WM-generated batches so conversion, cache invalidation, and GPU plugin grouping can be hardened without parsing HTML/CSS in the backend.
 - AC-9: Any inefficiency or bug discovered while hardening the GPU/backend path is recorded as a concrete bug report.
+- AC-10: Engine2D backend architecture separates drawing backend responsibilities from processing/compute backend responsibilities so future GPU Draw IR migration does not conflate framebuffer ownership with kernel/offload execution.
 
 ## Scope Exclusions
 
@@ -56,3 +57,5 @@ dev-done
 - impl: Added `DrawIrEventTargetContext` so translated pointer events carry
   component/local coordinate/backend metadata into the Draw IR batch selected
   for draw processing, with stale scene rejection.
+- impl: Added `backend_lane.spl` to make drawing vs processing backend
+  responsibilities explicit and exported through Engine2D.
