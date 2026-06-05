@@ -61,10 +61,37 @@ scalar stores and do **not** call these kernels; routing those through the SIMD
 layer is tracked as future work and is gated on the array un-boxing that AOT
 provides.
 
+## Verification gates
+
+- `scripts/check/check-engine2d-simd-c-kernels.shs` — compiles the C kernels'
+  pure helpers and runs the **exhaustive** bit-exactness test
+  (`test/09_baselines/engine2d_simd/engine2d_simd_c_test.c`, all 16.7M
+  `(sa,s,d)` blend combos). This is the only gate that exercises the **C** path
+  directly; the others run in the interpreter (Rust seed shim).
+- `scripts/check/check-cpu-simd-engine2d-evidence.shs` — interpreter evidence
+  (NEON executed + bit-exact). Its skip-guard greps `rt_engine2d_simd_fill_row_u32`
+  (the symbol the evidence actually calls) so a binary without the new externs
+  skips cleanly rather than crashing.
+
 ## Deployment
 
 Because these are runtime externs, the production `bin/release` binary picks
 them up via the standard bootstrap (`scripts/bootstrap/bootstrap-from-scratch.sh
 --deploy`). The freshly built driver
-(`src/compiler_rust/target/gui/debug/simple`) has them immediately for
+(`src/compiler_rust/target/bootstrap/simple`) has them immediately for
 verification.
+
+### Open follow-ups
+
+- **Native end-to-end unverified.** `runtime_simd_dispatch.c` is wired into the
+  core-c runtime archive (`tools.rs`) and `.spl` calls the C-backed externs, but
+  this was only verified in interpreter mode + by the standalone C gate; a native
+  engine2d build that actually links and runs the C kernels has not been run here
+  (that build path is separately problematic). Confirm the native lane links
+  `rt_engine2d_simd_*_row_u32` from the C archive before claiming production parity.
+- **Dead legacy handlers.** The old `rt_simd_fill_row_u32` / `rt_simd_copy_row_u32`
+  interpreter handlers (engine2d_simd_ops Rust backing) are no longer referenced
+  by `.spl`; delete-unused cleanup is deferred to avoid an extra seed rebuild.
+- **blit/scroll** remain pure-Simple scalar (never Rust-backed); a genuine SIMD
+  win there needs in-place externs, which the interpreter's Arc-clone model can't
+  propagate.
