@@ -30,19 +30,26 @@ The ground truth is `read_pixels()` dumped to a PPM — it proves the lane rende
 independent of window-server/compositor/permission state. Screen capture by
 region is flaky (it can grab whatever window sits at those coordinates).
 
-- 2D + widgets: dump via the app's `read_pixels()` → P6 PPM.
-- Widgets headless dump: `SHOWCASE_PPM=/tmp/widgets.ppm … run
-  examples/06_io/ui/widget_showcase_gui.spl --mode=interpreter`.
-- Web/HTML headless dump at a realistic size (binary P6 via `encode_ppm_p6`):
-  ```bash
-  PAGE_W=440 PAGE_H=360 SIMPLE_TIMEOUT_SECONDS=1200 SIMPLE_LIB=src \
-    src/compiler_rust/target/gui/debug/simple run \
-    examples/06_io/ui/web_render_page_ppm.spl <file.html> /tmp/out.ppm --mode=interpreter
-  ```
-  Always pass **`--mode=interpreter`** for these graphics apps: default JIT mode
-  panics resolving the winit/engine2d runtime externs (`rt_winit_event_loop_new`;
-  the rt_* handle-table split). The macos-gui-run.shs launcher already forces
-  interpret mode. Use `encode_ppm_p6(w,h,pixels)` (`common.image.ppm_decode`) — it
+Each app dumps `read_pixels()` → P6 PPM when its env var is set:
+
+```bash
+# 2D shapes
+SHAPES_PPM=/tmp/shapes.ppm   SIMPLE_EXECUTION_MODE=interpret SIMPLE_LIB=src \
+  src/compiler_rust/target/gui/debug/simple run examples/06_io/ui/engine2d_shapes_gui.spl
+# GUI widgets
+SHOWCASE_PPM=/tmp/widgets.ppm SIMPLE_EXECUTION_MODE=interpret SIMPLE_LIB=src \
+  src/compiler_rust/target/gui/debug/simple run examples/06_io/ui/widget_showcase_gui.spl
+# Web/HTML at a realistic size (binary P6 via encode_ppm_p6)
+PAGE_W=440 PAGE_H=360 SIMPLE_EXECUTION_MODE=interpret SIMPLE_TIMEOUT_SECONDS=1200 SIMPLE_LIB=src \
+  src/compiler_rust/target/gui/debug/simple run \
+  examples/06_io/ui/web_render_page_ppm.spl <file.html> /tmp/out.ppm
+```
+
+Always set **`SIMPLE_EXECUTION_MODE=interpret`** for these graphics apps: in default
+JIT mode the cranelift JIT panics resolving the winit/engine2d runtime externs
+(`rt_winit_event_loop_new`; the rt_* handle-table split). `--mode=interpreter` is
+**not** sufficient — JIT is still attempted; the env var is what the driver honors
+(macos-gui-run.shs sets it). Use `encode_ppm_p6(w,h,pixels)` (`common.image.ppm_decode`) — it
   pre-sizes + index-assigns (O(n)); never the O(n²) ASCII-P3 `ppm = ppm + …`
   concat, and never `expr as u8` in an element store (the `[u8]`→extern marshalling
   drops u8-tagged elements — store masked ints). The web layout lane is
