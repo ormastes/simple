@@ -90,11 +90,18 @@ restaurant webapp infra test vehicle.
     - Result: 9.1MB binary, app prints "[RestaurantApp] Starting at http://localhost:3001",
       passes module inits and WebApp.new(), crashes in WebApp.start() — codegen bug.
 
-14. **Codegen bug in WebApp.start()** — open
-    - Binary starts, prints startup message, crashes in WebApp.start()
-    - GDB: `mov 0x30(%rdi),%r10` segfaults — WebApp struct field access
-    - Likely a Cranelift codegen issue with struct layout or field offsets
-    - This is the final runtime blocker for serving HTTP
+14. **Codegen bug in WebApp.start()** — PARTIALLY FIXED (2026-06-05)
+    - **Fixed:** `WebApp.new("app.sdn")` called `JsonArrayBuilder.new` instead
+      of `WebApp.create` — import map resolved wrong `.new()` method due to
+      name collision across modules. Fix: changed `main.spl` to use `.create()`.
+    - **Remaining:** crash in `HandlerRegistry.register` inside `start()` —
+      `self.registry` loads string data (raw "e: app.s") instead of a
+      HandlerRegistry pointer. Struct field offset computation is wrong.
+    - Root cause: Cranelift native codegen computes incorrect byte offsets
+      for struct fields in multi-field classes. The WebApp class has 8 fields
+      and field 6 (registry) is accessed at the wrong offset, returning
+      string data from field 0 (config).
+    - This is a deep codegen/struct-layout bug requiring compiler-side fix.
 
 ## Conclusion
 
