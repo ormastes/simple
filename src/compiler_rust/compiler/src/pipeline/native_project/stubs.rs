@@ -652,6 +652,12 @@ pub(crate) fn generate_stub_object(
         preview,
         if needs_stub.len() > 80 { " ..." } else { "" }
     );
+    if let Ok(dump_path) = std::env::var("SIMPLE_DUMP_STUBS") {
+        let mut all: Vec<String> = needs_stub.iter().cloned().collect();
+        all.sort();
+        let _ = std::fs::write(&dump_path, all.join("\n") + "\n");
+        eprintln!("Wrote {} unresolved symbols to {}", all.len(), dump_path);
+    }
 
     if std::env::var("SIMPLE_NO_STUB_FALLBACK").as_deref() == Ok("1") {
         return Err(format!(
