@@ -930,7 +930,16 @@ fn is_windows_system_prefix(name: &str) -> bool {
 }
 
 fn is_macos_system_symbol(sym: &str) -> bool {
+    // macOS ABI-variant suffixes (`realpath$DARWIN_EXTSN`, `fopen$UNIX2003`, ...) alias
+    // the plain libc entry point; classify them by their base name.
+    let sym = sym.split('$').next().unwrap_or(sym);
     let name = sym.strip_prefix('_').unwrap_or(sym);
+
+    // After stripping the `$`-variant suffix, re-check the shared libc/libm table so
+    // ABI-variant aliases (e.g. `realpath$DARWIN_EXTSN`) resolve to their base entry.
+    if is_known_system_name(sym) || is_known_system_name(name) {
+        return true;
+    }
 
     if matches!(
         name,
@@ -1028,6 +1037,105 @@ fn is_macos_system_symbol(sym: &str) -> bool {
     }
 
     if name.starts_with("pthread_") || name.starts_with("dispatch_") || name.starts_with("mach_") {
+        return true;
+    }
+
+    // Symbols provided by the C libraries linked alongside `libsimple_native_all.a`
+    // (see `PlatformLinkConfig::macos()` / `macos_frameworks()`): libffi, libedit,
+    // zlib/zstd, libxml2, libncurses/terminfo, libobjc, plus low-level runtime/dyld/
+    // TLS/unwind helpers from libSystem. These resolve from the real `-l`/`-framework`
+    // flags at link time, so they must not be weak-stubbed (stubbing wins over the real
+    // definition and produces a broken binary).
+    if name.starts_with("ffi_")          // libffi
+        || name.starts_with("el_")       // libedit
+        || name.starts_with("history")   // libedit
+        || name.starts_with("tok_")      // libedit
+        || name.starts_with("xml")       // libxml2
+        || name.starts_with("ZSTD_")     // zstd
+        || name.starts_with("MTL")       // Metal framework
+        || name.starts_with("Unwind_")   // libunwind / libSystem
+        || name.starts_with("_Unwind_")
+        || name.starts_with("dyld_")     // dyld image introspection
+        || name.starts_with("_dyld_")
+        || name.starts_with("tlv_")      // thread-local-variable runtime
+        || name.starts_with("_tlv_")
+    {
+        return true;
+    }
+
+    // libz (zlib) and libncurses/terminfo entry points (no common prefix).
+    if matches!(
+        name,
+        // zlib
+        "compress" | "compress2" | "compressBound" | "uncompress" | "crc32" | "crc32_combine"
+            | "adler32" | "adler32_combine" | "deflate" | "deflateInit_" | "deflateInit2_"
+            | "deflateEnd" | "deflateBound" | "inflate" | "inflateInit_" | "inflateInit2_"
+            | "inflateEnd" | "zlibVersion"
+            // libncurses / terminfo (used transitively by libedit)
+            | "setupterm" | "del_curterm" | "set_curterm" | "tigetnum" | "tigetstr" | "tigetflag"
+            | "tparm" | "tputs"
+            // libobjc runtime (also reachable via Foundation framework)
+            | "class_getName" | "class_isMetaClass" | "object_getClass" | "sel_getName"
+            | "sel_registerName" | "objc_msgSend" | "objc_getClass" | "objc_lookUpClass"
+            // libiconv
+            | "iconv" | "iconv_open" | "iconv_close"
+    ) {
+        return true;
+    }
+
+    // Additional libc / libm / libSystem entry points referenced by the combined
+    // archive that are missing from `is_known_system_name` above. All resolve from
+    // `-lSystem` (already in the macOS lib list); they only need to be kept out of the
+    // stub set so the real definitions win.
+    if matches!(
+        name,
+        // libm
+        "cbrt" | "cbrtf" | "cosh" | "sinh" | "tanh" | "exp2" | "exp2f" | "exp10" | "_exp10"
+            | "hypot" | "hypotf" | "ldexp" | "ldexpf" | "log1p" | "log1pf" | "log2f" | "modf"
+            | "modff" | "feclearexcept" | "fetestexcept" | "fegetround" | "fesetround"
+            | "sincos" | "sincosf" | "_sincos_stret" | "__sincos_stret" | "sincos_stret"
+            | "__exp10"
+            // libc string / stdio / formatting
+            | "atoi" | "atol" | "atoll" | "atof" | "bzero" | "memccpy" | "strcasecmp"
+            | "strncasecmp" | "strnlen" | "strpbrk" | "strspn" | "strcspn" | "strsep"
+            | "strsignal" | "strerror_r" | "strtof" | "strftime" | "strptime" | "putchar"
+            | "fgetc" | "getc" | "ungetc" | "scanf" | "sscanf" | "fscanf" | "vsnprintf"
+            | "vfprintf" | "vprintf" | "vsprintf" | "remove" | "uuid_unparse" | "uuid_generate"
+            // libc process / fs / signals / misc
+            | "alarm" | "pause" | "raise" | "wait" | "wait4" | "waitid" | "execv" | "execvp"
+            | "execvpe" | "chmod" | "fchmod" | "chown" | "fchown" | "lchown" | "chroot"
+            | "umask" | "link" | "linkat" | "unlinkat" | "openat" | "fstatat" | "statfs"
+            | "fstatfs" | "fsync" | "fdatasync" | "futimens" | "utimensat" | "isatty"
+            | "openpty" | "ttyname" | "ttyname_r" | "ptsname" | "grantpt" | "unlockpt"
+            | "posix_openpt" | "tcgetattr" | "tcsetattr" | "tcdrain" | "tcflush" | "cfmakeraw"
+            | "getentropy" | "getrandom" | "getpagesize" | "getrlimit" | "setrlimit"
+            | "getrusage" | "getpriority" | "setpriority" | "getsid" | "setsid" | "setpgid"
+            | "getpgid" | "setgid" | "setuid" | "setgroups" | "getgroups" | "getpeername"
+            | "getsockname" | "shutdown" | "gethostuuid" | "gethostname" | "sethostname"
+            | "gai_strerror" | "getnameinfo" | "sigprocmask" | "sigpending" | "sigsuspend"
+            | "sigwait" | "longjmp" | "setjmp" | "_setjmp" | "_longjmp" | "siglongjmp"
+            | "sigsetjmp" | "gmtime_r" | "localtime_r" | "mktime" | "timegm" | "asctime_r"
+            | "ctime_r" | "sched_yield" | "shm_open" | "shm_unlink" | "madvise"
+            | "posix_madvise" | "msync" | "mlock" | "munlock" | "backtrace"
+            | "backtrace_symbols" | "dladdr" | "dlinfo" | "getpwnam_r" | "getgrnam_r"
+            | "getgrgid_r" | "getpwnam" | "uname" | "putenv"
+            // Apple-specific copyfile / clonefile / malloc-zone / mach / objc-glue
+            | "copyfile" | "fcopyfile" | "copyfile_state_alloc" | "copyfile_state_free"
+            | "copyfile_state_get" | "copyfile_state_set" | "clonefile" | "fclonefileat"
+            | "clonefileat" | "malloc_default_zone" | "malloc_zone_statistics"
+            | "malloc_zone_malloc" | "malloc_size" | "malloc_good_size"
+            | "memset_pattern16" | "memset_pattern8" | "memset_pattern4"
+            | "sys_icache_invalidate" | "sys_dcache_flush" | "proc_pid_rusage"
+            | "task_get_exception_ports" | "task_set_exception_ports"
+            // low-level C runtime / EH glue resolved by libSystem / compiler-rt
+            | "__assert_rtn" | "_assert_rtn" | "__chkstk_darwin" | "_chkstk_darwin"
+            | "__register_frame" | "_register_frame" | "__deregister_frame"
+            | "_deregister_frame" | "__dso_handle" | "_dso_handle" | "__memcpy_chk"
+            | "_memcpy_chk" | "__memmove_chk" | "__memset_chk" | "__strcpy_chk"
+            | "__strcat_chk" | "__snprintf_chk" | "__sprintf_chk" | "__vsnprintf_chk"
+            | "__gxx_personality_v0" | "_gxx_personality_v0" | "__DefaultRuneLocale"
+            | "_DefaultRuneLocale" | "__Exit" | "_Exit"
+    ) {
         return true;
     }
 

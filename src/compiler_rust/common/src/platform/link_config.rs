@@ -83,8 +83,19 @@ impl PlatformLinkConfig {
 
     fn macos() -> Self {
         Self {
-            libraries: vec!["m", "System"],
-            library_search_paths: vec![],
+            // `m`/`System` are the libc/libm base. The combined `libsimple_native_all.a`
+            // additionally references the C libraries that several runtime/vendor crates
+            // bind (libffi for dynamic FFI, libedit for the REPL, zlib/zstd for
+            // compression, libxml2 for the XML helpers, libncurses for terminfo, libobjc
+            // for the Objective-C runtime, libiconv for text transcoding). These are not
+            // emitted as load commands by this native-build link path the way `cargo`/
+            // rustc auto-adds them, so they must be listed explicitly or their symbols go
+            // unresolved (and, with `SIMPLE_NO_STUB_FALLBACK=1`, fail the build).
+            libraries: vec![
+                "m", "System", "z", "ffi", "edit", "zstd", "xml2", "ncurses", "objc", "iconv",
+            ],
+            // Homebrew prefix so `-lzstd` resolves (no `libzstd.tbd` ships in the SDK).
+            library_search_paths: vec!["/opt/homebrew/lib"],
             system_scan_libs: vec!["/usr/lib/libSystem.B.dylib"],
             nm_flags: vec!["-g", "-p"],
             stub_strategy: StubStrategy::WeakDefinition,
@@ -106,6 +117,11 @@ impl PlatformLinkConfig {
             "CoreServices",
             "Foundation",
             "AppKit",
+            // Metal/CoreGraphics are referenced by the graphics runtime baked into
+            // `libsimple_native_all.a` (e.g. `_MTLCreateSystemDefaultDevice`); without
+            // these frameworks those symbols stay unresolved at link time.
+            "Metal",
+            "CoreGraphics",
         ]
     }
 
