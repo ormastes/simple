@@ -230,10 +230,7 @@ typedef struct {
 
 static void* rt_isolated_wrapper(void* raw) {
     RtThreadData* td = (RtThreadData*)raw;
-    fprintf(stderr, "[rt_wrapper] calling fn=0x%lx(closure=0x%lx)\n",
-            (unsigned long)(intptr_t)td->entry, (unsigned long)td->closure_ptr);
     td->result = td->entry(td->closure_ptr);
-    fprintf(stderr, "[rt_wrapper] result=%ld\n", td->result);
     td->done = 1;
     return NULL;
 }
@@ -247,15 +244,9 @@ static DWORD WINAPI rt_isolated_wrapper_win(LPVOID raw) {
 }
 #endif
 
-int64_t __attribute__((noinline,optimize("O0"))) rt_thread_spawn_isolated(int64_t arg0, int64_t arg1) {
-    fprintf(stderr, "[rt_spawn] arg0=0x%lx arg1=0x%lx\n", (unsigned long)arg0, (unsigned long)arg1);
-    fflush(stderr);
-    int64_t closure_ptr = (arg1 != 0) ? arg1 : arg0;
-    fprintf(stderr, "[rt_spawn] using closure_ptr=0x%lx\n", (unsigned long)closure_ptr);
-    fflush(stderr);
+int64_t rt_thread_spawn_isolated(int64_t closure_ptr, int64_t _unused) {
+    (void)_unused;
     rt_closure_fn_t fn_ptr = *(rt_closure_fn_t*)(intptr_t)closure_ptr;
-    fprintf(stderr, "[rt_spawn] fn_ptr=0x%lx\n", (unsigned long)(intptr_t)fn_ptr);
-    fflush(stderr);
     RtThreadData* td = (RtThreadData*)SPL_MALLOC(sizeof(RtThreadData), "rt_thread");
     if (!td) return 0;
     td->entry       = fn_ptr;

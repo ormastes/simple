@@ -1,0 +1,62 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl 80%
+# @tag: unit, engine2d, backend, lane
+
+use std.spec
+use std.gpu.engine2d.backend_lane.{
+    ENGINE2D_BACKEND_LANE_COMBINED,
+    ENGINE2D_BACKEND_LANE_DRAWING,
+    ENGINE2D_BACKEND_LANE_PROCESSING,
+    engine2d_backend_lane_plan,
+    engine2d_backend_lane_summary,
+    engine2d_combined_backend_lane,
+    engine2d_drawing_backend_lane,
+    engine2d_operation_lane,
+    engine2d_processing_backend_lane
+}
+
+describe "Engine2D backend lane split":
+
+    it "keeps drawing backends responsible for framebuffer visible rendering":
+        val lane = engine2d_drawing_backend_lane("vulkan")
+
+        expect(lane.lane).to_equal(ENGINE2D_BACKEND_LANE_DRAWING)
+        expect(lane.backend_name).to_equal("vulkan")
+        expect(lane.owns_framebuffer).to_equal(true)
+        expect(lane.owns_kernel_dispatch).to_equal(false)
+        expect(lane.requires_readback).to_equal(true)
+        expect(engine2d_backend_lane_summary(lane)).to_contain("framebuffer=true")
+
+    it "keeps processing backends responsible for compute and offload":
+        val lane = engine2d_processing_backend_lane("cuda")
+
+        expect(lane.lane).to_equal(ENGINE2D_BACKEND_LANE_PROCESSING)
+        expect(lane.backend_name).to_equal("cuda")
+        expect(lane.owns_framebuffer).to_equal(false)
+        expect(lane.owns_kernel_dispatch).to_equal(true)
+        expect(lane.requires_readback).to_equal(false)
+        expect(engine2d_operation_lane("generated_kernel")).to_equal(ENGINE2D_BACKEND_LANE_PROCESSING)
+        expect(engine2d_operation_lane("filter")).to_equal(ENGINE2D_BACKEND_LANE_PROCESSING)
+
+    it "allows an explicit combined backend without hiding the split":
+        val lane = engine2d_combined_backend_lane("metal")
+
+        expect(lane.lane).to_equal(ENGINE2D_BACKEND_LANE_COMBINED)
+        expect(lane.owns_framebuffer).to_equal(true)
+        expect(lane.owns_kernel_dispatch).to_equal(true)
+        expect(engine2d_operation_lane("present")).to_equal(ENGINE2D_BACKEND_LANE_DRAWING)
+        expect(engine2d_operation_lane("layout_compute")).to_equal(ENGINE2D_BACKEND_LANE_PROCESSING)
+
+    it "builds a split plan with CPU fallback when processing is not specified":
+        val split = engine2d_backend_lane_plan("vulkan", "cuda", true, true)
+        val fallback = engine2d_backend_lane_plan("cpu", "", true, false)
+
+        expect(split.drawing_backend.backend_name).to_equal("vulkan")
+        expect(split.processing_backend.backend_name).to_equal("cuda")
+        expect(split.processing_required).to_equal(true)
+        expect(split.shared_device_preferred).to_equal(true)
+        expect(split.split_required).to_equal(true)
+        expect(split.fallback_reason).to_equal("")
+        expect(fallback.drawing_backend.backend_name).to_equal("cpu")
+        expect(fallback.processing_backend.backend_name).to_equal("cpu")
+        expect(fallback.split_required).to_equal(false)
+        expect(fallback.fallback_reason).to_contain("processing backend not specified")
