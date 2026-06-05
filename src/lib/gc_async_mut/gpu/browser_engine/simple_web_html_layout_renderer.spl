@@ -491,9 +491,21 @@ fn apply_decls(st: Style, decls: text) -> Style:
             font_size_v = v
     val line_height = decl_get(decls, "line-height")
     if line_height.len() > 0:
-        val lh = parse_int(line_height)
-        if lh > 0:
-            line_height_v = lh
+        if line_height.contains("px"):
+            val lh = parse_int(line_height)
+            if lh > 0:
+                line_height_v = lh
+        else:
+            # Unitless line-height (e.g. 1.6) is a multiplier of font-size, NOT pixels.
+            # parse_int("1.6") drops to 1px and collapses every line — store a negative
+            # sentinel = multiplier*10, resolved per-element in style_line_h.
+            val whole = parse_int(line_height)
+            var mult10 = whole * 10
+            val dot = find_from(line_height, ".", 0)
+            if dot >= 0 and dot + 1 < line_height.len():
+                mult10 = whole * 10 + parse_int(line_height.substring(dot + 1, dot + 2))
+            if mult10 > 0:
+                line_height_v = 0 - mult10
     val width = decl_get(decls, "width")
     if width.len() > 0:
         if width.ends_with("%"):
@@ -1851,6 +1863,12 @@ fn line_h(fs: i32) -> i32:
 fn style_line_h(st: Style) -> i32:
     if st.line_height_px > 0:
         return st.line_height_px
+    if st.line_height_px < 0:
+        # negative sentinel = unitless line-height multiplier * 10 (e.g. 1.6 -> -16),
+        # resolved here against the element's final font-size.
+        val lh = st.font_size * (0 - st.line_height_px) / 10
+        if lh > 0:
+            return lh
     line_h(st.font_size)
 
 fn text_ink_y_offset(fs: i32) -> i32:
