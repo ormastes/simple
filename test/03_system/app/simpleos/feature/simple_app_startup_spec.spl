@@ -17,7 +17,17 @@ use os.kernel.loader.app_registry.{
     app_registry_cache_bytes,
     app_registry_cached_bytes
 }
+use os.services.vfs.vfs_init.{
+    _clear_vfs_rootfs_for_test,
+    _mount_hosted_rootfs_for_test,
+    g_vfs_write_file_text
+}
+use std.fs_driver.instance.{DriverInstance}
+use std.db.dbfs_driver.{DbFsDriver}
 use app.startup.launch_metadata.{launch_metadata_for_simpleos_path, startup_plan_from_metadata}
+
+fn _dbfs_root() -> DriverInstance:
+    DriverInstance.DbFs(DbFsDriver.new_hosted())
 
 describe "SimpleOS app startup prefetch":
     describe "REQ-100: SimpleOS launch metadata":
@@ -52,6 +62,7 @@ describe "SimpleOS app startup prefetch":
             expect(app_registry_cached_bytes("/sys/apps/simple").len()).to_equal(3)
 
         it "should record a miss for an executable that is not warmed yet":
+            _clear_vfs_rootfs_for_test()
             launcher_init()
             app_registry_load_hardcoded_fallback()
 
@@ -62,6 +73,22 @@ describe "SimpleOS app startup prefetch":
             expect(launcher_prefetch_last_path()).to_equal("/sys/apps/editor.smf")
             expect(launcher_prefetch_last_cache_hit()).to_equal(false)
             expect(launcher_get_running_app_count()).to_equal(0)
+
+        it "should warm executable bytes through VFS when hover finds an app file":
+            _clear_vfs_rootfs_for_test()
+            expect(_mount_hosted_rootfs_for_test(_dbfs_root())).to_equal(true)
+            expect(g_vfs_write_file_text("/sys/apps/editor.smf", "SMF!!")).to_equal(true)
+            launcher_init()
+            app_registry_load_hardcoded_fallback()
+
+            val hit = launcher_hover_executable_icon("/sys/apps/editor.smf")
+
+            expect(hit).to_equal(true)
+            expect(launcher_prefetch_count()).to_equal(1)
+            expect(launcher_prefetch_last_path()).to_equal("/sys/apps/editor.smf")
+            expect(launcher_prefetch_last_cache_hit()).to_equal(true)
+            expect(launcher_get_running_app_count()).to_equal(0)
+            expect(app_registry_cached_bytes("/sys/apps/editor").len()).to_equal(5)
 
         it "should reject empty hover paths without recording a prefetch":
             launcher_init()

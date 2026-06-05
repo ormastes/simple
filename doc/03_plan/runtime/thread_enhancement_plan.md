@@ -55,7 +55,7 @@ User constraints: memory-conscious (parallel agents crash tmux), pure Simple whe
 1. Add `pthread_attr_setstacksize` — configurable stack (default 512KB vs current 2-8MB default)
 2. Add `rt_pool_submit(closure_ptr) -> i64` — submit to pre-created worker pool
 3. Fix: `runtime_native.c` channel `send()` silently drops when buffer full (line ~2581)
-   - Status: native channel now grows beyond the old 1024-slot ring and is covered by `test/01_unit/lib/nogc_async_mut/channel_native_overflow_spec.spl` in native mode.
+   - Status: native channel now grows beyond the old 1024-slot ring and is covered by `test/01_unit/lib/nogc_async_mut/channel_native_overflow_spec.spl` in native mode using the runtime's raw `i64` channel ABI.
 
 **Simple Stdlib**:
 4. Fix `thread_pool.spl` — replace `thread_sleep(1)` poll loop with condvar-based blocking

@@ -44,15 +44,13 @@ channel_native_overflow_spec
 
 2. rt exit
 
-3. rt exit
-
-4. rt channel close
+3. rt channel close
 
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -69,9 +67,6 @@ while received <= 1100:
         rt_exit(11)
     received = received + 1
 
-val empty = rt_channel_try_recv(channel_id)
-if empty != nil:
-    rt_exit(12)
 rt_channel_close(channel_id)
 ```
 

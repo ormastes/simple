@@ -35,12 +35,48 @@ Existing pieces to reuse:
   `src/os/kernel/loader/loader_api.spl`,
   `src/os/kernel/loader/dylib_registry.spl`, and
   `src/os/kernel/loader/smf.spl`.
+- Native/SMF launch metadata emission:
+  `src/compiler/80.driver/driver_aot_output.spl` appends native
+  `SIMPLE_LAUNCH_V1` trailers and writes SMF `.launch_meta` payloads through
+  `src/compiler/80.driver/smf_writer.spl`.
+- Native-build CLI sidecar emission:
+  `src/app/io/cli_compile_part2.spl` writes
+  `<output>.simple_launch.sdn` as auxiliary checker input.
+- Direct script argv normalization:
+  `src/app/io/cli_commands_part1.spl` calls
+  `startup_normalize_program_args(...)` before forwarding file launches to the
+  driver.
+- SimpleOS WM hover prefetch:
+  `src/os/services/launcher/launcher.spl` calls
+  `g_vfs_read_executable_bytes(...)` from `src/os/services/vfs/vfs_init.spl`
+  on cache miss, then stores warmed bytes in the app registry without process
+  launch or dynlib calls.
 
 Current dynlib specs are sufficient for loader capability: native dynlib
 registration, symbol lookup, SMF role-2 library extraction, and SMF-wrapped
 native dynlib registry support. They are not sufficient for startup policy.
 Startup needs additional specs proving dependency discovery, conditional load,
 and exclusion of unused dynlib loader code.
+
+## Startup Ownership Boundaries
+
+Startup is split into policy, artifact metadata, IO/cache mechanisms, and
+launch surface adapters:
+
+| Layer | Owns | Must not own |
+|-------|------|--------------|
+| `src/app/startup/launch_metadata.spl` | Pure metadata parsing and `StartupLaunchPlan` decisions | Filesystem reads, process spawn, dynlib calls |
+| `src/app/io/*` and CLI driver | Direct file dispatch, `argv[0]` normalization, explicit `launch-meta check` command | Guessing startup features after metadata exists |
+| `src/compiler/80.driver/*` | Emitting native trailers, SMF `.launch_meta`, and sidecar-compatible SDN | Runtime loader policy |
+| `src/compiler/99.loader/*` | SMF byte mmap/cache and executable mapping lifecycle | CLI/script argument parsing |
+| `src/os/services/vfs/*` | SimpleOS file read-ahead and executable byte materialization | Process launch policy |
+| `src/os/services/launcher/launcher.spl` | WM hover/click intent, app registry warm checks, process launch dispatch | Mapping process-callable code during hover |
+
+The important optimization rule is that metadata policy remains pure. Fast
+startup changes should add or improve a mechanism behind one of the adapters,
+then prove the `StartupLaunchPlan` still gates it. Do not move file reads,
+dynlib opens, parser construction, or VFS calls into
+`launch_metadata.spl`.
 
 ## Launch Metadata Contract
 
@@ -123,6 +159,10 @@ interpret main.spl
 Script launch must preserve `argv[0]` as the script path exactly once. The
 direct CLI path now normalizes args through
 `startup_normalize_program_args(...)` before forwarding to the driver.
+The driver fast path for `.shs`, `get_cli_args`, and `std.cli` scripts is a
+startup invariant: performance changes must preserve direct interpreter launch
+unless `SIMPLE_EXECUTION_MODE` explicitly asks for another mode. The regression
+gate is `test/02_integration/app/startup_argparse_mmap_perf_spec.spl`.
 
 ## SMF Launch
 
@@ -154,7 +194,10 @@ launcher_hover_executable_icon(path)
   |
   +--> app registry has cached bytes? --> mark warm hit
   |
-  +--> no cached bytes? -------------> record prefetch miss/request
+  +--> no cached bytes? -------------> g_vfs_read_executable_bytes(path)
+                                      |
+                                      +--> bytes found? cache registry + mark warm hit
+                                      +--> no bytes? record prefetch miss/request
   |
   v
 no process launch, no dynlib call, no executable handoff
@@ -170,8 +213,41 @@ registry cache / VFS / FAT32 aliases / SMF or ELF loader
 
 Hover prefetch is a hint. It may warm metadata or executable bytes, but it must
 not execute, map process-callable code, or call dynlib symbols. The launcher API
-records the request and checks the existing app-registry byte cache; VFS
-read-ahead can attach behind that API without changing WM behavior.
+records the request, checks the existing app-registry byte cache, and on miss
+asks `g_vfs_read_executable_bytes(...)` to materialize bytes through the
+SimpleOS VFS/rootfs/FAT32 alias lane. If bytes are returned, the launcher
+stores them through `app_registry_cache_bytes(...)` under the hovered path; the
+registry normalizes `.smf` suffixes so later launch can reuse the warmed
+canonical entry.
+
+The hover path is intentionally not an executable mapper. SMF role-2 dynlibs
+and native dynlibs are loaded only from the click/launch path after metadata
+dependency checks. Hover must remain safe to fire repeatedly as the pointer
+moves across app icons.
+
+## Mmap And Cache Strategy
+
+Host startup has two mmap lanes:
+
+- source/script file loads can use `std.nogc_sync_mut.io.file_ops` mmap helpers
+  for fast text/byte reads when the platform supports them
+- SMF startup uses `src/compiler/99.loader/loader/smf_cache.spl`,
+  `smf_cache_manager.spl`, and `smf_mmap_native.spl` for file-backed SMF bytes
+  and explicit ref-counted eviction
+
+SimpleOS does not let the WM map executable code on hover. Its equivalent fast
+path is VFS read-ahead plus app-registry byte caching. Kernel/process mmap
+remains owned by the loader and VM subsystems during actual launch.
+
+## Implementation Alignment Matrix
+
+| Requirement | Current implementation | Evidence |
+|-------------|------------------------|----------|
+| File arg parser in startup logic | `startup_normalize_program_args(...)` and `cli_run_file(...)` preserve one script `argv[0]` | `test/03_system/app/simple/feature/simple_app_startup_spec.spl`, `test/02_integration/app/startup_argparse_mmap_perf_spec.spl` |
+| Mmap support for fast file loading | Host mmap smoke via `file_mmap_read_text`; SMF mmap/cache in loader; SimpleOS VFS prewarm strategy in startup plan | `test/02_integration/app/startup_argparse_mmap_perf_spec.spl`, `test/03_system/app/simple/feature/simple_app_startup_spec.spl` |
+| Dynlib/SMF load on startup | Metadata carries `required_native_dynlibs` and `required_smf_dynlibs`; startup plan includes loader only when dependency lists are non-empty | `test/03_system/app/simple/feature/simple_app_startup_spec.spl` |
+| SimpleOS hover preload | Launcher hover asks VFS for executable bytes on cache miss, caches warmed bytes, and keeps process count unchanged | `test/03_system/app/simpleos/feature/simple_app_startup_spec.spl` |
+| Optimization guard | `launch_metadata.spl` stays pure; mechanism inclusion is capability-gated by `StartupLaunchPlan` | this document plus system specs |
 
 ## Metadata Checker
 
@@ -196,6 +272,7 @@ It should fail when:
 
 Executable specs:
 
+- `test/02_integration/app/startup_argparse_mmap_perf_spec.spl`
 - `test/03_system/app/simple/feature/simple_app_startup_spec.spl`
 - `test/03_system/app/simpleos/feature/simple_app_startup_spec.spl`
 

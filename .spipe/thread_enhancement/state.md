@@ -37,4 +37,6 @@ dev-done
 - verify: `find doc/06_spec -name '*_spec.spl' | wc -l` printed `0`.
 - impl: Changed native C channel send to grow the ring buffer instead of silently dropping when the old 1024-slot capacity is reached.
 - impl: Added `test/01_unit/lib/nogc_async_mut/channel_native_overflow_spec.spl`.
+- impl: Corrected the native overflow spec to use the runtime `i64` channel ABI; removed the standalone native-build helper because it is not the authoritative SPipe runner path.
 - verify: `SIMPLE_LIB=src bin/simple test test/01_unit/lib/nogc_async_mut/channel_native_overflow_spec.spl --mode=native --clean --force-rebuild --sequential --timeout 120` passed with 1 example.
+- verify: `sh scripts/check/check-cross-language-perf.shs` was attempted. It reported `[FAIL] Simple native: build/cross_lang_perf/parallel.spl` and `[FAIL] Simple SMF: build/cross_lang_perf/parallel.spl`, then stalled in `=== Measuring parallel - 100 workers ===`; the current harness process tree was terminated after no further output.

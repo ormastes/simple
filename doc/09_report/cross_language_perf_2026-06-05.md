@@ -9,6 +9,12 @@
 > "Runtime dep" column shows runtime size where applicable.
 > Warm throughput measured IN-PROCESS (JIT runtimes reach steady state).
 
+> Thread enhancement rerun note: the 2026-06-05 rerun attempted by
+> `scripts/check/check-cross-language-perf.shs` reported Simple parallel
+> compile failures for native and SMF, then stalled during the 100-worker
+> parallel section before the full report completed. Treat the parallel section
+> below as partial evidence until the harness completes cleanly.
+
 ## 1. Binary / Script Size
 
 | Language               |        Hello |          Fib |  Runtime dep |              |
@@ -27,11 +33,39 @@
 
 | Language               |     Avg (ms) |         Mode |              |              |
 |------------------------|--------------|--------------|--------------|--------------|
-| Simple (interpreter)   |       26.032 |    interpret |              |              |
-| Simple (SMF loader)    |       20.417 |          smf |              |              |
-| Simple (native)        |        3.808 |       native |              |              |
-| C (gcc -O2)            |        2.769 |       native |              |              |
-| Go (compiled)          |       62.671 |       native |              |              |
-| Python                 |       25.050 |    interpret |              |              |
-| Bun                    |      103.798 |          JIT |              |              |
-| Java                   |      151.077 |    JIT (JVM) |              |              |
+| Simple (interpreter)   |       23.927 |    interpret |              |              |
+| Simple (SMF loader)    |       20.256 |          smf |              |              |
+| Simple (native)        |        2.352 |       native |              |              |
+| C (gcc -O2)            |        1.714 |       native |              |              |
+| Go (compiled)          |       62.336 |       native |              |              |
+| Python                 |       26.043 |    interpret |              |              |
+| Bun                    |       99.775 |          JIT |              |              |
+| Java                   |      135.110 |    JIT (JVM) |              |              |
+| Erlang                 |     1473.245 |      BEAM VM |              |              |
+
+## 3. Warm Throughput — fib(35) (in-process: 10 warmup + 20 measured)
+
+| Language               |     Avg (ms) |                                    Notes |
+|------------------------|--------------|------------------------------------------|
+| Simple (interpreter)   |       88.070 | tree-walk (outer-process, no in-proc timing) |
+| Simple (SMF loader)    |       79.850 | bytecode (outer-process, no in-proc timing) |
+| Simple (native)        |       57.701 |           AOT via Cranelift (in-process) |
+| C (gcc -O2)            |       13.362 |                             baseline AOT |
+| Go                     |       52.498 |                                  SSA AOT |
+| Python                 |     1562.385 |                         CPython bytecode |
+| Bun                    |       65.725 |        JavaScriptCore JIT (steady-state) |
+| Java                   |       50.646 |            HotSpot C2 JIT (steady-state) |
+| Erlang                 |      121.771 |                    BEAM (single-process) |
+
+## 4. Parallel — spawn 100 workers (20 runs avg)
+
+| Language               |     Avg (ms) |                        Concurrency model |
+|------------------------|--------------|------------------------------------------|
+| Simple (interpreter)   |          n/a |          extern thread FFI not supported |
+| Simple (SMF loader)    |         fail |              std thread_spawn (bytecode) |
+| Simple (native)        |       47.902 | channel + OS threads (same as Go pattern) |
+| C (pthreads)           |       29.728 |                               OS threads |
+| Go                     |       17.682 |           goroutines + chan result (M:N) |
+| Python                 |     2978.362 |                          threading (GIL) |
+| Bun                    |      858.814 |                           worker_threads |
+| Java                   |      174.156 |                               ThreadPool |

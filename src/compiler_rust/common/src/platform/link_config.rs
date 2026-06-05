@@ -229,11 +229,28 @@ impl PlatformLinkConfig {
         !sym.is_empty()
             && sym
                 .chars()
-                .all(|c| c.is_alphanumeric() || c == '_' || self.asm_label_extra_chars.contains(&c))
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || self.asm_label_extra_chars.contains(&c))
+    }
+
+    fn needs_asm_quoting(&self, sym: &str) -> bool {
+        sym.chars().next().is_some_and(|c| c.is_ascii_digit())
+            || sym
+                .chars()
+                .any(|c| !(c.is_ascii_alphanumeric() || c == '_' || self.asm_label_extra_chars.contains(&c)))
+    }
+
+    fn asm_symbol(&self, sym: &str) -> String {
+        if !self.needs_asm_quoting(sym) {
+            return sym.to_string();
+        }
+
+        let escaped = sym.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("\"{}\"", escaped)
     }
 
     /// Generate assembly stub for a symbol.
     pub fn generate_stub_asm(&self, sym: &str, ret_nil: &str) -> String {
+        let sym = self.asm_symbol(sym);
         match self.stub_strategy {
             StubStrategy::WeakDefinition => {
                 format!(".weak_definition {0}\n.globl {0}\n{0}:\n  {1}\n\n", sym, ret_nil)
@@ -249,6 +266,8 @@ impl PlatformLinkConfig {
 
     /// Generate assembly for a builtin trampoline (e.g., `___builtin_X` → `_X`).
     pub fn generate_builtin_trampoline_asm(&self, sym: &str, jmp_prefix: &str, real_fn: &str) -> String {
+        let sym = self.asm_symbol(sym);
+        let real_fn = self.asm_symbol(real_fn);
         match self.stub_strategy {
             StubStrategy::WeakDefinition => {
                 format!(
@@ -295,5 +314,39 @@ pub fn default_libraries_for_target(target: &Target) -> Vec<String> {
             "simple_runtime".into(),
         ],
         _ => vec!["c".into()],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trampoline_quotes_digit_start_target() {
+        let config = PlatformLinkConfig::linux();
+        let asm = config.generate_builtin_trampoline_asm(
+            "rt_hashmap_new",
+            "jmp",
+            "01_unit__lib__nogc_async_mut__spec__rt_hashmap_new",
+        );
+
+        assert!(asm.contains("rt_hashmap_new:\n  jmp \"01_unit__lib__nogc_async_mut__spec__rt_hashmap_new\""));
+    }
+
+    #[test]
+    fn stub_quotes_digit_start_symbol() {
+        let config = PlatformLinkConfig::linux();
+        let asm = config.generate_stub_asm("01_unit__entry", "retq");
+
+        assert!(asm.contains(".weak \"01_unit__entry\""));
+        assert!(asm.contains("\"01_unit__entry\":\n  retq"));
+    }
+
+    #[test]
+    fn asm_label_validation_is_ascii_only() {
+        let config = PlatformLinkConfig::linux();
+
+        assert!(config.is_valid_asm_label("rt_hashmap_new"));
+        assert!(!config.is_valid_asm_label("rt_hashmap_ñ"));
     }
 }
