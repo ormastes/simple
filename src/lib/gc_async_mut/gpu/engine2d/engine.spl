@@ -30,7 +30,7 @@ use std.gpu.engine2d.backend_webgpu.{WebGpuBackend}
 use std.gpu.engine2d.backend_qualcomm.{QualcommBackend}
 use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
 use std.gpu.engine2d.compute_dispatch.{ComputeDispatchResult, compute_dispatch_auto, compute_dispatch_for_backend}
-use std.gpu.engine2d.helpers_availability.{backend_default_priority_order}
+use std.gpu.engine2d.helpers_availability.{backend_canonical_name, backend_default_priority_order}
 use std.gpu.engine2d.wm_frame_pacing.{FramePacingCounters, make_frame_pacing_counters, tick_once}
 
 # ============================================================================
@@ -95,7 +95,7 @@ class Engine2D:
         Args:
             width: Framebuffer width in pixels
             height: Framebuffer height in pixels
-            backend_name: One of "cuda", "rocm", "metal", "vulkan", "opencl", "opengl", "software", "cpu_simd", "simd_cpu", "cpu", "baremetal"
+            backend_name: One of "cuda", "rocm"/"hip", "metal", "vulkan", "opencl", "opengl", "software", "cpu_simd", "simd_cpu", "cpu", "baremetal"
 
         Returns:
             Initialized Engine2D (falls back to cpu on failure)
@@ -103,52 +103,53 @@ class Engine2D:
         Note: "baremetal" requires a pre-initialized BaremetalBackend. Use
               create_with_baremetal_backend() instead for baremetal rendering.
         """
-        if backend_name == "cuda":
+        val requested_backend = backend_canonical_name(backend_name)
+        if requested_backend == "cuda":
             var cuda = CudaBackend.create()
             if cuda.init(width, height):
                 return Engine2D(backend: cuda, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cuda")
 
-        if backend_name == "vulkan":
+        if requested_backend == "vulkan":
             var vulkan = VulkanBackend.create()
             if vulkan.init(width, height):
                 return Engine2D(backend: vulkan, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "vulkan")
 
-        if backend_name == "opencl":
+        if requested_backend == "opencl":
             var opencl = OpenClBackend.create()
             if opencl.init(width, height):
                 return Engine2D(backend: opencl, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "opencl")
 
-        if backend_name == "opengl":
+        if requested_backend == "opengl":
             var opengl = OpenGLBackend.create()
             if opengl.init(width, height):
                 return Engine2D(backend: opengl, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "opengl")
 
-        if backend_name == "metal":
+        if requested_backend == "metal":
             var metal = MetalBackend.create()
             if metal.init(width, height):
                 return Engine2D(backend: metal, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "metal")
 
-        if backend_name == "rocm":
+        if requested_backend == "rocm":
             var rocm = RocmBackend.create()
             if rocm.init(width, height):
                 return Engine2D(backend: rocm, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "rocm")
 
-        if backend_name == "intel":
+        if requested_backend == "intel":
             var intel = IntelBackend.create()
             if intel.init(width, height):
                 return Engine2D(backend: intel, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "intel")
 
-        if backend_name == "qualcomm":
+        if requested_backend == "qualcomm":
             var qualcomm = QualcommBackend.create()
             if qualcomm.init(width, height):
                 return Engine2D(backend: qualcomm, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "qualcomm")
 
-        if backend_name == "webgpu":
+        if requested_backend == "webgpu":
             var webgpu = WebGpuBackend.create()
             if webgpu.init(width, height):
                 return Engine2D(backend: webgpu, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "webgpu")
 
-        if backend_name == "software":
+        if requested_backend == "software":
             var sw = SoftwareBackend.create()
             if sw.init(width, height):
                 return Engine2D(backend: sw, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software")
@@ -157,7 +158,7 @@ class Engine2D:
         # FramebufferDriver and must be created via create_with_baremetal_backend().
         # If requested here by name, fall through to CPU fallback.
 
-        if backend_name == "cpu_simd" or backend_name == "simd_cpu":
+        if requested_backend == "cpu_simd":
             var cpu_simd = CpuBackend.create()
             cpu_simd.init(width, height)
             return Engine2D(backend: cpu_simd, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cpu_simd")
@@ -209,7 +210,8 @@ class Engine2D:
 
     static fn probe_backend(width: i32, height: i32, backend_name: text) -> BackendProbeResult:
         """Probe whether a backend is available without creating an engine."""
-        if backend_name == "cuda":
+        val requested_backend = backend_canonical_name(backend_name)
+        if requested_backend == "cuda":
             var b = CudaBackend.create()
             if b.init(width, height):
                 val probe = b.last_probe
@@ -217,7 +219,7 @@ class Engine2D:
                 return probe
             return b.last_probe
 
-        if backend_name == "vulkan":
+        if requested_backend == "vulkan":
             var b = VulkanBackend.create()
             if b.init(width, height):
                 b.shutdown()
@@ -226,7 +228,7 @@ class Engine2D:
                 return BackendProbeResult.unavailable("vulkan", b.last_error)
             return BackendProbeResult.unavailable("vulkan", "vkCreateInstance failed or no devices")
 
-        if backend_name == "opencl":
+        if requested_backend == "opencl":
             var b = OpenClBackend.create()
             if b.init(width, height):
                 val probe = b.last_probe
@@ -234,55 +236,55 @@ class Engine2D:
                 return probe
             return b.last_probe
 
-        if backend_name == "rocm":
+        if requested_backend == "rocm":
             var b = RocmBackend.create()
             if b.init(width, height):
                 b.shutdown()
                 return BackendProbeResult.success("rocm", "ROCm/HIP initialized")
             return BackendProbeResult.unavailable("rocm", "ROCm/HIP runtime, device, or module unavailable")
 
-        if backend_name == "metal":
+        if requested_backend == "metal":
             var b = MetalBackend.create()
             if b.init(width, height):
                 b.shutdown()
                 return BackendProbeResult.success("metal", "Metal initialized")
             return b.last_probe
 
-        if backend_name == "qualcomm":
+        if requested_backend == "qualcomm":
             var b = QualcommBackend.create()
             if b.init(width, height):
                 b.shutdown()
                 return BackendProbeResult.success("qualcomm", "Qualcomm Adreno Vulkan delegate initialized")
             return BackendProbeResult.unavailable("qualcomm", "Qualcomm Adreno target or Vulkan delegate unavailable")
 
-        if backend_name == "webgpu":
+        if requested_backend == "webgpu":
             var b = WebGpuBackend.create()
             if b.init(width, height):
                 b.shutdown()
                 return BackendProbeResult.success("webgpu", "WebGPU initialized")
             return BackendProbeResult.unavailable("webgpu", "WebGPU adapter not found")
 
-        if backend_name == "opengl":
+        if requested_backend == "opengl":
             var b = OpenGLBackend.create()
             if b.init(width, height):
                 b.shutdown()
                 return BackendProbeResult.success("opengl", "OpenGL initialized")
             return BackendProbeResult.unavailable("opengl", "OpenGL context creation failed")
 
-        if backend_name == "intel":
+        if requested_backend == "intel":
             var b = IntelBackend.create()
             if b.init(width, height):
                 b.shutdown()
                 return BackendProbeResult.success("intel", "Intel oneAPI initialized")
             return BackendProbeResult.unavailable("intel", "Intel oneAPI runtime or device unavailable")
 
-        if backend_name == "software":
+        if requested_backend == "software":
             return BackendProbeResult.success("software", "Software always available")
 
-        if backend_name == "cpu":
+        if requested_backend == "cpu":
             return BackendProbeResult.success("cpu", "CPU always available")
 
-        if backend_name == "cpu_simd" or backend_name == "simd_cpu":
+        if requested_backend == "cpu_simd":
             return BackendProbeResult.success("cpu_simd", "SIMD-backed CPU renderer always available")
 
         BackendProbeResult.unavailable(backend_name, "Unknown backend: " + backend_name)

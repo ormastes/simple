@@ -16,6 +16,7 @@ use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.gc_async_mut.gpu.engine2d.color.{rgb}
 use std.gc_async_mut.gpu.engine2d.backend_probe.{BackendStatus}
 use std.gc_async_mut.gpu.engine2d.simd_provider.{reset_simd_hits, simd_hit_counts}
+use std.gc_async_mut.gpu.engine2d.helpers_availability.{backend_canonical_name, backend_default_priority_order, backend_is_hardware, backend_preference_summary, backend_priority, backend_requires_gpu, feature_gate_description}
 use std.nogc_sync_mut.env.platform.{is_macos}
 
 fn quick_lifecycle_backends() -> [text]:
@@ -108,10 +109,37 @@ describe "Engine2D Backend Lifecycle Smoke":
 
     context "Engine2D explicit backend selection":
 
+        it "documents the default backend preference as platform native then CUDA HIP then Vulkan":
+            val order = backend_default_priority_order()
+            expect(order[0]).to_equal("metal")
+            expect(order[1]).to_equal("cuda")
+            expect(order[2]).to_equal("rocm")
+            expect(order[4]).to_equal("vulkan")
+            expect(order[5]).to_equal("opencl")
+            expect(order[order.len() - 1]).to_equal("cpu")
+            expect(backend_preference_summary()).to_contain("metal > cuda > rocm/hip")
+            expect(backend_preference_summary()).to_contain("vulkan > opencl")
+
+        it "canonicalizes HIP and SIMD aliases before backend selection":
+            expect(backend_canonical_name("hip")).to_equal("rocm")
+            expect(backend_canonical_name("AMD-HIP")).to_equal("rocm")
+            expect(backend_canonical_name("simd-cpu")).to_equal("cpu_simd")
+            expect(backend_priority("hip")).to_equal(backend_priority("rocm"))
+            expect(backend_is_hardware("hip")).to_equal(true)
+            expect(backend_requires_gpu("hip")).to_equal(true)
+            expect(feature_gate_description("hip")).to_contain("ROCm")
+
         it "cpu_simd is a first-class strict backend alias":
             val probe = Engine2D.probe_backend(16, 16, "cpu_simd")
             expect(probe.status).to_equal(BackendStatus.Initialized)
             expect(probe.selected_name).to_equal("cpu_simd")
+
+        it "hip alias probes the ROCm HIP backend instead of unknown fallback":
+            val probe = Engine2D.probe_backend(16, 16, "hip")
+            expect(probe.selected_name).to_equal("rocm")
+            expect(probe.backend_name).to_equal("rocm")
+            expect(probe.status == BackendStatus.Initialized or probe.status == BackendStatus.Unavailable or probe.status == BackendStatus.Failed).to_equal(true)
+            expect(probe.reason).to_contain("ROCm")
 
         it "simd_cpu alias renders through the CPU SIMD surface":
             reset_simd_hits()

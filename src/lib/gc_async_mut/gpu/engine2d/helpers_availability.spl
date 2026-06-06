@@ -22,31 +22,47 @@ Usage:
 # Backend Name & Identity
 # ============================================================================
 
+fn backend_canonical_name(name: text) -> text:
+    """Normalize backend aliases to the canonical Engine2D backend key."""
+    val normalized = name.trim().lower()
+    if normalized == "hip" or normalized == "amd_hip" or normalized == "amd-hip":
+        return "rocm"
+    if normalized == "amd_rocm" or normalized == "amd-rocm":
+        return "rocm"
+    if normalized == "simd_cpu" or normalized == "cpu-simd" or normalized == "simd-cpu":
+        return "cpu_simd"
+    normalized
+
 fn backend_display_name(name: text) -> text:
     """Return a human-readable display name for a backend identifier.
 
     Maps canonical backend keys (as used in Engine2D.create_with_backend_strict)
     to the strings shown in diagnostics and probe output.
     """
-    if name == "cuda":
+    val canonical = backend_canonical_name(name)
+    if canonical == "cuda":
         return "NVIDIA CUDA"
-    if name == "rocm":
+    if canonical == "rocm":
         return "AMD ROCm/HIP"
-    if name == "metal":
+    if canonical == "metal":
         return "Apple Metal"
-    if name == "qualcomm":
+    if canonical == "qualcomm":
         return "Qualcomm Adreno"
-    if name == "vulkan":
+    if canonical == "vulkan":
         return "Vulkan Compute"
-    if name == "opengl":
+    if canonical == "opencl":
+        return "OpenCL"
+    if canonical == "opengl":
         return "OpenGL"
-    if name == "intel":
+    if canonical == "intel":
         return "Intel Arc / oneAPI"
-    if name == "webgpu":
+    if canonical == "webgpu":
         return "WebGPU"
-    if name == "software":
+    if canonical == "software":
         return "Optimized Software (SIMD)"
-    if name == "cpu":
+    if canonical == "cpu_simd":
+        return "CPU SIMD"
+    if canonical == "cpu":
         return "CPU Software (fallback)"
     "Unknown backend ({name})"
 
@@ -56,28 +72,31 @@ fn backend_priority(name: text) -> i32:
     Matches the default Engine2D graphics order:
     platform native first, then CUDA/HIP, then portable GPU APIs, then CPU.
     """
-    if name == "metal":
+    val canonical = backend_canonical_name(name)
+    if canonical == "metal":
         return 0
-    if name == "cuda":
+    if canonical == "cuda":
         return 1
-    if name == "rocm":
+    if canonical == "rocm":
         return 2
-    if name == "qualcomm":
+    if canonical == "qualcomm":
         return 3
-    if name == "vulkan":
+    if canonical == "vulkan":
         return 4
-    if name == "opengl":
+    if canonical == "opencl":
         return 5
-    if name == "intel":
+    if canonical == "opengl":
+        return 5
+    if canonical == "intel":
         return 6
-    if name == "webgpu":
+    if canonical == "webgpu":
         return 7
-    if name == "software":
+    if canonical == "software":
         return 8
-    if name == "cpu":
-        return 10
-    if name == "cpu_simd" or name == "simd_cpu":
+    if canonical == "cpu_simd":
         return 9
+    if canonical == "cpu":
+        return 10
     99
 
 fn backend_default_priority_order() -> [text]:
@@ -89,15 +108,21 @@ fn backend_default_priority_order() -> [text]:
     """
     ["metal", "cuda", "rocm", "qualcomm", "vulkan", "opencl", "opengl", "intel", "webgpu", "software", "cpu_simd", "cpu"]
 
+fn backend_preference_summary() -> text:
+    """Stable one-line summary for docs, diagnostics, and profile reports."""
+    "metal > cuda > rocm/hip > qualcomm > vulkan > opencl > opengl > intel > webgpu > software > cpu_simd > cpu"
+
 fn backend_is_hardware(name: text) -> bool:
     """Return true if the backend uses dedicated GPU hardware."""
-    name == "cuda" or name == "rocm" or name == "metal" or
-    name == "qualcomm" or name == "vulkan" or name == "opengl" or
-    name == "intel" or name == "webgpu"
+    val canonical = backend_canonical_name(name)
+    canonical == "cuda" or canonical == "rocm" or canonical == "metal" or
+    canonical == "qualcomm" or canonical == "vulkan" or canonical == "opencl" or
+    canonical == "opengl" or canonical == "intel" or canonical == "webgpu"
 
 fn backend_requires_gpu(name: text) -> bool:
     """Return true if the backend cannot fall back to CPU execution."""
-    name == "cuda" or name == "rocm" or name == "metal" or name == "qualcomm"
+    val canonical = backend_canonical_name(name)
+    canonical == "cuda" or canonical == "rocm" or canonical == "metal" or canonical == "qualcomm"
 
 # ============================================================================
 # Feature Gate Descriptions
@@ -105,45 +130,53 @@ fn backend_requires_gpu(name: text) -> bool:
 
 fn feature_gate_description(name: text) -> text:
     """Return a one-line description of what hardware/driver is required."""
-    if name == "cuda":
+    val canonical = backend_canonical_name(name)
+    if canonical == "cuda":
         return "Requires NVIDIA GPU with CUDA driver >= 11.0"
-    if name == "rocm":
+    if canonical == "rocm":
         return "Requires AMD GPU with ROCm >= 5.0"
-    if name == "metal":
+    if canonical == "metal":
         return "Requires Apple Silicon or AMD GPU on macOS >= 12"
-    if name == "qualcomm":
+    if canonical == "qualcomm":
         return "Requires Qualcomm Adreno GPU with QDSS driver"
-    if name == "vulkan":
+    if canonical == "vulkan":
         return "Requires Vulkan runtime with compute shader support"
-    if name == "opengl":
+    if canonical == "opencl":
+        return "Requires OpenCL runtime and GPU driver support"
+    if canonical == "opengl":
         return "Requires OpenGL >= 3.3 with GLSL compute extensions"
-    if name == "intel":
+    if canonical == "intel":
         return "Requires Intel Arc GPU with Level Zero / oneAPI runtime"
-    if name == "webgpu":
+    if canonical == "webgpu":
         return "Requires WebGPU-capable browser or wgpu native runtime"
-    if name == "software":
+    if canonical == "software":
         return "No external dependencies; uses SIMD-friendly memory layout"
-    if name == "cpu":
+    if canonical == "cpu_simd":
+        return "No external dependencies; uses CPU SIMD when available"
+    if canonical == "cpu":
         return "No external dependencies; always available as final fallback"
     "Unknown backend — no feature gate information available"
 
 fn backend_unavailable_reason(name: text) -> text:
     """Return a suggested diagnosis message when a backend fails to init."""
-    if name == "cuda":
+    val canonical = backend_canonical_name(name)
+    if canonical == "cuda":
         return "Check NVIDIA driver installation and CUDA toolkit version"
-    if name == "rocm":
+    if canonical == "rocm":
         return "Check AMD driver and ROCm installation"
-    if name == "metal":
+    if canonical == "metal":
         return "Metal is only available on macOS/iOS with Apple GPU drivers"
-    if name == "qualcomm":
+    if canonical == "qualcomm":
         return "Qualcomm backend requires Adreno device and matching SDK"
-    if name == "vulkan":
+    if canonical == "vulkan":
         return "Check Vulkan runtime (vulkan-loader) and GPU driver support"
-    if name == "opengl":
+    if canonical == "opencl":
+        return "Check OpenCL ICD loader and GPU driver support"
+    if canonical == "opengl":
         return "Check OpenGL driver version and compute extension support"
-    if name == "intel":
+    if canonical == "intel":
         return "Check Intel Arc driver and Level Zero runtime installation"
-    if name == "webgpu":
+    if canonical == "webgpu":
         return "Check wgpu native runtime or browser WebGPU flag"
     "Check system configuration and driver installation"
 
