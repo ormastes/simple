@@ -92,6 +92,40 @@ events on Tauri2, no hard-coded HTML, no wasm dependency.
   (7 absolute-oracle assertions: exact markup, escaping, nesting, document wrap)
   — confirmed real via a negative control (wrong-expectation spec fails).
 
+## CORRECTION (2026-06-06): the real generate+events pipeline already exists & works
+
+Earlier this doc said "no `WidgetNode→HTML` renderer" and "both routes are large
+builds" — **that was wrong** (I searched only `src/lib`). The full pipeline lives
+in `src/app/`:
+- `app.ui.render.html_widgets.render_html_tree(node, state)` — genuine widget
+  catalog → HTML (button/input/panel/table/progress/menubar/tree/vbox/hbox …),
+  **26-test spec passes** (`test/01_unit/app/ui/html_render_spec.spl`).
+- `app.ui.web.html.generate_css(state)` — CSS generation.
+- `src/app/ui/main.spl` + `src/app/ui.tauri/app.spl` — stay-alive event loop:
+  initial render → poll stdin → `update_state` → re-render.
+- The Tauri shell already invokes it for `.ui.sdn` entries:
+  `simple run src/app/ui/main.spl tauri <entry.ui.sdn>` (see
+  `simple_subprocess_args_for`), and forwards DOM events back as `ShellMessage`
+  (`action`/`keypress`/`input`/`quit`) to the subprocess stdin.
+
+**Verified end-to-end** (desktop, exact shell invocation + piped events):
+`… tauri demo_table_list.ui.sdn` with `{"type":"action",…}` then `{"type":"quit"}`
+emitted **2 `render` IPC messages** (initial + post-event re-render) whose HTML
+contained real generated widgets (12 `widget-panel`, 4 `<input>`, 4 `<table>`).
+So Simple genuinely generates the UI from a model AND handles events live.
+
+**So the mobile gap is narrow and concrete:** the mobile shell bundles a 6-line
+hard-coded smoke as `SIMPLE_MOBILE_ENTRY_SOURCE` instead of running the real app.
+To close it: bundle a `.ui.sdn` + make the cross-compiled mobile runtime run
+`src/app/ui/main.spl tauri <ui.sdn>` on-device (needs the `src/app/ui*` + `src/lib`
+sources or an AOT build reachable in the package), then events flow over the
+already-wired stdin channel. `mobile_html_gen.spl` remains a lightweight,
+dependency-free alternative for simple surfaces.
+
+Bug found: `simple ui <mode> <file>` mis-marshals the mode arg (prints a pointer:
+"Unknown mode '381699817928'"); use the `run src/app/ui/main.spl tauri <file>`
+form. Track as a CLI arg-marshalling bug.
+
 ## Verified live (2026-06-06): Simple-generated GUI renders on both mobile targets
 
 Built the hello UI **from the `mobile_html_gen` model** (no hard-coded body),
