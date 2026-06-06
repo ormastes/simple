@@ -169,7 +169,7 @@ TUI startup speed is not measured by this cross-language profile. It is covered 
 > handle to report `used_runtime_pool()` so inline fallback cannot masquerade as
 > M:N evidence. It is not yet the final scheduler-aware green API.
 > The cooperative-green row uses the `COOPERATIVE_GREEN_WORKERS` count from the
-> report header because the current cooperative seed is intentionally separate
+> report header because the current cooperative Simple implementation is intentionally separate
 > from the OS-thread/Goroutine worker count.
 > Current direct-run blocker: SMF mutable globals can segfault before the
 > cooperative queue runs, so the SMF cooperative-green row is classified instead

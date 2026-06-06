@@ -31,7 +31,7 @@ All multi-threaded Simple programs fail in interpreter mode (HTTP server, parall
 
 ## Resolution
 
-`rt_thread_spawn_isolated2` was already registered in the interpreter extern
+`rt_thread_spawn_isolated_with_args` was already registered in the interpreter extern
 dispatcher and covered by the concurrent wrapper specs. The failing path was the
 HTTP server's legacy direct numbered thread-spawn extern declaration, which bypassed
 the std thread wrapper and did not return the `ThreadHandle` API expected by
@@ -39,5 +39,5 @@ the std thread wrapper and did not return the `ThreadHandle` API expected by
 
 `src/lib/nogc_sync_mut/http_server/server.spl` now imports
 `std.concurrent.thread.thread_spawn_with_args`, so interpreter execution routes
-through the registered `rt_thread_spawn_isolated2` extern and receives the
+through the registered `rt_thread_spawn_isolated_with_args` extern and receives the
 standard `ThreadHandle`.

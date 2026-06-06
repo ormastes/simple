@@ -17,7 +17,7 @@ Simple programs can run in three modes:
 
 | Mode | Flag | What happens | Tradeoff |
 |------|------|-------------|----------|
-| **Interpreter** | (default) | Tree-walk evaluation by the Rust seed binary | Fastest startup, slowest throughput |
+| **Interpreter** | (default) | Tree-walk evaluation by the Simple interpreter in the bootstrap binary | Fastest startup, slowest throughput |
 | **SMF Loader** | `.smf` file | Compile to `.smf` bytecode, then execute via bytecode VM | Medium startup, ~2-5x faster dispatch |
 | **Native** | `--native` | AOT compile via LLVM or Cranelift, standalone ELF/PE | Slowest compile step, fastest throughput |
 
@@ -46,7 +46,7 @@ bin/simple test path/to/spec.spl --compile            # native
 ```bash
 bin/simple build bootstrap          # 3-stage self-compilation (stage1→stage2→stage3 must match)
 bin/simple build check              # lint + fmt --check + full test suite
-bin/simple build lint               # clippy linter on Rust seed
+bin/simple build lint               # linter for the bootstrap implementation
 bin/simple build fmt --check        # format check
 ```
 
@@ -88,7 +88,7 @@ sh scripts/check/check-cross-language-perf.shs
 | `FIB_N` | 35 | Fibonacci depth for throughput test |
 | `WORKERS` | 100 | Parallel worker count |
 | `CPU_WORKERS` | `WORKERS` or 100 | Shared CPU-heavy worker count for semantic rows |
-| `OS_THREAD_WORKERS` | `CPU_WORKERS` | Simple OS-thread worker count for `thread_spawn_with_args` rows |
+| `OS_THREAD_WORKERS` | `CPU_WORKERS` | Simple OS-thread worker count for `thread_spawn` rows |
 | `COOPERATIVE_GREEN_WORKERS` | capped at 10 by default | Current single-carrier green queue worker count |
 | `MULTICORE_GREEN_WORKERS` | `CPU_WORKERS` | Pool-backed `multicore_green_spawn` worker count |
 | `FANOUT_WORKERS` | 1000 | Large fanout worker count for tiny-task scheduling overhead |
@@ -106,7 +106,7 @@ then measured as if it belonged to the current run. Long-running measured
 commands and Simple compile steps are bounded by `RUN_TIMEOUT`; set it higher
 for full reports on slow hosts, or lower it for smoke evidence. The 1000-worker
 Simple OS-thread fanout source is intentionally reported separately from Simple
-green fanout and uses loop-based `thread_spawn_with_args` so the harness does not need
+green fanout and uses loop-based `thread_spawn` fork-join so the harness does not need
 large unrolled source generation.
 
 ### What it measures
@@ -116,8 +116,8 @@ large unrolled source generation.
 | **Size** | hello + fib source/binary | Deployment footprint |
 | **Cold startup** | `hello world` (20 runs avg) | Time-to-first-output |
 | **Warm throughput** | `fib(35)` recursive, in-process loop (10 warmup + 20 measured) | Steady-state single-thread perf (JIT reaches hotspot) |
-| **Parallel** | 100 workers × LCG 100K iters via channel (`channel_new`/`channel_from_id`/`send`/`recv` from `std.concurrent.channel` — same semantic as Go's goroutine + chan). Simple native uses `thread_spawn_with_args(seed, channel_id, worker)` to pass scalar worker data explicitly. | CPU-heavy worker throughput plus concurrency overhead |
-| **Large fanout** | 1000 tiny workers × LCG 32 iters. Simple native uses loop-based `thread_spawn_with_args`/channel; Simple cooperative green uses cooperative queue fanout; C uses one pthread per tiny task; Go uses one goroutine per tiny task; Erlang uses one BEAM process per tiny task. | Scheduling overhead where Go should usually beat C pthread creation; Simple native measures OS-thread fanout; Simple cooperative green measures queue fanout, not CPU parallelism |
+| **Parallel** | 100 workers × LCG 100K iters. Simple native uses Pure Simple `thread_spawn` fork-join for the OS-thread baseline. Simple multicore green uses `multicore_green_spawn` and fails the row unless every handle reports `used_runtime_pool()`. | CPU-heavy worker throughput plus concurrency overhead |
+| **Large fanout** | 1000 tiny workers × LCG 32 iters. Simple native uses loop-based `thread_spawn` fork-join; Simple cooperative green uses cooperative queue fanout; C uses one pthread per tiny task; Go uses one goroutine per tiny task; Erlang uses one BEAM process per tiny task. | Scheduling overhead where Go should usually beat C pthread creation; Simple native measures OS-thread fanout; Simple cooperative green measures queue fanout, not CPU parallelism |
 | **Parallel binary size** | Binary/script sizes for parallel workloads across languages | Deployment footprint for concurrent programs |
 | **Parallel peak RSS** | `/usr/bin/time -v` peak RSS with 100 workers, baseline subtracted, per-worker delta | Memory cost per concurrent task (baseline = hello world RSS for each language) |
 
@@ -152,7 +152,7 @@ large unrolled source generation.
 
 **Warm throughput (fib35):** C ≈ Simple-native < Go < Java (after JIT) < Bun < Simple-SMF < Erlang < Simple-interp < Python
 
-**Parallel (100 workers):** Go and C are the current native baselines; the OS-thread Simple row uses `thread_spawn_with_args` plus `std.concurrent.channel`. The implemented `std.concurrent.cooperative_green` API is cooperative and single-OS-thread, so it is not a drop-in Go-goroutine benchmark row. The `std.concurrent.multicore_green` row uses `multicore_green_spawn` over `rt_pool_*` as the current Pure Simple M:N candidate until a scheduler-aware green runtime lands. The generated multicore-green workloads check every handle with `used_runtime_pool()` and fail the row if the runtime pool was unavailable.
+**Parallel (100 workers):** Go and C are the current native baselines; the OS-thread Simple row uses Pure Simple `thread_spawn` fork-join. `thread_spawn_with_args` is tracked separately while its native ABI blocker is active, so it is not the profile baseline. The implemented `std.concurrent.cooperative_green` API is cooperative and single-OS-thread, so it is not a drop-in Go-goroutine benchmark row. The `std.concurrent.multicore_green` row uses `multicore_green_spawn` over `rt_pool_*` as the current Pure Simple M:N candidate until a scheduler-aware green runtime lands. The generated multicore-green workloads check every handle with `used_runtime_pool()` and fail the row if the runtime pool was unavailable.
 
 ### What matters per use case
 

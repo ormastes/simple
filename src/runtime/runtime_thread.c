@@ -315,10 +315,6 @@ int64_t rt_thread_spawn_isolated_with_args(int64_t fn_ptr, int64_t data1, int64_
     return alloc_handle(HANDLE_THREAD, td);
 }
 
-int64_t rt_thread_spawn_isolated2(int64_t fn_ptr, int64_t data1, int64_t data2) {
-    return rt_thread_spawn_isolated_with_args(fn_ptr, data1, data2);
-}
-
 int64_t rt_thread_join(int64_t handle) {
     RtThreadData* td = (RtThreadData*)get_handle(handle, HANDLE_THREAD);
     if (!td) return 0;

@@ -272,7 +272,7 @@ Generated: 2026-05-17
 | Function | Tier | Status | Target | Notes |
 |----------|------|--------|--------|-------|
 | rt_thread_spawn_isolated | 3 | C-done | C | Implemented in runtime_thread.c |
-| rt_thread_spawn_isolated2 | 3 | C-done | C | Implemented in runtime_thread.c |
+| rt_thread_spawn_isolated_with_args | 3 | C-done | C | Implemented in runtime_thread.c |
 | rt_thread_join | 3 | C-done | C | Implemented in runtime_thread.c |
 | rt_thread_is_done | 3 | C-done | C | Implemented in runtime_thread.c |
 | rt_thread_id | 3 | C-done | C | Implemented in runtime_thread.c |

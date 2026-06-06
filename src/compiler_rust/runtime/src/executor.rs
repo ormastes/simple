@@ -644,11 +644,6 @@ pub extern "C" fn rt_thread_spawn_isolated_with_args(
     Box::into_raw(thread_handle) as u64
 }
 
-#[no_mangle]
-pub extern "C" fn rt_thread_spawn_isolated2(closure_ptr: u64, data1: RuntimeValue, data2: RuntimeValue) -> u64 {
-    rt_thread_spawn_isolated_with_args(closure_ptr, data1, data2)
-}
-
 /// Join an isolated thread and get its result.
 /// This blocks until the thread completes.
 ///
@@ -973,27 +968,6 @@ pub extern "C" fn rt_thread_spawn_limited_with_args(
     });
 
     Box::into_raw(thread_handle) as u64
-}
-
-#[no_mangle]
-pub extern "C" fn rt_thread_spawn_limited2(
-    closure_ptr: u64,
-    data1: RuntimeValue,
-    data2: RuntimeValue,
-    cpu_seconds: i64,
-    memory_bytes: i64,
-    fd_limit: i64,
-    thread_limit: i64,
-) -> u64 {
-    rt_thread_spawn_limited_with_args(
-        closure_ptr,
-        data1,
-        data2,
-        cpu_seconds,
-        memory_bytes,
-        fd_limit,
-        thread_limit,
-    )
 }
 
 /// Join a resource-limited thread and get its result.

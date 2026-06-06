@@ -407,7 +407,7 @@ declare i64 @rt_async_poll_tasks()
 
 declare i64 @rt_thread_spawn_isolated(i64, i64)
 
-declare i64 @rt_thread_spawn_isolated2(i64, i64, i64)
+declare i64 @rt_thread_spawn_isolated_with_args(i64, i64, i64)
 
 declare i64 @rt_thread_join(i64)
 

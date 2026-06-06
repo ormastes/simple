@@ -84,7 +84,7 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val handle = rt_thread_spawn_isolated2(\a, b: a + b, 10, 20)
+val handle = rt_thread_spawn_isolated_with_args(\a, b: a + b, 10, 20)
 val result = rt_thread_join(handle)
 expect(result).to_equal(30)
 ```
@@ -294,7 +294,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val ch_id = rt_channel_new()
-val h = rt_thread_spawn_isolated2(\data, cid: rt_channel_send(cid, data * 7), 6, ch_id)
+val h = rt_thread_spawn_isolated_with_args(\data, cid: rt_channel_send(cid, data * 7), 6, ch_id)
 rt_thread_join(h)
 val result = rt_channel_try_recv(ch_id)
 expect(result).to_equal(42)

@@ -636,7 +636,6 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     RuntimeFuncSpec::new("rt_thread_spawn_isolated", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_thread_spawn_isolated_with_args", &[I64, I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_thread_spawn_isolated2", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_thread_join", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_thread_is_done", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_thread_id", &[I64], &[I64]),

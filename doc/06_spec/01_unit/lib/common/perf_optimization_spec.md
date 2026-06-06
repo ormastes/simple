@@ -311,7 +311,7 @@ expect r3 == "third"
 
 </details>
 
-### rt_thread_spawn_isolated2 - Two-arg Closure
+### rt_thread_spawn_isolated_with_args - Two-arg Closure
 
 #### basic two-arg execution
 
@@ -612,7 +612,7 @@ rt_set_concurrent_backend("pure_std")
 
 </details>
 
-#### spawn_isolated2 works in native mode
+#### spawn_isolated_with_args works in native mode
 
 1. rt set concurrent backend
 
