@@ -1127,6 +1127,28 @@ fn compute_styles(nodes: [HNode], rules: Rules, html: text) -> [Style]:
 
 val FONT_CHARSET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,:;!?-_()[]/\\'\"+=#%&@*<>abcdefghijklmnopqrstuvwxyz"
 
+val FONT_ROWS_PACKED: [i64] = [
+    18842895918i64, 32801094206i64, 15620129326i64, 32801080894i64, 33840200223i64, 17734072863i64, 15621407278i64, 18842451505i64,
+    15170932878i64, 13507823687i64, 18879369809i64, 33840185872i64, 18842572657i64, 18842507057i64, 15621211694i64, 17734518334i64,
+    14585218606i64, 18879563326i64, 32247333391i64, 4433514655i64, 15621211697i64, 4648912433i64, 19182306865i64, 18593485137i64,
+    4433514833i64, 33831389247i64, 15629733422i64, 15170933124i64, 33831454254i64, 15604060255i64, 2247698626i64, 15603923487i64,
+    15621636358i64, 8866891839i64, 15621113390i64, 12953568814i64, 0i64, 4294967296i64, 8724152320i64, 134217856i64,
+    8724152448i64, 4295102596i64, 4299295278i64, 1015808i64, 33285996544i64, 2290360450i64, 8726317192i64, 15309480206i64,
+    15101659214i64, 17456826433i64, 1143087376i64, 8324i64, 10570i64, 139432064i64, 32537600i64, 368389098i64,
+    120853337i64, 455782988i64, 487282222i64, 5014436516i64, 2290622594i64, 8726284424i64, 521635264i64, 1025047056i64,
+    487080384i64, 521714721i64, 487572928i64, 277117190i64, 471320032i64, 588839440i64, 474099716i64, 421599234i64,
+    625758800i64, 474091660i64, 588961600i64, 588826560i64, 488162752i64, 554649536i64, 35112416i64, 554197696i64,
+    1008157152i64, 211035080i64, 456705568i64, 145278496i64, 358270496i64, 581052960i64, 471320096i64, 1048710112i64
+]
+
+val FONT_UNKNOWN_PACKED: i64 = 33874822719i64
+
+fn glyph_row_bits(gi: i32, row: i32) -> i32:
+    if row < 0 or row >= 7:
+        return 0
+    val packed = if gi >= 0 and gi < FONT_ROWS_PACKED.len(): FONT_ROWS_PACKED[gi] else: FONT_UNKNOWN_PACKED
+    ((packed >> (row * 5)) & 31i64) as i32
+
 # returns the 7 row bitmasks for a glyph index into FONT_CHARSET
 fn glyph_rows(gi: i32) -> [i32]:
     if gi == 0:  return [0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001]  # A
@@ -1224,6 +1246,41 @@ fn glyph_index_for_char(ch: text) -> i32:
     if direct >= 0:
         return direct
     FONT_CHARSET.index_of(ch.upper())
+
+fn glyph_index_for_code(code: i64) -> i32:
+    if code >= 65 and code <= 90:
+        return (code - 65) as i32
+    if code >= 48 and code <= 57:
+        return (code - 48 + 26) as i32
+    if code == 32: return 36
+    if code == 46: return 37
+    if code == 44: return 38
+    if code == 58: return 39
+    if code == 59: return 40
+    if code == 33: return 41
+    if code == 63: return 42
+    if code == 45: return 43
+    if code == 95: return 44
+    if code == 40: return 45
+    if code == 41: return 46
+    if code == 91: return 47
+    if code == 93: return 48
+    if code == 47: return 49
+    if code == 92: return 50
+    if code == 39: return 51
+    if code == 34: return 52
+    if code == 43: return 53
+    if code == 61: return 54
+    if code == 35: return 55
+    if code == 37: return 56
+    if code == 38: return 57
+    if code == 64: return 58
+    if code == 42: return 59
+    if code == 60: return 60
+    if code == 62: return 61
+    if code >= 97 and code <= 122:
+        return (code - 97 + 62) as i32
+    -1
 
 # integer nearest scale based on font size; 16->2, 34->4
 fn glyph_scale(fs: i32) -> i32:
@@ -1412,10 +1469,9 @@ fn fb_border_sides_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h
 # draw one glyph at (x,y) scaled by `scale`
 fn fb_glyph(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, gi: i32, color: u32, scale: i32) -> [u32]:
     var out = fb
-    val rows = glyph_rows(gi)
     var ry = 0
     while ry < 7:
-        val bits = rows[ry]
+        val bits = glyph_row_bits(gi, ry)
         var rx = 0
         while rx < 5:
             val mask = 1 << (4 - rx)
@@ -1447,9 +1503,8 @@ fn fb_text(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, color: u32, s
     var cx = x
     val adv = 6 * scale
     while i < n:
-        val ch = s.substring(i, i + 1)
         if cx < fbw:
-            val gi = glyph_index_for_char(ch)
+            val gi = glyph_index_for_code(s.char_code_at(i))
             if gi >= 0 and gi != 36:
                 out = fb_glyph(out, fbw, fbh, cx, y, gi, color, scale)
         cx = cx + adv
@@ -1469,10 +1524,9 @@ fn fb_glyph_thin_scaled(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, gi: i32, 
     if scale <= 1:
         return fb_glyph(fb, fbw, fbh, x, y, gi, color, scale)
     var out = fb
-    val rows = glyph_rows(gi)
     var ry = 0
     while ry < 7:
-        val bits = rows[ry]
+        val bits = glyph_row_bits(gi, ry)
         var rx = 0
         while rx < 5:
             val mask = 1 << (4 - rx)
@@ -1501,9 +1555,8 @@ fn fb_text_thin_scaled(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, c
     val n = s.len()
     var cx = x
     while i < n:
-        val ch = s.substring(i, i + 1)
         if cx < fbw:
-            val gi = glyph_index_for_char(ch)
+            val gi = glyph_index_for_code(s.char_code_at(i))
             if gi >= 0 and gi != 36:
                 out = fb_glyph_thin_scaled(out, fbw, fbh, cx, y, gi, color, scale)
         cx = cx + advance
@@ -1512,10 +1565,9 @@ fn fb_text_thin_scaled(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, c
 
 fn fb_glyph_thin_scaled_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, gi: i32, color: u32, scale: i32, clip: ClipRect) -> [u32]:
     var out = fb
-    val rows = glyph_rows(gi)
     var ry = 0
     while ry < 7:
-        val bits = rows[ry]
+        val bits = glyph_row_bits(gi, ry)
         var rx = 0
         while rx < 5:
             val mask = 1 << (4 - rx)
@@ -1540,14 +1592,19 @@ fn fb_glyph_thin_scaled_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, gi: 
     out
 
 fn fb_text_thin_scaled_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, color: u32, scale: i32, advance: i32, clip: ClipRect) -> [u32]:
+    fb_text_thin_scaled_clip_range(fb, fbw, fbh, x, y, s, 0, s.len(), color, scale, advance, clip)
+
+fn fb_text_thin_scaled_clip_range(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, start_i: i32, end_i: i32, color: u32, scale: i32, advance: i32, clip: ClipRect) -> [u32]:
     var out = fb
-    var i = 0
-    val n = s.len()
+    var i = start_i
+    var n = end_i
+    val s_len = s.len()
+    if n > s_len:
+        n = s_len
     var cx = x
     while i < n:
-        val ch = s.substring(i, i + 1)
         if cx < fbw and cx < clip.x1:
-            val gi = glyph_index_for_char(ch)
+            val gi = glyph_index_for_code(s.char_code_at(i))
             if gi >= 0 and gi != 36:
                 out = fb_glyph_thin_scaled_clip(out, fbw, fbh, cx, y, gi, color, scale, clip)
         cx = cx + advance
@@ -1556,10 +1613,9 @@ fn fb_text_thin_scaled_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: te
 
 fn fb_glyph_sparse(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, gi: i32, color: u32) -> [u32]:
     var out = fb
-    val rows = glyph_rows(gi)
     var ry = 0
     while ry < 7:
-        val bits = rows[ry]
+        val bits = glyph_row_bits(gi, ry)
         var rx = 0
         while rx < 5:
             val mask = 1 << (4 - rx)
@@ -1901,7 +1957,7 @@ fn wrap_line_end(txt: text, off: i32, cpl: i32) -> i32:
     var last_space = -1
     var i = off
     while i < limit:
-        if txt.substring(i, i + 1) == " ":
+        if txt.char_code_at(i) == 32:
             last_space = i
         i = i + 1
     if last_space > off:
@@ -1910,7 +1966,8 @@ fn wrap_line_end(txt: text, off: i32, cpl: i32) -> i32:
 
 fn skip_wrap_spaces(txt: text, off: i32) -> i32:
     var out = off
-    while out < txt.len() and txt.substring(out, out + 1) == " ":
+    val n = txt.len()
+    while out < n and txt.char_code_at(out) == 32:
         out = out + 1
     out
 
@@ -2300,12 +2357,12 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                 val lh = style_line_h(st)
                 while off < txt.len() and ly < fbh:
                     val endc = wrap_line_end(txt, off, cpl)
-                    val line = txt.substring(off, endc)
                     if not chrome_widget_text:
                         if widget_mode:
+                            val line = txt.substring(off, endc)
                             out = fb_text_sparse(out, fbw, fbh, text_x, ly, line, st.fg)
                         else:
-                            out = fb_text_thin_scaled_clip(out, fbw, fbh, text_x, ly, line, st.fg, scale, adv, clip)
+                            out = fb_text_thin_scaled_clip_range(out, fbw, fbh, text_x, ly, txt, off, endc, st.fg, scale, adv, clip)
                     off = skip_wrap_spaces(txt, endc)
                     ly = ly + lh
         i = i + 1
@@ -2468,4 +2525,7 @@ pub fn simple_web_layout_render_html_pixels(html: text, width: i32, height: i32,
     val base = if widget_mode: argb(245, 245, 245) else: white
     var fb: [u32] = [base; width * height]
     val painted = paint(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, fb, width, height, widget_mode)
+    val normalized_backend = backend_name.trim().lower()
+    if normalized_backend == "software" or normalized_backend == "cpu":
+        return painted
     present_layout_pixels_with_engine2d(painted, width, height, backend_name, base)

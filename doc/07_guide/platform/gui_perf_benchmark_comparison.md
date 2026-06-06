@@ -5,6 +5,20 @@
 Cross-framework GUI rendering performance comparison at 8K resolution (7680x4320).
 All numbers measured on this host unless marked otherwise.
 
+## Profile Checklist
+
+Use the GUI profile as a diagnostic report, not as a single winner table:
+
+- Record cold startup, warm total time, average/p50/p95/max frame time, peak RSS,
+  resolution, frame count, backend selection, and unavailable backend reasons.
+- Separate startup-only rows from frame-throughput rows; a row with zero
+  frame samples is availability evidence, not rendering performance evidence.
+- Treat headless in-memory canvas, X11/Xvfb compositing, native window-system
+  rendering, and GPU readback as different measurement scopes unless the report
+  says they are normalized.
+- Repeat release-grade claims on the target platform and require pixel parity
+  or checksum evidence before accepting an optimization.
+
 ## Measured Results (2026-06-05)
 
 ### 8K Fill + Widget Scene (7680x4320, 33.18M pixels, 60 frames)
@@ -17,7 +31,7 @@ All numbers measured on this host unless marked otherwise.
 | Electron | 4075 ms | — | — | — | Existing contract; checksum=0 headless |
 | Tauri | — | — | — | — | Unavailable (no cargo-tauri) |
 | Simple CUDA | — | — | — | — | Interpreter lacks CUDA FFI; needs compiled binary |
-| Simple Web Soft | — | — | — | — | Interpreter probe only; needs compiled binary |
+| Simple Web Soft | 3440 ms | 3267 ms | 3267 ms | 3267 ms | 2026-06-06 smoke, 320x240, software render-loop row |
 
 **Notes**: GTK frame times are frame-to-frame intervals (draw + composite + X11 present).
 Cairo draw calls alone take 0.035ms; the remaining ~150ms is GTK/X11 software compositing
@@ -88,6 +102,15 @@ bin/simple run src/app/wm_compare/backend_measurement_export.spl -- \
 - Key optimization: the Simple-to-C compilation gap, not algorithmic
 - CPU SIMD (AVX2) backend exists but needs 8K throughput measurement
 - Dirty-rect tracking avoids full 127 MB writes for partial updates
+- Software layout renders must not replay the already-painted framebuffer
+  through an Engine2D software present/readback cycle. The 2026-06-06
+  render-loop smoke dropped from about 13.98s to about 3.27s at 320x240 after
+  returning the painted software framebuffer directly.
+- Text remains the dominant software-layout cost. Direct 320x240 fixture timing
+  showed a solid page at about 2ms, layout without text at about 244ms, and
+  layout with text at about 1.21-1.29s after char-code glyph lookup and packed
+  glyph rows. Treat further software-only text tweaks as secondary to GPU or
+  compiled-mode text rasterization.
 
 ### General
 - Frame pacer prevents busy-wait; verify no artificial latency in bench mode
@@ -95,8 +118,9 @@ bin/simple run src/app/wm_compare/backend_measurement_export.spl -- \
 
 ## Remaining Work
 
-1. **Compiled Simple benchmarks**: CUDA and software backends need compiled binary
-   (interpreter can't drive CUDA FFI or measure real frame throughput)
+1. **Compiled Simple benchmarks**: CUDA needs compiled binary/device evidence;
+   software now has interpreter render-loop smoke evidence but still needs
+   repeated release-grade compiled-mode runs.
 2. **CPU SIMD at 8K**: AVX2 backend exists but no 8K throughput evidence yet
 3. **Tauri integration**: Needs `cargo-tauri` CLI + WebKitGTK dev package
 4. **Wire perf probes**: `start_phase`/`end_phase` calls need to be added to the
@@ -108,7 +132,7 @@ bin/simple run src/app/wm_compare/backend_measurement_export.spl -- \
 tools/gui_perf_bench/
   run_all_benchmarks.shs     # Orchestrator — all backends, collects results
   bench_gtk.c               # C/GTK3 benchmark (Cairo/X11)
-  bench_python.py           # Python/tkinter benchmark
+  bench_python.shs          # Python/tkinter benchmark
   bench_js.html             # Browser JS Canvas benchmark
   bench_js_node.js          # Node.js headless canvas benchmark
 
