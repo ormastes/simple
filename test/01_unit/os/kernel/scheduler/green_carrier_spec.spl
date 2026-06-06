@@ -28,7 +28,9 @@ existing SimpleOS SMP reschedule IPI surface for remote online CPUs. Dispatch
 selects queued work for a carrier CPU without stealing tasks from other CPUs.
 The scheduler intent step converts successful dispatch into a typed `TaskId`
 and a context-switch request, while failed dispatches remain no-op scheduler
-intents.
+intents. Applying the intent records the current green task and switch count for
+the target carrier CPU without performing the hardware context switch itself;
+that keeps the contract executable before QEMU SMP context-switch evidence.
 
 ## Requirements
 
@@ -62,7 +64,11 @@ use os.kernel.scheduler.green_carrier.{
     green_carrier_queue_depth,
     green_carrier_apply_enqueue,
     green_carrier_dispatch_next,
-    green_carrier_scheduler_intent
+    green_carrier_scheduler_intent,
+    green_carrier_execution_state_new,
+    green_carrier_current_task_on_cpu,
+    green_carrier_context_switches_on_cpu,
+    green_carrier_apply_scheduler_intent
 }
 use os.kernel.smp.smp.{smp_init, smp_bringup_ap, smp_take_ipi}
 
@@ -260,3 +266,53 @@ describe "SimpleOS green carrier bridge contract":
             expect(intent.task.id).to_equal(0)
             expect(intent.cpu).to_equal(1u32)
             expect(intent.reason).to_equal("queue_empty")
+
+    describe "execution apply":
+        it "records current green task and switch count for scheduler intent":
+            smp_init()
+            val queues = green_carrier_run_queues_new(4, 8)
+            val decision = green_carrier_spawn_task(36, 4, 0, 3, 1, 2, 4, 1)
+            val queued = green_carrier_apply_enqueue(queues, decision)
+            val dispatched = green_carrier_dispatch_next(queued.queues, 1)
+            val intent = green_carrier_scheduler_intent(dispatched)
+            val state = green_carrier_execution_state_new(4)
+            val applied = green_carrier_apply_scheduler_intent(state, intent)
+
+            expect(applied.applied).to_equal(true)
+            expect(applied.reason).to_equal("context_switch_recorded")
+            expect(green_carrier_current_task_on_cpu(applied.state, 1)).to_equal(36)
+            expect(green_carrier_context_switches_on_cpu(applied.state, 1)).to_equal(1)
+            expect(applied.state.total_context_switches).to_equal(1)
+            expect(applied.state.rejected_intents).to_equal(0)
+
+        it "rejects no-op intent without changing current task":
+            val queues = green_carrier_run_queues_new(4, 8)
+            val dispatched = green_carrier_dispatch_next(queues, 2)
+            val intent = green_carrier_scheduler_intent(dispatched)
+            val state = green_carrier_execution_state_new(4)
+            val applied = green_carrier_apply_scheduler_intent(state, intent)
+
+            expect(applied.applied).to_equal(false)
+            expect(applied.reason).to_equal("queue_empty")
+            expect(green_carrier_current_task_on_cpu(applied.state, 2)).to_equal(0)
+            expect(green_carrier_context_switches_on_cpu(applied.state, 2)).to_equal(0)
+            expect(applied.state.rejected_intents).to_equal(1)
+
+        it "keeps execution state isolated per carrier CPU":
+            smp_init()
+            val queues = green_carrier_run_queues_new(4, 8)
+            val cpu1_task = green_carrier_spawn_task(37, 4, 0, 3, 1, 2, 4, 1)
+            val after_cpu1 = green_carrier_apply_enqueue(queues, cpu1_task)
+            val cpu2_task = green_carrier_spawn_task(38, 4, 0, 3, 4, 1, 2, 2)
+            val after_cpu2 = green_carrier_apply_enqueue(after_cpu1.queues, cpu2_task)
+            val state = green_carrier_execution_state_new(4)
+            val dispatch1 = green_carrier_dispatch_next(after_cpu2.queues, 1)
+            val apply1 = green_carrier_apply_scheduler_intent(state, green_carrier_scheduler_intent(dispatch1))
+            val dispatch2 = green_carrier_dispatch_next(dispatch1.queues, 2)
+            val apply2 = green_carrier_apply_scheduler_intent(apply1.state, green_carrier_scheduler_intent(dispatch2))
+
+            expect(green_carrier_current_task_on_cpu(apply2.state, 1)).to_equal(37)
+            expect(green_carrier_current_task_on_cpu(apply2.state, 2)).to_equal(38)
+            expect(green_carrier_context_switches_on_cpu(apply2.state, 1)).to_equal(1)
+            expect(green_carrier_context_switches_on_cpu(apply2.state, 2)).to_equal(1)
+            expect(apply2.state.total_context_switches).to_equal(2)

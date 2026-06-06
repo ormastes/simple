@@ -60,6 +60,21 @@ pub struct GreenCarrierSchedulerIntent:
     should_context_switch: bool
     reason: text
 
+pub struct GreenCarrierExecutionState:
+    """Scheduler-visible execution state for green carrier CPUs."""
+    current_task_by_cpu: [u64]
+    context_switches_by_cpu: [i64]
+    total_context_switches: i64
+    rejected_intents: i64
+
+pub struct GreenCarrierExecutionResult:
+    """Result of applying scheduler intent to green execution state."""
+    state: GreenCarrierExecutionState
+    task: TaskId
+    cpu: u32
+    applied: bool
+    reason: text
+
 pub fn green_carrier_should_send_ipi(current_cpu: i64, target_cpu: i64, should_enqueue: bool) -> bool:
     """Request a wake IPI only for remote runnable enqueue decisions."""
     should_enqueue and target_cpu != current_cpu
@@ -247,6 +262,92 @@ pub fn green_carrier_scheduler_intent(dispatch: GreenCarrierDispatchResult) -> G
             should_run: true,
             should_context_switch: true,
             reason: "green_task_ready"
+        )
+
+pub fn green_carrier_execution_state_new(cpu_count: i64) -> GreenCarrierExecutionState:
+    """Create empty green execution state for carrier CPUs."""
+    val normalized_cpu_count = green_carrier_normalized_cpu_count(cpu_count)
+    var current_task_by_cpu: [u64] = []
+    var context_switches_by_cpu: [i64] = []
+    var i = 0
+    while i < normalized_cpu_count:
+        current_task_by_cpu.push(0)
+        context_switches_by_cpu.push(0)
+        i = i + 1
+    GreenCarrierExecutionState(
+        current_task_by_cpu: current_task_by_cpu,
+        context_switches_by_cpu: context_switches_by_cpu,
+        total_context_switches: 0,
+        rejected_intents: 0
+    )
+
+pub fn green_carrier_current_task_on_cpu(state: GreenCarrierExecutionState, cpu: i64) -> u64:
+    """Return current green task id recorded for a carrier CPU."""
+    if cpu < 0 or cpu >= state.current_task_by_cpu.len():
+        0
+    else:
+        state.current_task_by_cpu[cpu]
+
+pub fn green_carrier_context_switches_on_cpu(state: GreenCarrierExecutionState, cpu: i64) -> i64:
+    """Return context-switch intents applied to one carrier CPU."""
+    if cpu < 0 or cpu >= state.context_switches_by_cpu.len():
+        0
+    else:
+        state.context_switches_by_cpu[cpu]
+
+fn green_carrier_mark_current_task(current_task_by_cpu: [u64], cpu: i64, task_id: u64) -> [u64]:
+    var next_current = current_task_by_cpu
+    if cpu >= 0 and cpu < next_current.len():
+        next_current[cpu] = task_id
+    next_current
+
+fn green_carrier_increment_switch_count(context_switches_by_cpu: [i64], cpu: i64) -> [i64]:
+    var next_switches = context_switches_by_cpu
+    if cpu >= 0 and cpu < next_switches.len():
+        next_switches[cpu] = next_switches[cpu] + 1
+    next_switches
+
+pub fn green_carrier_apply_scheduler_intent(state: GreenCarrierExecutionState, intent: GreenCarrierSchedulerIntent) -> GreenCarrierExecutionResult:
+    """Apply a green scheduler intent to execution state."""
+    val cpu = intent.cpu as i64
+    if not intent.should_run or not intent.should_context_switch:
+        GreenCarrierExecutionResult(
+            state: GreenCarrierExecutionState(
+                current_task_by_cpu: state.current_task_by_cpu,
+                context_switches_by_cpu: state.context_switches_by_cpu,
+                total_context_switches: state.total_context_switches,
+                rejected_intents: state.rejected_intents + 1
+            ),
+            task: intent.task,
+            cpu: intent.cpu,
+            applied: false,
+            reason: intent.reason
+        )
+    elif cpu < 0 or cpu >= state.current_task_by_cpu.len():
+        GreenCarrierExecutionResult(
+            state: GreenCarrierExecutionState(
+                current_task_by_cpu: state.current_task_by_cpu,
+                context_switches_by_cpu: state.context_switches_by_cpu,
+                total_context_switches: state.total_context_switches,
+                rejected_intents: state.rejected_intents + 1
+            ),
+            task: intent.task,
+            cpu: intent.cpu,
+            applied: false,
+            reason: "invalid_cpu"
+        )
+    else:
+        GreenCarrierExecutionResult(
+            state: GreenCarrierExecutionState(
+                current_task_by_cpu: green_carrier_mark_current_task(state.current_task_by_cpu, cpu, intent.task.id),
+                context_switches_by_cpu: green_carrier_increment_switch_count(state.context_switches_by_cpu, cpu),
+                total_context_switches: state.total_context_switches + 1,
+                rejected_intents: state.rejected_intents
+            ),
+            task: intent.task,
+            cpu: intent.cpu,
+            applied: true,
+            reason: "context_switch_recorded"
         )
 
 pub fn green_carrier_apply_enqueue(queues: GreenCarrierRunQueueState, decision: GreenCarrierEnqueueDecision) -> GreenCarrierApplyResult:
