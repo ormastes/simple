@@ -144,22 +144,24 @@ expect_script_has_deferred_boundary("scripts/qemu/qemu_rv32_http_test.shs")
 
 ### HTTP baremetal production blockers
 
-#### records RV64 packet RX/TX and HTTP-only QEMU smoke as current evidence
+#### records RV64 packet RX/TX and HTTP-only QEMU smoke as prebuilt-only evidence until source rebuild passes
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val plan = rt_file_read_text("doc/03_plan/os/riscv/riscv_rtl_simpleos_boot.md")
 
-expect(plan).to_contain("HTTP-only live gate passing")
+expect(plan).to_contain("HTTP-only prebuilt gate passing; current-source QEMU blocked")
 expect(plan).to_contain("packet RX/TX for QEMU HTTP smoke")
 expect(plan).to_contain("--expect-http-only")
 expect(plan).to_contain("Storage service ready")
 expect(plan).to_contain("NVFS root superblock ready")
+expect(plan).to_contain("Do not treat the")
+expect(plan).to_contain("passing prebuilt ELF smoke as current-source rebuild evidence")
 ```
 
 </details>

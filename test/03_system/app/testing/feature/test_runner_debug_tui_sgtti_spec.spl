@@ -1,0 +1,157 @@
+# @cover src/app/test_runner_new/test_runner_debug_tui.spl 80%
+# @cover src/app/test_runner_new/main.spl 20%
+# @cover src/lib/nogc_sync_mut/ui_test/sgtti.spl 40%
+# codex-system-test
+"""
+# Test Runner Debug TUI SGTTI System Spec
+
+## Overview
+
+Validates that test-runner session-debug mode has a queryable TUI surface and
+that SPipe UI evidence can be captured through the shared SGTTI test interface.
+
+**Requirements:** doc/03_plan/sys_test/test_runner_debug_tui_sgtti.md
+**Plan:** doc/03_plan/sys_test/test_runner_debug_tui_sgtti.md
+**Design:** doc/05_design/app/testing/test_runner_debug_tui_sgtti.md
+**Research:** N/A
+**TUI Captures:** build/test-artifacts/03_system/app/testing/feature/test_runner_debug_tui_sgtti/debug_tui.txt
+
+## Syntax
+
+The spec builds an in-process session schedule, renders it as the runner debug
+TUI, writes the visible text capture, and checks the same state through
+`SgttiTestDriver`.
+"""
+# @evidence-display: embed_tui
+
+use std.spec.{describe, it, expect}
+use std.ui_test.sgtti.{SgttiTestDriver}
+use app.test_daemon.session_scheduler.{schedule_session_tests}
+use app.test_daemon.session_types.{
+    TestSessionMeta,
+    SESSION_KIND_GUI,
+    SESSION_KIND_LOCAL,
+    SESSION_KIND_QEMU_VM,
+    RESET_NONE,
+    RESET_SNAPSHOT_RESTORE,
+    RESET_SOFT,
+    REUSE_FRESH_PER_TEST,
+    REUSE_SHARED_READ_ONLY,
+    REUSE_SHARED_WITH_RESET
+}
+use app.test_runner_new.test_runner_args.{parse_test_args}
+use app.test_runner_new.test_runner_debug_tui.{
+    test_runner_debug_tui_capture,
+    test_runner_debug_tui_model,
+    test_runner_debug_tui_schedule_text,
+    test_runner_debug_tui_snapshot,
+    test_runner_debug_tui_summary
+}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_read_text(path: text) -> text
+
+val ARTIFACT_DIR: text = "build/test-artifacts/03_system/app/testing/feature/test_runner_debug_tui_sgtti"
+val TUI_CAPTURE_PATH: text = ARTIFACT_DIR + "/debug_tui.txt"
+
+fn _meta(path: text, kind: i64, target: text, reuse_mode: i64, reset_policy: i64) -> TestSessionMeta:
+    TestSessionMeta(
+        file_path: path,
+        session_kind: kind,
+        target: target,
+        reuse_mode: reuse_mode,
+        reset_policy: reset_policy,
+        artifact: "",
+        startup_cmd: "",
+        healthcheck: ""
+    )
+
+fn _schedule_fixture():
+    schedule_session_tests([
+        _meta("test/03_system/app/qemu_boot_spec.spl", SESSION_KIND_QEMU_VM, "rv64", REUSE_SHARED_READ_ONLY, RESET_NONE),
+        _meta("test/03_system/gui/widget_showcase_spec.spl", SESSION_KIND_GUI, "headless", REUSE_SHARED_WITH_RESET, RESET_SOFT),
+        _meta("test/01_unit/lib/local_spec.spl", SESSION_KIND_LOCAL, "", REUSE_FRESH_PER_TEST, RESET_SNAPSHOT_RESTORE)
+    ])
+
+fn _write_capture(content: text) -> i64:
+    val script = "mkdir -p '" + ARTIFACT_DIR + "' && cat > '" + TUI_CAPTURE_PATH + "' <<'SIMPLE_TUI_CAPTURE_EOF'\n" +
+        content + "\nSIMPLE_TUI_CAPTURE_EOF\n"
+    val (_out, _err, code) = rt_process_run("/bin/sh", ["-c", script])
+    code
+
+fn _capture_file_state(expected: text) -> text:
+    val (out, _err, code) = rt_process_run("/bin/sh", ["-c", "test -f '" + TUI_CAPTURE_PATH + "' && cat '" + TUI_CAPTURE_PATH + "'"])
+    if code != 0:
+        return "missing"
+    if out == expected + "\n":
+        return "matched"
+    "mismatched"
+
+fn _run_test_runner_help() -> (text, text, i64):
+    rt_process_run("/bin/sh", [
+        "-c",
+        "REPO=$(pwd); SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/test_runner_new/main.spl\" --help"
+    ])
+
+fn _marker_state(source: text, marker: text) -> text:
+    if source.contains(marker):
+        return "present"
+    "absent"
+
+describe "test runner debug TUI through SGTTI":
+    it "renders session debug mode as a TUI capture":
+        val schedule = _schedule_fixture()
+        val model = test_runner_debug_tui_model("test/03_system", "interpreter", true, true, schedule)
+        val capture = test_runner_debug_tui_capture(model)
+
+        expect(_write_capture(capture)).to_equal(0)
+        expect(_capture_file_state(capture)).to_equal("matched")
+        expect(capture).to_start_with("Test Runner Debug")
+        expect(capture).to_contain("target: test/03_system")
+        expect(capture).to_contain("mode: interpreter")
+        expect(capture).to_contain("session-enabled: true")
+        expect(capture).to_contain("session-debug: true")
+        expect(capture).to_contain("group: qemu_vm target=rv64 tests=1")
+        expect(capture).to_contain("group: gui_session target=headless tests=1")
+
+    it "exposes the debug TUI as SGTTI queryable visible state":
+        val schedule = _schedule_fixture()
+        val model = test_runner_debug_tui_model("test/03_system", "interpreter", true, true, schedule)
+        val snapshot = test_runner_debug_tui_snapshot(model, 1000, 5000, 1000)
+        val driver = SgttiTestDriver.new(snapshot)
+
+        expect(snapshot.access.mode).to_equal("tui")
+        expect(snapshot.sources[0].source_kind).to_equal("in_process_tui")
+        expect(snapshot.sources[0].capabilities).to_contain("query_text")
+        expect(driver.check_text("root", "Test Runner Debug").unwrap())
+        expect(driver.check_text("line_8", "qemu_vm").unwrap())
+        expect(driver.check_text("line_9", "gui_session").unwrap())
+        expect(driver.get_elements().unwrap().len()).to_equal(model.lines.len() + 1)
+
+    it "keeps session-debug parser help and schedule summary aligned":
+        val options = parse_test_args(["--session-debug", "--session-daemon", "--session-kind=qemu_vm", "test/03_system"])
+        val schedule = _schedule_fixture()
+        val model = test_runner_debug_tui_model(options.path, "interpreter", options.session_share, options.session_debug, schedule)
+        val summary = test_runner_debug_tui_summary(model)
+        val schedule_text = test_runner_debug_tui_schedule_text(schedule)
+        val (help_out, help_err, help_code) = _run_test_runner_help()
+
+        expect(options.session_debug)
+        expect(options.session_share)
+        expect(options.session_daemon)
+        expect(options.session_kind).to_equal("qemu_vm")
+        expect(summary).to_contain("debug=true")
+        expect(schedule_text).to_contain("Session Schedule:")
+        expect(help_code).to_equal(0)
+        expect(help_out).to_contain("--session-debug")
+
+    it "keeps SGTTI and debug TUI construction out of the normal runner entrypoint":
+        val main_source = rt_file_read_text("src/app/test_runner_new/main.spl")
+        val runner_source = rt_file_read_text("src/app/test_runner_new/test_runner_main.spl")
+
+        expect(_marker_state(main_source, "std.ui_test.sgtti")).to_equal("absent")
+        expect(_marker_state(main_source, "SgttiTestDriver")).to_equal("absent")
+        expect(_marker_state(main_source, "test_runner_debug_tui")).to_equal("absent")
+        expect(_marker_state(runner_source, "std.ui_test.sgtti")).to_equal("absent")
+        expect(_marker_state(runner_source, "SgttiTestDriver")).to_equal("absent")
+        expect(_marker_state(runner_source, "test_runner_debug_tui")).to_equal("absent")

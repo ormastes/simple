@@ -5,7 +5,7 @@ Related hardware launch plan:
 FPGA inventory, RV64 softcore strategy, SimpleOS bring-up gates, and current
 hardware/tool blockers.
 
-**Date:** 2026-05-11 (updated 2026-05-12)
+**Date:** 2026-05-11 (updated 2026-06-06)
 
 ## Goal
 
@@ -37,8 +37,8 @@ Production-level RISC-V system:
 | B2 | TCP shim | DONE |
 | B3 | IoDriver shim | DONE |
 | B4 | TLS on baremetal | BLOCKED |
-| B5 | HTTP server launch | HTTP-only live gate passing |
-| B6 | QEMU integration tests | HTTP/display/storage live gates passing |
+| B5 | HTTP server launch | HTTP-only prebuilt gate passing; current-source QEMU blocked |
+| B6 | QEMU integration tests | HTTP/display/storage prebuilt smoke passed; current-source rebuild blocked by LLVM seed support |
 
 ### B1 Detail — Current Blockers
 
@@ -146,8 +146,12 @@ netstack, TLS, and HTTP closures.
 **Current boundary after B3/B5/B6:**
 - The RISC-V service probe now requires VirtIO-net TX completion and packet RX
   readiness before setting `riscv_network_ready()`.
-- RV64 QEMU proves packet RX/TX for QEMU HTTP smoke through the boot-local
-  ARP/TCP/HTTP provider, then serves `/health` and `/` over host forwarding.
+- RV64 QEMU has prebuilt smoke evidence for packet RX/TX through the boot-local
+  ARP/TCP/HTTP provider, then serving `/health` and `/` over host forwarding.
+  The `scripts/qemu/qemu_rv64_http_test.shs --expect-http-only --with-storage`
+  path now requires a current-source build stamp by default and only accepts
+  unstamped ELFs when `--allow-prebuilt-artifact` is passed. Do not treat the
+  passing prebuilt ELF smoke as current-source rebuild evidence.
 - This is still a narrow boot-local provider, not the full kernel TCP/IP
   netstack. The full TCP shim/netstack must become freestanding-safe before it
   replaces the boot-local path.

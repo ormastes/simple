@@ -55,3 +55,16 @@ interval. While work is active, it switches to the shorter busy poll interval.
 - `qemu_effective_limit`
 
 Use these fields when diagnosing queued QEMU or test requests.
+
+## Session Debug TUI
+
+`--session-debug` prints scheduler routing details for session-capable tests.
+The queryable TUI evidence surface is modeled by
+`src/app/test_runner_new/test_runner_debug_tui.spl` and tested by
+`test/03_system/app/testing/feature/test_runner_debug_tui_sgtti_spec.spl`.
+
+The SGTTI layer is opt-in evidence only. The normal test-runner entrypoints
+(`src/app/test_runner_new/main.spl` and `test_runner_main.spl`) must not import
+`std.ui_test.sgtti`, `SgttiTestDriver`, or the debug TUI model. That keeps
+compile-time entry-closure builds free to omit SGTTI entirely, with no snapshot
+construction, polling, or capture allocation on the default path.

@@ -29,7 +29,7 @@ simple_portal_server_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -69,6 +69,32 @@ Reproduction: this block contains the complete executable scenario source.
 val resp = _server().route_request("GET", "//api//portal//releases//", "", "")
 expect(resp).to_start_with("HTTP/1.1 200 OK")
 expect(resp).to_contain("\"releases\"")
+```
+
+</details>
+
+#### serves content APIs from a filesystem-backed data root even when the app root is absent
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val data_root = simple_portal_default_app_root()
+val server_result = SimplePortalServer.new(
+    4041,
+    "/tmp/simple_portal_missing_app_root",
+    data_root,
+    "dev-token"
+)
+expect(server_result.is_ok()).to_equal(true)
+val server = server_result.unwrap()
+expect(server.content_root).to_equal(data_root)
+val resp = server.route_request("GET", "/api/portal/pages/docs", "", "")
+expect(resp).to_start_with("HTTP/1.1 200 OK")
+expect(resp).to_contain("Simple Portal Docs")
 ```
 
 </details>
@@ -197,8 +223,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

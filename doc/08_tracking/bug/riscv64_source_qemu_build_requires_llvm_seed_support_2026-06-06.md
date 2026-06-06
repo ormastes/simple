@@ -27,8 +27,11 @@ Affected commands:
 
 The prebuilt ELF smoke still provides limited evidence:
 
-- `sh scripts/qemu/qemu_rv64_http_test.shs --expect-http-only` passed HTTP-only checks against
-  `build/simpleos-rv64.elf`.
+- `sh scripts/qemu/qemu_rv64_http_test.shs --expect-http-only --allow-prebuilt-artifact` may be
+  used for smoke-only checks against a known prebuilt ELF.
+- The script now defaults to `build/os/simpleos_riscv64.elf` and requires the runner-generated
+  `.build_stamp` by default, so unstamped ELFs fail closed instead of being presented as
+  current-source evidence.
 
 ## Required Fix
 

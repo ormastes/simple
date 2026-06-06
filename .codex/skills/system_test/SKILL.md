@@ -131,6 +131,12 @@ describe "<Feature Name>":
     before falling back to screenshots.
   - Evidence paths appear in `**Screenshots:**` or `**TUI Captures:**` metadata so generated `doc/06_spec/...` docs can render them according to evidence display policy.
   - Raster evidence (`.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.ppm`) is tracked by Git LFS.
+- SGTTI must remain zero-overhead outside explicit test/debug builds. Specs that
+  add SGTTI-backed TUI/GUI evidence must also prove the normal production
+  entrypoint does not import `std.ui_test.sgtti`, `SgttiTestDriver`, or the
+  SGTTI capture/debug surface. The test/debug entrypoint may import SGTTI; the
+  default product/runner path must not construct snapshots, poll UI state, or
+  allocate capture nodes when SGTTI is compile-time disabled or absent.
 - Draw IR layout/style parity specs should capture structured Protocol-v2
   evidence when available: use `draw-ir/diff?baseline=...&capability=draw_ir`
   or `common.ui.draw_ir_diff` for stable-id geometry, border, color, style, and

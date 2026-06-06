@@ -267,7 +267,7 @@ rustc --version     # 1.75+
 | Platform binary | `bin/release/<triple>/simple` | Self-sufficient compiler/interpreter |
 | Build artifacts | `build/` | Intermediate files (safe to delete) |
 
-The platform binary is fully self-sufficient. All compilation, interpretation, and test running happens in-process. The only external tool calls are to system compilers and linkers (`clang`, `gcc`, `mold`/`lld`/`ld`, `llc`). The `scripts/setup/setup.sh` script creates the `bin/simple` symlink pointing to the correct platform binary.
+The platform binary is fully self-sufficient. All compilation, interpretation, and test running happens in-process. The only external tool calls are to system compilers and linkers (`clang`, `gcc`, `mold`/`lld`/`ld`, `llc`). The `scripts/setup/setup.shs` script creates the `bin/simple` symlink pointing to the correct platform binary.
 
 ---
 

@@ -1325,7 +1325,7 @@ fn concurrency_api_import_error(
             expected: Some("OS-thread API symbol".to_string()),
             found: Some(target_name.clone()),
             notes: vec![
-                "std.concurrent.thread is reserved for OS thread primitives such as thread_spawn and thread_spawn2"
+                "std.concurrent.thread is reserved for OS thread primitives such as thread_spawn and thread_spawn_with_args"
                     .to_string(),
             ],
             help: vec!["import task_spawn from std.nogc_async_mut.thread_pool instead".to_string()],
@@ -1692,7 +1692,7 @@ mod tests {
         let mut file = NamedTempFile::new().unwrap();
         writeln!(
             file,
-            "use std.concurrent.thread.{{thread_spawn, thread_spawn2}}\nfn main():\n    val x = 1"
+            "use std.concurrent.thread.{{thread_spawn, thread_spawn_with_args}}\nfn main():\n    val x = 1"
         )
         .unwrap();
 

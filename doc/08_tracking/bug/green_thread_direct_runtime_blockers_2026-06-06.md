@@ -29,12 +29,12 @@ cross-language harness with `WORKERS=2 GREEN_WORKERS=2 RUNS=3` measured:
 - Go goroutines/channels: 6.117 ms
 
 This is a model mismatch, not just a local queue optimization issue. Use
-`thread_spawn2`/pool-backed native work for C/Go-style CPU parallelism once the
+`thread_spawn_with_args`/pool-backed native work for C/Go-style CPU parallelism once the
 native OS-thread path compiles and runs cleanly.
 
 The cross-language harness now reports Simple OS-thread and Simple green rows
 separately. A 20-worker OS-thread fanout smoke compiles and runs through
-loop-based `thread_spawn2`, and the harness no longer needs 1000-worker unrolled
+loop-based `thread_spawn_with_args`, and the harness no longer needs 1000-worker unrolled
 source generation for the OS-thread fanout row. The remaining direct-run blockers
 are the cooperative green SMF mutable-global failure and the older function-value
 closure path used by `thread_spawn(fn)`; those are runtime/compiler issues, not

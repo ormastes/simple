@@ -1025,7 +1025,7 @@ simple build coverage
 
 **Performance Profiles:**
 - Language profile: [scripts/check/check-cross-language-perf.shs](scripts/check/check-cross-language-perf.shs) generates [doc/09_report/cross_language_perf_2026-06-06.md](doc/09_report/cross_language_perf_2026-06-06.md)
-- GUI profile: [tools/gui_perf_bench/run_all_benchmarks.sh](tools/gui_perf_bench/run_all_benchmarks.sh) generates [doc/09_report/gui_perf_benchmark_2026-06-06.md](doc/09_report/gui_perf_benchmark_2026-06-06.md)
+- GUI profile: [tools/gui_perf_bench/run_all_benchmarks.shs](tools/gui_perf_bench/run_all_benchmarks.shs) generates [doc/09_report/gui_perf_benchmark_2026-06-06.md](doc/09_report/gui_perf_benchmark_2026-06-06.md)
 - Startup/TUI profile: [scripts/check/check-startup-size-performance-audit.shs](scripts/check/check-startup-size-performance-audit.shs) records TUI startup rows in [doc/09_report/startup_size_performance_audit_2026-05-27.md](doc/09_report/startup_size_performance_audit_2026-05-27.md)
 
 See [doc/09_report/session/full_test_suite_results_2026-02-14.md](doc/09_report/session/full_test_suite_results_2026-02-14.md) for detailed test analysis.

@@ -14,7 +14,7 @@ responsive CSS and 44px touch-target contract.
 | Android Emulator | any recent | `emulator -avd Pixel7` |
 | Rust toolchain | stable | `rustup target add aarch64-linux-android` |
 | Tauri CLI | 2.x | `cargo install tauri-cli` |
-| `simple` binary | on `$PATH` | `scripts/setup/setup.sh` or `bin/simple` symlink |
+| `simple` binary | on `$PATH` | `scripts/setup/setup.shs` or `bin/simple` symlink |
 
 ## 2. Environment Setup
 

@@ -4,6 +4,8 @@
 # `/sys/apps/simple_portal/` filesystem app layout.
 
 use std.json.builder.{escape_json}
+use std.fs_driver.mount_table.{MountTable}
+use std.fs_driver.types.{OpenFlags}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
@@ -92,6 +94,27 @@ pub fn portal_content_db_load_resolved(app_root: text, data_root: text) -> Resul
         Ok(db):
             Ok(PortalContentSource(root: root, db: db))
 
+pub fn portal_content_db_load_from_mount(fs: MountTable, root: text) -> Result<PortalContentSource, text>:
+    val pages_path = "{root}/content/pages.db"
+    val examples_path = "{root}/content/examples.db"
+    val releases_path = "{root}/content/releases.db"
+    val links_path = "{root}/content/links.db"
+    if not _portal_mount_file_exists(fs, pages_path):
+        return Err("Missing portal content file: {pages_path}")
+    if not _portal_mount_file_exists(fs, examples_path):
+        return Err("Missing portal content file: {examples_path}")
+    if not _portal_mount_file_exists(fs, releases_path):
+        return Err("Missing portal content file: {releases_path}")
+    if not _portal_mount_file_exists(fs, links_path):
+        return Err("Missing portal content file: {links_path}")
+    val db = portal_content_db_from_text(
+        pages_text: _portal_mount_read_text(fs, pages_path)?,
+        examples_text: _portal_mount_read_text(fs, examples_path)?,
+        releases_text: _portal_mount_read_text(fs, releases_path)?,
+        links_text: _portal_mount_read_text(fs, links_path)?
+    )?
+    Ok(PortalContentSource(root: root, db: db))
+
 pub fn portal_content_db_from_text(pages_text: text, examples_text: text, releases_text: text, links_text: text) -> Result<PortalContentDb, text>:
     val pages = _parse_pages(pages_text)?
     val examples = _parse_examples(examples_text)?
@@ -103,13 +126,13 @@ pub fn portal_content_db_from_text(pages_text: text, examples_text: text, releas
 pub fn portal_page_by_slug(db: PortalContentDb, slug: text) -> PortalPageRecord?:
     for page in db.pages:
         if page.slug == slug:
-            return Some(page)
+            return page
     nil
 
 pub fn portal_example_by_id(db: PortalContentDb, example_id: text) -> PortalExampleRecord?:
     for example in db.examples:
         if example.example_id == example_id:
-            return Some(example)
+            return example
     nil
 
 pub fn portal_read_page_body(app_root: text, page: PortalPageRecord) -> text:
@@ -123,6 +146,22 @@ pub fn portal_read_example_source(app_root: text, example: PortalExampleRecord) 
     if not rt_file_exists(path):
         return ""
     rt_file_read_text(path)
+
+pub fn portal_read_page_body_from_mount(fs: MountTable, root: text, page: PortalPageRecord) -> text:
+    val path = "{root}/content/{page.body_path}"
+    match _portal_mount_read_text(fs, path):
+        Ok(body):
+            body
+        Err(_):
+            ""
+
+pub fn portal_read_example_source_from_mount(fs: MountTable, root: text, example: PortalExampleRecord) -> text:
+    val path = "{root}/content/{example.source_path}"
+    match _portal_mount_read_text(fs, path):
+        Ok(source):
+            source
+        Err(_):
+            ""
 
 pub fn portal_pages_json(db: PortalContentDb, app_root: text) -> text:
     var out = "["
@@ -322,3 +361,28 @@ fn _portal_content_db_files_exist(root: text) -> bool:
         rt_file_exists("{root}/content/examples.db") and
         rt_file_exists("{root}/content/releases.db") and
         rt_file_exists("{root}/content/links.db")
+
+fn _portal_mount_file_exists(fs: MountTable, path: text) -> bool:
+    val stat = fs.stat(path)
+    if stat.is_err():
+        return false
+    stat.unwrap().is_file
+
+fn _portal_mount_read_text(fs: MountTable, path: text) -> Result<text, text>:
+    val stat = fs.stat(path)
+    if stat.is_err():
+        return Err("Missing portal content file: {path}")
+    val info = stat.unwrap()
+    if not info.is_file:
+        return Err("Portal content path is not a file: {path}")
+    val handle = fs.open(path, OpenFlags.read_only())
+    if handle.is_err():
+        return Err("Failed to open portal content file: {path}")
+    val fh = handle.unwrap()
+    val body = fs.read(fh, info.size)
+    val _ = fs.close(fh)
+    match body:
+        Ok(text_body):
+            Ok(text_body)
+        Err(_):
+            Err("Failed to read portal content file: {path}")

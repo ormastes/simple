@@ -28,7 +28,7 @@ simple_portal_content_db_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -50,6 +50,25 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val result = portal_content_db_load(simple_portal_default_app_root())
 expect(result.is_ok()).to_equal(true)
+```
+
+</details>
+
+#### prefers a complete filesystem-backed data root over a missing app root
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val data_root = simple_portal_default_app_root()
+val result = portal_content_db_load_resolved("/tmp/simple_portal_missing_app_root", data_root)
+expect(result.is_ok()).to_equal(true)
+val source = result.unwrap()
+expect(source.root).to_equal(data_root)
+expect(source.db.pages[0].slug).to_equal("docs")
 ```
 
 </details>
@@ -113,8 +132,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

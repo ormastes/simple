@@ -27,13 +27,13 @@ node .spipe/spipe_project/cli/spipe.js fine-tune-init
 Create a new attempt record:
 
 ```sh
-.spipe/llm-finetune-process/scripts/new_attempt.sh <attempt_id> <goal> [app_or_server_target]
+.spipe/llm-finetune-process/scripts/new_attempt.shs <attempt_id> <goal> [app_or_server_target]
 ```
 
 Verify a filled attempt record:
 
 ```sh
-.spipe/llm-finetune-process/scripts/verify_attempt.sh .spipe/llm-finetune-process/attempts/<attempt_id>.sdn
+.spipe/llm-finetune-process/scripts/verify_attempt.shs .spipe/llm-finetune-process/attempts/<attempt_id>.sdn
 ```
 
 The verifier delegates to `spipe fine-tune-verify` when the separated SPipe CLI

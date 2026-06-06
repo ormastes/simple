@@ -57,7 +57,7 @@ speed difference is partly the display-server overhead, not renderer speed alone
 ```bash
 # Full comparison (needs Xvfb for GTK/tkinter):
 Xvfb :99 -screen 0 7680x4320x24 &
-DISPLAY=:99 tools/gui_perf_bench/run_all_benchmarks.sh --width 7680 --height 4320 --frames 60
+DISPLAY=:99 tools/gui_perf_bench/run_all_benchmarks.shs --width 7680 --height 4320 --frames 60
 
 # Individual:
 node tools/gui_perf_bench/bench_js_node.js --width 7680 --height 4320 --frames 60
@@ -106,7 +106,7 @@ bin/simple run src/app/wm_compare/backend_measurement_export.spl -- \
 
 ```
 tools/gui_perf_bench/
-  run_all_benchmarks.sh     # Orchestrator — all backends, collects results
+  run_all_benchmarks.shs     # Orchestrator — all backends, collects results
   bench_gtk.c               # C/GTK3 benchmark (Cairo/X11)
   bench_python.py           # Python/tkinter benchmark
   bench_js.html             # Browser JS Canvas benchmark

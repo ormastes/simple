@@ -61,6 +61,12 @@ surface for existing specs. Do not create feature-specific replacements for
 `describe`, `it`, `expect`, or the built-in matchers. UI, SGTTI, Draw IR, MCP,
 and protocol checks should add helper functions that run inside normal SPipe
 `it` blocks.
+SGTTI must be zero-overhead in production paths. Keep SGTTI imports and capture
+builders in explicit test/debug entrypoints; normal product entrypoints must not
+import `std.ui_test.sgtti`, `SgttiTestDriver`, or debug-TUI capture modules. For
+native entry-closure builds, SGTTI should be elided when not imported. Any spec
+that introduces SGTTI evidence must include an import-boundary check proving the
+normal path does not construct or poll the SGTTI surface.
 For UI layout, border, color, style, or text-bound parity, prefer structured
 Protocol-v2 Draw IR evidence with
 `/api/test/draw-ir/diff?baseline=...&capability=draw_ir` or

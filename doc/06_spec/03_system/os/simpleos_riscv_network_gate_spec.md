@@ -10,7 +10,7 @@
 @layout dag
 @direction LR
 
-simpleos_riscv_network_gate_spec
+simpleos_riscv_network_gate_spec -> std
 ```
 
 </details>
@@ -27,7 +27,7 @@ simpleos_riscv_network_gate_spec
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 20 | 20 | 0 | 0 |
+| 21 | 21 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -375,16 +375,36 @@ expect(shim).to_contain("Returns -1 if the fd is invalid or the netstack is unav
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val server = rt_file_read_text("src/lib/nogc_sync_mut/http_server/server.spl")
+val response = rt_file_read_text("src/lib/nogc_sync_mut/http_server/response.spl")
 
-expect(server).to_contain("val handler = thread_spawn2(stream, self")
+expect(server).to_contain("val handler = thread_spawn_with_args(stream, self")
 expect(server).to_contain("if handler.handle < 0:")
 expect(server).to_contain("SimpleHttpServer.handle_connection_static(self, stream)")
+expect(server).to_contain("if not write_response(stream, resp):")
+expect(response).to_contain("match stream.write_text(wire):")
 expect(server).to_contain("handler.free()")
+```
+
+</details>
+
+#### reports sync HTTP response write failure on fail-closed TCP streams
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val stream = TcpStream(fd: -1, open: true)
+
+expect(write_response(stream, HttpResponse.ok("hello"))).to_equal(false)
+expect(write_error(stream, HttpStatus.BadRequest, "bad request")).to_equal(false)
 ```
 
 </details>
@@ -418,17 +438,22 @@ expect(boot_shim).to_contain("fn rt_io_tcp_write_text(fd: i64, data: text) -> i6
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect_qemu_deferred_script_contract("scripts/qemu/qemu_rv64_http_test.shs")
 val script = rt_file_read_text("scripts/qemu/qemu_rv64_http_test.shs")
 
-expect(script).to_contain("Build it first with an LLVM-enabled compiler")
-expect(script).to_contain("--source build/os/generated")
-expect(script).to_contain("--backend llvm")
-expect(script).to_contain("--target riscv64gc-unknown-none")
+expect(script).to_contain("build/os/simpleos_riscv64.elf")
+expect(script).to_contain("--allow-prebuilt-artifact")
+expect(script).to_contain("current-source build stamp not found")
+expect(script).to_contain("as current-source RV64 QEMU evidence")
+expect(script).to_contain("Build it first through the SimpleOS runner with an LLVM-enabled compiler")
+expect(script).to_contain("bin/simple os build --arch=riscv64")
+expect(script).to_contain("backend=llvm")
+expect(script).to_contain("target=riscv64-unknown-none")
+expect(script).to_contain("entry=src/os/kernel/arch/riscv64/boot.spl")
 expect(script).to_contain("--expect-http-only")
 expect(script).to_contain("EXPECT_HTTP_ONLY=true")
 expect(script).to_contain("PMM OK")
@@ -500,7 +525,7 @@ expect(runner).to_contain("LLVM backend unavailable: rebuild the selected Simple
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -508,6 +533,7 @@ val script = rt_file_read_text("scripts/qemu/qemu_rv64_http_test.shs")
 
 expect(script).to_contain("--expect-http-only")
 expect(script).to_contain("--with-storage")
+expect(script).to_contain("WARNING: --allow-prebuilt-artifact gives smoke-only evidence")
 expect(script).to_contain("Storage service ready")
 expect(script).to_contain("NVFS root superblock ready")
 
@@ -595,8 +621,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 20 |
-| Active scenarios | 20 |
+| Total scenarios | 21 |
+| Active scenarios | 21 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

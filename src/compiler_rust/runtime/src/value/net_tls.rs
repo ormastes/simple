@@ -8,7 +8,7 @@
 // Server: `rt_tls_server_create/accept/read/write/close/shutdown`.
 // Listeners own a `std::net::TcpListener` + an `Arc<rustls::ServerConfig>`;
 // per-connection state is a `(ServerConnection, TcpStream)` pair protected by
-// a fine-grained mutex so the per-connection thread_spawn2 pattern in
+// a fine-grained mutex so the per-connection thread_spawn_with_args pattern in
 // `src/app/ui.web/tls_serve_loop.spl` can serve multiple TLS clients in
 // parallel.
 //
