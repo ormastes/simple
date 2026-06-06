@@ -142,6 +142,35 @@ platforms**. Transport here is a dev HTTP serve of the Simple-generated HTML; th
 remaining integration is to (a) generate at build time + bundle, and (b) keep the
 Simple process alive to handle events + re-render (the IPC event loop).
 
+## Agent-team findings (2026-06-06)
+
+**AOT-to-mobile is a dead-end now** (investigated + attempted on the Android
+emulator): `native-build` ignores `--target` (builds host Mach-O);
+`compile --target aarch64-linux-android` only emits an SMF container (exit 127 on
+device, not a runnable ELF). Missing: `--target` plumbing in native-build,
+Android/iOS target presets, Mach-O writer (iOS), cross-compiled runtime; also
+upstream-blocked on seed LLVM. Android ≈ days, iOS ≈ weeks. → use source bundle.
+
+**Source-bundle layout (de-risked, proven from isolation):**
+- Module resolution uses `find_project_root` (walks up from the entry for a dir
+  containing `src/`), **not `SIMPLE_LIB`**. So the bundle must be
+  `<BUNDLE>/src/{app,lib,os,type}/…` and run as
+  `simple run <BUNDLE>/src/app/ui/main.spl tauri <ui.sdn>`.
+- Closure (proven self-sufficient, 368 widget markers rendered from `/tmp` with
+  no repo access): `src/app/{io,common,ui*}` (2.5 MB) + `src/lib` minus heavy
+  dirs (skia/scipy/scv/viz/cc/blink/compiler/editor/lint) (39 MB) + `src/os`
+  whole (11 MB) + `src/type` (52 KB); `src/std` omitted (resolver finds
+  `src/lib` first). **Total ≈ 54 MB** (the minimal app.ui-only set is NOT
+  sufficient — `main.spl` statically imports all 8 backends).
+
+**Widget showcase:** `examples/06_io/ui/widget_showcase_mobile.ui.sdn` renders
+**33 widget kinds** via `render_html_tree`. Catalog gaps (no HTML renderer; silent
+drop): command_bar, sidebar, glass_title_bar, workspace_tabs, command_palette,
+toast, sheet_modal, context_menu, inspector, utility_rail, status_chip,
+selection_pill, empty_state. Prop gaps (renderer reads, SDN parser doesn't copy):
+switch `on`, card `subtitle`, heading `level`, button `icon-id`, search_bar
+`show_cancel`, navigation_bar `large_title`.
+
 ## Next milestones
 
 1. Fix wasm string ABI (export memory + readable text return) — unblocks live render.
