@@ -19,6 +19,10 @@
 - The software backend has enough `RenderBackend3D` behavior for deterministic
   unit coverage, but raw float/index serialization remains a pre-existing
   limitation in mesh upload paths.
+- Verification found the software 3D replay path also depended on missing
+  `Mat4`/`Vec3` compatibility methods and nested renderer mutation propagation.
+  Those are part of the hardening lane because Graph IR replay should work
+  through the real software backend, not only a test recorder.
 
 ## Implementation Implication
 

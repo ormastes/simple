@@ -16,6 +16,8 @@
   by pipeline id, texture id, vertex buffer id, index buffer id, then uniform id.
 - Replay walks passes in order, begins a backend render pass, binds draw state,
   issues `draw_indexed`, and ends the pass.
+- Software backend replay uses Math3D point/direction transforms and assigns
+  updated nested `ForwardRenderer3D` state back to the backend after drawing.
 
 ## Error Handling
 

@@ -10,6 +10,7 @@ use std.nogc_sync_mut.engine.render.backend3d.{
     RenderPassHandle, TextureFormat3D, PipelineDesc3D
 }
 use std.nogc_sync_mut.engine.render.capability3d.{RenderCapability3D, capability_software_3d}
+use std.nogc_sync_mut.engine.render.software_backend3d.{SoftwareRenderBackend3D}
 
 fn mesh_handle(v: i64, i: i64, count: i64) -> GpuMeshHandle:
     GpuMeshHandle(
@@ -234,3 +235,29 @@ describe "Graph IR 3D":
             expect(backend.last_ibuf_id).to_equal(ibuf.id)
             expect(backend.last_uniform_id).to_equal(uniform.id)
             expect(backend.last_index_count).to_equal(3)
+
+        it "executes graph draws through the software 3D backend":
+            var backend = SoftwareRenderBackend3D.create()
+            val _ = backend.init(16, 16)
+            val color = backend.create_texture(16, 16, TextureFormat3D.Rgba8Unorm)
+            val depth = backend.create_texture(16, 16, TextureFormat3D.Depth32Float)
+            val vbuf = backend.create_vertex_buffer(96)
+            val ibuf = backend.create_index_buffer(12)
+            val uniform = backend.create_uniform_buffer(64)
+            val pipeline = backend.create_pipeline(PipelineDesc3D(
+                vertex_shader_spirv: [],
+                fragment_shader_spirv: [],
+                vertex_shader_wgsl: "",
+                fragment_shader_wgsl: "",
+                vertex_stride: 96,
+                cull_back_faces: true,
+                depth_write: true,
+                depth_test: true
+            ))
+
+            var graph = GraphIr3D.new()
+            val pass_id = graph.begin_pass(color, depth)
+            graph.add_draw(pass_id, mesh_handle(vbuf.id, ibuf.id, 3), uniform, pipeline)
+            graph_ir3d_execute(backend, graph_ir3d_optimize_for_3d(graph))
+
+            expect(backend.renderer.get_stats().draw_calls).to_equal(1)

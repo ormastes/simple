@@ -27,7 +27,7 @@ graph_ir3d_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -255,6 +255,53 @@ expect(backend.last_index_count).to_equal(3)
 
 </details>
 
+#### executes graph draws through the software 3D backend
+
+1. var backend = SoftwareRenderBackend3D create
+
+2. var graph = GraphIr3D new
+
+3. graph add draw
+
+4. graph ir3d execute
+   - Expected: backend.renderer.get_stats().draw_calls equals `1`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 24 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var backend = SoftwareRenderBackend3D.create()
+val _ = backend.init(16, 16)
+val color = backend.create_texture(16, 16, TextureFormat3D.Rgba8Unorm)
+val depth = backend.create_texture(16, 16, TextureFormat3D.Depth32Float)
+val vbuf = backend.create_vertex_buffer(96)
+val ibuf = backend.create_index_buffer(12)
+val uniform = backend.create_uniform_buffer(64)
+val pipeline = backend.create_pipeline(PipelineDesc3D(
+    vertex_shader_spirv: [],
+    fragment_shader_spirv: [],
+    vertex_shader_wgsl: "",
+    fragment_shader_wgsl: "",
+    vertex_stride: 96,
+    cull_back_faces: true,
+    depth_write: true,
+    depth_test: true
+))
+
+var graph = GraphIr3D.new()
+val pass_id = graph.begin_pass(color, depth)
+graph.add_draw(pass_id, mesh_handle(vbuf.id, ibuf.id, 3), uniform, pipeline)
+graph_ir3d_execute(backend, graph_ir3d_optimize_for_3d(graph))
+
+expect(backend.renderer.get_stats().draw_calls).to_equal(1)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -277,8 +324,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

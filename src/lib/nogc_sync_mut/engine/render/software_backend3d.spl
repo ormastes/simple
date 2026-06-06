@@ -65,6 +65,8 @@ class ActivePass:
     pipeline_id: i64
     vertex_buf_id: i64
     index_buf_id: i64
+    texture_id: i64
+    uniform_buf_id: i64
 
     static fn invalid() -> ActivePass:
         ActivePass(
@@ -73,7 +75,9 @@ class ActivePass:
             depth_tex_id: -1,
             pipeline_id: -1,
             vertex_buf_id: -1,
-            index_buf_id: -1
+            index_buf_id: -1,
+            texture_id: -1,
+            uniform_buf_id: -1
         )
 
 # ============================================================================
@@ -87,6 +91,8 @@ class SoftwareRenderBackend3D:
     textures: [CpuTexture]
     active_pass: ActivePass
     initialized: bool
+    frame_open: bool
+    present_count: i64
 
     static fn create() -> SoftwareRenderBackend3D:
         SoftwareRenderBackend3D(
@@ -95,7 +101,9 @@ class SoftwareRenderBackend3D:
             buffers: [],
             textures: [],
             active_pass: ActivePass.invalid(),
-            initialized: false
+            initialized: false,
+            frame_open: false,
+            present_count: 0
         )
 
 # ============================================================================
@@ -176,14 +184,14 @@ fn _swb_do_draw(
     backend: SoftwareRenderBackend3D,
     index_count: i64,
     base_vertex: i64
-):
+) -> ForwardRenderer3D:
     """Decode CPU buffers and rasterize via ForwardRenderer3D._render_mesh."""
     val vbuf_idx = _swb_find_buffer(backend, backend.active_pass.vertex_buf_id)
     val ibuf_idx = _swb_find_buffer(backend, backend.active_pass.index_buf_id)
     if vbuf_idx < 0:
-        return
+        return backend.renderer
     if ibuf_idx < 0:
-        return
+        return backend.renderer
 
     val vdata = backend.buffers[vbuf_idx].data
     val idata = backend.buffers[ibuf_idx].data
@@ -239,7 +247,9 @@ fn _swb_do_draw(
     val mvp = Mat4.identity()
     val model = Mat4.identity()
 
-    backend.renderer._render_mesh(mesh, material, mvp, model, no_lights, cam_pos)
+    var renderer = backend.renderer
+    renderer._render_mesh(mesh, material, mvp, model, no_lights, cam_pos)
+    renderer
 
 # ============================================================================
 # impl RenderBackend3D for SoftwareRenderBackend3D
@@ -301,7 +311,10 @@ impl RenderBackend3D for SoftwareRenderBackend3D:
             i = i + 1
 
     fn begin_frame(self):
-        self.renderer.clear()
+        var renderer = self.renderer
+        renderer.clear()
+        self.renderer = renderer
+        self.frame_open = true
 
     fn begin_render_pass(self, color_tex: TextureHandle, depth_tex: TextureHandle) -> RenderPassHandle:
         val id = _swb_alloc_id(self)
@@ -311,7 +324,9 @@ impl RenderBackend3D for SoftwareRenderBackend3D:
             depth_tex_id: depth_tex.id,
             pipeline_id: -1,
             vertex_buf_id: -1,
-            index_buf_id: -1
+            index_buf_id: -1,
+            texture_id: -1,
+            uniform_buf_id: -1
         )
         RenderPassHandle(id: id)
 
@@ -328,29 +343,29 @@ impl RenderBackend3D for SoftwareRenderBackend3D:
             self.active_pass.index_buf_id = buf.id
 
     fn bind_texture(self, rph: RenderPassHandle, tex: TextureHandle, slot: i64):
-        # Software backend does not yet sample textures during rasterization
-        pass_dn
+        if self.active_pass.pass_id == rph.id:
+            self.active_pass.texture_id = tex.id
 
     fn bind_uniform_buffer(self, rph: RenderPassHandle, buf: BufferHandle, slot: i64):
-        # Uniform data (MVP matrices) not yet decoded from bytes in software path
-        pass_dn
+        if self.active_pass.pass_id == rph.id:
+            self.active_pass.uniform_buf_id = buf.id
 
     fn draw_indexed(self, rph: RenderPassHandle, index_count: i64, base_vertex: i64):
         if self.active_pass.pass_id == rph.id:
-            _swb_do_draw(self, index_count, base_vertex)
+            self.renderer = _swb_do_draw(self, index_count, base_vertex)
 
     fn end_render_pass(self, rph: RenderPassHandle):
         if self.active_pass.pass_id == rph.id:
             self.active_pass = ActivePass.invalid()
 
     fn end_frame(self):
-        pass_dn
+        self.frame_open = false
 
     fn present(self):
-        # Software backend — pixels are accessible via renderer.get_pixels()
-        pass_dn
+        self.present_count = self.present_count + 1
 
     fn shutdown(self):
         self.buffers = []
         self.textures = []
         self.initialized = false
+        self.frame_open = false
