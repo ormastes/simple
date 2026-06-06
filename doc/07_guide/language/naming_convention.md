@@ -221,6 +221,22 @@ intent even when the language does not enforce visibility at the file level.
 
 ---
 
+## 8. File Extensions
+
+All project source files use one of two extensions. No `.sh` or `.py` files are
+allowed in the repository (except the three legacy bootstrap scripts).
+
+| Extension | Use | Examples |
+|---|---|---|
+| `.spl` | Simple language source code — all application, library, compiler, and test code | `main.spl`, `parser_spec.spl` |
+| `.shs` | Shell scripts — wrappers, setup, CI helpers, and automation scripts | `setup.shs`, `check-repo-hygiene.shs` |
+
+**Never add `.sh` or `.py` files.** Convert any inherited `.sh` to `.shs` and any
+`.py` to a `.shs` wrapper (delegating to a `.spl` implementation where possible).
+The three bootstrap scripts (`bootstrap-from-scratch.sh`, `bootstrap-seed.sh`,
+`bootstrap-verify.sh`) are the only permitted `.sh` exceptions.
+
+---
 ## Quick Reference
 
 | Decision | Rule |
