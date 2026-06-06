@@ -141,22 +141,30 @@ expect(_pixels_equal(lower, upper)).to_equal(false)
 
 </details>
 
-#### matches Chrome calibrated text raster fixture pixels
+#### renders the text-raster fixture with genuine glyph ink (no memorized Chrome overlay)
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# The renderer used to paste a hard-coded captured-Chrome pixel table over
+# this scene so it could assert Chrome's antialiased counts (4881/316/163/1).
+# That overlay was a machine/version-specific tautology and was removed; these
+# assertions now describe the renderer's own honest software-rasterized output
+# (solid 5x7 glyph ink + a 1px panel border). Per-pixel parity vs Chrome's
+# font rasterizer is intentionally NOT asserted here — it is tracked as
+# known-divergent in the electron web-layout manifest (track-text-divergence).
 val html = "<html><head><style>html,body{margin:0;padding:0;width:96px;height:64px;overflow:hidden;background-color:#ffffff}.panel{background-color:#f8fafc;border:1px solid #334155;padding:4px;width:86px;height:54px}.title{color:#0f172a;font-size:16px;background-color:#f8fafc}.sub{color:#475569;font-size:8px;background-color:#f8fafc;margin-top:4px}</style></head><body><section class='panel'><div class='title'>TEXT RASTER</div><div class='sub'>Chrome AA baseline</div></section></body></html>"
 val pixels = simple_web_render_html_to_pixels(html, 96, 64)
 expect(pixels.len()).to_equal(96 * 64)
-expect(_count_color(pixels, 0xFFF8FAFCu32)).to_equal(4881)
 expect(_count_color(pixels, 0xFF334155u32)).to_equal(316)
-expect(_count_color(pixels, 0xFF0F172Au32)).to_equal(163)
-expect(_count_color(pixels, 0xFF475569u32)).to_equal(1)
+expect(_count_color(pixels, 0xFFF8FAFCu32)).to_be_greater_than(4000)
+expect(_count_color(pixels, 0xFF0F172Au32)).to_be_greater_than(0)
+expect(_count_color(pixels, 0xFF475569u32)).to_be_greater_than(0)
+expect(_count_color(pixels, 0xFFFFFFFFu32)).to_equal(0)
 ```
 
 </details>
@@ -166,15 +174,19 @@ expect(_count_color(pixels, 0xFF475569u32)).to_equal(1)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val html = "<html><head><style>html,body{margin:0;padding:0;width:96px;height:64px;overflow:hidden;background-color:#f8fafc}.shell{background-color:#e5e7eb;padding:4px;width:60px;height:56px}.copy{background-color:#dbeafe;color:#0f172a;font-size:8px;line-height:12px;width:22px}.after{background-color:#f59e0b;width:10px;height:6px;margin-top:2px}</style></head><body><section class='shell'><div class='copy'>ALPHA BETA GAMMA</div><div class='after'></div></section></body></html>"
 val pixels = simple_web_render_html_to_pixels(html, 96, 64)
 expect(pixels.len()).to_equal(96 * 64)
+# The .after box lands at y=42 because the explicit 12px line-height pushes
+# the wrapped .copy text down — this is the actual line-height behaviour.
 expect(pixels[4 + 42 * 96]).to_equal(0xFFF59E0Bu32)
-expect(pixels[4 + 33 * 96]).to_equal(0xFF3C4559u32)
+# The wrapped copy text renders genuine glyph ink (was a memorized overlay
+# pixel 0xFF3C4559; now the renderer draws solid 0xFF0F172A glyph ink).
+expect(_count_color(pixels, 0xFF0F172Au32)).to_be_greater_than(0)
 ```
 
 </details>
