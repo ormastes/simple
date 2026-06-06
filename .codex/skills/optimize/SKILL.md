@@ -15,10 +15,10 @@ explicitly asks for runtime/compiler C/Rust changes.
 - Preserve behavior and public API. Add or keep SPipe coverage before risky rewrites.
 - Do not rewrite the feature in C/Rust to win a benchmark.
 - Prefer algorithm/data-layout improvements over micro-tuning.
-- For concurrency benchmarks, keep `thread_spawn`, `green_spawn`, and
-  `multicore_green_spawn` separate. Optimize the Pure Simple path first and use
-  the cross-language profile rows as evidence instead of replacing Simple code
-  with Rust/C.
+- For concurrency benchmarks, keep `thread_spawn`, `cooperative_green_spawn`,
+  and `multicore_green_spawn` separate. Optimize the Pure Simple path first and
+  use the cross-language profile rows as evidence instead of replacing Simple
+  code with Rust/C.
 - Remove unused logic/data only when it is proven unused by tests, references, or
   optimizer/lint evidence.
 - Do not change user-visible inputs, outputs, ordering, errors, or persistence

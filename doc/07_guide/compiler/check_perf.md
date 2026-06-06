@@ -117,7 +117,7 @@ large unrolled source generation.
 | **Cold startup** | `hello world` (20 runs avg) | Time-to-first-output |
 | **Warm throughput** | `fib(35)` recursive, in-process loop (10 warmup + 20 measured) | Steady-state single-thread perf (JIT reaches hotspot) |
 | **Parallel** | 100 workers × LCG 100K iters via channel (`channel_new`/`channel_from_id`/`send`/`recv` from `std.concurrent.channel` — same semantic as Go's goroutine + chan). Simple native uses `thread_spawn_with_args(seed, channel_id, worker)` to pass scalar worker data explicitly. | CPU-heavy worker throughput plus concurrency overhead |
-| **Large fanout** | 1000 tiny workers × LCG 32 iters. Simple native uses loop-based `thread_spawn_with_args`/channel; Simple green uses cooperative queue fanout; C uses one pthread per tiny task; Go uses one goroutine per tiny task; Erlang uses one BEAM process per tiny task. | Scheduling overhead where Go should usually beat C pthread creation; Simple native measures OS-thread fanout; Simple green measures queue fanout, not CPU parallelism |
+| **Large fanout** | 1000 tiny workers × LCG 32 iters. Simple native uses loop-based `thread_spawn_with_args`/channel; Simple cooperative green uses cooperative queue fanout; C uses one pthread per tiny task; Go uses one goroutine per tiny task; Erlang uses one BEAM process per tiny task. | Scheduling overhead where Go should usually beat C pthread creation; Simple native measures OS-thread fanout; Simple cooperative green measures queue fanout, not CPU parallelism |
 | **Parallel binary size** | Binary/script sizes for parallel workloads across languages | Deployment footprint for concurrent programs |
 | **Parallel peak RSS** | `/usr/bin/time -v` peak RSS with 100 workers, baseline subtracted, per-worker delta | Memory cost per concurrent task (baseline = hello world RSS for each language) |
 
@@ -128,7 +128,7 @@ large unrolled source generation.
 | Simple (interpreter) | Tree-walk | Baseline — current default mode |
 | Simple (SMF loader) | Bytecode VM | Shows bytecode dispatch win |
 | Simple (native) | AOT (LLVM/Cranelift) | Shows AOT ceiling |
-| Simple `green_spawn` / `green_spawn_value` | Cooperative queue on current OS thread | Implemented green-thread API, but not CPU-parallel or preemptive |
+| Simple `cooperative_green_spawn` / `cooperative_green_spawn_value` | Cooperative queue on current OS thread | Implemented green-thread API, but not CPU-parallel or preemptive |
 | Simple `multicore_green_spawn` | Bounded runtime worker pool through `rt_pool_*` | Current Pure Simple M:N candidate row for CPU-heavy comparisons |
 | Simple `task_spawn` | Runtime worker pool when `rt_pool_*` links | Intended Simple path for Go-like parallel benchmark work |
 | C (gcc -O2) | AOT native | Absolute performance floor |
@@ -152,7 +152,7 @@ large unrolled source generation.
 
 **Warm throughput (fib35):** C ≈ Simple-native < Go < Java (after JIT) < Bun < Simple-SMF < Erlang < Simple-interp < Python
 
-**Parallel (100 workers):** Go and C are the current native baselines; the OS-thread Simple row uses `thread_spawn_with_args` plus `std.concurrent.channel`. The implemented `std.concurrent.green_thread` API is cooperative and single-OS-thread, so it is not a drop-in Go-goroutine benchmark row. The `std.concurrent.multicore_green` row uses `multicore_green_spawn` over `rt_pool_*` as the current Pure Simple M:N candidate until a scheduler-aware green runtime lands.
+**Parallel (100 workers):** Go and C are the current native baselines; the OS-thread Simple row uses `thread_spawn_with_args` plus `std.concurrent.channel`. The implemented `std.concurrent.cooperative_green` API is cooperative and single-OS-thread, so it is not a drop-in Go-goroutine benchmark row. The `std.concurrent.multicore_green` row uses `multicore_green_spawn` over `rt_pool_*` as the current Pure Simple M:N candidate until a scheduler-aware green runtime lands.
 
 ### What matters per use case
 

@@ -202,15 +202,15 @@ execution model:
 | API | Path | Model |
 |-----|------|-------|
 | `thread_spawn` / `ThreadHandle` | `src/lib/nogc_async_mut/concurrent/thread.spl` and `thread_sffi.spl` | OS thread (`pthread_create` / `CreateThread`) |
-| `green_spawn` / `green_spawn_value` / `GreenThreadHandle` / `green_run_one` / `green_run_all` | `src/lib/nogc_async_mut/concurrent/green_thread.spl` | Cooperative green-thread queue on the current OS thread; no preemption or CPU parallelism |
+| `cooperative_green_spawn` / `cooperative_green_spawn_value` / `GreenThreadHandle` / `cooperative_green_run_one` / `cooperative_green_run_all` | `src/lib/nogc_async_mut/concurrent/cooperative_green.spl` over `green_thread.spl` | Cooperative green-thread queue on the current OS thread; no preemption or CPU parallelism |
 | `multicore_green_spawn` / `MulticoreGreenHandle` | `src/lib/nogc_async_mut/concurrent/multicore_green.spl` | Pure Simple bounded-worker facade over `rt_pool_*`; current M:N benchmark candidate, not final scheduler-aware green runtime |
 | `task_spawn` / `TaskHandle` | `src/lib/nogc_async_mut/thread_pool.spl` | Pool-backed native task path when `rt_pool_*` is available; interpreter fallback otherwise |
 | `channel_new` / `channel_from_id` | `src/lib/nogc_sync_mut/concurrent/channel.spl` re-exported through `std.concurrent.channel` | Runtime MPMC channel |
 
-Use `green_spawn` for lightweight cooperative scheduling tests, and
-`green_spawn_value` when a direct-run benchmark needs to exercise the queue
-without function-value calls. Do not use either for Go-style M:N CPU-parallel
-benchmarks. Use `multicore_green_spawn`, `task_spawn`, or a future
+Use `cooperative_green_spawn` for lightweight cooperative scheduling tests, and
+`cooperative_green_spawn_value` when a direct-run benchmark needs to exercise
+the queue without function-value calls. Do not use either for Go-style M:N
+CPU-parallel benchmarks. Use `multicore_green_spawn`, `task_spawn`, or a future
 scheduler-aware green runtime for Go-like benchmark work.
 
 ## Reserved Keywords

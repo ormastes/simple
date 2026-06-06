@@ -12,7 +12,7 @@ Go 1.14 added asynchronous goroutine preemption, which matters for tight CPU loo
 
 ## Implications For Simple
 
-- `green_spawn` must remain cooperative and single-carrier until scheduler-aware execution exists.
+- `cooperative_green_spawn` must remain cooperative and single-carrier until scheduler-aware execution exists.
 - `multicore_green_spawn` can be the current Pure Simple M:N candidate because it maps many value tasks onto a bounded runtime worker pool.
 - A final Go-like runtime needs per-worker or per-CPU queues, work stealing, park/unpark, blocking integration for channels/sleep/join/I/O, and eventually preemption or compiler-inserted yield points.
 - SimpleOS support should reuse scheduler/SMP foundations, but green tasks need their own logical task state and a carrier-worker bridge instead of pretending OS kernel tasks and green tasks are the same object.

@@ -3,7 +3,7 @@
 ## Current Simple Surfaces
 
 - OS threads: `std.concurrent.thread.{thread_spawn, thread_spawn_with_args}` in `src/lib/nogc_sync_mut/concurrent/thread.spl` and `src/lib/nogc_async_mut/concurrent/thread.spl`. This is CPU-parallel, but each spawn maps to a platform thread.
-- Cooperative green queue: `std.concurrent.green_thread.{green_spawn, green_spawn_value, green_run_one, green_run_all}` in `src/lib/nogc_async_mut/concurrent/green_thread.spl`. This is lightweight and deterministic, but it runs on the current OS thread only.
+- Cooperative green queue: `std.concurrent.cooperative_green.{cooperative_green_spawn, cooperative_green_spawn_value, cooperative_green_run_one, cooperative_green_run_all}` in `src/lib/nogc_async_mut/concurrent/cooperative_green.spl` over `green_thread.spl`. This is lightweight and deterministic, but it runs on the current OS thread only.
 - Multicore-green candidate: `std.concurrent.multicore_green.{multicore_green_spawn}` in `src/lib/nogc_async_mut/concurrent/multicore_green.spl`. This is a Pure Simple facade over `rt_pool_submit`, `rt_pool_join`, and `rt_pool_is_done` for bounded CPU-parallel value work.
 - Lower-level pool path: `task_spawn` in `src/lib/nogc_async_mut/thread_pool.spl`. It can use `rt_pool_*`, but currently imports the broader OS-thread handle surface. The profile harness uses `multicore_green_spawn` so the benchmark does not pull unrelated `spl_thread_join` codegen.
 
