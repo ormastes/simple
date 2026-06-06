@@ -1,0 +1,122 @@
+"""
+# SimpleOS Green Carrier Bridge Specification
+
+Tests the scheduler-facing carrier bridge from logical green tasks to SimpleOS
+run-queue enqueue and remote wake/IPI intent.
+
+## Overview
+
+The carrier bridge is the contract between pure logical green-task state and the
+lower SimpleOS scheduler work that will eventually insert runnable green tasks
+into per-CPU queues. It does not execute closures and it does not send APIC
+interrupts directly. Instead, it records the target carrier CPU, whether a
+green task should be enqueued, and whether a remote reschedule IPI is required.
+
+This keeps the SimpleOS side testable before the real run-queue and wakeup
+hooks are connected. The contract also prevents parked or completed green tasks
+from being re-enqueued by mistake.
+
+## Examples
+
+Spawning a logical green task chooses a CPU through the existing green-worker
+placement rules and turns the runnable task into either a local or remote
+carrier enqueue decision. Waking a parked green task reuses the green-task
+unpark decision, then records whether the chosen CPU is remote to the current
+carrier CPU.
+
+## Requirements
+
+**Requirements:** N/A
+
+## Plan
+
+**Plan:** doc/03_plan/sys_test/multicore_green.md
+
+## Design
+
+**Design:** N/A
+
+## Research
+
+**Research:** doc/01_research/local/multicore_green.md
+"""
+
+use std.spec.*
+use os.kernel.scheduler.green_task.{
+    green_task_new,
+    green_task_park,
+    green_task_complete
+}
+use os.kernel.scheduler.green_carrier.{
+    green_carrier_should_send_ipi,
+    green_carrier_enqueue_task,
+    green_carrier_spawn_task,
+    green_carrier_unpark_task
+}
+
+describe "SimpleOS green carrier bridge contract":
+    describe "spawn enqueue":
+        it "enqueues a new runnable task onto the selected carrier CPU":
+            val decision = green_carrier_spawn_task(21, 4, 0, 3, 1, 2, 4, 1)
+
+            expect(decision.task.task_id).to_equal(21)
+            expect(decision.target_cpu).to_equal(1)
+            expect(decision.should_enqueue).to_equal(true)
+            expect(decision.should_send_ipi).to_equal(false)
+            expect(decision.reason).to_equal("local_run_queue")
+
+        it "requests a reschedule IPI for remote run-queue enqueue":
+            val decision = green_carrier_spawn_task(22, 4, 0, 3, 1, 2, 4, 0)
+
+            expect(decision.target_cpu).to_equal(1)
+            expect(decision.should_enqueue).to_equal(true)
+            expect(decision.should_send_ipi).to_equal(true)
+            expect(decision.ipi_reason).to_equal("remote_reschedule")
+            expect(decision.reason).to_equal("remote_run_queue")
+
+    describe "wake enqueue":
+        it "wakes a parked task onto the waker CPU when load is close":
+            val task = green_task_new(23, 4, 0, 0, 1, 2, 3)
+            val parked = green_task_park(task, "channel_recv")
+            val decision = green_carrier_unpark_task(parked, 2, 2, 3, 1, 0)
+
+            expect(decision.task.state).to_equal("runnable")
+            expect(decision.target_cpu).to_equal(2)
+            expect(decision.should_enqueue).to_equal(true)
+            expect(decision.should_send_ipi).to_equal(true)
+            expect(decision.reason).to_equal("wake_affine_waker_cpu")
+
+        it "does not enqueue when unpark is misused on a runnable task":
+            val task = green_task_new(24, 4, 0, 0, 1, 2, 3)
+            val decision = green_carrier_unpark_task(task, 2, 0, 0, 1, 0)
+
+            expect(decision.task.state).to_equal("runnable")
+            expect(decision.should_enqueue).to_equal(false)
+            expect(decision.should_send_ipi).to_equal(false)
+            expect(decision.reason).to_equal("not_parked")
+
+    describe "blocked states":
+        it "does not enqueue parked tasks directly":
+            val task = green_task_new(25, 4, 0, 0, 1, 2, 3)
+            val parked = green_task_park(task, "timer")
+            val decision = green_carrier_enqueue_task(parked, 0)
+
+            expect(decision.should_enqueue).to_equal(false)
+            expect(decision.should_send_ipi).to_equal(false)
+            expect(decision.reason).to_equal("task_parked")
+
+        it "does not enqueue completed tasks":
+            val task = green_task_new(26, 4, 0, 0, 1, 2, 3)
+            val done = green_task_complete(task, 77)
+            val decision = green_carrier_enqueue_task(done, 0)
+
+            expect(decision.task.result).to_equal(77)
+            expect(decision.should_enqueue).to_equal(false)
+            expect(decision.should_send_ipi).to_equal(false)
+            expect(decision.reason).to_equal("task_done")
+
+    describe "IPI guard":
+        it "sends IPI only for remote runnable enqueue":
+            expect(green_carrier_should_send_ipi(0, 1, true)).to_equal(true)
+            expect(green_carrier_should_send_ipi(1, 1, true)).to_equal(false)
+            expect(green_carrier_should_send_ipi(0, 1, false)).to_equal(false)

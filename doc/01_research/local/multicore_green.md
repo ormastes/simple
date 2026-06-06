@@ -12,8 +12,9 @@
 - Scheduler foundations already exist under `src/os/kernel/scheduler/`, including per-CPU run queues, CPU selection, wake/preempt logic, affinity hooks, and context-switch support.
 - The scheduler-facing green-worker contract now exists in `src/os/kernel/scheduler/green_worker.spl`, with unit coverage for affinity, spawn CPU choice, wake-affine placement, stealing threshold, and rebalance decisions.
 - The logical green-task lifecycle contract now exists in `src/os/kernel/scheduler/green_task.spl`, with unit coverage for spawn records, park/unpark, no-op unpark misuse, completion, and carrier CPU preservation.
+- The SimpleOS green-carrier bridge contract now exists in `src/os/kernel/scheduler/green_carrier.spl`, with unit coverage for runnable enqueue, parked/done suppression, wake-affine re-enqueue, and remote reschedule IPI intent.
 - SMP/AP/IPI support exists under `src/os/kernel/smp/`.
-- A full scheduler-aware multicore green runtime still needs a carrier bridge into concrete run queues, blocking syscall boundaries, and SimpleOS wakeup/IPI hooks.
+- A full scheduler-aware multicore green runtime still needs the carrier bridge wired into concrete run queues, blocking syscall boundaries, and actual SimpleOS wakeup/IPI delivery.
 
 ## Local Evidence
 
@@ -22,3 +23,4 @@
 - `test/01_unit/lib/nogc_async_mut/multicore_green_spec.spl` verifies the interpreter semantics, but the current `simple test` command can hang in `spipe-docgen` after reporting the passing example.
 - `test/01_unit/os/kernel/scheduler/green_worker_spec.spl` verifies the SimpleOS placement and rebalance contract for future green-task carrier workers.
 - `test/01_unit/os/kernel/scheduler/green_task_spec.spl` verifies the SimpleOS logical green-task lifecycle for future green-task carrier workers.
+- `test/01_unit/os/kernel/scheduler/green_carrier_spec.spl` verifies the SimpleOS bridge contract between logical green tasks and carrier run-queue/IPI intent.

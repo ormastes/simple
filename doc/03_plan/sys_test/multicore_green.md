@@ -8,12 +8,12 @@
 - `test/01_unit/lib/nogc_async_mut/cooperative_green_spec.spl` checks the semantic cooperative-green facade over the existing single-carrier queue.
 - `test/01_unit/os/kernel/scheduler/green_worker_spec.spl` checks the SimpleOS scheduler-facing green-worker contract: CPU affinity, spawn CPU choice, wake-affine placement, stealing threshold, and rebalance decisions.
 - `test/01_unit/os/kernel/scheduler/green_task_spec.spl` checks the SimpleOS logical green-task lifecycle: spawn records, park, unpark, no-op unpark misuse, completion, and carrier CPU preservation.
+- `test/01_unit/os/kernel/scheduler/green_carrier_spec.spl` checks the SimpleOS carrier bridge contract: runnable enqueue, parked/done suppression, wake-affine re-enqueue, and remote reschedule IPI intent.
 
 ## Required Future SSPEC
 
 - `test/01_unit/lib/nogc_async_mut/green_scheduler_spec.spl`: spawn, yield order, run-one/run-all, join/result, ready count, park/unpark.
 - `test/01_unit/lib/nogc_async_mut/green_channel_spec.spl`: channel recv parks, send unparks, bounded backpressure does not block the carrier worker.
-- `test/01_unit/os/kernel/scheduler/green_carrier_spec.spl`: carrier bridge from logical green tasks to SimpleOS run queues and wakeup/IPI hooks.
 - `test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl`: SimpleOS smoke for cooperative green semantics.
 - `test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl`: QEMU SMP smoke proving work runs across multiple SimpleOS CPUs/APs.
 - `test/05_perf/stress/multicore_green_fanout_spec.spl`: fanout/fanin performance versus OS threads, cooperative green, Go goroutines, and C pthreads.

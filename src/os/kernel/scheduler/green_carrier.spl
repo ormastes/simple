@@ -1,0 +1,110 @@
+# SimpleOS Green Carrier Bridge Contract
+#
+# Pure scheduler-facing bridge from logical green tasks to SimpleOS carrier
+# run-queue enqueue and remote wake intent. This module deliberately records
+# decisions only; concrete run-queue insertion and APIC/IPI delivery remain in
+# the lower scheduler and SMP layers.
+
+use os.kernel.scheduler.green_task.{
+    green_task_new,
+    green_task_unpark,
+    green_task_is_runnable,
+    green_task_is_parked,
+    green_task_is_done,
+    GreenTaskRecord
+}
+
+pub struct GreenCarrierEnqueueDecision:
+    """Run-queue enqueue and wake intent for a logical green task."""
+    task: GreenTaskRecord
+    target_cpu: i64
+    should_enqueue: bool
+    should_send_ipi: bool
+    ipi_reason: text
+    reason: text
+
+pub fn green_carrier_should_send_ipi(current_cpu: i64, target_cpu: i64, should_enqueue: bool) -> bool:
+    """Request a wake IPI only for remote runnable enqueue decisions."""
+    should_enqueue and target_cpu != current_cpu
+
+fn green_carrier_ipi_reason(current_cpu: i64, target_cpu: i64, should_enqueue: bool) -> text:
+    if green_carrier_should_send_ipi(current_cpu, target_cpu, should_enqueue):
+        "remote_reschedule"
+    else:
+        ""
+
+fn green_carrier_enqueue_reason(current_cpu: i64, target_cpu: i64) -> text:
+    if target_cpu == current_cpu:
+        "local_run_queue"
+    else:
+        "remote_run_queue"
+
+fn green_carrier_decision(task: GreenTaskRecord, target_cpu: i64, should_enqueue: bool, current_cpu: i64, reason: text) -> GreenCarrierEnqueueDecision:
+    GreenCarrierEnqueueDecision(
+        task: task,
+        target_cpu: target_cpu,
+        should_enqueue: should_enqueue,
+        should_send_ipi: green_carrier_should_send_ipi(current_cpu, target_cpu, should_enqueue),
+        ipi_reason: green_carrier_ipi_reason(current_cpu, target_cpu, should_enqueue),
+        reason: reason
+    )
+
+pub fn green_carrier_enqueue_task(task: GreenTaskRecord, current_cpu: i64) -> GreenCarrierEnqueueDecision:
+    """Convert a runnable green task into a carrier run-queue decision."""
+    if green_task_is_runnable(task):
+        green_carrier_decision(
+            task: task,
+            target_cpu: task.assigned_cpu,
+            should_enqueue: true,
+            current_cpu: current_cpu,
+            reason: green_carrier_enqueue_reason(current_cpu, task.assigned_cpu)
+        )
+    elif green_task_is_parked(task):
+        green_carrier_decision(
+            task: task,
+            target_cpu: task.assigned_cpu,
+            should_enqueue: false,
+            current_cpu: current_cpu,
+            reason: "task_parked"
+        )
+    elif green_task_is_done(task):
+        green_carrier_decision(
+            task: task,
+            target_cpu: task.assigned_cpu,
+            should_enqueue: false,
+            current_cpu: current_cpu,
+            reason: "task_done"
+        )
+    else:
+        green_carrier_decision(
+            task: task,
+            target_cpu: task.assigned_cpu,
+            should_enqueue: false,
+            current_cpu: current_cpu,
+            reason: "task_not_runnable"
+        )
+
+pub fn green_carrier_spawn_task(task_id: i64, cpu_count: i64, affinity_mask: i64, load0: i64, load1: i64, load2: i64, load3: i64, current_cpu: i64) -> GreenCarrierEnqueueDecision:
+    """Create a logical green task and return its first carrier enqueue."""
+    val task = green_task_new(task_id, cpu_count, affinity_mask, load0, load1, load2, load3)
+    green_carrier_enqueue_task(task, current_cpu)
+
+pub fn green_carrier_unpark_task(task: GreenTaskRecord, waker_cpu: i64, home_load: i64, waker_load: i64, wake_affine_threshold: i64, current_cpu: i64) -> GreenCarrierEnqueueDecision:
+    """Wake a parked green task and produce the matching carrier enqueue."""
+    val wake = green_task_unpark(task, waker_cpu, home_load, waker_load, wake_affine_threshold)
+    if wake.should_enqueue:
+        green_carrier_decision(
+            task: wake.task,
+            target_cpu: wake.task.assigned_cpu,
+            should_enqueue: true,
+            current_cpu: current_cpu,
+            reason: wake.placement.reason
+        )
+    else:
+        green_carrier_decision(
+            task: wake.task,
+            target_cpu: wake.task.assigned_cpu,
+            should_enqueue: false,
+            current_cpu: current_cpu,
+            reason: wake.placement.reason
+        )
