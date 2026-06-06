@@ -3,6 +3,32 @@ use cli
 use std.nogc_sync_mut.io.file_ops.{file_mmap_read_text}
 use std.spipe.*
 
+"""
+# Startup Argparse Mmap Perf Specification
+
+## Overview
+
+Verifies startup-sensitive behavior used by the low_dependency_ui_dynsmf app
+root path. The spec proves declarative CLI parsing remains responsive when run
+through `simple run`, and file-backed mmap loading stays bounded for repeated
+reads.
+
+## Examples
+
+The CLI startup scenario writes a temporary Simple entrypoint that parses flags,
+options, and positionals, runs it through the current Simple launcher, checks
+the parsed output, and enforces a warm average latency budget. Subprocess
+failures are hard failures with diagnostics. The mmap scenario writes a fixture,
+reads it repeatedly through `file_mmap_read_text`, checks exact content, and
+enforces a read latency budget.
+
+**Requirements:** doc/02_requirements/feature/low_dependency_ui_dynsmf.md
+**Requirements:** doc/02_requirements/nfr/low_dependency_ui_dynsmf.md
+**Plan:** doc/03_plan/sys_test/low_dependency_ui_dynsmf_dynsmf_session.md
+**Design:** doc/05_design/low_dependency_ui_dynsmf.md
+**Research:** doc/01_research/local/low_dependency_ui_dynsmf.md
+"""
+
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_file_write_text(path: text, content: text) -> bool
@@ -103,9 +129,7 @@ describe "startup arg parsing and mmap perf smoke":
         val warm = run_cli_perf_once(script_path, fixture_path)
         if warm.2 != 0:
             cleanup_tmpdir(tmpdir)
-            # subprocess not available or failed in interpreter mode — skip gracefully
-            expect(true).to_equal(true)
-            return
+            fail("startup perf warm run failed: code={warm.2} stderr={warm.1}")
 
         var total_elapsed = 0i64
         var run_count = 0i64
@@ -115,8 +139,7 @@ describe "startup arg parsing and mmap perf smoke":
             val run = run_cli_perf_once(script_path, fixture_path)
             if run.2 != 0:
                 cleanup_tmpdir(tmpdir)
-                expect(true).to_equal(true)
-                return
+                fail("startup perf measured run failed: code={run.2} stderr={run.1}")
             expect(run.0.contains(expected)).to_equal(true)
             total_elapsed = total_elapsed + run.3
             run_count = run_count + 1

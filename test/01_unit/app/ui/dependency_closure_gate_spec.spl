@@ -1,0 +1,175 @@
+# @cover src/app/ui/dependency_closure_gate.spl 80%
+"""
+# Low Dependency UI Dependency Closure Gate
+
+## Overview
+
+Verifies exact-prefix UI dependency closure policy for the selected
+low_dependency_ui_dynsmf thin slice. The gate walks only reachable imports from
+the selected root and reports forbidden backend implementation dependencies.
+
+## Examples
+
+The TUI root fixture may depend on common UI widgets and TUI render helpers, but
+must not match sibling names such as `app.ui.tui_web` or pull HTML renderer
+modules through a shared renderer surface. The real-source case reads the
+current `app.ui.tui.backend` closure from `src/` to keep the production TUI lane
+inside TUI/common renderer modules.
+
+**Requirements:** doc/02_requirements/feature/low_dependency_ui_dynsmf.md
+**Requirements:** doc/02_requirements/nfr/low_dependency_ui_dynsmf.md
+**Traceability:** REQ-001, REQ-002, REQ-009, NFR-001, NFR-002, NFR-006
+**Plan:** doc/03_plan/sys_test/low_dependency_ui_dynsmf_dependency_gate.md
+**Design:** doc/05_design/low_dependency_ui_dynsmf.md
+**Research:** doc/01_research/local/low_dependency_ui_dynsmf.md
+"""
+
+use std.spec
+use std.io_runtime
+use app.ui.dependency_closure_gate.{
+    UiModuleSource,
+    UiDependencyPolicy,
+    ui_dependency_module_matches,
+    ui_dependency_extract_imports,
+    ui_dependency_direct_imports,
+    ui_dependency_imports_module,
+    ui_dependency_report
+}
+
+fn clean_tui_fixture() -> [UiModuleSource]:
+    [
+        UiModuleSource(name: "app.ui.tui", source: "use std.common.ui.widget\nuse app.ui.render.tui_widgets\n"),
+        UiModuleSource(name: "std.common.ui.widget", source: ""),
+        UiModuleSource(name: "app.ui.render.tui_widgets", source: "use app.ui.render.colors\n"),
+        UiModuleSource(name: "app.ui.render.colors", source: ""),
+        UiModuleSource(name: "app.ui.tui_web", source: "use app.ui.web.ws_handler\n"),
+        UiModuleSource(name: "app.ui.web.ws_handler", source: ""),
+        UiModuleSource(name: "app.ui.render.html_widgets", source: "")
+    ]
+
+fn html_leak_fixture() -> [UiModuleSource]:
+    [
+        UiModuleSource(name: "app.ui.render", source: "use app.ui.render.widgets\n"),
+        UiModuleSource(name: "app.ui.render.widgets", source: "use app.ui.render.html_widgets\n"),
+        UiModuleSource(name: "app.ui.render.html_widgets", source: "")
+    ]
+
+fn unresolved_html_leak_fixture() -> [UiModuleSource]:
+    [
+        UiModuleSource(name: "app.ui.tui.backend", source: "use app.ui.web.backend\n")
+    ]
+
+fn source_module(name: text, path: text) -> UiModuleSource:
+    UiModuleSource(name: name, source: rt_file_read_text(path) ?? "")
+
+fn real_tui_backend_sources() -> [UiModuleSource]:
+    [
+        source_module("app.ui.tui.backend", "src/app/ui.tui/backend.spl"),
+        source_module("app.ui.tui.input", "src/app/ui.tui/input.spl"),
+        source_module("app.ui.tui.screen", "src/app/ui.tui/screen.spl"),
+        source_module("app.ui.render.widgets", "src/app/ui.render/widgets.spl"),
+        source_module("app.ui.render.tui_widgets", "src/app/ui.render/tui_widgets.spl"),
+        source_module("app.ui.render.tui_widgets_part1", "src/app/ui.render/tui_widgets_part1.spl"),
+        source_module("app.ui.render.tui_widgets_part2", "src/app/ui.render/tui_widgets_part2.spl"),
+        source_module("app.ui.render.ansi", "src/app/ui.render/ansi.spl"),
+        source_module("app.ui.render.colors", "src/app/ui.render/colors.spl"),
+        source_module("app.ui.render.progress", "src/app/ui.render/progress.spl"),
+        source_module("app.ui.render.table", "src/app/ui.render/table.spl"),
+        source_module("app.dashboard.render.colors", "src/app/dashboard.render/colors.spl"),
+        source_module("app.dashboard.render.progress", "src/app/dashboard.render/progress.spl"),
+        source_module("app.dashboard.render.table", "src/app/dashboard.render/table.spl"),
+        source_module("app.ui.web", "src/app/ui.web/__init__.spl"),
+        source_module("app.ui.web.backend", "src/app/ui.web/backend.spl"),
+        source_module("app.ui.tui_web", "src/app/ui.tui_web/__init__.spl"),
+        source_module("app.ui.tui_web.backend", "src/app/ui.tui_web/backend.spl"),
+        source_module("app.ui.browser", "src/app/ui.browser/__init__.spl"),
+        source_module("app.ui.browser.backend", "src/app/ui.browser/backend.spl"),
+        source_module("app.ui.render.html_widgets", "src/app/ui.render/html_widgets.spl"),
+        source_module("app.ui.render.css", "src/app/ui.render/css.spl")
+    ]
+
+fn real_html_adapter_sources() -> [UiModuleSource]:
+    [
+        source_module("app.ui.web.backend", "src/app/ui.web/backend.spl"),
+        source_module("app.ui.tauri.backend", "src/app/ui.tauri/backend.spl"),
+        source_module("app.ui.electron.backend", "src/app/ui.electron/backend.spl"),
+        source_module("app.ui.browser.backend", "src/app/ui.browser/backend.spl"),
+        source_module("app.ui.vscode.backend", "src/app/ui.vscode/backend.spl"),
+        source_module("app.ui.tui_web.backend", "src/app/ui.tui_web/backend.spl"),
+        source_module("app.ui.none.backend", "src/app/ui.none/backend.spl"),
+        source_module("app.ui.render.widgets", "src/app/ui.render/widgets.spl")
+    ]
+
+fn tui_policy(root: text) -> UiDependencyPolicy:
+    UiDependencyPolicy(
+        root_module: root,
+        forbidden_prefixes: ["app.ui.web", "app.ui.tui_web", "app.ui.browser", "app.ui.render.html_widgets", "app.ui.render.css"],
+        forbidden_terms: ["css", ".gui"]
+    )
+
+describe "UI dependency exact-prefix gate":
+    it "does not treat app.ui.tui_web as part of app.ui.tui":
+        expect(ui_dependency_module_matches("app.ui.tui_web", "app.ui.tui")).to_equal(false)
+        expect(ui_dependency_module_matches("app.ui.tui.screen", "app.ui.tui")).to_equal(true)
+
+    it "extracts structured use imports without imported symbol braces":
+        val imports = ui_dependency_extract_imports("use app.ui.render.html_widgets." + "{" + "render_html_tree" + "}\nuse app.ui.web.html\n")
+        expect(imports[0]).to_equal("app.ui.render.html_widgets")
+        expect(imports[1]).to_equal("app.ui.web.html")
+
+    it "keeps the base TUI fixture free of forbidden web and HTML modules":
+        val report = ui_dependency_report(clean_tui_fixture(), tui_policy("app.ui.tui"))
+        expect(report.module_count).to_equal(4)
+        expect(report.violation_count).to_equal(0)
+
+    it "detects when common renderer widgets pull HTML implementation":
+        val report = ui_dependency_report(html_leak_fixture(), tui_policy("app.ui.render"))
+        expect(report.module_count).to_equal(3)
+        expect(report.violation_count).to_equal(1)
+
+    it "counts unresolved forbidden imports as dependency violations":
+        val report = ui_dependency_report(unresolved_html_leak_fixture(), tui_policy("app.ui.tui.backend"))
+        expect(report.violation_count).to_equal(1)
+
+    it "keeps the current app.ui.tui.backend source closure out of web HTML CSS and browser modules":
+        val report = ui_dependency_report(real_tui_backend_sources(), tui_policy("app.ui.tui.backend"))
+        expect(report.module_count).to_equal(13)
+        expect(report.violation_count).to_equal(0)
+
+    it "keeps the current app.ui.render.widgets shim free of HTML and CSS implementation imports":
+        val report = ui_dependency_report(real_tui_backend_sources(), tui_policy("app.ui.render.widgets"))
+        expect(report.module_count).to_equal(12)
+        expect(report.violation_count).to_equal(0)
+
+    it "keeps HTML-capable adapters on direct html_widgets imports instead of the shared widgets shim":
+        val sources = real_html_adapter_sources()
+        val web_imports = ui_dependency_direct_imports(sources, "app.ui.web.backend")
+        expect(ui_dependency_imports_module(web_imports, "app.ui.render.html_widgets")).to_equal(true)
+        expect(ui_dependency_imports_module(web_imports, "app.ui.render.widgets")).to_equal(false)
+        val tauri_imports = ui_dependency_direct_imports(sources, "app.ui.tauri.backend")
+        expect(ui_dependency_imports_module(tauri_imports, "app.ui.render.html_widgets")).to_equal(true)
+        expect(ui_dependency_imports_module(tauri_imports, "app.ui.render.widgets")).to_equal(false)
+        val electron_imports = ui_dependency_direct_imports(sources, "app.ui.electron.backend")
+        expect(ui_dependency_imports_module(electron_imports, "app.ui.render.html_widgets")).to_equal(true)
+        expect(ui_dependency_imports_module(electron_imports, "app.ui.render.widgets")).to_equal(false)
+        val browser_imports = ui_dependency_direct_imports(sources, "app.ui.browser.backend")
+        expect(ui_dependency_imports_module(browser_imports, "app.ui.render.html_widgets")).to_equal(true)
+        expect(ui_dependency_imports_module(browser_imports, "app.ui.render.widgets")).to_equal(false)
+        val vscode_imports = ui_dependency_direct_imports(sources, "app.ui.vscode.backend")
+        expect(ui_dependency_imports_module(vscode_imports, "app.ui.render.html_widgets")).to_equal(true)
+        expect(ui_dependency_imports_module(vscode_imports, "app.ui.render.widgets")).to_equal(false)
+        val tui_web_imports = ui_dependency_direct_imports(sources, "app.ui.tui_web.backend")
+        expect(ui_dependency_imports_module(tui_web_imports, "app.ui.render.html_widgets")).to_equal(true)
+        expect(ui_dependency_imports_module(tui_web_imports, "app.ui.render.widgets")).to_equal(false)
+        val none_imports = ui_dependency_direct_imports(sources, "app.ui.none.backend")
+        expect(ui_dependency_imports_module(none_imports, "app.ui.render.html_widgets")).to_equal(true)
+        expect(ui_dependency_imports_module(none_imports, "app.ui.render.widgets")).to_equal(false)
+
+    it "keeps HTML-capable adapters on shared web render contracts where applicable":
+        val sources = real_html_adapter_sources()
+        expect(ui_dependency_imports_module(ui_dependency_direct_imports(sources, "app.ui.web.backend"), "common.ui.web_render_api")).to_equal(true)
+        expect(ui_dependency_imports_module(ui_dependency_direct_imports(sources, "app.ui.tauri.backend"), "common.ui.web_render_api")).to_equal(true)
+        expect(ui_dependency_imports_module(ui_dependency_direct_imports(sources, "app.ui.electron.backend"), "common.ui.web_render_api")).to_equal(true)
+        expect(ui_dependency_imports_module(ui_dependency_direct_imports(sources, "app.ui.browser.backend"), "common.ui.web_render_api")).to_equal(true)
+        expect(ui_dependency_imports_module(ui_dependency_direct_imports(sources, "app.ui.tui_web.backend"), "common.ui.web_render_api")).to_equal(true)
+        expect(ui_dependency_imports_module(ui_dependency_direct_imports(sources, "app.ui.none.backend"), "common.ui.web_render_api")).to_equal(true)

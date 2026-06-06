@@ -154,6 +154,18 @@ Use backend-specific renderer modules at call sites:
 symbols from it; that would pull HTML/CSS implementation code into TUI-oriented
 closures.
 
+Renderer implementation capabilities live in `app.ui.render.capability`.
+Use that module for capability metadata because it does not import HTML/CSS
+implementation modules. HTML widgets declare `html_renderer`, CSS declares
+`css_provider`, and both are lazy capabilities; the TUI renderer declares the
+default `tui_renderer` capability for terminal lanes.
+
+For adapter stylesheets, import `css_for_components` from `app.ui.render.css`
+and pass the component names the adapter actually needs, for example
+`css_for_components(["card", "badge", "table"])`. Avoid hand-concatenating
+individual shared CSS functions in adapters; the component list is the
+traceable boundary proving which CSS payload is requested.
+
 ### Bitmap parity evidence
 
 For exact-pixel Simple GUI/WebRenderer/Engine2D parity across JS hosts and the

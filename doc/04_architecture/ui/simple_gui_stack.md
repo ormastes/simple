@@ -173,6 +173,29 @@ terminal surfaces, but it should share command names, focus semantics, and event
 ids with GUI where practical. TUI code must not depend on GUI wrappers or GPU
 availability.
 
+The low-dependency UI/dynSMF lane makes this boundary executable:
+`app.ui.tui` and the TUI compatibility renderer must stay free of GUI, web,
+TUI-web, browser, HTML renderer, and CSS implementation imports. The exact
+module-prefix dependency gate in `src/app/ui/dependency_closure_gate.spl`
+checks that `app.ui.tui` does not accidentally match similarly named modules
+such as `app.ui.tui_web`.
+
+### Renderer Capability Boundary
+
+Renderer implementation capabilities live outside the base UI/TUI closure.
+`src/app/ui.render/capability.spl` declares implementation-free metadata for
+`html_renderer`, `css_provider`, and `tui_renderer`. HTML-capable widgets and
+host web adapters import `app.ui.render.html_widgets` directly; the legacy
+`app.ui.render.widgets` module remains a TUI-only compatibility wrapper.
+
+CSS is component-scoped at the adapter edge. Web-capable adapters call
+`css_for_components([...])` from `app.ui.render.css` to request only the style
+payloads their surface uses, instead of importing a monolithic CSS bundle or
+hand-concatenating direct style functions. Non-HTML lanes prove they do not
+request the HTML/CSS capability closure through
+`test/01_unit/app/ui/render_capability_spec.spl` and
+`test/03_system/app/ui/feature/low_dependency_ui_dynsmf_dependency_gate_spec.spl`.
+
 ### Simple GUI API
 
 The GUI API expresses UI intent. It should not call Electron, Tauri, Chrome,
@@ -275,6 +298,20 @@ backends handle compute kernels, generated artifacts, filters, and offload.
 Draw processing may use CPU scalar, CPU SIMD, OpenCL, CUDA, HIP, Vulkan, Metal,
 or WebGPU, but GUI code sees only the typed Simple 2D and plugin contracts.
 
+### Startup dynSMF Libraries
+
+The low-dependency lane treats standard library-like capabilities as
+precompiled dynSMF entries: `file_io`, `net_io`, `render2d`, `web_renderer`,
+`gui_renderer`, and `tui_renderer`. Startup constructs a session through
+`src/app/startup/dynsmf_autoload.spl`, applies `--no-dynsmf`,
+`--disable-dynsmf=<ids>`, `SIMPLE_DYNSMF=0`, and
+`SIMPLE_DYNSMF_DISABLE=<ids>`, validates generated `build/dynsmf/*.smf`
+artifacts, and then loads enabled entries through `smf_dlopen`.
+
+The session owns handles and generation metadata so interpreter-mode tests can
+unload a library, observe stale symbol evidence, and reload without retaining
+process-global state.
+
 ## Hot-Path Policy
 
 Hot redraw paths must avoid:
@@ -330,6 +367,13 @@ dispatch commands and forwards them to the web adapter protocol.
 | WM dispatch | `src/lib/common/ui/wm_runtime_dispatch.spl` | `WmRuntimeDispatchCommand`, `WmRuntimeShellState`, backend-neutral WM command adapter |
 | Engine2D Draw IR | `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl` | `Engine2dDrawIrAdvResult`, first Simple2D-facing Draw IR executor (rect/text, CPU fallback, pixel readback) |
 | Backend lane | `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl` | Drawing vs processing lane split contract |
+| Renderer capability | `src/app/ui.render/capability.spl` | Implementation-free HTML/CSS/TUI renderer capability metadata |
+| TUI widget shim | `src/app/ui.render/widgets.spl` | TUI-only compatibility wrapper that avoids HTML/CSS implementation imports |
+| HTML widgets | `src/app/ui.render/html_widgets.spl` | HTML-capable widget renderer implementation |
+| Component CSS | `src/app/ui.render/css.spl` | Component-scoped CSS payload selector through `css_for_components` |
+| UI dependency gate | `src/app/ui/dependency_closure_gate.spl` | Exact-prefix dependency closure verifier for TUI and adapter boundaries |
+| dynSMF session | `src/os/smf/dynsmf_session.spl` | Precompiled dynSMF manifest, checked load/autoload, unload/reload evidence |
+| dynSMF startup | `src/app/startup/dynsmf_autoload.spl` | CLI/env policy adapter for checked default dynSMF autoload |
 | Web render API | `src/lib/common/ui/web_render_api.spl` | WebRender IR transport |
 | Web bridge | `src/app/ui.web/wm_bridge.spl` | Web host WM adapter |
 | Web WM bridge | `src/app/ui.web/wm_runtime_bridge.spl` | Web host WM runtime dispatch consumer |
@@ -362,6 +406,12 @@ Every implementation of this architecture needs evidence for:
 
 - semantic equivalence across TUI, GUI, web, and wrapper paths where the command
   model overlaps;
+- TUI and renderer dependency closure gates proving HTML/CSS/GUI/web
+  implementations stay outside non-capable lanes;
+- component-scoped CSS selector evidence proving adapters request only the
+  style payloads they use;
+- checked dynSMF artifact, startup policy, unload, stale symbol, and reload
+  evidence for stdlib-like renderer/runtime capabilities;
 - CPU fallback rendering for every Draw IR feature;
 - plugin fallback reason reporting;
 - pixel/capture/hash evidence for GPU execution claims;

@@ -56,6 +56,37 @@ if dynlib_is_valid(lib):
 
 - `dynlib_call_0..6(lib, name, args...) -> i64` — resolve + call with 0-6 args
 
+### smf_dynlib.spl
+
+- `smf_dlopen(req, next_handle) -> DynLoadResult` — compatibility SMF dynlib
+  facade that validates request shape and returns a session handle.
+- `smf_dlopen_checked(req, next_handle) -> DynLoadResult` — fail-closed SMF
+  dynlib open for generated artifacts; requires a `.smf` path, file existence,
+  and `SMF\0` magic before returning a handle.
+- `smf_dlsym(handle, symbol, registry) -> DynSymResult` — resolve a symbol in
+  the session-owned handle registry.
+- `smf_dlclose(handle) -> DynCloseResult` — validate and close a session handle.
+
+## stdlib-like dynSMF Startup
+
+The low-dependency UI dynSMF lane adds a startup-facing session path for the
+stdlib-like libraries `file_io`, `net_io`, `render2d`, `web_renderer`,
+`gui_renderer`, and `tui_renderer`.
+
+- Manifest/session implementation: `src/os/smf/dynsmf_session.spl`
+- Startup adapter: `src/app/startup/dynsmf_autoload.spl`
+- Artifact build evidence: `scripts/check/check-low-dependency-dynsmf-build-plans.shs`
+- App-root status: `simple run src/app/main.spl --dynsmf-status`
+- Disable all default autoload: `--no-dynsmf` or `SIMPLE_DYNSMF=0`
+- Disable selected entries: `--disable-dynsmf=<ids>` or
+  `SIMPLE_DYNSMF_DISABLE=<ids>`
+
+The startup adapter uses checked autoload: enabled manifest entries must point
+to generated `.smf` artifacts with `SMF\0` magic before `smf_dlopen_checked`
+returns a handle. Missing, short, or invalid artifacts record deterministic
+failed evidence rows. Plain app-root startup remains quiet; use
+`--dynsmf-status` when operator or test evidence is needed.
+
 ## Current Limitations
 
 - **Libraries must be pre-registered**: `dylib_async_open` calls
@@ -90,4 +121,6 @@ if dynlib_is_valid(lib):
 ```bash
 bin/simple test test/01_unit/os/posix/dynlib_spec.spl
 bin/simple test test/01_unit/os/posix/dylib_async_spec.spl
+bin/simple test test/01_unit/os/smf/smf_dynlib_spec.spl
+bin/simple test test/02_integration/app/simple/dynsmf_autoload_policy_spec.spl
 ```

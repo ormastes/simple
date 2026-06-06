@@ -1,0 +1,364 @@
+use os.smf.smf_dynlib.{DynLoadRequest, smf_dlopen, smf_dlopen_checked, smf_dlsym, smf_dlclose}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_bytes(path: text) -> [u8]
+
+class DynSmfManifestEntry:
+    id: text
+    path: text
+    source_module: text
+    artifact_kind: text
+    abi_version: text
+    default_autoload: bool
+    exports: [text]
+
+class DynSmfPolicy:
+    disabled_all: bool
+    disabled_ids: [text]
+    source: text
+
+class DynSmfLoadedLibrary:
+    id: text
+    handle: int
+    generation: int
+    status: text
+    symbol_registry: text
+
+class DynSmfEvidenceRow:
+    library_id: text
+    action: text
+    policy_source: text
+    status: text
+    handle: int
+    generation: int
+    reason: text
+
+    me to_text() -> text:
+        return self.library_id + ":" + self.action + ":" + self.policy_source + ":" + self.status + ":" + self.reason + ":h" + self.handle.to_text() + ":g" + self.generation.to_text()
+
+class DynSmfSession:
+    session_id: text
+    generation: int
+    next_handle: int
+    policy: DynSmfPolicy
+    loaded: [DynSmfLoadedLibrary]
+    evidence: [DynSmfEvidenceRow]
+
+class DynSmfBuildPlan:
+    library_id: text
+    source_module: text
+    source_path: text
+    output_path: text
+    command: text
+    status: text
+    reason: text
+
+class DynSmfArtifactStatus:
+    library_id: text
+    path: text
+    ready: bool
+    reason: text
+    byte_count: int
+    magic_hex: text
+
+    me to_text() -> text:
+        return self.library_id + ":" + self.path + ":" + self.ready.to_text() + ":" + self.reason + ":bytes" + self.byte_count.to_text() + ":magic" + self.magic_hex
+
+fn dynsmf_default_manifest() -> [DynSmfManifestEntry]:
+    [
+        DynSmfManifestEntry(id: "file_io", path: "build/dynsmf/file_io.smf", source_module: "std.io", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: true, exports: ["open", "close"]),
+        DynSmfManifestEntry(id: "net_io", path: "build/dynsmf/net_io.smf", source_module: "std.net", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: true, exports: ["connect", "close"]),
+        DynSmfManifestEntry(id: "render2d", path: "build/dynsmf/render2d.smf", source_module: "std.render2d", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: true, exports: ["draw"]),
+        DynSmfManifestEntry(id: "web_renderer", path: "build/dynsmf/web_renderer.smf", source_module: "app.ui.render.html_widgets", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: true, exports: ["render_html"]),
+        DynSmfManifestEntry(id: "gui_renderer", path: "build/dynsmf/gui_renderer.smf", source_module: "app.ui.web.backend", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: true, exports: ["render_gui"]),
+        DynSmfManifestEntry(id: "tui_renderer", path: "build/dynsmf/tui_renderer.smf", source_module: "app.ui.render.tui_widgets", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: true, exports: ["render_tui_tree"])
+    ]
+
+fn dynsmf_manifest_all_precompiled(manifest: [DynSmfManifestEntry]) -> bool:
+    var idx = 0
+    while idx < manifest.len():
+        val entry = manifest[idx]
+        if entry.artifact_kind != "precompiled_smf":
+            return false
+        if entry.path == "":
+            return false
+        if not entry.path.ends_with(".smf"):
+            return false
+        if entry.source_module == "":
+            return false
+        idx = idx + 1
+    true
+
+fn dynsmf_manifest_source_path(entry: DynSmfManifestEntry) -> text:
+    if entry.id == "file_io":
+        return "src/lib/nogc_sync_mut/io/file.spl"
+    if entry.id == "net_io":
+        return "src/lib/nogc_sync_mut/net.spl"
+    if entry.id == "render2d":
+        return "src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl"
+    if entry.id == "web_renderer":
+        return "src/app/ui.render/html_widgets.spl"
+    if entry.id == "gui_renderer":
+        return "src/app/ui.web/backend.spl"
+    if entry.id == "tui_renderer":
+        return "src/app/ui.render/tui_widgets.spl"
+    ""
+
+fn dynsmf_build_plan(entry: DynSmfManifestEntry) -> DynSmfBuildPlan:
+    val source_path = dynsmf_manifest_source_path(entry)
+    if entry.artifact_kind != "precompiled_smf":
+        return DynSmfBuildPlan(library_id: entry.id, source_module: entry.source_module, source_path: source_path, output_path: entry.path, command: "", status: "invalid", reason: "not_precompiled_smf")
+    if source_path == "":
+        return DynSmfBuildPlan(library_id: entry.id, source_module: entry.source_module, source_path: source_path, output_path: entry.path, command: "", status: "invalid", reason: "unknown_source")
+    if entry.path == "" or not entry.path.ends_with(".smf"):
+        return DynSmfBuildPlan(library_id: entry.id, source_module: entry.source_module, source_path: source_path, output_path: entry.path, command: "", status: "invalid", reason: "invalid_output")
+    val command = "bin/simple compile " + source_path + " -o " + entry.path
+    DynSmfBuildPlan(library_id: entry.id, source_module: entry.source_module, source_path: source_path, output_path: entry.path, command: command, status: "ready", reason: "compile_to_smf")
+
+fn dynsmf_build_plans(manifest: [DynSmfManifestEntry]) -> [DynSmfBuildPlan]:
+    var plans: [DynSmfBuildPlan] = []
+    var idx = 0
+    while idx < manifest.len():
+        plans.push(dynsmf_build_plan(manifest[idx]))
+        idx = idx + 1
+    plans
+
+fn dynsmf_build_plans_ready(plans: [DynSmfBuildPlan]) -> bool:
+    var idx = 0
+    while idx < plans.len():
+        if plans[idx].status != "ready":
+            return false
+        idx = idx + 1
+    true
+
+fn dynsmf_artifact_magic_hex(data: [u8]) -> text:
+    if data.len() < 4:
+        return "short"
+    if data[0] == 83 and data[1] == 77 and data[2] == 70 and data[3] == 0:
+        return "534d4600"
+    "invalid"
+
+fn dynsmf_artifact_has_smf_magic(data: [u8]) -> bool:
+    data.len() >= 4 and data[0] == 83 and data[1] == 77 and data[2] == 70 and data[3] == 0
+
+fn dynsmf_artifact_status_from_bytes(entry: DynSmfManifestEntry, file_present: bool, data: [u8]) -> DynSmfArtifactStatus:
+    if entry.artifact_kind != "precompiled_smf":
+        return DynSmfArtifactStatus(library_id: entry.id, path: entry.path, ready: false, reason: "not_precompiled_smf", byte_count: data.len(), magic_hex: dynsmf_artifact_magic_hex(data))
+    if entry.path == "":
+        return DynSmfArtifactStatus(library_id: entry.id, path: entry.path, ready: false, reason: "missing_path", byte_count: data.len(), magic_hex: dynsmf_artifact_magic_hex(data))
+    if not file_present:
+        return DynSmfArtifactStatus(library_id: entry.id, path: entry.path, ready: false, reason: "missing_file", byte_count: data.len(), magic_hex: dynsmf_artifact_magic_hex(data))
+    if data.len() < 4:
+        return DynSmfArtifactStatus(library_id: entry.id, path: entry.path, ready: false, reason: "too_short", byte_count: data.len(), magic_hex: dynsmf_artifact_magic_hex(data))
+    if not dynsmf_artifact_has_smf_magic(data):
+        return DynSmfArtifactStatus(library_id: entry.id, path: entry.path, ready: false, reason: "invalid_magic", byte_count: data.len(), magic_hex: dynsmf_artifact_magic_hex(data))
+    DynSmfArtifactStatus(library_id: entry.id, path: entry.path, ready: true, reason: "smf_artifact_ready", byte_count: data.len(), magic_hex: dynsmf_artifact_magic_hex(data))
+
+fn dynsmf_artifact_status(entry: DynSmfManifestEntry) -> DynSmfArtifactStatus:
+    if entry.path == "":
+        return dynsmf_artifact_status_from_bytes(entry, false, [])
+    if not rt_file_exists(entry.path):
+        return dynsmf_artifact_status_from_bytes(entry, false, [])
+    val data = rt_file_read_bytes(entry.path) ?? []
+    dynsmf_artifact_status_from_bytes(entry, true, data)
+
+fn dynsmf_artifacts_ready(manifest: [DynSmfManifestEntry]) -> bool:
+    var idx = 0
+    while idx < manifest.len():
+        if not dynsmf_artifact_status(manifest[idx]).ready:
+            return false
+        idx = idx + 1
+    true
+
+fn dynsmf_policy_default() -> DynSmfPolicy:
+    DynSmfPolicy(disabled_all: false, disabled_ids: [], source: "default")
+
+fn dynsmf_policy_from_args_env(args: [text], env_dynsmf: text, env_disable: text) -> DynSmfPolicy:
+    var disabled_all = false
+    var disabled_ids: [text] = []
+    var source = "default"
+    if env_dynsmf == "0":
+        disabled_all = true
+        source = "env:SIMPLE_DYNSMF"
+    if env_disable != "":
+        val ids = env_disable.split(",")
+        var idx = 0
+        while idx < ids.len():
+            if ids[idx] != "":
+                disabled_ids.push(ids[idx])
+            idx = idx + 1
+        source = "env:SIMPLE_DYNSMF_DISABLE"
+    var arg_idx = 0
+    while arg_idx < args.len():
+        val arg = args[arg_idx]
+        if arg == "--no-dynsmf":
+            disabled_all = true
+            source = "arg:--no-dynsmf"
+        elif arg.starts_with("--disable-dynsmf="):
+            val parts = arg.split("=")
+            if parts.len() == 2:
+                val ids = parts[1].split(",")
+                var idx = 0
+                while idx < ids.len():
+                    if ids[idx] != "":
+                        disabled_ids.push(ids[idx])
+                    idx = idx + 1
+                source = "arg:--disable-dynsmf"
+        arg_idx = arg_idx + 1
+    DynSmfPolicy(disabled_all: disabled_all, disabled_ids: disabled_ids, source: source)
+
+fn dynsmf_session_new(session_id: text, policy: DynSmfPolicy) -> DynSmfSession:
+    DynSmfSession(session_id: session_id, generation: 1, next_handle: 100, policy: policy, loaded: [], evidence: [])
+
+fn dynsmf_id_disabled(policy: DynSmfPolicy, id: text) -> bool:
+    if policy.disabled_all:
+        return true
+    var idx = 0
+    while idx < policy.disabled_ids.len():
+        if policy.disabled_ids[idx] == id:
+            return true
+        idx = idx + 1
+    false
+
+fn dynsmf_manifest_find(manifest: [DynSmfManifestEntry], id: text) -> DynSmfManifestEntry?:
+    var idx = 0
+    while idx < manifest.len():
+        if manifest[idx].id == id:
+            return manifest[idx]
+        idx = idx + 1
+    nil
+
+fn dynsmf_symbol_registry(entry: DynSmfManifestEntry, handle: int) -> text:
+    var rows: [text] = []
+    var idx = 0
+    while idx < entry.exports.len():
+        rows.push(handle.to_text() + ":" + entry.exports[idx] + ":" + (idx + 1).to_text())
+        idx = idx + 1
+    rows.join(";")
+
+fn dynsmf_session_add_evidence(session: DynSmfSession, row: DynSmfEvidenceRow) -> DynSmfSession:
+    var out = session
+    out.evidence.push(row)
+    out
+
+fn dynsmf_session_load_impl(session: DynSmfSession, manifest: [DynSmfManifestEntry], id: text, require_artifact: bool) -> DynSmfSession:
+    var out = session
+    val entry_opt = dynsmf_manifest_find(manifest, id)
+    if not entry_opt:
+        return dynsmf_session_add_evidence(out, DynSmfEvidenceRow(library_id: id, action: "load", policy_source: out.policy.source, status: "failed", handle: 0, generation: out.generation, reason: "unknown_library"))
+    if dynsmf_id_disabled(out.policy, id):
+        return dynsmf_session_add_evidence(out, DynSmfEvidenceRow(library_id: id, action: "skip", policy_source: out.policy.source, status: "skipped", handle: 0, generation: out.generation, reason: "disabled"))
+    val entry = entry_opt!
+    var loaded_idx = 0
+    while loaded_idx < out.loaded.len():
+        val existing = out.loaded[loaded_idx]
+        if existing.id == id and existing.status == "loaded":
+            return out
+        loaded_idx = loaded_idx + 1
+    if require_artifact:
+        val artifact = dynsmf_artifact_status(entry)
+        if not artifact.ready:
+            return dynsmf_session_add_evidence(out, DynSmfEvidenceRow(library_id: id, action: "load", policy_source: out.policy.source, status: "failed", handle: 0, generation: out.generation, reason: "artifact_" + artifact.reason))
+    val request = DynLoadRequest.lazy(entry.id, entry.path, out.session_id)
+    val load = if require_artifact: smf_dlopen_checked(request, out.next_handle) else: smf_dlopen(request, out.next_handle)
+    if not load.success:
+        return dynsmf_session_add_evidence(out, DynSmfEvidenceRow(library_id: id, action: "load", policy_source: out.policy.source, status: "failed", handle: 0, generation: out.generation, reason: load.error_msg))
+    val handle = load.handle_id
+    var action = "load"
+    loaded_idx = 0
+    while loaded_idx < out.loaded.len():
+        val existing = out.loaded[loaded_idx]
+        if existing.id == id and existing.status == "unloaded":
+            action = "reload"
+        loaded_idx = loaded_idx + 1
+    out.next_handle = out.next_handle + 1
+    out.loaded.push(DynSmfLoadedLibrary(id: id, handle: handle, generation: out.generation, status: "loaded", symbol_registry: dynsmf_symbol_registry(entry, handle)))
+    out.evidence.push(DynSmfEvidenceRow(library_id: id, action: action, policy_source: out.policy.source, status: "loaded", handle: handle, generation: out.generation, reason: "smf_dlopen"))
+    out
+
+fn dynsmf_session_load(session: DynSmfSession, manifest: [DynSmfManifestEntry], id: text) -> DynSmfSession:
+    dynsmf_session_load_impl(session, manifest, id, false)
+
+fn dynsmf_session_load_checked(session: DynSmfSession, manifest: [DynSmfManifestEntry], id: text) -> DynSmfSession:
+    dynsmf_session_load_impl(session, manifest, id, true)
+
+fn dynsmf_session_autoload(session: DynSmfSession, manifest: [DynSmfManifestEntry]) -> DynSmfSession:
+    var out = session
+    var idx = 0
+    while idx < manifest.len():
+        if manifest[idx].default_autoload:
+            out = dynsmf_session_load(out, manifest, manifest[idx].id)
+        idx = idx + 1
+    out
+
+fn dynsmf_session_autoload_checked(session: DynSmfSession, manifest: [DynSmfManifestEntry]) -> DynSmfSession:
+    var out = session
+    var idx = 0
+    while idx < manifest.len():
+        if manifest[idx].default_autoload:
+            out = dynsmf_session_load_checked(out, manifest, manifest[idx].id)
+        idx = idx + 1
+    out
+
+fn dynsmf_session_find_loaded(session: DynSmfSession, id: text) -> DynSmfLoadedLibrary?:
+    var idx = 0
+    while idx < session.loaded.len():
+        val lib = session.loaded[idx]
+        if lib.id == id:
+            if lib.status == "loaded":
+                return lib
+        idx = idx + 1
+    nil
+
+fn dynsmf_session_symbol(session: DynSmfSession, id: text, symbol: text) -> DynSmfEvidenceRow:
+    var idx = 0
+    while idx < session.loaded.len():
+        val lib = session.loaded[idx]
+        if lib.id == id:
+            if lib.status == "loaded":
+                val sym = smf_dlsym(lib.handle, symbol, lib.symbol_registry)
+                if sym.found:
+                    return DynSmfEvidenceRow(library_id: id, action: "symbol", policy_source: session.policy.source, status: "ok", handle: lib.handle, generation: lib.generation, reason: symbol + "@" + sym.offset.to_text())
+                return DynSmfEvidenceRow(library_id: id, action: "symbol", policy_source: session.policy.source, status: "missing", handle: lib.handle, generation: lib.generation, reason: sym.error_msg)
+        idx = idx + 1
+    DynSmfEvidenceRow(library_id: id, action: "symbol", policy_source: session.policy.source, status: "stale", handle: 0, generation: session.generation, reason: "unloaded")
+
+fn dynsmf_session_record_symbol(session: DynSmfSession, id: text, symbol: text) -> DynSmfSession:
+    dynsmf_session_add_evidence(session, dynsmf_session_symbol(session, id, symbol))
+
+fn dynsmf_session_unload(session: DynSmfSession, id: text) -> DynSmfSession:
+    var out = session
+    var idx = 0
+    var found = false
+    var loaded: [DynSmfLoadedLibrary] = []
+    while idx < out.loaded.len():
+        val lib = out.loaded[idx]
+        if lib.id == id:
+            if lib.status == "loaded":
+                val close = smf_dlclose(lib.handle)
+                if close.success:
+                    found = true
+                    loaded.push(DynSmfLoadedLibrary(id: lib.id, handle: lib.handle, generation: lib.generation, status: "unloaded", symbol_registry: ""))
+                    out.generation = out.generation + 1
+                    out.evidence.push(DynSmfEvidenceRow(library_id: id, action: "unload", policy_source: out.policy.source, status: "unloaded", handle: lib.handle, generation: out.generation, reason: "smf_dlclose"))
+                else:
+                    loaded.push(lib)
+                    out.evidence.push(DynSmfEvidenceRow(library_id: id, action: "unload", policy_source: out.policy.source, status: "failed", handle: lib.handle, generation: out.generation, reason: close.error_msg))
+            else:
+                loaded.push(lib)
+        else:
+            loaded.push(lib)
+        idx = idx + 1
+    if not found:
+        out.evidence.push(DynSmfEvidenceRow(library_id: id, action: "unload", policy_source: out.policy.source, status: "failed", handle: 0, generation: out.generation, reason: "not_loaded"))
+    else:
+        out.loaded = loaded
+    out
+
+export DynSmfManifestEntry, DynSmfPolicy, DynSmfLoadedLibrary, DynSmfEvidenceRow, DynSmfSession, DynSmfBuildPlan, DynSmfArtifactStatus
+export dynsmf_default_manifest, dynsmf_manifest_all_precompiled, dynsmf_manifest_source_path
+export dynsmf_build_plan, dynsmf_build_plans, dynsmf_build_plans_ready
+export dynsmf_artifact_status_from_bytes, dynsmf_artifact_status, dynsmf_artifacts_ready
+export dynsmf_policy_default, dynsmf_policy_from_args_env
+export dynsmf_session_new, dynsmf_session_autoload, dynsmf_session_autoload_checked, dynsmf_session_load, dynsmf_session_load_checked
+export dynsmf_session_symbol, dynsmf_session_record_symbol, dynsmf_session_unload, dynsmf_id_disabled

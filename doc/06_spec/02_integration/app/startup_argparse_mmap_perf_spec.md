@@ -1,6 +1,6 @@
 # Startup Argparse Mmap Perf Specification
 
-> 1. fail
+> Verifies startup-sensitive behavior used by the low_dependency_ui_dynsmf app root path. The spec proves declarative CLI parsing remains responsive when run through `simple run`, and file-backed mmap loading stays bounded for repeated reads.
 
 <!-- sdn-diagram:id=startup_argparse_mmap_perf_spec.arch -->
 <details class="sdn-source">
@@ -36,6 +36,44 @@ startup_argparse_mmap_perf_spec -> std
 
 # Startup Argparse Mmap Perf Specification
 
+Verifies startup-sensitive behavior used by the low_dependency_ui_dynsmf app root path. The spec proves declarative CLI parsing remains responsive when run through `simple run`, and file-backed mmap loading stays bounded for repeated reads.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Requirements | doc/02_requirements/nfr/low_dependency_ui_dynsmf.md |
+| Plan | doc/03_plan/sys_test/low_dependency_ui_dynsmf_dynsmf_session.md |
+| Design | doc/05_design/low_dependency_ui_dynsmf.md |
+| Research | doc/01_research/local/low_dependency_ui_dynsmf.md |
+| Source | `test/02_integration/app/startup_argparse_mmap_perf_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Verifies startup-sensitive behavior used by the low_dependency_ui_dynsmf app
+root path. The spec proves declarative CLI parsing remains responsive when run
+through `simple run`, and file-backed mmap loading stays bounded for repeated
+reads.
+
+## Examples
+
+The CLI startup scenario writes a temporary Simple entrypoint that parses flags,
+options, and positionals, runs it through the current Simple launcher, checks
+the parsed output, and enforces a warm average latency budget. Subprocess
+failures are hard failures with diagnostics. The mmap scenario writes a fixture,
+reads it repeatedly through `file_mmap_read_text`, checks exact content, and
+enforces a read latency budget.
+
+**Requirements:** doc/02_requirements/feature/low_dependency_ui_dynsmf.md
+**Requirements:** doc/02_requirements/nfr/low_dependency_ui_dynsmf.md
+**Plan:** doc/03_plan/sys_test/low_dependency_ui_dynsmf_dynsmf_session.md
+**Design:** doc/05_design/low_dependency_ui_dynsmf.md
+**Research:** doc/01_research/local/low_dependency_ui_dynsmf.md
+
 ## Scenarios
 
 ### startup arg parsing and mmap perf smoke
@@ -51,19 +89,21 @@ startup_argparse_mmap_perf_spec -> std
    - Expected: rt_file_write_text(fixture_path, "fn main(): print \\\"fixture\\\"\\n") is true
 
 4. cleanup tmpdir
-   - Expected: true is true
 
-5. cleanup tmpdir
-   - Expected: true is true
-   - Expected: run.0 contains `expected`
+5. fail
 
 6. cleanup tmpdir
+
+7. fail
+   - Expected: run.0 contains `expected`
+
+8. cleanup tmpdir
 
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 37 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -82,9 +122,7 @@ expect(rt_file_write_text(fixture_path, "fn main(): print \\\"fixture\\\"\\n")).
 val warm = run_cli_perf_once(script_path, fixture_path)
 if warm.2 != 0:
     cleanup_tmpdir(tmpdir)
-    # subprocess not available or failed in interpreter mode — skip gracefully
-    expect(true).to_equal(true)
-    return
+    fail("startup perf warm run failed: code={warm.2} stderr={warm.1}")
 
 var total_elapsed = 0i64
 var run_count = 0i64
@@ -94,8 +132,7 @@ for _i in 0..3:
     val run = run_cli_perf_once(script_path, fixture_path)
     if run.2 != 0:
         cleanup_tmpdir(tmpdir)
-        expect(true).to_equal(true)
-        return
+        fail("startup perf measured run failed: code={run.2} stderr={run.1}")
     expect(run.0.contains(expected)).to_equal(true)
     total_elapsed = total_elapsed + run.3
     run_count = run_count + 1
@@ -166,21 +203,6 @@ expect(avg_elapsed_ms).to_be_less_than(50)
 
 </details>
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/02_integration/app/startup_argparse_mmap_perf_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- startup arg parsing and mmap perf smoke
-
 ## Scenario Summary
 
 | Metric | Count |
@@ -190,6 +212,14 @@ Tests covering:
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Requirements:** [doc/02_requirements/nfr/low_dependency_ui_dynsmf.md](doc/02_requirements/nfr/low_dependency_ui_dynsmf.md)
+- **Plan:** [doc/03_plan/sys_test/low_dependency_ui_dynsmf_dynsmf_session.md](doc/03_plan/sys_test/low_dependency_ui_dynsmf_dynsmf_session.md)
+- **Design:** [doc/05_design/low_dependency_ui_dynsmf.md](doc/05_design/low_dependency_ui_dynsmf.md)
+- **Research:** [doc/01_research/local/low_dependency_ui_dynsmf.md](doc/01_research/local/low_dependency_ui_dynsmf.md)
 
 
 </details>

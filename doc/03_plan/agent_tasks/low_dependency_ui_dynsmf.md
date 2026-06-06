@@ -53,6 +53,8 @@ Outputs:
 - Session-scoped dynSMF handle API design.
 - Interpreter-mode unload/reload specs.
 - Error contract for stale handles after unload.
+- Loader handoff reference:
+  `doc/03_plan/agent_tasks/low_dependency_ui_dynsmf_loader_handoff.md`
 
 Conflict boundary:
 
@@ -71,6 +73,9 @@ Outputs:
 - dynSMF manifest schema and default autoload policy.
 - CLI/env opt-out matrix for all libraries and per-library disable.
 - Build integration plan for precompiled artifacts.
+- Provisional control names from the loader handoff:
+  `--no-dynsmf`, `--disable-dynsmf=<ids>`, `SIMPLE_DYNSMF=0`, and
+  `SIMPLE_DYNSMF_DISABLE=<ids>`.
 
 Conflict boundary:
 
@@ -159,3 +164,12 @@ Use Option C plus NFR-A/NFR-B:
   import removals and allowed replacement APIs.
 - Agent E should own docgen/readback quality and must keep
   `doc/06_spec/**/*_spec.spl` count at zero.
+
+Completed option-independent handoff plans:
+
+- `doc/03_plan/sys_test/low_dependency_ui_dynsmf_dependency_gate.md`
+- `doc/03_plan/sys_test/low_dependency_ui_dynsmf_dynsmf_session.md`
+- `doc/03_plan/agent_tasks/low_dependency_ui_dynsmf_parallel_work_orders.md`
+- `doc/04_architecture/low_dependency_ui_dynsmf.md`
+- `doc/05_design/low_dependency_ui_dynsmf.md`
+- `doc/03_plan/agent_tasks/low_dependency_ui_dynsmf_selection_audit.md`

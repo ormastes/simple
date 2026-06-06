@@ -57,6 +57,16 @@ Host input
   readback; processing backends own compute kernels, generated artifacts,
   filters, and offload. Combined backends are explicit lane plans.
 - Wrappers own: host process/window/webview integration and input/present IPC.
+- TUI boundary: `app.ui.tui` and the TUI widget shim must not import GUI, web,
+  TUI-web, browser, HTML renderer, or CSS implementations.
+- Renderer capabilities: `app.ui.render.capability` declares HTML/CSS/TUI
+  capability metadata without importing implementations; HTML-capable adapters
+  import `app.ui.render.html_widgets` directly.
+- CSS is component-scoped: adapters call `css_for_components([...])` for only
+  the style payloads their surface needs.
+- Startup dynSMF: file IO, net IO, render2d, web renderer, GUI renderer, and
+  TUI renderer use checked `build/dynsmf/*.smf` autoload with arg/env opt-outs
+  and session unload/reload evidence.
 - Preferred next refactor: typed GUI AST -> WebRender IR -> Draw IR; resolve
   GUI/HTML AST and CSS before Draw IR, then keep source kind/id and style
   revision on the batch for cache/debug/GPU grouping.
@@ -83,6 +93,13 @@ Host input
 | `src/lib/common/ui/wm_runtime_dispatch.spl` | WM dispatch command adapter for host shells |
 | `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl` | Engine2D Draw IR executor (rect/text, CPU fallback) |
 | `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl` | Drawing vs processing lane split |
+| `src/app/ui.render/capability.spl` | Implementation-free renderer capabilities |
+| `src/app/ui.render/widgets.spl` | TUI-only compatibility renderer shim |
+| `src/app/ui.render/html_widgets.spl` | HTML-capable widget renderer |
+| `src/app/ui.render/css.spl` | Component-scoped CSS selector |
+| `src/app/ui/dependency_closure_gate.spl` | Exact-prefix UI dependency closure gate |
+| `src/os/smf/dynsmf_session.spl` | checked dynSMF manifest/session/unload |
+| `src/app/startup/dynsmf_autoload.spl` | CLI/env dynSMF startup policy |
 | `src/app/ui.web/wm_runtime_bridge.spl` | Web host WM runtime bridge |
 
 ## Host Shells
@@ -96,6 +113,9 @@ MCP, Render, Test API — all thin. GUI policy stays in Simple.
   unavailable states explicitly.
 - hot path: no full-tree scans, repeated file reads, subprocess retry loops, or
   per-frame device probing.
+- dependency gates: non-capable lanes prove no HTML/CSS/GUI/web closure.
+- dynSMF startup: enabled artifacts must exist and start with `SMF\0` before
+  `smf_dlopen`.
 - cache/index: cache keys include backend id, device capability version, Draw IR
   schema version, source kind/id, artifact version, style/font/image versions,
   style revision, and fallback reason metadata.

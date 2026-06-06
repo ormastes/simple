@@ -5,7 +5,7 @@
 This slice adds a production parity harness in `app.wm_compare`:
 
 - `common.ui.builder` builds marker-free widget trees.
-- `app.ui.render.widgets.render_html_tree` converts the tree into real widget
+- `app.ui.render.html_widgets.render_html_tree` converts the tree into real widget
   HTML.
 - `simple_web_engine2d_render_html_pixels` detects generated widget HTML and
   routes it to `simple_web_layout_render_html_pixels`.

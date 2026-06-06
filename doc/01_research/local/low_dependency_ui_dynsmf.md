@@ -54,6 +54,8 @@ Local dynlib files already exist:
 - `src/os/kernel/loader/dylib_registry.spl`: registry path; includes close and
   SMF support.
 - `src/app/gui_perf/smf_dynlib_probe_core.spl`: GUI SMF dynlib probe support.
+- `src/os/smf/smf_dynlib.spl`: standalone SMF `dlopen`/`dlsym`/`dlclose`
+  primitives.
 
 Relevant tests and manuals already exist:
 
@@ -63,6 +65,10 @@ Relevant tests and manuals already exist:
 - `test/03_system/gui/macos_smf_dynlib_release_gate_system_spec.spl`
 - `doc/06_spec/unit/os/posix/dynlib_spec.md`
 - `doc/06_spec/system/gui/linux_smf_dynlib_e2e_gate_system_spec.md`
+
+More detailed loader/session handoff:
+
+- `doc/03_plan/agent_tasks/low_dependency_ui_dynsmf_loader_handoff.md`
 
 ## Gaps
 
@@ -75,6 +81,8 @@ Relevant tests and manuals already exist:
   implementation closures.
 - There is no current proof that TUI avoids GUI/web/HTML/CSS implementation
   dependency closure.
+- No existing stdlib-like dynSMF autoload manifest was found for `file_io`,
+  `net_io`, `render2d`, `web_renderer`, `gui_renderer`, or `tui_renderer`.
 
 ## Corrected Import Closure Snapshot
 

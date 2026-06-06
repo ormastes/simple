@@ -1,3 +1,6 @@
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_bytes(path: text) -> [u8]
+
 class LibraryRole:
     role_name: text
     is_pic: bool
@@ -156,6 +159,27 @@ pub fn smf_dlopen(req: DynLoadRequest, next_handle: int) -> DynLoadResult:
     if next_handle <= 0:
         return DynLoadResult.fail(req.library_name, "invalid handle seed")
     return DynLoadResult.ok(req.library_name, next_handle)
+
+fn smf_artifact_has_magic(data: [u8]) -> bool:
+    data.len() >= 4 and data[0] == 83 and data[1] == 77 and data[2] == 70 and data[3] == 0
+
+pub fn smf_dlopen_checked(req: DynLoadRequest, next_handle: int) -> DynLoadResult:
+    """Open an SMF library package after validating the artifact path.
+
+    This keeps the compatibility `smf_dlopen` facade stable while giving
+    startup and release gates a fail-closed path for generated `.smf` files.
+    """
+    val base = smf_dlopen(req, next_handle)
+    if not base.success:
+        return base
+    if not req.search_path.ends_with(".smf"):
+        return DynLoadResult.fail(req.library_name, "not an smf artifact")
+    if not rt_file_exists(req.search_path):
+        return DynLoadResult.fail(req.library_name, "artifact missing")
+    val data = rt_file_read_bytes(req.search_path) ?? []
+    if not smf_artifact_has_magic(data):
+        return DynLoadResult.fail(req.library_name, "invalid smf magic")
+    base
 
 pub fn smf_dlsym(handle_id: int, symbol_name: text, registry: text) -> DynSymResult:
     """Look up a symbol by name in a loaded SMF library handle.
