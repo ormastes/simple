@@ -17,6 +17,30 @@ On macOS the pure-Simple lane = **Engine2D CPU/NEON** (aarch64) + **Metal** (GPU
 Backend-specific 2D variants (same scene, different backend) for parity work:
 `engine2d_cpu_simd_gui.spl` (CPU-NEON) and `engine2d_metal_gui.spl` (Metal).
 
+### Web-render backend comparison (pure_simple vs chromium)
+
+`examples/06_io/ui/web_render_backend_gui.spl` renders the **same** HTML page
+through one `WebRenderBackend` interface on either engine — `pure_simple` (Simple
+layout → Engine2D raster in a winit window) or `chromium` (a **live, interactive**
+Electron `BrowserWindow`). Use it to compare Simple's own renderer against real
+Chromium. Honest bit-level gate: `check-electron-simple-web-engine2d-bitmap-evidence.shs`
+(`mismatch=0`, two independently produced artifacts — never memorized pixels).
+Guide: `doc/07_guide/ui/web_render_backend.md`.
+
+```bash
+scripts/gui/macos-gui-run.shs examples/06_io/ui/web_render_backend_gui.spl pure_simple 384x288
+scripts/gui/macos-gui-run.shs examples/06_io/ui/web_render_backend_gui.spl chromium 1280x960
+```
+
+**Perf caveat — pure_simple is interpreter + canvas bound.** Two O(n²) traps
+(fixed 2026-06-06, see the bug doc): a heuristic-surface `push`-loop buffer build
+(use `[0; w*h]` array-repeat), and the in-place array-write fix (`2d4579a0`) must
+be in the **running binary** — a stale `bin/simple` (built before that fix) clones
+the whole framebuffer on every pixel write → O(n²) (e.g. 192s vs 15s at 320×240).
+If headless web render is pathologically slow, suspect a stale deployed driver;
+rebuild it (`cargo build --release -p simple-driver` + redeploy, or
+`bootstrap-from-scratch.sh --deploy`). Keep pure_simple viewports ≤ ~400 wide.
+
 ## Launch (on-screen, macOS)
 
 ```bash
