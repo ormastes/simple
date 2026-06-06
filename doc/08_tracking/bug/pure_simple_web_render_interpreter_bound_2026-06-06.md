@@ -17,7 +17,19 @@ Verified: no-text page 320×240 **69s → 3s (~23×)**, linear scaling restored.
 Bit-exact gate unchanged (`check-electron-simple-web-engine2d-bitmap-evidence.shs`,
 `mismatch_count=0`) — identical output.
 
-## Path B — layout renderer (real CSS pages, e.g. vanillastyle) — stale binary
+## Path B — layout renderer (real CSS pages, e.g. vanillastyle) — FIXED (rebuilt binary)
+
+**Resolved 2026-06-06 by rebuilding & redeploying the release binary** (the
+in-place fix was already in source; only the deployed binary was stale).
+`cargo build --release -p simple-driver` + atomic deploy to
+`bin/release/<triple>/simple`. Result via `bin/simple`: no-text 320×240 **67s→2s**,
+vanillastyle 320×240 **192s→15s (~12.8×)**. Correctness verified: bit-exact gate
+`mismatch_count=0`; `collections_spec.spl` 33/33 (reference semantics intact). The
+deploy binary is a gitignored local artifact, so this is per-checkout — other
+environments pick it up on their next driver rebuild (source already carries
+`2d4579a0`).
+
+### Root-cause detail
 
 `simple_web_html_layout_renderer` paints via `fb[i] = color` writes. The
 **in-place array-write optimization** (`CowEnv::get_mut`, commit `2d4579a0`,
