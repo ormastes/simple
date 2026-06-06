@@ -81,8 +81,14 @@ back to mirroring the other, pair the equality check with an **absolute oracle**
 
 This area of the codebase has a documented false-green history (software-vs-itself
 "GPU parity", scalar paths reporting `has_neon` without running NEON, all-black
-buffers matching all-black). See
-`doc/07_guide/ui/engine2d_cpu_metal_bit_parity.md` ("MATCH ≠ correct"). When the
+buffers matching all-black, and **hard-coded captured-browser pixel tables pasted
+over the renderer output** — memorizing the reference instead of rendering it,
+which silently goes stale and is machine/version-specific). See
+`doc/07_guide/ui/engine2d_cpu_metal_bit_parity.md` ("MATCH ≠ correct"). When a
+real renderer genuinely cannot bit-match a reference (e.g. software text AA vs a
+browser font rasterizer), do **not** memorize pixels — render honestly and mark
+the case known-divergent (the web-layout manifest's `policy=track-text-divergence`
+classifies such cases as *tracked*, not *exact* or *fail*). When the
 test runner can't execute the `it` blocks (e.g. it segfaults importing a heavy
 module graph), run the same assertions through a `bin/simple run …` harness and
 keep the absolute oracle in it — don't downgrade to "files load".

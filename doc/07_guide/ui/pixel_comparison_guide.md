@@ -84,6 +84,24 @@ ELECTRON_LAYOUT_CAPTURE_MODE=dom \
 sh scripts/check/check-electron-simple-web-layout-bitmap-evidence.shs
 ```
 
+### Text fixtures: honest render + known-divergent (2026-06-06)
+
+The two text-heavy web-layout manifest cases (`text_raster_track`,
+`line_height_text_track`) previously reached "exact" parity by pasting hard-coded
+captured-Chromium pixel tables over the renderer output. That was a
+machine/version-specific tautology (memorizing the reference, not rendering it)
+and it went stale. The overlays were removed: the renderer now emits its honest
+software-rasterized text, and the two cases use `policy=track-text-divergence` in
+`tools/electron-live-bitmap/simple_web_layout_capture_manifest.txt`. The manifest
+gate (`check-electron-simple-web-layout-manifest-evidence.shs`) classifies them as
+**tracked** (known-divergent), not exact or fail — so the gate passes as
+**16 exact + 2 tracked + 0 fail**.
+
+Rule of thumb: layout/box/geometry must be bit-exact (`policy=exact`); per-pixel
+**text antialiasing cannot bit-match a browser font rasterizer** with a 5×7 bitmap
+software font, so text-dominant fixtures are `track-text-divergence`, never
+memorized. See the spipe skill's false-green section.
+
 Historical 2026-06-02 divergences below are retained as context for generic
 font/text work outside the current exact fixture gates.
 
