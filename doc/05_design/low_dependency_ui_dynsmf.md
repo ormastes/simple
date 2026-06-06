@@ -116,10 +116,14 @@ styles they need.
 1. Parse args/env/test policy.
 2. Load manifest entries.
 3. Apply skip-all and per-id disable.
-4. Validate enabled default precompiled SMF artifacts exist and start with
+4. Queue general background compile evidence for enabled default entries whose
+   planned precompiled SMF artifact is missing or invalid. This records the
+   deterministic `bin/simple compile <source_path> -o <output_path>` work while
+   the interpreter startup path continues.
+5. Validate enabled default precompiled SMF artifacts exist and start with
    `SMF\0`.
-5. Load ready entries through `smf_dlopen_checked`.
-6. Emit evidence rows.
+6. Load ready entries through `smf_dlopen_checked`.
+7. Emit evidence rows.
 
 ### App Startup Integration
 
@@ -148,6 +152,9 @@ styles they need.
 3. Emit `bin/simple compile <source_path> -o <output_path>`.
 4. Report invalid source/output metadata before any package wrapper executes a
    build.
+5. Startup background compile evidence uses the same build-plan contract for
+   every manifest id; GUI libraries are consumers of the general path, not a
+   separate implementation.
 
 ### dynSMF Unload/Reload
 
@@ -170,6 +177,7 @@ styles they need.
 | Missing capability | Return missing-capability diagnostic |
 | Unknown dynSMF id | Record failed evidence with `unknown_library` |
 | Disabled dynSMF id | Record skipped evidence with policy source |
+| Missing dynSMF artifact during startup | Record queued background compile evidence, then keep checked autoload fail-closed until the artifact exists |
 | Missing or invalid dynSMF artifact | Record failed evidence from `smf_dlopen_checked` |
 | Load failure | Record lower loader error |
 | Lookup after unload | Record stale/unloaded diagnostic |

@@ -28,7 +28,7 @@ dynsmf_session_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 14 | 14 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -122,6 +122,88 @@ expect(plans[0].command).to_equal("bin/simple compile src/lib/nogc_sync_mut/io/f
 expect(plans[2].source_path).to_equal("src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl")
 expect(plans[3].source_path).to_equal("src/app/ui.render/html_widgets.spl")
 expect(plans[5].output_path).to_equal("build/dynsmf/tui_renderer.smf")
+```
+
+</details>
+
+#### records general background compile evidence for non-gui and gui artifacts
+
+1. DynSmfManifestEntry
+
+2. DynSmfManifestEntry
+
+3. DynSmfManifestEntry
+
+4. DynSmfManifestEntry
+
+5. DynSmfManifestEntry
+
+6. DynSmfArtifactStatus
+
+7. DynSmfArtifactStatus
+
+8. DynSmfArtifactStatus
+
+9. DynSmfArtifactStatus
+
+10. DynSmfArtifactStatus
+   - Expected: session.evidence.len() equals `5`
+   - Expected: session.evidence[0].library_id equals `file_io`
+   - Expected: session.evidence[0].action equals `compile_background`
+   - Expected: session.evidence[0].status equals `queued`
+   - Expected: session.evidence[1].library_id equals `net_io`
+   - Expected: session.evidence[1].status equals `skipped`
+   - Expected: session.evidence[1].reason equals `disabled`
+   - Expected: session.evidence[2].library_id equals `bad`
+   - Expected: session.evidence[2].status equals `failed`
+   - Expected: session.evidence[2].reason equals `invalid_unknown_source`
+   - Expected: session.evidence[3].library_id equals `gui_renderer`
+   - Expected: session.evidence[3].status equals `queued`
+   - Expected: session.evidence[4].library_id equals `render2d`
+   - Expected: session.evidence[4].status equals `skipped`
+   - Expected: session.evidence[4].reason equals `artifact_ready`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 33 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val manifest = [
+    DynSmfManifestEntry(id: "file_io", path: "build/dynsmf/bg_file_io_missing.smf", source_module: "std.io", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: true, exports: ["open"]),
+    DynSmfManifestEntry(id: "net_io", path: "build/dynsmf/bg_net_io_missing.smf", source_module: "std.net", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: true, exports: ["connect"]),
+    DynSmfManifestEntry(id: "bad", path: "build/dynsmf/bg_bad.smf", source_module: "std.bad", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: true, exports: []),
+    DynSmfManifestEntry(id: "gui_renderer", path: "build/dynsmf/bg_gui_renderer_missing.smf", source_module: "app.ui.web.backend", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: true, exports: ["render_gui"]),
+    DynSmfManifestEntry(id: "render2d", path: "build/dynsmf/bg_render2d_ready.smf", source_module: "std.render2d", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: true, exports: ["draw"])
+]
+val statuses = [
+    DynSmfArtifactStatus(library_id: "file_io", path: "build/dynsmf/bg_file_io_missing.smf", ready: false, reason: "missing_file", byte_count: 0, magic_hex: "short"),
+    DynSmfArtifactStatus(library_id: "net_io", path: "build/dynsmf/bg_net_io_missing.smf", ready: false, reason: "missing_file", byte_count: 0, magic_hex: "short"),
+    DynSmfArtifactStatus(library_id: "bad", path: "build/dynsmf/bg_bad.smf", ready: false, reason: "missing_file", byte_count: 0, magic_hex: "short"),
+    DynSmfArtifactStatus(library_id: "gui_renderer", path: "build/dynsmf/bg_gui_renderer_missing.smf", ready: false, reason: "missing_file", byte_count: 0, magic_hex: "short"),
+    DynSmfArtifactStatus(library_id: "render2d", path: "build/dynsmf/bg_render2d_ready.smf", ready: true, reason: "smf_artifact_ready", byte_count: 8, magic_hex: "534d4600")
+]
+val policy = dynsmf_policy_from_args_env(["--disable-dynsmf=net_io"], "", "")
+val session = dynsmf_session_request_background_compiles_from_statuses(dynsmf_session_new("background", policy), manifest, statuses, true, true)
+expect(session.evidence.len()).to_equal(5)
+expect(session.evidence[0].library_id).to_equal("file_io")
+expect(session.evidence[0].action).to_equal("compile_background")
+expect(session.evidence[0].status).to_equal("queued")
+expect(session.evidence[0].reason).to_contain("bin/simple compile src/lib/nogc_sync_mut/io/file.spl")
+expect(session.evidence[1].library_id).to_equal("net_io")
+expect(session.evidence[1].status).to_equal("skipped")
+expect(session.evidence[1].reason).to_equal("disabled")
+expect(session.evidence[2].library_id).to_equal("bad")
+expect(session.evidence[2].status).to_equal("failed")
+expect(session.evidence[2].reason).to_equal("invalid_unknown_source")
+expect(session.evidence[3].library_id).to_equal("gui_renderer")
+expect(session.evidence[3].status).to_equal("queued")
+expect(session.evidence[3].reason).to_contain("src/app/ui.web/backend.spl")
+expect(session.evidence[4].library_id).to_equal("render2d")
+expect(session.evidence[4].status).to_equal("skipped")
+expect(session.evidence[4].reason).to_equal("artifact_ready")
 ```
 
 </details>
@@ -402,8 +484,8 @@ expect(reloaded.evidence[7].action).to_equal("reload")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 14 |
-| Active scenarios | 14 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

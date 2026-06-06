@@ -7,10 +7,10 @@
 # server to come up, then runs nc/openssl smoke tests against it.
 #
 # Usage:
-#   sh scripts/qemu/qemu_rv64_http_test.shs [--elf <path>] [--expect-deferred] [--expect-http-only] [--with-display] [--with-storage]
+#   sh scripts/qemu/qemu_rv64_http_test.shs [--elf <path>] [--expect-deferred] [--expect-http-only] [--with-display] [--with-storage] [--allow-prebuilt-artifact]
 #
 # Defaults:
-#   --elf build/simpleos-rv64.elf
+#   --elf build/os/simpleos_riscv64.elf
 #
 # Requires: qemu-system-riscv64, nc
 # ============================================================================
@@ -20,7 +20,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 # ---- defaults ----
-ELF="build/simpleos-rv64.elf"
+ELF="build/os/simpleos_riscv64.elf"
 HTTP_PORT=8080
 HTTPS_PORT=8443
 BOOT_TIMEOUT=60
@@ -30,6 +30,7 @@ EXPECT_HTTP_ONLY=false
 WITH_DISPLAY=false
 WITH_STORAGE=false
 STORAGE_IMG="build/qemu-rv64-storage-probe.img"
+ALLOW_PREBUILT_ARTIFACT=false
 
 # ---- parse args ----
 while [ "$#" -gt 0 ]; do
@@ -53,14 +54,19 @@ while [ "$#" -gt 0 ]; do
     --with-storage)
       WITH_STORAGE=true
       ;;
+    --allow-prebuilt-artifact)
+      ALLOW_PREBUILT_ARTIFACT=true
+      ;;
     --help|-h)
-      echo "Usage: sh scripts/qemu/qemu_rv64_http_test.shs [--elf <path>] [--expect-deferred] [--expect-http-only] [--with-display] [--with-storage]"
+      echo "Usage: sh scripts/qemu/qemu_rv64_http_test.shs [--elf <path>] [--expect-deferred] [--expect-http-only] [--with-display] [--with-storage] [--allow-prebuilt-artifact]"
       echo ""
-      echo "  --elf <path>        Path to SimpleOS RV64 ELF (default: build/simpleos-rv64.elf)"
+      echo "  --elf <path>        Path to SimpleOS RV64 ELF (default: build/os/simpleos_riscv64.elf)"
       echo "  --expect-deferred   Pass when virtio is detected but packet RX is unavailable"
       echo "  --expect-http-only  Pass the live HTTP gate while HTTPS/TLS remains blocked"
       echo "  --with-display      Expose a virtio-gpu PCI device and require display readiness"
       echo "  --with-storage      Expose a virtio-blk PCI device and require sector-read readiness"
+      echo "  --allow-prebuilt-artifact"
+      echo "                      Permit smoke-only evidence from an ELF without a current-source build stamp"
       exit 0
       ;;
     *)
@@ -74,13 +80,29 @@ done
 # ---- verify prerequisites ----
 if [ ! -f "$ELF" ]; then
   echo "error: ELF not found: ${ELF}" >&2
-  echo "  Build it first with an LLVM-enabled compiler:" >&2
-  echo "  SIMPLE_BOOTSTRAP=1 bin/simple native-build \\" >&2
-  echo "    --source build/os/generated --source src/os --source src/lib \\" >&2
-  echo "    --backend llvm --entry src/os/kernel/arch/riscv64/boot.spl \\" >&2
-  echo "    --entry-closure --linker-script src/os/kernel/arch/riscv64/linker.ld \\" >&2
-  echo "    --target riscv64gc-unknown-none -o build/simpleos-rv64.elf" >&2
+  echo "  Build it first through the SimpleOS runner with an LLVM-enabled compiler:" >&2
+  echo "  bin/simple os build --arch=riscv64" >&2
+  echo "  Current seed builds without LLVM fail closed before QEMU; that is not live RV64 evidence." >&2
   exit 1
+fi
+
+BUILD_STAMP="${ELF}.build_stamp"
+if [ "$ALLOW_PREBUILT_ARTIFACT" = "false" ]; then
+  if [ ! -f "$BUILD_STAMP" ]; then
+    echo "error: current-source build stamp not found: ${BUILD_STAMP}" >&2
+    echo "  Refusing to treat ${ELF} as current-source RV64 QEMU evidence." >&2
+    echo "  Build through: bin/simple os build --arch=riscv64" >&2
+    echo "  For limited smoke-only evidence from a known prebuilt ELF, rerun with --allow-prebuilt-artifact." >&2
+    exit 1
+  fi
+  if ! grep -q '^backend=llvm$' "$BUILD_STAMP" 2>/dev/null ||
+     ! grep -q '^target=riscv64-unknown-none$' "$BUILD_STAMP" 2>/dev/null ||
+     ! grep -q '^entry=src/os/kernel/arch/riscv64/boot.spl$' "$BUILD_STAMP" 2>/dev/null; then
+    echo "error: build stamp does not describe the RV64 LLVM current-source boot lane: ${BUILD_STAMP}" >&2
+    exit 1
+  fi
+else
+  echo "WARNING: --allow-prebuilt-artifact gives smoke-only evidence; it is not current-source RV64 rebuild evidence." >&2
 fi
 
 if ! command -v qemu-system-riscv64 >/dev/null 2>&1; then

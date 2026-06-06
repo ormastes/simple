@@ -7,6 +7,9 @@
 - default dynSMF autoload policy;
 - app startup policy wiring and app-root status evidence;
 - deterministic compile-to-SMF build plans for default dynSMF artifacts;
+- interpreter-startup background compile request evidence for missing dynSMF
+  artifacts, using the same general build-plan contract for non-GUI and GUI
+  libraries;
 - runtime artifact readiness validation for generated `build/dynsmf/*.smf`
   outputs;
 - arg/env skip-all and per-library disable policy;
@@ -38,6 +41,9 @@ Candidate generated manuals:
   `SIMPLE_DYNSMF`/`SIMPLE_DYNSMF_DISABLE` environment values.
 - Startup and system-boundary checked autoload reject missing, short, or invalid
   SMF artifacts before `smf_dlopen`.
+- Startup records `compile_background` queued evidence for enabled missing
+  artifacts before checked autoload fails closed; this evidence is general to
+  all dynSMF manifest entries and is not GUI-only.
 - `src/app/main.spl --dynsmf-status` emits deterministic startup evidence while
   plain app-root startup remains quiet.
 - Every precompiled manifest entry has a ready build plan with a concrete source
@@ -80,11 +86,13 @@ Existing loader APIs:
 
 Existing loader tests cover registry close/refcount and SMF wrapper loading.
 The low-dependency dynSMF unit spec now covers artifact-readiness validation,
-session-owned stdlib dynSMF autoload, skip-all, per-id disable, unload, stale
-lookup, and reload policy. The integration spec now covers checked
-`app.startup.dynsmf_autoload` and the `src/app/main.spl --dynsmf-status`
-app-root path. The system spec now exercises unload, stale symbol evidence, and
-checked reload for all six selected default library ids.
+general background compile evidence, session-owned stdlib dynSMF autoload,
+skip-all, per-id disable, unload, stale lookup, and reload policy. The
+integration spec now covers checked `app.startup.dynsmf_autoload`, missing
+artifact background compile queue evidence, and the
+`src/app/main.spl --dynsmf-status` app-root path. The system spec now exercises
+unload, stale symbol evidence, and checked reload for all six selected default
+library ids.
 
 ## Implementation Notes
 

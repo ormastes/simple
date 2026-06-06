@@ -216,10 +216,15 @@ bool spl_thread_join(spl_thread_handle handle) {
  * ================================================================ */
 
 typedef int64_t (*rt_closure_fn_t)(int64_t);
+typedef int64_t (*rt_closure2_fn_t)(int64_t, int64_t);
 
 typedef struct {
     rt_closure_fn_t  entry;
+    rt_closure2_fn_t entry2;
     int64_t          closure_ptr;
+    int64_t          data1;
+    int64_t          data2;
+    int              arity;
     int64_t          result;
     int              done;
 #ifdef SPL_THREAD_PTHREAD
@@ -231,7 +236,11 @@ typedef struct {
 
 static void* rt_isolated_wrapper(void* raw) {
     RtThreadData* td = (RtThreadData*)raw;
-    td->result = td->entry(td->closure_ptr);
+    if (td->arity == 2) {
+        td->result = td->entry2(td->data1, td->data2);
+    } else {
+        td->result = td->entry(td->closure_ptr);
+    }
     td->done = 1;
     return NULL;
 }
@@ -239,7 +248,11 @@ static void* rt_isolated_wrapper(void* raw) {
 #ifdef SPL_THREAD_WINDOWS
 static DWORD WINAPI rt_isolated_wrapper_win(LPVOID raw) {
     RtThreadData* td = (RtThreadData*)raw;
-    td->result = td->entry(td->closure_ptr);
+    if (td->arity == 2) {
+        td->result = td->entry2(td->data1, td->data2);
+    } else {
+        td->result = td->entry(td->closure_ptr);
+    }
     td->done = 1;
     return 0;
 }
@@ -251,7 +264,11 @@ int64_t rt_thread_spawn_isolated(int64_t arg0, int64_t arg1) {
     RtThreadData* td = (RtThreadData*)SPL_MALLOC(sizeof(RtThreadData), "rt_thread");
     if (!td) return 0;
     td->entry       = fn_ptr;
+    td->entry2      = NULL;
     td->closure_ptr = closure_ptr;
+    td->data1       = 0;
+    td->data2       = 0;
+    td->arity       = 1;
     td->result      = 0;
     td->done        = 0;
 
@@ -271,8 +288,31 @@ int64_t rt_thread_spawn_isolated(int64_t arg0, int64_t arg1) {
 }
 
 int64_t rt_thread_spawn_isolated2(int64_t fn_ptr, int64_t data1, int64_t data2) {
-    (void)data2;
-    return rt_thread_spawn_isolated(fn_ptr, data1);
+    rt_closure2_fn_t entry = (rt_closure2_fn_t)(intptr_t)(fn_ptr >> 3);
+    RtThreadData* td = (RtThreadData*)SPL_MALLOC(sizeof(RtThreadData), "rt_thread2");
+    if (!td) return 0;
+    td->entry       = NULL;
+    td->entry2      = entry;
+    td->closure_ptr = 0;
+    td->data1       = data1;
+    td->data2       = data2;
+    td->arity       = 2;
+    td->result      = 0;
+    td->done        = 0;
+
+#ifdef SPL_THREAD_PTHREAD
+    if (pthread_create(&td->thread, NULL, rt_isolated_wrapper, td) != 0) {
+        SPL_FREE(td);
+        return 0;
+    }
+#else
+    td->thread = CreateThread(NULL, 0, rt_isolated_wrapper_win, td, 0, NULL);
+    if (td->thread == NULL) {
+        SPL_FREE(td);
+        return 0;
+    }
+#endif
+    return alloc_handle(HANDLE_THREAD, td);
 }
 
 int64_t rt_thread_join(int64_t handle) {

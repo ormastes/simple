@@ -11,6 +11,7 @@
 @direction LR
 
 dynsmf_autoload_policy_spec -> std
+dynsmf_autoload_policy_spec -> os
 dynsmf_autoload_policy_spec -> app
 ```
 
@@ -28,7 +29,7 @@ dynsmf_autoload_policy_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -80,6 +81,51 @@ startup evidence.
 ## Scenarios
 
 ### dynSMF startup autoload policy
+
+#### queues background compile evidence before checked autoload for missing artifacts
+
+1. DynSmfManifestEntry
+
+2. DynSmfManifestEntry
+   - Expected: session.loaded.len() equals `0`
+   - Expected: session.evidence.len() equals `4`
+   - Expected: session.evidence[0].library_id equals `file_io`
+   - Expected: session.evidence[0].action equals `compile_background`
+   - Expected: session.evidence[0].status equals `queued`
+   - Expected: session.evidence[1].library_id equals `gui_renderer`
+   - Expected: session.evidence[1].action equals `compile_background`
+   - Expected: session.evidence[1].status equals `queued`
+   - Expected: session.evidence[2].status equals `failed`
+   - Expected: session.evidence[2].reason equals `artifact_missing_file`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val manifest = [
+    DynSmfManifestEntry(id: "file_io", path: "build/dynsmf/startup_missing_file_io.smf", source_module: "std.io", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: true, exports: ["open"]),
+    DynSmfManifestEntry(id: "gui_renderer", path: "build/dynsmf/startup_missing_gui_renderer.smf", source_module: "app.ui.web.backend", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: true, exports: ["render_gui"])
+]
+val session = dynsmf_startup_session_for_manifest_from_values([], "", "", "integration-background", manifest)
+expect(session.loaded.len()).to_equal(0)
+expect(session.evidence.len()).to_equal(4)
+expect(session.evidence[0].library_id).to_equal("file_io")
+expect(session.evidence[0].action).to_equal("compile_background")
+expect(session.evidence[0].status).to_equal("queued")
+expect(session.evidence[0].reason).to_contain("bin/simple compile src/lib/nogc_sync_mut/io/file.spl")
+expect(session.evidence[1].library_id).to_equal("gui_renderer")
+expect(session.evidence[1].action).to_equal("compile_background")
+expect(session.evidence[1].status).to_equal("queued")
+expect(session.evidence[1].reason).to_contain("src/app/ui.web/backend.spl")
+expect(session.evidence[2].status).to_equal("failed")
+expect(session.evidence[2].reason).to_equal("artifact_missing_file")
+```
+
+</details>
 
 #### autoloads all six default stdlib-like dynSMF entries for startup
 
@@ -220,8 +266,8 @@ expect(out).to_contain("file_io:skip:arg:--no-dynsmf:skipped:disabled")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

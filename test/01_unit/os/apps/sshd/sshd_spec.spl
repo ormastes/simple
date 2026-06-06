@@ -1,5 +1,6 @@
 use os.apps.sshd.sshd.{sshd_decode_net_runtime_i32_for_test, sshd_build_host_keys_for_session_for_test}
-use os.apps.sshd.ssh_kex.{host_key_set_advertised_algorithms}
+use os.apps.sshd.ssh_kex.{host_key_set_advertised_algorithms, ssh_build_kexinit_for_host_keys}
+use os.apps.sshd.ssh_transport.{ssh_parse_kexinit}
 
 fn _ecdsa_p256_pkcs8_der() -> [u8]:
     _hex_decode("308187020100301306072a8648ce3d020106082a8648ce3d030107046d306b0201010420578329bff057bf48c84b9fc462940c57bb509e77e443228dbd627054a1fce283a14403420004fc116698a3e3236550c4c9efa9bd4d0619602a65d2930e9150ab33e84dbc83f8a6a6b9933f35ab59245e5b5a7af5dca76b33cbe7aeee5981b3ca350bebf52ecd")
@@ -53,3 +54,12 @@ describe "sshd host key selection":
         val host_keys = sshd_build_host_keys_for_session_for_test(true, [1, 2, 3, 4], nil, nil, _ecdsa_p256_pkcs8_der())
         expect(host_keys.ecdsa_p256_pkcs8 != nil).to_equal(true)
         expect(host_key_set_advertised_algorithms(host_keys)).to_equal("ssh-ed25519,ecdsa-sha2-nistp256")
+
+    it "advertises daemon-selected host keys and aes256 in production KEXINIT":
+        val host_keys = sshd_build_host_keys_for_session_for_test(true, [1, 2, 3, 4], [9, 10, 11, 12], [13, 14, 15, 16], nil)
+        val parsed = ssh_parse_kexinit(ssh_build_kexinit_for_host_keys(host_keys))
+        expect(parsed.is_ok()).to_equal(true)
+        val kex = parsed.unwrap()
+        expect(kex.server_host_key_algorithms).to_equal("ssh-ed25519,rsa-sha2-256,rsa-sha2-512")
+        expect(kex.encryption_client_to_server).to_equal("aes256-gcm@openssh.com")
+        expect(kex.encryption_server_to_client).to_equal("aes256-gcm@openssh.com")

@@ -1,91 +1,49 @@
-# Integration tests for doctest discovery
-# Tests DiscoveryConfig and discovery functions
+# Integration tests for doctest parsing from source files
+# Tests parse_doctests with realistic doc-comment source content
 
-use std.doctest.discovery.*
-use std.doctest.parser.DoctestExample
+use std.spec
+use std.spec.{expect}
+use std.common.doctest.parser
 
-describe "DiscoveryConfig":
-    context "default configuration":
-        it "has default search paths":
-            val config = DiscoveryConfig.default()
-            expect config.get_search_paths().len() to_be 3
-            expect config.has_search_path("lib/") to_be true
-            expect config.has_search_path("src/") to_be true
-            expect config.has_search_path("doc/") to_be true
+describe "Doctest Source Parsing":
+    context "parse_doctests integration":
+        it "discovers doctests in doc comments":
+            val source = "/// Example usage:\n/// >>> 1 + 2\n/// 3\nfn add(a: i64, b: i64) -> i64:\n    a + b\n"
+            val items = parse_doctests(source, "lib/math.spl")
 
-        it "has default include patterns":
-            val config = DiscoveryConfig.default()
-            val patterns = config.get_include_patterns()
-            expect patterns.len() to_be 3
+            expect items.len to eq 1
+            expect items[0].commands to eq ["1 + 2"]
+            expect items[0].source_path to eq "lib/math.spl"
 
-        it "has default exclude patterns":
-            val config = DiscoveryConfig.default()
-            val patterns = config.get_exclude_patterns()
-            expect patterns.len() to_be 2
+        it "discovers multiple doctests across functions":
+            val source = "/// >>> 1 + 1\n/// 2\nfn foo(): pass\n\n/// >>> 2 + 2\n/// 4\nfn bar(): pass\n"
+            val items = parse_doctests(source, "lib/ops.spl")
 
-    context "configuration modification":
-        it "adds search path":
-            val config = DiscoveryConfig.default()
-                .add_search_path("tests/")
-            expect config.has_search_path("tests/") to_be true
-            expect config.get_search_paths().len() to_be 4
+            expect items.len to eq 2
+            expect items[0].commands to eq ["1 + 1"]
+            expect items[1].commands to eq ["2 + 2"]
 
-        it "adds include pattern":
-            val config = DiscoveryConfig.default()
-                .add_include_pattern("**/*.rst")
-            val patterns = config.get_include_patterns()
-            expect patterns.len() to_be 4
+        it "skips functions without doc comments":
+            val source = "fn helper(): pass\n\n/// >>> 42\n/// 42\nfn documented(): pass\n"
+            val items = parse_doctests(source, "lib/mixed.spl")
 
-        it "adds exclude pattern":
-            val config = DiscoveryConfig.default()
-                .add_exclude_pattern("**/cache/**")
-            val patterns = config.get_exclude_patterns()
-            expect patterns.len() to_be 3
+            expect items.len to eq 1
+            expect items[0].commands to eq ["42"]
 
-    context "summary":
-        it "provides configuration summary":
-            val config = DiscoveryConfig.default()
-            val summary = config.summary()
-            expect summary.contains("search paths") to_be true
-            expect summary.contains("include patterns") to_be true
-            expect summary.contains("exclude patterns") to_be true
+        it "handles exception expectations in doc comments":
+            val source = "/// >>> bad_call()\n/// Error: ValueError\nfn risky(): pass\n"
+            val items = parse_doctests(source, "lib/errors.spl")
 
-describe "File Discovery":
-    context "discover_file function":
-        it "returns empty list for unknown extensions":
-            val found = discover_file("unknown.xyz")
-            expect found.len() to_be 0
+            expect items.len to eq 1
+            match items[0].expected:
+                case Expected.Exception(type, msg):
+                    expect type to eq "ValueError"
+                case _:
+                    fail "Expected Exception"
 
-        it "recognizes spl files":
-            val found = discover_file("test.spl")
-            expect found.is_list() to_be true
+        it "preserves line numbers":
+            val source = "# header\n\n/// >>> 1\n/// 1\nfn f(): pass\n"
+            val items = parse_doctests(source, "test.spl")
 
-        it "recognizes md files":
-            val found = discover_file("test.md")
-            expect found.is_list() to_be true
-
-describe "Pattern Matching":
-    context "should_exclude function":
-        it "excludes paths matching target pattern":
-            val exclude_patterns = ["**/target/**"]
-            expect should_exclude("project/target/debug/test.spl", exclude_patterns) to_be true
-
-        it "does not exclude non-matching paths":
-            val exclude_patterns = ["**/target/**", "**/build/**"]
-            expect should_exclude("src/lib/module.spl", exclude_patterns) to_be false
-
-    context "matches_any_pattern function":
-        it "matches spl files":
-            val include_patterns = ["**/*.spl"]
-            expect matches_any_pattern("src/module.spl", include_patterns) to_be true
-
-        it "does not match non-matching extensions":
-            val include_patterns = ["**/*.spl"]
-            expect matches_any_pattern("src/module.rs", include_patterns) to_be false
-
-describe "Full Discovery":
-    context "discover_all function":
-        it "returns a list":
-            val config = DiscoveryConfig.default()
-            val found = discover_all(config)
-            expect found.is_list() to_be true
+            expect items.len to eq 1
+            expect items[0].start_line to eq 3

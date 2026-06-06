@@ -2,6 +2,7 @@
 IDE office plugin suite system specification.
 Validates that IDE-facing Markdown, presentation, spreadsheet, dashboard, and database surfaces reuse existing app modules.
 """
+# @evidence-display: embed_tui
 
 use std.spec.{describe, it, expect}
 
@@ -16,6 +17,8 @@ use app.ide.launch_sanity.{ide_launch_sanity, ide_launch_sanity_summary}
 use app.ide.plugin_manifest.{ide_plugin_manifest_probe, ide_plugin_manifest_summary}
 use app.ide.gui_sanity.{ide_gui_sanity, ide_gui_sanity_summary}
 use app.ide.tui_sanity.{ide_tui_sanity, ide_tui_sanity_summary}
+use app.office.slides.slide.{SlideElement, SlideElementKind, SlideLayout, add_slide_element, slide_layout_display_name, slide_layout_short_name, slide_with_elements}
+use common.office.number.{office_parse_non_negative_i32, office_parse_signed_decimal_f64, office_parse_unsigned_decimal_f64, office_pow10_f64, office_pow10_i64}
 
 describe "IDE office plugin suite capabilities":
     """
@@ -51,6 +54,32 @@ describe "IDE office plugin suite capabilities":
         expect(tui_report).to_contain("tui-panels:")
         expect(tui_report).to_contain("slides: app.office.slides")
 
+    it "keeps the feature-check manual surface complete and ordered":
+        val lines = ide_feature_check_report("tui")
+        expect(lines.len()).to_equal(17)
+        expect(lines[0]).to_equal("Simple IDE feature check")
+        expect(lines[1]).to_equal("mode: tui")
+        expect(lines[2]).to_equal("capabilities: 5")
+        expect(lines[3]).to_start_with("markdown:")
+        expect(lines[5]).to_start_with("slides:")
+        expect(lines[7]).to_start_with("sheets:")
+        expect(lines[10]).to_start_with("agent-dashboard:")
+        expect(lines[12]).to_start_with("db-admin:")
+        expect(lines[16]).to_start_with("  plugin-manifest:")
+
+    it "keeps GUI and TUI feature-check probes in parity except launch mode":
+        val tui_lines = ide_feature_check_report("tui")
+        val gui_lines = ide_feature_check_report("gui")
+        expect(tui_lines.len()).to_equal(gui_lines.len())
+        expect(tui_lines[0]).to_equal(gui_lines[0])
+        expect(tui_lines[2]).to_equal(gui_lines[2])
+        expect(tui_lines[3]).to_equal(gui_lines[3])
+        expect(tui_lines[5]).to_equal(gui_lines[5])
+        expect(tui_lines[7]).to_equal(gui_lines[7])
+        expect(tui_lines[10]).to_equal(gui_lines[10])
+        expect(tui_lines[12]).to_equal(gui_lines[12])
+        expect(tui_lines[16]).to_equal(gui_lines[16])
+
     it "checks slide rendering outline and page design through existing office modules":
         val probe = ide_slide_compat_probe()
         val summary = ide_slide_compat_summary()
@@ -60,9 +89,33 @@ describe "IDE office plugin suite capabilities":
         expect(probe.canvas_widget_count).to_be_greater_than(1)
         expect(probe.outline_line_count).to_equal(2)
         expect(probe.design_count).to_equal(2)
-        expect(probe.has_css_like_design).to_equal(true)
-        expect(probe.has_outline_transform).to_equal(true)
+        expect(probe.has_css_like_design)
+        expect(probe.has_outline_transform)
         expect(summary).to_contain("transform=true")
+
+    it "checks slide constructor helpers used by IDE presentation previews":
+        val el = SlideElement(
+            id: "notes",
+            kind: SlideElementKind.TextBox(content: "Speaker notes"),
+            x: 10,
+            y: 20,
+            width: 300,
+            height: 80
+        )
+        val base = slide_with_elements("manual", SlideLayout.TitleContent, [el])
+        val next = add_slide_element(base, SlideElement(
+            id: "footer",
+            kind: SlideElementKind.TextBox(content: "Footer"),
+            x: 10,
+            y: 520,
+            width: 300,
+            height: 40
+        ))
+        expect(slide_layout_display_name(base.layout)).to_equal("Title + Content")
+        expect(slide_layout_short_name(base.layout)).to_equal("Content")
+        expect(base.elements.len()).to_equal(1)
+        expect(next.elements.len()).to_equal(2)
+        expect(next.background).to_equal("#FFFFFF")
 
     it "checks spreadsheet compatibility through existing sheet and formula modules":
         val compat = ide_sheet_compat_probe()
@@ -71,9 +124,17 @@ describe "IDE office plugin suite capabilities":
         expect(compat.compatible_formats.join(",")).to_contain("xlsx")
         expect(compat.compatible_formats.join(",")).to_contain("tabular")
         expect(compat.sample_range).to_equal("A1:C1")
-        expect(compat.formula_evaluator_ok).to_equal(true)
+        expect(compat.formula_evaluator_ok)
         expect(summary).to_contain("formula=5")
         expect(summary).to_contain("evaluator=true")
+
+    it "checks shared Office numeric parsing used by sheet and planner surfaces":
+        expect(office_parse_non_negative_i32("4096")).to_equal(4096)
+        expect(office_parse_non_negative_i32("12px")).to_equal(0)
+        expect(office_parse_unsigned_decimal_f64("12.5")).to_equal(12.5)
+        expect(office_parse_signed_decimal_f64("-3.25")).to_equal(-3.25)
+        expect(office_pow10_f64(2)).to_equal(100.0)
+        expect(office_pow10_i64(3)).to_equal(1000)
 
     it "checks DB admin targets through existing editor and portal DB ownership":
         val surface = ide_db_admin_surface()
@@ -92,8 +153,8 @@ describe "IDE office plugin suite capabilities":
         val summary = ide_agent_dashboard_summary()
         expect(surface.owner_module).to_equal("app.editor.mcp_tools")
         expect(surface.tool_count).to_be_greater_than(10)
-        expect(surface.has_lsp_tools).to_equal(true)
-        expect(surface.has_wiki_tools).to_equal(true)
+        expect(surface.has_lsp_tools)
+        expect(surface.has_wiki_tools)
         expect(summary).to_contain("combined-live")
 
     it "checks markdown rendering through the shared editor renderer and preview pane":
@@ -103,8 +164,8 @@ describe "IDE office plugin suite capabilities":
         expect(probe.block_count).to_be_greater_than(2)
         expect(probe.rendered_line_count).to_be_greater_than(2)
         expect(probe.preview_line_count).to_be_greater_than(2)
-        expect(probe.contains_heading).to_equal(true)
-        expect(probe.contains_table).to_equal(true)
+        expect(probe.contains_heading)
+        expect(probe.contains_table)
         expect(summary).to_contain("preview=")
 
     it "checks TUI GUI and SDL launch modes through the shared editor launch contract":
@@ -122,20 +183,20 @@ describe "IDE office plugin suite capabilities":
         val summary = ide_tui_sanity_summary()
         expect(sanity.preview_line_count).to_be_greater_than(2)
         expect(sanity.outline_line_count).to_equal(2)
-        expect(sanity.renders_markdown_preview).to_equal(true)
-        expect(sanity.renders_table_preview).to_equal(true)
-        expect(sanity.renders_slide_outline).to_equal(true)
-        expect(sanity.renders_outline_style).to_equal(true)
+        expect(sanity.renders_markdown_preview)
+        expect(sanity.renders_table_preview)
+        expect(sanity.renders_slide_outline)
+        expect(sanity.renders_outline_style)
         expect(summary).to_contain("slide-outline=true")
 
     it "checks GUI rendering through the shared editor backend":
         val sanity = ide_gui_sanity()
         val summary = ide_gui_sanity_summary()
         expect(sanity.theme).to_equal("dark")
-        expect(sanity.renders_markdown).to_equal(true)
-        expect(sanity.renders_presentation).to_equal(true)
-        expect(sanity.renders_sheet).to_equal(true)
-        expect(sanity.has_backend_config).to_equal(true)
+        expect(sanity.renders_markdown)
+        expect(sanity.renders_presentation)
+        expect(sanity.renders_sheet)
+        expect(sanity.has_backend_config)
         expect(summary).to_contain("ppt=true")
 
     it "exports IDE app support through the existing plugin manifest registry":

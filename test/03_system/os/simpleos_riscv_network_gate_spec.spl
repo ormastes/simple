@@ -2,6 +2,9 @@ extern fn rt_file_read_text(path: text) -> text
 extern fn rt_env_get(key: text) -> text?
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 
+use std.nogc_sync_mut.http_server.{HttpResponse, HttpStatus, write_response, write_error}
+use std.nogc_sync_mut.io.tcp.{TcpStream}
+
 fn rv64_http_storage_live_enabled() -> bool:
     (rt_env_get("SIMPLEOS_RV64_HTTP_STORAGE_QEMU") ?? "") == "1"
 
@@ -199,6 +202,9 @@ describe "SimpleOS RISC-V network readiness gate":
         expect(shim).to_contain("extern fn rt_net_rx_ready() -> i64")
         expect(shim).to_contain("fn driver_shim_packet_io_ready() -> bool")
         expect(shim).to_contain("rt_net_tx_test() == 0 and rt_net_rx_ready() == 0")
+        expect(shim).to_contain("rt_io_tcp_write_text(fd, data)")
+        expect(shim).to_contain("if written < 0:\n        return -1")
+        expect(shim).to_contain("result_val: written")
         expect(shim).to_contain("if not driver_shim_packet_io_ready():\n        return -1")
         expect(shim).to_contain("if not driver_shim_packet_io_ready():\n        return RT_LINK_STATE_UNKNOWN")
         expect(shim).to_contain("if not driver_shim_packet_io_ready():\n        return \"\"")
@@ -213,6 +219,23 @@ describe "SimpleOS RISC-V network readiness gate":
         expect(shim.index_of("g_next_os_fd") ?? -1).to_equal(-1)
         expect(shim.index_of("data.len().to_i64()") ?? -1).to_equal(-1)
         expect(shim).to_contain("Returns -1 if the fd is invalid or the netstack is unavailable")
+
+    it "lets the sync HTTP server serve inline when thread spawn is unavailable":
+        val server = rt_file_read_text("src/lib/nogc_sync_mut/http_server/server.spl")
+        val response = rt_file_read_text("src/lib/nogc_sync_mut/http_server/response.spl")
+
+        expect(server).to_contain("val handler = thread_spawn2(stream, self")
+        expect(server).to_contain("if handler.handle < 0:")
+        expect(server).to_contain("SimpleHttpServer.handle_connection_static(self, stream)")
+        expect(server).to_contain("if not write_response(stream, resp):")
+        expect(response).to_contain("match stream.write_text(wire):")
+        expect(server).to_contain("handler.free()")
+
+    it "reports sync HTTP response write failure on fail-closed TCP streams":
+        val stream = TcpStream(fd: -1, open: true)
+
+        expect(write_response(stream, HttpResponse.ok("hello"))).to_equal(false)
+        expect(write_error(stream, HttpStatus.BadRequest, "bad request")).to_equal(false)
 
     it "keeps the boot-local TCP shim delegated to the packet provider":
         val boot_shim = rt_file_read_text("src/os/kernel/boot/tcp_baremetal_min.spl")
@@ -241,10 +264,16 @@ describe "SimpleOS RISC-V QEMU HTTP scripts":
         expect_qemu_deferred_script_contract("scripts/qemu/qemu_rv64_http_test.shs")
         val script = rt_file_read_text("scripts/qemu/qemu_rv64_http_test.shs")
 
-        expect(script).to_contain("Build it first with an LLVM-enabled compiler")
+        expect(script).to_contain("build/os/simpleos_riscv64.elf")
+        expect(script).to_contain("--allow-prebuilt-artifact")
+        expect(script).to_contain("current-source build stamp not found")
+        expect(script).to_contain("Refusing to treat ${ELF} as current-source RV64 QEMU evidence.")
+        expect(script).to_contain("Build it first through the SimpleOS runner with an LLVM-enabled compiler")
+        expect(script).to_contain("bin/simple os build --arch=riscv64")
         expect(script).to_contain("--source build/os/generated")
         expect(script).to_contain("--backend llvm")
-        expect(script).to_contain("--target riscv64gc-unknown-none")
+        expect(script).to_contain("target=riscv64-unknown-none")
+        expect(script).to_contain("entry=src/os/kernel/arch/riscv64/boot.spl")
         expect(script).to_contain("--expect-http-only")
         expect(script).to_contain("EXPECT_HTTP_ONLY=true")
         expect(script).to_contain("PMM OK")
@@ -277,6 +306,7 @@ describe "SimpleOS RISC-V QEMU HTTP scripts":
 
         expect(script).to_contain("--expect-http-only")
         expect(script).to_contain("--with-storage")
+        expect(script).to_contain("WARNING: --allow-prebuilt-artifact gives smoke-only evidence")
         expect(script).to_contain("Storage service ready")
         expect(script).to_contain("NVFS root superblock ready")
 

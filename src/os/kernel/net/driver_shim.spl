@@ -8,15 +8,15 @@
 #
 # Architecture:
 #   - Each rt_driver_create() allocates a BaremetalDriver with its own queues.
-#   - submit_* functions create PendingOp entries (or immediately complete for
-#     send operations since B2 TCP shim discards data).
+#   - submit_* functions create PendingOp entries or complete synchronously
+#     after the underlying TCP shim accepts the operation.
 #   - flush() is a no-op (ops are "submitted" immediately to pending list).
 #   - poll() drives tick counter, checks timeout expirations, and moves
 #     completed ops into a batch array addressable by index.
 #   - poll_id/poll_result/poll_flags/poll_data read from the last batch.
 #
-# Follow-up: Wire submit_accept/recv to real NetstackService when TCP
-#            shim gains live packet processing.
+# Follow-up: Wire file operations to DBFS/NVFS when the storage service has
+#            durable async completion APIs.
 
 use os.kernel.net.driver_shim_state.{
     PendingOp, CompletedOp, BaremetalDriver,
@@ -27,7 +27,7 @@ use os.kernel.net.driver_shim_state.{
     driver_add_pending, driver_add_completed, driver_destroy,
     g_drivers
 }
-use os.kernel.net.tcp_shim.{rt_io_tcp_accept, rt_io_tcp_read}
+use os.kernel.net.tcp_shim.{rt_io_tcp_accept, rt_io_tcp_read, rt_io_tcp_write_text}
 
 extern fn rt_bytes_to_text(data: [u8]) -> text
 extern fn rt_net_tx_test() -> i64
@@ -111,16 +111,19 @@ fn rt_driver_submit_recv(handle: i64, fd: i64, buf_size: i64) -> i64:
 fn rt_driver_submit_send(handle: i64, fd: i64, data: text, len: i64) -> i64:
     """Submit async send. Returns op_id.
 
-    Fails closed until the boot packet provider proves both TX and RX. This
+    Completes synchronously only after the TCP shim accepts the bytes. This
     prevents discarded-data paths from being accepted as real network transfer.
     """
     if not driver_shim_packet_io_ready():
+        return -1
+    val written = rt_io_tcp_write_text(fd, data)
+    if written < 0:
         return -1
     val op_id = driver_alloc_op_id(handle)
     if op_id < 0:
         return -1
     val comp = CompletedOp(
-        op_id: op_id, result_val: len, flags: 0,
+        op_id: op_id, result_val: written, flags: 0,
         data_text: "", data_len: 0
     )
     driver_add_completed(handle, comp)

@@ -1,13 +1,36 @@
 use std.spec
 use app.simple_portal.content_db.{
     portal_content_db_load, portal_content_db_from_text,
-    simple_portal_default_app_root
+    portal_content_db_load_resolved, simple_portal_default_app_root
 }
+
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+fn _write_content_root(root: text):
+    val _ = rt_dir_create("{root}/content/pages", true)
+    val _ = rt_dir_create("{root}/content/examples", true)
+    val _ = rt_file_write_text("{root}/content/pages.db", "dbfs-home|DBFS Home|Filesystem backed page|pages/dbfs-home.html\n")
+    val _ = rt_file_write_text("{root}/content/examples.db", "dbfs-example|DBFS Example|simple|client|Filesystem backed example|examples/dbfs_example.simple\n")
+    val _ = rt_file_write_text("{root}/content/releases.db", "9.9.9|stable|DBFS Stable|/downloads/simple-9.9.9\n")
+    val _ = rt_file_write_text("{root}/content/links.db", "dbfs-docs|DBFS Docs|docs|/docs/dbfs\n")
+    val _ = rt_file_write_text("{root}/content/pages/dbfs-home.html", "<h1>DBFS backed content</h1>\n")
+    val _ = rt_file_write_text("{root}/content/examples/dbfs_example.simple", "print \"dbfs backed\"\n")
 
 describe "simple_portal content db":
     it "loads the packaged portal content root":
         val result = portal_content_db_load(simple_portal_default_app_root())
         expect(result.is_ok()).to_equal(true)
+
+    it "prefers complete filesystem-backed content under the data root":
+        val data_root = "/tmp/simple_portal_dbfs_nvfs_content_db"
+        _write_content_root(data_root)
+        val result = portal_content_db_load_resolved(simple_portal_default_app_root(), data_root)
+        expect(result.is_ok()).to_equal(true)
+        val source = result.unwrap()
+        expect(source.root).to_equal(data_root)
+        expect(source.db.pages.len()).to_equal(1)
+        expect(source.db.pages[0].slug).to_equal("dbfs-home")
 
     it "rejects malformed page body paths":
         val result = portal_content_db_from_text(

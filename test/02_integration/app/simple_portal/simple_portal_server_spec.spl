@@ -3,6 +3,9 @@ use app.simple_portal.server.{SimplePortalServer}
 use app.simple_portal.content_db.{simple_portal_default_app_root, simple_portal_default_data_root}
 use os.apps.simple_portal.simple_portal.{simple_portal_app_id, simple_portal_exec_path}
 
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
 fn _server() -> SimplePortalServer:
     val result = SimplePortalServer.new(
         4040,
@@ -11,6 +14,16 @@ fn _server() -> SimplePortalServer:
         "dev-token"
     )
     result.unwrap()
+
+fn _write_content_root(root: text):
+    val _ = rt_dir_create("{root}/content/pages", true)
+    val _ = rt_dir_create("{root}/content/examples", true)
+    val _ = rt_file_write_text("{root}/content/pages.db", "nvfs-home|NVFS Home|Filesystem backed page|pages/nvfs-home.html\n")
+    val _ = rt_file_write_text("{root}/content/examples.db", "nvfs-example|NVFS Example|simple|client|Filesystem backed example|examples/nvfs_example.simple\n")
+    val _ = rt_file_write_text("{root}/content/releases.db", "9.9.9|stable|NVFS Stable|/downloads/simple-9.9.9\n")
+    val _ = rt_file_write_text("{root}/content/links.db", "nvfs-docs|NVFS Docs|docs|/docs/nvfs\n")
+    val _ = rt_file_write_text("{root}/content/pages/nvfs-home.html", "<h1>NVFS backed content</h1>\n")
+    val _ = rt_file_write_text("{root}/content/examples/nvfs_example.simple", "print \"nvfs backed\"\n")
 
 describe "simple_portal server":
     it "serves the landing page from the app filesystem root":
@@ -23,6 +36,22 @@ describe "simple_portal server":
         val resp = _server().route_request("GET", "//api//portal//releases//", "", "")
         expect(resp).to_start_with("HTTP/1.1 200 OK")
         expect(resp).to_contain("\"releases\"")
+
+    it "serves content APIs from a filesystem-backed data root":
+        val data_root = "/tmp/simple_portal_dbfs_nvfs_server"
+        _write_content_root(data_root)
+        val server_result = SimplePortalServer.new(
+            4041,
+            simple_portal_default_app_root(),
+            data_root,
+            "dev-token"
+        )
+        expect(server_result.is_ok()).to_equal(true)
+        val server = server_result.unwrap()
+        expect(server.content_root).to_equal(data_root)
+        val resp = server.route_request("GET", "/api/portal/pages/nvfs-home", "", "")
+        expect(resp).to_start_with("HTTP/1.1 200 OK")
+        expect(resp).to_contain("NVFS backed content")
 
     it "rejects static path traversal":
         val resp = _server().route_request("GET", "/static/../content/pages.db", "", "")

@@ -18,6 +18,9 @@
   dynSMF policy; app root exposes quiet-by-default `--dynsmf-status` evidence.
 - Each manifest entry has a deterministic compile-to-SMF build plan under
   `build/dynsmf/`.
+- Interpreter startup records general `compile_background` queue evidence for
+  missing dynSMF artifacts before checked autoload fails closed; this is not a
+  GUI-only path.
 - Session evidence persists load, skip, symbol, stale, unload, and reload
   actions for interpreter-mode verification.
 - Real package/build-output wiring can replace the facade-backed paths without
@@ -30,6 +33,7 @@ architecture {
   renderer_capability_registry -> html_css
   renderer_capability_registry -> implementation_free
   app_startup -> dynsmf_session
+  app_startup -> background_compile_request
   dynsmf_session -> stdlib_like_dynsmf
 }
 ```

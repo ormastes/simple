@@ -178,12 +178,11 @@ write_simple_parallel() {
     # Workers send results through a channel; main recvs and sums.
     # Import the OS-thread owner directly so this benchmark does not pull the
     # unrelated task_spawn facade symbols while compiling the direct thread row.
-    # Unrolled: native codegen List iteration is broken (codegen bug).
-    _last_worker=$((WORKERS - 1))
     {
         echo 'use std.concurrent.channel.{channel_new, channel_from_id}'
-        echo 'use std.nogc_sync_mut.concurrent.thread.{thread_spawn}'
+        echo 'use std.nogc_sync_mut.concurrent.thread.{thread_spawn2}'
         echo ''
+        echo "val WORKERS: i64 = ${WORKERS}"
         echo 'val LCG_A: i64 = 1103515245'
         echo 'val LCG_C: i64 = 12345'
         echo 'val LCG_M: i64 = 2147483648'
@@ -200,17 +199,12 @@ write_simple_parallel() {
         echo 'fn main():'
         echo '    val ch = channel_new()'
         echo '    val cid = ch.id()'
-        for i in $(seq 0 "$_last_worker"); do
-            echo "    var h${i} = thread_spawn(\\: worker(${i}, cid))"
-        done
+        echo '    for i in 0..WORKERS:'
+        echo '        thread_spawn2(i, cid, worker)'
         echo '    var total: i64 = 0'
-        for i in $(seq 0 "$_last_worker"); do
-            echo "    val v${i}: i64 = ch.recv()"
-            echo "    total = total + v${i}"
-        done
-        for i in $(seq 0 "$_last_worker"); do
-            echo "    h${i}.join()"
-        done
+        echo '    for i in 0..WORKERS:'
+        echo '        val v: i64 = ch.recv()'
+        echo '        total = total + v'
         echo '    println("total = {total}")'
     } >"$BUILD_DIR/parallel.spl"
 }
@@ -1037,7 +1031,7 @@ par_row() {
 par_row "Simple (interpreter)" "n/a" "extern thread FFI not supported"
 if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/parallel_simple.smf" ]; then
     ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/parallel_simple.smf" "$RUNS")
-    par_row "Simple (SMF loader)" "$ms" "std thread_spawn (bytecode)"
+    par_row "Simple (SMF loader)" "$ms" "std thread_spawn2 (bytecode)"
 fi
 if [ -x "$BUILD_DIR/parallel_simple_native" ]; then
     ms=$(avg_ms "$BUILD_DIR/parallel_simple_native" "$RUNS")
@@ -1113,12 +1107,12 @@ if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/fanout_simple.smf" ]; then
     ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/fanout_simple.smf" "$RUNS")
     if [ "$ms" = "fail" ]; then
         reason=$(failure_reason "$SIMPLE_BINARY $BUILD_DIR/fanout_simple.smf")
-        fanout_row "Simple (SMF loader)" "$ms" "std thread_spawn fanout ($reason)"
+        fanout_row "Simple (SMF loader)" "$ms" "std thread_spawn2 fanout ($reason)"
     else
-        fanout_row "Simple (SMF loader)" "$ms" "std thread_spawn fanout"
+        fanout_row "Simple (SMF loader)" "$ms" "std thread_spawn2 fanout"
     fi
 elif echo "$COMPILE_FAIL_SMF" | grep -q 'smf:fanout(timeout)'; then
-    fanout_row "Simple (SMF loader)" "n/a" "std thread_spawn fanout compile timeout"
+    fanout_row "Simple (SMF loader)" "n/a" "std thread_spawn2 fanout compile timeout"
 fi
 if [ -x "$BUILD_DIR/fanout_simple_native" ]; then
     ms=$(avg_ms "$BUILD_DIR/fanout_simple_native" "$RUNS")
@@ -1346,9 +1340,9 @@ cat >>"$REPORT_PATH" <<'EOF'
 > The large fanout section uses many tiny workers with `FANOUT_ITERS` iterations
 > to expose scheduling overhead; this is the case where Go goroutines should
 > usually beat one-pthread-per-task C. Simple reports both OS-thread fanout
-> through `thread_spawn` and cooperative green-thread queue fanout separately.
+> through `thread_spawn2` and cooperative green-thread queue fanout separately.
 >
-> **Simple concurrency rows:** `Simple (native)` uses `thread_spawn`, which is
+> **Simple concurrency rows:** `Simple (native)` uses `thread_spawn2`, which is
 > the OS-thread API. `Simple green` uses `green_spawn_value`, which exercises the
 > implemented cooperative green-thread queue on the current OS thread; it does
 > not run in parallel and is not a Go M:N goroutine equivalent. The green row uses the

@@ -8,7 +8,7 @@ use std.http_server.types.{HttpResponseData}
 use std.json.builder.{escape_json}
 use app.simple_portal.content_db.{
     PortalContentDb, PortalPageRecord, PortalExampleRecord,
-    portal_content_db_load, portal_page_by_slug,
+    portal_content_db_load_resolved, portal_page_by_slug,
     portal_example_by_id, portal_pages_json, portal_examples_json,
     portal_releases_json, portal_links_json, portal_read_page_body,
     portal_read_example_source
@@ -25,22 +25,24 @@ class SimplePortalServer:
     port: i32
     app_root: text
     data_root: text
+    content_root: text
     run_token: text
     db: PortalContentDb
     max_body_bytes: i64
 
     static fn new(port: i32, app_root: text, data_root: text, run_token: text) -> Result<SimplePortalServer, text>:
-        val db_result = portal_content_db_load(app_root)
-        match db_result:
+        val source_result = portal_content_db_load_resolved(app_root, data_root)
+        match source_result:
             Err(e):
                 Err(e)
-            Ok(db):
+            Ok(source):
                 Ok(SimplePortalServer(
                     port: port,
                     app_root: app_root,
                     data_root: data_root,
+                    content_root: source.root,
                     run_token: run_token,
-                    db: db,
+                    db: source.db,
                     max_body_bytes: 16384
                 ))
 
@@ -94,6 +96,8 @@ class SimplePortalServer:
     fn route_request(method: text, path: text, body: text, headers: text) -> text:
         val normalized = _normalize_path(path)
         if normalized.1 != "":
+            if path.starts_with("/static/"):
+                return self._error("Static path traversal rejected", 404)
             return self._error(normalized.1, 400)
         val clean_path = normalized.0
 
@@ -101,7 +105,7 @@ class SimplePortalServer:
             return self._method_not_allowed(clean_path)
 
         if body.length() > self.max_body_bytes:
-            return self._finalize(error_response(413, "Request entity too large"), false, true)
+            return self._finalize(_build_error(413, "Request entity too large"), false, true)
 
         if clean_path.starts_with("/static/"):
             if method != "GET" and method != "HEAD":
@@ -116,7 +120,7 @@ class SimplePortalServer:
         if clean_path == "/api/portal/pages":
             if method != "GET" and method != "HEAD":
                 return self._method_not_allowed(clean_path)
-            val payload = "{\"pages\":" + portal_pages_json(self.db, self.app_root) + "}"
+            val payload = "{\"pages\":" + portal_pages_json(self.db, self.content_root) + "}"
             return self._finalize(build_json(payload), method == "HEAD", false)
 
         if clean_path.starts_with("/api/portal/pages/"):
@@ -128,7 +132,7 @@ class SimplePortalServer:
         if clean_path == "/api/portal/examples":
             if method != "GET" and method != "HEAD":
                 return self._method_not_allowed(clean_path)
-            val payload = "{\"examples\":" + portal_examples_json(self.db, self.app_root) + "}"
+            val payload = "{\"examples\":" + portal_examples_json(self.db, self.content_root) + "}"
             return self._finalize(build_json(payload), method == "HEAD", false)
 
         if clean_path.starts_with("/api/portal/examples/"):
@@ -180,7 +184,7 @@ class SimplePortalServer:
 
     fn _serve_page(slug: text, head_only: bool) -> text:
         if val page = portal_page_by_slug(self.db, slug):
-            val body = portal_read_page_body(self.app_root, page)
+            val body = portal_read_page_body(self.content_root, page)
             val payload = "{\"slug\":\"" + escape_json(page.slug) + "\","
             val payload2 = payload + "\"title\":\"" + escape_json(page.title) + "\","
             val payload3 = payload2 + "\"summary\":\"" + escape_json(page.summary) + "\","
@@ -190,7 +194,7 @@ class SimplePortalServer:
 
     fn _serve_example(example_id: text, head_only: bool) -> text:
         if val example = portal_example_by_id(self.db, example_id):
-            val source = portal_read_example_source(self.app_root, example)
+            val source = portal_read_example_source(self.content_root, example)
             val payload = "{\"id\":\"" + escape_json(example.example_id) + "\","
             val payload2 = payload + "\"title\":\"" + escape_json(example.title) + "\","
             val payload3 = payload2 + "\"runtime\":\"" + escape_json(example.runtime) + "\","

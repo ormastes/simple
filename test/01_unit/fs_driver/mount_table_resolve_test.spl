@@ -54,40 +54,32 @@ describe "MountTable.resolve() — FR-STORAGE-0004 fix":
     it "resolve('/') with root mounted returns relpath ''":
         # mount point == path → strip entire prefix → empty relpath
         var mt = MountTable.new()
-        mt.mount(Path(raw: "/"), make_driver(), make_opts())
+        mt.mount("/", make_driver(), make_opts())
         val r = mt.resolve(Path(raw: "/"))
         expect(r.is_ok()).to_equal(true)
         val pair = r.unwrap()
-        val rel = pair.1
+        val rel = pair.relpath
         # relpath is "" because the mount point consumes the entire path
         expect(rel.raw).to_equal("")
 
     it "resolve('/foo') with '/' mounted returns relpath 'foo'":
         # '/' mount point length is 1; path is '/foo' (4 chars) → drop 1 → 'foo'
         var mt = MountTable.new()
-        mt.mount(Path(raw: "/"), make_driver(), make_opts())
+        mt.mount("/", make_driver(), make_opts())
         val r = mt.resolve(Path(raw: "/foo"))
         expect(r.is_ok()).to_equal(true)
         val pair = r.unwrap()
-        val rel = pair.1
+        val rel = pair.relpath
         expect(rel.raw).to_equal("foo")
 
     it "resolve('/mnt/data/file.txt') with '/mnt/data' mounted returns relpath 'file.txt'":
-        # mount point '/mnt/data' (9 chars); path '/mnt/data/file.txt' → drop 9 → '/file.txt'
-        # then drop leading '/' separator → 'file.txt'
-        # NOTE: the mount point is '/mnt/data' (no trailing slash). The path
-        # '/mnt/data/file.txt' starts_with('/mnt/data') ✓. After stripping 9
-        # chars we get '/file.txt'. The leading slash is part of the separator
-        # convention: callers that need a clean relpath should strip it.
-        # Design decision: resolve() strips the prefix byte-for-byte; the
-        # relpath retains the leading '/' separator ('/file.txt').
         var mt = MountTable.new()
-        mt.mount(Path(raw: "/mnt/data"), make_driver(), make_opts())
+        mt.mount("/mnt/data", make_driver(), make_opts())
         val r = mt.resolve(Path(raw: "/mnt/data/file.txt"))
         expect(r.is_ok()).to_equal(true)
         val pair = r.unwrap()
-        val rel = pair.1
-        expect(rel.raw).to_equal("/file.txt")
+        val rel = pair.relpath
+        expect(rel.raw).to_equal("file.txt")
 
     it "resolve('/nonexistent') with no matching mount returns Err(NotFound)":
         # empty table → no prefix match → NotFound
@@ -100,17 +92,29 @@ describe "MountTable.resolve() — FR-STORAGE-0004 fix":
 
     it "resolve('/mnt/data/file.txt') with both '/' and '/mnt/data' mounted picks longest prefix":
         # longest-prefix match: '/mnt/data' (9) beats '/' (1)
-        # relpath after '/mnt/data' → '/file.txt'
+        # relpath after '/mnt/data' → 'file.txt'
         var mt = MountTable.new()
         val d1 = DriverInstance.RamFs(driver: RamFsStub(name: "rootfs"))
         val d2 = DriverInstance.RamFs(driver: RamFsStub(name: "datavol"))
-        mt.mount(Path(raw: "/"), d1, make_opts())
-        mt.mount(Path(raw: "/mnt/data"), d2, make_opts())
+        mt.mount("/", d1, make_opts())
+        mt.mount("/mnt/data", d2, make_opts())
         val r = mt.resolve(Path(raw: "/mnt/data/file.txt"))
         expect(r.is_ok()).to_equal(true)
         val pair = r.unwrap()
-        val mid = pair.0
-        val rel = pair.1
+        val mid = pair.mount_id
+        val rel = pair.relpath
         # id=2 is the /mnt/data mount (mounted second)
         expect(mid.id).to_equal(2)
-        expect(rel.raw).to_equal("/file.txt")
+        expect(rel.raw).to_equal("file.txt")
+
+    it "resolve('/mnt/database/file.txt') does not match sibling /mnt/data mount":
+        var mt = MountTable.new()
+        val d1 = DriverInstance.RamFs(driver: RamFsStub(name: "rootfs"))
+        val d2 = DriverInstance.RamFs(driver: RamFsStub(name: "datavol"))
+        mt.mount("/", d1, make_opts())
+        mt.mount("/mnt/data", d2, make_opts())
+        val r = mt.resolve(Path(raw: "/mnt/database/file.txt"))
+        expect(r.is_ok()).to_equal(true)
+        val pair = r.unwrap()
+        expect(pair.mount_id.id).to_equal(1)
+        expect(pair.relpath.raw).to_equal("mnt/database/file.txt")

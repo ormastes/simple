@@ -62,6 +62,8 @@ var _dbfs_device_blob_offsets: [i64] = []
 var _dbfs_device_blob_lengths: [i64] = []
 var _dbfs_device_next_inst_ids: [i64] = []
 var _dbfs_device_next_offsets: [i64] = []
+var _dbfs_device_store_inst_ids: [i64] = []
+var _dbfs_device_store_devices: [BlockDevice] = []
 
 fn _dbfs_text_to_bytes(value: text) -> [u8]:
     rt_text_to_bytes(value)
@@ -207,6 +209,177 @@ fn _dbfs_record_device_blob(inst_id: i64, inode_id: u64, offset: i64, length: i6
     _dbfs_device_blob_offsets.push(offset)
     _dbfs_device_blob_lengths.push(length)
 
+fn _dbfs_device_store_idx(inst_id: i64) -> i32:
+    var i: i32 = 0
+    while i < _dbfs_device_store_inst_ids.len() as i32:
+        if _dbfs_device_store_inst_ids[i] == inst_id:
+            return i
+        i = i + 1
+    -1
+
+fn _dbfs_register_device_store(inst_id: i64, dev: BlockDevice):
+    val idx = _dbfs_device_store_idx(inst_id)
+    if idx >= 0:
+        _dbfs_device_store_devices[idx] = dev
+        return
+    _dbfs_device_store_inst_ids.push(inst_id)
+    _dbfs_device_store_devices.push(dev)
+
+fn _dbfs_set_device_next_offset(inst_id: i64, offset: i64):
+    val idx = _dbfs_device_next_idx(inst_id)
+    if idx >= 0:
+        _dbfs_device_next_offsets[idx] = offset
+
+fn _dbfs_namespace_lba(base_block: i64, block_count: i64) -> u64:
+    (base_block + block_count - 1) as u64
+
+fn _dbfs_sector_size(inst_id: i64) -> i64:
+    val idx = _dbfs_device_store_idx(inst_id)
+    if idx < 0:
+        return 512
+    _dbfs_device_store_devices[idx].sector_size() as i64
+
+fn _dbfs_zero_sector(size: i64) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < size:
+        out.push(0)
+        i = i + 1
+    out
+
+fn _dbfs_pad_sector(bytes: [u8], size: i64) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < size and i < bytes.len():
+        out.push(bytes[i])
+        i = i + 1
+    while i < size:
+        out.push(0)
+        i = i + 1
+    out
+
+fn _dbfs_write_device_bytes(inst_id: i64, base_block: i64, block_count: i64, offset: i64, data: [u8]) -> Result<i64, FsError>:
+    val dev_idx = _dbfs_device_store_idx(inst_id)
+    if dev_idx < 0:
+        return Err(FsError.Unsupported)
+    if offset < 0:
+        return Err(FsError.InvalidArg)
+    val sector_size = _dbfs_sector_size(inst_id)
+    val max_data_bytes = (block_count - 2) * sector_size
+    if offset + data.len() as i64 > max_data_bytes:
+        return Err(FsError.TooLarge)
+
+    var written: i64 = 0
+    while written < data.len() as i64:
+        val absolute = offset + written
+        val sector_idx = absolute / sector_size
+        val intra = absolute - sector_idx * sector_size
+        val lba = (base_block + 1 + sector_idx) as u64
+        val read = _dbfs_device_store_devices[dev_idx].read_sector(lba)
+        var sector = if read.is_ok(): read.unwrap() else: _dbfs_zero_sector(sector_size)
+        if sector.len() == 0:
+            sector = _dbfs_zero_sector(sector_size)
+        var pos = intra
+        while pos < sector_size and written < data.len() as i64:
+            sector[pos] = data[written]
+            pos = pos + 1
+            written = written + 1
+        val ok = _dbfs_device_store_devices[dev_idx].write_sector(lba, _dbfs_pad_sector(sector, sector_size))
+        if ok.is_err():
+            return Err(FsError.IoError(code: 0))
+    Ok(written)
+
+fn _dbfs_read_device_bytes(inst_id: i64, base_block: i64, offset: i64, length: i64) -> Result<[u8], FsError>:
+    val dev_idx = _dbfs_device_store_idx(inst_id)
+    if dev_idx < 0:
+        return Err(FsError.Unsupported)
+    if offset < 0 or length < 0:
+        return Err(FsError.InvalidArg)
+    val sector_size = _dbfs_sector_size(inst_id)
+    var out: [u8] = []
+    var read_count: i64 = 0
+    while read_count < length:
+        val absolute = offset + read_count
+        val sector_idx = absolute / sector_size
+        val intra = absolute - sector_idx * sector_size
+        val lba = (base_block + 1 + sector_idx) as u64
+        val read = _dbfs_device_store_devices[dev_idx].read_sector(lba)
+        if read.is_err():
+            return Err(FsError.IoError(code: 0))
+        val sector = read.unwrap()
+        var pos = intra
+        while pos < sector_size and read_count < length and pos < sector.len():
+            out.push(sector[pos])
+            pos = pos + 1
+            read_count = read_count + 1
+    Ok(out)
+
+fn _dbfs_persist_namespace(inst_id: i64, base_block: i64, block_count: i64) -> Result<(), FsError>:
+    val dev_idx = _dbfs_device_store_idx(inst_id)
+    if dev_idx < 0:
+        return Ok(())
+    val sector_size = _dbfs_sector_size(inst_id)
+    var content = "DBFSNS1\n"
+    for inode in _dbfs_inodes:
+        if inode.inst_id == inst_id and not inode.unlinked and inode.id != 1:
+            val blob_idx = _dbfs_device_blob_idx(inst_id, inode.id)
+            val blob_offset = if blob_idx >= 0: _dbfs_device_blob_offsets[blob_idx] else: 0
+            val blob_len = if blob_idx >= 0: _dbfs_device_blob_lengths[blob_idx] else: 0
+            val kind = match inode.kind:
+                case Dir: "D"
+                case File: "F"
+            content = content + kind + "|" + inode.id.to_text() + "|" + inode.size.to_text() + "|" + blob_offset.to_text() + "|" + blob_len.to_text() + "|" + inode.name + "\n"
+    val bytes = _dbfs_text_to_bytes(content)
+    if bytes.len() as i64 > sector_size:
+        return Err(FsError.TooLarge)
+    val sector = _dbfs_pad_sector(bytes, sector_size)
+    val write = _dbfs_device_store_devices[dev_idx].write_sector(_dbfs_namespace_lba(base_block, block_count), sector)
+    if write.is_err():
+        return Err(FsError.IoError(code: 0))
+    Ok(())
+
+fn _dbfs_replay_namespace(inst_id: i64, dev: BlockDevice, base_block: i64, block_count: i64) -> u64:
+    val read = dev.read_sector(_dbfs_namespace_lba(base_block, block_count))
+    if read.is_err():
+        return 2u64
+    val text_data = _dbfs_bytes_to_text(read.unwrap(), dev.sector_size() as i64)
+    if not text_data.starts_with("DBFSNS1\n"):
+        return 2u64
+    var max_id: u64 = 1u64
+    var max_offset: i64 = 0
+    val lines = text_data.split("\n")
+    for line in lines:
+        if line.starts_with("F|") or line.starts_with("D|"):
+            val parts = line.split("|")
+            if parts.len() >= 6:
+                val kind_text = parts[0]
+                val inode_id = (parts[1].to_i64() ?? 0) as u64
+                val size_val = parts[2].to_i64() ?? 0
+                val blob_offset = parts[3].to_i64() ?? 0
+                val blob_len = parts[4].to_i64() ?? 0
+                val path = parts[5]
+                if inode_id > 1u64 and path.len() > 0:
+                    val kind = if kind_text == "D": DbFsKind.Dir else: DbFsKind.File
+                    _dbfs_inodes.push(DbFsInode(
+                        inst_id:  inst_id,
+                        id:       inode_id,
+                        kind:     kind,
+                        name:     path,
+                        content:  "",
+                        content_bytes: [],
+                        parent:   1,
+                        size:     size_val,
+                        unlinked: false,
+                    ))
+                    if kind_text == "F":
+                        _dbfs_record_device_blob(inst_id, inode_id, blob_offset, blob_len)
+                        if blob_offset + blob_len > max_offset:
+                            max_offset = blob_offset + blob_len
+                    if inode_id >= max_id:
+                        max_id = inode_id + 1u64
+    _dbfs_set_device_next_offset(inst_id, max_offset)
+    max_id
+
 impl DbFsDriver:
     static fn new_hosted() -> DbFsDriver:
         """Create a new in-memory DBFS driver with a root inode."""
@@ -242,14 +415,18 @@ impl DbFsDriver:
     static fn open_on_device(dev: BlockDevice, base_block: i64, block_count: i64) -> Result<DbFsDriver, FsError>:
         """Create a DBFS driver backed by a real BlockDevice region.
 
-        Registers a RawNvmeArena over [base_block, base_block+block_count) on dev.
+        Registers a RawNvmeArena over the data portion of
+        [base_block, base_block+block_count) on dev. The final block is
+        reserved for a compact namespace checkpoint replayed on remount.
         Returns Ok(DbFsDriver) with arena_base set; arena writes go through
-        BlockDevice.write_sector. In-memory inode store is still used for the
-        directory/file metadata layer (see write_passthrough for raw arena I/O).
+        BlockDevice.write_sector.
         """
-        val arena = RawNvmeArena.new(dev, base_block, block_count)
+        if block_count < 3:
+            return Err(FsError.InvalidArg)
+        val arena = RawNvmeArena.new(dev, base_block, block_count - 1)
         val iid = _alloc_inst_id()
         _dbfs_register_device_instance(iid)
+        _dbfs_register_device_store(iid, dev)
         # Install root inode in the in-memory layer (same as new_hosted).
         _dbfs_inodes.push(DbFsInode(
             inst_id:  iid,
@@ -262,10 +439,11 @@ impl DbFsDriver:
             size:     0,
             unlinked: false,
         ))
+        val next_inode = _dbfs_replay_namespace(iid, dev, base_block, block_count)
         Ok(DbFsDriver(
             name:              "DbFsDriver",
             inst_id:           iid,
-            next_id:           2,
+            next_id:           next_inode,
             next_fd:           1,
             wal:               DbfsWal.new(),
             flush_count:       0,
@@ -371,7 +549,7 @@ impl DbFsDriver:
         """
         if self.arena_base < 0:
             return Err(FsError.Unsupported)
-        val arena = RawNvmeArena(base_block: self.arena_base, block_count: self.arena_block_count)
+        val arena = RawNvmeArena(base_block: self.arena_base, block_count: self.arena_block_count - 1)
         val handle = arena.arena_handle()
         val r = arena.arena_append(handle, data, DurabilityClass.BestEffort)
         if r.generation < 0:
@@ -382,19 +560,21 @@ impl DbFsDriver:
         """Append the current file image to the device arena and map it to inode."""
         if self.arena_base < 0:
             return Ok(false)
-        if self.direct_io.is_none():
-            return Ok(false)
         val next_idx = _dbfs_device_next_idx(self.inst_id)
         if next_idx < 0:
             return Err(FsError.IoError(code: 0))
         val offset = _dbfs_device_next_offsets[next_idx]
-        val arena = RawNvmeArena(base_block: self.arena_base, block_count: self.arena_block_count)
-        val handle = arena.arena_handle()
-        val r = arena.arena_append(handle, data, DurabilityClass.BestEffort)
-        if r.generation < 0 or r.bytes_written != data.len() as i64:
+        val r = _dbfs_write_device_bytes(self.inst_id, self.arena_base, self.arena_block_count, offset, data)
+        if r.is_err():
             return Err(FsError.IoError(code: 0))
-        _dbfs_record_device_blob(self.inst_id, inode_id, offset, r.bytes_written)
-        _dbfs_device_next_offsets[next_idx] = offset + r.bytes_written
+        val written = r.unwrap()
+        if written != data.len() as i64:
+            return Err(FsError.IoError(code: 0))
+        _dbfs_record_device_blob(self.inst_id, inode_id, offset, written)
+        _dbfs_device_next_offsets[next_idx] = offset + written
+        val persisted = _dbfs_persist_namespace(self.inst_id, self.arena_base, self.arena_block_count)
+        if persisted.is_err():
+            return Err(FsError.IoError(code: 0))
         Ok(true)
 
     fn _read_inode_bytes_from_device(inode_id: u64, length: i64) -> Result<[u8], FsError>:
@@ -405,12 +585,13 @@ impl DbFsDriver:
             return Err(FsError.Unsupported)
         val blob_len = _dbfs_device_blob_lengths[blob_idx]
         val want = if length < blob_len: length else: blob_len
-        val arena = RawNvmeArena(base_block: self.arena_base, block_count: self.arena_block_count)
-        val handle = arena.arena_handle()
-        val bytes = arena.arena_read_bytes(handle, _dbfs_device_blob_offsets[blob_idx], want)
-        if bytes.len() < want:
+        val bytes = _dbfs_read_device_bytes(self.inst_id, self.arena_base, _dbfs_device_blob_offsets[blob_idx], want)
+        if bytes.is_err():
+            return bytes
+        val out = bytes.unwrap()
+        if out.len() < want:
             return Err(FsError.IoError(code: 0))
-        Ok(bytes)
+        Ok(out)
 
     # --- stat ---
 
@@ -454,6 +635,9 @@ impl DbFsDriver:
                 size:     0,
                 unlinked: false,
             ))
+            val persisted = _dbfs_persist_namespace(self.inst_id, self.arena_base, self.arena_block_count)
+            if persisted.is_err():
+                return Err(FsError.IoError(code: 0))
         val hid = _alloc_fd_id(self.inst_id)
         _dbfs_fds.push(DbFsFd(
             inst_id:    self.inst_id,
@@ -503,7 +687,7 @@ impl DbFsDriver:
         val inode_idx = _fd_inode_idx(self.inst_id, handle.id as u64)
         if inode_idx < 0:
             return Ok("")
-        if self.direct_io.is_some():
+        if self.arena_base >= 0:
             val device = self._read_inode_bytes_from_device(_dbfs_inodes[inode_idx].id, length)
             if device.is_ok():
                 val bytes = device.unwrap()
@@ -527,7 +711,7 @@ impl DbFsDriver:
         val inode_idx = _fd_inode_idx(self.inst_id, handle.id as u64)
         if inode_idx < 0:
             return Ok([])
-        if self.direct_io.is_some():
+        if self.arena_base >= 0:
             val device = self._read_inode_bytes_from_device(_dbfs_inodes[inode_idx].id, length)
             if device.is_ok():
                 return device
@@ -542,7 +726,7 @@ impl DbFsDriver:
         val inode_idx = _fd_inode_idx(self.inst_id, handle.id as u64)
         if inode_idx < 0:
             return Err(FsError.NotFound)
-        if self.direct_io.is_some():
+        if self.arena_base >= 0:
             val device = self._read_inode_bytes_from_device(_dbfs_inodes[inode_idx].id, offset + length)
             if device.is_ok():
                 val bytes = device.unwrap()
@@ -601,7 +785,7 @@ impl DbFsDriver:
         _dbfs_inodes.push(new_inode)
         val committed = self._commit_inode_bytes_to_device(old.id, _dbfs_text_to_bytes(content))
         if committed.is_err():
-            return Ok(())
+            return Err(FsError.IoError(code: 0))
         Ok(())
 
     fn write_bytes_handle(handle: FileHandle, content: [u8]) -> Result<(), FsError>:
@@ -630,7 +814,7 @@ impl DbFsDriver:
         _dbfs_inodes.push(new_inode)
         val committed = self._commit_inode_bytes_to_device(old.id, _dbfs_slice_bytes(content, content.len() as i64))
         if committed.is_err():
-            return Ok(())
+            return Err(FsError.IoError(code: 0))
         Ok(())
 
     # --- pwrite ---
@@ -674,7 +858,7 @@ impl DbFsDriver:
         _dbfs_inodes.push(new_inode)
         val committed = self._commit_inode_bytes_to_device(old.id, _dbfs_text_to_bytes(new_content))
         if committed.is_err():
-            return Ok(())
+            return Err(FsError.IoError(code: 0))
         Ok(())
 
     # --- close ---
@@ -717,6 +901,9 @@ impl DbFsDriver:
         )
         _dbfs_inodes.remove(idx)
         _dbfs_inodes.push(new_inode)
+        val persisted = _dbfs_persist_namespace(self.inst_id, self.arena_base, self.arena_block_count)
+        if persisted.is_err():
+            return Err(FsError.IoError(code: 0))
         Ok(())
 
     # --- rename ---
@@ -744,6 +931,9 @@ impl DbFsDriver:
         )
         _dbfs_inodes.remove(src_idx)
         _dbfs_inodes.push(new_inode)
+        val persisted = _dbfs_persist_namespace(self.inst_id, self.arena_base, self.arena_block_count)
+        if persisted.is_err():
+            return Err(FsError.IoError(code: 0))
         Ok(())
 
     # --- ftruncate ---
@@ -776,6 +966,9 @@ impl DbFsDriver:
         )
         _dbfs_inodes.remove(inode_idx)
         _dbfs_inodes.push(new_inode)
+        val committed = self._commit_inode_bytes_to_device(old.id, _dbfs_text_to_bytes(new_content))
+        if committed.is_err():
+            return Err(FsError.IoError(code: 0))
         Ok(())
 
     # --- mkdir ---
@@ -794,6 +987,9 @@ impl DbFsDriver:
             size:     0,
             unlinked: false,
         ))
+        val persisted = _dbfs_persist_namespace(self.inst_id, self.arena_base, self.arena_block_count)
+        if persisted.is_err():
+            return Err(FsError.IoError(code: 0))
         Ok(())
 
     fn mkdir(path: text, mode: u32) -> Result<(), FsError>:

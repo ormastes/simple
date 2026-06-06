@@ -15,6 +15,8 @@
   facade.
 - Add deterministic compile-to-SMF build plans for the six `build/dynsmf/*.smf`
   outputs.
+- Queue general background compile evidence from startup when an enabled
+  dynSMF artifact is missing, then keep checked autoload fail-closed.
 - Validate checked dynSMF artifacts with `DynSmfArtifactStatus` and
   `smf_dlopen_checked`; missing, short, or invalid magic fails before a handle
   is accepted.
@@ -27,6 +29,7 @@ detail_design {
   dependency_policy -> closure_gate
   renderer_capability -> html_css_gate
   renderer_capability -> implementation_free_registry
+  startup_policy -> background_compile_queue
   startup_policy -> dynsmf_session
   dynsmf_session -> stdlib_like_dynsmf
 }

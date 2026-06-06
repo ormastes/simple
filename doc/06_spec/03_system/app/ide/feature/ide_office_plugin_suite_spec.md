@@ -1,0 +1,468 @@
+# ide_office_plugin_suite_spec
+
+> IDE office plugin suite system specification.
+
+## Overview
+
+This manual validates the production IDE Office plugin suite after restoring the original `src/app/ide` and `src/app/office` surface. It confirms that the IDE feature-check report, Markdown preview, slide preview, spreadsheet/tabular support, agent dashboard metadata, DB admin ownership, and TUI/GUI launch probes all use real in-repo modules.
+
+**Requirements:** `doc/03_plan/sys_test/ide_office_plugin_suite.md`
+**Plan:** `doc/03_plan/sys_test/ide_office_plugin_suite.md`
+**Design:** `doc/03_plan/app/ide/simple_ide_submodule_plan_2026-06-04.md`
+**Research:** N/A - this is hardening for an existing restored feature lane.
+
+## Execution
+
+```bash
+SIMPLE_LIB=src bin/simple-interp test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl
+```
+
+Expected result: `16 examples, 0 failures`.
+
+## Coverage Matrix
+
+| Area | Scenario Evidence |
+|------|-------------------|
+| Capability registry | Registers markdown, slides, sheets, agent-dashboard, and db-admin. |
+| Owner wiring | Verifies Markdown, Office, editor MCP, and DB owner modules. |
+| Manual output | Checks feature-check line count, order, and GUI/TUI parity. |
+| Slides | Checks rendering probe, slide constructors, layout labels, and element append helper. |
+| Sheets/tabular | Checks formats, sample range, formula evaluator, and shared numeric helpers. |
+| TUI/GUI | Checks preview panels, outline rendering, GUI backend, and launch summary. |
+| Plugin manifest | Checks five entries and manifest roundtrip. |
+
+<!-- sdn-diagram:id=ide_office_plugin_suite_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=ide_office_plugin_suite_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+ide_office_plugin_suite_spec -> std
+ide_office_plugin_suite_spec -> app
+ide_office_plugin_suite_spec -> common
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=ide_office_plugin_suite_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 16 | 16 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# ide_office_plugin_suite_spec
+
+IDE office plugin suite system specification.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl` |
+| Updated | 2026-06-06 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+IDE office plugin suite system specification.
+Validates that IDE-facing Markdown, presentation, spreadsheet, dashboard, and database surfaces reuse existing app modules.
+
+## Scenarios
+
+### IDE office plugin suite capabilities
+
+#### registers markdown slides sheets dashboard and database capabilities
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val ids = ide_capability_ids().join(",")
+expect(ids).to_contain("markdown")
+expect(ids).to_contain("slides")
+expect(ids).to_contain("sheets")
+expect(ids).to_contain("agent-dashboard")
+expect(ids).to_contain("db-admin")
+```
+
+</details>
+
+#### points each capability at an existing implementation owner
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val caps = ide_capabilities()
+var owners = ""
+for cap in caps:
+    owners = owners + cap.owner_module + "\n"
+expect(owners).to_contain("std.editor.render.md_renderer")
+expect(owners).to_contain("app.office.slides")
+expect(owners).to_contain("app.office.sheets")
+expect(owners).to_contain("app.editor.mcp_tools")
+expect(owners).to_contain("std.editor.core.session_db")
+```
+
+</details>
+
+#### reports GUI and TUI feature checks through the IDE product surface
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val tui_report = ide_feature_check_report("tui").join("\n")
+val gui_report = ide_feature_check_report("gui").join("\n")
+expect(tui_report).to_contain("mode: tui")
+expect(gui_report).to_contain("mode: gui")
+expect(tui_report).to_contain("Presentation Slides")
+expect(gui_report).to_contain("Database Admin")
+expect(tui_report).to_contain("tui-panels:")
+expect(tui_report).to_contain("slides: app.office.slides")
+```
+
+</details>
+
+#### keeps the feature-check manual surface complete and ordered
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val lines = ide_feature_check_report("tui")
+expect(lines.len()).to_equal(17)
+expect(lines[0]).to_equal("Simple IDE feature check")
+expect(lines[1]).to_equal("mode: tui")
+expect(lines[2]).to_equal("capabilities: 5")
+expect(lines[3]).to_start_with("markdown:")
+expect(lines[5]).to_start_with("slides:")
+expect(lines[7]).to_start_with("sheets:")
+expect(lines[10]).to_start_with("agent-dashboard:")
+expect(lines[12]).to_start_with("db-admin:")
+expect(lines[16]).to_start_with("  plugin-manifest:")
+```
+
+</details>
+
+#### keeps GUI and TUI feature-check probes in parity except launch mode
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val tui_lines = ide_feature_check_report("tui")
+val gui_lines = ide_feature_check_report("gui")
+expect(tui_lines.len()).to_equal(gui_lines.len())
+expect(tui_lines[0]).to_equal(gui_lines[0])
+expect(tui_lines[2]).to_equal(gui_lines[2])
+expect(tui_lines[3]).to_equal(gui_lines[3])
+expect(tui_lines[5]).to_equal(gui_lines[5])
+expect(tui_lines[7]).to_equal(gui_lines[7])
+expect(tui_lines[10]).to_equal(gui_lines[10])
+expect(tui_lines[12]).to_equal(gui_lines[12])
+expect(tui_lines[16]).to_equal(gui_lines[16])
+```
+
+</details>
+
+#### checks slide rendering outline and page design through existing office modules
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val probe = ide_slide_compat_probe()
+val summary = ide_slide_compat_summary()
+expect(probe.owner_module).to_equal("app.office.slides")
+expect(probe.slide_count).to_equal(2)
+expect(probe.thumbnail).to_contain("Slide 2:")
+expect(probe.canvas_widget_count).to_be_greater_than(1)
+expect(probe.outline_line_count).to_equal(2)
+expect(probe.design_count).to_equal(2)
+expect(probe.has_css_like_design)
+expect(probe.has_outline_transform)
+expect(summary).to_contain("transform=true")
+```
+
+</details>
+
+#### checks slide constructor helpers used by IDE presentation previews
+
+1. kind: SlideElementKind TextBox
+
+2. kind: SlideElementKind TextBox
+   - Expected: slide_layout_display_name(base.layout) equals `Title + Content`
+   - Expected: slide_layout_short_name(base.layout) equals `Content`
+   - Expected: base.elements.len() equals `1`
+   - Expected: next.elements.len() equals `2`
+   - Expected: next.background equals `#FFFFFF`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val el = SlideElement(
+    id: "notes",
+    kind: SlideElementKind.TextBox(content: "Speaker notes"),
+    x: 10,
+    y: 20,
+    width: 300,
+    height: 80
+)
+val base = slide_with_elements("manual", SlideLayout.TitleContent, [el])
+val next = add_slide_element(base, SlideElement(
+    id: "footer",
+    kind: SlideElementKind.TextBox(content: "Footer"),
+    x: 10,
+    y: 520,
+    width: 300,
+    height: 40
+))
+expect(slide_layout_display_name(base.layout)).to_equal("Title + Content")
+expect(slide_layout_short_name(base.layout)).to_equal("Content")
+expect(base.elements.len()).to_equal(1)
+expect(next.elements.len()).to_equal(2)
+expect(next.background).to_equal("#FFFFFF")
+```
+
+</details>
+
+#### checks spreadsheet compatibility through existing sheet and formula modules
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val compat = ide_sheet_compat_probe()
+val summary = ide_sheet_compat_summary()
+expect(compat.owner_module).to_equal("app.office.sheets")
+expect(compat.compatible_formats.join(",")).to_contain("xlsx")
+expect(compat.compatible_formats.join(",")).to_contain("tabular")
+expect(compat.sample_range).to_equal("A1:C1")
+expect(compat.formula_evaluator_ok)
+expect(summary).to_contain("formula=5")
+expect(summary).to_contain("evaluator=true")
+```
+
+</details>
+
+#### checks shared Office numeric parsing used by sheet and planner surfaces
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(office_parse_non_negative_i32("4096")).to_equal(4096)
+expect(office_parse_non_negative_i32("12px")).to_equal(0)
+expect(office_parse_unsigned_decimal_f64("12.5")).to_equal(12.5)
+expect(office_parse_signed_decimal_f64("-3.25")).to_equal(-3.25)
+expect(office_pow10_f64(2)).to_equal(100.0)
+expect(office_pow10_i64(3)).to_equal(1000)
+```
+
+</details>
+
+#### checks DB admin targets through existing editor and portal DB ownership
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val surface = ide_db_admin_surface()
+val summary = ide_db_admin_summary()
+expect(surface.owner_modules.join(",")).to_contain("std.editor.core.session_db")
+expect(surface.owner_modules.join(",")).to_contain("app.simple_portal.content_db")
+expect(surface.owner_modules.join(",")).to_contain("std.simple_db_if.storage_api")
+expect(surface.supported_targets.join(",")).to_contain("simple-db")
+expect(surface.simple_db_contracts.join(",")).to_contain("PageBuf")
+expect(surface.default_state_mode).to_equal("normal")
+expect(summary).to_contain("portal-db")
+expect(summary).to_contain("page-size=4096")
+```
+
+</details>
+
+#### checks agent dashboard integration through existing editor MCP tools
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val surface = ide_agent_dashboard_surface()
+val summary = ide_agent_dashboard_summary()
+expect(surface.owner_module).to_equal("app.editor.mcp_tools")
+expect(surface.tool_count).to_be_greater_than(10)
+expect(surface.has_lsp_tools)
+expect(surface.has_wiki_tools)
+expect(summary).to_contain("combined-live")
+```
+
+</details>
+
+#### checks markdown rendering through the shared editor renderer and preview pane
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val probe = ide_markdown_render_probe()
+val summary = ide_markdown_render_summary()
+expect(probe.owner_module).to_equal("std.editor.render.md_renderer")
+expect(probe.block_count).to_be_greater_than(2)
+expect(probe.rendered_line_count).to_be_greater_than(2)
+expect(probe.preview_line_count).to_be_greater_than(2)
+expect(probe.contains_heading)
+expect(probe.contains_table)
+expect(summary).to_contain("preview=")
+```
+
+</details>
+
+#### checks TUI GUI and SDL launch modes through the shared editor launch contract
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val sanity = ide_launch_sanity()
+val summary = ide_launch_sanity_summary()
+expect(sanity.tui_mode).to_equal("tui")
+expect(sanity.gui_mode).to_equal("gui")
+expect(sanity.sdl_mode).to_equal("gui-sdl")
+expect(sanity.file_count).to_equal(3)
+expect(sanity.unknown_option).to_equal("--bad-mode")
+expect(summary).to_contain("gui=gui")
+```
+
+</details>
+
+#### checks TUI preview and outline panels through shared editor render helpers
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val sanity = ide_tui_sanity()
+val summary = ide_tui_sanity_summary()
+expect(sanity.preview_line_count).to_be_greater_than(2)
+expect(sanity.outline_line_count).to_equal(2)
+expect(sanity.renders_markdown_preview)
+expect(sanity.renders_table_preview)
+expect(sanity.renders_slide_outline)
+expect(sanity.renders_outline_style)
+expect(summary).to_contain("slide-outline=true")
+```
+
+</details>
+
+#### checks GUI rendering through the shared editor backend
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val sanity = ide_gui_sanity()
+val summary = ide_gui_sanity_summary()
+expect(sanity.theme).to_equal("dark")
+expect(sanity.renders_markdown)
+expect(sanity.renders_presentation)
+expect(sanity.renders_sheet)
+expect(sanity.has_backend_config)
+expect(summary).to_contain("ppt=true")
+```
+
+</details>
+
+#### exports IDE app support through the existing plugin manifest registry
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val probe = ide_plugin_manifest_probe()
+val summary = ide_plugin_manifest_summary()
+expect(probe.entry_count).to_equal(5)
+expect(probe.roundtrip_count).to_equal(5)
+expect(probe.names.join(",")).to_contain("ide.slides")
+expect(probe.names.join(",")).to_contain("ide.sheets")
+expect(probe.manifest_text).to_contain("builtin:app.office.slides")
+expect(summary).to_contain("roundtrip=5")
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 16 |
+| Active scenarios | 16 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>

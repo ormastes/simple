@@ -27,7 +27,7 @@ simpleos_riscv_network_gate_spec
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 19 | 19 | 0 | 0 |
+| 20 | 20 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -328,7 +328,7 @@ expect(ready_set).to_be_greater_than(rx_probe)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -338,6 +338,9 @@ expect(shim).to_contain("extern fn rt_net_tx_test() -> i64")
 expect(shim).to_contain("extern fn rt_net_rx_ready() -> i64")
 expect(shim).to_contain("fn driver_shim_packet_io_ready() -> bool")
 expect(shim).to_contain("rt_net_tx_test() == 0 and rt_net_rx_ready() == 0")
+expect(shim).to_contain("rt_io_tcp_write_text(fd, data)")
+expect(shim).to_contain("if written < 0:\n        return -1")
+expect(shim).to_contain("result_val: written")
 expect(shim).to_contain("if not driver_shim_packet_io_ready():\n        return -1")
 expect(shim).to_contain("if not driver_shim_packet_io_ready():\n        return RT_LINK_STATE_UNKNOWN")
 expect(shim).to_contain("if not driver_shim_packet_io_ready():\n        return \"\"")
@@ -363,6 +366,25 @@ expect(shim).to_contain("if not net_tcp_available():\n        return -1")
 expect(shim.index_of("g_next_os_fd") ?? -1).to_equal(-1)
 expect(shim.index_of("data.len().to_i64()") ?? -1).to_equal(-1)
 expect(shim).to_contain("Returns -1 if the fd is invalid or the netstack is unavailable")
+```
+
+</details>
+
+#### lets the sync HTTP server serve inline when thread spawn is unavailable
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val server = rt_file_read_text("src/lib/nogc_sync_mut/http_server/server.spl")
+
+expect(server).to_contain("val handler = thread_spawn2(stream, self")
+expect(server).to_contain("if handler.handle < 0:")
+expect(server).to_contain("SimpleHttpServer.handle_connection_static(self, stream)")
+expect(server).to_contain("handler.free()")
 ```
 
 </details>
@@ -573,8 +595,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 19 |
-| Active scenarios | 19 |
+| Total scenarios | 20 |
+| Active scenarios | 20 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

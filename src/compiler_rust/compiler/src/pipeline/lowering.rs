@@ -206,6 +206,15 @@ fn convert_lower_error(e: crate::hir::LowerError) -> CompileError {
     }
 }
 
+fn handle_lenient_type_check_error(e: impl std::fmt::Debug) -> Result<(), CompileError> {
+    let message = format!("{:?}", e);
+    if message.contains("Undefined(\"undefined identifier:") {
+        return Err(CompileError::Semantic(message));
+    }
+    eprintln!("warning: type check: {} (continuing)", message);
+    Ok(())
+}
+
 impl CompilerPipeline {
     pub(super) fn emit_explicit_simd_warnings(&self, ast_module: &Module) {
         if self.simd_mode != SimdMode::Auto {
@@ -1736,9 +1745,9 @@ impl CompilerPipeline {
         self.emit_explicit_simd_warnings(ast_module);
         self.emit_simd_report(ast_module);
 
-        // Type check (lenient - log errors but don't fail for bootstrap)
+        // Type check (lenient for bootstrap, but fail closed on unresolved names)
         if let Err(e) = type_check(&ast_module.items) {
-            eprintln!("warning: type check: {:?} (continuing)", e);
+            handle_lenient_type_check_error(e)?;
         }
 
         // Lower AST to HIR (using lenient mode for bootstrap)
@@ -1777,9 +1786,9 @@ impl CompilerPipeline {
         self.emit_explicit_simd_warnings(ast_module);
         self.emit_simd_report(ast_module);
 
-        // Type check (lenient - log errors but don't fail for bootstrap)
+        // Type check (lenient for bootstrap, but fail closed on unresolved names)
         if let Err(e) = type_check(&ast_module.items) {
-            eprintln!("warning: type check: {:?} (continuing)", e);
+            handle_lenient_type_check_error(e)?;
         }
 
         // Lower AST to HIR with module resolution support (using lenient mode for bootstrap)
@@ -1817,9 +1826,9 @@ impl CompilerPipeline {
         self.emit_explicit_simd_warnings(ast_module);
         self.emit_simd_report(ast_module);
 
-        // Type check (lenient - log errors but don't fail for bootstrap)
+        // Type check (lenient for bootstrap, but fail closed on unresolved names)
         if let Err(e) = type_check(&ast_module.items) {
-            eprintln!("warning: type check: {:?} (continuing)", e);
+            handle_lenient_type_check_error(e)?;
         }
 
         // Lower AST to HIR with module resolution support (strict mode)
@@ -1841,6 +1850,28 @@ mod tests {
     use std::collections::HashSet;
     use std::fs;
     use tempfile::tempdir_in;
+
+    #[test]
+    fn undefined_identifier_type_check_error_is_hard_failure() {
+        struct FakeUndefined;
+
+        impl std::fmt::Debug for FakeUndefined {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "Undefined(\"undefined identifier: task_spawn\")")
+            }
+        }
+
+        let err = handle_lenient_type_check_error(FakeUndefined).unwrap_err();
+        assert!(err.to_string().contains("undefined identifier: task_spawn"));
+    }
+
+    #[test]
+    fn non_undefined_type_check_error_stays_lenient() {
+        #[derive(Debug)]
+        struct FakeLegacyError;
+
+        assert!(handle_lenient_type_check_error(FakeLegacyError).is_ok());
+    }
 
     #[test]
     fn imported_static_methods_survive_lowering_with_context() {

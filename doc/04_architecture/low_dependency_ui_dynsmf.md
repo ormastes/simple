@@ -111,9 +111,14 @@ process-global environment variables.
 
 `src/app/startup/dynsmf_autoload.spl` constructs a startup dynSMF session from
 CLI args plus `SIMPLE_DYNSMF` and `SIMPLE_DYNSMF_DISABLE`. The app-root
-entrypoint calls the checked autoload path silently on startup and exposes
-`--dynsmf-status` for deterministic operator/test evidence. dynSMF control
-flags are treated as shared app-root startup options so `--no-dynsmf` and
+entrypoint first records general background compile requests for enabled
+manifest entries whose `.smf` artifacts are missing or invalid, then calls the
+checked autoload path silently on startup and exposes `--dynsmf-status` for
+deterministic operator/test evidence. The compile request is general dynSMF
+infrastructure, not GUI-only: every manifest entry maps a source path to a
+`build/dynsmf/<id>.smf` output and the canonical wrapper materializes those
+plans with `bin/simple compile <source> -o <artifact>.smf`. dynSMF control flags
+are treated as shared app-root startup options so `--no-dynsmf` and
 `--disable-dynsmf=<ids>` can control loading without becoming unknown commands.
 
 ## Verification Hooks
@@ -130,10 +135,12 @@ flags are treated as shared app-root startup options so `--no-dynsmf` and
   capability registry, lazy HTML/CSS capability declarations, component-scoped
   CSS selection, and real render-adapter CSS selector usage.
 - `test/01_unit/os/smf/dynsmf_session_spec.spl` verifies dynSMF artifact
-  readiness, missing/invalid artifact failure, and evidence through the existing
+  readiness, general background compile evidence for non-GUI and GUI manifest
+  entries, missing/invalid artifact failure, and evidence through the existing
   SMF dynlib facade.
 - `test/02_integration/app/simple/dynsmf_autoload_policy_spec.spl` verifies
-  checked startup autoload policy and app-root dynSMF status evidence.
+  checked startup autoload policy, missing-artifact background compile queue
+  evidence, and app-root dynSMF status evidence.
 - `test/03_system/stdlib/dynload/dynsmf_session_unload_reload_spec.spl`
   verifies generated artifact readiness, default checked dynSMF autoload,
   per-id disable, stale symbol evidence, and reload generation at the system

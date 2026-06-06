@@ -81,10 +81,15 @@ stdlib-like libraries `file_io`, `net_io`, `render2d`, `web_renderer`,
 - Disable selected entries: `--disable-dynsmf=<ids>` or
   `SIMPLE_DYNSMF_DISABLE=<ids>`
 
-The startup adapter uses checked autoload: enabled manifest entries must point
-to generated `.smf` artifacts with `SMF\0` magic before `smf_dlopen_checked`
-returns a handle. Missing, short, or invalid artifacts record deterministic
-failed evidence rows. Plain app-root startup remains quiet; use
+The startup adapter is a general dynSMF path. It records background compile
+requests for enabled manifest entries whose artifacts are not ready, using the
+same deterministic build plan as the wrapper:
+`bin/simple compile <source> -o build/dynsmf/<id>.smf`. It then uses checked
+autoload: enabled manifest entries must point to generated `.smf` artifacts with
+`SMF\0` magic before `smf_dlopen_checked` returns a handle. Background compile
+evidence never masks load failures; missing, short, or invalid artifacts still
+record deterministic failed evidence rows until the wrapper or another compiler
+worker materializes them. Plain app-root startup remains quiet; use
 `--dynsmf-status` when operator or test evidence is needed.
 
 ## Current Limitations

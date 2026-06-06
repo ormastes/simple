@@ -27,7 +27,7 @@ sshd_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -120,6 +120,26 @@ expect(host_key_set_advertised_algorithms(host_keys)).to_equal("ssh-ed25519,ecds
 
 </details>
 
+#### advertises daemon-selected host keys and aes256 in production KEXINIT
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val host_keys = sshd_build_host_keys_for_session_for_test(true, [1, 2, 3, 4], [9, 10, 11, 12], [13, 14, 15, 16], nil)
+val parsed = ssh_parse_kexinit(ssh_build_kexinit_for_host_keys(host_keys))
+expect(parsed.is_ok()).to_equal(true)
+val kex = parsed.unwrap()
+expect(kex.server_host_key_algorithms).to_equal("ssh-ed25519,rsa-sha2-256,rsa-sha2-512")
+expect(kex.encryption_client_to_server).to_equal("aes256-gcm@openssh.com")
+expect(kex.encryption_server_to_client).to_equal("aes256-gcm@openssh.com")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -140,8 +160,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

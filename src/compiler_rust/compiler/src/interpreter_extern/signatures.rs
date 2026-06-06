@@ -253,16 +253,20 @@ pub fn rt_rsa_pss_sha256_verify(args: &[Value]) -> Result<Value, CompileError> {
     let Some(pk) = extract_bytes(args, 0) else {
         return Ok(Value::Int(0));
     };
-    let Some(pk) = normalize_rsa_public_key(&pk) else {
-        return Ok(Value::Int(0));
-    };
     let Some(msg) = extract_bytes(args, 1) else {
         return Ok(Value::Int(0));
     };
     let Some(sig) = extract_bytes(args, 2) else {
         return Ok(Value::Int(0));
     };
-    let key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA256, pk);
+    let spki_key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA256, &pk);
+    if spki_key.verify(&msg, &sig).is_ok() {
+        return Ok(Value::Int(1));
+    }
+    let Some(pkcs1) = normalize_rsa_public_key(&pk) else {
+        return Ok(Value::Int(0));
+    };
+    let key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA256, pkcs1);
     Ok(Value::Int(if key.verify(&msg, &sig).is_ok() { 1 } else { 0 }))
 }
 
@@ -271,16 +275,20 @@ pub fn rt_rsa_pss_sha384_verify(args: &[Value]) -> Result<Value, CompileError> {
     let Some(pk) = extract_bytes(args, 0) else {
         return Ok(Value::Int(0));
     };
-    let Some(pk) = normalize_rsa_public_key(&pk) else {
-        return Ok(Value::Int(0));
-    };
     let Some(msg) = extract_bytes(args, 1) else {
         return Ok(Value::Int(0));
     };
     let Some(sig) = extract_bytes(args, 2) else {
         return Ok(Value::Int(0));
     };
-    let key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA384, pk);
+    let spki_key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA384, &pk);
+    if spki_key.verify(&msg, &sig).is_ok() {
+        return Ok(Value::Int(1));
+    }
+    let Some(pkcs1) = normalize_rsa_public_key(&pk) else {
+        return Ok(Value::Int(0));
+    };
+    let key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA384, pkcs1);
     Ok(Value::Int(if key.verify(&msg, &sig).is_ok() { 1 } else { 0 }))
 }
 
@@ -289,16 +297,20 @@ pub fn rt_rsa_pss_sha512_verify(args: &[Value]) -> Result<Value, CompileError> {
     let Some(pk) = extract_bytes(args, 0) else {
         return Ok(Value::Int(0));
     };
-    let Some(pk) = normalize_rsa_public_key(&pk) else {
-        return Ok(Value::Int(0));
-    };
     let Some(msg) = extract_bytes(args, 1) else {
         return Ok(Value::Int(0));
     };
     let Some(sig) = extract_bytes(args, 2) else {
         return Ok(Value::Int(0));
     };
-    let key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA512, pk);
+    let spki_key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA512, &pk);
+    if spki_key.verify(&msg, &sig).is_ok() {
+        return Ok(Value::Int(1));
+    }
+    let Some(pkcs1) = normalize_rsa_public_key(&pk) else {
+        return Ok(Value::Int(0));
+    };
+    let key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA512, pkcs1);
     Ok(Value::Int(if key.verify(&msg, &sig).is_ok() { 1 } else { 0 }))
 }
 

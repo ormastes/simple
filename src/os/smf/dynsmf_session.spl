@@ -131,6 +131,9 @@ fn dynsmf_build_plans_ready(plans: [DynSmfBuildPlan]) -> bool:
         idx = idx + 1
     true
 
+fn dynsmf_background_compile_action() -> text:
+    "compile_background"
+
 fn dynsmf_artifact_magic_hex(data: [u8]) -> text:
     if data.len() < 4:
         return "short"
@@ -169,6 +172,52 @@ fn dynsmf_artifacts_ready(manifest: [DynSmfManifestEntry]) -> bool:
             return false
         idx = idx + 1
     true
+
+fn dynsmf_session_record_background_compile_for_status(
+    session: DynSmfSession,
+    entry: DynSmfManifestEntry,
+    plan: DynSmfBuildPlan,
+    artifact: DynSmfArtifactStatus,
+    record_ready: bool,
+    record_disabled: bool
+) -> DynSmfSession:
+    var out = session
+    if dynsmf_id_disabled(out.policy, entry.id):
+        if record_disabled:
+            out.evidence.push(DynSmfEvidenceRow(library_id: entry.id, action: dynsmf_background_compile_action(), policy_source: out.policy.source, status: "skipped", handle: 0, generation: out.generation, reason: "disabled"))
+        return out
+    if plan.status != "ready":
+        out.evidence.push(DynSmfEvidenceRow(library_id: entry.id, action: dynsmf_background_compile_action(), policy_source: out.policy.source, status: "failed", handle: 0, generation: out.generation, reason: "invalid_" + plan.reason))
+        return out
+    if artifact.ready:
+        if record_ready:
+            out.evidence.push(DynSmfEvidenceRow(library_id: entry.id, action: dynsmf_background_compile_action(), policy_source: out.policy.source, status: "skipped", handle: 0, generation: out.generation, reason: "artifact_ready"))
+        return out
+    out.evidence.push(DynSmfEvidenceRow(library_id: entry.id, action: dynsmf_background_compile_action(), policy_source: out.policy.source, status: "queued", handle: 0, generation: out.generation, reason: "queued:" + plan.command))
+    out
+
+fn dynsmf_session_request_background_compiles_from_statuses(
+    session: DynSmfSession,
+    manifest: [DynSmfManifestEntry],
+    statuses: [DynSmfArtifactStatus],
+    record_ready: bool,
+    record_disabled: bool
+) -> DynSmfSession:
+    var out = session
+    var idx = 0
+    while idx < manifest.len():
+        val entry = manifest[idx]
+        val plan = dynsmf_build_plan(entry)
+        val artifact = if idx < statuses.len(): statuses[idx] else: dynsmf_artifact_status(entry)
+        out = dynsmf_session_record_background_compile_for_status(out, entry, plan, artifact, record_ready, record_disabled)
+        idx = idx + 1
+    out
+
+fn dynsmf_session_request_background_compiles(session: DynSmfSession, manifest: [DynSmfManifestEntry]) -> DynSmfSession:
+    dynsmf_session_request_background_compiles_from_statuses(session, manifest, [], true, true)
+
+fn dynsmf_session_queue_missing_background_compiles(session: DynSmfSession, manifest: [DynSmfManifestEntry]) -> DynSmfSession:
+    dynsmf_session_request_background_compiles_from_statuses(session, manifest, [], false, false)
 
 fn dynsmf_policy_default() -> DynSmfPolicy:
     DynSmfPolicy(disabled_all: false, disabled_ids: [], source: "default")
@@ -359,6 +408,7 @@ export DynSmfManifestEntry, DynSmfPolicy, DynSmfLoadedLibrary, DynSmfEvidenceRow
 export dynsmf_default_manifest, dynsmf_manifest_all_precompiled, dynsmf_manifest_source_path
 export dynsmf_build_plan, dynsmf_build_plans, dynsmf_build_plans_ready
 export dynsmf_artifact_status_from_bytes, dynsmf_artifact_status, dynsmf_artifacts_ready
+export dynsmf_session_request_background_compiles, dynsmf_session_request_background_compiles_from_statuses, dynsmf_session_queue_missing_background_compiles
 export dynsmf_policy_default, dynsmf_policy_from_args_env
 export dynsmf_session_new, dynsmf_session_autoload, dynsmf_session_autoload_checked, dynsmf_session_load, dynsmf_session_load_checked
 export dynsmf_session_symbol, dynsmf_session_record_symbol, dynsmf_session_unload, dynsmf_id_disabled

@@ -6,6 +6,8 @@
   `net_io`, `render2d`, `web_renderer`, `gui_renderer`, and `tui_renderer`.
 - Startup integration lives in `src/app/startup/dynsmf_autoload.spl` and
   `src/app/main.spl --dynsmf-status`.
+- Startup records `compile_background` queue evidence for missing non-GUI and
+  GUI dynSMF artifacts before checked autoload failure.
 - Controls: `--no-dynsmf`, `--disable-dynsmf=<id>`,
   `SIMPLE_DYNSMF=0`, `SIMPLE_DYNSMF_DISABLE=<id>`.
 - Generated manuals exist for unit, integration, and system dynSMF specs.
@@ -13,6 +15,7 @@
 ```sdn
 dynsmf_session_test {
   manifest -> autoload
+  manifest -> background_compile_queue
   app_startup -> status_evidence
   opt_out -> skipped
   all_defaults -> unload

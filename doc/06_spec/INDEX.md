@@ -17,4 +17,3 @@
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
 | [SFM Sample Apps & Reuse](03_system/feature/sfm/sfm_samples_spec.md) | Draft | N/A | 11 | 20% | 45 lines |
-

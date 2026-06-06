@@ -990,12 +990,27 @@ fn validate_imports(file_path: &Path, items: &[Node], errors: &mut Vec<CheckErro
         }
     }
 
-    fn import_resolves(
+    fn target_import_name(target: &ImportTarget) -> Option<&str> {
+        match target {
+            ImportTarget::Single(name) | ImportTarget::Aliased { name, .. } => Some(name),
+            _ => None,
+        }
+    }
+
+    fn target_resolves(
         resolvers: &[ModuleResolver],
         module_path: &simple_parser::ast::ModulePath,
         target: &ImportTarget,
         from_file: &Path,
     ) -> bool {
+        if let ImportTarget::Group(targets) = target {
+            return targets
+                .iter()
+                .all(|target| target_resolves(resolvers, module_path, target, from_file));
+        }
+
+        let target_name = target_import_name(target);
+
         if let Some(candidate_path) = target_module_path(module_path, target) {
             if resolvers
                 .iter()
@@ -1005,9 +1020,99 @@ fn validate_imports(file_path: &Path, items: &[Node], errors: &mut Vec<CheckErro
             }
         }
 
+        if let Some(name) = target_name {
+            return resolvers.iter().any(|resolver| {
+                resolver
+                    .resolve(module_path, from_file)
+                    .ok()
+                    .is_some_and(|resolved| module_file_exports_symbol(&resolved.path, name))
+            });
+        }
+
+        false
+    }
+
+    fn export_target_matches(target: &ImportTarget, name: &str) -> bool {
+        match target {
+            ImportTarget::Single(exported) | ImportTarget::Aliased { name: exported, .. } => exported == name,
+            ImportTarget::Group(targets) => targets.iter().any(|target| export_target_matches(target, name)),
+            ImportTarget::Glob => true,
+        }
+    }
+
+    fn module_file_exports_symbol(path: &Path, name: &str) -> bool {
+        let Ok(source) = fs::read_to_string(path) else {
+            return false;
+        };
+        let mut parser = Parser::new(&source);
+        let Ok(module) = parser.parse() else {
+            return false;
+        };
+
+        module.items.iter().any(|item| match item {
+            Node::Function(func) => func.name == name,
+            Node::Class(class_def) => class_def.name == name,
+            Node::Struct(struct_def) => struct_def.name == name,
+            Node::Enum(enum_def) => enum_def.name == name,
+            Node::Trait(trait_def) => trait_def.name == name,
+            Node::ExportUseStmt(export_use) => export_target_matches(&export_use.target, name),
+            _ => false,
+        })
+    }
+
+    fn import_resolves(
+        resolvers: &[ModuleResolver],
+        module_path: &simple_parser::ast::ModulePath,
+        target: &ImportTarget,
+        from_file: &Path,
+    ) -> bool {
+        if target_resolves(resolvers, module_path, target, from_file) {
+            return true;
+        }
+
+        if matches!(
+            target,
+            ImportTarget::Single(_) | ImportTarget::Aliased { .. } | ImportTarget::Group(_)
+        ) {
+            return false;
+        }
+
         resolvers
             .iter()
             .any(|resolver| resolver.resolve(module_path, from_file).is_ok())
+    }
+
+    fn module_resolves(
+        resolvers: &[ModuleResolver],
+        module_path: &simple_parser::ast::ModulePath,
+        from_file: &Path,
+    ) -> bool {
+        resolvers
+            .iter()
+            .any(|resolver| resolver.resolve(module_path, from_file).is_ok())
+    }
+
+    fn named_target_missing(
+        resolvers: &[ModuleResolver],
+        module_path: &simple_parser::ast::ModulePath,
+        target: &ImportTarget,
+        from_file: &Path,
+    ) -> Option<String> {
+        match target {
+            ImportTarget::Group(targets) => targets
+                .iter()
+                .find_map(|target| named_target_missing(resolvers, module_path, target, from_file)),
+            ImportTarget::Single(name) | ImportTarget::Aliased { name, .. } => {
+                if module_resolves(resolvers, module_path, from_file)
+                    && !target_resolves(resolvers, module_path, target, from_file)
+                {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            }
+            ImportTarget::Glob => None,
+        }
     }
 
     for item in items {
@@ -1016,8 +1121,39 @@ fn validate_imports(file_path: &Path, items: &[Node], errors: &mut Vec<CheckErro
                 if use_stmt.path.segments.is_empty() {
                     continue;
                 }
+                if let Some(error) = concurrency_api_import_error(
+                    file_path,
+                    &use_stmt.path,
+                    &use_stmt.target,
+                    use_stmt.span.line,
+                    use_stmt.span.column,
+                ) {
+                    errors.push(error);
+                    continue;
+                }
                 let resolved = import_resolves(&resolvers, &use_stmt.path, &use_stmt.target, &abs_path);
                 if !resolved {
+                    if let Some(name) = named_target_missing(&resolvers, &use_stmt.path, &use_stmt.target, &abs_path) {
+                        errors.push(CheckError {
+                            file: file_path.display().to_string(),
+                            line: use_stmt.span.line,
+                            column: use_stmt.span.column,
+                            severity: ErrorSeverity::Error,
+                            code: Some("E0410".to_string()),
+                            message: format!(
+                                "module '{}' does not export '{}'",
+                                use_stmt.path.segments.join("."),
+                                name
+                            ),
+                            expected: Some("exported symbol".to_string()),
+                            found: Some(name),
+                            notes: Vec::new(),
+                            help: vec![
+                                "import the symbol from its owning module or update the module export list".to_string(),
+                            ],
+                        });
+                        continue;
+                    }
                     let msg = resolvers
                         .iter()
                         .find_map(|resolver| resolver.resolve(&use_stmt.path, &abs_path).err())
@@ -1036,6 +1172,61 @@ fn validate_imports(file_path: &Path, items: &[Node], errors: &mut Vec<CheckErro
                         notes: Vec::new(),
                         help: vec!["check the module path or add the source root with --source-root".to_string()],
                     });
+                }
+            }
+            Node::MultiUse(multi_use) => {
+                for (path, target) in &multi_use.imports {
+                    if path.segments.is_empty() {
+                        continue;
+                    }
+                    if let Some(error) = concurrency_api_import_error(
+                        file_path,
+                        path,
+                        target,
+                        multi_use.span.line,
+                        multi_use.span.column,
+                    ) {
+                        errors.push(error);
+                        continue;
+                    }
+                    let resolved = import_resolves(&resolvers, path, target, &abs_path);
+                    if !resolved {
+                        if let Some(name) = named_target_missing(&resolvers, path, target, &abs_path) {
+                            errors.push(CheckError {
+                                file: file_path.display().to_string(),
+                                line: multi_use.span.line,
+                                column: multi_use.span.column,
+                                severity: ErrorSeverity::Error,
+                                code: Some("E0410".to_string()),
+                                message: format!("module '{}' does not export '{}'", path.segments.join("."), name),
+                                expected: Some("exported symbol".to_string()),
+                                found: Some(name),
+                                notes: Vec::new(),
+                                help: vec![
+                                    "import the symbol from its owning module or update the module export list"
+                                        .to_string(),
+                                ],
+                            });
+                            continue;
+                        }
+                        let msg = resolvers
+                            .iter()
+                            .find_map(|resolver| resolver.resolve(path, &abs_path).err())
+                            .map(|e| e.to_string())
+                            .unwrap_or_else(|| "unknown import resolution failure".to_string());
+                        errors.push(CheckError {
+                            file: file_path.display().to_string(),
+                            line: multi_use.span.line,
+                            column: multi_use.span.column,
+                            severity: ErrorSeverity::Warning,
+                            code: Some("W0410".to_string()),
+                            message: format!("unresolved import '{}': {}", path.segments.join("."), msg),
+                            expected: None,
+                            found: None,
+                            notes: Vec::new(),
+                            help: vec!["check the module path or add the source root with --source-root".to_string()],
+                        });
+                    }
                 }
             }
             Node::CommonUseStmt(common_use) => {
@@ -1101,6 +1292,47 @@ fn validate_imports(file_path: &Path, items: &[Node], errors: &mut Vec<CheckErro
             _ => {}
         }
     }
+}
+
+fn concurrency_api_import_error(
+    file_path: &Path,
+    path: &ModulePath,
+    target: &ImportTarget,
+    line: usize,
+    column: usize,
+) -> Option<CheckError> {
+    let path_text = path.segments.join(".");
+    let target_name = match target {
+        ImportTarget::Single(name) | ImportTarget::Aliased { name, .. } => name,
+        ImportTarget::Group(targets) => {
+            return targets
+                .iter()
+                .find_map(|target| concurrency_api_import_error(file_path, path, target, line, column));
+        }
+        _ => return None,
+    };
+
+    if (path_text == "std.concurrent.thread" || path_text == "std.nogc_async_mut.concurrent.thread")
+        && target_name == "task_spawn"
+    {
+        return Some(CheckError {
+            file: file_path.display().to_string(),
+            line,
+            column,
+            severity: ErrorSeverity::Error,
+            code: Some("E-PAR-001".to_string()),
+            message: "task_spawn is not part of the OS-thread facade".to_string(),
+            expected: Some("OS-thread API symbol".to_string()),
+            found: Some(target_name.clone()),
+            notes: vec![
+                "std.concurrent.thread is reserved for OS thread primitives such as thread_spawn and thread_spawn2"
+                    .to_string(),
+            ],
+            help: vec!["import task_spawn from std.nogc_async_mut.thread_pool instead".to_string()],
+        });
+    }
+
+    None
 }
 
 /// Convert ParseError to CheckError
@@ -1453,6 +1685,87 @@ mod tests {
         let result = check_file(file.path(), &[], false);
         assert_eq!(result.status, CheckStatus::Success);
         assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    fn test_check_allows_parallel_os_thread_facade_imports() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "use std.concurrent.thread.{{thread_spawn, thread_spawn2}}\nfn main():\n    val x = 1"
+        )
+        .unwrap();
+
+        let result = check_file(file.path(), &[], false);
+        assert_eq!(result.status, CheckStatus::Success);
+        assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    fn test_check_allows_parallel_task_pool_owner_import() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "use std.nogc_async_mut.thread_pool.{{task_spawn}}\nfn main():\n    val x = 1"
+        )
+        .unwrap();
+
+        let result = check_file(file.path(), &[], false);
+        assert_eq!(result.status, CheckStatus::Success);
+        assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    fn test_check_rejects_task_spawn_from_os_thread_facade_group_import() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "use std.concurrent.thread.{{task_spawn}}\nfn main():\n    val x = 1"
+        )
+        .unwrap();
+
+        let result = check_file(file.path(), &[], false);
+        assert_eq!(result.status, CheckStatus::Error);
+        assert!(result.errors.iter().any(|error| {
+            error.code.as_deref() == Some("E-PAR-001")
+                && error.message.contains("task_spawn is not part of the OS-thread facade")
+        }));
+    }
+
+    #[test]
+    fn test_check_rejects_task_spawn_from_os_thread_facade_multi_import() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "use std.spec, std.concurrent.thread.{{task_spawn}}\nfn main():\n    val x = 1"
+        )
+        .unwrap();
+
+        let result = check_file(file.path(), &[], false);
+        assert_eq!(result.status, CheckStatus::Error);
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.code.as_deref() == Some("E-PAR-001")));
+    }
+
+    #[test]
+    fn test_check_rejects_missing_group_import_export() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "use std.concurrent.thread.{{definitely_missing_thread_api}}\nfn main():\n    val x = 1"
+        )
+        .unwrap();
+
+        let result = check_file(file.path(), &[], false);
+        assert_eq!(result.status, CheckStatus::Error);
+        assert!(result.errors.iter().any(|error| {
+            error.code.as_deref() == Some("E0410")
+                && error
+                    .message
+                    .contains("does not export 'definitely_missing_thread_api'")
+        }));
     }
 
     #[test]

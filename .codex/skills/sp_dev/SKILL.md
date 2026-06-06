@@ -43,6 +43,19 @@ For runtime concurrency work, keep the public API map current in
 document green-thread APIs as Go-style M:N CPU parallelism unless the
 scheduler-aware green runtime has actually landed and been benchmarked.
 
+For dynSMF or SMF-startup work, distinguish three separate lanes before
+editing: SimpleOS disk SMF placement, GUI SMF dynlib release evidence, and the
+general dynSMF background compile/startup lane. If the request says the
+interpreter should compile SMF while reading/running scripts, or mentions
+precompiled `build/dynsmf/*.smf` artifacts, start with
+`src/os/smf/dynsmf_session.spl`,
+`src/app/startup/dynsmf_autoload.spl`, and
+`scripts/check/check-low-dependency-dynsmf-build-plans.shs`. This is not
+GUI-only: GUI renderer entries and non-GUI entries share the same manifest,
+build-plan, `compile_background` evidence, and checked-autoload contract. Update
+`doc/07_guide/lib/api/dynlib_api.md`, the low-dependency dynSMF architecture
+and design docs, and the matching SPipe specs whenever that contract changes.
+
 For optimization work, use `.codex/skills/optimize/SKILL.md`. SPipe optimization
 tasks must start from a baseline, run
 `bin/simple run src/app/optimize/main.spl <file> --full --level=O3` on touched

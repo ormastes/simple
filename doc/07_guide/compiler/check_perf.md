@@ -97,8 +97,11 @@ sh scripts/check/check-cross-language-perf.shs
 The harness deletes a Simple output before recording a failed compile, so a
 failed native or SMF compile cannot leave a stale binary/bytecode file that is
 then measured as if it belonged to the current run. Long-running measured
-commands are bounded by `RUN_TIMEOUT`; set it higher for full reports on slow
-hosts, or lower it for smoke evidence.
+commands and Simple compile steps are bounded by `RUN_TIMEOUT`; set it higher
+for full reports on slow hosts, or lower it for smoke evidence. The 1000-worker
+Simple OS-thread fanout source is intentionally reported separately from Simple
+green fanout and uses loop-based `thread_spawn2` so the harness does not need
+large unrolled source generation.
 
 ### What it measures
 
@@ -107,8 +110,8 @@ hosts, or lower it for smoke evidence.
 | **Size** | hello + fib source/binary | Deployment footprint |
 | **Cold startup** | `hello world` (20 runs avg) | Time-to-first-output |
 | **Warm throughput** | `fib(35)` recursive, in-process loop (10 warmup + 20 measured) | Steady-state single-thread perf (JIT reaches hotspot) |
-| **Parallel** | 100 workers × LCG 100K iters via channel (`channel_new`/`channel_from_id`/`send`/`recv` from `std.concurrent.channel` — same semantic as Go's goroutine + chan). Workers pass channel id (not object) due to native struct-closure codegen limitation. | CPU-heavy worker throughput plus concurrency overhead |
-| **Large fanout** | 1000 tiny workers × LCG 32 iters. Simple green uses cooperative queue fanout; C uses one pthread per tiny task; Go uses one goroutine per tiny task; Erlang uses one BEAM process per tiny task. | Scheduling overhead where Go should usually beat C pthread creation; Simple green measures queue fanout, not CPU parallelism |
+| **Parallel** | 100 workers × LCG 100K iters via channel (`channel_new`/`channel_from_id`/`send`/`recv` from `std.concurrent.channel` — same semantic as Go's goroutine + chan). Simple native uses `thread_spawn2(seed, channel_id, worker)` to pass scalar worker data explicitly. | CPU-heavy worker throughput plus concurrency overhead |
+| **Large fanout** | 1000 tiny workers × LCG 32 iters. Simple native uses loop-based `thread_spawn2`/channel; Simple green uses cooperative queue fanout; C uses one pthread per tiny task; Go uses one goroutine per tiny task; Erlang uses one BEAM process per tiny task. | Scheduling overhead where Go should usually beat C pthread creation; Simple native measures OS-thread fanout; Simple green measures queue fanout, not CPU parallelism |
 | **Parallel binary size** | Binary/script sizes for parallel workloads across languages | Deployment footprint for concurrent programs |
 | **Parallel peak RSS** | `/usr/bin/time -v` peak RSS with 100 workers, baseline subtracted, per-worker delta | Memory cost per concurrent task (baseline = hello world RSS for each language) |
 
@@ -142,7 +145,7 @@ hosts, or lower it for smoke evidence.
 
 **Warm throughput (fib35):** C ≈ Simple-native < Go < Java (after JIT) < Bun < Simple-SMF < Erlang < Simple-interp < Python
 
-**Parallel (100 workers):** Go and C are the current native baselines; the current cross-language Simple row uses OS-thread `thread_spawn` plus `std.concurrent.channel`. The implemented `std.concurrent.green_thread` API is cooperative and single-OS-thread, so it is not a drop-in Go-goroutine benchmark row. Use `task_spawn`/`rt_pool_*` or future scheduler-aware green threads for Go-like CPU-parallel comparisons.
+**Parallel (100 workers):** Go and C are the current native baselines; the current cross-language Simple row uses OS-thread `thread_spawn2` plus `std.concurrent.channel`. The implemented `std.concurrent.green_thread` API is cooperative and single-OS-thread, so it is not a drop-in Go-goroutine benchmark row. Use `task_spawn`/`rt_pool_*` or future scheduler-aware green threads for Go-like CPU-parallel comparisons.
 
 ### What matters per use case
 

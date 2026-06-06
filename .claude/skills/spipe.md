@@ -66,6 +66,30 @@ Protocol-v2 Draw IR evidence with
 `/api/test/draw-ir/diff?baseline=...&capability=draw_ir` or
 `common.ui.draw_ir_diff` before relying on pixel-only assertions.
 
+## Rendering Checks (`expect_draw` style)
+
+For GUI, Web, 2D, Draw IR, and WASM rendering specs, use `expect_draw`-style
+helper functions inside normal SPipe `it` blocks. The helper may wrap repeated
+setup/readback, but it must contain real assertions and must not replace
+`expect`, `describe`, `it`, or the canonical matchers.
+
+Prefer the strongest available oracle for the surface:
+
+- HTML/CSS/WASM-backed surfaces: first assert HTML, DOM-visible text,
+  attributes, layout-relevant objects, or canvas/wasm bridge state.
+- Draw IR and object-model surfaces: assert emitted draw commands, scene nodes,
+  object state, bounds, colors, event/source metadata, or deterministic hashes.
+- Native GUI/raster-only surfaces: use screenshots, goldens, framebuffer
+  readback, pixel diffs, or hashes as fallback or supplemental evidence.
+
+Do not accept placeholder rendering passes: no `pass_todo`, no
+`expect(true).to_equal(true)`, no empty draw helpers, and no screenshot-only
+claim when HTML, Draw IR, object state, or visible-text evidence is available.
+If the host cannot execute a renderer, skip with a concrete reason or assert an
+available non-raster oracle. Keep executable specs under `test/...`; generated
+manual docs and evidence assets belong under `doc/06_spec/...`, and
+`doc/06_spec` must never contain executable `.spl` specs.
+
 ## Startup-Sensitive Specs
 
 If a SPipe change touches `simple run`, direct file argv parsing,
@@ -81,6 +105,25 @@ doc/06_spec/02_integration/app/startup_argparse_mmap_perf_spec.md
 Do not move executable startup specs into `doc/06_spec`, and do not route
 script startup through compile/JIT as a workaround for a failing fast path. Fix
 the fast path or record a concrete bug.
+
+### dynSMF Background Compile Startup
+
+If a task mentions compiling SMF while the interpreter reads/runs scripts,
+precompiled dynSMF artifacts, GUI-library SMF loading, or `build/dynsmf/*.smf`,
+start from the general dynSMF lane:
+
+- implementation: `src/os/smf/dynsmf_session.spl`
+- startup adapter: `src/app/startup/dynsmf_autoload.spl`
+- canonical wrapper: `scripts/check/check-low-dependency-dynsmf-build-plans.shs`
+- unit spec: `test/01_unit/os/smf/dynsmf_session_spec.spl`
+- startup integration spec: `test/02_integration/app/simple/dynsmf_autoload_policy_spec.spl`
+- guide: `doc/07_guide/lib/api/dynlib_api.md`
+
+Do not treat this as a GUI-only feature. GUI renderer artifacts are consumers of
+the same manifest/build-plan/background-compile evidence contract used by
+non-GUI entries such as `file_io` and `net_io`. Startup may record
+`compile_background` queued evidence while continuing interpreter execution, but
+checked autoload must remain fail-closed until a valid `SMF\0` artifact exists.
 
 ## Equality is not correctness (false-green guard)
 

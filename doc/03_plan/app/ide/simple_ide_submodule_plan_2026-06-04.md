@@ -11,6 +11,23 @@ every feature exercises and hardens Simple's language, stdlib, and compiler.
 - **Submodule path:** `examples/10_tooling/simple_ide`
 - **Architecture:** MDSOC+ (MDSOC outer + ECS business layer)
 
+### Current Repository State
+
+As of 2026-06-06, the production compatibility surface for IDE feature checks is
+the original `src/app/ide` and `src/app/office` namespace. The documented
+commands below must continue to run from the main repo:
+
+```bash
+bin/simple-interp src/app/ide/main.spl --feature-check --tui
+bin/simple-interp src/app/ide/main.spl --feature-check --gui
+```
+
+`examples/10_tooling/simple_ide` still has `.gitmodules` metadata and a nested
+gitdir, but the parent repository currently tracks that path as a normal tree,
+not a gitlink submodule. Do not assume `git submodule update` will repair IDE
+feature-check failures; first verify the `src/app/ide` and `src/app/office`
+compatibility namespace exists and resolves.
+
 ## 2. Feature List
 
 ### Core IDE

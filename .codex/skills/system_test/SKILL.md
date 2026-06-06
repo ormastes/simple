@@ -104,6 +104,19 @@ describe "<Feature Name>":
   `ui_access_observe`, or `ui_access_state`. CLI/MCP wrappers such as
   `simple play wm-text-*` and `play_wm_text_*` are acceptable adapters. A
   screenshot-only pass is evidence, not interaction coverage.
+- GUI, Web, 2D, and WASM rendering specs should use `expect_draw`-style helper
+  functions inside normal SPipe `it` blocks. These helpers must assert rendered
+  state, not merely call the renderer: check Draw IR/object state, scene nodes,
+  layout boxes, visible text, readback pixels, hashes, or diffs that prove the
+  expected surface exists.
+- For HTML/CSS/WASM-backed surfaces, prefer HTML or DOM-visible-text checks
+  before raster checks. Assert semantic text, attributes, layout-relevant
+  objects, or canvas/wasm bridge state when available; use GUI screenshots,
+  goldens, and pixel diffs as fallback or supplemental evidence.
+- Rendering checks must not use placeholder assertions such as `pass_todo`,
+  `expect(true).to_equal(true)`, or empty helper bodies. If the renderer cannot
+  be executed on the host, skip with a concrete reason or assert an available
+  non-raster oracle such as generated Draw IR, object state, or captured HTML.
 - Evidence display is user-selectable with `# @evidence-display: embed_tui`,
   `links`, or `embed_all`. Default to `embed_tui`: embed TUI evidence and link
   screenshots, logs, protocol dumps, binary artifacts, and other non-TUI files.
@@ -114,6 +127,8 @@ describe "<Feature Name>":
   - TUI specs capture text or ANSI output under `build/test-artifacts/<spec-relative-path>/`.
   - HTML-backed GUI specs capture source HTML/visible text and check user-visible text before screenshot checks.
   - GUI specs capture screenshots/goldens/diffs under `doc/06_spec/image/<spec-relative-path>/` when HTML is unavailable or insufficient.
+  - Draw IR and 2D specs capture or assert object/command state where possible
+    before falling back to screenshots.
   - Evidence paths appear in `**Screenshots:**` or `**TUI Captures:**` metadata so generated `doc/06_spec/...` docs can render them according to evidence display policy.
   - Raster evidence (`.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.ppm`) is tracked by Git LFS.
 - Draw IR layout/style parity specs should capture structured Protocol-v2
@@ -137,6 +152,13 @@ describe "<Feature Name>":
     `doc/06_spec/02_integration/app/startup_argparse_mmap_perf_spec.md`.
   - Do not replace the compact startup path with a compile/JIT workaround just
     to make a test pass; fix the fast path or record a concrete bug.
+  - If the change touches dynSMF precompiled artifacts or compiling SMF while
+    interpreter startup continues, include both
+    `test/01_unit/os/smf/dynsmf_session_spec.spl` and
+    `test/02_integration/app/simple/dynsmf_autoload_policy_spec.spl`. Tests
+    must prove `compile_background` evidence for at least one non-GUI manifest
+    entry and one GUI-related entry, and must also prove checked autoload still
+    fails closed until a valid `SMF\0` artifact exists.
 
 ## Phase 3: Traceability Matrix
 
