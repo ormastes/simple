@@ -21,6 +21,7 @@
 ## Local Evidence
 
 - `doc/03_plan/agent_tasks/multicore_green.md` now maps the active multicore-green lane into parallel agent work orders: Go/profile evidence, Simple OS-thread baseline, cooperative green semantics, multicore-green runtime-pool evidence, and SimpleOS green-carrier proof.
+- `doc/02_requirements/feature/multicore_green_options.md` and `doc/02_requirements/nfr/multicore_green_options.md` define named requirement options. Final selected requirement docs are intentionally still absent until the user selects scope.
 - `scripts/check/check-cross-language-perf.shs` now emits separate rows for OS thread, cooperative green, and multicore-green candidate workloads. Native OS-thread rows use `thread_spawn` fork-join because `thread_spawn_with_args` native explicit-argument ABI is currently blocked.
 - `test/05_perf/profile_scripts/profile_report_contract_test.shs` now fails cross-language reports that omit the OS-thread, cooperative-green, multicore-green, C pthread, Go goroutine, large-fanout, Go-vs-C fanout stress, RSS, or `used_runtime_pool()` evidence needed to compare the models honestly.
 - `test/01_unit/lib/nogc_async_mut/multicore_green_native.spl` verifies the native entry-closure path joins multiple multicore-green tasks.
