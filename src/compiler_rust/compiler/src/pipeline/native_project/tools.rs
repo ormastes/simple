@@ -528,6 +528,7 @@ pub(crate) fn strip_llvm_constructors(lib: &Path, temp_dir: &Path) -> Result<Pat
 /// Check if a mangled symbol name refers to a C standard library / system function.
 #[cfg(any(
     target_os = "android",
+    target_os = "ios",
     target_os = "macos",
     target_os = "freebsd",
     target_os = "linux",

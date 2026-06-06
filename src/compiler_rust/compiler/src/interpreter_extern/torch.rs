@@ -17,7 +17,7 @@ fn torch_runtime_name() -> &'static str {
     {
         "libsimple_runtime.so"
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
         "libsimple_runtime.dylib"
     }

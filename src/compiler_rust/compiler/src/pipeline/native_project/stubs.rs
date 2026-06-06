@@ -490,6 +490,7 @@ pub(crate) fn generate_stub_object_freestanding(
 /// Generate a stub object file that provides weak definitions for all unresolved symbols.
 #[cfg(any(
     target_os = "android",
+    target_os = "ios",
     target_os = "macos",
     target_os = "freebsd",
     target_os = "linux",
