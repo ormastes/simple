@@ -1,0 +1,95 @@
+# @cover src/lib/nogc_sync_mut/ui_test/sgtti.spl 80%
+use std.spec.{describe, it, expect}
+use std.ui_test.sgtti.{SgttiTestDriver}
+use common.ui.access_types.{UiAccessProp, UiAccessSurface}
+use common.ui.win_text_access.{
+    WinTextSnapshot,
+    win_text_make_node,
+    win_text_snapshot_from_parts,
+    win_text_source
+}
+
+fn _sgtti_fixture_snapshot() -> WinTextSnapshot:
+    val surface = UiAccessSurface(
+        surface_id: "surface:main",
+        title: "Main",
+        active: true,
+        window_id: "main",
+        app_id: "sgtti_test",
+        root_canonical_id: "surface:main#root"
+    )
+    val button = win_text_make_node(
+        surface_id: "surface:main",
+        widget_id: "button_ok",
+        kind: "button",
+        text_value: "OK",
+        action_names: ["click"],
+        props: [UiAccessProp(key: "role", value: "primary action")]
+    )
+    val input = win_text_make_node(
+        surface_id: "surface:main",
+        widget_id: "name_input",
+        kind: "input",
+        text_value: "Ada",
+        action_names: ["type_text"],
+        props: [UiAccessProp(key: "placeholder", value: "Name")]
+    )
+    val source = win_text_source(
+        source_id: "sgtti_test",
+        source_kind: "in_process_semantic",
+        confidence: "high",
+        capabilities: ["query_text", "act_node"],
+        captured_at_ms: 1000,
+        max_age_ms: 5000,
+        now_ms: 1000
+    )
+    win_text_snapshot_from_parts(
+        mode: "sgtti_test",
+        active_surface: "surface:main",
+        surfaces: [surface],
+        nodes: [button, input],
+        sources: [source]
+    )
+
+describe "SGTTI UI test driver":
+
+    it "finds an element by canonical id":
+        val driver = SgttiTestDriver.new(_sgtti_fixture_snapshot())
+        val node = driver.get_element("surface:main#button_ok").unwrap()
+        expect(node.widget_id).to_equal("button_ok")
+
+    it "finds an element by widget id":
+        val driver = SgttiTestDriver.new(_sgtti_fixture_snapshot())
+        val node = driver.get_element("name_input").unwrap()
+        expect(node.canonical_id).to_equal("surface:main#name_input")
+
+    it "returns all elements":
+        val driver = SgttiTestDriver.from_snapshot(_sgtti_fixture_snapshot())
+        val nodes = driver.get_elements().unwrap()
+        expect(nodes.len()).to_equal(2)
+
+    it "delegates filtered node queries to WinText":
+        val driver = SgttiTestDriver.new(_sgtti_fixture_snapshot())
+        val nodes = driver.find_nodes("surface:main", "input", "Ada", 10).unwrap()
+        expect(nodes.len()).to_equal(1)
+        expect(nodes[0].widget_id).to_equal("name_input")
+
+    it "checks visibility, focus, enabled, selected, existence, and text":
+        val driver = SgttiTestDriver.new(_sgtti_fixture_snapshot())
+        expect(driver.check_exists("button_ok").unwrap()).to_equal(true)
+        expect(driver.check_visible("button_ok").unwrap()).to_equal(true)
+        expect(driver.check_focused("button_ok").unwrap()).to_equal(false)
+        expect(driver.check_enabled("button_ok").unwrap()).to_equal(true)
+        expect(driver.check_selected("button_ok").unwrap()).to_equal(false)
+        expect(driver.check_text("button_ok", "primary").unwrap()).to_equal(true)
+
+    it "routes click and type_text actions":
+        val driver = SgttiTestDriver.new(_sgtti_fixture_snapshot())
+        expect(driver.click("button_ok").unwrap()).to_equal(true)
+        expect(driver.type_text("name_input", "Grace").unwrap()).to_equal(true)
+
+    it "reports missing and unsupported targets":
+        val driver = SgttiTestDriver.new(_sgtti_fixture_snapshot())
+        expect(driver.check_exists("missing").unwrap()).to_equal(false)
+        expect(driver.get_element("missing").is_err()).to_equal(true)
+        expect(driver.click("name_input").is_err()).to_equal(true)

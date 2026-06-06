@@ -1,0 +1,89 @@
+# SGTTI UI Test Driver
+#
+# In-process sibling to UITestClient. It mirrors the common UI-test
+# query/check/action vocabulary over a WinTextSnapshot without an HTTP server.
+
+use common.ui.access_types.{UiAccessNode}
+use common.ui.win_text_access.{
+    WinTextSnapshot,
+    WinTextActionRequest,
+    win_text_find_nodes,
+    win_text_route_action
+}
+
+pub class SgttiTestDriver:
+    snapshot: WinTextSnapshot
+
+    static fn new(snapshot: WinTextSnapshot) -> SgttiTestDriver:
+        SgttiTestDriver(snapshot: snapshot)
+
+    static fn from_snapshot(source_snapshot: WinTextSnapshot) -> SgttiTestDriver:
+        SgttiTestDriver.new(source_snapshot)
+
+    fn get_element(id: text) -> Result<UiAccessNode, text>:
+        val node = self._find_node(id)
+        if node == nil:
+            return Err("element not found: {id}")
+        Ok(node)
+
+    fn get_elements() -> Result<[UiAccessNode], text>:
+        Ok(self.snapshot.access.nodes)
+
+    fn find_nodes(surface_id: text, kind: text, text_query: text, limit: i32) -> Result<[UiAccessNode], text>:
+        Ok(win_text_find_nodes(self.snapshot, surface_id, kind, text_query, limit))
+
+    fn click(id: text) -> Result<bool, text>:
+        self._route_action(id, "click", "")
+
+    fn type_text(id: text, content: text) -> Result<bool, text>:
+        self._route_action(id, "type_text", content)
+
+    fn check_exists(id: text) -> Result<bool, text>:
+        Ok(self._find_node(id) != nil)
+
+    fn check_visible(id: text) -> Result<bool, text>:
+        val node = self.get_element(id)?
+        Ok(node.visible)
+
+    fn check_focused(id: text) -> Result<bool, text>:
+        val node = self.get_element(id)?
+        Ok(node.focused)
+
+    fn check_enabled(id: text) -> Result<bool, text>:
+        val node = self.get_element(id)?
+        Ok(node.enabled)
+
+    fn check_selected(id: text) -> Result<bool, text>:
+        val node = self.get_element(id)?
+        Ok(node.selected)
+
+    fn check_text(id: text, expected: text) -> Result<bool, text>:
+        val node = self.get_element(id)?
+        if node.text_value.contains(expected):
+            return Ok(true)
+        for prop in node.props:
+            if prop.value.contains(expected):
+                return Ok(true)
+        Ok(false)
+
+    fn _route_action(id: text, action: text, text_value: text) -> Result<bool, text>:
+        val node = self.get_element(id)?
+        val result = win_text_route_action(self.snapshot, WinTextActionRequest(
+            target_id: node.canonical_id,
+            action: action,
+            text_value: text_value,
+            x: 0,
+            y: 0
+        ))
+        if result.ok:
+            return Ok(true)
+        Err(result.message)
+
+    fn _find_node(id: text) -> UiAccessNode?:
+        for node in self.snapshot.access.nodes:
+            if node.canonical_id == id:
+                return node
+        for node in self.snapshot.access.nodes:
+            if node.widget_id == id:
+                return node
+        nil
