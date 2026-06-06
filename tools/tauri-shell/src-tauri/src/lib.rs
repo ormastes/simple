@@ -837,6 +837,34 @@ fn handle_subprocess_message(msg: SubprocessMessage, app: &AppHandle) {
                         var html = `{}`;
                         if (/^\s*<!doctype|\s*<html[\s>]/i.test(html)) {{
                             var parsed = new DOMParser().parseFromString(html, 'text/html');
+                            // Apply the generated document's <head> styles. innerHTML of a
+                            // full document drops <head>, so the CSS would otherwise be lost
+                            // (page renders unstyled). Re-home it into a persistent <style>.
+                            if (parsed.head) {{
+                                var css = '';
+                                parsed.head.querySelectorAll('style').forEach(function(s) {{ css += s.textContent + '\n'; }});
+                                if (css) {{
+                                    var sink = document.getElementById('simple-render-css');
+                                    if (!sink) {{
+                                        sink = document.createElement('style');
+                                        sink.id = 'simple-render-css';
+                                        document.head.appendChild(sink);
+                                    }}
+                                    sink.textContent = css;
+                                }}
+                            }}
+                            // Carry theme/data attributes (e.g. data-wm-accent) from the
+                            // generated <html>/<body> so :root[...] selectors still match.
+                            var srcRoots = [parsed.documentElement, parsed.body];
+                            var dstRoots = [document.documentElement, document.body];
+                            for (var ri = 0; ri < srcRoots.length; ri++) {{
+                                var src = srcRoots[ri]; var dst = dstRoots[ri];
+                                if (!src || !dst) continue;
+                                for (var ai = 0; ai < src.attributes.length; ai++) {{
+                                    var at = src.attributes[ai];
+                                    if (at.name.indexOf('data-') === 0 || at.name === 'class') dst.setAttribute(at.name, at.value);
+                                }}
+                            }}
                             html = parsed.body ? parsed.body.innerHTML : html;
                         }}
                         el.innerHTML = html;

@@ -192,8 +192,32 @@ the **real** `render_html_tree` pipeline on device (replacing the 6-line smoke):
   `simple_subprocess_args_with_main`, so `find_project_root` resolves the module
   graph to `<root>` on device. Explicit `SIMPLE_ENTRY`/argv still take precedence.
 
-Desktop shell verified compiling (`cargo check`, clean). **Remaining: build the
-mobile runtime + APK/iOS app and verify the real showcase renders + events live.**
+Desktop shell verified compiling (`cargo check`, clean).
+
+### Live on Android emulator (2026-06-06): real pipeline runs on device
+
+Built the APK (embeds the 8 MB bundle), installed on `emulator-5554`, launched.
+Logcat proves the cross-compiled Simple runtime **extracted the bundle and ran
+the genuine `src/app/ui/main.spl tauri widget_showcase_mobile.ui.sdn`** pipeline:
+the full module graph loaded (engine2d/sffi gc-warnings) and it emitted a
+`{"type":"render",...}` IPC with **`html_len=344229`** (344 KB of generated HTML
+carrying the real `generate_css` design tokens) → `eval OK` (mounted in the
+Tauri2 webview). This is the real generate-on-model pipeline, NOT the 6-line smoke.
+
+**Bug found + fixed (honest):** the first device render was **unstyled** (black
+text on white, only top widgets visible). Root cause in `handle_subprocess_message`
+Render handler: it `DOMParser`-parsed the full document but applied only
+`parsed.body.innerHTML`, **discarding `parsed.head`** — the `<style>` with all the
+CSS. Fix: extract the head's `<style>` text into a persistent
+`<style id="simple-render-css">` and copy `data-*`/`class` theme attributes from
+the generated `<html>`/`<body>`. Rebuilding + re-verifying on device.
+
+Preflight oracle (desktop, extracted bundle exactly as device extracts it):
+`bin/simple run <bundle>/src/app/ui/main.spl tauri <bundle>/widget_showcase_mobile.ui.sdn`
+→ EXIT 0, 1 render, genuine widgets (46 `widget-button`, 50 `widget-gallery`,
+36 `widget-checkbox`, 12 `<button>`, 8 `<input>`, 2 `<table>`).
+
+**Remaining: confirm styled render + events live on Android, then iOS.**
 
 ## Next milestones
 
