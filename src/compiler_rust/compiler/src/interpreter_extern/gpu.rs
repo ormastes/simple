@@ -1207,7 +1207,7 @@ pub fn rt_cuda_module_get_function_fn(args: &[Value]) -> Result<Value, CompileEr
             let c_name = c_string_or_error(func_name, "rt_cuda_module_get_function")?;
             let mut func: *mut std::os::raw::c_void = std::ptr::null_mut();
             let r =
-                unsafe { (fns.module_get_function)(&mut func, module as *mut std::os::raw::c_void, c_name.as_ptr()) };
+                unsafe { (fns.module_get_function)(&mut func, module as *mut std::os::raw::c_void, c_name.as_ptr().cast()) };
             if r == 0 {
                 return Ok(Value::Int(func as i64));
             }
@@ -1248,7 +1248,7 @@ pub fn rt_cuda_launch_kernel_fn(args: &[Value]) -> Result<Value, CompileError> {
             let c_name = c_string_or_error(func_name, "rt_cuda_launch_kernel")?;
             let mut func: *mut std::os::raw::c_void = std::ptr::null_mut();
             let r =
-                unsafe { (fns.module_get_function)(&mut func, module as *mut std::os::raw::c_void, c_name.as_ptr()) };
+                unsafe { (fns.module_get_function)(&mut func, module as *mut std::os::raw::c_void, c_name.as_ptr().cast()) };
             if r != 0 {
                 return Ok(Value::Int(-(r as i64)));
             }

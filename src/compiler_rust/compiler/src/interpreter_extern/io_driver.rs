@@ -72,7 +72,7 @@ pub fn dispatch(name: &str, args: &[Value]) -> Option<Result<Value, CompileError
         "rt_driver_submit_connect" => {
             let addr = get_cstr(args, 2);
             Ok(Value::Int(unsafe {
-                rt_driver_submit_connect(get_i64(args, 0), get_i64(args, 1), addr.as_ptr(), get_i64(args, 3))
+                rt_driver_submit_connect(get_i64(args, 0), get_i64(args, 1), addr.as_ptr().cast(), get_i64(args, 3))
             }))
         }
         "rt_driver_submit_recv" => Ok(Value::Int(unsafe {
@@ -112,7 +112,7 @@ pub fn dispatch(name: &str, args: &[Value]) -> Option<Result<Value, CompileError
         "rt_driver_submit_open" => {
             let path = get_cstr(args, 1);
             Ok(Value::Int(unsafe {
-                rt_driver_submit_open(get_i64(args, 0), path.as_ptr(), get_i64(args, 2), get_i64(args, 3))
+                rt_driver_submit_open(get_i64(args, 0), path.as_ptr().cast(), get_i64(args, 2), get_i64(args, 3))
             }))
         }
         "rt_driver_submit_close" => Ok(Value::Int(unsafe {
@@ -163,7 +163,7 @@ pub fn dispatch(name: &str, args: &[Value]) -> Option<Result<Value, CompileError
             if ptr.is_null() {
                 Ok(Value::Str("unknown".into()))
             } else {
-                let cstr = std::ffi::CStr::from_ptr(ptr as *const i8);
+                let cstr = std::ffi::CStr::from_ptr(ptr as *const std::os::raw::c_char);
                 Ok(Value::Str(cstr.to_string_lossy().into_owned().into()))
             }
         },
