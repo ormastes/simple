@@ -1,9 +1,9 @@
 # @cover src/lib/nogc_sync_mut/ui_test/sgtti.spl 80%
 use std.spec.{describe, it, expect}
-use std.ui_test.sgtti.{SgttiTestDriver, UI_TEST_TARGET_TUI, UI_TEST_TARGET_GUI, UI_TEST_TARGET_BOTH, ui_test_targets, sgtti_parity_check, sgtti_snapshot_from_tui_state, sgtti_snapshot_from_draw_ir_batch, expect_draw, gui_test_snapshot, gui_test_snapshot_default}
+use std.ui_test.sgtti.{SgttiTestDriver, UI_TEST_TARGET_TUI, UI_TEST_TARGET_GUI, UI_TEST_TARGET_BOTH, ui_test_targets, sgtti_parity_check, sgtti_snapshot_from_tui_state, sgtti_snapshot_from_draw_ir_batch, sgtti_snapshot_from_draw_ir_composition, expect_draw, gui_test_snapshot, gui_test_snapshot_default}
 use common.ui.access_types.{UiAccessNode, UiAccessProp, UiAccessSurface}
 use common.ui.builder.{column, text_widget, build_tree}
-use common.ui.draw_ir.{DRAW_IR_BACKEND_CPU, draw_ir_batch_with_source, draw_ir_box_with_style, draw_ir_embedding_config, draw_ir_port_command, draw_ir_rect_bounds, draw_ir_source_gui_ast, draw_ir_style_prop}
+use common.ui.draw_ir.{DRAW_IR_BACKEND_CPU, draw_ir_batch_with_source, draw_ir_box_with_style, draw_ir_composition, draw_ir_embedding_config, draw_ir_port_command, draw_ir_rect_bounds, draw_ir_source_gui_ast, draw_ir_source_html_ast, draw_ir_style_prop}
 use common.ui.widget.{UIState}
 use common.ui.win_text_access.{
     WinTextSnapshot,
@@ -128,6 +128,33 @@ fn _sgtti_gui_button_snapshot() -> WinTextSnapshot:
 
 fn _sgtti_shared_text_parity(tui: SgttiTestDriver, gui: SgttiTestDriver):
     sgtti_parity_check(tui, gui, "shared_text")
+
+fn _sgtti_gui_draw_ir_batch():
+    val panel = draw_ir_box_with_style(
+        "root",
+        10,
+        20,
+        100,
+        40,
+        0x112233u32,
+        draw_ir_rect_bounds(10, 20, 100, 40),
+        draw_ir_rect_bounds(12, 22, 96, 36),
+        draw_ir_rect_bounds(10, 20, 100, 40),
+        draw_ir_rect_bounds(0, 0, 200, 120),
+        [
+            draw_ir_style_prop("kind", "panel"),
+            draw_ir_style_prop("role", "canvas"),
+            draw_ir_style_prop("display", "flex")
+        ]
+    )
+    val port = draw_ir_port_command("root-port", "root", 30, 35)
+    draw_ir_batch_with_source(
+        "sgtti-gui-draw",
+        DRAW_IR_BACKEND_CPU,
+        draw_ir_embedding_config("main", "root", 0, 0, 200, 120, 0, 1000, true),
+        [panel, port],
+        draw_ir_source_gui_ast("sgtti-test", "style", "1")
+    )
 
 describe "SGTTI UI test driver":
 
@@ -268,3 +295,148 @@ describe "SGTTI UI test driver":
         expect(driver.expect_draw("root", "kind panel").unwrap()).to_equal(true)
         expect(driver.expect_draw("root", "role canvas").unwrap()).to_equal(true)
         expect(expect_draw(driver, "root-port", "parent root").unwrap()).to_equal(true)
+
+    it "asserts HTML backed Draw IR with visible text css and hit geometry":
+        val card = draw_ir_box_with_style(
+            "card",
+            4,
+            6,
+            120,
+            48,
+            0x1D4ED8u32,
+            draw_ir_rect_bounds(4, 6, 120, 48),
+            draw_ir_rect_bounds(8, 10, 112, 40),
+            draw_ir_rect_bounds(4, 6, 120, 48),
+            draw_ir_rect_bounds(0, 0, 160, 96),
+            [
+                draw_ir_style_prop("tag", "section"),
+                draw_ir_style_prop("kind", "html"),
+                draw_ir_style_prop("role", "region"),
+                draw_ir_style_prop("display", "block"),
+                draw_ir_style_prop("background-color", "#1d4ed8")
+            ]
+        )
+        val batch = draw_ir_batch_with_source(
+            "html-draw",
+            DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config("web", "card", 0, 0, 160, 96, 0, 1000, true),
+            [card],
+            draw_ir_source_html_ast("simple-web", "section", "card", "#card", "panel", "style", "1")
+        )
+        val driver = SgttiTestDriver.new(sgtti_snapshot_from_draw_ir_batch(batch, 1000, 5000, 1000))
+
+        expect(driver.expect_draw("card", "visible").unwrap()).to_equal(true)
+        expect(driver.expect_draw("card", "kind html").unwrap()).to_equal(true)
+        expect(driver.expect_draw("card", "role region").unwrap()).to_equal(true)
+        expect(driver.expect_draw("card", "css display block").unwrap()).to_equal(true)
+        expect(driver.expect_draw("card", "css background-color #1d4ed8").unwrap()).to_equal(true)
+        expect(driver.expect_draw("card", "geometry 4 6 120 48").unwrap()).to_equal(true)
+        expect(expect_draw(driver, "card", "hit_rect contains 32 24").unwrap()).to_equal(true)
+
+    it "asserts composed 2D html css and wasm draw contracts through expect_draw":
+        val html_panel = draw_ir_box_with_style(
+            "html-panel",
+            8,
+            10,
+            180,
+            90,
+            0x0F172Au32,
+            draw_ir_rect_bounds(8, 10, 180, 90),
+            draw_ir_rect_bounds(16, 18, 164, 74),
+            draw_ir_rect_bounds(8, 10, 180, 90),
+            draw_ir_rect_bounds(0, 0, 220, 140),
+            [
+                draw_ir_style_prop("kind", "html"),
+                draw_ir_style_prop("role", "region"),
+                draw_ir_style_prop("display", "grid"),
+                draw_ir_style_prop("contain", "paint")
+            ]
+        )
+        val wasm_canvas = draw_ir_box_with_style(
+            "wasm-canvas",
+            20,
+            28,
+            96,
+            48,
+            0x2563EBu32,
+            draw_ir_rect_bounds(20, 28, 96, 48),
+            draw_ir_rect_bounds(24, 32, 88, 40),
+            draw_ir_rect_bounds(20, 28, 96, 48),
+            draw_ir_rect_bounds(8, 10, 180, 90),
+            [
+                draw_ir_style_prop("kind", "canvas"),
+                draw_ir_style_prop("role", "wasm"),
+                draw_ir_style_prop("wasm-abi", "wasm32-simple-ui-host-wm")
+            ]
+        )
+        val canvas_port = draw_ir_port_command("wasm-canvas-port", "wasm-canvas", 44, 52)
+        val composition = draw_ir_composition("expect-draw-2d-wasm", "scene-2d-wasm", DRAW_IR_BACKEND_CPU, [
+            draw_ir_batch_with_source(
+                "html-css-batch",
+                DRAW_IR_BACKEND_CPU,
+                draw_ir_embedding_config("web-surface", "html-panel", 0, 0, 220, 140, 0, 1000, true),
+                [html_panel],
+                draw_ir_source_html_ast("html-node-9", "section", "html-panel", "#app .panel", "panel", "panel.grid", "css-rev-2")
+            ),
+            draw_ir_batch_with_source(
+                "wasm-2d-batch",
+                DRAW_IR_BACKEND_CPU,
+                draw_ir_embedding_config("wasm-surface", "wasm-canvas", 0, 0, 220, 140, 1, 1000, true),
+                [wasm_canvas, canvas_port],
+                draw_ir_source_gui_ast("wasm-scene-node", "canvas.wasm", "wasm-rev-1")
+            )
+        ])
+        val driver = SgttiTestDriver.new(sgtti_snapshot_from_draw_ir_composition(composition, 1000, 5000, 1000))
+
+        expect(driver.expect_draw("html-panel", "visible").unwrap()).to_equal(true)
+        expect(driver.expect_draw("html-panel", "kind html").unwrap()).to_equal(true)
+        expect(driver.expect_draw("html-panel", "css display grid").unwrap()).to_equal(true)
+        expect(driver.expect_draw("html-panel", "css contain paint").unwrap()).to_equal(true)
+        expect(driver.expect_draw("html-panel", "geometry 8 10 180 90").unwrap()).to_equal(true)
+        expect(driver.expect_draw("wasm-canvas", "role wasm").unwrap()).to_equal(true)
+        expect(driver.expect_draw("wasm-canvas", "css wasm-abi wasm32-simple-ui-host-wm").unwrap()).to_equal(true)
+        expect(driver.expect_draw("wasm-canvas", "hit_rect contains 64 48").unwrap()).to_equal(true)
+        expect(expect_draw(driver, "wasm-canvas-port", "parent wasm-canvas").unwrap()).to_equal(true)
+        expect(driver.expect_draw("wasm-canvas", "geometry 20 28 120 48").unwrap()).to_equal(false)
+
+    it "captures GUI Draw IR as visible access state evidence":
+        val batch = _sgtti_gui_draw_ir_batch()
+        val snapshot = sgtti_snapshot_from_draw_ir_batch(batch, 1000, 5000, 1000)
+        val driver = SgttiTestDriver.new(snapshot)
+        val root = driver.get_element("draw_ir:sgtti-gui-draw#root").unwrap()
+
+        expect(snapshot.access.mode).to_equal("draw_ir")
+        expect(snapshot.access.active_surface).to_equal("draw_ir:sgtti-gui-draw")
+        expect(snapshot.access.surfaces[0].app_id).to_equal("draw_ir")
+        expect(snapshot.sources[0].source_kind).to_equal("in_process_semantic")
+        expect(snapshot.sources[0].capabilities).to_contain("layout_read")
+        expect(root.visible).to_equal(true)
+        expect(root.kind).to_equal("rect")
+        expect(root.text_value).to_equal("")
+        expect(driver.check_visible("root").unwrap()).to_equal(true)
+        expect(driver.check_exists("root-port").unwrap()).to_equal(true)
+
+    it "converts GUI Draw IR compositions into expect_draw targets":
+        val batch = _sgtti_gui_draw_ir_batch()
+        val composition = draw_ir_composition("sgtti-composition", "scene-1", DRAW_IR_BACKEND_CPU, [batch])
+        val driver = SgttiTestDriver.new(sgtti_snapshot_from_draw_ir_composition(composition, 1000, 5000, 1000))
+
+        expect(driver.get_elements().unwrap().len()).to_equal(2)
+        expect(driver.expect_draw("root", "geometry 10 20 100 40").unwrap()).to_equal(true)
+        expect(driver.expect_draw("root", "css display flex").unwrap()).to_equal(true)
+        expect(driver.expect_draw("root-port", "parent root").unwrap()).to_equal(true)
+
+    it "reports failed GUI Draw IR assertions without passing silently":
+        val batch = _sgtti_gui_draw_ir_batch()
+        val driver = SgttiTestDriver.new(sgtti_snapshot_from_draw_ir_batch(batch, 1000, 5000, 1000))
+        val missing_kind = driver.expect_draw("root", "kind dialog").unwrap()
+        val outside_hit_rect = driver.expect_draw("root", "hit_rect contains 500 500").unwrap()
+        val unknown_assertion = driver.expect_draw("root", "opacity 1000")
+        val malformed_geometry = driver.expect_draw("root", "geometry 10")
+
+        expect(missing_kind).to_equal(false)
+        expect(outside_hit_rect).to_equal(false)
+        expect(unknown_assertion.is_err()).to_equal(true)
+        expect(unknown_assertion.unwrap_err()).to_contain("unknown draw assertion")
+        expect(malformed_geometry.is_err()).to_equal(true)
+        expect(malformed_geometry.unwrap_err()).to_contain("geometry assertion requires")

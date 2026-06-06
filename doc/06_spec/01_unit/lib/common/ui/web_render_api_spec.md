@@ -27,7 +27,7 @@ web_render_api_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 17 | 17 | 0 | 0 |
+| 18 | 18 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -360,6 +360,54 @@ expect(artifact.capability_summary).to_contain("no_javascript")
 
 </details>
 
+#### ties WASM html css metadata to 2D pixel artifact provenance
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 35 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val body = "<main><section id=\"card\" class=\"panel\">Ready</section><canvas id=\"scene\"></canvas></main>"
+val css = ".panel{display:grid;contain:paint}.panel canvas{image-rendering:pixelated}"
+val wasm_req = WebRenderRequest.html(WEB_RENDER_TARGET_HOST_WM_WASM, "2D Contract", body, css, "", 320, 180)
+val wasm_meta = WebRenderWasmArtifactMetadata.create("build/gui/host-wm/expect-draw-2d.wasm", web_render_wasm_abi_for_target(WEB_RENDER_TARGET_HOST_WM_WASM), 16384, 2048, 42)
+val wasm_artifact = web_render_generated_wasm_artifact(wasm_req, wasm_meta)
+val pixel_req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "2D Contract", body, css, "", 4, 2).with_pixel_output()
+val rendered = web_render_engine2d_rendered_artifact(
+    web_render_pixel_artifact(pixel_req, [
+        0xFF0F172Au32,
+        0xFF0F172Au32,
+        0xFF2563EBu32,
+        0xFF2563EBu32,
+        0xFF111827u32,
+        0xFF111827u32,
+        0xFFFFFFFFu32,
+        0xFFFFFFFFu32
+    ]),
+    "software"
+)
+
+expect(web_render_wasm_no_js_is_valid(wasm_req, wasm_meta)).to_equal(true)
+expect(wasm_artifact.target).to_equal(WEB_RENDER_TARGET_HOST_WM_WASM)
+expect(wasm_artifact.binary_schema).to_equal(WEB_RENDER_WASM_SCHEMA_VERSION)
+expect(wasm_artifact.binary_cache_key).to_contain("wasm=build/gui/host-wm/expect-draw-2d.wasm")
+expect(wasm_artifact.html).to_contain("<canvas id=\"scene\"></canvas>")
+expect(wasm_artifact.html).to_contain("<style>.panel{display:grid;contain:paint}.panel canvas{image-rendering:pixelated}</style>")
+expect(wasm_artifact.html.contains("<script>")).to_equal(false)
+expect(rendered.target).to_equal(WEB_RENDER_TARGET_PURE_SIMPLE)
+expect(rendered.pixels.len()).to_equal(8)
+expect(rendered.viewport_w).to_equal(4)
+expect(rendered.viewport_h).to_equal(2)
+expect(rendered.html).to_contain("image-rendering:pixelated")
+expect(rendered.engine2d_status).to_equal(WEB_RENDER_ENGINE2D_STATUS_RENDERED)
+expect(rendered.engine2d_backend).to_equal("software")
+expect(rendered.engine2d_reason).to_contain("Engine2D")
+```
+
+</details>
+
 #### requires measured GUI and text timings to beat GTK on the same scene
 
 <details>
@@ -525,8 +573,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 17 |
-| Active scenarios | 17 |
+| Total scenarios | 18 |
+| Active scenarios | 18 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

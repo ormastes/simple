@@ -28,7 +28,7 @@ sgtti_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 13 | 13 | 0 | 0 |
+| 18 | 18 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -346,6 +346,285 @@ expect(expect_draw(driver, "root-port", "parent root").unwrap()).to_equal(true)
 
 </details>
 
+#### asserts HTML backed Draw IR with visible text css and hit geometry
+
+1. draw ir rect bounds
+
+2. draw ir rect bounds
+
+3. draw ir rect bounds
+
+4. draw ir rect bounds
+
+5. draw ir style prop
+
+6. draw ir style prop
+
+7. draw ir style prop
+
+8. draw ir style prop
+
+9. draw ir style prop
+
+10. draw ir embedding config
+
+11. draw ir source html ast
+   - Expected: driver.expect_draw("card", "visible").unwrap() is true
+   - Expected: driver.expect_draw("card", "kind html").unwrap() is true
+   - Expected: driver.expect_draw("card", "role region").unwrap() is true
+   - Expected: driver.expect_draw("card", "css display block").unwrap() is true
+   - Expected: driver.expect_draw("card", "css background-color #1d4ed8").unwrap() is true
+   - Expected: driver.expect_draw("card", "geometry 4 6 120 48").unwrap() is true
+   - Expected: expect_draw(driver, "card", "hit_rect contains 32 24").unwrap() is true
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 35 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val card = draw_ir_box_with_style(
+    "card",
+    4,
+    6,
+    120,
+    48,
+    0x1D4ED8u32,
+    draw_ir_rect_bounds(4, 6, 120, 48),
+    draw_ir_rect_bounds(8, 10, 112, 40),
+    draw_ir_rect_bounds(4, 6, 120, 48),
+    draw_ir_rect_bounds(0, 0, 160, 96),
+    [
+        draw_ir_style_prop("tag", "section"),
+        draw_ir_style_prop("kind", "html"),
+        draw_ir_style_prop("role", "region"),
+        draw_ir_style_prop("display", "block"),
+        draw_ir_style_prop("background-color", "#1d4ed8")
+    ]
+)
+val batch = draw_ir_batch_with_source(
+    "html-draw",
+    DRAW_IR_BACKEND_CPU,
+    draw_ir_embedding_config("web", "card", 0, 0, 160, 96, 0, 1000, true),
+    [card],
+    draw_ir_source_html_ast("simple-web", "section", "card", "#card", "panel", "style", "1")
+)
+val driver = SgttiTestDriver.new(sgtti_snapshot_from_draw_ir_batch(batch, 1000, 5000, 1000))
+
+expect(driver.expect_draw("card", "visible").unwrap()).to_equal(true)
+expect(driver.expect_draw("card", "kind html").unwrap()).to_equal(true)
+expect(driver.expect_draw("card", "role region").unwrap()).to_equal(true)
+expect(driver.expect_draw("card", "css display block").unwrap()).to_equal(true)
+expect(driver.expect_draw("card", "css background-color #1d4ed8").unwrap()).to_equal(true)
+expect(driver.expect_draw("card", "geometry 4 6 120 48").unwrap()).to_equal(true)
+expect(expect_draw(driver, "card", "hit_rect contains 32 24").unwrap()).to_equal(true)
+```
+
+</details>
+
+#### asserts composed 2D html css and wasm draw contracts through expect_draw
+
+1. draw ir rect bounds
+
+2. draw ir rect bounds
+
+3. draw ir rect bounds
+
+4. draw ir rect bounds
+
+5. draw ir style prop
+
+6. draw ir style prop
+
+7. draw ir style prop
+
+8. draw ir style prop
+
+9. draw ir rect bounds
+
+10. draw ir rect bounds
+
+11. draw ir rect bounds
+
+12. draw ir rect bounds
+
+13. draw ir style prop
+
+14. draw ir style prop
+
+15. draw ir style prop
+
+16. draw ir embedding config
+
+17. draw ir source html ast
+
+18. draw ir embedding config
+
+19. draw ir source gui ast
+   - Expected: driver.expect_draw("html-panel", "visible").unwrap() is true
+   - Expected: driver.expect_draw("html-panel", "kind html").unwrap() is true
+   - Expected: driver.expect_draw("html-panel", "css display grid").unwrap() is true
+   - Expected: driver.expect_draw("html-panel", "css contain paint").unwrap() is true
+   - Expected: driver.expect_draw("html-panel", "geometry 8 10 180 90").unwrap() is true
+   - Expected: driver.expect_draw("wasm-canvas", "role wasm").unwrap() is true
+   - Expected: driver.expect_draw("wasm-canvas", "css wasm-abi wasm32-simple-ui-host-wm").unwrap() is true
+   - Expected: driver.expect_draw("wasm-canvas", "hit_rect contains 64 48").unwrap() is true
+   - Expected: expect_draw(driver, "wasm-canvas-port", "parent wasm-canvas").unwrap() is true
+   - Expected: driver.expect_draw("wasm-canvas", "geometry 20 28 120 48").unwrap() is false
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 64 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html_panel = draw_ir_box_with_style(
+    "html-panel",
+    8,
+    10,
+    180,
+    90,
+    0x0F172Au32,
+    draw_ir_rect_bounds(8, 10, 180, 90),
+    draw_ir_rect_bounds(16, 18, 164, 74),
+    draw_ir_rect_bounds(8, 10, 180, 90),
+    draw_ir_rect_bounds(0, 0, 220, 140),
+    [
+        draw_ir_style_prop("kind", "html"),
+        draw_ir_style_prop("role", "region"),
+        draw_ir_style_prop("display", "grid"),
+        draw_ir_style_prop("contain", "paint")
+    ]
+)
+val wasm_canvas = draw_ir_box_with_style(
+    "wasm-canvas",
+    20,
+    28,
+    96,
+    48,
+    0x2563EBu32,
+    draw_ir_rect_bounds(20, 28, 96, 48),
+    draw_ir_rect_bounds(24, 32, 88, 40),
+    draw_ir_rect_bounds(20, 28, 96, 48),
+    draw_ir_rect_bounds(8, 10, 180, 90),
+    [
+        draw_ir_style_prop("kind", "canvas"),
+        draw_ir_style_prop("role", "wasm"),
+        draw_ir_style_prop("wasm-abi", "wasm32-simple-ui-host-wm")
+    ]
+)
+val canvas_port = draw_ir_port_command("wasm-canvas-port", "wasm-canvas", 44, 52)
+val composition = draw_ir_composition("expect-draw-2d-wasm", "scene-2d-wasm", DRAW_IR_BACKEND_CPU, [
+    draw_ir_batch_with_source(
+        "html-css-batch",
+        DRAW_IR_BACKEND_CPU,
+        draw_ir_embedding_config("web-surface", "html-panel", 0, 0, 220, 140, 0, 1000, true),
+        [html_panel],
+        draw_ir_source_html_ast("html-node-9", "section", "html-panel", "#app .panel", "panel", "panel.grid", "css-rev-2")
+    ),
+    draw_ir_batch_with_source(
+        "wasm-2d-batch",
+        DRAW_IR_BACKEND_CPU,
+        draw_ir_embedding_config("wasm-surface", "wasm-canvas", 0, 0, 220, 140, 1, 1000, true),
+        [wasm_canvas, canvas_port],
+        draw_ir_source_gui_ast("wasm-scene-node", "canvas.wasm", "wasm-rev-1")
+    )
+])
+val driver = SgttiTestDriver.new(sgtti_snapshot_from_draw_ir_composition(composition, 1000, 5000, 1000))
+
+expect(driver.expect_draw("html-panel", "visible").unwrap()).to_equal(true)
+expect(driver.expect_draw("html-panel", "kind html").unwrap()).to_equal(true)
+expect(driver.expect_draw("html-panel", "css display grid").unwrap()).to_equal(true)
+expect(driver.expect_draw("html-panel", "css contain paint").unwrap()).to_equal(true)
+expect(driver.expect_draw("html-panel", "geometry 8 10 180 90").unwrap()).to_equal(true)
+expect(driver.expect_draw("wasm-canvas", "role wasm").unwrap()).to_equal(true)
+expect(driver.expect_draw("wasm-canvas", "css wasm-abi wasm32-simple-ui-host-wm").unwrap()).to_equal(true)
+expect(driver.expect_draw("wasm-canvas", "hit_rect contains 64 48").unwrap()).to_equal(true)
+expect(expect_draw(driver, "wasm-canvas-port", "parent wasm-canvas").unwrap()).to_equal(true)
+expect(driver.expect_draw("wasm-canvas", "geometry 20 28 120 48").unwrap()).to_equal(false)
+```
+
+</details>
+
+#### captures GUI Draw IR as visible access state evidence
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val batch = _sgtti_gui_draw_ir_batch()
+val snapshot = sgtti_snapshot_from_draw_ir_batch(batch, 1000, 5000, 1000)
+val driver = SgttiTestDriver.new(snapshot)
+val root = driver.get_element("draw_ir:sgtti-gui-draw#root").unwrap()
+
+expect(snapshot.access.mode).to_equal("draw_ir")
+expect(snapshot.access.active_surface).to_equal("draw_ir:sgtti-gui-draw")
+expect(snapshot.access.surfaces[0].app_id).to_equal("draw_ir")
+expect(snapshot.sources[0].source_kind).to_equal("in_process_semantic")
+expect(snapshot.sources[0].capabilities).to_contain("layout_read")
+expect(root.visible).to_equal(true)
+expect(root.kind).to_equal("rect")
+expect(root.text_value).to_equal("")
+expect(driver.check_visible("root").unwrap()).to_equal(true)
+expect(driver.check_exists("root-port").unwrap()).to_equal(true)
+```
+
+</details>
+
+#### converts GUI Draw IR compositions into expect_draw targets
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val batch = _sgtti_gui_draw_ir_batch()
+val composition = draw_ir_composition("sgtti-composition", "scene-1", DRAW_IR_BACKEND_CPU, [batch])
+val driver = SgttiTestDriver.new(sgtti_snapshot_from_draw_ir_composition(composition, 1000, 5000, 1000))
+
+expect(driver.get_elements().unwrap().len()).to_equal(2)
+expect(driver.expect_draw("root", "geometry 10 20 100 40").unwrap()).to_equal(true)
+expect(driver.expect_draw("root", "css display flex").unwrap()).to_equal(true)
+expect(driver.expect_draw("root-port", "parent root").unwrap()).to_equal(true)
+```
+
+</details>
+
+#### reports failed GUI Draw IR assertions without passing silently
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val batch = _sgtti_gui_draw_ir_batch()
+val driver = SgttiTestDriver.new(sgtti_snapshot_from_draw_ir_batch(batch, 1000, 5000, 1000))
+val missing_kind = driver.expect_draw("root", "kind dialog").unwrap()
+val outside_hit_rect = driver.expect_draw("root", "hit_rect contains 500 500").unwrap()
+val unknown_assertion = driver.expect_draw("root", "opacity 1000")
+val malformed_geometry = driver.expect_draw("root", "geometry 10")
+
+expect(missing_kind).to_equal(false)
+expect(outside_hit_rect).to_equal(false)
+expect(unknown_assertion.is_err()).to_equal(true)
+expect(unknown_assertion.unwrap_err()).to_contain("unknown draw assertion")
+expect(malformed_geometry.is_err()).to_equal(true)
+expect(malformed_geometry.unwrap_err()).to_contain("geometry assertion requires")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -365,8 +644,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 18 |
+| Active scenarios | 18 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
