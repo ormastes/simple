@@ -32,8 +32,8 @@ report for the current Simple backend profile. It was regenerated at 320x240,
 
 | Backend | Frame p50 | Frame p95 | Status | Measurement |
 |---------|-----------|-----------|--------|-------------|
-| Simple CUDA fill | 0.528 ms | 0.528 ms | valid | Device-buffer fill/readback, checksum `sum32:328570011648000`, `nonzero_pixels:76800` |
-| Simple Web software | 20821.511 ms | 20821.511 ms | valid | Real `simple_web_render_html_to_pixels_with_engine2d_backend` render-loop row, checksum `sum32:328745677397784`, `nonzero_pixels:76800` |
+| Simple CUDA fill | 0.479 ms | 0.479 ms | valid | Device-buffer fill/readback, checksum `sum32:328570011648000`, `nonzero_pixels:76800` |
+| Simple Web software | 3011.155 ms | 3011.155 ms | valid | Narrow software-only `simple_web_render_html_to_pixels_with_engine2d_backend` render-loop row, checksum `sum32:328745677397784`, `nonzero_pixels:76800` |
 
 The CUDA row proves the generated Engine2D GPU fill lane is measurable on this
 host. The software web row is not an availability probe anymore; it is a real
@@ -83,8 +83,8 @@ DISPLAY=:99 build/gui_perf_bench/bench_gtk --width 7680 --height 4320 --frames 6
 bin/simple run src/app/wm_compare/backend_measurement_export.spl -- \
   --measure-cuda-device-buffer true --width 7680 --height 4320
 
-bin/simple run src/app/wm_compare/backend_measurement_export.spl -- \
-  --measure-software-render-loop true --software-render-backend software \
+bin/simple run src/app/wm_compare/backend_measurement_software_export.spl -- \
+  --software-render-backend software \
   --width 320 --height 240 --warmup-count 1 --sample-count 1
 ```
 
@@ -110,8 +110,9 @@ bin/simple run src/app/wm_compare/backend_measurement_export.spl -- \
 - Dirty-rect tracking avoids full 127 MB writes for partial updates
 - Software layout renders must not replay the already-painted framebuffer
   through an Engine2D software present/readback cycle. The 2026-06-06
-  render-loop smoke dropped from about 13.98s to about 3.27s at 320x240 after
-  returning the painted software framebuffer directly.
+  render-loop smoke dropped from about 20.82s in the broad profile path to
+  about 3.01s at 320x240 after returning the painted software framebuffer
+  directly and measuring through the narrow software-only exporter.
 - Text remains the dominant software-layout cost. Direct 320x240 fixture timing
   showed a solid page at about 2ms, layout without text at about 244ms, and
   layout with text at about 1.21-1.29s after char-code glyph lookup and packed
@@ -145,6 +146,7 @@ tools/gui_perf_bench/
 src/app/wm_compare/
   backend_measurement_cuda.spl    # CUDA device-buffer measurement
   backend_measurement_export.spl  # CLI entry point
+  backend_measurement_software_export.spl # Narrow software render-loop CLI
   backend_measurement_report.spl  # BackendComparisonSample + SDN export
 
 src/os/compositor/

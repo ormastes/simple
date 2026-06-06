@@ -28,7 +28,7 @@ backend_measurement_capture_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 22 | 22 | 0 | 0 |
+| 23 | 23 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -969,6 +969,42 @@ expect(sdn).to_contain("sample_count: 1")
 
 </details>
 
+<details>
+<summary>Advanced: exports measured Simple software render-loop rows through the narrow software entrypoint</summary>
+
+#### exports measured Simple software render-loop rows through the narrow software entrypoint
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val sdn = software_only_render_loop_export_sdn([
+    "--software-render-backend", "software",
+    "--width", "8",
+    "--height", "8",
+    "--warmup-count", "0",
+    "--sample-count", "1",
+    "--fixture", "wm_compare:software-only-render-loop",
+    "--shell", "simple-web",
+    "--command", "software-only-render-loop-spec",
+    "--host", "linux-x86_64"
+])
+expect(sdn).to_contain("valid: true")
+expect(sdn).to_contain("backend_family: \"software\"")
+expect(sdn).to_contain("render_readback_scope: \"software-render-loop\"")
+expect(sdn).to_contain("checksum: \"sum32:")
+expect(sdn).to_contain("pixel_proof: \"nonzero_pixels:")
+expect(sdn).to_contain("sample_count: 1")
+```
+
+</details>
+
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -988,8 +1024,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 22 |
-| Active scenarios | 22 |
+| Total scenarios | 23 |
+| Active scenarios | 23 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

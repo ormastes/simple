@@ -76,16 +76,22 @@ Resolved later on 2026-06-06 for the software render-loop profile row:
   measures actual `simple_web_render_html_to_pixels_with_engine2d_backend`
   calls and emits non-zero `p50_frame_us` / `p95_frame_us`, checksum, and
   `nonzero_pixels` proof.
-- The GUI profile harness now uses that mode for `simple_web_software`.
+- The GUI profile harness initially used that broad mode for
+  `simple_web_software`; the current harness uses the narrower
+  `backend_measurement_software_export.spl` entrypoint.
 - `simple_web_layout_render_html_pixels` now returns the painted software
   framebuffer directly for `software`/`cpu` instead of blitting it into an
   Engine2D software backend, presenting, and reading it back again.
+- `backend_measurement_software_export.spl` provides a narrow software-only
+  profile entrypoint, so the Simple Web software row does not import the full
+  backend matrix just to measure a software render loop.
 - Measured smoke at 320x240, 1 timed frame:
   - before software render-loop mode: zero frame samples, availability only;
   - after adding render-loop mode before bypass: `p95_frame_us` about
     `13,981,066`;
-  - after bypassing redundant software present/readback: `p95_frame_us` about
-    `3,266,908` to `3,319,642` on repeated smoke runs;
+  - after bypassing redundant software present/readback and using the narrow
+    software profile entrypoint: `p95_frame_us` about `3,011,155` on the latest
+    linked smoke run;
   - checksum stayed `sum32:328820832230016`, proof stayed
     `nonzero_pixels:76800`.
 - `test/03_system/gui/wm_compare/famous_site_engine2d_backend_spec.spl` now
@@ -114,7 +120,7 @@ render loop instead of an initialized-backend availability row:
 - `tools/gui_perf_bench/run_all_benchmarks.shs` selects `bin/simple`,
   `bin/release/simple`, or `bin/bootstrap/simple`, in that order.
 - `simple_web_software` calls
-  `backend_measurement_export.spl --measure-software-render-loop true`.
+  `backend_measurement_software_export.spl --software-render-backend software`.
 - `pure_simple_cuda` passes `--measure-cuda-device-buffer true`, so it records
   the actual CUDA device-buffer row instead of falling back to the generic
   backend matrix.
@@ -126,14 +132,14 @@ Current report evidence on host `dl`:
 
 | Lane | p50 | p95 | Proof |
 |------|-----|-----|-------|
-| CUDA fill | 528us | 528us | `sum32:328570011648000`, `nonzero_pixels:76800` |
-| Simple web software | 20821511us | 20821511us | `sum32:328745677397784`, `nonzero_pixels:76800` |
+| CUDA fill | 479us | 479us | `sum32:328570011648000`, `nonzero_pixels:76800` |
+| Simple web software | 3011155us | 3011155us | `sum32:328745677397784`, `nonzero_pixels:76800` |
 
 This confirms the generated CUDA fill lane is fast and measurable, while the
 pure Simple web software lane is still dominated by interpreted text/layout
 work.
 
-Open JIT blocker: running the software render-loop command still prints
+Open JIT blocker: running the narrow software render-loop command still prints
 `[INFO] JIT compilation failed, falling back to interpreter: HIR lowering error:
 Unknown type: any`. A behavior-preserving local rename in
 `simple_web_html_layout_renderer.parse_int` avoided a reserved-looking local
