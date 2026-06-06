@@ -28,7 +28,7 @@ green_carrier_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 20 | 20 | 0 | 0 |
+| 21 | 21 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -548,6 +548,43 @@ expect(intent.reason).to_equal("queue_empty")
 
 ### execution apply
 
+#### extends execution state for additional carrier CPUs
+
+1. green carrier run queues new
+
+2. green carrier spawn task
+   - Expected: applied.applied is true
+   - Expected: green_carrier_current_task_on_cpu(applied.state, 3) equals `39`
+   - Expected: green_carrier_context_switches_on_cpu(applied.state, 3) equals `1`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val state = green_carrier_execution_state_new(1)
+val extended = green_carrier_extend_execution_state(state, 4)
+val intent = green_carrier_scheduler_intent(
+    green_carrier_dispatch_next(
+        green_carrier_apply_enqueue(
+            green_carrier_run_queues_new(4, 8),
+            green_carrier_spawn_task(39, 4, 8, 3, 1, 2, 4, 0)
+        ).queues,
+        3
+    )
+)
+val applied = green_carrier_apply_scheduler_intent(extended, intent)
+
+expect(applied.applied).to_equal(true)
+expect(green_carrier_current_task_on_cpu(applied.state, 3)).to_equal(39)
+expect(green_carrier_context_switches_on_cpu(applied.state, 3)).to_equal(1)
+```
+
+</details>
+
 #### records current green task and switch count for scheduler intent
 
 1. smp init
@@ -651,8 +688,8 @@ expect(apply2.state.total_context_switches).to_equal(2)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 20 |
-| Active scenarios | 20 |
+| Total scenarios | 21 |
+| Active scenarios | 21 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

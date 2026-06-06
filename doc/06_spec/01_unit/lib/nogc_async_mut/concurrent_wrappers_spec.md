@@ -75,7 +75,7 @@ expect(done).to_equal(1)
 
 </details>
 
-#### spawn2 passes two arguments
+#### two-argument thread spawn passes arguments
 
 <details>
 <summary>Executable SPipe</summary>

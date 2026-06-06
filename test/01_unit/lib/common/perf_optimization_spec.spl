@@ -84,7 +84,7 @@ fn spawn_thread(closure: Any) -> ThreadHandle:
     val handle = rt_thread_spawn_isolated(closure)
     return ThreadHandle(_handle: handle)
 
-fn spawn2(data1: Any, data2: Any, closure: fn(Any, Any) -> Any) -> ThreadHandle:
+fn spawn_thread_with_args(data1: Any, data2: Any, closure: fn(Any, Any) -> Any) -> ThreadHandle:
     val handle = rt_thread_spawn_isolated2(closure=closure, data1=data1, data2=data2)
     return ThreadHandle(_handle: handle)
 
@@ -194,29 +194,29 @@ describe "rt_thread_spawn_isolated2 - Two-arg Closure":
 
     context "basic two-arg execution":
         it "adds two numbers":
-            val handle = spawn2(5, 3) \x, y: x + y
+            val handle = spawn_thread_with_args(5, 3) \x, y: x + y
             val result = handle.join()
             expect result == 8
 
         it "concatenates strings":
-            val handle = spawn2("hello", " world") \a, b: a + b
+            val handle = spawn_thread_with_args("hello", " world") \a, b: a + b
             val result = handle.join()
             expect result == "hello world"
 
         it "returns first argument":
-            val handle = spawn2(42, 99) \x, y: x
+            val handle = spawn_thread_with_args(42, 99) \x, y: x
             val result = handle.join()
             expect result == 42
 
         it "returns second argument":
-            val handle = spawn2(42, 99) \x, y: y
+            val handle = spawn_thread_with_args(42, 99) \x, y: y
             val result = handle.join()
             expect result == 99
 
     context "closure with channel communication":
         it "sends result via channel":
             val ch = new_channel()
-            val handle = spawn2(6, ch._id) \data, channel_id:
+            val handle = spawn_thread_with_args(6, ch._id) \data, channel_id:
                 rt_channel_send(channel_id, data * 7)
                 return nil
 
@@ -227,7 +227,7 @@ describe "rt_thread_spawn_isolated2 - Two-arg Closure":
 
         it "sends multiple values via channel":
             val ch = new_channel()
-            val handle = spawn2(3, ch._id) \count, channel_id:
+            val handle = spawn_thread_with_args(3, ch._id) \count, channel_id:
                 for i in 0..count:
                     rt_channel_send(channel_id, i * 10)
                 return nil
@@ -242,7 +242,7 @@ describe "rt_thread_spawn_isolated2 - Two-arg Closure":
         it "runs 5 threads with accumulation":
             var total = 0
             for i in 0..5:
-                val handle = spawn2(i, i + 1) \a, b: a * b
+                val handle = spawn_thread_with_args(i, i + 1) \a, b: a * b
                 total = total + handle.join()
             # 0*1 + 1*2 + 2*3 + 3*4 + 4*5 = 0+2+6+12+20 = 40
             expect total == 40
@@ -295,7 +295,7 @@ describe "Concurrent Backend Configuration":
 
         it "spawn_isolated2 works in native mode":
             rt_set_concurrent_backend("native")
-            # native backend spawn2 returns nil in interpreter; verify backend switched
+            # native backend thread-spawn-with-args returns nil in interpreter; verify backend switched
             val backend = rt_get_concurrent_backend()
             expect backend == "native"
             rt_set_concurrent_backend("pure_std")
@@ -332,7 +332,7 @@ describe "Integration - Threads + Channels + Backend":
     context "producer-consumer pattern":
         it "thread produces main consumes":
             val ch = new_channel()
-            val handle = spawn2(ch._id, 5) \channel_id, count:
+            val handle = spawn_thread_with_args(ch._id, 5) \channel_id, count:
                 for i in 0..count:
                     rt_channel_send(channel_id, i * 10)
                 return "done"
@@ -354,7 +354,7 @@ describe "Integration - Threads + Channels + Backend":
             var handles = []
 
             for i in 0..5:
-                val h = spawn2(i, ch._id) \data, channel_id:
+                val h = spawn_thread_with_args(i, ch._id) \data, channel_id:
                     rt_channel_send(channel_id, data)
                     return nil
                 handles = handles.push(h)
@@ -374,19 +374,19 @@ describe "Integration - Threads + Channels + Backend":
     context "thread with complex captured data":
         it "captures dict and processes it":
             # Dict key iteration in closures doesn't work in interpreter;
-            # verify spawn2 with simple dict field access works
+            # verify spawn_thread_with_args with simple dict field access works
             val data = {"a": 1, "b": 2, "c": 3}
-            val handle = spawn2(data, nil) \d, _:
+            val handle = spawn_thread_with_args(data, nil) \d, _:
                 d["a"] + d["b"] + d["c"]
 
             val result = handle.join()
             expect result == 6
 
         it "captures list and computes sum":
-            # Use spawn2 with pre-computed sum to avoid closure mutation
+            # Use spawn_thread_with_args with pre-computed sum to avoid closure mutation
             val numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
             val precomputed = 55
-            val handle = spawn2(precomputed, nil) \s, _: s
+            val handle = spawn_thread_with_args(precomputed, nil) \s, _: s
 
             expect handle.join() == 55
 
@@ -424,7 +424,7 @@ describe "Stress Tests":
         it "spawns 50 two-arg threads":
             var total = 0
             for i in 0..50:
-                val h = spawn2(i, 1) \a, b: a + b
+                val h = spawn_thread_with_args(i, 1) \a, b: a + b
                 total = total + h.join()
             # Sum of (i+1) for i in 0..50 = 0+1+1+2+1+3+...+1+50 = sum(1..51) = 1275
             expect total == 1275
@@ -463,7 +463,7 @@ describe "Stress Tests":
             var handles = []
 
             for i in 0..10:
-                val h = spawn2(i, ch._id) \thread_num, channel_id:
+                val h = spawn_thread_with_args(i, ch._id) \thread_num, channel_id:
                     for j in 0..5:
                         rt_channel_send(channel_id, thread_num * 100 + j)
                     return nil
@@ -559,7 +559,7 @@ describe "Edge Cases":
             val h = spawn_thread(\: 99)
             expect h.join() == 99
 
-    context "spawn2 with nil arguments":
+    context "spawn_thread_with_args with nil arguments":
         it "handles nil data arguments":
-            val handle = spawn2(nil, nil) \a, b: "ok"
+            val handle = spawn_thread_with_args(nil, nil) \a, b: "ok"
             expect handle.join() == "ok"

@@ -28,6 +28,13 @@ use os.kernel.types.task_types.{
 }
 use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.scheduler.scheduler.{Scheduler, ReadyQueue, PiMutex, SchedulerPreemptionReason, SchedulerTraceKind, scheduler_user_context_for_arch}
+use os.kernel.scheduler.green_carrier.{
+    green_carrier_run_queues_new,
+    green_carrier_spawn_task,
+    green_carrier_apply_enqueue,
+    green_carrier_dispatch_next,
+    green_carrier_scheduler_intent
+}
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.loader.executable_source.{_set_synthetic_initramfs_for_test, _clear_synthetic_initramfs_for_test}
 use os.kernel.ipc.notif_global.{g_notification_table}
@@ -238,6 +245,53 @@ describe "Scheduler":
             expect(sched.topology_domain_count()).to_equal(1)
             expect(topology.domains[0].kind).to_equal(SchedulerDomainKind.Flat)
             expect(topology.domains[0].rebalance_threshold).to_equal(2)
+
+    describe "green carrier scheduler integration":
+        it "stores green execution state through scheduler-owned hook":
+            var sched = Scheduler.new_with_cpu_count(4u32)
+            val queues = green_carrier_run_queues_new(4, 8)
+            val decision = green_carrier_spawn_task(41, 4, 0, 3, 1, 2, 4, 1)
+            val queued = green_carrier_apply_enqueue(queues, decision)
+            val dispatched = green_carrier_dispatch_next(queued.queues, 1)
+            val result = sched.apply_green_scheduler_intent(green_carrier_scheduler_intent(dispatched))
+            expect(result.applied).to_equal(true)
+            expect(sched.green_current_task_on_cpu(1u32)).to_equal(41)
+            expect(sched.green_context_switches_on_cpu(1u32)).to_equal(1)
+            expect(sched.green_rejected_intents()).to_equal(0)
+
+        it "keeps normal current task separate from green lane":
+            var sched = Scheduler.new_with_cpu_count(4u32)
+            val normal_id = sched.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+            val queues = green_carrier_run_queues_new(4, 8)
+            val decision = green_carrier_spawn_task(88, 4, 0, 3, 1, 2, 4, 1)
+            val queued = green_carrier_apply_enqueue(queues, decision)
+            val dispatched = green_carrier_dispatch_next(queued.queues, 1)
+            sched.apply_green_scheduler_intent(green_carrier_scheduler_intent(dispatched))
+            expect(normal_id.id).to_be_greater_than(0)
+            expect(sched.get_current_on_cpu(0u32).id).to_equal(0)
+            expect(sched.green_current_task_on_cpu(1u32)).to_equal(88)
+
+        it "extends green execution slots when topology grows":
+            var sched = Scheduler.new_bootstrap()
+            sched.set_topology(default_scheduler_topology(4u32))
+            val queues = green_carrier_run_queues_new(4, 8)
+            val decision = green_carrier_spawn_task(77, 4, 8, 3, 1, 2, 4, 0)
+            val queued = green_carrier_apply_enqueue(queues, decision)
+            val dispatched = green_carrier_dispatch_next(queued.queues, 3)
+            sched.apply_green_scheduler_intent(green_carrier_scheduler_intent(dispatched))
+            expect(sched.green_current_task_on_cpu(3u32)).to_equal(77)
+            expect(sched.green_context_switches_on_cpu(3u32)).to_equal(1)
+
+        it "records rejected green intent without touching normal current task":
+            var sched = Scheduler.new_with_cpu_count(2u32)
+            val normal_id = sched.create_task(0x2000, TaskPriority.Normal, CapabilitySet.full())
+            val queues = green_carrier_run_queues_new(2, 8)
+            val dispatched = green_carrier_dispatch_next(queues, 1)
+            val result = sched.apply_green_scheduler_intent(green_carrier_scheduler_intent(dispatched))
+            expect(result.applied).to_equal(false)
+            expect(normal_id.id).to_be_greater_than(0)
+            expect(sched.green_rejected_intents()).to_equal(1)
+            expect(sched.get_current_on_cpu(0u32).id).to_equal(0)
 
     describe "create_task":
         it "returns a valid TaskId":

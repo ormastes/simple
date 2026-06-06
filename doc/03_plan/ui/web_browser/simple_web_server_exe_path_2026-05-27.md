@@ -33,7 +33,7 @@ Bugs filed in `doc/08_tracking/bug/`:
 3. **`self.fn_field(args)` confused with method calls** → `interpreter_fn_field_method_confusion_2026-05-27.md`
    - `r.handler(req)` fails because interpreter treats fn-field as method lookup
 
-4. **Legacy numbered thread spawn wrapper not registered** → `interpreter_thread_spawn2_not_registered_2026-05-27.md`
+4. **Semantic thread_spawn_with_args wrapper registration** → `interpreter_thread_spawn_with_args_registration_2026-05-27.md`
    - Old raw extern path was not in interpreter dispatch table; new code uses `thread_spawn_with_args`
 
 5. **`mut fn` syntax** → `parser_mut_fn_syntax_not_supported_2026-05-27.md`

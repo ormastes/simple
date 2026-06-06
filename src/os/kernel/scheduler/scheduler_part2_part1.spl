@@ -90,6 +90,13 @@ use os.kernel.scheduler.scheduler_exec.{
     sched_clone_task_impl,
     sched_exec_image_impl
 }
+use os.kernel.scheduler.green_carrier.{
+    GreenCarrierSchedulerIntent, GreenCarrierExecutionResult,
+    green_carrier_apply_scheduler_intent,
+    green_carrier_extend_execution_state,
+    green_carrier_current_task_on_cpu,
+    green_carrier_context_switches_on_cpu
+}
 
 
 # Module-level task-id counter shared across all task-creation paths.
@@ -464,11 +471,31 @@ impl Scheduler:
             self.rt_replenish_ns_by_cpu.push(0)
             self.rt_throttled_by_cpu.push(false)
             cpu = cpu + 1u32
+        self.green_execution_state = green_carrier_extend_execution_state(
+            self.green_execution_state,
+            self.topology.cpu_count as i64
+        )
         true
 
     fn get_current_on_cpu(cpu_id: u32) -> TaskId:
         val cpu = self._normalize_cpu(cpu_id)
         self.current_by_cpu[cpu as i64]
+
+    me apply_green_scheduler_intent(intent: GreenCarrierSchedulerIntent) -> GreenCarrierExecutionResult:
+        val result = green_carrier_apply_scheduler_intent(self.green_execution_state, intent)
+        self.green_execution_state = result.state
+        result
+
+    fn green_current_task_on_cpu(cpu_id: u32) -> u64:
+        val cpu = self._normalize_cpu(cpu_id)
+        green_carrier_current_task_on_cpu(self.green_execution_state, cpu as i64)
+
+    fn green_context_switches_on_cpu(cpu_id: u32) -> i64:
+        val cpu = self._normalize_cpu(cpu_id)
+        green_carrier_context_switches_on_cpu(self.green_execution_state, cpu as i64)
+
+    fn green_rejected_intents() -> i64:
+        self.green_execution_state.rejected_intents
 
     fn preempt_pending_on_cpu(cpu_id: u32) -> TaskId?:
         val cpu = self._normalize_cpu(cpu_id)
