@@ -2,9 +2,9 @@
 
 ## Scope
 - `test/02_integration/app/ui.web/backpressure_test.spl`
-- `test/03_system/database/database_system_spec.spl`
+- `test/03_system/stdlib/database/database_system_spec.spl`
 - `test/01_unit/std/improved/http_unit_spec.spl`
-- `test/03_system/net_http_sendfile_routing_spec.spl`
+- `test/03_system/os/net_http_sendfile_routing_spec.spl`
 - `test/03_system/feature/usage/primitive_types_spec.spl`
 - `test/02_integration/app/primitive_api_lint_spec.spl`
 - `test/shared/core/primitives_spec.spl`

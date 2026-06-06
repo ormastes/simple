@@ -113,12 +113,16 @@ fn test_promise_reject() {
 // Isolated Thread tests
 // ========================================================================
 
-extern "C" fn double_value(v: RuntimeValue) -> RuntimeValue {
+fn native_closure_record(func: *const ()) -> Box<usize> {
+    Box::new(func as usize)
+}
+
+extern "C" fn double_value(_closure: u64, v: RuntimeValue) -> RuntimeValue {
     let n = v.as_int();
     RuntimeValue::from_int(n * 2)
 }
 
-extern "C" fn add_values(v1: RuntimeValue, v2: RuntimeValue) -> RuntimeValue {
+extern "C" fn add_values(_closure: u64, v1: RuntimeValue, v2: RuntimeValue) -> RuntimeValue {
     let a = v1.as_int();
     let b = v2.as_int();
     RuntimeValue::from_int(a + b)
@@ -126,7 +130,8 @@ extern "C" fn add_values(v1: RuntimeValue, v2: RuntimeValue) -> RuntimeValue {
 
 #[test]
 fn test_isolated_thread_spawn_and_join() {
-    let handle = rt_thread_spawn_isolated(double_value as *const () as u64, RuntimeValue::from_int(21));
+    let closure = native_closure_record(double_value as *const ());
+    let handle = rt_thread_spawn_isolated((&*closure) as *const usize as u64, RuntimeValue::from_int(21));
 
     assert!(handle != 0);
     assert!(rt_thread_id(handle) > 0);
@@ -140,8 +145,9 @@ fn test_isolated_thread_spawn_and_join() {
 
 #[test]
 fn test_isolated_thread_spawn2_and_join() {
+    let closure = native_closure_record(add_values as *const ());
     let handle = rt_thread_spawn_isolated2(
-        add_values as *const () as u64,
+        (&*closure) as *const usize as u64,
         RuntimeValue::from_int(10),
         RuntimeValue::from_int(32),
     );
@@ -157,12 +163,13 @@ fn test_isolated_thread_spawn2_and_join() {
 
 #[test]
 fn test_isolated_thread_is_done() {
-    extern "C" fn slow_work(v: RuntimeValue) -> RuntimeValue {
+    extern "C" fn slow_work(_closure: u64, v: RuntimeValue) -> RuntimeValue {
         thread::sleep(Duration::from_millis(50));
         v
     }
 
-    let handle = rt_thread_spawn_isolated(slow_work as *const () as u64, RuntimeValue::from_int(1));
+    let closure = native_closure_record(slow_work as *const ());
+    let handle = rt_thread_spawn_isolated((&*closure) as *const usize as u64, RuntimeValue::from_int(1));
 
     // Thread should not be done immediately
     assert_eq!(rt_thread_is_done(handle), 0);

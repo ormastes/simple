@@ -113,9 +113,11 @@ impl Lowerer {
 
         let saved_locals_len = ctx.locals.len();
         let saved_local_map = ctx.local_map.clone();
+        let mut param_local_indices = Vec::with_capacity(param_info.len());
         // Add lambda parameters to context as locals for body lowering
         for (name, ty) in &param_info {
-            ctx.add_local(name.clone(), *ty, simple_parser::ast::Mutability::Immutable);
+            let local_index = ctx.add_local(name.clone(), *ty, simple_parser::ast::Mutability::Immutable);
+            param_local_indices.push(local_index);
         }
 
         // Lower the lambda body with access to parameters
@@ -129,6 +131,7 @@ impl Lowerer {
         Ok(HirExpr {
             kind: HirExprKind::Lambda {
                 params: param_info,
+                param_local_indices,
                 body: body_hir,
                 captures,
             },

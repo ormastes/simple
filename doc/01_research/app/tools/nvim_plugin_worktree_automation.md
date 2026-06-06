@@ -22,7 +22,7 @@ current repository worktree without requiring a user-installed plugin checkout.
 
 ## Implemented Test Target
 
-- `scripts/smoke/nvim_plugin_smoke.py` runs isolated `nvim --headless` cases with
+- `scripts/smoke/nvim_plugin_smoke.spl` runs isolated `nvim --headless` cases with
   temporary XDG directories and the worktree plugin on runtimepath.
 - Covered paths: Lua syntax loading, filetype setup, command registration, LSP
   command validation, Tree-sitter query discovery, ftplugin keyword policy,

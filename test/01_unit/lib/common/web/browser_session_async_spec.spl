@@ -32,7 +32,7 @@ describe "BrowserSession async fetch":
             Ok(value) =>
                 expect(_display_js(value)).to_equal("inner")
             Err(e) =>
-                expect(false).to_equal(true)
+                fail("Expected adopted promise return value to evaluate: {e}")
 
     it "adopts rejected promises returned from then callbacks":
         var session = BrowserSession.new()
@@ -46,7 +46,7 @@ describe "BrowserSession async fetch":
             Ok(value) =>
                 expect(_display_js(value)).to_equal("boom")
             Err(e) =>
-                expect(false).to_equal(true)
+                fail("Expected adopted rejected promise callback to evaluate: {e}")
 
     it "installs promise globals":
         var session = BrowserSession.new()
@@ -56,7 +56,7 @@ describe "BrowserSession async fetch":
             Ok(value) =>
                 expect(_display_js(value)).to_equal("function:function")
             Err(e) =>
-                expect(false).to_equal(true)
+                fail("Expected Promise globals to evaluate: {e}")
 
     it "queues a pending fetch and settles it later":
         var session = BrowserSession.new()
@@ -86,11 +86,11 @@ describe "BrowserSession async fetch":
                                 expect(_display_js(value)).to_contain("alpha:alpha")
                                 expect(_display_js(value)).to_contain("token=abc")
                             Err(e) =>
-                                expect(false).to_equal(true)
+                                fail("Expected settled fetch output and cookie to evaluate: {e}")
                     Err(e) =>
-                        expect(false).to_equal(true)
+                        fail("Expected network response commit for pending fetch to succeed: {e}")
             nil:
-                expect(false).to_equal(true)
+                fail("Expected pending fetch request after fetch setup")
 
     it "rejects promise callbacks on transport error":
         var session = BrowserSession.new()
@@ -118,11 +118,11 @@ describe "BrowserSession async fetch":
                             Ok(value) =>
                                 expect(_display_js(value)).to_equal("network down")
                             Err(err) =>
-                                expect(false).to_equal(true)
+                                fail("Expected transport rejection callback output to evaluate: {err}")
                     Ok(_) =>
-                        expect(false).to_equal(true)
+                        fail("Expected transport-error commit to reject")
             nil:
-                expect(false).to_equal(true)
+                fail("Expected pending fetch request for transport-error path")
 
     it "resolves http error responses with ok false and readable metadata":
         var session = BrowserSession.new()
@@ -149,11 +149,11 @@ describe "BrowserSession async fetch":
                             Ok(value) =>
                                 expect(_display_js(value)).to_equal("404:false:X-Test: missing\n:missing:missing:404:false:X-Test: missing\n:missing:missing")
                             Err(e) =>
-                                expect(false).to_equal(true)
+                                fail("Expected HTTP error response metadata output to evaluate: {e}")
                     Err(e) =>
-                        expect(false).to_equal(true)
+                        fail("Expected HTTP error response commit to resolve: {e}")
             nil:
-                expect(false).to_equal(true)
+                fail("Expected pending fetch request for HTTP error response")
 
     it "exposes response.statusText for resolved fetch responses":
         var session = BrowserSession.new()
@@ -180,11 +180,111 @@ describe "BrowserSession async fetch":
                             Ok(value) =>
                                 expect(_display_js(value)).to_equal("404:Not Found:false:404:Not Found:false")
                             Err(e) =>
-                                expect(false).to_equal(true)
+                                fail("Expected response.statusText output to evaluate: {e}")
                     Err(e) =>
-                        expect(false).to_equal(true)
+                        fail("Expected statusText response commit to resolve: {e}")
             nil:
-                expect(false).to_equal(true)
+                fail("Expected pending fetch request for statusText response")
+
+    it "rejects compileStreaming when response content type is not application wasm":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/app",
+            "<html><body><script>var out = 'start'; WebAssembly.compileStreaming(window.fetch('/module.wasm')).then(function(m) { out = 'compiled'; }).catch(function(err) { out = err; });</script></body></html>"
+        )
+
+        match session.take_pending_request():
+            Some(request) =>
+                expect(request.url).to_equal("https://example.com/module.wasm")
+                val commit_result = session.commit_network_response(BrowserResponse.create(
+                    request_id: request.id,
+                    kind: "fetch",
+                    url: request.url,
+                    status: 200,
+                    headers: "Content-Type: text/plain\n",
+                    body: "0061736d01000000",
+                    error: ""
+                ))
+                match commit_result:
+                    Ok(_) =>
+                        val result = session.eval_script("out")
+                        match result:
+                            Ok(value) =>
+                                expect(_display_js(value)).to_equal("unsupported-wasm-content-type:text/plain")
+                            Err(e) =>
+                                fail("Expected compileStreaming MIME rejection output to evaluate: {e}")
+                    Err(e) =>
+                        fail("Expected compileStreaming non-wasm response commit to settle: {e}")
+            nil:
+                fail("Expected pending fetch request for compileStreaming MIME check")
+
+    it "rejects instantiateStreaming when response content type is not application wasm":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/app",
+            "<html><body><script>var out = 'start'; WebAssembly.instantiateStreaming(window.fetch('/module.wasm')).then(function(result) { out = result.instance.status; }).catch(function(err) { out = err; });</script></body></html>"
+        )
+
+        match session.take_pending_request():
+            Some(request) =>
+                expect(request.url).to_equal("https://example.com/module.wasm")
+                val commit_result = session.commit_network_response(BrowserResponse.create(
+                    request_id: request.id,
+                    kind: "fetch",
+                    url: request.url,
+                    status: 200,
+                    headers: "Content-Type: text/plain\n",
+                    body: "0061736d01000000",
+                    error: ""
+                ))
+                match commit_result:
+                    Ok(_) =>
+                        val result = session.eval_script("out")
+                        match result:
+                            Ok(value) =>
+                                expect(_display_js(value)).to_equal("unsupported-wasm-content-type:text/plain")
+                            Err(e) =>
+                                fail("Expected instantiateStreaming MIME rejection output to evaluate: {e}")
+                    Err(e) =>
+                        fail("Expected instantiateStreaming non-wasm response commit to settle: {e}")
+            nil:
+                fail("Expected pending fetch request for instantiateStreaming MIME check")
+
+    it "blocks mixed content compileStreaming wasm fetches from secure pages":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/app",
+            "<html><body><script>var out = 'start'; WebAssembly.compileStreaming(window.fetch('http://example.com/module.wasm')).then(function(m) { out = 'compiled'; }).catch(function(err) { out = err; });</script></body></html>"
+        )
+
+        match session.take_pending_request():
+            Some(request) =>
+                fail("Expected secure-page compileStreaming mixed-content fetch to be blocked before network request: {request.url}")
+            nil:
+                val result = session.eval_script("window.isSecureContext + ':' + out")
+                match result:
+                    Ok(value) =>
+                        expect(_display_js(value)).to_equal("true:mixed-content:http://example.com/module.wasm")
+                    Err(e) =>
+                        fail("Expected compileStreaming mixed-content rejection output to evaluate: {e}")
+
+    it "blocks mixed content instantiateStreaming wasm fetches from secure pages":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/app",
+            "<html><body><script>var out = 'start'; WebAssembly.instantiateStreaming(window.fetch('http://example.com/module.wasm')).then(function(result) { out = result.instance.status; }).catch(function(err) { out = err; });</script></body></html>"
+        )
+
+        match session.take_pending_request():
+            Some(request) =>
+                fail("Expected secure-page instantiateStreaming mixed-content fetch to be blocked before network request: {request.url}")
+            nil:
+                val result = session.eval_script("window.isSecureContext + ':' + out")
+                match result:
+                    Ok(value) =>
+                        expect(_display_js(value)).to_equal("true:mixed-content:http://example.com/module.wasm")
+                    Err(e) =>
+                        fail("Expected instantiateStreaming mixed-content rejection output to evaluate: {e}")
 
     it "returns a promise from response.text and unwraps it through then chaining":
         var session = BrowserSession.new()
@@ -211,11 +311,11 @@ describe "BrowserSession async fetch":
                             Ok(value) =>
                                 expect(_display_js(value)).to_equal("function:alpha")
                             Err(e) =>
-                                expect(false).to_equal(true)
+                                fail("Expected response.text promise output to evaluate: {e}")
                     Err(e) =>
-                        expect(false).to_equal(true)
+                        fail("Expected response.text network response commit to succeed: {e}")
             nil:
-                expect(false).to_equal(true)
+                fail("Expected pending fetch request for response.text promise")
 
     it "marks response.bodyUsed after text consumption":
         var session = BrowserSession.new()
@@ -242,11 +342,11 @@ describe "BrowserSession async fetch":
                             Ok(value) =>
                                 expect(_display_js(value)).to_equal("false:true:alpha:false:true:alpha")
                             Err(e) =>
-                                expect(false).to_equal(true)
+                                fail("Expected response.bodyUsed output to evaluate: {e}")
                     Err(e) =>
-                        expect(false).to_equal(true)
+                        fail("Expected bodyUsed response commit to succeed: {e}")
             nil:
-                expect(false).to_equal(true)
+                fail("Expected pending fetch request for bodyUsed response")
 
     it "returns a promise from response.json for simple JSON bodies":
         var session = BrowserSession.new()
@@ -273,11 +373,11 @@ describe "BrowserSession async fetch":
                             Ok(value) =>
                                 expect(_display_js(value)).to_equal("function:42")
                             Err(e) =>
-                                expect(false).to_equal(true)
+                                fail("Expected response.json promise output to evaluate: {e}")
                     Err(e) =>
-                        expect(false).to_equal(true)
+                        fail("Expected JSON response commit to succeed: {e}")
             nil:
-                expect(false).to_equal(true)
+                fail("Expected pending fetch request for JSON response")
 
     it "serializes plain object fetch headers into the pending request":
         var session = BrowserSession.new()
@@ -294,7 +394,7 @@ describe "BrowserSession async fetch":
                 expect(request.headers).to_contain("X-Test: 1")
                 expect(request.headers).to_contain("Accept: text/plain")
             nil:
-                expect(false).to_equal(true)
+                fail("Expected pending fetch request with plain object headers")
 
     it "ignores caller cookie headers and keeps the session cookie on fetch requests":
         var session = BrowserSession.new()
@@ -311,7 +411,7 @@ describe "BrowserSession async fetch":
                 expect(request.headers.contains("manual=1")).to_equal(false)
                 expect(request.headers.split("\n").len()).to_equal(2)
             nil:
-                expect(false).to_equal(true)
+                fail("Expected pending fetch request with sanitized cookie headers")
 
     it "uses cookies set by one fetch response on the next fetch from the same page":
         var session = BrowserSession.new()
@@ -353,15 +453,15 @@ describe "BrowserSession async fetch":
                                             Ok(value) =>
                                                 expect(_display_js(value)).to_equal("token=abc:token=abc:two")
                                             Err(e) =>
-                                                expect(false).to_equal(true)
+                                                fail("Expected chained fetch cookie/body result to evaluate: {e}")
                                     Err(e) =>
-                                        expect(false).to_equal(true)
+                                        fail("Expected second chained fetch response commit to succeed: {e}")
                             nil:
-                                expect(false).to_equal(true)
+                                fail("Expected second pending fetch request after cookie-setting response")
                     Err(e) =>
-                        expect(false).to_equal(true)
+                        fail("Expected first chained fetch response commit to succeed: {e}")
             nil:
-                expect(false).to_equal(true)
+                fail("Expected first pending fetch request for cookie chaining")
 
     it "applies Set-Cookie from fetch responses without exposing it in response headersText":
         var session = BrowserSession.new()
@@ -388,11 +488,11 @@ describe "BrowserSession async fetch":
                             Ok(value) =>
                                 expect(_display_js(value)).to_equal("X-Test: ok\\n:token=abc:X-Test: ok\\n:token=abc")
                             Err(e) =>
-                                expect(false).to_equal(true)
+                                fail("Expected Set-Cookie filtering metadata output to evaluate: {e}")
                     Err(e) =>
-                        expect(false).to_equal(true)
+                        fail("Expected Set-Cookie filtering response commit to succeed: {e}")
             nil:
-                expect(false).to_equal(true)
+                fail("Expected pending fetch request for Set-Cookie filtering")
 
     it "settles multiple fetches by request id even when responses arrive out of order":
         var session = BrowserSession.new()
@@ -407,13 +507,13 @@ describe "BrowserSession async fetch":
             Some(request) =>
                 req_a = Some(request)
             nil =>
-                expect(false).to_equal(true)
+                fail("Expected first pending fetch request for out-of-order settlement")
                 return
         match session.take_pending_request():
             Some(request) =>
                 req_b = Some(request)
             nil =>
-                expect(false).to_equal(true)
+                fail("Expected second pending fetch request for out-of-order settlement")
                 return
 
         match req_a:
@@ -438,9 +538,9 @@ describe "BrowserSession async fetch":
                                     Ok(value) =>
                                         expect(_display_js(value)).to_equal(":B::B")
                                     Err(e) =>
-                                        expect(false).to_equal(true)
+                                        fail("Expected mid out-of-order fetch state to evaluate: {e}")
                             Err(e) =>
-                                expect(false).to_equal(true)
+                                fail("Expected second out-of-order fetch response commit to succeed: {e}")
                         val first_result = session.commit_network_response(BrowserResponse.create(
                             request_id: first_request.id,
                             kind: "fetch",
@@ -457,13 +557,13 @@ describe "BrowserSession async fetch":
                                     Ok(value) =>
                                         expect(_display_js(value)).to_equal("A:B")
                                     Err(e) =>
-                                        expect(false).to_equal(true)
+                                        fail("Expected final out-of-order fetch state to evaluate: {e}")
                             Err(e) =>
-                                expect(false).to_equal(true)
+                                fail("Expected first out-of-order fetch response commit to succeed: {e}")
                     nil =>
-                        expect(false).to_equal(true)
+                        fail("Expected stored second request for out-of-order settlement")
             nil =>
-                expect(false).to_equal(true)
+                fail("Expected stored first request for out-of-order settlement")
 
     it "preserves fulfilled values through finally chains":
         var session = BrowserSession.new()
@@ -490,11 +590,11 @@ describe "BrowserSession async fetch":
                             Ok(value) =>
                                 expect(_display_js(value)).to_equal("alpha:cleanup")
                             Err(e) =>
-                                expect(false).to_equal(true)
+                                fail("Expected fulfilled Promise.finally chain output to evaluate: {e}")
                     Err(e) =>
-                        expect(false).to_equal(true)
+                        fail("Expected fulfilled Promise.finally response commit to succeed: {e}")
             nil:
-                expect(false).to_equal(true)
+                fail("Expected pending fetch request for fulfilled Promise.finally chain")
 
     it "preserves rejected values through finally chains":
         var session = BrowserSession.new()
@@ -522,8 +622,8 @@ describe "BrowserSession async fetch":
                             Ok(value) =>
                                 expect(_display_js(value)).to_equal("network down:cleanup")
                             Err(err) =>
-                                expect(false).to_equal(true)
+                                fail("Expected rejected Promise.finally chain output to evaluate: {err}")
                     Ok(_) =>
-                        expect(false).to_equal(true)
+                        fail("Expected rejected Promise.finally transport commit to reject")
             nil:
-                expect(false).to_equal(true)
+                fail("Expected pending fetch request for rejected Promise.finally chain")

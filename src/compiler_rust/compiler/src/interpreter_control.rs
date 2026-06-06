@@ -2422,12 +2422,8 @@ fn lower_stable_inline_operand(
         InlineIntOperand::IndexBitAnd { mask } => Ok(InlineIntOperand::IndexBitAnd { mask }),
         InlineIntOperand::IndexBitOr { mask } => Ok(InlineIntOperand::IndexBitOr { mask }),
         InlineIntOperand::IndexBitXor { mask } => Ok(InlineIntOperand::IndexBitXor { mask }),
-        InlineIntOperand::IndexShiftLeft { bits } => {
-            Ok(InlineIntOperand::IndexShiftLeft { bits })
-        }
-        InlineIntOperand::IndexShiftRight { bits } => {
-            Ok(InlineIntOperand::IndexShiftRight { bits })
-        }
+        InlineIntOperand::IndexShiftLeft { bits } => Ok(InlineIntOperand::IndexShiftLeft { bits }),
+        InlineIntOperand::IndexShiftRight { bits } => Ok(InlineIntOperand::IndexShiftRight { bits }),
         InlineIntOperand::DictValue { dict, key } => match env.get(&dict) {
             Some(Value::Dict(values)) | Some(Value::FrozenDict(values)) => match values.get(&key) {
                 Some(Value::Int(value)) => Ok(InlineIntOperand::Const(*value)),

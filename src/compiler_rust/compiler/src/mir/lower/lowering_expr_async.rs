@@ -2,10 +2,16 @@
 
 use super::lowering_core::{MirLowerResult, MirLowerer};
 use crate::hir::{HirExpr, TypeId};
-use crate::mir::instructions::{MirInst, VReg};
+use crate::mir::instructions::{LambdaParamBinding, MirInst, VReg};
 
 impl<'a> MirLowerer<'a> {
-    pub(super) fn lower_lambda_expr(&mut self, body: &HirExpr, captures: &[usize]) -> MirLowerResult<VReg> {
+    pub(super) fn lower_lambda_expr(
+        &mut self,
+        params: &[(String, TypeId)],
+        param_local_indices: &[usize],
+        body: &HirExpr,
+        captures: &[usize],
+    ) -> MirLowerResult<VReg> {
         // Save current block
         let original_block = self.with_func(|_, current_block| current_block)?;
 
@@ -57,6 +63,15 @@ impl<'a> MirLowerer<'a> {
             .map(|ctx| ctx.func_name.clone())
             .unwrap_or_else(|_| "anonymous".to_string());
         let func_name = format!("{}_outlined_{}", parent_name, body_block.0);
+        let lambda_params: Vec<LambdaParamBinding> = params
+            .iter()
+            .zip(param_local_indices.iter())
+            .map(|((name, ty), local_index)| LambdaParamBinding {
+                local_index: *local_index,
+                name: name.clone(),
+                ty: *ty,
+            })
+            .collect();
 
         self.with_func(|func, current_block| {
             let dest = func.new_vreg();
@@ -68,6 +83,7 @@ impl<'a> MirLowerer<'a> {
                 capture_offsets,
                 capture_types,
                 captures: capture_regs,
+                lambda_params,
                 body_block: Some(body_block),
             });
             dest

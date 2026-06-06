@@ -310,6 +310,7 @@ shared_test!(shared_closure_missing_func, |f: &mut MirFunction| {
         capture_offsets: vec![],
         capture_types: vec![],
         captures: vec![],
+        lambda_params: vec![],
         body_block: None,
     });
     dest
@@ -338,6 +339,7 @@ shared_module_test!(shared_indirect_call_void_return,
         block.instructions.push(MirInst::ClosureCreate {
             dest: closure, func_name: "void_fn".to_string(),
             closure_size: 8, capture_offsets: vec![], capture_types: vec![], captures: vec![],
+            lambda_params: vec![],
             body_block: None,
         });
         block.instructions.push(MirInst::ConstInt { dest: arg, value: 42 });
@@ -358,6 +360,7 @@ shared_module_test!(shared_indirect_call_void_return,
         MirInst::ClosureCreate {
             dest: VReg(0), func_name: "void_fn".to_string(),
             closure_size: 8, capture_offsets: vec![], capture_types: vec![], captures: vec![],
+            lambda_params: vec![],
             body_block: None,
         },
         MirInst::ConstInt { dest: VReg(1), value: 42 },

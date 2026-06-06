@@ -29,91 +29,9 @@ trap 'rm -rf "$TMPDIR"' EXIT INT TERM
 printf '{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}\n{"jsonrpc":"2.0","id":"2","method":"tools/list","params":{}}\n' \
     | "$MCP_SERVER" > "$TMPDIR/mcp.jsonl"
 
-python3 - <<'PY' | "$LSP_MCP_SERVER" > "$TMPDIR/lsp.out"
-requests = [
-    '{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}',
-    '{"jsonrpc":"2.0","id":"2","method":"tools/list","params":{}}',
-]
-for body in requests:
-    print(f"Content-Length: {len(body)}\r\n\r\n{body}", end="")
-PY
+lsp_tools_list='{"jsonrpc":"2.0","id":"2","method":"tools/list","params":{}}'
+printf 'Content-Length: %s\r\n\r\n%s' "${#lsp_tools_list}" "$lsp_tools_list" \
+    | "$LSP_MCP_SERVER" > "$TMPDIR/lsp.out"
 
-python3 - "$TMPDIR/mcp.jsonl" "$TMPDIR/lsp.out" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-def parse_payloads(path: Path):
-    text = path.read_text()
-    if text.startswith("Content-Length:"):
-        payloads = []
-        offset = 0
-        while offset < len(text):
-            if not text.startswith("Content-Length:", offset):
-                break
-            header_end = text.find("\n\n", offset)
-            sep_len = 2
-            if header_end < 0:
-                header_end = text.find("\r\n\r\n", offset)
-                sep_len = 4
-            if header_end < 0:
-                break
-            header = text[offset:header_end].replace("\r", "")
-            body_start = header_end + sep_len
-            decoder = json.JSONDecoder()
-            payload, consumed = decoder.raw_decode(text[body_start:])
-            payloads.append(payload)
-            offset = body_start + consumed
-        return payloads
-    lines = [line for line in text.splitlines() if line.strip()]
-    return [json.loads(line) for line in lines]
-
-def validate(path_str: str, prefix: str) -> None:
-    path = Path(path_str)
-    json_valid = True
-    schema_valid = True
-    tool_count = 0
-    try:
-        payloads = parse_payloads(path)
-    except Exception:
-        json_valid = False
-        schema_valid = False
-        payloads = []
-    if payloads:
-        tools = payloads[-1].get("result", {}).get("tools", [])
-        tool_count = len(tools)
-        tool_names = [tool.get("name", "") for tool in tools]
-        for tool in tools:
-            schema = tool.get("inputSchema")
-            if not isinstance(schema, dict):
-                schema_valid = False
-                continue
-            props = schema.get("properties", {})
-            required = schema.get("required", [])
-            if not isinstance(props, dict) or not isinstance(required, list):
-                schema_valid = False
-                continue
-            for key in required:
-                if key not in props:
-                    schema_valid = False
-                    break
-    wm_text_valid = True
-    if prefix == "mcp":
-        required_wm_text = {
-            "play_wm_text_status",
-            "play_wm_text_snapshot",
-            "play_wm_text_find",
-            "play_wm_text_act",
-        }
-        wm_text_valid = required_wm_text.issubset(set(tool_names if payloads else []))
-    print(f"{prefix}_tools_json_valid={'true' if json_valid else 'false'}")
-    print(f"{prefix}_tools_schema_valid={'true' if schema_valid else 'false'}")
-    print(f"{prefix}_tools_count={tool_count}")
-    if prefix == "mcp":
-        print(f"{prefix}_wm_text_tools_present={'true' if wm_text_valid else 'false'}")
-    if not json_valid or not schema_valid or not wm_text_valid:
-        sys.exit(1)
-
-validate(sys.argv[1], "mcp")
-validate(sys.argv[2], "lsp")
-PY
+MCP_NATIVE_SMOKE_MCP_OUT="$TMPDIR/mcp.jsonl" MCP_NATIVE_SMOKE_LSP_OUT="$TMPDIR/lsp.out" \
+    "$SIMPLE_BINARY" run scripts/check/validate_mcp_native_smoke.spl --mode=interpreter

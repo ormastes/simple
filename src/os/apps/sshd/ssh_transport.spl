@@ -173,26 +173,51 @@ fn ssh_build_version_string() -> [u8]:
     buf.push(0x0A)
     buf
 
+fn _version_bytes_start_with_ssh2(data: [u8], end: u64) -> bool:
+    if end < 8:
+        return false
+    _u8_at(data, 0) == 0x53 and
+        _u8_at(data, 1) == 0x53 and
+        _u8_at(data, 2) == 0x48 and
+        _u8_at(data, 3) == 0x2D and
+        _u8_at(data, 4) == 0x32 and
+        _u8_at(data, 5) == 0x2E and
+        _u8_at(data, 6) == 0x30 and
+        _u8_at(data, 7) == 0x2D
+
+fn _version_bytes_start_with_ssh_dash(data: [u8]) -> bool:
+    if data.len() < 4:
+        return false
+    _u8_at(data, 0) == 0x53 and
+        _u8_at(data, 1) == 0x53 and
+        _u8_at(data, 2) == 0x48 and
+        _u8_at(data, 3) == 0x2D
+
 fn ssh_parse_version_string(data: [u8]) -> Result<text, text>:
     """Parse a version string from raw bytes. Strips trailing CR LF.
 
     Validates the "SSH-2.0-" prefix per RFC 4253 section 4.2.
     """
+    if _version_bytes_start_with_ssh_dash(data) and not _version_bytes_start_with_ssh2(data, data.len()):
+        return Err("unsupported SSH version")
+
     # Find the CR LF terminator
     var end: u64 = 0
     while end + 1 < data.len():
         if _u8_at(data, end) == 0x0D and _u8_at(data, end + 1) == 0x0A:
-            # Found CRLF at position end — extract version string
-            var version_bytes: [u8] = []
-            var i: u64 = 0
-            while i < end:
-                version_bytes.push(_u8_at(data, i))
-                i = i + 1
-            var version: text = ssh_ascii_bytes_to_text(version_bytes)
-            if not version.starts_with("SSH-2.0-"):
-                return Err("unsupported SSH version: {version}")
-            return Ok(version)
-        end = end + 1
+            if not _version_bytes_start_with_ssh2(data, end):
+                return Err("unsupported SSH version")
+            else:
+                # Found CRLF at position end — extract version string
+                var version_bytes: [u8] = []
+                var i: u64 = 0
+                while i < end:
+                    version_bytes.push(_u8_at(data, i))
+                    i = i + 1
+                var version: text = ssh_ascii_bytes_to_text(version_bytes)
+                return Ok(version)
+        else:
+            end = end + 1
 
     Err("no CRLF terminator in version string")
 
@@ -392,27 +417,26 @@ fn _list_contains(list: text, candidate: text) -> bool:
 
 fn _first_match(client_list: text, server_list: text) -> text:
     """Find the first algorithm in client_list that also appears in server_list."""
-    for raw in server_list.split(","):
+    for raw in client_list.split(","):
         val candidate = raw.trim()
-        if _list_contains(client_list, candidate):
+        if _list_contains(server_list, candidate):
             return candidate
     ""
 
+fn _is_supported_host_key_algorithm(algorithm: text) -> bool:
+    algorithm == "ssh-ed25519-cert-v01@openssh.com" or
+        algorithm == "ssh-ed25519" or
+        algorithm == "rsa-sha2-512-cert-v01@openssh.com" or
+        algorithm == "rsa-sha2-256-cert-v01@openssh.com" or
+        algorithm == "ecdsa-sha2-nistp256" or
+        algorithm == "rsa-sha2-512" or
+        algorithm == "rsa-sha2-256"
+
 fn _preferred_host_key_match(client_list: text, server_list: text) -> text:
-    if _list_contains(client_list, "ssh-ed25519-cert-v01@openssh.com") and _list_contains(server_list, "ssh-ed25519-cert-v01@openssh.com"):
-        return "ssh-ed25519-cert-v01@openssh.com"
-    if _list_contains(client_list, "ssh-ed25519") and _list_contains(server_list, "ssh-ed25519"):
-        return "ssh-ed25519"
-    if _list_contains(client_list, "rsa-sha2-512-cert-v01@openssh.com") and _list_contains(server_list, "rsa-sha2-512-cert-v01@openssh.com"):
-        return "rsa-sha2-512-cert-v01@openssh.com"
-    if _list_contains(client_list, "rsa-sha2-256-cert-v01@openssh.com") and _list_contains(server_list, "rsa-sha2-256-cert-v01@openssh.com"):
-        return "rsa-sha2-256-cert-v01@openssh.com"
-    if _list_contains(client_list, "ecdsa-sha2-nistp256") and _list_contains(server_list, "ecdsa-sha2-nistp256"):
-        return "ecdsa-sha2-nistp256"
-    if _list_contains(client_list, "rsa-sha2-512") and _list_contains(server_list, "rsa-sha2-512"):
-        return "rsa-sha2-512"
-    if _list_contains(client_list, "rsa-sha2-256") and _list_contains(server_list, "rsa-sha2-256"):
-        return "rsa-sha2-256"
+    for raw in client_list.split(","):
+        val candidate = raw.trim()
+        if _is_supported_host_key_algorithm(candidate) and _list_contains(server_list, candidate):
+            return candidate
     ""
 
 fn _is_aes_gcm(cipher: text) -> bool:
@@ -423,6 +447,13 @@ fn _is_aes256_ctr(cipher: text) -> bool:
 
 fn _is_supported_etm(mac: text) -> bool:
     mac == "hmac-sha2-256-etm@openssh.com" or mac == "hmac-sha2-512-etm@openssh.com"
+
+fn _first_supported_etm_match(client_list: text, server_list: text) -> text:
+    for raw in client_list.split(","):
+        val candidate = raw.trim()
+        if _is_supported_etm(candidate) and _list_contains(server_list, candidate):
+            return candidate
+    ""
 
 fn ssh_kex_uses_strict_kex(client_kex_algorithms: text, server_kex_algorithms: text) -> bool:
     _list_contains(client_kex_algorithms, "kex-strict-c-v00@openssh.com") and
@@ -467,10 +498,8 @@ fn ssh_negotiate_algorithms(client: SshKexInit, server: SshKexInit) -> Result<Ss
     var mac_c2s = ""
     if _is_aes_gcm(cipher_c2s):
         mac_c2s = "none"
-    elif _list_contains(client.mac_client_to_server, "hmac-sha2-256-etm@openssh.com") and _list_contains(server.mac_client_to_server, "hmac-sha2-256-etm@openssh.com"):
-        mac_c2s = "hmac-sha2-256-etm@openssh.com"
-    elif _list_contains(client.mac_client_to_server, "hmac-sha2-512-etm@openssh.com") and _list_contains(server.mac_client_to_server, "hmac-sha2-512-etm@openssh.com"):
-        mac_c2s = "hmac-sha2-512-etm@openssh.com"
+    else:
+        mac_c2s = _first_supported_etm_match(client.mac_client_to_server, server.mac_client_to_server)
     if mac_c2s == "":
         return Err("no matching mac (c2s)")
     if _is_aes256_ctr(cipher_c2s) and not _is_supported_etm(mac_c2s):
@@ -479,10 +508,8 @@ fn ssh_negotiate_algorithms(client: SshKexInit, server: SshKexInit) -> Result<Ss
     var mac_s2c = ""
     if _is_aes_gcm(cipher_s2c):
         mac_s2c = "none"
-    elif _list_contains(client.mac_server_to_client, "hmac-sha2-256-etm@openssh.com") and _list_contains(server.mac_server_to_client, "hmac-sha2-256-etm@openssh.com"):
-        mac_s2c = "hmac-sha2-256-etm@openssh.com"
-    elif _list_contains(client.mac_server_to_client, "hmac-sha2-512-etm@openssh.com") and _list_contains(server.mac_server_to_client, "hmac-sha2-512-etm@openssh.com"):
-        mac_s2c = "hmac-sha2-512-etm@openssh.com"
+    else:
+        mac_s2c = _first_supported_etm_match(client.mac_server_to_client, server.mac_server_to_client)
     if mac_s2c == "":
         return Err("no matching mac (s2c)")
     if _is_aes256_ctr(cipher_s2c) and not _is_supported_etm(mac_s2c):

@@ -1,0 +1,363 @@
+# Generate SimpleOS multiarch hardening audit evidence.
+
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_exit(code: i32) -> void
+
+struct OsHardenConfig:
+    root: text
+    report_path: text
+    arches: [text]
+
+struct CountSamples:
+    count: i64
+    samples: [text]
+
+struct CapCoverage:
+    pct: i64
+    uncovered: i64
+
+fn shell_quote(value: text) -> text:
+    "'" + value.replace("'", "'\"'\"'") + "'"
+
+fn normalize_args(all_args: [text]) -> [text]:
+    var start = 0
+    var found = false
+    var i = 0
+    while i < all_args.len():
+        if all_args[i].ends_with("os_harden_audit.spl"):
+            start = i + 1
+            found = true
+            break
+        i = i + 1
+    if not found and all_args.len() > 0:
+        start = 1
+    var args: [text] = []
+    i = start
+    while i < all_args.len():
+        if all_args[i] != "--":
+            args = args.push(all_args[i])
+        i = i + 1
+    args
+
+fn default_arches() -> [text]:
+    ["x86_64", "x86_32", "aarch64", "arm32", "riscv64", "riscv32"]
+
+fn default_config() -> OsHardenConfig:
+    OsHardenConfig(root: ".", report_path: "build/multiarch/harden_audit_report.json", arches: [])
+
+fn join_path(root: text, path: text) -> text:
+    if root == "" or root == ".":
+        return path
+    if root.ends_with("/"):
+        return root + path
+    root + "/" + path
+
+fn finalize_config(config: OsHardenConfig) -> OsHardenConfig:
+    var result = config
+    if result.root != "." and result.root != "" and result.report_path == "build/multiarch/harden_audit_report.json":
+        result.report_path = join_path(result.root, result.report_path)
+    if result.arches.len() == 0:
+        result.arches = default_arches()
+    result
+
+fn parse_args(args: [text]) -> OsHardenConfig:
+    var config = default_config()
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--root" and i + 1 < args.len():
+            config.root = args[i + 1]
+            i = i + 2
+        elif arg.starts_with("--root="):
+            config.root = arg.substring("--root=".len())
+            i = i + 1
+        elif arg == "--report" and i + 1 < args.len():
+            config.report_path = args[i + 1]
+            i = i + 2
+        elif arg.starts_with("--report="):
+            config.report_path = arg.substring("--report=".len())
+            i = i + 1
+        elif arg == "--arch" and i + 1 < args.len():
+            config.arches = config.arches.push(args[i + 1])
+            i = i + 2
+        elif arg.starts_with("--arch="):
+            config.arches = config.arches.push(arg.substring("--arch=".len()))
+            i = i + 1
+        else:
+            i = i + 1
+    finalize_config(config)
+
+fn dirname(path: text) -> text:
+    var idx = path.len() - 1
+    while idx >= 0:
+        if path.substring(idx, idx + 1) == "/":
+            return path.substring(0, idx)
+        idx = idx - 1
+    "."
+
+fn ensure_parent(path: text):
+    val dir = dirname(path)
+    val (_out, _err, _code) = rt_process_run("/bin/sh", ["-c", "mkdir -p " + shell_quote(dir)])
+
+fn rel_path(path: text, root: text) -> text:
+    if root != "" and root != "." and path.starts_with(root + "/"):
+        return path.substring(root.len() + 1)
+    if path.starts_with("./"):
+        return path.substring(2)
+    path
+
+fn list_owned_spl_files(root: text) -> [text]:
+    var files: [text] = []
+    for base in ["src/os", "src/lib", "src/app"]:
+        val scan_root = join_path(root, base)
+        val command = "if [ -e " + shell_quote(scan_root) + " ]; then find " + shell_quote(scan_root) + " -type f -name '*.spl' | sort; fi"
+        val result = rt_process_run("/bin/sh", ["-c", command])
+        if result.2 != 0:
+            continue
+        for raw in result.0.split("\n"):
+            val path = raw.trim()
+            val rel = rel_path(path, root)
+            if path != "" and not rel.starts_with("src/compiler_rust/vendor") and not rel.starts_with("src/runtime/vendor"):
+                files = files.push(path)
+    files
+
+fn code_lines(path: text) -> [text]:
+    val source = rt_file_read_text(path) ?? ""
+    var out: [text] = []
+    var line_no = 0
+    for line in source.split("\n"):
+        line_no = line_no + 1
+        val stripped = line.trim()
+        if stripped != "" and not stripped.starts_with("#"):
+            out = out.push(line_no.to_string() + "\t" + stripped)
+    out
+
+fn split_lineno(entry: text) -> i64:
+    val tab = entry.index_of("\t") ?? -1
+    if tab < 0:
+        return 0
+    entry.substring(0, tab).to_i64()
+
+fn split_code(entry: text) -> text:
+    val tab = entry.index_of("\t") ?? -1
+    if tab < 0:
+        return entry
+    entry.substring(tab + 1)
+
+fn outside_hal(rel: text) -> bool:
+    not rel.starts_with("src/os/kernel/arch/") and not rel.starts_with("src/lib/nogc_async_mut_noalloc/baremetal/")
+
+fn count_unsafe_outside_hal(files: [text], root: text) -> CountSamples:
+    var samples: [text] = []
+    var count = 0
+    for path in files:
+        val rel = rel_path(path, root)
+        if not outside_hal(rel):
+            continue
+        for entry in code_lines(path):
+            val stripped = split_code(entry)
+            if stripped.starts_with("unsafe:") or stripped.starts_with("@nocheck"):
+                count = count + 1
+                if samples.len() < 20:
+                    samples = samples.push(rel + ":" + split_lineno(entry).to_string())
+    CountSamples(count: count, samples: samples)
+
+fn count_direct_arch_imports(files: [text], root: text) -> CountSamples:
+    var samples: [text] = []
+    var count = 0
+    for path in files:
+        val rel = rel_path(path, root)
+        if rel.starts_with("src/os/kernel/arch/") or rel.starts_with("src/os/kernel/arch_adapt/"):
+            continue
+        for entry in code_lines(path):
+            val stripped = split_code(entry)
+            if stripped.starts_with("use os.kernel.arch.") and (
+                stripped.contains("os.kernel.arch.x86_64") or
+                stripped.contains("os.kernel.arch.x86_32") or
+                stripped.contains("os.kernel.arch.arm64") or
+                stripped.contains("os.kernel.arch.arm32") or
+                stripped.contains("os.kernel.arch.riscv64") or
+                stripped.contains("os.kernel.arch.riscv32")
+            ):
+                count = count + 1
+                if samples.len() < 20:
+                    samples = samples.push(rel + ":" + split_lineno(entry).to_string())
+    CountSamples(count: count, samples: samples)
+
+fn wx_violations(files: [text], root: text) -> CountSamples:
+    var samples: [text] = []
+    var count = 0
+    for path in files:
+        val rel = rel_path(path, root)
+        if not rel.starts_with("src/os/kernel/"):
+            continue
+        for entry in code_lines(path):
+            val stripped = split_code(entry)
+            if stripped.contains("VmFlags(bits:") and stripped.contains("VM_WRITABLE") and not stripped.contains("VM_NO_EXECUTE"):
+                count = count + 1
+                if samples.len() < 20:
+                    samples = samples.push(rel + ":" + split_lineno(entry).to_string())
+            elif stripped.contains("VmFlags(bits:") and stripped.contains("bits: 7"):
+                count = count + 1
+                if samples.len() < 20:
+                    samples = samples.push(rel + ":" + split_lineno(entry).to_string())
+    CountSamples(count: count, samples: samples)
+
+fn cap_check_coverage(root: text) -> CapCoverage:
+    val path = join_path(root, "src/os/kernel/ipc/syscall.spl")
+    val source = rt_file_read_text(path) ?? ""
+    if source == "":
+        return CapCoverage(pct: 0, uncovered: 0)
+    val lines = source.split("\n")
+    var in_handler = false
+    var in_match = false
+    var protected = 0
+    var uncovered = 0
+    var in_case = false
+    var case_allowed = false
+    var case_has_cap = false
+    var idx = 0
+    while idx < lines.len():
+        val stripped = lines[idx].trim()
+        if stripped.starts_with("fn syscall_handler("):
+            in_handler = true
+            idx = idx + 1
+            continue
+        if in_handler and stripped == "match args.id:":
+            in_match = true
+            idx = idx + 1
+            continue
+        if in_handler and in_match and stripped.starts_with("fn "):
+            break
+        if in_handler and in_match and stripped.starts_with("case ") and not stripped.starts_with("case _"):
+            if in_case and not case_allowed:
+                protected = protected + 1
+                if not case_has_cap:
+                    uncovered = uncovered + 1
+            in_case = true
+            case_allowed = stripped.contains("always allowed")
+            case_has_cap = false
+        elif in_handler and in_case:
+            if stripped.contains("_cap_check("):
+                case_has_cap = true
+        idx = idx + 1
+    if in_case and not case_allowed:
+        protected = protected + 1
+        if not case_has_cap:
+            uncovered = uncovered + 1
+    if protected <= 0:
+        return CapCoverage(pct: 0, uncovered: 0)
+    CapCoverage(pct: ((protected - uncovered) * 100) / protected, uncovered: uncovered)
+
+fn check_bounds_emitted(root: text) -> bool:
+    val lowering =
+        (rt_file_read_text(join_path(root, "src/compiler/50.mir/mir_lowering_expr_part1.spl")) ?? "") +
+        "\n" +
+        (rt_file_read_text(join_path(root, "src/compiler/50.mir/mir_lowering_stmts.spl")) ?? "")
+    val runtime =
+        (rt_file_read_text(join_path(root, "src/runtime/runtime.c")) ?? "") +
+        "\n" +
+        (rt_file_read_text(join_path(root, "src/runtime/runtime.h")) ?? "")
+    lowering.contains("MirInstKind.Intrinsic(nil, \"bounds_check\"") and runtime.contains("__simple_intrinsic_bounds_check")
+
+fn json_bool_file_contains(path: text, field: text) -> bool:
+    val source = rt_file_read_text(path) ?? ""
+    source.contains("\"" + field + "\": true")
+
+fn canary_log_ok(root: text, arch: text) -> bool:
+    json_bool_file_contains(join_path(root, "build/multiarch/" + arch + "/canary_runtime.json"), "differs_across_reboots")
+
+fn text_write_trap_ok(root: text) -> bool:
+    json_bool_file_contains(join_path(root, "build/multiarch/x86_64/text_write_trap.json"), "trap_observed")
+
+fn json_escape(value: text) -> text:
+    val escaped_backslash = value.replace("\\", "\\\\")
+    val escaped_quote = escaped_backslash.replace("\"", "\\\"")
+    escaped_quote.replace("\n", "\\n")
+
+fn json_text_array(values: [text]) -> text:
+    var out = "["
+    var i = 0
+    while i < values.len():
+        if i > 0:
+            out = out + ", "
+        out = out + "\"" + json_escape(values[i]) + "\""
+        i = i + 1
+    out + "]"
+
+fn canary_runtime_json(root: text, arches: [text]) -> text:
+    var out = "{"
+    var i = 0
+    while i < arches.len():
+        if i > 0:
+            out = out + ", "
+        val ok = canary_log_ok(root, arches[i])
+        out = out + "\"" + json_escape(arches[i]) + "\": {\"differs_across_reboots\": " + (if ok: "true" else: "false") + "}"
+        i = i + 1
+    out + "}"
+
+fn per_arch_exit_codes_json(root: text, arches: [text]) -> text:
+    var out = "{"
+    var i = 0
+    while i < arches.len():
+        if i > 0:
+            out = out + ", "
+        val code = if canary_log_ok(root, arches[i]): 0 else: 1
+        out = out + "\"" + json_escape(arches[i]) + "\": " + code.to_string()
+        i = i + 1
+    out + "}"
+
+fn all_arch_canaries_ok(root: text, arches: [text]) -> bool:
+    for arch in arches:
+        if not canary_log_ok(root, arch):
+            return false
+    true
+
+fn write_report(path: text, root: text, arches: [text], unsafe_hits: CountSamples, arch_imports: CountSamples, wx_hits: CountSamples, cap: CapCoverage, text_trap: bool, bounds: bool, all_arch_pass: bool):
+    ensure_parent(path)
+    val body =
+        "{\n" +
+        "  \"all_arch_pass\": " + (if all_arch_pass: "true" else: "false") + ",\n" +
+        "  \"canary_runtime\": " + canary_runtime_json(root, arches) + ",\n" +
+        "  \"cap_check_coverage_pct\": " + cap.pct.to_string() + ",\n" +
+        "  \"check_bounds_emitted\": " + (if bounds: "true" else: "false") + ",\n" +
+        "  \"direct_arch_import_samples\": " + json_text_array(arch_imports.samples) + ",\n" +
+        "  \"direct_arch_imports_outside_arch\": " + arch_imports.count.to_string() + ",\n" +
+        "  \"generated_by\": \"scripts/audit/os_harden_audit.spl\",\n" +
+        "  \"nocheck_outside_hal\": " + unsafe_hits.count.to_string() + ",\n" +
+        "  \"per_arch_exit_codes\": " + per_arch_exit_codes_json(root, arches) + ",\n" +
+        "  \"syscall_variants_uncovered\": " + cap.uncovered.to_string() + ",\n" +
+        "  \"text_write_trap\": " + (if text_trap: "true" else: "false") + ",\n" +
+        "  \"unsafe_outside_hal\": " + unsafe_hits.count.to_string() + ",\n" +
+        "  \"unsafe_outside_hal_samples\": " + json_text_array(unsafe_hits.samples) + ",\n" +
+        "  \"wx_violation_samples\": " + json_text_array(wx_hits.samples) + ",\n" +
+        "  \"wx_violations\": " + wx_hits.count.to_string() + ",\n" +
+        "  \"x86_32_nx_status\": \"present_in_audit_pending_runtime_proof\"\n" +
+        "}\n"
+    rt_file_write_text(path, body)
+
+val config = parse_args(normalize_args(rt_cli_get_args()))
+val files = list_owned_spl_files(config.root)
+val unsafe_hits = count_unsafe_outside_hal(files, config.root)
+val arch_imports = count_direct_arch_imports(files, config.root)
+val wx_hits = wx_violations(files, config.root)
+val cap = cap_check_coverage(config.root)
+val text_trap = text_write_trap_ok(config.root)
+val bounds = check_bounds_emitted(config.root)
+val audit_passed =
+    unsafe_hits.count == 0 and
+    arch_imports.count == 0 and
+    wx_hits.count == 0 and
+    cap.pct == 100 and
+    cap.uncovered == 0 and
+    text_trap and
+    bounds and
+    all_arch_canaries_ok(config.root, config.arches)
+
+write_report(config.report_path, config.root, config.arches, unsafe_hits, arch_imports, wx_hits, cap, text_trap, bounds, audit_passed)
+if audit_passed:
+    rt_exit(0)
+rt_exit(1)

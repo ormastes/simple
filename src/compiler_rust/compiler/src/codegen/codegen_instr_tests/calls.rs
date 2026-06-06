@@ -42,6 +42,7 @@ fn codegen_closure_create_and_indirect_call() {
         capture_offsets: vec![],
         capture_types: vec![],
         captures: vec![],
+        lambda_params: vec![],
         body_block: None,
     });
     block.instructions.push(MirInst::ConstInt { dest: arg, value: 42 });

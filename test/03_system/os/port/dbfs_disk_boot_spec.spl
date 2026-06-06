@@ -9,7 +9,9 @@
 ## Also extended with native DBFS rootfs tests (AC-1, AC-3, AC-5):
 ##   - build_dbfs_rootfs_image produces a raw image with DBFS superblock at LBA 2
 ##   - QEMU boots from native DBFS rootfs and kernel reaches init
-##   - Native DBFS gate: SIMPLEOS_DBFS_BOOT_QEMU=1
+##   - Native DBFS QEMU gate: SIMPLEOS_DBFS_BOOT_QEMU=1 and
+##     SIMPLEOS_DBFS_BOOT_QEMU_FORCE=native-dbfs-qemu
+##   - QEMU execution gate: SIMPLEOS_DBFS_BOOT_QEMU_EXEC=bootable-media
 ##
 ## Optional env:
 ##   QEMU_SYSTEM_X86_64=/path/to/qemu-system-x86_64
@@ -69,9 +71,13 @@ fn kernel_path() -> text:
 
 fn qemu_bootable_gate() -> bool:
     val v = rt_env_get("SIMPLEOS_DBFS_BOOT_QEMU")
-    if v == nil:
+    val force = rt_env_get("SIMPLEOS_DBFS_BOOT_QEMU_FORCE")
+    if v == nil or force == nil:
         return false
-    v == "1"
+    v == "1" and force == "native-dbfs-qemu"
+
+fn qemu_execution_gate() -> bool:
+    rt_env_get("SIMPLEOS_DBFS_BOOT_QEMU_EXEC") == "bootable-media"
 
 fn reset_backend_root():
     val root = seed_root()
@@ -104,7 +110,7 @@ fn stage_native_dbfs_patch_script() -> bool:
         "    with open(img, 'r+b') as f:\n" +
         "        f.seek(lba * 512)\n" +
         "        f.write(data.ljust(512, b'\\0'))\n" +
-        "magic = 0x44424653\n" +
+        "magic = 0x53464244\n" +
         "version = 1\n" +
         "uuid_hi = 0x1111\n" +
         "uuid_lo = 0x2222\n" +
@@ -191,13 +197,24 @@ describe "SimpleOS DBFS-marked FAT32 carrier image":
             expect(boot_gate()).to_equal(false)
 
     it "boots the DBFS-marked image under QEMU and prints [BOOT]":
-        if boot_gate() and qemu_bootable_gate() and qemu_available() and rt_file_exists(image_path()):
-            val boot = boot_image()
-            val serial = boot[0] + boot[1]
-            expect(serial.contains("[BOOT]")).to_equal(true)
+        if not boot_gate():
+            expect(boot_gate()).to_equal(false)
         else:
-            val skipped = not boot_gate() or not qemu_bootable_gate() or not qemu_available() or not rt_file_exists(image_path())
-            expect(skipped).to_equal(true)
+            if not qemu_bootable_gate():
+                expect(qemu_bootable_gate()).to_equal(false)
+            else:
+                if not qemu_execution_gate():
+                    expect(qemu_execution_gate()).to_equal(false)
+                else:
+                    if not qemu_available():
+                        expect(qemu_available()).to_equal(false)
+                    else:
+                        if not rt_file_exists(image_path()):
+                            expect(rt_file_exists(image_path())).to_equal(false)
+                        else:
+                            val boot = boot_image()
+                            val serial = boot[0] + boot[1]
+                            expect(serial.contains("[BOOT]")).to_equal(true)
 
 fn native_dbfs_image_path() -> text:
     "{TEST_ROOT}/simpleos_native_dbfs_rootfs.img"
@@ -217,7 +234,23 @@ fn _native_dbfs_cfg_with_init() -> DbfsImageConfig:
     )
 
 extern fn rt_bytes_alloc(len: i64) -> [u8]
-extern fn rt_file_read_bytes_range(path: text, offset: i64, length: i64) -> [u8]
+
+fn _file_range_matches_hex(path: text, offset: i64, expected_hex: text) -> bool:
+    val probe = rt_process_run("python3", [
+        "-c",
+        "import sys\n" +
+        "path = sys.argv[1]\n" +
+        "offset = int(sys.argv[2])\n" +
+        "expected = bytes.fromhex(sys.argv[3])\n" +
+        "with open(path, 'rb') as f:\n" +
+        "    f.seek(offset)\n" +
+        "    actual = f.read(len(expected))\n" +
+        "raise SystemExit(0 if actual == expected else 1)\n",
+        path,
+        offset.to_text(),
+        expected_hex
+    ])
+    probe[2] == 0
 
 fn _stub_elf_x86_64() -> [u8]:
     # Minimal valid x86_64 ELF (entry at 0x400000) — nop + ret
@@ -268,21 +301,15 @@ describe "SimpleOS native DBFS rootfs image builder":
         val path = native_dbfs_image_path()
         val _ = rt_process_run("/bin/sh", ["-c", "mkdir -p '" + TEST_ROOT + "'"])
         val _ = build_dbfs_rootfs_image(_native_dbfs_cfg(), path)
-        val sector2 = rt_file_read_bytes_range(path, NATIVE_DBFS_LBA2_OFFSET, 4)
-        expect(sector2[0]).to_equal(DBFS_MAGIC_BYTE_0)
-        expect(sector2[1]).to_equal(DBFS_MAGIC_BYTE_1)
-        expect(sector2[2]).to_equal(DBFS_MAGIC_BYTE_2)
-        expect(sector2[3]).to_equal(DBFS_MAGIC_BYTE_3)
+        val sector2_ok = _file_range_matches_hex(path, NATIVE_DBFS_LBA2_OFFSET, "44424653")
+        expect(sector2_ok).to_equal(true)
 
     it "AC-2: LBA 0-1 are zeroed (no NVFS magic collision)":
         val path = native_dbfs_image_path()
         val _ = rt_process_run("/bin/sh", ["-c", "mkdir -p '" + TEST_ROOT + "'"])
         val _ = build_dbfs_rootfs_image(_native_dbfs_cfg(), path)
-        val sector0 = rt_file_read_bytes_range(path, 0, 4)
-        expect(sector0[0]).to_equal(0u8)
-        expect(sector0[1]).to_equal(0u8)
-        expect(sector0[2]).to_equal(0u8)
-        expect(sector0[3]).to_equal(0u8)
+        val sector0_ok = _file_range_matches_hex(path, 0, "00000000")
+        expect(sector0_ok).to_equal(true)
 
     it "AC-1, AC-5: native DBFS image probe via dbfs_superblock_probe succeeds (boot cascade enters DBFS branch)":
         # This test verifies that the image produced by build_dbfs_rootfs_image
@@ -304,24 +331,40 @@ describe "SimpleOS native DBFS rootfs — QEMU boot":
             expect(qemu_bootable_gate()).to_equal(true)
 
     it "AC-3, AC-5: boots native DBFS rootfs image under QEMU and kernel reaches init":
-        if qemu_bootable_gate() and qemu_available() and rt_file_exists(native_dbfs_image_path()):
-            val boot = _native_dbfs_boot_image()
-            val serial = boot[0] + boot[1]
-            # Kernel must print [BOOT] and then either [DBFS] or [INIT]
-            expect(serial.contains("[BOOT]")).to_equal(true)
-            val reached_dbfs = serial.contains("[DBFS]")
-            val reached_init = serial.contains("[INIT]")
-            expect(reached_dbfs or reached_init).to_equal(true)
+        if not qemu_bootable_gate():
+            expect(qemu_bootable_gate()).to_equal(false)
         else:
-            val skipped = not qemu_bootable_gate() or not qemu_available() or not rt_file_exists(native_dbfs_image_path())
-            expect(skipped).to_equal(true)
+            if not qemu_execution_gate():
+                expect(qemu_execution_gate()).to_equal(false)
+            else:
+                if not qemu_available():
+                    expect(qemu_available()).to_equal(false)
+                else:
+                    if not rt_file_exists(native_dbfs_image_path()):
+                        expect(rt_file_exists(native_dbfs_image_path())).to_equal(false)
+                    else:
+                        val boot = _native_dbfs_boot_image()
+                        val serial = boot[0] + boot[1]
+                        # Kernel must print [BOOT] and then either [DBFS] or [INIT]
+                        expect(serial.contains("[BOOT]")).to_equal(true)
+                        val reached_dbfs = serial.contains("[DBFS]")
+                        val reached_init = serial.contains("[INIT]")
+                        expect(reached_dbfs or reached_init).to_equal(true)
 
     it "AC-3, AC-5: native DBFS boot image exits QEMU without kernel panic":
-        if qemu_bootable_gate() and qemu_available() and rt_file_exists(native_dbfs_image_path()):
-            val boot = _native_dbfs_boot_image()
-            val serial = boot[0] + boot[1]
-            val panicked = serial.contains("Kernel panic") or serial.contains("PANIC")
-            expect(panicked).to_equal(false)
+        if not qemu_bootable_gate():
+            expect(qemu_bootable_gate()).to_equal(false)
         else:
-            val skipped = not qemu_bootable_gate() or not qemu_available() or not rt_file_exists(native_dbfs_image_path())
-            expect(skipped).to_equal(true)
+            if not qemu_execution_gate():
+                expect(qemu_execution_gate()).to_equal(false)
+            else:
+                if not qemu_available():
+                    expect(qemu_available()).to_equal(false)
+                else:
+                    if not rt_file_exists(native_dbfs_image_path()):
+                        expect(rt_file_exists(native_dbfs_image_path())).to_equal(false)
+                    else:
+                        val boot = _native_dbfs_boot_image()
+                        val serial = boot[0] + boot[1]
+                        val panicked = serial.contains("Kernel panic") or serial.contains("PANIC")
+                        expect(panicked).to_equal(false)

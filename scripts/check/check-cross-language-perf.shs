@@ -24,6 +24,13 @@ REPORT_PATH="${REPORT_PATH:-doc/09_report/cross_language_perf_$(date +%Y-%m-%d).
 RUNS="${RUNS:-20}"
 FIB_N="${FIB_N:-35}"
 WORKERS="${WORKERS:-100}"
+if [ -z "${GREEN_WORKERS:-}" ]; then
+    if [ "$WORKERS" -gt 10 ]; then
+        GREEN_WORKERS=10
+    else
+        GREEN_WORKERS="$WORKERS"
+    fi
+fi
 WARM_ITERS="${WARM_ITERS:-5}"
 WARM_IN_PROCESS="${WARM_IN_PROCESS:-10}"
 RUN_TIMEOUT="${RUN_TIMEOUT:-30}"
@@ -143,6 +150,7 @@ write_simple_parallel() {
     # Channel-based pattern — same semantic as Go's goroutine + chan result.
     # Workers send results through a channel; main recvs and sums.
     # Unrolled: native codegen List iteration is broken (codegen bug).
+    _last_worker=$((WORKERS - 1))
     {
         echo 'use std.concurrent.channel.{channel_new, channel_from_id}'
         echo 'use std.concurrent.thread.{thread_spawn}'
@@ -163,19 +171,54 @@ write_simple_parallel() {
         echo 'fn main():'
         echo '    val ch = channel_new()'
         echo '    val cid = ch.id()'
-        for i in $(seq 0 99); do
+        for i in $(seq 0 "$_last_worker"); do
             echo "    var h${i} = thread_spawn(\\: worker(${i}, cid))"
         done
-        for i in $(seq 0 99); do
+        for i in $(seq 0 "$_last_worker"); do
             echo "    h${i}.join()"
         done
         echo '    var total: i64 = 0'
-        for i in $(seq 0 99); do
+        for i in $(seq 0 "$_last_worker"); do
             echo "    val v${i}: i64 = ch.recv()"
             echo "    total = total + v${i}"
         done
         echo '    println("total = {total}")'
     } >"$BUILD_DIR/parallel.spl"
+}
+
+write_simple_parallel_green() {
+    # Cooperative green-thread pattern. Same LCG worker count, but green threads
+    # run to completion on the current OS thread and return through join().
+    _last_green_worker=$((GREEN_WORKERS - 1))
+    {
+        echo 'use std.concurrent.green_thread.{green_spawn, green_run_all}'
+        echo ''
+        echo 'val LCG_A: i64 = 1103515245'
+        echo 'val LCG_C: i64 = 12345'
+        echo 'val LCG_M: i64 = 2147483648'
+        echo 'val ITERS: i64 = 100000'
+        echo ''
+        echo 'fn worker(seed: i64) -> i64:'
+        echo '    var x = seed'
+        echo '    for i in 0..ITERS:'
+        echo '        x = (x * LCG_A + LCG_C) % LCG_M'
+        echo '    x'
+        echo ''
+        for i in $(seq 0 "$_last_green_worker"); do
+            echo "fn worker_${i}() -> i64: worker(${i})"
+        done
+        echo ''
+        echo 'fn main():'
+        for i in $(seq 0 "$_last_green_worker"); do
+            echo "    var h${i} = green_spawn(worker_${i})"
+        done
+        echo '    green_run_all()'
+        echo '    var total: i64 = 0'
+        for i in $(seq 0 "$_last_green_worker"); do
+            echo "    total = total + h${i}.join()"
+        done
+        echo '    println("total = {total}")'
+    } >"$BUILD_DIR/parallel_green.spl"
 }
 
 write_c_hello() {
@@ -215,7 +258,7 @@ C
 }
 
 write_c_parallel() {
-    cat >"$BUILD_DIR/parallel.c" <<'C'
+    cat >"$BUILD_DIR/parallel.c" <<C
 #include <stdio.h>
 #include <stdint.h>
 #include <pthread.h>
@@ -230,7 +273,7 @@ static void *worker(void *arg) {
     return (void *)(intptr_t)x;
 }
 int main(void) {
-    enum { N = 100 };
+    enum { N = ${WORKERS} };
     pthread_t t[N]; int64_t total = 0;
     for (int i = 0; i < N; i++) pthread_create(&t[i], NULL, worker, (void *)(intptr_t)i);
     for (int i = 0; i < N; i++) { void *r; pthread_join(t[i], &r); total += (int64_t)(intptr_t)r; }
@@ -265,7 +308,7 @@ GO
 }
 
 write_go_parallel() {
-    cat >"$BUILD_DIR/parallel.go" <<'GO'
+    cat >"$BUILD_DIR/parallel.go" <<GO
 package main
 import "fmt"
 /* Idiomatic Go: results flow through channels (safe pattern) */
@@ -276,10 +319,10 @@ func worker(seed int64, ch chan<- int64) {
     ch <- x
 }
 func main() {
-    ch := make(chan int64, 100)
-    for i := 0; i < 100; i++ { go worker(int64(i), ch) }
+    ch := make(chan int64, ${WORKERS})
+    for i := 0; i < ${WORKERS}; i++ { go worker(int64(i), ch) }
     var total int64
-    for i := 0; i < 100; i++ { total += <-ch }
+    for i := 0; i < ${WORKERS}; i++ { total += <-ch }
     fmt.Printf("total = %d\n", total)
 }
 GO
@@ -313,7 +356,7 @@ PY
 }
 
 write_python_parallel() {
-    cat >"$BUILD_DIR/parallel.py" <<'PY'
+    cat >"$BUILD_DIR/parallel.py" <<PY
 import threading
 A, C, M, ITERS = 1103515245, 12345, 2147483648, 100000
 def worker(results, idx):
@@ -321,8 +364,8 @@ def worker(results, idx):
     for _ in range(ITERS):
         x = (x * A + C) % M
     results[idx] = x
-results = [0]*100
-threads = [threading.Thread(target=worker, args=(results,i)) for i in range(100)]
+results = [0]*${WORKERS}
+threads = [threading.Thread(target=worker, args=(results,i)) for i in range(${WORKERS})]
 for t in threads: t.start()
 for t in threads: t.join()
 print(f"total = {sum(results)}")
@@ -349,7 +392,7 @@ JS
 }
 
 write_bun_parallel() {
-    cat >"$BUILD_DIR/parallel.js" <<'JS'
+    cat >"$BUILD_DIR/parallel.js" <<JS
 const { Worker, isMainThread, parentPort, workerData } = require("worker_threads");
 if (!isMainThread) {
   const A = 1103515245, C = 12345, M = 2147483648, ITERS = 100000;
@@ -357,11 +400,11 @@ if (!isMainThread) {
   for (let i = 0; i < ITERS; i++) x = (x * A + C) % M;
   parentPort.postMessage(x);
 } else {
-  const N = 100;
+  const N = ${WORKERS};
   let total = 0, done = 0;
   for (let i = 0; i < N; i++) {
     const w = new Worker(__filename, { workerData: { seed: i } });
-    w.on("message", v => { total += v; if (++done === N) console.log(`total = ${total}`); });
+    w.on("message", v => { total += v; if (++done === N) console.log("total = " + total); });
   }
 }
 JS
@@ -393,7 +436,7 @@ JAVA
 }
 
 write_java_parallel() {
-    cat >"$BUILD_DIR/Parallel.java" <<'JAVA'
+    cat >"$BUILD_DIR/Parallel.java" <<JAVA
 import java.util.concurrent.*;
 import java.util.stream.*;
 public class Parallel {
@@ -406,7 +449,7 @@ public class Parallel {
     }
     public static void main(String[] a) throws Exception {
         var pool = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
-        var futures = IntStream.range(0,100).mapToObj(i -> pool.submit(() -> worker(i))).toList();
+        var futures = IntStream.range(0,${WORKERS}).mapToObj(i -> pool.submit(() -> worker(i))).toList();
         long total = 0; for (var f : futures) total += f.get();
         pool.shutdown();
         System.out.printf("total = %d%n", total);
@@ -446,7 +489,7 @@ ERL
 }
 
 write_erlang_parallel() {
-    cat >"$BUILD_DIR/parallel.erl" <<'ERL'
+    cat >"$BUILD_DIR/parallel.erl" <<ERL
 -module(parallel).
 -export([main/1]).
 lcg(_X, 0) -> _X;
@@ -454,7 +497,7 @@ lcg(X, N) -> lcg((X * 1103515245 + 12345) rem 2147483648, N - 1).
 worker(Parent, Seed) -> Parent ! {self(), lcg(Seed, 100000)}.
 main(_) ->
     Self = self(),
-    Pids = [spawn(fun() -> worker(Self, I) end) || I <- lists:seq(0,99)],
+    Pids = [spawn(fun() -> worker(Self, I) end) || I <- lists:seq(0,$((WORKERS - 1)))],
     Total = lists:foldl(fun(Pid, Acc) -> receive {Pid, V} -> Acc + V end end, 0, Pids),
     io:format("total = ~w~n", [Total]).
 ERL
@@ -466,6 +509,7 @@ write_simple_hello
 write_simple_fib
 write_simple_fib_warm
 write_simple_parallel
+write_simple_parallel_green
 write_c_hello
 write_c_fib
 write_c_fib_warm
@@ -520,7 +564,7 @@ else echo "  [skip] Erlang — erlc not found"; fi
 
 # Simple native
 if [ -x "$SIMPLE_BINARY" ]; then
-    for _src in hello fib fib_warm parallel; do
+    for _src in hello fib fib_warm parallel parallel_green; do
         _spl="$BUILD_DIR/${_src}.spl"
         _out="$BUILD_DIR/${_src}_simple_native"
         if [ -f "$_spl" ]; then
@@ -539,7 +583,7 @@ else echo "  [skip] Simple — $SIMPLE_BINARY not found"; fi
 # Simple SMF
 COMPILE_FAIL_SMF=""
 if [ -x "$SIMPLE_BINARY" ]; then
-    for _src in hello fib fib_warm parallel; do
+    for _src in hello fib fib_warm parallel parallel_green; do
         _spl="$BUILD_DIR/${_src}.spl"
         _out="$BUILD_DIR/${_src}_simple.smf"
         if [ -f "$_spl" ]; then
@@ -563,7 +607,7 @@ cat >"$REPORT_PATH" <<EOF
 **Date:** $(date +%Y-%m-%d)
 **Machine:** $(uname -m) / $(uname -s) $(uname -r)
 **CPU:** $(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs || sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "unknown")
-**Runs per measurement:** $RUNS | **Warmup (in-process):** $WARM_IN_PROCESS | **fib(N):** $FIB_N | **Workers:** $WORKERS | **Per-run timeout:** ${RUN_TIMEOUT}s
+**Runs per measurement:** $RUNS | **Warmup (in-process):** $WARM_IN_PROCESS | **fib(N):** $FIB_N | **Workers:** $WORKERS | **Green workers:** $GREEN_WORKERS | **Per-run timeout:** ${RUN_TIMEOUT}s
 
 > Size for AOT = binary bytes. For VM/interpreted = script bytes (runtime not included).
 > "Runtime dep" column shows runtime size where applicable.
@@ -696,7 +740,7 @@ if have erl; then
     warm_row "Erlang" "$ms" "BEAM (single-process)"
 fi
 
-# ── 4. Parallel — spawn 100 workers ─────────────────────────────────────
+# ── 4. Parallel — spawn workers ─────────────────────────────────────────
 
 echo "=== Measuring parallel — $WORKERS workers ==="
 section "4. Parallel — spawn $WORKERS workers ($RUNS runs avg)"
@@ -717,6 +761,20 @@ if [ -x "$BUILD_DIR/parallel_simple_native" ]; then
     par_row "Simple (native)" "$ms" "channel + OS threads (same as Go pattern)"
 else
     par_row "Simple (native)" "n/a" "compile failed"
+fi
+if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/parallel_green.spl" ]; then
+    ms=$(avg_ms "$SIMPLE_BINARY run $BUILD_DIR/parallel_green.spl --mode=interpreter" "$RUNS")
+    par_row "Simple green (interp)" "$ms" "green_spawn cooperative queue"
+fi
+if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/parallel_green_simple.smf" ]; then
+    ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/parallel_green_simple.smf" "$RUNS")
+    par_row "Simple green (SMF)" "$ms" "green_spawn cooperative queue"
+fi
+if [ -x "$BUILD_DIR/parallel_green_simple_native" ]; then
+    ms=$(avg_ms "$BUILD_DIR/parallel_green_simple_native" "$RUNS")
+    par_row "Simple green (native)" "$ms" "green_spawn cooperative queue"
+else
+    par_row "Simple green (native)" "n/a" "compile failed"
 fi
 if [ -x "$BUILD_DIR/parallel_c" ]; then
     ms=$(avg_ms "$BUILD_DIR/parallel_c" "$RUNS")
@@ -762,6 +820,14 @@ if [ -f "$BUILD_DIR/parallel_simple.smf" ]; then
     _sz=$(bytes_of "$BUILD_DIR/parallel_simple.smf")
     par_size_row "Simple (SMF)" "$(human_bytes "$_sz")" "OS default (8MB)" "+ runtime $(human_bytes "$(bytes_of "$(readlink -f "$SIMPLE_BINARY")")")"
 fi
+if [ -x "$BUILD_DIR/parallel_green_simple_native" ]; then
+    _sz=$(bytes_of "$BUILD_DIR/parallel_green_simple_native")
+    par_size_row "Simple green (native)" "$(human_bytes "$_sz")" "current OS thread" "cooperative queue"
+fi
+if [ -f "$BUILD_DIR/parallel_green_simple.smf" ]; then
+    _sz=$(bytes_of "$BUILD_DIR/parallel_green_simple.smf")
+    par_size_row "Simple green (SMF)" "$(human_bytes "$_sz")" "current OS thread" "+ runtime $(human_bytes "$(bytes_of "$(readlink -f "$SIMPLE_BINARY")")")"
+fi
 if [ -x "$BUILD_DIR/parallel_c" ]; then
     _sz=$(bytes_of "$BUILD_DIR/parallel_c")
     par_size_row "C (pthreads)" "$(human_bytes "$_sz")" "OS default (8MB)" "gcc -O2"
@@ -790,7 +856,7 @@ fi
 # ── 4c. Parallel peak RSS ──────────────────────────────────────────────
 
 echo "=== Measuring parallel peak RSS ==="
-section "4c. Parallel Peak RSS (100 workers)"
+section "4c. Parallel Peak RSS ($WORKERS workers)"
 printf "| %-22s | %14s | %14s | %20s |\n" "Language" "Peak RSS" "Baseline RSS" "Per-worker delta" >>"$REPORT_PATH"
 printf "|%-24s|%16s|%16s|%22s|\n" "------------------------" "----------------" "----------------" "----------------------" >>"$REPORT_PATH"
 
@@ -837,7 +903,7 @@ echo "  Measuring parallel RSS..."
 if [ -x "$BUILD_DIR/parallel_simple_native" ]; then
     _rss_kb=$(measure_rss "$BUILD_DIR/parallel_simple_native")
     if [ -n "$_rss_kb" ] && [ "$_rss_kb" != "0" ]; then
-        _per=$(rss_delta_per_worker "$_rss_kb" "$_base_simple_kb" 100)
+        _per=$(rss_delta_per_worker "$_rss_kb" "$_base_simple_kb" "$WORKERS")
         _base_h=""; if [ -n "$_base_simple_kb" ]; then _base_h=$(human_bytes $((_base_simple_kb * 1024))); else _base_h="n/a"; fi
         _per_h=""; if [ -n "$_per" ]; then _per_h="~${_per}KB"; else _per_h="n/a"; fi
         par_rss_row "Simple (native)" "$(human_bytes $((_rss_kb * 1024)))" "$_base_h" "$_per_h"
@@ -846,7 +912,7 @@ fi
 if [ -x "$BUILD_DIR/parallel_c" ]; then
     _rss_kb=$(measure_rss "$BUILD_DIR/parallel_c")
     if [ -n "$_rss_kb" ] && [ "$_rss_kb" != "0" ]; then
-        _per=$(rss_delta_per_worker "$_rss_kb" "$_base_c_kb" 100)
+        _per=$(rss_delta_per_worker "$_rss_kb" "$_base_c_kb" "$WORKERS")
         _base_h=""; if [ -n "$_base_c_kb" ]; then _base_h=$(human_bytes $((_base_c_kb * 1024))); else _base_h="n/a"; fi
         _per_h=""; if [ -n "$_per" ]; then _per_h="~${_per}KB"; else _per_h="n/a"; fi
         par_rss_row "C (pthreads)" "$(human_bytes $((_rss_kb * 1024)))" "$_base_h" "$_per_h"
@@ -855,7 +921,7 @@ fi
 if [ -x "$BUILD_DIR/parallel_go" ]; then
     _rss_kb=$(measure_rss "$BUILD_DIR/parallel_go")
     if [ -n "$_rss_kb" ] && [ "$_rss_kb" != "0" ]; then
-        _per=$(rss_delta_per_worker "$_rss_kb" "$_base_go_kb" 100)
+        _per=$(rss_delta_per_worker "$_rss_kb" "$_base_go_kb" "$WORKERS")
         _base_h=""; if [ -n "$_base_go_kb" ]; then _base_h=$(human_bytes $((_base_go_kb * 1024))); else _base_h="n/a"; fi
         _per_h=""; if [ -n "$_per" ]; then _per_h="~${_per}KB"; else _per_h="n/a"; fi
         par_rss_row "Go" "$(human_bytes $((_rss_kb * 1024)))" "$_base_h" "$_per_h"
@@ -865,7 +931,7 @@ if have python3; then
     _base_py_kb=$(measure_rss "python3 -c 'print(1)'")
     _rss_kb=$(measure_rss "python3 $BUILD_DIR/parallel.py")
     if [ -n "$_rss_kb" ] && [ "$_rss_kb" != "0" ]; then
-        _per=$(rss_delta_per_worker "$_rss_kb" "$_base_py_kb" 100)
+        _per=$(rss_delta_per_worker "$_rss_kb" "$_base_py_kb" "$WORKERS")
         _base_h=""; if [ -n "$_base_py_kb" ]; then _base_h=$(human_bytes $((_base_py_kb * 1024))); else _base_h="n/a"; fi
         _per_h=""; if [ -n "$_per" ]; then _per_h="~${_per}KB"; else _per_h="n/a"; fi
         par_rss_row "Python" "$(human_bytes $((_rss_kb * 1024)))" "$_base_h" "$_per_h"
@@ -875,7 +941,7 @@ if have java; then
     _base_java_kb=$(measure_rss "java -version")
     _rss_kb=$(measure_rss "java -cp $BUILD_DIR Parallel")
     if [ -n "$_rss_kb" ] && [ "$_rss_kb" != "0" ]; then
-        _per=$(rss_delta_per_worker "$_rss_kb" "$_base_java_kb" 100)
+        _per=$(rss_delta_per_worker "$_rss_kb" "$_base_java_kb" "$WORKERS")
         _base_h=""; if [ -n "$_base_java_kb" ]; then _base_h=$(human_bytes $((_base_java_kb * 1024))); else _base_h="n/a"; fi
         _per_h=""; if [ -n "$_per" ]; then _per_h="~${_per}KB"; else _per_h="n/a"; fi
         par_rss_row "Java" "$(human_bytes $((_rss_kb * 1024)))" "$_base_h" "$_per_h"
@@ -889,6 +955,13 @@ cat >>"$REPORT_PATH" <<'EOF'
 > **Workload:** LCG (Linear Congruential Generator) with 100K iterations per worker.
 > Each worker reads shared constants (LCG_A, LCG_C, LCG_M, ITERS).
 >
+> **Simple concurrency rows:** `Simple (native)` uses `thread_spawn`, which is
+> the OS-thread API. `Simple green` uses `green_spawn`, which is the implemented
+> cooperative green-thread queue on the current OS thread; it does not run in
+> parallel and is not a Go M:N goroutine equivalent. The green row uses the
+> `GREEN_WORKERS` count from the report header because the current cooperative
+> seed is intentionally separate from the OS-thread/Goroutine worker count.
+>
 > **Design comparison — Simple channels vs Go channels:**
 > Both Simple and Go use the same pattern: workers send results through a channel,
 > main collects via recv. Simple's `val` constants captured by closures add a
@@ -898,7 +971,7 @@ cat >>"$REPORT_PATH" <<'EOF'
 > Same semantic, same safety for result collection; Simple adds compile-time
 > enforcement for shared read-only data.
 >
-> **RSS note:** Per-worker delta = (parallel_RSS - hello_baseline_RSS) / 100.
+> **RSS note:** Per-worker delta = (parallel_RSS - hello_baseline_RSS) / worker count.
 > Baseline measures the runtime's fixed overhead (startup, GC, stdlib).
 > OS-thread languages (Simple, C) pay ~8MB default stack per thread but RSS
 > reflects only committed pages, not reserved virtual memory.

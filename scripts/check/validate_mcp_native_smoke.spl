@@ -1,0 +1,210 @@
+# Validate MCP native smoke outputs without Python.
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_file_read_text(path: text) -> text
+
+struct SmokeResult:
+    json_valid: bool
+    schema_valid: bool
+    tool_count: i64
+    wm_text_valid: bool
+
+fn extract_json_payloads(text_value: text) -> [text]:
+    var payloads: [text] = []
+    var i: i64 = 0
+    while i < text_value.len():
+        while i < text_value.len() and text_value.char_at(i) != "{":
+            i = i + 1
+        if i >= text_value.len():
+            break
+        val start = i
+        var depth: i64 = 0
+        var in_string = false
+        var escaped = false
+        while i < text_value.len():
+            val ch = text_value.char_at(i)
+            if in_string:
+                if escaped:
+                    escaped = false
+                elif ch == "\\":
+                    escaped = true
+                elif ch == "\"":
+                    in_string = false
+            else:
+                if ch == "\"":
+                    in_string = true
+                elif ch == "{":
+                    depth = depth + 1
+                elif ch == "}":
+                    depth = depth - 1
+                    if depth == 0:
+                        payloads.push(text_value.substring(start, i + 1))
+                        i = i + 1
+                        break
+            i = i + 1
+        if depth != 0:
+            return []
+    payloads
+
+fn find_matching(text_value: text, start: i64, open_ch: text, close_ch: text) -> i64:
+    var i = start
+    var depth: i64 = 0
+    var in_string = false
+    var escaped = false
+    while i < text_value.len():
+        val ch = text_value.char_at(i)
+        if in_string:
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == "\"":
+                in_string = false
+        else:
+            if ch == "\"":
+                in_string = true
+            elif ch == open_ch:
+                depth = depth + 1
+            elif ch == close_ch:
+                depth = depth - 1
+                if depth == 0:
+                    return i
+        i = i + 1
+    -1
+
+fn extract_string_after(text_value: text, marker: text) -> text:
+    val marker_pos = text_value.find(marker)
+    if marker_pos < 0:
+        return ""
+    var i = marker_pos + marker.len()
+    while i < text_value.len() and (text_value.char_at(i) == " " or text_value.char_at(i) == "\t" or text_value.char_at(i) == "\n" or text_value.char_at(i) == "\r"):
+        i = i + 1
+    if i >= text_value.len() or text_value.char_at(i) != "\"":
+        return ""
+    i = i + 1
+    val start = i
+    var escaped = false
+    while i < text_value.len():
+        val ch = text_value.char_at(i)
+        if escaped:
+            escaped = false
+        elif ch == "\\":
+            escaped = true
+        elif ch == "\"":
+            return text_value.substring(start, i)
+        i = i + 1
+    ""
+
+fn extract_balanced_after(text_value: text, marker: text, open_ch: text, close_ch: text) -> text:
+    val marker_pos = text_value.find(marker)
+    if marker_pos < 0:
+        return ""
+    var i = marker_pos + marker.len()
+    while i < text_value.len() and (text_value.char_at(i) == " " or text_value.char_at(i) == "\t" or text_value.char_at(i) == "\n" or text_value.char_at(i) == "\r"):
+        i = i + 1
+    if i >= text_value.len() or text_value.char_at(i) != open_ch:
+        return ""
+    val end = find_matching(text_value, i, open_ch, close_ch)
+    if end < 0:
+        return ""
+    text_value.substring(i, end + 1)
+
+fn extract_required_keys(required_array: text) -> [text]:
+    var keys: [text] = []
+    var i: i64 = 0
+    while i < required_array.len():
+        while i < required_array.len() and required_array.char_at(i) != "\"":
+            i = i + 1
+        if i >= required_array.len():
+            break
+        val start = i + 1
+        i = start
+        while i < required_array.len() and required_array.char_at(i) != "\"":
+            i = i + 1
+        if i < required_array.len():
+            keys.push(required_array.substring(start, i))
+        i = i + 1
+    keys
+
+fn has_text(values: [text], needle: text) -> bool:
+    for value in values:
+        if value == needle:
+            return true
+    false
+
+fn count_occurrences(haystack: text, needle: text) -> i64:
+    var count: i64 = 0
+    var pos: i64 = 0
+    while pos < haystack.len():
+        val found = haystack.substring(pos, haystack.len()).find(needle)
+        if found < 0:
+            return count
+        count = count + 1
+        pos = pos + found + needle.len()
+    count
+
+fn validate_tool_schema(tool: text) -> bool:
+    val schema = extract_balanced_after(tool, "\"inputSchema\":", "{", "}")
+    if schema == "":
+        return false
+    val props = extract_balanced_after(schema, "\"properties\":", "{", "}")
+    val required = extract_balanced_after(schema, "\"required\":", "[", "]")
+    if props == "" or required == "":
+        return false
+    for key in extract_required_keys(required):
+        if not props.contains("\"" + key + "\""):
+            return false
+    true
+
+fn validate_payload_file(path: text, prefix: text) -> SmokeResult:
+    val raw = rt_file_read_text(path)
+    val payloads = extract_json_payloads(raw)
+    var json_valid = payloads.len() > 0
+    var schema_valid = json_valid
+    var tool_count: i64 = 0
+    if payloads.len() == 0:
+        schema_valid = false
+    else:
+        val last = payloads[payloads.len() - 1]
+        if not last.contains("\"tools\":"):
+            schema_valid = false
+        else:
+            tool_count = count_occurrences(last, "\"name\":\"")
+            val schema_count = count_occurrences(last, "\"inputSchema\":")
+            if tool_count <= 0 or schema_count < tool_count or not last.contains("\"properties\":") or not last.contains("\"required\":"):
+                schema_valid = false
+    var wm_text_valid = true
+    if prefix == "mcp":
+        val last = if payloads.len() > 0: payloads[payloads.len() - 1] else: ""
+        wm_text_valid = last.contains("\"name\":\"play_wm_text_status\"") and last.contains("\"name\":\"play_wm_text_snapshot\"") and last.contains("\"name\":\"play_wm_text_find\"") and last.contains("\"name\":\"play_wm_text_act\"")
+    SmokeResult(json_valid: json_valid, schema_valid: schema_valid, tool_count: tool_count, wm_text_valid: wm_text_valid)
+
+fn print_result(prefix: text, result: SmokeResult):
+    print prefix + "_tools_json_valid=" + result.json_valid.to_string()
+    print prefix + "_tools_schema_valid=" + result.schema_valid.to_string()
+    print prefix + "_tools_count=" + result.tool_count.to_string()
+    if prefix == "mcp":
+        print prefix + "_wm_text_tools_present=" + result.wm_text_valid.to_string()
+
+fn print_missing_args():
+    print "mcp_tools_json_valid=false"
+    print "mcp_tools_schema_valid=false"
+    print "mcp_tools_count=0"
+    print "mcp_wm_text_tools_present=false"
+    print "lsp_tools_json_valid=false"
+    print "lsp_tools_schema_valid=false"
+    print "lsp_tools_count=0"
+
+fn main() -> i32:
+    val mcp_path = rt_env_get("MCP_NATIVE_SMOKE_MCP_OUT") ?? ""
+    val lsp_path = rt_env_get("MCP_NATIVE_SMOKE_LSP_OUT") ?? ""
+    if mcp_path == "" or lsp_path == "":
+        print_missing_args()
+        return 1
+    val mcp = validate_payload_file(mcp_path, "mcp")
+    val lsp = validate_payload_file(lsp_path, "lsp")
+    print_result("mcp", mcp)
+    print_result("lsp", lsp)
+    if mcp.json_valid and mcp.schema_valid and mcp.wm_text_valid and lsp.json_valid and lsp.schema_valid:
+        return 0
+    1

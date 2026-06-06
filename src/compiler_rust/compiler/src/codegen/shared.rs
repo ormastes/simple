@@ -10,7 +10,9 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{Linkage, Module};
 
 use crate::hir::TypeId;
-use crate::mir::{lower_generator, LocalKind, MirFunction, MirInst, MirLocal, MirModule, Terminator, Visibility};
+use crate::mir::{
+    lower_generator, LambdaParamBinding, LocalKind, MirFunction, MirInst, MirLocal, MirModule, Terminator, Visibility,
+};
 
 use super::types_util::type_to_cranelift;
 
@@ -166,6 +168,7 @@ pub fn build_mir_signature(func: &MirFunction) -> Signature {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mir::{BlockId, VReg};
 
     fn param(name: &str, ty: TypeId) -> MirLocal {
         MirLocal {
@@ -205,6 +208,90 @@ mod tests {
         assert_eq!(sig.params[2].value_type, types::I64);
         assert_eq!(sig.returns[0].value_type, types::I64);
     }
+
+    #[test]
+    fn outlined_lambda_preserves_user_params_after_ctx() {
+        let mut func = MirFunction::new("main".to_string(), TypeId::I64, Visibility::Public);
+        func.locals.push(MirLocal {
+            name: "$lambda_param_a_hole".to_string(),
+            ty: TypeId::I64,
+            kind: LocalKind::Local,
+            is_ghost: false,
+        });
+        func.locals.push(MirLocal {
+            name: "$lambda_param_b_hole".to_string(),
+            ty: TypeId::I64,
+            kind: LocalKind::Local,
+            is_ghost: false,
+        });
+        func.locals.push(MirLocal {
+            name: "temp".to_string(),
+            ty: TypeId::I64,
+            kind: LocalKind::Local,
+            is_ghost: false,
+        });
+
+        let body_block = func.new_block();
+        func.block_mut(body_block).unwrap().instructions.extend([
+            MirInst::LocalAddr {
+                dest: VReg(10),
+                local_index: 0,
+            },
+            MirInst::LocalAddr {
+                dest: VReg(11),
+                local_index: 1,
+            },
+            MirInst::LocalAddr {
+                dest: VReg(12),
+                local_index: 2,
+            },
+        ]);
+        func.block_mut(body_block).unwrap().terminator = Terminator::Return(Some(VReg(10)));
+        func.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::ClosureCreate {
+                dest: VReg(0),
+                func_name: "main_outlined_1".to_string(),
+                closure_size: 8,
+                capture_offsets: vec![],
+                capture_types: vec![],
+                captures: vec![],
+                lambda_params: vec![
+                    LambdaParamBinding {
+                        local_index: 0,
+                        name: "a".to_string(),
+                        ty: TypeId::I64,
+                    },
+                    LambdaParamBinding {
+                        local_index: 1,
+                        name: "b".to_string(),
+                        ty: TypeId::I64,
+                    },
+                ],
+                body_block: Some(body_block),
+            });
+
+        let mut module = MirModule::new();
+        module.functions.push(func);
+
+        let expanded = expand_with_outlined(&module);
+        let outlined = expanded.iter().find(|f| f.name == "main_outlined_1").unwrap();
+        let param_names: Vec<_> = outlined.params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(param_names, vec!["ctx", "a", "b"]);
+
+        let local_indices: Vec<_> = outlined
+            .block(body_block)
+            .unwrap()
+            .instructions
+            .iter()
+            .filter_map(|inst| match inst {
+                MirInst::LocalAddr { local_index, .. } => Some(*local_index),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(local_indices, vec![1, 2, 5]);
+    }
 }
 
 /// Return a function address for an outlined MIR block.
@@ -226,14 +313,16 @@ pub fn get_func_block_addr<M: Module>(
 }
 
 /// Extract body kind from a MIR instruction if it creates an outlined body
-pub fn get_body_kind(inst: &MirInst) -> Option<(crate::mir::BlockId, BodyKind)> {
+pub fn get_body_kind(inst: &MirInst) -> Option<(crate::mir::BlockId, BodyKind, Vec<LambdaParamBinding>)> {
     match inst {
-        MirInst::ActorSpawn { body_block, .. } => Some((*body_block, BodyKind::Actor)),
-        MirInst::GeneratorCreate { body_block, .. } => Some((*body_block, BodyKind::Generator)),
-        MirInst::FutureCreate { body_block, .. } => Some((*body_block, BodyKind::Future)),
+        MirInst::ActorSpawn { body_block, .. } => Some((*body_block, BodyKind::Actor, Vec::new())),
+        MirInst::GeneratorCreate { body_block, .. } => Some((*body_block, BodyKind::Generator, Vec::new())),
+        MirInst::FutureCreate { body_block, .. } => Some((*body_block, BodyKind::Future, Vec::new())),
         MirInst::ClosureCreate {
-            body_block: Some(bb), ..
-        } => Some((*bb, BodyKind::Lambda)),
+            body_block: Some(bb),
+            lambda_params,
+            ..
+        } => Some((*bb, BodyKind::Lambda, lambda_params.clone())),
         _ => None,
     }
 }
@@ -250,7 +339,7 @@ pub fn expand_with_outlined(mir: &MirModule) -> Vec<MirFunction> {
         let live_ins_map = func.compute_live_ins();
         for block in &func.blocks {
             for inst in &block.instructions {
-                if let Some((body_block, kind)) = get_body_kind(inst) {
+                if let Some((body_block, kind, lambda_params)) = get_body_kind(inst) {
                     let name = format!("{}_outlined_{}", func.name, body_block.0);
                     if seen.contains(&name) {
                         continue;
@@ -258,8 +347,15 @@ pub fn expand_with_outlined(mir: &MirModule) -> Vec<MirFunction> {
                     seen.insert(name.clone());
 
                     // Create outlined function from parent
-                    let outlined =
-                        create_outlined_function(func, &name, body_block, kind, &live_ins_map, &mut functions);
+                    let outlined = create_outlined_function(
+                        func,
+                        &name,
+                        body_block,
+                        kind,
+                        &lambda_params,
+                        &live_ins_map,
+                        &mut functions,
+                    );
                     functions.push(outlined);
                 }
             }
@@ -274,9 +370,11 @@ fn create_outlined_function(
     name: &str,
     body_block: crate::mir::BlockId,
     kind: BodyKind,
+    lambda_params: &[LambdaParamBinding],
     live_ins_map: &std::collections::HashMap<crate::mir::BlockId, std::collections::HashSet<crate::mir::VReg>>,
     functions: &mut [MirFunction],
 ) -> MirFunction {
+    let original_param_count = func.params.len();
     let mut outlined = func.clone();
     outlined.name = name.to_string();
     outlined.visibility = Visibility::Private;
@@ -306,6 +404,23 @@ fn create_outlined_function(
             kind: LocalKind::Parameter,
             is_ghost: false,
         });
+    } else if kind == BodyKind::Lambda {
+        outlined.params.clear();
+        outlined.params.push(MirLocal {
+            name: "ctx".to_string(),
+            ty: crate::hir::TypeId::I64,
+            kind: LocalKind::Parameter,
+            is_ghost: false,
+        });
+        for param in lambda_params {
+            outlined.params.push(MirLocal {
+                name: param.name.clone(),
+                ty: param.ty,
+                kind: LocalKind::Parameter,
+                is_ghost: false,
+            });
+        }
+        rewrite_lambda_local_indices(&mut outlined, original_param_count, lambda_params);
     } else {
         outlined.params.push(MirLocal {
             name: "ctx".to_string(),
@@ -370,5 +485,30 @@ fn create_outlined_function(
         lowered_func
     } else {
         outlined
+    }
+}
+
+fn rewrite_lambda_local_indices(
+    outlined: &mut MirFunction,
+    original_param_count: usize,
+    lambda_params: &[LambdaParamBinding],
+) {
+    let lambda_param_map: std::collections::HashMap<usize, usize> = lambda_params
+        .iter()
+        .enumerate()
+        .map(|(i, param)| (param.local_index, i + 1))
+        .collect();
+    let new_param_count = lambda_params.len() + 1;
+
+    for block in &mut outlined.blocks {
+        for inst in &mut block.instructions {
+            if let MirInst::LocalAddr { local_index, .. } = inst {
+                if let Some(mapped) = lambda_param_map.get(local_index) {
+                    *local_index = *mapped;
+                } else if *local_index >= original_param_count {
+                    *local_index = new_param_count + (*local_index - original_param_count);
+                }
+            }
+        }
     }
 }

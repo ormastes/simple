@@ -193,6 +193,23 @@ alias Optional = Option        # Class alias
 | `:=` walrus shorthand | Use `val name = expr` until real `:=` parser/runtime tests pass |
 | Native pipe-forward dispatch | Use direct calls or run native tests with `SIMPLE_NO_STUB_FALLBACK=1` |
 
+## Concurrency API Map
+
+When investigating Simple concurrency, search the API names as well as runtime
+terms like fiber or scheduler. The implemented stdlib surfaces are split by
+execution model:
+
+| API | Path | Model |
+|-----|------|-------|
+| `thread_spawn` / `ThreadHandle` | `src/lib/nogc_async_mut/concurrent/thread.spl` and `thread_sffi.spl` | OS thread (`pthread_create` / `CreateThread`) |
+| `green_spawn` / `GreenThreadHandle` / `green_run_one` / `green_run_all` | `src/lib/nogc_async_mut/concurrent/green_thread.spl` | Cooperative green-thread queue on the current OS thread; no preemption or CPU parallelism |
+| `task_spawn` / `TaskHandle` | `src/lib/nogc_async_mut/thread_pool.spl` | Pool-backed native task path when `rt_pool_*` is available; interpreter fallback otherwise |
+| `channel_new` / `channel_from_id` | `src/lib/nogc_sync_mut/concurrent/channel.spl` re-exported through `std.concurrent.channel` | Runtime MPMC channel |
+
+Use `green_spawn` for lightweight cooperative scheduling tests, not for Go-style
+M:N CPU-parallel benchmarks. Use `task_spawn` or a future scheduler-aware green
+runtime for Go-like benchmark work.
+
 ## Reserved Keywords
 
 These CANNOT be used as identifiers:

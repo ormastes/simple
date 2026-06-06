@@ -219,71 +219,23 @@ if [ -n "$GUI_DIR" ]; then
     GUI_PPM_SIZE="$(file_size "$GUI_DIR/capture.ppm")"
     GUI_RAW_SIZE="$(file_size "$GUI_DIR/capture.ppm.raw")"
     if [ -f "$GUI_DIR/capture.ppm" ]; then
-        python3 - "$GUI_DIR/capture.ppm" >"$qemu_mdi_ppm_anchor_log" <<'PY'
-import sys
-
-path = sys.argv[1]
-data = open(path, "rb").read()
-status = "fail"
-nonblack = 0
-checks = {
-    "probe": False,
-    "header": False,
-    "bodyA": False,
-    "bodyB": False,
-    "top": False,
-    "taskbar": False,
-}
-
-def parse_ppm(buf):
-    parts = []
-    pos = 0
-    while len(parts) < 4:
-        while pos < len(buf) and buf[pos:pos + 1].isspace():
-            pos += 1
-        start = pos
-        while pos < len(buf) and not buf[pos:pos + 1].isspace():
-            pos += 1
-        parts.append(buf[start:pos])
-    while pos < len(buf) and buf[pos:pos + 1].isspace():
-        pos += 1
-    return parts[0], int(parts[1]), int(parts[2]), int(parts[3]), pos
-
-def near(got, exp, tolerance=8):
-    return len(got) == 3 and all(abs(got[i] - exp[i]) <= tolerance for i in range(3))
-
-try:
-    magic, width, height, maxval, start = parse_ppm(data)
-    pix = data[start:]
-    if magic == b"P6" and width == 1024 and height == 768 and maxval == 255 and len(pix) == width * height * 3:
-        def rgb(x, y):
-            i = (y * width + x) * 3
-            return pix[i:i + 3]
-        nonblack = sum(1 for i in range(0, len(pix), 3) if pix[i:i + 3] != b"\x00\x00\x00")
-        checks["probe"] = near(rgb(10, 0), bytes([255, 0, 0]))
-        checks["header"] = near(rgb(404, 166), bytes([0x20, 0x50, 0xA0]))
-        checks["bodyA"] = near(rgb(404, 200), bytes([0x18, 0x22, 0x30]))
-        checks["bodyB"] = near(rgb(450, 300), bytes([0x1F, 0x29, 0x37]))
-        checks["top"] = (
-            near(rgb(64, 20), bytes([0x20, 0x50, 0xA0]))
-            and near(rgb(500, 42), bytes([0x34, 0x98, 0xDB]))
-            and near(rgb(900, 20), bytes([0x1F, 0x29, 0x37]))
-        )
-        checks["taskbar"] = (
-            near(rgb(346, 750), bytes([0x34, 0x98, 0xDB]))
-            and near(rgb(500, 740), bytes([0x17, 0x20, 0x2A]))
-            and near(rgb(920, 748), bytes([0x24, 0x34, 0x47]))
-        )
-        if nonblack > 100000 and all(checks.values()):
-            status = "pass"
-except Exception as exc:
-    print(f"simpleos_hardening_qemu_mdi_ppm_error={exc}")
-
-print(f"simpleos_hardening_qemu_mdi_ppm_anchor_status={status}")
-print(f"simpleos_hardening_qemu_mdi_ppm_nonblack={nonblack}")
-for key in ["probe", "header", "bodyA", "bodyB", "top", "taskbar"]:
-    print(f"simpleos_hardening_qemu_mdi_ppm_{key}={str(checks[key]).lower()}")
-PY
+        SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+        set +e
+        SIMPLEOS_HARDENING_QEMU_MDI_PPM="$GUI_DIR/capture.ppm" "$SIMPLE_BIN" run scripts/check/validate_simpleos_hardening_qemu_mdi_ppm.spl --mode=interpreter >"$qemu_mdi_ppm_anchor_log"
+        ppm_validator_code=$?
+        set -e
+        if [ "$ppm_validator_code" -ne 0 ] && [ ! -s "$qemu_mdi_ppm_anchor_log" ]; then
+            {
+                echo "simpleos_hardening_qemu_mdi_ppm_anchor_status=fail"
+                echo "simpleos_hardening_qemu_mdi_ppm_nonblack=0"
+                echo "simpleos_hardening_qemu_mdi_ppm_probe=false"
+                echo "simpleos_hardening_qemu_mdi_ppm_header=false"
+                echo "simpleos_hardening_qemu_mdi_ppm_bodyA=false"
+                echo "simpleos_hardening_qemu_mdi_ppm_bodyB=false"
+                echo "simpleos_hardening_qemu_mdi_ppm_top=false"
+                echo "simpleos_hardening_qemu_mdi_ppm_taskbar=false"
+            } >"$qemu_mdi_ppm_anchor_log"
+        fi
         qemu_mdi_ppm_anchor_status="$(sed -n 's/^simpleos_hardening_qemu_mdi_ppm_anchor_status=//p' "$qemu_mdi_ppm_anchor_log" | tail -n 1)"
         qemu_mdi_ppm_nonblack="$(sed -n 's/^simpleos_hardening_qemu_mdi_ppm_nonblack=//p' "$qemu_mdi_ppm_anchor_log" | tail -n 1)"
     fi

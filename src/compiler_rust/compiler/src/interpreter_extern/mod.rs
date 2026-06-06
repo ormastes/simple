@@ -791,10 +791,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_rocm_module_load", gpu_rocm::rt_rocm_module_load_fn);
     insert_simple!("rt_rocm_set_device", gpu_rocm::rt_rocm_set_device_fn);
     insert_simple!("rt_rocm_shutdown", gpu_rocm::rt_rocm_shutdown_fn);
-    insert_simple!(
-        "rt_rocm_stream_synchronize",
-        gpu_rocm::rt_rocm_stream_synchronize_fn
-    );
+    insert_simple!("rt_rocm_stream_synchronize", gpu_rocm::rt_rocm_stream_synchronize_fn);
     insert_simple!("rt_rocm_synchronize", gpu_rocm::rt_rocm_synchronize_fn);
     insert_simple!("rt_rocm_unload_module", gpu_rocm::rt_rocm_unload_module_fn);
     insert_simple!("rt_current_dir", file_io::rt_current_dir);
@@ -1447,7 +1444,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         concurrency::rt_thread_available_parallelism
     );
     insert_simple!("spl_thread_cpu_count", concurrency::rt_thread_available_parallelism);
-    insert_simple!("spl_thread_pool_spawn_worker", concurrency::spl_thread_pool_spawn_worker);
+    insert_simple!(
+        "spl_thread_pool_spawn_worker",
+        concurrency::spl_thread_pool_spawn_worker
+    );
     insert_simple!("spl_thread_join", concurrency::rt_thread_join);
     insert_simple!("spl_thread_detach", concurrency::rt_thread_free);
     insert_simple!("spl_thread_current_id", concurrency::rt_thread_id);

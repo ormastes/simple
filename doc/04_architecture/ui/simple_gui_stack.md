@@ -376,6 +376,7 @@ dispatch commands and forwards them to the web adapter protocol.
 |---|---|---|
 | Draw IR contract | `src/lib/common/ui/draw_ir.spl` | `DrawIrCommand`, `DrawIrBatch`, `DrawIrComposition`, `DrawIrSourceInfo`, `DrawIrEmbeddingConfig`, `DrawIrEventTargetContext`, `Simple2dDrawIrPlan` |
 | Draw IR SDN skin | `src/lib/common/ui/draw_ir_sdn.spl` | Deterministic tab-indented SDN import/export over `DrawIrComposition` |
+| Draw IR Draw.io skin | `src/lib/common/ui/draw_ir_drawio.spl` | Draw.io mxGraph import/export over the same `DrawIrComposition` model |
 | WM scene | `src/lib/common/ui/window_scene.spl` | `SharedWmScene`, `SharedWmWindow`, event target translation, scene layout keys, cache-safe pointer targeting |
 | WM → Draw IR | `src/lib/common/ui/window_scene_draw_ir.spl` | WM scene composition into ordered Draw IR batches (desktop, chrome, windows by z-order) |
 | WM dispatch | `src/lib/common/ui/wm_runtime_dispatch.spl` | `WmRuntimeDispatchCommand`, `WmRuntimeShellState`, backend-neutral WM command adapter |

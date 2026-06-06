@@ -133,7 +133,7 @@ fn collect_short_grammar_warnings(source: &str, diagnostics: &mut Vec<Diagnostic
                 ),
                 suggestion.message,
             )
-            .with_code("STYLE_SHORT_GRAMMAR"),
+            .with_code("L-STYLE-001"),
         );
     }
 }
@@ -715,7 +715,7 @@ mod tests {
         );
 
         assert!(diagnostics.iter().any(|diag| {
-            diag.code.as_deref() == Some("STYLE_SHORT_GRAMMAR")
+            diag.code.as_deref() == Some("L-STYLE-001")
                 && diag.message.contains("_1 * 2")
                 && diag.severity == DiagnosticSeverity::Warning
         }));

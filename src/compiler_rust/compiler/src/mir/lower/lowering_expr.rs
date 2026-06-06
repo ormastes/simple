@@ -195,10 +195,11 @@ impl<'a> MirLowerer<'a> {
             } => self.lower_method_call_expr(receiver, method, args, dispatch),
 
             HirExprKind::Lambda {
-                params: _params,
+                params,
+                param_local_indices,
                 body,
                 captures,
-            } => self.lower_lambda_expr(body, captures),
+            } => self.lower_lambda_expr(params, param_local_indices, body, captures),
             HirExprKind::Yield(value) => self.lower_yield_expr(value),
             HirExprKind::GeneratorCreate { body } => self.lower_generator_create_expr(body),
             HirExprKind::FutureCreate { body } => self.lower_future_create_expr(body),

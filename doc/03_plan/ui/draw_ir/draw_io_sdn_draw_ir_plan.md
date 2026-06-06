@@ -3,96 +3,12 @@
 **Date:** 2026-06-06
 **Feature:** `draw_io_sdn_draw_ir`
 **Research:** `doc/01_research/ui/draw_ir/draw_io_sdn_draw_ir.md`
-**Status:** In progress — Phases 1-2 implemented; Phases 3-7 pending
-**Owners:** `src/lib/common/ui`, `src/app/ui.test_api`,
-`src/lib/gc_async_mut/gpu/browser_engine`
-
-## Goal
-
-Extend the existing typed Draw IR v1 (`src/lib/common/ui/draw_ir.spl`) into a
-shared, debuggable inspection IR that is HTML/CSS box-tree first and Draw.io
-(`mxGraph`) compatible second, with tab-indented SDN as the canonical
-interchange text, and a gated Protocol-v2 test surface — without breaking the
-v1 shared UI contract or forking a second model.
-
-## Guardrails (non-negotiable)
-
-- **No second model.** All growth is additive on `DrawIr*`. Bump `schema` to
-  `simple-draw-ir-v2` when the wire shape grows; v1 producers must still
-  validate (new fields default-empty).
-- **v1 contract is frozen.** Layout / CSS / absolute-position / pixel
-  assertions ship as **Protocol v2 / optional Draw-IR extension** behind a
-  capability flag and a bumped `X-UI-Protocol-Version`. Never edit v1
-  `/api/test/*` endpoints or the §7 assertion table.
-- **Pure Simple, SDN-first.** `.spl` only, `[T]` arrays, `<>` generics, no
-  preprocessor; SDN (not JSON/YAML) for interchange. Debug gating via build +
-  runtime flags, not `#if`.
-- **Zero release overhead.** Capture + SDN/Draw.io stringify are skipped when
-  the flag is off; style stays typed in the model and is stringified only at
-  export.
-- **Test policy.** Migrate only pure-Simple API tests; do not migrate
-  native-backend-dependent tests. Never silently skip a failing test.
-
-## Phases
-
-### Phase 1 — Model growth (v2 schema) + specs — done
-- Add to `DrawIrCommand`: new `kind` values (`edge`, `path`, `image`, `group`,
-  `port`); optional geometry `border_rect` / `content_rect` / `hit_rect` /
-  `clip_rect`; optional `computed_style` key-value list (border-radius, padding,
-  display, z-index, …).
-- Add `DrawEdge` (`id`, `source`, `target`, `routing` =
-  straight|orthogonal|bezier, `points: [Point]`, `style`).
-- Bump `DRAW_IR_SCHEMA_VERSION` → `simple-draw-ir-v2`; keep `rect`/`text`
-  byte-compatible; default new fields so existing `wm_scene`/`html_ast`/
-  `gui_ast` producers continue to validate unchanged.
-- **Files:** `src/lib/common/ui/draw_ir.spl`.
-- **Spec:** extend `doc/06_spec/01_unit/lib/common/ui/draw_ir_spec.md` +
-  `test/01_unit/lib/common/ui/draw_ir_spec.spl` (v1 round-trip still green).
-- **Exit:** v1 producers validate under v2 schema; new fields constructible.
-- **Evidence:** `src/lib/common/ui/draw_ir.spl`,
-  `test/01_unit/lib/common/ui/draw_ir_spec.spl`, and
-  `doc/06_spec/01_unit/lib/common/ui/draw_ir_spec.md`.
-
-### Phase 2 — SDN skin (`draw_ir ↔ sdn`) — done
-- New `src/lib/common/ui/draw_ir_sdn.spl`:
-  - `draw_ir_to_sdn(composition) -> text` — tab-indented, grammar
-    `draw_ir v1` / `meta` / `cell|box` / `geometry` / `point` (per research doc).
-  - `sdn_to_draw_ir(text) -> DrawIrComposition`.
-- Hand-rolled emit/parse (no generic reflection encoder exists in repo).
-- **Spec:** `test/01_unit/lib/common/ui/draw_ir_sdn_spec.spl` — round-trip
-  equality on the WM composition from `window_scene_draw_ir.spl`.
-- **Exit:** `compose → to_sdn → sdn_to → compose'` is structurally equal.
-- **Evidence:** `src/lib/common/ui/draw_ir_sdn.spl`,
-  `test/01_unit/lib/common/ui/draw_ir_sdn_spec.spl`, and
-  `doc/06_spec/01_unit/lib/common/ui/draw_ir_sdn_spec.md`.
-
-### Phase 3 — Draw.io (`mxGraph`) skin
-- New `src/lib/common/ui/draw_ir_drawio.spl`:
-  - `draw_ir_to_mxgraph` / `mxgraph_to_draw_ir`.
-  - Mapping: `mxCell.id↔id`, `parent↔parent`, `vertex=1↔box`, `edge=1↔DrawEdge`,
-    `mxGeometry(x,y,w,h)↔geometry`, `style="a=b;c=d;"↔computed_style/style map`.
-- Canonical model stays `DrawIrComposition`; mxGraph is import/export only.
-- **Spec:** `test/01_unit/lib/common/ui/draw_ir_drawio_spec.spl` — import a
-  small fixture, export, re-import; assert node/edge identity preserved.
-- **Exit:** lossless round-trip for box + edge + geometry + style on a fixture.
-
-### Phase 4 — Producer enrichment
-- WM: emit `hit_rect` / `clip_rect` and z-index style from
-  `window_scene_draw_ir.spl`.
-- Web: emit computed style + border/content/hit rects into the `html_ast`
-  source from `simple_web_html_layout_renderer.spl`.
-- **Exit:** SDN dump of a real web page + WM scene shows populated geometry and
-  computed style for known IDs.
-
-### Phase 5 — Gated Protocol-v2 inspection endpoint
-- `app.ui.test_api`: `/api/test/draw-ir`, `/api/test/draw-ir?id=...`,
-  `/api/test/draw-ir/diff`, `/api/test/draw-ir/layout?id=...`, behind a capability flag; responses carry bumped
-  `X-UI-Protocol-Version`.
-- Record the extension in `doc/04_architecture/ui/shared_ui_contract.md`
-  (new "Protocol v2 / Draw-IR extension" section + support matrix rows).
 - Keep the existing `/api/test/*` v1 endpoints stable. Draw IR inspection is an
   advertised optional extension, not a replacement for element/state/action
   endpoints.
+- **Pre-impl spec:** `draw_ir_inspection_contract_spec.spl` fills the endpoint,
+  protocol-header, capability-gate, and v1-compatibility cases with real
+  assertions; no placeholder false-fail case is used.
 - **Exit:** endpoint returns SDN/JSON Draw IR for a running web surface; v1
   endpoints unchanged; capability advertised.
 
@@ -103,6 +19,9 @@ v1 shared UI contract or forking a second model.
 - Keep `expect_draw` as a UI helper used inside normal SPipe specs that import
   `use std.spec`. It must not replace SPipe `expect` or change existing
   `std.spipe` alias compatibility.
+- **Pre-impl spec:** `draw_ir_inspection_contract_spec.spl` requires the helper
+  to appear in the UI-test layer and checks the geometry / hit-rect / css /
+  parent / kind assertion vocabulary from this plan.
 - **Exit:** migration samples from the research/proposal pass against a pure
   Simple API test; native-backend tests untouched.
 

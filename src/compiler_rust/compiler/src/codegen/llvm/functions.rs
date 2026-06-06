@@ -815,6 +815,7 @@ impl LlvmBackend {
                 capture_offsets,
                 capture_types,
                 captures,
+                lambda_params: _,
                 body_block: _,
             } => {
                 self.compile_closure_create(

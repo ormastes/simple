@@ -1,0 +1,115 @@
+# BrowserSession adapter for the common textual UI access protocol.
+
+use common.ui.access.{
+    UiAccessProp,
+    UiAccessNode,
+    UiAccessSurface,
+    UiAccessEvent,
+    UiAccessSnapshot,
+    WinTextActionRequest,
+    WinTextActionResult,
+    ui_access_canonical_id,
+    ui_access_find_node
+}
+use std.gc_async_mut.web.browser_session.{BrowserSession}
+
+val BROWSER_SESSION_SURFACE_ID = "browser:session"
+val BROWSER_SESSION_SOURCE_ID = "browser_session"
+
+fn _browser_node(
+    widget_id: text,
+    kind: text,
+    text_value: text,
+    enabled: bool,
+    selected: bool,
+    action_names: [text],
+    props: [UiAccessProp]
+) -> UiAccessNode:
+    UiAccessNode(
+        canonical_id: ui_access_canonical_id(BROWSER_SESSION_SURFACE_ID, widget_id),
+        surface_id: BROWSER_SESSION_SURFACE_ID,
+        widget_id: widget_id,
+        kind: kind,
+        visible: true,
+        focused: false,
+        enabled: enabled,
+        selected: selected,
+        text_value: text_value,
+        props: props,
+        child_ids: [],
+        action_names: action_names
+    )
+
+fn _browser_control_props(control: text) -> [UiAccessProp]:
+    [
+        UiAccessProp(key: "source", value: BROWSER_SESSION_SOURCE_ID),
+        UiAccessProp(key: "control", value: control)
+    ]
+
+fn _browser_action_result(ok: bool, code: text, message: text, target_id: text, action: text) -> WinTextActionResult:
+    WinTextActionResult(
+        ok: ok,
+        code: code,
+        message: message,
+        source_id: BROWSER_SESSION_SOURCE_ID,
+        target_id: target_id,
+        action: action
+    )
+
+impl BrowserSession:
+
+    me ui_access_snapshot() -> UiAccessSnapshot:
+        val surface = UiAccessSurface(
+            surface_id: BROWSER_SESSION_SURFACE_ID,
+            title: self.current_title,
+            active: true,
+            window_id: "browser-session",
+            app_id: "simple-browser",
+            root_canonical_id: ui_access_canonical_id(BROWSER_SESSION_SURFACE_ID, "root")
+        )
+        var nodes: [UiAccessNode] = []
+        nodes = nodes.push(_browser_node("back", "button", "Back", self.can_go_back(), false, ["click"], _browser_control_props("back")))
+        nodes = nodes.push(_browser_node("forward", "button", "Forward", self.can_go_forward(), false, ["click"], _browser_control_props("forward")))
+        nodes = nodes.push(_browser_node("stop", "button", "Stop", self.is_loading, false, ["click"], _browser_control_props("stop")))
+        nodes = nodes.push(_browser_node("home", "button", "Home", true, false, ["click"], _browser_control_props("home")))
+        nodes = nodes.push(_browser_node("favorite", "button", "Favorite", true, self.is_favorite(self.current_url), ["click"], _browser_control_props("favorite")))
+        nodes = nodes.push(_browser_node("address", "textfield", self.current_url, true, false, ["set_value"], _browser_control_props("address")))
+        nodes = nodes.push(_browser_node("title", "label", self.current_title, true, false, [], _browser_control_props("title")))
+        UiAccessSnapshot(
+            protocol_version: 1,
+            snapshot_revision: 0,
+            mode: "browser_session",
+            active_surface: BROWSER_SESSION_SURFACE_ID,
+            surfaces: [surface],
+            nodes: nodes,
+            recent_events: []
+        )
+
+    me ui_access_act(request: WinTextActionRequest) -> WinTextActionResult:
+        val snapshot = self.ui_access_snapshot()
+        val node = ui_access_find_node(snapshot, request.target_id)
+        if node == nil:
+            return _browser_action_result(false, "target_not_found", "target not found", request.target_id, request.action)
+        if request.action != "click":
+            return _browser_action_result(false, "unsupported_operation", "unsupported action '{request.action}'", request.target_id, request.action)
+        if not node.enabled:
+            return _browser_action_result(false, "disabled", "control disabled", request.target_id, request.action)
+        if node.widget_id == "back":
+            match self.go_back():
+                Ok(_): return _browser_action_result(true, "ok", "went back", request.target_id, request.action)
+                Err(e): return _browser_action_result(false, "action_failed", e, request.target_id, request.action)
+        if node.widget_id == "forward":
+            match self.go_forward():
+                Ok(_): return _browser_action_result(true, "ok", "went forward", request.target_id, request.action)
+                Err(e): return _browser_action_result(false, "action_failed", e, request.target_id, request.action)
+        if node.widget_id == "stop":
+            self.stop_loading()
+            return _browser_action_result(true, "ok", "stopped loading", request.target_id, request.action)
+        if node.widget_id == "home":
+            match self.go_home():
+                Ok(_): return _browser_action_result(true, "ok", "went home", request.target_id, request.action)
+                Err(e): return _browser_action_result(false, "action_failed", e, request.target_id, request.action)
+        if node.widget_id == "favorite":
+            self.add_current_favorite()
+            return _browser_action_result(true, "ok", "favorite added", request.target_id, request.action)
+        _browser_action_result(false, "unsupported_operation", "unsupported browser control", request.target_id, request.action)

@@ -77,6 +77,7 @@ Host input
   `std.spec`; `std.spipe` remains an alias for existing specs.
 - Current bootstrap files: `src/lib/common/ui/draw_ir.spl` for Draw IR,
   `src/lib/common/ui/draw_ir_sdn.spl` for SDN interchange,
+  `src/lib/common/ui/draw_ir_drawio.spl` for Draw.io mxGraph interchange,
   `src/lib/common/ui/window_scene_draw_ir.spl` for WM composition, and
   `src/lib/common/ui/window_scene.spl` for cache-safe event target translation.
 - Event-to-draw-processing handoff: `DrawIrEventTargetContext` maps translated
@@ -94,6 +95,8 @@ Host input
 | File | What |
 |---|---|
 | `src/lib/common/ui/draw_ir.spl` | Draw IR contract (commands, batches, composition, event context) |
+| `src/lib/common/ui/draw_ir_sdn.spl` | SDN interchange skin over Draw IR |
+| `src/lib/common/ui/draw_ir_drawio.spl` | Draw.io mxGraph interchange skin over Draw IR |
 | `src/lib/common/ui/window_scene.spl` | WM scene, event target translation, scene layout keys |
 | `src/lib/common/ui/window_scene_draw_ir.spl` | WM scene → Draw IR composition |
 | `src/lib/common/ui/wm_runtime_dispatch.spl` | WM dispatch command adapter for host shells |

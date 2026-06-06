@@ -19,7 +19,7 @@ work end-to-end and the required verification gates pass.
 The current session restored and verified a narrow DAP/editor/LSP slice:
 
 - `src/app/dap/simple_dap_main.spl` exists as a launchable stdio DAP adapter.
-- `scripts/smoke/dap_protocol_smoke.py` exists and drives initialize, launch, breakpoints,
+- `scripts/smoke/dap_protocol_smoke.spl` exists and drives initialize, launch, breakpoints,
   stack, scopes, variables, evaluate, and disconnect.
 - `test/03_system/dap_protocol_live_spec.spl` exists and wraps the live smoke.
 - Extension manifests now support `ExtensionDebugAdapter`.
@@ -39,7 +39,7 @@ Verified commands that passed before this handoff:
 
 ```bash
 bin/simple check src/lib/editor/extensions/manifest.spl src/lib/editor/extensions/host.spl src/lib/editor/extensions/builtin/spl_language.spl src/lib/editor/extensions/builtin/md_language.spl test/03_system/editor_extension_spec.spl src/app/dap/simple_dap_main.spl test/03_system/dap_protocol_live_spec.spl
-python3 scripts/smoke/dap_protocol_smoke.py
+bin/simple run scripts/smoke/dap_protocol_smoke.spl --mode=interpreter
 bin/simple test test/03_system/dap_protocol_live_spec.spl --mode=interpreter
 bin/simple test test/03_system/editor_extension_spec.spl --mode=interpreter
 bin/simple check src/lib/editor/services/lsp_transport.spl src/lib/editor/services/lsp_client.spl src/lib/editor/services/md_lsp_config.spl src/lib/editor/services/simple_lsp_config.spl src/lib/editor/services/diagnostics.spl src/app/md_lsp/md_lsp_handler.spl src/app/editor/commands.spl src/app/editor/editor_controller.spl
@@ -439,7 +439,7 @@ Verification evidence collected in this session:
 
 ```bash
 bin/simple check src/app/editor src/lib/editor src/app/md_lsp src/app/dap test/03_system/editor_controller_spec.spl test/03_system/editor_extension_spec.spl test/03_system/editor_lsp_spec.spl test/03_system/editor_md_lsp_code_action_spec.spl test/03_system/editor_markdown_spec.spl test/03_system/dap_protocol_live_spec.spl test/03_system/simple_lsp_protocol_live_spec.spl
-python3 scripts/smoke/dap_protocol_smoke.py
+bin/simple run scripts/smoke/dap_protocol_smoke.spl --mode=interpreter
 python3 scripts/smoke/simple_lsp_protocol_smoke.py
 bin/simple test test/03_system/editor_controller_spec.spl --mode=interpreter
 bin/simple test test/03_system/editor_extension_spec.spl --mode=interpreter
@@ -527,7 +527,7 @@ Status: FOUNDATION VERIFIED in the 2026-05-13 restart session.
 Confirm the new files and patched surfaces still exist:
 
 ```bash
-ls src/app/dap/simple_dap_main.spl scripts/smoke/dap_protocol_smoke.py test/03_system/dap_protocol_live_spec.spl
+ls src/app/dap/simple_dap_main.spl scripts/smoke/dap_protocol_smoke.spl test/03_system/dap_protocol_live_spec.spl
 rg -n "ExtensionDebugAdapter|find_debug_adapter|codeActionProvider|simple_lsp_config|quickfix|debug-start" src/app src/lib test/system --glob '*.spl'
 ```
 
@@ -639,7 +639,7 @@ Run narrow gates after each slice, then a broader editor gate:
 
 ```bash
 bin/simple check src/app/editor src/lib/editor src/app/md_lsp src/app/dap test/03_system/editor_controller_spec.spl test/03_system/editor_extension_spec.spl test/03_system/editor_lsp_spec.spl test/03_system/editor_md_lsp_code_action_spec.spl test/03_system/dap_protocol_live_spec.spl
-python3 scripts/smoke/dap_protocol_smoke.py
+bin/simple run scripts/smoke/dap_protocol_smoke.spl --mode=interpreter
 bin/simple test test/03_system/editor_controller_spec.spl --mode=interpreter
 bin/simple test test/03_system/editor_extension_spec.spl --mode=interpreter
 bin/simple test test/03_system/editor_lsp_spec.spl --mode=interpreter

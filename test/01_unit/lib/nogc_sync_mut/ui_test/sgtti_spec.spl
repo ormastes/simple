@@ -1,7 +1,9 @@
 # @cover src/lib/nogc_sync_mut/ui_test/sgtti.spl 80%
 use std.spec.{describe, it, expect}
-use std.ui_test.sgtti.{SgttiTestDriver}
-use common.ui.access_types.{UiAccessProp, UiAccessSurface}
+use std.ui_test.sgtti.{SgttiTestDriver, UI_TEST_TARGET_TUI, UI_TEST_TARGET_GUI, UI_TEST_TARGET_BOTH, ui_test_targets, sgtti_parity_check, sgtti_snapshot_from_tui_state}
+use common.ui.access_types.{UiAccessNode, UiAccessProp, UiAccessSurface}
+use common.ui.builder.{column, text_widget, build_tree}
+use common.ui.widget.{UIState}
 use common.ui.win_text_access.{
     WinTextSnapshot,
     win_text_make_node,
@@ -51,6 +53,81 @@ fn _sgtti_fixture_snapshot() -> WinTextSnapshot:
         sources: [source]
     )
 
+fn _sgtti_parity_snapshot(mode: text, visible: bool, focused: bool, enabled: bool, selected: bool) -> WinTextSnapshot:
+    val surface = UiAccessSurface(
+        surface_id: "{mode}:main",
+        title: mode,
+        active: true,
+        window_id: mode,
+        app_id: "sgtti_{mode}",
+        root_canonical_id: "{mode}:main#root"
+    )
+    val node = UiAccessNode(
+        canonical_id: "{mode}:main#shared",
+        surface_id: "{mode}:main",
+        widget_id: "shared",
+        kind: "button",
+        visible: visible,
+        focused: focused,
+        enabled: enabled,
+        selected: selected,
+        text_value: "Shared",
+        props: [],
+        child_ids: [],
+        action_names: ["click"]
+    )
+    val source = win_text_source(
+        source_id: mode,
+        source_kind: "in_process_semantic",
+        confidence: "high",
+        capabilities: ["query_text", "act_node"],
+        captured_at_ms: 1000,
+        max_age_ms: 5000,
+        now_ms: 1000
+    )
+    win_text_snapshot_from_parts(mode: mode, active_surface: "{mode}:main", surfaces: [surface], nodes: [node], sources: [source])
+
+fn _sgtti_tui_state() -> UIState:
+    val root = column("root", [text_widget("shared_text", "Shared UI").set_prop("text", "Shared UI")])
+    UIState.new(build_tree(root))
+
+fn _sgtti_gui_button_snapshot() -> WinTextSnapshot:
+    val surface = UiAccessSurface(
+        surface_id: "gui:main",
+        title: "GUI",
+        active: true,
+        window_id: "gui",
+        app_id: "sgtti_gui",
+        root_canonical_id: "gui:main#root"
+    )
+    val node = UiAccessNode(
+        canonical_id: "gui:main#shared_text",
+        surface_id: "gui:main",
+        widget_id: "shared_text",
+        kind: "text",
+        visible: true,
+        focused: false,
+        enabled: true,
+        selected: false,
+        text_value: "Shared UI",
+        props: [],
+        child_ids: [],
+        action_names: []
+    )
+    val source = win_text_source(
+        source_id: "gui",
+        source_kind: "in_process_semantic",
+        confidence: "high",
+        capabilities: ["query_text", "act_node"],
+        captured_at_ms: 1000,
+        max_age_ms: 5000,
+        now_ms: 1000
+    )
+    win_text_snapshot_from_parts(mode: "gui", active_surface: "gui:main", surfaces: [surface], nodes: [node], sources: [source])
+
+fn _sgtti_shared_text_parity(tui: SgttiTestDriver, gui: SgttiTestDriver):
+    sgtti_parity_check(tui, gui, "shared_text")
+
 describe "SGTTI UI test driver":
 
     it "finds an element by canonical id":
@@ -93,3 +170,53 @@ describe "SGTTI UI test driver":
         expect(driver.check_exists("missing").unwrap()).to_equal(false)
         expect(driver.get_element("missing").is_err()).to_equal(true)
         expect(driver.click("name_input").is_err()).to_equal(true)
+
+    it "expands ui test target config":
+        expect(ui_test_targets(UI_TEST_TARGET_TUI).len()).to_equal(1)
+        expect(ui_test_targets(UI_TEST_TARGET_TUI)[0]).to_equal(UI_TEST_TARGET_TUI)
+        expect(ui_test_targets(UI_TEST_TARGET_GUI)[0]).to_equal(UI_TEST_TARGET_GUI)
+        expect(ui_test_targets(UI_TEST_TARGET_BOTH).len()).to_equal(2)
+        expect(ui_test_targets(UI_TEST_TARGET_BOTH)[0]).to_equal(UI_TEST_TARGET_TUI)
+        expect(ui_test_targets(UI_TEST_TARGET_BOTH)[1]).to_equal(UI_TEST_TARGET_GUI)
+        expect(ui_test_targets("unknown").len()).to_equal(0)
+
+    it "passes parity when tui and gui snapshots agree":
+        val tui = SgttiTestDriver.new(_sgtti_parity_snapshot("tui", true, false, true, false))
+        val gui = SgttiTestDriver.new(_sgtti_parity_snapshot("gui", true, false, true, false))
+        val result = sgtti_parity_check(tui, gui, "shared")
+
+        expect(result.ok).to_equal(true)
+        expect(result.tui_found).to_equal(true)
+        expect(result.gui_found).to_equal(true)
+        expect(result.visible_match).to_equal(true)
+        expect(result.focused_match).to_equal(true)
+        expect(result.enabled_match).to_equal(true)
+        expect(result.selected_match).to_equal(true)
+
+    it "converts TUI UIState onto SGTTI and shares a parity body with GUI":
+        val state = _sgtti_tui_state()
+        val snapshot = sgtti_snapshot_from_tui_state(state, 1000, 5000, 1000)
+        val tui = SgttiTestDriver.new(snapshot)
+        val tui_from_state = SgttiTestDriver.from_tui_state(state, 1000, 5000, 1000)
+        val gui = SgttiTestDriver.new(_sgtti_gui_button_snapshot())
+
+        expect(snapshot.access.active_surface).to_equal("main")
+        expect(tui.get_element("shared_text").unwrap().text_value).to_equal("Shared UI")
+        expect(tui_from_state.check_exists("shared_text").unwrap()).to_equal(true)
+        val result = _sgtti_shared_text_parity(tui, gui)
+        expect(result.ok).to_equal(true)
+        expect(tui.check_text("shared_text", "Shared UI").unwrap()).to_equal(true)
+        expect(gui.check_text("shared_text", "Shared UI").unwrap()).to_equal(true)
+
+    it "fails parity on divergent state or missing targets":
+        val tui = SgttiTestDriver.new(_sgtti_parity_snapshot("tui", true, false, true, false))
+        val gui = SgttiTestDriver.new(_sgtti_parity_snapshot("gui", false, false, true, false))
+        val mismatch = sgtti_parity_check(tui, gui, "shared")
+        val missing = sgtti_parity_check(tui, gui, "missing")
+
+        expect(mismatch.ok).to_equal(false)
+        expect(mismatch.visible_match).to_equal(false)
+        expect(mismatch.focused_match).to_equal(true)
+        expect(missing.ok).to_equal(false)
+        expect(missing.tui_found).to_equal(false)
+        expect(missing.gui_found).to_equal(false)

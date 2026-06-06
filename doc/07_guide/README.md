@@ -45,15 +45,15 @@ User-facing guides for the Simple programming language. For specifications see `
 | [tooling/mcp.md](tooling/mcp.md) | MCP server setup and usage |
 | [tooling/lint.md](tooling/lint.md) | Linter configuration and usage |
 | [tooling/logging.md](tooling/logging.md) | Production logging, debug logging, and script print policy |
-| [tooling/ui_access.md](tooling/ui_access.md) | Canonical UI snapshot, act, and history workflow |
-| [tooling/ui_render.md](tooling/ui_render.md) | UI rendering pipeline, shared web render contract, HTML/CSS cache planning |
+| [app/ui/ui_access.md](app/ui/ui_access.md) | Canonical UI snapshot, act, and history workflow |
+| [app/ui/ui_render.md](app/ui/ui_render.md) | UI rendering pipeline, shared web render contract, HTML/CSS cache planning |
 | [tooling/llm_dashboard_web_login.md](tooling/llm_dashboard_web_login.md) | Web login, bootstrap admin credentials, and auth-session storage for `llm_dashboard` |
 | [tooling/llm_approval_flow.md](tooling/llm_approval_flow.md) | LLM approval flow |
 | [tooling/treesitter.md](tooling/treesitter.md) | Tree-sitter integration |
 | [tooling/dashboard.md](tooling/dashboard.md) | Dashboard CLI, CI/CD |
 | [tooling/duplicate_check.md](tooling/duplicate_check.md) | Code duplication detection |
-| [tooling/wm_compare.md](tooling/wm_compare.md) | WM screenshot capture and compare harness |
-| [tooling/wm_ui_snapshot.md](tooling/wm_ui_snapshot.md) | WM/UI HTML snapshot export, PNG generation, Stitch handoff |
+| [app/ui/wm_compare.md](app/ui/wm_compare.md) | WM screenshot capture and compare harness |
+| [app/ui/wm_ui_snapshot.md](app/ui/wm_ui_snapshot.md) | WM/UI HTML snapshot export, PNG generation, Stitch handoff |
 | [tooling/script_layout_policy.md](tooling/script_layout_policy.md) | `scripts/` vs `bin/` policy, `.shs` rule, ignore list |
 | [tooling/ai_cli_registration.md](tooling/ai_cli_registration.md) | AI CLI plugin registration |
 | [tooling/ai_command_parity.md](tooling/ai_command_parity.md) | AI command parity across providers |
@@ -69,6 +69,12 @@ User-facing guides for the Simple programming language. For specifications see `
 | [api/markdown_document_decoration.md](api/markdown_document_decoration.md) | Markdown CSS, page view, header, and footer document rendering |
 | [api/pure_dl_api_reference.md](api/pure_dl_api_reference.md) | Pure DL API reference |
 | [api/webgpu_guide.md](api/webgpu_guide.md) | WebGPU usage guide |
+
+## Library
+
+| Guide | Description |
+|-------|-------------|
+| [lib/misc/stdlib.md](lib/misc/stdlib.md) | Standard library guide, including SDN, text utilities, concurrency primitives, and database access |
 
 ## FFI
 

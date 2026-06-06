@@ -48,7 +48,7 @@ Recovered implementation state:
   - Result: PASS, 6 files checked.
 - `src/compiler_rust/target/bootstrap/simple check src/app/dap/simple_dap_main.spl src/app/editor/commands.spl src/app/editor/editor_controller.spl src/app/editor/gui_shell.spl src/app/editor/md_dispatch.spl src/app/editor/tui_shell.spl src/lib/editor/view/preview_pane.spl src/lib/editor/services/debug_session.spl src/lib/editor/70.backend/gui_backend.spl test/03_system/dap_protocol_live_spec.spl test/03_system/editor_controller_spec.spl test/03_system/editor_debug_session_spec.spl test/03_system/editor_gui_spec.spl test/03_system/editor_keybinding_spec.spl test/03_system/editor_markdown_spec.spl`
   - Result: PASS, 15 files checked.
-- `python3 scripts/smoke/dap_protocol_smoke.py`
+- `bin/simple run scripts/smoke/dap_protocol_smoke.spl --mode=interpreter`
   - Result: `STATUS: PASS dap_protocol_smoke`.
 - `src/compiler_rust/target/bootstrap/simple test test/03_system/dap_protocol_live_spec.spl --mode=interpreter --fail-fast`
   - Result: PASS, 1 passed.

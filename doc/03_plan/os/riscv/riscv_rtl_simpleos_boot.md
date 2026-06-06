@@ -37,8 +37,8 @@ Production-level RISC-V system:
 | B2 | TCP shim | DONE |
 | B3 | IoDriver shim | DONE |
 | B4 | TLS on baremetal | BLOCKED |
-| B5 | HTTP server launch | BLOCKED |
-| B6 | QEMU integration tests | BLOCKED |
+| B5 | HTTP server launch | HTTP-only live gate passing |
+| B6 | QEMU integration tests | HTTP/display/storage live gates passing |
 
 ### B1 Detail — Current Blockers
 
@@ -143,15 +143,16 @@ netstack, TLS, and HTTP closures.
 - Production RISC-V link passes. QEMU UART smoke reaches boot idle with the
   minimal B5 HTTP launcher guarded behind `riscv_network_ready()`.
 
-**Remaining after B3:**
-- The TCP/IoDriver shims compile and are ready for a live netstack, but the
-  current RISC-V service probe only proves PCI/VirtIO NIC discovery, not packet
-  RX/TX readiness.
-- The RISC-V boot service gate now requires an explicit packet-RX readiness
-  probe before setting `riscv_network_ready()`. This prevents the boot-local
-  listener-only shim from being reported as production network readiness.
-- B4 TLS must replace deterministic placeholder entropy before TLS
-  can be treated as production-ready on baremetal.
+**Current boundary after B3/B5/B6:**
+- The RISC-V service probe now requires VirtIO-net TX completion and packet RX
+  readiness before setting `riscv_network_ready()`.
+- RV64 QEMU proves packet RX/TX for QEMU HTTP smoke through the boot-local
+  ARP/TCP/HTTP provider, then serves `/health` and `/` over host forwarding.
+- This is still a narrow boot-local provider, not the full kernel TCP/IP
+  netstack. The full TCP shim/netstack must become freestanding-safe before it
+  replaces the boot-local path.
+- B4 TLS must replace deterministic placeholder entropy before HTTPS/TLS can be
+  treated as production-ready on baremetal.
 
 ### B4 Detail — TLS Baremetal
 
@@ -270,7 +271,8 @@ netstack, TLS, and HTTP closures.
   legacy virtio-blk queue, completes three-descriptor sector-read requests,
   verifies the NVFS magic/version/generation fields, and requires
   `[storage-riscv] Storage service ready` plus `[fs-riscv] NVFS root superblock
-  ready` before accepting the live HTTP smoke result.
+  ready` (`NVFS root superblock ready`) before accepting the live HTTP smoke
+  result.
 - The current source-built RV64 HTTP ELF links with zero unexpected
   freestanding unresolved symbols and QEMU reaches the live HTTP marker. The
   serial log now reports `PMM OK` and `HEAP OK` before service startup. The

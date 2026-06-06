@@ -3,6 +3,8 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+ROOT_DIR="$(CDPATH= cd -- "../.." && pwd)"
+SIMPLE_BIN="${SIMPLE_BIN:-$ROOT_DIR/bin/simple}"
 CAPTURE_DIR="$(pwd)/screenshots"
 mkdir -p "$CAPTURE_DIR"
 
@@ -50,16 +52,7 @@ if command -v xcrun &>/dev/null; then
     fi
 
     # Find an available iPhone simulator
-    SIM_UDID=$(xcrun simctl list devices available -j 2>/dev/null | \
-        python3 -c "
-import json,sys
-data = json.load(sys.stdin)
-devs = data.get('devices', {})
-for rt, ds in devs.items():
-    for d in ds:
-        if 'iPhone' in d.get('name','') and d.get('isAvailable'):
-            print(d['udid']); sys.exit()
-" 2>/dev/null || true)
+    SIM_UDID=$("$SIMPLE_BIN" run "$ROOT_DIR/scripts/check/first_available_iphone_simulator.spl" --mode=interpreter 2>/dev/null || true)
 
     if [ -n "$SIM_UDID" ]; then
         echo "Booting simulator: $SIM_UDID"

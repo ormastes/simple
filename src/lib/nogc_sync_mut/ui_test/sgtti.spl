@@ -3,13 +3,56 @@
 # In-process sibling to UITestClient. It mirrors the common UI-test
 # query/check/action vocabulary over a WinTextSnapshot without an HTTP server.
 
+use common.ui.access.{ui_access_snapshot_from_state}
 use common.ui.access_types.{UiAccessNode}
+use common.ui.widget.{UIState}
 use common.ui.win_text_access.{
     WinTextSnapshot,
     WinTextActionRequest,
     win_text_find_nodes,
-    win_text_route_action
+    win_text_route_action,
+    win_text_simple_ui_snapshot
 }
+
+val UI_TEST_TARGET_TUI: text = "tui"
+val UI_TEST_TARGET_GUI: text = "gui"
+val UI_TEST_TARGET_BOTH: text = "both"
+
+pub struct SgttiParityResult:
+    ok: bool
+    id: text
+    message: text
+    tui_found: bool
+    gui_found: bool
+    visible_match: bool
+    focused_match: bool
+    enabled_match: bool
+    selected_match: bool
+
+fn ui_test_targets(target: text) -> [text]:
+    if target == UI_TEST_TARGET_TUI:
+        return [UI_TEST_TARGET_TUI]
+    if target == UI_TEST_TARGET_GUI:
+        return [UI_TEST_TARGET_GUI]
+    if target == UI_TEST_TARGET_BOTH:
+        return [UI_TEST_TARGET_TUI, UI_TEST_TARGET_GUI]
+    []
+
+fn _sgtti_parity_result(ok: bool, id: text, message: text, tui_found: bool, gui_found: bool, visible_match: bool, focused_match: bool, enabled_match: bool, selected_match: bool) -> SgttiParityResult:
+    SgttiParityResult(
+        ok: ok,
+        id: id,
+        message: message,
+        tui_found: tui_found,
+        gui_found: gui_found,
+        visible_match: visible_match,
+        focused_match: focused_match,
+        enabled_match: enabled_match,
+        selected_match: selected_match
+    )
+
+fn sgtti_snapshot_from_tui_state(state: UIState, captured_at_ms: i64, max_age_ms: i64, now_ms: i64) -> WinTextSnapshot:
+    win_text_simple_ui_snapshot(ui_access_snapshot_from_state(state, []), captured_at_ms, max_age_ms, now_ms)
 
 pub class SgttiTestDriver:
     snapshot: WinTextSnapshot
@@ -19,6 +62,9 @@ pub class SgttiTestDriver:
 
     static fn from_snapshot(source_snapshot: WinTextSnapshot) -> SgttiTestDriver:
         SgttiTestDriver.new(source_snapshot)
+
+    static fn from_tui_state(state: UIState, captured_at_ms: i64, max_age_ms: i64, now_ms: i64) -> SgttiTestDriver:
+        SgttiTestDriver.new(sgtti_snapshot_from_tui_state(state, captured_at_ms, max_age_ms, now_ms))
 
     fn get_element(id: text) -> Result<UiAccessNode, text>:
         val node = self._find_node(id)
@@ -87,3 +133,23 @@ pub class SgttiTestDriver:
             if node.widget_id == id:
                 return node
         nil
+
+    fn find_element(id: text) -> UiAccessNode?:
+        self._find_node(id)
+
+fn sgtti_parity_check(tui: SgttiTestDriver, gui: SgttiTestDriver, id: text) -> SgttiParityResult:
+    val tui_node = tui.find_element(id)
+    val gui_node = gui.find_element(id)
+    if tui_node == nil and gui_node == nil:
+        return _sgtti_parity_result(false, id, "missing from tui and gui: {id}", false, false, false, false, false, false)
+    if tui_node == nil:
+        return _sgtti_parity_result(false, id, "missing from tui: {id}", false, true, false, false, false, false)
+    if gui_node == nil:
+        return _sgtti_parity_result(false, id, "missing from gui: {id}", true, false, false, false, false, false)
+    val visible_match = tui_node.visible == gui_node.visible
+    val focused_match = tui_node.focused == gui_node.focused
+    val enabled_match = tui_node.enabled == gui_node.enabled
+    val selected_match = tui_node.selected == gui_node.selected
+    val ok = visible_match and focused_match and enabled_match and selected_match
+    val message = if ok: "parity ok: {id}" else: "parity mismatch: {id}"
+    _sgtti_parity_result(ok, id, message, true, true, visible_match, focused_match, enabled_match, selected_match)

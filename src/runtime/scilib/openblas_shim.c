@@ -16,7 +16,7 @@
 #define __has_include(x) 0
 #endif
 
-#if __has_include(<cblas.h>) && __has_include(<lapacke.h>)
+#if defined(SIMPLE_SCILIB_ENABLE_REAL_OPENBLAS) && __has_include(<cblas.h>) && __has_include(<lapacke.h>)
 #define SIMPLE_SCILIB_HAVE_OPENBLAS 1
 #include <cblas.h>
 #include <lapacke.h>

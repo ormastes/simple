@@ -28,11 +28,7 @@ pub enum MirInst {
     },
 
     /// Unary operation
-    UnaryOp {
-        dest: VReg,
-        op: UnaryOp,
-        operand: VReg,
-    },
+    UnaryOp { dest: VReg, op: UnaryOp, operand: VReg },
 
     /// Type cast operation
     Cast {
@@ -50,10 +46,7 @@ pub enum MirInst {
     },
 
     /// Raw inline assembly with no operands.
-    InlineAsm {
-        instructions: Vec<String>,
-        volatile: bool,
-    },
+    InlineAsm { instructions: Vec<String>, volatile: bool },
 
     /// Load from memory
     Load { dest: VReg, addr: VReg, ty: TypeId },
@@ -91,11 +84,7 @@ pub enum MirInst {
     // Pointer instructions
     // =========================================================================
     /// Allocate a new pointer wrapping a value
-    PointerNew {
-        dest: VReg,
-        kind: PointerKind,
-        value: VReg,
-    },
+    PointerNew { dest: VReg, kind: PointerKind, value: VReg },
 
     /// Create a borrow reference (immutable or mutable)
     PointerRef {
@@ -276,12 +265,7 @@ pub enum MirInst {
     },
 
     /// SIMD fused multiply-add: a.fma(b, c) -> a * b + c
-    VecFma {
-        dest: VReg,
-        a: VReg,
-        b: VReg,
-        c: VReg,
-    },
+    VecFma { dest: VReg, a: VReg, b: VReg, c: VReg },
 
     /// SIMD reciprocal: v.recip() -> 1.0 / v
     VecRecip { dest: VReg, source: VReg },
@@ -349,18 +333,10 @@ pub enum MirInst {
     },
 
     /// Get an element from a collection by index
-    IndexGet {
-        dest: VReg,
-        collection: VReg,
-        index: VReg,
-    },
+    IndexGet { dest: VReg, collection: VReg, index: VReg },
 
     /// Set an element in a collection by index
-    IndexSet {
-        collection: VReg,
-        index: VReg,
-        value: VReg,
-    },
+    IndexSet { collection: VReg, index: VReg, value: VReg },
 
     /// Create a slice of a collection
     SliceOp {
@@ -399,6 +375,8 @@ pub enum MirInst {
         capture_types: Vec<TypeId>,
         /// Captured variable values
         captures: Vec<VReg>,
+        /// Lambda parameter locals that must become outlined function params
+        lambda_params: Vec<LambdaParamBinding>,
         /// Body block for lambda extraction (used by expand_with_outlined)
         body_block: Option<super::BlockId>,
     },
@@ -830,7 +808,6 @@ pub enum MirInst {
     // =========================================================================
     // Parallel Iterator Instructions (#415)
     // =========================================================================
-
     /// Parallel map: applies a closure to each element in parallel
     /// `dest = par_map(input, closure)`
     ParMap {
@@ -871,7 +848,6 @@ pub enum MirInst {
     // =========================================================================
     // Value Boxing Instructions (for SFFI boundary)
     // =========================================================================
-
     /// Box a native integer as RuntimeValue for SFFI calls.
     /// RuntimeValue layout: (value << 3) | TAG_INT, where TAG_INT = 0.
     /// Used when passing native integers to SFFI functions that expect RuntimeValue.

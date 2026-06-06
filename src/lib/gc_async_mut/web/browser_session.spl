@@ -1,7 +1,8 @@
 # Browser session for the main Simple web/browser surface.
 #
 # Scope:
-# - page lifecycle state: begin/open/commit/stop/reload/back/forward
+# - page lifecycle state: begin/open/commit/stop/reload/back/forward/home
+# - lightweight browser chrome state: home URL and favorite links
 # - HTML body rendering through the existing browser renderer
 # - inline script execution through the shared JS runtime
 # - minimal browser-like host globals: window/document/location/navigator/chrome
@@ -563,6 +564,8 @@ class BrowserSession:
     module_source_cache: [Pair<text, text>]
     loaded_module_urls: [text]
     module_eval_stack: [text]
+    home_url: text
+    favorite_links: [Pair<text, text>]
 
     static fn new() -> BrowserSession:
         BrowserSession._create(true)
@@ -594,7 +597,9 @@ class BrowserSession:
             resource_overrides: [],
             module_source_cache: [],
             loaded_module_urls: [],
-            module_eval_stack: []
+            module_eval_stack: [],
+            home_url: "about:blank",
+            favorite_links: []
         )
 
 impl BrowserSession:
@@ -866,6 +871,50 @@ impl BrowserSession:
 
     me can_go_forward() -> bool:
         self.current_index >= 0 and self.current_index < self.history.len() - 1
+
+    me set_home_url(url: text):
+        self.home_url = normalize_browser_url(url)
+
+    me go_home() -> Result<bool, text>:
+        val target = self.home_url
+        if target == "about:blank":
+            return self.open_html(target, blank_page_html())
+        if target.starts_with("file://"):
+            val path = target.slice(7, target.len())
+            val html = file_read_text(path)
+            return self.open_html(target, html)
+        if val Some(override_body) = pair_value(self.resource_overrides, target):
+            return self.open_html(target, override_body)
+        Err("network navigation requires begin_network_navigation for '{target}'")
+
+    me add_favorite(url: text, title: text):
+        val normalized = normalize_browser_url(url)
+        val stored_title = if title != "": title else: normalized
+        self.favorite_links = upsert_pair(self.favorite_links, normalized, stored_title)
+
+    me add_current_favorite():
+        val normalized = normalize_browser_url(self.current_url)
+        val stored_title = if self.current_title != "": self.current_title else: normalized
+        self.favorite_links = upsert_pair(self.favorite_links, normalized, stored_title)
+
+    me remove_favorite(url: text):
+        val normalized = normalize_browser_url(url)
+        var kept: [Pair<text, text>] = []
+        var idx = 0
+        while idx < self.favorite_links.len():
+            val entry = self.favorite_links[idx]
+            if entry.first != normalized:
+                kept.push(entry)
+            idx = idx + 1
+        self.favorite_links = kept
+
+    me favorite_title(url: text) -> text?:
+        pair_value(self.favorite_links, normalize_browser_url(url))
+
+    me is_favorite(url: text) -> bool:
+        match pair_value(self.favorite_links, normalize_browser_url(url)):
+            Some(_): true
+            nil: false
 
     me session_storage_item(key: text) -> text?:
         pair_value(self.session_storage, key)

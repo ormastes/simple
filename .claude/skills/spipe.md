@@ -180,6 +180,14 @@ for mode in interpreter smf native; do
 done
 ```
 
+For concurrency perf work, do not collapse the Simple APIs into one "thread"
+bucket. `thread_spawn` is the OS-thread primitive, `green_spawn` in
+`std.concurrent.green_thread` is the implemented cooperative green-thread queue
+on the current OS thread, and `task_spawn` is the pool-backed native task path
+when `rt_pool_*` links. Keep `doc/07_guide/lib/misc/stdlib.md`,
+`doc/07_guide/compiler/check_perf.md`, and `.codex/skills/coding/SKILL.md`
+updated when those surfaces change.
+
 Native-mode SPipe specs are not always a reliable oracle for runtime ABI work:
 unresolved generated BDD calls (`rt_bdd_*` / `std.spec`) can no-op or segfault
 before `it` bodies execute. For native runtime hooks, pair interpreter SPipe

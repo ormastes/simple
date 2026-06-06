@@ -4,7 +4,7 @@
 **Feature:** `ui_test_sgtti`
 **Architecture:** `doc/04_architecture/ui/ui_test_architecture.md`
 **Depends-for:** `doc/03_plan/ui/draw_ir/draw_io_sdn_draw_ir_plan.md` (Phase 5)
-**Status:** In progress — Phase 1 implemented; Phases 2-5 pending
+**Status:** In progress — Phases 1-3 implemented; Phases 4-5 pending
 **Owners:** `src/lib/nogc_sync_mut/ui_test`, `src/lib/common/ui/win_text_access`,
 `src/os/compositor/gtti`
 
@@ -99,15 +99,19 @@ without forking a new element model or changing the HTTP protocol path.
   memory-tier re-export shims, `test/01_unit/lib/nogc_sync_mut/ui_test/sgtti_spec.spl`,
   and `doc/06_spec/01_unit/lib/nogc_sync_mut/ui_test/sgtti_spec.md`.
 
-### Phase 2 - Target config + parity (`tui` | `gui` | `both`)
+### Phase 2 - Target config + parity (`tui` | `gui` | `both`) — done
 
 - Add `UI_TEST_TARGET_TUI/GUI/BOTH` + `ui_test_targets(target)` expansion.
 - Add `SgttiParityResult` + `sgtti_parity_check(tui, gui, id)` requiring
   visible/focused/enabled/selected agreement; `both` passes only on parity.
 - **Spec:** parity passes on agreeing snapshots, fails on divergence/missing.
 - **Exit:** one driver vocabulary, surface chosen by config.
+- **Evidence:** `UI_TEST_TARGET_TUI/GUI/BOTH`, `ui_test_targets`,
+  `SgttiParityResult`, and `sgtti_parity_check` in
+  `src/lib/nogc_sync_mut/ui_test/sgtti.spl`, with unit coverage in
+  `test/01_unit/lib/nogc_sync_mut/ui_test/sgtti_spec.spl`.
 
-### Phase 3 - TUI onto the shared surface
+### Phase 3 - TUI onto the shared surface — done
 
 - Helper lifting a TUI `UIState` to a `WinTextSnapshot`:
   `ui_access_snapshot_from_state(state, [])` ->
@@ -115,6 +119,11 @@ without forking a new element model or changing the HTTP protocol path.
 - Migrate 1-2 representative TUI specs to the shared driver (keep, do not
   delete, the widget-model specs). Do not migrate native-backend-dependent tests.
 - **Exit:** a TUI spec and a GUI spec share one test body via the target config.
+- **Evidence:** `sgtti_snapshot_from_tui_state` and
+  `SgttiTestDriver.from_tui_state` in
+  `src/lib/nogc_sync_mut/ui_test/sgtti.spl`, re-export shims across memory
+  families, and shared TUI/GUI parity coverage in
+  `test/01_unit/lib/nogc_sync_mut/ui_test/sgtti_spec.spl`.
 
 ### Phase 4 - Ergonomic headless GUI snapshot provider
 
@@ -143,7 +152,9 @@ Phases 1-2 here**:
 - `/api/test/draw-ir` serves the same `WinTextSnapshot`/Draw IR composition the
   SGTTI driver queries.
 
-Sequencing: land `ui_test_sgtti` Phases 1-2 first, then Draw IR plan Phases 5-6.
+Sequencing: `ui_test_sgtti` Phases 1-2 are landed; Draw IR plan Phases 5-6 may
+build on the SGTTI target/parity API, while Phase 3 continues lifting TUI onto
+the shared surface.
 The Draw IR model/SDN/Draw.io work (its Phases 1-3) is independent and can run
 in parallel.
 

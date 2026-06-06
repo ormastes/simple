@@ -129,6 +129,14 @@ pub struct BlockId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VReg(pub u32);
 
+/// Lambda parameter binding preserved for MIR outlining.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LambdaParamBinding {
+    pub local_index: usize,
+    pub name: String,
+    pub ty: TypeId,
+}
+
 // Include all submodules (using include! for simplicity)
 // This keeps the modular file structure while satisfying Rust's module system
 include!("inst_types.rs");

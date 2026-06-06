@@ -5,9 +5,9 @@
 ## Quick Stats
 
 - **Total Features:** 1
-- **Complete Documentation:** 0 (0%)
-- **Stubs Remaining:** 1
-- **Total Lines:** 0
+- **Complete Documentation:** 1 (100%)
+- **Stubs Remaining:** 0
+- **Total Lines:** 35
 - **Warnings:** 1
 
 ---
@@ -16,5 +16,5 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Web Render Backend Api Specification](01_unit/app/ui/web_render_backend_api_spec.md) | Auto-generated | N/A | 11 | 0% | 0 lines |
+| [Draw IR Inspection Contract](03_system/app/ui_test_api/feature/draw_ir_inspection_contract_spec.md) | Minimal | N/A | 13 | 20% | 35 lines |
 

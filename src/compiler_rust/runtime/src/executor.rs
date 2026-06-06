@@ -555,9 +555,22 @@ pub struct IsolatedThreadHandle {
 // Track thread IDs
 static NEXT_THREAD_ID: AtomicU64 = AtomicU64::new(1);
 
+unsafe fn native_closure_entry(closure_ptr: u64) -> Option<usize> {
+    if closure_ptr < 4096 || closure_ptr & 0x7 != 0 {
+        return None;
+    }
+    let entry = *(closure_ptr as *const usize);
+    if entry < 4096 {
+        None
+    } else {
+        Some(entry)
+    }
+}
+
 /// Spawn an isolated thread with a closure and copied data.
 ///
-/// The closure receives the copied data and executes in a separate OS thread.
+/// The closure receives its native closure record as the implicit first
+/// argument, then the copied data, and executes in a separate OS thread.
 /// Communication with the main thread is only possible through channels.
 ///
 /// # Arguments
@@ -570,8 +583,10 @@ static NEXT_THREAD_ID: AtomicU64 = AtomicU64::new(1);
 pub extern "C" fn rt_thread_spawn_isolated(closure_ptr: u64, data: RuntimeValue) -> u64 {
     let thread_id = NEXT_THREAD_ID.fetch_add(1, Ordering::SeqCst);
 
-    // Convert closure pointer to a function
-    let func: extern "C" fn(RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(closure_ptr as usize) };
+    let Some(entry) = (unsafe { native_closure_entry(closure_ptr) }) else {
+        return 0;
+    };
+    let func: extern "C" fn(u64, RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(entry) };
 
     // Clone data for the thread (deep copy for isolation)
     let copied_data = data.deep_copy();
@@ -581,7 +596,7 @@ pub extern "C" fn rt_thread_spawn_isolated(closure_ptr: u64, data: RuntimeValue)
         .name(format!("simple-isolated-{}", thread_id))
         .spawn(move || {
             // Execute the closure with copied data
-            func(copied_data)
+            func(closure_ptr, copied_data)
         })
         .expect("Failed to spawn isolated thread");
 
@@ -600,9 +615,11 @@ pub extern "C" fn rt_thread_spawn_isolated(closure_ptr: u64, data: RuntimeValue)
 pub extern "C" fn rt_thread_spawn_isolated2(closure_ptr: u64, data1: RuntimeValue, data2: RuntimeValue) -> u64 {
     let thread_id = NEXT_THREAD_ID.fetch_add(1, Ordering::SeqCst);
 
-    // Convert closure pointer to a function
-    let func: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue =
-        unsafe { std::mem::transmute(closure_ptr as usize) };
+    let Some(entry) = (unsafe { native_closure_entry(closure_ptr) }) else {
+        return 0;
+    };
+    let func: extern "C" fn(u64, RuntimeValue, RuntimeValue) -> RuntimeValue =
+        unsafe { std::mem::transmute(entry) };
 
     // Clone data for the thread
     let copied_data1 = data1.deep_copy();
@@ -611,7 +628,7 @@ pub extern "C" fn rt_thread_spawn_isolated2(closure_ptr: u64, data1: RuntimeValu
     // Spawn the OS thread
     let handle = thread::Builder::new()
         .name(format!("simple-isolated-{}", thread_id))
-        .spawn(move || func(copied_data1, copied_data2))
+        .spawn(move || func(closure_ptr, copied_data1, copied_data2))
         .expect("Failed to spawn isolated thread");
 
     // Create and box the handle

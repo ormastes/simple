@@ -1035,8 +1035,14 @@ fn codegen_struct_field_get_native_types() {
         let got_int = f.new_vreg();
         let got_float = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
-        block.instructions.push(MirInst::ConstInt { dest: int_val, value: 42 });
-        block.instructions.push(MirInst::ConstFloat { dest: float_val, value: 3.5 });
+        block.instructions.push(MirInst::ConstInt {
+            dest: int_val,
+            value: 42,
+        });
+        block.instructions.push(MirInst::ConstFloat {
+            dest: float_val,
+            value: 3.5,
+        });
         block.instructions.push(MirInst::StructInit {
             dest: obj,
             type_id: TypeId::I64,
@@ -1090,6 +1096,7 @@ fn codegen_closure_create_and_indirect_call() {
         capture_offsets: vec![],
         capture_types: vec![],
         captures: vec![],
+        lambda_params: vec![],
         body_block: None,
     });
     block.instructions.push(MirInst::ConstInt { dest: arg, value: 42 });

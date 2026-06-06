@@ -11,7 +11,7 @@ breaking callers.
 
 ## Current Baseline
 
-`python3 scripts/audit/api_consistency_audit.py` currently reports:
+`bin/simple run scripts/audit/api_consistency_audit.spl --mode=interpreter` reports:
 
 | Scope | Advisory `is_`/`has_` declarations |
 | --- | ---: |
@@ -41,9 +41,9 @@ Increasing the total or any scoped count fails the audit.
 Run:
 
 ```sh
-python3 -m py_compile scripts/audit/api_consistency_audit.py
 python3 -m json.tool scripts/audit/api_consistency_baseline.json >/dev/null
-python3 scripts/audit/api_consistency_audit.py
+bin/simple check scripts/audit/api_consistency_audit.spl --mode=interpreter
+bin/simple run scripts/audit/api_consistency_audit.spl --mode=interpreter
 ```
 
 Passing evidence means there are no hard-rejected API names and no new

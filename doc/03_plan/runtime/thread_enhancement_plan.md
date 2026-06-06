@@ -89,6 +89,7 @@ User constraints: memory-conscious (parallel agents crash tmux), pure Simple whe
 1. Provides `GreenThreadHandle`, `green_spawn`, `green_run_one`, `green_run_all`, and `green_ready_count`.
 2. Runs green-thread closures cooperatively to completion on the current OS thread.
 3. Separates the green-thread API from OS-thread `thread_spawn`; stack switching, parking, scheduler-aware channels, and preemption remain Tier 1/Tier 2 follow-up work.
+4. Discovery note for agents: this is the implemented Simple green-thread API today. Do not infer "no green threads" from the absence of a runtime-owned fiber scheduler; search for `green_spawn` and `std.concurrent.green_thread` before checking lower-level `fiber`, `scheduler`, or `rt_green_*` work.
 
 **C Runtime** — new `src/runtime/runtime_green.c`:
 1. **Slab stack allocator**: One `mmap` per slab (8MB = 1024×8KB stacks), guard page per slab boundary. Live-G cap (default 100K) with backpressure.

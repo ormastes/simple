@@ -118,7 +118,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val task_id = next_task_id()
 mark_task_done(task_id, 123)
-val handle = TaskHandle(task_id: task_id)
+val handle = TaskHandle(task_id: task_id, native_handle: 0)
 expect(handle.is_done()).to_equal(true)
 expect(handle.id()).to_equal(task_id)
 expect(handle.join()).to_equal(123)

@@ -30,17 +30,34 @@ if command -v nvidia-smi >/dev/null 2>&1; then
     fi
 fi
 
-pytorch_report="$(python3 - <<'PY' 2>/dev/null || true
-try:
-    import torch
-    print("pytorch_available=true")
-    print("pytorch_version=" + str(torch.__version__))
-    print("pytorch_cuda_available=" + str(torch.cuda.is_available()).lower())
-except Exception as exc:
-    print("pytorch_available=false")
-    print("pytorch_error=" + exc.__class__.__name__)
-PY
-)"
+torch_libs="$(ldconfig -p 2>/dev/null | rg 'libtorch(_cpu|_cuda)?\.so|libc10(_cuda)?\.so' || true)"
+if [ -z "$torch_libs" ]; then
+    for torch_dir in /usr/lib /usr/local/lib /usr/lib64 /usr/local/lib64 /opt/libtorch/lib "$HOME/.local/lib"; do
+        if [ -d "$torch_dir" ]; then
+            found="$(find "$torch_dir" -maxdepth 1 -type f \( -name 'libtorch*.so*' -o -name 'libc10*.so*' \) 2>/dev/null | head -20 || true)"
+            if [ -n "$found" ]; then
+                torch_libs="$found"
+                break
+            fi
+        fi
+    done
+fi
+pytorch_report="pytorch_available=false
+pytorch_source=libtorch
+pytorch_error=libtorch_not_found
+pytorch_cuda_available=false"
+if printf '%s\n' "$torch_libs" | rg -q 'libtorch(_cpu)?\.so|libtorch\.so'; then
+    torch_library_names="$(printf '%s\n' "$torch_libs" | sed 's/.*=> //; s/ (.*//; s#.*/##' | sort -u | paste -sd, -)"
+    torch_cuda_available=false
+    if printf '%s\n' "$torch_libs" | rg -q 'libtorch_cuda\.so|libc10_cuda\.so'; then
+        torch_cuda_available=true
+    fi
+    pytorch_report="pytorch_available=true
+pytorch_source=libtorch
+pytorch_version=unknown
+pytorch_libraries=$torch_library_names
+pytorch_cuda_available=$torch_cuda_available"
+fi
 pytorch_available=false
 if printf '%s\n' "$pytorch_report" | rg -q '^pytorch_available=true$'; then
     pytorch_available=true

@@ -134,12 +134,21 @@ helpers such as SGTTI query/action checks or future `expect_draw` assertions as
 helper calls inside normal `describe`/`it` scenarios; do not create a parallel
 test framework or replace the built-in SPipe matchers.
 
+For in-process SGTTI tests, use `SgttiTestDriver` over a `WinTextSnapshot`.
+Use `SgttiTestDriver.from_tui_state` or `sgtti_snapshot_from_tui_state` when a
+TUI `UIState` should be asserted through the shared SGTTI surface. Select
+surfaces with `UI_TEST_TARGET_TUI`, `UI_TEST_TARGET_GUI`,
+`UI_TEST_TARGET_BOTH`, and `ui_test_targets`; use `sgtti_parity_check` when a
+`both` run must prove visible/focused/enabled/selected state agrees across TUI
+and GUI snapshots.
+
 Protocol v2 Draw IR inspection is optional and capability-gated. Use
 `/api/test/draw-ir`, `/api/test/draw-ir?id=...`,
 `/api/test/draw-ir/diff`, and `/api/test/draw-ir/layout?id=...` for Draw IR
 surfaces; keep Protocol v1 element/state/action endpoints stable. The typed
 model is `DrawIrComposition`; SDN interchange is provided by
-`src/lib/common/ui/draw_ir_sdn.spl`.
+`src/lib/common/ui/draw_ir_sdn.spl`, and Draw.io mxGraph interchange by
+`src/lib/common/ui/draw_ir_drawio.spl`.
 
 ---
 

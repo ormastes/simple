@@ -8,7 +8,7 @@
 
 ## Overview
 
-Tests the freshly-added `rt_ed25519_sign` FFI and its `ed25519_sign` Tier-2
+Tests the freshly-added `rt_ed25519_sign` SFFI and its `ed25519_sign_pkcs8` Tier-2
 wrapper (RFC 8032 / EdDSA over Curve25519).
 
 Covers:
@@ -22,13 +22,46 @@ tag: slow, system, crypto
 """
 
 use std.spipe.*
-use std.nogc_sync_mut.io.signature_ffi.{ed25519_sign, ed25519_verify}
-use test.system.os_crypto_ref_helpers.{
-    openssl_present,
-    hex_to_bytes
-}
-use std.nogc_sync_mut.ffi.system.{rt_process_run}
-use std.nogc_sync_mut.ffi.io.{rt_file_write_bytes}
+use std.nogc_sync_mut.io.signature_sffi.{ed25519_sign_pkcs8, ed25519_verify}
+use std.nogc_sync_mut.sffi.system.{rt_process_run}
+use std.nogc_sync_mut.sffi.io.{rt_file_write_bytes}
+
+fn _hex_digit(c: text) -> i64:
+    if c == "0": return 0
+    if c == "1": return 1
+    if c == "2": return 2
+    if c == "3": return 3
+    if c == "4": return 4
+    if c == "5": return 5
+    if c == "6": return 6
+    if c == "7": return 7
+    if c == "8": return 8
+    if c == "9": return 9
+    if c == "a" or c == "A": return 10
+    if c == "b" or c == "B": return 11
+    if c == "c" or c == "C": return 12
+    if c == "d" or c == "D": return 13
+    if c == "e" or c == "E": return 14
+    if c == "f" or c == "F": return 15
+    -1
+
+fn hex_to_bytes(s: text) -> [u8]:
+    if (s.len() % 2) != 0:
+        return []
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < s.len():
+        val hi = _hex_digit(s[i])
+        val lo = _hex_digit(s[i + 1])
+        if hi < 0 or lo < 0:
+            return []
+        out.push((hi * 16 + lo).to_u8())
+        i = i + 2
+    out
+
+fn openssl_present() -> bool:
+    val result = rt_process_run("openssl", ["version"])
+    result.2 == 0 and result.0.starts_with("OpenSSL ")
 
 # ============================================================================
 # Fixtures — generated offline
@@ -97,18 +130,18 @@ fn _openssl_ed25519_verify(spki: [u8], msg: [u8], sig: [u8]) -> bool:
 
 describe "os_rt_ed25519_sign: round-trip sign -> verify":
     """
-    ## Round-Trip: ed25519_sign -> ed25519_verify
+    ## Round-Trip: ed25519_sign_pkcs8 -> ed25519_verify
 
     Signs a message with the test PKCS#8 key and immediately verifies
     with the corresponding raw 32-byte public key.
     Asserts: sig is exactly 64 bytes, and verify returns true.
     """
 
-    it "ed25519_sign round-trips through ed25519_verify":
+    it "ed25519_sign_pkcs8 round-trips through ed25519_verify":
         val pkcs8  = hex_to_bytes(ED25519_PKCS8_HEX)
         val pubkey = hex_to_bytes(ED25519_PUBKEY_HEX)
         val msg    = _msg_hello()
-        val sig    = ed25519_sign(pkcs8, msg)
+        val sig    = ed25519_sign_pkcs8(pkcs8, msg)
         expect(sig.len()).to_equal(64)
         val ok = ed25519_verify(pubkey, msg, sig)
         expect(ok).to_equal(true)
@@ -117,7 +150,7 @@ describe "os_rt_ed25519_sign: round-trip sign -> verify":
         val pkcs8  = hex_to_bytes(ED25519_PKCS8_HEX)
         val pubkey = hex_to_bytes(ED25519_PUBKEY_HEX)
         var msg: [u8] = []
-        val sig = ed25519_sign(pkcs8, msg)
+        val sig = ed25519_sign_pkcs8(pkcs8, msg)
         expect(sig.len()).to_equal(64)
         val ok = ed25519_verify(pubkey, msg, sig)
         expect(ok).to_equal(true)
@@ -132,11 +165,11 @@ describe "os_rt_ed25519_sign: determinism (RFC 8032)":
     Signing the same key+message twice must yield byte-identical output.
     """
 
-    it "ed25519_sign is deterministic for same key + message":
+    it "ed25519_sign_pkcs8 is deterministic for same key + message":
         val pkcs8 = hex_to_bytes(ED25519_PKCS8_HEX)
         val msg   = _msg_hello()
-        val sig1  = ed25519_sign(pkcs8, msg)
-        val sig2  = ed25519_sign(pkcs8, msg)
+        val sig1  = ed25519_sign_pkcs8(pkcs8, msg)
+        val sig2  = ed25519_sign_pkcs8(pkcs8, msg)
         expect(sig1.len()).to_equal(64)
         expect(sig2.len()).to_equal(64)
         expect(_bytes_eq(sig1, sig2)).to_equal(true)
@@ -146,20 +179,20 @@ describe "os_rt_ed25519_sign: malformed input contract":
     """
     ## Malformed Input
 
-    ed25519_sign must return an empty [u8] (not panic) on any error:
+    ed25519_sign_pkcs8 must return an empty [u8] (not panic) on any error:
     bad PKCS#8 DER, wrong key type, etc.
     """
 
-    it "ed25519_sign returns empty [u8] on malformed pkcs8":
+    it "ed25519_sign_pkcs8 returns empty [u8] on malformed pkcs8":
         val bad_pkcs8 = hex_to_bytes(BAD_PKCS8_HEX)
         val msg       = _msg_hello()
-        val bad_sig   = ed25519_sign(bad_pkcs8, msg)
+        val bad_sig   = ed25519_sign_pkcs8(bad_pkcs8, msg)
         expect(bad_sig.len()).to_equal(0)
 
-    it "ed25519_sign returns empty [u8] on junk raw bytes":
+    it "ed25519_sign_pkcs8 returns empty [u8] on junk raw bytes":
         val junk: [u8] = [0x30u8, 0x01, 0x00]
         val msg = _msg_hello()
-        val bad_sig = ed25519_sign(junk, msg)
+        val bad_sig = ed25519_sign_pkcs8(junk, msg)
         expect(bad_sig.len()).to_equal(0)
 
 
@@ -175,7 +208,7 @@ describe "os_rt_ed25519_sign: signature integrity (one-bit flip)":
         val pkcs8  = hex_to_bytes(ED25519_PKCS8_HEX)
         val pubkey = hex_to_bytes(ED25519_PUBKEY_HEX)
         val msg    = _msg_hello()
-        val sig    = ed25519_sign(pkcs8, msg)
+        val sig    = ed25519_sign_pkcs8(pkcs8, msg)
         expect(sig.len()).to_equal(64)
         # Build corrupted signature: flip first byte
         var bad_sig: [u8] = []
@@ -191,7 +224,7 @@ describe "os_rt_ed25519_sign: signature integrity (one-bit flip)":
         val pkcs8  = hex_to_bytes(ED25519_PKCS8_HEX)
         val pubkey = hex_to_bytes(ED25519_PUBKEY_HEX)
         val msg    = _msg_hello()
-        val sig    = ed25519_sign(pkcs8, msg)
+        val sig    = ed25519_sign_pkcs8(pkcs8, msg)
         expect(sig.len()).to_equal(64)
         # Build corrupted signature: flip last byte
         var bad_sig: [u8] = []
@@ -209,16 +242,16 @@ describe "os_rt_ed25519_sign: openssl cross-check":
     ## OpenSSL Cross-Check
 
     Gate on openssl_present(). When openssl is available, verify that the
-    signature produced by ed25519_sign passes `openssl pkeyutl -verify`,
+    signature produced by ed25519_sign_pkcs8 passes `openssl pkeyutl -verify`,
     proving interoperability with RFC 8032 / standard tooling.
     """
 
-    it "Simple ed25519_sign -> openssl pkeyutl -verify -> success":
+    it "Simple ed25519_sign_pkcs8 -> openssl pkeyutl -verify -> success":
         if not openssl_present():
             val pkcs8 = hex_to_bytes(ED25519_PKCS8_HEX)
             val pubkey = hex_to_bytes(ED25519_PUBKEY_HEX)
             val msg   = _msg_hello()
-            val sig   = ed25519_sign(pkcs8, msg)
+            val sig   = ed25519_sign_pkcs8(pkcs8, msg)
             expect(sig.len()).to_equal(64)
             val ok = ed25519_verify(pubkey, msg, sig)
             expect(ok).to_equal(true)
@@ -226,7 +259,7 @@ describe "os_rt_ed25519_sign: openssl cross-check":
             val pkcs8 = hex_to_bytes(ED25519_PKCS8_HEX)
             val spki  = hex_to_bytes(ED25519_SPKI_HEX)
             val msg   = _msg_hello()
-            val sig   = ed25519_sign(pkcs8, msg)
+            val sig   = ed25519_sign_pkcs8(pkcs8, msg)
             expect(sig.len()).to_equal(64)
             val ok = _openssl_ed25519_verify(spki, msg, sig)
             expect(ok).to_equal(true)

@@ -28,7 +28,7 @@ sgtti_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -157,6 +157,100 @@ expect(driver.click("name_input").is_err()).to_equal(true)
 
 </details>
 
+#### expands ui test target config
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(ui_test_targets(UI_TEST_TARGET_TUI).len()).to_equal(1)
+expect(ui_test_targets(UI_TEST_TARGET_TUI)[0]).to_equal(UI_TEST_TARGET_TUI)
+expect(ui_test_targets(UI_TEST_TARGET_GUI)[0]).to_equal(UI_TEST_TARGET_GUI)
+expect(ui_test_targets(UI_TEST_TARGET_BOTH).len()).to_equal(2)
+expect(ui_test_targets(UI_TEST_TARGET_BOTH)[0]).to_equal(UI_TEST_TARGET_TUI)
+expect(ui_test_targets(UI_TEST_TARGET_BOTH)[1]).to_equal(UI_TEST_TARGET_GUI)
+expect(ui_test_targets("unknown").len()).to_equal(0)
+```
+
+</details>
+
+#### passes parity when tui and gui snapshots agree
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val tui = SgttiTestDriver.new(_sgtti_parity_snapshot("tui", true, false, true, false))
+val gui = SgttiTestDriver.new(_sgtti_parity_snapshot("gui", true, false, true, false))
+val result = sgtti_parity_check(tui, gui, "shared")
+
+expect(result.ok).to_equal(true)
+expect(result.tui_found).to_equal(true)
+expect(result.gui_found).to_equal(true)
+expect(result.visible_match).to_equal(true)
+expect(result.focused_match).to_equal(true)
+expect(result.enabled_match).to_equal(true)
+expect(result.selected_match).to_equal(true)
+```
+
+</details>
+
+#### converts TUI UIState onto SGTTI and shares a parity body with GUI
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val state = _sgtti_tui_state()
+val snapshot = sgtti_snapshot_from_tui_state(state, 1000, 5000, 1000)
+val tui = SgttiTestDriver.new(snapshot)
+val tui_from_state = SgttiTestDriver.from_tui_state(state, 1000, 5000, 1000)
+val gui = SgttiTestDriver.new(_sgtti_gui_button_snapshot())
+
+expect(snapshot.access.active_surface).to_equal("main")
+expect(tui.get_element("shared_text").unwrap().text_value).to_equal("Shared UI")
+expect(tui_from_state.check_exists("shared_text").unwrap()).to_equal(true)
+val result = _sgtti_shared_text_parity(tui, gui)
+expect(result.ok).to_equal(true)
+expect(tui.check_text("shared_text", "Shared UI").unwrap()).to_equal(true)
+expect(gui.check_text("shared_text", "Shared UI").unwrap()).to_equal(true)
+```
+
+</details>
+
+#### fails parity on divergent state or missing targets
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val tui = SgttiTestDriver.new(_sgtti_parity_snapshot("tui", true, false, true, false))
+val gui = SgttiTestDriver.new(_sgtti_parity_snapshot("gui", false, false, true, false))
+val mismatch = sgtti_parity_check(tui, gui, "shared")
+val missing = sgtti_parity_check(tui, gui, "missing")
+
+expect(mismatch.ok).to_equal(false)
+expect(mismatch.visible_match).to_equal(false)
+expect(mismatch.focused_match).to_equal(true)
+expect(missing.ok).to_equal(false)
+expect(missing.tui_found).to_equal(false)
+expect(missing.gui_found).to_equal(false)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -176,8 +270,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

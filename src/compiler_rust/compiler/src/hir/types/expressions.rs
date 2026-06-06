@@ -129,6 +129,7 @@ pub enum HirExprKind {
     // Lambda/closure
     Lambda {
         params: Vec<(String, TypeId)>,
+        param_local_indices: Vec<usize>,
         body: Box<HirExpr>,
         captures: Vec<usize>, // indices of captured locals
     },

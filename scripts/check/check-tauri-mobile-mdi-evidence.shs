@@ -72,64 +72,16 @@ pass_line "android_apk_runtime_packaging"
 
 test -s "$ANDROID_SCREENSHOT" || fail "Android live MDI screenshot missing: $ANDROID_SCREENSHOT"
 test -s "$ANDROID_LOGCAT" || fail "Android live MDI logcat missing: $ANDROID_LOGCAT"
-python3 "$ROOT_DIR/scripts/check/ios_mdi_probe_server.py" --validate-screenshot \
+"$SIMPLE_BIN" run "$ROOT_DIR/scripts/check/ios_mdi_probe_server.spl" --mode=interpreter --validate-screenshot \
     "$ANDROID_SCREENSHOT" android_live_mdi_screenshot \
     || fail "Android live MDI screenshot PNG validation failed"
-python3 "$ROOT_DIR/scripts/check/ios_mdi_probe_server.py" --validate-android-mdi-screenshot \
+"$SIMPLE_BIN" run "$ROOT_DIR/scripts/check/ios_mdi_probe_server.spl" --mode=interpreter --validate-android-mdi-screenshot \
     "$ANDROID_SCREENSHOT" \
     || fail "Android live MDI screenshot semantic validation failed"
 
-python3 - "$ANDROID_LOGCAT" <<'PY'
-import json
-import re
-import sys
-from pathlib import Path
-
-log = Path(sys.argv[1]).read_text(errors="ignore")
-for forbidden in ["F DEBUG", "panicked", "InvalidUri", "Cannot redefine", "parse error", "Permission denied"]:
-    if forbidden in log:
-        raise SystemExit(f"forbidden log marker present: {forbidden}")
-
-required = [
-    "libsimple_mobile_runtime_exec.so",
-    "subprocess pid=",
-    "openWindow id=terminal",
-    "openWindow id=files",
-    "openWindow id=tasks",
-    "openWindow id=settings",
-]
-for marker in required:
-    if marker not in log:
-        raise SystemExit(f"required log marker missing: {marker}")
-
-matches = re.findall(r"\[tauri-shell\] mdi proof: (\{.*?\})", log)
-if not matches:
-    raise SystemExit("MDI proof JSON missing")
-proof = json.loads(matches[-1])
-checks = {
-    "count": proof.get("count", 0) >= 4,
-    "hasDesktop": proof.get("hasDesktop") is True,
-    "imageCount": proof.get("imageCount", 0) >= 1,
-    "hasDragRuntime": proof.get("hasDragRuntime") is True,
-    "hasDragEvents": proof.get("hasDragEvents") is True,
-    "dragMoved": proof.get("dragMoved") is True,
-    "hasWindowEventRuntime": proof.get("hasWindowEventRuntime") is True,
-    "appActionControlFound": proof.get("appActionControlFound") is True,
-    "appInputControlFound": proof.get("appInputControlFound") is True,
-    "bodyClickRouted": proof.get("bodyClickRouted") is True,
-    "bodyInputRouted": proof.get("bodyInputRouted") is True,
-    "bodyKeyRouted": proof.get("bodyKeyRouted") is True,
-    "taskbarItemCount": proof.get("taskbarItemCount", 0) >= 4,
-    "taskbarIconCount": proof.get("taskbarIconCount", 0) >= 4,
-    "taskbarIconsVisible": proof.get("taskbarIconsVisible") is True,
-    "taskbarLabelsVisible": proof.get("taskbarLabelsVisible") is True,
-    "htmlRenderable": proof.get("htmlRenderable") is True,
-}
-failed = [name for name, ok in checks.items() if not ok]
-if failed:
-    raise SystemExit("MDI proof failed fields: " + ", ".join(failed))
-print("android_logcat_proof=pass")
-PY
+"$SIMPLE_BIN" run "$ROOT_DIR/scripts/check/ios_mdi_probe_server.spl" --mode=interpreter --validate-android-log \
+    "$ANDROID_LOGCAT" \
+    || fail "Android live MDI logcat semantic validation failed"
 
 echo "android_screenshot=$ANDROID_SCREENSHOT"
 echo "android_logcat=$ANDROID_LOGCAT"

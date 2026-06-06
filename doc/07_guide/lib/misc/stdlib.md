@@ -144,6 +144,41 @@ str_pad_left("42", 5, "0") # "00042"
 
 ---
 
+## Concurrency Primitives
+
+Simple has distinct APIs for OS threads, cooperative green threads, pool-backed
+tasks, and channels. Use the API name when searching the codebase; searching only
+for `fiber` or scheduler runtime terms can miss the implemented stdlib module.
+
+| Need | API | Implementation | Notes |
+|------|-----|----------------|-------|
+| Spawn a platform thread | `std.concurrent.thread.{thread_spawn}` | `src/lib/nogc_async_mut/concurrent/thread.spl` / `thread_sffi.spl` | Uses OS threads (`pthread_create` / `CreateThread`) |
+| Schedule lightweight cooperative work | `std.concurrent.green_thread.{green_spawn, green_run_one, green_run_all}` | `src/lib/nogc_async_mut/concurrent/green_thread.spl` | Runs closures to completion on the current OS thread; no preemption or CPU parallelism |
+| Reuse a worker pool | `task_spawn` / `TaskHandle` | `src/lib/nogc_async_mut/thread_pool.spl` | Native path uses `rt_pool_submit`, `rt_pool_join`, and `rt_pool_is_done` when linked |
+| Send values between concurrent work | `std.concurrent.channel.{channel_new, channel_from_id}` | `src/lib/nogc_sync_mut/concurrent/channel.spl` | Runtime MPMC channel surface |
+
+### Green Thread Example
+
+```simple
+use std.concurrent.green_thread.{green_spawn, green_run_all}
+
+fn value_7() -> i64:
+    7
+
+fn main():
+    val handle = green_spawn(value_7)
+    green_run_all()
+    print handle.join()
+```
+
+`green_spawn` is useful for cooperative scheduling semantics and low-overhead
+queued work, but it is not a Go-goroutine equivalent. It does not run tasks in
+parallel and cannot preempt a long-running closure. For Go-like CPU-parallel
+benchmarks, use the pool-backed `task_spawn` path or future scheduler-aware
+green-thread work.
+
+---
+
 ## Database Abstraction (DB Layer)
 
 The DB layer provides a backend-agnostic interface for SQL databases. SQP (below) builds on top of it.

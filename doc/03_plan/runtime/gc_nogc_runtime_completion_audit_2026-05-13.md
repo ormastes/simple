@@ -21,7 +21,7 @@ Date: 2026-05-13
 | Avoid noalloc depending on allocating runtime families | `test/01_unit/lib/dependency_boundary_spec.spl` checks `nogc_async_mut_noalloc` for direct imports from `nogc_sync_mut`, `nogc_async_mut`, `nogc_async_immut`, and `gc_async_mut`; test passes | Complete for direct import boundary |
 | Avoid noalloc depending on app surfaces | `test/01_unit/lib/dependency_boundary_spec.spl` checks `nogc_async_mut_noalloc` for direct `app.*` imports; test passes | Complete for direct import boundary |
 | Avoid noalloc allocation opt-in markers | `test/01_unit/lib/dependency_boundary_spec.spl` checks `nogc_async_mut_noalloc` for `@alloc` module annotations; test passes | Complete for marker-level regression |
-| Avoid noalloc transitive imports through unsafe helper modules | `scripts/audit/noalloc_reachable_imports.py` computes the reachable import closure from `src/lib/nogc_async_mut_noalloc` and `test/01_unit/lib/dependency_boundary_spec.spl` fails if that closure reaches allocating runtime families, OS/app/example, POSIX/Linux, `@alloc`, or host allocation APIs | Complete for reachable import closure |
+| Avoid noalloc transitive imports through unsafe helper modules | `scripts/audit/noalloc_reachable_imports.spl` computes the reachable import closure from `src/lib/nogc_async_mut_noalloc` through the compiler-owned Simple verifier, and `test/01_unit/lib/dependency_boundary_spec.spl` fails if that closure reaches allocating runtime families, OS/app/example, POSIX/Linux, `@alloc`, or host allocation APIs | Complete for reachable import closure |
 | Keep noalloc family checker-clean | Rebuilt bootstrap `simple check` over all 128 `src/lib/nogc_async_mut_noalloc/**/*.spl` files and all 128 `src/std/nogc_async_mut_noalloc/**/*.spl` files reports all checks passed | Complete |
 | Restrict target presets to compatible runtime families | `src/compiler/70.backend/target_presets.spl` carries `allowed_families`; `preset_apply_compile_options()` writes `gc_off` and `allowed_families` into `CompileOptions`; resolver filtering is covered by `test/01_unit/compiler/module_resolver/allowed_families_spec.spl` | Complete for preset-to-resolver wiring |
 | Remove conflicting compiler `GcMode` names | `src/compiler/00.common/gc_config.spl` is the only `enum GcMode:`; write-barrier algorithms use `GcStrategy`; guarded by `test/01_unit/compiler/semantics/gc_strategy_naming_spec.spl` | Complete |
@@ -101,7 +101,7 @@ src/compiler_rust/target/bootstrap/simple check src/lib/nogc_async_mut_noalloc/l
 src/compiler_rust/target/bootstrap/simple test test/03_system/feature/app/remote_baremetal/remote_baremetal_library_spec.spl --mode=interpreter
 => Passed: 22, Failed: 0; legacy inline asm warnings remain in baremetal semihost/system API files
 
-python3 scripts/audit/noalloc_reachable_imports.py
+bin/simple run scripts/audit/noalloc_reachable_imports.spl
 => noalloc reachable import closure is restricted to nogc_async_mut_noalloc/common
 
 src/compiler_rust/target/bootstrap/simple test test/01_unit/lib/dependency_boundary_spec.spl --mode=interpreter

@@ -217,45 +217,7 @@ if ! sips -s format bmp "$CAPTURE_PNG" --out "$CAPTURE_BMP" >/dev/null 2>&1; the
     emit_fail "capture-convert-failed"
 fi
 
-capture_metrics="$(python3 - "$CAPTURE_BMP" <<'PY'
-import sys
-from pathlib import Path
-import struct
-
-data = Path(sys.argv[1]).read_bytes()
-if len(data) < 54 or data[:2] != b"BM":
-    print("0 0 0 0 0.000000")
-    raise SystemExit
-
-offset = struct.unpack_from("<I", data, 10)[0]
-width = struct.unpack_from("<i", data, 18)[0]
-height_raw = struct.unpack_from("<i", data, 22)[0]
-bits = struct.unpack_from("<H", data, 28)[0]
-compression = struct.unpack_from("<I", data, 30)[0]
-# macOS `sips` emits 32-bit top-down BMPs with BI_BITFIELDS (compression 3);
-# accept that alongside uncompressed (0). Pixels stay BGRA, 4-byte stride.
-if width <= 0 or height_raw == 0 or bits not in (24, 32) or compression not in (0, 3):
-    print("0 0 0 0 0.000000")
-    raise SystemExit
-
-height = abs(height_raw)
-bytes_per_pixel = bits // 8
-stride = ((width * bits + 31) // 32) * 4
-count = 0
-for y in range(height):
-    row = offset + y * stride
-    for x in range(width):
-        pos = row + x * bytes_per_pixel
-        if pos + 2 >= len(data):
-            continue
-        b, g, r = data[pos], data[pos + 1], data[pos + 2]
-        if max(r, g, b) - min(r, g, b) > 12 or max(r, g, b) > 32:
-            count += 1
-total = width * height
-ratio = count / total if total > 0 else 0
-print(f"{width} {height} {total} {count} {ratio:.6f}")
-PY
-)"
+capture_metrics="$(MACOS_GUI_LIVE_WINDOW_BMP="$CAPTURE_BMP" "$SIMPLE_BIN" run scripts/check/measure_macos_gui_live_window_bmp.spl --mode=interpreter)"
 set -- $capture_metrics
 capture_width="${1:-0}"
 capture_height="${2:-0}"

@@ -261,7 +261,7 @@ fn validate_short_grammar_suggestions(file_path: &Path, source: &str, errors: &m
             line: suggestion.line,
             column: suggestion.column,
             severity: ErrorSeverity::Warning,
-            code: Some("STYLE_SHORT_GRAMMAR".to_string()),
+            code: Some("L-STYLE-001".to_string()),
             message: "readable callback can use short grammar".to_string(),
             expected: None,
             found: None,
@@ -1331,7 +1331,7 @@ mod tests {
         assert_eq!(result.status, CheckStatus::Warning);
         assert_eq!(result.errors.len(), 1);
         assert_eq!(result.errors[0].severity, ErrorSeverity::Warning);
-        assert_eq!(result.errors[0].code.as_deref(), Some("STYLE_SHORT_GRAMMAR"));
+        assert_eq!(result.errors[0].code.as_deref(), Some("L-STYLE-001"));
         assert!(result.errors[0].help.iter().any(|h| h.contains("_1 * 2")));
     }
 

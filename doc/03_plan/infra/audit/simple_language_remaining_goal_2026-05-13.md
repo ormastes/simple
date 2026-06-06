@@ -17,14 +17,14 @@ guidelines, stable error/warning messages, and final verification readiness.
   - `doc/01_research/lib/lang_comparison/ruby_features.md`
   - `doc/01_research/lib/best_practices/errors.md`
 - Hygiene gate:
-  - `scripts/audit/repo_hygiene_audit.py`
+  - `scripts/audit/repo_hygiene_audit.spl`
   - `scripts/audit/repo_hygiene_policy.json`
 - API consistency gate:
-  - `scripts/audit/api_consistency_audit.py`
+  - `scripts/audit/api_consistency_audit.spl`
   - `scripts/audit/api_consistency_baseline.json`
 - Diagnostic gates:
-  - `scripts/audit/diagnostic_code_audit.py`
-  - `scripts/audit/diagnostic_catalog_audit.py`
+  - `scripts/audit/diagnostic_code_audit.spl`
+  - `scripts/audit/diagnostic_catalog_audit.spl`
   - `test/02_integration/app/diagnostics/check_diagnostics_contract_spec.spl`
   - `test/02_integration/app/diagnostics/run_diagnostics_contract_spec.spl`
   - `test/01_unit/compiler/diagnostic_formatter_contract_spec.spl`
@@ -36,7 +36,7 @@ guidelines, stable error/warning messages, and final verification readiness.
 | --- | --- | --- |
 | Compiler imports | Resolve or retire remaining non-library compiler unresolved-import buckets: obsolete HIR/MIR seed tests, verification namespace, MDSOC weaving diagnostics, and watcher build import. | `simple check src/compiler` exits 0 with no unexpected import warnings, or each remaining warning is documented with owner and rationale. |
 | Libraries | Library import and parity warnings remain delegated to other agents. | Library lane reports closure or its own tracked debt with current `simple check src/lib` evidence. |
-| API predicates | Reduce the frozen legacy `is_`/`has_` predicate-prefix baseline without breaking compatibility. | `scripts/audit/api_consistency_audit.py` passes with a lower checked baseline. |
+| API predicates | Reduce the frozen legacy `is_`/`has_` predicate-prefix baseline without breaking compatibility. | `scripts/audit/api_consistency_audit.spl` passes with a lower checked baseline. |
 | Error depth | Broaden semantic diagnostic fixtures beyond direct literal mismatch cases. | End-to-end CLI tests cover representative non-literal semantic type errors with stable codes/help. |
 | Global verify | Run the full repo verification workflow after implementation lanes converge. | Verify report covers docs, hygiene, API consistency, diagnostics, compiler/app checks, and library delegation status. |
 

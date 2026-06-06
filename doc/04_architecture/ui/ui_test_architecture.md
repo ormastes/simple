@@ -171,6 +171,9 @@ applies, which is what makes one configurable interface possible.
 The improvement is an in-process driver that mirrors the `UITestClient`
 vocabulary over a `WinTextSnapshot`, with a target config selecting the
 surface(s). Same method names regardless of surface; `both` requires parity.
+The Phase 2 public API is `UI_TEST_TARGET_TUI`, `UI_TEST_TARGET_GUI`,
+`UI_TEST_TARGET_BOTH`, `ui_test_targets`, `SgttiParityResult`, and
+`sgtti_parity_check`.
 
 ```
         config: target = tui | gui | both
@@ -231,6 +234,7 @@ Design constraints:
 | `src/lib/common/ui/access_types.spl` | `UiAccessNode` / `UiAccessSnapshot` canonical types |
 | `src/lib/common/ui/access.spl` | `ui_access_snapshot_from_state` (TUI/GUI state lift) |
 | `src/lib/nogc_sync_mut/ui_test/client.spl` | `UITestClient` (HTTP `/api/test/*`) |
+| `src/lib/nogc_sync_mut/ui_test/sgtti.spl` | `SgttiTestDriver`, target expansion, and TUI/GUI parity check |
 | `src/lib/nogc_sync_mut/ui_test/types.spl` | `ElementInfo` / `UIStateInfo` (HTTP shape) |
 | `src/app/ui.test_api/handler.spl` | `/api/test/*` server routes |
 | `test/01_unit/os/compositor/gtti_spec.spl` | Existing headless SGTTI compositor test |

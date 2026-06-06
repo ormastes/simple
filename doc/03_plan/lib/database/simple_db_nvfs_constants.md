@@ -1,8 +1,7 @@
 # System Test Plan — simple_db_nvfs_constants
 
 Specs:
-- `test/03_system/simple_db_nvfs_constants_spec.spl`
-- `examples/11_advanced/simple_db/test/02_integration/storage/simple_db_nvfs_constants_spec.spl`
+- `test/03_system/stdlib/simple_db_nvfs_constants_spec.spl`
 
 Coverage:
 - `STORAGE_CLASS_DB_WAL`, `STORAGE_CLASS_META_DURABLE`, `STORAGE_CLASS_DB_TEMP`, and

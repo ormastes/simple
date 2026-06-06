@@ -60,6 +60,10 @@ TUI snapshot     GUI snapshot (headless)
    both -> parity: state must agree on tui AND gui
 ```
 
+Public SGTTI Phase 2 API: `UI_TEST_TARGET_TUI`, `UI_TEST_TARGET_GUI`,
+`UI_TEST_TARGET_BOTH`, `ui_test_targets`, `SgttiParityResult`, and
+`sgtti_parity_check`.
+
 ## Rules
 
 - **No fork.** Driver returns canonical `UiAccessNode` (or the owner's

@@ -25,8 +25,8 @@ impl NativeProjectBuilder {
         for line in String::from_utf8_lossy(&output.stdout).lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
             let parsed = match parts.as_slice() {
-                [sym_type, name] if *sym_type != "U" => Some((*sym_type, *name)),
-                [_addr, sym_type, name] if *sym_type != "U" => Some((*sym_type, *name)),
+                [sym_type, name] => Some((*sym_type, *name)),
+                [_addr, sym_type, name] => Some((*sym_type, *name)),
                 _ => None,
             };
             if let Some((sym_type, raw_name)) = parsed {
@@ -166,6 +166,14 @@ impl NativeProjectBuilder {
         Ok(symbols)
     }
 
+    fn read_strong_undefined_symbol_set(obj: &Path) -> Result<HashSet<String>, String> {
+        Ok(Self::read_global_symbol_types(obj)?
+            .into_iter()
+            .filter(|(kind, _)| kind == "U")
+            .map(|(_, name)| name)
+            .collect())
+    }
+
     fn normalize_relocation_symbol(raw_name: &str) -> String {
         let mut name = raw_name.split('@').next().unwrap_or(raw_name).trim().to_string();
         for marker in ["+0x", "-0x", "+0X", "-0X"] {
@@ -297,14 +305,18 @@ impl NativeProjectBuilder {
         let runtime_defined = Self::read_defined_symbol_set(runtime_lib)?;
         let mut required = BTreeSet::new();
         for obj in object_paths.iter().map(|p| p.as_path()).chain(std::iter::once(main_o)) {
-            for sym in Self::read_relocated_symbol_set(obj)? {
+            let mut referenced = Self::read_relocated_symbol_set(obj)?;
+            referenced.extend(Self::read_strong_undefined_symbol_set(obj)?);
+            for sym in referenced {
                 if runtime_defined.contains(&sym) {
                     required.insert(sym);
                 }
             }
         }
         if let Some(init) = init_o {
-            for sym in Self::read_relocated_symbol_set(init)? {
+            let mut referenced = Self::read_relocated_symbol_set(init)?;
+            referenced.extend(Self::read_strong_undefined_symbol_set(init)?);
+            for sym in referenced {
                 if runtime_defined.contains(&sym) {
                     required.insert(sym);
                 }
@@ -326,7 +338,20 @@ impl NativeProjectBuilder {
             }
         }
 
-        Ok(required.into_iter().collect())
+        let roots: Vec<String> = required.into_iter().collect();
+        if std::env::var("SIMPLE_TRACE_RUNTIME_ROOTS").is_ok() {
+            eprintln!(
+                "Runtime retention source: {} defined={}",
+                runtime_lib.display(),
+                runtime_defined.len()
+            );
+            eprintln!(
+                "Runtime retention roots ({}): {}",
+                roots.len(),
+                roots.iter().take(120).cloned().collect::<Vec<_>>().join(", ")
+            );
+        }
+        Ok(roots)
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]

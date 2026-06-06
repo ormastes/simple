@@ -222,6 +222,11 @@ pub extern "C" fn native_pty_write(fd: i64, data: RuntimeValue) -> RuntimeValue 
     }
 }
 
+#[no_mangle]
+pub extern "C" fn rt_pty_write(fd: i64, data: RuntimeValue) -> RuntimeValue {
+    native_pty_write(fd, data)
+}
+
 /// Helper to extract string from RuntimeValue
 #[cfg(unix)]
 unsafe fn runtime_value_to_string(val: RuntimeValue) -> Option<String> {
@@ -295,6 +300,11 @@ pub extern "C" fn native_pty_read(fd: i64, timeout_ms: i64) -> RuntimeValue {
     }
 }
 
+#[no_mangle]
+pub extern "C" fn rt_pty_read(fd: i64, timeout_ms: i64) -> RuntimeValue {
+    native_pty_read(fd, timeout_ms)
+}
+
 /// Helper to create RuntimeValue from string
 fn string_to_runtime_value(s: &str) -> RuntimeValue {
     super::collections::rt_string_new(s.as_ptr(), s.len() as u64)
@@ -320,6 +330,11 @@ pub extern "C" fn native_pty_close(fd: i64) -> RuntimeValue {
     {
         RuntimeValue::from_bool(false)
     }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_pty_close(fd: i64) -> RuntimeValue {
+    native_pty_close(fd)
 }
 
 #[cfg(test)]

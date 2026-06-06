@@ -71,7 +71,7 @@ debt.
 
 The enforcement baseline lives in
 `scripts/audit/api_consistency_baseline.json`, and
-`scripts/audit/api_consistency_audit.py` fails if the total or per-root
+`scripts/audit/api_consistency_audit.spl` fails if the total or per-root
 predicate-prefix count grows. Lower the baseline only after adding the preferred
 predicate API, migrating callers, keeping any needed compatibility alias, and
 updating tests.

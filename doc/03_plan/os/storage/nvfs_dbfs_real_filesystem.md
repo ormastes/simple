@@ -36,9 +36,22 @@ Store files, persist across remounts, load ELF binaries.
 - `bin/simple test test/02_integration/storage/dbfs/nvfs_no_regression_spec.spl`
 - `bin/simple test test/01_unit/os/services/vfs/vfs_rootfs_porting_spec.spl`
 - `bin/simple test test/01_unit/os/kernel/loader/elf_loader_spec.spl`
-- `bin/simple test test/03_system/kernel/boot_fs_spec.spl`
-- `bin/simple test test/03_system/kernel/nvfs_elf_load_spec.spl`
-- `bin/simple test test/03_system/kernel/elf_load_chain_spec.spl`
+- `bin/simple test test/03_system/os/kernel/boot_fs_spec.spl`
+- `bin/simple test test/03_system/os/kernel/nvfs_elf_load_spec.spl`
+- `bin/simple test test/03_system/os/kernel/elf_load_chain_spec.spl`
 - `bin/simple test test/01_unit/os/kernel/loader/executable_source_vfs_spec.spl`
 - `SIMPLEOS_DBFS_BOOT=1 bin/simple test test/03_system/os/port/dbfs_disk_boot_spec.spl`
-- Known gap: QEMU boot from a native DBFS rootfs and in-guest DBFS executable spawn is not yet covered; current QEMU smoke proves the DBFS-marked FAT32 carrier image build/marker path
+- `SIMPLEOS_RV64_HTTP_STORAGE_QEMU=1 bin/simple test test/03_system/os/simpleos_riscv_network_gate_spec.spl`
+  proves the live RV64 QEMU virtio-blk sector-read path plus NVFS root
+  superblock marker before accepting HTTP smoke.
+- Native DBFS QEMU execution remains opt-in behind
+  `SIMPLEOS_DBFS_BOOT_QEMU=1`,
+  `SIMPLEOS_DBFS_BOOT_QEMU_FORCE=native-dbfs-qemu`, and
+  `SIMPLEOS_DBFS_BOOT_QEMU_EXEC=bootable-media`.
+- Known gap: QEMU boot from a native DBFS rootfs and in-guest DBFS executable
+  spawn still needs a bootable-media command path. Current evidence:
+  `qemu-system-x86_64 -kernel build/os/simpleos_x86_64.elf` fails before
+  kernel boot with `multiboot knows VBE. we don't`, and the FAT32 carrier image
+  QEMU command times out without `[BOOT]`. The passing system smoke now proves
+  DBFS-marked carrier image construction plus native DBFS raw image creation,
+  size, LBA 2 magic, LBA 0 zeroing, and QEMU skip-gate behavior.

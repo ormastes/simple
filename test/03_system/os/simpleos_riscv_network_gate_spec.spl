@@ -1,4 +1,9 @@
 extern fn rt_file_read_text(path: text) -> text
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+fn rv64_http_storage_live_enabled() -> bool:
+    (rt_env_get("SIMPLEOS_RV64_HTTP_STORAGE_QEMU") ?? "") == "1"
 
 describe "SimpleOS RISC-V network readiness gate":
     it "keeps the RV64 boot handoff freestanding and QEMU-memory explicit":
@@ -53,7 +58,8 @@ describe "SimpleOS RISC-V network readiness gate":
         expect(runtime).to_contain("return 0x87000000ULL;")
         expect(runtime).to_contain("spl_i64 rt_time_now_unix_micros(void)")
         expect(runtime).to_contain("spl_u64 rt_riscv_seed(void)")
-        expect(runtime).to_contain("spl_u64 boot_alloc = simpleos_noalloc_heap_alloc(size, align)")
+        expect(runtime).to_contain("void *boot_alloc;")
+        expect(runtime).to_contain("kernel__boot__riscv_noalloc_heap__riscv_noalloc_heap_alloc(size)")
         expect(runtime).to_contain("if (boot_alloc)")
         expect(runtime).to_contain("rt_entropy_hardware_ready(void)")
         expect(runtime).to_contain("return 0;")
@@ -219,13 +225,7 @@ fn expect_qemu_deferred_script_contract(path: text):
     val script = rt_file_read_text(path)
 
     expect(script).to_contain("--expect-deferred")
-    expect(script).to_contain("--expect-http-only")
     expect(script).to_contain("EXPECT_DEFERRED=true")
-    expect(script).to_contain("EXPECT_HTTP_ONLY=true")
-    expect(script).to_contain("PMM OK")
-    expect(script).to_contain("HEAP OK")
-    expect(script).to_contain("Network packet TX ready")
-    expect(script).to_contain("Network packet RX unavailable")
     expect(script).to_contain("HTTP server deferred")
     expect(script).to_contain("Entering boot idle loop")
     expect(script).to_contain("DEFERRED PASSED")
@@ -245,6 +245,12 @@ describe "SimpleOS RISC-V QEMU HTTP scripts":
         expect(script).to_contain("--source build/os/generated")
         expect(script).to_contain("--backend llvm")
         expect(script).to_contain("--target riscv64gc-unknown-none")
+        expect(script).to_contain("--expect-http-only")
+        expect(script).to_contain("EXPECT_HTTP_ONLY=true")
+        expect(script).to_contain("PMM OK")
+        expect(script).to_contain("HEAP OK")
+        expect(script).to_contain("Network packet TX ready")
+        expect(script).to_contain("Network packet RX unavailable")
         expect(script).to_contain("RISC-V TLS not production-ready")
         expect(script.index_of("scripts/os/simpleos-native-build.shs --target riscv64gc-unknown-none") ?? -1).to_equal(-1)
 
@@ -266,6 +272,34 @@ describe "SimpleOS RISC-V QEMU HTTP scripts":
         expect(runner).to_contain("Cranelift native builds do not support hosted riscv32 yet")
         expect(runner).to_contain("LLVM backend unavailable: rebuild the selected Simple compiler")
 
+    it "runs the RV64 HTTP and NVFS storage QEMU gate when explicitly enabled":
+        val script = rt_file_read_text("scripts/qemu/qemu_rv64_http_test.shs")
+
+        expect(script).to_contain("--expect-http-only")
+        expect(script).to_contain("--with-storage")
+        expect(script).to_contain("Storage service ready")
+        expect(script).to_contain("NVFS root superblock ready")
+
+        if rv64_http_storage_live_enabled():
+            val result = rt_process_run_timeout(
+                "sh",
+                ["scripts/qemu/qemu_rv64_http_test.shs", "--expect-http-only", "--with-storage"],
+                90000,
+            )
+            val output = result[0] + result[1]
+
+            expect(result[2]).to_equal(0)
+            expect(output).to_contain("ALL PASSED")
+            expect(output).to_contain("Storage service verified")
+            expect(output).to_contain("NVFS root superblock verified")
+            expect(output).to_contain("GET /health (HTTP)... PASS (200)")
+            expect(output).to_contain("GET / (HTTP)... PASS (200)")
+            expect(output).to_contain("SKIP (HTTP-only gate; RISC-V TLS not production-ready)")
+            expect(output).to_contain("GET /health content-type... PASS (JSON)")
+            expect(output).to_contain("GET / content-type... PASS (HTML)")
+        else:
+            print "SKIP: set SIMPLEOS_RV64_HTTP_STORAGE_QEMU=1 to run live RV64 HTTP+NVFS QEMU gate"
+
 fn expect_no_fake_network_pass(path: text):
     val source = rt_file_read_text(path)
 
@@ -280,11 +314,11 @@ fn expect_no_fake_network_pass(path: text):
 
 describe "SimpleOS QEMU network entrypoint gates":
     it "does not report os_network success for query/no-crash socket placeholders":
-        expect_no_fake_network_pass("test/system/os_network_spec.spl")
-        val source = rt_file_read_text("test/system/os_network_spec.spl")
+        expect_no_fake_network_pass("test/03_system/os/os_network_spec.spl")
+        val source = rt_file_read_text("test/03_system/os/os_network_spec.spl")
         expect(source).to_contain("_assert(net_ready, \"Network stack initialized\")")
         expect(source).to_contain("_assert(bind_result >= 0")
         expect(source).to_contain("_assert(conn_result >= 0")
 
     it "does not report full-stack network success for no-crash socket placeholders":
-        expect_no_fake_network_pass("test/system/os_full_stack_spec.spl")
+        expect_no_fake_network_pass("test/03_system/os/os_full_stack_spec.spl")
