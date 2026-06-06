@@ -92,6 +92,22 @@ events on Tauri2, no hard-coded HTML, no wasm dependency.
   (7 absolute-oracle assertions: exact markup, escaping, nesting, document wrap)
   — confirmed real via a negative control (wrong-expectation spec fails).
 
+## Verified live (2026-06-06): Simple-generated GUI renders on both mobile targets
+
+Built the hello UI **from the `mobile_html_gen` model** (no hard-coded body),
+wrapped it with `html_gen_document`, and loaded the resulting HTML into the Tauri
+shell's webview in external-URL mode:
+- **iOS simulator** (`build/tauri_ios_mdi/ios_simple_generated_gui.png`) and
+  **Android emulator** (`build/tauri_android_mdi/android_simple_generated_gui2.png`)
+  both render the same UI (Home/Apps taskbar, Run + "simple run gui" command bar,
+  "Hello World" button, "Generated WASM UI" input) — matching the existing
+  hand-authored hello reference structure.
+
+So "Simple GUI generates HTML/CSS" is now real and **renders correctly on both
+platforms**. Transport here is a dev HTTP serve of the Simple-generated HTML; the
+remaining integration is to (a) generate at build time + bundle, and (b) keep the
+Simple process alive to handle events + re-render (the IPC event loop).
+
 ## Next milestones
 
 1. Fix wasm string ABI (export memory + readable text return) — unblocks live render.
