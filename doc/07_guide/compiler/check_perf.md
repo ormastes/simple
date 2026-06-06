@@ -87,6 +87,8 @@ sh scripts/check/check-cross-language-perf.shs
 | `WARM_IN_PROCESS` | 10 | In-process warmup iterations (JIT reaches steady state) |
 | `FIB_N` | 35 | Fibonacci depth for throughput test |
 | `WORKERS` | 100 | Parallel worker count |
+| `FANOUT_WORKERS` | 1000 | Large fanout worker count for tiny-task scheduling overhead |
+| `FANOUT_ITERS` | 32 | Tiny per-task LCG iterations for the large fanout benchmark |
 | `RUN_TIMEOUT` | 30 | Per-command timeout in seconds for measured commands and RSS probes |
 | `SIMPLE_BINARY` | `bin/simple` | Path to Simple compiler |
 | `BUILD_DIR` | `build/cross_lang_perf` | Workload compile output |
@@ -105,7 +107,8 @@ hosts, or lower it for smoke evidence.
 | **Size** | hello + fib source/binary | Deployment footprint |
 | **Cold startup** | `hello world` (20 runs avg) | Time-to-first-output |
 | **Warm throughput** | `fib(35)` recursive, in-process loop (10 warmup + 20 measured) | Steady-state single-thread perf (JIT reaches hotspot) |
-| **Parallel** | 100 workers × LCG 100K iters via channel (`channel_new`/`channel_from_id`/`send`/`recv` from `std.concurrent.channel` — same semantic as Go's goroutine + chan). Workers pass channel id (not object) due to native struct-closure codegen limitation. | Concurrency model overhead |
+| **Parallel** | 100 workers × LCG 100K iters via channel (`channel_new`/`channel_from_id`/`send`/`recv` from `std.concurrent.channel` — same semantic as Go's goroutine + chan). Workers pass channel id (not object) due to native struct-closure codegen limitation. | CPU-heavy worker throughput plus concurrency overhead |
+| **Large fanout** | 1000 tiny workers × LCG 32 iters. Simple green uses cooperative queue fanout; C uses one pthread per tiny task; Go uses one goroutine per tiny task; Erlang uses one BEAM process per tiny task. | Scheduling overhead where Go should usually beat C pthread creation; Simple green measures queue fanout, not CPU parallelism |
 | **Parallel binary size** | Binary/script sizes for parallel workloads across languages | Deployment footprint for concurrent programs |
 | **Parallel peak RSS** | `/usr/bin/time -v` peak RSS with 100 workers, baseline subtracted, per-worker delta | Memory cost per concurrent task (baseline = hello world RSS for each language) |
 

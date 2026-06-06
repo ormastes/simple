@@ -17,6 +17,40 @@
 #   bin/simple test test/system/t32_tools/t32_gui_system_spec.spl
 #   bash config/t32/trace32_x11_container.shs down
 
+"""
+# T32 GUI System Debug Session Specification
+
+**Feature IDs:** #T32-GUI-001
+**Category:** Hardware Debug Infrastructure
+**Difficulty:** 4/5
+**Status:** In Progress
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+
+## Overview
+
+Verifies TRACE32-style GUI debug sessions through a simulated state machine and,
+when a live TRACE32 remote is available, through the remote command adapter.
+The scenarios cover lifecycle, register and memory inspection, breakpoint
+control, window layout, dialog handling, AREA output, printer redirection, and
+run-state guards.
+
+## Syntax
+
+The spec uses `T32GuiSession` helpers to model commands and checks every
+expected `Result` branch with explicit assertions or failure messages.
+
+## Examples
+
+`T32GuiSession.create("localhost", 20000)` starts in `disconnected`, then
+`connect`, `system_up`, `step`, `capture_registers`, and `disconnect` exercise
+the debug workflow.
+"""
+
+use std.spec.*
+
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_time_now_unix_micros() -> i64
@@ -542,7 +576,7 @@ impl T32GuiSession:
     me disconnect():
         if LIVE:
             # No explicit disconnect for t32rem
-            pass_dn
+            self.log("REMOTE_DISCONNECT_NOOP")
         self.state = "disconnected"
         self.log("DISCONNECT")
 
@@ -570,11 +604,11 @@ describe "T32 GUI Debug Sessions":
             val r1 = s.step()
             match r1:
                 Err(e): expect(e).to_contain("halted")
-                Ok(_): expect(false).to_equal(true)
+                Ok(_): fail("step unexpectedly succeeded while disconnected")
             val r2 = s.read_register("PC")
             match r2:
                 Err(e): expect(e).to_contain("halted")
-                Ok(_): expect(false).to_equal(true)
+                Ok(_): fail("read_register unexpectedly succeeded while disconnected")
 
     context "breakpoint + step debug session":
         it "set bp → run → halt → step → read PC → verify PC changed":
@@ -585,7 +619,7 @@ describe "T32 GUI Debug Sessions":
             val pc_before = s.read_register("PC")
             match pc_before:
                 Ok(v): expect(v).to_equal("0x08000000")
-                Err(_): expect(false).to_equal(true)
+                Err(e): fail("initial PC read failed: " + e)
             # Set breakpoint
             s.set_breakpoint("0x08000010")
             val bps1 = s.breakpoints
@@ -594,7 +628,7 @@ describe "T32 GUI Debug Sessions":
             val bp_view = s.capture_breakpoints()
             match bp_view:
                 Ok(v): expect(v).to_contain("0x08000010")
-                Err(_): expect(false).to_equal(true)
+                Err(e): fail("breakpoint capture failed: " + e)
             # Run and halt
             s.run_target()
             expect(s.state).to_equal("running")
@@ -606,13 +640,13 @@ describe "T32 GUI Debug Sessions":
             val pc_after = s.read_register("PC")
             match pc_after:
                 Ok(v): expect(v).to_equal("0x08000004")
-                Err(_): expect(false).to_equal(true)
+                Err(e): fail("PC read after step failed: " + e)
             # Step over
             s.step_over()
             val pc_final = s.read_register("PC")
             match pc_final:
                 Ok(v): expect(v).to_equal("0x08000008")
-                Err(_): expect(false).to_equal(true)
+                Err(e): fail("PC read after step over failed: " + e)
             # Delete all breakpoints
             s.delete_breakpoints()
             val bps2 = s.breakpoints
@@ -630,33 +664,33 @@ describe "T32 GUI Debug Sessions":
             val lr = s.read_register("LR")
             match pc:
                 Ok(v): expect(v).to_equal("0x08000000")
-                Err(_): expect(false).to_equal(true)
+                Err(e): fail("PC read failed: " + e)
             match sp:
                 Ok(v): expect(v).to_equal("0x20001000")
-                Err(_): expect(false).to_equal(true)
+                Err(e): fail("SP read failed: " + e)
             # Capture register window (like GDB TUI register view)
             val reg_view = s.capture_registers()
             match reg_view:
                 Ok(v): expect(v).to_contain("0x08000000")
-                Err(_): expect(false).to_equal(true)
+                Err(e): fail("register capture failed: " + e)
             # Modify PC
             s.write_register("PC", "0x08001000")
             val new_pc = s.read_register("PC")
             match new_pc:
                 Ok(v): expect(v).to_equal("0x08001000")
-                Err(_): expect(false).to_equal(true)
+                Err(e): fail("PC read after write failed: " + e)
             # Read memory
             val mem = s.read_memory("0x08000000")
             match mem:
                 Ok(v): expect(v.len() > 0).to_equal(true)
-                Err(_): expect(false).to_equal(true)
+                Err(e): fail("memory read failed: " + e)
             # Write memory
             s.write_memory("0x20000000", "0x12345678")
             # Capture memory dump (like GDB x/4x)
             val mem_view = s.capture_memory("0x08000000")
             match mem_view:
                 Ok(v): expect(v.len() > 0).to_equal(true)
-                Err(_): expect(false).to_equal(true)
+                Err(e): fail("memory capture failed: " + e)
             s.disconnect()
 
     context "window layout debug session (rcar3_window)":
@@ -690,7 +724,7 @@ describe "T32 GUI Debug Sessions":
             val reg_view = s.capture_registers()
             match reg_view:
                 Ok(v): expect(v).to_contain("0x08000000")
-                Err(_): expect(false).to_equal(true)
+                Err(e): fail("register capture failed in window layout session: " + e)
             val bp_view = s.capture_breakpoints()
             # Step 5: Create second page
             s.page_create("P001")
@@ -716,8 +750,12 @@ describe "T32 GUI Debug Sessions":
             # Step 1: Ask user before flash erase (auto-dismissed in headless)
             val confirm = s.dialog_yesno("Erase flash sector 0?")
             match confirm:
-                Ok(v): pass_dn  # headless returns false, live may vary
-                Err(e): expect(false).to_equal(true)
+                Ok(v):
+                    if LIVE:
+                        expect(v == true or v == false).to_equal(true)
+                    else:
+                        expect(v).to_equal(false)
+                Err(e): fail("flash confirmation dialog failed: " + e)
             # Step 2: Setup debug layout
             s.toolbar(true)
             s.statusbar(true)
@@ -744,12 +782,12 @@ describe "T32 GUI Debug Sessions":
             val pc = s.read_register("PC")
             match pc:
                 Ok(v): expect(v.len() > 0).to_equal(true)
-                Err(_): expect(false).to_equal(true)
+                Err(e): fail("PC read after flash step failed: " + e)
             # Step 8: Capture register view after stepping
             val regs = s.capture_registers()
             match regs:
                 Ok(v): expect(v.len() > 0).to_equal(true)
-                Err(_): expect(false).to_equal(true)
+                Err(e): fail("register capture after flash step failed: " + e)
             # Step 9: Clean up
             s.area_reset()
             s.delete_breakpoints()
@@ -902,37 +940,37 @@ describe "T32 GUI Debug Sessions":
             val r1 = s.read_register("PC")
             match r1:
                 Ok(pc): expect(pc.len()).to_be_greater_than(0)
-                Err(_): expect(false).to_equal(true)
+                Err(e): fail("halted PC read failed: " + e)
             # Halted: capture SHOULD work
             val c1 = s.capture_registers()
             match c1:
                 Ok(view): expect(view).to_contain("PC")
-                Err(_): expect(false).to_equal(true)
+                Err(e): fail("halted register capture failed: " + e)
             # Running: register read SHOULD fail
             s.run_target()
             expect(s.state).to_equal("running")
             val r2 = s.read_register("PC")
             match r2:
                 Err(e): expect(e).to_contain("halted")
-                Ok(_): expect(false).to_equal(true)
+                Ok(_): fail("running PC read unexpectedly succeeded")
             # Running: capture SHOULD fail
             val c2 = s.capture_registers()
             match c2:
                 Err(e): expect(e).to_contain("halted")
-                Ok(_): expect(false).to_equal(true)
+                Ok(_): fail("running register capture unexpectedly succeeded")
             # Running: breakpoint set IS allowed (safe while running)
             val bp = s.set_breakpoint("0x08001000")
             match bp:
                 Ok(msg):
                     expect(msg).to_contain("0x08001000")
                     expect(s.breakpoints.len()).to_equal(1)
-                Err(_): expect(false).to_equal(true)
+                Err(e): fail("breakpoint set while running failed: " + e)
             # Halt, then capture works again
             s.halt()
             val r3 = s.read_register("PC")
             match r3:
                 Ok(pc): expect(pc.len()).to_be_greater_than(0)
-                Err(_): expect(false).to_equal(true)
+                Err(e): fail("PC read after halt failed: " + e)
             s.disconnect()
 
     context "full debug cycle with state diff":
@@ -955,8 +993,8 @@ describe "T32 GUI Debug Sessions":
                 Ok(pre_v):
                     match post_pc:
                         Ok(post_v): expect(pre_v == post_v).to_equal(false)
-                        Err(_): expect(false).to_equal(true)
-                Err(_): expect(false).to_equal(true)
+                        Err(e): fail("post-step PC read failed: " + e)
+                Err(e): fail("pre-step PC read failed: " + e)
             # Register view hash should differ (PC changed)
             expect(pre_hash == post_hash).to_equal(false)
             # History should record all steps

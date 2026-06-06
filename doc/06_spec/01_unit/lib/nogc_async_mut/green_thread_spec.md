@@ -27,7 +27,7 @@ green_thread_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -110,6 +110,36 @@ expect(handle.join()).to_equal(23)
 
 </details>
 
+#### runs more than eight precomputed values without slot overwrite
+
+1. green run all
+   - Expected: total equals `45`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val h0 = green_spawn_value(0)
+val h1 = green_spawn_value(1)
+val h2 = green_spawn_value(2)
+val h3 = green_spawn_value(3)
+val h4 = green_spawn_value(4)
+val h5 = green_spawn_value(5)
+val h6 = green_spawn_value(6)
+val h7 = green_spawn_value(7)
+val h8 = green_spawn_value(8)
+val h9 = green_spawn_value(9)
+green_run_all()
+val total = h0.join() + h1.join() + h2.join() + h3.join() + h4.join() + h5.join() + h6.join() + h7.join() + h8.join() + h9.join()
+expect(total).to_equal(45)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -117,7 +147,7 @@ expect(handle.join()).to_equal(23)
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/nogc_async_mut/green_thread_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-06-06 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -129,8 +159,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

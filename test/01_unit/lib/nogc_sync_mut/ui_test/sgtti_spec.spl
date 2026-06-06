@@ -1,8 +1,9 @@
 # @cover src/lib/nogc_sync_mut/ui_test/sgtti.spl 80%
 use std.spec.{describe, it, expect}
-use std.ui_test.sgtti.{SgttiTestDriver, UI_TEST_TARGET_TUI, UI_TEST_TARGET_GUI, UI_TEST_TARGET_BOTH, ui_test_targets, sgtti_parity_check, sgtti_snapshot_from_tui_state, gui_test_snapshot, gui_test_snapshot_default}
+use std.ui_test.sgtti.{SgttiTestDriver, UI_TEST_TARGET_TUI, UI_TEST_TARGET_GUI, UI_TEST_TARGET_BOTH, ui_test_targets, sgtti_parity_check, sgtti_snapshot_from_tui_state, sgtti_snapshot_from_draw_ir_batch, expect_draw, gui_test_snapshot, gui_test_snapshot_default}
 use common.ui.access_types.{UiAccessNode, UiAccessProp, UiAccessSurface}
 use common.ui.builder.{column, text_widget, build_tree}
+use common.ui.draw_ir.{DRAW_IR_BACKEND_CPU, draw_ir_batch_with_source, draw_ir_box_with_style, draw_ir_embedding_config, draw_ir_port_command, draw_ir_rect_bounds, draw_ir_source_gui_ast, draw_ir_style_prop}
 use common.ui.widget.{UIState}
 use common.ui.win_text_access.{
     WinTextSnapshot,
@@ -231,3 +232,39 @@ describe "SGTTI UI test driver":
         expect(missing.ok).to_equal(false)
         expect(missing.tui_found).to_equal(false)
         expect(missing.gui_found).to_equal(false)
+
+    it "asserts Draw IR geometry, hit rect, css, parent, and kind":
+        val box = draw_ir_box_with_style(
+            "root",
+            10,
+            20,
+            100,
+            40,
+            0x112233u32,
+            draw_ir_rect_bounds(10, 20, 100, 40),
+            draw_ir_rect_bounds(12, 22, 96, 36),
+            draw_ir_rect_bounds(10, 20, 100, 40),
+            draw_ir_rect_bounds(0, 0, 200, 120),
+            [
+                draw_ir_style_prop("kind", "panel"),
+                draw_ir_style_prop("role", "canvas"),
+                draw_ir_style_prop("display", "flex")
+            ]
+        )
+        val port = draw_ir_port_command("root-port", "root", 30, 35)
+        val batch = draw_ir_batch_with_source(
+            "sgtti-draw",
+            DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config("main", "root", 0, 0, 200, 120, 0, 1000, true),
+            [box, port],
+            draw_ir_source_gui_ast("sgtti-test", "style", "1")
+        )
+        val driver = SgttiTestDriver.new(sgtti_snapshot_from_draw_ir_batch(batch, 1000, 5000, 1000))
+
+        expect(driver.expect_draw("root", "visible").unwrap()).to_equal(true)
+        expect(driver.expect_draw("root", "geometry 10 20 101 39 tolerance 1").unwrap()).to_equal(true)
+        expect(driver.expect_draw("root", "hit_rect contains 25 30").unwrap()).to_equal(true)
+        expect(driver.expect_draw("root", "css display flex").unwrap()).to_equal(true)
+        expect(driver.expect_draw("root", "kind panel").unwrap()).to_equal(true)
+        expect(driver.expect_draw("root", "role canvas").unwrap()).to_equal(true)
+        expect(expect_draw(driver, "root-port", "parent root").unwrap()).to_equal(true)

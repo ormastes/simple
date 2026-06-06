@@ -457,8 +457,12 @@ scenarios and do not replace `expect` or the canonical matcher set.
 
 Semantic SGTTI evidence and pixel evidence run together. SGTTI proves
 identity/state/text/structure; existing bitmap gates and Engine2D readback stay
-the pixel oracle. Draw IR Protocol v2 inspection depends on SGTTI. Improvement
-plan: `doc/03_plan/ui/ui_test/ui_test_sgtti_plan.md`.
+the pixel oracle. Draw IR batches/compositions can be lifted with
+`sgtti_snapshot_from_draw_ir_batch` and
+`sgtti_snapshot_from_draw_ir_composition`, letting Engine2D specs assert the
+pre-raster node tree before pixel readback. Draw IR Protocol v2 inspection
+depends on SGTTI. Improvement plan:
+`doc/03_plan/ui/ui_test/ui_test_sgtti_plan.md`.
 
 ## GUI Sanity Apps (pure-Simple lane, macOS)
 

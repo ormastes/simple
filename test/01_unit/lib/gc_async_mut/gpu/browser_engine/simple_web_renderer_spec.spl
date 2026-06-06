@@ -1,10 +1,48 @@
+"""
+# Simple Web Renderer Specification
+
+## Overview
+
+This unit spec covers the pure-Simple web renderer path used by browser, web,
+and Engine2D-backed GUI surfaces. It checks HTML-to-scene conversion,
+HTML-to-pixel rendering, selector cascade behavior, text raster behavior,
+Chrome-parity matrix fixtures, static pixel caching, backend-name resolution,
+and corpus fixture rendering.
+
+The Draw IR Phase 4 scenario verifies the semantic inspection side of the same
+layout pipeline: `simple_web_layout_render_html_draw_ir` emits an `html_ast`
+Draw IR batch with computed style and border/content/hit/clip rectangles before
+the pixel renderer paints the page.
+
+**Requirements:** N/A
+
+These scenarios are implementation and architecture evidence for the Simple Web
+renderer and active Draw IR inspection plan rather than numbered product
+requirements.
+
+**Plan:** doc/03_plan/ui/draw_ir/draw_io_sdn_draw_ir_plan.md
+
+**Design:** doc/04_architecture/ui/simple_gui_stack.md
+
+**Research:** doc/01_research/ui/draw_ir/draw_io_sdn_draw_ir.md
+
+## Syntax
+
+The spec uses `std.spec` scenarios and the built-in matcher vocabulary. Pixel
+assertions remain the rendering oracle; Draw IR assertions inspect semantic
+layout metadata before raster.
+"""
+
 use std.spec.*
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
     SimpleWebRenderer, simple_web_render_html_to_scene, simple_web_render_html_to_pixels,
     simple_web_render_url_to_pixels, simple_web_resolved_engine2d_backend_name}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir}
 use std.gc_async_mut.gpu.browser_engine.simple_web_corpus_fixture_renderer.{
     simple_web_render_html_to_pixels_with_corpus_fixtures}
 use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer}
+use common.ui.draw_ir.{DrawIrCommand}
 
 fn _count_non_bg(pixels: [u32], bg: u32) -> i32:
     var count: i32 = 0
@@ -44,6 +82,22 @@ fn _simple_scene_has_fill_color(html: text, color: u32) -> bool:
         idx = idx + 1
     false
 
+fn _draw_ir_command_by_id(commands: [DrawIrCommand], component_id: text) -> DrawIrCommand:
+    var idx = 0
+    while idx < commands.len():
+        if commands[idx].component_id == component_id:
+            return commands[idx]
+        idx = idx + 1
+    commands[0]
+
+fn _draw_ir_style_value(command: DrawIrCommand, key: text) -> text:
+    var idx = 0
+    while idx < command.computed_style.len():
+        if command.computed_style[idx].key == key:
+            return command.computed_style[idx].value
+        idx = idx + 1
+    ""
+
 describe "SimpleWebRenderer":
 
     it "renders HTML through the canonical browser engine to RenderScene":
@@ -73,6 +127,27 @@ describe "SimpleWebRenderer":
         expect(pixels.len()).to_equal(96 * 64)
         expect(_count_color(pixels, 0xFF1D4ED8u32)).to_be_greater_than(0)
         expect(_count_color(pixels, 0xFF141418u32)).to_equal(0)
+
+    it "emits HTML layout Draw IR with computed style and hit geometry before raster":
+        val html = "<html><head><style>#card { background-color:#1d4ed8; color:#ffffff; width:40px; height:18px; padding:2px; border:1px solid #0f172a; }</style></head><body><section id='card'>CMD</section></body></html>"
+        val composition = simple_web_layout_render_html_draw_ir(html, 96, 64)
+        val batch = composition.batches[0]
+        val card = _draw_ir_command_by_id(batch.commands, "card")
+
+        expect(batch.source.source_kind).to_equal("html_ast")
+        expect(batch.commands.len()).to_be_greater_than(0)
+        expect(card.component_id).to_equal("card")
+        expect(card.border_rect.present).to_equal(true)
+        expect(card.content_rect.present).to_equal(true)
+        expect(card.hit_rect.present).to_equal(true)
+        expect(card.clip_rect.present).to_equal(true)
+        expect(card.content_rect.x).to_equal(card.x + 3)
+        expect(card.content_rect.y).to_equal(card.y + 3)
+        expect(card.content_rect.width).to_equal(34)
+        expect(card.content_rect.height).to_equal(12)
+        expect(_draw_ir_style_value(card, "tag")).to_equal("section")
+        expect(_draw_ir_style_value(card, "display")).to_equal("block")
+        expect(_draw_ir_style_value(card, "padding-left")).to_equal("2")
 
     it "keeps lowercase browser text glyphs distinct from uppercase glyphs":
         val lower_html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}.label{color:#111827;font-size:8px;background-color:#ffffff}</style></head><body><div class='label'>chrome baseline</div></body></html>"

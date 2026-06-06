@@ -143,6 +143,9 @@ fixture setup. Select surfaces with `UI_TEST_TARGET_TUI`, `UI_TEST_TARGET_GUI`,
 `UI_TEST_TARGET_BOTH`, and `ui_test_targets`; use `sgtti_parity_check` when a
 `both` run must prove visible/focused/enabled/selected state agrees across TUI
 and GUI snapshots.
+Use `sgtti_snapshot_from_draw_ir_batch` or
+`sgtti_snapshot_from_draw_ir_composition` when an Engine2D/Web Draw IR scene
+must assert semantic node structure before raster/pixel readback.
 
 Protocol v2 Draw IR inspection is optional and capability-gated. Use
 `/api/test/draw-ir`, `/api/test/draw-ir?id=...`,

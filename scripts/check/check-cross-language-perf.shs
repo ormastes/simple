@@ -6,7 +6,7 @@ set -eu
 # bun, python, go, erlang, java, and C.
 #
 # Dimensions: binary/runtime size, cold startup, warm throughput (fib35),
-#             parallel spawn-N (shows BEAM/goroutine strength).
+#             parallel CPU workers, and large fanout scheduling.
 #
 # Warm throughput uses IN-PROCESS loops so JIT runtimes (Java HotSpot,
 # Bun/JSC) reach steady state within a single process — not relaunched.
@@ -14,6 +14,7 @@ set -eu
 # Usage:
 #   sh scripts/check/check-cross-language-perf.shs
 #   RUNS=50 WORKERS=100 sh scripts/check/check-cross-language-perf.shs
+#   RUNS=3 FANOUT_WORKERS=1000 FANOUT_ITERS=32 sh scripts/check/check-cross-language-perf.shs
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
@@ -24,6 +25,8 @@ REPORT_PATH="${REPORT_PATH:-doc/09_report/cross_language_perf_$(date +%Y-%m-%d).
 RUNS="${RUNS:-20}"
 FIB_N="${FIB_N:-35}"
 WORKERS="${WORKERS:-100}"
+FANOUT_WORKERS="${FANOUT_WORKERS:-1000}"
+FANOUT_ITERS="${FANOUT_ITERS:-32}"
 if [ -z "${GREEN_WORKERS:-}" ]; then
     if [ "$WORKERS" -gt 10 ]; then
         GREEN_WORKERS=10
@@ -233,6 +236,37 @@ write_simple_parallel_green() {
     } >"$BUILD_DIR/parallel_green.spl"
 }
 
+write_simple_fanout_green() {
+    # Simple's implemented green-thread API is cooperative on the current OS
+    # thread. This row measures queue fanout overhead, not CPU parallelism.
+    _last_fanout_worker=$((FANOUT_WORKERS - 1))
+    {
+        echo 'use std.concurrent.green_thread.{green_spawn_value, green_run_all}'
+        echo ''
+        echo 'val LCG_A: i64 = 1103515245'
+        echo 'val LCG_C: i64 = 12345'
+        echo 'val LCG_M: i64 = 2147483648'
+        echo "val ITERS: i64 = ${FANOUT_ITERS}"
+        echo ''
+        echo 'fn work(seed: i64) -> i64:'
+        echo '    var x = seed'
+        echo '    for i in 0..ITERS:'
+        echo '        x = (x * LCG_A + LCG_C) % LCG_M'
+        echo '    x'
+        echo ''
+        echo 'fn main():'
+        for i in $(seq 0 "$_last_fanout_worker"); do
+            echo "    var h${i} = green_spawn_value(work(${i}))"
+        done
+        echo '    green_run_all()'
+        echo '    var total: i64 = 0'
+        for i in $(seq 0 "$_last_fanout_worker"); do
+            echo "    total = total + h${i}.join()"
+        done
+        echo '    println("total = {total}")'
+    } >"$BUILD_DIR/fanout_green.spl"
+}
+
 write_c_hello() {
     cat >"$BUILD_DIR/hello.c" <<'C'
 #include <stdio.h>
@@ -294,6 +328,51 @@ int main(void) {
 C
 }
 
+write_c_fanout() {
+    cat >"$BUILD_DIR/fanout.c" <<C
+#include <stdio.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <pthread.h>
+static const int64_t LCG_A = 1103515245;
+static const int64_t LCG_C = 12345;
+static const int64_t LCG_M = 2147483648LL;
+static const int ITERS = ${FANOUT_ITERS};
+static int64_t *results;
+static int64_t work(int64_t seed) {
+    int64_t x = seed;
+    for (int i = 0; i < ITERS; i++) x = (x * LCG_A + LCG_C) % LCG_M;
+    return x;
+}
+static void *worker(void *arg) {
+    int64_t i = (int64_t)(intptr_t)arg;
+    results[i] = work(i);
+    return NULL;
+}
+int main(void) {
+    enum { N = ${FANOUT_WORKERS} };
+    pthread_t *t = calloc(N, sizeof(pthread_t));
+    results = calloc(N, sizeof(int64_t));
+    if (!t || !results) return 2;
+    int created = 0;
+    for (int i = 0; i < N; i++) {
+        if (pthread_create(&t[i], NULL, worker, (void *)(intptr_t)i) != 0) break;
+        created++;
+    }
+    if (created != N) {
+        for (int i = 0; i < created; i++) pthread_join(t[i], NULL);
+        fprintf(stderr, "pthread_create failed at %d/%d\n", created, N);
+        return 2;
+    }
+    int64_t total = 0;
+    for (int i = 0; i < N; i++) { pthread_join(t[i], NULL); total += results[i]; }
+    printf("total = %ld\n", total);
+    free(t); free(results);
+    return 0;
+}
+C
+}
+
 write_go_fib() {
     cat >"$BUILD_DIR/fib.go" <<'GO'
 package main
@@ -335,6 +414,28 @@ func main() {
     for i := 0; i < ${WORKERS}; i++ { go worker(int64(i), ch) }
     var total int64
     for i := 0; i < ${WORKERS}; i++ { total += <-ch }
+    fmt.Printf("total = %d\n", total)
+}
+GO
+}
+
+write_go_fanout() {
+    cat >"$BUILD_DIR/fanout.go" <<GO
+package main
+import "fmt"
+func work(seed int64) int64 {
+    const a, c, m int64 = 1103515245, 12345, 2147483648
+    x := seed
+    for i := 0; i < ${FANOUT_ITERS}; i++ { x = (x*a + c) % m }
+    return x
+}
+func main() {
+    ch := make(chan int64, ${FANOUT_WORKERS})
+    for i := 0; i < ${FANOUT_WORKERS}; i++ {
+        go func(seed int64) { ch <- work(seed) }(int64(i))
+    }
+    var total int64
+    for i := 0; i < ${FANOUT_WORKERS}; i++ { total += <-ch }
     fmt.Printf("total = %d\n", total)
 }
 GO
@@ -384,6 +485,26 @@ print(f"total = {sum(results)}")
 PY
 }
 
+write_python_fanout() {
+    cat >"$BUILD_DIR/fanout.py" <<PY
+import threading
+A, C, M, ITERS = 1103515245, 12345, 2147483648, ${FANOUT_ITERS}
+N = ${FANOUT_WORKERS}
+results = [0] * N
+def work(seed):
+    x = seed
+    for _ in range(ITERS):
+        x = (x * A + C) % M
+    return x
+def worker(i):
+    results[i] = work(i)
+threads = [threading.Thread(target=worker, args=(i,)) for i in range(N)]
+for t in threads: t.start()
+for t in threads: t.join()
+print(f"total = {sum(results)}")
+PY
+}
+
 write_bun_fib() {
     cat >"$BUILD_DIR/fib.js" <<'JS'
 function fib(n) { return n < 2 ? n : fib(n-1) + fib(n-2); }
@@ -417,6 +538,26 @@ if (!isMainThread) {
   for (let i = 0; i < N; i++) {
     const w = new Worker(__filename, { workerData: { seed: i } });
     w.on("message", v => { total += v; if (++done === N) console.log("total = " + total); });
+  }
+}
+JS
+}
+
+write_bun_fanout() {
+    cat >"$BUILD_DIR/fanout.js" <<JS
+const { Worker, isMainThread, parentPort, workerData } = require("worker_threads");
+if (!isMainThread) {
+  const A = 1103515245, C = 12345, M = 2147483648, ITERS = ${FANOUT_ITERS};
+  let x = workerData.seed;
+  for (let i = 0; i < ITERS; i++) x = (x * A + C) % M;
+  parentPort.postMessage(x);
+} else {
+  const N = ${FANOUT_WORKERS};
+  let total = 0, done = 0;
+  for (let i = 0; i < N; i++) {
+    const w = new Worker(__filename, { workerData: { seed: i } });
+    w.on("message", v => { total += v; if (++done === N) console.log("total = " + total); });
+    w.on("error", e => { console.error(e.message); process.exitCode = 2; });
   }
 }
 JS
@@ -470,6 +611,29 @@ public class Parallel {
 JAVA
 }
 
+write_java_fanout() {
+    cat >"$BUILD_DIR/Fanout.java" <<JAVA
+import java.util.concurrent.*;
+import java.util.stream.*;
+public class Fanout {
+    static final long LCG_A = 1103515245L, LCG_C = 12345L, LCG_M = 2147483648L;
+    static final int ITERS = ${FANOUT_ITERS};
+    static long work(long seed) {
+        long x = seed;
+        for (int i = 0; i < ITERS; i++) x = (x * LCG_A + LCG_C) % LCG_M;
+        return x;
+    }
+    public static void main(String[] a) throws Exception {
+        var pool = Executors.newCachedThreadPool();
+        var futures = IntStream.range(0,${FANOUT_WORKERS}).mapToObj(i -> pool.submit(() -> work(i))).toList();
+        long total = 0; for (var f : futures) total += f.get();
+        pool.shutdown();
+        System.out.printf("total = %d%n", total);
+    }
+}
+JAVA
+}
+
 write_erlang_fib() {
     cat >"$BUILD_DIR/fib.erl" <<'ERL'
 -module(fib).
@@ -515,6 +679,21 @@ main(_) ->
 ERL
 }
 
+write_erlang_fanout() {
+    cat >"$BUILD_DIR/fanout.erl" <<ERL
+-module(fanout).
+-export([main/1]).
+lcg(X, 0) -> X;
+lcg(X, N) -> lcg((X * 1103515245 + 12345) rem 2147483648, N - 1).
+worker(Parent, Seed) -> Parent ! {self(), lcg(Seed, ${FANOUT_ITERS})}.
+main(_) ->
+    Self = self(),
+    Pids = [spawn(fun() -> worker(Self, I) end) || I <- lists:seq(0,$((FANOUT_WORKERS - 1)))],
+    Total = lists:foldl(fun(Pid, Acc) -> receive {Pid, V} -> Acc + V end end, 0, Pids),
+    io:format("total = ~w~n", [Total]).
+ERL
+}
+
 # ── write all sources ────────────────────────────────────────────────────
 
 write_simple_hello
@@ -522,25 +701,32 @@ write_simple_fib
 write_simple_fib_warm
 write_simple_parallel
 write_simple_parallel_green
+write_simple_fanout_green
 write_c_hello
 write_c_fib
 write_c_fib_warm
 write_c_parallel
+write_c_fanout
 write_go_fib
 write_go_fib_warm
 write_go_parallel
+write_go_fanout
 write_python_fib
 write_python_fib_warm
 write_python_parallel
+write_python_fanout
 write_bun_fib
 write_bun_fib_warm
 write_bun_parallel
+write_bun_fanout
 write_java_fib
 write_java_fib_warm
 write_java_parallel
+write_java_fanout
 write_erlang_fib
 write_erlang_fib_warm
 write_erlang_parallel
+write_erlang_fanout
 
 # ── compile what we can ──────────────────────────────────────────────────
 
@@ -553,30 +739,31 @@ if have gcc; then
     gcc -O2 -o "$BUILD_DIR/fib_c" "$BUILD_DIR/fib.c"
     gcc -O2 -o "$BUILD_DIR/fib_warm_c" "$BUILD_DIR/fib_warm.c"
     gcc -O2 -pthread -o "$BUILD_DIR/parallel_c" "$BUILD_DIR/parallel.c"
+    gcc -O2 -pthread -o "$BUILD_DIR/fanout_c" "$BUILD_DIR/fanout.c"
     echo "  [ok] C (gcc)"
 else echo "  [skip] C — gcc not found"; fi
 
 # Go
 if have go; then
-    (cd "$BUILD_DIR" && go build -o fib_go fib.go && go build -o fib_warm_go fib_warm.go && go build -o parallel_go parallel.go)
+    (cd "$BUILD_DIR" && go build -o fib_go fib.go && go build -o fib_warm_go fib_warm.go && go build -o parallel_go parallel.go && go build -o fanout_go fanout.go)
     echo "  [ok] Go"
 else echo "  [skip] Go — go not found"; fi
 
 # Java
 if have javac; then
-    javac -d "$BUILD_DIR" "$BUILD_DIR/Fib.java" "$BUILD_DIR/FibWarm.java" "$BUILD_DIR/Parallel.java"
+    javac -d "$BUILD_DIR" "$BUILD_DIR/Fib.java" "$BUILD_DIR/FibWarm.java" "$BUILD_DIR/Parallel.java" "$BUILD_DIR/Fanout.java"
     echo "  [ok] Java (javac)"
 else echo "  [skip] Java — javac not found"; fi
 
 # Erlang
 if have erlc; then
-    erlc -o "$BUILD_DIR" "$BUILD_DIR/fib.erl" "$BUILD_DIR/fib_warm.erl" "$BUILD_DIR/parallel.erl"
+    erlc -o "$BUILD_DIR" "$BUILD_DIR/fib.erl" "$BUILD_DIR/fib_warm.erl" "$BUILD_DIR/parallel.erl" "$BUILD_DIR/fanout.erl"
     echo "  [ok] Erlang (erlc)"
 else echo "  [skip] Erlang — erlc not found"; fi
 
 # Simple native
 if [ -x "$SIMPLE_BINARY" ]; then
-    for _src in hello fib fib_warm parallel parallel_green; do
+    for _src in hello fib fib_warm parallel parallel_green fanout_green; do
         _spl="$BUILD_DIR/${_src}.spl"
         _out="$BUILD_DIR/${_src}_simple_native"
         if [ -f "$_spl" ]; then
@@ -595,7 +782,7 @@ else echo "  [skip] Simple — $SIMPLE_BINARY not found"; fi
 # Simple SMF
 COMPILE_FAIL_SMF=""
 if [ -x "$SIMPLE_BINARY" ]; then
-    for _src in hello fib fib_warm parallel parallel_green; do
+    for _src in hello fib fib_warm parallel parallel_green fanout_green; do
         _spl="$BUILD_DIR/${_src}.spl"
         _out="$BUILD_DIR/${_src}_simple.smf"
         if [ -f "$_spl" ]; then
@@ -619,7 +806,7 @@ cat >"$REPORT_PATH" <<EOF
 **Date:** $(date +%Y-%m-%d)
 **Machine:** $(uname -m) / $(uname -s) $(uname -r)
 **CPU:** $(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs || sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "unknown")
-**Runs per measurement:** $RUNS | **Warmup (in-process):** $WARM_IN_PROCESS | **fib(N):** $FIB_N | **Workers:** $WORKERS | **Green workers:** $GREEN_WORKERS | **Per-run timeout:** ${RUN_TIMEOUT}s
+**Runs per measurement:** $RUNS | **Warmup (in-process):** $WARM_IN_PROCESS | **fib(N):** $FIB_N | **Workers:** $WORKERS | **Green workers:** $GREEN_WORKERS | **Fanout workers:** $FANOUT_WORKERS | **Fanout iters:** $FANOUT_ITERS | **Per-run timeout:** ${RUN_TIMEOUT}s
 
 > Size for AOT = binary bytes. For VM/interpreted = script bytes (runtime not included).
 > "Runtime dep" column shows runtime size where applicable.
@@ -787,6 +974,9 @@ if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/parallel_green_simple.smf" ]; the
     ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/parallel_green_simple.smf" "$RUNS")
     if [ "$ms" = "fail" ]; then
         reason=$(failure_reason "$SIMPLE_BINARY $BUILD_DIR/parallel_green_simple.smf")
+        if [ "$reason" = "segfault" ]; then
+            reason="SMF mutable-global runtime blocker"
+        fi
         par_row "Simple green (SMF)" "$ms" "green_spawn_value cooperative queue ($reason)"
     else
         par_row "Simple green (SMF)" "$ms" "green_spawn_value cooperative queue"
@@ -821,6 +1011,74 @@ fi
 if have erl; then
     ms=$(avg_ms "erl -noshell -pa $BUILD_DIR -eval 'parallel:main([]).' -s init stop" "$RUNS")
     par_row "Erlang" "$ms" "lightweight processes"
+fi
+
+# ── 4a. Large fanout — scheduling overhead ─────────────────────────────────
+
+echo "=== Measuring large fanout — $FANOUT_WORKERS workers ==="
+section "4a. Large Fanout — spawn $FANOUT_WORKERS tiny workers ($RUNS runs avg)"
+printf "| %-22s | %12s | %40s |\n" "Language" "Avg (ms)" "Concurrency model" >>"$REPORT_PATH"
+printf "|%-24s|%14s|%42s|\n" "------------------------" "--------------" "------------------------------------------" >>"$REPORT_PATH"
+
+fanout_row() {
+    printf "| %-22s | %12s | %40s |\n" "$1" "$2" "$3" >>"$REPORT_PATH"
+}
+
+if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/fanout_green.spl" ]; then
+    ms=$(avg_ms "$SIMPLE_BINARY run $BUILD_DIR/fanout_green.spl --mode=interpreter" "$RUNS")
+    if [ "$ms" = "fail" ]; then
+        reason=$(failure_reason "$SIMPLE_BINARY run $BUILD_DIR/fanout_green.spl --mode=interpreter")
+        fanout_row "Simple green (interp)" "$ms" "cooperative queue fanout ($reason)"
+    else
+        fanout_row "Simple green (interp)" "$ms" "cooperative queue fanout"
+    fi
+fi
+if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/fanout_green_simple.smf" ]; then
+    ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/fanout_green_simple.smf" "$RUNS")
+    if [ "$ms" = "fail" ]; then
+        reason=$(failure_reason "$SIMPLE_BINARY $BUILD_DIR/fanout_green_simple.smf")
+        if [ "$reason" = "segfault" ]; then
+            reason="SMF mutable-global runtime blocker"
+        fi
+        fanout_row "Simple green (SMF)" "$ms" "cooperative queue fanout ($reason)"
+    else
+        fanout_row "Simple green (SMF)" "$ms" "cooperative queue fanout"
+    fi
+fi
+if [ -x "$BUILD_DIR/fanout_green_simple_native" ]; then
+    ms=$(avg_ms "$BUILD_DIR/fanout_green_simple_native" "$RUNS")
+    fanout_row "Simple green (native)" "$ms" "cooperative queue fanout"
+else
+    fanout_row "Simple green (native)" "n/a" "compile failed"
+fi
+if [ -x "$BUILD_DIR/fanout_c" ]; then
+    ms=$(avg_ms "$BUILD_DIR/fanout_c" "$RUNS")
+    if [ "$ms" = "fail" ]; then
+        reason=$(failure_reason "$BUILD_DIR/fanout_c")
+        fanout_row "C (pthreads)" "$ms" "one OS thread per tiny task ($reason)"
+    else
+        fanout_row "C (pthreads)" "$ms" "one OS thread per tiny task"
+    fi
+fi
+if [ -x "$BUILD_DIR/fanout_go" ]; then
+    ms=$(avg_ms "$BUILD_DIR/fanout_go" "$RUNS")
+    fanout_row "Go" "$ms" "goroutine per tiny task + channel"
+fi
+if have python3; then
+    ms=$(avg_ms "python3 $BUILD_DIR/fanout.py" "$RUNS")
+    fanout_row "Python" "$ms" "threading per tiny task (GIL)"
+fi
+if have bun; then
+    ms=$(avg_ms "bun $BUILD_DIR/fanout.js" "$RUNS")
+    fanout_row "Bun" "$ms" "worker_thread per tiny task"
+fi
+if have java; then
+    ms=$(avg_ms "java -cp $BUILD_DIR Fanout" "$RUNS")
+    fanout_row "Java" "$ms" "cached ThreadPool future per tiny task"
+fi
+if have erl; then
+    ms=$(avg_ms "erl -noshell -pa $BUILD_DIR -eval 'fanout:main([]).' -s init stop" "$RUNS")
+    fanout_row "Erlang" "$ms" "BEAM process per tiny task"
 fi
 
 # ── 4b. Parallel binary sizes ───────────────────────────────────────────
@@ -976,6 +1234,9 @@ cat >>"$REPORT_PATH" <<'EOF'
 
 > **Workload:** LCG (Linear Congruential Generator) with 100K iterations per worker.
 > Each worker reads shared constants (LCG_A, LCG_C, LCG_M, ITERS).
+> The large fanout section uses many tiny workers with `FANOUT_ITERS` iterations
+> to expose scheduling overhead; this is the case where Go goroutines should
+> usually beat one-pthread-per-task C.
 >
 > **Simple concurrency rows:** `Simple (native)` uses `thread_spawn`, which is
 > the OS-thread API. `Simple green` uses `green_spawn_value`, which exercises the
@@ -983,6 +1244,9 @@ cat >>"$REPORT_PATH" <<'EOF'
 > not run in parallel and is not a Go M:N goroutine equivalent. The green row uses the
 > `GREEN_WORKERS` count from the report header because the current cooperative
 > seed is intentionally separate from the OS-thread/Goroutine worker count.
+> Current direct-run blocker: SMF mutable globals can segfault before the
+> cooperative queue runs, so the SMF green row is classified instead of treated
+> as a scheduling result when that runtime failure appears.
 >
 > **Design comparison — Simple channels vs Go channels:**
 > Both Simple and Go use the same pattern: workers send results through a channel,

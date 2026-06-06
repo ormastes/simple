@@ -22,6 +22,7 @@ See: `doc/07_guide/app/llm/llm_cooperative_dev_phase.md`
 | `$impl` | `.codex/skills/impl/SKILL.md` | 15-phase implementation |
 | `$verify` | `.codex/skills/verify/SKILL.md` | Production readiness check |
 | `$release` | `.codex/skills/release/SKILL.md` | Version bump + tag |
+| `$optimize` | `.codex/skills/optimize/SKILL.md` | Semantics-preserving Simple optimization with perf evidence |
 | `$architecture` | `.codex/skills/architecture/SKILL.md` | MDSOC, ADR writing |
 | `$mdsoc` | `.codex/skills/mdsoc-architecture-writing/SKILL.md` | MDSOC architecture docs |
 | `$system_test` | `.codex/skills/system_test/SKILL.md` | SPipe test design |

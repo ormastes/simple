@@ -45,7 +45,9 @@ The SFM infra ships sample feature modules that exercise the public API end-to-e
 | Category | Infrastructure |
 | Status | Draft |
 | Requirements | doc/04_architecture/simple_feature_module.md |
+| Plan | N/A |
 | Design | doc/05_design/simple_feature_module.md |
+| Research | N/A |
 | Source | `test/03_system/feature/sfm/sfm_samples_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
@@ -68,6 +70,18 @@ from the samples (AC-13).
 | vcs_status | A VCS status/commit operation consumed via the SFM infra |
 | help_info_text | Help/Info menu text surfacing module + VERSION.md version |
 | read_version_md | Build-time VERSION.md reader feeding manifest.version |
+
+## Syntax
+
+These scenarios exercise public SFM sample calls directly: `arg_parse_sample(args)`,
+`sfm_set_log_level(level)`, `web_login_attempt(user, password)`, `vcs_status()`,
+`help_info_text()`, `consumer_describe_module()`, and `read_version_md()`.
+
+## Examples
+
+The examples cover a valid login returning a token, an invalid login returning an
+error message, arg parsing with `--name alice deploy`, and version text surfaced
+through both Help/Info and the reuse consumer.
 
 ## Related Specifications
 
@@ -182,7 +196,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 match web_login_attempt("admin", "s3cret"):
-    Ok(_):  expect(true).to_equal(true)
+    Ok(token): expect(token.len()).to_be_greater_than(0)
     Err(e): expect("valid login rejected: " + e).to_equal("ok")
 ```
 
@@ -206,7 +220,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 match web_login_attempt("admin", "wrong"):
     Ok(_):  expect("invalid login accepted").to_equal("ok")
-    Err(_): expect(true).to_equal(true)
+    Err(e): expect(e.len()).to_be_greater_than(0)
 ```
 
 </details>

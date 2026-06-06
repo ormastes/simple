@@ -3,7 +3,7 @@
 **Date:** 2026-06-06
 **Feature:** `draw_io_sdn_draw_ir`
 **Research:** `doc/01_research/ui/draw_ir/draw_io_sdn_draw_ir.md`
-**Status:** In progress — Phases 1-3 implemented; Phases 4-7 pending
+**Status:** In progress — Phases 1-4 implemented; Phases 5-7 pending
 **Owners:** `src/lib/common/ui`, `src/app/ui.test_api`,
 `src/lib/nogc_sync_mut/ui_test`
 
@@ -83,14 +83,19 @@ v1 shared UI contract or forking a second model.
   `test/01_unit/lib/common/ui/draw_ir_drawio_spec.spl`, and
   `doc/06_spec/01_unit/lib/common/ui/draw_ir_drawio_spec.md`.
 
-### Phase 4 — Producer enrichment
+### Phase 4 — Producer enrichment — done
 
 - WM: emit `hit_rect` / `clip_rect` and z-index style from
   `window_scene_draw_ir.spl` — done.
 - Web: emit computed style + border/content/hit rects into the `html_ast`
-  source from `simple_web_html_layout_renderer.spl`.
+  source from `simple_web_html_layout_renderer.spl` — done.
 - **Exit:** SDN dump of a real web page + WM scene shows populated geometry and
   computed style for known IDs.
+- **Evidence:** WM enrichment in `src/lib/common/ui/window_scene_draw_ir.spl`
+  with `test/01_unit/lib/common/ui/window_scene_draw_ir_spec.spl`; web
+  enrichment in `simple_web_layout_render_html_draw_ir` inside
+  `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
+  with `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl`.
 
 ### Phase 5 — Gated Protocol-v2 inspection endpoint
 

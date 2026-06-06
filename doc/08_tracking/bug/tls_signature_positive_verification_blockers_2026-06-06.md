@@ -32,9 +32,10 @@ Current evidence:
     handshake preparation stops with `certificate_verify_failed` instead of
     emitting an empty-signature server flight.
 - `bin/simple test test/01_unit/os/tls13/cert_verify_ed25519_spec.spl --clean --json`
-  - `total_passed: 3`, `total_failed: 3`
-  - Valid Ed25519 CertificateVerify signatures are accepted, but wrong-key and
-    tampered-signature rejection cases fail.
+  - `total_passed: 6`, `total_failed: 0`
+  - Pure Simple Ed25519 now accepts valid CertificateVerify signatures and
+    rejects wrong-key/tampered signatures. TLS no longer falls through to the
+    permissive runtime fallback after pure Simple rejection.
 
 ## Required Fix
 

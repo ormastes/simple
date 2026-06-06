@@ -63,6 +63,9 @@ TUI snapshot     GUI snapshot (headless)
 Public SGTTI Phase 2 API: `UI_TEST_TARGET_TUI`, `UI_TEST_TARGET_GUI`,
 `UI_TEST_TARGET_BOTH`, `ui_test_targets`, `SgttiParityResult`, and
 `sgtti_parity_check`.
+Phase 5 adds `sgtti_snapshot_from_draw_ir_batch` and
+`sgtti_snapshot_from_draw_ir_composition` so Draw IR scenes can assert their
+semantic node tree before Engine2D pixel readback.
 
 ## Rules
 

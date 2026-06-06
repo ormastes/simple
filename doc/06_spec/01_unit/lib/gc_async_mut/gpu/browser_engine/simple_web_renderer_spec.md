@@ -1,6 +1,6 @@
 # Simple Web Renderer Specification
 
-> <details>
+> This unit spec covers the pure-Simple web renderer path used by browser, web, and Engine2D-backed GUI surfaces. It checks HTML-to-scene conversion, HTML-to-pixel rendering, selector cascade behavior, text raster behavior, Chrome-parity matrix fixtures, static pixel caching, backend-name resolution, and corpus fixture rendering.
 
 <!-- sdn-diagram:id=simple_web_renderer_spec.arch -->
 <details class="sdn-source">
@@ -11,6 +11,7 @@
 @direction LR
 
 simple_web_renderer_spec -> std
+simple_web_renderer_spec -> common
 ```
 
 </details>
@@ -27,12 +28,59 @@ simple_web_renderer_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 50 | 50 | 0 | 0 |
+| 51 | 51 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # Simple Web Renderer Specification
+
+This unit spec covers the pure-Simple web renderer path used by browser, web, and Engine2D-backed GUI surfaces. It checks HTML-to-scene conversion, HTML-to-pixel rendering, selector cascade behavior, text raster behavior, Chrome-parity matrix fixtures, static pixel caching, backend-name resolution, and corpus fixture rendering.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Requirements | N/A |
+| Plan | doc/03_plan/ui/draw_ir/draw_io_sdn_draw_ir_plan.md |
+| Design | doc/04_architecture/ui/simple_gui_stack.md |
+| Research | doc/01_research/ui/draw_ir/draw_io_sdn_draw_ir.md |
+| Source | `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+This unit spec covers the pure-Simple web renderer path used by browser, web,
+and Engine2D-backed GUI surfaces. It checks HTML-to-scene conversion,
+HTML-to-pixel rendering, selector cascade behavior, text raster behavior,
+Chrome-parity matrix fixtures, static pixel caching, backend-name resolution,
+and corpus fixture rendering.
+
+The Draw IR Phase 4 scenario verifies the semantic inspection side of the same
+layout pipeline: `simple_web_layout_render_html_draw_ir` emits an `html_ast`
+Draw IR batch with computed style and border/content/hit/clip rectangles before
+the pixel renderer paints the page.
+
+**Requirements:** N/A
+
+These scenarios are implementation and architecture evidence for the Simple Web
+renderer and active Draw IR inspection plan rather than numbered product
+requirements.
+
+**Plan:** doc/03_plan/ui/draw_ir/draw_io_sdn_draw_ir_plan.md
+
+**Design:** doc/04_architecture/ui/simple_gui_stack.md
+
+**Research:** doc/01_research/ui/draw_ir/draw_io_sdn_draw_ir.md
+
+## Syntax
+
+The spec uses `std.spec` scenarios and the built-in matcher vocabulary. Pixel
+assertions remain the rendering oracle; Draw IR assertions inspect semantic
+layout metadata before raster.
 
 ## Scenarios
 
@@ -117,6 +165,38 @@ val pixels = simple_web_render_html_to_pixels(html, 96, 64)
 expect(pixels.len()).to_equal(96 * 64)
 expect(_count_color(pixels, 0xFF1D4ED8u32)).to_be_greater_than(0)
 expect(_count_color(pixels, 0xFF141418u32)).to_equal(0)
+```
+
+</details>
+
+#### emits HTML layout Draw IR with computed style and hit geometry before raster
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>#card { background-color:#1d4ed8; color:#ffffff; width:40px; height:18px; padding:2px; border:1px solid #0f172a; }</style></head><body><section id='card'>CMD</section></body></html>"
+val composition = simple_web_layout_render_html_draw_ir(html, 96, 64)
+val batch = composition.batches[0]
+val card = _draw_ir_command_by_id(batch.commands, "card")
+
+expect(batch.source.source_kind).to_equal("html_ast")
+expect(batch.commands.len()).to_be_greater_than(0)
+expect(card.component_id).to_equal("card")
+expect(card.border_rect.present).to_equal(true)
+expect(card.content_rect.present).to_equal(true)
+expect(card.hit_rect.present).to_equal(true)
+expect(card.clip_rect.present).to_equal(true)
+expect(card.content_rect.x).to_equal(card.x + 3)
+expect(card.content_rect.y).to_equal(card.y + 3)
+expect(card.content_rect.width).to_equal(34)
+expect(card.content_rect.height).to_equal(12)
+expect(_draw_ir_style_value(card, "tag")).to_equal("section")
+expect(_draw_ir_style_value(card, "display")).to_equal("block")
+expect(_draw_ir_style_value(card, "padding-left")).to_equal("2")
 ```
 
 </details>
@@ -1037,30 +1117,22 @@ expect(_count_color(pixels, 0xFF065F46u32)).to_equal(0)
 
 </details>
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Standard Library |
-| Status | Active |
-| Source | `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- SimpleWebRenderer
-
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 50 |
-| Active scenarios | 50 |
+| Total scenarios | 51 |
+| Active scenarios | 51 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Plan:** [doc/03_plan/ui/draw_ir/draw_io_sdn_draw_ir_plan.md](doc/03_plan/ui/draw_ir/draw_io_sdn_draw_ir_plan.md)
+- **Design:** [doc/04_architecture/ui/simple_gui_stack.md](doc/04_architecture/ui/simple_gui_stack.md)
+- **Research:** [doc/01_research/ui/draw_ir/draw_io_sdn_draw_ir.md](doc/01_research/ui/draw_ir/draw_io_sdn_draw_ir.md)
 
 
 </details>

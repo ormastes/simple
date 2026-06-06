@@ -134,8 +134,10 @@ MCP, Render, Test API — all thin. GUI policy stays in Simple.
 - UI tests: `doc/04_architecture/ui/ui_test_architecture.md` defines the
   `tui` | `gui` | `both` interface. HTTP `UITestClient` stays for S4 surfaces;
   SGTTI (`common.ui.win_text_access` + `os.compositor.gtti`) gives headless
-  GUI/web/2D semantic assertions over `UiAccessNode`. New specs use
-  `std.spec`; `std.spipe` is compatibility only.
+  GUI/web/2D semantic assertions over `UiAccessNode`; Draw IR batches and
+  compositions lift through `sgtti_snapshot_from_draw_ir_batch` /
+  `sgtti_snapshot_from_draw_ir_composition` before Engine2D pixel readback.
+  New specs use `std.spec`; `std.spipe` is compatibility only.
 
 ## GUI Sanity Apps
 

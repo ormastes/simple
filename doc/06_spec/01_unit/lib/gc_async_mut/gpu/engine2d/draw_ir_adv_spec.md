@@ -1,6 +1,6 @@
-# Draw Ir Adv Specification
+# Engine2D Draw IR Advanced Executor Specification
 
-> 1. var engine = Engine2D create with backend
+> This unit spec covers the Simple2D-facing Draw IR executor. It proves Draw IR batches and compositions choose the CPU fallback when GPU execution is unavailable, render supported rectangle commands into the Engine2D pixel buffer, skip unsupported future commands, and expose the same Draw IR batch through SGTTI before raster so semantic assertions and pixel readback are paired.
 
 <!-- sdn-diagram:id=draw_ir_adv_spec.arch -->
 <details class="sdn-source">
@@ -33,7 +33,54 @@ draw_ir_adv_spec -> common
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Draw Ir Adv Specification
+# Engine2D Draw IR Advanced Executor Specification
+
+This unit spec covers the Simple2D-facing Draw IR executor. It proves Draw IR batches and compositions choose the CPU fallback when GPU execution is unavailable, render supported rectangle commands into the Engine2D pixel buffer, skip unsupported future commands, and expose the same Draw IR batch through SGTTI before raster so semantic assertions and pixel readback are paired.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Requirements | N/A |
+| Plan | doc/03_plan/ui/ui_test/ui_test_sgtti_plan.md |
+| Design | doc/04_architecture/ui/ui_test_architecture.md |
+| Research | doc/01_research/ui/draw_ir/draw_io_sdn_draw_ir.md |
+| Source | `test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_adv_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+This unit spec covers the Simple2D-facing Draw IR executor. It proves Draw IR
+batches and compositions choose the CPU fallback when GPU execution is
+unavailable, render supported rectangle commands into the Engine2D pixel buffer,
+skip unsupported future commands, and expose the same Draw IR batch through
+SGTTI before raster so semantic assertions and pixel readback are paired.
+
+## Evidence Model
+
+The first scenario is the SGTTI Phase 5 gate: it builds a Draw IR batch, asserts
+the pre-raster semantic node with `SgttiTestDriver`, then renders the same batch
+through Engine2D and checks pixel output.
+
+**Requirements:** N/A
+
+This is implementation evidence for the active SGTTI and Draw IR plans rather
+than a numbered product requirement.
+
+**Plan:** doc/03_plan/ui/ui_test/ui_test_sgtti_plan.md
+
+**Design:** doc/04_architecture/ui/ui_test_architecture.md
+
+**Research:** doc/01_research/ui/draw_ir/draw_io_sdn_draw_ir.md
+
+## Syntax
+
+The spec uses normal `std.spec` scenarios. Assertions stay on the canonical
+SPipe matcher set; SGTTI is used as a helper inside an `it` block, not as a
+replacement test framework.
 
 ## Scenarios
 
@@ -46,6 +93,10 @@ draw_ir_adv_spec -> common
 2. engine clear
 
 3. draw ir rect
+   - Expected: semantic.check_exists("body").unwrap() is true
+   - Expected: semantic.check_visible("body").unwrap() is true
+   - Expected: body.kind equals `rect`
+   - Expected: body.widget_id equals `body`
    - Expected: result.unit_id equals `batch-rect`
    - Expected: result.selected_backend equals `cpu`
    - Expected: result.fallback_required is true
@@ -59,7 +110,7 @@ draw_ir_adv_spec -> common
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -69,6 +120,13 @@ val embedding = draw_ir_embedding_config("surf1", "win1", 4, 5, 20, 16, 10, 1000
 val batch = draw_ir_batch("batch-rect", DRAW_IR_BACKEND_GPU, embedding, [
     draw_ir_rect("body", 2, 3, 6, 5, RED)
 ])
+
+val semantic = SgttiTestDriver.new(sgtti_snapshot_from_draw_ir_batch(batch, 1000, 5000, 1000))
+val body = semantic.get_element("body").unwrap()
+expect(semantic.check_exists("body").unwrap()).to_equal(true)
+expect(semantic.check_visible("body").unwrap()).to_equal(true)
+expect(body.kind).to_equal("rect")
+expect(body.widget_id).to_equal("body")
 
 val result = engine2d_draw_ir_adv_batch(engine, batch, false)
 
@@ -165,21 +223,6 @@ engine.shutdown()
 
 </details>
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Standard Library |
-| Status | Active |
-| Source | `test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_adv_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- Engine2D advanced Draw IR executor
-
 ## Scenario Summary
 
 | Metric | Count |
@@ -189,6 +232,13 @@ Tests covering:
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Plan:** [doc/03_plan/ui/ui_test/ui_test_sgtti_plan.md](doc/03_plan/ui/ui_test/ui_test_sgtti_plan.md)
+- **Design:** [doc/04_architecture/ui/ui_test_architecture.md](doc/04_architecture/ui/ui_test_architecture.md)
+- **Research:** [doc/01_research/ui/draw_ir/draw_io_sdn_draw_ir.md](doc/01_research/ui/draw_ir/draw_io_sdn_draw_ir.md)
 
 
 </details>

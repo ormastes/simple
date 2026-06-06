@@ -4,7 +4,7 @@
 **Feature:** `ui_test_sgtti`
 **Architecture:** `doc/04_architecture/ui/ui_test_architecture.md`
 **Depends-for:** `doc/03_plan/ui/draw_ir/draw_io_sdn_draw_ir_plan.md` (Phase 5)
-**Status:** In progress — Phases 1-4 implemented; Phase 5 pending
+**Status:** Implemented — Phases 1-5 complete
 **Owners:** `src/lib/nogc_sync_mut/ui_test`, `src/lib/common/ui/win_text_access`,
 `src/os/compositor/gtti`
 
@@ -136,19 +136,25 @@ without forking a new element model or changing the HTTP protocol path.
   families, and unit coverage in
   `test/01_unit/lib/nogc_sync_mut/ui_test/sgtti_spec.spl`.
 
-### Phase 5 - Engine2D / web semantic assertions
+### Phase 5 - Engine2D / web semantic assertions — done
 
 - Pair existing bitmap gates with an SGTTI assertion that the Draw IR batch
   produced the expected node tree before raster (semantic + pixel together).
 - **Exit:** at least one engine2d/web scene asserts both tiers.
+- **Evidence:** `sgtti_snapshot_from_draw_ir_batch` and
+  `sgtti_snapshot_from_draw_ir_composition` in
+  `src/lib/nogc_sync_mut/ui_test/sgtti.spl`, re-export shims across memory
+  families, and the Engine2D Draw IR executor spec asserting SGTTI semantics
+  before pixel readback in
+  `test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_adv_spec.spl`.
 
 ## Cross-link: Draw IR inspection depends on this
 
 `doc/03_plan/ui/draw_ir/draw_io_sdn_draw_ir_plan.md` **Phase 5** (gated
 `/api/test/draw-ir`, `/api/test/draw-ir?id=...`,
 `/api/test/draw-ir/diff`, `/api/test/draw-ir/layout?id=...`) and **Phase 6**
-(`expect_draw`) read the in-process snapshot substrate. They are **blocked on
-Phases 1-2 here**:
+(`expect_draw`) read the in-process snapshot substrate. Phases 1-5 here now
+provide that substrate:
 
 - `expect_draw` is the SGTTI driver's assertion vocabulary extended with
   layout/geometry fields (Protocol v2, capability-gated), implemented as a
@@ -156,9 +162,8 @@ Phases 1-2 here**:
 - `/api/test/draw-ir` serves the same `WinTextSnapshot`/Draw IR composition the
   SGTTI driver queries.
 
-Sequencing: `ui_test_sgtti` Phases 1-2 are landed; Draw IR plan Phases 5-6 may
-build on the SGTTI target/parity API, while Phase 3 continues lifting TUI onto
-the shared surface.
+Sequencing: `ui_test_sgtti` Phases 1-5 are landed; Draw IR plan Phases 5-6 may
+build on the SGTTI target/parity API and Draw IR snapshot lifts.
 The Draw IR model/SDN/Draw.io work (its Phases 1-3) is independent and can run
 in parallel.
 
@@ -169,5 +174,7 @@ in parallel.
 2. One configurable interface (`tui` | `gui` | `both`) with a real parity check.
 3. TUI lifted onto the shared surface; a shared body runs on both.
 4. Headless GUI fixture reduced to one provider call.
-5. Architecture (full + TLDR), guide, skill docs, and this plan describe one
+5. At least one Engine2D/Web Draw IR scene asserts SGTTI semantics before
+   raster and pixels after Engine2D readback.
+6. Architecture (full + TLDR), guide, skill docs, and this plan describe one
    consistent `std.spec` canonical / `std.spipe` compatibility API.

@@ -49,6 +49,20 @@ fn runtime_byte_array_to_vec(data: RuntimeValue) -> Option<Vec<u8>> {
     Some(bytes.to_vec())
 }
 
+fn ed25519_pkcs8_v1_seed(pkcs8: &[u8]) -> Option<&[u8]> {
+    if pkcs8.len() < 48 {
+        return None;
+    }
+    let header = [
+        0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06,
+        0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
+    ];
+    if pkcs8.get(..header.len()) != Some(&header) {
+        return None;
+    }
+    pkcs8.get(16..48)
+}
+
 fn der_read_length(data: &[u8], offset: usize) -> Option<(usize, usize)> {
     let first = *data.get(offset)?;
     if first < 0x80 {
@@ -442,8 +456,10 @@ pub extern "C" fn rt_ed25519_sign(pkcs8: RuntimeValue, message: RuntimeValue) ->
         return _empty_bytes();
     };
 
-    // Accept PKCS#8 v1 Ed25519 keys that omit the embedded public key.
-    let keypair = match ring::signature::Ed25519KeyPair::from_pkcs8_maybe_unchecked(&key_bytes) {
+    let Some(seed) = ed25519_pkcs8_v1_seed(&key_bytes) else {
+        return _empty_bytes();
+    };
+    let keypair = match ring::signature::Ed25519KeyPair::from_seed_unchecked(seed) {
         Ok(kp) => kp,
         Err(_) => return _empty_bytes(),
     };
@@ -492,6 +508,16 @@ mod tests {
         0x19, 0x2e, 0x22, 0x4a, 0x71, 0xdd, 0xdf, 0x8c, 0x08, 0x2c, 0x76, 0x90, 0xdb, 0x9f, 0xdf, 0x58, 0x3f, 0x3d,
         0x4e, 0x02, 0xa1, 0x9b, 0x77, 0xd0, 0xf8, 0x69, 0x2f, 0x2e, 0xa4, 0x0c,
     ];
+    const ED25519_PUBKEY: &[u8] = &[
+        0xeb, 0x41, 0x41, 0xcd, 0xcf, 0x61, 0xde, 0x82, 0xb4, 0x36, 0x9e, 0x60, 0xb8, 0x2b, 0x74, 0xad, 0x2c, 0x7a,
+        0x21, 0xc6, 0x19, 0xb9, 0xd4, 0xa0, 0x6c, 0xcd, 0x76, 0x9e, 0x66, 0xa9, 0x54, 0xe6,
+    ];
+    const ED25519_SIG_HELLO: &[u8] = &[
+        0xc4, 0xdb, 0xc1, 0x58, 0x95, 0x22, 0x3c, 0xe9, 0xe2, 0xa1, 0x03, 0xdf, 0x00, 0xf0, 0x9b, 0x25, 0x1b, 0x56,
+        0x9c, 0xb5, 0x2c, 0x13, 0x0d, 0x01, 0x64, 0xfb, 0x73, 0x30, 0x30, 0xdf, 0x6a, 0x4a, 0x17, 0x79, 0x28, 0xee,
+        0x98, 0x5f, 0x70, 0x8a, 0xf3, 0x4f, 0x26, 0xd3, 0x2f, 0x7c, 0xa5, 0xc6, 0x40, 0x61, 0x8f, 0x26, 0xf9, 0xb7,
+        0x15, 0xd9, 0x28, 0xf6, 0x6b, 0x00, 0xc2, 0x8c, 0x68, 0x08,
+    ];
     const MSG: &[u8] = b"Hello, Ed25519!";
 
     fn bytes_value(bytes: &[u8]) -> RuntimeValue {
@@ -499,9 +525,14 @@ mod tests {
     }
 
     #[test]
-    fn ed25519_sign_accepts_pkcs8_v1_fixture() {
+    fn ed25519_sign_matches_pkcs8_v1_fixture_signature() {
         let sig = rt_ed25519_sign(bytes_value(ED25519_PKCS8_V1), bytes_value(MSG));
         let len = crate::value::collections::rt_string_len(sig);
         assert_eq!(len, 64);
+        let ptr = crate::value::collections::rt_string_data(sig);
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+        assert_eq!(bytes, ED25519_SIG_HELLO);
+        let key = UnparsedPublicKey::new(&ED25519, ED25519_PUBKEY);
+        key.verify(MSG, bytes).expect("fixture signature should verify");
     }
 }

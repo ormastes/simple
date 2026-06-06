@@ -28,7 +28,7 @@ sgtti_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -273,6 +273,79 @@ expect(missing.gui_found).to_equal(false)
 
 </details>
 
+#### asserts Draw IR geometry, hit rect, css, parent, and kind
+
+1. draw ir rect bounds
+
+2. draw ir rect bounds
+
+3. draw ir rect bounds
+
+4. draw ir rect bounds
+
+5. draw ir style prop
+
+6. draw ir style prop
+
+7. draw ir style prop
+
+8. draw ir embedding config
+
+9. draw ir source gui ast
+   - Expected: driver.expect_draw("root", "visible").unwrap() is true
+   - Expected: driver.expect_draw("root", "geometry 10 20 101 39 tolerance 1").unwrap() is true
+   - Expected: driver.expect_draw("root", "hit_rect contains 25 30").unwrap() is true
+   - Expected: driver.expect_draw("root", "css display flex").unwrap() is true
+   - Expected: driver.expect_draw("root", "kind panel").unwrap() is true
+   - Expected: driver.expect_draw("root", "role canvas").unwrap() is true
+   - Expected: expect_draw(driver, "root-port", "parent root").unwrap() is true
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 34 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val box = draw_ir_box_with_style(
+    "root",
+    10,
+    20,
+    100,
+    40,
+    0x112233u32,
+    draw_ir_rect_bounds(10, 20, 100, 40),
+    draw_ir_rect_bounds(12, 22, 96, 36),
+    draw_ir_rect_bounds(10, 20, 100, 40),
+    draw_ir_rect_bounds(0, 0, 200, 120),
+    [
+        draw_ir_style_prop("kind", "panel"),
+        draw_ir_style_prop("role", "canvas"),
+        draw_ir_style_prop("display", "flex")
+    ]
+)
+val port = draw_ir_port_command("root-port", "root", 30, 35)
+val batch = draw_ir_batch_with_source(
+    "sgtti-draw",
+    DRAW_IR_BACKEND_CPU,
+    draw_ir_embedding_config("main", "root", 0, 0, 200, 120, 0, 1000, true),
+    [box, port],
+    draw_ir_source_gui_ast("sgtti-test", "style", "1")
+)
+val driver = SgttiTestDriver.new(sgtti_snapshot_from_draw_ir_batch(batch, 1000, 5000, 1000))
+
+expect(driver.expect_draw("root", "visible").unwrap()).to_equal(true)
+expect(driver.expect_draw("root", "geometry 10 20 101 39 tolerance 1").unwrap()).to_equal(true)
+expect(driver.expect_draw("root", "hit_rect contains 25 30").unwrap()).to_equal(true)
+expect(driver.expect_draw("root", "css display flex").unwrap()).to_equal(true)
+expect(driver.expect_draw("root", "kind panel").unwrap()).to_equal(true)
+expect(driver.expect_draw("root", "role canvas").unwrap()).to_equal(true)
+expect(expect_draw(driver, "root-port", "parent root").unwrap()).to_equal(true)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -292,8 +365,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

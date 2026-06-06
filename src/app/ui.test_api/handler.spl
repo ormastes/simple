@@ -6,14 +6,31 @@
 
 use common.ui.widget.{UIState, UIEvent, WidgetNode, get_widget_record}
 use nogc_sync_mut.ui.session.{UISession}
-use common.ui.access.{UiAccessSnapshot, UiAccessNode, UiAccessSurface, ui_access_snapshot_from_state, ui_access_snapshot_to_json, ui_access_surface_to_json, ui_access_events_to_json, ui_access_surface_id_from_canonical, ui_access_widget_id_from_canonical, ui_access_find_node, ui_access_find_nodes, ui_access_resolve_action_name, ui_access_snapshot_to_text, ui_access_query_to_json, ui_access_ensure_result, ui_access_ensure_to_json, ui_access_supports_value, ui_access_value_to_json}
+use common.ui.access.{UiAccessSnapshot, UiAccessNode, UiAccessSurface, ui_access_snapshot_from_state, ui_access_snapshot_to_json, ui_access_surface_to_json, ui_access_events_to_json, ui_access_surface_id_from_canonical, ui_access_widget_id_from_canonical, ui_access_find_node, ui_access_find_nodes, ui_access_node_value, ui_access_resolve_action_name, ui_access_snapshot_to_text, ui_access_supports_value}
 use common.ui.access_source.{ui_access_snapshot_envelope_to_json}
 use common.ui.access_adapter.{ui_access_default_adapter_registry}
 use common.ui.access_vision.{ui_access_vision_capture_to_json}
+use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_CPU,
+    DrawIrCommand,
+    DrawIrComposition,
+    DrawIrRect,
+    draw_ir_batch_with_source,
+    draw_ir_box_with_style,
+    draw_ir_composition,
+    draw_ir_embedding_config,
+    draw_ir_rect_bounds,
+    draw_ir_source_gui_ast,
+    draw_ir_style_prop
+}
+use common.ui.draw_ir_sdn.{draw_ir_to_sdn}
 use os.services.llm.ui_access_resolver.{ui_access_resolve_adapter, ui_access_resolve_visual_probe}
 use app.ui.test_api.json.{element_to_json, elements_to_json, extract_json_field, escape_json, state_to_json}
 
 val PROTOCOL_VERSION = 1
+val DRAW_IR_PROTOCOL_VERSION = 2
+val DRAW_IR_CAPABILITY = "draw_ir"
+val DRAW_IR_PROTOCOL_VERSION_HEADER = "X-UI-Protocol-Version"
 
 extern fn rt_time_ms() -> u64
 extern fn rt_sleep_ms(ms: i64)
@@ -51,7 +68,17 @@ fn handle_test_request(path: text, method: text, body: text, state: UIState, inj
             return (404, "application/json", "{\"error\":\"not_found\",\"message\":\"Route not found\"}")
 
     elif method == "GET":
-        if route == "/api/test/ui/snapshot":
+        if route == "/api/test/draw-ir":
+            val id = _extract_query_param(path, "id")
+            return _handle_draw_ir(path, id, state)
+        elif route == "/api/test/draw-ir/layout":
+            val id = _extract_query_param(path, "id")
+            return _handle_draw_ir_layout(path, id, state)
+        elif route == "/api/test/draw-ir/diff":
+            val from_id = _extract_query_param(path, "from_id")
+            val to_id = _extract_query_param(path, "to_id")
+            return _handle_draw_ir_diff(path, from_id, to_id, state)
+        elif route == "/api/test/ui/snapshot":
             return _handle_ui_snapshot(state, session)
         elif route == "/api/test/ui/ensure":
             val surface_id = _extract_query_param(path, "surface_id")
@@ -230,7 +257,10 @@ fn _handle_ui_act(body: text, inject_event: fn(UIEvent), session: UISession?) ->
     if session != nil:
         session.set_active_surface(resolved_surface_id)
     val action_name = if session != nil and canonical_id != "":
-        ui_access_resolve_action_name(session.access_snapshot(), canonical_id, action)
+        val node = ui_access_find_node(session.access_snapshot(), canonical_id)
+        if node == nil:
+            return (404, "application/json", "{\"error\":\"element_not_found\",\"message\":\"Canonical node not found: {escape_json(canonical_id)}\"}")
+        ui_access_resolve_action_name(node, action)
     elif widget_id != "":
         "{action}_{widget_id}"
     else:
@@ -311,7 +341,7 @@ fn _handle_ui_value_post(body: text, session: UISession?) -> (i32, text, text):
         return (500, "application/json", "{\"error\":\"write_failed\",\"message\":\"Failed to update node value\"}")
     session.set_active_surface(resolved_surface_id)
     val updated = session.access_snapshot()
-    val payload = ui_access_value_to_json(updated, canonical_id)
+    val payload = _ui_access_value_response_json(updated, canonical_id)
     return (200, "application/json", "{\"ok\":true," + payload.slice(1, payload.len()))
 
 # =========================================================================
@@ -364,7 +394,7 @@ fn _handle_ui_query(surface_id: text, canonical_id: text, kind: text, text_query
     var limit = 50
     if limit_str != "":
         limit = limit_str.to_i32()
-    val json = ui_access_query_to_json(snapshot, surface_id, canonical_id, kind, text_query, _is_truthy(focused_only), limit)
+    val json = _ui_access_query_response_json(snapshot, surface_id, canonical_id, kind, text_query, _is_truthy(focused_only), limit)
     return (200, "application/json", json)
 
 fn _handle_ui_ensure(surface_id: text, canonical_id: text, kind: text, text_query: text, focused_only: text, expectation: text, expected_value: text, limit_str: text, timeout_str: text, poll_str: text, state: UIState, session: UISession?) -> (i32, text, text):
@@ -381,14 +411,14 @@ fn _handle_ui_ensure(surface_id: text, canonical_id: text, kind: text, text_quer
     val focused = _is_truthy(focused_only)
     val started = rt_time_ms()
     var snapshot = _build_access_snapshot(state, session)
-    var result = ui_access_ensure_result(snapshot, surface_id, canonical_id, kind, text_query, focused, limit, expectation, expected_value)
-    while session != nil and timeout_ms > 0 and not result.ok and (rt_time_ms() - started) < timeout_ms:
+    var result = _ui_access_ensure_response_json(snapshot, surface_id, canonical_id, kind, text_query, focused, limit, expectation, expected_value, 0)
+    while session != nil and timeout_ms > 0 and not result.contains("\"satisfied\":true") and (rt_time_ms() - started) < timeout_ms:
         if poll_ms > 0:
             rt_sleep_ms(poll_ms)
         snapshot = _build_access_snapshot(state, session)
-        result = ui_access_ensure_result(snapshot, surface_id, canonical_id, kind, text_query, focused, limit, expectation, expected_value)
+        result = _ui_access_ensure_response_json(snapshot, surface_id, canonical_id, kind, text_query, focused, limit, expectation, expected_value, 0)
     val elapsed_ms = rt_time_ms() - started
-    val json = ui_access_ensure_to_json(snapshot, surface_id, canonical_id, kind, text_query, focused, limit, expectation, expected_value, elapsed_ms)
+    val json = _ui_access_ensure_response_json(snapshot, surface_id, canonical_id, kind, text_query, focused, limit, expectation, expected_value, elapsed_ms.to_i64())
     return (200, "application/json", json)
 
 fn _handle_ui_observe(surface_id: text, canonical_id: text, kind: text, text_query: text, focused_only: text, state: UIState, session: UISession?) -> (i32, text, text):
@@ -413,7 +443,7 @@ fn _handle_ui_observe(surface_id: text, canonical_id: text, kind: text, text_que
         return (200, "application/json", ui_access_snapshot_to_json(filtered))
     if kind != "" or text_query != "" or focused_only != "":
         val focused = _is_truthy(focused_only)
-        val matches = ui_access_find_nodes(snapshot, surface_id, kind, text_query, focused)
+        val matches = _ui_access_find_nodes(snapshot, surface_id, kind, text_query, focused, 50)
         val filtered = UiAccessSnapshot(
             protocol_version: snapshot.protocol_version,
             mode: snapshot.mode,
@@ -462,7 +492,7 @@ fn _handle_ui_value_get(canonical_id: text, state: UIState, session: UISession?)
         return (404, "application/json", "{\"error\":\"element_not_found\",\"message\":\"Canonical node not found: {escape_json(canonical_id)}\"}")
     if not ui_access_supports_value(node):
         return (400, "application/json", "{\"error\":\"invalid_field\",\"message\":\"Unsupported value target: {escape_json(canonical_id)}\"}")
-    return (200, "application/json", ui_access_value_to_json(snapshot, canonical_id))
+    return (200, "application/json", _ui_access_value_response_json(snapshot, canonical_id))
 
 fn _handle_ui_adapter_snapshot(surface_id: text, session: UISession?) -> (i32, text, text):
     """Handle GET /api/test/ui/adapter_snapshot — additive adapter envelope route."""
@@ -488,9 +518,10 @@ fn _handle_ui_surface(surface_id: text, state: UIState, session: UISession?) -> 
     if surface_id == "":
         return (400, "application/json", "{\"error\":\"missing_field\",\"message\":\"Missing required field: id\"}")
     val snapshot = _build_access_snapshot(state, session)
-    val json = ui_access_surface_to_json(snapshot, surface_id)
-    if json == "{}":
+    val surface = _find_surface(snapshot, surface_id)
+    if surface == nil:
         return (404, "application/json", "{\"error\":\"element_not_found\",\"message\":\"Surface not found: {surface_id}\"}")
+    val json = ui_access_surface_to_json(surface)
     return (200, "application/json", json)
 
 fn _handle_ui_history(surface_id: text, count_str: text, session: UISession?) -> (i32, text, text):
@@ -511,6 +542,139 @@ fn _handle_ui_history(surface_id: text, count_str: text, session: UISession?) ->
                 session.access_recent_surface_events(surface_id, count)
     val json = ui_access_events_to_json(events)
     return (200, "application/json", json)
+
+fn _handle_draw_ir(path: text, id: text, state: UIState) -> (i32, text, text):
+    """Handle GET /api/test/draw-ir — optional Protocol v2 Draw IR extension."""
+    if not _draw_ir_capability_enabled(path):
+        return _draw_ir_capability_denied()
+    val composition = _build_state_draw_ir_composition(state, id)
+    val sdn = draw_ir_to_sdn(composition)
+    val count = _draw_ir_command_count(composition)
+    val json = "{\"protocol_version\":{DRAW_IR_PROTOCOL_VERSION},\"capability\":\"{DRAW_IR_CAPABILITY}\",\"enabled\":true,\"format\":\"sdn\",\"schema\":\"{escape_json(composition.schema)}\",\"composition_id\":\"{escape_json(composition.composition_id)}\",\"scene_key\":\"{escape_json(composition.scene_key)}\",\"command_count\":{count},\"sdn\":\"{escape_json(sdn)}\"}"
+    return (200, "application/vnd.simple.draw-ir+json", json)
+
+fn _handle_draw_ir_layout(path: text, id: text, state: UIState) -> (i32, text, text):
+    """Handle GET /api/test/draw-ir/layout?id=X — return layout metadata."""
+    if not _draw_ir_capability_enabled(path):
+        return _draw_ir_capability_denied()
+    if id == "":
+        return (400, "application/vnd.simple.draw-ir+json", "{\"protocol_version\":{DRAW_IR_PROTOCOL_VERSION},\"capability\":\"{DRAW_IR_CAPABILITY}\",\"error\":\"missing_field\",\"message\":\"Missing required field: id\"}")
+    val composition = _build_state_draw_ir_composition(state, "")
+    val command = _draw_ir_find_command(composition, id)
+    if command == nil:
+        return (404, "application/vnd.simple.draw-ir+json", "{\"protocol_version\":{DRAW_IR_PROTOCOL_VERSION},\"capability\":\"{DRAW_IR_CAPABILITY}\",\"error\":\"element_not_found\",\"message\":\"Draw IR node not found: {escape_json(id)}\"}")
+    val json = "{\"protocol_version\":{DRAW_IR_PROTOCOL_VERSION},\"capability\":\"{DRAW_IR_CAPABILITY}\",\"id\":\"{escape_json(command.component_id)}\",\"kind\":\"{escape_json(command.kind)}\",\"geometry\":{_draw_ir_geometry_json(command)},\"border_rect\":{_draw_ir_rect_json(command.border_rect)},\"content_rect\":{_draw_ir_rect_json(command.content_rect)},\"hit_rect\":{_draw_ir_rect_json(command.hit_rect)},\"clip_rect\":{_draw_ir_rect_json(command.clip_rect)},\"computed_style\":{_draw_ir_style_json(command)}}"
+    return (200, "application/vnd.simple.draw-ir+json", json)
+
+fn _handle_draw_ir_diff(path: text, from_id: text, to_id: text, state: UIState) -> (i32, text, text):
+    """Handle GET /api/test/draw-ir/diff — compare two Draw IR nodes."""
+    if not _draw_ir_capability_enabled(path):
+        return _draw_ir_capability_denied()
+    if from_id == "" or to_id == "":
+        return (400, "application/vnd.simple.draw-ir+json", "{\"protocol_version\":{DRAW_IR_PROTOCOL_VERSION},\"capability\":\"{DRAW_IR_CAPABILITY}\",\"error\":\"missing_field\",\"message\":\"Missing required field: from_id or to_id\"}")
+    val composition = _build_state_draw_ir_composition(state, "")
+    val from_cmd = _draw_ir_find_command(composition, from_id)
+    val to_cmd = _draw_ir_find_command(composition, to_id)
+    if from_cmd == nil:
+        return (404, "application/vnd.simple.draw-ir+json", "{\"protocol_version\":{DRAW_IR_PROTOCOL_VERSION},\"capability\":\"{DRAW_IR_CAPABILITY}\",\"error\":\"element_not_found\",\"message\":\"Draw IR node not found: {escape_json(from_id)}\"}")
+    if to_cmd == nil:
+        return (404, "application/vnd.simple.draw-ir+json", "{\"protocol_version\":{DRAW_IR_PROTOCOL_VERSION},\"capability\":\"{DRAW_IR_CAPABILITY}\",\"error\":\"element_not_found\",\"message\":\"Draw IR node not found: {escape_json(to_id)}\"}")
+    val style_changed = if _draw_ir_style_json(from_cmd) == _draw_ir_style_json(to_cmd): "false" else: "true"
+    val json = "{\"protocol_version\":{DRAW_IR_PROTOCOL_VERSION},\"capability\":\"{DRAW_IR_CAPABILITY}\",\"from_id\":\"{escape_json(from_id)}\",\"to_id\":\"{escape_json(to_id)}\",\"dx\":{to_cmd.x - from_cmd.x},\"dy\":{to_cmd.y - from_cmd.y},\"dwidth\":{to_cmd.width - from_cmd.width},\"dheight\":{to_cmd.height - from_cmd.height},\"style_changed\":{style_changed}}"
+    return (200, "application/vnd.simple.draw-ir+json", json)
+
+fn _draw_ir_capability_enabled(path: text) -> bool:
+    val capability = _extract_query_param(path, "capability")
+    return capability == DRAW_IR_CAPABILITY or capability == "draw-ir"
+
+fn _draw_ir_capability_denied() -> (i32, text, text):
+    return (403, "application/vnd.simple.draw-ir+json", "{\"protocol_version\":{DRAW_IR_PROTOCOL_VERSION},\"capability\":\"{DRAW_IR_CAPABILITY}\",\"enabled\":false,\"error\":\"capability_required\",\"message\":\"Draw IR inspection requires capability=draw_ir\"}")
+
+fn _build_state_draw_ir_composition(state: UIState, filter_id: text) -> DrawIrComposition:
+    var commands: [DrawIrCommand] = []
+    var index = 0
+    val ids = state.tree.all_widget_ids()
+    for widget_id in ids:
+        if filter_id == "" or widget_id == filter_id:
+            commands = commands.push(_draw_ir_command_for_widget(state, widget_id, index))
+        index = index + 1
+    val height = if index > 0: index * 28 + 8 else: 32
+    val batch = draw_ir_batch_with_source(
+        "ui-test-current",
+        DRAW_IR_BACKEND_CPU,
+        draw_ir_embedding_config("main", "ui-state", 0, 0, 240, height, 0, 1000, true),
+        commands,
+        draw_ir_source_gui_ast("ui.test_api", "ui-state", "1")
+    )
+    draw_ir_composition("ui-test-current", "ui-test-current", DRAW_IR_BACKEND_CPU, [batch])
+
+fn _draw_ir_command_for_widget(state: UIState, widget_id: text, index: i32) -> DrawIrCommand:
+    val node = WidgetNode(id: widget_id)
+    val record = get_widget_record(widget_id)
+    val x = 8
+    val y = 8 + index * 28
+    val width = 200
+    val height = 22
+    var kind = "panel"
+    var visible = true
+    var focused = state.focused_id == widget_id
+    if record != nil:
+        kind = record.kind
+        visible = record.visible
+        focused = record.focused or focused
+    val text_value = node.get_prop("text")
+    val style = [
+        draw_ir_style_prop("id", widget_id),
+        draw_ir_style_prop("kind", kind),
+        draw_ir_style_prop("source", "gui_ast"),
+        draw_ir_style_prop("visible", if visible: "true" else: "false"),
+        draw_ir_style_prop("focused", if focused: "true" else: "false"),
+        draw_ir_style_prop("text", text_value)
+    ]
+    draw_ir_box_with_style(
+        widget_id,
+        x,
+        y,
+        width,
+        height,
+        0x335577u32,
+        draw_ir_rect_bounds(x, y, width, height),
+        draw_ir_rect_bounds(x + 2, y + 2, width - 4, height - 4),
+        draw_ir_rect_bounds(x, y, width, height),
+        draw_ir_rect_bounds(0, 0, 240, 8 + (index + 1) * 28),
+        style
+    )
+
+fn _draw_ir_command_count(composition: DrawIrComposition) -> i32:
+    var count = 0
+    for batch in composition.batches:
+        count = count + batch.commands.len()
+    count
+
+fn _draw_ir_find_command(composition: DrawIrComposition, id: text) -> DrawIrCommand?:
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.component_id == id:
+                return command
+    nil
+
+fn _draw_ir_geometry_json(command: DrawIrCommand) -> text:
+    "{\"x\":{command.x},\"y\":{command.y},\"width\":{command.width},\"height\":{command.height}}"
+
+fn _draw_ir_rect_json(rect: DrawIrRect) -> text:
+    val present = if rect.present: "true" else: "false"
+    "{\"present\":{present},\"x\":{rect.x},\"y\":{rect.y},\"width\":{rect.width},\"height\":{rect.height}}"
+
+fn _draw_ir_style_json(command: DrawIrCommand) -> text:
+    var json = "{"
+    var first = true
+    for prop in command.computed_style:
+        if first:
+            first = false
+        else:
+            json = "{json},"
+        json = "{json}\"{escape_json(prop.key)}\":\"{escape_json(prop.value)}\""
+    "{json}}"
 
 # =========================================================================
 # Query String Helpers
@@ -553,37 +717,37 @@ fn _resolve_ui_state_action(snapshot: UiAccessSnapshot, node: UiAccessNode, stat
     if lower_key == "focus" or lower_key == "focused":
         if not _is_truthy(state_value):
             return ""
-        return ui_access_resolve_action_name(snapshot, node.canonical_id, "focus")
+        return ui_access_resolve_action_name(node, "focus")
     if lower_key == "invoke" or lower_key == "invoked" or lower_key == "press" or lower_key == "pressed":
         if not _is_truthy(state_value):
             return ""
-        return ui_access_resolve_action_name(snapshot, node.canonical_id, "invoke")
+        return ui_access_resolve_action_name(node, "invoke")
     if lower_key == "submit" or lower_key == "submitted":
         if not _is_truthy(state_value):
             return ""
-        return ui_access_resolve_action_name(snapshot, node.canonical_id, "submit")
+        return ui_access_resolve_action_name(node, "submit")
     if lower_key == "select":
         if not _is_truthy(state_value):
             return ""
         if node.selected:
             return "__noop__"
-        return ui_access_resolve_action_name(snapshot, node.canonical_id, "select")
+        return ui_access_resolve_action_name(node, "select")
     if lower_key == "selected":
         if _state_matches_toggle_target(node.selected, state_value):
             return "__noop__"
         if _is_truthy(state_value):
-            return ui_access_resolve_action_name(snapshot, node.canonical_id, "select")
+            return ui_access_resolve_action_name(node, "select")
         if _is_falsy(state_value):
-            return ui_access_resolve_action_name(snapshot, node.canonical_id, "toggle")
+            return ui_access_resolve_action_name(node, "toggle")
         return ""
     if lower_key == "toggle" or lower_key == "toggled" or lower_key == "checked" or lower_key == "expanded":
         if _state_matches_toggle_target(node.selected, state_value):
             return "__noop__"
-        return ui_access_resolve_action_name(snapshot, node.canonical_id, "toggle")
+        return ui_access_resolve_action_name(node, "toggle")
     if lower_key == "action":
         if state_value == "":
             return ""
-        return ui_access_resolve_action_name(snapshot, node.canonical_id, state_value)
+        return ui_access_resolve_action_name(node, state_value)
     return ""
 
 fn _is_truthy(value: text) -> bool:
@@ -606,6 +770,107 @@ fn _find_surface(snapshot: UiAccessSnapshot, surface_id: text) -> UiAccessSurfac
         if surface.surface_id == surface_id:
             return surface
     return nil
+
+fn _ui_access_find_nodes(snapshot: UiAccessSnapshot, surface_id: text, kind: text, text_query: text, focused_only: bool, limit: i32) -> [UiAccessNode]:
+    val found = ui_access_find_nodes(snapshot, surface_id, kind, text_query, limit)
+    if not focused_only:
+        return found
+    var filtered: [UiAccessNode] = []
+    for node in found:
+        if node.focused:
+            filtered = filtered.push(node)
+    filtered
+
+fn _ui_access_nodes_snapshot(snapshot: UiAccessSnapshot, nodes: [UiAccessNode]) -> UiAccessSnapshot:
+    UiAccessSnapshot(
+        protocol_version: snapshot.protocol_version,
+        snapshot_revision: snapshot.snapshot_revision,
+        mode: snapshot.mode,
+        active_surface: snapshot.active_surface,
+        surfaces: snapshot.surfaces,
+        nodes: nodes,
+        recent_events: []
+    )
+
+fn _ui_access_query_response_json(snapshot: UiAccessSnapshot, surface_id: text, canonical_id: text, kind: text, text_query: text, focused_only: bool, limit: i32) -> text:
+    var matches: [UiAccessNode] = []
+    if canonical_id != "":
+        val node = ui_access_find_node(snapshot, canonical_id)
+        if node != nil:
+            matches = [node]
+    else:
+        matches = _ui_access_find_nodes(snapshot, surface_id, kind, text_query, focused_only, limit)
+    val filtered = _ui_access_nodes_snapshot(snapshot, matches)
+    "{\"surface_id\":\"{escape_json(surface_id)}\",\"canonical_id\":\"{escape_json(canonical_id)}\",\"kind\":\"{escape_json(kind)}\",\"text\":\"{escape_json(text_query)}\",\"focused_only\":{_json_bool(focused_only)},\"match_count\":{matches.len()},\"snapshot\":{ui_access_snapshot_to_json(filtered)}}"
+
+fn _ui_access_ensure_response_json(snapshot: UiAccessSnapshot, surface_id: text, canonical_id: text, kind: text, text_query: text, focused_only: bool, limit: i32, expectation: text, expected_value: text, elapsed_ms: i64) -> text:
+    val matches = _ui_access_find_for_ensure(snapshot, surface_id, canonical_id, kind, text_query, focused_only, limit)
+    val effective_expectation = if expectation == "": "exists" else: expectation
+    val satisfied = _ui_access_expectation_satisfied(matches, effective_expectation, expected_value)
+    val query_json = _ui_access_query_response_json(snapshot, surface_id, canonical_id, kind, text_query, focused_only, limit)
+    "{\"surface_id\":\"{escape_json(surface_id)}\",\"canonical_id\":\"{escape_json(canonical_id)}\",\"kind\":\"{escape_json(kind)}\",\"text\":\"{escape_json(text_query)}\",\"focused_only\":{_json_bool(focused_only)},\"expectation\":\"{escape_json(effective_expectation)}\",\"expected_value\":\"{escape_json(expected_value)}\",\"satisfied\":{_json_bool(satisfied)},\"match_count\":{matches.len()},\"elapsed_ms\":{elapsed_ms},\"query\":{query_json}}"
+
+fn _ui_access_find_for_ensure(snapshot: UiAccessSnapshot, surface_id: text, canonical_id: text, kind: text, text_query: text, focused_only: bool, limit: i32) -> [UiAccessNode]:
+    if canonical_id != "":
+        val node = ui_access_find_node(snapshot, canonical_id)
+        if node == nil:
+            return []
+        if focused_only and not node.focused:
+            return []
+        return [node]
+    _ui_access_find_nodes(snapshot, surface_id, kind, text_query, focused_only, limit)
+
+fn _ui_access_expectation_satisfied(matches: [UiAccessNode], expectation: text, expected_value: text) -> bool:
+    val count = matches.len()
+    val lower = expectation.lower()
+    if lower == "absent":
+        return count == 0
+    if lower == "match_count":
+        if expected_value == "":
+            return false
+        return count == expected_value.to_i32()
+    if lower == "focused":
+        for node in matches:
+            if node.focused:
+                return true
+        return false
+    if lower == "enabled":
+        for node in matches:
+            if node.enabled:
+                return true
+        return false
+    if lower == "disabled":
+        for node in matches:
+            if not node.enabled:
+                return true
+        return false
+    if lower == "selected" or lower == "checked" or lower == "expanded":
+        for node in matches:
+            if node.selected:
+                return true
+        return false
+    if lower == "unselected" or lower == "unchecked" or lower == "collapsed":
+        for node in matches:
+            if not node.selected:
+                return true
+        return false
+    if lower == "value":
+        for node in matches:
+            if ui_access_node_value(node) == expected_value:
+                return true
+        return false
+    count > 0
+
+fn _ui_access_value_response_json(snapshot: UiAccessSnapshot, canonical_id: text) -> text:
+    val node = ui_access_find_node(snapshot, canonical_id)
+    if node == nil:
+        return "{}"
+    "{\"canonical_id\":\"{escape_json(canonical_id)}\",\"value\":\"{escape_json(ui_access_node_value(node))}\"}"
+
+fn _json_bool(value: bool) -> text:
+    if value:
+        return "true"
+    "false"
 
 fn _node_state_value(node: UiAccessNode, state_key: text) -> text?:
     val lower_key = state_key.lower()

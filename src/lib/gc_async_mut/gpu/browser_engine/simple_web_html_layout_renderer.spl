@@ -17,6 +17,19 @@
 # Public entry: simple_web_layout_render_html_pixels(html, w, h, backend_name)
 #   parse -> CSS cascade -> block layout -> paint text+boxes -> Engine2D -> [u32]
 
+use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_CPU,
+    DrawIrCommand,
+    DrawIrComposition,
+    DrawIrStyleProp,
+    draw_ir_batch_with_source,
+    draw_ir_box_with_style,
+    draw_ir_composition,
+    draw_ir_embedding_config,
+    draw_ir_rect_bounds,
+    draw_ir_source_html_ast,
+    draw_ir_style_prop
+}
 use std.gpu.engine2d.engine.{Engine2D}
 
 # ---------------------------------------------------------------------------
@@ -2336,6 +2349,102 @@ fn draw_layout_pixel_runs(engine: Engine2D, pixels: [u32], width: i32, height: i
             engine.draw_rect_filled(x, y, run_w, 1, color)
             x = x + run_w
         y = y + 1
+
+fn _html_draw_ir_component_id(nodes: [HNode], i: i32) -> text:
+    val node = nodes[i]
+    if node.id_attr != "":
+        return node.id_attr
+    if node.tag == "#text":
+        return "text_{i}"
+    "{node.tag}_{i}"
+
+fn _html_draw_ir_non_negative(value: i32) -> i32:
+    if value < 0:
+        return 0
+    value
+
+fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
+    [
+        draw_ir_style_prop("tag", node.tag),
+        draw_ir_style_prop("id", node.id_attr),
+        draw_ir_style_prop("class", node.class_attr),
+        draw_ir_style_prop("display", st.display),
+        draw_ir_style_prop("background-color", "{st.bg}"),
+        draw_ir_style_prop("color", "{st.fg}"),
+        draw_ir_style_prop("font-size", "{st.font_size}"),
+        draw_ir_style_prop("padding-left", "{st.pad_l}"),
+        draw_ir_style_prop("padding-top", "{st.pad_t}"),
+        draw_ir_style_prop("padding-right", "{st.pad_r}"),
+        draw_ir_style_prop("padding-bottom", "{st.pad_b}"),
+        draw_ir_style_prop("border-left-width", "{st.border_l}"),
+        draw_ir_style_prop("border-top-width", "{st.border_t}"),
+        draw_ir_style_prop("border-right-width", "{st.border_r}"),
+        draw_ir_style_prop("border-bottom-width", "{st.border_b}"),
+        draw_ir_style_prop("z-index", "{st.z_index}"),
+        draw_ir_style_prop("visibility", if st.visibility_hidden: "hidden" else: "visible")
+    ]
+
+fn _html_draw_ir_command(nodes: [HNode], styles: [Style], boxes: LayoutResult, i: i32, width: i32, height: i32) -> DrawIrCommand:
+    val st = styles[i]
+    val x = boxes.bx[i]
+    val y = boxes.by[i]
+    val w = boxes.bw[i]
+    val h = boxes.bh[i]
+    val content_x = x + st.border_l + st.pad_l
+    val content_y = y + st.border_t + st.pad_t
+    val content_w = _html_draw_ir_non_negative(w - st.border_l - st.border_r - st.pad_l - st.pad_r)
+    val content_h = _html_draw_ir_non_negative(h - st.border_t - st.border_b - st.pad_t - st.pad_b)
+    val border_rect = draw_ir_rect_bounds(x, y, w, h)
+    val content_rect = draw_ir_rect_bounds(content_x, content_y, content_w, content_h)
+    val hit_rect = draw_ir_rect_bounds(x, y, w, h)
+    val clip_rect = draw_ir_rect_bounds(0, 0, width, height)
+    val computed_style = _html_draw_ir_style_props(nodes[i], st)
+    draw_ir_box_with_style(
+        _html_draw_ir_component_id(nodes, i),
+        x,
+        y,
+        w,
+        h,
+        st.bg,
+        border_rect,
+        content_rect,
+        hit_rect,
+        clip_rect,
+        computed_style
+    )
+
+fn _html_draw_ir_commands(nodes: [HNode], styles: [Style], boxes: LayoutResult, width: i32, height: i32) -> [DrawIrCommand]:
+    var commands: [DrawIrCommand] = []
+    var i = 0
+    while i < nodes.len():
+        val node = nodes[i]
+        val st = styles[i]
+        if i > 0 and st.display != "none" and boxes.bw[i] > 0 and boxes.bh[i] > 0:
+            commands = commands.push(_html_draw_ir_command(nodes, styles, boxes, i, width, height))
+        i = i + 1
+    commands
+
+pub fn simple_web_layout_render_html_draw_ir(html: text, width: i32, height: i32) -> DrawIrComposition:
+    val nodes = parse_html(html)
+    val rules = extract_css(html)
+    val styles = compute_styles(nodes, rules, html)
+    val boxes = layout(
+        nodes,
+        styles,
+        0,
+        0,
+        0,
+        width,
+        height,
+        [0; nodes.len()],
+        [0; nodes.len()],
+        [0; nodes.len()],
+        [0; nodes.len()]
+    )
+    val source = draw_ir_source_html_ast("simple_web_html_layout_renderer", "html", "", "", "", "layout", "1")
+    val embedding = draw_ir_embedding_config("html", "document", 0, 0, width, height, 0, 1000, true)
+    val batch = draw_ir_batch_with_source("html-layout", DRAW_IR_BACKEND_CPU, embedding, _html_draw_ir_commands(nodes, styles, boxes, width, height), source)
+    draw_ir_composition("html-layout", "simple-web-html-layout", DRAW_IR_BACKEND_CPU, [batch])
 
 pub fn simple_web_layout_render_html_pixels(html: text, width: i32, height: i32, backend_name: text) -> [u32]:
     val nodes = parse_html(html)

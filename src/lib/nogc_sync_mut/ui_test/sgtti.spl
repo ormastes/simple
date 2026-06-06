@@ -5,7 +5,7 @@
 
 use common.ui.access.{ui_access_snapshot_from_state}
 use common.ui.access_types.{UiAccessNode, UiAccessProp, UiAccessSurface}
-use common.ui.draw_ir.{DrawIrBatch, DrawIrComposition, DrawIrCommand}
+use common.ui.draw_ir.{DrawIrBatch, DrawIrComposition, DrawIrCommand, DrawIrRect}
 use common.ui.widget.{UIState}
 use common.ui.win_text_access.{
     WinTextSnapshot,
@@ -147,14 +147,30 @@ fn _sgtti_draw_ir_node(surface_id: text, batch_id: text, command: DrawIrCommand)
         props: [
             UiAccessProp(key: "source", value: "draw_ir"),
             UiAccessProp(key: "batch_id", value: batch_id),
+            UiAccessProp(key: "parent", value: command.parent_id),
             UiAccessProp(key: "x", value: "{command.x}"),
             UiAccessProp(key: "y", value: "{command.y}"),
             UiAccessProp(key: "width", value: "{command.width}"),
-            UiAccessProp(key: "height", value: "{command.height}")
-        ],
+            UiAccessProp(key: "height", value: "{command.height}"),
+            UiAccessProp(key: "border_rect", value: _sgtti_draw_ir_rect_value(command.border_rect)),
+            UiAccessProp(key: "content_rect", value: _sgtti_draw_ir_rect_value(command.content_rect)),
+            UiAccessProp(key: "hit_rect", value: _sgtti_draw_ir_rect_value(command.hit_rect)),
+            UiAccessProp(key: "clip_rect", value: _sgtti_draw_ir_rect_value(command.clip_rect))
+        ] + _sgtti_draw_ir_style_props(command),
         child_ids: [],
         action_names: []
     )
+
+fn _sgtti_draw_ir_rect_value(rect: DrawIrRect) -> text:
+    if not rect.present:
+        return ""
+    "{rect.x},{rect.y},{rect.width},{rect.height}"
+
+fn _sgtti_draw_ir_style_props(command: DrawIrCommand) -> [UiAccessProp]:
+    var props: [UiAccessProp] = []
+    for style in command.computed_style:
+        props = props.push(UiAccessProp(key: "css:{style.key}", value: style.value))
+    props
 
 pub class SgttiTestDriver:
     snapshot: WinTextSnapshot
@@ -214,6 +230,10 @@ pub class SgttiTestDriver:
                 return Ok(true)
         Ok(false)
 
+    fn expect_draw(id: text, assertion: text) -> Result<bool, text>:
+        val node = self.get_element(id)?
+        _sgtti_expect_draw_node(node, assertion)
+
     fn _route_action(id: text, action: text, text_value: text) -> Result<bool, text>:
         val node = self.get_element(id)?
         val result = win_text_route_action(self.snapshot, WinTextActionRequest(
@@ -238,6 +258,89 @@ pub class SgttiTestDriver:
 
     fn find_element(id: text) -> UiAccessNode?:
         self._find_node(id)
+
+fn expect_draw(driver: SgttiTestDriver, id: text, assertion: text) -> Result<bool, text>:
+    driver.expect_draw(id, assertion)
+
+fn _sgtti_expect_draw_node(node: UiAccessNode, assertion: text) -> Result<bool, text>:
+    val parts = _sgtti_words(assertion)
+    if parts.len() == 0:
+        return Err("empty draw assertion")
+    val command = parts[0]
+    if command == "visible":
+        return Ok(node.visible)
+    if command == "kind":
+        if parts.len() < 2:
+            return Err("kind assertion requires a value")
+        val expected = parts[1]
+        return Ok(node.kind == expected or _sgtti_prop_value(node, "css:kind") == expected)
+    if command == "role":
+        if parts.len() < 2:
+            return Err("role assertion requires a value")
+        return Ok(_sgtti_prop_value(node, "css:role") == parts[1])
+    if command == "parent":
+        if parts.len() < 2:
+            return Err("parent assertion requires an id")
+        return Ok(_sgtti_prop_value(node, "parent") == parts[1])
+    if command == "css":
+        if parts.len() < 3:
+            return Err("css assertion requires property and value")
+        return Ok(_sgtti_prop_value(node, "css:{parts[1]}") == parts[2])
+    if command == "geometry":
+        return _sgtti_expect_geometry(node, parts)
+    if command == "hit_rect":
+        return _sgtti_expect_hit_rect(node, parts)
+    Err("unknown draw assertion: {assertion}")
+
+fn _sgtti_expect_geometry(node: UiAccessNode, parts: [text]) -> Result<bool, text>:
+    if parts.len() < 5:
+        return Err("geometry assertion requires x y width height")
+    var tolerance = 0
+    if parts.len() >= 7 and parts[5] == "tolerance":
+        tolerance = parts[6].to_i32()
+    val x_ok = _sgtti_i32_close(_sgtti_prop_value(node, "x").to_i32(), parts[1].to_i32(), tolerance)
+    val y_ok = _sgtti_i32_close(_sgtti_prop_value(node, "y").to_i32(), parts[2].to_i32(), tolerance)
+    val w_ok = _sgtti_i32_close(_sgtti_prop_value(node, "width").to_i32(), parts[3].to_i32(), tolerance)
+    val h_ok = _sgtti_i32_close(_sgtti_prop_value(node, "height").to_i32(), parts[4].to_i32(), tolerance)
+    Ok(x_ok and y_ok and w_ok and h_ok)
+
+fn _sgtti_expect_hit_rect(node: UiAccessNode, parts: [text]) -> Result<bool, text>:
+    if parts.len() < 4 or parts[1] != "contains":
+        return Err("hit_rect assertion requires: hit_rect contains x y")
+    val rect = _sgtti_rect_parts(_sgtti_prop_value(node, "hit_rect"))
+    if rect.len() < 4:
+        return Ok(false)
+    val x = parts[2].to_i32()
+    val y = parts[3].to_i32()
+    val rx = rect[0].to_i32()
+    val ry = rect[1].to_i32()
+    val rw = rect[2].to_i32()
+    val rh = rect[3].to_i32()
+    Ok(x >= rx and y >= ry and x <= rx + rw and y <= ry + rh)
+
+fn _sgtti_i32_close(actual: i32, expected: i32, tolerance: i32) -> bool:
+    val delta = actual - expected
+    if delta < 0:
+        return -delta <= tolerance
+    delta <= tolerance
+
+fn _sgtti_prop_value(node: UiAccessNode, key: text) -> text:
+    for prop in node.props:
+        if prop.key == key:
+            return prop.value
+    ""
+
+fn _sgtti_words(source: text) -> [text]:
+    var out: [text] = []
+    for part in source.split(" "):
+        if part != "":
+            out = out.push(part)
+    out
+
+fn _sgtti_rect_parts(source: text) -> [text]:
+    if source == "":
+        return []
+    source.split(",")
 
 fn sgtti_parity_check(tui: SgttiTestDriver, gui: SgttiTestDriver, id: text) -> SgttiParityResult:
     val tui_node = tui.find_element(id)

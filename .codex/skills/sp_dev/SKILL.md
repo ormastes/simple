@@ -43,6 +43,14 @@ For runtime concurrency work, keep the public API map current in
 document green-thread APIs as Go-style M:N CPU parallelism unless the
 scheduler-aware green runtime has actually landed and been benchmarked.
 
+For optimization work, use `.codex/skills/optimize/SKILL.md`. SPipe optimization
+tasks must start from a baseline, run
+`bin/simple run src/app/optimize/main.spl <file> --full --level=O3` on touched
+`.spl` files, preserve behavior, and rerun both correctness tests and the same
+perf script. Do not rewrite Simple features in C/Rust to claim C-level speed; if
+parity is blocked by runtime/compiler behavior, record a measured blocker under
+`doc/08_tracking/bug/`.
+
 For UI, GUI, MDI/window-manager, Draw IR, Simple 2D, or Engine2D backend-lane
 work, keep the stack architecture current in
 `doc/04_architecture/ui/simple_gui_stack.md` and its TLDR companion. If the work
