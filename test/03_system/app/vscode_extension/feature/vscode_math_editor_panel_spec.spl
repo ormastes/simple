@@ -1,36 +1,90 @@
-# System-spec checks for the VS Code math editor panel.
-#
-# The panel is a synchronized companion view. The source editor remains
-# canonical; the panel mirrors the active block, mirrors selection metadata,
-# and delegates edits back to the document through normal VS Code edits.
+# codex-system-test
+"""
+# VSCode Math Editor Panel System Spec
 
-use std.spec
+## Overview
 
-describe "vscode_math_editor_panel feature spec":
-    it "renders an active panel shell with sync and pending states":
-        val panel_contract = "panel-root active active-strip sync-pending math-source request-sync setSelectionRange"
-        expect(panel_contract).to_contain("panel-root")
-        expect(panel_contract).to_contain("active-strip")
-        expect(panel_contract).to_contain("sync-pending")
+Verifies that the synchronized math editor panel is backed by the real VS Code
+extension source and bundled output: command registration, active-block state,
+selection mirroring, source edit delegation, and panel HTML controls.
 
-    it "keeps the source editor canonical for edit delegation":
-        val edit_contract = "TextEditor.edit block.contentRange source textarea"
-        expect(edit_contract).to_contain("TextEditor.edit")
-        expect(edit_contract).to_contain("block.contentRange")
-        expect(edit_contract).to_contain("textarea")
+**Artifacts:** build/test-artifacts/03_system/app/vscode_extension/feature/vscode_math_editor_panel/math_panel_contract.txt
+"""
+# @evidence-display: links
 
-    it "renders an empty state when no math block is active":
-        val empty_contract = "Move the cursor onto a math block in the source editor."
-        expect(empty_contract).to_contain("Move the cursor onto a math block")
+use std.spec.{describe, it, expect}
 
-    it "requires selection mirroring back to the source textarea":
-        val selection_contract = "selectionStart selectionEnd setSelectionRange source sync"
-        expect(selection_contract).to_contain("selectionStart")
-        expect(selection_contract).to_contain("selectionEnd")
-        expect(selection_contract).to_contain("setSelectionRange")
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
-    it "keeps hover and inline rendering as compatibility paths":
-        val compatibility_contract = "simple.math.toggleSyncPanel simple.math.togglePreview MathHoverProvider MathDecorationProvider"
-        expect(compatibility_contract).to_contain("simple.math.toggleSyncPanel")
-        expect(compatibility_contract).to_contain("simple.math.togglePreview")
-        expect(compatibility_contract).to_contain("MathHoverProvider")
+val EXTENSION_TS: text = "examples/10_tooling/simple_ide/platform/vscode/src/extension.ts"
+val NATIVE_PROVIDER_TS: text = "examples/10_tooling/simple_ide/platform/vscode/src/nativeMathProvider.ts"
+val SYNC_PANEL_TS: text = "examples/10_tooling/simple_ide/platform/vscode/src/math/mathSyncPanel.ts"
+val PANEL_HTML_TS: text = "examples/10_tooling/simple_ide/platform/vscode/src/math/mathPanelHtml.ts"
+val PANEL_SHARED_TS: text = "examples/10_tooling/simple_ide/platform/vscode/src/math/mathPanelShared.ts"
+val PACKAGE_JSON: text = "examples/10_tooling/simple_ide/platform/vscode/package.json"
+val BUNDLE_SYNC_JS: text = "src/app/vscode_extension/out/math/mathSyncPanel.js"
+val BUNDLE_HTML_JS: text = "src/app/vscode_extension/out/math/mathPanelHtml.js"
+val ARTIFACT_DIR: text = "build/test-artifacts/03_system/app/vscode_extension/feature/vscode_math_editor_panel"
+val ARTIFACT_PATH: text = ARTIFACT_DIR + "/math_panel_contract.txt"
+
+fn _read(path: text) -> text:
+    rt_file_read_text(path)
+
+fn _has(path: text, marker: text) -> text:
+    if _read(path).contains(marker):
+        return "present"
+    "absent"
+
+fn _write_capture(content: text) -> i64:
+    val script = "mkdir -p '" + ARTIFACT_DIR + "' && cat > '" + ARTIFACT_PATH + "' <<'SIMPLE_MATH_PANEL_EOF'\n" +
+        content + "\nSIMPLE_MATH_PANEL_EOF\n"
+    val (_out, _err, code) = rt_process_run("/bin/sh", ["-c", script])
+    code
+
+fn _capture_state(expected: text) -> text:
+    val (out, _err, code) = rt_process_run("/bin/sh", ["-c", "test -f '" + ARTIFACT_PATH + "' && cat '" + ARTIFACT_PATH + "'"])
+    if code != 0:
+        return "missing"
+    if out == expected + "\n":
+        return "matched"
+    "mismatched"
+
+describe "VSCode math editor panel feature":
+    it "registers the sync panel command and hover entrypoint":
+        expect(_has(EXTENSION_TS, "simple.math.toggleSyncPanel")).to_equal("present")
+        expect(_has(EXTENSION_TS, "MathSyncPanel.show()")).to_equal("present")
+        expect(_has(PACKAGE_JSON, "\"command\": \"simple.math.toggleSyncPanel\"")).to_equal("present")
+        expect(_has(NATIVE_PROVIDER_TS, "Open Synced Math Panel")).to_equal("present")
+        expect(_has(NATIVE_PROVIDER_TS, "contentRange")).to_equal("present")
+
+    it "builds active and empty panel states from the canonical source document":
+        expect(_has(PANEL_SHARED_TS, "buildMathSyncPanelState")).to_equal("present")
+        expect(_has(PANEL_SHARED_TS, "findMathBlockAtOffset")).to_equal("present")
+        expect(_has(PANEL_SHARED_TS, "activeBlock: null")).to_equal("present")
+        expect(_has(PANEL_SHARED_TS, "activeSelectionStart")).to_equal("present")
+        expect(_has(PANEL_SHARED_TS, "contentRange")).to_equal("present")
+
+    it "renders panel shell controls and mirrors textarea selection":
+        expect(_has(PANEL_HTML_TS, "textarea id=\"math-source\"")).to_equal("present")
+        expect(_has(PANEL_HTML_TS, "source.selectionStart")).to_equal("present")
+        expect(_has(PANEL_HTML_TS, "source.selectionEnd")).to_equal("present")
+        expect(_has(PANEL_HTML_TS, "type: 'selectionChanged'")).to_equal("present")
+        expect(_has(PANEL_HTML_TS, "type: 'editAll'")).to_equal("present")
+
+    it "delegates edits through WorkspaceEdit and ships bundled output":
+        expect(_has(SYNC_PANEL_TS, "message.type !== 'editAll'")).to_equal("present")
+        expect(_has(SYNC_PANEL_TS, "new vscode.WorkspaceEdit()")).to_equal("present")
+        expect(_has(SYNC_PANEL_TS, "edit.replace(editor.document.uri")).to_equal("present")
+        expect(_has(BUNDLE_SYNC_JS, "new vscode.WorkspaceEdit()")).to_equal("present")
+        expect(_has(BUNDLE_HTML_JS, "selectionChanged")).to_equal("present")
+
+    it "writes a generated-manual evidence summary":
+        val capture = "VSCode Math Panel Evidence\n" +
+            "command: simple.math.toggleSyncPanel\n" +
+            "state: buildMathSyncPanelState + activeBlock\n" +
+            "selection: selectionStart/selectionEnd mirrored through textarea\n" +
+            "edit: editAll -> WorkspaceEdit\n" +
+            "hover: NativeMathProvider opens synced panel"
+        expect(_write_capture(capture)).to_equal(0)
+        expect(_capture_state(capture)).to_equal("matched")

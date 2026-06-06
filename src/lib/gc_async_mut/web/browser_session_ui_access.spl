@@ -12,6 +12,7 @@ use common.ui.access.{
     ui_access_find_node
 }
 use std.gc_async_mut.web.browser_session.{BrowserSession}
+use std.gc_async_mut.web.browser_session_url.{resolve_relative_url}
 
 val BROWSER_SESSION_SURFACE_ID = "browser:session"
 val BROWSER_SESSION_SOURCE_ID = "browser_session"
@@ -46,6 +47,90 @@ fn _browser_control_props(control: text) -> [UiAccessProp]:
         UiAccessProp(key: "control", value: control)
     ]
 
+fn _browser_link_props(href: text) -> [UiAccessProp]:
+    [
+        UiAccessProp(key: "source", value: BROWSER_SESSION_SOURCE_ID),
+        UiAccessProp(key: "control", value: "link"),
+        UiAccessProp(key: "href", value: href)
+    ]
+
+fn _browser_node_prop(node: UiAccessNode, key: text) -> text:
+    for prop in node.props:
+        if prop.key == key:
+            return prop.value
+    ""
+
+fn _browser_extract_attr(tag: text, attr: text) -> text:
+    val double_marker = attr + "=\""
+    var start = tag.index_of(double_marker)
+    if start >= 0:
+        val rest = tag.slice(start + double_marker.len(), tag.len())
+        val end = rest.index_of("\"")
+        if end >= 0:
+            return rest.slice(0, end)
+    val single_marker = attr + "='"
+    start = tag.index_of(single_marker)
+    if start >= 0:
+        val rest = tag.slice(start + single_marker.len(), tag.len())
+        val end = rest.index_of("'")
+        if end >= 0:
+            return rest.slice(0, end)
+    ""
+
+fn _browser_strip_inline_tags(html: text) -> text:
+    var out = ""
+    var in_tag = false
+    var i = 0
+    while i < html.len():
+        val ch = html.slice(i, i + 1)
+        if ch == "<":
+            in_tag = true
+        else if ch == ">":
+            in_tag = false
+        else if not in_tag:
+            out = out + ch
+        i = i + 1
+    out
+
+fn _browser_collapse_parent_segments(url: text) -> text:
+    var out = url
+    while out.contains("/../"):
+        val marker = out.index_of("/../")
+        if marker < 0:
+            return out
+        val before = out.slice(0, marker)
+        val previous_slash = before.last_index_of("/") ?? -1
+        if previous_slash < 0:
+            return out
+        out = out.slice(0, previous_slash) + out.slice(marker + 3, out.len())
+    out
+
+fn _browser_link_nodes(body_html: text, base_url: text) -> [UiAccessNode]:
+    var nodes: [UiAccessNode] = []
+    var rest = body_html
+    var index = 0
+    while true:
+        val start = rest.index_of("<a")
+        if start < 0:
+            return nodes
+        val after_start = rest.slice(start, rest.len())
+        val tag_end = after_start.index_of(">")
+        if tag_end < 0:
+            return nodes
+        val tag = after_start.slice(0, tag_end + 1)
+        val after_tag = after_start.slice(tag_end + 1, after_start.len())
+        val close = after_tag.index_of("</a>")
+        if close < 0:
+            return nodes
+        val href = _browser_extract_attr(tag, "href")
+        val label = _browser_strip_inline_tags(after_tag.slice(0, close))
+        if href != "" and label != "":
+            val resolved = _browser_collapse_parent_segments(resolve_relative_url(base_url, href))
+            nodes = nodes.push(_browser_node("link_{index}", "link", label, true, false, ["click"], _browser_link_props(resolved)))
+            index = index + 1
+        rest = after_tag.slice(close + 4, after_tag.len())
+    nodes
+
 fn _browser_action_result(ok: bool, code: text, message: text, target_id: text, action: text) -> WinTextActionResult:
     WinTextActionResult(
         ok: ok,
@@ -75,6 +160,8 @@ impl BrowserSession:
         nodes = nodes.push(_browser_node("favorite", "button", "Favorite", true, self.is_favorite(self.current_url), ["click"], _browser_control_props("favorite")))
         nodes = nodes.push(_browser_node("address", "textfield", self.current_url, true, false, ["set_value"], _browser_control_props("address")))
         nodes = nodes.push(_browser_node("title", "label", self.current_title, true, false, [], _browser_control_props("title")))
+        for link_node in _browser_link_nodes(self.current_body_html, self.current_url):
+            nodes = nodes.push(link_node)
         UiAccessSnapshot(
             protocol_version: 1,
             snapshot_revision: 0,
@@ -112,4 +199,11 @@ impl BrowserSession:
         if node.widget_id == "favorite":
             self.add_current_favorite()
             return _browser_action_result(true, "ok", "favorite added", request.target_id, request.action)
+        if node.kind == "link":
+            val href = _browser_node_prop(node, "href")
+            if href == "":
+                return _browser_action_result(false, "action_failed", "link missing href", request.target_id, request.action)
+            match self.begin_network_navigation(href, "GET", "", "", ""):
+                Ok(_): return _browser_action_result(true, "ok", "opened link", request.target_id, request.action)
+                Err(e): return _browser_action_result(false, "action_failed", e, request.target_id, request.action)
         _browser_action_result(false, "unsupported_operation", "unsupported browser control", request.target_id, request.action)

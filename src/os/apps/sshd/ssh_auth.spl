@@ -12,13 +12,6 @@
 
 use os.apps.sshd.ssh_packet.{ssh_put_u32, ssh_put_text, ssh_put_string, ssh_put_bool, ssh_put_byte, ssh_get_u32, ssh_get_string, ssh_get_text, ssh_ascii_text_to_bytes, SshTextResult, SshStringResult}
 
-# C-side auth helpers — workaround for Cranelift codegen bug where
-# struct field text comparisons corrupt on baremetal (tests C2/C5/C6/C10/C11).
-extern fn rt_auth_add_user(uname: text, password_text: text) -> i64
-extern fn rt_auth_check(uname: text, password_text: text) -> i64
-extern fn rt_auth_reset() -> i64
-extern fn rt_auth_find_user(uname: text) -> i64
-
 # ============================================================================
 # Constants
 # ============================================================================
@@ -72,8 +65,6 @@ impl SshUserDb:
             password: password_val,
             authorized_keys: []
         ))
-        # Mirror to C-side auth DB for reliable text comparison on baremetal
-        rt_auth_add_user(username, password_val)
 
     me add_user_key(username: text, key_blob: [u8]):
         """Add an authorized public key for an existing user."""
@@ -94,13 +85,14 @@ impl SshUserDb:
         nil
 
     fn authenticate_password(username: text, password_val: text) -> bool:
-        """Check password against stored plaintext.
-
-        Delegates to C-side rt_auth_check to work around Cranelift codegen
-        bug where struct field text comparisons corrupt on baremetal.
-        """
-        var result: i64 = rt_auth_check(username, password_val)
-        result == 1
+        """Check password against stored plaintext."""
+        var i: u64 = 0
+        while i < self.users.len():
+            val user = self.users[i]
+            if user.username == username and user.password == password_val:
+                return true
+            i = i + 1
+        false
 
     fn authenticate_key(username: text, key_blob: [u8]) -> bool:
         """Check if a public key is authorized for this user.
@@ -127,7 +119,6 @@ fn sshd_create_default_users() -> SshUserDb:
     Standalone function to avoid method resolution ambiguity
     between SshDaemon.add_user and SshUserDb.add_user in Cranelift codegen.
     """
-    rt_auth_reset()
     var db = SshUserDb.new()
     db.add_user("root", "simpleos")
     db.add_user("user", "password")
