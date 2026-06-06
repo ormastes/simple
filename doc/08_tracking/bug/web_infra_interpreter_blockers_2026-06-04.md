@@ -32,7 +32,7 @@ restaurant webapp infra test vehicle.
 6. **`self.fn_field(args)` method confusion** — RESOLVED (2026-05-27)
    - Fixed in both Rust-side and pure-Simple-side evaluators.
 
-7. **`thread_spawn2` not registered** — RESOLVED (2026-05-27)
+7. **Legacy numbered thread spawn wrapper not registered** — RESOLVED (2026-05-27)
    - HTTP server now imports through std concurrent wrapper.
 
 8. **`? operator requires Result or Option type, got object`** — interpreter fallback error

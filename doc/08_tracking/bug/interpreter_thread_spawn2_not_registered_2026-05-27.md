@@ -1,4 +1,4 @@
-# Bug: `thread_spawn2` extern not registered in interpreter
+# Bug: legacy numbered thread spawn wrapper was not registered in interpreter
 
 **Date:** 2026-05-27
 **Status:** RESOLVED 2026-05-27
@@ -11,7 +11,9 @@
 error: semantic: unknown extern function: thread_spawn2
 ```
 
-The interpreter's extern dispatch table does not include `thread_spawn2`, making any multi-threaded code fail in interpreter mode.
+The interpreter's extern dispatch table did not include the old raw
+`thread_spawn2` path, making older multi-threaded code fail in interpreter mode.
+New code uses the semantic `thread_spawn_with_args` wrapper instead.
 
 ## Location
 
@@ -19,7 +21,8 @@ The interpreter's extern dispatch table does not include `thread_spawn2`, making
 
 ## Expected
 
-`thread_spawn2` should be registered in the interpreter's extern table, spawning an OS thread that runs the provided closure.
+`thread_spawn_with_args` should route through the registered runtime ABI and
+spawn an OS thread that runs the provided closure.
 
 ## Impact
 
@@ -34,6 +37,6 @@ the std thread wrapper and did not return the `ThreadHandle` API expected by
 `handler.free()`.
 
 `src/lib/nogc_sync_mut/http_server/server.spl` now imports
-`std.concurrent.thread.thread_spawn2`, so interpreter execution routes through
-the registered `rt_thread_spawn_isolated2` extern and receives the standard
-`ThreadHandle`.
+`std.concurrent.thread.thread_spawn_with_args`, so interpreter execution routes
+through the registered `rt_thread_spawn_isolated2` extern and receives the
+standard `ThreadHandle`.

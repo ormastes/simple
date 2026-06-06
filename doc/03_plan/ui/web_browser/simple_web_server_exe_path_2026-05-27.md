@@ -33,8 +33,8 @@ Bugs filed in `doc/08_tracking/bug/`:
 3. **`self.fn_field(args)` confused with method calls** → `interpreter_fn_field_method_confusion_2026-05-27.md`
    - `r.handler(req)` fails because interpreter treats fn-field as method lookup
 
-4. **`thread_spawn2` not registered** → `interpreter_thread_spawn2_not_registered_2026-05-27.md`
-   - Extern not in interpreter dispatch table; all threaded code fails
+4. **Legacy numbered thread spawn wrapper not registered** → `interpreter_thread_spawn2_not_registered_2026-05-27.md`
+   - Old raw extern path was not in interpreter dispatch table; new code uses `thread_spawn_with_args`
 
 5. **`mut fn` syntax** → `parser_mut_fn_syntax_not_supported_2026-05-27.md`
    - Parser does not recognize `mut fn`; may be by design
@@ -48,9 +48,9 @@ Web server requires compiled mode for full functionality. Interpreter mode block
 Compile Simple web server to native binary for production performance.
 
 ### Steps
-1. Resolve all extern stubs needed for compiled mode (`thread_spawn2`, TCP accept)
+1. Resolve all extern stubs needed for compiled mode (`thread_spawn_with_args`, TCP accept)
 2. `bin/simple native-build --entry examples/06_io/simple_web_server/main.spl -o build/simple-web-server`
-3. Multi-threaded accept loop (restore `thread_spawn2` behind compiled-mode guard)
+3. Multi-threaded accept loop (restore `thread_spawn_with_args` behind compiled-mode guard)
 4. Sendfile routing for static files (already implemented in `sendfile_routing.spl`)
 5. Benchmark compiled binary vs nginx with wrk (4 threads, 50 connections)
 
