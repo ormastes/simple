@@ -1,0 +1,118 @@
+# Web Render Backend comparison GUI.
+#
+# Renders ONE real HTML page through the unified WebRenderBackend interface using
+# the backend selected by argv/WEB_RENDER_BACKEND (pure_simple | chromium), then
+# presents the result in a host window whose title shows the active backend. Same
+# .spl, same page, same interface — only the backend differs.
+#
+#   scripts/gui/macos-gui-run.shs examples/06_io/ui/web_render_backend_gui.spl pure_simple
+#   scripts/gui/macos-gui-run.shs examples/06_io/ui/web_render_backend_gui.spl chromium
+#
+# Env: WEB_RENDER_BACKEND, PAGE_W, PAGE_H, PAGE_SCALE, WEB_RENDER_HTML (a .html
+# path; default is the VanillaStyle demo). A .html argv also overrides the page.
+#
+# App code uses only library interfaces (no rt_* externs): renderer from
+# std.gpu.browser_engine.web_render_backend, window from std.io.window_winit,
+# env/args from std.env / std.cli.
+
+use std.gc_async_mut.gpu.browser_engine.web_render_backend.{WebRenderBackend, web_render_backend_names}
+use std.io.window_winit.{
+    WinitLoop, WinitWindow, winit_loop_new, winit_loop_free,
+    winit_window_new, winit_window_free, winit_present_rgba, winit_poll_close_requested}
+use std.env.variables.{env_get_or}
+use std.cli.cli_util.{get_cli_args}
+
+fn _repo_root() -> text:
+    val lib = env_get_or("SIMPLE_LIB", "src")
+    if lib.ends_with("/src"):
+        return lib[0 : lib.len() - 4]
+    if lib == "" or lib == "src":
+        return "."
+    lib
+
+fn _backend_from_args(fallback: text) -> text:
+    """A recognized backend argv wins (survives the macOS .app launcher, which
+    does not forward arbitrary env vars), else WEB_RENDER_BACKEND, else fallback."""
+    val names = web_render_backend_names()
+    for arg in get_cli_args():
+        for n in names:
+            if arg == n:
+                return arg
+    fallback
+
+fn _html_path_from_args(fallback: text) -> text:
+    for arg in get_cli_args():
+        if arg.ends_with(".html"):
+            return arg
+    fallback
+
+fn _int_env(key: text, fallback: i32) -> i32:
+    val v = env_get_or(key, "")
+    if v == "":
+        return fallback
+    v.to_i32()
+
+fn upscale(src: [u32], sw: i32, sh: i32, scale: i32) -> [i64]:
+    """Nearest-neighbour upscale src (sw x sh, 0xAARRGGBB) to a presentable
+    [i64] buffer (0x00RRGGBB; softbuffer ignores the top byte)."""
+    val dw = sw * scale
+    val dh = sh * scale
+    var out: [i64] = [0; dw * dh]
+    var dy = 0
+    while dy < dh:
+        val syv = dy / scale
+        var dx = 0
+        while dx < dw:
+            val sxv = dx / scale
+            out[dy * dw + dx] = src[syv * sw + sxv].to_i64() & 0xFFFFFF
+            dx = dx + 1
+        dy = dy + 1
+    out
+
+fn main() -> i64:
+    val backend_name = _backend_from_args(env_get_or("WEB_RENDER_BACKEND", "pure_simple"))
+    val default_html = _repo_root() + "/test/09_baselines/web_html_input/vanillastyle_demo.html"
+    val html_path = _html_path_from_args(env_get_or("WEB_RENDER_HTML", default_html))
+    val render_w = _int_env("PAGE_W", 384)
+    val render_h = _int_env("PAGE_H", 288)
+    val scale = _int_env("PAGE_SCALE", 2)
+    val window_w = render_w * scale
+    val window_h = render_h * scale
+
+    val renderer = WebRenderBackend.create(backend_name, render_w, render_h)
+    print "Rendering {html_path}"
+    print "  via web-render backend '{renderer.name()}' at {render_w}x{render_h} (window {window_w}x{window_h})..."
+
+    val pixels = renderer.render_html_file_to_pixels(html_path)
+    if pixels.len() < render_w * render_h:
+        print "Backend '{renderer.name()}' produced too few pixels ({pixels.len()}); cannot present."
+        return 1
+    print "Backend '{renderer.name()}' rendered {pixels.len()} px."
+
+    val packed = upscale(pixels, render_w, render_h, scale)
+
+    if env_get_or("SIMPLE_GUI", "") != "1":
+        print "No GUI requested (set SIMPLE_GUI=1 to open a window); headless render only."
+        return 0
+
+    val lp = winit_loop_new()
+    if not lp.is_valid:
+        print "No GUI runtime available."
+        return 0
+    val title = "Simple Web Renderer — backend: " + renderer.name()
+    val win = winit_window_new(lp, window_w.to_i64(), window_h.to_i64(), title)
+    if not win.is_valid:
+        winit_loop_free(lp)
+        return 0
+
+    var running = true
+    var iters = 0
+    while running and iters < 2000000:
+        winit_present_rgba(win, window_w.to_i64(), window_h.to_i64(), packed)
+        if winit_poll_close_requested(lp):
+            running = false
+        iters = iters + 1
+
+    winit_window_free(win)
+    winit_loop_free(lp)
+    0
