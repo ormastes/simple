@@ -256,6 +256,27 @@ and paints the full styled dark-glass UI in WKWebView.
    a real minimal `dist/inline-shell.html` (served from `frontendDist`) as the
    base document, so the App-scheme nav resolves on both platforms.
 
+### iOS build errors fixed (2026-06-06): `cargo tauri ios build` now succeeds
+
+The default `cargo tauri ios build` (device archive) failed with three chained
+errors; all fixed in `gen/apple/project.yml` (xcodegen source; regenerate the
+`.xcodeproj` with `xcodegen generate`):
+1. **Signing** — `error: Signing requires a development team` (exit 65). This
+   machine has **0 signing identities** and the sim needs none, so disable the
+   requirement: `CODE_SIGNING_ALLOWED: NO`, `CODE_SIGNING_REQUIRED: NO`,
+   `CODE_SIGN_IDENTITY: ""`. (For a real device, set `DEVELOPMENT_TEAM` and flip
+   back on.)
+2. **Platform-mismatched swift lib** — `OTHER_LDFLAGS` hardcoded
+   `/iphonesimulator` → device builds linked a sim-built `libswiftCompatibility56.a`
+   (`building for 'iOS', but linking in object file built for 'iOS-simulator'`).
+   Use the dynamic `$(PLATFORM_NAME)` leaf.
+3. **Wrong toolchain root** — `$(TOOLCHAIN_DIR)` resolved to the Metal cryptex
+   toolchain (no swift-compat libs) → `library 'swiftCompatibility56' not found`.
+   Use `$(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME)`.
+
+Both `cargo tauri ios build` (device, unsigned) and `--target aarch64-sim` now
+**BUILD SUCCEEDED**; the sim app reinstalls and still renders the styled showcase.
+
 ## Next milestones
 
 1. Fix wasm string ABI (export memory + readable text return) — unblocks live render.
