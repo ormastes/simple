@@ -67,41 +67,21 @@ fn _viewport_from_args(fw: i32, fh: i32) -> (i32, i32):
                     return (w, h)
     (fw, fh)
 
-fn scroll_slice(src: [u32], sw: i32, sh_total: i32, src_y0: i32, src_h: i32, dw: i32, dh: i32) -> [i64]:
-    """Take src_h rows starting at src_y0 from src (sw wide, sh_total tall,
-    0xAARRGGBB) and scale that slice to a dw x dh presentable [i64] buffer, then
-    overlay a scrollbar on the right edge showing the position within the full page."""
-    var out: [i64] = [0; dw * dh]
+fn shrink_render(src: [u32], sw: i32, sh: i32, div: i32, dw: i32, dh: i32) -> [i64]:
+    """Shrink the WHOLE render (sw x sh, 0xAARRGGBB) by `div` and blit it top-left
+    into a dw x dh window (0x00RRGGBB), the rest filled with a neutral background."""
+    var out: [i64] = [0x00222831; dw * dh]
+    val tw = sw / div
+    val th = sh / div
     var dy = 0
-    while dy < dh:
-        val sy = src_y0 + dy * src_h / dh
+    while dy < th and dy < dh:
+        val sy = dy * div
         var dx = 0
-        while dx < dw:
-            val sx = dx * sw / dw
+        while dx < tw and dx < dw:
+            val sx = dx * div
             out[dy * dw + dx] = src[sy * sw + sx].to_i64() & 0xFFFFFF
             dx = dx + 1
         dy = dy + 1
-    # Scrollbar (right edge): track + a thumb sized to the visible fraction and
-    # positioned by scroll offset, so it's clear the page scrolls and where you are.
-    val bar_w = 16
-    var thumb_h = dh * src_h / sh_total
-    if thumb_h < 24:
-        thumb_h = 24
-    if thumb_h > dh:
-        thumb_h = dh
-    val max_y0 = sh_total - src_h
-    var thumb_y = 0
-    if max_y0 > 0:
-        thumb_y = src_y0 * (dh - thumb_h) / max_y0
-    var by = 0
-    while by < dh:
-        val in_thumb = by >= thumb_y and by < thumb_y + thumb_h
-        val col: i64 = if in_thumb: 0x00C8D0DC else: 0x00222A33
-        var bx = dw - bar_w
-        while bx < dw:
-            out[by * dw + bx] = col
-            bx = bx + 1
-        by = by + 1
     out
 
 fn main() -> i64:
@@ -154,37 +134,19 @@ fn main() -> i64:
         winit_loop_free(lp)
         return 0
 
-    var max_off = full_rh - rh_win
-    if max_off < 0:
-        max_off = 0
-    val step = if rh_win / 6 > 0: rh_win / 6 else: 1
-    var off = 0
-    var frame = scroll_slice(full_pixels, rw, full_rh, off, rh_win, win_w, win_h)
+    # Display the WHOLE rendered page shrunk to 1/DIV (pure_simple only; chromium
+    # is native, scale 1). Shrunk page sits top-left with a background fill.
+    val div = _int_env("PURE_SIMPLE_DISPLAY_DIV", 8)
+    val frame = shrink_render(full_pixels, rw, full_rh, div, win_w, win_h)
     var running = true
     var iters = 0
     while running and iters < 20000000:
         val input = winit_poll_input(lp)
         if input.close:
             running = false
-        var dirty = false
         for k in input.keys:
-            if (k == 40 or k == 34) and off < max_off:   # Down / PageDown
-                off = off + step
-                dirty = true
-            if (k == 38 or k == 33) and off > 0:          # Up / PageUp
-                off = off - step
-                dirty = true
-            if k == 27:                                # Esc
+            if k == 27:
                 running = false
-        if input.scroll_y != 0.0:
-            off = off + (input.scroll_y * -16.0).to_i32()
-            dirty = true
-        if off < 0:
-            off = 0
-        if off > max_off:
-            off = max_off
-        if dirty:
-            frame = scroll_slice(full_pixels, rw, full_rh, off, rh_win, win_w, win_h)
         winit_present_rgba(win, win_w.to_i64(), win_h.to_i64(), frame)
         iters = iters + 1
 
