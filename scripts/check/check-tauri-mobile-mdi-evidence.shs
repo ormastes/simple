@@ -5,8 +5,28 @@ ROOT_DIR="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
 BUILD_DIR="$ROOT_DIR/build/tauri_android_mdi"
 SIMPLE_BIN="${SIMPLE_BIN:-$ROOT_DIR/src/compiler_rust/target/release/simple}"
 SMOKE_SOURCE="$ROOT_DIR/examples/06_io/ui/tauri_mobile_mdi_smoke.spl"
-ANDROID_RUNTIME="$ROOT_DIR/src/compiler_rust/target/x86_64-linux-android/release/simple"
 ANDROID_APK="$ROOT_DIR/tools/tauri-shell/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk"
+
+# ABI-aware: the Android emulator ABI depends on the host (arm64-v8a on Apple
+# Silicon, x86_64 on Intel/CI). Derive the packaged ABI from the APK itself
+# instead of hard-coding x86_64, and map it to the cross-compiled runtime triple.
+# Override with ANDROID_ABI=arm64-v8a|x86_64 if needed.
+if [ -n "${ANDROID_ABI:-}" ]; then
+    abi="$ANDROID_ABI"
+elif [ -f "$ANDROID_APK" ]; then
+    abi="$(unzip -l "$ANDROID_APK" 2>/dev/null \
+        | grep -oE 'lib/[a-z0-9_-]+/libsimple_mobile_runtime_exec\.so' \
+        | head -1 | cut -d/ -f2)"
+fi
+abi="${abi:-arm64-v8a}"
+case "$abi" in
+    arm64-v8a) ANDROID_TRIPLE="aarch64-linux-android" ;;
+    x86_64)    ANDROID_TRIPLE="x86_64-linux-android" ;;
+    armeabi-v7a) ANDROID_TRIPLE="armv7-linux-androideabi" ;;
+    x86)       ANDROID_TRIPLE="i686-linux-android" ;;
+    *)         ANDROID_TRIPLE="aarch64-linux-android" ;;
+esac
+ANDROID_RUNTIME="$ROOT_DIR/src/compiler_rust/target/$ANDROID_TRIPLE/release/simple"
 ANDROID_SCREENSHOT="${ANDROID_SCREENSHOT:-$BUILD_DIR/android_emulator_screenshot_live_mdi_final.png}"
 ANDROID_LOGCAT="${ANDROID_LOGCAT:-$BUILD_DIR/emulator_logcat_live_mdi_final.txt}"
 IOS_MDI_EVIDENCE="$ROOT_DIR/scripts/check/check-tauri-ios-mobile-mdi-evidence.shs"
@@ -42,12 +62,12 @@ grep -q 'simple-picture' "$BUILD_DIR/mobile_mdi_smoke_run.out" \
     || fail "mobile MDI smoke output missing taskbar/icon image marker"
 pass_line "smoke_source_ipc"
 
-test -x "$ANDROID_RUNTIME" || fail "Android x86_64 Simple runtime missing: $ANDROID_RUNTIME"
+test -x "$ANDROID_RUNTIME" || fail "Android $ANDROID_TRIPLE Simple runtime missing: $ANDROID_RUNTIME"
 pass_line "android_runtime_artifact"
 
 test -f "$ANDROID_APK" || fail "Android APK missing: $ANDROID_APK"
-unzip -l "$ANDROID_APK" | grep -q 'lib/x86_64/libsimple_mobile_runtime_exec.so' \
-    || fail "Android APK missing packaged native Simple runtime"
+unzip -l "$ANDROID_APK" | grep -q "lib/$abi/libsimple_mobile_runtime_exec.so" \
+    || fail "Android APK missing packaged native Simple runtime (lib/$abi/)"
 pass_line "android_apk_runtime_packaging"
 
 test -s "$ANDROID_SCREENSHOT" || fail "Android live MDI screenshot missing: $ANDROID_SCREENSHOT"
