@@ -185,6 +185,7 @@ pub use executor::{
     rt_thread_spawn_isolated2,
     rt_thread_spawn_limited,
     rt_thread_spawn_limited2,
+    rt_thread_spawn_limited_with_args,
     rt_thread_was_killed,
     rt_thread_yield,
     spawn,

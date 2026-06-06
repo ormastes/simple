@@ -216,9 +216,10 @@ scheduler-aware green runtime for Go-like benchmark work. When a test or profile
 claims M:N CPU parallelism, assert `used_runtime_pool()` so interpreter or
 platform fallback does not masquerade as a parallel result.
 
-Do not use numbered concurrency aliases. `thread_spawn2` is rejected by
-`simple check` with `E-PAR-002`; use `thread_spawn_with_args` for
-explicit-argument OS-thread spawning.
+Do not use numbered concurrency aliases. `thread_spawn2`, `spawn_isolated2`,
+and `spawn_limited2` are rejected by `simple check` with `E-PAR-002`; use
+`thread_spawn_with_args`, `spawn_isolated_with_args`, or
+`spawn_limited_with_args` for explicit-argument spawning.
 
 ## Reserved Keywords
 

@@ -619,11 +619,10 @@ pub extern "C" fn rt_thread_spawn_isolated_with_args(
 ) -> u64 {
     let thread_id = NEXT_THREAD_ID.fetch_add(1, Ordering::SeqCst);
 
-    let entry = RuntimeValue::from_raw(closure_ptr).as_int() as u64;
-    if entry < 4096 {
+    let Some(entry) = (unsafe { native_closure_entry(closure_ptr) }) else {
         return 0;
-    }
-    let func: extern "C" fn(i64, i64) -> i64 = unsafe { std::mem::transmute(entry) };
+    };
+    let func: extern "C" fn(u64, RuntimeValue, RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(entry) };
 
     // Clone data for the thread
     let copied_data1 = data1.deep_copy();
@@ -632,7 +631,7 @@ pub extern "C" fn rt_thread_spawn_isolated_with_args(
     // Spawn the OS thread
     let handle = thread::Builder::new()
         .name(format!("simple-isolated-{}", thread_id))
-        .spawn(move || RuntimeValue::from_int(func(copied_data1.as_int(), copied_data2.as_int())))
+        .spawn(move || func(closure_ptr, copied_data1, copied_data2))
         .expect("Failed to spawn isolated thread");
 
     // Create and box the handle
@@ -646,11 +645,7 @@ pub extern "C" fn rt_thread_spawn_isolated_with_args(
 }
 
 #[no_mangle]
-pub extern "C" fn rt_thread_spawn_isolated2(
-    closure_ptr: u64,
-    data1: RuntimeValue,
-    data2: RuntimeValue,
-) -> u64 {
+pub extern "C" fn rt_thread_spawn_isolated2(closure_ptr: u64, data1: RuntimeValue, data2: RuntimeValue) -> u64 {
     rt_thread_spawn_isolated_with_args(closure_ptr, data1, data2)
 }
 
@@ -902,9 +897,9 @@ pub extern "C" fn rt_thread_spawn_limited(
     Box::into_raw(thread_handle) as u64
 }
 
-/// Spawn a resource-limited isolated thread with two data arguments.
+/// Spawn a resource-limited isolated thread with explicit worker arguments.
 #[no_mangle]
-pub extern "C" fn rt_thread_spawn_limited2(
+pub extern "C" fn rt_thread_spawn_limited_with_args(
     closure_ptr: u64,
     data1: RuntimeValue,
     data2: RuntimeValue,
@@ -915,9 +910,10 @@ pub extern "C" fn rt_thread_spawn_limited2(
 ) -> u64 {
     let thread_id = NEXT_THREAD_ID.fetch_add(1, Ordering::SeqCst);
 
-    // Convert closure pointer to a function
-    let func: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue =
-        unsafe { std::mem::transmute(closure_ptr as usize) };
+    let Some(entry) = (unsafe { native_closure_entry(closure_ptr) }) else {
+        return 0;
+    };
+    let func: extern "C" fn(u64, RuntimeValue, RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(entry) };
 
     // Clone data for the thread
     let copied_data1 = data1.deep_copy();
@@ -958,7 +954,7 @@ pub extern "C" fn rt_thread_spawn_limited2(
             }
 
             // Execute the closure
-            func(copied_data1, copied_data2)
+            func(closure_ptr, copied_data1, copied_data2)
         })
         .expect("Failed to spawn limited thread");
 
@@ -977,6 +973,27 @@ pub extern "C" fn rt_thread_spawn_limited2(
     });
 
     Box::into_raw(thread_handle) as u64
+}
+
+#[no_mangle]
+pub extern "C" fn rt_thread_spawn_limited2(
+    closure_ptr: u64,
+    data1: RuntimeValue,
+    data2: RuntimeValue,
+    cpu_seconds: i64,
+    memory_bytes: i64,
+    fd_limit: i64,
+    thread_limit: i64,
+) -> u64 {
+    rt_thread_spawn_limited_with_args(
+        closure_ptr,
+        data1,
+        data2,
+        cpu_seconds,
+        memory_bytes,
+        fd_limit,
+        thread_limit,
+    )
 }
 
 /// Join a resource-limited thread and get its result.

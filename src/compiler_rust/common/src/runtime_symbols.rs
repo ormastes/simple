@@ -518,6 +518,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_thread_sleep",
     "rt_thread_yield",
     "rt_thread_spawn_limited",
+    "rt_thread_spawn_limited_with_args",
     "rt_thread_spawn_limited2",
     "rt_thread_join_limited",
     "rt_thread_was_killed",

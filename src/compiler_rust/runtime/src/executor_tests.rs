@@ -144,9 +144,9 @@ fn test_isolated_thread_spawn_and_join() {
 }
 
 #[test]
-fn test_isolated_thread_spawn2_and_join() {
+fn test_isolated_thread_spawn_with_args_and_join() {
     let closure = native_closure_record(add_values as *const ());
-    let handle = rt_thread_spawn_isolated2(
+    let handle = rt_thread_spawn_isolated_with_args(
         (&*closure) as *const usize as u64,
         RuntimeValue::from_int(10),
         RuntimeValue::from_int(32),
