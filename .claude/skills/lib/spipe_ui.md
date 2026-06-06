@@ -32,13 +32,25 @@ and is considered FAKE.** It reinvents layout/state/event routing that already
 exists. Use the builder → `render_html_tree` → web-renderer pipeline below, or
 extend the existing interactive host — never reinvent widgets with raw 2D ops.
 
-**Canonical interactive app:** `src/os/hosted/hosted_entry.spl`. It wires a
-`HostCompositor` (`src/os/compositor/host_compositor_entry.spl`) seeded by
+**To just open ONE GUI window (default — not the WM):** present a `[u32]` buffer to
+a single winit window via `std.io.window_winit` and **re-present continuously** in
+the loop — model: `examples/06_io/ui/web_engine2d_gui.spl` (its `iters % 200`
+re-present). On macOS the window only composites if you keep presenting; a
+render-on-dirty-only loop (like the WM) leaves the window blank. Do NOT reach for
+the multi-window compositor unless you actually need multiple windows.
+⚠️ `web_engine2d_gui.spl`'s `demo_html()` uses the **corpus/heuristic** renderer at
+32×24 (a degenerate marker demo — titlebar fills the whole height). For CORRECT
+content render a real widget tree (builder → `render_html_tree`, pipeline below) or
+a real HTML file through the layout renderer — not the corpus demo markers.
+
+**For MULTIPLE windows (advanced — the MDI WM):** `src/os/hosted/hosted_entry.spl`
+wires a `HostCompositor` (`src/os/compositor/host_compositor_entry.spl`) seeded by
 `seed_host_compositor_shared_mdi` (`src/os/compositor/shared_mdi_host_seed.spl`),
 rendering **Simple Web MDI app content** through `HostedWinitBufferBackend`
-(`src/os/compositor/hosted_backend_winit.spl`). It has REAL event routing:
+(`src/os/compositor/hosted_backend_winit.spl`), with REAL event routing:
 `comp.pointer_move(x, y)`, `comp.handle_left_button(pressed)` (click-focus,
-titlebar drag, close-X) and keyboard Tab/W/M/R/Esc.
+titlebar drag, close-X) and keyboard Tab/W/M/R/Esc. (Known bug: its render-on-dirty
+loop leaves content blank on macOS — needs the continuous re-present above.)
 
 **The real widget → pixels pipeline** (used by the office apps word/sheets/mail/
 planner and the WM — model app `src/app/wm_compare/production_gui_web_renderer_parity.spl`):

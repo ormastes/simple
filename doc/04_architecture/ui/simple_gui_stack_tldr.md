@@ -148,6 +148,14 @@ CPU/NEON + Metal); launch with `scripts/gui/macos-gui-run.shs <app>`:
 - **widgets**: `widget_showcase_gui.spl`
 - **HTML**: `web_text_gui.spl` (or `web_render_file_gui.spl <file.html>`)
 
+The above are **static**. The **interactive** GUI is the real pipeline — do NOT
+hand-draw one with engine2d primitives:
+
+- **interactive WM/MDI**: `src/os/hosted/hosted_entry.spl` (HostCompositor +
+  `seed_host_compositor_shared_mdi`, real `builder`→`render_html_tree`→web-render,
+  real event routing). Gate: `check-shared-wm-renderer-unification-evidence.shs`
+  (`logic_passed >= 4`).
+
 Verify the framebuffer (`read_pixels` → PPM), not the screenshot. Details +
 caveats in [source](simple_gui_stack.md) → "GUI Sanity Apps".
 

@@ -476,6 +476,27 @@ is the Engine2D **CPU/aarch64-NEON** and **Metal** backends). They are the quick
 | GUI widgets | `examples/06_io/ui/widget_showcase_gui.spl` | Widget chrome drawn on the CPU lane: button, checkbox, text field, progress bar, list, with legible labels |
 | HTML rendering | `examples/06_io/ui/web_text_gui.spl` (text page) / `web_render_file_gui.spl <file.html>` | Web layout → Engine2D CPU: real laid-out, legible glyph text |
 
+Those three apps render **static, non-interactive** scenes — they sanity-check
+the drawing surfaces, not the interactive GUI (the HTML one uses the real web
+renderer; the 2D/widget ones draw primitives directly, which is fine for a demo
+but not a template for an app). The **interactive WM/MDI app** is the real
+pipeline and must not be re-implemented by hand-drawing engine2d primitives:
+
+| Lane | App | What it proves |
+|------|-----|----------------|
+| Interactive WM/MDI | `src/os/hosted/hosted_entry.spl` | `HostCompositor` + `seed_host_compositor_shared_mdi` rendering Simple Web MDI app content through `HostedWinitBufferBackend`, with real event routing (`comp.pointer_move`, `comp.handle_left_button` — click-focus, titlebar drag, close-X; keyboard Tab/W/M/R/Esc). Widget→pixels uses the real `common.ui.builder` → `init_state` → `app.ui.render.html_widgets.render_html_tree` → `simple_web_render_html_to_pixels_with_engine2d_backend` path; hit-testing via `shared_wm_translate_pointer_event` (`src/lib/common/ui/window_scene.spl`). |
+
+Verify the interactive WM with the framebuffer/logic gate (not a screenshot):
+`scripts/check/check-shared-wm-renderer-unification-evidence.shs` expects
+`shared_wm_renderer_unification_status=pass` and `logic_passed >= 4`. macOS
+caveat: the hosted winit window can present blank — the documented winit bug
+`doc/08_tracking/bug/macos_winit_window_not_displayed_2026-05-28.md` — so trust
+the gate, not the live window. Pure-Simple web render is real but
+interpreter-bound (~minutes/frame); the fast live path is Draw IR
+(`engine2d_draw_ir_adv_batch` in
+`src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl`), whose widget-tree→Draw IR
+converter is the not-yet-built "preferred next refactor".
+
 Launch on macOS (registers the process with the window server via a throwaway
 `.app` bundle, then nudges the window on-screen):
 
