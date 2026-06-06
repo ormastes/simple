@@ -90,6 +90,10 @@ prefer the Protocol-v2 Draw IR baseline diff
 `/api/test/draw-ir/diff?baseline=...&capability=draw_ir` or the shared
 `common.ui.draw_ir_diff` helper as structured evidence before falling back to
 pixel-only assertions.
+When the question is "where did this GUI component render?", use
+`/api/test/draw-ir/layout?id=...&capability=draw_ir` or `expect_draw` to assert
+the stable id, role/kind, geometry, hit rect, parent, and computed style inside
+the SPipe case.
 After adding or moving UI-facing app feature specs, run
 `test/03_system/app/testing/feature/ui_sspec_evidence_audit_spec.spl` to keep
 the critical UI SSPEC lane mirrored into generated manuals with visible

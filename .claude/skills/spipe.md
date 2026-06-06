@@ -71,6 +71,10 @@ For UI layout, border, color, style, or text-bound parity, prefer structured
 Protocol-v2 Draw IR evidence with
 `/api/test/draw-ir/diff?baseline=...&capability=draw_ir` or
 `common.ui.draw_ir_diff` before relying on pixel-only assertions.
+For GUI render-location assertions, use
+`/api/test/draw-ir/layout?id=...&capability=draw_ir` or `expect_draw` to prove
+the stable id, role/kind, geometry, hit rect, parent, and computed style inside
+the SPipe case.
 
 ## Rendering Checks (`expect_draw` style)
 

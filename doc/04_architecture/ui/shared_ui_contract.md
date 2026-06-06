@@ -114,6 +114,10 @@ The extension endpoints are:
 Client helpers such as `expect_draw` are SPipe-layer conveniences over these
 endpoints. They run inside ordinary specs that import `use std.spec`; the
 existing `std.spipe` alias remains source-compatible.
+Together, `/api/test/draw-ir/layout?id=...` and `expect_draw` give GUI tests a
+stable answer to "what rendered where": tests can assert the component id,
+kind/role, geometry, border/content/hit/clip rectangles, and computed style
+without depending on screenshot-only pixel inference.
 
 ### 3.2 Base URL
 

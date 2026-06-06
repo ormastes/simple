@@ -155,6 +155,11 @@ geometry/style/color/text-bound comparisons. Keep Protocol v1 element/state/
 action endpoints stable. The typed model is `DrawIrComposition`; SDN
 interchange is provided by `src/lib/common/ui/draw_ir_sdn.spl`, and Draw.io
 mxGraph interchange by `src/lib/common/ui/draw_ir_drawio.spl`.
+For GUI tests that need to know what was rendered where, call
+`/api/test/draw-ir/layout?id=...&capability=draw_ir` or use `expect_draw` to
+assert stable id, kind/role, geometry, hit rect, parent, and computed style
+inside a normal SPipe scenario before using screenshots as supplemental
+evidence.
 
 ---
 

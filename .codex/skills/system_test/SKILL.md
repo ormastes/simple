@@ -145,6 +145,10 @@ describe "<Feature Name>":
   evidence when available: use `draw-ir/diff?baseline=...&capability=draw_ir`
   or `common.ui.draw_ir_diff` for stable-id geometry, border, color, style, and
   text-bound deltas; screenshots are supporting evidence, not the only oracle.
+- GUI render-location specs should prove "what rendered where" through
+  `draw-ir/layout?id=...&capability=draw_ir` or `expect_draw` before relying on
+  screenshot pixels: assert stable id, kind/role, geometry, hit rect, parent,
+  and computed style.
 - Environmental tests should capture command/API/protocol/binary/log evidence
   when that is more meaningful than a screenshot.
 - Short grammar features must have runtime-specific coverage:
