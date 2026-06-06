@@ -231,7 +231,30 @@ pattern, so it embeds on iOS too with no env. lib.rs already selects
 `IOS_RUNTIME_AARCH64_SIM` under `cfg(target_os=ios, aarch64, sim)`.
 Rebuilt the deleted iOS-sim runtime (`cargo build --release --target
 aarch64-apple-ios-sim -p simple-driver` → 31.5 MB Mach-O arm64), copied to the
-sibling path, building the iOS app + verifying on the booted iPhone 17 sim.
+sibling path, built the iOS app (`cargo tauri ios build --debug --target
+aarch64-sim`; the device archive needs signing, the sim target doesn't).
+
+**LIVE on iPhone 17 sim (2026-06-06): real pipeline in-app, at render parity
+with Android.** The app extracts the embedded runtime + bundle, **spawns the
+Simple subprocess in-app** (the sim permits exec — the prior blocker was env, now
+fixed), runs `main.spl tauri showcase`, emits the same `html_len=344229` real
+generated HTML (verified widgets: `widget-menubar` File/Edit, `widget-table`
+Alice/Bob/Carol, `widget-tree` src/main.spl, `widget-card`, `widget-textfield`),
+and paints the full styled dark-glass UI in WKWebView.
+
+**Two iOS-specific bugs found + fixed (honest — first render was blank white):**
+1. **ATS blocked the webview nav.** The mobile branch hardcoded
+   `WebviewUrl::External("http://tauri.localhost/inline-shell.html")`. os_log
+   showed `didFailProvisionalLoadForFrame ... NSURLErrorDomain code=-1022` — iOS
+   App Transport Security rejects plain `http://`; iOS serves assets via the
+   secure `tauri://localhost` scheme. Failed nav → blank webview, and the render
+   eval'd against a dead document (`eval OK` is NOT proof of paint). Fix: use
+   `WebviewUrl::App("inline-shell.html")`, which resolves the correct per-platform
+   scheme (secure `tauri://` on iOS, `http://tauri.localhost` on Android).
+2. **No real base asset.** `inline-shell.html` was a made-up URL with no asset
+   (Android tolerates the 404 and still paints injected DOM; iOS does not). Added
+   a real minimal `dist/inline-shell.html` (served from `frontendDist`) as the
+   base document, so the App-scheme nav resolves on both platforms.
 
 ## Next milestones
 

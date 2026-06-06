@@ -1672,12 +1672,13 @@ pub fn run() {
                 eprintln!("[tauri-shell] creating window from initial data URL");
                 WebviewUrl::External(initial_url.parse().expect("invalid initial data URL"))
             } else if initial_inline_html.is_some() {
-                eprintln!("[tauri-shell] creating window from mobile inline shell placeholder");
-                WebviewUrl::External(
-                    "http://tauri.localhost/inline-shell.html"
-                        .parse()
-                        .expect("invalid mobile inline placeholder URL"),
-                )
+                // Use the App scheme (not a hardcoded http:// URL): on iOS, assets
+                // are served via the secure `tauri://localhost` scheme and ATS
+                // rejects plain `http://tauri.localhost` (NSURLErrorDomain -1022 →
+                // failed provisional load → blank webview). App() resolves the
+                // correct per-platform scheme and loads the real bundled asset.
+                eprintln!("[tauri-shell] creating window from mobile inline shell base (App scheme)");
+                WebviewUrl::App("inline-shell.html".into())
             } else {
                 eprintln!("[tauri-shell] creating window from app://index.html");
                 WebviewUrl::App("index.html".into())
