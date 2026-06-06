@@ -1,12 +1,6 @@
 # GUI Performance Profile
 
-<<<<<<< Conflict 1 of 7
-%%%%%%% Changes from base to side #1
--**Date:** 2026-06-06T08:48:22+00:00
-+**Date:** 2026-06-06T09:04:24+00:00
-+++++++ Contents of side #2
-**Date:** 2026-06-06T06:41:59+00:00
->>>>>>> Conflict 1 of 7 ends
+**Date:** 2026-06-06T09:51:02+00:00
 **Resolution:** 320x240
 **Frames:** 1
 **Profile script:** `tools/gui_perf_bench/run_all_benchmarks.shs`
@@ -41,32 +35,18 @@ TUI startup speed is not measured by this GUI profile. The canonical startup aud
 gui_perf_benchmark_backend=gtk3
 gui_perf_benchmark_resolution=320x240
 gui_perf_benchmark_frames=1
-<<<<<<< Conflict 2 of 7
-%%%%%%% Changes from base to side #1
--gui_perf_benchmark_cold_startup_ms=68.35
--gui_perf_benchmark_warm_total_ms=0.03
-+gui_perf_benchmark_cold_startup_ms=75.55
-+gui_perf_benchmark_warm_total_ms=0.04
-+++++++ Contents of side #2
-gui_perf_benchmark_cold_startup_ms=104.65
-gui_perf_benchmark_warm_total_ms=0.04
->>>>>>> Conflict 2 of 7 ends
+gui_perf_benchmark_cold_startup_ms=73.51
+gui_perf_benchmark_warm_total_ms=0.03
 gui_perf_benchmark_frame_time_avg_ms=0.000
 gui_perf_benchmark_frame_time_p50_ms=0.000
 gui_perf_benchmark_frame_time_p95_ms=0.000
 gui_perf_benchmark_frame_time_max_ms=0.000
-<<<<<<< Conflict 3 of 7
-%%%%%%% Changes from base to side #1
--gui_perf_benchmark_draw_only_avg_ms=0.027
-+gui_perf_benchmark_draw_only_avg_ms=0.035
-+++++++ Contents of side #2
-gui_perf_benchmark_draw_only_avg_ms=0.037
->>>>>>> Conflict 3 of 7 ends
+gui_perf_benchmark_draw_only_avg_ms=0.023
 gui_perf_benchmark_pixel_count=76800
 gui_perf_benchmark_bytes_per_frame=307200
 gui_perf_benchmark_status=completed
 ```
-gui_perf_benchmark_max_rss_kb=81152
+gui_perf_benchmark_max_rss_kb=80896
 gui_perf_benchmark_exit_code=0
 
 --- python_tkinter: SKIPPED (tkinter not found) ---
@@ -80,34 +60,18 @@ gui_perf_benchmark_reason=python3 tkinter not available
 gui_perf_benchmark_backend=javascript_node_canvas
 gui_perf_benchmark_resolution=320x240
 gui_perf_benchmark_frames=1
-<<<<<<< Conflict 4 of 7
-%%%%%%% Changes from base to side #1
--gui_perf_benchmark_cold_startup_ms=0.41
--gui_perf_benchmark_warm_total_ms=0.28
--gui_perf_benchmark_frame_time_avg_ms=0.282
--gui_perf_benchmark_frame_time_p50_ms=0.282
--gui_perf_benchmark_frame_time_p95_ms=0.282
--gui_perf_benchmark_frame_time_max_ms=0.282
-+gui_perf_benchmark_cold_startup_ms=0.42
-+gui_perf_benchmark_warm_total_ms=0.29
-+gui_perf_benchmark_frame_time_avg_ms=0.286
-+gui_perf_benchmark_frame_time_p50_ms=0.286
-+gui_perf_benchmark_frame_time_p95_ms=0.286
-+gui_perf_benchmark_frame_time_max_ms=0.286
-+++++++ Contents of side #2
-gui_perf_benchmark_cold_startup_ms=0.65
-gui_perf_benchmark_warm_total_ms=0.39
-gui_perf_benchmark_frame_time_avg_ms=0.383
-gui_perf_benchmark_frame_time_p50_ms=0.383
-gui_perf_benchmark_frame_time_p95_ms=0.383
-gui_perf_benchmark_frame_time_max_ms=0.383
->>>>>>> Conflict 4 of 7 ends
+gui_perf_benchmark_cold_startup_ms=0.62
+gui_perf_benchmark_warm_total_ms=0.29
+gui_perf_benchmark_frame_time_avg_ms=0.292
+gui_perf_benchmark_frame_time_p50_ms=0.292
+gui_perf_benchmark_frame_time_p95_ms=0.292
+gui_perf_benchmark_frame_time_max_ms=0.292
 gui_perf_benchmark_pixel_count=76800
 gui_perf_benchmark_bytes_per_frame=307200
 gui_perf_benchmark_pixel_checksum=32801960
 gui_perf_benchmark_status=completed
 ```
-gui_perf_benchmark_max_rss_kb=64000
+gui_perf_benchmark_max_rss_kb=64512
 gui_perf_benchmark_exit_code=0
 
 --- electron: SKIPPED (electron not installed) ---
@@ -122,46 +86,21 @@ gui_perf_benchmark_reason=tauri benchmark app not yet built; requires cargo-taur
 ### pure_simple_cuda
 
 ```text
-(backend_comparison_samples sample_count: 6 valid: false
-  (backend_comparison_sample fixture_id: "gui-perf-8k-fill" backend_family: "metal" shell: "simple-web" requested: "metal" selected: "metal" device_id: "" status: "Unavailable" command: "bench-8k" host: "dl" warmup_count: 0 sample_count: 0 cold_start_us: 0 warm_start_us: 0 p50_frame_us: 0 p95_frame_us: 0 p95_input_to_paint_us: 0 max_rss_kb: 0 binary_size_bytes: 0 baseline_binary_size_bytes: 0 binary_size_delta_bytes: 0 package_size_bytes: 0 artifact_build_us: 0 artifact_load_us: 0 artifact_submit_us: 0 artifact_sync_us: 0 artifact_readback_us: 0 render_readback_scope: "" offload_tag_kind: "@gpu" operation_family: "text_blit" generated_operation: "simple_2d_copy_u32" generated_entry_symbol: "simple_2d_copy_u32" generated_source_format: "metal-shading-language" generated_binary_format: "metallib" generated_artifact_path_suffix: "simple_2d_optimization.metallib" runtime_compute_target: "metal" runtime_execution_path: "generated_2d_kernel" runtime_launch_api: "MTLComputeCommandEncoder.dispatchThreads" runtime_entry_symbol: "simple_2d_copy_u32" runtime_artifact_name: "simple_2d_optimization.metallib" runtime_status: "runtime-unavailable" checksum: "" pixel_proof: "" scalar_baseline_compared: false fallback_used: false fallback_reason: "" unavailable_reason: "Metal requires macOS")
-  (backend_comparison_sample fixture_id: "gui-perf-8k-fill" backend_family: "vulkan" shell: "simple-web" requested: "vulkan" selected: "vulkan" device_id: "" status: "Unavailable" command: "bench-8k" host: "dl" warmup_count: 0 sample_count: 0 cold_start_us: 0 warm_start_us: 0 p50_frame_us: 0 p95_frame_us: 0 p95_input_to_paint_us: 0 max_rss_kb: 0 binary_size_bytes: 0 baseline_binary_size_bytes: 0 binary_size_delta_bytes: 0 package_size_bytes: 0 artifact_build_us: 0 artifact_load_us: 0 artifact_submit_us: 0 artifact_sync_us: 0 artifact_readback_us: 0 render_readback_scope: "" offload_tag_kind: "@gpu" operation_family: "text_blit" generated_operation: "" generated_entry_symbol: "" generated_source_format: "none" generated_binary_format: "none" generated_artifact_path_suffix: "" runtime_compute_target: "unsupported" runtime_execution_path: "generated_2d_kernel" runtime_launch_api: "none" runtime_entry_symbol: "" runtime_artifact_name: "" runtime_status: "plan-not-ready:backend-inactive" checksum: "" pixel_proof: "" scalar_baseline_compared: false fallback_used: false fallback_reason: "" unavailable_reason: "vulkan probe unavailable in interpreter")
-  (backend_comparison_sample fixture_id: "gui-perf-8k-fill" backend_family: "cuda" shell: "simple-web" requested: "cuda" selected: "cuda" device_id: "" status: "Failed" command: "bench-8k" host: "dl" warmup_count: 0 sample_count: 0 cold_start_us: 0 warm_start_us: 0 p50_frame_us: 0 p95_frame_us: 0 p95_input_to_paint_us: 0 max_rss_kb: 0 binary_size_bytes: 0 baseline_binary_size_bytes: 0 binary_size_delta_bytes: 0 package_size_bytes: 0 artifact_build_us: 0 artifact_load_us: 0 artifact_submit_us: 0 artifact_sync_us: 0 artifact_readback_us: 0 render_readback_scope: "" offload_tag_kind: "@gpu" operation_family: "text_blit" generated_operation: "simple_2d_copy_u32" generated_entry_symbol: "simple_2d_copy_u32" generated_source_format: "cuda-c" generated_binary_format: "ptx" generated_artifact_path_suffix: "simple_2d_optimization.ptx" runtime_compute_target: "cuda" runtime_execution_path: "generated_2d_kernel" runtime_launch_api: "rt_cuda_launch_kernel" runtime_entry_symbol: "simple_2d_copy_u32" runtime_artifact_name: "simple_2d_optimization.ptx" runtime_status: "cuda-runtime-unavailable" checksum: "" pixel_proof: "" scalar_baseline_compared: false fallback_used: false fallback_reason: "" unavailable_reason: "backend-specific measurement missing")
-  (backend_comparison_sample fixture_id: "gui-perf-8k-fill" backend_family: "opencl" shell: "simple-web" requested: "opencl" selected: "opencl" device_id: "" status: "Unavailable" command: "bench-8k" host: "dl" warmup_count: 0 sample_count: 0 cold_start_us: 0 warm_start_us: 0 p50_frame_us: 0 p95_frame_us: 0 p95_input_to_paint_us: 0 max_rss_kb: 0 binary_size_bytes: 0 baseline_binary_size_bytes: 0 binary_size_delta_bytes: 0 package_size_bytes: 0 artifact_build_us: 0 artifact_load_us: 0 artifact_submit_us: 0 artifact_sync_us: 0 artifact_readback_us: 0 render_readback_scope: "" offload_tag_kind: "@gpu" operation_family: "text_blit" generated_operation: "simple_2d_copy_u32" generated_entry_symbol: "simple_2d_copy_u32" generated_source_format: "opencl-c" generated_binary_format: "spirv" generated_artifact_path_suffix: "simple_2d_optimization.spirv" runtime_compute_target: "opencl" runtime_execution_path: "generated_2d_kernel" runtime_launch_api: "clEnqueueNDRangeKernel" runtime_entry_symbol: "simple_2d_copy_u32" runtime_artifact_name: "simple_2d_optimization.spirv" runtime_status: "opencl-runtime-or-queue-unavailable" checksum: "" pixel_proof: "" scalar_baseline_compared: false fallback_used: false fallback_reason: "" unavailable_reason: "OpenCL session proof failed: OpenClSessionEvidence[op=init success=false status=context-unavailable reason=opencl-context-create-failed platform=1 context=0 queue=0 program=0 kernel=0 generation=0 readback=false expected=0 actual=0]")
-  (backend_comparison_sample fixture_id: "gui-perf-8k-fill" backend_family: "hip" shell: "simple-web" requested: "rocm" selected: "rocm" device_id: "" status: "Unavailable" command: "bench-8k" host: "dl" warmup_count: 0 sample_count: 0 cold_start_us: 0 warm_start_us: 0 p50_frame_us: 0 p95_frame_us: 0 p95_input_to_paint_us: 0 max_rss_kb: 0 binary_size_bytes: 0 baseline_binary_size_bytes: 0 binary_size_delta_bytes: 0 package_size_bytes: 0 artifact_build_us: 0 artifact_load_us: 0 artifact_submit_us: 0 artifact_sync_us: 0 artifact_readback_us: 0 render_readback_scope: "" offload_tag_kind: "@gpu" operation_family: "text_blit" generated_operation: "simple_2d_copy_u32" generated_entry_symbol: "simple_2d_copy_u32" generated_source_format: "hip-cpp" generated_binary_format: "hsaco" generated_artifact_path_suffix: "simple_2d_optimization.hsaco" runtime_compute_target: "hip" runtime_execution_path: "generated_2d_kernel" runtime_launch_api: "rt_rocm_launch_kernel" runtime_entry_symbol: "simple_2d_copy_u32" runtime_artifact_name: "simple_2d_optimization.hsaco" runtime_status: "hip-runtime-unavailable" checksum: "" pixel_proof: "" scalar_baseline_compared: false fallback_used: false fallback_reason: "" unavailable_reason: "ROCm/HIP probe unavailable in interpreter")
-  (backend_comparison_sample fixture_id: "gui-perf-8k-fill" backend_family: "cpu_simd" shell: "simple-web" requested: "cpu_simd" selected: "cpu_simd" device_id: "host-cpu" status: "Initialized" command: "bench-8k" host: "dl" warmup_count: 0 sample_count: 0 cold_start_us: 0 warm_start_us: 0 p50_frame_us: 0 p95_frame_us: 0 p95_input_to_paint_us: 0 max_rss_kb: 0 binary_size_bytes: 0 baseline_binary_size_bytes: 0 binary_size_delta_bytes: 0 package_size_bytes: 0 artifact_build_us: 0 artifact_load_us: 0 artifact_submit_us: 0 artifact_sync_us: 0 artifact_readback_us: 0 render_readback_scope: "startup-size-audit" offload_tag_kind: "baseline" operation_family: "cpu_simd" generated_operation: "cpu_simd_baseline" generated_entry_symbol: "RenderBackend" generated_source_format: "engine2d-cpu" generated_binary_format: "none" generated_artifact_path_suffix: "" runtime_compute_target: "cpu_simd" runtime_execution_path: "engine2d-cpu-simd" runtime_launch_api: "RenderBackend" runtime_entry_symbol: "RenderBackend" runtime_artifact_name: "" runtime_status: "cpu-simd-baseline-ready" checksum: "sha256:unmeasured" pixel_proof: "startup-size-only" scalar_baseline_compared: true fallback_used: false fallback_reason: "" unavailable_reason: "")
+(backend_comparison_samples sample_count: 1 valid: true
+  (backend_comparison_sample fixture_id: "gui-perf-8k-fill" backend_family: "cuda" shell: "simple-web" requested: "cuda" selected: "cuda" device_id: "cuda:0" status: "Initialized" command: "bench-8k" host: "dl" warmup_count: 0 sample_count: 1 cold_start_us: 131452 warm_start_us: 130991 p50_frame_us: 528 p95_frame_us: 528 p95_input_to_paint_us: 528 max_rss_kb: 1 binary_size_bytes: 1 baseline_binary_size_bytes: 1 binary_size_delta_bytes: 0 package_size_bytes: 1 artifact_build_us: 461 artifact_load_us: 130463 artifact_submit_us: 379 artifact_sync_us: 16 artifact_readback_us: 133 render_readback_scope: "render+readback" offload_tag_kind: "@gpu" operation_family: "fill" generated_operation: "simple_2d_fill_u32" generated_entry_symbol: "simple_2d_fill_u32" generated_source_format: "cuda-c" generated_binary_format: "ptx" generated_artifact_path_suffix: "simple_2d_optimization.ptx" runtime_compute_target: "cuda" runtime_execution_path: "generated_2d_kernel" runtime_launch_api: "rt_cuda_launch_kernel" runtime_entry_symbol: "simple_2d_fill_u32" runtime_artifact_name: "simple_2d_optimization.ptx" runtime_status: "ready" checksum: "sum32:328570011648000" pixel_proof: "nonzero_pixels:76800" scalar_baseline_compared: true fallback_used: false fallback_reason: "" unavailable_reason: "")
 )
 ```
-<<<<<<< Conflict 5 of 7
-%%%%%%% Changes from base to side #1
--gui_perf_benchmark_max_rss_kb=286212
-+gui_perf_benchmark_max_rss_kb=287140
-+++++++ Contents of side #2
-gui_perf_benchmark_max_rss_kb=188916
->>>>>>> Conflict 5 of 7 ends
+gui_perf_benchmark_max_rss_kb=272604
 gui_perf_benchmark_exit_code=0
 
 ### simple_web_software
 
 ```text
-<<<<<<< Conflict 6 of 7
-+++++++ Contents of side #1
 (backend_comparison_samples sample_count: 1 valid: true
-  (backend_comparison_sample fixture_id: "gui-perf-8k-software" backend_family: "software" shell: "simple-web" requested: "software" selected: "software" device_id: "host-cpu" status: "Initialized" command: "bench-8k" host: "dl" warmup_count: 1 sample_count: 1 cold_start_us: 3439796 warm_start_us: 3266908 p50_frame_us: 3266908 p95_frame_us: 3266908 p95_input_to_paint_us: 3266908 max_rss_kb: 1 binary_size_bytes: 44980744 baseline_binary_size_bytes: 44980744 binary_size_delta_bytes: 0 package_size_bytes: 44980744 artifact_build_us: 0 artifact_load_us: 0 artifact_submit_us: 0 artifact_sync_us: 0 artifact_readback_us: 0 render_readback_scope: "render+readback" offload_tag_kind: "baseline" operation_family: "text_blit" generated_operation: "simple_web_render_html_to_pixels" generated_entry_symbol: "RenderBackend.draw_text_or_text_blit" generated_source_format: "simple" generated_binary_format: "none" generated_artifact_path_suffix: "" runtime_compute_target: "cpu_scalar" runtime_execution_path: "engine2d-cpu_scalar" runtime_launch_api: "RenderBackend" runtime_entry_symbol: "RenderBackend.draw_text_or_text_blit" runtime_artifact_name: "" runtime_status: "cpu-render-loop-ready" checksum: "sum32:328820832230016" pixel_proof: "nonzero_pixels:76800" scalar_baseline_compared: true fallback_used: false fallback_reason: "" unavailable_reason: "")
-%%%%%%% Changes from base to side #2
--(backend_comparison_samples sample_count: 1 valid: true
--  (backend_comparison_sample fixture_id: "gui-perf-8k-software" backend_family: "software" shell: "simple-web" requested: "software" selected: "software" device_id: "host-cpu" status: "Initialized" command: "bench-8k" host: "dl" warmup_count: 1 sample_count: 1 cold_start_us: 3315126 warm_start_us: 3291649 p50_frame_us: 3291649 p95_frame_us: 3291649 p95_input_to_paint_us: 3291649 max_rss_kb: 1 binary_size_bytes: 44980744 baseline_binary_size_bytes: 44980744 binary_size_delta_bytes: 0 package_size_bytes: 44980744 artifact_build_us: 0 artifact_load_us: 0 artifact_submit_us: 0 artifact_sync_us: 0 artifact_readback_us: 0 render_readback_scope: "render+readback" offload_tag_kind: "baseline" operation_family: "text_blit" generated_operation: "simple_web_render_html_to_pixels" generated_entry_symbol: "RenderBackend.draw_text_or_text_blit" generated_source_format: "simple" generated_binary_format: "none" generated_artifact_path_suffix: "" runtime_compute_target: "cpu_scalar" runtime_execution_path: "engine2d-cpu_scalar" runtime_launch_api: "RenderBackend" runtime_entry_symbol: "RenderBackend.draw_text_or_text_blit" runtime_artifact_name: "" runtime_status: "cpu-render-loop-ready" checksum: "sum32:328820832230016" pixel_proof: "nonzero_pixels:76800" scalar_baseline_compared: true fallback_used: false fallback_reason: "" unavailable_reason: "")
-+(backend_comparison_samples sample_count: 1 valid: false
-+  (backend_comparison_sample fixture_id: "gui-perf-8k-software" backend_family: "software" shell: "simple-web" requested: "software" selected: "software" device_id: "" status: "Initialized" command: "bench-8k" host: "dl" warmup_count: 0 sample_count: 0 cold_start_us: 0 warm_start_us: 0 p50_frame_us: 0 p95_frame_us: 0 p95_input_to_paint_us: 0 max_rss_kb: 0 binary_size_bytes: 0 baseline_binary_size_bytes: 0 binary_size_delta_bytes: 0 package_size_bytes: 0 artifact_build_us: 0 artifact_load_us: 0 artifact_submit_us: 0 artifact_sync_us: 0 artifact_readback_us: 0 render_readback_scope: "render+readback" offload_tag_kind: "@gpu" operation_family: "text_blit" generated_operation: "" generated_entry_symbol: "" generated_source_format: "none" generated_binary_format: "none" generated_artifact_path_suffix: "" runtime_compute_target: "cpu_scalar" runtime_execution_path: "engine2d-cpu_scalar" runtime_launch_api: "RenderBackend" runtime_entry_symbol: "RenderBackend.draw_text_or_text_blit" runtime_artifact_name: "" runtime_status: "cpu-scalar-baseline-ready" checksum: "" pixel_proof: "" scalar_baseline_compared: true fallback_used: false fallback_reason: "" unavailable_reason: "")
->>>>>>> Conflict 6 of 7 ends
+  (backend_comparison_sample fixture_id: "gui-perf-8k-software" backend_family: "software" shell: "simple-web" requested: "software" selected: "software" device_id: "host-software" status: "Initialized" command: "bench-8k" host: "dl" warmup_count: 1 sample_count: 1 cold_start_us: 20821511 warm_start_us: 20821511 p50_frame_us: 20821511 p95_frame_us: 20821511 p95_input_to_paint_us: 20821511 max_rss_kb: 1 binary_size_bytes: 213 baseline_binary_size_bytes: 213 binary_size_delta_bytes: 0 package_size_bytes: 213 artifact_build_us: 0 artifact_load_us: 0 artifact_submit_us: 20821511 artifact_sync_us: 0 artifact_readback_us: 0 render_readback_scope: "software-render-loop" offload_tag_kind: "@gpu" operation_family: "text_blit" generated_operation: "" generated_entry_symbol: "" generated_source_format: "none" generated_binary_format: "none" generated_artifact_path_suffix: "" runtime_compute_target: "cpu_scalar" runtime_execution_path: "engine2d-cpu_scalar" runtime_launch_api: "RenderBackend" runtime_entry_symbol: "RenderBackend.draw_text_or_text_blit" runtime_artifact_name: "" runtime_status: "cpu-scalar-baseline-ready" checksum: "sum32:328745677397784" pixel_proof: "nonzero_pixels:76800" scalar_baseline_compared: true fallback_used: false fallback_reason: "" unavailable_reason: "")
 )
 ```
-<<<<<<< Conflict 7 of 7
-+++++++ Contents of side #1
-gui_perf_benchmark_max_rss_kb=217344
-%%%%%%% Changes from base to side #2
--gui_perf_benchmark_max_rss_kb=214548
-+gui_perf_benchmark_max_rss_kb=87472
->>>>>>> Conflict 7 of 7 ends
+gui_perf_benchmark_max_rss_kb=199096
 gui_perf_benchmark_exit_code=0
 
 ## Reproducibility

@@ -3,8 +3,11 @@
 use app.wm_compare.backend_measurement_report.{BackendComparisonSample, BackendMeasurementRecord}
 use app.wm_compare.backend_measurement_report.{backend_comparison_from_measurement, backend_comparison_from_measurement_with_runtime_metadata, backend_measurement_from_probe}
 use compiler.backend.gpu_portable_compute.{portable_compute_operation_metadata}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_engine2d_backend}
 use std.gpu.engine2d.generated_kernel_dispatch.{generated_2d_operation_provenance}
 use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus, StrictBackendFactory}
+
+extern fn rt_time_now_micros() -> i64
 
 pub struct HostCommandMeasurement:
     command: text
@@ -49,6 +52,22 @@ pub struct InitializedGpuRuntimeMeasurement:
     runtime_ready: bool
     module_ready: bool
     args_ptr: i64
+
+pub struct SoftwareRenderLoopMeasurementOptions:
+    backend: text
+    operation_family: text
+    fixture_id: text
+    shell: text
+    command: text
+    host: text
+    width: i64
+    height: i64
+    warmup_count: i32
+    sample_count: i32
+    max_rss_kb: i64
+    binary_size_bytes: i64
+    baseline_binary_size_bytes: i64
+    package_size_bytes: i64
 
 fn _field_after(line: text, key: text) -> text:
     val marker = key + "="
@@ -101,6 +120,107 @@ fn _percentile_nearest_rank(sorted: [i64], pct: i32) -> i64:
     if idx > sorted.len():
         idx = sorted.len()
     sorted[idx - 1]
+
+fn _positive_elapsed_us(start_us: i64) -> i64:
+    val elapsed = rt_time_now_micros() - start_us
+    if elapsed <= 0:
+        return 1
+    elapsed
+
+fn _positive_or_one(value: i64) -> i64:
+    if value <= 0:
+        return 1
+    value
+
+fn _software_render_loop_html(fixture_id: text) -> text:
+    "<html><head><title>GUI Perf</title><style>body{background:#102030;color:#f8fafc} .panel{padding:12px;border:1px solid #38bdf8}</style></head><body><main class='panel'><h1>Simple GUI Perf</h1><p>" + fixture_id + "</p><button>Render</button><section><h2>Text lane</h2><p>abcdefghijklmnopqrstuvwxyz 0123456789</p></section></main></body></html>"
+
+fn _checksum_u32_pixels(pixels: [u32]) -> i64:
+    var checksum: i64 = 0
+    var i = 0
+    while i < pixels.len():
+        checksum = checksum + ((pixels[i] as i64) & 0xFFFFFFFF)
+        i = i + 1
+    checksum
+
+fn _nonzero_pixels(pixels: [u32]) -> i64:
+    var count: i64 = 0
+    var i = 0
+    while i < pixels.len():
+        if pixels[i] != 0u32:
+            count = count + 1
+        i = i + 1
+    count
+
+pub fn software_render_loop_measurement_sample(opts: SoftwareRenderLoopMeasurementOptions) -> BackendComparisonSample:
+    val html = _software_render_loop_html(opts.fixture_id)
+    var warmup = 0
+    while warmup < opts.warmup_count:
+        simple_web_render_html_to_pixels_with_engine2d_backend(html, opts.width.to_i32(), opts.height.to_i32(), opts.backend)
+        warmup = warmup + 1
+    var samples: [i64] = []
+    var pixels: [u32] = []
+    var i = 0
+    while i < opts.sample_count:
+        val start_us = rt_time_now_micros()
+        pixels = simple_web_render_html_to_pixels_with_engine2d_backend(html, opts.width.to_i32(), opts.height.to_i32(), opts.backend)
+        samples.push(_positive_elapsed_us(start_us))
+        i = i + 1
+    val sorted = _sort_i64(samples)
+    val p50 = _percentile_nearest_rank(sorted, 50)
+    val p95 = _percentile_nearest_rank(sorted, 95)
+    val measurement = HostCommandMeasurement(
+        command: opts.command,
+        host: opts.host,
+        sample_count: opts.sample_count,
+        p50_us: p50,
+        p95_us: p95,
+        max_rss_kb: _positive_or_one(opts.max_rss_kb),
+        binary_size_bytes: _positive_or_one(opts.binary_size_bytes),
+        baseline_binary_size_bytes: _positive_or_one(opts.baseline_binary_size_bytes),
+        render_readback_scope: "software-render-loop"
+    )
+    var record = host_measurement_record(
+        opts.backend,
+        opts.backend,
+        "Initialized",
+        measurement,
+        true,
+        false,
+        ""
+    )
+    record.warmup_count = opts.warmup_count
+    backend_comparison_from_measurement_with_runtime_metadata(
+        record,
+        opts.fixture_id,
+        "software",
+        opts.shell,
+        p50,
+        p50,
+        _positive_or_one(opts.package_size_bytes),
+        p95,
+        0,
+        0,
+        p50,
+        0,
+        0,
+        "sum32:" + _checksum_u32_pixels(pixels).to_string(),
+        "nonzero_pixels:" + _nonzero_pixels(pixels).to_string(),
+        "host-software",
+        "baseline",
+        opts.operation_family,
+        "simple_web_render_html_to_pixels",
+        "RenderBackend.draw_text_or_text_blit",
+        "simple",
+        "none",
+        "",
+        "cpu_scalar",
+        "engine2d-cpu_scalar",
+        "RenderBackend",
+        "RenderBackend.draw_text_or_text_blit",
+        "",
+        "cpu-render-loop-ready"
+    )
 
 pub fn parse_usr_bin_time_measurements(command: text, host: text,
                                        time_output: text,

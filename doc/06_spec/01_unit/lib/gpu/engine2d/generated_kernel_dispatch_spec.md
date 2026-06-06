@@ -234,10 +234,10 @@ val rocm = generated_2d_execution_request("rocm", GENERATED_2D_ALPHA, 32, 32, 0,
 
 expect(cuda.can_submit).to_equal(true)
 expect(cuda.handle_kind).to_equal("cuda-kernel-args")
-expect(cuda.call_shape()).to_equal("rt_cuda_launch_kernel(kernel,gx,gy,gz,bx,by,bz,shared_mem,args_ptr)")
+expect(cuda.call_shape()).to_equal("cuda_launch_api")
 expect(rocm.can_submit).to_equal(true)
 expect(rocm.handle_kind).to_equal("rocm-kernel-args")
-expect(rocm.call_shape()).to_equal("rt_rocm_launch_kernel(kernel,gx,gy,gz,bx,by,bz,shared_mem,args_ptr)")
+expect(rocm.call_shape()).to_equal("hip_launch_api")
 ```
 
 </details>
@@ -256,10 +256,10 @@ val metal = generated_2d_execution_request("metal", GENERATED_2D_SCROLL, 16, 16,
 
 expect(opencl.can_submit).to_equal(true)
 expect(opencl.handle_kind).to_equal("opencl-queue-kernel")
-expect(opencl.call_shape()).to_equal("clEnqueueNDRangeKernel(queue,kernel,global_range,local_range)")
+expect(opencl.call_shape()).to_equal("opencl_ndrange_api")
 expect(metal.can_submit).to_equal(true)
 expect(metal.handle_kind).to_equal("metal-encoder-pipeline")
-expect(metal.call_shape()).to_equal("metal_sffi_dispatch_compute(encoder,pipeline,gx,gy,gz,bx,by,bz)")
+expect(metal.call_shape()).to_equal("metal_compute_api")
 ```
 
 </details>
@@ -284,7 +284,7 @@ expect(fill.plan.launch_api).to_equal("clEnqueueNDRangeKernel")
 expect(copy.plan.entry_name).to_equal("simple_2d_copy_u32")
 expect(alpha.plan.entry_name).to_equal("simple_2d_alpha_u32")
 expect(scroll.plan.entry_name).to_equal("simple_2d_scroll_u32")
-expect(scroll.call_shape()).to_equal("clEnqueueNDRangeKernel(queue,kernel,global_range,local_range)")
+expect(scroll.call_shape()).to_equal("opencl_ndrange_api")
 ```
 
 </details>
@@ -460,10 +460,10 @@ val metal_request = generated_2d_execution_request_from_load(metal_load, 0)
 expect(cuda_load.loaded).to_equal(true)
 expect(cuda_load.reason).to_equal("loaded")
 expect(cuda_request.can_submit).to_equal(true)
-expect(cuda_request.call_shape()).to_contain("rt_cuda_launch_kernel")
+expect(cuda_request.call_shape()).to_equal("cuda_launch_api")
 expect(metal_load.loaded).to_equal(true)
 expect(metal_request.can_submit).to_equal(true)
-expect(metal_request.call_shape()).to_contain("metal_sffi_dispatch_compute")
+expect(metal_request.call_shape()).to_equal("metal_compute_api")
 ```
 
 </details>

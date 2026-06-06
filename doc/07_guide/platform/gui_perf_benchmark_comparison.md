@@ -17,18 +17,28 @@ All numbers measured on this host unless marked otherwise.
 | Electron | 4075 ms | — | — | — | Existing contract; checksum=0 headless |
 | Tauri | — | — | — | — | Unavailable (no cargo-tauri) |
 | Simple CUDA | — | — | — | — | Interpreter lacks CUDA FFI; needs compiled binary |
-<<<<<<< Conflict 1 of 2
-+++++++ Contents of side #1
-| Simple Web Soft | 3440 ms | 3267 ms | 3267 ms | 3267 ms | 2026-06-06 smoke, 320x240, software render-loop row |
-%%%%%%% Changes from base to side #2
--| Simple Web Soft | 3315 ms | 3292 ms | 3292 ms | 3292 ms | 2026-06-06 smoke, 320x240, software render-loop row |
-+| Simple Web Soft | — | — | — | — | Interpreter probe only; needs compiled binary |
->>>>>>> Conflict 1 of 2 ends
+| Simple Web Soft | — | — | — | — | 8K run deferred; 320x240 measured smoke below |
 
 **Notes**: GTK frame times are frame-to-frame intervals (draw + composite + X11 present).
 Cairo draw calls alone take 0.035ms; the remaining ~150ms is GTK/X11 software compositing
 on Xvfb. Node.js canvas is headless (in-memory buffer, no display server), so the 9.3x
 speed difference is partly the display-server overhead, not renderer speed alone.
+
+### Current Simple Backend Evidence (2026-06-06 smoke)
+
+`doc/09_report/gui_perf_benchmark_2026-06-06.md` is the canonical linked smoke
+report for the current Simple backend profile. It was regenerated at 320x240,
+1 frame, with `profile_report_contract=true`.
+
+| Backend | Frame p50 | Frame p95 | Status | Measurement |
+|---------|-----------|-----------|--------|-------------|
+| Simple CUDA fill | 0.528 ms | 0.528 ms | valid | Device-buffer fill/readback, checksum `sum32:328570011648000`, `nonzero_pixels:76800` |
+| Simple Web software | 20821.511 ms | 20821.511 ms | valid | Real `simple_web_render_html_to_pixels_with_engine2d_backend` render-loop row, checksum `sum32:328745677397784`, `nonzero_pixels:76800` |
+
+The CUDA row proves the generated Engine2D GPU fill lane is measurable on this
+host. The software web row is not an availability probe anymore; it is a real
+frame measurement and shows the current pure Simple web GUI path remains
+dominated by interpreted text/layout work.
 
 ### Existing Evidence: Simple vs GTK Cold Start (from `gtk_gui_repeat_evidence`)
 
@@ -71,7 +81,11 @@ DISPLAY=:99 build/gui_perf_bench/bench_gtk --width 7680 --height 4320 --frames 6
 
 # Simple backends (requires compiled binary, not interpreter):
 bin/simple run src/app/wm_compare/backend_measurement_export.spl -- \
-  --measure-cuda-device-buffer --width 7680 --height 4320
+  --measure-cuda-device-buffer true --width 7680 --height 4320
+
+bin/simple run src/app/wm_compare/backend_measurement_export.spl -- \
+  --measure-software-render-loop true --software-render-backend software \
+  --width 320 --height 240 --warmup-count 1 --sample-count 1
 ```
 
 ## Pixel Parity Gate
@@ -84,7 +98,7 @@ bin/simple run src/app/wm_compare/backend_measurement_export.spl -- \
 
 ## Optimization Opportunities
 
-### CUDA (highest impact, currently unmeasured at 8K)
+### CUDA (highest impact, measured smoke; needs 8K repeats)
 - Persistent device buffer reuse (skip 127 MB alloc/free per frame)
 - Async readback via `cuMemcpyDtoHAsync` + stream sync
 - Module caching already in `CudaSession.module_cache`
@@ -94,8 +108,6 @@ bin/simple run src/app/wm_compare/backend_measurement_export.spl -- \
 - Key optimization: the Simple-to-C compilation gap, not algorithmic
 - CPU SIMD (AVX2) backend exists but needs 8K throughput measurement
 - Dirty-rect tracking avoids full 127 MB writes for partial updates
-<<<<<<< Conflict 2 of 2
-+++++++ Contents of side #1
 - Software layout renders must not replay the already-painted framebuffer
   through an Engine2D software present/readback cycle. The 2026-06-06
   render-loop smoke dropped from about 13.98s to about 3.27s at 320x240 after
@@ -105,12 +117,6 @@ bin/simple run src/app/wm_compare/backend_measurement_export.spl -- \
   layout with text at about 1.21-1.29s after char-code glyph lookup and packed
   glyph rows. Treat further software-only text tweaks as secondary to GPU or
   compiled-mode text rasterization.
-%%%%%%% Changes from base to side #2
--- Software layout renders must not replay the already-painted framebuffer
--  through an Engine2D software present/readback cycle. The 2026-06-06
--  render-loop smoke dropped from about 13.98s to about 3.29s at 320x240 after
--  returning the painted software framebuffer directly.
->>>>>>> Conflict 2 of 2 ends
 
 ### General
 - Frame pacer prevents busy-wait; verify no artificial latency in bench mode
@@ -118,12 +124,13 @@ bin/simple run src/app/wm_compare/backend_measurement_export.spl -- \
 
 ## Remaining Work
 
-1. **Compiled Simple benchmarks**: CUDA and software backends need compiled binary
-   (interpreter can't drive CUDA FFI or measure real frame throughput)
+1. **Compiled Simple 8K repeats**: CUDA and software backends now have measured
+   smoke rows; repeat at 8K with multiple frames before making release claims.
 2. **CPU SIMD at 8K**: AVX2 backend exists but no 8K throughput evidence yet
 3. **Tauri integration**: Needs `cargo-tauri` CLI + WebKitGTK dev package
-4. **Wire perf probes**: `start_phase`/`end_phase` calls need to be added to the
-   benchmark measurement path for `WmPerfCounters` to have non-zero samples
+4. **Software text/layout optimization**: the real software render-loop row is
+   still far slower than JS/GTK at 320x240; move bitmap/vector font and text-blit
+   work onto generated Engine2D GPU lanes or compiled text raster paths.
 
 ## File Layout
 

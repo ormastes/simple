@@ -13,6 +13,18 @@ WIDTH="${WIDTH:-7680}"
 HEIGHT="${HEIGHT:-4320}"
 FRAMES="${FRAMES:-60}"
 
+select_simple_bin() {
+    if [[ -x "$PROJECT_DIR/bin/simple" ]]; then
+        printf '%s\n' "$PROJECT_DIR/bin/simple"
+    elif [[ -x "$PROJECT_DIR/bin/release/simple" ]]; then
+        printf '%s\n' "$PROJECT_DIR/bin/release/simple"
+    elif [[ -x "$PROJECT_DIR/bin/bootstrap/simple" ]]; then
+        printf '%s\n' "$PROJECT_DIR/bin/bootstrap/simple"
+    else
+        printf '%s\n' ""
+    fi
+}
+
 # Parse args
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -171,10 +183,9 @@ else
 fi
 
 # ── 6. Pure Simple (CUDA-backed) ──
-if command -v nvidia-smi >/dev/null 2>&1 && [[ -x "$PROJECT_DIR/bin/simple" ]]; then
-    run_bench "pure_simple_cuda" "$PROJECT_DIR/bin/simple run $PROJECT_DIR/src/app/wm_compare/backend_measurement_export.spl -- --measure-cuda-device-buffer --width $WIDTH --height $HEIGHT --fixture gui-perf-8k-fill --shell simple-web --command bench-8k --host $(hostname)"
-elif command -v nvidia-smi >/dev/null 2>&1 && [[ -x "$PROJECT_DIR/bin/bootstrap/simple" ]]; then
-    run_bench "pure_simple_cuda" "$PROJECT_DIR/bin/bootstrap/simple run $PROJECT_DIR/src/app/wm_compare/backend_measurement_export.spl -- --measure-cuda-device-buffer --width $WIDTH --height $HEIGHT --fixture gui-perf-8k-fill --shell simple-web --command bench-8k --host $(hostname)"
+SIMPLE_CUDA_BIN="$(select_simple_bin)"
+if command -v nvidia-smi >/dev/null 2>&1 && [[ -x "$SIMPLE_CUDA_BIN" ]]; then
+    run_bench "pure_simple_cuda" "$SIMPLE_CUDA_BIN run $PROJECT_DIR/src/app/wm_compare/backend_measurement_export.spl -- --measure-cuda-device-buffer true --width $WIDTH --height $HEIGHT --fixture gui-perf-8k-fill --shell simple-web --command bench-8k --host $(hostname)"
 else
     echo "--- pure_simple_cuda: SKIPPED ---" | tee -a "$REPORT"
     echo "gui_perf_benchmark_backend=pure_simple_cuda" | tee -a "$REPORT"
@@ -188,8 +199,7 @@ else
 fi
 
 # ── 7. Simple Web Renderer (software path) ──
-SIMPLE_BIN="$PROJECT_DIR/bin/simple"
-[[ ! -x "$SIMPLE_BIN" ]] && SIMPLE_BIN="$PROJECT_DIR/bin/bootstrap/simple"
+SIMPLE_BIN="$(select_simple_bin)"
 if [[ -x "$SIMPLE_BIN" ]]; then
     SIMPLE_BIN_SIZE=$(stat -Lc%s "$SIMPLE_BIN" 2>/dev/null || wc -c <"$SIMPLE_BIN")
     run_bench "simple_web_software" "$SIMPLE_BIN run $PROJECT_DIR/src/app/wm_compare/backend_measurement_export.spl -- --measure-software-render-loop true --software-render-backend software --width $WIDTH --height $HEIGHT --warmup-count 1 --sample-count $FRAMES --binary-size-bytes $SIMPLE_BIN_SIZE --baseline-binary-size-bytes $SIMPLE_BIN_SIZE --package-size-bytes $SIMPLE_BIN_SIZE --fixture gui-perf-8k-software --shell simple-web --command bench-8k --host $(hostname)"

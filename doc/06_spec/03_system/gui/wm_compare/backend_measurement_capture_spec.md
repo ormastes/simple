@@ -28,7 +28,7 @@ backend_measurement_capture_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 19 | 19 | 0 | 0 |
+| 22 | 22 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -722,6 +722,94 @@ expect(sdn).to_contain("runtime_launch_api: \"rt_rocm_launch_kernel\"")
 </details>
 
 <details>
+<summary>Advanced: measures Simple Web software render loops with non-zero frame samples and pixel proof</summary>
+
+#### measures Simple Web software render loops with non-zero frame samples and pixel proof
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 26 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val sample = software_render_loop_measurement_sample(
+    SoftwareRenderLoopMeasurementOptions(
+    backend: "software",
+    operation_family: "text_blit",
+    fixture_id: "wm_compare:software:render-loop",
+    shell: "simple-web",
+    command: "simple wm_compare software render loop",
+    host: "linux-x86_64",
+    width: 32,
+    height: 24,
+    warmup_count: 1,
+    sample_count: 2,
+    max_rss_kb: 70000,
+    binary_size_bytes: 2000000,
+    baseline_binary_size_bytes: 1950000,
+    package_size_bytes: 2050000
+    )
+)
+expect(backend_comparison_sample_valid(sample)).to_equal(true)
+expect(sample.status).to_equal("Initialized")
+expect(sample.sample_count).to_equal(2)
+expect(sample.p50_frame_us).to_be_greater_than(0)
+expect(sample.p95_frame_us).to_be_greater_than(0)
+expect(sample.checksum).to_contain("sum32:")
+expect(sample.pixel_proof).to_contain("nonzero_pixels:")
+expect(sample.runtime_status).to_equal("cpu-render-loop-ready")
+```
+
+</details>
+
+
+</details>
+
+<details>
+<summary>Advanced: exports Simple Web software render-loop rows as normalized SDN</summary>
+
+#### exports Simple Web software render-loop rows as normalized SDN
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 24 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val sdn = software_render_loop_measurement_export_sdn(
+    SoftwareRenderLoopMeasurementOptions(
+    backend: "software",
+    operation_family: "text_blit",
+    fixture_id: "wm_compare:software:render-loop-export",
+    shell: "simple-web",
+    command: "simple wm_compare software render loop",
+    host: "linux-x86_64",
+    width: 32,
+    height: 24,
+    warmup_count: 1,
+    sample_count: 2,
+    max_rss_kb: 70000,
+    binary_size_bytes: 2000000,
+    baseline_binary_size_bytes: 1950000,
+    package_size_bytes: 2050000
+    )
+)
+expect(sdn).to_contain("valid: true")
+expect(sdn).to_contain("sample_count: 1")
+expect(sdn).to_contain("backend_family: \"software\"")
+expect(sdn).to_contain("p50_frame_us:")
+expect(sdn).to_contain("checksum: \"sum32:")
+expect(sdn).to_contain("runtime_status: \"cpu-render-loop-ready\"")
+```
+
+</details>
+
+
+</details>
+
+<details>
 <summary>Advanced: builds a current-host backend matrix with explicit unavailable GPU lanes</summary>
 
 #### builds a current-host backend matrix with explicit unavailable GPU lanes
@@ -844,6 +932,43 @@ expect(sdn).to_contain("runtime_compute_target: \"opencl\"")
 
 </details>
 
+<details>
+<summary>Advanced: exports measured Simple software render-loop rows with non-zero frame evidence</summary>
+
+#### exports measured Simple software render-loop rows with non-zero frame evidence
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val sdn = software_render_loop_export_sdn([
+    "--measure-software-render-loop", "true",
+    "--software-render-backend", "software",
+    "--width", "8",
+    "--height", "8",
+    "--warmup-count", "0",
+    "--sample-count", "1",
+    "--fixture", "wm_compare:software-render-loop",
+    "--shell", "simple-web",
+    "--command", "software-render-loop-spec",
+    "--host", "linux-x86_64"
+])
+expect(sdn).to_contain("valid: true")
+expect(sdn).to_contain("backend_family: \"software\"")
+expect(sdn).to_contain("render_readback_scope: \"software-render-loop\"")
+expect(sdn).to_contain("checksum: \"sum32:")
+expect(sdn).to_contain("pixel_proof: \"nonzero_pixels:")
+expect(sdn).to_contain("sample_count: 1")
+```
+
+</details>
+
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -863,8 +988,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 19 |
-| Active scenarios | 19 |
+| Total scenarios | 22 |
+| Active scenarios | 22 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

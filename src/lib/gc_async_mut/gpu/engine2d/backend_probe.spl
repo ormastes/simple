@@ -1,0 +1,145 @@
+# Engine2D backend probe result and strict selection helpers.
+
+val BACKEND_CPU: text = "cpu"
+val BACKEND_SOFTWARE: text = "software"
+val BACKEND_CPU_SIMD: text = "cpu_simd"
+val BACKEND_VULKAN: text = "vulkan"
+val BACKEND_CUDA: text = "cuda"
+val BACKEND_ROCM: text = "rocm"
+val BACKEND_OPENCL: text = "opencl"
+val BACKEND_METAL: text = "metal"
+val BACKEND_WEBGPU: text = "webgpu"
+
+val STATUS_OK: text = "Initialized"
+val STATUS_FAILED: text = "Failed"
+val STATUS_FALLBACK: text = "Fallback"
+
+enum BackendStatus:
+    Initialized
+    Unavailable
+    Failed
+    Fallback
+    Unsupported
+
+fn backend_status_text(status: BackendStatus) -> text:
+    match status:
+        BackendStatus.Initialized: "Initialized"
+        BackendStatus.Unavailable: "Unavailable"
+        BackendStatus.Failed: "Failed"
+        BackendStatus.Fallback: "Fallback"
+        BackendStatus.Unsupported: "Unsupported"
+
+class BackendProbeResult:
+    requested_name: text
+    selected_name: text
+    status: BackendStatus
+    device_name: text
+    api_name: text
+    feature_gate: text
+    shader_format: text
+    fallback_reason: text
+    backend_name: text
+    available: bool
+    init_ms: i64
+    reason: text
+    has_compute: bool
+    has_graphics: bool
+    has_present: bool
+
+    static fn create(name: text, status: BackendStatus, api: text, gate: text, shader: text, reason: text) -> BackendProbeResult:
+        val ok = status == BackendStatus.Initialized
+        BackendProbeResult(
+            requested_name: name,
+            selected_name: name,
+            status: status,
+            device_name: if ok: name + ":0" else: "",
+            api_name: api,
+            feature_gate: gate,
+            shader_format: shader,
+            fallback_reason: if ok: "" else: reason,
+            backend_name: name,
+            available: ok,
+            init_ms: if ok: 1 else: 0,
+            reason: reason,
+            has_compute: ok,
+            has_graphics: ok,
+            has_present: false
+        )
+
+    static fn success(name: text, reason: text) -> BackendProbeResult:
+        BackendProbeResult.create(name, BackendStatus.Initialized, name, name + "_runtime", _shader_format_for_backend(name), reason)
+
+    static fn failed(name: text, reason: text) -> BackendProbeResult:
+        BackendProbeResult.create(name, BackendStatus.Failed, name, name + "_runtime", _shader_format_for_backend(name), reason)
+
+    static fn unavailable(name: text, reason: text) -> BackendProbeResult:
+        BackendProbeResult.create(name, BackendStatus.Unavailable, name, name + "_runtime", _shader_format_for_backend(name), reason)
+
+    fn diagnostic_text() -> text:
+        "requested={self.requested_name};selected={self.selected_name};status={backend_status_text(self.status)};api={self.api_name};gate={self.feature_gate};shader={self.shader_format};compute={self.has_compute.to_text()};graphics={self.has_graphics.to_text()};present={self.has_present.to_text()};reason={self.reason}"
+
+fn _shader_format_for_backend(name: text) -> text:
+    if name == BACKEND_CUDA:
+        return "ptx"
+    if name == BACKEND_ROCM:
+        return "hsaco"
+    if name == BACKEND_OPENCL:
+        return "opencl-c"
+    if name == BACKEND_METAL:
+        return "msl"
+    if name == BACKEND_VULKAN:
+        return "spirv"
+    if name == BACKEND_WEBGPU:
+        return "wgsl"
+    "none"
+
+fn _strict_probe_backend(name: text) -> BackendProbeResult:
+    if name == BACKEND_CPU or name == BACKEND_SOFTWARE or name == BACKEND_CPU_SIMD:
+        var cpu = BackendProbeResult.success(name, name + " backend available")
+        cpu.has_compute = true
+        cpu.has_graphics = true
+        cpu.has_present = true
+        return cpu
+    if name == BACKEND_ROCM:
+        return BackendProbeResult.unavailable(name, "ROCm/HIP probe unavailable in interpreter")
+    BackendProbeResult.unavailable(name, name + " runtime evidence not available")
+
+class BackendProber:
+    static fn create() -> BackendProber:
+        BackendProber()
+
+    fn probe_backend(name: text) -> BackendProbeResult:
+        _strict_probe_backend(name)
+
+    fn probe_cuda() -> BackendProbeResult:
+        _strict_probe_backend(BACKEND_CUDA)
+
+    fn probe_rocm() -> BackendProbeResult:
+        _strict_probe_backend(BACKEND_ROCM)
+
+    fn probe_opencl() -> BackendProbeResult:
+        _strict_probe_backend(BACKEND_OPENCL)
+
+    fn probe_cpu_simd_x86() -> BackendProbeResult:
+        _strict_probe_backend(BACKEND_CPU_SIMD)
+
+    fn probe_cpu_simd_arm() -> BackendProbeResult:
+        BackendProbeResult.unavailable("cpu_simd_arm", "arm SIMD backend not selected on this host")
+
+    fn probe_cpu_simd_riscv() -> BackendProbeResult:
+        BackendProbeResult.unavailable("cpu_simd_riscv", "riscv SIMD backend not selected on this host")
+
+    fn probe_cpu() -> BackendProbeResult:
+        _strict_probe_backend(BACKEND_CPU)
+
+class StrictBackendFactory:
+    static fn strict() -> StrictBackendFactory:
+        StrictBackendFactory()
+
+    fn create_backend(name: text) -> BackendProbeResult:
+        _strict_probe_backend(name)
+
+export BackendStatus, BackendProbeResult, BackendProber, StrictBackendFactory
+export backend_status_text
+export BACKEND_CPU, BACKEND_SOFTWARE, BACKEND_VULKAN, BACKEND_CUDA, BACKEND_METAL, BACKEND_WEBGPU
+export STATUS_OK, STATUS_FAILED, STATUS_FALLBACK

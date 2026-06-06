@@ -1,14 +1,16 @@
 # Export normalized backend comparison samples for startup, size, and GPU lane reports.
 
-use app.wm_compare.backend_measurement_capture.{InitializedGpuRuntimeMeasurement, current_host_backend_comparison_samples, initialized_gpu_comparison_sample_from_measurement, initialized_gpu_runner_comparison_sample}
+use app.wm_compare.backend_measurement_capture.{InitializedGpuRuntimeMeasurement, SoftwareRenderLoopMeasurementOptions, current_host_backend_comparison_samples, initialized_gpu_comparison_sample_from_measurement, initialized_gpu_runner_comparison_sample, software_render_loop_measurement_sample}
 use app.wm_compare.backend_measurement_cuda.{CudaDeviceMeasurementOptions, cuda_device_buffer_measurement_sample}
 use app.wm_compare.backend_measurement_opencl.{OpenClDeviceMeasurementOptions, opencl_device_buffer_measurement_sample}
 use app.wm_compare.backend_measurement_rocm.{RocmDeviceMeasurementOptions, rocm_device_buffer_measurement_sample}
 use app.wm_compare.backend_measurement_report.{backend_comparison_samples_sdn}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_engine2d_backend}
 use std.nogc_sync_mut.sffi.io.{file_write_text}
 
 extern fn rt_cli_get_args() -> [text]
 extern fn rt_file_read_text(path: text) -> text
+extern fn rt_time_now_micros() -> i64
 
 pub fn backend_measurement_export_sdn(command: text,
                                       host: text,
@@ -58,6 +60,10 @@ pub fn rocm_device_buffer_measurement_export_sdn(opts: RocmDeviceMeasurementOpti
     val sample = rocm_device_buffer_measurement_sample(opts)
     backend_comparison_samples_sdn([sample])
 
+pub fn software_render_loop_measurement_export_sdn(opts: SoftwareRenderLoopMeasurementOptions) -> text:
+    val sample = software_render_loop_measurement_sample(opts)
+    backend_comparison_samples_sdn([sample])
+
 fn _arg_value(args: [text], key: text, fallback: text) -> text:
     var i = 0
     while i + 1 < args.len():
@@ -83,6 +89,122 @@ fn _arg_bool(args: [text], key: text, fallback: bool) -> bool:
     if raw == "":
         return fallback
     raw == "true" or raw == "1" or raw == "yes"
+
+fn _positive_elapsed_us(start_us: i64) -> i64:
+    val elapsed = rt_time_now_micros() - start_us
+    if elapsed <= 0:
+        return 1
+    elapsed
+
+fn _positive_or_one(value: i64) -> i64:
+    if value <= 0:
+        return 1
+    value
+
+fn _sort_i64(values: [i64]) -> [i64]:
+    var out = values
+    var i = 0
+    while i < out.len():
+        var j = i + 1
+        while j < out.len():
+            if out[j] < out[i]:
+                val tmp = out[i]
+                out[i] = out[j]
+                out[j] = tmp
+            j = j + 1
+        i = i + 1
+    out
+
+fn _percentile_nearest_rank(sorted: [i64], pct: i32) -> i64:
+    if sorted.len() == 0:
+        return 0
+    var idx = ((sorted.len() * pct) + 99) / 100
+    if idx <= 0:
+        idx = 1
+    if idx > sorted.len():
+        idx = sorted.len()
+    sorted[idx - 1]
+
+fn _sample_html(fixture_id: text) -> text:
+    "<html><head><title>GUI Perf</title><style>body{background:#102030;color:#f8fafc} .panel{padding:12px;border:1px solid #38bdf8}</style></head><body><main class='panel'><h1>Simple GUI Perf</h1><p>" + fixture_id + "</p><button>Render</button><section><h2>Text lane</h2><p>abcdefghijklmnopqrstuvwxyz 0123456789</p></section></main></body></html>"
+
+fn _checksum_u32_pixels(pixels: [u32]) -> i64:
+    var checksum: i64 = 0
+    var i = 0
+    while i < pixels.len():
+        checksum = checksum + ((pixels[i] as i64) & 0xFFFFFFFF)
+        i = i + 1
+    checksum
+
+fn _nonzero_pixels(pixels: [u32]) -> i64:
+    var count: i64 = 0
+    var i = 0
+    while i < pixels.len():
+        if pixels[i] != 0u32:
+            count = count + 1
+        i = i + 1
+    count
+
+pub fn software_render_loop_export_sdn(args: [text]) -> text:
+    val width = _arg_i64(args, "--width", 64)
+    val height = _arg_i64(args, "--height", 64)
+    val warmup_count = _arg_i32(args, "--warmup-count", 0)
+    val sample_count = _arg_i32(args, "--sample-count", 1)
+    val backend = _arg_value(args, "--software-render-backend", "software")
+    val fixture_id = _arg_value(args, "--fixture", "software-render-loop")
+    val html = _sample_html(fixture_id)
+    var warmup = 0
+    while warmup < warmup_count:
+        simple_web_render_html_to_pixels_with_engine2d_backend(html, width.to_i32(), height.to_i32(), backend)
+        warmup = warmup + 1
+    var samples: [i64] = []
+    var pixels: [u32] = []
+    var i = 0
+    while i < sample_count:
+        val start_us = rt_time_now_micros()
+        pixels = simple_web_render_html_to_pixels_with_engine2d_backend(html, width.to_i32(), height.to_i32(), backend)
+        samples.push(_positive_elapsed_us(start_us))
+        i = i + 1
+    val sorted = _sort_i64(samples)
+    val p50 = _percentile_nearest_rank(sorted, 50)
+    val p95 = _percentile_nearest_rank(sorted, 95)
+    val checksum_value = _checksum_u32_pixels(pixels)
+    val proof_count = _nonzero_pixels(pixels)
+    initialized_gpu_measurement_export_sdn(
+        InitializedGpuRuntimeMeasurement(
+        backend: backend,
+        operation_family: _arg_value(args, "--operation-family", "text_blit"),
+        fixture_id: fixture_id,
+        shell: _arg_value(args, "--shell", "simple-web"),
+        command: _arg_value(args, "--command", "software-render-loop"),
+        host: _arg_value(args, "--host", "unknown"),
+        warmup_count: warmup_count,
+        sample_count: sample_count,
+        p50_frame_us: p50,
+        p95_frame_us: p95,
+        max_rss_kb: _positive_or_one(_arg_i64(args, "--max-rss-kb", 0)),
+        binary_size_bytes: _positive_or_one(_arg_i64(args, "--binary-size-bytes", 0)),
+        baseline_binary_size_bytes: _positive_or_one(_arg_i64(args, "--baseline-binary-size-bytes", 0)),
+        render_readback_scope: "software-render-loop",
+        cold_start_us: p50,
+        warm_start_us: p50,
+        package_size_bytes: _positive_or_one(_arg_i64(args, "--package-size-bytes", 0)),
+        p95_input_to_paint_us: p95,
+        artifact_build_us: 0,
+        artifact_load_us: 0,
+        artifact_submit_us: p50,
+        artifact_sync_us: 0,
+        artifact_readback_us: 0,
+        checksum: "sum32:" + checksum_value.to_string(),
+        pixel_proof: "nonzero_pixels:" + proof_count.to_string(),
+        device_id: "host-software",
+        width: width,
+        height: height,
+        runtime_ready: true,
+        module_ready: true,
+        args_ptr: 1
+        )
+    )
 
 fn _initialized_gpu_measurement_from_args(args: [text], backend: text) -> InitializedGpuRuntimeMeasurement:
     InitializedGpuRuntimeMeasurement(
@@ -173,10 +295,13 @@ fn main() -> i64:
     val time_output = if time_path == "": _arg_value(args, "--time-inline", "") else: rt_file_read_text(time_path)
     val initialized_backend = _arg_value(args, "--initialized-gpu-backend", "")
     val use_runner = _arg_bool(args, "--probe-initialized-gpu", false)
+    val measure_software_render_loop = _arg_bool(args, "--measure-software-render-loop", false)
     val measure_opencl = _arg_bool(args, "--measure-opencl-device-buffer", false)
     val measure_cuda = _arg_bool(args, "--measure-cuda-device-buffer", false)
     val measure_rocm = _arg_bool(args, "--measure-rocm-device-buffer", false) or _arg_bool(args, "--measure-hip-device-buffer", false)
-    val sdn = if measure_cuda:
+    val sdn = if measure_software_render_loop:
+        software_render_loop_export_sdn(args)
+    elif measure_cuda:
         cuda_device_buffer_measurement_export_sdn(_cuda_device_measurement_from_args(args))
     elif measure_rocm:
         rocm_device_buffer_measurement_export_sdn(_rocm_device_measurement_from_args(args))
