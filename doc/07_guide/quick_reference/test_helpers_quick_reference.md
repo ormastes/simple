@@ -317,8 +317,8 @@ testing.assert_fast(\: operation(), 1000000, "1 second limit")
 ### Import
 
 ```simple
-use std.nogc_sync_mut.ui_test.client.{UITestClient}
-use std.nogc_sync_mut.ui_test.types.{ElementInfo, UIStateInfo}
+use std.ui_test.client.{UITestClient}
+use std.ui_test.types.{ElementInfo, UIStateInfo}
 ```
 
 ### Connection

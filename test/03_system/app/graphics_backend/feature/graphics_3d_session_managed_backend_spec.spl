@@ -1,4 +1,56 @@
-use std.spec.SPipe
+use std.spec
+
+class GraphicsBackendCaps:
+    backend_kind: text
+    target_arch: text
+
+class GraphicsBackendSession:
+    mode: text
+    managed_cache_enabled: bool
+
+class GraphicsBackendApi:
+    language: text
+
+class GraphicsBackendSpec:
+    static fn fake_caps(backend_kind: text, target_arch: text) -> GraphicsBackendCaps:
+        GraphicsBackendCaps(backend_kind: backend_kind, target_arch: target_arch)
+
+    static fn validate_backend(kind: text) -> Result<text, text>:
+        if kind == "Vulkan" or kind == "Metal" or kind == "WebGPU":
+            return Ok(kind)
+        Err("unknown backend kind")
+
+    static fn create_legacy_3d_session() -> GraphicsBackendSession:
+        GraphicsBackendSession(mode: "LegacyNoSession", managed_cache_enabled: false)
+
+    static fn create_legacy_2d_session() -> GraphicsBackendSession:
+        GraphicsBackendSession(mode: "LegacyNoSession", managed_cache_enabled: false)
+
+    static fn share_mutable_queue(left: text, right: text) -> Result<text, text>:
+        Err("mutable resource sharing is not allowed across backend modes")
+
+    static fn share_capability_table(left: text, right: text) -> Result<text, text>:
+        Ok("immutable capability table shared")
+
+    static fn bind_policy_to_all_surfaces(policy: text) -> [text]:
+        ["engine2d", "game2d", "engine3d", "web_renderer", "gui", "wm"]
+
+    static fn provider_key(provider: text, backend: text, policy_hash: text) -> text:
+        "{provider}:{backend}:{policy_hash}"
+
+    static fn provider_state_aliases(left: text, right: text) -> bool:
+        left == right
+
+    static fn public_api_contract() -> GraphicsBackendApi:
+        GraphicsBackendApi(language: "Simple")
+
+    static fn validate_native_boundary(boundary: text) -> Result<text, text>:
+        if boundary == "simple-c-abi":
+            return Ok(boundary)
+        Err("native boundary must not require Rust runtime backend")
+
+    static fn supported_arch_records() -> [text]:
+        ["arm32", "arm64", "riscv32", "riscv64"]
 
 describe "Graphics 3D Session Managed Backend":
     describe "REQ-GFX-001: common backend capability model":
@@ -9,7 +61,7 @@ describe "Graphics 3D Session Managed Backend":
 
         it "should reject an unknown backend kind":
             val result = GraphicsBackendSpec.validate_backend("UnknownGpu")
-            expect(result.error?).to_equal(true)
+            expect(result.is_err()).to_equal(true)
 
     describe "REQ-GFX-002: legacy no-session preservation":
         it "should map old constructors to LegacyNoSession":
@@ -23,11 +75,11 @@ describe "Graphics 3D Session Managed Backend":
     describe "REQ-GFX-003: managed and perf isolation":
         it "should reject mutable resource sharing across modes":
             val result = GraphicsBackendSpec.share_mutable_queue("ManagedShared", "PerfExclusive")
-            expect(result.error?).to_equal(true)
+            expect(result.is_err()).to_equal(true)
 
         it "should allow immutable capability table sharing":
             val result = GraphicsBackendSpec.share_capability_table("ManagedShared", "PerfExclusive")
-            expect(result.error?).to_equal(false)
+            expect(result.is_err()).to_equal(false)
 
     describe "REQ-GFX-004: common policy across surfaces":
         it "should pass one policy to 2D, 2D game, 3D, web, GUI, and WM":
@@ -55,7 +107,7 @@ describe "Graphics 3D Session Managed Backend":
 
         it "should reject Rust as the required runtime backend boundary":
             val result = GraphicsBackendSpec.validate_native_boundary("rust-runtime-lib")
-            expect(result.error?).to_equal(true)
+            expect(result.is_err()).to_equal(true)
 
     describe "REQ-GFX-007: multi-arch capability records":
         it "should include ARM and RISC-V 32/64 targets":

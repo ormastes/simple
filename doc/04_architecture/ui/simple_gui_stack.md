@@ -225,6 +225,12 @@ class when present, and a style revision. That metadata is for diagnostics,
 cache invalidation, replay, and GPU batch grouping; primitive commands remain
 the execution truth.
 
+UI test helpers consume Draw IR through the shared test contract, not through
+renderer-private files or backend handles. Protocol v1 `/api/test/*` endpoints
+remain stable; Protocol v2 Draw IR endpoints are optional and capability-gated.
+SPipe remains the test harness: new UI/Draw IR specs import `use std.spec`, and
+`std.spipe` remains an alias for existing specs.
+
 This boundary is the best next refactoring target because it reduces coupling
 between `src/app/ui.web`, `src/lib/common/ui/web_render_api.spl`, and
 `src/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer.spl`.
@@ -422,27 +428,28 @@ Every implementation of this architecture needs evidence for:
 - `doc/06_spec` layout safety: executable specs stay under `test/**`, not
   under generated/manual spec docs.
 
-## UI Testing (test-access seam)
+## UI Test Architecture
 
-How these surfaces are *tested* is its own architecture, kept beside the render
-stack: `doc/04_architecture/ui/ui_test_architecture.md` (TLDR:
-`ui_test_architecture_tldr.md`). Two layers are unified behind one configurable
-interface (`tui` | `gui` | `both`):
+The canonical test-access architecture for TUI, GUI, web, and 2D lives in
+`doc/04_architecture/ui/ui_test_architecture.md` and its TLDR companion
+`doc/04_architecture/ui/ui_test_architecture_tldr.md`. Two layers are unified
+behind one configurable interface (`tui` | `gui` | `both`):
 
-- **HTTP protocol path** — `UITestClient` over `/api/test/*` for the S4
-  surfaces (web, tui-web); returns `ElementInfo`.
-- **SGTTI in-process path** — `common.ui.win_text_access` +
-  `os.compositor.gtti` give GUI/web/2D a headless semantic tree (compositor
-  source in `WM_MODE_HIDDEN`) over the canonical `UiAccessNode`, asserted with
-  the same vocabulary, no server. TUI joins via the
-  `UIState → win_text_simple_ui_snapshot` lift.
+- **HTTP protocol path** - `UITestClient` over `/api/test/*` for S4 surfaces
+  (web, tui-web); returns `ElementInfo`.
+- **SGTTI in-process path** - `common.ui.win_text_access` +
+  `os.compositor.gtti` give GUI/web/2D a headless semantic tree through the
+  compositor source in `WM_MODE_HIDDEN`, over canonical `UiAccessNode` values.
+  TUI joins through the `UIState -> win_text_simple_ui_snapshot` lift.
 
-Two evidence tiers run together: the semantic tier (SGTTI) and the pixel tier
-(the bitmap gates + Engine2D CPU-fallback readback, which stays the pixel
-oracle). Layout/CSS/position assertions are **not** part of semantic v1 — they
-arrive only via the Draw IR inspection extension (Protocol v2, gated), which
-depends on SGTTI. Improvement plan:
-`doc/03_plan/ui/ui_test/ui_test_sgtti_plan.md`.
+New UI specs import `use std.spec`; `std.spipe` remains a compatibility alias.
+Helpers such as SGTTI checks and future `expect_draw` run inside SPipe
+scenarios and do not replace `expect` or the canonical matcher set.
+
+Semantic SGTTI evidence and pixel evidence run together. SGTTI proves
+identity/state/text/structure; existing bitmap gates and Engine2D readback stay
+the pixel oracle. Draw IR Protocol v2 inspection depends on SGTTI. Improvement
+plan: `doc/03_plan/ui/ui_test/ui_test_sgtti_plan.md`.
 
 ## GUI Sanity Apps (pure-Simple lane, macOS)
 

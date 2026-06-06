@@ -79,22 +79,24 @@ v1 shared UI contract or forking a second model.
   computed style for known IDs.
 
 ### Phase 5 — Gated Protocol-v2 inspection endpoint
-> **Depends on SGTTI** (`doc/03_plan/ui/ui_test/ui_test_sgtti_plan.md`
-> Phases 1–2): the endpoint and `expect_draw` read the in-process
-> `WinTextSnapshot` substrate. Land that test-lib work first; Phases 1–3 here
-> (model/SDN/Draw.io) are independent and can run in parallel.
 - `app.ui.test_api`: `/api/test/draw-ir`, `?id=`, `/draw-ir/diff`,
   `/layout?id=`, behind a capability flag; responses carry bumped
   `X-UI-Protocol-Version`.
 - Record the extension in `doc/04_architecture/ui/shared_ui_contract.md`
   (new "Protocol v2 / Draw-IR extension" section + support matrix rows).
+- Keep the existing `/api/test/*` v1 endpoints stable. Draw IR inspection is an
+  advertised optional extension, not a replacement for element/state/action
+  endpoints.
 - **Exit:** endpoint returns SDN/JSON Draw IR for a running web surface; v1
   endpoints unchanged; capability advertised.
 
-### Phase 6 — `expect_draw` matcher (gated)
+### Phase 6 — `expect_draw` helper (gated)
 - Add `expect_draw` over `UITestClient` (`src/lib/nogc_sync_mut/ui_test/`):
   `visible`, `geometry … tolerance N`, `hit_rect contains x y`, `css <prop>
   <val>`, `parent <id>`, `kind`/`role`.
+- Keep `expect_draw` as a UI helper used inside normal SPipe specs that import
+  `use std.spec`. It must not replace SPipe `expect` or change existing
+  `std.spipe` alias compatibility.
 - **Exit:** migration samples from the research/proposal pass against a pure
   Simple API test; native-backend tests untouched.
 
@@ -108,7 +110,7 @@ v1 shared UI contract or forking a second model.
 - Order is smallest-blast-radius first: model + SDN are fully in-Simple and
   browser-free (Phases 1–2), so they are the safe foundation. Draw.io (3) is
   pure text mapping. Producer enrichment (4) touches the large renderer files
-  and is the first browser-dependent step. The gated endpoint/matcher (5–6) is
+  and is the first browser-dependent step. The gated endpoint/helper (5–6) is
   where the contract-version discipline matters most.
 - Risk: enriching `simple_web_html_layout_renderer.spl` (115 KB) and
   `window_scene_draw_ir.spl` must stay behind the debug flag so the render hot

@@ -45,6 +45,11 @@ exists, and cite the canonical implementation paths such as
 `src/lib/common/ui/window_scene_draw_ir.spl`, and
 `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl`.
 
+For UI-test helper work, keep the test-library surface consistent: new specs
+use canonical `use std.spec`, existing `use std.spipe` remains an alias, and
+UI/SGTTI/Draw IR helpers must layer inside SPipe scenarios instead of replacing
+`describe`, `it`, `expect`, or the built-in matchers.
+
 For Simple Web/Electron renderer parity, keep the canonical wrapper documented
 as `scripts/check/check-production-gui-web-renderer-parity-evidence.shs`.
 Generated-GUI evidence may record explicit `text_normalization_pixels` for

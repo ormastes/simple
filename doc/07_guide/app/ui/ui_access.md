@@ -121,6 +121,19 @@ The startup-light play CLI recognizes matching planner subcommands:
 `simple play wm-text-snapshot`, `simple play wm-text-find`, and
 `simple play wm-text-act`.
 
+## SPipe Test API Consistency
+
+Executable UI, SGTTI, and Draw IR specs should use the canonical SPipe import:
+
+```simple
+use std.spec
+```
+
+`std.spipe` is a compatibility alias for existing specs. Keep UI-specific
+helpers such as SGTTI query/action checks or future `expect_draw` assertions as
+helper calls inside normal `describe`/`it` scenarios; do not create a parallel
+test framework or replace the built-in SPipe matchers.
+
 ---
 
 ## MCP Tools

@@ -65,11 +65,15 @@ aligned with the current workspace compiler/runtime changes.
 
 ## Writing Tests
 
-Tests use the built-in SPipe BDD framework. No imports needed for `describe`, `it`, `expect`.
+Tests use the built-in SPipe BDD framework. New specs should import
+`use std.spec` for `describe`, `it`, and `expect`. `use std.spipe` is a
+compatibility alias with the same public surface for older or SPipe-named
+specs.
 
 ```simple
 # test/01_unit/std/example_spec.spl
 
+use std.spec
 use std.my_module.{my_function}
 
 describe "std.my_module":

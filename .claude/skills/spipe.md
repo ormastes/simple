@@ -47,6 +47,21 @@ tests, generated `doc/06_spec/...` must read like a scenario manual:
 Run `bin/simple spipe-docgen <spec> --output doc/06_spec` and revise the spec
 until the generated manual is usable without opening the source.
 
+## Test API Imports
+
+Use `std.spec` as the canonical SPipe test-library import in new executable
+specs:
+
+```simple
+use std.spec
+```
+
+`std.spipe` remains a compatibility alias that re-exports the same public
+surface for existing specs. Do not create feature-specific replacements for
+`describe`, `it`, `expect`, or the built-in matchers. UI, SGTTI, Draw IR, MCP,
+and protocol checks should add helper functions that run inside normal SPipe
+`it` blocks.
+
 ## Startup-Sensitive Specs
 
 If a SPipe change touches `simple run`, direct file argv parsing,

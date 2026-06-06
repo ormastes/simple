@@ -30,11 +30,11 @@ Codex excels at systematic test generation with full requirement traceability. U
 
 ## Phase 2: SPipe BDD Test Generation
 
-Generate test specs using **built-in matchers only**.
+Generate test specs using the canonical SPipe matcher set.
 Executable specs belong under `test/...`; `doc/06_spec/...` is reserved for
 generated/manual scenario documentation derived from those specs.
 
-### Built-in Matchers (ONLY these are allowed)
+### Canonical Matchers
 
 | Matcher | Usage |
 |---------|-------|
@@ -47,16 +47,17 @@ generated/manual scenario documentation derived from those specs.
 | `to_be_greater_than(val)` | Numeric greater than |
 | `to_be_less_than(val)` | Numeric less than |
 
-**Forbidden patterns:**
-- `to_be_true()` — use `to_equal(true)` instead
-- `to_be_false()` — use `to_equal(false)` instead
+**Do not use in new specs:**
+- `to_be_true()` — compatibility helper; use `to_equal(true)` instead
+- `to_be_false()` — compatibility helper; use `to_equal(false)` instead
 - `to_raise()` — not available; test error returns via `Result<T, E>`
-- Custom matchers — not supported
+- Feature-specific matcher replacements — use helper functions inside SPipe
+  scenarios instead
 
 ### SPipe Template
 
 ```simple
-use std.spec.SPipe
+use std.spec
 
 describe "<Feature Name>":
     describe "REQ-001: <requirement title>":
@@ -204,9 +205,10 @@ bin/simple test path/to/spec.spl --native  # Compiled mode (full execution)
 
 ## Rules
 
-- Built-in matchers ONLY — no custom matchers
+- Canonical matchers only in new specs; add helper functions inside scenarios
+  instead of custom matcher replacements
 - Every REQ-NNN must have test coverage — zero is a FAIL
-- Use `to_equal(true)` not `to_be_true()`
+- Use `to_equal(true)` not compatibility helpers such as `to_be_true()`
 - All test code in `.spl` — no Python, no Bash
 - Generics use `<>` not `[]`
 - NO inheritance in test helpers — use composition

@@ -34,7 +34,7 @@ SPipe is a BDD (Behavior-Driven Development) testing framework for Simple, inspi
 ### Quick Start
 
 ```simple
-use std.spipe.*
+use std.spec
 
 describe "Calculator":
     context "addition":
@@ -239,7 +239,7 @@ context "with user":
         { name: "Alice", id: 42 }
 
     it "accesses user":
-        expect user.name == "Alice"
+        expect(user.name).to_equal("Alice")
 ```
 
 ### Named Eager Setup
@@ -252,7 +252,7 @@ context "complex setup":
         database.connect()
 
     it "has setup":
-        expect true
+        expect(true)
 ```
 
 ### Unnamed Eager Setup
@@ -263,7 +263,7 @@ context "setup":
         setup_database()
 
     it "works":
-        expect true
+        expect(true)
 ```
 
 ### Fixture Types and BDD Pattern
@@ -287,7 +287,7 @@ describe "User Service":
             { id: 42, email: "user@example.com", role: "admin" }
 
         it "has user email":
-            expect user.email == "user@example.com"
+            expect(user.email).to_equal("user@example.com")
 ```
 
 ---
@@ -310,7 +310,7 @@ context_def :as_admin:
 describe "AdminDashboard":
     context :as_admin:
         it "shows admin panel":
-            expect page.has_selector(".admin-panel")
+            expect(page.has_selector(".admin-panel"))
 ```
 
 ### Compose Multiple Contexts
@@ -318,7 +318,7 @@ describe "AdminDashboard":
 ```simple
 context_compose :as_admin, :with_database:
     it "loads from database":
-        expect user.data.is_persisted()
+        expect(user.data.is_persisted())
 ```
 
 ### Sequential Given Blocks
@@ -334,7 +334,7 @@ describe "Integrated Setup":
             let user_key = "user_" + user.id.to_string()
 
         it "has derived variables":
-            expect user_key == "user_42"
+            expect(user_key).to_equal("user_42")
 ```
 
 ### When to Use context_def vs Inline
@@ -426,9 +426,9 @@ import std.testing.mock as mock
 val save_mock = mock.create_mock("save_user")
 save_mock.record_call(["user123", "Alice"])
 
-expect save_mock.was_called()
-expect save_mock.call_count() == 1
-expect save_mock.was_called_with(["user123", "Alice"])
+expect(save_mock.was_called())
+expect(save_mock.call_count()).to_equal(1)
+expect(save_mock.was_called_with(["user123", "Alice"]))
 ```
 
 ### MockBuilder with Return Values
@@ -768,8 +768,8 @@ bin/simple ui web app.ui.sdn --port 9001 --test-api-external
 ### UITestClient
 
 ```simple
-use std.nogc_sync_mut.ui_test.client.{UITestClient}
-use std.nogc_sync_mut.ui_test.types.{ElementInfo, UIStateInfo}
+use std.ui_test.client.{UITestClient}
+use std.ui_test.types.{ElementInfo, UIStateInfo}
 
 val client = UITestClient.connect("127.0.0.1", 9001)?
 client.wait_ready(5000)?
@@ -826,7 +826,7 @@ client.wait_for("modal_dialog", 3000)?             # Wait for element
 # test/03_system/ui/my_app_spec.spl
 # tag: slow, system
 
-use std.nogc_sync_mut.ui_test.client.{UITestClient}
+use std.ui_test.client.{UITestClient}
 
 extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
 extern fn rt_process_kill(pid: i64) -> bool
@@ -937,13 +937,13 @@ The interpreter mode test runner only verifies file loading. The `it` block bodi
 ```simple
 # Wrong -- fixture not defined:
 it "uses user":
-    expect user.name == "Alice"
+    expect(user.name).to_equal("Alice")
 
 # Right -- define fixture first:
 given_lazy :user, \:
     { name: "Alice" }
 it "uses user":
-    expect user.name == "Alice"
+    expect(user.name).to_equal("Alice")
 ```
 
 ### State leaking between tests

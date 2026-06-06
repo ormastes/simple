@@ -78,7 +78,7 @@ maps to `doc/06_spec/feature/usage/math_blocks_spec.md`.
 Never create executable `.spl` files under `doc/06_spec`; verify with
 `find doc/06_spec -name '*_spec.spl' | wc -l` and require `0`.
 
-### Built-in Matchers (ONLY these are allowed)
+### Canonical Matchers
 
 ```
 to_equal(expected)        # Exact equality
@@ -93,11 +93,13 @@ to_be_less_than(val)      # Numeric comparison
 
 - Use `to_equal(true)` not `to_be_true()`
 - Use `to_equal(false)` not `to_be_false()`
+- Compatibility helpers may exist in older specs, but new specs should use only
+  this canonical matcher set.
 
 ### SPipe Test Template
 
 ```simple
-use std.spec.SPipe
+use std.spec
 
 describe "<Feature>":
     describe "REQ-001: <requirement name>":

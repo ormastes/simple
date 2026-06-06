@@ -16,7 +16,8 @@
 
 1. Generate SPipe BDD tests: `test/03_system/app/<app_name>/feature/<feature>_spec.spl`
 2. Follow SPipe rules:
-   - `describe`, `it`, `expect` built-in (no import)
+   - New non-shared specs import `use std.spec` for `describe`, `it`, and
+     `expect`; only `test/shared` cross-platform specs stay import-free.
    - One assertion concept per test
    - Clear names: `it "adds two positive numbers":` not `it "works":`
    - `"""..."""` docstrings for generated docs

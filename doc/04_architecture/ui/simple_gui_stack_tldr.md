@@ -70,6 +70,9 @@ Host input
 - Preferred next refactor: typed GUI AST -> WebRender IR -> Draw IR; resolve
   GUI/HTML AST and CSS before Draw IR, then keep source kind/id and style
   revision on the batch for cache/debug/GPU grouping.
+- UI test helpers: Protocol v1 `/api/test/*` stays stable; Protocol v2 Draw IR
+  is optional and capability-gated. New UI/Draw IR/SGTTI specs use
+  `std.spec`; `std.spipe` remains an alias for existing specs.
 - Current bootstrap files: `src/lib/common/ui/draw_ir.spl` for Draw IR,
   `src/lib/common/ui/window_scene_draw_ir.spl` for WM composition, and
   `src/lib/common/ui/window_scene.spl` for cache-safe event target translation.
@@ -122,6 +125,11 @@ MCP, Render, Test API — all thin. GUI policy stays in Simple.
 - evidence: CPU fallback is mandatory and acts as the rendering test oracle.
 - event cache: stale translations are rejected when scene layout keys change;
   WM Draw IR uses the same scene key.
+- UI tests: `doc/04_architecture/ui/ui_test_architecture.md` defines the
+  `tui` | `gui` | `both` interface. HTTP `UITestClient` stays for S4 surfaces;
+  SGTTI (`common.ui.win_text_access` + `os.compositor.gtti`) gives headless
+  GUI/web/2D semantic assertions over `UiAccessNode`. New specs use
+  `std.spec`; `std.spipe` is compatibility only.
 
 ## GUI Sanity Apps
 
@@ -135,19 +143,9 @@ CPU/NEON + Metal); launch with `scripts/gui/macos-gui-run.shs <app>`:
 Verify the framebuffer (`read_pixels` → PPM), not the screenshot. Details +
 caveats in [source](simple_gui_stack.md) → "GUI Sanity Apps".
 
-## Testing
-
-How these surfaces are tested is its own seam — one configurable interface
-(`tui` | `gui` | `both`): `UITestClient` HTTP path for S4 surfaces, plus an
-SGTTI in-process path (`win_text_access` + `gtti`, headless compositor in
-`WM_MODE_HIDDEN`) giving GUI/web/2D a semantic tree with no server. Semantic
-tier (SGTTI) runs alongside the pixel tier (bitmap gates / Engine2D readback).
-See [UI test architecture](ui_test_architecture_tldr.md).
-
 ## Open Next
 
 - [source](simple_gui_stack.md)
-- [UI test architecture](ui_test_architecture_tldr.md)
 - [UI web protocol](ui_web_protocol.md)
 - [Engine2D architecture](engine_2d.md)
 - [accelerated backend architecture](../compiler/graphics/accelerated_shared_ui_backend_architecture.md)

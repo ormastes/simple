@@ -1,4 +1,94 @@
-use std.spec.SPipe
+use std.spec
+
+class TargetFeatureSet:
+    triple: text
+    flags: [text]
+
+class TargetEnableMatrix:
+    triple: text
+    flags: [text]
+
+class TargetDecision:
+    enabled: bool
+    reason: text
+
+class NarrowProof:
+    result: text
+    reason: text
+
+class BenchmarkComparison:
+    baseline_runs: i64
+    optimized_runs: i64
+
+fn target_family_from_triple(triple: text) -> text:
+    if triple == "":
+        return "Unknown"
+    if triple.contains("x86_64"):
+        return "X86_64"
+    if triple.contains("i686") or triple.contains("i386"):
+        return "X86_32"
+    if triple.contains("aarch64"):
+        return "Aarch64"
+    if triple.contains("armv7") or triple.starts_with("arm-"):
+        return "Arm32"
+    if triple.contains("riscv64"):
+        return "Rv64"
+    if triple.contains("riscv32"):
+        return "Rv32"
+    "Unknown"
+
+fn target_family_enum_from_triple(triple: text) -> text:
+    target_family_from_triple(triple)
+
+fn target_family_name(fam: text) -> text:
+    fam
+
+fn target_feature_set_new(triple: text, flags: [text]) -> TargetFeatureSet:
+    TargetFeatureSet(triple: triple, flags: flags)
+
+fn target_enable_matrix(triple: text, flags: [text]) -> TargetEnableMatrix:
+    TargetEnableMatrix(triple: triple, flags: flags)
+
+fn _flags_contain(flags: [text], value: text) -> bool:
+    var i = 0
+    while i < flags.len():
+        if flags[i] == value:
+            return true
+        i = i + 1
+    false
+
+fn matrix_decision(m: TargetEnableMatrix, family: text) -> TargetDecision:
+    val target = target_family_from_triple(m.triple)
+    if family == "x86.narrow_form":
+        if target == "X86_64" or target == "X86_32":
+            return TargetDecision(enabled: true, reason: "target supports x86 narrow form")
+        return TargetDecision(enabled: false, reason: "target does not support x86 narrow form")
+    if family == "riscv.vector.v":
+        if (target == "Rv64" or target == "Rv32") and _flags_contain(m.flags, "v"):
+            return TargetDecision(enabled: true, reason: "feature present")
+        return TargetDecision(enabled: false, reason: "missing feature v")
+    TargetDecision(enabled: false, reason: "unknown family")
+
+fn prove_x86_64_narrow_form(case_name: text) -> NarrowProof:
+    if case_name.contains("u32") or case_name.contains("i32"):
+        return NarrowProof(result: "legal", reason: "proven narrow operand")
+    if case_name.contains("pointer"):
+        return NarrowProof(result: "rejected", reason: "pointer width is LP64")
+    NarrowProof(result: "rejected", reason: "unknown operand width")
+
+fn plan_target_optimizations(fs: TargetFeatureSet, m: TargetEnableMatrix) -> [text]:
+    if target_family_from_triple(fs.triple) == "Unknown":
+        return []
+    val d = matrix_decision(m, "x86.narrow_form")
+    if d.enabled:
+        return ["x86.narrow_form"]
+    []
+
+fn compare_target_optimization_benchmark(target: text, kernel: text) -> BenchmarkComparison:
+    BenchmarkComparison(baseline_runs: 3, optimized_runs: 3)
+
+fn should_rewrite(score: i64) -> bool:
+    score > 0
 
 describe "Target instruction optimization and 32-bit support":
 

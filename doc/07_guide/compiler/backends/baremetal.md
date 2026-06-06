@@ -321,7 +321,7 @@ class SemihostResult:
 ### Test Example
 
 ```simple
-use std.spipe.{describe, it, expect}
+use std.spec.{describe, it, expect}
 use std.execution.semihost_capture.{SemihostExecutor}
 
 describe "RISC-V 32 Semihosting":

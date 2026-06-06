@@ -83,6 +83,12 @@ Owns additive HTTP contract routes:
 
 The existing `/api/test/*` contract remains valid.
 
+UI access test helpers layer on the existing SPipe test library. New executable
+UI specs use canonical `use std.spec`; `use std.spipe` remains a compatibility
+alias. Helper APIs may add semantic UI assertions, but they must run inside
+normal `describe`/`it` scenarios and must not redefine `expect` or the built-in
+matcher surface.
+
 ### MCP OS tool layer
 
 `src/os/services/llm/mcp_os_server.spl`

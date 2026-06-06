@@ -101,5 +101,5 @@ import graph.
 - [x] Smoke spec at
       `test/01_unit/app/ui.chromium/engine_merge_spec.spl` constructs a
       minimal DOM, runs it through the canonical pipeline, and asserts
-      a non-empty layout + scene result with `.to_be_true()`.
+      a non-empty layout + scene result with `expect(condition)`.
 - [ ] `wm_compare` golden diff ≤1 % (enforced by M5, not M4).

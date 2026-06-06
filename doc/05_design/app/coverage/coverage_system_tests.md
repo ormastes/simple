@@ -36,7 +36,7 @@ Each test file imports its subject via the canonical `use` path:
 
 All tests additionally import:
 ```simple
-use std.spec.SPipe
+use std.spec
 ```
 
 ## Testing Strategy for Private Functions

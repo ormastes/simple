@@ -89,6 +89,29 @@ X-UI-Protocol-Version: 1
 
 Version 1 is the initial stable contract defined in this document.
 
+### 3.1.1 Protocol Version 2 Draw IR Extension
+
+Protocol v2 is an additive, capability-gated extension for Draw IR inspection.
+It does not replace Protocol v1 element/state/action endpoints.
+
+Surfaces that support the extension advertise a Draw IR capability and return:
+
+```text
+X-UI-Protocol-Version: 2
+```
+
+The extension endpoints are:
+
+| Endpoint | Response | Description |
+|----------|----------|-------------|
+| `/api/test/draw-ir` | Draw IR JSON or SDN text | Current composition for the active surface |
+| `/api/test/draw-ir?id=X` | Draw IR JSON or SDN text | Composition filtered to a stable node/surface id |
+| `/api/test/draw-ir/diff` | Geometry/style diff JSON | Semantic Draw IR delta by stable id |
+
+Client helpers such as `expect_draw` are SPipe-layer conveniences over these
+endpoints. They run inside ordinary specs that import `use std.spec`; the
+existing `std.spipe` alias remains source-compatible.
+
 ### 3.2 Base URL
 
 All shared test endpoints live under `/api/test/`. Application-specific endpoints are outside this contract.
@@ -114,6 +137,9 @@ All shared test endpoints live under `/api/test/`. Application-specific endpoint
 | `/api/test/drag` | `{"from_id":"X","to_id":"Y"}` | `{"ok":true}` | Drag between elements |
 | `/api/test/submit` | `{"id":"X"}` | `{"ok":true}` | Submit form/dialog |
 | `/api/test/event` | Event JSON (see 3.5) | `{"ok":true}` | Raw event injection |
+
+Draw IR extension endpoints are listed in §3.1.1 because they require Protocol
+v2 capability advertisement.
 
 ### 3.4 Error Model
 
@@ -352,6 +378,7 @@ Surface-specific deviations from this contract MUST be documented here:
 | ElementInfo.text | yes | yes |
 | UIStateInfo.element_count | yes | yes |
 | UIStateInfo.protocol_version | yes | yes |
+| Protocol v2 Draw IR extension | optional | optional |
 
 ## 10. Versioning
 
@@ -359,3 +386,5 @@ Surface-specific deviations from this contract MUST be documented here:
 - Breaking changes (field removal, semantic change) require a version bump.
 - Additive changes (new optional fields, new endpoints) do not require a version bump.
 - Clients SHOULD check `protocol_version` in the ready response and fail fast if unsupported.
+- Protocol Version 2 is reserved for the optional Draw IR inspection extension;
+  clients must feature-detect it before calling `/api/test/draw-ir*`.
