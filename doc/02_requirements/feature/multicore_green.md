@@ -51,7 +51,7 @@ SimpleOS scheduler work distinct and verifiable.
 - Go/C/Simple research: `doc/01_research/local/multicore_green.md`,
   `doc/01_research/domain/multicore_green.md`, and
   `doc/01_research/lib/threading/go_vs_simple_threads.md`.
-- Architecture/design: `doc/04_architecture/multicore_green.md` and
+- Architecture/design: `doc/04_architecture/runtime/multicore_green.md` and
   `doc/05_design/multicore_green.md`.
 - Host specs: `test/01_unit/lib/nogc_async_mut/cooperative_green_spec.spl`,
   `test/01_unit/lib/nogc_async_mut/multicore_green_spec.spl`, and

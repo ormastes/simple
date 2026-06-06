@@ -90,7 +90,7 @@ Agent and system-test plans live in
 
 **Design:** doc/05_design/multicore_green.md
 
-Architecture and detail design live in `doc/04_architecture/multicore_green.md`
+Architecture and detail design live in `doc/04_architecture/runtime/multicore_green.md`
 and `doc/05_design/multicore_green.md`.
 
 ## Examples
@@ -219,7 +219,7 @@ expect(row).to_contain("doc/01_research/local/multicore_green.md")
 expect(row).to_contain("doc/01_research/domain/multicore_green.md")
 expect(row).to_contain("doc/03_plan/agent_tasks/multicore_green.md")
 expect(row).to_contain("doc/03_plan/sys_test/multicore_green.md")
-expect(row).to_contain("doc/04_architecture/multicore_green.md")
+expect(row).to_contain("doc/04_architecture/runtime/multicore_green.md")
 expect(row).to_contain("doc/05_design/multicore_green.md")
 ```
 

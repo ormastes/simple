@@ -37,7 +37,7 @@ exist. Full release verification remains pending.
 | Loader handoff | `doc/03_plan/agent_tasks/low_dependency_ui_dynsmf_loader_handoff.md` |
 | Parallel work orders | `doc/03_plan/agent_tasks/low_dependency_ui_dynsmf_parallel_work_orders.md` |
 | System-test plans | `doc/03_plan/sys_test/low_dependency_ui_dynsmf_dependency_gate.md`, `doc/03_plan/sys_test/low_dependency_ui_dynsmf_dynsmf_session.md` |
-| Architecture | `doc/04_architecture/low_dependency_ui_dynsmf.md` |
+| Architecture | `doc/04_architecture/ui/low_dependency_ui_dynsmf.md` |
 | Detail design | `doc/05_design/low_dependency_ui_dynsmf.md` |
 | Feature tracking | `doc/08_tracking/feature/feature_db.sdn` row `LOW_DEPENDENCY_UI_DYNSMF_2026_06_05` |
 

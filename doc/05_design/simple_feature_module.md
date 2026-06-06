@@ -1,7 +1,7 @@
 # Simple Feature Module (SFM) — Detailed Design
 
 Detailed design of the `.sfm` codec, manifest encoding, DI/AOP/security-level
-flow, and VERSION.md build wiring. Architecture: [../04_architecture/simple_feature_module.md](../04_architecture/simple_feature_module.md).
+flow, and VERSION.md build wiring. Architecture: [../04_architecture/language/simple_feature_module.md](../04_architecture/language/simple_feature_module.md).
 
 <!-- sdn-diagram:id=simple_feature_module.design -->
 <details class="sdn-source">

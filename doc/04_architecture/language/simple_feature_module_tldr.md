@@ -10,7 +10,7 @@ data-driven from the manifest; an **AOP** authz aspect gates Trusted layers. The
 - Layout (LE): `"SFM1" | ver(u16,u16) | manifest_len u32 | smf_len u32 | manifest | opaque SMF`.
 - SMF blob is last and never re-encoded; header is 16 bytes.
 - Profiles: native | loader | script | web | mobile (loader reports which handled it).
-- VERSION.md → embedded SemVer, retrievable at runtime.
+- VERSION → embedded SemVer, retrievable at runtime.
 
 <!-- sdn-diagram:id=simple_feature_module_tldr.arch -->
 <details class="sdn-source">
@@ -39,5 +39,5 @@ loader -> profile
 </details>
 <!-- sdn-diagram:end -->
 
-Full: [simple_feature_module.md](simple_feature_module.md) · Design: [../05_design/simple_feature_module.md](../05_design/simple_feature_module.md)
+Full: [simple_feature_module.md](simple_feature_module.md) · Design: [../../05_design/simple_feature_module.md](../../05_design/simple_feature_module.md)
 </content>

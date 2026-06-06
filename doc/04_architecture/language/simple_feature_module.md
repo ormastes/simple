@@ -43,7 +43,7 @@ version -> manifest
 - **di_bridge.spl** — `register_layers`/`resolve_layer` over the existing DI container (`src/lib/nogc_sync_mut/src/di.spl`), data-driven from the manifest, `Any`-keyed.
 - **authz.spl** — AOP Around interceptor (on `src/lib/nogc_sync_mut/src/aop.spl`) enforcing `SfmSecurityLevel`.
 - **loader.spl** — parses container, selects + reports the target profile, hands SMF bytes to `SmfReaderImpl`/`SmfGetter`.
-- **version.spl** — reads repo-root `VERSION.md` at build time; embeds the SemVer.
+- **version.spl** — reads repo-root `VERSION` at build time; embeds the SemVer.
 
 ## Byte layout (all little-endian)
 `"SFM1"(4) | ver_major u16 | ver_minor u16 | manifest_len u32 | smf_len u32 | manifest_blob | opaque SMF blob`.

@@ -43,7 +43,7 @@ sfm_codec_spec -> std
 | Feature IDs | #SFM |
 | Category | Infrastructure |
 | Status | Draft |
-| Requirements | doc/04_architecture/simple_feature_module.md |
+| Requirements | doc/04_architecture/language/simple_feature_module.md |
 | Design | doc/05_design/simple_feature_module.md |
 | Source | `test/03_system/feature/sfm/sfm_codec_spec.spl` |
 | Updated | 2026-06-01 |
@@ -406,7 +406,7 @@ match round_trip(m, empty):
 
 ## Related Documentation
 
-- **Requirements:** [doc/04_architecture/simple_feature_module.md](doc/04_architecture/simple_feature_module.md)
+- **Requirements:** [doc/04_architecture/language/simple_feature_module.md](doc/04_architecture/language/simple_feature_module.md)
 - **Design:** [doc/05_design/simple_feature_module.md](doc/05_design/simple_feature_module.md)
 
 

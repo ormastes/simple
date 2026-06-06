@@ -43,7 +43,7 @@ The SFM runtime loads a `.sfm` across five target profiles — native, loader, s
 | Feature IDs | #SFM |
 | Category | Infrastructure |
 | Status | Draft |
-| Requirements | doc/04_architecture/simple_feature_module.md |
+| Requirements | doc/04_architecture/language/simple_feature_module.md |
 | Design | doc/05_design/simple_feature_module.md |
 | Source | `test/03_system/feature/sfm/sfm_loader_profiles_spec.spl` |
 | Updated | 2026-06-01 |
@@ -306,7 +306,7 @@ match write_sample(path):
 
 ## Related Documentation
 
-- **Requirements:** [doc/04_architecture/simple_feature_module.md](doc/04_architecture/simple_feature_module.md)
+- **Requirements:** [doc/04_architecture/language/simple_feature_module.md](doc/04_architecture/language/simple_feature_module.md)
 - **Design:** [doc/05_design/simple_feature_module.md](doc/05_design/simple_feature_module.md)
 
 

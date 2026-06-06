@@ -27,7 +27,7 @@ Date: 2026-06-06
 - `doc/01_research/local/multicore_green.md`
 - `doc/02_requirements/feature/multicore_green.md`
 - `doc/02_requirements/nfr/multicore_green.md`
-- `doc/04_architecture/multicore_green.md`
+- `doc/04_architecture/runtime/multicore_green.md`
 - `doc/05_design/multicore_green.md`
 - `doc/03_plan/sys_test/multicore_green.md`
 - `doc/09_report/cross_language_perf_parallel_smoke.md`

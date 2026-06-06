@@ -1,6 +1,6 @@
 # SFM Sample Apps & Reuse
 
-> The SFM infra ships sample feature modules that exercise the public API end-to-end: a native arg-parser app (AC-7), a runtime log-level changer (AC-8), a web-app login (AC-9), a version-control layer (AC-10), a UI Help/Info menu surfacing the version (AC-11), VERSION.md build integration (AC-12), and an in-repo reuse consumer distinct from the samples (AC-13).
+> The SFM infra ships sample feature modules that exercise the public API end-to-end: a native arg-parser app (AC-7), a runtime log-level changer (AC-8), a web-app login (AC-9), a version-control layer (AC-10), a UI Help/Info menu surfacing the version (AC-11), VERSION build integration (AC-12), and an in-repo reuse consumer distinct from the samples (AC-13).
 
 <!-- sdn-diagram:id=sfm_samples_spec.arch -->
 <details class="sdn-source">
@@ -35,7 +35,7 @@ sfm_samples_spec -> app
 
 # SFM Sample Apps & Reuse
 
-The SFM infra ships sample feature modules that exercise the public API end-to-end: a native arg-parser app (AC-7), a runtime log-level changer (AC-8), a web-app login (AC-9), a version-control layer (AC-10), a UI Help/Info menu surfacing the version (AC-11), VERSION.md build integration (AC-12), and an in-repo reuse consumer distinct from the samples (AC-13).
+The SFM infra ships sample feature modules that exercise the public API end-to-end: a native arg-parser app (AC-7), a runtime log-level changer (AC-8), a web-app login (AC-9), a version-control layer (AC-10), a UI Help/Info menu surfacing the version (AC-11), VERSION build integration (AC-12), and an in-repo reuse consumer distinct from the samples (AC-13).
 
 ## At a Glance
 
@@ -44,7 +44,7 @@ The SFM infra ships sample feature modules that exercise the public API end-to-e
 | Feature IDs | #SFM |
 | Category | Infrastructure |
 | Status | Draft |
-| Requirements | doc/04_architecture/simple_feature_module.md |
+| Requirements | doc/04_architecture/language/simple_feature_module.md |
 | Plan | N/A |
 | Design | doc/05_design/simple_feature_module.md |
 | Research | N/A |
@@ -57,7 +57,7 @@ The SFM infra ships sample feature modules that exercise the public API end-to-e
 The SFM infra ships sample feature modules that exercise the public API end-to-end:
 a native arg-parser app (AC-7), a runtime log-level changer (AC-8), a web-app login
 (AC-9), a version-control layer (AC-10), a UI Help/Info menu surfacing the version
-(AC-11), VERSION.md build integration (AC-12), and an in-repo reuse consumer distinct
+(AC-11), VERSION build integration (AC-12), and an in-repo reuse consumer distinct
 from the samples (AC-13).
 
 ## Key Concepts
@@ -68,8 +68,8 @@ from the samples (AC-13).
 | sfm_set_log_level | Changes the active log level at runtime, observable in output |
 | web_login_attempt | Authenticates a credential; rejects invalid ones |
 | vcs_status | A VCS status/commit operation consumed via the SFM infra |
-| help_info_text | Help/Info menu text surfacing module + VERSION.md version |
-| read_version_md | Build-time VERSION.md reader feeding manifest.version |
+| help_info_text | Help/Info menu text surfacing module + VERSION version |
+| read_version_md | Build-time VERSION reader feeding manifest.version |
 
 ## Syntax
 
@@ -265,7 +265,7 @@ expect(text).to_contain("SFM")
 
 </details>
 
-#### should surface a version string from VERSION.md in the help menu
+#### should surface a version string from VERSION in the help menu
 
 **Scenario capture:** exec after_step
 
@@ -277,14 +277,14 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val ver = read_version_md("VERSION.md")
+val ver = read_version_md("VERSION")
 val text = help_info_text()
 expect(text).to_contain(ver)
 ```
 
 </details>
 
-#### should read a non-empty version string from VERSION.md (AC-12)
+#### should read a non-empty version string from VERSION (AC-12)
 
 **Scenario capture:** exec after_step
 
@@ -296,7 +296,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val ver = read_version_md("VERSION.md")
+val ver = read_version_md("VERSION")
 expect(ver.len()).to_be_greater_than(0)
 ```
 
@@ -335,7 +335,7 @@ expect(desc).to_contain("name")
 
 ## Related Documentation
 
-- **Requirements:** [doc/04_architecture/simple_feature_module.md](doc/04_architecture/simple_feature_module.md)
+- **Requirements:** [doc/04_architecture/language/simple_feature_module.md](doc/04_architecture/language/simple_feature_module.md)
 - **Design:** [doc/05_design/simple_feature_module.md](doc/05_design/simple_feature_module.md)
 
 

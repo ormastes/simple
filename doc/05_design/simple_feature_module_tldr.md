@@ -36,5 +36,5 @@ authz -> security_level
 </details>
 <!-- sdn-diagram:end -->
 
-Full: [simple_feature_module.md](simple_feature_module.md) · Arch: [../04_architecture/simple_feature_module.md](../04_architecture/simple_feature_module.md)
+Full: [simple_feature_module.md](simple_feature_module.md) · Arch: [../04_architecture/language/simple_feature_module.md](../04_architecture/language/simple_feature_module.md)
 </content>

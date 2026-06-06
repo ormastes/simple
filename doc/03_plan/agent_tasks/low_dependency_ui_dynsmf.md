@@ -170,6 +170,6 @@ Completed option-independent handoff plans:
 - `doc/03_plan/sys_test/low_dependency_ui_dynsmf_dependency_gate.md`
 - `doc/03_plan/sys_test/low_dependency_ui_dynsmf_dynsmf_session.md`
 - `doc/03_plan/agent_tasks/low_dependency_ui_dynsmf_parallel_work_orders.md`
-- `doc/04_architecture/low_dependency_ui_dynsmf.md`
+- `doc/04_architecture/ui/low_dependency_ui_dynsmf.md`
 - `doc/05_design/low_dependency_ui_dynsmf.md`
 - `doc/03_plan/agent_tasks/low_dependency_ui_dynsmf_selection_audit.md`
