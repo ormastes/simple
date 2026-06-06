@@ -1,0 +1,302 @@
+# Interactive pure-Simple GUI app — button + scroll + text input.
+#
+# One of the pure-Simple GUI lane check apps, but unlike the static widget
+# showcase this one is INTERACTIVE: it responds to real mouse/keyboard events
+# drained through the lib (std.io.window_winit) and re-renders each frame via the
+# Engine2D CPU backend. No rt_* externs in app code — all OS access goes through
+# the library interface.
+#
+#   - Button  : left-click toggles a counter ("Clicks: N").
+#   - Scroll  : mouse wheel or Up/Down arrows scroll a 20-item list.
+#   - Text    : letter/digit/space keys type into a field; Backspace deletes.
+#   - Quit    : Esc or the window close button.
+#
+# Modes:
+#   INTERACTIVE_SELFTEST=1  headless: drive the REAL input handler with a scripted
+#                           event sequence, assert the resulting state, dump a PPM.
+#   SIMPLE_GUI=1            open a live winit window and handle real events. Pass a
+#                           `.log` argv token to log decoded events (proves the
+#                           real winit->runtime->lib path under real OS input).
+#   (neither)               render the initial frame headless (+ PPM if PPM= set).
+#
+# Launch (window):  scripts/gui/macos-gui-run.shs examples/06_io/ui/interactive_gui.spl
+# Self-test:        INTERACTIVE_SELFTEST=1 SIMPLE_EXECUTION_MODE=interpret SIMPLE_LIB=src \
+#                     src/compiler_rust/target/gui/debug/simple run examples/06_io/ui/interactive_gui.spl
+
+use std.gpu.engine2d.backend_cpu.{CpuBackend}
+use std.io.window_winit.{
+    WinitLoop, WinitWindow, WinitInput, winit_loop_new, winit_loop_free,
+    winit_window_new, winit_window_free, winit_present_rgba, winit_poll_input,
+    winit_keycode_to_char, KEY_BACKSPACE, KEY_ARROW_UP, KEY_ARROW_DOWN, KEY_ESCAPE}
+use std.env.variables.{env_get_or}
+use std.cli.cli_util.{get_cli_args}
+use std.io.file_ops.{file_write_bytes, file_append}
+use common.image.ppm_decode.{encode_ppm_p6}
+
+val W: i32 = 560
+val H: i32 = 420
+
+# Palette
+val BG: u32 = 0xFF14141Cu32
+val CARD: u32 = 0xFF1E1E28u32
+val FG: u32 = 0xFFE6E6F0u32
+val MUTED: u32 = 0xFF8A8A9Au32
+val LINE: u32 = 0xFF34343Eu32
+val ACCENT: u32 = 0xFF3B82F6u32
+val ACCENT_HOT: u32 = 0xFF60A5FAu32
+val GREEN: u32 = 0xFF22C55Eu32
+val WHITE: u32 = 0xFFFFFFFFu32
+val TRACK: u32 = 0xFF2A2A38u32
+
+# Button geometry
+val BTN_X: i32 = 30
+val BTN_Y: i32 = 56
+val BTN_W: i32 = 180
+val BTN_H: i32 = 40
+
+# List geometry
+val LIST_X: i32 = 30
+val LIST_Y: i32 = 210
+val LIST_ROW_H: i32 = 24
+val LIST_VISIBLE: i32 = 6
+val NUM_ITEMS: i32 = 20
+
+fn clamp_scroll(v: i32) -> i32:
+    val max_scroll = NUM_ITEMS - LIST_VISIBLE
+    if v < 0:
+        return 0
+    if v > max_scroll:
+        return max_scroll
+    v
+
+fn point_in_button(x: i32, y: i32) -> bool:
+    x >= BTN_X and x < BTN_X + BTN_W and y >= BTN_Y and y < BTN_Y + BTN_H
+
+# Interactive UI state. `handle` is the single input handler used by BOTH the live
+# winit loop and the headless self-test, so the self-test exercises the real path.
+class UiState:
+    counter: i32
+    scroll: i32
+    text: text
+    cur_x: i32
+    cur_y: i32
+    btn_hot: bool
+
+impl UiState:
+    static fn create() -> UiState:
+        UiState(counter: 0, scroll: 0, text: "", cur_x: 0, cur_y: 0, btn_hot: false)
+
+    me handle(input: WinitInput):
+        if input.mouse_moved:
+            self.cur_x = input.mouse_x.to_i32()
+            self.cur_y = input.mouse_y.to_i32()
+        self.btn_hot = point_in_button(self.cur_x, self.cur_y)
+        if input.left_pressed and self.btn_hot:
+            self.counter = self.counter + 1
+        if input.scroll_y != 0.0:
+            self.scroll = clamp_scroll(self.scroll - input.scroll_y.to_i32())
+        for k in input.keys:
+            if k == KEY_BACKSPACE:
+                if self.text.len() > 0:
+                    self.text = self.text[0 : self.text.len() - 1]
+            elif k == KEY_ARROW_DOWN:
+                self.scroll = clamp_scroll(self.scroll + 1)
+            elif k == KEY_ARROW_UP:
+                self.scroll = clamp_scroll(self.scroll - 1)
+            else:
+                val ch = winit_keycode_to_char(k, false)
+                if ch != "":
+                    self.text = self.text + ch
+
+fn render(state: UiState) -> [u32]:
+    var b = CpuBackend.create()
+    if not b.init(W, H):
+        print "CPU backend failed to initialize"
+        return []
+    b.clear(BG)
+
+    # title
+    b.draw_text(20, 16, "Interactive GUI (pure-Simple lane)", FG, 9)
+    b.draw_line(20, 40, W - 20, 40, LINE, 1)
+
+    # button — brightens when hot, label shows the live counter
+    val btn_col = if state.btn_hot: ACCENT_HOT else: ACCENT
+    b.draw_rect_filled(BTN_X, BTN_Y, BTN_W, BTN_H, btn_col)
+    b.draw_rounded_rect(BTN_X, BTN_Y, BTN_W, BTN_H, 6, ACCENT)
+    b.draw_text(BTN_X + 16, BTN_Y + 14, "Clicks: " + state.counter.to_text(), WHITE, 9)
+    b.draw_text(BTN_X, BTN_Y + BTN_H + 8, "left-click the button", MUTED, 6)
+
+    # text field — typed text with a caret
+    b.draw_text(30, 122, "Text input (type letters, Backspace deletes):", MUTED, 6)
+    b.draw_rect(30, 136, 360, 30, MUTED)
+    b.draw_text(38, 145, state.text + "_", FG, 8)
+
+    # scrollable list — viewport of NUM_ITEMS, offset by state.scroll
+    b.draw_text(LIST_X, 192, "Scroll list (wheel / Up-Down):", MUTED, 6)
+    b.draw_rect(LIST_X, LIST_Y, 300, LIST_ROW_H * LIST_VISIBLE, LINE)
+    var row = 0
+    while row < LIST_VISIBLE:
+        val item = state.scroll + row
+        if item < NUM_ITEMS:
+            val ry = LIST_Y + row * LIST_ROW_H
+            if (item % 2) == 0:
+                b.draw_rect_filled(LIST_X + 1, ry + 1, 298, LIST_ROW_H - 2, CARD)
+            b.draw_text(LIST_X + 10, ry + 7, "Item " + item.to_text(), FG, 7)
+        row = row + 1
+    # scrollbar thumb
+    val track_h = LIST_ROW_H * LIST_VISIBLE
+    val thumb_h = track_h * LIST_VISIBLE / NUM_ITEMS
+    val max_scroll = NUM_ITEMS - LIST_VISIBLE
+    val thumb_y = if max_scroll > 0: LIST_Y + (track_h - thumb_h) * state.scroll / max_scroll else: LIST_Y
+    b.draw_rect_filled(LIST_X + 304, LIST_Y, 8, track_h, TRACK)
+    b.draw_rounded_rect(LIST_X + 304, thumb_y, 8, thumb_h, 4, MUTED)
+
+    # status bar
+    b.draw_rect_filled(0, H - 18, W, 18, CARD)
+    val status = "counter=" + state.counter.to_text() + "  scroll=" + state.scroll.to_text() + "  text='" + state.text + "'  cursor=" + state.cur_x.to_text() + "," + state.cur_y.to_text()
+    b.draw_text(8, H - 14, status, GREEN, 6)
+
+    b.present()
+    val pixels = b.read_pixels()
+    b.shutdown()
+    pixels
+
+fn pack(src: [u32]) -> [i64]:
+    var out: [i64] = [0; src.len()]
+    var i = 0
+    while i < src.len():
+        out[i] = src[i].to_i64() & 0xFFFFFF
+        i = i + 1
+    out
+
+fn dump_ppm(pixels: [u32], path: text):
+    if path != "":
+        val bytes = encode_ppm_p6(W.to_u32(), H.to_u32(), pixels)
+        if file_write_bytes(path, bytes):
+            print "wrote {path} ({bytes.len()} bytes)"
+        else:
+            print "failed to write {path}"
+
+# Build a synthetic input frame for the self-test.
+fn ev(keys: [i64], scroll: f64, mx: f64, my: f64, moved: bool, lpress: bool) -> WinitInput:
+    WinitInput(close: false, keys: keys, scroll_y: scroll, mouse_x: mx, mouse_y: my, mouse_moved: moved, left_pressed: lpress, left_released: false)
+
+# Drive the REAL handler with a scripted event sequence and assert state.
+fn selftest() -> i64:
+    var s = UiState.create()
+    print "selftest start: counter={s.counter} scroll={s.scroll} text='{s.text}'"
+
+    # move cursor onto the button, then press (two presses -> counter 2)
+    s.handle(ev([], 0.0, (BTN_X + 20).to_f64(), (BTN_Y + 20).to_f64(), true, true))
+    s.handle(ev([], 0.0, 0.0, 0.0, false, true))          # cursor persists; press again
+    print "after 2 clicks: counter={s.counter}  btn_hot={s.btn_hot}"
+
+    # a press while NOT over the button must NOT count
+    s.handle(ev([], 0.0, 400.0, 300.0, true, true))
+    print "after off-button click: counter={s.counter}  btn_hot={s.btn_hot}"
+
+    # wheel scroll down 3, then one Up arrow -> scroll 2
+    s.handle(ev([], -3.0, 0.0, 0.0, false, false))
+    s.handle(ev([KEY_ARROW_UP], 0.0, 0.0, 0.0, false, false))
+    print "after scroll: scroll={s.scroll}"
+
+    var ok = true
+
+    # type "Hi 9" (H=72 I=73 space=32 digit9=57) -> lower-cased "hi 9"
+    s.handle(ev([72, 73, 32, 57], 0.0, 0.0, 0.0, false, false))
+    print "after typing: text='{s.text}'"
+    if s.text != "hi 9":
+        ok = false
+        print "FAIL: text input — expected 'hi 9', got '{s.text}'"
+
+    # Backspace removes the last char -> "hi "
+    s.handle(ev([KEY_BACKSPACE], 0.0, 0.0, 0.0, false, false))
+    print "after backspace: text='{s.text}'"
+    if s.text != "hi ":
+        ok = false
+        print "FAIL: backspace — expected 'hi ', got '{s.text}'"
+
+    if s.counter != 2:
+        ok = false
+        print "FAIL: button click — expected counter 2, got {s.counter}"
+    if s.scroll != 2:
+        ok = false
+        print "FAIL: scroll — expected 2, got {s.scroll}"
+
+    val pixels = render(s)
+    if pixels.len() < W * H:
+        print "FAIL: render produced too few pixels ({pixels.len()})"
+        return 1
+    dump_ppm(pixels, env_get_or("PPM", "/tmp/interactive_selftest.ppm"))
+
+    if ok:
+        print "SELFTEST PASS — button + scroll + text input all handled"
+        return 0
+    print "SELFTEST FAIL"
+    1
+
+fn main() -> i64:
+    if env_get_or("INTERACTIVE_SELFTEST", "") == "1":
+        return selftest()
+
+    var state = UiState.create()
+    print "Interactive GUI — button + scroll + text input (Esc/close to quit)"
+
+    if env_get_or("SIMPLE_GUI", "") != "1":
+        val pixels = render(state)
+        print "rendered {pixels.len()} px (headless; set SIMPLE_GUI=1 for a window)"
+        dump_ppm(pixels, env_get_or("PPM", ""))
+        return 0
+
+    val lp = winit_loop_new()
+    if not lp.is_valid:
+        print "No GUI runtime available."
+        return 0
+    val win = winit_window_new(lp, W.to_i64(), H.to_i64(), "Simple Interactive GUI")
+    if not win.is_valid:
+        winit_loop_free(lp)
+        return 0
+
+    # Optional event log: proves the REAL path (winit -> runtime -> lib decode of
+    # the new mouse-button/cursor externs) when driven by real OS input. The path
+    # comes from a `.log` argv token (survives the macOS .app launcher, which drops
+    # arbitrary env) or INTERACTIVE_EVENT_LOG.
+    var log_path = env_get_or("INTERACTIVE_EVENT_LOG", "")
+    for arg in get_cli_args():
+        if arg.ends_with(".log"):
+            log_path = arg
+
+    var frame = pack(render(state))
+    var running = true
+    var iters = 0
+    while running and iters < 20000000:
+        val input = winit_poll_input(lp)
+        if input.close:
+            running = false
+        for k in input.keys:
+            if k == KEY_ESCAPE:
+                running = false
+        # Log discrete events (not every mouse-move) so a real interaction shows
+        # the decoded button/scroll/key values came through the runtime.
+        if log_path != "":
+            if input.left_pressed:
+                file_append(log_path, "CLICK at " + input.mouse_x.to_i32().to_text() + "," + input.mouse_y.to_i32().to_text() + " (tracked " + state.cur_x.to_text() + "," + state.cur_y.to_text() + ") hot=" + state.btn_hot.to_text() + "\n")
+            if input.scroll_y != 0.0:
+                file_append(log_path, "SCROLL dy=" + input.scroll_y.to_text() + "\n")
+            for k in input.keys:
+                val ch = winit_keycode_to_char(k, false)
+                file_append(log_path, "KEY code=" + k.to_text() + " char='" + ch + "'\n")
+        # Re-raster only when something changed; always present to keep the window live.
+        val dirty = input.mouse_moved or input.left_pressed or input.scroll_y != 0.0 or input.keys.len() > 0
+        state.handle(input)
+        if dirty:
+            frame = pack(render(state))
+        winit_present_rgba(win, W.to_i64(), H.to_i64(), frame)
+        iters = iters + 1
+
+    if log_path != "":
+        file_append(log_path, "FINAL counter=" + state.counter.to_text() + " scroll=" + state.scroll.to_text() + " text='" + state.text + "'\n")
+
+    winit_window_free(win)
+    winit_loop_free(lp)
+    0

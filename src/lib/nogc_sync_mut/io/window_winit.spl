@@ -21,6 +21,8 @@ extern fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64
 extern fn rt_winit_event_get_type(ev: i64) -> i64
 extern fn rt_winit_event_keyboard_input(ev: i64) -> (i64, i64, bool)
 extern fn rt_winit_event_mouse_wheel(ev: i64) -> (f64, f64)
+extern fn rt_winit_event_mouse_button(ev: i64) -> (i64, bool)
+extern fn rt_winit_event_mouse_moved(ev: i64) -> (f64, f64)
 extern fn rt_winit_event_free(ev: i64)
 extern fn rt_winit_window_free(win: i64)
 extern fn rt_winit_event_loop_free(el: i64)
@@ -28,7 +30,14 @@ extern fn rt_winit_event_loop_free(el: i64)
 # Event types returned by rt_winit_event_get_type.
 val EVT_CLOSE: i64 = 3
 val EVT_KEYBOARD: i64 = 10
+val EVT_MOUSE_BUTTON: i64 = 20
+val EVT_MOUSE_MOVED: i64 = 21
 val EVT_MOUSE_WHEEL: i64 = 22
+
+# Mouse button codes (rt_winit_event_mouse_button).
+val MOUSE_LEFT: i64 = 0
+val MOUSE_RIGHT: i64 = 1
+val MOUSE_MIDDLE: i64 = 2
 
 # ============================================================================
 # Tier 2: Typed handles
@@ -85,20 +94,61 @@ fn winit_poll_close_requested(lp: WinitLoop) -> bool:
         ev = rt_winit_event_loop_poll_events(lp.handle, 1)
     close_requested
 
-# Input drained from one poll: a close request plus the key codes pressed this
-# frame (drains + frees every pending event, like winit_poll_close_requested).
-# Lets an app be interactive (scroll, keys) without touching raw rt_* externs.
+# Input drained from one poll: a close request, the key codes pressed this frame,
+# accumulated wheel delta, the latest cursor position, and left-button press/release
+# this frame (drains + frees every pending event, like winit_poll_close_requested).
+# Lets an app be fully interactive (button clicks, scroll, keyboard/text) without
+# touching raw rt_* externs.
+#
+# `mouse_moved` is true when a cursor-move arrived this poll; `mouse_x`/`mouse_y`
+# then hold the latest position. The button events carry no position, so callers
+# track the last known cursor position (update it whenever `mouse_moved`) and
+# hit-test `left_pressed` against it.
 struct WinitInput:
     close: bool
     keys: [i64]
     scroll_y: f64
+    mouse_x: f64
+    mouse_y: f64
+    mouse_moved: bool
+    left_pressed: bool
+    left_released: bool
+
+# Keycodes that produce a typed character (the runtime maps letters to ASCII
+# uppercase 65-90, digits to 48-57, space to 32). Returns the printable character
+# for a text-producing keycode, or "" for control/navigation keys. `shift` selects
+# the upper-case letter; digits/space ignore it here.
+val KEY_SPACE: i64 = 32
+val KEY_BACKSPACE: i64 = 8
+val KEY_ENTER: i64 = 13
+val KEY_ESCAPE: i64 = 27
+val KEY_ARROW_LEFT: i64 = 37
+val KEY_ARROW_UP: i64 = 38
+val KEY_ARROW_RIGHT: i64 = 39
+val KEY_ARROW_DOWN: i64 = 40
+
+fn winit_keycode_to_char(keycode: i64, shift: bool) -> text:
+    if keycode >= 65 and keycode <= 90:
+        # Letters arrive as ASCII uppercase; lower-case unless shift held.
+        val code = if shift: keycode else: keycode + 32
+        return code.chr()
+    if keycode >= 48 and keycode <= 57:
+        return keycode.chr()
+    if keycode == KEY_SPACE:
+        return " "
+    ""
 
 fn winit_poll_input(lp: WinitLoop) -> WinitInput:
     var close_requested = false
     var keys: [i64] = []
     var scroll_y = 0.0
+    var mouse_x = 0.0
+    var mouse_y = 0.0
+    var mouse_moved = false
+    var left_pressed = false
+    var left_released = false
     if not lp.is_valid:
-        return WinitInput(close: false, keys: keys, scroll_y: 0.0)
+        return WinitInput(close: false, keys: keys, scroll_y: 0.0, mouse_x: 0.0, mouse_y: 0.0, mouse_moved: false, left_pressed: false, left_released: false)
     var ev = rt_winit_event_loop_poll_events(lp.handle, 1)
     while ev != 0:
         val kind = rt_winit_event_get_type(ev)
@@ -111,6 +161,18 @@ fn winit_poll_input(lp: WinitLoop) -> WinitInput:
         elif kind == EVT_MOUSE_WHEEL:
             val (_wx, wy) = rt_winit_event_mouse_wheel(ev)
             scroll_y = scroll_y + wy
+        elif kind == EVT_MOUSE_MOVED:
+            val (mx, my) = rt_winit_event_mouse_moved(ev)
+            mouse_x = mx
+            mouse_y = my
+            mouse_moved = true
+        elif kind == EVT_MOUSE_BUTTON:
+            val (button, pressed) = rt_winit_event_mouse_button(ev)
+            if button == MOUSE_LEFT:
+                if pressed:
+                    left_pressed = true
+                else:
+                    left_released = true
         rt_winit_event_free(ev)
         ev = rt_winit_event_loop_poll_events(lp.handle, 1)
-    WinitInput(close: close_requested, keys: keys, scroll_y: scroll_y)
+    WinitInput(close: close_requested, keys: keys, scroll_y: scroll_y, mouse_x: mouse_x, mouse_y: mouse_y, mouse_moved: mouse_moved, left_pressed: left_pressed, left_released: left_released)
