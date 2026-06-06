@@ -3,7 +3,7 @@
 **Date:** 2026-06-06
 **Feature:** `draw_io_sdn_draw_ir`
 **Research:** `doc/01_research/ui/draw_ir/draw_io_sdn_draw_ir.md`
-**Status:** In progress — Phases 1-4 implemented; Phases 5-7 pending
+**Status:** Implemented through Phase 6; Phase 7 visual baseline diff deferred
 **Owners:** `src/lib/common/ui`, `src/app/ui.test_api`,
 `src/lib/nogc_sync_mut/ui_test`
 
@@ -97,7 +97,7 @@ v1 shared UI contract or forking a second model.
   `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
   with `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl`.
 
-### Phase 5 — Gated Protocol-v2 inspection endpoint
+### Phase 5 — Gated Protocol-v2 inspection endpoint — done
 
 - `app.ui.test_api`: `/api/test/draw-ir`, `/api/test/draw-ir?id=...`,
   `/api/test/draw-ir/diff`, `/api/test/draw-ir/layout?id=...`, behind a
@@ -112,8 +112,14 @@ v1 shared UI contract or forking a second model.
   assertions; no synthetic fail-only case is used.
 - **Exit:** endpoint returns SDN/JSON Draw IR for a running web surface; v1
   endpoints unchanged; capability advertised.
+- **Evidence:** `src/app/ui.test_api/handler.spl` and
+  `src/app/ui.test_api/mount.spl` implement `/api/test/draw-ir*` behind
+  `capability=draw_ir`, with Protocol-v2 response typing and v1 header
+  preservation; covered by `test/01_unit/app/ui.test_api/handler_test.spl`,
+  `test/01_unit/app/ui/test_api_mount_spec.spl`, and
+  `test/03_system/app/ui_test_api/feature/draw_ir_inspection_contract_spec.spl`.
 
-### Phase 6 — `expect_draw` helper (gated)
+### Phase 6 — `expect_draw` helper (gated) — done
 
 - Add `expect_draw` over `UITestClient` (`src/lib/nogc_sync_mut/ui_test/`):
   `visible`, `geometry … tolerance N`, `hit_rect contains x y`, `css <prop>
@@ -126,12 +132,22 @@ v1 shared UI contract or forking a second model.
   parent / kind assertion vocabulary from this plan.
 - **Exit:** migration samples from the research/proposal pass against a pure
   Simple API test; native-backend tests untouched.
+- **Evidence:** `src/lib/nogc_sync_mut/ui_test/sgtti.spl` exposes
+  `expect_draw` as a driver method and top-level helper over Draw IR snapshots;
+  `test/01_unit/lib/nogc_sync_mut/ui_test/sgtti_spec.spl` covers `visible`,
+  `geometry ... tolerance`, `hit_rect contains`, `css`, `parent`, `kind`, and
+  `role` assertions. Memory-tier and `std.ui_test.sgtti` shims re-export the
+  helper.
 
-### Phase 7 — Visual diff (later)
+### Phase 7 — Visual diff (deferred later)
 
 - Border / color / text-bounds diff over two compositions by stable ID, reusing
   `doc/01_research/ui/tui/harden_tui_gui_layout_comparison.md` patterns.
 - **Exit:** `draw-ir/diff?baseline=` reports per-node geometry/style deltas.
+- **Status:** deferred by plan. The Phase-5 endpoint includes a current-state
+  `/api/test/draw-ir/diff?from_id=...&to_id=...` geometry/style comparison, but
+  persistent baseline capture and visual text-bounds diff remain out of this
+  implementation slice.
 
 ## Sequencing & risk
 

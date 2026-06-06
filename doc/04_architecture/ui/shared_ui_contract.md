@@ -92,7 +92,9 @@ Version 1 is the initial stable contract defined in this document.
 ### 3.1.1 Protocol Version 2 Draw IR Extension
 
 Protocol v2 is an additive, capability-gated extension for Draw IR inspection.
-It does not replace Protocol v1 element/state/action endpoints.
+It does not replace Protocol v1 element/state/action endpoints. Clients request
+the extension explicitly with `capability=draw_ir`; requests without that gate
+fail closed instead of exposing layout/CSS inspection by default.
 
 Surfaces that support the extension advertise a Draw IR capability and return:
 

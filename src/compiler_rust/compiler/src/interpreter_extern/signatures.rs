@@ -30,17 +30,18 @@ use std::sync::Arc;
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Extract a `Vec<u8>` from a `Value::Array` of `Value::Int` entries.
+/// Extract a `Vec<u8>` from a `Value::Array` of numeric byte entries.
 /// Mirrors the `rt_sha1_write` byte-extraction pattern: `i as u8` truncates
 /// to the low 8 bits so signed-wraparound byte values (e.g. i64(-128) for
-/// 0x80) round-trip correctly. Returns None only if the arg is missing or
-/// is not an Array.
+/// 0x80) round-trip correctly. Typed byte literals arrive as `Value::UInt`,
+/// and must not be dropped from SFFI byte arrays.
 fn extract_bytes(args: &[Value], index: usize) -> Option<Vec<u8>> {
     match args.get(index)? {
         Value::Array(arr) => Some(
             arr.iter()
                 .filter_map(|v| match v {
                     Value::Int(i) => Some(*i as u8),
+                    Value::UInt { value, .. } => Some(*value as u8),
                     _ => None,
                 })
                 .collect(),
@@ -51,9 +52,28 @@ fn extract_bytes(args: &[Value], index: usize) -> Option<Vec<u8>> {
 
 /// Wrap raw bytes in a `Value::Array(Arc<Vec<Value::Int(byte)>>)` shape
 /// so Simple code sees a genuine `[u8]`.
-fn bytes_to_value(bytes: &[u8]) -> Value {
-    Value::Array(Arc::new(bytes.iter().map(|b| Value::Int(*b as i64)).collect()))
-}
+    fn bytes_to_value(bytes: &[u8]) -> Value {
+        Value::Array(Arc::new(bytes.iter().map(|b| Value::Int(*b as i64)).collect()))
+    }
+
+    fn bytes_to_value_with_first_u8(bytes: &[u8]) -> Value {
+        Value::Array(Arc::new(
+            bytes
+                .iter()
+                .enumerate()
+                .map(|(index, byte)| {
+                    if index == 0 {
+                        Value::UInt {
+                            value: *byte as u64,
+                            width: 8,
+                        }
+                    } else {
+                        Value::Int(*byte as i64)
+                    }
+                })
+                .collect(),
+        ))
+    }
 
 fn empty_bytes() -> Value {
     Value::Array(Arc::new(Vec::new()))
@@ -399,5 +419,22 @@ mod tests {
         assert_eq!(sig, ED25519_SIG_HELLO);
         let key = UnparsedPublicKey::new(&ED25519, ED25519_PUBKEY);
         key.verify(MSG, &sig).expect("fixture signature should verify");
+    }
+
+    #[test]
+    fn ed25519_sign_preserves_u8_literals_in_message_arrays() {
+        let args = [bytes_to_value(ED25519_PKCS8_V1), bytes_to_value_with_first_u8(MSG)];
+        let result = rt_ed25519_sign(&args).expect("signing should not error");
+        let Value::Array(bytes) = result else {
+            panic!("unexpected result: {result:?}");
+        };
+        let sig: Vec<u8> = bytes
+            .iter()
+            .map(|value| match value {
+                Value::Int(i) => *i as u8,
+                other => panic!("unexpected byte value: {other:?}"),
+            })
+            .collect();
+        assert_eq!(sig, ED25519_SIG_HELLO);
     }
 }
