@@ -14,13 +14,13 @@
 - `test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl` checks SimpleOS-lane cooperative green semantics: logical work queues on the current carrier, `run_all` drains queued work, and direct value scheduling remains available for profile fanout rows.
 - `test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl` checks hosted SimpleOS multicore-green contracts: remote enqueue records a reschedule IPI, green dispatch applies to scheduler-owned multicore execution state, and topology growth extends green execution slots.
 - `test/05_perf/stress/multicore_green_fanout_spec.spl` checks fanout/fanin checksum parity across Simple OS threads, cooperative green, and multicore green; it also requires multicore-green handles to report whether the runtime pool was used before treating the row as M:N evidence.
+- `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl` parses the cross-language profile smoke report and gates numeric Simple OS-thread and multicore-green native rows against Go goroutine and C pthread baselines while keeping cooperative green classified as non-M:N.
 - `test/01_unit/lib/nogc_async_mut/green_channel_spec.spl` checks the pure Simple green-channel contract: empty recv parks a logical green task, send unparks the oldest waiter, FIFO buffering works, and bounded backpressure does not block the carrier worker.
 
 ## Required Future SSPEC
 
 - Scheduler-integrated green-channel wake through carrier dispatch: prove a channel send re-enqueues the unparked logical green task on the selected carrier.
 - `test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl`: live QEMU SMP smoke proving guest-visible green carrier work runs across multiple SimpleOS CPUs/APs.
-- `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`: parse numeric cross-language profile results and gate current Simple rows against Go goroutines and C pthreads.
 
 ## Blocking Evidence To Track
 
