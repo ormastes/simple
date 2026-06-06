@@ -422,6 +422,28 @@ Every implementation of this architecture needs evidence for:
 - `doc/06_spec` layout safety: executable specs stay under `test/**`, not
   under generated/manual spec docs.
 
+## UI Testing (test-access seam)
+
+How these surfaces are *tested* is its own architecture, kept beside the render
+stack: `doc/04_architecture/ui/ui_test_architecture.md` (TLDR:
+`ui_test_architecture_tldr.md`). Two layers are unified behind one configurable
+interface (`tui` | `gui` | `both`):
+
+- **HTTP protocol path** — `UITestClient` over `/api/test/*` for the S4
+  surfaces (web, tui-web); returns `ElementInfo`.
+- **SGTTI in-process path** — `common.ui.win_text_access` +
+  `os.compositor.gtti` give GUI/web/2D a headless semantic tree (compositor
+  source in `WM_MODE_HIDDEN`) over the canonical `UiAccessNode`, asserted with
+  the same vocabulary, no server. TUI joins via the
+  `UIState → win_text_simple_ui_snapshot` lift.
+
+Two evidence tiers run together: the semantic tier (SGTTI) and the pixel tier
+(the bitmap gates + Engine2D CPU-fallback readback, which stays the pixel
+oracle). Layout/CSS/position assertions are **not** part of semantic v1 — they
+arrive only via the Draw IR inspection extension (Protocol v2, gated), which
+depends on SGTTI. Improvement plan:
+`doc/03_plan/ui/ui_test/ui_test_sgtti_plan.md`.
+
 ## GUI Sanity Apps (pure-Simple lane, macOS)
 
 Three small on-screen apps exercise the pure-Simple drawing lane (on macOS that

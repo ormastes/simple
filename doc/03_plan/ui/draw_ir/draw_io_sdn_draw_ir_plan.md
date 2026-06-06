@@ -79,6 +79,10 @@ v1 shared UI contract or forking a second model.
   computed style for known IDs.
 
 ### Phase 5 — Gated Protocol-v2 inspection endpoint
+> **Depends on SGTTI** (`doc/03_plan/ui/ui_test/ui_test_sgtti_plan.md`
+> Phases 1–2): the endpoint and `expect_draw` read the in-process
+> `WinTextSnapshot` substrate. Land that test-lib work first; Phases 1–3 here
+> (model/SDN/Draw.io) are independent and can run in parallel.
 - `app.ui.test_api`: `/api/test/draw-ir`, `?id=`, `/draw-ir/diff`,
   `/layout?id=`, behind a capability flag; responses carry bumped
   `X-UI-Protocol-Version`.

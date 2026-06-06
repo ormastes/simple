@@ -135,9 +135,19 @@ CPU/NEON + Metal); launch with `scripts/gui/macos-gui-run.shs <app>`:
 Verify the framebuffer (`read_pixels` → PPM), not the screenshot. Details +
 caveats in [source](simple_gui_stack.md) → "GUI Sanity Apps".
 
+## Testing
+
+How these surfaces are tested is its own seam — one configurable interface
+(`tui` | `gui` | `both`): `UITestClient` HTTP path for S4 surfaces, plus an
+SGTTI in-process path (`win_text_access` + `gtti`, headless compositor in
+`WM_MODE_HIDDEN`) giving GUI/web/2D a semantic tree with no server. Semantic
+tier (SGTTI) runs alongside the pixel tier (bitmap gates / Engine2D readback).
+See [UI test architecture](ui_test_architecture_tldr.md).
+
 ## Open Next
 
 - [source](simple_gui_stack.md)
+- [UI test architecture](ui_test_architecture_tldr.md)
 - [UI web protocol](ui_web_protocol.md)
 - [Engine2D architecture](engine_2d.md)
 - [accelerated backend architecture](../compiler/graphics/accelerated_shared_ui_backend_architecture.md)
