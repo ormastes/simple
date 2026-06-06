@@ -20,11 +20,25 @@ scripts cannot use the closure path as a reliable benchmark input yet.
 `green_spawn_value(result)` is used for direct perf checks to exercise the
 cooperative queue without function-value calls or global array mutation.
 
+2026-06-06 follow-up: a Pure Simple delayed-closure queue was prototyped by
+storing `fn() -> i64` values and running them from `green_run_one()`. Interpreter
+checks and SPipe examples passed, but native entry-closure evidence failed:
+
+- Array-backed function storage compiled, then the native smoke segfaulted with
+  `exit=139`.
+- Fixed function-valued global slots compiled, but native codegen emitted
+  `CODEGEN-WARN ... IncompatibleDeclaration` for `GREEN_TASK_FUNC_*`, and the
+  native smoke again segfaulted with `exit=139`.
+
+Until native codegen can safely store and call function-valued globals or array
+entries, `green_spawn(fn)` must keep the native-safe eager-result behavior and
+`green_spawn_value(result)` remains the stable profile harness input.
+
 Green threads also cannot be used as proof of C/Go parity for CPU-parallel
 workloads because they run on the current OS thread. On 2026-06-06, the existing
 cross-language harness with `WORKERS=2 GREEN_WORKERS=2 RUNS=3` measured:
 
-- Simple green native: 9.479 ms
+- Simple cooperative green native: 9.479 ms
 - C pthreads: 5.852 ms
 - Go goroutines/channels: 6.117 ms
 
@@ -32,12 +46,12 @@ This is a model mismatch, not just a local queue optimization issue. Use
 `thread_spawn_with_args`/pool-backed native work for C/Go-style CPU parallelism once the
 native OS-thread path compiles and runs cleanly.
 
-The cross-language harness now reports Simple OS-thread and Simple green rows
-separately. A 20-worker OS-thread fanout smoke compiles and runs through
+The cross-language harness now reports Simple OS-thread and Simple cooperative
+green rows separately. A 20-worker OS-thread fanout smoke compiles and runs through
 loop-based `thread_spawn_with_args`, and the harness no longer needs 1000-worker unrolled
 source generation for the OS-thread fanout row. The remaining direct-run blockers
-are the cooperative green SMF mutable-global failure and the older function-value
-closure path used by `thread_spawn(fn)`; those are runtime/compiler issues, not
+are the cooperative green SMF mutable-global failure and native/SMF
+function-valued storage/codegen failures; those are runtime/compiler issues, not
 public API change requests.
 
 ## Reproduction
@@ -50,6 +64,6 @@ Temporary local repro files were created under `build/tmp/` while investigating:
 
 ## Required Fix
 
-Fix direct interpreter and SMF handling for function-value calls and mutable
-global state, then switch the perf harness green row back to `green_spawn(fn)`
-for closure execution timing.
+Fix native and SMF handling for function-valued globals/arrays and mutable
+global state, then switch or add a perf harness green row for delayed
+`green_spawn(fn)` closure execution timing.
