@@ -43,16 +43,19 @@ cross-language harness with `WORKERS=2 GREEN_WORKERS=2 RUNS=3` measured:
 - Go goroutines/channels: 6.117 ms
 
 This is a model mismatch, not just a local queue optimization issue. Use
-`thread_spawn_with_args`/pool-backed native work for C/Go-style CPU parallelism once the
-native OS-thread path compiles and runs cleanly.
+`thread_spawn` or pool-backed native work for C/Go-style CPU parallelism. Do not
+use `thread_spawn_with_args` as native performance evidence until
+`doc/08_tracking/bug/native_thread_spawn_with_args_abi_2026-06-06.md` is fixed.
 
 The cross-language harness now reports Simple OS-thread and Simple cooperative
-green rows separately. A 20-worker OS-thread fanout smoke compiles and runs through
-loop-based `thread_spawn_with_args`, and the harness no longer needs 1000-worker unrolled
-source generation for the OS-thread fanout row. The remaining direct-run blockers
-are the cooperative green SMF mutable-global failure and native/SMF
-function-valued storage/codegen failures; those are runtime/compiler issues, not
-public API change requests.
+green rows separately. A 20-worker OS-thread fanout smoke compiles and runs
+through unrolled `thread_spawn` fork-join handles. `thread_spawn_with_args`
+native probes currently segfault with exit 139 even when handles are joined, so
+that explicit-argument path is tracked as a separate ABI blocker. The remaining
+direct-run blockers are the cooperative green SMF mutable-global failure,
+native/SMF function-valued storage/codegen failures, and the
+`thread_spawn_with_args` native ABI issue; those are runtime/compiler issues,
+not public API change requests.
 
 ## Reproduction
 

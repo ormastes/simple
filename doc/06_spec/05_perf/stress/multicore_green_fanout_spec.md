@@ -94,14 +94,14 @@ Reproduction: this block contains the complete executable scenario source.
 val iterations = 512
 val expected = fanout_expected(8, iterations)
 
-val h0 = thread_spawn_with_args(0, iterations, \seed, iters: fanout_work(seed, iters))
-val h1 = thread_spawn_with_args(1, iterations, \seed, iters: fanout_work(seed, iters))
-val h2 = thread_spawn_with_args(2, iterations, \seed, iters: fanout_work(seed, iters))
-val h3 = thread_spawn_with_args(3, iterations, \seed, iters: fanout_work(seed, iters))
-val h4 = thread_spawn_with_args(4, iterations, \seed, iters: fanout_work(seed, iters))
-val h5 = thread_spawn_with_args(5, iterations, \seed, iters: fanout_work(seed, iters))
-val h6 = thread_spawn_with_args(6, iterations, \seed, iters: fanout_work(seed, iters))
-val h7 = thread_spawn_with_args(7, iterations, \seed, iters: fanout_work(seed, iters))
+val h0 = thread_spawn(\: fanout_work(0, iterations))
+val h1 = thread_spawn(\: fanout_work(1, iterations))
+val h2 = thread_spawn(\: fanout_work(2, iterations))
+val h3 = thread_spawn(\: fanout_work(3, iterations))
+val h4 = thread_spawn(\: fanout_work(4, iterations))
+val h5 = thread_spawn(\: fanout_work(5, iterations))
+val h6 = thread_spawn(\: fanout_work(6, iterations))
+val h7 = thread_spawn(\: fanout_work(7, iterations))
 
 val got = h0.join() + h1.join() + h2.join() + h3.join() + h4.join() + h5.join() + h6.join() + h7.join()
 expect(got).to_equal(expected)

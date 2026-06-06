@@ -20,8 +20,8 @@
 
 ## Local Evidence
 
-- `scripts/check/check-cross-language-perf.shs` now emits separate rows for OS thread, cooperative green, and multicore-green candidate workloads.
-- `test/05_perf/profile_scripts/profile_report_contract_test.shs` now fails cross-language reports that omit the OS-thread, cooperative-green, multicore-green, C pthread, Go goroutine, large-fanout, RSS, or `used_runtime_pool()` evidence needed to compare the models honestly.
+- `scripts/check/check-cross-language-perf.shs` now emits separate rows for OS thread, cooperative green, and multicore-green candidate workloads. Native OS-thread rows use `thread_spawn` fork-join because `thread_spawn_with_args` native explicit-argument ABI is currently blocked.
+- `test/05_perf/profile_scripts/profile_report_contract_test.shs` now fails cross-language reports that omit the OS-thread, cooperative-green, multicore-green, C pthread, Go goroutine, large-fanout, Go-vs-C fanout stress, RSS, or `used_runtime_pool()` evidence needed to compare the models honestly.
 - `test/01_unit/lib/nogc_async_mut/multicore_green_native.spl` verifies the native entry-closure path joins multiple multicore-green tasks.
 - `test/01_unit/lib/nogc_async_mut/multicore_green_spec.spl` verifies the interpreter semantics, but the current `simple test` command can hang in `spipe-docgen` after reporting the passing example.
 - `test/01_unit/os/kernel/scheduler/green_worker_spec.spl` verifies the SimpleOS placement and rebalance contract for future green-task carrier workers.
@@ -33,6 +33,6 @@
 - `test/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.spl` verifies hosted SimpleOS green-channel wake integration from pure channel send-unpark output through carrier enqueue, dispatch, and scheduler-owned execution-state update.
 - `test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl` verifies the opt-in live SimpleOS/QEMU lane. The forced run on 2026-06-06 used `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 --clean`, built the x86_64 guest probe, observed `[smp] AP reached 64-bit entry`, and observed `[green-carrier-qemu] PASS=true` after CPU1 fixed-slot green dispatch.
 - `test/05_perf/stress/multicore_green_fanout_spec.spl` verifies fanout/fanin checksum parity between Simple OS threads, cooperative green, and multicore green while keeping runtime-pool evidence separate from inline fallback.
-- `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl` verifies the checked-in cross-language smoke report numerically: Simple OS-thread and multicore-green native rows must remain within bounded ratios of Go goroutine and C pthread rows, and cooperative green must stay classified as current-carrier, non-M:N work.
+- `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl` verifies the checked-in cross-language smoke report numerically: Simple OS-thread and multicore-green native rows must remain within bounded ratios of Go goroutine and C pthread rows, Go must beat one-pthread-per-task C in the isolated large-fanout stress row, and cooperative green must stay classified as current-carrier, non-M:N work.
 - `test/01_unit/lib/nogc_async_mut/green_channel_spec.spl` verifies the pure Simple green-channel park/unpark/backpressure contract needed before scheduler-integrated channel wakeup.
 - `test/01_unit/os/kernel/smp/smp_spec.spl` verifies the named SMP accessors, AP registration, online CPU tracking, IPI send/take behavior, and preemption counter behavior used by the green-carrier apply path.

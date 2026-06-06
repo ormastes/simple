@@ -15,6 +15,7 @@ set -eu
 #   sh scripts/check/check-cross-language-perf.shs
 #   RUNS=50 WORKERS=100 sh scripts/check/check-cross-language-perf.shs
 #   RUNS=3 FANOUT_WORKERS=1000 FANOUT_ITERS=32 sh scripts/check/check-cross-language-perf.shs
+#   RUNS=3 FANOUT_STRESS_WORKERS=2000 sh scripts/check/check-cross-language-perf.shs
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
@@ -22,6 +23,8 @@ cd "$ROOT_DIR"
 if [ -z "${SIMPLE_BINARY:-}" ]; then
     if [ -x "bin/simple" ]; then
         SIMPLE_BINARY="bin/simple"
+    elif [ -x "bin/release/simple" ]; then
+        SIMPLE_BINARY="bin/release/simple"
     elif [ -x "bin/release/x86_64-unknown-linux-gnu/simple" ]; then
         SIMPLE_BINARY="bin/release/x86_64-unknown-linux-gnu/simple"
     else
@@ -41,6 +44,8 @@ FANOUT_WORKERS="${FANOUT_WORKERS:-1000}"
 FANOUT_OS_THREAD_WORKERS="${FANOUT_OS_THREAD_WORKERS:-$FANOUT_WORKERS}"
 FANOUT_MULTICORE_GREEN_WORKERS="${FANOUT_MULTICORE_GREEN_WORKERS:-$FANOUT_WORKERS}"
 FANOUT_ITERS="${FANOUT_ITERS:-32}"
+FANOUT_STRESS_WORKERS="${FANOUT_STRESS_WORKERS:-512}"
+FANOUT_STRESS_ITERS="${FANOUT_STRESS_ITERS:-1}"
 if [ -z "${COOPERATIVE_GREEN_WORKERS:-}" ]; then
     if [ -n "${GREEN_WORKERS:-}" ]; then
         COOPERATIVE_GREEN_WORKERS="$GREEN_WORKERS"
@@ -85,6 +90,17 @@ run_bounded() {
 
 bytes_of() {
     if [ -f "$1" ]; then wc -c <"$1" | tr -d ' '; else echo "n/a"; fi
+}
+
+simple_runtime_path() {
+    _path="$(readlink -f "$SIMPLE_BINARY")"
+    _dir="$(dirname "$_path")"
+    _wrapped="$_dir/x86_64-unknown-linux-gnu/simple"
+    if [ "$(basename "$_path")" = "simple" ] && [ -x "$_wrapped" ]; then
+        echo "$_wrapped"
+    else
+        echo "$_path"
+    fi
 }
 
 human_bytes() {
@@ -191,13 +207,12 @@ SIMPLE
 }
 
 write_simple_parallel() {
-    # Channel-based pattern — same semantic as Go's goroutine + chan result.
-    # Workers send results through a channel; main recvs and sums.
-    # Import the OS-thread owner directly so this benchmark does not pull the
-    # unrelated task_spawn facade symbols while compiling the direct thread row.
+    # Fork-join OS-thread pattern using Simple's direct thread_spawn API.
+    # thread_spawn_with_args is tracked separately while its native ABI blocker
+    # is active; this row must stay a real OS-thread baseline.
+    _last_os_worker=$((WORKERS - 1))
     {
-        echo 'use std.concurrent.channel.{channel_new, channel_from_id}'
-        echo 'use std.nogc_sync_mut.concurrent.thread.{thread_spawn_with_args}'
+        echo 'use std.nogc_sync_mut.concurrent.thread.{thread_spawn}'
         echo ''
         echo "val WORKERS: i64 = ${WORKERS}"
         echo 'val LCG_A: i64 = 1103515245'
@@ -205,23 +220,20 @@ write_simple_parallel() {
         echo 'val LCG_M: i64 = 2147483648'
         echo 'val ITERS: i64 = 100000'
         echo ''
-        echo 'fn worker(seed: i64, ch_id: i64) -> i64:'
+        echo 'fn worker(seed: i64) -> i64:'
         echo '    var x = seed'
         echo '    for i in 0..ITERS:'
         echo '        x = (x * LCG_A + LCG_C) % LCG_M'
-        echo '    val ch = channel_from_id(ch_id)'
-        echo '    ch.send(x)'
-        echo '    return 0'
+        echo '    x'
         echo ''
         echo 'fn main():'
-        echo '    val ch = channel_new()'
-        echo '    val cid = ch.id()'
-        echo '    for i in 0..WORKERS:'
-        echo '        thread_spawn_with_args(i, cid, worker)'
+        for i in $(seq 0 "$_last_os_worker"); do
+            echo "    var h${i} = thread_spawn(\\: worker(${i}))"
+        done
         echo '    var total: i64 = 0'
-        echo '    for i in 0..WORKERS:'
-        echo '        val v: i64 = ch.recv()'
-        echo '        total = total + v'
+        for i in $(seq 0 "$_last_os_worker"); do
+            echo "    total = total + h${i}.join()"
+        done
         echo '    println("total = {total}")'
     } >"$BUILD_DIR/parallel.spl"
 }
@@ -300,14 +312,11 @@ write_simple_parallel_multicore_green() {
 }
 
 write_simple_fanout() {
-    # OS-thread fanout pattern using Simple's explicit-argument thread/channel APIs. This is
+    # OS-thread fanout pattern using Simple's direct thread_spawn API. This is
     # the Simple row comparable to C pthread-per-task fanout.
-    # Import the OS-thread owner directly so the benchmark stays focused on
-    # OS thread spawning rather than the task_spawn/thread-pool facade. Receive
-    # all channel messages for synchronization; process exit reclaims handles.
+    _last_fanout_os_worker=$((FANOUT_WORKERS - 1))
     {
-        echo 'use std.concurrent.channel.{channel_new, channel_from_id}'
-        echo 'use std.nogc_sync_mut.concurrent.thread.{thread_spawn_with_args}'
+        echo 'use std.nogc_sync_mut.concurrent.thread.{thread_spawn}'
         echo ''
         echo 'val LCG_A: i64 = 1103515245'
         echo 'val LCG_C: i64 = 12345'
@@ -321,20 +330,14 @@ write_simple_fanout() {
         echo '        x = (x * LCG_A + LCG_C) % LCG_M'
         echo '    x'
         echo ''
-        echo 'fn worker(seed: i64, ch_id: i64) -> i64:'
-        echo '    val ch = channel_from_id(ch_id)'
-        echo '    ch.send(work(seed))'
-        echo '    return 0'
-        echo ''
         echo 'fn main():'
-        echo '    val ch = channel_new()'
-        echo '    val cid = ch.id()'
-        echo '    for i in 0..WORKERS:'
-        echo '        thread_spawn_with_args(i, cid, worker)'
+        for i in $(seq 0 "$_last_fanout_os_worker"); do
+            echo "    var h${i} = thread_spawn(\\: work(${i}))"
+        done
         echo '    var total: i64 = 0'
-        echo '    for i in 0..WORKERS:'
-        echo '        val v: i64 = ch.recv()'
-        echo '        total = total + v'
+        for i in $(seq 0 "$_last_fanout_os_worker"); do
+            echo "    total = total + h${i}.join()"
+        done
         echo '    println("total = {total}")'
     } >"$BUILD_DIR/fanout.spl"
 }
@@ -513,6 +516,51 @@ int main(void) {
 C
 }
 
+write_c_fanout_stress() {
+    cat >"$BUILD_DIR/fanout_stress.c" <<C
+#include <stdio.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <pthread.h>
+static const int64_t LCG_A = 1103515245;
+static const int64_t LCG_C = 12345;
+static const int64_t LCG_M = 2147483648LL;
+static const int ITERS = ${FANOUT_STRESS_ITERS};
+static int64_t *results;
+static int64_t work(int64_t seed) {
+    int64_t x = seed;
+    for (int i = 0; i < ITERS; i++) x = (x * LCG_A + LCG_C) % LCG_M;
+    return x;
+}
+static void *worker(void *arg) {
+    int64_t i = (int64_t)(intptr_t)arg;
+    results[i] = work(i);
+    return NULL;
+}
+int main(void) {
+    enum { N = ${FANOUT_STRESS_WORKERS} };
+    pthread_t *t = calloc(N, sizeof(pthread_t));
+    results = calloc(N, sizeof(int64_t));
+    if (!t || !results) return 2;
+    int created = 0;
+    for (int i = 0; i < N; i++) {
+        if (pthread_create(&t[i], NULL, worker, (void *)(intptr_t)i) != 0) break;
+        created++;
+    }
+    if (created != N) {
+        for (int i = 0; i < created; i++) pthread_join(t[i], NULL);
+        fprintf(stderr, "pthread_create failed at %d/%d\n", created, N);
+        return 2;
+    }
+    int64_t total = 0;
+    for (int i = 0; i < N; i++) { pthread_join(t[i], NULL); total += results[i]; }
+    printf("total = %ld\n", total);
+    free(t); free(results);
+    return 0;
+}
+C
+}
+
 write_go_fib() {
     cat >"$BUILD_DIR/fib.go" <<'GO'
 package main
@@ -576,6 +624,28 @@ func main() {
     }
     var total int64
     for i := 0; i < ${FANOUT_WORKERS}; i++ { total += <-ch }
+    fmt.Printf("total = %d\n", total)
+}
+GO
+}
+
+write_go_fanout_stress() {
+    cat >"$BUILD_DIR/fanout_stress.go" <<GO
+package main
+import "fmt"
+func work(seed int64) int64 {
+    const a, c, m int64 = 1103515245, 12345, 2147483648
+    x := seed
+    for i := 0; i < ${FANOUT_STRESS_ITERS}; i++ { x = (x*a + c) % m }
+    return x
+}
+func main() {
+    ch := make(chan int64, ${FANOUT_STRESS_WORKERS})
+    for i := 0; i < ${FANOUT_STRESS_WORKERS}; i++ {
+        go func(seed int64) { ch <- work(seed) }(int64(i))
+    }
+    var total int64
+    for i := 0; i < ${FANOUT_STRESS_WORKERS}; i++ { total += <-ch }
     fmt.Printf("total = %d\n", total)
 }
 GO
@@ -850,10 +920,12 @@ write_c_fib
 write_c_fib_warm
 write_c_parallel
 write_c_fanout
+write_c_fanout_stress
 write_go_fib
 write_go_fib_warm
 write_go_parallel
 write_go_fanout
+write_go_fanout_stress
 write_python_fib
 write_python_fib_warm
 write_python_parallel
@@ -883,12 +955,13 @@ if have gcc; then
     gcc -O2 -o "$BUILD_DIR/fib_warm_c" "$BUILD_DIR/fib_warm.c"
     gcc -O2 -pthread -o "$BUILD_DIR/parallel_c" "$BUILD_DIR/parallel.c"
     gcc -O2 -pthread -o "$BUILD_DIR/fanout_c" "$BUILD_DIR/fanout.c"
+    gcc -O2 -pthread -o "$BUILD_DIR/fanout_stress_c" "$BUILD_DIR/fanout_stress.c"
     echo "  [ok] C (gcc)"
 else echo "  [skip] C — gcc not found"; fi
 
 # Go
 if have go; then
-    (cd "$BUILD_DIR" && go build -o fib_go fib.go && go build -o fib_warm_go fib_warm.go && go build -o parallel_go parallel.go && go build -o fanout_go fanout.go)
+    (cd "$BUILD_DIR" && go build -o fib_go fib.go && go build -o fib_warm_go fib_warm.go && go build -o parallel_go parallel.go && go build -o fanout_go fanout.go && go build -o fanout_stress_go fanout_stress.go)
     echo "  [ok] Go"
 else echo "  [skip] Go — go not found"; fi
 
@@ -959,7 +1032,7 @@ cat >"$REPORT_PATH" <<EOF
 **Date:** $(date +%Y-%m-%d)
 **Machine:** $(uname -m) / $(uname -s) $(uname -r)
 **CPU:** $(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs || sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "unknown")
-**Runs per measurement:** $RUNS | **Warmup (in-process):** $WARM_IN_PROCESS | **fib(N):** $FIB_N | **CPU workers:** $CPU_WORKERS | **OS thread workers:** $OS_THREAD_WORKERS | **Cooperative green workers:** $COOPERATIVE_GREEN_WORKERS | **Multicore green workers:** $MULTICORE_GREEN_WORKERS | **Fanout workers:** $FANOUT_WORKERS | **Fanout cooperative green workers:** $FANOUT_COOPERATIVE_GREEN_WORKERS | **Fanout multicore green workers:** $FANOUT_MULTICORE_GREEN_WORKERS | **Fanout iters:** $FANOUT_ITERS | **Per-run timeout:** ${RUN_TIMEOUT}s
+**Runs per measurement:** $RUNS | **Warmup (in-process):** $WARM_IN_PROCESS | **fib(N):** $FIB_N | **CPU workers:** $CPU_WORKERS | **OS thread workers:** $OS_THREAD_WORKERS | **Cooperative green workers:** $COOPERATIVE_GREEN_WORKERS | **Multicore green workers:** $MULTICORE_GREEN_WORKERS | **Fanout workers:** $FANOUT_WORKERS | **Fanout cooperative green workers:** $FANOUT_COOPERATIVE_GREEN_WORKERS | **Fanout multicore green workers:** $FANOUT_MULTICORE_GREEN_WORKERS | **Fanout iters:** $FANOUT_ITERS | **Fanout stress workers:** $FANOUT_STRESS_WORKERS | **Fanout stress iters:** $FANOUT_STRESS_ITERS | **Per-run timeout:** ${RUN_TIMEOUT}s
 **Profile script:** \`scripts/check/check-cross-language-perf.shs\`
 **Report path:** \`$REPORT_PATH\`
 
@@ -1005,7 +1078,7 @@ measure_size() {
 
 _simple_rt="n/a"
 if [ -x "$SIMPLE_BINARY" ]; then
-    _sb=$(bytes_of "$(readlink -f "$SIMPLE_BINARY")")
+    _sb=$(bytes_of "$(simple_runtime_path)")
     if [ "$_sb" != "n/a" ]; then _simple_rt=$(human_bytes "$_sb"); fi
 fi
 
@@ -1128,11 +1201,11 @@ par_row() {
 par_row "Simple (interpreter)" "n/a" "extern thread FFI not supported"
 if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/parallel_simple.smf" ]; then
     ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/parallel_simple.smf" "$RUNS")
-    par_row "Simple (SMF loader)" "$ms" "std thread_spawn_with_args (bytecode)"
+    par_row "Simple (SMF loader)" "$ms" "std thread_spawn fork-join (bytecode)"
 fi
 if [ -x "$BUILD_DIR/parallel_simple_native" ]; then
     ms=$(avg_ms "$BUILD_DIR/parallel_simple_native" "$RUNS")
-    par_row "Simple (native)" "$ms" "channel + OS threads (same as Go pattern)"
+    par_row "Simple (native)" "$ms" "thread_spawn fork-join OS threads"
 else
     par_row "Simple (native)" "n/a" "compile failed"
 fi
@@ -1224,20 +1297,20 @@ if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/fanout_simple.smf" ]; then
     ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/fanout_simple.smf" "$RUNS")
     if [ "$ms" = "fail" ]; then
         reason=$(failure_reason "$SIMPLE_BINARY $BUILD_DIR/fanout_simple.smf")
-        fanout_row "Simple (SMF loader)" "$ms" "std thread_spawn_with_args fanout ($reason)"
+        fanout_row "Simple (SMF loader)" "$ms" "std thread_spawn fanout ($reason)"
     else
-        fanout_row "Simple (SMF loader)" "$ms" "std thread_spawn_with_args fanout"
+        fanout_row "Simple (SMF loader)" "$ms" "std thread_spawn fanout"
     fi
 elif echo "$COMPILE_FAIL_SMF" | grep -q 'smf:fanout(timeout)'; then
-    fanout_row "Simple (SMF loader)" "n/a" "std thread_spawn_with_args fanout compile timeout"
+    fanout_row "Simple (SMF loader)" "n/a" "std thread_spawn fanout compile timeout"
 fi
 if [ -x "$BUILD_DIR/fanout_simple_native" ]; then
     ms=$(avg_ms "$BUILD_DIR/fanout_simple_native" "$RUNS")
     if [ "$ms" = "fail" ]; then
         reason=$(failure_reason "$BUILD_DIR/fanout_simple_native")
-        fanout_row "Simple (native)" "$ms" "OS-thread fanout + channel ($reason)"
+        fanout_row "Simple (native)" "$ms" "OS-thread fork-join fanout ($reason)"
     else
-        fanout_row "Simple (native)" "$ms" "OS-thread fanout + channel"
+        fanout_row "Simple (native)" "$ms" "OS-thread fork-join fanout"
     fi
 elif echo "$COMPILE_FAIL" | grep -q 'native:fanout(timeout)'; then
     fanout_row "Simple (native)" "n/a" "OS-thread fanout compile timeout"
@@ -1325,6 +1398,31 @@ if have erl; then
     fanout_row "Erlang" "$ms" "BEAM process per tiny task"
 fi
 
+# ── Go-vs-C large fanout stress ──────────────────────────────────────────
+
+echo "=== Measuring Go-vs-C large fanout stress — $FANOUT_STRESS_WORKERS workers ==="
+section "Go vs C Large Fanout Stress — spawn $FANOUT_STRESS_WORKERS tiny workers ($RUNS runs avg)"
+printf "| %-22s | %12s | %40s |\n" "Language" "Avg (ms)" "Concurrency model" >>"$REPORT_PATH"
+printf "|%-24s|%14s|%42s|\n" "------------------------" "--------------" "------------------------------------------" >>"$REPORT_PATH"
+
+stress_row() {
+    printf "| %-22s | %12s | %40s |\n" "$1" "$2" "$3" >>"$REPORT_PATH"
+}
+
+if [ -x "$BUILD_DIR/fanout_stress_c" ]; then
+    ms=$(avg_ms "$BUILD_DIR/fanout_stress_c" "$RUNS")
+    if [ "$ms" = "fail" ]; then
+        reason=$(failure_reason "$BUILD_DIR/fanout_stress_c")
+        stress_row "C (pthreads)" "$ms" "pthread per stress task ($reason)"
+    else
+        stress_row "C (pthreads)" "$ms" "pthread per stress task"
+    fi
+fi
+if [ -x "$BUILD_DIR/fanout_stress_go" ]; then
+    ms=$(avg_ms "$BUILD_DIR/fanout_stress_go" "$RUNS")
+    stress_row "Go" "$ms" "goroutine per stress task (M:N)"
+fi
+
 # ── Parallel artifact footprint ──────────────────────────────────────────
 
 echo "=== Measuring parallel binary sizes ==="
@@ -1342,7 +1440,7 @@ if [ -x "$BUILD_DIR/parallel_simple_native" ]; then
 fi
 if [ -f "$BUILD_DIR/parallel_simple.smf" ]; then
     _sz=$(bytes_of "$BUILD_DIR/parallel_simple.smf")
-    par_size_row "Simple (SMF)" "$(human_bytes "$_sz")" "OS default (8MB)" "+ runtime $(human_bytes "$(bytes_of "$(readlink -f "$SIMPLE_BINARY")")")"
+    par_size_row "Simple (SMF)" "$(human_bytes "$_sz")" "OS default (8MB)" "+ runtime $(human_bytes "$(bytes_of "$(simple_runtime_path)")")"
 fi
 if [ -x "$BUILD_DIR/parallel_cooperative_green_simple_native" ]; then
     _sz=$(bytes_of "$BUILD_DIR/parallel_cooperative_green_simple_native")
@@ -1350,7 +1448,7 @@ if [ -x "$BUILD_DIR/parallel_cooperative_green_simple_native" ]; then
 fi
 if [ -f "$BUILD_DIR/parallel_cooperative_green_simple.smf" ]; then
     _sz=$(bytes_of "$BUILD_DIR/parallel_cooperative_green_simple.smf")
-    par_size_row "Simple cooperative green (SMF)" "$(human_bytes "$_sz")" "current OS thread" "+ runtime $(human_bytes "$(bytes_of "$(readlink -f "$SIMPLE_BINARY")")")"
+    par_size_row "Simple cooperative green (SMF)" "$(human_bytes "$_sz")" "current OS thread" "+ runtime $(human_bytes "$(bytes_of "$(simple_runtime_path)")")"
 fi
 if [ -x "$BUILD_DIR/parallel_multicore_green_simple_native" ]; then
     _sz=$(bytes_of "$BUILD_DIR/parallel_multicore_green_simple_native")
@@ -1358,7 +1456,7 @@ if [ -x "$BUILD_DIR/parallel_multicore_green_simple_native" ]; then
 fi
 if [ -f "$BUILD_DIR/parallel_multicore_green_simple.smf" ]; then
     _sz=$(bytes_of "$BUILD_DIR/parallel_multicore_green_simple.smf")
-    par_size_row "Simple multicore green (SMF)" "$(human_bytes "$_sz")" "runtime pool" "+ runtime $(human_bytes "$(bytes_of "$(readlink -f "$SIMPLE_BINARY")")")"
+    par_size_row "Simple multicore green (SMF)" "$(human_bytes "$_sz")" "runtime pool" "+ runtime $(human_bytes "$(bytes_of "$(simple_runtime_path)")")"
 fi
 if [ -x "$BUILD_DIR/parallel_c" ]; then
     _sz=$(bytes_of "$BUILD_DIR/parallel_c")
@@ -1498,11 +1596,17 @@ cat >>"$REPORT_PATH" <<'EOF'
 > The large fanout section uses many tiny workers with `FANOUT_ITERS` iterations
 > to expose scheduling overhead; this is the case where Go goroutines should
 > usually beat one-pthread-per-task C. Simple reports both OS-thread fanout
-> through `thread_spawn_with_args`, cooperative green-thread queue fanout, and
+> through `thread_spawn`, cooperative green-thread queue fanout, and
 > pool-backed `multicore_green_spawn` fanout separately.
+> The Go-vs-C large fanout stress section isolates that specific comparison at
+> `FANOUT_STRESS_WORKERS` workers without changing the Simple rows. It exists so
+> the pthread-per-task baseline cannot be mistaken for Go-style M:N scheduling
+> when fanout grows.
 >
-> **Simple concurrency rows:** `Simple (native)` uses `thread_spawn_with_args`, which is
-> the OS-thread API. `Simple cooperative green` uses `cooperative_green_spawn_value`, which exercises the
+> **Simple concurrency rows:** `Simple (native)` uses `thread_spawn`, which is
+> the OS-thread API. `thread_spawn_with_args` remains tracked separately while
+> its native ABI blocker is active. `Simple cooperative green` uses
+> `cooperative_green_spawn_value`, which exercises the
 > implemented cooperative green-thread queue on the current OS thread; it does
 > not run in parallel and is not a Go M:N goroutine equivalent. `Simple multicore
 > green` is the Pure Simple `multicore_green_spawn`/`rt_pool_*` candidate row for bounded
@@ -1546,8 +1650,9 @@ sh scripts/check/check-cross-language-perf.shs
 Useful knobs: `RUNS`, `FIB_N`, `CPU_WORKERS`, `OS_THREAD_WORKERS`,
 `COOPERATIVE_GREEN_WORKERS`, `MULTICORE_GREEN_WORKERS`, `GREEN_WORKERS`
 (compatibility alias), `FANOUT_WORKERS`, `FANOUT_COOPERATIVE_GREEN_WORKERS`,
-`FANOUT_MULTICORE_GREEN_WORKERS`, `FANOUT_ITERS`, `WARM_IN_PROCESS`,
-`RUN_TIMEOUT`, `SIMPLE_BINARY`, `BUILD_DIR`, and `REPORT_PATH`.
+`FANOUT_MULTICORE_GREEN_WORKERS`, `FANOUT_ITERS`, `FANOUT_STRESS_WORKERS`,
+`FANOUT_STRESS_ITERS`, `WARM_IN_PROCESS`, `RUN_TIMEOUT`, `SIMPLE_BINARY`,
+`BUILD_DIR`, and `REPORT_PATH`.
 
 ## Limitations
 

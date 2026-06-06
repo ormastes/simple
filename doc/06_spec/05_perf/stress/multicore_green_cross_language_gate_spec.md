@@ -27,7 +27,7 @@ multicore_green_cross_language_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -110,10 +110,10 @@ val go_ms = row_ms_scaled(parallel, "Go")
 val c_ms = row_ms_scaled(parallel, "C (pthreads)")
 val native_baseline = min_positive(go_ms, c_ms)
 
-expect(simple_os).to_be_greater_than(0)
-expect(multicore).to_be_greater_than(0)
-expect(go_ms).to_be_greater_than(0)
-expect(c_ms).to_be_greater_than(0)
+expect(is_positive_metric(simple_os)).to_equal(true)
+expect(is_positive_metric(multicore)).to_equal(true)
+expect(is_positive_metric(go_ms)).to_equal(true)
+expect(is_positive_metric(c_ms)).to_equal(true)
 expect(within_ratio(simple_os, native_baseline, 2, 1)).to_equal(true)
 expect(within_ratio(multicore, native_baseline, 3, 1)).to_equal(true)
 expect(model_text(row_for_label(parallel, "Simple cooperative green (native)"))).to_contain("cooperative")
@@ -141,10 +141,10 @@ val go_ms = row_ms_scaled(fanout, "Go")
 val c_ms = row_ms_scaled(fanout, "C (pthreads)")
 val native_baseline = min_positive(go_ms, c_ms)
 
-expect(simple_os).to_be_greater_than(0)
-expect(multicore).to_be_greater_than(0)
-expect(go_ms).to_be_greater_than(0)
-expect(c_ms).to_be_greater_than(0)
+expect(is_positive_metric(simple_os)).to_equal(true)
+expect(is_positive_metric(multicore)).to_equal(true)
+expect(is_positive_metric(go_ms)).to_equal(true)
+expect(is_positive_metric(c_ms)).to_equal(true)
 expect(within_ratio(simple_os, native_baseline, 2, 1)).to_equal(true)
 expect(within_ratio(multicore, native_baseline, 3, 1)).to_equal(true)
 expect(model_text(row_for_label(fanout, "C (pthreads)"))).to_contain("one OS thread per tiny task")
@@ -154,12 +154,36 @@ expect(model_text(row_for_label(fanout, "Simple cooperative green (native)"))).t
 
 </details>
 
+#### proves large-fanout goroutines beat one-pthread-per-task C
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val report = rt_file_read_text("doc/09_report/cross_language_perf_parallel_smoke.md") ?? ""
+val stress = section_named(report, "Go vs C Large Fanout Stress")
+
+val go_ms = row_ms_scaled(stress, "Go")
+val c_ms = row_ms_scaled(stress, "C (pthreads)")
+
+expect(is_positive_metric(go_ms)).to_equal(true)
+expect(is_positive_metric(c_ms)).to_equal(true)
+expect(within_ratio(go_ms, c_ms, 1, 1)).to_equal(true)
+expect(model_text(row_for_label(stress, "Go"))).to_contain("goroutine per stress task")
+expect(model_text(row_for_label(stress, "C (pthreads)"))).to_contain("pthread per stress task")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
