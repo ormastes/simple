@@ -18,6 +18,40 @@ fn runtime_include_line(var: &str, const_name: &str) -> String {
     }
 }
 
+// Emits the include for the UI source bundle tarball. Precedence:
+//   1. SIMPLE_MOBILE_UI_BUNDLE env var (explicit path)
+//   2. the default `ui_bundle.tar.gz` next to this build.rs, if it exists
+//   3. None (keeps the crate compiling when no bundle is present)
+fn ui_bundle_include_line(const_name: &str) -> String {
+    println!("cargo:rerun-if-env-changed=SIMPLE_MOBILE_UI_BUNDLE");
+
+    let bundle_path = match env::var("SIMPLE_MOBILE_UI_BUNDLE") {
+        Ok(path) if !path.trim().is_empty() => Some(PathBuf::from(path.trim())),
+        _ => {
+            let default_path = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap_or_default())
+                .join("ui_bundle.tar.gz");
+            println!("cargo:rerun-if-changed={}", default_path.display());
+            if default_path.exists() {
+                Some(default_path)
+            } else {
+                None
+            }
+        }
+    };
+
+    match bundle_path {
+        Some(path) => {
+            println!("cargo:rerun-if-changed={}", path.display());
+            format!(
+                "pub const {}: Option<&'static [u8]> = Some(include_bytes!(r#\"{}\"#));\n",
+                const_name,
+                path.display()
+            )
+        }
+        None => format!("pub const {}: Option<&'static [u8]> = None;\n", const_name),
+    }
+}
+
 fn write_mobile_runtime_assets(out_dir: &Path) {
     let generated = [
         runtime_include_line("SIMPLE_ANDROID_RUNTIME_AARCH64", "ANDROID_RUNTIME_AARCH64"),
@@ -28,6 +62,7 @@ fn write_mobile_runtime_assets(out_dir: &Path) {
         runtime_include_line("SIMPLE_IOS_RUNTIME_AARCH64_SIM", "IOS_RUNTIME_AARCH64_SIM"),
         runtime_include_line("SIMPLE_IOS_RUNTIME_X86_64_SIM", "IOS_RUNTIME_X86_64_SIM"),
         runtime_include_line("SIMPLE_MOBILE_ENTRY_SOURCE", "MOBILE_ENTRY_SOURCE"),
+        ui_bundle_include_line("MOBILE_UI_BUNDLE"),
     ]
     .join("");
 

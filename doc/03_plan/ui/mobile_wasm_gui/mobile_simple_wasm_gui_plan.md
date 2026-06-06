@@ -171,6 +171,30 @@ selection_pill, empty_state. Prop gaps (renderer reads, SDN parser doesn't copy)
 switch `on`, card `subtitle`, heading `level`, button `icon-id`, search_bar
 `show_cancel`, navigation_bar `large_title`.
 
+## Landed (2026-06-06): source-bundle wiring into the mobile shell
+
+The mobile Tauri shell now embeds + extracts the proven source bundle and runs
+the **real** `render_html_tree` pipeline on device (replacing the 6-line smoke):
+
+- `tools/tauri-shell/scripts/build-ui-bundle.shs` — stages the self-sufficient
+  closure (`src/app/{io,common,ui*}` + `src/lib` minus heavy dirs + `src/os` +
+  `src/type` + `widget_showcase_mobile.ui.sdn`) and gzip-tars it to
+  `ui_bundle.tar.gz` (**8.0 MB**; gitignored, not committed).
+- `build.rs` — `ui_bundle_include_line()` embeds the tarball as
+  `MOBILE_UI_BUNDLE: Option<&[u8]>` (env `SIMPLE_MOBILE_UI_BUNDLE` overrides;
+  defaults to the sibling `ui_bundle.tar.gz`; `None` when absent so the crate
+  still compiles).
+- `Cargo.toml` — `flate2` + `tar` for on-device decompression.
+- `lib.rs` — `prepare_bundled_ui_bundle()` gunzip-untars to
+  `<tmp>/simple-tauri-shell/ui-bundle/bundle/` (size-marker guarded). `run()`
+  prefers the bundle's `widget_showcase_mobile.ui.sdn` over the smoke entry and
+  passes the **absolute** `<root>/src/app/ui/main.spl` as `ui_main` via the new
+  `simple_subprocess_args_with_main`, so `find_project_root` resolves the module
+  graph to `<root>` on device. Explicit `SIMPLE_ENTRY`/argv still take precedence.
+
+Desktop shell verified compiling (`cargo check`, clean). **Remaining: build the
+mobile runtime + APK/iOS app and verify the real showcase renders + events live.**
+
 ## Next milestones
 
 1. Fix wasm string ABI (export memory + readable text return) — unblocks live render.

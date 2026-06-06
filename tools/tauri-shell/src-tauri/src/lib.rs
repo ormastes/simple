@@ -1315,6 +1315,46 @@ fn prepare_bundled_mobile_entry() -> Result<Option<String>, String> {
     Ok(Some(entry_path.to_string_lossy().into_owned()))
 }
 
+// Extracts the embedded UI source bundle (gzip tar) to a cache directory and
+// returns its root path. The bundle is laid out as `<root>/src/{app,lib,os,type}/...`
+// plus `<root>/widget_showcase_mobile.ui.sdn`, so the on-device invocation
+// `simple run <root>/src/app/ui/main.spl tauri <root>/widget_showcase_mobile.ui.sdn`
+// lets find_project_root resolve the module graph from <root>.
+fn prepare_bundled_ui_bundle() -> Result<Option<String>, String> {
+    let Some(bytes) = MOBILE_UI_BUNDLE else {
+        return Ok(None);
+    };
+
+    let mut bundle_dir = env::temp_dir();
+    bundle_dir.push("simple-tauri-shell");
+    bundle_dir.push("ui-bundle");
+
+    // Re-extract only when the embedded payload size differs from the marker.
+    let marker = bundle_dir.join(".bundle-bytes");
+    let root = bundle_dir.join("bundle");
+    let expected = bytes.len().to_string();
+    let up_to_date = root.is_dir()
+        && fs::read_to_string(&marker)
+            .map(|s| s.trim() == expected)
+            .unwrap_or(false);
+    if !up_to_date {
+        if bundle_dir.exists() {
+            let _ = fs::remove_dir_all(&bundle_dir);
+        }
+        fs::create_dir_all(&root)
+            .map_err(|e| format!("failed to create ui-bundle dir: {}", e))?;
+        let decoder = flate2::read::GzDecoder::new(bytes);
+        let mut archive = tar::Archive::new(decoder);
+        archive
+            .unpack(&root)
+            .map_err(|e| format!("failed to unpack ui-bundle: {}", e))?;
+        fs::write(&marker, &expected)
+            .map_err(|e| format!("failed to write ui-bundle marker: {}", e))?;
+    }
+
+    Ok(Some(root.to_string_lossy().into_owned()))
+}
+
 fn resolve_entry_file() -> Option<String> {
     let args: Vec<String> = env::args().collect();
     if args.len() > 2 && !args[2].starts_with('-') {
@@ -1334,12 +1374,24 @@ fn shared_wm_requested() -> bool {
 }
 
 fn simple_subprocess_args_for(entry: Option<&str>, shared_wm: bool) -> Vec<String> {
+    simple_subprocess_args_with_main(entry, shared_wm, "src/app/ui/main.spl")
+}
+
+// `ui_main` is the path passed to `simple run` ahead of the `tauri` subcommand.
+// Desktop uses the repo-relative `src/app/ui/main.spl` (resolved against cwd).
+// The bundle path passes an ABSOLUTE `<bundleRoot>/src/app/ui/main.spl` so that
+// find_project_root resolves the module graph to <bundleRoot> on device.
+fn simple_subprocess_args_with_main(
+    entry: Option<&str>,
+    shared_wm: bool,
+    ui_main: &str,
+) -> Vec<String> {
     let mut args = Vec::new();
     if let Some(entry) = entry {
         if entry.ends_with(".ui.sdn") {
             args.extend([
                 "run".to_string(),
-                "src/app/ui/main.spl".to_string(),
+                ui_main.to_string(),
                 "tauri".to_string(),
                 entry.to_string(),
             ]);
@@ -1349,7 +1401,7 @@ fn simple_subprocess_args_for(entry: Option<&str>, shared_wm: bool) -> Vec<Strin
     } else if shared_wm {
         args.extend([
             "run".to_string(),
-            "src/app/ui/main.spl".to_string(),
+            ui_main.to_string(),
             "tauri".to_string(),
         ]);
     }
@@ -1419,6 +1471,28 @@ pub fn run() {
             },
         };
     let mut entry_file = resolve_entry_file();
+    // Path passed to `simple run` before the `tauri` subcommand. Defaults to the
+    // repo-relative desktop path; the embedded source bundle overrides it with an
+    // absolute `<bundleRoot>/src/app/ui/main.spl` so find_project_root resolves on device.
+    let mut ui_main_path = "src/app/ui/main.spl".to_string();
+    // Prefer the embedded real-pipeline source bundle (renders the widget showcase
+    // via the genuine render_html_tree path) over the hard-coded smoke entry.
+    if entry_file.is_none() {
+        match prepare_bundled_ui_bundle() {
+            Ok(Some(root)) => {
+                entry_file = Some(format!("{}/widget_showcase_mobile.ui.sdn", root));
+                ui_main_path = format!("{}/src/app/ui/main.spl", root);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                eprintln!("[tauri-shell] bundled ui source extraction failed: {}", err);
+                startup_error = Some(format!(
+                    "Bundled UI source extraction failed.\n\n{}",
+                    err
+                ));
+            }
+        }
+    }
     if entry_file.is_none() {
         match prepare_bundled_mobile_entry() {
             Ok(path) => entry_file = path,
@@ -1465,9 +1539,10 @@ pub fn run() {
             }
             {
                 let mut cmd = Command::new(simple_bin);
-                cmd.args(simple_subprocess_args_for(
+                cmd.args(simple_subprocess_args_with_main(
                     entry_file.as_deref(),
                     shared_wm_requested,
+                    &ui_main_path,
                 ));
                 if entry_file
                     .as_ref()
