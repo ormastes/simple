@@ -18,6 +18,7 @@ Benchmarks are used to:
 | `pure_dl_perf.spl` | Deep learning performance comparison (Pure Simple vs PyTorch FFI) | Run directly: `bin/simple test/perf/pure_dl_perf.spl` |
 | `run_duplicate_check.spl` | Duplicate detection performance benchmark | `bin/simple test/perf/run_duplicate_check.spl [path] [options]` |
 | `native_layout_performance_spec.spl` | Native code layout performance tests | Run with test runner |
+| `profile_scripts/profile_report_contract_test.shs` | Common contract test for profile scripts that generate Markdown under `doc/09_report` | Called by profile scripts; can run directly with kind, script path, and report path |
 
 ## Quick Start
 
@@ -94,6 +95,12 @@ val results = runner.run_all()
 ### Code Analysis
 - **Duplicate Detection:** File scanning, token matching, block identification
 - **Static Analysis:** Code pattern recognition, optimization suggestions
+
+### Profile Script Reports
+- **Cross-language profile:** `scripts/check/check-cross-language-perf.shs`
+- **GUI profile:** `tools/gui_perf_bench/run_all_benchmarks.sh`
+- **Common report contract:** `test/05_perf/profile_scripts/profile_report_contract_test.shs`
+- **Report location:** `doc/09_report/*.md`
 
 ## Benchmark Configuration
 

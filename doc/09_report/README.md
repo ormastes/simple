@@ -15,6 +15,8 @@ Implementation reports, completion logs, and session transcripts from developmen
 
 | Report | Status | Notes |
 |--------|--------|-------|
+| [cross_language_perf_2026-06-06.md](cross_language_perf_2026-06-06.md) | Generated | Cross-language profile report from `scripts/check/check-cross-language-perf.shs`. |
+| [gui_perf_benchmark_2026-06-06.md](gui_perf_benchmark_2026-06-06.md) | Generated | GUI/backend profile report from `tools/gui_perf_bench/run_all_benchmarks.sh`. |
 | [qemu_gtk_wm_capture_evidence_2026-06-01.md](qemu_gtk_wm_capture_evidence_2026-06-01.md) | Pass | QEMU GTK WM capture evidence. Auto QMP launch passed with a socket, and live QMP screendump capture passed with zero sample/scene mismatches. |
 
 ## Related

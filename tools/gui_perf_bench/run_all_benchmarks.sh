@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# GUI Perf Benchmark — Run all framework benchmarks at 8K resolution
+# GUI Performance Profile — run framework/backend benchmarks and write Markdown
 # Usage: ./run_all_benchmarks.sh [--width 7680 --height 4320 --frames 60]
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-BUILD_DIR="$PROJECT_DIR/build/gui_perf_bench"
-REPORT="$BUILD_DIR/comparison_report.txt"
+BUILD_DIR="${BUILD_DIR:-$PROJECT_DIR/build/gui_perf_bench}"
+REPORT="${REPORT_PATH:-$PROJECT_DIR/doc/09_report/gui_perf_benchmark_$(date +%Y-%m-%d).md}"
+PROFILE_REPORT_CONTRACT_TEST="${PROFILE_REPORT_CONTRACT_TEST:-$PROJECT_DIR/test/05_perf/profile_scripts/profile_report_contract_test.shs}"
 
 WIDTH="${WIDTH:-7680}"
 HEIGHT="${HEIGHT:-4320}"
@@ -22,13 +23,40 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-mkdir -p "$BUILD_DIR"
-echo "=== GUI Perf Benchmark Comparison ===" | tee "$REPORT"
-echo "Resolution: ${WIDTH}x${HEIGHT}  Frames: ${FRAMES}" | tee -a "$REPORT"
-echo "Date: $(date -Iseconds)" | tee -a "$REPORT"
-echo "Host: $(hostname)" | tee -a "$REPORT"
-echo "GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo 'none')" | tee -a "$REPORT"
-echo "" | tee -a "$REPORT"
+mkdir -p "$BUILD_DIR" "$(dirname "$REPORT")"
+{
+    echo "# GUI Performance Profile"
+    echo ""
+    echo "**Date:** $(date -Iseconds)"
+    echo "**Resolution:** ${WIDTH}x${HEIGHT}"
+    echo "**Frames:** ${FRAMES}"
+    echo "**Profile script:** \`tools/gui_perf_bench/run_all_benchmarks.sh\`"
+    echo "**Report path:** \`${REPORT#$PROJECT_DIR/}\`"
+    echo ""
+    echo "## Methodology"
+    echo ""
+    echo "- Builds or invokes available GUI/backend lanes and records each backend separately."
+    echo "- Captures stdout, stderr, exit status, and maximum resident set size with \`/usr/bin/time -v\`."
+    echo "- Marks unavailable dependencies and failed backends explicitly; skipped rows are environment facts, not performance wins."
+    echo "- Uses the same resolution and frame count for all lanes that can accept those knobs."
+    echo ""
+    echo "## Environment"
+    echo ""
+    echo "- Host: \`$(hostname)\`"
+    echo "- OS: \`$(uname -m) / $(uname -s) $(uname -r)\`"
+    echo "- GPU: \`$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo 'none')\`"
+    echo "- Build dir: \`${BUILD_DIR#$PROJECT_DIR/}\`"
+    echo ""
+    echo "## TUI startup speed"
+    echo ""
+    echo "TUI startup speed is not measured by this GUI profile. The canonical startup audit is"
+    echo "\`scripts/check/check-startup-size-performance-audit.shs\`, which reports"
+    echo "\`Simple standalone TUI\` and \`Simple full TUI app\` rows in"
+    echo "\`doc/09_report/startup_size_performance_audit_2026-05-27.md\`."
+    echo ""
+    echo "## Backend Results"
+    echo ""
+} | tee "$REPORT"
 
 run_bench() {
     local name="$1"
@@ -37,9 +65,12 @@ run_bench() {
     local err="$BUILD_DIR/${name}.stderr"
     local time_out="$BUILD_DIR/${name}.time"
 
-    echo "--- Running: $name ---" | tee -a "$REPORT"
+    echo "### $name" | tee -a "$REPORT"
+    echo "" | tee -a "$REPORT"
     if /usr/bin/time -v bash -c "$cmd" >"$out" 2>"$err"; then
+        echo '```text' | tee -a "$REPORT"
         cat "$out" | tee -a "$REPORT"
+        echo '```' | tee -a "$REPORT"
         # Extract RSS from time output (in stderr)
         local rss
         rss=$(grep "Maximum resident" "$err" | awk '{print $NF}' 2>/dev/null || echo "unavailable")
@@ -50,7 +81,9 @@ run_bench() {
         echo "gui_perf_benchmark_backend=$name" | tee -a "$REPORT"
         echo "gui_perf_benchmark_status=failed" | tee -a "$REPORT"
         echo "gui_perf_benchmark_exit_code=$rc" | tee -a "$REPORT"
-        echo "gui_perf_benchmark_error=$(head -5 "$err" 2>/dev/null)" | tee -a "$REPORT"
+        echo '```text' | tee -a "$REPORT"
+        head -20 "$err" 2>/dev/null | tee -a "$REPORT" || true
+        echo '```' | tee -a "$REPORT"
     fi
     echo "" | tee -a "$REPORT"
 }
@@ -62,7 +95,11 @@ if pkg-config --exists gtk+-3.0 2>/dev/null; then
         echo "Building GTK benchmark..."
         gcc -O2 -o "$GTK_BIN" "$SCRIPT_DIR/bench_gtk.c" $(pkg-config --cflags --libs gtk+-3.0) -lm
     fi
-    run_bench "gtk3" "GDK_BACKEND=x11 $GTK_BIN --width $WIDTH --height $HEIGHT --frames $FRAMES"
+    if command -v xvfb-run >/dev/null 2>&1; then
+        run_bench "gtk3" "xvfb-run -a env GDK_BACKEND=x11 $GTK_BIN --width $WIDTH --height $HEIGHT --frames $FRAMES"
+    else
+        run_bench "gtk3" "GDK_BACKEND=x11 $GTK_BIN --width $WIDTH --height $HEIGHT --frames $FRAMES"
+    fi
 else
     echo "--- gtk3: SKIPPED (gtk+-3.0 not found) ---" | tee -a "$REPORT"
     echo "gui_perf_benchmark_backend=gtk3" | tee -a "$REPORT"
@@ -163,7 +200,29 @@ else
     echo "" | tee -a "$REPORT"
 fi
 
-# ── Summary ──
-echo "========================================" | tee -a "$REPORT"
-echo "Benchmark complete. Full report: $REPORT" | tee -a "$REPORT"
-echo "Per-backend outputs: $BUILD_DIR/*.stdout" | tee -a "$REPORT"
+{
+    echo "## Reproducibility"
+    echo ""
+    echo "Run from the repository root:"
+    echo ""
+    echo '```sh'
+    echo "tools/gui_perf_bench/run_all_benchmarks.sh --width $WIDTH --height $HEIGHT --frames $FRAMES"
+    echo '```'
+    echo ""
+    echo "Useful knobs: \`WIDTH\`, \`HEIGHT\`, \`FRAMES\`, \`BUILD_DIR\`, and \`REPORT_PATH\`."
+    echo ""
+    echo "Per-backend stdout/stderr files are written under \`${BUILD_DIR#$PROJECT_DIR/}\`."
+    echo ""
+    echo "## Limitations"
+    echo ""
+    echo "- Headless hosts need \`xvfb-run\` for GTK; without it GTK is recorded as failed or unavailable."
+    echo "- Electron, Tauri, CUDA, and Node canvas rows depend on host-installed tools."
+    echo "- Backend rows that print startup-only or unmeasured fields must not be used as frame-time evidence."
+    echo "- The report compares available lanes on one host; release claims need repeated runs on the target platform."
+    echo ""
+    echo "Benchmark complete. Full report: \`${REPORT#$PROJECT_DIR/}\`"
+} | tee -a "$REPORT"
+
+if [[ "${SKIP_PROFILE_REPORT_CONTRACT:-0}" != "1" ]]; then
+    sh "$PROFILE_REPORT_CONTRACT_TEST" gui tools/gui_perf_bench/run_all_benchmarks.sh "${REPORT#$PROJECT_DIR/}"
+fi

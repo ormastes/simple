@@ -1,0 +1,89 @@
+#!/bin/sh
+set -eu
+
+# Common contract test for profile scripts that generate Markdown reports.
+# Profile wrappers call this after writing a report so report shape failures are
+# caught at the evidence boundary instead of discovered later in docs review.
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)"
+cd "$ROOT_DIR"
+
+kind="${1:-}"
+script_path="${2:-}"
+report_path="${3:-}"
+
+fail() {
+    echo "profile_report_contract=false"
+    echo "error=$1"
+    exit 1
+}
+
+require_arg() {
+    [ -n "$1" ] || fail "$2"
+}
+
+require_file() {
+    [ -f "$1" ] || fail "missing file: $1"
+}
+
+require_contains() {
+    file="$1"
+    needle="$2"
+    if ! grep -Fq "$needle" "$file"; then
+        fail "missing '$needle' in $file"
+    fi
+}
+
+require_arg "$kind" "missing profile kind"
+require_arg "$script_path" "missing script path"
+require_arg "$report_path" "missing report path"
+require_file "$script_path"
+require_file "$report_path"
+
+case "$report_path" in
+    doc/09_report/*.md|"$ROOT_DIR"/doc/09_report/*.md) ;;
+    *) fail "report path must be a Markdown file under doc/09_report: $report_path" ;;
+esac
+
+case "$report_path" in
+    *.md) ;;
+    *) fail "report path must end in .md: $report_path" ;;
+esac
+
+if [ ! -s "$report_path" ]; then
+    fail "empty report: $report_path"
+fi
+
+require_contains "$report_path" "## Methodology"
+require_contains "$report_path" "## Reproducibility"
+require_contains "$report_path" "Profile script:"
+require_contains "$report_path" "Report path:"
+require_contains "$report_path" "Environment"
+require_contains "$report_path" "Limitations"
+
+case "$kind" in
+    cross_language)
+        require_contains "$report_path" "# Cross-Language Performance Profile"
+        require_contains "$report_path" "Cold Startup"
+        require_contains "$report_path" "Warm Throughput"
+        require_contains "$report_path" "Parallel"
+        require_contains "$report_path" "TUI startup scope"
+        require_contains "$report_path" "scripts/check/check-startup-size-performance-audit.shs"
+        ;;
+    gui)
+        require_contains "$report_path" "# GUI Performance Profile"
+        require_contains "$report_path" "Backend Results"
+        require_contains "$report_path" "Resolution"
+        require_contains "$report_path" "TUI startup speed"
+        require_contains "$report_path" "not measured by this GUI profile"
+        require_contains "$report_path" "scripts/check/check-startup-size-performance-audit.shs"
+        ;;
+    *)
+        fail "unknown profile kind: $kind"
+        ;;
+esac
+
+echo "profile_report_contract=true"
+echo "profile_kind=$kind"
+echo "profile_script=$script_path"
+echo "report_path=$report_path"

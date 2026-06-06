@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-# Cross-language performance comparison harness
+# Cross-language performance profile harness
 # Compares Simple (interpreter / SMF loader / native) against
 # bun, python, go, erlang, java, and C.
 #
@@ -19,9 +19,18 @@ set -eu
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
+if [ -z "${SIMPLE_BINARY:-}" ]; then
+    if [ -x "bin/simple" ]; then
+        SIMPLE_BINARY="bin/simple"
+    elif [ -x "bin/release/x86_64-unknown-linux-gnu/simple" ]; then
+        SIMPLE_BINARY="bin/release/x86_64-unknown-linux-gnu/simple"
+    else
+        SIMPLE_BINARY="bin/simple"
+    fi
+fi
 BUILD_DIR="${BUILD_DIR:-build/cross_lang_perf}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/cross_language_perf_$(date +%Y-%m-%d).md}"
+PROFILE_REPORT_CONTRACT_TEST="${PROFILE_REPORT_CONTRACT_TEST:-test/05_perf/profile_scripts/profile_report_contract_test.shs}"
 RUNS="${RUNS:-20}"
 FIB_N="${FIB_N:-35}"
 WORKERS="${WORKERS:-100}"
@@ -167,11 +176,13 @@ SIMPLE
 write_simple_parallel() {
     # Channel-based pattern — same semantic as Go's goroutine + chan result.
     # Workers send results through a channel; main recvs and sums.
+    # Import the OS-thread owner directly so this benchmark does not pull the
+    # unrelated task_spawn facade symbols while compiling the direct thread row.
     # Unrolled: native codegen List iteration is broken (codegen bug).
     _last_worker=$((WORKERS - 1))
     {
         echo 'use std.concurrent.channel.{channel_new, channel_from_id}'
-        echo 'use std.concurrent.thread.{thread_spawn}'
+        echo 'use std.nogc_sync_mut.concurrent.thread.{thread_spawn}'
         echo ''
         echo 'val LCG_A: i64 = 1103515245'
         echo 'val LCG_C: i64 = 12345'
@@ -192,13 +203,13 @@ write_simple_parallel() {
         for i in $(seq 0 "$_last_worker"); do
             echo "    var h${i} = thread_spawn(\\: worker(${i}, cid))"
         done
-        for i in $(seq 0 "$_last_worker"); do
-            echo "    h${i}.join()"
-        done
         echo '    var total: i64 = 0'
         for i in $(seq 0 "$_last_worker"); do
             echo "    val v${i}: i64 = ch.recv()"
             echo "    total = total + v${i}"
+        done
+        for i in $(seq 0 "$_last_worker"); do
+            echo "    h${i}.join()"
         done
         echo '    println("total = {total}")'
     } >"$BUILD_DIR/parallel.spl"
@@ -234,6 +245,46 @@ write_simple_parallel_green() {
         done
         echo '    println("total = {total}")'
     } >"$BUILD_DIR/parallel_green.spl"
+}
+
+write_simple_fanout() {
+    # OS-thread fanout pattern using Simple's thread_spawn2/channel APIs. This is
+    # the Simple row comparable to C pthread-per-task fanout.
+    # Import the OS-thread owner directly so the benchmark stays focused on
+    # OS thread spawning rather than the task_spawn/thread-pool facade. Receive
+    # all channel messages for synchronization; process exit reclaims handles.
+    {
+        echo 'use std.concurrent.channel.{channel_new, channel_from_id}'
+        echo 'use std.nogc_sync_mut.concurrent.thread.{thread_spawn2}'
+        echo ''
+        echo 'val LCG_A: i64 = 1103515245'
+        echo 'val LCG_C: i64 = 12345'
+        echo 'val LCG_M: i64 = 2147483648'
+        echo "val ITERS: i64 = ${FANOUT_ITERS}"
+        echo "val WORKERS: i64 = ${FANOUT_WORKERS}"
+        echo ''
+        echo 'fn work(seed: i64) -> i64:'
+        echo '    var x = seed'
+        echo '    for i in 0..ITERS:'
+        echo '        x = (x * LCG_A + LCG_C) % LCG_M'
+        echo '    x'
+        echo ''
+        echo 'fn worker(seed: i64, ch_id: i64) -> i64:'
+        echo '    val ch = channel_from_id(ch_id)'
+        echo '    ch.send(work(seed))'
+        echo '    return 0'
+        echo ''
+        echo 'fn main():'
+        echo '    val ch = channel_new()'
+        echo '    val cid = ch.id()'
+        echo '    for i in 0..WORKERS:'
+        echo '        thread_spawn2(i, cid, worker)'
+        echo '    var total: i64 = 0'
+        echo '    for i in 0..WORKERS:'
+        echo '        val v: i64 = ch.recv()'
+        echo '        total = total + v'
+        echo '    println("total = {total}")'
+    } >"$BUILD_DIR/fanout.spl"
 }
 
 write_simple_fanout_green() {
@@ -701,6 +752,7 @@ write_simple_fib
 write_simple_fib_warm
 write_simple_parallel
 write_simple_parallel_green
+write_simple_fanout
 write_simple_fanout_green
 write_c_hello
 write_c_fib
@@ -763,16 +815,21 @@ else echo "  [skip] Erlang — erlc not found"; fi
 
 # Simple native
 if [ -x "$SIMPLE_BINARY" ]; then
-    for _src in hello fib fib_warm parallel parallel_green fanout_green; do
+    for _src in hello fib fib_warm parallel parallel_green fanout fanout_green; do
         _spl="$BUILD_DIR/${_src}.spl"
         _out="$BUILD_DIR/${_src}_simple_native"
         if [ -f "$_spl" ]; then
-            if "$SIMPLE_BINARY" compile "$_spl" --native -o "$_out" 2>/dev/null; then
+            if run_bounded "$SIMPLE_BINARY compile $_spl --native -o $_out" >/dev/null 2>&1; then
                 : # ok
             else
+                _status=$?
                 rm -f "$_out"
                 echo "  [FAIL] Simple native: $_spl"
-                COMPILE_FAIL="$COMPILE_FAIL native:$_src"
+                if [ "$_status" -eq 124 ]; then
+                    COMPILE_FAIL="$COMPILE_FAIL native:$_src(timeout)"
+                else
+                    COMPILE_FAIL="$COMPILE_FAIL native:$_src"
+                fi
             fi
         fi
     done
@@ -782,16 +839,21 @@ else echo "  [skip] Simple — $SIMPLE_BINARY not found"; fi
 # Simple SMF
 COMPILE_FAIL_SMF=""
 if [ -x "$SIMPLE_BINARY" ]; then
-    for _src in hello fib fib_warm parallel parallel_green fanout_green; do
+    for _src in hello fib fib_warm parallel parallel_green fanout fanout_green; do
         _spl="$BUILD_DIR/${_src}.spl"
         _out="$BUILD_DIR/${_src}_simple.smf"
         if [ -f "$_spl" ]; then
-            if "$SIMPLE_BINARY" compile "$_spl" -o "$_out" 2>/dev/null; then
+            if run_bounded "$SIMPLE_BINARY compile $_spl -o $_out" >/dev/null 2>&1; then
                 : # ok
             else
+                _status=$?
                 rm -f "$_out"
                 echo "  [FAIL] Simple SMF: $_spl"
-                COMPILE_FAIL_SMF="$COMPILE_FAIL_SMF smf:$_src"
+                if [ "$_status" -eq 124 ]; then
+                    COMPILE_FAIL_SMF="$COMPILE_FAIL_SMF smf:$_src(timeout)"
+                else
+                    COMPILE_FAIL_SMF="$COMPILE_FAIL_SMF smf:$_src"
+                fi
             fi
         fi
     done
@@ -801,16 +863,38 @@ fi
 # ── report header ────────────────────────────────────────────────────────
 
 cat >"$REPORT_PATH" <<EOF
-# Cross-Language Performance Comparison
+# Cross-Language Performance Profile
 
 **Date:** $(date +%Y-%m-%d)
 **Machine:** $(uname -m) / $(uname -s) $(uname -r)
 **CPU:** $(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs || sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "unknown")
 **Runs per measurement:** $RUNS | **Warmup (in-process):** $WARM_IN_PROCESS | **fib(N):** $FIB_N | **Workers:** $WORKERS | **Green workers:** $GREEN_WORKERS | **Fanout workers:** $FANOUT_WORKERS | **Fanout iters:** $FANOUT_ITERS | **Per-run timeout:** ${RUN_TIMEOUT}s
+**Profile script:** \`scripts/check/check-cross-language-perf.shs\`
+**Report path:** \`$REPORT_PATH\`
+
+## Methodology
+
+- Generates equivalent hello, recursive fib, in-process warm fib, worker, and fanout workloads for each supported runtime.
+- Measures binary/script size, cold process startup, warm throughput, parallel worker latency, fanout latency, parallel binary size, and peak RSS where the runtime and compiler are available.
+- Uses bounded commands so failed, missing, timed-out, or unavailable lanes are classified instead of silently treated as passing data.
+- Warm throughput is measured in-process where the runtime can print \`warm_ms\`; interpreter and SMF rows use outer-process timing and are labeled that way.
+
+## Environment
+
+- Host: \`$(hostname)\`
+- Shell: \`${SHELL:-unknown}\`
+- Simple binary: \`$SIMPLE_BINARY\`
 
 > Size for AOT = binary bytes. For VM/interpreted = script bytes (runtime not included).
 > "Runtime dep" column shows runtime size where applicable.
 > Warm throughput measured IN-PROCESS (JIT runtimes reach steady state).
+
+## TUI startup scope
+
+TUI startup speed is not measured by this cross-language profile. It is covered by
+\`scripts/check/check-startup-size-performance-audit.shs\`, which builds and times
+\`Simple standalone TUI\` and \`Simple full TUI app\` rows in
+\`doc/09_report/startup_size_performance_audit_2026-05-27.md\`.
 EOF
 
 # ── 1. Size ──────────────────────────────────────────────────────────────
@@ -1024,6 +1108,31 @@ fanout_row() {
     printf "| %-22s | %12s | %40s |\n" "$1" "$2" "$3" >>"$REPORT_PATH"
 }
 
+fanout_row "Simple (interpreter)" "n/a" "extern thread FFI not supported"
+if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/fanout_simple.smf" ]; then
+    ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/fanout_simple.smf" "$RUNS")
+    if [ "$ms" = "fail" ]; then
+        reason=$(failure_reason "$SIMPLE_BINARY $BUILD_DIR/fanout_simple.smf")
+        fanout_row "Simple (SMF loader)" "$ms" "std thread_spawn fanout ($reason)"
+    else
+        fanout_row "Simple (SMF loader)" "$ms" "std thread_spawn fanout"
+    fi
+elif echo "$COMPILE_FAIL_SMF" | grep -q 'smf:fanout(timeout)'; then
+    fanout_row "Simple (SMF loader)" "n/a" "std thread_spawn fanout compile timeout"
+fi
+if [ -x "$BUILD_DIR/fanout_simple_native" ]; then
+    ms=$(avg_ms "$BUILD_DIR/fanout_simple_native" "$RUNS")
+    if [ "$ms" = "fail" ]; then
+        reason=$(failure_reason "$BUILD_DIR/fanout_simple_native")
+        fanout_row "Simple (native)" "$ms" "OS-thread fanout + channel ($reason)"
+    else
+        fanout_row "Simple (native)" "$ms" "OS-thread fanout + channel"
+    fi
+elif echo "$COMPILE_FAIL" | grep -q 'native:fanout(timeout)'; then
+    fanout_row "Simple (native)" "n/a" "OS-thread fanout compile timeout"
+else
+    fanout_row "Simple (native)" "n/a" "compile failed"
+fi
 if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/fanout_green.spl" ]; then
     ms=$(avg_ms "$SIMPLE_BINARY run $BUILD_DIR/fanout_green.spl --mode=interpreter" "$RUNS")
     if [ "$ms" = "fail" ]; then
@@ -1236,7 +1345,8 @@ cat >>"$REPORT_PATH" <<'EOF'
 > Each worker reads shared constants (LCG_A, LCG_C, LCG_M, ITERS).
 > The large fanout section uses many tiny workers with `FANOUT_ITERS` iterations
 > to expose scheduling overhead; this is the case where Go goroutines should
-> usually beat one-pthread-per-task C.
+> usually beat one-pthread-per-task C. Simple reports both OS-thread fanout
+> through `thread_spawn` and cooperative green-thread queue fanout separately.
 >
 > **Simple concurrency rows:** `Simple (native)` uses `thread_spawn`, which is
 > the OS-thread API. `Simple green` uses `green_spawn_value`, which exercises the
@@ -1267,6 +1377,28 @@ EOF
 
 cat >>"$REPORT_PATH" <<'EOF'
 
+## Reproducibility
+
+Run the script from the repository root:
+
+```sh
+sh scripts/check/check-cross-language-perf.shs
+```
+
+Useful knobs: `RUNS`, `FIB_N`, `WORKERS`, `GREEN_WORKERS`, `FANOUT_WORKERS`,
+`FANOUT_ITERS`, `WARM_IN_PROCESS`, `RUN_TIMEOUT`, `SIMPLE_BINARY`,
+`BUILD_DIR`, and `REPORT_PATH`.
+
+## Limitations
+
+- Different runtimes have different startup and warmup models; the report labels
+  in-process and outer-process timing separately.
+- Missing compilers or runtimes are reported as unavailable and should not be
+  read as slower-than-Simple data.
+- OS scheduler load, CPU frequency scaling, thermal state, VM host load, and JIT
+  warmup can move small timing deltas enough to require repeated runs before a
+  release-blocking performance claim.
+
 ## Size Definition
 
 | Category | What "size" means |
@@ -1290,6 +1422,9 @@ EOF
 
 echo ""
 echo "=== Report written to: $REPORT_PATH ==="
+if [ "${SKIP_PROFILE_REPORT_CONTRACT:-0}" != "1" ]; then
+    sh "$PROFILE_REPORT_CONTRACT_TEST" cross_language scripts/check/check-cross-language-perf.shs "$REPORT_PATH"
+fi
 if [ -n "$COMPILE_FAIL$COMPILE_FAIL_SMF" ]; then
     echo "WARNING: Some Simple compilations failed — check output above"
 fi
