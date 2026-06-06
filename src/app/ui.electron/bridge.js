@@ -676,6 +676,14 @@ if (app) app.whenReady().then(() => {
         mainWindow.webContents.on('did-finish-load', () => mainWindow.setTitle(lockedTitle));
     }
 
+    // Optional zoom (e.g. 0.25 = 4x smaller fonts) for the web-render comparison.
+    const zoomFactor = Number(process.env.SIMPLE_ELECTRON_ZOOM);
+    if (zoomFactor > 0) {
+        mainWindow.webContents.on('did-finish-load', () => {
+            mainWindow.webContents.setZoomFactor(zoomFactor);
+        });
+    }
+
     mainWindow.loadURL(shellUrl());
     mainWindow.webContents.once('did-finish-load', () => {
         startSimpleProcess(options.simpleBin, options.entry);
