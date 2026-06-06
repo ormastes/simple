@@ -6918,6 +6918,8 @@ int64_t rt_net_send_bytes(int64_t sock_fd, RuntimeValue data_rv)
 }
 
 static RuntimeValue _tls_runtime_array_from_bytes(const uint8_t *buf, uint32_t len);
+static uint8_t _ssh_last_plain_payload[4096];
+static uint32_t _ssh_last_plain_payload_len = 0;
 
 /* rt_net_recv_bytes: receive data from a socket as a byte array RuntimeValue.
  * Returns a RuntimeValue pointing to RuntimeArray of u8, or nil on error. */
@@ -7079,21 +7081,22 @@ RuntimeValue rt_net_recv_ssh_plain_packet_payload(int64_t sock_fd)
     }
 
     uint32_t payload_length = packet_length - padding_length - 1U;
-    RuntimeArray *out = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)payload_length * sizeof(RuntimeValue));
-    if (!out) return NIL_VALUE;
-    out->hdr.type = HEAP_ARRAY;
-    out->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)payload_length * sizeof(RuntimeValue));
-    out->len = payload_length;
-    out->cap = payload_length;
-    out->items = runtime_array_inline_items(out);
+    uint8_t *payload = (uint8_t *)malloc(payload_length ? payload_length : 1U);
+    if (!payload) return NIL_VALUE;
 
     /* Consume header */
     for (uint32_t i = 0; i < 5U; i++) {
         s->rx_tail = (s->rx_tail + 1U) % TCP_RXBUF_SIZE;
     }
     /* Consume payload */
+    _ssh_last_plain_payload_len = payload_length < sizeof(_ssh_last_plain_payload)
+        ? payload_length
+        : (uint32_t)sizeof(_ssh_last_plain_payload);
     for (uint32_t i = 0; i < payload_length; i++) {
-        out->items[i] = ENCODE_INT(s->rxbuf[s->rx_tail]);
+        payload[i] = s->rxbuf[s->rx_tail];
+        if (i < _ssh_last_plain_payload_len) {
+            _ssh_last_plain_payload[i] = payload[i];
+        }
         s->rx_tail = (s->rx_tail + 1U) % TCP_RXBUF_SIZE;
     }
     /* Discard padding */
@@ -7105,12 +7108,36 @@ RuntimeValue rt_net_recv_ssh_plain_packet_payload(int64_t sock_fd)
     serial_put_dec(payload_length);
     serial_puts(" first-byte=");
     if (payload_length > 0U) {
-        serial_put_hex((uint8_t)_rv_byte(out->items[0]));
+        serial_put_hex(payload[0]);
     } else {
         serial_put_hex(0);
     }
     serial_puts("\r\n");
-    return ENCODE_PTR(out);
+    RuntimeValue out = _tls_runtime_array_from_bytes(payload, payload_length);
+    free(payload);
+    return out;
+}
+
+RuntimeValue rt_net_last_ssh_plain_payload_slice(int64_t start_i64, int64_t length_i64)
+{
+    serial_puts("[tcp-ssh-plain] last-payload-slice start\r\n");
+    if (start_i64 < 0) start_i64 = 0;
+    if (length_i64 < 0) length_i64 = 0;
+    uint32_t start = (uint32_t)start_i64;
+    uint32_t length = (uint32_t)length_i64;
+    if (start > _ssh_last_plain_payload_len) start = _ssh_last_plain_payload_len;
+    if (length > _ssh_last_plain_payload_len - start) {
+        length = _ssh_last_plain_payload_len - start;
+    }
+    serial_puts("[tcp-ssh-plain] last-payload-slice len=");
+    serial_put_dec(length);
+    serial_puts("\r\n");
+    return _tls_runtime_array_from_bytes(_ssh_last_plain_payload + start, length);
+}
+
+int64_t rt_net_last_ssh_plain_payload_len(void)
+{
+    return (int64_t)_ssh_last_plain_payload_len;
 }
 
 RuntimeValue rt_tls13_recv_record(int64_t sock_fd)
@@ -9422,6 +9449,55 @@ RuntimeValue rt_tls13_x25519_public_key(RuntimeValue scalar_rv)
     _tls_x25519_scalarmult(out, scalar, basepoint);
     free(scalar);
     return _tls_runtime_array_from_bytes(out, 32U);
+}
+
+RuntimeValue rt_tls13_ed25519_public_key(RuntimeValue seed_rv)
+{
+    uint32_t seed_len = 0;
+    uint8_t *seed = _tls_copy_runtime_bytes(seed_rv, &seed_len);
+    uint8_t pk[32];
+    uint8_t sk[64];
+    if (!seed || seed_len != 32U) {
+        if (seed) free(seed);
+        return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
+    }
+    extern int64_t rt_tls13_ring_ed25519_keypair_raw(const uint8_t seed[32], uint8_t pk[32], uint8_t sk[64]);
+    if (rt_tls13_ring_ed25519_keypair_raw(seed, pk, sk) != 0) {
+        free(seed);
+        return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
+    }
+    free(seed);
+    return _tls_runtime_array_from_bytes(pk, 32U);
+}
+
+RuntimeValue rt_tls13_ed25519_sign(RuntimeValue seed_rv, RuntimeValue pub_rv, RuntimeValue msg_rv)
+{
+    uint32_t seed_len = 0, pub_len = 0, msg_len = 0;
+    uint8_t *seed = _tls_copy_runtime_bytes(seed_rv, &seed_len);
+    uint8_t *pub = _tls_copy_runtime_bytes(pub_rv, &pub_len);
+    uint8_t *msg = _tls_copy_runtime_bytes(msg_rv, &msg_len);
+    uint8_t sk[64];
+    uint8_t sig[64];
+    if (!seed || seed_len != 32U || !pub || pub_len != 32U) {
+        if (seed) free(seed);
+        if (pub) free(pub);
+        if (msg) free(msg);
+        return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
+    }
+    for (uint32_t i = 0; i < 32U; i++) {
+        sk[i] = seed[i];
+        sk[32U + i] = pub[i];
+    }
+    extern int64_t rt_tls13_ring_ed25519_sign_raw(const uint8_t *msg, uint32_t msg_len,
+                                                  const uint8_t sk[64], uint8_t sig[64]);
+    int64_t rc = rt_tls13_ring_ed25519_sign_raw(msg ? msg : (const uint8_t *)"", msg_len, sk, sig);
+    free(seed);
+    free(pub);
+    if (msg) free(msg);
+    if (rc != 0) {
+        return _tls_runtime_array_from_bytes((const uint8_t *)"", 0);
+    }
+    return _tls_runtime_array_from_bytes(sig, 64U);
 }
 
 int64_t rt_tls13_x25519_shared_secret_into(RuntimeValue scalar_rv, RuntimeValue point_rv, RuntimeValue out_rv)

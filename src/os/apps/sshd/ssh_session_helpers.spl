@@ -46,6 +46,11 @@ struct _SshTextField:
     value: text
     next_offset: u64
 
+struct _SshFieldRange:
+    start: u64
+    end: u64
+    next_offset: u64
+
 struct _AuthRequestFast:
     username: text
     service: text
@@ -208,78 +213,214 @@ fn _read_text_field_fast(data: [u8], offset: u64) -> Result<_SshTextField, text>
         next_offset: end
     ))
 
+fn _read_field_range_fast(data: [u8], offset: u64) -> Result<_SshFieldRange, text>:
+    if offset + 4 > data.len():
+        return Err("truncated length")
+    val field_len = _read_u32_stable(data, offset).to_u64()
+    val start = offset + 4
+    val end = start + field_len
+    if end > data.len():
+        return Err("truncated data")
+    Ok(_SshFieldRange(start: start, end: end, next_offset: end))
+
+fn _append_algo_name(list: text, name: text) -> text:
+    if list.len() == 0:
+        return name
+    list + "," + name
+
+fn _token_equals_bytes(data: [u8], start: u64, end: u64, expected: [u8]) -> bool:
+    if end < start:
+        return false
+    if end - start != expected.len():
+        return false
+    var i: u64 = 0
+    while i < expected.len():
+        if _u8_at(data, start + i) != _u8_at(expected, i):
+            return false
+        i = i + 1
+    true
+
+fn _field_has_token(data: [u8], start: u64, end: u64, expected: [u8]) -> bool:
+    var token_start = start
+    var i = start
+    while i < end:
+        if _u8_at(data, i) == 0x2C:
+            if _token_equals_bytes(data, token_start, i, expected):
+                return true
+            token_start = i + 1
+        i = i + 1
+    _token_equals_bytes(data, token_start, end, expected)
+
+fn _known_kex_list(data: [u8], start: u64, end: u64) -> text:
+    var out = ""
+    if _field_has_token(data, start, end, [0x63, 0x75, 0x72, 0x76, 0x65, 0x32, 0x35, 0x35, 0x31, 0x39, 0x2D, 0x73, 0x68, 0x61, 0x32, 0x35, 0x36]):
+        out = _append_algo_name(out, "curve25519-sha256")
+    if _field_has_token(data, start, end, [0x6B, 0x65, 0x78, 0x2D, 0x73, 0x74, 0x72, 0x69, 0x63, 0x74, 0x2D, 0x63, 0x2D, 0x76, 0x30, 0x30, 0x40, 0x6F, 0x70, 0x65, 0x6E, 0x73, 0x73, 0x68, 0x2E, 0x63, 0x6F, 0x6D]):
+        out = _append_algo_name(out, "kex-strict-c-v00@openssh.com")
+    if _field_has_token(data, start, end, [0x6B, 0x65, 0x78, 0x2D, 0x73, 0x74, 0x72, 0x69, 0x63, 0x74, 0x2D, 0x73, 0x2D, 0x76, 0x30, 0x30, 0x40, 0x6F, 0x70, 0x65, 0x6E, 0x73, 0x73, 0x68, 0x2E, 0x63, 0x6F, 0x6D]):
+        out = _append_algo_name(out, "kex-strict-s-v00@openssh.com")
+    out
+
+fn _known_host_key_list(data: [u8], start: u64, end: u64) -> text:
+    var out = ""
+    var token_start = start
+    var i = start
+    while i < end:
+        if _u8_at(data, i) == 0x2C:
+            if _token_equals_bytes(data, token_start, i, [0x73, 0x73, 0x68, 0x2D, 0x65, 0x64, 0x32, 0x35, 0x35, 0x31, 0x39, 0x2D, 0x63, 0x65, 0x72, 0x74, 0x2D, 0x76, 0x30, 0x31, 0x40, 0x6F, 0x70, 0x65, 0x6E, 0x73, 0x73, 0x68, 0x2E, 0x63, 0x6F, 0x6D]):
+                out = _append_algo_name(out, "ssh-ed25519-cert-v01@openssh.com")
+            elif _token_equals_bytes(data, token_start, i, [0x73, 0x73, 0x68, 0x2D, 0x65, 0x64, 0x32, 0x35, 0x35, 0x31, 0x39]):
+                out = _append_algo_name(out, "ssh-ed25519")
+            elif _token_equals_bytes(data, token_start, i, [0x72, 0x73, 0x61, 0x2D, 0x73, 0x68, 0x61, 0x32, 0x2D, 0x32, 0x35, 0x36, 0x2D, 0x63, 0x65, 0x72, 0x74, 0x2D, 0x76, 0x30, 0x31, 0x40, 0x6F, 0x70, 0x65, 0x6E, 0x73, 0x73, 0x68, 0x2E, 0x63, 0x6F, 0x6D]):
+                out = _append_algo_name(out, "rsa-sha2-256-cert-v01@openssh.com")
+            elif _token_equals_bytes(data, token_start, i, [0x72, 0x73, 0x61, 0x2D, 0x73, 0x68, 0x61, 0x32, 0x2D, 0x35, 0x31, 0x32, 0x2D, 0x63, 0x65, 0x72, 0x74, 0x2D, 0x76, 0x30, 0x31, 0x40, 0x6F, 0x70, 0x65, 0x6E, 0x73, 0x73, 0x68, 0x2E, 0x63, 0x6F, 0x6D]):
+                out = _append_algo_name(out, "rsa-sha2-512-cert-v01@openssh.com")
+            elif _token_equals_bytes(data, token_start, i, [0x72, 0x73, 0x61, 0x2D, 0x73, 0x68, 0x61, 0x32, 0x2D, 0x32, 0x35, 0x36]):
+                out = _append_algo_name(out, "rsa-sha2-256")
+            elif _token_equals_bytes(data, token_start, i, [0x72, 0x73, 0x61, 0x2D, 0x73, 0x68, 0x61, 0x32, 0x2D, 0x35, 0x31, 0x32]):
+                out = _append_algo_name(out, "rsa-sha2-512")
+            elif _token_equals_bytes(data, token_start, i, [0x65, 0x63, 0x64, 0x73, 0x61, 0x2D, 0x73, 0x68, 0x61, 0x32, 0x2D, 0x6E, 0x69, 0x73, 0x74, 0x70, 0x32, 0x35, 0x36]):
+                out = _append_algo_name(out, "ecdsa-sha2-nistp256")
+            token_start = i + 1
+        i = i + 1
+    if _token_equals_bytes(data, token_start, end, [0x73, 0x73, 0x68, 0x2D, 0x65, 0x64, 0x32, 0x35, 0x35, 0x31, 0x39, 0x2D, 0x63, 0x65, 0x72, 0x74, 0x2D, 0x76, 0x30, 0x31, 0x40, 0x6F, 0x70, 0x65, 0x6E, 0x73, 0x73, 0x68, 0x2E, 0x63, 0x6F, 0x6D]):
+        out = _append_algo_name(out, "ssh-ed25519-cert-v01@openssh.com")
+    elif _token_equals_bytes(data, token_start, end, [0x73, 0x73, 0x68, 0x2D, 0x65, 0x64, 0x32, 0x35, 0x35, 0x31, 0x39]):
+        out = _append_algo_name(out, "ssh-ed25519")
+    elif _token_equals_bytes(data, token_start, end, [0x72, 0x73, 0x61, 0x2D, 0x73, 0x68, 0x61, 0x32, 0x2D, 0x32, 0x35, 0x36, 0x2D, 0x63, 0x65, 0x72, 0x74, 0x2D, 0x76, 0x30, 0x31, 0x40, 0x6F, 0x70, 0x65, 0x6E, 0x73, 0x73, 0x68, 0x2E, 0x63, 0x6F, 0x6D]):
+        out = _append_algo_name(out, "rsa-sha2-256-cert-v01@openssh.com")
+    elif _token_equals_bytes(data, token_start, end, [0x72, 0x73, 0x61, 0x2D, 0x73, 0x68, 0x61, 0x32, 0x2D, 0x35, 0x31, 0x32, 0x2D, 0x63, 0x65, 0x72, 0x74, 0x2D, 0x76, 0x30, 0x31, 0x40, 0x6F, 0x70, 0x65, 0x6E, 0x73, 0x73, 0x68, 0x2E, 0x63, 0x6F, 0x6D]):
+        out = _append_algo_name(out, "rsa-sha2-512-cert-v01@openssh.com")
+    elif _token_equals_bytes(data, token_start, end, [0x72, 0x73, 0x61, 0x2D, 0x73, 0x68, 0x61, 0x32, 0x2D, 0x32, 0x35, 0x36]):
+        out = _append_algo_name(out, "rsa-sha2-256")
+    elif _token_equals_bytes(data, token_start, end, [0x72, 0x73, 0x61, 0x2D, 0x73, 0x68, 0x61, 0x32, 0x2D, 0x35, 0x31, 0x32]):
+        out = _append_algo_name(out, "rsa-sha2-512")
+    elif _token_equals_bytes(data, token_start, end, [0x65, 0x63, 0x64, 0x73, 0x61, 0x2D, 0x73, 0x68, 0x61, 0x32, 0x2D, 0x6E, 0x69, 0x73, 0x74, 0x70, 0x32, 0x35, 0x36]):
+        out = _append_algo_name(out, "ecdsa-sha2-nistp256")
+    out
+
+fn _known_cipher_list(data: [u8], start: u64, end: u64) -> text:
+    var out = ""
+    var token_start = start
+    var i = start
+    while i < end:
+        if _u8_at(data, i) == 0x2C:
+            if _token_equals_bytes(data, token_start, i, [0x61, 0x65, 0x73, 0x32, 0x35, 0x36, 0x2D, 0x67, 0x63, 0x6D, 0x40, 0x6F, 0x70, 0x65, 0x6E, 0x73, 0x73, 0x68, 0x2E, 0x63, 0x6F, 0x6D]):
+                out = _append_algo_name(out, "aes256-gcm@openssh.com")
+            elif _token_equals_bytes(data, token_start, i, [0x61, 0x65, 0x73, 0x31, 0x32, 0x38, 0x2D, 0x67, 0x63, 0x6D, 0x40, 0x6F, 0x70, 0x65, 0x6E, 0x73, 0x73, 0x68, 0x2E, 0x63, 0x6F, 0x6D]):
+                out = _append_algo_name(out, "aes128-gcm@openssh.com")
+            elif _token_equals_bytes(data, token_start, i, [0x61, 0x65, 0x73, 0x32, 0x35, 0x36, 0x2D, 0x63, 0x74, 0x72]):
+                out = _append_algo_name(out, "aes256-ctr")
+            token_start = i + 1
+        i = i + 1
+    if _token_equals_bytes(data, token_start, end, [0x61, 0x65, 0x73, 0x32, 0x35, 0x36, 0x2D, 0x67, 0x63, 0x6D, 0x40, 0x6F, 0x70, 0x65, 0x6E, 0x73, 0x73, 0x68, 0x2E, 0x63, 0x6F, 0x6D]):
+        out = _append_algo_name(out, "aes256-gcm@openssh.com")
+    elif _token_equals_bytes(data, token_start, end, [0x61, 0x65, 0x73, 0x31, 0x32, 0x38, 0x2D, 0x67, 0x63, 0x6D, 0x40, 0x6F, 0x70, 0x65, 0x6E, 0x73, 0x73, 0x68, 0x2E, 0x63, 0x6F, 0x6D]):
+        out = _append_algo_name(out, "aes128-gcm@openssh.com")
+    elif _token_equals_bytes(data, token_start, end, [0x61, 0x65, 0x73, 0x32, 0x35, 0x36, 0x2D, 0x63, 0x74, 0x72]):
+        out = _append_algo_name(out, "aes256-ctr")
+    out
+
+fn _known_mac_list(data: [u8], start: u64, end: u64) -> text:
+    var out = ""
+    var token_start = start
+    var i = start
+    while i < end:
+        if _u8_at(data, i) == 0x2C:
+            if _token_equals_bytes(data, token_start, i, [0x68, 0x6D, 0x61, 0x63, 0x2D, 0x73, 0x68, 0x61, 0x32, 0x2D, 0x35, 0x31, 0x32, 0x2D, 0x65, 0x74, 0x6D, 0x40, 0x6F, 0x70, 0x65, 0x6E, 0x73, 0x73, 0x68, 0x2E, 0x63, 0x6F, 0x6D]):
+                out = _append_algo_name(out, "hmac-sha2-512-etm@openssh.com")
+            elif _token_equals_bytes(data, token_start, i, [0x68, 0x6D, 0x61, 0x63, 0x2D, 0x73, 0x68, 0x61, 0x32, 0x2D, 0x32, 0x35, 0x36, 0x2D, 0x65, 0x74, 0x6D, 0x40, 0x6F, 0x70, 0x65, 0x6E, 0x73, 0x73, 0x68, 0x2E, 0x63, 0x6F, 0x6D]):
+                out = _append_algo_name(out, "hmac-sha2-256-etm@openssh.com")
+            elif _token_equals_bytes(data, token_start, i, [0x6E, 0x6F, 0x6E, 0x65]):
+                out = _append_algo_name(out, "none")
+            token_start = i + 1
+        i = i + 1
+    if _token_equals_bytes(data, token_start, end, [0x68, 0x6D, 0x61, 0x63, 0x2D, 0x73, 0x68, 0x61, 0x32, 0x2D, 0x35, 0x31, 0x32, 0x2D, 0x65, 0x74, 0x6D, 0x40, 0x6F, 0x70, 0x65, 0x6E, 0x73, 0x73, 0x68, 0x2E, 0x63, 0x6F, 0x6D]):
+        out = _append_algo_name(out, "hmac-sha2-512-etm@openssh.com")
+    elif _token_equals_bytes(data, token_start, end, [0x68, 0x6D, 0x61, 0x63, 0x2D, 0x73, 0x68, 0x61, 0x32, 0x2D, 0x32, 0x35, 0x36, 0x2D, 0x65, 0x74, 0x6D, 0x40, 0x6F, 0x70, 0x65, 0x6E, 0x73, 0x73, 0x68, 0x2E, 0x63, 0x6F, 0x6D]):
+        out = _append_algo_name(out, "hmac-sha2-256-etm@openssh.com")
+    elif _token_equals_bytes(data, token_start, end, [0x6E, 0x6F, 0x6E, 0x65]):
+        out = _append_algo_name(out, "none")
+    out
+
+fn _known_compress_list(data: [u8], start: u64, end: u64) -> text:
+    if _field_has_token(data, start, end, [0x6E, 0x6F, 0x6E, 0x65]):
+        return "none"
+    ""
+
 fn _parse_kexinit_fast(data: [u8]) -> Result<SshKexInit, text>:
     log_raw_println("[sshd-session] fast kex begin len={data.len()}")
-    log_raw_println("[sshd-session] fast kex preview={_bytes_to_hex(_copy_prefix_stable(data, 24))}")
     if data.len() < 17:
         log_raw_println("[sshd-session] fast kex err=too_short")
         return Err("KEXINIT too short")
+    if _u8_at(data, 0) != 20:
+        return Err("not a KEXINIT message")
 
     var off: u64 = 17
-    val r_kex = _read_text_field_fast(data, off)
+    val r_kex = _read_field_range_fast(data, off)
     if r_kex.is_err():
         log_raw_println("[sshd-session] fast kex err=bad_kex off={off}")
         return Err("bad kex")
     val kex = r_kex.unwrap()
     off = kex.next_offset
     log_raw_println("[sshd-session] fast kex stage=kex off={off}")
-    val r_host = _read_text_field_fast(data, off)
+    val r_host = _read_field_range_fast(data, off)
     if r_host.is_err():
         log_raw_println("[sshd-session] fast kex err=bad_host off={off}")
         return Err("bad host")
     val host = r_host.unwrap()
     off = host.next_offset
     log_raw_println("[sshd-session] fast kex stage=host off={off}")
-    val r_enc_c2s = _read_text_field_fast(data, off)
+    val r_enc_c2s = _read_field_range_fast(data, off)
     if r_enc_c2s.is_err():
         log_raw_println("[sshd-session] fast kex err=bad_enc_c2s off={off}")
         return Err("bad enc c2s")
     val enc_c2s = r_enc_c2s.unwrap()
     off = enc_c2s.next_offset
     log_raw_println("[sshd-session] fast kex stage=enc_c2s off={off}")
-    val r_enc_s2c = _read_text_field_fast(data, off)
+    val r_enc_s2c = _read_field_range_fast(data, off)
     if r_enc_s2c.is_err():
         log_raw_println("[sshd-session] fast kex err=bad_enc_s2c off={off}")
         return Err("bad enc s2c")
     val enc_s2c = r_enc_s2c.unwrap()
     off = enc_s2c.next_offset
     log_raw_println("[sshd-session] fast kex stage=enc_s2c off={off}")
-    val r_mac_c2s = _read_text_field_fast(data, off)
+    val r_mac_c2s = _read_field_range_fast(data, off)
     if r_mac_c2s.is_err():
         log_raw_println("[sshd-session] fast kex err=bad_mac_c2s off={off}")
         return Err("bad mac c2s")
     val mac_c2s = r_mac_c2s.unwrap()
     off = mac_c2s.next_offset
     log_raw_println("[sshd-session] fast kex stage=mac_c2s off={off}")
-    val r_mac_s2c = _read_text_field_fast(data, off)
+    val r_mac_s2c = _read_field_range_fast(data, off)
     if r_mac_s2c.is_err():
         log_raw_println("[sshd-session] fast kex err=bad_mac_s2c off={off}")
         return Err("bad mac s2c")
     val mac_s2c = r_mac_s2c.unwrap()
     off = mac_s2c.next_offset
     log_raw_println("[sshd-session] fast kex stage=mac_s2c off={off}")
-    val r_comp_c2s = _read_text_field_fast(data, off)
+    val r_comp_c2s = _read_field_range_fast(data, off)
     if r_comp_c2s.is_err():
         log_raw_println("[sshd-session] fast kex err=bad_comp_c2s off={off}")
         return Err("bad comp c2s")
     val comp_c2s = r_comp_c2s.unwrap()
     off = comp_c2s.next_offset
     log_raw_println("[sshd-session] fast kex stage=comp_c2s off={off}")
-    val r_comp_s2c = _read_text_field_fast(data, off)
+    val r_comp_s2c = _read_field_range_fast(data, off)
     if r_comp_s2c.is_err():
         log_raw_println("[sshd-session] fast kex err=bad_comp_s2c off={off}")
         return Err("bad comp s2c")
     val comp_s2c = r_comp_s2c.unwrap()
     off = comp_s2c.next_offset
     log_raw_println("[sshd-session] fast kex stage=comp_s2c off={off}")
-    val r_lang1 = _read_text_field_fast(data, off)
+    val r_lang1 = _read_field_range_fast(data, off)
     if r_lang1.is_err():
         log_raw_println("[sshd-session] fast kex err=bad_lang1 off={off}")
         return Err("bad lang1")
     val lang1 = r_lang1.unwrap()
     off = lang1.next_offset
     log_raw_println("[sshd-session] fast kex stage=lang1 off={off}")
-    val r_lang2 = _read_text_field_fast(data, off)
+    val r_lang2 = _read_field_range_fast(data, off)
     if r_lang2.is_err():
         log_raw_println("[sshd-session] fast kex err=bad_lang2 off={off}")
         return Err("bad lang2")
@@ -299,16 +440,28 @@ fn _parse_kexinit_fast(data: [u8]) -> Result<SshKexInit, text>:
         log_raw_println("[sshd-session] fast kex err=trailing_bytes off={off} len={data.len()}")
         return Err("trailing bytes")
 
+    val kex_list = _known_kex_list(data, kex.start, kex.end)
+    val host_list = _known_host_key_list(data, host.start, host.end)
+    val enc_c2s_list = _known_cipher_list(data, enc_c2s.start, enc_c2s.end)
+    val enc_s2c_list = _known_cipher_list(data, enc_s2c.start, enc_s2c.end)
+    val mac_c2s_list = _known_mac_list(data, mac_c2s.start, mac_c2s.end)
+    val mac_s2c_list = _known_mac_list(data, mac_s2c.start, mac_s2c.end)
+    val comp_c2s_list = _known_compress_list(data, comp_c2s.start, comp_c2s.end)
+    val comp_s2c_list = _known_compress_list(data, comp_s2c.start, comp_s2c.end)
+    if kex_list.len() == 0 or host_list.len() == 0 or enc_c2s_list.len() == 0 or enc_s2c_list.len() == 0 or comp_c2s_list.len() == 0 or comp_s2c_list.len() == 0:
+        log_raw_println("[sshd-session] fast kex err=no_supported_algorithms")
+        return Err("no supported algorithms")
+
     Ok(SshKexInit(
-        cookie: _copy_range_stable(data, 1, 16),
-        kex_algorithms: kex.value,
-        server_host_key_algorithms: host.value,
-        encryption_client_to_server: enc_c2s.value,
-        encryption_server_to_client: enc_s2c.value,
-        mac_client_to_server: mac_c2s.value,
-        mac_server_to_client: mac_s2c.value,
-        compression_client_to_server: comp_c2s.value,
-        compression_server_to_client: comp_s2c.value,
+        cookie: [],
+        kex_algorithms: kex_list,
+        server_host_key_algorithms: host_list,
+        encryption_client_to_server: enc_c2s_list,
+        encryption_server_to_client: enc_s2c_list,
+        mac_client_to_server: mac_c2s_list,
+        mac_server_to_client: mac_s2c_list,
+        compression_client_to_server: comp_c2s_list,
+        compression_server_to_client: comp_s2c_list,
         first_kex_packet_follows: first_follows
     ))
 

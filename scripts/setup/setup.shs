@@ -57,30 +57,72 @@ esac
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root="${script_dir}/.."
+log_dir="${repo_root}/.simple/logs"
+mkdir -p "${log_dir}"
+
+if [ "${1:-}" = "--json" ]; then
+  printf '%s\n' '{"command":"mcp","status":"ready","tool":"Simple MCP Server","version":"4.0.0"}'
+  exit 0
+fi
+
+mcp_probe_native() {
+  probe_native="$1"
+  if [ "${SIMPLE_MCP_SKIP_NATIVE_PROBE:-0}" = "1" ]; then
+    return 0
+  fi
+  probe_tmp="$(mktemp "${TMPDIR:-/tmp}/simple_mcp_probe.XXXXXX")" || probe_tmp=""
+  if [ -z "${probe_tmp}" ]; then
+    return 1
+  fi
+  printf '{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"wrapper-probe","version":"1"}}}\n{"jsonrpc":"2.0","id":"2","method":"tools/list","params":{}}\n' \
+    | timeout "${SIMPLE_MCP_NATIVE_PROBE_TIMEOUT:-5}" "${probe_native}" >"${probe_tmp}" 2>>"${log_dir}/simple_mcp_stderr.log" || true
+  if grep -q '"play_wm_text_status"' "${probe_tmp}"; then
+    rm -f "${probe_tmp}"
+    return 0
+  fi
+  printf 'native_probe_failed wrapper=simple_mcp_server native=%s reason=missing_wm_text_tools fallback=next_candidate\n' "${probe_native}" >>"${log_dir}/simple_mcp_startup.log"
+  rm -f "${probe_tmp}"
+  return 1
+}
+
+native=""
+for candidate in \
+  "${repo_root}/build/bootstrap/mcp-package/simple_mcp_server" \
+  "${script_dir}/release/x86_64-unknown-linux-gnu/simple_mcp_server" \
+  "${script_dir}/release/linux-x86_64/simple_mcp_server" \
+  "${repo_root}/build/bootstrap/full/x86_64-unknown-linux-gnu/simple_mcp_server"
+do
+  if [ -x "${candidate}" ] && mcp_probe_native "${candidate}"; then
+    native="${candidate}"
+    break
+  fi
+done
 
 runtime=""
 for candidate in \
-  "${script_dir}/release/x86_64-unknown-linux-gnu/simple" \
-  "${script_dir}/release/linux-x86_64/simple" \
+  "${SIMPLE_BINARY:-}" \
   "${script_dir}/simple" \
-  "${repo_root}/bin/release/simple" \
-  "${repo_root}/src/compiler_rust/target/release/simple" \
-  "${repo_root}/src/compiler_rust/target/debug/simple"
+  "${script_dir}/release/simple" \
+  "${script_dir}/release/x86_64-unknown-linux-gnu/simple" \
+  "${script_dir}/release/linux-x86_64/simple"
 do
-  if [ -x "${candidate}" ]; then
+  if [ -n "${candidate}" ] && [ -x "${candidate}" ]; then
     runtime="${candidate}"
     break
   fi
 done
 
-if [ -z "${runtime}" ]; then
-  printf '%s\n' "error: simple runtime not found" >&2
-  exit 127
-fi
-
-entry="${repo_root}/src/app/mcp/main.spl"
-if [ ! -f "${entry}" ]; then
-  printf '%s\n' "error: MCP entry point not found: ${entry}" >&2
+if [ -z "${native}" ] && [ -z "${runtime}" ]; then
+  {
+    printf '%s\n' "error: native simple_mcp_server not found"
+    printf '%s\n' "checked:"
+    printf '%s\n' "  ${repo_root}/build/bootstrap/mcp-package/simple_mcp_server"
+    printf '%s\n' "  ${script_dir}/release/x86_64-unknown-linux-gnu/simple_mcp_server"
+    printf '%s\n' "  ${script_dir}/release/linux-x86_64/simple_mcp_server"
+    printf '%s\n' "  ${repo_root}/build/bootstrap/full/x86_64-unknown-linux-gnu/simple_mcp_server"
+    printf '%s\n' "source fallback runtime also not found"
+    printf '%s\n' "hint: rebuild with native-build for src/app/mcp/main.spl"
+  } >&2
   exit 127
 fi
 
@@ -90,7 +132,18 @@ export SIMPLE_TIMEOUT_SECONDS="${SIMPLE_TIMEOUT_SECONDS:-86400}"
 export SIMPLE_MEMORY_LIMIT_MB="${SIMPLE_MEMORY_LIMIT_MB:-${SIMPLE_TEST_MEMORY_LIMIT_MB:-100}}"
 export RUST_LOG="${RUST_LOG:-error}"
 
-exec "${runtime}" "${entry}" "$@" 2>>"${repo_root}/.simple/logs/simple_mcp_stderr.log"
+if [ -n "${native}" ]; then
+  printf 'startup wrapper=simple_mcp_server mode=native native=%s cwd=%s\n' "${native}" "$(pwd)" >>"${log_dir}/simple_mcp_startup.log"
+  exec "${native}" "$@" 2>>"${log_dir}/simple_mcp_stderr.log"
+fi
+
+entry="${repo_root}/src/app/mcp/main.spl"
+if [ ! -f "${entry}" ]; then
+  printf '%s\n' "error: MCP source fallback entry point not found: ${entry}" >&2
+  exit 127
+fi
+printf 'startup wrapper=simple_mcp_server mode=source runtime=%s cwd=%s\n' "${runtime}" "$(pwd)" >>"${log_dir}/simple_mcp_startup.log"
+exec "${runtime}" "${entry}" "$@" 2>>"${log_dir}/simple_mcp_stderr.log"
 EOF
 chmod +x simple_mcp_server
 
@@ -115,28 +168,63 @@ esac
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 platform_dir="${SIMPLE_PLATFORM_TRIPLE:-x86_64-unknown-linux-gnu}"
+repo_root="${script_dir}/.."
+log_dir="${repo_root}/.simple/logs"
+mkdir -p "${log_dir}"
 
-if [ "${platform_dir}" = "x86_64-unknown-linux-gnu" ] && [ -x "${script_dir}/release/linux-x86_64/simple_lsp_mcp_server" ]; then
-  native="${script_dir}/release/linux-x86_64/simple_lsp_mcp_server"
-else
-  native="${script_dir}/release/${platform_dir}/simple_lsp_mcp_server"
+if [ "${1:-}" = "--json" ]; then
+  printf '%s\n' '{"command":"simple-lsp-mcp","status":"ready","version":"0.9.8"}'
+  exit 0
 fi
 
-if [ ! -x "${native}" ]; then
-  for candidate in "${script_dir}"/release/*/simple_lsp_mcp_server; do
-    if [ -x "${candidate}" ]; then
-      native="${candidate}"
-      break
-    fi
-  done
-fi
+mcp_probe_lsp_native() {
+  probe_native="$1"
+  if [ "${SIMPLE_LSP_MCP_SKIP_NATIVE_PROBE:-0}" = "1" ]; then
+    return 0
+  fi
+  probe_tmp="$(mktemp "${TMPDIR:-/tmp}/simple_lsp_mcp_probe.XXXXXX")" || probe_tmp=""
+  if [ -z "${probe_tmp}" ]; then
+    return 1
+  fi
+  printf '{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"wrapper-probe","version":"1"}}}\n{"jsonrpc":"2.0","id":"2","method":"tools/list","params":{}}\n' \
+    | timeout "${SIMPLE_LSP_MCP_NATIVE_PROBE_TIMEOUT:-3}" "${probe_native}" >"${probe_tmp}" 2>>"${log_dir}/simple_lsp_mcp_stderr.log" || true
+  if grep -q '"lsp_definition"' "${probe_tmp}"; then
+    rm -f "${probe_tmp}"
+    return 0
+  fi
+  printf 'native_probe_failed wrapper=simple_lsp_mcp_server native=%s reason=missing_lsp_definition fallback=next_candidate\n' "${probe_native}" >>"${log_dir}/simple_lsp_mcp_startup.log"
+  rm -f "${probe_tmp}"
+  return 1
+}
+
+native=""
+for candidate in \
+  "${repo_root}/build/bootstrap/mcp-package/simple_lsp_mcp_server" \
+  "${script_dir}/release/${platform_dir}/simple_lsp_mcp_server" \
+  "${script_dir}/release/linux-x86_64/simple_lsp_mcp_server" \
+  "${repo_root}/build/bootstrap/full/x86_64-unknown-linux-gnu/simple_lsp_mcp_server" \
+  "${script_dir}"/release/*/simple_lsp_mcp_server
+do
+  if [ -x "${candidate}" ] && mcp_probe_lsp_native "${candidate}"; then
+    native="${candidate}"
+    break
+  fi
+done
 
 if [ ! -x "${native}" ]; then
-  printf '%s\n' "error: native simple_lsp_mcp_server not found under ${script_dir}/release" >&2
+  {
+    printf '%s\n' "error: native simple_lsp_mcp_server not found"
+    printf '%s\n' "checked release directory: ${script_dir}/release"
+    printf '%s\n' "checked package artifact: ${repo_root}/build/bootstrap/mcp-package/simple_lsp_mcp_server"
+    printf '%s\n' "checked full artifact: ${repo_root}/build/bootstrap/full/x86_64-unknown-linux-gnu/simple_lsp_mcp_server"
+    printf '%s\n' "platform: ${platform_dir}"
+    printf '%s\n' "hint: rebuild with native-build for src/app/simple_lsp_mcp/main.spl"
+  } >&2
   exit 127
 fi
 
-exec "${native}" "$@"
+printf 'startup wrapper=simple_lsp_mcp_server mode=native native=%s cwd=%s\n' "${native}" "$(pwd)" >>"${log_dir}/simple_lsp_mcp_startup.log"
+exec "${native}" "$@" 2>>"${log_dir}/simple_lsp_mcp_stderr.log"
 EOF
   chmod +x simple_lsp_mcp_server
 fi

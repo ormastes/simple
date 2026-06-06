@@ -81,7 +81,7 @@ class SshSession:
 
     Manages the full lifecycle from TCP accept through interactive shell.
     """
-    socket_fd: i32
+    socket_fd: i64
     state: SessionState
     cipher: SshCipher
     channels: ChannelTable
@@ -118,7 +118,7 @@ class SshSession:
 
 impl SshSession:
 
-    static fn new(socket_fd: i32, user_db: SshUserDb, host_private: [u8], host_public: [u8]) -> SshSession:
+    static fn new(socket_fd: i64, user_db: SshUserDb, host_private: [u8], host_public: [u8]) -> SshSession:
         """Create a new SSH session for an accepted TCP connection.
 
         Backward-compatible constructor: wraps an Ed25519 seed into a HostKeySet.
@@ -137,14 +137,14 @@ impl SshSession:
             rsa_sha2_512_cert: nil
         ), host_public)
 
-    static fn new_with_host_keys(socket_fd: i32, user_db: SshUserDb, host_keys: HostKeySet) -> SshSession:
+    static fn new_with_host_keys(socket_fd: i64, user_db: SshUserDb, host_keys: HostKeySet) -> SshSession:
         SshSession.new_with_host_materials(socket_fd, user_db, host_keys, HostCertificateSet(
             ssh_ed25519_cert: nil,
             rsa_sha2_256_cert: nil,
             rsa_sha2_512_cert: nil
         ), [])
 
-    static fn new_with_host_materials(socket_fd: i32, user_db: SshUserDb, host_keys: HostKeySet, host_certs: HostCertificateSet, host_ed25519_public: [u8]) -> SshSession:
+    static fn new_with_host_materials(socket_fd: i64, user_db: SshUserDb, host_keys: HostKeySet, host_certs: HostCertificateSet, host_ed25519_public: [u8]) -> SshSession:
         """Create a new SSH session with a full HostKeySet."""
         SshSession(
             socket_fd: socket_fd,
@@ -241,12 +241,18 @@ impl SshSession:
     # Packet I/O
     # ========================================================================
 
+    me encrypted_packets_enabled() -> bool:
+        """Return true only after NEWKEYS has moved the session to encrypted I/O."""
+        self.cipher.active and (
+            self.state == SessionState.Authentication or self.state == SessionState.Interactive
+        )
+
     me send_packet(payload: [u8]):
         """Send an SSH packet. Encrypts if cipher is active."""
-        val stable_payload = _copy_bytes_stable(payload)
-        val first_byte = if payload.len() > 0: _u8_at(payload, 0).to_u64() else: 0
-        serial_println("[sshd-session] send_packet active={self.cipher.active} payload_len_raw={payload.len()} payload_len_stable={stable_payload.len()} b0=0x{format_hex(first_byte, 1)} prefix={_bytes_to_hex(_copy_prefix_stable(payload, 16))} send_seq={self.send_seq}")
-        if self.cipher.active:
+        val encrypted_io = self.encrypted_packets_enabled()
+        serial_println("[sshd-session] send_packet active={self.cipher.active} encrypted_io={encrypted_io} state={self.state} payload_len={payload.len()} send_seq={self.send_seq}")
+        if encrypted_io:
+            val stable_payload = _copy_bytes_stable(payload)
             var encrypted: [u8] = []
             if self.negotiated_cipher_s2c == "aes256-gcm@openssh.com":
                 encrypted = ssh_encrypt_packet_aes_gcm(stable_payload, self.cipher.seq_s2c, self.enc_key_s2c, self.iv_s2c)
@@ -265,8 +271,8 @@ impl SshSession:
             self.raw_send(encrypted)
             self.cipher.seq_s2c = (self.cipher.seq_s2c + 1) & 0xFFFFFFFF
         else:
-            val header = _build_plain_packet_header(stable_payload.len(), 8)
-            val packet_with_payload = rt_bytes_concat(header.header, stable_payload)
+            val header = _build_plain_packet_header(payload.len(), 8)
+            val packet_with_payload = rt_bytes_concat(header.header, payload)
             val packet = rt_bytes_concat(packet_with_payload, _zero_padding_bytes(header.padding_len))
             self.raw_send(packet)
         self.send_seq = (self.send_seq + 1) & 0xFFFFFFFF
@@ -276,7 +282,8 @@ impl SshSession:
 
         Accumulates data in recv_buf until a complete packet can be parsed.
         """
-        if not self.cipher.active:
+        val encrypted_io = self.encrypted_packets_enabled()
+        if not encrypted_io:
             # Plaintext mode on baremetal: frame one packet directly in the
             # runtime socket ring to avoid SPL-side buffering corruption.
             val payload = rt_net_recv_ssh_plain_packet_payload(self.socket_fd as i64)
@@ -304,7 +311,7 @@ impl SshSession:
                     serial_println("[sshd-session] recv encrypted head bytes={new_data.len()} seq={self.cipher.seq_c2s}")
                     self.recv_buf = new_data
 
-        if self.cipher.active:
+        if encrypted_io:
             if self.negotiated_cipher_c2s == "aes256-ctr":
                 val mac_len = ssh_mac_len(self.negotiated_mac_c2s)
                 var ctr_empty_spins: u64 = 0

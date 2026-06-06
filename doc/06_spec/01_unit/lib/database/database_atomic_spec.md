@@ -27,7 +27,7 @@ database_atomic_spec
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -38,17 +38,44 @@ database_atomic_spec
 
 ### Database Atomic
 
-#### skipped
+#### keeps file lock acquisition and stale lock handling available
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val pending_reason = "pre-existing test failures - functions/imports not available"
-expect(pending_reason.len()).to_be_greater_than(0)
+val source = atomic_source()
+
+expect(source).to_contain("class FileLock:")
+expect(source).to_contain("static fn for_file(path: text) -> FileLock")
+expect(source).to_contain("me acquire() -> bool")
+expect(source).to_contain("me try_acquire(timeout_ms: i64) -> bool")
+expect(source).to_contain("fn is_stale_lock() -> bool")
+expect(source).to_contain("me release()")
+```
+
+</details>
+
+#### keeps atomic read write append and batch operations available
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val source = atomic_source()
+
+expect(source).to_contain("fn atomic_read(path: text) -> text?")
+expect(source).to_contain("fn atomic_write(path: text, content: text) -> bool")
+expect(source).to_contain("fn atomic_write_batch(paths: [text], contents: [text]) -> bool")
+expect(source).to_contain("fn atomic_append(path: text, content: text) -> bool")
+expect(source).to_contain("rt_file_sync(temp_path)")
+expect(source).to_contain("rt_file_rename(temp_path, path)")
 ```
 
 </details>
@@ -72,8 +99,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
+| Total scenarios | 2 |
+| Active scenarios | 2 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

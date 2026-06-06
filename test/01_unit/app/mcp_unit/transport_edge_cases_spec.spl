@@ -6,7 +6,38 @@
 # Tests for edge cases, error conditions, and crash prevention in the transport
 # layer using MCP helpers and the validation system.
 
-describe "MCP transport_edge_cases (skipped)":
-    it "skipped":
-        val pending_reason = "Depends on std.nogc_async_mut.mcp.error_handler which still triggers mcp/ package loading"
-        expect(pending_reason.len()).to_be_greater_than(0)
+extern fn rt_file_read_text(path: text) -> text
+
+fn error_handler_source() -> text:
+    rt_file_read_text("src/lib/nogc_async_mut/mcp/error_handler.spl") ?? ""
+
+describe "MCP transport_edge_cases":
+    it "maps transport-facing error categories to JSON-RPC codes":
+        val src = error_handler_source()
+
+        expect(src).to_contain("case ErrorCategory.ParseError: -32700")
+        expect(src).to_contain("case ErrorCategory.InvalidRequest: -32600")
+        expect(src).to_contain("case ErrorCategory.MethodNotFound: -32601")
+        expect(src).to_contain("case ErrorCategory.InvalidParams: -32602")
+        expect(src).to_contain("case ErrorCategory.InternalError: -32603")
+
+    it "bounds hostile transport payload dimensions":
+        val src = error_handler_source()
+
+        expect(src).to_contain("max_content_length: 1048576")
+        expect(src).to_contain("max_string_length: 65536")
+        expect(src).to_contain("max_uri_length: 2048")
+        expect(src).to_contain("max_tool_name_length: 256")
+        expect(src).to_contain("max_array_length: 1000")
+        expect(src).to_contain("Content length cannot be negative")
+        expect(src).to_contain("Array length cannot be negative")
+
+    it "rejects malformed URI schemes and tool names before dispatch":
+        val src = error_handler_source()
+
+        expect(src).to_contain("fn validate_uri(uri: text) -> McpError?:")
+        expect(src).to_contain("URI cannot be empty")
+        expect(src).to_contain("Invalid URI scheme")
+        expect(src).to_contain("fn validate_tool_name(name: text) -> McpError?:")
+        expect(src).to_contain("Tool name cannot be empty")
+        expect(src).to_contain("Tool name contains invalid character")

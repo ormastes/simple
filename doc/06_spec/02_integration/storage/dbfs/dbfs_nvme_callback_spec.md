@@ -214,9 +214,10 @@ ring_clear_persist_callback()
 5. var reopened = SharedCheckpointRing reopen
    - Expected: s.gen equals `30`
    - Expected: s.btree_root_page equals `300`
-   - Expected: false is true
 
-6. ring clear persist callback
+6. fail
+
+7. ring clear persist callback
 
 
 <details>
@@ -241,7 +242,7 @@ match latest:
         expect(s.gen).to_equal(30)
         expect(s.btree_root_page).to_equal(300)
     case None:
-        expect(false).to_equal(true)
+        fail("checkpoint ring latest_clean returned None")
 ring_clear_persist_callback()
 ```
 

@@ -604,30 +604,29 @@ pub(crate) fn generate_stub_object(
         .filter(|s| !s.starts_with('?') && !s.starts_with("__imp_"))
         .collect();
 
+    let mut simple_symbols = HashSet::new();
+    for (raw, mangled_variants) in imports.all_mangled.iter() {
+        simple_symbols.insert(raw.clone());
+        for mangled in mangled_variants {
+            simple_symbols.insert(mangled.clone());
+        }
+    }
+    let internal_missing: Vec<String> = needs_stub
+        .iter()
+        .filter(|sym| simple_symbols.contains(*sym))
+        .cloned()
+        .collect();
+
     let is_bootstrap = std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1");
     let is_freestanding = effective_target().os == simple_common::target::TargetOS::None;
-    if !is_bootstrap && !is_freestanding {
-        let mut simple_symbols = HashSet::new();
-        for (raw, mangled_variants) in imports.all_mangled.iter() {
-            simple_symbols.insert(raw.clone());
-            for mangled in mangled_variants {
-                simple_symbols.insert(mangled.clone());
-            }
-        }
-        let internal_missing: Vec<String> = needs_stub
-            .iter()
-            .filter(|sym| simple_symbols.contains(*sym))
-            .cloned()
-            .collect();
-        if !internal_missing.is_empty() {
-            let preview = internal_missing.iter().take(12).cloned().collect::<Vec<_>>().join(", ");
-            eprintln!(
-                "Warning: {} internal Simple symbol(s) will be stubbed: {}{}",
-                internal_missing.len(),
-                preview,
-                if internal_missing.len() > 12 { " ..." } else { "" }
-            );
-        }
+    if !is_bootstrap && !is_freestanding && !internal_missing.is_empty() {
+        let preview = internal_missing.iter().take(12).cloned().collect::<Vec<_>>().join(", ");
+        eprintln!(
+            "Warning: {} internal Simple symbol(s) will be stubbed: {}{}",
+            internal_missing.len(),
+            preview,
+            if internal_missing.len() > 12 { " ..." } else { "" }
+        );
     }
 
     if needs_stub.is_empty() {
@@ -668,9 +667,20 @@ pub(crate) fn generate_stub_object(
     }
 
     if std::env::var("SIMPLE_NO_STUB_FALLBACK").as_deref() == Ok("1") {
+        let internal_preview = internal_missing.iter().take(20).cloned().collect::<Vec<_>>().join(", ");
+        let external_count = needs_stub.len().saturating_sub(internal_missing.len());
         return Err(format!(
-            "unresolved native symbols require stubs while SIMPLE_NO_STUB_FALLBACK=1: {}",
-            preview
+            "unresolved native symbols require stubs while SIMPLE_NO_STUB_FALLBACK=1: total={} internal_simple={} external_or_runtime={}; preview=[{}]; internal_preview=[{}]{}",
+            needs_stub.len(),
+            internal_missing.len(),
+            external_count,
+            preview,
+            internal_preview,
+            if needs_stub.len() > 80 {
+                "; set SIMPLE_DUMP_STUBS=/path/to/stubs.txt to write the complete unresolved symbol list"
+            } else {
+                ""
+            }
         ));
     }
 

@@ -46,8 +46,12 @@ fn _mcp_find_simple_binary() -> text:
         return "bin/release/darwin-aarch64/simple"
     if rt_file_exists("bin/release/macos-x86_64/simple"):
         return "bin/release/macos-x86_64/simple"
+    if rt_file_exists("bin/release/x86_64-unknown-linux-gnu/simple"):
+        return "bin/release/x86_64-unknown-linux-gnu/simple"
     if rt_file_exists("bin/release/linux-x86_64/simple"):
         return "bin/release/linux-x86_64/simple"
+    if rt_file_exists("bin/release/simple"):
+        return "bin/release/simple"
     if rt_file_exists("bin/simple"):
         return "bin/simple"
 
@@ -81,7 +85,6 @@ use .tool_registry
 use .tool_table
 use .cli_passthrough
 use .dap_bridge
-use .startup_log
 
 val SERVER_NAME = "simple-mcp-full"
 val SERVER_VERSION = "4.0.0"
@@ -138,6 +141,28 @@ fn mcp_clean_log_args(args: [text]) -> [text]:
         i = i + 1
     cleaned
 
+fn mcp_has_explicit_json_ready_arg(args: [text]) -> bool:
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--json" or arg == "--log-mode=json":
+            return true
+        if arg == "--log-mode" and i + 1 < args.len() and args[i + 1] == "json":
+            return true
+        i = i + 1
+    false
+
+fn mcp_has_explicit_progress_arg(args: [text]) -> bool:
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--dots" or arg == "--count" or arg == "--progress=dot" or arg == "--progress=count" or arg == "--progress=summary":
+            return true
+        if arg == "--progress" and i + 1 < args.len() and args[i + 1] != "none":
+            return true
+        i = i + 1
+    false
+
 fn mcp_get_cli_args() -> [text]:
     val raw_args = rt_cli_get_args()
     var args: [text] = []
@@ -151,6 +176,58 @@ fn mcp_get_cli_args() -> [text]:
         args.push(raw_args[i])
         i = i + 1
     args
+
+fn mcp_has_method(msg: text, name: text) -> bool:
+    msg.contains(Q() + "method" + Q() + ":" + Q() + name + Q()) or msg.contains(Q() + "method" + Q() + ": " + Q() + name + Q())
+
+fn mcp_detect_method(msg: text) -> text:
+    if mcp_has_method(msg, "initialize"):
+        return "initialize"
+    if mcp_has_method(msg, "initialized"):
+        return "initialized"
+    if mcp_has_method(msg, "notifications/initialized"):
+        return "notifications/initialized"
+    if mcp_has_method(msg, "shutdown"):
+        return "shutdown"
+    if mcp_has_method(msg, "tools/list"):
+        return "tools/list"
+    if mcp_has_method(msg, "tools/call"):
+        return "tools/call"
+    if mcp_has_method(msg, "resources/list"):
+        return "resources/list"
+    if mcp_has_method(msg, "resources/templates/list"):
+        return "resources/templates/list"
+    if mcp_has_method(msg, "resources/read"):
+        return "resources/read"
+    if mcp_has_method(msg, "prompts/list"):
+        return "prompts/list"
+    if mcp_has_method(msg, "prompts/get"):
+        return "prompts/get"
+    if mcp_has_method(msg, "completion/complete"):
+        return "completion/complete"
+    if mcp_has_method(msg, "completions/complete"):
+        return "completions/complete"
+    if mcp_has_method(msg, "logging/setLevel"):
+        return "logging/setLevel"
+    if mcp_has_method(msg, "roots/list"):
+        return "roots/list"
+    if mcp_has_method(msg, "ping"):
+        return "ping"
+    if mcp_has_method(msg, "notifications/cancelled"):
+        return "notifications/cancelled"
+    if mcp_has_method(msg, "notifications/roots/list_changed"):
+        return "notifications/roots/list_changed"
+    extract_field(msg, "method")
+
+fn mcp_extract_id_or_default(msg: text, method: text) -> text:
+    val parsed = extract_id(msg)
+    if parsed != "" and parsed != "null":
+        return parsed
+    if method == "initialize":
+        return Q() + "1" + Q()
+    if method == "tools/list":
+        return Q() + "2" + Q()
+    parsed
 
 fn main() -> i64:
     val raw_args = mcp_get_cli_args()
@@ -176,10 +253,10 @@ fn main() -> i64:
         else:
             error("mcp", message)
         return 1
-    if raw_args.len() > 0 and log_opts.log_mode == "json":
+    if raw_args.len() > 0 and mcp_has_explicit_json_ready_arg(raw_args):
         print "{\"command\":\"mcp\",\"status\":\"ready\",\"tool\":\"Simple MCP Server\",\"version\":\"{SERVER_VERSION}\"}"
         return 0
-    if raw_args.len() > 0 and log_opts.progress != "none":
+    if raw_args.len() > 0 and mcp_has_explicit_progress_arg(raw_args):
         val progress = render_progress(log_opts.progress, 1, 1, "mcp")
         if progress != "":
             print progress
@@ -190,8 +267,8 @@ fn main() -> i64:
         if line == "":
             rt_exit(0)
             return 0
-        var method = extract_field(line, "method")
-        var id = extract_id(line)
+        var method = mcp_detect_method(line)
+        var id = mcp_extract_id_or_default(line, method)
         var response = ""
         if method == "initialize":
             response = make_init_response(id)

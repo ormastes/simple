@@ -27,7 +27,7 @@ database_e2e_spec
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -38,17 +38,90 @@ database_e2e_spec
 
 ### Database E2E
 
-#### skipped
+#### keeps bug database creation persistence and row conversion available
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val pending_reason = "pre-existing test failures - functions/imports not available"
-expect(pending_reason.len()).to_be_greater_than(0)
+val source = bug_database_source()
+
+expect(source).to_contain("fn load_bug_database(path: text) -> BugDatabase?")
+expect(source).to_contain("fn create_bug_database(path: text) -> BugDatabase")
+expect(source).to_contain("class BugDatabase:")
+expect(source).to_contain("fn bug_to_row(bug: Bug) -> SdnRow")
+expect(source).to_contain("fn bug_to_row_for_table(bug: Bug, table: SdnTable) -> SdnRow")
+expect(source).to_contain("me save() -> bool")
+```
+
+</details>
+
+#### keeps end to end bug workflow operations available
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val source = bug_database_source()
+
+expect(source).to_contain("me add_bug(bug: Bug) -> bool")
+expect(source).to_contain("fn get_bug(id: text) -> Bug?")
+expect(source).to_contain("fn all_bugs() -> [Bug]")
+expect(source).to_contain("me update_bug(id: text, bug: Bug) -> bool")
+expect(source).to_contain("me resolve_bug(id: text, timestamp: text) -> bool")
+expect(source).to_contain("fn bugs_by_status(status: BugStatus) -> [Bug]")
+expect(source).to_contain("fn bugs_by_severity(severity: BugSeverity) -> [Bug]")
+```
+
+</details>
+
+#### keeps bug database validation and status mapping available
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val source = bug_database_source()
+
+expect(source).to_contain("fn validate_test_links() -> [text]")
+expect(source).to_contain("fn validate_fix_strategy() -> [text]")
+expect(source).to_contain("fn validate() -> [DbIssue]")
+expect(source).to_contain("fn severity_to_string(severity: BugSeverity) -> text")
+expect(source).to_contain("fn status_to_storage_string(status: BugStatus) -> text")
+expect(source).to_contain("fn parse_status(s: text) -> BugStatus")
+expect(source).to_contain("\"documented_limitation\": BugStatus.Closed")
+```
+
+</details>
+
+#### keeps database persistence backed by SDN and atomic writes
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val core = core_database_source()
+val atomic = atomic_database_source()
+
+expect(core).to_contain("class SdnDatabase:")
+expect(core).to_contain("static fn load(path: text) -> SdnDatabase?")
+expect(core).to_contain("me save() -> bool")
+expect(core).to_contain("rt_crc32_text(body)")
+expect(core).to_contain("atomic_write(self.path, content)")
+expect(atomic).to_contain("fn atomic_write(path: text, content: text) -> bool")
+expect(atomic).to_contain("fn atomic_read(path: text) -> text?")
 ```
 
 </details>
@@ -72,8 +145,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

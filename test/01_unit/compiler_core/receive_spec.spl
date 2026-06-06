@@ -1,23 +1,34 @@
-describe "Receive":
-    it "skipped":
-        val pending_reason = "imports compiler modules - causes OOM via numbered directory resolution"
-        expect(pending_reason.len()).to_be_greater_than(0)
+extern fn rt_file_read_text(path: text) -> text
 
-# # receive: block parser spec
-# # Tests that receive: block syntax parses correctly
-# use compiler.core.tokens.{TOK_KW_RECEIVE, TOK_KW_AFTER}
-# use compiler.core.ast.{STMT_RECEIVE}
-# 
-# describe "receive: block parsing":
-#     it "STMT_RECEIVE has value 19":
-#         expect(STMT_RECEIVE).to_equal(19)
-# 
-#     it "TOK_KW_RECEIVE has value 206":
-#         expect(TOK_KW_RECEIVE).to_equal(206)
-# 
-#     it "TOK_KW_AFTER has value 207":
-#         expect(TOK_KW_AFTER).to_equal(207)
-# 
-#     it "receive block with after arm parses":
-#         # Syntactic test - just verifying constants exist
-#         expect(STMT_RECEIVE > 0).to_equal(true)
+fn read_source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+describe "Receive":
+    it "should reserve receive and after token tags":
+        val src = read_source("src/compiler/10.frontend/core/tokens.spl")
+        expect(src.contains("const TOK_KW_RECEIVE: i64 = 206")).to_equal(true)
+        expect(src.contains("const TOK_KW_AFTER: i64 = 207")).to_equal(true)
+        expect(src.contains("if name == \"receive\": return TOK_KW_RECEIVE")).to_equal(true)
+        expect(src.contains("if name == \"after\": return TOK_KW_AFTER")).to_equal(true)
+
+    it "should reserve and construct receive statements":
+        val src = read_source("src/compiler/10.frontend/core/ast_stmt.spl")
+        expect(src.contains("const STMT_RECEIVE = 19")).to_equal(true)
+        expect(src.contains("fn stmt_receive_stmt(arm_indices: [i64], timeout_expr: i64, timeout_body_idx: i64, span_id: i64) -> i64")).to_equal(true)
+        expect(src.contains("val idx = stmt_alloc(STMT_RECEIVE, span_id)")).to_equal(true)
+        expect(src.contains("stmt_body[idx] = arm_indices")).to_equal(true)
+
+    it "should parse receive arms and after timeout arms":
+        val src = read_source("src/compiler/10.frontend/core/parser_stmts.spl")
+        expect(src.contains("fn parse_receive_stmt() -> i64")).to_equal(true)
+        expect(src.contains("if par_kind_get() == 207")).to_equal(true)
+        expect(src.contains("timeout_expr = parse_expr()")).to_equal(true)
+        expect(src.contains("arm_new_with_binding_and_rationale")).to_equal(true)
+        expect(src.contains("stmt_receive_stmt(arm_indices, timeout_expr, timeout_body_idx, 0)")).to_equal(true)
+
+    it "should evaluate timeout body or first receive arm body":
+        val src = read_source("src/compiler/10.frontend/core/interpreter/eval_stmts.spl")
+        expect(src.contains("if tag == STMT_RECEIVE")).to_equal(true)
+        expect(src.contains("val recv_timeout_body = s_node_recv.type_tag")).to_equal(true)
+        expect(src.contains("return eval_stmt(recv_timeout_body)")).to_equal(true)
+        expect(src.contains("val first_arm_body = arm_get_body(recv_arms[0])")).to_equal(true)
