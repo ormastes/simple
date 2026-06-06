@@ -126,7 +126,7 @@ Additional progress on 2026-05-24:
 - Added compact LLM text tree rendering.
 - Replaced source-mode runtime-only `StringBuilder`/`common.text` dependencies in `log_store.spl` with local text-array rendering helpers.
 - Fixed `simple_lsp_mcp` native stdin parsing by removing `text.ends_with` from `_strip_line_end` and normalizing its entrypoint to `fn main() -> i64`.
-- Updated `scripts/setup/setup.sh` to generate MCP wrapper scripts that prefer the working `linux-x86_64` release artifacts when the default Linux triple artifacts are silent or invalid.
+- Updated `scripts/setup/setup.shs` to generate MCP wrapper scripts that prefer the working `linux-x86_64` release artifacts when the default Linux triple artifacts are silent or invalid.
 - Added SQL `MATCH` token parsing and row-level `fts_match(column, query)` support in `PureDatabase` WHERE expressions.
 - Added `LOG001` print-to-log lint for production roots while allowing script/test/example `print`.
 - Added logging guidance to `.codex/skills/coding/SKILL.md` and `doc/07_guide/tooling/logging.md`.
@@ -147,7 +147,7 @@ Additional progress on 2026-05-24:
  - Added compact LLM text tree rendering.
  - Replaced source-mode runtime-only `StringBuilder`/`common.text` dependencies in `log_store.spl` with local text-array rendering helpers.
  - Fixed `simple_lsp_mcp` native stdin parsing by removing `text.ends_with` from `_strip_line_end` and normalizing its entrypoint to `fn main() -> i64`.
- - Updated `scripts/setup/setup.sh` to generate MCP wrapper scripts that prefer the working `linux-x86_64` release artifacts when the default Linux triple artifacts are silent or invalid.
+ - Updated `scripts/setup/setup.shs` to generate MCP wrapper scripts that prefer the working `linux-x86_64` release artifacts when the default Linux triple artifacts are silent or invalid.
  - Hardened release packaging for native MCP binaries: MCP package builds now set `SIMPLE_NO_STUB_FALLBACK=1`, stage both MCP binaries first, and copy them into the package only after the staged pair passes `scripts/check/check-mcp-native-smoke.shs`.
  - Extended `SIMPLE_NO_STUB_FALLBACK=1` in the Rust native-project linker so unresolved link-symbol auto-stubs are a hard error, not just function-body codegen stubs. Added focused Rust coverage for the new behavior while preserving optional weak MCP entry hooks.
  - Added missing core-C runtime helper exports needed by the reduced `simple_lsp_mcp` native-build lane and made its framed stdin parsing/response path avoid native-unstable text scanner and length lowering paths.
@@ -234,7 +234,7 @@ Passed:
 - `bin/simple check src/app/mcp` (26 passed)
 - `bin/simple check src/app/simple_lsp_mcp` (5 passed)
 - `SIMPLE_LIB=src bin/simple test test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter --clean` (3 passed)
-- `bin/simple check src/app/simple_lsp_mcp scripts/setup/setup.sh` (Simple sources passed; shell script ignored by checker)
+- `bin/simple check src/app/simple_lsp_mcp scripts/setup/setup.shs` (Simple sources passed; shell script ignored by checker)
 - `SIMPLE_LIB=src bin/simple test test/02_integration/app/simple_lsp_mcp_stdio_spec.spl --mode=interpreter --clean` (2 passed)
 - `sh scripts/check/check-mcp-native-smoke.shs` (exit 0; MCP tools JSON/schema valid, 144 tools; LSP tools JSON/schema valid, 0 tools)
 - `bin/simple check src/lib/nogc_sync_mut/db/dbfs_engine/sql_parser.spl src/lib/nogc_sync_mut/database/pure_sql/database.spl test/02_integration/storage/dbfs/pure_db_sql_extended_spec.spl`
@@ -285,7 +285,7 @@ Native MCP/LSP verification update:
  - `bin/simple check src/app/mcp` (26 passed)
  - `bin/simple check src/app/simple_lsp_mcp` (5 passed)
  - `SIMPLE_LIB=src bin/simple test test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter --clean` (3 passed)
- - `bin/simple check src/app/simple_lsp_mcp scripts/setup/setup.sh` (Simple sources passed; shell script ignored by checker)
+ - `bin/simple check src/app/simple_lsp_mcp scripts/setup/setup.shs` (Simple sources passed; shell script ignored by checker)
  - `SIMPLE_LIB=src bin/simple test test/02_integration/app/simple_lsp_mcp_stdio_spec.spl --mode=interpreter --clean` (2 passed)
  - `sh scripts/check/check-mcp-native-smoke.shs` (exit 0; MCP tools JSON/schema valid, 144 tools; LSP tools JSON/schema valid, 0 tools)
  - `bin/simple check src/app/search/main.spl test/02_integration/app/search_log_modes_spec.spl` (passed)

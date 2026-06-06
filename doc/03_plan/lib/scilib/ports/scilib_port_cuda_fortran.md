@@ -154,7 +154,7 @@ T-CUDA-07  # backend dispatch (depends on T-CUDA-02/03/05)
 T-CUDA-08  # Cargo.toml feature flags and workspace wiring
 T-CUDA-09  # SFFI_PATH + test harness mock default (parallel with T-CUDA-08)
     ↓
-T-CUDA-10  # scripts/setup/setup.sh integration
+T-CUDA-10  # scripts/setup/setup.shs integration
 T-CUDA-11  # bootstrap script wiring (parallel with T-CUDA-10)
     ↓
 T-CUDA-12  # CI matrix (mock-only, openblas-host, cuda-host)
@@ -502,7 +502,7 @@ For interpreter-mode spec runs (AC-7 / OQ-D compliance):
      `doc/08_tracking/feature/compiler_requests.md` and use the hard-coded prefix for v1.
 2. `SIMPLE_SFFI_PATH` must include the `build/` directory so `libspl_cublas_mock.so` is found
    by `spl_dlopen` without a full install step.
-   - Add `export SIMPLE_SFFI_PATH="${SIMPLE_SFFI_PATH}:${REPO_ROOT}/build"` to `scripts/setup/setup.sh`
+   - Add `export SIMPLE_SFFI_PATH="${SIMPLE_SFFI_PATH}:${REPO_ROOT}/build"` to `scripts/setup/setup.shs`
      (see T-CUDA-10).
 3. Verify: run `bin/simple test src/lib/common/linalg/axpy_spec.spl` in interpreter mode — must
    not hang, must not require CUDA, must use mock symbols.
@@ -512,13 +512,13 @@ OpenBLAS installed (mock-only machine).
 
 ---
 
-### T-CUDA-10: Integrate into `scripts/setup/setup.sh`
+### T-CUDA-10: Integrate into `scripts/setup/setup.shs`
 
 **Estimate:** 0.5 day
 **Depends on:** T-CUDA-08, T-CUDA-09
-**Disjoint files:** `scripts/setup/setup.sh` only
+**Disjoint files:** `scripts/setup/setup.shs` only
 
-Add to `scripts/setup/setup.sh`:
+Add to `scripts/setup/setup.shs`:
 
 1. Build the scilib mock shim unconditionally:
    ```sh
@@ -556,7 +556,7 @@ Add to `scripts/setup/setup.sh`:
 5. Set `SIMPLE_BLAS_BACKEND=mock` in the local `.envrc` or equivalent if the user's env
    does not already set it (do not override an existing value).
 
-**Done when:** `scripts/setup/setup.sh` runs cleanly on a CPU-only machine; produces
+**Done when:** `scripts/setup/setup.shs` runs cleanly on a CPU-only machine; produces
 `build/libspl_cublas_mock.so`; prints `[scilib]` status lines.
 
 ---
@@ -573,10 +573,10 @@ the self-hosted binary can run linalg specs.
 Add to the post-deploy section of `scripts/bootstrap/bootstrap-from-scratch.sh`:
 ```sh
 # Build scilib shims (mock always; openblas/cuda if available)
-sh scripts/setup/setup.sh --scilib-only
+sh scripts/setup/setup.shs --scilib-only
 ```
 
-Add a `--scilib-only` flag to `scripts/setup/setup.sh` that runs only the scilib build steps
+Add a `--scilib-only` flag to `scripts/setup/setup.shs` that runs only the scilib build steps
 (steps 1–4 of T-CUDA-10), skipping the symlink and other setup.
 
 **Rationale:** Per `feedback_extern_bootstrap_rebuild`, after adding new `rt_*` externs a
@@ -605,8 +605,8 @@ Define three CI matrix legs for scilib:
 
 For each leg:
 
-- `mock-only`: `apt-get install gcc` only; no BLAS/CUDA packages; scripts/setup/setup.sh builds mock.
-- `openblas-host`: `apt-get install libopenblas-dev`; scripts/setup/setup.sh detects and builds openblas
+- `mock-only`: `apt-get install gcc` only; no BLAS/CUDA packages; scripts/setup/setup.shs builds mock.
+- `openblas-host`: `apt-get install libopenblas-dev`; scripts/setup/setup.shs detects and builds openblas
   shim; specs additionally check that `rt_blas_ddot([1,2,3], [1,2,3])` returns `14.0` (numeric
   correctness check beyond mock zeros).
 - `cuda-host`: uses NVIDIA-provided Docker image or runner with CUDA toolkit 11.7+; full shim set.
@@ -653,13 +653,13 @@ Numerical correctness for openblas and cublas legs is verified in the CI matrix 
 **Estimate:** 0.5 day
 **Depends on:** T-CUDA-02, T-CUDA-03, T-CUDA-06, completion of `scilib_port_blas.md` and
 `scilib_port_lapack.md`
-**Disjoint files:** `src/runtime/scilib/verify_symbols.sh` (new script)
+**Disjoint files:** `src/runtime/scilib/verify_symbols.shs` (new script)
 
-Write `src/runtime/scilib/verify_symbols.sh`:
+Write `src/runtime/scilib/verify_symbols.shs`:
 
 ```sh
 #!/bin/sh
-# Usage: ./verify_symbols.sh build/libspl_cublas_mock.so build/libspl_openblas.so build/libspl_cublas.so
+# Usage: ./verify_symbols.shs build/libspl_cublas_mock.so build/libspl_openblas.so build/libspl_cublas.so
 # Checks that all three shims export the same set of rt_* symbols.
 MOCK_SYMS=$(nm -D "$1" | grep ' T rt_' | awk '{print $3}' | sort)
 for shim in "$2" "$3"; do
@@ -672,13 +672,13 @@ done
 ```
 
 Run this script:
-1. At the end of `scripts/setup/setup.sh` for all three shims (skipping any not built).
+1. At the end of `scripts/setup/setup.shs` for all three shims (skipping any not built).
 2. As a CI check in the mock-only leg — all three shims must export the same `rt_*` set.
 3. Manually after any new symbol is added in `scilib_port_blas.md` or `scilib_port_lapack.md`.
 
 Add the script to the CI mock-only leg as a required step (not advisory).
 
-**Done when:** `verify_symbols.sh` runs cleanly on mock + openblas shims; reports diff if any
+**Done when:** `verify_symbols.shs` runs cleanly on mock + openblas shims; reports diff if any
 symbol is present in one but not the other.
 
 ---
@@ -692,12 +692,12 @@ symbol is present in one but not the other.
 - [ ] `build/libspl_cublas.so` builds on a CUDA ≥ 11.7 machine; uses `_64` API (T-CUDA-05/06)
 - [ ] `SIMPLE_BLAS_BACKEND=mock` is the default in `bin/simple test` for linalg/ndarray specs
   (T-CUDA-09)
-- [ ] `scripts/setup/setup.sh` builds mock unconditionally; openblas and cuda conditionally; appends
+- [ ] `scripts/setup/setup.shs` builds mock unconditionally; openblas and cuda conditionally; appends
   `build/` to `SIMPLE_SFFI_PATH` (T-CUDA-10)
 - [ ] `scripts/bootstrap/bootstrap-from-scratch.sh --deploy` triggers scilib mock build (T-CUDA-11)
 - [ ] CI matrix has three legs: mock-only, openblas-host, cuda-host (T-CUDA-12)
 - [ ] `blas_backend_smoke_spec.spl` passes interpreter mode; zero `skip()` (T-CUDA-13)
-- [ ] `verify_symbols.sh` passes as CI gate (T-CUDA-14)
+- [ ] `verify_symbols.shs` passes as CI gate (T-CUDA-14)
 - [ ] No nvfortran toolchain references anywhere in `src/runtime/scilib/` (anti-pattern 1)
 - [ ] No `--mode=native` in any spec run instructions (anti-pattern 3)
 
@@ -710,6 +710,6 @@ symbol is present in one but not the other.
 | **R-CUDA-1: CUDA version fragmentation** — `_64` API only in CUDA ≥ 11.7; older CI runners may have 11.0–11.6 | High | T-CUDA-04 detects version; `SIMPLE_CUDA_NO_64BIT` fallback with `i32` clamping + assertion |
 | **R-CUDA-2: Mock fidelity gap** — a spec tests behavior that differs between mock (zeros) and real backend | High | Specs annotated `#[gpu_only]` when they assert numeric results; mock specs assert only shape + non-error return + mock contract values |
 | **R-CUDA-3: Build system reach** — scilib build must integrate into both `setup.sh` and `bootstrap-from-scratch.sh`; breakage in either blocks all downstream specs | Medium | T-CUDA-10/11 are explicitly scoped; `--scilib-only` flag isolates the scilib build step so it cannot break unrelated bootstrap stages |
-| **R-CUDA-4: Symbol set drift** — blas/lapack task files add a new symbol; one or more shims miss it | Medium | `verify_symbols.sh` (T-CUDA-14) runs as a required CI gate; any drift fails CI before any spec runs |
+| **R-CUDA-4: Symbol set drift** — blas/lapack task files add a new symbol; one or more shims miss it | Medium | `verify_symbols.shs` (T-CUDA-14) runs as a required CI gate; any drift fails CI before any spec runs |
 | **R-CUDA-5: OpenBLAS row-major vs column-major double-swap** — openblas shim accidentally applies operand swap that Layer B already applied | Low–Medium | Document clearly in `openblas_shim.c` header comment; CI openblas-host leg verifies `I @ I = I` numerically |
 | **R-CUDA-6: cuSOLVER workspace per-call malloc cost** — each `rt_lapack_dgetrf` call allocates and frees a CUDA workspace | Low | Acceptable for v1; PERF-SUGAR-004 tracks batching mitigation; internal workspace is freed before function returns |

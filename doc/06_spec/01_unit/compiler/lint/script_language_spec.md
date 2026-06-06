@@ -115,8 +115,8 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = rt_file_read_text("tools/gui_perf_bench/run_all_benchmarks.sh")
-expect(count_rule(source, "tools/gui_perf_bench/run_all_benchmarks.sh", "simple_script_required")).to_equal(0)
+val source = rt_file_read_text("tools/gui_perf_bench/run_all_benchmarks.shs")
+expect(count_rule(source, "tools/gui_perf_bench/run_all_benchmarks.shs", "simple_script_required")).to_equal(0)
 ```
 
 </details>

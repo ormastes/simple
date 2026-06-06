@@ -32,7 +32,7 @@ interrupt the tool call manually.  The agent never returned a result or error.
 - Cancel the hung agent (user interrupts tool call)
 - Run Phase 7 verification inline (directly in orchestrator context)
 - Ensure `bin/simple` symlink exists before spawning agents:
-  `sh scripts/setup/setup.sh`
+  `sh scripts/setup/setup.shs`
 
 ## Root Cause Hypothesis
 
@@ -50,7 +50,7 @@ Two possible causes:
 
 - SStack orchestrator should verify `bin/simple` exists before spawning any
   agent that runs tests.  Add a pre-flight check:
-  `if not file_exists("bin/simple"): run scripts/setup/setup.sh`
+  `if not file_exists("bin/simple"): run scripts/setup/setup.shs`
 - Agent prompts for verify phases should include an explicit early-exit
   instruction: "If bin/simple is not found, report the error and exit
   immediately."
@@ -61,7 +61,7 @@ Two possible causes:
 
 The SStack orchestration instructions now require a `bin/simple` preflight before
 spawning phases 2-8. If `bin/simple` is missing, the orchestrator runs
-`sh scripts/setup/setup.sh` and stops with a setup failure if the binary is still
+`sh scripts/setup/setup.shs` and stops with a setup failure if the binary is still
 unavailable, instead of spawning an agent that may hang.
 
 The Phase 7 verify agent instructions now include an explicit first verification

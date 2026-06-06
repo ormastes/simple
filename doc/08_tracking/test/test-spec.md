@@ -1,12 +1,12 @@
 # Test Specification
 
-*Generated: 2026-06-06 06:22:26*
+*Generated: 2026-06-06 07:43:25*
 
-## test/01_unit/lib/crypto
+## test/02_integration/os/apps/sshd
 
-❌ **ed25519_rfc8032_spec.spl** (9093ms)
-  - Source: `test/01_unit/lib/crypto/ed25519_rfc8032_spec.spl`
-  - Generated doc: `doc/06_spec/ed25519_rfc8032_spec.md`
+❌ **sshd_production_packet_transcript_spec.spl** (9238ms)
+  - Source: `test/02_integration/os/apps/sshd/sshd_production_packet_transcript_spec.spl`
+  - Generated doc: `doc/06_spec/sshd_production_packet_transcript_spec.md`
 
 
 ---
@@ -16,4 +16,4 @@
 - **Total:** 1 tests
 - **Passed:** 0 ✅
 - **Failed:** 1 ❌
-- **Duration:** 9189ms
+- **Duration:** 9247ms

@@ -13,7 +13,7 @@
 ## Wrapper Evidence
 
 - `scripts/check/check-cross-language-perf.shs` calls the contract after writing its report unless `SKIP_PROFILE_REPORT_CONTRACT=1`.
-- `tools/gui_perf_bench/run_all_benchmarks.sh` calls the contract after writing its report unless `SKIP_PROFILE_REPORT_CONTRACT=1`.
+- `tools/gui_perf_bench/run_all_benchmarks.shs` calls the contract after writing its report unless `SKIP_PROFILE_REPORT_CONTRACT=1`.
 
 ## TUI Startup Scope
 

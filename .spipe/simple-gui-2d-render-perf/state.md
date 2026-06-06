@@ -68,7 +68,7 @@ implementation-evidence-in-progress
 - **Python/tkinter**: `tools/gui_perf_bench/bench_python.py`
 - **Tauri**: unavailable (cargo-tauri not installed)
 
-Runner: `tools/gui_perf_bench/run_all_benchmarks.sh --width 7680 --height 4320 --frames 60`
+Runner: `tools/gui_perf_bench/run_all_benchmarks.shs --width 7680 --height 4320 --frames 60`
 Guide: `doc/07_guide/platform/gui_perf_benchmark_comparison.md`
 
 All backends emit uniform `gui_perf_benchmark_*=value` metrics for direct comparison.

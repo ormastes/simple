@@ -20,7 +20,7 @@ Concrete incident (2026-04-16, this session): pre-`/sync`, the working copy cont
 - `src/compiler_rust/compiler/src/interpreter_extern/signatures.rs`  (RSA-PSS verify)
 - `src/compiler_rust/runtime/src/value/ffi/signature.rs`  (RSA-PSS verify)
 - `src/os/tls13/cert_verify.spl`  (RSA-PSS callsite)
-- `config/mcp/mcp_startup_lib.sh`  (MCP wrapper hardening)
+- `config/mcp/mcp_startup_lib.shs`  (MCP wrapper hardening)
 - `src/app/mcp/main.spl`, `src/app/mcp/main_lazy_*.spl` (×5)  (MCP source fixes)
 - `src/app/simple_lsp_mcp/json_helpers.spl`  (LSP MCP source fix)
 - `build/native/*_native.broken.20260416` (×2)  (native binary quarantine)
@@ -53,7 +53,7 @@ Detected 2 topics in 12 modified files:
   → confidence: 0.92  (3-of-3 RSA-PSS extern fns introduced together; cert_verify is sole consumer)
 
 [2/2] mcp (8 files)
-  M config/mcp/mcp_startup_lib.sh
+  M config/mcp/mcp_startup_lib.shs
   M src/app/mcp/main.spl
   M src/app/mcp/main_lazy_protocol.spl
   M src/app/mcp/main_lazy_vcs_tools.spl

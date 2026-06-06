@@ -90,6 +90,10 @@ prefer the Protocol-v2 Draw IR baseline diff
 `/api/test/draw-ir/diff?baseline=...&capability=draw_ir` or the shared
 `common.ui.draw_ir_diff` helper as structured evidence before falling back to
 pixel-only assertions.
+After adding or moving UI-facing app feature specs, run
+`test/03_system/app/testing/feature/ui_sspec_evidence_audit_spec.spl` to keep
+the critical UI SSPEC lane mirrored into generated manuals with visible
+evidence markers.
 
 For Simple Web/Electron renderer parity, keep the canonical wrapper documented
 as `scripts/check/check-production-gui-web-renderer-parity-evidence.shs`.

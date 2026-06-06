@@ -2,35 +2,6 @@
 
 > IDE office plugin suite system specification.
 
-## Overview
-
-This manual validates the production IDE Office plugin suite after restoring the original `src/app/ide` and `src/app/office` surface. It confirms that the IDE feature-check report, Markdown preview, slide preview, spreadsheet/tabular support, agent dashboard metadata, DB admin ownership, and TUI/GUI launch probes all use real in-repo modules.
-
-**Requirements:** `doc/03_plan/sys_test/ide_office_plugin_suite.md`
-**Plan:** `doc/03_plan/sys_test/ide_office_plugin_suite.md`
-**Design:** `doc/03_plan/app/ide/simple_ide_submodule_plan_2026-06-04.md`
-**Research:** N/A - this is hardening for an existing restored feature lane.
-
-## Execution
-
-```bash
-SIMPLE_LIB=src bin/simple-interp test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl
-```
-
-Expected result: `16 examples, 0 failures`.
-
-## Coverage Matrix
-
-| Area | Scenario Evidence |
-|------|-------------------|
-| Capability registry | Registers markdown, slides, sheets, agent-dashboard, and db-admin. |
-| Owner wiring | Verifies Markdown, Office, editor MCP, and DB owner modules. |
-| Manual output | Checks feature-check line count, order, and GUI/TUI parity. |
-| Slides | Checks rendering probe, slide constructors, layout labels, and element append helper. |
-| Sheets/tabular | Checks formats, sample range, formula evaluator, and shared numeric helpers. |
-| TUI/GUI | Checks preview panels, outline rendering, GUI backend, and launch summary. |
-| Plugin manifest | Checks five entries and manifest roundtrip. |
-
 <!-- sdn-diagram:id=ide_office_plugin_suite_spec.arch -->
 <details class="sdn-source">
 <summary>SDN source</summary>
@@ -58,7 +29,7 @@ ide_office_plugin_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 16 | 16 | 0 | 0 |
+| 17 | 17 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -74,11 +45,52 @@ IDE office plugin suite system specification.
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl` |
-| Updated | 2026-06-06 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 IDE office plugin suite system specification.
 Validates that IDE-facing Markdown, presentation, spreadsheet, dashboard, and database surfaces reuse existing app modules.
+
+## Evidence
+
+Display policy: `embed_tui`
+
+| Category | Count |
+|----------|------:|
+| TUI Captures | 1 |
+
+### TUI Captures
+
+| Item | Kind | Path |
+|------|------|------|
+| `feature_check_tui.txt` | TUI capture | `build/test-artifacts/03_system/app/ide/feature/ide_office_plugin_suite/feature_check_tui.txt` |
+
+#### Embedded TUI Text Captures
+
+<details>
+<summary>feature_check_tui.txt</summary>
+
+```text
+Simple IDE feature check
+mode: tui
+capabilities: 5
+markdown: Markdown Preview [document-renderer] -> std.editor.render.md_renderer (md, markdown)
+  check: markdown: std.editor.render.md_renderer blocks=3 lines=6 preview=6 heading=true table=true
+slides: Presentation Slides [office-app] -> app.office.slides (ppt, presentation, slides)
+  check: slides: app.office.slides count=2 thumb=Slide 2: (Content) canvas=2 outline=2 designs=2 css=true transform=true
+sheets: Spreadsheet [office-app] -> app.office.sheets (excel, xlsx, tabular, csv)
+  check: sheets: app.office.sheets formats=excel,xlsx,csv,tabular range=A1:C1 formula=5 evaluator=true
+  gui: gui-backend: theme=dark size=1200x800 md=true ppt=true sheet=true config=true
+agent-dashboard: Agent Dashboard [dashboard] -> app.editor.mcp_tools (agent, dashboard, mcp)
+  check: agent-dashboard: app.editor.mcp_tools tools=19 lsp=true wiki=true modes=3
+db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, simple-db, portal-db)
+  check: db-admin: owners=5 targets=4 state=normal/1 contracts=Rel/BlkNo/Lsn/TxnId/PhysPtr/PageBuf page-size=4096
+  tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
+  launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 unknown=--bad-mode
+  plugin-manifest: plugins: entries=5 roundtrip=5 names=5
+```
+
+</details>
 
 ## Scenarios
 
@@ -166,6 +178,29 @@ expect(lines[7]).to_start_with("sheets:")
 expect(lines[10]).to_start_with("agent-dashboard:")
 expect(lines[12]).to_start_with("db-admin:")
 expect(lines[16]).to_start_with("  plugin-manifest:")
+```
+
+</details>
+
+#### keeps the TUI feature-check layout within terminal width and captures it
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val lines = ide_feature_check_report("tui")
+val capture = lines.join("\n")
+expect(_max_line_width(lines)).to_be_less_than(121)
+expect(capture).to_contain("markdown: Markdown Preview")
+expect(capture).to_contain("slides: Presentation Slides")
+expect(capture).to_contain("sheets: Spreadsheet")
+expect(capture).to_contain("db-admin: Database Admin")
+expect(capture).to_contain("  tui: tui-panels:")
+expect(_write_tui_capture(capture)).to_equal(0)
+expect(_capture_file_state(capture)).to_equal("matched")
 ```
 
 </details>
@@ -321,7 +356,7 @@ expect(surface.owner_modules.join(",")).to_contain("std.simple_db_if.storage_api
 expect(surface.supported_targets.join(",")).to_contain("simple-db")
 expect(surface.simple_db_contracts.join(",")).to_contain("PageBuf")
 expect(surface.default_state_mode).to_equal("normal")
-expect(summary).to_contain("portal-db")
+expect(summary).to_contain("targets=4")
 expect(summary).to_contain("page-size=4096")
 ```
 
@@ -332,7 +367,7 @@ expect(summary).to_contain("page-size=4096")
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -342,7 +377,8 @@ expect(surface.owner_module).to_equal("app.editor.mcp_tools")
 expect(surface.tool_count).to_be_greater_than(10)
 expect(surface.has_lsp_tools)
 expect(surface.has_wiki_tools)
-expect(summary).to_contain("combined-live")
+expect(surface.modes.join(",")).to_contain("combined-live")
+expect(summary).to_contain("modes=3")
 ```
 
 </details>
@@ -458,8 +494,8 @@ expect(summary).to_contain("roundtrip=5")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 16 |
-| Active scenarios | 16 |
+| Total scenarios | 17 |
+| Active scenarios | 17 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

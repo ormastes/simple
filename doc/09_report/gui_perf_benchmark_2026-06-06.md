@@ -3,7 +3,7 @@
 **Date:** 2026-06-06T06:41:59+00:00
 **Resolution:** 320x240
 **Frames:** 1
-**Profile script:** `tools/gui_perf_bench/run_all_benchmarks.sh`
+**Profile script:** `tools/gui_perf_bench/run_all_benchmarks.shs`
 **Report path:** `doc/09_report/gui_perf_benchmark_2026-06-06.md`
 
 ## Methodology
@@ -113,7 +113,7 @@ gui_perf_benchmark_exit_code=0
 Run from the repository root:
 
 ```sh
-tools/gui_perf_bench/run_all_benchmarks.sh --width 320 --height 240 --frames 1
+tools/gui_perf_bench/run_all_benchmarks.shs --width 320 --height 240 --frames 1
 ```
 
 Useful knobs: `WIDTH`, `HEIGHT`, `FRAMES`, `BUILD_DIR`, and `REPORT_PATH`.

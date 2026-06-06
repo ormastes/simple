@@ -23,7 +23,7 @@ node cli/spipe.js fine-tune-new-attempt demo "LLM-backed app" app
 node cli/spipe.js fine-tune-record-data demo dataset source license "download command" .spipe/cache/dataset checksum
 node cli/spipe.js fine-tune-record-model-research demo model license 8192 fit constraints selected
 node cli/spipe.js fine-tune-select-model-method demo model revision local provider-fine-tune user retry-base-model
-node cli/spipe.js fine-tune-scaffold-training demo provider-fine-tune .spipe/llm-finetune-process/scripts/train_demo.sh
+node cli/spipe.js fine-tune-scaffold-training demo provider-fine-tune .spipe/llm-finetune-process/scripts/train_demo.shs
 node cli/spipe.js fine-tune-record-verify-loop demo "eval command" "metric=1" "metric>=1" pass accepted none
 node cli/spipe.js fine-tune-report demo
 ```

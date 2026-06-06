@@ -158,7 +158,7 @@ implementation-in-progress
 
 Added 7-backend 8K (7680x4320) benchmark harness at `tools/gui_perf_bench/`:
 - Pure Simple CUDA, Simple Web Software, Electron, GTK3/C, JS/Node, JS/Browser, Python/tkinter
-- Runner: `tools/gui_perf_bench/run_all_benchmarks.sh --width 7680 --height 4320 --frames 60`
+- Runner: `tools/gui_perf_bench/run_all_benchmarks.shs --width 7680 --height 4320 --frames 60`
 - Guide: `doc/07_guide/platform/gui_perf_benchmark_comparison.md`
 - 8K = 33.2M pixels, 127 MB/frame RGBA. Fill-rate dominated at this resolution.
 - Pixel parity gate enforced: checksums captured before/after optimization, exact match required.

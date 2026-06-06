@@ -116,7 +116,7 @@ Architecture decisions from approved plan:
 
 ### 8K Multi-Framework Benchmark (2026-06-05)
 Cross-framework 8K GUI perf comparison added (7 backends):
-- Runner: `tools/gui_perf_bench/run_all_benchmarks.sh --width 7680 --height 4320 --frames 60`
+- Runner: `tools/gui_perf_bench/run_all_benchmarks.shs --width 7680 --height 4320 --frames 60`
 - Guide: `doc/07_guide/platform/gui_perf_benchmark_comparison.md`
 - Backends: Pure Simple CUDA, Simple Web Software, Electron, GTK3/C, JS/Node, JS/Browser, Python/tkinter
 - Pixel parity gate: exact match enforced before/after any optimization

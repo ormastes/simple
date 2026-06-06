@@ -51,7 +51,7 @@ Codex reads:
 
 ## Parity Convention
 
-To keep the repo easy to navigate, `scripts/setup/setup.sh` creates `.codex/commands/<name>.md` symlinks pointing at `.codex/skills/<name>/SKILL.md`.
+To keep the repo easy to navigate, `scripts/setup/setup.shs` creates `.codex/commands/<name>.md` symlinks pointing at `.codex/skills/<name>/SKILL.md`.
 
 This gives Codex and Gemini the same visible command names in the tree, but it does **not** mean Codex has native Gemini-style slash command support.
 

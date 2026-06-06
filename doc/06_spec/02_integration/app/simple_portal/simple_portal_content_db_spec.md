@@ -28,7 +28,7 @@ simple_portal_content_db_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -69,6 +69,34 @@ expect(result.is_ok()).to_equal(true)
 val source = result.unwrap()
 expect(source.root).to_equal(data_root)
 expect(source.db.pages[0].slug).to_equal("docs")
+```
+
+</details>
+
+#### loads portal content from a DBFS-backed mount table root
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val mt = _make_portal_dbfs_mount()
+val result = portal_content_db_load_from_mount(mt, "/portal")
+expect(result.is_ok()).to_equal(true)
+val source = result.unwrap()
+expect(source.root).to_equal("/portal")
+expect(source.db.pages.len()).to_equal(1)
+expect(source.db.examples.len()).to_equal(1)
+val page = portal_page_by_slug(source.db, "ops")
+expect(page.?).to_equal(true)
+val body = portal_read_page_body_from_mount(mt, source.root, source.db.pages[0])
+expect(body).to_contain("DBFS mounted portal")
+val example = portal_example_by_id(source.db, "hello")
+expect(example.?).to_equal(true)
+val source_text = portal_read_example_source_from_mount(mt, source.root, source.db.examples[0])
+expect(source_text).to_contain("print \"hello\"")
 ```
 
 </details>
@@ -132,8 +160,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

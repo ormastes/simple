@@ -1,10 +1,21 @@
 use std.spec.*
 
+"""
+BrowserSession textual UI access control system specification.
+
+**TUI Captures:** build/test-artifacts/03_system/app/browser/feature/browser_session_ui_access_controls/browser_ui_access_snapshot.txt
+"""
+# @evidence-display: embed_tui
+
 use common.ui.access.{WinTextActionRequest, ui_access_find_nodes}
 use std.gc_async_mut.web.browser_session.{BrowserSession}
 use std.gc_async_mut.web.browser_session_loading.*
 use std.gc_async_mut.web.browser_session_runtime.*
 use std.gc_async_mut.web.browser_session_ui_access.*
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+val UI_CAPTURE_PATH: text = "build/test-artifacts/03_system/app/browser/feature/browser_session_ui_access_controls/browser_ui_access_snapshot.txt"
 
 fn _node_prop(node, key: text) -> text:
     var i = 0
@@ -14,14 +25,45 @@ fn _node_prop(node, key: text) -> text:
         i = i + 1
     ""
 
+fn _browser_session_fixture() -> BrowserSession:
+    var session = BrowserSession.new()
+    session.register_resource("https://example.com/home", "<html><head><title>Home</title></head><body>Home</body></html>")
+    session.open_html("https://example.com/one", "<html><head><title>One</title></head><body>One</body></html>")
+    session.open_html("https://example.com/two", "<html><head><title>Two</title></head><body>Two</body></html>")
+    session.set_home_url("https://example.com/home")
+    session
+
+fn _snapshot_capture(snapshot) -> text:
+    var lines: [text] = []
+    lines.push("BrowserSession UI Access Snapshot")
+    lines.push("mode: " + snapshot.mode)
+    lines.push("active-surface: " + snapshot.active_surface)
+    lines.push("surfaces: {snapshot.surfaces.len()}")
+    for surface in snapshot.surfaces:
+        lines.push("surface: {surface.surface_id} title={surface.title} app={surface.app_id} active={surface.active}")
+    lines.push("nodes: {snapshot.nodes.len()}")
+    for node in snapshot.nodes:
+        lines.push("node: {node.widget_id} kind={node.kind} text={node.text_value} enabled={node.enabled} selected={node.selected} actions={node.action_names.join(\"|\")}")
+    lines.join("\n")
+
+fn _write_ui_capture(content: text) -> i64:
+    val script = "mkdir -p 'build/test-artifacts/03_system/app/browser/feature/browser_session_ui_access_controls' && cat > '" + UI_CAPTURE_PATH + "' <<'SIMPLE_BROWSER_UI_CAPTURE_EOF'\n" +
+        content + "\nSIMPLE_BROWSER_UI_CAPTURE_EOF\n"
+    val (_out, _err, code) = rt_process_run("/bin/sh", ["-c", script])
+    code
+
+fn _capture_file_state(expected: text) -> text:
+    val (out, _err, code) = rt_process_run("/bin/sh", ["-c", "test -f '" + UI_CAPTURE_PATH + "' && cat '" + UI_CAPTURE_PATH + "'"])
+    if code != 0:
+        return "missing"
+    if out == expected + "\n":
+        return "matched"
+    "mismatched"
+
 describe "BrowserSession primitive controls through textual UI access":
 
     it "exposes browser toolbar controls as queryable UI access nodes":
-        var session = BrowserSession.new()
-        session.register_resource("https://example.com/home", "<html><head><title>Home</title></head><body>Home</body></html>")
-        session.open_html("https://example.com/one", "<html><head><title>One</title></head><body>One</body></html>")
-        session.open_html("https://example.com/two", "<html><head><title>Two</title></head><body>Two</body></html>")
-        session.set_home_url("https://example.com/home")
+        var session = _browser_session_fixture()
 
         val snapshot = session.ui_access_snapshot()
         expect(snapshot.mode).to_equal("browser_session")
@@ -33,12 +75,20 @@ describe "BrowserSession primitive controls through textual UI access":
         expect(ui_access_find_nodes(snapshot, "browser:session", "button", "Favorite", 1).len()).to_equal(1)
         expect(ui_access_find_nodes(snapshot, "browser:session", "textfield", "https://example.com/two", 1).len()).to_equal(1)
 
+    it "captures browser UI access visible state for the generated manual":
+        var session = _browser_session_fixture()
+        val snapshot = session.ui_access_snapshot()
+        val capture = _snapshot_capture(snapshot)
+
+        expect(capture).to_contain("BrowserSession UI Access Snapshot")
+        expect(capture).to_contain("node: back kind=button text=Back")
+        expect(capture).to_contain("node: favorite kind=button text=Favorite")
+        expect(capture).to_contain("node: address kind=textfield text=https://example.com/two")
+        expect(_write_ui_capture(capture)).to_equal(0)
+        expect(_capture_file_state(capture)).to_equal("matched")
+
     it "routes textual UI access actions into BrowserSession primitive controls":
-        var session = BrowserSession.new()
-        session.register_resource("https://example.com/home", "<html><head><title>Home</title></head><body>Home</body></html>")
-        session.open_html("https://example.com/one", "<html><head><title>One</title></head><body>One</body></html>")
-        session.open_html("https://example.com/two", "<html><head><title>Two</title></head><body>Two</body></html>")
-        session.set_home_url("https://example.com/home")
+        var session = _browser_session_fixture()
 
         val back = session.ui_access_act(WinTextActionRequest(target_id: "browser:session#back", action: "click", text_value: "", x: 0, y: 0))
         expect(back.ok).to_equal(true)

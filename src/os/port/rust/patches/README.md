@@ -18,8 +18,8 @@ Two independent pieces land together:
 ```bash
 cd ~/rust                                   # ormastes/rust checkout
 git checkout simpleos                       # fork branch
-/path/to/simple/src/os/port/rust/patches/apply.sh .
-# ...edit the two mod.rs files per apply.sh's manual-follow-up notice...
+/path/to/simple/src/os/port/rust/patches/apply.shs .
+# ...edit the two mod.rs files per apply.shs's manual-follow-up notice...
 ./x.py build library/std --target x86_64-unknown-simpleos
 ```
 
@@ -61,7 +61,7 @@ Expected: prints `hello, simpleos\n` via fd 1, returns 0.
 
 ```
 patches/
-  apply.sh                      # copy helper (idempotent)
+  apply.shs                      # copy helper (idempotent)
   README.md                     # this file
   compiler/rustc_target/src/spec/
     targets/x86_64_unknown_simpleos.rs

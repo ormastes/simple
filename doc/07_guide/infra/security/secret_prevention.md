@@ -25,11 +25,11 @@ covers how the Simple toolchain prevents accidental secret commits.
 
 ### Automatic (recommended)
 
-The `scripts/setup/setup.sh` script installs the secret scanner as a git pre-commit
+The `scripts/setup/setup.shs` script installs the secret scanner as a git pre-commit
 hook:
 
 ```sh
-scripts/setup/setup.sh
+scripts/setup/setup.shs
 ```
 
 ### Manual

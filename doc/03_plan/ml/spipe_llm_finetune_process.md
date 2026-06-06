@@ -10,8 +10,8 @@ and route verification failures into retry/retune actions.
 
 ## Test Surfaces
 
-- `examples/05_stdlib/spipe/scripts/build.sh`
-- `.spipe/spipe/scripts/build.sh`
+- `examples/05_stdlib/spipe/scripts/build.shs`
+- `.spipe/spipe/scripts/build.shs`
 - `scripts/setup/install-spipe-dev-command.shs --check`
 - `node examples/05_stdlib/spipe/cli/spipe.js doctor .`
 - `node examples/05_stdlib/spipe/cli/spipe.js fine-tune-status <attempt_id>`

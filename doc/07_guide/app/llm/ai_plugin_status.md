@@ -12,7 +12,7 @@ Status of all MCP servers, LSP plugins, agent plugins, and their cross-platform 
 | t32-lsp-mcp | `bin/t32_lsp_mcp_server` -> `bin/release/<platform>/t32_lsp_mcp_server` | `t32-lsp-mcp` | Working | Platform wrapper + native probe + daemon support |
 | obsidian-lsp-mcp | `bin/obsidian_lsp_mcp_server` | `obsidian-lsp-mcp` | Working | Direct exec |
 
-**Shared startup library:** `config/mcp/mcp_startup_lib.sh`
+**Shared startup library:** `config/mcp/mcp_startup_lib.shs`
 - Compile cache (background, >1KB size check)
 - Debug logging (env: `<SERVER>_DEBUG_LOG=1`)
 - Native binary health probe with caching
@@ -58,7 +58,7 @@ Step 7: verify-agent (Claude+MCP) → verification report
 | MCP servers | Shell wrappers | Shell wrappers | Shell via bash | .cmd wrappers needed |
 | LSP plugins | Via MCP | Via MCP | Via MCP | Via MCP |
 | Agent plugins | CLI tools | CLI tools | CLI tools | CLI tools |
-| Setup | `scripts/setup/setup.sh` | `scripts/setup/setup.sh` | `scripts/setup/setup.sh` (Git Bash) | `scripts\setup.cmd` |
+| Setup | `scripts/setup/setup.shs` | `scripts/setup/setup.shs` | `scripts/setup/setup.shs` (Git Bash) | `scripts\setup.cmd` |
 
 ## Configuration Files
 

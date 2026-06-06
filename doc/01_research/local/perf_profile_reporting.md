@@ -6,7 +6,7 @@
 ## Existing Scripts
 
 - `scripts/check/check-cross-language-perf.shs` already generated Markdown under `doc/09_report/cross_language_perf_<date>.md`, but the report did not have a reusable report contract test.
-- `tools/gui_perf_bench/run_all_benchmarks.sh` generated `build/gui_perf_bench/comparison_report.txt`, so its evidence was easy to miss and was outside the documented report tree.
+- `tools/gui_perf_bench/run_all_benchmarks.shs` generated `build/gui_perf_bench/comparison_report.txt`, so its evidence was easy to miss and was outside the documented report tree.
 - `scripts/check/check-startup-size-performance-audit.shs` is the canonical startup profile and already measures TUI startup rows:
   - `Simple standalone TUI`
   - `Simple full TUI app`

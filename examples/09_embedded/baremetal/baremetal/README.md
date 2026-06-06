@@ -5,7 +5,7 @@ Minimal "hello world" examples for all 6 architectures.
 ## Build All Examples
 
 ```bash
-./build.sh
+./build.shs
 ```
 
 ## Architecture Support
@@ -26,7 +26,7 @@ Minimal "hello world" examples for all 6 architectures.
 sudo apt install gcc-multilib gcc-arm-none-eabi gcc-aarch64-linux-gnu gcc-riscv64-unknown-elf
 
 # Then build
-./build.sh
+./build.shs
 ```
 
 ## Run Tests

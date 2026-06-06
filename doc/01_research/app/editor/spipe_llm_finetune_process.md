@@ -29,7 +29,7 @@ The separated SPipe project exposes:
 - MCP server: `examples/05_stdlib/spipe/mcp/server.js`
 - Package manifest: `examples/05_stdlib/spipe/package.json`
 - Plugin manifest: `examples/05_stdlib/spipe/plugin/.codex-plugin/plugin.json`
-- Build guard: `examples/05_stdlib/spipe/scripts/build.sh`
+- Build guard: `examples/05_stdlib/spipe/scripts/build.shs`
 
 The CLI supports host link inspection, doctor checks, process doc linking,
 fine-tune attempt initialization, data download recording, data cache/check
@@ -58,8 +58,8 @@ This is correct because final requirements must not be selected by an agent.
 Current guards cover:
 
 - `spipe doctor .` host link and common-surface checks.
-- `sh examples/05_stdlib/spipe/scripts/build.sh` separated project smoke.
-- `sh .spipe/spipe/scripts/build.sh` compatibility mount smoke.
+- `sh examples/05_stdlib/spipe/scripts/build.shs` separated project smoke.
+- `sh .spipe/spipe/scripts/build.shs` compatibility mount smoke.
 - `sh scripts/setup/install-spipe-dev-command.shs --check` SPipe command routing.
 - `find doc/06_spec -name '*_spec.spl' | wc -l` layout invariant.
 - `diff -qr -x .git examples/05_stdlib/spipe .spipe/spipe` checkout drift invariant.

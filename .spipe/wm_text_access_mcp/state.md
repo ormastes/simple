@@ -86,7 +86,7 @@ dev-done
 - fix: `bin/simple_mcp_server` native `tools/list` was stale and the rebuilt
   native binary segfaulted, so the wrapper now falls back to the source MCP
   entrypoint for stale `tools/list` output and `play_wm_text_*` calls.
-  `scripts/setup/setup.sh` generates the same fallback wrapper.
+  `scripts/setup/setup.shs` generates the same fallback wrapper.
 - verify: `scripts/check/check-mcp-native-smoke.shs` now asserts
   `mcp_wm_text_tools_present=true`; wrapper probes show 151 tools and
   `play_wm_text_status`, `play_wm_text_snapshot`, `play_wm_text_find`, and

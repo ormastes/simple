@@ -4,7 +4,7 @@
 **Category:** Infrastructure / MCP / Reliability
 **Priority:** High
 **Proposed:** 2026-04-16
-**Status:** Partially Implemented (sentinel cache live in `mcp_startup_lib.sh`)
+**Status:** Partially Implemented (sentinel cache live in `mcp_startup_lib.shs`)
 
 ## Problem
 
@@ -37,7 +37,7 @@ The 2026-04-16 emergency fix added an opt-in cache mechanism (`SIMPLE_MCP_DISABL
 
 ### 1. Standardize the wrapper contract
 
-Every MCP wrapper sources `config/mcp/mcp_startup_lib.sh` and calls one entry point:
+Every MCP wrapper sources `config/mcp/mcp_startup_lib.shs` and calls one entry point:
 ```sh
 mcp_run "$ENTRY_SPL" "$NATIVE_BIN" "$LIB_PATH" "$@"
 ```
@@ -118,7 +118,7 @@ demotions: [
 ## Implementation Notes
 
 - **Already implemented (2026-04-16):**
-  - `.smf.ok` sentinel in `config/mcp/mcp_startup_lib.sh`
+  - `.smf.ok` sentinel in `config/mcp/mcp_startup_lib.shs`
   - `SIMPLE_MCP_DISABLE_CACHE` env opt-out
   - Compile-time warning detection blocks promotion
   - 3-second SMF probe before promotion

@@ -51,7 +51,7 @@
 
 **Gaps to close:**
 1. Verify mold is truly default (lld may still win in some paths)
-2. Add `scripts/setup/install-mold.shs` or extend `scripts/setup/setup.sh`
+2. Add `scripts/setup/install-mold.shs` or extend `scripts/setup/setup.shs`
 3. Add mold to SimpleOS filesystem image build
 4. Implement mimalloc algorithm in Simple
 5. Wire MimallocAllocator as default
@@ -60,7 +60,7 @@
 ### 2-research
 **AC-1:** `find_linker()` in `mold.spl` already returns mold first. `find_mold_path()` checks `cwd()/bin/mold/mold` before `which mold`. The in-process lld block in `linker_wrapper.spl` is gated on `is_simpleos_target()` — it is a cross-compile necessity (no fork/exec on SimpleOS guest), not a host override. No code change needed.
 
-**AC-2:** `scripts/setup/setup.sh` is the main setup script (bash). `.shs` files in this repo are plain `#!/usr/bin/env bash` scripts. `scripts/install_compiler_rt_simpleos.shs` confirmed the format. Mold 2.35.1 tarball URL: `https://github.com/rui314/mold/releases/download/v2.35.1/mold-2.35.1-{arch}-linux.tar.gz`. Both x86_64 and aarch64 pre-builts exist.
+**AC-2:** `scripts/setup/setup.shs` is the main setup script (bash). `.shs` files in this repo are plain `#!/usr/bin/env bash` scripts. `scripts/install_compiler_rt_simpleos.shs` confirmed the format. Mold 2.35.1 tarball URL: `https://github.com/rui314/mold/releases/download/v2.35.1/mold-2.35.1-{arch}-linux.tar.gz`. Both x86_64 and aarch64 pre-builts exist.
 
 **AC-3:** No rootfs binary-injection mechanism found. `scenario_x64_nvme_fat32` and `scenario_x64_desktop_disk` use pre-built FAT32 images. No `rootfs_add_binary` or equivalent exists. Deferred.
 

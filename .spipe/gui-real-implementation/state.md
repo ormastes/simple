@@ -33,7 +33,7 @@ dev-done
 
 Cross-framework 8K (7680x4320) GUI perf comparison added:
 - 7 backends: Pure Simple CUDA, Simple Web Software, Electron, GTK3/C, JS/Node, JS/Browser, Python/tkinter
-- Runner: `tools/gui_perf_bench/run_all_benchmarks.sh`
+- Runner: `tools/gui_perf_bench/run_all_benchmarks.shs`
 - Guide: `doc/07_guide/platform/gui_perf_benchmark_comparison.md`
 - Pixel parity gate enforced for all optimizations (exact match, no tolerance)
 

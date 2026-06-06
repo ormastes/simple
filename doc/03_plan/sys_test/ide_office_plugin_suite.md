@@ -21,6 +21,7 @@ Validate the restored IDE product surface and Office plugin wiring for:
 | REQ-004 | The real IDE CLI entrypoint prints complete TUI and GUI feature-check manuals. | `test/02_integration/app/ide/ide_feature_check_integration_spec.spl` |
 | REQ-005 | Normal IDE help and unknown-option behavior remain intact. | `test/02_integration/app/ide/ide_feature_check_integration_spec.spl` |
 | REQ-006 | Shared Office helpers used by slides, sheets, and planner paths remain covered. | `test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl` |
+| REQ-007 | The TUI feature-check report stays within a 120-column terminal and publishes text capture evidence. | `build/test-artifacts/03_system/app/ide/feature/ide_office_plugin_suite/feature_check_tui.txt` |
 
 ## Execution
 
@@ -35,9 +36,13 @@ find doc/06_spec -name '*_spec.spl' | wc -l
 
 ## Manual Outputs
 
-- `doc/06_spec/system/app/ide/ide_office_plugin_suite_spec.md`
-- `doc/06_spec/integration/app/ide/ide_feature_check_integration_spec.md`
+- `doc/06_spec/03_system/app/ide/feature/ide_office_plugin_suite_spec.md`
+- `doc/06_spec/02_integration/app/ide/ide_feature_check_integration_spec.md`
 
 ## Coverage Notes
 
-The system spec covers module-level contracts and pure probes. The integration spec covers the CLI dispatch path through `bin/simple run src/app/ide/main.spl`. Together they guard against the previous failure mode where the original IDE and Office source tree existed only in examples while the production `src/app/ide` path was missing.
+The system spec covers module-level contracts, pure probes, bounded TUI layout,
+and TUI capture evidence. The integration spec covers the CLI dispatch path
+through `bin/simple run src/app/ide/main.spl`. Together they guard against the
+previous failure mode where the original IDE and Office source tree existed only
+in examples while the production `src/app/ide` path was missing.

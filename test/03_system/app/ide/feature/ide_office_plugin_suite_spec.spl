@@ -1,6 +1,8 @@
 """
 IDE office plugin suite system specification.
 Validates that IDE-facing Markdown, presentation, spreadsheet, dashboard, and database surfaces reuse existing app modules.
+
+**TUI Captures:** build/test-artifacts/03_system/app/ide/feature/ide_office_plugin_suite/feature_check_tui.txt
 """
 # @evidence-display: embed_tui
 
@@ -19,6 +21,31 @@ use app.ide.gui_sanity.{ide_gui_sanity, ide_gui_sanity_summary}
 use app.ide.tui_sanity.{ide_tui_sanity, ide_tui_sanity_summary}
 use app.office.slides.slide.{SlideElement, SlideElementKind, SlideLayout, add_slide_element, slide_layout_display_name, slide_layout_short_name, slide_with_elements}
 use common.office.number.{office_parse_non_negative_i32, office_parse_signed_decimal_f64, office_parse_unsigned_decimal_f64, office_pow10_f64, office_pow10_i64}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+val TUI_CAPTURE_PATH: text = "build/test-artifacts/03_system/app/ide/feature/ide_office_plugin_suite/feature_check_tui.txt"
+
+fn _max_line_width(lines: [text]) -> i64:
+    var max_width = 0
+    for line in lines:
+        if line.len() > max_width:
+            max_width = line.len()
+    max_width
+
+fn _write_tui_capture(content: text) -> i64:
+    val script = "mkdir -p 'build/test-artifacts/03_system/app/ide/feature/ide_office_plugin_suite' && cat > '" + TUI_CAPTURE_PATH + "' <<'SIMPLE_IDE_TUI_CAPTURE_EOF'\n" +
+        content + "\nSIMPLE_IDE_TUI_CAPTURE_EOF\n"
+    val (_out, _err, code) = rt_process_run("/bin/sh", ["-c", script])
+    code
+
+fn _capture_file_state(expected: text) -> text:
+    val (out, _err, code) = rt_process_run("/bin/sh", ["-c", "test -f '" + TUI_CAPTURE_PATH + "' && cat '" + TUI_CAPTURE_PATH + "'"])
+    if code != 0:
+        return "missing"
+    if out == expected + "\n":
+        return "matched"
+    "mismatched"
 
 describe "IDE office plugin suite capabilities":
     """
@@ -66,6 +93,18 @@ describe "IDE office plugin suite capabilities":
         expect(lines[10]).to_start_with("agent-dashboard:")
         expect(lines[12]).to_start_with("db-admin:")
         expect(lines[16]).to_start_with("  plugin-manifest:")
+
+    it "keeps the TUI feature-check layout within terminal width and captures it":
+        val lines = ide_feature_check_report("tui")
+        val capture = lines.join("\n")
+        expect(_max_line_width(lines)).to_be_less_than(121)
+        expect(capture).to_contain("markdown: Markdown Preview")
+        expect(capture).to_contain("slides: Presentation Slides")
+        expect(capture).to_contain("sheets: Spreadsheet")
+        expect(capture).to_contain("db-admin: Database Admin")
+        expect(capture).to_contain("  tui: tui-panels:")
+        expect(_write_tui_capture(capture)).to_equal(0)
+        expect(_capture_file_state(capture)).to_equal("matched")
 
     it "keeps GUI and TUI feature-check probes in parity except launch mode":
         val tui_lines = ide_feature_check_report("tui")
@@ -145,7 +184,7 @@ describe "IDE office plugin suite capabilities":
         expect(surface.supported_targets.join(",")).to_contain("simple-db")
         expect(surface.simple_db_contracts.join(",")).to_contain("PageBuf")
         expect(surface.default_state_mode).to_equal("normal")
-        expect(summary).to_contain("portal-db")
+        expect(summary).to_contain("targets=4")
         expect(summary).to_contain("page-size=4096")
 
     it "checks agent dashboard integration through existing editor MCP tools":
@@ -155,7 +194,8 @@ describe "IDE office plugin suite capabilities":
         expect(surface.tool_count).to_be_greater_than(10)
         expect(surface.has_lsp_tools)
         expect(surface.has_wiki_tools)
-        expect(summary).to_contain("combined-live")
+        expect(surface.modes.join(",")).to_contain("combined-live")
+        expect(summary).to_contain("modes=3")
 
     it "checks markdown rendering through the shared editor renderer and preview pane":
         val probe = ide_markdown_render_probe()

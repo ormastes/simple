@@ -142,7 +142,7 @@ Generated/manual SPipe docs mirror executable test paths:
   `test/03_system/feature/language/fuzz` with summary evidence preserved. The moved fuzz
   directory passes focused verification.
 - Moved top-level JS conformance specs to `test/03_system/feature/js` and moved the shell
-  compatibility harness to `test/fixtures/js/compat_test.sh`. The moved JS
+  compatibility harness to `test/fixtures/js/compat_test.shs`. The moved JS
   specs are discovered at the new path but still fail existing conformance
   coverage.
 - Moved top-level NVFS host-side storage specs to
@@ -264,7 +264,7 @@ Generated/manual SPipe docs mirror executable test paths:
 - Fuzz feature move:
   `bin/simple test test/03_system/feature/language/fuzz --mode=interpreter --no-cache`
   passed 33/33 across three moved files.
-- JS feature move: `bash -n test/fixtures/js/compat_test.sh` passed.
+- JS feature move: `bash -n test/fixtures/js/compat_test.shs` passed.
   `bin/simple test test/03_system/feature/js` discovered all four moved JS specs but
   failed existing JS conformance coverage with 0 passed and 114 failed.
 - NVFS storage integration move:
