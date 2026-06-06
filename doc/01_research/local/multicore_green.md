@@ -10,6 +10,7 @@
 ## SimpleOS Touchpoints
 
 - Scheduler foundations already exist under `src/os/kernel/scheduler/`, including per-CPU run queues, CPU selection, wake/preempt logic, affinity hooks, and context-switch support.
+- The scheduler-facing green-worker contract now exists in `src/os/kernel/scheduler/green_worker.spl`, with unit coverage for affinity, spawn CPU choice, wake-affine placement, stealing threshold, and rebalance decisions.
 - SMP/AP/IPI support exists under `src/os/kernel/smp/`.
 - A full scheduler-aware multicore green runtime still needs green task records, park/unpark integration, blocking syscall boundaries, and SimpleOS wakeup/IPI hooks.
 
@@ -18,3 +19,4 @@
 - `scripts/check/check-cross-language-perf.shs` now emits separate rows for OS thread, cooperative green, and multicore-green candidate workloads.
 - `test/01_unit/lib/nogc_async_mut/multicore_green_native.spl` verifies the native entry-closure path joins multiple multicore-green tasks.
 - `test/01_unit/lib/nogc_async_mut/multicore_green_spec.spl` verifies the interpreter semantics, but the current `simple test` command can hang in `spipe-docgen` after reporting the passing example.
+- `test/01_unit/os/kernel/scheduler/green_worker_spec.spl` verifies the SimpleOS placement and rebalance contract for future green-task carrier workers.
