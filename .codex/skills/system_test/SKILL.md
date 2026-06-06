@@ -116,6 +116,10 @@ describe "<Feature Name>":
   - GUI specs capture screenshots/goldens/diffs under `doc/06_spec/image/<spec-relative-path>/` when HTML is unavailable or insufficient.
   - Evidence paths appear in `**Screenshots:**` or `**TUI Captures:**` metadata so generated `doc/06_spec/...` docs can render them according to evidence display policy.
   - Raster evidence (`.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.ppm`) is tracked by Git LFS.
+- Draw IR layout/style parity specs should capture structured Protocol-v2
+  evidence when available: use `draw-ir/diff?baseline=...&capability=draw_ir`
+  or `common.ui.draw_ir_diff` for stable-id geometry, border, color, style, and
+  text-bound deltas; screenshots are supporting evidence, not the only oracle.
 - Environmental tests should capture command/API/protocol/binary/log evidence
   when that is more meaningful than a screenshot.
 - Short grammar features must have runtime-specific coverage:

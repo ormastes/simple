@@ -61,6 +61,10 @@ surface for existing specs. Do not create feature-specific replacements for
 `describe`, `it`, `expect`, or the built-in matchers. UI, SGTTI, Draw IR, MCP,
 and protocol checks should add helper functions that run inside normal SPipe
 `it` blocks.
+For UI layout, border, color, style, or text-bound parity, prefer structured
+Protocol-v2 Draw IR evidence with
+`/api/test/draw-ir/diff?baseline=...&capability=draw_ir` or
+`common.ui.draw_ir_diff` before relying on pixel-only assertions.
 
 ## Startup-Sensitive Specs
 

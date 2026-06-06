@@ -3,7 +3,7 @@
 **Date:** 2026-06-06
 **Feature:** `draw_io_sdn_draw_ir`
 **Research:** `doc/01_research/ui/draw_ir/draw_io_sdn_draw_ir.md`
-**Status:** Implemented through Phase 6; Phase 7 visual baseline diff deferred
+**Status:** Implemented — Phases 1-7 complete
 **Owners:** `src/lib/common/ui`, `src/app/ui.test_api`,
 `src/lib/nogc_sync_mut/ui_test`
 
@@ -139,15 +139,18 @@ v1 shared UI contract or forking a second model.
   `role` assertions. Memory-tier and `std.ui_test.sgtti` shims re-export the
   helper.
 
-### Phase 7 — Visual diff (deferred later)
+### Phase 7 — Visual diff — done
 
 - Border / color / text-bounds diff over two compositions by stable ID, reusing
   `doc/01_research/ui/tui/harden_tui_gui_layout_comparison.md` patterns.
 - **Exit:** `draw-ir/diff?baseline=` reports per-node geometry/style deltas.
-- **Status:** deferred by plan. The Phase-5 endpoint includes a current-state
-  `/api/test/draw-ir/diff?from_id=...&to_id=...` geometry/style comparison, but
-  persistent baseline capture and visual text-bounds diff remain out of this
-  implementation slice.
+- **Evidence:** `src/lib/common/ui/draw_ir_diff.spl` compares baseline and
+  current `DrawIrComposition` values by stable `component_id`, reporting
+  geometry, color, text, style, border, hit-rect, and text-bounds deltas.
+  `/api/test/draw-ir/diff?baseline=...&capability=draw_ir` exposes the report
+  while preserving the existing `from_id`/`to_id` current-state diff. Covered by
+  `test/01_unit/lib/common/ui/draw_ir_diff_spec.spl` and
+  `test/01_unit/app/ui.test_api/handler_test.spl`.
 
 ## Sequencing & risk
 
@@ -167,7 +170,7 @@ v1 shared UI contract or forking a second model.
 1. `draw_ir.spl` carries v2 model with edges + box geometry + computed style;
    v1 round-trip green.
 2. SDN and Draw.io round-trips green on WM + a web fixture.
-3. `/api/test/draw-ir*` + `expect_draw` work as a documented, capability-gated
-   Protocol v2 extension; v1 contract and tests unchanged.
+3. `/api/test/draw-ir*` + `expect_draw` + baseline diff work as a documented,
+   capability-gated Protocol v2 extension; v1 contract and tests unchanged.
 4. Release builds with the flag off show no new render-path cost.
 5. Research, plan, and `shared_ui_contract` v2 section are in sync and pushed.

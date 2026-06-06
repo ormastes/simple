@@ -66,6 +66,11 @@ For UI-test helper work, keep the test-library surface consistent: new specs
 use canonical `use std.spec`, existing `use std.spipe` remains an alias, and
 UI/SGTTI/Draw IR helpers must layer inside SPipe scenarios instead of replacing
 `describe`, `it`, `expect`, or the built-in matchers.
+When a UI change claims layout, border, color, style, or text-bound parity,
+prefer the Protocol-v2 Draw IR baseline diff
+`/api/test/draw-ir/diff?baseline=...&capability=draw_ir` or the shared
+`common.ui.draw_ir_diff` helper as structured evidence before falling back to
+pixel-only assertions.
 
 For Simple Web/Electron renderer parity, keep the canonical wrapper documented
 as `scripts/check/check-production-gui-web-renderer-parity-evidence.shs`.

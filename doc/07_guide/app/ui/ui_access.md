@@ -150,10 +150,11 @@ must assert semantic node structure before raster/pixel readback.
 Protocol v2 Draw IR inspection is optional and capability-gated. Use
 `/api/test/draw-ir`, `/api/test/draw-ir?id=...`,
 `/api/test/draw-ir/diff`, and `/api/test/draw-ir/layout?id=...` for Draw IR
-surfaces; keep Protocol v1 element/state/action endpoints stable. The typed
-model is `DrawIrComposition`; SDN interchange is provided by
-`src/lib/common/ui/draw_ir_sdn.spl`, and Draw.io mxGraph interchange by
-`src/lib/common/ui/draw_ir_drawio.spl`.
+surfaces; use `/api/test/draw-ir/diff?baseline=...` for baseline-to-current
+geometry/style/color/text-bound comparisons. Keep Protocol v1 element/state/
+action endpoints stable. The typed model is `DrawIrComposition`; SDN
+interchange is provided by `src/lib/common/ui/draw_ir_sdn.spl`, and Draw.io
+mxGraph interchange by `src/lib/common/ui/draw_ir_drawio.spl`.
 
 ---
 

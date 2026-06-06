@@ -24,6 +24,8 @@ use common.ui.draw_ir.{
     draw_ir_style_prop
 }
 use common.ui.draw_ir_sdn.{draw_ir_to_sdn}
+use common.ui.draw_ir_sdn.{sdn_to_draw_ir}
+use common.ui.draw_ir_diff.{draw_ir_diff_compositions, draw_ir_diff_report_to_json}
 use os.services.llm.ui_access_resolver.{ui_access_resolve_adapter, ui_access_resolve_visual_probe}
 use app.ui.test_api.json.{element_to_json, elements_to_json, extract_json_field, escape_json, state_to_json}
 
@@ -77,7 +79,8 @@ fn handle_test_request(path: text, method: text, body: text, state: UIState, inj
         elif route == "/api/test/draw-ir/diff":
             val from_id = _extract_query_param(path, "from_id")
             val to_id = _extract_query_param(path, "to_id")
-            return _handle_draw_ir_diff(path, from_id, to_id, state)
+            val baseline = _extract_query_param(path, "baseline")
+            return _handle_draw_ir_diff(path, from_id, to_id, baseline, state)
         elif route == "/api/test/ui/snapshot":
             return _handle_ui_snapshot(state, session)
         elif route == "/api/test/ui/ensure":
@@ -566,13 +569,19 @@ fn _handle_draw_ir_layout(path: text, id: text, state: UIState) -> (i32, text, t
     val json = "{\"protocol_version\":{DRAW_IR_PROTOCOL_VERSION},\"capability\":\"{DRAW_IR_CAPABILITY}\",\"id\":\"{escape_json(command.component_id)}\",\"kind\":\"{escape_json(command.kind)}\",\"geometry\":{_draw_ir_geometry_json(command)},\"border_rect\":{_draw_ir_rect_json(command.border_rect)},\"content_rect\":{_draw_ir_rect_json(command.content_rect)},\"hit_rect\":{_draw_ir_rect_json(command.hit_rect)},\"clip_rect\":{_draw_ir_rect_json(command.clip_rect)},\"computed_style\":{_draw_ir_style_json(command)}}"
     return (200, "application/vnd.simple.draw-ir+json", json)
 
-fn _handle_draw_ir_diff(path: text, from_id: text, to_id: text, state: UIState) -> (i32, text, text):
-    """Handle GET /api/test/draw-ir/diff — compare two Draw IR nodes."""
+fn _handle_draw_ir_diff(path: text, from_id: text, to_id: text, baseline: text, state: UIState) -> (i32, text, text):
+    """Handle GET /api/test/draw-ir/diff — compare Draw IR nodes or baselines."""
     if not _draw_ir_capability_enabled(path):
         return _draw_ir_capability_denied()
+    val composition = _build_state_draw_ir_composition(state, "")
+    if baseline != "":
+        val baseline_composition = _draw_ir_baseline_composition(baseline, composition)
+        val report = draw_ir_diff_compositions(baseline_composition, composition)
+        val report_json = draw_ir_diff_report_to_json(report)
+        val json = "{\"protocol_version\":{DRAW_IR_PROTOCOL_VERSION},\"capability\":\"{DRAW_IR_CAPABILITY}\",\"mode\":\"baseline\",\"diff\":{report_json}}"
+        return (200, "application/vnd.simple.draw-ir+json", json)
     if from_id == "" or to_id == "":
         return (400, "application/vnd.simple.draw-ir+json", "{\"protocol_version\":{DRAW_IR_PROTOCOL_VERSION},\"capability\":\"{DRAW_IR_CAPABILITY}\",\"error\":\"missing_field\",\"message\":\"Missing required field: from_id or to_id\"}")
-    val composition = _build_state_draw_ir_composition(state, "")
     val from_cmd = _draw_ir_find_command(composition, from_id)
     val to_cmd = _draw_ir_find_command(composition, to_id)
     if from_cmd == nil:
@@ -582,6 +591,13 @@ fn _handle_draw_ir_diff(path: text, from_id: text, to_id: text, state: UIState) 
     val style_changed = if _draw_ir_style_json(from_cmd) == _draw_ir_style_json(to_cmd): "false" else: "true"
     val json = "{\"protocol_version\":{DRAW_IR_PROTOCOL_VERSION},\"capability\":\"{DRAW_IR_CAPABILITY}\",\"from_id\":\"{escape_json(from_id)}\",\"to_id\":\"{escape_json(to_id)}\",\"dx\":{to_cmd.x - from_cmd.x},\"dy\":{to_cmd.y - from_cmd.y},\"dwidth\":{to_cmd.width - from_cmd.width},\"dheight\":{to_cmd.height - from_cmd.height},\"style_changed\":{style_changed}}"
     return (200, "application/vnd.simple.draw-ir+json", json)
+
+fn _draw_ir_baseline_composition(baseline: text, current: DrawIrComposition) -> DrawIrComposition:
+    if baseline == "current":
+        return current
+    if baseline == "empty":
+        return draw_ir_composition("empty", current.scene_key, current.backend_target, [])
+    sdn_to_draw_ir(_query_percent_decode(baseline))
 
 fn _draw_ir_capability_enabled(path: text) -> bool:
     val capability = _extract_query_param(path, "capability")
@@ -706,6 +722,44 @@ fn _extract_query_param(path: text, param: text) -> text:
         end_pos = end_pos + 1
 
     return query.slice(start, end_pos)
+
+fn _query_percent_decode(value: text) -> text:
+    var decoded = ""
+    var i = 0
+    while i < value.len():
+        if value[i] == "%" and i + 2 < value.len():
+            val code = value.slice(i + 1, i + 3).upper()
+            if code == "20":
+                decoded = "{decoded} "
+                i = i + 3
+            elif code == "09":
+                decoded = "{decoded}\t"
+                i = i + 3
+            elif code == "0A":
+                decoded = "{decoded}\n"
+                i = i + 3
+            elif code == "0D":
+                decoded = "{decoded}\r"
+                i = i + 3
+            elif code == "3D":
+                decoded = "{decoded}="
+                i = i + 3
+            elif code == "25":
+                decoded = "{decoded}%"
+                i = i + 3
+            elif code == "26":
+                decoded = "{decoded}&"
+                i = i + 3
+            else:
+                decoded = "{decoded}{value[i]}"
+                i = i + 1
+        elif value[i] == "+":
+            decoded = "{decoded} "
+            i = i + 1
+        else:
+            decoded = "{decoded}{value[i]}"
+            i = i + 1
+    decoded
 
 fn _build_access_snapshot(state: UIState, session: UISession?) -> UiAccessSnapshot:
     if session != nil:

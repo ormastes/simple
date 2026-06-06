@@ -108,7 +108,7 @@ The extension endpoints are:
 |----------|----------|-------------|
 | `/api/test/draw-ir` | Draw IR JSON or SDN text | Current composition for the active surface |
 | `/api/test/draw-ir?id=X` | Draw IR JSON or SDN text | Composition filtered to a stable node/surface id |
-| `/api/test/draw-ir/diff` | Geometry/style diff JSON | Semantic Draw IR delta by stable id |
+| `/api/test/draw-ir/diff` | Geometry/style diff JSON | Semantic Draw IR delta by stable id; `baseline=` compares a captured SDN baseline to the current composition |
 | `/api/test/draw-ir/layout?id=X` | Layout JSON or SDN text | Box geometry for a stable node/surface id |
 
 Client helpers such as `expect_draw` are SPipe-layer conveniences over these
