@@ -20,6 +20,7 @@
 ## Local Evidence
 
 - `scripts/check/check-cross-language-perf.shs` now emits separate rows for OS thread, cooperative green, and multicore-green candidate workloads.
+- `test/05_perf/profile_scripts/profile_report_contract_test.shs` now fails cross-language reports that omit the OS-thread, cooperative-green, multicore-green, C pthread, Go goroutine, large-fanout, RSS, or `used_runtime_pool()` evidence needed to compare the models honestly.
 - `test/01_unit/lib/nogc_async_mut/multicore_green_native.spl` verifies the native entry-closure path joins multiple multicore-green tasks.
 - `test/01_unit/lib/nogc_async_mut/multicore_green_spec.spl` verifies the interpreter semantics, but the current `simple test` command can hang in `spipe-docgen` after reporting the passing example.
 - `test/01_unit/os/kernel/scheduler/green_worker_spec.spl` verifies the SimpleOS placement and rebalance contract for future green-task carrier workers.

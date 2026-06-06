@@ -5,6 +5,7 @@
 - `test/01_unit/lib/nogc_async_mut/multicore_green_spec.spl` checks Pure Simple join/result semantics for multiple value tasks and asserts interpreter inline fallback through `ran_inline_fallback()` / `used_runtime_pool()`.
 - `test/01_unit/lib/nogc_async_mut/multicore_green_native.spl` is a native entry-closure smoke for the `rt_pool_*` path and fails if any handle does not report `used_runtime_pool()`.
 - `scripts/check/check-cross-language-perf.shs` produces profile evidence for Simple OS thread, Simple cooperative green, Simple multicore green, C pthreads, and Go goroutines. The generated multicore-green workloads fail if runtime-pool acceptance is not proven for every handle.
+- `test/05_perf/profile_scripts/profile_report_contract_test.shs` gates the cross-language Markdown report shape and now requires concrete OS-thread, cooperative-green, multicore-green, C pthread, Go goroutine, large-fanout, RSS, and `used_runtime_pool()` evidence text.
 - `test/01_unit/lib/nogc_async_mut/cooperative_green_spec.spl` checks the semantic cooperative-green facade over the existing single-carrier queue.
 - `test/01_unit/os/kernel/scheduler/green_worker_spec.spl` checks the SimpleOS scheduler-facing green-worker contract: CPU affinity, spawn CPU choice, wake-affine placement, stealing threshold, and rebalance decisions.
 - `test/01_unit/os/kernel/scheduler/green_task_spec.spl` checks the SimpleOS logical green-task lifecycle: spawn records, park, unpark, no-op unpark misuse, completion, and carrier CPU preservation.
@@ -19,7 +20,7 @@
 
 - Scheduler-integrated green-channel wake through carrier dispatch: prove a channel send re-enqueues the unparked logical green task on the selected carrier.
 - `test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl`: live QEMU SMP smoke proving guest-visible green carrier work runs across multiple SimpleOS CPUs/APs.
-- `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`: parse the cross-language profile report and gate current Simple rows against Go goroutines and C pthreads.
+- `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`: parse numeric cross-language profile results and gate current Simple rows against Go goroutines and C pthreads.
 
 ## Blocking Evidence To Track
 

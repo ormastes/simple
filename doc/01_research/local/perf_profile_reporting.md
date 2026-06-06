@@ -27,4 +27,4 @@
 
 ## Implementation Direction
 
-Add `test/05_perf/profile_scripts/profile_report_contract_test.shs` and have both profile scripts call it after generating reports. The test asserts Markdown location, report shape, methodology, reproducibility, limitations, script link, and TUI startup scope language.
+Add `test/05_perf/profile_scripts/profile_report_contract_test.shs` and have both profile scripts call it after generating reports. The test asserts Markdown location, report shape, methodology, reproducibility, limitations, script link, and TUI startup scope language. For cross-language reports, keep the contract strict enough to prove the concurrency rows remain comparable: OS-thread Simple, cooperative green, multicore green with `used_runtime_pool()` evidence, C pthreads, and Go goroutines must remain distinct.
