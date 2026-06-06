@@ -206,6 +206,16 @@ and `dbus-run-session`.
 | `SIMPLE_RENDER_FORMAT` | Override default format (`text`, `html`, `both`). CLI `--format` takes precedence. |
 | `SIMPLE_GUI_BACKEND` | Backend hint; feeds into the shared config model alongside `--backend`. |
 
+For pure-Simple Engine2D GUI rendering, `auto` follows the shared graphics order
+`metal`, `cuda`, `rocm`, `qualcomm`, `vulkan`, `opencl`, `opengl`, `intel`,
+`webgpu`, `software`, `cpu_simd`, `cpu`. Use an explicit backend only when the
+test or deployment target requires that exact path; strict GPU requests must
+report an unavailable backend instead of silently falling back to CPU.
+
+Startup text rendering uses the shared bitmap/vector-font path. Bitmap fallback
+buffers are allocated at their final dimensions and then filled, so new GUI
+startup code should not rebuild text surfaces with repeated pixel appends.
+
 Config precedence (highest wins):
 
 1. CLI flags
