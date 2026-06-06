@@ -164,12 +164,23 @@ upstream-blocked on seed LLVM. Android ≈ days, iOS ≈ weeks. → use source b
   sufficient — `main.spl` statically imports all 8 backends).
 
 **Widget showcase:** `examples/06_io/ui/widget_showcase_mobile.ui.sdn` renders
-**33 widget kinds** via `render_html_tree`. Catalog gaps (no HTML renderer; silent
-drop): command_bar, sidebar, glass_title_bar, workspace_tabs, command_palette,
-toast, sheet_modal, context_menu, inspector, utility_rail, status_chip,
-selection_pill, empty_state. Prop gaps (renderer reads, SDN parser doesn't copy):
-switch `on`, card `subtitle`, heading `level`, button `icon-id`, search_bar
-`show_cancel`, navigation_bar `large_title`.
+the full widget catalog via `render_html_tree`.
+
+**Step 5 DONE (2026-06-06): the 13 missing catalog renderers added.** Added HTML
+renderers in `src/app/ui.render/html_widgets.spl` (+ match arms) for the kinds the
+`render_html_tree` match had no arm for (previously silently dropped):
+`glass_title_bar`, `sidebar`, `command_bar`, `workspace_tabs`, `command_palette`,
+`toast`, `sheet_modal`, `context_menu`, `inspector`, `utility_rail`, `status_chip`,
+`selection_pill`, `empty_state`. Markup matches the existing glass CSS classes
+(`widget-*` + `ws-tab`/`pill-item`/`rail-icon` `.active`, `palette-item`,
+`context-item`, `inspector-title`, `sheet-handle`, `empty-subtitle`, etc.);
+interactive kinds emit `data-action` (`ws_tab_*`, `pill_*`, `rail_*`) so events
+flow over the existing channel. Verified: 39/39 `html_render_spec.spl` tests pass
+(13 new absolute-oracle cases) + the showcase (now exercising all 13) renders all
+13 classes + structural markers through the real pipeline (`bin/simple run … tauri
+…` → 700 KB HTML, grep-confirmed). Prop gaps (renderer reads, SDN parser doesn't
+copy) remain a separate item: switch `on`, card `subtitle`, heading `level`,
+button `icon-id`, search_bar `show_cancel`, navigation_bar `large_title`.
 
 ## Landed (2026-06-06): source-bundle wiring into the mobile shell
 
