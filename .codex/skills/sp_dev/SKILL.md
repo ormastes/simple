@@ -37,11 +37,14 @@ can find the canonical wrapper instead of repeating stale commands.
 For runtime concurrency work, keep the public API map current in
 `doc/07_guide/lib/misc/stdlib.md`, `doc/07_guide/compiler/check_perf.md`, and
 `.codex/skills/coding/SKILL.md`. In particular, distinguish `thread_spawn`
-(OS thread), `green_spawn` / `green_spawn_value` / `std.concurrent.green_thread`
-(implemented cooperative green-thread queue on the current OS thread), and
-`task_spawn` (pool-backed native task path when `rt_pool_*` links). Do not
-document green-thread APIs as Go-style M:N CPU parallelism unless the
-scheduler-aware green runtime has actually landed and been benchmarked.
+(OS thread), `cooperative_green_spawn` / `cooperative_green_spawn_value`
+(implemented cooperative green-thread queue on the current OS thread),
+`multicore_green_spawn` (Pure Simple bounded-worker facade over `rt_pool_*`),
+and `task_spawn` (pool-backed native task path when `rt_pool_*` links). Do not
+document cooperative green-thread APIs as Go-style M:N CPU parallelism. When a
+profile or test claims M:N behavior through `multicore_green_spawn`, require
+`MulticoreGreenHandle.used_runtime_pool()` evidence so inline fallback cannot
+masquerade as CPU-parallel work.
 
 For dynSMF or SMF-startup work, distinguish three separate lanes before
 editing: SimpleOS disk SMF placement, GUI SMF dynlib release evidence, and the

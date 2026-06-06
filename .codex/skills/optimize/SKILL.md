@@ -18,7 +18,9 @@ explicitly asks for runtime/compiler C/Rust changes.
 - For concurrency benchmarks, keep `thread_spawn`, `cooperative_green_spawn`,
   and `multicore_green_spawn` separate. Optimize the Pure Simple path first and
   use the cross-language profile rows as evidence instead of replacing Simple
-  code with Rust/C.
+  code with Rust/C. For `multicore_green_spawn`, require
+  `MulticoreGreenHandle.used_runtime_pool()` evidence before treating a row as
+  Go-like M:N CPU parallelism.
 - Remove unused logic/data only when it is proven unused by tests, references, or
   optimizer/lint evidence.
 - Do not change user-visible inputs, outputs, ordering, errors, or persistence

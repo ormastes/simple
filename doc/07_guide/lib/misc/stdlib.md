@@ -154,7 +154,7 @@ for `fiber` or scheduler runtime terms can miss the implemented stdlib module.
 |------|-----|----------------|-------|
 | Spawn a platform thread | `std.concurrent.thread.{thread_spawn}` | `src/lib/nogc_async_mut/concurrent/thread.spl` / `thread_sffi.spl` | Uses OS threads (`pthread_create` / `CreateThread`) |
 | Schedule lightweight cooperative work | `std.concurrent.cooperative_green.{cooperative_green_spawn, cooperative_green_spawn_value, cooperative_green_run_one, cooperative_green_run_all}` | `src/lib/nogc_async_mut/concurrent/cooperative_green.spl` over `green_thread.spl` | Runs queued work/results on the current OS thread; no preemption or CPU parallelism |
-| Schedule bounded CPU-parallel value work | `std.concurrent.multicore_green.{multicore_green_spawn}` | `src/lib/nogc_async_mut/concurrent/multicore_green.spl` | Pure Simple facade over `rt_pool_submit` / `rt_pool_join` / `rt_pool_is_done`; current M:N candidate, not the final scheduler-aware green runtime |
+| Schedule bounded CPU-parallel value work | `std.concurrent.multicore_green.{multicore_green_spawn}` / `MulticoreGreenHandle.used_runtime_pool()` | `src/lib/nogc_async_mut/concurrent/multicore_green.spl` | Pure Simple facade over `rt_pool_submit` / `rt_pool_join` / `rt_pool_is_done`; profile rows require runtime-pool acceptance and treat inline fallback as non-M:N |
 | Reuse a worker pool | `task_spawn` / `TaskHandle` | `src/lib/nogc_async_mut/thread_pool.spl` | Native path uses `rt_pool_submit`, `rt_pool_join`, and `rt_pool_is_done` when linked |
 | Send values between concurrent work | `std.concurrent.channel.{channel_new, channel_from_id}` | `src/lib/nogc_sync_mut/concurrent/channel.spl` | Runtime MPMC channel surface |
 
@@ -197,7 +197,10 @@ fn main():
 `multicore_green_spawn` is the current Pure Simple API used by the
 cross-language profile for bounded CPU-parallel value tasks. It keeps the public
 surface distinct from `cooperative_green_spawn` so cooperative scheduling tests do not
-pretend to be Go-style M:N scheduling.
+pretend to be Go-style M:N scheduling. Use `handle.used_runtime_pool()` when a
+test or benchmark must prove that work was accepted by the bounded runtime pool;
+use `handle.ran_inline_fallback()` only for interpreter or platform fallback
+coverage.
 
 ---
 
