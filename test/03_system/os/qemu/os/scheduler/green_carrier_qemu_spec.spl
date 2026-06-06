@@ -1,0 +1,150 @@
+# @tag:system
+#
+# Opt-in live QEMU validation for green carrier scheduling on a two-CPU
+# SimpleOS x86_64 guest.
+
+"""
+# SimpleOS Green Carrier QEMU Live Specification
+
+**Feature IDs:** #green-simpleos-qemu-carrier
+**Category:** SimpleOS / QEMU / Concurrency
+**Status:** In Progress
+
+## Overview
+
+This opt-in live spec validates the SimpleOS green-carrier AP lane in QEMU.
+When `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1` is set, the spec builds the
+x86_64 guest probe, boots a two-CPU guest, and checks serial output for the
+real AP 64-bit entry marker plus the green-carrier PASS marker.
+
+The PASS marker means the freestanding fixed-slot carrier path selected CPU1,
+sent the remote green-carrier IPI intent, dispatched task `701`, and recorded
+one CPU1 green context-switch count. This proves AP startup plus
+scheduler-visible CPU1 green dispatch. Full hardware context-switch handoff
+across APs remains tracked separately.
+
+## Requirements
+
+**Requirements:** N/A
+
+## Plan
+
+**Plan:** doc/03_plan/sys_test/multicore_green.md
+
+## Design
+
+**Design:** N/A
+
+## Research
+
+**Research:** doc/01_research/local/multicore_green.md
+
+## Syntax
+
+Run the fast cached/default lane:
+
+```sh
+bin/release/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter
+```
+
+Run the live QEMU lane:
+
+```sh
+SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 bin/release/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean
+```
+
+## Examples
+
+The live serial output must include:
+
+```text
+[smp] AP reached 64-bit entry
+[green-carrier-qemu] PASS=true
+```
+"""
+
+use std.spec
+
+extern fn rt_env_get(name: text) -> text?
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_exists(path: text) -> bool
+
+val DEFAULT_SIMPLE_BIN: text = "bin/release/simple"
+val BOOTSTRAP_SIMPLE_BIN: text = "src/compiler_rust/target/bootstrap/simple"
+val LINKER_SCRIPT: text = "examples/09_embedded/simple_os/arch/x86_64/linker.ld"
+val BUILD_SOURCES: text = "--source src/os --source src/lib --source examples/09_embedded/simple_os"
+val ENTRY: text = "examples/09_embedded/simple_os/arch/x86_64/green_carrier_probe_entry.spl"
+val QEMU_BASE: text =
+    "qemu-system-x86_64 -machine q35 -cpu qemu64 -smp 2 -serial stdio -display none -no-reboot"
+val DEBUG_EXIT: text = "-device isa-debug-exit,iobase=0xf4,iosize=0x04"
+val AP_ONLINE_MARKER: text = "[smp] AP reached 64-bit entry"
+val GREEN_PASS_MARKER: text = "[green-carrier-qemu] PASS=true"
+
+fn _enabled() -> bool:
+    (rt_env_get("SIMPLEOS_GREEN_CARRIER_QEMU_LIVE") ?? "") == "1"
+
+fn _run_shell(command: text) -> (text, text, i64):
+    rt_process_run("/bin/sh", ["-c", command])
+
+fn _qemu_available() -> bool:
+    val result = _run_shell("command -v qemu-system-x86_64 >/dev/null 2>&1")
+    result[2] == 0
+
+fn _simple_bin() -> text:
+    val override_bin = rt_env_get("SIMPLEOS_QEMU_SIMPLE_BIN") ?? ""
+    if override_bin != "":
+        override_bin
+    elif rt_file_exists(BOOTSTRAP_SIMPLE_BIN):
+        BOOTSTRAP_SIMPLE_BIN
+    else:
+        DEFAULT_SIMPLE_BIN
+
+fn _build_probe(output: text, backend: text) -> bool:
+    val command = "SIMPLE_BOOTSTRAP=1 SIMPLE_LIB=\"$(pwd)/src\" PATH=\"/usr/bin:$PATH\" {_simple_bin()} native-build {BUILD_SOURCES} --backend {backend} --entry-closure --entry {ENTRY} --target x86_64-unknown-none -o {output} --linker-script {LINKER_SCRIPT}"
+    val result = _run_shell(command)
+    if result[2] != 0:
+        print "[green_carrier_qemu_spec] {backend} build failed exit={result[2]}"
+        print result[0] + result[1]
+        return false
+    if not rt_file_exists(output):
+        print "[green_carrier_qemu_spec] build output missing: {output}"
+        return false
+    true
+
+fn _run_probe(kernel: text) -> (text, i64):
+    val command = "timeout 20s {QEMU_BASE} -m 512M -kernel {kernel} {DEBUG_EXIT} 2>&1 | tr -d '\\000'"
+    val result = _run_shell(command)
+    (result[0] + result[1], result[2])
+
+fn _has_required_markers(serial: text) -> bool:
+    serial.contains(AP_ONLINE_MARKER) and serial.contains(GREEN_PASS_MARKER)
+
+fn _print_probe_debug(serial: text, qemu_exit: i64):
+    val saw_boot = serial.contains("[green-carrier-qemu] boot")
+    val saw_ap_marker = serial.contains(AP_ONLINE_MARKER)
+    val saw_green_pass = serial.contains(GREEN_PASS_MARKER)
+    print "[green_carrier_qemu_spec] qemu exit={qemu_exit}"
+    print "[green_carrier_qemu_spec] saw boot={saw_boot}"
+    print "[green_carrier_qemu_spec] saw ap-marker={saw_ap_marker}"
+    print "[green_carrier_qemu_spec] saw green-pass={saw_green_pass}"
+    print serial
+
+describe "SimpleOS green carrier live QEMU proof":
+    """Live green-carrier validation, disabled unless SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1."""
+
+    it "boots two CPUs and dispatches green work onto the AP carrier CPU":
+        """When enabled, QEMU serial output must show AP startup and green-carrier PASS markers."""
+        if not _enabled():
+            expect(_enabled()).to_equal(false)
+        elif not _qemu_available():
+            expect(_qemu_available()).to_equal(false)
+        else:
+            val output_path = "build/os/simpleos_green_carrier_probe.elf"
+            val built = _build_probe(output_path, "cranelift") or _build_probe(output_path, "llvm")
+            expect(built).to_equal(true)
+            val result = _run_probe(output_path)
+            val serial = result[0]
+            if not _has_required_markers(serial):
+                _print_probe_debug(serial, result[1])
+            expect(serial.contains(AP_ONLINE_MARKER)).to_equal(true)
+            expect(serial.contains(GREEN_PASS_MARKER)).to_equal(true)

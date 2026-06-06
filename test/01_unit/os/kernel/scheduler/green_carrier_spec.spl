@@ -69,7 +69,9 @@ use os.kernel.scheduler.green_carrier.{
     green_carrier_extend_execution_state,
     green_carrier_current_task_on_cpu,
     green_carrier_context_switches_on_cpu,
-    green_carrier_apply_scheduler_intent
+    green_carrier_apply_scheduler_intent,
+    green_carrier_fixed_spawn_cpu,
+    green_carrier_fixed_run_task
 }
 use os.kernel.smp.smp.{smp_init, smp_bringup_ap, smp_take_ipi}
 
@@ -335,3 +337,25 @@ describe "SimpleOS green carrier bridge contract":
             expect(green_carrier_context_switches_on_cpu(apply2.state, 1)).to_equal(1)
             expect(green_carrier_context_switches_on_cpu(apply2.state, 2)).to_equal(1)
             expect(apply2.state.total_context_switches).to_equal(2)
+
+    describe "fixed-slot freestanding carrier":
+        it "matches the hosted spawn CPU placement without heap or text state":
+            val hosted = green_carrier_spawn_task(40, 4, 0, 3, 1, 2, 4, 0)
+            val fixed_cpu = green_carrier_fixed_spawn_cpu(4, 0, 3, 1, 2, 4)
+
+            expect(fixed_cpu).to_equal(hosted.target_cpu)
+
+        it "records remote AP dispatch through the SimpleOS IPI surface":
+            smp_init()
+            smp_bringup_ap(1u32)
+            val result = green_carrier_fixed_run_task(41, 2, 0, 5, 0, 0, 0, 0)
+            val pending = smp_take_ipi(1u32)
+
+            expect(result.target_cpu).to_equal(1)
+            expect(result.enqueued).to_equal(true)
+            expect(result.ipi_sent).to_equal(true)
+            expect(result.ipi_reason_mask).to_equal(0x1u32)
+            expect(pending).to_equal(0x1u32)
+            expect(result.dispatched).to_equal(true)
+            expect(result.current_task).to_equal(41)
+            expect(result.context_switches).to_equal(1)

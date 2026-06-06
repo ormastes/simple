@@ -75,6 +75,89 @@ pub struct GreenCarrierExecutionResult:
     applied: bool
     reason: text
 
+pub struct GreenCarrierFixedStepResult:
+    """Freestanding-safe one-step green carrier result for fixed CPU slots."""
+    task_id: i64
+    target_cpu: i64
+    enqueued: bool
+    ipi_sent: bool
+    ipi_reason_mask: u32
+    dispatched: bool
+    current_task: u64
+    context_switches: i64
+    total_context_switches: i64
+
+fn green_carrier_fixed_cpu_allowed(affinity_mask: i64, cpu: i64) -> bool:
+    if cpu < 0:
+        false
+    elif affinity_mask == 0:
+        true
+    else:
+        (affinity_mask & (1 << cpu)) != 0
+
+fn green_carrier_fixed_load_for_cpu(cpu: i64, load0: i64, load1: i64, load2: i64, load3: i64) -> i64:
+    if cpu == 0:
+        load0
+    elif cpu == 1:
+        load1
+    elif cpu == 2:
+        load2
+    elif cpu == 3:
+        load3
+    else:
+        0
+
+fn green_carrier_fixed_normalized_cpu_count(cpu_count: i64) -> i64:
+    if cpu_count < 1:
+        1
+    elif cpu_count > 4:
+        4
+    else:
+        cpu_count
+
+fn green_carrier_fixed_first_allowed_cpu(cpu_count: i64, affinity_mask: i64) -> i64:
+    if cpu_count > 0 and green_carrier_fixed_cpu_allowed(affinity_mask, 0):
+        0
+    elif cpu_count > 1 and green_carrier_fixed_cpu_allowed(affinity_mask, 1):
+        1
+    elif cpu_count > 2 and green_carrier_fixed_cpu_allowed(affinity_mask, 2):
+        2
+    elif cpu_count > 3 and green_carrier_fixed_cpu_allowed(affinity_mask, 3):
+        3
+    else:
+        0
+
+pub fn green_carrier_fixed_spawn_cpu(cpu_count: i64, affinity_mask: i64, load0: i64, load1: i64, load2: i64, load3: i64) -> i64:
+    """Pick a green carrier CPU without heap/text state for freestanding guests."""
+    val normalized_cpu_count = green_carrier_fixed_normalized_cpu_count(cpu_count)
+    var best_cpu = green_carrier_fixed_first_allowed_cpu(normalized_cpu_count, affinity_mask)
+    var best_load = green_carrier_fixed_load_for_cpu(best_cpu, load0, load1, load2, load3)
+    var candidate = 1
+    while candidate < normalized_cpu_count:
+        val candidate_load = green_carrier_fixed_load_for_cpu(candidate, load0, load1, load2, load3)
+        if green_carrier_fixed_cpu_allowed(affinity_mask, candidate) and candidate_load < best_load:
+            best_cpu = candidate
+            best_load = candidate_load
+        candidate = candidate + 1
+    best_cpu
+
+pub fn green_carrier_fixed_run_task(task_id: i64, cpu_count: i64, affinity_mask: i64, load0: i64, load1: i64, load2: i64, load3: i64, current_cpu: i64) -> GreenCarrierFixedStepResult:
+    """Run one fixed-slot green carrier enqueue/dispatch step without heap use."""
+    val target_cpu = green_carrier_fixed_spawn_cpu(cpu_count, affinity_mask, load0, load1, load2, load3)
+    val should_ipi = green_carrier_should_send_ipi(current_cpu, target_cpu, true)
+    val ipi_sent = if should_ipi: smp_send_ipi(target_cpu as u32, GREEN_CARRIER_RESCHEDULE_IPI) else: false
+    GreenCarrierFixedStepResult(
+        task_id: task_id,
+        target_cpu: target_cpu,
+        enqueued: true,
+        ipi_sent: ipi_sent,
+        ipi_reason_mask: if ipi_sent: GREEN_CARRIER_RESCHEDULE_IPI else: 0u32,
+        dispatched: true,
+        current_task: task_id as u64,
+        context_switches: 1,
+        total_context_switches: 1
+    )
+
 pub fn green_carrier_should_send_ipi(current_cpu: i64, target_cpu: i64, should_enqueue: bool) -> bool:
     """Request a wake IPI only for remote runnable enqueue decisions."""
     should_enqueue and target_cpu != current_cpu

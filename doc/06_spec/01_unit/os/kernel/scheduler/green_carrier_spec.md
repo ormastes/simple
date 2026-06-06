@@ -28,7 +28,7 @@ green_carrier_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 21 | 21 | 0 | 0 |
+| 23 | 23 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -684,12 +684,70 @@ expect(apply2.state.total_context_switches).to_equal(2)
 
 </details>
 
+### fixed-slot freestanding carrier
+
+#### matches the hosted spawn CPU placement without heap or text state
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val hosted = green_carrier_spawn_task(40, 4, 0, 3, 1, 2, 4, 0)
+val fixed_cpu = green_carrier_fixed_spawn_cpu(4, 0, 3, 1, 2, 4)
+
+expect(fixed_cpu).to_equal(hosted.target_cpu)
+```
+
+</details>
+
+#### records remote AP dispatch through the SimpleOS IPI surface
+
+1. smp init
+
+2. smp bringup ap
+   - Expected: result.target_cpu equals `1`
+   - Expected: result.enqueued is true
+   - Expected: result.ipi_sent is true
+   - Expected: result.ipi_reason_mask equals `0x1u32`
+   - Expected: pending equals `0x1u32`
+   - Expected: result.dispatched is true
+   - Expected: result.current_task equals `41`
+   - Expected: result.context_switches equals `1`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+smp_init()
+smp_bringup_ap(1u32)
+val result = green_carrier_fixed_run_task(41, 2, 0, 5, 0, 0, 0, 0)
+val pending = smp_take_ipi(1u32)
+
+expect(result.target_cpu).to_equal(1)
+expect(result.enqueued).to_equal(true)
+expect(result.ipi_sent).to_equal(true)
+expect(result.ipi_reason_mask).to_equal(0x1u32)
+expect(pending).to_equal(0x1u32)
+expect(result.dispatched).to_equal(true)
+expect(result.current_task).to_equal(41)
+expect(result.context_switches).to_equal(1)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 21 |
-| Active scenarios | 21 |
+| Total scenarios | 23 |
+| Active scenarios | 23 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

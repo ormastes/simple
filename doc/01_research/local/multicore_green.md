@@ -13,9 +13,10 @@
 - The scheduler-facing green-worker contract now exists in `src/os/kernel/scheduler/green_worker.spl`, with unit coverage for affinity, spawn CPU choice, wake-affine placement, stealing threshold, and rebalance decisions.
 - The logical green-task lifecycle contract now exists in `src/os/kernel/scheduler/green_task.spl`, with unit coverage for spawn records, park/unpark, no-op unpark misuse, completion, and carrier CPU preservation.
 - The SimpleOS green-carrier bridge contract now exists in `src/os/kernel/scheduler/green_carrier.spl`, with unit coverage for runnable enqueue, parked/done suppression, wake-affine re-enqueue, bounded green carrier queue mutation, remote reschedule IPI delivery through `smp_send_ipi`, per-CPU dispatch selection, typed `TaskId` scheduler run intent, and per-CPU execution-state application.
+- `green_carrier_fixed_spawn_cpu` and `green_carrier_fixed_run_task` provide a freestanding-safe fixed-slot carrier path for live SimpleOS guests. This keeps the public hosted carrier API unchanged while avoiding heap/text state that can stop tiny x86_64 QEMU probes before serial readback.
 - The real `Scheduler` now owns a separate green execution lane through `apply_green_scheduler_intent`, so logical green task ids do not collide with normal OS `TaskId` state.
 - SMP/AP/IPI support exists under `src/os/kernel/smp/`; `percpu.spl` now updates per-CPU entries through whole-entry replacement so interpreter-mode specs can exercise SMP state changes without indexed-field assignment failures.
-- A full scheduler-aware multicore green runtime still needs hardware context-switch handoff, blocking syscall boundaries, and QEMU proof that work runs across multiple SimpleOS CPUs/APs.
+- A full scheduler-aware multicore green runtime still needs hardware context-switch handoff and blocking syscall boundaries. The current QEMU proof covers AP startup plus scheduler-visible CPU1 green dispatch.
 
 ## Local Evidence
 
@@ -30,6 +31,7 @@
 - `test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl` verifies the SimpleOS feature-lane cooperative green contract on the current carrier.
 - `test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl` verifies hosted SimpleOS multicore-green contracts across SMP IPI, carrier dispatch, scheduler-owned green execution state, and topology growth.
 - `test/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.spl` verifies hosted SimpleOS green-channel wake integration from pure channel send-unpark output through carrier enqueue, dispatch, and scheduler-owned execution-state update.
+- `test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl` verifies the opt-in live SimpleOS/QEMU lane. The forced run on 2026-06-06 used `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 --clean`, built the x86_64 guest probe, observed `[smp] AP reached 64-bit entry`, and observed `[green-carrier-qemu] PASS=true` after CPU1 fixed-slot green dispatch.
 - `test/05_perf/stress/multicore_green_fanout_spec.spl` verifies fanout/fanin checksum parity between Simple OS threads, cooperative green, and multicore green while keeping runtime-pool evidence separate from inline fallback.
 - `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl` verifies the checked-in cross-language smoke report numerically: Simple OS-thread and multicore-green native rows must remain within bounded ratios of Go goroutine and C pthread rows, and cooperative green must stay classified as current-carrier, non-M:N work.
 - `test/01_unit/lib/nogc_async_mut/green_channel_spec.spl` verifies the pure Simple green-channel park/unpark/backpressure contract needed before scheduler-integrated channel wakeup.
