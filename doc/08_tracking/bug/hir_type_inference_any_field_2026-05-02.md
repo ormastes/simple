@@ -207,3 +207,35 @@ Stage-4 log `build/bootstrap/logs/x86_64-unknown-linux-gnu/stage4-native-build.l
 ## Cross-link / status updates
 
 RESOLVED as of 2026-05-20 (empirically verified). Previously PARTIAL as of 2026-05-15 log (7 residual). `aes128_gcm_stub_2026-05-01.md` and `w6d_vec8f_bitcast_framing_disproven_2026-05-01.md` are not present in the repo (already removed or never committed). No further cleanup needed on those cross-links.
+
+## Re-observation 2026-06-06 — full `main.spl` native-build residual + Class-5 partial fix
+
+Class 1/2/3 stay RESOLVED for the originally-tracked files. But the stage-4 **full CLI**
+(`--entry src/app/cli/main.spl`) native-build still emits auto-stubbed unresolved symbols
+from the same ANY root, with seed+source at HEAD and a **clean cache** (`754 compiled, 0
+cached, 1 failed`):
+
+- **681 unresolved symbols** (dumped via new `SIMPLE_DUMP_STUBS=<path>` env in
+  `native_project/stubs.rs::generate_stub_object`). Families: `_rt*` 264, `_nogc*` 93,
+  `_builder*` (SPIR-V) 24, `_cranelift*` 16; string-shaped only 28 (4%).
+- The 1 hard failure: `leak_check/main.spl` → `cannot infer field type ... struct 'ANY'
+  field 'alloc_id'` (same Class-2/3 symptom).
+- Runtime effect: `lint <file>` on a seed-native full binary segfaults (139) with
+  `Function 'str.length' not found` — i.e. **Class 5** (`.length` on an ANY receiver).
+  `methods.rs:341` forms `format!("{}.{}", receiver_type, method)` = `"str.length"`
+  because `receiver_type` is `"str"` (ANY), matching no builtin arm → stub → abort.
+
+**Class 5 partial fix landed** (implements this doc's own recommendation "register `length`
+as an array/string intrinsic in the field-access path"):
+- Seed Cranelift codegen — `"len" | "length" => rt_len` in `instr/calls.rs`
+  (fallback + `sffi_alias_target`), `instr/methods.rs` (typed Array/String/Dict/Tuple),
+  `instr/closures_structs.rs`. Commit `a8dc6fac`.
+- Pure-Simple main lowering — `mir_lowering_expr_part3.spl:81` routes typed `.length()`
+  through `len_runtime_symbol_for_hir_type` (type-KIND `case Str/Array/Dict`) like `.len()`.
+  Commit `b5391184`. Matches interpreter's existing `"len" | "length"`.
+
+Caveat: these are **correct consistency only** — they do NOT clear the segfault, because the
+typed fast-paths never fire while the receiver is ANY (the Class-2/3 inference gap). The
+*deployed* self-hosted binary builds check/lint/fmt fine; the segfault is seed-native-full
+only. Owner: cross-module inference effort (`826ec099` lineage). Does NOT reopen the
+2026-05-20 RESOLVED status for the 7 originally-tracked files.
