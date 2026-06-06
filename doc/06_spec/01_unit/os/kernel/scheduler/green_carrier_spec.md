@@ -28,7 +28,7 @@ green_carrier_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -59,9 +59,10 @@ into per-CPU queues. It does not execute closures and it does not send APIC
 interrupts directly. Instead, it records the target carrier CPU, whether a
 green task should be enqueued, and whether a remote reschedule IPI is required.
 
-This keeps the SimpleOS side testable before the real run-queue and wakeup
-hooks are connected. The contract also prevents parked or completed green tasks
-from being re-enqueued by mistake.
+This keeps the SimpleOS side testable while the green carrier path moves from
+decision-only contracts toward concrete queue mutation and wakeup hooks. The
+contract also prevents parked or completed green tasks from being re-enqueued
+by mistake.
 
 ## Examples
 
@@ -69,7 +70,8 @@ Spawning a logical green task chooses a CPU through the existing green-worker
 placement rules and turns the runnable task into either a local or remote
 carrier enqueue decision. Waking a parked green task reuses the green-task
 unpark decision, then records whether the chosen CPU is remote to the current
-carrier CPU.
+carrier CPU. Applying a decision updates bounded carrier queues and uses the
+existing SimpleOS SMP reschedule IPI surface for remote online CPUs.
 
 ## Requirements
 
@@ -238,12 +240,144 @@ expect(green_carrier_should_send_ipi(0, 1, false)).to_equal(false)
 
 </details>
 
+### queue apply
+
+#### applies local enqueue into the carrier run queue without IPI
+
+1. smp init
+   - Expected: applied.enqueued is true
+   - Expected: applied.ipi_sent is false
+   - Expected: applied.reason equals `queued_local`
+   - Expected: green_carrier_queue_depth(applied.queues, 1) equals `1`
+   - Expected: applied.queues.queued_task_ids.len() equals `1`
+   - Expected: applied.queues.queued_task_ids[0] equals `27`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+smp_init()
+val queues = green_carrier_run_queues_new(4, 8)
+val decision = green_carrier_spawn_task(27, 4, 0, 3, 1, 2, 4, 1)
+val applied = green_carrier_apply_enqueue(queues, decision)
+
+expect(applied.enqueued).to_equal(true)
+expect(applied.ipi_sent).to_equal(false)
+expect(applied.reason).to_equal("queued_local")
+expect(green_carrier_queue_depth(applied.queues, 1)).to_equal(1)
+expect(applied.queues.queued_task_ids.len()).to_equal(1)
+expect(applied.queues.queued_task_ids[0]).to_equal(27)
+```
+
+</details>
+
+#### applies remote enqueue and records a SimpleOS reschedule IPI
+
+1. smp init
+
+2. smp bringup ap
+   - Expected: applied.enqueued is true
+   - Expected: applied.ipi_sent is true
+   - Expected: applied.ipi_reason_mask equals `0x1u32`
+   - Expected: pending equals `0x1u32`
+   - Expected: green_carrier_queue_depth(applied.queues, 1) equals `1`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+smp_init()
+smp_bringup_ap(1u32)
+val queues = green_carrier_run_queues_new(4, 8)
+val decision = green_carrier_spawn_task(28, 4, 0, 3, 1, 2, 4, 0)
+val applied = green_carrier_apply_enqueue(queues, decision)
+val pending = smp_take_ipi(1u32)
+
+expect(applied.enqueued).to_equal(true)
+expect(applied.ipi_sent).to_equal(true)
+expect(applied.ipi_reason_mask).to_equal(0x1u32)
+expect(pending).to_equal(0x1u32)
+expect(green_carrier_queue_depth(applied.queues, 1)).to_equal(1)
+```
+
+</details>
+
+#### does not mutate queues for non-enqueue decisions
+
+1. smp init
+   - Expected: applied.enqueued is false
+   - Expected: applied.queues.queued_task_ids.len() equals `0`
+   - Expected: applied.reason equals `task_parked`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+smp_init()
+val task = green_task_new(29, 4, 0, 0, 1, 2, 3)
+val parked = green_task_park(task, "timer")
+val decision = green_carrier_enqueue_task(parked, 0)
+val queues = green_carrier_run_queues_new(4, 8)
+val applied = green_carrier_apply_enqueue(queues, decision)
+
+expect(applied.enqueued).to_equal(false)
+expect(applied.queues.queued_task_ids.len()).to_equal(0)
+expect(applied.reason).to_equal("task_parked")
+```
+
+</details>
+
+#### rejects enqueue when the green carrier queue is full
+
+1. smp init
+   - Expected: after_first.enqueued is true
+   - Expected: after_second.enqueued is false
+   - Expected: after_second.reason equals `queue_rejected`
+   - Expected: after_second.queues.dropped_count equals `1`
+   - Expected: after_second.queues.queued_task_ids.len() equals `1`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+smp_init()
+val queues = green_carrier_run_queues_new(4, 1)
+val first = green_carrier_spawn_task(30, 4, 0, 3, 1, 2, 4, 1)
+val after_first = green_carrier_apply_enqueue(queues, first)
+val second = green_carrier_spawn_task(31, 4, 0, 3, 1, 2, 4, 1)
+val after_second = green_carrier_apply_enqueue(after_first.queues, second)
+
+expect(after_first.enqueued).to_equal(true)
+expect(after_second.enqueued).to_equal(false)
+expect(after_second.reason).to_equal("queue_rejected")
+expect(after_second.queues.dropped_count).to_equal(1)
+expect(after_second.queues.queued_task_ids.len()).to_equal(1)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

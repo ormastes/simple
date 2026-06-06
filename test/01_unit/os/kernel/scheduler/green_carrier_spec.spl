@@ -12,9 +12,10 @@ into per-CPU queues. It does not execute closures and it does not send APIC
 interrupts directly. Instead, it records the target carrier CPU, whether a
 green task should be enqueued, and whether a remote reschedule IPI is required.
 
-This keeps the SimpleOS side testable before the real run-queue and wakeup
-hooks are connected. The contract also prevents parked or completed green tasks
-from being re-enqueued by mistake.
+This keeps the SimpleOS side testable while the green carrier path moves from
+decision-only contracts toward concrete queue mutation and wakeup hooks. The
+contract also prevents parked or completed green tasks from being re-enqueued
+by mistake.
 
 ## Examples
 
@@ -22,7 +23,8 @@ Spawning a logical green task chooses a CPU through the existing green-worker
 placement rules and turns the runnable task into either a local or remote
 carrier enqueue decision. Waking a parked green task reuses the green-task
 unpark decision, then records whether the chosen CPU is remote to the current
-carrier CPU.
+carrier CPU. Applying a decision updates bounded carrier queues and uses the
+existing SimpleOS SMP reschedule IPI surface for remote online CPUs.
 
 ## Requirements
 
@@ -51,8 +53,12 @@ use os.kernel.scheduler.green_carrier.{
     green_carrier_should_send_ipi,
     green_carrier_enqueue_task,
     green_carrier_spawn_task,
-    green_carrier_unpark_task
+    green_carrier_unpark_task,
+    green_carrier_run_queues_new,
+    green_carrier_queue_depth,
+    green_carrier_apply_enqueue
 }
+use os.kernel.smp.smp.{smp_init, smp_bringup_ap, smp_take_ipi}
 
 describe "SimpleOS green carrier bridge contract":
     describe "spawn enqueue":
@@ -120,3 +126,57 @@ describe "SimpleOS green carrier bridge contract":
             expect(green_carrier_should_send_ipi(0, 1, true)).to_equal(true)
             expect(green_carrier_should_send_ipi(1, 1, true)).to_equal(false)
             expect(green_carrier_should_send_ipi(0, 1, false)).to_equal(false)
+
+    describe "queue apply":
+        it "applies local enqueue into the carrier run queue without IPI":
+            smp_init()
+            val queues = green_carrier_run_queues_new(4, 8)
+            val decision = green_carrier_spawn_task(27, 4, 0, 3, 1, 2, 4, 1)
+            val applied = green_carrier_apply_enqueue(queues, decision)
+
+            expect(applied.enqueued).to_equal(true)
+            expect(applied.ipi_sent).to_equal(false)
+            expect(applied.reason).to_equal("queued_local")
+            expect(green_carrier_queue_depth(applied.queues, 1)).to_equal(1)
+            expect(applied.queues.queued_task_ids.len()).to_equal(1)
+            expect(applied.queues.queued_task_ids[0]).to_equal(27)
+
+        it "applies remote enqueue and records a SimpleOS reschedule IPI":
+            smp_init()
+            smp_bringup_ap(1u32)
+            val queues = green_carrier_run_queues_new(4, 8)
+            val decision = green_carrier_spawn_task(28, 4, 0, 3, 1, 2, 4, 0)
+            val applied = green_carrier_apply_enqueue(queues, decision)
+            val pending = smp_take_ipi(1u32)
+
+            expect(applied.enqueued).to_equal(true)
+            expect(applied.ipi_sent).to_equal(true)
+            expect(applied.ipi_reason_mask).to_equal(0x1u32)
+            expect(pending).to_equal(0x1u32)
+            expect(green_carrier_queue_depth(applied.queues, 1)).to_equal(1)
+
+        it "does not mutate queues for non-enqueue decisions":
+            smp_init()
+            val task = green_task_new(29, 4, 0, 0, 1, 2, 3)
+            val parked = green_task_park(task, "timer")
+            val decision = green_carrier_enqueue_task(parked, 0)
+            val queues = green_carrier_run_queues_new(4, 8)
+            val applied = green_carrier_apply_enqueue(queues, decision)
+
+            expect(applied.enqueued).to_equal(false)
+            expect(applied.queues.queued_task_ids.len()).to_equal(0)
+            expect(applied.reason).to_equal("task_parked")
+
+        it "rejects enqueue when the green carrier queue is full":
+            smp_init()
+            val queues = green_carrier_run_queues_new(4, 1)
+            val first = green_carrier_spawn_task(30, 4, 0, 3, 1, 2, 4, 1)
+            val after_first = green_carrier_apply_enqueue(queues, first)
+            val second = green_carrier_spawn_task(31, 4, 0, 3, 1, 2, 4, 1)
+            val after_second = green_carrier_apply_enqueue(after_first.queues, second)
+
+            expect(after_first.enqueued).to_equal(true)
+            expect(after_second.enqueued).to_equal(false)
+            expect(after_second.reason).to_equal("queue_rejected")
+            expect(after_second.queues.dropped_count).to_equal(1)
+            expect(after_second.queues.queued_task_ids.len()).to_equal(1)

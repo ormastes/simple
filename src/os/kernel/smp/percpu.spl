@@ -4,6 +4,12 @@
 
 val MAX_CPUS: u32 = 32
 
+fn percpu_max_cpus() -> u32:
+    MAX_CPUS
+
+fn percpu_num_cpus() -> u32:
+    g_num_cpus
+
 struct PerCpu:
     cpu_id: u32
     present: bool       # firmware enumerated this CPU
@@ -19,6 +25,13 @@ struct PerCpu:
 var g_percpu: [PerCpu] = []
 var g_num_cpus: u32 = 1   # BSP only until smp_bringup runs
 var g_percpu_initialized: bool = false
+
+fn percpu_store_entry(cpu_id: u32, entry: PerCpu) -> bool:
+    if cpu_id >= MAX_CPUS:
+        false
+    else:
+        g_percpu[cpu_id] = entry
+        true
 
 fn percpu_init():
     """Reset all per-CPU entries to a known state. Called once by BSP at boot."""
@@ -39,8 +52,18 @@ fn percpu_init():
         ))
         i = i + 1
     # BSP is online by definition
-    g_percpu[0].present = true
-    g_percpu[0].online = true
+    percpu_store_entry(0u32, PerCpu(
+        cpu_id: 0u32,
+        present: true,
+        apic_id: 0u32,
+        online: true,
+        startup_sent: false,
+        idle_task_id: 0u32,
+        current_task_id: 0u32,
+        runqueue_len: 0u32,
+        ipi_pending: 0u32,
+        preempt_disable: 0u32,
+    ))
     g_num_cpus = 1
     g_percpu_initialized = true
 
@@ -53,8 +76,19 @@ fn percpu_register_apic_id(cpu_id: u32, apic_id: u32) -> bool:
     percpu_ensure_init()
     if cpu_id >= MAX_CPUS:
         return false
-    g_percpu[cpu_id].present = true
-    g_percpu[cpu_id].apic_id = apic_id
+    val current = g_percpu[cpu_id]
+    percpu_store_entry(cpu_id, PerCpu(
+        cpu_id: current.cpu_id,
+        present: true,
+        apic_id: apic_id,
+        online: current.online,
+        startup_sent: current.startup_sent,
+        idle_task_id: current.idle_task_id,
+        current_task_id: current.current_task_id,
+        runqueue_len: current.runqueue_len,
+        ipi_pending: current.ipi_pending,
+        preempt_disable: current.preempt_disable,
+    ))
     if cpu_id + 1u32 > g_num_cpus:
         g_num_cpus = cpu_id + 1u32
     true
@@ -84,7 +118,19 @@ fn percpu_mark_startup_sent(cpu_id: u32) -> bool:
     percpu_ensure_init()
     if cpu_id == 0u32 or cpu_id >= MAX_CPUS or not g_percpu[cpu_id].present:
         return false
-    g_percpu[cpu_id].startup_sent = true
+    val current = g_percpu[cpu_id]
+    percpu_store_entry(cpu_id, PerCpu(
+        cpu_id: current.cpu_id,
+        present: current.present,
+        apic_id: current.apic_id,
+        online: current.online,
+        startup_sent: true,
+        idle_task_id: current.idle_task_id,
+        current_task_id: current.current_task_id,
+        runqueue_len: current.runqueue_len,
+        ipi_pending: current.ipi_pending,
+        preempt_disable: current.preempt_disable,
+    ))
     true
 
 fn percpu_startup_sent(cpu_id: u32) -> bool:
@@ -107,8 +153,19 @@ fn percpu_mark_online(cpu_id: u32) -> bool:
     percpu_ensure_init()
     if cpu_id >= MAX_CPUS:
         return false
-    g_percpu[cpu_id].present = true
-    g_percpu[cpu_id].online = true
+    val current = g_percpu[cpu_id]
+    percpu_store_entry(cpu_id, PerCpu(
+        cpu_id: current.cpu_id,
+        present: true,
+        apic_id: current.apic_id,
+        online: true,
+        startup_sent: current.startup_sent,
+        idle_task_id: current.idle_task_id,
+        current_task_id: current.current_task_id,
+        runqueue_len: current.runqueue_len,
+        ipi_pending: current.ipi_pending,
+        preempt_disable: current.preempt_disable,
+    ))
     if cpu_id + 1 > g_num_cpus:
         g_num_cpus = cpu_id + 1
     true
@@ -122,15 +179,80 @@ fn percpu_is_online(cpu_id: u32) -> bool:
 fn percpu_preempt_disable(cpu_id: u32):
     percpu_ensure_init()
     if cpu_id < MAX_CPUS:
-        g_percpu[cpu_id].preempt_disable = g_percpu[cpu_id].preempt_disable + 1
+        val current = g_percpu[cpu_id]
+        percpu_store_entry(cpu_id, PerCpu(
+            cpu_id: current.cpu_id,
+            present: current.present,
+            apic_id: current.apic_id,
+            online: current.online,
+            startup_sent: current.startup_sent,
+            idle_task_id: current.idle_task_id,
+            current_task_id: current.current_task_id,
+            runqueue_len: current.runqueue_len,
+            ipi_pending: current.ipi_pending,
+            preempt_disable: current.preempt_disable + 1u32,
+        ))
 
 fn percpu_preempt_enable(cpu_id: u32):
     percpu_ensure_init()
-    if cpu_id < MAX_CPUS and g_percpu[cpu_id].preempt_disable > 0:
-        g_percpu[cpu_id].preempt_disable = g_percpu[cpu_id].preempt_disable - 1
+    if cpu_id < MAX_CPUS:
+        val current = g_percpu[cpu_id]
+        if current.preempt_disable == 0u32:
+            return
+        percpu_store_entry(cpu_id, PerCpu(
+            cpu_id: current.cpu_id,
+            present: current.present,
+            apic_id: current.apic_id,
+            online: current.online,
+            startup_sent: current.startup_sent,
+            idle_task_id: current.idle_task_id,
+            current_task_id: current.current_task_id,
+            runqueue_len: current.runqueue_len,
+            ipi_pending: current.ipi_pending,
+            preempt_disable: current.preempt_disable - 1u32,
+        ))
 
 fn percpu_preempt_enabled(cpu_id: u32) -> bool:
     percpu_ensure_init()
     if cpu_id >= MAX_CPUS:
         return false
     g_percpu[cpu_id].preempt_disable == 0
+
+fn percpu_or_ipi(cpu_id: u32, reason: u32) -> bool:
+    percpu_ensure_init()
+    if cpu_id >= MAX_CPUS or not g_percpu[cpu_id].online:
+        return false
+    val current = g_percpu[cpu_id]
+    percpu_store_entry(cpu_id, PerCpu(
+        cpu_id: current.cpu_id,
+        present: current.present,
+        apic_id: current.apic_id,
+        online: current.online,
+        startup_sent: current.startup_sent,
+        idle_task_id: current.idle_task_id,
+        current_task_id: current.current_task_id,
+        runqueue_len: current.runqueue_len,
+        ipi_pending: current.ipi_pending | reason,
+        preempt_disable: current.preempt_disable,
+    ))
+    true
+
+fn percpu_take_ipi(cpu_id: u32) -> u32:
+    percpu_ensure_init()
+    if cpu_id >= MAX_CPUS:
+        return 0u32
+    val current = g_percpu[cpu_id]
+    val pending = current.ipi_pending
+    percpu_store_entry(cpu_id, PerCpu(
+        cpu_id: current.cpu_id,
+        present: current.present,
+        apic_id: current.apic_id,
+        online: current.online,
+        startup_sent: current.startup_sent,
+        idle_task_id: current.idle_task_id,
+        current_task_id: current.current_task_id,
+        runqueue_len: current.runqueue_len,
+        ipi_pending: 0u32,
+        preempt_disable: current.preempt_disable,
+    ))
+    pending

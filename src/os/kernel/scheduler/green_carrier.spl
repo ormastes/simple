@@ -13,6 +13,9 @@ use os.kernel.scheduler.green_task.{
     green_task_is_done,
     GreenTaskRecord
 }
+use os.kernel.smp.smp.{smp_send_ipi}
+
+pub val GREEN_CARRIER_RESCHEDULE_IPI: u32 = 0x1u32
 
 pub struct GreenCarrierEnqueueDecision:
     """Run-queue enqueue and wake intent for a logical green task."""
@@ -21,6 +24,23 @@ pub struct GreenCarrierEnqueueDecision:
     should_enqueue: bool
     should_send_ipi: bool
     ipi_reason: text
+    reason: text
+
+pub struct GreenCarrierRunQueueState:
+    """Concrete SimpleOS green-task queue state keyed by carrier CPU."""
+    queued_task_ids: [i64]
+    queued_cpus: [i64]
+    queue_depth_by_cpu: [i64]
+    capacity: i64
+    dropped_count: i64
+
+pub struct GreenCarrierApplyResult:
+    """Result of applying a carrier enqueue decision to queue and SMP state."""
+    queues: GreenCarrierRunQueueState
+    decision: GreenCarrierEnqueueDecision
+    enqueued: bool
+    ipi_sent: bool
+    ipi_reason_mask: u32
     reason: text
 
 pub fn green_carrier_should_send_ipi(current_cpu: i64, target_cpu: i64, should_enqueue: bool) -> bool:
@@ -48,6 +68,115 @@ fn green_carrier_decision(task: GreenTaskRecord, target_cpu: i64, should_enqueue
         ipi_reason: green_carrier_ipi_reason(current_cpu, target_cpu, should_enqueue),
         reason: reason
     )
+
+fn green_carrier_normalized_cpu_count(cpu_count: i64) -> i64:
+    if cpu_count < 1:
+        1
+    elif cpu_count > 4:
+        4
+    else:
+        cpu_count
+
+pub fn green_carrier_run_queues_new(cpu_count: i64, capacity: i64) -> GreenCarrierRunQueueState:
+    """Create bounded carrier queues for scheduler-visible green tasks."""
+    val normalized_cpu_count = green_carrier_normalized_cpu_count(cpu_count)
+    var queue_depth_by_cpu: [i64] = []
+    var i = 0
+    while i < normalized_cpu_count:
+        queue_depth_by_cpu.push(0)
+        i = i + 1
+    GreenCarrierRunQueueState(
+        queued_task_ids: [],
+        queued_cpus: [],
+        queue_depth_by_cpu: queue_depth_by_cpu,
+        capacity: if capacity < 1: 1 else: capacity,
+        dropped_count: 0
+    )
+
+pub fn green_carrier_queue_depth(queues: GreenCarrierRunQueueState, cpu: i64) -> i64:
+    """Return the number of green tasks queued for a carrier CPU."""
+    if cpu < 0 or cpu >= queues.queue_depth_by_cpu.len():
+        0
+    else:
+        queues.queue_depth_by_cpu[cpu]
+
+fn green_carrier_queue_push(queues: GreenCarrierRunQueueState, task_id: i64, cpu: i64) -> GreenCarrierRunQueueState:
+    if cpu < 0 or cpu >= queues.queue_depth_by_cpu.len():
+        GreenCarrierRunQueueState(
+            queued_task_ids: queues.queued_task_ids,
+            queued_cpus: queues.queued_cpus,
+            queue_depth_by_cpu: queues.queue_depth_by_cpu,
+            capacity: queues.capacity,
+            dropped_count: queues.dropped_count + 1
+        )
+    elif queues.queued_task_ids.len() >= queues.capacity:
+        GreenCarrierRunQueueState(
+            queued_task_ids: queues.queued_task_ids,
+            queued_cpus: queues.queued_cpus,
+            queue_depth_by_cpu: queues.queue_depth_by_cpu,
+            capacity: queues.capacity,
+            dropped_count: queues.dropped_count + 1
+        )
+    else:
+        var queued_task_ids = queues.queued_task_ids
+        var queued_cpus = queues.queued_cpus
+        queued_task_ids.push(task_id)
+        queued_cpus.push(cpu)
+        GreenCarrierRunQueueState(
+            queued_task_ids: queued_task_ids,
+            queued_cpus: queued_cpus,
+            queue_depth_by_cpu: green_carrier_increment_queue_depth(queues.queue_depth_by_cpu, cpu),
+            capacity: queues.capacity,
+            dropped_count: queues.dropped_count
+        )
+
+fn green_carrier_increment_queue_depth(queue_depth_by_cpu: [i64], cpu: i64) -> [i64]:
+    var next_depth = queue_depth_by_cpu
+    if cpu >= 0 and cpu < next_depth.len():
+        next_depth[cpu] = next_depth[cpu] + 1
+    next_depth
+
+pub fn green_carrier_apply_enqueue(queues: GreenCarrierRunQueueState, decision: GreenCarrierEnqueueDecision) -> GreenCarrierApplyResult:
+    """Apply a carrier decision to green run queues and SMP reschedule IPIs."""
+    if not decision.should_enqueue:
+        return GreenCarrierApplyResult(
+            queues: queues,
+            decision: decision,
+            enqueued: false,
+            ipi_sent: false,
+            ipi_reason_mask: 0u32,
+            reason: decision.reason
+        )
+    val next_queues = green_carrier_queue_push(queues, decision.task.task_id, decision.target_cpu)
+    val enqueued = next_queues.dropped_count == queues.dropped_count
+    if not enqueued:
+        return GreenCarrierApplyResult(
+            queues: next_queues,
+            decision: decision,
+            enqueued: false,
+            ipi_sent: false,
+            ipi_reason_mask: 0u32,
+            reason: "queue_rejected"
+        )
+    if decision.should_send_ipi:
+        val sent = smp_send_ipi(decision.target_cpu as u32, GREEN_CARRIER_RESCHEDULE_IPI)
+        GreenCarrierApplyResult(
+            queues: next_queues,
+            decision: decision,
+            enqueued: true,
+            ipi_sent: sent,
+            ipi_reason_mask: if sent: GREEN_CARRIER_RESCHEDULE_IPI else: 0u32,
+            reason: if sent: "queued_remote_reschedule" else: "queued_without_ipi"
+        )
+    else:
+        GreenCarrierApplyResult(
+            queues: next_queues,
+            decision: decision,
+            enqueued: true,
+            ipi_sent: false,
+            ipi_reason_mask: 0u32,
+            reason: "queued_local"
+        )
 
 pub fn green_carrier_enqueue_task(task: GreenTaskRecord, current_cpu: i64) -> GreenCarrierEnqueueDecision:
     """Convert a runnable green task into a carrier run-queue decision."""
