@@ -69,13 +69,17 @@ cross-language smoke report (`doc/09_report/cross_language_perf_parallel_smoke.m
 classifies:
 
 - `Simple multicore green (SMF)` parallel CPU workers as
-  `multicore_green runtime pool candidate` when the small worker workload runs.
+  `multicore_green runtime pool candidate (checksum mismatch)`. The row now
+  exits nonzero because generated Simple concurrency workloads compare joined
+  results against a sequential expected checksum.
 - `Simple multicore green (SMF)` large fanout as
   `multicore_green runtime pool fanout (segfault)`.
 
 Keep SMF multicore-green failures classified separately from native M:N evidence
 until the SMF runtime can execute the generated `fanout_multicore_green.spl`
-workload without segfaulting and while every handle reports `used_runtime_pool()`.
+workload without segfaulting, execute the generated `parallel_multicore_green.spl`
+workload without checksum mismatch, and report `used_runtime_pool()` for every
+handle.
 
 ## Reproduction
 

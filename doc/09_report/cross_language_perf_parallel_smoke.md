@@ -12,6 +12,7 @@
 - Generates equivalent hello, recursive fib, in-process warm fib, worker, and fanout workloads for each supported runtime.
 - Measures binary/script size, cold process startup, warm throughput, parallel worker latency, fanout latency, parallel binary size, and peak RSS where the runtime and compiler are available.
 - Uses bounded commands so failed, missing, timed-out, or unavailable lanes are classified instead of silently treated as passing data.
+- Generated Simple concurrency workloads compute an expected checksum and exit nonzero on mismatch, so runtime-pool closure failures cannot be timed as valid M:N evidence.
 - Warm throughput is measured in-process where the runtime can print `warm_ms`; interpreter and SMF rows use outer-process timing and are labeled that way.
 
 ## Environment
@@ -49,29 +50,29 @@ TUI startup speed is not measured by this cross-language profile. It is covered 
 
 | Language               |     Avg (ms) |         Mode |              |              |
 |------------------------|--------------|--------------|--------------|--------------|
-| Simple (interpreter)   |       57.277 |    interpret |              |              |
-| Simple (SMF loader)    |       34.464 |          smf |              |              |
-| Simple (native)        |        7.001 |       native |              |              |
-| C (gcc -O2)            |        6.783 |       native |              |              |
-| Go (compiled)          |       85.532 |       native |              |              |
-| Python                 |       29.924 |    interpret |              |              |
-| Bun                    |      287.227 |          JIT |              |              |
-| Java                   |      297.968 |    JIT (JVM) |              |              |
-| Erlang                 |     1898.185 |      BEAM VM |              |              |
+| Simple (interpreter)   |       46.770 |    interpret |              |              |
+| Simple (SMF loader)    |       34.450 |          smf |              |              |
+| Simple (native)        |        6.045 |       native |              |              |
+| C (gcc -O2)            |        8.577 |       native |              |              |
+| Go (compiled)          |       80.012 |       native |              |              |
+| Python                 |       32.973 |    interpret |              |              |
+| Bun                    |      143.831 |          JIT |              |              |
+| Java                   |      196.357 |    JIT (JVM) |              |              |
+| Erlang                 |     1880.682 |      BEAM VM |              |              |
 
 ## Warm Throughput — fib(35) in process (10 warmup + 1 measured)
 
 | Language               |     Avg (ms) |                                    Notes |
 |------------------------|--------------|------------------------------------------|
-| Simple (interpreter)   |       95.875 | tree-walk (outer-process, no in-proc timing) |
-| Simple (SMF loader)    |       96.279 | bytecode (outer-process, no in-proc timing) |
-| Simple (native)        |       74.183 |           AOT via Cranelift (in-process) |
-| C (gcc -O2)            |       27.722 |                             baseline AOT |
-| Go                     |       69.084 |                                  SSA AOT |
-| Python                 |     2426.286 |                         CPython bytecode |
-| Bun                    |      132.502 |        JavaScriptCore JIT (steady-state) |
-| Java                   |       61.055 |            HotSpot C2 JIT (steady-state) |
-| Erlang                 |      210.988 |                    BEAM (single-process) |
+| Simple (interpreter)   |      134.873 | tree-walk (outer-process, no in-proc timing) |
+| Simple (SMF loader)    |      124.721 | bytecode (outer-process, no in-proc timing) |
+| Simple (native)        |       74.204 |           AOT via Cranelift (in-process) |
+| C (gcc -O2)            |       27.646 |                             baseline AOT |
+| Go                     |       64.931 |                                  SSA AOT |
+| Python                 |     2549.487 |                         CPython bytecode |
+| Bun                    |      131.960 |        JavaScriptCore JIT (steady-state) |
+| Java                   |       66.564 |            HotSpot C2 JIT (steady-state) |
+| Erlang                 |      195.256 |                    BEAM (single-process) |
 
 ## OS Thread Parallel Workers — spawn 2 workers (1 runs avg)
 
@@ -79,18 +80,18 @@ TUI startup speed is not measured by this cross-language profile. It is covered 
 |------------------------|--------------|------------------------------------------|
 | Simple (interpreter)   |          n/a |          extern thread FFI not supported |
 | Simple (SMF loader)    |         fail |    std thread_spawn fork-join (bytecode) |
-| Simple (native)        |        9.222 |        thread_spawn fork-join OS threads |
-| Simple cooperative green (interp) |       51.290 | cooperative_green_spawn_value cooperative queue |
+| Simple (native)        |        8.727 |        thread_spawn fork-join OS threads |
+| Simple cooperative green (interp) |       51.481 | cooperative_green_spawn_value cooperative queue |
 | Simple cooperative green (SMF) |         fail | cooperative_green_spawn_value cooperative queue (SMF mutable-global runtime blocker) |
-| Simple cooperative green (native) |        7.022 | cooperative_green_spawn_value cooperative queue |
-| Simple multicore green (SMF) |       32.966 |   multicore_green runtime pool candidate |
-| Simple multicore green (native) |       14.103 |   multicore_green runtime pool candidate |
-| C (pthreads)           |        9.947 |                               OS threads |
-| Go                     |       14.998 |           goroutines + chan result (M:N) |
-| Python                 |       91.830 |                          threading (GIL) |
-| Bun                    |      123.676 |                           worker_threads |
-| Java                   |      187.079 |                               ThreadPool |
-| Erlang                 |     1975.552 |                    lightweight processes |
+| Simple cooperative green (native) |       10.410 | cooperative_green_spawn_value cooperative queue |
+| Simple multicore green (SMF) |         fail | multicore_green runtime pool candidate (checksum mismatch) |
+| Simple multicore green (native) |       16.109 |   multicore_green runtime pool candidate |
+| C (pthreads)           |        7.903 |                               OS threads |
+| Go                     |       10.964 |           goroutines + chan result (M:N) |
+| Python                 |       98.178 |                          threading (GIL) |
+| Bun                    |      120.643 |                           worker_threads |
+| Java                   |      160.134 |                               ThreadPool |
+| Erlang                 |     2100.254 |                    lightweight processes |
 
 ## Large Fanout Scheduling — spawn 20 tiny workers (1 runs avg)
 
@@ -98,36 +99,36 @@ TUI startup speed is not measured by this cross-language profile. It is covered 
 |------------------------|--------------|------------------------------------------|
 | Simple (interpreter)   |          n/a |          extern thread FFI not supported |
 | Simple (SMF loader)    |         fail |         std thread_spawn fanout (failed) |
-| Simple (native)        |       16.031 |               OS-thread fork-join fanout |
-| Simple cooperative green (interp) |       47.499 |                 cooperative queue fanout |
+| Simple (native)        |       10.619 |               OS-thread fork-join fanout |
+| Simple cooperative green (interp) |       44.947 |                 cooperative queue fanout |
 | Simple cooperative green (SMF) |         fail | cooperative queue fanout (SMF mutable-global runtime blocker) |
-| Simple cooperative green (native) |       11.712 |                 cooperative queue fanout |
+| Simple cooperative green (native) |        4.324 |                 cooperative queue fanout |
 | Simple multicore green (SMF) |         fail | multicore_green runtime pool fanout (segfault) |
-| Simple multicore green (native) |       15.310 |      multicore_green runtime pool fanout |
-| C (pthreads)           |       10.750 |              one OS thread per tiny task |
-| Go                     |       11.838 |        goroutine per tiny task + channel |
-| Python                 |       52.115 |            threading per tiny task (GIL) |
-| Bun                    |      362.092 |              worker_thread per tiny task |
-| Java                   |      163.572 |   cached ThreadPool future per tiny task |
-| Erlang                 |     2217.540 |               BEAM process per tiny task |
+| Simple multicore green (native) |       12.164 |      multicore_green runtime pool fanout |
+| C (pthreads)           |       12.675 |              one OS thread per tiny task |
+| Go                     |        9.201 |        goroutine per tiny task + channel |
+| Python                 |       47.637 |            threading per tiny task (GIL) |
+| Bun                    |      312.217 |              worker_thread per tiny task |
+| Java                   |      105.173 |   cached ThreadPool future per tiny task |
+| Erlang                 |     2016.432 |               BEAM process per tiny task |
 
 ## Go vs C Large Fanout Stress — spawn 512 tiny workers (1 runs avg)
 
 | Language               |     Avg (ms) |                        Concurrency model |
 |------------------------|--------------|------------------------------------------|
-| C (pthreads)           |       47.707 |                  pthread per stress task |
-| Go                     |       18.560 |          goroutine per stress task (M:N) |
+| C (pthreads)           |       51.745 |                  pthread per stress task |
+| Go                     |        9.318 |          goroutine per stress task (M:N) |
 
 ## Parallel Artifact Footprint
 
 | Language               |         Binary |     Per-thread |                Notes |
 |------------------------|----------------|----------------|----------------------|
-| Simple (native)        |       587.4 KB | OS default (8MB) |        Cranelift AOT |
-| Simple (SMF)           |         6.7 KB | OS default (8MB) |    + runtime 42.9 MB |
-| Simple cooperative green (native) |       534.0 KB | current OS thread |    cooperative queue |
-| Simple cooperative green (SMF) |        12.3 KB | current OS thread |    + runtime 42.9 MB |
-| Simple multicore green (native) |       534.1 KB |   runtime pool |      multicore_green |
-| Simple multicore green (SMF) |         6.4 KB |   runtime pool |    + runtime 42.9 MB |
+| Simple (native)        |       588.1 KB | OS default (8MB) |        Cranelift AOT |
+| Simple (SMF)           |         7.9 KB | OS default (8MB) |    + runtime 42.9 MB |
+| Simple cooperative green (native) |       534.7 KB | current OS thread |    cooperative queue |
+| Simple cooperative green (SMF) |        13.6 KB | current OS thread |    + runtime 42.9 MB |
+| Simple multicore green (native) |       534.7 KB |   runtime pool |      multicore_green |
+| Simple multicore green (SMF) |         7.7 KB |   runtime pool |    + runtime 42.9 MB |
 | C (pthreads)           |        15.8 KB | OS default (8MB) |              gcc -O2 |
 | Go                     |         1.8 MB | goroutine (2-8KB) |        static binary |
 | Python                 |        370.0 B | OS default (8MB) |        + interpreter |
@@ -140,11 +141,11 @@ TUI startup speed is not measured by this cross-language profile. It is covered 
 | Language               |       Peak RSS |   Baseline RSS |     Per-worker delta |
 |------------------------|----------------|----------------|----------------------|
 | Simple (native)        |         2.2 MB |         2.0 MB |               ~128KB |
-| Simple multicore green |         2.2 MB |         2.0 MB |               ~128KB |
+| Simple multicore green |         2.5 MB |         2.0 MB |               ~256KB |
 | C (pthreads)           |         2.0 MB |         2.0 MB |                 ~0KB |
 | Go                     |         2.0 MB |         1.8 MB |               ~128KB |
-| Python                 |        10.2 MB |        10.2 MB |                 ~0KB |
-| Java                   |        47.0 MB |        42.8 MB |              ~2176KB |
+| Python                 |        10.5 MB |        10.2 MB |               ~128KB |
+| Java                   |        47.5 MB |        43.0 MB |              ~2304KB |
 
 > **Workload:** LCG (Linear Congruential Generator) with 100K iterations per worker.
 > Each worker reads shared constants (LCG_A, LCG_C, LCG_M, ITERS).

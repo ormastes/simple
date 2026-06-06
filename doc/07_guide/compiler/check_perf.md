@@ -108,6 +108,9 @@ for full reports on slow hosts, or lower it for smoke evidence. The 1000-worker
 Simple OS-thread fanout source is intentionally reported separately from Simple
 green fanout and uses loop-based `thread_spawn` fork-join so the harness does not need
 large unrolled source generation.
+Generated Simple concurrency workloads compute an expected checksum and exit
+nonzero on mismatch, so runtime-pool closure lookup failures or wrong joins are
+classified as failed rows instead of performance wins.
 The profile-report contract rejects numbered concurrency aliases such as
 `thread_spawn2`, `spawn_isolated2`, and `spawn_limited2`; use the semantic API
 names in reports, generated workloads, and profile-script comments.

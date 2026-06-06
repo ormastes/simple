@@ -135,6 +135,8 @@ failure_reason() {
         echo "timeout"
     elif [ "$_status" -eq 139 ]; then
         echo "segfault"
+    elif echo "$_out" | grep -q 'checksum_mismatch'; then
+        echo "checksum mismatch"
     elif echo "$_out" | grep -q 'Undefined symbol: rt_len'; then
         echo "missing rt_len"
     elif echo "$_out" | grep -q 'rt_pool_'; then
@@ -219,12 +221,19 @@ write_simple_parallel() {
         echo 'val LCG_C: i64 = 12345'
         echo 'val LCG_M: i64 = 2147483648'
         echo 'val ITERS: i64 = 100000'
+        echo 'extern fn rt_exit(code: i32)'
         echo ''
         echo 'fn worker(seed: i64) -> i64:'
         echo '    var x = seed'
         echo '    for i in 0..ITERS:'
         echo '        x = (x * LCG_A + LCG_C) % LCG_M'
         echo '    x'
+        echo ''
+        echo 'fn expected_total() -> i64:'
+        echo '    var total: i64 = 0'
+        echo '    for seed in 0..WORKERS:'
+        echo '        total = total + worker(seed)'
+        echo '    total'
         echo ''
         echo 'fn main():'
         for i in $(seq 0 "$_last_os_worker"); do
@@ -234,6 +243,10 @@ write_simple_parallel() {
         for i in $(seq 0 "$_last_os_worker"); do
             echo "    total = total + h${i}.join()"
         done
+        echo '    val expected = expected_total()'
+        echo '    if total != expected:'
+        echo '        println("checksum_mismatch total={total} expected={expected}")'
+        echo '        rt_exit(74)'
         echo '    println("total = {total}")'
     } >"$BUILD_DIR/parallel.spl"
 }
@@ -250,12 +263,20 @@ write_simple_parallel_cooperative_green() {
         echo 'val LCG_C: i64 = 12345'
         echo 'val LCG_M: i64 = 2147483648'
         echo 'val ITERS: i64 = 100000'
+        echo "val WORKERS: i64 = ${GREEN_WORKERS}"
+        echo 'extern fn rt_exit(code: i32)'
         echo ''
         echo 'fn worker(seed: i64) -> i64:'
         echo '    var x = seed'
         echo '    for i in 0..ITERS:'
         echo '        x = (x * LCG_A + LCG_C) % LCG_M'
         echo '    x'
+        echo ''
+        echo 'fn expected_total() -> i64:'
+        echo '    var total: i64 = 0'
+        echo '    for seed in 0..WORKERS:'
+        echo '        total = total + worker(seed)'
+        echo '    total'
         echo ''
         echo 'fn main():'
         for i in $(seq 0 "$_last_green_worker"); do
@@ -266,6 +287,10 @@ write_simple_parallel_cooperative_green() {
         for i in $(seq 0 "$_last_green_worker"); do
             echo "    total = total + h${i}.join()"
         done
+        echo '    val expected = expected_total()'
+        echo '    if total != expected:'
+        echo '        println("checksum_mismatch total={total} expected={expected}")'
+        echo '        rt_exit(74)'
         echo '    println("total = {total}")'
     } >"$BUILD_DIR/parallel_cooperative_green.spl"
 }
@@ -284,12 +309,19 @@ write_simple_parallel_multicore_green() {
         echo 'val LCG_C: i64 = 12345'
         echo 'val LCG_M: i64 = 2147483648'
         echo 'val ITERS: i64 = 100000'
+        echo "val WORKERS: i64 = ${MULTICORE_GREEN_WORKERS}"
         echo ''
         echo 'fn worker(seed: i64) -> i64:'
         echo '    var x = seed'
         echo '    for i in 0..ITERS:'
         echo '        x = (x * LCG_A + LCG_C) % LCG_M'
         echo '    x'
+        echo ''
+        echo 'fn expected_total() -> i64:'
+        echo '    var total: i64 = 0'
+        echo '    for seed in 0..WORKERS:'
+        echo '        total = total + worker(seed)'
+        echo '    total'
         echo ''
         echo 'fn main():'
         for i in $(seq 0 "$_last_multicore_worker"); do
@@ -307,6 +339,10 @@ write_simple_parallel_multicore_green() {
         for i in $(seq 0 "$_last_multicore_worker"); do
             echo "    total = total + h${i}.join()"
         done
+        echo '    val expected = expected_total()'
+        echo '    if total != expected:'
+        echo '        println("checksum_mismatch total={total} expected={expected}")'
+        echo '        rt_exit(74)'
         echo '    println("total = {total}")'
     } >"$BUILD_DIR/parallel_multicore_green.spl"
 }
@@ -323,12 +359,19 @@ write_simple_fanout() {
         echo 'val LCG_M: i64 = 2147483648'
         echo "val ITERS: i64 = ${FANOUT_ITERS}"
         echo "val WORKERS: i64 = ${FANOUT_WORKERS}"
+        echo 'extern fn rt_exit(code: i32)'
         echo ''
         echo 'fn work(seed: i64) -> i64:'
         echo '    var x = seed'
         echo '    for i in 0..ITERS:'
         echo '        x = (x * LCG_A + LCG_C) % LCG_M'
         echo '    x'
+        echo ''
+        echo 'fn expected_total() -> i64:'
+        echo '    var total: i64 = 0'
+        echo '    for seed in 0..WORKERS:'
+        echo '        total = total + work(seed)'
+        echo '    total'
         echo ''
         echo 'fn main():'
         for i in $(seq 0 "$_last_fanout_os_worker"); do
@@ -338,6 +381,10 @@ write_simple_fanout() {
         for i in $(seq 0 "$_last_fanout_os_worker"); do
             echo "    total = total + h${i}.join()"
         done
+        echo '    val expected = expected_total()'
+        echo '    if total != expected:'
+        echo '        println("checksum_mismatch total={total} expected={expected}")'
+        echo '        rt_exit(74)'
         echo '    println("total = {total}")'
     } >"$BUILD_DIR/fanout.spl"
 }
@@ -353,12 +400,20 @@ write_simple_fanout_cooperative_green() {
         echo 'val LCG_C: i64 = 12345'
         echo 'val LCG_M: i64 = 2147483648'
         echo "val ITERS: i64 = ${FANOUT_ITERS}"
+        echo "val WORKERS: i64 = ${FANOUT_COOPERATIVE_GREEN_WORKERS}"
+        echo 'extern fn rt_exit(code: i32)'
         echo ''
         echo 'fn work(seed: i64) -> i64:'
         echo '    var x = seed'
         echo '    for i in 0..ITERS:'
         echo '        x = (x * LCG_A + LCG_C) % LCG_M'
         echo '    x'
+        echo ''
+        echo 'fn expected_total() -> i64:'
+        echo '    var total: i64 = 0'
+        echo '    for seed in 0..WORKERS:'
+        echo '        total = total + work(seed)'
+        echo '    total'
         echo ''
         echo 'fn main():'
         for i in $(seq 0 "$_last_fanout_worker"); do
@@ -369,6 +424,10 @@ write_simple_fanout_cooperative_green() {
         for i in $(seq 0 "$_last_fanout_worker"); do
             echo "    total = total + h${i}.join()"
         done
+        echo '    val expected = expected_total()'
+        echo '    if total != expected:'
+        echo '        println("checksum_mismatch total={total} expected={expected}")'
+        echo '        rt_exit(74)'
         echo '    println("total = {total}")'
     } >"$BUILD_DIR/fanout_cooperative_green.spl"
 }
@@ -383,12 +442,19 @@ write_simple_fanout_multicore_green() {
         echo 'val LCG_C: i64 = 12345'
         echo 'val LCG_M: i64 = 2147483648'
         echo "val ITERS: i64 = ${FANOUT_ITERS}"
+        echo "val WORKERS: i64 = ${FANOUT_MULTICORE_GREEN_WORKERS}"
         echo ''
         echo 'fn work(seed: i64) -> i64:'
         echo '    var x = seed'
         echo '    for i in 0..ITERS:'
         echo '        x = (x * LCG_A + LCG_C) % LCG_M'
         echo '    x'
+        echo ''
+        echo 'fn expected_total() -> i64:'
+        echo '    var total: i64 = 0'
+        echo '    for seed in 0..WORKERS:'
+        echo '        total = total + work(seed)'
+        echo '    total'
         echo ''
         echo 'fn main():'
         for i in $(seq 0 "$_last_fanout_worker"); do
@@ -406,6 +472,10 @@ write_simple_fanout_multicore_green() {
         for i in $(seq 0 "$_last_fanout_worker"); do
             echo "    total = total + h${i}.join()"
         done
+        echo '    val expected = expected_total()'
+        echo '    if total != expected:'
+        echo '        println("checksum_mismatch total={total} expected={expected}")'
+        echo '        rt_exit(74)'
         echo '    println("total = {total}")'
     } >"$BUILD_DIR/fanout_multicore_green.spl"
 }
@@ -1041,6 +1111,7 @@ cat >"$REPORT_PATH" <<EOF
 - Generates equivalent hello, recursive fib, in-process warm fib, worker, and fanout workloads for each supported runtime.
 - Measures binary/script size, cold process startup, warm throughput, parallel worker latency, fanout latency, parallel binary size, and peak RSS where the runtime and compiler are available.
 - Uses bounded commands so failed, missing, timed-out, or unavailable lanes are classified instead of silently treated as passing data.
+- Generated Simple concurrency workloads compute an expected checksum and exit nonzero on mismatch, so runtime-pool closure failures cannot be timed as valid M:N evidence.
 - Warm throughput is measured in-process where the runtime can print \`warm_ms\`; interpreter and SMF rows use outer-process timing and are labeled that way.
 
 ## Environment
