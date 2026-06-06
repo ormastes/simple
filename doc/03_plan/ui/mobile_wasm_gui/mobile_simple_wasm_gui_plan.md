@@ -82,6 +82,16 @@ handles events over the existing subprocess stdin/stdout `SubprocessMessage` /
 `WebRenderInputEnvelope` channel — genuine Simple-generated UI + Simple-handled
 events on Tauri2, no hard-coded HTML, no wasm dependency.
 
+## Landed (2026-06-06)
+
+- **Pure-Simple HTML generator** `src/lib/common/ui/mobile_html_gen.spl`: a leaf
+  node model (`HtmlNode` = tag + attrs + text + children) + `html_node_render`
+  (recursive, escaping) + `html_gen_document`. Simple now genuinely *generates*
+  HTML from a model instead of pasting strings, without depending on the stubbed
+  `widget_store_ops`. Verified by `test/01_unit/lib/common/ui/mobile_html_gen_spec.spl`
+  (7 absolute-oracle assertions: exact markup, escaping, nesting, document wrap)
+  — confirmed real via a negative control (wrong-expectation spec fails).
+
 ## Next milestones
 
 1. Fix wasm string ABI (export memory + readable text return) — unblocks live render.
