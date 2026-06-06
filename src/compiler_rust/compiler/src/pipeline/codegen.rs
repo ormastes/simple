@@ -44,6 +44,7 @@ impl CompilerPipeline {
             }
             BackendKind::Llvm => {
                 let mut llvm_mir = mir_module.clone();
+                llvm_mir.functions = crate::codegen::shared::expand_with_outlined(&llvm_mir);
                 for func in &mut llvm_mir.functions {
                     if func.name == "main" {
                         func.name = "spl_main".to_string();

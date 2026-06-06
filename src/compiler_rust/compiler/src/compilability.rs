@@ -185,8 +185,11 @@ fn analyze_node(node: &Node, reasons: &mut Vec<FallbackReason>) {
         Node::For(for_stmt) => {
             analyze_expr(&for_stmt.iterable, reasons);
             analyze_block(&for_stmt.body, reasons);
-            // For loops require collection iteration - needs runtime support
-            add_reason(reasons, FallbackReason::CollectionOps);
+            // Scalar range loops lower to native loop MIR. Other iterable
+            // loops still require collection iteration runtime support.
+            if !matches!(for_stmt.iterable, Expr::Range { .. }) {
+                add_reason(reasons, FallbackReason::CollectionOps);
+            }
         }
         Node::Loop(loop_stmt) => {
             analyze_block(&loop_stmt.body, reasons);
@@ -363,7 +366,6 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
             if let Some(e) = end {
                 analyze_expr(e, reasons);
             }
-            add_reason(reasons, FallbackReason::CollectionOps);
         }
 
         // Lambdas/closures need environment capture
@@ -780,6 +782,25 @@ mod tests {
         let status = results.get("get_len").unwrap();
         assert!(!status.is_compilable());
         assert!(status.reasons().contains(&FallbackReason::MethodCall));
+    }
+
+    #[test]
+    fn test_scalar_range_loop_worker_compilable() {
+        let results = parse_and_analyze(
+            r#"val ITERS: i64 = 10
+fn worker(seed: i64) -> i64:
+    var x = seed
+    for i in 0..ITERS:
+        x = (x * 1103515245 + 12345) % 2147483648
+    x
+"#,
+        );
+        let status = results.get("worker").unwrap();
+        assert!(
+            status.is_compilable(),
+            "scalar range-loop worker should compile natively, got {:?}",
+            status.reasons()
+        );
     }
 
     #[test]
