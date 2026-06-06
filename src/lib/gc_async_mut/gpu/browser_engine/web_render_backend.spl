@@ -47,8 +47,16 @@ fn _repo_root() -> text:
     if lib.ends_with("/src"):
         return lib[0 : lib.len() - 4]
     if lib == "" or lib == "src":
-        return "."
+        return _env_or("PWD", ".")
     lib
+
+fn _abs_path(p: text) -> text:
+    """Absolute path for a chromium file:// URL (a relative path makes Electron
+    load a blank page)."""
+    if p.starts_with("/"):
+        return p
+    val cwd = _env_or("PWD", ".")
+    cwd + "/" + p
 
 fn _shell_quote(s: text) -> text:
     "'" + s.replace("'", "'\\''") + "'"
@@ -138,12 +146,13 @@ impl WebRenderBackend:
             return []
         self.render_html_to_pixels(html)
 
-    fn show_live_window(self, html_path: text) -> bool:
-        """Open the backend's NATIVE LIVE window for this page and return true if
-        one was opened. The chromium backend launches a real, interactive Chromium
-        (Electron) BrowserWindow on the live HTML — crisp, resizable, event-driven,
-        not a captured bitmap. pure_simple has no live DOM shell (it is a software
-        rasterizer), so it returns false and the caller presents its pixel frame.
+    fn show_live_window(self, html_path: text, width: i32, height: i32, title: text) -> bool:
+        """Open the backend's NATIVE LIVE window for this page (at width x height,
+        titled `title`) and return true if one was opened. The chromium backend
+        launches a real, interactive Chromium (Electron) BrowserWindow on the live
+        HTML — crisp, resizable, event-driven, not a captured bitmap. pure_simple
+        has no live DOM shell (it is a software rasterizer), so it returns false and
+        the caller presents its pixel frame at the same size.
 
         render_html_to_pixels() stays the path for the bit-level comparison gate;
         this is the path for live display."""
@@ -152,10 +161,14 @@ impl WebRenderBackend:
         val root = _repo_root()
         val electron = _env_or("SIMPLE_WEB_RENDER_ELECTRON", root + "/tools/electron-shell/node_modules/.bin/electron")
         val shell = root + "/tools/electron-shell"
-        val url = "file://" + html_path
-        # nohup + background so the live window fully detaches and survives this
-        # (short-lived) Simple process exiting.
-        val cmd = "nohup " + _shell_quote(electron) + " --no-sandbox " + _shell_quote(shell) +
+        val url = "file://" + _abs_path(html_path)
+        # Size + title passed to the shell so the chromium window matches the
+        # pure_simple window. nohup + background so the live window fully detaches
+        # and survives this (short-lived) Simple process exiting.
+        val cmd = "SIMPLE_ELECTRON_WIDTH=" + width.to_text() +
+            " SIMPLE_ELECTRON_HEIGHT=" + height.to_text() +
+            " SIMPLE_ELECTRON_TITLE=" + _shell_quote(title) +
+            " nohup " + _shell_quote(electron) + " --no-sandbox " + _shell_quote(shell) +
             " --url " + _shell_quote(url) + " >/dev/null 2>&1 &"
         val result = rt_process_run("/bin/sh", ["-c", cmd])
         result.2 == 0

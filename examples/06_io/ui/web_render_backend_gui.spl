@@ -17,8 +17,8 @@
 
 use std.gc_async_mut.gpu.browser_engine.web_render_backend.{WebRenderBackend, web_render_backend_names}
 use std.io.window_winit.{
-    WinitLoop, WinitWindow, winit_loop_new, winit_loop_free,
-    winit_window_new, winit_window_free, winit_present_rgba, winit_poll_close_requested}
+    WinitLoop, WinitWindow, WinitInput, winit_loop_new, winit_loop_free,
+    winit_window_new, winit_window_free, winit_present_rgba, winit_poll_input}
 use std.env.variables.{env_get_or}
 use std.cli.cli_util.{get_cli_args}
 
@@ -27,7 +27,9 @@ fn _repo_root() -> text:
     if lib.ends_with("/src"):
         return lib[0 : lib.len() - 4]
     if lib == "" or lib == "src":
-        return "."
+        # absolute cwd so the chromium file:// URL is valid (a relative path
+        # makes Electron load a blank page).
+        return env_get_or("PWD", ".")
     lib
 
 fn _backend_from_args(fallback: text) -> text:
@@ -65,20 +67,41 @@ fn _viewport_from_args(fw: i32, fh: i32) -> (i32, i32):
                     return (w, h)
     (fw, fh)
 
-fn resample(src: [u32], sw: i32, sh: i32, dw: i32, dh: i32) -> [i64]:
-    """Nearest-neighbour resample src (sw x sh, 0xAARRGGBB) to dw x dh — used to
-    DOWNSCALE a large viewport render to a sensible window (0x00RRGGBB; softbuffer
-    ignores the top byte)."""
+fn scroll_slice(src: [u32], sw: i32, sh_total: i32, src_y0: i32, src_h: i32, dw: i32, dh: i32) -> [i64]:
+    """Take src_h rows starting at src_y0 from src (sw wide, sh_total tall,
+    0xAARRGGBB) and scale that slice to a dw x dh presentable [i64] buffer, then
+    overlay a scrollbar on the right edge showing the position within the full page."""
     var out: [i64] = [0; dw * dh]
     var dy = 0
     while dy < dh:
-        val sy = dy * sh / dh
+        val sy = src_y0 + dy * src_h / dh
         var dx = 0
         while dx < dw:
             val sx = dx * sw / dw
             out[dy * dw + dx] = src[sy * sw + sx].to_i64() & 0xFFFFFF
             dx = dx + 1
         dy = dy + 1
+    # Scrollbar (right edge): track + a thumb sized to the visible fraction and
+    # positioned by scroll offset, so it's clear the page scrolls and where you are.
+    val bar_w = 10
+    var thumb_h = dh * src_h / sh_total
+    if thumb_h < 24:
+        thumb_h = 24
+    if thumb_h > dh:
+        thumb_h = dh
+    val max_y0 = sh_total - src_h
+    var thumb_y = 0
+    if max_y0 > 0:
+        thumb_y = src_y0 * (dh - thumb_h) / max_y0
+    var by = 0
+    while by < dh:
+        val in_thumb = by >= thumb_y and by < thumb_y + thumb_h
+        val col: i64 = if in_thumb: 0x00C8D0DC else: 0x00222A33
+        var bx = dw - bar_w
+        while bx < dw:
+            out[by * dw + bx] = col
+            bx = bx + 1
+        by = by + 1
     out
 
 fn main() -> i64:
@@ -86,39 +109,37 @@ fn main() -> i64:
     val default_html = _repo_root() + "/test/09_baselines/web_html_input/vanillastyle_demo.html"
     val html_path = _html_path_from_args(env_get_or("WEB_RENDER_HTML", default_html))
 
-    # CSS viewport the page lays out in. The default is small because the
-    # pure_simple raster path runs fully interpreted (the JIT cannot lower its
-    # `any` types — see doc) and is interpreter-bound; chromium opens a live
-    # window and ignores this. Override with a 'WxH' argv (e.g. 1024x768).
-    val (render_w, render_h) = _viewport_from_args(_int_env("PAGE_W", 320), _int_env("PAGE_H", 240))
-    # Window the result is DOWNSCALED into (so a desktop page looks normal, not
-    # zoomed). Never upscale past the viewport.
-    var disp_w = _int_env("DISP_W", 960)
-    if disp_w > render_w:
-        disp_w = render_w
-    val disp_h = render_h * disp_w / render_w
+    # ONE big window size shared by BOTH backends (a 'WxH' argv overrides). Both
+    # show the page at the SAME large size — same app code, same page, same window.
+    val (win_w, win_h) = _viewport_from_args(_int_env("PAGE_W", 820), _int_env("PAGE_H", 620))
+    val title = "Simple Web Renderer — backend: " + backend_name
 
-    val renderer = WebRenderBackend.create(backend_name, render_w, render_h)
-    print "Showing {html_path}"
-    print "  via web-render backend '{renderer.name()}'..."
-
-    # Backends with a live DOM shell (chromium) open their own interactive,
-    # crisp, event-driven window. Software-rasterizer backends (pure_simple)
-    # fall through to the pixel-frame path below.
-    if renderer.show_live_window(html_path):
-        print "Opened live '{renderer.name()}' window (interactive HTML)."
+    # chromium opens its own live, interactive window at the full window size.
+    if WebRenderBackend.create(backend_name, win_w, win_h).show_live_window(html_path, win_w, win_h, title):
+        print "Showing {html_path}"
+        print "Opened live '{backend_name}' window (interactive HTML) at {win_w}x{win_h}."
         return 0
 
-    print "  rasterizing at viewport {render_w}x{render_h} -> window {disp_w}x{disp_h}..."
-    val pixels = renderer.render_html_file_to_pixels(html_path)
-    if pixels.len() < render_w * render_h:
-        print "Backend '{renderer.name()}' produced too few pixels ({pixels.len()}); cannot present."
-        return 1
-    print "Backend '{renderer.name()}' rendered {pixels.len()} px."
+    # pure_simple is a software rasterizer (interpreted + canvas-bound). Render the
+    # page once at a wide-ish internal resolution (PURE_SIMPLE_RENDER_W — wider =
+    # smaller, more chromium-like fonts, but slower) but TALL enough to span several
+    # screens, then run a LIVE, INTERACTIVE event loop: scroll with Up/Down arrows,
+    # quit with Esc or the close button. Each frame presents an upscaled slice of
+    # the pre-rendered page (with a scrollbar) — big, live, interactive, without
+    # re-rendering on every scroll.
+    val rw = _int_env("PURE_SIMPLE_RENDER_W", 460)
+    val rh_win = if win_w > 0: rw * win_h / win_w else: rw
+    val pages = _int_env("PURE_SIMPLE_PAGES", 2)
+    val full_rh = rh_win * pages
+    val renderer = WebRenderBackend.create(backend_name, rw, full_rh)
+    print "Showing {html_path}"
+    print "  via web-render backend '{renderer.name()}': render {rw}x{full_rh} -> window {win_w}x{win_h}  (scroll: Up/Down, quit: Esc)..."
 
-    val packed = resample(pixels, render_w, render_h, disp_w, disp_h)
-    val window_w = disp_w
-    val window_h = disp_h
+    val full_pixels = renderer.render_html_file_to_pixels(html_path)
+    if full_pixels.len() < rw * full_rh:
+        print "Backend '{renderer.name()}' produced too few pixels ({full_pixels.len()}); cannot present."
+        return 1
+    print "Backend '{renderer.name()}' rendered {full_pixels.len()} px."
 
     if env_get_or("SIMPLE_GUI", "") != "1":
         print "No GUI requested (set SIMPLE_GUI=1 to open a window); headless render only."
@@ -128,18 +149,36 @@ fn main() -> i64:
     if not lp.is_valid:
         print "No GUI runtime available."
         return 0
-    val title = "Simple Web Renderer — backend: " + renderer.name()
-    val win = winit_window_new(lp, window_w.to_i64(), window_h.to_i64(), title)
+    val win = winit_window_new(lp, win_w.to_i64(), win_h.to_i64(), title)
     if not win.is_valid:
         winit_loop_free(lp)
         return 0
 
+    var max_off = full_rh - rh_win
+    if max_off < 0:
+        max_off = 0
+    val step = if rh_win / 6 > 0: rh_win / 6 else: 1
+    var off = 0
+    var frame = scroll_slice(full_pixels, rw, full_rh, off, rh_win, win_w, win_h)
     var running = true
     var iters = 0
-    while running and iters < 2000000:
-        winit_present_rgba(win, window_w.to_i64(), window_h.to_i64(), packed)
-        if winit_poll_close_requested(lp):
+    while running and iters < 20000000:
+        val input = winit_poll_input(lp)
+        if input.close:
             running = false
+        var dirty = false
+        for k in input.keys:
+            if k == 40 and off + step <= max_off:    # Down arrow
+                off = off + step
+                dirty = true
+            if k == 38 and off - step >= 0:           # Up arrow
+                off = off - step
+                dirty = true
+            if k == 27:                                # Esc
+                running = false
+        if dirty:
+            frame = scroll_slice(full_pixels, rw, full_rh, off, rh_win, win_w, win_h)
+        winit_present_rgba(win, win_w.to_i64(), win_h.to_i64(), frame)
         iters = iters + 1
 
     winit_window_free(win)

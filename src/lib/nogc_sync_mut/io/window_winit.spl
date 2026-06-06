@@ -19,12 +19,14 @@ extern fn rt_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64
 extern fn rt_winit_window_present_rgba(win: i64, w: i64, h: i64, pixels: [i64])
 extern fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64
 extern fn rt_winit_event_get_type(ev: i64) -> i64
+extern fn rt_winit_event_keyboard_input(ev: i64) -> (i64, i64, bool)
 extern fn rt_winit_event_free(ev: i64)
 extern fn rt_winit_window_free(win: i64)
 extern fn rt_winit_event_loop_free(el: i64)
 
-# Event type returned by rt_winit_event_get_type for a close request.
+# Event types returned by rt_winit_event_get_type.
 val EVT_CLOSE: i64 = 3
+val EVT_KEYBOARD: i64 = 10
 
 # ============================================================================
 # Tier 2: Typed handles
@@ -80,3 +82,28 @@ fn winit_poll_close_requested(lp: WinitLoop) -> bool:
         rt_winit_event_free(ev)
         ev = rt_winit_event_loop_poll_events(lp.handle, 1)
     close_requested
+
+# Input drained from one poll: a close request plus the key codes pressed this
+# frame (drains + frees every pending event, like winit_poll_close_requested).
+# Lets an app be interactive (scroll, keys) without touching raw rt_* externs.
+struct WinitInput:
+    close: bool
+    keys: [i64]
+
+fn winit_poll_input(lp: WinitLoop) -> WinitInput:
+    var close_requested = false
+    var keys: [i64] = []
+    if not lp.is_valid:
+        return WinitInput(close: false, keys: keys)
+    var ev = rt_winit_event_loop_poll_events(lp.handle, 1)
+    while ev != 0:
+        val kind = rt_winit_event_get_type(ev)
+        if kind == EVT_CLOSE:
+            close_requested = true
+        elif kind == EVT_KEYBOARD:
+            val (_scancode, keycode, pressed) = rt_winit_event_keyboard_input(ev)
+            if pressed:
+                keys = keys.push(keycode)
+        rt_winit_event_free(ev)
+        ev = rt_winit_event_loop_poll_events(lp.handle, 1)
+    WinitInput(close: close_requested, keys: keys)

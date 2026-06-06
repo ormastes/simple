@@ -637,11 +637,15 @@ function shellUrl() {
 if (app) app.whenReady().then(() => {
     const platform = process.platform;
 
+    // When a SIMPLE_ELECTRON_TITLE is provided (e.g. the web-render backend
+    // comparison), use a standard visible title bar so the title — which names
+    // the backend — is actually shown. The WM/MDI default hides it (hiddenInset).
+    const showTitle = !!process.env.SIMPLE_ELECTRON_TITLE;
     const winOptions = {
-        width: 1280,
-        height: 720,
-        titleBarStyle: platform === 'darwin' ? 'hiddenInset' : 'hidden',
-        titleBarOverlay: platform !== 'darwin'
+        width: Number(process.env.SIMPLE_ELECTRON_WIDTH) || 1280,
+        height: Number(process.env.SIMPLE_ELECTRON_HEIGHT) || 720,
+        titleBarStyle: showTitle ? 'default' : (platform === 'darwin' ? 'hiddenInset' : 'hidden'),
+        titleBarOverlay: (!showTitle && platform !== 'darwin')
             ? { color: '#0b0d10', symbolColor: '#ffffff', height: 28 }
             : undefined,
         backgroundColor: '#0b0d10',
@@ -650,7 +654,7 @@ if (app) app.whenReady().then(() => {
             contextIsolation: true,
             preload: path.join(__dirname, 'preload.js')
         },
-        title: 'Simple UI'
+        title: process.env.SIMPLE_ELECTRON_TITLE || 'Simple UI'
     };
 
     // Platform-specific material support
@@ -662,6 +666,15 @@ if (app) app.whenReady().then(() => {
     }
 
     mainWindow = new BrowserWindow(winOptions);
+
+    // Lock the window title to our backend label: a loaded page's <title>
+    // (document.title) otherwise overrides it, hiding which backend rendered.
+    if (process.env.SIMPLE_ELECTRON_TITLE) {
+        const lockedTitle = process.env.SIMPLE_ELECTRON_TITLE;
+        mainWindow.on('page-title-updated', (e) => { e.preventDefault(); });
+        mainWindow.setTitle(lockedTitle);
+        mainWindow.webContents.on('did-finish-load', () => mainWindow.setTitle(lockedTitle));
+    }
 
     mainWindow.loadURL(shellUrl());
     mainWindow.webContents.once('did-finish-load', () => {
