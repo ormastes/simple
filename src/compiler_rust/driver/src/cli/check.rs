@@ -1332,6 +1332,28 @@ fn concurrency_api_import_error(
         });
     }
 
+    if (path_text == "std.concurrent.thread"
+        || path_text == "std.nogc_async_mut.concurrent.thread"
+        || path_text == "std.nogc_sync_mut.concurrent.thread")
+        && target_name == "thread_spawn2"
+    {
+        return Some(CheckError {
+            file: file_path.display().to_string(),
+            line,
+            column,
+            severity: ErrorSeverity::Error,
+            code: Some("E-PAR-002".to_string()),
+            message: "thread_spawn2 was a numbered compatibility alias and is not a public API".to_string(),
+            expected: Some("semantic OS-thread API symbol".to_string()),
+            found: Some(target_name.clone()),
+            notes: vec![
+                "numbered concurrency API names are rejected so OS-thread, cooperative-green, and multicore-green surfaces stay unambiguous"
+                    .to_string(),
+            ],
+            help: vec!["use thread_spawn_with_args for explicit-argument OS-thread spawning".to_string()],
+        });
+    }
+
     None
 }
 
@@ -1747,6 +1769,41 @@ mod tests {
             .errors
             .iter()
             .any(|error| error.code.as_deref() == Some("E-PAR-001")));
+    }
+
+    #[test]
+    fn test_check_rejects_numbered_thread_spawn_alias() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "use std.concurrent.thread.{{thread_spawn2}}\nfn main():\n    val x = 1"
+        )
+        .unwrap();
+
+        let result = check_file(file.path(), &[], false);
+        assert_eq!(result.status, CheckStatus::Error);
+        assert!(result.errors.iter().any(|error| {
+            error.code.as_deref() == Some("E-PAR-002")
+                && error.message.contains("thread_spawn2 was a numbered compatibility alias")
+                && error.help.iter().any(|help| help.contains("thread_spawn_with_args"))
+        }));
+    }
+
+    #[test]
+    fn test_check_rejects_numbered_thread_spawn_alias_multi_import() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "use std.spec, std.nogc_sync_mut.concurrent.thread.{{thread_spawn2}}\nfn main():\n    val x = 1"
+        )
+        .unwrap();
+
+        let result = check_file(file.path(), &[], false);
+        assert_eq!(result.status, CheckStatus::Error);
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.code.as_deref() == Some("E-PAR-002")));
     }
 
     #[test]
