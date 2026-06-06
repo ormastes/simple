@@ -4,7 +4,7 @@
 **Feature:** `ui_test_sgtti`
 **Architecture:** `doc/04_architecture/ui/ui_test_architecture.md`
 **Depends-for:** `doc/03_plan/ui/draw_ir/draw_io_sdn_draw_ir_plan.md` (Phase 5)
-**Status:** Proposed
+**Status:** In progress — Phase 1 implemented; Phases 2-5 pending
 **Owners:** `src/lib/nogc_sync_mut/ui_test`, `src/lib/common/ui/win_text_access`,
 `src/os/compositor/gtti`
 
@@ -81,7 +81,7 @@ without forking a new element model or changing the HTTP protocol path.
 
 ## Phases
 
-### Phase 1 - SGTTI test driver (GUI/web/2D in-process)
+### Phase 1 - SGTTI test driver (GUI/web/2D in-process) — done
 
 - New `src/lib/nogc_sync_mut/ui_test/sgtti.spl`:
   - `SgttiTestDriver` over a `WinTextSnapshot`, methods mirroring `UITestClient`:
@@ -95,6 +95,9 @@ without forking a new element model or changing the HTTP protocol path.
 - **Verify:** `bin/simple check` + probe `bin/simple run` asserting node lookup
   and `check_visible`/`check_text` truths.
 - **Exit:** GUI-shaped snapshot asserts in-process with no HTTP server.
+- **Evidence:** `src/lib/nogc_sync_mut/ui_test/sgtti.spl`,
+  memory-tier re-export shims, `test/01_unit/lib/nogc_sync_mut/ui_test/sgtti_spec.spl`,
+  and `doc/06_spec/01_unit/lib/nogc_sync_mut/ui_test/sgtti_spec.md`.
 
 ### Phase 2 - Target config + parity (`tui` | `gui` | `both`)
 
@@ -129,7 +132,8 @@ without forking a new element model or changing the HTTP protocol path.
 ## Cross-link: Draw IR inspection depends on this
 
 `doc/03_plan/ui/draw_ir/draw_io_sdn_draw_ir_plan.md` **Phase 5** (gated
-`/api/test/draw-ir`, `?id=`, `/diff`, `/layout`) and **Phase 6**
+`/api/test/draw-ir`, `/api/test/draw-ir?id=...`,
+`/api/test/draw-ir/diff`, `/api/test/draw-ir/layout?id=...`) and **Phase 6**
 (`expect_draw`) read the in-process snapshot substrate. They are **blocked on
 Phases 1-2 here**:
 

@@ -58,11 +58,11 @@ REQUIREMENTS -> NFR;  RESEARCH -> DESIGN -> ADR;  GUIDES <- OPERATIONS
 | **Manual** specs | Non-`_spec.md` names (README, INDEX, guides) | Hand-edited, survives regeneration |
 | **Auto-meta** | `feature.md`, `pending_feature.md` | Regenerated every test run |
 
-Categories mirror test/ structure:
-- `unit/` -> `test/01_unit/`, `integration/` -> `test/02_integration/`, `system/` -> `test/03_system/`
-- `feature/` for language feature specs (language/, usage/)
+Categories mirror the numbered `test/` structure:
+- `01_unit/` -> `test/01_unit/`, `02_integration/` -> `test/02_integration/`, `03_system/` -> `test/03_system/`
+- feature specs keep their mirrored numbered tier instead of moving to a flat `feature/` tree.
 
-Path mapping: `test/01_unit/compiler/parser/x_spec.spl` -> `doc/06_spec/unit/compiler/parser/x_spec.md`
+Path mapping: `test/01_unit/compiler/parser/x_spec.spl` -> `doc/06_spec/01_unit/compiler/parser/x_spec.md`
 
 See `doc/06_spec/FILE.md` for full manifest.
 

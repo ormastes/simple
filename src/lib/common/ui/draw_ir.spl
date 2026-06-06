@@ -3,16 +3,47 @@
 # This is a pure Simple boundary. GPU execution is deliberately deferred to
 # backend plugins that consume these batches and report fallback decisions.
 
-val DRAW_IR_SCHEMA_VERSION: text = "simple-draw-ir-v1"
+val DRAW_IR_SCHEMA_VERSION: text = "simple-draw-ir-v2"
 val DRAW_IR_BACKEND_CPU: text = "cpu"
 val DRAW_IR_BACKEND_GPU: text = "gpu"
 val DRAW_IR_BACKEND_AUTO: text = "auto"
 val DRAW_IR_COMMAND_RECT: text = "rect"
 val DRAW_IR_COMMAND_TEXT: text = "text"
+val DRAW_IR_COMMAND_EDGE: text = "edge"
+val DRAW_IR_COMMAND_PATH: text = "path"
+val DRAW_IR_COMMAND_IMAGE: text = "image"
+val DRAW_IR_COMMAND_GROUP: text = "group"
+val DRAW_IR_COMMAND_PORT: text = "port"
+val DRAW_IR_EDGE_STRAIGHT: text = "straight"
+val DRAW_IR_EDGE_ORTHOGONAL: text = "orthogonal"
+val DRAW_IR_EDGE_BEZIER: text = "bezier"
 val DRAW_IR_SOURCE_MANUAL: text = "manual"
 val DRAW_IR_SOURCE_GUI_AST: text = "gui_ast"
 val DRAW_IR_SOURCE_HTML_AST: text = "html_ast"
 val DRAW_IR_SOURCE_WM_SCENE: text = "wm_scene"
+
+struct DrawIrPoint:
+    x: i32
+    y: i32
+
+struct DrawIrRect:
+    present: bool
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+
+struct DrawIrStyleProp:
+    key: text
+    value: text
+
+struct DrawEdge:
+    id: text
+    source: text
+    target: text
+    routing: text
+    points: [DrawIrPoint]
+    style: [DrawIrStyleProp]
 
 struct DrawIrEmbeddingConfig:
     surface_id: text
@@ -34,6 +65,15 @@ struct DrawIrCommand:
     height: i32
     color: u32
     text_value: text
+    border_rect: DrawIrRect
+    content_rect: DrawIrRect
+    hit_rect: DrawIrRect
+    clip_rect: DrawIrRect
+    computed_style: [DrawIrStyleProp]
+    edge: DrawEdge?
+    parent_id: text
+    image_uri: text
+    points: [DrawIrPoint]
 
 struct DrawIrSourceInfo:
     source_kind: text
@@ -104,6 +144,21 @@ struct Simple2dDrawIrCompositionPlan:
     fallback_required: bool
     fallback_reason: text
 
+fn draw_ir_point(x: i32, y: i32) -> DrawIrPoint:
+    DrawIrPoint(x: x, y: y)
+
+fn draw_ir_rect_bounds(x: i32, y: i32, width: i32, height: i32) -> DrawIrRect:
+    DrawIrRect(present: true, x: x, y: y, width: width, height: height)
+
+fn draw_ir_no_rect() -> DrawIrRect:
+    DrawIrRect(present: false, x: 0, y: 0, width: 0, height: 0)
+
+fn draw_ir_style_prop(key: text, value: text) -> DrawIrStyleProp:
+    DrawIrStyleProp(key: key, value: value)
+
+fn draw_edge(id: text, source: text, target: text, routing: text, points: [DrawIrPoint], style: [DrawIrStyleProp]) -> DrawEdge:
+    DrawEdge(id: id, source: source, target: target, routing: routing, points: points, style: style)
+
 fn draw_ir_embedding_config(surface_id: text, component_id: text, x: i32, y: i32, width: i32, height: i32, layer: i32, opacity_milli: i32, clip: bool) -> DrawIrEmbeddingConfig:
     DrawIrEmbeddingConfig(
         surface_id: surface_id,
@@ -126,7 +181,16 @@ fn draw_ir_rect(component_id: text, x: i32, y: i32, width: i32, height: i32, col
         width: width,
         height: height,
         color: color,
-        text_value: ""
+        text_value: "",
+        border_rect: draw_ir_no_rect(),
+        content_rect: draw_ir_no_rect(),
+        hit_rect: draw_ir_no_rect(),
+        clip_rect: draw_ir_no_rect(),
+        computed_style: [],
+        edge: nil,
+        parent_id: "",
+        image_uri: "",
+        points: []
     )
 
 fn draw_ir_text(component_id: text, x: i32, y: i32, text_value: text, color: u32) -> DrawIrCommand:
@@ -138,7 +202,142 @@ fn draw_ir_text(component_id: text, x: i32, y: i32, text_value: text, color: u32
         width: 0,
         height: 0,
         color: color,
-        text_value: text_value
+        text_value: text_value,
+        border_rect: draw_ir_no_rect(),
+        content_rect: draw_ir_no_rect(),
+        hit_rect: draw_ir_no_rect(),
+        clip_rect: draw_ir_no_rect(),
+        computed_style: [],
+        edge: nil,
+        parent_id: "",
+        image_uri: "",
+        points: []
+    )
+
+fn draw_ir_box_with_style(component_id: text, x: i32, y: i32, width: i32, height: i32, color: u32, border_rect: DrawIrRect, content_rect: DrawIrRect, hit_rect: DrawIrRect, clip_rect: DrawIrRect, computed_style: [DrawIrStyleProp]) -> DrawIrCommand:
+    DrawIrCommand(
+        kind: DRAW_IR_COMMAND_RECT,
+        component_id: component_id,
+        x: x,
+        y: y,
+        width: width,
+        height: height,
+        color: color,
+        text_value: "",
+        border_rect: border_rect,
+        content_rect: content_rect,
+        hit_rect: hit_rect,
+        clip_rect: clip_rect,
+        computed_style: computed_style,
+        edge: nil,
+        parent_id: "",
+        image_uri: "",
+        points: []
+    )
+
+fn draw_ir_edge_command(edge: DrawEdge) -> DrawIrCommand:
+    DrawIrCommand(
+        kind: DRAW_IR_COMMAND_EDGE,
+        component_id: edge.id,
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
+        color: 0u32,
+        text_value: "",
+        border_rect: draw_ir_no_rect(),
+        content_rect: draw_ir_no_rect(),
+        hit_rect: draw_ir_no_rect(),
+        clip_rect: draw_ir_no_rect(),
+        computed_style: edge.style,
+        edge: edge,
+        parent_id: "",
+        image_uri: "",
+        points: edge.points
+    )
+
+fn draw_ir_path_command(component_id: text, points: [DrawIrPoint], computed_style: [DrawIrStyleProp]) -> DrawIrCommand:
+    DrawIrCommand(
+        kind: DRAW_IR_COMMAND_PATH,
+        component_id: component_id,
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
+        color: 0u32,
+        text_value: "",
+        border_rect: draw_ir_no_rect(),
+        content_rect: draw_ir_no_rect(),
+        hit_rect: draw_ir_no_rect(),
+        clip_rect: draw_ir_no_rect(),
+        computed_style: computed_style,
+        edge: nil,
+        parent_id: "",
+        image_uri: "",
+        points: points
+    )
+
+fn draw_ir_image_command(component_id: text, x: i32, y: i32, width: i32, height: i32, image_uri: text, computed_style: [DrawIrStyleProp]) -> DrawIrCommand:
+    DrawIrCommand(
+        kind: DRAW_IR_COMMAND_IMAGE,
+        component_id: component_id,
+        x: x,
+        y: y,
+        width: width,
+        height: height,
+        color: 0u32,
+        text_value: "",
+        border_rect: draw_ir_no_rect(),
+        content_rect: draw_ir_no_rect(),
+        hit_rect: draw_ir_rect_bounds(x, y, width, height),
+        clip_rect: draw_ir_no_rect(),
+        computed_style: computed_style,
+        edge: nil,
+        parent_id: "",
+        image_uri: image_uri,
+        points: []
+    )
+
+fn draw_ir_group_command(component_id: text, parent_id: text) -> DrawIrCommand:
+    DrawIrCommand(
+        kind: DRAW_IR_COMMAND_GROUP,
+        component_id: component_id,
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
+        color: 0u32,
+        text_value: "",
+        border_rect: draw_ir_no_rect(),
+        content_rect: draw_ir_no_rect(),
+        hit_rect: draw_ir_no_rect(),
+        clip_rect: draw_ir_no_rect(),
+        computed_style: [],
+        edge: nil,
+        parent_id: parent_id,
+        image_uri: "",
+        points: []
+    )
+
+fn draw_ir_port_command(component_id: text, parent_id: text, x: i32, y: i32) -> DrawIrCommand:
+    DrawIrCommand(
+        kind: DRAW_IR_COMMAND_PORT,
+        component_id: component_id,
+        x: x,
+        y: y,
+        width: 0,
+        height: 0,
+        color: 0u32,
+        text_value: "",
+        border_rect: draw_ir_no_rect(),
+        content_rect: draw_ir_no_rect(),
+        hit_rect: draw_ir_rect_bounds(x, y, 0, 0),
+        clip_rect: draw_ir_no_rect(),
+        computed_style: [],
+        edge: nil,
+        parent_id: parent_id,
+        image_uri: "",
+        points: []
     )
 
 fn draw_ir_source_info(source_kind: text, source_id: text, html_tag: text, html_node_id: text, css_selector: text, css_class: text, style_key: text, style_revision: text) -> DrawIrSourceInfo:

@@ -157,7 +157,7 @@ Any REQ with 0 test cases is a **FAIL** — must be addressed.
   `0`.
 - Mirror the executable path after stripping `test/`, for example
   `test/03_system/feature/usage/math_blocks_spec.spl` ->
-  `doc/06_spec/feature/usage/math_blocks_spec.md`.
+  `doc/06_spec/03_system/feature/usage/math_blocks_spec.md`.
 - Keep requirement, research, design, architecture, plan, generated spec,
   implementation, guide, and executable test artifacts on the same feature slug.
 - Include both the generated spec/manual path and executable `test/...` path in

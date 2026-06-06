@@ -36,7 +36,7 @@
 |----------|----------|
 | Architecture | `doc/04_architecture/<domain>/<topic>/<feature>.md` |
 | System tests | `test/03_system/app/<app_name>/feature/<feature>_spec.spl` |
-| Generated spec docs | `doc/06_spec/system/app/<app_name>/feature/<feature>_spec.md` |
+| Generated spec docs | `doc/06_spec/03_system/app/<app_name>/feature/<feature>_spec.md` |
 | Test plan | `doc/03_plan/<domain>/<topic>/<feature>.md` |
 
 ## Critical Rules

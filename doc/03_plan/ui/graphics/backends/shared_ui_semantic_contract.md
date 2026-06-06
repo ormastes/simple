@@ -77,7 +77,7 @@ Tasks:
 
 Ownership:
 - `test/03_system/app/ui/feature/shared_ui_semantic_contract_spec.spl`
-- generated/manual mirrored docs under `doc/06_spec/system/app/ui/feature/`
+- generated/manual mirrored docs under `doc/06_spec/03_system/app/ui/feature/`
 
 Tasks:
 - Prove Web, Native TUI, Electron, Tauri, and headless helpers expose the same

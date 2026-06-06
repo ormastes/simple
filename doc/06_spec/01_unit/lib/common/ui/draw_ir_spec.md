@@ -1,6 +1,6 @@
 # Draw Ir Specification
 
-> 1. draw ir rect
+> <details>
 
 <!-- sdn-diagram:id=draw_ir_spec.arch -->
 <details class="sdn-source">
@@ -28,7 +28,7 @@ draw_ir_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -38,6 +38,31 @@ draw_ir_spec -> common
 ## Scenarios
 
 ### shared Draw IR advanced Simple 2D contract
+
+#### uses the additive v2 schema while keeping v1 rect and text constructors compatible
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val rect = draw_ir_rect("body", 1, 2, 30, 40, 0xff202428u32)
+val text_cmd = draw_ir_text("label", 4, 18, "Ready", 0xffffffffu32)
+
+expect(DRAW_IR_SCHEMA_VERSION).to_equal("simple-draw-ir-v2")
+expect(rect.kind).to_equal(DRAW_IR_COMMAND_RECT)
+expect(text_cmd.kind).to_equal(DRAW_IR_COMMAND_TEXT)
+expect(rect.border_rect.present).to_equal(false)
+expect(rect.content_rect.present).to_equal(false)
+expect(rect.hit_rect.present).to_equal(false)
+expect(rect.clip_rect.present).to_equal(false)
+expect(rect.computed_style.len()).to_equal(0)
+expect(rect.edge == nil).to_equal(true)
+```
+
+</details>
 
 #### embeds window size location layer and transparency metadata
 
@@ -324,6 +349,106 @@ expect(stale.stale_scene_rejected).to_equal(true)
 
 </details>
 
+#### constructs v2 box geometry, computed style, and edge commands
+
+1. draw ir rect bounds
+
+2. draw ir rect bounds
+
+3. draw ir rect bounds
+
+4. draw ir no rect
+
+5. [draw ir style prop
+
+6. [draw ir point
+
+7. [draw ir style prop
+   - Expected: styled.border_rect.present is true
+   - Expected: styled.content_rect.width equals `92`
+   - Expected: styled.hit_rect.height equals `44`
+   - Expected: styled.computed_style.len() equals `2`
+   - Expected: styled.computed_style[0].key equals `border-radius`
+   - Expected: edge_cmd.kind equals `DRAW_IR_COMMAND_EDGE`
+   - Expected: edge_cmd.component_id equals `edge-1`
+   - Expected: edge_cmd.edge.source equals `button-bg`
+   - Expected: edge_cmd.edge.target equals `label`
+   - Expected: edge_cmd.edge.routing equals `DRAW_IR_EDGE_ORTHOGONAL`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 33 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val styled = draw_ir_box_with_style(
+    "button-bg",
+    10,
+    20,
+    100,
+    40,
+    0xff2f80edu32,
+    draw_ir_rect_bounds(10, 20, 100, 40),
+    draw_ir_rect_bounds(14, 24, 92, 32),
+    draw_ir_rect_bounds(8, 18, 104, 44),
+    draw_ir_no_rect(),
+    [draw_ir_style_prop("border-radius", "6"), draw_ir_style_prop("display", "flex")]
+)
+val edge = draw_edge(
+    "edge-1",
+    "button-bg",
+    "label",
+    DRAW_IR_EDGE_ORTHOGONAL,
+    [draw_ir_point(10, 20), draw_ir_point(110, 20)],
+    [draw_ir_style_prop("stroke", "#2f80ed")]
+)
+val edge_cmd = draw_ir_edge_command(edge)
+
+expect(styled.border_rect.present).to_equal(true)
+expect(styled.content_rect.width).to_equal(92)
+expect(styled.hit_rect.height).to_equal(44)
+expect(styled.computed_style.len()).to_equal(2)
+expect(styled.computed_style[0].key).to_equal("border-radius")
+expect(edge_cmd.kind).to_equal(DRAW_IR_COMMAND_EDGE)
+expect(edge_cmd.component_id).to_equal("edge-1")
+expect(edge_cmd.edge.source).to_equal("button-bg")
+expect(edge_cmd.edge.target).to_equal("label")
+expect(edge_cmd.edge.routing).to_equal(DRAW_IR_EDGE_ORTHOGONAL)
+```
+
+</details>
+
+#### constructs path image group and port command kinds
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val path = draw_ir_path_command("path-1", [draw_ir_point(0, 0), draw_ir_point(20, 10)], [draw_ir_style_prop("stroke", "#111")])
+val image = draw_ir_image_command("image-1", 4, 5, 64, 32, "asset://logo", [])
+val group = draw_ir_group_command("group-1", "root")
+val port = draw_ir_port_command("port-1", "group-1", 12, 16)
+
+expect(path.kind).to_equal(DRAW_IR_COMMAND_PATH)
+expect(path.points.len()).to_equal(2)
+expect(path.computed_style[0].key).to_equal("stroke")
+expect(image.kind).to_equal(DRAW_IR_COMMAND_IMAGE)
+expect(image.image_uri).to_equal("asset://logo")
+expect(image.hit_rect.present).to_equal(true)
+expect(group.kind).to_equal(DRAW_IR_COMMAND_GROUP)
+expect(group.parent_id).to_equal("root")
+expect(port.kind).to_equal(DRAW_IR_COMMAND_PORT)
+expect(port.parent_id).to_equal("group-1")
+expect(port.hit_rect.x).to_equal(12)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -343,8 +468,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

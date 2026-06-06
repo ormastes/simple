@@ -99,7 +99,7 @@ If multiple LLMs participate in research:
 | Architecture | `doc/04_architecture/<feature>.md` |
 | System test plan | `doc/03_plan/sys_test/<feature>.md` |
 | SPipe tests | `test/03_system/app/<app_name>/feature/<feature>_spec.spl` |
-| Generated SPipe docs | `doc/06_spec/system/app/<app_name>/feature/<feature>_spec.md` |
+| Generated SPipe docs | `doc/06_spec/03_system/app/<app_name>/feature/<feature>_spec.md` |
 | Detail design | `doc/05_design/<feature>.md` |
 | Agent task breakdown | `doc/03_plan/agent_tasks/<feature>.md` |
 

@@ -6,26 +6,57 @@ use common.ui.draw_ir.{
     DRAW_IR_BACKEND_AUTO,
     DRAW_IR_BACKEND_CPU,
     DRAW_IR_BACKEND_GPU,
+    DRAW_IR_COMMAND_EDGE,
+    DRAW_IR_COMMAND_GROUP,
+    DRAW_IR_COMMAND_IMAGE,
+    DRAW_IR_COMMAND_PATH,
+    DRAW_IR_COMMAND_PORT,
     DRAW_IR_COMMAND_RECT,
     DRAW_IR_COMMAND_TEXT,
+    DRAW_IR_EDGE_ORTHOGONAL,
     DRAW_IR_SCHEMA_VERSION,
     DRAW_IR_SOURCE_GUI_AST,
     DRAW_IR_SOURCE_HTML_AST,
     DRAW_IR_SOURCE_MANUAL,
+    draw_edge,
     draw_ir_batch_with_source,
     draw_ir_batch,
+    draw_ir_box_with_style,
     draw_ir_composition,
     draw_ir_embedding_config,
+    draw_ir_edge_command,
+    draw_ir_group_command,
+    draw_ir_image_command,
+    draw_ir_no_rect,
+    draw_ir_path_command,
+    draw_ir_point,
+    draw_ir_port_command,
+    draw_ir_rect_bounds,
     draw_ir_event_target_context,
     draw_ir_rect,
     draw_ir_source_gui_ast,
     draw_ir_source_html_ast,
+    draw_ir_style_prop,
     draw_ir_text,
     simple_2d_draw_ir_adv_plan,
     simple_2d_draw_ir_adv_composition_plan
 }
 
 describe "shared Draw IR advanced Simple 2D contract":
+
+    it "uses the additive v2 schema while keeping v1 rect and text constructors compatible":
+        val rect = draw_ir_rect("body", 1, 2, 30, 40, 0xff202428u32)
+        val text_cmd = draw_ir_text("label", 4, 18, "Ready", 0xffffffffu32)
+
+        expect(DRAW_IR_SCHEMA_VERSION).to_equal("simple-draw-ir-v2")
+        expect(rect.kind).to_equal(DRAW_IR_COMMAND_RECT)
+        expect(text_cmd.kind).to_equal(DRAW_IR_COMMAND_TEXT)
+        expect(rect.border_rect.present).to_equal(false)
+        expect(rect.content_rect.present).to_equal(false)
+        expect(rect.hit_rect.present).to_equal(false)
+        expect(rect.clip_rect.present).to_equal(false)
+        expect(rect.computed_style.len()).to_equal(0)
+        expect(rect.edge == nil).to_equal(true)
 
     it "embeds window size location layer and transparency metadata":
         val embedding = draw_ir_embedding_config("surface-1", "window-1", 10, 20, 640, 360, 7, 720, true)
@@ -156,3 +187,56 @@ describe "shared Draw IR advanced Simple 2D contract":
         expect(resolved.backend_target).to_equal(DRAW_IR_BACKEND_GPU)
         expect(stale.resolved).to_equal(false)
         expect(stale.stale_scene_rejected).to_equal(true)
+
+    it "constructs v2 box geometry, computed style, and edge commands":
+        val styled = draw_ir_box_with_style(
+            "button-bg",
+            10,
+            20,
+            100,
+            40,
+            0xff2f80edu32,
+            draw_ir_rect_bounds(10, 20, 100, 40),
+            draw_ir_rect_bounds(14, 24, 92, 32),
+            draw_ir_rect_bounds(8, 18, 104, 44),
+            draw_ir_no_rect(),
+            [draw_ir_style_prop("border-radius", "6"), draw_ir_style_prop("display", "flex")]
+        )
+        val edge = draw_edge(
+            "edge-1",
+            "button-bg",
+            "label",
+            DRAW_IR_EDGE_ORTHOGONAL,
+            [draw_ir_point(10, 20), draw_ir_point(110, 20)],
+            [draw_ir_style_prop("stroke", "#2f80ed")]
+        )
+        val edge_cmd = draw_ir_edge_command(edge)
+
+        expect(styled.border_rect.present).to_equal(true)
+        expect(styled.content_rect.width).to_equal(92)
+        expect(styled.hit_rect.height).to_equal(44)
+        expect(styled.computed_style.len()).to_equal(2)
+        expect(styled.computed_style[0].key).to_equal("border-radius")
+        expect(edge_cmd.kind).to_equal(DRAW_IR_COMMAND_EDGE)
+        expect(edge_cmd.component_id).to_equal("edge-1")
+        expect(edge_cmd.edge.source).to_equal("button-bg")
+        expect(edge_cmd.edge.target).to_equal("label")
+        expect(edge_cmd.edge.routing).to_equal(DRAW_IR_EDGE_ORTHOGONAL)
+
+    it "constructs path image group and port command kinds":
+        val path = draw_ir_path_command("path-1", [draw_ir_point(0, 0), draw_ir_point(20, 10)], [draw_ir_style_prop("stroke", "#111")])
+        val image = draw_ir_image_command("image-1", 4, 5, 64, 32, "asset://logo", [])
+        val group = draw_ir_group_command("group-1", "root")
+        val port = draw_ir_port_command("port-1", "group-1", 12, 16)
+
+        expect(path.kind).to_equal(DRAW_IR_COMMAND_PATH)
+        expect(path.points.len()).to_equal(2)
+        expect(path.computed_style[0].key).to_equal("stroke")
+        expect(image.kind).to_equal(DRAW_IR_COMMAND_IMAGE)
+        expect(image.image_uri).to_equal("asset://logo")
+        expect(image.hit_rect.present).to_equal(true)
+        expect(group.kind).to_equal(DRAW_IR_COMMAND_GROUP)
+        expect(group.parent_id).to_equal("root")
+        expect(port.kind).to_equal(DRAW_IR_COMMAND_PORT)
+        expect(port.parent_id).to_equal("group-1")
+        expect(port.hit_rect.x).to_equal(12)

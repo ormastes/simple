@@ -134,6 +134,13 @@ helpers such as SGTTI query/action checks or future `expect_draw` assertions as
 helper calls inside normal `describe`/`it` scenarios; do not create a parallel
 test framework or replace the built-in SPipe matchers.
 
+Protocol v2 Draw IR inspection is optional and capability-gated. Use
+`/api/test/draw-ir`, `/api/test/draw-ir?id=...`,
+`/api/test/draw-ir/diff`, and `/api/test/draw-ir/layout?id=...` for Draw IR
+surfaces; keep Protocol v1 element/state/action endpoints stable. The typed
+model is `DrawIrComposition`; SDN interchange is provided by
+`src/lib/common/ui/draw_ir_sdn.spl`.
+
 ---
 
 ## MCP Tools

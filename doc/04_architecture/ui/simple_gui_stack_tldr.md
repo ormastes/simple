@@ -71,9 +71,12 @@ Host input
   GUI/HTML AST and CSS before Draw IR, then keep source kind/id and style
   revision on the batch for cache/debug/GPU grouping.
 - UI test helpers: Protocol v1 `/api/test/*` stays stable; Protocol v2 Draw IR
-  is optional and capability-gated. New UI/Draw IR/SGTTI specs use
+  is optional and capability-gated at `/api/test/draw-ir`,
+  `/api/test/draw-ir?id=...`, `/api/test/draw-ir/diff`, and
+  `/api/test/draw-ir/layout?id=...`. New UI/Draw IR/SGTTI specs use
   `std.spec`; `std.spipe` remains an alias for existing specs.
 - Current bootstrap files: `src/lib/common/ui/draw_ir.spl` for Draw IR,
+  `src/lib/common/ui/draw_ir_sdn.spl` for SDN interchange,
   `src/lib/common/ui/window_scene_draw_ir.spl` for WM composition, and
   `src/lib/common/ui/window_scene.spl` for cache-safe event target translation.
 - Event-to-draw-processing handoff: `DrawIrEventTargetContext` maps translated

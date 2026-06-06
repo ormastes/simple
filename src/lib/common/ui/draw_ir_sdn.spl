@@ -1,0 +1,202 @@
+# Draw IR SDN interchange skin.
+#
+# This is intentionally hand-written. Draw IR remains the typed source of
+# truth; SDN is a deterministic inspection/interchange representation.
+
+use common.ui.draw_ir.{
+    DRAW_IR_COMMAND_EDGE,
+    DRAW_IR_COMMAND_RECT,
+    DRAW_IR_COMMAND_TEXT,
+    DRAW_IR_SCHEMA_VERSION,
+    DrawIrBatch,
+    DrawIrCommand,
+    DrawIrComposition,
+    DrawIrSourceInfo,
+    draw_edge,
+    draw_ir_batch_with_source,
+    draw_ir_composition,
+    draw_ir_edge_command,
+    draw_ir_embedding_config,
+    draw_ir_rect,
+    draw_ir_source_info,
+    draw_ir_text
+}
+
+fn _draw_ir_sdn_escape(value: text) -> text:
+    var escaped = value.replace("%", "%25")
+    escaped = escaped.replace("\t", "%09")
+    escaped = escaped.replace("\n", "%0A")
+    escaped = escaped.replace(" ", "%20")
+    escaped.replace("=", "%3D")
+
+fn _draw_ir_sdn_unescape(value: text) -> text:
+    var unescaped = value.replace("%3D", "=")
+    unescaped = unescaped.replace("%20", " ")
+    unescaped = unescaped.replace("%0A", "\n")
+    unescaped = unescaped.replace("%09", "\t")
+    unescaped.replace("%25", "%")
+
+fn _draw_ir_sdn_field(line: text, key: text) -> text:
+    val prefix = "{key}="
+    val parts = line.split(" ")
+    for part in parts:
+        if part.starts_with(prefix):
+            return _draw_ir_sdn_unescape(part.substring(prefix.len(), part.len()))
+    ""
+
+fn _draw_ir_sdn_i32(line: text, key: text) -> i32:
+    val value = _draw_ir_sdn_field(line, key)
+    _draw_ir_sdn_parse_i32(value)
+
+fn _draw_ir_sdn_bool(line: text, key: text) -> bool:
+    _draw_ir_sdn_field(line, key) == "true"
+
+fn _draw_ir_sdn_digit(c: text) -> i32:
+    if c == "0":
+        return 0
+    if c == "1":
+        return 1
+    if c == "2":
+        return 2
+    if c == "3":
+        return 3
+    if c == "4":
+        return 4
+    if c == "5":
+        return 5
+    if c == "6":
+        return 6
+    if c == "7":
+        return 7
+    if c == "8":
+        return 8
+    if c == "9":
+        return 9
+    -1
+
+fn _draw_ir_sdn_parse_i32(value: text) -> i32:
+    if value == "":
+        return 0
+    var sign = 1
+    var i = 0
+    if value[0] == "-":
+        sign = -1
+        i = 1
+    var parsed = 0
+    while i < value.len():
+        val digit = _draw_ir_sdn_digit(value[i])
+        if digit < 0:
+            return parsed * sign
+        parsed = parsed * 10 + digit
+        i = i + 1
+    parsed * sign
+
+fn _draw_ir_sdn_parse_u32(value: text) -> u32:
+    var i = 0
+    var parsed = 0u32
+    while i < value.len():
+        val digit = _draw_ir_sdn_digit(value[i])
+        if digit < 0:
+            return parsed
+        parsed = parsed * 10u32 + digit.to_u32()
+        i = i + 1
+    parsed
+
+fn _draw_ir_sdn_u32(line: text, key: text) -> u32:
+    val value = _draw_ir_sdn_field(line, key)
+    _draw_ir_sdn_parse_u32(value)
+
+fn _draw_ir_sdn_emit_command(command: DrawIrCommand) -> text:
+    var line = "\t\tcommand kind={command.kind} id={_draw_ir_sdn_escape(command.component_id)} x={command.x} y={command.y} width={command.width} height={command.height} color={command.color} text={_draw_ir_sdn_escape(command.text_value)}"
+    if command.kind == DRAW_IR_COMMAND_EDGE and command.edge != nil:
+        line = line + " source={_draw_ir_sdn_escape(command.edge.source)} target={_draw_ir_sdn_escape(command.edge.target)} routing={_draw_ir_sdn_escape(command.edge.routing)}"
+    line
+
+fn _draw_ir_sdn_emit_batch(batch: DrawIrBatch) -> text:
+    var lines: [text] = []
+    var line = "\tbatch id={_draw_ir_sdn_escape(batch.batch_id)} backend={batch.backend_target}"
+    line = line + " surface={_draw_ir_sdn_escape(batch.embedding.surface_id)} component={_draw_ir_sdn_escape(batch.embedding.component_id)}"
+    line = line + " x={batch.embedding.x} y={batch.embedding.y} width={batch.embedding.width} height={batch.embedding.height}"
+    line = line + " layer={batch.embedding.layer} opacity={batch.embedding.opacity_milli} clip={batch.embedding.clip}"
+    line = line + " source_kind={_draw_ir_sdn_escape(batch.source.source_kind)} source_id={_draw_ir_sdn_escape(batch.source.source_id)}"
+    line = line + " html_tag={_draw_ir_sdn_escape(batch.source.html_tag)} html_node_id={_draw_ir_sdn_escape(batch.source.html_node_id)}"
+    line = line + " css_selector={_draw_ir_sdn_escape(batch.source.css_selector)} css_class={_draw_ir_sdn_escape(batch.source.css_class)}"
+    line = line + " style_key={_draw_ir_sdn_escape(batch.source.style_key)} style_revision={_draw_ir_sdn_escape(batch.source.style_revision)}"
+    lines = lines.push(line)
+    for command in batch.commands:
+        lines = lines.push(_draw_ir_sdn_emit_command(command))
+    lines.join("\n")
+
+fn draw_ir_to_sdn(composition: DrawIrComposition) -> text:
+    var lines: [text] = []
+    lines = lines.push("draw_ir schema={composition.schema}")
+    lines = lines.push("\tcomposition id={_draw_ir_sdn_escape(composition.composition_id)} scene_key={_draw_ir_sdn_escape(composition.scene_key)} backend={composition.backend_target}")
+    for batch in composition.batches:
+        lines = lines.push(_draw_ir_sdn_emit_batch(batch))
+    lines.join("\n")
+
+fn _draw_ir_sdn_parse_command(line: text) -> DrawIrCommand:
+    val kind = _draw_ir_sdn_field(line, "kind")
+    val component_id = _draw_ir_sdn_field(line, "id")
+    if kind == DRAW_IR_COMMAND_TEXT:
+        return draw_ir_text(component_id, _draw_ir_sdn_i32(line, "x"), _draw_ir_sdn_i32(line, "y"), _draw_ir_sdn_field(line, "text"), _draw_ir_sdn_u32(line, "color"))
+    if kind == DRAW_IR_COMMAND_EDGE:
+        val edge = draw_edge(component_id, _draw_ir_sdn_field(line, "source"), _draw_ir_sdn_field(line, "target"), _draw_ir_sdn_field(line, "routing"), [], [])
+        return draw_ir_edge_command(edge)
+    draw_ir_rect(component_id, _draw_ir_sdn_i32(line, "x"), _draw_ir_sdn_i32(line, "y"), _draw_ir_sdn_i32(line, "width"), _draw_ir_sdn_i32(line, "height"), _draw_ir_sdn_u32(line, "color"))
+
+fn _draw_ir_sdn_parse_source(line: text) -> DrawIrSourceInfo:
+    draw_ir_source_info(
+        _draw_ir_sdn_field(line, "source_kind"),
+        _draw_ir_sdn_field(line, "source_id"),
+        _draw_ir_sdn_field(line, "html_tag"),
+        _draw_ir_sdn_field(line, "html_node_id"),
+        _draw_ir_sdn_field(line, "css_selector"),
+        _draw_ir_sdn_field(line, "css_class"),
+        _draw_ir_sdn_field(line, "style_key"),
+        _draw_ir_sdn_field(line, "style_revision")
+    )
+
+fn _draw_ir_sdn_batch_from_state(batch_line: text, commands: [DrawIrCommand]) -> DrawIrBatch:
+    draw_ir_batch_with_source(
+        _draw_ir_sdn_field(batch_line, "id"),
+        _draw_ir_sdn_field(batch_line, "backend"),
+        draw_ir_embedding_config(
+            _draw_ir_sdn_field(batch_line, "surface"),
+            _draw_ir_sdn_field(batch_line, "component"),
+            _draw_ir_sdn_i32(batch_line, "x"),
+            _draw_ir_sdn_i32(batch_line, "y"),
+            _draw_ir_sdn_i32(batch_line, "width"),
+            _draw_ir_sdn_i32(batch_line, "height"),
+            _draw_ir_sdn_i32(batch_line, "layer"),
+            _draw_ir_sdn_i32(batch_line, "opacity"),
+            _draw_ir_sdn_bool(batch_line, "clip")
+        ),
+        commands,
+        _draw_ir_sdn_parse_source(batch_line)
+    )
+
+fn sdn_to_draw_ir(source: text) -> DrawIrComposition:
+    var composition_id = ""
+    var scene_key = ""
+    var backend_target = ""
+    var batches: [DrawIrBatch] = []
+    var batch_line = ""
+    var commands: [DrawIrCommand] = []
+    val lines = source.split("\n")
+    for raw_line in lines:
+        val line = raw_line.trim()
+        if line.starts_with("composition "):
+            composition_id = _draw_ir_sdn_field(line, "id")
+            scene_key = _draw_ir_sdn_field(line, "scene_key")
+            backend_target = _draw_ir_sdn_field(line, "backend")
+        elif line.starts_with("batch "):
+            if batch_line != "":
+                batches = batches.push(_draw_ir_sdn_batch_from_state(batch_line, commands))
+            batch_line = line
+            commands = []
+        elif line.starts_with("command "):
+            commands = commands.push(_draw_ir_sdn_parse_command(line))
+    if batch_line != "":
+        batches = batches.push(_draw_ir_sdn_batch_from_state(batch_line, commands))
+    draw_ir_composition(composition_id, scene_key, backend_target, batches)

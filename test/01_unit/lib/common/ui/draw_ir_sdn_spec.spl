@@ -1,0 +1,66 @@
+# @cover src/lib/common/ui/draw_ir_sdn.spl 80%
+# @tag: unit, ui, draw_ir, sdn
+
+use std.spec
+use common.ui.builder.{column, label, build_tree_with_title}
+use common.ui.draw_ir.{DRAW_IR_BACKEND_GPU, DRAW_IR_COMMAND_TEXT}
+use common.ui.draw_ir_sdn.{draw_ir_to_sdn, sdn_to_draw_ir}
+use common.ui.taskbar_model.{AppRef, TaskbarModel, TrayItem, WindowRef}
+use common.ui.window.{WindowManager}
+use common.ui.window_surface_registry.{UiWindowSurfaceRegistry, UI_SURFACE_KIND_SIMPLE_WEB}
+use common.ui.window_scene.{shared_wm_scene_from_window_manager}
+use common.ui.window_scene_draw_ir.{shared_wm_scene_draw_ir_composition}
+
+fn _sdn_tree(title: text):
+    build_tree_with_title(column("{title}_root", [label("{title}_label", title)]), title, "glass_dark")
+
+fn _sdn_taskbar() -> TaskbarModel:
+    TaskbarModel(
+        pinned: [
+            AppRef(app_id: "terminal", display_name: "Terminal", icon: "term")
+        ],
+        running: [
+            WindowRef(window_id: "win1", app_id: "demo.app", title: "Window One", minimized: false)
+        ],
+        tray: [
+            TrayItem(item_id: "clock", label: "09:41", icon: "clock")
+        ]
+    )
+
+fn _sdn_scene():
+    var manager = WindowManager.new()
+    val _one = manager.open_window("surf1", "One", 10, 40, 300, 200, _sdn_tree("one"))
+    var registry = UiWindowSurfaceRegistry.new()
+    registry.bind_with_kind("win1", "surf1", 42u64, "demo.app", "Window One", UI_SURFACE_KIND_SIMPLE_WEB)
+    shared_wm_scene_from_window_manager(manager, registry, 800, 600)
+
+describe "Draw IR SDN skin":
+
+    it "emits tab-indented SDN for a WM Draw IR composition":
+        val composition = shared_wm_scene_draw_ir_composition(_sdn_scene(), _sdn_taskbar(), DRAW_IR_BACKEND_GPU, 1000, "09:41", 1)
+        val sdn = draw_ir_to_sdn(composition)
+
+        expect(sdn).to_start_with("draw_ir schema=simple-draw-ir-v2")
+        expect(sdn).to_contain("\tcomposition id=wm-composite")
+        expect(sdn).to_contain("\tbatch id=wm-desktop")
+        expect(sdn).to_contain("\t\tcommand kind=rect")
+        expect(sdn).to_contain("source_kind=wm_scene")
+
+    it "round-trips a WM Draw IR composition through SDN":
+        val composition = shared_wm_scene_draw_ir_composition(_sdn_scene(), _sdn_taskbar(), DRAW_IR_BACKEND_GPU, 1000, "09:41", 1)
+        val parsed = sdn_to_draw_ir(draw_ir_to_sdn(composition))
+
+        expect(parsed.schema).to_equal(composition.schema)
+        expect(parsed.composition_id).to_equal(composition.composition_id)
+        expect(parsed.scene_key).to_equal(composition.scene_key)
+        expect(parsed.backend_target).to_equal(composition.backend_target)
+        expect(parsed.batches.len()).to_equal(composition.batches.len())
+        expect(parsed.batches[2].batch_id).to_equal(composition.batches[2].batch_id)
+        expect(parsed.batches[2].embedding.surface_id).to_equal("surf1")
+        expect(parsed.batches[2].embedding.x).to_equal(10)
+        expect(parsed.batches[2].embedding.y).to_equal(40)
+        expect(parsed.batches[2].source.source_kind).to_equal("wm_scene")
+        expect(parsed.batches[2].source.source_id).to_equal("wm.window.win1")
+        expect(parsed.batches[2].commands.len()).to_equal(composition.batches[2].commands.len())
+        expect(parsed.batches[2].commands[3].kind).to_equal(DRAW_IR_COMMAND_TEXT)
+        expect(parsed.batches[2].commands[3].text_value).to_equal("Window One")

@@ -56,7 +56,7 @@ Use `to_equal(true)` and `to_equal(false)` instead.
 ## Spec File Structure
 
 ```simple
-use std.spipe.*
+use std.spec
 
 # --- Step Helpers ---
 

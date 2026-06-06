@@ -3,7 +3,7 @@
 **Date:** 2026-06-06
 **Feature:** `draw_io_sdn_draw_ir`
 **Research:** `doc/01_research/ui/draw_ir/draw_io_sdn_draw_ir.md`
-**Status:** Proposed
+**Status:** In progress — Phases 1-2 implemented; Phases 3-7 pending
 **Owners:** `src/lib/common/ui`, `src/app/ui.test_api`,
 `src/lib/gc_async_mut/gpu/browser_engine`
 
@@ -35,7 +35,7 @@ v1 shared UI contract or forking a second model.
 
 ## Phases
 
-### Phase 1 — Model growth (v2 schema) + specs
+### Phase 1 — Model growth (v2 schema) + specs — done
 - Add to `DrawIrCommand`: new `kind` values (`edge`, `path`, `image`, `group`,
   `port`); optional geometry `border_rect` / `content_rect` / `hit_rect` /
   `clip_rect`; optional `computed_style` key-value list (border-radius, padding,
@@ -49,8 +49,11 @@ v1 shared UI contract or forking a second model.
 - **Spec:** extend `doc/06_spec/01_unit/lib/common/ui/draw_ir_spec.md` +
   `test/01_unit/lib/common/ui/draw_ir_spec.spl` (v1 round-trip still green).
 - **Exit:** v1 producers validate under v2 schema; new fields constructible.
+- **Evidence:** `src/lib/common/ui/draw_ir.spl`,
+  `test/01_unit/lib/common/ui/draw_ir_spec.spl`, and
+  `doc/06_spec/01_unit/lib/common/ui/draw_ir_spec.md`.
 
-### Phase 2 — SDN skin (`draw_ir ↔ sdn`)
+### Phase 2 — SDN skin (`draw_ir ↔ sdn`) — done
 - New `src/lib/common/ui/draw_ir_sdn.spl`:
   - `draw_ir_to_sdn(composition) -> text` — tab-indented, grammar
     `draw_ir v1` / `meta` / `cell|box` / `geometry` / `point` (per research doc).
@@ -59,6 +62,9 @@ v1 shared UI contract or forking a second model.
 - **Spec:** `test/01_unit/lib/common/ui/draw_ir_sdn_spec.spl` — round-trip
   equality on the WM composition from `window_scene_draw_ir.spl`.
 - **Exit:** `compose → to_sdn → sdn_to → compose'` is structurally equal.
+- **Evidence:** `src/lib/common/ui/draw_ir_sdn.spl`,
+  `test/01_unit/lib/common/ui/draw_ir_sdn_spec.spl`, and
+  `doc/06_spec/01_unit/lib/common/ui/draw_ir_sdn_spec.md`.
 
 ### Phase 3 — Draw.io (`mxGraph`) skin
 - New `src/lib/common/ui/draw_ir_drawio.spl`:
@@ -79,8 +85,8 @@ v1 shared UI contract or forking a second model.
   computed style for known IDs.
 
 ### Phase 5 — Gated Protocol-v2 inspection endpoint
-- `app.ui.test_api`: `/api/test/draw-ir`, `?id=`, `/draw-ir/diff`,
-  `/layout?id=`, behind a capability flag; responses carry bumped
+- `app.ui.test_api`: `/api/test/draw-ir`, `/api/test/draw-ir?id=...`,
+  `/api/test/draw-ir/diff`, `/api/test/draw-ir/layout?id=...`, behind a capability flag; responses carry bumped
   `X-UI-Protocol-Version`.
 - Record the extension in `doc/04_architecture/ui/shared_ui_contract.md`
   (new "Protocol v2 / Draw-IR extension" section + support matrix rows).

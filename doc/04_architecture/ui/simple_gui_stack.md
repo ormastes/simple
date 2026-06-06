@@ -225,11 +225,18 @@ class when present, and a style revision. That metadata is for diagnostics,
 cache invalidation, replay, and GPU batch grouping; primitive commands remain
 the execution truth.
 
+The canonical Draw IR schema is `simple-draw-ir-v2`. The typed model includes
+box geometry/style metadata plus edge/path/image/group/port command kinds; SDN
+inspection uses `src/lib/common/ui/draw_ir_sdn.spl` as an interchange skin over
+the same `DrawIrComposition`, not a second model.
+
 UI test helpers consume Draw IR through the shared test contract, not through
 renderer-private files or backend handles. Protocol v1 `/api/test/*` endpoints
-remain stable; Protocol v2 Draw IR endpoints are optional and capability-gated.
-SPipe remains the test harness: new UI/Draw IR specs import `use std.spec`, and
-`std.spipe` remains an alias for existing specs.
+remain stable; Protocol v2 Draw IR endpoints are optional and capability-gated:
+`/api/test/draw-ir`, `/api/test/draw-ir?id=...`,
+`/api/test/draw-ir/diff`, and `/api/test/draw-ir/layout?id=...`. SPipe remains
+the test harness: new UI/Draw IR specs import `use std.spec`, and `std.spipe`
+remains an alias for existing specs.
 
 This boundary is the best next refactoring target because it reduces coupling
 between `src/app/ui.web`, `src/lib/common/ui/web_render_api.spl`, and
@@ -368,6 +375,7 @@ dispatch commands and forwards them to the web adapter protocol.
 | Layer | File | Purpose |
 |---|---|---|
 | Draw IR contract | `src/lib/common/ui/draw_ir.spl` | `DrawIrCommand`, `DrawIrBatch`, `DrawIrComposition`, `DrawIrSourceInfo`, `DrawIrEmbeddingConfig`, `DrawIrEventTargetContext`, `Simple2dDrawIrPlan` |
+| Draw IR SDN skin | `src/lib/common/ui/draw_ir_sdn.spl` | Deterministic tab-indented SDN import/export over `DrawIrComposition` |
 | WM scene | `src/lib/common/ui/window_scene.spl` | `SharedWmScene`, `SharedWmWindow`, event target translation, scene layout keys, cache-safe pointer targeting |
 | WM → Draw IR | `src/lib/common/ui/window_scene_draw_ir.spl` | WM scene composition into ordered Draw IR batches (desktop, chrome, windows by z-order) |
 | WM dispatch | `src/lib/common/ui/wm_runtime_dispatch.spl` | `WmRuntimeDispatchCommand`, `WmRuntimeShellState`, backend-neutral WM command adapter |
