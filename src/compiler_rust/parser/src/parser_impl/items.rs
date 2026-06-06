@@ -356,7 +356,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse an attributed item: @attr fn/struct/class/etc
-    /// Only @ syntax is supported. The legacy #[] syntax has been removed.
+    /// Only @ syntax is preferred. Legacy #[] syntax emits DEPR005 warning.
     pub(super) fn parse_attributed_item(&mut self) -> Result<Node, ParseError> {
         let mut attributes = Vec::new();
 
@@ -364,7 +364,18 @@ impl<'a> Parser<'a> {
         // for compatibility with existing Simple source and lint fixtures.
         loop {
             if self.check(&TokenKind::Hash) {
-                attributes.push(self.parse_attribute()?);
+                let hash_span = self.current.span;
+                let attr = self.parse_attribute()?;
+                let attr_name = attr.name.clone();
+                self.error_hints.push(
+                    ErrorHint::warning(
+                        format!("'#[{}]' uses deprecated syntax, use '@{}' instead", attr_name, attr_name),
+                        hash_span,
+                    ).with_help(
+                        format!("Replace '#[{}]' with '@{}'", attr_name, attr_name),
+                    ),
+                );
+                attributes.push(attr);
             } else if self.check(&TokenKind::At) && self.is_at_known_attribute() {
                 attributes.push(self.parse_at_as_attribute()?);
             } else {

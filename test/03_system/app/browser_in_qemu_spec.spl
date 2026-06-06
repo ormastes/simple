@@ -16,6 +16,25 @@
 # BrowserSession navigation reaches the settled marker and the rendered
 # frame reaches the framebuffer paint marker on serial.
 #
+# codex-system-test
+"""
+# Browser In QEMU System Contract
+
+## Overview
+
+This system spec locks the SimpleOS browser guest contract before the parallel
+GUI/web framework work fills in more runtime plumbing. It verifies the
+deterministic BrowserSession fixture in pure code and, when QEMU is available,
+boots the browser kernel far enough to observe the live transport probe,
+deterministic request pump, session result, and framebuffer paint marker.
+
+## Evidence
+
+The live scenario records serial output under `build/os/browser_qemu_spec_serial.log`.
+Hosts without `qemu-system-x86_64` keep the build artifact assertion as the hard
+gate and skip only the live guest capture.
+"""
+
 use std.spec.*
 
 use os.qemu_runner.{OsTarget, build_os}
@@ -159,8 +178,10 @@ describe "Browser webrendering in QEMU Simple OS guest":
         # redirected to serial_log. The harness polls for the socket to
         # appear (~10s) before returning, and kills the process on any
         # error path.
+        var spawned = false
         match spawn_guest_with_qmp(target, qmp_socket, serial_log):
             Ok(handle):
+                spawned = true
                 expect(wait_for_serial_marker(
                     handle,
                     "[BE] Probing live browser transport...",
@@ -177,7 +198,7 @@ describe "Browser webrendering in QEMU Simple OS guest":
                     print "[browser_in_qemu_spec] serial log follows:"
                     print read_serial_log(handle)
                     stop_guest(handle)
-                    expect(false).to_equal(true)
+                    expect(saw_painted).to_equal(true)
                     return
 
                 val serial_output = read_serial_log(handle)
@@ -202,7 +223,7 @@ describe "Browser webrendering in QEMU Simple OS guest":
                     "[BE] Frame painted: HTML -> DOM -> layout -> paint -> scene -> software rasterizer -> framebuffer")).to_equal(true)
             Err(err):
                 print "[browser_in_qemu_spec] failed to spawn guest: {err}"
-                expect(false).to_equal(true)
+        expect(spawned).to_equal(true)
 
     it "has a baseline directory for browser_in_qemu captures":
         val baseline_dir = "test/baselines/browser_in_qemu"

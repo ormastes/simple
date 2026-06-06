@@ -46,6 +46,7 @@ fn _emit_source_lint_diagnostics(file: text, source: text, format: text) -> i64:
     - Deprecated patterns (Type__method syntax, .new() constructors, bare pass)
     - Unreachable code (statements after return)
     - Match exhaustiveness (match without wildcard arm)
+    - DEPR005: #[name] attribute syntax (use @name instead)
 
     Then runs AST-based lint passes for:
     - ARG001/ARG002: argument count (>7 warn, >12 error)
@@ -80,6 +81,7 @@ fn _emit_basic_line_lints(lines: [text], file: text, format: text) -> i64:
         val line_num = scan.line_num
 
         count = count + _check_deprecated_double_underscore(trimmed, line_num, file, format)
+        count = count + _check_hash_bracket_attribute(trimmed, line_num, file, format)
 
         if trimmed.contains(".new("):
             if format == "json":
@@ -265,6 +267,37 @@ fn _check_deprecated_double_underscore(trimmed: text, line_num: i64, file: text,
         else:
             ci = ci + 1
     found
+
+fn _check_hash_bracket_attribute(trimmed: text, line_num: i64, file: text, format: text) -> i64:
+    """Check for legacy #[name] attribute syntax — should be @name instead.
+
+    Matches lines starting with #[ followed by an identifier and ].
+    Skips comment-directive forms like #[allow(...)] and #[bypass] which
+    are intentionally scanned as text by the lint/visibility systems."""
+    if not trimmed.starts_with("#["):
+        return 0
+    val after = trimmed.substring(2, trimmed.len())
+    var name_end = 0
+    while name_end < after.len():
+        val c = after.substring(name_end, name_end + 1)
+        val is_ident = (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "_"
+        if not is_ident:
+            break
+        name_end = name_end + 1
+    if name_end == 0:
+        return 0
+    val attr_name = after.substring(0, name_end)
+    if attr_name == "allow" or attr_name == "bypass":
+        return 0
+    val rest = after.substring(name_end, after.len()).trim()
+    if not (rest.starts_with("]") or rest.starts_with("(")):
+        return 0
+    if format == "json":
+        val col = 1
+        _diag_emit_or_collect("{\"severity\":2,\"code\":\"DEPR005\",\"message\":\"'#[{attr_name}]' uses deprecated syntax, use '@{attr_name}' instead\",\"line\":{line_num},\"col\":{col},\"end_line\":{line_num},\"end_col\":{col + 2 + name_end + 1},\"tags\":[2],\"source\":\"simple-lint\"}")
+    else:
+        print "{file}:{line_num}: warning[DEPR005]: '#[{attr_name}]' is deprecated, use '@{attr_name}' instead"
+    1
 
 fn _check_unused_vars_text(lines: [text], file: text, format: text) -> i64:
     """Text-based heuristic for unused variable detection.

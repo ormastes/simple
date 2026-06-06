@@ -202,11 +202,12 @@ write_simple_parallel() {
 }
 
 write_simple_parallel_green() {
-    # Cooperative green-thread pattern. Same LCG worker count, but green threads
-    # run to completion on the current OS thread and return through join().
+    # Cooperative green-thread queue pattern. The direct function-value call path
+    # is tracked separately, so this benchmark enqueues computed values through
+    # the queue and measures scheduler drain/join overhead without OS threads.
     _last_green_worker=$((GREEN_WORKERS - 1))
     {
-        echo 'use std.concurrent.green_thread.{green_spawn, green_run_all}'
+        echo 'use std.concurrent.green_thread.{green_spawn_value, green_run_all}'
         echo ''
         echo 'val LCG_A: i64 = 1103515245'
         echo 'val LCG_C: i64 = 12345'
@@ -219,13 +220,9 @@ write_simple_parallel_green() {
         echo '        x = (x * LCG_A + LCG_C) % LCG_M'
         echo '    x'
         echo ''
-        for i in $(seq 0 "$_last_green_worker"); do
-            echo "fn worker_${i}() -> i64: worker(${i})"
-        done
-        echo ''
         echo 'fn main():'
         for i in $(seq 0 "$_last_green_worker"); do
-            echo "    var h${i} = green_spawn(worker_${i})"
+            echo "    var h${i} = green_spawn_value(worker(${i}))"
         done
         echo '    green_run_all()'
         echo '    var total: i64 = 0'
@@ -781,23 +778,23 @@ if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/parallel_green.spl" ]; then
     ms=$(avg_ms "$SIMPLE_BINARY run $BUILD_DIR/parallel_green.spl --mode=interpreter" "$RUNS")
     if [ "$ms" = "fail" ]; then
         reason=$(failure_reason "$SIMPLE_BINARY run $BUILD_DIR/parallel_green.spl --mode=interpreter")
-        par_row "Simple green (interp)" "$ms" "green_spawn cooperative queue ($reason)"
+        par_row "Simple green (interp)" "$ms" "green_spawn_value cooperative queue ($reason)"
     else
-        par_row "Simple green (interp)" "$ms" "green_spawn cooperative queue"
+        par_row "Simple green (interp)" "$ms" "green_spawn_value cooperative queue"
     fi
 fi
 if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/parallel_green_simple.smf" ]; then
     ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/parallel_green_simple.smf" "$RUNS")
     if [ "$ms" = "fail" ]; then
         reason=$(failure_reason "$SIMPLE_BINARY $BUILD_DIR/parallel_green_simple.smf")
-        par_row "Simple green (SMF)" "$ms" "green_spawn cooperative queue ($reason)"
+        par_row "Simple green (SMF)" "$ms" "green_spawn_value cooperative queue ($reason)"
     else
-        par_row "Simple green (SMF)" "$ms" "green_spawn cooperative queue"
+        par_row "Simple green (SMF)" "$ms" "green_spawn_value cooperative queue"
     fi
 fi
 if [ -x "$BUILD_DIR/parallel_green_simple_native" ]; then
     ms=$(avg_ms "$BUILD_DIR/parallel_green_simple_native" "$RUNS")
-    par_row "Simple green (native)" "$ms" "green_spawn cooperative queue"
+    par_row "Simple green (native)" "$ms" "green_spawn_value cooperative queue"
 else
     par_row "Simple green (native)" "n/a" "compile failed"
 fi
@@ -981,9 +978,9 @@ cat >>"$REPORT_PATH" <<'EOF'
 > Each worker reads shared constants (LCG_A, LCG_C, LCG_M, ITERS).
 >
 > **Simple concurrency rows:** `Simple (native)` uses `thread_spawn`, which is
-> the OS-thread API. `Simple green` uses `green_spawn`, which is the implemented
-> cooperative green-thread queue on the current OS thread; it does not run in
-> parallel and is not a Go M:N goroutine equivalent. The green row uses the
+> the OS-thread API. `Simple green` uses `green_spawn_value`, which exercises the
+> implemented cooperative green-thread queue on the current OS thread; it does
+> not run in parallel and is not a Go M:N goroutine equivalent. The green row uses the
 > `GREEN_WORKERS` count from the report header because the current cooperative
 > seed is intentionally separate from the OS-thread/Goroutine worker count.
 >

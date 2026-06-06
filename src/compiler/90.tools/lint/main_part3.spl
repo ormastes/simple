@@ -231,6 +231,10 @@ impl Linter:
                 has_literal_tautology = true
             if normalized.contains("expect(false).to_be(false)"):
                 has_literal_tautology = true
+            if normalized.contains("expect(true).is_equal(true)"):
+                has_literal_tautology = true
+            if normalized.contains("expect(false).is_equal(false)"):
+                has_literal_tautology = true
 
             if has_literal_tautology:
                 val lint = Lint.new("SPIPE001", LintLevel.Deny, LintCategory.Correctness,
@@ -294,9 +298,9 @@ impl Linter:
                 val fix = boolean_wrapper_easy_fix(path, line, normalized, byte_offset, line_num)
                 val lint = Lint(
                     code: "SPIPE007",
-                    level: LintLevel.Deny,
+                    level: LintLevel.Warn,
                     category: LintCategory.Correctness,
-                    message: "False boolean matcher wrapper in spec/example; use expect_not(condition) instead of a boolean matcher wrapper",
+                    message: "False boolean equality wrapper in spec/example; use expect_not(condition) instead of a boolean equality wrapper",
                     fix_hint: Some("Use expect_not(condition) for false checks"),
                     easy_fix: Some(fix)
                 )
@@ -375,7 +379,7 @@ impl Linter:
             var has_sanctioned_skip = false
             for stmt in statements:
                 val normalized = normalize_lint_line(stmt)
-                val assertion_like = normalized.contains("expect(") or normalized.contains("expect_not(") or normalized.contains("to_equal(") or normalized.contains("to_be(") or normalized.contains("to_contain(") or normalized.contains("to_start_with(") or normalized.contains("to_end_with(") or normalized.contains("to_be_greater_than(") or normalized.contains("to_be_less_than(")
+                val assertion_like = normalized.contains("expect(") or normalized.contains("expect_not(") or normalized.contains("to_equal(") or normalized.contains("to_be(") or normalized.contains("is_equal(") or normalized.contains("to_contain(") or normalized.contains("to_start_with(") or normalized.contains("to_end_with(") or normalized.contains("to_be_greater_than(") or normalized.contains("to_be_less_than(")
                 if assertion_like:
                     has_real_assertion = true
                 val sanctioned_skip = normalized == "skip:" or normalized.starts_with("skip:") or normalized.contains("return\"skip:") or normalized.contains("return'skip:")
@@ -581,6 +585,9 @@ fn extract_expect_subject(normalized: String) -> String:
     val end_be = tail.find(").to_be(")
     if end_be >= 0:
         return tail.slice(0, end_be)
+    val end_is_equal = tail.find(").is_equal(")
+    if end_is_equal >= 0:
+        return tail.slice(0, end_is_equal)
     ""
 
 fn extract_expect_subject_from_source(line: String) -> String:
@@ -595,6 +602,9 @@ fn extract_expect_subject_from_source(line: String) -> String:
     val end_be = tail.find(").to_be(")
     if end_be >= 0:
         return tail.slice(0, end_be)
+    val end_is_equal = tail.find(").is_equal(")
+    if end_is_equal >= 0:
+        return tail.slice(0, end_is_equal)
     ""
 
 fn is_boolean_wrapper_assertion(normalized: String) -> Bool:
@@ -604,6 +614,10 @@ fn is_boolean_wrapper_assertion(normalized: String) -> Bool:
     if normalized.contains(").to_be(true)"):
         compares_to_bool = true
     if normalized.contains(").to_be(false)"):
+        compares_to_bool = true
+    if normalized.contains(").is_equal(true)"):
+        compares_to_bool = true
+    if normalized.contains(").is_equal(false)"):
         compares_to_bool = true
     if not compares_to_bool:
         return false
@@ -617,19 +631,19 @@ fn is_boolean_wrapper_assertion(normalized: String) -> Bool:
 fn is_true_boolean_wrapper_assertion(normalized: String) -> Bool:
     if not is_boolean_wrapper_assertion(normalized):
         return false
-    normalized.contains(").to_equal(true)") or normalized.contains(").to_be(true)")
+    normalized.contains(").to_equal(true)") or normalized.contains(").to_be(true)") or normalized.contains(").is_equal(true)")
 
 fn is_false_boolean_wrapper_assertion(normalized: String) -> Bool:
     if not is_boolean_wrapper_assertion(normalized):
         return false
-    normalized.contains(").to_equal(false)") or normalized.contains(").to_be(false)")
+    normalized.contains(").to_equal(false)") or normalized.contains(").to_be(false)") or normalized.contains(").is_equal(false)")
 
 fn boolean_wrapper_easy_fix(path: String, line: String, normalized: String, byte_offset: Int, line_num: Int) -> EasyFix:
     var subject = extract_expect_subject_from_source(line)
     if subject == "":
         subject = extract_expect_subject(normalized)
     var replacement_call = "expect({subject})"
-    if normalized.contains(").to_equal(false)") or normalized.contains(").to_be(false)"):
+    if normalized.contains(").to_equal(false)") or normalized.contains(").to_be(false)") or normalized.contains(").is_equal(false)"):
         replacement_call = "expect_not({subject})"
 
     val trimmed = line.trim()

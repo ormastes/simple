@@ -28,7 +28,7 @@ sgtti_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 11 | 11 | 0 | 0 |
+| 12 | 12 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -227,6 +227,28 @@ expect(gui.check_text("shared_text", "Shared UI").unwrap()).to_equal(true)
 
 </details>
 
+#### builds a headless GUI snapshot with one helper call
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val snapshot = gui_test_snapshot("Settings", 12, 24, 320, 200, 2000, 2000)
+val driver = SgttiTestDriver.new(snapshot)
+val default_snapshot = gui_test_snapshot_default("Terminal")
+
+expect(snapshot.access.nodes.len()).to_equal(1)
+expect(snapshot.access.nodes[0].kind).to_equal("compositor_window")
+expect(snapshot.access.nodes[0].text_value).to_equal("Settings")
+expect(driver.check_text("compositor:1#root", "Settings").unwrap()).to_equal(true)
+expect(default_snapshot.access.nodes[0].text_value).to_equal("Terminal")
+```
+
+</details>
+
 #### fails parity on divergent state or missing targets
 
 <details>
@@ -270,8 +292,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

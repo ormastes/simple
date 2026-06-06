@@ -27,7 +27,7 @@ green_thread_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -92,6 +92,24 @@ expect(h2.join()).to_equal(11)
 
 </details>
 
+#### schedules precomputed values through the green queue
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val handle = green_spawn_value(23)
+expect(handle.is_done()).to_equal(false)
+expect(green_run_one()).to_equal(true)
+expect(handle.is_done()).to_equal(true)
+expect(handle.join()).to_equal(23)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -111,8 +129,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

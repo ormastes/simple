@@ -136,8 +136,10 @@ test framework or replace the built-in SPipe matchers.
 
 For in-process SGTTI tests, use `SgttiTestDriver` over a `WinTextSnapshot`.
 Use `SgttiTestDriver.from_tui_state` or `sgtti_snapshot_from_tui_state` when a
-TUI `UIState` should be asserted through the shared SGTTI surface. Select
-surfaces with `UI_TEST_TARGET_TUI`, `UI_TEST_TARGET_GUI`,
+TUI `UIState` should be asserted through the shared SGTTI surface. Use
+`gui_test_snapshot` or `gui_test_snapshot_default` when a headless compositor
+window should be asserted through the same driver without copying compositor
+fixture setup. Select surfaces with `UI_TEST_TARGET_TUI`, `UI_TEST_TARGET_GUI`,
 `UI_TEST_TARGET_BOTH`, and `ui_test_targets`; use `sgtti_parity_check` when a
 `both` run must prove visible/focused/enabled/selected state agrees across TUI
 and GUI snapshots.

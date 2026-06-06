@@ -4,7 +4,7 @@
 **Feature:** `ui_test_sgtti`
 **Architecture:** `doc/04_architecture/ui/ui_test_architecture.md`
 **Depends-for:** `doc/03_plan/ui/draw_ir/draw_io_sdn_draw_ir_plan.md` (Phase 5)
-**Status:** In progress — Phases 1-3 implemented; Phases 4-5 pending
+**Status:** In progress — Phases 1-4 implemented; Phase 5 pending
 **Owners:** `src/lib/nogc_sync_mut/ui_test`, `src/lib/common/ui/win_text_access`,
 `src/os/compositor/gtti`
 
@@ -125,12 +125,16 @@ without forking a new element model or changing the HTTP protocol path.
   families, and shared TUI/GUI parity coverage in
   `test/01_unit/lib/nogc_sync_mut/ui_test/sgtti_spec.spl`.
 
-### Phase 4 - Ergonomic headless GUI snapshot provider
+### Phase 4 - Ergonomic headless GUI snapshot provider — done
 
 - A `gui_test_snapshot(...)` helper that builds the headless `Compositor`
   fixture (backend + cursor) and returns a `WinTextSnapshot`, so GUI tests stop
   copying the `gtti_spec.spl` boilerplate.
 - **Exit:** GUI test setup is a single call; documented fixture cost removed.
+- **Evidence:** `gui_test_snapshot` and `gui_test_snapshot_default` in
+  `src/lib/nogc_sync_mut/ui_test/sgtti.spl`, re-export shims across memory
+  families, and unit coverage in
+  `test/01_unit/lib/nogc_sync_mut/ui_test/sgtti_spec.spl`.
 
 ### Phase 5 - Engine2D / web semantic assertions
 

@@ -4,15 +4,22 @@
 # query/check/action vocabulary over a WinTextSnapshot without an HTTP server.
 
 use common.ui.access.{ui_access_snapshot_from_state}
-use common.ui.access_types.{UiAccessNode}
+use common.ui.access_types.{UiAccessNode, UiAccessProp, UiAccessSurface}
+use common.ui.draw_ir.{DrawIrBatch, DrawIrComposition, DrawIrCommand}
 use common.ui.widget.{UIState}
 use common.ui.win_text_access.{
     WinTextSnapshot,
     WinTextActionRequest,
     win_text_find_nodes,
     win_text_route_action,
-    win_text_simple_ui_snapshot
+    win_text_simple_ui_snapshot,
+    win_text_snapshot_from_parts,
+    win_text_source
 }
+use os.compositor.compositor.{Compositor}
+use os.compositor.gtti.{gtti_snapshot_from_compositor}
+use os.compositor.host_compositor_entry.{HeadlessHostCompositorBackend}
+use os.compositor.wm_core.{WM_MODE_HIDDEN}
 
 val UI_TEST_TARGET_TUI: text = "tui"
 val UI_TEST_TARGET_GUI: text = "gui"
@@ -53,6 +60,101 @@ fn _sgtti_parity_result(ok: bool, id: text, message: text, tui_found: bool, gui_
 
 fn sgtti_snapshot_from_tui_state(state: UIState, captured_at_ms: i64, max_age_ms: i64, now_ms: i64) -> WinTextSnapshot:
     win_text_simple_ui_snapshot(ui_access_snapshot_from_state(state, []), captured_at_ms, max_age_ms, now_ms)
+
+fn gui_test_snapshot(title: text, x: i32, y: i32, width: i32, height: i32, captured_at_ms: i64, now_ms: i64) -> WinTextSnapshot:
+    var comp = Compositor.with_backends(HeadlessHostCompositorBackend.new(width, height), nil, width, height)
+    comp.create_window(title, x, y, width, height)
+    gtti_snapshot_from_compositor(comp, WM_MODE_HIDDEN, captured_at_ms, now_ms)
+
+fn gui_test_snapshot_default(title: text) -> WinTextSnapshot:
+    gui_test_snapshot(title, 0, 0, 640, 480, 1000, 1000)
+
+fn sgtti_snapshot_from_draw_ir_batch(batch: DrawIrBatch, captured_at_ms: i64, max_age_ms: i64, now_ms: i64) -> WinTextSnapshot:
+    val surface_id = "draw_ir:{batch.batch_id}"
+    val surface = UiAccessSurface(
+        surface_id: surface_id,
+        title: batch.batch_id,
+        active: true,
+        window_id: batch.embedding.component_id,
+        app_id: "draw_ir",
+        root_canonical_id: "{surface_id}#root"
+    )
+    val source = win_text_source(
+        source_id: "draw_ir",
+        source_kind: "in_process_semantic",
+        confidence: "high",
+        capabilities: ["query_text", "layout_read"],
+        captured_at_ms: captured_at_ms,
+        max_age_ms: max_age_ms,
+        now_ms: now_ms
+    )
+    win_text_snapshot_from_parts(
+        mode: "draw_ir",
+        active_surface: surface_id,
+        surfaces: [surface],
+        nodes: _sgtti_draw_ir_batch_nodes(surface_id, batch),
+        sources: [source]
+    )
+
+fn sgtti_snapshot_from_draw_ir_composition(composition: DrawIrComposition, captured_at_ms: i64, max_age_ms: i64, now_ms: i64) -> WinTextSnapshot:
+    val surface_id = "draw_ir:{composition.composition_id}"
+    val surface = UiAccessSurface(
+        surface_id: surface_id,
+        title: composition.scene_key,
+        active: true,
+        window_id: composition.scene_key,
+        app_id: "draw_ir",
+        root_canonical_id: "{surface_id}#root"
+    )
+    val source = win_text_source(
+        source_id: "draw_ir",
+        source_kind: "in_process_semantic",
+        confidence: "high",
+        capabilities: ["query_text", "layout_read"],
+        captured_at_ms: captured_at_ms,
+        max_age_ms: max_age_ms,
+        now_ms: now_ms
+    )
+    var nodes: [UiAccessNode] = []
+    for batch in composition.batches:
+        for node in _sgtti_draw_ir_batch_nodes(surface_id, batch):
+            nodes = nodes.push(node)
+    win_text_snapshot_from_parts(
+        mode: "draw_ir",
+        active_surface: surface_id,
+        surfaces: [surface],
+        nodes: nodes,
+        sources: [source]
+    )
+
+fn _sgtti_draw_ir_batch_nodes(surface_id: text, batch: DrawIrBatch) -> [UiAccessNode]:
+    var nodes: [UiAccessNode] = []
+    for command in batch.commands:
+        nodes = nodes.push(_sgtti_draw_ir_node(surface_id, batch.batch_id, command))
+    nodes
+
+fn _sgtti_draw_ir_node(surface_id: text, batch_id: text, command: DrawIrCommand) -> UiAccessNode:
+    UiAccessNode(
+        canonical_id: "{surface_id}#{command.component_id}",
+        surface_id: surface_id,
+        widget_id: command.component_id,
+        kind: command.kind,
+        visible: true,
+        focused: false,
+        enabled: true,
+        selected: false,
+        text_value: command.text_value,
+        props: [
+            UiAccessProp(key: "source", value: "draw_ir"),
+            UiAccessProp(key: "batch_id", value: batch_id),
+            UiAccessProp(key: "x", value: "{command.x}"),
+            UiAccessProp(key: "y", value: "{command.y}"),
+            UiAccessProp(key: "width", value: "{command.width}"),
+            UiAccessProp(key: "height", value: "{command.height}")
+        ],
+        child_ids: [],
+        action_names: []
+    )
 
 pub class SgttiTestDriver:
     snapshot: WinTextSnapshot

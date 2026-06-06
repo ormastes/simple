@@ -1,6 +1,6 @@
 # Draw IR Inspection Contract
 
-> Red-phase source-contract coverage for Draw IR Phases 4-6. These scenarios spell out the endpoint, producer-enrichment, and `expect_draw` surfaces before implementation work starts. They are intentionally concrete assertions rather than placeholder false-fail cases.
+> Red-phase source-contract coverage for Draw IR Phases 4-6. These scenarios spell out the endpoint, producer-enrichment, and `expect_draw` surfaces before implementation work starts. They are intentionally concrete assertions rather than synthetic fail-only cases.
 
 <!-- sdn-diagram:id=draw_ir_inspection_contract_spec.arch -->
 <details class="sdn-source">
@@ -34,7 +34,7 @@ draw_ir_inspection_contract_spec -> std
 
 # Draw IR Inspection Contract
 
-Red-phase source-contract coverage for Draw IR Phases 4-6. These scenarios spell out the endpoint, producer-enrichment, and `expect_draw` surfaces before implementation work starts. They are intentionally concrete assertions rather than placeholder false-fail cases.
+Red-phase source-contract coverage for Draw IR Phases 4-6. These scenarios spell out the endpoint, producer-enrichment, and `expect_draw` surfaces before implementation work starts. They are intentionally concrete assertions rather than synthetic fail-only cases.
 
 ## At a Glance
 
@@ -55,7 +55,7 @@ Red-phase source-contract coverage for Draw IR Phases 4-6. These scenarios spell
 Red-phase source-contract coverage for Draw IR Phases 4-6. These scenarios
 spell out the endpoint, producer-enrichment, and `expect_draw` surfaces before
 implementation work starts. They are intentionally concrete assertions rather
-than placeholder false-fail cases.
+than synthetic fail-only cases.
 
 **Requirements:** N/A
 

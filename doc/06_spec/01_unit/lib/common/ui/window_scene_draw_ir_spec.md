@@ -28,7 +28,7 @@ window_scene_draw_ir_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -69,6 +69,33 @@ expect(composition.batches[3].embedding.x).to_equal(80)
 expect(composition.batches[3].embedding.y).to_equal(120)
 expect(composition.batches[3].commands[0].kind).to_equal(DRAW_IR_COMMAND_RECT)
 expect(composition.batches[3].commands[3].kind).to_equal(DRAW_IR_COMMAND_TEXT)
+```
+
+</details>
+
+#### enriches WM window boxes with hit clip and z-index metadata
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val composition = shared_wm_scene_draw_ir_composition(_scene(), _taskbar(), DRAW_IR_BACKEND_GPU, 1000, "09:41", 2)
+val window_batch = composition.batches[2]
+val body = window_batch.commands[1]
+val titlebar = window_batch.commands[2]
+
+expect(body.hit_rect.present).to_equal(true)
+expect(body.hit_rect.width).to_equal(300)
+expect(body.clip_rect.present).to_equal(true)
+expect(body.clip_rect.height).to_equal(200)
+expect(body.computed_style[0].key).to_equal("source")
+expect(body.computed_style[1].value).to_equal("body")
+expect(body.computed_style[2].key).to_equal("z-index")
+expect(titlebar.hit_rect.height).to_equal(28)
+expect(titlebar.computed_style[1].value).to_equal("titlebar")
 ```
 
 </details>
@@ -174,8 +201,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

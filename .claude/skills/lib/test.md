@@ -4,6 +4,7 @@
 
 - NEVER ignore/skip/comment-out failing tests without user approval
 - ALWAYS fix root cause or ask user
+- NEVER disable sdoctest (md-embedded tests) or spl_doctest (comment-embedded tests) — both must stay enabled in test_config defaults
 
 ## Running Tests
 

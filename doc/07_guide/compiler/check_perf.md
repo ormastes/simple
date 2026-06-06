@@ -116,7 +116,7 @@ hosts, or lower it for smoke evidence.
 | Simple (interpreter) | Tree-walk | Baseline — current default mode |
 | Simple (SMF loader) | Bytecode VM | Shows bytecode dispatch win |
 | Simple (native) | AOT (LLVM/Cranelift) | Shows AOT ceiling |
-| Simple `green_spawn` | Cooperative queue on current OS thread | Implemented green-thread API, but not CPU-parallel or preemptive |
+| Simple `green_spawn` / `green_spawn_value` | Cooperative queue on current OS thread | Implemented green-thread API, but not CPU-parallel or preemptive |
 | Simple `task_spawn` | Runtime worker pool when `rt_pool_*` links | Intended Simple path for Go-like parallel benchmark work |
 | C (gcc -O2) | AOT native | Absolute performance floor |
 | Go | AOT + goroutines | Low-overhead concurrency |

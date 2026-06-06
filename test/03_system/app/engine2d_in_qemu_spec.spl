@@ -22,6 +22,24 @@
 # first run (no baseline present) the test also records the baseline and
 # passes so the next run can do a real compare.
 
+# codex-system-test
+"""
+# Engine2D In QEMU System Contract
+
+## Overview
+
+This system spec verifies the SimpleOS Engine2D guest contract while the
+parallel GUI/2D framework work continues elsewhere. It builds the baremetal
+guest, waits for the Engine2D paint marker, captures a QMP framebuffer, checks
+that it is nonblank, and compares it against the text-tolerant PPM baseline.
+
+## Evidence
+
+The live guest writes serial evidence to `build/os/engine2d_qemu_serial.log`.
+The capture is compared with `test/baselines/engine2d_in_qemu/verification_scene.ppm`;
+`UPDATE_BASELINE=1` rewrites that baseline after a nonblank capture.
+"""
+
 use std.spec.*
 
 use os.qemu_runner.{OsTarget, build_os}
@@ -175,13 +193,14 @@ fn _run_compare(handle: QemuGuestHandle, result: CaptureResult, baseline_path: t
     if not ok:
         print "[engine2d_in_qemu_spec] baseline read failed: {err}"
         stop_guest(handle)
-        expect(false).to_equal(true)
+        expect(ok).to_equal(true)
         return false
 
     if base_w != result.width or base_h != result.height:
         print "[engine2d_in_qemu_spec] baseline dims {base_w}x{base_h} != capture dims {result.width}x{result.height}"
         stop_guest(handle)
-        expect(false).to_equal(true)
+        expect(base_w).to_equal(result.width)
+        expect(base_h).to_equal(result.height)
         return false
 
     val profile = profile_text_tolerant()
@@ -234,8 +253,10 @@ describe "Engine2D in QEMU Simple OS guest":
         # redirected to serial_log. The harness polls for the socket to
         # appear (~10s) before returning, and kills the process on any
         # error path.
+        var spawned = false
         match spawn_guest_with_qmp(target, qmp_socket, serial_log):
             Ok(handle):
+                spawned = true
                 # Wait for Engine2D to paint at least once. Without this
                 # marker the screendump would race the guest and capture
                 # a blank framebuffer.
@@ -256,7 +277,7 @@ describe "Engine2D in QEMU Simple OS guest":
                         if not file_exists(baseline_path):
                             print "[engine2d_in_qemu_spec] missing baseline: {baseline_path}"
                             stop_guest(handle)
-                            expect(false).to_equal(true)
+                            expect(file_exists(baseline_path)).to_equal(true)
                         else:
                             val compared = captured and nonblank and _compare_baseline_ppm_with_python(capture_ppm, baseline_path)
                             stop_guest(handle)
@@ -266,10 +287,10 @@ describe "Engine2D in QEMU Simple OS guest":
                     print "[engine2d_in_qemu_spec] serial log follows:"
                     print read_serial_log(handle)
                     stop_guest(handle)
-                    expect(false).to_equal(true)
+                    expect(saw_painted).to_equal(true)
             Err(err):
                 print "[engine2d_in_qemu_spec] failed to spawn guest: {err}"
-                expect(false).to_equal(true)
+        expect(spawned).to_equal(true)
 
     it "has a baseline directory for engine2d_in_qemu captures":
         val baseline_dir = "test/baselines/engine2d_in_qemu"

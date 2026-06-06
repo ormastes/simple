@@ -5,6 +5,24 @@
 # This stays separate from browser_in_qemu_spec.spl so the marker smoke
 # and the framebuffer byte-compare can fail independently.
 
+# codex-system-test
+"""
+# Browser In QEMU Pixel Contract
+
+## Overview
+
+This slow system spec compares the deterministic browser framebuffer captured
+from QEMU against `test/baselines/browser_in_qemu/session.ppm`. It keeps the
+pixel baseline failure mode concrete: missing baseline, failed screendump, spawn
+failure, and byte mismatch each assert the condition that failed instead of a
+synthetic false assertion.
+
+## Evidence
+
+The capture is written to `build/os/browser_capture_pixel.ppm`; serial evidence
+is written to `build/os/browser_qemu_pixel_serial.log`.
+"""
+
 use std.spec.*
 
 use os.qemu_runner.{OsTarget, build_os}
@@ -88,11 +106,13 @@ describe "Browser webrendering in QEMU Simple OS guest pixel regression":
 
         if not file_exists(baseline_path):
             print "[browser_in_qemu_pixel_spec] missing baseline: {baseline_path}"
-            expect(false).to_equal(true)
+            expect(file_exists(baseline_path)).to_equal(true)
             return
 
+        var spawned = false
         match spawn_guest_with_qmp(target, qmp_socket, serial_log):
             Ok(handle):
+                spawned = true
                 val saw_marker = wait_for_serial_marker(
                     handle,
                     "[BE] Frame painted: HTML -> DOM -> layout -> paint -> scene -> software rasterizer -> framebuffer",
@@ -100,14 +120,15 @@ describe "Browser webrendering in QEMU Simple OS guest pixel regression":
                 if not saw_marker:
                     print "[browser_in_qemu_pixel_spec] serial marker not observed before capture; using QMP pixel compare as authority"
 
-                if not _capture_qmp_ppm_with_timeout(qmp_socket, capture_ppm):
+                val captured = _capture_qmp_ppm_with_timeout(qmp_socket, capture_ppm)
+                if not captured:
                     stop_guest(handle)
                     print "[browser_in_qemu_pixel_spec] QMP screendump timed out or failed"
-                    expect(false).to_equal(true)
+                    expect(captured).to_equal(true)
                     return
                 stop_guest(handle)
 
                 expect(_ppm_capture_matches_baseline(capture_ppm, baseline_path)).to_equal(true)
             Err(err):
                 print "[browser_in_qemu_pixel_spec] failed to spawn guest: {err}"
-                expect(false).to_equal(true)
+        expect(spawned).to_equal(true)

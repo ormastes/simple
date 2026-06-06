@@ -153,7 +153,7 @@ for `fiber` or scheduler runtime terms can miss the implemented stdlib module.
 | Need | API | Implementation | Notes |
 |------|-----|----------------|-------|
 | Spawn a platform thread | `std.concurrent.thread.{thread_spawn}` | `src/lib/nogc_async_mut/concurrent/thread.spl` / `thread_sffi.spl` | Uses OS threads (`pthread_create` / `CreateThread`) |
-| Schedule lightweight cooperative work | `std.concurrent.green_thread.{green_spawn, green_run_one, green_run_all}` | `src/lib/nogc_async_mut/concurrent/green_thread.spl` | Runs closures to completion on the current OS thread; no preemption or CPU parallelism |
+| Schedule lightweight cooperative work | `std.concurrent.green_thread.{green_spawn, green_spawn_value, green_run_one, green_run_all}` | `src/lib/nogc_async_mut/concurrent/green_thread.spl` | Runs queued work/results on the current OS thread; no preemption or CPU parallelism |
 | Reuse a worker pool | `task_spawn` / `TaskHandle` | `src/lib/nogc_async_mut/thread_pool.spl` | Native path uses `rt_pool_submit`, `rt_pool_join`, and `rt_pool_is_done` when linked |
 | Send values between concurrent work | `std.concurrent.channel.{channel_new, channel_from_id}` | `src/lib/nogc_sync_mut/concurrent/channel.spl` | Runtime MPMC channel surface |
 
@@ -173,9 +173,10 @@ fn main():
 
 `green_spawn` is useful for cooperative scheduling semantics and low-overhead
 queued work, but it is not a Go-goroutine equivalent. It does not run tasks in
-parallel and cannot preempt a long-running closure. For Go-like CPU-parallel
-benchmarks, use the pool-backed `task_spawn` path or future scheduler-aware
-green-thread work.
+parallel and cannot preempt a long-running closure. Use `green_spawn_value` when
+testing the queue path from direct interpreter/SMF perf scripts without relying
+on function-value calls. For Go-like CPU-parallel benchmarks, use the pool-backed
+`task_spawn` path or future scheduler-aware green-thread work.
 
 ---
 
