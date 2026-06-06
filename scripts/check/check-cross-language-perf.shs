@@ -84,6 +84,21 @@ avg_ms() {
     else awk "BEGIN {printf \"%.3f\", ($total / $ok) / 1000000}"; fi
 }
 
+failure_reason() {
+    _cmd="$1"
+    _out=$(run_bounded "$_cmd" 2>&1) && { echo "ok"; return; }
+    _status=$?
+    if [ "$_status" -eq 124 ]; then
+        echo "timeout"
+    elif [ "$_status" -eq 139 ]; then
+        echo "segfault"
+    elif echo "$_out" | grep -q 'Undefined symbol: rt_len'; then
+        echo "missing rt_len"
+    else
+        echo "failed"
+    fi
+}
+
 # Extract in-process timing from program stdout (programs print "warm_ms: NNN.NNN")
 extract_warm_ms() {
     _cmd="$1"
@@ -764,11 +779,21 @@ else
 fi
 if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/parallel_green.spl" ]; then
     ms=$(avg_ms "$SIMPLE_BINARY run $BUILD_DIR/parallel_green.spl --mode=interpreter" "$RUNS")
-    par_row "Simple green (interp)" "$ms" "green_spawn cooperative queue"
+    if [ "$ms" = "fail" ]; then
+        reason=$(failure_reason "$SIMPLE_BINARY run $BUILD_DIR/parallel_green.spl --mode=interpreter")
+        par_row "Simple green (interp)" "$ms" "green_spawn cooperative queue ($reason)"
+    else
+        par_row "Simple green (interp)" "$ms" "green_spawn cooperative queue"
+    fi
 fi
 if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/parallel_green_simple.smf" ]; then
     ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/parallel_green_simple.smf" "$RUNS")
-    par_row "Simple green (SMF)" "$ms" "green_spawn cooperative queue"
+    if [ "$ms" = "fail" ]; then
+        reason=$(failure_reason "$SIMPLE_BINARY $BUILD_DIR/parallel_green_simple.smf")
+        par_row "Simple green (SMF)" "$ms" "green_spawn cooperative queue ($reason)"
+    else
+        par_row "Simple green (SMF)" "$ms" "green_spawn cooperative queue"
+    fi
 fi
 if [ -x "$BUILD_DIR/parallel_green_simple_native" ]; then
     ms=$(avg_ms "$BUILD_DIR/parallel_green_simple_native" "$RUNS")
