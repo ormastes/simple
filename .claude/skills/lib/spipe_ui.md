@@ -17,6 +17,61 @@ On macOS the pure-Simple lane = **Engine2D CPU/NEON** (aarch64) + **Metal** (GPU
 Backend-specific 2D variants (same scene, different backend) for parity work:
 `engine2d_cpu_simd_gui.spl` (CPU-NEON) and `engine2d_metal_gui.spl` (Metal).
 
+> **These 3 apps render STATIC, NON-INTERACTIVE scenes** — render-surface sanity
+> checks, not the interactive GUI. (#3 `web_render_file_gui` uses the real web
+> layout → Engine2D renderer; #2 `widget_showcase_gui` and #1 `engine2d_shapes_gui`
+> draw primitives directly — fine for a primitives/widget-catalog demo, but NOT a
+> template for building an interactive app.) For a real interactive app, do NOT
+> hand-draw one. See the next section.
+
+## Interactive GUI (the REAL pipeline) — do NOT hand-draw a new one
+
+⚠️ **Hand-drawing a GUI by calling engine2d primitives (`draw_rect` / `draw_text`,
+`draw_circle`, …) to lay out widgets yourself bypasses the real UI architecture
+and is considered FAKE.** It reinvents layout/state/event routing that already
+exists. Use the builder → `render_html_tree` → web-renderer pipeline below, or
+extend the existing interactive host — never reinvent widgets with raw 2D ops.
+
+**Canonical interactive app:** `src/os/hosted/hosted_entry.spl`. It wires a
+`HostCompositor` (`src/os/compositor/host_compositor_entry.spl`) seeded by
+`seed_host_compositor_shared_mdi` (`src/os/compositor/shared_mdi_host_seed.spl`),
+rendering **Simple Web MDI app content** through `HostedWinitBufferBackend`
+(`src/os/compositor/hosted_backend_winit.spl`). It has REAL event routing:
+`comp.pointer_move(x, y)`, `comp.handle_left_button(pressed)` (click-focus,
+titlebar drag, close-X) and keyboard Tab/W/M/R/Esc.
+
+**The real widget → pixels pipeline** (used by the office apps word/sheets/mail/
+planner and the WM — model app `src/app/wm_compare/production_gui_web_renderer_parity.spl`):
+
+```
+common.ui.builder      button(id,label,action) / text_field / list_widget / scroll
+                       / column / row / panel / build_tree_with_title(root,title,theme)
+  -> common.ui.state.init_state(tree)
+  -> app.ui.render.html_widgets.render_html_tree(state.tree.root_node(), state)   # -> HTML
+  -> simple_web_render_html_to_pixels_with_engine2d_backend(html, w, h, "cpu_simd")  # -> [u32]
+```
+
+Real pixel→widget hit-testing already exists too: `shared_wm_translate_pointer_event`
+in `src/lib/common/ui/window_scene.spl` (returns component kind, local coords,
+target id, callback/window identity).
+
+**Verify with the framebuffer/logic gate, not a screenshot:**
+`scripts/check/check-shared-wm-renderer-unification-evidence.shs` (expects
+`shared_wm_renderer_unification_status=pass`, `logic_passed >= 4`).
+
+**Fast live-interaction status:** the pure-Simple web render is REAL but
+interpreter-bound (~minutes/frame, not live-interactive). The fast "real IR" path
+is UI model → Draw IR → Engine2D executor `engine2d_draw_ir_adv_batch`
+(`src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl`), but the widget-tree→Draw IR
+converter is **NOT built yet** (the "preferred next refactor" in
+`doc/04_architecture/ui/simple_gui_stack_tldr.md`). So today: live interaction is
+via Draw IR (converter TBD) or the electron/tauri/chromium host shells.
+
+**macOS caveat:** the hosted winit window composites, but on-screen content can be
+blank — the documented winit present bug
+(`doc/08_tracking/bug/macos_winit_window_not_displayed_2026-05-28.md`). Trust the
+framebuffer/logic gate, not the live window, on macOS.
+
 ### Web-render backend comparison (pure_simple vs chromium)
 
 `examples/06_io/ui/web_render_backend_gui.spl` renders the **same** HTML page
