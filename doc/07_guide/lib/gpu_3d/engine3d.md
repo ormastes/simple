@@ -238,6 +238,29 @@ Each handle carries `id` (pool index) and `gpu_id` (backend resource ID). The `l
 
 ---
 
+## Backend-Neutral Graph IR
+
+The sync-mut engine render layer exposes a backend-neutral 3D Graph IR at:
+
+```simple
+use std.nogc_sync_mut.engine.render.graph_ir3d.{
+    GraphIr3D, graph_ir3d_optimize_for_3d, graph_ir3d_execute
+}
+```
+
+Use it when a caller needs to collect 3D render passes and indexed mesh draws
+before replaying them through `RenderBackend3D`. The graph records color/depth
+attachments, vertex/index/uniform/texture/pipeline handles, and indexed draw
+parameters. `graph_ir3d_optimize_for_3d` dedupes resource references and sorts
+draws inside each pass by pipeline, texture, and mesh handles. It never moves
+draws across pass boundaries.
+
+The first Graph IR layer is intentionally handle-based. Vulkan/WebGPU command
+recorders, CUDA compute streams, and backend-specific synchronization remain
+backend responsibilities.
+
+---
+
 ## Shaders and Pipelines
 
 ```simple
