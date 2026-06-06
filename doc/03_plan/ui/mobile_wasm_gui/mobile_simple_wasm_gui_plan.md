@@ -1,0 +1,54 @@
+# Mobile Simple-GUI → HTML/CSS/WASM → Tauri2 — Plan & Verified Status (2026-06-06)
+
+Goal (user): Simple GUI **generates** HTML/CSS/WASM; **Tauri2** hosts that UI;
+events + UI data flow Simple↔webview. Replace the current hard-coded-HTML path.
+
+## Intended architecture
+
+```sdn
+(pipeline mobile-simple-wasm-gui
+  (node app        "*.spl exports simple_app_init/render/event")
+  (node compile    "bin/simple compile --target wasm32 -> .wasm (exports + simple.gui custom section)")
+  (node host       "Tauri2 webview JS: load .wasm, call render -> mount HTML+CSS")
+  (node events     "DOM event -> simple_app_event(name,target_id) -> re-render")
+  (edge app compile) (edge compile host) (edge host events) (edge events host))
+```
+
+## Verified by checking (evidence in build/, doc/09_report/mobile_tauri_*)
+
+- **Step 1 — render+events live.** Android: Simple-runtime MDI renders on arm64
+  emulator; real adb tap/text/scroll/drag processed (touch-drag bug fixed,
+  `touch-action:none`). iOS sim: WKWebView renders an interactive page and
+  processes real taps/typing. *Caveat:* those demos used hard-coded / hand-written
+  HTML, not Simple-generated UI; on Android the Simple process exits before events
+  (events handled by JS, not Simple).
+- **Step 2 — linkage.** Tauri shell ↔ subprocess uses an openWindow/render
+  `SubprocessMessage` IPC (stdin/stdout). A richer envelope protocol exists in
+  `web_render_api.spl` (`WebRenderSnapshotEnvelope`/`PatchEnvelope` = UI data,
+  `WebRenderInputEnvelope` = events) but is **not** wired to Tauri.
+- **Step 3 — generation exists, partly.** `bin/simple compile hello_wasm_gui.spl
+  --target wasm32` → valid 4380-byte wasm exporting `simple_app_init`,
+  `simple_app_render`, `simple_app_event` + a `simple.gui` custom section (the
+  `.spl` source). Render/event **logic runs inside wasm** (`render_probe=8`,
+  `event_probe=5`). `web_render_api_spec` (17) + `wasm_hello_gui_spec` (19) pass.
+
+## The concrete blocker for Step 4 (genuine, not faked)
+
+The compiled wasm **exports no `memory`** and `simple_app_render()` returns
+`undefined` → the generated HTML string is **unreachable** by a host. The
+existing Electron "browser execution evidence" mounts *pre-known* HTML and only
+asserts the probe counts — it does not render the wasm's actual output (a partial
+false-green: logic-ran ≠ HTML-rendered).
+
+To unblock, the Simple **wasm backend** must: (a) export linear `memory`; and
+(b) make `simple_app_render`/`simple_app_event` return a readable `(ptr,len)`
+for the `text` (or export `rt_string_data`/`rt_string_len` accessors). This is
+compiler/ABI work in `src/compiler/70.backend` (wasm) + runtime string repr.
+
+## Next milestones
+
+1. Fix wasm string ABI (export memory + readable text return) — unblocks live render.
+2. Tauri2 webview loader: load `.wasm`, `simple_app_render`→mount HTML+CSS,
+   DOM events→`simple_app_event`. Verify on desktop, then Android+iOS.
+3. Replace `dist/index.html` + the hard-coded smoke with the Simple-WASM GUI.
+4. Widget showcase via `builder_matrix_wasm_gui.spl` — all widgets, verified live.
