@@ -288,6 +288,20 @@ errors; all fixed in `gen/apple/project.yml` (xcodegen source; regenerate the
 Both `cargo tauri ios build` (device, unsigned) and `--target aarch64-sim` now
 **BUILD SUCCEEDED**; the sim app reinstalls and still renders the styled showcase.
 
+### Final status (2026-06-06): both platforms — build + render + events ✅
+
+Same source, config-only platform difference. Verified live on the same current
+bundle (33 + 13 widgets):
+- **Android emulator-5554:** APK builds/installs/launches; full styled showcase
+  renders (`html_len≈346 KB`); a real `adb` tap on the tab bar → subprocess
+  re-render IPC.
+- **iPhone 17 sim:** sim app builds/installs/launches; identical styled showcase;
+  a real (computer-use) tap on the Search tab → **Home→Search switch** + re-render.
+
+Docs updated: `doc/07_guide/platform/mobile/tauri_mobile_guide.md` (§1b live
+source-bundle mode + corrected iOS build fixes) and the SPipe UI skill
+`.claude/skills/lib/spipe_ui.md` (mobile sanity section).
+
 ## Next milestones
 
 1. Fix wasm string ABI (export memory + readable text return) — unblocks live render.

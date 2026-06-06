@@ -90,6 +90,46 @@ SIMPLE_BIN="$PWD/src/compiler_rust/target/gui/debug/simple" SIMPLE_LIB="$PWD/src
   bash scripts/check/check-cpu-simd-engine2d-evidence.shs
 ```
 
+## Mobile (Tauri Android / iOS) sanity
+
+The mobile GUI lane runs the **real** `render_html_tree` + `generate_css`
+pipeline as a subprocess inside the Tauri v2 shell (`tools/tauri-shell`), driven
+by a bundled `.ui.sdn`. **Same source both platforms; only build config + the
+cross-compiled runtime differ.** Full guide:
+`doc/07_guide/platform/mobile/tauri_mobile_guide.md` (§1b live source-bundle).
+
+Rebuild loop after changing UI source (`src/app/ui*`, `html_widgets.spl`, a
+`.ui.sdn`): regenerate the embedded bundle, then the app.
+
+```bash
+sh tools/tauri-shell/scripts/build-ui-bundle.shs          # → ui_bundle.tar.gz (~8 MB, gitignored)
+cd tools/tauri-shell/src-tauri
+cargo tauri android build --target aarch64 --debug        # Android APK
+cargo tauri ios build --debug --target aarch64-sim        # iOS simulator (.app)
+```
+
+Pre-flight oracle (desktop, no device): extract the bundle exactly as the device
+will and run the genuine entry — proves the bundle is self-sufficient + the
+renderers fire, via grep on the emitted HTML (not interpreter `index_of`):
+
+```bash
+printf '{"type":"quit"}\n' | bin/simple run src/app/ui/main.spl tauri \
+  examples/06_io/ui/widget_showcase_mobile.ui.sdn 2>/dev/null \
+  | grep -oE 'widget-[a-z-]+' | sort -u    # every supported kind must appear
+```
+
+On-device verification (absolute oracles, NOT `eval OK` which ≠ painted):
+- **Render:** logcat / os_log `[tauri-shell] render, html_len=<N>` + a real
+  screenshot showing styled widgets (`adb exec-out screencap` / `xcrun simctl io
+  booted screenshot`). A blank webview with `eval OK` is the iOS ATS/scheme bug.
+- **Events:** clear the log, inject a REAL tap on a **state-changing** control
+  (a tab/checkbox — `OK`/nav actions may not re-render), then confirm a NEW
+  `html_len` render line appeared (the subprocess re-rendered in response) and
+  the screenshot shows the state change. `adb shell input tap X Y`; on the iOS
+  sim use computer-use pixel clicks (simctl has no tap). Tapping plain widget
+  text can select it instead of clicking — aim at buttons/tab cells.
+- Same `.ui.sdn` → byte-identical `html_len` on both platforms = same source.
+
 ## Gotchas
 
 - `bin/simple run` enforces a 10s example watchdog (wall-clock + RSS). Override
