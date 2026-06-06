@@ -56,6 +56,25 @@ is a major compiler subsystem (real wasm codegen for strings/heap/memory), not a
 small fix. **Decision (user: "WASM-first, IPC fallback"): fall back to the IPC
 path now**; WASM GUI codegen tracked as a separate large compiler effort.
 
+### Update 2: the "Simple generates HTML from a model" path is also unbuilt
+
+Intensive check of the UI stack found there is **no used `WidgetNode → HTML`
+renderer**: every Simple GUI example (`hello_wasm_gui.spl`,
+`builder_matrix_wasm_gui.spl`) **hard-codes** its `<main>…</main>` body string and
+uses the built `WidgetNode` tree only for `all_widget_ids()` / validation. Worse,
+the widget model is inconsistent: `widget_store_ops.spl` defines
+`struct WidgetNode: id: text` (id only) with kind/props/children in separate
+process-global registries (the known "widget_store_ops stub"). So a genuine
+model→HTML renderer requires first untangling the widget model.
+
+Net: **both** routes to truly Simple-generated UI are large builds:
+- WASM route → implement string/heap codegen in the stub wasm backend.
+- Model→HTML route → reconcile the widget model + write a `WidgetNode`-tree→HTML
+  renderer + a stay-alive Simple event loop + Tauri event-forwarding to stdin.
+
+This is multi-PR work, not a single-session fix. Recommend confirming scope and
+doing it as a tracked feature with per-step specs + emulator verification.
+
 ## IPC fallback (active path): Simple generates UI + handles events, live
 
 Simple process **stays alive**, generates HTML/CSS via the UI builder, and
