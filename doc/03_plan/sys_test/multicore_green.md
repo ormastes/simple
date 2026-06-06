@@ -2,6 +2,7 @@
 
 ## Current Executable Coverage
 
+- `doc/03_plan/agent_tasks/multicore_green.md` defines the parallel work orders for Go/profile evidence, Simple OS-thread baseline, cooperative green, multicore-green runtime-pool evidence, and SimpleOS green-carrier proof.
 - `test/01_unit/lib/nogc_async_mut/multicore_green_spec.spl` checks Pure Simple join/result semantics for multiple value tasks and asserts interpreter inline fallback through `ran_inline_fallback()` / `used_runtime_pool()`.
 - `test/01_unit/lib/nogc_async_mut/multicore_green_native.spl` is a native entry-closure smoke for the `rt_pool_*` path and fails if any handle does not report `used_runtime_pool()`.
 - `scripts/check/check-cross-language-perf.shs` produces profile evidence for Simple OS thread, Simple cooperative green, Simple multicore green, C pthreads, and Go goroutines. The generated Simple OS-thread native rows use `thread_spawn` fork-join while `thread_spawn_with_args` native ABI is blocked; generated multicore-green workloads fail if runtime-pool acceptance is not proven for every handle.
