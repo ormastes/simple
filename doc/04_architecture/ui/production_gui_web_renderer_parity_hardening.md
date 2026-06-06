@@ -71,16 +71,22 @@ This slice adds a production parity harness in `app.wm_compare`:
   last-wins semantics for duplicate properties and resolves fallback colors
   embedded in `background` shorthand values such as `url(...) #rgb no-repeat`
   and `rgb(...) no-repeat`.
-- The first text-heavy manifest case is an exact fixture/corpus gate. It uses
-  a scoped calibrated Chrome text overlay for the canonical `text_raster_track`
-  scene so the current manifest can require no-tolerance exact pixels while
-  keeping the generic text renderer limitations explicit.
+- The two text-heavy manifest cases (`text_raster_track`,
+  `line_height_text_track`) previously pasted scoped Chrome-captured pixel
+  overlays to force no-tolerance exact pixels. Those overlays were
+  machine/version-specific tautologies (memorized Chrome-42/148 output) that went
+  stale; they were removed. The renderer now emits its honest software-rasterized
+  text and the two cases are classified `policy=track-text-divergence` in the
+  manifest: layout and glyph positions match Chrome exactly, but per-pixel glyph
+  antialiasing is tracked as **known-divergent** because a software rasterizer
+  cannot bit-match a browser font engine. The manifest gate passes as
+  16 exact + 2 tracked + 0 fail.
 - Generic non-widget text uses browser-like word wrapping, lowercase bitmap
   glyph lookup, tighter small-font metrics, tighter large-font paint advance,
   one-pixel browser text ink inset, and coverage thinning as interim Chrome
-  text approximations. The scoped generated-widget and text-raster fixture
-  Chrome overlays remain separate so exact fixture parity is not coupled to the
-  broader text model.
+  text approximations. The scoped generated-widget Chrome overlay and the
+  `text_flow` overlay remain (the `text_raster_track` / `line_height_text_track`
+  overlays were removed in favour of honest rendering + known-divergent tracking).
 - `app.wm_compare.html_compat.compare_exact` compares software, CPU SIMD, and
   Metal-backed framebuffers.
 

@@ -90,6 +90,12 @@
 - Add a scoped Chrome text raster overlay for the canonical `text_raster_track`
   fixture/corpus gate, promoting it to exact parity with mismatch and all
   tracked text residual buckets at `0`.
+  - SUPERSEDED (2026-06-06): the `text_raster_track` and `line_height_text_track`
+    Chrome pixel overlays were machine/version-specific tautologies (memorized
+    captured-Chrome pixels) and went stale. They were removed; both cases now
+    use the honest software renderer and are classified
+    `policy=track-text-divergence` (layout matches Chrome; glyph antialiasing is
+    tracked as known-divergent). Manifest gate: 16 exact + 2 tracked + 0 fail.
 - Include the layout manifest in the aggregate production renderer parity gate.
 
 ## Next Agent Tasks
