@@ -128,6 +128,7 @@ Primary paths:
 - `test/01_unit/lib/nogc_async_mut/multicore_green_spec.spl`
 - `test/01_unit/lib/nogc_async_mut/multicore_green_native.spl`
 - `test/05_perf/stress/multicore_green_fanout_spec.spl`
+- `doc/08_tracking/bug/green_thread_direct_runtime_blockers_2026-06-06.md`
 
 Deliverables:
 
@@ -139,6 +140,8 @@ Deliverables:
 Acceptance evidence:
 
 - `bin/release/simple check test/01_unit/lib/nogc_async_mut/multicore_green_native.spl`
+- native build/run of `test/01_unit/lib/nogc_async_mut/multicore_green_native.spl`
+  exits `0`, proving every handle reported `used_runtime_pool()`;
 - `bin/release/simple test test/05_perf/stress/multicore_green_fanout_spec.spl --mode=interpreter --clean`
 - cross-language report contains `used_runtime_pool()` evidence text.
 

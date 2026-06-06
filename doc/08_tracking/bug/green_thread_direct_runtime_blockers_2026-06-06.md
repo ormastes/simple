@@ -57,6 +57,26 @@ native/SMF function-valued storage/codegen failures, and the
 `thread_spawn_with_args` native ABI issue; those are runtime/compiler issues,
 not public API change requests.
 
+## Multicore Green SMF Fanout Blocker
+
+The native `multicore_green_spawn` path has separate runtime-pool evidence:
+`test/01_unit/lib/nogc_async_mut/multicore_green_native.spl` exits nonzero if
+any handle reports `used_runtime_pool() == false`. Current native evidence
+passes that gate.
+
+The SMF fanout row remains a runtime blocker, not M:N evidence. The current
+cross-language smoke report (`doc/09_report/cross_language_perf_parallel_smoke.md`)
+classifies:
+
+- `Simple multicore green (SMF)` parallel CPU workers as
+  `multicore_green runtime pool candidate` when the small worker workload runs.
+- `Simple multicore green (SMF)` large fanout as
+  `multicore_green runtime pool fanout (segfault)`.
+
+Keep SMF multicore-green failures classified separately from native M:N evidence
+until the SMF runtime can execute the generated `fanout_multicore_green.spl`
+workload without segfaulting and while every handle reports `used_runtime_pool()`.
+
 ## Reproduction
 
 Temporary local repro files were created under `build/tmp/` while investigating:

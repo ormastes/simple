@@ -27,7 +27,7 @@ multicore_green_tracking_spec
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -126,6 +126,8 @@ guard with the selected requirement paths in the same change.
   multicore green, and the SimpleOS green carrier.
 - The tracking row must carry guide links for the compiler perf guide and
   standard library concurrency API guide.
+- The tracking row must carry the current blocker document while SMF
+  multicore-green fanout and direct green runtime issues remain unresolved.
 
 ## Naming Expectations
 
@@ -270,12 +272,27 @@ expect(row).to_contain("doc/07_guide/lib/misc/stdlib.md")
 
 </details>
 
+#### links active runtime blockers for unresolved M:N work
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val row = multicore_green_row(read_tracking_db())
+expect(row).to_contain("doc/08_tracking/bug/green_thread_direct_runtime_blockers_2026-06-06.md")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
