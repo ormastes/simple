@@ -43,6 +43,14 @@ pub struct GreenCarrierApplyResult:
     ipi_reason_mask: u32
     reason: text
 
+pub struct GreenCarrierDispatchResult:
+    """Result of selecting queued green work for a carrier CPU."""
+    queues: GreenCarrierRunQueueState
+    task_id: i64
+    cpu: i64
+    dispatched: bool
+    reason: text
+
 pub fn green_carrier_should_send_ipi(current_cpu: i64, target_cpu: i64, should_enqueue: bool) -> bool:
     """Request a wake IPI only for remote runnable enqueue decisions."""
     should_enqueue and target_cpu != current_cpu
@@ -132,9 +140,78 @@ fn green_carrier_queue_push(queues: GreenCarrierRunQueueState, task_id: i64, cpu
 
 fn green_carrier_increment_queue_depth(queue_depth_by_cpu: [i64], cpu: i64) -> [i64]:
     var next_depth = queue_depth_by_cpu
-    if cpu >= 0 and cpu < next_depth.len():
+    val depth_len = next_depth.len()
+    if cpu >= 0 and cpu < depth_len:
         next_depth[cpu] = next_depth[cpu] + 1
     next_depth
+
+fn green_carrier_decrement_queue_depth(queue_depth_by_cpu: [i64], cpu: i64) -> [i64]:
+    var next_depth = queue_depth_by_cpu
+    val depth_len = next_depth.len()
+    if cpu >= 0 and cpu < depth_len and next_depth[cpu] > 0:
+        next_depth[cpu] = next_depth[cpu] - 1
+    next_depth
+
+fn green_carrier_first_queued_index_for_cpu(queues: GreenCarrierRunQueueState, cpu: i64) -> i64:
+    var i = 0
+    val task_len = queues.queued_task_ids.len()
+    val cpu_len = queues.queued_cpus.len()
+    val scan_len = if task_len < cpu_len: task_len else: cpu_len
+    while i < scan_len:
+        if queues.queued_cpus[i] == cpu:
+            return i
+        i = i + 1
+    -1
+
+fn green_carrier_remove_queued_index(queues: GreenCarrierRunQueueState, remove_index: i64) -> GreenCarrierRunQueueState:
+    var queued_task_ids: [i64] = []
+    var queued_cpus: [i64] = []
+    var i = 0
+    val task_len = queues.queued_task_ids.len()
+    val cpu_len = queues.queued_cpus.len()
+    val scan_len = if task_len < cpu_len: task_len else: cpu_len
+    while i < scan_len:
+        if i != remove_index:
+            queued_task_ids.push(queues.queued_task_ids[i])
+            queued_cpus.push(queues.queued_cpus[i])
+        i = i + 1
+    GreenCarrierRunQueueState(
+        queued_task_ids: queued_task_ids,
+        queued_cpus: queued_cpus,
+        queue_depth_by_cpu: green_carrier_decrement_queue_depth(queues.queue_depth_by_cpu, queues.queued_cpus[remove_index]),
+        capacity: queues.capacity,
+        dropped_count: queues.dropped_count
+    )
+
+pub fn green_carrier_dispatch_next(queues: GreenCarrierRunQueueState, cpu: i64) -> GreenCarrierDispatchResult:
+    """Select the next queued green task for one carrier CPU."""
+    if cpu < 0 or cpu >= queues.queue_depth_by_cpu.len():
+        GreenCarrierDispatchResult(
+            queues: queues,
+            task_id: -1,
+            cpu: cpu,
+            dispatched: false,
+            reason: "invalid_cpu"
+        )
+    else:
+        val idx = green_carrier_first_queued_index_for_cpu(queues, cpu)
+        if idx < 0:
+            GreenCarrierDispatchResult(
+                queues: queues,
+                task_id: -1,
+                cpu: cpu,
+                dispatched: false,
+                reason: "queue_empty"
+            )
+        else:
+            val task_id = queues.queued_task_ids[idx]
+            GreenCarrierDispatchResult(
+                queues: green_carrier_remove_queued_index(queues, idx),
+                task_id: task_id,
+                cpu: cpu,
+                dispatched: true,
+                reason: "dispatched"
+            )
 
 pub fn green_carrier_apply_enqueue(queues: GreenCarrierRunQueueState, decision: GreenCarrierEnqueueDecision) -> GreenCarrierApplyResult:
     """Apply a carrier decision to green run queues and SMP reschedule IPIs."""

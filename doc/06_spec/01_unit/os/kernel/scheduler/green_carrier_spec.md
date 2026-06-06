@@ -28,7 +28,7 @@ green_carrier_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 11 | 11 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -71,7 +71,8 @@ placement rules and turns the runnable task into either a local or remote
 carrier enqueue decision. Waking a parked green task reuses the green-task
 unpark decision, then records whether the chosen CPU is remote to the current
 carrier CPU. Applying a decision updates bounded carrier queues and uses the
-existing SimpleOS SMP reschedule IPI surface for remote online CPUs.
+existing SimpleOS SMP reschedule IPI surface for remote online CPUs. Dispatch
+selects queued work for a carrier CPU without stealing tasks from other CPUs.
 
 ## Requirements
 
@@ -372,12 +373,123 @@ expect(after_second.queues.queued_task_ids.len()).to_equal(1)
 
 </details>
 
+### dispatch
+
+#### dispatches queued green work for the requested carrier CPU
+
+1. smp init
+   - Expected: dispatched.dispatched is true
+   - Expected: dispatched.task_id equals `32`
+   - Expected: dispatched.cpu equals `1`
+   - Expected: dispatched.reason equals `dispatched`
+   - Expected: green_carrier_queue_depth(dispatched.queues, 1) equals `0`
+   - Expected: dispatched.queues.queued_task_ids.len() equals `0`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+smp_init()
+val queues = green_carrier_run_queues_new(4, 8)
+val first = green_carrier_spawn_task(32, 4, 0, 3, 1, 2, 4, 1)
+val queued = green_carrier_apply_enqueue(queues, first)
+val dispatched = green_carrier_dispatch_next(queued.queues, 1)
+
+expect(dispatched.dispatched).to_equal(true)
+expect(dispatched.task_id).to_equal(32)
+expect(dispatched.cpu).to_equal(1)
+expect(dispatched.reason).to_equal("dispatched")
+expect(green_carrier_queue_depth(dispatched.queues, 1)).to_equal(0)
+expect(dispatched.queues.queued_task_ids.len()).to_equal(0)
+```
+
+</details>
+
+#### preserves queued work for other carrier CPUs
+
+1. smp init
+   - Expected: dispatched.dispatched is true
+   - Expected: dispatched.task_id equals `33`
+   - Expected: green_carrier_queue_depth(dispatched.queues, 1) equals `0`
+   - Expected: green_carrier_queue_depth(dispatched.queues, 2) equals `1`
+   - Expected: dispatched.queues.queued_task_ids.len() equals `1`
+   - Expected: dispatched.queues.queued_task_ids[0] equals `34`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+smp_init()
+val queues = green_carrier_run_queues_new(4, 8)
+val cpu1_task = green_carrier_spawn_task(33, 4, 0, 3, 1, 2, 4, 1)
+val after_cpu1 = green_carrier_apply_enqueue(queues, cpu1_task)
+val cpu2_task = green_carrier_spawn_task(34, 4, 0, 3, 4, 1, 2, 2)
+val after_cpu2 = green_carrier_apply_enqueue(after_cpu1.queues, cpu2_task)
+val dispatched = green_carrier_dispatch_next(after_cpu2.queues, 1)
+
+expect(dispatched.dispatched).to_equal(true)
+expect(dispatched.task_id).to_equal(33)
+expect(green_carrier_queue_depth(dispatched.queues, 1)).to_equal(0)
+expect(green_carrier_queue_depth(dispatched.queues, 2)).to_equal(1)
+expect(dispatched.queues.queued_task_ids.len()).to_equal(1)
+expect(dispatched.queues.queued_task_ids[0]).to_equal(34)
+```
+
+</details>
+
+#### reports empty queue without mutating state
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val queues = green_carrier_run_queues_new(4, 8)
+val dispatched = green_carrier_dispatch_next(queues, 1)
+
+expect(dispatched.dispatched).to_equal(false)
+expect(dispatched.task_id).to_equal(-1)
+expect(dispatched.reason).to_equal("queue_empty")
+expect(dispatched.queues.queued_task_ids.len()).to_equal(0)
+```
+
+</details>
+
+#### rejects dispatch for invalid carrier CPU
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val queues = green_carrier_run_queues_new(4, 8)
+val dispatched = green_carrier_dispatch_next(queues, 9)
+
+expect(dispatched.dispatched).to_equal(false)
+expect(dispatched.task_id).to_equal(-1)
+expect(dispatched.reason).to_equal("invalid_cpu")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
