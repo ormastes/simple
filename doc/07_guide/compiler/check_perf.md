@@ -5,11 +5,11 @@ modes, compared against bun, python, go, erlang, java, and C.
 
 ## Table of Contents
 
-1. [Execution Modes](#execution-modes)
-2. [Correctness Checks](#correctness-checks)
-3. [Cross-Language Benchmark](#cross-language-benchmark)
-4. [Reading the Results](#reading-the-results)
-5. [Optimizing Simple Code](#optimizing-simple-code)
+- **Execution modes:** [Execution Modes](#execution-modes)
+- **Correctness gates:** [Correctness Checks](#correctness-checks)
+- **Cross-language evidence:** [Cross-Language Benchmark](#cross-language-benchmark)
+- **Result interpretation:** [Reading the Results](#reading-the-results)
+- **Simple optimization:** [Optimizing Simple Code](#optimizing-simple-code)
 
 ## Execution Modes
 
@@ -170,11 +170,11 @@ Interpreter → SMF Loader → Native
 
 ### Code-level optimizations
 
-1. **`val` over `var`** — immutable bindings enable constant folding
-2. **Iteration over recursion** — tail-call not yet optimized; rewrite deep recursion as loops
-3. **Typed collections** — `List<i64>` avoids boxing overhead vs untyped `List`
-4. **Avoid string interpolation in hot loops** — pre-format outside the loop
-5. **Use `std.testing.benchmark`** for micro-benchmarks with warmup + outlier detection
+- **Immutable bindings:** prefer `val` over `var` to enable constant folding
+- **Iterative control flow:** rewrite deep recursion as loops where practical because tail-call is not yet optimized
+- **Typed collections:** use `List<i64>` to avoid boxing overhead vs untyped `List`
+- **Hot-loop formatting:** pre-format strings outside hot loops
+- **Benchmark harness:** use `std.testing.benchmark` for micro-benchmarks with warmup and outlier detection
 
 ### Built-in perf tools
 
