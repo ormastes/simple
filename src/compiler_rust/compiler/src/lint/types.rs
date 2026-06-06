@@ -95,6 +95,10 @@ pub enum LintName {
     TooManyArguments,
     /// Non-deterministic call inside a @deterministic-annotated function
     NonDetCallInDetFn,
+    /// Accessor method only forwards a backing field without behavior
+    DummyAccessor,
+    /// Child method name is close to an inherited method name
+    SimilarParentMethodName,
 }
 
 impl LintName {
@@ -130,6 +134,8 @@ impl LintName {
             LintName::UnknownAttribute => "unknown_attribute",
             LintName::TooManyArguments => "too_many_arguments",
             LintName::NonDetCallInDetFn => "non_det_call_in_det_fn",
+            LintName::DummyAccessor => "dummy_accessor",
+            LintName::SimilarParentMethodName => "similar_parent_method_name",
         }
     }
 
@@ -165,6 +171,8 @@ impl LintName {
             "unknown_attribute" => Some(LintName::UnknownAttribute),
             "too_many_arguments" | "too_many_args" => Some(LintName::TooManyArguments),
             "non_det_call_in_det_fn" => Some(LintName::NonDetCallInDetFn),
+            "dummy_accessor" => Some(LintName::DummyAccessor),
+            "similar_parent_method_name" => Some(LintName::SimilarParentMethodName),
             "unknown_annotation" => {
                 // Meta-lint: suppresses both unknown_decorator and unknown_attribute
                 // Handled specially in config.rs apply_attributes
@@ -207,6 +215,8 @@ impl LintName {
             LintName::UnknownAttribute => LintLevel::Warn,
             LintName::TooManyArguments => LintLevel::Warn,
             LintName::NonDetCallInDetFn => LintLevel::Warn,
+            LintName::DummyAccessor => LintLevel::Warn,
+            LintName::SimilarParentMethodName => LintLevel::Warn,
         }
     }
 
@@ -836,6 +846,41 @@ Refactor the signature first.
 Only after explicit user or reviewer confirmation should you add a narrowly
 scoped suppression with a concrete reason.
 "#.to_string(),
+            LintName::DummyAccessor => r#"Lint: dummy_accessor
+Level: warn (default)
+
+=== What it checks ===
+
+Warns when get_*, set_*, or is_* methods only expose or assign a backing field
+and add no behavior.
+
+=== Why it matters ===
+
+Simple already supports field forwarding through accessor conventions. Dummy
+accessors make generated code larger without changing behavior.
+
+=== Suppression policy ===
+
+Prefer deleting the wrapper or adding the missing behavior. Overrides of parent
+accessors and accessor groups with one real accessor are exempt.
+"#.to_string(),
+            LintName::SimilarParentMethodName => r#"Lint: similar_parent_method_name
+Level: warn (default)
+
+=== What it checks ===
+
+Warns when a child class method name is edit-distance-similar to an inherited
+method name but is not an exact override.
+
+=== Why it matters ===
+
+Near-miss method names are usually misspellings that accidentally fail to
+override parent behavior.
+
+=== Suppression policy ===
+
+Use @name_checked on the child method when the near-match is intentional.
+"#.to_string(),
         }
     }
 
@@ -871,6 +916,8 @@ scoped suppression with a concrete reason.
             LintName::UnknownAttribute,
             LintName::TooManyArguments,
             LintName::NonDetCallInDetFn,
+            LintName::DummyAccessor,
+            LintName::SimilarParentMethodName,
         ]
     }
 }

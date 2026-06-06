@@ -65,7 +65,7 @@ var _g_addresses: [i64] = []
 
 fn _global_set(symbol: text, owner_id: text, address: i64):
     var idx = -1
-    for i in range(0, _g_symbols.len()):
+    for i in 0.._g_symbols.len():
         if _g_symbols[i] == symbol:
             idx = i
     if idx >= 0:
@@ -77,7 +77,7 @@ fn _global_set(symbol: text, owner_id: text, address: i64):
         _g_addresses.push(address)
 
 fn _global_get(symbol: text):
-    for i in range(0, _g_symbols.len()):
+    for i in 0.._g_symbols.len():
         if _g_symbols[i] == symbol:
             return Some(MappedRecord(owner_id: _g_owners[i], address: _g_addresses[i]))
     nil
@@ -86,7 +86,7 @@ fn _global_remove(symbol: text):
     var keep_s: [text] = []
     var keep_o: [text] = []
     var keep_a: [i64] = []
-    for i in range(0, _g_symbols.len()):
+    for i in 0.._g_symbols.len():
         if _g_symbols[i] != symbol:
             keep_s.push(_g_symbols[i])
             keep_o.push(_g_owners[i])
@@ -94,6 +94,12 @@ fn _global_remove(symbol: text):
     _g_symbols = keep_s
     _g_owners = keep_o
     _g_addresses = keep_a
+
+fn _jit_key_list_contains(keys: [text], key: text) -> bool:
+    for item in keys:
+        if item == key:
+            return true
+    false
 
 class JitExecMapper:
     records: Dict
@@ -104,7 +110,7 @@ class JitExecMapper:
     me set_record(symbol: text, owner_id: text, address: i64):
         self.records[symbol] = MappedRecord(owner_id: owner_id, address: address)
         var found = -1
-        for i in range(0, self.symbols.len()):
+        for i in 0..self.symbols.len():
             if self.symbols[i] == symbol:
                 found = i
         if found >= 0:
@@ -119,7 +125,7 @@ class JitExecMapper:
         val g = _global_get(symbol)
         if g.?:
             return g
-        for i in range(0, self.symbols.len()):
+        for i in 0..self.symbols.len():
             if self.symbols[i] == symbol:
                 return Some(MappedRecord(owner_id: self.owners[i], address: self.addresses[i]))
         if self.records.has(symbol):
@@ -139,6 +145,8 @@ class JitMapper:
 class JitInstantiator:
     config: JitInstantiatorConfig
     jit_cache: Dict
+    jit_semantic_keys: Dict<text, [text]>
+    smf_semantic_keys: Dict<text, [text]>
     exec_mapper: JitExecMapper
     jit_mapper: JitMapper
     loaded_metadata: Dict<text, LoadedMetadata>
@@ -150,6 +158,8 @@ class JitInstantiator:
         JitInstantiator(
             config: config,
             jit_cache: {},
+            jit_semantic_keys: {},
+            smf_semantic_keys: {},
             exec_mapper: JitExecMapper(records: {}, symbols: [], owners: [], addresses: []),
             jit_mapper: JitMapper(),
             loaded_metadata: {},
@@ -202,16 +212,33 @@ class JitInstantiator:
             owner = rec.unwrap().owner_id
         self.jit_cache[name] = {"code": code, "address": addr, "owner": owner}
 
+    me set_smf_semantic_keys(path: text, keys: [text]):
+        self.smf_semantic_keys[path] = keys
+
+    me set_symbol_semantic_keys(name: text, keys: [text]):
+        self.jit_semantic_keys[name] = keys
+
+    me invalidate_by_semantic_key(changed_key: text) -> [text]:
+        var removed: [text] = []
+        for symbol in self.jit_semantic_keys.keys():
+            val keys = self.jit_semantic_keys[symbol]
+            if _jit_key_list_contains(keys, changed_key):
+                self.drop_cached_symbol(symbol)
+                removed.push(symbol)
+        removed
+
     me drop_cached_symbol(name: text):
         if self.jit_cache.has(name):
             self.jit_cache = self.jit_cache.remove(name)
+        if self.jit_semantic_keys.has(name):
+            self.jit_semantic_keys = self.jit_semantic_keys.remove(name)
         _global_remove(name)
         if self.exec_mapper.records.has(name):
             self.exec_mapper.records = self.exec_mapper.records.remove(name)
         var kept_syms: [text] = []
         var kept_owners: [text] = []
         var kept_addrs: [i64] = []
-        for i in range(0, self.exec_mapper.symbols.len()):
+        for i in 0..self.exec_mapper.symbols.len():
             if self.exec_mapper.symbols[i] != name:
                 kept_syms.push(self.exec_mapper.symbols[i])
                 kept_owners.push(self.exec_mapper.owners[i])
@@ -255,6 +282,8 @@ class JitInstantiator:
             "address": address,
             "owner": owner_id
         }
+        if self.smf_semantic_keys.has(path):
+            self.jit_semantic_keys[name] = self.smf_semantic_keys[path]
         self.compile_count = self.compile_count + 1
 
         if self.config.update_smf:

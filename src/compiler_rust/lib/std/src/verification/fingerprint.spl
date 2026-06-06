@@ -7,7 +7,8 @@
 # 1. Source file content hash
 # 2. Generated Lean content hash
 # 3. Dependency file hashes (imported proof modules)
-# 4. Lean toolchain version string
+# 4. Semantic/public ABI hashes (exported layout, accessors, wrappers)
+# 5. Lean toolchain version string
 
 use io.fs as fs
 
@@ -16,12 +17,19 @@ class Fingerprint:
     source_hash: text
     lean_hash: text
     dep_hashes: List<text>
+    semantic_hashes: List<text>
     toolchain_version: text
     combined: text              # Final combined hash
 
     # Compute a fingerprint from source, lean, dependency files, and toolchain version.
     # Reads file contents and hashes them. Missing files hash as empty string.
     static fn compute(source_file: text, lean_file: text, dep_files: List<text>, toolchain_version: text) -> Fingerprint:
+        Fingerprint.compute_with_semantics(source_file, lean_file, dep_files, [], toolchain_version)
+
+    # Compute a fingerprint including semantic/public ABI inputs.
+    # Semantic hashes are pre-computed by the compiler layer and must include
+    # field wrappers, generated get/set/is accessors, layout, and exported ABI.
+    static fn compute_with_semantics(source_file: text, lean_file: text, dep_files: List<text>, semantic_hashes: List<text>, toolchain_version: text) -> Fingerprint:
         val source_content = fs.read_text(source_file) ?? ""
         val lean_content = fs.read_text(lean_file) ?? ""
         val source_hash = simple_hash(source_content)
@@ -30,24 +38,43 @@ class Fingerprint:
         for dep in dep_files:
             val dep_content = fs.read_text(dep) ?? ""
             dep_hashes = dep_hashes + [simple_hash(dep_content)]
-        val combined = simple_hash(source_hash + "|" + lean_hash + "|" + dep_hashes.join("|") + "|" + toolchain_version)
-        Fingerprint(source_hash, lean_hash, dep_hashes, toolchain_version, combined)
+        val combined = combine_fingerprint_parts(source_hash, lean_hash, dep_hashes, semantic_hashes, toolchain_version)
+        Fingerprint(
+            source_hash: source_hash,
+            lean_hash: lean_hash,
+            dep_hashes: dep_hashes,
+            semantic_hashes: semantic_hashes,
+            toolchain_version: toolchain_version,
+            combined: combined
+        )
 
     # Build a fingerprint from pre-computed hash values (no file I/O).
     # Useful for tests and cache deserialization.
     static fn from_hashes(source_hash: text, lean_hash: text, dep_hashes: List<text>, toolchain_version: text) -> Fingerprint:
-        val combined = simple_hash(source_hash + "|" + lean_hash + "|" + dep_hashes.join("|") + "|" + toolchain_version)
-        Fingerprint(source_hash, lean_hash, dep_hashes, toolchain_version, combined)
+        Fingerprint.from_hashes_with_semantics(source_hash, lean_hash, dep_hashes, [], toolchain_version)
+
+    # Build a fingerprint from pre-computed hashes plus semantic/public ABI hashes.
+    static fn from_hashes_with_semantics(source_hash: text, lean_hash: text, dep_hashes: List<text>, semantic_hashes: List<text>, toolchain_version: text) -> Fingerprint:
+        val combined = combine_fingerprint_parts(source_hash, lean_hash, dep_hashes, semantic_hashes, toolchain_version)
+        Fingerprint(
+            source_hash: source_hash,
+            lean_hash: lean_hash,
+            dep_hashes: dep_hashes,
+            semantic_hashes: semantic_hashes,
+            toolchain_version: toolchain_version,
+            combined: combined
+        )
 
     # Check whether two fingerprints are semantically identical.
     fn matches(self, other: Fingerprint) -> bool:
         self.combined == other.combined
 
     # Serialize to a flat text representation for SDN storage.
-    # Format: source_hash|lean_hash|dep1,dep2,...|toolchain_version|combined
+    # Format: source_hash|lean_hash|dep1,dep2,...|sem1,sem2,...|toolchain_version|combined
     fn to_text(self) -> text:
         val deps_str = self.dep_hashes.join(",")
-        "{self.source_hash}|{self.lean_hash}|{deps_str}|{self.toolchain_version}|{self.combined}"
+        val semantic_str = self.semantic_hashes.join(",")
+        "{self.source_hash}|{self.lean_hash}|{deps_str}|{semantic_str}|{self.toolchain_version}|{self.combined}"
 
     # Deserialize from flat text representation.
     static fn from_text(raw: text) -> Option<Fingerprint>:
@@ -57,18 +84,58 @@ class Fingerprint:
         val source_hash = parts[0]
         val lean_hash = parts[1]
         val deps_str = parts[2]
-        val toolchain_version = parts[3]
-        val combined = parts[4]
         var dep_hashes: List<text> = []
         if deps_str.len() > 0:
             dep_hashes = deps_str.split(",")
-        Some(Fingerprint(source_hash, lean_hash, dep_hashes, toolchain_version, combined))
+        if parts.len() == 5:
+            val toolchain_version = parts[3]
+            val combined = parts[4]
+            return Some(Fingerprint(
+                source_hash: source_hash,
+                lean_hash: lean_hash,
+                dep_hashes: dep_hashes,
+                semantic_hashes: [],
+                toolchain_version: toolchain_version,
+                combined: combined
+            ))
+        val semantic_str = parts[3]
+        var semantic_hashes: List<text> = []
+        if semantic_str.len() > 0:
+            semantic_hashes = semantic_str.split(",")
+        val toolchain_version = parts[4]
+        val combined = parts[5]
+        Some(Fingerprint(
+            source_hash: source_hash,
+            lean_hash: lean_hash,
+            dep_hashes: dep_hashes,
+            semantic_hashes: semantic_hashes,
+            toolchain_version: toolchain_version,
+            combined: combined
+        ))
 
-# Simple string hash function (FNV-1a inspired).
-# Returns a deterministic text representation of the hash value.
+# Build a semantic fingerprint atom for public ABI/accessor inputs.
+pub fn semantic_fingerprint(kind: text, owner: text, name: text, signature: text, body_hash: text) -> text:
+    simple_hash("sem|" + kind + "|" + owner + "|" + name + "|" + signature + "|" + body_hash)
+
+pub fn public_abi_fingerprint(owner: text, exported_layout: text, exported_symbols: List<text>) -> text:
+    simple_hash("public_abi|" + owner + "|" + exported_layout + "|" + exported_symbols.join("|"))
+
+pub fn accessor_fingerprint(owner: text, accessor_name: text, signature: text, body_hash: text) -> text:
+    semantic_fingerprint("accessor", owner, accessor_name, signature, body_hash)
+
+pub fn field_wrapper_fingerprint(owner: text, field_name: text, wrapper_type: text, accessor_hashes: List<text>) -> text:
+    simple_hash("field_wrapper|" + owner + "|" + field_name + "|" + wrapper_type + "|" + accessor_hashes.join("|"))
+
+pub fn dependency_semantic_fingerprint(module_name: text, public_abi_hash: text, accessor_hash: text, field_wrapper_hash: text) -> text:
+    simple_hash("dependency_semantic|" + module_name + "|" + public_abi_hash + "|" + accessor_hash + "|" + field_wrapper_hash)
+
+fn combine_fingerprint_parts(source_hash: text, lean_hash: text, dep_hashes: List<text>, semantic_hashes: List<text>, toolchain_version: text) -> text:
+    simple_hash(source_hash + "|" + lean_hash + "|" + dep_hashes.join("|") + "|" + semantic_hashes.join("|") + "|" + toolchain_version)
+
+# Simple deterministic content fingerprint.
 pub fn simple_hash(input: text) -> text:
-    var h: i64 = 14695981039346656037  # FNV offset basis
-    for ch in input:
-        h = h ^ ch.to_i64()
-        h = h * 1099511628211  # FNV prime
-    "{h}"  # Convert to string representation
+    var escaped = input.replace("%", "%25")
+    escaped = escaped.replace("|", "%7C")
+    escaped = escaped.replace(",", "%2C")
+    escaped = escaped.replace("\n", "%0A")
+    "{input.len()}:{escaped}"

@@ -1,0 +1,361 @@
+# Part 5 of src/compiler/90.tools/lint/main.spl
+use compiler.tools.lint.main.*
+
+class NameLintWarning:
+    code: String
+    line: Int
+    message: String
+    hint: String
+
+class NameLintMethod:
+    class_name: String
+    parent_name: String
+    name: String
+    line: Int
+    params: [String]
+    body: [String]
+    name_checked: Bool
+
+class NameLintClass:
+    name: String
+    parent_name: String
+    indent: Int
+    line: Int
+    methods: [NameLintMethod]
+
+fn lint_accessor_and_parent_names(path: String, content: String) -> [NameLintWarning]:
+    val classes = name_lint_collect_classes(content)
+    var warnings: [NameLintWarning] = []
+    for class_info in classes:
+        for warning in name_lint_dummy_accessor_warnings(path, class_info, classes):
+            warnings.push(warning)
+        for warning in name_lint_similar_parent_method_name_warnings(path, class_info, classes):
+            warnings.push(warning)
+    warnings
+
+fn name_lint_collect_classes(content: String) -> [NameLintClass]:
+    val lines = content.split("\n")
+    var classes: [NameLintClass] = []
+    var current_class_index = -1
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            i = i + 1
+            continue
+
+        val indent = indent_width(line)
+        if trimmed.starts_with("class "):
+            classes.push(name_lint_parse_class(trimmed, indent, i + 1))
+            current_class_index = classes.len() - 1
+            i = i + 1
+            continue
+
+        if current_class_index >= 0:
+            val class_info = classes[current_class_index]
+            if indent <= class_info.indent:
+                current_class_index = -1
+                continue
+            if name_lint_is_method_header(trimmed):
+                val method = name_lint_parse_method(lines, i, class_info.name, class_info.parent_name)
+                var updated_class = classes[current_class_index]
+                updated_class.methods.push(method)
+                classes[current_class_index] = updated_class
+                i = name_lint_method_body_end(lines, i)
+                continue
+
+        i = i + 1
+    classes
+
+fn name_lint_parse_class(trimmed: String, indent: Int, line_num: Int) -> NameLintClass:
+    var rest = trimmed.slice(6).trim()
+    if rest.ends_with(":"):
+        rest = rest.slice(0, rest.len() - 1).trim()
+    var name = rest
+    var parent_name = ""
+    val extends_pos = rest.find(" extends ")
+    if extends_pos >= 0:
+        name = rest.slice(0, extends_pos).trim()
+        parent_name = rest.slice(extends_pos + 9).trim()
+    else:
+        val paren_pos = rest.find("(")
+        val close_pos = rest.find(")")
+        if paren_pos >= 0 and close_pos > paren_pos:
+            name = rest.slice(0, paren_pos).trim()
+            parent_name = rest.slice(paren_pos + 1, close_pos).trim()
+    NameLintClass(name: name, parent_name: parent_name, indent: indent, line: line_num, methods: [])
+
+fn name_lint_is_method_header(trimmed: String) -> Bool:
+    trimmed.starts_with("fn ") or trimmed.starts_with("me ") or trimmed.starts_with("static fn ")
+
+fn name_lint_parse_method(lines: [String], index: Int, class_name: String, parent_name: String) -> NameLintMethod:
+    val line = lines[index]
+    val trimmed = line.trim()
+    val method_indent = indent_width(line)
+    val name = name_lint_extract_method_name(trimmed)
+    val params = name_lint_extract_params(trimmed)
+    val name_checked = name_lint_has_name_checked_decorator(lines, index, method_indent)
+    var body: [String] = []
+    var j = index + 1
+    while j < lines.len():
+        val body_line = lines[j]
+        val body_trimmed = body_line.trim()
+        if body_trimmed != "" and not body_trimmed.starts_with("#") and indent_width(body_line) <= method_indent:
+            break
+        if body_trimmed != "" and not body_trimmed.starts_with("#"):
+            body.push(body_trimmed)
+        j = j + 1
+    NameLintMethod(
+        class_name: class_name,
+        parent_name: parent_name,
+        name: name,
+        line: index + 1,
+        params: params,
+        body: body,
+        name_checked: name_checked
+    )
+
+fn name_lint_method_body_end(lines: [String], index: Int) -> Int:
+    val method_indent = indent_width(lines[index])
+    var j = index + 1
+    while j < lines.len():
+        val trimmed = lines[j].trim()
+        if trimmed != "" and not trimmed.starts_with("#") and indent_width(lines[j]) <= method_indent:
+            break
+        j = j + 1
+    j
+
+fn name_lint_extract_method_name(trimmed: String) -> String:
+    var rest = trimmed
+    if rest.starts_with("static fn "):
+        rest = rest.slice(10).trim()
+    elif rest.starts_with("fn "):
+        rest = rest.slice(3).trim()
+    elif rest.starts_with("me "):
+        rest = rest.slice(3).trim()
+    val paren = rest.find("(")
+    if paren >= 0:
+        return rest.slice(0, paren).trim()
+    rest.split(" ")[0].trim()
+
+fn name_lint_extract_params(trimmed: String) -> [String]:
+    var params: [String] = []
+    val start = trimmed.find("(")
+    val end = trimmed.find(")")
+    if start < 0 or end <= start:
+        return params
+    val raw = trimmed.slice(start + 1, end).trim()
+    if raw == "":
+        return params
+    for part in raw.split(","):
+        var name = part.trim()
+        val colon = name.find(":")
+        if colon >= 0:
+            name = name.slice(0, colon).trim()
+        val equal = name.find("=")
+        if equal >= 0:
+            name = name.slice(0, equal).trim()
+        if name != "":
+            params.push(name)
+    params
+
+fn name_lint_has_name_checked_decorator(lines: [String], index: Int, method_indent: Int) -> Bool:
+    var j = index - 1
+    while j >= 0:
+        val trimmed = lines[j].trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            j = j - 1
+            continue
+        if indent_width(lines[j]) != method_indent:
+            return false
+        return trimmed == "@name_checked" or trimmed.starts_with("@name_checked(")
+    false
+
+fn name_lint_dummy_accessor_warnings(path: String, class_info: NameLintClass, classes: [NameLintClass]) -> [NameLintWarning]:
+    var warnings: [NameLintWarning] = []
+    val inherited = name_lint_inherited_method_names(class_info, classes)
+    var suffixes: [String] = []
+    for method in class_info.methods:
+        val suffix = name_lint_accessor_suffix(method.name)
+        if suffix != "" and not suffixes.contains(suffix):
+            suffixes.push(suffix)
+
+    for suffix in suffixes:
+        var any_real = false
+        for method in class_info.methods:
+            if name_lint_accessor_suffix(method.name) == suffix and not name_lint_is_dummy_accessor(method, suffix):
+                any_real = true
+        if any_real:
+            continue
+        for method in class_info.methods:
+            if name_lint_accessor_suffix(method.name) != suffix:
+                continue
+            if inherited.contains(method.name):
+                continue
+            if name_lint_is_dummy_accessor(method, suffix):
+                warnings.push(NameLintWarning(
+                    code: "ACC001",
+                    line: method.line,
+                    message: "accessor '{method.name}' only forwards backing field '{suffix}' without behavior",
+                    hint: "Remove the wrapper and use field forwarding directly, or add real validation/normalization behavior"
+                ))
+    warnings
+
+fn name_lint_similar_parent_method_name_warnings(path: String, class_info: NameLintClass, classes: [NameLintClass]) -> [NameLintWarning]:
+    var warnings: [NameLintWarning] = []
+    val inherited = name_lint_inherited_method_names(class_info, classes)
+    if inherited.len() == 0:
+        return warnings
+    for method in class_info.methods:
+        if method.name_checked or inherited.contains(method.name):
+            continue
+        for parent_name in inherited:
+            if name_lint_accessor_prefix_collision_expected(method.name, parent_name):
+                continue
+            if name_lint_likely_misspelling(method.name, parent_name):
+                warnings.push(NameLintWarning(
+                    code: "NAME001",
+                    line: method.line,
+                    message: "method '{method.name}' is similar to inherited method '{parent_name}' and may be a misspelled override",
+                    hint: "Rename to '{parent_name}' or add @name_checked above the method if the near-match is intentional"
+                ))
+                break
+    warnings
+
+fn name_lint_accessor_suffix(name: String) -> String:
+    if name.starts_with("get_") and name.len() > 4:
+        return name.slice(4)
+    if name.starts_with("set_") and name.len() > 4:
+        return name.slice(4)
+    if name.starts_with("is_") and name.len() > 3:
+        return name.slice(3)
+    ""
+
+fn name_lint_is_dummy_accessor(method: NameLintMethod, suffix: String) -> Bool:
+    if method.body.len() != 1:
+        return false
+    val stmt = name_lint_normalize(method.body[0])
+    if method.name.starts_with("get_") or method.name.starts_with("is_"):
+        return stmt == "self.{suffix}" or stmt == "me.{suffix}" or stmt == "returnself.{suffix}" or stmt == "returnme.{suffix}"
+    if method.name.starts_with("set_"):
+        val value_param = name_lint_first_value_param(method.params)
+        if value_param == "":
+            return false
+        return stmt == "self.{suffix}={value_param}" or stmt == "me.{suffix}={value_param}"
+    false
+
+fn name_lint_first_value_param(params: [String]) -> String:
+    for param in params:
+        if param != "self" and param != "me":
+            return param
+    ""
+
+fn name_lint_normalize(value: String) -> String:
+    var out = value.replace(" ", "")
+    out = out.replace("\t", "")
+    out
+
+fn name_lint_inherited_method_names(class_info: NameLintClass, classes: [NameLintClass]) -> [String]:
+    var inherited: [String] = []
+    var parent_name = class_info.parent_name
+    var depth = 0
+    while parent_name != "" and depth < 20:
+        val parent_index = name_lint_find_class(classes, parent_name)
+        if parent_index < 0:
+            break
+        val parent_class = classes[parent_index]
+        for method in parent_class.methods:
+            if not inherited.contains(method.name):
+                inherited.push(method.name)
+        parent_name = parent_class.parent_name
+        depth = depth + 1
+    inherited
+
+fn name_lint_find_class(classes: [NameLintClass], name: String) -> Int:
+    var i = 0
+    while i < classes.len():
+        if classes[i].name == name:
+            return i
+        i = i + 1
+    -1
+
+fn name_lint_accessor_prefix_collision_expected(a: String, b: String) -> Bool:
+    val a_suffix = name_lint_accessor_suffix(a)
+    val b_suffix = name_lint_accessor_suffix(b)
+    if a_suffix == "" or b_suffix == "":
+        return false
+    if a_suffix != b_suffix:
+        return false
+    name_lint_accessor_prefix(a) != name_lint_accessor_prefix(b)
+
+fn name_lint_accessor_prefix(name: String) -> String:
+    if name.starts_with("get_"):
+        return "get"
+    if name.starts_with("set_"):
+        return "set"
+    if name.starts_with("is_"):
+        return "is"
+    ""
+
+fn name_lint_likely_misspelling(candidate: String, inherited: String) -> Bool:
+    if candidate == inherited:
+        return false
+    val candidate_len = candidate.len()
+    val inherited_len = inherited.len()
+    val max_len = if candidate_len > inherited_len: candidate_len else: inherited_len
+    if max_len < 4:
+        return false
+    val threshold = if max_len >= 9: 2 else: 1
+    name_lint_bounded_damerau_levenshtein(candidate, inherited, threshold) <= threshold
+
+fn name_lint_bounded_damerau_levenshtein(a: String, b: String, limit: Int) -> Int:
+    val a_len = a.len()
+    val b_len = b.len()
+    if name_lint_abs(a_len - b_len) > limit:
+        return limit + 1
+
+    var prev_prev: [Int] = []
+    var prev: [Int] = []
+    var j0 = 0
+    while j0 <= b_len:
+        prev.push(j0)
+        prev_prev.push(limit + 1)
+        j0 = j0 + 1
+
+    var i = 1
+    while i <= a_len:
+        var curr: [Int] = [i]
+        var row_min = i
+        var j = 1
+        while j <= b_len:
+            val cost = if a.substring(i - 1, i) == b.substring(j - 1, j): 0 else: 1
+            var best = name_lint_min3(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost)
+            if i > 1 and j > 1:
+                if a.substring(i - 1, i) == b.substring(j - 2, j - 1) and a.substring(i - 2, i - 1) == b.substring(j - 1, j):
+                    val swapped = prev_prev[j - 2] + 1
+                    if swapped < best:
+                        best = swapped
+            curr.push(best)
+            if best < row_min:
+                row_min = best
+            j = j + 1
+        if row_min > limit:
+            return limit + 1
+        prev_prev = prev
+        prev = curr
+        i = i + 1
+    prev[b_len]
+
+fn name_lint_abs(value: Int) -> Int:
+    if value < 0:
+        return 0 - value
+    value
+
+fn name_lint_min3(a: Int, b: Int, c: Int) -> Int:
+    var best = a
+    if b < best:
+        best = b
+    if c < best:
+        best = c
+    best

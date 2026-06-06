@@ -119,12 +119,20 @@ struct ModuleLoader:
     loader_mapper: LoaderMapper
     # Loaded modules cache: path -> module
     modules: Dict<text, LoadedModule>
+    # Semantic/public-ABI/accessor fingerprint for each loaded artifact.
+    semantic_fingerprints: Dict<text, text>
+    # Per-module dependency fingerprints: dependent path -> dependency path -> fingerprint.
+    dependency_semantic_fingerprints: Dict<text, Dict<text, text>>
     # Global symbol table: name -> (module_path, symbol)
     global_symbols: Dict<text, (text, LoadedSymbol)>
     # Resource lifecycle manager — tracks per-module ownership for deallocation
     lifecycle: ResourceLifecycleManager
     # Configuration
     config: ModuleLoaderConfig
+    # Public ABI/accessor semantic keys exported by each loaded module.
+    semantic_exports: Dict<text, [text]>
+    # Public ABI/accessor semantic keys each module compiled against.
+    semantic_dependencies: Dict<text, [text]>
 
 
 # ============================================================================
@@ -166,9 +174,13 @@ fn moduleloader_new(config: ModuleLoaderConfig) -> ModuleLoader:
                 allow_replace_on_reload: config.hot_reload
             )),
             modules: {},
+            semantic_fingerprints: {},
+            dependency_semantic_fingerprints: {},
             global_symbols: {},
             lifecycle: lifecycle_new(lifecycle_config, smf_cache_mgr),
-            config: config
+            config: config,
+            semantic_exports: {},
+            semantic_dependencies: {}
         )
 
 
@@ -639,6 +651,83 @@ fn current_time() -> i64:
 # Internal helpers
 # ============================================================================
 
+fn text_array_contains(items: [text], needle: text) -> bool:
+    for item in items:
+        if item == needle:
+            return true
+    false
+
+fn text_array_push_unique(items: [text], value: text) -> [text]:
+    if text_array_contains(items, value):
+        return items
+    items.push(value)
+
+fn text_array_intersects(left: [text], right: [text]) -> bool:
+    for item in left:
+        if text_array_contains(right, item):
+            return true
+    false
+
+fn moduleloader_record_semantic_export(self: ModuleLoader, path: text, key: text):
+    if not self.semantic_exports.has(path):
+        self.semantic_exports[path] = []
+    self.semantic_exports[path] = text_array_push_unique(self.semantic_exports[path], key)
+
+fn moduleloader_record_semantic_dependency(self: ModuleLoader, path: text, key: text):
+    if not self.semantic_dependencies.has(path):
+        self.semantic_dependencies[path] = []
+    self.semantic_dependencies[path] = text_array_push_unique(self.semantic_dependencies[path], key)
+
+fn moduleloader_semantic_dependents(self: ModuleLoader, changed_key: text) -> [text]:
+    var changed_keys: [text] = [changed_key]
+    var affected: [text] = []
+    var progressed = true
+    while progressed:
+        progressed = false
+        for path in self.modules.keys():
+            if text_array_contains(affected, path):
+                continue
+            val exports = if self.semantic_exports.has(path):
+                self.semantic_exports[path]
+            else:
+                []
+            val deps = if self.semantic_dependencies.has(path):
+                self.semantic_dependencies[path]
+            else:
+                []
+            if text_array_intersects(exports, changed_keys) or text_array_intersects(deps, changed_keys):
+                affected = text_array_push_unique(affected, path)
+                changed_keys = text_array_push_unique(changed_keys, path)
+                for exported_key in exports:
+                    changed_keys = text_array_push_unique(changed_keys, exported_key)
+                progressed = true
+    affected
+
+fn moduleloader_invalidate_semantic_change(self: ModuleLoader, changed_key: text) -> [text]:
+    """Unload a changed semantic artifact and every transitive dependent.
+
+    `changed_key` may be a loaded module path or an exported semantic key such
+    as a public ABI/accessor/field-wrapper fingerprint key. In both cases the
+    loader must drop SMF metadata and JIT code that was compiled against the
+    old meaning.
+    """
+    var affected: [text] = []
+    affected = text_array_push_unique(affected, changed_key)
+
+    for path in moduleloader_semantic_dependents(self, changed_key):
+        affected = text_array_push_unique(affected, path)
+
+    for path in moduleloader_semantic_dependents_of(self, changed_key):
+        affected = text_array_push_unique(affected, path)
+
+    _ = self.jit.invalidate_by_semantic_key(changed_key)
+    for path in affected:
+        if self.modules.has(path):
+            moduleloader_unload(self, path)
+        else:
+            moduleloader_drop_semantic_cache_record(self, path)
+    affected
+
 fn moduleloader_unload(self: ModuleLoader, path: text):
     """Unload module and free all associated resources.
 
@@ -681,9 +770,73 @@ fn moduleloader_unload(self: ModuleLoader, path: text):
 
     # 6. Clear template metadata for this module.
     self.jit.loaded_metadata = loaded_metadata_remove_path(self.jit.loaded_metadata, path)
+    self.semantic_exports = self.semantic_exports.remove(path)
+    self.semantic_dependencies = self.semantic_dependencies.remove(path)
 
     # 7. Remove module from cache.
+    moduleloader_drop_semantic_cache_record(self, path)
     self.modules = self.modules.remove(path)
+
+fn moduleloader_record_semantic_fingerprint(self: ModuleLoader, path: text, fingerprint: text):
+    """Record the semantic/public-ABI/accessor fingerprint for a loaded artifact."""
+    self.semantic_fingerprints[path] = fingerprint
+
+fn moduleloader_record_dependency_semantic_fingerprint(self: ModuleLoader, dependent_path: text, dependency_path: text, fingerprint: text):
+    """Record the dependency fingerprint that made a dependent artifact valid."""
+    var deps: Dict<text, text> = {}
+    if self.dependency_semantic_fingerprints.has(dependent_path):
+        deps = self.dependency_semantic_fingerprints[dependent_path]
+    deps[dependency_path] = fingerprint
+    self.dependency_semantic_fingerprints[dependent_path] = deps
+
+fn moduleloader_semantic_cache_is_fresh(self: ModuleLoader, path: text, current_fingerprint: text, current_dependencies: Dict<text, text>) -> bool:
+    """Fail-closed semantic cache validation for loader/JIT artifacts."""
+    if not self.semantic_fingerprints.has(path):
+        return false
+    if self.semantic_fingerprints[path] != current_fingerprint:
+        return false
+
+    if not self.dependency_semantic_fingerprints.has(path):
+        return current_dependencies.len() == 0
+
+    val stored_deps = self.dependency_semantic_fingerprints[path]
+    if stored_deps.len() != current_dependencies.len():
+        return false
+
+    for dep_path in current_dependencies.keys():
+        if not stored_deps.has(dep_path):
+            return false
+        if stored_deps[dep_path] != current_dependencies[dep_path]:
+            return false
+    true
+
+fn moduleloader_semantic_dependents_of(self: ModuleLoader, changed_path: text) -> [text]:
+    """Return transitive semantic dependents, including dependency cycles."""
+    var affected: [text] = []
+    var changed_keys: [text] = [changed_path]
+    var progressed = true
+    while progressed:
+        progressed = false
+        for module_path in self.dependency_semantic_fingerprints.keys():
+            if affected.contains(module_path):
+                continue
+            val deps = self.dependency_semantic_fingerprints[module_path]
+            var depends_on_changed = false
+            for candidate in changed_keys:
+                if deps.has(candidate):
+                    depends_on_changed = true
+            if depends_on_changed:
+                affected = affected.push(module_path)
+                changed_keys = changed_keys.push(module_path)
+                progressed = true
+    affected
+
+fn moduleloader_drop_semantic_cache_record(self: ModuleLoader, path: text):
+    """Drop semantic cache metadata for one artifact."""
+    if self.semantic_fingerprints.has(path):
+        self.semantic_fingerprints = self.semantic_fingerprints.remove(path)
+    if self.dependency_semantic_fingerprints.has(path):
+        self.dependency_semantic_fingerprints = self.dependency_semantic_fingerprints.remove(path)
 
 fn moduleloader_allocate_exec_module(self: ModuleLoader, owner_id: text, symbol: text, code: [u8], allow_replace: bool) -> i64:
     """Allocate executable memory and copy code."""

@@ -1,6 +1,6 @@
 use std.spec.{describe, it, expect, context}
 use verification.cache.{VerificationCache, CacheEntry, CacheStats}
-use verification.fingerprint.{Fingerprint, simple_hash}
+use verification.fingerprint.{Fingerprint, simple_hash, public_abi_fingerprint, accessor_fingerprint, field_wrapper_fingerprint, dependency_semantic_fingerprint}
 use verification.state.{VerificationState}
 use verification.proof_unit.{ProofUnit}
 
@@ -18,13 +18,13 @@ describe "Verification Cache":
         val fp = Fingerprint.from_hashes("src1", "lean1", [], "v4.x")
         cache.store("my_module.spl", fp, VerificationState.Verified, {}, "v4.x")
         val result = cache.lookup("my_module.spl", fp)
-        expect(result.?).to_equal(true)
+        expect(result.?).to_be(true)
         match result:
             case Some(entry):
                 expect(entry.fingerprint).to_equal(fp.combined)
                 expect(entry.state).to_equal(VerificationState.Verified)
             case nil:
-                expect(false).to_equal(true)  # Should not reach here
+                expect("nil cache entry").to_equal("stored cache entry")
 
     it "returns nil when fingerprint has changed (stale detection)":
         var cache = VerificationCache.new("/tmp/test-vcache-stale")
@@ -41,6 +41,9 @@ describe "Verification Cache":
         cache.store("safety.spl", fp_original, VerificationState.Verified, {}, "v4.x")
         # Simulate a semantic change by altering the source hash
         val fp_changed = Fingerprint.from_hashes("modified", "lean_ok", [], "v4.x")
+        expect(fp_original.source_hash).to_equal("original")
+        expect(fp_changed.source_hash).to_equal("modified")
+        expect(fp_original.combined).to_not_equal(fp_changed.combined)
         val result = cache.lookup("safety.spl", fp_changed)
         # The safety invariant: stale entries must not be returned
         expect(result).to_be_nil()
@@ -90,12 +93,65 @@ describe "Verification Cache":
             # a.spl should still be cached (no dependency on base_defs)
             val result_a = cache.lookup("a.spl", fp_a)
             match result_a:
-                case Some(_): expect(true).to_equal(true)
-                case nil: expect(false).to_equal(true)
+                case Some(entry):
+                    expect(entry.fingerprint).to_equal(fp_a.combined)
+                case nil:
+                    expect("nil cache entry").to_equal("preserved cache entry")
 
             # b.spl should have been invalidated
             val result_b = cache.lookup("b.spl", fp_b)
             expect(result_b).to_be_nil()
+
+        it "removes transitive dependents of a changed module":
+            var cache = VerificationCache.new("/tmp/test-vcache-invalidate-transitive")
+            val fp_b = Fingerprint.from_hashes("b", "lb", [], "v4.x")
+            val fp_c = Fingerprint.from_hashes("c", "lc", [], "v4.x")
+            cache.store("b.spl", fp_b, VerificationState.Verified, {}, "v4.x")
+            cache.store("c.spl", fp_c, VerificationState.Verified, {}, "v4.x")
+
+            var unit_b = ProofUnit.create("b.spl", "*", "Verification.B", "b.lean")
+            var unit_c = ProofUnit.create("c.spl", "*", "Verification.C", "c.lean")
+            unit_b = unit_b.with_dependencies(["Verification.A"])
+            unit_c = unit_c.with_dependencies(["Verification.B"])
+
+            cache.invalidate_dependents("Verification.A", [unit_b, unit_c])
+
+            expect(cache.lookup("b.spl", fp_b)).to_be_nil()
+            expect(cache.lookup("c.spl", fp_c)).to_be_nil()
+
+        it "removes all cached members of a dependent cycle":
+            var cache = VerificationCache.new("/tmp/test-vcache-invalidate-cycle")
+            val fp_a = Fingerprint.from_hashes("a", "la", [], "v4.x")
+            val fp_b = Fingerprint.from_hashes("b", "lb", [], "v4.x")
+            cache.store("a.spl", fp_a, VerificationState.Verified, {}, "v4.x")
+            cache.store("b.spl", fp_b, VerificationState.Verified, {}, "v4.x")
+
+            var unit_a = ProofUnit.create("a.spl", "*", "Verification.A", "a.lean")
+            var unit_b = ProofUnit.create("b.spl", "*", "Verification.B", "b.lean")
+            unit_a = unit_a.with_dependencies(["Verification.B"])
+            unit_b = unit_b.with_dependencies(["Verification.A"])
+
+            cache.invalidate_dependents("Verification.A", [unit_a, unit_b])
+
+            expect(cache.lookup("a.spl", fp_a)).to_be_nil()
+            expect(cache.lookup("b.spl", fp_b)).to_be_nil()
+
+        it "removes field-wrapper semantic dependents and wrapped-reference cycles":
+            var cache = VerificationCache.new("/tmp/test-vcache-field-wrapper-cycle")
+            val fp_a = Fingerprint.from_hashes("a", "la", [], "v4.x")
+            val fp_b = Fingerprint.from_hashes("b", "lb", [], "v4.x")
+            cache.store("a.spl", fp_a, VerificationState.Verified, {}, "v4.x")
+            cache.store("b.spl", fp_b, VerificationState.Verified, {}, "v4.x")
+
+            var unit_a = ProofUnit.create("a.spl", "A", "Verification.A", "a.lean")
+            var unit_b = ProofUnit.create("b.spl", "B", "Verification.B", "b.lean")
+            unit_a = unit_a.with_dependencies(["B.value.field_wrapper"])
+            unit_b = unit_b.with_dependencies(["a.spl"])
+
+            cache.invalidate_dependents("B.value.field_wrapper", [unit_a, unit_b])
+
+            expect(cache.lookup("a.spl", fp_a)).to_be_nil()
+            expect(cache.lookup("b.spl", fp_b)).to_be_nil()
 
     context "clear":
         it "empties the cache completely":
@@ -113,36 +169,74 @@ describe "Verification Cache":
         it "produces deterministic hashes for identical input":
             val fp1 = Fingerprint.from_hashes("src", "lean", ["dep1"], "v4.x")
             val fp2 = Fingerprint.from_hashes("src", "lean", ["dep1"], "v4.x")
-            expect(fp1.matches(fp2)).to_equal(true)
+            expect(fp1.matches(fp2)).to_be(true)
             expect(fp1.combined).to_equal(fp2.combined)
 
         it "produces different hashes for different input":
             val fp1 = Fingerprint.from_hashes("src_a", "lean", [], "v4.x")
             val fp2 = Fingerprint.from_hashes("src_b", "lean", [], "v4.x")
-            expect(fp1.matches(fp2)).to_equal(false)
+            expect(fp1.combined).to_not_equal(fp2.combined)
 
         it "includes toolchain version in fingerprint":
             val fp1 = Fingerprint.from_hashes("src", "lean", [], "v4.3.0")
             val fp2 = Fingerprint.from_hashes("src", "lean", [], "v4.4.0")
-            expect(fp1.matches(fp2)).to_equal(false)
+            expect(fp1.combined).to_not_equal(fp2.combined)
 
         it "includes dependency hashes in fingerprint":
             val fp1 = Fingerprint.from_hashes("src", "lean", ["dep_v1"], "v4.x")
             val fp2 = Fingerprint.from_hashes("src", "lean", ["dep_v2"], "v4.x")
-            expect(fp1.matches(fp2)).to_equal(false)
+            expect(fp1.combined).to_not_equal(fp2.combined)
+
+        it "includes public ABI accessor and field-wrapper semantic hashes":
+            val abi_v1 = public_abi_fingerprint("B", "field:value:WrappedA", ["get_value", "set_value"])
+            val get_v1 = accessor_fingerprint("B", "get_value", "fn() -> WrappedA", "body:v1")
+            val set_v1 = accessor_fingerprint("B", "set_value", "fn(WrappedA) -> void", "body:v1")
+            val wrapper_v1 = field_wrapper_fingerprint("B", "value", "WrappedA", [get_v1, set_v1])
+            val dep_v1 = dependency_semantic_fingerprint("B", abi_v1, get_v1 + "|" + set_v1, wrapper_v1)
+
+            val abi_v2 = public_abi_fingerprint("B", "field:value:WrappedA", ["get_value", "set_value"])
+            val get_v2 = accessor_fingerprint("B", "get_value", "fn() -> WrappedA", "body:v2")
+            val set_v2 = accessor_fingerprint("B", "set_value", "fn(WrappedA) -> void", "body:v1")
+            val wrapper_v2 = field_wrapper_fingerprint("B", "value", "WrappedA", [get_v2, set_v2])
+            val dep_v2 = dependency_semantic_fingerprint("B", abi_v2, get_v2 + "|" + set_v2, wrapper_v2)
+
+            val fp1 = Fingerprint.from_hashes_with_semantics("src", "lean", [], [dep_v1], "v4.x")
+            val fp2 = Fingerprint.from_hashes_with_semantics("src", "lean", [], [dep_v2], "v4.x")
+            expect(fp1.combined).to_not_equal(fp2.combined)
+
+        it "fails closed when only public ABI accessor semantics change":
+            var cache = VerificationCache.new("/tmp/test-vcache-semantic-field-wrapper")
+            val abi_v1 = public_abi_fingerprint("B", "field:value:WrappedA", ["get_value", "set_value"])
+            val get_v1 = accessor_fingerprint("B", "get_value", "fn() -> WrappedA", "body:v1")
+            val set_v1 = accessor_fingerprint("B", "set_value", "fn(WrappedA) -> void", "body:v1")
+            val wrapper_v1 = field_wrapper_fingerprint("B", "value", "WrappedA", [get_v1, set_v1])
+            val dep_v1 = dependency_semantic_fingerprint("B", abi_v1, get_v1 + "|" + set_v1, wrapper_v1)
+
+            val abi_v2 = public_abi_fingerprint("B", "field:value:WrappedA", ["get_value", "set_value"])
+            val get_v2 = accessor_fingerprint("B", "get_value", "fn() -> WrappedA", "body:v2")
+            val set_v2 = accessor_fingerprint("B", "set_value", "fn(WrappedA) -> void", "body:v1")
+            val wrapper_v2 = field_wrapper_fingerprint("B", "value", "WrappedA", [get_v2, set_v2])
+            val dep_v2 = dependency_semantic_fingerprint("B", abi_v2, get_v2 + "|" + set_v2, wrapper_v2)
+
+            val fp_v1 = Fingerprint.from_hashes_with_semantics("same-src", "same-lean", [], [dep_v1], "v4.x")
+            val fp_v2 = Fingerprint.from_hashes_with_semantics("same-src", "same-lean", [], [dep_v2], "v4.x")
+            cache.store("a_depends_on_b.spl", fp_v1, VerificationState.Verified, {}, "v4.x")
+            expect(cache.lookup("a_depends_on_b.spl", fp_v2)).to_be_nil()
 
         it "round-trips through to_text and from_text":
-            val fp = Fingerprint.from_hashes("abc", "def", ["g1", "g2"], "v4.x")
+            val sem = accessor_fingerprint("B", "get_value", "fn() -> WrappedA", "body:v1")
+            val fp = Fingerprint.from_hashes_with_semantics("abc", "def", ["g1", "g2"], [sem], "v4.x")
             val serialized = fp.to_text()
             val restored = Fingerprint.from_text(serialized)
             match restored:
                 case Some(fp2):
-                    expect(fp.matches(fp2)).to_equal(true)
+                    expect(fp.matches(fp2)).to_be(true)
                     expect(fp2.source_hash).to_equal("abc")
                     expect(fp2.lean_hash).to_equal("def")
+                    expect(fp2.semantic_hashes).to_equal([sem])
                     expect(fp2.toolchain_version).to_equal("v4.x")
                 case nil:
-                    expect(false).to_equal(true)  # Should not fail
+                    expect("nil fingerprint").to_equal("restored fingerprint")
 
         it "returns nil for malformed text":
             val result = Fingerprint.from_text("incomplete")
@@ -157,8 +251,8 @@ describe "Verification Cache":
         it "returns different results for different input":
             val h1 = simple_hash("hello")
             val h2 = simple_hash("world")
-            expect(h1 == h2).to_equal(false)
+            expect(h1).to_not_equal(h2)
 
         it "handles empty string":
             val h = simple_hash("")
-            expect(h.len() > 0).to_equal(true)
+            expect(h.len() > 0).to_be(true)

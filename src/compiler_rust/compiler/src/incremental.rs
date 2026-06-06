@@ -107,6 +107,10 @@ pub struct SourceInfo {
     pub functions: Vec<String>,
     /// Types defined in this file (structs, classes, enums).
     pub types: Vec<String>,
+    /// Public semantic exports such as class fields and generated accessors.
+    pub semantic_exports: HashMap<String, u64>,
+    /// Semantic fingerprints this source compiled against.
+    pub semantic_dependencies: HashMap<String, u64>,
 }
 
 impl SourceInfo {
@@ -120,6 +124,8 @@ impl SourceInfo {
             macros: Vec::new(),
             functions: Vec::new(),
             types: Vec::new(),
+            semantic_exports: HashMap::new(),
+            semantic_dependencies: HashMap::new(),
         }
     }
 
@@ -129,6 +135,16 @@ impl SourceInfo {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         content.hash(&mut hasher);
         self.content_hash = hasher.finish();
+    }
+
+    /// Record a public semantic export fingerprint for this source.
+    pub fn add_semantic_export(&mut self, key: impl Into<String>, fingerprint: u64) {
+        self.semantic_exports.insert(key.into(), fingerprint);
+    }
+
+    /// Record a semantic dependency fingerprint captured during compilation.
+    pub fn add_semantic_dependency(&mut self, key: impl Into<String>, fingerprint: u64) {
+        self.semantic_dependencies.insert(key.into(), fingerprint);
     }
 
     /// Update modification time from filesystem.
@@ -242,6 +258,10 @@ pub struct IncrementalState {
     status: DashMap<PathBuf, CompilationStatus>,
     /// Reverse dependency map (who depends on whom).
     dependents: DashMap<PathBuf, HashSet<PathBuf>>,
+    /// Reverse semantic dependency map (semantic key -> sources compiled from it).
+    semantic_dependents: DashMap<String, HashSet<PathBuf>>,
+    /// Latest known semantic export fingerprints.
+    semantic_exports: DashMap<String, u64>,
     /// Statistics.
     stats: RwLock<IncrementalStats>,
 }
@@ -260,6 +280,8 @@ impl IncrementalState {
             artifacts: DashMap::new(),
             status: DashMap::new(),
             dependents: DashMap::new(),
+            semantic_dependents: DashMap::new(),
+            semantic_exports: DashMap::new(),
             stats: RwLock::new(IncrementalStats::default()),
         })
     }
@@ -271,6 +293,15 @@ impl IncrementalState {
         // Update reverse dependency map
         for dep in &info.dependencies {
             self.dependents.entry(dep.clone()).or_default().insert(path.clone());
+        }
+        for key in info.semantic_dependencies.keys() {
+            self.semantic_dependents
+                .entry(key.clone())
+                .or_default()
+                .insert(path.clone());
+        }
+        for (key, fingerprint) in &info.semantic_exports {
+            self.semantic_exports.insert(key.clone(), *fingerprint);
         }
 
         self.sources.insert(path.clone(), info);
@@ -284,7 +315,10 @@ impl IncrementalState {
 
         // Check if we have cached artifact
         if let Some(artifact) = self.artifacts.get(path) {
-            if artifact.is_valid() && !artifact.is_expired(self.config.max_age_secs) {
+            if artifact.is_valid()
+                && !artifact.is_expired(self.config.max_age_secs)
+                && self.semantic_dependencies_match(&artifact)
+            {
                 stats.cache_hits += 1;
                 stats.files_cached += 1;
                 return false;
@@ -298,16 +332,46 @@ impl IncrementalState {
 
     /// Mark a source as dirty (needs recompilation).
     pub fn mark_dirty(&self, path: &Path) {
-        self.status.insert(path.to_path_buf(), CompilationStatus::Dirty);
+        let mut stack = vec![path.to_path_buf()];
+        let mut visited = HashSet::new();
+        let mut stats = self.stats.write();
 
-        // Also mark all dependents as dirty
-        if let Some(deps) = self.dependents.get(path) {
-            let mut stats = self.stats.write();
-            for dep in deps.iter() {
-                self.status.insert(dep.clone(), CompilationStatus::Dirty);
-                stats.dependency_invalidations += 1;
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current.clone()) {
+                continue;
+            }
+            self.status.insert(current.clone(), CompilationStatus::Dirty);
+            self.artifacts.remove(&current);
+
+            if let Some(deps) = self.dependents.get(&current) {
+                for dep in deps.iter() {
+                    stats.dependency_invalidations += 1;
+                    stack.push(dep.clone());
+                }
             }
         }
+    }
+
+    /// Invalidate all sources compiled from a changed semantic export.
+    pub fn invalidate_semantic_export(&self, key: &str, new_fingerprint: u64) {
+        self.semantic_exports.insert(key.to_string(), new_fingerprint);
+        if let Some(deps) = self.semantic_dependents.get(key) {
+            let dependents: Vec<PathBuf> = deps.iter().cloned().collect();
+            drop(deps);
+            for dep in dependents {
+                self.mark_dirty(&dep);
+            }
+        }
+    }
+
+    fn semantic_dependencies_match(&self, artifact: &CachedArtifact) -> bool {
+        for (key, expected) in &artifact.source.semantic_dependencies {
+            match self.semantic_exports.get(key) {
+                Some(actual) if *actual == *expected => {}
+                _ => return false,
+            }
+        }
+        true
     }
 
     /// Mark a source as in progress.
@@ -382,6 +446,8 @@ impl IncrementalState {
         self.artifacts.clear();
         self.status.clear();
         self.dependents.clear();
+        self.semantic_dependents.clear();
+        self.semantic_exports.clear();
         *self.stats.write() = IncrementalStats::default();
     }
 }
@@ -394,6 +460,8 @@ impl Default for IncrementalState {
             artifacts: DashMap::new(),
             status: DashMap::new(),
             dependents: DashMap::new(),
+            semantic_dependents: DashMap::new(),
+            semantic_exports: DashMap::new(),
             stats: RwLock::new(IncrementalStats::default()),
         }
     }

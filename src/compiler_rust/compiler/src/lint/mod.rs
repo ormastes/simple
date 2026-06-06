@@ -1962,4 +1962,111 @@ fn load(state: GameState) -> GameState:
             "rt_fs_* calls inside @deterministic should be flagged"
         );
     }
+
+    #[test]
+    fn test_dummy_accessor_group_warns_for_trivial_get_set_is() {
+        let code = r#"
+class Meter:
+    value: i64
+    active: bool
+
+    fn get_value(self) -> i64:
+        self.value
+
+    fn set_value(self, value: i64):
+        self.value = value
+
+    fn is_active(self) -> bool:
+        self.active
+"#;
+        let diagnostics = check_code(code);
+        let dummy_count = diagnostics
+            .iter()
+            .filter(|d| d.lint == LintName::DummyAccessor)
+            .count();
+        assert_eq!(dummy_count, 3, "expected all trivial accessors to warn: {diagnostics:?}");
+    }
+
+    #[test]
+    fn test_real_accessor_group_suppresses_trivial_pair_member() {
+        let code = r#"
+class Meter:
+    value: i64
+
+    fn get_value(self) -> i64:
+        if self.value < 0:
+            return 0
+        self.value
+
+    fn set_value(self, value: i64):
+        self.value = value
+"#;
+        let diagnostics = check_code(code);
+        assert!(
+            diagnostics.iter().all(|d| d.lint != LintName::DummyAccessor),
+            "real get_value should suppress same-field trivial set_value warning: {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn test_overriding_parent_accessor_does_not_warn() {
+        let code = r#"
+class Parent:
+    value: i64
+    fn get_value(self) -> i64:
+        self.value
+
+class Child extends Parent:
+    value: i64
+    fn get_value(self) -> i64:
+        self.value
+"#;
+        let diagnostics = check_code(code);
+        let get_value_warnings = diagnostics
+            .iter()
+            .filter(|d| d.lint == LintName::DummyAccessor && d.message.contains("get_value"))
+            .count();
+        assert_eq!(
+            get_value_warnings, 1,
+            "only the base non-overriding accessor should warn: {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn test_similar_parent_method_name_warns_and_name_checked_suppresses() {
+        let typo = r#"
+class Parent:
+    fn render_frame(self):
+        pass
+
+class Child extends Parent:
+    fn render_farme(self):
+        pass
+"#;
+        let diagnostics = check_code(typo);
+        assert!(
+            diagnostics.iter().any(|d| d.lint == LintName::SimilarParentMethodName),
+            "near miss should warn: {diagnostics:?}"
+        );
+
+        let checked = r#"
+class Parent:
+    fn render_frame(self):
+        pass
+
+class Child extends Parent:
+    @name_checked
+    fn render_farme(self):
+        pass
+"#;
+        let diagnostics = check_code(checked);
+        assert!(
+            diagnostics.iter().all(|d| d.lint != LintName::SimilarParentMethodName),
+            "@name_checked should suppress the near-miss warning: {diagnostics:?}"
+        );
+        assert!(
+            diagnostics.iter().all(|d| d.lint != LintName::UnknownDecorator),
+            "@name_checked should be a known decorator: {diagnostics:?}"
+        );
+    }
 }

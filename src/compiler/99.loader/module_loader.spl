@@ -32,6 +32,19 @@ fn _name_in(list: [text], name: text) -> bool:
             return true
     false
 
+fn _push_unique(list: [text], name: text) -> [text]:
+    if _name_in(list, name):
+        return list
+    var out = list
+    out.push(name)
+    out
+
+fn _any_name_in(left: [text], right: [text]) -> bool:
+    for item in left:
+        if _name_in(right, item):
+            return true
+    false
+
 fn _metadata_instantiation_symbols(self: ModuleLoader, path: text) -> [text]:
     loaded_metadata_instantiation_symbol_names(self.jit.loaded_metadata, path)
 
@@ -86,9 +99,58 @@ me _moduleloader_unload_impl(self: ModuleLoader, path: text):
 
     self.global_symbols = rebuilt_globals
     self.jit.loaded_metadata = loaded_metadata_remove_path(self.jit.loaded_metadata, path)
+    self.semantic_exports = self.semantic_exports.remove(path)
+    self.semantic_dependencies = self.semantic_dependencies.remove(path)
+    self.semantic_fingerprints = self.semantic_fingerprints.remove(path)
+    self.dependency_semantic_fingerprints = self.dependency_semantic_fingerprints.remove(path)
 
     if self.modules.has(path):
         self.modules = self.modules.remove(path)
+
+fn _moduleloader_semantic_dependents(self: ModuleLoader, changed_key: text) -> [text]:
+    var changed_keys: [text] = [changed_key]
+    var affected: [text] = []
+    var progressed = true
+    while progressed:
+        progressed = false
+        for path in self.modules.keys():
+            if _name_in(affected, path):
+                continue
+            val exports = if self.semantic_exports.has(path):
+                self.semantic_exports[path]
+            else:
+                []
+            val deps = if self.semantic_dependencies.has(path):
+                self.semantic_dependencies[path]
+            else:
+                []
+            if _any_name_in(exports, changed_keys) or _any_name_in(deps, changed_keys):
+                affected = _push_unique(affected, path)
+                changed_keys = _push_unique(changed_keys, path)
+                for key in exports:
+                    changed_keys = _push_unique(changed_keys, key)
+                progressed = true
+    affected
+
+fn _moduleloader_semantic_fingerprint_dependents(self: ModuleLoader, changed_path: text) -> [text]:
+    var changed_paths: [text] = [changed_path]
+    var affected: [text] = []
+    var progressed = true
+    while progressed:
+        progressed = false
+        for path in self.dependency_semantic_fingerprints.keys():
+            if _name_in(affected, path):
+                continue
+            val deps = self.dependency_semantic_fingerprints[path]
+            var depends_on_changed = false
+            for candidate in changed_paths:
+                if deps.has(candidate):
+                    depends_on_changed = true
+            if depends_on_changed:
+                affected = _push_unique(affected, path)
+                changed_paths = _push_unique(changed_paths, path)
+                progressed = true
+    affected
 
 enum SymbolType:
     Function
@@ -157,6 +219,10 @@ struct ModuleLoader:
     modules: Dict<text, LoadedModule>
     global_symbols: Dict<text, (text, LoadedSymbol)>
     jit: JitInstantiator
+    semantic_exports: Dict<text, [text]>
+    semantic_dependencies: Dict<text, [text]>
+    semantic_fingerprints: Dict<text, text>
+    dependency_semantic_fingerprints: Dict<text, Dict<text, text>>
 
 fn _compat_load_smf(self: ModuleLoader, path: text) -> LoadResult:
     if self.modules.has(path):
@@ -290,24 +356,39 @@ impl ModuleLoader:
     me unload(path: text):
         if not self.modules.has(path):
             return
-        val remove_jit = _collect_unload_jit_symbols(self, path)
-        for sym_name in remove_jit:
-            self.jit.drop_cached_symbol(sym_name)
+        _moduleloader_unload_impl(self, path)
 
-        val owned_symbols = owned_global_symbol_names(self.global_symbols, path)
-        val removed_symbols = owned_symbols + remove_jit
-        var rebuilt_globals: Dict<text, (text, LoadedSymbol)> = global_symbols_without_names(self.global_symbols, removed_symbols)
+    me record_semantic_export(path: text, key: text):
+        if not self.semantic_exports.has(path):
+            self.semantic_exports[path] = []
+        self.semantic_exports[path] = _push_unique(self.semantic_exports[path], key)
 
-        for sym_name in self.jit.jit_cache.keys():
-            val rec_cache = self.jit.jit_cache[sym_name]
-            val mapped_owner = _jit_cache_owner(self, sym_name, rec_cache)
-            rebuilt_globals[sym_name] = (mapped_owner, _jit_cached_loaded_symbol(sym_name, rec_cache))
+    me record_semantic_dependency(path: text, key: text):
+        if not self.semantic_dependencies.has(path):
+            self.semantic_dependencies[path] = []
+        self.semantic_dependencies[path] = _push_unique(self.semantic_dependencies[path], key)
 
-        self.global_symbols = rebuilt_globals
-        self.jit.loaded_metadata = loaded_metadata_remove_path(self.jit.loaded_metadata, path)
+    fn semantic_dependents(changed_key: text) -> [text]:
+        _moduleloader_semantic_dependents(self, changed_key)
 
-        if self.modules.has(path):
-            self.modules = self.modules.remove(path)
+    fn semantic_fingerprint_dependents(changed_path: text) -> [text]:
+        _moduleloader_semantic_fingerprint_dependents(self, changed_path)
+
+    me invalidate_semantic_change(changed_key: text) -> [text]:
+        var affected = self.semantic_dependents(changed_key)
+        affected = _push_unique(affected, changed_key)
+        for path in self.semantic_fingerprint_dependents(changed_key):
+            affected = _push_unique(affected, path)
+        for path in affected:
+            if self.modules.has(path):
+                self.unload(path)
+            else:
+                self.semantic_exports = self.semantic_exports.remove(path)
+                self.semantic_dependencies = self.semantic_dependencies.remove(path)
+                self.semantic_fingerprints = self.semantic_fingerprints.remove(path)
+                self.dependency_semantic_fingerprints = self.dependency_semantic_fingerprints.remove(path)
+        self.jit.invalidate_by_semantic_key(changed_key)
+        affected
 
     me resolve_symbol(name: text) -> SymbolResult:
         if self.global_symbols.has(name):
@@ -371,16 +452,20 @@ fn moduleloaderconfig_default() -> ModuleLoaderConfig:
     )
 
 fn moduleloader_new(config: ModuleLoaderConfig) -> ModuleLoader:
-    ModuleLoader(
-        config: config,
-        modules: {},
-        global_symbols: {},
-        jit: JitInstantiator.new(JitInstantiatorConfig(
-            update_smf: config.enable_cache,
-            max_depth: 50,
-            enabled: config.enable_jit,
-            verbose: config.verbose
-        ))
+        ModuleLoader(
+            config: config,
+            modules: {},
+            global_symbols: {},
+            jit: JitInstantiator.new(JitInstantiatorConfig(
+                update_smf: config.enable_cache,
+                max_depth: 50,
+                enabled: config.enable_jit,
+                verbose: config.verbose
+            )),
+            semantic_exports: {},
+            semantic_dependencies: {},
+            semantic_fingerprints: {},
+            dependency_semantic_fingerprints: {}
     )
 
 fn moduleloader_with_defaults() -> ModuleLoader:
@@ -405,6 +490,48 @@ fn moduleloader_resolve_symbol(self: ModuleLoader, name: text) -> SymbolResult:
 
 fn moduleloader_resolve_generic(self: ModuleLoader, name: text, type_args: [TypeInfo]) -> SymbolResult:
     self.resolve_symbol(mangle_name(name, type_args))
+
+fn moduleloader_record_semantic_export(self: ModuleLoader, path: text, key: text):
+    self.record_semantic_export(path, key)
+
+fn moduleloader_record_semantic_dependency(self: ModuleLoader, path: text, key: text):
+    self.record_semantic_dependency(path, key)
+
+fn moduleloader_record_semantic_fingerprint(self: ModuleLoader, path: text, fingerprint: text):
+    self.semantic_fingerprints[path] = fingerprint
+
+fn moduleloader_record_dependency_semantic_fingerprint(self: ModuleLoader, dependent_path: text, dependency_path: text, fingerprint: text):
+    var deps: Dict<text, text> = {}
+    if self.dependency_semantic_fingerprints.has(dependent_path):
+        deps = self.dependency_semantic_fingerprints[dependent_path]
+    deps[dependency_path] = fingerprint
+    self.dependency_semantic_fingerprints[dependent_path] = deps
+
+fn moduleloader_semantic_cache_is_fresh(self: ModuleLoader, path: text, current_fingerprint: text, current_dependencies: Dict<text, text>) -> bool:
+    if not self.semantic_fingerprints.has(path):
+        return false
+    if self.semantic_fingerprints[path] != current_fingerprint:
+        return false
+    if not self.dependency_semantic_fingerprints.has(path):
+        return current_dependencies.len() == 0
+    val stored_deps = self.dependency_semantic_fingerprints[path]
+    if stored_deps.len() != current_dependencies.len():
+        return false
+    for dep_path in current_dependencies.keys():
+        if not stored_deps.has(dep_path):
+            return false
+        if stored_deps[dep_path] != current_dependencies[dep_path]:
+            return false
+    true
+
+fn moduleloader_semantic_dependents_of(self: ModuleLoader, changed_path: text) -> [text]:
+    self.semantic_fingerprint_dependents(changed_path)
+
+fn moduleloader_semantic_dependents(self: ModuleLoader, changed_key: text) -> [text]:
+    self.semantic_dependents(changed_key)
+
+fn moduleloader_invalidate_semantic_change(self: ModuleLoader, changed_key: text) -> [text]:
+    self.invalidate_semantic_change(changed_key)
 
 fn mangle_name(base: text, type_args: [TypeInfo]) -> text:
     if type_args.len() == 0:

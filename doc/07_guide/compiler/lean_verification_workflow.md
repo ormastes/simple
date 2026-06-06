@@ -268,6 +268,7 @@ A cache entry's fingerprint is computed from:
 2. **Generated Lean content** -- the `.lean` file produced by `gen-lean write`
 3. **Dependency file hashes** -- imported proof module paths
 4. **Lean toolchain version** -- from `lean-toolchain` file
+5. **Semantic dependency shape** -- public ABI, accessor-forwarding, and field-wrapper dependencies that can change a dependent module's meaning
 
 Any change in these inputs marks the proof unit as `stale`.
 
@@ -275,9 +276,17 @@ Any change in these inputs marks the proof unit as `stale`.
 
 - Editing a source file invalidates its own cache entry
 - Editing an external proof module invalidates all proof units that depend on it
+- Changing a wrapped field, forwarded getter/setter, or public ABI member invalidates dependent units that mention that semantic edge
 - Changing the Lean toolchain version invalidates all cache entries
 - Running `simple verify check` after invalidation re-checks affected units
 - Stale entries are never returned from cache lookups (safety invariant)
+
+Field-wrapper invalidation is fail-closed. If module `A` refers to `B` through a
+forwarded field or generated accessor and `B` wraps, unwraps, renames, or
+changes that field's accessor shape, `A` must miss the verification cache. The
+same semantic key is mirrored into the interpreter incremental path, SMF loader
+cache, and JIT instantiator cache so stale executable artifacts are not reused
+after meaning-changing accessor changes.
 
 ### Cache Format
 

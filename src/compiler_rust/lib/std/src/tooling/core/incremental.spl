@@ -94,6 +94,8 @@ pub class FileEntry:
 pub class IncrementalCache:
     pub entries: Dict<text, FileEntry>
     pub dependencies: Dict<text, List<text>>
+    pub semantic_fingerprints: Dict<text, text>
+    pub dependency_semantic_fingerprints: Dict<text, Dict<text, text>>
     pub cache_path: text
 
     pub fn new(cache_path: text) -> IncrementalCache:
@@ -108,6 +110,8 @@ pub class IncrementalCache:
         IncrementalCache {
             entries: {},
             dependencies: {},
+            semantic_fingerprints: {},
+            dependency_semantic_fingerprints: {},
             cache_path: cache_path
         }
 
@@ -177,6 +181,37 @@ pub class IncrementalCache:
                                     _:
                                         pass
                             cache.dependencies[file] = deps_list
+                        _:
+                            pass
+            _:
+                pass
+
+        # Parse current public ABI/accessor/field-wrapper semantic hashes.
+        match doc.get("semantic_fingerprints"):
+            some(SdnValue.Dict(semantic_dict)):
+                for (file, fp_val) in semantic_dict.items():
+                    match fp_val:
+                        SdnValue.text(fp):
+                            cache.semantic_fingerprints[file] = fp
+                        _:
+                            pass
+            _:
+                pass
+
+        # Parse the dependency semantic hashes recorded for each compiled file.
+        match doc.get("dependency_semantic_fingerprints"):
+            some(SdnValue.Dict(file_dict)):
+                for (file, deps_val) in file_dict.items():
+                    match deps_val:
+                        SdnValue.Dict(dep_dict):
+                            var recorded: Dict<text, text> = {}
+                            for (dep, fp_val) in dep_dict.items():
+                                match fp_val:
+                                    SdnValue.text(fp):
+                                        recorded[dep] = fp
+                                    _:
+                                        pass
+                            cache.dependency_semantic_fingerprints[file] = recorded
                         _:
                             pass
             _:
@@ -266,6 +301,8 @@ pub class IncrementalCache:
         # Build SDN structure
         var sdn_entries: Dict<text, SdnValue> = {}
         var sdn_deps: Dict<text, SdnValue> = {}
+        var sdn_semantics: Dict<text, SdnValue> = {}
+        var sdn_dep_semantics: Dict<text, SdnValue> = {}
 
         # Serialize entries
         for (path, entry) in self.entries.items():
@@ -284,10 +321,21 @@ pub class IncrementalCache:
 
             sdn_deps[file] = SdnValue.Array(deps_array)
 
+        for (file, fingerprint) in self.semantic_fingerprints.items():
+            sdn_semantics[file] = SdnValue.text(fingerprint)
+
+        for (file, recorded) in self.dependency_semantic_fingerprints.items():
+            var dep_dict: Dict<text, SdnValue> = {}
+            for (dep, fingerprint) in recorded.items():
+                dep_dict[dep] = SdnValue.text(fingerprint)
+            sdn_dep_semantics[file] = SdnValue.Dict(dep_dict)
+
         # Build root document
         val root_dict: Dict<text, SdnValue> = {}
         root_dict["entries"] = SdnValue.Dict(sdn_entries)
         root_dict["dependencies"] = SdnValue.Dict(sdn_deps)
+        root_dict["semantic_fingerprints"] = SdnValue.Dict(sdn_semantics)
+        root_dict["dependency_semantic_fingerprints"] = SdnValue.Dict(sdn_dep_semantics)
 
         val root_value = SdnValue.Dict(root_dict)
 
@@ -344,6 +392,20 @@ pub class IncrementalCache:
             self.dependencies[file] = []
 
         self.dependencies[file].append(dependency)
+        if self.semantic_fingerprints.has(dependency):
+            self.record_dependency_semantic_fingerprint(file, dependency, self.semantic_fingerprints[dependency])
+
+    pub fn set_semantic_fingerprint(self, file: text, public_abi_hash: text, accessor_hash: text, field_wrapper_hash: text):
+        """Record this file's public ABI/accessor/field-wrapper fingerprint."""
+        self.semantic_fingerprints[file] = incremental_semantic_fingerprint(public_abi_hash, accessor_hash, field_wrapper_hash)
+
+    pub fn record_dependency_semantic_fingerprint(self, file: text, dependency: text, semantic_fingerprint: text):
+        """Record the dependency semantic fingerprint used to compile a file."""
+        if not self.dependency_semantic_fingerprints.has(file):
+            self.dependency_semantic_fingerprints[file] = {}
+        var recorded = self.dependency_semantic_fingerprints[file]
+        recorded[dependency] = semantic_fingerprint
+        self.dependency_semantic_fingerprints[file] = recorded
 
     pub fn get_changed_files(self, current_files: List<text>) -> List<text>:
         """Detect changed files since last build.
@@ -372,6 +434,8 @@ pub class IncrementalCache:
                 val current_entry = FileEntry.new(path, old_entry.language)
 
                 if current_entry.has_changed(old_entry):
+                    changed.append(path)
+                elif self.semantic_dependencies_changed(path):
                     changed.append(path)
 
         changed
@@ -442,6 +506,18 @@ pub class IncrementalCache:
 
         dependents
 
+    pub fn semantic_dependencies_changed(self, file: text) -> bool:
+        """Fail closed when a recorded dependency semantic fingerprint is missing or changed."""
+        if not self.dependency_semantic_fingerprints.has(file):
+            return false
+        val recorded = self.dependency_semantic_fingerprints[file]
+        for (dep, expected_fingerprint) in recorded.items():
+            if not self.semantic_fingerprints.has(dep):
+                return true
+            if self.semantic_fingerprints[dep] != expected_fingerprint:
+                return true
+        false
+
     pub fn is_empty(self) -> bool:
         """Check if cache is empty.
 
@@ -454,6 +530,8 @@ pub class IncrementalCache:
         """Clear all cache entries."""
         self.entries = {}
         self.dependencies = {}
+        self.semantic_fingerprints = {}
+        self.dependency_semantic_fingerprints = {}
 
     pub fn file_count(self) -> i32:
         """Get number of tracked files.
@@ -598,6 +676,14 @@ pub class IncrementalCompiler:
             val language = self.detect_language_from_extension(file)
             self.cache.add_file(file, language)
 
+        # Update dependencies after all compiled file entries are refreshed.
+        for (file, deps) in dependencies.items():
+            for dep in deps:
+                self.cache.add_dependency(file, dep)
+
+        if self.verbose:
+            print("Updated cache with {compiled_files.len()} files")
+
     fn detect_language_from_extension(path: text) -> Language:
         """Detect programming language from file extension.
 
@@ -625,14 +711,6 @@ pub class IncrementalCompiler:
             return Language.Cpp
         else:
             return Language.Simple  # Default
-
-        # Update dependencies
-        for (file, deps) in dependencies.items():
-            for dep in deps:
-                self.cache.add_dependency(file, dep)
-
-        if self.verbose:
-            print("Updated cache with {compiled_files.len()} files")
 
     pub fn save_cache(self) -> Result<(), text>:
         """Save cache to disk.
@@ -696,3 +774,17 @@ pub class IncrementalAnalysis:
             Clean + dirty files
         """
         self.clean_files.len() + self.dirty_files.len()
+
+pub fn incremental_semantic_fingerprint(public_abi_hash: text, accessor_hash: text, field_wrapper_hash: text) -> text:
+    incremental_text_hash("public_abi|" + public_abi_hash + "|accessor|" + accessor_hash + "|field_wrapper|" + field_wrapper_hash)
+
+fn incremental_text_hash(input: text) -> text:
+    var h1: i64 = 5381
+    var h2: i64 = 52711
+    var len = 0
+    while len < input.len():
+        val code = input.char_at(len).ord().to_i64()
+        h1 = ((h1 * 33) + code) % 2147483647
+        h2 = ((h2 * 131) + code + len) % 2147483629
+        len = len + 1
+    "{len}:{h1}:{h2}"

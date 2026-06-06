@@ -100,6 +100,18 @@ available non-raster oracle. Keep executable specs under `test/...`; generated
 manual docs and evidence assets belong under `doc/06_spec/...`, and
 `doc/06_spec` must never contain executable `.spl` specs.
 
+For compiler cache, formal verification, loader, JIT, or accessor-forwarding
+changes, add semantic invalidation specs. Public ABI changes, field-wrapper
+changes, forwarded getter/setter changes, and generated accessor dependency
+changes must miss stale interpreter, SMF, and JIT cache entries instead of
+reusing old code. Keep the spec close to the cache owner and mirror it into
+`doc/06_spec` as a readable scenario manual.
+
+Avoid boolean-wrapper assertions such as `expect(a == b).to_equal(true)` or
+`expect(a != b).to_equal(false)`. Prefer direct value matchers such as
+`to_equal`, `to_be_greater_than`, `to_contain`, or `to_be_nil`; use
+`to_be(true/false)` only when the boolean itself is the behavior being tested.
+
 ## Startup-Sensitive Specs
 
 If a SPipe change touches `simple run`, direct file argv parsing,

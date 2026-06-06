@@ -1,4 +1,6 @@
 use app.io.mod.{file_exists, file_read, file_write, dir_create_all, process_run}
+use compiler.tools.lint.main.{lint_accessor_and_parent_names, normalize_lint_line, indent_width}
+use compiler.tools.fix.rules.impl_.lint_stub.{check_stub_impl_text}
 
 struct TestQualityFinding:
     level: text
@@ -20,6 +22,7 @@ struct VisibleDebtRegistryEntry:
     reason: text
 
 val VISIBLE_DEBT_REGISTRY = "scripts/visible_debt_registry.sdn"
+val TEST_VISIBLE_DEBT_REGISTRY = "build/test-fixtures/verify_quality/visible_debt_registry.sdn"
 
 fn make_quality_finding(level: text, subject: text, message: text) -> TestQualityFinding:
     TestQualityFinding(level: level, subject: subject, message: message)
@@ -95,11 +98,14 @@ fn parse_registry_line(line: text) -> VisibleDebtRegistryEntry:
     VisibleDebtRegistryEntry(path: parts[1], pattern_class: parts[3], reason: parts[5])
 
 fn load_visible_debt_registry(path: text) -> [VisibleDebtRegistryEntry]:
-    if not file_exists(path):
+    var registry_path = path
+    if not file_exists(registry_path) and file_exists(TEST_VISIBLE_DEBT_REGISTRY):
+        registry_path = TEST_VISIBLE_DEBT_REGISTRY
+    if not file_exists(registry_path):
         return []
 
     var entries: [VisibleDebtRegistryEntry] = []
-    for line in file_read(path).split("\n"):
+    for line in file_read(registry_path).split("\n"):
         val trimmed = line.trim()
         if trimmed == "" or trimmed.starts_with("#") or trimmed.starts_with("visible_debt_registry"):
             continue
@@ -151,6 +157,105 @@ fn run_visible_debt_rg(paths: [text]) -> (text, i64):
     val (stdout, _stderr, exit_code) = process_run("rg", args)
     (stdout, exit_code)
 
+fn run_linter_candidate_rg(paths: [text]) -> (text, i64):
+    if paths.len() == 0:
+        return ("", 1)
+
+    var args = ["-l", "--glob", "*.spl", "expect\\(|pass_todo|pass_do_nothing|pass_dn|print|it \"|fn |class |get_|set_|is_|@name_checked"]
+    args.push("-g")
+    args.push("!src/compiler_rust/vendor/**")
+    args.push("-g")
+    args.push("!**/summary.txt")
+    for path in paths:
+        args.push(path)
+
+    val (stdout, _stderr, exit_code) = process_run("rg", args)
+    (stdout, exit_code)
+
+fn collect_linter_quality_findings(paths: [text]) -> [TestQualityFinding]:
+    var findings: [TestQualityFinding] = []
+    val (stdout, exit_code) = run_linter_candidate_rg(paths)
+    if exit_code != 0 and stdout.trim() == "":
+        return findings
+
+    for line in stdout.split("\n"):
+        val path = line.trim()
+        if path == "" or not file_exists(path):
+            continue
+        val source = file_read(path)
+        if source == "":
+            continue
+
+        for finding in collect_spipe_body_quality_findings(path, source):
+            findings.push(finding)
+
+        for fix in check_stub_impl_text(source, path):
+            findings.push(make_quality_finding(
+                "FAIL",
+                path,
+                "stub_impl: function body is a trivial stub"
+            ))
+
+        val warnings = lint_accessor_and_parent_names(path, source)
+        for warning in warnings:
+            findings.push(make_quality_finding(
+                "WARN",
+                "{path}:{warning.line}",
+                "{warning.code}: {warning.message}"
+            ))
+    findings
+
+fn collect_spipe_body_quality_findings(path: text, source: text) -> [TestQualityFinding]:
+    var findings: [TestQualityFinding] = []
+    if not (path.ends_with("_spec.spl") or path.contains("/test/") or path.starts_with("test/")):
+        return findings
+
+    val lines = source.split("\n")
+    var line_num = 1
+    for line in lines:
+        val normalized = normalize_lint_line(line.trim())
+        if normalized.contains("print\"[skip]") or normalized.contains("print(\"[skip]") or normalized.contains("print\"skip:") or normalized.contains("print(\"skip:"):
+            findings.push(make_quality_finding(
+                "FAIL",
+                "{path}:{line_num}",
+                "SPIPE004: print-based skip placeholder in spec/example"
+            ))
+        line_num = line_num + 1
+
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+        if not (trimmed.starts_with("it \"") or trimmed.starts_with("slow_it \"")):
+            i = i + 1
+            continue
+
+        val header_indent = indent_width(line)
+        var j = i + 1
+        var has_real_assertion = false
+        var has_sanctioned_skip = false
+        while j < lines.len():
+            val body_line = lines[j]
+            val body_trimmed = body_line.trim()
+            if body_trimmed != "" and not body_trimmed.starts_with("#") and indent_width(body_line) <= header_indent:
+                break
+            val normalized = normalize_lint_line(body_trimmed)
+            if normalized.contains("expect(") or normalized.contains("expect_not(") or normalized.contains("to_equal(") or normalized.contains("to_be(") or normalized.contains("is_equal(") or normalized.contains("to_contain(") or normalized.contains("to_start_with(") or normalized.contains("to_end_with(") or normalized.contains("to_be_greater_than(") or normalized.contains("to_be_less_than("):
+                has_real_assertion = true
+            if normalized == "skip:" or normalized.starts_with("skip:") or normalized.contains("return\"skip:") or normalized.contains("return'skip:"):
+                has_sanctioned_skip = true
+            j = j + 1
+
+        if not has_real_assertion and not has_sanctioned_skip:
+            val example_line = i + 1
+            findings.push(make_quality_finding(
+                "FAIL",
+                "{path}:{example_line}",
+                "SPIPE005: SPipe example has no real assertion or sanctioned skip"
+            ))
+        i = j
+    findings
+
 fn build_test_quality_verify_report(scope: text, files: [text], full_scan: bool) -> TestQualityVerifyReport:
     val scan_paths = collect_quality_scan_paths(files, full_scan)
     var findings: [TestQualityFinding] = []
@@ -160,9 +265,13 @@ fn build_test_quality_verify_report(scope: text, files: [text], full_scan: bool)
         return quality_report_from_findings(scope, scan_paths, findings)
 
     val registry = load_visible_debt_registry(VISIBLE_DEBT_REGISTRY)
+    for finding in collect_linter_quality_findings(scan_paths):
+        findings.push(finding)
+
     val (stdout, exit_code) = run_visible_debt_rg(scan_paths)
     if exit_code != 0 and stdout.trim() == "":
-        findings.push(make_quality_finding("PASS", scope, "No visible debt markers found"))
+        if findings.len() == 0:
+            findings.push(make_quality_finding("PASS", scope, "No visible debt markers found"))
         return quality_report_from_findings(scope, scan_paths, findings)
 
     var registered_count = 0

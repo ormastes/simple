@@ -134,6 +134,12 @@ fn type_from_string(type_str: text) -> text:
 
 # Executable memory now delegates to shared loader/object mapper.
 
+fn text_list_contains(items: [text], needle: text) -> bool:
+    for item in items:
+        if item == needle:
+            return true
+    false
+
 # ============================================================================
 # JIT Instantiator
 # ============================================================================
@@ -147,6 +153,8 @@ struct JitInstantiator:
     depth: i32
     compile_count: i32
     jit_cache: Dict<text, ([u8], i64)>
+    jit_semantic_keys: Dict<text, [text]>
+    smf_semantic_keys: Dict<text, [text]>
     symbol_table: Dict<text, i64>
     exec_mapper: SharedExecMapper
     jit_mapper: JitMapper
@@ -163,6 +171,8 @@ impl JitInstantiator:
             depth: 0,
             compile_count: 0,
             jit_cache: {},
+            jit_semantic_keys: {},
+            smf_semantic_keys: {},
             symbol_table: {},
             exec_mapper: SharedExecMapper.new(SharedExecMapperConfig(verbose: config.verbose)),
             jit_mapper: JitMapper.new(JitMapperConfig(
@@ -187,10 +197,29 @@ impl JitInstantiator:
         self.jit_cache[symbol] = (code, address)
         self.symbol_table[symbol] = address
 
+    me set_smf_semantic_keys(smf_path: text, keys: [text]):
+        """Attach semantic/public-ABI dependency keys to future JIT symbols from an SMF."""
+        self.smf_semantic_keys[smf_path] = keys
+
+    me set_symbol_semantic_keys(symbol: text, keys: [text]):
+        """Attach semantic/public-ABI dependency keys to an existing JIT symbol."""
+        self.jit_semantic_keys[symbol] = keys
+
+    me invalidate_by_semantic_key(changed_key: text) -> [text]:
+        """Drop JIT symbols compiled against a changed semantic/public-ABI key."""
+        var removed: [text] = []
+        for symbol in self.jit_semantic_keys.keys():
+            if text_list_contains(self.jit_semantic_keys[symbol], changed_key):
+                self.drop_cached_symbol(symbol)
+                removed = removed.push(symbol)
+        removed
+
     me drop_cached_symbol(symbol: text):
         """Drop cached JIT bookkeeping and free exec page for one symbol."""
         if self.jit_cache.has(symbol):
             self.jit_cache = self.jit_cache.remove(symbol)
+        if self.jit_semantic_keys.has(symbol):
+            self.jit_semantic_keys = self.jit_semantic_keys.remove(symbol)
         if self.symbol_table.has(symbol):
             self.symbol_table = self.symbol_table.remove(symbol)
         # Free the mmap'd executable page if it exists in the exec mapper.
@@ -341,6 +370,8 @@ impl JitInstantiator:
 
                 # Cache the result
                 self.jit_cache[entry.mangled_name] = (compiled_code, fn_pointer)
+                if self.smf_semantic_keys.has(smf_path):
+                    self.jit_semantic_keys[entry.mangled_name] = self.smf_semantic_keys[smf_path]
 
                 # Register in symbol table
                 self.symbol_table[entry.mangled_name] = fn_pointer
@@ -416,6 +447,15 @@ impl JitInstantiator:
             smf_files_mapped: cache_stats.total_files,
             smf_memory_mapped: cache_stats.total_memory
         )
+
+fn loader__jit_instantiator__JitInstantiator_dot_new(config: JitInstantiatorConfig) -> JitInstantiator:
+    JitInstantiator.new(config)
+
+fn loader__jit_instantiator__JitInstantiator_dot_load_smf_metadata(instantiator: JitInstantiator, smf_path: text) -> Result<(), text>:
+    instantiator.load_smf_metadata(smf_path)
+
+fn loader__jit_instantiator__JitInstantiator_dot_try_jit_instantiate(instantiator: JitInstantiator, symbol: text) -> JitInstantiationResult:
+    instantiator.try_jit_instantiate(symbol)
 
 # ============================================================================
 # Statistics

@@ -6,6 +6,7 @@ use app.io.mod.{file_write, dir_create_all}
 
 val TEST_QUALITY_TEST_FIXTURES = "build/test-fixtures/verify_quality/test"
 val TEST_QUALITY_SOURCE_FIXTURES = "build/test-fixtures/verify_quality/src"
+val TEST_QUALITY_REGISTRY_FIXTURE = "build/test-fixtures/verify_quality/visible_debt_registry.sdn"
 
 fn ensure_fixture_dir(prefix: text):
     val _ = dir_create_all(prefix)
@@ -22,7 +23,7 @@ describe "anti-dummy / anti-stub verify gate":
             "bad_spec.spl",
             "describe \"x\":\n" +
             "    it \"y\":\n" +
-            "        expect(true).to_equal(true)\n")
+            "        expect(" + "true).to_equal(true)\n")
         val report = build_test_quality_verify_report("fixture", [path], false)
         expect(report.status).to_equal("FAIL")
 
@@ -95,14 +96,23 @@ describe "anti-dummy / anti-stub verify gate":
             suppression +
             "describe \"x\":\n" +
             "    it \"y\":\n" +
-            "        expect(true).to_equal(true)\n")
+            "        expect(" + "true).to_equal(true)\n")
         val report = build_test_quality_verify_report("fixture", [path], false)
         expect(report.status).to_equal("FAIL")
 
     it "warns on registered visible debt markers":
+        val path = write_fixture(TEST_QUALITY_TEST_FIXTURES,
+            "registered_debt_spec.spl",
+            "# TODO: [test][P2] registered fixture debt\n" +
+            "describe \"x\":\n" +
+            "    it \"y\":\n" +
+            "        expect(1 + 1).to_equal(2)\n")
+        val _registry = file_write(TEST_QUALITY_REGISTRY_FIXTURE,
+            "visible_debt_registry\n" +
+            "  entry path \"{path}\" pattern_class \"tracking_keyword\" reason \"fixture debt exercises registered warning path\"\n")
         val report = build_test_quality_verify_report(
             "fixture",
-            ["test/integration/app/verify_test_quality_gate_spec.spl"],
+            [path],
             false
         )
         val rendered = render_test_quality_verify_report(report)
@@ -124,3 +134,15 @@ describe "anti-dummy / anti-stub verify gate":
         val report = build_test_quality_verify_report("fixture", [good_test, good_src], false)
         expect(report.status).to_equal("PASS")
         expect(render_test_quality_verify_report(report)).to_contain("STATUS: PASS")
+
+    it "warns on Pure Simple dummy accessor lints in verify quality":
+        val path = write_fixture(TEST_QUALITY_SOURCE_FIXTURES,
+            "dummy_accessor.spl",
+            "class Meter:\n" +
+            "    value: i64\n" +
+            "    fn get_value(self) -> i64:\n" +
+            "        self.value\n")
+        val report = build_test_quality_verify_report("fixture", [path], false)
+        val rendered = render_test_quality_verify_report(report)
+        expect(report.status).to_equal("WARN")
+        expect(rendered).to_contain("ACC001")

@@ -102,6 +102,18 @@ After adding or moving UI-facing app feature specs, run
 the critical UI SSPEC lane mirrored into generated manuals with visible
 evidence markers.
 
+For compiler cache, loader, JIT, formal verification, or accessor-forwarding
+work, include SPipe evidence for semantic invalidation. A change to public ABI,
+field-wrapper shape, forwarded getter/setter behavior, or generated accessor
+dependencies must miss the interpreter/incremental cache and any SMF/JIT cache
+that could otherwise reuse stale code. Add focused specs near the cache owner
+instead of relying only on broad loader suites.
+
+Do not write boolean-wrapper assertions in new SPipe specs:
+`expect(a == b).to_equal(true)`, `expect(a != b).to_equal(false)`, and similar
+forms are quality-gate failures. Assert concrete values directly, or use
+`to_be(true/false)` only when the boolean value itself is the unit under test.
+
 For Simple Web/Electron renderer parity, keep the canonical wrapper documented
 as `scripts/check/check-production-gui-web-renderer-parity-evidence.shs`.
 Generated-GUI evidence may record explicit `text_normalization_pixels` for

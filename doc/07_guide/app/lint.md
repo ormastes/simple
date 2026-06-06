@@ -60,6 +60,8 @@ Deep analysis using the arena-based AST. Runs during compilation.
 | STUB001 | Stub Impl | ERROR | Function with params returns trivial value, params unused |
 | STUB002 | Stub Impl | INFO | Zero-param function returns default value (possible stub) |
 | STUB003 | Stub Impl | ERROR | Whole-function explicit placeholder body (`pass_todo`, `pass_do_nothing`, `pass_dn`) in production code |
+| ACC001 | Accessor Quality | ERROR | Getter/setter pair is a dummy field wrapper with no real contract or behavior |
+| NAME001 | Naming Correctness | ERROR | Child method name is suspiciously similar to inherited parent API; use `@name_checked` for intentional shims |
 | SPIPE001 | Test Quality | ERROR | Tautological literal assertion in spec/example |
 | SPIPE002 | Test Quality | ERROR | Placeholder pass helper (`pass_todo`, `pass_do_nothing`, `pass_dn`) in spec/example |
 | SPIPE003 | Test Quality | ERROR | Placeholder match-arm success/failure assertion in spec/example |
@@ -111,6 +113,26 @@ Combined pattern-based + EasyFix pipeline with severity control.
 | Stub (STUB) | STUB001-STUB003 | Trivial/dummy implementations |
 | SPipe quality (SPIPE) | SPIPE001-SPIPE006 | Tautology and placeholder-success checks in test/spec files |
 | Arguments (ARG) | ARG001-ARG002 | Too many function parameters |
+| Accessor (ACC) | ACC001 | Dummy getter/setter field-wrapper contracts |
+| Name (NAME) | NAME001 | Similar inherited method names without `@name_checked` |
+
+---
+
+## Accessor and Inherited-Name Lints
+
+### ACC001: Dummy Accessor Pair (ERROR)
+
+Fires when a field is exposed only through a trivial getter/setter pair that
+does not add validation, conversion, synchronization, tracing, or another real
+contract. This catches LLM-generated "wrappers" that make public API shape look
+intentional while preserving raw field semantics.
+
+### NAME001: Similar Parent Method Name (ERROR)
+
+Fires when a child class introduces a method name close enough to an inherited
+parent method that it is likely a misspelling or accidental shadowing. Add
+`@name_checked` to the intentional child method when the near-name is deliberate
+compatibility surface.
 
 ---
 

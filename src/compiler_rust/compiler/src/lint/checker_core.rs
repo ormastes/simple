@@ -425,6 +425,9 @@ impl LintChecker {
 
         // Check for non-deterministic calls inside @deterministic functions
         self.check_deterministic_calls(items);
+
+        // Check method/accessor names after class definitions are available.
+        self.check_accessor_and_parent_names(items);
     }
 
     /// Collect function definitions for call-site checking
@@ -567,6 +570,7 @@ impl LintChecker {
         "gpu_intrinsic",
         // Determinism guard (GAME-DET-LINT-001)
         "deterministic",
+        "name_checked",
     ];
 
     /// Known attribute names (whitelist)
@@ -593,5 +597,6 @@ impl LintChecker {
         "variant",
         // Determinism guard (GAME-DET-LINT-001): #[deterministic]
         "deterministic",
+        "name_checked",
     ];
 }

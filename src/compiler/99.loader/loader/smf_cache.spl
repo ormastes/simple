@@ -158,6 +158,18 @@ impl MappedSmf:
                 self.note_sdn = Some(empty_metadata)
                 Ok(empty_metadata)
 
+    me read_semantic_fingerprint() -> Result<SmfSemanticFingerprint, text>:
+        """Read public ABI/accessor/field-wrapper semantic metadata from note.sdn."""
+        val search_size = if self.size > 65536: 65536 else: self.size
+        val search_offset = self.size - search_size
+        val sdn_text = mmap_read_string(self.address, search_offset, search_size)
+        val sdn_value = parse(sdn_text)
+        match sdn_value:
+            case Ok(value):
+                parse_smf_semantic_fingerprint(value)
+            case Err(err):
+                Err("SMF semantic metadata missing or malformed")
+
     fn read_template_bytes(symbol_name: text, template_offset: i64) -> Result<[u8], text>:
         """Read template bytecode from TemplateCode section."""
         # Locate template at offset
@@ -228,6 +240,14 @@ struct CacheStats:
     total_memory: i64
     cache_hits: i32
     cache_misses: i32
+
+struct SmfSemanticFingerprint:
+    """Public ABI/accessor/field-wrapper semantic fingerprint stored in SMF metadata."""
+    public_abi_hash: text
+    accessor_hash: text
+    field_wrapper_hash: text
+    dependency_fingerprints: Dict<text, text>
+    combined: text
 
 impl SmfCache:
     static fn new() -> SmfCache:
@@ -540,6 +560,53 @@ fn get_bool_from_value(value: SdnValue) -> Result<bool, text>:
                 case _: Err("Invalid boolean string: {s}")
         case _: Err("Expected boolean value")
 
+fn parse_smf_semantic_fingerprint(value: SdnValue) -> Result<SmfSemanticFingerprint, text>:
+    match value:
+        case SdnValue.Dict(dict):
+            val public_abi_hash = get_required_text_field(dict, "public_abi_hash")?
+            val accessor_hash = get_required_text_field(dict, "accessor_hash")?
+            val field_wrapper_hash = get_required_text_field(dict, "field_wrapper_hash")?
+            var dependency_fingerprints: Dict<text, text> = {}
+            if dict.has("dependency_semantic_fingerprints"):
+                match dict["dependency_semantic_fingerprints"]:
+                    case SdnValue.Dict(dep_dict):
+                        for dep in dep_dict.keys():
+                            dependency_fingerprints[dep] = get_string_from_value(dep_dict[dep])?
+                    case _:
+                        return Err("dependency_semantic_fingerprints must be a dictionary")
+            Ok(expected_smf_semantic_fingerprint(public_abi_hash, accessor_hash, field_wrapper_hash, dependency_fingerprints))
+        case _:
+            Err("Expected Dict at root of semantic note.sdn")
+
+fn get_required_text_field(dict: Dict<text, SdnValue>, field: text) -> Result<text, text>:
+    if not dict.has(field):
+        return Err("SMF semantic metadata missing {field}")
+    get_string_from_value(dict[field])
+
+fn expected_smf_semantic_fingerprint(public_abi_hash: text, accessor_hash: text, field_wrapper_hash: text, dependency_fingerprints: Dict<text, text>) -> SmfSemanticFingerprint:
+    var dep_parts: [text] = []
+    for dep in dependency_fingerprints.keys():
+        dep_parts = dep_parts.push(dep + "=" + dependency_fingerprints[dep])
+    val combined = smf_semantic_text_hash("public_abi|" + public_abi_hash + "|accessor|" + accessor_hash + "|field_wrapper|" + field_wrapper_hash + "|deps|" + dep_parts.join("|"))
+    SmfSemanticFingerprint(
+        public_abi_hash: public_abi_hash,
+        accessor_hash: accessor_hash,
+        field_wrapper_hash: field_wrapper_hash,
+        dependency_fingerprints: dependency_fingerprints,
+        combined: combined
+    )
+
+fn smf_semantic_text_hash(input: text) -> text:
+    var h1: i64 = 5381
+    var h2: i64 = 52711
+    var len = 0
+    while len < input.len():
+        val code = input.char_at(len).ord().to_i64()
+        h1 = ((h1 * 33) + code) % 2147483647
+        h2 = ((h2 * 131) + code + len) % 2147483629
+        len = len + 1
+    "{len}:{h1}:{h2}"
+
 # ============================================================================
 # Validated SMF Loading
 # ============================================================================
@@ -584,6 +651,19 @@ fn validated_smf_load(smf_path: text, source_path: text, backend: text, opt_leve
         val _ = mapped.close()
         return Err("SMF options mismatch: {validation.detail}")
 
+    Ok(mapped)
+
+fn validated_smf_load_with_semantics(smf_path: text, source_path: text, backend: text, opt_level: i64, release: bool, debug_info: bool, gc_off: bool, profile: text, allowed_families: [text], expected_semantics: SmfSemanticFingerprint) -> Result<MappedSmf, text>:
+    """Load an SMF and fail closed on public ABI/accessor/field-wrapper mismatch."""
+    val mapped = validated_smf_load(smf_path, source_path, backend, opt_level, release, debug_info, gc_off, profile, allowed_families)?
+    val stored_semantics_result = mapped.read_semantic_fingerprint()
+    if stored_semantics_result.is_err():
+        val _ = mapped.close()
+        return Err(stored_semantics_result.unwrap_err())
+    val stored_semantics = stored_semantics_result.unwrap()
+    if stored_semantics.combined != expected_semantics.combined:
+        val _ = mapped.close()
+        return Err("SMF semantic fingerprint mismatch for {smf_path}")
     Ok(mapped)
 
 # ============================================================================

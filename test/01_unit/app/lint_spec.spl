@@ -1,7 +1,18 @@
 # @Feature 703.1: Simple linter
 # @Description: Test the Simple language linter
 
+use compiler.tools.lint.main.{lint_accessor_and_parent_names}
+use compiler.tools.fix.rules.impl_.lint_annotation.{check_unknown_attribute, check_unknown_decorator}
+
 # NOTE: describe, it, expect are built-in - no imports needed
+
+fn count_name_lint(source: text, code: text) -> i64:
+    val warnings = lint_accessor_and_parent_names("sample.spl", source)
+    var count = 0
+    for warning in warnings:
+        if warning.code == code:
+            count = count + 1
+    count
 
 describe "Linter - code quality checks":
     it "validates variable naming conventions":
@@ -73,7 +84,7 @@ describe "Linter - code patterns":
             case Ok(value):
                 expect value == 10
             case Err(msg):
-                expect false  # Shouldn't reach here
+                expect msg == ""
 
 describe "Linter - best practices":
     it "prefers val over var when possible":
@@ -101,7 +112,7 @@ describe "Linter - best practices":
             case Some(v):
                 expect v == 2
             case None:
-                expect false
+                expect("Expected target value to be found" == "")
 
     it "validates match exhaustiveness":
         # All cases should be covered
@@ -142,3 +153,71 @@ describe "Linter - performance hints":
 
         expect PI_VAL > 3.0
         expect PI_CONST > 3.0
+
+describe "Linter - accessor and inherited name checks":
+    it "warns for trivial get set is accessors":
+        val source =
+            "class Meter:\n" +
+            "    value: i64\n" +
+            "    active: bool\n" +
+            "    fn get_value(self) -> i64:\n" +
+            "        self.value\n" +
+            "    fn set_value(self, value: i64):\n" +
+            "        self.value = value\n" +
+            "    fn is_active(self) -> bool:\n" +
+            "        self.active\n"
+        expect(count_name_lint(source, "ACC001")).to_equal(3)
+
+    it "suppresses a trivial accessor group when any accessor has real behavior":
+        val source =
+            "class Meter:\n" +
+            "    value: i64\n" +
+            "    fn get_value(self) -> i64:\n" +
+            "        if self.value < 0:\n" +
+            "            return 0\n" +
+            "        self.value\n" +
+            "    fn set_value(self, value: i64):\n" +
+            "        self.value = value\n"
+        expect(count_name_lint(source, "ACC001")).to_equal(0)
+
+    it "suppresses dummy accessor warning when overriding a parent accessor":
+        val source =
+            "class Parent:\n" +
+            "    value: i64\n" +
+            "    fn get_value(self) -> i64:\n" +
+            "        self.value\n" +
+            "class Child extends Parent:\n" +
+            "    value: i64\n" +
+            "    fn get_value(self) -> i64:\n" +
+            "        self.value\n"
+        expect(count_name_lint(source, "ACC001")).to_equal(1)
+
+    it "warns for close misspellings of inherited method names":
+        val source =
+            "class Parent:\n" +
+            "    fn render_frame(self):\n" +
+            "        pass\n" +
+            "class Child extends Parent:\n" +
+            "    fn render_farme(self):\n" +
+            "        pass\n"
+        expect(count_name_lint(source, "NAME001")).to_equal(1)
+
+    it "suppresses close inherited method name warning with name_checked":
+        val source =
+            "class Parent:\n" +
+            "    fn render_frame(self):\n" +
+            "        pass\n" +
+            "class Child extends Parent:\n" +
+            "    @name_checked\n" +
+            "    fn render_farme(self):\n" +
+            "        pass\n"
+        expect(count_name_lint(source, "NAME001")).to_equal(0)
+
+    it "treats name_checked as a known Pure Simple annotation":
+        val source =
+            "class Child:\n" +
+            "    @name_checked\n" +
+            "    fn render_farme(self):\n" +
+            "        pass\n"
+        expect(check_unknown_decorator(source, "sample.spl").len()).to_equal(0)
+        expect(check_unknown_attribute(source, "sample.spl").len()).to_equal(0)

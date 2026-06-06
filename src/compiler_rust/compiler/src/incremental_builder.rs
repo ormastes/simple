@@ -9,6 +9,7 @@ impl IncrementalBuilder {
         let mut info = SourceInfo::new(path.clone());
         info.update_from_content(content);
         let _ = info.update_mtime();
+        add_semantic_exports_from_content(&mut info, content);
 
         // Parse imports (simple heuristic)
         for line in content.lines() {
@@ -66,6 +67,23 @@ impl IncrementalBuilder {
         self.state.register_source(info);
     }
 
+    /// Add a source with semantic dependency fingerprints captured by the
+    /// compiler/type resolver. This is the cache-invalidation path for
+    /// generated field-wrapper accessors and public layout dependencies.
+    pub fn add_source_with_semantic_dependencies(
+        &self,
+        path: PathBuf,
+        content: &str,
+        semantic_dependencies: HashMap<String, u64>,
+    ) {
+        let mut info = SourceInfo::new(path.clone());
+        info.update_from_content(content);
+        let _ = info.update_mtime();
+        add_semantic_exports_from_content(&mut info, content);
+        info.semantic_dependencies = semantic_dependencies;
+        self.state.register_source(info);
+    }
+
     /// Build incrementally, returning files that need compilation.
     pub fn build(&self) -> Vec<PathBuf> {
         self.state.check_all()
@@ -90,6 +108,74 @@ impl IncrementalBuilder {
     /// Get compilation statistics.
     pub fn stats(&self) -> IncrementalStats {
         self.state.stats()
+    }
+}
+
+fn semantic_hash(input: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    input.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn add_semantic_exports_from_content(info: &mut SourceInfo, content: &str) {
+    let mut current_type: Option<String> = None;
+    for raw_line in content.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        if let Some(rest) = trimmed.strip_prefix("class ") {
+            if let Some(name) = rest.split(|c: char| !c.is_alphanumeric() && c != '_').next() {
+                if !name.is_empty() {
+                    current_type = Some(name.to_string());
+                    info.add_semantic_export(format!("type:{name}"), semantic_hash(trimmed));
+                }
+            }
+            continue;
+        }
+
+        if let Some(rest) = trimmed.strip_prefix("struct ") {
+            if let Some(name) = rest.split(|c: char| !c.is_alphanumeric() && c != '_').next() {
+                if !name.is_empty() {
+                    current_type = Some(name.to_string());
+                    info.add_semantic_export(format!("type:{name}"), semantic_hash(trimmed));
+                }
+            }
+            continue;
+        }
+
+        let Some(type_name) = current_type.as_ref() else {
+            continue;
+        };
+
+        if let Some((field_name, _)) = trimmed.split_once(':') {
+            let field_name = field_name.trim();
+            if !field_name.is_empty()
+                && field_name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
+                info.add_semantic_export(
+                    format!("field:{type_name}.{field_name}"),
+                    semantic_hash(trimmed),
+                );
+            }
+        }
+
+        for prefix in ["fn get_", "fn set_", "fn is_", "me get_", "me set_", "me is_"] {
+            if let Some(rest) = trimmed.strip_prefix(prefix) {
+                if let Some(method_suffix) = rest.split(['(', '[']).next() {
+                    let accessor_prefix = prefix.split_whitespace().nth(1).unwrap_or_default();
+                    let method_name = format!("{accessor_prefix}{method_suffix}");
+                    info.add_semantic_export(
+                        format!("accessor:{type_name}.{method_name}"),
+                        semantic_hash(trimmed),
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -274,12 +360,79 @@ mod tests {
         a_info.dependencies.push(PathBuf::from("b.spl"));
         state.register_source(a_info);
 
-        // Mark C as dirty - should cascade to B (direct dependent)
+        // Mark C as dirty - should cascade transitively through B to A.
         state.mark_dirty(Path::new("c.spl"));
 
         assert_eq!(state.get_status(Path::new("c.spl")), CompilationStatus::Dirty);
         assert_eq!(state.get_status(Path::new("b.spl")), CompilationStatus::Dirty);
-        // Note: A won't be marked dirty automatically - only direct dependents are marked
+        assert_eq!(state.get_status(Path::new("a.spl")), CompilationStatus::Dirty);
+    }
+
+    #[test]
+    fn test_dependency_cycle_invalidation_marks_whole_group() {
+        let state = IncrementalState::new();
+
+        let mut a_info = SourceInfo::new(PathBuf::from("a.spl"));
+        a_info.dependencies.push(PathBuf::from("b.spl"));
+        state.register_source(a_info);
+
+        let mut b_info = SourceInfo::new(PathBuf::from("b.spl"));
+        b_info.dependencies.push(PathBuf::from("a.spl"));
+        state.register_source(b_info);
+
+        state.mark_dirty(Path::new("a.spl"));
+
+        assert_eq!(state.get_status(Path::new("a.spl")), CompilationStatus::Dirty);
+        assert_eq!(state.get_status(Path::new("b.spl")), CompilationStatus::Dirty);
+    }
+
+    #[test]
+    fn test_semantic_field_wrapper_change_invalidates_cached_dependent() {
+        let unique = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("simple_incremental_semantic_{unique}"));
+        std::fs::create_dir_all(&temp_dir).expect("temp dir");
+        let b_path = temp_dir.join("b.spl");
+        let a_path = temp_dir.join("a.spl");
+        let b_content = r#"
+            class B:
+                value: i64
+                fn get_value(self) -> i64:
+                    self.value
+            "#;
+        let a_content = r#"
+            import b
+            fn read(b: B) -> i64:
+                b.value
+            "#;
+        std::fs::write(&b_path, b_content).expect("write b");
+        std::fs::write(&a_path, a_content).expect("write a");
+
+        let state = IncrementalState::new();
+        let builder = IncrementalBuilder::new(state.clone());
+
+        builder.add_source(b_path.clone(), b_content);
+
+        let original = state
+            .semantic_exports
+            .get("accessor:B.get_value")
+            .map(|v| *v)
+            .expect("accessor export");
+
+        let mut deps = HashMap::new();
+        deps.insert("accessor:B.get_value".to_string(), original);
+        builder.add_source_with_semantic_dependencies(a_path.clone(), a_content, deps);
+
+        let a_source = state.sources.get(&a_path).expect("a source").clone();
+        let mut artifact = CachedArtifact::new(a_source);
+        artifact.has_hir = true;
+        state.mark_complete(&a_path, artifact);
+        assert!(!state.needs_recompile(&a_path));
+
+        state.invalidate_semantic_export("accessor:B.get_value", original.wrapping_add(1));
+
+        assert_eq!(state.get_status(&a_path), CompilationStatus::Dirty);
+        assert!(state.needs_recompile(&a_path));
+        let _ = std::fs::remove_dir_all(temp_dir);
     }
 
     #[test]
