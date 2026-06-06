@@ -52,6 +52,38 @@ fn ui_bundle_include_line(const_name: &str) -> String {
     }
 }
 
+// Like runtime_include_line, but falls back to a sibling file when the env var
+// is unset. iOS builds run cargo through Xcode, which sanitizes the environment
+// so build.rs never sees SIMPLE_IOS_RUNTIME_* — embedding the runtime from a
+// committed-path sibling file (gitignored) makes the runtime survive that.
+fn runtime_include_line_with_file_default(
+    var: &str,
+    const_name: &str,
+    default_filename: &str,
+) -> String {
+    println!("cargo:rerun-if-env-changed={}", var);
+    let path = match env::var(var) {
+        Ok(p) if !p.trim().is_empty() => Some(PathBuf::from(p.trim())),
+        _ => {
+            let default_path = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap_or_default())
+                .join(default_filename);
+            println!("cargo:rerun-if-changed={}", default_path.display());
+            default_path.exists().then_some(default_path)
+        }
+    };
+    match path {
+        Some(p) => {
+            println!("cargo:rerun-if-changed={}", p.display());
+            format!(
+                "pub const {}: Option<&'static [u8]> = Some(include_bytes!(r#\"{}\"#));\n",
+                const_name,
+                p.display()
+            )
+        }
+        None => format!("pub const {}: Option<&'static [u8]> = None;\n", const_name),
+    }
+}
+
 fn write_mobile_runtime_assets(out_dir: &Path) {
     let generated = [
         runtime_include_line("SIMPLE_ANDROID_RUNTIME_AARCH64", "ANDROID_RUNTIME_AARCH64"),
@@ -59,7 +91,11 @@ fn write_mobile_runtime_assets(out_dir: &Path) {
         runtime_include_line("SIMPLE_ANDROID_RUNTIME_ARMV7", "ANDROID_RUNTIME_ARMV7"),
         runtime_include_line("SIMPLE_ANDROID_RUNTIME_I686", "ANDROID_RUNTIME_I686"),
         runtime_include_line("SIMPLE_IOS_RUNTIME_AARCH64", "IOS_RUNTIME_AARCH64"),
-        runtime_include_line("SIMPLE_IOS_RUNTIME_AARCH64_SIM", "IOS_RUNTIME_AARCH64_SIM"),
+        runtime_include_line_with_file_default(
+            "SIMPLE_IOS_RUNTIME_AARCH64_SIM",
+            "IOS_RUNTIME_AARCH64_SIM",
+            "ios_runtime_aarch64_sim.bin",
+        ),
         runtime_include_line("SIMPLE_IOS_RUNTIME_X86_64_SIM", "IOS_RUNTIME_X86_64_SIM"),
         runtime_include_line("SIMPLE_MOBILE_ENTRY_SOURCE", "MOBILE_ENTRY_SOURCE"),
         ui_bundle_include_line("MOBILE_UI_BUNDLE"),

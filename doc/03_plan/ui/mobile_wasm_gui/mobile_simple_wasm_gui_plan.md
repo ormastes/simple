@@ -217,7 +217,21 @@ Preflight oracle (desktop, extracted bundle exactly as device extracts it):
 → EXIT 0, 1 render, genuine widgets (46 `widget-button`, 50 `widget-gallery`,
 36 `widget-checkbox`, 12 `<button>`, 8 `<input>`, 2 `<table>`).
 
-**Remaining: confirm styled render + events live on Android, then iOS.**
+**Android: DONE + verified** (styled render + tap/scroll events live, pushed).
+
+### iOS (2026-06-06): same pipeline, runtime-embed fix for Xcode
+
+The bundle + CSS fix are platform-agnostic (same lib.rs). The known iOS blocker
+was that **Xcode invokes cargo with a sanitized env**, so build.rs never saw
+`SIMPLE_IOS_RUNTIME_AARCH64_SIM` → the runtime wasn't embedded → in-app placeholder.
+Fix: `runtime_include_line_with_file_default` embeds the iOS-sim runtime from a
+committed-path sibling file `ios_runtime_aarch64_sim.bin` (gitignored) when the env
+is unset — so it survives Xcode. The UI bundle already used this file-default
+pattern, so it embeds on iOS too with no env. lib.rs already selects
+`IOS_RUNTIME_AARCH64_SIM` under `cfg(target_os=ios, aarch64, sim)`.
+Rebuilt the deleted iOS-sim runtime (`cargo build --release --target
+aarch64-apple-ios-sim -p simple-driver` → 31.5 MB Mach-O arm64), copied to the
+sibling path, building the iOS app + verifying on the booted iPhone 17 sim.
 
 ## Next milestones
 
