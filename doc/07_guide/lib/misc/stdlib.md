@@ -154,6 +154,7 @@ for `fiber` or scheduler runtime terms can miss the implemented stdlib module.
 |------|-----|----------------|-------|
 | Spawn a platform thread | `std.concurrent.thread.{thread_spawn}` | `src/lib/nogc_async_mut/concurrent/thread.spl` / `thread_sffi.spl` | Uses OS threads (`pthread_create` / `CreateThread`) |
 | Schedule lightweight cooperative work | `std.concurrent.green_thread.{green_spawn, green_spawn_value, green_run_one, green_run_all}` | `src/lib/nogc_async_mut/concurrent/green_thread.spl` | Runs queued work/results on the current OS thread; no preemption or CPU parallelism |
+| Schedule bounded CPU-parallel value work | `std.concurrent.multicore_green.{multicore_green_spawn}` | `src/lib/nogc_async_mut/concurrent/multicore_green.spl` | Pure Simple facade over `rt_pool_submit` / `rt_pool_join` / `rt_pool_is_done`; current M:N candidate, not the final scheduler-aware green runtime |
 | Reuse a worker pool | `task_spawn` / `TaskHandle` | `src/lib/nogc_async_mut/thread_pool.spl` | Native path uses `rt_pool_submit`, `rt_pool_join`, and `rt_pool_is_done` when linked |
 | Send values between concurrent work | `std.concurrent.channel.{channel_new, channel_from_id}` | `src/lib/nogc_sync_mut/concurrent/channel.spl` | Runtime MPMC channel surface |
 
@@ -175,8 +176,27 @@ fn main():
 queued work, but it is not a Go-goroutine equivalent. It does not run tasks in
 parallel and cannot preempt a long-running closure. Use `green_spawn_value` when
 testing the queue path from direct interpreter/SMF perf scripts without relying
-on function-value calls. For Go-like CPU-parallel benchmarks, use the pool-backed
-`task_spawn` path or future scheduler-aware green-thread work.
+on function-value calls. For Go-like CPU-parallel benchmarks, use
+`multicore_green_spawn`, the lower-level pool-backed `task_spawn` path, or future
+scheduler-aware green-thread work.
+
+### Multicore Green Example
+
+```simple
+use std.concurrent.multicore_green.{multicore_green_spawn}
+
+fn value_9() -> i64:
+    9
+
+fn main():
+    val handle = multicore_green_spawn(\: value_9())
+    print handle.join()
+```
+
+`multicore_green_spawn` is the current Pure Simple API used by the
+cross-language profile for bounded CPU-parallel value tasks. It keeps the public
+surface distinct from `green_spawn` so cooperative scheduling tests do not
+pretend to be Go-style M:N scheduling.
 
 ---
 

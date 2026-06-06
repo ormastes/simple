@@ -33,14 +33,29 @@ REPORT_PATH="${REPORT_PATH:-doc/09_report/cross_language_perf_$(date +%Y-%m-%d).
 PROFILE_REPORT_CONTRACT_TEST="${PROFILE_REPORT_CONTRACT_TEST:-test/05_perf/profile_scripts/profile_report_contract_test.shs}"
 RUNS="${RUNS:-20}"
 FIB_N="${FIB_N:-35}"
-WORKERS="${WORKERS:-100}"
+CPU_WORKERS="${CPU_WORKERS:-${WORKERS:-100}}"
+OS_THREAD_WORKERS="${OS_THREAD_WORKERS:-$CPU_WORKERS}"
+MULTICORE_GREEN_WORKERS="${MULTICORE_GREEN_WORKERS:-$CPU_WORKERS}"
+WORKERS="$OS_THREAD_WORKERS"
 FANOUT_WORKERS="${FANOUT_WORKERS:-1000}"
+FANOUT_OS_THREAD_WORKERS="${FANOUT_OS_THREAD_WORKERS:-$FANOUT_WORKERS}"
+FANOUT_MULTICORE_GREEN_WORKERS="${FANOUT_MULTICORE_GREEN_WORKERS:-$FANOUT_WORKERS}"
 FANOUT_ITERS="${FANOUT_ITERS:-32}"
-if [ -z "${GREEN_WORKERS:-}" ]; then
-    if [ "$WORKERS" -gt 10 ]; then
-        GREEN_WORKERS=10
+if [ -z "${COOPERATIVE_GREEN_WORKERS:-}" ]; then
+    if [ -n "${GREEN_WORKERS:-}" ]; then
+        COOPERATIVE_GREEN_WORKERS="$GREEN_WORKERS"
+    elif [ "$CPU_WORKERS" -gt 10 ]; then
+        COOPERATIVE_GREEN_WORKERS=10
     else
-        GREEN_WORKERS="$WORKERS"
+        COOPERATIVE_GREEN_WORKERS="$CPU_WORKERS"
+    fi
+fi
+GREEN_WORKERS="$COOPERATIVE_GREEN_WORKERS"
+if [ -z "${FANOUT_COOPERATIVE_GREEN_WORKERS:-}" ]; then
+    if [ "$FANOUT_WORKERS" -gt 200 ]; then
+        FANOUT_COOPERATIVE_GREEN_WORKERS=200
+    else
+        FANOUT_COOPERATIVE_GREEN_WORKERS="$FANOUT_WORKERS"
     fi
 fi
 WARM_ITERS="${WARM_ITERS:-5}"
@@ -106,6 +121,8 @@ failure_reason() {
         echo "segfault"
     elif echo "$_out" | grep -q 'Undefined symbol: rt_len'; then
         echo "missing rt_len"
+    elif echo "$_out" | grep -q 'rt_pool_'; then
+        echo "missing runtime pool symbol"
     else
         echo "failed"
     fi
@@ -241,6 +258,38 @@ write_simple_parallel_green() {
     } >"$BUILD_DIR/parallel_green.spl"
 }
 
+write_simple_parallel_multicore_green() {
+    # Pool-backed Simple task path. This is the current Pure Simple candidate
+    # for Go-like M:N CPU-parallel work: many logical tasks over bounded runtime
+    # workers when rt_pool_* is linked. It is intentionally separate from the
+    # cooperative green-thread queue and from one-OS-thread-per-task spawn.
+    _last_multicore_worker=$((MULTICORE_GREEN_WORKERS - 1))
+    {
+        echo 'use std.concurrent.multicore_green.{multicore_green_spawn}'
+        echo ''
+        echo 'val LCG_A: i64 = 1103515245'
+        echo 'val LCG_C: i64 = 12345'
+        echo 'val LCG_M: i64 = 2147483648'
+        echo 'val ITERS: i64 = 100000'
+        echo ''
+        echo 'fn worker(seed: i64) -> i64:'
+        echo '    var x = seed'
+        echo '    for i in 0..ITERS:'
+        echo '        x = (x * LCG_A + LCG_C) % LCG_M'
+        echo '    x'
+        echo ''
+        echo 'fn main():'
+        for i in $(seq 0 "$_last_multicore_worker"); do
+            echo "    var h${i} = multicore_green_spawn(\\: worker(${i}))"
+        done
+        echo '    var total: i64 = 0'
+        for i in $(seq 0 "$_last_multicore_worker"); do
+            echo "    total = total + h${i}.join()"
+        done
+        echo '    println("total = {total}")'
+    } >"$BUILD_DIR/parallel_multicore_green.spl"
+}
+
 write_simple_fanout() {
     # OS-thread fanout pattern using Simple's explicit-argument thread/channel APIs. This is
     # the Simple row comparable to C pthread-per-task fanout.
@@ -284,7 +333,7 @@ write_simple_fanout() {
 write_simple_fanout_green() {
     # Simple's implemented green-thread API is cooperative on the current OS
     # thread. This row measures queue fanout overhead, not CPU parallelism.
-    _last_fanout_worker=$((FANOUT_WORKERS - 1))
+    _last_fanout_worker=$((FANOUT_COOPERATIVE_GREEN_WORKERS - 1))
     {
         echo 'use std.concurrent.green_thread.{green_spawn_value, green_run_all}'
         echo ''
@@ -310,6 +359,34 @@ write_simple_fanout_green() {
         done
         echo '    println("total = {total}")'
     } >"$BUILD_DIR/fanout_green.spl"
+}
+
+write_simple_fanout_multicore_green() {
+    _last_fanout_worker=$((FANOUT_MULTICORE_GREEN_WORKERS - 1))
+    {
+        echo 'use std.concurrent.multicore_green.{multicore_green_spawn}'
+        echo ''
+        echo 'val LCG_A: i64 = 1103515245'
+        echo 'val LCG_C: i64 = 12345'
+        echo 'val LCG_M: i64 = 2147483648'
+        echo "val ITERS: i64 = ${FANOUT_ITERS}"
+        echo ''
+        echo 'fn work(seed: i64) -> i64:'
+        echo '    var x = seed'
+        echo '    for i in 0..ITERS:'
+        echo '        x = (x * LCG_A + LCG_C) % LCG_M'
+        echo '    x'
+        echo ''
+        echo 'fn main():'
+        for i in $(seq 0 "$_last_fanout_worker"); do
+            echo "    var h${i} = multicore_green_spawn(\\: work(${i}))"
+        done
+        echo '    var total: i64 = 0'
+        for i in $(seq 0 "$_last_fanout_worker"); do
+            echo "    total = total + h${i}.join()"
+        done
+        echo '    println("total = {total}")'
+    } >"$BUILD_DIR/fanout_multicore_green.spl"
 }
 
 write_c_hello() {
@@ -746,8 +823,10 @@ write_simple_fib
 write_simple_fib_warm
 write_simple_parallel
 write_simple_parallel_green
+write_simple_parallel_multicore_green
 write_simple_fanout
 write_simple_fanout_green
+write_simple_fanout_multicore_green
 write_c_hello
 write_c_fib
 write_c_fib_warm
@@ -809,7 +888,7 @@ else echo "  [skip] Erlang — erlc not found"; fi
 
 # Simple native
 if [ -x "$SIMPLE_BINARY" ]; then
-    for _src in hello fib fib_warm parallel parallel_green fanout fanout_green; do
+    for _src in hello fib fib_warm parallel parallel_green parallel_multicore_green fanout fanout_green fanout_multicore_green; do
         _spl="$BUILD_DIR/${_src}.spl"
         _out="$BUILD_DIR/${_src}_simple_native"
         if [ -f "$_spl" ]; then
@@ -833,7 +912,7 @@ else echo "  [skip] Simple — $SIMPLE_BINARY not found"; fi
 # Simple SMF
 COMPILE_FAIL_SMF=""
 if [ -x "$SIMPLE_BINARY" ]; then
-    for _src in hello fib fib_warm parallel parallel_green fanout fanout_green; do
+    for _src in hello fib fib_warm parallel parallel_green parallel_multicore_green fanout fanout_green fanout_multicore_green; do
         _spl="$BUILD_DIR/${_src}.spl"
         _out="$BUILD_DIR/${_src}_simple.smf"
         if [ -f "$_spl" ]; then
@@ -862,7 +941,7 @@ cat >"$REPORT_PATH" <<EOF
 **Date:** $(date +%Y-%m-%d)
 **Machine:** $(uname -m) / $(uname -s) $(uname -r)
 **CPU:** $(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs || sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "unknown")
-**Runs per measurement:** $RUNS | **Warmup (in-process):** $WARM_IN_PROCESS | **fib(N):** $FIB_N | **Workers:** $WORKERS | **Green workers:** $GREEN_WORKERS | **Fanout workers:** $FANOUT_WORKERS | **Fanout iters:** $FANOUT_ITERS | **Per-run timeout:** ${RUN_TIMEOUT}s
+**Runs per measurement:** $RUNS | **Warmup (in-process):** $WARM_IN_PROCESS | **fib(N):** $FIB_N | **CPU workers:** $CPU_WORKERS | **OS thread workers:** $OS_THREAD_WORKERS | **Cooperative green workers:** $COOPERATIVE_GREEN_WORKERS | **Multicore green workers:** $MULTICORE_GREEN_WORKERS | **Fanout workers:** $FANOUT_WORKERS | **Fanout cooperative green workers:** $FANOUT_COOPERATIVE_GREEN_WORKERS | **Fanout multicore green workers:** $FANOUT_MULTICORE_GREEN_WORKERS | **Fanout iters:** $FANOUT_ITERS | **Per-run timeout:** ${RUN_TIMEOUT}s
 **Profile script:** \`scripts/check/check-cross-language-perf.shs\`
 **Report path:** \`$REPORT_PATH\`
 
@@ -1066,6 +1145,26 @@ if [ -x "$BUILD_DIR/parallel_green_simple_native" ]; then
 else
     par_row "Simple green (native)" "n/a" "compile failed"
 fi
+if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/parallel_multicore_green_simple.smf" ]; then
+    ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/parallel_multicore_green_simple.smf" "$RUNS")
+    if [ "$ms" = "fail" ]; then
+        reason=$(failure_reason "$SIMPLE_BINARY $BUILD_DIR/parallel_multicore_green_simple.smf")
+        par_row "Simple multicore green (SMF)" "$ms" "multicore_green runtime pool candidate ($reason)"
+    else
+        par_row "Simple multicore green (SMF)" "$ms" "multicore_green runtime pool candidate"
+    fi
+fi
+if [ -x "$BUILD_DIR/parallel_multicore_green_simple_native" ]; then
+    ms=$(avg_ms "$BUILD_DIR/parallel_multicore_green_simple_native" "$RUNS")
+    if [ "$ms" = "fail" ]; then
+        reason=$(failure_reason "$BUILD_DIR/parallel_multicore_green_simple_native")
+        par_row "Simple multicore green (native)" "$ms" "multicore_green runtime pool candidate ($reason)"
+    else
+        par_row "Simple multicore green (native)" "$ms" "multicore_green runtime pool candidate"
+    fi
+else
+    par_row "Simple multicore green (native)" "n/a" "compile failed"
+fi
 if [ -x "$BUILD_DIR/parallel_c" ]; then
     ms=$(avg_ms "$BUILD_DIR/parallel_c" "$RUNS")
     par_row "C (pthreads)" "$ms" "OS threads"
@@ -1154,6 +1253,30 @@ if [ -x "$BUILD_DIR/fanout_green_simple_native" ]; then
 else
     fanout_row "Simple green (native)" "n/a" "compile failed"
 fi
+if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/fanout_multicore_green_simple.smf" ]; then
+    ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/fanout_multicore_green_simple.smf" "$RUNS")
+    if [ "$ms" = "fail" ]; then
+        reason=$(failure_reason "$SIMPLE_BINARY $BUILD_DIR/fanout_multicore_green_simple.smf")
+        fanout_row "Simple multicore green (SMF)" "$ms" "multicore_green runtime pool fanout ($reason)"
+    else
+        fanout_row "Simple multicore green (SMF)" "$ms" "multicore_green runtime pool fanout"
+    fi
+elif echo "$COMPILE_FAIL_SMF" | grep -q 'smf:fanout_multicore_green(timeout)'; then
+    fanout_row "Simple multicore green (SMF)" "n/a" "multicore_green runtime pool fanout compile timeout"
+fi
+if [ -x "$BUILD_DIR/fanout_multicore_green_simple_native" ]; then
+    ms=$(avg_ms "$BUILD_DIR/fanout_multicore_green_simple_native" "$RUNS")
+    if [ "$ms" = "fail" ]; then
+        reason=$(failure_reason "$BUILD_DIR/fanout_multicore_green_simple_native")
+        fanout_row "Simple multicore green (native)" "$ms" "multicore_green runtime pool fanout ($reason)"
+    else
+        fanout_row "Simple multicore green (native)" "$ms" "multicore_green runtime pool fanout"
+    fi
+elif echo "$COMPILE_FAIL" | grep -q 'native:fanout_multicore_green(timeout)'; then
+    fanout_row "Simple multicore green (native)" "n/a" "multicore_green runtime pool fanout compile timeout"
+else
+    fanout_row "Simple multicore green (native)" "n/a" "compile failed"
+fi
 if [ -x "$BUILD_DIR/fanout_c" ]; then
     ms=$(avg_ms "$BUILD_DIR/fanout_c" "$RUNS")
     if [ "$ms" = "fail" ]; then
@@ -1210,6 +1333,14 @@ fi
 if [ -f "$BUILD_DIR/parallel_green_simple.smf" ]; then
     _sz=$(bytes_of "$BUILD_DIR/parallel_green_simple.smf")
     par_size_row "Simple green (SMF)" "$(human_bytes "$_sz")" "current OS thread" "+ runtime $(human_bytes "$(bytes_of "$(readlink -f "$SIMPLE_BINARY")")")"
+fi
+if [ -x "$BUILD_DIR/parallel_multicore_green_simple_native" ]; then
+    _sz=$(bytes_of "$BUILD_DIR/parallel_multicore_green_simple_native")
+    par_size_row "Simple multicore green (native)" "$(human_bytes "$_sz")" "runtime pool" "multicore_green"
+fi
+if [ -f "$BUILD_DIR/parallel_multicore_green_simple.smf" ]; then
+    _sz=$(bytes_of "$BUILD_DIR/parallel_multicore_green_simple.smf")
+    par_size_row "Simple multicore green (SMF)" "$(human_bytes "$_sz")" "runtime pool" "+ runtime $(human_bytes "$(bytes_of "$(readlink -f "$SIMPLE_BINARY")")")"
 fi
 if [ -x "$BUILD_DIR/parallel_c" ]; then
     _sz=$(bytes_of "$BUILD_DIR/parallel_c")
@@ -1292,6 +1423,15 @@ if [ -x "$BUILD_DIR/parallel_simple_native" ]; then
         par_rss_row "Simple (native)" "$(human_bytes $((_rss_kb * 1024)))" "$_base_h" "$_per_h"
     fi
 fi
+if [ -x "$BUILD_DIR/parallel_multicore_green_simple_native" ]; then
+    _rss_kb=$(measure_rss "$BUILD_DIR/parallel_multicore_green_simple_native")
+    if [ -n "$_rss_kb" ] && [ "$_rss_kb" != "0" ]; then
+        _per=$(rss_delta_per_worker "$_rss_kb" "$_base_simple_kb" "$MULTICORE_GREEN_WORKERS")
+        _base_h=""; if [ -n "$_base_simple_kb" ]; then _base_h=$(human_bytes $((_base_simple_kb * 1024))); else _base_h="n/a"; fi
+        _per_h=""; if [ -n "$_per" ]; then _per_h="~${_per}KB"; else _per_h="n/a"; fi
+        par_rss_row "Simple multicore green" "$(human_bytes $((_rss_kb * 1024)))" "$_base_h" "$_per_h"
+    fi
+fi
 if [ -x "$BUILD_DIR/parallel_c" ]; then
     _rss_kb=$(measure_rss "$BUILD_DIR/parallel_c")
     if [ -n "$_rss_kb" ] && [ "$_rss_kb" != "0" ]; then
@@ -1340,14 +1480,18 @@ cat >>"$REPORT_PATH" <<'EOF'
 > The large fanout section uses many tiny workers with `FANOUT_ITERS` iterations
 > to expose scheduling overhead; this is the case where Go goroutines should
 > usually beat one-pthread-per-task C. Simple reports both OS-thread fanout
-> through `thread_spawn_with_args` and cooperative green-thread queue fanout separately.
+> through `thread_spawn_with_args`, cooperative green-thread queue fanout, and
+> pool-backed `multicore_green_spawn` fanout separately.
 >
 > **Simple concurrency rows:** `Simple (native)` uses `thread_spawn_with_args`, which is
 > the OS-thread API. `Simple green` uses `green_spawn_value`, which exercises the
 > implemented cooperative green-thread queue on the current OS thread; it does
-> not run in parallel and is not a Go M:N goroutine equivalent. The green row uses the
-> `GREEN_WORKERS` count from the report header because the current cooperative
-> seed is intentionally separate from the OS-thread/Goroutine worker count.
+> not run in parallel and is not a Go M:N goroutine equivalent. `Simple multicore
+> green` is the Pure Simple `multicore_green_spawn`/`rt_pool_*` candidate row for bounded
+> worker-pool scheduling; it is not yet the final scheduler-aware green API.
+> The cooperative green row uses the `COOPERATIVE_GREEN_WORKERS` count from the
+> report header because the current cooperative seed is intentionally separate
+> from the OS-thread/Goroutine worker count.
 > Current direct-run blocker: SMF mutable globals can segfault before the
 > cooperative queue runs, so the SMF green row is classified instead of treated
 > as a scheduling result when that runtime failure appears.
@@ -1379,9 +1523,11 @@ Run the script from the repository root:
 sh scripts/check/check-cross-language-perf.shs
 ```
 
-Useful knobs: `RUNS`, `FIB_N`, `WORKERS`, `GREEN_WORKERS`, `FANOUT_WORKERS`,
-`FANOUT_ITERS`, `WARM_IN_PROCESS`, `RUN_TIMEOUT`, `SIMPLE_BINARY`,
-`BUILD_DIR`, and `REPORT_PATH`.
+Useful knobs: `RUNS`, `FIB_N`, `CPU_WORKERS`, `OS_THREAD_WORKERS`,
+`COOPERATIVE_GREEN_WORKERS`, `MULTICORE_GREEN_WORKERS`, `GREEN_WORKERS`
+(compatibility alias), `FANOUT_WORKERS`, `FANOUT_COOPERATIVE_GREEN_WORKERS`,
+`FANOUT_MULTICORE_GREEN_WORKERS`, `FANOUT_ITERS`, `WARM_IN_PROCESS`,
+`RUN_TIMEOUT`, `SIMPLE_BINARY`, `BUILD_DIR`, and `REPORT_PATH`.
 
 ## Limitations
 

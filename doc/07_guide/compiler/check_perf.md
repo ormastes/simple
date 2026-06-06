@@ -87,7 +87,13 @@ sh scripts/check/check-cross-language-perf.shs
 | `WARM_IN_PROCESS` | 10 | In-process warmup iterations (JIT reaches steady state) |
 | `FIB_N` | 35 | Fibonacci depth for throughput test |
 | `WORKERS` | 100 | Parallel worker count |
+| `CPU_WORKERS` | `WORKERS` or 100 | Shared CPU-heavy worker count for semantic rows |
+| `OS_THREAD_WORKERS` | `CPU_WORKERS` | Simple OS-thread worker count for `thread_spawn_with_args` rows |
+| `COOPERATIVE_GREEN_WORKERS` | capped at 10 by default | Current single-carrier green queue worker count |
+| `MULTICORE_GREEN_WORKERS` | `CPU_WORKERS` | Pool-backed `multicore_green_spawn` worker count |
 | `FANOUT_WORKERS` | 1000 | Large fanout worker count for tiny-task scheduling overhead |
+| `FANOUT_COOPERATIVE_GREEN_WORKERS` | capped at 200 by default | Cooperative green fanout count; capped to avoid oversized generated source |
+| `FANOUT_MULTICORE_GREEN_WORKERS` | `FANOUT_WORKERS` | Pool-backed multicore-green fanout count |
 | `FANOUT_ITERS` | 32 | Tiny per-task LCG iterations for the large fanout benchmark |
 | `RUN_TIMEOUT` | 30 | Per-command timeout in seconds for measured commands and RSS probes |
 | `SIMPLE_BINARY` | `bin/simple` | Path to Simple compiler |
@@ -123,6 +129,7 @@ large unrolled source generation.
 | Simple (SMF loader) | Bytecode VM | Shows bytecode dispatch win |
 | Simple (native) | AOT (LLVM/Cranelift) | Shows AOT ceiling |
 | Simple `green_spawn` / `green_spawn_value` | Cooperative queue on current OS thread | Implemented green-thread API, but not CPU-parallel or preemptive |
+| Simple `multicore_green_spawn` | Bounded runtime worker pool through `rt_pool_*` | Current Pure Simple M:N candidate row for CPU-heavy comparisons |
 | Simple `task_spawn` | Runtime worker pool when `rt_pool_*` links | Intended Simple path for Go-like parallel benchmark work |
 | C (gcc -O2) | AOT native | Absolute performance floor |
 | Go | AOT + goroutines | Low-overhead concurrency |
@@ -145,7 +152,7 @@ large unrolled source generation.
 
 **Warm throughput (fib35):** C ≈ Simple-native < Go < Java (after JIT) < Bun < Simple-SMF < Erlang < Simple-interp < Python
 
-**Parallel (100 workers):** Go and C are the current native baselines; the current cross-language Simple row uses OS-thread `thread_spawn_with_args` plus `std.concurrent.channel`. The implemented `std.concurrent.green_thread` API is cooperative and single-OS-thread, so it is not a drop-in Go-goroutine benchmark row. Use `task_spawn`/`rt_pool_*` or future scheduler-aware green threads for Go-like CPU-parallel comparisons.
+**Parallel (100 workers):** Go and C are the current native baselines; the OS-thread Simple row uses `thread_spawn_with_args` plus `std.concurrent.channel`. The implemented `std.concurrent.green_thread` API is cooperative and single-OS-thread, so it is not a drop-in Go-goroutine benchmark row. The `std.concurrent.multicore_green` row uses `multicore_green_spawn` over `rt_pool_*` as the current Pure Simple M:N candidate until a scheduler-aware green runtime lands.
 
 ### What matters per use case
 

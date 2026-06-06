@@ -1,0 +1,40 @@
+# Multicore Green - Pure Simple facade for bounded CPU-parallel tasks.
+#
+# This is the public Simple-level candidate for Go-like M:N CPU work. It uses
+# the runtime-owned worker pool when rt_pool_* is linked, while keeping the
+# existing cooperative green-thread queue separate.
+
+extern fn rt_pool_submit(closure: Any) -> i64
+extern fn rt_pool_join(handle: i64) -> i64
+extern fn rt_pool_is_done(handle: i64) -> i64
+
+class MulticoreGreenHandle:
+    """Join handle for a multicore-green value task."""
+    native_handle: i64
+    inline_done: bool
+    inline_result: i64
+
+    fn is_done() -> bool:
+        if self.native_handle > 0:
+            return rt_pool_is_done(self.native_handle) == 1
+        self.inline_done
+
+    fn join() -> i64:
+        if self.native_handle > 0:
+            return rt_pool_join(self.native_handle)
+        self.inline_result
+
+fn multicore_green_spawn(task: fn() -> i64) -> MulticoreGreenHandle:
+    """Spawn a value task on the bounded runtime worker pool when available."""
+    val native_handle = rt_pool_submit(task)
+    if native_handle > 0:
+        return MulticoreGreenHandle(
+            native_handle: native_handle,
+            inline_done: false,
+            inline_result: 0
+        )
+    MulticoreGreenHandle(
+        native_handle: 0,
+        inline_done: true,
+        inline_result: task()
+    )
