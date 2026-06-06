@@ -26,4 +26,6 @@
 - `test/01_unit/os/kernel/scheduler/green_task_spec.spl` verifies the SimpleOS logical green-task lifecycle for future green-task carrier workers.
 - `test/01_unit/os/kernel/scheduler/green_carrier_spec.spl` verifies the SimpleOS bridge contract between logical green tasks, bounded carrier queues, SimpleOS reschedule IPI state, per-CPU green dispatch selection, typed scheduler run intent, and execution-state application.
 - `test/01_unit/os/kernel/scheduler/scheduler_spec.spl` verifies that `Scheduler.apply_green_scheduler_intent` persists the green lane separately from normal OS task scheduling and grows green execution slots with topology changes.
+- `test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl` verifies the SimpleOS feature-lane cooperative green contract on the current carrier.
+- `test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl` verifies hosted SimpleOS multicore-green contracts across SMP IPI, carrier dispatch, scheduler-owned green execution state, and topology growth.
 - `test/01_unit/os/kernel/smp/smp_spec.spl` verifies the named SMP accessors, AP registration, online CPU tracking, IPI send/take behavior, and preemption counter behavior used by the green-carrier apply path.

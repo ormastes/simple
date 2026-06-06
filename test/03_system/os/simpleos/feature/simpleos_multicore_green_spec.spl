@@ -1,0 +1,89 @@
+"""
+# SimpleOS Multicore Green System Contract
+
+**Feature IDs:** #green-simpleos-multicore
+**Category:** SimpleOS / Concurrency
+**Status:** In Progress
+
+## Overview
+
+This system spec exercises the hosted SimpleOS contract for multicore green
+work: logical green tasks enqueue onto carrier CPUs, remote enqueue uses the SMP
+reschedule IPI surface, and the real `Scheduler` records green execution state
+separately from normal OS task ids.
+
+The spec is intentionally not a live QEMU proof. The QEMU SMP evidence remains
+tracked in the multicore-green system plan until guest-visible AP execution is
+available to assert.
+
+## Requirements
+
+**Requirements:** N/A
+
+## Plan
+
+**Plan:** doc/03_plan/sys_test/multicore_green.md
+
+## Design
+
+**Design:** N/A
+
+## Research
+
+**Research:** doc/01_research/local/multicore_green.md
+"""
+
+use std.spec.{describe, it, expect}
+use os.kernel.smp.smp.{smp_init, smp_bringup_ap, smp_take_ipi, smp_ipi_resched}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.scheduler.green_carrier.{
+    green_carrier_run_queues_new,
+    green_carrier_spawn_task,
+    green_carrier_apply_enqueue,
+    green_carrier_dispatch_next,
+    green_carrier_scheduler_intent
+}
+use os.kernel.types.task_types.{default_scheduler_topology}
+
+describe "SimpleOS multicore green contract":
+    it "routes remote green enqueue through the SimpleOS reschedule IPI surface":
+        smp_init()
+        smp_bringup_ap(1u32)
+        val queues = green_carrier_run_queues_new(4, 8)
+        val decision = green_carrier_spawn_task(101, 4, 0, 3, 1, 2, 4, 0)
+        val result = green_carrier_apply_enqueue(queues, decision)
+
+        expect(result.enqueued).to_equal(true)
+        expect(result.ipi_sent).to_equal(true)
+        expect(result.ipi_reason_mask).to_equal(smp_ipi_resched())
+        expect(smp_take_ipi(1u32)).to_equal(smp_ipi_resched())
+
+    it "dispatches green work into scheduler-owned multicore execution state":
+        smp_init()
+        smp_bringup_ap(1u32)
+        var scheduler = Scheduler.new_with_cpu_count(4u32)
+        val queues = green_carrier_run_queues_new(4, 8)
+        val decision = green_carrier_spawn_task(202, 4, 0, 3, 1, 2, 4, 0)
+        val queued = green_carrier_apply_enqueue(queues, decision)
+        val dispatched = green_carrier_dispatch_next(queued.queues, 1)
+        val applied = scheduler.apply_green_scheduler_intent(green_carrier_scheduler_intent(dispatched))
+
+        expect(applied.applied).to_equal(true)
+        expect(scheduler.green_current_task_on_cpu(1u32)).to_equal(202)
+        expect(scheduler.green_context_switches_on_cpu(1u32)).to_equal(1)
+        expect(scheduler.green_rejected_intents()).to_equal(0)
+        expect(scheduler.get_current_on_cpu(1u32).id).to_equal(0)
+
+    it "extends green scheduler slots when SimpleOS topology grows":
+        smp_init()
+        var scheduler = Scheduler.new_bootstrap()
+        scheduler.set_topology(default_scheduler_topology(4u32))
+        val queues = green_carrier_run_queues_new(4, 8)
+        val decision = green_carrier_spawn_task(303, 4, 8, 3, 1, 2, 4, 0)
+        val queued = green_carrier_apply_enqueue(queues, decision)
+        val dispatched = green_carrier_dispatch_next(queued.queues, 3)
+        val applied = scheduler.apply_green_scheduler_intent(green_carrier_scheduler_intent(dispatched))
+
+        expect(applied.applied).to_equal(true)
+        expect(scheduler.green_current_task_on_cpu(3u32)).to_equal(303)
+        expect(scheduler.green_context_switches_on_cpu(3u32)).to_equal(1)

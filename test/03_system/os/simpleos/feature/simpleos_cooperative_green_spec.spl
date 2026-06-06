@@ -1,0 +1,77 @@
+"""
+# SimpleOS Cooperative Green System Contract
+
+**Feature IDs:** #green-simpleos-cooperative
+**Category:** SimpleOS / Concurrency
+**Status:** Implemented
+
+## Overview
+
+This system spec proves that the implemented cooperative-green API remains
+usable in the SimpleOS feature lane while preserving its explicit semantics: it
+queues logical work on the current carrier and does not claim CPU-parallel M:N
+execution.
+
+## Requirements
+
+**Requirements:** N/A
+
+## Plan
+
+**Plan:** doc/03_plan/sys_test/multicore_green.md
+
+## Design
+
+**Design:** N/A
+
+## Research
+
+**Research:** doc/01_research/local/multicore_green.md
+"""
+
+use std.spec.{describe, it, expect}
+use std.concurrent.cooperative_green.{
+    cooperative_green_spawn,
+    cooperative_green_spawn_value,
+    cooperative_green_ready_count,
+    cooperative_green_run_one,
+    cooperative_green_run_all
+}
+
+fn simpleos_cooperative_green_value_3() -> i64:
+    3
+
+fn simpleos_cooperative_green_value_8() -> i64:
+    8
+
+describe "SimpleOS cooperative green contract":
+    it "queues logical green work without marking it done before the carrier runs":
+        val before = cooperative_green_ready_count()
+        val handle = cooperative_green_spawn(simpleos_cooperative_green_value_3)
+
+        expect(handle.is_done()).to_equal(false)
+        expect(cooperative_green_ready_count()).to_equal(before + 1)
+        expect(cooperative_green_run_one()).to_equal(true)
+        expect(handle.is_done()).to_equal(true)
+        expect(handle.join()).to_equal(3)
+
+    it "runs all queued cooperative work on the current carrier":
+        val before = cooperative_green_ready_count()
+        val h1 = cooperative_green_spawn(simpleos_cooperative_green_value_3)
+        val h2 = cooperative_green_spawn(simpleos_cooperative_green_value_8)
+
+        expect(cooperative_green_ready_count()).to_equal(before + 2)
+        val ran = cooperative_green_run_all()
+
+        expect(ran >= 2).to_equal(true)
+        expect(h1.join()).to_equal(3)
+        expect(h2.join()).to_equal(8)
+
+    it "supports direct value scheduling used by profile fanout rows":
+        val before = cooperative_green_ready_count()
+        val handle = cooperative_green_spawn_value(21)
+
+        expect(handle.is_done()).to_equal(false)
+        expect(cooperative_green_ready_count()).to_equal(before + 1)
+        expect(cooperative_green_run_one()).to_equal(true)
+        expect(handle.join()).to_equal(21)
