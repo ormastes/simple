@@ -52,19 +52,31 @@ fn _int_env(key: text, fallback: i32) -> i32:
         return fallback
     v.to_i32()
 
-fn upscale(src: [u32], sw: i32, sh: i32, scale: i32) -> [i64]:
-    """Nearest-neighbour upscale src (sw x sh, 0xAARRGGBB) to a presentable
-    [i64] buffer (0x00RRGGBB; softbuffer ignores the top byte)."""
-    val dw = sw * scale
-    val dh = sh * scale
+fn _viewport_from_args(fw: i32, fh: i32) -> (i32, i32):
+    """A 'WxH' argv token (e.g. 1024x768) sets the CSS viewport the page lays out
+    in — survives the macOS .app launcher, which drops arbitrary env vars."""
+    for arg in get_cli_args():
+        if arg.contains("x"):
+            val parts = arg.split("x")
+            if parts.len() == 2:
+                val w = parts[0].to_i32()
+                val h = parts[1].to_i32()
+                if w > 0 and h > 0:
+                    return (w, h)
+    (fw, fh)
+
+fn resample(src: [u32], sw: i32, sh: i32, dw: i32, dh: i32) -> [i64]:
+    """Nearest-neighbour resample src (sw x sh, 0xAARRGGBB) to dw x dh — used to
+    DOWNSCALE a large viewport render to a sensible window (0x00RRGGBB; softbuffer
+    ignores the top byte)."""
     var out: [i64] = [0; dw * dh]
     var dy = 0
     while dy < dh:
-        val syv = dy / scale
+        val sy = dy * sh / dh
         var dx = 0
         while dx < dw:
-            val sxv = dx / scale
-            out[dy * dw + dx] = src[syv * sw + sxv].to_i64() & 0xFFFFFF
+            val sx = dx * sw / dw
+            out[dy * dw + dx] = src[sy * sw + sx].to_i64() & 0xFFFFFF
             dx = dx + 1
         dy = dy + 1
     out
@@ -73,15 +85,19 @@ fn main() -> i64:
     val backend_name = _backend_from_args(env_get_or("WEB_RENDER_BACKEND", "pure_simple"))
     val default_html = _repo_root() + "/test/09_baselines/web_html_input/vanillastyle_demo.html"
     val html_path = _html_path_from_args(env_get_or("WEB_RENDER_HTML", default_html))
-    val render_w = _int_env("PAGE_W", 384)
-    val render_h = _int_env("PAGE_H", 288)
-    val scale = _int_env("PAGE_SCALE", 2)
-    val window_w = render_w * scale
-    val window_h = render_h * scale
+
+    # CSS viewport the page lays out in (desktop width => proportional fonts).
+    val (render_w, render_h) = _viewport_from_args(_int_env("PAGE_W", 1024), _int_env("PAGE_H", 768))
+    # Window the result is DOWNSCALED into (so a desktop page looks normal, not
+    # zoomed). Never upscale past the viewport.
+    var disp_w = _int_env("DISP_W", 960)
+    if disp_w > render_w:
+        disp_w = render_w
+    val disp_h = render_h * disp_w / render_w
 
     val renderer = WebRenderBackend.create(backend_name, render_w, render_h)
     print "Rendering {html_path}"
-    print "  via web-render backend '{renderer.name()}' at {render_w}x{render_h} (window {window_w}x{window_h})..."
+    print "  via web-render backend '{renderer.name()}' at viewport {render_w}x{render_h} -> window {disp_w}x{disp_h}..."
 
     val pixels = renderer.render_html_file_to_pixels(html_path)
     if pixels.len() < render_w * render_h:
@@ -89,7 +105,9 @@ fn main() -> i64:
         return 1
     print "Backend '{renderer.name()}' rendered {pixels.len()} px."
 
-    val packed = upscale(pixels, render_w, render_h, scale)
+    val packed = resample(pixels, render_w, render_h, disp_w, disp_h)
+    val window_w = disp_w
+    val window_h = disp_h
 
     if env_get_or("SIMPLE_GUI", "") != "1":
         print "No GUI requested (set SIMPLE_GUI=1 to open a window); headless render only."
