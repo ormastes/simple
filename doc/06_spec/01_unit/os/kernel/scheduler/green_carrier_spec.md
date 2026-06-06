@@ -28,7 +28,7 @@ green_carrier_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 15 | 15 | 0 | 0 |
+| 17 | 17 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -73,6 +73,9 @@ unpark decision, then records whether the chosen CPU is remote to the current
 carrier CPU. Applying a decision updates bounded carrier queues and uses the
 existing SimpleOS SMP reschedule IPI surface for remote online CPUs. Dispatch
 selects queued work for a carrier CPU without stealing tasks from other CPUs.
+The scheduler intent step converts successful dispatch into a typed `TaskId`
+and a context-switch request, while failed dispatches remain no-op scheduler
+intents.
 
 ## Requirements
 
@@ -484,12 +487,69 @@ expect(dispatched.reason).to_equal("invalid_cpu")
 
 </details>
 
+### scheduler intent
+
+#### converts successful dispatch into a typed scheduler run intent
+
+1. smp init
+   - Expected: intent.should_run is true
+   - Expected: intent.should_context_switch is true
+   - Expected: intent.task.id equals `35`
+   - Expected: intent.cpu equals `1u32`
+   - Expected: intent.reason equals `green_task_ready`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+smp_init()
+val queues = green_carrier_run_queues_new(4, 8)
+val decision = green_carrier_spawn_task(35, 4, 0, 3, 1, 2, 4, 1)
+val queued = green_carrier_apply_enqueue(queues, decision)
+val dispatched = green_carrier_dispatch_next(queued.queues, 1)
+val intent = green_carrier_scheduler_intent(dispatched)
+
+expect(intent.should_run).to_equal(true)
+expect(intent.should_context_switch).to_equal(true)
+expect(intent.task.id).to_equal(35)
+expect(intent.cpu).to_equal(1u32)
+expect(intent.reason).to_equal("green_task_ready")
+```
+
+</details>
+
+#### keeps empty dispatch as a no-op scheduler intent
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val queues = green_carrier_run_queues_new(4, 8)
+val dispatched = green_carrier_dispatch_next(queues, 1)
+val intent = green_carrier_scheduler_intent(dispatched)
+
+expect(intent.should_run).to_equal(false)
+expect(intent.should_context_switch).to_equal(false)
+expect(intent.task.id).to_equal(0)
+expect(intent.cpu).to_equal(1u32)
+expect(intent.reason).to_equal("queue_empty")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 15 |
-| Active scenarios | 15 |
+| Total scenarios | 17 |
+| Active scenarios | 17 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

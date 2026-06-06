@@ -26,6 +26,9 @@ unpark decision, then records whether the chosen CPU is remote to the current
 carrier CPU. Applying a decision updates bounded carrier queues and uses the
 existing SimpleOS SMP reschedule IPI surface for remote online CPUs. Dispatch
 selects queued work for a carrier CPU without stealing tasks from other CPUs.
+The scheduler intent step converts successful dispatch into a typed `TaskId`
+and a context-switch request, while failed dispatches remain no-op scheduler
+intents.
 
 ## Requirements
 
@@ -58,7 +61,8 @@ use os.kernel.scheduler.green_carrier.{
     green_carrier_run_queues_new,
     green_carrier_queue_depth,
     green_carrier_apply_enqueue,
-    green_carrier_dispatch_next
+    green_carrier_dispatch_next,
+    green_carrier_scheduler_intent
 }
 use os.kernel.smp.smp.{smp_init, smp_bringup_ap, smp_take_ipi}
 
@@ -230,3 +234,29 @@ describe "SimpleOS green carrier bridge contract":
             expect(dispatched.dispatched).to_equal(false)
             expect(dispatched.task_id).to_equal(-1)
             expect(dispatched.reason).to_equal("invalid_cpu")
+
+    describe "scheduler intent":
+        it "converts successful dispatch into a typed scheduler run intent":
+            smp_init()
+            val queues = green_carrier_run_queues_new(4, 8)
+            val decision = green_carrier_spawn_task(35, 4, 0, 3, 1, 2, 4, 1)
+            val queued = green_carrier_apply_enqueue(queues, decision)
+            val dispatched = green_carrier_dispatch_next(queued.queues, 1)
+            val intent = green_carrier_scheduler_intent(dispatched)
+
+            expect(intent.should_run).to_equal(true)
+            expect(intent.should_context_switch).to_equal(true)
+            expect(intent.task.id).to_equal(35)
+            expect(intent.cpu).to_equal(1u32)
+            expect(intent.reason).to_equal("green_task_ready")
+
+        it "keeps empty dispatch as a no-op scheduler intent":
+            val queues = green_carrier_run_queues_new(4, 8)
+            val dispatched = green_carrier_dispatch_next(queues, 1)
+            val intent = green_carrier_scheduler_intent(dispatched)
+
+            expect(intent.should_run).to_equal(false)
+            expect(intent.should_context_switch).to_equal(false)
+            expect(intent.task.id).to_equal(0)
+            expect(intent.cpu).to_equal(1u32)
+            expect(intent.reason).to_equal("queue_empty")

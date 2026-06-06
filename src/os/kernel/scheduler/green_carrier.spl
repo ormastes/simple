@@ -13,6 +13,7 @@ use os.kernel.scheduler.green_task.{
     green_task_is_done,
     GreenTaskRecord
 }
+use os.kernel.types.task_types.{TaskId}
 use os.kernel.smp.smp.{smp_send_ipi}
 
 pub val GREEN_CARRIER_RESCHEDULE_IPI: u32 = 0x1u32
@@ -49,6 +50,14 @@ pub struct GreenCarrierDispatchResult:
     task_id: i64
     cpu: i64
     dispatched: bool
+    reason: text
+
+pub struct GreenCarrierSchedulerIntent:
+    """Typed scheduler-facing intent produced from green carrier dispatch."""
+    task: TaskId
+    cpu: u32
+    should_run: bool
+    should_context_switch: bool
     reason: text
 
 pub fn green_carrier_should_send_ipi(current_cpu: i64, target_cpu: i64, should_enqueue: bool) -> bool:
@@ -212,6 +221,33 @@ pub fn green_carrier_dispatch_next(queues: GreenCarrierRunQueueState, cpu: i64) 
                 dispatched: true,
                 reason: "dispatched"
             )
+
+pub fn green_carrier_scheduler_intent(dispatch: GreenCarrierDispatchResult) -> GreenCarrierSchedulerIntent:
+    """Convert green carrier dispatch into a typed scheduler execution intent."""
+    if not dispatch.dispatched:
+        GreenCarrierSchedulerIntent(
+            task: TaskId(id: 0),
+            cpu: if dispatch.cpu < 0: 0u32 else: dispatch.cpu as u32,
+            should_run: false,
+            should_context_switch: false,
+            reason: dispatch.reason
+        )
+    elif dispatch.task_id < 0 or dispatch.cpu < 0:
+        GreenCarrierSchedulerIntent(
+            task: TaskId(id: 0),
+            cpu: 0u32,
+            should_run: false,
+            should_context_switch: false,
+            reason: "invalid_dispatch"
+        )
+    else:
+        GreenCarrierSchedulerIntent(
+            task: TaskId(id: dispatch.task_id as u64),
+            cpu: dispatch.cpu as u32,
+            should_run: true,
+            should_context_switch: true,
+            reason: "green_task_ready"
+        )
 
 pub fn green_carrier_apply_enqueue(queues: GreenCarrierRunQueueState, decision: GreenCarrierEnqueueDecision) -> GreenCarrierApplyResult:
     """Apply a carrier decision to green run queues and SMP reschedule IPIs."""

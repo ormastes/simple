@@ -8,7 +8,7 @@
 - `test/01_unit/lib/nogc_async_mut/cooperative_green_spec.spl` checks the semantic cooperative-green facade over the existing single-carrier queue.
 - `test/01_unit/os/kernel/scheduler/green_worker_spec.spl` checks the SimpleOS scheduler-facing green-worker contract: CPU affinity, spawn CPU choice, wake-affine placement, stealing threshold, and rebalance decisions.
 - `test/01_unit/os/kernel/scheduler/green_task_spec.spl` checks the SimpleOS logical green-task lifecycle: spawn records, park, unpark, no-op unpark misuse, completion, and carrier CPU preservation.
-- `test/01_unit/os/kernel/scheduler/green_carrier_spec.spl` checks the SimpleOS carrier bridge contract: runnable enqueue, parked/done suppression, wake-affine re-enqueue, bounded green carrier queue mutation, remote SimpleOS reschedule IPI delivery through `smp_send_ipi`, and per-CPU green dispatch selection.
+- `test/01_unit/os/kernel/scheduler/green_carrier_spec.spl` checks the SimpleOS carrier bridge contract: runnable enqueue, parked/done suppression, wake-affine re-enqueue, bounded green carrier queue mutation, remote SimpleOS reschedule IPI delivery through `smp_send_ipi`, per-CPU green dispatch selection, and typed scheduler run intent.
 
 ## Required Future SSPEC
 
