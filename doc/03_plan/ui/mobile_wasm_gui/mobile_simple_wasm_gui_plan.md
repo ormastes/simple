@@ -45,6 +45,24 @@ To unblock, the Simple **wasm backend** must: (a) export linear `memory`; and
 for the `text` (or export `rt_string_data`/`rt_string_len` accessors). This is
 compiler/ABI work in `src/compiler/70.backend` (wasm) + runtime string repr.
 
+### Update (2026-06-06): WASM backend is skeletal — deeper than an ABI tweak
+
+Confirmed via `wasm-objdump`: `simple_app_render` is compiled to `() -> nil`
+with body **size=2** (an empty stub). `wasm_codegen_adapter.spl` self-describes
+"body stub with unreachable" and "default stub: treat unknown types as i32";
+the string-building body is never emitted and `text` returns are dropped. So the
+wasm backend has **no string/heap codegen** — making the WASM GUI render for real
+is a major compiler subsystem (real wasm codegen for strings/heap/memory), not a
+small fix. **Decision (user: "WASM-first, IPC fallback"): fall back to the IPC
+path now**; WASM GUI codegen tracked as a separate large compiler effort.
+
+## IPC fallback (active path): Simple generates UI + handles events, live
+
+Simple process **stays alive**, generates HTML/CSS via the UI builder, and
+handles events over the existing subprocess stdin/stdout `SubprocessMessage` /
+`WebRenderInputEnvelope` channel — genuine Simple-generated UI + Simple-handled
+events on Tauri2, no hard-coded HTML, no wasm dependency.
+
 ## Next milestones
 
 1. Fix wasm string ABI (export memory + readable text return) — unblocks live render.
