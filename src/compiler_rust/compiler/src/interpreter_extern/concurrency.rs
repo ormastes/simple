@@ -209,11 +209,11 @@ pub fn rt_thread_spawn_isolated_with_context(
     Ok(Value::Int(handle_id))
 }
 
-/// Spawn isolated thread with 2 arguments and interpreter context
+/// Spawn isolated thread with explicit arguments and interpreter context
 ///
 /// Executes the closure synchronously with full interpreter context.
 /// The closure receives two data arguments and can perform any operation.
-pub fn rt_thread_spawn_isolated2_with_context(
+pub fn rt_thread_spawn_isolated_with_args_context(
     args: &[Value],
     _env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
@@ -223,7 +223,7 @@ pub fn rt_thread_spawn_isolated2_with_context(
 ) -> Result<Value, CompileError> {
     if args.len() != 3 {
         return Err(CompileError::Runtime(
-            "rt_thread_spawn_isolated2 expects 3 arguments (closure, data1, data2)".to_string(),
+            "rt_thread_spawn_isolated_with_args expects 3 arguments (closure, data1, data2)".to_string(),
         ));
     }
 
@@ -232,7 +232,7 @@ pub fn rt_thread_spawn_isolated2_with_context(
         Value::Lambda { params, body, env } => (params.clone(), body.clone(), Env::clone(env)),
         _ => {
             return Err(CompileError::Runtime(
-                "rt_thread_spawn_isolated2 expects first argument to be a closure".to_string(),
+                "rt_thread_spawn_isolated_with_args expects first argument to be a closure".to_string(),
             ))
         }
     };

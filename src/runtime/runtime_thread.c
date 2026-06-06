@@ -287,7 +287,7 @@ int64_t rt_thread_spawn_isolated(int64_t arg0, int64_t arg1) {
     return alloc_handle(HANDLE_THREAD, td);
 }
 
-int64_t rt_thread_spawn_isolated2(int64_t fn_ptr, int64_t data1, int64_t data2) {
+int64_t rt_thread_spawn_isolated_with_args(int64_t fn_ptr, int64_t data1, int64_t data2) {
     rt_closure2_fn_t entry = (rt_closure2_fn_t)(intptr_t)(fn_ptr >> 3);
     RtThreadData* td = (RtThreadData*)SPL_MALLOC(sizeof(RtThreadData), "rt_thread2");
     if (!td) return 0;
@@ -313,6 +313,10 @@ int64_t rt_thread_spawn_isolated2(int64_t fn_ptr, int64_t data1, int64_t data2) 
     }
 #endif
     return alloc_handle(HANDLE_THREAD, td);
+}
+
+int64_t rt_thread_spawn_isolated2(int64_t fn_ptr, int64_t data1, int64_t data2) {
+    return rt_thread_spawn_isolated_with_args(fn_ptr, data1, data2);
 }
 
 int64_t rt_thread_join(int64_t handle) {

@@ -610,9 +610,13 @@ pub extern "C" fn rt_thread_spawn_isolated(closure_ptr: u64, data: RuntimeValue)
     Box::into_raw(thread_handle) as u64
 }
 
-/// Spawn an isolated thread with closure and two data arguments (e.g., data + channel).
+/// Spawn an isolated thread with closure and explicit worker arguments.
 #[no_mangle]
-pub extern "C" fn rt_thread_spawn_isolated2(closure_ptr: u64, data1: RuntimeValue, data2: RuntimeValue) -> u64 {
+pub extern "C" fn rt_thread_spawn_isolated_with_args(
+    closure_ptr: u64,
+    data1: RuntimeValue,
+    data2: RuntimeValue,
+) -> u64 {
     let thread_id = NEXT_THREAD_ID.fetch_add(1, Ordering::SeqCst);
 
     let entry = RuntimeValue::from_raw(closure_ptr).as_int() as u64;
@@ -639,6 +643,15 @@ pub extern "C" fn rt_thread_spawn_isolated2(closure_ptr: u64, data1: RuntimeValu
     });
 
     Box::into_raw(thread_handle) as u64
+}
+
+#[no_mangle]
+pub extern "C" fn rt_thread_spawn_isolated2(
+    closure_ptr: u64,
+    data1: RuntimeValue,
+    data2: RuntimeValue,
+) -> u64 {
+    rt_thread_spawn_isolated_with_args(closure_ptr, data1, data2)
 }
 
 /// Join an isolated thread and get its result.

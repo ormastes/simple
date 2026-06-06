@@ -203,6 +203,7 @@ execution model:
 |-----|------|-------|
 | `thread_spawn` / `ThreadHandle` | `src/lib/nogc_async_mut/concurrent/thread.spl` and `thread_sffi.spl` | OS thread (`pthread_create` / `CreateThread`) |
 | `cooperative_green_spawn` / `cooperative_green_spawn_value` / `GreenThreadHandle` / `cooperative_green_run_one` / `cooperative_green_run_all` | `src/lib/nogc_async_mut/concurrent/cooperative_green.spl` over `green_thread.spl` | Cooperative green-thread queue on the current OS thread; no preemption or CPU parallelism |
+| `green_channel_new` / `green_channel_recv` / `green_channel_send` | `src/lib/nogc_async_mut/concurrent/green_channel.spl` | Pure Simple nonblocking green-channel contract; recv parks a logical green task, send unparks a waiter or reports bounded backpressure |
 | `multicore_green_spawn` / `MulticoreGreenHandle.used_runtime_pool()` / `MulticoreGreenHandle.ran_inline_fallback()` | `src/lib/nogc_async_mut/concurrent/multicore_green.spl` | Pure Simple bounded-worker facade over `rt_pool_*`; current M:N benchmark candidate, not final scheduler-aware green runtime |
 | `task_spawn` / `TaskHandle` | `src/lib/nogc_async_mut/thread_pool.spl` | Pool-backed native task path when `rt_pool_*` is available; interpreter fallback otherwise |
 | `channel_new` / `channel_from_id` | `src/lib/nogc_sync_mut/concurrent/channel.spl` re-exported through `std.concurrent.channel` | Runtime MPMC channel |

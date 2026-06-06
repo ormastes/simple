@@ -50,6 +50,7 @@ spl_thread_handle spl_thread_create(void* (*entry_point)(void*), void* arg);
 bool spl_thread_join(spl_thread_handle handle);
 
 int64_t rt_thread_spawn_isolated(int64_t fn_ptr, int64_t env_ptr);
+int64_t rt_thread_spawn_isolated_with_args(int64_t fn_ptr, int64_t data1, int64_t data2);
 int64_t rt_thread_spawn_isolated2(int64_t fn_ptr, int64_t data1, int64_t data2);
 int64_t rt_thread_join(int64_t handle);
 int64_t rt_thread_is_done(int64_t handle);

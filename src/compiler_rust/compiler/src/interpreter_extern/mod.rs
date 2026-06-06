@@ -1891,9 +1891,15 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         }) as ExternHandler,
     );
     m.insert(
+        "rt_thread_spawn_isolated_with_args",
+        (|evaluated, env, functions, classes, enums, impl_methods| {
+            concurrency::rt_thread_spawn_isolated_with_args_context(evaluated, env, functions, classes, enums, impl_methods)
+        }) as ExternHandler,
+    );
+    m.insert(
         "rt_thread_spawn_isolated2",
         (|evaluated, env, functions, classes, enums, impl_methods| {
-            concurrency::rt_thread_spawn_isolated2_with_context(evaluated, env, functions, classes, enums, impl_methods)
+            concurrency::rt_thread_spawn_isolated_with_args_context(evaluated, env, functions, classes, enums, impl_methods)
         }) as ExternHandler,
     );
     m.insert(

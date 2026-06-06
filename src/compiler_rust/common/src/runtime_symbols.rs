@@ -504,6 +504,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_future_new",
     "rt_future_await",
     "rt_thread_spawn_isolated",
+    "rt_thread_spawn_isolated_with_args",
     "rt_thread_spawn_isolated2",
     "rt_pool_submit",
     "rt_pool_join",
