@@ -1,0 +1,36 @@
+## Regression spec for pure-Simple bootstrap seed fallback policy.
+##
+## Bootstrap-native code must not generate Rust seed wrappers or ret-0
+## diagnostic stubs as successful compiler artifacts.
+
+use std.spec
+
+extern fn rt_file_read_text(path: text) -> text?
+extern fn rt_file_exists(path: text) -> bool
+
+fn forbidden_bootstrap_marker(src: text) -> text:
+    if src.contains("compiler_rust"):
+        return "compiler_rust"
+    if src.contains("execv"):
+        return "execv"
+    if src.contains("SIMPLE_BOOTSTRAP_SEED"):
+        return "SIMPLE_BOOTSTRAP_SEED"
+    if src.contains("ret i64 0"):
+        return "ret i64 0"
+    "ok"
+
+describe "bootstrap seed fallback policy":
+    it "keeps bootstrap_main free of seed-wrapper fallback generation":
+        val src = rt_file_read_text("src/app/cli/bootstrap_main.spl") ?? ""
+        val bin_catalog = rt_file_read_text("bin/FILE.md") ?? ""
+        expect(src).to_contain("bootstrap_main cannot emit a seed-wrapper fallback")
+        expect(forbidden_bootstrap_marker(src)).to_equal("ok")
+        expect(rt_file_exists("bin/simple.bootstrap_seed_wrapper.c")).to_equal(false)
+        expect(bin_catalog.contains("bootstrap_seed_wrapper")).to_equal(false)
+
+    it "rejects driver bootstrap seed and stub fallbacks":
+        val src = rt_file_read_text("src/compiler/80.driver/driver_bootstrap.spl") ?? ""
+        expect(src).to_contain("bootstrap seed-wrapper fallback was removed")
+        expect(src).to_contain("bootstrap driver stub LLVM was removed")
+        expect(src).to_contain("bootstrap direct stub IR was removed")
+        expect(forbidden_bootstrap_marker(src)).to_equal("ok")

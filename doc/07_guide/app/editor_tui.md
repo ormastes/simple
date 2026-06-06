@@ -144,8 +144,9 @@ line-numbered content + reverse-video status bar; line count computed by
   verified lanes described in
   `doc/08_tracking/bug/editor_render_runtime_blockers_2026-05-29.md`.
 - **Frame: renders** via the interpreter proof above and through full native
-  TUI loops in both `rust-hosted` and `core-c-bootstrap` lanes, timing out
-  normally as expected for an interactive loop.
+  TUI loops. Older evidence covered the removed `rust-hosted` lane; refresh
+  new native-loop evidence on `core-c-bootstrap` or ABI-complete
+  `simple-core` lanes only.
 - **Shared launch parsing/readiness surface: verified** —
   `src/lib/editor/core/launch.spl` is used by `src/app/editor/main.spl`,
   `src/app/editor/tui_main.spl`, `src/app/ide/main.spl`, and

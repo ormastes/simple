@@ -47,7 +47,7 @@ Target dependency shape for the next refactor phase:
 - the native-build archive root should consume only:
   - runtime/compiler contracts needed for compiled entry closures
   - a small hook/provider crate for file execution or test execution if those hooks remain required
-  - hosted-runtime stubs only when the selected entry/runtime bundle actually needs them
+  - Simple/C-lane runtime hooks only; hosted-runtime/native_all fallback is not a supported bundle selection
 
 This is the next architecture seam after the loader ABI split:
 

@@ -2,26 +2,17 @@
 
 use std::path::{Path, PathBuf};
 
-use super::tools::{strip_llvm_constructors, StripError};
 use super::tools::{
-    build_core_c_runtime_library, find_abi_complete_simple_core_runtime_library, find_native_all_library,
-    find_runtime_library, find_simple_core_runtime_library, runtime_archive_has_core_required_symbols,
+    build_core_c_runtime_library, find_abi_complete_simple_core_runtime_library, find_runtime_library,
+    find_simple_core_runtime_library, runtime_archive_has_core_required_symbols,
 };
 
-/// Log a [LIM-010] warning when LLVM constructor stripping fails and return the
-/// original (unstripped) archive path as a fallback.
-fn warn_strip_failure(e: StripError, fallback: &Path) -> PathBuf {
-    eprintln!("[LIM-010] WARNING: LLVM constructor stripping failed: {:?}", e);
-    eprintln!("[LIM-010] Using unstripped archive — Stage 3 may SEGFAULT");
-    fallback.to_path_buf()
-}
 use super::NativeProjectBuilder;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NativeRuntimeLane {
     SimpleCore,
     CoreCBootstrap,
-    RustHosted,
 }
 
 impl NativeRuntimeLane {
@@ -29,7 +20,6 @@ impl NativeRuntimeLane {
         match self {
             Self::SimpleCore => "simple-core",
             Self::CoreCBootstrap => "core-c-bootstrap",
-            Self::RustHosted => "rust-hosted",
         }
     }
 }
@@ -50,10 +40,6 @@ fn runtime_bundle_requests_hosted(value: &str) -> bool {
         value,
         "all" | "hosted" | "rust-hosted" | "hosted-runtime" | "rust-runtime"
     )
-}
-
-fn runtime_bundle_requests_hosted_runtime(value: &str) -> bool {
-    matches!(value, "hosted-runtime" | "rust-runtime")
 }
 
 fn is_compiler_like_entry(path: &Path) -> bool {
@@ -80,14 +66,13 @@ fn runtime_path_has_abi_complete_simple_core(runtime_path: Option<&Path>) -> boo
 
 impl NativeProjectBuilder {
     pub(crate) fn runtime_bundle_prefers_core_lane(&self) -> bool {
-        !matches!(self.resolve_runtime_lane(), NativeRuntimeLane::RustHosted)
+        true
     }
 
     pub(crate) fn resolve_runtime_lane(&self) -> NativeRuntimeLane {
         match self.config.runtime_bundle.as_str() {
             value if runtime_bundle_requests_simple_core(value) => return NativeRuntimeLane::SimpleCore,
             value if runtime_bundle_requests_core_c_bootstrap(value) => return NativeRuntimeLane::CoreCBootstrap,
-            value if runtime_bundle_requests_hosted(value) => return NativeRuntimeLane::RustHosted,
             _ => {}
         }
         if std::env::var("SIMPLE_NATIVE_RUNTIME_BUNDLE")
@@ -104,21 +89,6 @@ impl NativeProjectBuilder {
         {
             return NativeRuntimeLane::CoreCBootstrap;
         }
-        if std::env::var("SIMPLE_NATIVE_RUNTIME_BUNDLE")
-            .ok()
-            .as_deref()
-            .is_some_and(runtime_bundle_requests_hosted)
-        {
-            return NativeRuntimeLane::RustHosted;
-        }
-        if let Some(entry_file) = self.entry_file.as_ref() {
-            if is_compiler_like_entry(entry_file) {
-                return NativeRuntimeLane::RustHosted;
-            }
-        }
-        if self.source_dirs.iter().any(|p| is_compiler_like_entry(p)) {
-            return NativeRuntimeLane::RustHosted;
-        }
         if let Some(runtime_path) = self.config.runtime_path.as_deref() {
             return if runtime_path_has_abi_complete_simple_core(Some(runtime_path)) {
                 NativeRuntimeLane::SimpleCore
@@ -133,7 +103,7 @@ impl NativeProjectBuilder {
         }
     }
 
-    pub(crate) fn runtime_bundle_is_explicit_hosted(&self) -> bool {
+    pub(crate) fn runtime_bundle_requests_removed_hosted(&self) -> bool {
         if runtime_bundle_requests_hosted(&self.config.runtime_bundle) {
             return true;
         }
@@ -141,16 +111,6 @@ impl NativeProjectBuilder {
             .ok()
             .as_deref()
             .is_some_and(runtime_bundle_requests_hosted)
-    }
-
-    fn runtime_bundle_is_hosted_runtime_only(&self) -> bool {
-        if runtime_bundle_requests_hosted_runtime(&self.config.runtime_bundle) {
-            return true;
-        }
-        std::env::var("SIMPLE_NATIVE_RUNTIME_BUNDLE")
-            .ok()
-            .as_deref()
-            .is_some_and(runtime_bundle_requests_hosted_runtime)
     }
 
     pub(crate) fn runtime_bundle_is_explicit_simple_core(&self) -> bool {
@@ -167,9 +127,6 @@ impl NativeProjectBuilder {
         &self,
         selected_runtime: Option<&(PathBuf, bool)>,
     ) -> Result<(), String> {
-        if self.runtime_bundle_is_explicit_hosted() || !self.runtime_bundle_prefers_core_lane() {
-            return Ok(());
-        }
         if let Some((runtime_lib, true)) = selected_runtime {
             let entry = self
                 .entry_file
@@ -177,7 +134,7 @@ impl NativeProjectBuilder {
                 .map(|path| path.display().to_string())
                 .unwrap_or_else(|| "<none>".to_string());
             return Err(format!(
-                "native-build refused rust-hosted runtime for `{}` on the `{}` lane: selected `{}`. Provide a core-lane libsimple_runtime.a archive for that lane or pass `--runtime-bundle rust-hosted` (legacy: `hosted`/`all`) to opt into the hosted lane explicitly.",
+                "native-build refused hosted native_all runtime for `{}` on the `{}` lane: selected `{}`. Use `--runtime-bundle simple-core` with an ABI-complete pure Simple archive or `--runtime-bundle core-c-bootstrap` for the C bootstrap runtime.",
                 entry,
                 self.resolve_runtime_lane().display_name(),
                 runtime_lib.display()
@@ -187,14 +144,17 @@ impl NativeProjectBuilder {
     }
 
     pub(crate) fn selected_runtime_library(&self, temp_dir: &Path) -> Result<Option<(PathBuf, bool)>, String> {
+        if self.runtime_bundle_requests_removed_hosted() {
+            return Err(
+                "native-build removed Rust-hosted runtime bundles; use simple-core or core-c-bootstrap".to_string(),
+            );
+        }
         let lane = self.resolve_runtime_lane();
-        let hosted_runtime_only = self.runtime_bundle_is_hosted_runtime_only();
         let mut candidates: Vec<(PathBuf, bool)> = Vec::new();
 
         let mut push_runtime_candidates = |dir: &Path| {
             let runtime_deps = dir.join("deps").join("libsimple_runtime.a");
             let runtime = dir.join("libsimple_runtime.a");
-            let native_all = dir.join("libsimple_native_all.a");
             match lane {
                 NativeRuntimeLane::CoreCBootstrap => {
                     if runtime_deps.exists() {
@@ -202,11 +162,6 @@ impl NativeProjectBuilder {
                     }
                     if runtime.exists() {
                         candidates.push((runtime, false));
-                    }
-                    if native_all.exists() {
-                        let lib = strip_llvm_constructors(&native_all, temp_dir)
-                            .unwrap_or_else(|e| warn_strip_failure(e, &native_all));
-                        candidates.push((lib, true));
                     }
                 }
                 NativeRuntimeLane::SimpleCore => {
@@ -219,27 +174,6 @@ impl NativeProjectBuilder {
                         }
                         if lane_runtime.exists() {
                             candidates.push((lane_runtime, false));
-                        }
-                    }
-                }
-                NativeRuntimeLane::RustHosted => {
-                    if hosted_runtime_only {
-                        if runtime_deps.exists() {
-                            candidates.push((runtime_deps, false));
-                        }
-                        if runtime.exists() {
-                            candidates.push((runtime, false));
-                        }
-                    } else if native_all.exists() {
-                        let lib = strip_llvm_constructors(&native_all, temp_dir)
-                            .unwrap_or_else(|e| warn_strip_failure(e, &native_all));
-                        candidates.push((lib, true));
-                    } else {
-                        if runtime_deps.exists() {
-                            candidates.push((runtime_deps, false));
-                        }
-                        if runtime.exists() {
-                            candidates.push((runtime, false));
                         }
                     }
                 }
@@ -263,26 +197,6 @@ impl NativeProjectBuilder {
                         if !candidates.iter().any(|(p, _)| p == &runtime) {
                             candidates.push((runtime, false));
                         }
-                    }
-                    if let Some(native_all) = find_native_all_library() {
-                        let lib = strip_llvm_constructors(&native_all, temp_dir)
-                            .unwrap_or_else(|e| warn_strip_failure(e, &native_all));
-                        if !candidates.iter().any(|(p, _)| p == &lib) {
-                            candidates.push((lib, true));
-                        }
-                    }
-                }
-                NativeRuntimeLane::RustHosted => {
-                    if hosted_runtime_only {
-                        if let Some(runtime) = find_runtime_library() {
-                            candidates.push((runtime, false));
-                        }
-                    } else if let Some(native_all) = find_native_all_library() {
-                        let lib = strip_llvm_constructors(&native_all, temp_dir)
-                            .unwrap_or_else(|e| warn_strip_failure(e, &native_all));
-                        candidates.push((lib, true));
-                    } else if let Some(runtime) = find_runtime_library() {
-                        candidates.push((runtime, false));
                     }
                 }
             }

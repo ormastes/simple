@@ -18,7 +18,7 @@
 //!   --no-mangle         Disable name mangling (enabled by default for symbol collision avoidance)
 //!   --backend <name>    Compilation backend (cranelift, llvm)
 //!   --cpu <name>        CPU profile: default, native, x86-64-v1..v4
-//!   --runtime-bundle <mode> Runtime lane to link (auto, simple-core, core-c-bootstrap, rust-hosted, hosted-runtime)
+//!   --runtime-bundle <mode> Runtime lane to link (auto, simple-core, core-c-bootstrap)
 //!   --emit-archive      Emit a static archive from Simple objects instead of linking an executable
 //!   --entry-closure     Compile only modules reachable from --entry
 //!   --help              Show help
@@ -42,11 +42,13 @@ fn is_valid_runtime_bundle(value: &str) -> bool {
             | "core"
             | "core-c"
             | "core_c"
-            | "hosted"
-            | "rust-hosted"
-            | "hosted-runtime"
-            | "rust-runtime"
-            | "all"
+    )
+}
+
+fn is_removed_runtime_bundle(value: &str) -> bool {
+    matches!(
+        value,
+        "hosted" | "rust-hosted" | "rust_hosted" | "hosted-runtime" | "rust-runtime" | "all"
     )
 }
 
@@ -246,9 +248,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
                     runtime_bundle = args[i + 1].clone();
                     i += 2;
                 } else {
-                    eprintln!(
-                        "error: --runtime-bundle requires a value (auto, simple-core, core-c-bootstrap, rust-hosted)"
-                    );
+                    eprintln!("error: --runtime-bundle requires a value (auto, simple-core, core-c-bootstrap)");
                     return 1;
                 }
             }
@@ -330,8 +330,15 @@ pub fn handle_native_build(args: &[String]) -> i32 {
     }
 
     if !is_valid_runtime_bundle(&runtime_bundle) {
+        if is_removed_runtime_bundle(&runtime_bundle) {
+            eprintln!(
+                "error: runtime bundle '{}' was removed; use simple-core or core-c-bootstrap",
+                runtime_bundle
+            );
+            return 1;
+        }
         eprintln!(
-            "error: invalid --runtime-bundle value '{}'. Expected one of: auto, simple-core, core-c-bootstrap, runtime, hosted, rust-hosted, hosted-runtime, all",
+            "error: invalid --runtime-bundle value '{}'. Expected one of: auto, simple-core, core-c-bootstrap, runtime",
             runtime_bundle
         );
         return 1;
@@ -409,12 +416,6 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         // Also set env vars in-process as fallback
         unsafe {
             std::env::set_var("SIMPLE_RUNTIME_PATH", rp);
-        }
-        let native_all = rp.join("libsimple_native_all.a");
-        if native_all.exists() {
-            unsafe {
-                std::env::set_var("SIMPLE_NATIVE_ALL_PATH", &native_all);
-            }
         }
     }
 
@@ -587,7 +588,7 @@ fn print_help() {
     println!("  --backend <name>    Codegen backend: llvm (default when available) or cranelift");
     println!("  --opt-level=<level> Optimization level: none, basic, standard, aggressive");
     println!("  --list-optimizations Print implemented optimization groups and levels");
-    println!("  --runtime-bundle <mode> Runtime lane to link (auto, simple-core, core-c-bootstrap, rust-hosted, hosted-runtime)");
+    println!("  --runtime-bundle <mode> Runtime lane to link (auto, simple-core, core-c-bootstrap)");
     println!("  --emit-archive     Emit a static archive from Simple objects instead of linking an executable");
     println!("  --entry-closure     Compile only modules reachable from --entry");
     println!("  --help, -h          Show this help");

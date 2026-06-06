@@ -1,6 +1,4 @@
 extern fn rt_cli_get_args() -> [text]
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 # Keep in sync with ./VERSION file
 fn bootstrap_version() -> text:
@@ -23,21 +21,11 @@ fn bootstrap_output_from_args(args: [text], i: i64) -> text:
     else:
         bootstrap_output_from_args(args, i + 1)
 
-fn bootstrap_emit_seed_wrapper(output: text) -> i64:
-    val c_path = output + ".bootstrap_seed_wrapper.c"
-    val c_src = "#include <errno.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <unistd.h>\n#if defined(__APPLE__) || defined(__MACH__)\n#define SIMPLE_BOOTSTRAP_PAD_SECTION __attribute__((section(\"__DATA,__data\")))\n#else\n#define SIMPLE_BOOTSTRAP_PAD_SECTION __attribute__((section(\".data\")))\n#endif\nstatic volatile unsigned char simple_bootstrap_pad[1572864] SIMPLE_BOOTSTRAP_PAD_SECTION;\nstatic int try_seed(const char *seed, int argc, char **argv) {\n  if (!seed || seed[0] == '\\0') return 127;\n  if (argc > 0) argv[0] = (char *)seed;\n  execv(seed, argv);\n  return errno;\n}\nint main(int argc, char **argv) {\n  const char *env_seed = getenv(\"SIMPLE_BOOTSTRAP_SEED\");\n  if (simple_bootstrap_pad[0] == 255) fprintf(stderr, \"pad\\n\");\n  int err = try_seed(env_seed, argc, argv);\n  if (!env_seed || env_seed[0] == '\\0') {\n    err = try_seed(\"bin/simple\", argc, argv);\n    err = try_seed(\"bin/release/linux-x86_64/simple\", argc, argv);\n    err = try_seed(\"bin/release/macos-arm64/simple\", argc, argv);\n    err = try_seed(\"bin/release/macos-x86_64/simple\", argc, argv);\n  }\n  errno = err;\n  perror(env_seed && env_seed[0] ? env_seed : \"simple bootstrap seed\");\n  return 127;\n}\n"
-    if not rt_file_write_text(c_path, c_src):
-        eprint("error: could not write bootstrap wrapper source")
-        return 1
-    val (_out, err, code) = rt_process_run("cc", [c_path, "-o", output])
-    if code != 0:
-        eprint("error: bootstrap wrapper compile failed: {err}")
-        return 1
-    0
-
 fn run_native_build_bootstrap(args: [text]) -> i64:
     val output = bootstrap_output_from_args(args, 0)
-    bootstrap_emit_seed_wrapper(output)
+    eprint("error: bootstrap_main cannot emit a seed-wrapper fallback for {output}\n")
+    eprint("error: rebuild with the full Simple driver so native-build uses real Simple lowering/codegen\n")
+    1
 
 fn get_cli_args() -> [text]:
     var raw_args = rt_cli_get_args()
@@ -66,7 +54,7 @@ fn main() -> i64:
         return 0
     if first == "--help":
         print "Simple Bootstrap Compiler v{bootstrap_version()}"
-        print "Built from Simple source via the staged Rust-seed bootstrap"
+        print "Built from Simple source via the staged bootstrap"
         print ""
         print "Compile-related flags include:"
         print "  --opt-level=<none|basic|standard|aggressive>"

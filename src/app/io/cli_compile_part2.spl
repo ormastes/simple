@@ -260,7 +260,7 @@ fn cli_native_build(args: [text]) -> i64:
             cli_print_shared_opt_level_help()
             print "  --list-optimizations Print implemented optimization groups and levels"
             print "  --strip              Strip symbols from output"
-            print "  --runtime-bundle <mode> Runtime lane: auto, simple-core, core-c-bootstrap, rust-hosted"
+            print "  --runtime-bundle <mode> Runtime lane: auto, simple-core, core-c-bootstrap"
             print "  --entry-closure      Compile only modules reachable from --entry"
             print "  --log <on|off>       Compile normal SimpleOS logging in or out"
             print "  --verbose, -v        Verbose output"
@@ -275,6 +275,17 @@ fn cli_native_build(args: [text]) -> i64:
             i = i + 1
             backend = args[i]
             backend_explicit = true
+        elif arg == "--runtime-bundle" and i + 1 < args.len():
+            val bundle = args[i + 1]
+            if cli_runtime_bundle_is_rust_or_hosted(bundle):
+                _cli_eprint("Error: runtime bundle '{bundle}' was removed; use simple-core or core-c-bootstrap")
+                return 1
+            i = i + 1
+        elif arg.starts_with("--runtime-bundle="):
+            val bundle = arg.substring(17)
+            if cli_runtime_bundle_is_rust_or_hosted(bundle):
+                _cli_eprint("Error: runtime bundle '{bundle}' was removed; use simple-core or core-c-bootstrap")
+                return 1
         elif arg.starts_with("--log="):
             val mode = arg.substring(6)
             if mode == "":
@@ -486,12 +497,10 @@ fn cli_native_build(args: [text]) -> i64:
         return rt_native_build(cli_normalize_runtime_bundle_aliases(args))
 
 fn cli_normalize_runtime_bundle_aliases(args: [text]) -> [text]:
-    """Map semantic lane names onto legacy driver values when delegating.
+    """Map semantic Simple/C runtime lane names onto legacy driver values.
 
-    The Rust driver is the authoritative implementation for runtime lanes, but
-    bootstrap and cached delegated binaries can lag behind the source tree.
-    Normalize the new semantic names here so `bin/simple native-build` accepts
-    them immediately without requiring a freshly rebuilt delegated driver.
+    Delegation must not revive the removed Rust-hosted lane or collapse pure
+    Simple and C-bootstrap lanes into the legacy `runtime` value.
     """
     var normalized: [text] = []
     var i = 0
@@ -500,20 +509,20 @@ fn cli_normalize_runtime_bundle_aliases(args: [text]) -> [text]:
         if arg == "--runtime-bundle" and i + 1 < args.len():
             normalized.push(arg)
             val value = args[i + 1]
-            if value == "simple-core" or value == "simple_core" or value == "core-c-bootstrap" or value == "core_c_bootstrap":
-                normalized.push("runtime")
-            elif value == "rust-hosted":
-                normalized.push("hosted")
+            if value == "simple_core":
+                normalized.push("simple-core")
+            elif value == "core_c_bootstrap":
+                normalized.push("core-c-bootstrap")
             else:
                 normalized.push(value)
             i = i + 2
             continue
         elif arg.starts_with("--runtime-bundle="):
             val value = arg.substring(17)
-            if value == "simple-core" or value == "simple_core" or value == "core-c-bootstrap" or value == "core_c_bootstrap":
-                normalized.push("--runtime-bundle=runtime")
-            elif value == "rust-hosted":
-                normalized.push("--runtime-bundle=hosted")
+            if value == "simple_core":
+                normalized.push("--runtime-bundle=simple-core")
+            elif value == "core_c_bootstrap":
+                normalized.push("--runtime-bundle=core-c-bootstrap")
             else:
                 normalized.push(arg)
             i = i + 1
@@ -521,3 +530,6 @@ fn cli_normalize_runtime_bundle_aliases(args: [text]) -> [text]:
         normalized.push(arg)
         i = i + 1
     return normalized
+
+fn cli_runtime_bundle_is_rust_or_hosted(bundle: text) -> bool:
+    bundle == "rust-hosted" or bundle == "rust_hosted" or bundle == "hosted"

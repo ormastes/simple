@@ -652,7 +652,10 @@ Spawned read-only explorers:
       `test/03_system/editor_lsp_spec.spl`, and
       `test/03_system/editor_extension_spec.spl` still fail on stale or unrelated
       system assertions outside the focused consolidation acceptance.
-45. Editor `rust-hosted` frame render partially completed.
+45. Editor frame render partially completed. Historical `rust-hosted`
+    verification below is obsolete after the 2026-06-06 Simple/C-only runtime
+    hardening; refresh native evidence on `core-c-bootstrap` or ABI-complete
+    `simple-core` only.
     - Exported the missing Rust seed/JIT symbol `rt_compile_to_native_with_opt`
       and added runtime SFFI specs for the compile-to-native helpers.
     - Mirrored the command-palette and diagnostics service APIs across the
@@ -665,7 +668,7 @@ Spawned read-only explorers:
       `cargo check -p simple-runtime -p simple-common -p simple-native-all -p simple-compiler --manifest-path src/compiler_rust/Cargo.toml`
       and focused `SIMPLE_LIB=src bin/simple check` over the changed editor
       TUI/service files.
-    - Full TUI verification:
+    - Historical full TUI verification:
       `SIMPLE_LIB=src bin/simple native-build --runtime-bundle rust-hosted --source src/lib --source src/app --entry-closure --entry src/app/editor/tui_main.spl --output /tmp/simple_editor_tui_rust_hosted`
       then
       `TERM=xterm timeout 3 /tmp/simple_editor_tui_rust_hosted /tmp/simple_editor_empty.spl`.
@@ -722,22 +725,25 @@ Spawned read-only explorers:
       status-bar document count in `src/app/editor/tui_shell.spl`.
     - Verification passed:
       `SIMPLE_LIB=src bin/simple check src/app/editor/tui_shell.spl src/app/editor/editor_controller.spl test/03_system/editor_palette_spec.spl`.
-    - Full `rust-hosted` and `core-c-bootstrap` editor TUI builds now time out
-      normally in the interactive loop with no stderr, `1 files` in the status
-      bar, and no `No file open...` fallback marker.
+    - Historical pre-hardening full `rust-hosted` and `core-c-bootstrap`
+      editor TUI builds timed out normally in the interactive loop with no
+      stderr, `1 files` in the status bar, and no `No file open...` fallback
+      marker. Refresh future native evidence on `core-c-bootstrap` or
+      ABI-complete `simple-core` only.
 50. Editor palette/LSP popup overlay guard removed.
     - Restored overlay rendering calls in `src/app/editor/tui_shell.spl` after
       the base frame render path.
     - Added explicit typed locals for optional `PaletteState` visibility.
-    - Fixed popup text rendering in native hosted lanes by using typed popup
-      content/detail locals and `rt_string_len(value)` in popup cleaner/fit
-      helpers; focused repro showed `value.len()` on a text function parameter
-      returned `-1` in native mode.
+    - Fixed popup text rendering in the then-active native hosted lane by using
+      typed popup content/detail locals and `rt_string_len(value)` in popup
+      cleaner/fit helpers; focused repro showed `value.len()` on a text
+      function parameter returned `-1` in native mode.
     - Visible native overlay probe passed with `Command Palette`, `hover text`,
       `detail text`, and `after-lsp` markers.
-    - Full `rust-hosted` and `core-c-bootstrap` editor TUI builds still time out
-      normally in the interactive loop with no stderr and `1 files` in the
-      status bar.
+    - Historical pre-hardening full `rust-hosted` and `core-c-bootstrap`
+      editor TUI builds still timed out normally in the interactive loop with
+      no stderr and `1 files` in the status bar. Refresh future native evidence
+      on `core-c-bootstrap` or ABI-complete `simple-core` only.
     - `doc/08_tracking/bug/editor_render_runtime_blockers_2026-05-29.md` is now
       marked resolved for the editor render tracker.
 51. Editor controller system regression batch completed.

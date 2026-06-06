@@ -19,7 +19,7 @@ Final requirements must not be written until the user selects options.
 
 ## Phase 0 - Baseline And Conflict Cleanup
 
-1. Record current hello, file I/O, TUI smoke, and network smoke binary sizes for `core-c-bootstrap`, `simple-core` when present, and `rust-hosted`.
+1. Record current hello, file I/O, TUI smoke, and network smoke binary sizes for `core-c-bootstrap` and `simple-core`. Treat older `rust-hosted` measurements as historical comparison only; do not add new hosted-lane baselines.
 2. Add a documentation note that `doc/05_design/rust_to_simple_migration_plan.md` is superseded where it says the core runtime must remain Rust.
 3. Confirm existing executable-size tests identify Rust symbols or Rust archives in core-lane outputs.
 
@@ -89,4 +89,3 @@ Exit evidence:
 1. Should process execution be part of the first Rust-removal milestone, or remain hosted-only?
 2. Should TLS be excluded from the default network target until a provider is selected?
 3. Should Windows console support be required in the first TUI milestone, or compile-gated after Unix terminal support?
-

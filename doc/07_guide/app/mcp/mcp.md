@@ -149,12 +149,13 @@ If schema validation fails:
    package builds and smoke the produced binaries:
 
    ```bash
-   bin/simple native-build --runtime-bundle core-c --source src/app --entry-closure --entry src/app/mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_mcp_server
-   bin/simple native-build --runtime-bundle core-c --source src/app --entry-closure --entry src/app/simple_lsp_mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_lsp_mcp_server
+   bin/simple native-build --runtime-bundle core-c-bootstrap --source src/app --entry-closure --entry src/app/mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_mcp_server
+   bin/simple native-build --runtime-bundle core-c-bootstrap --source src/app --entry-closure --entry src/app/simple_lsp_mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_lsp_mcp_server
    ```
 
-   The package binaries must stay on a core lane. Do not use
-   `--runtime-bundle rust-hosted` for MCP/LSP package validation.
+   The package binaries must stay on a Simple/C core lane. Removed aliases
+   such as `--runtime-bundle rust-hosted`, `hosted`, `hosted-runtime`, and
+   `all` must fail closed, not validate MCP/LSP packages.
 
 Do not publish npm, registry metadata, or plugin bundles while either
 `*_json_valid`, `*_schema_valid`, or `mcp_wm_text_tools_present` is false.

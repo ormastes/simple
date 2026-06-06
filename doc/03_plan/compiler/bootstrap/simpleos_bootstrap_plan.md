@@ -1,16 +1,16 @@
 # SimpleOS Bootstrap Plan
 
 Status: prerequisite gates passing; staged cross bootstrap blocked at Stage 2
-Date: 2026-04-24
+Date: 2026-06-06
 
 ## Current Blocker
 
-As of 2026-05-05, host prerequisite verification, native-surface policy checks,
+As of 2026-06-06, host prerequisite verification, native-surface policy checks,
 and the toolchain/bootstrap dry-run gates pass for `simpleos-x86_64` /
-`x86_64-simpleos`. A fresh staged cross-bootstrap run no longer reaches the
-documented wrapper-lane convergence signal: Stage 1 builds, then Stage 2 emits
-a 6,176-byte diagnostic stub and is rejected by the size gate after three
-attempts.
+`x86_64-simpleos`. Seed-wrapper fallback generation has been removed from the
+minimal bootstrap CLI and driver bootstrap helper. Bootstrap native-build must
+now either produce a real Simple compiler artifact through Simple lowering and
+native codegen or fail closed.
 
 Progress made in this pass:
 
@@ -36,20 +36,10 @@ Progress made in this pass:
   `lower_to_mir()` method-dispatch crash, and Stage 2 now gets through MIR
   lowering, borrow checking, async processing, AOP weaving, output selection,
   and format selection.
-- The diagnostic direct-IR `ret 0` emitter is now opt-in via
-  `SIMPLE_BOOTSTRAP_DIRECT_IR=1`; default bootstrap runs no longer accept that
-  path. Passing the `MirModule` into `compile_module_with_backend(...)`
-  segfaulted before the helper's first diagnostic, so Stage 2 now uses a
-  primitive-argument bootstrap helper to prove the boundary.
-- The primitive helper now emits six local bootstrap MIR stubs without relying
-  on the cross-module bootstrap globals, and the driver-local LLVM path writes
-  a direct stub object. This avoids the earlier empty-function backend module
-  and invalid `MirToLlvm` return operand output.
-- The latest direct stage1-generated probe links
-  `/tmp/simple-stage2-real-current` as a 6.1 KiB executable. It starts and
-  exits 0, but running it as a compiler produces no `/tmp/simple-stage3-real-current`.
-  This proves the current boundary is a valid diagnostic stub, not a
-  self-hosting Simple compiler.
+- The diagnostic direct-IR `ret 0` emitter, driver-local LLVM stub emitter, and
+  seed-wrapper emitter now return codegen errors instead of producing successful
+  artifacts. `src/app/cli/bootstrap_main.spl` also refuses to generate a C
+  seed wrapper.
 - The bootstrap HIR path currently defers body lowering in bootstrap mode after
   counting the six `bootstrap_main.spl` functions from the flat AST/env
   surface. This avoids the stage1 `lower_function` / `lower_stmt` crash, but it
@@ -61,10 +51,10 @@ Progress made in this pass:
   crashes in `run_native_build_bootstrap` while lowering the second local
   declaration. This is the current full-self-host blocker; the default wrapper
   lane keeps HIR bodies deferred.
-- `bootstrap_cross.spl` contains a deterministic post-stage1 seed-wrapper
-  helper for stage2/stage3 handoff checks, but the current main pipeline still
-  reaches the unstable stage1 bootstrap lowering path first and rejects the
-  resulting tiny diagnostic artifact.
+- The remaining Stage 2 path is the real Simple HIR/MIR/native path. If that
+  path cannot lower `run_native_build_bootstrap`, the run must fail with a
+  compiler error rather than falling back to Rust, seed exec, or diagnostic
+  stubs.
 - The fresh host probe produced:
   - Stage 1: `build/os/bootstrap/simpleos-x86_64/stage1/simple` (8 MiB)
   - Stage 2: `build/os/bootstrap/simpleos-x86_64/stage2/simple` (6,176 bytes)
@@ -76,8 +66,66 @@ Progress made in this pass:
   after the failed staged run.
 - `test/02_integration/os/port/bootstrap_cross_status_spec.spl` guards that status/audit
   behavior so tiny placeholder outputs cannot regress to `BUILT`.
+- `test/02_integration/os/port/bootstrap_seed_fallback_policy_spec.spl` guards
+  the fail-closed policy: no Rust seed path, `execv`, `SIMPLE_BOOTSTRAP_SEED`,
+  or `ret i64 0` stub remains in the bootstrap CLI/driver fallback surface.
+- `src/app/io/cli_compile_part2.spl` rejects `rust-hosted`, `rust_hosted`,
+  and legacy `hosted` runtime bundles before native-build delegation. It now
+  preserves delegated `auto`, `simple-core`, and `core-c-bootstrap` lane names
+  so pure Simple and C-bootstrap runtime selection remain distinct.
+- The Rust native-build implementation now removes the hosted/native_all lane
+  as a selectable runtime bundle. `simple-core` links only an ABI-complete pure
+  Simple `libsimple_runtime.a`; `core-c-bootstrap` links the C bootstrap
+  `libsimple_runtime.a`; removed aliases such as `hosted`, `all`,
+  `rust-hosted`, `hosted-runtime`, and `rust-runtime` fail closed. Runtime
+  discovery no longer scans `src/compiler_rust/target/**` or
+  `SIMPLE_NATIVE_ALL_PATH` for fallback archives.
+- `bin/simple_mcp_server` and `bin/simple-interp` now resolve only Simple
+  release/self-hosted paths; they no longer search `src/compiler_rust`.
 
-Acceptance evidence captured or refreshed on 2026-05-05:
+Acceptance evidence refreshed on 2026-06-06:
+
+- `SIMPLE_LIB=src bin/simple check src/app/cli/bootstrap_main.spl
+  src/compiler/80.driver/driver_bootstrap.spl` passed.
+- `SIMPLE_LIB=src bin/simple check
+  test/02_integration/os/port/bootstrap_cross_status_spec.spl
+  test/02_integration/os/port/bootstrap_seed_fallback_policy_spec.spl` passed.
+- `SIMPLE_LIB=src bin/simple test
+  test/02_integration/os/port/bootstrap_cross_status_spec.spl
+  --mode=interpreter --clean` passed: 2 tests, 0 failed.
+- `SIMPLE_LIB=src bin/simple test
+  test/02_integration/os/port/bootstrap_seed_fallback_policy_spec.spl
+  --mode=interpreter --clean` passed: 2 tests, 0 failed.
+- `rg -n "compiler_rust|execv|SIMPLE_BOOTSTRAP_SEED|ret i64 0"
+  src/app/cli/bootstrap_main.spl src/compiler/80.driver/driver_bootstrap.spl`
+  returned no matches.
+- `SIMPLE_LIB=src bin/simple test
+  test/02_integration/os/port/runtime_bundle_policy_spec.spl
+  --mode=interpreter --clean` passed: 1 test, 0 failed.
+- `cargo check --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler
+  -p simple-driver -p simple-native-all` passed with the existing runtime
+  extern-signature/interpreter unused-assignment warnings.
+- `cargo test --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler
+  runtime_bundle -- --nocapture` passed: 21 matching tests, 0 failed.
+- `src/compiler_rust/target/debug/simple native-build --runtime-bundle
+  core-c-bootstrap --entry examples/01_getting_started/hello_native.spl
+  --source examples -o /tmp/simple_core_c_runtime_probe --backend cranelift
+  --clean --strip && /tmp/simple_core_c_runtime_probe` passed and printed
+  `Hello World`.
+- The tracked `bin/release/x86_64-unknown-linux-gnu/simple` was rebuilt from
+  `simple-driver`. `bin/simple native-build --help` now lists only
+  `auto, simple-core, core-c-bootstrap`; `--runtime-bundle rust-hosted` and
+  `SIMPLE_NATIVE_RUNTIME_BUNDLE=hosted` fail closed; `bin/simple
+  native-build --runtime-bundle core-c-bootstrap ...hello_native.spl` builds
+  and runs `Hello World`.
+- A fake-repo smoke with only `src/compiler_rust/target/release/simple`
+  available made `bin/simple_mcp_server` exit 127 with
+  `checked Simple release/self-hosted paths only`, proving it did not use the
+  Rust fallback.
+- `bin/simple-interp --version` returned `Simple Language v1.0.0-beta` through
+  the deployed Simple binary.
+
+Earlier acceptance evidence captured or refreshed on 2026-05-05:
 
 - `sh src/os/port/llvm/sysroot.shs` rebuilt `build/os/sysroot`: 28 headers,
   `libsimpleos_c.a`, `crt0.o`, and `share/simpleos/simpleos.ld`.
@@ -109,16 +157,13 @@ Acceptance evidence captured or refreshed on 2026-05-05:
 
 The remaining blockers are therefore:
 
-1. Host staged wrapper lane: either wire the deterministic seed-wrapper helper
-   into the Stage 2/Stage 3 handoff path before the size gate, or remove that
-   fallback and require the real Stage 2 compiler path to produce a >1 MiB
-   compiler artifact.
-2. Rust cross seed: provide a SimpleOS `std` port for the Rust driver, or split
-   a true no-std seed package whose dependency graph can build with
-   `core,alloc`.
-3. Full Simple MIR self-host: replace the host wrapper lane and diagnostic
-   `ret 0` stub lane with a real stage1-generated Simple compiler once
-   bootstrap HIR body lowering and MIR lowering can run safely.
+1. Full Simple MIR self-host: complete real stage1-generated HIR body lowering
+   and MIR lowering for `run_native_build_bootstrap` and the full bootstrap CLI.
+2. Native artifact production: make the real Simple backend/link path emit a
+   >1 MiB Stage 2 compiler artifact without Rust seed exec or diagnostic stubs.
+3. SimpleOS cross seed: keep the cross lane on Simple plus the C/sysroot
+   surface; do not revive the Rust seed fallback as a substitute for the real
+   Stage 2 compiler path.
 
 ## Goal
 

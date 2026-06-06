@@ -12,7 +12,6 @@ Executables, wrappers, and MCP server launchers.
 | `mail` | Email CLI |
 | `release` | Release directory |
 | `simple` | Main compiler binary |
-| `simple.bootstrap_seed_wrapper.c` | Bootstrap seed wrapper |
 | `simple.cmd` | Windows wrapper |
 | `simple.exe` | Windows executable |
 | `simple.freebsd` | FreeBSD binary |

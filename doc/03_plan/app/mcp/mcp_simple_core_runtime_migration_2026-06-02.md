@@ -91,5 +91,5 @@ runtime, which has a registry-free `rt_string_len` and `read()` stdin.
   a proper bootstrap before the deployed `bin/release/.../simple` driver can
   reproduce these builds.
 - Shared `src/app/simple_lsp_mcp/json_helpers.spl` still uses C
-  `stdin_read_char` (fine for interpreter/rust-hosted; needs the same `read()`
-  treatment for a core-c LSP deploy).
+  `stdin_read_char` (fine for interpreter; needs the same `read()` treatment
+  for a `core-c-bootstrap` or `simple-core` LSP deploy).

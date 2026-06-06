@@ -3,9 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use super::{effective_target, ModuleImports};
-use super::tools::{
-    find_c_compiler, find_native_all_library, find_runtime_library, is_compiler_rt_builtin_symbol, is_system_symbol,
-};
+use super::tools::{find_c_compiler, find_runtime_library, is_compiler_rt_builtin_symbol, is_system_symbol};
 
 fn is_linker_provided_symbol(sym: &str, defined: &std::collections::HashSet<String>) -> bool {
     matches!(
@@ -73,6 +71,10 @@ fn is_compiler_provided_runtime_symbol(sym: &str) -> bool {
     matches_bare(sym) || matches_bare(stripped)
 }
 
+fn is_runtime_owned_symbol(sym: &str) -> bool {
+    sym.trim_start_matches('_').starts_with("rt_")
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FreestandingUnresolvedMode {
     DeferToLinker,
@@ -91,6 +93,10 @@ fn freestanding_unresolved_mode() -> FreestandingUnresolvedMode {
 }
 
 fn resolve_defined_suffix_alias(sym: &str, defined: &std::collections::HashSet<String>) -> Option<String> {
+    if is_runtime_owned_symbol(sym) {
+        return None;
+    }
+
     let sanitized = sym.replace('.', "_dot_");
     let tail = sanitized.rsplit("__").next().unwrap_or(sanitized.as_str());
     let suffix = format!("__{}", tail);
@@ -534,7 +540,7 @@ pub(crate) fn generate_stub_object(
 
     let runtime_lib = selected_runtime_lib
         .map(|p| p.to_path_buf())
-        .or_else(|| find_native_all_library().or_else(find_runtime_library));
+        .or_else(find_runtime_library);
     if let Some(ref rt_path) = runtime_lib {
         let output = std::process::Command::new("nm")
             .arg("-g")
@@ -592,6 +598,7 @@ pub(crate) fn generate_stub_object(
         })
         .filter(|s| !is_optional_weak_hook_symbol(s))
         .filter(|s| !is_compiler_provided_runtime_symbol(s))
+        .filter(|s| !is_runtime_owned_symbol(s))
         .filter(|s| !is_system_symbol(s))
         .filter(|s| !s.starts_with('?') && !s.starts_with("__imp_"))
         .collect();
@@ -828,5 +835,29 @@ pub(crate) fn generate_stub_object(
         }
 
         Ok(stub_o)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn runtime_owned_symbols_are_not_suffix_aliased() {
+        let defined = HashSet::from(["m_01_unit__spec__rt_hashmap_new".to_string()]);
+
+        assert_eq!(resolve_defined_suffix_alias("__rt_hashmap_new", &defined), None);
+        assert_eq!(resolve_defined_suffix_alias("rt_thread_join", &defined), None);
+    }
+
+    #[test]
+    fn non_runtime_symbols_can_still_suffix_alias() {
+        let defined = HashSet::from(["m_01_unit__spec__helper".to_string()]);
+
+        assert_eq!(
+            resolve_defined_suffix_alias("helper", &defined),
+            Some("m_01_unit__spec__helper".to_string())
+        );
     }
 }

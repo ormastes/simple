@@ -7,6 +7,7 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::codegen::common_backend::module_prefix_from_path;
 use crate::incremental::SourceInfo;
+use crate::pipeline::execution::runtime_bundle_env_lock_for_tests as runtime_bundle_env_lock;
 use simple_simd::{host_cpu_config, reset_host_cpu_config_cache_for_tests, HostCpuConfig, SimdTier};
 use super::*;
 
@@ -16,11 +17,6 @@ fn simd_tier_env_lock() -> &'static Mutex<()> {
 }
 
 fn process_dir_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
-fn runtime_bundle_env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
 }
@@ -643,7 +639,7 @@ fn test_runtime_bundle_auto_prefers_core_c_bootstrap_for_non_compiler_entry_when
 }
 
 #[test]
-fn test_runtime_bundle_auto_prefers_hosted_runtime_for_compiler_entry() {
+fn test_runtime_bundle_auto_prefers_core_c_for_compiler_entry() {
     let _guard = runtime_bundle_env_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let runtime = temp.path().join("libsimple_runtime.a");
@@ -661,12 +657,12 @@ fn test_runtime_bundle_auto_prefers_hosted_runtime_for_compiler_entry() {
     builder.entry_file = Some(PathBuf::from("/project/src/app/cli/main.spl"));
 
     let (selected, is_native_all) = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
-    assert_eq!(selected, native_all);
-    assert!(is_native_all);
+    assert_eq!(selected, runtime);
+    assert!(!is_native_all);
 }
 
 #[test]
-fn test_runtime_bundle_auto_prefers_hosted_runtime_for_compiler_source_root() {
+fn test_runtime_bundle_auto_prefers_core_c_for_compiler_source_root() {
     let _guard = runtime_bundle_env_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let runtime = temp.path().join("libsimple_runtime.a");
@@ -688,8 +684,8 @@ fn test_runtime_bundle_auto_prefers_hosted_runtime_for_compiler_source_root() {
     builder.source_dirs.push(PathBuf::from("/project/src/compiler"));
 
     let (selected, is_native_all) = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
-    assert_eq!(selected, native_all);
-    assert!(is_native_all);
+    assert_eq!(selected, runtime);
+    assert!(!is_native_all);
 }
 
 #[test]
@@ -853,7 +849,7 @@ fn test_core_lane_runtime_required_abi_stdout_stderr_and_values() {
 }
 
 #[test]
-fn test_find_native_all_library_skips_empty_debug_archive() {
+fn test_find_native_all_library_does_not_search_compiler_rust_target() {
     let temp = tempfile::tempdir().unwrap();
     let debug_dir = temp.path().join("src/compiler_rust/target/debug");
     let release_dir = temp.path().join("src/compiler_rust/target/release");
@@ -865,15 +861,12 @@ fn test_find_native_all_library_skips_empty_debug_archive() {
     std::fs::write(&empty_debug, b"").unwrap();
     std::fs::write(&release, b"real archive").unwrap();
 
-    let selected = with_current_dir(temp.path(), find_native_all_library).unwrap();
-    assert_eq!(
-        selected,
-        PathBuf::from("src/compiler_rust/target/release/libsimple_native_all.a")
-    );
+    let selected = with_current_dir(temp.path(), find_native_all_library);
+    assert!(selected.is_none());
 }
 
 #[test]
-fn test_runtime_bundle_auto_rejects_native_all_for_non_compiler_entry() {
+fn test_runtime_bundle_auto_ignores_native_all_for_non_compiler_entry() {
     let _guard = runtime_bundle_env_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let native_all = temp.path().join("libsimple_native_all.a");
@@ -894,16 +887,12 @@ fn test_runtime_bundle_auto_rejects_native_all_for_non_compiler_entry() {
     ));
 
     let selected_runtime = builder.selected_runtime_library(temp.path()).unwrap();
-    let err = builder
-        .reject_unexpected_native_all(selected_runtime.as_ref())
-        .unwrap_err();
-    assert!(err.contains("core-c-bootstrap"));
-    assert!(err.contains("--runtime-bundle rust-hosted"));
-    assert!(err.contains("tool_runner.spl"));
+    assert!(selected_runtime.is_none());
+    builder.reject_unexpected_native_all(selected_runtime.as_ref()).unwrap();
 }
 
 #[test]
-fn test_runtime_bundle_hosted_allows_native_all_for_non_compiler_entry() {
+fn test_runtime_bundle_hosted_is_removed_for_non_compiler_entry() {
     let _guard = runtime_bundle_env_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let native_all = temp.path().join("libsimple_native_all.a");
@@ -924,8 +913,8 @@ fn test_runtime_bundle_hosted_allows_native_all_for_non_compiler_entry() {
         "/project/examples/10_tooling/trace32_tools/t32_lsp_mcp/tool_runner.spl",
     ));
 
-    let selected_runtime = builder.selected_runtime_library(temp.path()).unwrap();
-    builder.reject_unexpected_native_all(selected_runtime.as_ref()).unwrap();
+    let err = builder.selected_runtime_library(temp.path()).unwrap_err();
+    assert!(err.contains("removed Rust-hosted runtime bundles"));
 }
 
 #[test]
@@ -1002,7 +991,7 @@ fn test_runtime_bundle_simple_core_errors_when_archive_is_missing() {
 }
 
 #[test]
-fn test_runtime_bundle_legacy_all_alias_allows_native_all_for_non_compiler_entry() {
+fn test_runtime_bundle_legacy_all_alias_is_removed() {
     let _guard = runtime_bundle_env_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let native_all = temp.path().join("libsimple_native_all.a");
@@ -1021,8 +1010,8 @@ fn test_runtime_bundle_legacy_all_alias_allows_native_all_for_non_compiler_entry
     .config(config);
     builder.entry_file = Some(PathBuf::from("/project/examples/demo/app.spl"));
 
-    let selected_runtime = builder.selected_runtime_library(temp.path()).unwrap();
-    builder.reject_unexpected_native_all(selected_runtime.as_ref()).unwrap();
+    let err = builder.selected_runtime_library(temp.path()).unwrap_err();
+    assert!(err.contains("removed Rust-hosted runtime bundles"));
 }
 
 #[test]

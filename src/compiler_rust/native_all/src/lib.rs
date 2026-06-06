@@ -35,6 +35,28 @@ use simple_runtime::value::{
     rt_array_get, rt_array_len, rt_string_data, rt_string_len, rt_tuple_new, rt_tuple_set, RuntimeValue,
 };
 
+fn is_valid_runtime_bundle(value: &str) -> bool {
+    matches!(
+        value,
+        "auto"
+            | "simple-core"
+            | "simple_core"
+            | "core-c-bootstrap"
+            | "core_c_bootstrap"
+            | "runtime"
+            | "core"
+            | "core-c"
+            | "core_c"
+    )
+}
+
+fn is_removed_runtime_bundle(value: &str) -> bool {
+    matches!(
+        value,
+        "hosted" | "rust-hosted" | "rust_hosted" | "hosted-runtime" | "rust-runtime" | "all"
+    )
+}
+
 // Helper: extract a Rust String from a Simple runtime string value.
 fn extract_rt_string(val: RuntimeValue) -> Option<String> {
     let len = rt_string_len(val);
@@ -129,7 +151,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                 println!("  --opt-level=<level> Optimization level: none, basic, standard, aggressive");
                 println!("  --list-optimizations Print implemented optimization groups and levels");
                 println!(
-                    "  --runtime-bundle <mode> Runtime lane to link: auto (default), simple-core, core-c-bootstrap, or rust-hosted"
+                    "  --runtime-bundle <mode> Runtime lane to link: auto (default), simple-core, or core-c-bootstrap"
                 );
                 println!("  --runtime-path <dir> Directory containing libsimple_runtime.a");
                 println!("  --entry-closure     Compile only modules reachable from --entry");
@@ -245,9 +267,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                     runtime_bundle = args_vec[i + 1].clone();
                     i += 2;
                 } else {
-                    eprintln!(
-                        "error: --runtime-bundle requires a value (auto, simple-core, core-c-bootstrap, rust-hosted)"
-                    );
+                    eprintln!("error: --runtime-bundle requires a value (auto, simple-core, core-c-bootstrap)");
                     return 1;
                 }
             }
@@ -386,6 +406,21 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
         }
     }
 
+    if !is_valid_runtime_bundle(&runtime_bundle) {
+        if is_removed_runtime_bundle(&runtime_bundle) {
+            eprintln!(
+                "error: runtime bundle '{}' was removed; use simple-core or core-c-bootstrap",
+                runtime_bundle
+            );
+            return 1;
+        }
+        eprintln!(
+            "error: invalid --runtime-bundle value '{}'. Expected one of: auto, simple-core, core-c-bootstrap, runtime",
+            runtime_bundle
+        );
+        return 1;
+    }
+
     // Defaults
     let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     if source_dirs.is_empty() {
@@ -450,9 +485,6 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
         // Also set env var in-process as fallback (for code that checks env vars directly)
         unsafe {
             std::env::set_var("SIMPLE_RUNTIME_PATH", rp);
-        }
-        unsafe {
-            std::env::set_var("SIMPLE_NATIVE_ALL_PATH", rp.join("libsimple_native_all.a"));
         }
     }
 

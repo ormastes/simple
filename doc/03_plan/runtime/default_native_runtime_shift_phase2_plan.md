@@ -4,17 +4,17 @@
 
 Phase 1 is complete:
 
-- native runtime lanes are explicit: `simple-core`, `core-c-bootstrap`, `rust-hosted`
-- non-compiler `auto` no longer silently falls back to `rust-hosted`
-- launcher, wrapper, and packaging surfaces now treat hosted/source-entry execution as explicit legacy fallback
+- native runtime lanes are explicit: `simple-core` and `core-c-bootstrap`
+- `auto` no longer silently falls back to `rust-hosted` or `libsimple_native_all.a`
+- launcher, wrapper, and packaging surfaces now treat Rust-hosted/source-entry execution as removed fallback
 
 What remains is the runtime and service port work that makes the new default lane real for the current hosted-heavy app surfaces.
 
 This plan covers the remaining three items:
 
 1. implement the `simple-core` ABI/runtime
-2. migrate MCP/LSP off `rust-hosted`
-3. package MCP/LSP binaries on a core lane instead of explicit hosted packaging
+2. keep MCP/LSP on Simple/C runtime lanes
+3. package MCP/LSP binaries on a core lane
 
 Related docs:
 
@@ -29,15 +29,15 @@ Related docs:
 
 ## Non-Goals
 
-- Migrating compiler/bootstrap/self-host flows off `rust-hosted`.
+- Completing the remaining compiler/bootstrap/self-host body lowering work.
 - Reworking MCP protocol shape, tool inventory, or client-facing behavior to make the port easier.
-- Broad hosted-runtime decomposition beyond what is needed for hello, standalone TUI, MCP, and simple LSP MCP.
+- Broad removed hosted-lane decomposition beyond what is needed for hello, standalone TUI, MCP, and simple LSP MCP.
 
 ## Exit Criteria
 
 - `simple-core` links and runs `hello` and standalone TUI without `libsimple_native_all.a`.
 - MCP and simple LSP MCP pass startup and smoke protocol checks on a core lane.
-- package build commands for MCP/LSP no longer require `--runtime-bundle rust-hosted`.
+- package build commands for MCP/LSP use `simple-core` or `core-c-bootstrap`, never Rust-hosted aliases.
 - selected core lanes contain no unwind dependency and no hosted-runtime archive in their closure.
 
 ## Workstream 1: Implement `simple-core` ABI/Runtime
@@ -161,7 +161,7 @@ Create a pure-Simple implementation of the narrow host ABI already defined by th
 - `scripts/check/check-simple-core-runtime-smoke.shs` now builds `build/simple-core/libsimple_runtime.a` from `src/runtime/simple_core` with `--emit-archive --no-mangle` (falling back to the current Rust CLI if `bin/simple` is stale), then verifies hello, standalone TUI, interactive TUI, and closure cleanliness on the selectable `simple-core` lane.
 - Pure-Simple source coverage is now 41 of 41 `core-required` symbols.
 
-## Workstream 2: Migrate MCP/LSP Off `rust-hosted`
+## Workstream 2: Keep MCP/LSP Off Removed Hosted Lanes
 
 ### Objective
 
@@ -323,12 +323,12 @@ Remove the temporary explicit hosted packaging commands and ship MCP/LSP artifac
 
 ### Progress 2026-05-04
 
-- Package-shape app-only builds now succeed on `core-c`:
-  - `bin/simple native-build --runtime-bundle core-c --source src/app --entry-closure --entry src/app/mcp/main.spl --strip --output /tmp/simple_mcp_core_c_app_probe`
-  - `bin/simple native-build --runtime-bundle core-c --source src/app --entry-closure --entry src/app/simple_lsp_mcp/main.spl --strip --output /tmp/simple_lsp_mcp_core_c_app_probe`
-- App-only MCP and Simple LSP MCP binaries pass initialize + tools/list smoke on `core-c`; MCP includes `debug_create_session`, `simple_check`, and `test_daemon_status`, and Simple LSP MCP includes `lsp_definition`.
+- Package-shape app-only builds now succeed on `core-c-bootstrap`:
+  - `bin/simple native-build --runtime-bundle core-c-bootstrap --source src/app --entry-closure --entry src/app/mcp/main.spl --strip --output /tmp/simple_mcp_core_c_app_probe`
+  - `bin/simple native-build --runtime-bundle core-c-bootstrap --source src/app --entry-closure --entry src/app/simple_lsp_mcp/main.spl --strip --output /tmp/simple_lsp_mcp_core_c_app_probe`
+- App-only MCP and Simple LSP MCP binaries pass initialize + tools/list smoke on `core-c-bootstrap`; MCP includes `debug_create_session`, `simple_check`, and `test_daemon_status`, and Simple LSP MCP includes `lsp_definition`.
 - Closure audit on those app-only core-C binaries found no `libsimple_native_all.a`, `rust-hosted`, or unwind strings/symbols.
-- `doc/07_guide/tooling/mcp.md` now documents core-C package validation commands for MCP/LSP instead of `rust-hosted`.
+- `doc/07_guide/app/mcp/mcp.md` now documents `core-c-bootstrap` package validation commands for MCP/LSP instead of removed Rust-hosted lanes.
 - `scripts/check/check-mcp-native-smoke.shs` now validates the mixed transports used by the package binaries: MCP JSON-lines and Simple LSP MCP framed `Content-Length`. The package smoke reports 144 MCP tools and 11 LSP tools with valid schemas.
 
 ### Progress 2026-05-05
@@ -380,4 +380,5 @@ Remove the temporary explicit hosted packaging commands and ship MCP/LSP artifac
 - `simple-core` is chosen because it is ABI-complete, not because a placeholder archive exists
 - `hello`, standalone TUI, simple MCP, and simple LSP MCP all run on a core lane
 - package build instructions no longer mention `--runtime-bundle rust-hosted` for MCP/LSP
-- hosted remains available only as an explicit compatibility lane for flows not yet migrated
+- removed hosted/native_all lanes stay unavailable; missing ABI work is ported to
+  `simple-core` or `core-c-bootstrap` instead of re-enabling Rust-hosted fallback

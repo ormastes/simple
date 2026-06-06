@@ -256,10 +256,6 @@ pub(crate) fn find_simple_core_runtime_library() -> Option<PathBuf> {
         "build/simple-core/libsimple_runtime.a",
         "build/simple_core/deps/libsimple_runtime.a",
         "build/simple_core/libsimple_runtime.a",
-        "src/compiler_rust/target/simple-core/deps/libsimple_runtime.a",
-        "src/compiler_rust/target/simple-core/libsimple_runtime.a",
-        "src/compiler_rust/target/simple_core/deps/libsimple_runtime.a",
-        "src/compiler_rust/target/simple_core/libsimple_runtime.a",
     ];
 
     for candidate in candidates {
@@ -312,73 +308,6 @@ pub(crate) fn find_abi_complete_simple_core_runtime_library() -> Option<PathBuf>
 
 /// Find the combined native_all library (runtime + compiler with Cranelift SFFI).
 pub(crate) fn find_native_all_library() -> Option<PathBuf> {
-    if let Some(dir) = RUNTIME_PATH_OVERRIDE.get() {
-        let p = dir.join("libsimple_native_all.a");
-        if has_nonempty_archive_payload(&p) {
-            return Some(p);
-        }
-        #[cfg(target_os = "windows")]
-        {
-            let p = dir.join("simple_native_all.lib");
-            if has_nonempty_archive_payload(&p) {
-                return Some(p);
-            }
-        }
-    }
-
-    if let Ok(path) = std::env::var("SIMPLE_NATIVE_ALL_PATH") {
-        let p = PathBuf::from(&path);
-        if has_nonempty_archive_payload(&p) {
-            return Some(p);
-        }
-    }
-    if let Ok(path) = std::env::var("SIMPLE_RUNTIME_PATH") {
-        let p = PathBuf::from(&path).join("libsimple_native_all.a");
-        if has_nonempty_archive_payload(&p) {
-            return Some(p);
-        }
-    }
-
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let path = dir.join("libsimple_native_all.a");
-            if has_nonempty_archive_payload(&path) {
-                return Some(path);
-            }
-            #[cfg(target_os = "windows")]
-            {
-                let path = dir.join("simple_native_all.lib");
-                if has_nonempty_archive_payload(&path) {
-                    return Some(path);
-                }
-            }
-        }
-    }
-
-    let mut candidates: Vec<&str> = vec![
-        "src/compiler_rust/target/debug/libsimple_native_all.a",
-        "src/compiler_rust/target/release/libsimple_native_all.a",
-        "src/compiler_rust/target/bootstrap/libsimple_native_all.a",
-    ];
-
-    #[cfg(target_os = "windows")]
-    {
-        candidates.extend_from_slice(&[
-            "src/compiler_rust/target/x86_64-pc-windows-gnu/debug/libsimple_native_all.a",
-            "src/compiler_rust/target/x86_64-pc-windows-gnu/release/libsimple_native_all.a",
-            "src/compiler_rust/target/debug/simple_native_all.lib",
-            "src/compiler_rust/target/release/simple_native_all.lib",
-            "src/compiler_rust/target/bootstrap/simple_native_all.lib",
-        ]);
-    }
-
-    for candidate in &candidates {
-        let path = PathBuf::from(candidate);
-        if has_nonempty_archive_payload(&path) {
-            return Some(path);
-        }
-    }
-
     None
 }
 
@@ -417,37 +346,6 @@ pub(crate) fn find_runtime_library() -> Option<PathBuf> {
             if let Some(path) = archive_from_dir(dir, "libsimple_runtime") {
                 return Some(path);
             }
-        }
-    }
-
-    let mut candidates: Vec<&str> = vec![
-        "src/compiler_rust/target/debug/deps/libsimple_runtime.a",
-        "src/compiler_rust/target/debug/libsimple_runtime.a",
-        "src/compiler_rust/target/release/deps/libsimple_runtime.a",
-        "src/compiler_rust/target/release/libsimple_runtime.a",
-        "src/compiler_rust/target/bootstrap/deps/libsimple_runtime.a",
-        "src/compiler_rust/target/bootstrap/libsimple_runtime.a",
-    ];
-
-    #[cfg(target_os = "windows")]
-    {
-        candidates.extend_from_slice(&[
-            "src/compiler_rust/target/debug/simple_runtime.lib",
-            "src/compiler_rust/target/debug/deps/simple_runtime.lib",
-            "src/compiler_rust/target/release/simple_runtime.lib",
-            "src/compiler_rust/target/release/deps/simple_runtime.lib",
-            "src/compiler_rust/target/bootstrap/simple_runtime.lib",
-            "src/compiler_rust/target/bootstrap/deps/simple_runtime.lib",
-        ]);
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    candidates.push("/usr/local/lib/libsimple_runtime.a");
-
-    for candidate in &candidates {
-        let path = PathBuf::from(candidate);
-        if has_nonempty_archive_payload(&path) {
-            return Some(path);
         }
     }
 

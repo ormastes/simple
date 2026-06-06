@@ -104,19 +104,22 @@ pub(super) fn native_single_file_project_hint(source_path: &Path) -> Option<Path
     find_project_root_hint(&cwd)
 }
 
-fn is_compiler_like_native_source(source_path: &Path) -> bool {
-    let path = source_path.to_string_lossy().replace('\\', "/");
-    path.contains("/src/compiler/")
-        || path.ends_with("/src/compiler")
-        || path.contains("/src/app/cli/")
-        || path.ends_with("/src/app/cli")
-}
-
-fn runtime_bundle_env_requests_hosted() -> bool {
+fn runtime_bundle_env_requests_removed_hosted() -> bool {
     std::env::var("SIMPLE_NATIVE_RUNTIME_BUNDLE")
         .ok()
         .as_deref()
-        .is_some_and(|value| matches!(value, "all" | "hosted" | "rust-hosted"))
+        .is_some_and(|value| {
+            matches!(
+                value,
+                "all" | "hosted" | "rust-hosted" | "rust_hosted" | "hosted-runtime" | "rust-runtime"
+            )
+        })
+}
+
+#[cfg(test)]
+pub(crate) fn runtime_bundle_env_lock_for_tests() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
 
 fn runtime_bundle_env_requests_core_c() -> bool {
@@ -142,29 +145,13 @@ fn single_file_prefers_runtime_only(source_path: Option<&Path>, options: &crate:
     if options.target != Target::host() {
         return false;
     }
-    if runtime_bundle_env_requests_hosted() {
-        return false;
+    if runtime_bundle_env_requests_removed_hosted() {
+        return true;
     }
     if runtime_bundle_env_requests_core_c() {
         return true;
     }
-    source_path.is_some_and(|path| !is_compiler_like_native_source(path))
-}
-
-fn single_file_prefers_hosted_runtime(
-    source_path: Option<&Path>,
-    options: &crate::linker::NativeBinaryOptions,
-) -> bool {
-    if options.target != Target::host() {
-        return false;
-    }
-    if runtime_bundle_env_requests_core_c() {
-        return false;
-    }
-    if runtime_bundle_env_requests_hosted() {
-        return true;
-    }
-    source_path.is_some_and(is_compiler_like_native_source)
+    source_path.is_some()
 }
 
 fn filter_single_file_runtime_bundle(
@@ -200,9 +187,7 @@ fn filter_single_file_runtime_bundle(
         }
     }
 
-    if single_file_prefers_hosted_runtime(source_path, &options) {
-        ensure_runtime_root(&mut options, "simple_native_all", "simple_runtime");
-    } else if single_file_prefers_runtime_only(source_path, &options) {
+    if single_file_prefers_runtime_only(source_path, &options) {
         ensure_runtime_root(&mut options, "simple_runtime", "simple_native_all");
     }
     prefer_abi_complete_core_runtime(&mut options);
@@ -1011,16 +996,10 @@ impl CompilerPipeline {
 mod tests {
     use super::{
         filter_single_file_runtime_bundle, find_project_root_hint, native_single_file_project_hint,
-        single_file_prefers_hosted_runtime, single_file_prefers_runtime_only,
+        runtime_bundle_env_lock_for_tests as runtime_bundle_env_lock, single_file_prefers_runtime_only,
     };
     use crate::linker::NativeBinaryOptions;
     use simple_common::target::{Target, TargetArch, TargetOS};
-    use std::sync::{Mutex, OnceLock};
-
-    fn runtime_bundle_env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     #[test]
     fn native_single_file_project_hint_only_applies_to_temp_sources() {
@@ -1056,22 +1035,14 @@ mod tests {
     }
 
     #[test]
-    fn single_file_runtime_bundle_keeps_native_all_for_compiler_like_sources() {
+    fn single_file_runtime_bundle_prefers_runtime_only_for_compiler_like_sources() {
         let _guard = runtime_bundle_env_lock().lock().unwrap();
         let options = NativeBinaryOptions::new().target(Target::host()).shared(false);
-        assert!(!single_file_prefers_runtime_only(
+        assert!(single_file_prefers_runtime_only(
             Some(std::path::Path::new("/work/src/compiler/80.driver/main.spl")),
             &options
         ));
-        assert!(!single_file_prefers_runtime_only(
-            Some(std::path::Path::new("/work/src/app/cli/main.spl")),
-            &options
-        ));
-        assert!(single_file_prefers_hosted_runtime(
-            Some(std::path::Path::new("/work/src/compiler/80.driver/main.spl")),
-            &options
-        ));
-        assert!(single_file_prefers_hosted_runtime(
+        assert!(single_file_prefers_runtime_only(
             Some(std::path::Path::new("/work/src/app/cli/main.spl")),
             &options
         ));
@@ -1113,7 +1084,7 @@ mod tests {
     }
 
     #[test]
-    fn single_file_runtime_bundle_keeps_native_all_when_env_requests_all() {
+    fn single_file_runtime_bundle_removes_native_all_when_env_requests_all() {
         let _guard = runtime_bundle_env_lock().lock().unwrap();
         let previous = std::env::var("SIMPLE_NATIVE_RUNTIME_BUNDLE").ok();
         std::env::set_var("SIMPLE_NATIVE_RUNTIME_BUNDLE", "all");
@@ -1129,11 +1100,12 @@ mod tests {
             None => std::env::remove_var("SIMPLE_NATIVE_RUNTIME_BUNDLE"),
         }
 
-        assert!(filtered.libraries.iter().any(|lib| lib == "simple_native_all"));
+        assert!(!filtered.libraries.iter().any(|lib| lib == "simple_native_all"));
+        assert!(filtered.libraries.iter().any(|lib| lib == "simple_runtime"));
     }
 
     #[test]
-    fn single_file_runtime_bundle_keeps_native_all_when_env_requests_hosted() {
+    fn single_file_runtime_bundle_removes_native_all_when_env_requests_hosted() {
         let _guard = runtime_bundle_env_lock().lock().unwrap();
         let previous = std::env::var("SIMPLE_NATIVE_RUNTIME_BUNDLE").ok();
         std::env::set_var("SIMPLE_NATIVE_RUNTIME_BUNDLE", "hosted");
@@ -1149,11 +1121,12 @@ mod tests {
             None => std::env::remove_var("SIMPLE_NATIVE_RUNTIME_BUNDLE"),
         }
 
-        assert!(filtered.libraries.iter().any(|lib| lib == "simple_native_all"));
+        assert!(!filtered.libraries.iter().any(|lib| lib == "simple_native_all"));
+        assert!(filtered.libraries.iter().any(|lib| lib == "simple_runtime"));
     }
 
     #[test]
-    fn single_file_runtime_bundle_removes_simple_runtime_for_hosted_compiler_like_source() {
+    fn single_file_runtime_bundle_keeps_simple_runtime_for_compiler_like_source() {
         let _guard = runtime_bundle_env_lock().lock().unwrap();
         let options = NativeBinaryOptions::new()
             .target(Target::host())
@@ -1163,12 +1136,12 @@ mod tests {
             Some(std::path::Path::new("/work/src/compiler/80.driver/main.spl")),
             options,
         );
-        assert!(!filtered.libraries.iter().any(|lib| lib == "simple_runtime"));
-        assert!(filtered.libraries.iter().any(|lib| lib == "simple_native_all"));
+        assert!(filtered.libraries.iter().any(|lib| lib == "simple_runtime"));
+        assert!(!filtered.libraries.iter().any(|lib| lib == "simple_native_all"));
     }
 
     #[test]
-    fn single_file_runtime_bundle_removes_simple_runtime_when_env_requests_hosted() {
+    fn single_file_runtime_bundle_keeps_simple_runtime_when_env_requests_hosted() {
         let _guard = runtime_bundle_env_lock().lock().unwrap();
         let previous = std::env::var("SIMPLE_NATIVE_RUNTIME_BUNDLE").ok();
         std::env::set_var("SIMPLE_NATIVE_RUNTIME_BUNDLE", "hosted");
@@ -1184,7 +1157,7 @@ mod tests {
             None => std::env::remove_var("SIMPLE_NATIVE_RUNTIME_BUNDLE"),
         }
 
-        assert!(!filtered.libraries.iter().any(|lib| lib == "simple_runtime"));
-        assert!(filtered.libraries.iter().any(|lib| lib == "simple_native_all"));
+        assert!(filtered.libraries.iter().any(|lib| lib == "simple_runtime"));
+        assert!(!filtered.libraries.iter().any(|lib| lib == "simple_native_all"));
     }
 }
