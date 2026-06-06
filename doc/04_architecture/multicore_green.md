@@ -1,0 +1,165 @@
+# Multicore Green Architecture
+
+Date: 2026-06-06
+Status: preselection architecture. Final requirements are pending user selection
+from `doc/02_requirements/feature/multicore_green_options.md` and
+`doc/02_requirements/nfr/multicore_green_options.md`.
+
+## Scope Boundary
+
+This architecture covers the current and planned Simple concurrency split:
+
+- `thread_spawn` is the explicit OS-thread API.
+- `cooperative_green_spawn` and `cooperative_green_spawn_value` are
+  current-carrier cooperative queue APIs.
+- `multicore_green_spawn` is the hosted Pure Simple M:N candidate only when
+  its handle proves runtime-pool acceptance with `used_runtime_pool()`.
+- SimpleOS green-carrier support is a scheduler-facing lane for logical green
+  tasks, channel wake, AP dispatch evidence, and future hardware handoff.
+
+The architecture deliberately avoids numbered API names and does not use C,
+Go, or Rust as user-facing replacements for Simple APIs. C and Go remain
+profile baselines; Rust/C runtime code remains bootstrap or ABI
+implementation context.
+
+## Architectural Invariants
+
+- No M:N claim without evidence: hosted claims require runtime-pool handles,
+  and SimpleOS hardware claims require scheduler/QEMU evidence.
+- Cooperative green is never presented as Go-style CPU parallelism.
+- Public Simple APIs keep meaningful names and stable behavior.
+- Profile scripts must keep OS threads, cooperative green, multicore green,
+  C pthreads, and Go goroutines in separate rows.
+- SimpleOS logical green task state must not collide with normal OS `TaskId`
+  scheduling state.
+
+## Layers
+
+### Public Simple API Layer
+
+Primary paths:
+
+- `src/lib/nogc_sync_mut/concurrent/thread.spl`
+- `src/lib/nogc_async_mut/concurrent/cooperative_green.spl`
+- `src/lib/nogc_async_mut/concurrent/green_thread.spl`
+- `src/lib/nogc_async_mut/concurrent/multicore_green.spl`
+
+Responsibilities:
+
+- Provide stable user-facing names.
+- Preserve the semantic difference between OS thread, cooperative queue, and
+  runtime-pool M:N candidate.
+- Expose join and evidence methods without leaking runtime ABI names into user
+  code.
+
+### Runtime Pool ABI Layer
+
+Primary surfaces:
+
+- `rt_pool_submit`
+- `rt_pool_join`
+- `rt_pool_is_done`
+
+Responsibilities:
+
+- Accept closure work into a bounded native worker pool when linked.
+- Return a positive handle only when the runtime pool owns the work.
+- Allow `MulticoreGreenHandle.used_runtime_pool()` to be the trust boundary for
+  profile and M:N evidence.
+
+### Profile And Evidence Layer
+
+Primary paths:
+
+- `scripts/check/check-cross-language-perf.shs`
+- `test/05_perf/profile_scripts/profile_report_contract_test.shs`
+- `test/05_perf/stress/multicore_green_fanout_spec.spl`
+- `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`
+- `doc/09_report/cross_language_perf_parallel_smoke.md`
+
+Responsibilities:
+
+- Generate and gate reproducible evidence for Simple OS thread, cooperative
+  green, multicore green, C pthread, and Go goroutine rows.
+- Reject missing or misleading native M:N rows.
+- Keep Go-vs-C large fanout stress separate so one-pthread-per-task C is not
+  mistaken for M:N scheduling.
+
+### SimpleOS Scheduler Layer
+
+Primary paths:
+
+- `src/os/kernel/scheduler/green_task.spl`
+- `src/os/kernel/scheduler/green_worker.spl`
+- `src/os/kernel/scheduler/green_carrier.spl`
+- `src/os/kernel/scheduler/scheduler.spl`
+- `src/os/kernel/smp/smp.spl`
+
+Responsibilities:
+
+- Model logical green tasks separately from normal kernel tasks.
+- Route runnable green work through bounded carrier queues.
+- Send remote reschedule IPI intent for AP work.
+- Apply scheduler-owned green execution state separately from normal current
+  task state.
+- Provide freestanding fixed-slot helpers for small QEMU probes.
+
+## Data Flow
+
+Hosted runtime-pool path:
+
+- User code calls `multicore_green_spawn`.
+- The facade calls `rt_pool_submit`.
+- Positive native handle means runtime-pool ownership; zero means inline
+  fallback.
+- Join and done checks go through `rt_pool_join` and `rt_pool_is_done` only for
+  positive native handles.
+- Profile rows treat only positive-handle work as M:N candidate evidence.
+
+Cooperative path:
+
+- User code calls `cooperative_green_spawn` or
+  `cooperative_green_spawn_value`.
+- Work/result enters the current-carrier green queue.
+- `cooperative_green_run_one` or `cooperative_green_run_all` drains the queue
+  on the current OS thread.
+- Profile rows classify this as cooperative queue work, not CPU parallelism.
+
+SimpleOS path:
+
+- Logical green task state is created or woken.
+- `green_carrier` creates enqueue and remote wake intent.
+- SMP records IPI delivery for remote CPUs.
+- Carrier dispatch produces `GreenCarrierSchedulerIntent`.
+- `Scheduler.apply_green_scheduler_intent` updates the scheduler-owned green
+  execution lane without mutating normal OS task state.
+- QEMU proof currently covers AP startup plus CPU1 fixed-slot dispatch; full
+  hardware context-switch handoff remains future work.
+
+## Requirement Option Mapping
+
+Evidence-Only Stabilization uses the Public Simple API Layer and Profile And
+Evidence Layer while keeping blockers explicit.
+
+Host Runtime-Pool M:N uses the Public Simple API Layer, Runtime Pool ABI Layer,
+and Profile And Evidence Layer. Its proof boundary is
+`used_runtime_pool()`.
+
+Scheduler-Aware SimpleOS Green Runtime uses the SimpleOS Scheduler Layer and
+requires hosted SimpleOS specs plus opt-in QEMU proof.
+
+Full Go-Like Runtime Roadmap combines all layers and adds future work stealing,
+blocking integration, a parallelism limit similar in role to `GOMAXPROCS`, and
+preemption or compiler-inserted yield points before claiming tight-loop
+fairness comparable to Go.
+
+## Known Gaps
+
+- Final feature and NFR requirements require user selection.
+- Architecture and design should be revalidated after selected requirements are
+  written.
+- `thread_spawn_with_args` native explicit-argument ABI remains tracked as a
+  blocker, so profile OS-thread rows use `thread_spawn`.
+- SMF cooperative-green and SMF multicore-green fanout blockers remain
+  classified separately from native M:N evidence.
+- SimpleOS QEMU proof does not yet prove final hardware context-switch handoff.
