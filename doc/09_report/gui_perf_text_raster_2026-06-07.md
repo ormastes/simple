@@ -118,6 +118,14 @@ the returned alpha mask plus `cuda_hits=1`, `gpu_returned_glyphs=1`, and
 `gpu_returned_glyph_pixels=1`. This proves bitmap glyphs can use the same
 backend-return evidence shape; live production kernels still need to feed it.
 
+2026-06-07 Draw IR bitmap-return follow-up: the Engine2D Draw IR executor now
+resets and reads bitmap accelerator stats with vector stats. A focused unit
+renders a non-vector `~` text command, injects validated CUDA bitmap glyph
+pixels, and asserts `gpu-glyph-returned`,
+`font_gpu_glyph_returned=true`, and `font_production_ready=true` from the Draw
+IR result. This closes the bitmap visibility gap at the GUI text boundary; live
+CUDA/HIP/Vulkan/Metal kernels still need to populate the contract.
+
 Related tracked issue:
 [`pure_simple_web_render_interpreter_bound_2026-06-06.md`](../08_tracking/bug/pure_simple_web_render_interpreter_bound_2026-06-06.md).
   

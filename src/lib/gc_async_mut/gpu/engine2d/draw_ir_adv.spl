@@ -15,8 +15,8 @@ use common.ui.draw_ir.{
 }
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.helpers_text.{TextBlitCache}
-use std.gc_async_mut.gpu.engine2d.vector_font_offload.{vector_font_current_offload_evidence}
-use std.gc_async_mut.text_layout.font_rasterizer.{reset_vector_font_raster_stats}
+use std.gc_async_mut.gpu.engine2d.vector_font_offload.{VectorFontOffloadEvidence, vector_font_current_offload_evidence}
+use std.gc_async_mut.text_layout.font_rasterizer.{reset_vector_font_raster_stats, reset_bitmap_font_raster_stats, bitmap_font_accelerator_stats}
 
 val ENGINE2D_DRAW_IR_COMMAND_RECT: text = "rect"
 val ENGINE2D_DRAW_IR_COMMAND_TEXT: text = "text"
@@ -38,6 +38,36 @@ struct Engine2dDrawIrAdvResult:
     font_text_cache_hits: i32
     font_text_cache_misses: i32
     pixels: [u32]
+
+class Engine2dFontOffloadSummary:
+    status: text
+    reason: text
+    gpu_glyph_returned: bool
+    production_ready: bool
+
+fn _engine2d_font_offload_summary(evidence: VectorFontOffloadEvidence) -> Engine2dFontOffloadSummary:
+    val bitmap = bitmap_font_accelerator_stats()
+    val bitmap_gpu_glyph_returned = bitmap.gpu_returned_glyphs > 0 and bitmap.gpu_returned_glyph_pixels > 0
+    if bitmap.cpu_fallback_hits > 0:
+        return Engine2dFontOffloadSummary(
+            status: "cpu-fallback",
+            reason: if bitmap.unavailable_reason != "": bitmap.unavailable_reason else: "bitmap-font-gpu-glyph-return-missing",
+            gpu_glyph_returned: false,
+            production_ready: false
+        )
+    if bitmap_gpu_glyph_returned:
+        return Engine2dFontOffloadSummary(
+            status: "gpu-glyph-returned",
+            reason: bitmap.unavailable_reason,
+            gpu_glyph_returned: true,
+            production_ready: true
+        )
+    Engine2dFontOffloadSummary(
+        status: evidence.status_code,
+        reason: evidence.reason,
+        gpu_glyph_returned: evidence.gpu_glyph_returned,
+        production_ready: evidence.production_ready
+    )
 
 fn _engine2d_draw_ir_result_from_plan(plan: Simple2dDrawIrPlan, rendered: i32, skipped: i32, text_count: i32, last_font_size: i32, font_status: text, font_reason: text, font_gpu_glyph_returned: bool, font_production_ready: bool, font_text_cache_hits: i32, font_text_cache_misses: i32, pixels: [u32]) -> Engine2dDrawIrAdvResult:
     Engine2dDrawIrAdvResult(
@@ -127,6 +157,7 @@ fn engine2d_draw_ir_adv_batch(engine: Engine2D, batch: DrawIrBatch, gpu_availabl
     var font_production_ready = false
     var font_cache = TextBlitCache.new()
     reset_vector_font_raster_stats()
+    reset_bitmap_font_raster_stats()
     for command in batch.commands:
         val x = batch.embedding.x + command.x
         val y = batch.embedding.y + command.y
@@ -141,10 +172,11 @@ fn engine2d_draw_ir_adv_batch(engine: Engine2D, batch: DrawIrBatch, gpu_availabl
             val evidence = vector_font_current_offload_evidence(engine.backend_name(), _draw_ir_text_extent(text_buf.width, command.width), _draw_ir_text_extent(text_buf.height, command.height), gpu_available and plan.selected_backend != "cpu", gpu_available and plan.selected_backend != "cpu", 0)
             text_count = text_count + 1
             last_font_size = font_size
-            font_status = evidence.status_code
-            font_reason = evidence.reason
-            font_gpu_glyph_returned = evidence.gpu_glyph_returned
-            font_production_ready = evidence.production_ready
+            val offload = _engine2d_font_offload_summary(evidence)
+            font_status = offload.status
+            font_reason = offload.reason
+            font_gpu_glyph_returned = offload.gpu_glyph_returned
+            font_production_ready = offload.production_ready
             rendered = rendered + 1
         else:
             skipped = skipped + 1
@@ -164,6 +196,7 @@ fn engine2d_draw_ir_adv_composition(engine: Engine2D, composition: DrawIrComposi
     var font_production_ready = false
     var font_cache = TextBlitCache.new()
     reset_vector_font_raster_stats()
+    reset_bitmap_font_raster_stats()
     for batch in composition.batches:
         if batch.embedding.clip:
             engine.set_clip(batch.embedding.x, batch.embedding.y, batch.embedding.width, batch.embedding.height)
@@ -181,10 +214,11 @@ fn engine2d_draw_ir_adv_composition(engine: Engine2D, composition: DrawIrComposi
                 val evidence = vector_font_current_offload_evidence(engine.backend_name(), _draw_ir_text_extent(text_buf.width, command.width), _draw_ir_text_extent(text_buf.height, command.height), gpu_available and plan.selected_backend != "cpu", gpu_available and plan.selected_backend != "cpu", 0)
                 text_count = text_count + 1
                 last_font_size = font_size
-                font_status = evidence.status_code
-                font_reason = evidence.reason
-                font_gpu_glyph_returned = evidence.gpu_glyph_returned
-                font_production_ready = evidence.production_ready
+                val offload = _engine2d_font_offload_summary(evidence)
+                font_status = offload.status
+                font_reason = offload.reason
+                font_gpu_glyph_returned = offload.gpu_glyph_returned
+                font_production_ready = offload.production_ready
                 rendered = rendered + 1
             else:
                 skipped = skipped + 1

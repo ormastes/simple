@@ -28,7 +28,7 @@ draw_ir_adv_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -376,12 +376,62 @@ _clear_cuda_vector_font_probe_glyph()
 
 </details>
 
+#### reports gpu glyph return when backend rasterizer supplies bitmap glyph pixels
+
+1.  set cuda bitmap font probe glyph
+2. var engine = Engine2D create with backend
+3. engine clear
+4.  draw ir text command
+   - Expected: result.rendered_command_count equals `1`
+   - Expected: result.text_command_count equals `1`
+   - Expected: result.font_offload_status equals `gpu-glyph-returned`
+   - Expected: result.font_offload_reason equals `cuda-bitmap-font-glyph-pixels-returned`
+   - Expected: result.font_gpu_glyph_returned is true
+   - Expected: result.font_production_ready is true
+   - Expected: stats.gpu_returned_glyphs equals `1`
+   - Expected: stats.gpu_returned_glyph_pixels equals `1`
+5. engine shutdown
+6.  clear cuda bitmap font probe glyph
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 21 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+_set_cuda_bitmap_font_probe_glyph()
+var engine = Engine2D.create_with_backend(64, 32, "cpu")
+engine.clear(BG)
+val batch = draw_ir_batch("text-bitmap-gpu-glyph-batch", DRAW_IR_TEST_BACKEND_GPU, draw_ir_embedding_config("surf", "win", 0, 0, 64, 32, 1, 1000, false), [
+    _draw_ir_text_command("title-bitmap", 2, 3, "~")
+])
+
+val result = engine2d_draw_ir_adv_batch(engine, batch, false)
+val stats = bitmap_font_accelerator_stats()
+
+expect(result.rendered_command_count).to_equal(1)
+expect(result.text_command_count).to_equal(1)
+expect(result.font_offload_status).to_equal("gpu-glyph-returned")
+expect(result.font_offload_reason).to_equal("cuda-bitmap-font-glyph-pixels-returned")
+expect(result.font_gpu_glyph_returned).to_equal(true)
+expect(result.font_production_ready).to_equal(true)
+expect(stats.gpu_returned_glyphs).to_equal(1)
+expect(stats.gpu_returned_glyph_pixels).to_equal(1)
+expect(_count_not_color(result.pixels, BG)).to_be_greater_than(0)
+engine.shutdown()
+_clear_cuda_bitmap_font_probe_glyph()
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

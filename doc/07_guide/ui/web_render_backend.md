@@ -67,13 +67,14 @@ consumes those text commands directly.
 `engine2d_draw_ir_adv_*` now consumes the text contract by reading `font-size`,
 rendering through FontRenderer-backed text blit buffers, and reporting
 `font_offload_status`, `font_offload_reason`, `font_gpu_glyph_returned`, and
-`font_production_ready` from the vector-font offload evidence helper. A status
-such as `cpu-fallback` means routing and metadata are live while production GPU
-dispatch is still missing; `gpu-glyph-returned` means the backend rasterizer
-returned glyph pixels through the vector-font evidence path. The Draw IR text
-executor also reports `font_text_cache_hits` / `font_text_cache_misses` for the
-per-batch text-blit buffer cache; repeated identical labels should hit this
-cache instead of re-running glyph layout and blit preparation.
+`font_production_ready` from the vector and bitmap font accelerator evidence.
+A status such as `cpu-fallback` means routing and metadata are live while
+production GPU dispatch is still missing; `gpu-glyph-returned` means the backend
+rasterizer returned glyph pixels through the vector or bitmap evidence path.
+The Draw IR text executor also reports `font_text_cache_hits` /
+`font_text_cache_misses` for the per-batch text-blit buffer cache; repeated
+identical labels should hit this cache instead of re-running glyph layout and
+blit preparation.
 Bitmap fallback follows the same evidence direction through
 `rasterize_bitmap_accelerated()` and `bitmap_font_accelerator_stats()`: a
 validated backend-returned bitmap glyph can bypass CPU mask generation and

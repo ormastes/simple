@@ -150,9 +150,17 @@ contract. Focused unit coverage injects one `A` glyph, asserts the returned
 1x1 pixel mask, and verifies `cuda_hits == 1`,
 `gpu_returned_glyphs == 1`, and `gpu_returned_glyph_pixels == 1`.
 
+2026-06-07 Draw IR bitmap-return update: `engine2d_draw_ir_adv_*` now resets
+and reads bitmap accelerator stats alongside vector stats, so a non-vector text
+glyph rendered through bitmap fallback can surface `font_offload_status ==
+"gpu-glyph-returned"`, `font_offload_reason ==
+"cuda-bitmap-font-glyph-pixels-returned"`, and
+`font_production_ready == true` at the main GUI Draw IR boundary. Focused unit
+coverage injects a validated `~` bitmap glyph and verifies the Draw IR result.
+
 Remaining bitmap gap: production CUDA/HIP/Vulkan/Metal glyph raster kernels
-still need to populate the bitmap glyph-return contract during real GUI
-execution.
+still need to populate the bitmap glyph-return contract during live GUI
+execution instead of the test evidence slot.
 ## Follow-up: GUI profile throughput evidence
 
 2026-06-06 GUI profile smoke:
