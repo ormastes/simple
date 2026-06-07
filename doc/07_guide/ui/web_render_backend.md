@@ -133,14 +133,17 @@ facade allocates device `glyph_plan` and `dst`, packs those handles, launches
 `simple_2d_glyph_raster_u32`, and requires readback evidence before reporting a
 returned generated glyph. It still reports `production_ready=false` because the
 smoke plan is not yet a real vector or bitmap glyph plan.
-provenance observes `args_ready`. OpenCL, CUDA, and ROCm session launch evidence
-now use that shared layout validator before submit, so generated glyph kernels
-do not treat an arbitrary nonzero pointer as launch-ready. Live GUI text
-execution now uses the shared generated glyph staging helper to allocate
-temporary glyph-plan/output buffers, packs a real args pointer for GPU-routed
-Draw IR text, and reports
-`font_generated_args_ready` / `font_generated_args_reason`. Backend readback
-into returned glyph pixels remains the production integration step.
+Generated glyph provenance observes `args_ready`. OpenCL, CUDA, and ROCm session
+launch evidence now use that shared layout validator before submit, so generated
+glyph kernels do not treat an arbitrary nonzero pointer as launch-ready. Live
+GUI text execution now uses the shared generated glyph staging helper to
+allocate temporary glyph-plan/output buffers, packs a real args pointer for
+GPU-routed Draw IR text, and reports `font_generated_args_ready` /
+`font_generated_args_reason`. Draw IR also reports
+`font_backend_glyph_status`, `font_backend_glyph_reason`, and
+`font_backend_glyph_readback` from the Engine2D backend evidence bridge.
+Backend readback into returned glyph pixels remains the production integration
+step.
 `web_render_vector_font_native_compute_evidence()` mirrors the same native-first
 order for shared web-render reports, while the older CUDA/OpenCL-only evidence
 helper remains available for existing reports.

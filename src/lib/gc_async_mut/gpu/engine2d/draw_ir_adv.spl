@@ -38,6 +38,9 @@ struct Engine2dDrawIrAdvResult:
     font_production_ready: bool
     font_generated_args_ready: bool
     font_generated_args_reason: text
+    font_backend_glyph_status: text
+    font_backend_glyph_reason: text
+    font_backend_glyph_readback: bool
     font_text_cache_hits: i32
     font_text_cache_misses: i32
     pixels: [u32]
@@ -72,7 +75,7 @@ fn _engine2d_font_offload_summary(evidence: VectorFontOffloadEvidence) -> Engine
         production_ready: evidence.production_ready
     )
 
-fn _engine2d_draw_ir_result_from_plan(plan: Simple2dDrawIrPlan, rendered: i32, skipped: i32, text_count: i32, last_font_size: i32, font_status: text, font_reason: text, font_gpu_glyph_returned: bool, font_production_ready: bool, font_generated_args_ready: bool, font_generated_args_reason: text, font_text_cache_hits: i32, font_text_cache_misses: i32, pixels: [u32]) -> Engine2dDrawIrAdvResult:
+fn _engine2d_draw_ir_result_from_plan(plan: Simple2dDrawIrPlan, rendered: i32, skipped: i32, text_count: i32, last_font_size: i32, font_status: text, font_reason: text, font_gpu_glyph_returned: bool, font_production_ready: bool, font_generated_args_ready: bool, font_generated_args_reason: text, font_backend_glyph_status: text, font_backend_glyph_reason: text, font_backend_glyph_readback: bool, font_text_cache_hits: i32, font_text_cache_misses: i32, pixels: [u32]) -> Engine2dDrawIrAdvResult:
     Engine2dDrawIrAdvResult(
         schema: plan.schema,
         unit_id: plan.batch_id,
@@ -89,12 +92,15 @@ fn _engine2d_draw_ir_result_from_plan(plan: Simple2dDrawIrPlan, rendered: i32, s
         font_production_ready: font_production_ready,
         font_generated_args_ready: font_generated_args_ready,
         font_generated_args_reason: font_generated_args_reason,
+        font_backend_glyph_status: font_backend_glyph_status,
+        font_backend_glyph_reason: font_backend_glyph_reason,
+        font_backend_glyph_readback: font_backend_glyph_readback,
         font_text_cache_hits: font_text_cache_hits,
         font_text_cache_misses: font_text_cache_misses,
         pixels: pixels
     )
 
-fn _engine2d_draw_ir_result_from_composition_plan(plan: Simple2dDrawIrCompositionPlan, rendered: i32, skipped: i32, text_count: i32, last_font_size: i32, font_status: text, font_reason: text, font_gpu_glyph_returned: bool, font_production_ready: bool, font_generated_args_ready: bool, font_generated_args_reason: text, font_text_cache_hits: i32, font_text_cache_misses: i32, pixels: [u32]) -> Engine2dDrawIrAdvResult:
+fn _engine2d_draw_ir_result_from_composition_plan(plan: Simple2dDrawIrCompositionPlan, rendered: i32, skipped: i32, text_count: i32, last_font_size: i32, font_status: text, font_reason: text, font_gpu_glyph_returned: bool, font_production_ready: bool, font_generated_args_ready: bool, font_generated_args_reason: text, font_backend_glyph_status: text, font_backend_glyph_reason: text, font_backend_glyph_readback: bool, font_text_cache_hits: i32, font_text_cache_misses: i32, pixels: [u32]) -> Engine2dDrawIrAdvResult:
     Engine2dDrawIrAdvResult(
         schema: plan.schema,
         unit_id: plan.composition_id,
@@ -111,6 +117,9 @@ fn _engine2d_draw_ir_result_from_composition_plan(plan: Simple2dDrawIrCompositio
         font_production_ready: font_production_ready,
         font_generated_args_ready: font_generated_args_ready,
         font_generated_args_reason: font_generated_args_reason,
+        font_backend_glyph_status: font_backend_glyph_status,
+        font_backend_glyph_reason: font_backend_glyph_reason,
+        font_backend_glyph_readback: font_backend_glyph_readback,
         font_text_cache_hits: font_text_cache_hits,
         font_text_cache_misses: font_text_cache_misses,
         pixels: pixels
@@ -164,6 +173,9 @@ fn engine2d_draw_ir_adv_batch(engine: Engine2D, batch: DrawIrBatch, gpu_availabl
     var font_production_ready = false
     var font_generated_args_ready = false
     var font_generated_args_reason = "no-text-commands"
+    var font_backend_glyph_status = "no-text-commands"
+    var font_backend_glyph_reason = "no-text-commands"
+    var font_backend_glyph_readback = false
     var font_cache = TextBlitCache.new()
     val backend_name = engine.backend_name()
     val generated_glyph_args_enabled = gpu_available and plan.selected_backend != "cpu"
@@ -184,10 +196,14 @@ fn engine2d_draw_ir_adv_batch(engine: Engine2D, batch: DrawIrBatch, gpu_availabl
             val offload_height = _draw_ir_text_extent(text_buf.height, command.height)
             val staging = generated_glyph_raster_staging_create(offload_width, offload_height, font_size as i64, generated_glyph_args_enabled)
             val evidence = vector_font_current_offload_evidence(backend_name, offload_width, offload_height, generated_glyph_args_enabled, generated_glyph_args_enabled, staging.args_ptr())
+            val backend_glyph = engine.generated_glyph_raster_evidence(offload_width.to_i32(), offload_height.to_i32(), font_size)
             text_count = text_count + 1
             last_font_size = font_size
             font_generated_args_ready = staging.ready()
             font_generated_args_reason = staging.reason()
+            font_backend_glyph_status = backend_glyph.status_code
+            font_backend_glyph_reason = backend_glyph.reason
+            font_backend_glyph_readback = backend_glyph.device_glyph_returned
             val offload = _engine2d_font_offload_summary(evidence)
             font_status = offload.status
             font_reason = offload.reason
@@ -199,7 +215,7 @@ fn engine2d_draw_ir_adv_batch(engine: Engine2D, batch: DrawIrBatch, gpu_availabl
             skipped = skipped + 1
     if batch.embedding.clip:
         engine.clear_clip()
-    _engine2d_draw_ir_result_from_plan(plan, rendered, skipped, text_count, last_font_size, font_status, font_reason, font_gpu_glyph_returned, font_production_ready, font_generated_args_ready, font_generated_args_reason, font_cache.cache_hits, font_cache.cache_misses, engine.read_pixels())
+    _engine2d_draw_ir_result_from_plan(plan, rendered, skipped, text_count, last_font_size, font_status, font_reason, font_gpu_glyph_returned, font_production_ready, font_generated_args_ready, font_generated_args_reason, font_backend_glyph_status, font_backend_glyph_reason, font_backend_glyph_readback, font_cache.cache_hits, font_cache.cache_misses, engine.read_pixels())
 
 fn engine2d_draw_ir_adv_composition(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool) -> Engine2dDrawIrAdvResult:
     val plan = simple_2d_draw_ir_adv_composition_plan(composition, gpu_available)
@@ -213,6 +229,9 @@ fn engine2d_draw_ir_adv_composition(engine: Engine2D, composition: DrawIrComposi
     var font_production_ready = false
     var font_generated_args_ready = false
     var font_generated_args_reason = "no-text-commands"
+    var font_backend_glyph_status = "no-text-commands"
+    var font_backend_glyph_reason = "no-text-commands"
+    var font_backend_glyph_readback = false
     var font_cache = TextBlitCache.new()
     val backend_name = engine.backend_name()
     val generated_glyph_args_enabled = gpu_available and plan.selected_backend != "cpu"
@@ -236,10 +255,14 @@ fn engine2d_draw_ir_adv_composition(engine: Engine2D, composition: DrawIrComposi
                 val offload_height = _draw_ir_text_extent(text_buf.height, command.height)
                 val staging = generated_glyph_raster_staging_create(offload_width, offload_height, font_size as i64, generated_glyph_args_enabled)
                 val evidence = vector_font_current_offload_evidence(backend_name, offload_width, offload_height, generated_glyph_args_enabled, generated_glyph_args_enabled, staging.args_ptr())
+                val backend_glyph = engine.generated_glyph_raster_evidence(offload_width.to_i32(), offload_height.to_i32(), font_size)
                 text_count = text_count + 1
                 last_font_size = font_size
                 font_generated_args_ready = staging.ready()
                 font_generated_args_reason = staging.reason()
+                font_backend_glyph_status = backend_glyph.status_code
+                font_backend_glyph_reason = backend_glyph.reason
+                font_backend_glyph_readback = backend_glyph.device_glyph_returned
                 val offload = _engine2d_font_offload_summary(evidence)
                 font_status = offload.status
                 font_reason = offload.reason
@@ -251,4 +274,4 @@ fn engine2d_draw_ir_adv_composition(engine: Engine2D, composition: DrawIrComposi
                 skipped = skipped + 1
         if batch.embedding.clip:
             engine.clear_clip()
-    _engine2d_draw_ir_result_from_composition_plan(plan, rendered, skipped, text_count, last_font_size, font_status, font_reason, font_gpu_glyph_returned, font_production_ready, font_generated_args_ready, font_generated_args_reason, font_cache.cache_hits, font_cache.cache_misses, engine.read_pixels())
+    _engine2d_draw_ir_result_from_composition_plan(plan, rendered, skipped, text_count, last_font_size, font_status, font_reason, font_gpu_glyph_returned, font_production_ready, font_generated_args_ready, font_generated_args_reason, font_backend_glyph_status, font_backend_glyph_reason, font_backend_glyph_readback, font_cache.cache_hits, font_cache.cache_misses, engine.read_pixels())

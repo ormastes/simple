@@ -363,6 +363,10 @@ it allocates temporary glyph-plan and destination buffers to prove generated
 launch-argument readiness, but production readiness requires backend readback to
 populate the vector or bitmap returned-glyph contract before
 `font_production_ready` can be true.
+The Engine2D facade exposes backend generated-glyph evidence to Draw IR as
+separate status/reason/readback metadata. These fields prove whether a concrete
+backend handoff was attempted or failed closed without reclassifying smoke
+readback as production glyph rendering.
 Concrete backends must not pass host staging pointers to APIs that require
 device buffers. The OpenCL facade owns an explicit generated-glyph smoke path
 that allocates device `glyph_plan` and `dst` buffers, packs those device handles

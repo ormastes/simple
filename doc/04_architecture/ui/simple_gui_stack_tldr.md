@@ -88,6 +88,8 @@ Host input
   staging smoke path for `simple_2d_glyph_raster_u32`; it packs device
   `glyph_plan`/`dst` handles with the shared generated glyph layout and reports
   typed launch/readback evidence without marking production font readiness.
+- Draw IR glyph evidence: `Engine2dDrawIrAdvResult` reports backend glyph
+  status/reason/readback separately from production returned-glyph readiness.
 - Engine2D split contract: `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl`.
 - WM dispatch adapter: `src/lib/common/ui/wm_runtime_dispatch.spl` converts
   `SharedWmDispatchResult` to stable `WmRuntimeDispatchCommand` for host shells.

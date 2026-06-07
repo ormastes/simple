@@ -234,6 +234,13 @@ and requires typed readback evidence before reporting
 until live vector/bitmap glyph-plan data is wired into the returned-glyph
 contract.
 
+2026-06-07 Draw IR backend-glyph evidence bridge update: `Engine2D` now keeps
+the selected OpenCL backend reachable for generated glyph evidence and
+`engine2d_draw_ir_adv_*` reports `font_backend_glyph_status`,
+`font_backend_glyph_reason`, and `font_backend_glyph_readback` separately from
+`font_gpu_glyph_returned`. This lets Draw IR surface backend handoff/readback
+state without claiming production font readiness from the OpenCL smoke path.
+
 ## Path F — repeated ancestor clip walks during paint — FIXED 2026-06-07
 
 `paint()` called `ancestor_clip()` in the background, absolute, positive z-index,

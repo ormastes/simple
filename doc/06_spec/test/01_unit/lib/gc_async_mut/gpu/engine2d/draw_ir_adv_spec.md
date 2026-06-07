@@ -234,13 +234,16 @@ engine.shutdown()
    - Expected: result.font_production_ready is false
    - Expected: result.font_generated_args_ready is false
    - Expected: result.font_generated_args_reason equals `generated-glyph-args-disabled`
+   - Expected: result.font_backend_glyph_status equals `backend-not-opencl`
+   - Expected: result.font_backend_glyph_reason equals `engine2d-generated-glyph-backend-not-opencl`
+   - Expected: result.font_backend_glyph_readback is false
 9. engine shutdown
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 43 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -282,6 +285,9 @@ expect(result.font_gpu_glyph_returned).to_equal(false)
 expect(result.font_production_ready).to_equal(false)
 expect(result.font_generated_args_ready).to_equal(false)
 expect(result.font_generated_args_reason).to_equal("generated-glyph-args-disabled")
+expect(result.font_backend_glyph_status).to_equal("backend-not-opencl")
+expect(result.font_backend_glyph_reason).to_equal("engine2d-generated-glyph-backend-not-opencl")
+expect(result.font_backend_glyph_readback).to_equal(false)
 expect(_count_not_color(result.pixels, BG)).to_be_greater_than(0)
 engine.shutdown()
 ```
@@ -297,6 +303,8 @@ engine.shutdown()
    - Expected: result.text_command_count equals `1`
    - Expected: result.font_generated_args_ready is true
    - Expected: result.font_generated_args_reason equals `ready`
+   - Expected: result.font_backend_glyph_status equals `backend-not-opencl`
+   - Expected: result.font_backend_glyph_readback is false
    - Expected: result.font_gpu_glyph_returned is false
    - Expected: result.font_production_ready is false
    - Expected: stats.attempts equals `1`
@@ -306,7 +314,7 @@ engine.shutdown()
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -323,6 +331,8 @@ expect(result.rendered_command_count).to_equal(1)
 expect(result.text_command_count).to_equal(1)
 expect(result.font_generated_args_ready).to_equal(true)
 expect(result.font_generated_args_reason).to_equal("ready")
+expect(result.font_backend_glyph_status).to_equal("backend-not-opencl")
+expect(result.font_backend_glyph_readback).to_equal(false)
 expect(result.font_gpu_glyph_returned).to_equal(false)
 expect(result.font_production_ready).to_equal(false)
 expect(stats.attempts).to_equal(1)
