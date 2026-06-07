@@ -146,6 +146,11 @@ Behavior:
 - `Scheduler.green_timer_tick_active_carriers` runs that tick hook over active
   carriers only, so inactive carrier work is not preempted or requeued behind
   the scheduler-owned parallelism limit.
+- `Scheduler.green_preemption_safepoint_active_carriers` wraps the active
+  carrier tick sweep with an explicit preemption source contract. Accepted
+  sources are `timer_interrupt`, `runtime_safepoint`, and
+  `compiler_safepoint`; invalid sources return `invalid_preemption_source`
+  without ticking or mutating carrier state.
 - `Scheduler.run_green_channel_wake_pass` converts green-channel send/unpark
   output into a carrier enqueue, then runs the bounded active pass only when
   the wake actually enqueued a receiver.
@@ -218,9 +223,10 @@ Repository guards:
 
 - Scheduler-owned parallelism handoff: the hosted runtime-pool facade and
   SimpleOS `Scheduler` now both expose topology-bounded parallelism contracts.
-  Remaining work is carrying bounded worker-loop/yield/tick sweeps into final
-  AP hardware handoff, broader blocking surfaces, and real interrupt/compiler
-  preemption entrypoints.
-- Preemption strategy: scheduler-owned tick-budget yield exists; remaining work
-  is wiring compiler-inserted yields, runtime safepoints, or hardware timer
-  interrupts to that hook.
+  Remaining work is carrying bounded worker-loop/yield/tick and preemption-
+  safepoint sweeps into final AP hardware handoff plus broader blocking
+  surfaces.
+- Preemption strategy: scheduler-owned tick-budget yield and preemption
+  safepoint bridge exist; remaining work is wiring actual compiler-inserted
+  yields, runtime safepoint polling sites, and hardware timer interrupts to
+  that hook.

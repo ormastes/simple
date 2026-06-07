@@ -179,6 +179,11 @@ SimpleOS path:
 - `Scheduler.green_timer_tick_active_carriers` sweeps that timer hook across
   the active carrier set, preserving inactive carriers until the scheduler
   parallelism limit changes.
+- `Scheduler.green_preemption_safepoint_active_carriers` is the shared
+  interrupt/runtime/compiler entry contract for green preemption sweeps. It
+  accepts meaningful source labels (`timer_interrupt`, `runtime_safepoint`, or
+  `compiler_safepoint`), rejects unknown sources without mutating carrier
+  state, and delegates accepted sources to the active-carrier timer sweep.
 - `Scheduler.run_green_channel_wake_pass` composes green-channel unpark output
   with carrier enqueue and the bounded active-carrier pass, so parked channel
   receivers can re-enter scheduler-owned execution without bypassing carrier
@@ -200,9 +205,10 @@ The selected Full Go-Like Runtime Roadmap uses all layers:
   wake/IPI intent, and AP evidence.
 
 Future roadmap work remains explicit: carrying bounded worker-loop/yield/tick
-sweeps into final AP hardware handoff, blocking coverage beyond the current
-green-channel wake pass, and wiring the real interrupt/compiler preemption
-entrypoints before claiming tight-loop fairness comparable to Go.
+and preemption-safepoint sweeps into final AP hardware handoff, expanding
+blocking coverage beyond the current green-channel wake pass, and wiring real
+hardware timer and compiler-inserted safepoint call sites before claiming
+tight-loop fairness comparable to Go.
 
 ## Known Gaps
 

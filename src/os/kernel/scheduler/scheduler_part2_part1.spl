@@ -95,6 +95,7 @@ use os.kernel.scheduler.green_carrier.{
     GreenCarrierRunQueueState, GreenCarrierRebalanceResult, GreenCarrierRebalancePassResult,
     GreenCarrierRunStepResult, GreenCarrierRunPassResult, GreenCarrierRunLoopResult,
     GreenCarrierYieldResult, GreenCarrierTimerTickResult, GreenCarrierTimerSweepResult,
+    GreenCarrierPreemptionSweepResult,
     GreenCarrierWakeRunResult,
     green_carrier_apply_scheduler_intent,
     green_carrier_extend_execution_state,
@@ -636,6 +637,41 @@ impl Scheduler:
             last_cpu: last_cpu,
             last_task_id: last_task_id,
             reason: if yielded_workers > 0: "green_time_slice_expired" else: "time_slice_running"
+        )
+
+    fn _green_preemption_source_is_valid(source: text) -> bool:
+        source == "timer_interrupt" or source == "runtime_safepoint" or source == "compiler_safepoint"
+
+    me green_preemption_safepoint_active_carriers(queues: GreenCarrierRunQueueState, source: text) -> GreenCarrierPreemptionSweepResult:
+        if not self._green_preemption_source_is_valid(source):
+            val empty_sweep = GreenCarrierTimerSweepResult(
+                queues: queues,
+                ticked_carriers: 0,
+                yielded_workers: 0,
+                last_cpu: -1,
+                last_task_id: -1,
+                reason: "invalid_preemption_source"
+            )
+            return GreenCarrierPreemptionSweepResult(
+                queues: queues,
+                sweep: empty_sweep,
+                source: source,
+                accepted: false,
+                preemption_requested: false,
+                ticked_carriers: 0,
+                yielded_workers: 0,
+                reason: "invalid_preemption_source"
+            )
+        val sweep = self.green_timer_tick_active_carriers(queues)
+        GreenCarrierPreemptionSweepResult(
+            queues: sweep.queues,
+            sweep: sweep,
+            source: source,
+            accepted: true,
+            preemption_requested: sweep.yielded_workers > 0,
+            ticked_carriers: sweep.ticked_carriers,
+            yielded_workers: sweep.yielded_workers,
+            reason: sweep.reason
         )
 
     me set_green_carrier_parallelism(requested_limit: i64) -> GreenCarrierParallelismState:

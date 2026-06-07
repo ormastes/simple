@@ -157,6 +157,13 @@ go-runtime-hardening
 - verification: `scheduler.spl` and `green_carrier.spl` checks passed, and
   `scheduler_green_parallelism_spec.spl` passed 23 examples for active-carrier
   timer sweeps and inactive-carrier preservation.
+- implementation: Added `Scheduler.green_preemption_safepoint_active_carriers`,
+  a scheduler-owned preemption bridge for `timer_interrupt`,
+  `runtime_safepoint`, and `compiler_safepoint` sources. Unknown sources return
+  `invalid_preemption_source` without ticking or mutating carrier state.
+- verification: `scheduler.spl` and `green_carrier.spl` checks passed, and
+  `scheduler_green_parallelism_spec.spl` passed 26 examples for timer-interrupt
+  preemption, compiler-safepoint entry, and invalid-source misuse coverage.
 
 ## Completion Audit - 2026-06-07
 
