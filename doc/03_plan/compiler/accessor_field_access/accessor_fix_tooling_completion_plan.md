@@ -1,8 +1,15 @@
 # Accessor Field-Access Tooling — Completion Plan
 
-Status: planned (transform shipped; surfacing + cleanup outstanding)
+Status: completed 2026-06-07 (transform shipped; surfacing + cleanup verified)
 Date: 2026-06-07
 Owner: lint/fix tooling
+
+Completion note: verified against current `origin/main` in an isolated worktree.
+The old 111 ambiguous ACC001 field/accessor warnings are no longer present:
+the full lint sweep reports `ACC001: 0`, literal `field access` warning text is
+`0`, and `accessor_fix_main.spl --quiet` dry-runs with `0 file(s)`, `0 wrapper(s)`
+removed, and `0` call rewrites. Focused LSP, Tree-sitter, and accessor regression
+specs passed; see the Completion Evidence section below.
 
 ## Context
 
@@ -199,3 +206,25 @@ A and B are independent. Recommended order: **B first** (it reduces the 111, the
 visible metric), **A second** (surfaces the remaining intentional ones + all
 EasyFixes in-editor). Each lands behind its own verification gate; neither needs
 the other.
+
+## Completion Evidence
+
+Verified 2026-06-07 from clean worktree `/tmp/simple-accessor-fix` at current
+`origin/main`:
+
+- `SIMPLE_EXECUTION_MODE=interpret bin/simple run src/compiler/90.tools/fix/accessor_fix_main.spl --quiet`
+  reported `0 file(s)`, `0 wrapper(s) removed`, `0 cross-file call(s) rewritten`,
+  and `0 same-file call(s) simplified`.
+- Full lint sweep over `src test examples doc scripts tools bin` reported
+  `ACC001: 0` and literal `field access` warnings: `0`.
+- LSP sanity passed:
+  `test/01_unit/app/lsp/code_action_kind_spec.spl`,
+  `workspace_edit_spec.spl`, `server_capabilities_spec.spl`, and
+  `diagnostics_spec.spl`.
+- Tree-sitter sanity passed:
+  `treesitter_lexer_real_spec.spl`, `treesitter_parser_real_spec.spl`,
+  `treesitter_tokenkind_real_spec.spl`, and `treesitter_tree_real_spec.spl`.
+- Accessor/field-access regression specs passed:
+  `test/01_unit/compiler/tools/fix/dummy_accessor_fix_spec.spl`,
+  `test/01_unit/compiler/codegen/method_dispatch_field_access_spec.spl`, and
+  `test/03_system/compiler/compiler_compile_options_field_access_spec.spl`.

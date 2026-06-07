@@ -2,32 +2,25 @@
 
 Date: 2026-06-07 · Full: [accessor_fix_tooling_completion_plan.md](accessor_fix_tooling_completion_plan.md)
 
-Field-access rewrite shipped (199→111 ACC001 cleared; `L:short_grammar_field_access`
-emitted by `bin/simple fix`/`lint`). Two gaps remain.
+Status: **complete as of 2026-06-07**. The old 111 ACC001 field/accessor warning
+target is cleared in current `origin/main`: full lint sweep reports `ACC001: 0`,
+literal `field access` warnings `0`, and `accessor_fix_main.spl --quiet` reports
+zero remaining safe rewrites.
 
-**A. LSP code-actions** — the LSP shells only `check`, so lint/EasyFixes aren't
-shown. Add: in-process `Linter.lint_source` diagnostics + a
-`textDocument/codeAction` handler mapping `EasyFix.Replacement` (byte offsets) →
-LSP `WorkspaceEdit` (line + **UTF-16** columns). Advertise `codeActionProvider`.
-Live only after a bootstrap rebuild.
+**LSP sanity** passed for code-action kind, workspace edit, server capabilities,
+and diagnostics specs.
 
-**B. Clear the 111** — they are type-ambiguous (a real same-named method exists),
-so deletion needs **receiver types**. Steps: (0) classify — keep intentional
-mocks/forwarding/examples; (1) resolve receiver type per call **via the compiler's
-type pass, in-process** (preferred over LSP round-trips); (2) rewrite only
-C-typed calls then delete C's wrapper, **fail closed** on any unresolved /
-`&:N` / `_.N` / `ANY` usage; (3) gate with dry-run + 0-dangling + worktree
-baseline-vs-sweep + bootstrap; (4) pilot 2–3 names then expand.
+**Tree-sitter sanity** passed for lexer, parser, token-kind, and tree specs.
 
-Independent; do **B first** (reduces the metric), **A second**.
+**Accessor regression sanity** passed for dummy accessor fix, method-dispatch
+field access, and compiler compile-options field-access specs.
 
 ```sdn
 plan {
-  shipped: "field-access rewrite + ACC001 199->111"
-  A: "LSP: lint diagnostics + EasyFix quickfix code-actions"
-  B: "type-aware delete of 111 ambiguous wrappers (compiler-driven, fail-closed)"
-  shipped -> B -> A
-  gate: "dry-run + 0-dangling + baseline-vs-sweep + bootstrap, in isolated worktree"
-  B -> gate
+  status: "complete"
+  field_warning_gate: "ACC001=0, field access warning text=0"
+  accessor_fix_dry_run: "0 files, 0 wrappers, 0 call rewrites"
+  lsp: "focused sanity specs pass"
+  treesitter: "focused sanity specs pass"
 }
 ```
