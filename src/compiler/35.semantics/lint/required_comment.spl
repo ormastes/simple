@@ -11,19 +11,14 @@
 # Works with the arena-based core AST (integer-tagged nodes).
 
 use compiler.core.ast_expr.{
-    EXPR_PASS_TODO, EXPR_PASS_DO_NOTHING, EXPR_PASS_DN,
-    EXPR_CALL, EXPR_IDENT, EXPR_STRING_LIT, EXPR_MATCH,
-    EXPR_BINARY, EXPR_UNARY, EXPR_IF, EXPR_BLOCK,
-    expr_tag, expr_s_val, expr_left, expr_right, expr_extra, expr_args, expr_stmts
+    expr_get_tag, expr_get_str, expr_get_left, expr_get_right,
+    expr_get_extra, expr_get_args, expr_get_stmts
 }
 use compiler.core.ast_stmt.{
-    STMT_EXPR, STMT_RETURN, STMT_VAL_DECL, STMT_VAR_DECL,
-    STMT_IF, STMT_FOR, STMT_WHILE, STMT_BLOCK, STMT_MATCH,
-    stmt_tag, stmt_expr, stmt_body
+    stmt_get_tag, stmt_get_expr, stmt_get_body
 }
 use compiler.core.ast.{
-    DECL_FN,
-    decl_tag, decl_name, decl_body_stmts,
+    decl_get_tag, decl_get_name, decl_get_body,
     arm_get_pattern, arm_get_guard, arm_get_body, arm_get_rationale
 }
 use compiler.frontend.core.dangerous_keywords.{is_dangerous_keyword}
@@ -52,16 +47,18 @@ fn check_required_comment(decl_indices: [i64]) -> [RequiredCommentWarning]:
     var warnings: [RequiredCommentWarning] = []
 
     for idx in decl_indices:
-        val tag = decl_tag[idx]
+        val tag = decl_get_tag(idx)
 
-        if tag != DECL_FN:
+        if tag != 1:
             continue
 
-        val fn_name = decl_name[idx]
-        val body = decl_body_stmts[idx]
+        val fn_name = decl_get_name(idx)
+        val body = decl_get_body(idx)
 
         for stmt_idx in body:
-            _check_stmt(stmt_idx, fn_name, warnings)
+            val stmt_warnings = _check_stmt(stmt_idx, fn_name)
+            for warning in stmt_warnings:
+                warnings.push(warning)
 
     warnings
 
@@ -81,50 +78,73 @@ fn _is_weak_rationale(msg: text) -> bool:
 # Statement and Expression Walking
 # ============================================================================
 
-fn _check_stmt(stmt_idx: i64, site_name: text, warnings: [RequiredCommentWarning]):
+fn _check_stmt(stmt_idx: i64, site_name: text) -> [RequiredCommentWarning]:
+    var warnings: [RequiredCommentWarning] = []
     if stmt_idx < 0:
-        return
-    val tag = stmt_tag[stmt_idx]
+        return warnings
+    val tag = stmt_get_tag(stmt_idx)
 
-    if tag == STMT_EXPR:
-        val e = stmt_expr[stmt_idx]
-        _check_expr(e, site_name, warnings)
-    elif tag == STMT_RETURN:
-        val e = stmt_expr[stmt_idx]
+    if tag == 1:
+        val e = stmt_get_expr(stmt_idx)
+        val expr_warnings = _check_expr(e, site_name)
+        for warning in expr_warnings:
+            warnings.push(warning)
+    elif tag == 5:
+        val e = stmt_get_expr(stmt_idx)
         if e >= 0:
-            _check_expr(e, site_name, warnings)
-    elif tag == STMT_BLOCK:
-        val body = stmt_body[stmt_idx]
+            val expr_warnings = _check_expr(e, site_name)
+            for warning in expr_warnings:
+                warnings.push(warning)
+    elif tag == 10:
+        val body = stmt_get_body(stmt_idx)
         for s in body:
-            _check_stmt(s, site_name, warnings)
-    elif tag == STMT_IF:
-        val body = stmt_body[stmt_idx]
+            val stmt_warnings = _check_stmt(s, site_name)
+            for warning in stmt_warnings:
+                warnings.push(warning)
+    elif tag == 6:
+        val body = stmt_get_body(stmt_idx)
         for s in body:
-            _check_stmt(s, site_name, warnings)
-    elif tag == STMT_FOR:
-        val body = stmt_body[stmt_idx]
+            val stmt_warnings = _check_stmt(s, site_name)
+            for warning in stmt_warnings:
+                warnings.push(warning)
+    elif tag == 7:
+        val body = stmt_get_body(stmt_idx)
         for s in body:
-            _check_stmt(s, site_name, warnings)
-    elif tag == STMT_WHILE:
-        val body = stmt_body[stmt_idx]
+            val stmt_warnings = _check_stmt(s, site_name)
+            for warning in stmt_warnings:
+                warnings.push(warning)
+    elif tag == 8:
+        val body = stmt_get_body(stmt_idx)
         for s in body:
-            _check_stmt(s, site_name, warnings)
-    elif tag == STMT_MATCH:
-        val e = stmt_expr[stmt_idx]
-        _check_expr(e, site_name, warnings)
-        val arms = stmt_body[stmt_idx]
+            val stmt_warnings = _check_stmt(s, site_name)
+            for warning in stmt_warnings:
+                warnings.push(warning)
+    elif tag == 9:
+        val e = stmt_get_expr(stmt_idx)
+        val expr_warnings = _check_expr(e, site_name)
+        for warning in expr_warnings:
+            warnings.push(warning)
+        val arms = stmt_get_body(stmt_idx)
         for arm_idx in arms:
-            _check_match_arm(arm_idx, site_name, warnings)
+            val arm_warnings = _check_match_arm(arm_idx, site_name)
+            for warning in arm_warnings:
+                warnings.push(warning)
+    warnings
 
-fn _check_match_arm(arm_idx: i64, site_name: text, warnings: [RequiredCommentWarning]):
+fn _check_match_arm(arm_idx: i64, site_name: text) -> [RequiredCommentWarning]:
+    var warnings: [RequiredCommentWarning] = []
     if arm_idx < 0:
-        return
+        return warnings
     val pattern = arm_get_pattern(arm_idx)
-    _check_expr(pattern, site_name, warnings)
+    val pattern_warnings = _check_expr(pattern, site_name)
+    for warning in pattern_warnings:
+        warnings.push(warning)
     val guard = arm_get_guard(arm_idx)
     if guard >= 0:
-        _check_expr(guard, site_name, warnings)
-    if pattern >= 0 and expr_tag[pattern] == EXPR_IDENT and expr_s_val[pattern] == "_":
+        val guard_warnings = _check_expr(guard, site_name)
+        for warning in guard_warnings:
+            warnings.push(warning)
+    if pattern >= 0 and expr_get_tag(pattern) == 6 and expr_get_str(pattern) == "_":
         val rationale = arm_get_rationale(arm_idx)
         if _is_weak_rationale(rationale):
             warnings.push(RequiredCommentWarning(
@@ -137,22 +157,26 @@ fn _check_match_arm(arm_idx: i64, site_name: text, warnings: [RequiredCommentWar
             ))
     val body = arm_get_body(arm_idx)
     for s in body:
-        _check_stmt(s, site_name, warnings)
+        val stmt_warnings = _check_stmt(s, site_name)
+        for warning in stmt_warnings:
+            warnings.push(warning)
+    warnings
 
-fn _check_expr(expr_idx: i64, site_name: text, warnings: [RequiredCommentWarning]):
+fn _check_expr(expr_idx: i64, site_name: text) -> [RequiredCommentWarning]:
+    var warnings: [RequiredCommentWarning] = []
     if expr_idx < 0:
-        return
-    val tag = expr_tag[expr_idx]
+        return warnings
+    val tag = expr_get_tag(expr_idx)
 
     # Check pass_* nodes for missing comment
-    val is_pass_todo = tag == EXPR_PASS_TODO
-    val is_pass_dn = tag == EXPR_PASS_DN
-    val is_pass_do_nothing = tag == EXPR_PASS_DO_NOTHING
+    val is_pass_todo = tag == 40
+    val is_pass_dn = tag == 43
+    val is_pass_do_nothing = tag == 41
     val is_pass = is_pass_todo or is_pass_dn
     val is_any_pass = is_pass or is_pass_do_nothing
 
     if is_any_pass:
-        val msg = expr_s_val[expr_idx]
+        val msg = expr_get_str(expr_idx)
         if _is_weak_rationale(msg):
             val w = RequiredCommentWarning(
                 code: "REQC001",
@@ -163,22 +187,22 @@ fn _check_expr(expr_idx: i64, site_name: text, warnings: [RequiredCommentWarning
                 line: 0
             )
             warnings.push(w)
-        return
+        return warnings
 
-    if tag == EXPR_CALL:
-        val callee_idx = expr_left[expr_idx]
+    if tag == 9:
+        val callee_idx = expr_get_left(expr_idx)
         if callee_idx >= 0:
-            val callee_tag = expr_tag[callee_idx]
-            if callee_tag == EXPR_IDENT:
-                val callee_name = expr_s_val[callee_idx]
+            val callee_tag = expr_get_tag(callee_idx)
+            if callee_tag == 6:
+                val callee_name = expr_get_str(callee_idx)
                 if callee_name == "todo":
-                    val args = expr_args[expr_idx]
+                    val args = expr_get_args(expr_idx)
                     var has_what = false
                     var has_hint = false
-                    if args.len() > 0 and args[0] >= 0 and expr_tag[args[0]] == EXPR_STRING_LIT:
-                        has_what = not _is_weak_rationale(expr_s_val[args[0]])
-                    if args.len() > 1 and args[1] >= 0 and expr_tag[args[1]] == EXPR_STRING_LIT:
-                        has_hint = not _is_weak_rationale(expr_s_val[args[1]])
+                    if args.len() > 0 and args[0] >= 0 and expr_get_tag(args[0]) == 3:
+                        has_what = not _is_weak_rationale(expr_get_str(args[0]))
+                    if args.len() > 1 and args[1] >= 0 and expr_get_tag(args[1]) == 3:
+                        has_hint = not _is_weak_rationale(expr_get_str(args[1]))
                     if not has_what or not has_hint:
                         warnings.push(RequiredCommentWarning(
                             code: "REQC003",
@@ -189,14 +213,14 @@ fn _check_expr(expr_idx: i64, site_name: text, warnings: [RequiredCommentWarning
                             line: 0
                         ))
                 if is_dangerous_keyword(callee_name):
-                    val args = expr_args[expr_idx]
+                    val args = expr_get_args(expr_idx)
                     var has_comment = false
                     if args.len() > 0:
                         val first_arg = args[0]
                         if first_arg >= 0:
-                            val first_tag = expr_tag[first_arg]
-                            if first_tag == EXPR_STRING_LIT:
-                                val first_val = expr_s_val[first_arg]
+                            val first_tag = expr_get_tag(first_arg)
+                            if first_tag == 3:
+                                val first_val = expr_get_str(first_arg)
                                 if not _is_weak_rationale(first_val):
                                     has_comment = true
                     if not has_comment:
@@ -209,28 +233,49 @@ fn _check_expr(expr_idx: i64, site_name: text, warnings: [RequiredCommentWarning
                             line: 0
                         )
                         warnings.push(w)
-        val args2 = expr_args[expr_idx]
+        val args2 = expr_get_args(expr_idx)
         for arg in args2:
-            _check_expr(arg, site_name, warnings)
-        return
+            val arg_warnings = _check_expr(arg, site_name)
+            for warning in arg_warnings:
+                warnings.push(warning)
+        return warnings
 
-    if tag == EXPR_MATCH:
-        _check_expr(expr_left[expr_idx], site_name, warnings)
-        val arms = expr_args[expr_idx]
+    if tag == 15:
+        val left_warnings = _check_expr(expr_get_left(expr_idx), site_name)
+        for warning in left_warnings:
+            warnings.push(warning)
+        val arms = expr_get_args(expr_idx)
         for arm_idx in arms:
-            _check_match_arm(arm_idx, site_name, warnings)
-        return
+            val arm_warnings = _check_match_arm(arm_idx, site_name)
+            for warning in arm_warnings:
+                warnings.push(warning)
+        return warnings
 
-    if tag == EXPR_BINARY:
-        _check_expr(expr_left[expr_idx], site_name, warnings)
-        _check_expr(expr_right[expr_idx], site_name, warnings)
-    elif tag == EXPR_UNARY:
-        _check_expr(expr_left[expr_idx], site_name, warnings)
-    elif tag == EXPR_IF:
-        _check_expr(expr_left[expr_idx], site_name, warnings)
-        _check_expr(expr_right[expr_idx], site_name, warnings)
-        _check_expr(expr_extra[expr_idx], site_name, warnings)
-    elif tag == EXPR_BLOCK:
-        val body = expr_stmts[expr_idx]
+    if tag == 7:
+        val left_warnings = _check_expr(expr_get_left(expr_idx), site_name)
+        for warning in left_warnings:
+            warnings.push(warning)
+        val right_warnings = _check_expr(expr_get_right(expr_idx), site_name)
+        for warning in right_warnings:
+            warnings.push(warning)
+    elif tag == 8:
+        val left_warnings = _check_expr(expr_get_left(expr_idx), site_name)
+        for warning in left_warnings:
+            warnings.push(warning)
+    elif tag == 14:
+        val left_warnings = _check_expr(expr_get_left(expr_idx), site_name)
+        for warning in left_warnings:
+            warnings.push(warning)
+        val right_warnings = _check_expr(expr_get_right(expr_idx), site_name)
+        for warning in right_warnings:
+            warnings.push(warning)
+        val extra_warnings = _check_expr(expr_get_extra(expr_idx), site_name)
+        for warning in extra_warnings:
+            warnings.push(warning)
+    elif tag == 18:
+        val body = expr_get_stmts(expr_idx)
         for s in body:
-            _check_stmt(s, site_name, warnings)
+            val stmt_warnings = _check_stmt(s, site_name)
+            for warning in stmt_warnings:
+                warnings.push(warning)
+    warnings
