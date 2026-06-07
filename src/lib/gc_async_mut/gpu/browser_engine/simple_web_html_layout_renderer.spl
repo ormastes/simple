@@ -457,6 +457,9 @@ fn apply_single_decl_fast(st: Style, body: text) -> SingleDeclStyle:
         return SingleDeclStyle(handled: false, style: st)
     val name = body.substring(0, colon).trim().lower()
     val value = body.substring(colon + 1, body.len()).trim()
+    apply_single_decl_fast_parts(st, name, value)
+
+fn apply_single_decl_fast_parts(st: Style, name: text, value: text) -> SingleDeclStyle:
     if value.len() == 0:
         return SingleDeclStyle(handled: false, style: st)
     var out = st
@@ -975,6 +978,8 @@ class Rules:
     simple_fast_kinds: [i32]
     simple_fast_tags: [text]
     simple_fast_values: [text]
+    single_decl_names: [text]
+    single_decl_values: [text]
 
 fn selector_needs_rightmost_prefilter(sel: text) -> bool:
     sel.index_of(" ") >= 0 or sel.contains(">")
@@ -1013,6 +1018,24 @@ fn selector_simple_fast_value(sel: text, kind: i32) -> text:
     if kind == 3:
         return sel
     ""
+
+fn single_decl_fast_name(decls: text) -> text:
+    val body = single_decl_body(decls)
+    if body.len() == 0:
+        return ""
+    val colon = body.index_of(":")
+    if colon < 0:
+        return ""
+    body.substring(0, colon).trim().lower()
+
+fn single_decl_fast_value(decls: text) -> text:
+    val body = single_decl_body(decls)
+    if body.len() == 0:
+        return ""
+    val colon = body.index_of(":")
+    if colon < 0:
+        return ""
+    body.substring(colon + 1, body.len()).trim()
 
 fn selector_group_rightmost_filter(group: text) -> text:
     val trimmed = group.trim()
@@ -1053,6 +1076,8 @@ fn extract_css(html: text) -> Rules:
     var simple_fast_kinds: [i32] = []
     var simple_fast_tags: [text] = []
     var simple_fast_values: [text] = []
+    var single_decl_names: [text] = []
+    var single_decl_values: [text] = []
     var pos = 0
     var guard = 0
     while guard < 1000:
@@ -1090,9 +1115,19 @@ fn extract_css(html: text) -> Rules:
                 simple_fast_kinds.push(fast_kind)
                 simple_fast_tags.push(selector_simple_fast_tag(sel, fast_kind))
                 simple_fast_values.push(selector_simple_fast_value(sel, fast_kind))
+                single_decl_names.push(single_decl_fast_name(decl))
+                single_decl_values.push(single_decl_fast_value(decl))
             cp = endb + 1
         pos = close + 1
-    Rules(sels: sels, decls: decls, needs_rightmost_prefilter: needs_rightmost_prefilter, rightmost_prefilters: rightmost_prefilters, simple_selector_rules: simple_selector_rules, simple_fast_kinds: simple_fast_kinds, simple_fast_tags: simple_fast_tags, simple_fast_values: simple_fast_values)
+    Rules(sels: sels, decls: decls, needs_rightmost_prefilter: needs_rightmost_prefilter, rightmost_prefilters: rightmost_prefilters, simple_selector_rules: simple_selector_rules, simple_fast_kinds: simple_fast_kinds, simple_fast_tags: simple_fast_tags, simple_fast_values: simple_fast_values, single_decl_names: single_decl_names, single_decl_values: single_decl_values)
+
+fn apply_rule_decls(st: Style, rules: Rules, idx: i32) -> Style:
+    val single_name = rules.single_decl_names[idx]
+    if single_name.len() > 0:
+        val fast = apply_single_decl_fast_parts(st, single_name, rules.single_decl_values[idx])
+        if fast.handled:
+            return fast.style
+    apply_decls(st, rules.decls[idx])
 
 fn unquote_css_attr_value(raw: text) -> text:
     val v = raw.trim()
@@ -1322,12 +1357,12 @@ fn compute_styles(nodes: [HNode], rules: Rules, html: text) -> [Style]:
             val fast_kind = rules.simple_fast_kinds[r]
             if fast_kind > 0:
                 if simple_fast_match(fast_kind, rules.simple_fast_tags[r], rules.simple_fast_values[r], nd.tag, nd.class_attr, nd.id_attr):
-                    st = apply_decls(st, rules.decls[r])
+                    st = apply_rule_decls(st, rules, r)
             elif rules.simple_selector_rules[r]:
                 if simple_match(rules.rightmost_prefilters[r], nd.tag, nd.class_attr, nd.id_attr, nd.attrs_raw):
-                    st = apply_decls(st, rules.decls[r])
+                    st = apply_rule_decls(st, rules, r)
             elif (not rules.needs_rightmost_prefilter[r] or selector_rightmost_filter_matches_node(rules.rightmost_prefilters[r], nd.tag, nd.class_attr, nd.id_attr, nd.attrs_raw)) and selector_matches_node(nodes, i, sel):
-                st = apply_decls(st, rules.decls[r])
+                st = apply_rule_decls(st, rules, r)
             r = r + 1
         if nd.style_attr.len() > 0:
             st = apply_decls(st, nd.style_attr)

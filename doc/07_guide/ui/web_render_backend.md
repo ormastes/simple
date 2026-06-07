@@ -86,6 +86,9 @@ fixed (see `doc/08_tracking/bug/pure_simple_web_render_interpreter_bound_2026-06
    parses common one-property blocks once and falls back to the full parser for
    everything else; an 80-rule / 80-node 96x96 smoke improved
    `1783387us -> 1687064us` with unchanged checksum `182357384819455458`.
+   Follow-up extraction now stores single-declaration name/value metadata on
+   stylesheet rules, so matched rules can apply the fast path without reparsing
+   the declaration text for every node.
 8. `FontRenderer.GlyphCache` linearly scanned the bounded glyph cache on every
    character before returning cached vector/bitmap glyphs. The 2026-06-07
    glyph-cache index adds hot-entry and `(codepoint,font_size)` bucket lookups;
