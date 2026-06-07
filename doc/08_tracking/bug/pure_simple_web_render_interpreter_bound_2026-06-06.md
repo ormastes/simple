@@ -58,26 +58,26 @@ in-place array-write optimization (already in source). No renderer change needed
 - Path B: after redeploy, re-time vanillastyle 320×240 via `bin/simple`; expect it
   to match the gui/debug binary (~20s, not ~190s). Keep the bit-exact gate green.
  
- ## Path C — per-node stylesheet rescans — FIXED 2026-06-07
- 
- `compute_styles()` received the already-extracted `Rules` list, but still called
- `style_block_decls_for_node(html, nodes, i)` for every node. That helper reparsed
- every `<style>` block and rematched selectors for the current node before the
- same `rules.sels` loop applied the extracted rules again. Large GUI HTML with
- many generated CSS rules therefore paid an avoidable O(nodes × stylesheet)
- startup cost, and it duplicated cascade work.
- 
- **Fix (pure Simple):** delete the per-node rescan and apply the extracted rules
- directly in `compute_styles()`. Focused smoke on a 40-rule / 40-node CSS-heavy
- Simple Web render at 96x96:
- 
- | Measurement | Before | After |
- |-------------|--------|-------|
- | elapsed | `787368us` | `367032us` |
- | checksum | `39568413652567` | `39568413652567` |
- 
- Unit coverage: `simple_web_renderer_spec.spl` now includes
- `applies extracted stylesheet rules without per-node style rescans`.
+## Path C — per-node stylesheet rescans — FIXED 2026-06-07
+
+`compute_styles()` received the already-extracted `Rules` list, but still called
+`style_block_decls_for_node(html, nodes, i)` for every node. That helper reparsed
+every `<style>` block and rematched selectors for the current node before the
+same `rules.sels` loop applied the extracted rules again. Large GUI HTML with
+many generated CSS rules therefore paid an avoidable O(nodes × stylesheet)
+startup cost, and it duplicated cascade work.
+
+**Fix (pure Simple):** delete the per-node rescan and apply the extracted rules
+directly in `compute_styles()`. Focused smoke on a 40-rule / 40-node CSS-heavy
+Simple Web render at 96x96:
+
+| Measurement | Before | After |
+|-------------|--------|-------|
+| elapsed | `2207027us` | `1259842us` |
+| checksum | `39575341662880` | `39575341662880` |
+
+Unit coverage: `simple_web_renderer_spec.spl` includes
+`applies extracted stylesheet rules without per-node style rescans`.
  
 ## Path D — recursive layout child discovery scans — FIXED 2026-06-07
 
