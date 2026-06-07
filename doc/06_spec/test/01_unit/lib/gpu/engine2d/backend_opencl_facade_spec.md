@@ -112,6 +112,13 @@ expect(source).to_contain("glyph_plan[base_y]")
    - Expected: triangle[0] equals `0xff55aa11u32`
    - Expected: triangle[1] equals `0xff55aa11u32`
    - Expected: triangle[4] equals `0xff55aa11u32`
+   - Expected: bitmap_evidence.width equals `8`
+   - Expected: bitmap_evidence.height equals `16`
+   - Expected: bitmap_evidence.codepoint equals `65`
+   - Expected: bitmap_evidence.glyph_pixels.len() equals `128`
+   - Expected: bitmap_evidence.production_ready is true
+   - Expected: bitmap_evidence.glyph_pixels.len() equals `0`
+   - Expected: bitmap_evidence.production_ready is false
    - Expected: backend.last_probe.status equals `BackendStatus.Unavailable`
    - Expected: backend.last_probe.has_graphics is false
 10. backend shutdown
@@ -120,7 +127,7 @@ expect(source).to_contain("glyph_plan[base_y]")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 55 lines folded for reproduction.
+Runnable source: 65 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -175,6 +182,16 @@ if ok:
     expect(triangle[0]).to_equal(0xff55aa11u32)
     expect(triangle[1]).to_equal(0xff55aa11u32)
     expect(triangle[4]).to_equal(0xff55aa11u32)
+    val bitmap_evidence = backend.launch_bitmap_glyph_raster_evidence(65, 16)
+    expect(bitmap_evidence.width).to_equal(8)
+    expect(bitmap_evidence.height).to_equal(16)
+    if bitmap_evidence.device_glyph_returned:
+        expect(bitmap_evidence.codepoint).to_equal(65)
+        expect(bitmap_evidence.glyph_pixels.len()).to_equal(128)
+        expect(bitmap_evidence.production_ready).to_equal(true)
+    else:
+        expect(bitmap_evidence.glyph_pixels.len()).to_equal(0)
+        expect(bitmap_evidence.production_ready).to_equal(false)
 else:
     expect(backend.last_probe.status).to_equal(BackendStatus.Unavailable)
     expect(backend.last_probe.has_graphics).to_equal(false)
@@ -355,9 +372,11 @@ backend.shutdown()
    - Expected: cold.production_ready is false
    - Expected: cold.status_code equals `launch-backend-not-ready`
    - Expected: cold.launch.operation equals `opencl_backend_generated_glyph_raster`
+   - Expected: cold.glyph_pixels.len() equals `0`
    - Expected: bitmap_cold.width equals `8`
    - Expected: bitmap_cold.height equals `16`
    - Expected: bitmap_cold.status_code equals `launch-backend-not-ready`
+   - Expected: bitmap_cold.glyph_pixels.len() equals `0`
    - Expected: bitmap_cold.production_ready is false
 2. backend shutdown
 
@@ -365,7 +384,7 @@ backend.shutdown()
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -383,9 +402,12 @@ expect(cold.production_ready).to_equal(false)
 expect(cold.status_code).to_equal("launch-backend-not-ready")
 expect(cold.launch.operation).to_equal("opencl_backend_generated_glyph_raster")
 expect(cold.diagnostic_text()).to_contain("production_ready=false")
+expect(cold.glyph_pixels.len()).to_equal(0)
+expect(cold.diagnostic_text()).to_contain("pixels=0")
 expect(bitmap_cold.width).to_equal(8)
 expect(bitmap_cold.height).to_equal(16)
 expect(bitmap_cold.status_code).to_equal("launch-backend-not-ready")
+expect(bitmap_cold.glyph_pixels.len()).to_equal(0)
 expect(bitmap_cold.production_ready).to_equal(false)
 
 backend.shutdown()
@@ -401,6 +423,7 @@ backend.shutdown()
    - Expected: evidence.status_code equals `launch-backend-not-opencl`
    - Expected: evidence.reason equals `engine2d-bitmap-glyph-backend-not-opencl`
    - Expected: evidence.device_glyph_returned is false
+   - Expected: evidence.glyph_pixels.len() equals `0`
    - Expected: evidence.production_ready is false
 2. engine shutdown
 
@@ -408,7 +431,7 @@ backend.shutdown()
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -420,6 +443,7 @@ expect(evidence.height).to_equal(16)
 expect(evidence.status_code).to_equal("launch-backend-not-opencl")
 expect(evidence.reason).to_equal("engine2d-bitmap-glyph-backend-not-opencl")
 expect(evidence.device_glyph_returned).to_equal(false)
+expect(evidence.glyph_pixels.len()).to_equal(0)
 expect(evidence.production_ready).to_equal(false)
 engine.shutdown()
 ```

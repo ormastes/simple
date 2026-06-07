@@ -378,8 +378,10 @@ returned-glyph contract.
 For bitmap fonts, the OpenCL facade can now build the device `glyph_plan` from
 the existing 8x16 fallback glyph rows and expose that plan through
 `Engine2D.bitmap_glyph_raster_evidence()`. This is the first real glyph-shaped
-plan input; production readiness still requires converting the readback into a
-`CachedGlyph` returned through the vector/bitmap font contract.
+plan input. Successful bitmap readback now carries grayscale glyph pixels in
+the backend evidence and is production-eligible there; the remaining integration
+step is routing those pixels into a `CachedGlyph` through the vector/bitmap font
+contract during live GUI text execution.
 Returned-glyph readback probes for both vector and bitmap fonts must support a
 bounded multi-slot batch (`0..7`) so backend launches can return more than one
 glyph without falling back to CPU for every character after slot 0.

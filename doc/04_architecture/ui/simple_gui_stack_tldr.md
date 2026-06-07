@@ -90,7 +90,8 @@ Host input
   typed launch/readback evidence without marking production font readiness.
 - OpenCL bitmap glyph plan: `Engine2D.bitmap_glyph_raster_evidence()` exposes
   the OpenCL path that uploads existing 8x16 bitmap glyph rows as device
-  `glyph_plan` input.
+  `glyph_plan` input and carries grayscale readback pixels when the launch
+  succeeds.
 - Font returned-glyph priority: vector and bitmap probes share the same
   `METAL`, `CUDA`, `ROCM`, `VULKAN`, `OPENCL` helper before CPU fallback.
 - Draw IR glyph evidence: `Engine2dDrawIrAdvResult` reports backend glyph

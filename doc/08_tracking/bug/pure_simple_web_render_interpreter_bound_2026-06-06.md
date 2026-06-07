@@ -245,9 +245,13 @@ state without claiming production font readiness from the OpenCL smoke path.
 reads 8x16 bitmap row data from `glyph_plan`, and
 `OpenClBackend.launch_bitmap_glyph_raster_evidence()` prepares that plan from
 the existing `rt_gui_get_glyph_8x16()` fallback rows. `Engine2D` exposes this as
-`bitmap_glyph_raster_evidence()`. Remaining gap: successful readback still needs
-to be converted into `CachedGlyph` pixels and routed through the bitmap
-returned-glyph contract.
+`bitmap_glyph_raster_evidence()`.
+
+2026-06-07 OpenCL bitmap glyph readback pixels update: successful OpenCL bitmap
+glyph readback now converts the device `u32` output into grayscale glyph pixels
+on `OpenClGeneratedGlyphRasterEvidence` and marks only the real bitmap path as
+production-eligible. Remaining gap: those evidence pixels still need to be
+routed through the live font renderer's `CachedGlyph` returned-glyph contract.
 
 2026-06-07 font returned-glyph priority cleanup: vector and bitmap returned
 glyph probes now share one native/generated font backend order helper
