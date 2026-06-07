@@ -294,7 +294,12 @@ impl Lowerer {
                     ty: TypeId::ANY,
                 })
             } else {
-                Err(LowerError::UnknownVariable(name.to_string()))
+                let detail = if let Some(func_name) = &self.current_function_name {
+                    format!("{name} while lowering {func_name}")
+                } else {
+                    name.to_string()
+                };
+                Err(LowerError::UnknownVariable(detail))
             }
         }
     }

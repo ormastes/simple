@@ -328,3 +328,42 @@ This plan is done when:
 - The safer path is `bootstrap_lower_hir_globals_to_mir_module()`, using `_bootstrap_hir_functions` populated during HIR lowering.
 - With the HIR-global MIR path and `SIMPLE_BOOTSTRAP_REAL_LOWER=1`, stage2 progressed to real MIR lowering and then crashed while lowering `native_build_help`; additional `real-lower:*` probes were added around signature/body/end_function to isolate that next substep.
 - Current checked state: `src/compiler/50.mir/mir_lowering.spl` and `src/compiler/80.driver/driver.spl` pass `bin/simple check ... --clean`; stage2 still does not produce a runnable compiler.
+
+## 2026-06-07 Follow-Up Evidence
+
+- `native-build --backend llvm-lib` now dispatches through
+  `src/app/cli/native_build_main.spl` for the Simple-first path instead of
+  stopping at the protected seed-wrapper fallback.
+- The stage2 probe now clears the earlier blockers for:
+  - flat bridge alias collisions (`ParserFunction`)
+  - legacy `has_T` optional annotations
+  - wildcard let bindings
+  - in-body extern and function-scope import registration
+  - driver API static calls through `CompilerDriver`
+  - same-name `Span` layout collisions in combined JIT lowering
+  - generated parser helper artifacts in `parser_types_utils.spl` and
+    `parser_types_expr.spl`
+- Latest probe:
+
+```bash
+cd src/compiler_rust
+target/bootstrap/simple native-build \
+  --backend llvm-lib \
+  --source ../compiler \
+  --source ../app \
+  --source ../lib \
+  --source ../compiler_shared \
+  --entry ../app/cli/bootstrap_main.spl \
+  -o /tmp/simple_stage2_probe_default
+```
+
+Result:
+
+```text
+stage2_exit=1
+no_stage2_artifact
+HIR lowering error: Unknown variable: fields_len while lowering compute_transparent_layout
+```
+
+Current next blocker: normalize the remaining generated helper-call artifact in
+`compute_transparent_layout` and continue the same stage2 probe loop.

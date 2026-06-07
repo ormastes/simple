@@ -12,6 +12,10 @@ use super::lowerer::Lowerer;
 use crate::CompileError;
 
 impl Lowerer {
+    fn import_target_cache_key(target: &ImportTarget) -> String {
+        format!("{:?}", target)
+    }
+
     fn import_target_exports_name(target: &ImportTarget, name: &str) -> bool {
         match target {
             ImportTarget::Glob => true,
@@ -799,14 +803,25 @@ impl Lowerer {
         // Resolve module path to filesystem location
         let resolved = self.resolve_imported_module_path(resolver, current_file, module_path, target)?;
 
-        // Prevent circular imports
+        let import_key = (resolved.path.clone(), Self::import_target_cache_key(target));
+        if self.loaded_import_targets.contains(&import_key) {
+            return Ok(());
+        }
+
+        // Prevent circular imports while still allowing the same module to be
+        // materialized later for a different target symbol group.
         if self.loaded_modules.contains(&resolved.path) {
-            return Ok(()); // Already loaded
+            return Ok(());
         }
         self.loaded_modules.insert(resolved.path.clone());
 
         if resolved.path.extension().is_some_and(|ext| ext == "smf") {
-            return self.load_types_from_smf(&resolved.path, target);
+            let result = self.load_types_from_smf(&resolved.path, target);
+            self.loaded_modules.remove(&resolved.path);
+            if result.is_ok() {
+                self.loaded_import_targets.insert(import_key);
+            }
+            return result;
         }
 
         // Read and parse the module file
@@ -837,6 +852,10 @@ impl Lowerer {
         })();
 
         self.current_file = previous_file;
+        self.loaded_modules.remove(&resolved.path);
+        if result.is_ok() {
+            self.loaded_import_targets.insert(import_key);
+        }
         result
     }
 

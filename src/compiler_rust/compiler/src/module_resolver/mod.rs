@@ -79,6 +79,29 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_file_module_before_same_name_package() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let driver_dir = src.join("driver");
+        fs::create_dir_all(&driver_dir).unwrap();
+        fs::write(src.join("driver.spl"), "fn compiler_driver_create(): 0").unwrap();
+        fs::write(driver_dir.join("__init__.spl"), "export use crate.driver.*").unwrap();
+        fs::write(driver_dir.join("incremental.spl"), "struct IncrementalCompiler:").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+
+        let file_path = ModulePath::new(vec!["crate".into(), "driver".into()]);
+        let file_resolved = resolver.resolve(&file_path, &src.join("main.spl")).unwrap();
+        assert_eq!(file_resolved.path, src.join("driver.spl"));
+        assert!(!file_resolved.is_directory);
+
+        let nested_path = ModulePath::new(vec!["crate".into(), "driver".into(), "incremental".into()]);
+        let nested_resolved = resolver.resolve(&nested_path, &src.join("main.spl")).unwrap();
+        assert_eq!(nested_resolved.path, driver_dir.join("incremental.spl"));
+        assert!(!nested_resolved.is_directory);
+    }
+
+    #[test]
     fn test_resolve_directory_module() {
         let dir = create_test_project();
         let src = dir.path().join("src");

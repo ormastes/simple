@@ -776,6 +776,11 @@ fn should_prefer_interpreter_for_source(path: &Path, extension: &str) -> bool {
 }
 
 fn source_uses_cli_args(path: &Path) -> bool {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    if normalized.ends_with("src/app/cli/main.spl") {
+        return true;
+    }
+
     let Ok(source) = std::fs::read_to_string(path) else {
         return false;
     };
@@ -819,6 +824,16 @@ mod tests {
 
         assert!(source_uses_cli_args(&script));
         assert!(should_prefer_interpreter_for_source(&script, "spl"));
+    }
+
+    #[test]
+    fn full_cli_entry_uses_interpreter_fast_path_for_dispatch_args() {
+        assert!(source_uses_cli_args(Path::new("src/app/cli/main.spl")));
+        assert!(source_uses_cli_args(Path::new("/repo/src/app/cli/main.spl")));
+        assert!(should_prefer_interpreter_for_source(
+            Path::new("src/app/cli/main.spl"),
+            "spl"
+        ));
     }
 
     #[test]

@@ -392,6 +392,39 @@ fn test_lower_field_access_uses_unique_duplicate_struct_variant() {
 }
 
 #[test]
+fn test_method_field_access_recovers_same_name_struct_layout_variant() {
+    let source = "\
+struct Span:
+    start: i64
+    end: i64
+
+impl Span:
+    fn end_value() -> i64:
+        self.end
+
+struct Span:
+    start: i64
+    end_pos: i64
+";
+    let mut parser = Parser::new(source);
+    let module = parser.parse().expect("parse failed");
+
+    let mut lowerer = Lowerer::new();
+    lowerer.set_lenient_types(true);
+    let lowered = lowerer.lower_module(&module).unwrap();
+    let func = lowered
+        .functions
+        .iter()
+        .find(|f| f.name == "Span.end_value")
+        .expect("expected Span.end_value");
+    let HirStmt::Expr(expr) = &func.body[0] else {
+        panic!("Expected expression statement");
+    };
+    assert!(matches!(expr.kind, HirExprKind::FieldAccess { .. }));
+    assert_eq!(expr.ty, TypeId::I64);
+}
+
+#[test]
 fn test_lower_assignment() {
     let module = parse_and_lower("fn test() -> i64:\n    let mut x: i64 = 0\n    x = 42\n    return x\n").unwrap();
 

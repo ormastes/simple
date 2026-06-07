@@ -109,6 +109,15 @@ impl Lowerer {
                         return self.resolve_type(&Type::Optional(Box::new(inner)));
                     }
                 }
+                // Legacy compiler sources use `has_T` to spell an optional T.
+                // Normalize it here so the pure Simple native-build path can
+                // lower older annotations without per-module rewrites.
+                if let Some(base) = name.strip_prefix("has_") {
+                    if !base.is_empty() {
+                        let inner = Type::Simple(base.to_string());
+                        return self.resolve_type(&Type::Optional(Box::new(inner)));
+                    }
+                }
                 // Handle Self type in class/struct methods
                 if name == "Self" {
                     if let Some(class_ty) = self.current_class_type {
@@ -590,6 +599,11 @@ impl Lowerer {
                     {
                         return Ok((global_idx, global_field_ty));
                     }
+                    if let Some((variant_idx, variant_field_ty)) =
+                        self.try_resolve_registered_same_name_field_variant(&name, field)
+                    {
+                        return Ok((variant_idx, variant_field_ty));
+                    }
                     let available_fields = fields.iter().map(|(name, _)| name.clone()).collect();
                     Err(LowerError::CannotInferFieldType {
                         struct_name: name,
@@ -720,6 +734,37 @@ impl Lowerer {
                 available_fields: vec![],
             })
         }
+    }
+
+    fn try_resolve_registered_same_name_field_variant(
+        &self,
+        struct_name: &str,
+        field_name: &str,
+    ) -> Option<(usize, TypeId)> {
+        let mut found: Option<(usize, TypeId)> = None;
+        for (_, hir_ty) in self.module.types.iter() {
+            let HirType::Struct { name, fields, .. } = hir_ty else {
+                continue;
+            };
+            if name != struct_name {
+                continue;
+            }
+            let Some((idx, field_ty)) = fields
+                .iter()
+                .enumerate()
+                .find_map(|(idx, (fname, fty))| (fname == field_name).then_some((idx, *fty)))
+            else {
+                continue;
+            };
+            if let Some((existing_idx, existing_ty)) = found {
+                if existing_idx != idx || existing_ty != field_ty {
+                    return None;
+                }
+            } else {
+                found = Some((idx, field_ty));
+            }
+        }
+        found
     }
 
     fn try_resolve_global_field_for_struct(&mut self, struct_name: &str, field_name: &str) -> Option<(usize, TypeId)> {

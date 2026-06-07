@@ -42,6 +42,10 @@ pub struct Lowerer {
     pub(super) current_file: Option<PathBuf>,
     /// Track loaded modules to prevent circular dependencies
     pub(super) loaded_modules: HashSet<PathBuf>,
+    /// Track materialized import targets per module path. A module can be
+    /// imported multiple times with different grouped symbols; path-only
+    /// de-duplication skips later function imports.
+    pub(super) loaded_import_targets: HashSet<(PathBuf, String)>,
     /// Memory safety warning collector
     pub(super) memory_warnings: MemoryWarningCollector,
     /// Lifetime inference context for tracking reference lifetimes
@@ -119,6 +123,7 @@ impl Lowerer {
             module_resolver: None,
             current_file: None,
             loaded_modules: HashSet::new(),
+            loaded_import_targets: HashSet::new(),
             memory_warnings: MemoryWarningCollector::strict(), // STRICT mode for Rust-level safety
             lifetime_context: LifetimeContext::new(),
             capability_env: CapabilityEnv::new(),
@@ -158,6 +163,7 @@ impl Lowerer {
             module_resolver: Some(module_resolver),
             current_file: Some(current_file),
             loaded_modules: HashSet::new(),
+            loaded_import_targets: HashSet::new(),
             memory_warnings: MemoryWarningCollector::strict(), // STRICT by default
             lifetime_context: LifetimeContext::new(),
             capability_env: CapabilityEnv::new(),
@@ -220,6 +226,7 @@ impl Lowerer {
             module_resolver: None,
             current_file: None,
             loaded_modules: HashSet::new(),
+            loaded_import_targets: HashSet::new(),
             memory_warnings: MemoryWarningCollector::new(), // Lenient mode (warnings only)
             lifetime_context: LifetimeContext::new(),
             capability_env: CapabilityEnv::new(),

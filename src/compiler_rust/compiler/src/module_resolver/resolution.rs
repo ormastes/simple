@@ -152,6 +152,16 @@ fn layered_alias_child_dir(current: &Path, segment: &str) -> Option<PathBuf> {
 }
 
 fn resolve_module_in_dir(dir: &Path, last: &str, original_path: &ModulePath) -> Option<ResolvedModule> {
+    let file_path = dir.join(format!("{}.spl", last));
+    if file_path.exists() && file_path.is_file() {
+        return Some(ResolvedModule {
+            path: file_path,
+            module_path: original_path.clone(),
+            is_directory: false,
+            manifest: None,
+        });
+    }
+
     let dir_path = dir.join(last);
     let init_path = dir_path.join("__init__.spl");
     if init_path.exists() && init_path.is_file() {
@@ -169,16 +179,6 @@ fn resolve_module_in_dir(dir: &Path, last: &str, original_path: &ModulePath) -> 
             path: mod_path,
             module_path: original_path.clone(),
             is_directory: true,
-            manifest: None,
-        });
-    }
-
-    let file_path = dir.join(format!("{}.spl", last));
-    if file_path.exists() && file_path.is_file() {
-        return Some(ResolvedModule {
-            path: file_path,
-            module_path: original_path.clone(),
-            is_directory: false,
             manifest: None,
         });
     }

@@ -5,13 +5,14 @@
 #   - Must NOT import from Tier 2+ files
 #   - Uses `use lazy` for CompilerDriver and cache/watcher modules
 
-use compiler.driver.driver_api_types (rt_file_exists)
 use compiler.common.driver_core_types (CompileOptions, CompileMode, CompileResult, OutputFormat, driver_core_compile_options_default)
-use lazy compiler.driver.driver
-use lazy compiler.driver.watcher.smf_manifest
-use compiler.driver.cache.cache_types (CacheCheckResult, CACHE_FRESH)
+use lazy compiler.driver.driver (CompilerDriver)
+use lazy compiler.driver.watcher.smf_manifest (SmfManifestEntry, load_smf_manifest_default, smf_manifest_find)
+use compiler.driver.cache.cache_types (CacheCheckResult)
 use compiler.driver.cache.compile_options_hash (compile_options_hash_zero)
-use lazy compiler.driver.cache.cache_validator
+use lazy compiler.driver.cache.cache_validator (validate_smf)
+
+extern fn rt_file_exists(path: text) -> bool
 
 pub fn interpret_file(path: text) -> CompileResult:
     val cached = try_load_smf_cached(path)
@@ -20,8 +21,8 @@ pub fn interpret_file(path: text) -> CompileResult:
     val options = driver_core_compile_options_default()
     options.input_files = [path]
     options.mode = CompileMode.Interpret
-    val driver = compiler_driver_create(options)
-    compiler_driver_run_compile(driver)
+    val driver = CompilerDriver.create(options)
+    CompilerDriver.run_compile(driver)
 
 pub fn try_load_smf_cached(path: text) -> CompileResult?:
     val manifest = load_smf_manifest_default()
@@ -36,13 +37,13 @@ pub fn try_load_smf_cached(path: text) -> CompileResult?:
         return nil
 
     val freshness: CacheCheckResult = validate_smf(path, smf_path, compile_options_hash_zero())
-    if freshness.status != CACHE_FRESH:
+    if freshness.status != 0:
         return nil
 
     print "[interp] Loading pre-compiled SMF: {smf_path}"
     val options = driver_core_compile_options_default()
     options.input_files = [smf_path]
     options.mode = CompileMode.SmfExec
-    val driver = compiler_driver_create(options)
-    val result = compiler_driver_run_compile(driver)
+    val driver = CompilerDriver.create(options)
+    val result = CompilerDriver.run_compile(driver)
     Some(result)

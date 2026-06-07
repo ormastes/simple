@@ -98,13 +98,22 @@ impl TypeRegistry {
         registry.name_to_id.insert("f16".to_string(), TypeId::F32); // f16 maps to f32 for now
         registry.name_to_id.insert("f32".to_string(), TypeId::F32);
         registry.name_to_id.insert("f64".to_string(), TypeId::F64);
+        registry.name_to_id.insert("float".to_string(), TypeId::F64);
+        registry.name_to_id.insert("Float".to_string(), TypeId::F64);
         registry.name_to_id.insert("str".to_string(), TypeId::STRING);
+        registry.name_to_id.insert("Str".to_string(), TypeId::STRING);
         // Simple uses "text" as the canonical string type name
         registry.name_to_id.insert("text".to_string(), TypeId::STRING);
-        // Also support "String" for compatibility
+        // Also support legacy capitalized primitive names for compatibility.
+        registry.name_to_id.insert("int".to_string(), TypeId::I64);
+        registry.name_to_id.insert("Int".to_string(), TypeId::I64);
+        registry.name_to_id.insert("Bool".to_string(), TypeId::BOOL);
         registry.name_to_id.insert("String".to_string(), TypeId::STRING);
         registry.name_to_id.insert("nil".to_string(), TypeId::NIL);
+        registry.name_to_id.insert("Nil".to_string(), TypeId::NIL);
+        registry.name_to_id.insert("Void".to_string(), TypeId::VOID);
         // Dynamic Any type for DI containers, generic parameters, etc.
+        registry.name_to_id.insert("any".to_string(), TypeId::ANY);
         registry.name_to_id.insert("Any".to_string(), TypeId::ANY);
         // char type: Unicode code point (32-bit)
         registry.name_to_id.insert("char".to_string(), TypeId::CHAR);

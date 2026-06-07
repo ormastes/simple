@@ -60,8 +60,19 @@ mod tests {
         assert_eq!(registry.lookup("i32"), Some(TypeId::I32));
         assert_eq!(registry.lookup("f64"), Some(TypeId::F64));
         assert_eq!(registry.lookup("f32"), Some(TypeId::F32));
+        assert_eq!(registry.lookup("float"), Some(TypeId::F64));
+        assert_eq!(registry.lookup("Float"), Some(TypeId::F64));
         assert_eq!(registry.lookup("bool"), Some(TypeId::BOOL));
         assert_eq!(registry.lookup("str"), Some(TypeId::STRING));
+        assert_eq!(registry.lookup("Str"), Some(TypeId::STRING));
+        assert_eq!(registry.lookup("int"), Some(TypeId::I64));
+        assert_eq!(registry.lookup("Int"), Some(TypeId::I64));
+        assert_eq!(registry.lookup("Bool"), Some(TypeId::BOOL));
+        assert_eq!(registry.lookup("String"), Some(TypeId::STRING));
+        assert_eq!(registry.lookup("Nil"), Some(TypeId::NIL));
+        assert_eq!(registry.lookup("Void"), Some(TypeId::VOID));
+        assert_eq!(registry.lookup("any"), Some(TypeId::ANY));
+        assert_eq!(registry.lookup("Any"), Some(TypeId::ANY));
         assert_eq!(registry.lookup("Nonexistent"), None);
     }
 

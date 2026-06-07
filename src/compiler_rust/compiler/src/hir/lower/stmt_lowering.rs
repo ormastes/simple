@@ -80,6 +80,9 @@ impl Lowerer {
                 } else {
                     None
                 };
+                if matches!(inner_pattern, Pattern::Wildcard) {
+                    return Ok(value.map(HirStmt::Expr).into_iter().collect());
+                }
 
                 // Extract type annotation from either let_stmt.ty OR Pattern::Typed
                 // In Simple syntax, `var x: T = v` puts the type in Pattern::Typed
@@ -584,11 +587,14 @@ impl Lowerer {
                 Ok(vec![])
             }
 
-            // Import statements are resolved at the module level (module_pass.rs).
-            // When they appear inside a function body (e.g. SPipe test files wrapped
-            // into main), they are a no-op at code generation time.
-            Node::UseStmt(_)
-            | Node::MultiUse(_)
+            // Module-level imports are resolved in module_pass.rs. Function-scope
+            // imports still need to materialize their symbols before subsequent
+            // statements are lowered, then emit no runtime statement.
+            Node::UseStmt(use_stmt) => {
+                self.load_imported_types(&use_stmt.path, &use_stmt.target)?;
+                Ok(vec![])
+            }
+            Node::MultiUse(_)
             | Node::CommonUseStmt(_)
             | Node::ExportUseStmt(_)
             | Node::StructuredExportStmt(_)
@@ -733,6 +739,22 @@ impl Lowerer {
                 "Context statements require interpreter mode. Native codegen support is planned.".to_string(),
             )),
 
+            Node::Extern(e) => {
+                let ret_ty = self.resolve_type_opt(&e.return_type)?;
+                self.globals.insert(e.name.clone(), ret_ty);
+                self.extern_fn_names.insert(e.name.clone());
+                Ok(vec![])
+            }
+
+            Node::ExternClass(ec) => {
+                let type_id = self.module.types.register_named(
+                    ec.name.clone(),
+                    crate::hir::types::HirType::ExternClass { name: ec.name.clone() },
+                );
+                self.globals.insert(ec.name.clone(), type_id);
+                Ok(vec![])
+            }
+
             // Type definitions that legitimately appear inside function bodies
             // in spec/test code (e.g. `class Point:` defined inside an `it`
             // block). These are hoisted to module scope by
@@ -746,6 +768,8 @@ impl Lowerer {
             | Node::Impl(_)
             | Node::Mixin(_)
             | Node::TypeAlias(_)
+            | Node::Extern(_)
+            | Node::ExternClass(_)
             | Node::ClassAlias(_) => Ok(vec![]),
 
             // Other module-level definitions that have no in-body lowering.
@@ -753,8 +777,6 @@ impl Lowerer {
             | Node::InterfaceBinding(_)
             | Node::Actor(_)
             | Node::FunctionAlias(_)
-            | Node::Extern(_)
-            | Node::ExternClass(_)
             | Node::Const(_)
             | Node::Static(_)
             | Node::LeanBlock(_)

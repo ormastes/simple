@@ -17,6 +17,26 @@ use super::error::{LowerError, LowerResult};
 use super::lowerer::Lowerer;
 
 impl Lowerer {
+    fn register_named_struct_preserving_distinct_layout(&mut self, name: String, hir_type: HirType) -> TypeId {
+        let HirType::Struct { fields: new_fields, .. } = &hir_type else {
+            return self.module.types.update_named(name, hir_type);
+        };
+
+        if let Some(existing_id) = self.module.types.lookup(&name) {
+            if let Some(HirType::Struct {
+                fields: existing_fields,
+                ..
+            }) = self.module.types.get(existing_id)
+            {
+                if !existing_fields.is_empty() && !new_fields.is_empty() && existing_fields != new_fields {
+                    return self.module.types.register_named(name, hir_type);
+                }
+            }
+        }
+
+        self.module.types.update_named(name, hir_type)
+    }
+
     /// Register a class type and its invariant
     ///
     /// Inherited invariants: If the class extends a parent class, the child class
@@ -55,8 +75,7 @@ impl Lowerer {
             }
         }
 
-        // Use update_named to update the placeholder created in Pass 0
-        let type_id = self.module.types.update_named(
+        let type_id = self.register_named_struct_preserving_distinct_layout(
             c.name.clone(),
             HirType::Struct {
                 name: c.name.clone(),
@@ -134,8 +153,7 @@ impl Lowerer {
             type_bindings: std::collections::HashMap::new(), // Will be filled during specialization
         };
 
-        // Use update_named to update the placeholder created in Pass 0
-        let type_id = self.module.types.update_named(s.name.clone(), hir_type);
+        let type_id = self.register_named_struct_preserving_distinct_layout(s.name.clone(), hir_type);
 
         // Register struct invariant if present
         if let Some(ref invariant) = s.invariant {

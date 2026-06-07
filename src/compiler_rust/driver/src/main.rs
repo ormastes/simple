@@ -143,8 +143,10 @@ fn dispatch_command(entry: &CommandEntry, ctx: &CommandContext) -> i32 {
     }
 
     if entry.name == "native-build" && native_build_should_use_simple(ctx.args) {
-        eprintln!("[native-build] dispatching to Simple app: src/app/cli/bootstrap_main.spl");
-        if let Some(code) = dispatch_to_simple_app("src/app/cli/bootstrap_main.spl", ctx.args, ctx.gc_log, ctx.gc_off) {
+        eprintln!("[native-build] dispatching to Simple app: src/app/cli/native_build_main.spl");
+        if let Some(code) =
+            dispatch_to_simple_app("src/app/cli/native_build_main.spl", ctx.args, ctx.gc_log, ctx.gc_off)
+        {
             return code;
         }
     }
@@ -1062,6 +1064,7 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
         && app_relative_path != "src/app/ui.tauri/tauri_entry.spl"
         && app_relative_path != "src/app/office/mod.spl"
         && app_relative_path != "src/app/cli/bootstrap_main.spl"
+        && app_relative_path != "src/app/cli/native_build_main.spl"
         && app_relative_path != "src/app/cli/main.spl"
         && app_relative_path != "src/app/os/main.spl"
         && app_relative_path != "src/app/play/main.spl"
