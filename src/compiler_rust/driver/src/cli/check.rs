@@ -1303,17 +1303,17 @@ fn concurrency_api_import_error(
 ) -> Option<CheckError> {
     let path_text = path.segments.join(".");
     let target_name = match target {
-        ImportTarget::Single(name) | ImportTarget::Aliased { name, .. } => name,
+        ImportTarget::Single(name) | ImportTarget::Aliased { name, .. } => Some(name),
         ImportTarget::Group(targets) => {
             return targets
                 .iter()
                 .find_map(|target| concurrency_api_import_error(file_path, path, target, line, column));
         }
-        _ => return None,
+        _ => None,
     };
 
     if (path_text == "std.concurrent.thread" || path_text == "std.nogc_async_mut.concurrent.thread")
-        && target_name == "task_spawn"
+        && target_name.is_some_and(|name| name == "task_spawn")
     {
         return Some(CheckError {
             file: file_path.display().to_string(),
@@ -1323,7 +1323,7 @@ fn concurrency_api_import_error(
             code: Some("E-PAR-001".to_string()),
             message: "task_spawn is not part of the OS-thread facade".to_string(),
             expected: Some("OS-thread API symbol".to_string()),
-            found: Some(target_name.clone()),
+            found: Some("task_spawn".to_string()),
             notes: vec![
                 "std.concurrent.thread is reserved for OS thread primitives such as thread_spawn and thread_spawn_with_args"
                     .to_string(),
@@ -1332,38 +1332,74 @@ fn concurrency_api_import_error(
         });
     }
 
-    let numbered_concurrency_alias = match target_name.as_str() {
+    if is_concurrency_thread_path(&path_text) {
+        if let Some(name) = target_name {
+            if let Some(replacement) = numbered_concurrency_replacement(name) {
+                return Some(numbered_concurrency_error(file_path, line, column, name, replacement));
+            }
+        }
+    }
+
+    if let Some((owner_path, name)) = path.segments.split_last().and_then(|(name, owner)| {
+        let owner_path = owner.join(".");
+        if owner.is_empty() {
+            None
+        } else {
+            Some((owner_path, name))
+        }
+    }) {
+        if is_concurrency_thread_path(&owner_path) {
+            if let Some(replacement) = numbered_concurrency_replacement(name) {
+                return Some(numbered_concurrency_error(file_path, line, column, name, replacement));
+            }
+        }
+    }
+
+    None
+}
+
+fn is_concurrency_thread_path(path_text: &str) -> bool {
+    matches!(
+        path_text,
+        "std.concurrent.thread"
+            | "std.nogc_async_mut.concurrent.thread"
+            | "std.nogc_sync_mut.concurrent.thread"
+            | "concurrency.threads"
+            | "std.concurrency.threads"
+    )
+}
+
+fn numbered_concurrency_replacement(name: &str) -> Option<&'static str> {
+    match name {
         "thread_spawn2" => Some("thread_spawn_with_args"),
         "spawn_isolated2" => Some("spawn_isolated_with_args"),
         "spawn_limited2" => Some("spawn_limited_with_args"),
         _ => None,
-    };
-    if (path_text == "std.concurrent.thread"
-        || path_text == "std.nogc_async_mut.concurrent.thread"
-        || path_text == "std.nogc_sync_mut.concurrent.thread"
-        || path_text == "concurrency.threads"
-        || path_text == "std.concurrency.threads")
-        && numbered_concurrency_alias.is_some()
-    {
-        let replacement = numbered_concurrency_alias.unwrap();
-        return Some(CheckError {
-            file: file_path.display().to_string(),
-            line,
-            column,
-            severity: ErrorSeverity::Error,
-            code: Some("E-PAR-002".to_string()),
-            message: format!("{target_name} was a numbered compatibility alias and is not a public API"),
-            expected: Some("semantic concurrency API symbol".to_string()),
-            found: Some(target_name.clone()),
-            notes: vec![
-                "numbered concurrency API names are rejected so OS-thread, cooperative-green, and multicore-green surfaces stay unambiguous"
-                    .to_string(),
-            ],
-            help: vec![format!("use {replacement} for explicit-argument spawning")],
-        });
     }
+}
 
-    None
+fn numbered_concurrency_error(
+    file_path: &Path,
+    line: usize,
+    column: usize,
+    name: &str,
+    replacement: &str,
+) -> CheckError {
+    CheckError {
+        file: file_path.display().to_string(),
+        line,
+        column,
+        severity: ErrorSeverity::Error,
+        code: Some("E-PAR-002".to_string()),
+        message: format!("{name} is a numbered name and is not a public API"),
+        expected: Some("semantic concurrency API symbol".to_string()),
+        found: Some(name.to_string()),
+        notes: vec![
+            "numbered concurrency API names are rejected so OS-thread, cooperative-green, and multicore-green surfaces stay unambiguous"
+                .to_string(),
+        ],
+        help: vec![format!("use {replacement} for explicit-argument spawning")],
+    }
 }
 
 /// Convert ParseError to CheckError
@@ -1795,7 +1831,7 @@ mod tests {
             error.code.as_deref() == Some("E-PAR-002")
                 && error
                     .message
-                    .contains("thread_spawn2 was a numbered compatibility alias")
+                    .contains("thread_spawn2 is a numbered name")
                 && error.help.iter().any(|help| help.contains("thread_spawn_with_args"))
         }));
     }
