@@ -106,6 +106,14 @@ fixed (see `doc/08_tracking/bug/pure_simple_web_render_interpreter_bound_2026-06
     `128235us -> 122665us` p50 with unchanged checksum
     `sum32:52601568094128`.
 
+The 2026-06-07 JIT blocker pass fixed the Rust HIR lookup for lowercase
+Simple `any` type annotations, so the narrow software render-loop command no
+longer falls back with `Unknown type: any` when run through the patched driver.
+The current JIT frontier is the next HIR lowering error,
+`Cannot infer element type for index into 'Bool'`; live Simple Web text still
+runs through `engine2d-cpu_scalar` until that lowerer issue and production
+glyph backend population are resolved.
+
 The HTML layout Draw IR path now emits `text` commands for real text nodes with
 font size, line height, glyph advance/scale, clip rect, parent id, and
 `font-rendering=bitmap-vector-backend-preferred`. This gives native/GPU Draw IR

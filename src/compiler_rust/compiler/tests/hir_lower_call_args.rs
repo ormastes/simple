@@ -27,7 +27,7 @@
 mod common;
 
 use common::{find_hir_function, parse_and_lower};
-use simple_compiler::hir::{HirExprKind, HirModule, HirStmt};
+use simple_compiler::hir::{HirExprKind, HirModule, HirStmt, TypeId};
 
 // ============================================================================
 // Helpers
@@ -82,6 +82,22 @@ fn d1_lower_call_args_method_exists_on_lowerer() {
     // parse_and_lower internally uses Lowerer; reaching this line confirms
     // the helper compiled correctly as part of D1.
     let _module = lower("fn probe() -> i64:\n    0\nmain = probe()");
+}
+
+#[test]
+fn lowerer_accepts_lowercase_any_type_annotations() {
+    let module = lower(
+        r#"
+fn passthrough(value: any) -> any:
+    value
+
+main = 0
+"#,
+    );
+
+    let function = find_hir_function(&module, "passthrough").expect("passthrough should lower");
+    assert_eq!(function.params[0].ty, TypeId::ANY);
+    assert_eq!(function.return_type, TypeId::ANY);
 }
 
 // ============================================================================

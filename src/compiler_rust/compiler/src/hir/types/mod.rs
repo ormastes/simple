@@ -62,6 +62,8 @@ mod tests {
         assert_eq!(registry.lookup("f32"), Some(TypeId::F32));
         assert_eq!(registry.lookup("bool"), Some(TypeId::BOOL));
         assert_eq!(registry.lookup("str"), Some(TypeId::STRING));
+        assert_eq!(registry.lookup("any"), Some(TypeId::ANY));
+        assert_eq!(registry.lookup("Any"), Some(TypeId::ANY));
         assert_eq!(registry.lookup("Nonexistent"), None);
     }
 
@@ -219,5 +221,6 @@ mod tests {
         assert!(module.types.lookup("i64").is_some());
         assert!(module.types.lookup("bool").is_some());
         assert!(module.types.lookup("str").is_some());
+        assert_eq!(module.types.lookup("any"), Some(TypeId::ANY));
     }
 }

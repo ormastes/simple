@@ -105,6 +105,8 @@ impl TypeRegistry {
         registry.name_to_id.insert("String".to_string(), TypeId::STRING);
         registry.name_to_id.insert("nil".to_string(), TypeId::NIL);
         // Dynamic Any type for DI containers, generic parameters, etc.
+        // Simple source uses lowercase `any`; keep `Any` as a compatibility alias.
+        registry.name_to_id.insert("any".to_string(), TypeId::ANY);
         registry.name_to_id.insert("Any".to_string(), TypeId::ANY);
         // char type: Unicode code point (32-bit)
         registry.name_to_id.insert("char".to_string(), TypeId::CHAR);

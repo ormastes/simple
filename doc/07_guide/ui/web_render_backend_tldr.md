@@ -25,6 +25,8 @@ web_render_backend:
         carry the in-place array-write fix (2d4579a0) or every pixel write clones.
         Wrapped-line text paint uses range glyph drawing; remaining live text
         bottleneck is CPU-scalar until generated glyph kernels feed returned glyphs.
+        Lowercase `any` no longer blocks Rust HIR/JIT lowering; the current JIT
+        fallback is Bool-index element inference in the Simple Web import closure.
 ```
 
 Full guide: [web_render_backend.md](web_render_backend.md)

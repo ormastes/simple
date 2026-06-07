@@ -440,14 +440,20 @@ This confirms the generated CUDA fill lane is fast and measurable, while the
 pure Simple web software lane is still dominated by interpreted text/layout
 work.
 
-Open JIT blocker: running the narrow software render-loop command still prints
-`[INFO] JIT compilation failed, falling back to interpreter: HIR lowering error:
-Unknown type: any`. A behavior-preserving local rename in
-`simple_web_html_layout_renderer.parse_int` avoided a reserved-looking local
-named `any`, but the fallback remains. A targeted source search found no
-remaining `: any` type annotations in the immediate render path, so the next
-pass should inspect the JIT lowerer/import graph and the higher-layer
-`gc_async_mut` warnings emitted by this command.
+JIT blocker update: the Rust HIR registry now accepts Simple's lowercase
+`any` type spelling and keeps `Any` as a compatibility alias. Focused Rust
+evidence:
+
+- `cargo test -p simple-compiler --test hir_lower_call_args lowerer_accepts_lowercase_any_type_annotations`
+- `cargo test -p simple-compiler hir::types::tests`
+
+Patched-driver measurement on the narrow software render loop recorded
+`Unknown type: any` count `0`, unchanged checksum `sum32:52601568094128`, and
+`p50_frame_us=488628` / `p95_frame_us=494978` at 128x96 / 3 frames. JIT is not
+fully unblocked yet: the next fallback is
+`HIR lowering error: Cannot infer element type for index into 'Bool'`. The next
+pass should inspect the JIT lowerer/import graph for boolean values being used
+as indexed collections in the Simple Web import closure.
 
 ## 2026-06-07 Measurement-Agent Snapshot
 

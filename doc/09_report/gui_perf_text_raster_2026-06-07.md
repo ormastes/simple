@@ -153,6 +153,16 @@ original text span. On the same 128x96 / 3-frame software render-loop command,
 `simple_web_software` moved from `p50_frame_us=128235`,
 `p95_frame_us=128897` to `p50_frame_us=122665`, `p95_frame_us=125299` with
 unchanged checksum `sum32:52601568094128`. The row still reports
-`runtime_execution_path="engine2d-cpu_scalar"` and the JIT still falls back with
-`Unknown type: any`, so this is a software hot-loop reduction, not completion of
-production GPU font offload.
+`runtime_execution_path="engine2d-cpu_scalar"`, so this is a software hot-loop
+reduction, not completion of production GPU font offload.
+
+2026-06-07 lowercase-any JIT follow-up: the Rust HIR type registry now maps
+Simple's lowercase `any` spelling to `TypeId::ANY` while preserving `Any` as a
+compatibility alias. Focused Rust coverage passed through both the registry
+suite and a normal parser/lowerer round trip. A patched `simple-driver` run of
+the narrow 128x96 / 3-frame software render-loop command recorded
+`jit_unknown_any_count=0`, checksum `sum32:52601568094128`,
+`p50_frame_us=488628`, and `p95_frame_us=494978`. JIT still falls back, but on
+the next HIR issue: `Cannot infer element type for index into 'Bool'`. Live web
+text therefore remains CPU scalar until that lowerer blocker and the production
+glyph backend population are fixed.
