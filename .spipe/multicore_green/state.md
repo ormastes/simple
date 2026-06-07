@@ -164,6 +164,17 @@ go-runtime-hardening
 - verification: `scheduler.spl` and `green_carrier.spl` checks passed, and
   `scheduler_green_parallelism_spec.spl` passed 26 examples for timer-interrupt
   preemption, compiler-safepoint entry, and invalid-source misuse coverage.
+- implementation: Extended the hosted SimpleOS multicore-green feature spec so
+  runtime and timer safepoint sources route through
+  `Scheduler.green_preemption_safepoint_active_carriers`, while bad SimpleOS
+  source labels are rejected without ticking carriers.
+- verification: `simpleos_multicore_green_spec.spl` passed 5 examples for
+  SimpleOS remote enqueue, scheduler execution state, topology growth,
+  preemption safepoints, and invalid-source misuse coverage.
+- profile evidence: `profile_report_contract_test.shs cross_language` passes
+  against `doc/09_report/cross_language_perf_parallel_smoke.md`. The dated
+  `cross_language_perf_2026-06-06.md` report is historical and does not carry
+  the current profile-contract headings.
 
 ## Completion Audit - 2026-06-07
 

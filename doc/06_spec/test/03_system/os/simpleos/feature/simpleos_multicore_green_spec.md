@@ -1,6 +1,6 @@
 # SimpleOS Multicore Green System Contract
 
-> This system spec exercises the hosted SimpleOS contract for multicore green work: logical green tasks enqueue onto carrier CPUs, remote enqueue uses the SMP reschedule IPI surface, and the real `Scheduler` records green execution state separately from normal OS task ids.
+> This system spec exercises the hosted SimpleOS contract for multicore green work: logical green tasks enqueue onto carrier CPUs, remote enqueue uses the SMP reschedule IPI surface, and the real `Scheduler` records green execution state separately from normal OS task ids. It also proves the hosted SimpleOS lane routes runtime and timer preemption safepoints through the same scheduler-owned green carrier sweep used by interrupt/compiler entrypoints.
 
 <!-- sdn-diagram:id=simpleos_multicore_green_spec.arch -->
 <details class="sdn-source">
@@ -28,14 +28,14 @@ simpleos_multicore_green_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # SimpleOS Multicore Green System Contract
 
-This system spec exercises the hosted SimpleOS contract for multicore green work: logical green tasks enqueue onto carrier CPUs, remote enqueue uses the SMP reschedule IPI surface, and the real `Scheduler` records green execution state separately from normal OS task ids.
+This system spec exercises the hosted SimpleOS contract for multicore green work: logical green tasks enqueue onto carrier CPUs, remote enqueue uses the SMP reschedule IPI surface, and the real `Scheduler` records green execution state separately from normal OS task ids. It also proves the hosted SimpleOS lane routes runtime and timer preemption safepoints through the same scheduler-owned green carrier sweep used by interrupt/compiler entrypoints.
 
 ## At a Glance
 
@@ -57,7 +57,9 @@ This system spec exercises the hosted SimpleOS contract for multicore green work
 This system spec exercises the hosted SimpleOS contract for multicore green
 work: logical green tasks enqueue onto carrier CPUs, remote enqueue uses the SMP
 reschedule IPI surface, and the real `Scheduler` records green execution state
-separately from normal OS task ids.
+separately from normal OS task ids. It also proves the hosted SimpleOS lane
+routes runtime and timer preemption safepoints through the same scheduler-owned
+green carrier sweep used by interrupt/compiler entrypoints.
 
 The spec is intentionally not a live QEMU proof. The QEMU SMP evidence remains
 tracked in the multicore-green system plan until guest-visible AP execution is
@@ -189,12 +191,111 @@ expect(scheduler.green_context_switches_on_cpu(3u32)).to_equal(1)
 
 </details>
 
+#### routes SimpleOS preemption safepoints through active green carriers
+
+1. smp init
+
+2. var scheduler = Scheduler new with cpu count
+
+3. scheduler set green carrier parallelism
+   - Expected: pass_result.ran_workers equals `1`
+   - Expected: runtime_poll.accepted is true
+   - Expected: runtime_poll.source equals `runtime_safepoint`
+   - Expected: runtime_poll.preemption_requested is false
+   - Expected: runtime_poll.ticked_carriers equals `1`
+   - Expected: scheduler.green_current_task_on_cpu(0u32) equals `404`
+   - Expected: timer_poll.accepted is true
+   - Expected: timer_poll.source equals `timer_interrupt`
+   - Expected: timer_poll.preemption_requested is true
+   - Expected: timer_poll.yielded_workers equals `1`
+   - Expected: timer_poll.reason equals `green_time_slice_expired`
+   - Expected: green_carrier_queue_depth(timer_poll.queues, 0) equals `1`
+   - Expected: scheduler.green_current_task_on_cpu(0u32) equals `0`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 23 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+smp_init()
+var scheduler = Scheduler.new_with_cpu_count(4u32)
+scheduler.set_green_carrier_parallelism(1)
+val queues = green_carrier_run_queues_new(4, 8)
+val decision = green_carrier_spawn_task(404, 4, 1, 0, 4, 4, 4, 0)
+val queued = green_carrier_apply_enqueue(queues, decision)
+val pass_result = scheduler.run_green_carrier_active_pass(queued.queues, 0)
+val runtime_poll = scheduler.green_preemption_safepoint_active_carriers(pass_result.queues, "runtime_safepoint")
+val timer_poll = scheduler.green_preemption_safepoint_active_carriers(runtime_poll.queues, "timer_interrupt")
+
+expect(pass_result.ran_workers).to_equal(1)
+expect(runtime_poll.accepted).to_equal(true)
+expect(runtime_poll.source).to_equal("runtime_safepoint")
+expect(runtime_poll.preemption_requested).to_equal(false)
+expect(runtime_poll.ticked_carriers).to_equal(1)
+expect(scheduler.green_current_task_on_cpu(0u32)).to_equal(404)
+expect(timer_poll.accepted).to_equal(true)
+expect(timer_poll.source).to_equal("timer_interrupt")
+expect(timer_poll.preemption_requested).to_equal(true)
+expect(timer_poll.yielded_workers).to_equal(1)
+expect(timer_poll.reason).to_equal("green_time_slice_expired")
+expect(green_carrier_queue_depth(timer_poll.queues, 0)).to_equal(1)
+expect(scheduler.green_current_task_on_cpu(0u32)).to_equal(0)
+```
+
+</details>
+
+#### rejects bad SimpleOS preemption source without ticking carriers
+
+1. smp init
+
+2. var scheduler = Scheduler new with cpu count
+
+3. scheduler set green carrier parallelism
+   - Expected: rejected.accepted is false
+   - Expected: rejected.reason equals `invalid_preemption_source`
+   - Expected: rejected.ticked_carriers equals `0`
+   - Expected: rejected.yielded_workers equals `0`
+   - Expected: green_carrier_queue_depth(rejected.queues, 0) equals `0`
+   - Expected: scheduler.green_current_task_on_cpu(0u32) equals `405`
+   - Expected: scheduler.green_ticks_remaining_on_cpu(0u32) equals `2`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+smp_init()
+var scheduler = Scheduler.new_with_cpu_count(4u32)
+scheduler.set_green_carrier_parallelism(1)
+val queues = green_carrier_run_queues_new(4, 8)
+val decision = green_carrier_spawn_task(405, 4, 1, 0, 4, 4, 4, 0)
+val queued = green_carrier_apply_enqueue(queues, decision)
+val pass_result = scheduler.run_green_carrier_active_pass(queued.queues, 0)
+val rejected = scheduler.green_preemption_safepoint_active_carriers(pass_result.queues, "bad_simpleos_source")
+
+expect(rejected.accepted).to_equal(false)
+expect(rejected.reason).to_equal("invalid_preemption_source")
+expect(rejected.ticked_carriers).to_equal(0)
+expect(rejected.yielded_workers).to_equal(0)
+expect(green_carrier_queue_depth(rejected.queues, 0)).to_equal(0)
+expect(scheduler.green_current_task_on_cpu(0u32)).to_equal(405)
+expect(scheduler.green_ticks_remaining_on_cpu(0u32)).to_equal(2)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
