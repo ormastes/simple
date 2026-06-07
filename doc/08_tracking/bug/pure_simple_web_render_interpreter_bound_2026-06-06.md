@@ -164,6 +164,13 @@ evidence now follows the GUI backend preference order: `METAL`, `CUDA`, `ROCM`,
 vector glyph pixels win before CUDA, and ROCm/HIP bitmap glyph pixels win before
 Vulkan/OpenCL.
 
+2026-06-07 shared web-render evidence update: `common.ui.web_render_api` now has
+`web_render_vector_font_native_compute_evidence()` so reports can validate the
+same Metal -> CUDA -> ROCm/HIP -> Vulkan -> OpenCL order instead of only the
+older CUDA/OpenCL pair. Focused unit coverage asserts Metal glyph-return reason
+wins over CUDA, ROCm CPU-proof wins over Vulkan/OpenCL CPU-proof, and a Vulkan
+checksum mismatch fails closed.
+
 Remaining gap: production Metal/CUDA/HIP/Vulkan/OpenCL glyph raster kernels
 still need to populate the vector and bitmap glyph-return contract during live
 GUI execution instead of the test evidence slots.

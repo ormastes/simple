@@ -38,6 +38,7 @@ use common.ui.web_render_api.{
     web_render_to_artifact,
     web_render_vector_font_benchmark_evidence,
     web_render_vector_font_compute_evidence,
+    web_render_vector_font_native_compute_evidence,
     web_render_wasm_abi_for_target,
     web_render_wasm_no_js_is_valid,
     web_render_wasm_no_js_target,
@@ -343,6 +344,56 @@ describe "shared web render API":
         expect(missing_unavailable_reason.reason).to_equal("missing-cuda-unavailable-reason")
         expect(cuda_mismatch.reason).to_equal("cuda-checksum-mismatch")
         expect(opencl_bad_status.reason).to_equal("opencl-not-proven")
+
+    it "records vector font compute evidence in native backend preference order":
+        val all_unavailable = web_render_vector_font_native_compute_evidence(
+            "wm-vector-text-grid", 8800, 1200,
+            "unavailable", "metal-requires-macos", 0,
+            "unavailable", "missing-vector-font-cuda-kernel", 0,
+            "unavailable", "missing-vector-font-rocm-kernel", 0,
+            "unavailable", "missing-vector-font-vulkan-kernel", 0,
+            "unavailable", "missing-vector-font-opencl-kernel", 0,
+            false
+        )
+        val metal_and_cuda_return = web_render_vector_font_native_compute_evidence(
+            "wm-vector-text-grid", 8800, 1200,
+            "pass", "metal-vector-font-glyph-pixels-returned", 8800,
+            "pass", "cuda-vector-font-glyph-pixels-returned", 8800,
+            "unavailable", "missing-vector-font-rocm-kernel", 0,
+            "unavailable", "missing-vector-font-vulkan-kernel", 0,
+            "unavailable", "missing-vector-font-opencl-kernel", 0,
+            false
+        )
+        val rocm_cpu_proof = web_render_vector_font_native_compute_evidence(
+            "wm-vector-text-grid", 8800, 1200,
+            "unavailable", "metal-requires-macos", 0,
+            "unavailable", "missing-vector-font-cuda-kernel", 0,
+            "pass", "rocm-vector-font-proof-matched-cpu-with-cpu-glyph-return", 8800,
+            "pass", "vulkan-vector-font-proof-matched-cpu-with-cpu-glyph-return", 8800,
+            "pass", "opencl-vector-font-proof-matched-cpu-with-cpu-glyph-return", 8800,
+            false
+        )
+        val vulkan_mismatch = web_render_vector_font_native_compute_evidence(
+            "wm-vector-text-grid", 8800, 1200,
+            "unavailable", "metal-requires-macos", 0,
+            "unavailable", "missing-vector-font-cuda-kernel", 0,
+            "unavailable", "missing-vector-font-rocm-kernel", 0,
+            "pass", "vulkan-vector-font-glyph-pixels-returned", 8799,
+            "unavailable", "missing-vector-font-opencl-kernel", 0,
+            false
+        )
+
+        expect(all_unavailable.status).to_equal("pass")
+        expect(all_unavailable.offload_status).to_equal("accelerator-unavailable")
+        expect(all_unavailable.offload_reason).to_equal("metal-requires-macos")
+        expect(metal_and_cuda_return.offload_status).to_equal("gpu-glyph-returned")
+        expect(metal_and_cuda_return.offload_reason).to_equal("metal-vector-font-glyph-pixels-returned")
+        expect(metal_and_cuda_return.production_offload_ready).to_equal(true)
+        expect(metal_and_cuda_return.summary()).to_contain("rocm_status=unavailable")
+        expect(rocm_cpu_proof.offload_status).to_equal("gpu-proof-with-cpu-glyph")
+        expect(rocm_cpu_proof.offload_reason).to_equal("rocm-vector-font-proof-matched-cpu-with-cpu-glyph-return")
+        expect(rocm_cpu_proof.production_offload_ready).to_equal(false)
+        expect(vulkan_mismatch.reason).to_equal("vulkan-checksum-mismatch")
 
     it "requires exact bitmap evidence without blur or tolerance for node and electron baselines":
         val node_pass = web_render_exact_bitmap_comparison_evidence("wm-image-taskbar-command", "pure-simple-engine2d", "nodejs-canvas", 320, 200, 771200, 771200, 0, false, 90, 140, 4, 4, 3, 3)
