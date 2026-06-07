@@ -8,7 +8,7 @@
 ## Symptom
 
 ```
-error: semantic: unknown extern function: thread_spawn2
+error: semantic: unknown extern function: <numeric-suffix thread spawn alias>
 ```
 
 Older multi-threaded code declared a raw numbered thread-spawn extern directly,

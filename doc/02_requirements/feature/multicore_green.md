@@ -42,8 +42,8 @@ SimpleOS scheduler work distinct and verifiable.
 - REQ-MCG-009: C, Go, and Rust may be used as baselines, research references,
   seed implementations, or runtime/compiler implementation contexts; they must
   not replace Simple user-facing concurrency APIs.
-- REQ-MCG-010: Misuse checks must reject wrong-surface imports, numbered
-  aliases such as `thread_spawn2`, and profile rows that present inline fallback
+- REQ-MCG-010: Misuse checks must reject wrong-surface imports, numeric-suffix
+  aliases, and profile rows that present inline fallback
   work as runtime-pool M:N evidence.
 
 ## Acceptance Evidence

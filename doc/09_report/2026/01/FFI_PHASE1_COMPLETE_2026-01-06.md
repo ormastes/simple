@@ -122,7 +122,7 @@ Added `#[derive(Clone)]` to support registry operations.
 
 ### ✅ Thread Isolation Functions (All 9 in `src/runtime/src/executor.rs`)
 - `rt_thread_spawn_isolated` ✓
-- `rt_thread_spawn_isolated2` ✓
+- `rt_thread_spawn_isolated_with_args` ✓
 - `rt_thread_join` ✓
 - `rt_thread_is_done` ✓
 - `rt_thread_id` ✓

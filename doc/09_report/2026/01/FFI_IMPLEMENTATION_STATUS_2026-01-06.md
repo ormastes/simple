@@ -28,7 +28,7 @@ This report identifies FFI functions that are:
 
 #### **rt_thread_*** (9 functions) - Isolated thread operations
 - `rt_thread_spawn_isolated`
-- `rt_thread_spawn_isolated2`
+- `rt_thread_spawn_isolated_with_args`
 - `rt_thread_join`
 - `rt_thread_is_done`
 - `rt_thread_id`

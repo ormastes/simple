@@ -555,16 +555,83 @@ pub struct IsolatedThreadHandle {
 // Track thread IDs
 static NEXT_THREAD_ID: AtomicU64 = AtomicU64::new(1);
 
-unsafe fn native_closure_entry(closure_ptr: u64) -> Option<usize> {
-    if closure_ptr < 4096 || closure_ptr & 0x7 != 0 {
+const X86_64_MAX_CANONICAL_USER_PTR: u64 = 0x0000_7fff_ffff_ffff;
+
+enum NativeCallable {
+    ClosureRecord {
+        entry: usize,
+        closure_ptr: u64,
+        raw_worker_args: bool,
+    },
+    DirectFunction {
+        entry: usize,
+        raw_worker_args: bool,
+    },
+}
+
+fn native_closure_payload(raw: u64) -> Option<u64> {
+    if raw < 4096 {
         return None;
     }
-    let entry = *(closure_ptr as *const usize);
-    if entry < 4096 {
-        None
+
+    if raw > X86_64_MAX_CANONICAL_USER_PTR {
+        Some(raw >> 3)
     } else {
-        Some(entry)
+        Some(raw)
     }
+}
+
+fn native_worker_arg(value: RuntimeValue, raw_worker_args: bool) -> RuntimeValue {
+    if raw_worker_args && value.is_int() {
+        RuntimeValue(value.as_int() as u64)
+    } else {
+        value
+    }
+}
+
+#[cfg(unix)]
+unsafe fn native_address_is_code(addr: usize) -> bool {
+    let mut info: libc::Dl_info = std::mem::zeroed();
+    libc::dladdr(addr as *const libc::c_void, &mut info) != 0 && !info.dli_fname.is_null()
+}
+
+#[cfg(not(unix))]
+unsafe fn native_address_is_code(_addr: usize) -> bool {
+    false
+}
+
+unsafe fn native_callable(closure_arg: u64) -> Option<NativeCallable> {
+    let raw_worker_args = closure_arg > X86_64_MAX_CANONICAL_USER_PTR;
+    let payload = native_closure_payload(closure_arg)?;
+    if payload < 4096 {
+        return None;
+    }
+
+    let payload_addr = payload as usize;
+    if native_address_is_code(payload_addr) {
+        return Some(NativeCallable::DirectFunction {
+            entry: payload_addr,
+            raw_worker_args,
+        });
+    }
+
+    if payload & 0x7 != 0 {
+        return Some(NativeCallable::DirectFunction {
+            entry: payload_addr,
+            raw_worker_args,
+        });
+    }
+
+    let entry = *(payload as *const usize);
+    if entry < 4096 {
+        return None;
+    }
+
+    Some(NativeCallable::ClosureRecord {
+        entry,
+        closure_ptr: payload,
+        raw_worker_args,
+    })
 }
 
 /// Spawn an isolated thread with a closure and copied data.
@@ -583,10 +650,9 @@ unsafe fn native_closure_entry(closure_ptr: u64) -> Option<usize> {
 pub extern "C" fn rt_thread_spawn_isolated(closure_ptr: u64, data: RuntimeValue) -> u64 {
     let thread_id = NEXT_THREAD_ID.fetch_add(1, Ordering::SeqCst);
 
-    let Some(entry) = (unsafe { native_closure_entry(closure_ptr) }) else {
+    let Some(callable) = (unsafe { native_callable(closure_ptr) }) else {
         return 0;
     };
-    let func: extern "C" fn(u64, RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(entry) };
 
     // Clone data for the thread (deep copy for isolation)
     let copied_data = data.deep_copy();
@@ -594,9 +660,19 @@ pub extern "C" fn rt_thread_spawn_isolated(closure_ptr: u64, data: RuntimeValue)
     // Spawn the OS thread
     let handle = thread::Builder::new()
         .name(format!("simple-isolated-{}", thread_id))
-        .spawn(move || {
-            // Execute the closure with copied data
-            func(closure_ptr, copied_data)
+        .spawn(move || match callable {
+            NativeCallable::ClosureRecord {
+                entry,
+                closure_ptr,
+                raw_worker_args,
+            } => {
+                let func: extern "C" fn(u64, RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(entry) };
+                func(closure_ptr, native_worker_arg(copied_data, raw_worker_args))
+            }
+            NativeCallable::DirectFunction { entry, raw_worker_args } => {
+                let func: extern "C" fn(RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(entry) };
+                func(native_worker_arg(copied_data, raw_worker_args))
+            }
         })
         .expect("Failed to spawn isolated thread");
 
@@ -619,10 +695,9 @@ pub extern "C" fn rt_thread_spawn_isolated_with_args(
 ) -> u64 {
     let thread_id = NEXT_THREAD_ID.fetch_add(1, Ordering::SeqCst);
 
-    let Some(entry) = (unsafe { native_closure_entry(closure_ptr) }) else {
+    let Some(callable) = (unsafe { native_callable(closure_ptr) }) else {
         return 0;
     };
-    let func: extern "C" fn(u64, RuntimeValue, RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(entry) };
 
     // Clone data for the thread
     let copied_data1 = data1.deep_copy();
@@ -631,7 +706,29 @@ pub extern "C" fn rt_thread_spawn_isolated_with_args(
     // Spawn the OS thread
     let handle = thread::Builder::new()
         .name(format!("simple-isolated-{}", thread_id))
-        .spawn(move || func(closure_ptr, copied_data1, copied_data2))
+        .spawn(move || match callable {
+            NativeCallable::ClosureRecord {
+                entry,
+                closure_ptr,
+                raw_worker_args,
+            } => {
+                let func: extern "C" fn(u64, RuntimeValue, RuntimeValue) -> RuntimeValue =
+                    unsafe { std::mem::transmute(entry) };
+                func(
+                    closure_ptr,
+                    native_worker_arg(copied_data1, raw_worker_args),
+                    native_worker_arg(copied_data2, raw_worker_args),
+                )
+            }
+            NativeCallable::DirectFunction { entry, raw_worker_args } => {
+                let func: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue =
+                    unsafe { std::mem::transmute(entry) };
+                func(
+                    native_worker_arg(copied_data1, raw_worker_args),
+                    native_worker_arg(copied_data2, raw_worker_args),
+                )
+            }
+        })
         .expect("Failed to spawn isolated thread");
 
     // Create and box the handle
@@ -829,8 +926,9 @@ pub extern "C" fn rt_thread_spawn_limited(
 ) -> u64 {
     let thread_id = NEXT_THREAD_ID.fetch_add(1, Ordering::SeqCst);
 
-    // Convert closure pointer to a function
-    let func: extern "C" fn(RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(closure_ptr as usize) };
+    let Some(callable) = (unsafe { native_callable(closure_ptr) }) else {
+        return 0;
+    };
 
     // Clone data for the thread (deep copy for isolation)
     let copied_data = data.deep_copy();
@@ -870,8 +968,20 @@ pub extern "C" fn rt_thread_spawn_limited(
                 // Continue execution even if limits fail to apply
             }
 
-            // Execute the closure with copied data
-            func(copied_data)
+            match callable {
+                NativeCallable::ClosureRecord {
+                    entry,
+                    closure_ptr,
+                    raw_worker_args,
+                } => {
+                    let func: extern "C" fn(u64, RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(entry) };
+                    func(closure_ptr, native_worker_arg(copied_data, raw_worker_args))
+                }
+                NativeCallable::DirectFunction { entry, raw_worker_args } => {
+                    let func: extern "C" fn(RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(entry) };
+                    func(native_worker_arg(copied_data, raw_worker_args))
+                }
+            }
         })
         .expect("Failed to spawn limited thread");
 
@@ -905,10 +1015,9 @@ pub extern "C" fn rt_thread_spawn_limited_with_args(
 ) -> u64 {
     let thread_id = NEXT_THREAD_ID.fetch_add(1, Ordering::SeqCst);
 
-    let Some(entry) = (unsafe { native_closure_entry(closure_ptr) }) else {
+    let Some(callable) = (unsafe { native_callable(closure_ptr) }) else {
         return 0;
     };
-    let func: extern "C" fn(u64, RuntimeValue, RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(entry) };
 
     // Clone data for the thread
     let copied_data1 = data1.deep_copy();
@@ -948,8 +1057,29 @@ pub extern "C" fn rt_thread_spawn_limited_with_args(
                 tracing::error!("Failed to apply resource limits: {}", e);
             }
 
-            // Execute the closure
-            func(closure_ptr, copied_data1, copied_data2)
+            match callable {
+                NativeCallable::ClosureRecord {
+                    entry,
+                    closure_ptr,
+                    raw_worker_args,
+                } => {
+                    let func: extern "C" fn(u64, RuntimeValue, RuntimeValue) -> RuntimeValue =
+                        unsafe { std::mem::transmute(entry) };
+                    func(
+                        closure_ptr,
+                        native_worker_arg(copied_data1, raw_worker_args),
+                        native_worker_arg(copied_data2, raw_worker_args),
+                    )
+                }
+                NativeCallable::DirectFunction { entry, raw_worker_args } => {
+                    let func: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue =
+                        unsafe { std::mem::transmute(entry) };
+                    func(
+                        native_worker_arg(copied_data1, raw_worker_args),
+                        native_worker_arg(copied_data2, raw_worker_args),
+                    )
+                }
+            }
         })
         .expect("Failed to spawn limited thread");
 

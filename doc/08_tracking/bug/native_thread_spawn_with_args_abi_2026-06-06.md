@@ -4,6 +4,8 @@ Date: 2026-06-06
 
 ## Summary
 
+Status: fixed by `scripts/check/check-thread-spawn-with-args-native.shs`.
+
 Native binaries that call `thread_spawn_with_args` can compile successfully and
 then segfault at runtime, even when every returned handle is joined. Plain
 `thread_spawn(\: value)` still works for native fork-join OS-thread evidence.
@@ -29,7 +31,27 @@ native performance evidence. Profile rows must use `thread_spawn` for native
 OS-thread baselines until this ABI bug is fixed, and must not present stale
 `thread_spawn_with_args` timings as proof.
 
-## Required Fix
+## Fix
+
+The native Rust seed runtime now decodes generated tagged native closure values
+for both direct-function and closure-record worker forms. Generated native
+integer worker arguments are converted back to the raw `i64` ABI expected by
+compiled Simple worker functions, while the existing raw runtime-test closure
+record ABI remains supported. The C runtime mirror now normalizes tagged closure
+record pointers for the same explicit-argument entry shape:
+`entry(closure_ptr, data1, data2)`.
+
+The focused native gate is:
+
+```sh
+sh scripts/check/check-thread-spawn-with-args-native.shs
+```
+
+It builds and runs
+`test/01_unit/lib/nogc_async_mut/thread_spawn_with_args_native.spl`, covering
+both direct-function and lambda forms.
+
+## Historical Required Fix
 
 Fix native ABI lowering/runtime dispatch for explicit-argument thread spawn,
 then add a focused native smoke that compiles and runs both direct-function and

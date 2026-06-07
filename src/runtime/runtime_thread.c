@@ -216,7 +216,15 @@ bool spl_thread_join(spl_thread_handle handle) {
  * ================================================================ */
 
 typedef int64_t (*rt_closure_fn_t)(int64_t);
-typedef int64_t (*rt_closure2_fn_t)(int64_t, int64_t);
+typedef int64_t (*rt_closure2_fn_t)(int64_t, int64_t, int64_t);
+
+static int64_t rt_native_closure_payload(int64_t raw) {
+    uint64_t value = (uint64_t)raw;
+    if (value > 0x00007fffffffffffULL) {
+        return (int64_t)(value >> 3);
+    }
+    return raw;
+}
 
 typedef struct {
     rt_closure_fn_t  entry;
@@ -237,7 +245,7 @@ typedef struct {
 static void* rt_isolated_wrapper(void* raw) {
     RtThreadData* td = (RtThreadData*)raw;
     if (td->arity == 2) {
-        td->result = td->entry2(td->data1, td->data2);
+        td->result = td->entry2(td->closure_ptr, td->data1, td->data2);
     } else {
         td->result = td->entry(td->closure_ptr);
     }
@@ -249,7 +257,7 @@ static void* rt_isolated_wrapper(void* raw) {
 static DWORD WINAPI rt_isolated_wrapper_win(LPVOID raw) {
     RtThreadData* td = (RtThreadData*)raw;
     if (td->arity == 2) {
-        td->result = td->entry2(td->data1, td->data2);
+        td->result = td->entry2(td->closure_ptr, td->data1, td->data2);
     } else {
         td->result = td->entry(td->closure_ptr);
     }
@@ -259,7 +267,7 @@ static DWORD WINAPI rt_isolated_wrapper_win(LPVOID raw) {
 #endif
 
 int64_t rt_thread_spawn_isolated(int64_t arg0, int64_t arg1) {
-    int64_t closure_ptr = (arg1 != 0) ? arg1 : arg0;
+    int64_t closure_ptr = rt_native_closure_payload((arg1 != 0) ? arg1 : arg0);
     rt_closure_fn_t fn_ptr = *(rt_closure_fn_t*)(intptr_t)closure_ptr;
     RtThreadData* td = (RtThreadData*)SPL_MALLOC(sizeof(RtThreadData), "rt_thread");
     if (!td) return 0;
@@ -287,13 +295,16 @@ int64_t rt_thread_spawn_isolated(int64_t arg0, int64_t arg1) {
     return alloc_handle(HANDLE_THREAD, td);
 }
 
-int64_t rt_thread_spawn_isolated_with_args(int64_t fn_ptr, int64_t data1, int64_t data2) {
-    rt_closure2_fn_t entry = (rt_closure2_fn_t)(intptr_t)(fn_ptr >> 3);
+int64_t rt_thread_spawn_isolated_with_args(int64_t arg0, int64_t data1, int64_t data2) {
+    int64_t closure_ptr = rt_native_closure_payload(arg0);
+    if (!closure_ptr) return 0;
+    rt_closure2_fn_t entry = *(rt_closure2_fn_t*)(intptr_t)closure_ptr;
+    if (!entry) return 0;
     RtThreadData* td = (RtThreadData*)SPL_MALLOC(sizeof(RtThreadData), "rt_thread2");
     if (!td) return 0;
     td->entry       = NULL;
     td->entry2      = entry;
-    td->closure_ptr = 0;
+    td->closure_ptr = closure_ptr;
     td->data1       = data1;
     td->data2       = data2;
     td->arity       = 2;

@@ -62,7 +62,7 @@ val result = arr.filter(\x: x > 2).map(\x: x * 2)
 - `available_parallelism()` - Needs `rt_thread_available_parallelism`
 - `sleep()` - Needs `rt_thread_sleep`
 - `yield_thread()` - Needs `rt_thread_yield`
-- `spawn_isolated2()` - Needs `rt_thread_spawn_isolated2` + `rt_thread_join`
+- `spawn_isolated_with_args()` - Needs `rt_thread_spawn_isolated_with_args` + `rt_thread_join`
 - `Channel.new()` - Needs `rt_channel_new`
 - `Channel.send()` - Needs `rt_channel_send`
 - `Channel.try_recv()` - Needs `rt_channel_try_recv`

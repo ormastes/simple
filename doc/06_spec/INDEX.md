@@ -7,13 +7,12 @@
 - **Total Features:** 1
 - **Complete Documentation:** 1 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 42
-- **Warnings:** 1
+- **Total Lines:** 129
 
 ---
 
-## Performance / Concurrency (1 features)
+## Runtime Concurrency (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Multicore Green Cross-Language Profile Gate](05_perf/stress/multicore_green_cross_language_gate_spec.md) | Implemented | N/A | 3 | 20% | 42 lines |
+| [Multicore Green Feature Tracking Specification](test/03_system/feature/usage/multicore_green_tracking_spec.md) | Current | N/A | 6 | 60% | 129 lines |

@@ -99,6 +99,17 @@ Use this spec when updating `doc/08_tracking/feature/feature_db.sdn` for the
 multicore-green lane. Requirement, NFR, and evidence links must change in the
 same commit as the tracking row.
 
+## TUI Capture
+
+```text
+Simple Test Runner v1.0.0-beta
+Running: test/03_system/feature/usage/multicore_green_tracking_spec.spl
+[1/1] test/03_system/feature/usage/multicore_green_tracking_spec.spl PASSED
+Files: 1
+Passed: 6
+Failed: 0
+```
+
 ## Traceability Expectations
 
 - The tracking row must keep the feature id
@@ -136,7 +147,7 @@ same commit as the tracking row.
 - `multicore_green_spawn` names the bounded-worker Pure Simple facade over the
   runtime pool.
 - `task_spawn` names the pool-backed native task path when `rt_pool_*` links.
-- Numbered names such as `thread_spawn2` are not acceptable user-facing names.
+- Numeric suffix names are not acceptable user-facing concurrency APIs.
 - Runtime aliases must use semantic names instead of number suffixes.
 - Documentation must not use a number suffix to distinguish API behavior.
 
@@ -172,51 +183,73 @@ same commit as the tracking row.
 
 #### tracks the multicore-green lane as current rather than done
 
-<details>
-<summary>Executable SPipe</summary>
+1. Read the canonical multicore-green tracking row
+2. Verify the lane is current while full Go-like runtime work remains active
 
-Runnable source: 4 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+step("Read the canonical multicore-green tracking row")
 val row = multicore_green_row(read_tracking_db())
+step("Verify the lane is current while full Go-like runtime work remains active")
 expect(row).to_contain("\"FR-RUNTIME-MULTICORE-GREEN-2026-06-06\"")
 expect(row).to_contain("\"current\"")
-expect(row.contains("\"done\"")).to_equal(false)
+expect(row.contains("\"done\"")).to_be(false)
 ```
 
 </details>
 
 #### links selected requirements without stale option documents
 
-<details>
-<summary>Executable SPipe</summary>
+1. Read the canonical multicore-green tracking row
+2. Verify selected requirement documents are linked
+3. Verify deleted option documents are not linked
 
-Runnable source: 5 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+step("Read the canonical multicore-green tracking row")
 val row = multicore_green_row(read_tracking_db())
+step("Verify selected requirement documents are linked")
 expect(row).to_contain("doc/02_requirements/feature/multicore_green.md")
 expect(row).to_contain("doc/02_requirements/nfr/multicore_green.md")
-expect(row.contains("doc/02_requirements/feature/multicore_green_options.md")).to_equal(false)
-expect(row.contains("doc/02_requirements/nfr/multicore_green_options.md")).to_equal(false)
+step("Verify deleted option documents are not linked")
+expect(row.contains("doc/02_requirements/feature/multicore_green_options.md")).to_be(false)
+expect(row.contains("doc/02_requirements/nfr/multicore_green_options.md")).to_be(false)
 ```
 
 </details>
 
 #### links research plan architecture and design artifacts
 
-<details>
-<summary>Executable SPipe</summary>
+1. Read the canonical multicore-green tracking row
+2. Verify research links are present
+3. Verify plan and design links are present
 
-Runnable source: 7 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+step("Read the canonical multicore-green tracking row")
 val row = multicore_green_row(read_tracking_db())
+step("Verify research links are present")
 expect(row).to_contain("doc/01_research/local/multicore_green.md")
 expect(row).to_contain("doc/01_research/domain/multicore_green.md")
+step("Verify plan and design links are present")
 expect(row).to_contain("doc/03_plan/agent_tasks/multicore_green.md")
 expect(row).to_contain("doc/03_plan/sys_test/multicore_green.md")
 expect(row).to_contain("doc/04_architecture/runtime/multicore_green.md")
@@ -227,18 +260,26 @@ expect(row).to_contain("doc/05_design/multicore_green.md")
 
 #### links SimpleOS and profile SSPEC evidence
 
-<details>
-<summary>Executable SPipe</summary>
+1. Read the canonical multicore-green tracking row
+2. Verify SimpleOS green-carrier specs are linked
+3. Verify profile stress specs are linked
 
-Runnable source: 7 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+step("Read the canonical multicore-green tracking row")
 val row = multicore_green_row(read_tracking_db())
+step("Verify SimpleOS green-carrier specs are linked")
 expect(row).to_contain("test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl")
 expect(row).to_contain("test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl")
 expect(row).to_contain("test/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.spl")
 expect(row).to_contain("test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl")
+step("Verify profile stress specs are linked")
 expect(row).to_contain("test/05_perf/stress/multicore_green_cross_language_gate_spec.spl")
 expect(row).to_contain("test/05_perf/stress/multicore_green_fanout_spec.spl")
 ```
@@ -247,17 +288,25 @@ expect(row).to_contain("test/05_perf/stress/multicore_green_fanout_spec.spl")
 
 #### links implementation and guide surfaces
 
-<details>
-<summary>Executable SPipe</summary>
+1. Read the canonical multicore-green tracking row
+2. Verify Pure Simple implementation surfaces are linked
+3. Verify profile and guide surfaces are linked
 
-Runnable source: 7 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+step("Read the canonical multicore-green tracking row")
 val row = multicore_green_row(read_tracking_db())
+step("Verify Pure Simple implementation surfaces are linked")
 expect(row).to_contain("src/lib/nogc_async_mut/concurrent/cooperative_green.spl")
 expect(row).to_contain("src/lib/nogc_async_mut/concurrent/multicore_green.spl")
 expect(row).to_contain("src/os/kernel/scheduler/green_carrier.spl")
+step("Verify profile and guide surfaces are linked")
 expect(row).to_contain("scripts/check/check-cross-language-perf.shs")
 expect(row).to_contain("doc/07_guide/compiler/check_perf.md")
 expect(row).to_contain("doc/07_guide/lib/misc/stdlib.md")
@@ -267,14 +316,20 @@ expect(row).to_contain("doc/07_guide/lib/misc/stdlib.md")
 
 #### links active runtime blockers for unresolved M:N work
 
-<details>
-<summary>Executable SPipe</summary>
+1. Read the canonical multicore-green tracking row
+2. Verify unresolved runtime blockers remain visible
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+step("Read the canonical multicore-green tracking row")
 val row = multicore_green_row(read_tracking_db())
+step("Verify unresolved runtime blockers remain visible")
 expect(row).to_contain("doc/08_tracking/bug/green_thread_direct_runtime_blockers_2026-06-06.md")
 ```
 

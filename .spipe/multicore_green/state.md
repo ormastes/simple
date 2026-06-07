@@ -16,7 +16,7 @@ Deliver and verify a Simple concurrency lane that clearly separates OS threads, 
 
 - AC-1: Go goroutine, C pthread, Simple `thread_spawn`, `cooperative_green_spawn`, `multicore_green_spawn`, and `task_spawn` semantics are researched and documented with no misleading M:N claims.
 - AC-2: Public docs and coding guidance distinguish `thread_spawn` as OS-thread work, cooperative green APIs as current-carrier queue work, and `multicore_green_spawn` as pool-backed M:N candidate work only with runtime-pool evidence.
-- AC-3: Profile scripts use existing canonical profile harnesses, include OS-thread, cooperative-green, multicore-green, Go, and C rows, and reject numbered API aliases such as `thread_spawn2`.
+- AC-3: Profile scripts use existing canonical profile harnesses, include OS-thread, cooperative-green, multicore-green, Go, and C rows, and reject numeric-suffix API aliases.
 - AC-4: Perf reports prove Go-vs-C fanout behavior and Simple multicore-green native rows with `used_runtime_pool()` / `pool_used=` evidence.
 - AC-5: Pure Simple implementation, generated workloads, and executable perf specs avoid unrolled numbered handles where compact semantic loops and handle arrays preserve behavior.
 - AC-6: SimpleOS cooperative-green and multicore-green support has executable SPipe specs, generated manuals, and current evidence reports.

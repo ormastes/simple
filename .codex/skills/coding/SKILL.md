@@ -220,10 +220,10 @@ Call `multicore_green_set_parallelism(workers)` before the first
 record `multicore_green_parallelism()` in evidence. Live pools can grow but do
 not claim shrink/preemption behavior yet.
 
-Do not use numbered concurrency aliases. `thread_spawn2`, `spawn_isolated2`,
-and `spawn_limited2` are rejected by `simple check` with `E-PAR-002`; use
-`thread_spawn_with_args`, `spawn_isolated_with_args`, or
-`spawn_limited_with_args` for explicit-argument spawning.
+Do not use numeric-suffix concurrency aliases. They are rejected by
+`simple check` with `E-PAR-002`; use `thread_spawn_with_args`,
+`spawn_isolated_with_args`, or `spawn_limited_with_args` for
+explicit-argument spawning.
 Keep concurrency surfaces separate. Importing `thread_spawn` from
 `std.concurrent.cooperative_green`, importing `cooperative_green_spawn` from
 `std.concurrent.thread`, or similar wrong-surface imports is rejected with

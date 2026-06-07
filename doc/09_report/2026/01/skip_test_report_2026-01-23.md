@@ -14,7 +14,7 @@
 
 **Implementation Details:**
 - ? operator: Tests converted from placeholder `expect true == true` to actual Result/Option propagation tests
-- Thread closure: Modified `rt_thread_spawn_isolated2` to execute closures via `exec_block_value`
+- Thread closure: Modified `rt_thread_spawn_isolated_with_args` to execute closures via `exec_block_value`
 - Key change: `interpreter_extern/concurrency.rs` - added closure body evaluation using `exec_block_value`
 
 ## 🔄 Earlier 2026-01-23: Bug Fixes and Parser Improvements
@@ -308,7 +308,7 @@ Feature documentation generation:
 
 **Location:** `test/lib/std/unit/concurrency/concurrency_spec.spl`
 
-**Status:** ✅ All tests now working. Implemented closure execution in `rt_thread_spawn_isolated2`.
+**Status:** ✅ All tests now working. Implemented closure execution in `rt_thread_spawn_isolated_with_args`.
 
 **Implementation:**
 - Modified `interpreter_extern/concurrency.rs` to use `exec_block_value`

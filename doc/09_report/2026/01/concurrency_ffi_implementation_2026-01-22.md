@@ -17,7 +17,7 @@ Located in: `src/rust/compiler/src/interpreter_extern/concurrency.rs`
 | `rt_thread_sleep(millis)` | Sleep current thread | ✅ Working |
 | `rt_thread_yield()` | Yield to scheduler | ✅ Working |
 | `rt_thread_spawn_isolated(closure, data)` | Spawn isolated thread | ⚠️ Stub (needs closure support) |
-| `rt_thread_spawn_isolated2(closure, data1, data2)` | Spawn with 2 args | ⚠️ Stub (needs closure support) |
+| `rt_thread_spawn_isolated_with_args(closure, data1, data2)` | Spawn with explicit arguments | ⚠️ Stub (needs closure support) |
 | `rt_thread_join(handle)` | Wait for thread | ⚠️ Stub |
 | `rt_thread_is_done(handle)` | Check if done | ⚠️ Stub |
 | `rt_thread_id(handle)` | Get thread ID | ✅ Working |
