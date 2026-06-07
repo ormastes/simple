@@ -28,7 +28,7 @@ scheduler_green_parallelism_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -327,12 +327,49 @@ expect(sched.green_rejected_intents()).to_equal(0)
 
 </details>
 
+#### computes rebalance from carrier queue depths
+
+1. var sched = Scheduler new with cpu count
+
+2. sched set green carrier parallelism
+   - Expected: moved.moved is true
+   - Expected: moved.from_cpu equals `1`
+   - Expected: moved.to_cpu equals `0`
+   - Expected: result.applied is true
+   - Expected: sched.green_current_task_on_cpu(0u32) equals `54`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var sched = Scheduler.new_with_cpu_count(4u32)
+sched.set_green_carrier_parallelism(1)
+val queues = green_carrier_run_queues_new(4, 8)
+val decision = green_carrier_spawn_task(54, 4, 0, 3, 1, 2, 4, 0)
+val queued = green_carrier_apply_enqueue(queues, decision)
+val moved = sched.rebalance_green_carrier_queues_from_depth(queued.queues, 1)
+val dispatched = green_carrier_dispatch_next_with_limit(moved.queues, 0, sched.green_carrier_parallelism_limit())
+val result = sched.apply_green_scheduler_intent(green_carrier_scheduler_intent(dispatched))
+
+expect(moved.moved).to_equal(true)
+expect(moved.from_cpu).to_equal(1)
+expect(moved.to_cpu).to_equal(0)
+expect(result.applied).to_equal(true)
+expect(sched.green_current_task_on_cpu(0u32)).to_equal(54)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -121,6 +121,9 @@ Behavior:
 - `Scheduler.rebalance_green_carrier_queues` applies a green-worker rebalance
   decision using `Scheduler.green_parallelism_state.active_limit`, so callers
   do not pass a stale carrier limit.
+- `Scheduler.rebalance_green_carrier_queues_from_depth` reads per-CPU carrier
+  queue depths and derives the green-worker rebalance decision inside the
+  scheduler wrapper.
 
 ### Freestanding QEMU Probe Path
 

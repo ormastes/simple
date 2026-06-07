@@ -95,6 +95,13 @@ go-runtime-hardening
   `scheduler_green_parallelism_spec.spl` passed 8 examples, and
   `simpleos_multicore_green_spec.spl` passed 3 examples after the scheduler
   rebalance wrapper replaced the direct free-helper call in scheduler evidence.
+- implementation: Added `Scheduler.rebalance_green_carrier_queues_from_depth`
+  so the scheduler can derive green-worker rebalance decisions from live
+  carrier queue depths before applying its active carrier limit.
+- verification: `scheduler.spl` check passed,
+  `scheduler_green_parallelism_spec.spl` passed 9 examples, and
+  `simpleos_multicore_green_spec.spl` passed 3 examples for the queue-depth
+  rebalance wrapper.
 
 ## Completion Audit - 2026-06-07
 

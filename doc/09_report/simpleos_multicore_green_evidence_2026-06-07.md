@@ -33,7 +33,7 @@ SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 ./src/compiler_rust/target/debug/simple test 
 | SimpleOS green-carrier compile check | PASS | 1 file |
 | SimpleOS green-carrier unit contract | PASS | 36 |
 | SimpleOS scheduler compile check | PASS | 1 file |
-| SimpleOS scheduler green-carrier parallelism | PASS | 8 |
+| SimpleOS scheduler green-carrier parallelism | PASS | 9 |
 | SimpleOS green-carrier QEMU spec default lane | PASS | 1 |
 | SimpleOS green-carrier QEMU live lane | PASS | 1 |
 
@@ -57,4 +57,5 @@ SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 ./src/compiler_rust/target/debug/simple test 
   topology growth, and rejects runnable green dispatch for inactive carriers
   without dropping queued work. It also proves rebalanced inactive-carrier work
   can execute on an active carrier through the scheduler-owned rebalance
-  wrapper.
+  wrapper, including a wrapper path that derives the rebalance decision from
+  live carrier queue depths.

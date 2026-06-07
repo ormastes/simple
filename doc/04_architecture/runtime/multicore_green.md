@@ -152,6 +152,9 @@ SimpleOS path:
 - `Scheduler.rebalance_green_carrier_queues` applies those decisions with the
   scheduler-owned active carrier limit, keeping queue movement under the same
   authority as green dispatch.
+- `Scheduler.rebalance_green_carrier_queues_from_depth` derives the rebalance
+  decision from live carrier queue depths before applying the scheduler-owned
+  active carrier limit.
 - QEMU proof currently covers AP startup plus CPU1 fixed-slot dispatch; full
   hardware context-switch handoff remains future work.
 
