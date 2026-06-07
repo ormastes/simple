@@ -1,6 +1,6 @@
 # SimpleOS Multicore Green System Contract
 
-> This system spec exercises the hosted SimpleOS contract for multicore green work: logical green tasks enqueue onto carrier CPUs, remote enqueue uses the SMP reschedule IPI surface, and the real `Scheduler` records green execution state separately from normal OS task ids. It also proves the hosted SimpleOS lane routes runtime and timer preemption safepoints through the same scheduler-owned green carrier sweep used by interrupt/compiler entrypoints.
+> This system spec exercises the hosted SimpleOS contract for multicore green work: logical green tasks enqueue onto carrier CPUs, remote enqueue uses the SMP reschedule IPI surface, and the real `Scheduler` records green execution state separately from normal OS task ids. It also proves the hosted SimpleOS lane routes runtime, timer, and compiler preemption safepoints through named scheduler-owned green carrier adapters.
 
 <!-- sdn-diagram:id=simpleos_multicore_green_spec.arch -->
 <details class="sdn-source">
@@ -27,14 +27,14 @@ simpleos_multicore_green_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # SimpleOS Multicore Green System Contract
 
-This system spec exercises the hosted SimpleOS contract for multicore green work: logical green tasks enqueue onto carrier CPUs, remote enqueue uses the SMP reschedule IPI surface, and the real `Scheduler` records green execution state separately from normal OS task ids. It also proves the hosted SimpleOS lane routes runtime and timer preemption safepoints through the same scheduler-owned green carrier sweep used by interrupt/compiler entrypoints.
+This system spec exercises the hosted SimpleOS contract for multicore green work: logical green tasks enqueue onto carrier CPUs, remote enqueue uses the SMP reschedule IPI surface, and the real `Scheduler` records green execution state separately from normal OS task ids. It also proves the hosted SimpleOS lane routes runtime, timer, and compiler preemption safepoints through named scheduler-owned green carrier adapters.
 
 ## At a Glance
 
@@ -57,8 +57,8 @@ This system spec exercises the hosted SimpleOS contract for multicore green
 work: logical green tasks enqueue onto carrier CPUs, remote enqueue uses the SMP
 reschedule IPI surface, and the real `Scheduler` records green execution state
 separately from normal OS task ids. It also proves the hosted SimpleOS lane
-routes runtime and timer preemption safepoints through the same scheduler-owned
-green carrier sweep used by interrupt/compiler entrypoints.
+routes runtime, timer, and compiler preemption safepoints through named
+scheduler-owned green carrier adapters.
 
 The spec is intentionally not a live QEMU proof. The QEMU SMP evidence remains
 tracked in the multicore-green system plan until guest-visible AP execution is
@@ -93,53 +93,55 @@ Run the hosted SimpleOS multicore-green contract:
 The scenarios model the SimpleOS scheduler-owned carrier path: remote green
 enqueue sends the reschedule IPI, dispatch records green execution separately
 from normal OS tasks, topology growth extends green scheduler slots, and
-runtime/timer safepoints route through active green carriers. This is hosted
-model evidence; live QEMU/AP execution remains covered by
+runtime, timer, and compiler safepoints route through active green carriers.
+This is hosted model evidence; live QEMU/AP execution remains covered by
 `test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl`.
 
 ## Scenario Walkthrough
 
 ### Remote Green Enqueue
 
-1. Initialize the hosted SMP model.
-2. Bring up a remote application processor.
-3. Create carrier queues for four CPUs.
-4. Plan green work for a remote carrier CPU.
-5. Apply the enqueue decision.
-6. Assert the enqueue sent the SimpleOS reschedule IPI.
+- Initialize the hosted SMP model.
+- Bring up a remote application processor.
+- Create carrier queues for four CPUs.
+- Plan green work for a remote carrier CPU.
+- Apply the enqueue decision.
+- Assert the enqueue sent the SimpleOS reschedule IPI.
 
 ### Scheduler-Owned Green State
 
-1. Create a scheduler with four CPU slots.
-2. Enqueue green work for CPU one.
-3. Dispatch the next green task from the CPU one carrier queue.
-4. Apply the green scheduler intent.
-5. Assert green current-task and green context-switch counters changed.
-6. Assert the normal OS task slot remains unchanged.
+- Create a scheduler with four CPU slots.
+- Enqueue green work for CPU one.
+- Dispatch the next green task from the CPU one carrier queue.
+- Apply the green scheduler intent.
+- Assert green current-task and green context-switch counters changed.
+- Assert the normal OS task slot remains unchanged.
 
 ### Topology Growth
 
-1. Create a bootstrap scheduler.
-2. Grow the topology to four CPUs.
-3. Enqueue green work for CPU three.
-4. Dispatch and apply CPU three green scheduler intent.
-5. Assert the grown scheduler records CPU three green execution.
+- Create a bootstrap scheduler.
+- Grow the topology to four CPUs.
+- Enqueue green work for CPU three.
+- Dispatch and apply CPU three green scheduler intent.
+- Assert the grown scheduler records CPU three green execution.
 
 ### Active-Carrier Safepoints
 
-1. Set active green carrier parallelism to one.
-2. Enqueue and run green work on CPU zero.
-3. Poll a runtime safepoint through active green carriers.
-4. Poll a timer interrupt safepoint through active green carriers.
-5. Assert runtime polling ticks without preemption.
-6. Assert timer polling yields and requeues the active green worker.
-7. Poll an invalid source and assert no carrier is ticked or yielded.
+- Set active green carrier parallelism to one.
+- Enqueue and run green work on CPU zero.
+- Poll the named runtime safepoint adapter through active green carriers.
+- Poll the named timer interrupt adapter through active green carriers.
+- Poll the named compiler safepoint adapter through active green carriers.
+- Assert runtime and first compiler polling ticks without preemption.
+- Assert timer and second compiler polling yield and requeue the active green
+  worker.
+- Poll an invalid source and assert no carrier is ticked or yielded.
 
 ## Evidence Boundary
 
 - This spec proves hosted/model SimpleOS scheduler behavior.
 - It proves scheduler-owned carrier state, remote enqueue/IPI intent,
-  topology-bounded green state, and preemption-safepoint routing.
+  topology-bounded green state, and named preemption-safepoint routing.
 - It does not by itself prove live AP hardware execution.
 - Live AP and guest-visible dispatch evidence is owned by
   `green_carrier_qemu_spec.spl`.
@@ -153,7 +155,7 @@ Simple Test Runner v1.0.0-beta
 Running: test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl
 [1/1] test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl PASSED
 Files: 1
-Passed: 5
+Passed: 6
 Failed: 0
 ```
 
@@ -307,8 +309,8 @@ expect(scheduler.green_context_switches_on_cpu(3u32)).to_equal(1)
 5. scheduler set green carrier parallelism
 6. Enqueue green work on CPU zero
 7. Run an active carrier pass
-8. Poll the runtime safepoint through active green carriers
-9. Poll the timer interrupt safepoint through active green carriers
+8. Poll the named runtime safepoint adapter through active green carriers
+9. Poll the named timer interrupt adapter through active green carriers
 10. Verify runtime safepoint ticks without requesting preemption
    - Expected: pass_result.ran_workers equals `1`
    - Expected: runtime_poll.accepted is true
@@ -317,19 +319,20 @@ expect(scheduler.green_context_switches_on_cpu(3u32)).to_equal(1)
    - Expected: runtime_poll.ticked_carriers equals `1`
    - Expected: scheduler.green_current_task_on_cpu(0u32) equals `404`
 11. Verify timer safepoint yields the active green worker
-   - Expected: timer_poll.accepted is true
-   - Expected: timer_poll.source equals `timer_interrupt`
-   - Expected: timer_poll.preemption_requested is true
-   - Expected: timer_poll.yielded_workers equals `1`
-   - Expected: timer_poll.reason equals `green_time_slice_expired`
-   - Expected: green_carrier_queue_depth(timer_poll.queues, 0) equals `1`
+   - Expected: timer_interrupt.accepted is true
+   - Expected: timer_interrupt.source equals `timer_interrupt`
+   - Expected: timer_interrupt.preemption.preemption_requested is true
+   - Expected: timer_interrupt.eoi_required is true
+   - Expected: timer_interrupt.yielded_workers equals `1`
+   - Expected: timer_interrupt.reason equals `green_time_slice_expired`
+   - Expected: green_carrier_queue_depth(timer_interrupt.queues, 0) equals `1`
    - Expected: scheduler.green_current_task_on_cpu(0u32) equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -344,10 +347,10 @@ val decision = green_carrier_spawn_task(404, 4, 1, 0, 4, 4, 4, 0)
 val queued = green_carrier_apply_enqueue(queues, decision)
 step("Run an active carrier pass")
 val pass_result = scheduler.run_green_carrier_active_pass(queued.queues, 0)
-step("Poll the runtime safepoint through active green carriers")
-val runtime_poll = scheduler.green_preemption_safepoint_active_carriers(pass_result.queues, "runtime_safepoint")
-step("Poll the timer interrupt safepoint through active green carriers")
-val timer_poll = scheduler.green_preemption_safepoint_active_carriers(runtime_poll.queues, "timer_interrupt")
+step("Poll the named runtime safepoint adapter through active green carriers")
+val runtime_poll = scheduler.green_runtime_safepoint_active_carriers(pass_result.queues)
+step("Poll the named timer interrupt adapter through active green carriers")
+val timer_interrupt = scheduler.green_timer_interrupt_active_carriers(runtime_poll.queues)
 
 step("Verify runtime safepoint ticks without requesting preemption")
 expect(pass_result.ran_workers).to_equal(1)
@@ -357,12 +360,85 @@ expect(runtime_poll.preemption_requested).to_equal(false)
 expect(runtime_poll.ticked_carriers).to_equal(1)
 expect(scheduler.green_current_task_on_cpu(0u32)).to_equal(404)
 step("Verify timer safepoint yields the active green worker")
-expect(timer_poll.accepted).to_equal(true)
-expect(timer_poll.source).to_equal("timer_interrupt")
-expect(timer_poll.preemption_requested).to_equal(true)
-expect(timer_poll.yielded_workers).to_equal(1)
-expect(timer_poll.reason).to_equal("green_time_slice_expired")
-expect(green_carrier_queue_depth(timer_poll.queues, 0)).to_equal(1)
+expect(timer_interrupt.accepted).to_equal(true)
+expect(timer_interrupt.source).to_equal("timer_interrupt")
+expect(timer_interrupt.preemption.preemption_requested).to_equal(true)
+expect(timer_interrupt.eoi_required).to_equal(true)
+expect(timer_interrupt.yielded_workers).to_equal(1)
+expect(timer_interrupt.reason).to_equal("green_time_slice_expired")
+expect(green_carrier_queue_depth(timer_interrupt.queues, 0)).to_equal(1)
+expect(scheduler.green_current_task_on_cpu(0u32)).to_equal(0)
+```
+
+</details>
+
+#### routes compiler safepoints through the named SimpleOS green adapter
+
+1. Initialize the hosted SimpleOS SMP model
+2. smp init
+3. Create a scheduler with one active green carrier
+4. var scheduler = Scheduler new with cpu count
+5. scheduler set green carrier parallelism
+6. Enqueue compiler-yieldable green work on CPU zero
+7. Run an active carrier pass
+8. Poll the compiler safepoint before the time slice expires
+9. Poll the compiler safepoint at time-slice expiry
+10. Verify the compiler safepoint adapter preserves the running worker before expiry
+   - Expected: pass_result.ran_workers equals `1`
+   - Expected: compiler_running_poll.accepted is true
+   - Expected: compiler_running_poll.source equals `compiler_safepoint`
+   - Expected: compiler_running_poll.preemption_requested is false
+   - Expected: compiler_running_poll.ticked_carriers equals `1`
+   - Expected: compiler_running_poll.yielded_workers equals `0`
+   - Expected: scheduler.green_current_task_on_cpu(0u32) equals `406`
+11. Verify the compiler safepoint adapter yields at time-slice expiry
+   - Expected: compiler_expiring_poll.accepted is true
+   - Expected: compiler_expiring_poll.source equals `compiler_safepoint`
+   - Expected: compiler_expiring_poll.preemption_requested is true
+   - Expected: compiler_expiring_poll.yielded_workers equals `1`
+   - Expected: compiler_expiring_poll.reason equals `green_time_slice_expired`
+   - Expected: green_carrier_queue_depth(compiler_expiring_poll.queues, 0) equals `1`
+   - Expected: scheduler.green_current_task_on_cpu(0u32) equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 32 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Initialize the hosted SimpleOS SMP model")
+smp_init()
+step("Create a scheduler with one active green carrier")
+var scheduler = Scheduler.new_with_cpu_count(4u32)
+scheduler.set_green_carrier_parallelism(1)
+step("Enqueue compiler-yieldable green work on CPU zero")
+val queues = green_carrier_run_queues_new(4, 8)
+val decision = green_carrier_spawn_task(406, 4, 1, 0, 4, 4, 4, 0)
+val queued = green_carrier_apply_enqueue(queues, decision)
+step("Run an active carrier pass")
+val pass_result = scheduler.run_green_carrier_active_pass(queued.queues, 0)
+step("Poll the compiler safepoint before the time slice expires")
+val compiler_running_poll = scheduler.green_compiler_safepoint_active_carriers(pass_result.queues)
+step("Poll the compiler safepoint at time-slice expiry")
+val compiler_expiring_poll = scheduler.green_compiler_safepoint_active_carriers(compiler_running_poll.queues)
+
+step("Verify the compiler safepoint adapter preserves the running worker before expiry")
+expect(pass_result.ran_workers).to_equal(1)
+expect(compiler_running_poll.accepted).to_equal(true)
+expect(compiler_running_poll.source).to_equal("compiler_safepoint")
+expect(compiler_running_poll.preemption_requested).to_equal(false)
+expect(compiler_running_poll.ticked_carriers).to_equal(1)
+expect(compiler_running_poll.yielded_workers).to_equal(0)
+expect(scheduler.green_current_task_on_cpu(0u32)).to_equal(406)
+step("Verify the compiler safepoint adapter yields at time-slice expiry")
+expect(compiler_expiring_poll.accepted).to_equal(true)
+expect(compiler_expiring_poll.source).to_equal("compiler_safepoint")
+expect(compiler_expiring_poll.preemption_requested).to_equal(true)
+expect(compiler_expiring_poll.yielded_workers).to_equal(1)
+expect(compiler_expiring_poll.reason).to_equal("green_time_slice_expired")
+expect(green_carrier_queue_depth(compiler_expiring_poll.queues, 0)).to_equal(1)
 expect(scheduler.green_current_task_on_cpu(0u32)).to_equal(0)
 ```
 
@@ -425,8 +501,8 @@ expect(scheduler.green_ticks_remaining_on_cpu(0u32)).to_equal(2)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

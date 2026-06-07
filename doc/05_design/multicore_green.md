@@ -149,6 +149,8 @@ SimpleOS coverage:
 
 - `test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl`
 - `test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl`
+  covers scheduler-owned carrier state plus named runtime, timer-interrupt,
+  and compiler safepoint adapters.
 - `test/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.spl`
 - `test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl`
 
