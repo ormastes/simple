@@ -393,10 +393,16 @@ fn handle_bootstrap(args: &[&str]) -> i32 {
         return 1;
     };
 
-    // Stage 1: Compile compiler source with seed compiler
+    // Stage 1: Compile compiler source with seed compiler.
+    // NOTE: every stage compiles to the SAME basename ("simple", in a per-stage
+    // subdir) on purpose. native-build embeds the output basename into the
+    // binary, so compiling to distinct names (simple_stage1/2/3) made the three
+    // outputs differ regardless of codegen determinism — a false MISMATCH that
+    // also blocked the VERIFIED->deploy path. Same basename isolates genuine
+    // non-determinism from the output filename.
     println!();
     println!("=== Stage 1: Compile with seed compiler ===");
-    let stage1_path = bootstrap_stage_output_path(&output_dir, "simple_stage1");
+    let stage1_path = bootstrap_stage_output_path(&output_dir, "stage1/simple");
     let stage1 = compile_stage(&compiler, &stage1_path, &backend);
     if !stage1.success {
         eprintln!("Stage 1 FAILED");
@@ -410,7 +416,7 @@ fn handle_bootstrap(args: &[&str]) -> i32 {
     // deterministic output.
     println!();
     println!("=== Stage 2: Compile with seed compiler (determinism check) ===");
-    let stage2_path = bootstrap_stage_output_path(&output_dir, "simple_stage2");
+    let stage2_path = bootstrap_stage_output_path(&output_dir, "stage2/simple");
     let stage2 = compile_stage(&compiler, &stage2_path, &backend);
     if !stage2.success {
         eprintln!("Stage 2 FAILED");
@@ -421,7 +427,7 @@ fn handle_bootstrap(args: &[&str]) -> i32 {
     // Stage 3: Third compilation
     println!();
     println!("=== Stage 3: Compile with seed compiler (triple check) ===");
-    let stage3_path = bootstrap_stage_output_path(&output_dir, "simple_stage3");
+    let stage3_path = bootstrap_stage_output_path(&output_dir, "stage3/simple");
     let stage3 = compile_stage(&compiler, &stage3_path, &backend);
     if !stage3.success {
         eprintln!("Stage 3 FAILED");
@@ -462,6 +468,10 @@ fn bootstrap_stage_output_path(output_dir: &str, name: &str) -> String {
     let mut path = PathBuf::from(output_dir).join(name);
     if cfg!(target_os = "windows") && path.extension().is_none() {
         path.set_extension("exe");
+    }
+    // `name` may include a per-stage subdir (e.g. "stage1/simple"); ensure it exists.
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
     }
     path.to_string_lossy().to_string()
 }
@@ -647,12 +657,22 @@ fn resolve_preferred_simple_binary() -> Option<PathBuf> {
         PathBuf::from("build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple"),
         PathBuf::from("build/bootstrap/stage2/aarch64-unknown-linux-gnu/simple"),
         PathBuf::from("build/bootstrap/stage2_fullcli/simple"),
-        PathBuf::from("bin/release/simple"),
+    ];
+    // Prefer real host-platform binaries (bin/release/<triple>/simple) next.
+    // They run on the host AND are not misclassified as rust-driver seeds — a
+    // rust-driver seed (e.g. the `bin/simple` symlink) sets
+    // SIMPLE_NO_STUB_FALLBACK=1, which breaks the minimal bootstrap entry that
+    // legitimately needs libc stubs. No Linux regression: whenever the generic
+    // wrapper worked, the platform binary it execs exists and is found here.
+    candidates.extend(platform_release_binary_candidates());
+    candidates.extend([
         PathBuf::from("bin/simple"),
         PathBuf::from("src/compiler_rust/target/release/simple"),
         PathBuf::from("src/compiler_rust/target/bootstrap/simple"),
-    ];
-    candidates.extend(platform_release_binary_candidates());
+        // Generic wrapper: may exec a binary for the wrong platform
+        // (e.g. a Linux wrapper on macOS -> "Exec format error"). Last resort.
+        PathBuf::from("bin/release/simple"),
+    ]);
 
     candidates.into_iter().find(|candidate| candidate.is_file())
 }
