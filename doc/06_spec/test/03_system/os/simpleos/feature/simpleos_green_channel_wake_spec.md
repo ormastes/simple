@@ -104,14 +104,14 @@ val decision = green_carrier_channel_wake_task(parked_task, sent.receiver_task_i
 - smp bringup ap
 - var scheduler = Scheduler new with cpu count
 - scheduler set green carrier parallelism
-   - Expected: sent.unparked is true
-   - Expected: wake.enqueued is true
+   - Expected: bool_evidence(sent.unparked) equals `1`
+   - Expected: bool_evidence(wake.enqueued) equals `1`
    - Expected: wake.apply.decision.target_cpu equals `2`
-   - Expected: wake.apply.ipi_sent is true
+   - Expected: bool_evidence(wake.apply.ipi_sent) equals `1`
    - Expected: pending equals `smp_ipi_resched()`
    - Expected: wake.pass_result.rebalance.moved_workers equals `1`
    - Expected: wake.pass_result.ran_workers equals `1`
-   - Expected: wake.ran is true
+   - Expected: bool_evidence(wake.ran) equals `1`
    - Expected: wake.reason equals `active_pass_ran`
    - Expected: scheduler.green_current_task_on_cpu(0u32) equals `504`
    - Expected: scheduler.green_current_task_on_cpu(2u32) equals `0`
@@ -150,14 +150,14 @@ val wake = scheduler.run_green_channel_wake_pass(
 )
 val pending = smp_take_ipi(2u32)
 
-expect(sent.unparked).to_equal(true)
-expect(wake.enqueued).to_equal(true)
+expect(bool_evidence(sent.unparked)).to_equal(1)
+expect(bool_evidence(wake.enqueued)).to_equal(1)
 expect(wake.apply.decision.target_cpu).to_equal(2)
-expect(wake.apply.ipi_sent).to_equal(true)
+expect(bool_evidence(wake.apply.ipi_sent)).to_equal(1)
 expect(pending).to_equal(smp_ipi_resched())
 expect(wake.pass_result.rebalance.moved_workers).to_equal(1)
 expect(wake.pass_result.ran_workers).to_equal(1)
-expect(wake.ran).to_equal(true)
+expect(bool_evidence(wake.ran)).to_equal(1)
 expect(wake.reason).to_equal("active_pass_ran")
 expect(scheduler.green_current_task_on_cpu(0u32)).to_equal(504)
 expect(scheduler.green_current_task_on_cpu(2u32)).to_equal(0)
@@ -172,17 +172,17 @@ expect(green_carrier_queue_depth(wake.queues, 2)).to_equal(0)
 - smp init
 - smp bringup ap
 - var scheduler = Scheduler new with cpu count
-   - Expected: sent.unparked is true
-   - Expected: decision.should_enqueue is true
+   - Expected: bool_evidence(sent.unparked) equals `1`
+   - Expected: bool_evidence(decision.should_enqueue) equals `1`
    - Expected: decision.target_cpu equals `2`
    - Expected: decision.reason equals `wake_affine_waker_cpu`
-   - Expected: applied.enqueued is true
-   - Expected: applied.ipi_sent is true
+   - Expected: bool_evidence(applied.enqueued) equals `1`
+   - Expected: bool_evidence(applied.ipi_sent) equals `1`
    - Expected: pending equals `smp_ipi_resched()`
    - Expected: green_carrier_queue_depth(applied.queues, 2) equals `1`
-   - Expected: dispatched.dispatched is true
+   - Expected: bool_evidence(dispatched.dispatched) equals `1`
    - Expected: dispatched.task_id equals `501`
-   - Expected: scheduled.applied is true
+   - Expected: bool_evidence(scheduled.applied) equals `1`
    - Expected: scheduler.green_current_task_on_cpu(2u32) equals `501`
    - Expected: scheduler.green_context_switches_on_cpu(2u32) equals `1`
    - Expected: scheduler.get_current_on_cpu(2u32).id equals `0`
@@ -219,17 +219,17 @@ val pending = smp_take_ipi(2u32)
 val dispatched = green_carrier_dispatch_next(applied.queues, 2)
 val scheduled = scheduler.apply_green_scheduler_intent(green_carrier_scheduler_intent(dispatched))
 
-expect(sent.unparked).to_equal(true)
-expect(decision.should_enqueue).to_equal(true)
+expect(bool_evidence(sent.unparked)).to_equal(1)
+expect(bool_evidence(decision.should_enqueue)).to_equal(1)
 expect(decision.target_cpu).to_equal(2)
 expect(decision.reason).to_equal("wake_affine_waker_cpu")
-expect(applied.enqueued).to_equal(true)
-expect(applied.ipi_sent).to_equal(true)
+expect(bool_evidence(applied.enqueued)).to_equal(1)
+expect(bool_evidence(applied.ipi_sent)).to_equal(1)
 expect(pending).to_equal(smp_ipi_resched())
 expect(green_carrier_queue_depth(applied.queues, 2)).to_equal(1)
-expect(dispatched.dispatched).to_equal(true)
+expect(bool_evidence(dispatched.dispatched)).to_equal(1)
 expect(dispatched.task_id).to_equal(501)
-expect(scheduled.applied).to_equal(true)
+expect(bool_evidence(scheduled.applied)).to_equal(1)
 expect(scheduler.green_current_task_on_cpu(2u32)).to_equal(501)
 expect(scheduler.green_context_switches_on_cpu(2u32)).to_equal(1)
 expect(scheduler.get_current_on_cpu(2u32).id).to_equal(0)
@@ -240,10 +240,10 @@ expect(scheduler.get_current_on_cpu(2u32).id).to_equal(0)
 #### does not enqueue when a send buffered without waking a receiver
 
 - smp init
-   - Expected: sent.unparked is false
-   - Expected: decision.should_enqueue is false
+   - Expected: bool_evidence(sent.unparked) equals `0`
+   - Expected: bool_evidence(decision.should_enqueue) equals `0`
    - Expected: decision.reason equals `channel_no_receiver`
-   - Expected: applied.enqueued is false
+   - Expected: bool_evidence(applied.enqueued) equals `0`
    - Expected: applied.queues.queued_task_ids.len() equals `0`
 
 
@@ -271,10 +271,10 @@ val decision = green_carrier_channel_wake_task(
 )
 val applied = green_carrier_apply_enqueue(queues, decision)
 
-expect(sent.unparked).to_equal(false)
-expect(decision.should_enqueue).to_equal(false)
+expect(bool_evidence(sent.unparked)).to_equal(0)
+expect(bool_evidence(decision.should_enqueue)).to_equal(0)
 expect(decision.reason).to_equal("channel_no_receiver")
-expect(applied.enqueued).to_equal(false)
+expect(bool_evidence(applied.enqueued)).to_equal(0)
 expect(applied.queues.queued_task_ids.len()).to_equal(0)
 ```
 
@@ -283,11 +283,11 @@ expect(applied.queues.queued_task_ids.len()).to_equal(0)
 #### rejects mismatched channel wake task ids
 
 - smp init
-   - Expected: sent.unparked is true
+   - Expected: bool_evidence(sent.unparked) equals `1`
    - Expected: sent.receiver_task_id equals `999`
-   - Expected: decision.should_enqueue is false
+   - Expected: bool_evidence(decision.should_enqueue) equals `0`
    - Expected: decision.reason equals `channel_receiver_mismatch`
-   - Expected: applied.enqueued is false
+   - Expected: bool_evidence(applied.enqueued) equals `0`
 
 
 <details>
@@ -316,11 +316,11 @@ val decision = green_carrier_channel_wake_task(
 )
 val applied = green_carrier_apply_enqueue(queues, decision)
 
-expect(sent.unparked).to_equal(true)
+expect(bool_evidence(sent.unparked)).to_equal(1)
 expect(sent.receiver_task_id).to_equal(999)
-expect(decision.should_enqueue).to_equal(false)
+expect(bool_evidence(decision.should_enqueue)).to_equal(0)
 expect(decision.reason).to_equal("channel_receiver_mismatch")
-expect(applied.enqueued).to_equal(false)
+expect(bool_evidence(applied.enqueued)).to_equal(0)
 ```
 
 </details>

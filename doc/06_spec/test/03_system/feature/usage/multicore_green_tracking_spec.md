@@ -185,6 +185,7 @@ Failed: 0
 
 - Read the canonical multicore-green tracking row
 - Verify the lane is current while full Go-like runtime work remains active
+   - Expected: absent_in_text(row, "\"done\"") equals `1`
 
 
 <details>
@@ -199,7 +200,7 @@ val row = multicore_green_row(read_tracking_db())
 step("Verify the lane is current while full Go-like runtime work remains active")
 expect(row).to_contain("\"FR-RUNTIME-MULTICORE-GREEN-2026-06-06\"")
 expect(row).to_contain("\"current\"")
-expect(row.contains("\"done\"")).to_be(false)
+expect(absent_in_text(row, "\"done\"")).to_equal(1)
 ```
 
 </details>
@@ -209,6 +210,8 @@ expect(row.contains("\"done\"")).to_be(false)
 - Read the canonical multicore-green tracking row
 - Verify selected requirement documents are linked
 - Verify deleted option documents are not linked
+   - Expected: absent_in_text(row, "doc/02_requirements/feature/multicore_green_options.md") equals `1`
+   - Expected: absent_in_text(row, "doc/02_requirements/nfr/multicore_green_options.md") equals `1`
 
 
 <details>
@@ -224,8 +227,8 @@ step("Verify selected requirement documents are linked")
 expect(row).to_contain("doc/02_requirements/feature/multicore_green.md")
 expect(row).to_contain("doc/02_requirements/nfr/multicore_green.md")
 step("Verify deleted option documents are not linked")
-expect(row.contains("doc/02_requirements/feature/multicore_green_options.md")).to_be(false)
-expect(row.contains("doc/02_requirements/nfr/multicore_green_options.md")).to_be(false)
+expect(absent_in_text(row, "doc/02_requirements/feature/multicore_green_options.md")).to_equal(1)
+expect(absent_in_text(row, "doc/02_requirements/nfr/multicore_green_options.md")).to_equal(1)
 ```
 
 </details>
