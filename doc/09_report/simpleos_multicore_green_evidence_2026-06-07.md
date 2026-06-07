@@ -39,7 +39,7 @@ SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 bin/release/simple test test/03_system/os/qem
 | SimpleOS cooperative green | PASS | 3 |
 | SimpleOS multicore green scheduler contract | PASS | 6 |
 | SimpleOS green-channel wake bridge | PASS | 4 |
-| SimpleOS final hardware handoff blocker contract | PASS | 2 |
+| SimpleOS final hardware handoff blocker contract | PASS | 3 |
 | SimpleOS green-carrier compile check | PASS | 1 file |
 | SimpleOS green-carrier unit contract | PASS | 38 |
 | SimpleOS scheduler compile check | PASS | 1 file |
@@ -76,11 +76,11 @@ the scheduler green/user handoff compatibility spec was added and run:
 
 - scheduler green/user handoff compatibility: 1 assertion group in 7156ms
 
-After syncing `/tmp/simple-pherallel-sync` to `origin/main` at `2db5ee17b0`,
-the final hardware handoff gate was hardened and rerun in its default disabled
-lane:
+After syncing `/tmp/simple-pherallel-sync` to `origin/main` at `ac44a12ffd`,
+the final hardware handoff gate was rerun after adding the requirements/report
+alignment scenario:
 
-- final hardware handoff blocker contract: 2 scenarios
+- final hardware handoff blocker contract: 3 scenarios
 - QEMU default gate lane: 2 scenarios
 - final live hardware handoff lane remains opt-in and unclaimed until the guest
   emits hardware handoff, user-entry, and user-syscall markers from the real
