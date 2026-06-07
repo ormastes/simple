@@ -51,11 +51,24 @@ fn fanout_expected(worker_count: i64, iterations: i64) -> i64:
         worker = worker + 1
     total
 
+fn step(name: text) -> i64:
+    name.len()
+
+fn multicore_queue_model() -> text:
+    if multicore_green_uses_work_stealing():
+        "work_stealing"
+    elif multicore_green_uses_global_fifo_queue():
+        "global_fifo"
+    else:
+        "inline_or_unavailable"
+
 describe "multicore green fanout stress":
     slow_it "matches OS-thread fanout/fanin checksum":
+        step("Prepare deterministic OS-thread fanout inputs")
         val iterations = 512
         val expected = fanout_expected(8, iterations)
 
+        step("Spawn eight OS-thread fanout workers")
         val h0 = thread_spawn(\: fanout_work(0, iterations))
         val h1 = thread_spawn(\: fanout_work(1, iterations))
         val h2 = thread_spawn(\: fanout_work(2, iterations))
@@ -65,13 +78,16 @@ describe "multicore green fanout stress":
         val h6 = thread_spawn(\: fanout_work(6, iterations))
         val h7 = thread_spawn(\: fanout_work(7, iterations))
 
+        step("Join OS-thread workers and verify checksum")
         val got = h0.join() + h1.join() + h2.join() + h3.join() + h4.join() + h5.join() + h6.join() + h7.join()
         expect(got).to_equal(expected)
 
     slow_it "matches cooperative-green fanout checksum on the current carrier":
+        step("Prepare deterministic cooperative-green fanout inputs")
         val iterations = 512
         val expected = fanout_expected(8, iterations)
 
+        step("Queue eight cooperative-green workers on the current carrier")
         val h0 = cooperative_green_spawn_value(fanout_work(0, iterations))
         val h1 = cooperative_green_spawn_value(fanout_work(1, iterations))
         val h2 = cooperative_green_spawn_value(fanout_work(2, iterations))
@@ -81,16 +97,20 @@ describe "multicore green fanout stress":
         val h6 = cooperative_green_spawn_value(fanout_work(6, iterations))
         val h7 = cooperative_green_spawn_value(fanout_work(7, iterations))
 
+        step("Run the cooperative carrier and join all workers")
         val ran = cooperative_green_run_all()
         val got = h0.join() + h1.join() + h2.join() + h3.join() + h4.join() + h5.join() + h6.join() + h7.join()
 
-        expect(ran >= 8).to_equal(true)
+        step("Verify cooperative carrier progress and checksum")
+        expect(ran).to_be_greater_than(7)
         expect(got).to_equal(expected)
 
     slow_it "matches multicore-green fanout checksum and reports M:N evidence":
+        step("Prepare deterministic multicore-green fanout inputs")
         val iterations = 512
         val expected = fanout_expected(8, iterations)
 
+        step("Spawn eight multicore-green workers")
         val h0 = multicore_green_spawn(\: fanout_work(0, iterations))
         val h1 = multicore_green_spawn(\: fanout_work(1, iterations))
         val h2 = multicore_green_spawn(\: fanout_work(2, iterations))
@@ -102,6 +122,7 @@ describe "multicore green fanout stress":
 
         var pool_used = 0
         var inline_fallback = 0
+        step("Count runtime-pool and inline-fallback evidence")
         if h0.used_runtime_pool(): pool_used = pool_used + 1
         if h1.used_runtime_pool(): pool_used = pool_used + 1
         if h2.used_runtime_pool(): pool_used = pool_used + 1
@@ -119,12 +140,15 @@ describe "multicore green fanout stress":
         if h6.ran_inline_fallback(): inline_fallback = inline_fallback + 1
         if h7.ran_inline_fallback(): inline_fallback = inline_fallback + 1
 
+        step("Join multicore-green workers and classify evidence")
         val got = h0.join() + h1.join() + h2.join() + h3.join() + h4.join() + h5.join() + h6.join() + h7.join()
         val has_mn_evidence = pool_used == 8
+        val evidence_count = if has_mn_evidence: pool_used else: inline_fallback
 
+        step("Verify checksum and runtime evidence accounting")
         expect(got).to_equal(expected)
         expect(pool_used + inline_fallback).to_equal(8)
-        expect(has_mn_evidence or inline_fallback == 8).to_equal(true)
+        expect(evidence_count).to_equal(8)
         if has_mn_evidence:
-            expect(multicore_green_uses_global_fifo_queue()).to_equal(false)
-            expect(multicore_green_uses_work_stealing()).to_equal(true)
+            step("Verify runtime-pool fanout uses work stealing")
+            expect(multicore_queue_model()).to_equal("work_stealing")

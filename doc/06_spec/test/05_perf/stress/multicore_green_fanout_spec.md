@@ -84,16 +84,24 @@ FIFO queue cannot be mistaken for Go-like M:N CPU-parallel evidence.
 
 #### matches OS-thread fanout/fanin checksum _(slow)_
 
+1. Prepare deterministic OS-thread fanout inputs
+2. Spawn eight OS-thread fanout workers
+3. Join OS-thread workers and verify checksum
+   - Expected: got equals `expected`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+step("Prepare deterministic OS-thread fanout inputs")
 val iterations = 512
 val expected = fanout_expected(8, iterations)
 
+step("Spawn eight OS-thread fanout workers")
 val h0 = thread_spawn(\: fanout_work(0, iterations))
 val h1 = thread_spawn(\: fanout_work(1, iterations))
 val h2 = thread_spawn(\: fanout_work(2, iterations))
@@ -103,6 +111,7 @@ val h5 = thread_spawn(\: fanout_work(5, iterations))
 val h6 = thread_spawn(\: fanout_work(6, iterations))
 val h7 = thread_spawn(\: fanout_work(7, iterations))
 
+step("Join OS-thread workers and verify checksum")
 val got = h0.join() + h1.join() + h2.join() + h3.join() + h4.join() + h5.join() + h6.join() + h7.join()
 expect(got).to_equal(expected)
 ```
@@ -117,16 +126,25 @@ expect(got).to_equal(expected)
 
 #### matches cooperative-green fanout checksum on the current carrier _(slow)_
 
+1. Prepare deterministic cooperative-green fanout inputs
+2. Queue eight cooperative-green workers on the current carrier
+3. Run the cooperative carrier and join all workers
+4. Verify cooperative carrier progress and checksum
+   - Expected: got equals `expected`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+step("Prepare deterministic cooperative-green fanout inputs")
 val iterations = 512
 val expected = fanout_expected(8, iterations)
 
+step("Queue eight cooperative-green workers on the current carrier")
 val h0 = cooperative_green_spawn_value(fanout_work(0, iterations))
 val h1 = cooperative_green_spawn_value(fanout_work(1, iterations))
 val h2 = cooperative_green_spawn_value(fanout_work(2, iterations))
@@ -136,10 +154,12 @@ val h5 = cooperative_green_spawn_value(fanout_work(5, iterations))
 val h6 = cooperative_green_spawn_value(fanout_work(6, iterations))
 val h7 = cooperative_green_spawn_value(fanout_work(7, iterations))
 
+step("Run the cooperative carrier and join all workers")
 val ran = cooperative_green_run_all()
 val got = h0.join() + h1.join() + h2.join() + h3.join() + h4.join() + h5.join() + h6.join() + h7.join()
 
-expect(ran >= 8).to_equal(true)
+step("Verify cooperative carrier progress and checksum")
+expect(ran).to_be_greater_than(7)
 expect(got).to_equal(expected)
 ```
 
@@ -153,16 +173,30 @@ expect(got).to_equal(expected)
 
 #### matches multicore-green fanout checksum and reports M:N evidence _(slow)_
 
+1. Prepare deterministic multicore-green fanout inputs
+2. Spawn eight multicore-green workers
+3. Count runtime-pool and inline-fallback evidence
+4. Join multicore-green workers and classify evidence
+5. Verify checksum and runtime evidence accounting
+   - Expected: got equals `expected`
+   - Expected: pool_used + inline_fallback equals `8`
+   - Expected: evidence_count equals `8`
+6. Verify runtime-pool fanout uses work stealing
+   - Expected: multicore_queue_model() equals `work_stealing`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 46 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+step("Prepare deterministic multicore-green fanout inputs")
 val iterations = 512
 val expected = fanout_expected(8, iterations)
 
+step("Spawn eight multicore-green workers")
 val h0 = multicore_green_spawn(\: fanout_work(0, iterations))
 val h1 = multicore_green_spawn(\: fanout_work(1, iterations))
 val h2 = multicore_green_spawn(\: fanout_work(2, iterations))
@@ -174,6 +208,7 @@ val h7 = multicore_green_spawn(\: fanout_work(7, iterations))
 
 var pool_used = 0
 var inline_fallback = 0
+step("Count runtime-pool and inline-fallback evidence")
 if h0.used_runtime_pool(): pool_used = pool_used + 1
 if h1.used_runtime_pool(): pool_used = pool_used + 1
 if h2.used_runtime_pool(): pool_used = pool_used + 1
@@ -191,15 +226,18 @@ if h5.ran_inline_fallback(): inline_fallback = inline_fallback + 1
 if h6.ran_inline_fallback(): inline_fallback = inline_fallback + 1
 if h7.ran_inline_fallback(): inline_fallback = inline_fallback + 1
 
+step("Join multicore-green workers and classify evidence")
 val got = h0.join() + h1.join() + h2.join() + h3.join() + h4.join() + h5.join() + h6.join() + h7.join()
 val has_mn_evidence = pool_used == 8
+val evidence_count = if has_mn_evidence: pool_used else: inline_fallback
 
+step("Verify checksum and runtime evidence accounting")
 expect(got).to_equal(expected)
 expect(pool_used + inline_fallback).to_equal(8)
-expect(has_mn_evidence or inline_fallback == 8).to_equal(true)
+expect(evidence_count).to_equal(8)
 if has_mn_evidence:
-    expect(multicore_green_uses_global_fifo_queue()).to_equal(false)
-    expect(multicore_green_uses_work_stealing()).to_equal(true)
+    step("Verify runtime-pool fanout uses work stealing")
+    expect(multicore_queue_model()).to_equal("work_stealing")
 ```
 
 </details>
