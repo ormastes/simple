@@ -113,6 +113,8 @@ expect(cache.lookup_scan_count).to_equal(repeated_scans_after_miss)
 - var cache = TextBlitCache new
    - Expected: invalid is false
    - Expected: seeded is true
+   - Expected: cache.has_cached_glyph(65, 16) is true
+   - Expected: cache.has_cached_glyph(66, 16) is false
    - Expected: payload.is_empty() is false
    - Expected: payload.pixels[0] equals `0xff336699u32`
 
@@ -120,7 +122,7 @@ expect(cache.lookup_scan_count).to_equal(repeated_scans_after_miss)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -131,6 +133,8 @@ val payload = cache.transparent_blit_buffer("A", 0xff336699u32, 16)
 
 expect(invalid).to_equal(false)
 expect(seeded).to_equal(true)
+expect(cache.has_cached_glyph(65, 16)).to_equal(true)
+expect(cache.has_cached_glyph(66, 16)).to_equal(false)
 expect(payload.is_empty()).to_equal(false)
 expect(payload.pixels[0]).to_equal(0xff336699u32)
 ```

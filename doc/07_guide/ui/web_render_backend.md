@@ -153,6 +153,9 @@ GPU-routed Draw IR text, and reports `font_generated_args_ready` /
 When a single-glyph bitmap command has production-ready OpenCL readback pixels,
 Draw IR seeds them into `TextBlitCache` before normal `FontRenderer` rendering;
 the rendered text payload still flows through the existing image blit path.
+Repeated single-glyph labels are cache-gated before that backend probe, so a
+glyph already present in `FontRenderer.GlyphCache` does not relaunch bitmap
+readback evidence or invalidate text blit payloads again.
 Multi-glyph backend readback batching remains the next production expansion.
 `web_render_vector_font_native_compute_evidence()` mirrors the same native-first
 order for shared web-render reports, while the older CUDA/OpenCL-only evidence

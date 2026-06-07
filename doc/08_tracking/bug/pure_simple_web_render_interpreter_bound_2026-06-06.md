@@ -258,6 +258,13 @@ backend glyph pixels into its `FontRenderer` cache, and Draw IR uses
 OpenCL bitmap readback before rendering the text payload. Remaining gap:
 multi-glyph backend readback batching still needs direct returned-glyph routing.
 
+2026-06-07 backend glyph probe cache update: `FontRenderer` now exposes a
+cached-glyph query through `TextBlitCache`, and Draw IR checks it before
+launching single-glyph backend bitmap evidence. Repeated labels that already
+cached the glyph/font-size therefore skip duplicate backend probe/readback work
+and avoid clearing rendered text payload cache entries again. Focused helper
+coverage asserts seeded glyphs are visible through the cache query.
+
 2026-06-07 font returned-glyph priority cleanup: vector and bitmap returned
 glyph probes now share one native/generated font backend order helper
 (`METAL`, `CUDA`, `ROCM`, `VULKAN`, `OPENCL`) before CPU fallback. This removes

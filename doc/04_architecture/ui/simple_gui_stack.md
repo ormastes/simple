@@ -382,7 +382,10 @@ plan input. Successful bitmap readback now carries grayscale glyph pixels in
 the backend evidence and is production-eligible there. Draw IR seeds those
 validated single-glyph bitmap pixels into `TextBlitCache` before rendering, so
 the normal `FontRenderer`/`CachedGlyph` path can consume backend pixels without
-changing app code. Multi-glyph backend batching remains a separate expansion.
+changing app code. Draw IR checks the shared glyph cache before that backend
+probe, so repeated single-glyph labels do not relaunch bitmap glyph evidence or
+clear rendered text payload cache entries once the glyph/font-size is cached.
+Multi-glyph backend batching remains a separate expansion.
 Returned-glyph readback probes for both vector and bitmap fonts must support a
 bounded multi-slot batch (`0..7`) so backend launches can return more than one
 glyph without falling back to CPU for every character after slot 0.
