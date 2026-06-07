@@ -82,15 +82,14 @@ Primary paths:
 Deliverables:
 
 - passing fork-join coverage using `thread_spawn`;
-- a focused native smoke for `thread_spawn_with_args` after its ABI bug is fixed;
+- focused native smoke coverage for `thread_spawn_with_args`;
 - documentation saying when a profile row uses OS threads vs runtime-pool
   logical tasks.
 
 Acceptance evidence:
 
 - `bin/release/simple test test/05_perf/stress/multicore_green_fanout_spec.spl --mode=interpreter --clean`
-- native smoke for `thread_spawn_with_args` direct-function and lambda forms
-  once the ABI blocker is fixed.
+- `sh scripts/check/check-thread-spawn-with-args-native.shs`
 
 ## Agent C: Cooperative Green Semantics
 

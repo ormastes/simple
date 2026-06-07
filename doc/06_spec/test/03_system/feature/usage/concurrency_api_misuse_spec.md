@@ -86,6 +86,8 @@ Run the misuse gate:
 ## Examples
 
 - `thread_spawn` must be imported from `std.concurrent.thread`.
+- `thread_spawn_with_args` must stay available as the explicit-argument
+  OS-thread API.
 - `cooperative_green_spawn` must stay on the cooperative-green surface.
 - `multicore_green_spawn` must accept a single zero-argument closure.
 - `multicore_green_set_parallelism` must accept an integer worker count.
@@ -135,7 +137,7 @@ val (output, code) = run_profile_contract()
 expect(code).to_equal(0)
 step("Verify approved public-name fixtures were checked before misuse fixtures")
 expect(output).to_contain("concurrency_api_contract=true")
-expect(output).to_contain("positive_fixtures=3")
+expect(output).to_contain("positive_fixtures=4")
 expect(output).to_contain("fixtures=4")
 ```
 
