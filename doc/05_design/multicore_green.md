@@ -91,6 +91,7 @@ Key structures:
 - `GreenCarrierSchedulerIntent`
 - `GreenCarrierExecutionState`
 - `GreenCarrierExecutionResult`
+- `GreenCarrierParallelismState`
 
 Behavior:
 
@@ -99,6 +100,10 @@ Behavior:
 - Remote target CPU enqueue records a reschedule IPI intent.
 - Dispatch selects queued green work for a carrier CPU.
 - Scheduler intent applies to the green execution lane.
+- `green_carrier_parallelism_new`, `green_carrier_set_parallelism`,
+  `green_carrier_parallelism_for_topology`, and
+  `green_carrier_parallelism_limit` preserve the requested carrier limit while
+  bounding the active carrier count to detected SimpleOS topology.
 
 ### Freestanding QEMU Probe Path
 
@@ -164,9 +169,9 @@ Repository guards:
 
 ## Open Design Decisions
 
-- Scheduler-owned parallelism handoff: the hosted runtime-pool facade now has
-  `multicore_green_set_parallelism` / `multicore_green_parallelism`, but the
-  final SimpleOS scheduler-aware green runtime still needs the handoff from
-  hosted pool limits to scheduler-owned carrier limits.
+- Scheduler-owned parallelism handoff: the hosted runtime-pool facade and
+  SimpleOS carrier scheduler now both expose topology-bounded parallelism
+  contracts. Remaining work is wiring that SimpleOS limit into final AP
+  hardware handoff and blocking/preemption behavior.
 - Preemption strategy: compiler-inserted yields, runtime safepoints, or an
   explicit cooperative-only guarantee until later.

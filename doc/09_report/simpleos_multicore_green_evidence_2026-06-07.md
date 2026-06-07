@@ -15,6 +15,8 @@ All commands were run from `/tmp/simple-cooperative-green`.
 ./src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl --mode=interpreter --clean
 ./src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl --mode=interpreter --clean
 ./src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.spl --mode=interpreter --clean
+./src/compiler_rust/target/debug/simple check src/os/kernel/scheduler/green_carrier.spl
+./src/compiler_rust/target/debug/simple test test/01_unit/os/kernel/scheduler/green_carrier_spec.spl --mode=interpreter --clean
 ./src/compiler_rust/target/debug/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean
 SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 ./src/compiler_rust/target/debug/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean
 ```
@@ -26,6 +28,8 @@ SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 ./src/compiler_rust/target/debug/simple test 
 | SimpleOS cooperative green | PASS | 3 |
 | SimpleOS multicore green scheduler contract | PASS | 3 |
 | SimpleOS green-channel wake bridge | PASS | 3 |
+| SimpleOS green-carrier compile check | PASS | 1 file |
+| SimpleOS green-carrier unit contract | PASS | 30 |
 | SimpleOS green-carrier QEMU spec default lane | PASS | 1 |
 | SimpleOS green-carrier QEMU live lane | PASS | 1 |
 
@@ -38,3 +42,6 @@ SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 ./src/compiler_rust/target/debug/simple test 
   `[green-carrier-qemu] PASS=true` in serial output.
 - The hosted SimpleOS specs prove scheduler-owned green execution state remains
   separate from normal OS task state.
+- The green-carrier unit contract now proves requested-vs-active carrier
+  parallelism is scheduler-owned and topology-bounded before final AP hardware
+  handoff work.

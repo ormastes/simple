@@ -75,6 +75,13 @@ pub struct GreenCarrierExecutionResult:
     applied: bool
     reason: text
 
+pub struct GreenCarrierParallelismState:
+    """Scheduler-owned carrier limit for the SimpleOS green scheduler lane."""
+    requested_limit: i64
+    active_limit: i64
+    topology_cpu_count: i64
+    reason: text
+
 pub struct GreenCarrierFixedStepResult:
     """Freestanding-safe one-step green carrier result for fixed CPU slots."""
     task_id: i64
@@ -191,6 +198,59 @@ fn green_carrier_normalized_cpu_count(cpu_count: i64) -> i64:
         32
     else:
         cpu_count
+
+fn green_carrier_clamped_parallelism(requested_limit: i64, topology_cpu_count: i64) -> i64:
+    val topology_limit = green_carrier_normalized_cpu_count(topology_cpu_count)
+    if requested_limit < 1:
+        1
+    elif requested_limit > topology_limit:
+        topology_limit
+    else:
+        requested_limit
+
+fn green_carrier_parallelism_reason(requested_limit: i64, topology_cpu_count: i64) -> text:
+    val topology_limit = green_carrier_normalized_cpu_count(topology_cpu_count)
+    if requested_limit < 1:
+        "clamped_min"
+    elif requested_limit > topology_limit:
+        "clamped_topology"
+    else:
+        "requested_limit"
+
+pub fn green_carrier_parallelism_new(topology_cpu_count: i64) -> GreenCarrierParallelismState:
+    """Create the default scheduler carrier limit from the detected topology."""
+    val topology_limit = green_carrier_normalized_cpu_count(topology_cpu_count)
+    GreenCarrierParallelismState(
+        requested_limit: topology_limit,
+        active_limit: topology_limit,
+        topology_cpu_count: topology_limit,
+        reason: "default_topology_limit"
+    )
+
+pub fn green_carrier_set_parallelism(state: GreenCarrierParallelismState, requested_limit: i64) -> GreenCarrierParallelismState:
+    """Apply a requested carrier limit while preserving scheduler topology."""
+    val active_limit = green_carrier_clamped_parallelism(requested_limit, state.topology_cpu_count)
+    GreenCarrierParallelismState(
+        requested_limit: requested_limit,
+        active_limit: active_limit,
+        topology_cpu_count: green_carrier_normalized_cpu_count(state.topology_cpu_count),
+        reason: green_carrier_parallelism_reason(requested_limit, state.topology_cpu_count)
+    )
+
+pub fn green_carrier_parallelism_for_topology(state: GreenCarrierParallelismState, topology_cpu_count: i64) -> GreenCarrierParallelismState:
+    """Recompute the active carrier limit after topology discovery changes."""
+    val topology_limit = green_carrier_normalized_cpu_count(topology_cpu_count)
+    val active_limit = green_carrier_clamped_parallelism(state.requested_limit, topology_limit)
+    GreenCarrierParallelismState(
+        requested_limit: state.requested_limit,
+        active_limit: active_limit,
+        topology_cpu_count: topology_limit,
+        reason: green_carrier_parallelism_reason(state.requested_limit, topology_limit)
+    )
+
+pub fn green_carrier_parallelism_limit(state: GreenCarrierParallelismState) -> i64:
+    """Return the scheduler-active green carrier count."""
+    state.active_limit
 
 pub fn green_carrier_run_queues_new(cpu_count: i64, capacity: i64) -> GreenCarrierRunQueueState:
     """Create bounded carrier queues for scheduler-visible green tasks."""

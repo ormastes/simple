@@ -28,7 +28,7 @@ green_carrier_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 23 | 23 | 0 | 0 |
+| 30 | 30 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -242,6 +242,153 @@ Reproduction: this block contains the complete executable scenario source.
 expect(green_carrier_should_send_ipi(0, 1, true)).to_equal(true)
 expect(green_carrier_should_send_ipi(1, 1, true)).to_equal(false)
 expect(green_carrier_should_send_ipi(0, 1, false)).to_equal(false)
+```
+
+</details>
+
+### parallelism limit
+
+#### defaults to the detected scheduler topology
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val state = green_carrier_parallelism_new(4)
+
+expect(state.requested_limit).to_equal(4)
+expect(state.active_limit).to_equal(4)
+expect(state.topology_cpu_count).to_equal(4)
+expect(state.reason).to_equal("default_topology_limit")
+expect(green_carrier_parallelism_limit(state)).to_equal(4)
+```
+
+</details>
+
+#### clamps requested carriers to scheduler topology
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val initial = green_carrier_parallelism_new(4)
+val state = green_carrier_set_parallelism(initial, 99)
+
+expect(state.requested_limit).to_equal(99)
+expect(state.active_limit).to_equal(4)
+expect(state.topology_cpu_count).to_equal(4)
+expect(state.reason).to_equal("clamped_topology")
+expect(green_carrier_parallelism_limit(state)).to_equal(4)
+```
+
+</details>
+
+#### keeps requested carriers across topology growth
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val initial = green_carrier_parallelism_new(2)
+val requested = green_carrier_set_parallelism(initial, 4)
+val grown = green_carrier_parallelism_for_topology(requested, 4)
+
+expect(requested.requested_limit).to_equal(4)
+expect(requested.active_limit).to_equal(2)
+expect(requested.reason).to_equal("clamped_topology")
+expect(grown.requested_limit).to_equal(4)
+expect(grown.active_limit).to_equal(4)
+expect(grown.topology_cpu_count).to_equal(4)
+expect(grown.reason).to_equal("requested_limit")
+```
+
+</details>
+
+#### clamps zero requested carriers to one scheduler carrier
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val initial = green_carrier_parallelism_new(4)
+val state = green_carrier_set_parallelism(initial, 0)
+
+expect(state.requested_limit).to_equal(0)
+expect(state.active_limit).to_equal(1)
+expect(state.reason).to_equal("clamped_min")
+```
+
+</details>
+
+#### clamps negative requested carriers to one scheduler carrier
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val initial = green_carrier_parallelism_new(4)
+val state = green_carrier_set_parallelism(initial, -3)
+
+expect(state.requested_limit).to_equal(-3)
+expect(state.active_limit).to_equal(1)
+expect(state.reason).to_equal("clamped_min")
+```
+
+</details>
+
+#### normalizes invalid topology to one scheduler carrier
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val state = green_carrier_parallelism_new(0)
+val requested = green_carrier_set_parallelism(state, 4)
+
+expect(state.requested_limit).to_equal(1)
+expect(state.active_limit).to_equal(1)
+expect(state.topology_cpu_count).to_equal(1)
+expect(requested.requested_limit).to_equal(4)
+expect(requested.active_limit).to_equal(1)
+expect(requested.reason).to_equal("clamped_topology")
+```
+
+</details>
+
+#### clamps active carriers when topology shrinks below one
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val initial = green_carrier_parallelism_new(4)
+val shrunk = green_carrier_parallelism_for_topology(initial, 0)
+
+expect(shrunk.requested_limit).to_equal(4)
+expect(shrunk.active_limit).to_equal(1)
+expect(shrunk.topology_cpu_count).to_equal(1)
+expect(shrunk.reason).to_equal("clamped_topology")
 ```
 
 </details>
@@ -746,8 +893,8 @@ expect(result.context_switches).to_equal(1)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 23 |
-| Active scenarios | 23 |
+| Total scenarios | 30 |
+| Active scenarios | 30 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

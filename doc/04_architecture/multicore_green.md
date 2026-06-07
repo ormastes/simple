@@ -102,6 +102,8 @@ Responsibilities:
 - Send remote reschedule IPI intent for AP work.
 - Apply scheduler-owned green execution state separately from normal current
   task state.
+- Own a topology-bounded green carrier parallelism limit so hosted
+  `multicore_green_set_parallelism` has a matching SimpleOS scheduler contract.
 - Provide freestanding fixed-slot helpers for small QEMU probes.
 
 ## Data Flow
@@ -133,6 +135,8 @@ SimpleOS path:
 - Carrier dispatch produces `GreenCarrierSchedulerIntent`.
 - `Scheduler.apply_green_scheduler_intent` updates the scheduler-owned green
   execution lane without mutating normal OS task state.
+- `GreenCarrierParallelismState` records requested carriers, active
+  topology-bounded carriers, and clamp reason for the SimpleOS scheduler lane.
 - QEMU proof currently covers AP startup plus CPU1 fixed-slot dispatch; full
   hardware context-switch handoff remains future work.
 
@@ -150,9 +154,9 @@ The selected Full Go-Like Runtime Roadmap uses all layers:
   wake/IPI intent, and AP evidence.
 
 Future roadmap work remains explicit: work stealing or per-worker queues,
-blocking integration, scheduler-owned parallelism handoff beyond the hosted
-runtime-pool limit, and preemption or compiler-inserted yield points before
-claiming tight-loop fairness comparable to Go.
+blocking integration, connecting the SimpleOS carrier limit to final hardware
+handoff, and preemption or compiler-inserted yield points before claiming
+tight-loop fairness comparable to Go.
 
 ## Known Gaps
 

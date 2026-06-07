@@ -31,7 +31,7 @@ Deliver and verify a Simple concurrency lane that clearly separates OS threads, 
 
 ## Phase
 
-dev-done
+go-runtime-hardening
 
 ## Log
 
@@ -47,6 +47,15 @@ dev-done
 - verification: Re-ran SimpleOS cooperative green, multicore green scheduler,
   green-channel wake, default QEMU gate, and live QEMU green-carrier proof with
   the rebuilt compiler; live QEMU passed in 40469ms.
+- implementation: Added SimpleOS scheduler-owned green carrier parallelism
+  state and helper APIs. The active carrier count is topology-bounded while the
+  requested limit is preserved, advancing the selected full Go-like roadmap
+  without changing user-facing concurrency APIs. Hardware handoff, blocking
+  integration, work stealing, and preemption remain explicit follow-up gates.
+- verification: `green_carrier.spl` check passed and
+  `test/01_unit/os/kernel/scheduler/green_carrier_spec.spl` passed 30
+  examples, including carrier-limit clamp, invalid-topology, and
+  topology-growth coverage.
 
 ## Completion Audit - 2026-06-07
 
