@@ -50,6 +50,7 @@ Stability And Misuse Diagnostics, and SimpleOS Hardware Proof Gate.
 - `bin/simple test test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl --mode=interpreter`
 - `bin/simple test test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl --mode=interpreter`
 - `bin/simple test test/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.spl --mode=interpreter`
+- `bin/simple test test/01_unit/os/kernel/scheduler/scheduler_green_user_handoff_spec.spl --mode=interpreter`
 - `bin/simple test test/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.spl --mode=interpreter`
 - `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 bin/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean` when live QEMU hardware/AP evidence is claimed.
 - `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 bin/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean` when final AP ring/user handoff evidence is claimed.

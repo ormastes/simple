@@ -24,6 +24,7 @@ the `examples/09_embedded/simple_os` submodule.
 ./src/compiler_rust/target/debug/simple test test/01_unit/os/kernel/scheduler/green_carrier_spec.spl --mode=interpreter --clean
 ./src/compiler_rust/target/debug/simple check src/os/kernel/scheduler/scheduler.spl
 ./src/compiler_rust/target/debug/simple test test/01_unit/os/kernel/scheduler/scheduler_green_parallelism_spec.spl --mode=interpreter --clean
+./src/compiler_rust/target/debug/simple test test/01_unit/os/kernel/scheduler/scheduler_green_user_handoff_spec.spl --mode=interpreter --clean
 ./src/compiler_rust/target/debug/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean
 SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 bin/release/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean
 # Future final hardware gate, expected to remain opt-in until HW_HANDOFF_PASS exists:
@@ -42,6 +43,7 @@ SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 bin/release/simple test test/03_system/os/qem
 | SimpleOS green-carrier unit contract | PASS | 38 |
 | SimpleOS scheduler compile check | PASS | 1 file |
 | SimpleOS scheduler green-carrier parallelism | PASS | 29 |
+| SimpleOS scheduler green/user handoff compatibility | PASS | 1 |
 | SimpleOS green-carrier QEMU spec default lane | PASS | 2 |
 | SimpleOS green-carrier QEMU live lane | PASS | 2 |
 
@@ -67,6 +69,11 @@ the blocker contract and QEMU green-carrier lanes were rerun:
 - final hardware handoff blocker contract: 2 assertions
 - QEMU default gate lane: 2 assertions
 - QEMU live lane: 2 assertions in 40588ms
+
+After syncing `/tmp/simple-pherallel-sync` to `origin/main` at `f91f76ecb2`,
+the scheduler green/user handoff compatibility spec was added and run:
+
+- scheduler green/user handoff compatibility: 1 assertion group in 7156ms
 
 This refresh does not claim final ring/user context-switch handoff across APs;
 that claim remains blocked by

@@ -68,6 +68,9 @@ Current proof-point candidates:
     ring/user handoff.
 - `test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl`
   - current live AP green-carrier proof.
+- `test/01_unit/os/kernel/scheduler/scheduler_green_user_handoff_spec.spl`
+  - current Pure Simple scheduler/user-context compatibility proof before the
+    architecture handoff bridge.
 - `examples/09_embedded/simple_os/arch/x86_64/green_carrier_probe_entry.spl`
   - current live guest probe entry.
 
@@ -78,3 +81,10 @@ open. The feature can claim hosted runtime-pool M:N evidence, cooperative-green
 semantics, SimpleOS hosted scheduler evidence, and live QEMU AP scheduler-owned
 handoff evidence, but not final SimpleOS ring/user hardware context-switch
 handoff.
+
+The Pure Simple scheduler handoff compatibility contract is now covered by
+`test/01_unit/os/kernel/scheduler/scheduler_green_user_handoff_spec.spl`: it
+dispatches a seeded user-task pid through the green lane and verifies the same
+pid still resolves to a `user_context`. This is necessary setup evidence only;
+the final blocker remains open until live QEMU observes the x86_64 user entry
+and syscall-return path.

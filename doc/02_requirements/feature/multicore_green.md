@@ -61,6 +61,7 @@ SimpleOS scheduler work distinct and verifiable.
 - SimpleOS specs: `test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl`,
   `test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl`,
   `test/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.spl`,
+  `test/01_unit/os/kernel/scheduler/scheduler_green_user_handoff_spec.spl`,
   `test/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.spl`,
   and `test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl`.
 - Performance/profile gates: `scripts/check/check-cross-language-perf.shs`,
