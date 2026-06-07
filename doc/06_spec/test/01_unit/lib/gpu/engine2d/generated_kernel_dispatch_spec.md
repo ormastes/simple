@@ -43,7 +43,7 @@ generated_kernel_dispatch_spec -> std
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -53,8 +53,9 @@ expect(dispatch.active).to_equal(true)
 expect(dispatch.compute_target).to_equal("cuda")
 expect(dispatch.source_format).to_equal("cuda-c")
 expect(dispatch.binary_format).to_equal("ptx")
-expect(dispatch.kernel_count).to_equal(4)
+expect(dispatch.kernel_count).to_equal(5)
 expect(dispatch.kernel_entry(GENERATED_2D_FILL)).to_equal("simple_2d_fill_u32")
+expect(dispatch.kernel_entry(GENERATED_2D_GLYPH)).to_equal("simple_2d_glyph_raster_u32")
 expect(dispatch.artifact_suffix(GENERATED_2D_FILL)).to_equal("simple_2d_fill_u32.ptx")
 expect(dispatch.module_artifact_name()).to_equal("simple_2d_optimization.ptx")
 ```
@@ -66,7 +67,7 @@ expect(dispatch.module_artifact_name()).to_equal("simple_2d_optimization.ptx")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -80,6 +81,7 @@ expect(dispatch.binary_format).to_equal("hsaco")
 expect(dispatch.kernel_entry(GENERATED_2D_ALPHA)).to_equal("simple_2d_alpha_u32")
 expect(dispatch.artifact_suffix(GENERATED_2D_ALPHA)).to_equal("simple_2d_alpha_u32.hsaco")
 expect(dispatch.required_entries()).to_contain("simple_2d_scroll_u32")
+expect(dispatch.required_entries()).to_contain("simple_2d_glyph_raster_u32")
 ```
 
 </details>
@@ -141,7 +143,7 @@ val provider = generated_2d_dispatch_provider(dispatch)
 expect(provider.provider_kind).to_equal("generated_2d_kernel_dispatch")
 expect(provider.target_arch).to_equal("metal")
 expect(provider.target_features).to_equal("metallib")
-expect(provider.hit_count).to_equal(4)
+expect(provider.hit_count).to_equal(5)
 expect(provider.change_count).to_equal(1)
 expect(provider.active).to_equal(true)
 ```
@@ -153,7 +155,7 @@ expect(provider.active).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -163,6 +165,7 @@ expect(plan.dispatch_ready).to_equal(true)
 expect(plan.entry_name).to_equal("simple_2d_fill_u32")
 expect(plan.artifact_name).to_equal("simple_2d_optimization.ptx")
 expect(plan.required_entries).to_contain("simple_2d_copy_u32")
+expect(plan.required_entries).to_contain("simple_2d_glyph_raster_u32")
 expect(plan.launch_api).to_equal("rt_cuda_launch_kernel")
 expect(plan.grid_x).to_equal(1200)
 expect(plan.block_x).to_equal(256)
@@ -269,7 +272,7 @@ expect(metal.call_shape()).to_equal("metal_compute_api")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -277,6 +280,7 @@ val fill = generated_2d_execution_request("opencl", GENERATED_2D_FILL, 16, 16, 1
 val copy = generated_2d_execution_request("opencl", GENERATED_2D_COPY, 16, 16, 11, 22, 0)
 val alpha = generated_2d_execution_request("opencl", GENERATED_2D_ALPHA, 16, 16, 11, 23, 0)
 val scroll = generated_2d_execution_request("opencl", GENERATED_2D_SCROLL, 16, 16, 11, 24, 0)
+val glyph = generated_2d_execution_request("opencl", GENERATED_2D_GLYPH, 16, 16, 11, 25, 0)
 
 expect(fill.can_submit).to_equal(true)
 expect(fill.plan.entry_name).to_equal("simple_2d_fill_u32")
@@ -284,6 +288,8 @@ expect(fill.plan.launch_api).to_equal("clEnqueueNDRangeKernel")
 expect(copy.plan.entry_name).to_equal("simple_2d_copy_u32")
 expect(alpha.plan.entry_name).to_equal("simple_2d_alpha_u32")
 expect(scroll.plan.entry_name).to_equal("simple_2d_scroll_u32")
+expect(glyph.plan.entry_name).to_equal("simple_2d_glyph_raster_u32")
+expect(glyph.plan.args_layout).to_equal("glyph_plan,dst,width,height,font_size")
 expect(scroll.call_shape()).to_equal("opencl_ndrange_api")
 ```
 
@@ -378,7 +384,7 @@ expect(opencl_unavailable.diagnostic_text()).to_contain("artifact=simple_2d_opti
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 41 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -388,6 +394,7 @@ val cuda_text = generated_2d_operation_provenance("cuda", "text_blit", 64, 32, t
 val cuda_vector_font = generated_2d_operation_provenance("cuda", "vector_font", 64, 32, true, true, 2048)
 val opencl_image = generated_2d_operation_provenance("opencl", "image_blit", 64, 32, false, false, 2048)
 val opencl_glyph = generated_2d_operation_provenance("opencl", "glyph_raster", 64, 32, true, true, 2048)
+val cuda_bitmap_font = generated_2d_operation_provenance("cuda", "bitmap_font", 64, 32, true, true, 2048)
 val scalar_alpha = generated_2d_operation_provenance("cpu", "alpha_blend", 64, 32, false, false, 0)
 
 expect(cpu_vector.ready).to_equal(true)
@@ -396,16 +403,16 @@ expect(cpu_vector.generated_artifact_required).to_equal(false)
 expect(cpu_vector.generated_operation).to_equal(GENERATED_2D_FILL)
 expect(cpu_vector.typed_status).to_equal("cpu-simd-baseline-ready")
 expect(cpu_vector_font.ready).to_equal(true)
-expect(cpu_vector_font.generated_operation).to_equal(GENERATED_2D_COPY)
-expect(cpu_vector_font.cpu_preprocess_required).to_equal(true)
+expect(cpu_vector_font.generated_operation).to_equal(GENERATED_2D_GLYPH)
+expect(cpu_vector_font.cpu_preprocess_required).to_equal(false)
 expect(cpu_vector_font.entry_name).to_equal("FontRasterizer.rasterize_vector_accelerated")
 expect(cuda_text.ready).to_equal(true)
 expect(cuda_text.generated_operation).to_equal(GENERATED_2D_COPY)
 expect(cuda_text.cpu_preprocess_required).to_equal(true)
 expect(cuda_text.artifact_name).to_equal("simple_2d_optimization.ptx")
 expect(cuda_vector_font.ready).to_equal(true)
-expect(cuda_vector_font.generated_operation).to_equal(GENERATED_2D_COPY)
-expect(cuda_vector_font.cpu_preprocess_required).to_equal(true)
+expect(cuda_vector_font.generated_operation).to_equal(GENERATED_2D_GLYPH)
+expect(cuda_vector_font.cpu_preprocess_required).to_equal(false)
 expect(cuda_vector_font.diagnostic_text()).to_contain("family=vector_font")
 expect(opencl_image.ready).to_equal(false)
 expect(opencl_image.generated_operation).to_equal(GENERATED_2D_COPY)
@@ -413,9 +420,13 @@ expect(opencl_image.launch_api).to_equal("clEnqueueNDRangeKernel")
 expect(opencl_image.typed_status).to_equal("opencl-runtime-or-queue-unavailable")
 expect(opencl_image.artifact_name).to_equal("simple_2d_optimization.spirv")
 expect(opencl_glyph.ready).to_equal(true)
-expect(opencl_glyph.generated_operation).to_equal(GENERATED_2D_COPY)
-expect(opencl_glyph.cpu_preprocess_required).to_equal(true)
-expect(opencl_glyph.entry_name).to_equal("simple_2d_copy_u32")
+expect(opencl_glyph.generated_operation).to_equal(GENERATED_2D_GLYPH)
+expect(opencl_glyph.cpu_preprocess_required).to_equal(false)
+expect(opencl_glyph.entry_name).to_equal("simple_2d_glyph_raster_u32")
+expect(cuda_bitmap_font.ready).to_equal(true)
+expect(cuda_bitmap_font.generated_operation).to_equal(GENERATED_2D_GLYPH)
+expect(cuda_bitmap_font.cpu_preprocess_required).to_equal(false)
+expect(cuda_bitmap_font.entry_name).to_equal("simple_2d_glyph_raster_u32")
 expect(scalar_alpha.compute_target).to_equal("cpu_scalar")
 expect(scalar_alpha.generated_operation).to_equal(GENERATED_2D_ALPHA)
 ```
@@ -477,8 +488,8 @@ Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val valid = generated_2d_module_artifact_evidence("cuda", GENERATED_2D_FILL, 16, 16, ".version 8.0", ".entry simple_2d_fill_u32 .entry simple_2d_copy_u32 .entry simple_2d_alpha_u32 .entry simple_2d_scroll_u32", 4486)
-val missing = generated_2d_module_artifact_evidence("cuda", GENERATED_2D_FILL, 16, 16, ".version 8.0", ".entry simple_2d_fill_u32 .entry simple_2d_copy_u32 .entry simple_2d_alpha_u32", 4486)
+val valid = generated_2d_module_artifact_evidence("cuda", GENERATED_2D_FILL, 16, 16, ".version 8.0", ".entry simple_2d_fill_u32 .entry simple_2d_copy_u32 .entry simple_2d_alpha_u32 .entry simple_2d_scroll_u32 .entry simple_2d_glyph_raster_u32", 4486)
+val missing = generated_2d_module_artifact_evidence("cuda", GENERATED_2D_FILL, 16, 16, ".version 8.0", ".entry simple_2d_fill_u32 .entry simple_2d_copy_u32 .entry simple_2d_alpha_u32 .entry simple_2d_scroll_u32", 4486)
 val load = generated_2d_artifact_load_evidence_from_module(valid, true, 0, 77)
 val blocked = generated_2d_artifact_load_evidence_from_module(missing, true, 0, 77)
 
@@ -487,7 +498,7 @@ expect(valid.reason).to_equal("pass")
 expect(valid.summary()).to_contain("simple_2d_optimization.ptx")
 expect(load.loaded).to_equal(true)
 expect(missing.artifact_valid).to_equal(false)
-expect(missing.reason).to_equal("missing-entry-symbol:simple_2d_scroll_u32")
+expect(missing.reason).to_equal("missing-entry-symbol:simple_2d_glyph_raster_u32")
 expect(blocked.loaded).to_equal(false)
 expect(blocked.reason).to_equal("artifact-not-verified")
 ```
@@ -503,7 +514,7 @@ Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val module = generated_2d_module_artifact_evidence("opencl", GENERATED_2D_COPY, 16, 16, "SPIR-V 1.5", "OpEntryPoint GLCompute %simple_2d_fill_u32 \"simple_2d_fill_u32\" OpEntryPoint GLCompute %simple_2d_copy_u32 \"simple_2d_copy_u32\" OpEntryPoint GLCompute %simple_2d_alpha_u32 \"simple_2d_alpha_u32\" OpEntryPoint GLCompute %simple_2d_scroll_u32 \"simple_2d_scroll_u32\"", 4096)
+val module = generated_2d_module_artifact_evidence("opencl", GENERATED_2D_COPY, 16, 16, "SPIR-V 1.5", "OpEntryPoint GLCompute %simple_2d_fill_u32 \"simple_2d_fill_u32\" OpEntryPoint GLCompute %simple_2d_copy_u32 \"simple_2d_copy_u32\" OpEntryPoint GLCompute %simple_2d_alpha_u32 \"simple_2d_alpha_u32\" OpEntryPoint GLCompute %simple_2d_scroll_u32 \"simple_2d_scroll_u32\" OpEntryPoint GLCompute %simple_2d_glyph_raster_u32 \"simple_2d_glyph_raster_u32\"", 4096)
 val no_runtime = generated_2d_artifact_load_evidence_from_module(module, false, 11, 22)
 val request = generated_2d_execution_request_from_load(no_runtime, 0)
 val submit = generated_2d_submit_result(request, false, true)

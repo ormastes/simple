@@ -10,6 +10,7 @@ val GENERATED_2D_FILL: text = "fill"
 val GENERATED_2D_COPY: text = "copy"
 val GENERATED_2D_ALPHA: text = "alpha_blend"
 val GENERATED_2D_SCROLL: text = "scroll"
+val GENERATED_2D_GLYPH: text = "glyph_raster"
 
 class Generated2DKernelLaunchPlan:
     backend_name: text
@@ -461,14 +462,14 @@ class Generated2DKernelDispatch:
             source_format: source_fmt,
             binary_format: binary_fmt,
             tool_hint: tool,
-            kernel_count: 4,
+            kernel_count: 5,
             active: true
         )
 
     fn supports_kernel(op: text) -> bool:
         if not self.active:
             return false
-        op == GENERATED_2D_FILL or op == GENERATED_2D_COPY or op == GENERATED_2D_ALPHA or op == GENERATED_2D_SCROLL
+        op == GENERATED_2D_FILL or op == GENERATED_2D_COPY or op == GENERATED_2D_ALPHA or op == GENERATED_2D_SCROLL or op == GENERATED_2D_GLYPH
 
     fn kernel_entry(op: text) -> text:
         if op == GENERATED_2D_FILL:
@@ -479,6 +480,8 @@ class Generated2DKernelDispatch:
             return "simple_2d_alpha_u32"
         if op == GENERATED_2D_SCROLL:
             return "simple_2d_scroll_u32"
+        if op == GENERATED_2D_GLYPH:
+            return "simple_2d_glyph_raster_u32"
         ""
 
     fn artifact_suffix(op: text) -> text:
@@ -495,7 +498,7 @@ class Generated2DKernelDispatch:
     fn required_entries() -> text:
         if not self.active:
             return ""
-        "simple_2d_fill_u32 simple_2d_copy_u32 simple_2d_alpha_u32 simple_2d_scroll_u32"
+        "simple_2d_fill_u32 simple_2d_copy_u32 simple_2d_alpha_u32 simple_2d_scroll_u32 simple_2d_glyph_raster_u32"
 
     fn launch_api() -> text:
         if self.compute_target == "cuda":
@@ -559,13 +562,17 @@ fn _kernel_args_layout(op: text) -> text:
         return "src,dst,width,height,alpha_u8"
     if op == GENERATED_2D_SCROLL:
         return "src,dst,width,height,delta_y"
+    if op == GENERATED_2D_GLYPH:
+        return "glyph_plan,dst,width,height,font_size"
     ""
 
 fn _operation_family_generated_op(operation_family: text) -> text:
     val clean = operation_family.lower()
     if clean == "vector" or clean == "rect" or clean == "rect_filled" or clean == "fill":
         return GENERATED_2D_FILL
-    if clean == "image" or clean == "image_blit" or clean == "copy" or clean == "font" or clean == "text" or clean == "text_blit" or _operation_family_is_vector_font(clean):
+    if _operation_family_is_glyph_raster(clean):
+        return GENERATED_2D_GLYPH
+    if clean == "image" or clean == "image_blit" or clean == "copy" or clean == "font" or clean == "text" or clean == "text_blit":
         return GENERATED_2D_COPY
     if clean == "alpha" or clean == "alpha_blend" or clean == "image_alpha":
         return GENERATED_2D_ALPHA
@@ -575,10 +582,10 @@ fn _operation_family_generated_op(operation_family: text) -> text:
 
 fn _operation_family_needs_cpu_preprocess(operation_family: text) -> bool:
     val clean = operation_family.lower()
-    clean == "font" or clean == "text" or clean == "text_blit" or _operation_family_is_vector_font(clean)
+    clean == "font" or clean == "text" or clean == "text_blit"
 
-fn _operation_family_is_vector_font(clean: text) -> bool:
-    clean == "vector_font" or clean == "vector_glyph" or clean == "font_vector" or clean == "glyph_raster" or clean == "glyph_blit"
+fn _operation_family_is_glyph_raster(clean: text) -> bool:
+    clean == "vector_font" or clean == "vector_glyph" or clean == "font_vector" or clean == "bitmap_font" or clean == "bitmap_glyph" or clean == "font_bitmap" or clean == "glyph_raster" or clean == "glyph_blit"
 
 fn _is_cpu_operation_backend(backend: text) -> bool:
     backend == "cpu" or backend == "software" or backend == "cpu_simd" or backend == "simd_cpu" or backend == "cpu_simd_x86" or backend == "cpu_simd_arm" or backend == "cpu_simd_riscv"
@@ -590,7 +597,9 @@ fn _cpu_operation_target(backend: text) -> text:
 
 fn _cpu_operation_entry(operation_family: text) -> text:
     val clean = operation_family.lower()
-    if _operation_family_is_vector_font(clean):
+    if clean == "bitmap_font" or clean == "bitmap_glyph" or clean == "font_bitmap":
+        return "FontRasterizer.rasterize_bitmap_accelerated"
+    if _operation_family_is_glyph_raster(clean):
         return "FontRasterizer.rasterize_vector_accelerated"
     if clean == "font" or clean == "text" or clean == "text_blit":
         return "RenderBackend.draw_text_or_text_blit"
@@ -685,6 +694,8 @@ fn _module_artifact_reason(plan: Generated2DKernelLaunchPlan, artifact_magic: te
         return "missing-entry-symbol:simple_2d_alpha_u32"
     if plan.required_entries.contains("simple_2d_scroll_u32") and not exported_entries.contains("simple_2d_scroll_u32"):
         return "missing-entry-symbol:simple_2d_scroll_u32"
+    if plan.required_entries.contains("simple_2d_glyph_raster_u32") and not exported_entries.contains("simple_2d_glyph_raster_u32"):
+        return "missing-entry-symbol:simple_2d_glyph_raster_u32"
     "pass"
 
 fn _session_runtime_provenance_status(gate: Generated2DSessionLaunchGate) -> text:
