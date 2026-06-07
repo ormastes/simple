@@ -95,6 +95,8 @@ sh scripts/check/check-cross-language-perf.shs
 | `FANOUT_COOPERATIVE_GREEN_WORKERS` | capped at 200 by default | Cooperative green fanout count; capped to avoid oversized generated source |
 | `FANOUT_MULTICORE_GREEN_WORKERS` | `FANOUT_WORKERS` | Pool-backed multicore-green fanout count |
 | `FANOUT_ITERS` | 32 | Tiny per-task LCG iterations for the large fanout benchmark |
+| `FANOUT_STRESS_WORKERS` | 512 | Simple-vs-Go-vs-C tiny-task stress count for multicore green, goroutines, and pthreads |
+| `FANOUT_STRESS_ITERS` | 1 | Tiny per-task LCG iterations for the stress benchmark |
 | `RUN_TIMEOUT` | 30 | Per-command timeout in seconds for measured commands and RSS probes |
 | `SIMPLE_BINARY` | `bin/simple` | Path to Simple compiler |
 | `BUILD_DIR` | `build/cross_lang_perf` | Workload compile output |
@@ -109,8 +111,10 @@ Simple OS-thread fanout source is intentionally reported separately from Simple
 green fanout and uses loop-based `thread_spawn` fork-join so the harness does not need
 large unrolled source generation.
 Generated Simple concurrency workloads compute an expected checksum and exit
-nonzero on mismatch, so runtime-pool closure lookup failures or wrong joins are
-classified as failed rows instead of performance wins.
+nonzero on mismatch, so runtime-pool closure lookup failures, lambda capture
+bugs, or wrong joins are classified as failed rows instead of performance wins.
+The multicore-green fanout sources use compact handle arrays and loop-captured
+closures, not generated numbered handle variables.
 The profile-report contract rejects numbered concurrency aliases such as
 `thread_spawn2`, `spawn_isolated2`, and `spawn_limited2`; use the semantic API
 names in reports, generated workloads, and profile-script comments.

@@ -2,7 +2,7 @@
 //!
 //! This module extracts common functionality to reduce code duplication.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use cranelift_codegen::ir::{types, AbiParam, InstBuilder, Signature, UserFuncName};
 use cranelift_codegen::isa::CallConv;
@@ -292,6 +292,82 @@ mod tests {
             .collect();
         assert_eq!(local_indices, vec![1, 2, 5]);
     }
+
+    #[test]
+    fn outlined_lambda_maps_captured_parent_param_and_local_to_closure_slots() {
+        let mut func = MirFunction::new("main".to_string(), TypeId::I64, Visibility::Public);
+        func.params.push(param("seed_param", TypeId::I64));
+        func.locals.push(MirLocal {
+            name: "seed_local".to_string(),
+            ty: TypeId::I64,
+            kind: LocalKind::Local,
+            is_ghost: false,
+        });
+
+        let body_block = func.new_block();
+        func.block_mut(body_block).unwrap().instructions.extend([
+            MirInst::LocalAddr {
+                dest: VReg(10),
+                local_index: 0,
+            },
+            MirInst::LocalAddr {
+                dest: VReg(11),
+                local_index: 1,
+            },
+        ]);
+        func.block_mut(body_block).unwrap().terminator = Terminator::Return(Some(VReg(10)));
+        func.block_mut(BlockId(0)).unwrap().instructions.extend([
+            MirInst::LocalAddr {
+                dest: VReg(20),
+                local_index: 0,
+            },
+            MirInst::Load {
+                dest: VReg(21),
+                addr: VReg(20),
+                ty: TypeId::I64,
+            },
+            MirInst::LocalAddr {
+                dest: VReg(22),
+                local_index: 1,
+            },
+            MirInst::Load {
+                dest: VReg(23),
+                addr: VReg(22),
+                ty: TypeId::I64,
+            },
+            MirInst::ClosureCreate {
+                dest: VReg(0),
+                func_name: "main_outlined_1".to_string(),
+                closure_size: 24,
+                capture_offsets: vec![8, 16],
+                capture_types: vec![TypeId::I64, TypeId::I64],
+                captures: vec![VReg(21), VReg(23)],
+                lambda_params: vec![],
+                body_block: Some(body_block),
+            },
+        ]);
+
+        let mut module = MirModule::new();
+        module.functions.push(func);
+
+        let expanded = expand_with_outlined(&module);
+        let outlined = expanded.iter().find(|f| f.name == "main_outlined_1").unwrap();
+        let meta = outlined.outlined_bodies.get(&body_block).unwrap();
+        assert!(meta.is_lambda);
+        assert_eq!(meta.lambda_capture_local_indices, vec![2, 3]);
+
+        let local_indices: Vec<_> = outlined
+            .block(body_block)
+            .unwrap()
+            .instructions
+            .iter()
+            .filter_map(|inst| match inst {
+                MirInst::LocalAddr { local_index, .. } => Some(*local_index),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(local_indices, vec![2, 3]);
+    }
 }
 
 /// Return a function address for an outlined MIR block.
@@ -313,16 +389,24 @@ pub fn get_func_block_addr<M: Module>(
 }
 
 /// Extract body kind from a MIR instruction if it creates an outlined body
-pub fn get_body_kind(inst: &MirInst) -> Option<(crate::mir::BlockId, BodyKind, Vec<LambdaParamBinding>)> {
+pub fn get_body_kind(
+    inst: &MirInst,
+) -> Option<(
+    crate::mir::BlockId,
+    BodyKind,
+    Vec<LambdaParamBinding>,
+    Vec<crate::mir::VReg>,
+)> {
     match inst {
-        MirInst::ActorSpawn { body_block, .. } => Some((*body_block, BodyKind::Actor, Vec::new())),
-        MirInst::GeneratorCreate { body_block, .. } => Some((*body_block, BodyKind::Generator, Vec::new())),
-        MirInst::FutureCreate { body_block, .. } => Some((*body_block, BodyKind::Future, Vec::new())),
+        MirInst::ActorSpawn { body_block, .. } => Some((*body_block, BodyKind::Actor, Vec::new(), Vec::new())),
+        MirInst::GeneratorCreate { body_block, .. } => Some((*body_block, BodyKind::Generator, Vec::new(), Vec::new())),
+        MirInst::FutureCreate { body_block, .. } => Some((*body_block, BodyKind::Future, Vec::new(), Vec::new())),
         MirInst::ClosureCreate {
             body_block: Some(bb),
             lambda_params,
+            captures,
             ..
-        } => Some((*bb, BodyKind::Lambda, lambda_params.clone())),
+        } => Some((*bb, BodyKind::Lambda, lambda_params.clone(), captures.clone())),
         _ => None,
     }
 }
@@ -338,13 +422,18 @@ pub fn expand_with_outlined(mir: &MirModule) -> Vec<MirFunction> {
     for func in &mir.functions {
         let live_ins_map = func.compute_live_ins();
         for block in &func.blocks {
-            for inst in &block.instructions {
-                if let Some((body_block, kind, lambda_params)) = get_body_kind(inst) {
+            for (inst_index, inst) in block.instructions.iter().enumerate() {
+                if let Some((body_block, kind, lambda_params, capture_regs)) = get_body_kind(inst) {
                     let name = format!("{}_outlined_{}", func.name, body_block.0);
                     if seen.contains(&name) {
                         continue;
                     }
                     seen.insert(name.clone());
+                    let capture_local_indices = if kind == BodyKind::Lambda {
+                        lambda_capture_local_indices(block, inst_index, &capture_regs)
+                    } else {
+                        Vec::new()
+                    };
 
                     // Create outlined function from parent
                     let outlined = create_outlined_function(
@@ -353,6 +442,7 @@ pub fn expand_with_outlined(mir: &MirModule) -> Vec<MirFunction> {
                         body_block,
                         kind,
                         &lambda_params,
+                        &capture_local_indices,
                         &live_ins_map,
                         &mut functions,
                     );
@@ -371,6 +461,7 @@ fn create_outlined_function(
     body_block: crate::mir::BlockId,
     kind: BodyKind,
     lambda_params: &[LambdaParamBinding],
+    capture_local_indices: &[usize],
     live_ins_map: &std::collections::HashMap<crate::mir::BlockId, std::collections::HashSet<crate::mir::VReg>>,
     functions: &mut [MirFunction],
 ) -> MirFunction {
@@ -420,7 +511,22 @@ fn create_outlined_function(
                 is_ghost: false,
             });
         }
-        rewrite_lambda_local_indices(&mut outlined, original_param_count, lambda_params);
+        let lambda_capture_local_indices = rewrite_lambda_local_indices(
+            &mut outlined,
+            original_param_count,
+            lambda_params,
+            capture_local_indices,
+        );
+        set_lambda_capture_metadata(
+            &mut outlined,
+            body_block,
+            &name,
+            kind,
+            &live_ins_map,
+            &lambda_capture_local_indices,
+            functions,
+            &func.name,
+        );
     } else {
         outlined.params.push(MirLocal {
             name: "ctx".to_string(),
@@ -439,27 +545,33 @@ fn create_outlined_function(
         .collect();
     live_ins.sort_by_key(|v| v.0);
 
-    // Update original function's metadata
-    if let Some(orig) = functions.iter_mut().find(|f| f.name == func.name) {
-        orig.outlined_bodies.insert(
+    if kind != BodyKind::Lambda {
+        // Update original function's metadata
+        if let Some(orig) = functions.iter_mut().find(|f| f.name == func.name) {
+            orig.outlined_bodies.insert(
+                body_block,
+                crate::mir::OutlinedBody {
+                    name: name.to_string(),
+                    live_ins: live_ins.clone(),
+                    frame_slots: None,
+                    is_lambda: false,
+                    lambda_capture_local_indices: Vec::new(),
+                },
+            );
+        }
+
+        // Set metadata on outlined function
+        outlined.outlined_bodies.insert(
             body_block,
             crate::mir::OutlinedBody {
                 name: name.to_string(),
                 live_ins: live_ins.clone(),
                 frame_slots: None,
+                is_lambda: false,
+                lambda_capture_local_indices: Vec::new(),
             },
         );
     }
-
-    // Set metadata on outlined function
-    outlined.outlined_bodies.insert(
-        body_block,
-        crate::mir::OutlinedBody {
-            name: name.to_string(),
-            live_ins: live_ins.clone(),
-            frame_slots: None,
-        },
-    );
 
     // Handle generator lowering
     if kind == BodyKind::Generator {
@@ -492,18 +604,26 @@ fn rewrite_lambda_local_indices(
     outlined: &mut MirFunction,
     original_param_count: usize,
     lambda_params: &[LambdaParamBinding],
-) {
-    let lambda_param_map: std::collections::HashMap<usize, usize> = lambda_params
+    capture_local_indices: &[usize],
+) -> Vec<usize> {
+    let lambda_param_map: HashMap<usize, usize> = lambda_params
         .iter()
         .enumerate()
         .map(|(i, param)| (param.local_index, i + 1))
         .collect();
     let new_param_count = lambda_params.len() + 1;
+    let capture_map: HashMap<usize, usize> = capture_local_indices
+        .iter()
+        .enumerate()
+        .map(|(i, local_index)| (*local_index, new_param_count + outlined.locals.len() + i))
+        .collect();
 
     for block in &mut outlined.blocks {
         for inst in &mut block.instructions {
             if let MirInst::LocalAddr { local_index, .. } = inst {
                 if let Some(mapped) = lambda_param_map.get(local_index) {
+                    *local_index = *mapped;
+                } else if let Some(mapped) = capture_map.get(local_index) {
                     *local_index = *mapped;
                 } else if *local_index >= original_param_count {
                     *local_index = new_param_count + (*local_index - original_param_count);
@@ -511,4 +631,65 @@ fn rewrite_lambda_local_indices(
             }
         }
     }
+    capture_local_indices
+        .iter()
+        .filter_map(|local_index| capture_map.get(local_index).copied())
+        .collect()
+}
+
+fn lambda_capture_local_indices(
+    block: &crate::mir::MirBlock,
+    closure_inst_index: usize,
+    capture_regs: &[crate::mir::VReg],
+) -> Vec<usize> {
+    let mut addr_to_local = HashMap::new();
+    let mut load_to_local = HashMap::new();
+    for inst in block.instructions.iter().take(closure_inst_index) {
+        match inst {
+            MirInst::LocalAddr { dest, local_index } => {
+                addr_to_local.insert(*dest, *local_index);
+            }
+            MirInst::Load { dest, addr, .. } => {
+                if let Some(local_index) = addr_to_local.get(addr) {
+                    load_to_local.insert(*dest, *local_index);
+                }
+            }
+            _ => {}
+        }
+    }
+    capture_regs
+        .iter()
+        .filter_map(|reg| load_to_local.get(reg).copied())
+        .collect()
+}
+
+fn set_lambda_capture_metadata(
+    outlined: &mut MirFunction,
+    body_block: crate::mir::BlockId,
+    name: &str,
+    kind: BodyKind,
+    live_ins_map: &std::collections::HashMap<crate::mir::BlockId, std::collections::HashSet<crate::mir::VReg>>,
+    lambda_capture_local_indices: &[usize],
+    functions: &mut [MirFunction],
+    original_func_name: &str,
+) {
+    let mut live_ins: Vec<_> = live_ins_map
+        .get(&body_block)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    live_ins.sort_by_key(|v| v.0);
+
+    let meta = crate::mir::OutlinedBody {
+        name: name.to_string(),
+        live_ins,
+        frame_slots: None,
+        is_lambda: kind == BodyKind::Lambda,
+        lambda_capture_local_indices: lambda_capture_local_indices.to_vec(),
+    };
+    if let Some(orig) = functions.iter_mut().find(|f| f.name == original_func_name) {
+        orig.outlined_bodies.insert(body_block, meta.clone());
+    }
+    outlined.outlined_bodies.insert(body_block, meta);
 }

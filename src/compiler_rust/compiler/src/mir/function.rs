@@ -66,6 +66,8 @@ pub struct OutlinedBody {
     pub name: String,
     pub live_ins: Vec<VReg>,
     pub frame_slots: Option<usize>,
+    pub is_lambda: bool,
+    pub lambda_capture_local_indices: Vec<usize>,
 }
 
 /// MIR function

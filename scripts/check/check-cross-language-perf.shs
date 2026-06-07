@@ -44,7 +44,7 @@ FANOUT_WORKERS="${FANOUT_WORKERS:-1000}"
 FANOUT_OS_THREAD_WORKERS="${FANOUT_OS_THREAD_WORKERS:-$FANOUT_WORKERS}"
 FANOUT_MULTICORE_GREEN_WORKERS="${FANOUT_MULTICORE_GREEN_WORKERS:-$FANOUT_WORKERS}"
 FANOUT_ITERS="${FANOUT_ITERS:-32}"
-FANOUT_STRESS_WORKERS="${FANOUT_STRESS_WORKERS:-256}"
+FANOUT_STRESS_WORKERS="${FANOUT_STRESS_WORKERS:-512}"
 FANOUT_STRESS_ITERS="${FANOUT_STRESS_ITERS:-1}"
 if [ -z "${COOPERATIVE_GREEN_WORKERS:-}" ]; then
     if [ -n "${GREEN_WORKERS:-}" ]; then
@@ -347,9 +347,8 @@ write_simple_parallel_multicore_green() {
 write_simple_fanout() {
     # OS-thread fanout pattern using Simple's direct thread_spawn API. This is
     # the Simple row comparable to C pthread-per-task fanout.
-    _last_fanout_os_worker=$((FANOUT_WORKERS - 1))
     {
-        echo 'use std.nogc_sync_mut.concurrent.thread.{thread_spawn}'
+        echo 'use std.nogc_sync_mut.concurrent.thread.{thread_spawn, ThreadHandle}'
         echo ''
         echo 'extern fn rt_exit(code: i32)'
         echo ''
@@ -366,13 +365,13 @@ write_simple_fanout() {
         echo '    total'
         echo ''
         echo 'fn main():'
-        for i in $(seq 0 "$_last_fanout_os_worker"); do
-            echo "    var h${i} = thread_spawn(\\: work(${i}))"
-        done
+        echo '    var handles: [ThreadHandle] = []'
+        echo "    for seed in 0..${FANOUT_WORKERS}:"
+        echo '        handles.push(thread_spawn(\: work(seed)))'
         echo '    var total: i64 = 0'
-        for i in $(seq 0 "$_last_fanout_os_worker"); do
-            echo "    total = total + h${i}.join()"
-        done
+        echo '    for i in 0..handles.len():'
+        echo '        val handle = handles[i]'
+        echo '        total = total + handle.join()'
         echo '    val expected = expected_total()'
         echo '    if total != expected:'
         echo '        println("checksum_mismatch total={total} expected={expected}")'
@@ -420,9 +419,8 @@ write_simple_fanout_cooperative_green() {
 }
 
 write_simple_fanout_multicore_green() {
-    _last_fanout_worker=$((FANOUT_MULTICORE_GREEN_WORKERS - 1))
     {
-        echo 'use std.concurrent.multicore_green.{multicore_green_spawn}'
+        echo 'use std.concurrent.multicore_green.{multicore_green_spawn, MulticoreGreenHandle}'
         echo 'extern fn rt_exit(code: i32)'
         echo ''
         echo ''
@@ -439,21 +437,19 @@ write_simple_fanout_multicore_green() {
         echo '    total'
         echo ''
         echo 'fn main():'
-        for i in $(seq 0 "$_last_fanout_worker"); do
-            echo "    var h${i} = multicore_green_spawn(\\: work(${i}))"
-        done
+        echo '    var handles: [MulticoreGreenHandle] = []'
+        echo "    for seed in 0..${FANOUT_MULTICORE_GREEN_WORKERS}:"
+        echo '        handles.push(multicore_green_spawn(\: work(seed)))'
         echo '    var pool_used: i64 = 0'
-        for i in $(seq 0 "$_last_fanout_worker"); do
-            echo "    if h${i}.used_runtime_pool():"
-            echo "        pool_used = pool_used + 1"
-        done
+        echo '    var total: i64 = 0'
+        echo '    for i in 0..handles.len():'
+        echo '        val handle = handles[i]'
+        echo '        if handle.used_runtime_pool():'
+        echo '            pool_used = pool_used + 1'
+        echo '        total = total + handle.join()'
         echo "    println(\"multicore_green_pool_used = {pool_used}/${FANOUT_MULTICORE_GREEN_WORKERS}\")"
         echo "    if pool_used != ${FANOUT_MULTICORE_GREEN_WORKERS}:"
         echo '        rt_exit(73)'
-        echo '    var total: i64 = 0'
-        for i in $(seq 0 "$_last_fanout_worker"); do
-            echo "    total = total + h${i}.join()"
-        done
         echo '    val expected = expected_total()'
         echo '    if total != expected:'
         echo '        println("checksum_mismatch total={total} expected={expected}")'
@@ -463,9 +459,8 @@ write_simple_fanout_multicore_green() {
 }
 
 write_simple_fanout_stress_multicore_green() {
-    _last_stress_worker=$((FANOUT_STRESS_WORKERS - 1))
     {
-        echo 'use std.concurrent.multicore_green.{multicore_green_spawn}'
+        echo 'use std.concurrent.multicore_green.{multicore_green_spawn, MulticoreGreenHandle}'
         echo 'extern fn rt_exit(code: i32)'
         echo ''
         echo 'fn work(seed: i64) -> i64:'
@@ -481,21 +476,19 @@ write_simple_fanout_stress_multicore_green() {
         echo '    total'
         echo ''
         echo 'fn main():'
-        for i in $(seq 0 "$_last_stress_worker"); do
-            echo "    var h${i} = multicore_green_spawn(\\: work(${i}))"
-        done
+        echo '    var handles: [MulticoreGreenHandle] = []'
+        echo "    for seed in 0..${FANOUT_STRESS_WORKERS}:"
+        echo '        handles.push(multicore_green_spawn(\: work(seed)))'
         echo '    var pool_used: i64 = 0'
-        for i in $(seq 0 "$_last_stress_worker"); do
-            echo "    if h${i}.used_runtime_pool():"
-            echo "        pool_used = pool_used + 1"
-        done
+        echo '    var total: i64 = 0'
+        echo '    for i in 0..handles.len():'
+        echo '        val handle = handles[i]'
+        echo '        if handle.used_runtime_pool():'
+        echo '            pool_used = pool_used + 1'
+        echo '        total = total + handle.join()'
         echo "    println(\"multicore_green_pool_used = {pool_used}/${FANOUT_STRESS_WORKERS}\")"
         echo "    if pool_used != ${FANOUT_STRESS_WORKERS}:"
         echo '        rt_exit(73)'
-        echo '    var total: i64 = 0'
-        for i in $(seq 0 "$_last_stress_worker"); do
-            echo "    total = total + h${i}.join()"
-        done
         echo '    val expected = expected_total()'
         echo '    if total != expected:'
         echo '        println("checksum_mismatch total={total} expected={expected}")'

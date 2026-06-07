@@ -1,6 +1,6 @@
 // Complete MIR function body compilation.
 
-use cranelift_codegen::ir::{condcodes::IntCC, types, InstBuilder};
+use cranelift_codegen::ir::{condcodes::IntCC, types, InstBuilder, MemFlags};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::Module;
 use std::collections::{HashMap, HashSet};
@@ -441,9 +441,28 @@ pub fn compile_function_body<M: Module>(
         builder.def_var(var, converted);
     }
 
-    // If this is an outlined body with captures, load them from ctx (last param).
+    // If this is an outlined lambda, hydrate captured locals from the closure struct.
     if let Some(meta) = func.outlined_bodies.get(&func.entry_block) {
-        if !meta.live_ins.is_empty() {
+        if meta.is_lambda && !meta.lambda_capture_local_indices.is_empty() {
+            let closure_param = builder.block_params(entry_block)[0];
+            for (idx, local_index) in meta.lambda_capture_local_indices.iter().enumerate() {
+                let val = builder
+                    .ins()
+                    .load(types::I64, MemFlags::new(), closure_param, 8 + (idx as i32 * 8));
+                let var = if let Some(&var) = variables.get(local_index) {
+                    var
+                } else if let Some(&var) = extra_variables.get(local_index) {
+                    var
+                } else {
+                    let next_idx = (variables.len() + extra_variables.len()) as u32 + 1000;
+                    let var = Variable::from_u32(next_idx + *local_index as u32);
+                    builder.declare_var(var, types::I64);
+                    extra_variables.insert(*local_index, var);
+                    var
+                };
+                def_var_coerced(&mut builder, var, val);
+            }
+        } else if !meta.live_ins.is_empty() {
             let ctx_param = if func.generator_states.is_some() {
                 let gen_param = builder.block_params(entry_block)[0];
                 let get_ctx_id = runtime_funcs["rt_generator_get_ctx"];
