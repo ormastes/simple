@@ -173,6 +173,42 @@ require_simple_multicore_stress_beats_c() {
     fi
 }
 
+require_large_simple_multicore_fanout_beats_c() {
+    file="$1"
+    if ! grep -Fq "Fanout workers:** 1000" "$file"; then
+        return
+    fi
+    if ! awk -F'|' '
+        /^## / {
+            fanout = ($0 ~ /Large Fanout Scheduling/)
+            next
+        }
+        fanout && /C \(pthreads\)/ {
+            c = $3
+            gsub(/^[ \t]+|[ \t]+$/, "", c)
+        }
+        fanout && /Simple multicore green \(native\)/ {
+            simple = $3
+            notes = $4
+            gsub(/^[ \t]+|[ \t]+$/, "", simple)
+            gsub(/^[ \t]+|[ \t]+$/, "", notes)
+            if (notes !~ /pool_used=[0-9]+\/[0-9]+/ ||
+                notes !~ /parallelism=[0-9]+\/[0-9]+/ ||
+                notes !~ /queue_model=work_stealing/) {
+                bad = 1
+            }
+        }
+        END {
+            if (bad || simple == "" || c == "" || simple == "fail" || c == "fail" || simple == "n/a" || c == "n/a") {
+                exit 1
+            }
+            exit ((simple + 0) < (c + 0)) ? 0 : 1
+        }
+    ' "$file"; then
+        fail "large Simple multicore-green fanout row must be faster than C pthread fanout row with pool evidence in $file"
+    fi
+}
+
 require_arg "$kind" "missing profile kind"
 require_arg "$script_path" "missing script path"
 require_arg "$report_path" "missing report path"
@@ -247,6 +283,7 @@ case "$kind" in
         require_contains "$report_path" "goroutine per stress task (M:N)"
         require_go_stress_beats_c "$report_path"
         require_simple_multicore_stress_beats_c "$report_path"
+        require_large_simple_multicore_fanout_beats_c "$report_path"
         require_not_contains "$report_path" "thread_spawn2"
         require_not_contains "$report_path" "Simple task_spawn"
         require_not_contains "$report_path" "task_spawn runtime pool candidate"
