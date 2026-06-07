@@ -350,6 +350,10 @@ attempt.
 Draw IR text-buffer cache keys must include the text payload, foreground,
 background, and font size so recurring labels can reuse prepared blit buffers
 before a cache scan or glyph raster attempt.
+Generated glyph raster kernel callers must use the shared argument packer for
+`glyph_plan`, `dst`, `width`, `height`, and `font_size` so generated
+Metal/CUDA/HIP/Vulkan/OpenCL launch paths validate the same pointer layout before
+backend-specific launch/readback code consumes it.
 
 ## Migration Order
 

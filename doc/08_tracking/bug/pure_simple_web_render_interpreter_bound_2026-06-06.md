@@ -192,6 +192,14 @@ Remaining gap: production Metal/CUDA/HIP/Vulkan/OpenCL glyph raster kernels
 still need to populate the vector and bitmap glyph-return contract during live
 GUI execution instead of the test evidence slots.
 
+2026-06-07 generated glyph args update: generated glyph raster kernels now have
+one shared validated argument packer for `glyph_plan`, `dst`, `width`, `height`,
+and `font_size`. Focused unit coverage proves invalid inputs fail closed before
+allocation, valid arguments round-trip through the packed pointer layout, and
+generated glyph provenance sees a real `args_ready` pointer. Remaining gap: live
+backend launch/readback still needs to bind this packer into the production
+Metal/CUDA/HIP/Vulkan/OpenCL glyph raster paths.
+
 ## Path F — repeated ancestor clip walks during paint — FIXED 2026-06-07
 
 `paint()` called `ancestor_clip()` in the background, absolute, positive z-index,
