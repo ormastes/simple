@@ -104,22 +104,19 @@ Two failure classes -- unit mix-ups and id mix-ups -- become compile errors inst
 
 The single most common way generated code fails in production isn't a logic error -- it's the absent value nobody handled and the case nobody knew existed. So Simple removes both at the language level.
 
-**There is no null.** Absence is modeled with an explicit optional type, and you cannot use the inner value without first dealing with the empty case. A function that might not return a value says so in its type, and every caller is forced by the compiler to handle the empty branch. The billion-dollar mistake isn't discouraged -- it's unrepresentable. This matters doubly for generated code: an LLM trained on null-bearing languages will happily write code that dereferences a maybe-absent value, and in Simple that simply doesn't compile.
+**There is no user-level `null`.** Absence is modeled with `nil` and explicit optional types, and code that might not produce a value has to say so in its type. The point is not that the runtime and FFI layers never need to talk about null-like concepts; they do. The point is that ordinary Simple code represents absence explicitly, so generated code cannot quietly dereference a maybe-absent value as if it were present.
 
-**Pattern matches are exhaustive -- and in high-robustness mode, everywhere.** A `match` must cover every variant of the type it inspects; a missing case is a compile error, not a silent fall-through. The high-robustness mode tightens this further: it turns the partial-handling escape hatches into errors too, so across the whole program every case of every matched type must be explicitly addressed. You dial the strictness up for the parts of the system that must not surprise you.
+**Pattern matches are checked for exhaustiveness, and strict lint configuration can make misses fail the build.** Simple has match-exhaustiveness linting for enum, bool, Option, and Result shapes. In the default toolchain this is a lint surface; in the load-bearing parts of a generated system you can deny that lint so a missing case becomes a build-stopping error instead of a review comment.
 
 ```simple
 fn describe(x: Shape) -> str:
     match x:
         Circle(r):    "circle r={r}"
         Square(s):    "square s={s}"
-        # In high-robustness mode, omitting Triangle is a compile error,
-        # and so is a catch-all `_` that hides an unhandled variant.
+        # With non-exhaustive matches denied, omitting Triangle fails the gate.
 ```
 
-The combination is the point. No-null means the *absent* case can't be ignored; exhaustive match means the *unexpected* case can't be ignored; high-robustness mode means neither can be ignored anywhere you've asked the compiler to insist. For a codebase being extended by a model that doesn't know what it doesn't know, "the compiler enumerates the cases you forgot" is worth more than any amount of review.
-
-*(Note for accuracy: I've described no-null and exhaustive matching as the language's design intent and named a high-robustness mode. Confirm the exact keyword/flag name and the optional-type syntax against the current compiler before publishing -- I've kept the snippet schematic rather than asserting specific surface syntax I haven't verified.)*
+The combination is the point. Explicit absence means the *absent* case can't be ignored; exhaustive-match linting means the *unexpected* case can be made impossible to miss in strict code. For a codebase being extended by a model that doesn't know what it doesn't know, "the compiler enumerates the cases you forgot" is worth more than any amount of review.
 
 ---
 
@@ -129,7 +126,7 @@ This is the deepest one. Past a certain size, an LLM simply cannot hold the syst
 
 Simple's response is to make the architecture **machine-checkable and bounded**, so the model never needs to hold the whole thing in its head.
 
-**Minimal public surface.** Only explicitly exported symbols can be referenced across boundaries -- there is no `*` export. The public surface stays small and enumerable, which is exactly the surface the model has to reason about.
+**Minimal public surface.** Public boundaries are explicit: `__init__.spl` and structured export rules keep cross-module access enumerable instead of accidental. The public surface stays small, which is exactly the surface the model has to reason about.
 
 **Architecture rules as compile-time constraints.** Layer dependencies are declared and enforced when you build, using predicate-based pointcuts:
 
@@ -151,7 +148,7 @@ Together these keep the *context required to safely extend the system* small and
 
 Mistake-prevention runs deeper than linting. Simple integrates a **Lean 4 formal verification layer** -- deterministic Lean generation, proof-artifact inventory, Lean/Lake checking, cache invalidation, and verification-state reporting -- for the supported verification subset. Where you've verified something, the toolchain knows it's verified, which is the other half of "don't let the model rewrite proven code."
 
-Memory safety has its own structural guards: **borrow checking** plus a set of **runtime families** the compiler keeps separate.
+Memory safety has its own structural guards: **borrow-checking infrastructure** plus a set of **runtime families** the toolchain keeps separate in the supported matrix.
 
 | Family | Allocation | Mutation | Async | Use case |
 | --- | --- | --- | --- | --- |
@@ -161,19 +158,17 @@ Memory safety has its own structural guards: **borrow checking** plus a set of *
 | `gc_async_mut` | GC-managed | mutable | yes | GPU/CUDA, ML pipelines |
 | `nogc_async_mut_noalloc` | stack only | mutable | yes | Baremetal, embedded, RTOS |
 
-Importing a GC module into a no-GC context produces a diagnostic, and target presets (`Baremetal`, `Hosted`, `EmbeddedWithHeap`) automatically restrict module resolution to compatible families. You choose GC or no-GC per context, and the compiler stops you from accidentally mixing them.
+The key idea is that GC/no-GC and allocation expectations are part of the module family contract rather than folklore. The public evidence is strongest for the declared family matrix and parity lanes, so this should be described as a bounded enforcement surface, not as a universal claim that every target preset rejects every incompatible import today.
 
-Pointers are not one thing, either. Simple has **five pointer types** -- GC, unique, shared, weak, and **handle** -- so "a reference to something" carries its ownership and lifetime story in the type rather than leaving it implicit. The first four are the familiar managed/owned/shared/non-owning quartet. The fifth is the one that matters for baremetal.
+Pointers are not one thing, either. Simple's parser and runtime surface distinguish ownership and lifetime forms such as unique, shared, weak, borrowed/raw, and **handle** references. GC belongs primarily to the runtime-family story rather than being best described as just another pointer spelling. The important design point is still the same: "a reference to something" should carry its ownership and lifetime story in the type rather than leaving it implicit.
 
-A **handle** is an *index-as-pointer*: instead of holding a raw machine address, it holds an index into a table, pool, or arena that owns the actual storage. This is the classic embedded and high-reliability pattern, and it's a good fit for exactly the places a raw pointer is dangerous:
+A **handle** is intended for the index-as-pointer pattern: instead of handing arbitrary code a raw machine address, code refers to storage through a table, pool, or arena that owns the actual object. The repo has handle syntax/runtime hooks and handle-pool concepts; the full checked-pool semantics should be treated as a bounded surface to confirm against the current compiler before making stronger claims. The reason this direction matters is straightforward:
 
 - **No raw addresses to corrupt.** On a target with no MMU, a stray raw pointer write can scribble anywhere; a handle is just an index that gets *resolved* through its pool, and the resolution can be bounds-checked.
 - **It can't dangle into arbitrary memory.** A handle to a freed or not-yet-ready slot resolves to "absent," not to whatever now occupies that address -- which composes directly with the no-null/optional discipline from earlier.
 - **It's relocatable and serializable.** Because it's a value-index rather than an address, the pool can move, snapshot, or restore its backing store without invalidating outstanding handles -- useful for arenas, save/restore, and the stack-only `nogc_async_mut_noalloc` baremetal family above.
 
-The handle composes with the runtime families rather than competing with them: the family decides *where* storage lives (stack-only, arena, pool), and the handle is the bounds-checkable way to *refer* to it without a raw address. For LLM-scale code this is another bug class converted into a checkable lookup -- a raw pointer is one more thing a model gets subtly wrong at a million lines, and an index-handle the runtime can validate turns "memory corruption" into "this handle didn't resolve."
-
-*(Accuracy note, consistent with the rest: I'm reading `handle` in the five-pointer list as this index/table-handle concept and describing its baremetal rationale. Confirm the exact semantics and the handle syntax against the current compiler before publishing -- I've kept this conceptual rather than asserting a specific surface form.)*
+The handle direction composes with runtime families rather than competing with them: the family decides *where* storage lives, and a handle is the safer way to refer to that storage when raw addresses are the wrong abstraction. For LLM-scale code, the attraction is obvious: turn "the model scribbled through a bad pointer" into "this handle did not resolve" wherever the supported runtime surface can enforce it.
 
 And the **macros are parser-friendly**: definition, expansion, validation, and hygiene are compiler features, not editor-hostile text substitution. Because macros are contract-first, tooling knows what a macro introduces *before* it expands -- which means the model (and your IDE) can reason about generated symbols instead of guessing.
 
@@ -218,9 +213,9 @@ simple test --sdoctest src/math.spl   # run file-local doctest examples
 simple test --sdoctest --tag slow      # filter doctests by tag
 ```
 
-So both kinds of "documentation code" -- the prose-level examples in Markdown and the inline examples in comments -- are first-class tests. (`--doctest` is accepted as a compatibility alias, but `--sdoctest` is the name for the implemented path.) For a codebase an LLM is extending, this is one more case of turning a thing humans forget to check into a thing the toolchain checks every time: every example the model writes either runs and matches, or it isn't allowed in.
+So both kinds of "documentation code" -- the prose-level examples in Markdown and the inline examples in comments -- are first-class tests. `--sdoctest` is the implemented path to cite publicly; treat any `--doctest` compatibility wording as something to verify against the current CLI before publishing. For a codebase an LLM is extending, this is one more case of turning a thing humans forget to check into a thing the toolchain checks every time: every example the model writes either runs and matches, or it isn't allowed in.
 
-And feature documentation is **auto-generated from BDD specs** -- each spec carries feature metadata and executable assertions, so the docs describe what the tests actually verify. Documentation that lies is its own kind of LLM failure mode; this closes it.
+And feature documentation is **auto-generated from SPipe BDD specs** -- each spec carries feature metadata and executable assertions, so the docs describe what the tests actually verify. Documentation that lies is its own kind of LLM failure mode; this closes it.
 
 ---
 
@@ -259,7 +254,7 @@ nograd{
 
 The part that's genuinely unusual is **rendering**: a math block has five rendering backends -- plain text, a debug form, Unicode, LaTeX, and Markdown. The same expression can show up as `α` in your terminal via the Neovim conceal preview, as LaTeX in generated documentation, and as ordinary source when you're editing. The editors lean on this: VSCode highlights and previews math blocks with nested-brace support, and Neovim renders inline Unicode (`frac(1,2)` -> `(1)/(2)`, `alpha` -> `α`, `sqrt(x)` -> `√(x)`). So the arithmetic you read is a *rendering* of the expression the compiler actually checks -- the notation and the semantics can't drift apart.
 
-For deep learning specifically, the autograd path through `m{}` / `loss{}` / `nograd{}` is complete for the promoted torch-backed C/LLVM scope, including backward passes, detached-input failure handling, and `nograd{}` restore semantics. (Other backends for these blocks are deferred -- this is one of the bounded-scope features, not a universal claim.) The repo ships working DL examples on top of this: a pure-Simple XOR net, linear regression, iris classification, and progressive LoRA fine-tuning.
+For deep learning specifically, the `m{}` / `loss{}` / `nograd{}` path is real in the promoted torch-backed C/LLVM scope, including parser/lowering/runtime control work and examples. Broader autograd runtime coverage is still target-scoped and in progress, so this is one of the bounded-scope features, not a universal backend claim. The repo ships DL examples on top of this direction: a pure-Simple XOR net, linear regression, iris classification, and progressive LoRA fine-tuning.
 
 ---
 
@@ -305,7 +300,7 @@ The idea is that a feature spec is the unit of work whether it runs on your lapt
 
 The honest qualifier: hardware-dependent lanes are host- and board-aware rather than universally turnkey -- the lane matrix in the repo says which boards and which paths are stable. But the through-line is real: one spec, host or target, same assertions.
 
-On the same target, the **handle pointer** described earlier does the addressing: with no MMU underneath you, the index-into-a-pool model is how you refer to peripherals, buffers, and pool-allocated objects without exposing a raw address that a bad write could corrupt. The stack-only baremetal runtime family decides where that storage lives; the handle is the bounds-checkable way to reach it.
+The handle-pointer direction described earlier is especially relevant here: with no MMU underneath you, an index-into-a-pool model is the kind of reference discipline you want for peripherals, buffers, and pool-allocated objects. Treat that as the baremetal rationale for the handle surface, not as a blanket claim that every handle use is already a fully checked pool lookup on every target.
 
 ---
 
@@ -357,13 +352,15 @@ I want to be precise about what those numbers are: that's **test-suite throughpu
 
 On features: the BDD spec framework, SDoctest, coverage, traceability, the mock policy, the self-hosted compiler, MDSOC manifests, parser-friendly macros, Tree-sitter outline/query tooling, SDN-backed project/test/todo databases, primitive-public-API linting, borrow-checking infrastructure, watch/auto-build support, mmap-backed loader support, baremetal build/test plumbing, and SFFI are all in the "safe to advertise" tier. The Lean verification workflow, the LLVM family closure, the runtime families, the AOP system, and the VHDL/baremetal lanes are real but best described within their bounded scope -- full in the declared matrix, deferred elsewhere. The repo's README breaks this down feature by feature; I'd point a skeptical reader straight at it.
 
-**The GUI does not work yet.** I'm calling this out plainly because it's the most visible gap. There's a shared UI test protocol across the web backend and a TUI-web proxy, but that's a test contract, not a working rendering layer. The user-facing GUI is unfinished. Here's the plan, in the order I intend to build it:
+**The native/user-facing GUI is still unfinished, but the UI stack is farther along than "no GUI" implies.** The honest status is layered. The shared web/TUI-web test protocol is real. The TUI-web proxy wraps terminal UI state as HTML and delegates `/api/test` to the shared handler. Draw IR Protocol v2 exists for layout/diff inspection. The browser path has real HTML/CSS parsing, layout, paint, and Engine2D rendering work. The web render API names web, Electron, Tauri, Chromium, pure Simple, TUI-web, and WASM targets. The WASM GUI path is artifact/contract-ready while linker hardening continues. UI access is also exposed through a protocol that agents can drive: snapshot, find, act, and inspect observable state.
+
+So the gap is not "there is no rendering layer." The gap is product maturity: a polished native GUI and one shared component interface across TUI, GUI, and web. Here's the plan, in the order I intend to build it:
 
 1. **A lightweight TUI first.** Before anything graphical, a terminal UI that's small, fast, and dependency-light -- the thing that works everywhere, including over SSH and on baremetal-adjacent targets, and the easiest surface to make correct.
-2. **One shared interface across TUI, GUI, and web.** A single UI contract that all three surfaces implement, so a component is written once and rendered as a terminal view, a native window, or a web page. The shared test protocol that exists today is the seam this is meant to grow into -- the goal is one `handle_test_request`-style contract driving every surface, not three parallel UIs that drift apart. (Notice this is the same anti-drift principle as the rest of the language, applied to UI.)
+2. **One shared interface across TUI, GUI, and web.** A single UI contract that all three surfaces implement, so a component is written once and rendered as a terminal view, a native window, or a web page. The shared test protocol, TUI-web proxy, Draw IR, browser renderer, WASM contract, and UI-access MCP tools are the pieces this is meant to grow from -- the goal is one `handle_test_request`-style contract driving every surface, not three parallel UIs that drift apart. (Notice this is the same anti-drift principle as the rest of the language, applied to UI.)
 3. **A textual debugging GUI exposed three ways -- API, LLM (MCP), and CLI.** The debugger front-end should be drivable as a programmatic API, as an MCP tool an LLM can operate directly, and from the command line -- the same debugging surface whether a human, a script, or a model is at the controls. This matters for the million-line thesis: when generated code fails, the model needs to *debug* it through the same machine-checkable interface it uses to write it, not hand off to a human at a graphical window.
 
-Treat (1)-(3) as roadmap, not shipped. I'd rather list the plan than imply a GUI exists.
+Treat the polished native GUI and unified component surface as roadmap. Treat the web/TUI-web protocol, Draw IR inspection, browser rendering work, WASM contracts, and UI-access tooling as bounded implemented surfaces.
 
 ---
 
