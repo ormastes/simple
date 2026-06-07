@@ -62,9 +62,9 @@ The multi-platform target catalog lives in `src/os/port/simpleos_multiplatform_b
 ## Quick Start
 
 ```bash
-# Download release
-wget https://github.com/simple-lang/simple/releases/latest/download/simple-multi-platform.tar.gz
-tar xzf simple-multi-platform.tar.gz && cd simple-multi-platform/
+# Clone current beta with example/tooling submodules
+git clone --recurse-submodules https://github.com/ormastes/simple.git
+cd simple
 
 # The bin/simple wrapper auto-detects your platform
 ./bin/simple --version
@@ -239,7 +239,7 @@ Inside the FreeBSD VM:
 pkg install cmake llvm gmake git
 
 # Clone and bootstrap
-git clone https://github.com/simple-lang/simple.git && cd simple
+git clone --recurse-submodules https://github.com/ormastes/simple.git && cd simple
 ./scripts/bootstrap/bootstrap-from-scratch.sh
 
 # Verify

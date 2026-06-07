@@ -405,6 +405,7 @@ _Merged into 0.8.0 — see above._
 ## [0.5.0] - 2026-02-06
 
 ### Added
-- 100% Pure Simple (Rust source removed)
+- Pure-Simple source-first milestone for compiler/library work. Current
+  releases still retain Rust as the bootstrap seed and host substrate.
 - Self-hosting parser
 - Pre-built runtime

@@ -45,29 +45,23 @@ yay -S simple-lang
 choco install simple-lang
 ```
 
-### Manual Download
+### Source Checkout
 
-Download pre-compiled releases from [GitHub Releases](https://github.com/simple-lang/simple/releases).
+Use a source checkout for the current beta. It initializes the example and
+tooling submodules used by the docs and test evidence.
 
-**Linux x86_64:**
 ```bash
-wget https://github.com/simple-lang/simple/releases/download/v0.5.0/simple-0.5.0-linux-x86_64.tar.gz
-tar -xzf simple-0.5.0-linux-x86_64.tar.gz
-export PATH="$PWD/simple-0.5.0/bin:$PATH"
+git clone --recurse-submodules https://github.com/ormastes/simple.git
+cd simple
+export PATH="$PWD/bin:$PATH"
+simple --version
 ```
 
-**macOS ARM64 (Apple Silicon):**
-```bash
-curl -LO https://github.com/simple-lang/simple/releases/download/v0.5.0/simple-0.5.0-darwin-aarch64.tar.gz
-tar -xzf simple-0.5.0-darwin-aarch64.tar.gz
-export PATH="$PWD/simple-0.5.0/bin:$PATH"
-```
+For an existing checkout:
 
-**Windows (PowerShell):**
-```powershell
-Invoke-WebRequest -Uri https://github.com/simple-lang/simple/releases/download/v0.5.0/simple-0.5.0-windows-x86_64.zip -OutFile simple.zip
-Expand-Archive simple.zip
-$env:PATH = "$PWD\simple-0.5.0\bin;$env:PATH"
+```bash
+git submodule sync --recursive
+git submodule update --init --recursive
 ```
 
 ### Add to PATH Permanently
@@ -87,7 +81,7 @@ $path = [Environment]::GetEnvironmentVariable("Path", "User")
 ### From Source (Development)
 
 ```bash
-git clone https://github.com/simple-lang/simple.git
+git clone --recurse-submodules https://github.com/ormastes/simple.git
 cd simple
 scripts/setup/setup.shs                    # Creates the bin/simple wrapper and runtime launchers
 ```
@@ -95,7 +89,7 @@ scripts/setup/setup.shs                    # Creates the bin/simple wrapper and 
 On Windows (CMD/PowerShell):
 
 ```cmd
-git clone https://github.com/simple-lang/simple.git
+git clone --recurse-submodules https://github.com/ormastes/simple.git
 cd simple
 scripts\setup.cmd                   :: Creates bin\simple / bin\simple.cmd wrappers and bin\simple.exe
 ```

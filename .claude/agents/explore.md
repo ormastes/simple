@@ -12,7 +12,7 @@ Glob: test/**/*_spec.spl          # All test specs
 Grep: pattern="fn main" path=src/ # Find function definitions
 ```
 
-## Project Structure (Pure Simple)
+## Project Structure (Simple Source)
 
 ```
 src/

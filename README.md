@@ -2,7 +2,7 @@
 
 [![Production Ready](https://img.shields.io/badge/status-production%20ready-brightgreen)](doc/archive/release/PRODUCTION_READY_SUMMARY.md)
 [![Tests](https://img.shields.io/badge/tests-4067%2F4067%20passing-brightgreen)](doc/09_report/session/full_test_suite_results_2026-02-14.md)
-[![LLVM Cross](https://github.com/simple-lang/simple/actions/workflows/simple-llvm-cross.yml/badge.svg)](.github/workflows/simple-llvm-cross.yml)
+[![LLVM Cross](https://github.com/ormastes/simple/actions/workflows/simple-llvm-cross.yml/badge.svg)](.github/workflows/simple-llvm-cross.yml)
 [![License](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](LICENSE)
 
 Simple is a self-hosted language and toolchain that combines a readable Python-like surface with compiler-integrated testing, documentation, architecture rules, and baremetal-oriented execution paths.
@@ -84,45 +84,34 @@ See [Runtime Family Support Matrix](doc/04_architecture/runtime_family_support_m
 
 ## Quick Start
 
-### Installation from Binary (Recommended)
-
-Download the pre-compiled release for your platform - no build required!
+### Installation
 
 **What you get:**
-- Pre-compiled runtime (10 MB optimized binary)
-- Complete Simple compiler (100% Simple source code)
-- Standard library (100% Simple)
-- All development tools (MCP server, LSP, debugger - all in Simple)
+- Complete Simple compiler and toolchain source
+- Standard library and generated spec manuals
+- Development tools, including MCP server, LSP, and debugger surfaces
 
-**Available platforms:**
-- Linux x86_64 / ARM64
-- macOS x86_64 / ARM64
-- Windows x86_64 / ARM64
+Use a source checkout for the current beta. It also initializes the example and
+tooling submodules used by the docs and tests:
 
 ```bash
-# Linux x86_64
-wget https://github.com/simple-lang/simple/releases/download/v0.6.1/simple-0.6.1-linux-x86_64.tar.gz
-tar -xzf simple-0.6.1-linux-x86_64.tar.gz
-cd simple-0.6.1
+git clone --recurse-submodules https://github.com/ormastes/simple.git
+cd simple
 export PATH="$PWD/bin:$PATH"
-simple --version
-
-# macOS ARM64 (Apple Silicon)
-curl -LO https://github.com/simple-lang/simple/releases/download/v0.6.1/simple-0.6.1-darwin-aarch64.tar.gz
-tar -xzf simple-0.6.1-darwin-aarch64.tar.gz
-cd simple-0.6.1
-export PATH="$PWD/bin:$PATH"
-simple --version
-
-# Windows x86_64 (PowerShell)
-Invoke-WebRequest -Uri https://github.com/simple-lang/simple/releases/download/v0.6.1/simple-0.6.1-windows-x86_64.zip -OutFile simple.zip
-Expand-Archive simple.zip
-cd simple-0.6.1
-$env:PATH = "$PWD\bin;$env:PATH"
 simple --version
 ```
 
-**Note:** The runtime is pre-compiled for performance, but the entire language implementation (compiler, stdlib, tools) is in Simple source code that you can read and modify!
+For an existing checkout:
+
+```bash
+git submodule sync --recursive
+git submodule update --init --recursive
+```
+
+**Note:** Rust remains present as the bootstrap seed and host substrate. Product
+compiler, library, and tool work should stay in Simple source wherever the repo
+can express it; do not read "pure Simple" as "there is no Rust source in this
+checkout" today.
 
 ### Source Footprint
 
@@ -141,10 +130,6 @@ Snapshot generated 2026-04-23 from existing tracked `.spl`, `.rs`, `.c`, `.h`, `
 Only needed if you want to modify the runtime:
 
 ```bash
-git clone https://github.com/simple-lang/simple.git
-cd simple
-
-# Linux bootstrap verification
 scripts/setup/setup.shs
 bin/simple build bootstrap
 ```

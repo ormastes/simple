@@ -282,8 +282,8 @@ bounded implementation slices before deleting anything:
 
 ### Steps
 
-1. Read current version from `simple.sdn`
-2. Update 4 files: `simple.sdn`, `VERSION`, `main.spl`, `bootstrap_main.spl`
+1. Read current version from `VERSION`
+2. Update 3 version sources: `VERSION`, `src/app/cli/main_part1.spl`, `src/app/cli/bootstrap_main.spl`
 3. Update `CHANGELOG.md`
 4. Commit: `jj commit -m "chore: release vX.Y.Z"`
 5. Tag: `git tag -a vX.Y.Z -m "Release vX.Y.Z"`

@@ -31,7 +31,7 @@ bin/simple test --only-slow              # Slow tests only
 
 ## Release Process
 
-1. Update version in `simple.sdn`
+1. Update version in `VERSION`, `src/app/cli/main_part1.spl`, and `src/app/cli/bootstrap_main.spl`
 2. Update `CHANGELOG.md`
 3. Commit: `jj commit -m "chore: Release vX.Y.Z"`
 4. Tag: `git tag -a vX.Y.Z -m "Release vX.Y.Z"` (use git for tags)
@@ -52,7 +52,8 @@ bin/simple test --only-slow              # Slow tests only
 
 - [ ] All tests passing: `bin/simple test`
 - [ ] No lint warnings: `bin/simple build lint`
-- [ ] Version updated in `simple.sdn`
+- [ ] Version updated in all 3 version sources
+- [ ] `find doc/06_spec -name '*_spec.spl' | wc -l` returns `0`
 - [ ] CHANGELOG.md updated
 - [ ] Local build verified
 

@@ -5,7 +5,7 @@
 
 ## Key Rules
 
-- **100% Pure Simple** - No Rust. All code in `.spl` files.
+- **Simple-first product code** - Implement features in `.spl` wherever the repo can express them. Rust remains the bootstrap seed/runtime substrate; do not add Rust unless the task is explicitly seed/runtime work.
 - **Immutable by default:** `val x = 5` (preferred), `var x = 5` (when mutation needed)
 - **Implicit self:** Methods use `fn` (read-only) or `me` (mutable), self is implicit in signature but explicit in body (`self.field`)
 - **Static methods:** `static fn name()` - no self access
