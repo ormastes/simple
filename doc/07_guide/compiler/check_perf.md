@@ -151,7 +151,7 @@ profile-script comments.
 | Simple (native) | AOT (LLVM/Cranelift) | Shows AOT ceiling |
 | Simple `cooperative_green_spawn` / `cooperative_green_spawn_value` | Cooperative queue on current OS thread | Implemented green-thread API, but not CPU-parallel or preemptive |
 | Simple `multicore_green_spawn` | Bounded runtime worker pool through `rt_pool_*` | Current Pure Simple M:N candidate row for CPU-heavy comparisons; profile workloads set and print hosted parallelism plus a fail-closed `queue_model=work_stealing` marker and fail if `used_runtime_pool()` is false |
-| Simple `task_spawn` | Runtime worker pool when `rt_pool_*` links | Intended Simple path for Go-like parallel benchmark work |
+| Simple `task_spawn` | Runtime worker pool when `rt_pool_*` links | Lower-level pool-backed task API with focused API/native evidence; not the named cross-language M:N profile row |
 | C (gcc -O2) | AOT native | Absolute performance floor |
 | Go | AOT + goroutines | Low-overhead concurrency |
 | Python | CPython bytecode | Common scripting baseline |

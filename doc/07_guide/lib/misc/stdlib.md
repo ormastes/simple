@@ -156,7 +156,7 @@ for `fiber` or scheduler runtime terms can miss the implemented stdlib module.
 | Schedule lightweight cooperative work | `std.concurrent.cooperative_green.{cooperative_green_spawn, cooperative_green_spawn_value, cooperative_green_run_one, cooperative_green_run_all}` | `src/lib/nogc_async_mut/concurrent/cooperative_green.spl` over `green_thread.spl` | Runs queued work/results on the current OS thread; no preemption or CPU parallelism |
 | Coordinate logical green tasks | `std.concurrent.green_channel.{green_channel_new, green_channel_recv, green_channel_send}` | `src/lib/nogc_async_mut/concurrent/green_channel.spl` | Pure Simple nonblocking channel contract; empty recv parks a logical green task, send unparks a waiter, bounded full send reports backpressure |
 | Schedule bounded CPU-parallel value work | `std.concurrent.multicore_green.{multicore_green_spawn, multicore_green_set_parallelism, multicore_green_parallelism}` / `MulticoreGreenHandle.used_runtime_pool()` | `src/lib/nogc_async_mut/concurrent/multicore_green.spl` | Pure Simple facade over `rt_pool_submit` / `rt_pool_join` / `rt_pool_is_done`; profile rows require runtime-pool acceptance and treat inline fallback as non-M:N. Set parallelism before the first spawn for a Go `GOMAXPROCS`-like hosted pool limit; live pools can grow but do not claim shrink/preemption behavior yet. |
-| Reuse a worker pool | `task_spawn` / `TaskHandle` | `src/lib/nogc_async_mut/thread_pool.spl` | Native path uses `rt_pool_submit`, `rt_pool_join`, and `rt_pool_is_done` when linked |
+| Reuse a worker pool | `task_spawn` / `TaskHandle` | `src/lib/nogc_async_mut/thread_pool.spl` | Lower-level pool-backed task API. Native path uses `rt_pool_submit`, `rt_pool_join`, and `rt_pool_is_done` when linked; current cross-language M:N profile rows use `multicore_green_spawn` so profile evidence stays tied to `used_runtime_pool()`. |
 | Send values between concurrent work | `std.concurrent.channel.{channel_new, channel_from_id}` | `src/lib/nogc_sync_mut/concurrent/channel.spl` | Runtime MPMC channel surface |
 
 ### Green Thread Example
@@ -178,9 +178,10 @@ low-overhead queued work, but it is not a Go-goroutine equivalent. It does not
 run tasks in parallel and cannot preempt a long-running closure. Use
 `cooperative_green_spawn_value` when testing the queue path from direct
 interpreter/SMF perf scripts without relying on function-value calls. For
-Go-like CPU-parallel benchmarks, use
-`multicore_green_spawn`, the lower-level pool-backed `task_spawn` path, or future
-scheduler-aware green-thread work.
+Go-like CPU-parallel benchmarks, use `multicore_green_spawn` as the current
+profile row. Use the lower-level pool-backed `task_spawn` path only when the
+test explicitly targets the task API itself, or use future scheduler-aware
+green-thread work when that lands.
 
 ### Multicore Green Example
 
