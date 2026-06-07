@@ -437,7 +437,7 @@ expect(shrunk.reason).to_equal("default_topology_limit")
 
 #### applies local enqueue into the carrier run queue without IPI
 
-1. smp init
+- smp init
    - Expected: applied.enqueued is true
    - Expected: applied.ipi_sent is false
    - Expected: applied.reason equals `queued_local`
@@ -470,8 +470,8 @@ expect(applied.queues.queued_task_ids[0]).to_equal(27)
 
 #### applies remote enqueue and records a SimpleOS reschedule IPI
 
-1. smp init
-2. smp bringup ap
+- smp init
+- smp bringup ap
    - Expected: applied.enqueued is true
    - Expected: applied.ipi_sent is true
    - Expected: applied.ipi_reason_mask equals `0x1u32`
@@ -504,7 +504,7 @@ expect(green_carrier_queue_depth(applied.queues, 1)).to_equal(1)
 
 #### does not mutate queues for non-enqueue decisions
 
-1. smp init
+- smp init
    - Expected: applied.enqueued is false
    - Expected: applied.queues.queued_task_ids.len() equals `0`
    - Expected: applied.reason equals `task_parked`
@@ -533,7 +533,7 @@ expect(applied.reason).to_equal("task_parked")
 
 #### rejects enqueue when the green carrier queue is full
 
-1. smp init
+- smp init
    - Expected: after_first.enqueued is true
    - Expected: after_second.enqueued is false
    - Expected: after_second.reason equals `queue_rejected`
@@ -568,7 +568,7 @@ expect(after_second.queues.queued_task_ids.len()).to_equal(1)
 
 #### dispatches queued green work for the requested carrier CPU
 
-1. smp init
+- smp init
    - Expected: dispatched.dispatched is true
    - Expected: dispatched.task_id equals `32`
    - Expected: dispatched.cpu equals `1`
@@ -602,7 +602,7 @@ expect(dispatched.queues.queued_task_ids.len()).to_equal(0)
 
 #### preserves queued work for other carrier CPUs
 
-1. smp init
+- smp init
    - Expected: dispatched.dispatched is true
    - Expected: dispatched.task_id equals `33`
    - Expected: green_carrier_queue_depth(dispatched.queues, 1) equals `0`
@@ -677,7 +677,7 @@ expect(dispatched.reason).to_equal("invalid_cpu")
 
 #### preserves queued work when carrier is inactive
 
-1. smp init
+- smp init
    - Expected: dispatched.dispatched is false
    - Expected: dispatched.task_id equals `-1`
    - Expected: dispatched.cpu equals `1`
@@ -715,7 +715,7 @@ expect(dispatched.queues.queued_task_ids[0]).to_equal(36)
 
 #### moves queued work from inactive carrier to active carrier
 
-1. smp init
+- smp init
    - Expected: moved.moved is true
    - Expected: moved.task_id equals `37`
    - Expected: moved.reason equals `moved_to_active_carrier`
@@ -752,7 +752,7 @@ expect(dispatched.task_id).to_equal(37)
 
 #### applies green-worker rebalance decisions to carrier queues
 
-1. smp init
+- smp init
    - Expected: rebalance.should_move is true
    - Expected: moved.moved is true
    - Expected: moved.from_cpu equals `1`
@@ -787,7 +787,7 @@ expect(green_carrier_queue_depth(moved.queues, 0)).to_equal(1)
 
 #### does not move queued work to inactive target carrier
 
-1. smp init
+- smp init
    - Expected: moved.moved is false
    - Expected: moved.reason equals `target_inactive`
    - Expected: green_carrier_queue_depth(moved.queues, 1) equals `1`
@@ -819,7 +819,7 @@ expect(green_carrier_queue_depth(moved.queues, 2)).to_equal(0)
 
 #### converts successful dispatch into a typed scheduler run intent
 
-1. smp init
+- smp init
    - Expected: intent.should_run is true
    - Expected: intent.should_context_switch is true
    - Expected: intent.task.id equals `35`
@@ -876,8 +876,8 @@ expect(intent.reason).to_equal("queue_empty")
 
 #### extends execution state for additional carrier CPUs
 
-1. green carrier run queues new
-2. green carrier spawn task
+- green carrier run queues new
+- green carrier spawn task
    - Expected: applied.applied is true
    - Expected: green_carrier_current_task_on_cpu(applied.state, 3) equals `39`
    - Expected: green_carrier_context_switches_on_cpu(applied.state, 3) equals `1`
@@ -912,7 +912,7 @@ expect(green_carrier_context_switches_on_cpu(applied.state, 3)).to_equal(1)
 
 #### records current green task and switch count for scheduler intent
 
-1. smp init
+- smp init
    - Expected: applied.applied is true
    - Expected: applied.reason equals `context_switch_recorded`
    - Expected: green_carrier_current_task_on_cpu(applied.state, 1) equals `36`
@@ -973,7 +973,7 @@ expect(applied.state.rejected_intents).to_equal(1)
 
 #### keeps execution state isolated per carrier CPU
 
-1. smp init
+- smp init
    - Expected: green_carrier_current_task_on_cpu(apply2.state, 1) equals `37`
    - Expected: green_carrier_current_task_on_cpu(apply2.state, 2) equals `38`
    - Expected: green_carrier_context_switches_on_cpu(apply2.state, 1) equals `1`
@@ -1030,8 +1030,8 @@ expect(fixed_cpu).to_equal(hosted.target_cpu)
 
 #### records remote AP dispatch through the SimpleOS IPI surface
 
-1. smp init
-2. smp bringup ap
+- smp init
+- smp bringup ap
    - Expected: result.target_cpu equals `1`
    - Expected: result.enqueued is true
    - Expected: result.ipi_sent is true

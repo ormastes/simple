@@ -84,7 +84,7 @@ expect(sched.green_carrier_parallelism_reason()).to_equal("default_topology_limi
 
 #### clamps requested carriers to scheduler topology
 
-1. var sched = Scheduler new with cpu count
+- var sched = Scheduler new with cpu count
    - Expected: state.requested_limit equals `99`
    - Expected: state.active_limit equals `4`
    - Expected: state.reason equals `clamped_topology`
@@ -115,7 +115,7 @@ expect(sched.green_carrier_parallelism_reason()).to_equal("clamped_topology")
 
 #### clamps zero or negative requested carriers through scheduler API
 
-1. var sched = Scheduler new with cpu count
+- var sched = Scheduler new with cpu count
    - Expected: zero.requested_limit equals `0`
    - Expected: zero.active_limit equals `1`
    - Expected: zero.reason equals `clamped_min`
@@ -151,13 +151,13 @@ expect(sched.green_carrier_parallelism_limit()).to_equal(1)
 
 #### keeps requested carriers across topology changes
 
-1. var sched = Scheduler new with cpu count
-2. sched set green carrier parallelism
-3. sched set topology
+- var sched = Scheduler new with cpu count
+- sched set green carrier parallelism
+- sched set topology
    - Expected: sched.green_carrier_parallelism_requested() equals `4`
    - Expected: sched.green_carrier_parallelism_limit() equals `4`
    - Expected: sched.green_carrier_parallelism_reason() equals `requested_limit`
-4. sched set topology
+- sched set topology
    - Expected: sched.green_carrier_parallelism_requested() equals `4`
    - Expected: sched.green_carrier_parallelism_limit() equals `1`
    - Expected: sched.green_carrier_parallelism_reason() equals `clamped_topology`
@@ -189,8 +189,8 @@ expect(sched.green_carrier_parallelism_reason()).to_equal("clamped_topology")
 
 #### keeps default carrier parallelism aligned to topology growth
 
-1. var sched = Scheduler new bootstrap
-2. sched set topology
+- var sched = Scheduler new bootstrap
+- sched set topology
    - Expected: sched.green_carrier_parallelism_requested() equals `4`
    - Expected: sched.green_carrier_parallelism_limit() equals `4`
    - Expected: sched.green_carrier_parallelism_reason() equals `default_topology_limit`
@@ -215,8 +215,8 @@ expect(sched.green_carrier_parallelism_reason()).to_equal("default_topology_limi
 
 #### runs green dispatch on carriers activated by topology growth
 
-1. var sched = Scheduler new bootstrap
-2. sched set topology
+- var sched = Scheduler new bootstrap
+- sched set topology
    - Expected: result.applied is true
    - Expected: result.reason equals `context_switch_recorded`
    - Expected: sched.green_current_task_on_cpu(3u32) equals `52`
@@ -248,8 +248,8 @@ expect(sched.green_rejected_intents()).to_equal(0)
 
 #### rejects green dispatch on inactive carriers
 
-1. var sched = Scheduler new with cpu count
-2. sched set green carrier parallelism
+- var sched = Scheduler new with cpu count
+- sched set green carrier parallelism
    - Expected: result.applied is false
    - Expected: result.reason equals `inactive_green_carrier`
    - Expected: dispatched.queues.queued_task_ids.len() equals `1`
@@ -285,8 +285,8 @@ expect(sched.green_rejected_intents()).to_equal(1)
 
 #### runs rebalanced inactive-carrier work on active carrier
 
-1. var sched = Scheduler new with cpu count
-2. sched set green carrier parallelism
+- var sched = Scheduler new with cpu count
+- sched set green carrier parallelism
    - Expected: moved.moved is true
    - Expected: dispatched.task_id equals `53`
    - Expected: result.applied is true
@@ -322,8 +322,8 @@ expect(sched.green_rejected_intents()).to_equal(0)
 
 #### computes rebalance from carrier queue depths
 
-1. var sched = Scheduler new with cpu count
-2. sched set green carrier parallelism
+- var sched = Scheduler new with cpu count
+- sched set green carrier parallelism
    - Expected: moved.moved is true
    - Expected: moved.from_cpu equals `1`
    - Expected: moved.to_cpu equals `0`
@@ -358,8 +358,8 @@ expect(sched.green_current_task_on_cpu(0u32)).to_equal(54)
 
 #### drains inactive carrier queues with bounded repeated rebalance
 
-1. var sched = Scheduler new with cpu count
-2. sched set green carrier parallelism
+- var sched = Scheduler new with cpu count
+- sched set green carrier parallelism
    - Expected: pass_result.moved_workers equals `2`
    - Expected: pass_result.reason equals `inactive_sources_drained`
    - Expected: green_carrier_queue_depth(pass_result.queues, 1) equals `0`
@@ -398,8 +398,8 @@ expect(dispatch2.task_id).to_equal(56)
 
 #### honors repeated rebalance move budget
 
-1. var sched = Scheduler new with cpu count
-2. sched set green carrier parallelism
+- var sched = Scheduler new with cpu count
+- sched set green carrier parallelism
    - Expected: pass_result.moved_workers equals `1`
    - Expected: pass_result.reason equals `move_budget_exhausted`
    - Expected: green_carrier_queue_depth(pass_result.queues, 0) equals `1`
@@ -432,8 +432,8 @@ expect(green_carrier_queue_depth(pass_result.queues, 1)).to_equal(1)
 
 #### runs one active green carrier step through scheduler
 
-1. var sched = Scheduler new with cpu count
-2. sched set green carrier parallelism
+- var sched = Scheduler new with cpu count
+- sched set green carrier parallelism
    - Expected: step.ran is true
    - Expected: step.dispatch.task_id equals `59`
    - Expected: step.execution.applied is true
@@ -469,8 +469,8 @@ expect(green_carrier_queue_depth(step.queues, 0)).to_equal(0)
 
 #### keeps queued work when scheduler run step targets inactive carrier
 
-1. var sched = Scheduler new with cpu count
-2. sched set green carrier parallelism
+- var sched = Scheduler new with cpu count
+- sched set green carrier parallelism
    - Expected: step.ran is false
    - Expected: step.reason equals `inactive_green_carrier`
    - Expected: green_carrier_queue_depth(step.queues, 1) equals `1`
@@ -501,8 +501,8 @@ expect(sched.green_current_task_on_cpu(1u32)).to_equal(0)
 
 #### runs one bounded active carrier pass across active workers
 
-1. var sched = Scheduler new with cpu count
-2. sched set green carrier parallelism
+- var sched = Scheduler new with cpu count
+- sched set green carrier parallelism
    - Expected: pass_result.ran_workers equals `2`
    - Expected: pass_result.attempted_carriers equals `2`
    - Expected: pass_result.last_cpu equals `1`
@@ -547,8 +547,8 @@ expect(green_carrier_queue_depth(pass_result.queues, 1)).to_equal(0)
 
 #### rebalances inactive work before bounded active carrier pass
 
-1. var sched = Scheduler new with cpu count
-2. sched set green carrier parallelism
+- var sched = Scheduler new with cpu count
+- sched set green carrier parallelism
    - Expected: pass_result.rebalance.moved_workers equals `1`
    - Expected: pass_result.rebalance.reason equals `move_budget_exhausted`
    - Expected: pass_result.ran_workers equals `1`
@@ -589,8 +589,8 @@ expect(green_carrier_queue_depth(pass_result.queues, 1)).to_equal(0)
 
 #### runs active carrier passes until queues become idle
 
-1. var sched = Scheduler new with cpu count
-2. sched set green carrier parallelism
+- var sched = Scheduler new with cpu count
+- sched set green carrier parallelism
    - Expected: loop_result.ran_passes equals `2`
    - Expected: loop_result.ran_workers equals `2`
    - Expected: loop_result.attempted_passes equals `3`
@@ -634,8 +634,8 @@ expect(green_carrier_queue_depth(loop_result.queues, 0)).to_equal(0)
 
 #### stops active carrier loop at explicit run budget
 
-1. var sched = Scheduler new with cpu count
-2. sched set green carrier parallelism
+- var sched = Scheduler new with cpu count
+- sched set green carrier parallelism
    - Expected: loop_result.ran_passes equals `1`
    - Expected: loop_result.ran_workers equals `1`
    - Expected: loop_result.attempted_passes equals `1`
@@ -677,8 +677,8 @@ expect(green_carrier_queue_depth(loop_result.queues, 0)).to_equal(1)
 
 #### yields current green task back to active carrier queue
 
-1. var sched = Scheduler new with cpu count
-2. sched set green carrier parallelism
+- var sched = Scheduler new with cpu count
+- sched set green carrier parallelism
    - Expected: first_pass.ran_workers equals `1`
    - Expected: yielded.yielded is true
    - Expected: yielded.task_id equals `68`
@@ -722,8 +722,8 @@ expect(green_carrier_queue_depth(second_pass.queues, 0)).to_equal(0)
 
 #### does not yield when active carrier has no current green task
 
-1. var sched = Scheduler new with cpu count
-2. sched set green carrier parallelism
+- var sched = Scheduler new with cpu count
+- sched set green carrier parallelism
    - Expected: yielded.yielded is false
    - Expected: yielded.task_id equals `0`
    - Expected: yielded.reason equals `no_current_green_task`
@@ -754,8 +754,8 @@ expect(sched.green_current_task_on_cpu(0u32)).to_equal(0)
 
 #### yields current green task when timer budget expires
 
-1. var sched = Scheduler new with cpu count
-2. sched set green carrier parallelism
+- var sched = Scheduler new with cpu count
+- sched set green carrier parallelism
    - Expected: first_pass.ran_workers equals `1`
    - Expected: tick1.yielded is false
    - Expected: tick1.reason equals `time_slice_running`
@@ -805,8 +805,8 @@ expect(sched.green_ticks_remaining_on_cpu(0u32)).to_equal(2)
 
 #### does not tick-yield when carrier has no current green task
 
-1. var sched = Scheduler new with cpu count
-2. sched set green carrier parallelism
+- var sched = Scheduler new with cpu count
+- sched set green carrier parallelism
    - Expected: tick.yielded is false
    - Expected: tick.task_id equals `0`
    - Expected: tick.reason equals `no_current_green_task`
@@ -837,8 +837,8 @@ expect(sched.green_current_task_on_cpu(0u32)).to_equal(0)
 
 #### sweeps active green carriers and yields expired workers
 
-1. var sched = Scheduler new with cpu count
-2. sched set green carrier parallelism
+- var sched = Scheduler new with cpu count
+- sched set green carrier parallelism
    - Expected: pass_result.ran_workers equals `2`
    - Expected: sweep1.ticked_carriers equals `2`
    - Expected: sweep1.yielded_workers equals `0`
@@ -895,8 +895,8 @@ expect(sched.green_current_task_on_cpu(1u32)).to_equal(0)
 
 #### does not sweep inactive green carriers
 
-1. var sched = Scheduler new with cpu count
-2. sched set green carrier parallelism
+- var sched = Scheduler new with cpu count
+- sched set green carrier parallelism
    - Expected: pass_result.ran_workers equals `1`
    - Expected: sweep1.ticked_carriers equals `1`
    - Expected: sweep2.ticked_carriers equals `1`
@@ -941,8 +941,8 @@ expect(sched.green_current_task_on_cpu(1u32)).to_equal(0)
 
 #### routes timer interrupt preemption through active carrier sweep
 
-1. var sched = Scheduler new with cpu count
-2. sched set green carrier parallelism
+- var sched = Scheduler new with cpu count
+- sched set green carrier parallelism
    - Expected: sweep1.accepted is true
    - Expected: sweep1.source equals `timer_interrupt`
    - Expected: sweep1.preemption_requested is false
@@ -995,8 +995,8 @@ expect(sched.green_current_task_on_cpu(1u32)).to_equal(0)
 
 #### routes hardware timer vector through green preemption port
 
-1. var sched = Scheduler new with cpu count
-2. sched set green carrier parallelism
+- var sched = Scheduler new with cpu count
+- sched set green carrier parallelism
    - Expected: interrupt1.vector equals `VEC_TIMER`
    - Expected: interrupt1.source equals `timer_interrupt`
    - Expected: interrupt1.accepted is true
@@ -1049,8 +1049,8 @@ expect(sched.green_current_task_on_cpu(0u32)).to_equal(0)
 
 #### accepts compiler safepoint preemption without numbered API names
 
-1. var sched = Scheduler new with cpu count
-2. sched set green carrier parallelism
+- var sched = Scheduler new with cpu count
+- sched set green carrier parallelism
    - Expected: compiler_tick.accepted is true
    - Expected: compiler_tick.source equals `compiler_safepoint`
    - Expected: compiler_tick.ticked_carriers equals `1`
@@ -1086,8 +1086,8 @@ expect(sched.green_current_task_on_cpu(0u32)).to_equal(76)
 
 #### routes runtime safepoint polling through named green adapter
 
-1. var sched = Scheduler new with cpu count
-2. sched set green carrier parallelism
+- var sched = Scheduler new with cpu count
+- sched set green carrier parallelism
    - Expected: runtime_poll.accepted is true
    - Expected: runtime_poll.source equals `runtime_safepoint`
    - Expected: runtime_poll.preemption_requested is false
@@ -1125,8 +1125,8 @@ expect(sched.green_current_task_on_cpu(0u32)).to_equal(79)
 
 #### routes compiler safepoint through named green adapter
 
-1. var sched = Scheduler new with cpu count
-2. sched set green carrier parallelism
+- var sched = Scheduler new with cpu count
+- sched set green carrier parallelism
    - Expected: compiler_poll1.accepted is true
    - Expected: compiler_poll1.source equals `compiler_safepoint`
    - Expected: compiler_poll1.preemption_requested is false
@@ -1171,8 +1171,8 @@ expect(sched.green_current_task_on_cpu(0u32)).to_equal(0)
 
 #### rejects unknown green preemption source without mutating carriers
 
-1. var sched = Scheduler new with cpu count
-2. sched set green carrier parallelism
+- var sched = Scheduler new with cpu count
+- sched set green carrier parallelism
    - Expected: rejected.accepted is false
    - Expected: rejected.source equals `unknown_source`
    - Expected: rejected.preemption_requested is false

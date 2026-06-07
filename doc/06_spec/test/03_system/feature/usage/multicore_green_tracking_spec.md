@@ -282,7 +282,7 @@ expect(row).to_contain("doc/05_design/multicore_green.md")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -293,6 +293,7 @@ expect(row).to_contain("test/03_system/os/simpleos/feature/simpleos_cooperative_
 expect(row).to_contain("test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl")
 expect(row).to_contain("test/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.spl")
 expect(row).to_contain("test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl")
+expect(row).to_contain("doc/09_report/simpleos_multicore_green_evidence_2026-06-07.md")
 step("Verify profile stress specs are linked")
 expect(row).to_contain("test/05_perf/stress/multicore_green_cross_language_gate_spec.spl")
 expect(row).to_contain("test/05_perf/stress/multicore_green_fanout_spec.spl")

@@ -117,15 +117,15 @@ _Live green-carrier validation, disabled unless SIMPLEOS_GREEN_CARRIER_QEMU_LIVE
 
 #### boots two CPUs and dispatches green work through the scheduler-owned AP carrier
 
-1. Skip the live QEMU lane unless SIMPLEOS_GREEN_CARRIER_QEMU_LIVE is enabled
+- Skip the live QEMU lane unless SIMPLEOS_GREEN_CARRIER_QEMU_LIVE is enabled
    - Expected: _enabled() is false
-2. Skip live QEMU execution on hosts without qemu-system-x86_64
+- Skip live QEMU execution on hosts without qemu-system-x86_64
    - Expected: _qemu_available() is false
-3. Build the SimpleOS green carrier guest probe
+- Build the SimpleOS green carrier guest probe
    - Expected: built is true
-4. Boot the two-CPU guest probe under QEMU
-5.  print probe debug
-6. Verify AP startup and all green carrier proof markers
+- Boot the two-CPU guest probe under QEMU
+-  print probe debug
+- Verify AP startup and all green carrier proof markers
    - Expected: serial contains `AP_ONLINE_MARKER`
    - Expected: serial contains `GREEN_PASS_MARKER`
    - Expected: serial contains `GREEN_PREEMPT_MARKER`

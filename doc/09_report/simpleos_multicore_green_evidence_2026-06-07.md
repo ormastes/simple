@@ -39,6 +39,24 @@ SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 ./src/compiler_rust/target/debug/simple test 
 | SimpleOS green-carrier QEMU spec default lane | PASS | 1 |
 | SimpleOS green-carrier QEMU live lane | PASS | 1 |
 
+## Current Refresh
+
+After syncing `/tmp/simple-pherallel-sync` to `origin/main` at `45f46b0f6d`,
+the non-live SimpleOS green-thread loop was rerun with `--clean` on
+2026-06-07. The direct rerun passed:
+
+- cooperative green system contract: 3 assertions
+- multicore green scheduler contract: 6 assertions
+- green-channel wake bridge: 4 assertions
+- green-carrier compile check: 1 file
+- green-carrier unit contract: 38 assertions
+- scheduler compile check: 1 file
+- scheduler green-carrier parallelism: 29 assertions
+- QEMU default gate lane: 1 assertion
+
+The live-QEMU row above remains the previously recorded opt-in run. This refresh
+does not newly claim final ring/user context-switch handoff across APs.
+
 ## Notes
 
 - The default QEMU spec lane proves the opt-in gate is wired and disabled unless
