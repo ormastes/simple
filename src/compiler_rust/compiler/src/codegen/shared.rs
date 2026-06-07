@@ -355,6 +355,8 @@ mod tests {
         let meta = outlined.outlined_bodies.get(&body_block).unwrap();
         assert!(meta.is_lambda);
         assert_eq!(meta.lambda_capture_local_indices, vec![2, 3]);
+        let local_names: Vec<_> = outlined.locals.iter().map(|local| local.name.as_str()).collect();
+        assert_eq!(local_names, vec!["seed_local", "$lambda_capture_0", "$lambda_capture_1"]);
 
         let local_indices: Vec<_> = outlined
             .block(body_block)
@@ -612,11 +614,21 @@ fn rewrite_lambda_local_indices(
         .map(|(i, param)| (param.local_index, i + 1))
         .collect();
     let new_param_count = lambda_params.len() + 1;
+    let original_local_count = outlined.locals.len();
     let capture_map: HashMap<usize, usize> = capture_local_indices
         .iter()
         .enumerate()
-        .map(|(i, local_index)| (*local_index, new_param_count + outlined.locals.len() + i))
+        .map(|(i, local_index)| (*local_index, new_param_count + original_local_count + i))
         .collect();
+
+    for (i, _local_index) in capture_local_indices.iter().enumerate() {
+        outlined.locals.push(MirLocal {
+            name: format!("$lambda_capture_{i}"),
+            ty: crate::hir::TypeId::I64,
+            kind: LocalKind::Local,
+            is_ghost: false,
+        });
+    }
 
     for block in &mut outlined.blocks {
         for inst in &mut block.instructions {

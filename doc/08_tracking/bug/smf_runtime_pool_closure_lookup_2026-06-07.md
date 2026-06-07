@@ -2,13 +2,14 @@
 
 ## Summary
 
-SMF multicore-green workloads can resolve
+SMF multicore-green workloads previously resolved
 `multicore_green_set_parallelism` / `multicore_green_parallelism`, but native
-runtime-pool worker threads cannot look up the submitted SMF worker function.
-The run prints `function not found: worker` from `rt_interp_call` and exits by
-segfault.
+runtime-pool worker threads could not look up the submitted worker function.
+This is fixed for the current hosted profile path.
 
 ## Evidence
+
+### Original Failure
 
 ```text
 multicore_green_parallelism = 64/64
@@ -16,15 +17,20 @@ rt_interp_call: function not found: worker
 Segmentation fault
 ```
 
-## Impact
+### Fixed Evidence
 
-SMF multicore-green rows must be classified as
-`SMF runtime-pool closure lookup blocker` and must not be used as Go-like M:N
-evidence. Native multicore-green rows remain the hosted evidence path and still
-must provide `pool_used=N/N` plus `parallelism=requested/actual`.
+`SIMPLE_BINARY=./src/compiler_rust/target/debug/simple RUNS=1
+REPORT_PATH=doc/09_report/cross_language_perf_parallel_smoke.md sh
+scripts/check/check-cross-language-perf.shs` now reports
+`profile_report_contract=true` and includes valid SMF multicore-green rows:
 
-## Required Fix
+- Parallel: `pool_used=100/100`, `parallelism=64/64`.
+- Fanout: `pool_used=1000/1000`, `parallelism=64/64`.
 
-Make SMF runtime-pool worker threads resolve submitted closure entry functions
-from the SMF module context, or reject the pool submission before worker threads
-start so the Simple facade can fall back without crashing.
+## Resolution
+
+Outlined lambda capture materialization now gives runtime-pool closures a stable
+heap closure record and hydrated capture locals, so SMF-submitted pool tasks can
+run through the same evidence gate as native tasks. The profile-report contract
+now rejects SMF multicore-green failure rows instead of accepting this blocker
+classification.

@@ -1183,15 +1183,34 @@ impl CodegenEmitter for LlvmEmitter<'_> {
     ) -> Result<(), String> {
         let i8_type = self.backend.context_ref().i8_type();
         let i8_ptr_type = self.backend.context_ref().ptr_type(inkwell::AddressSpace::default());
-        let array_type = i8_type.array_type(closure_size as u32);
-        let alloc = self
+        // Closures can escape the creator via runtime pool/thread APIs. Heap
+        // allocation keeps captures stable after the creating frame advances.
+        let i64_type = self.backend.runtime_int_type();
+        let alloc_fn_type = i8_ptr_type.fn_type(&[i64_type.into()], false);
+        let alloc_fn = self
+            .module
+            .get_function("rt_alloc")
+            .unwrap_or_else(|| self.module.add_function("rt_alloc", alloc_fn_type, None));
+        let size_val = i64_type.const_int(closure_size as u64, false);
+        let alloc_call = self
             .builder
-            .build_alloca(array_type, "closure")
-            .map_err(|e| format!("alloca failed: {}", e))?;
-        let closure_ptr = self
-            .builder
-            .build_pointer_cast(alloc, i8_ptr_type, "closure_ptr")
-            .map_err(|e| format!("cast failed: {}", e))?;
+            .build_call(alloc_fn, &[size_val.into()], "closure_alloc")
+            .map_err(|e| format!("rt_alloc call failed: {}", e))?;
+        let alloc_value = alloc_call
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| "rt_alloc did not return a value".to_string())?;
+        let closure_ptr = match alloc_value {
+            BasicValueEnum::PointerValue(ptr) => self
+                .builder
+                .build_pointer_cast(ptr, i8_ptr_type, "closure_ptr")
+                .map_err(|e| format!("cast failed: {}", e))?,
+            BasicValueEnum::IntValue(iv) => self
+                .builder
+                .build_int_to_ptr(iv, i8_ptr_type, "closure_ptr")
+                .map_err(|e| format!("int_to_ptr failed: {}", e))?,
+            _ => return Err("rt_alloc returned unsupported value kind".to_string()),
+        };
 
         // Store function pointer at offset 0
         let func_ptr = self

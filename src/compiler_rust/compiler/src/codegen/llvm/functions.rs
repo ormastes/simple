@@ -443,6 +443,58 @@ impl LlvmBackend {
                     }
                 }
             }
+
+            if let Some(meta) = func
+                .outlined_bodies
+                .values()
+                .find(|meta| meta.is_lambda && !meta.lambda_capture_local_indices.is_empty())
+            {
+                if let Some(ctx_param) = function.get_nth_param(0) {
+                    let i8_type = self.context_ref().i8_type();
+                    let i8_ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
+                    let i64_type = self.runtime_int_type();
+                    let ctx_ptr = match ctx_param {
+                        inkwell::values::BasicValueEnum::PointerValue(ptr) => builder
+                            .build_pointer_cast(ptr, i8_ptr_type, "lambda_ctx_ptr")
+                            .map_err(|e| crate::error::factory::llvm_cast_failed("cast lambda ctx", &e))?,
+                        inkwell::values::BasicValueEnum::IntValue(iv) => builder
+                            .build_int_to_ptr(iv, i8_ptr_type, "lambda_ctx_ptr")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("lambda ctx int_to_ptr", &e))?,
+                        _ => {
+                            return Err(crate::error::factory::llvm_build_failed(
+                                "lambda ctx",
+                                &"unsupported ctx parameter kind",
+                            ))
+                        }
+                    };
+
+                    for (capture_index, local_index) in meta.lambda_capture_local_indices.iter().enumerate() {
+                        let Some(&alloca) = local_allocas.get(local_index) else {
+                            continue;
+                        };
+                        let offset = 8 + (capture_index as u64 * 8);
+                        let offset_val = self.context_ref().i32_type().const_int(offset, false);
+                        let field_ptr = unsafe {
+                            builder
+                                .build_gep(i8_type, ctx_ptr, &[offset_val], "lambda_capture_ptr")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("lambda capture gep", &e))?
+                        };
+                        let typed_ptr = builder
+                            .build_pointer_cast(
+                                field_ptr,
+                                self.context_ref().ptr_type(inkwell::AddressSpace::default()),
+                                "lambda_capture_typed_ptr",
+                            )
+                            .map_err(|e| crate::error::factory::llvm_cast_failed("cast lambda capture ptr", &e))?;
+                        let loaded = builder
+                            .build_load(i64_type, typed_ptr, "lambda_capture")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("load lambda capture", &e))?;
+                        builder
+                            .build_store(alloca, loaded)
+                            .map_err(|e| crate::error::factory::llvm_build_failed("store lambda capture", &e))?;
+                    }
+                }
+            }
         }
 
         // Map function parameters to virtual registers

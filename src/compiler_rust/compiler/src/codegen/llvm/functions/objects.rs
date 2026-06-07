@@ -200,13 +200,36 @@ impl LlvmBackend {
     ) -> Result<(), CompileError> {
         let i8_type = self.context_ref().i8_type();
         let i8_ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
-        let array_type = i8_type.array_type(closure_size);
-        let alloc = builder
-            .build_alloca(array_type, "closure")
-            .map_err(|e| crate::error::factory::llvm_build_failed("alloca", &e))?;
-        let closure_ptr = builder
-            .build_pointer_cast(alloc, i8_ptr_type, "closure_ptr")
-            .map_err(|e| crate::error::factory::llvm_cast_failed("cast closure ptr", &e))?;
+        // Closures can escape the creating stack frame through runtime pool and
+        // thread APIs. Allocate them on the runtime heap so captured values stay
+        // stable after the loop iteration or function call that created them.
+        let i64_type = self.runtime_int_type();
+        let alloc_fn_type = i8_ptr_type.fn_type(&[i64_type.into()], false);
+        let alloc_fn = module
+            .get_function("rt_alloc")
+            .unwrap_or_else(|| module.add_function("rt_alloc", alloc_fn_type, None));
+        let size_val = i64_type.const_int(closure_size as u64, false);
+        let alloc_call = builder
+            .build_call(alloc_fn, &[size_val.into()], "closure_alloc")
+            .map_err(|e| crate::error::factory::llvm_build_failed("rt_alloc call", &e))?;
+        let alloc_value = alloc_call
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| crate::error::factory::llvm_build_failed("rt_alloc result", &"missing return value"))?;
+        let closure_ptr = match alloc_value {
+            inkwell::values::BasicValueEnum::PointerValue(ptr) => builder
+                .build_pointer_cast(ptr, i8_ptr_type, "closure_ptr")
+                .map_err(|e| crate::error::factory::llvm_cast_failed("cast closure ptr", &e))?,
+            inkwell::values::BasicValueEnum::IntValue(iv) => builder
+                .build_int_to_ptr(iv, i8_ptr_type, "closure_ptr")
+                .map_err(|e| crate::error::factory::llvm_build_failed("int_to_ptr", &e))?,
+            _ => {
+                return Err(crate::error::factory::llvm_build_failed(
+                    "rt_alloc result",
+                    &"unsupported return value kind",
+                ))
+            }
+        };
 
         let func_ptr = module
             .get_function(func_name)
