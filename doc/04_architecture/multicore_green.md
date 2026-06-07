@@ -158,6 +158,8 @@ claiming tight-loop fairness comparable to Go.
 
 - `thread_spawn_with_args` native explicit-argument ABI remains tracked as a
   blocker, so profile OS-thread rows use `thread_spawn`.
-- SMF cooperative-green and SMF multicore-green fanout blockers remain
-  classified separately from native M:N evidence.
+- SMF multicore-green fanout now participates in the same pool-evidence gate as
+  native multicore-green. SMF failure classifications remain diagnostic only
+  and are rejected by the profile contract when a checked report is used as
+  M:N evidence.
 - SimpleOS QEMU proof does not yet prove final hardware context-switch handoff.

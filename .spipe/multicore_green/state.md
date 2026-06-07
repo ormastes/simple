@@ -44,6 +44,9 @@ dev-done
   `multicore_green_set_parallelism` / `multicore_green_parallelism` and
   `rt_pool_set_parallelism` / `rt_pool_get_parallelism`; profile rows now
   require `parallelism=requested/actual` evidence in addition to `pool_used`.
+- verification: Re-ran SimpleOS cooperative green, multicore green scheduler,
+  green-channel wake, default QEMU gate, and live QEMU green-carrier proof with
+  the rebuilt compiler; live QEMU passed in 40469ms.
 
 ## Completion Audit - 2026-06-07
 

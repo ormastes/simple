@@ -131,8 +131,8 @@ drifting silently.
   replacement names.
 - `thread_spawn_with_args` stays documented as blocked for native profile use
   until its ABI bug is fixed.
-- Profile reports classify SMF failures as blockers, not as scheduling
-  timings.
+- Profile reports reject SMF multicore-green failure rows when used as checked
+  M:N evidence; diagnostic failure labels remain available for local triage.
 - Docs must not call cooperative green M:N.
 
 ## Verification Design
