@@ -385,6 +385,8 @@ the normal `FontRenderer`/`CachedGlyph` path can consume backend pixels without
 changing app code. Draw IR checks the shared glyph cache before that backend
 probe, so repeated single-glyph labels do not relaunch bitmap glyph evidence or
 clear rendered text payload cache entries once the glyph/font-size is cached.
+Full text-buffer cache hits also skip repeated generated glyph staging/evidence
+and expose that count on the Draw IR result.
 Multi-glyph backend batching remains a separate expansion.
 Returned-glyph readback probes for both vector and bitmap fonts must support a
 bounded multi-slot batch (`0..7`) so backend launches can return more than one

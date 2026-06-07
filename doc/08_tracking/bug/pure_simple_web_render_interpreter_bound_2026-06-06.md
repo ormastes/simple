@@ -129,7 +129,7 @@ CPU-fallback reason with both glyph-return booleans false.
 by text/color/background/font size, so repeated identical labels skip glyph
 layout and text-buffer preparation entirely. Focused unit coverage renders two
 `A` text commands and asserts `font_text_cache_hits == 1`,
-`font_text_cache_misses == 1`, and
+`font_text_cache_misses == 1`, `font_generated_args_cache_skips == 1`, and
 `vector_font_accelerator_stats().attempts == 1`.
 
 2026-06-07 text-buffer cache index update: `TextBlitCache` now uses a hot entry

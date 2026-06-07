@@ -94,7 +94,8 @@ Host input
   succeeds.
 - Text glyph seeding: Draw IR can seed validated single-glyph bitmap readback
   pixels into `TextBlitCache` before normal `FontRenderer` rendering, then skip
-  repeat backend probes once the glyph/font-size is already cached.
+  repeat backend probes once the glyph/font-size is already cached. Full text
+  cache hits also skip repeat generated-glyph staging/evidence.
 - Font returned-glyph priority: vector and bitmap probes share the same
   `METAL`, `CUDA`, `ROCM`, `VULKAN`, `OPENCL` helper before CPU fallback.
 - Draw IR glyph evidence: `Engine2dDrawIrAdvResult` reports backend glyph

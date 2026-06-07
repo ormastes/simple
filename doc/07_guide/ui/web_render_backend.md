@@ -106,7 +106,9 @@ identical labels hit a hot cache entry before scanning the cache list, avoiding
 repeated glyph layout and blit preparation on common menu/list/status text.
 Non-adjacent repeated labels use the text-buffer bucket index before any
 fallback scan, so common GUI labels reused across separate windows or rows do
-not pay an O(cache-size) lookup on every occurrence.
+not pay an O(cache-size) lookup on every occurrence. When the full text payload
+is already cached, Draw IR also skips repeat generated glyph staging/evidence
+and reports the skip through `font_generated_args_cache_skips`.
 Inside `FontRenderer`, glyph-level caching also has a hot entry and bucket index,
 so repeated characters and recently used glyphs avoid a full glyph-cache scan
 before vector or bitmap fallback/offload evidence is consulted.

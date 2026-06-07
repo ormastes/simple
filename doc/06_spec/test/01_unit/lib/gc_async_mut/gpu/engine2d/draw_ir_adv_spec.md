@@ -88,9 +88,9 @@ replacement test framework.
 
 #### executes a Draw IR batch through the Simple2D advanced interface with embedding offsets
 
-1. var engine = Engine2D create with backend
-2. engine clear
-3. draw ir rect
+- var engine = Engine2D create with backend
+- engine clear
+- draw ir rect
    - Expected: semantic.check_exists("body").unwrap() is true
    - Expected: semantic.check_visible("body").unwrap() is true
    - Expected: body.kind equals `rect`
@@ -101,7 +101,7 @@ replacement test framework.
    - Expected: result.rendered_command_count equals `1`
    - Expected: result.skipped_command_count equals `0`
    - Expected: result.pixels[8 * 32 + 6] equals `RED`
-4. engine shutdown
+- engine shutdown
 
 
 <details>
@@ -141,16 +141,16 @@ engine.shutdown()
 
 #### executes a composed Draw IR scene in batch order
 
-1. var engine = Engine2D create with backend
-2. engine clear
-3. draw ir rect
-4. draw ir rect
+- var engine = Engine2D create with backend
+- engine clear
+- draw ir rect
+- draw ir rect
    - Expected: result.unit_id equals `wm-composite`
    - Expected: result.rendered_command_count equals `2`
    - Expected: result.skipped_command_count equals `0`
    - Expected: result.pixels[1 * 32 + 1] equals `RED`
    - Expected: result.pixels[8 * 32 + 7] equals `GREEN`
-5. engine shutdown
+- engine shutdown
 
 
 <details>
@@ -184,12 +184,12 @@ engine.shutdown()
 
 #### reports unsupported Draw IR commands without rendering them
 
-1. var engine = Engine2D create with backend
-2. engine clear
+- var engine = Engine2D create with backend
+- engine clear
    - Expected: result.rendered_command_count equals `0`
    - Expected: result.skipped_command_count equals `1`
    - Expected: result.pixels[1 * 16 + 1] equals `BG`
-3. engine shutdown
+- engine shutdown
 
 
 <details>
@@ -216,14 +216,14 @@ engine.shutdown()
 
 #### renders Draw IR text with command font metadata and vector-font evidence
 
-1. var engine = Engine2D create with backend
-2. engine clear
-3. border rect: draw ir no rect
-4. content rect: draw ir no rect
-5. hit rect: draw ir no rect
-6. clip rect: draw ir no rect
-7. draw ir style prop
-8. draw ir style prop
+- var engine = Engine2D create with backend
+- engine clear
+- border rect: draw ir no rect
+- content rect: draw ir no rect
+- hit rect: draw ir no rect
+- clip rect: draw ir no rect
+- draw ir style prop
+- draw ir style prop
    - Expected: result.rendered_command_count equals `1`
    - Expected: result.skipped_command_count equals `0`
    - Expected: result.text_command_count equals `1`
@@ -237,7 +237,7 @@ engine.shutdown()
    - Expected: result.font_backend_glyph_status equals `backend-not-opencl`
    - Expected: result.font_backend_glyph_reason equals `engine2d-generated-glyph-backend-not-opencl`
    - Expected: result.font_backend_glyph_readback is false
-9. engine shutdown
+- engine shutdown
 
 
 <details>
@@ -296,9 +296,9 @@ engine.shutdown()
 
 #### packs generated glyph args for GPU-routed Draw IR text without claiming readback
 
-1. var engine = Engine2D create with backend
-2. engine clear
-3.  draw ir text command
+- var engine = Engine2D create with backend
+- engine clear
+-  draw ir text command
    - Expected: result.rendered_command_count equals `1`
    - Expected: result.text_command_count equals `1`
    - Expected: result.font_generated_args_ready is true
@@ -308,7 +308,7 @@ engine.shutdown()
    - Expected: result.font_gpu_glyph_returned is false
    - Expected: result.font_production_ready is false
    - Expected: stats.attempts equals `1`
-4. engine shutdown
+- engine shutdown
 
 
 <details>
@@ -344,22 +344,24 @@ engine.shutdown()
 
 #### reuses text blit buffers across repeated Draw IR text commands
 
-1. var engine = Engine2D create with backend
-2. engine clear
-3.  draw ir text command
-4.  draw ir text command
+- var engine = Engine2D create with backend
+- engine clear
+-  draw ir text command
+-  draw ir text command
    - Expected: result.rendered_command_count equals `2`
    - Expected: result.text_command_count equals `2`
+   - Expected: result.font_generated_args_ready is true
+   - Expected: result.font_generated_args_cache_skips equals `1`
    - Expected: result.font_text_cache_hits equals `1`
    - Expected: result.font_text_cache_misses equals `1`
    - Expected: stats.attempts equals `1`
-5. engine shutdown
+- engine shutdown
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -370,11 +372,13 @@ val batch = draw_ir_batch("text-cache-batch", DRAW_IR_TEST_BACKEND_GPU, draw_ir_
     _draw_ir_text_command("title-b", 28, 3, "A")
 ])
 
-val result = engine2d_draw_ir_adv_batch(engine, batch, false)
+val result = engine2d_draw_ir_adv_batch(engine, batch, true)
 val stats = vector_font_accelerator_stats()
 
 expect(result.rendered_command_count).to_equal(2)
 expect(result.text_command_count).to_equal(2)
+expect(result.font_generated_args_ready).to_equal(true)
+expect(result.font_generated_args_cache_skips).to_equal(1)
 expect(result.font_text_cache_hits).to_equal(1)
 expect(result.font_text_cache_misses).to_equal(1)
 expect(stats.attempts).to_equal(1)
@@ -386,10 +390,10 @@ engine.shutdown()
 
 #### reports gpu glyph return when backend rasterizer supplies vector glyph pixels
 
-1.  set cuda vector font probe glyph
-2. var engine = Engine2D create with backend
-3. engine clear
-4.  draw ir text command
+-  set cuda vector font probe glyph
+- var engine = Engine2D create with backend
+- engine clear
+-  draw ir text command
    - Expected: result.rendered_command_count equals `1`
    - Expected: result.text_command_count equals `1`
    - Expected: result.font_offload_status equals `gpu-glyph-returned`
@@ -398,8 +402,8 @@ engine.shutdown()
    - Expected: result.font_production_ready is true
    - Expected: stats.gpu_returned_glyphs equals `1`
    - Expected: stats.gpu_returned_glyph_pixels equals `1`
-5. engine shutdown
-6.  clear cuda vector font probe glyph
+- engine shutdown
+-  clear cuda vector font probe glyph
 
 
 <details>
@@ -436,10 +440,10 @@ _clear_cuda_vector_font_probe_glyph()
 
 #### reports gpu glyph return when backend rasterizer supplies bitmap glyph pixels
 
-1.  set cuda bitmap font probe glyph
-2. var engine = Engine2D create with backend
-3. engine clear
-4.  draw ir text command
+-  set cuda bitmap font probe glyph
+- var engine = Engine2D create with backend
+- engine clear
+-  draw ir text command
    - Expected: result.rendered_command_count equals `1`
    - Expected: result.text_command_count equals `1`
    - Expected: result.font_offload_status equals `gpu-glyph-returned`
@@ -448,8 +452,8 @@ _clear_cuda_vector_font_probe_glyph()
    - Expected: result.font_production_ready is true
    - Expected: stats.gpu_returned_glyphs equals `1`
    - Expected: stats.gpu_returned_glyph_pixels equals `1`
-5. engine shutdown
-6.  clear cuda bitmap font probe glyph
+- engine shutdown
+-  clear cuda bitmap font probe glyph
 
 
 <details>
