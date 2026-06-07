@@ -154,6 +154,36 @@ describe("expression-context setter safety"):
         expect(out["node.spl"].contains("me set_visible")).to_be(true)
         expect(stats.defs_removed).to_equal(0)
 
+describe("impl-block and multi-arg safety"):
+    it("does not rewrite a name that has a real method in an impl block"):
+        # class-block dummy get_visible, but a real impl-block method of the same
+        # name exists elsewhere -> the name must be treated as ambiguous
+        var dummy = "class Flag:\n    visible: bool\n    fn get_visible() -> bool:\n        self.visible\n"
+        var impl_real = "struct Canvas:\n    items: i64\nimpl Canvas:\n    fn get_visible(idx: i32) -> bool:\n        idx > 0\n"
+        var caller = "fn use_it(c: Canvas) -> bool:\n    c.get_visible(1)\n"
+        var sources: Dict<text, text> = {}
+        sources["flag.spl"] = dummy
+        sources["canvas.spl"] = impl_real
+        sources["caller.spl"] = caller
+        var (out, stats) = apply_accessor_fixes(sources, true)
+        # ambiguous: wrapper kept, call untouched
+        expect(out["flag.spl"].contains("fn get_visible")).to_be(true)
+        expect(out["caller.spl"].contains("c.get_visible(1)")).to_be(true)
+        expect(stats.defs_removed).to_equal(0)
+
+    it("never rewrites a multi-argument setter call"):
+        var snap = "class Mixer:\n    volume: f64\n    me set_volume(v: f64):\n        self.volume = v\n"
+        var other = "struct Snap:\n    n: i64\nimpl Snap:\n    me set_volume(name: text, level: f64):\n        self.n = level\n"
+        var caller = "fn drive(s: Snap):\n    s.set_volume(\"music\", 0.3)\n"
+        var sources: Dict<text, text> = {}
+        sources["mixer.spl"] = snap
+        sources["snap.spl"] = other
+        sources["caller.spl"] = caller
+        var (out, stats) = apply_accessor_fixes(sources, true)
+        # set_volume is ambiguous (real 2-arg impl) -> no invalid `s.volume = "music", 0.3`
+        expect(out["caller.spl"].contains("s.set_volume(\"music\", 0.3)")).to_be(true)
+        expect(out["caller.spl"].contains("volume = \"music\"")).to_be(false)
+
 describe("cache invalidation invariant"):
     it("changes content of both wrapper-owning and caller files so hashed cache misses"):
         var sources: Dict<text, text> = {}

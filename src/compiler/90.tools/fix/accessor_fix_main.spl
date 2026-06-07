@@ -87,6 +87,8 @@ fn main():
     var field_of: Dict<text, text> = {}
     var kind_of: Dict<text, text> = {}
     var dummy_names: Dict<text, bool> = {}
+    var dummy_count: Dict<text, i64> = {}
+    var total_headers: Dict<text, i64> = {}
     var poison: Dict<text, bool> = {}
     var setter_unsafe: Dict<text, bool> = {}
     for path in files:
@@ -103,8 +105,17 @@ fn main():
                         dummy_names[m.name] = true
                         field_of[m.name] = m.field
                         kind_of[m.name] = m.kind
+                        val pc = if dummy_count.has(m.name): dummy_count[m.name] else: 0
+                        dummy_count[m.name] = pc + 1
                     else:
                         poison[m.name] = true
+            # count every accessor-named header (class/impl/struct) so a real
+            # method hidden in an impl block blocks the rewrite.
+            for line in content.split("\n"):
+                val hn = acc_header_accessor_name(line.trim())
+                if hn != "":
+                    val ph = if total_headers.has(hn): total_headers[hn] else: 0
+                    total_headers[hn] = ph + 1
         # caller-side scan: setter calls used as expressions can't be rewritten,
         # so their wrappers must not be deleted.
         for name in acc_unsafe_setter_names(content):
@@ -115,6 +126,9 @@ fn main():
     for name in dummy_names.keys():
         if poison.has(name):
             continue
+        val total = if total_headers.has(name): total_headers[name] else: 0
+        if total != dummy_count[name]:
+            continue   # a non-class-dummy definition of this name exists
         unambiguous[name] = true
         if kind_of[name] == "set" and setter_unsafe.has(name):
             continue

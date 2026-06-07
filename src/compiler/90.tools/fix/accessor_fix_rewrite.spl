@@ -49,6 +49,29 @@ fn acc_receiver_is_self_or_me(line: text, dot: i64) -> bool:
 fn acc_is_receiver_char(c: text) -> bool:
     acc_is_ident_char(c) or c == "." or c == "[" or c == "]" or c == "(" or c == ")"
 
+# True if s contains a comma outside of any bracket/quote nesting — i.e. the
+# argument list has more than one argument. A dummy setter takes exactly one
+# value, so a multi-arg call targets a different method and must be left alone.
+fn acc_has_top_level_comma(s: text) -> bool:
+    var depth = 0
+    var in_str = false
+    var i = 0
+    while i < s.len():
+        val c = s[i:i + 1]
+        if in_str:
+            if c == "\"":
+                in_str = false
+        elif c == "\"":
+            in_str = true
+        elif c == "(" or c == "[" or c == "{":
+            depth = depth + 1
+        elif c == ")" or c == "]" or c == "}":
+            depth = depth - 1
+        elif c == "," and depth == 0:
+            return true
+        i = i + 1
+    false
+
 # A setter call `recv.set_x(EXPR)` is only safe to turn into `recv.x = EXPR`
 # when it is a standalone statement. In expression position (e.g. the RHS of an
 # assignment, `node = node.set_x(v)`, or a nested argument) the assignment form
@@ -165,6 +188,11 @@ fn rewrite_set_in_line(line: text, name: text, field: text, restrict_self: bool)
             i = open + 1
             continue
         val expr = line.slice(open + 1, close).trim()
+        if acc_has_top_level_comma(expr):
+            # multi-arg call — not this single-value dummy setter
+            result = result + line.slice(i, open + 1)
+            i = open + 1
+            continue
         result = result + line.slice(i, dot) + ".{field} = {expr}"
         i = close + 1
         count = count + 1
@@ -289,13 +317,31 @@ fn apply_accessor_fixes(sources: Dict<text, text>, include_tier2: bool) -> (Dict
     val records = collect_dummy_records(sources)
     val poison = collect_poisoned_names(sources)
 
+    # Count every accessor-named method header (class / impl / struct / standalone)
+    # so a real method hidden in an impl block blocks the rewrite.
+    var total_headers: Dict<text, i64> = {}
+    for file in sources.keys():
+        for line in sources[file].split("\n"):
+            val hn = acc_header_accessor_name(line.trim())
+            if hn != "":
+                val prev = if total_headers.has(hn): total_headers[hn] else: 0
+                total_headers[hn] = prev + 1
+
     var field_of: Dict<text, text> = {}
     var kind_of: Dict<text, text> = {}
-    var unambiguous: Dict<text, bool> = {}
+    var dummy_count: Dict<text, i64> = {}
     for r in records:
         field_of[r.name] = r.field
         kind_of[r.name] = r.kind
-        if not poison.has(r.name):
+        val prev = if dummy_count.has(r.name): dummy_count[r.name] else: 0
+        dummy_count[r.name] = prev + 1
+
+    var unambiguous: Dict<text, bool> = {}
+    for r in records:
+        if poison.has(r.name):
+            continue
+        val total = if total_headers.has(r.name): total_headers[r.name] else: 0
+        if total == dummy_count[r.name]:
             unambiguous[r.name] = true
 
     # Setter names with an expression-context call anywhere are kept (not deleted).
