@@ -1,0 +1,53 @@
+#!/bin/sh
+set -eu
+
+# Negative coverage for the cross-language profile report contract. This keeps
+# the large-report Simple-vs-C fanout rule from silently becoming a no-op.
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)"
+cd "$ROOT_DIR"
+
+contract="test/05_perf/profile_scripts/profile_report_contract_test.shs"
+script_path="scripts/check/check-cross-language-perf.shs"
+source_report="doc/09_report/cross_language_perf_parallel_large_2026-06-07.md"
+tmp_report="doc/09_report/.profile_contract_negative_$$.md"
+tmp_edit="${tmp_report}.tmp"
+
+cleanup() {
+    rm -f "$tmp_report" "$tmp_edit"
+}
+trap cleanup EXIT INT TERM
+
+fail() {
+    echo "profile_report_contract_negative=false"
+    echo "error=$1"
+    exit 1
+}
+
+cp "$source_report" "$tmp_report"
+
+awk '
+    /^## / {
+        in_fanout = ($0 ~ /^## Large Fanout Scheduling/)
+    }
+    in_fanout && /\| Simple multicore green \(native\)/ {
+        sub(/\|[ \t]*[0-9]+\.[0-9]+[ \t]*\|/, "|      999.999 |")
+    }
+    { print }
+' "$tmp_report" >"$tmp_edit"
+mv "$tmp_edit" "$tmp_report"
+
+set +e
+output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
+code=$?
+set -e
+
+if [ "$code" -eq 0 ]; then
+    fail "mutated large Simple multicore-green fanout row unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq "large Simple multicore-green fanout row must be faster than C pthread fanout row" ||
+    fail "missing expected large-fanout failure message"
+
+echo "profile_report_contract_negative=true"
+echo "case=large_simple_multicore_fanout_slower_than_c"
