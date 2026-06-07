@@ -137,6 +137,8 @@ Failed: 0
 - The tracking row must carry the concurrency API misuse spec so wrong-surface,
   wrong-arity, bad-argument, and numbered-alias diagnostics stay tied to
   REQ-MCG-010.
+- The tracking row must carry the agent-plan spec so parallel-agent lanes keep
+  meaningful names and acceptance evidence.
 - The tracking row must carry the concurrency API shell contract so approved
   public names remain release-visible.
 - The tracking row must summarize the approved API count and `task_spawn`
@@ -287,7 +289,7 @@ expect(row).to_contain("doc/05_design/multicore_green.md")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -307,8 +309,10 @@ expect(row).to_contain("test/05_perf/stress/multicore_green_large_profile_gate_s
 expect(row).to_contain("test/05_perf/profile_scripts/profile_report_contract_test.shs")
 expect(row).to_contain("test/05_perf/profile_scripts/concurrency_api_contract_test.shs")
 expect(row).to_contain("test/03_system/feature/usage/concurrency_api_misuse_spec.spl")
+expect(row).to_contain("test/03_system/feature/usage/multicore_green_agent_plan_spec.spl")
 expect(row).to_contain("doc/06_spec/test/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.md")
 expect(row).to_contain("doc/06_spec/test/03_system/feature/usage/concurrency_api_misuse_spec.md")
+expect(row).to_contain("doc/06_spec/test/03_system/feature/usage/multicore_green_agent_plan_spec.md")
 step("Verify the public API contract summary remains explicit")
 expect(row).to_contain("positive_fixtures=5")
 expect(row).to_contain("task_spawn approved")

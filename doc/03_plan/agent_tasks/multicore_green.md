@@ -37,7 +37,7 @@ Date: 2026-06-06
 - `src/lib/nogc_async_mut/concurrent/multicore_green.spl`
 - `src/os/kernel/scheduler/green_carrier.spl`
 
-## Agent A: Go And Cross-Language Evidence
+## Go Profile Evidence Agent
 
 Goal: keep the profile harness honest about Go-style M:N scheduling, C pthread
 baselines, and Simple concurrency model labels.
@@ -66,7 +66,7 @@ Acceptance evidence:
 - `bin/release/simple test test/05_perf/stress/multicore_green_cross_language_gate_spec.spl --mode=interpreter --clean`
 - report row proving Go beats C pthreads in isolated large fanout stress.
 
-## Agent B: Simple OS-Thread Baseline
+## Simple OS-Thread Baseline Agent
 
 Goal: keep Simple's explicit OS-thread baseline working and distinct from green
 thread claims.
@@ -91,7 +91,7 @@ Acceptance evidence:
 - `bin/release/simple test test/05_perf/stress/multicore_green_fanout_spec.spl --mode=interpreter --clean`
 - `sh scripts/check/check-thread-spawn-with-args-native.shs`
 
-## Agent C: Cooperative Green Semantics
+## Cooperative Green Semantics Agent
 
 Goal: preserve and test cooperative green as a lightweight current-carrier
 queue, not CPU-parallel M:N work.
@@ -118,7 +118,7 @@ Acceptance evidence:
 - blocker doc remains current for SMF mutable globals and native function-valued
   storage issues.
 
-## Agent D: Multicore Green Runtime-Pool Path
+## Multicore Green Runtime-Pool Agent
 
 Goal: make `multicore_green_spawn` the Simple M:N candidate only when runtime
 pool use is proven.
@@ -146,7 +146,7 @@ Acceptance evidence:
 - `bin/release/simple test test/05_perf/stress/multicore_green_fanout_spec.spl --mode=interpreter --clean`
 - cross-language report contains `used_runtime_pool()` evidence text.
 
-## Agent E: SimpleOS Green Carrier
+## SimpleOS Green Carrier Agent
 
 Goal: keep SimpleOS support aligned with the host/library API split while
 progressing toward scheduler-aware multicore green execution.
@@ -177,26 +177,31 @@ Acceptance evidence:
 
 ## Merge Sequencing
 
-1. Agent A owns profile/report contract changes before any performance claim.
-2. Agent B fixes or tracks OS-thread API blockers before profile rows consume
-   those APIs.
-3. Agent C and D can run in parallel because cooperative green and multicore
-   green must stay semantically distinct.
-4. Agent E consumes stable host/library contracts into SimpleOS and QEMU proof.
+1. Go Profile Evidence Agent owns profile/report contract changes before any
+   performance claim.
+2. Simple OS-Thread Baseline Agent fixes or tracks OS-thread API blockers
+   before profile rows consume those APIs.
+3. Cooperative Green Semantics Agent and Multicore Green Runtime-Pool Agent can
+   run in parallel because cooperative green and multicore green must stay
+   semantically distinct.
+4. SimpleOS Green Carrier Agent consumes stable host/library contracts into
+   SimpleOS and QEMU proof.
 5. Generated manuals and `doc/09_report` are refreshed after executable specs
    and profile scripts change.
 
 ## Conflict Rules
 
-- If a change touches `scripts/check/check-cross-language-perf.shs`, Agent A
-  owns the report shape and must rerun the profile contract.
-- If a change touches `thread_spawn_with_args`, Agent B must update
-  `scripts/check/check-thread-spawn-with-args-native.shs` and the matching
-  tracking note.
-- If a change claims Go-like M:N behavior, Agent D must provide
-  `used_runtime_pool()` evidence and Agent A must gate the row numerically.
-- If a SimpleOS QEMU probe uses a fixed-slot helper, Agent E must state exactly
-  what is proven and what remains future hardware handoff work.
+- If a change touches `scripts/check/check-cross-language-perf.shs`, Go Profile
+  Evidence Agent owns the report shape and must rerun the profile contract.
+- If a change touches `thread_spawn_with_args`, Simple OS-Thread Baseline Agent
+  must update `scripts/check/check-thread-spawn-with-args-native.shs` and the
+  matching tracking note.
+- If a change claims Go-like M:N behavior, Multicore Green Runtime-Pool Agent
+  must provide `used_runtime_pool()` evidence and Go Profile Evidence Agent must
+  gate the row numerically.
+- If a SimpleOS QEMU probe uses a fixed-slot helper, SimpleOS Green Carrier
+  Agent must state exactly what is proven and what remains future hardware
+  handoff work.
 
 ## Required Handoff Commands
 
