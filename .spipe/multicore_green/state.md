@@ -64,6 +64,15 @@ go-runtime-hardening
   passed 4 examples. A broad `scheduler_spec.spl` run timed out at 120s, so the
   focused spec is the direct evidence for this scheduler-owned parallelism
   increment.
+- implementation: Enforced the active SimpleOS green carrier limit in
+  `Scheduler.apply_green_scheduler_intent`. Runnable intents targeting inactive
+  carrier CPUs are rejected and counted instead of recording execution.
+- verification: `green_carrier_spec.spl` passed 32 examples,
+  `scheduler_green_parallelism_spec.spl` passed 7 examples, and
+  `simpleos_multicore_green_spec.spl` passed 3 examples after default carrier
+  limits were changed to follow topology growth/shrink while explicit requests
+  remain preserved. The focused scheduler spec also proves dispatch can run on
+  carriers activated by topology growth and rejects inactive-carrier dispatch.
 
 ## Completion Audit - 2026-06-07
 

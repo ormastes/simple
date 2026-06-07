@@ -28,7 +28,7 @@ green_carrier_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 30 | 30 | 0 | 0 |
+| 32 | 32 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -313,6 +313,26 @@ expect(grown.reason).to_equal("requested_limit")
 
 </details>
 
+#### keeps default carrier limits aligned to topology growth
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val initial = green_carrier_parallelism_new(1)
+val grown = green_carrier_parallelism_for_topology(initial, 4)
+
+expect(grown.requested_limit).to_equal(4)
+expect(grown.active_limit).to_equal(4)
+expect(grown.topology_cpu_count).to_equal(4)
+expect(grown.reason).to_equal("default_topology_limit")
+```
+
+</details>
+
 #### clamps zero requested carriers to one scheduler carrier
 
 <details>
@@ -382,13 +402,33 @@ Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val initial = green_carrier_parallelism_new(4)
+val initial = green_carrier_set_parallelism(green_carrier_parallelism_new(4), 4)
 val shrunk = green_carrier_parallelism_for_topology(initial, 0)
 
 expect(shrunk.requested_limit).to_equal(4)
 expect(shrunk.active_limit).to_equal(1)
 expect(shrunk.topology_cpu_count).to_equal(1)
 expect(shrunk.reason).to_equal("clamped_topology")
+```
+
+</details>
+
+#### keeps default carrier limits aligned to topology shrink
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val initial = green_carrier_parallelism_new(4)
+val shrunk = green_carrier_parallelism_for_topology(initial, 0)
+
+expect(shrunk.requested_limit).to_equal(1)
+expect(shrunk.active_limit).to_equal(1)
+expect(shrunk.topology_cpu_count).to_equal(1)
+expect(shrunk.reason).to_equal("default_topology_limit")
 ```
 
 </details>
@@ -893,8 +933,8 @@ expect(result.context_switches).to_equal(1)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 30 |
-| Active scenarios | 30 |
+| Total scenarios | 32 |
+| Active scenarios | 32 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

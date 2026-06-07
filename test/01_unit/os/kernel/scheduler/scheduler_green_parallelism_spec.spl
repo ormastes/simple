@@ -21,6 +21,13 @@ spec keeps the multicore-green carrier-limit contract directly executable.
 use std.spec.{describe, it, expect}
 use os.kernel.types.task_types.{default_scheduler_topology}
 use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.scheduler.green_carrier.{
+    green_carrier_run_queues_new,
+    green_carrier_spawn_task,
+    green_carrier_apply_enqueue,
+    green_carrier_dispatch_next,
+    green_carrier_scheduler_intent
+}
 
 describe "Scheduler green carrier parallelism":
     it "starts from scheduler topology":
@@ -69,3 +76,39 @@ describe "Scheduler green carrier parallelism":
         expect(sched.green_carrier_parallelism_requested()).to_equal(4)
         expect(sched.green_carrier_parallelism_limit()).to_equal(1)
         expect(sched.green_carrier_parallelism_reason()).to_equal("clamped_topology")
+
+    it "keeps default carrier parallelism aligned to topology growth":
+        var sched = Scheduler.new_bootstrap()
+        sched.set_topology(default_scheduler_topology(4u32))
+
+        expect(sched.green_carrier_parallelism_requested()).to_equal(4)
+        expect(sched.green_carrier_parallelism_limit()).to_equal(4)
+        expect(sched.green_carrier_parallelism_reason()).to_equal("default_topology_limit")
+
+    it "runs green dispatch on carriers activated by topology growth":
+        var sched = Scheduler.new_bootstrap()
+        sched.set_topology(default_scheduler_topology(4u32))
+        val queues = green_carrier_run_queues_new(4, 8)
+        val decision = green_carrier_spawn_task(52, 4, 8, 3, 1, 2, 4, 0)
+        val queued = green_carrier_apply_enqueue(queues, decision)
+        val dispatched = green_carrier_dispatch_next(queued.queues, 3)
+        val result = sched.apply_green_scheduler_intent(green_carrier_scheduler_intent(dispatched))
+
+        expect(result.applied).to_equal(true)
+        expect(result.reason).to_equal("context_switch_recorded")
+        expect(sched.green_current_task_on_cpu(3u32)).to_equal(52)
+        expect(sched.green_rejected_intents()).to_equal(0)
+
+    it "rejects green dispatch on inactive carriers":
+        var sched = Scheduler.new_with_cpu_count(4u32)
+        sched.set_green_carrier_parallelism(1)
+        val queues = green_carrier_run_queues_new(4, 8)
+        val decision = green_carrier_spawn_task(51, 4, 0, 3, 1, 2, 4, 0)
+        val queued = green_carrier_apply_enqueue(queues, decision)
+        val dispatched = green_carrier_dispatch_next(queued.queues, 1)
+        val result = sched.apply_green_scheduler_intent(green_carrier_scheduler_intent(dispatched))
+
+        expect(result.applied).to_equal(false)
+        expect(result.reason).to_equal("inactive_green_carrier")
+        expect(sched.green_current_task_on_cpu(1u32)).to_equal(0)
+        expect(sched.green_rejected_intents()).to_equal(1)

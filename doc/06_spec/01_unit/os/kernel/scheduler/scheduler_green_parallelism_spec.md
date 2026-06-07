@@ -28,7 +28,7 @@ scheduler_green_parallelism_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -190,12 +190,107 @@ expect(sched.green_carrier_parallelism_reason()).to_equal("clamped_topology")
 
 </details>
 
+#### keeps default carrier parallelism aligned to topology growth
+
+1. var sched = Scheduler new bootstrap
+
+2. sched set topology
+   - Expected: sched.green_carrier_parallelism_requested() equals `4`
+   - Expected: sched.green_carrier_parallelism_limit() equals `4`
+   - Expected: sched.green_carrier_parallelism_reason() equals `default_topology_limit`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var sched = Scheduler.new_bootstrap()
+sched.set_topology(default_scheduler_topology(4u32))
+
+expect(sched.green_carrier_parallelism_requested()).to_equal(4)
+expect(sched.green_carrier_parallelism_limit()).to_equal(4)
+expect(sched.green_carrier_parallelism_reason()).to_equal("default_topology_limit")
+```
+
+</details>
+
+#### runs green dispatch on carriers activated by topology growth
+
+1. var sched = Scheduler new bootstrap
+
+2. sched set topology
+   - Expected: result.applied is true
+   - Expected: result.reason equals `context_switch_recorded`
+   - Expected: sched.green_current_task_on_cpu(3u32) equals `52`
+   - Expected: sched.green_rejected_intents() equals `0`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var sched = Scheduler.new_bootstrap()
+sched.set_topology(default_scheduler_topology(4u32))
+val queues = green_carrier_run_queues_new(4, 8)
+val decision = green_carrier_spawn_task(52, 4, 8, 3, 1, 2, 4, 0)
+val queued = green_carrier_apply_enqueue(queues, decision)
+val dispatched = green_carrier_dispatch_next(queued.queues, 3)
+val result = sched.apply_green_scheduler_intent(green_carrier_scheduler_intent(dispatched))
+
+expect(result.applied).to_equal(true)
+expect(result.reason).to_equal("context_switch_recorded")
+expect(sched.green_current_task_on_cpu(3u32)).to_equal(52)
+expect(sched.green_rejected_intents()).to_equal(0)
+```
+
+</details>
+
+#### rejects green dispatch on inactive carriers
+
+1. var sched = Scheduler new with cpu count
+
+2. sched set green carrier parallelism
+   - Expected: result.applied is false
+   - Expected: result.reason equals `inactive_green_carrier`
+   - Expected: sched.green_current_task_on_cpu(1u32) equals `0`
+   - Expected: sched.green_rejected_intents() equals `1`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var sched = Scheduler.new_with_cpu_count(4u32)
+sched.set_green_carrier_parallelism(1)
+val queues = green_carrier_run_queues_new(4, 8)
+val decision = green_carrier_spawn_task(51, 4, 0, 3, 1, 2, 4, 0)
+val queued = green_carrier_apply_enqueue(queues, decision)
+val dispatched = green_carrier_dispatch_next(queued.queues, 1)
+val result = sched.apply_green_scheduler_intent(green_carrier_scheduler_intent(dispatched))
+
+expect(result.applied).to_equal(false)
+expect(result.reason).to_equal("inactive_green_carrier")
+expect(sched.green_current_task_on_cpu(1u32)).to_equal(0)
+expect(sched.green_rejected_intents()).to_equal(1)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

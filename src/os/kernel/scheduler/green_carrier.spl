@@ -240,6 +240,8 @@ pub fn green_carrier_set_parallelism(state: GreenCarrierParallelismState, reques
 pub fn green_carrier_parallelism_for_topology(state: GreenCarrierParallelismState, topology_cpu_count: i64) -> GreenCarrierParallelismState:
     """Recompute the active carrier limit after topology discovery changes."""
     val topology_limit = green_carrier_normalized_cpu_count(topology_cpu_count)
+    if state.reason == "default_topology_limit":
+        return green_carrier_parallelism_new(topology_limit)
     val active_limit = green_carrier_clamped_parallelism(state.requested_limit, topology_limit)
     GreenCarrierParallelismState(
         requested_limit: state.requested_limit,
@@ -458,6 +460,21 @@ pub fn green_carrier_context_switches_on_cpu(state: GreenCarrierExecutionState, 
     else:
         state.context_switches_by_cpu[cpu]
 
+pub fn green_carrier_reject_scheduler_intent(state: GreenCarrierExecutionState, intent: GreenCarrierSchedulerIntent, reason: text) -> GreenCarrierExecutionResult:
+    """Reject a green scheduler intent without mutating carrier execution slots."""
+    GreenCarrierExecutionResult(
+        state: GreenCarrierExecutionState(
+            current_task_by_cpu: state.current_task_by_cpu,
+            context_switches_by_cpu: state.context_switches_by_cpu,
+            total_context_switches: state.total_context_switches,
+            rejected_intents: state.rejected_intents + 1
+        ),
+        task: intent.task,
+        cpu: intent.cpu,
+        applied: false,
+        reason: reason
+    )
+
 fn green_carrier_mark_current_task(current_task_by_cpu: [u64], cpu: i64, task_id: u64) -> [u64]:
     var next_current = current_task_by_cpu
     if cpu >= 0 and cpu < next_current.len():
@@ -474,31 +491,9 @@ pub fn green_carrier_apply_scheduler_intent(state: GreenCarrierExecutionState, i
     """Apply a green scheduler intent to execution state."""
     val cpu = intent.cpu as i64
     if not intent.should_run or not intent.should_context_switch:
-        GreenCarrierExecutionResult(
-            state: GreenCarrierExecutionState(
-                current_task_by_cpu: state.current_task_by_cpu,
-                context_switches_by_cpu: state.context_switches_by_cpu,
-                total_context_switches: state.total_context_switches,
-                rejected_intents: state.rejected_intents + 1
-            ),
-            task: intent.task,
-            cpu: intent.cpu,
-            applied: false,
-            reason: intent.reason
-        )
+        green_carrier_reject_scheduler_intent(state, intent, intent.reason)
     elif cpu < 0 or cpu >= state.current_task_by_cpu.len():
-        GreenCarrierExecutionResult(
-            state: GreenCarrierExecutionState(
-                current_task_by_cpu: state.current_task_by_cpu,
-                context_switches_by_cpu: state.context_switches_by_cpu,
-                total_context_switches: state.total_context_switches,
-                rejected_intents: state.rejected_intents + 1
-            ),
-            task: intent.task,
-            cpu: intent.cpu,
-            applied: false,
-            reason: "invalid_cpu"
-        )
+        green_carrier_reject_scheduler_intent(state, intent, "invalid_cpu")
     else:
         GreenCarrierExecutionResult(
             state: GreenCarrierExecutionState(
