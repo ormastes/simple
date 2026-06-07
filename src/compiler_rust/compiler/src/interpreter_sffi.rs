@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{c_char, CStr};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
 use simple_parser::ast::{ClassDef, Expr, FunctionDef, Node, Type, Visibility};
@@ -38,6 +39,25 @@ thread_local! {
 
     /// Impl block methods
     static INTERP_IMPL_METHODS: RefCell<ImplMethods> = RefCell::new(HashMap::new());
+
+    /// Generation of the definition maps currently installed on this thread.
+    static INTERP_STATE_GENERATION: RefCell<u64> = const { RefCell::new(0) };
+}
+
+#[derive(Clone)]
+struct InterpDefinitionsSnapshot {
+    generation: u64,
+    functions: HashMap<String, Arc<FunctionDef>>,
+    classes: HashMap<String, Arc<ClassDef>>,
+    enums: Enums,
+    impl_methods: ImplMethods,
+}
+
+static INTERP_DEFINITIONS_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+lazy_static::lazy_static! {
+    /// Latest immutable interpreter definitions copied into native worker threads.
+    static ref INTERP_DEFINITIONS_SNAPSHOT: RwLock<Option<InterpDefinitionsSnapshot>> = RwLock::new(None);
 }
 
 // ============================================================================
@@ -171,6 +191,8 @@ pub fn init_interpreter_state(items: &[Node]) {
     INTERP_ENV.with(|env| {
         env.borrow_mut().clear();
     });
+
+    publish_interp_definitions_snapshot();
 }
 
 /// Clear interpreter state
@@ -180,6 +202,8 @@ pub fn clear_interpreter_state() {
     INTERP_ENUMS.with(|e| e.borrow_mut().clear());
     INTERP_IMPL_METHODS.with(|i| i.borrow_mut().clear());
     INTERP_ENV.with(|e| e.borrow_mut().clear());
+    INTERP_STATE_GENERATION.with(|g| *g.borrow_mut() = 0);
+    *INTERP_DEFINITIONS_SNAPSHOT.write().unwrap() = None;
 }
 
 /// Clear the global compiled functions registry.
@@ -224,6 +248,56 @@ where
     })
 }
 
+fn publish_interp_definitions_snapshot() {
+    let generation = INTERP_DEFINITIONS_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    let snapshot = INTERP_FUNCTIONS.with(|funcs| {
+        INTERP_CLASSES.with(|classes| {
+            INTERP_ENUMS.with(|enums| {
+                INTERP_IMPL_METHODS.with(|impl_methods| InterpDefinitionsSnapshot {
+                    generation,
+                    functions: funcs.borrow().clone(),
+                    classes: classes.borrow().clone(),
+                    enums: enums.borrow().clone(),
+                    impl_methods: impl_methods.borrow().clone(),
+                })
+            })
+        })
+    });
+
+    *INTERP_DEFINITIONS_SNAPSHOT.write().unwrap() = Some(snapshot);
+    INTERP_STATE_GENERATION.with(|g| *g.borrow_mut() = generation);
+}
+
+fn seed_interp_definitions_for_current_thread() {
+    let snapshot = INTERP_DEFINITIONS_SNAPSHOT.read().unwrap().clone();
+    match snapshot {
+        Some(snapshot) => {
+            let current_generation = INTERP_STATE_GENERATION.with(|g| *g.borrow());
+            if current_generation == snapshot.generation {
+                return;
+            }
+
+            INTERP_FUNCTIONS.with(|f| *f.borrow_mut() = snapshot.functions.clone());
+            INTERP_CLASSES.with(|c| *c.borrow_mut() = snapshot.classes.clone());
+            INTERP_ENUMS.with(|e| *e.borrow_mut() = snapshot.enums.clone());
+            INTERP_IMPL_METHODS.with(|i| *i.borrow_mut() = snapshot.impl_methods.clone());
+            INTERP_STATE_GENERATION.with(|g| *g.borrow_mut() = snapshot.generation);
+        }
+        None => {
+            let current_generation = INTERP_STATE_GENERATION.with(|g| *g.borrow());
+            if current_generation == 0 {
+                return;
+            }
+
+            INTERP_FUNCTIONS.with(|f| f.borrow_mut().clear());
+            INTERP_CLASSES.with(|c| c.borrow_mut().clear());
+            INTERP_ENUMS.with(|e| e.borrow_mut().clear());
+            INTERP_IMPL_METHODS.with(|i| i.borrow_mut().clear());
+            INTERP_STATE_GENERATION.with(|g| *g.borrow_mut() = 0);
+        }
+    }
+}
+
 // ============================================================================
 // SFFI entry points
 // ============================================================================
@@ -259,6 +333,8 @@ pub unsafe extern "C" fn simple_interp_call(
     argc: usize,
     argv: *const BridgeValue,
 ) -> BridgeValue {
+    seed_interp_definitions_for_current_thread();
+
     // Parse function name
     if func_name.is_null() {
         return BridgeValue::error("null function name");
@@ -337,6 +413,8 @@ fn call_interpreted_function(
 /// The `expr_ptr` must point to a valid `Expr`.
 #[no_mangle]
 pub unsafe extern "C" fn simple_interp_eval_expr(expr_ptr: *const Expr) -> BridgeValue {
+    seed_interp_definitions_for_current_thread();
+
     if expr_ptr.is_null() {
         return BridgeValue::error("null expression");
     }
@@ -417,6 +495,8 @@ pub unsafe extern "C" fn simple_interp_get_var(name: *const c_char) -> BridgeVal
 
 /// Call an interpreted function by name with Value arguments.
 pub fn call_interp_function(name: &str, args: Vec<Value>) -> Result<Value, CompileError> {
+    seed_interp_definitions_for_current_thread();
+
     with_interp_state(|mut env, funcs, classes, enums, impl_methods| {
         if let Some(func) = funcs.get(name).cloned() {
             call_interpreted_function(&func, args, env, funcs, classes, enums, impl_methods)
@@ -436,6 +516,8 @@ pub fn call_interp_function(name: &str, args: Vec<Value>) -> Result<Value, Compi
 
 /// Evaluate an expression using interpreter state.
 pub fn eval_expr_with_state(expr: &Expr) -> Result<Value, CompileError> {
+    seed_interp_definitions_for_current_thread();
+
     with_interp_state(|mut env, funcs, classes, enums, impl_methods| {
         evaluate_expr(expr, env, funcs, classes, enums, impl_methods)
     })
@@ -494,6 +576,8 @@ unsafe extern "C" fn interp_call_handler(
     argv: *const simple_runtime::RuntimeValue,
 ) -> simple_runtime::RuntimeValue {
     use crate::value_bridge::{runtime_to_value, value_to_runtime};
+
+    seed_interp_definitions_for_current_thread();
 
     // Parse function name
     if func_name_ptr.is_null() {
@@ -555,6 +639,8 @@ unsafe extern "C" fn interp_call_handler(
 /// This is registered with the runtime via `init_interpreter_handlers()`.
 extern "C" fn interp_eval_handler(expr_index: i64) -> simple_runtime::RuntimeValue {
     use crate::value_bridge::value_to_runtime;
+
+    seed_interp_definitions_for_current_thread();
 
     // Diagram tracing for native expression evaluation
     if diagram_sffi::is_diagram_enabled() {
@@ -637,5 +723,24 @@ mod tests {
 
         unregister_compiled_fn("test_fn");
         assert!(!is_function_compiled("test_fn"));
+    }
+
+    #[test]
+    fn test_definition_snapshot_seeds_worker_thread() {
+        clear_interpreter_state();
+
+        let mut parser = simple_parser::Parser::new("fn spawn_worker() -> i64: 7");
+        let ast = parser.parse().expect("parse test function");
+        init_interpreter_state(&ast.items);
+
+        let found = std::thread::spawn(|| {
+            seed_interp_definitions_for_current_thread();
+            INTERP_FUNCTIONS.with(|funcs| funcs.borrow().contains_key("spawn_worker"))
+        })
+        .join()
+        .expect("worker thread completes");
+
+        assert!(found);
+        clear_interpreter_state();
     }
 }

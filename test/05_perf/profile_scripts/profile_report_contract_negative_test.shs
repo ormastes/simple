@@ -10,17 +10,11 @@ cd "$ROOT_DIR"
 
 contract="test/05_perf/profile_scripts/profile_report_contract_test.shs"
 script_path="scripts/check/check-cross-language-perf.shs"
-source_report="doc/09_report/cross_language_perf_parallel_large_2026-06-07.md"
-blocker_doc="doc/08_tracking/bug/smf_runtime_pool_closure_lookup_2026-06-07.md"
+source_report="doc/09_report/cross_language_perf_parallel_smoke.md"
 tmp_report="doc/09_report/.profile_contract_negative_$$.md"
 tmp_edit="${tmp_report}.tmp"
-tmp_blocker="${blocker_doc}.$$"
 
 cleanup() {
-    if [ -f "$tmp_blocker" ]; then
-        cp "$tmp_blocker" "$blocker_doc"
-        rm -f "$tmp_blocker"
-    fi
     rm -f "$tmp_report" "$tmp_edit"
 }
 trap cleanup EXIT INT TERM
@@ -34,6 +28,9 @@ fail() {
 cp "$source_report" "$tmp_report"
 
 awk '
+    /\*\*Fanout workers:\*\*/ {
+        sub(/\*\*Fanout workers:\*\* [0-9]+/, "**Fanout workers:** 1000")
+    }
     /^## / {
         in_fanout = ($0 ~ /^## Large Fanout Scheduling/)
     }
@@ -181,33 +178,6 @@ fi
 printf '%s\n' "$output" | grep -Fq "invalid Simple multicore green evidence row" ||
     fail "missing expected parallelism evidence failure message"
 
-cp "$source_report" "$tmp_report"
-cp "$blocker_doc" "$tmp_blocker"
-
-awk '
-    /^\*\*Status:\*\* Open/ {
-        print "**Status:** Closed"
-        next
-    }
-    { print }
-' "$blocker_doc" >"$tmp_edit"
-mv "$tmp_edit" "$blocker_doc"
-
-set +e
-output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
-code=$?
-set -e
-
-cp "$tmp_blocker" "$blocker_doc"
-rm -f "$tmp_blocker"
-
-if [ "$code" -eq 0 ]; then
-    fail "SMF runtime-pool failure unexpectedly passed after blocker was closed"
-fi
-
-printf '%s\n' "$output" | grep -Fq "missing '**Status:** Open' in $blocker_doc" ||
-    fail "missing expected closed-blocker failure message"
-
 echo "profile_report_contract_negative=true"
 echo "case=large_simple_multicore_fanout_slower_than_c"
 echo "case=simple_multicore_stress_slower_than_c"
@@ -215,4 +185,3 @@ echo "case=go_stress_slower_than_c"
 echo "case=simple_multicore_queue_model_global_fifo"
 echo "case=simple_multicore_pool_used_partial"
 echo "case=simple_multicore_parallelism_missing"
-echo "case=smf_runtime_pool_blocker_closed"

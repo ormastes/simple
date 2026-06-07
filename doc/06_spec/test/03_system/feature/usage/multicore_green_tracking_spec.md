@@ -293,7 +293,7 @@ expect(row).to_contain("doc/05_design/multicore_green.md")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -314,11 +314,11 @@ expect(row).to_contain("test/05_perf/profile_scripts/profile_report_contract_tes
 expect(row).to_contain("test/05_perf/profile_scripts/profile_report_contract_negative_test.shs")
 expect(row).to_contain("test/05_perf/profile_scripts/concurrency_api_contract_test.shs")
 expect(row).to_contain("test/03_system/feature/usage/concurrency_api_misuse_spec.spl")
-expect(row).to_contain("test/03_system/feature/usage/smf_runtime_pool_closure_blocker_spec.spl")
+expect(row).to_contain("test/03_system/feature/usage/smf_runtime_pool_closure_regression_spec.spl")
 expect(row).to_contain("test/03_system/feature/usage/multicore_green_agent_plan_spec.spl")
 expect(row).to_contain("doc/06_spec/test/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.md")
 expect(row).to_contain("doc/06_spec/test/03_system/feature/usage/concurrency_api_misuse_spec.md")
-expect(row).to_contain("doc/06_spec/test/03_system/feature/usage/smf_runtime_pool_closure_blocker_spec.md")
+expect(row).to_contain("doc/06_spec/test/03_system/feature/usage/smf_runtime_pool_closure_regression_spec.md")
 expect(row).to_contain("doc/06_spec/test/03_system/feature/usage/multicore_green_agent_plan_spec.md")
 step("Verify the public API contract summary remains explicit")
 expect(row).to_contain("positive_fixtures=5")
@@ -331,7 +331,6 @@ expect(row).to_contain("go_stress_slower_than_c")
 expect(row).to_contain("simple_multicore_queue_model_global_fifo")
 expect(row).to_contain("simple_multicore_pool_used_partial")
 expect(row).to_contain("simple_multicore_parallelism_missing")
-expect(row).to_contain("smf_runtime_pool_blocker_closed")
 ```
 
 </details>

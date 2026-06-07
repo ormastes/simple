@@ -1,18 +1,20 @@
 # SMF Runtime-Pool Closure Lookup Blocker
 
-**Status:** Open
+**Status:** Closed
 
 ## Summary
 
 SMF multicore-green workloads resolve
-`multicore_green_set_parallelism` / `multicore_green_parallelism`, but native
-runtime-pool worker threads could not look up the submitted worker function.
-Fresh cross-language smoke evidence still shows that failure in the SMF rows, so
-only native multicore-green rows are current M:N evidence.
+`multicore_green_set_parallelism` / `multicore_green_parallelism`, and
+wrapper-shaped runtime-pool submissions now execute through compiled SMF code.
+The original failure was that the hybrid compilability pass treated closure
+arguments as interpreter-only even for runtime-pool spawn APIs, so helper
+functions such as `spawn_worker()` were rewritten to `rt_interp_call` and failed
+in standalone SMF processes.
 
 ## Evidence
 
-### Current Failure Evidence
+### Original Failure Evidence
 
 ```text
 multicore_green_parallelism = 64/64
@@ -39,11 +41,11 @@ it was outside `doc/09_report`, but the generated rows still showed:
 
 ## Contract
 
-`test/05_perf/profile_scripts/profile_report_contract_test.shs` may allow this
-exact SMF failure classification only while this blocker document exists and is
-marked `Status: Open`. The contract still rejects failed native multicore-green
-rows, missing runtime-pool evidence, missing parallelism evidence, global-FIFO or
-scheduler-owned queue evidence, and ambiguous queue-model markers.
+`test/05_perf/profile_scripts/profile_report_contract_test.shs` no longer allows
+`SMF runtime-pool closure lookup blocker` as an acceptable report row. The
+contract rejects failed native or SMF multicore-green rows, missing runtime-pool
+evidence, missing parallelism evidence, global-FIFO or scheduler-owned queue
+evidence, and ambiguous queue-model markers.
 
 ## Sidecar Audit - 2026-06-07
 
@@ -75,25 +77,25 @@ map before reporting `function not found`. Runtime-pool workers are native
 threads, so they do not inherit the main SMF interpreter function table.
 
 Focused executable regression:
-`test/03_system/feature/usage/smf_runtime_pool_closure_blocker_spec.spl`
+`test/03_system/feature/usage/smf_runtime_pool_closure_regression_spec.spl`
 compiles and runs a tiny source equivalent to the generated wrapper shape:
 `spawn_worker() -> multicore_green_spawn(\: worker())`, then joins the native
-handle. It passes today by proving the current blocker failure is explicit as
-`function not found: spawn_worker`; it should be flipped to expect
-`wrapper_smf_pool_pass=true` when worker-thread `rt_interp_call` can see the SMF
-module function table. A direct `multicore_green_spawn(\: worker())` test is too
-weak because it already passes on this checkout.
+handle. It now requires exit code `0`, `got = 42`, and
+`wrapper_smf_pool_pass=true`. A direct `multicore_green_spawn(\: worker())` test
+is too weak because it already passed before the wrapper regression was fixed.
 
-Smallest implementation direction: make `rt_interp_call` on runtime-pool worker
-threads resolve against a process-visible snapshot of the SMF module function
-table, or otherwise initialize the worker thread's interpreter state from the
-main SMF state before invoking submitted closures. Do not change the
-`rt_pool_*` facade first; the runtime-pool symbols and closure submission path
-are already reached.
+Resolution: runtime-pool spawn APIs are now treated as compiled closure
+boundaries in `src/compiler_rust/compiler/src/compilability.rs`, preventing the
+wrapper helper from entering the non-compilable set. The SMF bridge also keeps a
+definition snapshot for in-process native worker callbacks in
+`src/compiler_rust/compiler/src/interpreter_sffi.rs`.
 
-## Exit Criteria
+## Resolution Evidence
 
-Close this blocker only after a report under `doc/09_report/` passes the profile
-contract with valid SMF multicore-green rows for both the parallel and fanout
-sections. Those rows must include `pool_used=N/N`, `parallelism=N/N`, and exactly
-one `queue_model=work_stealing` marker.
+- `test/03_system/feature/usage/smf_runtime_pool_closure_regression_spec.spl`
+  requires `wrapper_smf_pool_pass=true`.
+- `test/05_perf/profile_scripts/profile_report_contract_test.shs` rejects failed
+  SMF multicore-green rows.
+- Cross-language reports under `doc/09_report/` must contain valid SMF
+  multicore-green rows with `pool_used=N/N`, `parallelism=N/N`, and exactly one
+  `queue_model=work_stealing` marker.

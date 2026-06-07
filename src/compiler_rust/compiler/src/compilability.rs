@@ -261,8 +261,20 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
         // Function calls - may be compilable depending on the callee
         Expr::Call { callee, args, .. } => {
             analyze_expr(callee, reasons);
+            let compiled_closure_arg = matches!(
+                callee.as_ref(),
+                Expr::Identifier(name)
+                    if matches!(
+                        name.as_str(),
+                        "multicore_green_spawn" | "task_spawn" | "thread_spawn"
+                    )
+            );
             for arg in args {
-                analyze_expr(&arg.value, reasons);
+                if compiled_closure_arg {
+                    analyze_expr_as_compiled_closure_arg(&arg.value, reasons);
+                } else {
+                    analyze_expr(&arg.value, reasons);
+                }
             }
             // Check if it's a known compilable builtin
             if let Expr::Identifier(name) = callee.as_ref() {
@@ -703,6 +715,14 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
     }
 }
 
+fn analyze_expr_as_compiled_closure_arg(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
+    if let Expr::Lambda { body, .. } = expr {
+        analyze_expr(body, reasons);
+    } else {
+        analyze_expr(expr, reasons);
+    }
+}
+
 /// Add a reason if not already present
 fn add_reason(reasons: &mut Vec<FallbackReason>, reason: FallbackReason) {
     if !reasons.contains(&reason) {
@@ -799,6 +819,24 @@ fn worker(seed: i64) -> i64:
         assert!(
             status.is_compilable(),
             "scalar range-loop worker should compile natively, got {:?}",
+            status.reasons()
+        );
+    }
+
+    #[test]
+    fn test_multicore_green_spawn_wrapper_compilable() {
+        let results = parse_and_analyze(
+            r#"fn worker() -> i64:
+    42
+
+fn spawn_worker():
+    multicore_green_spawn(\: worker())
+"#,
+        );
+        let status = results.get("spawn_worker").unwrap();
+        assert!(
+            status.is_compilable(),
+            "runtime-pool spawn wrapper should compile natively, got {:?}",
             status.reasons()
         );
     }
