@@ -27,7 +27,8 @@ the `examples/09_embedded/simple_os` submodule.
 ./src/compiler_rust/target/debug/simple test test/01_unit/os/kernel/scheduler/scheduler_green_user_handoff_spec.spl --mode=interpreter --clean
 ./src/compiler_rust/target/debug/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean
 SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 bin/release/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean
-# Future final hardware gate, expected to remain opt-in until HW_HANDOFF_PASS exists:
+# Future final hardware gate, expected to remain opt-in until all final markers
+# exist: HW_HANDOFF_PASS, USER_ENTRY_PASS, and USER_SYSCALL_PASS.
 # SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 bin/release/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean
 ```
 
@@ -75,6 +76,16 @@ the scheduler green/user handoff compatibility spec was added and run:
 
 - scheduler green/user handoff compatibility: 1 assertion group in 7156ms
 
+After syncing `/tmp/simple-pherallel-sync` to `origin/main` at `2db5ee17b0`,
+the final hardware handoff gate was hardened and rerun in its default disabled
+lane:
+
+- final hardware handoff blocker contract: 2 scenarios
+- QEMU default gate lane: 2 scenarios
+- final live hardware handoff lane remains opt-in and unclaimed until the guest
+  emits hardware handoff, user-entry, and user-syscall markers from the real
+  AP ring/user path
+
 This refresh does not claim final ring/user context-switch handoff across APs;
 that claim remains blocked by
 `doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md`.
@@ -89,9 +100,12 @@ that claim remains blocked by
   `[green-carrier-qemu] PASS=true`, and
   `[green-carrier-qemu] PREEMPT_PASS=true`, and
   `[green-carrier-qemu] SCHED_HANDOFF_PASS=true` in serial output.
-- The final AP ring/user hardware handoff marker is deliberately separate:
-  `[green-carrier-qemu] HW_HANDOFF_PASS=true` is only required when
-  `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1` is set.
+- The final AP ring/user hardware handoff markers are deliberately separate:
+  `[green-carrier-qemu] HW_HANDOFF_PASS=true`,
+  `[green-carrier-qemu] USER_ENTRY_PASS=true`, and
+  `[green-carrier-qemu] USER_SYSCALL_PASS=true` are required only when
+  `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1` is set. A scheduler-only
+  probe must not print any of those final markers.
 - The hosted SimpleOS specs prove scheduler-owned green execution state remains
   separate from normal OS task state. The multicore-green SimpleOS contract now
   also proves named runtime, timer-interrupt, and compiler preemption
