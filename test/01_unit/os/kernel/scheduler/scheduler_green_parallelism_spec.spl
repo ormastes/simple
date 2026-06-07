@@ -31,6 +31,7 @@ use os.kernel.scheduler.green_carrier.{
     green_carrier_queue_depth
 }
 use os.kernel.scheduler.green_worker.{green_worker_rebalance_decision}
+use os.kernel.interrupts.idt.{VEC_TIMER}
 
 describe "Scheduler green carrier parallelism":
     it "starts from scheduler topology":
@@ -434,6 +435,31 @@ describe "Scheduler green carrier parallelism":
         expect(green_carrier_queue_depth(sweep2.queues, 1)).to_equal(1)
         expect(sched.green_current_task_on_cpu(0u32)).to_equal(0)
         expect(sched.green_current_task_on_cpu(1u32)).to_equal(0)
+
+    it "routes hardware timer vector through green preemption port":
+        var sched = Scheduler.new_with_cpu_count(4u32)
+        sched.set_green_carrier_parallelism(1)
+        val queues = green_carrier_run_queues_new(4, 8)
+        val first = green_carrier_spawn_task(78, 4, 1, 0, 4, 4, 4, 0)
+        val queued = green_carrier_apply_enqueue(queues, first)
+        val pass_result = sched.run_green_carrier_active_pass(queued.queues, 0)
+        val interrupt1 = sched.green_timer_interrupt_active_carriers(pass_result.queues)
+        val interrupt2 = sched.green_timer_interrupt_active_carriers(interrupt1.queues)
+
+        expect(interrupt1.vector).to_equal(VEC_TIMER)
+        expect(interrupt1.source).to_equal("timer_interrupt")
+        expect(interrupt1.accepted).to_equal(true)
+        expect(interrupt1.eoi_required).to_equal(true)
+        expect(interrupt1.ticked_carriers).to_equal(1)
+        expect(interrupt1.yielded_workers).to_equal(0)
+        expect(interrupt2.vector).to_equal(VEC_TIMER)
+        expect(interrupt2.accepted).to_equal(true)
+        expect(interrupt2.eoi_required).to_equal(true)
+        expect(interrupt2.yielded_workers).to_equal(1)
+        expect(interrupt2.preemption.preemption_requested).to_equal(true)
+        expect(interrupt2.reason).to_equal("green_time_slice_expired")
+        expect(green_carrier_queue_depth(interrupt2.queues, 0)).to_equal(1)
+        expect(sched.green_current_task_on_cpu(0u32)).to_equal(0)
 
     it "accepts compiler safepoint preemption without numbered API names":
         var sched = Scheduler.new_with_cpu_count(4u32)

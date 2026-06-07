@@ -151,6 +151,10 @@ Behavior:
   sources are `timer_interrupt`, `runtime_safepoint`, and
   `compiler_safepoint`; invalid sources return `invalid_preemption_source`
   without ticking or mutating carrier state.
+- `Scheduler.green_timer_interrupt_active_carriers` adapts the x86/APIC
+  `VEC_TIMER` interrupt vector to the `timer_interrupt` preemption source and
+  records that an end-of-interrupt acknowledgement is required after the
+  caller handles the tick.
 - `Scheduler.run_green_channel_wake_pass` converts green-channel send/unpark
   output into a carrier enqueue, then runs the bounded active pass only when
   the wake actually enqueued a receiver.
@@ -229,7 +233,7 @@ Repository guards:
   Remaining work is carrying bounded worker-loop/yield/tick and preemption-
   safepoint sweeps into final AP hardware handoff plus broader blocking
   surfaces.
-- Preemption strategy: scheduler-owned tick-budget yield and preemption
-  safepoint bridge exist; remaining work is wiring actual compiler-inserted
-  yields, runtime safepoint polling sites, and hardware timer interrupts to
-  that hook.
+- Preemption strategy: scheduler-owned tick-budget yield, preemption safepoint
+  bridge, and hardware timer-vector adapter exist; remaining work is wiring
+  actual compiler-inserted yields, runtime safepoint polling sites, and final
+  IDT/APIC-owned queue state to that hook.

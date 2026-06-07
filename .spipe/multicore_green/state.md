@@ -183,6 +183,13 @@ go-runtime-hardening
   preemption marker in the live QEMU lane. This advances hardware-facing
   SimpleOS evidence but still does not claim final AP ring/context-switch
   handoff.
+- implementation: Added `Scheduler.green_timer_interrupt_active_carriers`, a
+  hardware timer-vector adapter that routes `VEC_TIMER` to the
+  `timer_interrupt` green preemption source and marks EOI as required while
+  leaving green queue ownership with the caller.
+- verification: `scheduler.spl` and `green_carrier.spl` checks passed, and
+  `scheduler_green_parallelism_spec.spl` passed 27 examples including
+  timer-vector, EOI-required, and green-yield evidence.
 
 ## Completion Audit - 2026-06-07
 

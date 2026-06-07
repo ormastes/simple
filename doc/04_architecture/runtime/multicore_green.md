@@ -184,6 +184,11 @@ SimpleOS path:
   accepts meaningful source labels (`timer_interrupt`, `runtime_safepoint`, or
   `compiler_safepoint`), rejects unknown sources without mutating carrier
   state, and delegates accepted sources to the active-carrier timer sweep.
+- `Scheduler.green_timer_interrupt_active_carriers` is the hardware timer
+  vector adapter for that bridge. It routes `VEC_TIMER` to the
+  `timer_interrupt` source, marks that an EOI is required, and returns the
+  same active-carrier preemption evidence while leaving queue ownership with
+  the caller.
 - `Scheduler.run_green_channel_wake_pass` composes green-channel unpark output
   with carrier enqueue and the bounded active-carrier pass, so parked channel
   receivers can re-enter scheduler-owned execution without bypassing carrier
@@ -204,11 +209,11 @@ The selected Full Go-Like Runtime Roadmap uses all layers:
 - SimpleOS Scheduler Layer owns logical green tasks, carrier queues, remote
   wake/IPI intent, and AP evidence.
 
-Future roadmap work remains explicit: carrying bounded worker-loop/yield/tick
-and preemption-safepoint sweeps into final AP hardware handoff, expanding
-blocking coverage beyond the current green-channel wake pass, and wiring real
-hardware timer and compiler-inserted safepoint call sites before claiming
-tight-loop fairness comparable to Go.
+Future roadmap work remains explicit: carrying bounded worker-loop/yield/tick,
+timer-vector, and preemption-safepoint sweeps into final AP hardware handoff,
+expanding blocking coverage beyond the current green-channel wake pass, and
+wiring final IDT/APIC-owned queue state plus compiler-inserted safepoint call
+sites before claiming tight-loop fairness comparable to Go.
 
 ## Known Gaps
 
