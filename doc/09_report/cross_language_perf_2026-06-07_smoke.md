@@ -7,6 +7,12 @@
 **Profile script:** `scripts/check/check-cross-language-perf.shs`
 **Report path:** `doc/09_report/cross_language_perf_2026-06-07_smoke.md`
 
+> **Historical report:** this smoke predates the fail-closed
+> `queue_model=work_stealing` multicore-green evidence contract. Use
+> `doc/09_report/cross_language_perf_parallel_smoke.md` or
+> `doc/09_report/cross_language_perf_parallel_large_2026-06-07.md` for current
+> Go-like M:N profile evidence.
+
 ## Methodology
 
 - Generates equivalent hello, recursive fib, in-process warm fib, worker, and fanout workloads for each supported runtime.
