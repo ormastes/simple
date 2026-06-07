@@ -27,7 +27,7 @@ web_renderer_backend_parity_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -117,7 +117,7 @@ expect(pixels_equal(sw, simple_web_render_html_to_pixels_with_engine2d_backend(g
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -125,8 +125,46 @@ expect(simple_web_resolved_engine2d_backend_name(48, 32, "cuda")).to_equal("cuda
 expect(simple_web_resolved_engine2d_backend_name(48, 32, "opencl")).to_equal("opencl")
 expect(simple_web_resolved_engine2d_backend_name(48, 32, "vulkan")).to_equal("vulkan")
 expect(simple_web_resolved_engine2d_backend_name(48, 32, "metal")).to_equal("metal")
+expect(simple_web_resolved_engine2d_backend_name(48, 32, "hip")).to_equal("rocm")
 expect(simple_web_resolved_engine2d_backend_name(48, 32, "cpu_simd")).to_equal("cpu_simd")
 expect(simple_web_resolved_engine2d_backend_name(48, 32, "not-a-backend")).to_equal("software")
+```
+
+</details>
+
+#### maps preferred aliases to Engine2D preferred selection
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val expected = simple_web_resolved_engine2d_backend_name(48, 32, "preferred")
+expect(expected == "metal" or expected == "cuda" or expected == "rocm" or expected == "qualcomm" or expected == "vulkan" or expected == "opencl" or expected == "opengl" or expected == "intel" or expected == "webgpu" or expected == "software" or expected == "cpu_simd" or expected == "cpu").to_equal(true)
+expect(simple_web_resolved_engine2d_backend_name(48, 32, "preferred")).to_equal(expected)
+expect(simple_web_resolved_engine2d_backend_name(48, 32, "auto")).to_equal(expected)
+expect(simple_web_resolved_engine2d_backend_name(48, 32, "default")).to_equal(expected)
+expect(simple_web_resolved_engine2d_backend_name(48, 32, "")).to_equal(expected)
+```
+
+</details>
+
+#### uses the preferred Engine2D route for default pure-Simple rendering
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val default_px = simple_web_render_html_to_pixels(sample_html(), 48, 32)
+val preferred_px = simple_web_render_html_to_pixels_with_engine2d_backend(sample_html(), 48, 32, "preferred")
+val pure_simple = web_render_backend("pure_simple", 48, 32)
+expect(pixels_equal(default_px, preferred_px)).to_equal(true)
+expect(pure_simple.resolved_engine2d_backend_name()).to_equal(simple_web_resolved_engine2d_backend_name(48, 32, "preferred"))
 ```
 
 </details>
@@ -150,8 +188,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

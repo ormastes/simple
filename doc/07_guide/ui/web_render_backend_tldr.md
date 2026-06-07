@@ -17,7 +17,7 @@ web_render_backend:
   interface: { render_html_to_pixels: "[u32] both engines (compare)",
                show_live_window: "chromium live DOM; pure_simple -> false" }
   engines:
-    pure_simple: { layout: simple, raster: engine2d.cpu_simd, window: winit, live: false }
+    pure_simple: { layout: simple, raster: engine2d.preferred(policy/env), window: winit, live: false }
     chromium:    { engine: real-chromium(electron), window: BrowserWindow, live: true }
   backend_order: metal > cuda > rocm/hip > qualcomm > vulkan > opencl > opengl > intel > webgpu > software > cpu_simd > cpu
   gate: check-electron-simple-web-engine2d-bitmap-evidence.shs  # mismatch=0

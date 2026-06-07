@@ -19,7 +19,7 @@ val opened = r.show_live_window(html_path)             # true for chromium (live
 
 | backend | display | nature |
 |---------|---------|--------|
-| `pure_simple` | software raster frame in a winit window | Simple's HTML layout → Engine2D `cpu_simd`. No browser. |
+| `pure_simple` | preferred Engine2D raster frame in a winit window | Simple's HTML layout → Engine2D preferred backend (`metal > cuda > rocm/hip > qualcomm > vulkan > opencl > opengl > intel > webgpu > software > cpu_simd > cpu`). No browser. |
 | `chromium` | **live, interactive** Electron `BrowserWindow` | real Chromium renders the live DOM. |
 
 `render_html_to_pixels` produces a comparable buffer from **both** engines — this
@@ -42,7 +42,12 @@ page (default: `test/09_baselines/web_html_input/vanillastyle_demo.html`).
 
 ## Performance note (pure_simple)
 
-The pure-Simple raster runs interpreted and is canvas-bound. Four O(n²)-class traps were
+The pure-Simple raster runs interpreted and is canvas-bound. It now resolves a
+preferred backend by policy before raster: `SIMPLE_ENGINE2D_BACKEND` override
+first, Metal on Darwin/macOS, CUDA/HIP when the standard visibility env vars are
+present, then `software`. Explicit `software`, `cpu`, `cpu_simd`, or GPU backend
+names remain available for deterministic comparison and fallback tests. Four
+O(n²)-class traps were
 fixed (see `doc/08_tracking/bug/pure_simple_web_render_interpreter_bound_2026-06-06.md`):
 1. heuristic-surface buffer built with a `push` loop → use `[0; w*h]` array-repeat;
 2. the in-place array-write fix (`2d4579a0`) must be in the **running binary** —

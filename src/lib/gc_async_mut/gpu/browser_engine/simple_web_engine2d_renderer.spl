@@ -1,4 +1,10 @@
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_pixels}
+use std.gpu.engine2d.helpers_availability.{backend_canonical_name}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_platform_name() -> text
+
+var _preferred_engine2d_backend_cache: text = ""
 
 class SimpleWebHeuristicSurface:
     width: i32
@@ -38,6 +44,29 @@ impl SimpleWebHeuristicSurface:
 
     me shutdown():
         pass
+
+fn _preferred_engine2d_backend_name(width: i32, height: i32) -> text:
+    if _preferred_engine2d_backend_cache != "":
+        return _preferred_engine2d_backend_cache
+    val forced = backend_canonical_name(rt_env_get("SIMPLE_ENGINE2D_BACKEND") ?? "")
+    if forced == "metal" or forced == "cuda" or forced == "rocm" or forced == "qualcomm" or forced == "vulkan" or forced == "opencl" or forced == "opengl" or forced == "intel" or forced == "webgpu" or forced == "software" or forced == "cpu_simd" or forced == "cpu":
+        _preferred_engine2d_backend_cache = forced
+        return forced
+    val platform = rt_platform_name()
+    if platform == "darwin" or platform == "macos":
+        _preferred_engine2d_backend_cache = "metal"
+        return "metal"
+    val cuda_visible = rt_env_get("CUDA_VISIBLE_DEVICES") ?? ""
+    if cuda_visible != "" and cuda_visible != "-1":
+        _preferred_engine2d_backend_cache = "cuda"
+        return "cuda"
+    val hip_visible = rt_env_get("HIP_VISIBLE_DEVICES") ?? ""
+    val rocr_visible = rt_env_get("ROCR_VISIBLE_DEVICES") ?? ""
+    if (hip_visible != "" and hip_visible != "-1") or (rocr_visible != "" and rocr_visible != "-1"):
+        _preferred_engine2d_backend_cache = "rocm"
+        return "rocm"
+    _preferred_engine2d_backend_cache = "software"
+    "software"
 
 class SimpleWebEngine2DStaticPixelCache:
     width: i32
@@ -595,6 +624,7 @@ fn _is_generated_widget_html(html: text) -> bool:
 pub fn simple_web_engine2d_render_html_pixels(html: text, width: i32, height: i32, backend_name: text) -> [u32]:
     if width <= 0 or height <= 0:
         return []
+    val selected_backend_name = simple_web_engine2d_resolved_backend_name(width, height, backend_name)
 
     val bg = _html_background_color(html)
     val block_color = _first_block_color(html, 0u32)
@@ -619,12 +649,12 @@ pub fn simple_web_engine2d_render_html_pixels(html: text, width: i32, height: i3
     val needs_selector_layout = _style_block_has_class_or_id_selector(html)
     val is_generated_widget_html = _is_generated_widget_html(html)
     if is_generated_widget_html:
-        return simple_web_layout_render_html_pixels(html, width, height, backend_name)
+        return simple_web_layout_render_html_pixels(html, width, height, selected_backend_name)
     # Result-based fixture discriminator: route to the heuristic only when it
     # recognizes structure it can faithfully reproduce; otherwise lay out for real.
     val heuristic_recognized = not needs_selector_layout and (bg != 0xFFFFFFFFu32 or block_color != 0u32 or has_wm_titlebar or has_wm_content or has_simple_web_mark or has_toolbar_modal_grid or has_dashboard_command_list or has_form_sidebar_validation or has_settings_inspector_tree or has_media_gallery_command or has_report_table_command)
     if not heuristic_recognized:
-        return simple_web_layout_render_html_pixels(html, width, height, backend_name)
+        return simple_web_layout_render_html_pixels(html, width, height, selected_backend_name)
 
     val has_accent_stripes = bg == 0xFFFFFFFFu32 and block_color == 0u32
     if block_color == 0u32 and not has_accent_stripes and not has_wm_titlebar and not has_wm_content and not has_simple_web_mark and not has_toolbar_modal_grid and not has_dashboard_command_list and not has_form_sidebar_validation and not has_settings_inspector_tree and not has_media_gallery_command and not has_report_table_command:
@@ -835,9 +865,13 @@ pub fn simple_web_engine2d_render_html_pixels(html: text, width: i32, height: i3
 
 pub fn simple_web_engine2d_resolved_backend_name(width: i32, height: i32, backend_name: text) -> text:
     val normalized = backend_name.trim().lower()
+    if normalized == "preferred" or normalized == "auto" or normalized == "default" or normalized == "":
+        return _preferred_engine2d_backend_name(width, height)
+    if normalized == "hip":
+        return "rocm"
     if normalized == "cpu_simd" or normalized == "simd_cpu":
         return "cpu_simd"
-    if normalized == "cpu" or normalized == "software" or normalized == "metal" or normalized == "cuda" or normalized == "opencl" or normalized == "vulkan":
+    if normalized == "cpu" or normalized == "software" or normalized == "metal" or normalized == "cuda" or normalized == "opencl" or normalized == "opengl" or normalized == "intel" or normalized == "qualcomm" or normalized == "rocm" or normalized == "webgpu" or normalized == "vulkan":
         return normalized
     "software"
 
