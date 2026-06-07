@@ -1233,6 +1233,16 @@ fn validate_imports(file_path: &Path, items: &[Node], errors: &mut Vec<CheckErro
                 if common_use.path.segments.is_empty() {
                     continue;
                 }
+                if let Some(error) = concurrency_api_import_error(
+                    file_path,
+                    &common_use.path,
+                    &common_use.target,
+                    common_use.span.line,
+                    common_use.span.column,
+                ) {
+                    errors.push(error);
+                    continue;
+                }
                 let resolved = import_resolves(&resolvers, &common_use.path, &common_use.target, &abs_path);
                 if !resolved {
                     let msg = resolvers
@@ -1260,6 +1270,16 @@ fn validate_imports(file_path: &Path, items: &[Node], errors: &mut Vec<CheckErro
             }
             Node::ExportUseStmt(export_use) => {
                 if export_use.path.segments.is_empty() {
+                    continue;
+                }
+                if let Some(error) = concurrency_api_import_error(
+                    file_path,
+                    &export_use.path,
+                    &export_use.target,
+                    export_use.span.line,
+                    export_use.span.column,
+                ) {
+                    errors.push(error);
                     continue;
                 }
                 let resolved = import_resolves(&resolvers, &export_use.path, &export_use.target, &abs_path);
@@ -1312,26 +1332,6 @@ fn concurrency_api_import_error(
         _ => None,
     };
 
-    if (path_text == "std.concurrent.thread" || path_text == "std.nogc_async_mut.concurrent.thread")
-        && target_name.is_some_and(|name| name == "task_spawn")
-    {
-        return Some(CheckError {
-            file: file_path.display().to_string(),
-            line,
-            column,
-            severity: ErrorSeverity::Error,
-            code: Some("E-PAR-001".to_string()),
-            message: "task_spawn is not part of the OS-thread facade".to_string(),
-            expected: Some("OS-thread API symbol".to_string()),
-            found: Some("task_spawn".to_string()),
-            notes: vec![
-                "std.concurrent.thread is reserved for OS thread primitives such as thread_spawn and thread_spawn_with_args"
-                    .to_string(),
-            ],
-            help: vec!["import task_spawn from std.nogc_async_mut.thread_pool instead".to_string()],
-        });
-    }
-
     if is_concurrency_thread_path(&path_text) {
         if let Some(name) = target_name {
             if let Some(replacement) = numbered_concurrency_replacement(name) {
@@ -1340,18 +1340,30 @@ fn concurrency_api_import_error(
         }
     }
 
-    if let Some((owner_path, name)) = path.segments.split_last().and_then(|(name, owner)| {
+    let path_symbol = path.segments.split_last().and_then(|(name, owner)| {
         let owner_path = owner.join(".");
         if owner.is_empty() {
             None
         } else {
             Some((owner_path, name))
         }
-    }) {
-        if is_concurrency_thread_path(&owner_path) {
+    });
+
+    if let Some((owner_path, name)) = &path_symbol {
+        if is_concurrency_thread_path(owner_path) {
             if let Some(replacement) = numbered_concurrency_replacement(name) {
                 return Some(numbered_concurrency_error(file_path, line, column, name, replacement));
             }
+        }
+    }
+
+    if let Some(name) = target_name {
+        if let Some(error) = concurrency_wrong_surface_error(file_path, line, column, &path_text, name) {
+            return Some(error);
+        }
+    } else if let Some((owner_path, name)) = path_symbol {
+        if let Some(error) = concurrency_wrong_surface_error(file_path, line, column, &owner_path, name) {
+            return Some(error);
         }
     }
 
@@ -1400,6 +1412,101 @@ fn numbered_concurrency_error(
         ],
         help: vec![format!("use {replacement} for explicit-argument spawning")],
     }
+}
+
+fn concurrency_wrong_surface_error(
+    file_path: &Path,
+    line: usize,
+    column: usize,
+    owner_path: &str,
+    name: &str,
+) -> Option<CheckError> {
+    if is_concurrency_thread_path(owner_path) && name == "task_spawn" {
+        return Some(CheckError {
+            file: file_path.display().to_string(),
+            line,
+            column,
+            severity: ErrorSeverity::Error,
+            code: Some("E-PAR-001".to_string()),
+            message: "task_spawn is not part of the OS-thread facade".to_string(),
+            expected: Some("OS-thread API symbol".to_string()),
+            found: Some("task_spawn".to_string()),
+            notes: vec![
+                "std.concurrent.thread is reserved for OS thread primitives such as thread_spawn and thread_spawn_with_args"
+                    .to_string(),
+            ],
+            help: vec!["import task_spawn from std.nogc_async_mut.thread_pool instead".to_string()],
+        });
+    }
+
+    let Some(expected_owner) = expected_concurrency_owner(name) else {
+        return None;
+    };
+
+    let accepted = match name {
+        "thread_spawn" | "thread_spawn_with_args" => is_concurrency_thread_path(owner_path),
+        "cooperative_green_spawn"
+        | "cooperative_green_spawn_value"
+        | "cooperative_green_run_one"
+        | "cooperative_green_run_all" => is_cooperative_green_path(owner_path),
+        "multicore_green_spawn" => is_multicore_green_path(owner_path),
+        "task_spawn" => is_thread_pool_path(owner_path),
+        _ => true,
+    };
+
+    if accepted {
+        return None;
+    }
+
+    Some(CheckError {
+        file: file_path.display().to_string(),
+        line,
+        column,
+        severity: ErrorSeverity::Error,
+        code: Some("E-PAR-003".to_string()),
+        message: format!("{name} belongs to {expected_owner}, not {owner_path}"),
+        expected: Some(expected_owner.to_string()),
+        found: Some(owner_path.to_string()),
+        notes: vec![
+            "thread_spawn, cooperative_green_spawn, multicore_green_spawn, and task_spawn intentionally live on separate concurrency surfaces"
+                .to_string(),
+        ],
+        help: vec![format!("import {name} from {expected_owner}")],
+    })
+}
+
+fn expected_concurrency_owner(name: &str) -> Option<&'static str> {
+    match name {
+        "thread_spawn" | "thread_spawn_with_args" => Some("std.concurrent.thread"),
+        "cooperative_green_spawn"
+        | "cooperative_green_spawn_value"
+        | "cooperative_green_run_one"
+        | "cooperative_green_run_all" => Some("std.concurrent.cooperative_green"),
+        "multicore_green_spawn" => Some("std.concurrent.multicore_green"),
+        "task_spawn" => Some("std.nogc_async_mut.thread_pool"),
+        _ => None,
+    }
+}
+
+fn is_cooperative_green_path(path_text: &str) -> bool {
+    matches!(
+        path_text,
+        "std.concurrent.cooperative_green" | "std.nogc_async_mut.concurrent.cooperative_green"
+    )
+}
+
+fn is_multicore_green_path(path_text: &str) -> bool {
+    matches!(
+        path_text,
+        "std.concurrent.multicore_green" | "std.nogc_async_mut.concurrent.multicore_green"
+    )
+}
+
+fn is_thread_pool_path(path_text: &str) -> bool {
+    matches!(
+        path_text,
+        "std.nogc_async_mut.thread_pool" | "nogc_async_mut.thread_pool"
+    )
 }
 
 /// Convert ParseError to CheckError
@@ -1817,6 +1924,23 @@ mod tests {
     }
 
     #[test]
+    fn test_check_rejects_task_spawn_from_sync_os_thread_facade() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "use std.nogc_sync_mut.concurrent.thread.{{task_spawn}}\nfn main():\n    val x = 1"
+        )
+        .unwrap();
+
+        let result = check_file(file.path(), &[], false);
+        assert_eq!(result.status, CheckStatus::Error);
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.code.as_deref() == Some("E-PAR-001")));
+    }
+
+    #[test]
     fn test_check_rejects_numbered_thread_spawn_alias() {
         let mut file = NamedTempFile::new().unwrap();
         writeln!(
@@ -1851,6 +1975,73 @@ mod tests {
             .errors
             .iter()
             .any(|error| error.code.as_deref() == Some("E-PAR-002")));
+    }
+
+    #[test]
+    fn test_check_rejects_numbered_thread_spawn_alias_common_and_export_use() {
+        for statement in [
+            "common use std.concurrent.thread.{thread_spawn2}",
+            "export use std.concurrent.thread.{thread_spawn2}",
+        ] {
+            let mut file = NamedTempFile::new().unwrap();
+            writeln!(file, "{statement}\nfn main():\n    val x = 1").unwrap();
+
+            let result = check_file(file.path(), &[], false);
+            assert_eq!(result.status, CheckStatus::Error);
+            assert!(result
+                .errors
+                .iter()
+                .any(|error| error.code.as_deref() == Some("E-PAR-002")));
+        }
+    }
+
+    #[test]
+    fn test_check_rejects_numbered_thread_spawn_alias_with_alias() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "use std.concurrent.thread.{{thread_spawn2 as spawn}}\nfn main():\n    val x = 1"
+        )
+        .unwrap();
+
+        let result = check_file(file.path(), &[], false);
+        assert_eq!(result.status, CheckStatus::Error);
+        assert!(result.errors.iter().any(|error| {
+            error.code.as_deref() == Some("E-PAR-002")
+                && error.help.iter().any(|help| help.contains("thread_spawn_with_args"))
+        }));
+    }
+
+    #[test]
+    fn test_check_rejects_wrong_concurrency_surface_imports() {
+        for (statement, symbol, owner) in [
+            (
+                "use std.concurrent.thread.{cooperative_green_spawn}",
+                "cooperative_green_spawn",
+                "std.concurrent.cooperative_green",
+            ),
+            (
+                "use std.concurrent.thread.{multicore_green_spawn}",
+                "multicore_green_spawn",
+                "std.concurrent.multicore_green",
+            ),
+            (
+                "use std.concurrent.cooperative_green.{thread_spawn}",
+                "thread_spawn",
+                "std.concurrent.thread",
+            ),
+        ] {
+            let mut file = NamedTempFile::new().unwrap();
+            writeln!(file, "{statement}\nfn main():\n    val x = 1").unwrap();
+
+            let result = check_file(file.path(), &[], false);
+            assert_eq!(result.status, CheckStatus::Error);
+            assert!(result.errors.iter().any(|error| {
+                error.code.as_deref() == Some("E-PAR-003")
+                    && error.message.contains(symbol)
+                    && error.help.iter().any(|help| help.contains(owner))
+            }));
+        }
     }
 
     #[test]

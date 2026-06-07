@@ -146,6 +146,18 @@ failure_reason() {
     fi
 }
 
+pool_evidence() {
+    _cmd="$1"
+    _expected="$2"
+    _out=$(run_bounded "$_cmd" 2>&1) || { echo "pool_used=fail/$_expected"; return; }
+    _used=$(printf '%s\n' "$_out" | sed -n 's/.*multicore_green_pool_used = \([0-9][0-9]*\)\/[0-9][0-9]*.*/\1/p' | tail -1)
+    if [ -z "$_used" ]; then
+        echo "pool_used=missing/$_expected"
+    else
+        echo "pool_used=$_used/$_expected"
+    fi
+}
+
 # Extract in-process timing from program stdout (programs print "warm_ms: NNN.NNN")
 extract_warm_ms() {
     _cmd="$1"
@@ -317,8 +329,8 @@ write_simple_parallel_multicore_green() {
             echo "    if h${i}.used_runtime_pool():"
             echo "        pool_used = pool_used + 1"
         done
+        echo "    println(\"multicore_green_pool_used = {pool_used}/${MULTICORE_GREEN_WORKERS}\")"
         echo "    if pool_used != ${MULTICORE_GREEN_WORKERS}:"
-        echo '        println("multicore_green_pool_used = {pool_used}")'
         echo '        rt_exit(73)'
         echo '    var total: i64 = 0'
         for i in $(seq 0 "$_last_multicore_worker"); do
@@ -435,8 +447,8 @@ write_simple_fanout_multicore_green() {
             echo "    if h${i}.used_runtime_pool():"
             echo "        pool_used = pool_used + 1"
         done
+        echo "    println(\"multicore_green_pool_used = {pool_used}/${FANOUT_MULTICORE_GREEN_WORKERS}\")"
         echo "    if pool_used != ${FANOUT_MULTICORE_GREEN_WORKERS}:"
-        echo '        println("multicore_green_pool_used = {pool_used}")'
         echo '        rt_exit(73)'
         echo '    var total: i64 = 0'
         for i in $(seq 0 "$_last_fanout_worker"); do
@@ -1283,7 +1295,8 @@ if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/parallel_multicore_green_simple.s
         reason=$(failure_reason "$SIMPLE_BINARY $BUILD_DIR/parallel_multicore_green_simple.smf")
         par_row "Simple multicore green (SMF)" "$ms" "multicore_green runtime pool candidate ($reason)"
     else
-        par_row "Simple multicore green (SMF)" "$ms" "multicore_green runtime pool candidate"
+        evidence=$(pool_evidence "$SIMPLE_BINARY $BUILD_DIR/parallel_multicore_green_simple.smf" "$MULTICORE_GREEN_WORKERS")
+        par_row "Simple multicore green (SMF)" "$ms" "multicore_green runtime pool candidate ($evidence)"
     fi
 fi
 if [ -x "$BUILD_DIR/parallel_multicore_green_simple_native" ]; then
@@ -1292,7 +1305,8 @@ if [ -x "$BUILD_DIR/parallel_multicore_green_simple_native" ]; then
         reason=$(failure_reason "$BUILD_DIR/parallel_multicore_green_simple_native")
         par_row "Simple multicore green (native)" "$ms" "multicore_green runtime pool candidate ($reason)"
     else
-        par_row "Simple multicore green (native)" "$ms" "multicore_green runtime pool candidate"
+        evidence=$(pool_evidence "$BUILD_DIR/parallel_multicore_green_simple_native" "$MULTICORE_GREEN_WORKERS")
+        par_row "Simple multicore green (native)" "$ms" "multicore_green runtime pool candidate ($evidence)"
     fi
 else
     par_row "Simple multicore green (native)" "n/a" "compile failed"
@@ -1391,7 +1405,8 @@ if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/fanout_multicore_green_simple.smf
         reason=$(failure_reason "$SIMPLE_BINARY $BUILD_DIR/fanout_multicore_green_simple.smf")
         fanout_row "Simple multicore green (SMF)" "$ms" "multicore_green runtime pool fanout ($reason)"
     else
-        fanout_row "Simple multicore green (SMF)" "$ms" "multicore_green runtime pool fanout"
+        evidence=$(pool_evidence "$SIMPLE_BINARY $BUILD_DIR/fanout_multicore_green_simple.smf" "$FANOUT_MULTICORE_GREEN_WORKERS")
+        fanout_row "Simple multicore green (SMF)" "$ms" "multicore_green runtime pool fanout ($evidence)"
     fi
 elif echo "$COMPILE_FAIL_SMF" | grep -q 'smf:fanout_multicore_green(timeout)'; then
     fanout_row "Simple multicore green (SMF)" "n/a" "multicore_green runtime pool fanout compile timeout"
@@ -1402,7 +1417,8 @@ if [ -x "$BUILD_DIR/fanout_multicore_green_simple_native" ]; then
         reason=$(failure_reason "$BUILD_DIR/fanout_multicore_green_simple_native")
         fanout_row "Simple multicore green (native)" "$ms" "multicore_green runtime pool fanout ($reason)"
     else
-        fanout_row "Simple multicore green (native)" "$ms" "multicore_green runtime pool fanout"
+        evidence=$(pool_evidence "$BUILD_DIR/fanout_multicore_green_simple_native" "$FANOUT_MULTICORE_GREEN_WORKERS")
+        fanout_row "Simple multicore green (native)" "$ms" "multicore_green runtime pool fanout ($evidence)"
     fi
 elif echo "$COMPILE_FAIL" | grep -q 'native:fanout_multicore_green(timeout)'; then
     fanout_row "Simple multicore green (native)" "n/a" "multicore_green runtime pool fanout compile timeout"
@@ -1633,7 +1649,8 @@ fi
 cat >>"$REPORT_PATH" <<'EOF'
 
 > **Workload:** LCG (Linear Congruential Generator) with 100K iterations per worker.
-> Each worker reads shared constants (LCG_A, LCG_C, LCG_M, ITERS).
+> Generated Simple workers use literal loop and LCG constants so checksum
+> evidence does not depend on native/SMF global-load behavior.
 > The large fanout section uses many tiny workers with `FANOUT_ITERS` iterations
 > to expose scheduling overhead; this is the case where Go goroutines should
 > usually beat one-pthread-per-task C. Simple reports both OS-thread fanout
