@@ -28,7 +28,7 @@ simple_web_renderer_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 53 | 53 | 0 | 0 |
+| 54 | 54 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -334,6 +334,24 @@ expect(pixels.len()).to_equal(96 * 64)
 expect(_count_color(pixels, 0xFF22C55Eu32)).to_be_greater_than(0)
 expect(_count_color(pixels, 0xFFEF4444u32)).to_be_greater_than(0)
 expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(0)
+```
+
+</details>
+
+#### rejects non matching single class selectors without prefix matches
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>.button-primary{background-color:#dc2626;width:20px;height:10px}.button{background-color:#16a34a;width:20px;height:10px}</style></head><body><div class='button-primary'></div></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 96, 64)
+expect(pixels.len()).to_equal(96 * 64)
+expect(_count_color(pixels, 0xFFDC2626u32)).to_be_greater_than(0)
+expect(_count_color(pixels, 0xFF16A34Au32)).to_equal(0)
 ```
 
 </details>
@@ -1169,8 +1187,8 @@ expect(_count_color(pixels, 0xFF065F46u32)).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 53 |
-| Active scenarios | 53 |
+| Total scenarios | 54 |
+| Active scenarios | 54 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

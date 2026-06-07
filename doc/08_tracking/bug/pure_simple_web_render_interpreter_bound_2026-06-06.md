@@ -310,6 +310,11 @@ Unit coverage: `simple_web_renderer_spec.spl` includes direct child,
 descendant, class, and CSS matrix cases that exercise the fallback and fast
 paths.
 
+2026-06-07 single-class reject update: `class_has()` now returns immediately
+for non-matching one-token class attributes instead of constructing padded
+strings and splitting the class list for every missed `.class` rule. Focused
+coverage asserts `.button` does not prefix-match `class='button-primary'`.
+
 ## Path H — single-declaration CSS blocks paid full declaration lookup — FIXED 2026-06-07
 
 `apply_decls()` scanned and split a declaration block once for every supported
