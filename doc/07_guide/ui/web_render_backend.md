@@ -70,7 +70,10 @@ rendering through FontRenderer-backed text blit buffers, and reporting
 `font_production_ready` from the vector-font offload evidence helper. A status
 such as `cpu-fallback` means routing and metadata are live while production GPU
 dispatch is still missing; `gpu-glyph-returned` means the backend rasterizer
-returned glyph pixels through the vector-font evidence path.
+returned glyph pixels through the vector-font evidence path. The Draw IR text
+executor also reports `font_text_cache_hits` / `font_text_cache_misses` for the
+per-batch text-blit buffer cache; repeated identical labels should hit this
+cache instead of re-running glyph layout and blit preparation.
 
 Keep pure_simple viewports modest (≤ ~400 wide); chromium opens a live window
 and is unaffected.

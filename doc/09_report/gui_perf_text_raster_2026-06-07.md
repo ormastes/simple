@@ -96,10 +96,12 @@ offload status/reason plus explicit `font_gpu_glyph_returned` and
 production GPU glyph dispatch remains open.
 
 2026-06-07 Draw IR text-cache follow-up: the text executor now keeps one
-`TextBlitCache` per batch/composition so repeated text commands reuse the
-FontRenderer glyph cache instead of constructing a new renderer for every text
-command. Focused unit evidence renders two repeated vector `A` text commands and
-asserts one vector-font accelerator attempt while both commands render.
+`TextBlitCache` per batch/composition and caches complete rendered text blit
+buffers by text/color/background/font size. Repeated identical text commands now
+avoid both new renderer construction and repeated glyph layout/blit preparation.
+Focused unit evidence renders two repeated vector `A` text commands and asserts
+one cache hit, one cache miss, and one vector-font accelerator attempt while both
+commands render.
 
 2026-06-07 Draw IR glyph-return evidence follow-up: the Draw IR result now
 reports the positive backend-return state. A focused unit injects a validated

@@ -284,7 +284,7 @@ engine.shutdown()
 
 </details>
 
-#### reuses vector glyph rasterization across repeated Draw IR text commands
+#### reuses text blit buffers across repeated Draw IR text commands
 
 1. var engine = Engine2D create with backend
 2. engine clear
@@ -292,6 +292,8 @@ engine.shutdown()
 4.  draw ir text command
    - Expected: result.rendered_command_count equals `2`
    - Expected: result.text_command_count equals `2`
+   - Expected: result.font_text_cache_hits equals `1`
+   - Expected: result.font_text_cache_misses equals `1`
    - Expected: stats.attempts equals `1`
 5. engine shutdown
 
@@ -299,7 +301,7 @@ engine.shutdown()
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -315,6 +317,8 @@ val stats = vector_font_accelerator_stats()
 
 expect(result.rendered_command_count).to_equal(2)
 expect(result.text_command_count).to_equal(2)
+expect(result.font_text_cache_hits).to_equal(1)
+expect(result.font_text_cache_misses).to_equal(1)
 expect(stats.attempts).to_equal(1)
 expect(_count_not_color(result.pixels, BG)).to_be_greater_than(0)
 engine.shutdown()

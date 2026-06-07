@@ -125,9 +125,12 @@ CPU-fallback reason with both glyph-return booleans false.
 
 2026-06-07 text-cache update: the Draw IR executor now creates one
 `TextBlitCache` per batch/composition instead of creating a fresh
-`FontRenderer` per text command. Repeated vector glyphs in a Draw IR batch reuse
-the renderer glyph cache; focused unit coverage renders two `A` text commands
-and asserts `vector_font_accelerator_stats().attempts == 1`.
+`FontRenderer` per text command. It now caches full rendered text blit buffers
+by text/color/background/font size, so repeated identical labels skip glyph
+layout and text-buffer preparation entirely. Focused unit coverage renders two
+`A` text commands and asserts `font_text_cache_hits == 1`,
+`font_text_cache_misses == 1`, and
+`vector_font_accelerator_stats().attempts == 1`.
 
 2026-06-07 glyph-return evidence update: the Draw IR boundary now proves the
 positive glyph-return state when a backend rasterizer supplies vector glyph

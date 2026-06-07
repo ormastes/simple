@@ -32,12 +32,34 @@ class TextBlitBuffer:
     fn is_empty() -> bool:
         self.width <= 0 or self.height <= 0 or self.pixels.len() == 0
 
+class TextBlitCacheEntry:
+    text_value: text
+    fg: u32
+    bg: u32
+    font_size: i32
+    buffer: TextBlitBuffer
+
 class TextBlitCache:
     """Reusable font renderer for a Draw IR or backend text batch."""
     renderer: FontRenderer
+    entries: [TextBlitCacheEntry]
+    max_entries: i32
+    cache_hits: i32
+    cache_misses: i32
 
     static fn new() -> TextBlitCache:
-        TextBlitCache(renderer: FontRenderer.new())
+        TextBlitCache(renderer: FontRenderer.new(), entries: [], max_entries: 64, cache_hits: 0, cache_misses: 0)
+
+    fn lookup(text_val: text, fg: u32, bg: u32, font_size: i32) -> TextBlitBuffer?:
+        for entry in self.entries:
+            if entry.text_value == text_val and entry.fg == fg and entry.bg == bg and entry.font_size == font_size:
+                return entry.buffer
+        nil
+
+    me insert(text_val: text, fg: u32, bg: u32, font_size: i32, buffer: TextBlitBuffer):
+        if self.entries.len() >= self.max_entries:
+            self.entries = self.entries.slice(1, self.entries.len())
+        self.entries.push(TextBlitCacheEntry(text_value: text_val, fg: fg, bg: bg, font_size: font_size, buffer: buffer))
 
     me render_to_buf(text_val: text, fg: u32, bg: u32, font_size: i32) -> [u32]:
         val text_w = text_buf_width(text_val, font_size)
@@ -49,12 +71,19 @@ class TextBlitCache:
         self.renderer.render_text([bg; buf_size], text_w, text_h, 0, 0, text_val, fg, font_size)
 
     me blit_buffer(text_val: text, fg: u32, bg: u32, font_size: i32) -> TextBlitBuffer:
+        val cached = self.lookup(text_val, fg, bg, font_size)
+        if val Some(buffer) = cached:
+            self.cache_hits = self.cache_hits + 1
+            return buffer
+        self.cache_misses = self.cache_misses + 1
         val text_w = text_buf_width(text_val, font_size)
         val text_h = text_buf_height(font_size)
         if text_w <= 0 or text_h <= 0:
             var empty: [u32] = []
             return TextBlitBuffer(width: 0, height: 0, pixels: empty)
-        TextBlitBuffer(width: text_w, height: text_h, pixels: self.render_to_buf(text_val, fg, bg, font_size))
+        val buffer = TextBlitBuffer(width: text_w, height: text_h, pixels: self.render_to_buf(text_val, fg, bg, font_size))
+        self.insert(text_val, fg, bg, font_size, buffer)
+        buffer
 
     me transparent_blit_buffer(text_val: text, fg: u32, font_size: i32) -> TextBlitBuffer:
         self.blit_buffer(text_val, fg, 0u32, font_size)
