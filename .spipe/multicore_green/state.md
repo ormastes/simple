@@ -145,6 +145,12 @@ go-runtime-hardening
 - verification: `scheduler.spl` and `green_carrier.spl` checks passed, and
   `scheduler_green_parallelism_spec.spl` passed 19 examples for green yield
   requeue and no-current guard behavior.
+- implementation: Added `Scheduler.green_timer_tick_on_cpu` plus per-carrier
+  green tick budget state, so scheduler ticks can yield/requeue the current
+  green task through the existing fairness hook when its time slice expires.
+- verification: `scheduler.spl` and `green_carrier.spl` checks passed, and
+  `scheduler_green_parallelism_spec.spl` passed 21 examples for tick-budget
+  decrement, time-slice yield, and no-current tick behavior.
 
 ## Completion Audit - 2026-06-07
 

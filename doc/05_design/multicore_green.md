@@ -140,6 +140,9 @@ Behavior:
 - `Scheduler.yield_green_current_on_cpu` requeues a running green task on the
   active carrier queue and clears the current slot only after requeue succeeds,
   giving future safepoints or timer preemption a concrete fairness transition.
+- `Scheduler.green_timer_tick_on_cpu` records per-carrier green tick budgets,
+  decrements them on scheduler tick, and invokes the yield transition on time
+  slice expiry.
 - `Scheduler.run_green_channel_wake_pass` converts green-channel send/unpark
   output into a carrier enqueue, then runs the bounded active pass only when
   the wake actually enqueued a receiver.
@@ -212,7 +215,9 @@ Repository guards:
 
 - Scheduler-owned parallelism handoff: the hosted runtime-pool facade and
   SimpleOS `Scheduler` now both expose topology-bounded parallelism contracts.
-  Remaining work is carrying bounded worker-loop/yield passes into final AP
-  hardware handoff, broader blocking surfaces, and timer/compiler preemption.
-- Preemption strategy: the cooperative yield transition exists; remaining work
-  is wiring compiler-inserted yields, runtime safepoints, or timer preemption.
+  Remaining work is carrying bounded worker-loop/yield/tick passes into final
+  AP hardware handoff, broader blocking surfaces, and real interrupt/compiler
+  preemption entrypoints.
+- Preemption strategy: scheduler-owned tick-budget yield exists; remaining work
+  is wiring compiler-inserted yields, runtime safepoints, or hardware timer
+  interrupts to that hook.

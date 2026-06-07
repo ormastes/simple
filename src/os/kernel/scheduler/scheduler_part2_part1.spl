@@ -94,11 +94,13 @@ use os.kernel.scheduler.green_carrier.{
     GreenCarrierSchedulerIntent, GreenCarrierExecutionResult, GreenCarrierParallelismState,
     GreenCarrierRunQueueState, GreenCarrierRebalanceResult, GreenCarrierRebalancePassResult,
     GreenCarrierRunStepResult, GreenCarrierRunPassResult, GreenCarrierRunLoopResult,
-    GreenCarrierYieldResult, GreenCarrierWakeRunResult,
+    GreenCarrierYieldResult, GreenCarrierTimerTickResult, GreenCarrierWakeRunResult,
     green_carrier_apply_scheduler_intent,
     green_carrier_extend_execution_state,
     green_carrier_current_task_on_cpu,
     green_carrier_context_switches_on_cpu,
+    green_carrier_ticks_remaining_on_cpu,
+    green_carrier_decrement_ticks_on_cpu,
     green_carrier_clear_current_on_cpu,
     green_carrier_set_parallelism,
     green_carrier_parallelism_for_topology,
@@ -523,6 +525,10 @@ impl Scheduler:
         val cpu = self._normalize_cpu(cpu_id)
         green_carrier_context_switches_on_cpu(self.green_execution_state, cpu as i64)
 
+    fn green_ticks_remaining_on_cpu(cpu_id: u32) -> i64:
+        val cpu = self._normalize_cpu(cpu_id)
+        green_carrier_ticks_remaining_on_cpu(self.green_execution_state, cpu as i64)
+
     fn green_rejected_intents() -> i64:
         self.green_execution_state.rejected_intents
 
@@ -541,6 +547,58 @@ impl Scheduler:
                 cpu as i64
             )
         yielded
+
+    me green_timer_tick_on_cpu(queues: GreenCarrierRunQueueState, cpu_id: u32) -> GreenCarrierTimerTickResult:
+        val cpu = self._normalize_cpu(cpu_id)
+        val current_task = green_carrier_current_task_on_cpu(self.green_execution_state, cpu as i64)
+        val ticks_remaining = green_carrier_ticks_remaining_on_cpu(self.green_execution_state, cpu as i64)
+        if current_task < 1:
+            val yielded = GreenCarrierYieldResult(
+                queues: queues,
+                task_id: 0,
+                cpu: cpu as i64,
+                yielded: false,
+                reason: "no_current_green_task"
+            )
+            return GreenCarrierTimerTickResult(
+                queues: queues,
+                yield_result: yielded,
+                cpu: cpu as i64,
+                task_id: 0,
+                ticks_remaining: ticks_remaining,
+                yielded: false,
+                reason: "no_current_green_task"
+            )
+        if ticks_remaining > 1:
+            self.green_execution_state = green_carrier_decrement_ticks_on_cpu(
+                self.green_execution_state,
+                cpu as i64
+            )
+            return GreenCarrierTimerTickResult(
+                queues: queues,
+                yield_result: GreenCarrierYieldResult(
+                    queues: queues,
+                    task_id: current_task as i64,
+                    cpu: cpu as i64,
+                    yielded: false,
+                    reason: "time_slice_running"
+                ),
+                cpu: cpu as i64,
+                task_id: current_task as i64,
+                ticks_remaining: ticks_remaining - 1,
+                yielded: false,
+                reason: "time_slice_running"
+            )
+        val yielded = self.yield_green_current_on_cpu(queues, cpu_id)
+        GreenCarrierTimerTickResult(
+            queues: yielded.queues,
+            yield_result: yielded,
+            cpu: cpu as i64,
+            task_id: current_task as i64,
+            ticks_remaining: 0,
+            yielded: yielded.yielded,
+            reason: if yielded.yielded: "green_time_slice_expired" else: yielded.reason
+        )
 
     me set_green_carrier_parallelism(requested_limit: i64) -> GreenCarrierParallelismState:
         val next_state = green_carrier_set_parallelism(self.green_parallelism_state, requested_limit)

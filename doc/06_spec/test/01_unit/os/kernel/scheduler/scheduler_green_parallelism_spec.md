@@ -28,7 +28,7 @@ scheduler_green_parallelism_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 19 | 19 | 0 | 0 |
+| 21 | 21 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -770,12 +770,97 @@ expect(sched.green_current_task_on_cpu(0u32)).to_equal(0)
 
 </details>
 
+#### yields current green task when timer budget expires
+
+1. var sched = Scheduler new with cpu count
+
+2. sched set green carrier parallelism
+   - Expected: first_pass.ran_workers equals `1`
+   - Expected: tick1.yielded is false
+   - Expected: tick1.reason equals `time_slice_running`
+   - Expected: tick1.ticks_remaining equals `1`
+   - Expected: sched.green_current_task_on_cpu(0u32) equals `69`
+   - Expected: tick2.yielded is true
+   - Expected: tick2.reason equals `green_time_slice_expired`
+   - Expected: tick2.yield_result.reason equals `yielded_to_run_queue`
+   - Expected: green_carrier_queue_depth(tick2.queues, 0) equals `1`
+   - Expected: second_pass.ran_workers equals `1`
+   - Expected: second_pass.last_task_id equals `69`
+   - Expected: sched.green_ticks_remaining_on_cpu(0u32) equals `2`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var sched = Scheduler.new_with_cpu_count(4u32)
+sched.set_green_carrier_parallelism(1)
+val queues = green_carrier_run_queues_new(4, 8)
+val first = green_carrier_spawn_task(69, 4, 1, 0, 4, 4, 4, 0)
+val queued = green_carrier_apply_enqueue(queues, first)
+val first_pass = sched.run_green_carrier_active_pass(queued.queues, 0)
+val tick1 = sched.green_timer_tick_on_cpu(first_pass.queues, 0u32)
+val tick2 = sched.green_timer_tick_on_cpu(tick1.queues, 0u32)
+val second_pass = sched.run_green_carrier_active_pass(tick2.queues, 0)
+
+expect(first_pass.ran_workers).to_equal(1)
+expect(tick1.yielded).to_equal(false)
+expect(tick1.reason).to_equal("time_slice_running")
+expect(tick1.ticks_remaining).to_equal(1)
+expect(sched.green_current_task_on_cpu(0u32)).to_equal(69)
+expect(tick2.yielded).to_equal(true)
+expect(tick2.reason).to_equal("green_time_slice_expired")
+expect(tick2.yield_result.reason).to_equal("yielded_to_run_queue")
+expect(green_carrier_queue_depth(tick2.queues, 0)).to_equal(1)
+expect(second_pass.ran_workers).to_equal(1)
+expect(second_pass.last_task_id).to_equal(69)
+expect(sched.green_ticks_remaining_on_cpu(0u32)).to_equal(2)
+```
+
+</details>
+
+#### does not tick-yield when carrier has no current green task
+
+1. var sched = Scheduler new with cpu count
+
+2. sched set green carrier parallelism
+   - Expected: tick.yielded is false
+   - Expected: tick.task_id equals `0`
+   - Expected: tick.reason equals `no_current_green_task`
+   - Expected: green_carrier_queue_depth(tick.queues, 0) equals `0`
+   - Expected: sched.green_current_task_on_cpu(0u32) equals `0`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var sched = Scheduler.new_with_cpu_count(4u32)
+sched.set_green_carrier_parallelism(1)
+val queues = green_carrier_run_queues_new(4, 8)
+val tick = sched.green_timer_tick_on_cpu(queues, 0u32)
+
+expect(tick.yielded).to_equal(false)
+expect(tick.task_id).to_equal(0)
+expect(tick.reason).to_equal("no_current_green_task")
+expect(green_carrier_queue_depth(tick.queues, 0)).to_equal(0)
+expect(sched.green_current_task_on_cpu(0u32)).to_equal(0)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 19 |
-| Active scenarios | 19 |
+| Total scenarios | 21 |
+| Active scenarios | 21 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

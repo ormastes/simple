@@ -18,6 +18,7 @@ use os.kernel.types.task_types.{TaskId}
 use os.kernel.smp.smp.{smp_send_ipi}
 
 pub val GREEN_CARRIER_RESCHEDULE_IPI: u32 = 0x1u32
+pub val GREEN_CARRIER_TIME_SLICE_TICKS: i64 = 2
 
 pub struct GreenCarrierEnqueueDecision:
     """Run-queue enqueue and wake intent for a logical green task."""
@@ -107,6 +108,16 @@ pub struct GreenCarrierYieldResult:
     yielded: bool
     reason: text
 
+pub struct GreenCarrierTimerTickResult:
+    """Result of one green carrier timer tick."""
+    queues: GreenCarrierRunQueueState
+    yield_result: GreenCarrierYieldResult
+    cpu: i64
+    task_id: i64
+    ticks_remaining: i64
+    yielded: bool
+    reason: text
+
 pub struct GreenCarrierWakeRunResult:
     """Result of waking parked green work and running the scheduler pass."""
     queues: GreenCarrierRunQueueState
@@ -128,6 +139,7 @@ pub struct GreenCarrierExecutionState:
     """Scheduler-visible execution state for green carrier CPUs."""
     current_task_by_cpu: [u64]
     context_switches_by_cpu: [i64]
+    ticks_remaining_by_cpu: [i64]
     total_context_switches: i64
     rejected_intents: i64
 
@@ -617,14 +629,17 @@ pub fn green_carrier_execution_state_new(cpu_count: i64) -> GreenCarrierExecutio
     val normalized_cpu_count = green_carrier_normalized_cpu_count(cpu_count)
     var current_task_by_cpu: [u64] = []
     var context_switches_by_cpu: [i64] = []
+    var ticks_remaining_by_cpu: [i64] = []
     var i = 0
     while i < normalized_cpu_count:
         current_task_by_cpu.push(0)
         context_switches_by_cpu.push(0)
+        ticks_remaining_by_cpu.push(GREEN_CARRIER_TIME_SLICE_TICKS)
         i = i + 1
     GreenCarrierExecutionState(
         current_task_by_cpu: current_task_by_cpu,
         context_switches_by_cpu: context_switches_by_cpu,
+        ticks_remaining_by_cpu: ticks_remaining_by_cpu,
         total_context_switches: 0,
         rejected_intents: 0
     )
@@ -634,6 +649,7 @@ pub fn green_carrier_extend_execution_state(state: GreenCarrierExecutionState, c
     val normalized_cpu_count = green_carrier_normalized_cpu_count(cpu_count)
     var current_task_by_cpu = state.current_task_by_cpu
     var context_switches_by_cpu = state.context_switches_by_cpu
+    var ticks_remaining_by_cpu = state.ticks_remaining_by_cpu
     var current_len = current_task_by_cpu.len()
     while current_len < normalized_cpu_count:
         current_task_by_cpu.push(0)
@@ -642,9 +658,14 @@ pub fn green_carrier_extend_execution_state(state: GreenCarrierExecutionState, c
     while switch_len < normalized_cpu_count:
         context_switches_by_cpu.push(0)
         switch_len = switch_len + 1
+    var tick_len = ticks_remaining_by_cpu.len()
+    while tick_len < normalized_cpu_count:
+        ticks_remaining_by_cpu.push(GREEN_CARRIER_TIME_SLICE_TICKS)
+        tick_len = tick_len + 1
     GreenCarrierExecutionState(
         current_task_by_cpu: current_task_by_cpu,
         context_switches_by_cpu: context_switches_by_cpu,
+        ticks_remaining_by_cpu: ticks_remaining_by_cpu,
         total_context_switches: state.total_context_switches,
         rejected_intents: state.rejected_intents
     )
@@ -663,6 +684,13 @@ pub fn green_carrier_context_switches_on_cpu(state: GreenCarrierExecutionState, 
     else:
         state.context_switches_by_cpu[cpu]
 
+pub fn green_carrier_ticks_remaining_on_cpu(state: GreenCarrierExecutionState, cpu: i64) -> i64:
+    """Return remaining green time-slice ticks for a carrier CPU."""
+    if cpu < 0 or cpu >= state.ticks_remaining_by_cpu.len():
+        0
+    else:
+        state.ticks_remaining_by_cpu[cpu]
+
 pub fn green_carrier_clear_current_on_cpu(state: GreenCarrierExecutionState, cpu: i64) -> GreenCarrierExecutionState:
     """Clear the current green task slot after a successful yield."""
     if cpu < 0 or cpu >= state.current_task_by_cpu.len():
@@ -673,6 +701,7 @@ pub fn green_carrier_clear_current_on_cpu(state: GreenCarrierExecutionState, cpu
         GreenCarrierExecutionState(
             current_task_by_cpu: current_task_by_cpu,
             context_switches_by_cpu: state.context_switches_by_cpu,
+            ticks_remaining_by_cpu: state.ticks_remaining_by_cpu,
             total_context_switches: state.total_context_switches,
             rejected_intents: state.rejected_intents
         )
@@ -683,6 +712,7 @@ pub fn green_carrier_reject_scheduler_intent(state: GreenCarrierExecutionState, 
         state: GreenCarrierExecutionState(
             current_task_by_cpu: state.current_task_by_cpu,
             context_switches_by_cpu: state.context_switches_by_cpu,
+            ticks_remaining_by_cpu: state.ticks_remaining_by_cpu,
             total_context_switches: state.total_context_switches,
             rejected_intents: state.rejected_intents + 1
         ),
@@ -704,6 +734,28 @@ fn green_carrier_increment_switch_count(context_switches_by_cpu: [i64], cpu: i64
         next_switches[cpu] = next_switches[cpu] + 1
     next_switches
 
+fn green_carrier_reset_ticks(ticks_remaining_by_cpu: [i64], cpu: i64) -> [i64]:
+    var next_ticks = ticks_remaining_by_cpu
+    if cpu >= 0 and cpu < next_ticks.len():
+        next_ticks[cpu] = GREEN_CARRIER_TIME_SLICE_TICKS
+    next_ticks
+
+pub fn green_carrier_decrement_ticks_on_cpu(state: GreenCarrierExecutionState, cpu: i64) -> GreenCarrierExecutionState:
+    """Account one green scheduler tick without yielding yet."""
+    if cpu < 0 or cpu >= state.ticks_remaining_by_cpu.len():
+        state
+    else:
+        var ticks_remaining_by_cpu = state.ticks_remaining_by_cpu
+        if ticks_remaining_by_cpu[cpu] > 0:
+            ticks_remaining_by_cpu[cpu] = ticks_remaining_by_cpu[cpu] - 1
+        GreenCarrierExecutionState(
+            current_task_by_cpu: state.current_task_by_cpu,
+            context_switches_by_cpu: state.context_switches_by_cpu,
+            ticks_remaining_by_cpu: ticks_remaining_by_cpu,
+            total_context_switches: state.total_context_switches,
+            rejected_intents: state.rejected_intents
+        )
+
 pub fn green_carrier_apply_scheduler_intent(state: GreenCarrierExecutionState, intent: GreenCarrierSchedulerIntent) -> GreenCarrierExecutionResult:
     """Apply a green scheduler intent to execution state."""
     val cpu = intent.cpu as i64
@@ -716,6 +768,7 @@ pub fn green_carrier_apply_scheduler_intent(state: GreenCarrierExecutionState, i
             state: GreenCarrierExecutionState(
                 current_task_by_cpu: green_carrier_mark_current_task(state.current_task_by_cpu, cpu, intent.task.id),
                 context_switches_by_cpu: green_carrier_increment_switch_count(state.context_switches_by_cpu, cpu),
+                ticks_remaining_by_cpu: green_carrier_reset_ticks(state.ticks_remaining_by_cpu, cpu),
                 total_context_switches: state.total_context_switches + 1,
                 rejected_intents: state.rejected_intents
             ),

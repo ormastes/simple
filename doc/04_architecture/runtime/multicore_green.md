@@ -173,6 +173,9 @@ SimpleOS path:
 - `Scheduler.yield_green_current_on_cpu` is the cooperative fairness hook. It
   requeues the current green task on its active carrier and clears the
   scheduler-owned current slot only after the requeue succeeds.
+- `Scheduler.green_timer_tick_on_cpu` is the timer-facing preemption hook. It
+  decrements per-carrier green tick budget and calls the cooperative yield path
+  when the green time slice expires.
 - `Scheduler.run_green_channel_wake_pass` composes green-channel unpark output
   with carrier enqueue and the bounded active-carrier pass, so parked channel
   receivers can re-enter scheduler-owned execution without bypassing carrier
@@ -193,10 +196,10 @@ The selected Full Go-Like Runtime Roadmap uses all layers:
 - SimpleOS Scheduler Layer owns logical green tasks, carrier queues, remote
   wake/IPI intent, and AP evidence.
 
-Future roadmap work remains explicit: carrying bounded worker-loop and yield
+Future roadmap work remains explicit: carrying bounded worker-loop/yield/tick
 passes into final AP hardware handoff, blocking coverage beyond the current
-green-channel wake pass, and timer/compiler-inserted preemption before claiming
-tight-loop fairness comparable to Go.
+green-channel wake pass, and wiring the real interrupt/compiler preemption
+entrypoints before claiming tight-loop fairness comparable to Go.
 
 ## Known Gaps
 
