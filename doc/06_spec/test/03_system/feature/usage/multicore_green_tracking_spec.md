@@ -134,6 +134,9 @@ Failed: 0
 - The tracking row must carry the large-profile gate and profile-report
   contract so Go scheduler metadata, Go-vs-C stress fanout, and runtime-pool
   evidence stay release-visible.
+- The tracking row must carry the negative profile-report contract so broken
+  Simple fanout, Go stress, runtime-pool, and parallelism evidence cannot pass
+  silently.
 - The tracking row must carry the concurrency API misuse spec so wrong-surface,
   wrong-arity, bad-argument, and numbered-alias diagnostics stay tied to
   REQ-MCG-010.
@@ -284,12 +287,13 @@ expect(row).to_contain("doc/05_design/multicore_green.md")
 - Verify SimpleOS green-carrier specs are linked
 - Verify profile stress specs are linked
 - Verify the public API contract summary remains explicit
+- Verify negative profile contract cases stay release-visible
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -307,6 +311,7 @@ expect(row).to_contain("test/05_perf/stress/multicore_green_cross_language_gate_
 expect(row).to_contain("test/05_perf/stress/multicore_green_fanout_spec.spl")
 expect(row).to_contain("test/05_perf/stress/multicore_green_large_profile_gate_spec.spl")
 expect(row).to_contain("test/05_perf/profile_scripts/profile_report_contract_test.shs")
+expect(row).to_contain("test/05_perf/profile_scripts/profile_report_contract_negative_test.shs")
 expect(row).to_contain("test/05_perf/profile_scripts/concurrency_api_contract_test.shs")
 expect(row).to_contain("test/03_system/feature/usage/concurrency_api_misuse_spec.spl")
 expect(row).to_contain("test/03_system/feature/usage/multicore_green_agent_plan_spec.spl")
@@ -317,6 +322,13 @@ step("Verify the public API contract summary remains explicit")
 expect(row).to_contain("positive_fixtures=5")
 expect(row).to_contain("task_spawn approved")
 expect(row).to_contain("task_spawn_wrong_surface_import.spl rejects OS-thread facade")
+step("Verify negative profile contract cases stay release-visible")
+expect(row).to_contain("large_simple_multicore_fanout_slower_than_c")
+expect(row).to_contain("simple_multicore_stress_slower_than_c")
+expect(row).to_contain("go_stress_slower_than_c")
+expect(row).to_contain("simple_multicore_queue_model_global_fifo")
+expect(row).to_contain("simple_multicore_pool_used_partial")
+expect(row).to_contain("simple_multicore_parallelism_missing")
 ```
 
 </details>
