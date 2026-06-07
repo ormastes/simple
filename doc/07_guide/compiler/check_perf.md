@@ -87,11 +87,10 @@ sh scripts/check/check-cross-language-perf.shs
 | `WARM_IN_PROCESS` | 10 | In-process warmup iterations (JIT reaches steady state) |
 | `FIB_N` | 35 | Fibonacci depth for throughput test |
 | `WORKERS` | 100 | Parallel worker count |
-| `CPU_WORKERS` | `WORKERS` or 100 | Shared CPU-heavy worker count for semantic rows |
+| `CPU_WORKERS` | `WORKERS` or 100 | Shared CPU-heavy worker count and requested hosted pool parallelism for generated multicore-green workloads |
 | `OS_THREAD_WORKERS` | `CPU_WORKERS` | Simple OS-thread worker count for `thread_spawn` rows |
 | `COOPERATIVE_GREEN_WORKERS` | capped at 10 by default | Current single-carrier green queue worker count |
 | `MULTICORE_GREEN_WORKERS` | `CPU_WORKERS` | Pool-backed `multicore_green_spawn` worker count |
-| `CPU_WORKERS` | detected CPU count | Requested hosted `multicore_green_set_parallelism` limit for generated multicore-green workloads |
 | `FANOUT_WORKERS` | 1000 | Large fanout worker count for tiny-task scheduling overhead |
 | `FANOUT_COOPERATIVE_GREEN_WORKERS` | capped at 200 by default | Cooperative green fanout count; capped to avoid oversized generated source |
 | `FANOUT_MULTICORE_GREEN_WORKERS` | `FANOUT_WORKERS` | Pool-backed multicore-green fanout count |
