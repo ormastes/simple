@@ -1,9 +1,13 @@
 ---
 name: spipe
-description: SPipe Skill — Simple Pipe (spec → test → report). BDD test writing, matchers, file structure, doc generation. Use when writing or editing `*_spec.spl` test files, debugging matcher failures, or scaffolding from `.claude/templates/spipe_template.spl`. Renamed from `sspec` on 2026-04-26.
+description: SPipe Skill — runner/docgen/process around executable SSpec `.spl` scenarios. Step-based SSpec test writing, matchers, file structure, and doc generation. Use when writing or editing `*_spec.spl` test files, debugging matcher failures, or scaffolding from `.claude/templates/spipe_template.spl`.
 ---
 
-# SPipe — Simple Pipe (spec → test → report)
+# SPipe — SSpec Runner and Docgen Process
+
+SPipe is the process layer. SSpec is the executable `.spl` scenario authoring
+surface. New manuals should be written as step-based SSpec scenarios and run or
+mirrored through SPipe.
 
 The SPipe dev entrypoint lives at:
 
@@ -29,38 +33,55 @@ sh scripts/setup/install-spipe-dev-command.shs --apply
 - [`.claude/skills/lib/spipe_phases.md`](lib/spipe_phases.md) — phase map
 - [`.claude/skills/lib/spipe_diagrams.md`](lib/spipe_diagrams.md) — diagram & concision rules (≤30 lines + ≥1 SDN diagram)
 - [`.claude/skills/lib/spipe_ui.md`](lib/spipe_ui.md) — **UI skill**: the 3 main GUI check apps + framebuffer capture/verify & backend-parity gates
-- [`doc/07_guide/infra/testing/sspec_scenario_manual.md`](../../doc/07_guide/infra/testing/sspec_scenario_manual.md) — scenario manual, capture, inline/previous scenario, and environmental-test guidance
+- [`doc/07_guide/infra/sspec_scenario_manual.md`](../../doc/07_guide/infra/sspec_scenario_manual.md) — SSpec scenario manual, capture, inline/previous scenario, and environmental-test guidance
 
 ## Scenario Manual Quality
 
-SPipe specs are executable tests and generated manuals. For user-facing,
-operator-facing, MCP/tooling, UI, protocol, hardware, system, and environmental
-tests, generated `doc/06_spec/...` must read like a scenario manual:
+SSpec scenarios are executable `.spl` tests. SPipe runs those tests and
+generates the mirrored manuals. For user-facing, operator-facing, MCP/tooling,
+UI, protocol, hardware, system, and environmental tests, generated
+`doc/06_spec/...` must read like a scenario manual:
 
-- primary flows visible as ordered steps;
+- primary flows visible as ordered `step("...")` calls;
 - `@inline` setup hidden as standalone content and expanded through `@prev` or
   `@include`;
 - capture evidence attached under the step that caused it;
 - advanced/edge/matrix/stress details folded or skipped by policy;
-- executable SPipe folded below the manual.
+- executable SSpec folded below the manual.
 
 Run `bin/simple spipe-docgen <spec> --output doc/06_spec` and revise the spec
 until the generated manual is usable without opening the source.
 
 ## Test API Imports
 
-Use `std.spec` as the canonical SPipe test-library import in new executable
+Use `std.spec.*` as the canonical SSpec test-library import in new executable
 specs:
 
 ```simple
-use std.spec
+use std.spec.*
+
+describe "Feature":
+    it "operator completes the primary flow":
+        step("Open the feature surface")
+        expect(surface.status).to_equal("ready")
+
+        step("Submit valid input")
+        expect(result.message).to_contain("saved")
 ```
 
+For CLI/TUI-facing scenarios, include a real text capture so readers can inspect
+what the surface looked like. Use
+`test/02_integration/app/ide/ide_feature_check_integration_spec.spl` as the
+current model: it records `**TUI Captures:**`, writes
+`build/test-artifacts/.../feature_check_tui.txt`, verifies the capture matches
+the command output, and mirrors the sample under `doc/06_spec/...`.
+
 `std.spipe` remains a compatibility alias that re-exports the same public
-surface for existing specs. Do not create feature-specific replacements for
-`describe`, `it`, `expect`, or the built-in matchers. UI, SGTTI, Draw IR, MCP,
-and protocol checks should add helper functions that run inside normal SPipe
-`it` blocks.
+surface for existing specs. `Given_*`, `When_*`, and `Then_*` helpers are legacy
+manual text helpers; prefer `step("...")` for new scenario manuals. Do not
+create feature-specific replacements for `describe`, `it`, `expect`, `step`, or
+the built-in matchers. UI, SGTTI, Draw IR, MCP, and protocol checks should add
+helper functions that run inside normal SSpec `it` blocks executed by SPipe.
 SGTTI must be zero-overhead in production paths. Keep SGTTI imports and capture
 builders in explicit test/debug entrypoints; normal product entrypoints must not
 import `std.ui_test.sgtti`, `SgttiTestDriver`, or debug-TUI capture modules. For
@@ -74,12 +95,12 @@ Protocol-v2 Draw IR evidence with
 For GUI render-location assertions, use
 `/api/test/draw-ir/layout?id=...&capability=draw_ir` or `expect_draw` to prove
 the stable id, role/kind, geometry, hit rect, parent, and computed style inside
-the SPipe case.
+the SSpec case.
 
 ## Rendering Checks (`expect_draw` style)
 
 For GUI, Web, 2D, Draw IR, and WASM rendering specs, use `expect_draw`-style
-helper functions inside normal SPipe `it` blocks. The helper may wrap repeated
+helper functions inside normal SSpec `it` blocks. The helper may wrap repeated
 setup/readback, but it must contain real assertions and must not replace
 `expect`, `describe`, `it`, or the canonical matchers.
 

@@ -7,11 +7,13 @@ description: "SPipe dev entrypoint: refine a feature/bug/TODO into acceptance cr
 
 `/sp_dev` is the Codex entrypoint for the SPipe development workflow. The
 standalone `/dev` Codex skill has been removed so development work routes
-through the explicit SPipe namespace.
+through the explicit SPipe namespace. SPipe is the runner/docgen/process layer;
+SSpec is the executable `.spl` scenario authoring surface.
 
 Use it for a feature, bug fix, refactor, or TODO that should start with SPipe
 goal refinement and acceptance criteria, then continue through research, design,
-SPipe specs, implementation, refactor, verification, and ship handoff:
+SSpec scenarios executed through SPipe, implementation, refactor, verification,
+and ship handoff:
 
 ```
 /sp_dev <description of what to build or fix>
@@ -78,10 +80,12 @@ exists, and cite the canonical implementation paths such as
 `src/lib/common/ui/window_scene_draw_ir.spl`, and
 `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl`.
 
-For UI-test helper work, keep the test-library surface consistent: new specs
-use canonical `use std.spec`, existing `use std.spipe` remains an alias, and
-UI/SGTTI/Draw IR helpers must layer inside SPipe scenarios instead of replacing
-`describe`, `it`, `expect`, or the built-in matchers.
+For UI-test helper work, keep the test-library surface consistent: new SSpec
+manual specs use canonical `use std.spec.*` and `step("...")`, existing
+`use std.spipe` remains an alias, and UI/SGTTI/Draw IR helpers must layer inside
+SSpec scenarios instead of replacing `describe`, `it`, `expect`, `step`, or the
+built-in matchers. `Given_*`, `When_*`, and `Then_*` helpers are legacy manual
+text helpers.
 SGTTI is a test/debug evidence interface. Production entrypoints must not import
 `std.ui_test.sgtti`, `SgttiTestDriver`, or SGTTI capture builders unless the
 specific debug/test entrypoint explicitly opts in; compile-time entry-closure
@@ -96,7 +100,7 @@ pixel-only assertions.
 When the question is "where did this GUI component render?", use
 `/api/test/draw-ir/layout?id=...&capability=draw_ir` or `expect_draw` to assert
 the stable id, role/kind, geometry, hit rect, parent, and computed style inside
-the SPipe case.
+the SSpec case.
 After adding or moving UI-facing app feature specs, run
 `test/03_system/app/testing/feature/ui_sspec_evidence_audit_spec.spl` to keep
 the critical UI SSPEC lane mirrored into generated manuals with visible
@@ -134,11 +138,11 @@ checkout. Preserve other-agent work, report it separately, and commit only the
 intentional lane unless the user requests a combined integration.
 
 For scenario-oriented work, the SPipe loop also includes generated manual
-review. After specs are written or changed, generate the mirrored
-`doc/06_spec/...` document and read it as a scenario manual. Update step
-helpers, capture policy, inline/previous scenario expansion, and manual
+review. After SSpec `.spl` scenarios are written or changed, generate the
+mirrored `doc/06_spec/...` document and read it as a scenario manual. Update
+`step("...")` text, capture policy, inline/previous scenario expansion, and manual
 visibility until the generated manual is good enough to use without opening the
-source test. See `doc/07_guide/testing/sspec_scenario_manual.md`.
+source test. See `doc/07_guide/infra/sspec_scenario_manual.md`.
 
 Run `sh scripts/setup/install-spipe-dev-command.shs --check` on Unix-like hosts, or
 `powershell -ExecutionPolicy Bypass -File scripts\install-spipe-dev-command.ps1 --check`
@@ -151,7 +155,7 @@ Before handoff, run the generated-spec layout guard:
 find doc/06_spec -name '*_spec.spl' | wc -l
 ```
 
-The result must be `0`; executable SPipe belongs under `test/`, while
+The result must be `0`; executable SSpec belongs under `test/`, while
 `doc/06_spec` contains generated/manual Markdown and evidence assets only.
 
 ## LLM Fine-Tune Handoff

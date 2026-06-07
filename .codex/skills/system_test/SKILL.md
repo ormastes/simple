@@ -1,6 +1,6 @@
 ---
 name: system_test
-description: "Codex system test design skill (Codex-specific strength). SPipe BDD test generation with built-in matchers only. REQ-NNN to test traceability. Test plan creation."
+description: "Codex system test design skill (Codex-specific strength). Step-based SSpec `.spl` scenario generation through the SPipe runner/docgen process. Built-in matchers only. REQ-NNN to test traceability. Test plan creation."
 ---
 
 # System Test Design — Codex (Codex-Specific Strength)
@@ -28,9 +28,10 @@ Codex excels at systematic test generation with full requirement traceability. U
 - Identify testable behaviors per requirement
 - Map edge cases and error paths
 
-## Phase 2: SPipe BDD Test Generation
+## Phase 2: Step-Based SSpec Test Generation
 
-Generate test specs using the canonical SPipe matcher set.
+Generate executable SSpec `.spl` scenarios using the canonical matcher set.
+SPipe runs those scenarios and generates mirrored manual docs.
 Executable specs belong under `test/...`; `doc/06_spec/...` is reserved for
 generated/manual scenario documentation derived from those specs.
 
@@ -51,30 +52,34 @@ generated/manual scenario documentation derived from those specs.
 - `to_be_true()` — compatibility helper; use `to_equal(true)` instead
 - `to_be_false()` — compatibility helper; use `to_equal(false)` instead
 - `to_raise()` — not available; test error returns via `Result<T, E>`
-- Feature-specific matcher replacements — use helper functions inside SPipe
+- Feature-specific matcher replacements — use helper functions inside SSpec
   scenarios instead
 
-### SPipe Template
+### SSpec Template
 
 ```simple
-use std.spec
+use std.spec.*
 
 describe "<Feature Name>":
     describe "REQ-001: <requirement title>":
         it "should <expected behavior in present tense>":
+            step("Open the feature surface")
             val result = <invoke feature code>
             expect(result).to_equal(<expected value>)
 
         it "should handle empty input":
+            step("Submit empty input")
             val result = <invoke with empty>
             expect(result).to_be_nil()
 
         it "should reject invalid input":
+            step("Submit invalid input")
             val result = <invoke with invalid>
             expect(result.error?).to_equal(true)
 
     describe "REQ-002: <next requirement>":
         it "should <behavior>":
+            step("Run the requested behavior")
             val result = <invoke>
             expect(result).to_contain(<expected item>)
 ```
@@ -89,9 +94,11 @@ describe "<Feature Name>":
 - Scenario-oriented specs must produce manual-quality generated docs:
   primary scenarios visible, reusable setup hidden with `@inline` and expanded
   by `@prev`/`@include`, advanced/edge/matrix/stress details folded or skipped
-  by policy, and executable SPipe folded below the manual flow.
-- Use `@step` helper/checker prose when function names alone would not read like
-  manual steps.
+  by policy, and executable SSpec folded below the manual flow.
+- Use `step("...")` as the current manual-step helper. `Given_*`, `When_*`, and
+  `Then_*` helpers are legacy and should not be introduced in new specs.
+- Use `@step` metadata only when labeling an existing helper/checker call that
+  cannot be replaced cleanly with `step("...")`.
 - Capture is off by default. Bare `@capture` enables after-step `tui` capture.
   Use typed capture kinds for the evidence the reader needs: `tui`, `gui`,
   `html`, `text`, `api`, `protocol`, `exec`, `binary`, `log`, or `artifact`.
@@ -105,7 +112,7 @@ describe "<Feature Name>":
   `simple play wm-text-*` and `play_wm_text_*` are acceptable adapters. A
   screenshot-only pass is evidence, not interaction coverage.
 - GUI, Web, 2D, and WASM rendering specs should use `expect_draw`-style helper
-  functions inside normal SPipe `it` blocks. These helpers must assert rendered
+  functions inside normal SSpec `it` blocks. These helpers must assert rendered
   state, not merely call the renderer: check Draw IR/object state, scene nodes,
   layout boxes, visible text, readback pixels, hashes, or diffs that prove the
   expected surface exists.
@@ -125,6 +132,10 @@ describe "<Feature Name>":
   remains capture off.
 - UI-facing specs include visible-state capture evidence when practical:
   - TUI specs capture text or ANSI output under `build/test-artifacts/<spec-relative-path>/`.
+  - CLI/TUI scenario manuals should show the capture path and a compact embedded
+    sample when the output is small enough to review inline; use
+    `test/02_integration/app/ide/ide_feature_check_integration_spec.spl` as the
+    current step-based SSpec model.
   - HTML-backed GUI specs capture source HTML/visible text and check user-visible text before screenshot checks.
   - GUI specs capture screenshots/goldens/diffs under `doc/06_spec/image/<spec-relative-path>/` when HTML is unavailable or insufficient.
   - Draw IR and 2D specs capture or assert object/command state where possible
@@ -190,7 +201,7 @@ Any REQ with 0 test cases is a **FAIL** — must be addressed.
 
 ### Layout and Traceability
 
-- Executable tests live under `test/`; generated/manual SPipe docs live under
+- Executable SSpec tests live under `test/`; generated/manual SPipe docs live under
   `doc/06_spec/`.
 - `doc/06_spec` must not contain executable `.spl` specs. Run
   `find doc/06_spec -name '*_spec.spl' | wc -l` before completion and require

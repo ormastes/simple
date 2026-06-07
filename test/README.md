@@ -50,11 +50,11 @@ must mirror the same path below `doc/06_spec/`. Example:
 `test/03_system/feature/usage/math_blocks_spec.spl` generates
 `doc/06_spec/feature/usage/math_blocks_spec.md`.
 
-Generated docs should read as scenario-based manuals, not as raw test dumps.
+Generated SSpec manuals should read as scenario-based manuals, not as raw test dumps.
 For feature, system, app, MCP, UI, protocol, hardware, and environmental tests,
 write helper/checker functions so the generated manual can show ordered user or
-operator steps, typed capture evidence, and folded executable SPipe details.
-Use `doc/07_guide/testing/sspec_scenario_manual.md` when deciding whether a
+operator steps, typed capture evidence, and folded executable SSpec details.
+Use `doc/07_guide/infra/sspec_scenario_manual.md` when deciding whether a
 scenario should be visible, folded as advanced/edge detail, or skipped from the
 manual while remaining executable.
 
@@ -65,10 +65,10 @@ aligned with the current workspace compiler/runtime changes.
 
 ## Writing Tests
 
-Tests use the built-in SPipe BDD framework. New specs should import
-`use std.spec` for `describe`, `it`, and `expect`. `use std.spipe` is a
-compatibility alias with the same public surface for older or SPipe-named
-specs.
+Tests use the built-in SSpec BDD framework. Unit-style specs can import
+`use std.spec` for `describe`, `it`, and `expect`. SSpec scenario manuals should
+prefer `use std.spec.*` so the `step("...")` manual helper is visible next to
+the BDD surface. SPipe is the runner/docgen process around these `.spl` specs.
 
 ```simple
 # test/01_unit/std/example_spec.spl
@@ -90,11 +90,17 @@ describe "std.my_module":
 When a spec describes user-visible, operator-visible, system, protocol, MCP, or
 environmental behavior, author it as an executable scenario manual:
 
-- Put primary flows in normal `it` scenarios with readable step helper names.
-- Use `@step` metadata on helper/checker functions when the fallback function
-  name would not read like a manual sentence.
-- Use `@inline` for reusable setup scenarios and `@prev("...")` or
-  `@include("...")` to expand them into the visible scenario.
+- Put primary flows in normal `it` scenarios with explicit `step("...")`
+  action text.
+- Use `# @inline` for reusable setup scenarios and `# @include("...")` to
+  expand them into the visible scenario where those steps belong.
+- Treat `Given_*`, `When_*`, and `Then_*` helper naming as legacy style. Keep it
+  only when maintaining older specs; use `step("...")` for new scenario
+  manuals.
+- Use `@step` metadata only for older helper/checker functions when the
+  fallback function name would not read like a manual sentence.
+- Use `# @prev("...")` when the visible scenario should start with a previous
+  setup scenario.
 - Use `@capture` only where manual evidence is useful. Capture is off by
   default; bare `@capture` means after-step capture with default kind `tui`.
 - Use typed capture kinds for non-UI evidence: `api`, `protocol`, `exec`,
@@ -107,6 +113,23 @@ environmental behavior, author it as an executable scenario manual:
 - Fold or skip very detailed edge, matrix, stress, generated, and helper-only
   scenarios with manual visibility policy instead of forcing them into the main
   manual.
+
+Primary scenario-manual example:
+
+```simple
+use std.spec.*
+
+describe "Dashboard actions":
+    # @inline
+    it "operator has an authenticated session":
+        step("Open the sign-in page")
+        step("Submit valid credentials")
+
+    it "operator reviews dashboard actions":
+        # @include("operator has an authenticated session")
+        step("Open the actions panel")
+        expect("actions").to_equal("actions")
+```
 
 After writing or changing such a spec, generate the doc and read it like a
 hand-written manual. If it still reads like test plumbing, improve the steps,
@@ -220,7 +243,7 @@ baseline and reports improvements or regressions:
   modules separate from executable scenario placement decisions.
 - See `doc/07_guide/testing/test_layout_traceability.md` for the move
   checklist and current canonical-root policy.
-- See `doc/07_guide/testing/sspec_scenario_manual.md` for scenario manual,
+- See `doc/07_guide/infra/sspec_scenario_manual.md` for scenario manual,
   inline/previous scenario, capture, and environmental-test guidance.
 
 ## Known Limitations

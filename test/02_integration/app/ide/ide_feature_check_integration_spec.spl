@@ -1,12 +1,16 @@
 """
 IDE feature-check integration specification.
 Runs the IDE entrypoint through the Simple CLI so the feature-check manual contract covers real app dispatch.
+
+**TUI Captures:** build/test-artifacts/02_integration/app/ide/ide_feature_check_integration/feature_check_tui.txt
 """
 # @evidence-display: embed_tui
 
-use std.spec.{describe, it, expect}
+use std.spec.*
 
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+val TUI_CAPTURE_PATH: text = "build/test-artifacts/02_integration/app/ide/ide_feature_check_integration/feature_check_tui.txt"
 
 fn _run_ide(args: [text]) -> (text, text, i64):
     val joined = args.join(" ")
@@ -15,17 +19,36 @@ fn _run_ide(args: [text]) -> (text, text, i64):
         "REPO=$(pwd); SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/ide/main.spl\" " + joined
     ])
 
+fn _write_tui_capture(content: text) -> i64:
+    val script = "mkdir -p 'build/test-artifacts/02_integration/app/ide/ide_feature_check_integration' && cat > '" + TUI_CAPTURE_PATH + "' <<'SIMPLE_IDE_TUI_CAPTURE_EOF'\n" +
+        content + "SIMPLE_IDE_TUI_CAPTURE_EOF\n"
+    val (_out, _err, code) = rt_process_run("/bin/sh", ["-c", script])
+    code
+
+fn _capture_file_state(expected: text) -> text:
+    val (out, _err, code) = rt_process_run("/bin/sh", ["-c", "test -f '" + TUI_CAPTURE_PATH + "' && cat '" + TUI_CAPTURE_PATH + "'"])
+    if code != 0:
+        return "missing"
+    if out == expected:
+        return "matched"
+    "mismatched"
+
 describe "IDE feature-check CLI integration":
     """
     Verifies that the restored IDE product entrypoint exposes Office-style plugin checks through the real CLI path.
     """
 
     it "prints the complete TUI feature-check manual through the app entrypoint":
+        step("Run the IDE feature-check command in TUI mode")
         val (out, err, code) = _run_ide(["--feature-check", "--tui"])
         expect(code).to_equal(0)
+
+        step("Review the feature-check header and TUI mode")
         expect(out).to_start_with("Simple IDE feature check")
         expect(out).to_contain("mode: tui")
         expect(out).to_contain("capabilities: 5")
+
+        step("Confirm every Office plugin capability is visible")
         expect(out).to_contain("markdown: Markdown Preview")
         expect(out).to_contain("slides: Presentation Slides")
         expect(out).to_contain("sheets: Spreadsheet")
@@ -33,21 +56,32 @@ describe "IDE feature-check CLI integration":
         expect(out).to_contain("db-admin: Database Admin")
         expect(out).to_contain("plugin-manifest: plugins: entries=5")
 
+        step("Capture the TUI report so the manual shows the CLI surface")
+        expect(_write_tui_capture(out)).to_equal(0)
+        expect(_capture_file_state(out)).to_equal("matched")
+
     it "prints the complete GUI feature-check manual through the app entrypoint":
+        step("Run the IDE feature-check command in GUI mode")
         val (out, err, code) = _run_ide(["--feature-check", "--gui"])
         expect(code).to_equal(0)
+
+        step("Review the feature-check header and GUI mode")
         expect(out).to_start_with("Simple IDE feature check")
         expect(out).to_contain("mode: gui")
+
+        step("Confirm GUI launch and panel summaries are visible")
         expect(out).to_contain("gui-backend: theme=dark")
         expect(out).to_contain("tui-panels: preview=")
         expect(out).to_contain("launch: launch: tui=tui gui=gui sdl=gui-sdl")
 
     it "keeps normal IDE help and unknown option behavior intact":
+        step("Open IDE help through the production entrypoint")
         val (help_out, help_err, help_code) = _run_ide(["--help"])
         expect(help_code).to_equal(0)
         expect(help_out).to_contain("Usage: simple ide")
         expect(help_out).to_contain("--feature-check")
 
+        step("Submit an unknown IDE option")
         val (bad_out, bad_err, bad_code) = _run_ide(["--bad-mode"])
         expect(bad_code).to_equal(1)
         expect(bad_out).to_contain("Unknown option: --bad-mode")

@@ -1,7 +1,9 @@
 # SSpec Scenario Manual Guide
 
-Use this guide when writing SPipe/SSpec tests whose generated `doc/06_spec/...`
-output should read like a scenario-based manual.
+Use this guide when writing SSpec scenario manuals whose generated
+`doc/06_spec/...` output should read like a scenario-based manual. SSpec
+scenarios are executable `.spl` specs. SPipe is the related runner/docgen
+process around those specs, not a separate `.spipe` scenario format.
 
 ## Principle
 
@@ -9,9 +11,57 @@ Executable tests are the source of truth, but the generated document is a
 manual. A reader should see scenario intent, ordered user/system steps, and
 evidence under the relevant step before they see test mechanics.
 
-## Scenario Shape
+## Primary Scenario Shape
 
-Prefer small helper/checker methods with human step text:
+Use `step("...")` for the manual action text. Keep reusable setup in hidden
+inline scenarios and include it into the visible scenario where the reader
+needs to see it:
+
+```simple
+use std.spec.*
+
+describe "Dashboard actions":
+    # @inline
+    it "operator has an authenticated session":
+        step("Open the sign-in page")
+        step("Submit valid credentials")
+
+    it "operator reviews dashboard actions":
+        # @include("operator has an authenticated session")
+        step("Open the actions panel")
+        expect("actions").to_equal("actions")
+```
+
+Generated manuals should show this shape first:
+
+````md
+#### operator reviews dashboard actions
+
+1. Open the sign-in page
+2. Submit valid credentials
+3. Open the actions panel
+   - Expected: "actions" equals `actions`
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+step("Open the sign-in page")
+step("Submit valid credentials")
+step("Open the actions panel")
+expect("actions").to_equal("actions")
+```
+</details>
+````
+
+Use assertions for executable truth and `step(...)` for manual readability.
+`Given_*`, `When_*`, and `Then_*` helper naming is legacy style: keep it only
+when maintaining older specs. New scenario manuals should prefer explicit
+`step("...")` calls.
+
+## Derived Step Labels
+
+Older specs may still use helper/checker methods with human step text:
 
 ```simple
 @step "User opens the app"
@@ -27,7 +77,7 @@ fn Then_login_succeeds():
     expect(session.status).to_equal("signed-in")
 ```
 
-Use scenarios as manual flows:
+Legacy scenario flow:
 
 ```simple
 @capture
@@ -38,7 +88,7 @@ it "user logs in":
 ```
 
 Generated docs should render the step prose and captures first. Runnable code
-belongs in a folded `Executable SPipe` block.
+belongs in a folded `Executable SSpec` block.
 
 Current docgen derives starter manual steps from call-like scenario lines and
 keeps assertion mechanics in the folded executable block. For example,
@@ -46,8 +96,9 @@ keeps assertion mechanics in the folded executable block. For example,
 `expect(...)` and control-flow lines such as `if user.needs_login():` remain
 executable detail. Nested call-like actions inside control flow can still render
 as visible manual steps. Checker-style calls such as `Then_login_succeeds()`
-render as `Then login succeeds`. Prefer helper names that read cleanly when
-dots and underscores become words.
+render as `Then login succeeds` for compatibility with older specs. In new
+scenario manuals, prefer `step("Login succeeds")` over `Given_*`, `When_*`, or
+`Then_*` helper names.
 
 Use comment-form `# @step: Text` or `# @step("Text")` before a call or
 executable setup line when the derived label is not good enough:

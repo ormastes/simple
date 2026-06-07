@@ -16,7 +16,7 @@ The repo is unusually broad: language, compiler, interpreter, loader, test runne
 ## Distinctive Features
 
 - **Self-hosted staged toolchain**: real source layers for frontend, type analysis, borrow checking, backend, driver, interpreter, and loader live in-tree.
-- **Verification-native workflow**: SPipe BDD tests, SDoctest executable docs, coverage, traceability checks, and generated spec docs are part of the toolchain rather than bolted on.
+- **Verification-native workflow**: SSpec tests, the SPipe runner/docgen process, SDoctest executable docs, coverage, traceability checks, and generated spec docs are part of the toolchain rather than bolted on.
 - **MDSOC architecture support**: virtual capsules, manifests, and architecture-aware repository structure are first-class concepts.
 - **Parser-friendly macro system**: macro definitions, expansion, validation, and hygiene are compiler features rather than editor-hostile text substitution.
 - **Math-oriented syntax blocks**: `m{}`, `loss{}`, and `nograd{}` are implemented syntax with parsing, evaluation, five rendering backends (text, debug, Unicode, LaTeX, Markdown), and editor integration (query/LSP hover, VSCode highlighting/preview, Neovim inline Unicode preview with conceal). The autograd path is complete for the promoted torch-backed C/LLVM scope.
@@ -29,7 +29,7 @@ The repo is unusually broad: language, compiler, interpreter, loader, test runne
 ## Feature Status Highlights
 
 Implemented and safe to advertise:
-- SPipe, SDoctest, coverage, traceability checks, and generated spec docs
+- SSpec tests, SPipe runner/docgen, SDoctest, coverage, traceability checks, and generated spec docs
 - SPipe mock policy: system-test mock ban, HAL-only and custom pattern modes
 - Self-hosted staged compiler, interpreter, and loader architecture
 - MDSOC manifests and architecture-focused project structure
@@ -746,6 +746,7 @@ fn matrix_multiply(A: []f32, B: []f32, C: []f32, N: u32):
 **Development:**
 - [Build Guide](doc/07_guide/build.md) - Building Simple and common workflows
 - [Testing Guide](doc/07_guide/testing/testing.md) - Test runner behavior and flags
+- [SSpec Scenario Manual Guide](doc/07_guide/infra/sspec_scenario_manual.md) - `step(...)`, inline scenarios, capture, and generated manual style
 - [Mock Policy Guide](doc/07_guide/testing/mock_policy_system_test_ban.md) - System test mock ban and test level enforcement
 - [Coverage Guide](doc/07_guide/testing/coverage.md) - Coverage, SDoctest, and enforcement
 - [MCP Tooling Guide](doc/07_guide/tooling/mcp.md) - MCP registration and usage
@@ -810,41 +811,40 @@ bin/simple examples/cli_demo.spl
 
 ---
 
-## BDD Feature Documentation
+## SSpec Scenario Manuals
 
-Feature documentation is auto-generated from BDD spec tests. Each spec defines feature metadata and executable assertions that verify the feature works correctly.
+Feature and system documentation is generated from executable SSpec `.spl`
+scenarios. SPipe is the related runner/docgen process; SSpec is the authoring
+style: write readable `step("...")` actions, keep executable assertions in the
+same scenario, and let docgen render compact manual steps with folded source.
 
 ```simple
-# simple/std_lib/test/features/infrastructure/lexer_spec.spl
-import std.spec
+use std.spec.*
 
-feature "Lexer":
-    """
-    The lexer tokenizes Simple source code into tokens.
-    Feature ID: #1
-    Category: infrastructure
-    """
+describe "Dashboard actions":
+    # @inline
+    it "operator has an authenticated session":
+        step("Open the sign-in page")
+        step("Submit valid credentials")
 
-    scenario "tokenizes keywords":
-        given "source code with keywords"
-        when "the lexer processes it"
-        then "it produces keyword tokens"
-        expect tokenize("fn main") to contain Token(Keyword, "fn")
-
-    scenario "handles indentation":
-        given "indented code blocks"
-        when "the lexer processes it"
-        then "it emits INDENT and DEDENT tokens"
+    it "operator reviews dashboard actions":
+        # @include("operator has an authenticated session")
+        step("Open the actions panel")
+        expect("actions").to_equal("actions")
 ```
 
-Run feature tests:
-```bash
-# Run a specific feature spec
-./target/debug/simple simple/std_lib/test/features/infrastructure/lexer_spec.spl
+Generated manual:
 
-# Generate documentation from tests
-./target/debug/simple simple/std_lib/test/features/generate_docs.spl
+```md
+1. Open the sign-in page
+2. Submit valid credentials
+3. Open the actions panel
+   - Expected: "actions" equals `actions`
 ```
+
+`Given_*`, `When_*`, and `Then_*` helper naming is legacy style. Use
+`step("...")` for new SSpec manuals. See the
+[SSpec Scenario Manual Guide](doc/07_guide/infra/sspec_scenario_manual.md).
 
 Generated docs land in the numbered documentation tree, primarily under `doc/06_spec/`, so the checked examples stay close to the current spec artifacts.
 
@@ -911,6 +911,7 @@ The current spec and guide material is organized under the numbered documentatio
 
 **Testing & Tooling:**
 - [Testing Guide](doc/07_guide/testing/testing.md) - Test runner and matchers
+- [SSpec Scenario Manual Guide](doc/07_guide/infra/sspec_scenario_manual.md) - Scenario manuals generated from executable specs
 - [Coverage Guide](doc/07_guide/testing/coverage.md) - Coverage and SDoctest enforcement
 - [Lint Guide](doc/07_guide/tooling/lint.md) - Lint rules and workflow
 - [MCP Guide](doc/07_guide/tooling/mcp.md) - MCP workflow and registration
