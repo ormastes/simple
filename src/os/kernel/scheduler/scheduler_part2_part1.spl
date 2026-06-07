@@ -93,6 +93,7 @@ use os.kernel.scheduler.scheduler_exec.{
 use os.kernel.scheduler.green_carrier.{
     GreenCarrierSchedulerIntent, GreenCarrierExecutionResult, GreenCarrierParallelismState,
     GreenCarrierRunQueueState, GreenCarrierRebalanceResult, GreenCarrierRebalancePassResult,
+    GreenCarrierRunStepResult,
     green_carrier_apply_scheduler_intent,
     green_carrier_extend_execution_state,
     green_carrier_current_task_on_cpu,
@@ -102,7 +103,9 @@ use os.kernel.scheduler.green_carrier.{
     green_carrier_reject_scheduler_intent,
     green_carrier_apply_rebalance_decision,
     green_carrier_queue_depth,
-    green_carrier_rebalance_one
+    green_carrier_rebalance_one,
+    green_carrier_dispatch_next_with_limit,
+    green_carrier_scheduler_intent
 }
 use os.kernel.scheduler.green_worker.{GreenWorkerRebalanceDecision, green_worker_rebalance_decision}
 
@@ -627,6 +630,21 @@ impl Scheduler:
             last_from_cpu: last_from_cpu,
             last_to_cpu: last_to_cpu,
             reason: "move_budget_exhausted"
+        )
+
+    me run_green_carrier_once(queues: GreenCarrierRunQueueState, cpu: i64) -> GreenCarrierRunStepResult:
+        val dispatch = green_carrier_dispatch_next_with_limit(
+            queues,
+            cpu,
+            self.green_parallelism_state.active_limit
+        )
+        val execution = self.apply_green_scheduler_intent(green_carrier_scheduler_intent(dispatch))
+        GreenCarrierRunStepResult(
+            queues: dispatch.queues,
+            dispatch: dispatch,
+            execution: execution,
+            ran: execution.applied,
+            reason: execution.reason
         )
 
     fn preempt_pending_on_cpu(cpu_id: u32) -> TaskId?:

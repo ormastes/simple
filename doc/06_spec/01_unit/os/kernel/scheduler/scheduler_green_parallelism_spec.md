@@ -28,7 +28,7 @@ scheduler_green_parallelism_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 11 | 11 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -440,12 +440,83 @@ expect(green_carrier_queue_depth(pass_result.queues, 1)).to_equal(1)
 
 </details>
 
+#### runs one active green carrier step through scheduler
+
+1. var sched = Scheduler new with cpu count
+
+2. sched set green carrier parallelism
+   - Expected: step.ran is true
+   - Expected: step.dispatch.task_id equals `59`
+   - Expected: step.execution.applied is true
+   - Expected: step.reason equals `context_switch_recorded`
+   - Expected: sched.green_current_task_on_cpu(0u32) equals `59`
+   - Expected: green_carrier_queue_depth(step.queues, 0) equals `0`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var sched = Scheduler.new_with_cpu_count(4u32)
+sched.set_green_carrier_parallelism(1)
+val queues = green_carrier_run_queues_new(4, 8)
+val decision = green_carrier_spawn_task(59, 4, 0, 3, 1, 2, 4, 0)
+val queued = green_carrier_apply_enqueue(queues, decision)
+val pass_result = sched.rebalance_green_carrier_queues_until_stable(queued.queues, 1)
+val step = sched.run_green_carrier_once(pass_result.queues, 0)
+
+expect(step.ran).to_equal(true)
+expect(step.dispatch.task_id).to_equal(59)
+expect(step.execution.applied).to_equal(true)
+expect(step.reason).to_equal("context_switch_recorded")
+expect(sched.green_current_task_on_cpu(0u32)).to_equal(59)
+expect(green_carrier_queue_depth(step.queues, 0)).to_equal(0)
+```
+
+</details>
+
+#### keeps queued work when scheduler run step targets inactive carrier
+
+1. var sched = Scheduler new with cpu count
+
+2. sched set green carrier parallelism
+   - Expected: step.ran is false
+   - Expected: step.reason equals `inactive_green_carrier`
+   - Expected: green_carrier_queue_depth(step.queues, 1) equals `1`
+   - Expected: sched.green_current_task_on_cpu(1u32) equals `0`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var sched = Scheduler.new_with_cpu_count(4u32)
+sched.set_green_carrier_parallelism(1)
+val queues = green_carrier_run_queues_new(4, 8)
+val decision = green_carrier_spawn_task(60, 4, 0, 3, 1, 2, 4, 0)
+val queued = green_carrier_apply_enqueue(queues, decision)
+val step = sched.run_green_carrier_once(queued.queues, 1)
+
+expect(step.ran).to_equal(false)
+expect(step.reason).to_equal("inactive_green_carrier")
+expect(green_carrier_queue_depth(step.queues, 1)).to_equal(1)
+expect(sched.green_current_task_on_cpu(1u32)).to_equal(0)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

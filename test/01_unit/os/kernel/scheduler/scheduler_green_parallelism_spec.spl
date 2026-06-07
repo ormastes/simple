@@ -184,3 +184,32 @@ describe "Scheduler green carrier parallelism":
         expect(pass_result.reason).to_equal("move_budget_exhausted")
         expect(green_carrier_queue_depth(pass_result.queues, 0)).to_equal(1)
         expect(green_carrier_queue_depth(pass_result.queues, 1)).to_equal(1)
+
+    it "runs one active green carrier step through scheduler":
+        var sched = Scheduler.new_with_cpu_count(4u32)
+        sched.set_green_carrier_parallelism(1)
+        val queues = green_carrier_run_queues_new(4, 8)
+        val decision = green_carrier_spawn_task(59, 4, 0, 3, 1, 2, 4, 0)
+        val queued = green_carrier_apply_enqueue(queues, decision)
+        val pass_result = sched.rebalance_green_carrier_queues_until_stable(queued.queues, 1)
+        val step = sched.run_green_carrier_once(pass_result.queues, 0)
+
+        expect(step.ran).to_equal(true)
+        expect(step.dispatch.task_id).to_equal(59)
+        expect(step.execution.applied).to_equal(true)
+        expect(step.reason).to_equal("context_switch_recorded")
+        expect(sched.green_current_task_on_cpu(0u32)).to_equal(59)
+        expect(green_carrier_queue_depth(step.queues, 0)).to_equal(0)
+
+    it "keeps queued work when scheduler run step targets inactive carrier":
+        var sched = Scheduler.new_with_cpu_count(4u32)
+        sched.set_green_carrier_parallelism(1)
+        val queues = green_carrier_run_queues_new(4, 8)
+        val decision = green_carrier_spawn_task(60, 4, 0, 3, 1, 2, 4, 0)
+        val queued = green_carrier_apply_enqueue(queues, decision)
+        val step = sched.run_green_carrier_once(queued.queues, 1)
+
+        expect(step.ran).to_equal(false)
+        expect(step.reason).to_equal("inactive_green_carrier")
+        expect(green_carrier_queue_depth(step.queues, 1)).to_equal(1)
+        expect(sched.green_current_task_on_cpu(1u32)).to_equal(0)

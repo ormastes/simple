@@ -110,6 +110,15 @@ go-runtime-hardening
   `green_carrier_spec.spl` passed 36 examples, and
   `simpleos_multicore_green_spec.spl` passed 3 examples after the bounded
   repeated rebalance pass was added.
+- implementation: Added `Scheduler.run_green_carrier_once`, a scheduler-owned
+  one-step carrier runner that dispatches through the active carrier limit and
+  applies the resulting green scheduler intent while preserving inactive-carrier
+  queued work.
+- verification: `scheduler.spl` and `green_carrier.spl` checks passed,
+  `scheduler_green_parallelism_spec.spl` passed 13 examples,
+  `green_carrier_spec.spl` passed 36 examples, and
+  `simpleos_multicore_green_spec.spl` passed 3 examples after the run-step
+  helper.
 
 ## Completion Audit - 2026-06-07
 

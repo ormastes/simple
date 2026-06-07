@@ -127,6 +127,9 @@ Behavior:
 - `Scheduler.rebalance_green_carrier_queues_until_stable` repeats inactive
   carrier drains with a caller-provided move budget and records why the pass
   stopped.
+- `Scheduler.run_green_carrier_once` combines limited carrier dispatch with
+  scheduler intent application, returning the updated queues plus dispatch and
+  execution evidence for one Go-like worker-loop step.
 
 ### Freestanding QEMU Probe Path
 

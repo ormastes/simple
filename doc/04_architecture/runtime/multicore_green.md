@@ -158,6 +158,10 @@ SimpleOS path:
 - `Scheduler.rebalance_green_carrier_queues_until_stable` repeats inactive-to-
   active carrier moves with an explicit move budget, so preserved work can be
   drained without unbounded scheduler loops.
+- `Scheduler.run_green_carrier_once` is the scheduler-owned one-step carrier
+  execution path. It dispatches through the active carrier limit, applies the
+  resulting green scheduler intent, and preserves queued work when the target
+  carrier is inactive.
 - QEMU proof currently covers AP startup plus CPU1 fixed-slot dispatch; full
   hardware context-switch handoff remains future work.
 
