@@ -41,7 +41,9 @@ Stability And Misuse Diagnostics, and SimpleOS Hardware Proof Gate.
 ## Verification Gates
 
 - `sh test/05_perf/profile_scripts/profile_report_contract_test.shs cross_language scripts/check/check-cross-language-perf.shs doc/09_report/cross_language_perf_parallel_smoke.md`
+- `sh test/05_perf/profile_scripts/profile_report_contract_test.shs cross_language scripts/check/check-cross-language-perf.shs doc/09_report/cross_language_perf_parallel_large_2026-06-07.md`
 - `bin/simple test test/05_perf/stress/multicore_green_cross_language_gate_spec.spl --mode=interpreter`
+- `bin/simple test test/05_perf/stress/multicore_green_large_profile_gate_spec.spl --mode=interpreter`
 - `bin/simple test test/05_perf/stress/multicore_green_fanout_spec.spl --mode=interpreter`
 - `bin/simple test test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl --mode=interpreter`
 - `bin/simple test test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl --mode=interpreter`

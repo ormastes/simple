@@ -63,8 +63,10 @@ SimpleOS scheduler work distinct and verifiable.
 - Performance/profile gates: `scripts/check/check-cross-language-perf.shs`,
   `test/05_perf/profile_scripts/profile_report_contract_test.shs`,
   `test/05_perf/stress/multicore_green_fanout_spec.spl`,
-  `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`, and
-  `doc/09_report/cross_language_perf_parallel_smoke.md`.
+  `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`,
+  `test/05_perf/stress/multicore_green_large_profile_gate_spec.spl`,
+  `doc/09_report/cross_language_perf_parallel_smoke.md`, and
+  `doc/09_report/cross_language_perf_parallel_large_2026-06-07.md`.
 - Hosted parallelism control: `src/runtime/runtime_thread.c`,
   `src/runtime/runtime_thread.h`, and
   `src/lib/nogc_async_mut/concurrent/multicore_green.spl`.
