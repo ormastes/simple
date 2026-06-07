@@ -104,6 +104,10 @@ Behavior:
   `green_carrier_parallelism_for_topology`, and
   `green_carrier_parallelism_limit` preserve the requested carrier limit while
   bounding the active carrier count to detected SimpleOS topology.
+- `Scheduler.green_parallelism_state` stores the carrier limit beside
+  scheduler-owned green execution state. `set_green_carrier_parallelism`
+  updates the requested limit, while `set_topology` recomputes the active
+  limit from the preserved request.
 
 ### Freestanding QEMU Probe Path
 
@@ -150,6 +154,8 @@ Host API coverage:
 
 SimpleOS coverage:
 
+- `test/01_unit/os/kernel/scheduler/green_carrier_spec.spl`
+- `test/01_unit/os/kernel/scheduler/scheduler_green_parallelism_spec.spl`
 - `test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl`
 - `test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl`
 - `test/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.spl`
@@ -170,8 +176,8 @@ Repository guards:
 ## Open Design Decisions
 
 - Scheduler-owned parallelism handoff: the hosted runtime-pool facade and
-  SimpleOS carrier scheduler now both expose topology-bounded parallelism
-  contracts. Remaining work is wiring that SimpleOS limit into final AP
-  hardware handoff and blocking/preemption behavior.
+  SimpleOS `Scheduler` now both expose topology-bounded parallelism contracts.
+  Remaining work is enforcing that SimpleOS limit in final AP hardware handoff
+  and blocking/preemption behavior.
 - Preemption strategy: compiler-inserted yields, runtime safepoints, or an
   explicit cooperative-only guarantee until later.

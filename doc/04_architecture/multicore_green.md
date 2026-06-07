@@ -137,6 +137,8 @@ SimpleOS path:
   execution lane without mutating normal OS task state.
 - `GreenCarrierParallelismState` records requested carriers, active
   topology-bounded carriers, and clamp reason for the SimpleOS scheduler lane.
+- `Scheduler` owns that carrier parallelism state and recomputes the active
+  limit when scheduler topology changes, preserving the requested limit.
 - QEMU proof currently covers AP startup plus CPU1 fixed-slot dispatch; full
   hardware context-switch handoff remains future work.
 
@@ -154,9 +156,9 @@ The selected Full Go-Like Runtime Roadmap uses all layers:
   wake/IPI intent, and AP evidence.
 
 Future roadmap work remains explicit: work stealing or per-worker queues,
-blocking integration, connecting the SimpleOS carrier limit to final hardware
-handoff, and preemption or compiler-inserted yield points before claiming
-tight-loop fairness comparable to Go.
+blocking integration, enforcing the scheduler-owned SimpleOS carrier limit in
+final AP hardware handoff, and preemption or compiler-inserted yield points
+before claiming tight-loop fairness comparable to Go.
 
 ## Known Gaps
 

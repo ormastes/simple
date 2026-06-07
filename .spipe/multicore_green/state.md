@@ -56,6 +56,14 @@ go-runtime-hardening
   `test/01_unit/os/kernel/scheduler/green_carrier_spec.spl` passed 30
   examples, including carrier-limit clamp, invalid-topology, and
   topology-growth coverage.
+- implementation: Wired the SimpleOS carrier parallelism state into the real
+  `Scheduler`, with scheduler-facing set/get methods and topology-change
+  recomputation that preserves the requested carrier count.
+- verification: `scheduler.spl` check passed and
+  `test/01_unit/os/kernel/scheduler/scheduler_green_parallelism_spec.spl`
+  passed 4 examples. A broad `scheduler_spec.spl` run timed out at 120s, so the
+  focused spec is the direct evidence for this scheduler-owned parallelism
+  increment.
 
 ## Completion Audit - 2026-06-07
 

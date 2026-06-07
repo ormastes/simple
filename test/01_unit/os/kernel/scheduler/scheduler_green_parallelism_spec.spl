@@ -1,0 +1,71 @@
+"""
+# Scheduler Green Carrier Parallelism Specification
+
+Focused coverage for scheduler-owned green carrier parallelism. The broader
+`scheduler_spec.spl` validates scheduler task behavior and can be slow; this
+spec keeps the multicore-green carrier-limit contract directly executable.
+
+## Requirements
+
+**Requirements:** doc/02_requirements/feature/multicore_green.md
+
+## Plan
+
+**Plan:** doc/03_plan/sys_test/multicore_green.md
+
+## Design
+
+**Design:** doc/05_design/multicore_green.md
+"""
+
+use std.spec.{describe, it, expect}
+use os.kernel.types.task_types.{default_scheduler_topology}
+use os.kernel.scheduler.scheduler.{Scheduler}
+
+describe "Scheduler green carrier parallelism":
+    it "starts from scheduler topology":
+        val sched = Scheduler.new_with_cpu_count(4u32)
+
+        expect(sched.green_carrier_parallelism_requested()).to_equal(4)
+        expect(sched.green_carrier_parallelism_limit()).to_equal(4)
+        expect(sched.green_carrier_parallelism_reason()).to_equal("default_topology_limit")
+
+    it "clamps requested carriers to scheduler topology":
+        var sched = Scheduler.new_with_cpu_count(4u32)
+        val state = sched.set_green_carrier_parallelism(99)
+
+        expect(state.requested_limit).to_equal(99)
+        expect(state.active_limit).to_equal(4)
+        expect(state.reason).to_equal("clamped_topology")
+        expect(sched.green_carrier_parallelism_requested()).to_equal(99)
+        expect(sched.green_carrier_parallelism_limit()).to_equal(4)
+        expect(sched.green_carrier_parallelism_reason()).to_equal("clamped_topology")
+
+    it "clamps zero or negative requested carriers through scheduler API":
+        var sched = Scheduler.new_with_cpu_count(4u32)
+        val zero = sched.set_green_carrier_parallelism(0)
+        val negative = sched.set_green_carrier_parallelism(-3)
+
+        expect(zero.requested_limit).to_equal(0)
+        expect(zero.active_limit).to_equal(1)
+        expect(zero.reason).to_equal("clamped_min")
+        expect(negative.requested_limit).to_equal(-3)
+        expect(negative.active_limit).to_equal(1)
+        expect(negative.reason).to_equal("clamped_min")
+        expect(sched.green_carrier_parallelism_requested()).to_equal(-3)
+        expect(sched.green_carrier_parallelism_limit()).to_equal(1)
+
+    it "keeps requested carriers across topology changes":
+        var sched = Scheduler.new_with_cpu_count(2u32)
+        sched.set_green_carrier_parallelism(4)
+        sched.set_topology(default_scheduler_topology(4u32))
+
+        expect(sched.green_carrier_parallelism_requested()).to_equal(4)
+        expect(sched.green_carrier_parallelism_limit()).to_equal(4)
+        expect(sched.green_carrier_parallelism_reason()).to_equal("requested_limit")
+
+        sched.set_topology(default_scheduler_topology(1u32))
+
+        expect(sched.green_carrier_parallelism_requested()).to_equal(4)
+        expect(sched.green_carrier_parallelism_limit()).to_equal(1)
+        expect(sched.green_carrier_parallelism_reason()).to_equal("clamped_topology")
