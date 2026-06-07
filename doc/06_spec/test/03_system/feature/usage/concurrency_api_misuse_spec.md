@@ -1,6 +1,6 @@
 # Concurrency API Misuse System Contract
 
-> This system spec proves the public pherallel/concurrency API surfaces fail closed at compile time. The OS-thread `thread_spawn`, cooperative green queue APIs, low-level green thread APIs, and `multicore_green_spawn` runtime-pool facade must reject wrong imports, wrong arity, bad argument types, and numbered alias names.
+> This system spec proves the public pherallel/concurrency API surfaces fail closed at compile time while the approved meaningful API names remain usable. The OS-thread `thread_spawn`, cooperative green queue APIs, low-level green thread APIs, and `multicore_green_spawn` runtime-pool facade must reject wrong imports, wrong arity, bad argument types, and numbered alias names.
 
 <!-- sdn-diagram:id=concurrency_api_misuse_spec.arch -->
 <details class="sdn-source">
@@ -27,14 +27,14 @@ concurrency_api_misuse_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # Concurrency API Misuse System Contract
 
-This system spec proves the public pherallel/concurrency API surfaces fail closed at compile time. The OS-thread `thread_spawn`, cooperative green queue APIs, low-level green thread APIs, and `multicore_green_spawn` runtime-pool facade must reject wrong imports, wrong arity, bad argument types, and numbered alias names.
+This system spec proves the public pherallel/concurrency API surfaces fail closed at compile time while the approved meaningful API names remain usable. The OS-thread `thread_spawn`, cooperative green queue APIs, low-level green thread APIs, and `multicore_green_spawn` runtime-pool facade must reject wrong imports, wrong arity, bad argument types, and numbered alias names.
 
 ## At a Glance
 
@@ -54,10 +54,10 @@ This system spec proves the public pherallel/concurrency API surfaces fail close
 ## Overview
 
 This system spec proves the public pherallel/concurrency API surfaces fail
-closed at compile time. The OS-thread `thread_spawn`, cooperative green queue
-APIs, low-level green thread APIs, and `multicore_green_spawn` runtime-pool
-facade must reject wrong imports, wrong arity, bad argument types, and numbered
-alias names.
+closed at compile time while the approved meaningful API names remain usable.
+The OS-thread `thread_spawn`, cooperative green queue APIs, low-level green
+thread APIs, and `multicore_green_spawn` runtime-pool facade must reject wrong
+imports, wrong arity, bad argument types, and numbered alias names.
 
 ## Requirements
 
@@ -90,6 +90,8 @@ Run the misuse gate:
 - `multicore_green_spawn` must accept a single zero-argument closure.
 - `multicore_green_set_parallelism` must accept an integer worker count.
 - Numbered aliases such as `thread_spawn2` must be rejected.
+- The profile-script API contract checks approved public names before checking
+  misuse fixtures.
 
 ## Scenarios
 
@@ -110,6 +112,31 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 step("Count the checked-in concurrency misuse fixtures")
 expect(fixture_count()).to_equal(13)
+```
+
+</details>
+
+#### keeps approved public API names usable
+
+- Run the profile-script concurrency API contract
+   - Expected: code equals `0`
+- Verify approved public-name fixtures were checked before misuse fixtures
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Run the profile-script concurrency API contract")
+val (output, code) = run_profile_contract()
+expect(code).to_equal(0)
+step("Verify approved public-name fixtures were checked before misuse fixtures")
+expect(output).to_contain("concurrency_api_contract=true")
+expect(output).to_contain("positive_fixtures=3")
+expect(output).to_contain("fixtures=4")
 ```
 
 </details>
@@ -215,8 +242,8 @@ expect_compile_error("multicore_green_parallelism_bad_arg.spl", "E-PAR-004", "si
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

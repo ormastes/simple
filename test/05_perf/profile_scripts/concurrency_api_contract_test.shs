@@ -31,6 +31,54 @@ expect_check_fails() {
     fi
 }
 
+expect_check_passes() {
+    name="$1"
+    if ! "$SIMPLE_BIN" check "$WORK_DIR/$name.spl" >"$WORK_DIR/$name.out" 2>&1; then
+        cat "$WORK_DIR/$name.out"
+        fail "expected check success for $name"
+    fi
+}
+
+expect_run_contains() {
+    name="$1"
+    expected="$2"
+    if ! "$SIMPLE_BIN" run "$WORK_DIR/$name.spl" --mode=interpreter >"$WORK_DIR/$name.out" 2>&1; then
+        cat "$WORK_DIR/$name.out"
+        fail "expected run success for $name"
+    fi
+    if ! grep -Fq "$expected" "$WORK_DIR/$name.out"; then
+        cat "$WORK_DIR/$name.out"
+        fail "missing run marker for $name: $expected"
+    fi
+}
+
+write_fixture public_thread_spawn <<'SIMPLE'
+use std.concurrent.thread.{thread_spawn}
+
+fn main():
+    val handle = thread_spawn(\: 7)
+SIMPLE
+
+write_fixture public_cooperative_green <<'SIMPLE'
+use std.concurrent.cooperative_green.{cooperative_green_spawn_value, cooperative_green_run_all}
+
+fn main():
+    val handle = cooperative_green_spawn_value(11)
+    cooperative_green_run_all()
+    if handle.join() == 11:
+        println("cooperative_green_public=true")
+SIMPLE
+
+write_fixture public_multicore_green <<'SIMPLE'
+use std.concurrent.multicore_green.{multicore_green_spawn, multicore_green_set_parallelism, multicore_green_parallelism}
+
+fn main():
+    multicore_green_set_parallelism(2)
+    val handle = multicore_green_spawn(\: 13)
+    if handle.join() == 13 and multicore_green_parallelism() >= 1:
+        println("multicore_green_public=true")
+SIMPLE
+
 write_fixture thread_spawn2_import <<'SIMPLE'
 use std.concurrent.thread.{thread_spawn2}
 
@@ -60,6 +108,14 @@ fn main():
 SIMPLE
 
 fixtures=0
+positive_fixtures=0
+expect_check_passes public_thread_spawn
+positive_fixtures=$((positive_fixtures + 1))
+expect_run_contains public_cooperative_green "cooperative_green_public=true"
+positive_fixtures=$((positive_fixtures + 1))
+expect_run_contains public_multicore_green "multicore_green_public=true"
+positive_fixtures=$((positive_fixtures + 1))
+
 for name in \
     thread_spawn2_import \
     wrong_surface_import \
@@ -82,3 +138,4 @@ fi
 
 echo "concurrency_api_contract=true"
 echo "fixtures=$fixtures"
+echo "positive_fixtures=$positive_fixtures"
