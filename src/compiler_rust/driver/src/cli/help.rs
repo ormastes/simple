@@ -78,6 +78,7 @@ pub fn print_help() {
     eprintln!("Documentation Generation:");
     eprintln!("  simple spipe-docgen <files...>           Generate docs from SPipe test files");
     eprintln!("  simple spipe-docgen <files...> -o <dir>  Output to specific directory");
+    eprintln!("  simple md-diagram-update [file.md ...]   Render SDN diagrams in Markdown");
     eprintln!("  simple ffi-gen <file.spl> [options]      Generate SFFI wrappers from @Lib extern declarations");
     eprintln!();
     eprintln!("WASM App Packaging:");

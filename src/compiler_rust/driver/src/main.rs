@@ -597,6 +597,16 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         needs_rust_flags: &[],
     },
     CommandEntry {
+        name: "md-diagram-update",
+        app_path: "src/app/md_diagram_update/main.spl",
+        rust_handler: Handler::Custom(|_| {
+            eprintln!("error: pure Simple md-diagram-update app not found or failed to launch");
+            1
+        }),
+        env_override: "",
+        needs_rust_flags: &[],
+    },
+    CommandEntry {
         name: "ffi-gen",
         app_path: "src/compiler/90.tools/sffi_gen/main.spl",
         rust_handler: Handler::Custom(handle_sffi_gen_wrapper),
@@ -1062,6 +1072,7 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
         && app_relative_path != "src/app/wrapper_gen/mod.spl"
         && app_relative_path != "src/app/llm_process_gen/main.spl"
         && app_relative_path != "src/app/spipe_docgen/main.spl"
+        && app_relative_path != "src/app/md_diagram_update/main.spl"
     {
         return None;
     }
