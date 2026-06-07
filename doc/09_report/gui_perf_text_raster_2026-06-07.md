@@ -89,9 +89,16 @@ GUI or app code.
 
 2026-06-07 Draw IR executor follow-up: `engine2d_draw_ir_adv_*` now consumes
 that text contract by honoring command `font-size` instead of hardcoding 12px,
-and returns vector-font offload status/reason. Current CPU evidence reports
-`awaiting-rasterizer-evidence`, so routing is wired but GPU glyph return remains
-open.
+renders text through FontRenderer-backed blit buffers, and returns vector-font
+offload status/reason. Current CPU evidence reports `cpu-fallback` /
+`production-gpu-dispatch-not-wired`, so routing observes the rasterizer path but
+GPU glyph return remains open.
+
+2026-06-07 Draw IR text-cache follow-up: the text executor now keeps one
+`TextBlitCache` per batch/composition so repeated text commands reuse the
+FontRenderer glyph cache instead of constructing a new renderer for every text
+command. Focused unit evidence renders two repeated vector `A` text commands and
+asserts one vector-font accelerator attempt while both commands render.
 
 Related tracked issue:
 [`pure_simple_web_render_interpreter_bound_2026-06-06.md`](../08_tracking/bug/pure_simple_web_render_interpreter_bound_2026-06-06.md).

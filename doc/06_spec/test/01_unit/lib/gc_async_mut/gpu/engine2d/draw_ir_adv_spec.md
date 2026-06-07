@@ -28,7 +28,7 @@ draw_ir_adv_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -280,12 +280,50 @@ engine.shutdown()
 
 </details>
 
+#### reuses vector glyph rasterization across repeated Draw IR text commands
+
+1. var engine = Engine2D create with backend
+2. engine clear
+3.  draw ir text command
+4.  draw ir text command
+   - Expected: result.rendered_command_count equals `2`
+   - Expected: result.text_command_count equals `2`
+   - Expected: stats.attempts equals `1`
+5. engine shutdown
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var engine = Engine2D.create_with_backend(64, 32, "cpu")
+engine.clear(BG)
+val batch = draw_ir_batch("text-cache-batch", DRAW_IR_TEST_BACKEND_GPU, draw_ir_embedding_config("surf", "win", 0, 0, 64, 32, 1, 1000, false), [
+    _draw_ir_text_command("title-a", 2, 3, "A"),
+    _draw_ir_text_command("title-b", 28, 3, "A")
+])
+
+val result = engine2d_draw_ir_adv_batch(engine, batch, false)
+val stats = vector_font_accelerator_stats()
+
+expect(result.rendered_command_count).to_equal(2)
+expect(result.text_command_count).to_equal(2)
+expect(stats.attempts).to_equal(1)
+expect(_count_not_color(result.pixels, BG)).to_be_greater_than(0)
+engine.shutdown()
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

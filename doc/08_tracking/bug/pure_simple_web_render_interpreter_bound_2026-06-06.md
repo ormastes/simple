@@ -116,11 +116,17 @@ IR batch contains a backend-consumable text command for `CMD`.
 
 2026-06-07 backend-consumption update: `engine2d_draw_ir_adv_batch()` and
 `engine2d_draw_ir_adv_composition()` now read each text command's `font-size`,
-pass the resolved size to `Engine2D.draw_text`, count text commands, and expose
-`font_offload_status` / `font_offload_reason` from
+render text through FontRenderer-backed text blit buffers, count text commands,
+and expose `font_offload_status` / `font_offload_reason` from
 `vector_font_current_offload_evidence()`. Focused unit coverage asserts a 16px
-Draw IR text command renders through Engine2D and reports
-`awaiting-rasterizer-evidence` / `vector-font-rasterizer-not-yet-observed`.
+Draw IR text command renders through Engine2D and reports the current
+CPU-fallback reason.
+
+2026-06-07 text-cache update: the Draw IR executor now creates one
+`TextBlitCache` per batch/composition instead of creating a fresh
+`FontRenderer` per text command. Repeated vector glyphs in a Draw IR batch reuse
+the renderer glyph cache; focused unit coverage renders two `A` text commands
+and asserts `vector_font_accelerator_stats().attempts == 1`.
 
 Remaining gap: the text path still does not prove `gpu-glyph-returned`; bitmap
 and vector glyph execution need a backend rasterizer that returns glyph pixels

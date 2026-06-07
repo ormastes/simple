@@ -47,6 +47,7 @@ use common.ui.draw_ir.{
 }
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_batch, engine2d_draw_ir_adv_composition}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.text_layout.font_rasterizer.{vector_font_accelerator_stats}
 use std.gc_async_mut.ui_test.sgtti.{SgttiTestDriver, sgtti_snapshot_from_draw_ir_batch}
 
 val BG: u32 = 0xff000000u32
@@ -60,6 +61,30 @@ fn _count_not_color(pixels: [u32], color: u32) -> i32:
         if pixel != color:
             count = count + 1
     count
+
+fn _draw_ir_text_command(component_id: text, x: i32, y: i32, text_value: text) -> DrawIrCommand:
+    DrawIrCommand(
+        kind: "text",
+        component_id: component_id,
+        x: x,
+        y: y,
+        width: 24,
+        height: 24,
+        color: GREEN,
+        text_value: text_value,
+        border_rect: draw_ir_no_rect(),
+        content_rect: draw_ir_no_rect(),
+        hit_rect: draw_ir_no_rect(),
+        clip_rect: draw_ir_no_rect(),
+        computed_style: [
+            draw_ir_style_prop("font-size", "24px"),
+            draw_ir_style_prop("font-rendering", "bitmap-vector-backend-preferred")
+        ],
+        edge: nil,
+        parent_id: "window",
+        image_uri: "",
+        points: []
+    )
 
 describe "Engine2D advanced Draw IR executor":
 
@@ -157,5 +182,22 @@ describe "Engine2D advanced Draw IR executor":
         expect(result.last_text_font_size).to_equal(16)
         expect(result.font_offload_status).to_equal("cpu-fallback")
         expect(result.font_offload_reason).to_equal("production-gpu-dispatch-not-wired")
+        expect(_count_not_color(result.pixels, BG)).to_be_greater_than(0)
+        engine.shutdown()
+
+    it "reuses vector glyph rasterization across repeated Draw IR text commands":
+        var engine = Engine2D.create_with_backend(64, 32, "cpu")
+        engine.clear(BG)
+        val batch = draw_ir_batch("text-cache-batch", DRAW_IR_TEST_BACKEND_GPU, draw_ir_embedding_config("surf", "win", 0, 0, 64, 32, 1, 1000, false), [
+            _draw_ir_text_command("title-a", 2, 3, "A"),
+            _draw_ir_text_command("title-b", 28, 3, "A")
+        ])
+
+        val result = engine2d_draw_ir_adv_batch(engine, batch, false)
+        val stats = vector_font_accelerator_stats()
+
+        expect(result.rendered_command_count).to_equal(2)
+        expect(result.text_command_count).to_equal(2)
+        expect(stats.attempts).to_equal(1)
         expect(_count_not_color(result.pixels, BG)).to_be_greater_than(0)
         engine.shutdown()

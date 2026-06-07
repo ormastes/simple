@@ -32,6 +32,33 @@ class TextBlitBuffer:
     fn is_empty() -> bool:
         self.width <= 0 or self.height <= 0 or self.pixels.len() == 0
 
+class TextBlitCache:
+    """Reusable font renderer for a Draw IR or backend text batch."""
+    renderer: FontRenderer
+
+    static fn new() -> TextBlitCache:
+        TextBlitCache(renderer: FontRenderer.new())
+
+    me render_to_buf(text_val: text, fg: u32, bg: u32, font_size: i32) -> [u32]:
+        val text_w = text_buf_width(text_val, font_size)
+        val text_h = text_buf_height(font_size)
+        if text_w <= 0 or text_h <= 0:
+            var empty: [u32] = []
+            return empty
+        val buf_size = text_w * text_h
+        self.renderer.render_text([bg; buf_size], text_w, text_h, 0, 0, text_val, fg, font_size)
+
+    me blit_buffer(text_val: text, fg: u32, bg: u32, font_size: i32) -> TextBlitBuffer:
+        val text_w = text_buf_width(text_val, font_size)
+        val text_h = text_buf_height(font_size)
+        if text_w <= 0 or text_h <= 0:
+            var empty: [u32] = []
+            return TextBlitBuffer(width: 0, height: 0, pixels: empty)
+        TextBlitBuffer(width: text_w, height: text_h, pixels: self.render_to_buf(text_val, fg, bg, font_size))
+
+    me transparent_blit_buffer(text_val: text, fg: u32, font_size: i32) -> TextBlitBuffer:
+        self.blit_buffer(text_val, fg, 0u32, font_size)
+
 # ============================================================================
 # Text Buffer Dimensions
 # ============================================================================
@@ -82,23 +109,13 @@ fn text_render_to_buf(text_val: text, fg: u32, bg: u32, font_size: i32) -> [u32]
 
     Backends blit this buffer with `draw_image(x, y, text_w, text_h, buf)`.
     """
-    val text_w = text_buf_width(text_val, font_size)
-    val text_h = text_buf_height(font_size)
-    if text_w <= 0 or text_h <= 0:
-        var empty: [u32] = []
-        return empty
-    val buf_size = text_w * text_h
-    var renderer = FontRenderer.new()
-    renderer.render_text([bg; buf_size], text_w, text_h, 0, 0, text_val, fg, font_size)
+    var cache = TextBlitCache.new()
+    cache.render_to_buf(text_val, fg, bg, font_size)
 
 fn text_blit_buffer(text_val: text, fg: u32, bg: u32, font_size: i32) -> TextBlitBuffer:
     """Build a rendered text payload with dimensions and pixels together."""
-    val text_w = text_buf_width(text_val, font_size)
-    val text_h = text_buf_height(font_size)
-    if text_w <= 0 or text_h <= 0:
-        var empty: [u32] = []
-        return TextBlitBuffer(width: 0, height: 0, pixels: empty)
-    TextBlitBuffer(width: text_w, height: text_h, pixels: text_render_to_buf(text_val, fg, bg, font_size))
+    var cache = TextBlitCache.new()
+    cache.blit_buffer(text_val, fg, bg, font_size)
 
 fn text_transparent_blit_buffer(text_val: text, fg: u32, font_size: i32) -> TextBlitBuffer:
     """Build a foreground-only text payload where zero pixels are transparent."""
