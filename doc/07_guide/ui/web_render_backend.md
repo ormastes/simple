@@ -123,8 +123,10 @@ and `probe_all_summary()` expose this exact sequence for diagnostics and CI
 evidence. The vector and bitmap returned-glyph evidence slots follow the
 native/generated subset of that order (`METAL`, `CUDA`, `ROCM`, `VULKAN`,
 `OPENCL`) so a native or generated GPU glyph result wins before lower-priority
-slots. Current bitmap/vector glyph tests prove the return contract; live-kernel
-dispatch is proved backend by backend as each session binds real launch args.
+slots. Those slots now use one shared font backend priority helper for vector
+and bitmap glyphs, while current bitmap/vector glyph tests prove the return
+contract; live-kernel dispatch is proved backend by backend as each session
+binds real launch args.
 Generated glyph raster kernels share a validated argument packer for
 `glyph_plan`, `dst`, `width`, `height`, and `font_size`; tests prove invalid
 arguments fail closed, valid packed pointers round-trip, and generated glyph

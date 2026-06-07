@@ -249,6 +249,12 @@ the existing `rt_gui_get_glyph_8x16()` fallback rows. `Engine2D` exposes this as
 to be converted into `CachedGlyph` pixels and routed through the bitmap
 returned-glyph contract.
 
+2026-06-07 font returned-glyph priority cleanup: vector and bitmap returned
+glyph probes now share one native/generated font backend order helper
+(`METAL`, `CUDA`, `ROCM`, `VULKAN`, `OPENCL`) before CPU fallback. This removes
+duplicated CUDA/OpenCL-era branching from the production `CachedGlyph` return
+contract while preserving the existing app-facing renderer behavior.
+
 ## Path F — repeated ancestor clip walks during paint — FIXED 2026-06-07
 
 `paint()` called `ancestor_clip()` in the background, absolute, positive z-index,

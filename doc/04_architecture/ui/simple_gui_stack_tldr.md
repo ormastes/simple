@@ -91,6 +91,8 @@ Host input
 - OpenCL bitmap glyph plan: `Engine2D.bitmap_glyph_raster_evidence()` exposes
   the OpenCL path that uploads existing 8x16 bitmap glyph rows as device
   `glyph_plan` input.
+- Font returned-glyph priority: vector and bitmap probes share the same
+  `METAL`, `CUDA`, `ROCM`, `VULKAN`, `OPENCL` helper before CPU fallback.
 - Draw IR glyph evidence: `Engine2dDrawIrAdvResult` reports backend glyph
   status/reason/readback separately from production returned-glyph readiness.
 - Engine2D split contract: `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl`.

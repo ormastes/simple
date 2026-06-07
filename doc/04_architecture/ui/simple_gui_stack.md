@@ -383,6 +383,10 @@ plan input; production readiness still requires converting the readback into a
 Returned-glyph readback probes for both vector and bitmap fonts must support a
 bounded multi-slot batch (`0..7`) so backend launches can return more than one
 glyph without falling back to CPU for every character after slot 0.
+Both vector and bitmap returned-glyph probes use one shared native/generated
+font backend order helper (`METAL`, `CUDA`, `ROCM`, `VULKAN`, `OPENCL`) so the
+font contract cannot drift from the documented backend preference as new
+backend readback paths are wired.
 
 ## Migration Order
 
