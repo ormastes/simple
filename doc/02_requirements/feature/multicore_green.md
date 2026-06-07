@@ -23,7 +23,8 @@ SimpleOS scheduler work distinct and verifiable.
   `MulticoreGreenHandle.used_runtime_pool()`.
 - REQ-MCG-004: Profile scripts must keep Simple OS-thread, Simple cooperative
   green, Simple multicore green, C pthread, Go goroutine, artifact-size, RSS,
-  and large-fanout stress rows separate.
+  and large-fanout stress rows separate. Reports must record the Go runtime and
+  scheduler metadata, including `GOMAXPROCS`, for M:N comparisons.
 - REQ-MCG-005: Generated profile workloads must preserve user-facing Simple API
   semantics, use compact loop/handle-array forms where possible, and avoid
   numbered API aliases or generated numbered handle APIs.

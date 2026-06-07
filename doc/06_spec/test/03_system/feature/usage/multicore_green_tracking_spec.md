@@ -131,6 +131,9 @@ Failed: 0
   part of the OS lane as well as the host runtime lane.
 - The tracking row must carry profile evidence links because performance claims
   need executable profile scripts.
+- The tracking row must carry the large-profile gate and profile-report
+  contract so Go scheduler metadata, Go-vs-C stress fanout, and runtime-pool
+  evidence stay release-visible.
 - The tracking row must carry implementation links for cooperative green,
   multicore green, and the SimpleOS green carrier.
 - The tracking row must carry guide links for the compiler perf guide and
@@ -170,6 +173,9 @@ Failed: 0
   as Go-like M:N CPU-parallel evidence.
 - Cross-language profile reports must use the canonical profile script rather
   than ad hoc benchmark commands.
+- Cross-language profile reports must record Go runtime/scheduler metadata and
+  prove Go goroutine stress fanout beats one-pthread-per-task C when both rows
+  are numeric.
 - Pure Simple behavior should be optimized first; Rust remains a seed path, not
   the replacement for the Simple user-facing API.
 - Profile changes must keep comparable deterministic workloads across Simple,
@@ -271,7 +277,7 @@ expect(row).to_contain("doc/05_design/multicore_green.md")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -285,6 +291,8 @@ expect(row).to_contain("test/03_system/os/qemu/os/scheduler/green_carrier_qemu_s
 step("Verify profile stress specs are linked")
 expect(row).to_contain("test/05_perf/stress/multicore_green_cross_language_gate_spec.spl")
 expect(row).to_contain("test/05_perf/stress/multicore_green_fanout_spec.spl")
+expect(row).to_contain("test/05_perf/stress/multicore_green_large_profile_gate_spec.spl")
+expect(row).to_contain("test/05_perf/profile_scripts/profile_report_contract_test.shs")
 ```
 
 </details>
