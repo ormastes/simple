@@ -969,10 +969,47 @@ fn tag_defaults(st: Style, tag: text) -> Style:
 class Rules:
     sels: [text]
     decls: [text]
+    needs_rightmost_prefilter: [bool]
+    rightmost_prefilters: [text]
+
+fn selector_needs_rightmost_prefilter(sel: text) -> bool:
+    sel.index_of(" ") >= 0 or sel.contains(">")
+
+fn selector_group_rightmost_filter(group: text) -> text:
+    val trimmed = group.trim()
+    var end = trimmed.len()
+    while end > 0 and trimmed.substring(end - 1, end) == " ":
+        end = end - 1
+    if end <= 0:
+        return ""
+    var pos = end - 1
+    while pos >= 0:
+        val ch = trimmed.substring(pos, pos + 1)
+        if ch == " " or ch == ">":
+            return trimmed.substring(pos + 1, end)
+        pos = pos - 1
+    trimmed.substring(0, end)
+
+fn selector_rightmost_filter(sel: text) -> text:
+    if sel.index_of(",") < 0:
+        return selector_group_rightmost_filter(sel)
+    val groups = sel.split(",")
+    var out = ""
+    var g = 0
+    while g < groups.len():
+        val part = selector_group_rightmost_filter(groups[g])
+        if part.len() > 0:
+            if out.len() > 0:
+                out = out + ","
+            out = out + part
+        g = g + 1
+    out
 
 fn extract_css(html: text) -> Rules:
     var sels: [text] = []
     var decls: [text] = []
+    var needs_rightmost_prefilter: [bool] = []
+    var rightmost_prefilters: [text] = []
     var pos = 0
     var guard = 0
     while guard < 1000:
@@ -1003,9 +1040,11 @@ fn extract_css(html: text) -> Rules:
             if sel.len() > 0:
                 sels.push(sel)
                 decls.push(decl)
+                needs_rightmost_prefilter.push(selector_needs_rightmost_prefilter(sel))
+                rightmost_prefilters.push(selector_rightmost_filter(sel))
             cp = endb + 1
         pos = close + 1
-    Rules(sels: sels, decls: decls)
+    Rules(sels: sels, decls: decls, needs_rightmost_prefilter: needs_rightmost_prefilter, rightmost_prefilters: rightmost_prefilters)
 
 fn unquote_css_attr_value(raw: text) -> text:
     val v = raw.trim()
@@ -1194,34 +1233,16 @@ fn selector_matches_node(nodes: [HNode], idx: i32, sel: text) -> bool:
         g = g + 1
     false
 
-fn selector_group_rightmost_matches_node(group: text, tag: text, cls: text, id: text, attrs: text) -> bool:
-    val trimmed = group.trim()
-    var end = trimmed.len()
-    while end > 0 and trimmed.substring(end - 1, end) == " ":
-        end = end - 1
-    if end <= 0:
-        return false
-    var pos = end - 1
-    while pos >= 0:
-        val ch = trimmed.substring(pos, pos + 1)
-        if ch == " " or ch == ">":
-            return simple_match(trimmed.substring(pos + 1, end), tag, cls, id, attrs)
-        pos = pos - 1
-    simple_match(trimmed.substring(0, end), tag, cls, id, attrs)
-
-fn selector_rightmost_matches_node(sel: text, tag: text, cls: text, id: text, attrs: text) -> bool:
-    if sel.index_of(",") < 0:
-        return selector_group_rightmost_matches_node(sel, tag, cls, id, attrs)
-    val groups = sel.split(",")
+fn selector_rightmost_filter_matches_node(filter: text, tag: text, cls: text, id: text, attrs: text) -> bool:
+    if filter.index_of(",") < 0:
+        return simple_match(filter, tag, cls, id, attrs)
+    val groups = filter.split(",")
     var g = 0
     while g < groups.len():
-        if selector_group_rightmost_matches_node(groups[g], tag, cls, id, attrs):
+        if simple_match(groups[g], tag, cls, id, attrs):
             return true
         g = g + 1
     false
-
-fn selector_needs_rightmost_prefilter(sel: text) -> bool:
-    sel.index_of(" ") >= 0 or sel.contains(">")
 
 # ---------------------------------------------------------------------------
 # Compute styles (cascade: inherit -> tag defaults -> matched rules -> inline)
@@ -1239,7 +1260,7 @@ fn compute_styles(nodes: [HNode], rules: Rules, html: text) -> [Style]:
         var r = 0
         while r < rule_count:
             val sel = rules.sels[r]
-            if (not selector_needs_rightmost_prefilter(sel) or selector_rightmost_matches_node(sel, nd.tag, nd.class_attr, nd.id_attr, nd.attrs_raw)) and selector_matches_node(nodes, i, sel):
+            if (not rules.needs_rightmost_prefilter[r] or selector_rightmost_filter_matches_node(rules.rightmost_prefilters[r], nd.tag, nd.class_attr, nd.id_attr, nd.attrs_raw)) and selector_matches_node(nodes, i, sel):
                 st = apply_decls(st, rules.decls[r])
             r = r + 1
         if nd.style_attr.len() > 0:

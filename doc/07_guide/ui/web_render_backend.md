@@ -74,9 +74,10 @@ fixed (see `doc/08_tracking/bug/pure_simple_web_render_interpreter_bound_2026-06
    construction/splitting for one-token class attributes that miss a `.class`
    selector, and skips compound `.a.b` selector splitting when the node has only
    one class token, while preserving exact class matching. The same selector
-   path now prefilters descendant and child-combinator rules by the rightmost
-   node token before running the full ancestor matcher, so common misses do not
-   pay the tree-walk and normalization cost.
+   path now extracts descendant/child-combinator complexity and rightmost-token
+   filters once with the stylesheet rules, then uses that metadata before the
+   full ancestor matcher so common misses do not pay per-node selector scans,
+   normalization, or tree-walk cost.
 7. single-property CSS declaration blocks still paid the full declaration
    lookup path for every matched rule. The 2026-06-07 declaration fast-path
    parses common one-property blocks once and falls back to the full parser for
