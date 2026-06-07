@@ -24,7 +24,7 @@ the `examples/09_embedded/simple_os` submodule.
 ./src/compiler_rust/target/debug/simple check src/os/kernel/scheduler/scheduler.spl
 ./src/compiler_rust/target/debug/simple test test/01_unit/os/kernel/scheduler/scheduler_green_parallelism_spec.spl --mode=interpreter --clean
 ./src/compiler_rust/target/debug/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean
-SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 ./src/compiler_rust/target/debug/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean
+SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 bin/release/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean
 ```
 
 ## Results
@@ -43,9 +43,9 @@ SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 ./src/compiler_rust/target/debug/simple test 
 
 ## Current Refresh
 
-After syncing `/tmp/simple-pherallel-sync` to `origin/main` at `45f46b0f6d`,
-the non-live SimpleOS green-thread loop was rerun with `--clean` on
-2026-06-07. The direct rerun passed:
+After syncing `/tmp/simple-pherallel-sync` to `origin/main` at `9b5cb43402`,
+the SimpleOS green-thread loop was rerun with `--clean` on 2026-06-07. The
+direct rerun passed:
 
 - cooperative green system contract: 3 assertions
 - multicore green scheduler contract: 6 assertions
@@ -55,18 +55,19 @@ the non-live SimpleOS green-thread loop was rerun with `--clean` on
 - scheduler compile check: 1 file
 - scheduler green-carrier parallelism: 29 assertions
 - QEMU default gate lane: 1 assertion
+- QEMU live lane: 1 assertion in 37645ms
 
-The live-QEMU row above remains the previously recorded opt-in run. This refresh
-does not newly claim final ring/user context-switch handoff across APs; that
-claim remains blocked by
+This refresh does not claim final ring/user context-switch handoff across APs;
+that claim remains blocked by
 `doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md`.
 
 ## Notes
 
 - The default QEMU spec lane proves the opt-in gate is wired and disabled unless
   `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1` is set.
-- The live lane passed in 52254ms. The spec built the x86_64 probe, booted a
-  two-CPU QEMU guest, and asserted `[smp] AP reached 64-bit entry`,
+- The live lane passed in 37645ms on `9b5cb43402`. The spec built the x86_64
+  probe, booted a two-CPU QEMU guest, and asserted
+  `[smp] AP reached 64-bit entry`,
   `[green-carrier-qemu] PASS=true`, and
   `[green-carrier-qemu] PREEMPT_PASS=true`, and
   `[green-carrier-qemu] SCHED_HANDOFF_PASS=true` in serial output.
