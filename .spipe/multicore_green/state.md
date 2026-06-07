@@ -49,10 +49,9 @@ go-runtime-hardening
   numbered `h0` / `h1` style handles; the profile report contract now rejects
   numbered generated handles.
 - evidence: Regenerated `doc/09_report/cross_language_perf_parallel_smoke.md`
-  with capture-free generated Simple workers. Native fanout and stress
-  multicore-green rows now pass with `pool_used=N/N` and
-  `parallelism=requested/actual`; the regular parallel multicore row is
-  classified separately as a runtime-pool handle ownership blocker.
+  with capture-free generated Simple workers. Native regular parallel, fanout,
+  and stress multicore-green rows now pass with `pool_used=N/N` and
+  `parallelism=requested/actual` evidence.
 - verification: Re-ran SimpleOS cooperative green, multicore green scheduler,
   green-channel wake, default QEMU gate, and live QEMU green-carrier proof with
   the rebuilt compiler; live QEMU passed in 40469ms.
