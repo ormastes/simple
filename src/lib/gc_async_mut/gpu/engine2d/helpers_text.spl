@@ -47,16 +47,72 @@ class TextBlitCache:
     cache_hits: i32
     cache_misses: i32
     hot_index: i32
+    bucket_keys: [i64]
+    bucket_indexes: [i32]
+    bucket_hits: i32
     lookup_scan_count: i32
 
     static fn new() -> TextBlitCache:
-        TextBlitCache(renderer: FontRenderer.new(), entries: [], max_entries: 64, cache_hits: 0, cache_misses: 0, hot_index: -1, lookup_scan_count: 0)
+        TextBlitCache(
+            renderer: FontRenderer.new(),
+            entries: [],
+            max_entries: 64,
+            cache_hits: 0,
+            cache_misses: 0,
+            hot_index: -1,
+            bucket_keys: [-1i64; 256],
+            bucket_indexes: [-1; 256],
+            bucket_hits: 0,
+            lookup_scan_count: 0
+        )
+
+    fn cache_key(text_val: text, fg: u32, bg: u32, font_size: i32) -> i64:
+        var value: i64 = font_size.to_i64() * 131 + fg.to_i64() * 17 + bg.to_i64()
+        var idx = 0
+        val n = text_val.len()
+        while idx < n:
+            value = value * 33 + text_val.char_code_at(idx).to_i64()
+            idx = idx + 1
+        value
+
+    fn bucket_for_key(key: i64) -> i32:
+        if self.bucket_keys.len() == 0:
+            return -1
+        var bucket = (key % self.bucket_keys.len().to_i64()).to_i32()
+        if bucket < 0:
+            bucket = bucket * -1
+        bucket
 
     me insert(text_val: text, fg: u32, bg: u32, font_size: i32, buffer: TextBlitBuffer):
         if self.entries.len() >= self.max_entries:
             self.entries = self.entries.slice(1, self.entries.len())
-        self.entries.push(TextBlitCacheEntry(text_value: text_val, fg: fg, bg: bg, font_size: font_size, buffer: buffer))
-        self.hot_index = self.entries.len() - 1
+            self.rebuild_index()
+        val entry = TextBlitCacheEntry(text_value: text_val, fg: fg, bg: bg, font_size: font_size, buffer: buffer)
+        self.entries.push(entry)
+        val idx = self.entries.len() - 1
+        val key = self.cache_key(text_val, fg, bg, font_size)
+        val bucket = self.bucket_for_key(key)
+        if bucket >= 0 and bucket < self.bucket_keys.len():
+            self.bucket_keys[bucket] = key
+            self.bucket_indexes[bucket] = idx
+        self.hot_index = idx
+
+    me rebuild_index():
+        var idx = 0
+        while idx < self.bucket_keys.len():
+            self.bucket_keys[idx] = -1i64
+            self.bucket_indexes[idx] = -1
+            idx = idx + 1
+        self.hot_index = -1
+        idx = 0
+        while idx < self.entries.len():
+            val entry = self.entries[idx]
+            val key = self.cache_key(entry.text_value, entry.fg, entry.bg, entry.font_size)
+            val bucket = self.bucket_for_key(key)
+            if bucket >= 0 and bucket < self.bucket_keys.len():
+                self.bucket_keys[bucket] = key
+                self.bucket_indexes[bucket] = idx
+            idx = idx + 1
 
     me render_to_buf(text_val: text, fg: u32, bg: u32, font_size: i32) -> [u32]:
         val text_w = text_buf_width(text_val, font_size)
@@ -73,6 +129,17 @@ class TextBlitCache:
             if hot.text_value == text_val and hot.fg == fg and hot.bg == bg and hot.font_size == font_size:
                 self.cache_hits = self.cache_hits + 1
                 return hot.buffer
+        val key = self.cache_key(text_val, fg, bg, font_size)
+        val bucket = self.bucket_for_key(key)
+        if bucket >= 0 and bucket < self.bucket_keys.len() and self.bucket_keys[bucket] == key:
+            val bucket_idx = self.bucket_indexes[bucket]
+            if bucket_idx >= 0 and bucket_idx < self.entries.len():
+                val candidate = self.entries[bucket_idx]
+                if candidate.text_value == text_val and candidate.fg == fg and candidate.bg == bg and candidate.font_size == font_size:
+                    self.hot_index = bucket_idx
+                    self.bucket_hits = self.bucket_hits + 1
+                    self.cache_hits = self.cache_hits + 1
+                    return candidate.buffer
         var idx = 0
         val n = self.entries.len()
         while idx < n:
@@ -80,6 +147,9 @@ class TextBlitCache:
             self.lookup_scan_count = self.lookup_scan_count + 1
             if entry.text_value == text_val and entry.fg == fg and entry.bg == bg and entry.font_size == font_size:
                 self.hot_index = idx
+                if bucket >= 0 and bucket < self.bucket_keys.len():
+                    self.bucket_keys[bucket] = key
+                    self.bucket_indexes[bucket] = idx
                 self.cache_hits = self.cache_hits + 1
                 return entry.buffer
             idx = idx + 1

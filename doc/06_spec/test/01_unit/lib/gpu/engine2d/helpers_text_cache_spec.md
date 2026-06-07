@@ -49,12 +49,16 @@ helpers_text_cache_spec -> std
    - Expected: cache.lookup_scan_count equals `scans_after_miss`
    - Expected: third.is_empty() is false
    - Expected: cache.lookup_scan_count > scans_after_miss is true
+   - Expected: fourth.width equals `first.width`
+   - Expected: cache.bucket_hits equals `1`
+   - Expected: cache.cache_hits equals `2`
+   - Expected: cache.lookup_scan_count equals `scans_after_other`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -73,6 +77,12 @@ expect(cache.lookup_scan_count).to_equal(scans_after_miss)
 val third = cache.transparent_blit_buffer("Other", 0xff111111u32, 14)
 expect(third.is_empty()).to_equal(false)
 expect(cache.lookup_scan_count > scans_after_miss).to_equal(true)
+val scans_after_other = cache.lookup_scan_count
+val fourth = cache.transparent_blit_buffer("Repeat", 0xff111111u32, 14)
+expect(fourth.width).to_equal(first.width)
+expect(cache.bucket_hits).to_equal(1)
+expect(cache.cache_hits).to_equal(2)
+expect(cache.lookup_scan_count).to_equal(scans_after_other)
 ```
 
 </details>

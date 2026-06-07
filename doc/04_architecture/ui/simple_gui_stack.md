@@ -336,6 +336,7 @@ Hot redraw paths must avoid:
   available;
 - re-resolving CSS for Draw IR batches whose `style_revision` has not changed;
 - linear glyph-cache scans for each character in repeated menu/list/status text;
+- linear text-buffer cache scans for non-adjacent repeated Draw IR labels;
 - device probing per frame;
 - hidden wrapper-specific renderer forks.
 
@@ -346,6 +347,9 @@ style/font/image cache versions, and fallback reason metadata.
 Font cache keys must include at least codepoint and font size; hot-entry and
 bucket-index lookups are preferred before any fallback scan or rasterizer
 attempt.
+Draw IR text-buffer cache keys must include the text payload, foreground,
+background, and font size so recurring labels can reuse prepared blit buffers
+before a cache scan or glyph raster attempt.
 
 ## Migration Order
 

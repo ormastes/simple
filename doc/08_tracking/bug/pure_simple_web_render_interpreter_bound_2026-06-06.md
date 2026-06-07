@@ -132,6 +132,14 @@ layout and text-buffer preparation entirely. Focused unit coverage renders two
 `font_text_cache_misses == 1`, and
 `vector_font_accelerator_stats().attempts == 1`.
 
+2026-06-07 text-buffer cache index update: `TextBlitCache` now uses a hot entry
+plus a fixed bucket index keyed by `(text,fg,bg,font_size)`. Adjacent repeated
+labels still hit the hot entry, and non-adjacent repeats such as
+`Repeat, Other, Repeat` return through the bucket index without another linear
+scan of the text-buffer cache. Focused unit coverage asserts `bucket_hits == 1`,
+`cache_hits == 2`, and unchanged `lookup_scan_count` after returning to
+`Repeat`.
+
 2026-06-07 glyph-cache update: `FontRenderer.GlyphCache` no longer linearly
 scans the bounded glyph cache on every character. It keeps a hot glyph index for
 immediate repeats and a fixed bucket index keyed by `(codepoint,font_size)` for

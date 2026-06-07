@@ -46,7 +46,7 @@ The pure-Simple raster runs interpreted and is canvas-bound. It now resolves a
 preferred backend by policy before raster: `SIMPLE_ENGINE2D_BACKEND` override
 first, Metal on Darwin/macOS, CUDA/HIP when the standard visibility env vars are
 present, then `software`. Explicit `software`, `cpu`, `cpu_simd`, or GPU backend
-names remain available for deterministic comparison and fallback tests. Eight
+names remain available for deterministic comparison and fallback tests. Nine
 O(n²)-class traps were
 fixed (see `doc/08_tracking/bug/pure_simple_web_render_interpreter_bound_2026-06-06.md`):
 1. heuristic-surface buffer built with a `push` loop → use `[0; w*h]` array-repeat;
@@ -81,6 +81,11 @@ fixed (see `doc/08_tracking/bug/pure_simple_web_render_interpreter_bound_2026-06
    glyph-cache index adds hot-entry and `(codepoint,font_size)` bucket lookups;
    focused coverage proves repeated `A` and `A` after `B` reuse cached glyphs
    without another linear scan or accelerator attempt.
+9. `TextBlitCache` still linearly scanned cached full-text buffers for
+   non-adjacent repeated labels. The 2026-06-07 text-buffer cache index adds a
+   `(text,fg,bg,font_size)` bucket lookup; focused coverage proves
+   `Repeat, Other, Repeat` returns through `bucket_hits` without another cache
+   scan.
 
 The HTML layout Draw IR path now emits `text` commands for real text nodes with
 font size, line height, glyph advance/scale, clip rect, parent id, and
@@ -99,6 +104,9 @@ The Draw IR text executor also reports `font_text_cache_hits` /
 `font_text_cache_misses` for the per-batch text-blit buffer cache; repeated
 identical labels hit a hot cache entry before scanning the cache list, avoiding
 repeated glyph layout and blit preparation on common menu/list/status text.
+Non-adjacent repeated labels use the text-buffer bucket index before any
+fallback scan, so common GUI labels reused across separate windows or rows do
+not pay an O(cache-size) lookup on every occurrence.
 Inside `FontRenderer`, glyph-level caching also has a hot entry and bucket index,
 so repeated characters and recently used glyphs avoid a full glyph-cache scan
 before vector or bitmap fallback/offload evidence is consulted.

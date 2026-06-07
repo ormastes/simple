@@ -121,14 +121,16 @@ MCP, Render, Test API — all thin. GUI policy stays in Simple.
 - startup: probe plugin/backend capabilities once, cache the result, and report
   unavailable states explicitly.
 - hot path: no full-tree scans, repeated file reads, subprocess retry loops,
-  per-character glyph-cache scans, or per-frame device probing.
+  per-character glyph-cache scans, non-adjacent text-buffer cache scans, or
+  per-frame device probing.
 - dependency gates: non-capable lanes prove no HTML/CSS/GUI/web closure.
 - dynSMF startup: enabled artifacts must exist and start with `SMF\0` before
   `smf_dlopen`.
 - cache/index: cache keys include backend id, device capability version, Draw IR
   schema version, source kind/id, artifact version, style/font/image versions,
   style revision, fallback reason metadata, and glyph identity
-  `(codepoint,font_size)` for font caches.
+  `(codepoint,font_size)` plus text-buffer identity `(text,fg,bg,font_size)` for
+  font caches.
 - evidence: CPU fallback is mandatory and acts as the rendering test oracle.
 - event cache: stale translations are rejected when scene layout keys change;
   WM Draw IR uses the same scene key.
