@@ -13,6 +13,7 @@ use os.kernel.scheduler.green_task.{
     green_task_is_done,
     GreenTaskRecord
 }
+use os.kernel.scheduler.green_worker.{GreenWorkerRebalanceDecision}
 use os.kernel.types.task_types.{TaskId}
 use os.kernel.smp.smp.{smp_send_ipi}
 
@@ -50,6 +51,15 @@ pub struct GreenCarrierDispatchResult:
     task_id: i64
     cpu: i64
     dispatched: bool
+    reason: text
+
+pub struct GreenCarrierRebalanceResult:
+    """Result of moving queued green work between carrier CPUs."""
+    queues: GreenCarrierRunQueueState
+    task_id: i64
+    from_cpu: i64
+    to_cpu: i64
+    moved: bool
     reason: text
 
 pub struct GreenCarrierSchedulerIntent:
@@ -351,6 +361,85 @@ fn green_carrier_remove_queued_index(queues: GreenCarrierRunQueueState, remove_i
         capacity: queues.capacity,
         dropped_count: queues.dropped_count
     )
+
+fn green_carrier_move_queued_index(queues: GreenCarrierRunQueueState, move_index: i64, from_cpu: i64, to_cpu: i64) -> GreenCarrierRunQueueState:
+    var queued_cpus = queues.queued_cpus
+    queued_cpus[move_index] = to_cpu
+    GreenCarrierRunQueueState(
+        queued_task_ids: queues.queued_task_ids,
+        queued_cpus: queued_cpus,
+        queue_depth_by_cpu: green_carrier_increment_queue_depth(
+            green_carrier_decrement_queue_depth(queues.queue_depth_by_cpu, from_cpu),
+            to_cpu
+        ),
+        capacity: queues.capacity,
+        dropped_count: queues.dropped_count
+    )
+
+pub fn green_carrier_rebalance_one(queues: GreenCarrierRunQueueState, from_cpu: i64, to_cpu: i64, active_limit: i64) -> GreenCarrierRebalanceResult:
+    """Move one queued green task to an active carrier without dispatching it."""
+    val normalized_limit = green_carrier_normalized_cpu_count(active_limit)
+    if from_cpu < 0 or from_cpu >= queues.queue_depth_by_cpu.len() or to_cpu < 0 or to_cpu >= queues.queue_depth_by_cpu.len():
+        GreenCarrierRebalanceResult(
+            queues: queues,
+            task_id: -1,
+            from_cpu: from_cpu,
+            to_cpu: to_cpu,
+            moved: false,
+            reason: "invalid_cpu"
+        )
+    elif to_cpu >= normalized_limit:
+        GreenCarrierRebalanceResult(
+            queues: queues,
+            task_id: -1,
+            from_cpu: from_cpu,
+            to_cpu: to_cpu,
+            moved: false,
+            reason: "target_inactive"
+        )
+    elif from_cpu == to_cpu:
+        GreenCarrierRebalanceResult(
+            queues: queues,
+            task_id: -1,
+            from_cpu: from_cpu,
+            to_cpu: to_cpu,
+            moved: false,
+            reason: "same_cpu"
+        )
+    else:
+        val idx = green_carrier_first_queued_index_for_cpu(queues, from_cpu)
+        if idx < 0:
+            GreenCarrierRebalanceResult(
+                queues: queues,
+                task_id: -1,
+                from_cpu: from_cpu,
+                to_cpu: to_cpu,
+                moved: false,
+                reason: "source_empty"
+            )
+        else:
+            GreenCarrierRebalanceResult(
+                queues: green_carrier_move_queued_index(queues, idx, from_cpu, to_cpu),
+                task_id: queues.queued_task_ids[idx],
+                from_cpu: from_cpu,
+                to_cpu: to_cpu,
+                moved: true,
+                reason: "moved_to_active_carrier"
+            )
+
+pub fn green_carrier_apply_rebalance_decision(queues: GreenCarrierRunQueueState, decision: GreenWorkerRebalanceDecision, active_limit: i64) -> GreenCarrierRebalanceResult:
+    """Apply a green-worker rebalance decision to concrete carrier queues."""
+    if not decision.should_move:
+        GreenCarrierRebalanceResult(
+            queues: queues,
+            task_id: -1,
+            from_cpu: decision.from_cpu,
+            to_cpu: decision.to_cpu,
+            moved: false,
+            reason: decision.reason
+        )
+    else:
+        green_carrier_rebalance_one(queues, decision.from_cpu, decision.to_cpu, active_limit)
 
 pub fn green_carrier_dispatch_next(queues: GreenCarrierRunQueueState, cpu: i64) -> GreenCarrierDispatchResult:
     """Select the next queued green task for one carrier CPU."""

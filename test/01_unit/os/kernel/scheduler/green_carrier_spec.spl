@@ -65,6 +65,8 @@ use os.kernel.scheduler.green_carrier.{
     green_carrier_apply_enqueue,
     green_carrier_dispatch_next,
     green_carrier_dispatch_next_with_limit,
+    green_carrier_rebalance_one,
+    green_carrier_apply_rebalance_decision,
     green_carrier_scheduler_intent,
     green_carrier_execution_state_new,
     green_carrier_extend_execution_state,
@@ -78,6 +80,7 @@ use os.kernel.scheduler.green_carrier.{
     green_carrier_fixed_spawn_cpu,
     green_carrier_fixed_run_task
 }
+use os.kernel.scheduler.green_worker.{green_worker_rebalance_decision}
 use os.kernel.smp.smp.{smp_init, smp_bringup_ap, smp_take_ipi}
 
 describe "SimpleOS green carrier bridge contract":
@@ -350,6 +353,50 @@ describe "SimpleOS green carrier bridge contract":
             expect(green_carrier_queue_depth(dispatched.queues, 1)).to_equal(1)
             expect(dispatched.queues.queued_task_ids.len()).to_equal(1)
             expect(dispatched.queues.queued_task_ids[0]).to_equal(36)
+
+    describe "rebalance":
+        it "moves queued work from inactive carrier to active carrier":
+            smp_init()
+            val queues = green_carrier_run_queues_new(4, 8)
+            val decision = green_carrier_spawn_task(37, 4, 0, 3, 1, 2, 4, 0)
+            val queued = green_carrier_apply_enqueue(queues, decision)
+            val moved = green_carrier_rebalance_one(queued.queues, 1, 0, 1)
+            val dispatched = green_carrier_dispatch_next_with_limit(moved.queues, 0, 1)
+
+            expect(moved.moved).to_equal(true)
+            expect(moved.task_id).to_equal(37)
+            expect(moved.reason).to_equal("moved_to_active_carrier")
+            expect(green_carrier_queue_depth(moved.queues, 1)).to_equal(0)
+            expect(green_carrier_queue_depth(moved.queues, 0)).to_equal(1)
+            expect(dispatched.dispatched).to_equal(true)
+            expect(dispatched.task_id).to_equal(37)
+
+        it "applies green-worker rebalance decisions to carrier queues":
+            smp_init()
+            val queues = green_carrier_run_queues_new(4, 8)
+            val decision = green_carrier_spawn_task(38, 4, 0, 3, 1, 2, 4, 0)
+            val queued = green_carrier_apply_enqueue(queues, decision)
+            val rebalance = green_worker_rebalance_decision(4, 0, 4, 1, 2, 2)
+            val moved = green_carrier_apply_rebalance_decision(queued.queues, rebalance, 1)
+
+            expect(rebalance.should_move).to_equal(true)
+            expect(moved.moved).to_equal(true)
+            expect(moved.from_cpu).to_equal(1)
+            expect(moved.to_cpu).to_equal(0)
+            expect(moved.task_id).to_equal(38)
+            expect(green_carrier_queue_depth(moved.queues, 0)).to_equal(1)
+
+        it "does not move queued work to inactive target carrier":
+            smp_init()
+            val queues = green_carrier_run_queues_new(4, 8)
+            val decision = green_carrier_spawn_task(39, 4, 0, 3, 1, 2, 4, 0)
+            val queued = green_carrier_apply_enqueue(queues, decision)
+            val moved = green_carrier_rebalance_one(queued.queues, 1, 2, 1)
+
+            expect(moved.moved).to_equal(false)
+            expect(moved.reason).to_equal("target_inactive")
+            expect(green_carrier_queue_depth(moved.queues, 1)).to_equal(1)
+            expect(green_carrier_queue_depth(moved.queues, 2)).to_equal(0)
 
     describe "scheduler intent":
         it "converts successful dispatch into a typed scheduler run intent":

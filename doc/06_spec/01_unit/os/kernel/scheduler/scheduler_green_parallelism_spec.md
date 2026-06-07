@@ -28,7 +28,7 @@ scheduler_green_parallelism_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -289,12 +289,50 @@ expect(sched.green_rejected_intents()).to_equal(1)
 
 </details>
 
+#### runs rebalanced inactive-carrier work on active carrier
+
+1. var sched = Scheduler new with cpu count
+
+2. sched set green carrier parallelism
+   - Expected: moved.moved is true
+   - Expected: dispatched.task_id equals `53`
+   - Expected: result.applied is true
+   - Expected: sched.green_current_task_on_cpu(0u32) equals `53`
+   - Expected: sched.green_rejected_intents() equals `0`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var sched = Scheduler.new_with_cpu_count(4u32)
+sched.set_green_carrier_parallelism(1)
+val queues = green_carrier_run_queues_new(4, 8)
+val decision = green_carrier_spawn_task(53, 4, 0, 3, 1, 2, 4, 0)
+val queued = green_carrier_apply_enqueue(queues, decision)
+val rebalance = green_worker_rebalance_decision(4, 0, 4, 1, 2, 2)
+val moved = green_carrier_apply_rebalance_decision(queued.queues, rebalance, sched.green_carrier_parallelism_limit())
+val dispatched = green_carrier_dispatch_next_with_limit(moved.queues, 0, sched.green_carrier_parallelism_limit())
+val result = sched.apply_green_scheduler_intent(green_carrier_scheduler_intent(dispatched))
+
+expect(moved.moved).to_equal(true)
+expect(dispatched.task_id).to_equal(53)
+expect(result.applied).to_equal(true)
+expect(sched.green_current_task_on_cpu(0u32)).to_equal(53)
+expect(sched.green_rejected_intents()).to_equal(0)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

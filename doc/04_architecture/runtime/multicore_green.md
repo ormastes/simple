@@ -137,6 +137,18 @@ SimpleOS path:
   execution lane without mutating normal OS task state.
 - `GreenCarrierParallelismState` records requested carriers, active
   topology-bounded carriers, and clamp reason for the SimpleOS scheduler lane.
+- `Scheduler` owns that carrier parallelism state and recomputes the active
+  limit when scheduler topology changes. Explicit requests are preserved;
+  default limits follow topology growth or shrink.
+- `Scheduler.apply_green_scheduler_intent` rejects runnable intents for CPUs
+  outside the active green carrier limit, so inactive carriers cannot record
+  scheduler-visible execution.
+- `green_carrier_dispatch_next_with_limit` applies the active carrier limit
+  before queue removal, preserving queued work as scheduler backpressure for
+  inactive carriers.
+- `green_carrier_apply_rebalance_decision` turns green-worker rebalance
+  decisions into concrete carrier-queue movement, so preserved work can move
+  from inactive or overloaded carriers onto active carriers before dispatch.
 - QEMU proof currently covers AP startup plus CPU1 fixed-slot dispatch; full
   hardware context-switch handoff remains future work.
 
@@ -153,10 +165,10 @@ The selected Full Go-Like Runtime Roadmap uses all layers:
 - SimpleOS Scheduler Layer owns logical green tasks, carrier queues, remote
   wake/IPI intent, and AP evidence.
 
-Future roadmap work remains explicit: work stealing or per-worker queues,
-blocking integration, connecting the SimpleOS carrier limit to final hardware
-handoff, and preemption or compiler-inserted yield points before claiming
-tight-loop fairness comparable to Go.
+Future roadmap work remains explicit: repeated work stealing or per-worker
+queue loops, blocking integration, carrying rebalance decisions into final AP
+hardware handoff, and preemption or compiler-inserted yield points before
+claiming tight-loop fairness comparable to Go.
 
 ## Known Gaps
 

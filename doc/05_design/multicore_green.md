@@ -115,6 +115,9 @@ Behavior:
 - `green_carrier_dispatch_next_with_limit` checks the active carrier limit
   before removing a queued task, so inactive-carrier backpressure does not drop
   work.
+- `green_carrier_rebalance_one` and `green_carrier_apply_rebalance_decision`
+  move queued work from inactive or overloaded carriers to active carriers
+  without executing the task during rebalance.
 
 ### Freestanding QEMU Probe Path
 
@@ -184,7 +187,7 @@ Repository guards:
 
 - Scheduler-owned parallelism handoff: the hosted runtime-pool facade and
   SimpleOS `Scheduler` now both expose topology-bounded parallelism contracts.
-  Remaining work is carrying inactive-carrier preserved queues into final AP
+  Remaining work is carrying repeated rebalance decisions into final AP
   hardware handoff and blocking/preemption behavior.
 - Preemption strategy: compiler-inserted yields, runtime safepoints, or an
   explicit cooperative-only guarantee until later.

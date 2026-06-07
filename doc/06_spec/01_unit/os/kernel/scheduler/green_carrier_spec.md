@@ -28,7 +28,7 @@ green_carrier_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 33 | 33 | 0 | 0 |
+| 36 | 36 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -712,6 +712,110 @@ expect(dispatched.queues.queued_task_ids[0]).to_equal(36)
 
 </details>
 
+### rebalance
+
+#### moves queued work from inactive carrier to active carrier
+
+1. smp init
+   - Expected: moved.moved is true
+   - Expected: moved.task_id equals `37`
+   - Expected: moved.reason equals `moved_to_active_carrier`
+   - Expected: green_carrier_queue_depth(moved.queues, 1) equals `0`
+   - Expected: green_carrier_queue_depth(moved.queues, 0) equals `1`
+   - Expected: dispatched.dispatched is true
+   - Expected: dispatched.task_id equals `37`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+smp_init()
+val queues = green_carrier_run_queues_new(4, 8)
+val decision = green_carrier_spawn_task(37, 4, 0, 3, 1, 2, 4, 0)
+val queued = green_carrier_apply_enqueue(queues, decision)
+val moved = green_carrier_rebalance_one(queued.queues, 1, 0, 1)
+val dispatched = green_carrier_dispatch_next_with_limit(moved.queues, 0, 1)
+
+expect(moved.moved).to_equal(true)
+expect(moved.task_id).to_equal(37)
+expect(moved.reason).to_equal("moved_to_active_carrier")
+expect(green_carrier_queue_depth(moved.queues, 1)).to_equal(0)
+expect(green_carrier_queue_depth(moved.queues, 0)).to_equal(1)
+expect(dispatched.dispatched).to_equal(true)
+expect(dispatched.task_id).to_equal(37)
+```
+
+</details>
+
+#### applies green-worker rebalance decisions to carrier queues
+
+1. smp init
+   - Expected: rebalance.should_move is true
+   - Expected: moved.moved is true
+   - Expected: moved.from_cpu equals `1`
+   - Expected: moved.to_cpu equals `0`
+   - Expected: moved.task_id equals `38`
+   - Expected: green_carrier_queue_depth(moved.queues, 0) equals `1`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+smp_init()
+val queues = green_carrier_run_queues_new(4, 8)
+val decision = green_carrier_spawn_task(38, 4, 0, 3, 1, 2, 4, 0)
+val queued = green_carrier_apply_enqueue(queues, decision)
+val rebalance = green_worker_rebalance_decision(4, 0, 4, 1, 2, 2)
+val moved = green_carrier_apply_rebalance_decision(queued.queues, rebalance, 1)
+
+expect(rebalance.should_move).to_equal(true)
+expect(moved.moved).to_equal(true)
+expect(moved.from_cpu).to_equal(1)
+expect(moved.to_cpu).to_equal(0)
+expect(moved.task_id).to_equal(38)
+expect(green_carrier_queue_depth(moved.queues, 0)).to_equal(1)
+```
+
+</details>
+
+#### does not move queued work to inactive target carrier
+
+1. smp init
+   - Expected: moved.moved is false
+   - Expected: moved.reason equals `target_inactive`
+   - Expected: green_carrier_queue_depth(moved.queues, 1) equals `1`
+   - Expected: green_carrier_queue_depth(moved.queues, 2) equals `0`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+smp_init()
+val queues = green_carrier_run_queues_new(4, 8)
+val decision = green_carrier_spawn_task(39, 4, 0, 3, 1, 2, 4, 0)
+val queued = green_carrier_apply_enqueue(queues, decision)
+val moved = green_carrier_rebalance_one(queued.queues, 1, 2, 1)
+
+expect(moved.moved).to_equal(false)
+expect(moved.reason).to_equal("target_inactive")
+expect(green_carrier_queue_depth(moved.queues, 1)).to_equal(1)
+expect(green_carrier_queue_depth(moved.queues, 2)).to_equal(0)
+```
+
+</details>
+
 ### scheduler intent
 
 #### converts successful dispatch into a typed scheduler run intent
@@ -969,8 +1073,8 @@ expect(result.context_switches).to_equal(1)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 33 |
-| Active scenarios | 33 |
+| Total scenarios | 36 |
+| Active scenarios | 36 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

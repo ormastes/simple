@@ -81,6 +81,13 @@ go-runtime-hardening
   `scheduler_green_parallelism_spec.spl` passed 7 examples, and
   `simpleos_multicore_green_spec.spl` passed 3 examples after the non-dropping
   dispatch helper was added.
+- implementation: Added carrier-queue rebalance helpers so green-worker
+  rebalance decisions can move queued work from inactive or overloaded carriers
+  onto active carriers before dispatch.
+- verification: `green_carrier_spec.spl` passed 36 examples,
+  `scheduler_green_parallelism_spec.spl` passed 8 examples, and
+  `simpleos_multicore_green_spec.spl` passed 3 examples after rebalance helpers
+  were added.
 
 ## Completion Audit - 2026-06-07
 
