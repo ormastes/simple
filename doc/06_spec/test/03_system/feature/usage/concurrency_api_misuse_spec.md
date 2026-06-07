@@ -1,6 +1,6 @@
 # Concurrency API Misuse System Contract
 
-> This system spec proves the public pherallel/concurrency API surfaces fail closed at compile time while the approved meaningful API names remain usable. The OS-thread `thread_spawn`, cooperative green queue APIs, low-level green thread APIs, and `multicore_green_spawn` runtime-pool facade must reject wrong imports, wrong arity, bad argument types, and numbered alias names.
+> This system spec proves the public pherallel/concurrency API surfaces fail closed at compile time while the approved meaningful API names remain usable. The OS-thread `thread_spawn`, cooperative green queue APIs, low-level green thread APIs, `multicore_green_spawn`, and pool-backed `task_spawn` facades must reject wrong imports, wrong arity, bad argument types, and numbered alias names.
 
 <!-- sdn-diagram:id=concurrency_api_misuse_spec.arch -->
 <details class="sdn-source">
@@ -34,7 +34,7 @@ concurrency_api_misuse_spec -> std
 
 # Concurrency API Misuse System Contract
 
-This system spec proves the public pherallel/concurrency API surfaces fail closed at compile time while the approved meaningful API names remain usable. The OS-thread `thread_spawn`, cooperative green queue APIs, low-level green thread APIs, and `multicore_green_spawn` runtime-pool facade must reject wrong imports, wrong arity, bad argument types, and numbered alias names.
+This system spec proves the public pherallel/concurrency API surfaces fail closed at compile time while the approved meaningful API names remain usable. The OS-thread `thread_spawn`, cooperative green queue APIs, low-level green thread APIs, `multicore_green_spawn`, and pool-backed `task_spawn` facades must reject wrong imports, wrong arity, bad argument types, and numbered alias names.
 
 ## At a Glance
 
@@ -56,8 +56,8 @@ This system spec proves the public pherallel/concurrency API surfaces fail close
 This system spec proves the public pherallel/concurrency API surfaces fail
 closed at compile time while the approved meaningful API names remain usable.
 The OS-thread `thread_spawn`, cooperative green queue APIs, low-level green
-thread APIs, and `multicore_green_spawn` runtime-pool facade must reject wrong
-imports, wrong arity, bad argument types, and numbered alias names.
+thread APIs, `multicore_green_spawn`, and pool-backed `task_spawn` facades must
+reject wrong imports, wrong arity, bad argument types, and numbered alias names.
 
 ## Requirements
 
@@ -91,6 +91,7 @@ Run the misuse gate:
 - `cooperative_green_spawn` must stay on the cooperative-green surface.
 - `multicore_green_spawn` must accept a single zero-argument closure.
 - `multicore_green_set_parallelism` must accept an integer worker count.
+- `task_spawn` must stay available as the pool-backed native task API.
 - Numbered aliases such as `thread_spawn2` must be rejected.
 - The profile-script API contract checks approved public names before checking
   misuse fixtures.
@@ -102,7 +103,7 @@ Run the misuse gate:
 #### covers every checked-in misuse fixture
 
 - Count the checked-in concurrency misuse fixtures
-   - Expected: fixture_count() equals `13`
+   - Expected: fixture_count() equals `14`
 
 
 <details>
@@ -113,7 +114,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Count the checked-in concurrency misuse fixtures")
-expect(fixture_count()).to_equal(13)
+expect(fixture_count()).to_equal(14)
 ```
 
 </details>
@@ -137,7 +138,7 @@ val (output, code) = run_profile_contract()
 expect(code).to_equal(0)
 step("Verify approved public-name fixtures were checked before misuse fixtures")
 expect(output).to_contain("concurrency_api_contract=true")
-expect(output).to_contain("positive_fixtures=4")
+expect(output).to_contain("positive_fixtures=5")
 expect(output).to_contain("fixtures=4")
 ```
 
@@ -153,12 +154,14 @@ expect(output).to_contain("fixtures=4")
 - expect compile error
 - Reject numbered thread_spawn aliases
 - expect compile error
+- Reject task_spawn imported from the OS-thread surface
+- expect compile error
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -170,6 +173,8 @@ step("Reject thread_spawn called with a non-closure argument")
 expect_compile_error("thread_spawn_bad_arg.spl", "E-PAR-004", "pass a closure")
 step("Reject numbered thread_spawn aliases")
 expect_compile_error("numbered_thread_spawn_alias_import.spl", "E-PAR-002", "numbered name and is not a public API")
+step("Reject task_spawn imported from the OS-thread surface")
+expect_compile_error("task_spawn_wrong_surface_import.spl", "E-PAR-001", "task_spawn is not part of the OS-thread facade")
 ```
 
 </details>
