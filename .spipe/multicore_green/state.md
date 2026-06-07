@@ -20,7 +20,7 @@ Deliver and verify a Simple concurrency lane that clearly separates OS threads, 
 - AC-4: Perf reports prove Go-vs-C fanout behavior and Simple multicore-green native rows with `used_runtime_pool()` / `pool_used=` evidence.
 - AC-5: Pure Simple implementation and generated workloads avoid unrolled numbered handles where compact semantic loops and handle arrays preserve behavior.
 - AC-6: SimpleOS cooperative-green and multicore-green support has executable SPipe specs, generated manuals, and current evidence reports.
-- AC-7: Misuse and API-shape checks reject wrong-surface imports, numbered API aliases, and fallback rows that pretend to be runtime-pool M:N work.
+- AC-7: Misuse and API-shape checks reject wrong-surface imports, numbered API aliases, bad public argument shapes, and fallback rows that pretend to be runtime-pool M:N work.
 - AC-8: Final feature and NFR requirement documents are written from user-selected options; unselected options are removed per repository process.
 - AC-9: Verification includes SPipe command wiring, generated-spec layout guard, relevant unit/system/perf specs, profile contract, and GitHub sync.
 
@@ -222,9 +222,10 @@ go-runtime-hardening
   and `doc/09_report/simpleos_multicore_green_evidence_2026-06-07.md` provide
   current SimpleOS evidence.
 - AC-7: `test/03_system/feature/usage/multicore_green_tracking_spec.spl`,
-  `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`, and the
-  profile report contract reject wrong-surface claims, numbered API names, and
-  runtime-pool fallback rows.
+  `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`,
+  `test/05_perf/profile_scripts/concurrency_api_contract_test.shs`, and the
+  profile report contract reject wrong-surface claims, numbered API names,
+  bad source-level concurrency argument shapes, and runtime-pool fallback rows.
 - AC-9: Recent guards include `sh scripts/setup/install-spipe-dev-command.shs
   --check`, `find doc/06_spec -name '*_spec.spl' | wc -l` returning `0`,
   `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`, and the

@@ -14,7 +14,7 @@ use simple_compiler::short_grammar::collect_short_grammar_suggestions;
 use simple_compiler::{LintChecker, LintConfig, LintLevel, LintName};
 use simple_parser::ast::{Block, Expr, ImportTarget, ModulePath, Node, Pattern, Type};
 use simple_parser::{NumericSuffix, Parser, ParseError};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -230,6 +230,7 @@ fn check_file(path: &Path, source_roots: &[PathBuf], deny_gc_boundary_crossings:
             validate_gc_boundary_lints(path, &module.items, &mut errors, deny_gc_boundary_crossings);
             validate_noalloc_reachable_import_closure(path, &mut errors, source_roots, deny_gc_boundary_crossings);
             validate_basic_type_annotations(path, &module.items, &mut errors);
+            validate_concurrency_api_calls(path, &module.items, &mut errors);
             validate_short_grammar_suggestions(path, &source, &mut errors);
         }
         Err(e) => {
@@ -685,6 +686,330 @@ fn noalloc_check_error(file_path: &Path, line: usize, column: usize, message: St
 fn validate_basic_type_annotations(file_path: &Path, items: &[Node], errors: &mut Vec<CheckError>) {
     for item in items {
         validate_basic_type_annotation_node(file_path, item, None, errors);
+    }
+}
+
+fn validate_concurrency_api_calls(file_path: &Path, items: &[Node], errors: &mut Vec<CheckError>) {
+    let imported = imported_concurrency_call_bindings(items);
+    if imported.is_empty() {
+        return;
+    }
+
+    for item in items {
+        validate_concurrency_api_node(file_path, item, &imported, errors);
+    }
+}
+
+fn imported_concurrency_call_bindings(items: &[Node]) -> HashMap<String, String> {
+    let mut imported = HashMap::new();
+    for item in items {
+        match item {
+            Node::UseStmt(stmt) => collect_concurrency_import_targets(&stmt.path, &stmt.target, &mut imported),
+            Node::CommonUseStmt(stmt) => collect_concurrency_import_targets(&stmt.path, &stmt.target, &mut imported),
+            Node::ExportUseStmt(stmt) => collect_concurrency_import_targets(&stmt.path, &stmt.target, &mut imported),
+            Node::MultiUse(stmt) => {
+                for (path, target) in &stmt.imports {
+                    collect_concurrency_import_targets(path, target, &mut imported);
+                }
+            }
+            _ => {}
+        }
+    }
+    imported
+}
+
+fn collect_concurrency_import_targets(
+    path: &simple_parser::ast::ModulePath,
+    target: &ImportTarget,
+    imported: &mut HashMap<String, String>,
+) {
+    let owner_path = path.segments.join(".");
+    collect_concurrency_import_target(&owner_path, target, imported);
+}
+
+fn collect_concurrency_import_target(owner_path: &str, target: &ImportTarget, imported: &mut HashMap<String, String>) {
+    match target {
+        ImportTarget::Single(name) => {
+            if concurrency_call_rule(name).is_some() && concurrency_wrong_surface_error_owner_accepts(owner_path, name)
+            {
+                imported.insert(name.clone(), name.clone());
+            }
+        }
+        ImportTarget::Aliased { name, alias } => {
+            if concurrency_call_rule(name).is_some() && concurrency_wrong_surface_error_owner_accepts(owner_path, name)
+            {
+                imported.insert(alias.clone(), name.clone());
+            }
+        }
+        ImportTarget::Group(targets) => {
+            for target in targets {
+                collect_concurrency_import_target(owner_path, target, imported);
+            }
+        }
+        ImportTarget::Glob => {}
+    }
+}
+
+fn concurrency_wrong_surface_error_owner_accepts(owner_path: &str, name: &str) -> bool {
+    match name {
+        "thread_spawn" | "thread_spawn_with_args" => is_concurrency_thread_path(owner_path),
+        "cooperative_green_spawn" | "cooperative_green_spawn_value" => is_cooperative_green_path(owner_path),
+        "multicore_green_spawn" | "multicore_green_set_parallelism" => is_multicore_green_path(owner_path),
+        _ => false,
+    }
+}
+
+fn validate_concurrency_api_node(
+    file_path: &Path,
+    item: &Node,
+    imported: &HashMap<String, String>,
+    errors: &mut Vec<CheckError>,
+) {
+    match item {
+        Node::Function(function) => validate_concurrency_api_block(file_path, &function.body, imported, errors),
+        Node::Let(stmt) => {
+            if let Some(value) = &stmt.value {
+                validate_concurrency_api_expr(file_path, value, imported, errors);
+            }
+        }
+        Node::Const(stmt) => validate_concurrency_api_expr(file_path, &stmt.value, imported, errors),
+        Node::Static(stmt) => validate_concurrency_api_expr(file_path, &stmt.value, imported, errors),
+        Node::Assignment(stmt) => {
+            validate_concurrency_api_expr(file_path, &stmt.target, imported, errors);
+            validate_concurrency_api_expr(file_path, &stmt.value, imported, errors);
+        }
+        Node::Return(stmt) => {
+            if let Some(value) = &stmt.value {
+                validate_concurrency_api_expr(file_path, value, imported, errors);
+            }
+        }
+        Node::Expression(expr) => validate_concurrency_api_expr(file_path, expr, imported, errors),
+        Node::If(stmt) => {
+            validate_concurrency_api_expr(file_path, &stmt.condition, imported, errors);
+            validate_concurrency_api_block(file_path, &stmt.then_block, imported, errors);
+            for (_, condition, block) in &stmt.elif_branches {
+                validate_concurrency_api_expr(file_path, condition, imported, errors);
+                validate_concurrency_api_block(file_path, block, imported, errors);
+            }
+            if let Some(block) = &stmt.else_block {
+                validate_concurrency_api_block(file_path, block, imported, errors);
+            }
+        }
+        Node::For(stmt) => {
+            validate_concurrency_api_expr(file_path, &stmt.iterable, imported, errors);
+            validate_concurrency_api_block(file_path, &stmt.body, imported, errors);
+        }
+        Node::While(stmt) => {
+            validate_concurrency_api_expr(file_path, &stmt.condition, imported, errors);
+            validate_concurrency_api_block(file_path, &stmt.body, imported, errors);
+        }
+        Node::Loop(stmt) => validate_concurrency_api_block(file_path, &stmt.body, imported, errors),
+        Node::Skip(stmt) => {
+            if let simple_parser::ast::SkipBody::Block(block) = &stmt.body {
+                validate_concurrency_api_block(file_path, block, imported, errors);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn validate_concurrency_api_block(
+    file_path: &Path,
+    block: &Block,
+    imported: &HashMap<String, String>,
+    errors: &mut Vec<CheckError>,
+) {
+    for statement in &block.statements {
+        validate_concurrency_api_node(file_path, statement, imported, errors);
+    }
+}
+
+fn validate_concurrency_api_expr(
+    file_path: &Path,
+    expr: &Expr,
+    imported: &HashMap<String, String>,
+    errors: &mut Vec<CheckError>,
+) {
+    match expr {
+        Expr::Call { callee, args } => {
+            if let Some(canonical_name) = concurrency_call_canonical_name(callee, imported) {
+                validate_concurrency_call_shape(file_path, canonical_name, args, errors);
+            }
+            validate_concurrency_api_expr(file_path, callee, imported, errors);
+            for arg in args {
+                validate_concurrency_api_expr(file_path, &arg.value, imported, errors);
+            }
+        }
+        Expr::MethodCall { receiver, args, .. }
+        | Expr::FunctionalUpdate {
+            target: receiver, args, ..
+        } => {
+            validate_concurrency_api_expr(file_path, receiver, imported, errors);
+            for arg in args {
+                validate_concurrency_api_expr(file_path, &arg.value, imported, errors);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            validate_concurrency_api_expr(file_path, left, imported, errors);
+            validate_concurrency_api_expr(file_path, right, imported, errors);
+        }
+        Expr::Unary { operand, .. }
+        | Expr::Await(operand)
+        | Expr::Yield(Some(operand))
+        | Expr::New { expr: operand, .. }
+        | Expr::Cast { expr: operand, .. }
+        | Expr::Spread(operand)
+        | Expr::DictSpread(operand)
+        | Expr::Try(operand)
+        | Expr::ForceUnwrap(operand)
+        | Expr::ExistsCheck(operand)
+        | Expr::UnwrapOrReturn(operand)
+        | Expr::CastOrReturn { expr: operand, .. }
+        | Expr::ContractOld(operand) => validate_concurrency_api_expr(file_path, operand, imported, errors),
+        Expr::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            validate_concurrency_api_expr(file_path, condition, imported, errors);
+            validate_concurrency_api_expr(file_path, then_branch, imported, errors);
+            if let Some(else_branch) = else_branch {
+                validate_concurrency_api_expr(file_path, else_branch, imported, errors);
+            }
+        }
+        Expr::Tuple(values) | Expr::Array(values) | Expr::VecLiteral(values) => {
+            for value in values {
+                validate_concurrency_api_expr(file_path, value, imported, errors);
+            }
+        }
+        Expr::DoBlock(nodes) => {
+            for node in nodes {
+                validate_concurrency_api_node(file_path, node, imported, errors);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn concurrency_call_canonical_name<'a>(callee: &'a Expr, imported: &'a HashMap<String, String>) -> Option<&'a str> {
+    match callee {
+        Expr::Identifier(name) => imported.get(name).map(String::as_str),
+        Expr::Path(segments) => segments
+            .last()
+            .and_then(|name| concurrency_call_rule(name).map(|_| name.as_str())),
+        _ => None,
+    }
+}
+
+fn validate_concurrency_call_shape(
+    file_path: &Path,
+    canonical_name: &str,
+    args: &[simple_parser::ast::Argument],
+    errors: &mut Vec<CheckError>,
+) {
+    let Some(rule) = concurrency_call_rule(canonical_name) else {
+        return;
+    };
+    if args.len() != rule.expected_arity {
+        errors.push(concurrency_call_shape_error(
+            file_path,
+            args.first().map(|arg| arg.span.line).unwrap_or(1),
+            args.first().map(|arg| arg.span.column).unwrap_or(1),
+            canonical_name,
+            rule.expected,
+            format!("{} argument(s)", args.len()),
+            rule.help,
+        ));
+        return;
+    }
+
+    let Some(first) = args.first() else {
+        return;
+    };
+    let accepted = match rule.first_arg {
+        ConcurrencyFirstArg::Closure => matches!(first.value, Expr::Lambda { .. }),
+        ConcurrencyFirstArg::Integer => {
+            literal_type_name(&first.value).is_some_and(|found| numeric_literal_type_compatible("i64", found))
+        }
+    };
+    if !accepted {
+        errors.push(concurrency_call_shape_error(
+            file_path,
+            first.span.line,
+            first.span.column,
+            canonical_name,
+            rule.expected,
+            concurrency_arg_found(&first.value),
+            rule.help,
+        ));
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ConcurrencyFirstArg {
+    Closure,
+    Integer,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ConcurrencyCallRule {
+    expected_arity: usize,
+    first_arg: ConcurrencyFirstArg,
+    expected: &'static str,
+    help: &'static str,
+}
+
+fn concurrency_call_rule(name: &str) -> Option<ConcurrencyCallRule> {
+    match name {
+        "thread_spawn" | "cooperative_green_spawn" | "multicore_green_spawn" => Some(ConcurrencyCallRule {
+            expected_arity: 1,
+            first_arg: ConcurrencyFirstArg::Closure,
+            expected: "single zero-argument value closure",
+            help: "pass a closure such as `\\: 1`; use thread_spawn_with_args for explicit thread arguments",
+        }),
+        "multicore_green_set_parallelism" => Some(ConcurrencyCallRule {
+            expected_arity: 1,
+            first_arg: ConcurrencyFirstArg::Integer,
+            expected: "single integer worker count",
+            help: "pass an integer worker count such as `4`, not text",
+        }),
+        _ => None,
+    }
+}
+
+fn concurrency_arg_found(expr: &Expr) -> String {
+    match expr {
+        Expr::Lambda { .. } => "closure".to_string(),
+        _ => literal_type_name(expr)
+            .map(|found| found.display_name().to_string())
+            .unwrap_or_else(|| "non-literal expression".to_string()),
+    }
+}
+
+fn concurrency_call_shape_error(
+    file_path: &Path,
+    line: usize,
+    column: usize,
+    name: &str,
+    expected: &str,
+    found: String,
+    help: &str,
+) -> CheckError {
+    CheckError {
+        file: file_path.display().to_string(),
+        line,
+        column,
+        severity: ErrorSeverity::Error,
+        code: Some("E-PAR-004".to_string()),
+        message: format!("{name} was called with an invalid concurrency API argument"),
+        expected: Some(expected.to_string()),
+        found: Some(found),
+        notes: vec![
+            "public concurrency surfaces fail closed so OS-thread, cooperative-green, and multicore-green behavior cannot be confused"
+                .to_string(),
+        ],
+        help: vec![help.to_string()],
     }
 }
 
@@ -1953,9 +2278,7 @@ mod tests {
         assert_eq!(result.status, CheckStatus::Error);
         assert!(result.errors.iter().any(|error| {
             error.code.as_deref() == Some("E-PAR-002")
-                && error
-                    .message
-                    .contains("thread_spawn2 is a numbered name")
+                && error.message.contains("thread_spawn2 is a numbered name")
                 && error.help.iter().any(|help| help.contains("thread_spawn_with_args"))
         }));
     }
@@ -2041,6 +2364,57 @@ mod tests {
                     && error.message.contains(symbol)
                     && error.help.iter().any(|help| help.contains(owner))
             }));
+        }
+    }
+
+    #[test]
+    fn test_check_rejects_bad_concurrency_api_call_shapes() {
+        for (source, symbol) in [
+            (
+                "use std.concurrent.thread.{thread_spawn}\nfn main():\n    val handle = thread_spawn(42)",
+                "thread_spawn",
+            ),
+            (
+                "use std.concurrent.cooperative_green.{cooperative_green_spawn}\nfn main():\n    val handle = cooperative_green_spawn(42)",
+                "cooperative_green_spawn",
+            ),
+            (
+                "use std.concurrent.multicore_green.{multicore_green_spawn}\nfn main():\n    val handle = multicore_green_spawn(42)",
+                "multicore_green_spawn",
+            ),
+            (
+                "use std.concurrent.multicore_green.{multicore_green_set_parallelism}\nfn main():\n    val workers = multicore_green_set_parallelism(\"4\")",
+                "multicore_green_set_parallelism",
+            ),
+        ] {
+            let mut file = NamedTempFile::new().unwrap();
+            writeln!(file, "{source}").unwrap();
+
+            let result = check_file(file.path(), &[], false);
+            assert_eq!(result.status, CheckStatus::Error, "{source}");
+            assert!(result.errors.iter().any(|error| {
+                error.code.as_deref() == Some("E-PAR-004") && error.message.contains(symbol)
+            }));
+        }
+    }
+
+    #[test]
+    fn test_check_allows_valid_concurrency_api_call_shapes() {
+        for source in [
+            "use std.concurrent.thread.{thread_spawn}\nfn main():\n    val handle = thread_spawn(\\: 1)",
+            "use std.concurrent.cooperative_green.{cooperative_green_spawn}\nfn main():\n    val handle = cooperative_green_spawn(\\: 1)",
+            "use std.concurrent.multicore_green.{multicore_green_spawn}\nfn main():\n    val handle = multicore_green_spawn(\\: 1)",
+            "use std.concurrent.multicore_green.{multicore_green_set_parallelism}\nfn main():\n    val workers = multicore_green_set_parallelism(4)",
+        ] {
+            let mut file = NamedTempFile::new().unwrap();
+            writeln!(file, "{source}").unwrap();
+
+            let result = check_file(file.path(), &[], false);
+            assert!(
+                result.errors.iter().all(|error| error.code.as_deref() != Some("E-PAR-004")),
+                "{source}: {:?}",
+                result.errors
+            );
         }
     }
 

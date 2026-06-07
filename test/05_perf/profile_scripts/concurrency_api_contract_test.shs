@@ -1,0 +1,50 @@
+#!/bin/sh
+set -eu
+
+# Public concurrency APIs must fail closed for misleading names and wrong
+# surfaces. Profile evidence already rejects numbered names in reports; this
+# test proves the compiler/checker rejects them at the source boundary too.
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BIN="${SIMPLE_BIN:-./src/compiler_rust/target/debug/simple}"
+
+fail() {
+    echo "concurrency_api_contract=false"
+    echo "error=$1"
+    exit 1
+}
+
+require_file() {
+    [ -f "$1" ] || fail "missing file: $1"
+}
+
+expect_check_fails_with_code() {
+    fixture="$1"
+    expected_code="$2"
+    require_file "$fixture"
+    if "$SIMPLE_BIN" check "$fixture" >/tmp/simple_concurrency_api_contract.out 2>&1; then
+        cat /tmp/simple_concurrency_api_contract.out
+        fail "expected check failure: $fixture"
+    fi
+    if ! grep -Fq "$expected_code" /tmp/simple_concurrency_api_contract.out; then
+        cat /tmp/simple_concurrency_api_contract.out
+        fail "expected $expected_code for $fixture"
+    fi
+}
+
+require_file "$SIMPLE_BIN"
+
+expect_check_fails_with_code test/fixtures/concurrency_api_misuse/thread_spawn2_import.spl E-PAR-002
+expect_check_fails_with_code test/fixtures/concurrency_api_misuse/thread_spawn_wrong_surface_import.spl E-PAR-003
+expect_check_fails_with_code test/fixtures/concurrency_api_misuse/cooperative_green_wrong_surface_import.spl E-PAR-003
+expect_check_fails_with_code test/fixtures/concurrency_api_misuse/thread_spawn_bad_arg.spl E-PAR-004
+expect_check_fails_with_code test/fixtures/concurrency_api_misuse/cooperative_green_bad_arg.spl E-PAR-004
+expect_check_fails_with_code test/fixtures/concurrency_api_misuse/multicore_green_bad_arg.spl E-PAR-004
+expect_check_fails_with_code test/fixtures/concurrency_api_misuse/multicore_green_parallelism_bad_arg.spl E-PAR-004
+
+rm -f /tmp/simple_concurrency_api_contract.out
+
+echo "concurrency_api_contract=true"
+echo "fixtures=7"

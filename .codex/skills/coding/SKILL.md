@@ -224,6 +224,12 @@ Do not use numbered concurrency aliases. `thread_spawn2`, `spawn_isolated2`,
 and `spawn_limited2` are rejected by `simple check` with `E-PAR-002`; use
 `thread_spawn_with_args`, `spawn_isolated_with_args`, or
 `spawn_limited_with_args` for explicit-argument spawning.
+Keep concurrency surfaces separate. Importing `thread_spawn` from
+`std.concurrent.cooperative_green`, importing `cooperative_green_spawn` from
+`std.concurrent.thread`, or similar wrong-surface imports is rejected with
+`E-PAR-003`. Passing non-closures to `thread_spawn`,
+`cooperative_green_spawn`, or `multicore_green_spawn`, or passing text to
+`multicore_green_set_parallelism`, is rejected with `E-PAR-004`.
 
 ## Reserved Keywords
 
