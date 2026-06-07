@@ -18,7 +18,8 @@ and `doc/02_requirements/nfr/multicore_green.md`.
 
 `thread_spawn` creates explicit OS-thread work and returns `ThreadHandle`.
 Profile workloads use fork-join `thread_spawn` while
-`thread_spawn_with_args` native explicit-argument ABI remains blocked.
+`thread_spawn_with_args` native explicit-argument ABI stays in focused smoke
+coverage through `scripts/check/check-thread-spawn-with-args-native.shs`.
 
 Design rule: OS-thread rows must not be compared as green-thread rows. They are
 the platform-thread baseline, equivalent in model to C pthread fanout.
@@ -131,8 +132,9 @@ drifting silently.
 
 - Numbered concurrency aliases are rejected by `simple check` with actionable
   replacement names.
-- `thread_spawn_with_args` stays documented as blocked for native profile use
-  until its ABI bug is fixed.
+- `thread_spawn_with_args` stays documented as focused native ABI coverage, not
+  as the profile OS-thread baseline. Profile rows continue to use `thread_spawn`
+  so scheduler and fanout comparisons stay model-pure.
 - Profile reports classify SMF failures as blockers, not as scheduling
   timings.
 - Docs must not call cooperative green M:N.

@@ -16,9 +16,10 @@ Date: 2026-06-06
   are evidence baselines or seed/runtime implementation contexts only.
 - Executable SPipe specs go under `test/`; generated/manual docs go under
   `doc/06_spec`; `doc/06_spec/**/*_spec.spl` must remain zero.
-- Agents must not treat `thread_spawn_with_args` native timings as evidence
-  while `doc/08_tracking/bug/native_thread_spawn_with_args_abi_2026-06-06.md`
-  is open.
+- Agents must not treat `thread_spawn_with_args` native timings as profile
+  scheduler evidence. That ABI is covered by
+  `scripts/check/check-thread-spawn-with-args-native.shs`; profile OS-thread
+  rows stay on `thread_spawn`.
 
 ## Shared Inputs
 
@@ -75,6 +76,7 @@ Primary paths:
 - `src/lib/nogc_sync_mut/concurrent/thread.spl`
 - `src/lib/nogc_async_mut/concurrent/thread.spl`
 - `test/05_perf/stress/multicore_green_fanout_spec.spl`
+- `scripts/check/check-thread-spawn-with-args-native.shs`
 - `doc/08_tracking/bug/native_thread_spawn_with_args_abi_2026-06-06.md`
 
 Deliverables:
@@ -189,8 +191,9 @@ Acceptance evidence:
 
 - If a change touches `scripts/check/check-cross-language-perf.shs`, Agent A
   owns the report shape and must rerun the profile contract.
-- If a change touches `thread_spawn_with_args`, Agent B must update or close
-  `native_thread_spawn_with_args_abi_2026-06-06.md`.
+- If a change touches `thread_spawn_with_args`, Agent B must update
+  `scripts/check/check-thread-spawn-with-args-native.shs` and the matching
+  tracking note.
 - If a change claims Go-like M:N behavior, Agent D must provide
   `used_runtime_pool()` evidence and Agent A must gate the row numerically.
 - If a SimpleOS QEMU probe uses a fixed-slot helper, Agent E must state exactly

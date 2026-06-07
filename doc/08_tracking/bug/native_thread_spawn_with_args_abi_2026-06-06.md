@@ -4,16 +4,17 @@ Date: 2026-06-06
 
 ## Summary
 
-Status: fixed by `scripts/check/check-thread-spawn-with-args-native.shs`.
+Status: fixed and guarded by
+`scripts/check/check-thread-spawn-with-args-native.shs`.
 
-Native binaries that call `thread_spawn_with_args` can compile successfully and
-then segfault at runtime, even when every returned handle is joined. Plain
-`thread_spawn(\: value)` still works for native fork-join OS-thread evidence.
+Native binaries that call `thread_spawn_with_args` now compile and run under the
+focused smoke gate. Plain `thread_spawn(\: value)` remains the native
+fork-join OS-thread evidence used by profile rows.
 
 ## Evidence
 
-During the cross-language profile refresh, these native probes segfaulted with
-exit 139:
+During the original cross-language profile refresh, these native probes
+segfaulted with exit 139:
 
 - `thread_spawn_with_args(0, ITERS, worker)` with a direct function argument.
 - `thread_spawn_with_args(0, ITERS, \seed, iters: work(seed, iters))` with the
@@ -21,8 +22,9 @@ exit 139:
 - The previous channel fanin profile source using `channel_from_id` plus
   `thread_spawn_with_args`, even after retaining and joining handles.
 
-The replacement profile source uses `thread_spawn` and explicit handle joins,
-which compiled and ran in the checked-in smoke profile.
+The replacement profile source still uses `thread_spawn` and explicit handle
+joins because that row is the scheduler/fanout baseline. The explicit-argument
+ABI is covered separately by the native smoke gate.
 
 ## Impact
 
