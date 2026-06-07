@@ -190,10 +190,17 @@ A language built to stop generated code from lying shouldn't market itself by ov
 ## Try it
 
 ```bash
-git clone https://github.com/ormastes/simple.git
+git clone --recurse-submodules https://github.com/ormastes/simple.git
 cd simple
 export PATH="$PWD/bin:$PATH"
 simple --version
+```
+
+For an existing checkout, initialize or refresh the example/tooling submodules with:
+
+```bash
+git submodule sync --recursive
+git submodule update --init --recursive
 ```
 
 I'd point people at the source checkout rather than a hardcoded binary URL — the release tag (`v0.9.8`) and the `VERSION` file (`1.0.0-beta`) haven't fully reconciled yet, so the source path is the safest call to action today.
@@ -202,24 +209,24 @@ I'd point people at the source checkout rather than a hardcoded binary URL — t
 
 ## Repository submodules
 
-Current checkout state:
+Tracked submodule gitlinks:
 
 | Path | Purpose | State |
 | --- | --- | --- |
-| `.spipe/spipe` | External SPipe runner and BDD workflow source | Initialized, but working HEAD `ee79ffb71447` differs from recorded commit `c2a50b9f7b00` |
-| `examples/06_io/restaurant_webapp` | Restaurant web application example | Registered but not initialized |
-| `examples/07_ml/simple_deeplearning_study` | Deep-learning study examples | Registered but not initialized |
-| `examples/07_ml/svllm` | Simple-based LLM experiments | Registered but not initialized |
-| `examples/08_gpu/simple_cuda_example` | CUDA/GPU example project | Registered but not initialized |
-| `examples/10_tooling/korean_stock_mcp` | Korean stock MCP tooling example | Registered but not initialized |
-| `examples/10_tooling/llm_cli_tools` | LLM CLI tooling examples | Registered but not initialized |
-| `examples/10_tooling/obsidian-search` | Obsidian search tooling example | Registered but not initialized |
-| `examples/10_tooling/trace32_tools` | TRACE32 tooling example | Registered but not initialized |
-| `examples/11_advanced/simple_db` | Database example derived from `simple-spostgre` | Registered but not initialized |
+| `.spipe/spipe` | External SPipe runner and BDD workflow source | Pinned to `c2a50b9f7b00` |
+| `examples/06_io/restaurant_webapp` | Restaurant web application example | Pinned to `58d124eec8af` |
+| `examples/07_ml/simple_deeplearning_study` | Deep-learning study examples | Pinned to `1d274135da84` |
+| `examples/07_ml/svllm` | Simple-based LLM experiments | Pinned to `4de0f9256cc8` |
+| `examples/08_gpu/simple_cuda_example` | CUDA/GPU example project | Pinned to `e74405599b8a` |
+| `examples/10_tooling/korean_stock_mcp` | Korean stock MCP tooling example | Pinned to `1a2f57b6ddb2` |
+| `examples/10_tooling/llm_cli_tools` | LLM CLI tooling examples | Pinned to `310f74e1b17d` |
+| `examples/10_tooling/obsidian-search` | Obsidian search tooling example | Pinned to `835d9073a113` |
+| `examples/10_tooling/trace32_tools` | TRACE32 tooling example | Pinned to `40f6f53786bc` |
+| `examples/11_advanced/simple_db` | Database example derived from `simple-spostgre` | Pinned to `5df3b641fb80` |
 | `examples/10_tooling/simple_ide` | Simple IDE example/tooling tree | Declared in `.gitmodules`, but current HEAD stores it as a normal tree, not a gitlink |
 | `src/lib/nogc_async_mut/payment` | Payment library integration | Declared in `.gitmodules`, but current HEAD stores it as a normal tree, not a gitlink |
 
-`git submodule status --recursive` currently reports the registered gitlinks above. The declaration-only rows are still listed in `.gitmodules`, but they are not active Git submodules in the current index.
+All active gitlink commits above are expected to resolve from their configured remotes after `git submodule sync --recursive && git submodule update --init --recursive`. The declaration-only rows are still listed in `.gitmodules`, but they are not active Git submodules in the current index.
 
 ---
 
