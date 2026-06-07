@@ -207,6 +207,26 @@ Unit coverage: `simple_web_renderer_spec.spl` includes direct child,
 descendant, class, and CSS matrix cases that exercise the fallback and fast
 paths.
 
+## Path H — single-declaration CSS blocks paid full declaration lookup — FIXED 2026-06-07
+
+`apply_decls()` scanned and split a declaration block once for every supported
+CSS property lookup. Common Simple Web rules such as `.item{color:#123456;}`
+therefore paid the whole style parser path even though the block contained one
+property.
+
+**Fix (pure Simple):** detect one-property declaration blocks, apply common
+properties directly, and fall back to the existing full parser for multi-property
+or unsupported blocks. Focused smoke on an 80-rule / 80-node single-declaration
+Simple Web render at 96x96:
+
+| Measurement | Before | After |
+|-------------|--------|-------|
+| elapsed | `1783387us` | `1687064us` |
+| checksum | `182357384819455458` | `182357384819455458` |
+
+Unit coverage remains the existing Simple Web renderer CSS matrix, plus the
+focused benchmark checksum above for fast-path parity.
+
 ## Follow-up: GUI profile throughput evidence
 
 2026-06-06 GUI profile smoke:

@@ -435,10 +435,129 @@ fn is_heading(tag: text) -> bool:
 fn is_non_rendered_tag(tag: text) -> bool:
     tag == "head" or tag == "title" or tag == "meta" or tag == "style" or tag == "script" or tag == "link"
 
+class SingleDeclStyle:
+    handled: bool
+    style: Style
+
+fn single_decl_body(decls: text) -> text:
+    var body = decls.trim()
+    if body.len() == 0:
+        return ""
+    if body.ends_with(";"):
+        body = body.substring(0, body.len() - 1).trim()
+    if body.index_of(";") >= 0:
+        return ""
+    if body.index_of(":") < 0:
+        return ""
+    body
+
+fn apply_single_decl_fast(st: Style, body: text) -> SingleDeclStyle:
+    val colon = body.index_of(":")
+    if colon < 0:
+        return SingleDeclStyle(handled: false, style: st)
+    val name = body.substring(0, colon).trim().lower()
+    val value = body.substring(colon + 1, body.len()).trim()
+    if value.len() == 0:
+        return SingleDeclStyle(handled: false, style: st)
+    var out = st
+    if name == "color":
+        val cv = parse_color(value)
+        if cv != 0u32:
+            out.fg = cv
+        return SingleDeclStyle(handled: true, style: out)
+    if name == "background-color":
+        out.bg = parse_color(value)
+        return SingleDeclStyle(handled: true, style: out)
+    if name == "background":
+        out.bg = parse_color_any(value)
+        return SingleDeclStyle(handled: true, style: out)
+    if name == "font-size":
+        val v = parse_int(value)
+        if v > 0:
+            out.font_size = v
+        return SingleDeclStyle(handled: true, style: out)
+    if name == "font-weight":
+        if value == "bold" or value == "700" or value == "600" or value == "800":
+            out.bold = true
+        return SingleDeclStyle(handled: true, style: out)
+    if name == "width":
+        if value.ends_with("%"):
+            val wp = parse_int(value)
+            out.width_px = if wp > 0: 0 - wp else: 0
+        else:
+            out.width_px = parse_int(value)
+        return SingleDeclStyle(handled: true, style: out)
+    if name == "height":
+        out.height_px = parse_int(value)
+        return SingleDeclStyle(handled: true, style: out)
+    if name == "display":
+        if value == "none":
+            out.display = "none"
+        elif value == "inline":
+            out.display = "inline"
+        elif value == "flex":
+            out.display = "flex"
+        elif value == "contents":
+            out.display = "contents"
+            out.bg = 0u32
+            out.width_px = 0
+            out.height_px = 0
+            out.pad_l = 0
+            out.pad_t = 0
+            out.pad_r = 0
+            out.pad_b = 0
+            out.border_w = 0
+            out.border_l = 0
+            out.border_t = 0
+            out.border_r = 0
+            out.border_b = 0
+            out.border_color = 0u32
+            out.border_color_l = 0u32
+            out.border_color_t = 0u32
+            out.border_color_r = 0u32
+            out.border_color_b = 0u32
+            out.margin_l = 0
+            out.margin_t = 0
+            out.margin_r = 0
+            out.margin_b = 0
+        else:
+            out.display = "block"
+        return SingleDeclStyle(handled: true, style: out)
+    if name == "overflow" or name == "overflow-x" or name == "overflow-y":
+        if value == "hidden":
+            out.overflow_hidden = true
+        elif name == "overflow":
+            out.overflow_hidden = false
+        return SingleDeclStyle(handled: true, style: out)
+    if name == "visibility":
+        if value == "hidden":
+            out.visibility_hidden = true
+        elif value == "visible":
+            out.visibility_hidden = false
+        return SingleDeclStyle(handled: true, style: out)
+    if name == "box-sizing":
+        out.border_box = value == "border-box"
+        return SingleDeclStyle(handled: true, style: out)
+    if name == "flex":
+        if parse_int(value) > 0:
+            out.flex_fill = true
+        return SingleDeclStyle(handled: true, style: out)
+    if name == "gap":
+        val gv = parse_int(value)
+        if gv > 0:
+            out.gap_px = gv
+        return SingleDeclStyle(handled: true, style: out)
+    SingleDeclStyle(handled: false, style: st)
+
 # apply a declaration block onto a style
 fn apply_decls(st: Style, decls: text) -> Style:
     if decls.len() == 0:
         return st
+    val single = single_decl_body(decls)
+    if single.len() > 0:
+        val fast = apply_single_decl_fast(st, single)
+        if fast.handled:
+            return fast.style
     var bg_v = st.bg
     var fg_v = st.fg
     var font_size_v = st.font_size
