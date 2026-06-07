@@ -389,7 +389,12 @@ pub(crate) fn build_import_map(
                                 (v.name.clone(), payload_arity)
                             })
                             .collect();
-                        enum_defs.entry(e.name.clone()).or_insert(variant_summary);
+                        let entry = enum_defs.entry(e.name.clone()).or_default();
+                        for variant in variant_summary {
+                            if !entry.iter().any(|(name, _)| name == &variant.0) {
+                                entry.push(variant);
+                            }
+                        }
                         for m in &e.methods {
                             if !m.body.statements.is_empty() {
                                 let raw = format!("{}.{}", e.name, m.name);

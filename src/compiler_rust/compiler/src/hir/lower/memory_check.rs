@@ -328,7 +328,12 @@ impl Lowerer {
                 // In lenient mode, allow self mutation in fn methods (treat as warning)
                 return Ok(());
             }
-            return Err(LowerError::SelfMutationInImmutableMethod);
+            return Err(LowerError::SelfMutationInImmutableMethod {
+                func_name: self
+                    .current_function_name
+                    .clone()
+                    .unwrap_or_else(|| "<unknown>".to_string()),
+            });
         }
 
         Ok(())

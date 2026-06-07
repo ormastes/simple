@@ -56,7 +56,7 @@ class CompilerContextImpl:
     stats: ContextStats
     next_type_var: i64
 
-    fn infer_types(tmpl: Template, hints: [TypeHint]) -> [TypeInfo]:
+    me infer_types(tmpl: Template, hints: [TypeHint]) -> [TypeInfo]:
         """Infer type arguments for a generic template.
 
         Args:
@@ -81,17 +81,19 @@ class CompilerContextImpl:
         for param in tmpl.type_params:
             # Find hint for this parameter
             var found_type: TypeInfo = nil
+            var found = false
 
             for hint in hints:
                 if hint.source == "call_site":
                     found_type = hint.ty
+                    found = true
                     break
 
-            if has_found_type:
-                inferred_push(inferred, found_type_value)
+            if found:
+                inferred = inferred.push(found_type)
             else:
                 # Default to i64 if no hint
-                inferred.push(TypeInfo(
+                inferred = inferred.push(TypeInfo(
                     kind: "int",
                     name: "i64",
                     has_bits: true,
@@ -109,7 +111,7 @@ class CompilerContextImpl:
         self.type_cache[cache_key] = inferred
         inferred
 
-    fn instantiate_template(tmpl: Template, type_args: [TypeInfo]) -> CompilationResult:
+    me instantiate_template(tmpl: Template, type_args: [TypeInfo]) -> CompilationResult:
         """Instantiate a generic template with concrete type arguments.
 
         Args:
@@ -382,7 +384,7 @@ fn compiler_destroy_context(handle: i64):
     Args:
         handle: Context handle
     """
-    context_registry_remove(handle)
+    CONTEXT_REGISTRY = CONTEXT_REGISTRY.remove(handle)
 
 fn compiler_infer_types(
     handle: i64,
@@ -403,14 +405,15 @@ fn compiler_infer_types(
     if not CONTEXT_REGISTRY.contains(handle):
         return '{"error": "Invalid context handle"}'
 
-    val ctx = CONTEXT_REGISTRY[handle]
+    var ctx = CONTEXT_REGISTRY[handle]
 
     # Parse inputs
     val tmpl = parse_template_json(template_json)
     val hints = parse_hints_json(hints_json)
 
     # Run inference
-    val inferred = ctx_infer_types(ctx, tmpl, hints)
+    val inferred = ctx.infer_types(tmpl, hints)
+    CONTEXT_REGISTRY[handle] = ctx
 
     # Serialize result
     serialize_types_json(inferred)
@@ -428,7 +431,7 @@ fn compiler_check_types(handle: i64, code: [u8]) -> bool:
         return false
 
     val ctx = CONTEXT_REGISTRY[handle]
-    ctx_check_types(ctx, code)
+    ctx.check_types(code)
 
 fn compiler_instantiate_template(
     handle: i64,
@@ -457,7 +460,8 @@ fn compiler_instantiate_template(
     val types = parse_types_json(types_json)
 
     # Instantiate
-    val result = ctx_instantiate_template(ctx, tmpl, types)
+    val result = ctx.instantiate_template(tmpl, types)
+    CONTEXT_REGISTRY[handle] = ctx
 
     # Serialize result
     serialize_compilation_result(result)
@@ -475,7 +479,7 @@ fn compiler_get_stats(handle: i64) -> text:
         return '{"error": "Invalid context handle"}'
 
     val ctx = CONTEXT_REGISTRY[handle]
-    val stats = ctx_get_stats(ctx)
+    val stats = ctx.get_stats()
 
     '{"type_inferences": {stats.type_inferences}, "template_instantiations": {stats.template_instantiations}, "cache_hits": {stats.cache_hits}, "cache_misses": {stats.cache_misses}}'
 
@@ -630,10 +634,10 @@ fn sffi_json_field_text(json_text: text, key: text) -> text:
     sffi_json_unquote('"' + rest[0:end_idx] + '"')
 
 fn sffi_json_field_i64(json_text: text, key: text) -> i64?:
-    val literal = sffi_json_field_literal(json_text, key)
-    if literal.len() == 0:
+    val field_literal = sffi_json_field_literal(json_text, key)
+    if field_literal.len() == 0:
         return nil
-    val parsed = literal.to_i64() ?? -1
+    val parsed = field_literal.to_i64() ?? -1
     if parsed < 0:
         return nil
     parsed
@@ -645,10 +649,10 @@ fn sffi_json_field_bool(json_text: text, key: text, default_value: bool) -> bool
     default_value
 
 fn sffi_json_field_bool_opt(json_text: text, key: text) -> bool?:
-    val literal = sffi_json_field_literal(json_text, key)
-    if literal == "true":
+    val field_literal = sffi_json_field_literal(json_text, key)
+    if field_literal == "true":
         return true
-    if literal == "false":
+    if field_literal == "false":
         return false
     nil
 
@@ -712,7 +716,7 @@ fn sffi_json_object_array_items(json_text: text) -> [text]:
         elif ch == "}":
             depth = depth - 1
             if depth == 0 and start >= 0:
-                items.push(body[start:i + 1])
+                items = items.push(body[start:i + 1])
                 start = -1
         i = i + 1
     items
@@ -730,7 +734,7 @@ fn serialize_types_json(types: [TypeInfo]) -> text:
 
     for ty in types:
         val ty_json = serialize_type_json(ty)
-        parts_push(parts, ty_json)
+        parts = parts.push(ty_json)
 
     val joined = parts.join(",")
     "[{joined}]"

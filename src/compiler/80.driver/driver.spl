@@ -32,7 +32,7 @@ use compiler.hir.hir_types.{SymbolTable, SymbolId}
 use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at, bootstrap_lower_hir_globals_to_mir_module}
 use compiler.driver.driver_aot_output.*
 use compiler.driver.cache.cache_types.{CacheCheckResult, CACHE_FRESH}
-use compiler.common.driver_core_types.{CompileResult, driver_core_compile_options_default}
+use compiler.common.driver_core_types.{CompileResult, driver_core_compile_options_default, driver_output_format_is_smf, driver_output_format_is_both, driver_output_format_is_self_contained}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.driver.driver_log_helpers.{log_debug, log_trace, log_info, log_warn, log_error, log_phase}
 use compiler.driver.driver_bootstrap.{
@@ -70,10 +70,10 @@ class CheckBackendImpl(Backend):
 
     fn eval_expr(expr: HirExpr, env: Environment) -> Result<Value, text>:
         # Don't evaluate, just return unit
-        Ok(Value.Unit)
+        Ok(Value.Nil)
 
     fn exec_stmt(stmt: HirStmt, env: Environment) -> Result<Value, text>:
-        Ok(Value.Unit)
+        Ok(Value.Nil)
 
 # ------------------------------------------------------------------------------
 # Compiler Driver
@@ -698,44 +698,42 @@ pub class CompilerDriver:
         if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             log_phase("aot:bootstrap_native_context_dispatch")
             return bootstrap_compile_context_to_native_local(self.ctx, backend_name, output)
-        match format:
-            case OutputFormat.Smf:
-                return self.compile_to_smf(output)
-            case OutputFormat.SelfContained:
-                return self.compile_to_self_contained(output)
-            case OutputFormat.Both:
-                # Compile native (LLVM) first, then SMF (Cranelift) to cache
-                val native_result = self.compile_to_native(output)
-                if not native_result.is_success():
-                    return native_result
-                # SMF goes to build/smf/ cache directory
-                use compiler.driver.cache.cache_validator.{source_to_cache_path}
-                use compiler.driver.watcher.smf_manifest.{update_smf_manifest_entry}
-                val source_path = self.ctx.options.input_files[0]
-                val smf_cache_path = source_to_cache_path(source_path, "build/smf", ".smf")
-                val smf_result = self.compile_to_smf(smf_cache_path)
-                if smf_result.is_success():
-                    extern fn rt_hash_text(s: text) -> i64
-                    extern fn rt_file_read_text(path: text) -> text
-                    val smf_opt_level = compileoptions_effective_mir_opt_level(self.ctx.options)
-                    val src = rt_file_read_text(source_path) ?? ""
-                    val src_hash = rt_hash_text(src)
-                    update_smf_manifest_entry(
-                        source_path,
-                        smf_cache_path,
-                        src_hash,
-                        self.ctx.options.backend,
-                        smf_opt_level,
-                        self.ctx.options.release,
-                        self.ctx.options.debug_info,
-                        self.ctx.options.gc_off,
-                        self.ctx.options.profile,
-                        self.ctx.options.allowed_families
-                    )
-                return CompileResult.Success(output)
-            case _:
-                # Native (default)
-                return self.compile_to_native(output)
+        if driver_output_format_is_smf(format):
+            return self.compile_to_smf(output)
+        if driver_output_format_is_self_contained(format):
+            return self.compile_to_self_contained(output)
+        if driver_output_format_is_both(format):
+            # Compile native (LLVM) first, then SMF (Cranelift) to cache
+            val native_result = self.compile_to_native(output)
+            if not native_result.is_success():
+                return native_result
+            # SMF goes to build/smf/ cache directory
+            use compiler.driver.cache.cache_validator.{source_to_cache_path}
+            use compiler.driver.watcher.smf_manifest.{update_smf_manifest_entry}
+            val source_path = self.ctx.options.input_files[0]
+            val smf_cache_path = source_to_cache_path(source_path, "build/smf", ".smf")
+            val smf_result = self.compile_to_smf(smf_cache_path)
+            if smf_result.is_success():
+                extern fn rt_hash_text(s: text) -> i64
+                extern fn rt_file_read_text(path: text) -> text
+                val smf_opt_level = compileoptions_effective_mir_opt_level(self.ctx.options)
+                val src = rt_file_read_text(source_path) ?? ""
+                val src_hash = rt_hash_text(src)
+                update_smf_manifest_entry(
+                    source_path,
+                    smf_cache_path,
+                    src_hash,
+                    self.ctx.options.backend,
+                    smf_opt_level,
+                    self.ctx.options.release,
+                    self.ctx.options.debug_info,
+                    self.ctx.options.gc_off,
+                    self.ctx.options.profile,
+                    self.ctx.options.allowed_families
+                )
+            return CompileResult.Success(output)
+        # Native (default)
+        return self.compile_to_native(output)
 
 pub fn compiler_driver_create(options: CompileOptions) -> CompilerDriver:
     val ctx = CompileContext.create(options)

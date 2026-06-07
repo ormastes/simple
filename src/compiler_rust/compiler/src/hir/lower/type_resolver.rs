@@ -135,6 +135,9 @@ impl Lowerer {
                 if let Some(id) = self.module.types.lookup(name) {
                     return Ok(id);
                 }
+                if name.len() == 1 && name.chars().all(|ch| ch.is_ascii_uppercase()) {
+                    return Ok(TypeId::ANY);
+                }
                 // Fall back to cross-module struct definitions. This handles
                 // files that use a struct type by name (e.g. as a parameter
                 // annotation) without an explicit `use` statement — common
@@ -170,6 +173,33 @@ impl Lowerer {
                     }
                     "tuple" => return Ok(self.module.types.register(HirType::Tuple(vec![]))),
                     "dict" | "set" => return Ok(TypeId::ANY),
+                    "Option" => {
+                        return Ok(self.module.types.register(HirType::Enum {
+                            name: "Option".to_string(),
+                            variants: vec![
+                                ("Some".to_string(), Some(vec![TypeId::ANY])),
+                                ("None".to_string(), None),
+                            ],
+                            generic_params: vec!["T".to_string()],
+                            is_generic_template: false,
+                            type_bindings: std::collections::HashMap::from([("T".to_string(), TypeId::ANY)]),
+                        }))
+                    }
+                    "Result" => {
+                        return Ok(self.module.types.register(HirType::Enum {
+                            name: "Result".to_string(),
+                            variants: vec![
+                                ("Ok".to_string(), Some(vec![TypeId::ANY])),
+                                ("Err".to_string(), Some(vec![TypeId::ANY])),
+                            ],
+                            generic_params: vec!["T".to_string(), "E".to_string()],
+                            is_generic_template: false,
+                            type_bindings: std::collections::HashMap::from([
+                                ("T".to_string(), TypeId::ANY),
+                                ("E".to_string(), TypeId::ANY),
+                            ]),
+                        }))
+                    }
                     "usize" | "isize" => return Ok(TypeId::I64),
                     _ => {}
                 }
@@ -604,6 +634,28 @@ impl Lowerer {
                     {
                         return Ok((variant_idx, variant_field_ty));
                     }
+                    if let Some((idx, owner_field_ty)) = self.try_resolve_current_owner_field(field) {
+                        return Ok((idx, owner_field_ty));
+                    }
+                    if let Some((idx, field_ty, _, _)) = self.resolve_global_field_info(field) {
+                        return Ok((idx, field_ty));
+                    }
+                    let mut best: Option<(usize, TypeId, usize)> = None;
+                    for (_, search_ty) in self.module.types.iter() {
+                        if let HirType::Struct { fields: search_fields, .. } = search_ty {
+                            for (idx, (field_name, field_ty)) in search_fields.iter().enumerate() {
+                                if field_name == field {
+                                    let count = search_fields.len();
+                                    if best.as_ref().is_none_or(|(_, _, c)| count > *c) {
+                                        best = Some((idx, *field_ty, count));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if let Some((idx, field_ty, _)) = best {
+                        return Ok((idx, field_ty));
+                    }
                     let available_fields = fields.iter().map(|(name, _)| name.clone()).collect();
                     Err(LowerError::CannotInferFieldType {
                         struct_name: name,
@@ -661,6 +713,12 @@ impl Lowerer {
                     }
                 }
                 _ => {
+                    if let Some((idx, owner_field_ty)) = self.try_resolve_current_owner_field(field) {
+                        return Ok((idx, owner_field_ty));
+                    }
+                    if let Some((idx, field_ty, _, _)) = self.resolve_global_field_info(field) {
+                        return Ok((idx, field_ty));
+                    }
                     // For VOID, Pointer, or other non-struct types (often caused by
                     // cross-module imports where field types resolve to VOID because
                     // the dependency wasn't loaded yet), search known structs for
@@ -765,6 +823,35 @@ impl Lowerer {
             }
         }
         found
+    }
+
+    fn try_resolve_current_owner_field(&mut self, field_name: &str) -> Option<(usize, TypeId)> {
+        let owner = self
+            .current_function_name
+            .as_ref()
+            .and_then(|name| name.split_once('.').map(|(owner, _)| owner.to_string()))?;
+        if let Some(found) = self.try_resolve_global_field_for_struct(&owner, field_name) {
+            return Some(found);
+        }
+        if let Some(found) = self.try_resolve_registered_same_name_field_variant(&owner, field_name) {
+            return Some(found);
+        }
+        for (_, hir_ty) in self.module.types.iter() {
+            let HirType::Struct { name, fields, .. } = hir_ty else {
+                continue;
+            };
+            if name != &owner {
+                continue;
+            }
+            if let Some((idx, field_ty)) = fields
+                .iter()
+                .enumerate()
+                .find_map(|(idx, (fname, fty))| (fname == field_name).then_some((idx, *fty)))
+            {
+                return Some((idx, field_ty));
+            }
+        }
+        None
     }
 
     fn try_resolve_global_field_for_struct(&mut self, struct_name: &str, field_name: &str) -> Option<(usize, TypeId)> {

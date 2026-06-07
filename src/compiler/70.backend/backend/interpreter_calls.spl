@@ -10,8 +10,40 @@ use compiler.hir.hir.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.backend.backend_types.*
 use compiler.backend.backend.env.{EvalContext, Environment}
-use compiler.backend.sffi_minimal as sffi
 use compiler.backend.backend.interpreter.{InterpreterBackendImpl}
+
+enum ValueType:
+    Nil
+    Bool
+    Int
+    Float
+    String
+    Array
+    Dict
+    Object
+    Function
+
+extern fn rt_value_print(value: i64)
+extern fn rt_value_println(value: i64)
+extern fn rt_value_type(value: i64) -> ValueType
+extern fn rt_value_int(value: i64) -> i64
+extern fn rt_value_float(value: f64) -> i64
+extern fn rt_value_bool(value: bool) -> i64
+extern fn rt_value_nil() -> i64
+extern fn rt_value_string(ptr: i64, len: i64) -> i64
+extern fn rt_value_is_int(value: i64) -> bool
+extern fn rt_value_is_float(value: i64) -> bool
+extern fn rt_value_is_bool(value: i64) -> bool
+extern fn rt_value_is_nil(value: i64) -> bool
+extern fn rt_value_as_int(value: i64) -> i64
+extern fn rt_value_as_float(value: i64) -> f64
+extern fn rt_value_as_bool(value: i64) -> bool
+extern fn rt_file_exists(path_ptr: i64, path_len: i64) -> bool
+extern fn rt_file_read_text(path_ptr: i64, path_len: i64) -> i64
+extern fn rt_file_write_text(path_ptr: i64, path_len: i64, content_ptr: i64, content_len: i64) -> bool
+extern fn rt_file_delete(path_ptr: i64, path_len: i64) -> bool
+extern fn rt_env_get(name_ptr: i64, name_len: i64) -> i64
+extern fn rt_env_set(name_ptr: i64, name_len: i64, value_ptr: i64, value_len: i64) -> bool
 
 # ============================================================================
 # Builtin dispatch table (optimization: avoid per-call string comparison chain)
@@ -158,49 +190,49 @@ impl InterpreterBackendImpl:
                     val arg = args[0]
                     match arg:
                         case RuntimeValue(ptr):
-                            sffi.value_print(ptr)
+                            rt_value_print(ptr)
                         case Int(_):
                             val ptr = self.value_to_runtime_ptr(arg)
-                            sffi.value_print(ptr)
+                            rt_value_print(ptr)
                         case Float(_):
                             val ptr = self.value_to_runtime_ptr(arg)
-                            sffi.value_print(ptr)
+                            rt_value_print(ptr)
                         case Bool(_):
                             val ptr = self.value_to_runtime_ptr(arg)
-                            sffi.value_print(ptr)
+                            rt_value_print(ptr)
                         case Nil:
                             val ptr = self.value_to_runtime_ptr(arg)
-                            sffi.value_print(ptr)
+                            rt_value_print(ptr)
                         case _:
                             val msg = self.value_to_string(arg)
                             print msg
                 else:
                     print ""
-                Some(Ok(Value.Unit))
+                Some(Ok(Value.Nil))
             case BuiltinTag.Println:
                 if args.len() > 0:
                     val arg = args[0]
                     match arg:
                         case RuntimeValue(ptr):
-                            sffi.value_println(ptr)
+                            rt_value_println(ptr)
                         case Int(_):
                             val ptr = self.value_to_runtime_ptr(arg)
-                            sffi.value_println(ptr)
+                            rt_value_println(ptr)
                         case Float(_):
                             val ptr = self.value_to_runtime_ptr(arg)
-                            sffi.value_println(ptr)
+                            rt_value_println(ptr)
                         case Bool(_):
                             val ptr = self.value_to_runtime_ptr(arg)
-                            sffi.value_println(ptr)
+                            rt_value_println(ptr)
                         case Nil:
                             val ptr = self.value_to_runtime_ptr(arg)
-                            sffi.value_println(ptr)
+                            rt_value_println(ptr)
                         case _:
                             val msg = self.value_to_string(arg)
                             print msg
                 else:
                     print ""
-                Some(Ok(Value.Unit))
+                Some(Ok(Value.Nil))
             case BuiltinTag.ToString:
                 if args.len() > 0:
                     Some(Ok(Value.string(self.value_to_string(args[0]))))
@@ -212,7 +244,7 @@ impl InterpreterBackendImpl:
                     val arg = args[0]
                     match arg:
                         case RuntimeValue(ptr):
-                            val type_tag = sffi.value_type(ptr)
+                            val type_tag = rt_value_type(ptr)
                             val type_name = match type_tag:
                                 case ValueType.Nil: "nil"
                                 case ValueType.Bool: "bool"
@@ -235,8 +267,9 @@ impl InterpreterBackendImpl:
                     val arg = args[0]
                     match arg:
                         case RuntimeValue(ptr):
-                            val cloned_ptr = sffi.value_clone(ptr)
-                            Some(Ok(Value.RuntimeValue(cloned_ptr)))
+                            # Bootstrap interpreter fallback treats the runtime
+                            # pointer as an opaque refcounted handle.
+                            Some(Ok(Value.RuntimeValue(ptr)))
                         case _:
                             Some(Ok(arg))
                 else:
@@ -247,7 +280,7 @@ impl InterpreterBackendImpl:
                 if args.len() > 0:
                     match args[0]:
                         case String(path):
-                            val result = sffi.file_exists_ptr(path.ptr(), path.len())
+                            val result = rt_file_exists(path.ptr(), path.len())
                             Some(Ok(Value.bool(result)))
                         case _:
                             Some(Err(BackendError.type_error("file_exists requires string path", nil)))
@@ -258,7 +291,7 @@ impl InterpreterBackendImpl:
                 if args.len() > 0:
                     match args[0]:
                         case String(path):
-                            val ptr = sffi.file_read_text_ptr(path.ptr(), path.len())
+                            val ptr = rt_file_read_text(path.ptr(), path.len())
                             if ptr == 0:
                                 Some(Ok(Value.string("")))
                             else:
@@ -275,7 +308,7 @@ impl InterpreterBackendImpl:
                         case String(path):
                             match args[1]:
                                 case String(content):
-                                    val result = sffi.file_write_text_ptr(path.ptr(), path.len(), content.ptr(), content.len())
+                                    val result = rt_file_write_text(path.ptr(), path.len(), content.ptr(), content.len())
                                     Some(Ok(Value.bool(result)))
                                 case _:
                                     Some(Err(BackendError.type_error("file_write requires string path and content", nil)))
@@ -288,7 +321,7 @@ impl InterpreterBackendImpl:
                 if args.len() > 0:
                     match args[0]:
                         case String(path):
-                            val result = sffi.file_delete_ptr(path.ptr(), path.len())
+                            val result = rt_file_delete(path.ptr(), path.len())
                             Some(Ok(Value.bool(result)))
                         case _:
                             Some(Err(BackendError.type_error("file_delete requires string path", nil)))
@@ -300,7 +333,7 @@ impl InterpreterBackendImpl:
                 if args.len() > 0:
                     match args[0]:
                         case String(name):
-                            val ptr = sffi.env_get_ptr(name.ptr(), name.len())
+                            val ptr = rt_env_get(name.ptr(), name.len())
                             if ptr == 0:
                                 Some(Ok(Value.string("")))
                             else:
@@ -317,7 +350,7 @@ impl InterpreterBackendImpl:
                         case String(name):
                             match args[1]:
                                 case String(value):
-                                    val result = sffi.env_set_ptr(name.ptr(), name.len(), value.ptr(), value.len())
+                                    val result = rt_env_set(name.ptr(), name.len(), value.ptr(), value.len())
                                     Some(Ok(Value.bool(result)))
                                 case _:
                                     Some(Err(BackendError.type_error("env_set requires string name and value", nil)))
@@ -336,28 +369,28 @@ impl InterpreterBackendImpl:
     fn value_to_runtime_ptr(value: Value) -> i64:
         """Convert Simple Value to RuntimeValue pointer for SFFI operations."""
         match value:
-            case Int(i): sffi.value_int(i)
-            case Float(f): sffi.value_float(f)
-            case Bool(b): sffi.value_bool(b)
-            case Nil: sffi.value_nil()
+            case Int(i): rt_value_int(i)
+            case Float(f): rt_value_float(f)
+            case Bool(b): rt_value_bool(b)
+            case Nil: rt_value_nil()
             case RuntimeValue(ptr): ptr  # Already a pointer
             case String(s):
-                sffi.value_string(s.ptr(), s.len())
+                rt_value_string(s.ptr(), s.len())
             case _:
-                sffi.value_nil()
+                rt_value_nil()
 
     fn runtime_ptr_to_value(ptr: i64) -> Value:
         """Convert RuntimeValue pointer to Simple Value."""
-        if sffi.value_is_int(ptr):
-            val i = sffi.value_as_int(ptr)
+        if rt_value_is_int(ptr):
+            val i = rt_value_as_int(ptr)
             Value.int(i)
-        elif sffi.value_is_float(ptr):
-            val f = sffi.value_as_float(ptr)
+        elif rt_value_is_float(ptr):
+            val f = rt_value_as_float(ptr)
             Value.float(f)
-        elif sffi.value_is_bool(ptr):
-            val b = sffi.value_as_bool(ptr)
+        elif rt_value_is_bool(ptr):
+            val b = rt_value_as_bool(ptr)
             Value.bool(b)
-        elif sffi.value_is_nil(ptr):
+        elif rt_value_is_nil(ptr):
             Value.Nil
         else:
             Value.RuntimeValue(ptr)

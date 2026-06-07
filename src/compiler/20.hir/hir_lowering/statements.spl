@@ -17,6 +17,36 @@ extern fn rt_env_get(key: text) -> text
 # ============================================================================
 
 impl HirLowering:
+    fn lower_hir_assign_op(assign_op: AssignOp) -> HirAssignOp:
+        match assign_op:
+            case AssignOp.Add: HirAssignOp.Add
+            case AssignOp.Sub: HirAssignOp.Sub
+            case AssignOp.Mul: HirAssignOp.Mul
+            case AssignOp.Div: HirAssignOp.Div
+            case AssignOp.Mod: HirAssignOp.Mod
+
+    me lower_hir_assign_op_opt(op: AssignOp?) -> HirAssignOp?:
+        if op.?:
+            Some(self.lower_hir_assign_op(op.unwrap()))
+        else:
+            nil
+
+    me lower_hir_with_items(items: [WithItem]) -> [HirWithItem]:
+        var result: [HirWithItem] = []
+        for item in items:
+            val hir_context = self.lower_hir_expr(item.context_expr)
+            var hir_target: SymbolId? = nil
+            if item.target.?:
+                val symbol = self.symbols.define(item.target ?? "", SymbolKind.Variable, nil, item.span, false, false, nil)
+                hir_target = symbol
+            val hir_item = HirWithItem(
+                context_expr: hir_context,
+                target: hir_target,
+                span: item.span
+            )
+            result = result.push(hir_item)
+        result
+
     me lower_hir_stmt(s: Stmt) -> HirStmt:
         if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             eprint("[hir-lower] lower_stmt:start")
@@ -62,16 +92,7 @@ impl HirLowering:
                 HirStmtKind.Let(symbol, hir_type, hir_init)
 
             case StmtKind.Assign(target, op, value):
-                var hir_op: HirAssignOp? = nil
-                if op.?:
-                    val assign_op = op.unwrap()
-                    hir_op = Some(match assign_op:
-                        case AssignOp.Add: HirAssignOp.Add
-                        case AssignOp.Sub: HirAssignOp.Sub
-                        case AssignOp.Mul: HirAssignOp.Mul
-                        case AssignOp.Div: HirAssignOp.Div
-                        case AssignOp.Mod: HirAssignOp.Mod
-                    )
+                val hir_op = self.lower_hir_assign_op_opt(op)
                 HirStmtKind.Assign(self.lower_hir_expr(target), hir_op, self.lower_hir_expr(value))
 
             case StmtKind.For(var_, iter, body):
@@ -157,31 +178,9 @@ impl HirLowering:
                 HirStmtKind.AsmAssert(spec)
 
             case StmtKind.With(items, body):
-                # Lower with items
-                var hir_items: [HirWithItem] = []
-                for item in items:
-                    # Lower context expression
-                    val hir_context = self.lower_hir_expr(item.context_expr)
-
-                    # Handle optional variable binding
-                    var hir_target: SymbolId? = nil
-                    if item.target.?:
-                        # Define symbol for the bound variable
-                        val symbol = self.symbols.define(item.target ?? "", SymbolKind.Variable, nil, item.span, false, false, nil)
-                        hir_target = symbol
-
-                    # Create HIR with item
-                    val hir_item = HirWithItem(
-                        context_expr: hir_context,
-                        target: hir_target,
-                        span: item.span
-                    )
-                    hir_items = hir_items.push(hir_item)
-
-                # Lower body
+                val hir_items = self.lower_hir_with_items(items)
                 val hir_body = self.lower_hir_block(body)
 
-                # Create With expression
                 HirStmtKind.Expr(HirExpr(
                     kind: HirExprKind.With(hir_items, hir_body),
                     type_: nil,

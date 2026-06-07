@@ -17,14 +17,14 @@ use compiler.hir.hir_lowering.expressions.*
 use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
 use compiler.types.type_layout.{LayoutAttr, LayoutKind, PlatformParseResult, PlatformDiagnosticLevel, PlatformLayoutDiagnostic}
 use compiler.common.dependency.visibility.{Visibility}
-use compiler.core.ast.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_param_types, decl_get_ret_type}
-use compiler.core.ast.{decl_is_gpu_kernel, decl_get_gpu_target_text, decl_get_gpu_backends_text}
-use compiler.core.ast_stmt.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
-use compiler.core.ast_expr.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_BLOCK, EXPR_RETURN, expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_stmts}
-use compiler.core.tokens.{TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT, TOK_EQ, TOK_NOT_EQ, TOK_LT, TOK_LT_EQ, TOK_GT, TOK_GT_EQ}
-use compiler.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_TEXT, custom_primitive_bind_symbol, custom_primitive_is_name}
-use compiler.core.types.{primitive_integer_bit_width_from_name, custom_primitive_integer_bit_width_by_name}
-use compiler.core.types.{int_to_str}
+use compiler.core.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_param_types, decl_get_ret_type}
+use compiler.core.{decl_is_gpu_kernel, decl_get_gpu_target_text, decl_get_gpu_backends_text}
+use compiler.core.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
+use compiler.core.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_BLOCK, EXPR_RETURN, expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_stmts}
+use compiler.core.{TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT, TOK_EQ, TOK_NOT_EQ, TOK_LT, TOK_LT_EQ, TOK_GT, TOK_GT_EQ}
+use compiler.core.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_TEXT, custom_primitive_bind_symbol, custom_primitive_is_name}
+use compiler.core.{primitive_integer_bit_width_from_name, custom_primitive_integer_bit_width_by_name}
+use compiler.core.{int_to_str}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 extern fn rt_env_get(key: text) -> text
@@ -68,7 +68,7 @@ impl HirLowering:
             name: name,
             type_params: [],
             params: params,
-            return_type: bootstrap_hir_type_from_tag(decl_get_ret_type(decl_idx)),
+            return_type: self.bootstrap_hir_type_from_tag(decl_get_ret_type(decl_idx)),
             body: body,
             effects: [],
             visibility: Visibility.Public,
@@ -460,14 +460,31 @@ impl HirLowering:
         )
 
     me lower_bitfield(bf: Bitfield) -> HirBitfield:
-        val symbol = self.symbols.lookup(bf.name).unwrap()
+        val bitfield_name: text
+        val bitfield_backing_type: Type
+        val bitfield_fields: [BitfieldField]
+        val bitfield_visibility: Visibility
+        val bitfield_attributes: [Attribute]
+        val bitfield_doc_comment: text
+        val bitfield_span: Span
+        match bf:
+            case Bitfield(name, backing_type, fields, visibility, _, _, doc_comment, attributes, span):
+                bitfield_name = name
+                bitfield_backing_type = backing_type
+                bitfield_fields = fields
+                bitfield_visibility = visibility
+                bitfield_attributes = attributes
+                bitfield_doc_comment = doc_comment
+                bitfield_span = span
 
-        val backing = self.lower_type(bf.backing_type)
-        val layout_attr = parse_layout_attrs(bf.attributes)
+        val symbol = self.symbols.lookup(bitfield_name).unwrap()
+
+        val backing = self.lower_type(bitfield_backing_type)
+        val layout_attr = parse_layout_attrs(bitfield_attributes)
 
         # Pre-compute bit widths for all fields
         var widths: [i64] = []
-        for f in bf.fields:
+        for f in bitfield_fields:
             val w = if f.bits.?:
                 f.bits.unwrap()
             elif f.is_reserved:
@@ -479,7 +496,7 @@ impl HirLowering:
         # Build index array for field ordering
         var indices: [i64] = []
         var idx: i64 = 0
-        while idx < bf.fields.len():
+        while idx < bitfield_fields.len():
             indices.push(idx)
             idx = idx + 1
 
@@ -500,7 +517,7 @@ impl HirLowering:
         var bit_offset: i64 = 0
         val word_bits: i64 = 32
         for sorted_idx in indices:
-            val f = bf.fields[sorted_idx]
+            val f = bitfield_fields[sorted_idx]
             val w = widths[sorted_idx]
 
             if not layout_attr.is_compactq and w > 0 and w < word_bits:
@@ -513,16 +530,16 @@ impl HirLowering:
             bit_offset = bit_offset + w
 
         # Compute effective visibility using filename matching
-        val effective_visibility = self.compute_visibility(bf.name, bf.visibility)
+        val effective_visibility = self.compute_visibility(bitfield_name, bitfield_visibility)
 
         HirBitfield(
             symbol: symbol,
-            name: bf.name,
+            name: bitfield_name,
             backing_type: backing,
             fields: fields,
             total_bits: bit_offset,
             visibility: effective_visibility,
             is_public: effective_visibility.is_public(),
-            doc_comment: bf.doc_comment,
-            span: bf.span
+            doc_comment: bitfield_doc_comment,
+            span: bitfield_span
         )

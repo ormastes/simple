@@ -112,6 +112,19 @@ impl Lowerer {
             Expr::I18nTemplate { name, parts, args } => self.lower_i18n_template(name, parts, args),
             Expr::I18nRef(name) => self.lower_i18n_ref(name),
             Expr::Identifier(name) => self.lower_identifier(name, ctx),
+            Expr::Symbol(name) => {
+                if ctx.lookup(name).is_some()
+                    || self.globals.contains_key(name)
+                    || self.named_callable_return_type(name).is_some()
+                {
+                    self.lower_identifier(name, ctx)
+                } else {
+                    Ok(HirExpr {
+                        kind: HirExprKind::String(name.clone()),
+                        ty: TypeId::STRING,
+                    })
+                }
+            }
             Expr::Binary { op, left, right } => self.lower_binary(op, left, right, ctx),
             Expr::Unary { op, operand } => self.lower_unary(op, operand, ctx),
             Expr::Call { callee, args } => self.lower_call(callee, args, ctx),
@@ -450,6 +463,19 @@ impl Lowerer {
         if let Some(canonical_member) = self.resolve_static_member_name(type_name, member) {
             return self.lower_static_method_call(type_name, &canonical_member, args, ctx);
         }
+        if member.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()) {
+            let args_hir = self.lower_call_args(args, ctx)?;
+            return Ok(HirExpr {
+                kind: HirExprKind::Call {
+                    func: Box::new(HirExpr {
+                        kind: HirExprKind::Global(format!("{}::{}", type_name, member)),
+                        ty: TypeId::ANY,
+                    }),
+                    args: args_hir,
+                },
+                ty: TypeId::ANY,
+            });
+        }
         if Self::looks_like_wrapper_static_member_sugar(member) && !self.lenient_types {
             return Err(self.unknown_wrapper_static_member_error(type_name, member));
         }
@@ -470,6 +496,12 @@ impl Lowerer {
             return self
                 .lower_static_method_call(type_name, &canonical_member, &[], ctx)
                 .map(Some);
+        }
+        if member.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()) {
+            return Ok(Some(HirExpr {
+                kind: HirExprKind::Global(format!("{}::{}", type_name, member)),
+                ty: TypeId::ANY,
+            }));
         }
         if self.lenient_types {
             return Ok(None);

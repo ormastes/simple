@@ -222,6 +222,37 @@ avoidable for diagnostic probes, but the pure-stage2 payload still cannot emit
 until the probe runs with an LLVM-capable bootstrap seed or the plan accepts a
 Cranelift-compatible stage2 probe.
 
+Additional 2026-06-07 pure-Simple Stage2 lowering evidence:
+
+- The direct `target/bootstrap/simple native-build --backend llvm-lib ...`
+  probe now reaches the Simple-first lowering/JIT path instead of stopping at
+  the seed-wrapper fallback guard.
+- Rust remains the bootstrap seed and diagnostic host. The seed lowerer was
+  hardened to report function/source context for index-type inference failures,
+  which made subsequent pure-Simple blocker capture actionable.
+- Cleared Stage2 lowering blockers in this pass include:
+  - backend/runtime enum compatibility and `Value.Nil` unit-return lowering
+  - LLVM-lib, LLVM adapter, Cranelift adapter, and backend-helper public import
+    visibility
+  - compiler SFFI cache/context stale generated names and discarded `push`
+    results
+  - object-taker mutable cache helpers and inference-context parameter typing
+  - trait coherence reserved `gen` binding
+  - monomorphization substitution/table/mangling stale generated names
+- The latest probe still exits `1`, emits no
+  `/tmp/simple_stage2_probe_default`, and currently stops at:
+
+```text
+HIR lowering error: Parameter 'template_name' in function 'mangle' requires explicit type annotation
+```
+
+Current conclusion after this pass: the pure-Simple Stage2 path is no longer
+blocked at dispatch or backend facade visibility. It is now progressing through
+ordinary Simple source lowering defects, mostly stale generated helper names,
+missing explicit parameter annotations, and mutable-state helper declarations.
+The next concrete fix is the monomorphization metadata `mangle(...)`
+parameter typing blocker.
+
 ## Next Steps
 
 ### A. Route the pure-stage2 probe through the full Simple driver

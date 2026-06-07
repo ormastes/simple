@@ -89,6 +89,34 @@ impl Lowerer {
                             }
                         }
                     }
+                    if let Some(ref defs) = self.global_enum_defs.clone() {
+                        if let Some(variant_summary) = defs.get(recv_name) {
+                            if variant_summary.iter().any(|(vname, _)| vname == field) {
+                                let variants: Vec<(String, Option<Vec<TypeId>>)> = variant_summary
+                                    .iter()
+                                    .map(|(vname, payload_arity)| {
+                                        let payload = payload_arity.map(|n| vec![TypeId::ANY; n]);
+                                        (vname.clone(), payload)
+                                    })
+                                    .collect();
+                                let global_type_id = self.module.types.register_named(
+                                    recv_name.to_string(),
+                                    HirType::Enum {
+                                        name: recv_name.to_string(),
+                                        variants,
+                                        generic_params: vec![],
+                                        is_generic_template: false,
+                                        type_bindings: std::collections::HashMap::new(),
+                                    },
+                                );
+                                self.globals.insert(recv_name.to_string(), global_type_id);
+                                return Ok(HirExpr {
+                                    kind: HirExprKind::Global(format!("{}::{}", recv_name, field)),
+                                    ty: global_type_id,
+                                });
+                            }
+                        }
+                    }
                     // Variant not found
                     if self.lenient_types {
                         return Ok(HirExpr {
@@ -279,6 +307,37 @@ impl Lowerer {
                 }
 
                 if !has_known_method {
+                    if let Some((field_index, field_ty, _count, _sname)) = self.resolve_global_field_info(field) {
+                        return Ok(HirExpr {
+                            kind: HirExprKind::FieldAccess {
+                                receiver: recv_hir,
+                                field_index,
+                            },
+                            ty: field_ty,
+                        });
+                    }
+                    let mut best: Option<(usize, TypeId, usize)> = None;
+                    for (_, search_ty) in self.module.types.iter() {
+                        if let HirType::Struct { fields, .. } = search_ty {
+                            for (idx, (field_name, field_ty)) in fields.iter().enumerate() {
+                                if field_name == field {
+                                    let count = fields.len();
+                                    if best.as_ref().is_none_or(|(_, _, c)| count > *c) {
+                                        best = Some((idx, *field_ty, count));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if let Some((field_index, field_ty, _)) = best {
+                        return Ok(HirExpr {
+                            kind: HirExprKind::FieldAccess {
+                                receiver: recv_hir,
+                                field_index,
+                            },
+                            ty: field_ty,
+                        });
+                    }
                     if let Some(func_name) = &self.current_function_name {
                         return Err(LowerError::Unsupported(format!(
                             "cannot infer field type while lowering {func_name}: struct '{struct_name}' field '{field}'"
@@ -692,7 +751,18 @@ impl Lowerer {
         let recv_hir = Box::new(self.lower_expr(receiver, ctx)?);
         let idx_hir = Box::new(self.lower_expr(index, ctx)?);
         self.require_integer_index_operand(recv_hir.ty, idx_hir.ty)?;
-        let elem_ty = self.get_index_element_type(recv_hir.ty)?;
+        let elem_ty = self.get_index_element_type(recv_hir.ty).map_err(|err| match err {
+            LowerError::CannotInferIndexType(detail) => {
+                let func = self
+                    .current_function_name
+                    .clone()
+                    .unwrap_or_else(|| "<module>".to_string());
+                LowerError::CannotInferIndexType(format!(
+                    "{detail} while lowering {func}: receiver={receiver:?}, index={index:?}"
+                ))
+            }
+            other => other,
+        })?;
 
         // Check if receiver is SIMD type - use SimdExtract intrinsic
         if let Some(HirType::Simd { .. }) = self.module.types.get(recv_hir.ty) {
