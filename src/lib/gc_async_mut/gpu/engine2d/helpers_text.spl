@@ -46,20 +46,17 @@ class TextBlitCache:
     max_entries: i32
     cache_hits: i32
     cache_misses: i32
+    hot_index: i32
+    lookup_scan_count: i32
 
     static fn new() -> TextBlitCache:
-        TextBlitCache(renderer: FontRenderer.new(), entries: [], max_entries: 64, cache_hits: 0, cache_misses: 0)
-
-    fn lookup(text_val: text, fg: u32, bg: u32, font_size: i32) -> TextBlitBuffer?:
-        for entry in self.entries:
-            if entry.text_value == text_val and entry.fg == fg and entry.bg == bg and entry.font_size == font_size:
-                return entry.buffer
-        nil
+        TextBlitCache(renderer: FontRenderer.new(), entries: [], max_entries: 64, cache_hits: 0, cache_misses: 0, hot_index: -1, lookup_scan_count: 0)
 
     me insert(text_val: text, fg: u32, bg: u32, font_size: i32, buffer: TextBlitBuffer):
         if self.entries.len() >= self.max_entries:
             self.entries = self.entries.slice(1, self.entries.len())
         self.entries.push(TextBlitCacheEntry(text_value: text_val, fg: fg, bg: bg, font_size: font_size, buffer: buffer))
+        self.hot_index = self.entries.len() - 1
 
     me render_to_buf(text_val: text, fg: u32, bg: u32, font_size: i32) -> [u32]:
         val text_w = text_buf_width(text_val, font_size)
@@ -71,10 +68,21 @@ class TextBlitCache:
         self.renderer.render_text([bg; buf_size], text_w, text_h, 0, 0, text_val, fg, font_size)
 
     me blit_buffer(text_val: text, fg: u32, bg: u32, font_size: i32) -> TextBlitBuffer:
-        val cached = self.lookup(text_val, fg, bg, font_size)
-        if val Some(buffer) = cached:
-            self.cache_hits = self.cache_hits + 1
-            return buffer
+        if self.hot_index >= 0 and self.hot_index < self.entries.len():
+            val hot = self.entries[self.hot_index]
+            if hot.text_value == text_val and hot.fg == fg and hot.bg == bg and hot.font_size == font_size:
+                self.cache_hits = self.cache_hits + 1
+                return hot.buffer
+        var idx = 0
+        val n = self.entries.len()
+        while idx < n:
+            val entry = self.entries[idx]
+            self.lookup_scan_count = self.lookup_scan_count + 1
+            if entry.text_value == text_val and entry.fg == fg and entry.bg == bg and entry.font_size == font_size:
+                self.hot_index = idx
+                self.cache_hits = self.cache_hits + 1
+                return entry.buffer
+            idx = idx + 1
         self.cache_misses = self.cache_misses + 1
         val text_w = text_buf_width(text_val, font_size)
         val text_h = text_buf_height(font_size)

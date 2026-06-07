@@ -73,8 +73,8 @@ production GPU dispatch is still missing; `gpu-glyph-returned` means the backend
 rasterizer returned glyph pixels through the vector or bitmap evidence path.
 The Draw IR text executor also reports `font_text_cache_hits` /
 `font_text_cache_misses` for the per-batch text-blit buffer cache; repeated
-identical labels should hit this cache instead of re-running glyph layout and
-blit preparation.
+identical labels hit a hot cache entry before scanning the cache list, avoiding
+repeated glyph layout and blit preparation on common menu/list/status text.
 Bitmap fallback follows the same evidence direction through
 `rasterize_bitmap_accelerated()` and `bitmap_font_accelerator_stats()`: a
 validated backend-returned bitmap glyph can bypass CPU mask generation and

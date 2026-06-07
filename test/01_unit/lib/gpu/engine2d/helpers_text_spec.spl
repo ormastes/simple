@@ -2,48 +2,56 @@
 # @tag: unit, gpu, engine2d, text, blit
 
 use std.spec.{describe, it, expect}
-use std.gpu.engine2d.helpers_text.{text_blit_buffer, text_transparent_blit_buffer}
+use std.gpu.engine2d.helpers_text.{TextBlitCache, text_blit_buffer, text_transparent_blit_buffer}
 
 describe "Engine2D shared text blit helpers":
 
-    it "returns an empty payload for empty text":
-        val payload = text_blit_buffer("", 0xffffffffu32, 0xff000000u32, 7)
+    it "keeps empty background and transparent payload contracts stable":
+        val empty_payload = text_blit_buffer("", 0xffffffffu32, 0xff000000u32, 7)
+        expect(empty_payload.is_empty()).to_equal(true)
+        expect(empty_payload.width).to_equal(0)
+        expect(empty_payload.height).to_equal(0)
+        expect(empty_payload.pixels.len()).to_equal(0)
 
-        expect(payload.is_empty()).to_equal(true)
-        expect(payload.width).to_equal(0)
-        expect(payload.height).to_equal(0)
-        expect(payload.pixels.len()).to_equal(0)
+        val background_payload = text_blit_buffer("I", 0xff111111u32, 0xff222222u32, 7)
+        var background_fg_count = 0
+        var background_idx = 0
+        while background_idx < background_payload.pixels.len():
+            if background_payload.pixels[background_idx] == 0xff111111u32:
+                background_fg_count = background_fg_count + 1
+            background_idx = background_idx + 1
 
-    it "keeps dimensions and pixels together for background text":
-        val payload = text_blit_buffer("I", 0xff111111u32, 0xff222222u32, 7)
-        var fg_count = 0
-        var idx = 0
-        while idx < payload.pixels.len():
-            if payload.pixels[idx] == 0xff111111u32:
-                fg_count = fg_count + 1
-            idx = idx + 1
+        expect(background_payload.is_empty()).to_equal(false)
+        expect(background_payload.width > 0).to_equal(true)
+        expect(background_payload.height > 0).to_equal(true)
+        expect(background_payload.pixels.len()).to_equal(background_payload.width * background_payload.height)
+        expect(background_fg_count > 0).to_equal(true)
 
-        expect(payload.is_empty()).to_equal(false)
-        expect(payload.width > 0).to_equal(true)
-        expect(payload.height > 0).to_equal(true)
-        expect(payload.pixels.len()).to_equal(payload.width * payload.height)
-        expect(fg_count > 0).to_equal(true)
+        val transparent_payload = text_transparent_blit_buffer("A", 0xff111111u32, 7)
+        val opaque_payload = text_blit_buffer("A", 0xff111111u32, 0xff222222u32, 7)
+        var transparent_differing_count = 0
+        var transparent_fg_count = 0
+        var transparent_idx = 0
+        while transparent_idx < transparent_payload.pixels.len():
+            if transparent_payload.pixels[transparent_idx] != opaque_payload.pixels[transparent_idx]:
+                transparent_differing_count = transparent_differing_count + 1
+            if transparent_payload.pixels[transparent_idx] == 0xff111111u32:
+                transparent_fg_count = transparent_fg_count + 1
+            transparent_idx = transparent_idx + 1
 
-    it "uses zero pixels as transparent background for foreground text":
-        val payload = text_transparent_blit_buffer("A", 0xff111111u32, 7)
-        val opaque = text_blit_buffer("A", 0xff111111u32, 0xff222222u32, 7)
-        var differing_count = 0
-        var fg_count = 0
-        var idx = 0
-        while idx < payload.pixels.len():
-            if payload.pixels[idx] != opaque.pixels[idx]:
-                differing_count = differing_count + 1
-            if payload.pixels[idx] == 0xff111111u32:
-                fg_count = fg_count + 1
-            idx = idx + 1
+        expect(transparent_payload.is_empty()).to_equal(false)
+        expect(transparent_payload.width).to_equal(opaque_payload.width)
+        expect(transparent_payload.height).to_equal(opaque_payload.height)
+        expect(transparent_differing_count > 0).to_equal(true)
+        expect(transparent_fg_count > 0).to_equal(true)
 
-        expect(payload.is_empty()).to_equal(false)
-        expect(payload.width).to_equal(opaque.width)
-        expect(payload.height).to_equal(opaque.height)
-        expect(differing_count > 0).to_equal(true)
-        expect(fg_count > 0).to_equal(true)
+        var cache = TextBlitCache.new()
+        val repeated_first = cache.transparent_blit_buffer("Repeat", 0xff111111u32, 14)
+        val repeated_scans_after_miss = cache.lookup_scan_count
+        val repeated_second = cache.transparent_blit_buffer("Repeat", 0xff111111u32, 14)
+        expect(repeated_first.is_empty()).to_equal(false)
+        expect(repeated_second.width).to_equal(repeated_first.width)
+        expect(repeated_second.height).to_equal(repeated_first.height)
+        expect(cache.cache_misses).to_equal(1)
+        expect(cache.cache_hits).to_equal(1)
+        expect(cache.lookup_scan_count).to_equal(repeated_scans_after_miss)
