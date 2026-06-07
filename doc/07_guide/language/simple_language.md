@@ -19,7 +19,9 @@ You can fight this with better prompts. I don't think prompts are enough.
 
 At some size, the answer has to be structural. The model shouldn't have to remember the whole system — the toolchain should remember it. The model shouldn't be *trusted* to avoid fake tests — the test runner should *reject* them. The model shouldn't be expected to *notice* architectural drift — the compiler should *stop* it.
 
-That's why I built **Simple**: a self-hosted language and toolchain with a readable, Python-like surface. The syntax isn't the point. The point is that testing, documentation, architecture rules, traceability, project metadata, and even the AI agent's tooling all live inside one repo-native system instead of scattered across conventions and good intentions.
+That's why I built **Simple**: a self-hosted language and toolchain with a readable, Python-like surface, Ruby-like brevity, and Rust-like robustness. The syntax isn't the point. The point is that testing, documentation, architecture rules, traceability, project metadata, and even the AI agent's tooling all live inside one repo-native system instead of scattered across conventions and good intentions.
+
+In short: Simple aims for Python-like readability, Ruby-like brevity, and Rust-like robustness at scale.
 
 One rule underneath everything:
 
@@ -33,7 +35,7 @@ The most dangerous generated test is a green test that proves nothing.
 
 LLMs are *very* good at this. Ask one to test a payment flow and it may mock the gateway, mock the database, mock the clock, and assert that the mocks were called. That's not a system test. That's a puppet show.
 
-Simple's answer is a **system-test mock policy**: in the supported SPipe system-test path, mocks are *banned by default*, with narrow, scoped exceptions (HAL-only, custom patterns). Unit tests can still isolate — that's what unit tests are for. System tests have to exercise the real path.
+Simple's answer is a **system-test mock policy**: in the supported Sspec system-test path, mocks are *banned by default*, with narrow, scoped exceptions (HAL-only, custom patterns). Unit tests can still isolate — that's what unit tests are for. System tests have to exercise the real path.
 
 That distinction is the whole idea. Unit tests *isolate*; system tests *exercise*. The toolchain enforces which is which, so the model can't quietly downgrade a system test into a mock theater and still show you green.
 
@@ -177,7 +179,7 @@ Simple is real, and it should be described honestly.
 - **Test snapshot (2026-02-14):** 4,067 / 4,067 passing in 17.4 seconds. That's evidence of suite breadth and speed — *not* a language-vs-language runtime benchmark.
 - **Source footprint (2026-04-23):** ~2.27M non-comment lines across Simple, Rust, C, and assembly, with ~1.78M in Simple itself.
 
-Safe to advertise as implemented: SPipe, SDoctest, coverage, traceability, generated spec docs, the system-test mock policy, the self-hosted compiler/interpreter/loader, MDSOC manifests, parser-friendly macros, Tree-sitter tooling, SDN-backed databases, primitive-public-API linting, borrow-checking infrastructure, watch/auto-build, and C/C++ bidirectional SFFI for the supported ABI subset.
+Safe to advertise as implemented: Sspec, SDoctest, coverage, traceability, generated spec docs, the system-test mock policy, the self-hosted compiler/interpreter/loader, MDSOC manifests, parser-friendly macros, Tree-sitter tooling, SDN-backed databases, primitive-public-API linting, borrow-checking infrastructure, watch/auto-build, and C/C++ bidirectional SFFI for the supported ABI subset.
 
 Best described with qualifiers: **Lean verification** is complete for its supported subset; **runtime families** are bounded by their support matrix; the **LLVM backend** family is closed over a declared public matrix; the **VHDL backend** targets a documented hardware subset (with two GHDL RV32 simulation lanes); **remote baremetal** has 8 authoritative lanes but stays host- and board-aware; the **shared UI contract** is a cross-surface test protocol, not yet a finished universal UI layer; and the **math blocks / autograd** path is complete for the promoted torch-backed C/LLVM scope, with other backends deferred.
 
@@ -195,3 +197,48 @@ simple --version
 ```
 
 I'd point people at the source checkout rather than a hardcoded binary URL — the release tag (`v0.9.8`) and the `VERSION` file (`1.0.0-beta`) haven't fully reconciled yet, so the source path is the safest call to action today.
+
+---
+
+## Repository submodules
+
+Current checkout state:
+
+| Path | Purpose | State |
+| --- | --- | --- |
+| `.spipe/spipe` | External SPipe runner and BDD workflow source | Initialized, but working HEAD `ee79ffb71447` differs from recorded commit `c2a50b9f7b00` |
+| `examples/06_io/restaurant_webapp` | Restaurant web application example | Registered but not initialized |
+| `examples/07_ml/simple_deeplearning_study` | Deep-learning study examples | Registered but not initialized |
+| `examples/07_ml/svllm` | Simple-based LLM experiments | Registered but not initialized |
+| `examples/08_gpu/simple_cuda_example` | CUDA/GPU example project | Registered but not initialized |
+| `examples/10_tooling/korean_stock_mcp` | Korean stock MCP tooling example | Registered but not initialized |
+| `examples/10_tooling/llm_cli_tools` | LLM CLI tooling examples | Registered but not initialized |
+| `examples/10_tooling/obsidian-search` | Obsidian search tooling example | Registered but not initialized |
+| `examples/10_tooling/trace32_tools` | TRACE32 tooling example | Registered but not initialized |
+| `examples/11_advanced/simple_db` | Database example derived from `simple-spostgre` | Registered but not initialized |
+| `examples/10_tooling/simple_ide` | Simple IDE example/tooling tree | Declared in `.gitmodules`, but current HEAD stores it as a normal tree, not a gitlink |
+| `src/lib/nogc_async_mut/payment` | Payment library integration | Declared in `.gitmodules`, but current HEAD stores it as a normal tree, not a gitlink |
+
+`git submodule status --recursive` currently reports the registered gitlinks above. The declaration-only rows are still listed in `.gitmodules`, but they are not active Git submodules in the current index.
+
+---
+
+## Features
+
+| Area | What it does | Status |
+| --- | --- | --- |
+| Self-hosted toolchain | Compiler, interpreter, loader, CLI, and standard-library tooling live in Simple source layers | Implemented and safe to advertise |
+| Verification workflow | Sspec, SDoctest, coverage, traceability, generated spec docs, and quality gates make tests and docs executable evidence | Implemented and active |
+| System-test honesty | System-test mock policy and anti-dummy gates reject fake green tests and placeholder implementations | Active on primary source and CLI surfaces |
+| Architecture controls | MDSOC manifests, virtual capsules, layer rules, and pointcut constraints make architecture machine-checkable | Implemented, with documented contracts |
+| Runtime families | `common`, `nogc_sync_mut`, `nogc_async_mut`, `gc_async_mut`, and `nogc_async_mut_noalloc` encode allocation, mutation, async, and target assumptions | Implemented within the support matrix |
+| Parser-friendly macros | Macro definitions, expansion, validation, and hygiene are compiler-visible rather than raw text substitution | Implemented |
+| Math and autograd blocks | `m{}`, `loss{}`, and `nograd{}` parse as language constructs and render to text, Unicode, LaTeX, and Markdown | Complete for promoted torch-backed C/LLVM scope; other backends deferred |
+| SDN-backed data | Project metadata, tests, todos, dashboards, and database-like records use repo-native textual data flows | Implemented |
+| AI/editor tooling | MCP server, LSP server, Tree-sitter support, editor plugins, and agent instructions let tools query the repo directly | Implemented across supported surfaces |
+| SFFI | C/C++ bidirectional ABI bridge with exports, imports, callbacks, layout checks, and proof tests | Implemented for the supported ABI subset |
+| LLVM backend family | Public LLVM matrix is closed over explicit `stable` or `unsupported` rows | Implemented with qualifiers |
+| Lean verification | Deterministic Lean generation, proof inventory, checking, cache invalidation, and verification-state reporting | Complete for the supported subset |
+| VHDL and baremetal lanes | VHDL-2008 backend, GHDL RV32 semihost/mailbox simulation, QEMU, and remote baremetal flows | Bounded hardware subset; host- and board-aware |
+| Shared UI contract | Protocol V1 test client and shared handler cover web backend and TUI-web proxy behavior | Cross-surface test protocol, not a universal UI layer |
+| GPU/CUDA/ML paths | GPU kernels, CUDA-oriented examples, and ML/autograd integration | Useful but bounded by backend-specific support |
