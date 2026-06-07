@@ -198,8 +198,8 @@ drifting silently.
   replacement names.
 - Wrong-surface imports are rejected by `simple check` with `E-PAR-003`, and
   bad public argument shapes are rejected with `E-PAR-004`: spawn-style APIs
-  require closures, while `multicore_green_set_parallelism` requires an integer
-  worker count.
+  including direct `green_spawn` require closures, while
+  `multicore_green_set_parallelism` requires an integer worker count.
 - `thread_spawn_with_args` stays documented as blocked for native profile use
   until its ABI bug is fixed.
 - Profile reports reject SMF multicore-green failure rows when used as checked

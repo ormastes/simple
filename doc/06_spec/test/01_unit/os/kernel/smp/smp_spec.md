@@ -91,15 +91,9 @@ _Verify that smp_init sets up the per-CPU table with BSP online and all APs offl
 
 1. smp init
 
-2. expect smp online count
-
-3. expect percpu is online
-
-4. expect percpu is online
-
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -119,13 +113,9 @@ expect percpu_is_online(1u32).to_equal(false)
 
 1. smp init
 
-2. expect ok to equal
-
-3. expect smp online count
-
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -143,11 +133,9 @@ expect smp_online_count().to_equal(2u32)
 
 1. smp init
 
-2. expect ok to equal
-
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -164,11 +152,9 @@ expect ok.to_equal(false)
 
 1. smp init
 
-2. expect ok to equal
-
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -187,21 +173,9 @@ expect ok.to_equal(false)
 
 1. smp init
 
-2. expect count to equal
-
-3. expect smp num cpus
-
-4. expect percpu is present
-
-5. expect cpu apic id to equal
-
-6. expect percpu is online
-
-7. expect smp online count
-
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -225,22 +199,11 @@ expect smp_online_count().to_equal(1u32)
 #### tracks AP startup and marks online by APIC id
 
 1. smp init
-
 2. smp register firmware apic ids
-
-3. expect smp mark ap startup sent
-
-4. expect smp ap startup sent
-
-5. expect smp mark ap started by apic id
-
-6. expect percpu is online
-
-7. expect smp online count
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -262,14 +225,11 @@ expect smp_online_count().to_equal(2u32)
 #### rejects unknown APIC ids
 
 1. smp init
-
 2. smp register firmware apic ids
-
-3. expect smp mark ap started by apic id
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -286,16 +246,11 @@ expect smp_mark_ap_started_by_apic_id(99u32).to_equal(false)
 #### reports when registered APs need automatic boot startup
 
 1. smp init
-
-2. expect x86 registered ap boot startup needed
-
-3. smp register firmware apic ids
-
-4. expect x86 registered ap boot startup needed
+2. smp register firmware apic ids
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -317,16 +272,11 @@ _IPI send/take and bitmask accumulation via g_percpu[].ipi_pending._
 #### send/take round-trips the reason bitmask
 
 1. smp init
-
 2. smp bringup ap
-
-3. expect sent to equal
-
-4. expect got to equal
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -345,18 +295,13 @@ expect got.to_equal(smp_ipi_resched())
 #### multiple IPIs OR into the pending mask
 
 1. smp init
-
 2. smp bringup ap
-
 3. smp send ipi
-
 4. smp send ipi
-
-5. expect got to equal
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -376,18 +321,13 @@ expect got.to_equal(combined)
 #### take_ipi clears the pending mask
 
 1. smp init
-
 2. smp bringup ap
-
 3. smp send ipi
-
 4. smp take ipi
-
-5. expect got2 to equal
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -407,11 +347,9 @@ expect got2.to_equal(0u32)
 
 1. smp init
 
-2. expect sent to equal
-
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -429,26 +367,14 @@ expect sent.to_equal(false)
 #### disable nests and enable decrements
 
 1. smp init
-
-2. expect percpu preempt enabled
-
+2. percpu preempt disable
 3. percpu preempt disable
-
-4. expect percpu preempt enabled
-
-5. percpu preempt disable
-
-6. percpu preempt enable
-
-7. expect percpu preempt enabled
-
-8. percpu preempt enable
-
-9. expect percpu preempt enabled
+4. percpu preempt enable
+5. percpu preempt enable
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -471,17 +397,8 @@ expect percpu_preempt_enabled(0u32).to_equal(true)
 
 #### have stable bit assignments
 
-1. expect smp ipi resched
-
-2. expect smp ipi tlb flush
-
-3. expect smp ipi halt
-
-4. expect smp ipi call func
-
-
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

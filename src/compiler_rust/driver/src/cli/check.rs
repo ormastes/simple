@@ -753,6 +753,7 @@ fn collect_concurrency_import_target(owner_path: &str, target: &ImportTarget, im
 fn concurrency_wrong_surface_error_owner_accepts(owner_path: &str, name: &str) -> bool {
     match name {
         "thread_spawn" | "thread_spawn_with_args" => is_concurrency_thread_path(owner_path),
+        "green_spawn" => is_green_thread_path(owner_path) || is_cooperative_green_path(owner_path),
         "cooperative_green_spawn" | "cooperative_green_spawn_value" => is_cooperative_green_path(owner_path),
         "multicore_green_spawn" | "multicore_green_set_parallelism" => is_multicore_green_path(owner_path),
         _ => false,
@@ -962,7 +963,7 @@ struct ConcurrencyCallRule {
 
 fn concurrency_call_rule(name: &str) -> Option<ConcurrencyCallRule> {
     match name {
-        "thread_spawn" | "cooperative_green_spawn" | "multicore_green_spawn" => Some(ConcurrencyCallRule {
+        "thread_spawn" | "green_spawn" | "cooperative_green_spawn" | "multicore_green_spawn" => Some(ConcurrencyCallRule {
             expected_arity: 1,
             first_arg: ConcurrencyFirstArg::Closure,
             expected: "single zero-argument value closure",
@@ -1706,6 +1707,13 @@ fn is_concurrency_thread_path(path_text: &str) -> bool {
     )
 }
 
+fn is_green_thread_path(path_text: &str) -> bool {
+    matches!(
+        path_text,
+        "std.concurrent.green_thread" | "std.nogc_async_mut.concurrent.green_thread"
+    )
+}
+
 fn numbered_concurrency_replacement(name: &str) -> Option<&'static str> {
     match name {
         "thread_spawn2" => Some("thread_spawn_with_args"),
@@ -1770,6 +1778,7 @@ fn concurrency_wrong_surface_error(
 
     let accepted = match name {
         "thread_spawn" | "thread_spawn_with_args" => is_concurrency_thread_path(owner_path),
+        "green_spawn" => is_green_thread_path(owner_path) || is_cooperative_green_path(owner_path),
         "cooperative_green_spawn"
         | "cooperative_green_spawn_value"
         | "cooperative_green_run_one"
@@ -1793,7 +1802,7 @@ fn concurrency_wrong_surface_error(
         expected: Some(expected_owner.to_string()),
         found: Some(owner_path.to_string()),
         notes: vec![
-            "thread_spawn, cooperative_green_spawn, multicore_green_spawn, and task_spawn intentionally live on separate concurrency surfaces"
+            "thread_spawn, green_spawn, cooperative_green_spawn, multicore_green_spawn, and task_spawn intentionally live on separate concurrency surfaces"
                 .to_string(),
         ],
         help: vec![format!("import {name} from {expected_owner}")],
@@ -1803,6 +1812,7 @@ fn concurrency_wrong_surface_error(
 fn expected_concurrency_owner(name: &str) -> Option<&'static str> {
     match name {
         "thread_spawn" | "thread_spawn_with_args" => Some("std.concurrent.thread"),
+        "green_spawn" => Some("std.concurrent.green_thread"),
         "cooperative_green_spawn"
         | "cooperative_green_spawn_value"
         | "cooperative_green_run_one"
@@ -2349,6 +2359,11 @@ mod tests {
                 "std.concurrent.multicore_green",
             ),
             (
+                "use std.concurrent.thread.{green_spawn}",
+                "green_spawn",
+                "std.concurrent.green_thread",
+            ),
+            (
                 "use std.concurrent.cooperative_green.{thread_spawn}",
                 "thread_spawn",
                 "std.concurrent.thread",
@@ -2373,6 +2388,10 @@ mod tests {
             (
                 "use std.concurrent.thread.{thread_spawn}\nfn main():\n    val handle = thread_spawn(42)",
                 "thread_spawn",
+            ),
+            (
+                "use std.concurrent.green_thread.{green_spawn}\nfn main():\n    val handle = green_spawn(42)",
+                "green_spawn",
             ),
             (
                 "use std.concurrent.cooperative_green.{cooperative_green_spawn}\nfn main():\n    val handle = cooperative_green_spawn(42)",
@@ -2402,6 +2421,8 @@ mod tests {
     fn test_check_allows_valid_concurrency_api_call_shapes() {
         for source in [
             "use std.concurrent.thread.{thread_spawn}\nfn main():\n    val handle = thread_spawn(\\: 1)",
+            "use std.concurrent.green_thread.{green_spawn}\nfn main():\n    val handle = green_spawn(\\: 1)",
+            "use std.concurrent.cooperative_green.{green_spawn}\nfn main():\n    val handle = green_spawn(\\: 1)",
             "use std.concurrent.cooperative_green.{cooperative_green_spawn}\nfn main():\n    val handle = cooperative_green_spawn(\\: 1)",
             "use std.concurrent.multicore_green.{multicore_green_spawn}\nfn main():\n    val handle = multicore_green_spawn(\\: 1)",
             "use std.concurrent.multicore_green.{multicore_green_set_parallelism}\nfn main():\n    val workers = multicore_green_set_parallelism(4)",

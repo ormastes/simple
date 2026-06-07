@@ -101,11 +101,8 @@ val decision = green_carrier_channel_wake_task(parked_task, sent.receiver_task_i
 #### runs a channel wake through the scheduler-owned active pass
 
 1. smp init
-
 2. smp bringup ap
-
 3. var scheduler = Scheduler new with cpu count
-
 4. scheduler set green carrier parallelism
    - Expected: sent.unparked is true
    - Expected: wake.enqueued is true
@@ -123,7 +120,7 @@ val decision = green_carrier_channel_wake_task(parked_task, sent.receiver_task_i
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 37 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -173,9 +170,7 @@ expect(green_carrier_queue_depth(wake.queues, 2)).to_equal(0)
 #### re-enqueues an unparked channel receiver through carrier dispatch
 
 1. smp init
-
 2. smp bringup ap
-
 3. var scheduler = Scheduler new with cpu count
    - Expected: sent.unparked is true
    - Expected: decision.should_enqueue is true
@@ -194,7 +189,7 @@ expect(green_carrier_queue_depth(wake.queues, 2)).to_equal(0)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -253,7 +248,7 @@ expect(scheduler.get_current_on_cpu(2u32).id).to_equal(0)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -296,7 +291,7 @@ expect(applied.queues.queued_task_ids.len()).to_equal(0)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

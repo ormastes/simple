@@ -81,7 +81,7 @@ execution.
 #### queues logical green work without marking it done before the carrier runs
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -102,7 +102,7 @@ expect(handle.join()).to_equal(3)
 #### runs all queued cooperative work on the current carrier
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -125,7 +125,7 @@ expect(h2.join()).to_equal(8)
 #### supports direct value scheduling used by profile fanout rows
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

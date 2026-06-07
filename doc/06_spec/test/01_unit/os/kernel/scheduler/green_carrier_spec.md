@@ -104,7 +104,7 @@ that keeps the contract executable before QEMU SMP context-switch evidence.
 #### enqueues a new runnable task onto the selected carrier CPU
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -124,7 +124,7 @@ expect(decision.reason).to_equal("local_run_queue")
 #### requests a reschedule IPI for remote run-queue enqueue
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -146,7 +146,7 @@ expect(decision.reason).to_equal("remote_run_queue")
 #### wakes a parked task onto the waker CPU when load is close
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -168,7 +168,7 @@ expect(decision.reason).to_equal("wake_affine_waker_cpu")
 #### does not enqueue when unpark is misused on a runnable task
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -190,7 +190,7 @@ expect(decision.reason).to_equal("not_parked")
 #### does not enqueue parked tasks directly
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -210,7 +210,7 @@ expect(decision.reason).to_equal("task_parked")
 #### does not enqueue completed tasks
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -233,7 +233,7 @@ expect(decision.reason).to_equal("task_done")
 #### sends IPI only for remote runnable enqueue
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -251,7 +251,7 @@ expect(green_carrier_should_send_ipi(0, 1, false)).to_equal(false)
 #### defaults to the detected scheduler topology
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -271,7 +271,7 @@ expect(green_carrier_parallelism_limit(state)).to_equal(4)
 #### clamps requested carriers to scheduler topology
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -292,7 +292,7 @@ expect(green_carrier_parallelism_limit(state)).to_equal(4)
 #### keeps requested carriers across topology growth
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -316,7 +316,7 @@ expect(grown.reason).to_equal("requested_limit")
 #### keeps default carrier limits aligned to topology growth
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -336,7 +336,7 @@ expect(grown.reason).to_equal("default_topology_limit")
 #### clamps zero requested carriers to one scheduler carrier
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -355,7 +355,7 @@ expect(state.reason).to_equal("clamped_min")
 #### clamps negative requested carriers to one scheduler carrier
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -374,7 +374,7 @@ expect(state.reason).to_equal("clamped_min")
 #### normalizes invalid topology to one scheduler carrier
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -396,7 +396,7 @@ expect(requested.reason).to_equal("clamped_topology")
 #### clamps active carriers when topology shrinks below one
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -416,7 +416,7 @@ expect(shrunk.reason).to_equal("clamped_topology")
 #### keeps default carrier limits aligned to topology shrink
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -447,7 +447,7 @@ expect(shrunk.reason).to_equal("default_topology_limit")
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -471,7 +471,6 @@ expect(applied.queues.queued_task_ids[0]).to_equal(27)
 #### applies remote enqueue and records a SimpleOS reschedule IPI
 
 1. smp init
-
 2. smp bringup ap
    - Expected: applied.enqueued is true
    - Expected: applied.ipi_sent is true
@@ -481,7 +480,7 @@ expect(applied.queues.queued_task_ids[0]).to_equal(27)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -512,7 +511,7 @@ expect(green_carrier_queue_depth(applied.queues, 1)).to_equal(1)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -543,7 +542,7 @@ expect(applied.reason).to_equal("task_parked")
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -579,7 +578,7 @@ expect(after_second.queues.queued_task_ids.len()).to_equal(1)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -613,7 +612,7 @@ expect(dispatched.queues.queued_task_ids.len()).to_equal(0)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -640,7 +639,7 @@ expect(dispatched.queues.queued_task_ids[0]).to_equal(34)
 #### reports empty queue without mutating state
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -660,7 +659,7 @@ expect(dispatched.queues.queued_task_ids.len()).to_equal(0)
 #### rejects dispatch for invalid carrier CPU
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -689,7 +688,7 @@ expect(dispatched.reason).to_equal("invalid_cpu")
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -727,7 +726,7 @@ expect(dispatched.queues.queued_task_ids[0]).to_equal(36)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -763,7 +762,7 @@ expect(dispatched.task_id).to_equal(37)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -796,7 +795,7 @@ expect(green_carrier_queue_depth(moved.queues, 0)).to_equal(1)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -829,7 +828,7 @@ expect(green_carrier_queue_depth(moved.queues, 2)).to_equal(0)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -854,7 +853,7 @@ expect(intent.reason).to_equal("green_task_ready")
 #### keeps empty dispatch as a no-op scheduler intent
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -878,7 +877,6 @@ expect(intent.reason).to_equal("queue_empty")
 #### extends execution state for additional carrier CPUs
 
 1. green carrier run queues new
-
 2. green carrier spawn task
    - Expected: applied.applied is true
    - Expected: green_carrier_current_task_on_cpu(applied.state, 3) equals `39`
@@ -886,7 +884,7 @@ expect(intent.reason).to_equal("queue_empty")
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -924,7 +922,7 @@ expect(green_carrier_context_switches_on_cpu(applied.state, 3)).to_equal(1)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -952,7 +950,7 @@ expect(applied.state.rejected_intents).to_equal(0)
 #### rejects no-op intent without changing current task
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -984,7 +982,7 @@ expect(applied.state.rejected_intents).to_equal(1)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1016,7 +1014,7 @@ expect(apply2.state.total_context_switches).to_equal(2)
 #### matches the hosted spawn CPU placement without heap or text state
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1033,7 +1031,6 @@ expect(fixed_cpu).to_equal(hosted.target_cpu)
 #### records remote AP dispatch through the SimpleOS IPI surface
 
 1. smp init
-
 2. smp bringup ap
    - Expected: result.target_cpu equals `1`
    - Expected: result.enqueued is true
@@ -1046,7 +1043,7 @@ expect(fixed_cpu).to_equal(hosted.target_cpu)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1072,7 +1069,7 @@ expect(result.context_switches).to_equal(1)
 #### preempts a fixed-slot running task when timer slice expires
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1093,7 +1090,7 @@ expect(result.reason).to_equal("green_time_slice_expired")
 #### rejects bad fixed-slot preemption source without ticking
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

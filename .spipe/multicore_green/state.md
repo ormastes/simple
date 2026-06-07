@@ -243,7 +243,8 @@ go-runtime-hardening
   `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`,
   `test/05_perf/profile_scripts/concurrency_api_contract_test.shs`, and the
   profile report contract reject wrong-surface claims, numbered API names,
-  bad source-level concurrency argument shapes, and runtime-pool fallback rows.
+  bad source-level concurrency argument shapes including direct `green_spawn`,
+  and runtime-pool fallback rows.
 - AC-9: Recent guards include `sh scripts/setup/install-spipe-dev-command.shs
   --check`, `find doc/06_spec -name '*_spec.spl' | wc -l` returning `0`,
   `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`, and the

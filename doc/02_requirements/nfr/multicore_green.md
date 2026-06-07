@@ -25,7 +25,7 @@ Stability And Misuse Diagnostics, and SimpleOS Hardware Proof Gate.
 - NFR-MCG-006: Any miss against the performance budget must create or update a
   measured blocker under `doc/08_tracking/bug/`.
 - NFR-MCG-007: Public APIs keep meaningful names: `thread_spawn`,
-  `thread_spawn_with_args`, `cooperative_green_spawn`,
+  `thread_spawn_with_args`, `green_spawn`, `cooperative_green_spawn`,
   `cooperative_green_spawn_value`, `multicore_green_spawn`, and `task_spawn`.
 - NFR-MCG-008: Numbered aliases remain rejected by `simple check` with
   actionable replacement diagnostics.
