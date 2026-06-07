@@ -25,25 +25,33 @@ jobs:
       - name: Detect version
         id: detect
         run: |
-          # Extract version from simple.sdn
-          VERSION=$(grep 'version:' simple.sdn | head -1 | sed 's/.*version: *//')
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          # Extract version from the canonical repository VERSION file.
+          test -s VERSION
+          VERSION=$(tr -d '[:space:]' < VERSION)
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+          SPEC_DOC_SPL_COUNT=$(find doc/06_spec -name '*_spec.spl' | wc -l | tr -d ' ')
+          if [ "$SPEC_DOC_SPL_COUNT" != "0" ]; then
+            echo "Executable specs under doc/06_spec are not releasable: ${SPEC_DOC_SPL_COUNT}" >&2
+            find doc/06_spec -name '*_spec.spl' | head -20 >&2
+            exit 1
+          fi
 
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             # Tag push - always build
-            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "changed=true" >> "$GITHUB_OUTPUT"
             echo "Triggered by tag: $GITHUB_REF"
           elif [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
-            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "changed=true" >> "$GITHUB_OUTPUT"
             echo "Triggered manually"
           else
-            # Check if version in simple.sdn actually changed
-            PREV_VERSION=$(git show HEAD~1:simple.sdn 2>/dev/null | grep 'version:' | head -1 | sed 's/.*version: *//' || echo "")
+            # Check if VERSION actually changed.
+            PREV_VERSION=$(git show HEAD~1:VERSION 2>/dev/null | tr -d '[:space:]' || echo "")
             if [ "$VERSION" != "$PREV_VERSION" ]; then
-              echo "changed=true" >> $GITHUB_OUTPUT
+              echo "changed=true" >> "$GITHUB_OUTPUT"
               echo "Version changed: $PREV_VERSION -> $VERSION"
             else
-              echo "changed=false" >> $GITHUB_OUTPUT
+              echo "changed=false" >> "$GITHUB_OUTPUT"
               echo "Version unchanged ($VERSION), skipping build"
             fi
           fi
@@ -806,8 +814,8 @@ jobs:
       - name: Extract version
         id: version
         run: |
-          VERSION=$(grep 'version:' simple.sdn | head -1 | sed 's/.*version: *//')
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          VERSION=$(tr -d '[:space:]' < VERSION)
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Prepare release binary
         run: |
@@ -1010,7 +1018,7 @@ jobs:
             ./scripts/build-full.sh --with-binary
           else
             echo "⚠ scripts/build-full.sh not found — creating minimal full package"
-            VERSION=$(grep 'version:' simple.sdn | head -1 | awk '{print $2}')
+            VERSION=$(tr -d '[:space:]' < VERSION)
             PKG_ROOT="dist/simple-full-${VERSION}"
             rm -rf "$PKG_ROOT"
             mkdir -p "$PKG_ROOT"
@@ -1018,7 +1026,7 @@ jobs:
             cp -r src "$PKG_ROOT/"
             cp -r doc "$PKG_ROOT/"
             cp -r examples "$PKG_ROOT/"
-            cp CHANGELOG.md README.md LICENSE THIRD_PARTY_NOTICES.md simple.sdn "$PKG_ROOT/"
+            cp CHANGELOG.md README.md LICENSE THIRD_PARTY_NOTICES.md VERSION "$PKG_ROOT/"
             cp -r config "$PKG_ROOT/" 2>/dev/null || true
             cp -r resources "$PKG_ROOT/" 2>/dev/null || true
             mkdir -p "$PKG_ROOT/bin"

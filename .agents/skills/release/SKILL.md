@@ -14,12 +14,11 @@ description: Version bump and release. Accepts version argument (major/first, mi
 
 ## Steps
 
-1. Read current version from `simple.sdn` (field `project.version`)
+1. Read current version from the root `VERSION` file
 2. Calculate new version
 3. Update all version locations:
-   - `simple.sdn` — `version: X.Y.Z`
    - `VERSION` — entire file
-   - `src/app/cli/main.spl` — hardcoded fallback in `get_version()`
+   - `src/app/cli/main_part1.spl` — hardcoded fallback in `get_version()`
    - `src/app/cli/bootstrap_main.spl` — hardcoded in `bootstrap_version()`
 4. Update `CHANGELOG.md` with new section
 5. Commit: `jj commit -m "chore: release vX.Y.Z"` (or `git commit`)
@@ -31,6 +30,7 @@ description: Version bump and release. Accepts version argument (major/first, mi
 Run $verify first — must show STATUS: PASS.
 SPipe must already be complete and verified. Do not create or update SPipe in
 release; if SPipe is missing/stale, return to verify/implementation.
+`find doc/06_spec -name '*_spec.spl' | wc -l` must return `0`.
 
 ## Push
 

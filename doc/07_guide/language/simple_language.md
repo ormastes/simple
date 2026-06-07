@@ -189,11 +189,13 @@ L = \frac{\sum (y_{pred} - y_{true})^2}{n}
 
 Simple is real, and it should be described honestly.
 
-- **Version:** `VERSION` reads `1.0.0-beta`; the latest tagged release is **v0.9.8 (Apr 29, 2026)**.
+- **Version:** `VERSION` reads `1.0.0-beta`; the latest tagged release is **v1.0.0-beta**.
 - **Test snapshot (2026-02-14):** 4,067 / 4,067 passing in 17.4 seconds. That's evidence of suite breadth and speed — *not* a language-vs-language runtime benchmark.
 - **Source footprint (2026-04-23):** ~2.27M non-comment lines across Simple, Rust, C, and assembly, with ~1.78M in Simple itself.
 
 Safe to advertise as implemented: Sspec, SDoctest, coverage, traceability, generated spec docs, the system-test mock policy, the self-hosted compiler/interpreter/loader, MDSOC manifests, parser-friendly macros, Tree-sitter tooling, SDN-backed databases, primitive-public-API linting, borrow-checking infrastructure, watch/auto-build, and C/C++ bidirectional SFFI for the supported ABI subset.
+
+One boundary matters for accuracy: Rust is still present as the bootstrap seed and host implementation substrate. The pure-Simple compiler, loader, libraries, and generated docs are the direction of travel and the thing the bootstrap verifies, but "pure Simple" should not be read as "no Rust source exists in the repo" today.
 
 Best described with qualifiers: **Lean verification** is complete for its supported subset; **runtime families** are bounded by their support matrix; the **LLVM backend** family is closed over a declared public matrix; the **VHDL backend** targets a documented hardware subset (with two GHDL RV32 simulation lanes); **remote baremetal** has 8 authoritative lanes but stays host- and board-aware; the **shared UI contract** is a cross-surface test protocol, not yet a finished universal UI layer; and the **math blocks / autograd** path is complete for the promoted torch-backed C/LLVM scope, with other backends deferred.
 
@@ -217,7 +219,7 @@ git submodule sync --recursive
 git submodule update --init --recursive
 ```
 
-I'd point people at the source checkout rather than a hardcoded binary URL — the release tag (`v0.9.8`) and the `VERSION` file (`1.0.0-beta`) haven't fully reconciled yet, so the source path is the safest call to action today.
+I'd point people at the source checkout rather than a hardcoded binary URL: it exercises the current submodule layout and avoids stale platform-asset names while the release packaging process is being hardened.
 
 ---
 

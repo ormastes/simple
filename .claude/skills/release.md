@@ -21,7 +21,7 @@ Given argument: `$ARGUMENTS`
 
 ### Step 1 — Determine new version
 
-1. Read current version from `simple.sdn` (field `project.version`, line 6)
+1. Read current version from the root `VERSION` file
 2. Parse argument:
    - Empty, `patch`, or `third` → increment patch (Z+1)
    - `minor` or `second` → increment minor (Y+1), reset patch to 0
@@ -32,13 +32,12 @@ Given argument: `$ARGUMENTS`
 
 ### Step 2 — Update all version locations
 
-Update these 4 files with the new version:
+Update these 3 version sources with the new version:
 
 | File | What to change |
 |------|---------------|
-| `simple.sdn` | `version: X.Y.Z` (line 6) |
 | `VERSION` | Entire file content: `X.Y.Z\n` |
-| `src/app/cli/main.spl` | Hardcoded fallback string `"X.Y.Z"` in `get_version()` |
+| `src/app/cli/main_part1.spl` | Hardcoded fallback string `"X.Y.Z"` in `get_version()` |
 | `src/app/cli/bootstrap_main.spl` | Hardcoded string `"X.Y.Z"` in `bootstrap_version()` |
 
 ### Step 3 — Update CHANGELOG
@@ -105,7 +104,7 @@ Triggered by: git tag `v*.*.*` push or `workflow_dispatch` (manual).
 
 | Job | What | Platforms |
 |-----|------|-----------|
-| `check-version` | Detect version from `simple.sdn` | ubuntu |
+| `check-version` | Detect version from `VERSION` and reject executable specs under `doc/06_spec` | ubuntu |
 | `llvm-cross` | LLVM cross-compilation prep | reusable workflow |
 | `build-bootstrap` | Build per-platform packages | 13 platforms |
 | `build-full` | Full source+binary package | ubuntu |

@@ -32,7 +32,7 @@ placeholder-based, stop and go back to verify/implementation.
 ## Steps
 
 ### 1. Read Current Version
-Read from `simple.sdn` (field `project.version`).
+Read from the root `VERSION` file.
 
 ### 2. Calculate New Version
 Apply bump rule (major/minor/patch) or use exact version.
@@ -41,9 +41,8 @@ Apply bump rule (major/minor/patch) or use exact version.
 
 | File | Field/Pattern |
 |------|---------------|
-| `simple.sdn` | `version: X.Y.Z` |
 | `VERSION` | Entire file content |
-| `src/app/cli/main.spl` | Hardcoded fallback in `get_version()` |
+| `src/app/cli/main_part1.spl` | Hardcoded fallback in `get_version()` |
 | `src/app/cli/bootstrap_main.spl` | Hardcoded in `bootstrap_version()` |
 
 ### 4. Update CHANGELOG
@@ -109,7 +108,7 @@ override that credential.
 
 | Artifact | Path |
 |----------|------|
-| Updated version | `simple.sdn`, `VERSION`, `src/app/cli/main.spl`, `src/app/cli/bootstrap_main.spl` |
+| Updated version | `VERSION`, `src/app/cli/main_part1.spl`, `src/app/cli/bootstrap_main.spl` |
 | Changelog | `CHANGELOG.md` |
 | Git tag | `vX.Y.Z` |
 
@@ -118,5 +117,6 @@ override that credential.
 - NEVER release without verify PASS
 - NEVER update SPipe in release; release must consume verified SPipe evidence
 - NEVER push without user approval
-- NEVER skip version locations — all 4 files must be updated
+- NEVER skip version locations — all 3 version sources must be updated
+- NEVER release if `find doc/06_spec -name '*_spec.spl' | wc -l` is nonzero
 - All code in `.spl` — no Python, no Bash

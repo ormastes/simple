@@ -19,7 +19,7 @@ The strongest required edits are precision edits, not a rewrite:
 
 | Article area | Result | Comparison |
 | --- | --- | --- |
-| 1.0.0-beta status | Supported | `VERSION` and changelog agree. |
+| 1.0.0-beta status | Supported | `VERSION` and the latest tag are `v1.0.0-beta`. |
 | 4,067 tests in 17.4s | Supported as dated snapshot | README says this for 2026-02-14; do not present as freshly run. |
 | System-test mock ban | Supported | SPipe mock modes and execution tests exist. |
 | Anti-dummy / anti-stub | Supported | Lint and verify gates exist. |
@@ -43,6 +43,7 @@ The strongest required edits are precision edits, not a rewrite:
 | SFFI | Supported subset | Support matrix covers imports/exports/callbacks/layout/tests. |
 | AOP | Bounded | Predicate pointcuts/weaving exist within support matrix. |
 | GUI status | Understated | Native GUI is unfinished, but web/TUI-web protocol, Draw IR, browser rendering, WASM contracts, and UI-access MCP tools are real bounded surfaces. |
+| Pure Simple status | Qualified | Rust remains the bootstrap seed and host substrate; pure-Simple self-hosting is verified by bootstrap stages, not by removing every Rust source file. |
 
 ## Recommended Article Shape
 

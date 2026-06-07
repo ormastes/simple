@@ -189,11 +189,13 @@ L = \frac{\sum (y_{pred} - y_{true})^2}{n}
 
 Simple은 실재하며, 정직하게 서술되어야 한다.
 
-- **버전:** `VERSION` 파일은 `1.0.0-beta`로 표시되고, 최신 태그 릴리스는 **v0.9.8 (2026-04-29)**이다.
+- **버전:** `VERSION` 파일은 `1.0.0-beta`로 표시되고, 최신 태그 릴리스는 **v1.0.0-beta**이다.
 - **테스트 스냅샷 (2026-02-14):** 4,067 / 4,067 통과, 17.4초. 이는 스위트의 폭과 속도에 대한 증거이지 — 언어 대 언어 런타임 벤치마크가 *아니다*.
 - **소스 규모 (2026-04-23):** Simple, Rust, C, 어셈블리 합쳐 약 227만 줄(주석 제외), 그중 약 178만 줄이 Simple 자체.
 
 구현됐다고 광고해도 안전한 것들: Sspec, SDoctest, 커버리지, 추적성, 생성 스펙 문서, 시스템 테스트 mock 정책, self-hosted 컴파일러/인터프리터/로더, MDSOC 매니페스트, 파서 친화적 매크로, Tree-sitter 툴링, SDN 기반 데이터베이스, primitive-public-API linting, borrow-checking 인프라, watch/auto-build, 그리고 지원 ABI 서브셋에 대한 C/C++ 양방향 SFFI.
+
+정확성을 위해 한 가지 경계를 분명히 해야 한다. Rust는 여전히 bootstrap seed와 호스트 구현 기반으로 존재한다. pure-Simple 컴파일러, 로더, 라이브러리, 생성 스펙 문서는 진행 방향이자 bootstrap이 검증하는 대상이지만, 오늘의 "pure Simple"을 "저장소에 Rust 소스가 없다"는 뜻으로 읽으면 안 된다.
 
 한정어를 붙여 서술하는 게 나은 것들: **Lean 검증**은 지원 서브셋에 한해 완성됐고, **런타임 패밀리**는 지원 매트릭스로 한정되며, **LLVM 백엔드** 패밀리는 선언된 public 매트릭스 위에서 닫혀 있고, **VHDL 백엔드**는 문서화된 하드웨어 서브셋을 대상으로 하며(두 개의 GHDL RV32 시뮬레이션 레인 포함), **원격 베어메탈**은 8개의 권위 있는 레인을 갖지만 호스트·보드 인지적이고, **공유 UI 계약**은 완성된 범용 UI 레이어가 아니라 교차 표면 테스트 프로토콜이며, **수학 블록/autograd** 경로는 승격된 torch 기반 C/LLVM 범위에 한해 완성됐고 다른 백엔드는 보류 상태다.
 
@@ -204,13 +206,20 @@ Simple은 실재하며, 정직하게 서술되어야 한다.
 ## 직접 써 보기
 
 ```bash
-git clone https://github.com/ormastes/simple.git
+git clone --recurse-submodules https://github.com/ormastes/simple.git
 cd simple
 export PATH="$PWD/bin:$PATH"
 simple --version
 ```
 
-하드코딩된 바이너리 URL보다 소스 체크아웃을 가리키겠다 — 릴리스 태그(`v0.9.8`)와 `VERSION` 파일(`1.0.0-beta`)이 아직 완전히 일치하지 않으므로, 오늘 기준으로는 소스 경로가 가장 안전한 행동 유도다.
+기존 체크아웃에서는 예제/툴링 서브모듈을 초기화하거나 갱신한다.
+
+```bash
+git submodule sync --recursive
+git submodule update --init --recursive
+```
+
+하드코딩된 바이너리 URL보다 소스 체크아웃을 가리키겠다. 현재 서브모듈 레이아웃을 함께 검증할 수 있고, 릴리스 패키징 과정을 강화하는 동안 오래된 플랫폼 asset 이름을 피할 수 있기 때문이다.
 
 ---
 
