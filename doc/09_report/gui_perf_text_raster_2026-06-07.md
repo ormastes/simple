@@ -90,15 +90,24 @@ GUI or app code.
 2026-06-07 Draw IR executor follow-up: `engine2d_draw_ir_adv_*` now consumes
 that text contract by honoring command `font-size` instead of hardcoding 12px,
 renders text through FontRenderer-backed blit buffers, and returns vector-font
-offload status/reason. Current CPU evidence reports `cpu-fallback` /
+offload status/reason plus explicit `font_gpu_glyph_returned` and
+`font_production_ready` booleans. Current CPU evidence reports `cpu-fallback` /
 `production-gpu-dispatch-not-wired`, so routing observes the rasterizer path but
-GPU glyph return remains open.
+production GPU glyph dispatch remains open.
 
 2026-06-07 Draw IR text-cache follow-up: the text executor now keeps one
 `TextBlitCache` per batch/composition so repeated text commands reuse the
 FontRenderer glyph cache instead of constructing a new renderer for every text
 command. Focused unit evidence renders two repeated vector `A` text commands and
 asserts one vector-font accelerator attempt while both commands render.
+
+2026-06-07 Draw IR glyph-return evidence follow-up: the Draw IR result now
+reports the positive backend-return state. A focused unit injects a validated
+CUDA vector glyph through the existing glyph slot contract and asserts
+`gpu-glyph-returned`, `font_gpu_glyph_returned=true`, and
+`font_production_ready=true`. This proves the boundary can carry production
+glyph-return evidence; real CUDA/HIP/Vulkan/Metal glyph kernels still need to
+populate that contract in live GUI runs.
 
 Related tracked issue:
 [`pure_simple_web_render_interpreter_bound_2026-06-06.md`](../08_tracking/bug/pure_simple_web_render_interpreter_bound_2026-06-06.md).

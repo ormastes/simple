@@ -51,7 +51,7 @@ vector_font_offload_spec -> std
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -86,7 +86,7 @@ expect(evidence.diagnostic_text()).to_contain("family=vector_font")
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -117,7 +117,7 @@ expect(evidence.generated.launch_api).to_equal("clEnqueueNDRangeKernel")
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -147,7 +147,7 @@ expect(evidence.reason).to_equal("runtime-not-ready")
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

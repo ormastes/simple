@@ -50,6 +50,8 @@ use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.text_layout.font_rasterizer.{vector_font_accelerator_stats}
 use std.gc_async_mut.ui_test.sgtti.{SgttiTestDriver, sgtti_snapshot_from_draw_ir_batch}
 
+extern fn rt_env_set(key: text, value: text) -> bool
+
 val BG: u32 = 0xff000000u32
 val RED: u32 = 0xffff0000u32
 val GREEN: u32 = 0xff00ff00u32
@@ -85,6 +87,30 @@ fn _draw_ir_text_command(component_id: text, x: i32, y: i32, text_value: text) -
         image_uri: "",
         points: []
     )
+
+fn _set_cuda_vector_font_probe_glyph():
+    expect(rt_env_set("CUDA_VECTOR_FONT_STATUS", "pass")).to_equal(true)
+    expect(rt_env_set("CUDA_VECTOR_FONT_REASON", "cuda-vector-font-glyph-pixels-returned")).to_equal(true)
+    expect(rt_env_set("CUDA_VECTOR_FONT_GLYPH_COUNT", "1")).to_equal(true)
+    expect(rt_env_set("CUDA_VECTOR_FONT_GLYPH_0_CODEPOINT", "65")).to_equal(true)
+    expect(rt_env_set("CUDA_VECTOR_FONT_GLYPH_0_FONT_SIZE", "24")).to_equal(true)
+    expect(rt_env_set("CUDA_VECTOR_FONT_GLYPH_0_WIDTH", "1")).to_equal(true)
+    expect(rt_env_set("CUDA_VECTOR_FONT_GLYPH_0_HEIGHT", "1")).to_equal(true)
+    expect(rt_env_set("CUDA_VECTOR_FONT_GLYPH_0_ADVANCE", "2")).to_equal(true)
+    expect(rt_env_set("CUDA_VECTOR_FONT_GLYPH_0_PIXELS", "255")).to_equal(true)
+    expect(rt_env_set("CUDA_VECTOR_FONT_GLYPH_0_CHECKSUM", "305")).to_equal(true)
+
+fn _clear_cuda_vector_font_probe_glyph():
+    expect(rt_env_set("CUDA_VECTOR_FONT_STATUS", "")).to_equal(true)
+    expect(rt_env_set("CUDA_VECTOR_FONT_REASON", "")).to_equal(true)
+    expect(rt_env_set("CUDA_VECTOR_FONT_GLYPH_COUNT", "")).to_equal(true)
+    expect(rt_env_set("CUDA_VECTOR_FONT_GLYPH_0_CODEPOINT", "")).to_equal(true)
+    expect(rt_env_set("CUDA_VECTOR_FONT_GLYPH_0_FONT_SIZE", "")).to_equal(true)
+    expect(rt_env_set("CUDA_VECTOR_FONT_GLYPH_0_WIDTH", "")).to_equal(true)
+    expect(rt_env_set("CUDA_VECTOR_FONT_GLYPH_0_HEIGHT", "")).to_equal(true)
+    expect(rt_env_set("CUDA_VECTOR_FONT_GLYPH_0_ADVANCE", "")).to_equal(true)
+    expect(rt_env_set("CUDA_VECTOR_FONT_GLYPH_0_PIXELS", "")).to_equal(true)
+    expect(rt_env_set("CUDA_VECTOR_FONT_GLYPH_0_CHECKSUM", "")).to_equal(true)
 
 describe "Engine2D advanced Draw IR executor":
 
@@ -182,6 +208,8 @@ describe "Engine2D advanced Draw IR executor":
         expect(result.last_text_font_size).to_equal(16)
         expect(result.font_offload_status).to_equal("cpu-fallback")
         expect(result.font_offload_reason).to_equal("production-gpu-dispatch-not-wired")
+        expect(result.font_gpu_glyph_returned).to_equal(false)
+        expect(result.font_production_ready).to_equal(false)
         expect(_count_not_color(result.pixels, BG)).to_be_greater_than(0)
         engine.shutdown()
 
@@ -201,3 +229,26 @@ describe "Engine2D advanced Draw IR executor":
         expect(stats.attempts).to_equal(1)
         expect(_count_not_color(result.pixels, BG)).to_be_greater_than(0)
         engine.shutdown()
+
+    it "reports gpu glyph return when backend rasterizer supplies vector glyph pixels":
+        _set_cuda_vector_font_probe_glyph()
+        var engine = Engine2D.create_with_backend(64, 32, "cpu")
+        engine.clear(BG)
+        val batch = draw_ir_batch("text-gpu-glyph-batch", DRAW_IR_TEST_BACKEND_GPU, draw_ir_embedding_config("surf", "win", 0, 0, 64, 32, 1, 1000, false), [
+            _draw_ir_text_command("title-a", 2, 3, "A")
+        ])
+
+        val result = engine2d_draw_ir_adv_batch(engine, batch, false)
+        val stats = vector_font_accelerator_stats()
+
+        expect(result.rendered_command_count).to_equal(1)
+        expect(result.text_command_count).to_equal(1)
+        expect(result.font_offload_status).to_equal("gpu-glyph-returned")
+        expect(result.font_offload_reason).to_equal("cuda-vector-font-glyph-pixels-returned")
+        expect(result.font_gpu_glyph_returned).to_equal(true)
+        expect(result.font_production_ready).to_equal(true)
+        expect(stats.gpu_returned_glyphs).to_equal(1)
+        expect(stats.gpu_returned_glyph_pixels).to_equal(1)
+        expect(_count_not_color(result.pixels, BG)).to_be_greater_than(0)
+        engine.shutdown()
+        _clear_cuda_vector_font_probe_glyph()

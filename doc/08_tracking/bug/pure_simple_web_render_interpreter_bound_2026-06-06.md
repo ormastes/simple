@@ -117,10 +117,11 @@ IR batch contains a backend-consumable text command for `CMD`.
 2026-06-07 backend-consumption update: `engine2d_draw_ir_adv_batch()` and
 `engine2d_draw_ir_adv_composition()` now read each text command's `font-size`,
 render text through FontRenderer-backed text blit buffers, count text commands,
-and expose `font_offload_status` / `font_offload_reason` from
+and expose `font_offload_status`, `font_offload_reason`,
+`font_gpu_glyph_returned`, and `font_production_ready` from
 `vector_font_current_offload_evidence()`. Focused unit coverage asserts a 16px
 Draw IR text command renders through Engine2D and reports the current
-CPU-fallback reason.
+CPU-fallback reason with both glyph-return booleans false.
 
 2026-06-07 text-cache update: the Draw IR executor now creates one
 `TextBlitCache` per batch/composition instead of creating a fresh
@@ -128,9 +129,17 @@ CPU-fallback reason.
 the renderer glyph cache; focused unit coverage renders two `A` text commands
 and asserts `vector_font_accelerator_stats().attempts == 1`.
 
-Remaining gap: the text path still does not prove `gpu-glyph-returned`; bitmap
-and vector glyph execution need a backend rasterizer that returns glyph pixels
-without CPU glyph preparation.
+2026-06-07 glyph-return evidence update: the Draw IR boundary now proves the
+positive glyph-return state when a backend rasterizer supplies vector glyph
+pixels through the existing CUDA glyph slot contract. Focused unit coverage
+injects a validated CUDA glyph and asserts `font_offload_status ==
+"gpu-glyph-returned"`, `font_gpu_glyph_returned == true`, and
+`font_production_ready == true`.
+
+Remaining gap: production CUDA/HIP/Vulkan/Metal glyph raster kernels still need
+to populate that glyph-return contract during real GUI execution. Bitmap glyph
+execution also still needs equivalent backend-return evidence instead of CPU
+glyph preparation.
 ## Follow-up: GUI profile throughput evidence
 
 2026-06-06 GUI profile smoke:
