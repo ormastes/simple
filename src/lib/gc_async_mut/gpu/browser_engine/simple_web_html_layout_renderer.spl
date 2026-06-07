@@ -18,7 +18,6 @@
 #   parse -> CSS cascade -> block layout -> paint text+boxes -> Engine2D -> [u32]
 
 use common.ui.draw_ir.{
-    DRAW_IR_BACKEND_CPU,
     DrawIrCommand,
     DrawIrComposition,
     DrawIrStyleProp,
@@ -1241,11 +1240,40 @@ fn glyph_rows(gi: i32) -> [i32]:
     if gi == 87: return [0b00000, 0b11111, 0b00010, 0b00100, 0b01000, 0b11111, 0b00000]  # z
     [0b11111, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11111]  # unknown -> box
 
-fn glyph_index_for_char(ch: text) -> i32:
-    val direct = FONT_CHARSET.index_of(ch)
-    if direct >= 0:
-        return direct
-    FONT_CHARSET.index_of(ch.upper())
+fn glyph_index_for_code(code: i32) -> i32:
+    if code >= 65 and code <= 90:
+        return code - 65
+    if code >= 48 and code <= 57:
+        return 26 + (code - 48)
+    if code >= 97 and code <= 122:
+        return 62 + (code - 97)
+    if code == 32: return 36
+    if code == 46: return 37
+    if code == 44: return 38
+    if code == 58: return 39
+    if code == 59: return 40
+    if code == 33: return 41
+    if code == 63: return 42
+    if code == 45: return 43
+    if code == 95: return 44
+    if code == 40: return 45
+    if code == 41: return 46
+    if code == 91: return 47
+    if code == 93: return 48
+    if code == 47: return 49
+    if code == 92: return 50
+    if code == 39: return 51
+    if code == 34: return 52
+    if code == 43: return 53
+    if code == 61: return 54
+    if code == 35: return 55
+    if code == 37: return 56
+    if code == 38: return 57
+    if code == 64: return 58
+    if code == 42: return 59
+    if code == 60: return 60
+    if code == 62: return 61
+    -1
 
 # integer nearest scale based on font size; 16->2, 34->4
 fn glyph_scale(fs: i32) -> i32:
@@ -1468,9 +1496,8 @@ fn fb_text(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, color: u32, s
     var cx = x
     val adv = 6 * scale
     while i < n:
-        val ch = s.substring(i, i + 1)
         if cx < fbw:
-            val gi = glyph_index_for_char(ch)
+            val gi = glyph_index_for_code(s.char_code_at(i) as i32)
             if gi >= 0 and gi != 36:
                 out = fb_glyph(out, fbw, fbh, cx, y, gi, color, scale)
         cx = cx + adv
@@ -1521,9 +1548,8 @@ fn fb_text_thin_scaled(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, c
     val n = s.len()
     var cx = x
     while i < n:
-        val ch = s.substring(i, i + 1)
         if cx < fbw:
-            val gi = glyph_index_for_char(ch)
+            val gi = glyph_index_for_code(s.char_code_at(i) as i32)
             if gi >= 0 and gi != 36:
                 out = fb_glyph_thin_scaled(out, fbw, fbh, cx, y, gi, color, scale)
         cx = cx + advance
@@ -1564,9 +1590,8 @@ fn fb_text_thin_scaled_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: te
     val n = s.len()
     var cx = x
     while i < n:
-        val ch = s.substring(i, i + 1)
         if cx < fbw and cx < clip.x1:
-            val gi = glyph_index_for_char(ch)
+            val gi = glyph_index_for_code(s.char_code_at(i) as i32)
             if gi >= 0 and gi != 36:
                 out = fb_glyph_thin_scaled_clip(out, fbw, fbh, cx, y, gi, color, scale, clip)
         cx = cx + advance
@@ -1595,9 +1620,8 @@ fn fb_text_sparse(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, color:
     var i = 0
     var cx = x
     while i < s.len():
-        val ch = s.substring(i, i + 1)
         if cx < fbw:
-            val gi = glyph_index_for_char(ch)
+            val gi = glyph_index_for_code(s.char_code_at(i) as i32)
             if gi >= 0 and gi != 36:
                 out = fb_glyph_sparse(out, fbw, fbh, cx, y, gi, color)
         cx = cx + 6
@@ -1878,6 +1902,27 @@ class LayoutResult:
     bh: [i32]
     height: i32
 
+class ChildLinks:
+    first_child: [i32]
+    next_sibling: [i32]
+
+fn build_child_links(nodes: [HNode]) -> ChildLinks:
+    var first_child: [i32] = [-1; nodes.len()]
+    var next_sibling: [i32] = [-1; nodes.len()]
+    var last_child: [i32] = [-1; nodes.len()]
+    var i = 1
+    while i < nodes.len():
+        val parent = nodes[i].parent as i32
+        if parent >= 0 and parent < nodes.len():
+            val last = last_child[parent]
+            if last < 0:
+                first_child[parent] = i
+            else:
+                next_sibling[last] = i
+            last_child[parent] = i
+        i = i + 1
+    ChildLinks(first_child: first_child, next_sibling: next_sibling)
+
 fn char_w(fs: i32) -> i32:
     if fs <= 8:
         return 4
@@ -1974,7 +2019,7 @@ fn absolute_child_y(parent_y: i32, parent: Style, child: Style) -> i32:
         return parent_y + parent.border_t + padding_box_h - absolute_outer_height(child) - child.bottom_px
     parent_y + parent.border_t + child.top_px
 
-fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, viewport_h: i32, bx: [i32], by: [i32], bw: [i32], bh: [i32]) -> LayoutResult:
+fn layout(nodes: [HNode], styles: [Style], links: ChildLinks, i: i32, x: i32, y: i32, w: i32, viewport_h: i32, bx: [i32], by: [i32], bw: [i32], bh: [i32]) -> LayoutResult:
     var out_bx = bx
     var out_by = by
     var out_bw = bw
@@ -1990,25 +2035,24 @@ fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, viewp
     if st.display == "contents":
         out_bw[i] = w
         var cy_contents = y
-        var c_contents = i + 1
+        var c_contents = links.first_child[i]
         var child_count_contents = 0
-        while c_contents < nodes.len():
-            if nodes[c_contents].parent == i:
-                val cst = styles[c_contents]
-                if child_count_contents > 0:
-                    cy_contents = cy_contents + st.gap_px
-                cy_contents = cy_contents + cst.margin_t
-                var child_w_contents = w - cst.margin_l - cst.margin_r
-                if child_w_contents < 1:
-                    child_w_contents = 1
-                val child = layout(nodes, styles, c_contents, x + cst.margin_l, cy_contents, child_w_contents, viewport_h, out_bx, out_by, out_bw, out_bh)
-                out_bx = child.bx
-                out_by = child.by
-                out_bw = child.bw
-                out_bh = child.bh
-                cy_contents = cy_contents + child.height + cst.margin_b
-                child_count_contents = child_count_contents + 1
-            c_contents = c_contents + 1
+        while c_contents >= 0:
+            val cst = styles[c_contents]
+            if child_count_contents > 0:
+                cy_contents = cy_contents + st.gap_px
+            cy_contents = cy_contents + cst.margin_t
+            var child_w_contents = w - cst.margin_l - cst.margin_r
+            if child_w_contents < 1:
+                child_w_contents = 1
+            val child = layout(nodes, styles, links, c_contents, x + cst.margin_l, cy_contents, child_w_contents, viewport_h, out_bx, out_by, out_bw, out_bh)
+            out_bx = child.bx
+            out_by = child.by
+            out_bw = child.bw
+            out_bh = child.bh
+            cy_contents = cy_contents + child.height + cst.margin_b
+            child_count_contents = child_count_contents + 1
+            c_contents = links.next_sibling[c_contents]
         val h_contents = cy_contents - y
         out_bh[i] = h_contents
         return LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, height: h_contents)
@@ -2051,23 +2095,22 @@ fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, viewp
         var sum_explicit = 0
         var auto_count = 0
         var nonabs_count = 0
-        var ps = i + 1
-        while ps < nodes.len():
-            if nodes[ps].parent == i:
-                val pcst = styles[ps]
-                if not pcst.position_absolute:
-                    nonabs_count = nonabs_count + 1
-                    var cw = 0
-                    if pcst.width_px > 0:
-                        cw = if class_contains(nodes[ps].class_attr, "widget-") or class_contains(nodes[ps].class_attr, "icon-image") or pcst.border_box: pcst.width_px else: pcst.width_px + pcst.pad_l + pcst.pad_r + pcst.border_l + pcst.border_r
-                    elif pcst.width_px < 0:
-                        cw = iw * (0 - pcst.width_px) / 100
-                    if cw > 0:
-                        sum_explicit = sum_explicit + cw
-                    else:
-                        auto_count = auto_count + 1
-                    sum_explicit = sum_explicit + pcst.margin_l + pcst.margin_r
-            ps = ps + 1
+        var ps = links.first_child[i]
+        while ps >= 0:
+            val pcst = styles[ps]
+            if not pcst.position_absolute:
+                nonabs_count = nonabs_count + 1
+                var cw = 0
+                if pcst.width_px > 0:
+                    cw = if class_contains(nodes[ps].class_attr, "widget-") or class_contains(nodes[ps].class_attr, "icon-image") or pcst.border_box: pcst.width_px else: pcst.width_px + pcst.pad_l + pcst.pad_r + pcst.border_l + pcst.border_r
+                elif pcst.width_px < 0:
+                    cw = iw * (0 - pcst.width_px) / 100
+                if cw > 0:
+                    sum_explicit = sum_explicit + cw
+                else:
+                    auto_count = auto_count + 1
+                sum_explicit = sum_explicit + pcst.margin_l + pcst.margin_r
+            ps = links.next_sibling[ps]
         var gaps_total = 0
         if nonabs_count > 1:
             gaps_total = st.gap_px * (nonabs_count - 1)
@@ -2079,43 +2122,42 @@ fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, viewp
             per_auto = avail / auto_count
         var cx = ix
         var max_child_h = 0
-        var fc = i + 1
+        var fc = links.first_child[i]
         var flex_child_count = 0
-        while fc < nodes.len():
-            if nodes[fc].parent == i:
-                val cst = styles[fc]
-                if cst.position_absolute:
-                    val ax = absolute_child_x(x, st, nodes[fc], cst, iw)
-                    val ay = absolute_child_y(y, st, cst)
-                    val child = layout(nodes, styles, fc, ax, ay, iw, viewport_h, out_bx, out_by, out_bw, out_bh)
-                    out_bx = child.bx
-                    out_by = child.by
-                    out_bw = child.bw
-                    out_bh = child.bh
-                else:
-                    if flex_child_count > 0:
-                        cx = cx + st.gap_px
-                    cx = cx + cst.margin_l
-                    # auto-width child gets its fair share; %-width resolves against the
-                    # container inner width; px-width children ignore this (use width_px).
-                    var remaining_w = iw - (cx - ix) - cst.margin_r
-                    if cst.width_px == 0:
-                        remaining_w = per_auto
-                    elif cst.width_px < 0:
-                        remaining_w = iw
-                    if remaining_w < 1:
-                        remaining_w = 1
-                    val child = layout(nodes, styles, fc, cx, y + st.border_t + st.pad_t + cst.margin_t, remaining_w, viewport_h, out_bx, out_by, out_bw, out_bh)
-                    out_bx = child.bx
-                    out_by = child.by
-                    out_bw = child.bw
-                    out_bh = child.bh
-                    val used_h = cst.margin_t + child.height + cst.margin_b
-                    if used_h > max_child_h:
-                        max_child_h = used_h
-                    cx = cx + out_bw[fc] + cst.margin_r
-                    flex_child_count = flex_child_count + 1
-            fc = fc + 1
+        while fc >= 0:
+            val cst = styles[fc]
+            if cst.position_absolute:
+                val ax = absolute_child_x(x, st, nodes[fc], cst, iw)
+                val ay = absolute_child_y(y, st, cst)
+                val child = layout(nodes, styles, links, fc, ax, ay, iw, viewport_h, out_bx, out_by, out_bw, out_bh)
+                out_bx = child.bx
+                out_by = child.by
+                out_bw = child.bw
+                out_bh = child.bh
+            else:
+                if flex_child_count > 0:
+                    cx = cx + st.gap_px
+                cx = cx + cst.margin_l
+                # auto-width child gets its fair share; %-width resolves against the
+                # container inner width; px-width children ignore this (use width_px).
+                var remaining_w = iw - (cx - ix) - cst.margin_r
+                if cst.width_px == 0:
+                    remaining_w = per_auto
+                elif cst.width_px < 0:
+                    remaining_w = iw
+                if remaining_w < 1:
+                    remaining_w = 1
+                val child = layout(nodes, styles, links, fc, cx, y + st.border_t + st.pad_t + cst.margin_t, remaining_w, viewport_h, out_bx, out_by, out_bw, out_bh)
+                out_bx = child.bx
+                out_by = child.by
+                out_bw = child.bw
+                out_bh = child.bh
+                val used_h = cst.margin_t + child.height + cst.margin_b
+                if used_h > max_child_h:
+                    max_child_h = used_h
+                cx = cx + out_bw[fc] + cst.margin_r
+                flex_child_count = flex_child_count + 1
+            fc = links.next_sibling[fc]
         var flex_h = max_child_h + st.pad_t + st.pad_b + border_y
         val explicit_flex_h = if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
         if st.height_px > 0:
@@ -2131,34 +2173,33 @@ fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, viewp
         out_bh[i] = flex_h
         return LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, height: flex_h)
     var cy = y + st.border_t + st.pad_t
-    var c = i + 1
+    var c = links.first_child[i]
     var child_count = 0
-    while c < nodes.len():
-        if nodes[c].parent == i:
-            val cst = styles[c]
-            if cst.position_absolute:
-                val ax = absolute_child_x(x, st, nodes[c], cst, iw)
-                val ay = absolute_child_y(y, st, cst)
-                val child = layout(nodes, styles, c, ax, ay, iw, viewport_h, out_bx, out_by, out_bw, out_bh)
-                out_bx = child.bx
-                out_by = child.by
-                out_bw = child.bw
-                out_bh = child.bh
-            else:
-                if child_count > 0:
-                    cy = cy + st.gap_px
-                cy = cy + cst.margin_t
-                var child_w = iw - cst.margin_l - cst.margin_r
-                if child_w < 1:
-                    child_w = 1
-                val child = layout(nodes, styles, c, ix + cst.margin_l, cy, child_w, viewport_h, out_bx, out_by, out_bw, out_bh)
-                out_bx = child.bx
-                out_by = child.by
-                out_bw = child.bw
-                out_bh = child.bh
-                cy = cy + child.height + cst.margin_b
-                child_count = child_count + 1
-        c = c + 1
+    while c >= 0:
+        val cst = styles[c]
+        if cst.position_absolute:
+            val ax = absolute_child_x(x, st, nodes[c], cst, iw)
+            val ay = absolute_child_y(y, st, cst)
+            val child = layout(nodes, styles, links, c, ax, ay, iw, viewport_h, out_bx, out_by, out_bw, out_bh)
+            out_bx = child.bx
+            out_by = child.by
+            out_bw = child.bw
+            out_bh = child.bh
+        else:
+            if child_count > 0:
+                cy = cy + st.gap_px
+            cy = cy + cst.margin_t
+            var child_w = iw - cst.margin_l - cst.margin_r
+            if child_w < 1:
+                child_w = 1
+            val child = layout(nodes, styles, links, c, ix + cst.margin_l, cy, child_w, viewport_h, out_bx, out_by, out_bw, out_bh)
+            out_bx = child.bx
+            out_by = child.by
+            out_bw = child.bw
+            out_bh = child.bh
+            cy = cy + child.height + cst.margin_b
+            child_count = child_count + 1
+        c = links.next_sibling[c]
     var h = (cy - y) + st.pad_b + st.border_b
     val explicit_h = if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
     if st.height_px > 0:
@@ -2450,9 +2491,11 @@ pub fn simple_web_layout_render_html_draw_ir(html: text, width: i32, height: i32
     val nodes = parse_html(html)
     val rules = extract_css(html)
     val styles = compute_styles(nodes, rules, html)
+    val links = build_child_links(nodes)
     val boxes = layout(
         nodes,
         styles,
+        links,
         0,
         0,
         0,
@@ -2465,16 +2508,18 @@ pub fn simple_web_layout_render_html_draw_ir(html: text, width: i32, height: i32
     )
     val source = draw_ir_source_html_ast("simple_web_html_layout_renderer", "html", "", "", "", "layout", "1")
     val embedding = draw_ir_embedding_config("html", "document", 0, 0, width, height, 0, 1000, true)
-    val batch = draw_ir_batch_with_source("html-layout", DRAW_IR_BACKEND_CPU, embedding, _html_draw_ir_commands(nodes, styles, boxes, width, height), source)
-    draw_ir_composition("html-layout", "simple-web-html-layout", DRAW_IR_BACKEND_CPU, [batch])
+    val batch = draw_ir_batch_with_source("html-layout", "cpu", embedding, _html_draw_ir_commands(nodes, styles, boxes, width, height), source)
+    draw_ir_composition("html-layout", "simple-web-html-layout", "cpu", [batch])
 
 pub fn simple_web_layout_render_html_pixels(html: text, width: i32, height: i32, backend_name: text) -> [u32]:
     val nodes = parse_html(html)
     val rules = extract_css(html)
     val styles = compute_styles(nodes, rules, html)
+    val links = build_child_links(nodes)
     val boxes = layout(
         nodes,
         styles,
+        links,
         0,
         0,
         0,

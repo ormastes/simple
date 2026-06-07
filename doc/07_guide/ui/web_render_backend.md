@@ -42,13 +42,24 @@ page (default: `test/09_baselines/web_html_input/vanillastyle_demo.html`).
 
 ## Performance note (pure_simple)
 
-The pure-Simple raster runs interpreted and is canvas-bound. Two O(n²) traps were
+The pure-Simple raster runs interpreted and is canvas-bound. Four O(n²)-class traps were
 fixed (see `doc/08_tracking/bug/pure_simple_web_render_interpreter_bound_2026-06-06.md`):
 1. heuristic-surface buffer built with a `push` loop → use `[0; w*h]` array-repeat;
 2. the in-place array-write fix (`2d4579a0`) must be in the **running binary** —
    a stale `bin/simple` clones the framebuffer on every pixel write. Keep the
-   driver current (rebuild on a stale deploy). Keep pure_simple viewports modest
-   (≤ ~400 wide); chromium opens a live window and is unaffected.
+   driver current (rebuild on a stale deploy);
+ 3. per-node stylesheet rescans in `compute_styles()` reparsed `<style>` blocks
+    and rematched selectors before the extracted rule loop applied the same CSS
+    again. The 2026-06-07 fix applies extracted rules directly; a 40-rule /
+    40-node 96x96 smoke improved `787368us -> 367032us` with unchanged checksum
+   `39568413652567`;
+4. recursive layout child discovery scanned the full flat node arena for each
+   container. The 2026-06-07 child-link fix builds `first_child`/`next_sibling`
+   arrays once; a 180-sibling 96x96 smoke improved `494990us -> 472511us` with
+   unchanged checksum `39574588256768`.
+ 
+ Keep pure_simple viewports modest (≤ ~400 wide); chromium opens a live window
+ and is unaffected.
 
 ## Honest comparison (no memorized pixels)
 

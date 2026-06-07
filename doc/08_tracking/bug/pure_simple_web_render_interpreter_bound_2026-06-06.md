@@ -57,6 +57,46 @@ in-place array-write optimization (already in source). No renderer change needed
 - Path A: no-text page, 4× pixels ≈ 4× time (was ~16×). Done.
 - Path B: after redeploy, re-time vanillastyle 320×240 via `bin/simple`; expect it
   to match the gui/debug binary (~20s, not ~190s). Keep the bit-exact gate green.
+ 
+ ## Path C — per-node stylesheet rescans — FIXED 2026-06-07
+ 
+ `compute_styles()` received the already-extracted `Rules` list, but still called
+ `style_block_decls_for_node(html, nodes, i)` for every node. That helper reparsed
+ every `<style>` block and rematched selectors for the current node before the
+ same `rules.sels` loop applied the extracted rules again. Large GUI HTML with
+ many generated CSS rules therefore paid an avoidable O(nodes × stylesheet)
+ startup cost, and it duplicated cascade work.
+ 
+ **Fix (pure Simple):** delete the per-node rescan and apply the extracted rules
+ directly in `compute_styles()`. Focused smoke on a 40-rule / 40-node CSS-heavy
+ Simple Web render at 96x96:
+ 
+ | Measurement | Before | After |
+ |-------------|--------|-------|
+ | elapsed | `787368us` | `367032us` |
+ | checksum | `39568413652567` | `39568413652567` |
+ 
+ Unit coverage: `simple_web_renderer_spec.spl` now includes
+ `applies extracted stylesheet rules without per-node style rescans`.
+ 
+## Path D — recursive layout child discovery scans — FIXED 2026-06-07
+
+`layout()` recursively walked children by scanning the full flat node arena for
+`parent == i` in every block, flex, display-contents, and flex pre-pass. This was
+another O(containers × nodes) startup/layout cost on generated GUI HTML with
+many sibling widgets.
+
+**Fix (pure Simple):** build `ChildLinks(first_child, next_sibling)` once after
+parsing and walk those links during recursive layout. Focused smoke on a
+180-sibling child-heavy page at 96x96:
+
+| Measurement | Before | After |
+|-------------|--------|-------|
+| elapsed | `494990us` | `472511us` |
+| checksum | `39574588256768` | `39574588256768` |
+
+Unit coverage: `simple_web_renderer_spec.spl` includes
+`renders sibling block children through precomputed layout links`.
 ## Follow-up: GUI profile throughput evidence
 
 2026-06-06 GUI profile smoke:

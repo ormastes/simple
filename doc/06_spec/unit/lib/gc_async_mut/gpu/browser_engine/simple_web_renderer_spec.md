@@ -27,7 +27,7 @@ simple_web_renderer_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 49 | 49 | 0 | 0 |
+| 53 | 53 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -117,6 +117,44 @@ val pixels = simple_web_render_html_to_pixels(html, 96, 64)
 expect(pixels.len()).to_equal(96 * 64)
 expect(_count_color(pixels, 0xFF1D4ED8u32)).to_be_greater_than(0)
 expect(_count_color(pixels, 0xFF141418u32)).to_equal(0)
+```
+
+</details>
+
+ #### applies extracted stylesheet rules without per-node style rescans
+ 
+ <details>
+ <summary>Executable SPipe</summary>
+ 
+ Runnable source: 6 lines folded for reproduction.
+ Reproduction: this block contains the complete executable scenario source.
+ 
+ ```simple
+ val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}.item0{background-color:#16a34a;color:#111827;width:8px;height:4px}.item1{background-color:#dc2626;color:#111827;width:8px;height:4px}.item2{background-color:#2563eb;color:#111827;width:8px;height:4px}</style></head><body><div class='item0'>x</div><div class='item1'>x</div><div class='item2'>x</div></body></html>"
+ val pixels = simple_web_render_html_to_pixels(html, 96, 64)
+ expect(pixels.len()).to_equal(96 * 64)
+ expect(_count_color(pixels, 0xFF16A34Au32)).to_be_greater_than(0)
+ expect(_count_color(pixels, 0xFFDC2626u32)).to_be_greater_than(0)
+ expect(_count_color(pixels, 0xFF2563EBu32)).to_be_greater_than(0)
+ ```
+ 
+ </details>
+ 
+#### renders sibling block children through precomputed layout links
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}.a{background-color:#16a34a;width:12px;height:4px}.b{background-color:#dc2626;width:12px;height:4px}.c{background-color:#2563eb;width:12px;height:4px}</style></head><body><main><div class='a'></div><div class='b'></div><div class='c'></div></main></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 96, 64)
+expect(pixels.len()).to_equal(96 * 64)
+expect(_count_color(pixels, 0xFF16A34Au32)).to_be_greater_than(0)
+expect(_count_color(pixels, 0xFFDC2626u32)).to_be_greater_than(0)
+expect(_count_color(pixels, 0xFF2563EBu32)).to_be_greater_than(0)
 ```
 
 </details>
