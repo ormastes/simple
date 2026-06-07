@@ -28,7 +28,7 @@ scheduler_green_parallelism_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 15 | 15 | 0 | 0 |
+| 17 | 17 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -601,12 +601,102 @@ expect(green_carrier_queue_depth(pass_result.queues, 1)).to_equal(0)
 
 </details>
 
+#### runs active carrier passes until queues become idle
+
+1. var sched = Scheduler new with cpu count
+
+2. sched set green carrier parallelism
+   - Expected: loop_result.ran_passes equals `2`
+   - Expected: loop_result.ran_workers equals `2`
+   - Expected: loop_result.attempted_passes equals `3`
+   - Expected: loop_result.attempted_carriers equals `3`
+   - Expected: loop_result.last_task_id equals `65`
+   - Expected: loop_result.reason equals `no_active_work`
+   - Expected: sched.green_current_task_on_cpu(0u32) equals `65`
+   - Expected: green_carrier_queue_depth(loop_result.queues, 0) equals `0`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var sched = Scheduler.new_with_cpu_count(4u32)
+sched.set_green_carrier_parallelism(1)
+val queues = green_carrier_run_queues_new(4, 8)
+val first = green_carrier_spawn_task(64, 4, 1, 0, 4, 4, 4, 0)
+val after_first = green_carrier_apply_enqueue(queues, first)
+val second = green_carrier_spawn_task(65, 4, 1, 0, 4, 4, 4, 0)
+val after_second = green_carrier_apply_enqueue(after_first.queues, second)
+val loop_result = sched.run_green_carrier_until_blocked_or_budget(after_second.queues, 0, 4)
+
+expect(loop_result.ran_passes).to_equal(2)
+expect(loop_result.ran_workers).to_equal(2)
+expect(loop_result.attempted_passes).to_equal(3)
+expect(loop_result.attempted_carriers).to_equal(3)
+expect(loop_result.last_task_id).to_equal(65)
+expect(loop_result.reason).to_equal("no_active_work")
+expect(sched.green_current_task_on_cpu(0u32)).to_equal(65)
+expect(green_carrier_queue_depth(loop_result.queues, 0)).to_equal(0)
+```
+
+</details>
+
+<details>
+<summary>Advanced: stops active carrier loop at explicit run budget</summary>
+
+#### stops active carrier loop at explicit run budget
+
+1. var sched = Scheduler new with cpu count
+
+2. sched set green carrier parallelism
+   - Expected: loop_result.ran_passes equals `1`
+   - Expected: loop_result.ran_workers equals `1`
+   - Expected: loop_result.attempted_passes equals `1`
+   - Expected: loop_result.reason equals `run_budget_exhausted`
+   - Expected: loop_result.last_task_id equals `66`
+   - Expected: sched.green_current_task_on_cpu(0u32) equals `66`
+   - Expected: green_carrier_queue_depth(loop_result.queues, 0) equals `1`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var sched = Scheduler.new_with_cpu_count(4u32)
+sched.set_green_carrier_parallelism(1)
+val queues = green_carrier_run_queues_new(4, 8)
+val first = green_carrier_spawn_task(66, 4, 1, 0, 4, 4, 4, 0)
+val after_first = green_carrier_apply_enqueue(queues, first)
+val second = green_carrier_spawn_task(67, 4, 1, 0, 4, 4, 4, 0)
+val after_second = green_carrier_apply_enqueue(after_first.queues, second)
+val loop_result = sched.run_green_carrier_until_blocked_or_budget(after_second.queues, 0, 1)
+
+expect(loop_result.ran_passes).to_equal(1)
+expect(loop_result.ran_workers).to_equal(1)
+expect(loop_result.attempted_passes).to_equal(1)
+expect(loop_result.reason).to_equal("run_budget_exhausted")
+expect(loop_result.last_task_id).to_equal(66)
+expect(sched.green_current_task_on_cpu(0u32)).to_equal(66)
+expect(green_carrier_queue_depth(loop_result.queues, 0)).to_equal(1)
+```
+
+</details>
+
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 15 |
-| Active scenarios | 15 |
+| Total scenarios | 17 |
+| Active scenarios | 17 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -133,6 +133,12 @@ go-runtime-hardening
   `scheduler_green_parallelism_spec.spl` still passed 15 examples,
   `green_carrier_spec.spl` passed 36 examples, and
   `simpleos_multicore_green_spec.spl` passed 3 examples.
+- implementation: Added `Scheduler.run_green_carrier_until_blocked_or_budget`,
+  a bounded scheduler-owned worker-loop primitive that repeats active-carrier
+  passes until no active work remains or the explicit pass budget is exhausted.
+- verification: `scheduler.spl` and `green_carrier.spl` checks passed, and
+  `scheduler_green_parallelism_spec.spl` passed 17 examples for drain-to-idle
+  and run-budget-exhausted loop behavior.
 
 ## Completion Audit - 2026-06-07
 

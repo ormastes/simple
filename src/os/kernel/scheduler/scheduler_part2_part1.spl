@@ -93,7 +93,8 @@ use os.kernel.scheduler.scheduler_exec.{
 use os.kernel.scheduler.green_carrier.{
     GreenCarrierSchedulerIntent, GreenCarrierExecutionResult, GreenCarrierParallelismState,
     GreenCarrierRunQueueState, GreenCarrierRebalanceResult, GreenCarrierRebalancePassResult,
-    GreenCarrierRunStepResult, GreenCarrierRunPassResult, GreenCarrierWakeRunResult,
+    GreenCarrierRunStepResult, GreenCarrierRunPassResult, GreenCarrierRunLoopResult,
+    GreenCarrierWakeRunResult,
     green_carrier_apply_scheduler_intent,
     green_carrier_extend_execution_state,
     green_carrier_current_task_on_cpu,
@@ -688,6 +689,51 @@ impl Scheduler:
             last_cpu: last_cpu,
             last_task_id: last_task_id,
             reason: if ran_workers > 0: "active_pass_ran" else: "no_active_work"
+        )
+
+    me run_green_carrier_until_blocked_or_budget(queues: GreenCarrierRunQueueState, rebalance_move_budget: i64, max_passes: i64) -> GreenCarrierRunLoopResult:
+        if max_passes < 1:
+            return GreenCarrierRunLoopResult(
+                queues: queues,
+                attempted_passes: 0,
+                ran_passes: 0,
+                ran_workers: 0,
+                attempted_carriers: 0,
+                last_task_id: -1,
+                reason: "pass_budget_empty"
+            )
+        var current = queues
+        var attempted_passes = 0
+        var ran_passes = 0
+        var ran_workers = 0
+        var attempted_carriers = 0
+        var last_task_id = -1
+        while attempted_passes < max_passes:
+            val pass_result = self.run_green_carrier_active_pass(current, rebalance_move_budget)
+            current = pass_result.queues
+            attempted_passes = attempted_passes + 1
+            attempted_carriers = attempted_carriers + pass_result.attempted_carriers
+            if pass_result.ran_workers < 1:
+                return GreenCarrierRunLoopResult(
+                    queues: current,
+                    attempted_passes: attempted_passes,
+                    ran_passes: ran_passes,
+                    ran_workers: ran_workers,
+                    attempted_carriers: attempted_carriers,
+                    last_task_id: last_task_id,
+                    reason: "no_active_work"
+                )
+            ran_passes = ran_passes + 1
+            ran_workers = ran_workers + pass_result.ran_workers
+            last_task_id = pass_result.last_task_id
+        GreenCarrierRunLoopResult(
+            queues: current,
+            attempted_passes: attempted_passes,
+            ran_passes: ran_passes,
+            ran_workers: ran_workers,
+            attempted_carriers: attempted_carriers,
+            last_task_id: last_task_id,
+            reason: "run_budget_exhausted"
         )
 
     me run_green_channel_wake_pass(queues: GreenCarrierRunQueueState, task: GreenTaskRecord, receiver_task_id: i64, unparked: bool, waker_cpu: i64, home_load: i64, waker_load: i64, wake_affine_threshold: i64, current_cpu: i64, rebalance_move_budget: i64) -> GreenCarrierWakeRunResult:

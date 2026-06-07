@@ -166,6 +166,10 @@ SimpleOS path:
   It first performs budgeted inactive-carrier rebalance, then attempts one run
   step per active carrier and reports run counts without claiming unbounded
   preemption.
+- `Scheduler.run_green_carrier_until_blocked_or_budget` repeats bounded active
+  passes until the carriers report no runnable work or the caller's run budget
+  is exhausted. This is the scheduler-owned worker-loop primitive before timer
+  preemption is wired in.
 - `Scheduler.run_green_channel_wake_pass` composes green-channel unpark output
   with carrier enqueue and the bounded active-carrier pass, so parked channel
   receivers can re-enter scheduler-owned execution without bypassing carrier
@@ -186,10 +190,10 @@ The selected Full Go-Like Runtime Roadmap uses all layers:
 - SimpleOS Scheduler Layer owns logical green tasks, carrier queues, remote
   wake/IPI intent, and AP evidence.
 
-Future roadmap work remains explicit: per-worker queue loops, blocking coverage
-beyond the current green-channel wake pass, carrying bounded rebalance passes
-into final AP hardware handoff, and preemption or compiler-inserted yield
-points before claiming tight-loop fairness comparable to Go.
+Future roadmap work remains explicit: carrying bounded worker-loop passes into
+final AP hardware handoff, blocking coverage beyond the current green-channel
+wake pass, and preemption or compiler-inserted yield points before claiming
+tight-loop fairness comparable to Go.
 
 ## Known Gaps
 
