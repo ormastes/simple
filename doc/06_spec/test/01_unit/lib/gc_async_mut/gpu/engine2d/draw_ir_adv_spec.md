@@ -28,7 +28,7 @@ draw_ir_adv_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -232,13 +232,15 @@ engine.shutdown()
    - Expected: result.font_offload_reason equals `production-gpu-dispatch-not-wired`
    - Expected: result.font_gpu_glyph_returned is false
    - Expected: result.font_production_ready is false
+   - Expected: result.font_generated_args_ready is false
+   - Expected: result.font_generated_args_reason equals `generated-glyph-args-disabled`
 9. engine shutdown
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 38 lines folded for reproduction.
+Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -278,6 +280,52 @@ expect(result.font_offload_status).to_equal("cpu-fallback")
 expect(result.font_offload_reason).to_equal("production-gpu-dispatch-not-wired")
 expect(result.font_gpu_glyph_returned).to_equal(false)
 expect(result.font_production_ready).to_equal(false)
+expect(result.font_generated_args_ready).to_equal(false)
+expect(result.font_generated_args_reason).to_equal("generated-glyph-args-disabled")
+expect(_count_not_color(result.pixels, BG)).to_be_greater_than(0)
+engine.shutdown()
+```
+
+</details>
+
+#### packs generated glyph args for GPU-routed Draw IR text without claiming readback
+
+1. var engine = Engine2D create with backend
+2. engine clear
+3.  draw ir text command
+   - Expected: result.rendered_command_count equals `1`
+   - Expected: result.text_command_count equals `1`
+   - Expected: result.font_generated_args_ready is true
+   - Expected: result.font_generated_args_reason equals `ready`
+   - Expected: result.font_gpu_glyph_returned is false
+   - Expected: result.font_production_ready is false
+   - Expected: stats.attempts equals `1`
+4. engine shutdown
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var engine = Engine2D.create_with_backend(64, 32, "cpu")
+engine.clear(BG)
+val batch = draw_ir_batch("text-generated-args-batch", DRAW_IR_TEST_BACKEND_GPU, draw_ir_embedding_config("surf", "win", 0, 0, 64, 32, 1, 1000, false), [
+    _draw_ir_text_command("title-a", 2, 3, "A")
+])
+
+val result = engine2d_draw_ir_adv_batch(engine, batch, true)
+val stats = vector_font_accelerator_stats()
+
+expect(result.rendered_command_count).to_equal(1)
+expect(result.text_command_count).to_equal(1)
+expect(result.font_generated_args_ready).to_equal(true)
+expect(result.font_generated_args_reason).to_equal("ready")
+expect(result.font_gpu_glyph_returned).to_equal(false)
+expect(result.font_production_ready).to_equal(false)
+expect(stats.attempts).to_equal(1)
 expect(_count_not_color(result.pixels, BG)).to_be_greater_than(0)
 engine.shutdown()
 ```
@@ -430,8 +478,8 @@ _clear_cuda_bitmap_font_probe_glyph()
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
