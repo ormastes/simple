@@ -162,11 +162,67 @@ Additional focused bootstrap probes:
   lowering. The OS/QEMU smoke lanes remain separate; this is now a pure
   self-hosting compiler payload blocker.
 
+## 2026-06-07 Update
+
+Status: still blocked for the pure-Simple stage2 payload.
+
+Current repo bootstrap verification passes through the wrapper path:
+
+```bash
+SIMPLE_BOOTSTRAP=1 SIMPLE_LIB=src ./bin/simple build bootstrap --seed=./bin/simple
+```
+
+Evidence captured on 2026-06-07:
+
+- Stage 1, Stage 2, and Stage 3 all emitted 26 KB artifacts.
+- All three stages matched hash
+  `718fe35b4d36937744d7481b96cacd74e1905a54f1bcdf6ebd1f4d2da1d169a3`.
+
+That is useful bootstrap determinism evidence, but it is not the same as the
+pure-Simple stage2 compiler payload in this plan. A direct probe of the
+documented pure-stage2 command shape was run from `src/compiler_rust`:
+
+```bash
+target/bootstrap/simple native-build \
+  --backend llvm-lib \
+  --source ../compiler \
+  --source ../app \
+  --source ../lib \
+  --source ../compiler_shared \
+  --entry ../app/cli/bootstrap_main.spl \
+  -o /tmp/simple_stage2_probe
+```
+
+It exited `1`, emitted no `/tmp/simple_stage2_probe`, and failed with:
+
+```text
+error: bootstrap_main cannot emit a seed-wrapper fallback for /tmp/simple_stage2_probe
+error: rebuild with the full Simple driver so native-build uses real Simple lowering/codegen
+```
+
+Current conclusion: Rust remains the bootstrap seed and host substrate. The
+pure-Simple stage2 work is still open until `native-build` reaches real Simple
+lowering/codegen for this entry instead of stopping at the seed-wrapper
+fallback guard.
+
 ## Next Steps
 
-### A. Capture the next post-parse-start failure cleanly
+### A. Route the pure-stage2 probe through the full Simple driver
 
-Use a file-backed run so the final exit code and trailing diagnostics are preserved:
+The current direct `target/bootstrap/simple native-build ...` probe stops before
+the older parse/HIR failure because the bootstrap entry refuses to emit a
+seed-wrapper fallback. The next probe must first ensure the command is running
+the full Simple driver path that owns real Simple lowering/codegen.
+
+Acceptance:
+- the command no longer fails with `bootstrap_main cannot emit a seed-wrapper fallback`
+- either `/tmp/simple_stage2` is emitted
+- or the next exact lowering/codegen failure is captured
+
+### B. Capture the next post-parse-start failure cleanly
+
+Once the full-driver path is active, use a file-backed run so the final exit
+code and trailing diagnostics are preserved:
 
 ```bash
 cd src/compiler_rust
@@ -188,7 +244,7 @@ Acceptance:
 - either `/tmp/simple_stage2` is emitted
 - or the next exact failure line is captured after `phase2:parse:start`
 
-### B. If parse-phase failure remains opaque, tighten phase-2 instrumentation
+### C. If parse-phase failure remains opaque, tighten phase-2 instrumentation
 
 Primary target:
 - `src/compiler/10.frontend/flat_ast_bridge.spl`
@@ -201,7 +257,7 @@ Suggested instrumentation:
 Goal:
 - determine whether the next failure is still in flat AST conversion, module construction, or the first HIR consumer
 
-### C. Check for remaining `Module` collisions if the same shape error returns
+### D. Check for remaining `Module` collisions if the same shape error returns
 
 Primary files:
 - `src/compiler/10.frontend/parser_types.spl`
@@ -212,7 +268,7 @@ Primary files:
 Specific question:
 - after the explicit `FrontendModule(...)` constructor change, does any downstream parameter or local still infer against `ast.Module` rather than `parser_types.Module`?
 
-### D. Once stage2 emits, proceed immediately to stage3 verification
+### E. Once stage2 emits, proceed immediately to stage3 verification
 
 Run:
 
