@@ -1,0 +1,197 @@
+"""
+# SMF Runtime-Pool Closure Lookup Blocker
+
+**Feature IDs:** #green-smf-runtime-pool-closure
+**Category:** Runtime / SMF / Concurrency
+**Status:** Blocked
+
+## Overview
+
+This SSpec pins the narrow SMF runtime-pool blocker for `multicore_green_spawn`.
+Direct SMF submission of `multicore_green_spawn(\: worker())` can pass, but the
+profile-generated wrapper shape still fails when runtime-pool worker threads
+call back into the SMF interpreter.
+
+## Requirements
+
+**Requirements:** doc/02_requirements/feature/multicore_green.md
+
+## Plan
+
+**Plan:** doc/03_plan/sys_test/multicore_green.md
+
+## Design
+
+**Design:** doc/05_design/multicore_green.md
+
+## Research
+
+**Research:** doc/01_research/local/multicore_green.md
+
+## Syntax
+
+Run the blocker contract:
+
+```sh
+./src/compiler_rust/target/debug/simple test test/03_system/feature/usage/smf_runtime_pool_closure_blocker_spec.spl --mode=interpreter --clean
+```
+
+## Examples
+
+- The fixture compiles to SMF successfully.
+- The fixture configures runtime-pool parallelism.
+- The fixture fails today with `function not found: spawn_worker`.
+- The blocker is resolved only when the same fixture exits successfully and
+  prints `wrapper_smf_pool_pass=true`.
+
+## Current Failure Shape
+
+The checked profile script generates wrapper helpers so the benchmark can keep
+the spawn expression compact and comparable across parallel/fanout sections:
+
+```simple
+fn worker() -> i64:
+    42
+
+fn spawn_worker() -> MulticoreGreenHandle:
+    multicore_green_spawn(\: worker())
+```
+
+The direct shape below is intentionally not enough regression coverage because
+it already passes on this checkout:
+
+```simple
+val handle = multicore_green_spawn(\: worker())
+```
+
+This spec therefore exercises the wrapper shape and expects the current SMF
+loader/runtime-pool boundary to fail in a controlled way. That keeps failed SMF
+rows out of M:N evidence while still proving that the blocker is understood.
+
+## Expected Runtime Output
+
+The SMF process should print runtime-pool setup evidence before failing:
+
+```text
+multicore_green_parallelism = 2/2
+rt_interp_call: function not found: spawn_worker
+```
+
+It must not print:
+
+```text
+wrapper_smf_pool_pass=true
+```
+
+until worker-thread `rt_interp_call` can resolve the SMF module function table.
+
+## Resolution Contract
+
+When the blocker is fixed, update this spec in the same commit that updates the
+profile report contract:
+
+- keep the wrapper-shaped fixture;
+- require exit code `0`;
+- require `wrapper_smf_pool_pass=true`;
+- require the checked-in cross-language report to contain valid SMF
+  multicore-green rows for the parallel and fanout sections;
+- close `doc/08_tracking/bug/smf_runtime_pool_closure_lookup_2026-06-07.md`;
+- remove the temporary allowance for `SMF runtime-pool closure lookup blocker`
+  from `test/05_perf/profile_scripts/profile_report_contract_test.shs`.
+
+## TUI Capture
+
+```text
+Simple Test Runner v1.0.0-beta
+Running: test/03_system/feature/usage/smf_runtime_pool_closure_blocker_spec.spl
+[1/1] test/03_system/feature/usage/smf_runtime_pool_closure_blocker_spec.spl PASSED
+Files: 1
+Passed: 1
+Failed: 0
+```
+
+## Traceability Expectations
+
+- The blocker document must identify the wrapper-shape failure.
+- The blocker document must name `INTERP_FUNCTIONS` and `interp_call_handler`.
+- The executable fixture must use `spawn_worker() -> multicore_green_spawn(\: worker())`.
+- The fixture must fail today before it can be counted as SMF M:N evidence.
+- The failure must mention `function not found: spawn_worker`.
+- The fixture must be flipped from expected failure to expected pass when SMF
+  worker-thread function lookup is fixed.
+- The direct worker shape must not replace this wrapper-shaped regression.
+"""
+
+use std.spec.{describe, it, expect, step}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text?
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+val BUILD_DIR: text = "build/test/smf_runtime_pool_closure"
+val SOURCE_PATH: text = "build/test/smf_runtime_pool_closure/wrapper_blocker.spl"
+val SMF_PATH: text = "build/test/smf_runtime_pool_closure/wrapper_blocker.smf"
+val SIMPLE_BIN: text = "./src/compiler_rust/target/debug/simple"
+
+fn blocker_fixture_source() -> text:
+    [
+        "use std.concurrent.multicore_green.{multicore_green_spawn, multicore_green_set_parallelism, MulticoreGreenHandle}\n",
+        "extern fn rt_exit(code: i32)\n",
+        "extern fn rt_pool_join(handle: i64) -> i64\n",
+        "\n",
+        "fn worker() -> i64:\n",
+        "    42\n",
+        "\n",
+        "fn spawn_worker() -> MulticoreGreenHandle:\n",
+        "    multicore_green_spawn(\\: worker())\n",
+        "\n",
+        "fn main():\n",
+        "    val requested = multicore_green_set_parallelism(2)\n",
+        "    println(\"multicore_green_parallelism = \" + requested.to_text() + \"/2\")\n",
+        "    val handle = spawn_worker()\n",
+        "    if !handle.used_runtime_pool():\n",
+        "        println(\"pool_used=0/1\")\n",
+        "        rt_exit(71)\n",
+        "        return\n",
+        "    val native_handle = handle.native_handle\n",
+        "    handle.native_handle = 0\n",
+        "    val got = rt_pool_join(native_handle)\n",
+        "    println(\"got = \" + got.to_text())\n",
+        "    if got != 42:\n",
+        "        rt_exit(72)\n",
+        "        return\n",
+        "    println(\"wrapper_smf_pool_pass=true\")\n"
+    ].join("")
+
+fn read_text(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+fn shell(command: text) -> (text, i64):
+    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    (stdout + stderr, code)
+
+describe "SMF runtime-pool closure lookup blocker":
+    it "keeps the wrapper-shaped multicore-green SMF failure executable":
+        step("Write the minimal wrapper-shaped multicore-green fixture")
+        val (_mkdir_out, mkdir_code) = shell("mkdir -p " + BUILD_DIR)
+        expect(mkdir_code).to_equal(0)
+        expect(rt_file_write_text(SOURCE_PATH, blocker_fixture_source())).to_equal(true)
+
+        step("Compile the fixture to SMF")
+        val (compile_out, compile_code) = shell(SIMPLE_BIN + " compile " + SOURCE_PATH + " -o " + SMF_PATH)
+        expect(compile_code).to_equal(0)
+        val (_exists_out, exists_code) = shell("test -f " + SMF_PATH)
+        expect(exists_code).to_equal(0)
+
+        step("Run the SMF fixture and capture the current blocker failure")
+        val (run_out, run_code) = shell("timeout 20s " + SIMPLE_BIN + " " + SMF_PATH)
+        expect(run_code).to_be_greater_than(0)
+        expect(run_out).to_contain("function not found: spawn_worker")
+        expect(run_out).to_contain("multicore_green_parallelism")
+
+        step("Verify the blocker document describes the same narrow failure")
+        val blocker = read_text("doc/08_tracking/bug/smf_runtime_pool_closure_lookup_2026-06-07.md")
+        expect(blocker).to_contain("function not found: spawn_worker")
+        expect(blocker).to_contain("spawn_worker()")
+        expect(blocker).to_contain("INTERP_FUNCTIONS")
+        expect(blocker).to_contain("interp_call_handler")

@@ -45,6 +45,52 @@ marked `Status: Open`. The contract still rejects failed native multicore-green
 rows, missing runtime-pool evidence, missing parallelism evidence, global-FIFO or
 scheduler-owned queue evidence, and ambiguous queue-model markers.
 
+## Sidecar Audit - 2026-06-07
+
+Focused smoke in `/tmp/cross_lang_perf_probe` with
+`SIMPLE_BINARY=src/compiler_rust/target/debug/simple`, `RUNS=1`,
+`CPU_WORKERS=4`, and tiny fanout reproduced the blocker without writing a
+tracked report. The generated SMF workloads compile, resolve `rt_pool_*`, print
+`multicore_green_parallelism = 4/4`, and print
+`multicore_green_queue_model = work_stealing`; failure happens after native
+runtime-pool worker threads call back through `rt_interp_call`.
+
+The failing generated shapes are:
+
+- `parallel_multicore_green.spl`: `spawn_worker()` calls
+  `multicore_green_spawn(\: worker())`; the SMF run fails with
+  `rt_interp_call: function not found: spawn_worker`.
+- `fanout_multicore_green.spl`: `spawn_work()` calls
+  `multicore_green_spawn(\: work())`; the SMF run fails with
+  `rt_interp_call: function not found: spawn_work`.
+
+`src/lib/nogc_async_mut/concurrent/multicore_green.spl` is not the narrow
+blocker: a direct SMF probe that submits `worker` through
+`multicore_green_spawn(\: worker())` passed and returned the expected result.
+The narrow lookup issue is in the interpreter callback state used by the SMF
+runtime-pool worker thread. In
+`src/compiler_rust/compiler/src/interpreter_sffi.rs`, `INTERP_FUNCTIONS` is
+thread-local and `interp_call_handler` only checks that thread-local function
+map before reporting `function not found`. Runtime-pool workers are native
+threads, so they do not inherit the main SMF interpreter function table.
+
+Focused executable regression:
+`test/03_system/feature/usage/smf_runtime_pool_closure_blocker_spec.spl`
+compiles and runs a tiny source equivalent to the generated wrapper shape:
+`spawn_worker() -> multicore_green_spawn(\: worker())`, then joins the native
+handle. It passes today by proving the current blocker failure is explicit as
+`function not found: spawn_worker`; it should be flipped to expect
+`wrapper_smf_pool_pass=true` when worker-thread `rt_interp_call` can see the SMF
+module function table. A direct `multicore_green_spawn(\: worker())` test is too
+weak because it already passes on this checkout.
+
+Smallest implementation direction: make `rt_interp_call` on runtime-pool worker
+threads resolve against a process-visible snapshot of the SMF module function
+table, or otherwise initialize the worker thread's interpreter state from the
+main SMF state before invoking submitted closures. Do not change the
+`rt_pool_*` facade first; the runtime-pool symbols and closure submission path
+are already reached.
+
 ## Exit Criteria
 
 Close this blocker only after a report under `doc/09_report/` passes the profile
