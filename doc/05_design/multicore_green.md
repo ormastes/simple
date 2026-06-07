@@ -134,6 +134,9 @@ Behavior:
   the SimpleOS worker loop. It consumes a rebalance move budget, attempts one
   dispatch per active carrier, and returns queue, rebalance, run-count, and
   last-run evidence.
+- `Scheduler.run_green_channel_wake_pass` converts green-channel send/unpark
+  output into a carrier enqueue, then runs the bounded active pass only when
+  the wake actually enqueued a receiver.
 
 ### Freestanding QEMU Probe Path
 
@@ -204,6 +207,6 @@ Repository guards:
 - Scheduler-owned parallelism handoff: the hosted runtime-pool facade and
   SimpleOS `Scheduler` now both expose topology-bounded parallelism contracts.
   Remaining work is carrying bounded rebalance passes into final AP hardware
-  handoff and blocking/preemption behavior.
+  handoff, broader blocking surfaces, and preemption behavior.
 - Preemption strategy: compiler-inserted yields, runtime safepoints, or an
   explicit cooperative-only guarantee until later.

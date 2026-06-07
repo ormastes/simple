@@ -29,7 +29,7 @@ SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 ./src/compiler_rust/target/debug/simple test 
 |----------|--------|------------|
 | SimpleOS cooperative green | PASS | 3 |
 | SimpleOS multicore green scheduler contract | PASS | 3 |
-| SimpleOS green-channel wake bridge | PASS | 3 |
+| SimpleOS green-channel wake bridge | PASS | 4 |
 | SimpleOS green-carrier compile check | PASS | 1 file |
 | SimpleOS green-carrier unit contract | PASS | 36 |
 | SimpleOS scheduler compile check | PASS | 1 file |
@@ -46,6 +46,9 @@ SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 ./src/compiler_rust/target/debug/simple test 
   `[green-carrier-qemu] PASS=true` in serial output.
 - The hosted SimpleOS specs prove scheduler-owned green execution state remains
   separate from normal OS task state.
+- The green-channel wake bridge now proves a parked receiver can be woken,
+  enqueued, budget-rebalanced onto the active carrier set, and run through the
+  scheduler-owned active carrier pass.
 - The green-carrier unit contract now proves requested-vs-active carrier
   parallelism is scheduler-owned and topology-bounded, with explicit requests
   preserved, default limits aligned to topology changes, and inactive-carrier

@@ -93,7 +93,7 @@ use os.kernel.scheduler.scheduler_exec.{
 use os.kernel.scheduler.green_carrier.{
     GreenCarrierSchedulerIntent, GreenCarrierExecutionResult, GreenCarrierParallelismState,
     GreenCarrierRunQueueState, GreenCarrierRebalanceResult, GreenCarrierRebalancePassResult,
-    GreenCarrierRunStepResult, GreenCarrierRunPassResult,
+    GreenCarrierRunStepResult, GreenCarrierRunPassResult, GreenCarrierWakeRunResult,
     green_carrier_apply_scheduler_intent,
     green_carrier_extend_execution_state,
     green_carrier_current_task_on_cpu,
@@ -102,11 +102,14 @@ use os.kernel.scheduler.green_carrier.{
     green_carrier_parallelism_for_topology,
     green_carrier_reject_scheduler_intent,
     green_carrier_apply_rebalance_decision,
+    green_carrier_apply_enqueue,
+    green_carrier_channel_wake_task,
     green_carrier_queue_depth,
     green_carrier_rebalance_one,
     green_carrier_dispatch_next_with_limit,
     green_carrier_scheduler_intent
 }
+use os.kernel.scheduler.green_task.{GreenTaskRecord}
 use os.kernel.scheduler.green_worker.{GreenWorkerRebalanceDecision, green_worker_rebalance_decision}
 
 
@@ -685,6 +688,54 @@ impl Scheduler:
             last_cpu: last_cpu,
             last_task_id: last_task_id,
             reason: if ran_workers > 0: "active_pass_ran" else: "no_active_work"
+        )
+
+    me run_green_channel_wake_pass(queues: GreenCarrierRunQueueState, task: GreenTaskRecord, receiver_task_id: i64, unparked: bool, waker_cpu: i64, home_load: i64, waker_load: i64, wake_affine_threshold: i64, current_cpu: i64, rebalance_move_budget: i64) -> GreenCarrierWakeRunResult:
+        val decision = green_carrier_channel_wake_task(
+            task,
+            receiver_task_id,
+            unparked,
+            waker_cpu,
+            home_load,
+            waker_load,
+            wake_affine_threshold,
+            current_cpu
+        )
+        val applied = green_carrier_apply_enqueue(queues, decision)
+        if not applied.enqueued:
+            val rebalance = GreenCarrierRebalancePassResult(
+                queues: applied.queues,
+                moved_workers: 0,
+                last_task_id: -1,
+                last_from_cpu: -1,
+                last_to_cpu: -1,
+                reason: "wake_not_enqueued"
+            )
+            val pass_result = GreenCarrierRunPassResult(
+                queues: applied.queues,
+                rebalance: rebalance,
+                ran_workers: 0,
+                attempted_carriers: 0,
+                last_cpu: -1,
+                last_task_id: -1,
+                reason: applied.reason
+            )
+            return GreenCarrierWakeRunResult(
+                queues: applied.queues,
+                apply: applied,
+                pass_result: pass_result,
+                enqueued: false,
+                ran: false,
+                reason: applied.reason
+            )
+        val pass_result = self.run_green_carrier_active_pass(applied.queues, rebalance_move_budget)
+        GreenCarrierWakeRunResult(
+            queues: pass_result.queues,
+            apply: applied,
+            pass_result: pass_result,
+            enqueued: true,
+            ran: pass_result.ran_workers > 0,
+            reason: pass_result.reason
         )
 
     fn preempt_pending_on_cpu(cpu_id: u32) -> TaskId?:

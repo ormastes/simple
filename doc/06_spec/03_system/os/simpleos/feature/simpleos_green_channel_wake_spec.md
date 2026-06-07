@@ -28,7 +28,7 @@ simpleos_green_channel_wake_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -97,6 +97,78 @@ val decision = green_carrier_channel_wake_task(parked_task, sent.receiver_task_i
 ## Scenarios
 
 ### SimpleOS green channel wake contract
+
+#### runs a channel wake through the scheduler-owned active pass
+
+1. smp init
+
+2. smp bringup ap
+
+3. var scheduler = Scheduler new with cpu count
+
+4. scheduler set green carrier parallelism
+   - Expected: sent.unparked is true
+   - Expected: wake.enqueued is true
+   - Expected: wake.apply.decision.target_cpu equals `2`
+   - Expected: wake.apply.ipi_sent is true
+   - Expected: pending equals `smp_ipi_resched()`
+   - Expected: wake.pass_result.rebalance.moved_workers equals `1`
+   - Expected: wake.pass_result.ran_workers equals `1`
+   - Expected: wake.ran is true
+   - Expected: wake.reason equals `active_pass_ran`
+   - Expected: scheduler.green_current_task_on_cpu(0u32) equals `504`
+   - Expected: scheduler.green_current_task_on_cpu(2u32) equals `0`
+   - Expected: green_carrier_queue_depth(wake.queues, 0) equals `0`
+   - Expected: green_carrier_queue_depth(wake.queues, 2) equals `0`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 37 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+smp_init()
+smp_bringup_ap(2u32)
+var scheduler = Scheduler.new_with_cpu_count(4u32)
+scheduler.set_green_carrier_parallelism(1)
+val queues = green_carrier_run_queues_new(4, 8)
+val task = green_task_new(504, 4, 0, 0, 1, 2, 3)
+val parked_task = green_task_park(task, "green_channel_recv")
+val channel = green_channel_new(1)
+val parked_recv = green_channel_recv(channel, parked_task.task_id)
+val sent = green_channel_send(parked_recv.channel, 77)
+val wake = scheduler.run_green_channel_wake_pass(
+    queues,
+    parked_task,
+    sent.receiver_task_id,
+    sent.unparked,
+    2,
+    2,
+    3,
+    1,
+    0,
+    1
+)
+val pending = smp_take_ipi(2u32)
+
+expect(sent.unparked).to_equal(true)
+expect(wake.enqueued).to_equal(true)
+expect(wake.apply.decision.target_cpu).to_equal(2)
+expect(wake.apply.ipi_sent).to_equal(true)
+expect(pending).to_equal(smp_ipi_resched())
+expect(wake.pass_result.rebalance.moved_workers).to_equal(1)
+expect(wake.pass_result.ran_workers).to_equal(1)
+expect(wake.ran).to_equal(true)
+expect(wake.reason).to_equal("active_pass_ran")
+expect(scheduler.green_current_task_on_cpu(0u32)).to_equal(504)
+expect(scheduler.green_current_task_on_cpu(2u32)).to_equal(0)
+expect(green_carrier_queue_depth(wake.queues, 0)).to_equal(0)
+expect(green_carrier_queue_depth(wake.queues, 2)).to_equal(0)
+```
+
+</details>
 
 #### re-enqueues an unparked channel receiver through carrier dispatch
 
@@ -262,8 +334,8 @@ expect(applied.enqueued).to_equal(false)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

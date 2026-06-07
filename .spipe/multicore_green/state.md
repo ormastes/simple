@@ -125,6 +125,14 @@ go-runtime-hardening
 - verification: `scheduler.spl` and `green_carrier.spl` checks passed, and
   `scheduler_green_parallelism_spec.spl` passed 15 examples for active-worker
   pass and rebalance-before-run behavior.
+- implementation: Added `Scheduler.run_green_channel_wake_pass`, which converts
+  green-channel send/unpark output into a carrier enqueue and runs the bounded
+  active-carrier pass only after a successful wake enqueue.
+- verification: `simpleos_green_channel_wake_spec.spl` passed 4 examples,
+  proving channel wake can re-enter scheduler-owned active carrier execution;
+  `scheduler_green_parallelism_spec.spl` still passed 15 examples,
+  `green_carrier_spec.spl` passed 36 examples, and
+  `simpleos_multicore_green_spec.spl` passed 3 examples.
 
 ## Completion Audit - 2026-06-07
 
