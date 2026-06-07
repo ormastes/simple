@@ -100,7 +100,7 @@ expect(report).to_contain("Fanout stress workers:** 2000")
 step("Check every multicore-green native row reports runtime-pool usage")
 expect(model_text(row_for_label(parallel, "Simple multicore green (native)"))).to_contain("pool_used=100/100")
 expect(model_text(row_for_label(parallel, "Simple multicore green (native)"))).to_contain("parallelism=64/64")
-expect(model_text(row_for_label(parallel, "Simple multicore green (native)"))).to_contain("queue_model=")
+expect(model_text(row_for_label(parallel, "Simple multicore green (native)"))).to_contain("queue_model=work_stealing")
 expect(model_text(row_for_label(fanout, "Simple multicore green (native)"))).to_contain("pool_used=1000/1000")
 expect(model_text(row_for_label(stress, "Simple multicore green (native)"))).to_contain("pool_used=2000/2000")
 ```
@@ -152,9 +152,9 @@ step("Compare Simple multicore-green native rows against C pthread rows")
 expect(row_ms_scaled(fanout, "Simple multicore green (native)")).to_be_less_than(row_ms_scaled(fanout, "C (pthreads)"))
 expect(row_ms_scaled(stress, "Simple multicore green (native)")).to_be_less_than(row_ms_scaled(stress, "C (pthreads)"))
 expect(model_text(row_for_label(fanout, "Simple multicore green (native)"))).to_contain("parallelism=")
-expect(model_text(row_for_label(fanout, "Simple multicore green (native)"))).to_contain("queue_model=")
+expect(model_text(row_for_label(fanout, "Simple multicore green (native)"))).to_contain("queue_model=work_stealing")
 expect(model_text(row_for_label(stress, "Simple multicore green (native)"))).to_contain("parallelism=")
-expect(model_text(row_for_label(stress, "Simple multicore green (native)"))).to_contain("queue_model=")
+expect(model_text(row_for_label(stress, "Simple multicore green (native)"))).to_contain("queue_model=work_stealing")
 ```
 
 </details>

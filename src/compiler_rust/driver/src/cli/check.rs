@@ -231,6 +231,7 @@ fn check_file(path: &Path, source_roots: &[PathBuf], deny_gc_boundary_crossings:
             validate_noalloc_reachable_import_closure(path, &mut errors, source_roots, deny_gc_boundary_crossings);
             validate_basic_type_annotations(path, &module.items, &mut errors);
             validate_concurrency_api_calls(path, &module.items, &mut errors);
+            validate_numbered_concurrency_source(path, &source, &mut errors);
             validate_short_grammar_suggestions(path, &source, &mut errors);
         }
         Err(e) => {
@@ -2479,6 +2480,29 @@ mod tests {
             assert!(result.errors.iter().any(|error| {
                 error.code.as_deref() == Some("E-PAR-002")
                     && error.message.contains(alias)
+                    && error.help.iter().any(|help| help.contains(replacement))
+            }));
+        }
+    }
+
+    #[test]
+    fn test_check_rejects_numbered_concurrency_runtime_externs() {
+        for (symbol, replacement) in [
+            ("rt_thread_spawn_isolated2", "rt_thread_spawn_isolated_with_args"),
+            ("rt_thread_spawn_limited2", "rt_thread_spawn_limited_with_args"),
+        ] {
+            let mut file = NamedTempFile::new().unwrap();
+            writeln!(
+                file,
+                "extern fn {symbol}(closure: Any, data1: Any, data2: Any) -> i64\nfn main():\n    val x = 1"
+            )
+            .unwrap();
+
+            let result = check_file(file.path(), &[], false);
+            assert_eq!(result.status, CheckStatus::Error);
+            assert!(result.errors.iter().any(|error| {
+                error.code.as_deref() == Some("E-PAR-002")
+                    && error.message.contains(symbol)
                     && error.help.iter().any(|help| help.contains(replacement))
             }));
         }
