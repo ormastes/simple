@@ -118,6 +118,9 @@ nonzero on mismatch, so runtime-pool closure lookup failures, lambda capture
 bugs, or wrong joins are classified as failed rows instead of performance wins.
 The multicore-green fanout sources use compact handle arrays and loop-captured
 closures, not generated numbered handle variables.
+They also fail closed before measuring work if the runtime reports
+`queue_model=global_fifo` or `queue_model=scheduler_owned`; only a single
+`queue_model=work_stealing` marker may support M:N profile evidence.
 The profile-report contract and `simple check` reject numbered concurrency
 aliases such as `thread_spawn2`, `spawn_isolated2`, `spawn_limited2`,
 `rt_thread_spawn_isolated2`, and `rt_thread_spawn_limited2`; use the semantic
@@ -144,7 +147,7 @@ profile-script comments.
 | Simple (SMF loader) | Bytecode VM | Shows bytecode dispatch win |
 | Simple (native) | AOT (LLVM/Cranelift) | Shows AOT ceiling |
 | Simple `cooperative_green_spawn` / `cooperative_green_spawn_value` | Cooperative queue on current OS thread | Implemented green-thread API, but not CPU-parallel or preemptive |
-| Simple `multicore_green_spawn` | Bounded runtime worker pool through `rt_pool_*` | Current Pure Simple M:N candidate row for CPU-heavy comparisons; profile workloads set and print hosted parallelism plus `queue_model=work_stealing` evidence and fail if `used_runtime_pool()` is false |
+| Simple `multicore_green_spawn` | Bounded runtime worker pool through `rt_pool_*` | Current Pure Simple M:N candidate row for CPU-heavy comparisons; profile workloads set and print hosted parallelism plus a fail-closed `queue_model=work_stealing` marker and fail if `used_runtime_pool()` is false |
 | Simple `task_spawn` | Runtime worker pool when `rt_pool_*` links | Intended Simple path for Go-like parallel benchmark work |
 | C (gcc -O2) | AOT native | Absolute performance floor |
 | Go | AOT + goroutines | Low-overhead concurrency |
