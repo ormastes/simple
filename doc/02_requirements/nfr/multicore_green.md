@@ -45,6 +45,7 @@ Stability And Misuse Diagnostics, and SimpleOS Hardware Proof Gate.
 - `bin/simple test test/05_perf/stress/multicore_green_cross_language_gate_spec.spl --mode=interpreter`
 - `bin/simple test test/05_perf/stress/multicore_green_large_profile_gate_spec.spl --mode=interpreter`
 - `bin/simple test test/05_perf/stress/multicore_green_fanout_spec.spl --mode=interpreter`
+- `bin/simple test test/03_system/feature/usage/concurrency_api_misuse_spec.spl --mode=interpreter`
 - `bin/simple test test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl --mode=interpreter`
 - `bin/simple test test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl --mode=interpreter`
 - `bin/simple test test/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.spl --mode=interpreter`

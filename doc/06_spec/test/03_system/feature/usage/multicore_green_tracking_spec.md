@@ -134,6 +134,9 @@ Failed: 0
 - The tracking row must carry the large-profile gate and profile-report
   contract so Go scheduler metadata, Go-vs-C stress fanout, and runtime-pool
   evidence stay release-visible.
+- The tracking row must carry the concurrency API misuse spec so wrong-surface,
+  wrong-arity, bad-argument, and numbered-alias diagnostics stay tied to
+  REQ-MCG-010.
 - The tracking row must carry implementation links for cooperative green,
   multicore green, and the SimpleOS green carrier.
 - The tracking row must carry guide links for the compiler perf guide and
@@ -153,6 +156,8 @@ Failed: 0
 - Numeric suffix names are not acceptable user-facing concurrency APIs.
 - Runtime aliases must use semantic names instead of number suffixes.
 - Documentation must not use a number suffix to distinguish API behavior.
+- Wrong-surface imports, bad spawn arguments, and numbered concurrency aliases
+  must remain compile-time failures covered by the misuse spec.
 
 ## Status Expectations
 
@@ -277,7 +282,7 @@ expect(row).to_contain("doc/05_design/multicore_green.md")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -293,6 +298,8 @@ expect(row).to_contain("test/05_perf/stress/multicore_green_cross_language_gate_
 expect(row).to_contain("test/05_perf/stress/multicore_green_fanout_spec.spl")
 expect(row).to_contain("test/05_perf/stress/multicore_green_large_profile_gate_spec.spl")
 expect(row).to_contain("test/05_perf/profile_scripts/profile_report_contract_test.shs")
+expect(row).to_contain("test/03_system/feature/usage/concurrency_api_misuse_spec.spl")
+expect(row).to_contain("doc/06_spec/test/03_system/feature/usage/concurrency_api_misuse_spec.md")
 ```
 
 </details>

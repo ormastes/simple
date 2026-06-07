@@ -63,6 +63,7 @@ SimpleOS scheduler work distinct and verifiable.
   and `test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl`.
 - Performance/profile gates: `scripts/check/check-cross-language-perf.shs`,
   `test/05_perf/profile_scripts/profile_report_contract_test.shs`,
+  `test/03_system/feature/usage/concurrency_api_misuse_spec.spl`,
   `test/05_perf/stress/multicore_green_fanout_spec.spl`,
   `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`,
   `test/05_perf/stress/multicore_green_large_profile_gate_spec.spl`,
