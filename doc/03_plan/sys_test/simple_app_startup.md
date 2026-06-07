@@ -35,9 +35,9 @@ Run executable specs from `test/` only:
 
 Generated/manual docs mirror the executable paths:
 
-- `doc/06_spec/02_integration/app/startup_argparse_mmap_perf_spec.md`
-- `doc/06_spec/03_system/app/simple/feature/simple_app_startup_spec.md`
-- `doc/06_spec/03_system/app/simpleos/feature/simple_app_startup_spec.md`
+- `doc/06_spec/test/02_integration/app/startup_argparse_mmap_perf_spec.md`
+- `doc/06_spec/test/03_system/app/simple/feature/simple_app_startup_spec.md`
+- `doc/06_spec/test/03_system/app/simpleos/feature/simple_app_startup_spec.md`
 
 ## Pass Criteria
 
@@ -57,14 +57,14 @@ Generated/manual docs mirror the executable paths:
 
 | REQ | Description | Executable Spec | Generated Spec | Coverage |
 |-----|-------------|-----------------|----------------|----------|
-| REQ-001 | Launch kind detection | `test/03_system/app/simple/feature/simple_app_startup_spec.spl` | `doc/06_spec/03_system/app/simple/feature/simple_app_startup_spec.md` | Full |
-| REQ-002 | File arg parsing and parser gating | `test/03_system/app/simple/feature/simple_app_startup_spec.spl` | `doc/06_spec/03_system/app/simple/feature/simple_app_startup_spec.md` | Full |
-| REQ-003 | Mmap/cache startup strategy | `test/03_system/app/simple/feature/simple_app_startup_spec.spl` | `doc/06_spec/03_system/app/simple/feature/simple_app_startup_spec.md` | Full |
-| REQ-004 | Conditional native/SMF dynlib loading | `test/03_system/app/simple/feature/simple_app_startup_spec.spl` | `doc/06_spec/03_system/app/simple/feature/simple_app_startup_spec.md` | Full |
-| REQ-005 | Build launch metadata sidecar | `test/03_system/app/simple/feature/simple_app_startup_spec.spl` | `doc/06_spec/03_system/app/simple/feature/simple_app_startup_spec.md` | Full |
-| REQ-006 | Embedded SMF launch metadata | `test/03_system/app/simple/feature/simple_app_startup_spec.spl` | `doc/06_spec/03_system/app/simple/feature/simple_app_startup_spec.md` | Full |
-| REQ-007 | Embedded native launch metadata | `test/03_system/app/simple/feature/simple_app_startup_spec.spl` | `doc/06_spec/03_system/app/simple/feature/simple_app_startup_spec.md` | Full |
-| REQ-100 | SimpleOS launch metadata and VFS prewarm | `test/03_system/app/simpleos/feature/simple_app_startup_spec.spl` | `doc/06_spec/03_system/app/simpleos/feature/simple_app_startup_spec.md` | Full |
-| REQ-101 | SimpleOS hover prefetch and VFS miss warmup | `test/03_system/app/simpleos/feature/simple_app_startup_spec.spl` | `doc/06_spec/03_system/app/simpleos/feature/simple_app_startup_spec.md` | Full |
-| REQ-102 | SimpleOS launcher icon prefetch | `test/03_system/app/simpleos/feature/simple_app_startup_spec.spl` | `doc/06_spec/03_system/app/simpleos/feature/simple_app_startup_spec.md` | Full |
-| NFR-STARTUP-001 | `simple run` arg parsing and mmap performance stay responsive | `test/02_integration/app/startup_argparse_mmap_perf_spec.spl` | `doc/06_spec/02_integration/app/startup_argparse_mmap_perf_spec.md` | Full |
+| REQ-001 | Launch kind detection | `test/03_system/app/simple/feature/simple_app_startup_spec.spl` | `doc/06_spec/test/03_system/app/simple/feature/simple_app_startup_spec.md` | Full |
+| REQ-002 | File arg parsing and parser gating | `test/03_system/app/simple/feature/simple_app_startup_spec.spl` | `doc/06_spec/test/03_system/app/simple/feature/simple_app_startup_spec.md` | Full |
+| REQ-003 | Mmap/cache startup strategy | `test/03_system/app/simple/feature/simple_app_startup_spec.spl` | `doc/06_spec/test/03_system/app/simple/feature/simple_app_startup_spec.md` | Full |
+| REQ-004 | Conditional native/SMF dynlib loading | `test/03_system/app/simple/feature/simple_app_startup_spec.spl` | `doc/06_spec/test/03_system/app/simple/feature/simple_app_startup_spec.md` | Full |
+| REQ-005 | Build launch metadata sidecar | `test/03_system/app/simple/feature/simple_app_startup_spec.spl` | `doc/06_spec/test/03_system/app/simple/feature/simple_app_startup_spec.md` | Full |
+| REQ-006 | Embedded SMF launch metadata | `test/03_system/app/simple/feature/simple_app_startup_spec.spl` | `doc/06_spec/test/03_system/app/simple/feature/simple_app_startup_spec.md` | Full |
+| REQ-007 | Embedded native launch metadata | `test/03_system/app/simple/feature/simple_app_startup_spec.spl` | `doc/06_spec/test/03_system/app/simple/feature/simple_app_startup_spec.md` | Full |
+| REQ-100 | SimpleOS launch metadata and VFS prewarm | `test/03_system/app/simpleos/feature/simple_app_startup_spec.spl` | `doc/06_spec/test/03_system/app/simpleos/feature/simple_app_startup_spec.md` | Full |
+| REQ-101 | SimpleOS hover prefetch and VFS miss warmup | `test/03_system/app/simpleos/feature/simple_app_startup_spec.spl` | `doc/06_spec/test/03_system/app/simpleos/feature/simple_app_startup_spec.md` | Full |
+| REQ-102 | SimpleOS launcher icon prefetch | `test/03_system/app/simpleos/feature/simple_app_startup_spec.spl` | `doc/06_spec/test/03_system/app/simpleos/feature/simple_app_startup_spec.md` | Full |
+| NFR-STARTUP-001 | `simple run` arg parsing and mmap performance stay responsive | `test/02_integration/app/startup_argparse_mmap_perf_spec.spl` | `doc/06_spec/test/02_integration/app/startup_argparse_mmap_perf_spec.md` | Full |

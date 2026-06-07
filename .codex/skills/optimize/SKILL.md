@@ -62,6 +62,6 @@ implementation language. Acceptable outcomes are:
 
 - Add SPipe tests for any optimized path whose behavior could regress.
 - Perf specs belong under `test/05_perf/`; generated/manual docs belong under
-  `doc/06_spec/05_perf/`.
+  `doc/06_spec/test/05_perf/`.
 - Use real assertions. No `pass_todo`, empty examples, or trivial always-true
   assertions.

@@ -10,7 +10,7 @@ manual/evidence lane.
 ## Evidence Model
 
 - Executable specs live under `test/03_system/app/**/feature/*_spec.spl`.
-- Generated manuals live under the mirrored `doc/06_spec/03_system/app/**`
+- Generated manuals live under the mirrored `doc/06_spec/test/03_system/app/**`
   path.
 - UI evidence is proven by source markers such as `ui_access_snapshot`,
   `/api/test/draw-ir`, `SgttiTestDriver`, `# @evidence-display`, and

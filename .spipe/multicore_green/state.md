@@ -153,7 +153,7 @@ go-runtime-hardening
   comparison rows, and `pool_used=` evidence while rejecting numbered aliases.
 - AC-6: `test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl`,
   `test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl`,
-  their generated manuals under `doc/06_spec/03_system/os/simpleos/feature/`,
+  their generated manuals under `doc/06_spec/test/03_system/os/simpleos/feature/`,
   and `doc/09_report/simpleos_multicore_green_evidence_2026-06-07.md` provide
   current SimpleOS evidence.
 - AC-7: `test/03_system/feature/usage/multicore_green_tracking_spec.spl`,

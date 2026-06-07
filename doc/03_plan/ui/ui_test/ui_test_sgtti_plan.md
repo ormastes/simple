@@ -97,7 +97,7 @@ without forking a new element model or changing the HTTP protocol path.
 - **Exit:** GUI-shaped snapshot asserts in-process with no HTTP server.
 - **Evidence:** `src/lib/nogc_sync_mut/ui_test/sgtti.spl`,
   memory-tier re-export shims, `test/01_unit/lib/nogc_sync_mut/ui_test/sgtti_spec.spl`,
-  and `doc/06_spec/01_unit/lib/nogc_sync_mut/ui_test/sgtti_spec.md`.
+  and `doc/06_spec/test/01_unit/lib/nogc_sync_mut/ui_test/sgtti_spec.md`.
 
 ### Phase 2 - Target config + parity (`tui` | `gui` | `both`) — done
 

@@ -74,7 +74,7 @@ Output:
 
 Generated/manual SPipe docs mirror executable test paths after stripping the
 leading `test/` segment. Example: `test/03_system/feature/usage/math_blocks_spec.spl`
-maps to `doc/06_spec/03_system/feature/usage/math_blocks_spec.md`.
+maps to `doc/06_spec/test/03_system/feature/usage/math_blocks_spec.md`.
 Never create executable `.spl` files under `doc/06_spec`; verify with
 `find doc/06_spec -name '*_spec.spl' | wc -l` and require `0`.
 

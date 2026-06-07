@@ -36,8 +36,8 @@ find doc/06_spec -name '*_spec.spl' | wc -l
 
 ## Manual Outputs
 
-- `doc/06_spec/03_system/app/ide/feature/ide_office_plugin_suite_spec.md`
-- `doc/06_spec/02_integration/app/ide/ide_feature_check_integration_spec.md`
+- `doc/06_spec/test/03_system/app/ide/feature/ide_office_plugin_suite_spec.md`
+- `doc/06_spec/test/02_integration/app/ide/ide_feature_check_integration_spec.md`
 
 ## Coverage Notes
 

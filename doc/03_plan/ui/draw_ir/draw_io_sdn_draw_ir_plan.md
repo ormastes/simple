@@ -47,12 +47,12 @@ v1 shared UI contract or forking a second model.
   byte-compatible; default new fields so existing `wm_scene`/`html_ast`/
   `gui_ast` producers continue to validate unchanged.
 - **Files:** `src/lib/common/ui/draw_ir.spl`.
-- **Spec:** extend `doc/06_spec/01_unit/lib/common/ui/draw_ir_spec.md` +
+- **Spec:** extend `doc/06_spec/test/01_unit/lib/common/ui/draw_ir_spec.md` +
   `test/01_unit/lib/common/ui/draw_ir_spec.spl` (v1 round-trip still green).
 - **Exit:** v1 producers validate under v2 schema; new fields constructible.
 - **Evidence:** `src/lib/common/ui/draw_ir.spl`,
   `test/01_unit/lib/common/ui/draw_ir_spec.spl`, and
-  `doc/06_spec/01_unit/lib/common/ui/draw_ir_spec.md`.
+  `doc/06_spec/test/01_unit/lib/common/ui/draw_ir_spec.md`.
 
 ### Phase 2 — SDN skin (`draw_ir ↔ sdn`) — done
 
@@ -66,7 +66,7 @@ v1 shared UI contract or forking a second model.
 - **Exit:** `compose → to_sdn → sdn_to → compose'` is structurally equal.
 - **Evidence:** `src/lib/common/ui/draw_ir_sdn.spl`,
   `test/01_unit/lib/common/ui/draw_ir_sdn_spec.spl`, and
-  `doc/06_spec/01_unit/lib/common/ui/draw_ir_sdn_spec.md`.
+  `doc/06_spec/test/01_unit/lib/common/ui/draw_ir_sdn_spec.md`.
 
 ### Phase 3 — Draw.io (`mxGraph`) skin — done
 
@@ -81,7 +81,7 @@ v1 shared UI contract or forking a second model.
 - **Exit:** lossless round-trip for box + edge + geometry + style on a fixture.
 - **Evidence:** `src/lib/common/ui/draw_ir_drawio.spl`,
   `test/01_unit/lib/common/ui/draw_ir_drawio_spec.spl`, and
-  `doc/06_spec/01_unit/lib/common/ui/draw_ir_drawio_spec.md`.
+  `doc/06_spec/test/01_unit/lib/common/ui/draw_ir_drawio_spec.md`.
 
 ### Phase 4 — Producer enrichment — done
 

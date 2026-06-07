@@ -121,7 +121,7 @@ spec in the evidence set:
 
 ```text
 test/02_integration/app/startup_argparse_mmap_perf_spec.spl
-doc/06_spec/02_integration/app/startup_argparse_mmap_perf_spec.md
+doc/06_spec/test/02_integration/app/startup_argparse_mmap_perf_spec.md
 ```
 
 Do not move executable startup specs into `doc/06_spec`, and do not route

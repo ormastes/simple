@@ -278,8 +278,8 @@ Executable specs:
 
 Manual/generated companions:
 
-- `doc/06_spec/03_system/app/simple/feature/simple_app_startup_spec.md`
-- `doc/06_spec/03_system/app/simpleos/feature/simple_app_startup_spec.md`
+- `doc/06_spec/test/03_system/app/simple/feature/simple_app_startup_spec.md`
+- `doc/06_spec/test/03_system/app/simpleos/feature/simple_app_startup_spec.md`
 
 Test plan:
 

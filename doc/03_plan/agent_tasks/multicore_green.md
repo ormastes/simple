@@ -47,7 +47,7 @@ Primary paths:
 - `test/05_perf/profile_scripts/profile_report_contract_test.shs`
 - `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`
 - `doc/09_report/cross_language_perf_parallel_smoke.md`
-- `doc/06_spec/05_perf/stress/multicore_green_cross_language_gate_spec.md`
+- `doc/06_spec/test/05_perf/stress/multicore_green_cross_language_gate_spec.md`
 
 Deliverables:
 

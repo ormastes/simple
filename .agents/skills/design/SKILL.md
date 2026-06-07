@@ -32,7 +32,7 @@ description: Create architecture, UI design, system tests, and detail design for
 ## Phase 3: System Test Design
 
 - SPipe BDD tests: `test/03_system/app/<app_name>/feature/<feature>_spec.spl`
-- Generated/manual SPipe docs: `doc/06_spec/03_system/app/<app_name>/feature/<feature>_spec.md`
+- Generated/manual SPipe docs: `doc/06_spec/test/03_system/app/<app_name>/feature/<feature>_spec.md`
 - Never create executable `.spl` specs under `doc/06_spec`; verify
   `find doc/06_spec -name '*_spec.spl' | wc -l` is `0`.
 - Test plan: `doc/03_plan/sys_test/<feature>.md`

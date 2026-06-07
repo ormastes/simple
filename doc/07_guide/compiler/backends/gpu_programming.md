@@ -25,7 +25,7 @@ OpenCL C, while indirect or unsupported MIR calls are rejected before source is
 returned. Keep the executable contract and generated manual in sync:
 
 - `test/01_unit/compiler/codegen/opencl_backend_contract_spec.spl`
-- `doc/06_spec/01_unit/compiler/codegen/opencl_backend_contract_spec.md`
+- `doc/06_spec/test/01_unit/compiler/codegen/opencl_backend_contract_spec.md`
 
 ---
 

@@ -108,59 +108,59 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 expect(_manual_pair_state(
     "test/03_system/app/browser/feature/browser_session_ui_access_controls_spec.spl",
-    "doc/06_spec/03_system/app/browser/feature/browser_session_ui_access_controls_spec.md"
+    "doc/06_spec/test/03_system/app/browser/feature/browser_session_ui_access_controls_spec.md"
 )).to_equal("complete")
 expect(_manual_pair_state(
     "test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl",
-    "doc/06_spec/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.md"
+    "doc/06_spec/test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.md"
 )).to_equal("complete")
 expect(_manual_pair_state(
     "test/03_system/app/graphics_backend/feature/graphics_3d_session_managed_backend_spec.spl",
-    "doc/06_spec/03_system/app/graphics_backend/feature/graphics_3d_session_managed_backend_spec.md"
+    "doc/06_spec/test/03_system/app/graphics_backend/feature/graphics_3d_session_managed_backend_spec.md"
 )).to_equal("complete")
 expect(_manual_pair_state(
     "test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl",
-    "doc/06_spec/03_system/app/ide/feature/ide_office_plugin_suite_spec.md"
+    "doc/06_spec/test/03_system/app/ide/feature/ide_office_plugin_suite_spec.md"
 )).to_equal("complete")
 expect(_manual_pair_state(
     "test/03_system/app/os/feature/ui_access_protocol_spec.spl",
-    "doc/06_spec/03_system/app/os/feature/ui_access_protocol_spec.md"
+    "doc/06_spec/test/03_system/app/os/feature/ui_access_protocol_spec.md"
 )).to_equal("complete")
 expect(_manual_pair_state(
     "test/03_system/app/testing/feature/test_runner_debug_tui_sgtti_spec.spl",
-    "doc/06_spec/03_system/app/testing/feature/test_runner_debug_tui_sgtti_spec.md"
+    "doc/06_spec/test/03_system/app/testing/feature/test_runner_debug_tui_sgtti_spec.md"
 )).to_equal("complete")
 expect(_manual_pair_state(
     "test/03_system/app/ui/feature/html_css_binary_caching_spec.spl",
-    "doc/06_spec/03_system/app/ui/feature/html_css_binary_caching_spec.md"
+    "doc/06_spec/test/03_system/app/ui/feature/html_css_binary_caching_spec.md"
 )).to_equal("complete")
 expect(_manual_pair_state(
     "test/03_system/app/ui/feature/shared_wm_renderer_unification_spec.spl",
-    "doc/06_spec/03_system/app/ui/feature/shared_wm_renderer_unification_spec.md"
+    "doc/06_spec/test/03_system/app/ui/feature/shared_wm_renderer_unification_spec.md"
 )).to_equal("complete")
 expect(_manual_pair_state(
     "test/03_system/app/ui_test_api/feature/draw_ir_inspection_contract_spec.spl",
-    "doc/06_spec/03_system/app/ui_test_api/feature/draw_ir_inspection_contract_spec.md"
+    "doc/06_spec/test/03_system/app/ui_test_api/feature/draw_ir_inspection_contract_spec.md"
 )).to_equal("complete")
 expect(_manual_pair_state(
     "test/03_system/app/ui_test_api/feature/draw_ir_protocol_evidence_spec.spl",
-    "doc/06_spec/03_system/app/ui_test_api/feature/draw_ir_protocol_evidence_spec.md"
+    "doc/06_spec/test/03_system/app/ui_test_api/feature/draw_ir_protocol_evidence_spec.md"
 )).to_equal("complete")
 expect(_manual_pair_state(
     "test/03_system/app/ui_test/feature/sgtti_shared_surface_contract_spec.spl",
-    "doc/06_spec/03_system/app/ui_test/feature/sgtti_shared_surface_contract_spec.md"
+    "doc/06_spec/test/03_system/app/ui_test/feature/sgtti_shared_surface_contract_spec.md"
 )).to_equal("complete")
 expect(_manual_pair_state(
     "test/03_system/app/vscode_extension/feature/vscode_math_editor_panel_spec.spl",
-    "doc/06_spec/03_system/app/vscode_extension/feature/vscode_math_editor_panel_spec.md"
+    "doc/06_spec/test/03_system/app/vscode_extension/feature/vscode_math_editor_panel_spec.md"
 )).to_equal("complete")
 expect(_manual_pair_state(
     "test/03_system/app/vscode_rich_editor/feature/vscode_rich_editor_spec.spl",
-    "doc/06_spec/03_system/app/vscode_rich_editor/feature/vscode_rich_editor_spec.md"
+    "doc/06_spec/test/03_system/app/vscode_rich_editor/feature/vscode_rich_editor_spec.md"
 )).to_equal("complete")
 expect(_manual_pair_state(
     "test/03_system/app/wm_text_access_mcp/feature/wm_text_access_mcp_spec.spl",
-    "doc/06_spec/03_system/app/wm_text_access_mcp/feature/wm_text_access_mcp_spec.md"
+    "doc/06_spec/test/03_system/app/wm_text_access_mcp/feature/wm_text_access_mcp_spec.md"
 )).to_equal("complete")
 ```
 
@@ -261,47 +261,47 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_marker_state(
-    "doc/06_spec/03_system/app/testing/feature/test_runner_debug_tui_sgtti_spec.md",
+    "doc/06_spec/test/03_system/app/testing/feature/test_runner_debug_tui_sgtti_spec.md",
     "### TUI Captures"
 )).to_equal("present")
 expect(_marker_state(
-    "doc/06_spec/03_system/app/ide/feature/ide_office_plugin_suite_spec.md",
+    "doc/06_spec/test/03_system/app/ide/feature/ide_office_plugin_suite_spec.md",
     "feature_check_tui.txt"
 )).to_equal("present")
 expect(_marker_state(
-    "doc/06_spec/03_system/app/browser/feature/browser_session_ui_access_controls_spec.md",
+    "doc/06_spec/test/03_system/app/browser/feature/browser_session_ui_access_controls_spec.md",
     "ui_access_act"
 )).to_equal("present")
 expect(_marker_state(
-    "doc/06_spec/03_system/app/browser/feature/browser_session_ui_access_controls_spec.md",
+    "doc/06_spec/test/03_system/app/browser/feature/browser_session_ui_access_controls_spec.md",
     "browser_ui_access_snapshot.txt"
 )).to_equal("present")
 expect(_marker_state(
-    "doc/06_spec/03_system/app/ui_test_api/feature/draw_ir_inspection_contract_spec.md",
+    "doc/06_spec/test/03_system/app/ui_test_api/feature/draw_ir_inspection_contract_spec.md",
     "/api/test/draw-ir"
 )).to_equal("present")
 expect(_marker_state(
-    "doc/06_spec/03_system/app/ui_test_api/feature/draw_ir_protocol_evidence_spec.md",
+    "doc/06_spec/test/03_system/app/ui_test_api/feature/draw_ir_protocol_evidence_spec.md",
     "draw_ir_protocol.json"
 )).to_equal("present")
 expect(_marker_state(
-    "doc/06_spec/03_system/app/ui_test/feature/sgtti_shared_surface_contract_spec.md",
+    "doc/06_spec/test/03_system/app/ui_test/feature/sgtti_shared_surface_contract_spec.md",
     "SgttiTestDriver"
 )).to_equal("present")
 expect(_marker_state(
-    "doc/06_spec/03_system/app/vscode_rich_editor/feature/vscode_rich_editor_spec.md",
+    "doc/06_spec/test/03_system/app/vscode_rich_editor/feature/vscode_rich_editor_spec.md",
     "rich_editor_contract.txt"
 )).to_equal("present")
 expect(_marker_state(
-    "doc/06_spec/03_system/app/vscode_rich_editor/feature/vscode_rich_editor_spec.md",
+    "doc/06_spec/test/03_system/app/vscode_rich_editor/feature/vscode_rich_editor_spec.md",
     "implements vscode.CustomTextEditorProvider"
 )).to_equal("present")
 expect(_marker_state(
-    "doc/06_spec/03_system/app/vscode_extension/feature/vscode_math_editor_panel_spec.md",
+    "doc/06_spec/test/03_system/app/vscode_extension/feature/vscode_math_editor_panel_spec.md",
     "math_panel_contract.txt"
 )).to_equal("present")
 expect(_marker_state(
-    "doc/06_spec/03_system/app/vscode_extension/feature/vscode_math_editor_panel_spec.md",
+    "doc/06_spec/test/03_system/app/vscode_extension/feature/vscode_math_editor_panel_spec.md",
     "buildMathSyncPanelState"
 )).to_equal("present")
 ```

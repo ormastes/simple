@@ -82,7 +82,7 @@ traceability set:
 
 ```text
 test/02_integration/app/startup_argparse_mmap_perf_spec.spl
-doc/06_spec/02_integration/app/startup_argparse_mmap_perf_spec.md
+doc/06_spec/test/02_integration/app/startup_argparse_mmap_perf_spec.md
 ```
 
 Do not move the executable spec to `doc/06_spec`, and do not replace the fast

@@ -19,7 +19,7 @@ Before starting, check what exists — missing artifacts are created in phases 1
 | Architecture | `doc/04_architecture/<domain>/<topic>/<feature>.md` | 4 |
 | Design | `doc/05_design/<domain>/<topic>/<feature>.md` | 4 |
 | System tests | `test/03_system/app/<app_name>/feature/<feature>_spec.spl` | 6 |
-| Generated spec docs | `doc/06_spec/03_system/app/<app_name>/feature/<feature>_spec.md` | 6 |
+| Generated spec docs | `doc/06_spec/test/03_system/app/<app_name>/feature/<feature>_spec.md` | 6 |
 
 **If ALL artifacts exist** (from prior `/research_claude` + `/research_codex` + `/design_gemini` + `/design_codex` + `/design_claude`), skip to Phase 6.
 

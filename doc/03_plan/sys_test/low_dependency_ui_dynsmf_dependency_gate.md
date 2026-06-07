@@ -18,8 +18,8 @@ Candidate executable specs after requirement selection:
 
 Candidate generated manuals:
 
-- `doc/06_spec/03_system/app/ui/feature/low_dependency_ui_dynsmf_dependency_gate_spec.md`
-- `doc/06_spec/01_unit/app/ui/dependency_closure_gate_spec.md`
+- `doc/06_spec/test/03_system/app/ui/feature/low_dependency_ui_dynsmf_dependency_gate_spec.md`
+- `doc/06_spec/test/01_unit/app/ui/dependency_closure_gate_spec.md`
 
 ## Pass Criteria
 
@@ -50,10 +50,10 @@ Candidate generated manuals:
 
 | Candidate | Description | Executable Spec | Generated Spec | Coverage |
 |-----------|-------------|-----------------|----------------|----------|
-| AC-3 | TUI depends only on common UI/TUI renderer code | `test/03_system/app/ui/feature/low_dependency_ui_dynsmf_dependency_gate_spec.spl`; `test/01_unit/app/ui/dependency_closure_gate_spec.spl` | `doc/06_spec/03_system/app/ui/feature/low_dependency_ui_dynsmf_dependency_gate_spec.md`; `doc/06_spec/01_unit/app/ui/dependency_closure_gate_spec.md` | Covered |
-| AC-4 | Host adapters consume shared web-render contracts | `test/03_system/app/ui/feature/low_dependency_ui_dynsmf_dependency_gate_spec.spl`; `test/01_unit/app/ui/dependency_closure_gate_spec.spl` | `doc/06_spec/03_system/app/ui/feature/low_dependency_ui_dynsmf_dependency_gate_spec.md`; `doc/06_spec/01_unit/app/ui/dependency_closure_gate_spec.md` | Covered |
-| AC-5 | HTML/CSS implementation loads only where needed | `test/03_system/app/ui/feature/low_dependency_ui_dynsmf_dependency_gate_spec.spl`; `test/01_unit/app/ui/render_capability_spec.spl`; `test/01_unit/app/ui/dependency_closure_gate_spec.spl` | `doc/06_spec/03_system/app/ui/feature/low_dependency_ui_dynsmf_dependency_gate_spec.md`; `doc/06_spec/01_unit/app/ui/render_capability_spec.md`; `doc/06_spec/01_unit/app/ui/dependency_closure_gate_spec.md` | Covered |
-| NFR-A | Static dependency gate | `test/03_system/app/ui/feature/low_dependency_ui_dynsmf_dependency_gate_spec.spl`; `test/01_unit/app/ui/dependency_closure_gate_spec.spl` | `doc/06_spec/03_system/app/ui/feature/low_dependency_ui_dynsmf_dependency_gate_spec.md`; `doc/06_spec/01_unit/app/ui/dependency_closure_gate_spec.md` | Covered |
+| AC-3 | TUI depends only on common UI/TUI renderer code | `test/03_system/app/ui/feature/low_dependency_ui_dynsmf_dependency_gate_spec.spl`; `test/01_unit/app/ui/dependency_closure_gate_spec.spl` | `doc/06_spec/test/03_system/app/ui/feature/low_dependency_ui_dynsmf_dependency_gate_spec.md`; `doc/06_spec/test/01_unit/app/ui/dependency_closure_gate_spec.md` | Covered |
+| AC-4 | Host adapters consume shared web-render contracts | `test/03_system/app/ui/feature/low_dependency_ui_dynsmf_dependency_gate_spec.spl`; `test/01_unit/app/ui/dependency_closure_gate_spec.spl` | `doc/06_spec/test/03_system/app/ui/feature/low_dependency_ui_dynsmf_dependency_gate_spec.md`; `doc/06_spec/test/01_unit/app/ui/dependency_closure_gate_spec.md` | Covered |
+| AC-5 | HTML/CSS implementation loads only where needed | `test/03_system/app/ui/feature/low_dependency_ui_dynsmf_dependency_gate_spec.spl`; `test/01_unit/app/ui/render_capability_spec.spl`; `test/01_unit/app/ui/dependency_closure_gate_spec.spl` | `doc/06_spec/test/03_system/app/ui/feature/low_dependency_ui_dynsmf_dependency_gate_spec.md`; `doc/06_spec/test/01_unit/app/ui/render_capability_spec.md`; `doc/06_spec/test/01_unit/app/ui/dependency_closure_gate_spec.md` | Covered |
+| NFR-A | Static dependency gate | `test/03_system/app/ui/feature/low_dependency_ui_dynsmf_dependency_gate_spec.spl`; `test/01_unit/app/ui/dependency_closure_gate_spec.spl` | `doc/06_spec/test/03_system/app/ui/feature/low_dependency_ui_dynsmf_dependency_gate_spec.md`; `doc/06_spec/test/01_unit/app/ui/dependency_closure_gate_spec.md` | Covered |
 
 ## Current Baseline
 

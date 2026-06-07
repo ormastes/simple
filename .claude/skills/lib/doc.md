@@ -62,7 +62,7 @@ Categories mirror the numbered `test/` structure:
 - `01_unit/` -> `test/01_unit/`, `02_integration/` -> `test/02_integration/`, `03_system/` -> `test/03_system/`
 - feature specs keep their mirrored numbered tier instead of moving to a flat `feature/` tree.
 
-Path mapping: `test/01_unit/compiler/parser/x_spec.spl` -> `doc/06_spec/01_unit/compiler/parser/x_spec.md`
+Path mapping: `test/01_unit/compiler/parser/x_spec.spl` -> `doc/06_spec/test/01_unit/compiler/parser/x_spec.md`
 
 See `doc/06_spec/FILE.md` for full manifest.
 

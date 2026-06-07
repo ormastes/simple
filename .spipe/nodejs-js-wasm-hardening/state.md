@@ -151,7 +151,7 @@ dev-incomplete
   favorite links without nested sibling-method dispatch. PASS
   `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/web/browser_session_controls_spec.spl --mode=interpreter --clean`
   (2 scenarios). Regenerated
-  `doc/06_spec/01_unit/lib/common/web/browser_session_controls_spec.md`.
+  `doc/06_spec/test/01_unit/lib/common/web/browser_session_controls_spec.md`.
 - dev: Added an RFC 9110 BrowserSession HTTP status semantics slice. Red test
   first failed for unknown valid status-code class fallback and invalid status
   processing; implementation now maps unknown valid codes to their x00 class
@@ -160,7 +160,7 @@ dev-incomplete
   PASS `SIMPLE_LIB=src bin/simple check src/lib/gc_async_mut/http/types.spl src/lib/nogc_async_mut/http/types.spl src/lib/nogc_sync_mut/http/types.spl test/01_unit/lib/common/web/browser_session_http_status_spec.spl`.
   PASS `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/web/browser_session_http_status_spec.spl --mode=interpreter --clean`
   (2 scenarios). Regenerated
-  `doc/06_spec/01_unit/lib/common/web/browser_session_http_status_spec.md`.
+  `doc/06_spec/test/01_unit/lib/common/web/browser_session_http_status_spec.md`.
 - dev: Added the first HTML standard tag base-coverage slice. The red run
   exposed that repeated full renders made the spec take 85s and that
   `<template>` contents were visible in BrowserSession body rendering. The spec
@@ -172,7 +172,7 @@ dev-incomplete
   PASS `SIMPLE_LIB=src bin/simple check src/lib/gc_async_mut/web/browser_session_html.spl src/lib/gc_async_mut/web/browser_session_runtime.spl test/01_unit/lib/common/web/browser_session_html_tag_std_spec.spl`.
   PASS `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/web/browser_session_html_tag_std_spec.spl --mode=interpreter --clean`
   (2 scenarios, 12s after removing repeated renders). Regenerated
-  `doc/06_spec/01_unit/lib/common/web/browser_session_html_tag_std_spec.md`.
+  `doc/06_spec/test/01_unit/lib/common/web/browser_session_html_tag_std_spec.md`.
 - dev: Added a BrowserSession textual UI-access system slice for primitive
   browser controls. `browser_session_ui_access.spl` exposes back, forward,
   stop, home, favorite, address, and title nodes through `UiAccessSnapshot` and
@@ -180,7 +180,7 @@ dev-incomplete
   `SIMPLE_LIB=src bin/simple check src/lib/gc_async_mut/web/browser_session_ui_access.spl test/03_system/app/browser/feature/browser_session_ui_access_controls_spec.spl`.
   PASS `SIMPLE_LIB=src bin/simple test test/03_system/app/browser/feature/browser_session_ui_access_controls_spec.spl --mode=interpreter --clean`
   (3 scenarios). Regenerated
-  `doc/06_spec/03_system/app/browser/feature/browser_session_ui_access_controls_spec.md`.
+  `doc/06_spec/test/03_system/app/browser/feature/browser_session_ui_access_controls_spec.md`.
 - dev: Added an HTML scripting tag semantics slice for `script`/`noscript`.
   The first stricter red case proved `noscript` fallback was visible when
   BrowserSession runtime was enabled but no script executed. Implementation now
@@ -190,7 +190,7 @@ dev-incomplete
   `SIMPLE_LIB=src bin/simple check src/lib/gc_async_mut/web/browser_session_html.spl src/lib/gc_async_mut/web/browser_session_runtime.spl test/01_unit/lib/common/web/browser_session_html_scripting_tags_spec.spl`.
   PASS `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/web/browser_session_html_scripting_tags_spec.spl --mode=interpreter --clean`
   (3 scenarios). Regenerated
-  `doc/06_spec/01_unit/lib/common/web/browser_session_html_scripting_tags_spec.md`.
+  `doc/06_spec/test/01_unit/lib/common/web/browser_session_html_scripting_tags_spec.md`.
 - dev: Added an HTML text-level tag semantics slice. The red run proved
   `html_to_text` preserved normal inline text-level content but collapsed
   `<br>` instead of producing a visible line break. Implementation now extracts
@@ -199,7 +199,7 @@ dev-incomplete
   `SIMPLE_LIB=src bin/simple check src/lib/gc_async_mut/web/browser_session_html.spl test/01_unit/lib/common/web/browser_session_html_text_level_tags_spec.spl`.
   PASS `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/web/browser_session_html_text_level_tags_spec.spl --mode=interpreter --clean`
   (2 scenarios). Regenerated
-  `doc/06_spec/01_unit/lib/common/web/browser_session_html_text_level_tags_spec.md`.
+  `doc/06_spec/test/01_unit/lib/common/web/browser_session_html_text_level_tags_spec.md`.
 - dev: Added an HTML embedded tag text-alternative slice. The red run proved
   `html_to_text` did not expose `img alt` or `area alt` text. Implementation
   now emits non-empty `alt` text for non-closing `img` and `area` tags while
@@ -208,7 +208,7 @@ dev-incomplete
   `SIMPLE_LIB=src bin/simple check src/lib/gc_async_mut/web/browser_session_html.spl test/01_unit/lib/common/web/browser_session_html_embedded_tags_spec.spl`.
   PASS `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/web/browser_session_html_embedded_tags_spec.spl --mode=interpreter --clean`
   (2 scenarios). Regenerated
-  `doc/06_spec/01_unit/lib/common/web/browser_session_html_embedded_tags_spec.md`.
+  `doc/06_spec/test/01_unit/lib/common/web/browser_session_html_embedded_tags_spec.md`.
 - dev: Added an HTML form/control tag text slice. The red run proved
   `html_to_text` preserved ordinary form container text but dropped
   value-bearing controls. Implementation now emits `input value` and
@@ -216,14 +216,14 @@ dev-incomplete
   PASS `SIMPLE_LIB=src bin/simple check src/lib/gc_async_mut/web/browser_session_html.spl test/01_unit/lib/common/web/browser_session_html_form_tags_spec.spl`.
   PASS `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/web/browser_session_html_form_tags_spec.spl --mode=interpreter --clean`
   (2 scenarios). Regenerated
-  `doc/06_spec/01_unit/lib/common/web/browser_session_html_form_tags_spec.md`.
+  `doc/06_spec/test/01_unit/lib/common/web/browser_session_html_form_tags_spec.md`.
 - dev: Added an HTML table tag text slice. The red run proved table text
   collapsed caption, headers, cells, and rows into one flat string. The helper
   now inserts newlines at table row starts and tabs between `th`/`td` cells.
   PASS `SIMPLE_LIB=src bin/simple check src/lib/gc_async_mut/web/browser_session_html.spl test/01_unit/lib/common/web/browser_session_html_table_tags_spec.spl`.
   PASS `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/web/browser_session_html_table_tags_spec.spl --mode=interpreter --clean`
   (1 scenario). Regenerated
-  `doc/06_spec/01_unit/lib/common/web/browser_session_html_table_tags_spec.md`.
+  `doc/06_spec/test/01_unit/lib/common/web/browser_session_html_table_tags_spec.md`.
 - dev: Added an HTML grouping/list tag text slice. The red run proved
   paragraph/block grouping, list items, and definition lists collapsed without
   semantic separators. The helper now maps `hr` to a newline, separates `li`
@@ -231,7 +231,7 @@ dev-incomplete
   `SIMPLE_LIB=src bin/simple check src/lib/gc_async_mut/web/browser_session_html.spl test/01_unit/lib/common/web/browser_session_html_grouping_tags_spec.spl`.
   PASS `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/web/browser_session_html_grouping_tags_spec.spl --mode=interpreter --clean`
   (3 scenarios). Regenerated
-  `doc/06_spec/01_unit/lib/common/web/browser_session_html_grouping_tags_spec.md`.
+  `doc/06_spec/test/01_unit/lib/common/web/browser_session_html_grouping_tags_spec.md`.
 - dev: Added an HTML metadata tag text slice. The red run proved
   `html_to_text` leaked document `head`, `title`, and `style` contents into
   visible text. The helper now suppresses text inside `head`, `title`, `style`,
@@ -239,7 +239,7 @@ dev-incomplete
   `SIMPLE_LIB=src bin/simple check src/lib/gc_async_mut/web/browser_session_html.spl test/01_unit/lib/common/web/browser_session_html_metadata_tags_spec.spl`.
   PASS `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/web/browser_session_html_metadata_tags_spec.spl --mode=interpreter --clean`
   (2 scenarios). Regenerated
-  `doc/06_spec/01_unit/lib/common/web/browser_session_html_metadata_tags_spec.md`.
+  `doc/06_spec/test/01_unit/lib/common/web/browser_session_html_metadata_tags_spec.md`.
 - dev: Added an HTML section/heading tag text slice. The red run proved
   adjacent `h1`-`h6`, `hgroup`, and `address` text collapsed into one token.
   The helper now applies line boundaries before and after section text block
@@ -247,7 +247,7 @@ dev-incomplete
   `SIMPLE_LIB=src bin/simple check src/lib/gc_async_mut/web/browser_session_html.spl test/01_unit/lib/common/web/browser_session_html_section_tags_spec.spl`.
   PASS `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/web/browser_session_html_section_tags_spec.spl --mode=interpreter --clean`
   (2 scenarios). Regenerated
-  `doc/06_spec/01_unit/lib/common/web/browser_session_html_section_tags_spec.md`.
+  `doc/06_spec/test/01_unit/lib/common/web/browser_session_html_section_tags_spec.md`.
 - dev: Added an HTML ruby tag text slice. The red run proved ruby without
   `rp` fallback tags collapsed base text and `rt` annotation text. The helper
   now collects `rt` text as parenthesized annotations and suppresses `rp`
@@ -255,7 +255,7 @@ dev-incomplete
   `SIMPLE_LIB=src bin/simple check src/lib/gc_async_mut/web/browser_session_html.spl test/01_unit/lib/common/web/browser_session_html_ruby_tags_spec.spl`.
   PASS `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/web/browser_session_html_ruby_tags_spec.spl --mode=interpreter --clean`
   (2 scenarios). Regenerated
-  `doc/06_spec/01_unit/lib/common/web/browser_session_html_ruby_tags_spec.md`.
+  `doc/06_spec/test/01_unit/lib/common/web/browser_session_html_ruby_tags_spec.md`.
 - dev: Added an HTML edit tag text slice. The red run proved `ins`/`del`
   text lost revision semantics in plain text extraction. The helper now buffers
   edit text, ignores nested inline markup structurally, and emits `[+...]` for
@@ -263,7 +263,7 @@ dev-incomplete
   `SIMPLE_LIB=src bin/simple check src/lib/gc_async_mut/web/browser_session_html.spl test/01_unit/lib/common/web/browser_session_html_edit_tags_spec.spl`.
   PASS `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/web/browser_session_html_edit_tags_spec.spl --mode=interpreter --clean`
   (2 scenarios). Regenerated
-  `doc/06_spec/01_unit/lib/common/web/browser_session_html_edit_tags_spec.md`.
+  `doc/06_spec/test/01_unit/lib/common/web/browser_session_html_edit_tags_spec.md`.
 - dev: Added a real red HTML anchor/UI access navigation scenario and stopped
   before implementation per user instruction. The scenario expects anchors to
   appear as textual UI `link` nodes with resolved `href` metadata and expects
@@ -279,7 +279,7 @@ dev-incomplete
   PASS
   `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/web/browser_session_html_interactive_tags_spec.spl --mode=interpreter --clean --json`
   (2 scenarios). Regenerated
-  `doc/06_spec/01_unit/lib/common/web/browser_session_html_interactive_tags_spec.md`.
+  `doc/06_spec/test/01_unit/lib/common/web/browser_session_html_interactive_tags_spec.md`.
 - dev: Converted `browser_session_storage_spec.spl` placeholder failure
   branches from `expect(false).to_equal(true)` to explicit real-test failure
   messages for storage method/key collision behavior. No implementation logic
@@ -288,7 +288,7 @@ dev-incomplete
   RED
   `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/web/browser_session_storage_spec.spl --mode=interpreter --clean --json`
   (0 listed, 0 passed, 1 failed file). Regenerated
-  `doc/06_spec/01_unit/lib/common/web/browser_session_storage_spec.md`; focused
+  `doc/06_spec/test/01_unit/lib/common/web/browser_session_storage_spec.md`; focused
   placeholder scan reports 0 matches in the storage spec and generated manual.
 - dev: Converted `simple_browser_page_spec.spl` missing-target placeholder
   branches from `expect(false).to_equal(true)` to explicit real-test failure
@@ -299,7 +299,7 @@ dev-incomplete
   RED
   `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/web/simple_browser_page_spec.spl --mode=interpreter --clean --json`
   (0 listed, 0 passed, 4 failed scenarios/files as reported by the runner).
-  Regenerated `doc/06_spec/01_unit/lib/common/web/simple_browser_page_spec.md`;
+  Regenerated `doc/06_spec/test/01_unit/lib/common/web/simple_browser_page_spec.md`;
   focused placeholder scan reports 0 matches in the page spec and generated
   manual.
 - dev: Converted the first `browser_session_spec.spl` lifecycle slice from
@@ -311,7 +311,7 @@ dev-incomplete
   RED
   `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/web/browser_session_spec.spl --mode=interpreter --clean --json`
   (39 passed, 13 failed across the broader legacy file). Regenerated
-  `doc/06_spec/01_unit/lib/common/web/browser_session_spec.md`; focused
+  `doc/06_spec/test/01_unit/lib/common/web/browser_session_spec.md`; focused
   lifecycle range placeholder scan reports 0 matches, with 81 remaining
   placeholder assertions elsewhere in the same legacy spec.
 - dev: Converted the next `browser_session_spec.spl` page-loading slice from
@@ -324,7 +324,7 @@ dev-incomplete
   RED
   `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/web/browser_session_spec.spl --mode=interpreter --clean --json`
   (39 passed, 13 failed across the broader legacy file). Regenerated
-  `doc/06_spec/01_unit/lib/common/web/browser_session_spec.md`; focused
+  `doc/06_spec/test/01_unit/lib/common/web/browser_session_spec.md`; focused
   page-loading range placeholder scan reports 0 matches, with 73 remaining
   placeholder assertions elsewhere in the same legacy spec.
 - dev: Converted the next `browser_session_spec.spl` module/export slice from
@@ -337,7 +337,7 @@ dev-incomplete
   RED
   `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/web/browser_session_spec.spl --mode=interpreter --clean --json`
   (39 passed, 13 failed across the broader legacy file). Regenerated
-  `doc/06_spec/01_unit/lib/common/web/browser_session_spec.md`; focused
+  `doc/06_spec/test/01_unit/lib/common/web/browser_session_spec.md`; focused
   module/export range placeholder scan reports 0 matches, with 63 remaining
   placeholder assertions elsewhere in the same legacy spec.
 - dev: Converted the next `browser_session_spec.spl` module/script follow-up
@@ -349,7 +349,7 @@ dev-incomplete
   RED
   `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/web/browser_session_spec.spl --mode=interpreter --clean --json`
   (39 passed, 13 failed across the broader legacy file). Regenerated
-  `doc/06_spec/01_unit/lib/common/web/browser_session_spec.md`; focused
+  `doc/06_spec/test/01_unit/lib/common/web/browser_session_spec.md`; focused
   follow-up range placeholder scan reports 0 matches, with 58 remaining
   placeholder assertions elsewhere in the same legacy spec.
 - dev: Converted the next `browser_session_spec.spl` globals/location slice
@@ -362,7 +362,7 @@ dev-incomplete
   RED
   `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/web/browser_session_spec.spl --mode=interpreter --clean --json`
   (39 passed, 13 failed across the broader legacy file). Regenerated
-  `doc/06_spec/01_unit/lib/common/web/browser_session_spec.md`; focused
+  `doc/06_spec/test/01_unit/lib/common/web/browser_session_spec.md`; focused
   globals/location range placeholder scan reports 0 matches, with 42 remaining
   placeholder assertions elsewhere in the same legacy spec.
 - dev: Converted the next `browser_session_spec.spl`
@@ -375,7 +375,7 @@ dev-incomplete
   RED
   `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/web/browser_session_spec.spl --mode=interpreter --clean --json`
   (39 passed, 13 failed across the broader legacy file). Regenerated
-  `doc/06_spec/01_unit/lib/common/web/browser_session_spec.md`; focused
+  `doc/06_spec/test/01_unit/lib/common/web/browser_session_spec.md`; focused
   history/WebGPU/eval/storage range placeholder scan reports 0 matches, with 26
   remaining placeholder assertions elsewhere in the same legacy spec.
 - dev: Converted the final `browser_session_spec.spl` cookie/fetch/storage/
@@ -389,7 +389,7 @@ dev-incomplete
   RED
   `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/web/browser_session_spec.spl --mode=interpreter --clean --json`
   (39 passed, 13 failed across the broader legacy file). Regenerated
-  `doc/06_spec/01_unit/lib/common/web/browser_session_spec.md`; full source
+  `doc/06_spec/test/01_unit/lib/common/web/browser_session_spec.md`; full source
   placeholder scan reports 0 matches in `browser_session_spec.spl`.
 - dev: Converted the first `browser_session_async_spec.spl` promise/fetch
   response slice from `expect(false).to_equal(true)` placeholders to explicit
@@ -401,7 +401,7 @@ dev-incomplete
   RED
   `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/web/browser_session_async_spec.spl --mode=interpreter --clean --json`
   (0 passed, 17 failed across the broader async file). Regenerated
-  `doc/06_spec/01_unit/lib/common/web/browser_session_async_spec.md`; focused
+  `doc/06_spec/test/01_unit/lib/common/web/browser_session_async_spec.md`; focused
   first async range placeholder scan reports 0 matches, with 22 remaining
   placeholder assertions elsewhere in the same async spec.
 - dev: Converted the final `browser_session_async_spec.spl` chained-fetch/
@@ -414,7 +414,7 @@ dev-incomplete
   RED
   `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/web/browser_session_async_spec.spl --mode=interpreter --clean --json`
   (0 passed, 17 failed across real assertions/failures). Regenerated
-  `doc/06_spec/01_unit/lib/common/web/browser_session_async_spec.md`; full
+  `doc/06_spec/test/01_unit/lib/common/web/browser_session_async_spec.md`; full
   source placeholder scan reports 0 matches in
   `browser_session_async_spec.spl`.
 - dev: Added a real red JS/WASM/HTTP standard case for
@@ -427,7 +427,7 @@ dev-incomplete
   RED
   `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/web/browser_session_async_spec.spl --mode=interpreter --clean --json`
   (0 passed, 18 failed across real assertions/failures). Regenerated
-  `doc/06_spec/01_unit/lib/common/web/browser_session_async_spec.md`; full
+  `doc/06_spec/test/01_unit/lib/common/web/browser_session_async_spec.md`; full
   source placeholder scan reports 0 matches.
 - dev: Added a paired real red JS/WASM/HTTP standard case for
   `WebAssembly.instantiateStreaming(window.fetch(...))` MIME enforcement. The
@@ -439,7 +439,7 @@ dev-incomplete
   RED
   `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/web/browser_session_async_spec.spl --mode=interpreter --clean --json`
   (0 passed, 19 failed across real assertions/failures). Regenerated
-  `doc/06_spec/01_unit/lib/common/web/browser_session_async_spec.md`; full
+  `doc/06_spec/test/01_unit/lib/common/web/browser_session_async_spec.md`; full
   source placeholder scan reports 0 matches.
 - dev: Added a real red HTTP/JS browser standard case for same-origin fetch
   redirect following. `browser_session_http_status_spec.spl` now requires a
@@ -450,7 +450,7 @@ dev-incomplete
   RED
   `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/web/browser_session_http_status_spec.spl --mode=interpreter --clean --json`
   (2 passed, 1 failed). Regenerated
-  `doc/06_spec/01_unit/lib/common/web/browser_session_http_status_spec.md`;
+  `doc/06_spec/test/01_unit/lib/common/web/browser_session_http_status_spec.md`;
   source placeholder scan reports 0 matches.
 - dev: Added a real red HTTP/JS browser standard case for `HEAD` fetch response
   body semantics. The spec now requires the pending request to preserve
@@ -461,7 +461,7 @@ dev-incomplete
   RED
   `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/web/browser_session_http_status_spec.spl --mode=interpreter --clean --json`
   (2 passed, 2 failed). Regenerated
-  `doc/06_spec/01_unit/lib/common/web/browser_session_http_status_spec.md`;
+  `doc/06_spec/test/01_unit/lib/common/web/browser_session_http_status_spec.md`;
   source placeholder scan reports 0 matches.
 - dev: Added a real red HTTP/JS browser standard case for `303 See Other`
   redirect method rewriting. The spec now requires a `POST` fetch with body to
@@ -472,7 +472,7 @@ dev-incomplete
   RED
   `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/web/browser_session_http_status_spec.spl --mode=interpreter --clean --json`
   (2 passed, 3 failed). Regenerated
-  `doc/06_spec/01_unit/lib/common/web/browser_session_http_status_spec.md`;
+  `doc/06_spec/test/01_unit/lib/common/web/browser_session_http_status_spec.md`;
   source placeholder scan reports 0 matches.
 - dev: Added a real red HTTP/JS browser standard case for `307 Temporary
   Redirect` method/body preservation. The spec now requires a `POST` fetch with
@@ -484,7 +484,7 @@ dev-incomplete
   RED
   `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/web/browser_session_http_status_spec.spl --mode=interpreter --clean --json`
   (2 passed, 4 failed). Regenerated
-  `doc/06_spec/01_unit/lib/common/web/browser_session_http_status_spec.md`;
+  `doc/06_spec/test/01_unit/lib/common/web/browser_session_http_status_spec.md`;
   source placeholder scan reports 0 matches.
 - dev: Added a real red HTTP/JS browser standard case for `308 Permanent
   Redirect` method/body preservation. The spec now requires a `POST` fetch with
@@ -496,7 +496,7 @@ dev-incomplete
   RED
   `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/web/browser_session_http_status_spec.spl --mode=interpreter --clean --json`
   (2 passed, 5 failed). Regenerated
-  `doc/06_spec/01_unit/lib/common/web/browser_session_http_status_spec.md`;
+  `doc/06_spec/test/01_unit/lib/common/web/browser_session_http_status_spec.md`;
   source placeholder scan reports 0 matches.
 - dev: Added a real red HTTPS/JS browser standard case for active mixed-content
   fetch blocking. The spec now requires an HTTPS page to reject
@@ -508,7 +508,7 @@ dev-incomplete
   RED
   `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/web/browser_session_http_status_spec.spl --mode=interpreter --clean --json`
   (2 passed, 6 failed). Regenerated
-  `doc/06_spec/01_unit/lib/common/web/browser_session_http_status_spec.md`;
+  `doc/06_spec/test/01_unit/lib/common/web/browser_session_http_status_spec.md`;
   source placeholder scan reports 0 matches.
 - dev: Added a real red JS/WASM/HTTPS browser standard case for active
   mixed-content WASM streaming fetch blocking. The async spec now requires
@@ -520,5 +520,5 @@ dev-incomplete
   RED
   `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/web/browser_session_async_spec.spl --mode=interpreter --clean --json`
   (0 passed, 20 failed). Regenerated
-  `doc/06_spec/01_unit/lib/common/web/browser_session_async_spec.md`; source
+  `doc/06_spec/test/01_unit/lib/common/web/browser_session_async_spec.md`; source
   placeholder scan reports 0 matches.

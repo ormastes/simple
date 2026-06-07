@@ -29,9 +29,9 @@ Candidate executable specs after requirement selection:
 
 Candidate generated manuals:
 
-- `doc/06_spec/01_unit/os/smf/dynsmf_session_spec.md`
-- `doc/06_spec/02_integration/app/simple/dynsmf_autoload_policy_spec.md`
-- `doc/06_spec/03_system/stdlib/dynload/dynsmf_session_unload_reload_spec.md`
+- `doc/06_spec/test/01_unit/os/smf/dynsmf_session_spec.md`
+- `doc/06_spec/test/02_integration/app/simple/dynsmf_autoload_policy_spec.md`
+- `doc/06_spec/test/03_system/stdlib/dynload/dynsmf_session_unload_reload_spec.md`
 
 ## Pass Criteria
 
@@ -69,10 +69,10 @@ Candidate generated manuals:
 
 | Candidate | Description | Executable Spec | Generated Spec | Coverage |
 |-----------|-------------|-----------------|----------------|----------|
-| AC-6 | Requested stdlib-like libraries have precompiled dynSMF manifest entries | `test/02_integration/app/simple/dynsmf_autoload_policy_spec.spl`; `test/01_unit/os/smf/dynsmf_session_spec.spl`; `test/03_system/stdlib/dynload/dynsmf_session_unload_reload_spec.spl`; `scripts/check/check-low-dependency-dynsmf-build-plans.shs` | `doc/06_spec/02_integration/app/simple/dynsmf_autoload_policy_spec.md`; `doc/06_spec/01_unit/os/smf/dynsmf_session_spec.md`; `doc/06_spec/03_system/stdlib/dynload/dynsmf_session_unload_reload_spec.md`; `build/low_dependency_ui_dynsmf/build_plans/report.md` | Covered |
-| AC-7 | Arg/env controls disable all or named dynSMF libraries | `test/02_integration/app/simple/dynsmf_autoload_policy_spec.spl`; `test/01_unit/os/smf/dynsmf_session_spec.spl` | `doc/06_spec/02_integration/app/simple/dynsmf_autoload_policy_spec.md`; `doc/06_spec/01_unit/os/smf/dynsmf_session_spec.md` | Covered |
-| AC-8 | Session unload/reload works in interpreter-mode tests for every selected default library | `test/03_system/stdlib/dynload/dynsmf_session_unload_reload_spec.spl` | `doc/06_spec/03_system/stdlib/dynload/dynsmf_session_unload_reload_spec.md` | Covered |
-| NFR-B | Runtime load/unload evidence is inspectable | `test/01_unit/os/smf/dynsmf_session_spec.spl` | `doc/06_spec/01_unit/os/smf/dynsmf_session_spec.md` | Covered |
+| AC-6 | Requested stdlib-like libraries have precompiled dynSMF manifest entries | `test/02_integration/app/simple/dynsmf_autoload_policy_spec.spl`; `test/01_unit/os/smf/dynsmf_session_spec.spl`; `test/03_system/stdlib/dynload/dynsmf_session_unload_reload_spec.spl`; `scripts/check/check-low-dependency-dynsmf-build-plans.shs` | `doc/06_spec/test/02_integration/app/simple/dynsmf_autoload_policy_spec.md`; `doc/06_spec/test/01_unit/os/smf/dynsmf_session_spec.md`; `doc/06_spec/test/03_system/stdlib/dynload/dynsmf_session_unload_reload_spec.md`; `build/low_dependency_ui_dynsmf/build_plans/report.md` | Covered |
+| AC-7 | Arg/env controls disable all or named dynSMF libraries | `test/02_integration/app/simple/dynsmf_autoload_policy_spec.spl`; `test/01_unit/os/smf/dynsmf_session_spec.spl` | `doc/06_spec/test/02_integration/app/simple/dynsmf_autoload_policy_spec.md`; `doc/06_spec/test/01_unit/os/smf/dynsmf_session_spec.md` | Covered |
+| AC-8 | Session unload/reload works in interpreter-mode tests for every selected default library | `test/03_system/stdlib/dynload/dynsmf_session_unload_reload_spec.spl` | `doc/06_spec/test/03_system/stdlib/dynload/dynsmf_session_unload_reload_spec.md` | Covered |
+| NFR-B | Runtime load/unload evidence is inspectable | `test/01_unit/os/smf/dynsmf_session_spec.spl` | `doc/06_spec/test/01_unit/os/smf/dynsmf_session_spec.md` | Covered |
 
 ## Current Baseline
 

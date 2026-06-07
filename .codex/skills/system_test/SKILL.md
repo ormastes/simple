@@ -133,7 +133,7 @@ describe "<Feature Name>":
   - Raster evidence (`.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.ppm`) is tracked by Git LFS.
 - After adding or moving UI-facing app feature specs, run
   `test/03_system/app/testing/feature/ui_sspec_evidence_audit_spec.spl` so the
-  critical UI lane keeps executable specs, mirrored `doc/06_spec/03_system/app`
+  critical UI lane keeps executable specs, mirrored `doc/06_spec/test/03_system/app`
   manuals, and visible evidence markers.
 - SGTTI must remain zero-overhead outside explicit test/debug builds. Specs that
   add SGTTI-backed TUI/GUI evidence must also prove the normal production
@@ -163,7 +163,7 @@ describe "<Feature Name>":
     `test/02_integration/app/startup_argparse_mmap_perf_spec.spl` in the test
     plan and traceability.
   - Generated docs must mirror that spec at
-    `doc/06_spec/02_integration/app/startup_argparse_mmap_perf_spec.md`.
+    `doc/06_spec/test/02_integration/app/startup_argparse_mmap_perf_spec.md`.
   - Do not replace the compact startup path with a compile/JIT workaround just
     to make a test pass; fix the fast path or record a concrete bug.
   - If the change touches dynSMF precompiled artifacts or compiling SMF while
@@ -197,7 +197,7 @@ Any REQ with 0 test cases is a **FAIL** — must be addressed.
   `0`.
 - Mirror the executable path after stripping `test/`, for example
   `test/03_system/feature/usage/math_blocks_spec.spl` ->
-  `doc/06_spec/03_system/feature/usage/math_blocks_spec.md`.
+  `doc/06_spec/test/03_system/feature/usage/math_blocks_spec.md`.
 - Keep requirement, research, design, architecture, plan, generated spec,
   implementation, guide, and executable test artifacts on the same feature slug.
 - Include both the generated spec/manual path and executable `test/...` path in

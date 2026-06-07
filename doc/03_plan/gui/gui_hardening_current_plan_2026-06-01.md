@@ -8751,7 +8751,7 @@ BrowserSession fetched invalid arrayBuffer instantiate catch continuation:
  - Verify the instantiated result exposes an instance exports object for the
    valid empty module payload.
  - Regenerate the mirrored scenario manual for the changed SPipe spec under the
-   current `doc/06_spec/01_unit/...` layout.
+   current `doc/06_spec/test/01_unit/...` layout.
  - Remove the stale old-path generated manual for the same moved SPipe spec.
  - Restore generated index/manual noise from docgen and adjacent specs.
  - Record command evidence, pass counts, warning count, and remaining open scope.
@@ -9328,7 +9328,7 @@ Detailed completion checklist:
   empty `out` assertion, committed `application/wasm` responses, ordered
   intermediate output after the first commit, and deterministic final output.
 - Regenerate the mirrored SPipe scenario manual for the focused spec.
-- Move the generated old-path manual from `doc/06_spec/01_unit/...` onto the
+- Move the generated old-path manual from `doc/06_spec/test/01_unit/...` onto the
   tracked `doc/06_spec/unit/...` path.
 - Remove adjacent generated old-path manual noise from docgen and regression
   specs.
@@ -9351,8 +9351,8 @@ Detailed test checklist:
 - `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple check test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
 - `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
 - `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec`
-- `mkdir -p doc/06_spec/unit/lib/common/web && mv doc/06_spec/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.md doc/06_spec/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.md`
-- `rm -rf doc/06_spec/01_unit/lib/common/web doc/06_spec/03_system/app/browser doc/06_spec/03_system/feature/js`
+- `mkdir -p doc/06_spec/unit/lib/common/web && mv doc/06_spec/test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.md doc/06_spec/unit/lib/common/web/browser_session_fetch_wasm_chain_spec.md`
+- `rm -rf doc/06_spec/test/01_unit/lib/common/web doc/06_spec/test/03_system/app/browser doc/06_spec/test/03_system/feature/js`
 - `git restore doc/06_spec/INDEX.md doc/08_tracking/test/test-spec.html doc/08_tracking/test/test-spec.md`
 - `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/01_unit/lib/common/web/browser_session_wasm_host_spec.spl --mode=interpreter --timeout-ms=180000 --clean --format json`
 - `SIMPLE_LIB=src SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter --timeout-ms=240000 --clean --format json`
@@ -9541,7 +9541,7 @@ Detailed completion checklist:
 - [x] Run the focused spec-file check before broader regressions.
 - [x] Run the focused BrowserSession fetch/WASM chain interpreter spec.
 - [x] Regenerate the mirrored SPipe scenario manual.
-- [x] Move old-path docgen output from `doc/06_spec/01_unit/...` to the tracked
+- [x] Move old-path docgen output from `doc/06_spec/test/01_unit/...` to the tracked
   `doc/06_spec/unit/...` manual location.
 - [x] Restore generated index/tracking noise and remove stale old-path manual
   output.

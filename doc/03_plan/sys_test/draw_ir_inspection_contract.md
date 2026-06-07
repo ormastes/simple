@@ -2,7 +2,7 @@
 
 **Feature:** `draw_io_sdn_draw_ir`
 **Executable spec:** `test/03_system/app/ui_test_api/feature/draw_ir_inspection_contract_spec.spl`
-**Generated manual:** `doc/06_spec/03_system/app/ui_test_api/feature/draw_ir_inspection_contract_spec.md`
+**Generated manual:** `doc/06_spec/test/03_system/app/ui_test_api/feature/draw_ir_inspection_contract_spec.md`
 **Status:** Red-phase pre-implementation contract tests
 
 ## Scope

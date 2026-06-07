@@ -2,7 +2,7 @@
 
 **Feature:** `ui_test_sgtti`
 **Executable spec:** `test/03_system/app/ui_test/feature/sgtti_shared_surface_contract_spec.spl`
-**Generated manual:** `doc/06_spec/03_system/app/ui_test/feature/sgtti_shared_surface_contract_spec.md`
+**Generated manual:** `doc/06_spec/test/03_system/app/ui_test/feature/sgtti_shared_surface_contract_spec.md`
 **Status:** Red-phase pre-implementation contract tests
 
 ## Scope
