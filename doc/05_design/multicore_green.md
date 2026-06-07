@@ -118,6 +118,9 @@ Behavior:
 - `green_carrier_rebalance_one` and `green_carrier_apply_rebalance_decision`
   move queued work from inactive or overloaded carriers to active carriers
   without executing the task during rebalance.
+- `Scheduler.rebalance_green_carrier_queues` applies a green-worker rebalance
+  decision using `Scheduler.green_parallelism_state.active_limit`, so callers
+  do not pass a stale carrier limit.
 
 ### Freestanding QEMU Probe Path
 

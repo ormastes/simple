@@ -149,6 +149,9 @@ SimpleOS path:
 - `green_carrier_apply_rebalance_decision` turns green-worker rebalance
   decisions into concrete carrier-queue movement, so preserved work can move
   from inactive or overloaded carriers onto active carriers before dispatch.
+- `Scheduler.rebalance_green_carrier_queues` applies those decisions with the
+  scheduler-owned active carrier limit, keeping queue movement under the same
+  authority as green dispatch.
 - QEMU proof currently covers AP startup plus CPU1 fixed-slot dispatch; full
   hardware context-switch handoff remains future work.
 

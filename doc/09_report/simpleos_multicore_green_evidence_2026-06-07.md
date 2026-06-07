@@ -56,4 +56,5 @@ SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 ./src/compiler_rust/target/debug/simple test 
   carriers across topology changes, runs dispatch on carriers activated by
   topology growth, and rejects runnable green dispatch for inactive carriers
   without dropping queued work. It also proves rebalanced inactive-carrier work
-  can execute on an active carrier.
+  can execute on an active carrier through the scheduler-owned rebalance
+  wrapper.

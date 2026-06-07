@@ -314,7 +314,7 @@ val queues = green_carrier_run_queues_new(4, 8)
 val decision = green_carrier_spawn_task(53, 4, 0, 3, 1, 2, 4, 0)
 val queued = green_carrier_apply_enqueue(queues, decision)
 val rebalance = green_worker_rebalance_decision(4, 0, 4, 1, 2, 2)
-val moved = green_carrier_apply_rebalance_decision(queued.queues, rebalance, sched.green_carrier_parallelism_limit())
+val moved = sched.rebalance_green_carrier_queues(queued.queues, rebalance)
 val dispatched = green_carrier_dispatch_next_with_limit(moved.queues, 0, sched.green_carrier_parallelism_limit())
 val result = sched.apply_green_scheduler_intent(green_carrier_scheduler_intent(dispatched))
 
