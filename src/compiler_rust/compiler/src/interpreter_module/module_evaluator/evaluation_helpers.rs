@@ -408,6 +408,15 @@ pub(super) fn process_imports_and_assignments(
                     }
                 }
             }
+            Node::Const(stmt) => {
+                let value =
+                    evaluate_expr(&stmt.value, env, local_functions, local_classes, local_enums, impl_methods)?;
+                env.insert(stmt.name.clone(), value.clone());
+                exports.insert(stmt.name.clone(), value.clone());
+                MODULE_GLOBALS.with(|cell| {
+                    cell.borrow_mut().insert(stmt.name.clone(), value);
+                });
+            }
             Node::Assignment(stmt) => {
                 // Evaluate module-level assignments
                 if let Expr::Identifier(name) = &stmt.target {
