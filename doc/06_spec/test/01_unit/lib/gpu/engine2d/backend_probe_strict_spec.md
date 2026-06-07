@@ -27,7 +27,7 @@ backend_probe_strict_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -278,6 +278,23 @@ expect(summary).to_contain("compute=true")
 
 </details>
 
+#### reports the preferred GUI backend order for native and GPU font offload
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val prober = BackendProber.create()
+
+expect(prober.preferred_backend_order()).to_equal("metal > cuda > rocm/hip > qualcomm > vulkan > opencl > opengl > intel > webgpu > software > cpu_simd > cpu")
+expect(prober.probe_all_summary()).to_contain("preferred_order=metal > cuda > rocm/hip > qualcomm > vulkan > opencl > opengl > intel > webgpu > software > cpu_simd > cpu")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -297,8 +314,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

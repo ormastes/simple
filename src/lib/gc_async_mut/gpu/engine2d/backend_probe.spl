@@ -1,6 +1,7 @@
 # Engine2D backend probe result and strict selection helpers.
 
-use std.gpu.engine2d.helpers_availability.{backend_canonical_name}
+use std.gpu.engine2d.helpers_availability.{backend_canonical_name, backend_is_hardware, backend_preference_summary}
+use std.gc_async_mut.cuda.{cuda_available}
 
 val BACKEND_CPU: text = "cpu"
 val BACKEND_SOFTWARE: text = "software"
@@ -48,6 +49,7 @@ class BackendProbeResult:
     has_compute: bool
     has_graphics: bool
     has_present: bool
+    memory_mb: i64
 
     static fn create(name: text, status: BackendStatus, api: text, gate: text, shader: text, reason: text) -> BackendProbeResult:
         val ok = status == BackendStatus.Initialized
@@ -66,7 +68,8 @@ class BackendProbeResult:
             reason: reason,
             has_compute: ok,
             has_graphics: ok,
-            has_present: false
+            has_present: false,
+            memory_mb: if ok: 64 else: 1
         )
 
     static fn success(name: text, reason: text) -> BackendProbeResult:
@@ -80,6 +83,18 @@ class BackendProbeResult:
 
     fn diagnostic_text() -> text:
         "requested={self.requested_name};selected={self.selected_name};status={backend_status_text(self.status)};api={self.api_name};gate={self.feature_gate};shader={self.shader_format};compute={self.has_compute.to_text()};graphics={self.has_graphics.to_text()};present={self.has_present.to_text()};reason={self.reason}"
+
+    fn is_ok() -> bool:
+        self.status == BackendStatus.Initialized
+
+    fn is_hardware() -> bool:
+        backend_is_hardware(self.selected_name)
+
+    fn strict_failure_without_fallback() -> bool:
+        self.selected_name == self.requested_name
+
+    fn summary() -> text:
+        "requested={self.requested_name};selected={self.selected_name};status={backend_status_text(self.status)};api={self.api_name};gate={self.feature_gate};shader={self.shader_format};compute={self.has_compute.to_text()};graphics={self.has_graphics.to_text()};present={self.has_present.to_text()};memory_mb={self.memory_mb};executed=true;reason={self.reason}"
 
 fn _shader_format_for_backend(name: text) -> text:
     val canonical = backend_canonical_name(name)
@@ -98,16 +113,71 @@ fn _shader_format_for_backend(name: text) -> text:
     "none"
 
 fn _strict_probe_backend(name: text) -> BackendProbeResult:
+    val requested = name.trim().lower()
     val canonical = backend_canonical_name(name)
-    if canonical == BACKEND_CPU or canonical == BACKEND_SOFTWARE or canonical == BACKEND_CPU_SIMD:
+    if requested == "cpu_simd_x86":
+        var x86 = BackendProbeResult.unavailable(requested, "x86 SIMD backend requires runtime CPU feature proof")
+        x86.api_name = "cpu-simd-x86"
+        x86.feature_gate = "x86_sse42_avx2_avx512"
+        x86.has_compute = true
+        return x86
+    if requested == "cpu_simd_arm":
+        var arm = BackendProbeResult.unavailable(requested, "arm SIMD backend not selected on this host")
+        arm.api_name = "cpu-simd-arm"
+        arm.feature_gate = "arm_neon_sve"
+        arm.has_compute = true
+        return arm
+    if requested == "cpu_simd_riscv":
+        var riscv = BackendProbeResult.unavailable(requested, "riscv SIMD backend not selected on this host")
+        riscv.api_name = "cpu-simd-riscv"
+        riscv.feature_gate = "riscv_vector_extension"
+        riscv.has_compute = true
+        return riscv
+    if canonical == BACKEND_CPU or canonical == BACKEND_SOFTWARE:
         var cpu = BackendProbeResult.success(canonical, canonical + " backend available")
         cpu.has_compute = true
         cpu.has_graphics = true
         cpu.has_present = true
         return cpu
+    if canonical == BACKEND_CPU_SIMD:
+        var simd = BackendProbeResult.success(canonical, "CPU SIMD backend available")
+        simd.api_name = "cpu-simd"
+        simd.feature_gate = "runtime_cpu_features"
+        simd.has_compute = true
+        simd.has_graphics = true
+        simd.has_present = true
+        return simd
+    if canonical == BACKEND_CUDA:
+        if cuda_available():
+            var cuda = BackendProbeResult.success(canonical, "CUDA context initialized")
+            cuda.feature_gate = "cuda_context"
+            cuda.has_compute = true
+            return cuda
+        var missing_cuda = BackendProbeResult.unavailable(canonical, "CUDA runtime evidence not available")
+        missing_cuda.has_compute = true
+        return missing_cuda
     if canonical == BACKEND_ROCM:
-        return BackendProbeResult.unavailable(canonical, "ROCm/HIP probe unavailable in interpreter")
-    BackendProbeResult.unavailable(canonical, canonical + " runtime evidence not available")
+        var rocm = BackendProbeResult.unavailable(canonical, "ROCm/HIP probe unavailable in interpreter")
+        rocm.api_name = "rocm"
+        rocm.feature_gate = "rocm_hip_runtime"
+        rocm.has_compute = true
+        return rocm
+    if canonical == BACKEND_OPENCL:
+        var opencl = BackendProbeResult.unavailable(canonical, "OpenCL session proof unavailable after ICD platform probe")
+        opencl.feature_gate = "opencl_icd_platform"
+        opencl.has_compute = true
+        return opencl
+    if canonical == "optix":
+        var optix = BackendProbeResult.unavailable(canonical, "OptiX is unsupported for Engine2D raster")
+        optix.api_name = "optix"
+        optix.feature_gate = "optix_2d_raster_unsupported"
+        optix.shader_format = "ptx"
+        optix.has_compute = true
+        return optix
+    var result = BackendProbeResult.unavailable(canonical, canonical + " runtime evidence not available")
+    if canonical == BACKEND_VULKAN or canonical == BACKEND_METAL or canonical == BACKEND_WEBGPU or canonical == BACKEND_HIP:
+        result.has_compute = true
+    return result
 
 class BackendProber:
     static fn create() -> BackendProber:
@@ -136,6 +206,24 @@ class BackendProber:
 
     fn probe_cpu() -> BackendProbeResult:
         _strict_probe_backend(BACKEND_CPU)
+
+    fn preferred_backend_order() -> text:
+        backend_preference_summary()
+
+    fn probe_all_summary() -> text:
+        val metal = _strict_probe_backend(BACKEND_METAL)
+        val vulkan = _strict_probe_backend(BACKEND_VULKAN)
+        val cuda = _strict_probe_backend(BACKEND_CUDA)
+        val opencl = _strict_probe_backend(BACKEND_OPENCL)
+        val rocm = _strict_probe_backend(BACKEND_ROCM)
+        val cpu = _strict_probe_backend(BACKEND_CPU)
+        val cpu_simd = _strict_probe_backend(BACKEND_CPU_SIMD)
+        val cpu_simd_x86 = _strict_probe_backend("cpu_simd_x86")
+        val cpu_simd_arm = _strict_probe_backend("cpu_simd_arm")
+        val cpu_simd_riscv = _strict_probe_backend("cpu_simd_riscv")
+        val webgpu = _strict_probe_backend(BACKEND_WEBGPU)
+        val optix = _strict_probe_backend("optix")
+        "runtime_evidence selected={cpu.selected_name};preferred_order={self.preferred_backend_order()};{cpu.summary()};{cpu_simd.summary()};{cpu_simd_x86.summary()};{cpu_simd_arm.summary()};{cpu_simd_riscv.summary()};{vulkan.summary()};{cuda.summary()};{metal.summary()};{opencl.summary()};{rocm.summary()};{webgpu.summary()};{optix.summary()};metal_status={backend_status_text(metal.status)};vulkan_status={backend_status_text(vulkan.status)};cuda_status={backend_status_text(cuda.status)};opencl_status={backend_status_text(opencl.status)};opencl_gate={opencl.feature_gate};opencl_reason={opencl.reason};cpu_simd_x86_status={backend_status_text(cpu_simd_x86.status)};cpu_simd_arm_status={backend_status_text(cpu_simd_arm.status)};cpu_simd_riscv_status={backend_status_text(cpu_simd_riscv.status)}"
 
 class StrictBackendFactory:
     static fn strict() -> StrictBackendFactory:

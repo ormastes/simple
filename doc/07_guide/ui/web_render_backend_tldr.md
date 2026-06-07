@@ -19,6 +19,7 @@ web_render_backend:
   engines:
     pure_simple: { layout: simple, raster: engine2d.cpu_simd, window: winit, live: false }
     chromium:    { engine: real-chromium(electron), window: BrowserWindow, live: true }
+  backend_order: metal > cuda > rocm/hip > qualcomm > vulkan > opencl > opengl > intel > webgpu > software > cpu_simd > cpu
   gate: check-electron-simple-web-engine2d-bitmap-evidence.shs  # mismatch=0
   perf: pure_simple interpreted+canvas-bound; keep viewport small; binary must
         carry the in-place array-write fix (2d4579a0) or every pixel write clones.
