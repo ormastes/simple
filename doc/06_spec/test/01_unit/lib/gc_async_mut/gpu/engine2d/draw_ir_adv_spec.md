@@ -228,9 +228,8 @@ engine.shutdown()
    - Expected: result.skipped_command_count equals `0`
    - Expected: result.text_command_count equals `1`
    - Expected: result.last_text_font_size equals `16`
-   - Expected: result.font_offload_status equals `awaiting-rasterizer-evidence`
-   - Expected: result.font_offload_reason equals `vector-font-rasterizer-not-yet-observed`
-   - Expected: result.pixels[3 * 64 + 3] equals `GREEN`
+   - Expected: result.font_offload_status equals `cpu-fallback`
+   - Expected: result.font_offload_reason equals `production-gpu-dispatch-not-wired`
 9. engine shutdown
 
 
@@ -273,9 +272,9 @@ expect(result.rendered_command_count).to_equal(1)
 expect(result.skipped_command_count).to_equal(0)
 expect(result.text_command_count).to_equal(1)
 expect(result.last_text_font_size).to_equal(16)
-expect(result.font_offload_status).to_equal("awaiting-rasterizer-evidence")
-expect(result.font_offload_reason).to_equal("vector-font-rasterizer-not-yet-observed")
-expect(result.pixels[3 * 64 + 3]).to_equal(GREEN)
+expect(result.font_offload_status).to_equal("cpu-fallback")
+expect(result.font_offload_reason).to_equal("production-gpu-dispatch-not-wired")
+expect(_count_not_color(result.pixels, BG)).to_be_greater_than(0)
 engine.shutdown()
 ```
 

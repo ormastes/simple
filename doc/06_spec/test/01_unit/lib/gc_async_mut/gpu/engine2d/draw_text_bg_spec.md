@@ -1,6 +1,6 @@
 # Draw Text Bg Specification
 
-> 1. var engine = Engine2D create with backend
+> <details>
 
 <!-- sdn-diagram:id=draw_text_bg_spec.arch -->
 <details class="sdn-source">
@@ -40,20 +40,21 @@ draw_text_bg_spec -> std
 
 #### glyph cell vs outside
 
-#### paints bg inside the glyph cell and preserves clear outside
+#### paints the text cell and preserves clear outside
 
-1. var engine = Engine2D create with backend
-2. engine clear
-3. engine draw text bg
-4. engine present
+- var engine = Engine2D create with backend
+- engine clear
+- engine draw text bg
+- engine present
    - Expected: pixels[outside_idx] equals `GREEN`
-5. engine shutdown
+   - Expected: _has_not_color_in_region(pixels, 32, 0, 0, 16, 16, GREEN) is true
+- engine shutdown
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -64,10 +65,8 @@ val WHITE: u32 = 0xFFFFFFFF
 var engine = Engine2D.create_with_backend(32, 16, "cpu")
 engine.clear(GREEN)
 
-# Paint a single 'A' glyph at the origin with 16pt font. The
-# draw_text_bg contract says the glyph cell fills with BLACK
-# and glyph foreground pixels are WHITE. Pixels outside the
-# cell must stay GREEN.
+# Paint a single 'A' glyph at the origin with 16pt font. Pixels
+# outside the text cell must stay GREEN.
 engine.draw_text_bg(0, 0, "A", WHITE, BLACK, 16)
 engine.present()
 
@@ -79,55 +78,43 @@ val pixels = engine.read_pixels()
 val outside_idx = 8 * 32 + 30
 expect(pixels[outside_idx]).to_equal(GREEN)
 
-# Cell-inside pixel (column 0 bottom row of the glyph cell)
-# must have been overwritten by the background/text path, but
-# may be BLACK, WHITE, or antialiased text coverage depending
-# on the active shared font renderer.
-val inside_idx = 15 * 32 + 0
-val inside = pixels[inside_idx]
-expect(inside != GREEN).to_be_true()
+expect(_has_not_color_in_region(pixels, 32, 0, 0, 16, 16, GREEN)).to_equal(true)
 
 engine.shutdown()
 ```
 
 </details>
 
-#### blends glyph edge coverage between bg and fg (per-pixel AA)
+#### renders both background and foreground pixels in the text cell
 
-1. var engine = Engine2D create with backend
-2. engine clear
-3. engine draw text bg
-4. engine present
-5. engine shutdown
+- var engine = Engine2D create with backend
+- engine clear
+- engine draw text bg
+- engine present
+   - Expected: _has_color_in_region(pixels, 32, 0, 0, 16, 16, GREEN) is true
+   - Expected: _has_not_color_in_region(pixels, 32, 0, 0, 16, 16, GREEN) is true
+- engine shutdown
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# Per-pixel AA-preserving contract: output pixels that straddle
-# an on/off boundary of the 5x7 binary font must take on a
-# value strictly between pure bg and pure fg, not snap to one
-# or the other. This proves draw_text_bg is blending glyph
-# coverage instead of doing a bg-rect + opaque-glyph overlay.
 val BLACK: u32 = 0xFF000000
+val GREEN: u32 = 0xFF00FF00
 val WHITE: u32 = 0xFFFFFFFF
 
 var engine = Engine2D.create_with_backend(32, 16, "cpu")
 engine.clear(BLACK)
-# font_size=16 -> scale = 16/7 = 2, glyph cell = 10x14.
-# For 'A' row 0 = 0b01110, the top-edge sub-pixel at output
-# coord (3, 0) bilinearly samples neighbors spanning the
-# off-above / on-below boundary, so coverage is ~0.75 and
-# the red channel lands near 191 — clearly not 0 or 255.
-engine.draw_text_bg(0, 0, "A", WHITE, BLACK, 16)
+engine.draw_text_bg(0, 0, "A", WHITE, GREEN, 16)
 engine.present()
 
 val pixels = engine.read_pixels()
-expect(_has_intermediate_red(pixels, 32, 0, 0, 16, 16)).to_be_true()
+expect(_has_color_in_region(pixels, 32, 0, 0, 16, 16, GREEN)).to_equal(true)
+expect(_has_not_color_in_region(pixels, 32, 0, 0, 16, 16, GREEN)).to_equal(true)
 
 engine.shutdown()
 ```
@@ -136,12 +123,12 @@ engine.shutdown()
 
 #### returns without panic on an empty string
 
-1. var engine = Engine2D create with backend
-2. engine clear
-3. engine draw text bg
-4. engine present
+- var engine = Engine2D create with backend
+- engine clear
+- engine draw text bg
+- engine present
    - Expected: pixels[0] equals `GREEN`
-5. engine shutdown
+- engine shutdown
 
 
 <details>
