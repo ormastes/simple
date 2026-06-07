@@ -45,10 +45,12 @@ bin/simple test --mode=native        # Native compiled
 ```
 
 The executable tree is also the source of truth for generated scenario
-documentation. After removing the leading `test/` segment, generated SPipe docs
-must mirror the same path below `doc/06_spec/`. Example:
+documentation. Generated SPipe docs preserve the leading `test/` segment below
+`doc/06_spec/`, except for the formal-verification lane under
+`test/00_formal_verification/`, which generates directly under
+`doc/06_spec/00_formal_verification/`. Example:
 `test/03_system/feature/usage/math_blocks_spec.spl` generates
-`doc/06_spec/feature/usage/math_blocks_spec.md`.
+`doc/06_spec/test/03_system/feature/usage/math_blocks_spec.md`.
 
 Generated SSpec manuals should read as scenario-based manuals, not as raw test dumps.
 For feature, system, app, MCP, UI, protocol, hardware, and environmental tests,

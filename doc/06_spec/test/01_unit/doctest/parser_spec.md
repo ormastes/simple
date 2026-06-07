@@ -43,7 +43,7 @@ parser_spec -> std
 #### parses simple example with output
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -66,7 +66,7 @@ match items[0].expected:
 #### parses multiple lines of code
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -87,9 +87,9 @@ match items[0].expected:
 #### treats non-prefix lines as expected output
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -98,6 +98,11 @@ val items = parse_docstring(content)
 
 expect items.len to eq 1
 expect items[0].commands to eq ["for i in [1, 2, 3]:"]
+match items[0].expected:
+    case Expected.Output(out):
+        expect out to eq "...     print i\n1\n2\n3"
+    case _:
+        fail "Expected Output"
 ```
 
 </details>
@@ -105,7 +110,7 @@ expect items[0].commands to eq ["for i in [1, 2, 3]:"]
 #### parses exception expectations
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -126,7 +131,7 @@ match items[0].expected:
 #### parses exception with message
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -146,7 +151,7 @@ match items[0].expected:
 #### parses empty output
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -168,12 +173,11 @@ match items[0].expected:
 #### parses items separated by section headers
 
 1. expect items[0] commands to eq ["db = Database connect
-
 2. expect items[1] commands to eq ["db query
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -192,12 +196,11 @@ expect items[1].commands to eq ["db.query('SELECT 1')"]
 #### parses items after section labels
 
 1. expect items[0] commands to eq ["db query
-
 2. expect items[1] commands to eq ["db close
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -216,7 +219,7 @@ expect items[1].commands to eq ["db.close()"]
 #### separates multiple examples by blank lines
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -235,7 +238,7 @@ expect items[1].commands to eq ["2 + 2"]
 #### handles multi-line output
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -256,12 +259,11 @@ match items[0].expected:
 #### parses doc-comment examples
 
 1. source = "/// Doc with example\n/// >>> 1 + 1\n/// 2\nfn foo
-
 2. items = parse doctests
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -280,12 +282,11 @@ expect items[0].source_path to eq "test.spl"
 #### parses multiple doc-comment blocks
 
 1. source = "/// Fn1 doc\n/// >>> 1 + 1\n/// 2\nfn foo
-
 2. items = parse doctests
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -302,12 +303,11 @@ expect items.len to eq 2
 #### ignores non-doc comments
 
 1. source = "# Regular comment\n/// >>> 1 + 1\n/// 2\nfn foo
-
 2. items = parse doctests
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -329,7 +329,7 @@ expect items.len to eq 1
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -351,7 +351,7 @@ match expected:
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -373,7 +373,7 @@ match expected:
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -396,7 +396,7 @@ match expected:
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -419,7 +419,7 @@ match expected:
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
