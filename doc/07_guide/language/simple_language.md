@@ -169,6 +169,20 @@ Simple has a *lot* of surface area — macros, math blocks (`m{}`, `loss{}`, `no
 
 The interesting thing isn't the count. It's that they all point the same direction: **make intent executable, and make it checkable.** Parser-friendly macros are macros the compiler and editor can reason about *before* expansion. Math blocks parse as real language constructs and render to text, Unicode, LaTeX, or Markdown while staying tied to the checked expression. Runtime families make allocation and concurrency part of the contract. None of it is decoration; it's all in service of giving the model less room to improvise.
 
+For example, a checked math block can stay close to the source:
+
+```simple
+loss = m{
+    L = sum((y_pred - y_true)^2) / n
+}
+```
+
+and still render as LaTeX for documentation or editor previews:
+
+```latex
+L = \frac{\sum (y_{pred} - y_{true})^2}{n}
+```
+
 ---
 
 ## Status, without the marketing fog
