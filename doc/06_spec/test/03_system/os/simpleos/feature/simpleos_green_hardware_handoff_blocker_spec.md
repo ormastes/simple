@@ -27,7 +27,7 @@ simpleos_green_hardware_handoff_blocker_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -73,6 +73,27 @@ it must not be treated as final ring/user hardware context-switch proof.
 ## Research
 
 **Research:** doc/01_research/local/multicore_green.md
+
+## Syntax
+
+Run the blocker contract:
+
+```sh
+./src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.spl --mode=interpreter --clean
+```
+
+The final live QEMU lane is separate and opt-in:
+
+```sh
+SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 bin/release/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean
+```
+
+## Examples
+
+- `SCHED_HANDOFF_PASS=true` is scheduler-owned evidence only.
+- Final hardware evidence requires `HW_HANDOFF_PASS=true`.
+- Final user-entry evidence requires `USER_ENTRY_PASS=true`.
+- Final syscall-return evidence requires `USER_SYSCALL_PASS=true`.
 
 ## Scenarios
 
@@ -165,12 +186,57 @@ expect(probe).to_contain("SCHED_HANDOFF_PASS")
 
 </details>
 
+#### keeps requirements and evidence report aligned with the final live gate
+
+- Read requirements, NFR, QEMU spec, and current evidence report
+- Verify requirement docs require the final marker triplet
+- Verify the QEMU spec owns the explicit final live gate
+- Verify the evidence report does not claim final ring/user handoff
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 26 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Read requirements, NFR, QEMU spec, and current evidence report")
+val feature_req = read_text("doc/02_requirements/feature/multicore_green.md")
+val nfr_req = read_text("doc/02_requirements/nfr/multicore_green.md")
+val qemu_spec = read_text("test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl")
+val report = read_text("doc/09_report/simpleos_multicore_green_evidence_2026-06-07.md")
+
+step("Verify requirement docs require the final marker triplet")
+expect(feature_req).to_contain("REQ-MCG-007")
+expect(feature_req).to_contain("HW_HANDOFF_PASS=true")
+expect(feature_req).to_contain("USER_ENTRY_PASS=true")
+expect(feature_req).to_contain("USER_SYSCALL_PASS=true")
+expect(nfr_req).to_contain("NFR-MCG-012")
+expect(nfr_req).to_contain("SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1")
+
+step("Verify the QEMU spec owns the explicit final live gate")
+expect(qemu_spec).to_contain("_hw_handoff_enabled")
+expect(qemu_spec).to_contain("GREEN_HW_HANDOFF_MARKER")
+expect(qemu_spec).to_contain("GREEN_USER_ENTRY_MARKER")
+expect(qemu_spec).to_contain("GREEN_USER_SYSCALL_MARKER")
+
+step("Verify the evidence report does not claim final ring/user handoff")
+expect(report).to_contain("does not claim final")
+expect(report).to_contain("final live hardware handoff lane remains opt-in and unclaimed")
+expect(report).to_contain("SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1")
+expect(report).to_contain("A scheduler-only")
+expect(report).to_contain("must not print any of those final markers")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
