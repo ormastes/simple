@@ -363,6 +363,14 @@ it allocates temporary glyph-plan and destination buffers to prove generated
 launch-argument readiness, but production readiness requires backend readback to
 populate the vector or bitmap returned-glyph contract before
 `font_production_ready` can be true.
+Concrete backends must not pass host staging pointers to APIs that require
+device buffers. The OpenCL facade owns an explicit generated-glyph smoke path
+that allocates device `glyph_plan` and `dst` buffers, packs those device handles
+with the shared glyph argument layout, launches `simple_2d_glyph_raster_u32`,
+and reports typed launch/readback evidence. That evidence proves the backend
+handoff and readback gate, but it intentionally keeps production font readiness
+false until real glyph-plan data is connected to the vector and bitmap
+returned-glyph contract.
 Returned-glyph readback probes for both vector and bitmap fonts must support a
 bounded multi-slot batch (`0..7`) so backend launches can return more than one
 glyph without falling back to CPU for every character after slot 0.

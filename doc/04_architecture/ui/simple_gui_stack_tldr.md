@@ -84,6 +84,10 @@ Host input
   input location/component data to a Draw IR batch and rejects stale scene keys.
 - Simple2D hook: `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl` accepts
   Draw IR through Engine2D with CPU fallback metadata and pixel readback.
+- Generated glyph backend handoff: `backend_opencl.spl` owns an OpenCL device
+  staging smoke path for `simple_2d_glyph_raster_u32`; it packs device
+  `glyph_plan`/`dst` handles with the shared generated glyph layout and reports
+  typed launch/readback evidence without marking production font readiness.
 - Engine2D split contract: `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl`.
 - WM dispatch adapter: `src/lib/common/ui/wm_runtime_dispatch.spl` converts
   `SharedWmDispatchResult` to stable `WmRuntimeDispatchCommand` for host shells.

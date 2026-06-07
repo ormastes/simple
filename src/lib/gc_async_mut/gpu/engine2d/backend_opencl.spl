@@ -7,7 +7,8 @@
 use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended}
 use std.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
-use std.gc_async_mut.gpu.engine2d.opencl_session.{OpenClSession}
+use std.gc_async_mut.gpu.engine2d.generated_kernel_args.{generated_glyph_raster_args_pack, generated_glyph_raster_args_free}
+use std.gc_async_mut.gpu.engine2d.opencl_session.{OpenClSession, OpenClSessionEvidence}
 use std.gpu.engine2d.sffi_opencl.{OpenClFfi}
 use std.gpu.engine2d.helpers_text.{text_blit_buffer, text_transparent_blit_buffer}
 use std.gpu.engine2d.backend_emu.{
@@ -31,6 +32,7 @@ extern fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64) -> i64
 extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
 
 val OPENCL_2D_CLEAR_ARG_BYTES: i64 = 32
+val OPENCL_2D_GLYPH_OPERATION: text = "glyph_raster"
 
 fn opencl_2d_generated_source() -> text:
     "__kernel void simple_2d_fill_u32(__global uint* dst, long width, long height, long color) {\n" +
@@ -197,6 +199,16 @@ fn opencl_2d_generated_source() -> text:
     "    long px = x + dx;\n" +
     "    long py = y + dy;\n" +
     "    if (px >= 0 && py >= 0 && px < surface_width && py < surface_height) { dst[py * surface_width + px] = pixel; }\n" +
+    "}\n" +
+    "__kernel void simple_2d_glyph_raster_u32(__global const ulong* glyph_plan, __global uint* dst, long width, long height, long font_size) {\n" +
+    "    long i = get_global_id(0);\n" +
+    "    long count = width * height;\n" +
+    "    if (i >= count) { return; }\n" +
+    "    long x = i % width;\n" +
+    "    long y = i / width;\n" +
+    "    long border = (x == 0 || y == 0 || x + 1 == width || y + 1 == height) ? 1 : 0;\n" +
+    "    long stroke = ((x + y + font_size) % 5 == 0) ? 1 : 0;\n" +
+    "    dst[i] = (border != 0 || stroke != 0) ? 0xffffffffu : 0u;\n" +
     "}\n"
 
 fn _i64(v: i32) -> i64:
@@ -230,6 +242,40 @@ fn _write_opencl_clear_args(args_ptr: i64, d_framebuffer: i64, color: u32, width
     rt_ptr_write_i64(args_ptr, 16, _i64(height))
     rt_ptr_write_i64(args_ptr, 24, _i64_from_u32(color))
 
+fn _opencl_generated_glyph_pixel(width: i64, height: i64, font_size: i64, idx: i64) -> u32:
+    val x = idx % width
+    val y = idx / width
+    val border = x == 0 or y == 0 or x + 1 == width or y + 1 == height
+    val stroke = (x + y + font_size) % 5 == 0
+    if border or stroke:
+        return 0xffffffffu32
+    0u32
+
+fn _opencl_generated_glyph_expected_checksum(width: i64, height: i64, font_size: i64) -> i64:
+    var checksum: i64 = 17
+    var idx: i64 = 0
+    val count = width * height
+    while idx < count:
+        val pixel = _opencl_generated_glyph_pixel(width, height, font_size, idx)
+        checksum = (checksum + (pixel as i64) + ((idx + 1) * 97)) % 2147483647
+        idx = idx + 1
+    if checksum <= 0:
+        return 1
+    checksum
+
+fn _opencl_u32_host_checksum(ptr: i64, count: i64) -> i64:
+    if ptr == 0 or count <= 0:
+        return 0
+    var checksum: i64 = 17
+    var idx: i64 = 0
+    while idx < count:
+        val pixel = rt_ptr_read_i32(ptr, idx * 4) as u32
+        checksum = (checksum + (pixel as i64) + ((idx + 1) * 97)) % 2147483647
+        idx = idx + 1
+    if checksum <= 0:
+        return 1
+    checksum
+
 fn _opencl_probe_failure(message: text, gate: text) -> BackendProbeResult:
     var failed = BackendProbeResult.unavailable("opencl", message)
     failed.api_name = "opencl"
@@ -249,6 +295,57 @@ fn _opencl_render_ready() -> BackendProbeResult:
     ready.has_graphics = true
     ready.has_present = true
     ready
+
+fn _opencl_backend_session_evidence(session: OpenClSession, operation: text, status_code: text, reason: text) -> OpenClSessionEvidence:
+    OpenClSessionEvidence.create(
+        operation,
+        false,
+        status_code,
+        reason,
+        session.platform,
+        session.context,
+        session.queue,
+        session.program,
+        session.kernel_cache,
+        session.generation,
+        false,
+        0,
+        0
+    )
+
+class OpenClGeneratedGlyphRasterEvidence:
+    width: i64
+    height: i64
+    font_size: i64
+    launch: OpenClSessionEvidence
+    readback: OpenClSessionEvidence
+    device_glyph_returned: bool
+    production_ready: bool
+    status_code: text
+    reason: text
+
+    static fn create(width: i64, height: i64, font_size: i64, launch: OpenClSessionEvidence, readback: OpenClSessionEvidence) -> OpenClGeneratedGlyphRasterEvidence:
+        val returned = launch.success and readback.success
+        val status = if returned: "glyph-readback-matched" else: if not launch.success: "launch-" + launch.status_code else: "readback-" + readback.status_code
+        val why = if returned: "opencl-generated-glyph-readback-matched" else: if not launch.success: launch.reason else: readback.reason
+        OpenClGeneratedGlyphRasterEvidence(
+            width: width,
+            height: height,
+            font_size: font_size,
+            launch: launch,
+            readback: readback,
+            device_glyph_returned: returned,
+            production_ready: false,
+            status_code: status,
+            reason: why
+        )
+
+    static fn unavailable(session: OpenClSession, width: i64, height: i64, font_size: i64, status_code: text, reason: text) -> OpenClGeneratedGlyphRasterEvidence:
+        val ev = _opencl_backend_session_evidence(session, "opencl_backend_generated_glyph_raster", status_code, reason)
+        OpenClGeneratedGlyphRasterEvidence.create(width, height, font_size, ev, ev)
+
+    fn diagnostic_text() -> text:
+        "OpenClGeneratedGlyphRasterEvidence[size={self.width}x{self.height} font_size={self.font_size} returned={self.device_glyph_returned.to_text()} production_ready={self.production_ready.to_text()} status={self.status_code} reason={self.reason} launch={self.launch.diagnostic_text()} readback={self.readback.diagnostic_text()}]"
 
 class OpenClBackend:
     mirror: SoftwareBackend
@@ -397,6 +494,53 @@ class OpenClBackend:
             if d_pixels != 0:
                 self.session.free(d_pixels)
         false
+
+    me launch_generated_glyph_raster_evidence(width: i32, height: i32, font_size: i32) -> OpenClGeneratedGlyphRasterEvidence:
+        val w = _i64(width)
+        val h = _i64(height)
+        val fs = _i64(font_size)
+        if width <= 0 or height <= 0 or font_size <= 0:
+            return OpenClGeneratedGlyphRasterEvidence.unavailable(self.session, w, h, fs, "invalid-request", "invalid-opencl-generated-glyph-request")
+        if not self.initialized or not self.session.is_valid() or self.session.program == 0:
+            return OpenClGeneratedGlyphRasterEvidence.unavailable(self.session, w, h, fs, "backend-not-ready", "opencl-generated-glyph-backend-not-ready")
+        val glyph_plan = self.session.alloc(8)
+        if glyph_plan == 0:
+            return OpenClGeneratedGlyphRasterEvidence.unavailable(self.session, w, h, fs, "device-plan-alloc-failed", "opencl-generated-glyph-plan-device-allocation-failed")
+        val dst_bytes = w * h * 4
+        val dst = self.session.alloc(dst_bytes)
+        if dst == 0:
+            self.session.free(glyph_plan)
+            return OpenClGeneratedGlyphRasterEvidence.unavailable(self.session, w, h, fs, "device-dst-alloc-failed", "opencl-generated-glyph-dst-device-allocation-failed")
+        val host = rt_alloc(dst_bytes)
+        if host == 0:
+            self.session.free(dst)
+            self.session.free(glyph_plan)
+            return OpenClGeneratedGlyphRasterEvidence.unavailable(self.session, w, h, fs, "host-readback-alloc-failed", "opencl-generated-glyph-host-readback-allocation-failed")
+        val args = generated_glyph_raster_args_pack(glyph_plan, dst, w, h, fs)
+        if not args.ready:
+            rt_free(host, dst_bytes)
+            self.session.free(dst)
+            self.session.free(glyph_plan)
+            return OpenClGeneratedGlyphRasterEvidence.unavailable(self.session, w, h, fs, "args-not-ready", args.reason)
+        val launch = self.session.launch_generated_2d_evidence(OPENCL_2D_GLYPH_OPERATION, w, h, args.args_ptr)
+        var readback = _opencl_backend_session_evidence(self.session, "readback", "not-attempted", "opencl-generated-glyph-launch-not-submitted")
+        if launch.success:
+            val sync = self.session.synchronize_evidence()
+            if sync.success:
+                val expected = _opencl_generated_glyph_expected_checksum(w, h, fs)
+                val read_ok = self.session.read_buffer(dst, host, dst_bytes)
+                if read_ok:
+                    val actual = _opencl_u32_host_checksum(host, w * h)
+                    readback = self.session.readback_evidence(true, expected, actual)
+                else:
+                    readback = self.session.read_buffer_evidence(dst, host, dst_bytes, expected, 0)
+            else:
+                readback = sync
+        generated_glyph_raster_args_free(args)
+        rt_free(host, dst_bytes)
+        self.session.free(dst)
+        self.session.free(glyph_plan)
+        OpenClGeneratedGlyphRasterEvidence.create(w, h, fs, launch, readback)
 
 impl RenderBackend for OpenClBackend:
     fn name() -> text:

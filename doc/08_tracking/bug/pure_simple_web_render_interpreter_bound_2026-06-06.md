@@ -224,6 +224,16 @@ slot. Focused font renderer coverage proves OpenCL can return a matching bitmap
 glyph from slot 1 after slot 0 contains a different codepoint, with exactly one
 returned glyph and pixel counted.
 
+2026-06-07 OpenCL generated glyph backend handoff update: the OpenCL facade now
+exports `simple_2d_glyph_raster_u32` in its generated 2D source and exposes a
+backend-owned generated glyph smoke evidence path. The path allocates device
+`glyph_plan` and `dst` buffers, packs those device handles with the shared glyph
+argument layout, launches through `OpenClSession.launch_generated_2d_evidence`,
+and requires typed readback evidence before reporting
+`device_glyph_returned=true`. It deliberately leaves `production_ready=false`
+until live vector/bitmap glyph-plan data is wired into the returned-glyph
+contract.
+
 ## Path F — repeated ancestor clip walks during paint — FIXED 2026-06-07
 
 `paint()` called `ancestor_clip()` in the background, absolute, positive z-index,

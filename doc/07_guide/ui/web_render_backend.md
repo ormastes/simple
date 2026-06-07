@@ -128,6 +128,11 @@ dispatch is proved backend by backend as each session binds real launch args.
 Generated glyph raster kernels share a validated argument packer for
 `glyph_plan`, `dst`, `width`, `height`, and `font_size`; tests prove invalid
 arguments fail closed, valid packed pointers round-trip, and generated glyph
+launches now have an OpenCL backend-owned device staging smoke path. The OpenCL
+facade allocates device `glyph_plan` and `dst`, packs those handles, launches
+`simple_2d_glyph_raster_u32`, and requires readback evidence before reporting a
+returned generated glyph. It still reports `production_ready=false` because the
+smoke plan is not yet a real vector or bitmap glyph plan.
 provenance observes `args_ready`. OpenCL, CUDA, and ROCm session launch evidence
 now use that shared layout validator before submit, so generated glyph kernels
 do not treat an arbitrary nonzero pointer as launch-ready. Live GUI text

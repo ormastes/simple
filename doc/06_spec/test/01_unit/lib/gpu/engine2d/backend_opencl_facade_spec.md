@@ -27,7 +27,7 @@ backend_opencl_facade_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -41,9 +41,9 @@ backend_opencl_facade_spec -> std
 #### ships generated OpenCL 2D source with the shared kernel entries
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -63,6 +63,7 @@ expect(source).to_contain("__kernel void simple_2d_rounded_rect_u32")
 expect(source).to_contain("__kernel void simple_2d_triangle_filled_u32")
 expect(source).to_contain("__kernel void simple_2d_blit_image_u32")
 expect(source).to_contain("__kernel void simple_2d_blit_nonzero_u32")
+expect(source).to_contain("__kernel void simple_2d_glyph_raster_u32")
 ```
 
 </details>
@@ -79,12 +80,10 @@ expect(source).to_contain("__kernel void simple_2d_blit_nonzero_u32")
    - Expected: backend.last_probe.strict_failure_without_fallback() is true
    - Expected: backend.last_probe.status equals `BackendStatus.Initialized`
    - Expected: backend.last_probe.feature_gate equals `opencl_2d_render`
-
 2. backend clear
    - Expected: cleared.len() equals `16`
    - Expected: cleared[0] equals `0xff112233u32`
    - Expected: cleared[15] equals `0xff112233u32`
-
 3. backend draw rect filled
    - Expected: filled[0] equals `0xff112233u32`
    - Expected: filled[5] equals `0xff445566u32`
@@ -92,39 +91,32 @@ expect(source).to_contain("__kernel void simple_2d_blit_nonzero_u32")
    - Expected: filled[9] equals `0xff445566u32`
    - Expected: filled[10] equals `0xff445566u32`
    - Expected: filled[15] equals `0xff112233u32`
-
 4. backend draw line
    - Expected: lined[0] equals `0xff778899u32`
    - Expected: lined[5] equals `0xff778899u32`
    - Expected: lined[10] equals `0xff778899u32`
    - Expected: lined[15] equals `0xff778899u32`
-
 5. backend draw gradient rect
    - Expected: gradient[0] equals `0xffff0000u32`
    - Expected: gradient[15] equals `0xff0000ffu32`
-
 6. backend draw circle
    - Expected: circle[5] equals `0xffabcdefu32`
-
 7. backend draw circle filled
    - Expected: filled_circle[10] equals `0xff135724u32`
-
 8. backend draw rounded rect
    - Expected: rounded[5] equals `0xff2468acu32`
    - Expected: rounded[10] equals `0xff2468acu32`
-
 9. backend draw triangle filled
    - Expected: triangle[0] equals `0xff55aa11u32`
    - Expected: triangle[1] equals `0xff55aa11u32`
    - Expected: triangle[4] equals `0xff55aa11u32`
    - Expected: backend.last_probe.status equals `BackendStatus.Unavailable`
    - Expected: backend.last_probe.has_graphics is false
-
 10. backend shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 55 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -193,30 +185,23 @@ backend.shutdown()
 
 1. var backend = OpenClBackend create
    - Expected: backend.mirror.init(8, 8) is true
-
 2. backend draw line
    - Expected: backend.device_current is false
-
 3. backend draw circle
    - Expected: backend.device_current is false
-
 4. backend draw circle filled
    - Expected: backend.device_current is false
-
 5. backend draw rounded rect
    - Expected: backend.device_current is false
-
 6. backend draw triangle filled
    - Expected: backend.device_current is false
-
 7. backend draw gradient rect
    - Expected: backend.device_current is false
-
 8. backend shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -258,53 +243,32 @@ backend.shutdown()
 
 1. var backend = OpenClBackend create
    - Expected: backend.mirror.init(16, 16) is true
-
 2. backend clear
-
 3. backend draw ellipse
-
 4. backend draw ellipse filled
-
 5. backend draw arc
-
 6. backend draw bezier
-
 7. backend draw polygon filled
-
 8. backend draw polyline
-
 9. backend draw rect thick
-
 10. backend draw circle thick
-
 11. backend draw rounded rect outline
-
 12. backend draw gradient rect h
-
 13. backend draw radial gradient
-
 14. backend draw rect blend
-
 15. backend draw image blend
-
 16. backend draw image scaled
-
 17. backend draw triangle outline
-
 18. backend draw blur rect
-
 19. backend draw shadow rect
-
 20. backend draw image transform
-
 21. backend draw rect blend mode
    - Expected: pixels.len() equals `256`
-
 22. backend shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -348,18 +312,15 @@ backend.shutdown()
 1. var backend = OpenClBackend create
    - Expected: backend.mirror.init(8, 8) is true
    - Expected: backend._can_use_device_draw() is true
-
 2. backend set clip
    - Expected: backend._can_use_device_draw() is false
-
 3. backend clear clip
    - Expected: backend._can_use_device_draw() is true
-
 4. backend shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -381,6 +342,46 @@ backend.shutdown()
 
 </details>
 
+#### reports generated glyph raster facade evidence without claiming production font readiness
+
+1. var backend = OpenClBackend create
+   - Expected: invalid.device_glyph_returned is false
+   - Expected: invalid.production_ready is false
+   - Expected: invalid.status_code equals `launch-invalid-request`
+   - Expected: invalid.reason equals `invalid-opencl-generated-glyph-request`
+   - Expected: cold.device_glyph_returned is false
+   - Expected: cold.production_ready is false
+   - Expected: cold.status_code equals `launch-backend-not-ready`
+   - Expected: cold.launch.operation equals `opencl_backend_generated_glyph_raster`
+2. backend shutdown
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var backend = OpenClBackend.create()
+val invalid = backend.launch_generated_glyph_raster_evidence(0, 4, 12)
+val cold = backend.launch_generated_glyph_raster_evidence(4, 4, 12)
+
+expect(invalid.device_glyph_returned).to_equal(false)
+expect(invalid.production_ready).to_equal(false)
+expect(invalid.status_code).to_equal("launch-invalid-request")
+expect(invalid.reason).to_equal("invalid-opencl-generated-glyph-request")
+expect(cold.device_glyph_returned).to_equal(false)
+expect(cold.production_ready).to_equal(false)
+expect(cold.status_code).to_equal("launch-backend-not-ready")
+expect(cold.launch.operation).to_equal("opencl_backend_generated_glyph_raster")
+expect(cold.diagnostic_text()).to_contain("production_ready=false")
+
+backend.shutdown()
+```
+
+</details>
+
 #### routes Engine2D opencl probing through the render backend facade
 
 1. engine shutdown
@@ -390,7 +391,7 @@ backend.shutdown()
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -440,8 +441,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
