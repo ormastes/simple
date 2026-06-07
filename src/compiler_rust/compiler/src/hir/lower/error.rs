@@ -34,8 +34,8 @@ pub enum LowerError {
     #[error("Cannot infer type: {0}")]
     CannotInferTypeFor(String),
 
-    #[error("Parameter '{0}' requires explicit type annotation")]
-    MissingParameterType(String),
+    #[error("Parameter '{param}' in function '{function}' requires explicit type annotation")]
+    MissingParameterType { param: String, function: String },
 
     #[error("Cannot infer element type of empty array - use explicit annotation")]
     EmptyArrayNeedsType,

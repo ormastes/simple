@@ -357,7 +357,7 @@ target/bootstrap/simple native-build \
   -o /tmp/simple_stage2_probe_default
 ```
 
-Result:
+Earlier result from the first 2026-06-07 pass:
 
 ```text
 stage2_exit=1
@@ -365,5 +365,25 @@ no_stage2_artifact
 HIR lowering error: Unknown variable: fields_len while lowering compute_transparent_layout
 ```
 
-Current next blocker: normalize the remaining generated helper-call artifact in
-`compute_transparent_layout` and continue the same stage2 probe loop.
+Later 2026-06-07 follow-up fixed and checked the subsequent blockers for:
+
+- `fields_len(...)` helper-call artifacts in transparent type layout.
+- target-architecture pointer/bit helper availability during type layout.
+- shorthand easy-fix filters and callback/loop field inference in the stdlib and
+  compiler fix-rule copies.
+- missing `std.text.levenshtein_distance`.
+- missing `FixConfidence.Certain`.
+- missing `input_line` declaration for the interactive fix CLI path.
+- HIR diagnostics now include the owning function for missing parameter type
+  annotations, which made the `each` callback blocker actionable.
+
+Latest probe after those fixes still exits `1`, emits no stage2 artifact, and
+now stops at:
+
+```text
+HIR lowering error: Unsupported feature: cannot infer field type while lowering ThemeRegistry.resolve_surface: struct 'ResolvedThemeColors' field 'surface_level_0'
+```
+
+Current next blocker: type the `ThemeRegistry.resolve_surface` field-access path
+or teach HIR lowering the `ResolvedThemeColors` field type in that path, then
+continue the same stage2 probe loop.

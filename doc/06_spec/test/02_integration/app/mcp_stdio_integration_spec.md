@@ -1,6 +1,6 @@
 # Mcp Stdio Integration Specification
 
-> 1. Operator sends a Content-Length framed initialize request
+> <details>
 
 <!-- sdn-diagram:id=mcp_stdio_integration_spec.arch -->
 <details class="sdn-source">
@@ -40,13 +40,13 @@ mcp_stdio_integration_spec -> std
 
 #### survives initialize followed by tools/list on the same server process
 
-1. Operator sends a Content-Length framed initialize request
+- Operator sends a Content-Length framed initialize request
    - Protocol capture: after_step
    - Evidence: protocol response verified by 3 expected checks
    - Expected: output contains `"protocolVersion":"2025-06-18"`
    - Expected: output contains `"serverInfo":{"name":"simple-mcp-full"`
    - Expected: output does not contain `"error":`
-2. Operator sends the initialized notification and lists tools
+- Operator sends the initialized notification and lists tools
    - Protocol capture: after_step
    - Evidence: protocol response verified by 7 expected checks
    - Expected: exec_evidence.body contains `input: initialize, initialized, tools/list`
@@ -108,13 +108,13 @@ expect(output.contains("\"error\":")).to_equal(false)
 
 #### returns tool-level isError for unknown tool
 
-1. Operator sends a Content-Length framed initialize request
+- Operator sends a Content-Length framed initialize request
    - Protocol capture: after_step
    - Evidence: protocol response verified by 3 expected checks
    - Expected: output contains `"protocolVersion":"2025-06-18"`
    - Expected: output contains `"serverInfo":{"name":"simple-mcp-full"`
    - Expected: output does not contain `"error":`
-2. Operator calls an unknown tool to verify tool-level errors
+- Operator calls an unknown tool to verify tool-level errors
    - Protocol capture: after_step
    - Evidence: protocol response verified by 3 expected checks
    - Expected: output contains `"isError":true`
@@ -148,7 +148,7 @@ expect(output.contains("\"error\":")).to_equal(false)
 
 #### advertises and dispatches the safe shared editor MCP subset
 
-1. Operator sends the initialized notification and lists tools
+- Operator sends the initialized notification and lists tools
    - Protocol capture: after_step
    - Evidence: protocol response verified by 7 expected checks
    - Expected: exec_evidence.body contains `input: initialize, initialized, tools/list`
@@ -158,11 +158,11 @@ expect(output.contains("\"error\":")).to_equal(false)
    - Expected: output contains `"result":{"tools":[`
    - Expected: output contains `"name":"debug_create_session"`
    - Expected: output does not contain `"error":`
-2. Operator prepares an editor note
+- Operator prepares an editor note
    - API capture: after_step
    - Evidence: API response verified by 1 expected check
    - Expected: rt_file_write_text(path, "# MCP Note\n\nhello editor\n") is true
-3. Operator opens and reads the note through the safe editor tools
+- Operator opens and reads the note through the safe editor tools
    - API capture: after_step
    - Evidence: API response verified by 10 expected checks
    - Expected: output contains `"name":"editor.open_file"`
@@ -244,11 +244,11 @@ expect(output.contains("\"error\":")).to_equal(false)
 
 #### reads editor MCP arguments only from params.arguments
 
-1. Operator prepares an editor note
+- Operator prepares an editor note
    - API capture: after_step
    - Evidence: API response verified by 1 expected check
    - Expected: rt_file_write_text(path, "# MCP Note\n\nhello editor\n") is true
-2. Operator opens and reads the note through the safe editor tools
+- Operator opens and reads the note through the safe editor tools
    - API capture: after_step
    - Evidence: API response verified by 10 expected checks
    - Expected: output contains `"name":"editor.open_file"`
@@ -261,11 +261,11 @@ expect(output.contains("\"error\":")).to_equal(false)
    - Expected: output contains `hello editor`
    - Expected: output contains `path`
    - Expected: output does not contain `"error":`
-3. Operator prepares a scoped-argument editor note
+- Operator prepares a scoped-argument editor note
    - API capture: after_step
    - Evidence: API response verified by 1 expected check
    - Expected: rt_file_write_text(path, "# Scoped Argument\n\nfrom arguments\n") is true
-4. Operator verifies editor.open_file reads params.arguments.path
+- Operator verifies editor.open_file reads params.arguments.path
    - API capture: after_step
    - Evidence: API response verified by 4 expected checks
    - Expected: output contains `"opened " + path`

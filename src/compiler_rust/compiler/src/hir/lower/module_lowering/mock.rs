@@ -22,7 +22,10 @@ impl Lowerer {
             let ty = if let Some(t) = &param.ty {
                 self.resolve_type(t)?
             } else {
-                return Err(LowerError::MissingParameterType(param.name.clone()));
+                return Err(LowerError::MissingParameterType {
+                    param: param.name.clone(),
+                    function: "<mock expectation>".to_string(),
+                });
             };
             params.push(LocalVar {
                 name: param.name.clone(),

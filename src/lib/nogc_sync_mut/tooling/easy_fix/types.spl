@@ -22,6 +22,7 @@ pub enum LintCategory:
 # ============================================================================
 
 pub enum FixConfidence:
+    Certain    # Deterministic syntactic fix
     Safe       # Auto-apply without review
     Likely     # Probably correct, review recommended
     Uncertain  # May change semantics, needs human review
@@ -62,11 +63,13 @@ pub class EasyFix:
 
     fn is_safe() -> Bool:
         match self.confidence:
+            case Certain: true
             case Safe: true
             case _: false
 
     fn is_likely() -> Bool:
         match self.confidence:
+            case Certain: true
             case Safe: true
             case Likely: true
             case _: false
@@ -80,6 +83,7 @@ pub class EasyFix:
 
     fn confidence_str() -> String:
         match self.confidence:
+            case Certain: "certain"
             case Safe: "safe"
             case Likely: "likely"
             case Uncertain: "uncertain"
@@ -134,7 +138,8 @@ pub class FixApplicator:
         var by_file: Dict<String, [Replacement]> = {}
 
         for fix in fixes:
-            for rep in fix.replacements:
+            val replacements_for_fix: [Replacement] = easyfix_replacements(fix)
+            for rep in replacements_for_fix:
                 if not by_file.has(rep.file):
                     by_file[rep.file] = []
                 var file_reps = by_file[rep.file]
@@ -156,8 +161,8 @@ pub class FixApplicator:
             while i < replacements.len():
                 var j = i + 1
                 while j < replacements.len():
-                    val left = replacements[i]
-                    val right = replacements[j]
+                    val left: Replacement = replacements[i]
+                    val right: Replacement = replacements[j]
                     if left.start < right.start:
                         val temp = left
                         replacements[i] = replacements[j]
@@ -168,8 +173,8 @@ pub class FixApplicator:
             # Check for overlapping spans
             var i = 0
             while i < replacements.len() - 1:
-                val curr = replacements[i]
-                val next = replacements[i + 1]
+                val curr: Replacement = replacements[i]
+                val next: Replacement = replacements[i + 1]
                 # curr.start >= next.start (sorted descending)
                 if next.end > curr.start:
                     return Err("Conflicting replacements in {file}: spans [{next.start}..{next.end}] and [{curr.start}..{curr.end}] overlap")
@@ -178,8 +183,9 @@ pub class FixApplicator:
             # Apply replacements from end to start
             var new_source = source
             for rep in replacements:
-                if rep.start <= new_source.len() and rep.end <= new_source.len():
-                    new_source = new_source.slice(0, rep.start) + rep.new_text + new_source.slice(rep.end)
+                val typed_rep: Replacement = rep
+                if typed_rep.start <= new_source.len() and typed_rep.end <= new_source.len():
+                    new_source = new_source.slice(0, typed_rep.start) + typed_rep.new_text + new_source.slice(typed_rep.end)
 
             results[file] = new_source
 
@@ -187,15 +193,45 @@ pub class FixApplicator:
 
     static fn filter_by_confidence(fixes: [EasyFix], min_confidence: FixConfidence) -> [EasyFix]:
         match min_confidence:
+            case Certain:
+                var out: [EasyFix] = []
+                var i = 0
+                while i < fixes.len():
+                    val fix: EasyFix = fixes[i]
+                    if fix.is_safe():
+                        out = out.push(fix)
+                    i = i + 1
+                out
             case Safe:
-                fixes.filter(&:is_safe)
+                var out: [EasyFix] = []
+                var i = 0
+                while i < fixes.len():
+                    val fix: EasyFix = fixes[i]
+                    if fix.is_safe():
+                        out = out.push(fix)
+                    i = i + 1
+                out
             case Likely:
-                fixes.filter(&:is_likely)
+                var out: [EasyFix] = []
+                var i = 0
+                while i < fixes.len():
+                    val fix: EasyFix = fixes[i]
+                    if fix.is_likely():
+                        out = out.push(fix)
+                    i = i + 1
+                out
             case Uncertain:
                 fixes
 
     static fn filter_by_id(fixes: [EasyFix], id_prefix: String) -> [EasyFix]:
-        fixes.filter(_.id.starts_with(id_prefix))
+        var out: [EasyFix] = []
+        var i = 0
+        while i < fixes.len():
+            val fix: EasyFix = fixes[i]
+            if easyfix_id(fix).starts_with(id_prefix):
+                out = out.push(fix)
+            i = i + 1
+        out
 
 # ============================================================================
 # Lint: diagnostic with optional EasyFix

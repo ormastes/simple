@@ -580,7 +580,10 @@ impl Lowerer {
             } else if self.lenient_types {
                 TypeId::ANY
             } else {
-                return Err(LowerError::MissingParameterType(param.name.clone()));
+                return Err(LowerError::MissingParameterType {
+                    param: param.name.clone(),
+                    function: f.name.clone(),
+                });
             };
             ctx.add_local_with_inject_and_type_hint(
                 param.name.clone(),
