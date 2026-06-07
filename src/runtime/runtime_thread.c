@@ -600,6 +600,10 @@ int64_t rt_pool_get_parallelism(void) {
 #endif
 }
 
+int64_t rt_pool_uses_global_fifo_queue(void) {
+    return 1;
+}
+
 static void rt_pool_push_task(RtPoolTask* task) {
 #ifdef SPL_THREAD_PTHREAD
     pthread_mutex_lock(&g_pool_lock);

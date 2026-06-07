@@ -133,6 +133,24 @@ pub fn rt_pool_is_done(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(1))
 }
 
+/// Interpreter runtime-pool configuration is accepted for facade compatibility.
+pub fn rt_pool_set_parallelism(args: &[Value]) -> Result<Value, CompileError> {
+    if let Some(Value::Int(workers)) = args.first() {
+        return Ok(Value::Int((*workers).clamp(1, 64)));
+    }
+    Ok(Value::Int(1))
+}
+
+/// Interpreter mode has no native worker pool; report one inline carrier.
+pub fn rt_pool_get_parallelism(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(1))
+}
+
+/// Interpreter fallback is not the hosted runtime pool's shared FIFO.
+pub fn rt_pool_uses_global_fifo_queue(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
 /// Defensive interpreter stub for native pool handles.
 pub fn rt_pool_join(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(0))

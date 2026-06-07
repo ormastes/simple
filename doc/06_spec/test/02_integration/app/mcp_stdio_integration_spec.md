@@ -46,7 +46,6 @@ mcp_stdio_integration_spec -> std
    - Expected: output contains `"protocolVersion":"2025-06-18"`
    - Expected: output contains `"serverInfo":{"name":"simple-mcp-full"`
    - Expected: output does not contain `"error":`
-
 2. Operator sends the initialized notification and lists tools
    - Protocol capture: after_step
    - Evidence: protocol response verified by 7 expected checks
@@ -60,7 +59,7 @@ mcp_stdio_integration_spec -> std
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 37 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -115,7 +114,6 @@ expect(output.contains("\"error\":")).to_equal(false)
    - Expected: output contains `"protocolVersion":"2025-06-18"`
    - Expected: output contains `"serverInfo":{"name":"simple-mcp-full"`
    - Expected: output does not contain `"error":`
-
 2. Operator calls an unknown tool to verify tool-level errors
    - Protocol capture: after_step
    - Evidence: protocol response verified by 3 expected checks
@@ -125,7 +123,7 @@ expect(output.contains("\"error\":")).to_equal(false)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -160,12 +158,10 @@ expect(output.contains("\"error\":")).to_equal(false)
    - Expected: output contains `"result":{"tools":[`
    - Expected: output contains `"name":"debug_create_session"`
    - Expected: output does not contain `"error":`
-
 2. Operator prepares an editor note
    - API capture: after_step
    - Evidence: API response verified by 1 expected check
    - Expected: rt_file_write_text(path, "# MCP Note\n\nhello editor\n") is true
-
 3. Operator opens and reads the note through the safe editor tools
    - API capture: after_step
    - Evidence: API response verified by 10 expected checks
@@ -182,7 +178,7 @@ expect(output.contains("\"error\":")).to_equal(false)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 51 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -252,7 +248,6 @@ expect(output.contains("\"error\":")).to_equal(false)
    - API capture: after_step
    - Evidence: API response verified by 1 expected check
    - Expected: rt_file_write_text(path, "# MCP Note\n\nhello editor\n") is true
-
 2. Operator opens and reads the note through the safe editor tools
    - API capture: after_step
    - Evidence: API response verified by 10 expected checks
@@ -266,12 +261,10 @@ expect(output.contains("\"error\":")).to_equal(false)
    - Expected: output contains `hello editor`
    - Expected: output contains `path`
    - Expected: output does not contain `"error":`
-
 3. Operator prepares a scoped-argument editor note
    - API capture: after_step
    - Evidence: API response verified by 1 expected check
    - Expected: rt_file_write_text(path, "# Scoped Argument\n\nfrom arguments\n") is true
-
 4. Operator verifies editor.open_file reads params.arguments.path
    - API capture: after_step
    - Evidence: API response verified by 4 expected checks
@@ -282,7 +275,7 @@ expect(output.contains("\"error\":")).to_equal(false)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

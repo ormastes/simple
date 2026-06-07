@@ -525,7 +525,13 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_channel_new", concurrency::rt_channel_new);
     insert_simple!("rt_pool_is_done", concurrency::rt_pool_is_done);
     insert_simple!("rt_pool_join", concurrency::rt_pool_join);
+    insert_simple!("rt_pool_get_parallelism", concurrency::rt_pool_get_parallelism);
+    insert_simple!("rt_pool_set_parallelism", concurrency::rt_pool_set_parallelism);
     insert_simple!("rt_pool_submit", concurrency::rt_pool_submit);
+    insert_simple!(
+        "rt_pool_uses_global_fifo_queue",
+        concurrency::rt_pool_uses_global_fifo_queue
+    );
     insert_simple!("rt_channel_recv", concurrency::rt_channel_recv);
     insert_simple!("rt_channel_send", concurrency::rt_channel_send);
     insert_simple!("rt_channel_try_recv", concurrency::rt_channel_try_recv);

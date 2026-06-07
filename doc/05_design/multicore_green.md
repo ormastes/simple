@@ -17,8 +17,9 @@ and `doc/02_requirements/nfr/multicore_green.md`.
 ### OS Thread Baseline
 
 `thread_spawn` creates explicit OS-thread work and returns `ThreadHandle`.
-Profile workloads use fork-join `thread_spawn` while
-`thread_spawn_with_args` native explicit-argument ABI remains blocked.
+Profile workloads use fork-join `thread_spawn` for the OS-thread baseline.
+`thread_spawn_with_args` has focused native ABI smoke coverage, so it remains
+separate from scheduler profile rows rather than being treated as a green API.
 
 Design rule: OS-thread rows must not be compared as green-thread rows. They are
 the platform-thread baseline, equivalent in model to C pthread fanout.
@@ -55,6 +56,8 @@ Data structure:
 - `MulticoreGreenHandle.native_handle`
 - `MulticoreGreenHandle.inline_done`
 - `MulticoreGreenHandle.inline_result`
+- `multicore_green_uses_global_fifo_queue()` evidence for the current hosted
+  runtime-pool queue model.
 
 Behavior:
 
@@ -64,6 +67,9 @@ Behavior:
 - `ran_inline_fallback()` is true only for fallback.
 - `join()` delegates to `rt_pool_join` for native handles and otherwise returns
   the inline result.
+- `multicore_green_uses_global_fifo_queue()` returns true for the current
+  shared FIFO runtime pool. This is honest M:N candidate evidence, not a
+  claim of Go-style per-worker queues or work stealing.
 
 Design rule: only positive-handle work can support hosted M:N claims. Inline
 fallback is correct behavior but not M:N evidence.
@@ -200,8 +206,8 @@ drifting silently.
   bad public argument shapes are rejected with `E-PAR-004`: spawn-style APIs
   including direct `green_spawn` require closures, while
   `multicore_green_set_parallelism` requires an integer worker count.
-- `thread_spawn_with_args` stays documented as blocked for native profile use
-  until its ABI bug is fixed.
+- `thread_spawn_with_args` native ABI smoke stays separate from scheduler
+  profile rows.
 - Profile reports reject SMF multicore-green failure rows when used as checked
   M:N evidence; diagnostic failure labels remain available for local triage.
 - Docs must not call cooperative green M:N.
@@ -242,6 +248,9 @@ Repository guards:
   Remaining work is carrying bounded worker-loop/yield/tick and preemption-
   safepoint sweeps into final AP hardware handoff plus broader blocking
   surfaces.
+- Runtime-pool queue model: the hosted runtime currently reports a shared
+  FIFO queue. Per-worker queues and stealing remain future optimizer/runtime
+  work before claiming Go-like scheduling overhead.
 - Preemption strategy: scheduler-owned tick-budget yield, preemption safepoint
   bridge, hardware timer-vector adapter, and named runtime/compiler safepoint
   adapters exist; remaining work is inserting compiler-generated polls,

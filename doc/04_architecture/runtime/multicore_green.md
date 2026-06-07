@@ -58,6 +58,7 @@ Primary surfaces:
 - `rt_pool_submit`
 - `rt_pool_join`
 - `rt_pool_is_done`
+- `rt_pool_uses_global_fifo_queue`
 
 Responsibilities:
 
@@ -65,6 +66,8 @@ Responsibilities:
 - Return a positive handle only when the runtime pool owns the work.
 - Allow `MulticoreGreenHandle.used_runtime_pool()` to be the trust boundary for
   profile and M:N evidence.
+- Report the current shared FIFO queue model in meaningful Simple-facing terms
+  through `multicore_green_uses_global_fifo_queue()`.
 
 ### Profile And Evidence Layer
 
@@ -117,6 +120,8 @@ Hosted runtime-pool path:
 - Join and done checks go through `rt_pool_join` and `rt_pool_is_done` only for
   positive native handles.
 - Profile rows treat only positive-handle work as M:N candidate evidence.
+- Profile rows print `queue_model=global_fifo` for the current hosted runtime
+  pool, so reports do not overclaim per-worker queues or work stealing.
 
 Cooperative path:
 
@@ -221,8 +226,9 @@ insertion/poll-placement before claiming tight-loop fairness comparable to Go.
 
 ## Known Gaps
 
-- `thread_spawn_with_args` native explicit-argument ABI remains tracked as a
-  blocker, so profile OS-thread rows use `thread_spawn`.
+- `thread_spawn_with_args` native explicit-argument ABI has focused smoke
+  coverage. Profile OS-thread rows still use `thread_spawn` because they are
+  scheduler-baseline rows, not explicit-argument ABI rows.
 - SMF multicore-green fanout now participates in the same pool-evidence gate as
   native multicore-green. SMF failure classifications remain diagnostic only
   and are rejected by the profile contract when a checked report is used as
