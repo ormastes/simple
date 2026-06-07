@@ -18,7 +18,7 @@ Deliver and verify a Simple concurrency lane that clearly separates OS threads, 
 - AC-2: Public docs and coding guidance distinguish `thread_spawn` as OS-thread work, cooperative green APIs as current-carrier queue work, and `multicore_green_spawn` as pool-backed M:N candidate work only with runtime-pool evidence.
 - AC-3: Profile scripts use existing canonical profile harnesses, include OS-thread, cooperative-green, multicore-green, Go, and C rows, and reject numbered API aliases such as `thread_spawn2`.
 - AC-4: Perf reports prove Go-vs-C fanout behavior and Simple multicore-green native rows with `used_runtime_pool()` / `pool_used=` evidence.
-- AC-5: Pure Simple implementation and generated workloads avoid unrolled numbered handles where compact semantic loops and handle arrays preserve behavior.
+- AC-5: Pure Simple implementation, generated workloads, and executable perf specs avoid unrolled numbered handles where compact semantic loops and handle arrays preserve behavior.
 - AC-6: SimpleOS cooperative-green and multicore-green support has executable SPipe specs, generated manuals, and current evidence reports.
 - AC-7: Misuse and API-shape checks reject wrong-surface imports, numbered API aliases, bad public argument shapes, and fallback rows that pretend to be runtime-pool M:N work.
 - AC-8: Final feature and NFR requirement documents are written from user-selected options; unselected options are removed per repository process.
@@ -44,6 +44,15 @@ go-runtime-hardening
   `multicore_green_set_parallelism` / `multicore_green_parallelism` and
   `rt_pool_set_parallelism` / `rt_pool_get_parallelism`; profile rows now
   require `parallelism=requested/actual` evidence in addition to `pool_used`.
+- implementation: Reworked cross-language profile workload generation and
+  multicore-green fanout SSpec to use semantic typed handle arrays instead of
+  numbered `h0` / `h1` style handles; the profile report contract now rejects
+  numbered generated handles.
+- evidence: Regenerated `doc/09_report/cross_language_perf_parallel_smoke.md`
+  with capture-free generated Simple workers. Native fanout and stress
+  multicore-green rows now pass with `pool_used=N/N` and
+  `parallelism=requested/actual`; the regular parallel multicore row is
+  classified separately as a runtime-pool handle ownership blocker.
 - verification: Re-ran SimpleOS cooperative green, multicore green scheduler,
   green-channel wake, default QEMU gate, and live QEMU green-carrier proof with
   the rebuilt compiler; live QEMU passed in 40469ms.

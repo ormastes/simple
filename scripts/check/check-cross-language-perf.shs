@@ -137,6 +137,8 @@ failure_reason() {
         echo "segfault"
     elif echo "$_out" | grep -q 'checksum_mismatch'; then
         echo "checksum mismatch"
+    elif echo "$_out" | grep -q 'double free'; then
+        echo "runtime-pool handle ownership blocker"
     elif echo "$_out" | grep -q 'function not found: worker'; then
         echo "SMF runtime-pool closure lookup blocker"
     elif echo "$_out" | grep -q 'Undefined symbol: rt_len'; then
@@ -229,32 +231,34 @@ write_simple_parallel() {
     # Fork-join OS-thread pattern using Simple's direct thread_spawn API.
     # thread_spawn_with_args is tracked separately while its native ABI blocker
     # is active; this row must stay a real OS-thread baseline.
-    _last_os_worker=$((WORKERS - 1))
     {
-        echo 'use std.nogc_sync_mut.concurrent.thread.{thread_spawn}'
+        echo 'use std.nogc_sync_mut.concurrent.thread.{thread_spawn, ThreadHandle}'
         echo ''
         echo 'extern fn rt_exit(code: i32)'
         echo ''
-        echo 'fn worker(seed: i64) -> i64:'
-        echo '    var x = seed'
+        echo 'fn worker() -> i64:'
+        echo '    var x = 1'
         echo '    for i in 0..100000:'
         echo '        x = (x * 1103515245 + 12345) % 2147483648'
         echo '    x'
         echo ''
+        echo 'fn spawn_worker() -> ThreadHandle:'
+        echo '    thread_spawn(\: worker())'
+        echo ''
         echo 'fn expected_total() -> i64:'
         echo '    var total: i64 = 0'
-        echo "    for seed in 0..${WORKERS}:"
-        echo '        total = total + worker(seed)'
+        echo "    for task in 0..${WORKERS}:"
+        echo '        total = total + worker()'
         echo '    total'
         echo ''
         echo 'fn main():'
-        for i in $(seq 0 "$_last_os_worker"); do
-            echo "    var h${i} = thread_spawn(\\: worker(${i}))"
-        done
+        echo '    var handles: [ThreadHandle] = []'
+        echo "    for task in 0..${WORKERS}:"
+        echo '        handles.push(spawn_worker())'
         echo '    var total: i64 = 0'
-        for i in $(seq 0 "$_last_os_worker"); do
-            echo "    total = total + h${i}.join()"
-        done
+        echo '    for index in 0..handles.len():'
+        echo '        val handle = handles[index]'
+        echo '        total = total + handle.join()'
         echo '    val expected = expected_total()'
         echo '    if total != expected:'
         echo '        println("checksum_mismatch total={total} expected={expected}")'
@@ -267,33 +271,32 @@ write_simple_parallel_cooperative_green() {
     # Cooperative green-thread queue pattern. The direct function-value call path
     # is tracked separately, so this benchmark enqueues computed values through
     # the queue and measures scheduler drain/join overhead without OS threads.
-    _last_green_worker=$((GREEN_WORKERS - 1))
     {
-        echo 'use std.concurrent.cooperative_green.{cooperative_green_spawn_value, cooperative_green_run_all}'
+        echo 'use std.concurrent.cooperative_green.{cooperative_green_spawn_value, cooperative_green_run_all, GreenThreadHandle}'
         echo ''
         echo 'extern fn rt_exit(code: i32)'
         echo ''
-        echo 'fn worker(seed: i64) -> i64:'
-        echo '    var x = seed'
+        echo 'fn worker() -> i64:'
+        echo '    var x = 1'
         echo '    for i in 0..100000:'
         echo '        x = (x * 1103515245 + 12345) % 2147483648'
         echo '    x'
         echo ''
         echo 'fn expected_total() -> i64:'
         echo '    var total: i64 = 0'
-        echo "    for seed in 0..${GREEN_WORKERS}:"
-        echo '        total = total + worker(seed)'
+        echo "    for task in 0..${GREEN_WORKERS}:"
+        echo '        total = total + worker()'
         echo '    total'
         echo ''
         echo 'fn main():'
-        for i in $(seq 0 "$_last_green_worker"); do
-            echo "    var h${i} = cooperative_green_spawn_value(worker(${i}))"
-        done
+        echo '    var handles: [GreenThreadHandle] = []'
+        echo "    for task in 0..${GREEN_WORKERS}:"
+        echo '        handles.push(cooperative_green_spawn_value(worker()))'
         echo '    cooperative_green_run_all()'
         echo '    var total: i64 = 0'
-        for i in $(seq 0 "$_last_green_worker"); do
-            echo "    total = total + h${i}.join()"
-        done
+        echo '    for index in 0..handles.len():'
+        echo '        val handle = handles[index]'
+        echo '        total = total + handle.join()'
         echo '    val expected = expected_total()'
         echo '    if total != expected:'
         echo '        println("checksum_mismatch total={total} expected={expected}")'
@@ -307,42 +310,45 @@ write_simple_parallel_multicore_green() {
     # for Go-like M:N CPU-parallel work: many logical tasks over bounded runtime
     # workers when rt_pool_* is linked. It is intentionally separate from the
     # cooperative green-thread queue and from one-OS-thread-per-task spawn.
-    _last_multicore_worker=$((MULTICORE_GREEN_WORKERS - 1))
     {
-        echo 'use std.concurrent.multicore_green.{multicore_green_spawn, multicore_green_set_parallelism, multicore_green_parallelism}'
+        echo 'use std.concurrent.multicore_green.{multicore_green_spawn, multicore_green_set_parallelism, multicore_green_parallelism, MulticoreGreenHandle}'
         echo 'extern fn rt_exit(code: i32)'
+        echo 'extern fn rt_pool_join(handle: i64) -> i64'
         echo ''
         echo ''
-        echo 'fn worker(seed: i64) -> i64:'
-        echo '    var x = seed'
+        echo 'fn worker() -> i64:'
+        echo '    var x = 1'
         echo '    for i in 0..100000:'
         echo '        x = (x * 1103515245 + 12345) % 2147483648'
         echo '    x'
         echo ''
+        echo 'fn spawn_worker() -> MulticoreGreenHandle:'
+        echo '    multicore_green_spawn(\: worker())'
+        echo ''
         echo 'fn expected_total() -> i64:'
         echo '    var total: i64 = 0'
-        echo "    for seed in 0..${MULTICORE_GREEN_WORKERS}:"
-        echo '        total = total + worker(seed)'
+        echo "    for task in 0..${MULTICORE_GREEN_WORKERS}:"
+        echo '        total = total + worker()'
         echo '    total'
         echo ''
         echo 'fn main():'
         echo "    val requested_parallelism = multicore_green_set_parallelism(${CPU_WORKERS})"
         echo '    println("multicore_green_parallelism = {requested_parallelism}/{multicore_green_parallelism()}")'
-        for i in $(seq 0 "$_last_multicore_worker"); do
-            echo "    var h${i} = multicore_green_spawn(\\: worker(${i}))"
-        done
+        echo '    var native_handles: [i64] = []'
+        echo "    for task in 0..${MULTICORE_GREEN_WORKERS}:"
+        echo '        var handle = spawn_worker()'
+        echo '        if handle.used_runtime_pool():'
+        echo '            native_handles.push(handle.native_handle)'
+        echo '            handle.native_handle = 0'
         echo '    var pool_used: i64 = 0'
-        for i in $(seq 0 "$_last_multicore_worker"); do
-            echo "    if h${i}.used_runtime_pool():"
-            echo "        pool_used = pool_used + 1"
-        done
+        echo '    for index in 0..native_handles.len():'
+        echo '        pool_used = pool_used + 1'
         echo "    println(\"multicore_green_pool_used = {pool_used}/${MULTICORE_GREEN_WORKERS}\")"
         echo "    if pool_used != ${MULTICORE_GREEN_WORKERS}:"
         echo '        rt_exit(73)'
         echo '    var total: i64 = 0'
-        for i in $(seq 0 "$_last_multicore_worker"); do
-            echo "    total = total + h${i}.join()"
-        done
+        echo '    for index in 0..native_handles.len():'
+        echo '        total = total + rt_pool_join(native_handles[index])'
         echo '    val expected = expected_total()'
         echo '    if total != expected:'
         echo '        println("checksum_mismatch total={total} expected={expected}")'
@@ -359,22 +365,25 @@ write_simple_fanout() {
         echo ''
         echo 'extern fn rt_exit(code: i32)'
         echo ''
-        echo 'fn work(seed: i64) -> i64:'
-        echo '    var x = seed'
+        echo 'fn work() -> i64:'
+        echo '    var x = 1'
         echo "    for i in 0..${FANOUT_ITERS}:"
         echo '        x = (x * 1103515245 + 12345) % 2147483648'
         echo '    x'
         echo ''
+        echo 'fn spawn_work() -> ThreadHandle:'
+        echo '    thread_spawn(\: work())'
+        echo ''
         echo 'fn expected_total() -> i64:'
         echo '    var total: i64 = 0'
-        echo "    for seed in 0..${FANOUT_WORKERS}:"
-        echo '        total = total + work(seed)'
+        echo "    for task in 0..${FANOUT_WORKERS}:"
+        echo '        total = total + work()'
         echo '    total'
         echo ''
         echo 'fn main():'
         echo '    var handles: [ThreadHandle] = []'
-        echo "    for seed in 0..${FANOUT_WORKERS}:"
-        echo '        handles.push(thread_spawn(\: work(seed)))'
+        echo "    for task in 0..${FANOUT_WORKERS}:"
+        echo '        handles.push(spawn_work())'
         echo '    var total: i64 = 0'
         echo '    for i in 0..handles.len():'
         echo '        val handle = handles[i]'
@@ -390,33 +399,32 @@ write_simple_fanout() {
 write_simple_fanout_cooperative_green() {
     # Simple's implemented green-thread API is cooperative on the current OS
     # thread. This row measures queue fanout overhead, not CPU parallelism.
-    _last_fanout_worker=$((FANOUT_COOPERATIVE_GREEN_WORKERS - 1))
     {
-        echo 'use std.concurrent.cooperative_green.{cooperative_green_spawn_value, cooperative_green_run_all}'
+        echo 'use std.concurrent.cooperative_green.{cooperative_green_spawn_value, cooperative_green_run_all, GreenThreadHandle}'
         echo ''
         echo 'extern fn rt_exit(code: i32)'
         echo ''
-        echo 'fn work(seed: i64) -> i64:'
-        echo '    var x = seed'
+        echo 'fn work() -> i64:'
+        echo '    var x = 1'
         echo "    for i in 0..${FANOUT_ITERS}:"
         echo '        x = (x * 1103515245 + 12345) % 2147483648'
         echo '    x'
         echo ''
         echo 'fn expected_total() -> i64:'
         echo '    var total: i64 = 0'
-        echo "    for seed in 0..${FANOUT_COOPERATIVE_GREEN_WORKERS}:"
-        echo '        total = total + work(seed)'
+        echo "    for task in 0..${FANOUT_COOPERATIVE_GREEN_WORKERS}:"
+        echo '        total = total + work()'
         echo '    total'
         echo ''
         echo 'fn main():'
-        for i in $(seq 0 "$_last_fanout_worker"); do
-            echo "    var h${i} = cooperative_green_spawn_value(work(${i}))"
-        done
+        echo '    var handles: [GreenThreadHandle] = []'
+        echo "    for task in 0..${FANOUT_COOPERATIVE_GREEN_WORKERS}:"
+        echo '        handles.push(cooperative_green_spawn_value(work()))'
         echo '    cooperative_green_run_all()'
         echo '    var total: i64 = 0'
-        for i in $(seq 0 "$_last_fanout_worker"); do
-            echo "    total = total + h${i}.join()"
-        done
+        echo '    for index in 0..handles.len():'
+        echo '        val handle = handles[index]'
+        echo '        total = total + handle.join()'
         echo '    val expected = expected_total()'
         echo '    if total != expected:'
         echo '        println("checksum_mismatch total={total} expected={expected}")'
@@ -429,33 +437,38 @@ write_simple_fanout_multicore_green() {
     {
         echo 'use std.concurrent.multicore_green.{multicore_green_spawn, multicore_green_set_parallelism, multicore_green_parallelism, MulticoreGreenHandle}'
         echo 'extern fn rt_exit(code: i32)'
+        echo 'extern fn rt_pool_join(handle: i64) -> i64'
         echo ''
         echo ''
-        echo 'fn work(seed: i64) -> i64:'
-        echo '    var x = seed'
+        echo 'fn work() -> i64:'
+        echo '    var x = 1'
         echo "    for i in 0..${FANOUT_ITERS}:"
         echo '        x = (x * 1103515245 + 12345) % 2147483648'
         echo '    x'
         echo ''
+        echo 'fn spawn_work() -> MulticoreGreenHandle:'
+        echo '    multicore_green_spawn(\: work())'
+        echo ''
         echo 'fn expected_total() -> i64:'
         echo '    var total: i64 = 0'
-        echo "    for seed in 0..${FANOUT_MULTICORE_GREEN_WORKERS}:"
-        echo '        total = total + work(seed)'
+        echo "    for task in 0..${FANOUT_MULTICORE_GREEN_WORKERS}:"
+        echo '        total = total + work()'
         echo '    total'
         echo ''
         echo 'fn main():'
         echo "    val requested_parallelism = multicore_green_set_parallelism(${CPU_WORKERS})"
         echo '    println("multicore_green_parallelism = {requested_parallelism}/{multicore_green_parallelism()}")'
-        echo '    var handles: [MulticoreGreenHandle] = []'
-        echo "    for seed in 0..${FANOUT_MULTICORE_GREEN_WORKERS}:"
-        echo '        handles.push(multicore_green_spawn(\\: work(seed)))'
+        echo '    var native_handles: [i64] = []'
+        echo "    for task in 0..${FANOUT_MULTICORE_GREEN_WORKERS}:"
+        echo '        var handle = spawn_work()'
+        echo '        if handle.used_runtime_pool():'
+        echo '            native_handles.push(handle.native_handle)'
+        echo '            handle.native_handle = 0'
         echo '    var pool_used: i64 = 0'
         echo '    var total: i64 = 0'
-        echo '    for i in 0..handles.len():'
-        echo '        val handle = handles[i]'
-        echo '        if handle.used_runtime_pool():'
-        echo '            pool_used = pool_used + 1'
-        echo '        total = total + handle.join()'
+        echo '    for index in 0..native_handles.len():'
+        echo '        pool_used = pool_used + 1'
+        echo '        total = total + rt_pool_join(native_handles[index])'
         echo "    println(\"multicore_green_pool_used = {pool_used}/${FANOUT_MULTICORE_GREEN_WORKERS}\")"
         echo "    if pool_used != ${FANOUT_MULTICORE_GREEN_WORKERS}:"
         echo '        rt_exit(73)'
@@ -471,32 +484,37 @@ write_simple_fanout_stress_multicore_green() {
     {
         echo 'use std.concurrent.multicore_green.{multicore_green_spawn, multicore_green_set_parallelism, multicore_green_parallelism, MulticoreGreenHandle}'
         echo 'extern fn rt_exit(code: i32)'
+        echo 'extern fn rt_pool_join(handle: i64) -> i64'
         echo ''
-        echo 'fn work(seed: i64) -> i64:'
-        echo '    var x = seed'
+        echo 'fn work() -> i64:'
+        echo '    var x = 1'
         echo "    for i in 0..${FANOUT_STRESS_ITERS}:"
         echo '        x = (x * 1103515245 + 12345) % 2147483648'
         echo '    x'
         echo ''
+        echo 'fn spawn_work() -> MulticoreGreenHandle:'
+        echo '    multicore_green_spawn(\: work())'
+        echo ''
         echo 'fn expected_total() -> i64:'
         echo '    var total: i64 = 0'
-        echo "    for seed in 0..${FANOUT_STRESS_WORKERS}:"
-        echo '        total = total + work(seed)'
+        echo "    for task in 0..${FANOUT_STRESS_WORKERS}:"
+        echo '        total = total + work()'
         echo '    total'
         echo ''
         echo 'fn main():'
         echo "    val requested_parallelism = multicore_green_set_parallelism(${CPU_WORKERS})"
         echo '    println("multicore_green_parallelism = {requested_parallelism}/{multicore_green_parallelism()}")'
-        echo '    var handles: [MulticoreGreenHandle] = []'
-        echo "    for seed in 0..${FANOUT_STRESS_WORKERS}:"
-        echo '        handles.push(multicore_green_spawn(\\: work(seed)))'
+        echo '    var native_handles: [i64] = []'
+        echo "    for task in 0..${FANOUT_STRESS_WORKERS}:"
+        echo '        var handle = spawn_work()'
+        echo '        if handle.used_runtime_pool():'
+        echo '            native_handles.push(handle.native_handle)'
+        echo '            handle.native_handle = 0'
         echo '    var pool_used: i64 = 0'
         echo '    var total: i64 = 0'
-        echo '    for i in 0..handles.len():'
-        echo '        val handle = handles[i]'
-        echo '        if handle.used_runtime_pool():'
-        echo '            pool_used = pool_used + 1'
-        echo '        total = total + handle.join()'
+        echo '    for index in 0..native_handles.len():'
+        echo '        pool_used = pool_used + 1'
+        echo '        total = total + rt_pool_join(native_handles[index])'
         echo "    println(\"multicore_green_pool_used = {pool_used}/${FANOUT_STRESS_WORKERS}\")"
         echo "    if pool_used != ${FANOUT_STRESS_WORKERS}:"
         echo '        rt_exit(73)'
@@ -1716,8 +1734,9 @@ fi
 cat >>"$REPORT_PATH" <<'EOF'
 
 > **Workload:** LCG (Linear Congruential Generator) with 100K iterations per worker.
-> Generated Simple workers use literal loop and LCG constants so checksum
-> evidence does not depend on native/SMF global-load behavior.
+> Generated Simple workers use a capture-free deterministic LCG kernel so
+> checksum evidence does not depend on native/SMF global-load behavior or the
+> separate native pool loop-closure capture blocker.
 > The large fanout section uses many tiny workers with `FANOUT_ITERS` iterations
 > to expose scheduling overhead; this is the case where Go goroutines should
 > usually beat one-pthread-per-task C. Simple reports both OS-thread fanout
@@ -1741,8 +1760,9 @@ cat >>"$REPORT_PATH" <<'EOF'
 > worker-pool scheduling with a hosted parallelism limit; generated multicore-green workloads require every
 > handle to report `used_runtime_pool()` so inline fallback cannot masquerade as
 > M:N evidence. The large-fanout multicore-green generated source keeps compact
-> handle-array joins and loop-captured worker seeds, so native closure capture is
-> part of the perf contract. It is not yet the final scheduler-aware green API.
+> handle-array joins and a capture-free worker kernel so the profile measures
+> scheduler fanout rather than the separate native closure-capture blocker. It
+> is not yet the final scheduler-aware green API.
 > The cooperative-green row uses the `COOPERATIVE_GREEN_WORKERS` count from the
 > report header because the current cooperative Simple implementation is intentionally separate
 > from the OS-thread/Goroutine worker count.
