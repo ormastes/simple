@@ -60,6 +60,8 @@ void    rt_thread_yield(void);
 int64_t rt_pool_submit(int64_t fn_ptr, int64_t env_ptr);
 int64_t rt_pool_join(int64_t handle);
 int64_t rt_pool_is_done(int64_t handle);
+int64_t rt_pool_set_parallelism(int64_t workers);
+int64_t rt_pool_get_parallelism(void);
 
 /**
  * Detach thread (no join required).

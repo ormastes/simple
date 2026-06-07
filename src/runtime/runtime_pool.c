@@ -39,6 +39,7 @@ static RtPoolTask* g_pool_head = NULL;
 static RtPoolTask* g_pool_tail = NULL;
 static int g_pool_started = 0;
 static int g_pool_worker_count = 0;
+static int g_pool_configured_worker_count = 0;
 
 #ifdef RT_POOL_PTHREAD
 static pthread_mutex_t g_pool_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -72,6 +73,18 @@ static int rt_pool_default_worker_count(void) {
     if (n > 32) n = 32;
     return n;
 #endif
+}
+
+static int rt_pool_clamp_worker_count(int64_t count) {
+    if (count < 1) return 1;
+    if (count > 64) return 64;
+    return (int)count;
+}
+
+static int rt_pool_effective_worker_count(void) {
+    return g_pool_configured_worker_count > 0
+        ? g_pool_configured_worker_count
+        : rt_pool_default_worker_count();
 }
 
 static RtPoolTask* rt_pool_pop_task(void) {
@@ -132,6 +145,24 @@ static DWORD WINAPI rt_pool_worker_main_win(LPVOID raw) {
 }
 #endif
 
+static int rt_pool_spawn_worker(void) {
+#ifdef RT_POOL_PTHREAD
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, rt_pool_worker_main, NULL) == 0) {
+        pthread_detach(thread);
+        return 1;
+    }
+    return 0;
+#else
+    HANDLE thread = CreateThread(NULL, 0, rt_pool_worker_main_win, NULL, 0, NULL);
+    if (thread != NULL) {
+        CloseHandle(thread);
+        return 1;
+    }
+    return 0;
+#endif
+}
+
 static int rt_pool_start(void) {
 #ifdef RT_POOL_PTHREAD
     pthread_mutex_lock(&g_pool_lock);
@@ -143,14 +174,10 @@ static int rt_pool_start(void) {
     g_pool_started = 1;
     pthread_mutex_unlock(&g_pool_lock);
 
-    int requested = rt_pool_default_worker_count();
+    int requested = rt_pool_effective_worker_count();
     int started = 0;
     for (int i = 0; i < requested; i++) {
-        pthread_t thread;
-        if (pthread_create(&thread, NULL, rt_pool_worker_main, NULL) == 0) {
-            pthread_detach(thread);
-            started++;
-        }
+        started += rt_pool_spawn_worker();
     }
 
     pthread_mutex_lock(&g_pool_lock);
@@ -168,20 +195,87 @@ static int rt_pool_start(void) {
     g_pool_started = 1;
     LeaveCriticalSection(&g_pool_lock);
 
-    int requested = rt_pool_default_worker_count();
+    int requested = rt_pool_effective_worker_count();
     int started = 0;
     for (int i = 0; i < requested; i++) {
-        HANDLE thread = CreateThread(NULL, 0, rt_pool_worker_main_win, NULL, 0, NULL);
-        if (thread != NULL) {
-            CloseHandle(thread);
-            started++;
-        }
+        started += rt_pool_spawn_worker();
     }
 
     EnterCriticalSection(&g_pool_lock);
     g_pool_worker_count = started;
     LeaveCriticalSection(&g_pool_lock);
     return started;
+#endif
+}
+
+int64_t rt_pool_set_parallelism(int64_t workers) {
+    int requested = rt_pool_clamp_worker_count(workers);
+#ifdef RT_POOL_PTHREAD
+    pthread_mutex_lock(&g_pool_lock);
+    if (!g_pool_started) {
+        g_pool_configured_worker_count = requested;
+        g_pool_worker_count = requested;
+        pthread_mutex_unlock(&g_pool_lock);
+        return requested;
+    }
+    int current = g_pool_worker_count;
+    if (requested <= current) {
+        pthread_mutex_unlock(&g_pool_lock);
+        return current;
+    }
+    pthread_mutex_unlock(&g_pool_lock);
+
+    int added = 0;
+    for (int i = current; i < requested; i++) {
+        added += rt_pool_spawn_worker();
+    }
+
+    pthread_mutex_lock(&g_pool_lock);
+    g_pool_worker_count += added;
+    int actual = g_pool_worker_count;
+    pthread_mutex_unlock(&g_pool_lock);
+    return actual;
+#else
+    InitOnceExecuteOnce(&g_pool_once, rt_pool_init_once, NULL, NULL);
+    EnterCriticalSection(&g_pool_lock);
+    if (!g_pool_started) {
+        g_pool_configured_worker_count = requested;
+        g_pool_worker_count = requested;
+        LeaveCriticalSection(&g_pool_lock);
+        return requested;
+    }
+    int current = g_pool_worker_count;
+    if (requested <= current) {
+        LeaveCriticalSection(&g_pool_lock);
+        return current;
+    }
+    LeaveCriticalSection(&g_pool_lock);
+
+    int added = 0;
+    for (int i = current; i < requested; i++) {
+        added += rt_pool_spawn_worker();
+    }
+
+    EnterCriticalSection(&g_pool_lock);
+    g_pool_worker_count += added;
+    int actual = g_pool_worker_count;
+    LeaveCriticalSection(&g_pool_lock);
+    return actual;
+#endif
+}
+
+int64_t rt_pool_get_parallelism(void) {
+#ifdef RT_POOL_PTHREAD
+    pthread_mutex_lock(&g_pool_lock);
+    int count = g_pool_started ? g_pool_worker_count : rt_pool_effective_worker_count();
+    pthread_mutex_unlock(&g_pool_lock);
+    return count;
+#else
+    InitOnceExecuteOnce(&g_pool_once, rt_pool_init_once, NULL, NULL);
+    EnterCriticalSection(&g_pool_lock);
+    int count = g_pool_started ? g_pool_worker_count : rt_pool_effective_worker_count();
+    LeaveCriticalSection(&g_pool_lock);
+    return count;
 #endif
 }
 

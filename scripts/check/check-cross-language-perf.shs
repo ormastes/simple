@@ -137,6 +137,8 @@ failure_reason() {
         echo "segfault"
     elif echo "$_out" | grep -q 'checksum_mismatch'; then
         echo "checksum mismatch"
+    elif echo "$_out" | grep -q 'function not found: worker'; then
+        echo "SMF runtime-pool closure lookup blocker"
     elif echo "$_out" | grep -q 'Undefined symbol: rt_len'; then
         echo "missing rt_len"
     elif echo "$_out" | grep -q 'rt_pool_'; then
@@ -151,8 +153,11 @@ pool_evidence() {
     _expected="$2"
     _out=$(run_bounded "$_cmd" 2>&1) || { echo "pool_used=fail/$_expected"; return; }
     _used=$(printf '%s\n' "$_out" | sed -n 's/.*multicore_green_pool_used = \([0-9][0-9]*\)\/[0-9][0-9]*.*/\1/p' | tail -1)
+    _parallelism=$(printf '%s\n' "$_out" | sed -n 's/.*multicore_green_parallelism = \([0-9][0-9]*\/[0-9][0-9]*\).*/\1/p' | tail -1)
     if [ -z "$_used" ]; then
         echo "pool_used=missing/$_expected"
+    elif [ -n "$_parallelism" ]; then
+        echo "pool_used=$_used/$_expected, parallelism=$_parallelism"
     else
         echo "pool_used=$_used/$_expected"
     fi
@@ -304,7 +309,7 @@ write_simple_parallel_multicore_green() {
     # cooperative green-thread queue and from one-OS-thread-per-task spawn.
     _last_multicore_worker=$((MULTICORE_GREEN_WORKERS - 1))
     {
-        echo 'use std.concurrent.multicore_green.{multicore_green_spawn}'
+        echo 'use std.concurrent.multicore_green.{multicore_green_spawn, multicore_green_set_parallelism, multicore_green_parallelism}'
         echo 'extern fn rt_exit(code: i32)'
         echo ''
         echo ''
@@ -321,6 +326,8 @@ write_simple_parallel_multicore_green() {
         echo '    total'
         echo ''
         echo 'fn main():'
+        echo "    val requested_parallelism = multicore_green_set_parallelism(${CPU_WORKERS})"
+        echo '    println("multicore_green_parallelism = {requested_parallelism}/{multicore_green_parallelism()}")'
         for i in $(seq 0 "$_last_multicore_worker"); do
             echo "    var h${i} = multicore_green_spawn(\\: worker(${i}))"
         done
@@ -420,7 +427,7 @@ write_simple_fanout_cooperative_green() {
 
 write_simple_fanout_multicore_green() {
     {
-        echo 'use std.concurrent.multicore_green.{multicore_green_spawn, MulticoreGreenHandle}'
+        echo 'use std.concurrent.multicore_green.{multicore_green_spawn, multicore_green_set_parallelism, multicore_green_parallelism, MulticoreGreenHandle}'
         echo 'extern fn rt_exit(code: i32)'
         echo ''
         echo ''
@@ -437,9 +444,12 @@ write_simple_fanout_multicore_green() {
         echo '    total'
         echo ''
         echo 'fn main():'
+        echo "    val requested_parallelism = multicore_green_set_parallelism(${CPU_WORKERS})"
+        echo '    println("multicore_green_parallelism = {requested_parallelism}/{multicore_green_parallelism()}")'
         echo '    var handles: [MulticoreGreenHandle] = []'
-        echo "    for seed in 0..${FANOUT_MULTICORE_GREEN_WORKERS}:"
-        echo '        handles.push(multicore_green_spawn(\: work(seed)))'
+        for i in $(seq 0 "$((FANOUT_MULTICORE_GREEN_WORKERS - 1))"); do
+            echo "    handles.push(multicore_green_spawn(\\\\: work(${i})))"
+        done
         echo '    var pool_used: i64 = 0'
         echo '    var total: i64 = 0'
         echo '    for i in 0..handles.len():'
@@ -460,7 +470,7 @@ write_simple_fanout_multicore_green() {
 
 write_simple_fanout_stress_multicore_green() {
     {
-        echo 'use std.concurrent.multicore_green.{multicore_green_spawn, MulticoreGreenHandle}'
+        echo 'use std.concurrent.multicore_green.{multicore_green_spawn, multicore_green_set_parallelism, multicore_green_parallelism, MulticoreGreenHandle}'
         echo 'extern fn rt_exit(code: i32)'
         echo ''
         echo 'fn work(seed: i64) -> i64:'
@@ -476,9 +486,12 @@ write_simple_fanout_stress_multicore_green() {
         echo '    total'
         echo ''
         echo 'fn main():'
+        echo "    val requested_parallelism = multicore_green_set_parallelism(${CPU_WORKERS})"
+        echo '    println("multicore_green_parallelism = {requested_parallelism}/{multicore_green_parallelism()}")'
         echo '    var handles: [MulticoreGreenHandle] = []'
-        echo "    for seed in 0..${FANOUT_STRESS_WORKERS}:"
-        echo '        handles.push(multicore_green_spawn(\: work(seed)))'
+        for i in $(seq 0 "$((FANOUT_STRESS_WORKERS - 1))"); do
+            echo "    handles.push(multicore_green_spawn(\\\\: work(${i})))"
+        done
         echo '    var pool_used: i64 = 0'
         echo '    var total: i64 = 0'
         echo '    for i in 0..handles.len():'
@@ -1329,6 +1342,9 @@ if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/parallel_multicore_green_simple.s
     ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/parallel_multicore_green_simple.smf" "$RUNS")
     if [ "$ms" = "fail" ]; then
         reason=$(failure_reason "$SIMPLE_BINARY $BUILD_DIR/parallel_multicore_green_simple.smf")
+        if [ "$reason" = "segfault" ] || [ "$reason" = "missing runtime pool symbol" ]; then
+            reason="SMF runtime-pool closure lookup blocker"
+        fi
         par_row "Simple multicore green (SMF)" "$ms" "multicore_green runtime pool candidate ($reason)"
     else
         evidence=$(pool_evidence "$SIMPLE_BINARY $BUILD_DIR/parallel_multicore_green_simple.smf" "$MULTICORE_GREEN_WORKERS")
@@ -1439,6 +1455,9 @@ if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/fanout_multicore_green_simple.smf
     ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/fanout_multicore_green_simple.smf" "$RUNS")
     if [ "$ms" = "fail" ]; then
         reason=$(failure_reason "$SIMPLE_BINARY $BUILD_DIR/fanout_multicore_green_simple.smf")
+        if [ "$reason" = "segfault" ] || [ "$reason" = "missing runtime pool symbol" ]; then
+            reason="SMF runtime-pool closure lookup blocker"
+        fi
         fanout_row "Simple multicore green (SMF)" "$ms" "multicore_green runtime pool fanout ($reason)"
     else
         evidence=$(pool_evidence "$SIMPLE_BINARY $BUILD_DIR/fanout_multicore_green_simple.smf" "$FANOUT_MULTICORE_GREEN_WORKERS")
@@ -1705,7 +1724,10 @@ cat >>"$REPORT_PATH" <<'EOF'
 > to expose scheduling overhead; this is the case where Go goroutines should
 > usually beat one-pthread-per-task C. Simple reports both OS-thread fanout
 > through `thread_spawn`, cooperative green-thread queue fanout, and
-> pool-backed `multicore_green_spawn` fanout separately.
+> pool-backed `multicore_green_spawn` fanout separately. Generated
+> multicore-green workloads call `multicore_green_set_parallelism(CPU_WORKERS)`
+> before spawning tasks and print `multicore_green_parallelism=requested/actual`
+> evidence so the hosted pool limit is explicit.
 > The Simple-vs-Go-vs-C large fanout stress section repeats the stress shape at
 > `FANOUT_STRESS_WORKERS` workers and includes a Simple multicore-green native
 > row with `pool_used=N/N` evidence. It exists so the pthread-per-task baseline
@@ -1718,9 +1740,12 @@ cat >>"$REPORT_PATH" <<'EOF'
 > implemented cooperative green-thread queue on the current OS thread; it does
 > not run in parallel and is not a Go M:N goroutine equivalent. `Simple multicore
 > green` is the Pure Simple `multicore_green_spawn`/`rt_pool_*` candidate row for bounded
-> worker-pool scheduling; generated multicore-green workloads require every
+> worker-pool scheduling with a hosted parallelism limit; generated multicore-green workloads require every
 > handle to report `used_runtime_pool()` so inline fallback cannot masquerade as
-> M:N evidence. It is not yet the final scheduler-aware green API.
+> M:N evidence. The large-fanout multicore-green generated source keeps compact
+> handle-array joins but submits literal-seed closures instead of captured loop
+> variables because escaped native pool closures still have a measured loop-capture
+> blocker. It is not yet the final scheduler-aware green API.
 > The cooperative-green row uses the `COOPERATIVE_GREEN_WORKERS` count from the
 > report header because the current cooperative Simple implementation is intentionally separate
 > from the OS-thread/Goroutine worker count.

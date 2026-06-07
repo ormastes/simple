@@ -141,17 +141,18 @@ SimpleOS path:
 The selected Full Go-Like Runtime Roadmap uses all layers:
 
 - Public Simple API Layer preserves meaningful user APIs and model separation.
-- Runtime Pool ABI Layer proves hosted M:N ownership through positive handles
-  and `used_runtime_pool()`.
+- Runtime Pool ABI Layer proves hosted M:N ownership through positive handles,
+  `used_runtime_pool()`, and `multicore_green_parallelism()` evidence after
+  `multicore_green_set_parallelism(CPU_WORKERS)`.
 - Profile And Evidence Layer keeps Go, C pthread, Simple OS-thread,
   cooperative green, and multicore-green rows separate.
 - SimpleOS Scheduler Layer owns logical green tasks, carrier queues, remote
   wake/IPI intent, and AP evidence.
 
 Future roadmap work remains explicit: work stealing or per-worker queues,
-blocking integration, a parallelism limit similar in role to `GOMAXPROCS`, and
-preemption or compiler-inserted yield points before claiming tight-loop fairness
-comparable to Go.
+blocking integration, scheduler-owned parallelism handoff beyond the hosted
+runtime-pool limit, and preemption or compiler-inserted yield points before
+claiming tight-loop fairness comparable to Go.
 
 ## Known Gaps
 

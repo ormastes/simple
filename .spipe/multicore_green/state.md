@@ -40,6 +40,10 @@ dev-done
   AC-9 after selected requirements were written.
 - requirements: User selected `Full Go-Like Runtime Roadmap`; final feature and
   NFR requirements were written and option docs were removed.
+- implementation: Added hosted multicore-green parallelism control through
+  `multicore_green_set_parallelism` / `multicore_green_parallelism` and
+  `rt_pool_set_parallelism` / `rt_pool_get_parallelism`; profile rows now
+  require `parallelism=requested/actual` evidence in addition to `pool_used`.
 
 ## Completion Audit - 2026-06-07
 

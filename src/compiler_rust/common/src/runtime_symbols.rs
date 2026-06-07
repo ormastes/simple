@@ -17,7 +17,7 @@ pub struct AbiVersion {
 
 impl AbiVersion {
     /// Current ABI version of the runtime.
-    pub const CURRENT: Self = Self { major: 1, minor: 3 };
+    pub const CURRENT: Self = Self { major: 1, minor: 4 };
 
     /// Create a new ABI version.
     pub const fn new(major: u16, minor: u16) -> Self {
@@ -508,6 +508,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_pool_submit",
     "rt_pool_join",
     "rt_pool_is_done",
+    "rt_pool_set_parallelism",
+    "rt_pool_get_parallelism",
     "rt_thread_join",
     "rt_thread_is_done",
     "rt_thread_id",
@@ -1199,6 +1201,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_channel_try_recv",
     "rt_pool_is_done",
     "rt_pool_join",
+    "rt_pool_get_parallelism",
+    "rt_pool_set_parallelism",
     "rt_pool_submit",
     "rt_clear_args",
     "rt_cli_handle_add",

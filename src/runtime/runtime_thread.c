@@ -389,6 +389,7 @@ static RtPoolTask* g_pool_head = NULL;
 static RtPoolTask* g_pool_tail = NULL;
 static int g_pool_started = 0;
 static int g_pool_worker_count = 0;
+static int g_pool_configured_worker_count = 0;
 
 #ifdef SPL_THREAD_PTHREAD
 static pthread_mutex_t g_pool_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -404,6 +405,35 @@ static int rt_pool_default_worker_count(void) {
     if (count < 1) return 1;
     if (count > 64) return 64;
     return (int)count;
+}
+
+static int rt_pool_clamp_worker_count(int64_t count) {
+    if (count < 1) return 1;
+    if (count > 64) return 64;
+    return (int)count;
+}
+
+static int rt_pool_effective_worker_count(void) {
+    return g_pool_configured_worker_count > 0
+        ? g_pool_configured_worker_count
+        : rt_pool_default_worker_count();
+}
+
+static void* rt_pool_worker_main(void* raw);
+#ifdef SPL_THREAD_WINDOWS
+static DWORD WINAPI rt_pool_worker_main_win(LPVOID raw);
+#endif
+
+static void rt_pool_spawn_worker(void) {
+#ifdef SPL_THREAD_PTHREAD
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, rt_pool_worker_main, NULL) == 0) {
+        pthread_detach(thread);
+    }
+#else
+    HANDLE thread = CreateThread(NULL, 0, rt_pool_worker_main_win, NULL, 0, NULL);
+    if (thread) CloseHandle(thread);
+#endif
 }
 
 static RtPoolTask* rt_pool_pop_task(void) {
@@ -481,14 +511,11 @@ static void rt_pool_start(void) {
         return;
     }
     g_pool_started = 1;
-    g_pool_worker_count = rt_pool_default_worker_count();
+    g_pool_worker_count = rt_pool_effective_worker_count();
     pthread_mutex_unlock(&g_pool_lock);
 
     for (int i = 0; i < g_pool_worker_count; i++) {
-        pthread_t thread;
-        if (pthread_create(&thread, NULL, rt_pool_worker_main, NULL) == 0) {
-            pthread_detach(thread);
-        }
+        rt_pool_spawn_worker();
     }
 #else
     InitOnceExecuteOnce(&g_pool_once, rt_pool_init_once, NULL, NULL);
@@ -498,13 +525,67 @@ static void rt_pool_start(void) {
         return;
     }
     g_pool_started = 1;
-    g_pool_worker_count = rt_pool_default_worker_count();
+    g_pool_worker_count = rt_pool_effective_worker_count();
     LeaveCriticalSection(&g_pool_lock);
 
     for (int i = 0; i < g_pool_worker_count; i++) {
-        HANDLE thread = CreateThread(NULL, 0, rt_pool_worker_main_win, NULL, 0, NULL);
-        if (thread) CloseHandle(thread);
+        rt_pool_spawn_worker();
     }
+#endif
+}
+
+int64_t rt_pool_set_parallelism(int64_t workers) {
+    int requested = rt_pool_clamp_worker_count(workers);
+#ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_lock(&g_pool_lock);
+    if (!g_pool_started) {
+        g_pool_configured_worker_count = requested;
+        g_pool_worker_count = requested;
+        pthread_mutex_unlock(&g_pool_lock);
+        return requested;
+    }
+    int current = g_pool_worker_count;
+    if (requested <= current) {
+        pthread_mutex_unlock(&g_pool_lock);
+        return current;
+    }
+    g_pool_worker_count = requested;
+    pthread_mutex_unlock(&g_pool_lock);
+#else
+    InitOnceExecuteOnce(&g_pool_once, rt_pool_init_once, NULL, NULL);
+    EnterCriticalSection(&g_pool_lock);
+    if (!g_pool_started) {
+        g_pool_configured_worker_count = requested;
+        g_pool_worker_count = requested;
+        LeaveCriticalSection(&g_pool_lock);
+        return requested;
+    }
+    int current = g_pool_worker_count;
+    if (requested <= current) {
+        LeaveCriticalSection(&g_pool_lock);
+        return current;
+    }
+    g_pool_worker_count = requested;
+    LeaveCriticalSection(&g_pool_lock);
+#endif
+    for (int i = current; i < requested; i++) {
+        rt_pool_spawn_worker();
+    }
+    return requested;
+}
+
+int64_t rt_pool_get_parallelism(void) {
+#ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_lock(&g_pool_lock);
+    int count = g_pool_started ? g_pool_worker_count : rt_pool_effective_worker_count();
+    pthread_mutex_unlock(&g_pool_lock);
+    return count;
+#else
+    InitOnceExecuteOnce(&g_pool_once, rt_pool_init_once, NULL, NULL);
+    EnterCriticalSection(&g_pool_lock);
+    int count = g_pool_started ? g_pool_worker_count : rt_pool_effective_worker_count();
+    LeaveCriticalSection(&g_pool_lock);
+    return count;
 #endif
 }
 

@@ -34,8 +34,10 @@ SimpleOS scheduler work distinct and verifiable.
   evidence; host-only specs may prove logical behavior but not final hardware
   context-switch handoff.
 - REQ-MCG-008: The roadmap must track blocking integration, work stealing or
-  per-worker queues, a parallelism limit similar in role to Go `GOMAXPROCS`,
-  and preemption or compiler-inserted yield points before claiming tight-loop
+  per-worker queues, hosted `multicore_green_set_parallelism` /
+  `multicore_green_parallelism` evidence as the initial Go `GOMAXPROCS`-like
+  control, scheduler-owned carrier limits beyond the hosted pool, and
+  preemption or compiler-inserted yield points before claiming tight-loop
   fairness comparable to modern Go.
 - REQ-MCG-009: C, Go, and Rust may be used as baselines, research references,
   seed implementations, or runtime/compiler implementation contexts; they must
@@ -63,3 +65,6 @@ SimpleOS scheduler work distinct and verifiable.
   `test/05_perf/stress/multicore_green_fanout_spec.spl`,
   `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`, and
   `doc/09_report/cross_language_perf_parallel_smoke.md`.
+- Hosted parallelism control: `src/runtime/runtime_thread.c`,
+  `src/runtime/runtime_thread.h`, and
+  `src/lib/nogc_async_mut/concurrent/multicore_green.spl`.

@@ -204,7 +204,7 @@ execution model:
 | `thread_spawn` / `ThreadHandle` | `src/lib/nogc_async_mut/concurrent/thread.spl` and `thread_sffi.spl` | OS thread (`pthread_create` / `CreateThread`) |
 | `cooperative_green_spawn` / `cooperative_green_spawn_value` / `GreenThreadHandle` / `cooperative_green_run_one` / `cooperative_green_run_all` | `src/lib/nogc_async_mut/concurrent/cooperative_green.spl` over `green_thread.spl` | Cooperative green-thread queue on the current OS thread; no preemption or CPU parallelism |
 | `green_channel_new` / `green_channel_recv` / `green_channel_send` | `src/lib/nogc_async_mut/concurrent/green_channel.spl` | Pure Simple nonblocking green-channel contract; recv parks a logical green task, send unparks a waiter or reports bounded backpressure |
-| `multicore_green_spawn` / `MulticoreGreenHandle.used_runtime_pool()` / `MulticoreGreenHandle.ran_inline_fallback()` | `src/lib/nogc_async_mut/concurrent/multicore_green.spl` | Pure Simple bounded-worker facade over `rt_pool_*`; current M:N benchmark candidate, not final scheduler-aware green runtime |
+| `multicore_green_spawn` / `multicore_green_set_parallelism` / `multicore_green_parallelism` / `MulticoreGreenHandle.used_runtime_pool()` / `MulticoreGreenHandle.ran_inline_fallback()` | `src/lib/nogc_async_mut/concurrent/multicore_green.spl` | Pure Simple bounded-worker facade over `rt_pool_*`; current M:N benchmark candidate with a hosted Go `GOMAXPROCS`-like pool limit, not final scheduler-aware green runtime |
 | `task_spawn` / `TaskHandle` | `src/lib/nogc_async_mut/thread_pool.spl` | Pool-backed native task path when `rt_pool_*` is available; interpreter fallback otherwise |
 | `channel_new` / `channel_from_id` | `src/lib/nogc_sync_mut/concurrent/channel.spl` re-exported through `std.concurrent.channel` | Runtime MPMC channel |
 
@@ -215,6 +215,10 @@ CPU-parallel benchmarks. Use `multicore_green_spawn`, `task_spawn`, or a future
 scheduler-aware green runtime for Go-like benchmark work. When a test or profile
 claims M:N CPU parallelism, assert `used_runtime_pool()` so interpreter or
 platform fallback does not masquerade as a parallel result.
+Call `multicore_green_set_parallelism(workers)` before the first
+`multicore_green_spawn` when a profile needs an explicit hosted pool limit, and
+record `multicore_green_parallelism()` in evidence. Live pools can grow but do
+not claim shrink/preemption behavior yet.
 
 Do not use numbered concurrency aliases. `thread_spawn2`, `spawn_isolated2`,
 and `spawn_limited2` are rejected by `simple check` with `E-PAR-002`; use

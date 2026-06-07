@@ -14,7 +14,8 @@ Stability And Misuse Diagnostics, and SimpleOS Hardware Proof Gate.
   non-CPU-parallel work.
 - NFR-MCG-003: Cross-language performance reports must include OS-thread,
   cooperative-green, multicore-green, C pthread, Go goroutine, large-fanout,
-  Simple-vs-Go-vs-C stress, artifact-size, and RSS evidence.
+  Simple-vs-Go-vs-C stress, hosted `parallelism=requested/actual`,
+  artifact-size, and RSS evidence.
 - NFR-MCG-004: Simple native OS-thread and multicore-green rows must stay within
   the documented ratios in `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`
   for the checked-in smoke profile.

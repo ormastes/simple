@@ -643,6 +643,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_pool_submit", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_pool_join", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_pool_is_done", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_pool_set_parallelism", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_pool_get_parallelism", &[], &[I64]),
     RuntimeFuncSpec::new("rt_thread_available_parallelism", &[], &[I64]),
     RuntimeFuncSpec::new("spl_thread_cpu_count", &[], &[I64]),
     RuntimeFuncSpec::new("spl_thread_create", &[I64, I64], &[I64]),

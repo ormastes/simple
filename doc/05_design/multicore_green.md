@@ -164,7 +164,9 @@ Repository guards:
 
 ## Open Design Decisions
 
-- Exact future API for a parallelism limit similar in role to Go's
-  `GOMAXPROCS`.
+- Scheduler-owned parallelism handoff: the hosted runtime-pool facade now has
+  `multicore_green_set_parallelism` / `multicore_green_parallelism`, but the
+  final SimpleOS scheduler-aware green runtime still needs the handoff from
+  hosted pool limits to scheduler-owned carrier limits.
 - Preemption strategy: compiler-inserted yields, runtime safepoints, or an
   explicit cooperative-only guarantee until later.
