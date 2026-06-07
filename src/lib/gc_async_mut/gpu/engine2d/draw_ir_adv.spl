@@ -14,13 +14,10 @@ use common.ui.draw_ir.{
     simple_2d_draw_ir_adv_plan
 }
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
-use std.gc_async_mut.gpu.engine2d.generated_kernel_args.{GeneratedGlyphRasterArgs, generated_glyph_raster_args_pack, generated_glyph_raster_args_free}
+use std.gc_async_mut.gpu.engine2d.generated_kernel_args.{generated_glyph_raster_staging_create, generated_glyph_raster_staging_free}
 use std.gc_async_mut.gpu.engine2d.helpers_text.{TextBlitCache}
 use std.gc_async_mut.gpu.engine2d.vector_font_offload.{VectorFontOffloadEvidence, vector_font_current_offload_evidence}
 use std.gc_async_mut.text_layout.font_rasterizer.{reset_vector_font_raster_stats, reset_bitmap_font_raster_stats, bitmap_font_accelerator_stats}
-
-extern fn rt_alloc(size: i64) -> i64
-extern fn rt_free(ptr: i64, size: i64)
 
 val ENGINE2D_DRAW_IR_COMMAND_RECT: text = "rect"
 val ENGINE2D_DRAW_IR_COMMAND_TEXT: text = "text"
@@ -153,33 +150,6 @@ fn _draw_ir_text_extent(value: i32, fallback: i32) -> i64:
         return value as i64
     fallback as i64
 
-fn _engine2d_pack_generated_glyph_args(width: i64, height: i64, font_size: i64, enabled: bool) -> GeneratedGlyphRasterArgs:
-    if not enabled:
-        return GeneratedGlyphRasterArgs.invalid("generated-glyph-args-disabled")
-    if width <= 0 or height <= 0:
-        return GeneratedGlyphRasterArgs.invalid("invalid-generated-glyph-dimensions")
-    val glyph_plan = rt_alloc(8)
-    if glyph_plan == 0:
-        return GeneratedGlyphRasterArgs.invalid("alloc-glyph-plan-failed")
-    val dst_bytes = width * height * 4
-    val dst = rt_alloc(dst_bytes)
-    if dst == 0:
-        rt_free(glyph_plan, 8)
-        return GeneratedGlyphRasterArgs.invalid("alloc-glyph-dst-failed")
-    val args = generated_glyph_raster_args_pack(glyph_plan, dst, width, height, font_size)
-    if not args.ready:
-        rt_free(glyph_plan, 8)
-        rt_free(dst, dst_bytes)
-    args
-
-fn _engine2d_free_generated_glyph_args(args: GeneratedGlyphRasterArgs):
-    if args.args_ptr != 0:
-        generated_glyph_raster_args_free(args)
-    if args.glyph_plan != 0:
-        rt_free(args.glyph_plan, 8)
-    if args.dst != 0 and args.width > 0 and args.height > 0:
-        rt_free(args.dst, args.width * args.height * 4)
-
 fn engine2d_draw_ir_adv_batch(engine: Engine2D, batch: DrawIrBatch, gpu_available: bool) -> Engine2dDrawIrAdvResult:
     val plan = simple_2d_draw_ir_adv_plan(batch, gpu_available)
     if batch.embedding.clip:
@@ -212,18 +182,18 @@ fn engine2d_draw_ir_adv_batch(engine: Engine2D, batch: DrawIrBatch, gpu_availabl
                 engine.draw_image(x, y, text_buf.width, text_buf.height, text_buf.pixels)
             val offload_width = _draw_ir_text_extent(text_buf.width, command.width)
             val offload_height = _draw_ir_text_extent(text_buf.height, command.height)
-            val generated_args = _engine2d_pack_generated_glyph_args(offload_width, offload_height, font_size as i64, generated_glyph_args_enabled)
-            val evidence = vector_font_current_offload_evidence(backend_name, offload_width, offload_height, generated_glyph_args_enabled, generated_glyph_args_enabled, generated_args.args_ptr)
+            val staging = generated_glyph_raster_staging_create(offload_width, offload_height, font_size as i64, generated_glyph_args_enabled)
+            val evidence = vector_font_current_offload_evidence(backend_name, offload_width, offload_height, generated_glyph_args_enabled, generated_glyph_args_enabled, staging.args_ptr())
             text_count = text_count + 1
             last_font_size = font_size
-            font_generated_args_ready = generated_args.ready
-            font_generated_args_reason = generated_args.reason
+            font_generated_args_ready = staging.ready()
+            font_generated_args_reason = staging.reason()
             val offload = _engine2d_font_offload_summary(evidence)
             font_status = offload.status
             font_reason = offload.reason
             font_gpu_glyph_returned = offload.gpu_glyph_returned
             font_production_ready = offload.production_ready
-            _engine2d_free_generated_glyph_args(generated_args)
+            generated_glyph_raster_staging_free(staging)
             rendered = rendered + 1
         else:
             skipped = skipped + 1
@@ -264,18 +234,18 @@ fn engine2d_draw_ir_adv_composition(engine: Engine2D, composition: DrawIrComposi
                     engine.draw_image(x, y, text_buf.width, text_buf.height, text_buf.pixels)
                 val offload_width = _draw_ir_text_extent(text_buf.width, command.width)
                 val offload_height = _draw_ir_text_extent(text_buf.height, command.height)
-                val generated_args = _engine2d_pack_generated_glyph_args(offload_width, offload_height, font_size as i64, generated_glyph_args_enabled)
-                val evidence = vector_font_current_offload_evidence(backend_name, offload_width, offload_height, generated_glyph_args_enabled, generated_glyph_args_enabled, generated_args.args_ptr)
+                val staging = generated_glyph_raster_staging_create(offload_width, offload_height, font_size as i64, generated_glyph_args_enabled)
+                val evidence = vector_font_current_offload_evidence(backend_name, offload_width, offload_height, generated_glyph_args_enabled, generated_glyph_args_enabled, staging.args_ptr())
                 text_count = text_count + 1
                 last_font_size = font_size
-                font_generated_args_ready = generated_args.ready
-                font_generated_args_reason = generated_args.reason
+                font_generated_args_ready = staging.ready()
+                font_generated_args_reason = staging.reason()
                 val offload = _engine2d_font_offload_summary(evidence)
                 font_status = offload.status
                 font_reason = offload.reason
                 font_gpu_glyph_returned = offload.gpu_glyph_returned
                 font_production_ready = offload.production_ready
-                _engine2d_free_generated_glyph_args(generated_args)
+                generated_glyph_raster_staging_free(staging)
                 rendered = rendered + 1
             else:
                 skipped = skipped + 1

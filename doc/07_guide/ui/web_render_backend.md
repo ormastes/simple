@@ -129,8 +129,9 @@ arguments fail closed, valid packed pointers round-trip, and generated glyph
 provenance observes `args_ready`. OpenCL, CUDA, and ROCm session launch evidence
 now use that shared layout validator before submit, so generated glyph kernels
 do not treat an arbitrary nonzero pointer as launch-ready. Live GUI text
-execution now allocates temporary glyph-plan/output staging buffers, packs a real
-args pointer for GPU-routed Draw IR text, and reports
+execution now uses the shared generated glyph staging helper to allocate
+temporary glyph-plan/output buffers, packs a real args pointer for GPU-routed
+Draw IR text, and reports
 `font_generated_args_ready` / `font_generated_args_reason`. Backend readback
 into returned glyph pixels remains the production integration step.
 `web_render_vector_font_native_compute_evidence()` mirrors the same native-first

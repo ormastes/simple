@@ -358,10 +358,11 @@ Native session launch evidence must gate generated glyph kernels on that shared
 layout, not merely on `args_ptr != 0`; CUDA, ROCm/HIP, and OpenCL use
 backend-prefixed invalid-args reasons for missing glyph plans, missing
 destinations, dimension mismatches, and invalid font sizes.
-Draw IR text execution may allocate temporary glyph-plan and destination staging
-buffers to prove generated launch-argument readiness, but production readiness
-requires backend readback to populate the vector or bitmap returned-glyph
-contract before `font_production_ready` can be true.
+Draw IR text execution must use the shared generated glyph staging helper when
+it allocates temporary glyph-plan and destination buffers to prove generated
+launch-argument readiness, but production readiness requires backend readback to
+populate the vector or bitmap returned-glyph contract before
+`font_production_ready` can be true.
 
 ## Migration Order
 

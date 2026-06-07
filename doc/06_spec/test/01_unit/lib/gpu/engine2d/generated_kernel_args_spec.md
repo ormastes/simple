@@ -27,7 +27,7 @@ generated_kernel_args_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -145,6 +145,38 @@ generated_glyph_raster_args_free(args)
 
 </details>
 
+#### owns temporary glyph plan and destination staging buffers
+
+1. generated glyph raster staging free
+2. generated glyph raster staging free
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val disabled = generated_glyph_raster_staging_create(16, 8, 14, false)
+val staging = generated_glyph_raster_staging_create(16, 8, 14, true)
+
+expect(disabled.ready()).to_equal(false)
+expect(disabled.reason()).to_equal("generated-glyph-args-disabled")
+expect(disabled.args_ptr()).to_equal(0)
+expect(staging.ready()).to_equal(true)
+expect(staging.reason()).to_equal("ready")
+expect(staging.args_ptr() > 0).to_equal(true)
+expect(staging.args.glyph_plan > 0).to_equal(true)
+expect(staging.args.dst > 0).to_equal(true)
+expect(staging.dst_bytes).to_equal(16 * 8 * 4)
+
+generated_glyph_raster_staging_free(disabled)
+generated_glyph_raster_staging_free(staging)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -164,8 +196,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -210,9 +210,9 @@ successful backend readback into the vector/bitmap returned-glyph contract.
 
 2026-06-07 Draw IR generated-args update: `engine2d_draw_ir_adv_*` now allocates
 temporary glyph-plan and destination staging buffers for GPU-routed text
-commands, packs them through the shared generated glyph args helper, passes the
-real args pointer into vector font offload evidence, and frees the staging
-buffers after evidence capture. Focused Draw IR coverage asserts
+commands through the shared `GeneratedGlyphRasterStaging` helper, passes the
+real args pointer into vector font offload evidence, and frees the owned staging
+buffers after evidence capture. Focused Draw IR and generated-args coverage asserts
 `font_generated_args_ready == true` and `font_generated_args_reason == "ready"`
 when GPU routing is enabled, while `font_gpu_glyph_returned` and
 `font_production_ready` remain false until a backend returns glyph pixels.
