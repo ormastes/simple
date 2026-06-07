@@ -140,6 +140,39 @@ require_go_stress_beats_c() {
     fi
 }
 
+require_simple_multicore_stress_beats_c() {
+    file="$1"
+    if ! awk -F'|' '
+        /^## / {
+            stress = ($0 ~ /Simple vs Go vs C Large Fanout Stress/)
+            next
+        }
+        stress && /C \(pthreads\)/ {
+            c = $3
+            gsub(/^[ \t]+|[ \t]+$/, "", c)
+        }
+        stress && /Simple multicore green \(native\)/ {
+            simple = $3
+            notes = $4
+            gsub(/^[ \t]+|[ \t]+$/, "", simple)
+            gsub(/^[ \t]+|[ \t]+$/, "", notes)
+            if (notes !~ /pool_used=[0-9]+\/[0-9]+/ ||
+                notes !~ /parallelism=[0-9]+\/[0-9]+/ ||
+                notes !~ /queue_model=work_stealing/) {
+                bad = 1
+            }
+        }
+        END {
+            if (bad || simple == "" || c == "" || simple == "fail" || c == "fail" || simple == "n/a" || c == "n/a") {
+                exit 1
+            }
+            exit ((simple + 0) < (c + 0)) ? 0 : 1
+        }
+    ' "$file"; then
+        fail "Simple multicore-green stress fanout row must be faster than C pthread stress row with pool evidence in $file"
+    fi
+}
+
 require_arg "$kind" "missing profile kind"
 require_arg "$script_path" "missing script path"
 require_arg "$report_path" "missing report path"
@@ -213,6 +246,7 @@ case "$kind" in
         require_contains "$report_path" "goroutine per tiny task + channel"
         require_contains "$report_path" "goroutine per stress task (M:N)"
         require_go_stress_beats_c "$report_path"
+        require_simple_multicore_stress_beats_c "$report_path"
         require_not_contains "$report_path" "thread_spawn2"
         require_not_contains "$report_path" "Simple task_spawn"
         require_not_contains "$report_path" "task_spawn runtime pool candidate"
