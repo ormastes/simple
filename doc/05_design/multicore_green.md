@@ -1,9 +1,8 @@
 # Multicore Green Detail Design
 
 Date: 2026-06-06
-Status: preselection design. Final requirements are pending user selection from
-`doc/02_requirements/feature/multicore_green_options.md` and
-`doc/02_requirements/nfr/multicore_green_options.md`.
+Status: selected design for `doc/02_requirements/feature/multicore_green.md`
+and `doc/02_requirements/nfr/multicore_green.md`.
 
 ## Design Goals
 
@@ -165,10 +164,6 @@ Repository guards:
 
 ## Open Design Decisions
 
-- Selected feature scope.
-- Selected NFR gates.
-- Whether this cycle owns host runtime-pool M:N only or the full Go-like
-  runtime roadmap.
 - Exact future API for a parallelism limit similar in role to Go's
   `GOMAXPROCS`.
 - Preemption strategy: compiler-inserted yields, runtime safepoints, or an

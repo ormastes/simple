@@ -3,8 +3,8 @@
 ## Current Executable Coverage
 
 - `doc/03_plan/agent_tasks/multicore_green.md` defines the parallel work orders for Go/profile evidence, Simple OS-thread baseline, cooperative green, multicore-green runtime-pool evidence, and SimpleOS green-carrier proof.
-- `doc/02_requirements/feature/multicore_green_options.md` and `doc/02_requirements/nfr/multicore_green_options.md` define the requirement choices that still need user selection before final requirements, architecture, and detail design are claimed complete.
-- `doc/04_architecture/multicore_green.md` and `doc/05_design/multicore_green.md` document the preselection architecture/design invariants across all named requirement scopes.
+- `doc/02_requirements/feature/multicore_green.md` and `doc/02_requirements/nfr/multicore_green.md` define the selected Full Go-Like Runtime Roadmap requirements and NFR gates.
+- `doc/04_architecture/multicore_green.md` and `doc/05_design/multicore_green.md` document the selected architecture/design invariants for the host runtime-pool, cooperative green, profile-evidence, and SimpleOS lanes.
 - `test/01_unit/lib/nogc_async_mut/multicore_green_spec.spl` checks Pure Simple join/result semantics for multiple value tasks and asserts interpreter inline fallback through `ran_inline_fallback()` / `used_runtime_pool()`.
 - `test/01_unit/lib/nogc_async_mut/multicore_green_native.spl` is a native entry-closure smoke for the `rt_pool_*` path and fails if any handle does not report `used_runtime_pool()`.
 - `scripts/check/check-cross-language-perf.shs` produces profile evidence for Simple OS thread, Simple cooperative green, Simple multicore green, C pthreads, and Go goroutines. The generated Simple OS-thread native rows use `thread_spawn` fork-join while `thread_spawn_with_args` native ABI is blocked; generated multicore-green workloads fail if runtime-pool acceptance is not proven for every handle. Generated Simple CPU workers use literal loop constants so checksum evidence does not depend on the separate SMF/native global-load blocker.
@@ -27,7 +27,7 @@
 
 - SMF cooperative green still has a mutable-global runtime blocker that can segfault before queue execution; this is separate from `multicore_green_spawn`.
 - `thread_spawn_with_args` native explicit-argument probes currently segfault with exit 139; native OS-thread profile evidence uses `thread_spawn` until `doc/08_tracking/bug/native_thread_spawn_with_args_abi_2026-06-06.md` is fixed.
-- Simple multicore-green stress evidence currently uses 256 workers; 512-worker native compile scaling and compact handle-array join correctness are tracked in `doc/08_tracking/bug/multicore_green_stress_scale_blockers_2026-06-07.md`.
+- Simple multicore-green stress evidence now uses 512 workers with compact handle-array generated workloads; generated many-spawn native compile cost remains a separate scale target in `doc/08_tracking/bug/multicore_green_stress_scale_blockers_2026-06-07.md`.
 - SimpleOS still needs QEMU SMP evidence for full hardware context-switch handoff across APs. The current live QEMU green-carrier proof covers AP startup plus scheduler-visible CPU1 green dispatch, not a final ring/context-switch handoff.
 - The interpreter unit spec can pass its example and then hang in `spipe-docgen`; this is a test-runner/docgen issue, not a failed multicore-green assertion.
 - The value-index warning currently recommends angle-bracket indexing that fails to parse in expression contexts; tracked in `doc/08_tracking/bug/angle_bracket_index_lint_parse_mismatch_2026-06-06.md`.

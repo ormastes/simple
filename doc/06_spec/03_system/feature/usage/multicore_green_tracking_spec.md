@@ -1,6 +1,6 @@
 # Multicore Green Feature Tracking Specification
 
-> This specification guards the canonical feature tracking row for the multicore-green lane. The row must remain honest while final feature and NFR requirements are still option documents pending user selection.
+> This specification guards the canonical feature tracking row for the multicore-green lane. The row must remain honest after the selected Full Go-Like Runtime Roadmap requirements were written.
 
 <!-- sdn-diagram:id=multicore_green_tracking_spec.arch -->
 <details class="sdn-source">
@@ -34,7 +34,7 @@ multicore_green_tracking_spec
 
 # Multicore Green Feature Tracking Specification
 
-This specification guards the canonical feature tracking row for the multicore-green lane. The row must remain honest while final feature and NFR requirements are still option documents pending user selection.
+This specification guards the canonical feature tracking row for the multicore-green lane. The row must remain honest after the selected Full Go-Like Runtime Roadmap requirements were written.
 
 ## At a Glance
 
@@ -43,7 +43,7 @@ This specification guards the canonical feature tracking row for the multicore-g
 | Feature IDs | #FR-RUNTIME-MULTICORE-GREEN-2026-06-06 |
 | Category | Runtime Concurrency |
 | Status | Current |
-| Requirements | doc/02_requirements/feature/multicore_green_options.md |
+| Requirements | doc/02_requirements/feature/multicore_green.md |
 | Plan | doc/03_plan/sys_test/multicore_green.md |
 | Design | doc/05_design/multicore_green.md |
 | Research | doc/01_research/local/multicore_green.md |
@@ -54,23 +54,22 @@ This specification guards the canonical feature tracking row for the multicore-g
 ## Overview
 
 This specification guards the canonical feature tracking row for the
-multicore-green lane. The row must remain honest while final feature and NFR
-requirements are still option documents pending user selection.
+multicore-green lane. The row must remain honest after the selected Full
+Go-Like Runtime Roadmap requirements were written.
 
-The row is intentionally `current`, not `done`, because final requirements still
-need user selection and the Go-like M:N profile evidence remains a live
-hardening lane. It also protects meaningful public names such as
+The row is intentionally `current`, not `done`, because the full Go-like M:N
+roadmap still has scheduler, preemption, and hardware handoff hardening work.
+It also protects meaningful public names such as
 `cooperative_green_spawn` and `multicore_green_spawn` by keeping the tracked
 guide and implementation surfaces visible.
 
 ## Requirements
 
-**Requirements:** doc/02_requirements/feature/multicore_green_options.md
+**Requirements:** doc/02_requirements/feature/multicore_green.md
 
-The feature row must link requirement option documents without claiming final
-selected requirements. It must also link the research, plan, architecture,
-design, implementation, guide, SimpleOS, and profile evidence artifacts that
-define the lane.
+The feature row must link the selected feature and NFR requirements. It must
+also link the research, plan, architecture, design, implementation, guide,
+SimpleOS, and profile evidence artifacts that define the lane.
 
 ## Research
 
@@ -97,21 +96,20 @@ and `doc/05_design/multicore_green.md`.
 ## Examples
 
 Use this spec when updating `doc/08_tracking/feature/feature_db.sdn` for the
-multicore-green lane. If final requirements are selected later, update this
-guard with the selected requirement paths in the same change.
+multicore-green lane. Requirement, NFR, and evidence links must change in the
+same commit as the tracking row.
 
 ## Traceability Expectations
 
 - The tracking row must keep the feature id
   `FR-RUNTIME-MULTICORE-GREEN-2026-06-06`.
-- The tracking row must stay `current` while user-selected requirements are
-  absent.
-- The tracking row must not use `done` until final requirements, NFRs, and
-  release verification are complete.
-- The tracking row must point at requirement option documents during the
-  selection phase.
-- The tracking row must not point at final requirement documents before those
-  documents exist and have been selected by the user.
+- The tracking row must stay `current` while full-roadmap scheduler,
+  preemption, or hardware-handoff work remains active.
+- The tracking row must not use `done` until final requirements, NFRs, full
+  roadmap implementation, generated manuals, and release verification are
+  complete.
+- The tracking row must point at selected final requirement documents.
+- The tracking row must not point at deleted requirement option documents.
 - The tracking row must carry local and domain research links so later agents
   can find the Go runtime and Simple runtime comparisons.
 - The tracking row must carry the agent-task and system-test plans so remaining
@@ -145,18 +143,13 @@ guard with the selected requirement paths in the same change.
 ## Status Expectations
 
 - `current` means the lane has active implementation and evidence but still has
-  unresolved selection or hardening work.
+  unresolved full-roadmap hardening work.
 - `done` means final requirements are selected, implementation is complete,
   generated manuals are current, and release-blocking verification has passed.
-- This spec asserts `current` because final feature and NFR documents are still
-  deliberately absent.
-- The absence of final requirement documents is intentional, not a missing-file
-  bug.
-- When final requirements are selected, this spec should change in the same
-  commit that adds those final documents.
-- The selected-requirements change should also update the feature tracking row.
-- That later change should keep option documents only if the selected
-  requirements explicitly reference them.
+- This spec asserts `current` because the selected Full Go-Like Runtime Roadmap
+  still has active scheduler, preemption, and SimpleOS hardware proof work.
+- The final requirement documents must exist and option documents must be
+  absent.
 
 ## Performance Evidence Expectations
 
@@ -194,7 +187,7 @@ expect(row.contains("\"done\"")).to_equal(false)
 
 </details>
 
-#### links requirement options without claiming final selected requirements
+#### links selected requirements without stale option documents
 
 <details>
 <summary>Executable SPipe</summary>
@@ -204,10 +197,10 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val row = multicore_green_row(read_tracking_db())
-expect(row).to_contain("doc/02_requirements/feature/multicore_green_options.md")
-expect(row).to_contain("doc/02_requirements/nfr/multicore_green_options.md")
-expect(row.contains("doc/02_requirements/feature/multicore_green.md")).to_equal(false)
-expect(row.contains("doc/02_requirements/nfr/multicore_green.md")).to_equal(false)
+expect(row).to_contain("doc/02_requirements/feature/multicore_green.md")
+expect(row).to_contain("doc/02_requirements/nfr/multicore_green.md")
+expect(row.contains("doc/02_requirements/feature/multicore_green_options.md")).to_equal(false)
+expect(row.contains("doc/02_requirements/nfr/multicore_green_options.md")).to_equal(false)
 ```
 
 </details>
@@ -300,7 +293,7 @@ expect(row).to_contain("doc/08_tracking/bug/green_thread_direct_runtime_blockers
 
 ## Related Documentation
 
-- **Requirements:** [doc/02_requirements/feature/multicore_green_options.md](doc/02_requirements/feature/multicore_green_options.md)
+- **Requirements:** [doc/02_requirements/feature/multicore_green.md](doc/02_requirements/feature/multicore_green.md)
 - **Plan:** [doc/03_plan/sys_test/multicore_green.md](doc/03_plan/sys_test/multicore_green.md)
 - **Design:** [doc/05_design/multicore_green.md](doc/05_design/multicore_green.md)
 - **Research:** [doc/01_research/local/multicore_green.md](doc/01_research/local/multicore_green.md)

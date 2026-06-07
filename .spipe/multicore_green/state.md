@@ -28,7 +28,6 @@ Deliver and verify a Simple concurrency lane that clearly separates OS threads, 
 
 - Do not replace Simple user-facing concurrency APIs with C/Rust APIs.
 - Do not claim cooperative green APIs are Go-style M:N CPU parallelism.
-- Do not mark the feature complete until final feature/NFR requirement options are selected and written.
 
 ## Phase
 
@@ -38,7 +37,9 @@ dev-done
 
 - dev: Created state file with acceptance criteria for the multicore green SPipe lane.
 - audit: Current implementation/profile/docs evidence is present for AC-1 through
-  AC-7 and AC-9; AC-8 remains open pending user-selected final requirements.
+  AC-9 after selected requirements were written.
+- requirements: User selected `Full Go-Like Runtime Roadmap`; final feature and
+  NFR requirements were written and option docs were removed.
 
 ## Completion Audit - 2026-06-07
 
@@ -71,29 +72,10 @@ dev-done
   `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`, and the
   cross-language profile report contract. GitHub is synced through this lane.
 
-### Not Complete
+### Requirement Selection Complete
 
-- AC-8 is still open. Current files are option documents only:
-  `doc/02_requirements/feature/multicore_green_options.md` and
-  `doc/02_requirements/nfr/multicore_green_options.md`. Repository process says
-  final feature/NFR requirements require user selection and unchosen options
-  must be deleted, not archived.
-
-### Selection Prompt
-
-Feature scope options:
-- `Evidence-Only Stabilization`
-- `Host Runtime-Pool M:N`
-- `Scheduler-Aware SimpleOS Green Runtime`
-- `Full Go-Like Runtime Roadmap`
-
-NFR options:
-- `Evidence Integrity Gate`
-- `Performance Parity Budget`
-- `API Stability And Misuse Diagnostics`
-- `SimpleOS Hardware Proof Gate`
-
-Recommended pragmatic selection for the current evidence set:
-`Host Runtime-Pool M:N` plus `Performance Parity Budget` and
-`API Stability And Misuse Diagnostics`. Add `SimpleOS Hardware Proof Gate` only
-if this cycle must require stronger SimpleOS hardware proof before completion.
+- AC-8 is satisfied by `doc/02_requirements/feature/multicore_green.md` and
+  `doc/02_requirements/nfr/multicore_green.md`.
+- The selected feature scope is `Full Go-Like Runtime Roadmap`.
+- The selected NFR path is Evidence Integrity Gate, Performance Parity Budget,
+  API Stability And Misuse Diagnostics, and SimpleOS Hardware Proof Gate.

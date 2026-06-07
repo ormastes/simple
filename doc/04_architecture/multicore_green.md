@@ -1,9 +1,8 @@
 # Multicore Green Architecture
 
 Date: 2026-06-06
-Status: preselection architecture. Final requirements are pending user selection
-from `doc/02_requirements/feature/multicore_green_options.md` and
-`doc/02_requirements/nfr/multicore_green_options.md`.
+Status: selected architecture for `doc/02_requirements/feature/multicore_green.md`
+and `doc/02_requirements/nfr/multicore_green.md`.
 
 ## Scope Boundary
 
@@ -137,28 +136,25 @@ SimpleOS path:
 - QEMU proof currently covers AP startup plus CPU1 fixed-slot dispatch; full
   hardware context-switch handoff remains future work.
 
-## Requirement Option Mapping
+## Requirement Mapping
 
-Evidence-Only Stabilization uses the Public Simple API Layer and Profile And
-Evidence Layer while keeping blockers explicit.
+The selected Full Go-Like Runtime Roadmap uses all layers:
 
-Host Runtime-Pool M:N uses the Public Simple API Layer, Runtime Pool ABI Layer,
-and Profile And Evidence Layer. Its proof boundary is
-`used_runtime_pool()`.
+- Public Simple API Layer preserves meaningful user APIs and model separation.
+- Runtime Pool ABI Layer proves hosted M:N ownership through positive handles
+  and `used_runtime_pool()`.
+- Profile And Evidence Layer keeps Go, C pthread, Simple OS-thread,
+  cooperative green, and multicore-green rows separate.
+- SimpleOS Scheduler Layer owns logical green tasks, carrier queues, remote
+  wake/IPI intent, and AP evidence.
 
-Scheduler-Aware SimpleOS Green Runtime uses the SimpleOS Scheduler Layer and
-requires hosted SimpleOS specs plus opt-in QEMU proof.
-
-Full Go-Like Runtime Roadmap combines all layers and adds future work stealing,
+Future roadmap work remains explicit: work stealing or per-worker queues,
 blocking integration, a parallelism limit similar in role to `GOMAXPROCS`, and
-preemption or compiler-inserted yield points before claiming tight-loop
-fairness comparable to Go.
+preemption or compiler-inserted yield points before claiming tight-loop fairness
+comparable to Go.
 
 ## Known Gaps
 
-- Final feature and NFR requirements require user selection.
-- Architecture and design should be revalidated after selected requirements are
-  written.
 - `thread_spawn_with_args` native explicit-argument ABI remains tracked as a
   blocker, so profile OS-thread rows use `thread_spawn`.
 - SMF cooperative-green and SMF multicore-green fanout blockers remain
