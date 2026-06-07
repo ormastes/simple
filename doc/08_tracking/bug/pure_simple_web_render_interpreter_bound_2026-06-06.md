@@ -250,8 +250,13 @@ the existing `rt_gui_get_glyph_8x16()` fallback rows. `Engine2D` exposes this as
 2026-06-07 OpenCL bitmap glyph readback pixels update: successful OpenCL bitmap
 glyph readback now converts the device `u32` output into grayscale glyph pixels
 on `OpenClGeneratedGlyphRasterEvidence` and marks only the real bitmap path as
-production-eligible. Remaining gap: those evidence pixels still need to be
-routed through the live font renderer's `CachedGlyph` returned-glyph contract.
+production-eligible.
+
+2026-06-07 Draw IR bitmap glyph seed update: `TextBlitCache` can seed validated
+backend glyph pixels into its `FontRenderer` cache, and Draw IR uses
+`Engine2D.bitmap_glyph_raster_evidence()` to seed production-ready single-glyph
+OpenCL bitmap readback before rendering the text payload. Remaining gap:
+multi-glyph backend readback batching still needs direct returned-glyph routing.
 
 2026-06-07 font returned-glyph priority cleanup: vector and bitmap returned
 glyph probes now share one native/generated font backend order helper

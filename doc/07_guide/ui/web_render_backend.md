@@ -150,8 +150,10 @@ GPU-routed Draw IR text, and reports `font_generated_args_ready` /
 `font_generated_args_reason`. Draw IR also reports
 `font_backend_glyph_status`, `font_backend_glyph_reason`, and
 `font_backend_glyph_readback` from the Engine2D backend evidence bridge.
-Backend readback conversion into returned `CachedGlyph` pixels remains the
-remaining production integration step for the live font renderer boundary.
+When a single-glyph bitmap command has production-ready OpenCL readback pixels,
+Draw IR seeds them into `TextBlitCache` before normal `FontRenderer` rendering;
+the rendered text payload still flows through the existing image blit path.
+Multi-glyph backend readback batching remains the next production expansion.
 `web_render_vector_font_native_compute_evidence()` mirrors the same native-first
 order for shared web-render reports, while the older CUDA/OpenCL-only evidence
 helper remains available for existing reports.

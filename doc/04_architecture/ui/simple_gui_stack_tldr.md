@@ -92,6 +92,8 @@ Host input
   the OpenCL path that uploads existing 8x16 bitmap glyph rows as device
   `glyph_plan` input and carries grayscale readback pixels when the launch
   succeeds.
+- Text glyph seeding: Draw IR can seed validated single-glyph bitmap readback
+  pixels into `TextBlitCache` before normal `FontRenderer` rendering.
 - Font returned-glyph priority: vector and bitmap probes share the same
   `METAL`, `CUDA`, `ROCM`, `VULKAN`, `OPENCL` helper before CPU fallback.
 - Draw IR glyph evidence: `Engine2dDrawIrAdvResult` reports backend glyph

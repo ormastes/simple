@@ -159,6 +159,11 @@ fn _draw_ir_text_extent(value: i32, fallback: i32) -> i64:
         return value as i64
     fallback as i64
 
+fn _draw_ir_single_codepoint(value: text) -> i32:
+    if value.len() == 1:
+        return value.char_code_at(0) as i32
+    -1
+
 fn engine2d_draw_ir_adv_batch(engine: Engine2D, batch: DrawIrBatch, gpu_available: bool) -> Engine2dDrawIrAdvResult:
     val plan = simple_2d_draw_ir_adv_plan(batch, gpu_available)
     if batch.embedding.clip:
@@ -189,6 +194,17 @@ fn engine2d_draw_ir_adv_batch(engine: Engine2D, batch: DrawIrBatch, gpu_availabl
             rendered = rendered + 1
         elif command.kind == ENGINE2D_DRAW_IR_COMMAND_TEXT:
             val font_size = _draw_ir_text_font_size(command)
+            var backend_seeded_bitmap = false
+            var seeded_backend_status = ""
+            var seeded_backend_reason = ""
+            val single_codepoint = _draw_ir_single_codepoint(command.text_value)
+            if generated_glyph_args_enabled and single_codepoint >= 0:
+                val bitmap_glyph = engine.bitmap_glyph_raster_evidence(single_codepoint, font_size)
+                if bitmap_glyph.production_ready:
+                    backend_seeded_bitmap = font_cache.seed_backend_glyph(bitmap_glyph.codepoint, font_size, bitmap_glyph.width.to_i32(), bitmap_glyph.height.to_i32(), bitmap_glyph.advance.to_i32(), bitmap_glyph.glyph_pixels)
+                    if backend_seeded_bitmap:
+                        seeded_backend_status = bitmap_glyph.status_code
+                        seeded_backend_reason = bitmap_glyph.reason
             val text_buf = font_cache.transparent_blit_buffer(command.text_value, command.color, font_size)
             if not text_buf.is_empty():
                 engine.draw_image(x, y, text_buf.width, text_buf.height, text_buf.pixels)
@@ -201,14 +217,25 @@ fn engine2d_draw_ir_adv_batch(engine: Engine2D, batch: DrawIrBatch, gpu_availabl
             last_font_size = font_size
             font_generated_args_ready = staging.ready()
             font_generated_args_reason = staging.reason()
-            font_backend_glyph_status = backend_glyph.status_code
-            font_backend_glyph_reason = backend_glyph.reason
-            font_backend_glyph_readback = backend_glyph.device_glyph_returned
+            if backend_seeded_bitmap:
+                font_backend_glyph_status = seeded_backend_status
+                font_backend_glyph_reason = seeded_backend_reason
+                font_backend_glyph_readback = true
+            else:
+                font_backend_glyph_status = backend_glyph.status_code
+                font_backend_glyph_reason = backend_glyph.reason
+                font_backend_glyph_readback = backend_glyph.device_glyph_returned
             val offload = _engine2d_font_offload_summary(evidence)
-            font_status = offload.status
-            font_reason = offload.reason
-            font_gpu_glyph_returned = offload.gpu_glyph_returned
-            font_production_ready = offload.production_ready
+            if backend_seeded_bitmap:
+                font_status = "gpu-glyph-returned"
+                font_reason = "opencl-bitmap-font-glyph-pixels-returned"
+                font_gpu_glyph_returned = true
+                font_production_ready = true
+            else:
+                font_status = offload.status
+                font_reason = offload.reason
+                font_gpu_glyph_returned = offload.gpu_glyph_returned
+                font_production_ready = offload.production_ready
             generated_glyph_raster_staging_free(staging)
             rendered = rendered + 1
         else:
@@ -248,6 +275,17 @@ fn engine2d_draw_ir_adv_composition(engine: Engine2D, composition: DrawIrComposi
                 rendered = rendered + 1
             elif command.kind == ENGINE2D_DRAW_IR_COMMAND_TEXT:
                 val font_size = _draw_ir_text_font_size(command)
+                var backend_seeded_bitmap = false
+                var seeded_backend_status = ""
+                var seeded_backend_reason = ""
+                val single_codepoint = _draw_ir_single_codepoint(command.text_value)
+                if generated_glyph_args_enabled and single_codepoint >= 0:
+                    val bitmap_glyph = engine.bitmap_glyph_raster_evidence(single_codepoint, font_size)
+                    if bitmap_glyph.production_ready:
+                        backend_seeded_bitmap = font_cache.seed_backend_glyph(bitmap_glyph.codepoint, font_size, bitmap_glyph.width.to_i32(), bitmap_glyph.height.to_i32(), bitmap_glyph.advance.to_i32(), bitmap_glyph.glyph_pixels)
+                        if backend_seeded_bitmap:
+                            seeded_backend_status = bitmap_glyph.status_code
+                            seeded_backend_reason = bitmap_glyph.reason
                 val text_buf = font_cache.transparent_blit_buffer(command.text_value, command.color, font_size)
                 if not text_buf.is_empty():
                     engine.draw_image(x, y, text_buf.width, text_buf.height, text_buf.pixels)
@@ -260,14 +298,25 @@ fn engine2d_draw_ir_adv_composition(engine: Engine2D, composition: DrawIrComposi
                 last_font_size = font_size
                 font_generated_args_ready = staging.ready()
                 font_generated_args_reason = staging.reason()
-                font_backend_glyph_status = backend_glyph.status_code
-                font_backend_glyph_reason = backend_glyph.reason
-                font_backend_glyph_readback = backend_glyph.device_glyph_returned
+                if backend_seeded_bitmap:
+                    font_backend_glyph_status = seeded_backend_status
+                    font_backend_glyph_reason = seeded_backend_reason
+                    font_backend_glyph_readback = true
+                else:
+                    font_backend_glyph_status = backend_glyph.status_code
+                    font_backend_glyph_reason = backend_glyph.reason
+                    font_backend_glyph_readback = backend_glyph.device_glyph_returned
                 val offload = _engine2d_font_offload_summary(evidence)
-                font_status = offload.status
-                font_reason = offload.reason
-                font_gpu_glyph_returned = offload.gpu_glyph_returned
-                font_production_ready = offload.production_ready
+                if backend_seeded_bitmap:
+                    font_status = "gpu-glyph-returned"
+                    font_reason = "opencl-bitmap-font-glyph-pixels-returned"
+                    font_gpu_glyph_returned = true
+                    font_production_ready = true
+                else:
+                    font_status = offload.status
+                    font_reason = offload.reason
+                    font_gpu_glyph_returned = offload.gpu_glyph_returned
+                    font_production_ready = offload.production_ready
                 generated_glyph_raster_staging_free(staging)
                 rendered = rendered + 1
             else:

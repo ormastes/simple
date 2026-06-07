@@ -1,6 +1,6 @@
 # Helpers Text Specification
 
-> 1. var cache = TextBlitCache new
+> <details>
 
 <!-- sdn-diagram:id=helpers_text_spec.arch -->
 <details class="sdn-source">
@@ -27,7 +27,7 @@ helpers_text_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -40,7 +40,7 @@ helpers_text_spec -> std
 
 #### keeps empty background and transparent payload contracts stable
 
-1. var cache = TextBlitCache new
+- var cache = TextBlitCache new
    - Expected: repeated_first.is_empty() is false
    - Expected: repeated_second.width equals `repeated_first.width`
    - Expected: repeated_second.height equals `repeated_first.height`
@@ -108,6 +108,35 @@ expect(cache.lookup_scan_count).to_equal(repeated_scans_after_miss)
 
 </details>
 
+#### seeds backend glyph pixels into the renderer before building text payloads
+
+- var cache = TextBlitCache new
+   - Expected: invalid is false
+   - Expected: seeded is true
+   - Expected: payload.is_empty() is false
+   - Expected: payload.pixels[0] equals `0xff336699u32`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var cache = TextBlitCache.new()
+val invalid = cache.seed_backend_glyph(65, 16, 1, 1, 2, [])
+val seeded = cache.seed_backend_glyph(65, 16, 1, 1, 2, [255u8])
+val payload = cache.transparent_blit_buffer("A", 0xff336699u32, 16)
+
+expect(invalid).to_equal(false)
+expect(seeded).to_equal(true)
+expect(payload.is_empty()).to_equal(false)
+expect(payload.pixels[0]).to_equal(0xff336699u32)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -127,8 +156,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
+| Total scenarios | 2 |
+| Active scenarios | 2 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
