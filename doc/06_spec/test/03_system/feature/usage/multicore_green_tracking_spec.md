@@ -137,6 +137,10 @@ Failed: 0
 - The tracking row must carry the concurrency API misuse spec so wrong-surface,
   wrong-arity, bad-argument, and numbered-alias diagnostics stay tied to
   REQ-MCG-010.
+- The tracking row must carry the concurrency API shell contract so approved
+  public names remain release-visible.
+- The tracking row must summarize the approved API count and `task_spawn`
+  wrong-surface fixture so public API coverage cannot silently shrink.
 - The tracking row must carry implementation links for cooperative green,
   multicore green, and the SimpleOS green carrier.
 - The tracking row must carry guide links for the compiler perf guide and
@@ -277,12 +281,13 @@ expect(row).to_contain("doc/05_design/multicore_green.md")
 - Read the canonical multicore-green tracking row
 - Verify SimpleOS green-carrier specs are linked
 - Verify profile stress specs are linked
+- Verify the public API contract summary remains explicit
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -300,9 +305,14 @@ expect(row).to_contain("test/05_perf/stress/multicore_green_cross_language_gate_
 expect(row).to_contain("test/05_perf/stress/multicore_green_fanout_spec.spl")
 expect(row).to_contain("test/05_perf/stress/multicore_green_large_profile_gate_spec.spl")
 expect(row).to_contain("test/05_perf/profile_scripts/profile_report_contract_test.shs")
+expect(row).to_contain("test/05_perf/profile_scripts/concurrency_api_contract_test.shs")
 expect(row).to_contain("test/03_system/feature/usage/concurrency_api_misuse_spec.spl")
 expect(row).to_contain("doc/06_spec/test/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.md")
 expect(row).to_contain("doc/06_spec/test/03_system/feature/usage/concurrency_api_misuse_spec.md")
+step("Verify the public API contract summary remains explicit")
+expect(row).to_contain("positive_fixtures=5")
+expect(row).to_contain("task_spawn approved")
+expect(row).to_contain("task_spawn_wrong_surface_import.spl rejects OS-thread facade")
 ```
 
 </details>
