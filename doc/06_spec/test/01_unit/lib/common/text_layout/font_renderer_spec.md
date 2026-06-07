@@ -27,7 +27,7 @@ font_renderer_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 16 | 16 | 0 | 0 |
+| 18 | 18 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -37,6 +37,78 @@ font_renderer_spec -> std
 ## Scenarios
 
 ### shared font renderer fallbacks
+
+#### keeps repeated glyph lookups on the hot cache path without rescanning
+
+- reset vector font raster stats
+- var renderer = FontRenderer new
+   - Expected: second.width equals `first.width`
+   - Expected: renderer.cache.hot_hits equals `1`
+   - Expected: renderer.cache.lookup_scan_count equals `scans_after_first`
+   - Expected: vector_font_accelerator_stats().attempts equals `attempts_after_first`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+reset_vector_font_raster_stats()
+var renderer = FontRenderer.new()
+renderer.use_bitmap = false
+
+val first = renderer.get_glyph(65, 24)
+val scans_after_first = renderer.cache.lookup_scan_count
+val attempts_after_first = vector_font_accelerator_stats().attempts
+val second = renderer.get_glyph(65, 24)
+
+expect(first.width).to_be_greater_than(0)
+expect(second.width).to_equal(first.width)
+expect(renderer.cache.hot_hits).to_equal(1)
+expect(renderer.cache.lookup_scan_count).to_equal(scans_after_first)
+expect(vector_font_accelerator_stats().attempts).to_equal(attempts_after_first)
+```
+
+</details>
+
+#### uses the glyph cache bucket index instead of a linear scan after another glyph becomes hot
+
+- reset vector font raster stats
+- var renderer = FontRenderer new
+   - Expected: glyph_a_again.width equals `glyph_a.width`
+   - Expected: renderer.cache.bucket_hits equals `1`
+   - Expected: renderer.cache.lookup_scan_count equals `scans_after_misses`
+   - Expected: vector_font_accelerator_stats().attempts equals `attempts_after_misses`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+reset_vector_font_raster_stats()
+var renderer = FontRenderer.new()
+renderer.use_bitmap = false
+
+val glyph_a = renderer.get_glyph(65, 24)
+val glyph_b = renderer.get_glyph(66, 24)
+val scans_after_misses = renderer.cache.lookup_scan_count
+val attempts_after_misses = vector_font_accelerator_stats().attempts
+val glyph_a_again = renderer.get_glyph(65, 24)
+
+expect(glyph_a.width).to_be_greater_than(0)
+expect(glyph_b.width).to_be_greater_than(0)
+expect(glyph_a_again.width).to_equal(glyph_a.width)
+expect(renderer.cache.bucket_hits).to_equal(1)
+expect(renderer.cache.lookup_scan_count).to_equal(scans_after_misses)
+expect(vector_font_accelerator_stats().attempts).to_equal(attempts_after_misses)
+```
+
+</details>
 
 #### renders vector glyph coverage with antialiasing evidence
 
@@ -172,10 +244,10 @@ _clear_cuda_bitmap_font_probe_glyph()
 
 #### prefers native vector glyph pixels before CUDA glyph slots
 
-1. reset vector font raster stats
-2.  set vector font probe glyph
-3.  set vector font probe glyph
-4. var renderer = FontRenderer new
+- reset vector font raster stats
+-  set vector font probe glyph
+-  set vector font probe glyph
+- var renderer = FontRenderer new
    - Expected: glyph.width equals `1`
    - Expected: glyph.height equals `1`
    - Expected: glyph.advance equals `2`
@@ -183,8 +255,8 @@ _clear_cuda_bitmap_font_probe_glyph()
    - Expected: stats.cuda_hits equals `0`
    - Expected: stats.gpu_returned_glyphs equals `1`
    - Expected: stats.unavailable_reason equals `metal-vector-font-glyph-pixels-returned`
-5.  clear vector font probe glyph
-6.  clear vector font probe glyph
+-  clear vector font probe glyph
+-  clear vector font probe glyph
 
 
 <details>
@@ -218,11 +290,11 @@ _clear_vector_font_probe_glyph("CUDA")
 
 #### accepts ROCm bitmap glyph pixels before Vulkan and OpenCL fallback slots
 
-1. reset bitmap font raster stats
-2.  set bitmap font probe glyph
-3.  set bitmap font probe glyph
-4.  set bitmap font probe glyph
-5. var renderer = FontRenderer new
+- reset bitmap font raster stats
+-  set bitmap font probe glyph
+-  set bitmap font probe glyph
+-  set bitmap font probe glyph
+- var renderer = FontRenderer new
    - Expected: glyph.width equals `1`
    - Expected: glyph.height equals `1`
    - Expected: stats.rocm_hits equals `1`
@@ -230,9 +302,9 @@ _clear_vector_font_probe_glyph("CUDA")
    - Expected: stats.opencl_hits equals `0`
    - Expected: stats.gpu_returned_glyphs equals `1`
    - Expected: stats.unavailable_reason equals `rocm-bitmap-font-glyph-pixels-returned`
-6.  clear bitmap font probe glyph
-7.  clear bitmap font probe glyph
-8.  clear bitmap font probe glyph
+-  clear bitmap font probe glyph
+-  clear bitmap font probe glyph
+-  clear bitmap font probe glyph
 
 
 <details>
@@ -469,8 +541,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 16 |
-| Active scenarios | 16 |
+| Total scenarios | 18 |
+| Active scenarios | 18 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

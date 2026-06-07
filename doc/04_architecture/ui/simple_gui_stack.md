@@ -335,6 +335,7 @@ Hot redraw paths must avoid:
 - HTML/CSS string parsing when a typed GUI AST or already-resolved HTML AST is
   available;
 - re-resolving CSS for Draw IR batches whose `style_revision` has not changed;
+- linear glyph-cache scans for each character in repeated menu/list/status text;
 - device probing per frame;
 - hidden wrapper-specific renderer forks.
 
@@ -342,6 +343,9 @@ Capability probes run at startup or explicit re-probe time. Plugin cache keys
 must include backend id, device capability version, shader/kernel artifact
 version, Draw IR schema version, source kind/id, style revision,
 style/font/image cache versions, and fallback reason metadata.
+Font cache keys must include at least codepoint and font size; hot-entry and
+bucket-index lookups are preferred before any fallback scan or rasterizer
+attempt.
 
 ## Migration Order
 

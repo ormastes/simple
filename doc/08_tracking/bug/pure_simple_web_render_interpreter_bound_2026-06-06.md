@@ -132,6 +132,15 @@ layout and text-buffer preparation entirely. Focused unit coverage renders two
 `font_text_cache_misses == 1`, and
 `vector_font_accelerator_stats().attempts == 1`.
 
+2026-06-07 glyph-cache update: `FontRenderer.GlyphCache` no longer linearly
+scans the bounded glyph cache on every character. It keeps a hot glyph index for
+immediate repeats and a fixed bucket index keyed by `(codepoint,font_size)` for
+returning to a recently used glyph after another glyph becomes hot. `get_glyph()`
+now persists cache lookup/insert mutations explicitly before returning cached
+glyphs. Focused unit coverage asserts that repeated `A` lookups do not increase
+`lookup_scan_count` or accelerator attempts, and that returning to `A` after
+rendering `B` records one `bucket_hits` entry without another linear scan.
+
 2026-06-07 glyph-return evidence update: the Draw IR boundary now proves the
 positive glyph-return state when a backend rasterizer supplies vector glyph
 pixels through the backend glyph slot contract. Focused unit coverage

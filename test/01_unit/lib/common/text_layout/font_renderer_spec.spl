@@ -123,6 +123,40 @@ fn _clear_bitmap_font_probe_glyph(prefix: text):
     expect(rt_env_set(prefix + "_BITMAP_FONT_GLYPH_0_CHECKSUM", ""))
 
 describe "shared font renderer fallbacks":
+    it "keeps repeated glyph lookups on the hot cache path without rescanning":
+        reset_vector_font_raster_stats()
+        var renderer = FontRenderer.new()
+        renderer.use_bitmap = false
+
+        val first = renderer.get_glyph(65, 24)
+        val scans_after_first = renderer.cache.lookup_scan_count
+        val attempts_after_first = vector_font_accelerator_stats().attempts
+        val second = renderer.get_glyph(65, 24)
+
+        expect(first.width).to_be_greater_than(0)
+        expect(second.width).to_equal(first.width)
+        expect(renderer.cache.hot_hits).to_equal(1)
+        expect(renderer.cache.lookup_scan_count).to_equal(scans_after_first)
+        expect(vector_font_accelerator_stats().attempts).to_equal(attempts_after_first)
+
+    it "uses the glyph cache bucket index instead of a linear scan after another glyph becomes hot":
+        reset_vector_font_raster_stats()
+        var renderer = FontRenderer.new()
+        renderer.use_bitmap = false
+
+        val glyph_a = renderer.get_glyph(65, 24)
+        val glyph_b = renderer.get_glyph(66, 24)
+        val scans_after_misses = renderer.cache.lookup_scan_count
+        val attempts_after_misses = vector_font_accelerator_stats().attempts
+        val glyph_a_again = renderer.get_glyph(65, 24)
+
+        expect(glyph_a.width).to_be_greater_than(0)
+        expect(glyph_b.width).to_be_greater_than(0)
+        expect(glyph_a_again.width).to_equal(glyph_a.width)
+        expect(renderer.cache.bucket_hits).to_equal(1)
+        expect(renderer.cache.lookup_scan_count).to_equal(scans_after_misses)
+        expect(vector_font_accelerator_stats().attempts).to_equal(attempts_after_misses)
+
     it "renders vector glyph coverage with antialiasing evidence":
         var renderer = FontRenderer.new()
         renderer.use_bitmap = false

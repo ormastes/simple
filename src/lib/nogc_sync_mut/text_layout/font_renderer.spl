@@ -57,21 +57,97 @@ class CachedGlyph:
 class GlyphCache:
     entries: [CachedGlyph]
     max_entries: i32
+    hot_index: i32
+    bucket_keys: [i64]
+    bucket_indexes: [i32]
+    lookup_scan_count: i32
+    hot_hits: i32
+    bucket_hits: i32
 
     static fn new(max_size: i32) -> GlyphCache:
-        GlyphCache(entries: [], max_entries: max_size)
+        GlyphCache(
+            entries: [],
+            max_entries: max_size,
+            hot_index: -1,
+            bucket_keys: [-1i64; 1024],
+            bucket_indexes: [-1; 1024],
+            lookup_scan_count: 0,
+            hot_hits: 0,
+            bucket_hits: 0
+        )
 
-    fn lookup(codepoint: i32, font_size: i32) -> CachedGlyph?:
-        for entry in self.entries:
+    fn cache_key(codepoint: i32, font_size: i32) -> i64:
+        codepoint.to_i64() * 4099 + font_size.to_i64()
+
+    fn bucket_for_key(key: i64) -> i32:
+        if self.bucket_keys.len() == 0:
+            return -1
+        var bucket = (key % self.bucket_keys.len().to_i64()).to_i32()
+        if bucket < 0:
+            bucket = bucket * -1
+        bucket
+
+    me lookup(codepoint: i32, font_size: i32) -> CachedGlyph?:
+        if self.hot_index >= 0 and self.hot_index < self.entries.len():
+            val hot = self.entries[self.hot_index]
+            if hot.codepoint == codepoint and hot.font_size == font_size:
+                self.hot_hits = self.hot_hits + 1
+                return hot
+
+        val key = self.cache_key(codepoint, font_size)
+        val bucket = self.bucket_for_key(key)
+        if bucket >= 0 and bucket < self.bucket_keys.len() and self.bucket_keys[bucket] == key:
+            val idx = self.bucket_indexes[bucket]
+            if idx >= 0 and idx < self.entries.len():
+                val candidate = self.entries[idx]
+                if candidate.codepoint == codepoint and candidate.font_size == font_size:
+                    self.bucket_hits = self.bucket_hits + 1
+                    self.hot_index = idx
+                    return candidate
+
+        var idx = 0
+        while idx < self.entries.len():
+            val entry = self.entries[idx]
+            self.lookup_scan_count = self.lookup_scan_count + 1
             if entry.codepoint == codepoint and entry.font_size == font_size:
+                self.hot_index = idx
+                if bucket >= 0 and bucket < self.bucket_keys.len():
+                    self.bucket_keys[bucket] = key
+                    self.bucket_indexes[bucket] = idx
                 return entry
+            idx = idx + 1
         nil
+
+    me rebuild_index():
+        var i = 0
+        while i < self.bucket_keys.len():
+            self.bucket_keys[i] = -1i64
+            self.bucket_indexes[i] = -1
+            i = i + 1
+        self.hot_index = -1
+        var idx = 0
+        while idx < self.entries.len():
+            val entry = self.entries[idx]
+            val key = self.cache_key(entry.codepoint, entry.font_size)
+            val bucket = self.bucket_for_key(key)
+            if bucket >= 0 and bucket < self.bucket_keys.len():
+                self.bucket_keys[bucket] = key
+                self.bucket_indexes[bucket] = idx
+            idx = idx + 1
 
     me insert(glyph: CachedGlyph):
         # Evict oldest if cache full
         if self.entries.len() >= self.max_entries:
             self.entries = self.entries.slice(1, self.entries.len())
+            self.rebuild_index()
         self.entries.push(glyph)
+        val idx = self.entries.len() - 1
+        val key = self.cache_key(glyph.codepoint, glyph.font_size)
+        val bucket = self.bucket_for_key(key)
+        if bucket >= 0 and bucket < self.bucket_keys.len():
+            self.bucket_keys[bucket] = key
+            self.bucket_indexes[bucket] = idx
+        self.hot_index = idx
 
 # ============================================================================
 # Font Renderer
@@ -171,9 +247,11 @@ class FontRenderer:
     # -----------------------------------------------------------------------
     me get_glyph(codepoint: i32, font_size: i32) -> CachedGlyph:
         # Check cache first
-        val cached = self.cache.lookup(codepoint, font_size)
-        if val Some(g) = cached:
-            return g
+        var cache = self.cache
+        val cached = cache.lookup(codepoint, font_size)
+        self.cache = cache
+        if cached != nil:
+            return cached
 
         # Rasterize
         var glyph = CachedGlyph.empty(codepoint, font_size)
@@ -204,7 +282,9 @@ class FontRenderer:
         else if self.use_bitmap:
             glyph = rasterize_bitmap_accelerated(codepoint, font_size)
 
-        self.cache.insert(glyph)
+        cache = self.cache
+        cache.insert(glyph)
+        self.cache = cache
         glyph
 
     # -----------------------------------------------------------------------
