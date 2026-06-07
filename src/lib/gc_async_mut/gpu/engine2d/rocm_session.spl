@@ -6,11 +6,12 @@
 
 use std.gc_async_mut.gpu.engine2d.backend_session.{BackendSessionKind}
 use std.gc_async_mut.gpu.engine2d.generated_kernel_dispatch.{
-    GENERATED_2D_ALPHA, GENERATED_2D_COPY, GENERATED_2D_FILL, GENERATED_2D_SCROLL,
+    GENERATED_2D_ALPHA, GENERATED_2D_COPY, GENERATED_2D_FILL, GENERATED_2D_GLYPH, GENERATED_2D_SCROLL,
     Generated2DSessionRuntimeProvenance,
     generated_2d_session_launch_gate,
     generated_2d_session_runtime_provenance
 }
+use std.gc_async_mut.gpu.engine2d.generated_kernel_args.{generated_glyph_raster_args_launch_reason}
 use std.gc_async_mut.gpu.engine2d.session_support.{gpu_session_launch_gate_status, gpu_session_readback_status}
 use std.gc_async_mut.gpu.engine2d.sffi_rocm.{RocmFfi}
 
@@ -180,6 +181,8 @@ class RocmSession:
         val gate = generated_2d_session_launch_gate("rocm", op, width, height, self.is_valid(), self.module_cache != 0, args_ptr)
         if not gate.ready:
             return 1
+        if op == GENERATED_2D_GLYPH and generated_glyph_raster_args_launch_reason("rocm", args_ptr, width, height) != "ready":
+            return 1
         val kernel = self.ffi.kernel_get(self.module_cache, gate.plan.entry_name)
         if kernel == 0:
             return 1
@@ -204,6 +207,10 @@ class RocmSession:
         )
         if not status.ready:
             return self._evidence(operation, false, status.status_code, status.reason, 0, false, 0, 0)
+        if op == GENERATED_2D_GLYPH:
+            val args_status = generated_glyph_raster_args_launch_reason("rocm", args_ptr, width, height)
+            if args_status != "ready":
+                return self._evidence(operation, false, "invalid-args", args_status, 0, false, 0, 0)
         val rc = self.launch_generated_2d(op, width, height, args_ptr)
         if rc == 0:
             return self._evidence(operation, true, "submitted", "rocm-generated-2d-kernel-submitted", self.kernel_cache, true, 0, 0)

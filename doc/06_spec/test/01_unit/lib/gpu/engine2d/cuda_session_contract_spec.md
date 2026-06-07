@@ -27,7 +27,7 @@ cuda_session_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -41,7 +41,7 @@ cuda_session_contract_spec -> std
 #### reports CUDA kind and availability without initializing hardware
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -59,7 +59,7 @@ expect(session.is_valid()).to_equal(false)
 #### fails closed when launching without a loaded module
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -87,7 +87,7 @@ expect(session.scroll_kernel(64, 64, 4096)).to_equal(1)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -112,13 +112,12 @@ expect(session.launch_generated_2d("unsupported", 64, 64, 4096)).to_equal(1)
    - Expected: session.launch_kernel("kernel_clear", 1, 1, 1, 1) equals `1`
    - Expected: session.launch_kernel_args("kernel_clear", 1, 1, 1, 1, 1, 1, 0) equals `1`
    - Expected: session.synchronize() equals `1`
-
 2. session shutdown
    - Expected: session.ref_count equals `0`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -147,7 +146,7 @@ expect(session.ref_count).to_equal(0)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -170,17 +169,121 @@ expect(missing_args.diagnostic_text()).to_contain("launch=rt_cuda_launch_kernel"
 
 </details>
 
+#### reports typed CUDA launch evidence through the shared gate classifier
+
+1. var session = CudaSession create
+   - Expected: missing_runtime.success is false
+   - Expected: missing_runtime.status_code equals `runtime-not-ready`
+   - Expected: missing_runtime.reason equals `cuda-runtime-not-ready`
+   - Expected: missing_module.status_code equals `missing-module`
+   - Expected: missing_module.reason equals `missing-cuda-generated-module`
+   - Expected: missing_args.status_code equals `missing-args-pointer`
+   - Expected: missing_args.reason equals `missing-generated-2d-args-pointer`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = CudaSession.create()
+val missing_runtime = session.launch_generated_2d_evidence(GENERATED_2D_FILL, 8, 8, 4096)
+session.is_initialized = true
+session.ctx = 7
+val missing_module = session.launch_generated_2d_evidence(GENERATED_2D_FILL, 8, 8, 4096)
+session.module_cache = 11
+val missing_args = session.launch_generated_2d_evidence(GENERATED_2D_FILL, 8, 8, 0)
+
+expect(missing_runtime.success).to_equal(false)
+expect(missing_runtime.status_code).to_equal("runtime-not-ready")
+expect(missing_runtime.reason).to_equal("cuda-runtime-not-ready")
+expect(missing_module.status_code).to_equal("missing-module")
+expect(missing_module.reason).to_equal("missing-cuda-generated-module")
+expect(missing_args.status_code).to_equal("missing-args-pointer")
+expect(missing_args.reason).to_equal("missing-generated-2d-args-pointer")
+expect(missing_args.diagnostic_text()).to_contain("CudaSessionEvidence")
+```
+
+</details>
+
+#### validates generated glyph packed args before CUDA launch
+
+1. var session = CudaSession create
+2. rt ptr write i64
+3. rt ptr write i64
+4. rt ptr write i64
+5. rt ptr write i64
+6. rt ptr write i64
+   - Expected: missing_plan.status_code equals `invalid-args`
+   - Expected: missing_plan.reason equals `missing-cuda-glyph-plan`
+   - Expected: session.launch_generated_2d(GENERATED_2D_GLYPH, 4, 4, args) equals `1`
+7. rt ptr write i64
+8. rt ptr write i64
+   - Expected: missing_dst.reason equals `missing-cuda-glyph-dst`
+9. rt ptr write i64
+10. rt ptr write i64
+   - Expected: bad_dims.reason equals `cuda-glyph-dimensions-mismatch`
+11. rt ptr write i64
+12. rt ptr write i64
+   - Expected: bad_font.reason equals `invalid-cuda-glyph-font-size`
+13. rt free
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 32 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = CudaSession.create()
+session.is_initialized = true
+session.ctx = 7
+session.module_cache = 11
+val args = rt_alloc(40)
+rt_ptr_write_i64(args, 0, 0)
+rt_ptr_write_i64(args, 8, 1234)
+rt_ptr_write_i64(args, 16, 4)
+rt_ptr_write_i64(args, 24, 4)
+rt_ptr_write_i64(args, 32, 16)
+
+val missing_plan = session.launch_generated_2d_evidence(GENERATED_2D_GLYPH, 4, 4, args)
+expect(missing_plan.status_code).to_equal("invalid-args")
+expect(missing_plan.reason).to_equal("missing-cuda-glyph-plan")
+expect(session.launch_generated_2d(GENERATED_2D_GLYPH, 4, 4, args)).to_equal(1)
+
+rt_ptr_write_i64(args, 0, 4321)
+rt_ptr_write_i64(args, 8, 0)
+val missing_dst = session.launch_generated_2d_evidence(GENERATED_2D_GLYPH, 4, 4, args)
+expect(missing_dst.reason).to_equal("missing-cuda-glyph-dst")
+
+rt_ptr_write_i64(args, 8, 1234)
+rt_ptr_write_i64(args, 16, 5)
+val bad_dims = session.launch_generated_2d_evidence(GENERATED_2D_GLYPH, 4, 4, args)
+expect(bad_dims.reason).to_equal("cuda-glyph-dimensions-mismatch")
+
+rt_ptr_write_i64(args, 16, 4)
+rt_ptr_write_i64(args, 32, 0)
+val bad_font = session.launch_generated_2d_evidence(GENERATED_2D_GLYPH, 4, 4, args)
+expect(bad_font.reason).to_equal("invalid-cuda-glyph-font-size")
+
+rt_free(args, 40)
+```
+
+</details>
+
 #### shutdown is safe on an uninitialized session
 
 1. var session = CudaSession create
-
 2. session shutdown
    - Expected: session.is_valid() is false
    - Expected: session.ref_count equals `0`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -214,8 +317,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

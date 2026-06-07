@@ -27,7 +27,7 @@ rocm_session_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -41,7 +41,7 @@ rocm_session_contract_spec -> std
 #### reports ROCm kind and unavailable without an injected HIP FFI
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -59,7 +59,7 @@ expect(session.is_valid()).to_equal(false)
 #### fails closed when initializing or launching without HIP FFI
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -84,14 +84,13 @@ expect(session.scroll_kernel(64, 64, 4096)).to_equal(1)
 #### shutdown is safe on an uninitialized session
 
 1. var session = RocmSession create
-
 2. session shutdown
    - Expected: session.is_valid() is false
    - Expected: session.ref_count equals `0`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -116,7 +115,7 @@ expect(session.ref_count).to_equal(0)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -152,7 +151,7 @@ expect(still_missing_runtime.diagnostic_text()).to_contain("launch=rt_rocm_launc
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -179,17 +178,81 @@ expect(matched.status_code).to_equal("readback-matched")
 
 </details>
 
+#### validates generated glyph packed args before ROCm launch
+
+1. var session = RocmSession create with ffi
+2. rt ptr write i64
+3. rt ptr write i64
+4. rt ptr write i64
+5. rt ptr write i64
+6. rt ptr write i64
+   - Expected: missing_plan.status_code equals `invalid-args`
+   - Expected: missing_plan.reason equals `missing-rocm-glyph-plan`
+   - Expected: session.launch_generated_2d(GENERATED_2D_GLYPH, 4, 4, args) equals `1`
+7. rt ptr write i64
+8. rt ptr write i64
+   - Expected: missing_dst.reason equals `missing-rocm-glyph-dst`
+9. rt ptr write i64
+10. rt ptr write i64
+   - Expected: bad_dims.reason equals `rocm-glyph-dimensions-mismatch`
+11. rt ptr write i64
+12. rt ptr write i64
+   - Expected: bad_font.reason equals `invalid-rocm-glyph-font-size`
+13. rt free
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 31 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = RocmSession.create_with_ffi(RocmFfi.create_static())
+session.is_initialized = true
+session.module_cache = 11
+val args = rt_alloc(40)
+rt_ptr_write_i64(args, 0, 0)
+rt_ptr_write_i64(args, 8, 1234)
+rt_ptr_write_i64(args, 16, 4)
+rt_ptr_write_i64(args, 24, 4)
+rt_ptr_write_i64(args, 32, 16)
+
+val missing_plan = session.launch_generated_2d_evidence(GENERATED_2D_GLYPH, 4, 4, args)
+expect(missing_plan.status_code).to_equal("invalid-args")
+expect(missing_plan.reason).to_equal("missing-rocm-glyph-plan")
+expect(session.launch_generated_2d(GENERATED_2D_GLYPH, 4, 4, args)).to_equal(1)
+
+rt_ptr_write_i64(args, 0, 4321)
+rt_ptr_write_i64(args, 8, 0)
+val missing_dst = session.launch_generated_2d_evidence(GENERATED_2D_GLYPH, 4, 4, args)
+expect(missing_dst.reason).to_equal("missing-rocm-glyph-dst")
+
+rt_ptr_write_i64(args, 8, 1234)
+rt_ptr_write_i64(args, 16, 5)
+val bad_dims = session.launch_generated_2d_evidence(GENERATED_2D_GLYPH, 4, 4, args)
+expect(bad_dims.reason).to_equal("rocm-glyph-dimensions-mismatch")
+
+rt_ptr_write_i64(args, 16, 4)
+rt_ptr_write_i64(args, 32, 0)
+val bad_font = session.launch_generated_2d_evidence(GENERATED_2D_GLYPH, 4, 4, args)
+expect(bad_font.reason).to_equal("invalid-rocm-glyph-font-size")
+
+rt_free(args, 40)
+```
+
+</details>
+
 #### static HIP FFI exposes runtime-backed init evidence without missing FFI
 
 1. var session = RocmSession create with ffi
    - Expected: init_ev.reason == "missing-rocm-ffi" is false
    - Expected: init_ev.status_code == "initialized" or init_ev.status_code == "runtime-unavailable" or init_ev.status_code == "device-unavailable" or init_ev.status_code == "init-failed" is true
-
 2. session shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -208,7 +271,7 @@ session.shutdown()
 #### exports the HIP nonzero image blit kernel for transparent text
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -225,7 +288,7 @@ expect(source).to_contain("if (pixel == 0) return")
 #### exports shared generated HIP kernels with CUDA and OpenCL entry names
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -260,8 +323,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

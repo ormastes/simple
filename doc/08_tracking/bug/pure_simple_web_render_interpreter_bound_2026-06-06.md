@@ -200,6 +200,14 @@ generated glyph provenance sees a real `args_ready` pointer. Remaining gap: live
 backend launch/readback still needs to bind this packer into the production
 Metal/CUDA/HIP/Vulkan/OpenCL glyph raster paths.
 
+2026-06-07 native session glyph-args update: OpenCL, CUDA, and ROCm generated
+glyph launches now use the same shared argument-layout validator before submit.
+The CUDA and ROCm session contracts cover missing glyph plan, missing
+destination, mismatched dimensions, and invalid font size with `invalid-args`
+evidence instead of accepting any nonzero pointer. Remaining gap: the live GUI
+text executor still needs to allocate real glyph plans/output buffers and route
+successful backend readback into the vector/bitmap returned-glyph contract.
+
 ## Path F — repeated ancestor clip walks during paint — FIXED 2026-06-07
 
 `paint()` called `ancestor_clip()` in the background, absolute, positive z-index,

@@ -3,10 +3,14 @@
 
 use std.spec.{describe, it, expect}
 use std.gc_async_mut.gpu.engine2d.backend_session.{BackendSessionKind}
-use std.gc_async_mut.gpu.engine2d.generated_kernel_dispatch.{GENERATED_2D_ALPHA, GENERATED_2D_FILL}
+use std.gc_async_mut.gpu.engine2d.generated_kernel_dispatch.{GENERATED_2D_ALPHA, GENERATED_2D_FILL, GENERATED_2D_GLYPH}
 use std.gc_async_mut.gpu.engine2d.rocm_session.{RocmSession}
 use std.gpu.engine2d.backend_rocm_kernels.{_engine2d_hip_source, rocm_2d_generated_source}
 use std.gpu.engine2d.sffi_rocm.{RocmFfi}
+
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64, size: i64)
+extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
 
 describe "RocmSession compute contract":
 
@@ -69,6 +73,39 @@ describe "RocmSession compute contract":
         expect(read_ev.status_code).to_equal("missing-ffi")
         expect(matched.success).to_equal(true)
         expect(matched.status_code).to_equal("readback-matched")
+
+    it "validates generated glyph packed args before ROCm launch":
+        var session = RocmSession.create_with_ffi(RocmFfi.create_static())
+        session.is_initialized = true
+        session.module_cache = 11
+        val args = rt_alloc(40)
+        rt_ptr_write_i64(args, 0, 0)
+        rt_ptr_write_i64(args, 8, 1234)
+        rt_ptr_write_i64(args, 16, 4)
+        rt_ptr_write_i64(args, 24, 4)
+        rt_ptr_write_i64(args, 32, 16)
+
+        val missing_plan = session.launch_generated_2d_evidence(GENERATED_2D_GLYPH, 4, 4, args)
+        expect(missing_plan.status_code).to_equal("invalid-args")
+        expect(missing_plan.reason).to_equal("missing-rocm-glyph-plan")
+        expect(session.launch_generated_2d(GENERATED_2D_GLYPH, 4, 4, args)).to_equal(1)
+
+        rt_ptr_write_i64(args, 0, 4321)
+        rt_ptr_write_i64(args, 8, 0)
+        val missing_dst = session.launch_generated_2d_evidence(GENERATED_2D_GLYPH, 4, 4, args)
+        expect(missing_dst.reason).to_equal("missing-rocm-glyph-dst")
+
+        rt_ptr_write_i64(args, 8, 1234)
+        rt_ptr_write_i64(args, 16, 5)
+        val bad_dims = session.launch_generated_2d_evidence(GENERATED_2D_GLYPH, 4, 4, args)
+        expect(bad_dims.reason).to_equal("rocm-glyph-dimensions-mismatch")
+
+        rt_ptr_write_i64(args, 16, 4)
+        rt_ptr_write_i64(args, 32, 0)
+        val bad_font = session.launch_generated_2d_evidence(GENERATED_2D_GLYPH, 4, 4, args)
+        expect(bad_font.reason).to_equal("invalid-rocm-glyph-font-size")
+
+        rt_free(args, 40)
 
     it "static HIP FFI exposes runtime-backed init evidence without missing FFI":
         var session = RocmSession.create_with_ffi(RocmFfi.create_static())

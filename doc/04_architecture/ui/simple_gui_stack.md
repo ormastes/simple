@@ -354,6 +354,10 @@ Generated glyph raster kernel callers must use the shared argument packer for
 `glyph_plan`, `dst`, `width`, `height`, and `font_size` so generated
 Metal/CUDA/HIP/Vulkan/OpenCL launch paths validate the same pointer layout before
 backend-specific launch/readback code consumes it.
+Native session launch evidence must gate generated glyph kernels on that shared
+layout, not merely on `args_ptr != 0`; CUDA, ROCm/HIP, and OpenCL use
+backend-prefixed invalid-args reasons for missing glyph plans, missing
+destinations, dimension mismatches, and invalid font sizes.
 
 ## Migration Order
 

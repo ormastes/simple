@@ -27,7 +27,7 @@ generated_kernel_args_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -121,6 +121,30 @@ generated_glyph_raster_args_free(args)
 
 </details>
 
+#### reports backend-specific launch reasons from the shared glyph layout
+
+1. generated glyph raster args free
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val args = generated_glyph_raster_args_pack(1000, 2000, 16, 8, 14)
+
+expect(generated_glyph_raster_args_launch_reason("cuda", 0, 16, 8)).to_equal("missing-generated-2d-args-pointer")
+expect(generated_glyph_raster_args_launch_reason("cuda", args.args_ptr, 0, 8)).to_equal("invalid-generated-glyph-dimensions")
+expect(generated_glyph_raster_args_launch_reason("cuda", args.args_ptr, 16, 9)).to_equal("cuda-glyph-dimensions-mismatch")
+expect(generated_glyph_raster_args_launch_reason("rocm", args.args_ptr, 16, 8)).to_equal("ready")
+
+generated_glyph_raster_args_free(args)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -140,8 +164,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

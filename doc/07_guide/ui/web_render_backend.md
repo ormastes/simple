@@ -126,8 +126,10 @@ dispatch is proved backend by backend as each session binds real launch args.
 Generated glyph raster kernels share a validated argument packer for
 `glyph_plan`, `dst`, `width`, `height`, and `font_size`; tests prove invalid
 arguments fail closed, valid packed pointers round-trip, and generated glyph
-provenance observes `args_ready`. Live backend launch/readback remains the
-production integration step.
+provenance observes `args_ready`. OpenCL, CUDA, and ROCm session launch evidence
+now use that shared layout validator before submit, so generated glyph kernels
+do not treat an arbitrary nonzero pointer as launch-ready. Live GUI text
+allocation/readback remains the production integration step.
 `web_render_vector_font_native_compute_evidence()` mirrors the same native-first
 order for shared web-render reports, while the older CUDA/OpenCL-only evidence
 helper remains available for existing reports.
