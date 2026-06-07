@@ -139,6 +139,12 @@ go-runtime-hardening
 - verification: `scheduler.spl` and `green_carrier.spl` checks passed, and
   `scheduler_green_parallelism_spec.spl` passed 17 examples for drain-to-idle
   and run-budget-exhausted loop behavior.
+- implementation: Added `Scheduler.yield_green_current_on_cpu`, a cooperative
+  green fairness hook that requeues the current green task and clears the
+  current slot only after successful requeue.
+- verification: `scheduler.spl` and `green_carrier.spl` checks passed, and
+  `scheduler_green_parallelism_spec.spl` passed 19 examples for green yield
+  requeue and no-current guard behavior.
 
 ## Completion Audit - 2026-06-07
 

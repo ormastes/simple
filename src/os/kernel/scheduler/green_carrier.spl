@@ -99,6 +99,14 @@ pub struct GreenCarrierRunLoopResult:
     last_task_id: i64
     reason: text
 
+pub struct GreenCarrierYieldResult:
+    """Result of yielding a running green task back to a carrier queue."""
+    queues: GreenCarrierRunQueueState
+    task_id: i64
+    cpu: i64
+    yielded: bool
+    reason: text
+
 pub struct GreenCarrierWakeRunResult:
     """Result of waking parked green work and running the scheduler pass."""
     queues: GreenCarrierRunQueueState
@@ -539,6 +547,44 @@ pub fn green_carrier_dispatch_next_with_limit(queues: GreenCarrierRunQueueState,
     else:
         green_carrier_dispatch_next(queues, cpu)
 
+pub fn green_carrier_yield_running_task(queues: GreenCarrierRunQueueState, task_id: i64, cpu: i64, active_limit: i64) -> GreenCarrierYieldResult:
+    """Requeue a currently running green task without dropping it."""
+    val normalized_limit = green_carrier_normalized_cpu_count(active_limit)
+    if task_id < 1:
+        GreenCarrierYieldResult(
+            queues: queues,
+            task_id: task_id,
+            cpu: cpu,
+            yielded: false,
+            reason: "no_current_green_task"
+        )
+    elif cpu < 0 or cpu >= queues.queue_depth_by_cpu.len():
+        GreenCarrierYieldResult(
+            queues: queues,
+            task_id: task_id,
+            cpu: cpu,
+            yielded: false,
+            reason: "invalid_cpu"
+        )
+    elif cpu >= normalized_limit:
+        GreenCarrierYieldResult(
+            queues: queues,
+            task_id: task_id,
+            cpu: cpu,
+            yielded: false,
+            reason: "inactive_green_carrier"
+        )
+    else:
+        val next_queues = green_carrier_queue_push(queues, task_id, cpu)
+        val enqueued = next_queues.dropped_count == queues.dropped_count
+        GreenCarrierYieldResult(
+            queues: next_queues,
+            task_id: task_id,
+            cpu: cpu,
+            yielded: enqueued,
+            reason: if enqueued: "yielded_to_run_queue" else: "queue_rejected"
+        )
+
 pub fn green_carrier_scheduler_intent(dispatch: GreenCarrierDispatchResult) -> GreenCarrierSchedulerIntent:
     """Convert green carrier dispatch into a typed scheduler execution intent."""
     if not dispatch.dispatched:
@@ -616,6 +662,20 @@ pub fn green_carrier_context_switches_on_cpu(state: GreenCarrierExecutionState, 
         0
     else:
         state.context_switches_by_cpu[cpu]
+
+pub fn green_carrier_clear_current_on_cpu(state: GreenCarrierExecutionState, cpu: i64) -> GreenCarrierExecutionState:
+    """Clear the current green task slot after a successful yield."""
+    if cpu < 0 or cpu >= state.current_task_by_cpu.len():
+        state
+    else:
+        var current_task_by_cpu = state.current_task_by_cpu
+        current_task_by_cpu[cpu] = 0
+        GreenCarrierExecutionState(
+            current_task_by_cpu: current_task_by_cpu,
+            context_switches_by_cpu: state.context_switches_by_cpu,
+            total_context_switches: state.total_context_switches,
+            rejected_intents: state.rejected_intents
+        )
 
 pub fn green_carrier_reject_scheduler_intent(state: GreenCarrierExecutionState, intent: GreenCarrierSchedulerIntent, reason: text) -> GreenCarrierExecutionResult:
     """Reject a green scheduler intent without mutating carrier execution slots."""

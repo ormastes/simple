@@ -33,7 +33,7 @@ SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 ./src/compiler_rust/target/debug/simple test 
 | SimpleOS green-carrier compile check | PASS | 1 file |
 | SimpleOS green-carrier unit contract | PASS | 36 |
 | SimpleOS scheduler compile check | PASS | 1 file |
-| SimpleOS scheduler green-carrier parallelism | PASS | 17 |
+| SimpleOS scheduler green-carrier parallelism | PASS | 19 |
 | SimpleOS green-carrier QEMU spec default lane | PASS | 1 |
 | SimpleOS green-carrier QEMU live lane | PASS | 1 |
 
@@ -66,4 +66,6 @@ SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 ./src/compiler_rust/target/debug/simple test 
   that dispatches through the active carrier limit before applying scheduler
   intent. It also proves a bounded active-carrier pass can run one step across
   active workers, rebalance inactive work before running it, and repeat active
-  passes until idle/no-active-work or explicit run-budget exhaustion.
+  passes until idle/no-active-work or explicit run-budget exhaustion. It also
+  proves cooperative green yield requeues the running task, clears the current
+  slot only after requeue, and lets the next active pass run the yielded task.

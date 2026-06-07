@@ -94,11 +94,12 @@ use os.kernel.scheduler.green_carrier.{
     GreenCarrierSchedulerIntent, GreenCarrierExecutionResult, GreenCarrierParallelismState,
     GreenCarrierRunQueueState, GreenCarrierRebalanceResult, GreenCarrierRebalancePassResult,
     GreenCarrierRunStepResult, GreenCarrierRunPassResult, GreenCarrierRunLoopResult,
-    GreenCarrierWakeRunResult,
+    GreenCarrierYieldResult, GreenCarrierWakeRunResult,
     green_carrier_apply_scheduler_intent,
     green_carrier_extend_execution_state,
     green_carrier_current_task_on_cpu,
     green_carrier_context_switches_on_cpu,
+    green_carrier_clear_current_on_cpu,
     green_carrier_set_parallelism,
     green_carrier_parallelism_for_topology,
     green_carrier_reject_scheduler_intent,
@@ -108,6 +109,7 @@ use os.kernel.scheduler.green_carrier.{
     green_carrier_queue_depth,
     green_carrier_rebalance_one,
     green_carrier_dispatch_next_with_limit,
+    green_carrier_yield_running_task,
     green_carrier_scheduler_intent
 }
 use os.kernel.scheduler.green_task.{GreenTaskRecord}
@@ -523,6 +525,22 @@ impl Scheduler:
 
     fn green_rejected_intents() -> i64:
         self.green_execution_state.rejected_intents
+
+    me yield_green_current_on_cpu(queues: GreenCarrierRunQueueState, cpu_id: u32) -> GreenCarrierYieldResult:
+        val cpu = self._normalize_cpu(cpu_id)
+        val current_task = green_carrier_current_task_on_cpu(self.green_execution_state, cpu as i64)
+        val yielded = green_carrier_yield_running_task(
+            queues,
+            current_task as i64,
+            cpu as i64,
+            self.green_parallelism_state.active_limit
+        )
+        if yielded.yielded:
+            self.green_execution_state = green_carrier_clear_current_on_cpu(
+                self.green_execution_state,
+                cpu as i64
+            )
+        yielded
 
     me set_green_carrier_parallelism(requested_limit: i64) -> GreenCarrierParallelismState:
         val next_state = green_carrier_set_parallelism(self.green_parallelism_state, requested_limit)

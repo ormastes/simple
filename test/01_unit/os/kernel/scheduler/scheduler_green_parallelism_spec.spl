@@ -289,3 +289,36 @@ describe "Scheduler green carrier parallelism":
         expect(loop_result.last_task_id).to_equal(66)
         expect(sched.green_current_task_on_cpu(0u32)).to_equal(66)
         expect(green_carrier_queue_depth(loop_result.queues, 0)).to_equal(1)
+
+    it "yields current green task back to active carrier queue":
+        var sched = Scheduler.new_with_cpu_count(4u32)
+        sched.set_green_carrier_parallelism(1)
+        val queues = green_carrier_run_queues_new(4, 8)
+        val first = green_carrier_spawn_task(68, 4, 1, 0, 4, 4, 4, 0)
+        val queued = green_carrier_apply_enqueue(queues, first)
+        val first_pass = sched.run_green_carrier_active_pass(queued.queues, 0)
+        val yielded = sched.yield_green_current_on_cpu(first_pass.queues, 0u32)
+        val current_after_yield = sched.green_current_task_on_cpu(0u32)
+        val second_pass = sched.run_green_carrier_active_pass(yielded.queues, 0)
+
+        expect(first_pass.ran_workers).to_equal(1)
+        expect(yielded.yielded).to_equal(true)
+        expect(yielded.task_id).to_equal(68)
+        expect(yielded.reason).to_equal("yielded_to_run_queue")
+        expect(current_after_yield).to_equal(0)
+        expect(sched.green_current_task_on_cpu(0u32)).to_equal(68)
+        expect(second_pass.ran_workers).to_equal(1)
+        expect(second_pass.last_task_id).to_equal(68)
+        expect(green_carrier_queue_depth(second_pass.queues, 0)).to_equal(0)
+
+    it "does not yield when active carrier has no current green task":
+        var sched = Scheduler.new_with_cpu_count(4u32)
+        sched.set_green_carrier_parallelism(1)
+        val queues = green_carrier_run_queues_new(4, 8)
+        val yielded = sched.yield_green_current_on_cpu(queues, 0u32)
+
+        expect(yielded.yielded).to_equal(false)
+        expect(yielded.task_id).to_equal(0)
+        expect(yielded.reason).to_equal("no_current_green_task")
+        expect(green_carrier_queue_depth(yielded.queues, 0)).to_equal(0)
+        expect(sched.green_current_task_on_cpu(0u32)).to_equal(0)
