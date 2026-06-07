@@ -74,6 +74,13 @@ returned glyph pixels through the vector-font evidence path. The Draw IR text
 executor also reports `font_text_cache_hits` / `font_text_cache_misses` for the
 per-batch text-blit buffer cache; repeated identical labels should hit this
 cache instead of re-running glyph layout and blit preparation.
+Bitmap fallback follows the same evidence direction through
+`rasterize_bitmap_accelerated()` and `bitmap_font_accelerator_stats()`: a
+validated backend-returned bitmap glyph can bypass CPU mask generation and
+record returned glyph/pixel counts. The production backend priority remains
+host native first (`metal`, `cuda`, `hip`/ROCm, then `vulkan`/OpenCL by
+availability) before CPU fallback; current bitmap/vector glyph tests prove the
+return contract, not full live-kernel dispatch.
 
 Keep pure_simple viewports modest (≤ ~400 wide); chromium opens a live window
 and is unaffected.

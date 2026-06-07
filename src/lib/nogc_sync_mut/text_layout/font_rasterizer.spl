@@ -106,6 +106,15 @@ class VectorFontAcceleratorStats:
     gpu_returned_glyph_pixels: i64
     unavailable_reason: text
 
+class BitmapFontAcceleratorStats:
+    attempts: i64
+    cuda_hits: i64
+    opencl_hits: i64
+    cpu_fallback_hits: i64
+    gpu_returned_glyphs: i64
+    gpu_returned_glyph_pixels: i64
+    unavailable_reason: text
+
 var _vector_font_glyph_rasterizations: i64 = 0
 var _vector_font_command_triplets: i64 = 0
 var _vector_font_output_pixels: i64 = 0
@@ -116,6 +125,13 @@ var _vector_font_cpu_fallback_hits: i64 = 0
 var _vector_font_gpu_returned_glyphs: i64 = 0
 var _vector_font_gpu_returned_glyph_pixels: i64 = 0
 var _vector_font_accelerator_unavailable_reason: text = ""
+var _bitmap_font_accelerator_attempts: i64 = 0
+var _bitmap_font_cuda_hits: i64 = 0
+var _bitmap_font_opencl_hits: i64 = 0
+var _bitmap_font_cpu_fallback_hits: i64 = 0
+var _bitmap_font_gpu_returned_glyphs: i64 = 0
+var _bitmap_font_gpu_returned_glyph_pixels: i64 = 0
+var _bitmap_font_accelerator_unavailable_reason: text = ""
 
 fn reset_vector_font_raster_stats():
     _vector_font_glyph_rasterizations = 0
@@ -145,6 +161,26 @@ fn vector_font_accelerator_stats() -> VectorFontAcceleratorStats:
         gpu_returned_glyphs: _vector_font_gpu_returned_glyphs,
         gpu_returned_glyph_pixels: _vector_font_gpu_returned_glyph_pixels,
         unavailable_reason: _vector_font_accelerator_unavailable_reason
+    )
+
+fn reset_bitmap_font_raster_stats():
+    _bitmap_font_accelerator_attempts = 0
+    _bitmap_font_cuda_hits = 0
+    _bitmap_font_opencl_hits = 0
+    _bitmap_font_cpu_fallback_hits = 0
+    _bitmap_font_gpu_returned_glyphs = 0
+    _bitmap_font_gpu_returned_glyph_pixels = 0
+    _bitmap_font_accelerator_unavailable_reason = ""
+
+fn bitmap_font_accelerator_stats() -> BitmapFontAcceleratorStats:
+    BitmapFontAcceleratorStats(
+        attempts: _bitmap_font_accelerator_attempts,
+        cuda_hits: _bitmap_font_cuda_hits,
+        opencl_hits: _bitmap_font_opencl_hits,
+        cpu_fallback_hits: _bitmap_font_cpu_fallback_hits,
+        gpu_returned_glyphs: _bitmap_font_gpu_returned_glyphs,
+        gpu_returned_glyph_pixels: _bitmap_font_gpu_returned_glyph_pixels,
+        unavailable_reason: _bitmap_font_accelerator_unavailable_reason
     )
 
 fn _vector_font_env_text(key: text) -> text:
@@ -279,6 +315,56 @@ fn _try_cuda_vector_font_glyph(codepoint: i32, font_size: i32) -> CachedGlyph?:
 
 fn _try_opencl_vector_font_glyph(codepoint: i32, font_size: i32) -> CachedGlyph?:
     _try_vector_font_glyph_from_backend("OPENCL", codepoint, font_size)
+
+fn _try_bitmap_font_glyph_slot(prefix: text, slot: text, codepoint: i32, font_size: i32) -> CachedGlyph?:
+    val slot_prefix = prefix + "_BITMAP_FONT_GLYPH_" + slot
+    if _vector_font_env_i64(slot_prefix + "_CODEPOINT") != codepoint.to_i64():
+        return nil
+    if _vector_font_env_i64(slot_prefix + "_FONT_SIZE") != font_size.to_i64():
+        return nil
+    val width = _vector_font_env_i64(slot_prefix + "_WIDTH").to_i32()
+    val height = _vector_font_env_i64(slot_prefix + "_HEIGHT").to_i32()
+    val advance = _vector_font_env_i64(slot_prefix + "_ADVANCE").to_i32()
+    val expected_checksum = _vector_font_env_i64(slot_prefix + "_CHECKSUM")
+    if width <= 0 or height <= 0 or advance <= 0 or expected_checksum <= 0:
+        return nil
+    val expected_len = width * height
+    val pixels = _vector_font_env_pixels(slot_prefix + "_PIXELS", expected_len)
+    if pixels.len() != expected_len:
+        return nil
+    val checksum = _vector_font_pixels_checksum(pixels, width, height, advance)
+    if checksum != expected_checksum:
+        return nil
+    CachedGlyph(
+        codepoint: codepoint,
+        font_size: font_size,
+        width: width,
+        height: height,
+        advance: advance,
+        bearing_x: 0,
+        bearing_y: 0,
+        pixels: pixels
+    )
+
+fn _try_bitmap_font_glyph_from_backend(prefix: text, codepoint: i32, font_size: i32) -> CachedGlyph?:
+    val status = _vector_font_env_text(prefix + "_BITMAP_FONT_STATUS")
+    val reason = _vector_font_env_text(prefix + "_BITMAP_FONT_REASON")
+    if status != "pass" or (not reason.contains("matched-cpu") and not reason.contains("glyph-pixels-returned")):
+        return nil
+    var glyph_count = _vector_font_env_i64(prefix + "_BITMAP_FONT_GLYPH_COUNT")
+    if glyph_count <= 0:
+        glyph_count = 1
+    if glyph_count > 0:
+        val glyph0 = _try_bitmap_font_glyph_slot(prefix, "0", codepoint, font_size)
+        if glyph0 != nil:
+            return glyph0
+    nil
+
+fn _try_cuda_bitmap_font_glyph(codepoint: i32, font_size: i32) -> CachedGlyph?:
+    _try_bitmap_font_glyph_from_backend("CUDA", codepoint, font_size)
+
+fn _try_opencl_bitmap_font_glyph(codepoint: i32, font_size: i32) -> CachedGlyph?:
+    _try_bitmap_font_glyph_from_backend("OPENCL", codepoint, font_size)
 
 fn rasterize_vector_accelerated(cmds: [i32], codepoint: i32, font_size: i32) -> CachedGlyph:
     _vector_font_accelerator_attempts = _vector_font_accelerator_attempts + 1
@@ -423,6 +509,26 @@ fn vf_point_inside(cmds: [i32], px: i32, py: i32, scale_n: i32, scale_d: i32) ->
 # ============================================================================
 
 extern fn rt_gui_get_glyph_8x16(ch: i32) -> [u8]
+
+fn rasterize_bitmap_accelerated(codepoint: i32, font_size: i32) -> CachedGlyph:
+    _bitmap_font_accelerator_attempts = _bitmap_font_accelerator_attempts + 1
+    val cuda_glyph = _try_cuda_bitmap_font_glyph(codepoint, font_size)
+    if cuda_glyph != nil:
+        _bitmap_font_cuda_hits = _bitmap_font_cuda_hits + 1
+        _bitmap_font_gpu_returned_glyphs = _bitmap_font_gpu_returned_glyphs + 1
+        _bitmap_font_gpu_returned_glyph_pixels = _bitmap_font_gpu_returned_glyph_pixels + cuda_glyph.pixels.len().to_i64()
+        _bitmap_font_accelerator_unavailable_reason = "cuda-bitmap-font-glyph-pixels-returned"
+        return cuda_glyph
+    val opencl_glyph = _try_opencl_bitmap_font_glyph(codepoint, font_size)
+    if opencl_glyph != nil:
+        _bitmap_font_opencl_hits = _bitmap_font_opencl_hits + 1
+        _bitmap_font_gpu_returned_glyphs = _bitmap_font_gpu_returned_glyphs + 1
+        _bitmap_font_gpu_returned_glyph_pixels = _bitmap_font_gpu_returned_glyph_pixels + opencl_glyph.pixels.len().to_i64()
+        _bitmap_font_accelerator_unavailable_reason = "opencl-bitmap-font-glyph-pixels-returned"
+        return opencl_glyph
+    _bitmap_font_cpu_fallback_hits = _bitmap_font_cpu_fallback_hits + 1
+    _bitmap_font_accelerator_unavailable_reason = "production-gpu-dispatch-not-wired"
+    rasterize_bitmap(codepoint, font_size)
 
 fn rasterize_bitmap(codepoint: i32, font_size: i32) -> CachedGlyph:
     # Scale factor from 16px base

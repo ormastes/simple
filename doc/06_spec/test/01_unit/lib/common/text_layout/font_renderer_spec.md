@@ -1,6 +1,6 @@
 # Font Renderer Specification
 
-> 1. var renderer = FontRenderer new
+> <details>
 
 <!-- sdn-diagram:id=font_renderer_spec.arch -->
 <details class="sdn-source">
@@ -11,7 +11,6 @@
 @direction LR
 
 font_renderer_spec -> std
-font_renderer_spec -> common
 ```
 
 </details>
@@ -28,7 +27,7 @@ font_renderer_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 13 | 13 | 0 | 0 |
+| 14 | 14 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -41,7 +40,7 @@ font_renderer_spec -> common
 
 #### renders vector glyph coverage with antialiasing evidence
 
-1. var renderer = FontRenderer new
+- var renderer = FontRenderer new
    - Expected: glyph.height equals `24`
 
 
@@ -67,7 +66,7 @@ expect(_count_partial_alpha(glyph.pixels)).to_be_greater_than(0)
 
 #### renders Simple Vector Outline glyphs into an ARGB buffer
 
-1. var renderer = FontRenderer new
+- var renderer = FontRenderer new
 
 
 <details>
@@ -93,27 +92,80 @@ expect(_count_antialiased_argb_pixels(rendered, bg, fg)).to_be_greater_than(0)
 
 #### renders bitmap glyph fallback with exact mask evidence
 
-1. var renderer = FontRenderer new
+- reset bitmap font raster stats
+- var renderer = FontRenderer new
    - Expected: glyph.width equals `8`
    - Expected: glyph.height equals `16`
+   - Expected: stats.attempts equals `1`
+   - Expected: stats.cpu_fallback_hits equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+reset_bitmap_font_raster_stats()
 var renderer = FontRenderer.new()
 renderer.use_vector = false
 
 val glyph = renderer.get_glyph(65, 16)
+val stats = bitmap_font_accelerator_stats()
 
 expect(glyph.width).to_equal(8)
 expect(glyph.height).to_equal(16)
 expect(_count_nonzero_alpha(glyph.pixels)).to_be_greater_than(0)
 expect(_count_full_alpha(glyph.pixels)).to_be_greater_than(0)
+expect(stats.attempts).to_equal(1)
+expect(stats.cpu_fallback_hits).to_equal(1)
+```
+
+</details>
+
+#### accepts bitmap glyph pixels returned by a backend rasterizer
+
+- reset bitmap font raster stats
+-  set cuda bitmap font probe glyph
+- var renderer = FontRenderer new
+   - Expected: glyph.width equals `1`
+   - Expected: glyph.height equals `1`
+   - Expected: glyph.advance equals `2`
+   - Expected: glyph.pixels[0].to_i32() equals `255`
+   - Expected: stats.attempts equals `1`
+   - Expected: stats.cuda_hits equals `1`
+   - Expected: stats.gpu_returned_glyphs equals `1`
+   - Expected: stats.gpu_returned_glyph_pixels equals `1`
+   - Expected: stats.unavailable_reason equals `cuda-bitmap-font-glyph-pixels-returned`
+-  clear cuda bitmap font probe glyph
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+reset_bitmap_font_raster_stats()
+_set_cuda_bitmap_font_probe_glyph()
+var renderer = FontRenderer.new()
+renderer.use_vector = false
+
+val glyph = renderer.get_glyph(65, 16)
+val stats = bitmap_font_accelerator_stats()
+
+expect(glyph.width).to_equal(1)
+expect(glyph.height).to_equal(1)
+expect(glyph.advance).to_equal(2)
+expect(glyph.pixels[0].to_i32()).to_equal(255)
+expect(stats.attempts).to_equal(1)
+expect(stats.cuda_hits).to_equal(1)
+expect(stats.gpu_returned_glyphs).to_equal(1)
+expect(stats.gpu_returned_glyph_pixels).to_equal(1)
+expect(stats.unavailable_reason).to_equal("cuda-bitmap-font-glyph-pixels-returned")
+_clear_cuda_bitmap_font_probe_glyph()
 ```
 
 </details>
@@ -321,8 +373,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

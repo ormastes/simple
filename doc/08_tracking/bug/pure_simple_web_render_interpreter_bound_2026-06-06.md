@@ -140,9 +140,19 @@ injects a validated CUDA glyph and asserts `font_offload_status ==
 `font_production_ready == true`.
 
 Remaining gap: production CUDA/HIP/Vulkan/Metal glyph raster kernels still need
-to populate that glyph-return contract during real GUI execution. Bitmap glyph
-execution also still needs equivalent backend-return evidence instead of CPU
-glyph preparation.
+to populate that glyph-return contract during real GUI execution.
+
+2026-06-07 bitmap glyph evidence update: bitmap fallback now uses the same
+backend-return shape as vector glyphs. `FontRenderer` routes bitmap fallback
+through `rasterize_bitmap_accelerated()`, records bitmap accelerator stats, and
+accepts validated backend-returned glyph pixels through a CUDA bitmap glyph slot
+contract. Focused unit coverage injects one `A` glyph, asserts the returned
+1x1 pixel mask, and verifies `cuda_hits == 1`,
+`gpu_returned_glyphs == 1`, and `gpu_returned_glyph_pixels == 1`.
+
+Remaining bitmap gap: production CUDA/HIP/Vulkan/Metal glyph raster kernels
+still need to populate the bitmap glyph-return contract during real GUI
+execution.
 ## Follow-up: GUI profile throughput evidence
 
 2026-06-06 GUI profile smoke:

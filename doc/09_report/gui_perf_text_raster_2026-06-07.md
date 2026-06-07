@@ -111,6 +111,13 @@ CUDA vector glyph through the existing glyph slot contract and asserts
 glyph-return evidence; real CUDA/HIP/Vulkan/Metal glyph kernels still need to
 populate that contract in live GUI runs.
 
+2026-06-07 bitmap fallback evidence follow-up: bitmap glyph fallback now routes
+through an accelerated rasterizer contract and exposes bitmap accelerator stats.
+A focused unit injects validated CUDA-returned bitmap glyph pixels and asserts
+the returned alpha mask plus `cuda_hits=1`, `gpu_returned_glyphs=1`, and
+`gpu_returned_glyph_pixels=1`. This proves bitmap glyphs can use the same
+backend-return evidence shape; live production kernels still need to feed it.
+
 Related tracked issue:
 [`pure_simple_web_render_interpreter_bound_2026-06-06.md`](../08_tracking/bug/pure_simple_web_render_interpreter_bound_2026-06-06.md).
   

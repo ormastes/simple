@@ -1,5 +1,5 @@
 use std.spec.{describe, it, expect}
-use common.text_layout.font_renderer.{
+use std.nogc_sync_mut.text_layout.font_renderer.{
     browser_chrome_compatible_normal_font_name,
     browser_chrome_compatible_normal_font_path,
     browser_chrome_compatible_vector_font_name,
@@ -10,6 +10,9 @@ use common.text_layout.font_renderer.{
     browser_provided_font_paths, browser_sans_font_candidates,
     browser_serif_font_candidates,
     ensure_browser_provided_fonts}
+use std.nogc_sync_mut.text_layout.font_rasterizer.{reset_bitmap_font_raster_stats, bitmap_font_accelerator_stats}
+
+extern fn rt_env_set(key: text, value: text) -> bool
 
 fn _count_nonzero_alpha(pixels: [u8]) -> i32:
     var count = 0
@@ -47,6 +50,30 @@ fn _count_antialiased_argb_pixels(pixels: [u32], bg: u32, fg: u32) -> i32:
             count = count + 1
     count
 
+fn _set_cuda_bitmap_font_probe_glyph():
+    expect(rt_env_set("CUDA_BITMAP_FONT_STATUS", "pass"))
+    expect(rt_env_set("CUDA_BITMAP_FONT_REASON", "cuda-bitmap-font-glyph-pixels-returned"))
+    expect(rt_env_set("CUDA_BITMAP_FONT_GLYPH_COUNT", "1"))
+    expect(rt_env_set("CUDA_BITMAP_FONT_GLYPH_0_CODEPOINT", "65"))
+    expect(rt_env_set("CUDA_BITMAP_FONT_GLYPH_0_FONT_SIZE", "16"))
+    expect(rt_env_set("CUDA_BITMAP_FONT_GLYPH_0_WIDTH", "1"))
+    expect(rt_env_set("CUDA_BITMAP_FONT_GLYPH_0_HEIGHT", "1"))
+    expect(rt_env_set("CUDA_BITMAP_FONT_GLYPH_0_ADVANCE", "2"))
+    expect(rt_env_set("CUDA_BITMAP_FONT_GLYPH_0_PIXELS", "255"))
+    expect(rt_env_set("CUDA_BITMAP_FONT_GLYPH_0_CHECKSUM", "305"))
+
+fn _clear_cuda_bitmap_font_probe_glyph():
+    expect(rt_env_set("CUDA_BITMAP_FONT_STATUS", ""))
+    expect(rt_env_set("CUDA_BITMAP_FONT_REASON", ""))
+    expect(rt_env_set("CUDA_BITMAP_FONT_GLYPH_COUNT", ""))
+    expect(rt_env_set("CUDA_BITMAP_FONT_GLYPH_0_CODEPOINT", ""))
+    expect(rt_env_set("CUDA_BITMAP_FONT_GLYPH_0_FONT_SIZE", ""))
+    expect(rt_env_set("CUDA_BITMAP_FONT_GLYPH_0_WIDTH", ""))
+    expect(rt_env_set("CUDA_BITMAP_FONT_GLYPH_0_HEIGHT", ""))
+    expect(rt_env_set("CUDA_BITMAP_FONT_GLYPH_0_ADVANCE", ""))
+    expect(rt_env_set("CUDA_BITMAP_FONT_GLYPH_0_PIXELS", ""))
+    expect(rt_env_set("CUDA_BITMAP_FONT_GLYPH_0_CHECKSUM", ""))
+
 describe "shared font renderer fallbacks":
     it "renders vector glyph coverage with antialiasing evidence":
         var renderer = FontRenderer.new()
@@ -72,15 +99,39 @@ describe "shared font renderer fallbacks":
         expect(_count_antialiased_argb_pixels(rendered, bg, fg)).to_be_greater_than(0)
 
     it "renders bitmap glyph fallback with exact mask evidence":
+        reset_bitmap_font_raster_stats()
         var renderer = FontRenderer.new()
         renderer.use_vector = false
 
         val glyph = renderer.get_glyph(65, 16)
+        val stats = bitmap_font_accelerator_stats()
 
         expect(glyph.width).to_equal(8)
         expect(glyph.height).to_equal(16)
         expect(_count_nonzero_alpha(glyph.pixels)).to_be_greater_than(0)
         expect(_count_full_alpha(glyph.pixels)).to_be_greater_than(0)
+        expect(stats.attempts).to_equal(1)
+        expect(stats.cpu_fallback_hits).to_equal(1)
+
+    it "accepts bitmap glyph pixels returned by a backend rasterizer":
+        reset_bitmap_font_raster_stats()
+        _set_cuda_bitmap_font_probe_glyph()
+        var renderer = FontRenderer.new()
+        renderer.use_vector = false
+
+        val glyph = renderer.get_glyph(65, 16)
+        val stats = bitmap_font_accelerator_stats()
+
+        expect(glyph.width).to_equal(1)
+        expect(glyph.height).to_equal(1)
+        expect(glyph.advance).to_equal(2)
+        expect(glyph.pixels[0].to_i32()).to_equal(255)
+        expect(stats.attempts).to_equal(1)
+        expect(stats.cuda_hits).to_equal(1)
+        expect(stats.gpu_returned_glyphs).to_equal(1)
+        expect(stats.gpu_returned_glyph_pixels).to_equal(1)
+        expect(stats.unavailable_reason).to_equal("cuda-bitmap-font-glyph-pixels-returned")
+        _clear_cuda_bitmap_font_probe_glyph()
 
     it "keeps Chrome-compatible serif font candidates ahead of fallback fonts":
         val candidates = browser_serif_font_candidates()
