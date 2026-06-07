@@ -1,6 +1,6 @@
 # Multicore Green Fanout Stress Specification
 
-> This perf stress spec keeps the Simple concurrency rows comparable: OS threads, cooperative green, and multicore green all run the same deterministic fanout workload and must produce the same checksum. The multicore-green row separately reports whether every handle used the runtime pool, so inline fallback cannot be mistaken for Go-like M:N CPU-parallel evidence.
+> This perf stress spec keeps the Simple concurrency rows comparable: OS threads, cooperative green, and multicore green all run the same deterministic fanout workload and must produce the same checksum. The multicore-green row separately reports runtime-pool and work-stealing evidence, so inline fallback or a single FIFO queue cannot be mistaken for Go-like M:N CPU-parallel evidence.
 
 <!-- sdn-diagram:id=multicore_green_fanout_spec.arch -->
 <details class="sdn-source">
@@ -34,7 +34,7 @@ multicore_green_fanout_spec -> std
 
 # Multicore Green Fanout Stress Specification
 
-This perf stress spec keeps the Simple concurrency rows comparable: OS threads, cooperative green, and multicore green all run the same deterministic fanout workload and must produce the same checksum. The multicore-green row separately reports whether every handle used the runtime pool, so inline fallback cannot be mistaken for Go-like M:N CPU-parallel evidence.
+This perf stress spec keeps the Simple concurrency rows comparable: OS threads, cooperative green, and multicore green all run the same deterministic fanout workload and must produce the same checksum. The multicore-green row separately reports runtime-pool and work-stealing evidence, so inline fallback or a single FIFO queue cannot be mistaken for Go-like M:N CPU-parallel evidence.
 
 ## At a Glance
 
@@ -56,8 +56,8 @@ This perf stress spec keeps the Simple concurrency rows comparable: OS threads, 
 This perf stress spec keeps the Simple concurrency rows comparable: OS threads,
 cooperative green, and multicore green all run the same deterministic fanout
 workload and must produce the same checksum. The multicore-green row separately
-reports whether every handle used the runtime pool, so inline fallback cannot be
-mistaken for Go-like M:N CPU-parallel evidence.
+reports runtime-pool and work-stealing evidence, so inline fallback or a single
+FIFO queue cannot be mistaken for Go-like M:N CPU-parallel evidence.
 
 ## Requirements
 
@@ -84,27 +84,26 @@ mistaken for Go-like M:N CPU-parallel evidence.
 
 #### matches OS-thread fanout/fanin checksum _(slow)_
 
-1. Spawn OS-thread fanout handles with a compact handle array
-2. Join OS-thread handles and compare the deterministic checksum
-   - Expected: got equals `expected`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val iterations = 512
-val worker_count = 8
-val expected = fanout_expected(worker_count, iterations)
+val expected = fanout_expected(8, iterations)
 
-step("Spawn OS-thread fanout handles with a compact handle array")
-val handles = spawn_os_thread_handles(worker_count, iterations)
+val h0 = thread_spawn(\: fanout_work(0, iterations))
+val h1 = thread_spawn(\: fanout_work(1, iterations))
+val h2 = thread_spawn(\: fanout_work(2, iterations))
+val h3 = thread_spawn(\: fanout_work(3, iterations))
+val h4 = thread_spawn(\: fanout_work(4, iterations))
+val h5 = thread_spawn(\: fanout_work(5, iterations))
+val h6 = thread_spawn(\: fanout_work(6, iterations))
+val h7 = thread_spawn(\: fanout_work(7, iterations))
 
-step("Join OS-thread handles and compare the deterministic checksum")
-val got = join_os_thread_handles(handles)
+val got = h0.join() + h1.join() + h2.join() + h3.join() + h4.join() + h5.join() + h6.join() + h7.join()
 expect(got).to_equal(expected)
 ```
 
@@ -118,31 +117,29 @@ expect(got).to_equal(expected)
 
 #### matches cooperative-green fanout checksum on the current carrier _(slow)_
 
-1. Queue cooperative-green value handles on the current carrier
-2. Drain the cooperative queue and join every handle
-   - Expected: ran >= worker_count is true
-   - Expected: got equals `expected`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val iterations = 512
-val worker_count = 8
-val expected = fanout_expected(worker_count, iterations)
+val expected = fanout_expected(8, iterations)
 
-step("Queue cooperative-green value handles on the current carrier")
-val handles = spawn_cooperative_green_handles(worker_count, iterations)
+val h0 = cooperative_green_spawn_value(fanout_work(0, iterations))
+val h1 = cooperative_green_spawn_value(fanout_work(1, iterations))
+val h2 = cooperative_green_spawn_value(fanout_work(2, iterations))
+val h3 = cooperative_green_spawn_value(fanout_work(3, iterations))
+val h4 = cooperative_green_spawn_value(fanout_work(4, iterations))
+val h5 = cooperative_green_spawn_value(fanout_work(5, iterations))
+val h6 = cooperative_green_spawn_value(fanout_work(6, iterations))
+val h7 = cooperative_green_spawn_value(fanout_work(7, iterations))
 
-step("Drain the cooperative queue and join every handle")
 val ran = cooperative_green_run_all()
-val got = join_cooperative_green_handles(handles)
+val got = h0.join() + h1.join() + h2.join() + h3.join() + h4.join() + h5.join() + h6.join() + h7.join()
 
-expect(ran >= worker_count).to_equal(true)
+expect(ran >= 8).to_equal(true)
 expect(got).to_equal(expected)
 ```
 
@@ -156,34 +153,53 @@ expect(got).to_equal(expected)
 
 #### matches multicore-green fanout checksum and reports M:N evidence _(slow)_
 
-1. Spawn multicore-green handles through the runtime-pool facade
-2. Join multicore-green handles and count runtime-pool evidence
-   - Expected: evidence.got equals `expected`
-   - Expected: evidence.pool_used + evidence.inline_fallback equals `worker_count`
-   - Expected: has_mn_evidence or evidence.inline_fallback == worker_count is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val iterations = 512
-val worker_count = 8
-val expected = fanout_expected(worker_count, iterations)
+val expected = fanout_expected(8, iterations)
 
-step("Spawn multicore-green handles through the runtime-pool facade")
-val handles = spawn_multicore_green_handles(worker_count, iterations)
+val h0 = multicore_green_spawn(\: fanout_work(0, iterations))
+val h1 = multicore_green_spawn(\: fanout_work(1, iterations))
+val h2 = multicore_green_spawn(\: fanout_work(2, iterations))
+val h3 = multicore_green_spawn(\: fanout_work(3, iterations))
+val h4 = multicore_green_spawn(\: fanout_work(4, iterations))
+val h5 = multicore_green_spawn(\: fanout_work(5, iterations))
+val h6 = multicore_green_spawn(\: fanout_work(6, iterations))
+val h7 = multicore_green_spawn(\: fanout_work(7, iterations))
 
-step("Join multicore-green handles and count runtime-pool evidence")
-val evidence = join_multicore_green_handles(handles)
-val has_mn_evidence = evidence.pool_used == worker_count
+var pool_used = 0
+var inline_fallback = 0
+if h0.used_runtime_pool(): pool_used = pool_used + 1
+if h1.used_runtime_pool(): pool_used = pool_used + 1
+if h2.used_runtime_pool(): pool_used = pool_used + 1
+if h3.used_runtime_pool(): pool_used = pool_used + 1
+if h4.used_runtime_pool(): pool_used = pool_used + 1
+if h5.used_runtime_pool(): pool_used = pool_used + 1
+if h6.used_runtime_pool(): pool_used = pool_used + 1
+if h7.used_runtime_pool(): pool_used = pool_used + 1
+if h0.ran_inline_fallback(): inline_fallback = inline_fallback + 1
+if h1.ran_inline_fallback(): inline_fallback = inline_fallback + 1
+if h2.ran_inline_fallback(): inline_fallback = inline_fallback + 1
+if h3.ran_inline_fallback(): inline_fallback = inline_fallback + 1
+if h4.ran_inline_fallback(): inline_fallback = inline_fallback + 1
+if h5.ran_inline_fallback(): inline_fallback = inline_fallback + 1
+if h6.ran_inline_fallback(): inline_fallback = inline_fallback + 1
+if h7.ran_inline_fallback(): inline_fallback = inline_fallback + 1
 
-expect(evidence.got).to_equal(expected)
-expect(evidence.pool_used + evidence.inline_fallback).to_equal(worker_count)
-expect(has_mn_evidence or evidence.inline_fallback == worker_count).to_equal(true)
+val got = h0.join() + h1.join() + h2.join() + h3.join() + h4.join() + h5.join() + h6.join() + h7.join()
+val has_mn_evidence = pool_used == 8
+
+expect(got).to_equal(expected)
+expect(pool_used + inline_fallback).to_equal(8)
+expect(has_mn_evidence or inline_fallback == 8).to_equal(true)
+if has_mn_evidence:
+    expect(multicore_green_uses_global_fifo_queue()).to_equal(false)
+    expect(multicore_green_uses_work_stealing()).to_equal(true)
 ```
 
 </details>

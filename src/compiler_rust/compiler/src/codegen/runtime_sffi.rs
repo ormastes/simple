@@ -646,6 +646,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_pool_set_parallelism", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_pool_get_parallelism", &[], &[I64]),
     RuntimeFuncSpec::new("rt_pool_uses_global_fifo_queue", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_pool_uses_work_stealing", &[], &[I64]),
     RuntimeFuncSpec::new("rt_thread_available_parallelism", &[], &[I64]),
     RuntimeFuncSpec::new("spl_thread_cpu_count", &[], &[I64]),
     RuntimeFuncSpec::new("spl_thread_create", &[I64, I64], &[I64]),
@@ -1423,6 +1424,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_terminal_enable_raw_mode", &[], &[I64]), // () -> RuntimeValue (bool)
     RuntimeFuncSpec::new("rt_terminal_disable_raw_mode", &[], &[I64]), // () -> RuntimeValue (bool)
     RuntimeFuncSpec::new("rt_stdin_read_byte", &[], &[I64]), // () -> byte or -1
+    RuntimeFuncSpec::new("stdin_read_char", &[], &[I64]), // legacy source-level char read -> RuntimeValue(text)
     RuntimeFuncSpec::new("rt_ssh_userauth_password_only_failure_payload", &[], &[I64]),
     // =========================================================================
     // File I/O Metadata Operations

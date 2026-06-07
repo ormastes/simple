@@ -59,6 +59,7 @@ Primary surfaces:
 - `rt_pool_join`
 - `rt_pool_is_done`
 - `rt_pool_uses_global_fifo_queue`
+- `rt_pool_uses_work_stealing`
 
 Responsibilities:
 
@@ -120,8 +121,9 @@ Hosted runtime-pool path:
 - Join and done checks go through `rt_pool_join` and `rt_pool_is_done` only for
   positive native handles.
 - Profile rows treat only positive-handle work as M:N candidate evidence.
-- Profile rows print `queue_model=global_fifo` for the current hosted runtime
-  pool, so reports do not overclaim per-worker queues or work stealing.
+- Profile rows print `queue_model=work_stealing` only when the hosted runtime
+  pool reports per-worker queues with stealing. The model is still guarded by
+  positive runtime-pool handles so reports do not overclaim inline fallback.
 
 Cooperative path:
 
@@ -211,7 +213,7 @@ The selected Full Go-Like Runtime Roadmap uses all layers:
 
 - Public Simple API Layer preserves meaningful user APIs and model separation.
 - Runtime Pool ABI Layer proves hosted M:N ownership through positive handles,
-  `used_runtime_pool()`, and `multicore_green_parallelism()` evidence after
+  `used_runtime_pool()`, `multicore_green_parallelism()`, and `multicore_green_uses_work_stealing()` evidence after
   `multicore_green_set_parallelism(CPU_WORKERS)`.
 - Profile And Evidence Layer keeps Go, C pthread, Simple OS-thread,
   cooperative green, and multicore-green rows separate.

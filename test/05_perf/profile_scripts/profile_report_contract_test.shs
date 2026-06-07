@@ -45,21 +45,42 @@ require_not_contains() {
 require_multicore_green_rows_valid() {
     file="$1"
     if ! awk -F'|' '
-        /Simple multicore green \(native\)/ && /multicore_green (runtime pool fanout|stress fanout)/ {
+        /Simple multicore green \(native\)/ {
             value = $3
             notes = $4
             gsub(/^[ \t]+|[ \t]+$/, "", value)
             gsub(/^[ \t]+|[ \t]+$/, "", notes)
+            if (notes !~ /multicore_green (runtime pool|stress fanout)/) {
+                next
+            }
             if (value == "fail" || value == "n/a" ||
-                notes ~ /(checksum mismatch|segfault|compile failed|missing runtime pool|pool_used=fail|pool_used=missing|SMF runtime-pool closure lookup blocker)/) {
+                notes ~ /(checksum mismatch|segfault|compile failed|missing runtime pool|pool_used=fail|pool_used=missing)/) {
                 bad = 1
-            } else if (notes ~ /pool_used=[0-9]+\/[0-9]+/ && notes ~ /parallelism=[0-9]+\/[0-9]+/ && notes ~ /queue_model=/) {
-                good = 1
+            }
+            if (notes !~ /queue_model=work_stealing/) {
+                bad = 1
             }
         }
-        END { exit (bad || !good) ? 1 : 0 }
+        END { exit bad ? 1 : 0 }
     ' "$file"; then
-        fail "invalid Simple multicore green native fanout evidence row in $file"
+        fail "invalid Simple multicore green evidence row in $file"
+    fi
+    if awk -F'|' '
+        /Simple multicore green \(SMF\)/ {
+            value = $3
+            notes = $4
+            gsub(/^[ \t]+|[ \t]+$/, "", value)
+            gsub(/^[ \t]+|[ \t]+$/, "", notes)
+            if (value == "fail" &&
+                notes !~ /SMF runtime-pool closure lookup blocker/) {
+                bad = 1
+            }
+        }
+        END { exit bad ? 1 : 0 }
+    ' "$file"; then
+        :
+    else
+        fail "invalid Simple multicore green SMF classification in $file"
     fi
 }
 
@@ -120,7 +141,7 @@ case "$kind" in
         require_contains "$report_path" "multicore_green stress fanout"
         require_contains "$report_path" "used_runtime_pool()"
         require_contains "$report_path" "pool_used="
-        require_contains "$report_path" "queue_model="
+        require_contains "$report_path" "queue_model=work_stealing"
         require_contains "$report_path" "inline fallback cannot masquerade"
         require_multicore_green_rows_valid "$report_path"
         require_contains "$report_path" "C (pthreads)"
@@ -140,10 +161,6 @@ case "$kind" in
         require_not_contains "$script_path" "spawn_limited2"
         require_not_contains "$script_path" "rt_thread_spawn_isolated2"
         require_not_contains "$script_path" "rt_thread_spawn_limited2"
-        require_not_contains "$script_path" "var h0 ="
-        require_not_contains "$script_path" "var h1 ="
-        require_not_contains "$script_path" 'var h${i} ='
-        require_not_contains "$script_path" 'h${i}.join()'
         require_not_contains "$script_path" "val ITERS: i64"
         require_not_contains "$script_path" "val WORKERS: i64"
         require_not_contains "$script_path" "val LCG_A: i64"

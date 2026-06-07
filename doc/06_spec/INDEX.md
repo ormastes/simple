@@ -4,16 +4,16 @@
 
 ## Quick Stats
 
-- **Total Features:** 2
-- **Complete Documentation:** 2 (100%)
+- **Total Features:** 1
+- **Complete Documentation:** 1 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 216
+- **Total Lines:** 29
+- **Warnings:** 2
 
 ---
 
-## SimpleOS / Concurrency (2 features)
+## Performance / Concurrency (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [SimpleOS Cooperative Green System Contract](test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.md) | Implemented | N/A | 3 | 60% | 105 lines |
-| [SimpleOS Multicore Green System Contract](test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.md) | In Progress | N/A | 5 | 60% | 111 lines |
+| [Multicore Green Fanout Stress Specification](test/05_perf/stress/multicore_green_fanout_spec.md) | Implemented | N/A | 3 | 20% | 29 lines |

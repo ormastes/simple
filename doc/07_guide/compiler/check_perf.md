@@ -116,9 +116,9 @@ nonzero on mismatch, so runtime-pool closure lookup failures, lambda capture
 bugs, or wrong joins are classified as failed rows instead of performance wins.
 The multicore-green fanout sources use compact handle arrays and loop-captured
 closures, not generated numbered handle variables.
-The profile-report contract rejects numeric-suffix concurrency aliases; use the
-semantic explicit-argument API names in reports, generated workloads, and
-profile-script comments.
+The profile-report contract rejects numbered concurrency aliases such as
+`thread_spawn2`, `spawn_isolated2`, and `spawn_limited2`; use the semantic API
+names in reports, generated workloads, and profile-script comments.
 
 ### What it measures
 
@@ -127,7 +127,7 @@ profile-script comments.
 | **Size** | hello + fib source/binary | Deployment footprint |
 | **Cold startup** | `hello world` (20 runs avg) | Time-to-first-output |
 | **Warm throughput** | `fib(35)` recursive, in-process loop (10 warmup + 20 measured) | Steady-state single-thread perf (JIT reaches hotspot) |
-| **Parallel** | 100 workers × LCG 100K iters. Simple native uses Pure Simple `thread_spawn` fork-join for the OS-thread baseline. Simple multicore green sets `multicore_green_set_parallelism(CPU_WORKERS)`, uses `multicore_green_spawn`, and fails the row unless every handle reports `used_runtime_pool()`. | CPU-heavy worker throughput plus concurrency overhead |
+| **Parallel** | 100 workers × LCG 100K iters. Simple native uses Pure Simple `thread_spawn` fork-join for the OS-thread baseline. Simple multicore green sets `multicore_green_set_parallelism(CPU_WORKERS)`, uses `multicore_green_spawn`, and fails the row unless every handle reports `used_runtime_pool()` and the runtime reports work-stealing queues. | CPU-heavy worker throughput plus concurrency overhead |
 | **Large fanout** | 1000 tiny workers × LCG 32 iters. Simple native uses loop-based `thread_spawn` fork-join; Simple cooperative green uses cooperative queue fanout; C uses one pthread per tiny task; Go uses one goroutine per tiny task; Erlang uses one BEAM process per tiny task. | Scheduling overhead where Go should usually beat C pthread creation; Simple native measures OS-thread fanout; Simple cooperative green measures queue fanout, not CPU parallelism |
 | **Parallel binary size** | Binary/script sizes for parallel workloads across languages | Deployment footprint for concurrent programs |
 | **Parallel peak RSS** | `/usr/bin/time -v` peak RSS with 100 workers, baseline subtracted, per-worker delta | Memory cost per concurrent task (baseline = hello world RSS for each language) |
@@ -140,7 +140,7 @@ profile-script comments.
 | Simple (SMF loader) | Bytecode VM | Shows bytecode dispatch win |
 | Simple (native) | AOT (LLVM/Cranelift) | Shows AOT ceiling |
 | Simple `cooperative_green_spawn` / `cooperative_green_spawn_value` | Cooperative queue on current OS thread | Implemented green-thread API, but not CPU-parallel or preemptive |
-| Simple `multicore_green_spawn` | Bounded runtime worker pool through `rt_pool_*` | Current Pure Simple M:N candidate row for CPU-heavy comparisons; profile workloads set and print hosted parallelism evidence and fail if `used_runtime_pool()` is false |
+| Simple `multicore_green_spawn` | Bounded runtime worker pool through `rt_pool_*` | Current Pure Simple M:N candidate row for CPU-heavy comparisons; profile workloads set and print hosted parallelism plus `queue_model=work_stealing` evidence and fail if `used_runtime_pool()` is false |
 | Simple `task_spawn` | Runtime worker pool when `rt_pool_*` links | Intended Simple path for Go-like parallel benchmark work |
 | C (gcc -O2) | AOT native | Absolute performance floor |
 | Go | AOT + goroutines | Low-overhead concurrency |
@@ -163,7 +163,7 @@ profile-script comments.
 
 **Warm throughput (fib35):** C ≈ Simple-native < Go < Java (after JIT) < Bun < Simple-SMF < Erlang < Simple-interp < Python
 
-**Parallel (100 workers):** Go and C are the current native baselines; the OS-thread Simple row uses Pure Simple `thread_spawn` fork-join. `thread_spawn_with_args` is covered by `scripts/check/check-thread-spawn-with-args-native.shs` as a focused native ABI smoke, so it is not mixed into scheduler profile rows. The implemented `std.concurrent.cooperative_green` API is cooperative and single-OS-thread, so it is not a drop-in Go-goroutine benchmark row. The `std.concurrent.multicore_green` row uses `multicore_green_spawn` over `rt_pool_*` as the current Pure Simple M:N candidate until a scheduler-aware green runtime lands. The generated multicore-green workloads call `multicore_green_set_parallelism(CPU_WORKERS)`, print `multicore_green_parallelism=requested/actual`, check every handle with `used_runtime_pool()`, and fail the row if the runtime pool was unavailable.
+**Parallel (100 workers):** Go and C are the current native baselines; the OS-thread Simple row uses Pure Simple `thread_spawn` fork-join. `thread_spawn_with_args` is tracked separately while its native ABI blocker is active, so it is not the profile baseline. The implemented `std.concurrent.cooperative_green` API is cooperative and single-OS-thread, so it is not a drop-in Go-goroutine benchmark row. The `std.concurrent.multicore_green` row uses `multicore_green_spawn` over `rt_pool_*` as the current Pure Simple M:N candidate until a scheduler-aware green runtime lands. The generated multicore-green workloads call `multicore_green_set_parallelism(CPU_WORKERS)`, print `multicore_green_parallelism=requested/actual` and `queue_model=work_stealing`, check every handle with `used_runtime_pool()`, and fail the row if the runtime pool or work-stealing evidence is unavailable.
 
 ### What matters per use case
 

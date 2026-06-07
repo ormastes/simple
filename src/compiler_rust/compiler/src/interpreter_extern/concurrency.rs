@@ -133,26 +133,18 @@ pub fn rt_pool_is_done(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(1))
 }
 
-/// Interpreter runtime-pool configuration is accepted for facade compatibility.
-pub fn rt_pool_set_parallelism(args: &[Value]) -> Result<Value, CompileError> {
-    if let Some(Value::Int(workers)) = args.first() {
-        return Ok(Value::Int((*workers).clamp(1, 64)));
-    }
-    Ok(Value::Int(1))
+/// Defensive interpreter stub for native pool handles.
+pub fn rt_pool_join(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
 }
 
-/// Interpreter mode has no native worker pool; report one inline carrier.
-pub fn rt_pool_get_parallelism(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(1))
-}
-
-/// Interpreter fallback is not the hosted runtime pool's shared FIFO.
+/// Interpreter mode has no native global-FIFO runtime pool.
 pub fn rt_pool_uses_global_fifo_queue(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(0))
 }
 
-/// Defensive interpreter stub for native pool handles.
-pub fn rt_pool_join(_args: &[Value]) -> Result<Value, CompileError> {
+/// Interpreter mode has no native work-stealing runtime pool.
+pub fn rt_pool_uses_work_stealing(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(0))
 }
 
@@ -241,7 +233,8 @@ pub fn rt_thread_spawn_isolated_with_args_context(
 ) -> Result<Value, CompileError> {
     if args.len() != 3 {
         return Err(CompileError::Runtime(
-            "rt_thread_spawn_isolated_with_args expects 3 arguments (closure, data1, data2)".to_string(),
+            "rt_thread_spawn_isolated_with_args expects 3 arguments (closure, data1, data2)"
+                .to_string(),
         ));
     }
 
@@ -250,7 +243,8 @@ pub fn rt_thread_spawn_isolated_with_args_context(
         Value::Lambda { params, body, env } => (params.clone(), body.clone(), Env::clone(env)),
         _ => {
             return Err(CompileError::Runtime(
-                "rt_thread_spawn_isolated_with_args expects first argument to be a closure".to_string(),
+                "rt_thread_spawn_isolated_with_args expects first argument to be a closure"
+                    .to_string(),
             ))
         }
     };

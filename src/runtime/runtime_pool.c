@@ -35,11 +35,22 @@ typedef struct RtPoolTask {
 #endif
 } RtPoolTask;
 
-static RtPoolTask* g_pool_head = NULL;
-static RtPoolTask* g_pool_tail = NULL;
+#define RT_POOL_MAX_WORKERS 64
+
+typedef struct RtPoolQueue {
+    RtPoolTask* head;
+    RtPoolTask* tail;
+} RtPoolQueue;
+
+typedef struct RtPoolWorkerArg {
+    int worker_id;
+} RtPoolWorkerArg;
+
+static RtPoolQueue g_pool_queues[RT_POOL_MAX_WORKERS];
 static int g_pool_started = 0;
 static int g_pool_worker_count = 0;
 static int g_pool_configured_worker_count = 0;
+static int g_pool_next_worker = 0;
 
 #ifdef RT_POOL_PTHREAD
 static pthread_mutex_t g_pool_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -77,7 +88,7 @@ static int rt_pool_default_worker_count(void) {
 
 static int rt_pool_clamp_worker_count(int64_t count) {
     if (count < 1) return 1;
-    if (count > 64) return 64;
+    if (count > RT_POOL_MAX_WORKERS) return RT_POOL_MAX_WORKERS;
     return (int)count;
 }
 
@@ -87,27 +98,59 @@ static int rt_pool_effective_worker_count(void) {
         : rt_pool_default_worker_count();
 }
 
-static RtPoolTask* rt_pool_pop_task(void) {
+static int rt_pool_has_tasks_locked(void) {
+    int count = g_pool_worker_count > 0 ? g_pool_worker_count : rt_pool_effective_worker_count();
+    if (count > RT_POOL_MAX_WORKERS) count = RT_POOL_MAX_WORKERS;
+    for (int i = 0; i < count; i++) {
+        if (g_pool_queues[i].head != NULL) return 1;
+    }
+    return 0;
+}
+
+static RtPoolTask* rt_pool_queue_pop_head(RtPoolQueue* queue) {
+    RtPoolTask* task = queue->head;
+    if (task == NULL) return NULL;
+    queue->head = task->next;
+    if (queue->head == NULL) queue->tail = NULL;
+    task->next = NULL;
+    return task;
+}
+
+static void rt_pool_queue_push_tail(RtPoolQueue* queue, RtPoolTask* task) {
+    task->next = NULL;
+    if (queue->tail != NULL) {
+        queue->tail->next = task;
+    } else {
+        queue->head = task;
+    }
+    queue->tail = task;
+}
+
+static RtPoolTask* rt_pool_pop_task(int worker_id) {
 #ifdef RT_POOL_PTHREAD
     pthread_mutex_lock(&g_pool_lock);
-    while (g_pool_head == NULL) {
+    while (!rt_pool_has_tasks_locked()) {
         pthread_cond_wait(&g_pool_not_empty, &g_pool_lock);
     }
-    RtPoolTask* task = g_pool_head;
-    g_pool_head = task->next;
-    if (g_pool_head == NULL) g_pool_tail = NULL;
-    task->next = NULL;
+    int count = g_pool_worker_count > 0 ? g_pool_worker_count : 1;
+    RtPoolTask* task = rt_pool_queue_pop_head(&g_pool_queues[worker_id % count]);
+    for (int offset = 1; task == NULL && offset < count; offset++) {
+        int victim = (worker_id + offset) % count;
+        task = rt_pool_queue_pop_head(&g_pool_queues[victim]);
+    }
     pthread_mutex_unlock(&g_pool_lock);
     return task;
 #else
     EnterCriticalSection(&g_pool_lock);
-    while (g_pool_head == NULL) {
+    while (!rt_pool_has_tasks_locked()) {
         SleepConditionVariableCS(&g_pool_not_empty, &g_pool_lock, INFINITE);
     }
-    RtPoolTask* task = g_pool_head;
-    g_pool_head = task->next;
-    if (g_pool_head == NULL) g_pool_tail = NULL;
-    task->next = NULL;
+    int count = g_pool_worker_count > 0 ? g_pool_worker_count : 1;
+    RtPoolTask* task = rt_pool_queue_pop_head(&g_pool_queues[worker_id % count]);
+    for (int offset = 1; task == NULL && offset < count; offset++) {
+        int victim = (worker_id + offset) % count;
+        task = rt_pool_queue_pop_head(&g_pool_queues[victim]);
+    }
     LeaveCriticalSection(&g_pool_lock);
     return task;
 #endif
@@ -130,9 +173,11 @@ static void rt_pool_complete_task(RtPoolTask* task, int64_t result) {
 }
 
 static void* rt_pool_worker_main(void* raw) {
-    (void)raw;
+    RtPoolWorkerArg* arg = (RtPoolWorkerArg*)raw;
+    int worker_id = arg != NULL ? arg->worker_id : 0;
+    free(arg);
     for (;;) {
-        RtPoolTask* task = rt_pool_pop_task();
+        RtPoolTask* task = rt_pool_pop_task(worker_id);
         rt_pool_complete_task(task, task->entry(task->closure_ptr));
     }
     return NULL;
@@ -145,20 +190,25 @@ static DWORD WINAPI rt_pool_worker_main_win(LPVOID raw) {
 }
 #endif
 
-static int rt_pool_spawn_worker(void) {
+static int rt_pool_spawn_worker(int worker_id) {
+    RtPoolWorkerArg* arg = (RtPoolWorkerArg*)malloc(sizeof(RtPoolWorkerArg));
+    if (arg == NULL) return 0;
+    arg->worker_id = worker_id;
 #ifdef RT_POOL_PTHREAD
     pthread_t thread;
-    if (pthread_create(&thread, NULL, rt_pool_worker_main, NULL) == 0) {
+    if (pthread_create(&thread, NULL, rt_pool_worker_main, arg) == 0) {
         pthread_detach(thread);
         return 1;
     }
+    free(arg);
     return 0;
 #else
-    HANDLE thread = CreateThread(NULL, 0, rt_pool_worker_main_win, NULL, 0, NULL);
+    HANDLE thread = CreateThread(NULL, 0, rt_pool_worker_main_win, arg, 0, NULL);
     if (thread != NULL) {
         CloseHandle(thread);
         return 1;
     }
+    free(arg);
     return 0;
 #endif
 }
@@ -177,7 +227,7 @@ static int rt_pool_start(void) {
     int requested = rt_pool_effective_worker_count();
     int started = 0;
     for (int i = 0; i < requested; i++) {
-        started += rt_pool_spawn_worker();
+        if (rt_pool_spawn_worker(started)) started++;
     }
 
     pthread_mutex_lock(&g_pool_lock);
@@ -198,7 +248,7 @@ static int rt_pool_start(void) {
     int requested = rt_pool_effective_worker_count();
     int started = 0;
     for (int i = 0; i < requested; i++) {
-        started += rt_pool_spawn_worker();
+        if (rt_pool_spawn_worker(started)) started++;
     }
 
     EnterCriticalSection(&g_pool_lock);
@@ -227,7 +277,7 @@ int64_t rt_pool_set_parallelism(int64_t workers) {
 
     int added = 0;
     for (int i = current; i < requested; i++) {
-        added += rt_pool_spawn_worker();
+        if (rt_pool_spawn_worker(current + added)) added++;
     }
 
     pthread_mutex_lock(&g_pool_lock);
@@ -253,7 +303,7 @@ int64_t rt_pool_set_parallelism(int64_t workers) {
 
     int added = 0;
     for (int i = current; i < requested; i++) {
-        added += rt_pool_spawn_worker();
+        if (rt_pool_spawn_worker(current + added)) added++;
     }
 
     EnterCriticalSection(&g_pool_lock);
@@ -279,32 +329,32 @@ int64_t rt_pool_get_parallelism(void) {
 #endif
 }
 
-int64_t rt_pool_uses_global_fifo_queue(void) {
-    return 1;
-}
-
 static void rt_pool_push_task(RtPoolTask* task) {
 #ifdef RT_POOL_PTHREAD
     pthread_mutex_lock(&g_pool_lock);
-    if (g_pool_tail != NULL) {
-        g_pool_tail->next = task;
-    } else {
-        g_pool_head = task;
-    }
-    g_pool_tail = task;
+    int count = g_pool_worker_count > 0 ? g_pool_worker_count : 1;
+    int target = g_pool_next_worker % count;
+    g_pool_next_worker = (g_pool_next_worker + 1) % count;
+    rt_pool_queue_push_tail(&g_pool_queues[target], task);
     pthread_cond_signal(&g_pool_not_empty);
     pthread_mutex_unlock(&g_pool_lock);
 #else
     EnterCriticalSection(&g_pool_lock);
-    if (g_pool_tail != NULL) {
-        g_pool_tail->next = task;
-    } else {
-        g_pool_head = task;
-    }
-    g_pool_tail = task;
+    int count = g_pool_worker_count > 0 ? g_pool_worker_count : 1;
+    int target = g_pool_next_worker % count;
+    g_pool_next_worker = (g_pool_next_worker + 1) % count;
+    rt_pool_queue_push_tail(&g_pool_queues[target], task);
     WakeConditionVariable(&g_pool_not_empty);
     LeaveCriticalSection(&g_pool_lock);
 #endif
+}
+
+int64_t rt_pool_uses_global_fifo_queue(void) {
+    return 0;
+}
+
+int64_t rt_pool_uses_work_stealing(void) {
+    return 1;
 }
 
 int64_t rt_pool_submit(int64_t arg0, int64_t arg1) {

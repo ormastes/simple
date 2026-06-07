@@ -63,6 +63,7 @@ int64_t rt_pool_is_done(int64_t handle);
 int64_t rt_pool_set_parallelism(int64_t workers);
 int64_t rt_pool_get_parallelism(void);
 int64_t rt_pool_uses_global_fifo_queue(void);
+int64_t rt_pool_uses_work_stealing(void);
 
 /**
  * Detach thread (no join required).

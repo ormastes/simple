@@ -255,6 +255,32 @@ fn check_file(path: &Path, source_roots: &[PathBuf], deny_gc_boundary_crossings:
     }
 }
 
+fn validate_numbered_concurrency_source(file_path: &Path, source: &str, errors: &mut Vec<CheckError>) {
+    for (line_index, line) in source.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with("extern fn ") {
+            continue;
+        }
+        for (name, replacement) in [
+            ("rt_thread_spawn_isolated2", "rt_thread_spawn_isolated_with_args"),
+            ("rt_thread_spawn_limited2", "rt_thread_spawn_limited_with_args"),
+            ("thread_spawn2", "thread_spawn_with_args"),
+            ("spawn_isolated2", "spawn_isolated_with_args"),
+            ("spawn_limited2", "spawn_limited_with_args"),
+        ] {
+            if let Some(offset) = line.find(name) {
+                errors.push(numbered_concurrency_error(
+                    file_path,
+                    line_index + 1,
+                    offset + 1,
+                    name,
+                    replacement,
+                ));
+            }
+        }
+    }
+}
+
 fn validate_short_grammar_suggestions(file_path: &Path, source: &str, errors: &mut Vec<CheckError>) {
     for suggestion in collect_short_grammar_suggestions(source) {
         errors.push(CheckError {
