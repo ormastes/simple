@@ -145,7 +145,8 @@ git clone https://github.com/simple-lang/simple.git
 cd simple
 
 # Linux bootstrap verification
-scripts/bootstrap/bootstrap-from-scratch.sh --output=bootstrap
+scripts/setup/setup.shs
+bin/simple build bootstrap
 ```
 
 Direct commands behind the wrapper:
@@ -156,7 +157,7 @@ bin/simple build bootstrap
 sha256sum bootstrap/simple_stage2 bootstrap/simple_stage3
 ```
 
-See [doc/08_tracking/build/bootstrap_multi_platform.md](doc/08_tracking/build/bootstrap_multi_platform.md) and [doc/03_plan/pure_simple_bootstrap.plan.md](doc/03_plan/pure_simple_bootstrap.plan.md) for the current bootstrap flow.
+See [doc/02_requirements/app/build/bootstrap.md](doc/02_requirements/app/build/bootstrap.md) and [doc/03_plan/compiler/bootstrap/pure_simple_bootstrap_stage2_remaining_2026-05-04.md](doc/03_plan/compiler/bootstrap/pure_simple_bootstrap_stage2_remaining_2026-05-04.md) for the current bootstrap flow and remaining pure-Simple self-hosting notes.
 
 ### Build with GPU Support
 
