@@ -46,6 +46,69 @@ fn acc_receiver_is_self_or_me(line: text, dot: i64) -> bool:
         return acc_boundary_before(line, dot - 2)
     false
 
+fn acc_is_receiver_char(c: text) -> bool:
+    acc_is_ident_char(c) or c == "." or c == "[" or c == "]" or c == "(" or c == ")"
+
+# A setter call `recv.set_x(EXPR)` is only safe to turn into `recv.x = EXPR`
+# when it is a standalone statement. In expression position (e.g. the RHS of an
+# assignment, `node = node.set_x(v)`, or a nested argument) the assignment form
+# is invalid, so such calls must be left untouched.
+fn acc_is_statement_setter(line: text, dot: i64, close: i64) -> bool:
+    val after = line.slice(close + 1)
+    val after_t = after.trim()
+    if after_t != "" and not after_t.starts_with("#"):
+        return false
+    var rs = dot
+    while rs > 0 and acc_is_receiver_char(line[rs - 1:rs]):
+        rs = rs - 1
+    val leading = line.slice(0, rs)
+    leading.trim() == ""
+
+# Collect setter names whose calls appear in expression position anywhere in the
+# source — their wrapper defs must NOT be deleted (the call cannot be rewritten).
+fn acc_unsafe_setter_names(source: text) -> [text]:
+    var unsafe: [text] = []
+    if not source.contains(".set_"):
+        return unsafe
+    for line in source.split("\n"):
+        var i = 0
+        while i < line.len():
+            val tail = line.slice(i)
+            val rel = tail.find(".set_")
+            if rel < 0:
+                break
+            val dot = i + rel
+            val dtail = line.slice(dot)
+            val open = dtail.find("(")
+            if open < 0:
+                break
+            val open_abs = dot + open
+            val name = line.slice(dot + 1, open_abs)
+            # find matching close paren
+            var depth = 0
+            var p = open_abs
+            var close = -1
+            while p < line.len():
+                val ch = line[p:p + 1]
+                if ch == "(":
+                    depth = depth + 1
+                elif ch == ")":
+                    depth = depth - 1
+                    if depth == 0:
+                        close = p
+                        break
+                p = p + 1
+            if close < 0:
+                # multi-line / unbalanced call — treat as unsafe
+                if not unsafe.contains(name):
+                    unsafe.push(name)
+                break
+            if not acc_is_statement_setter(line, dot, close):
+                if not unsafe.contains(name):
+                    unsafe.push(name)
+            i = close + 1
+    unsafe
+
 # ============================================================================
 # Line-level rewriting
 # ============================================================================
@@ -96,6 +159,11 @@ fn rewrite_set_in_line(line: text, name: text, field: text, restrict_self: bool)
             result = result + line.slice(i, open + 1)
             i = open + 1
             continue
+        if not acc_is_statement_setter(line, dot, close):
+            # expression-context setter call — leave it untouched
+            result = result + line.slice(i, open + 1)
+            i = open + 1
+            continue
         val expr = line.slice(open + 1, close).trim()
         result = result + line.slice(i, dot) + ".{field} = {expr}"
         i = close + 1
@@ -128,6 +196,7 @@ fn acc_process_file(
     field_of: Dict<text, text>,
     kind_of: Dict<text, text>,
     unambiguous: Dict<text, bool>,
+    deletable: Dict<text, bool>,
     include_tier2: bool
 ) -> AccFileResult:
     val classes = parse_accessor_classes(source)
@@ -144,7 +213,7 @@ fn acc_process_file(
     for c in classes:
         var cand: [AccMethod] = []
         for m in c.methods:
-            if m.is_dummy and m.kind != "" and unambiguous.has(m.name) and not acc_suffix_has_real(c, m.field):
+            if m.is_dummy and m.kind != "" and deletable.has(m.name) and not acc_suffix_has_real(c, m.field):
                 cand.push(m)
         if cand.len() == 0:
             continue
@@ -229,10 +298,22 @@ fn apply_accessor_fixes(sources: Dict<text, text>, include_tier2: bool) -> (Dict
         if not poison.has(r.name):
             unambiguous[r.name] = true
 
+    # Setter names with an expression-context call anywhere are kept (not deleted).
+    var setter_unsafe: Dict<text, bool> = {}
+    for file in sources.keys():
+        for name in acc_unsafe_setter_names(sources[file]):
+            setter_unsafe[name] = true
+
+    var deletable: Dict<text, bool> = {}
+    for name in unambiguous.keys():
+        if kind_of[name] == "set" and setter_unsafe.has(name):
+            continue
+        deletable[name] = true
+
     var result: Dict<text, text> = {}
     var stats = AccFixStats(files_changed: 0, defs_removed: 0, calls_rewritten: 0, tier2_calls: 0)
     for file in sources.keys():
-        val fr = acc_process_file(sources[file], field_of, kind_of, unambiguous, include_tier2)
+        val fr = acc_process_file(sources[file], field_of, kind_of, unambiguous, deletable, include_tier2)
         result[file] = fr.source
         if fr.changed:
             stats.files_changed = stats.files_changed + 1

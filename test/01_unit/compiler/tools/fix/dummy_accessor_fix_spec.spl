@@ -127,6 +127,33 @@ describe("tier-2 same-file rewrite (ambiguous names)"):
         expect(box.contains("self.value")).to_be(true)
         expect(stats.defs_removed).to_equal(0)
 
+describe("expression-context setter safety"):
+    it("never rewrites a setter used as an expression, and keeps its wrapper"):
+        # set_visible returns/forwards but is used in builder position
+        var n = "class Node:\n"
+        n = n + "    visible: bool\n"
+        n = n + "    me set_visible(v: bool):\n"
+        n = n + "        self.visible = v\n"
+        var caller = "fn build(node: Node) -> Node:\n"
+        caller = caller + "    node.set_visible(true)\n"
+        caller = caller + "    node = node.set_visible(false)\n"
+        caller = caller + "    node\n"
+
+        var sources: Dict<text, text> = {}
+        sources["node.spl"] = n
+        sources["build.spl"] = caller
+        var (out, stats) = apply_accessor_fixes(sources, true)
+
+        val body = out["build.spl"]
+        # statement-position call simplified
+        expect(body.contains("node.visible = true")).to_be(true)
+        # expression-position call left intact (no invalid `node = node.visible = false`)
+        expect(body.contains("node = node.set_visible(false)")).to_be(true)
+        expect(body.contains("node.visible = false")).to_be(false)
+        # wrapper kept because an unrewritable call remains
+        expect(out["node.spl"].contains("me set_visible")).to_be(true)
+        expect(stats.defs_removed).to_equal(0)
+
 describe("cache invalidation invariant"):
     it("changes content of both wrapper-owning and caller files so hashed cache misses"):
         var sources: Dict<text, text> = {}

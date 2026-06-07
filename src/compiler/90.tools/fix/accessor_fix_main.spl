@@ -45,9 +45,14 @@ fn acc_should_scan(path: text) -> bool:
         return false
     true
 
-# Cheap precheck: a file is only relevant if it defines or calls an accessor.
+# Pass-1 precheck: only files that *define* an accessor add index entries.
+fn acc_defines_accessor(source: text) -> bool:
+    (source.contains("fn get_") or source.contains("fn set_") or source.contains("fn is_")
+     or source.contains("me get_") or source.contains("me set_") or source.contains("me is_"))
+
+# Pass-2 precheck: a file needs rewriting only if it defines or calls an accessor.
 fn acc_file_relevant(source: text) -> bool:
-    source.contains("get_") or source.contains("set_") or source.contains("is_")
+    acc_defines_accessor(source) or source.contains(".get_") or source.contains(".set_") or source.contains(".is_")
 
 fn main():
     val args = cli_get_args()
@@ -83,29 +88,40 @@ fn main():
     var kind_of: Dict<text, text> = {}
     var dummy_names: Dict<text, bool> = {}
     var poison: Dict<text, bool> = {}
+    var setter_unsafe: Dict<text, bool> = {}
     for path in files:
         val content = file_read(path)
-        if content == "" or not acc_file_relevant(content):
+        if content == "":
             continue
-        val classes = parse_accessor_classes(content)
-        for c in classes:
-            for m in c.methods:
-                if m.kind == "":
-                    continue
-                if m.is_dummy and not acc_suffix_has_real(c, m.field):
-                    dummy_names[m.name] = true
-                    field_of[m.name] = m.field
-                    kind_of[m.name] = m.kind
-                else:
-                    poison[m.name] = true
+        if acc_defines_accessor(content):
+            val classes = parse_accessor_classes(content)
+            for c in classes:
+                for m in c.methods:
+                    if m.kind == "":
+                        continue
+                    if m.is_dummy and not acc_suffix_has_real(c, m.field):
+                        dummy_names[m.name] = true
+                        field_of[m.name] = m.field
+                        kind_of[m.name] = m.kind
+                    else:
+                        poison[m.name] = true
+        # caller-side scan: setter calls used as expressions can't be rewritten,
+        # so their wrappers must not be deleted.
+        for name in acc_unsafe_setter_names(content):
+            setter_unsafe[name] = true
 
     var unambiguous: Dict<text, bool> = {}
+    var deletable: Dict<text, bool> = {}
     for name in dummy_names.keys():
-        if not poison.has(name):
-            unambiguous[name] = true
+        if poison.has(name):
+            continue
+        unambiguous[name] = true
+        if kind_of[name] == "set" and setter_unsafe.has(name):
+            continue
+        deletable[name] = true
 
     if not quiet:
-        print "[accessor-fix] indexed {files.len()} files: {dummy_names.len()} dummy name(s), {unambiguous.len()} globally unambiguous"
+        print "[accessor-fix] indexed {files.len()} files: {dummy_names.len()} dummy name(s), {unambiguous.len()} unambiguous, {deletable.len()} deletable"
 
     # ---- Pass 2: rewrite file by file
     var files_changed = 0
@@ -117,7 +133,7 @@ fn main():
         val content = file_read(path)
         if content == "" or not acc_file_relevant(content):
             continue
-        val fr = acc_process_file(content, field_of, kind_of, unambiguous, include_tier2)
+        val fr = acc_process_file(content, field_of, kind_of, unambiguous, deletable, include_tier2)
         if not fr.changed:
             continue
         files_changed = files_changed + 1
