@@ -1,4 +1,5 @@
 use compiler.tools.fix.rules.{check_short_grammar_refactor}
+use std.tooling.easy_fix.{check_field_access_refactor}
 use compiler.tools.fix.main.{FixApplicator, collect_fixes_from_source}
 use std.tooling.easy_fix.{easyfix_replacements}
 
@@ -477,3 +478,20 @@ describe "short grammar easy fix":
                 expect(updated["sample.spl"]).to_contain("# unicode before fix — keeps text offsets honest")
             case Err(e):
                 expect(e).to_equal("")
+
+    it "rewrites self get/set accessor calls to field access short grammar":
+        val source = "class Box:\n    value: i64\n    fn get_value() -> i64:\n        self.value\n    me set_value(v: i64):\n        self.value = v\n    me bump():\n        self.set_value(self.get_value() + 1)\n"
+        val fixes = check_field_access_refactor(source, "box.spl")
+        var sources: Dict<text, text> = {}
+        sources["box.spl"] = source
+        val result = FixApplicator.apply(fixes, sources)
+        match result:
+            case Ok(updated):
+                expect(updated["box.spl"]).to_contain("self.value = self.value + 1")
+            case Err(e):
+                expect(e).to_equal("")
+
+    it "does not rewrite an expression-context self setter call":
+        val source = "class Node:\n    visible: bool\n    me set_visible(v: bool):\n        self.visible = v\n    me build():\n        var n = self.set_visible(false)\n"
+        val fixes = check_field_access_refactor(source, "node.spl")
+        expect(fixes.len()).to_equal(0)
