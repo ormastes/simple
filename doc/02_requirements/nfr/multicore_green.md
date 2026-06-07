@@ -35,7 +35,8 @@ Stability And Misuse Diagnostics, and SimpleOS Hardware Proof Gate.
   channel wake, remote enqueue/IPI state, per-CPU dispatch, and topology growth.
 - NFR-MCG-011: Live QEMU evidence is required before claiming SimpleOS hardware
   or AP behavior.
-- NFR-MCG-012: Final hardware context-switch handoff remains a tracked blocker
+- NFR-MCG-012: Final hardware context-switch handoff remains tracked in
+  `doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md`
   until a live guest proves it.
 
 ## Verification Gates

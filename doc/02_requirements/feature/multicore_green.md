@@ -33,7 +33,8 @@ SimpleOS scheduler work distinct and verifiable.
   state.
 - REQ-MCG-007: SimpleOS AP/hardware claims require live scheduler or QEMU
   evidence; host-only specs may prove logical behavior but not final hardware
-  context-switch handoff.
+  context-switch handoff. The final handoff blocker is tracked in
+  `doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md`.
 - REQ-MCG-008: The roadmap must track blocking integration, work stealing or
   per-worker queues, hosted `multicore_green_set_parallelism` /
   `multicore_green_parallelism` evidence as the initial Go `GOMAXPROCS`-like

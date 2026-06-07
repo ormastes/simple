@@ -204,8 +204,10 @@ SimpleOS path:
   with carrier enqueue and the bounded active-carrier pass, so parked channel
   receivers can re-enter scheduler-owned execution without bypassing carrier
   limits.
-- QEMU proof currently covers AP startup plus CPU1 fixed-slot dispatch; full
-  hardware context-switch handoff remains future work.
+- QEMU proof currently covers AP startup, CPU1 fixed-slot dispatch, fixed
+  timer-preemption yield, and scheduler-owned CPU1 green handoff. Full
+  ring/user hardware context-switch handoff remains tracked in
+  `doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md`.
 
 ## Requirement Mapping
 
@@ -235,4 +237,6 @@ insertion/poll-placement before claiming tight-loop fairness comparable to Go.
   native multicore-green. SMF failure classifications remain diagnostic only
   and are rejected by the profile contract when a checked report is used as
   M:N evidence.
-- SimpleOS QEMU proof does not yet prove final hardware context-switch handoff.
+- SimpleOS QEMU proof does not yet prove final hardware context-switch handoff;
+  keep `doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md`
+  linked until a live guest proves the final AP ring/user handoff marker.

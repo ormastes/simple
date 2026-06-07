@@ -7,6 +7,8 @@ including the opt-in live QEMU green-carrier proof. It does not claim final
 ring/user context-switch handoff across APs; the live proof covers AP startup,
 fixed-slot CPU1 green dispatch/IPI evidence, fixed timer-preemption yield
 evidence, and scheduler-owned CPU1 green handoff through the real `Scheduler`.
+The final hardware handoff gap is tracked in
+`doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md`.
 
 ## Verified Commands
 
@@ -55,7 +57,9 @@ the non-live SimpleOS green-thread loop was rerun with `--clean` on
 - QEMU default gate lane: 1 assertion
 
 The live-QEMU row above remains the previously recorded opt-in run. This refresh
-does not newly claim final ring/user context-switch handoff across APs.
+does not newly claim final ring/user context-switch handoff across APs; that
+claim remains blocked by
+`doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md`.
 
 ## Notes
 
