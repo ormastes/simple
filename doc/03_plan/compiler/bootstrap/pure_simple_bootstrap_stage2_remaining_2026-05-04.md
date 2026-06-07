@@ -205,6 +205,23 @@ pure-Simple stage2 work is still open until `native-build` reaches real Simple
 lowering/codegen for this entry instead of stopping at the seed-wrapper
 fallback guard.
 
+Additional 2026-06-07 dispatch evidence:
+
+- The default command still takes the protected Simple-first path and still
+  refuses to emit a seed-wrapper fallback for `/tmp/simple_stage2_probe_default`.
+  This keeps accidental fallback artifacts blocked.
+- With `SIMPLE_NATIVE_BUILD_RUST=1`, the same `native-build --backend llvm-lib`
+  command bypasses the seed-wrapper guard and reaches the Rust native-build
+  handler.
+- That probe still exits `1` and emits no artifact because the bootstrap seed
+  reports:
+  `error: native backend 'llvm' is not available in this build; rebuild the Rust driver with --features llvm or use --backend cranelift`.
+
+Current conclusion after the dispatch check: the seed-wrapper fallback is now
+avoidable for diagnostic probes, but the pure-stage2 payload still cannot emit
+until the probe runs with an LLVM-capable bootstrap seed or the plan accepts a
+Cranelift-compatible stage2 probe.
+
 ## Next Steps
 
 ### A. Route the pure-stage2 probe through the full Simple driver
@@ -218,6 +235,8 @@ Acceptance:
 - the command no longer fails with `bootstrap_main cannot emit a seed-wrapper fallback`
 - either `/tmp/simple_stage2` is emitted
 - or the next exact lowering/codegen failure is captured
+- if using `SIMPLE_NATIVE_BUILD_RUST=1`, the selected seed must include the
+  requested backend or the probe must explicitly switch to a supported backend
 
 ### B. Capture the next post-parse-start failure cleanly
 

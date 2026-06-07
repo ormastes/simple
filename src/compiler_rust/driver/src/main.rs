@@ -137,16 +137,16 @@ struct CommandEntry {
 
 /// Execute a command entry: Simple-first with Rust fallback.
 fn dispatch_command(entry: &CommandEntry, ctx: &CommandContext) -> i32 {
+    // 1. Check env var override → Rust
+    if !entry.env_override.is_empty() && std::env::var(entry.env_override).is_ok() {
+        return run_rust_handler(&entry.rust_handler, ctx);
+    }
+
     if entry.name == "native-build" && native_build_should_use_simple(ctx.args) {
         eprintln!("[native-build] dispatching to Simple app: src/app/cli/bootstrap_main.spl");
         if let Some(code) = dispatch_to_simple_app("src/app/cli/bootstrap_main.spl", ctx.args, ctx.gc_log, ctx.gc_off) {
             return code;
         }
-    }
-
-    // 1. Check env var override → Rust
-    if !entry.env_override.is_empty() && std::env::var(entry.env_override).is_ok() {
-        return run_rust_handler(&entry.rust_handler, ctx);
     }
 
     // 2. Check if any args require the Rust handler
@@ -298,7 +298,7 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         name: "native-build",
         app_path: "",
         rust_handler: Handler::Args(handle_native_build),
-        env_override: "",
+        env_override: "SIMPLE_NATIVE_BUILD_RUST",
         needs_rust_flags: &[],
     },
     CommandEntry {
@@ -829,7 +829,7 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         name: "native-build",
         app_path: "",
         rust_handler: Handler::Args(handle_native_build),
-        env_override: "",
+        env_override: "SIMPLE_NATIVE_BUILD_RUST",
         needs_rust_flags: &[],
     },
 ];
