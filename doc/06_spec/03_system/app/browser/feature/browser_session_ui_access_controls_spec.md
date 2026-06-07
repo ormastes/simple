@@ -1,6 +1,6 @@
-# Browser Session Ui Access Controls Specification
+# browser_session_ui_access_controls_spec
 
-> 1. var session = BrowserSession new
+> BrowserSession textual UI access control system specification.
 
 <!-- sdn-diagram:id=browser_session_ui_access_controls_spec.arch -->
 <details class="sdn-source">
@@ -28,12 +28,64 @@ browser_session_ui_access_controls_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Browser Session Ui Access Controls Specification
+# browser_session_ui_access_controls_spec
+
+BrowserSession textual UI access control system specification.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/03_system/app/browser/feature/browser_session_ui_access_controls_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+BrowserSession textual UI access control system specification.
+
+## Evidence
+
+Display policy: `embed_tui`
+
+| Category | Count |
+|----------|------:|
+| TUI Captures | 1 |
+
+### TUI Captures
+
+| Item | Kind | Path |
+|------|------|------|
+| `browser_ui_access_snapshot.txt` | TUI capture | `build/test-artifacts/03_system/app/browser/feature/browser_session_ui_access_controls/browser_ui_access_snapshot.txt` |
+
+#### Embedded TUI Text Captures
+
+<details>
+<summary>browser_ui_access_snapshot.txt</summary>
+
+```text
+BrowserSession UI Access Snapshot
+mode: browser_session
+active-surface: browser:session
+surfaces: 1
+surface: browser:session title=Start app=simple-browser active=true
+nodes: 8
+node: back kind=button text=Back enabled=false selected=false actions=click
+node: forward kind=button text=Forward enabled=false selected=false actions=click
+node: stop kind=button text=Stop enabled=false selected=false actions=click
+node: home kind=button text=Home enabled=true selected=false actions=click
+node: favorite kind=button text=Favorite enabled=true selected=false actions=click
+node: address kind=textfield text=https://example.com/start/index.html enabled=true selected=false actions=set_value
+node: title kind=label text=Start enabled=true selected=false actions=
+node: link_0 kind=link text=Read docs enabled=true selected=false actions=click
+```
+
+</details>
 
 ## Scenarios
 
@@ -41,15 +93,7 @@ browser_session_ui_access_controls_spec -> common
 
 #### exposes browser toolbar controls as queryable UI access nodes
 
-1. var session = BrowserSession new
-
-2. session register resource
-
-3. session open html
-
-4. session open html
-
-5. session set home url
+1. var session =  browser session fixture
    - Expected: snapshot.mode equals `browser_session`
    - Expected: snapshot.active_surface equals `browser:session`
    - Expected: ui_access_find_nodes(snapshot, "browser:session", "button", "Back", 1).len() equals `1`
@@ -63,15 +107,11 @@ browser_session_ui_access_controls_spec -> common
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var session = BrowserSession.new()
-session.register_resource("https://example.com/home", "<html><head><title>Home</title></head><body>Home</body></html>")
-session.open_html("https://example.com/one", "<html><head><title>One</title></head><body>One</body></html>")
-session.open_html("https://example.com/two", "<html><head><title>Two</title></head><body>Two</body></html>")
-session.set_home_url("https://example.com/home")
+var session = _browser_session_fixture()
 
 val snapshot = session.ui_access_snapshot()
 expect(snapshot.mode).to_equal("browser_session")
@@ -86,17 +126,41 @@ expect(ui_access_find_nodes(snapshot, "browser:session", "textfield", "https://e
 
 </details>
 
-#### routes textual UI access actions into BrowserSession primitive controls
+#### captures browser UI access visible state for the generated manual
 
 1. var session = BrowserSession new
 
-2. session register resource
+2. session open html
+   - Expected: _write_ui_capture(capture) equals `0`
+   - Expected: _capture_file_state(capture) equals `matched`
 
-3. session open html
 
-4. session open html
+<details>
+<summary>Executable SPipe</summary>
 
-5. session set home url
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html("https://example.com/start/index.html", "<html><head><title>Start</title></head><body><a href='../docs/page.html'>Read docs</a></body></html>")
+val snapshot = session.ui_access_snapshot()
+val capture = _snapshot_capture(snapshot)
+
+expect(capture).to_contain("BrowserSession UI Access Snapshot")
+expect(capture).to_contain("node: back kind=button text=Back")
+expect(capture).to_contain("node: favorite kind=button text=Favorite")
+expect(capture).to_contain("node: address kind=textfield text=https://example.com/start/index.html")
+expect(capture).to_contain("node: link_0 kind=link text=Read docs")
+expect(_write_ui_capture(capture)).to_equal(0)
+expect(_capture_file_state(capture)).to_equal("matched")
+```
+
+</details>
+
+#### routes textual UI access actions into BrowserSession primitive controls
+
+1. var session =  browser session fixture
    - Expected: back.ok is true
    - Expected: session.current_url equals `https://example.com/one`
    - Expected: forward.ok is true
@@ -106,7 +170,7 @@ expect(ui_access_find_nodes(snapshot, "browser:session", "textfield", "https://e
    - Expected: favorite_nodes.len() equals `1`
    - Expected: favorite_nodes[0].selected is true
 
-6. session begin navigation
+2. session begin navigation
    - Expected: stop.ok is true
    - Expected: session.is_loading is false
    - Expected: home.ok is true
@@ -116,15 +180,11 @@ expect(ui_access_find_nodes(snapshot, "browser:session", "textfield", "https://e
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var session = BrowserSession.new()
-session.register_resource("https://example.com/home", "<html><head><title>Home</title></head><body>Home</body></html>")
-session.open_html("https://example.com/one", "<html><head><title>One</title></head><body>One</body></html>")
-session.open_html("https://example.com/two", "<html><head><title>Two</title></head><body>Two</body></html>")
-session.set_home_url("https://example.com/home")
+var session = _browser_session_fixture()
 
 val back = session.ui_access_act(WinTextActionRequest(target_id: "browser:session#back", action: "click", text_value: "", x: 0, y: 0))
 expect(back.ok).to_equal(true)
@@ -214,27 +274,12 @@ expect(session.current_body_html).to_contain("Docs page")
 
 </details>
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/03_system/app/browser/feature/browser_session_ui_access_controls_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- BrowserSession primitive controls through textual UI access
-
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
