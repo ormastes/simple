@@ -92,7 +92,7 @@ use os.kernel.scheduler.scheduler_exec.{
 }
 use os.kernel.scheduler.green_carrier.{
     GreenCarrierSchedulerIntent, GreenCarrierExecutionResult, GreenCarrierParallelismState,
-    GreenCarrierRunQueueState, GreenCarrierRebalanceResult,
+    GreenCarrierRunQueueState, GreenCarrierRebalanceResult, GreenCarrierRebalancePassResult,
     green_carrier_apply_scheduler_intent,
     green_carrier_extend_execution_state,
     green_carrier_current_task_on_cpu,
@@ -101,7 +101,8 @@ use os.kernel.scheduler.green_carrier.{
     green_carrier_parallelism_for_topology,
     green_carrier_reject_scheduler_intent,
     green_carrier_apply_rebalance_decision,
-    green_carrier_queue_depth
+    green_carrier_queue_depth,
+    green_carrier_rebalance_one
 }
 use os.kernel.scheduler.green_worker.{GreenWorkerRebalanceDecision, green_worker_rebalance_decision}
 
@@ -543,6 +544,90 @@ impl Scheduler:
             rebalance_threshold
         )
         self.rebalance_green_carrier_queues(queues, decision)
+
+    fn _green_rebalance_active_target_cpu(queues: GreenCarrierRunQueueState) -> i64:
+        val active_limit = self.green_parallelism_state.active_limit
+        if active_limit < 1:
+            return -1
+        var target_cpu = 0
+        var target_depth = green_carrier_queue_depth(queues, 0)
+        var cpu = 1
+        while cpu < active_limit:
+            val depth = green_carrier_queue_depth(queues, cpu)
+            if depth < target_depth:
+                target_depth = depth
+                target_cpu = cpu
+            cpu = cpu + 1
+        target_cpu
+
+    fn _green_rebalance_inactive_source_cpu(queues: GreenCarrierRunQueueState) -> i64:
+        var cpu = self.green_parallelism_state.active_limit
+        val cpu_count = self.topology.cpu_count as i64
+        while cpu < cpu_count:
+            if green_carrier_queue_depth(queues, cpu) > 0:
+                return cpu
+            cpu = cpu + 1
+        -1
+
+    fn rebalance_green_carrier_queues_until_stable(queues: GreenCarrierRunQueueState, max_moves: i64) -> GreenCarrierRebalancePassResult:
+        if max_moves < 1:
+            return GreenCarrierRebalancePassResult(
+                queues: queues,
+                moved_workers: 0,
+                last_task_id: -1,
+                last_from_cpu: -1,
+                last_to_cpu: -1,
+                reason: "move_budget_empty"
+            )
+        var current = queues
+        var moved_workers = 0
+        var last_task_id = -1
+        var last_from_cpu = -1
+        var last_to_cpu = -1
+        while moved_workers < max_moves:
+            val source_cpu = self._green_rebalance_inactive_source_cpu(current)
+            if source_cpu < 0:
+                return GreenCarrierRebalancePassResult(
+                    queues: current,
+                    moved_workers: moved_workers,
+                    last_task_id: last_task_id,
+                    last_from_cpu: last_from_cpu,
+                    last_to_cpu: last_to_cpu,
+                    reason: if moved_workers > 0: "inactive_sources_drained" else: "no_inactive_work"
+                )
+            val target_cpu = self._green_rebalance_active_target_cpu(current)
+            if target_cpu < 0:
+                return GreenCarrierRebalancePassResult(
+                    queues: current,
+                    moved_workers: moved_workers,
+                    last_task_id: last_task_id,
+                    last_from_cpu: last_from_cpu,
+                    last_to_cpu: last_to_cpu,
+                    reason: "no_active_carrier"
+                )
+            val moved = green_carrier_rebalance_one(current, source_cpu, target_cpu, self.green_parallelism_state.active_limit)
+            if not moved.moved:
+                return GreenCarrierRebalancePassResult(
+                    queues: moved.queues,
+                    moved_workers: moved_workers,
+                    last_task_id: last_task_id,
+                    last_from_cpu: last_from_cpu,
+                    last_to_cpu: last_to_cpu,
+                    reason: moved.reason
+                )
+            current = moved.queues
+            moved_workers = moved_workers + 1
+            last_task_id = moved.task_id
+            last_from_cpu = moved.from_cpu
+            last_to_cpu = moved.to_cpu
+        GreenCarrierRebalancePassResult(
+            queues: current,
+            moved_workers: moved_workers,
+            last_task_id: last_task_id,
+            last_from_cpu: last_from_cpu,
+            last_to_cpu: last_to_cpu,
+            reason: "move_budget_exhausted"
+        )
 
     fn preempt_pending_on_cpu(cpu_id: u32) -> TaskId?:
         val cpu = self._normalize_cpu(cpu_id)

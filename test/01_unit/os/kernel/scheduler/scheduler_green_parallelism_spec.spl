@@ -27,7 +27,8 @@ use os.kernel.scheduler.green_carrier.{
     green_carrier_apply_enqueue,
     green_carrier_dispatch_next,
     green_carrier_dispatch_next_with_limit,
-    green_carrier_scheduler_intent
+    green_carrier_scheduler_intent,
+    green_carrier_queue_depth
 }
 use os.kernel.scheduler.green_worker.{green_worker_rebalance_decision}
 
@@ -149,3 +150,37 @@ describe "Scheduler green carrier parallelism":
         expect(moved.to_cpu).to_equal(0)
         expect(result.applied).to_equal(true)
         expect(sched.green_current_task_on_cpu(0u32)).to_equal(54)
+
+    it "drains inactive carrier queues with bounded repeated rebalance":
+        var sched = Scheduler.new_with_cpu_count(4u32)
+        sched.set_green_carrier_parallelism(1)
+        val queues = green_carrier_run_queues_new(4, 8)
+        val first = green_carrier_spawn_task(55, 4, 0, 3, 1, 2, 4, 0)
+        val after_first = green_carrier_apply_enqueue(queues, first)
+        val second = green_carrier_spawn_task(56, 4, 0, 3, 1, 2, 4, 0)
+        val after_second = green_carrier_apply_enqueue(after_first.queues, second)
+        val pass_result = sched.rebalance_green_carrier_queues_until_stable(after_second.queues, 4)
+        val dispatch1 = green_carrier_dispatch_next_with_limit(pass_result.queues, 0, sched.green_carrier_parallelism_limit())
+        val dispatch2 = green_carrier_dispatch_next_with_limit(dispatch1.queues, 0, sched.green_carrier_parallelism_limit())
+
+        expect(pass_result.moved_workers).to_equal(2)
+        expect(pass_result.reason).to_equal("inactive_sources_drained")
+        expect(green_carrier_queue_depth(pass_result.queues, 1)).to_equal(0)
+        expect(green_carrier_queue_depth(pass_result.queues, 0)).to_equal(2)
+        expect(dispatch1.task_id).to_equal(55)
+        expect(dispatch2.task_id).to_equal(56)
+
+    it "honors repeated rebalance move budget":
+        var sched = Scheduler.new_with_cpu_count(4u32)
+        sched.set_green_carrier_parallelism(1)
+        val queues = green_carrier_run_queues_new(4, 8)
+        val first = green_carrier_spawn_task(57, 4, 0, 3, 1, 2, 4, 0)
+        val after_first = green_carrier_apply_enqueue(queues, first)
+        val second = green_carrier_spawn_task(58, 4, 0, 3, 1, 2, 4, 0)
+        val after_second = green_carrier_apply_enqueue(after_first.queues, second)
+        val pass_result = sched.rebalance_green_carrier_queues_until_stable(after_second.queues, 1)
+
+        expect(pass_result.moved_workers).to_equal(1)
+        expect(pass_result.reason).to_equal("move_budget_exhausted")
+        expect(green_carrier_queue_depth(pass_result.queues, 0)).to_equal(1)
+        expect(green_carrier_queue_depth(pass_result.queues, 1)).to_equal(1)

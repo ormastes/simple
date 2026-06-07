@@ -124,6 +124,9 @@ Behavior:
 - `Scheduler.rebalance_green_carrier_queues_from_depth` reads per-CPU carrier
   queue depths and derives the green-worker rebalance decision inside the
   scheduler wrapper.
+- `Scheduler.rebalance_green_carrier_queues_until_stable` repeats inactive
+  carrier drains with a caller-provided move budget and records why the pass
+  stopped.
 
 ### Freestanding QEMU Probe Path
 
@@ -193,7 +196,7 @@ Repository guards:
 
 - Scheduler-owned parallelism handoff: the hosted runtime-pool facade and
   SimpleOS `Scheduler` now both expose topology-bounded parallelism contracts.
-  Remaining work is carrying repeated rebalance decisions into final AP
-  hardware handoff and blocking/preemption behavior.
+  Remaining work is carrying bounded rebalance passes into final AP hardware
+  handoff and blocking/preemption behavior.
 - Preemption strategy: compiler-inserted yields, runtime safepoints, or an
   explicit cooperative-only guarantee until later.

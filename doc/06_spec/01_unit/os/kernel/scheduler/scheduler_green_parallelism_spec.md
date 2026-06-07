@@ -28,7 +28,7 @@ scheduler_green_parallelism_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -364,12 +364,88 @@ expect(sched.green_current_task_on_cpu(0u32)).to_equal(54)
 
 </details>
 
+#### drains inactive carrier queues with bounded repeated rebalance
+
+1. var sched = Scheduler new with cpu count
+
+2. sched set green carrier parallelism
+   - Expected: pass_result.moved_workers equals `2`
+   - Expected: pass_result.reason equals `inactive_sources_drained`
+   - Expected: green_carrier_queue_depth(pass_result.queues, 1) equals `0`
+   - Expected: green_carrier_queue_depth(pass_result.queues, 0) equals `2`
+   - Expected: dispatch1.task_id equals `55`
+   - Expected: dispatch2.task_id equals `56`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var sched = Scheduler.new_with_cpu_count(4u32)
+sched.set_green_carrier_parallelism(1)
+val queues = green_carrier_run_queues_new(4, 8)
+val first = green_carrier_spawn_task(55, 4, 0, 3, 1, 2, 4, 0)
+val after_first = green_carrier_apply_enqueue(queues, first)
+val second = green_carrier_spawn_task(56, 4, 0, 3, 1, 2, 4, 0)
+val after_second = green_carrier_apply_enqueue(after_first.queues, second)
+val pass_result = sched.rebalance_green_carrier_queues_until_stable(after_second.queues, 4)
+val dispatch1 = green_carrier_dispatch_next_with_limit(pass_result.queues, 0, sched.green_carrier_parallelism_limit())
+val dispatch2 = green_carrier_dispatch_next_with_limit(dispatch1.queues, 0, sched.green_carrier_parallelism_limit())
+
+expect(pass_result.moved_workers).to_equal(2)
+expect(pass_result.reason).to_equal("inactive_sources_drained")
+expect(green_carrier_queue_depth(pass_result.queues, 1)).to_equal(0)
+expect(green_carrier_queue_depth(pass_result.queues, 0)).to_equal(2)
+expect(dispatch1.task_id).to_equal(55)
+expect(dispatch2.task_id).to_equal(56)
+```
+
+</details>
+
+#### honors repeated rebalance move budget
+
+1. var sched = Scheduler new with cpu count
+
+2. sched set green carrier parallelism
+   - Expected: pass_result.moved_workers equals `1`
+   - Expected: pass_result.reason equals `move_budget_exhausted`
+   - Expected: green_carrier_queue_depth(pass_result.queues, 0) equals `1`
+   - Expected: green_carrier_queue_depth(pass_result.queues, 1) equals `1`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var sched = Scheduler.new_with_cpu_count(4u32)
+sched.set_green_carrier_parallelism(1)
+val queues = green_carrier_run_queues_new(4, 8)
+val first = green_carrier_spawn_task(57, 4, 0, 3, 1, 2, 4, 0)
+val after_first = green_carrier_apply_enqueue(queues, first)
+val second = green_carrier_spawn_task(58, 4, 0, 3, 1, 2, 4, 0)
+val after_second = green_carrier_apply_enqueue(after_first.queues, second)
+val pass_result = sched.rebalance_green_carrier_queues_until_stable(after_second.queues, 1)
+
+expect(pass_result.moved_workers).to_equal(1)
+expect(pass_result.reason).to_equal("move_budget_exhausted")
+expect(green_carrier_queue_depth(pass_result.queues, 0)).to_equal(1)
+expect(green_carrier_queue_depth(pass_result.queues, 1)).to_equal(1)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

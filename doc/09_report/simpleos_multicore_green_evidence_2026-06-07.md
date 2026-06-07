@@ -33,7 +33,7 @@ SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 ./src/compiler_rust/target/debug/simple test 
 | SimpleOS green-carrier compile check | PASS | 1 file |
 | SimpleOS green-carrier unit contract | PASS | 36 |
 | SimpleOS scheduler compile check | PASS | 1 file |
-| SimpleOS scheduler green-carrier parallelism | PASS | 9 |
+| SimpleOS scheduler green-carrier parallelism | PASS | 11 |
 | SimpleOS green-carrier QEMU spec default lane | PASS | 1 |
 | SimpleOS green-carrier QEMU live lane | PASS | 1 |
 
@@ -58,4 +58,5 @@ SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 ./src/compiler_rust/target/debug/simple test 
   without dropping queued work. It also proves rebalanced inactive-carrier work
   can execute on an active carrier through the scheduler-owned rebalance
   wrapper, including a wrapper path that derives the rebalance decision from
-  live carrier queue depths.
+  live carrier queue depths and a bounded repeated pass that drains inactive
+  queues or stops when its move budget is exhausted.

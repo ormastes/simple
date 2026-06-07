@@ -155,6 +155,9 @@ SimpleOS path:
 - `Scheduler.rebalance_green_carrier_queues_from_depth` derives the rebalance
   decision from live carrier queue depths before applying the scheduler-owned
   active carrier limit.
+- `Scheduler.rebalance_green_carrier_queues_until_stable` repeats inactive-to-
+  active carrier moves with an explicit move budget, so preserved work can be
+  drained without unbounded scheduler loops.
 - QEMU proof currently covers AP startup plus CPU1 fixed-slot dispatch; full
   hardware context-switch handoff remains future work.
 
@@ -171,10 +174,10 @@ The selected Full Go-Like Runtime Roadmap uses all layers:
 - SimpleOS Scheduler Layer owns logical green tasks, carrier queues, remote
   wake/IPI intent, and AP evidence.
 
-Future roadmap work remains explicit: repeated work stealing or per-worker
-queue loops, blocking integration, carrying rebalance decisions into final AP
-hardware handoff, and preemption or compiler-inserted yield points before
-claiming tight-loop fairness comparable to Go.
+Future roadmap work remains explicit: per-worker queue loops, blocking
+integration, carrying bounded rebalance passes into final AP hardware handoff,
+and preemption or compiler-inserted yield points before claiming tight-loop
+fairness comparable to Go.
 
 ## Known Gaps
 

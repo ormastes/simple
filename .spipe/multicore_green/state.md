@@ -102,6 +102,14 @@ go-runtime-hardening
   `scheduler_green_parallelism_spec.spl` passed 9 examples, and
   `simpleos_multicore_green_spec.spl` passed 3 examples for the queue-depth
   rebalance wrapper.
+- implementation: Added `Scheduler.rebalance_green_carrier_queues_until_stable`
+  with an explicit move budget, plus `GreenCarrierRebalancePassResult`, so the
+  scheduler can repeatedly drain inactive carrier queues without unbounded
+  loops.
+- verification: `scheduler_green_parallelism_spec.spl` passed 11 examples,
+  `green_carrier_spec.spl` passed 36 examples, and
+  `simpleos_multicore_green_spec.spl` passed 3 examples after the bounded
+  repeated rebalance pass was added.
 
 ## Completion Audit - 2026-06-07
 
