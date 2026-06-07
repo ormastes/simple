@@ -87,6 +87,32 @@ require_multicore_green_rows_valid() {
     fi
 }
 
+require_go_stress_beats_c() {
+    file="$1"
+    if ! awk -F'|' '
+        /^## / {
+            stress = ($0 ~ /Simple vs Go vs C Large Fanout Stress/)
+            next
+        }
+        stress && /C \(pthreads\)/ {
+            c = $3
+            gsub(/^[ \t]+|[ \t]+$/, "", c)
+        }
+        stress && /\| Go[ \t]*\|/ {
+            go = $3
+            gsub(/^[ \t]+|[ \t]+$/, "", go)
+        }
+        END {
+            if (go == "" || c == "" || go == "fail" || c == "fail" || go == "n/a" || c == "n/a") {
+                exit 1
+            }
+            exit ((go + 0) < (c + 0)) ? 0 : 1
+        }
+    ' "$file"; then
+        fail "Go stress fanout row must be faster than C pthread stress row in $file"
+    fi
+}
+
 require_arg "$kind" "missing profile kind"
 require_arg "$script_path" "missing script path"
 require_arg "$report_path" "missing report path"
@@ -129,6 +155,9 @@ case "$kind" in
         require_contains "$report_path" "Multicore green workers"
         require_contains "$report_path" "Fanout workers"
         require_contains "$report_path" "Fanout stress workers"
+        require_contains "$report_path" "Go runtime:"
+        require_contains "$report_path" "Go scheduler:"
+        require_contains "$report_path" "GOMAXPROCS="
         require_contains "$report_path" "expected checksum"
         require_contains "$report_path" "Simple (native)"
         require_contains "$report_path" "thread_spawn fork-join OS threads"
@@ -154,6 +183,7 @@ case "$kind" in
         require_contains "$report_path" "goroutines + chan result (M:N)"
         require_contains "$report_path" "goroutine per tiny task + channel"
         require_contains "$report_path" "goroutine per stress task (M:N)"
+        require_go_stress_beats_c "$report_path"
         require_not_contains "$report_path" "thread_spawn2"
         require_not_contains "$report_path" "spawn_isolated2"
         require_not_contains "$report_path" "spawn_limited2"

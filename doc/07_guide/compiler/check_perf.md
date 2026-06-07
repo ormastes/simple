@@ -110,6 +110,9 @@ for full reports on slow hosts, or lower it for smoke evidence. The 1000-worker
 Simple OS-thread fanout source is intentionally reported separately from Simple
 green fanout and uses loop-based `thread_spawn` fork-join so the harness does not need
 large unrolled source generation.
+The report records the Go toolchain and the generated Go probe's
+`runtime.GOMAXPROCS(0)` / `runtime.NumCPU()` values so Go-like M:N comparisons
+name the scheduler limit used by the goroutine rows.
 Generated Simple concurrency workloads compute an expected checksum and exit
 nonzero on mismatch, so runtime-pool closure lookup failures, lambda capture
 bugs, or wrong joins are classified as failed rows instead of performance wins.
@@ -129,7 +132,7 @@ profile-script comments.
 | **Cold startup** | `hello world` (20 runs avg) | Time-to-first-output |
 | **Warm throughput** | `fib(35)` recursive, in-process loop (10 warmup + 20 measured) | Steady-state single-thread perf (JIT reaches hotspot) |
 | **Parallel** | 100 workers × LCG 100K iters. Simple native uses Pure Simple `thread_spawn` fork-join for the OS-thread baseline. Simple multicore green sets `multicore_green_set_parallelism(CPU_WORKERS)`, uses `multicore_green_spawn`, and fails the row unless every handle reports `used_runtime_pool()` and the runtime reports work-stealing queues. | CPU-heavy worker throughput plus concurrency overhead |
-| **Large fanout** | 1000 tiny workers × LCG 32 iters. Simple native uses loop-based `thread_spawn` fork-join; Simple cooperative green uses cooperative queue fanout; C uses one pthread per tiny task; Go uses one goroutine per tiny task; Erlang uses one BEAM process per tiny task. | Scheduling overhead where Go should usually beat C pthread creation; Simple native measures OS-thread fanout; Simple cooperative green measures queue fanout, not CPU parallelism |
+| **Large fanout** | 1000 tiny workers × LCG 32 iters, plus the Simple-vs-Go-vs-C stress row. Simple native uses loop-based `thread_spawn` fork-join; Simple cooperative green uses cooperative queue fanout; C uses one pthread per tiny task; Go uses one goroutine per tiny task; Erlang uses one BEAM process per tiny task. | Scheduling overhead where Go must beat C pthread creation in the checked stress report; Simple native measures OS-thread fanout; Simple cooperative green measures queue fanout, not CPU parallelism |
 | **Parallel binary size** | Binary/script sizes for parallel workloads across languages | Deployment footprint for concurrent programs |
 | **Parallel peak RSS** | `/usr/bin/time -v` peak RSS with 100 workers, baseline subtracted, per-worker delta | Memory cost per concurrent task (baseline = hello world RSS for each language) |
 

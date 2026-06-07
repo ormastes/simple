@@ -20,6 +20,8 @@
 - Host: `dl`
 - Shell: `/bin/bash`
 - Simple binary: `./src/compiler_rust/target/debug/simple`
+- Go runtime: `go version go1.22.2 linux/amd64`
+- Go scheduler: `GOMAXPROCS=32 NumCPU=32`
 
 > Size for AOT = binary bytes. For VM/interpreted = script bytes (runtime not included).
 > "Runtime dep" column shows runtime size where applicable.
