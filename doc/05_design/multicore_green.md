@@ -155,6 +155,11 @@ Behavior:
   `VEC_TIMER` interrupt vector to the `timer_interrupt` preemption source and
   records that an end-of-interrupt acknowledgement is required after the
   caller handles the tick.
+- `Scheduler.green_runtime_safepoint_active_carriers` and
+  `Scheduler.green_compiler_safepoint_active_carriers` provide stable named
+  call targets for runtime polling and compiler-inserted safepoints. Both
+  delegate to the shared active-carrier preemption bridge and return the same
+  evidence shape as generic safepoints.
 - `Scheduler.run_green_channel_wake_pass` converts green-channel send/unpark
   output into a carrier enqueue, then runs the bounded active pass only when
   the wake actually enqueued a receiver.
@@ -234,6 +239,7 @@ Repository guards:
   safepoint sweeps into final AP hardware handoff plus broader blocking
   surfaces.
 - Preemption strategy: scheduler-owned tick-budget yield, preemption safepoint
-  bridge, and hardware timer-vector adapter exist; remaining work is wiring
-  actual compiler-inserted yields, runtime safepoint polling sites, and final
-  IDT/APIC-owned queue state to that hook.
+  bridge, hardware timer-vector adapter, and named runtime/compiler safepoint
+  adapters exist; remaining work is inserting compiler-generated polls,
+  choosing runtime poll placement, and wiring final IDT/APIC-owned queue state
+  to that hook.

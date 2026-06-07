@@ -88,7 +88,6 @@ available to assert.
 #### routes remote green enqueue through the SimpleOS reschedule IPI surface
 
 1. smp init
-
 2. smp bringup ap
    - Expected: result.enqueued is true
    - Expected: result.ipi_sent is true
@@ -97,7 +96,7 @@ available to assert.
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -120,9 +119,7 @@ expect(smp_take_ipi(1u32)).to_equal(smp_ipi_resched())
 #### dispatches green work into scheduler-owned multicore execution state
 
 1. smp init
-
 2. smp bringup ap
-
 3. var scheduler = Scheduler new with cpu count
    - Expected: applied.applied is true
    - Expected: scheduler.green_current_task_on_cpu(1u32) equals `202`
@@ -132,7 +129,7 @@ expect(smp_take_ipi(1u32)).to_equal(smp_ipi_resched())
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -159,9 +156,7 @@ expect(scheduler.get_current_on_cpu(1u32).id).to_equal(0)
 #### extends green scheduler slots when SimpleOS topology grows
 
 1. smp init
-
 2. var scheduler = Scheduler new bootstrap
-
 3. scheduler set topology
    - Expected: applied.applied is true
    - Expected: scheduler.green_current_task_on_cpu(3u32) equals `303`
@@ -169,7 +164,7 @@ expect(scheduler.get_current_on_cpu(1u32).id).to_equal(0)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -194,9 +189,7 @@ expect(scheduler.green_context_switches_on_cpu(3u32)).to_equal(1)
 #### routes SimpleOS preemption safepoints through active green carriers
 
 1. smp init
-
 2. var scheduler = Scheduler new with cpu count
-
 3. scheduler set green carrier parallelism
    - Expected: pass_result.ran_workers equals `1`
    - Expected: runtime_poll.accepted is true
@@ -214,7 +207,7 @@ expect(scheduler.green_context_switches_on_cpu(3u32)).to_equal(1)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -250,9 +243,7 @@ expect(scheduler.green_current_task_on_cpu(0u32)).to_equal(0)
 #### rejects bad SimpleOS preemption source without ticking carriers
 
 1. smp init
-
 2. var scheduler = Scheduler new with cpu count
-
 3. scheduler set green carrier parallelism
    - Expected: rejected.accepted is false
    - Expected: rejected.reason equals `invalid_preemption_source`
@@ -264,7 +255,7 @@ expect(scheduler.green_current_task_on_cpu(0u32)).to_equal(0)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

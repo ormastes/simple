@@ -190,6 +190,14 @@ go-runtime-hardening
 - verification: `scheduler.spl` and `green_carrier.spl` checks passed, and
   `scheduler_green_parallelism_spec.spl` passed 27 examples including
   timer-vector, EOI-required, and green-yield evidence.
+- implementation: Added named runtime/compiler green safepoint adapters:
+  `Scheduler.green_runtime_safepoint_active_carriers` and
+  `Scheduler.green_compiler_safepoint_active_carriers`. They delegate to the
+  shared preemption bridge with stable source names, avoiding ad hoc string
+  call sites for future runtime polling and compiler insertion.
+- verification: `scheduler.spl` and `green_carrier.spl` checks passed, and
+  `scheduler_green_parallelism_spec.spl` passed 29 examples including named
+  runtime and compiler safepoint coverage.
 
 ## Completion Audit - 2026-06-07
 

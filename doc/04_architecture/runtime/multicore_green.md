@@ -189,6 +189,10 @@ SimpleOS path:
   `timer_interrupt` source, marks that an EOI is required, and returns the
   same active-carrier preemption evidence while leaving queue ownership with
   the caller.
+- `Scheduler.green_runtime_safepoint_active_carriers` and
+  `Scheduler.green_compiler_safepoint_active_carriers` are the named runtime
+  polling and compiler-insertion call targets for the same bridge. They avoid
+  stringly call sites while preserving the shared preemption result contract.
 - `Scheduler.run_green_channel_wake_pass` composes green-channel unpark output
   with carrier enqueue and the bounded active-carrier pass, so parked channel
   receivers can re-enter scheduler-owned execution without bypassing carrier
@@ -210,10 +214,10 @@ The selected Full Go-Like Runtime Roadmap uses all layers:
   wake/IPI intent, and AP evidence.
 
 Future roadmap work remains explicit: carrying bounded worker-loop/yield/tick,
-timer-vector, and preemption-safepoint sweeps into final AP hardware handoff,
-expanding blocking coverage beyond the current green-channel wake pass, and
-wiring final IDT/APIC-owned queue state plus compiler-inserted safepoint call
-sites before claiming tight-loop fairness comparable to Go.
+timer-vector, and named runtime/compiler safepoint sweeps into final AP
+hardware handoff, expanding blocking coverage beyond the current green-channel
+wake pass, and wiring final IDT/APIC-owned queue state plus actual compiler
+insertion/poll-placement before claiming tight-loop fairness comparable to Go.
 
 ## Known Gaps
 

@@ -34,7 +34,7 @@ SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 ./src/compiler_rust/target/debug/simple test 
 | SimpleOS green-carrier compile check | PASS | 1 file |
 | SimpleOS green-carrier unit contract | PASS | 38 |
 | SimpleOS scheduler compile check | PASS | 1 file |
-| SimpleOS scheduler green-carrier parallelism | PASS | 27 |
+| SimpleOS scheduler green-carrier parallelism | PASS | 29 |
 | SimpleOS green-carrier QEMU spec default lane | PASS | 1 |
 | SimpleOS green-carrier QEMU live lane | PASS | 1 |
 
@@ -84,6 +84,9 @@ SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 ./src/compiler_rust/target/debug/simple test 
   The scheduler timer-interrupt adapter now proves `VEC_TIMER` maps to the
   `timer_interrupt` source, requires EOI acknowledgement, and reuses the same
   active-carrier preemption evidence.
+  Named runtime and compiler safepoint adapters now prove future runtime poll
+  sites and compiler-inserted checks have stable scheduler entrypoints without
+  repeating source strings at call sites.
   The fixed-slot freestanding helper now proves a QEMU-friendly timer-slice
   yield path can requeue a running CPU1 green task without heap-heavy scheduler
   state.

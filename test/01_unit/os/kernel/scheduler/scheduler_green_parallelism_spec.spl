@@ -477,6 +477,44 @@ describe "Scheduler green carrier parallelism":
         expect(compiler_tick.reason).to_equal("time_slice_running")
         expect(sched.green_current_task_on_cpu(0u32)).to_equal(76)
 
+    it "routes runtime safepoint polling through named green adapter":
+        var sched = Scheduler.new_with_cpu_count(4u32)
+        sched.set_green_carrier_parallelism(1)
+        val queues = green_carrier_run_queues_new(4, 8)
+        val first = green_carrier_spawn_task(79, 4, 1, 0, 4, 4, 4, 0)
+        val queued = green_carrier_apply_enqueue(queues, first)
+        val pass_result = sched.run_green_carrier_active_pass(queued.queues, 0)
+        val runtime_poll = sched.green_runtime_safepoint_active_carriers(pass_result.queues)
+
+        expect(runtime_poll.accepted).to_equal(true)
+        expect(runtime_poll.source).to_equal("runtime_safepoint")
+        expect(runtime_poll.preemption_requested).to_equal(false)
+        expect(runtime_poll.ticked_carriers).to_equal(1)
+        expect(runtime_poll.yielded_workers).to_equal(0)
+        expect(runtime_poll.reason).to_equal("time_slice_running")
+        expect(sched.green_current_task_on_cpu(0u32)).to_equal(79)
+
+    it "routes compiler safepoint through named green adapter":
+        var sched = Scheduler.new_with_cpu_count(4u32)
+        sched.set_green_carrier_parallelism(1)
+        val queues = green_carrier_run_queues_new(4, 8)
+        val first = green_carrier_spawn_task(80, 4, 1, 0, 4, 4, 4, 0)
+        val queued = green_carrier_apply_enqueue(queues, first)
+        val pass_result = sched.run_green_carrier_active_pass(queued.queues, 0)
+        val compiler_poll1 = sched.green_compiler_safepoint_active_carriers(pass_result.queues)
+        val compiler_poll2 = sched.green_compiler_safepoint_active_carriers(compiler_poll1.queues)
+
+        expect(compiler_poll1.accepted).to_equal(true)
+        expect(compiler_poll1.source).to_equal("compiler_safepoint")
+        expect(compiler_poll1.preemption_requested).to_equal(false)
+        expect(compiler_poll2.accepted).to_equal(true)
+        expect(compiler_poll2.source).to_equal("compiler_safepoint")
+        expect(compiler_poll2.preemption_requested).to_equal(true)
+        expect(compiler_poll2.yielded_workers).to_equal(1)
+        expect(compiler_poll2.reason).to_equal("green_time_slice_expired")
+        expect(green_carrier_queue_depth(compiler_poll2.queues, 0)).to_equal(1)
+        expect(sched.green_current_task_on_cpu(0u32)).to_equal(0)
+
     it "rejects unknown green preemption source without mutating carriers":
         var sched = Scheduler.new_with_cpu_count(4u32)
         sched.set_green_carrier_parallelism(1)

@@ -28,7 +28,7 @@ scheduler_green_parallelism_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 27 | 27 | 0 | 0 |
+| 29 | 29 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1084,6 +1084,91 @@ expect(sched.green_current_task_on_cpu(0u32)).to_equal(76)
 
 </details>
 
+#### routes runtime safepoint polling through named green adapter
+
+1. var sched = Scheduler new with cpu count
+2. sched set green carrier parallelism
+   - Expected: runtime_poll.accepted is true
+   - Expected: runtime_poll.source equals `runtime_safepoint`
+   - Expected: runtime_poll.preemption_requested is false
+   - Expected: runtime_poll.ticked_carriers equals `1`
+   - Expected: runtime_poll.yielded_workers equals `0`
+   - Expected: runtime_poll.reason equals `time_slice_running`
+   - Expected: sched.green_current_task_on_cpu(0u32) equals `79`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var sched = Scheduler.new_with_cpu_count(4u32)
+sched.set_green_carrier_parallelism(1)
+val queues = green_carrier_run_queues_new(4, 8)
+val first = green_carrier_spawn_task(79, 4, 1, 0, 4, 4, 4, 0)
+val queued = green_carrier_apply_enqueue(queues, first)
+val pass_result = sched.run_green_carrier_active_pass(queued.queues, 0)
+val runtime_poll = sched.green_runtime_safepoint_active_carriers(pass_result.queues)
+
+expect(runtime_poll.accepted).to_equal(true)
+expect(runtime_poll.source).to_equal("runtime_safepoint")
+expect(runtime_poll.preemption_requested).to_equal(false)
+expect(runtime_poll.ticked_carriers).to_equal(1)
+expect(runtime_poll.yielded_workers).to_equal(0)
+expect(runtime_poll.reason).to_equal("time_slice_running")
+expect(sched.green_current_task_on_cpu(0u32)).to_equal(79)
+```
+
+</details>
+
+#### routes compiler safepoint through named green adapter
+
+1. var sched = Scheduler new with cpu count
+2. sched set green carrier parallelism
+   - Expected: compiler_poll1.accepted is true
+   - Expected: compiler_poll1.source equals `compiler_safepoint`
+   - Expected: compiler_poll1.preemption_requested is false
+   - Expected: compiler_poll2.accepted is true
+   - Expected: compiler_poll2.source equals `compiler_safepoint`
+   - Expected: compiler_poll2.preemption_requested is true
+   - Expected: compiler_poll2.yielded_workers equals `1`
+   - Expected: compiler_poll2.reason equals `green_time_slice_expired`
+   - Expected: green_carrier_queue_depth(compiler_poll2.queues, 0) equals `1`
+   - Expected: sched.green_current_task_on_cpu(0u32) equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var sched = Scheduler.new_with_cpu_count(4u32)
+sched.set_green_carrier_parallelism(1)
+val queues = green_carrier_run_queues_new(4, 8)
+val first = green_carrier_spawn_task(80, 4, 1, 0, 4, 4, 4, 0)
+val queued = green_carrier_apply_enqueue(queues, first)
+val pass_result = sched.run_green_carrier_active_pass(queued.queues, 0)
+val compiler_poll1 = sched.green_compiler_safepoint_active_carriers(pass_result.queues)
+val compiler_poll2 = sched.green_compiler_safepoint_active_carriers(compiler_poll1.queues)
+
+expect(compiler_poll1.accepted).to_equal(true)
+expect(compiler_poll1.source).to_equal("compiler_safepoint")
+expect(compiler_poll1.preemption_requested).to_equal(false)
+expect(compiler_poll2.accepted).to_equal(true)
+expect(compiler_poll2.source).to_equal("compiler_safepoint")
+expect(compiler_poll2.preemption_requested).to_equal(true)
+expect(compiler_poll2.yielded_workers).to_equal(1)
+expect(compiler_poll2.reason).to_equal("green_time_slice_expired")
+expect(green_carrier_queue_depth(compiler_poll2.queues, 0)).to_equal(1)
+expect(sched.green_current_task_on_cpu(0u32)).to_equal(0)
+```
+
+</details>
+
 #### rejects unknown green preemption source without mutating carriers
 
 1. var sched = Scheduler new with cpu count
@@ -1133,8 +1218,8 @@ expect(sched.green_ticks_remaining_on_cpu(0u32)).to_equal(2)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 27 |
-| Active scenarios | 27 |
+| Total scenarios | 29 |
+| Active scenarios | 29 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
