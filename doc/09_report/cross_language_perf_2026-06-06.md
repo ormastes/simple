@@ -7,6 +7,14 @@
 **Profile script:** `scripts/check/check-cross-language-perf.shs`
 **Report path:** `doc/09_report/cross_language_perf_2026-06-06.md`
 
+> **Historical report:** this smoke predates the current split between
+> `cooperative_green_spawn` and `multicore_green_spawn`. Rows named
+> `Simple green` are cooperative queue evidence only and must not be cited as
+> Go-like M:N CPU-parallel evidence. Use
+> `doc/09_report/cross_language_perf_parallel_smoke.md` or
+> `doc/09_report/cross_language_perf_parallel_large_2026-06-07.md` for current
+> gated multicore-green profile evidence.
+
 ## Methodology
 
 - Generates equivalent hello, recursive fib, in-process warm fib, worker, and fanout workloads for each supported runtime.
