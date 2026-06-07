@@ -72,7 +72,8 @@ fixed (see `doc/08_tracking/bug/pure_simple_web_render_interpreter_bound_2026-06
    96x96 smoke improved `2361955us -> 2184205us` with unchanged checksum
    `39575341662880`. A follow-up single-class reject avoids padded-string
    construction/splitting for one-token class attributes that miss a `.class`
-   selector, while preserving exact class matching.
+   selector, and skips compound `.a.b` selector splitting when the node has only
+   one class token, while preserving exact class matching.
 7. single-property CSS declaration blocks still paid the full declaration
    lookup path for every matched rule. The 2026-06-07 declaration fast-path
    parses common one-property blocks once and falls back to the full parser for

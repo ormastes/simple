@@ -314,6 +314,8 @@ paths.
 for non-matching one-token class attributes instead of constructing padded
 strings and splitting the class list for every missed `.class` rule. Focused
 coverage asserts `.button` does not prefix-match `class='button-primary'`.
+Compound class selectors such as `.button.primary` also fail fast for a
+one-token node class before splitting the selector requirement list.
 
 ## Path H — single-declaration CSS blocks paid full declaration lookup — FIXED 2026-06-07
 
