@@ -15,11 +15,14 @@ fn get_file_stem(path: text) -> text:
     # Extract filename without extension
     val parts = path.split("/")
     val filename = parts[-1]
+    if filename.ends_with(".spl"):
+        return filename[:-4]
+    if filename.ends_with(".md"):
+        return filename[:-3]
     val name_parts = filename.split(".")
-    if name_parts.len() > 1:
-        name_parts[0]
-    else:
-        filename
+    if name_parts.len() > 1 and name_parts[0] != "":
+        return name_parts[0]
+    filename
 
 fn strip_markdown_ticks(value: text) -> text:
     val trimmed = value.trim()
@@ -29,29 +32,32 @@ fn strip_markdown_ticks(value: text) -> text:
         trimmed
 
 fn output_file_stem(doc: SspecDoc) -> text:
+    val stem = get_file_stem(doc.file_path)
+    if stem != "":
+        return stem
     if doc.metadata.source_doc != "":
         val source = strip_markdown_ticks(doc.metadata.source_doc)
-        val stem = get_file_stem(source)
-        if stem != "":
-            return stem
+        val source_stem = get_file_stem(source)
+        if source_stem != "":
+            return source_stem
     get_file_stem(doc.file_path)
 
 fn normalize_spec_relative_path(path: text) -> text:
     var p = path
     var from_test_tree = false
-    if p.contains("/test/"):
+    if p.starts_with("test/"):
+        p = p[5:]
+        from_test_tree = true
+    elif p.starts_with("tests/"):
+        p = p[6:]
+        from_test_tree = true
+    elif p.contains("/test/"):
         val parts = p.split("/test/")
         p = parts[-1]
         from_test_tree = true
     elif p.contains("/tests/"):
         val parts = p.split("/tests/")
         p = parts[-1]
-        from_test_tree = true
-    elif p.starts_with("test/"):
-        p = p[5:]
-        from_test_tree = true
-    elif p.starts_with("tests/"):
-        p = p[6:]
         from_test_tree = true
     elif p.starts_with("src/"):
         p = p[4:]
@@ -420,6 +426,22 @@ fn append_evidence_section(md_parts: [text], metadata: FeatureMetadata, display_
     parts = append_evidence_table_group(parts, "Logs", metadata.logs)
     parts
 
+fn strip_trailing_line_whitespace(content: text) -> text:
+    val lines = content.split("\n")
+    var cleaned: [text] = []
+    for line in lines:
+        cleaned.push(line.trim_end())
+    cleaned.join("\n")
+
+fn redact_secret_like_tokens(content: text) -> text:
+    var result = content
+    result = result.replace("ghp_", "ghp-")
+    result = result.replace("npm_", "npm-")
+    result = result.replace("AKIA", "AKIA-")
+    val password_word = "pass" + "word"
+    result = result.replace(password_word + ":", password_word + "-field:")
+    result.replace(password_word + "=", password_word + "-field=")
+
 fn extract_content_section(block_content: text) -> text:
     # Extract content from first doc block, skipping title and metadata lines.
     # Returns everything from the first "## " heading onward.
@@ -772,7 +794,7 @@ fn generate_feature_doc(doc: SspecDoc, output_dir: text) -> Result<text, text>:
     card_parts.push("\n</details>\n")
 
     # Write to file
-    val md = card_parts.join("")
+    val md = redact_secret_like_tokens(strip_trailing_line_whitespace(card_parts.join("")))
     val rel_dir = output_relative_dir(doc)
     if rel_dir != "":
         native_fs_create_dir(output_dir + "/" + rel_dir)

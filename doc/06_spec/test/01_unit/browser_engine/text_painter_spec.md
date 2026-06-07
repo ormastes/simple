@@ -1,0 +1,144 @@
+# Text Painter Specification
+
+> <details>
+
+<!-- sdn-diagram:id=text_painter_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=text_painter_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+text_painter_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=text_painter_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 4 | 4 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Text Painter Specification
+
+## Scenarios
+
+### Browser text painter
+
+#### keeps Chrome text glyph scanlines at their native y coordinate
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(browser_chrome_text_scanline_write_y_probe(2)).to_equal(2)
+expect(browser_chrome_text_scanline_write_y_probe(48)).to_equal(48)
+expect(browser_chrome_text_scanline_write_y_probe(49)).to_equal(49)
+```
+
+</details>
+
+#### wraps the Google corpus text into multiple pixel-width lines
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><body><div style='width: 120px; height: 40px; background-color: #2563eb; font-family: Arial, sans-serif'>Google search deterministic compatibility fixture</div></body></html>"
+val lines = br_famous_site_corpus_layout_lines(html, 16, 120)
+expect(lines.len()).to_equal(4)
+expect(lines.join("|")).to_equal("Google search|deterministic|compatibility|fixture")
+val widths = br_famous_site_corpus_layout_line_widths_sdn(html, 16, 120)
+expect(widths).to_contain("(line text: \"Google search\" width: 105)")
+```
+
+</details>
+
+#### exposes calibrated paint runs for production text compositing
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><body><div data-font-corpus=\"known-site-fonts\" style='width: 120px; height: 40px; background-color: #2563eb; font-family: Arial, sans-serif'>Google search deterministic compatibility fixture</div></body></html>"
+val runs = br_famous_site_corpus_layout_paint_runs(html, 16, 120, 8, 8, 18)
+expect(runs.len()).to_equal(4)
+expect(runs[0].line).to_equal("Google search")
+expect(runs[0].x).to_equal(8)
+expect(runs[0].y).to_equal(8)
+expect(runs[0].width).to_equal(105)
+expect(runs[1].line).to_equal("deterministic")
+expect(runs[1].y).to_equal(26)
+val sdn = br_famous_site_corpus_layout_paint_runs_sdn(html, 16, 120, 8, 8, 18)
+expect(sdn).to_contain("count: 4")
+expect(sdn).to_contain("(run text: \"compatibility\" x: 8 y: 44")
+```
+
+</details>
+
+#### uses corpus font stack metrics for wider Chrome line breaks
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><body><div data-font-corpus=\"known-site-fonts\" style='width: 120px; height: 40px; background-color: #0f766e; font-family: \"Times New Roman\", Times, serif'>TikTok productivity deterministic compatibility fixture</div></body></html>"
+val lines = br_famous_site_corpus_layout_lines(html, 16, 120)
+expect(lines.len()).to_equal(5)
+expect(lines.join("|")).to_equal("TikTok|productivity|deterministic|compatibility|fixture")
+```
+
+</details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Active |
+| Source | `test/01_unit/browser_engine/text_painter_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering:
+- Browser text painter
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 4 |
+| Active scenarios | 4 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>
