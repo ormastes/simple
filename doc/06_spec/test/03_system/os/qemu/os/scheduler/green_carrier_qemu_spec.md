@@ -99,8 +99,8 @@ Run the live QEMU lane:
 SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 bin/release/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean
 ```
 
-Run the future final hardware handoff lane after the AP ring/user proof marker
-exists:
+Run the future final hardware handoff lane after the AP ring/user proof markers
+exist:
 
 ```sh
 SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 bin/release/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean
@@ -115,6 +115,14 @@ The live serial output must include:
 [green-carrier-qemu] PASS=true
 [green-carrier-qemu] PREEMPT_PASS=true
 [green-carrier-qemu] SCHED_HANDOFF_PASS=true
+```
+
+The future final hardware handoff lane must additionally include all of:
+
+```text
+[green-carrier-qemu] HW_HANDOFF_PASS=true
+[green-carrier-qemu] USER_ENTRY_PASS=true
+[green-carrier-qemu] USER_SYSCALL_PASS=true
 ```
 
 ## Scenarios
@@ -171,7 +179,7 @@ else:
 
 </details>
 
-#### keeps final hardware handoff proof behind a separate opt-in marker
+#### keeps final hardware handoff proof behind separate opt-in markers
 
 - Skip the final hardware handoff lane unless its explicit live gate is enabled
    - Expected: bool_evidence(_hw_handoff_enabled()) equals `0`
@@ -181,13 +189,13 @@ else:
    - Expected: bool_evidence(built) equals `1`
 - Boot the two-CPU guest probe under QEMU
 -  print probe debug
-- Verify AP startup, scheduler handoff, and final hardware handoff markers
+- Verify AP startup, scheduler handoff, final hardware handoff, user entry, and syscall markers
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -205,12 +213,14 @@ else:
     step("Boot the two-CPU guest probe under QEMU")
     val result = _run_probe(output_path)
     val serial = result[0]
-    if not serial.contains(GREEN_HW_HANDOFF_MARKER):
+    if not serial.contains(GREEN_HW_HANDOFF_MARKER) or not serial.contains(GREEN_USER_ENTRY_MARKER) or not serial.contains(GREEN_USER_SYSCALL_MARKER):
         _print_probe_debug(serial, result[1])
-    step("Verify AP startup, scheduler handoff, and final hardware handoff markers")
+    step("Verify AP startup, scheduler handoff, final hardware handoff, user entry, and syscall markers")
     expect(serial).to_contain(AP_ONLINE_MARKER)
     expect(serial).to_contain(GREEN_SCHED_HANDOFF_MARKER)
     expect(serial).to_contain(GREEN_HW_HANDOFF_MARKER)
+    expect(serial).to_contain(GREEN_USER_ENTRY_MARKER)
+    expect(serial).to_contain(GREEN_USER_SYSCALL_MARKER)
 ```
 
 </details>

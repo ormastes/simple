@@ -84,12 +84,14 @@ it must not be treated as final ring/user hardware context-switch proof.
 - Verify the existing scheduler marker remains documented as non-final evidence
 - Verify the current guest probe does not claim the future final marker
    - Expected: absent_in_text(probe, "HW_HANDOFF_PASS=true") equals `1`
+   - Expected: absent_in_text(probe, "USER_ENTRY_PASS=true") equals `1`
+   - Expected: absent_in_text(probe, "USER_SYSCALL_PASS=true") equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -104,10 +106,14 @@ expect(blocker).to_contain("HW_HANDOFF_PASS=true")
 expect(blocker).to_contain("do not overload")
 expect(qemu_spec).to_contain("GREEN_SCHED_HANDOFF_MARKER")
 expect(qemu_spec).to_contain("GREEN_HW_HANDOFF_MARKER")
+expect(qemu_spec).to_contain("GREEN_USER_ENTRY_MARKER")
+expect(qemu_spec).to_contain("GREEN_USER_SYSCALL_MARKER")
 expect(qemu_spec).to_contain("SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE")
 
 step("Verify the current guest probe does not claim the future final marker")
 expect(absent_in_text(probe, "HW_HANDOFF_PASS=true")).to_equal(1)
+expect(absent_in_text(probe, "USER_ENTRY_PASS=true")).to_equal(1)
+expect(absent_in_text(probe, "USER_SYSCALL_PASS=true")).to_equal(1)
 ```
 
 </details>
@@ -122,7 +128,7 @@ expect(absent_in_text(probe, "HW_HANDOFF_PASS=true")).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -131,13 +137,19 @@ val blocker = read_text("doc/08_tracking/bug/simpleos_green_hardware_context_swi
 val context_switch = read_text("src/os/kernel/scheduler/context_switch.spl")
 val x86_context = read_text("src/os/kernel/arch/x86_64/context.spl")
 val user_entry = read_text("src/os/kernel/arch/x86_64/user_entry.spl")
+val syscall_entry = read_text("src/os/kernel/arch/x86_64/cpu.spl")
+val syscall_dispatch = read_text("src/os/kernel/ipc/syscall.spl")
 val probe = read_text("examples/09_embedded/simple_os/arch/x86_64/green_carrier_probe_entry.spl")
 
 step("Verify the blocker links the live probe and current context-switch symbols")
 expect(blocker).to_contain("src/os/kernel/scheduler/context_switch.spl")
 expect(blocker).to_contain("src/os/kernel/arch/x86_64/context.spl")
 expect(blocker).to_contain("src/os/kernel/arch/x86_64/user_entry.spl")
+expect(blocker).to_contain("src/os/kernel/arch/x86_64/cpu.spl")
+expect(blocker).to_contain("src/os/kernel/ipc/syscall.spl")
 expect(blocker).to_contain("green_carrier_probe_entry.spl")
+expect(blocker).to_contain("USER_ENTRY_PASS=true")
+expect(blocker).to_contain("USER_SYSCALL_PASS=true")
 
 step("Verify current implementation files expose the named proof points")
 expect(context_switch).to_contain("context_restore")
@@ -145,6 +157,9 @@ expect(context_switch).to_contain("switch_context_with_as")
 expect(x86_context).to_contain("arch_x86_64_enter_user_task")
 expect(x86_context).to_contain("rt_x86_enter_user_first")
 expect(user_entry).to_contain("dispatch_enter_user_blocking")
+expect(syscall_entry).to_contain("kernel_syscall_entry_asm")
+expect(syscall_entry).to_contain("rt_syscall_dispatch")
+expect(syscall_dispatch).to_contain("syscall_handler")
 expect(probe).to_contain("SCHED_HANDOFF_PASS")
 ```
 
