@@ -58,6 +58,13 @@ Run the live QEMU lane:
 SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 bin/release/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean
 ```
 
+Run the future final hardware handoff lane after the AP ring/user proof marker
+exists:
+
+```sh
+SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 bin/release/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean
+```
+
 ## Examples
 
 The live serial output must include:
@@ -88,9 +95,13 @@ val AP_ONLINE_MARKER: text = "[smp] AP reached 64-bit entry"
 val GREEN_PASS_MARKER: text = "[green-carrier-qemu] PASS=true"
 val GREEN_PREEMPT_MARKER: text = "[green-carrier-qemu] PREEMPT_PASS=true"
 val GREEN_SCHED_HANDOFF_MARKER: text = "[green-carrier-qemu] SCHED_HANDOFF_PASS=true"
+val GREEN_HW_HANDOFF_MARKER: text = "[green-carrier-qemu] HW_HANDOFF_PASS=true"
 
 fn _enabled() -> bool:
     (rt_env_get("SIMPLEOS_GREEN_CARRIER_QEMU_LIVE") ?? "") == "1"
+
+fn _hw_handoff_enabled() -> bool:
+    (rt_env_get("SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE") ?? "") == "1"
 
 fn _run_shell(command: text) -> (text, text, i64):
     rt_process_run("/bin/sh", ["-c", command])
@@ -145,6 +156,12 @@ fn _print_probe_debug(serial: text, qemu_exit: i64):
 fn step(name: text) -> i64:
     name.len()
 
+fn bool_evidence(value: bool) -> i64:
+    if value:
+        1
+    else:
+        0
+
 describe "SimpleOS green carrier live QEMU proof":
     """Live green-carrier validation, disabled unless SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1."""
 
@@ -171,3 +188,26 @@ describe "SimpleOS green carrier live QEMU proof":
             expect(serial.contains(GREEN_PASS_MARKER)).to_equal(true)
             expect(serial.contains(GREEN_PREEMPT_MARKER)).to_equal(true)
             expect(serial.contains(GREEN_SCHED_HANDOFF_MARKER)).to_equal(true)
+
+    it "keeps final hardware handoff proof behind a separate opt-in marker":
+        """The final AP ring/user handoff marker is intentionally separate from SCHED_HANDOFF_PASS."""
+        if not _hw_handoff_enabled():
+            step("Skip the final hardware handoff lane unless its explicit live gate is enabled")
+            expect(bool_evidence(_hw_handoff_enabled())).to_equal(0)
+        elif not _qemu_available():
+            step("Skip final hardware handoff execution on hosts without qemu-system-x86_64")
+            expect(bool_evidence(_qemu_available())).to_equal(0)
+        else:
+            step("Build the SimpleOS green carrier guest probe for final handoff evidence")
+            val output_path = "build/os/simpleos_green_carrier_probe.elf"
+            val built = _build_probe(output_path, "cranelift") or _build_probe(output_path, "llvm")
+            expect(bool_evidence(built)).to_equal(1)
+            step("Boot the two-CPU guest probe under QEMU")
+            val result = _run_probe(output_path)
+            val serial = result[0]
+            if not serial.contains(GREEN_HW_HANDOFF_MARKER):
+                _print_probe_debug(serial, result[1])
+            step("Verify AP startup, scheduler handoff, and final hardware handoff markers")
+            expect(serial).to_contain(AP_ONLINE_MARKER)
+            expect(serial).to_contain(GREEN_SCHED_HANDOFF_MARKER)
+            expect(serial).to_contain(GREEN_HW_HANDOFF_MARKER)

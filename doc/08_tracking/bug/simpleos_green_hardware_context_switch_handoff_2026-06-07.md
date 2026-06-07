@@ -44,6 +44,33 @@ The final marker must be separate from the existing
 `SCHED_HANDOFF_PASS=true` marker so scheduler-state evidence cannot be mistaken
 for ring/user hardware handoff evidence.
 
+Use a separate final marker:
+`[green-carrier-qemu] HW_HANDOFF_PASS=true`; do not overload
+`[green-carrier-qemu] SCHED_HANDOFF_PASS=true`.
+
+The executable live gate is
+`SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1`. It should fail until the
+guest probe prints the final hardware handoff marker from a real AP ring/user
+handoff path.
+
+Current proof-point candidates:
+
+- `src/os/kernel/scheduler/context_switch.spl`
+  - `context_restore`
+  - `switch_context_with_as`
+- `src/os/kernel/arch/x86_64/context.spl`
+  - `arch_x86_64_enter_user_task`
+  - `rt_x86_enter_user_first`
+- `src/os/kernel/arch/x86_64/user_entry.spl`
+  - `dispatch_enter_user_blocking`
+- `test/03_system/os/qemu/os/scheduler/context_switch_qemu_spec.spl`
+  - existing QEMU context-switch lane, currently too broad to prove green AP
+    ring/user handoff.
+- `test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl`
+  - current live AP green-carrier proof.
+- `examples/09_embedded/simple_os/arch/x86_64/green_carrier_probe_entry.spl`
+  - current live guest probe entry.
+
 ## Current Boundary
 
 Do not mark `FR-RUNTIME-MULTICORE-GREEN-2026-06-06` done while this blocker is

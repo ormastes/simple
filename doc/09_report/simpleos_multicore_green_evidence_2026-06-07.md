@@ -19,12 +19,15 @@ the `examples/09_embedded/simple_os` submodule.
 ./src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl --mode=interpreter --clean
 ./src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl --mode=interpreter --clean
 ./src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.spl --mode=interpreter --clean
+./src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.spl --mode=interpreter --clean
 ./src/compiler_rust/target/debug/simple check src/os/kernel/scheduler/green_carrier.spl
 ./src/compiler_rust/target/debug/simple test test/01_unit/os/kernel/scheduler/green_carrier_spec.spl --mode=interpreter --clean
 ./src/compiler_rust/target/debug/simple check src/os/kernel/scheduler/scheduler.spl
 ./src/compiler_rust/target/debug/simple test test/01_unit/os/kernel/scheduler/scheduler_green_parallelism_spec.spl --mode=interpreter --clean
 ./src/compiler_rust/target/debug/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean
 SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 bin/release/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean
+# Future final hardware gate, expected to remain opt-in until HW_HANDOFF_PASS exists:
+# SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 bin/release/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean
 ```
 
 ## Results
@@ -34,12 +37,13 @@ SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 bin/release/simple test test/03_system/os/qem
 | SimpleOS cooperative green | PASS | 3 |
 | SimpleOS multicore green scheduler contract | PASS | 6 |
 | SimpleOS green-channel wake bridge | PASS | 4 |
+| SimpleOS final hardware handoff blocker contract | PASS | 2 |
 | SimpleOS green-carrier compile check | PASS | 1 file |
 | SimpleOS green-carrier unit contract | PASS | 38 |
 | SimpleOS scheduler compile check | PASS | 1 file |
 | SimpleOS scheduler green-carrier parallelism | PASS | 29 |
-| SimpleOS green-carrier QEMU spec default lane | PASS | 1 |
-| SimpleOS green-carrier QEMU live lane | PASS | 1 |
+| SimpleOS green-carrier QEMU spec default lane | PASS | 2 |
+| SimpleOS green-carrier QEMU live lane | PASS | 2 |
 
 ## Current Refresh
 
@@ -57,6 +61,13 @@ direct rerun passed:
 - QEMU default gate lane: 1 assertion
 - QEMU live lane: 1 assertion in 37645ms
 
+After syncing `/tmp/simple-pherallel-sync` to `origin/main` at `989e782de4`,
+the blocker contract and QEMU green-carrier lanes were rerun:
+
+- final hardware handoff blocker contract: 2 assertions
+- QEMU default gate lane: 2 assertions
+- QEMU live lane: 2 assertions in 40588ms
+
 This refresh does not claim final ring/user context-switch handoff across APs;
 that claim remains blocked by
 `doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md`.
@@ -65,12 +76,15 @@ that claim remains blocked by
 
 - The default QEMU spec lane proves the opt-in gate is wired and disabled unless
   `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1` is set.
-- The live lane passed in 37645ms on `9b5cb43402`. The spec built the x86_64
+- The live lane passed in 40588ms on `989e782de4`. The spec built the x86_64
   probe, booted a two-CPU QEMU guest, and asserted
   `[smp] AP reached 64-bit entry`,
   `[green-carrier-qemu] PASS=true`, and
   `[green-carrier-qemu] PREEMPT_PASS=true`, and
   `[green-carrier-qemu] SCHED_HANDOFF_PASS=true` in serial output.
+- The final AP ring/user hardware handoff marker is deliberately separate:
+  `[green-carrier-qemu] HW_HANDOFF_PASS=true` is only required when
+  `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1` is set.
 - The hosted SimpleOS specs prove scheduler-owned green execution state remains
   separate from normal OS task state. The multicore-green SimpleOS contract now
   also proves named runtime, timer-interrupt, and compiler preemption
