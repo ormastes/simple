@@ -145,3 +145,14 @@ and `test/01_unit/lib/gpu/engine2d/helpers_text_spec.spl` instead.
 
 Measurement-agent report:
 [`gui_perf_measurement_agent_2026-06-07.md`](gui_perf_measurement_agent_2026-06-07.md).
+
+2026-06-07 wrapped-line range paint follow-up: the Simple Web software text
+pass no longer allocates `txt.substring(off, endc)` for each wrapped line before
+glyph drawing. Range-based sparse/scaled clipped painters draw directly from the
+original text span. On the same 128x96 / 3-frame software render-loop command,
+`simple_web_software` moved from `p50_frame_us=128235`,
+`p95_frame_us=128897` to `p50_frame_us=122665`, `p95_frame_us=125299` with
+unchanged checksum `sum32:52601568094128`. The row still reports
+`runtime_execution_path="engine2d-cpu_scalar"` and the JIT still falls back with
+`Unknown type: any`, so this is a software hot-loop reduction, not completion of
+production GPU font offload.

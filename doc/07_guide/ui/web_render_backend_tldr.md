@@ -23,6 +23,8 @@ web_render_backend:
   gate: check-electron-simple-web-engine2d-bitmap-evidence.shs  # mismatch=0
   perf: pure_simple interpreted+canvas-bound; keep viewport small; binary must
         carry the in-place array-write fix (2d4579a0) or every pixel write clones.
+        Wrapped-line text paint uses range glyph drawing; remaining live text
+        bottleneck is CPU-scalar until generated glyph kernels feed returned glyphs.
 ```
 
 Full guide: [web_render_backend.md](web_render_backend.md)

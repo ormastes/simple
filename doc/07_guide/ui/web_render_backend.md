@@ -46,7 +46,7 @@ The pure-Simple raster runs interpreted and is canvas-bound. It now resolves a
 preferred backend by policy before raster: `SIMPLE_ENGINE2D_BACKEND` override
 first, Metal on Darwin/macOS, CUDA/HIP when the standard visibility env vars are
 present, then `software`. Explicit `software`, `cpu`, `cpu_simd`, or GPU backend
-names remain available for deterministic comparison and fallback tests. Nine
+names remain available for deterministic comparison and fallback tests. Ten
 O(n²)-class traps were
 fixed (see `doc/08_tracking/bug/pure_simple_web_render_interpreter_bound_2026-06-06.md`):
 1. heuristic-surface buffer built with a `push` loop → use `[0; w*h]` array-repeat;
@@ -99,6 +99,12 @@ fixed (see `doc/08_tracking/bug/pure_simple_web_render_interpreter_bound_2026-06
    `(text,fg,bg,font_size)` bucket lookup; focused coverage proves
    `Repeat, Other, Repeat` returns through `bucket_hits` without another cache
    scan.
+10. The compatibility Simple Web software text pass allocated
+    `txt.substring(off, endc)` for every wrapped line before glyph drawing. The
+    2026-06-07 range-paint fix draws directly from `(text,start,end)` for sparse
+    and clipped scaled glyph paths; the 128x96 / 3-frame software row improved
+    `128235us -> 122665us` p50 with unchanged checksum
+    `sum32:52601568094128`.
 
 The HTML layout Draw IR path now emits `text` commands for real text nodes with
 font size, line height, glyph advance/scale, clip rect, parent id, and

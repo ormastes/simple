@@ -392,6 +392,27 @@ Further work should target bitmap/vector font rendering through the generated
 Engine2D GPU text-blit lane or a compiled-mode text raster path, not another
 software present/readback cycle.
 
+## Path I — wrapped text paint allocated a substring per line — FIXED 2026-06-07
+
+The Simple Web software text pass still built `txt.substring(off, endc)` for
+every wrapped line before drawing glyphs. The glyph painter only needs the
+source text and the start/end offsets, so this paid repeated text allocation in
+the hottest remaining CPU-scalar path.
+
+**Fix (pure Simple):** add range-based sparse and clipped scaled text painters
+and draw wrapped lines directly from `(text, start, end)` without changing glyph
+lookup, clipping, advance, or pixel output. Focused 128x96 / 3-frame software
+render-loop evidence:
+
+| Measurement | Before | After |
+|-------------|--------|-------|
+| `simple_web_software` p50 | `128235us` | `122665us` |
+| `simple_web_software` p95 | `128897us` | `125299us` |
+| checksum | `sum32:52601568094128` | `sum32:52601568094128` |
+
+Unit coverage: `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl`
+passed 57 scenarios after the change.
+
 ## 2026-06-06 Current Profile Evidence
 
 The GUI profile harness now measures the Simple web software row through a real
