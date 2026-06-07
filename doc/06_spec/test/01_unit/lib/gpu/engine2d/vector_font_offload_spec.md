@@ -1,6 +1,6 @@
 # Vector Font Offload Specification
 
-> 1. accel
+> 1. accel native
 
 <!-- sdn-diagram:id=vector_font_offload_spec.arch -->
 <details class="sdn-source">
@@ -27,7 +27,7 @@ vector_font_offload_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -38,11 +38,42 @@ vector_font_offload_spec -> std
 
 ### Engine2D vector font offload evidence
 
+#### treats native backend vector font proof as GPU proof before CPU fallback
+
+1. accel native
+   - Expected: evidence.generated_ready is true
+   - Expected: evidence.gpu_glyph_returned is false
+   - Expected: evidence.production_ready is false
+   - Expected: evidence.status_code equals `gpu-proof-with-cpu-glyph`
+   - Expected: evidence.reason equals `metal-vector-font-proof-matched-cpu-with-cpu-glyph-return`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val evidence = vector_font_offload_evidence(
+    "metal", 48, 24, true, true, 4096,
+    accel_native(1, 1, 0, 0, 0, 0, 1, 0, 0, "metal-vector-font-proof-matched-cpu-with-cpu-glyph-return")
+)
+
+expect(evidence.generated_ready).to_equal(true)
+expect(evidence.gpu_glyph_returned).to_equal(false)
+expect(evidence.production_ready).to_equal(false)
+expect(evidence.status_code).to_equal("gpu-proof-with-cpu-glyph")
+expect(evidence.reason).to_equal("metal-vector-font-proof-matched-cpu-with-cpu-glyph-return")
+```
+
+</details>
+
 #### marks CUDA vector font evidence production ready only after GPU glyph pixels return
 
 1. accel
    - Expected: evidence.generated_ready is true
-   - Expected: evidence.generated.generated_operation equals `copy`
+   - Expected: evidence.generated.generated_operation equals `glyph_raster`
    - Expected: evidence.cpu_preprocess_required is true
    - Expected: evidence.gpu_glyph_returned is true
    - Expected: evidence.production_ready is true
@@ -63,7 +94,7 @@ val evidence = vector_font_offload_evidence(
 )
 
 expect(evidence.generated_ready).to_equal(true)
-expect(evidence.generated.generated_operation).to_equal("copy")
+expect(evidence.generated.generated_operation).to_equal("glyph_raster")
 expect(evidence.cpu_preprocess_required).to_equal(true)
 expect(evidence.gpu_glyph_returned).to_equal(true)
 expect(evidence.production_ready).to_equal(true)
@@ -186,8 +217,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

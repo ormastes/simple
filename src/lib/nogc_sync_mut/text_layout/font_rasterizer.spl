@@ -99,7 +99,10 @@ class VectorFontRasterStats:
 
 class VectorFontAcceleratorStats:
     attempts: i64
+    metal_hits: i64
     cuda_hits: i64
+    rocm_hits: i64
+    vulkan_hits: i64
     opencl_hits: i64
     cpu_fallback_hits: i64
     gpu_returned_glyphs: i64
@@ -108,7 +111,10 @@ class VectorFontAcceleratorStats:
 
 class BitmapFontAcceleratorStats:
     attempts: i64
+    metal_hits: i64
     cuda_hits: i64
+    rocm_hits: i64
+    vulkan_hits: i64
     opencl_hits: i64
     cpu_fallback_hits: i64
     gpu_returned_glyphs: i64
@@ -119,14 +125,20 @@ var _vector_font_glyph_rasterizations: i64 = 0
 var _vector_font_command_triplets: i64 = 0
 var _vector_font_output_pixels: i64 = 0
 var _vector_font_accelerator_attempts: i64 = 0
+var _vector_font_metal_hits: i64 = 0
 var _vector_font_cuda_hits: i64 = 0
+var _vector_font_rocm_hits: i64 = 0
+var _vector_font_vulkan_hits: i64 = 0
 var _vector_font_opencl_hits: i64 = 0
 var _vector_font_cpu_fallback_hits: i64 = 0
 var _vector_font_gpu_returned_glyphs: i64 = 0
 var _vector_font_gpu_returned_glyph_pixels: i64 = 0
 var _vector_font_accelerator_unavailable_reason: text = ""
 var _bitmap_font_accelerator_attempts: i64 = 0
+var _bitmap_font_metal_hits: i64 = 0
 var _bitmap_font_cuda_hits: i64 = 0
+var _bitmap_font_rocm_hits: i64 = 0
+var _bitmap_font_vulkan_hits: i64 = 0
 var _bitmap_font_opencl_hits: i64 = 0
 var _bitmap_font_cpu_fallback_hits: i64 = 0
 var _bitmap_font_gpu_returned_glyphs: i64 = 0
@@ -138,7 +150,10 @@ fn reset_vector_font_raster_stats():
     _vector_font_command_triplets = 0
     _vector_font_output_pixels = 0
     _vector_font_accelerator_attempts = 0
+    _vector_font_metal_hits = 0
     _vector_font_cuda_hits = 0
+    _vector_font_rocm_hits = 0
+    _vector_font_vulkan_hits = 0
     _vector_font_opencl_hits = 0
     _vector_font_cpu_fallback_hits = 0
     _vector_font_gpu_returned_glyphs = 0
@@ -155,7 +170,10 @@ fn vector_font_raster_stats() -> VectorFontRasterStats:
 fn vector_font_accelerator_stats() -> VectorFontAcceleratorStats:
     VectorFontAcceleratorStats(
         attempts: _vector_font_accelerator_attempts,
+        metal_hits: _vector_font_metal_hits,
         cuda_hits: _vector_font_cuda_hits,
+        rocm_hits: _vector_font_rocm_hits,
+        vulkan_hits: _vector_font_vulkan_hits,
         opencl_hits: _vector_font_opencl_hits,
         cpu_fallback_hits: _vector_font_cpu_fallback_hits,
         gpu_returned_glyphs: _vector_font_gpu_returned_glyphs,
@@ -165,7 +183,10 @@ fn vector_font_accelerator_stats() -> VectorFontAcceleratorStats:
 
 fn reset_bitmap_font_raster_stats():
     _bitmap_font_accelerator_attempts = 0
+    _bitmap_font_metal_hits = 0
     _bitmap_font_cuda_hits = 0
+    _bitmap_font_rocm_hits = 0
+    _bitmap_font_vulkan_hits = 0
     _bitmap_font_opencl_hits = 0
     _bitmap_font_cpu_fallback_hits = 0
     _bitmap_font_gpu_returned_glyphs = 0
@@ -175,7 +196,10 @@ fn reset_bitmap_font_raster_stats():
 fn bitmap_font_accelerator_stats() -> BitmapFontAcceleratorStats:
     BitmapFontAcceleratorStats(
         attempts: _bitmap_font_accelerator_attempts,
+        metal_hits: _bitmap_font_metal_hits,
         cuda_hits: _bitmap_font_cuda_hits,
+        rocm_hits: _bitmap_font_rocm_hits,
+        vulkan_hits: _bitmap_font_vulkan_hits,
         opencl_hits: _bitmap_font_opencl_hits,
         cpu_fallback_hits: _bitmap_font_cpu_fallback_hits,
         gpu_returned_glyphs: _bitmap_font_gpu_returned_glyphs,
@@ -316,6 +340,53 @@ fn _try_cuda_vector_font_glyph(codepoint: i32, font_size: i32) -> CachedGlyph?:
 fn _try_opencl_vector_font_glyph(codepoint: i32, font_size: i32) -> CachedGlyph?:
     _try_vector_font_glyph_from_backend("OPENCL", codepoint, font_size)
 
+fn _vector_font_backend_has_proof(prefix: text) -> bool:
+    val status = _vector_font_env_text(prefix + "_VECTOR_FONT_STATUS")
+    val checksum = _vector_font_env_i64(prefix + "_VECTOR_FONT_CHECKSUM")
+    val reason = _vector_font_env_text(prefix + "_VECTOR_FONT_REASON")
+    status == "pass" and checksum > 0 and (reason.contains("matched-cpu") or reason.contains("glyph-pixels-returned"))
+
+fn _record_vector_font_backend_hit(prefix: text):
+    if prefix == "METAL":
+        _vector_font_metal_hits = _vector_font_metal_hits + 1
+    elif prefix == "CUDA":
+        _vector_font_cuda_hits = _vector_font_cuda_hits + 1
+    elif prefix == "ROCM":
+        _vector_font_rocm_hits = _vector_font_rocm_hits + 1
+    elif prefix == "VULKAN":
+        _vector_font_vulkan_hits = _vector_font_vulkan_hits + 1
+    elif prefix == "OPENCL":
+        _vector_font_opencl_hits = _vector_font_opencl_hits + 1
+
+fn _record_vector_font_returned_glyph(prefix: text, pixel_count: i64):
+    _record_vector_font_backend_hit(prefix)
+    _vector_font_gpu_returned_glyphs = _vector_font_gpu_returned_glyphs + 1
+    _vector_font_gpu_returned_glyph_pixels = _vector_font_gpu_returned_glyph_pixels + pixel_count
+    _vector_font_accelerator_unavailable_reason = prefix.lower() + "-vector-font-glyph-pixels-returned"
+
+fn _record_first_vector_font_backend_proof() -> bool:
+    if _vector_font_backend_has_proof("METAL"):
+        _record_vector_font_backend_hit("METAL")
+        _vector_font_accelerator_unavailable_reason = "metal-vector-font-proof-matched-cpu-with-cpu-glyph-return"
+        return true
+    if _vector_font_backend_has_proof("CUDA"):
+        _record_vector_font_backend_hit("CUDA")
+        _vector_font_accelerator_unavailable_reason = "cuda-vector-font-proof-matched-cpu-with-cpu-glyph-return"
+        return true
+    if _vector_font_backend_has_proof("ROCM"):
+        _record_vector_font_backend_hit("ROCM")
+        _vector_font_accelerator_unavailable_reason = "rocm-vector-font-proof-matched-cpu-with-cpu-glyph-return"
+        return true
+    if _vector_font_backend_has_proof("VULKAN"):
+        _record_vector_font_backend_hit("VULKAN")
+        _vector_font_accelerator_unavailable_reason = "vulkan-vector-font-proof-matched-cpu-with-cpu-glyph-return"
+        return true
+    if _vector_font_backend_has_proof("OPENCL"):
+        _record_vector_font_backend_hit("OPENCL")
+        _vector_font_accelerator_unavailable_reason = "opencl-vector-font-proof-matched-cpu-with-cpu-glyph-return"
+        return true
+    false
+
 fn _try_bitmap_font_glyph_slot(prefix: text, slot: text, codepoint: i32, font_size: i32) -> CachedGlyph?:
     val slot_prefix = prefix + "_BITMAP_FONT_GLYPH_" + slot
     if _vector_font_env_i64(slot_prefix + "_CODEPOINT") != codepoint.to_i64():
@@ -366,51 +437,47 @@ fn _try_cuda_bitmap_font_glyph(codepoint: i32, font_size: i32) -> CachedGlyph?:
 fn _try_opencl_bitmap_font_glyph(codepoint: i32, font_size: i32) -> CachedGlyph?:
     _try_bitmap_font_glyph_from_backend("OPENCL", codepoint, font_size)
 
+fn _record_bitmap_font_backend_hit(prefix: text):
+    if prefix == "METAL":
+        _bitmap_font_metal_hits = _bitmap_font_metal_hits + 1
+    elif prefix == "CUDA":
+        _bitmap_font_cuda_hits = _bitmap_font_cuda_hits + 1
+    elif prefix == "ROCM":
+        _bitmap_font_rocm_hits = _bitmap_font_rocm_hits + 1
+    elif prefix == "VULKAN":
+        _bitmap_font_vulkan_hits = _bitmap_font_vulkan_hits + 1
+    elif prefix == "OPENCL":
+        _bitmap_font_opencl_hits = _bitmap_font_opencl_hits + 1
+
+fn _record_bitmap_font_returned_glyph(prefix: text, pixel_count: i64):
+    _record_bitmap_font_backend_hit(prefix)
+    _bitmap_font_gpu_returned_glyphs = _bitmap_font_gpu_returned_glyphs + 1
+    _bitmap_font_gpu_returned_glyph_pixels = _bitmap_font_gpu_returned_glyph_pixels + pixel_count
+    _bitmap_font_accelerator_unavailable_reason = prefix.lower() + "-bitmap-font-glyph-pixels-returned"
+
 fn rasterize_vector_accelerated(cmds: [i32], codepoint: i32, font_size: i32) -> CachedGlyph:
     _vector_font_accelerator_attempts = _vector_font_accelerator_attempts + 1
+    val metal_glyph = _try_vector_font_glyph_from_backend("METAL", codepoint, font_size)
+    if metal_glyph != nil:
+        _record_vector_font_returned_glyph("METAL", metal_glyph.pixels.len().to_i64())
+        return metal_glyph
     val cuda_glyph = _try_cuda_vector_font_glyph(codepoint, font_size)
     if cuda_glyph != nil:
-        _vector_font_cuda_hits = _vector_font_cuda_hits + 1
-        _vector_font_gpu_returned_glyphs = _vector_font_gpu_returned_glyphs + 1
-        _vector_font_gpu_returned_glyph_pixels = _vector_font_gpu_returned_glyph_pixels + cuda_glyph.pixels.len().to_i64()
-        if _vector_font_opencl_hits > 0:
-            _vector_font_accelerator_unavailable_reason = "cuda-opencl-vector-font-glyph-pixels-returned"
-        else:
-            _vector_font_accelerator_unavailable_reason = "cuda-vector-font-glyph-pixels-returned"
+        _record_vector_font_returned_glyph("CUDA", cuda_glyph.pixels.len().to_i64())
         return cuda_glyph
+    val rocm_glyph = _try_vector_font_glyph_from_backend("ROCM", codepoint, font_size)
+    if rocm_glyph != nil:
+        _record_vector_font_returned_glyph("ROCM", rocm_glyph.pixels.len().to_i64())
+        return rocm_glyph
+    val vulkan_glyph = _try_vector_font_glyph_from_backend("VULKAN", codepoint, font_size)
+    if vulkan_glyph != nil:
+        _record_vector_font_returned_glyph("VULKAN", vulkan_glyph.pixels.len().to_i64())
+        return vulkan_glyph
     val opencl_glyph = _try_opencl_vector_font_glyph(codepoint, font_size)
     if opencl_glyph != nil:
-        _vector_font_opencl_hits = _vector_font_opencl_hits + 1
-        _vector_font_gpu_returned_glyphs = _vector_font_gpu_returned_glyphs + 1
-        _vector_font_gpu_returned_glyph_pixels = _vector_font_gpu_returned_glyph_pixels + opencl_glyph.pixels.len().to_i64()
-        if _vector_font_cuda_hits > 0:
-            _vector_font_accelerator_unavailable_reason = "cuda-opencl-vector-font-glyph-pixels-returned"
-        else:
-            _vector_font_accelerator_unavailable_reason = "opencl-vector-font-glyph-pixels-returned"
+        _record_vector_font_returned_glyph("OPENCL", opencl_glyph.pixels.len().to_i64())
         return opencl_glyph
-    val cuda_status = _vector_font_env_text("CUDA_VECTOR_FONT_STATUS")
-    val cuda_checksum = _vector_font_env_i64("CUDA_VECTOR_FONT_CHECKSUM")
-    val cuda_reason = _vector_font_env_text("CUDA_VECTOR_FONT_REASON")
-    val opencl_status = _vector_font_env_text("OPENCL_VECTOR_FONT_STATUS")
-    val opencl_checksum = _vector_font_env_i64("OPENCL_VECTOR_FONT_CHECKSUM")
-    val opencl_reason = _vector_font_env_text("OPENCL_VECTOR_FONT_REASON")
-    if cuda_status == "pass" and cuda_checksum > 0 and (cuda_reason.contains("matched-cpu") or cuda_reason.contains("glyph-pixels-returned")):
-        _vector_font_cuda_hits = _vector_font_cuda_hits + 1
-        if _vector_font_gpu_returned_glyphs > 0 and _vector_font_opencl_hits > 0:
-            _vector_font_accelerator_unavailable_reason = "cuda-opencl-vector-font-glyph-pixels-returned"
-        else if _vector_font_gpu_returned_glyphs > 0:
-            _vector_font_accelerator_unavailable_reason = "cuda-vector-font-glyph-pixels-returned"
-        else:
-            _vector_font_accelerator_unavailable_reason = "cuda-vector-font-proof-matched-cpu-with-cpu-glyph-return"
-    else if opencl_status == "pass" and opencl_checksum > 0 and (opencl_reason.contains("matched-cpu") or opencl_reason.contains("glyph-pixels-returned")):
-        _vector_font_opencl_hits = _vector_font_opencl_hits + 1
-        if _vector_font_gpu_returned_glyphs > 0 and _vector_font_cuda_hits > 0:
-            _vector_font_accelerator_unavailable_reason = "cuda-opencl-vector-font-glyph-pixels-returned"
-        else if _vector_font_gpu_returned_glyphs > 0:
-            _vector_font_accelerator_unavailable_reason = "opencl-vector-font-glyph-pixels-returned"
-        else:
-            _vector_font_accelerator_unavailable_reason = "opencl-vector-font-proof-matched-cpu-with-cpu-glyph-return"
-    else:
+    if not _record_first_vector_font_backend_proof():
         _vector_font_accelerator_unavailable_reason = "production-gpu-dispatch-not-wired"
     _vector_font_cpu_fallback_hits = _vector_font_cpu_fallback_hits + 1
     rasterize_vector(cmds, codepoint, font_size)
@@ -512,19 +579,25 @@ extern fn rt_gui_get_glyph_8x16(ch: i32) -> [u8]
 
 fn rasterize_bitmap_accelerated(codepoint: i32, font_size: i32) -> CachedGlyph:
     _bitmap_font_accelerator_attempts = _bitmap_font_accelerator_attempts + 1
+    val metal_glyph = _try_bitmap_font_glyph_from_backend("METAL", codepoint, font_size)
+    if metal_glyph != nil:
+        _record_bitmap_font_returned_glyph("METAL", metal_glyph.pixels.len().to_i64())
+        return metal_glyph
     val cuda_glyph = _try_cuda_bitmap_font_glyph(codepoint, font_size)
     if cuda_glyph != nil:
-        _bitmap_font_cuda_hits = _bitmap_font_cuda_hits + 1
-        _bitmap_font_gpu_returned_glyphs = _bitmap_font_gpu_returned_glyphs + 1
-        _bitmap_font_gpu_returned_glyph_pixels = _bitmap_font_gpu_returned_glyph_pixels + cuda_glyph.pixels.len().to_i64()
-        _bitmap_font_accelerator_unavailable_reason = "cuda-bitmap-font-glyph-pixels-returned"
+        _record_bitmap_font_returned_glyph("CUDA", cuda_glyph.pixels.len().to_i64())
         return cuda_glyph
+    val rocm_glyph = _try_bitmap_font_glyph_from_backend("ROCM", codepoint, font_size)
+    if rocm_glyph != nil:
+        _record_bitmap_font_returned_glyph("ROCM", rocm_glyph.pixels.len().to_i64())
+        return rocm_glyph
+    val vulkan_glyph = _try_bitmap_font_glyph_from_backend("VULKAN", codepoint, font_size)
+    if vulkan_glyph != nil:
+        _record_bitmap_font_returned_glyph("VULKAN", vulkan_glyph.pixels.len().to_i64())
+        return vulkan_glyph
     val opencl_glyph = _try_opencl_bitmap_font_glyph(codepoint, font_size)
     if opencl_glyph != nil:
-        _bitmap_font_opencl_hits = _bitmap_font_opencl_hits + 1
-        _bitmap_font_gpu_returned_glyphs = _bitmap_font_gpu_returned_glyphs + 1
-        _bitmap_font_gpu_returned_glyph_pixels = _bitmap_font_gpu_returned_glyph_pixels + opencl_glyph.pixels.len().to_i64()
-        _bitmap_font_accelerator_unavailable_reason = "opencl-bitmap-font-glyph-pixels-returned"
+        _record_bitmap_font_returned_glyph("OPENCL", opencl_glyph.pixels.len().to_i64())
         return opencl_glyph
     _bitmap_font_cpu_fallback_hits = _bitmap_font_cpu_fallback_hits + 1
     _bitmap_font_accelerator_unavailable_reason = "production-gpu-dispatch-not-wired"

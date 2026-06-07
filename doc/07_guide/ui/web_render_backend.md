@@ -80,8 +80,11 @@ Bitmap fallback follows the same evidence direction through
 validated backend-returned bitmap glyph can bypass CPU mask generation and
 record returned glyph/pixel counts. The production backend priority remains
 host native first (`metal`, `cuda`, `hip`/ROCm, then `vulkan`/OpenCL by
-availability) before CPU fallback; current bitmap/vector glyph tests prove the
-return contract, not full live-kernel dispatch.
+availability) before CPU fallback. The vector and bitmap returned-glyph evidence
+slots now follow that same order (`METAL`, `CUDA`, `ROCM`, `VULKAN`, `OPENCL`)
+so a native or generated GPU glyph result wins before lower-priority slots.
+Current bitmap/vector glyph tests prove the return contract, not full
+live-kernel dispatch.
 Custom Engine2D priority lists use the same canonicalization as strict backend
 selection, so aliases such as `hip` and `simd_cpu` select `rocm` and `cpu_simd`
 instead of falling through to plain CPU.

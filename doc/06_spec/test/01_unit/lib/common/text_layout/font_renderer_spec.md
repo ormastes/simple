@@ -27,7 +27,7 @@ font_renderer_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 14 | 14 | 0 | 0 |
+| 16 | 16 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -166,6 +166,102 @@ expect(stats.gpu_returned_glyphs).to_equal(1)
 expect(stats.gpu_returned_glyph_pixels).to_equal(1)
 expect(stats.unavailable_reason).to_equal("cuda-bitmap-font-glyph-pixels-returned")
 _clear_cuda_bitmap_font_probe_glyph()
+```
+
+</details>
+
+#### prefers native vector glyph pixels before CUDA glyph slots
+
+1. reset vector font raster stats
+2.  set vector font probe glyph
+3.  set vector font probe glyph
+4. var renderer = FontRenderer new
+   - Expected: glyph.width equals `1`
+   - Expected: glyph.height equals `1`
+   - Expected: glyph.advance equals `2`
+   - Expected: stats.metal_hits equals `1`
+   - Expected: stats.cuda_hits equals `0`
+   - Expected: stats.gpu_returned_glyphs equals `1`
+   - Expected: stats.unavailable_reason equals `metal-vector-font-glyph-pixels-returned`
+5.  clear vector font probe glyph
+6.  clear vector font probe glyph
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+reset_vector_font_raster_stats()
+_set_vector_font_probe_glyph("METAL", "metal-vector-font-glyph-pixels-returned")
+_set_vector_font_probe_glyph("CUDA", "cuda-vector-font-glyph-pixels-returned")
+var renderer = FontRenderer.new()
+renderer.use_bitmap = false
+
+val glyph = renderer.get_glyph(65, 24)
+val stats = vector_font_accelerator_stats()
+
+expect(glyph.width).to_equal(1)
+expect(glyph.height).to_equal(1)
+expect(glyph.advance).to_equal(2)
+expect(stats.metal_hits).to_equal(1)
+expect(stats.cuda_hits).to_equal(0)
+expect(stats.gpu_returned_glyphs).to_equal(1)
+expect(stats.unavailable_reason).to_equal("metal-vector-font-glyph-pixels-returned")
+_clear_vector_font_probe_glyph("METAL")
+_clear_vector_font_probe_glyph("CUDA")
+```
+
+</details>
+
+#### accepts ROCm bitmap glyph pixels before Vulkan and OpenCL fallback slots
+
+1. reset bitmap font raster stats
+2.  set bitmap font probe glyph
+3.  set bitmap font probe glyph
+4.  set bitmap font probe glyph
+5. var renderer = FontRenderer new
+   - Expected: glyph.width equals `1`
+   - Expected: glyph.height equals `1`
+   - Expected: stats.rocm_hits equals `1`
+   - Expected: stats.vulkan_hits equals `0`
+   - Expected: stats.opencl_hits equals `0`
+   - Expected: stats.gpu_returned_glyphs equals `1`
+   - Expected: stats.unavailable_reason equals `rocm-bitmap-font-glyph-pixels-returned`
+6.  clear bitmap font probe glyph
+7.  clear bitmap font probe glyph
+8.  clear bitmap font probe glyph
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+reset_bitmap_font_raster_stats()
+_set_bitmap_font_probe_glyph("ROCM", "rocm-bitmap-font-glyph-pixels-returned")
+_set_bitmap_font_probe_glyph("VULKAN", "vulkan-bitmap-font-glyph-pixels-returned")
+_set_bitmap_font_probe_glyph("OPENCL", "opencl-bitmap-font-glyph-pixels-returned")
+var renderer = FontRenderer.new()
+renderer.use_vector = false
+
+val glyph = renderer.get_glyph(65, 16)
+val stats = bitmap_font_accelerator_stats()
+
+expect(glyph.width).to_equal(1)
+expect(glyph.height).to_equal(1)
+expect(stats.rocm_hits).to_equal(1)
+expect(stats.vulkan_hits).to_equal(0)
+expect(stats.opencl_hits).to_equal(0)
+expect(stats.gpu_returned_glyphs).to_equal(1)
+expect(stats.unavailable_reason).to_equal("rocm-bitmap-font-glyph-pixels-returned")
+_clear_bitmap_font_probe_glyph("ROCM")
+_clear_bitmap_font_probe_glyph("VULKAN")
+_clear_bitmap_font_probe_glyph("OPENCL")
 ```
 
 </details>
@@ -373,8 +469,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 14 |
-| Active scenarios | 14 |
+| Total scenarios | 16 |
+| Active scenarios | 16 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -7,7 +7,24 @@ use std.nogc_sync_mut.text_layout.font_rasterizer.{VectorFontAcceleratorStats}
 fn accel(attempts: i64, cuda_hits: i64, opencl_hits: i64, cpu_hits: i64, returned_glyphs: i64, returned_pixels: i64, reason: text) -> VectorFontAcceleratorStats:
     VectorFontAcceleratorStats(
         attempts: attempts,
+        metal_hits: 0,
         cuda_hits: cuda_hits,
+        rocm_hits: 0,
+        vulkan_hits: 0,
+        opencl_hits: opencl_hits,
+        cpu_fallback_hits: cpu_hits,
+        gpu_returned_glyphs: returned_glyphs,
+        gpu_returned_glyph_pixels: returned_pixels,
+        unavailable_reason: reason
+    )
+
+fn accel_native(attempts: i64, metal_hits: i64, cuda_hits: i64, rocm_hits: i64, vulkan_hits: i64, opencl_hits: i64, cpu_hits: i64, returned_glyphs: i64, returned_pixels: i64, reason: text) -> VectorFontAcceleratorStats:
+    VectorFontAcceleratorStats(
+        attempts: attempts,
+        metal_hits: metal_hits,
+        cuda_hits: cuda_hits,
+        rocm_hits: rocm_hits,
+        vulkan_hits: vulkan_hits,
         opencl_hits: opencl_hits,
         cpu_fallback_hits: cpu_hits,
         gpu_returned_glyphs: returned_glyphs,
@@ -17,6 +34,18 @@ fn accel(attempts: i64, cuda_hits: i64, opencl_hits: i64, cpu_hits: i64, returne
 
 describe "Engine2D vector font offload evidence":
 
+    it "treats native backend vector font proof as GPU proof before CPU fallback":
+        val evidence = vector_font_offload_evidence(
+            "metal", 48, 24, true, true, 4096,
+            accel_native(1, 1, 0, 0, 0, 0, 1, 0, 0, "metal-vector-font-proof-matched-cpu-with-cpu-glyph-return")
+        )
+
+        expect(evidence.generated_ready).to_equal(true)
+        expect(evidence.gpu_glyph_returned).to_equal(false)
+        expect(evidence.production_ready).to_equal(false)
+        expect(evidence.status_code).to_equal("gpu-proof-with-cpu-glyph")
+        expect(evidence.reason).to_equal("metal-vector-font-proof-matched-cpu-with-cpu-glyph-return")
+
     it "marks CUDA vector font evidence production ready only after GPU glyph pixels return":
         val evidence = vector_font_offload_evidence(
             "cuda", 48, 24, true, true, 4096,
@@ -24,7 +53,7 @@ describe "Engine2D vector font offload evidence":
         )
 
         expect(evidence.generated_ready).to_equal(true)
-        expect(evidence.generated.generated_operation).to_equal("copy")
+        expect(evidence.generated.generated_operation).to_equal("glyph_raster")
         expect(evidence.cpu_preprocess_required).to_equal(true)
         expect(evidence.gpu_glyph_returned).to_equal(true)
         expect(evidence.production_ready).to_equal(true)

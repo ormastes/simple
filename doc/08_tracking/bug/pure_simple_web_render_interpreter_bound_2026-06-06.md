@@ -134,7 +134,7 @@ layout and text-buffer preparation entirely. Focused unit coverage renders two
 
 2026-06-07 glyph-return evidence update: the Draw IR boundary now proves the
 positive glyph-return state when a backend rasterizer supplies vector glyph
-pixels through the existing CUDA glyph slot contract. Focused unit coverage
+pixels through the backend glyph slot contract. Focused unit coverage
 injects a validated CUDA glyph and asserts `font_offload_status ==
 "gpu-glyph-returned"`, `font_gpu_glyph_returned == true`, and
 `font_production_ready == true`.
@@ -158,9 +158,15 @@ glyph rendered through bitmap fallback can surface `font_offload_status ==
 `font_production_ready == true` at the main GUI Draw IR boundary. Focused unit
 coverage injects a validated `~` bitmap glyph and verifies the Draw IR result.
 
-Remaining bitmap gap: production CUDA/HIP/Vulkan/Metal glyph raster kernels
-still need to populate the bitmap glyph-return contract during live GUI
-execution instead of the test evidence slot.
+2026-06-07 backend-priority glyph slot update: vector and bitmap returned-glyph
+evidence now follows the GUI backend preference order: `METAL`, `CUDA`, `ROCM`,
+`VULKAN`, `OPENCL`, then CPU fallback. Focused unit coverage proves native
+vector glyph pixels win before CUDA, and ROCm/HIP bitmap glyph pixels win before
+Vulkan/OpenCL.
+
+Remaining gap: production Metal/CUDA/HIP/Vulkan/OpenCL glyph raster kernels
+still need to populate the vector and bitmap glyph-return contract during live
+GUI execution instead of the test evidence slots.
 ## Follow-up: GUI profile throughput evidence
 
 2026-06-06 GUI profile smoke:
