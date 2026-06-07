@@ -82,8 +82,9 @@ Responsibilities:
 - Generate and gate reproducible evidence for Simple OS thread, cooperative
   green, multicore green, C pthread, and Go goroutine rows.
 - Reject missing or misleading native M:N rows.
-- Keep Go-vs-C large fanout stress separate so one-pthread-per-task C is not
-  mistaken for M:N scheduling.
+- Keep Simple-vs-Go-vs-C large fanout stress explicit so one-pthread-per-task C
+  is not mistaken for M:N scheduling and Simple multicore-green stress rows must
+  carry runtime-pool evidence.
 
 ### SimpleOS Scheduler Layer
 

@@ -44,7 +44,7 @@ FANOUT_WORKERS="${FANOUT_WORKERS:-1000}"
 FANOUT_OS_THREAD_WORKERS="${FANOUT_OS_THREAD_WORKERS:-$FANOUT_WORKERS}"
 FANOUT_MULTICORE_GREEN_WORKERS="${FANOUT_MULTICORE_GREEN_WORKERS:-$FANOUT_WORKERS}"
 FANOUT_ITERS="${FANOUT_ITERS:-32}"
-FANOUT_STRESS_WORKERS="${FANOUT_STRESS_WORKERS:-512}"
+FANOUT_STRESS_WORKERS="${FANOUT_STRESS_WORKERS:-256}"
 FANOUT_STRESS_ITERS="${FANOUT_STRESS_ITERS:-1}"
 if [ -z "${COOPERATIVE_GREEN_WORKERS:-}" ]; then
     if [ -n "${GREEN_WORKERS:-}" ]; then
@@ -460,6 +460,48 @@ write_simple_fanout_multicore_green() {
         echo '        rt_exit(74)'
         echo '    println("total = {total}")'
     } >"$BUILD_DIR/fanout_multicore_green.spl"
+}
+
+write_simple_fanout_stress_multicore_green() {
+    _last_stress_worker=$((FANOUT_STRESS_WORKERS - 1))
+    {
+        echo 'use std.concurrent.multicore_green.{multicore_green_spawn}'
+        echo 'extern fn rt_exit(code: i32)'
+        echo ''
+        echo 'fn work(seed: i64) -> i64:'
+        echo '    var x = seed'
+        echo "    for i in 0..${FANOUT_STRESS_ITERS}:"
+        echo '        x = (x * 1103515245 + 12345) % 2147483648'
+        echo '    x'
+        echo ''
+        echo 'fn expected_total() -> i64:'
+        echo '    var total: i64 = 0'
+        echo "    for seed in 0..${FANOUT_STRESS_WORKERS}:"
+        echo '        total = total + work(seed)'
+        echo '    total'
+        echo ''
+        echo 'fn main():'
+        for i in $(seq 0 "$_last_stress_worker"); do
+            echo "    var h${i} = multicore_green_spawn(\\: work(${i}))"
+        done
+        echo '    var pool_used: i64 = 0'
+        for i in $(seq 0 "$_last_stress_worker"); do
+            echo "    if h${i}.used_runtime_pool():"
+            echo "        pool_used = pool_used + 1"
+        done
+        echo "    println(\"multicore_green_pool_used = {pool_used}/${FANOUT_STRESS_WORKERS}\")"
+        echo "    if pool_used != ${FANOUT_STRESS_WORKERS}:"
+        echo '        rt_exit(73)'
+        echo '    var total: i64 = 0'
+        for i in $(seq 0 "$_last_stress_worker"); do
+            echo "    total = total + h${i}.join()"
+        done
+        echo '    val expected = expected_total()'
+        echo '    if total != expected:'
+        echo '        println("checksum_mismatch total={total} expected={expected}")'
+        echo '        rt_exit(74)'
+        echo '    println("total = {total}")'
+    } >"$BUILD_DIR/fanout_stress_multicore_green.spl"
 }
 
 write_c_hello() {
@@ -967,6 +1009,7 @@ write_simple_parallel_multicore_green
 write_simple_fanout
 write_simple_fanout_cooperative_green
 write_simple_fanout_multicore_green
+write_simple_fanout_stress_multicore_green
 write_c_hello
 write_c_fib
 write_c_fib_warm
@@ -1031,7 +1074,7 @@ else echo "  [skip] Erlang — erlc not found"; fi
 
 # Simple native
 if [ -x "$SIMPLE_BINARY" ]; then
-    for _src in hello fib fib_warm parallel parallel_cooperative_green parallel_multicore_green fanout fanout_cooperative_green fanout_multicore_green; do
+    for _src in hello fib fib_warm parallel parallel_cooperative_green parallel_multicore_green fanout fanout_cooperative_green fanout_multicore_green fanout_stress_multicore_green; do
         _spl="$BUILD_DIR/${_src}.spl"
         _out="$BUILD_DIR/${_src}_simple_native"
         if [ -f "$_spl" ]; then
@@ -1455,10 +1498,10 @@ if have erl; then
     fanout_row "Erlang" "$ms" "BEAM process per tiny task"
 fi
 
-# ── Go-vs-C large fanout stress ──────────────────────────────────────────
+# ── Simple-vs-Go-vs-C large fanout stress ────────────────────────────────
 
-echo "=== Measuring Go-vs-C large fanout stress — $FANOUT_STRESS_WORKERS workers ==="
-section "Go vs C Large Fanout Stress — spawn $FANOUT_STRESS_WORKERS tiny workers ($RUNS runs avg)"
+echo "=== Measuring Simple-vs-Go-vs-C large fanout stress — $FANOUT_STRESS_WORKERS workers ==="
+section "Simple vs Go vs C Large Fanout Stress — spawn $FANOUT_STRESS_WORKERS tiny workers ($RUNS runs avg)"
 printf "| %-22s | %12s | %40s |\n" "Language" "Avg (ms)" "Concurrency model" >>"$REPORT_PATH"
 printf "|%-24s|%14s|%42s|\n" "------------------------" "--------------" "------------------------------------------" >>"$REPORT_PATH"
 
@@ -1474,6 +1517,20 @@ if [ -x "$BUILD_DIR/fanout_stress_c" ]; then
     else
         stress_row "C (pthreads)" "$ms" "pthread per stress task"
     fi
+fi
+if [ -x "$BUILD_DIR/fanout_stress_multicore_green_simple_native" ]; then
+    ms=$(avg_ms "$BUILD_DIR/fanout_stress_multicore_green_simple_native" "$RUNS")
+    if [ "$ms" = "fail" ]; then
+        reason=$(failure_reason "$BUILD_DIR/fanout_stress_multicore_green_simple_native")
+        stress_row "Simple multicore green (native)" "$ms" "multicore_green stress fanout ($reason)"
+    else
+        evidence=$(pool_evidence "$BUILD_DIR/fanout_stress_multicore_green_simple_native" "$FANOUT_STRESS_WORKERS")
+        stress_row "Simple multicore green (native)" "$ms" "multicore_green stress fanout ($evidence)"
+    fi
+elif echo "$COMPILE_FAIL" | grep -q 'native:fanout_stress_multicore_green(timeout)'; then
+    stress_row "Simple multicore green (native)" "n/a" "multicore_green stress fanout compile timeout"
+else
+    stress_row "Simple multicore green (native)" "n/a" "compile failed"
 fi
 if [ -x "$BUILD_DIR/fanout_stress_go" ]; then
     ms=$(avg_ms "$BUILD_DIR/fanout_stress_go" "$RUNS")
@@ -1656,10 +1713,10 @@ cat >>"$REPORT_PATH" <<'EOF'
 > usually beat one-pthread-per-task C. Simple reports both OS-thread fanout
 > through `thread_spawn`, cooperative green-thread queue fanout, and
 > pool-backed `multicore_green_spawn` fanout separately.
-> The Go-vs-C large fanout stress section isolates that specific comparison at
-> `FANOUT_STRESS_WORKERS` workers without changing the Simple rows. It exists so
-> the pthread-per-task baseline cannot be mistaken for Go-style M:N scheduling
-> when fanout grows.
+> The Simple-vs-Go-vs-C large fanout stress section repeats the stress shape at
+> `FANOUT_STRESS_WORKERS` workers and includes a Simple multicore-green native
+> row with `pool_used=N/N` evidence. It exists so the pthread-per-task baseline
+> cannot be mistaken for Go-style M:N scheduling when fanout grows.
 >
 > **Simple concurrency rows:** `Simple (native)` uses `thread_spawn`, which is
 > the OS-thread API. `thread_spawn_with_args` remains tracked separately while

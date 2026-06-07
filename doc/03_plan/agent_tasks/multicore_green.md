@@ -53,7 +53,7 @@ Deliverables:
 
 - cross-language report with separate rows for Simple OS threads, cooperative
   green, multicore green, C pthreads, Go goroutines, RSS, artifact footprint,
-  and isolated Go-vs-C large fanout stress;
+  and Simple-vs-Go-vs-C large fanout stress;
 - numeric SPipe gate that rejects `fail`, `n/a`, and missing rows for required
   native evidence;
 - report text that clearly says cooperative green is not Go M:N;

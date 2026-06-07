@@ -154,27 +154,37 @@ expect(model_text(row_for_label(fanout, "Simple cooperative green (native)"))).t
 
 </details>
 
-#### proves large-fanout goroutines beat one-pthread-per-task C
+<details>
+<summary>Advanced: proves large-fanout multicore-green evidence and goroutine stress behavior</summary>
+
+#### proves large-fanout multicore-green evidence and goroutine stress behavior
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val report = rt_file_read_text("doc/09_report/cross_language_perf_parallel_smoke.md") ?? ""
-val stress = section_named(report, "Go vs C Large Fanout Stress")
+val stress = section_named(report, "Simple vs Go vs C Large Fanout Stress")
 
+val simple_multicore = row_ms_scaled(stress, "Simple multicore green (native)")
 val go_ms = row_ms_scaled(stress, "Go")
 val c_ms = row_ms_scaled(stress, "C (pthreads)")
 
+expect(is_positive_metric(simple_multicore)).to_equal(true)
 expect(is_positive_metric(go_ms)).to_equal(true)
 expect(is_positive_metric(c_ms)).to_equal(true)
 expect(within_ratio(go_ms, c_ms, 1, 1)).to_equal(true)
+expect(model_text(row_for_label(stress, "Simple multicore green (native)"))).to_contain("multicore_green stress fanout")
+expect(model_text(row_for_label(stress, "Simple multicore green (native)"))).to_contain("pool_used=")
 expect(model_text(row_for_label(stress, "Go"))).to_contain("goroutine per stress task")
 expect(model_text(row_for_label(stress, "C (pthreads)"))).to_contain("pthread per stress task")
 ```
+
+</details>
+
 
 </details>
 
