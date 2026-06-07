@@ -4,13 +4,14 @@
 
 This report records the SimpleOS evidence for the multicore-green SPipe lane,
 including the opt-in live QEMU green-carrier proof. It does not claim final
-hardware context-switch handoff across APs; the live proof covers AP startup,
-scheduler-visible CPU1 green dispatch, and fixed timer-preemption yield
-evidence.
+ring/user context-switch handoff across APs; the live proof covers AP startup,
+fixed-slot CPU1 green dispatch/IPI evidence, fixed timer-preemption yield
+evidence, and scheduler-owned CPU1 green handoff through the real `Scheduler`.
 
 ## Verified Commands
 
-All commands were run from `/tmp/simple-cooperative-green`.
+Commands were refreshed from `/tmp/simple-pherallel-sync` after initializing
+the `examples/09_embedded/simple_os` submodule.
 
 ```sh
 ./src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl --mode=interpreter --clean
@@ -42,10 +43,11 @@ SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 ./src/compiler_rust/target/debug/simple test 
 
 - The default QEMU spec lane proves the opt-in gate is wired and disabled unless
   `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1` is set.
-- The live lane passed in 40022ms. The spec built the x86_64 probe, booted a
+- The live lane passed in 52254ms. The spec built the x86_64 probe, booted a
   two-CPU QEMU guest, and asserted `[smp] AP reached 64-bit entry`,
   `[green-carrier-qemu] PASS=true`, and
-  `[green-carrier-qemu] PREEMPT_PASS=true` in serial output.
+  `[green-carrier-qemu] PREEMPT_PASS=true`, and
+  `[green-carrier-qemu] SCHED_HANDOFF_PASS=true` in serial output.
 - The hosted SimpleOS specs prove scheduler-owned green execution state remains
   separate from normal OS task state. The multicore-green SimpleOS contract now
   also proves named runtime, timer-interrupt, and compiler preemption
@@ -89,4 +91,7 @@ SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 ./src/compiler_rust/target/debug/simple test 
   repeating source strings at call sites.
   The fixed-slot freestanding helper now proves a QEMU-friendly timer-slice
   yield path can requeue a running CPU1 green task without heap-heavy scheduler
-  state.
+  state. The live probe also constructs a scheduler-owned CPU1 carrier queue,
+  dispatches task `701` through `Scheduler.run_green_carrier_once`, records one
+  CPU1 green context switch, and verifies the normal OS CPU1 task slot remains
+  `0`.

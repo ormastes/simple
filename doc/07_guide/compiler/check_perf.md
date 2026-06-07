@@ -116,9 +116,11 @@ nonzero on mismatch, so runtime-pool closure lookup failures, lambda capture
 bugs, or wrong joins are classified as failed rows instead of performance wins.
 The multicore-green fanout sources use compact handle arrays and loop-captured
 closures, not generated numbered handle variables.
-The profile-report contract rejects numbered concurrency aliases such as
-`thread_spawn2`, `spawn_isolated2`, and `spawn_limited2`; use the semantic API
-names in reports, generated workloads, and profile-script comments.
+The profile-report contract and `simple check` reject numbered concurrency
+aliases such as `thread_spawn2`, `spawn_isolated2`, `spawn_limited2`,
+`rt_thread_spawn_isolated2`, and `rt_thread_spawn_limited2`; use the semantic
+API names in reports, generated workloads, runtime extern declarations, and
+profile-script comments.
 
 ### What it measures
 
