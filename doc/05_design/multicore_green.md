@@ -130,6 +130,10 @@ Behavior:
 - `Scheduler.run_green_carrier_once` combines limited carrier dispatch with
   scheduler intent application, returning the updated queues plus dispatch and
   execution evidence for one Go-like worker-loop step.
+- `Scheduler.run_green_carrier_active_pass` is the bounded pass primitive for
+  the SimpleOS worker loop. It consumes a rebalance move budget, attempts one
+  dispatch per active carrier, and returns queue, rebalance, run-count, and
+  last-run evidence.
 
 ### Freestanding QEMU Probe Path
 

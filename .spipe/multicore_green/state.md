@@ -119,6 +119,12 @@ go-runtime-hardening
   `green_carrier_spec.spl` passed 36 examples, and
   `simpleos_multicore_green_spec.spl` passed 3 examples after the run-step
   helper.
+- implementation: Added `Scheduler.run_green_carrier_active_pass`, a bounded
+  active-worker pass that performs budgeted inactive-carrier rebalance and then
+  attempts one run step per active carrier.
+- verification: `scheduler.spl` and `green_carrier.spl` checks passed, and
+  `scheduler_green_parallelism_spec.spl` passed 15 examples for active-worker
+  pass and rebalance-before-run behavior.
 
 ## Completion Audit - 2026-06-07
 

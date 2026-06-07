@@ -93,7 +93,7 @@ use os.kernel.scheduler.scheduler_exec.{
 use os.kernel.scheduler.green_carrier.{
     GreenCarrierSchedulerIntent, GreenCarrierExecutionResult, GreenCarrierParallelismState,
     GreenCarrierRunQueueState, GreenCarrierRebalanceResult, GreenCarrierRebalancePassResult,
-    GreenCarrierRunStepResult,
+    GreenCarrierRunStepResult, GreenCarrierRunPassResult,
     green_carrier_apply_scheduler_intent,
     green_carrier_extend_execution_state,
     green_carrier_current_task_on_cpu,
@@ -645,6 +645,46 @@ impl Scheduler:
             execution: execution,
             ran: execution.applied,
             reason: execution.reason
+        )
+
+    me run_green_carrier_active_pass(queues: GreenCarrierRunQueueState, rebalance_move_budget: i64) -> GreenCarrierRunPassResult:
+        val rebalance = self.rebalance_green_carrier_queues_until_stable(queues, rebalance_move_budget)
+        var current = rebalance.queues
+        var attempted_carriers = 0
+        var ran_workers = 0
+        var last_cpu = -1
+        var last_task_id = -1
+        var carrier_limit = self.green_parallelism_state.active_limit
+        if carrier_limit > current.queue_depth_by_cpu.len():
+            carrier_limit = current.queue_depth_by_cpu.len()
+        if carrier_limit < 1:
+            return GreenCarrierRunPassResult(
+                queues: current,
+                rebalance: rebalance,
+                ran_workers: 0,
+                attempted_carriers: 0,
+                last_cpu: -1,
+                last_task_id: -1,
+                reason: "no_active_carrier"
+            )
+        var cpu = 0
+        while cpu < carrier_limit:
+            val step = self.run_green_carrier_once(current, cpu)
+            current = step.queues
+            attempted_carriers = attempted_carriers + 1
+            if step.ran:
+                ran_workers = ran_workers + 1
+                last_cpu = cpu
+                last_task_id = step.dispatch.task_id
+            cpu = cpu + 1
+        GreenCarrierRunPassResult(
+            queues: current,
+            rebalance: rebalance,
+            ran_workers: ran_workers,
+            attempted_carriers: attempted_carriers,
+            last_cpu: last_cpu,
+            last_task_id: last_task_id,
+            reason: if ran_workers > 0: "active_pass_ran" else: "no_active_work"
         )
 
     fn preempt_pending_on_cpu(cpu_id: u32) -> TaskId?:

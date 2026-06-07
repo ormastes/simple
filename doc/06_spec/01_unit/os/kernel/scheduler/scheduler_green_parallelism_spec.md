@@ -28,7 +28,7 @@ scheduler_green_parallelism_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 13 | 13 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -511,12 +511,102 @@ expect(sched.green_current_task_on_cpu(1u32)).to_equal(0)
 
 </details>
 
+#### runs one bounded active carrier pass across active workers
+
+1. var sched = Scheduler new with cpu count
+
+2. sched set green carrier parallelism
+   - Expected: pass_result.ran_workers equals `2`
+   - Expected: pass_result.attempted_carriers equals `2`
+   - Expected: pass_result.last_cpu equals `1`
+   - Expected: pass_result.last_task_id equals `62`
+   - Expected: pass_result.reason equals `active_pass_ran`
+   - Expected: pass_result.rebalance.reason equals `move_budget_empty`
+   - Expected: sched.green_current_task_on_cpu(0u32) equals `61`
+   - Expected: sched.green_current_task_on_cpu(1u32) equals `62`
+   - Expected: green_carrier_queue_depth(pass_result.queues, 0) equals `0`
+   - Expected: green_carrier_queue_depth(pass_result.queues, 1) equals `0`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var sched = Scheduler.new_with_cpu_count(4u32)
+sched.set_green_carrier_parallelism(2)
+val queues = green_carrier_run_queues_new(4, 8)
+val first = green_carrier_spawn_task(61, 4, 1, 0, 4, 4, 4, 0)
+val after_first = green_carrier_apply_enqueue(queues, first)
+val second = green_carrier_spawn_task(62, 4, 2, 4, 0, 4, 4, 0)
+val after_second = green_carrier_apply_enqueue(after_first.queues, second)
+val pass_result = sched.run_green_carrier_active_pass(after_second.queues, 0)
+
+expect(pass_result.ran_workers).to_equal(2)
+expect(pass_result.attempted_carriers).to_equal(2)
+expect(pass_result.last_cpu).to_equal(1)
+expect(pass_result.last_task_id).to_equal(62)
+expect(pass_result.reason).to_equal("active_pass_ran")
+expect(pass_result.rebalance.reason).to_equal("move_budget_empty")
+expect(sched.green_current_task_on_cpu(0u32)).to_equal(61)
+expect(sched.green_current_task_on_cpu(1u32)).to_equal(62)
+expect(green_carrier_queue_depth(pass_result.queues, 0)).to_equal(0)
+expect(green_carrier_queue_depth(pass_result.queues, 1)).to_equal(0)
+```
+
+</details>
+
+#### rebalances inactive work before bounded active carrier pass
+
+1. var sched = Scheduler new with cpu count
+
+2. sched set green carrier parallelism
+   - Expected: pass_result.rebalance.moved_workers equals `1`
+   - Expected: pass_result.rebalance.reason equals `move_budget_exhausted`
+   - Expected: pass_result.ran_workers equals `1`
+   - Expected: pass_result.attempted_carriers equals `1`
+   - Expected: pass_result.last_cpu equals `0`
+   - Expected: pass_result.last_task_id equals `63`
+   - Expected: sched.green_current_task_on_cpu(0u32) equals `63`
+   - Expected: green_carrier_queue_depth(pass_result.queues, 0) equals `0`
+   - Expected: green_carrier_queue_depth(pass_result.queues, 1) equals `0`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var sched = Scheduler.new_with_cpu_count(4u32)
+sched.set_green_carrier_parallelism(1)
+val queues = green_carrier_run_queues_new(4, 8)
+val inactive = green_carrier_spawn_task(63, 4, 2, 4, 0, 4, 4, 0)
+val queued = green_carrier_apply_enqueue(queues, inactive)
+val pass_result = sched.run_green_carrier_active_pass(queued.queues, 1)
+
+expect(pass_result.rebalance.moved_workers).to_equal(1)
+expect(pass_result.rebalance.reason).to_equal("move_budget_exhausted")
+expect(pass_result.ran_workers).to_equal(1)
+expect(pass_result.attempted_carriers).to_equal(1)
+expect(pass_result.last_cpu).to_equal(0)
+expect(pass_result.last_task_id).to_equal(63)
+expect(sched.green_current_task_on_cpu(0u32)).to_equal(63)
+expect(green_carrier_queue_depth(pass_result.queues, 0)).to_equal(0)
+expect(green_carrier_queue_depth(pass_result.queues, 1)).to_equal(0)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

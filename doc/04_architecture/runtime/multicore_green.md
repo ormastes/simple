@@ -162,6 +162,10 @@ SimpleOS path:
   execution path. It dispatches through the active carrier limit, applies the
   resulting green scheduler intent, and preserves queued work when the target
   carrier is inactive.
+- `Scheduler.run_green_carrier_active_pass` is the bounded worker-loop bridge.
+  It first performs budgeted inactive-carrier rebalance, then attempts one run
+  step per active carrier and reports run counts without claiming unbounded
+  preemption.
 - QEMU proof currently covers AP startup plus CPU1 fixed-slot dispatch; full
   hardware context-switch handoff remains future work.
 
