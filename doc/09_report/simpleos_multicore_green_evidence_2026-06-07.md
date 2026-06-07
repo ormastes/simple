@@ -33,7 +33,7 @@ SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 ./src/compiler_rust/target/debug/simple test 
 | SimpleOS green-carrier compile check | PASS | 1 file |
 | SimpleOS green-carrier unit contract | PASS | 36 |
 | SimpleOS scheduler compile check | PASS | 1 file |
-| SimpleOS scheduler green-carrier parallelism | PASS | 21 |
+| SimpleOS scheduler green-carrier parallelism | PASS | 23 |
 | SimpleOS green-carrier QEMU spec default lane | PASS | 1 |
 | SimpleOS green-carrier QEMU live lane | PASS | 1 |
 
@@ -71,3 +71,5 @@ SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 ./src/compiler_rust/target/debug/simple test 
   slot only after requeue, and lets the next active pass run the yielded task.
   It also proves scheduler-owned green timer ticks decrement per-carrier budget
   and yield/requeue the current green task when the time slice expires.
+  Active-carrier timer sweeps now prove the scheduler ticks only active green
+  carriers and leaves inactive carrier work queued.

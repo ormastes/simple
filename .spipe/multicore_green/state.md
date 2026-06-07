@@ -151,6 +151,12 @@ go-runtime-hardening
 - verification: `scheduler.spl` and `green_carrier.spl` checks passed, and
   `scheduler_green_parallelism_spec.spl` passed 21 examples for tick-budget
   decrement, time-slice yield, and no-current tick behavior.
+- implementation: Added `Scheduler.green_timer_tick_active_carriers`, a
+  scheduler-owned timer sweep that ticks active carriers only and requeues
+  expired green workers through the existing yield path.
+- verification: `scheduler.spl` and `green_carrier.spl` checks passed, and
+  `scheduler_green_parallelism_spec.spl` passed 23 examples for active-carrier
+  timer sweeps and inactive-carrier preservation.
 
 ## Completion Audit - 2026-06-07
 

@@ -94,7 +94,8 @@ use os.kernel.scheduler.green_carrier.{
     GreenCarrierSchedulerIntent, GreenCarrierExecutionResult, GreenCarrierParallelismState,
     GreenCarrierRunQueueState, GreenCarrierRebalanceResult, GreenCarrierRebalancePassResult,
     GreenCarrierRunStepResult, GreenCarrierRunPassResult, GreenCarrierRunLoopResult,
-    GreenCarrierYieldResult, GreenCarrierTimerTickResult, GreenCarrierWakeRunResult,
+    GreenCarrierYieldResult, GreenCarrierTimerTickResult, GreenCarrierTimerSweepResult,
+    GreenCarrierWakeRunResult,
     green_carrier_apply_scheduler_intent,
     green_carrier_extend_execution_state,
     green_carrier_current_task_on_cpu,
@@ -598,6 +599,43 @@ impl Scheduler:
             ticks_remaining: 0,
             yielded: yielded.yielded,
             reason: if yielded.yielded: "green_time_slice_expired" else: yielded.reason
+        )
+
+    me green_timer_tick_active_carriers(queues: GreenCarrierRunQueueState) -> GreenCarrierTimerSweepResult:
+        var current = queues
+        var ticked_carriers = 0
+        var yielded_workers = 0
+        var last_cpu = -1
+        var last_task_id = -1
+        var carrier_limit = self.green_parallelism_state.active_limit
+        if carrier_limit > current.queue_depth_by_cpu.len():
+            carrier_limit = current.queue_depth_by_cpu.len()
+        if carrier_limit < 1:
+            return GreenCarrierTimerSweepResult(
+                queues: current,
+                ticked_carriers: 0,
+                yielded_workers: 0,
+                last_cpu: -1,
+                last_task_id: -1,
+                reason: "no_active_carrier"
+            )
+        var cpu = 0
+        while cpu < carrier_limit:
+            val tick = self.green_timer_tick_on_cpu(current, cpu as u32)
+            current = tick.queues
+            ticked_carriers = ticked_carriers + 1
+            if tick.yielded:
+                yielded_workers = yielded_workers + 1
+                last_cpu = cpu
+                last_task_id = tick.task_id
+            cpu = cpu + 1
+        GreenCarrierTimerSweepResult(
+            queues: current,
+            ticked_carriers: ticked_carriers,
+            yielded_workers: yielded_workers,
+            last_cpu: last_cpu,
+            last_task_id: last_task_id,
+            reason: if yielded_workers > 0: "green_time_slice_expired" else: "time_slice_running"
         )
 
     me set_green_carrier_parallelism(requested_limit: i64) -> GreenCarrierParallelismState:

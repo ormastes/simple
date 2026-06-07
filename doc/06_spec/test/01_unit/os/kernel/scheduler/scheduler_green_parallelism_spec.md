@@ -28,7 +28,7 @@ scheduler_green_parallelism_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 21 | 21 | 0 | 0 |
+| 23 | 23 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -855,12 +855,118 @@ expect(sched.green_current_task_on_cpu(0u32)).to_equal(0)
 
 </details>
 
+#### sweeps active green carriers and yields expired workers
+
+1. var sched = Scheduler new with cpu count
+
+2. sched set green carrier parallelism
+   - Expected: pass_result.ran_workers equals `2`
+   - Expected: sweep1.ticked_carriers equals `2`
+   - Expected: sweep1.yielded_workers equals `0`
+   - Expected: sweep1.reason equals `time_slice_running`
+   - Expected: sched.green_ticks_remaining_on_cpu(0u32) equals `1`
+   - Expected: sched.green_ticks_remaining_on_cpu(1u32) equals `1`
+   - Expected: sweep2.ticked_carriers equals `2`
+   - Expected: sweep2.yielded_workers equals `2`
+   - Expected: sweep2.last_cpu equals `1`
+   - Expected: sweep2.last_task_id equals `71`
+   - Expected: sweep2.reason equals `green_time_slice_expired`
+   - Expected: green_carrier_queue_depth(sweep2.queues, 0) equals `1`
+   - Expected: green_carrier_queue_depth(sweep2.queues, 1) equals `1`
+   - Expected: sched.green_current_task_on_cpu(0u32) equals `0`
+   - Expected: sched.green_current_task_on_cpu(1u32) equals `0`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 26 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var sched = Scheduler.new_with_cpu_count(4u32)
+sched.set_green_carrier_parallelism(2)
+val queues = green_carrier_run_queues_new(4, 8)
+val first = green_carrier_spawn_task(70, 4, 1, 0, 4, 4, 4, 0)
+val after_first = green_carrier_apply_enqueue(queues, first)
+val second = green_carrier_spawn_task(71, 4, 2, 4, 0, 4, 4, 0)
+val after_second = green_carrier_apply_enqueue(after_first.queues, second)
+val pass_result = sched.run_green_carrier_active_pass(after_second.queues, 0)
+val sweep1 = sched.green_timer_tick_active_carriers(pass_result.queues)
+val sweep2 = sched.green_timer_tick_active_carriers(sweep1.queues)
+
+expect(pass_result.ran_workers).to_equal(2)
+expect(sweep1.ticked_carriers).to_equal(2)
+expect(sweep1.yielded_workers).to_equal(0)
+expect(sweep1.reason).to_equal("time_slice_running")
+expect(sched.green_ticks_remaining_on_cpu(0u32)).to_equal(1)
+expect(sched.green_ticks_remaining_on_cpu(1u32)).to_equal(1)
+expect(sweep2.ticked_carriers).to_equal(2)
+expect(sweep2.yielded_workers).to_equal(2)
+expect(sweep2.last_cpu).to_equal(1)
+expect(sweep2.last_task_id).to_equal(71)
+expect(sweep2.reason).to_equal("green_time_slice_expired")
+expect(green_carrier_queue_depth(sweep2.queues, 0)).to_equal(1)
+expect(green_carrier_queue_depth(sweep2.queues, 1)).to_equal(1)
+expect(sched.green_current_task_on_cpu(0u32)).to_equal(0)
+expect(sched.green_current_task_on_cpu(1u32)).to_equal(0)
+```
+
+</details>
+
+#### does not sweep inactive green carriers
+
+1. var sched = Scheduler new with cpu count
+
+2. sched set green carrier parallelism
+   - Expected: pass_result.ran_workers equals `1`
+   - Expected: sweep1.ticked_carriers equals `1`
+   - Expected: sweep2.ticked_carriers equals `1`
+   - Expected: sweep2.yielded_workers equals `1`
+   - Expected: sweep2.last_task_id equals `72`
+   - Expected: green_carrier_queue_depth(sweep2.queues, 0) equals `1`
+   - Expected: green_carrier_queue_depth(sweep2.queues, 1) equals `1`
+   - Expected: sched.green_current_task_on_cpu(0u32) equals `0`
+   - Expected: sched.green_current_task_on_cpu(1u32) equals `0`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var sched = Scheduler.new_with_cpu_count(4u32)
+sched.set_green_carrier_parallelism(1)
+val queues = green_carrier_run_queues_new(4, 8)
+val active = green_carrier_spawn_task(72, 4, 1, 0, 4, 4, 4, 0)
+val after_active = green_carrier_apply_enqueue(queues, active)
+val inactive = green_carrier_spawn_task(73, 4, 2, 4, 0, 4, 4, 0)
+val after_inactive = green_carrier_apply_enqueue(after_active.queues, inactive)
+val pass_result = sched.run_green_carrier_active_pass(after_inactive.queues, 0)
+val sweep1 = sched.green_timer_tick_active_carriers(pass_result.queues)
+val sweep2 = sched.green_timer_tick_active_carriers(sweep1.queues)
+
+expect(pass_result.ran_workers).to_equal(1)
+expect(sweep1.ticked_carriers).to_equal(1)
+expect(sweep2.ticked_carriers).to_equal(1)
+expect(sweep2.yielded_workers).to_equal(1)
+expect(sweep2.last_task_id).to_equal(72)
+expect(green_carrier_queue_depth(sweep2.queues, 0)).to_equal(1)
+expect(green_carrier_queue_depth(sweep2.queues, 1)).to_equal(1)
+expect(sched.green_current_task_on_cpu(0u32)).to_equal(0)
+expect(sched.green_current_task_on_cpu(1u32)).to_equal(0)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 21 |
-| Active scenarios | 21 |
+| Total scenarios | 23 |
+| Active scenarios | 23 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
