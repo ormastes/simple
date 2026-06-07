@@ -157,8 +157,11 @@ Behavior:
 
 ### Freestanding QEMU Probe Path
 
-`green_carrier_fixed_spawn_cpu` and `green_carrier_fixed_run_task` avoid heap
-and text-heavy state for small SimpleOS x86_64 QEMU probes.
+`green_carrier_fixed_spawn_cpu`, `green_carrier_fixed_run_task`, and
+`green_carrier_fixed_preempt_running_task` avoid heap-heavy scheduler state for
+small SimpleOS x86_64 QEMU probes. The preemption helper gives the live guest a
+freestanding timer-slice yield marker without claiming final AP hardware
+context-switch handoff.
 
 Design rule: fixed-slot helpers are proof adapters, not replacements for the
 hosted scheduler-facing API.

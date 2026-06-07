@@ -190,6 +190,19 @@ pub struct GreenCarrierFixedStepResult:
     context_switches: i64
     total_context_switches: i64
 
+pub struct GreenCarrierFixedPreemptionResult:
+    """Freestanding-safe green preemption result for fixed CPU slots."""
+    task_id: i64
+    cpu: i64
+    source: text
+    accepted: bool
+    ticked: bool
+    yielded: bool
+    current_task: u64
+    queued_task: i64
+    ticks_remaining: i64
+    reason: text
+
 fn green_carrier_fixed_cpu_allowed(affinity_mask: i64, cpu: i64) -> bool:
     if cpu < 0:
         false
@@ -260,6 +273,77 @@ pub fn green_carrier_fixed_run_task(task_id: i64, cpu_count: i64, affinity_mask:
         context_switches: 1,
         total_context_switches: 1
     )
+
+fn green_carrier_fixed_preemption_source_is_valid(source: text) -> bool:
+    source == "timer_interrupt" or source == "runtime_safepoint" or source == "compiler_safepoint"
+
+pub fn green_carrier_fixed_preempt_running_task(task_id: i64, cpu: i64, active_limit: i64, ticks_remaining: i64, source: text) -> GreenCarrierFixedPreemptionResult:
+    """Tick or yield one fixed-slot running task for freestanding QEMU probes."""
+    if not green_carrier_fixed_preemption_source_is_valid(source):
+        GreenCarrierFixedPreemptionResult(
+            task_id: task_id,
+            cpu: cpu,
+            source: source,
+            accepted: false,
+            ticked: false,
+            yielded: false,
+            current_task: task_id as u64,
+            queued_task: 0,
+            ticks_remaining: ticks_remaining,
+            reason: "invalid_preemption_source"
+        )
+    elif task_id < 1:
+        GreenCarrierFixedPreemptionResult(
+            task_id: task_id,
+            cpu: cpu,
+            source: source,
+            accepted: true,
+            ticked: false,
+            yielded: false,
+            current_task: 0,
+            queued_task: 0,
+            ticks_remaining: ticks_remaining,
+            reason: "no_current_green_task"
+        )
+    elif cpu < 0 or cpu >= active_limit:
+        GreenCarrierFixedPreemptionResult(
+            task_id: task_id,
+            cpu: cpu,
+            source: source,
+            accepted: true,
+            ticked: false,
+            yielded: false,
+            current_task: task_id as u64,
+            queued_task: 0,
+            ticks_remaining: ticks_remaining,
+            reason: "inactive_green_carrier"
+        )
+    elif ticks_remaining > 1:
+        GreenCarrierFixedPreemptionResult(
+            task_id: task_id,
+            cpu: cpu,
+            source: source,
+            accepted: true,
+            ticked: true,
+            yielded: false,
+            current_task: task_id as u64,
+            queued_task: 0,
+            ticks_remaining: ticks_remaining - 1,
+            reason: "time_slice_running"
+        )
+    else:
+        GreenCarrierFixedPreemptionResult(
+            task_id: task_id,
+            cpu: cpu,
+            source: source,
+            accepted: true,
+            ticked: true,
+            yielded: true,
+            current_task: 0,
+            queued_task: task_id,
+            ticks_remaining: 0,
+            reason: "green_time_slice_expired"
+        )
 
 pub fn green_carrier_should_send_ipi(current_cpu: i64, target_cpu: i64, should_enqueue: bool) -> bool:
     """Request a wake IPI only for remote runnable enqueue decisions."""

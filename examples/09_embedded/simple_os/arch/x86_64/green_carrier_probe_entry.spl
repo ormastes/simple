@@ -16,7 +16,8 @@ use os.kernel.smp.percpu.{percpu_is_online, percpu_is_present}
 use os.kernel.arch.x86_64.cpu.{x86_ap_trampoline_vector, x86_registered_ap_boot_started_count, x86_send_startup_to_cpu}
 use os.kernel.arch.x86_64.interrupt.{X86Interrupt}
 use os.kernel.scheduler.green_carrier.{
-    green_carrier_fixed_run_task
+    green_carrier_fixed_run_task,
+    green_carrier_fixed_preempt_running_task
 }
 
 extern fn serial_println(msg: text)
@@ -37,10 +38,14 @@ fn _run_green_carrier_probe():
     val result = green_carrier_fixed_run_task(701, 2, 0, 5, 0, 0, 0, 0)
     val pending = smp_take_ipi(1u32)
     val probe_ok = result.enqueued and result.ipi_sent and result.dispatched and result.current_task == 701u64 and result.context_switches == 1
+    val preempt = green_carrier_fixed_preempt_running_task(result.current_task as i64, 1, 2, 1, "timer_interrupt")
+    val preempt_ok = preempt.accepted and preempt.ticked and preempt.yielded and preempt.current_task == 0u64 and preempt.queued_task == 701
 
     serial_println("[green-carrier-qemu] target-cpu={result.target_cpu} enqueued={_pass(result.enqueued)} ipi={_pass(result.ipi_sent)} pending={pending}")
     serial_println("[green-carrier-qemu] dispatched={_pass(result.dispatched)} task={result.task_id}")
     serial_println("[green-carrier-qemu] cpu1-task={result.current_task} cpu1-switches={result.context_switches}")
+    serial_println("[green-carrier-qemu] preempt-source={preempt.source} ticked={_pass(preempt.ticked)} yielded={_pass(preempt.yielded)} queued={preempt.queued_task}")
+    serial_println("[green-carrier-qemu] PREEMPT_PASS={_pass(preempt_ok)}")
     serial_println("[green-carrier-qemu] PASS={_pass(probe_ok)}")
 
 fn _start():

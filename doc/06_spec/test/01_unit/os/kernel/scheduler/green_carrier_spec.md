@@ -28,7 +28,7 @@ green_carrier_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 36 | 36 | 0 | 0 |
+| 38 | 38 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1069,12 +1069,54 @@ expect(result.context_switches).to_equal(1)
 
 </details>
 
+#### preempts a fixed-slot running task when timer slice expires
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = green_carrier_fixed_preempt_running_task(42, 1, 2, 1, "timer_interrupt")
+
+expect(result.accepted).to_equal(true)
+expect(result.ticked).to_equal(true)
+expect(result.yielded).to_equal(true)
+expect(result.current_task).to_equal(0)
+expect(result.queued_task).to_equal(42)
+expect(result.reason).to_equal("green_time_slice_expired")
+```
+
+</details>
+
+#### rejects bad fixed-slot preemption source without ticking
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = green_carrier_fixed_preempt_running_task(43, 1, 2, 1, "bad_source")
+
+expect(result.accepted).to_equal(false)
+expect(result.ticked).to_equal(false)
+expect(result.yielded).to_equal(false)
+expect(result.current_task).to_equal(43)
+expect(result.queued_task).to_equal(0)
+expect(result.reason).to_equal("invalid_preemption_source")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 36 |
-| Active scenarios | 36 |
+| Total scenarios | 38 |
+| Active scenarios | 38 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

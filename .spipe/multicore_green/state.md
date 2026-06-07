@@ -175,6 +175,14 @@ go-runtime-hardening
   against `doc/09_report/cross_language_perf_parallel_smoke.md`. The dated
   `cross_language_perf_2026-06-06.md` report is historical and does not carry
   the current profile-contract headings.
+- implementation: Added `green_carrier_fixed_preempt_running_task` and wired
+  the x86_64 green-carrier QEMU probe to emit
+  `[green-carrier-qemu] PREEMPT_PASS=true` after a fixed timer-preemption yield
+  for the CPU1 green task.
+- verification target: `green_carrier_qemu_spec.spl` now requires the
+  preemption marker in the live QEMU lane. This advances hardware-facing
+  SimpleOS evidence but still does not claim final AP ring/context-switch
+  handoff.
 
 ## Completion Audit - 2026-06-07
 

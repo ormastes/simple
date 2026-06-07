@@ -1,6 +1,6 @@
 # SimpleOS Green Carrier QEMU Live Specification
 
-> This opt-in live spec validates the SimpleOS green-carrier AP lane in QEMU. When `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1` is set, the spec builds the x86_64 guest probe, boots a two-CPU guest, and checks serial output for the real AP 64-bit entry marker plus the green-carrier PASS marker.
+> This opt-in live spec validates the SimpleOS green-carrier AP lane in QEMU. When `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1` is set, the spec builds the x86_64 guest probe, boots a two-CPU guest, and checks serial output for the real AP 64-bit entry marker plus green-carrier dispatch and preemption PASS markers.
 
 <!-- sdn-diagram:id=green_carrier_qemu_spec.arch -->
 <details class="sdn-source">
@@ -34,7 +34,7 @@ green_carrier_qemu_spec -> std
 
 # SimpleOS Green Carrier QEMU Live Specification
 
-This opt-in live spec validates the SimpleOS green-carrier AP lane in QEMU. When `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1` is set, the spec builds the x86_64 guest probe, boots a two-CPU guest, and checks serial output for the real AP 64-bit entry marker plus the green-carrier PASS marker.
+This opt-in live spec validates the SimpleOS green-carrier AP lane in QEMU. When `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1` is set, the spec builds the x86_64 guest probe, boots a two-CPU guest, and checks serial output for the real AP 64-bit entry marker plus green-carrier dispatch and preemption PASS markers.
 
 ## At a Glance
 
@@ -56,13 +56,16 @@ This opt-in live spec validates the SimpleOS green-carrier AP lane in QEMU. When
 This opt-in live spec validates the SimpleOS green-carrier AP lane in QEMU.
 When `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1` is set, the spec builds the
 x86_64 guest probe, boots a two-CPU guest, and checks serial output for the
-real AP 64-bit entry marker plus the green-carrier PASS marker.
+real AP 64-bit entry marker plus green-carrier dispatch and preemption PASS
+markers.
 
 The PASS marker means the freestanding fixed-slot carrier path selected CPU1,
 sent the remote green-carrier IPI intent, dispatched task `701`, and recorded
-one CPU1 green context-switch count. This proves AP startup plus
-scheduler-visible CPU1 green dispatch. Full hardware context-switch handoff
-across APs remains tracked separately.
+one CPU1 green context-switch count. The PREEMPT_PASS marker means the same
+guest probe ran the fixed-slot timer preemption helper and requeued the running
+green task. This proves AP startup plus scheduler-visible CPU1 green dispatch
+and freestanding timer-preemption evidence. Full hardware context-switch
+handoff across APs remains tracked separately.
 
 ## Requirements
 
@@ -101,6 +104,7 @@ The live serial output must include:
 ```text
 [smp] AP reached 64-bit entry
 [green-carrier-qemu] PASS=true
+[green-carrier-qemu] PREEMPT_PASS=true
 ```
 
 ## Scenarios
@@ -113,12 +117,13 @@ _Live green-carrier validation, disabled unless SIMPLEOS_GREEN_CARRIER_QEMU_LIVE
 1.  print probe debug
    - Expected: serial contains `AP_ONLINE_MARKER`
    - Expected: serial contains `GREEN_PASS_MARKER`
+   - Expected: serial contains `GREEN_PREEMPT_MARKER`
 
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -136,6 +141,7 @@ else:
         _print_probe_debug(serial, result[1])
     expect(serial.contains(AP_ONLINE_MARKER)).to_equal(true)
     expect(serial.contains(GREEN_PASS_MARKER)).to_equal(true)
+    expect(serial.contains(GREEN_PREEMPT_MARKER)).to_equal(true)
 ```
 
 </details>

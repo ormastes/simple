@@ -4,8 +4,9 @@
 
 This report records the SimpleOS evidence for the multicore-green SPipe lane,
 including the opt-in live QEMU green-carrier proof. It does not claim final
-hardware context-switch handoff across APs; the live proof covers AP startup
-plus scheduler-visible CPU1 green dispatch.
+hardware context-switch handoff across APs; the live proof covers AP startup,
+scheduler-visible CPU1 green dispatch, and fixed timer-preemption yield
+evidence.
 
 ## Verified Commands
 
@@ -31,7 +32,7 @@ SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 ./src/compiler_rust/target/debug/simple test 
 | SimpleOS multicore green scheduler contract | PASS | 5 |
 | SimpleOS green-channel wake bridge | PASS | 4 |
 | SimpleOS green-carrier compile check | PASS | 1 file |
-| SimpleOS green-carrier unit contract | PASS | 36 |
+| SimpleOS green-carrier unit contract | PASS | 38 |
 | SimpleOS scheduler compile check | PASS | 1 file |
 | SimpleOS scheduler green-carrier parallelism | PASS | 26 |
 | SimpleOS green-carrier QEMU spec default lane | PASS | 1 |
@@ -41,9 +42,10 @@ SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 ./src/compiler_rust/target/debug/simple test 
 
 - The default QEMU spec lane proves the opt-in gate is wired and disabled unless
   `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1` is set.
-- The live lane passed in 40469ms. The spec built the x86_64 probe, booted a
-  two-CPU QEMU guest, and asserted both `[smp] AP reached 64-bit entry` and
-  `[green-carrier-qemu] PASS=true` in serial output.
+- The live lane passed in 40022ms. The spec built the x86_64 probe, booted a
+  two-CPU QEMU guest, and asserted `[smp] AP reached 64-bit entry`,
+  `[green-carrier-qemu] PASS=true`, and
+  `[green-carrier-qemu] PREEMPT_PASS=true` in serial output.
 - The hosted SimpleOS specs prove scheduler-owned green execution state remains
   separate from normal OS task state. The multicore-green SimpleOS contract now
   also proves runtime and timer preemption safepoints route through active
@@ -79,3 +81,6 @@ SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 ./src/compiler_rust/target/debug/simple test 
   bridge now proves timer-interrupt and compiler-safepoint sources route
   through the active-carrier sweep, and that unknown sources are rejected
   without ticking or mutating carrier state.
+  The fixed-slot freestanding helper now proves a QEMU-friendly timer-slice
+  yield path can requeue a running CPU1 green task without heap-heavy scheduler
+  state.
