@@ -972,12 +972,47 @@ class Rules:
     needs_rightmost_prefilter: [bool]
     rightmost_prefilters: [text]
     simple_selector_rules: [bool]
+    simple_fast_kinds: [i32]
+    simple_fast_tags: [text]
+    simple_fast_values: [text]
 
 fn selector_needs_rightmost_prefilter(sel: text) -> bool:
     sel.index_of(" ") >= 0 or sel.contains(">")
 
 fn selector_is_single_simple_rule(sel: text) -> bool:
     not selector_needs_rightmost_prefilter(sel) and sel.index_of(",") < 0
+
+fn selector_simple_fast_kind(sel: text) -> i32:
+    if not selector_is_single_simple_rule(sel):
+        return 0
+    if sel.index_of(":") >= 0 or sel.index_of("[") >= 0:
+        return 0
+    if sel.len() == 0:
+        return 0
+    val first = sel.substring(0, 1)
+    if first == ".":
+        return 1
+    if first == "#":
+        return 2
+    if sel.index_of(".") >= 0:
+        return 4
+    3
+
+fn selector_simple_fast_tag(sel: text, kind: i32) -> text:
+    if kind == 4:
+        val dot = sel.index_of(".")
+        return sel.substring(0, dot)
+    ""
+
+fn selector_simple_fast_value(sel: text, kind: i32) -> text:
+    if kind == 1 or kind == 2:
+        return sel.substring(1, sel.len())
+    if kind == 4:
+        val dot = sel.index_of(".")
+        return sel.substring(dot + 1, sel.len())
+    if kind == 3:
+        return sel
+    ""
 
 fn selector_group_rightmost_filter(group: text) -> text:
     val trimmed = group.trim()
@@ -1015,6 +1050,9 @@ fn extract_css(html: text) -> Rules:
     var needs_rightmost_prefilter: [bool] = []
     var rightmost_prefilters: [text] = []
     var simple_selector_rules: [bool] = []
+    var simple_fast_kinds: [i32] = []
+    var simple_fast_tags: [text] = []
+    var simple_fast_values: [text] = []
     var pos = 0
     var guard = 0
     while guard < 1000:
@@ -1048,9 +1086,13 @@ fn extract_css(html: text) -> Rules:
                 needs_rightmost_prefilter.push(selector_needs_rightmost_prefilter(sel))
                 rightmost_prefilters.push(selector_rightmost_filter(sel))
                 simple_selector_rules.push(selector_is_single_simple_rule(sel))
+                val fast_kind = selector_simple_fast_kind(sel)
+                simple_fast_kinds.push(fast_kind)
+                simple_fast_tags.push(selector_simple_fast_tag(sel, fast_kind))
+                simple_fast_values.push(selector_simple_fast_value(sel, fast_kind))
             cp = endb + 1
         pos = close + 1
-    Rules(sels: sels, decls: decls, needs_rightmost_prefilter: needs_rightmost_prefilter, rightmost_prefilters: rightmost_prefilters, simple_selector_rules: simple_selector_rules)
+    Rules(sels: sels, decls: decls, needs_rightmost_prefilter: needs_rightmost_prefilter, rightmost_prefilters: rightmost_prefilters, simple_selector_rules: simple_selector_rules, simple_fast_kinds: simple_fast_kinds, simple_fast_tags: simple_fast_tags, simple_fast_values: simple_fast_values)
 
 fn unquote_css_attr_value(raw: text) -> text:
     val v = raw.trim()
@@ -1118,6 +1160,17 @@ fn simple_match(sel: text, tag: text, cls: text, id: text, attrs: text) -> bool:
         val expr = base.substring(attr_start + 1, attr_end)
         return base_selector_matches(node_base, tag, cls, id) and attr_selector_matches(attrs, expr)
     base_selector_matches(base, tag, cls, id)
+
+fn simple_fast_match(kind: i32, fast_tag: text, fast_value: text, tag: text, cls: text, id: text) -> bool:
+    if kind == 1:
+        return class_has_all(cls, fast_value)
+    if kind == 2:
+        return id == fast_value
+    if kind == 3:
+        return tag == fast_value
+    if kind == 4:
+        return tag == fast_tag and class_has_all(cls, fast_value)
+    false
 
 fn class_has(cls: text, want: text) -> bool:
     if cls == want:
@@ -1266,7 +1319,11 @@ fn compute_styles(nodes: [HNode], rules: Rules, html: text) -> [Style]:
         var r = 0
         while r < rule_count:
             val sel = rules.sels[r]
-            if rules.simple_selector_rules[r]:
+            val fast_kind = rules.simple_fast_kinds[r]
+            if fast_kind > 0:
+                if simple_fast_match(fast_kind, rules.simple_fast_tags[r], rules.simple_fast_values[r], nd.tag, nd.class_attr, nd.id_attr):
+                    st = apply_decls(st, rules.decls[r])
+            elif rules.simple_selector_rules[r]:
                 if simple_match(rules.rightmost_prefilters[r], nd.tag, nd.class_attr, nd.id_attr, nd.attrs_raw):
                     st = apply_decls(st, rules.decls[r])
             elif (not rules.needs_rightmost_prefilter[r] or selector_rightmost_filter_matches_node(rules.rightmost_prefilters[r], nd.tag, nd.class_attr, nd.id_attr, nd.attrs_raw)) and selector_matches_node(nodes, i, sel):

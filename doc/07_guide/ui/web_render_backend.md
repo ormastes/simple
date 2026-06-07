@@ -78,8 +78,9 @@ fixed (see `doc/08_tracking/bug/pure_simple_web_render_interpreter_bound_2026-06
    filters once with the stylesheet rules, then uses that metadata before the
    full ancestor matcher so common misses do not pay per-node selector scans,
    normalization, or tree-walk cost. Single simple rules such as `.class`,
-   `tag`, and `#id` are also marked at extraction time and matched directly
-   through `simple_match()` instead of the generic selector dispatcher.
+   `tag`, `#id`, and `tag.class` are also classified into kind/value metadata at
+   extraction time and matched directly instead of reparsing the selector through
+   `simple_match()` or the generic selector dispatcher.
 7. single-property CSS declaration blocks still paid the full declaration
    lookup path for every matched rule. The 2026-06-07 declaration fast-path
    parses common one-property blocks once and falls back to the full parser for
