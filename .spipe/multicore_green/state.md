@@ -52,6 +52,13 @@ go-runtime-hardening
   with capture-free generated Simple workers. Native regular parallel, fanout,
   and stress multicore-green rows now pass with `pool_used=N/N` and
   `parallelism=requested/actual` evidence.
+- evidence: Added dated large profile evidence in
+  `doc/09_report/cross_language_perf_parallel_large_2026-06-07.md` with
+  100 CPU workers, 1000 fanout workers, and 2000 stress workers. The large
+  profile shows Go goroutine fanout beating C pthread fanout and Simple
+  multicore-green native fanout/stress beating C with full runtime-pool
+  evidence. `test/05_perf/stress/multicore_green_large_profile_gate_spec.spl`
+  gates this report.
 - verification: Re-ran SimpleOS cooperative green, multicore green scheduler,
   green-channel wake, default QEMU gate, and live QEMU green-carrier proof with
   the rebuilt compiler; live QEMU passed in 40469ms.
@@ -220,10 +227,13 @@ go-runtime-hardening
   work, runtime-pool multicore green work, Go goroutines, C pthreads, and
   `task_spawn`.
 - AC-3 / AC-4 / AC-5: `scripts/check/check-cross-language-perf.shs`,
-  `doc/09_report/cross_language_perf_parallel_smoke.md`, and
+  `doc/09_report/cross_language_perf_parallel_smoke.md`,
+  `doc/09_report/cross_language_perf_parallel_large_2026-06-07.md`,
+  `test/05_perf/stress/multicore_green_large_profile_gate_spec.spl`, and
   `test/05_perf/profile_scripts/profile_report_contract_test.shs` use the
   canonical profile harness, compact handle-array generated workloads, Go/C
-  comparison rows, and `pool_used=` evidence while rejecting numbered aliases.
+  comparison rows, large fanout evidence, and `pool_used=` evidence while
+  rejecting numbered aliases.
 - AC-6: `test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl`,
   `test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl`,
   their generated manuals under `doc/06_spec/test/03_system/os/simpleos/feature/`,
