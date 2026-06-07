@@ -167,6 +167,26 @@ Vulkan/OpenCL.
 Remaining gap: production Metal/CUDA/HIP/Vulkan/OpenCL glyph raster kernels
 still need to populate the vector and bitmap glyph-return contract during live
 GUI execution instead of the test evidence slots.
+
+## Path F — repeated ancestor clip walks during paint — FIXED 2026-06-07
+
+`paint()` called `ancestor_clip()` in the background, absolute, positive z-index,
+image, icon, and text passes. Each call walked the node's parent chain, so deep
+overflow-hidden GUI trees paid repeated O(depth) clip work per painted node and
+per pass.
+
+**Fix (pure Simple):** build a `[ClipRect]` cache once per `paint()` call using
+the already ordered node array, then index `clips[i]` from each paint pass.
+Focused smoke on a 48-deep overflow-hidden Simple Web render at 96x96:
+
+| Measurement | Before | After |
+|-------------|--------|-------|
+| elapsed | `974687us` | `867759us` |
+| checksum | `39575014374045` | `39575014374045` |
+
+Unit coverage: `simple_web_renderer_spec.spl` already includes
+`matches Chrome overflow hidden clipping for a text-free CSS matrix`.
+
 ## Follow-up: GUI profile throughput evidence
 
 2026-06-06 GUI profile smoke:

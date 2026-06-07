@@ -2195,12 +2195,32 @@ fn ancestor_clip(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32
         p = nodes[p].parent
     clip
 
+fn build_ancestor_clips(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32], fbw: i32, fbh: i32) -> [ClipRect]:
+    var clips: [ClipRect] = []
+    var i = 0
+    while i < nodes.len():
+        val parent = nodes[i].parent
+        var clip = ClipRect(x0: 0, y0: 0, x1: fbw, y1: fbh)
+        if parent >= 0:
+            clip = clips[parent as i32]
+            val pst = styles[parent as i32]
+            if pst.overflow_hidden and pst.display != "none":
+                val cx0 = bx[parent as i32] + pst.border_l
+                val cy0 = by[parent as i32] + pst.border_t
+                val cx1 = bx[parent as i32] + bw[parent as i32] - pst.border_r
+                val cy1 = by[parent as i32] + bh[parent as i32] - pst.border_b
+                clip = clip_intersect(clip, cx0, cy0, cx1, cy1)
+        clips.push(clip)
+        i = i + 1
+    clips
+
 # ---------------------------------------------------------------------------
 # Paint into a staging [u32] framebuffer before Engine2D presentation.
 # ---------------------------------------------------------------------------
 
 fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32], fb: [u32], fbw: i32, fbh: i32, widget_mode: bool) -> [u32]:
     var out = fb
+    val clips = build_ancestor_clips(nodes, styles, bx, by, bw, bh, fbw, fbh)
     var has_widget_panel = widget_mode
     val chrome_widget_text = widget_mode and fbw >= 38 and fbh >= 62 and has_nonempty_widget_text_node(nodes)
     var scan = 0
@@ -2212,7 +2232,7 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
     var i = 0
     while i < nodes.len():
         val st = styles[i]
-        val clip = ancestor_clip(nodes, styles, bx, by, bw, bh, i, fbw, fbh)
+        val clip = clips[i]
         val skip_widget_page_bg = has_widget_panel and (nodes[i].tag == "html" or nodes[i].tag == "body")
         val skip_widget_node_bg = widget_mode and (class_contains(nodes[i].class_attr, "widget-") or class_contains(nodes[i].class_attr, "icon-image"))
         if not st.position_absolute and not skip_widget_page_bg and not skip_widget_node_bg and st.display != "none" and not st.visibility_hidden and nodes[i].tag != "#text" and st.bg != 0u32 and by[i] < fbh:
@@ -2231,7 +2251,7 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
     while i < nodes.len():
         val st = styles[i]
         if st.position_absolute and st.z_index <= 0:
-            val clip = ancestor_clip(nodes, styles, bx, by, bw, bh, i, fbw, fbh)
+            val clip = clips[i]
             val skip_widget_page_bg = has_widget_panel and (nodes[i].tag == "html" or nodes[i].tag == "body")
             val skip_widget_node_bg = widget_mode and (class_contains(nodes[i].class_attr, "widget-") or class_contains(nodes[i].class_attr, "icon-image"))
             if not skip_widget_page_bg and not skip_widget_node_bg and st.display != "none" and not st.visibility_hidden and nodes[i].tag != "#text" and st.bg != 0u32 and by[i] < fbh:
@@ -2263,7 +2283,7 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
             while i < nodes.len():
                 val st = styles[i]
                 if st.position_absolute and st.z_index == next_z:
-                    val clip = ancestor_clip(nodes, styles, bx, by, bw, bh, i, fbw, fbh)
+                    val clip = clips[i]
                     val skip_widget_page_bg = has_widget_panel and (nodes[i].tag == "html" or nodes[i].tag == "body")
                     val skip_widget_node_bg = widget_mode and (class_contains(nodes[i].class_attr, "widget-") or class_contains(nodes[i].class_attr, "icon-image"))
                     if not skip_widget_page_bg and not skip_widget_node_bg and st.display != "none" and not st.visibility_hidden and nodes[i].tag != "#text" and st.bg != 0u32 and by[i] < fbh:
@@ -2301,7 +2321,7 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
     # text on top
     i = 0
     while i < nodes.len():
-        val clip = ancestor_clip(nodes, styles, bx, by, bw, bh, i, fbw, fbh)
+        val clip = clips[i]
         if not widget_mode and styles[i].display != "none" and not styles[i].visibility_hidden and nodes[i].tag == "img" and class_contains(nodes[i].class_attr, "widget-image"):
             out = fb_rect_clip(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], argb(37, 99, 235), clip)
             out = fb_rect_clip(out, fbw, fbh, bx[i] + 3, by[i] + 4, 8, 7, argb(245, 158, 11), clip)
