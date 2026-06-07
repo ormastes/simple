@@ -375,6 +375,11 @@ and reports typed launch/readback evidence. That evidence proves the backend
 handoff and readback gate, but it intentionally keeps production font readiness
 false until real glyph-plan data is connected to the vector and bitmap
 returned-glyph contract.
+For bitmap fonts, the OpenCL facade can now build the device `glyph_plan` from
+the existing 8x16 fallback glyph rows and expose that plan through
+`Engine2D.bitmap_glyph_raster_evidence()`. This is the first real glyph-shaped
+plan input; production readiness still requires converting the readback into a
+`CachedGlyph` returned through the vector/bitmap font contract.
 Returned-glyph readback probes for both vector and bitmap fonts must support a
 bounded multi-slot batch (`0..7`) so backend launches can return more than one
 glyph without falling back to CPU for every character after slot 0.

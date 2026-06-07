@@ -88,6 +88,9 @@ Host input
   staging smoke path for `simple_2d_glyph_raster_u32`; it packs device
   `glyph_plan`/`dst` handles with the shared generated glyph layout and reports
   typed launch/readback evidence without marking production font readiness.
+- OpenCL bitmap glyph plan: `Engine2D.bitmap_glyph_raster_evidence()` exposes
+  the OpenCL path that uploads existing 8x16 bitmap glyph rows as device
+  `glyph_plan` input.
 - Draw IR glyph evidence: `Engine2dDrawIrAdvResult` reports backend glyph
   status/reason/readback separately from production returned-glyph readiness.
 - Engine2D split contract: `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl`.

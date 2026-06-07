@@ -241,6 +241,14 @@ the selected OpenCL backend reachable for generated glyph evidence and
 `font_gpu_glyph_returned`. This lets Draw IR surface backend handoff/readback
 state without claiming production font readiness from the OpenCL smoke path.
 
+2026-06-07 OpenCL bitmap glyph plan update: `simple_2d_glyph_raster_u32` now
+reads 8x16 bitmap row data from `glyph_plan`, and
+`OpenClBackend.launch_bitmap_glyph_raster_evidence()` prepares that plan from
+the existing `rt_gui_get_glyph_8x16()` fallback rows. `Engine2D` exposes this as
+`bitmap_glyph_raster_evidence()`. Remaining gap: successful readback still needs
+to be converted into `CachedGlyph` pixels and routed through the bitmap
+returned-glyph contract.
+
 ## Path F — repeated ancestor clip walks during paint — FIXED 2026-06-07
 
 `paint()` called `ancestor_clip()` in the background, absolute, positive z-index,

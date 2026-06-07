@@ -27,7 +27,7 @@ backend_opencl_facade_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -43,7 +43,7 @@ backend_opencl_facade_spec -> std
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -64,6 +64,8 @@ expect(source).to_contain("__kernel void simple_2d_triangle_filled_u32")
 expect(source).to_contain("__kernel void simple_2d_blit_image_u32")
 expect(source).to_contain("__kernel void simple_2d_blit_nonzero_u32")
 expect(source).to_contain("__kernel void simple_2d_glyph_raster_u32")
+expect(source).to_contain("__global const uchar* glyph_plan")
+expect(source).to_contain("glyph_plan[base_y]")
 ```
 
 </details>
@@ -353,19 +355,24 @@ backend.shutdown()
    - Expected: cold.production_ready is false
    - Expected: cold.status_code equals `launch-backend-not-ready`
    - Expected: cold.launch.operation equals `opencl_backend_generated_glyph_raster`
+   - Expected: bitmap_cold.width equals `8`
+   - Expected: bitmap_cold.height equals `16`
+   - Expected: bitmap_cold.status_code equals `launch-backend-not-ready`
+   - Expected: bitmap_cold.production_ready is false
 2. backend shutdown
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 var backend = OpenClBackend.create()
 val invalid = backend.launch_generated_glyph_raster_evidence(0, 4, 12)
 val cold = backend.launch_generated_glyph_raster_evidence(4, 4, 12)
+val bitmap_cold = backend.launch_bitmap_glyph_raster_evidence(65, 16)
 
 expect(invalid.device_glyph_returned).to_equal(false)
 expect(invalid.production_ready).to_equal(false)
@@ -376,8 +383,45 @@ expect(cold.production_ready).to_equal(false)
 expect(cold.status_code).to_equal("launch-backend-not-ready")
 expect(cold.launch.operation).to_equal("opencl_backend_generated_glyph_raster")
 expect(cold.diagnostic_text()).to_contain("production_ready=false")
+expect(bitmap_cold.width).to_equal(8)
+expect(bitmap_cold.height).to_equal(16)
+expect(bitmap_cold.status_code).to_equal("launch-backend-not-ready")
+expect(bitmap_cold.production_ready).to_equal(false)
 
 backend.shutdown()
+```
+
+</details>
+
+#### keeps Engine2D bitmap glyph evidence fail-closed on non OpenCL backends
+
+1. var engine = Engine2D create with backend
+   - Expected: evidence.width equals `8`
+   - Expected: evidence.height equals `16`
+   - Expected: evidence.status_code equals `launch-backend-not-opencl`
+   - Expected: evidence.reason equals `engine2d-bitmap-glyph-backend-not-opencl`
+   - Expected: evidence.device_glyph_returned is false
+   - Expected: evidence.production_ready is false
+2. engine shutdown
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var engine = Engine2D.create_with_backend(16, 16, "cpu")
+val evidence = engine.bitmap_glyph_raster_evidence(65, 16)
+
+expect(evidence.width).to_equal(8)
+expect(evidence.height).to_equal(16)
+expect(evidence.status_code).to_equal("launch-backend-not-opencl")
+expect(evidence.reason).to_equal("engine2d-bitmap-glyph-backend-not-opencl")
+expect(evidence.device_glyph_returned).to_equal(false)
+expect(evidence.production_ready).to_equal(false)
+engine.shutdown()
 ```
 
 </details>
@@ -441,8 +485,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
