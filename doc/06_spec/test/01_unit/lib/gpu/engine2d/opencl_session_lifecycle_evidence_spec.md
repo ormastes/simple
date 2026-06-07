@@ -41,7 +41,7 @@ opencl_session_lifecycle_evidence_spec -> std
 #### reports typed lifecycle evidence for unavailable OpenCL runtime paths
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -68,9 +68,9 @@ expect(sync_ev.diagnostic_text()).to_contain("OpenClSessionEvidence")
 #### reports typed generated 2D launch evidence for generated OpenCL dispatch operations
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -80,6 +80,7 @@ val fill_ev = session.launch_generated_2d_evidence("fill", 16, 16, 4096)
 val copy_ev = session.launch_generated_2d_evidence("copy", 16, 16, 4096)
 val alpha_ev = session.launch_generated_2d_evidence("alpha_blend", 16, 16, 4096)
 val scroll_ev = session.launch_generated_2d_evidence("scroll", 16, 16, 4096)
+val glyph_ev = session.launch_generated_2d_evidence("glyph_raster", 16, 16, 4096)
 val rect_ev = session.launch_generated_2d_evidence("rect_filled", 16, 16, 4096)
 val missing_args_ev = session.launch_generated_2d_evidence("fill", 16, 16, 0)
 val bad_plan_ev = session.launch_generated_2d_evidence("fill", 0, 16, 4096)
@@ -92,6 +93,8 @@ expect(alpha_ev.operation).to_equal("launch_generated_2d:alpha_blend")
 expect(alpha_ev.status_code).to_equal("missing-ffi")
 expect(scroll_ev.operation).to_equal("launch_generated_2d:scroll")
 expect(scroll_ev.status_code).to_equal("missing-ffi")
+expect(glyph_ev.operation).to_equal("launch_generated_2d:glyph_raster")
+expect(glyph_ev.status_code).to_equal("missing-ffi")
 expect(rect_ev.operation).to_equal("launch_generated_2d:rect_filled")
 expect(rect_ev.status_code).to_equal("plan-not-ready")
 expect(rect_ev.reason).to_equal("unsupported-operation")

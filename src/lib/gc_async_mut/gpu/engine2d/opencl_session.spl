@@ -4,7 +4,7 @@
 
 use std.gc_async_mut.gpu.engine2d.backend_session.{BackendSessionKind}
 use std.gc_async_mut.gpu.engine2d.generated_kernel_dispatch.{
-    GENERATED_2D_ALPHA, GENERATED_2D_COPY, GENERATED_2D_FILL, GENERATED_2D_SCROLL,
+    GENERATED_2D_ALPHA, GENERATED_2D_COPY, GENERATED_2D_FILL, GENERATED_2D_GLYPH, GENERATED_2D_SCROLL,
     Generated2DSessionRuntimeProvenance,
     generated_2d_launch_plan,
     generated_2d_session_launch_gate,
@@ -189,6 +189,8 @@ class OpenClSession:
             return 1
         if op == GENERATED_2D_FILL:
             return self._launch_generated_fill_u32(gate.plan.entry_name, args_ptr, width, height, gate.plan.grid_x, gate.plan.grid_y, gate.plan.block_x, gate.plan.block_y)
+        if op == GENERATED_2D_GLYPH:
+            return self._launch_generated_glyph_u32(gate.plan.entry_name, args_ptr, width, height, gate.plan.grid_x, gate.plan.grid_y, gate.plan.block_x, gate.plan.block_y)
         self.launch_kernel(gate.plan.entry_name, gate.plan.grid_x, gate.plan.grid_y, gate.plan.block_x, gate.plan.block_y)
 
     me launch_generated_2d_evidence(op: text, width: i64, height: i64, args_ptr: i64) -> OpenClSessionEvidence:
@@ -206,6 +208,10 @@ class OpenClSession:
         )
         if not status.ready:
             return self._evidence(operation, false, status.status_code, status.reason, 0, false, 0, 0)
+        if op == GENERATED_2D_GLYPH:
+            val args_status = self._generated_glyph_args_status(args_ptr, width, height)
+            if args_status != "ready":
+                return self._evidence(operation, false, "invalid-args", args_status, 0, false, 0, 0)
         val rc = self.launch_generated_2d(op, width, height, args_ptr)
         if rc == 0:
             return self._evidence(operation, true, "submitted", "opencl-generated-2d-kernel-submitted", self.kernel_cache, true, 0, 0)
@@ -264,6 +270,53 @@ class OpenClSession:
         else:
             1
 
+    me _generated_glyph_args_status(args_ptr: i64, width: i64, height: i64) -> text:
+        if args_ptr == 0:
+            return "missing-generated-2d-args-pointer"
+        if width <= 0 or height <= 0:
+            return "invalid-generated-glyph-dimensions"
+        val glyph_plan = rt_ptr_read_i64(args_ptr, 0)
+        val dst = rt_ptr_read_i64(args_ptr, 8)
+        val arg_width = rt_ptr_read_i64(args_ptr, 16)
+        val arg_height = rt_ptr_read_i64(args_ptr, 24)
+        val font_size = rt_ptr_read_i64(args_ptr, 32)
+        if glyph_plan == 0:
+            return "missing-opencl-glyph-plan"
+        if dst == 0:
+            return "missing-opencl-glyph-dst"
+        if arg_width != width or arg_height != height:
+            return "opencl-glyph-dimensions-mismatch"
+        if font_size <= 0:
+            return "invalid-opencl-glyph-font-size"
+        "ready"
+
+    me _launch_generated_glyph_u32(entry_name: text, args_ptr: i64, width: i64, height: i64, grid_x: i64, grid_y: i64, block_x: i64, block_y: i64) -> i64:
+        if self.ffi == nil or self.queue == 0 or self.program == 0:
+            return 1
+        if self._generated_glyph_args_status(args_ptr, width, height) != "ready":
+            return 1
+        val glyph_plan = rt_ptr_read_i64(args_ptr, 0)
+        val dst = rt_ptr_read_i64(args_ptr, 8)
+        val font_size = rt_ptr_read_i64(args_ptr, 32)
+        val kernel = self.ffi.create_kernel(self.program, entry_name)
+        if kernel == 0:
+            return 1
+        self._cache_kernel(kernel)
+        if not self.set_kernel_arg_buffer(kernel, 0, glyph_plan):
+            return 1
+        if not self.set_kernel_arg_buffer(kernel, 1, dst):
+            return 1
+        if not self.set_kernel_arg_i64(kernel, 2, width):
+            return 1
+        if not self.set_kernel_arg_i64(kernel, 3, height):
+            return 1
+        if not self.set_kernel_arg_i64(kernel, 4, font_size):
+            return 1
+        if self.ffi.enqueue_ndrange(self.queue, kernel, grid_x, grid_y, 1, block_x, block_y, 1):
+            0
+        else:
+            1
+
     me launch_rect_filled_u32(dst: i64, surface_width: i64, surface_height: i64, x: i64, y: i64, w: i64, h: i64, color: i64) -> i64:
         self._launch_rect_u32("simple_2d_rect_filled_u32", dst, surface_width, surface_height, x, y, w, h, color)
 
@@ -304,6 +357,9 @@ class OpenClSession:
 
     me scroll_kernel(width: i64, height: i64, args_ptr: i64) -> i64:
         self.launch_generated_2d(GENERATED_2D_SCROLL, width, height, args_ptr)
+
+    me glyph_kernel(width: i64, height: i64, args_ptr: i64) -> i64:
+        self.launch_generated_2d(GENERATED_2D_GLYPH, width, height, args_ptr)
 
     me alloc(size: i64) -> i64:
         if self.ffi == nil or self.context == 0 or size <= 0:
