@@ -234,8 +234,8 @@ Tracked submodule gitlinks:
 | `examples/08_gpu/simple_cuda_example` | CUDA/GPU example project | Pinned to `e74405599b8a` |
 | `examples/09_embedded/simple_os` | SimpleOS example tree and platform bring-up fixtures | Pinned to `823f04dec344` |
 | `examples/09_embedded/fpga_riscv` | RISC-V/FPGA RTL, firmware, and board collateral | Pinned to `3a1414ff77d1` |
-| `examples/09_embedded/mllvm_qemu_rtl` | MLLVM/QEMU RTL example lane | Pinned to `28d6482b83ac` |
-| `examples/09_embedded/baremetal` | Baremetal ELF, linker, and board smoke fixtures | Pinned to `d6d666ceb5e8` |
+| `examples/09_embedded/mllvm_qemu_rtl` | MLLVM/QEMU RTL example lane | Pinned to `b65c7cf5a05a` |
+| `examples/09_embedded/baremetal` | Baremetal ELF, linker, and board smoke fixtures | Pinned to `4c6ba6caa132` |
 | `examples/09_embedded/qemu` | QEMU runner and OS simulation fixtures | Pinned to `73c5b6fc1e8a` |
 | `examples/10_tooling/simple_ide` | Simple IDE example/tooling tree | Pinned to `bc7110fce667` |
 | `examples/10_tooling/korean_stock_mcp` | Korean stock MCP tooling example | Pinned to `1a2f57b6ddb2` |
