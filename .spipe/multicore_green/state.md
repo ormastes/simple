@@ -37,3 +37,63 @@ dev-done
 ## Log
 
 - dev: Created state file with acceptance criteria for the multicore green SPipe lane.
+- audit: Current implementation/profile/docs evidence is present for AC-1 through
+  AC-7 and AC-9; AC-8 remains open pending user-selected final requirements.
+
+## Completion Audit - 2026-06-07
+
+### Proven Or Strong Evidence
+
+- AC-1 / AC-2: `doc/01_research/lib/threading/go_vs_simple_threads.md`,
+  `doc/01_research/local/multicore_green.md`,
+  `doc/01_research/domain/multicore_green.md`,
+  `doc/07_guide/lib/misc/stdlib.md`,
+  `doc/07_guide/compiler/check_perf.md`, and
+  `.codex/skills/coding/SKILL.md` distinguish OS threads, cooperative green
+  work, runtime-pool multicore green work, Go goroutines, C pthreads, and
+  `task_spawn`.
+- AC-3 / AC-4 / AC-5: `scripts/check/check-cross-language-perf.shs`,
+  `doc/09_report/cross_language_perf_parallel_smoke.md`, and
+  `test/05_perf/profile_scripts/profile_report_contract_test.shs` use the
+  canonical profile harness, compact handle-array generated workloads, Go/C
+  comparison rows, and `pool_used=` evidence while rejecting numbered aliases.
+- AC-6: `test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl`,
+  `test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl`,
+  their generated manuals under `doc/06_spec/03_system/os/simpleos/feature/`,
+  and `doc/09_report/simpleos_multicore_green_evidence_2026-06-07.md` provide
+  current SimpleOS evidence.
+- AC-7: `test/03_system/feature/usage/multicore_green_tracking_spec.spl`,
+  `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`, and the
+  profile report contract reject wrong-surface claims, numbered API names, and
+  runtime-pool fallback rows.
+- AC-9: Recent guards include `sh scripts/setup/install-spipe-dev-command.shs
+  --check`, `find doc/06_spec -name '*_spec.spl' | wc -l` returning `0`,
+  `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`, and the
+  cross-language profile report contract. GitHub is synced through this lane.
+
+### Not Complete
+
+- AC-8 is still open. Current files are option documents only:
+  `doc/02_requirements/feature/multicore_green_options.md` and
+  `doc/02_requirements/nfr/multicore_green_options.md`. Repository process says
+  final feature/NFR requirements require user selection and unchosen options
+  must be deleted, not archived.
+
+### Selection Prompt
+
+Feature scope options:
+- `Evidence-Only Stabilization`
+- `Host Runtime-Pool M:N`
+- `Scheduler-Aware SimpleOS Green Runtime`
+- `Full Go-Like Runtime Roadmap`
+
+NFR options:
+- `Evidence Integrity Gate`
+- `Performance Parity Budget`
+- `API Stability And Misuse Diagnostics`
+- `SimpleOS Hardware Proof Gate`
+
+Recommended pragmatic selection for the current evidence set:
+`Host Runtime-Pool M:N` plus `Performance Parity Budget` and
+`API Stability And Misuse Diagnostics`. Add `SimpleOS Hardware Proof Gate` only
+if this cycle must require stronger SimpleOS hardware proof before completion.
