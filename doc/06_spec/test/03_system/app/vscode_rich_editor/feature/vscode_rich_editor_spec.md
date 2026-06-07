@@ -75,7 +75,7 @@ Display policy: `links`
 #### uses a real custom text editor provider backed by TextDocument
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -94,7 +94,7 @@ expect(_has(PACKAGE_JSON, "\"viewType\": \"simple.richSourceEditor\"")).to_equal
 #### renders variable-height math and image widgets through CodeMirror
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -113,7 +113,7 @@ expect(_has(DECORATION_TS, "new MathWidget")).to_equal("present")
 #### reveals raw source when the cursor enters a renderable block
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -129,7 +129,7 @@ expect(_has(DECORATION_TS, "continue")).to_equal("present")
 #### keeps the backing document authoritative and bundled
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -147,7 +147,7 @@ expect(_has(BUNDLE_DTS, "implements vscode.CustomTextEditorProvider")).to_equal(
 #### writes a generated-manual evidence summary
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

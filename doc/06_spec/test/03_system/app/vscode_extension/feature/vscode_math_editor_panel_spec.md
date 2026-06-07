@@ -75,7 +75,7 @@ Display policy: `links`
 #### registers the sync panel command and hover entrypoint
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -93,7 +93,7 @@ expect(_has(NATIVE_PROVIDER_TS, "contentRange")).to_equal("present")
 #### builds active and empty panel states from the canonical source document
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -111,7 +111,7 @@ expect(_has(PANEL_SHARED_TS, "contentRange")).to_equal("present")
 #### renders panel shell controls and mirrors textarea selection
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -129,7 +129,7 @@ expect(_has(PANEL_HTML_TS, "type: 'editAll'")).to_equal("present")
 #### delegates edits through WorkspaceEdit and ships bundled output
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -147,7 +147,7 @@ expect(_has(BUNDLE_HTML_JS, "selectionChanged")).to_equal("present")
 #### writes a generated-manual evidence summary
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

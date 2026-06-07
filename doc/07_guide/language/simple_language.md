@@ -232,15 +232,20 @@ Tracked submodule gitlinks:
 | `examples/07_ml/simple_deeplearning_study` | Deep-learning study examples | Pinned to `1d274135da84` |
 | `examples/07_ml/svllm` | Simple-based LLM experiments | Pinned to `4de0f9256cc8` |
 | `examples/08_gpu/simple_cuda_example` | CUDA/GPU example project | Pinned to `e74405599b8a` |
+| `examples/09_embedded/simple_os` | SimpleOS example tree and platform bring-up fixtures | Pinned to `823f04dec344` |
+| `examples/09_embedded/fpga_riscv` | RISC-V/FPGA RTL, firmware, and board collateral | Pinned to `3a1414ff77d1` |
+| `examples/09_embedded/mllvm_qemu_rtl` | MLLVM/QEMU RTL example lane | Pinned to `28d6482b83ac` |
+| `examples/09_embedded/baremetal` | Baremetal ELF, linker, and board smoke fixtures | Pinned to `d6d666ceb5e8` |
+| `examples/10_tooling/simple_ide` | Simple IDE example/tooling tree | Pinned to `bc7110fce667` |
 | `examples/10_tooling/korean_stock_mcp` | Korean stock MCP tooling example | Pinned to `1a2f57b6ddb2` |
 | `examples/10_tooling/llm_cli_tools` | LLM CLI tooling examples | Pinned to `310f74e1b17d` |
 | `examples/10_tooling/obsidian-search` | Obsidian search tooling example | Pinned to `835d9073a113` |
 | `examples/10_tooling/trace32_tools` | TRACE32 tooling example | Pinned to `40f6f53786bc` |
+| `examples/11_advanced/browser` | Browser example project; shared browser libraries remain internal under `src/lib` | Pinned to `9172f02ff612` |
 | `examples/11_advanced/simple_db` | Database example derived from `simple-spostgre` | Pinned to `5df3b641fb80` |
-| `examples/10_tooling/simple_ide` | Simple IDE example/tooling tree | Declared in `.gitmodules`, but current HEAD stores it as a normal tree, not a gitlink |
 | `src/lib/nogc_async_mut/payment` | Payment library integration | Declared in `.gitmodules`, but current HEAD stores it as a normal tree, not a gitlink |
 
-All active gitlink commits above are expected to resolve from their configured remotes after `git submodule sync --recursive && git submodule update --init --recursive`. The declaration-only rows are still listed in `.gitmodules`, but they are not active Git submodules in the current index.
+All active gitlink commits above are expected to resolve from their configured remotes after `git submodule sync --recursive && git submodule update --init --recursive`. The declaration-only payment row is still listed in `.gitmodules`, but it is not an active Git submodule in the current index.
 
 ---
 
