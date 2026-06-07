@@ -110,3 +110,27 @@ the two-CPU guest. The scheduler-owned AP carrier proof still passes, including
 `SCHED_HANDOFF_PASS=true`; the final lane remains open because the guest serial
 does not yet print `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, or
 `USER_SYSCALL_PASS=true`.
+
+## 2026-06-07 Final Marker Root Cause
+
+The current green-carrier QEMU probe is a `qemu -kernel` guest with no mounted
+user payload. Its scheduler handoff path seeds only scheduler-owned green state;
+it does not create a real x86_64 user address space or call
+`dispatch_enter_user_blocking`.
+
+The existing real x86_64 user-entry route is disk/spawn based:
+`desktop_e2e_entry.spl` mounts VFS, spawns `/sys/apps/ring3_smoke.smf`, then
+calls syscall `14` (`EnterUserBlocking`) to reach `rt_x86_enter_user_first`.
+That route can prove user entry/syscall return, but it is not wired into the
+green-carrier `-kernel` probe and is not AP-green-affine yet.
+
+Do not close this blocker by printing the final markers from scheduler code.
+The next implementation step must either add a real direct in-memory user
+payload/address-space probe to the green-carrier guest, or teach the opt-in
+QEMU gate to boot the disk-backed ring3 smoke path and connect it to the
+green-carrier AP handoff.
+
+The x86_64 user-context selector setup is no longer a blocker: the scheduler
+and `X86ContextSwitch.create(..., user_mode=true)` now use `CS=0x2B` and
+`SS=0x23`, matching the boot GDT's 64-bit user code/data descriptors. The
+remaining blocker is payload/CR3/user-entry wiring, not the selector frame.

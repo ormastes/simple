@@ -27,7 +27,7 @@ x86_boot_spec
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 21 | 21 | 0 | 0 |
+| 22 | 22 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -207,7 +207,7 @@ expect(KERNEL_DATA_SELECTOR).to_equal(16)
 
 </details>
 
-#### user code selector has RPL 3
+#### user compat code selector has RPL 3
 
 <details>
 <summary>Executable SSpec</summary>
@@ -216,8 +216,23 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val USER_CODE_SELECTOR: u16 = 0x18 | 3
-expect(USER_CODE_SELECTOR).to_equal(0x1B)
+val USER_COMPAT_CODE_SELECTOR: u16 = 0x18 | 3
+expect(USER_COMPAT_CODE_SELECTOR).to_equal(0x1B)
+```
+
+</details>
+
+#### user 64-bit code selector has RPL 3
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val USER_CODE_SELECTOR: u16 = 0x28 | 3
+expect(USER_CODE_SELECTOR).to_equal(0x2B)
 ```
 
 </details>
@@ -433,8 +448,8 @@ expect(original).to_equal(1)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 21 |
-| Active scenarios | 21 |
+| Total scenarios | 22 |
+| Active scenarios | 22 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -75,12 +75,14 @@ markers emitted from the real AP ring/user path.
    - Expected: task.user_context == nil is false
    - Expected: user_ctx.rip equals `0x400000`
    - Expected: user_ctx.rsp equals `0x3fffffff80`
+   - Expected: user_ctx.cs equals `0x2B`
+   - Expected: user_ctx.ss equals `0x23`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -109,6 +111,8 @@ if handoff != nil:
         val user_ctx = task.user_context.unwrap()
         expect(user_ctx.rip).to_equal(0x400000)
         expect(user_ctx.rsp).to_equal(0x3fffffff80)
+        expect(user_ctx.cs).to_equal(0x2B)
+        expect(user_ctx.ss).to_equal(0x23)
 ```
 
 </details>

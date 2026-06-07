@@ -94,7 +94,7 @@ expect(user_cs_64 - user_cs_32).to_equal(16)
 
 </details>
 
-#### GDT spans 5 descriptors (40 bytes), limit is 39
+#### GDT spans 6 descriptors (48 bytes), limit is 47
 
 <details>
 <summary>Executable SSpec</summary>
@@ -104,8 +104,8 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val gdt_size: u64 = user_cs_64 + 8
-expect(gdt_size).to_equal(40)
-expect(gdt_size - 1).to_equal(39)
+expect(gdt_size).to_equal(48)
+expect(gdt_size - 1).to_equal(47)
 ```
 
 </details>

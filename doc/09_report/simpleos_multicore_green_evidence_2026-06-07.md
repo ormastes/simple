@@ -106,6 +106,21 @@ link blocker is closed:
 - the final-handoff serial output still lacks `HW_HANDOFF_PASS=true`,
   `USER_ENTRY_PASS=true`, and `USER_SYSCALL_PASS=true`
 
+After the x86_64 user selector refresh, the scheduler/user handoff setup now
+uses the boot GDT's 64-bit user code selector (`CS=0x2B`, `SS=0x23`) instead
+of the compat selector. Rerun evidence:
+
+- GDT layout contract: PASS, 7 scenarios
+- scheduler green/user handoff compatibility: PASS, 1 scenario
+- x86 boot selector usage contract: PASS, 22 scenarios
+- x86_64 kernel MVP ring3 context smoke: PASS, 6 scenarios
+- `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1` live QEMU gate: PASS, 2 scenarios in
+  37223ms
+- `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1` final-handoff QEMU gate:
+  FAIL as expected, 1 passed scenario and 1 failed scenario in 37480ms; serial
+  still shows AP startup plus `SCHED_HANDOFF_PASS=true`, but no final
+  hardware/user markers
+
 ## Notes
 
 - The default QEMU spec lane proves the opt-in gate is wired and disabled unless

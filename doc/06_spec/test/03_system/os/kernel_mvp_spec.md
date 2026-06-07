@@ -60,13 +60,13 @@ expect(ctx.rsp % 16).to_equal(0)
 
 #### prepares canonical app bytes for the filesystem-backed path
 
-1.  clear vfs rootfs for test
-2.  clear synthetic vfs for test
-3.  set synthetic vfs file for test
+-  clear vfs rootfs for test
+-  clear synthetic vfs for test
+-  set synthetic vfs file for test
    - Expected: bytes[0] equals `0x7F.to_u8()`
    - Expected: bytes[1] equals `0x45.to_u8()`
-4.  clear synthetic vfs for test
-5.  clear vfs rootfs for test
+-  clear synthetic vfs for test
+-  clear vfs rootfs for test
 
 
 <details>
@@ -93,8 +93,8 @@ _clear_vfs_rootfs_for_test()
 
 #### reads and writes through a DBFS-backed rootfs
 
-1.  clear synthetic vfs for test
-2.  clear vfs rootfs for test
+-  clear synthetic vfs for test
+-  clear vfs rootfs for test
    - Expected: _mount_hosted_rootfs_for_test(_dbfs_root()) is true
    - Expected: g_vfs_write_file_text("/sys/config/boot_mode", "dbfs\n") is true
    - Expected: g_vfs_file_exists("/sys/config/boot_mode") is true
@@ -102,7 +102,7 @@ _clear_vfs_rootfs_for_test()
    - Expected: g_vfs_read_file_text("/sys/config/boot_mode") equals `dbfs\n`
    - Expected: bytes.len() equals `5`
    - Expected: bytes[0] equals `100u8`
-3.  clear vfs rootfs for test
+-  clear vfs rootfs for test
 
 
 <details>
@@ -129,8 +129,8 @@ _clear_vfs_rootfs_for_test()
 
 #### reads and writes through an NVFS-backed rootfs
 
-1.  clear synthetic vfs for test
-2.  clear vfs rootfs for test
+-  clear synthetic vfs for test
+-  clear vfs rootfs for test
    - Expected: _mount_hosted_rootfs_for_test(_nvfs_posix_root()) is true
    - Expected: g_vfs_write_file_text("/sys/config/boot_mode", "nvfs\n") is true
    - Expected: g_vfs_file_exists("/sys/config/boot_mode") is true
@@ -138,7 +138,7 @@ _clear_vfs_rootfs_for_test()
    - Expected: g_vfs_read_file_text("/sys/config/boot_mode") equals `nvfs\n`
    - Expected: bytes.len() equals `5`
    - Expected: bytes[0] equals `110u8`
-3.  clear vfs rootfs for test
+-  clear vfs rootfs for test
 
 
 <details>
@@ -167,7 +167,7 @@ _clear_vfs_rootfs_for_test()
 
 #### shows dmesg in shell help output
 
-1. shell execute
+- shell execute
    - Expected: shell.last_exit_code equals `0`
    - Expected: _has_line(shell.output_lines, "dmesg [N]") is true
 
@@ -192,7 +192,7 @@ expect(_has_line(shell.output_lines, "dmesg [N]")).to_equal(true)
 
 #### does not crash on an unknown syscall id
 
-1. log write
+- log write
    - Expected: entries.len() equals `1`
    - Expected: entries[0].message equals `fault smoke`
 
