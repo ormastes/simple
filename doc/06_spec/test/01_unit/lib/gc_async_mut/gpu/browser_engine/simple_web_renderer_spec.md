@@ -212,14 +212,15 @@ expect(_count_color(pixels, 0xFF2563EBu32)).to_be_greater_than(0)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val html = "<html><head><style>#card { background-color:#1d4ed8; color:#ffffff; width:40px; height:18px; padding:2px; border:1px solid #0f172a; }</style></head><body><section id='card'>CMD</section></body></html>"
+val html = "<html><head><style>#card { background-color:#1d4ed8; color:#ffffff; font-size:8px; width:40px; height:18px; padding:2px; border:1px solid #0f172a; }</style></head><body><section id='card'>CMD</section></body></html>"
 val composition = simple_web_layout_render_html_draw_ir(html, 96, 64)
 val batch = composition.batches[0]
 val card = _draw_ir_command_by_id(batch.commands, "card")
+val text_cmd = _draw_ir_first_text_command(batch.commands)
 
 expect(batch.source.source_kind).to_equal("html_ast")
 expect(batch.commands.len()).to_be_greater_than(0)
@@ -235,6 +236,15 @@ expect(card.content_rect.height).to_equal(12)
 expect(_draw_ir_style_value(card, "tag")).to_equal("section")
 expect(_draw_ir_style_value(card, "display")).to_equal("block")
 expect(_draw_ir_style_value(card, "padding-left")).to_equal("2")
+expect(text_cmd.kind).to_equal("text")
+expect(text_cmd.text_value).to_equal("CMD")
+expect(text_cmd.color).to_equal(0xFFFFFFFFu32)
+expect(text_cmd.parent_id).to_equal("card")
+expect(text_cmd.clip_rect.present).to_equal(true)
+expect(_draw_ir_style_value(text_cmd, "font-size")).to_equal("8")
+expect(_draw_ir_style_value(text_cmd, "line-height")).to_equal("10")
+expect(_draw_ir_style_value(text_cmd, "font-rendering")).to_equal("bitmap-vector-backend-preferred")
+expect(_draw_ir_style_value(text_cmd, "backend-consumable")).to_equal("true")
 ```
 
 </details>

@@ -80,8 +80,15 @@ render at 96x96 improved from `494990us` to `472511us`; checksum stayed
 but cold/dynamic glyph pixels still need the generated GPU or compiled text
 raster path.
 
+2026-06-07 Draw IR text-contract follow-up: the HTML layout Draw IR path now
+emits backend-consumable `text` commands for `#text` nodes with font metrics,
+clip rect, parent id, and `font-rendering=bitmap-vector-backend-preferred`.
+This is not a measured glyph-speedup yet; it is the pre-raster contract needed
+for native/GPU bitmap or vector font backends to render text without changing
+GUI or app code.
+
 Related tracked issue:
-  [`pure_simple_web_render_interpreter_bound_2026-06-06.md`](../08_tracking/bug/pure_simple_web_render_interpreter_bound_2026-06-06.md).
+[`pure_simple_web_render_interpreter_bound_2026-06-06.md`](../08_tracking/bug/pure_simple_web_render_interpreter_bound_2026-06-06.md).
   
  Contract-backed full report:
  [`gui_perf_benchmark_2026-06-07.md`](gui_perf_benchmark_2026-06-07.md).

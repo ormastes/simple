@@ -97,6 +97,22 @@ parsing and walk those links during recursive layout. Focused smoke on a
 
 Unit coverage: `simple_web_renderer_spec.spl` includes
 `renders sibling block children through precomputed layout links`.
+
+## Path E — text Draw IR offload contract — IN PROGRESS 2026-06-07
+
+The compatibility Simple Web pixel path still paints glyphs into a CPU `[u32]`
+framebuffer, but `simple_web_layout_render_html_draw_ir()` now emits real Draw IR
+`text` commands for `#text` nodes before rasterization. Each command carries the
+text payload, color, parent id, clip rect, font size, line height, text advance,
+glyph scale, and `font-rendering=bitmap-vector-backend-preferred`.
+
+This does not complete bitmap/vector GPU glyph execution. It removes the
+integration blocker where text existed only as CPU-painted pixels, so a native,
+CUDA/HIP/Vulkan/Metal, or generated Simple GPU backend can consume text directly
+without changing application code.
+
+Unit coverage: `simple_web_renderer_spec.spl` asserts that the HTML layout Draw
+IR batch contains a backend-consumable text command for `CMD`.
 ## Follow-up: GUI profile throughput evidence
 
 2026-06-06 GUI profile smoke:

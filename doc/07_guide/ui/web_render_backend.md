@@ -57,9 +57,16 @@ fixed (see `doc/08_tracking/bug/pure_simple_web_render_interpreter_bound_2026-06
    container. The 2026-06-07 child-link fix builds `first_child`/`next_sibling`
    arrays once; a 180-sibling 96x96 smoke improved `494990us -> 472511us` with
    unchanged checksum `39574588256768`.
- 
- Keep pure_simple viewports modest (≤ ~400 wide); chromium opens a live window
- and is unaffected.
+
+The HTML layout Draw IR path now emits `text` commands for real text nodes with
+font size, line height, glyph advance/scale, clip rect, parent id, and
+`font-rendering=bitmap-vector-backend-preferred`. This gives native/GPU Draw IR
+consumers a stable text contract before rasterization; the compatibility pixel
+path still uses the pure-Simple 5x7 framebuffer rasterizer until a backend
+consumes those text commands directly.
+
+Keep pure_simple viewports modest (≤ ~400 wide); chromium opens a live window
+and is unaffected.
 
 ## Honest comparison (no memorized pixels)
 
