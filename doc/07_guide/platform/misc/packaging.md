@@ -252,7 +252,7 @@ simple install test-pkg
 
 The release workflow (`.github/workflows/release.yml`) builds packages for all platforms automatically.
 
-**Trigger:** Tag push (`git tag v0.5.0 && git push --tags`) or manual dispatch.
+**Trigger:** Tag push (`git tag vX.Y.Z && git push --tags`) or manual dispatch.
 
 **Build matrix:**
 

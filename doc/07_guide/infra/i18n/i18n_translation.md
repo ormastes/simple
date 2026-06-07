@@ -28,7 +28,7 @@
 
 ```bash
 # Clone the Simple repository
-git clone https://github.com/simple-lang/simple.git
+git clone --recurse-submodules https://github.com/ormastes/simple.git
 cd simple
 
 # Build the compiler (ensures everything works)
