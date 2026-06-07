@@ -46,7 +46,7 @@ The pure-Simple raster runs interpreted and is canvas-bound. It now resolves a
 preferred backend by policy before raster: `SIMPLE_ENGINE2D_BACKEND` override
 first, Metal on Darwin/macOS, CUDA/HIP when the standard visibility env vars are
 present, then `software`. Explicit `software`, `cpu`, `cpu_simd`, or GPU backend
-names remain available for deterministic comparison and fallback tests. Five
+names remain available for deterministic comparison and fallback tests. Six
 O(n²)-class traps were
 fixed (see `doc/08_tracking/bug/pure_simple_web_render_interpreter_bound_2026-06-06.md`):
 1. heuristic-surface buffer built with a `push` loop → use `[0; w*h]` array-repeat;
@@ -66,6 +66,11 @@ fixed (see `doc/08_tracking/bug/pure_simple_web_render_interpreter_bound_2026-06
    paint pass. The 2026-06-07 clip-cache fix builds per-node clip rectangles
    once per frame; a 48-deep overflow-hidden 96x96 smoke improved
    `974687us -> 867759us` with unchanged checksum `39575014374045`.
+6. selector matching split/normalized every selector for every node, even for
+   common single-class selectors. The 2026-06-07 selector fast-path avoids comma,
+   child-combinator, and multi-class splitting when absent; an 80-rule / 80-node
+   96x96 smoke improved `2361955us -> 2184205us` with unchanged checksum
+   `39575341662880`.
 
 The HTML layout Draw IR path now emits `text` commands for real text nodes with
 font size, line height, glyph advance/scale, clip rect, parent id, and

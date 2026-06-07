@@ -187,6 +187,26 @@ Focused smoke on a 48-deep overflow-hidden Simple Web render at 96x96:
 Unit coverage: `simple_web_renderer_spec.spl` already includes
 `matches Chrome overflow hidden clipping for a text-free CSS matrix`.
 
+## Path G — selector split/normalization on common simple selectors — FIXED 2026-06-07
+
+`selector_matches_node()` split selector groups on every node/rule match, and
+`selector_group_matches_node()` normalized child combinators even when a selector
+had no comma, no `>`, and no descendant combinator. Class selectors also split
+the desired class string on `.` even for the common single-class case.
+
+**Fix (pure Simple):** add fast paths for single selector groups, simple selector
+groups, and single-class matches before falling back to the full parser. Focused
+smoke on an 80-rule / 80-node class-selector Simple Web render at 96x96:
+
+| Measurement | Before | After |
+|-------------|--------|-------|
+| elapsed | `2361955us` | `2184205us` |
+| checksum | `39575341662880` | `39575341662880` |
+
+Unit coverage: `simple_web_renderer_spec.spl` includes direct child,
+descendant, class, and CSS matrix cases that exercise the fallback and fast
+paths.
+
 ## Follow-up: GUI profile throughput evidence
 
 2026-06-06 GUI profile smoke:
