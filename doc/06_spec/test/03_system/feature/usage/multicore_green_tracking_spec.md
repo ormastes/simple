@@ -183,8 +183,8 @@ Failed: 0
 
 #### tracks the multicore-green lane as current rather than done
 
-1. Read the canonical multicore-green tracking row
-2. Verify the lane is current while full Go-like runtime work remains active
+- Read the canonical multicore-green tracking row
+- Verify the lane is current while full Go-like runtime work remains active
 
 
 <details>
@@ -206,9 +206,9 @@ expect(row.contains("\"done\"")).to_be(false)
 
 #### links selected requirements without stale option documents
 
-1. Read the canonical multicore-green tracking row
-2. Verify selected requirement documents are linked
-3. Verify deleted option documents are not linked
+- Read the canonical multicore-green tracking row
+- Verify selected requirement documents are linked
+- Verify deleted option documents are not linked
 
 
 <details>
@@ -232,9 +232,9 @@ expect(row.contains("doc/02_requirements/nfr/multicore_green_options.md")).to_be
 
 #### links research plan architecture and design artifacts
 
-1. Read the canonical multicore-green tracking row
-2. Verify research links are present
-3. Verify plan and design links are present
+- Read the canonical multicore-green tracking row
+- Verify research links are present
+- Verify plan and design links are present
 
 
 <details>
@@ -260,9 +260,9 @@ expect(row).to_contain("doc/05_design/multicore_green.md")
 
 #### links SimpleOS and profile SSPEC evidence
 
-1. Read the canonical multicore-green tracking row
-2. Verify SimpleOS green-carrier specs are linked
-3. Verify profile stress specs are linked
+- Read the canonical multicore-green tracking row
+- Verify SimpleOS green-carrier specs are linked
+- Verify profile stress specs are linked
 
 
 <details>
@@ -288,9 +288,9 @@ expect(row).to_contain("test/05_perf/stress/multicore_green_fanout_spec.spl")
 
 #### links implementation and guide surfaces
 
-1. Read the canonical multicore-green tracking row
-2. Verify Pure Simple implementation surfaces are linked
-3. Verify profile and guide surfaces are linked
+- Read the canonical multicore-green tracking row
+- Verify Pure Simple implementation surfaces are linked
+- Verify profile and guide surfaces are linked
 
 
 <details>
@@ -316,8 +316,8 @@ expect(row).to_contain("doc/07_guide/lib/misc/stdlib.md")
 
 #### links active runtime blockers for unresolved M:N work
 
-1. Read the canonical multicore-green tracking row
-2. Verify unresolved runtime blockers remain visible
+- Read the canonical multicore-green tracking row
+- Verify unresolved runtime blockers remain visible
 
 
 <details>

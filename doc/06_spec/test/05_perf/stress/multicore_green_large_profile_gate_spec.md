@@ -76,8 +76,8 @@ task while beating the C pthread fanout baseline.
 
 #### records the large profile dimensions and runtime-pool evidence
 
-1. Check the profile used large worker counts
-2. Check every multicore-green native row reports runtime-pool usage
+- Check the profile used large worker counts
+- Check every multicore-green native row reports runtime-pool usage
 
 
 <details>
@@ -109,7 +109,7 @@ expect(model_text(row_for_label(stress, "Simple multicore green (native)"))).to_
 
 #### proves Go goroutine fanout beats C pthread fanout at large scale
 
-1. Compare Go fanout rows against C pthread rows
+- Compare Go fanout rows against C pthread rows
 
 
 <details>
@@ -134,7 +134,7 @@ expect(model_text(row_for_label(stress, "Go"))).to_contain("goroutine per stress
 
 #### proves Simple multicore-green fanout beats C pthread fanout with pool evidence
 
-1. Compare Simple multicore-green native rows against C pthread rows
+- Compare Simple multicore-green native rows against C pthread rows
 
 
 <details>

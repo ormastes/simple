@@ -94,28 +94,28 @@ carrier cooperative scheduling, not CPU-parallel M:N execution.
 
 ### Pending Until Carrier Run
 
-1. Read the current cooperative ready queue depth.
-2. Queue one logical green task with `cooperative_green_spawn`.
-3. Assert the handle is not done before the carrier runs.
-4. Assert the ready queue depth increased by one.
-5. Run one cooperative carrier turn.
-6. Assert the handle is done and joins to the expected value.
+- Read the current cooperative ready queue depth.
+- Queue one logical green task with `cooperative_green_spawn`.
+- Assert the handle is not done before the carrier runs.
+- Assert the ready queue depth increased by one.
+- Run one cooperative carrier turn.
+- Assert the handle is done and joins to the expected value.
 
 ### Drain Current Carrier
 
-1. Read the current cooperative ready queue depth.
-2. Queue two logical green tasks.
-3. Assert both tasks are visible in the ready queue.
-4. Run all queued cooperative work on the current carrier.
-5. Assert at least two tasks ran.
-6. Join both handles and assert their expected values.
+- Read the current cooperative ready queue depth.
+- Queue two logical green tasks.
+- Assert both tasks are visible in the ready queue.
+- Run all queued cooperative work on the current carrier.
+- Assert at least two tasks ran.
+- Join both handles and assert their expected values.
 
 ### Direct Value Scheduling
 
-1. Queue a direct value with `cooperative_green_spawn_value`.
-2. Assert the value handle remains pending before a carrier turn.
-3. Run one cooperative carrier turn.
-4. Join the value handle and assert the direct value is returned.
+- Queue a direct value with `cooperative_green_spawn_value`.
+- Assert the value handle remains pending before a carrier turn.
+- Run one cooperative carrier turn.
+- Join the value handle and assert the direct value is returned.
 
 ## Evidence Boundary
 
@@ -157,14 +157,14 @@ Failed: 0
 
 #### queues logical green work without marking it done before the carrier runs
 
-1. Record the current SimpleOS cooperative carrier queue depth
-2. Queue a logical green task on the current carrier
-3. Verify the task is pending until the carrier runs
+- Record the current SimpleOS cooperative carrier queue depth
+- Queue a logical green task on the current carrier
+- Verify the task is pending until the carrier runs
    - Expected: handle.is_done() is false
    - Expected: cooperative_green_ready_count() equals `before + 1`
-4. Run one cooperative carrier turn
+- Run one cooperative carrier turn
    - Expected: cooperative_green_run_one() is true
-5. Verify the queued task completed with its expected value
+- Verify the queued task completed with its expected value
    - Expected: handle.is_done() is true
    - Expected: handle.join() equals `3`
 
@@ -195,12 +195,12 @@ expect(handle.join()).to_equal(3)
 
 #### runs all queued cooperative work on the current carrier
 
-1. Record the current SimpleOS cooperative carrier queue depth
-2. Queue two logical green tasks on the current carrier
-3. Verify both tasks are visible in the ready queue
+- Record the current SimpleOS cooperative carrier queue depth
+- Queue two logical green tasks on the current carrier
+- Verify both tasks are visible in the ready queue
    - Expected: cooperative_green_ready_count() equals `before + 2`
-4. Run the cooperative carrier until the queue is drained
-5. Verify both queued tasks completed on the current carrier
+- Run the cooperative carrier until the queue is drained
+- Verify both queued tasks completed on the current carrier
    - Expected: ran >= 2 is true
    - Expected: h1.join() equals `3`
    - Expected: h2.join() equals `8`
@@ -234,14 +234,14 @@ expect(h2.join()).to_equal(8)
 
 #### supports direct value scheduling used by profile fanout rows
 
-1. Record the current SimpleOS cooperative carrier queue depth
-2. Queue a direct value task on the current carrier
-3. Verify value work is pending until the carrier runs
+- Record the current SimpleOS cooperative carrier queue depth
+- Queue a direct value task on the current carrier
+- Verify value work is pending until the carrier runs
    - Expected: handle.is_done() is false
    - Expected: cooperative_green_ready_count() equals `before + 1`
-4. Run one cooperative carrier turn
+- Run one cooperative carrier turn
    - Expected: cooperative_green_run_one() is true
-5. Verify the direct value result is returned
+- Verify the direct value result is returned
    - Expected: handle.join() equals `21`
 
 

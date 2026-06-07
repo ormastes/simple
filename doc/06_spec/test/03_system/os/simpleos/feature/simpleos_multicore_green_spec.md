@@ -165,14 +165,14 @@ Failed: 0
 
 #### routes remote green enqueue through the SimpleOS reschedule IPI surface
 
-1. Initialize the hosted SimpleOS SMP model
-2. smp init
-3. Bring up a remote application processor
-4. smp bringup ap
-5. Create carrier run queues for four CPUs
-6. Plan a green task for a remote carrier CPU
-7. Apply the enqueue decision through the SimpleOS carrier queues
-8. Verify remote enqueue sends the SimpleOS reschedule IPI
+- Initialize the hosted SimpleOS SMP model
+- smp init
+- Bring up a remote application processor
+- smp bringup ap
+- Create carrier run queues for four CPUs
+- Plan a green task for a remote carrier CPU
+- Apply the enqueue decision through the SimpleOS carrier queues
+- Verify remote enqueue sends the SimpleOS reschedule IPI
    - Expected: result.enqueued is true
    - Expected: result.ipi_sent is true
    - Expected: result.ipi_reason_mask equals `smp_ipi_resched()`
@@ -208,16 +208,16 @@ expect(smp_take_ipi(1u32)).to_equal(smp_ipi_resched())
 
 #### dispatches green work into scheduler-owned multicore execution state
 
-1. Initialize the hosted SimpleOS SMP model
-2. smp init
-3. Bring up a remote application processor
-4. smp bringup ap
-5. Create a scheduler with four CPU slots
-6. var scheduler = Scheduler new with cpu count
-7. Create carrier queues and enqueue green work for CPU one
-8. Dispatch the next green task from CPU one carrier queue
-9. Apply the dispatched green scheduler intent
-10. Verify green execution state is separate from the normal task slot
+- Initialize the hosted SimpleOS SMP model
+- smp init
+- Bring up a remote application processor
+- smp bringup ap
+- Create a scheduler with four CPU slots
+- var scheduler = Scheduler new with cpu count
+- Create carrier queues and enqueue green work for CPU one
+- Dispatch the next green task from CPU one carrier queue
+- Apply the dispatched green scheduler intent
+- Verify green execution state is separate from the normal task slot
    - Expected: applied.applied is true
    - Expected: scheduler.green_current_task_on_cpu(1u32) equals `202`
    - Expected: scheduler.green_context_switches_on_cpu(1u32) equals `1`
@@ -259,14 +259,14 @@ expect(scheduler.get_current_on_cpu(1u32).id).to_equal(0)
 
 #### extends green scheduler slots when SimpleOS topology grows
 
-1. Initialize the hosted SimpleOS SMP model
-2. smp init
-3. Create a bootstrap scheduler and grow it to four CPUs
-4. var scheduler = Scheduler new bootstrap
-5. scheduler set topology
-6. Create carrier queues and enqueue green work for CPU three
-7. Dispatch and apply the CPU three green scheduler intent
-8. Verify the grown scheduler records CPU three green execution
+- Initialize the hosted SimpleOS SMP model
+- smp init
+- Create a bootstrap scheduler and grow it to four CPUs
+- var scheduler = Scheduler new bootstrap
+- scheduler set topology
+- Create carrier queues and enqueue green work for CPU three
+- Dispatch and apply the CPU three green scheduler intent
+- Verify the grown scheduler records CPU three green execution
    - Expected: applied.applied is true
    - Expected: scheduler.green_current_task_on_cpu(3u32) equals `303`
    - Expected: scheduler.green_context_switches_on_cpu(3u32) equals `1`
@@ -302,23 +302,23 @@ expect(scheduler.green_context_switches_on_cpu(3u32)).to_equal(1)
 
 #### routes SimpleOS preemption safepoints through active green carriers
 
-1. Initialize the hosted SimpleOS SMP model
-2. smp init
-3. Create a scheduler with one active green carrier
-4. var scheduler = Scheduler new with cpu count
-5. scheduler set green carrier parallelism
-6. Enqueue green work on CPU zero
-7. Run an active carrier pass
-8. Poll the named runtime safepoint adapter through active green carriers
-9. Poll the named timer interrupt adapter through active green carriers
-10. Verify runtime safepoint ticks without requesting preemption
+- Initialize the hosted SimpleOS SMP model
+- smp init
+- Create a scheduler with one active green carrier
+- var scheduler = Scheduler new with cpu count
+- scheduler set green carrier parallelism
+- Enqueue green work on CPU zero
+- Run an active carrier pass
+- Poll the named runtime safepoint adapter through active green carriers
+- Poll the named timer interrupt adapter through active green carriers
+- Verify runtime safepoint ticks without requesting preemption
    - Expected: pass_result.ran_workers equals `1`
    - Expected: runtime_poll.accepted is true
    - Expected: runtime_poll.source equals `runtime_safepoint`
    - Expected: runtime_poll.preemption_requested is false
    - Expected: runtime_poll.ticked_carriers equals `1`
    - Expected: scheduler.green_current_task_on_cpu(0u32) equals `404`
-11. Verify timer safepoint yields the active green worker
+- Verify timer safepoint yields the active green worker
    - Expected: timer_interrupt.accepted is true
    - Expected: timer_interrupt.source equals `timer_interrupt`
    - Expected: timer_interrupt.preemption.preemption_requested is true
@@ -374,16 +374,16 @@ expect(scheduler.green_current_task_on_cpu(0u32)).to_equal(0)
 
 #### routes compiler safepoints through the named SimpleOS green adapter
 
-1. Initialize the hosted SimpleOS SMP model
-2. smp init
-3. Create a scheduler with one active green carrier
-4. var scheduler = Scheduler new with cpu count
-5. scheduler set green carrier parallelism
-6. Enqueue compiler-yieldable green work on CPU zero
-7. Run an active carrier pass
-8. Poll the compiler safepoint before the time slice expires
-9. Poll the compiler safepoint at time-slice expiry
-10. Verify the compiler safepoint adapter preserves the running worker before expiry
+- Initialize the hosted SimpleOS SMP model
+- smp init
+- Create a scheduler with one active green carrier
+- var scheduler = Scheduler new with cpu count
+- scheduler set green carrier parallelism
+- Enqueue compiler-yieldable green work on CPU zero
+- Run an active carrier pass
+- Poll the compiler safepoint before the time slice expires
+- Poll the compiler safepoint at time-slice expiry
+- Verify the compiler safepoint adapter preserves the running worker before expiry
    - Expected: pass_result.ran_workers equals `1`
    - Expected: compiler_running_poll.accepted is true
    - Expected: compiler_running_poll.source equals `compiler_safepoint`
@@ -391,7 +391,7 @@ expect(scheduler.green_current_task_on_cpu(0u32)).to_equal(0)
    - Expected: compiler_running_poll.ticked_carriers equals `1`
    - Expected: compiler_running_poll.yielded_workers equals `0`
    - Expected: scheduler.green_current_task_on_cpu(0u32) equals `406`
-11. Verify the compiler safepoint adapter yields at time-slice expiry
+- Verify the compiler safepoint adapter yields at time-slice expiry
    - Expected: compiler_expiring_poll.accepted is true
    - Expected: compiler_expiring_poll.source equals `compiler_safepoint`
    - Expected: compiler_expiring_poll.preemption_requested is true
@@ -446,15 +446,15 @@ expect(scheduler.green_current_task_on_cpu(0u32)).to_equal(0)
 
 #### rejects bad SimpleOS preemption source without ticking carriers
 
-1. Initialize the hosted SimpleOS SMP model
-2. smp init
-3. Create a scheduler with one active green carrier
-4. var scheduler = Scheduler new with cpu count
-5. scheduler set green carrier parallelism
-6. Enqueue green work on CPU zero
-7. Run an active carrier pass
-8. Poll an invalid SimpleOS preemption source
-9. Verify the invalid safepoint does not tick or yield carriers
+- Initialize the hosted SimpleOS SMP model
+- smp init
+- Create a scheduler with one active green carrier
+- var scheduler = Scheduler new with cpu count
+- scheduler set green carrier parallelism
+- Enqueue green work on CPU zero
+- Run an active carrier pass
+- Poll an invalid SimpleOS preemption source
+- Verify the invalid safepoint does not tick or yield carriers
    - Expected: rejected.accepted is false
    - Expected: rejected.reason equals `invalid_preemption_source`
    - Expected: rejected.ticked_carriers equals `0`

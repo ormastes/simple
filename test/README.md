@@ -54,8 +54,8 @@ documentation. Generated SPipe docs preserve the leading `test/` segment below
 
 Generated SSpec manuals should read as scenario-based manuals, not as raw test dumps.
 For feature, system, app, MCP, UI, protocol, hardware, and environmental tests,
-write helper/checker functions so the generated manual can show ordered user or
-operator steps, typed capture evidence, and folded executable SSpec details.
+write helper/checker functions so the generated manual can show readable user or
+operator step text, typed capture evidence, and folded executable SSpec details.
 Use `doc/07_guide/infra/sspec_scenario_manual.md` when deciding whether a
 scenario should be visible, folded as advanced/edge detail, or skipped from the
 manual while remaining executable.

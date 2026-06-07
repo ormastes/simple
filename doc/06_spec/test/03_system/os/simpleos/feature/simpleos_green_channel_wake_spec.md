@@ -100,10 +100,10 @@ val decision = green_carrier_channel_wake_task(parked_task, sent.receiver_task_i
 
 #### runs a channel wake through the scheduler-owned active pass
 
-1. smp init
-2. smp bringup ap
-3. var scheduler = Scheduler new with cpu count
-4. scheduler set green carrier parallelism
+- smp init
+- smp bringup ap
+- var scheduler = Scheduler new with cpu count
+- scheduler set green carrier parallelism
    - Expected: sent.unparked is true
    - Expected: wake.enqueued is true
    - Expected: wake.apply.decision.target_cpu equals `2`
@@ -169,9 +169,9 @@ expect(green_carrier_queue_depth(wake.queues, 2)).to_equal(0)
 
 #### re-enqueues an unparked channel receiver through carrier dispatch
 
-1. smp init
-2. smp bringup ap
-3. var scheduler = Scheduler new with cpu count
+- smp init
+- smp bringup ap
+- var scheduler = Scheduler new with cpu count
    - Expected: sent.unparked is true
    - Expected: decision.should_enqueue is true
    - Expected: decision.target_cpu equals `2`
@@ -239,7 +239,7 @@ expect(scheduler.get_current_on_cpu(2u32).id).to_equal(0)
 
 #### does not enqueue when a send buffered without waking a receiver
 
-1. smp init
+- smp init
    - Expected: sent.unparked is false
    - Expected: decision.should_enqueue is false
    - Expected: decision.reason equals `channel_no_receiver`
@@ -282,7 +282,7 @@ expect(applied.queues.queued_task_ids.len()).to_equal(0)
 
 #### rejects mismatched channel wake task ids
 
-1. smp init
+- smp init
    - Expected: sent.unparked is true
    - Expected: sent.receiver_task_id equals `999`
    - Expected: decision.should_enqueue is false

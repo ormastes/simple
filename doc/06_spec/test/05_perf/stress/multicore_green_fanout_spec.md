@@ -84,9 +84,9 @@ FIFO queue cannot be mistaken for Go-like M:N CPU-parallel evidence.
 
 #### matches OS-thread fanout/fanin checksum _(slow)_
 
-1. Prepare deterministic OS-thread fanout inputs
-2. Spawn eight OS-thread fanout workers
-3. Join OS-thread workers and verify checksum
+- Prepare deterministic OS-thread fanout inputs
+- Spawn eight OS-thread fanout workers
+- Join OS-thread workers and verify checksum
    - Expected: got equals `expected`
 
 
@@ -126,10 +126,10 @@ expect(got).to_equal(expected)
 
 #### matches cooperative-green fanout checksum on the current carrier _(slow)_
 
-1. Prepare deterministic cooperative-green fanout inputs
-2. Queue eight cooperative-green workers on the current carrier
-3. Run the cooperative carrier and join all workers
-4. Verify cooperative carrier progress and checksum
+- Prepare deterministic cooperative-green fanout inputs
+- Queue eight cooperative-green workers on the current carrier
+- Run the cooperative carrier and join all workers
+- Verify cooperative carrier progress and checksum
    - Expected: got equals `expected`
 
 
@@ -173,15 +173,15 @@ expect(got).to_equal(expected)
 
 #### matches multicore-green fanout checksum and reports M:N evidence _(slow)_
 
-1. Prepare deterministic multicore-green fanout inputs
-2. Spawn eight multicore-green workers
-3. Count runtime-pool and inline-fallback evidence
-4. Join multicore-green workers and classify evidence
-5. Verify checksum and runtime evidence accounting
+- Prepare deterministic multicore-green fanout inputs
+- Spawn eight multicore-green workers
+- Count runtime-pool and inline-fallback evidence
+- Join multicore-green workers and classify evidence
+- Verify checksum and runtime evidence accounting
    - Expected: got equals `expected`
    - Expected: pool_used + inline_fallback equals `8`
    - Expected: evidence_count equals `8`
-6. Verify runtime-pool fanout uses work stealing
+- Verify runtime-pool fanout uses work stealing
    - Expected: multicore_queue_model() equals `work_stealing`
 
 
