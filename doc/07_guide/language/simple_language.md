@@ -242,7 +242,7 @@ Tracked submodule gitlinks:
 | `examples/10_tooling/llm_cli_tools` | LLM CLI tooling examples | Pinned to `310f74e1b17d` |
 | `examples/10_tooling/obsidian-search` | Obsidian search tooling example | Pinned to `835d9073a113` |
 | `examples/10_tooling/trace32_tools` | TRACE32 tooling example | Pinned to `40f6f53786bc` |
-| `examples/11_advanced/browser` | Browser example project; shared browser libraries remain internal under `src/lib` | Pinned to `9172f02ff612` |
+| `examples/11_advanced/browser` | Browser example project; shared browser libraries remain internal under `src/lib` | Pinned to `4d8394fcbc06` |
 | `examples/11_advanced/simple_db` | Database example derived from `simple-spostgre` | Pinned to `5df3b641fb80` |
 | `src/lib/nogc_async_mut/payment` | Payment library integration | Declared in `.gitmodules`, but current HEAD stores it as a normal tree, not a gitlink |
 
