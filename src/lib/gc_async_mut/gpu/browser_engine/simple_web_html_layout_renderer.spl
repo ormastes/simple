@@ -971,9 +971,13 @@ class Rules:
     decls: [text]
     needs_rightmost_prefilter: [bool]
     rightmost_prefilters: [text]
+    simple_selector_rules: [bool]
 
 fn selector_needs_rightmost_prefilter(sel: text) -> bool:
     sel.index_of(" ") >= 0 or sel.contains(">")
+
+fn selector_is_single_simple_rule(sel: text) -> bool:
+    not selector_needs_rightmost_prefilter(sel) and sel.index_of(",") < 0
 
 fn selector_group_rightmost_filter(group: text) -> text:
     val trimmed = group.trim()
@@ -1010,6 +1014,7 @@ fn extract_css(html: text) -> Rules:
     var decls: [text] = []
     var needs_rightmost_prefilter: [bool] = []
     var rightmost_prefilters: [text] = []
+    var simple_selector_rules: [bool] = []
     var pos = 0
     var guard = 0
     while guard < 1000:
@@ -1042,9 +1047,10 @@ fn extract_css(html: text) -> Rules:
                 decls.push(decl)
                 needs_rightmost_prefilter.push(selector_needs_rightmost_prefilter(sel))
                 rightmost_prefilters.push(selector_rightmost_filter(sel))
+                simple_selector_rules.push(selector_is_single_simple_rule(sel))
             cp = endb + 1
         pos = close + 1
-    Rules(sels: sels, decls: decls, needs_rightmost_prefilter: needs_rightmost_prefilter, rightmost_prefilters: rightmost_prefilters)
+    Rules(sels: sels, decls: decls, needs_rightmost_prefilter: needs_rightmost_prefilter, rightmost_prefilters: rightmost_prefilters, simple_selector_rules: simple_selector_rules)
 
 fn unquote_css_attr_value(raw: text) -> text:
     val v = raw.trim()
@@ -1260,7 +1266,10 @@ fn compute_styles(nodes: [HNode], rules: Rules, html: text) -> [Style]:
         var r = 0
         while r < rule_count:
             val sel = rules.sels[r]
-            if (not rules.needs_rightmost_prefilter[r] or selector_rightmost_filter_matches_node(rules.rightmost_prefilters[r], nd.tag, nd.class_attr, nd.id_attr, nd.attrs_raw)) and selector_matches_node(nodes, i, sel):
+            if rules.simple_selector_rules[r]:
+                if simple_match(rules.rightmost_prefilters[r], nd.tag, nd.class_attr, nd.id_attr, nd.attrs_raw):
+                    st = apply_decls(st, rules.decls[r])
+            elif (not rules.needs_rightmost_prefilter[r] or selector_rightmost_filter_matches_node(rules.rightmost_prefilters[r], nd.tag, nd.class_attr, nd.id_attr, nd.attrs_raw)) and selector_matches_node(nodes, i, sel):
                 st = apply_decls(st, rules.decls[r])
             r = r + 1
         if nd.style_attr.len() > 0:
