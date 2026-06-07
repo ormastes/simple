@@ -6,6 +6,7 @@
 **Runs per measurement:** 1 | **Warmup (in-process):** 10 | **fib(N):** 35 | **CPU workers:** 4 | **OS thread workers:** 4 | **Cooperative green workers:** 4 | **Multicore green workers:** 4 | **Fanout workers:** 20 | **Fanout cooperative green workers:** 20 | **Fanout multicore green workers:** 20 | **Fanout iters:** 32 | **Fanout stress workers:** 32 | **Fanout stress iters:** 1 | **Per-run timeout:** 30s
 **Profile script:** `scripts/check/check-cross-language-perf.shs`
 **Report path:** `doc/09_report/cross_language_perf_parallel_smoke.md`
+**Profile contract:** enforced by `test/05_perf/profile_scripts/profile_report_contract_test.shs`
 
 ## Methodology
 
