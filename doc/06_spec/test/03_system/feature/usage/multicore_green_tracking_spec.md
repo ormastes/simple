@@ -371,7 +371,7 @@ expect(row).to_contain("doc/07_guide/lib/misc/stdlib.md")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -379,6 +379,7 @@ step("Read the canonical multicore-green tracking row")
 val row = multicore_green_row(read_tracking_db())
 step("Verify unresolved runtime blockers remain visible")
 expect(row).to_contain("doc/08_tracking/bug/green_thread_direct_runtime_blockers_2026-06-06.md")
+expect(row).to_contain("doc/08_tracking/bug/smf_runtime_pool_closure_lookup_2026-06-07.md")
 expect(row).to_contain("doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md")
 ```
 
