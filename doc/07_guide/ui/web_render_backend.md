@@ -64,6 +64,11 @@ font size, line height, glyph advance/scale, clip rect, parent id, and
 consumers a stable text contract before rasterization; the compatibility pixel
 path still uses the pure-Simple 5x7 framebuffer rasterizer until a backend
 consumes those text commands directly.
+`engine2d_draw_ir_adv_*` now consumes the text contract by reading `font-size`,
+passing the resolved size to `Engine2D.draw_text`, and reporting
+`font_offload_status` / `font_offload_reason` from the vector-font offload
+evidence helper. A status such as `awaiting-rasterizer-evidence` means routing
+and metadata are live, while actual GPU glyph return is still missing.
 
 Keep pure_simple viewports modest (≤ ~400 wide); chromium opens a live window
 and is unaffected.

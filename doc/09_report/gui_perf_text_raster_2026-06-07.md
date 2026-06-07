@@ -87,6 +87,12 @@ This is not a measured glyph-speedup yet; it is the pre-raster contract needed
 for native/GPU bitmap or vector font backends to render text without changing
 GUI or app code.
 
+2026-06-07 Draw IR executor follow-up: `engine2d_draw_ir_adv_*` now consumes
+that text contract by honoring command `font-size` instead of hardcoding 12px,
+and returns vector-font offload status/reason. Current CPU evidence reports
+`awaiting-rasterizer-evidence`, so routing is wired but GPU glyph return remains
+open.
+
 Related tracked issue:
 [`pure_simple_web_render_interpreter_bound_2026-06-06.md`](../08_tracking/bug/pure_simple_web_render_interpreter_bound_2026-06-06.md).
   

@@ -5,9 +5,8 @@
 # as metadata/fallback policy; real GPU plugin migration is a later backend job.
 
 use common.ui.draw_ir.{
-    DRAW_IR_COMMAND_RECT,
-    DRAW_IR_COMMAND_TEXT,
     DrawIrBatch,
+    DrawIrCommand,
     DrawIrComposition,
     Simple2dDrawIrCompositionPlan,
     Simple2dDrawIrPlan,
@@ -15,6 +14,10 @@ use common.ui.draw_ir.{
     simple_2d_draw_ir_adv_plan
 }
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.vector_font_offload.{vector_font_current_offload_evidence}
+
+val ENGINE2D_DRAW_IR_COMMAND_RECT: text = "rect"
+val ENGINE2D_DRAW_IR_COMMAND_TEXT: text = "text"
 
 struct Engine2dDrawIrAdvResult:
     schema: text
@@ -24,9 +27,13 @@ struct Engine2dDrawIrAdvResult:
     fallback_reason: text
     rendered_command_count: i32
     skipped_command_count: i32
+    text_command_count: i32
+    last_text_font_size: i32
+    font_offload_status: text
+    font_offload_reason: text
     pixels: [u32]
 
-fn _engine2d_draw_ir_result_from_plan(plan: Simple2dDrawIrPlan, rendered: i32, skipped: i32, pixels: [u32]) -> Engine2dDrawIrAdvResult:
+fn _engine2d_draw_ir_result_from_plan(plan: Simple2dDrawIrPlan, rendered: i32, skipped: i32, text_count: i32, last_font_size: i32, font_status: text, font_reason: text, pixels: [u32]) -> Engine2dDrawIrAdvResult:
     Engine2dDrawIrAdvResult(
         schema: plan.schema,
         unit_id: plan.batch_id,
@@ -35,10 +42,14 @@ fn _engine2d_draw_ir_result_from_plan(plan: Simple2dDrawIrPlan, rendered: i32, s
         fallback_reason: plan.fallback_reason,
         rendered_command_count: rendered,
         skipped_command_count: skipped,
+        text_command_count: text_count,
+        last_text_font_size: last_font_size,
+        font_offload_status: font_status,
+        font_offload_reason: font_reason,
         pixels: pixels
     )
 
-fn _engine2d_draw_ir_result_from_composition_plan(plan: Simple2dDrawIrCompositionPlan, rendered: i32, skipped: i32, pixels: [u32]) -> Engine2dDrawIrAdvResult:
+fn _engine2d_draw_ir_result_from_composition_plan(plan: Simple2dDrawIrCompositionPlan, rendered: i32, skipped: i32, text_count: i32, last_font_size: i32, font_status: text, font_reason: text, pixels: [u32]) -> Engine2dDrawIrAdvResult:
     Engine2dDrawIrAdvResult(
         schema: plan.schema,
         unit_id: plan.composition_id,
@@ -47,8 +58,46 @@ fn _engine2d_draw_ir_result_from_composition_plan(plan: Simple2dDrawIrCompositio
         fallback_reason: plan.fallback_reason,
         rendered_command_count: rendered,
         skipped_command_count: skipped,
+        text_command_count: text_count,
+        last_text_font_size: last_font_size,
+        font_offload_status: font_status,
+        font_offload_reason: font_reason,
         pixels: pixels
     )
+
+fn _draw_ir_style_value(command: DrawIrCommand, key: text) -> text:
+    var idx = 0
+    val n = command.computed_style.len()
+    while idx < n:
+        if command.computed_style[idx].key == key:
+            return command.computed_style[idx].value
+        idx = idx + 1
+    ""
+
+fn _positive_i32_from_text(raw: text, fallback: i32) -> i32:
+    var value = 0
+    var idx = 0
+    var found = false
+    val n = raw.len()
+    while idx < n:
+        val code = raw.char_code_at(idx) as i32
+        if code >= 48 and code <= 57:
+            value = value * 10 + (code - 48)
+            found = true
+        elif found:
+            idx = n
+        idx = idx + 1
+    if found and value > 0:
+        return value
+    fallback
+
+fn _draw_ir_text_font_size(command: DrawIrCommand) -> i32:
+    _positive_i32_from_text(_draw_ir_style_value(command, "font-size"), 12)
+
+fn _draw_ir_text_extent(value: i32, fallback: i32) -> i64:
+    if value > 0:
+        return value as i64
+    fallback as i64
 
 fn engine2d_draw_ir_adv_batch(engine: Engine2D, batch: DrawIrBatch, gpu_available: bool) -> Engine2dDrawIrAdvResult:
     val plan = simple_2d_draw_ir_adv_plan(batch, gpu_available)
@@ -56,39 +105,59 @@ fn engine2d_draw_ir_adv_batch(engine: Engine2D, batch: DrawIrBatch, gpu_availabl
         engine.set_clip(batch.embedding.x, batch.embedding.y, batch.embedding.width, batch.embedding.height)
     var rendered = 0
     var skipped = 0
+    var text_count = 0
+    var last_font_size = 0
+    var font_status = "no-text-commands"
+    var font_reason = ""
     for command in batch.commands:
         val x = batch.embedding.x + command.x
         val y = batch.embedding.y + command.y
-        if command.kind == DRAW_IR_COMMAND_RECT:
+        if command.kind == ENGINE2D_DRAW_IR_COMMAND_RECT:
             engine.draw_rect_filled(x, y, command.width, command.height, command.color)
             rendered = rendered + 1
-        elif command.kind == DRAW_IR_COMMAND_TEXT:
-            engine.draw_text(x, y, command.text_value, command.color, 12)
+        elif command.kind == ENGINE2D_DRAW_IR_COMMAND_TEXT:
+            val font_size = _draw_ir_text_font_size(command)
+            val evidence = vector_font_current_offload_evidence(engine.backend_name(), _draw_ir_text_extent(command.width, batch.embedding.width), _draw_ir_text_extent(command.height, batch.embedding.height), gpu_available and plan.selected_backend != "cpu", gpu_available and plan.selected_backend != "cpu", 0)
+            engine.draw_text(x, y, command.text_value, command.color, font_size)
+            text_count = text_count + 1
+            last_font_size = font_size
+            font_status = evidence.status_code
+            font_reason = evidence.reason
             rendered = rendered + 1
         else:
             skipped = skipped + 1
     if batch.embedding.clip:
         engine.clear_clip()
-    _engine2d_draw_ir_result_from_plan(plan, rendered, skipped, engine.read_pixels())
+    _engine2d_draw_ir_result_from_plan(plan, rendered, skipped, text_count, last_font_size, font_status, font_reason, engine.read_pixels())
 
 fn engine2d_draw_ir_adv_composition(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool) -> Engine2dDrawIrAdvResult:
     val plan = simple_2d_draw_ir_adv_composition_plan(composition, gpu_available)
     var rendered = 0
     var skipped = 0
+    var text_count = 0
+    var last_font_size = 0
+    var font_status = "no-text-commands"
+    var font_reason = ""
     for batch in composition.batches:
         if batch.embedding.clip:
             engine.set_clip(batch.embedding.x, batch.embedding.y, batch.embedding.width, batch.embedding.height)
         for command in batch.commands:
             val x = batch.embedding.x + command.x
             val y = batch.embedding.y + command.y
-            if command.kind == DRAW_IR_COMMAND_RECT:
+            if command.kind == ENGINE2D_DRAW_IR_COMMAND_RECT:
                 engine.draw_rect_filled(x, y, command.width, command.height, command.color)
                 rendered = rendered + 1
-            elif command.kind == DRAW_IR_COMMAND_TEXT:
-                engine.draw_text(x, y, command.text_value, command.color, 12)
+            elif command.kind == ENGINE2D_DRAW_IR_COMMAND_TEXT:
+                val font_size = _draw_ir_text_font_size(command)
+                val evidence = vector_font_current_offload_evidence(engine.backend_name(), _draw_ir_text_extent(command.width, batch.embedding.width), _draw_ir_text_extent(command.height, batch.embedding.height), gpu_available and plan.selected_backend != "cpu", gpu_available and plan.selected_backend != "cpu", 0)
+                engine.draw_text(x, y, command.text_value, command.color, font_size)
+                text_count = text_count + 1
+                last_font_size = font_size
+                font_status = evidence.status_code
+                font_reason = evidence.reason
                 rendered = rendered + 1
             else:
                 skipped = skipped + 1
         if batch.embedding.clip:
             engine.clear_clip()
-    _engine2d_draw_ir_result_from_composition_plan(plan, rendered, skipped, engine.read_pixels())
+    _engine2d_draw_ir_result_from_composition_plan(plan, rendered, skipped, text_count, last_font_size, font_status, font_reason, engine.read_pixels())

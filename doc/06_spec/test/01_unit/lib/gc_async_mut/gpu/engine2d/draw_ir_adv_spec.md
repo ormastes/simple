@@ -28,7 +28,7 @@ draw_ir_adv_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -89,9 +89,7 @@ replacement test framework.
 #### executes a Draw IR batch through the Simple2D advanced interface with embedding offsets
 
 1. var engine = Engine2D create with backend
-
 2. engine clear
-
 3. draw ir rect
    - Expected: semantic.check_exists("body").unwrap() is true
    - Expected: semantic.check_visible("body").unwrap() is true
@@ -103,12 +101,11 @@ replacement test framework.
    - Expected: result.rendered_command_count equals `1`
    - Expected: result.skipped_command_count equals `0`
    - Expected: result.pixels[8 * 32 + 6] equals `RED`
-
 4. engine shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -117,7 +114,7 @@ Reproduction: this block contains the complete executable scenario source.
 var engine = Engine2D.create_with_backend(32, 24, "cpu")
 engine.clear(BG)
 val embedding = draw_ir_embedding_config("surf1", "win1", 4, 5, 20, 16, 10, 1000, true)
-val batch = draw_ir_batch("batch-rect", DRAW_IR_BACKEND_GPU, embedding, [
+val batch = draw_ir_batch("batch-rect", DRAW_IR_TEST_BACKEND_GPU, embedding, [
     draw_ir_rect("body", 2, 3, 6, 5, RED)
 ])
 
@@ -145,23 +142,19 @@ engine.shutdown()
 #### executes a composed Draw IR scene in batch order
 
 1. var engine = Engine2D create with backend
-
 2. engine clear
-
 3. draw ir rect
-
 4. draw ir rect
    - Expected: result.unit_id equals `wm-composite`
    - Expected: result.rendered_command_count equals `2`
    - Expected: result.skipped_command_count equals `0`
    - Expected: result.pixels[1 * 32 + 1] equals `RED`
    - Expected: result.pixels[8 * 32 + 7] equals `GREEN`
-
 5. engine shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -169,13 +162,13 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 var engine = Engine2D.create_with_backend(32, 24, "cpu")
 engine.clear(BG)
-val desktop = draw_ir_batch("desktop", DRAW_IR_BACKEND_GPU, draw_ir_embedding_config("wm", "desktop", 0, 0, 32, 24, 0, 1000, false), [
+val desktop = draw_ir_batch("desktop", DRAW_IR_TEST_BACKEND_GPU, draw_ir_embedding_config("wm", "desktop", 0, 0, 32, 24, 0, 1000, false), [
     draw_ir_rect("bg", 0, 0, 32, 24, RED)
 ])
-val window = draw_ir_batch("window", DRAW_IR_BACKEND_GPU, draw_ir_embedding_config("surf1", "win1", 6, 7, 12, 10, 10, 1000, true), [
+val window = draw_ir_batch("window", DRAW_IR_TEST_BACKEND_GPU, draw_ir_embedding_config("surf1", "win1", 6, 7, 12, 10, 10, 1000, true), [
     draw_ir_rect("body", 0, 0, 4, 4, GREEN)
 ])
-val composition = draw_ir_composition("wm-composite", "scene-key", DRAW_IR_BACKEND_GPU, [desktop, window])
+val composition = draw_ir_composition("wm-composite", "scene-key", DRAW_IR_TEST_BACKEND_GPU, [desktop, window])
 
 val result = engine2d_draw_ir_adv_composition(engine, composition, false)
 
@@ -192,17 +185,15 @@ engine.shutdown()
 #### reports unsupported Draw IR commands without rendering them
 
 1. var engine = Engine2D create with backend
-
 2. engine clear
    - Expected: result.rendered_command_count equals `0`
    - Expected: result.skipped_command_count equals `1`
    - Expected: result.pixels[1 * 16 + 1] equals `BG`
-
 3. engine shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -211,7 +202,7 @@ Reproduction: this block contains the complete executable scenario source.
 var engine = Engine2D.create_with_backend(16, 16, "cpu")
 engine.clear(BG)
 val unsupported = DrawIrCommand(kind: "future-path", component_id: "path", x: 1, y: 1, width: 5, height: 5, color: RED, text_value: "", border_rect: draw_ir_no_rect(), content_rect: draw_ir_no_rect(), hit_rect: draw_ir_no_rect(), clip_rect: draw_ir_no_rect(), computed_style: [], edge: nil, parent_id: "", image_uri: "", points: [])
-val batch = draw_ir_batch("unsupported", DRAW_IR_BACKEND_GPU, draw_ir_embedding_config("surf", "win", 0, 0, 16, 16, 1, 1000, false), [unsupported])
+val batch = draw_ir_batch("unsupported", DRAW_IR_TEST_BACKEND_GPU, draw_ir_embedding_config("surf", "win", 0, 0, 16, 16, 1, 1000, false), [unsupported])
 
 val result = engine2d_draw_ir_adv_batch(engine, batch, false)
 
@@ -223,12 +214,79 @@ engine.shutdown()
 
 </details>
 
+#### renders Draw IR text with command font metadata and vector-font evidence
+
+1. var engine = Engine2D create with backend
+2. engine clear
+3. border rect: draw ir no rect
+4. content rect: draw ir no rect
+5. hit rect: draw ir no rect
+6. clip rect: draw ir no rect
+7. draw ir style prop
+8. draw ir style prop
+   - Expected: result.rendered_command_count equals `1`
+   - Expected: result.skipped_command_count equals `0`
+   - Expected: result.text_command_count equals `1`
+   - Expected: result.last_text_font_size equals `16`
+   - Expected: result.font_offload_status equals `awaiting-rasterizer-evidence`
+   - Expected: result.font_offload_reason equals `vector-font-rasterizer-not-yet-observed`
+   - Expected: result.pixels[3 * 64 + 3] equals `GREEN`
+9. engine shutdown
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 36 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var engine = Engine2D.create_with_backend(64, 32, "cpu")
+engine.clear(BG)
+val text_cmd = DrawIrCommand(
+    kind: "text",
+    component_id: "title",
+    x: 2,
+    y: 3,
+    width: 48,
+    height: 18,
+    color: GREEN,
+    text_value: "HI",
+    border_rect: draw_ir_no_rect(),
+    content_rect: draw_ir_no_rect(),
+    hit_rect: draw_ir_no_rect(),
+    clip_rect: draw_ir_no_rect(),
+    computed_style: [
+        draw_ir_style_prop("font-size", "16px"),
+        draw_ir_style_prop("font-rendering", "bitmap-vector-backend-preferred")
+    ],
+    edge: nil,
+    parent_id: "window",
+    image_uri: "",
+    points: []
+)
+val batch = draw_ir_batch("text-batch", DRAW_IR_TEST_BACKEND_GPU, draw_ir_embedding_config("surf", "win", 0, 0, 64, 32, 1, 1000, false), [text_cmd])
+
+val result = engine2d_draw_ir_adv_batch(engine, batch, false)
+
+expect(result.rendered_command_count).to_equal(1)
+expect(result.skipped_command_count).to_equal(0)
+expect(result.text_command_count).to_equal(1)
+expect(result.last_text_font_size).to_equal(16)
+expect(result.font_offload_status).to_equal("awaiting-rasterizer-evidence")
+expect(result.font_offload_reason).to_equal("vector-font-rasterizer-not-yet-observed")
+expect(result.pixels[3 * 64 + 3]).to_equal(GREEN)
+engine.shutdown()
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -89,7 +89,7 @@ layout metadata before raster.
 #### renders HTML through the canonical browser engine to RenderScene
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -107,7 +107,7 @@ expect(scene.commands.len()).to_be_greater_than(0)
 #### renders inline url background shorthand fallback colors through RenderScene
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -122,7 +122,7 @@ expect(_simple_scene_has_fill_color(html, 0xFF00FF88u32)).to_equal(true)
 #### renders style block url background shorthand fallback colors through RenderScene
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -137,7 +137,7 @@ expect(_simple_scene_has_fill_color(html, 0xFF00FF88u32)).to_equal(true)
 #### renders HTML to pixels for framebuffer and host adapters
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -154,7 +154,7 @@ expect(_count_non_bg(pixels, 0xFFFFFFFF)).to_be_greater_than(0)
 #### applies style block colors in the generic layout renderer
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -172,7 +172,7 @@ expect(_count_color(pixels, 0xFF141418u32)).to_equal(0)
 #### applies extracted stylesheet rules without per-node style rescans
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -191,7 +191,7 @@ expect(_count_color(pixels, 0xFF2563EBu32)).to_be_greater_than(0)
 #### renders sibling block children through precomputed layout links
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -210,7 +210,7 @@ expect(_count_color(pixels, 0xFF2563EBu32)).to_be_greater_than(0)
 #### emits HTML layout Draw IR with computed style and hit geometry before raster
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -252,7 +252,7 @@ expect(_draw_ir_style_value(text_cmd, "backend-consumable")).to_equal("true")
 #### keeps lowercase browser text glyphs distinct from uppercase glyphs
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -272,7 +272,7 @@ expect(_pixels_equal(lower, upper)).to_equal(false)
 #### renders the text-raster fixture with genuine glyph ink (no memorized Chrome overlay)
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -300,7 +300,7 @@ expect(_count_color(pixels, 0xFFFFFFFFu32)).to_equal(0)
 #### uses explicit line-height for wrapped text layout
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -322,7 +322,7 @@ expect(_count_color(pixels, 0xFF0F172Au32)).to_be_greater_than(0)
 #### applies class selector colors and inline overrides in generic layout
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -341,7 +341,7 @@ expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(0)
 #### scopes descendant selector colors to matching ancestors
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -359,7 +359,7 @@ expect(_count_color(pixels, 0xFF334155u32)).to_be_greater_than(0)
 #### scopes child selector colors to direct children only
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -385,7 +385,7 @@ expect(child_green).to_be_less_than(descendant_green)
 #### matches Chrome content-box flex geometry for a text-free CSS matrix
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -414,7 +414,7 @@ expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(144)
 #### matches Chrome solid-border and nested-selector geometry for a text-free CSS matrix
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -445,7 +445,7 @@ expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(0)
 #### matches Chrome asymmetric border-side geometry for a text-free CSS matrix
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -474,7 +474,7 @@ expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(24)
 #### matches Chrome overflow hidden clipping for a text-free CSS matrix
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -499,7 +499,7 @@ expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(0)
 #### matches Chrome visibility hidden paint suppression while preserving layout
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -522,7 +522,7 @@ expect(_count_color(pixels, 0xFF7F1D1Du32)).to_equal(0)
 #### matches Chrome display contents wrapper suppression
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -545,7 +545,7 @@ expect(_count_color(pixels, 0xFF7F1D1Du32)).to_equal(0)
 #### matches Chrome positioned absolute geometry without normal-flow contribution
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -568,7 +568,7 @@ expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(128)
 #### matches Chrome positioned right and bottom offsets
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -607,7 +607,7 @@ expect(_count_color(pixels, 0xFF1D4ED8u32)).to_equal(120)
 #### matches Chrome positioned absolute paint order over normal-flow siblings
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -629,7 +629,7 @@ expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(96)
 #### matches Chrome positioned positive z-index ordering
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -652,7 +652,7 @@ expect(_count_color(pixels, 0xFF334155u32)).to_equal(56)
 #### matches Chrome leaf background opacity blending
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -672,7 +672,7 @@ expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(0)
 #### matches Chrome background shorthand fallback and declaration order
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -694,7 +694,7 @@ expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(0)
 #### paints famous-site corpus block geometry with Chrome default body margin
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -716,7 +716,7 @@ expect(pixels[32 + 93 * 160]).to_equal(0xFFFFFFFFu32)
 #### keeps exact Twitch corpus pixels in the fixture renderer
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -735,7 +735,7 @@ expect(pixels[32 + 93 * 160]).to_equal(0xFF000000u32)
 #### returns an RGBA byte frame from the URL facade
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -750,7 +750,7 @@ expect(pixels.len()).to_equal(120 * 80 * 4)
 #### keeps backend choice wrapped behind the renderer interface
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -767,7 +767,7 @@ expect(pixels.len()).to_equal(96 * 64)
 #### preserves supported Engine2D backend names before runtime fallback
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -791,7 +791,7 @@ expect(simple_web_resolved_engine2d_backend_name(96, 64, "cpu_simd")).to_equal("
 #### high-level renderer preserves OpenCL backend selection without changing generic layout pixels
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -809,7 +809,7 @@ expect(_pixels_equal(opencl.render_html_to_pixels(html), sw.render_html_to_pixel
 #### reports the actual backend after invalid backend fallback
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -826,7 +826,7 @@ expect(pixels.len()).to_equal(96 * 64)
 #### keeps BrowserRenderer.render_html_to_pixels on the non-empty software path
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -846,7 +846,7 @@ expect(result.has_html_capture()).to_equal(true)
 #### default renderer uses the BrowserRenderer Engine2D software pixel path
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -866,7 +866,7 @@ expect(_pixels_equal(simple_pixels, browser_pixels)).to_equal(true)
 #### fallback facade parses rgb() background-color with the shared CSS parser
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -883,7 +883,7 @@ expect(pixels[7 + 210 * 8]).to_equal(0xFF059669u32)
 #### fallback facade composites rgba() background-color over the white page
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -900,7 +900,7 @@ expect(pixels[7 + 210 * 8]).to_equal(0xFF808080u32)
 #### fallback facade parses shorthand hex background-color
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -917,7 +917,7 @@ expect(pixels[7 + 210 * 8]).to_equal(0xFF00FF88u32)
 #### fallback facade composites shorthand hex alpha background-color to the white page
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -934,7 +934,7 @@ expect(pixels[7 + 210 * 8]).to_equal(0xFF777777u32)
 #### fallback facade parses named CSS background-color
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -951,7 +951,7 @@ expect(pixels[7 + 210 * 8]).to_equal(0xFF663399u32)
 #### fallback facade composites transparent background-color to the white page
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -968,7 +968,7 @@ expect(pixels[7 + 210 * 8]).to_equal(0xFFFFFFFFu32)
 #### fallback facade parses hsl() background-color
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -985,7 +985,7 @@ expect(pixels[7 + 210 * 8]).to_equal(0xFF008000u32)
 #### fallback facade resolves background-color currentColor from text color
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1002,7 +1002,7 @@ expect(pixels[7 + 210 * 8]).to_equal(0xFF456789u32)
 #### fallback facade parses color-first background shorthand
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1019,7 +1019,7 @@ expect(pixels[7 + 210 * 8]).to_equal(0xFF663399u32)
 #### fallback facade parses function color background shorthand before trailing tokens
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1036,7 +1036,7 @@ expect(pixels[7 + 210 * 8]).to_equal(0xFF059669u32)
 #### fallback facade parses fallback color after url() in background shorthand
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1053,7 +1053,7 @@ expect(pixels[7 + 210 * 8]).to_equal(0xFF00FF88u32)
 #### fallback facade resolves background shorthand currentColor from text color
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1070,7 +1070,7 @@ expect(pixels[7 + 210 * 8]).to_equal(0xFF345678u32)
 #### fallback facade lets later background shorthand override earlier background-color
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1087,7 +1087,7 @@ expect(pixels[7 + 210 * 8]).to_equal(0xFF00FF88u32)
 #### fallback facade lets later background-color override earlier background shorthand
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1104,7 +1104,7 @@ expect(pixels[7 + 210 * 8]).to_equal(0xFF663399u32)
 #### fallback facade applies attribute presence selectors to the first visual block
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1120,7 +1120,7 @@ expect(_count_color(pixels, 0xFF0E7490u32)).to_equal(96)
 #### fallback facade rejects non matching exact attribute selectors
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1136,7 +1136,7 @@ expect(_count_color(pixels, 0xFF4D7C0Fu32)).to_equal(0)
 #### fallback facade applies attribute prefix selectors to the first visual block
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1152,7 +1152,7 @@ expect(_count_color(pixels, 0xFF0F5E9Cu32)).to_equal(96)
 #### fallback facade rejects non matching attribute suffix selectors
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

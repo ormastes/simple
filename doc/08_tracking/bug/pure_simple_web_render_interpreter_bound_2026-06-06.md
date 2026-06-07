@@ -113,6 +113,18 @@ without changing application code.
 
 Unit coverage: `simple_web_renderer_spec.spl` asserts that the HTML layout Draw
 IR batch contains a backend-consumable text command for `CMD`.
+
+2026-06-07 backend-consumption update: `engine2d_draw_ir_adv_batch()` and
+`engine2d_draw_ir_adv_composition()` now read each text command's `font-size`,
+pass the resolved size to `Engine2D.draw_text`, count text commands, and expose
+`font_offload_status` / `font_offload_reason` from
+`vector_font_current_offload_evidence()`. Focused unit coverage asserts a 16px
+Draw IR text command renders through Engine2D and reports
+`awaiting-rasterizer-evidence` / `vector-font-rasterizer-not-yet-observed`.
+
+Remaining gap: the text path still does not prove `gpu-glyph-returned`; bitmap
+and vector glyph execution need a backend rasterizer that returns glyph pixels
+without CPU glyph preparation.
 ## Follow-up: GUI profile throughput evidence
 
 2026-06-06 GUI profile smoke:

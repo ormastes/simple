@@ -37,13 +37,13 @@ replacement test framework.
 
 use std.spec
 use common.ui.draw_ir.{
-    DRAW_IR_BACKEND_GPU,
     DrawIrCommand,
     draw_ir_batch,
     draw_ir_composition,
     draw_ir_embedding_config,
     draw_ir_no_rect,
-    draw_ir_rect
+    draw_ir_rect,
+    draw_ir_style_prop
 }
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_batch, engine2d_draw_ir_adv_composition}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
@@ -52,6 +52,7 @@ use std.gc_async_mut.ui_test.sgtti.{SgttiTestDriver, sgtti_snapshot_from_draw_ir
 val BG: u32 = 0xff000000u32
 val RED: u32 = 0xffff0000u32
 val GREEN: u32 = 0xff00ff00u32
+val DRAW_IR_TEST_BACKEND_GPU: text = "gpu"
 
 describe "Engine2D advanced Draw IR executor":
 
@@ -59,7 +60,7 @@ describe "Engine2D advanced Draw IR executor":
         var engine = Engine2D.create_with_backend(32, 24, "cpu")
         engine.clear(BG)
         val embedding = draw_ir_embedding_config("surf1", "win1", 4, 5, 20, 16, 10, 1000, true)
-        val batch = draw_ir_batch("batch-rect", DRAW_IR_BACKEND_GPU, embedding, [
+        val batch = draw_ir_batch("batch-rect", DRAW_IR_TEST_BACKEND_GPU, embedding, [
             draw_ir_rect("body", 2, 3, 6, 5, RED)
         ])
 
@@ -84,13 +85,13 @@ describe "Engine2D advanced Draw IR executor":
     it "executes a composed Draw IR scene in batch order":
         var engine = Engine2D.create_with_backend(32, 24, "cpu")
         engine.clear(BG)
-        val desktop = draw_ir_batch("desktop", DRAW_IR_BACKEND_GPU, draw_ir_embedding_config("wm", "desktop", 0, 0, 32, 24, 0, 1000, false), [
+        val desktop = draw_ir_batch("desktop", DRAW_IR_TEST_BACKEND_GPU, draw_ir_embedding_config("wm", "desktop", 0, 0, 32, 24, 0, 1000, false), [
             draw_ir_rect("bg", 0, 0, 32, 24, RED)
         ])
-        val window = draw_ir_batch("window", DRAW_IR_BACKEND_GPU, draw_ir_embedding_config("surf1", "win1", 6, 7, 12, 10, 10, 1000, true), [
+        val window = draw_ir_batch("window", DRAW_IR_TEST_BACKEND_GPU, draw_ir_embedding_config("surf1", "win1", 6, 7, 12, 10, 10, 1000, true), [
             draw_ir_rect("body", 0, 0, 4, 4, GREEN)
         ])
-        val composition = draw_ir_composition("wm-composite", "scene-key", DRAW_IR_BACKEND_GPU, [desktop, window])
+        val composition = draw_ir_composition("wm-composite", "scene-key", DRAW_IR_TEST_BACKEND_GPU, [desktop, window])
 
         val result = engine2d_draw_ir_adv_composition(engine, composition, false)
 
@@ -105,11 +106,49 @@ describe "Engine2D advanced Draw IR executor":
         var engine = Engine2D.create_with_backend(16, 16, "cpu")
         engine.clear(BG)
         val unsupported = DrawIrCommand(kind: "future-path", component_id: "path", x: 1, y: 1, width: 5, height: 5, color: RED, text_value: "", border_rect: draw_ir_no_rect(), content_rect: draw_ir_no_rect(), hit_rect: draw_ir_no_rect(), clip_rect: draw_ir_no_rect(), computed_style: [], edge: nil, parent_id: "", image_uri: "", points: [])
-        val batch = draw_ir_batch("unsupported", DRAW_IR_BACKEND_GPU, draw_ir_embedding_config("surf", "win", 0, 0, 16, 16, 1, 1000, false), [unsupported])
+        val batch = draw_ir_batch("unsupported", DRAW_IR_TEST_BACKEND_GPU, draw_ir_embedding_config("surf", "win", 0, 0, 16, 16, 1, 1000, false), [unsupported])
 
         val result = engine2d_draw_ir_adv_batch(engine, batch, false)
 
         expect(result.rendered_command_count).to_equal(0)
         expect(result.skipped_command_count).to_equal(1)
         expect(result.pixels[1 * 16 + 1]).to_equal(BG)
+        engine.shutdown()
+
+    it "renders Draw IR text with command font metadata and vector-font evidence":
+        var engine = Engine2D.create_with_backend(64, 32, "cpu")
+        engine.clear(BG)
+        val text_cmd = DrawIrCommand(
+            kind: "text",
+            component_id: "title",
+            x: 2,
+            y: 3,
+            width: 48,
+            height: 18,
+            color: GREEN,
+            text_value: "HI",
+            border_rect: draw_ir_no_rect(),
+            content_rect: draw_ir_no_rect(),
+            hit_rect: draw_ir_no_rect(),
+            clip_rect: draw_ir_no_rect(),
+            computed_style: [
+                draw_ir_style_prop("font-size", "16px"),
+                draw_ir_style_prop("font-rendering", "bitmap-vector-backend-preferred")
+            ],
+            edge: nil,
+            parent_id: "window",
+            image_uri: "",
+            points: []
+        )
+        val batch = draw_ir_batch("text-batch", DRAW_IR_TEST_BACKEND_GPU, draw_ir_embedding_config("surf", "win", 0, 0, 64, 32, 1, 1000, false), [text_cmd])
+
+        val result = engine2d_draw_ir_adv_batch(engine, batch, false)
+
+        expect(result.rendered_command_count).to_equal(1)
+        expect(result.skipped_command_count).to_equal(0)
+        expect(result.text_command_count).to_equal(1)
+        expect(result.last_text_font_size).to_equal(16)
+        expect(result.font_offload_status).to_equal("awaiting-rasterizer-evidence")
+        expect(result.font_offload_reason).to_equal("vector-font-rasterizer-not-yet-observed")
+        expect(result.pixels[3 * 64 + 3]).to_equal(GREEN)
         engine.shutdown()

@@ -42,7 +42,7 @@ famous_site_engine2d_backend_spec -> app
 #### matches default Simple Web Renderer pixels for every corpus page
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -56,7 +56,7 @@ expect(_all_engine_backend_samples_match_default(40, 30)).to_equal(true)
 #### matches default Simple Web Renderer pixels for representative full-size corpus pages
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -73,7 +73,7 @@ expect(_engine_backend_matches_default_for_sample(samples[99], 160, 120)).to_equ
 #### keeps direct layout software and cpu backend pixels identical
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
