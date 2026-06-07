@@ -26,10 +26,10 @@ which compiled and ran in the checked-in smoke profile.
 
 ## Impact
 
-`thread_spawn_with_args` remains a public API name, but it is not currently valid
-native performance evidence. Profile rows must use `thread_spawn` for native
-OS-thread baselines until this ABI bug is fixed, and must not present stale
-`thread_spawn_with_args` timings as proof.
+`thread_spawn_with_args` remains a public API name and now has focused native
+ABI smoke coverage. Profile rows still use `thread_spawn` for native OS-thread
+scheduler baselines so explicit-argument ABI coverage does not get mixed into
+fanout and scheduler-overhead comparisons.
 
 ## Fix
 

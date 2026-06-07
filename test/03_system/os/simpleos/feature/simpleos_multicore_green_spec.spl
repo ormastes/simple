@@ -33,9 +33,85 @@ available to assert.
 ## Research
 
 **Research:** doc/01_research/local/multicore_green.md
+
+## Syntax
+
+Run the hosted SimpleOS multicore-green contract:
+
+```sh
+./src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl --mode=interpreter --clean
+```
+
+## Examples
+
+The scenarios model the SimpleOS scheduler-owned carrier path: remote green
+enqueue sends the reschedule IPI, dispatch records green execution separately
+from normal OS tasks, topology growth extends green scheduler slots, and
+runtime/timer safepoints route through active green carriers. This is hosted
+model evidence; live QEMU/AP execution remains covered by
+`test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl`.
+
+## Scenario Walkthrough
+
+### Remote Green Enqueue
+
+1. Initialize the hosted SMP model.
+2. Bring up a remote application processor.
+3. Create carrier queues for four CPUs.
+4. Plan green work for a remote carrier CPU.
+5. Apply the enqueue decision.
+6. Assert the enqueue sent the SimpleOS reschedule IPI.
+
+### Scheduler-Owned Green State
+
+1. Create a scheduler with four CPU slots.
+2. Enqueue green work for CPU one.
+3. Dispatch the next green task from the CPU one carrier queue.
+4. Apply the green scheduler intent.
+5. Assert green current-task and green context-switch counters changed.
+6. Assert the normal OS task slot remains unchanged.
+
+### Topology Growth
+
+1. Create a bootstrap scheduler.
+2. Grow the topology to four CPUs.
+3. Enqueue green work for CPU three.
+4. Dispatch and apply CPU three green scheduler intent.
+5. Assert the grown scheduler records CPU three green execution.
+
+### Active-Carrier Safepoints
+
+1. Set active green carrier parallelism to one.
+2. Enqueue and run green work on CPU zero.
+3. Poll a runtime safepoint through active green carriers.
+4. Poll a timer interrupt safepoint through active green carriers.
+5. Assert runtime polling ticks without preemption.
+6. Assert timer polling yields and requeues the active green worker.
+7. Poll an invalid source and assert no carrier is ticked or yielded.
+
+## Evidence Boundary
+
+- This spec proves hosted/model SimpleOS scheduler behavior.
+- It proves scheduler-owned carrier state, remote enqueue/IPI intent,
+  topology-bounded green state, and preemption-safepoint routing.
+- It does not by itself prove live AP hardware execution.
+- Live AP and guest-visible dispatch evidence is owned by
+  `green_carrier_qemu_spec.spl`.
+- Final hardware context-switch handoff remains tracked until live guest proof
+  covers that exact transition.
+
+## TUI Capture
+
+```text
+Simple Test Runner v1.0.0-beta
+Running: test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl
+[1/1] test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl PASSED
+Files: 1
+Passed: 5
+Failed: 0
+```
 """
 
-use std.spec.{describe, it, expect}
 use os.kernel.smp.smp.{smp_init, smp_bringup_ap, smp_take_ipi, smp_ipi_resched}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.scheduler.green_carrier.{
@@ -48,29 +124,45 @@ use os.kernel.scheduler.green_carrier.{
 }
 use os.kernel.types.task_types.{default_scheduler_topology}
 
+fn step(name: text) -> i64:
+    name.len()
+
 describe "SimpleOS multicore green contract":
     it "routes remote green enqueue through the SimpleOS reschedule IPI surface":
+        step("Initialize the hosted SimpleOS SMP model")
         smp_init()
+        step("Bring up a remote application processor")
         smp_bringup_ap(1u32)
+        step("Create carrier run queues for four CPUs")
         val queues = green_carrier_run_queues_new(4, 8)
+        step("Plan a green task for a remote carrier CPU")
         val decision = green_carrier_spawn_task(101, 4, 0, 3, 1, 2, 4, 0)
+        step("Apply the enqueue decision through the SimpleOS carrier queues")
         val result = green_carrier_apply_enqueue(queues, decision)
 
+        step("Verify remote enqueue sends the SimpleOS reschedule IPI")
         expect(result.enqueued).to_equal(true)
         expect(result.ipi_sent).to_equal(true)
         expect(result.ipi_reason_mask).to_equal(smp_ipi_resched())
         expect(smp_take_ipi(1u32)).to_equal(smp_ipi_resched())
 
     it "dispatches green work into scheduler-owned multicore execution state":
+        step("Initialize the hosted SimpleOS SMP model")
         smp_init()
+        step("Bring up a remote application processor")
         smp_bringup_ap(1u32)
+        step("Create a scheduler with four CPU slots")
         var scheduler = Scheduler.new_with_cpu_count(4u32)
+        step("Create carrier queues and enqueue green work for CPU one")
         val queues = green_carrier_run_queues_new(4, 8)
         val decision = green_carrier_spawn_task(202, 4, 0, 3, 1, 2, 4, 0)
         val queued = green_carrier_apply_enqueue(queues, decision)
+        step("Dispatch the next green task from CPU one carrier queue")
         val dispatched = green_carrier_dispatch_next(queued.queues, 1)
+        step("Apply the dispatched green scheduler intent")
         val applied = scheduler.apply_green_scheduler_intent(green_carrier_scheduler_intent(dispatched))
 
+        step("Verify green execution state is separate from the normal task slot")
         expect(applied.applied).to_equal(true)
         expect(scheduler.green_current_task_on_cpu(1u32)).to_equal(202)
         expect(scheduler.green_context_switches_on_cpu(1u32)).to_equal(1)
@@ -78,36 +170,49 @@ describe "SimpleOS multicore green contract":
         expect(scheduler.get_current_on_cpu(1u32).id).to_equal(0)
 
     it "extends green scheduler slots when SimpleOS topology grows":
+        step("Initialize the hosted SimpleOS SMP model")
         smp_init()
+        step("Create a bootstrap scheduler and grow it to four CPUs")
         var scheduler = Scheduler.new_bootstrap()
         scheduler.set_topology(default_scheduler_topology(4u32))
+        step("Create carrier queues and enqueue green work for CPU three")
         val queues = green_carrier_run_queues_new(4, 8)
         val decision = green_carrier_spawn_task(303, 4, 8, 3, 1, 2, 4, 0)
         val queued = green_carrier_apply_enqueue(queues, decision)
+        step("Dispatch and apply the CPU three green scheduler intent")
         val dispatched = green_carrier_dispatch_next(queued.queues, 3)
         val applied = scheduler.apply_green_scheduler_intent(green_carrier_scheduler_intent(dispatched))
 
+        step("Verify the grown scheduler records CPU three green execution")
         expect(applied.applied).to_equal(true)
         expect(scheduler.green_current_task_on_cpu(3u32)).to_equal(303)
         expect(scheduler.green_context_switches_on_cpu(3u32)).to_equal(1)
 
     it "routes SimpleOS preemption safepoints through active green carriers":
+        step("Initialize the hosted SimpleOS SMP model")
         smp_init()
+        step("Create a scheduler with one active green carrier")
         var scheduler = Scheduler.new_with_cpu_count(4u32)
         scheduler.set_green_carrier_parallelism(1)
+        step("Enqueue green work on CPU zero")
         val queues = green_carrier_run_queues_new(4, 8)
         val decision = green_carrier_spawn_task(404, 4, 1, 0, 4, 4, 4, 0)
         val queued = green_carrier_apply_enqueue(queues, decision)
+        step("Run an active carrier pass")
         val pass_result = scheduler.run_green_carrier_active_pass(queued.queues, 0)
+        step("Poll the runtime safepoint through active green carriers")
         val runtime_poll = scheduler.green_preemption_safepoint_active_carriers(pass_result.queues, "runtime_safepoint")
+        step("Poll the timer interrupt safepoint through active green carriers")
         val timer_poll = scheduler.green_preemption_safepoint_active_carriers(runtime_poll.queues, "timer_interrupt")
 
+        step("Verify runtime safepoint ticks without requesting preemption")
         expect(pass_result.ran_workers).to_equal(1)
         expect(runtime_poll.accepted).to_equal(true)
         expect(runtime_poll.source).to_equal("runtime_safepoint")
         expect(runtime_poll.preemption_requested).to_equal(false)
         expect(runtime_poll.ticked_carriers).to_equal(1)
         expect(scheduler.green_current_task_on_cpu(0u32)).to_equal(404)
+        step("Verify timer safepoint yields the active green worker")
         expect(timer_poll.accepted).to_equal(true)
         expect(timer_poll.source).to_equal("timer_interrupt")
         expect(timer_poll.preemption_requested).to_equal(true)
@@ -117,15 +222,21 @@ describe "SimpleOS multicore green contract":
         expect(scheduler.green_current_task_on_cpu(0u32)).to_equal(0)
 
     it "rejects bad SimpleOS preemption source without ticking carriers":
+        step("Initialize the hosted SimpleOS SMP model")
         smp_init()
+        step("Create a scheduler with one active green carrier")
         var scheduler = Scheduler.new_with_cpu_count(4u32)
         scheduler.set_green_carrier_parallelism(1)
+        step("Enqueue green work on CPU zero")
         val queues = green_carrier_run_queues_new(4, 8)
         val decision = green_carrier_spawn_task(405, 4, 1, 0, 4, 4, 4, 0)
         val queued = green_carrier_apply_enqueue(queues, decision)
+        step("Run an active carrier pass")
         val pass_result = scheduler.run_green_carrier_active_pass(queued.queues, 0)
+        step("Poll an invalid SimpleOS preemption source")
         val rejected = scheduler.green_preemption_safepoint_active_carriers(pass_result.queues, "bad_simpleos_source")
 
+        step("Verify the invalid safepoint does not tick or yield carriers")
         expect(rejected.accepted).to_equal(false)
         expect(rejected.reason).to_equal("invalid_preemption_source")
         expect(rejected.ticked_carriers).to_equal(0)

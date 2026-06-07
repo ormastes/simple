@@ -4,15 +4,16 @@
 
 ## Quick Stats
 
-- **Total Features:** 1
-- **Complete Documentation:** 1 (100%)
+- **Total Features:** 2
+- **Complete Documentation:** 2 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 129
+- **Total Lines:** 216
 
 ---
 
-## Runtime Concurrency (1 features)
+## SimpleOS / Concurrency (2 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Multicore Green Feature Tracking Specification](test/03_system/feature/usage/multicore_green_tracking_spec.md) | Current | N/A | 6 | 60% | 129 lines |
+| [SimpleOS Cooperative Green System Contract](test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.md) | Implemented | N/A | 3 | 60% | 105 lines |
+| [SimpleOS Multicore Green System Contract](test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.md) | In Progress | N/A | 5 | 60% | 111 lines |
