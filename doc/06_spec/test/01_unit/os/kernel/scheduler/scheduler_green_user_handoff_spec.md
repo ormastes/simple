@@ -43,14 +43,19 @@ Verifies the Pure Simple scheduler contract between the green-carrier lane and
 |-------|-------|
 | Category | Hardware & OS |
 | Status | Active |
+| Requirements | doc/02_requirements/feature/multicore_green.md |
+| Plan | doc/03_plan/sys_test/multicore_green.md |
+| Design | doc/05_design/multicore_green.md |
+| Research | doc/01_research/local/multicore_green.md |
 | Source | `test/01_unit/os/kernel/scheduler/scheduler_green_user_handoff_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Verifies the Pure Simple scheduler contract between the green-carrier lane and
-the user-task handoff record. This is not final x86_64 hardware handoff proof:
-`HW_HANDOFF_PASS=true` remains reserved for live QEMU evidence that enters user
-mode through the architecture bridge and observes a user-mode syscall.
+the user-task handoff record before the architecture bridge. This is not final
+x86_64 hardware handoff proof: final live QEMU evidence remains reserved for
+`HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, and `USER_SYSCALL_PASS=true`
+markers emitted from the real AP ring/user path.
 
 ## Scenarios
 
@@ -117,6 +122,14 @@ if handoff != nil:
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Requirements:** [doc/02_requirements/feature/multicore_green.md](doc/02_requirements/feature/multicore_green.md)
+- **Plan:** [doc/03_plan/sys_test/multicore_green.md](doc/03_plan/sys_test/multicore_green.md)
+- **Design:** [doc/05_design/multicore_green.md](doc/05_design/multicore_green.md)
+- **Research:** [doc/01_research/local/multicore_green.md](doc/01_research/local/multicore_green.md)
 
 
 </details>

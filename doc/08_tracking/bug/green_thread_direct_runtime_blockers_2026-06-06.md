@@ -64,15 +64,15 @@ The native `multicore_green_spawn` path has separate runtime-pool evidence:
 any handle reports `used_runtime_pool() == false`. Current native evidence
 passes that gate.
 
-2026-06-06 update: the multicore-green SMF rows now execute with runtime-pool
-evidence and checksum validation in the checked-in smoke report
-(`doc/09_report/cross_language_perf_parallel_smoke.md`). The profile generator
-uses literal CPU-loop constants in generated Simple workloads so benchmark
-checksums do not depend on the separate SMF/native global-load blocker.
+2026-06-07 update: native multicore-green rows now execute with runtime-pool
+evidence and checksum validation in the checked-in smoke reports. Current SMF
+multicore-green rows still fail with `SMF runtime-pool closure lookup blocker`,
+tracked separately in
+`doc/08_tracking/bug/smf_runtime_pool_closure_lookup_2026-06-07.md`.
 
-Remaining SMF failures in that report are cooperative-green queue rows, which
-still depend on mutable global queue state and are not M:N CPU-parallel
-evidence. Keep those classified separately from `multicore_green_spawn`.
+Remaining SMF failures include cooperative-green queue rows, which still depend
+on mutable global queue state and are not M:N CPU-parallel evidence. Keep those
+classified separately from native `multicore_green_spawn` evidence.
 
 ## Reproduction
 
