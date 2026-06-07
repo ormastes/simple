@@ -129,5 +129,19 @@ CUDA/HIP/Vulkan/Metal kernels still need to populate the contract.
 Related tracked issue:
 [`pure_simple_web_render_interpreter_bound_2026-06-06.md`](../08_tracking/bug/pure_simple_web_render_interpreter_bound_2026-06-06.md).
   
- Contract-backed full report:
- [`gui_perf_benchmark_2026-06-07.md`](gui_perf_benchmark_2026-06-07.md).
+2026-06-07 measurement-agent follow-up: reran the canonical small text fixture
+profile at 128x96 / 3 frames from parent revision
+`3d2cc6df8549cc9c57bbd4ad468540fb1e8b90a3`. `simple_web_software` remained a
+valid CPU scalar text-blit row with checksum `sum32:52601568094128`,
+`nonzero_pixels:12288`, `p50_frame_us=126466`, and `p95_frame_us=133121`.
+The generated CUDA fill lane on the same pixel count recorded
+`p50_frame_us=527` and `p95_frame_us=527`, proving generated GPU execution is
+available while live web text remains CPU-bound. Focused selector/style,
+Draw IR, helper text, font renderer, and backend probe specs all passed at
+their current paths. The stale `gc_async_mut/gpu/engine2d/font_renderer_spec.spl`
+and `gc_async_mut/gpu/engine2d/helpers_text_spec.spl` test paths no longer
+exist in this checkout; use `test/01_unit/lib/common/text_layout/font_renderer_spec.spl`
+and `test/01_unit/lib/gpu/engine2d/helpers_text_spec.spl` instead.
+
+Measurement-agent report:
+[`gui_perf_measurement_agent_2026-06-07.md`](gui_perf_measurement_agent_2026-06-07.md).

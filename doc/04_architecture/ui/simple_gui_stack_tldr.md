@@ -136,6 +136,9 @@ MCP, Render, Test API — all thin. GUI policy stays in Simple.
 
 - startup: probe plugin/backend capabilities once, cache the result, and report
   unavailable states explicitly.
+- Engine2D GUI startup order: `metal > cuda > rocm/hip > vulkan > opencl >
+  software > cpu_simd > cpu`; optional explicit backends stay selectable by
+  name but are not part of the default startup probe ladder.
 - hot path: no full-tree scans, repeated file reads, subprocess retry loops,
   per-character glyph-cache scans, non-adjacent text-buffer cache scans, or
   per-frame device probing.

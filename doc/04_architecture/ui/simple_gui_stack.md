@@ -310,6 +310,11 @@ handle primitive draw, framebuffer ownership, present, and readback. Processing
 backends handle compute kernels, generated artifacts, filters, and offload.
 Draw processing may use CPU scalar, CPU SIMD, OpenCL, CUDA, HIP, Vulkan, Metal,
 or WebGPU, but GUI code sees only the typed Simple 2D and plugin contracts.
+Default GUI startup probes the compact Engine2D ladder
+`metal > cuda > rocm/hip > vulkan > opencl > software > cpu_simd > cpu`.
+Optional explicit backends such as OpenGL, Intel oneAPI, WebGPU, and
+device-specific delegates remain selectable by name or custom priority, but
+they are not probed during normal `Engine2D.create()` startup.
 
 ### Startup dynSMF Libraries
 

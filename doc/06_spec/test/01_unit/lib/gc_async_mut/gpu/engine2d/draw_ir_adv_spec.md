@@ -28,7 +28,7 @@ draw_ir_adv_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -388,6 +388,49 @@ engine.shutdown()
 
 </details>
 
+#### reuses generated glyph staging for equal shaped text cache misses
+
+- var engine = Engine2D create with backend
+- engine clear
+-  draw ir text command
+-  draw ir text command
+   - Expected: result.rendered_command_count equals `2`
+   - Expected: result.text_command_count equals `2`
+   - Expected: result.font_generated_args_ready is true
+   - Expected: result.font_generated_args_cache_skips equals `1`
+   - Expected: result.font_text_cache_hits equals `0`
+   - Expected: result.font_text_cache_misses equals `2`
+- engine shutdown
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var engine = Engine2D.create_with_backend(64, 32, "cpu")
+engine.clear(BG)
+val batch = draw_ir_batch("text-staging-cache-batch", DRAW_IR_TEST_BACKEND_GPU, draw_ir_embedding_config("surf", "win", 0, 0, 64, 32, 1, 1000, false), [
+    _draw_ir_text_command("title-a", 2, 3, "A"),
+    _draw_ir_text_command("title-b", 28, 3, "B")
+])
+
+val result = engine2d_draw_ir_adv_batch(engine, batch, true)
+
+expect(result.rendered_command_count).to_equal(2)
+expect(result.text_command_count).to_equal(2)
+expect(result.font_generated_args_ready).to_equal(true)
+expect(result.font_generated_args_cache_skips).to_equal(1)
+expect(result.font_text_cache_hits).to_equal(0)
+expect(result.font_text_cache_misses).to_equal(2)
+expect(_count_not_color(result.pixels, BG)).to_be_greater_than(0)
+engine.shutdown()
+```
+
+</details>
+
 #### reports gpu glyph return when backend rasterizer supplies vector glyph pixels
 
 -  set cuda vector font probe glyph
@@ -492,8 +535,8 @@ _clear_cuda_bitmap_font_probe_glyph()
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

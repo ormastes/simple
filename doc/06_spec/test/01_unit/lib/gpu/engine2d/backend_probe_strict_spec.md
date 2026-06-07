@@ -27,7 +27,7 @@ backend_probe_strict_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -289,8 +289,33 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val prober = BackendProber.create()
 
-expect(prober.preferred_backend_order()).to_equal("metal > cuda > rocm/hip > qualcomm > vulkan > opencl > opengl > intel > webgpu > software > cpu_simd > cpu")
-expect(prober.probe_all_summary()).to_contain("preferred_order=metal > cuda > rocm/hip > qualcomm > vulkan > opencl > opengl > intel > webgpu > software > cpu_simd > cpu")
+expect(prober.preferred_backend_order()).to_equal("metal > cuda > rocm/hip > vulkan > opencl > software > cpu_simd > cpu")
+expect(prober.probe_all_summary()).to_contain("preferred_order=metal > cuda > rocm/hip > vulkan > opencl > software > cpu_simd > cpu")
+```
+
+</details>
+
+#### exports compact GUI startup order before CPU fallback
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val order = backend_graphics_default_order()
+
+expect(order.len()).to_equal(8)
+expect(order[0]).to_equal("metal")
+expect(order[1]).to_equal("cuda")
+expect(order[2]).to_equal("rocm")
+expect(order[3]).to_equal("vulkan")
+expect(order[4]).to_equal("opencl")
+expect(order[5]).to_equal("software")
+expect(order[6]).to_equal("cpu_simd")
+expect(order[7]).to_equal("cpu")
+expect(backend_graphics_preference_summary()).to_equal("metal > cuda > rocm/hip > vulkan > opencl > software > cpu_simd > cpu")
 ```
 
 </details>
@@ -314,8 +339,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

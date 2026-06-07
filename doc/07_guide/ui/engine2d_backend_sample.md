@@ -11,6 +11,16 @@ The sample renders a compact 2D scene with a filled rectangle, circle, thick
 line, vertical gradient, rounded rectangle, and text. It reads the framebuffer
 back and checks exact pixels for each primitive.
 
+## Default Startup Order
+
+`Engine2D.create()` uses the compact Pure Simple GUI startup order
+`metal > cuda > rocm/hip > vulkan > opencl > software > cpu_simd > cpu`.
+This keeps normal GUI startup on the native/generated GPU ladder first and then
+falls back to CPU without probing optional explicit backends such as OpenGL,
+Intel oneAPI, WebGPU, or Qualcomm delegates. Those backends remain selectable by
+name through `Engine2D.create_with_backend()` and by custom priority through
+`Engine2D.create_with_priority()`.
+
 ## Commands
 
 Run the always-available SIMD CPU lane:
@@ -40,6 +50,8 @@ than silently accepted as a CPU fallback.
 
 - `test/02_integration/rendering/engine2d_backend_spec.spl` covers backend
   selection, SIMD hit evidence, and strict Metal probe behavior.
+- `test/01_unit/lib/gpu/engine2d/engine_platform_spec.spl` covers the compact
+  default GUI startup order exposed by `Engine2D.preferred_backend_order()`.
 - `test/02_integration/rendering/metal_engine2d_readback_spec.spl` covers Metal
   framebuffer readback for GPU-backed clear and filled-rectangle kernels.
 - `test/05_perf/graphics_2d/metal_readback_proof_spec.spl` covers raw Metal

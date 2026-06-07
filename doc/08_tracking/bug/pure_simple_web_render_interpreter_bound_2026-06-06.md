@@ -427,3 +427,41 @@ named `any`, but the fallback remains. A targeted source search found no
 remaining `: any` type annotations in the immediate render path, so the next
 pass should inspect the JIT lowerer/import graph and the higher-layer
 `gc_async_mut` warnings emitted by this command.
+
+## 2026-06-07 Measurement-Agent Snapshot
+
+Measurement-only rerun on parent revision
+`3d2cc6df8549cc9c57bbd4ad468540fb1e8b90a3` used the current benchmark wrapper:
+
+```sh
+REPORT_PATH=build/gui_perf_bench/measurement_agent_128x96_3_2026-06-07.md \
+BUILD_DIR=build/gui_perf_bench/measurement_agent_128x96_3 \
+SKIP_PROFILE_REPORT_CONTRACT=1 \
+tools/gui_perf_bench/run_all_benchmarks.shs --width 128 --height 96 --frames 3
+```
+
+Current 128x96 / 3-frame evidence on host `dl`:
+
+| Lane | p50 | p95 | Proof |
+|------|-----|-----|-------|
+| CUDA generated fill | `527us` | `527us` | `sum32:52571201863680`, `nonzero_pixels:12288` |
+| Simple web software text | `126466us` | `133121us` | `sum32:52601568094128`, `nonzero_pixels:12288` |
+
+Focused correctness/evidence specs passed:
+
+- Simple Web renderer check: 2 files.
+- Simple Web renderer spec: 57 scenarios.
+- Draw IR advanced spec: 8 scenarios.
+- Helper text spec at `test/01_unit/lib/gpu/engine2d/helpers_text_spec.spl`: 2 scenarios.
+- Font renderer spec at `test/01_unit/lib/common/text_layout/font_renderer_spec.spl`: 19 scenarios.
+- Backend probe perf spec: 17 scenarios.
+
+Remaining measured bottleneck: the Simple Web text row still reports
+`runtime_execution_path="engine2d-cpu_scalar"` and `operation_family="text_blit"`.
+Recent selector/style and cache fast paths are covered and compatible with the
+current profile, but live GUI text is still CPU-bound until the generated
+bitmap/vector glyph kernels populate the returned-glyph contract in production.
+
+Measurement caveat: this checkout's `tools/gui_perf_bench/run_all_benchmarks.shs`
+does not currently emit the earlier `simple_web_auto` static-cache row, so that
+claim was not revalidated through this wrapper.

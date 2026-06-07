@@ -19,7 +19,7 @@ val opened = r.show_live_window(html_path)             # true for chromium (live
 
 | backend | display | nature |
 |---------|---------|--------|
-| `pure_simple` | preferred Engine2D raster frame in a winit window | Simple's HTML layout → Engine2D preferred backend (`metal > cuda > rocm/hip > qualcomm > vulkan > opencl > opengl > intel > webgpu > software > cpu_simd > cpu`). No browser. |
+| `pure_simple` | preferred Engine2D raster frame in a winit window | Simple's HTML layout → Engine2D preferred backend (`metal > cuda > rocm/hip > vulkan > opencl > software > cpu_simd > cpu`). No browser. |
 | `chromium` | **live, interactive** Electron `BrowserWindow` | real Chromium renders the live DOM. |
 
 `render_html_to_pixels` produces a comparable buffer from **both** engines — this
@@ -121,7 +121,11 @@ Non-adjacent repeated labels use the text-buffer bucket index before any
 fallback scan, so common GUI labels reused across separate windows or rows do
 not pay an O(cache-size) lookup on every occurrence. When the full text payload
 is already cached, Draw IR also skips repeat generated glyph staging/evidence
-and reports the skip through `font_generated_args_cache_skips`.
+and reports the skip through `font_generated_args_cache_skips`. For different
+text payloads that share the same generated glyph offload shape, Draw IR keeps
+one generated glyph staging pack alive for the batch/composition and reuses it
+for the next matching font size and extent while still recomputing current
+font-offload evidence after each glyph render.
 Inside `FontRenderer`, glyph-level caching also has a hot entry and bucket index,
 so repeated characters and recently used glyphs avoid a full glyph-cache scan
 before vector or bitmap fallback/offload evidence is consulted.
@@ -132,10 +136,12 @@ record returned glyph/pixel counts. Bitmap returned-glyph probes scan slots
 `0..7`, matching vector glyph probes, so a backend readback can provide multiple
 glyphs for one text batch. The production backend priority remains host native
 first, then generated GPU compute, then portable APIs, then CPU:
-`metal > cuda > rocm/hip > qualcomm > vulkan > opencl > opengl > intel >
-webgpu > software > cpu_simd > cpu`. `BackendProber.preferred_backend_order()`
-and `probe_all_summary()` expose this exact sequence for diagnostics and CI
-evidence. The vector and bitmap returned-glyph evidence slots follow the
+`metal > cuda > rocm/hip > vulkan > opencl > software > cpu_simd > cpu`.
+`BackendProber.preferred_backend_order()` and `probe_all_summary()` expose this
+startup sequence for diagnostics and CI evidence. Explicit OpenGL, Intel
+oneAPI, WebGPU, Qualcomm, and other backend-specific lanes remain selectable by
+name, but they are not part of normal GUI startup probing. The vector and bitmap
+returned-glyph evidence slots follow the
 native/generated subset of that order (`METAL`, `CUDA`, `ROCM`, `VULKAN`,
 `OPENCL`) so a native or generated GPU glyph result wins before lower-priority
 slots. Those slots now use one shared font backend priority helper for vector
