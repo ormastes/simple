@@ -293,7 +293,7 @@ expect(row).to_contain("doc/05_design/multicore_green.md")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -329,6 +329,7 @@ expect(row).to_contain("go_stress_slower_than_c")
 expect(row).to_contain("simple_multicore_queue_model_global_fifo")
 expect(row).to_contain("simple_multicore_pool_used_partial")
 expect(row).to_contain("simple_multicore_parallelism_missing")
+expect(row).to_contain("smf_runtime_pool_blocker_closed")
 ```
 
 </details>
