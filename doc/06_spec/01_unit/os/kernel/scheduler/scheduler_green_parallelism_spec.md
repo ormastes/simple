@@ -258,6 +258,8 @@ expect(sched.green_rejected_intents()).to_equal(0)
 2. sched set green carrier parallelism
    - Expected: result.applied is false
    - Expected: result.reason equals `inactive_green_carrier`
+   - Expected: dispatched.queues.queued_task_ids.len() equals `1`
+   - Expected: green_carrier_dispatch_next(dispatched.queues, 1).task_id equals `51`
    - Expected: sched.green_current_task_on_cpu(1u32) equals `0`
    - Expected: sched.green_rejected_intents() equals `1`
 
@@ -265,7 +267,7 @@ expect(sched.green_rejected_intents()).to_equal(0)
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -274,11 +276,13 @@ sched.set_green_carrier_parallelism(1)
 val queues = green_carrier_run_queues_new(4, 8)
 val decision = green_carrier_spawn_task(51, 4, 0, 3, 1, 2, 4, 0)
 val queued = green_carrier_apply_enqueue(queues, decision)
-val dispatched = green_carrier_dispatch_next(queued.queues, 1)
+val dispatched = green_carrier_dispatch_next_with_limit(queued.queues, 1, sched.green_carrier_parallelism_limit())
 val result = sched.apply_green_scheduler_intent(green_carrier_scheduler_intent(dispatched))
 
 expect(result.applied).to_equal(false)
 expect(result.reason).to_equal("inactive_green_carrier")
+expect(dispatched.queues.queued_task_ids.len()).to_equal(1)
+expect(green_carrier_dispatch_next(dispatched.queues, 1).task_id).to_equal(51)
 expect(sched.green_current_task_on_cpu(1u32)).to_equal(0)
 expect(sched.green_rejected_intents()).to_equal(1)
 ```

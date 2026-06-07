@@ -143,6 +143,9 @@ SimpleOS path:
 - `Scheduler.apply_green_scheduler_intent` rejects runnable intents for CPUs
   outside the active green carrier limit, so inactive carriers cannot record
   scheduler-visible execution.
+- `green_carrier_dispatch_next_with_limit` applies the active carrier limit
+  before queue removal, preserving queued work as scheduler backpressure for
+  inactive carriers.
 - QEMU proof currently covers AP startup plus CPU1 fixed-slot dispatch; full
   hardware context-switch handoff remains future work.
 
@@ -160,7 +163,7 @@ The selected Full Go-Like Runtime Roadmap uses all layers:
   wake/IPI intent, and AP evidence.
 
 Future roadmap work remains explicit: work stealing or per-worker queues,
-blocking integration, carrying inactive-carrier backpressure into final AP
+blocking integration, carrying inactive-carrier preserved queues into final AP
 hardware handoff, and preemption or compiler-inserted yield points before
 claiming tight-loop fairness comparable to Go.
 

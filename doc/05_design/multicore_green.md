@@ -112,6 +112,9 @@ Behavior:
 - `Scheduler.apply_green_scheduler_intent` rejects runnable dispatch intents
   whose target CPU is outside the active green carrier limit and increments
   rejected green intent accounting.
+- `green_carrier_dispatch_next_with_limit` checks the active carrier limit
+  before removing a queued task, so inactive-carrier backpressure does not drop
+  work.
 
 ### Freestanding QEMU Probe Path
 
@@ -181,7 +184,7 @@ Repository guards:
 
 - Scheduler-owned parallelism handoff: the hosted runtime-pool facade and
   SimpleOS `Scheduler` now both expose topology-bounded parallelism contracts.
-  Remaining work is carrying inactive-carrier backpressure into final AP
+  Remaining work is carrying inactive-carrier preserved queues into final AP
   hardware handoff and blocking/preemption behavior.
 - Preemption strategy: compiler-inserted yields, runtime safepoints, or an
   explicit cooperative-only guarantee until later.

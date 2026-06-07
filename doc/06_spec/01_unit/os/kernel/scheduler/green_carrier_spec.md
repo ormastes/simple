@@ -28,7 +28,7 @@ green_carrier_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 32 | 32 | 0 | 0 |
+| 33 | 33 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -676,6 +676,42 @@ expect(dispatched.reason).to_equal("invalid_cpu")
 
 </details>
 
+#### preserves queued work when carrier is inactive
+
+1. smp init
+   - Expected: dispatched.dispatched is false
+   - Expected: dispatched.task_id equals `-1`
+   - Expected: dispatched.cpu equals `1`
+   - Expected: dispatched.reason equals `inactive_green_carrier`
+   - Expected: green_carrier_queue_depth(dispatched.queues, 1) equals `1`
+   - Expected: dispatched.queues.queued_task_ids.len() equals `1`
+   - Expected: dispatched.queues.queued_task_ids[0] equals `36`
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+smp_init()
+val queues = green_carrier_run_queues_new(4, 8)
+val decision = green_carrier_spawn_task(36, 4, 0, 3, 1, 2, 4, 0)
+val queued = green_carrier_apply_enqueue(queues, decision)
+val dispatched = green_carrier_dispatch_next_with_limit(queued.queues, 1, 1)
+
+expect(dispatched.dispatched).to_equal(false)
+expect(dispatched.task_id).to_equal(-1)
+expect(dispatched.cpu).to_equal(1)
+expect(dispatched.reason).to_equal("inactive_green_carrier")
+expect(green_carrier_queue_depth(dispatched.queues, 1)).to_equal(1)
+expect(dispatched.queues.queued_task_ids.len()).to_equal(1)
+expect(dispatched.queues.queued_task_ids[0]).to_equal(36)
+```
+
+</details>
+
 ### scheduler intent
 
 #### converts successful dispatch into a typed scheduler run intent
@@ -933,8 +969,8 @@ expect(result.context_switches).to_equal(1)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 32 |
-| Active scenarios | 32 |
+| Total scenarios | 33 |
+| Active scenarios | 33 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

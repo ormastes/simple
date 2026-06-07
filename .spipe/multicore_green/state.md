@@ -73,6 +73,14 @@ go-runtime-hardening
   limits were changed to follow topology growth/shrink while explicit requests
   remain preserved. The focused scheduler spec also proves dispatch can run on
   carriers activated by topology growth and rejects inactive-carrier dispatch.
+- implementation: Added `green_carrier_dispatch_next_with_limit` so inactive
+  carrier backpressure is applied before queue removal. Inactive-carrier
+  dispatch now preserves queued work instead of relying on scheduler rejection
+  after dequeue.
+- verification: `green_carrier_spec.spl` passed 33 examples,
+  `scheduler_green_parallelism_spec.spl` passed 7 examples, and
+  `simpleos_multicore_green_spec.spl` passed 3 examples after the non-dropping
+  dispatch helper was added.
 
 ## Completion Audit - 2026-06-07
 

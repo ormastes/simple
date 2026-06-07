@@ -31,7 +31,7 @@ SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 ./src/compiler_rust/target/debug/simple test 
 | SimpleOS multicore green scheduler contract | PASS | 3 |
 | SimpleOS green-channel wake bridge | PASS | 3 |
 | SimpleOS green-carrier compile check | PASS | 1 file |
-| SimpleOS green-carrier unit contract | PASS | 32 |
+| SimpleOS green-carrier unit contract | PASS | 33 |
 | SimpleOS scheduler compile check | PASS | 1 file |
 | SimpleOS scheduler green-carrier parallelism | PASS | 7 |
 | SimpleOS green-carrier QEMU spec default lane | PASS | 1 |
@@ -48,8 +48,10 @@ SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 ./src/compiler_rust/target/debug/simple test 
   separate from normal OS task state.
 - The green-carrier unit contract now proves requested-vs-active carrier
   parallelism is scheduler-owned and topology-bounded, with explicit requests
-  preserved and default limits aligned to topology changes.
+  preserved, default limits aligned to topology changes, and inactive-carrier
+  dispatch preserving queued work.
 - The scheduler green-carrier parallelism spec proves the real `Scheduler`
   stores that carrier limit, clamps it to topology, preserves requested
   carriers across topology changes, runs dispatch on carriers activated by
-  topology growth, and rejects runnable green dispatch for inactive carriers.
+  topology growth, and rejects runnable green dispatch for inactive carriers
+  without dropping queued work.
