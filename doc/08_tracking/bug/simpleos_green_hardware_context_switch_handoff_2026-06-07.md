@@ -97,3 +97,16 @@ dispatches a seeded user-task pid through the green lane and verifies the same
 pid still resolves to a `user_context`. This is necessary setup evidence only;
 the final blocker remains open until live QEMU observes the x86_64 user entry
 and syscall-return path.
+
+## 2026-06-07 Link Blocker Refresh
+
+The SimpleOS freestanding x86_64 runtime now exports
+`rt_string_char_code_at`, matching the hosted native raw-index/raw-code string
+helper contract. That closes the native-build link blocker that previously
+stopped the live final-handoff QEMU gate before boot.
+
+With SimpleOS submodule commit `f8d3554`, the opt-in live gate builds and boots
+the two-CPU guest. The scheduler-owned AP carrier proof still passes, including
+`SCHED_HANDOFF_PASS=true`; the final lane remains open because the guest serial
+does not yet print `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, or
+`USER_SYSCALL_PASS=true`.

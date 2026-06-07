@@ -90,6 +90,22 @@ This refresh does not claim final ring/user context-switch handoff across APs;
 that claim remains blocked by
 `doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md`.
 
+After syncing `/tmp/simple-pherallel-sync` to `origin/main` at `30e5b3a9fd`,
+the SimpleOS submodule was advanced to `f8d3554` with a freestanding x86_64
+`rt_string_char_code_at` implementation. The previously observed native-build
+link blocker is closed:
+
+- final hardware handoff blocker contract: PASS, 3 scenarios in 98ms
+- `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1` live QEMU gate: PASS, 2 scenarios in
+  37771ms
+- `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1` final-handoff QEMU gate:
+  FAIL as the remaining expected final-marker blocker, 1 passed scenario and 1
+  failed scenario in 37998ms
+- the final-handoff serial output includes AP startup, `PASS=true`,
+  `PREEMPT_PASS=true`, and `SCHED_HANDOFF_PASS=true`
+- the final-handoff serial output still lacks `HW_HANDOFF_PASS=true`,
+  `USER_ENTRY_PASS=true`, and `USER_SYSCALL_PASS=true`
+
 ## Notes
 
 - The default QEMU spec lane proves the opt-in gate is wired and disabled unless
