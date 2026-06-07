@@ -113,8 +113,10 @@ before vector or bitmap fallback/offload evidence is consulted.
 Bitmap fallback follows the same evidence direction through
 `rasterize_bitmap_accelerated()` and `bitmap_font_accelerator_stats()`: a
 validated backend-returned bitmap glyph can bypass CPU mask generation and
-record returned glyph/pixel counts. The production backend priority remains
-host native first, then generated GPU compute, then portable APIs, then CPU:
+record returned glyph/pixel counts. Bitmap returned-glyph probes scan slots
+`0..7`, matching vector glyph probes, so a backend readback can provide multiple
+glyphs for one text batch. The production backend priority remains host native
+first, then generated GPU compute, then portable APIs, then CPU:
 `metal > cuda > rocm/hip > qualcomm > vulkan > opencl > opengl > intel >
 webgpu > software > cpu_simd > cpu`. `BackendProber.preferred_backend_order()`
 and `probe_all_summary()` expose this exact sequence for diagnostics and CI

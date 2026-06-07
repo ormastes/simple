@@ -363,6 +363,9 @@ it allocates temporary glyph-plan and destination buffers to prove generated
 launch-argument readiness, but production readiness requires backend readback to
 populate the vector or bitmap returned-glyph contract before
 `font_production_ready` can be true.
+Returned-glyph readback probes for both vector and bitmap fonts must support a
+bounded multi-slot batch (`0..7`) so backend launches can return more than one
+glyph without falling back to CPU for every character after slot 0.
 
 ## Migration Order
 

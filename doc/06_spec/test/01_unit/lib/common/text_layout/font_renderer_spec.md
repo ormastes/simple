@@ -27,7 +27,7 @@ font_renderer_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 18 | 18 | 0 | 0 |
+| 19 | 19 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -338,6 +338,55 @@ _clear_bitmap_font_probe_glyph("OPENCL")
 
 </details>
 
+#### accepts bitmap glyph pixels from nonzero backend glyph slots
+
+1. reset bitmap font raster stats
+2.  set bitmap font probe slot
+3.  set bitmap font probe slot
+4. var renderer = FontRenderer new
+   - Expected: glyph.width equals `1`
+   - Expected: glyph.height equals `1`
+   - Expected: stats.opencl_hits equals `1`
+   - Expected: stats.gpu_returned_glyphs equals `1`
+   - Expected: stats.gpu_returned_glyph_pixels equals `1`
+   - Expected: stats.unavailable_reason equals `opencl-bitmap-font-glyph-pixels-returned`
+5.  clear bitmap font probe slot
+6.  clear bitmap font probe slot
+7.  clear bitmap font probe glyph
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 21 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+reset_bitmap_font_raster_stats()
+expect(rt_env_set("OPENCL_BITMAP_FONT_STATUS", "pass"))
+expect(rt_env_set("OPENCL_BITMAP_FONT_REASON", "opencl-bitmap-font-glyph-pixels-returned"))
+expect(rt_env_set("OPENCL_BITMAP_FONT_GLYPH_COUNT", "2"))
+_set_bitmap_font_probe_slot("OPENCL", "0", "66", "16")
+_set_bitmap_font_probe_slot("OPENCL", "1", "65", "16")
+var renderer = FontRenderer.new()
+renderer.use_vector = false
+
+val glyph = renderer.get_glyph(65, 16)
+val stats = bitmap_font_accelerator_stats()
+
+expect(glyph.width).to_equal(1)
+expect(glyph.height).to_equal(1)
+expect(stats.opencl_hits).to_equal(1)
+expect(stats.gpu_returned_glyphs).to_equal(1)
+expect(stats.gpu_returned_glyph_pixels).to_equal(1)
+expect(stats.unavailable_reason).to_equal("opencl-bitmap-font-glyph-pixels-returned")
+_clear_bitmap_font_probe_slot("OPENCL", "0")
+_clear_bitmap_font_probe_slot("OPENCL", "1")
+_clear_bitmap_font_probe_glyph("OPENCL")
+```
+
+</details>
+
 #### keeps Chrome-compatible serif font candidates ahead of fallback fonts
 
 <details>
@@ -541,8 +590,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 18 |
-| Active scenarios | 18 |
+| Total scenarios | 19 |
+| Active scenarios | 19 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

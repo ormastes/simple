@@ -217,6 +217,13 @@ buffers after evidence capture. Focused Draw IR and generated-args coverage asse
 when GPU routing is enabled, while `font_gpu_glyph_returned` and
 `font_production_ready` remain false until a backend returns glyph pixels.
 
+2026-06-07 bitmap returned-glyph slot update: bitmap backend-return probes now
+scan slots `0..7`, matching vector glyph probes. This lets a backend provide
+multiple bitmap glyphs for one text batch instead of only returning the first
+slot. Focused font renderer coverage proves OpenCL can return a matching bitmap
+glyph from slot 1 after slot 0 contains a different codepoint, with exactly one
+returned glyph and pixel counted.
+
 ## Path F — repeated ancestor clip walks during paint — FIXED 2026-06-07
 
 `paint()` called `ancestor_clip()` in the background, absolute, positive z-index,
