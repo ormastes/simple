@@ -1194,20 +1194,52 @@ fn selector_matches_node(nodes: [HNode], idx: i32, sel: text) -> bool:
         g = g + 1
     false
 
+fn selector_group_rightmost_matches_node(group: text, tag: text, cls: text, id: text, attrs: text) -> bool:
+    val trimmed = group.trim()
+    var end = trimmed.len()
+    while end > 0 and trimmed.substring(end - 1, end) == " ":
+        end = end - 1
+    if end <= 0:
+        return false
+    var pos = end - 1
+    while pos >= 0:
+        val ch = trimmed.substring(pos, pos + 1)
+        if ch == " " or ch == ">":
+            return simple_match(trimmed.substring(pos + 1, end), tag, cls, id, attrs)
+        pos = pos - 1
+    simple_match(trimmed.substring(0, end), tag, cls, id, attrs)
+
+fn selector_rightmost_matches_node(sel: text, tag: text, cls: text, id: text, attrs: text) -> bool:
+    if sel.index_of(",") < 0:
+        return selector_group_rightmost_matches_node(sel, tag, cls, id, attrs)
+    val groups = sel.split(",")
+    var g = 0
+    while g < groups.len():
+        if selector_group_rightmost_matches_node(groups[g], tag, cls, id, attrs):
+            return true
+        g = g + 1
+    false
+
+fn selector_needs_rightmost_prefilter(sel: text) -> bool:
+    sel.index_of(" ") >= 0 or sel.contains(">")
+
 # ---------------------------------------------------------------------------
 # Compute styles (cascade: inherit -> tag defaults -> matched rules -> inline)
 # ---------------------------------------------------------------------------
 
 fn compute_styles(nodes: [HNode], rules: Rules, html: text) -> [Style]:
     var styles: [Style] = []
+    val node_count = nodes.len()
+    val rule_count = rules.sels.len()
     var i = 0
-    while i < nodes.len():
+    while i < node_count:
         val nd = nodes[i]
         var st = if nd.parent >= 0: inherit_style(styles[nd.parent]) else: default_style()
         st = tag_defaults(st, nd.tag)
         var r = 0
-        while r < rules.sels.len():
-            if selector_matches_node(nodes, i, rules.sels[r]):
+        while r < rule_count:
+            val sel = rules.sels[r]
+            if (not selector_needs_rightmost_prefilter(sel) or selector_rightmost_matches_node(sel, nd.tag, nd.class_attr, nd.id_attr, nd.attrs_raw)) and selector_matches_node(nodes, i, sel):
                 st = apply_decls(st, rules.decls[r])
             r = r + 1
         if nd.style_attr.len() > 0:

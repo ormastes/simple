@@ -28,7 +28,7 @@ simple_web_renderer_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 55 | 55 | 0 | 0 |
+| 56 | 56 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -366,6 +366,24 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val html = "<html><head><style>.button-primary{background-color:#dc2626;width:20px;height:10px}.button.primary{background-color:#16a34a;width:20px;height:10px}</style></head><body><div class='button-primary'></div></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 96, 64)
+expect(pixels.len()).to_equal(96 * 64)
+expect(_count_color(pixels, 0xFFDC2626u32)).to_be_greater_than(0)
+expect(_count_color(pixels, 0xFF16A34Au32)).to_equal(0)
+```
+
+</details>
+
+#### rejects descendant and child selector misses by rightmost node token
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>.panel .missing{background-color:#16a34a;width:20px;height:10px}.panel>.ghost{background-color:#16a34a;width:20px;height:10px}.panel .status{background-color:#dc2626;width:20px;height:10px}</style></head><body><section class='panel'><div class='status'></div></section></body></html>"
 val pixels = simple_web_render_html_to_pixels(html, 96, 64)
 expect(pixels.len()).to_equal(96 * 64)
 expect(_count_color(pixels, 0xFFDC2626u32)).to_be_greater_than(0)
@@ -1205,8 +1223,8 @@ expect(_count_color(pixels, 0xFF065F46u32)).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 55 |
-| Active scenarios | 55 |
+| Total scenarios | 56 |
+| Active scenarios | 56 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
