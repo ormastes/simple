@@ -692,3 +692,31 @@ HIR lowering error: Memory safety error [W1003]: mutable binding with shared typ
 Current next blocker: locate the `hir_target` mutable shared binding in the
 next lowered file, convert it to value/index tracking if it is another optional
 or shared accumulator, then continue the same stage2 probe loop.
+
+## 2026-06-08 HIR Block Optional Lowering Follow-Up
+
+Status: still blocked for the pure-Simple stage2 payload.
+
+The same direct stage2 probe now clears the next HIR lowering mutability
+blockers for:
+
+- `lower_hir_with_items` now builds the optional `HirWithItem.target` with a
+  value expression instead of rebinding `hir_target`.
+- The bootstrap-only `lower_hir_block` trace path now builds the optional block
+  value with a value expression instead of rebinding `boot_value`.
+- The normal `lower_hir_block` path now builds the optional block value with a
+  value expression instead of rebinding `value`.
+
+Latest probe still exits `1`, emits no stage2 artifact, and now stops at:
+
+```text
+HIR lowering error: Memory safety error [W1003]: mutable binding with shared type (value): shared pointers cannot be reassigned; use `val` instead of `var` at 489:9
+```
+
+Current next blocker: inspect `lower_asm` in
+`src/compiler/20.hir/hir_lowering/expressions.spl`. The reported line is the
+`hir_constraints` list builder; the shared value appears to come from
+`HirAsmConstraint.value: HirExpr`. A list comprehension workaround is not
+usable yet because Stage2 HIR lowering reports `Unsupported feature:
+ListComprehension`, so the fix needs a Stage2-supported immutable/shared-list
+construction or a compiler-side lowering improvement for this case.
