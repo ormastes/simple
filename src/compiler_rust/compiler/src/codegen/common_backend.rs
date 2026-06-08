@@ -1598,6 +1598,7 @@ impl<M: Module> CodegenBackend<M> {
             .module
             .declare_function(&init_name, cranelift_module::Linkage::Preemptible, &sig)
             .map_err(|e| BackendError::ModuleError(format!("declare __module_init: {e}")))?;
+        self.func_ids.insert(init_name.clone(), func_id);
 
         let string_new_id = if init_strings.is_empty() {
             None

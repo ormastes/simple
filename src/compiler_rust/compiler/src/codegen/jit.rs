@@ -4,6 +4,7 @@
 //! the interpreter to compile hot paths to native code at runtime.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use cranelift_jit::{JITBuilder, JITModule};
@@ -29,6 +30,8 @@ pub struct JitCompiler {
     /// Runtime symbol provider (kept alive for the lifetime of the compiler)
     #[allow(dead_code)] // reason: reachable via SFFI or future entry point; not yet wired
     provider: Arc<dyn RuntimeSymbolProvider>,
+    /// Heap-backed global initialization runs once before the first JIT entry call.
+    module_init_ran: AtomicBool,
 }
 
 // Safety: The compiled function pointers are only valid while JitCompiler is alive
@@ -67,6 +70,7 @@ impl JitCompiler {
             backend,
             compiled_funcs: HashMap::new(),
             provider,
+            module_init_ran: AtomicBool::new(false),
         })
     }
 
@@ -98,6 +102,14 @@ impl JitCompiler {
                 self.compiled_funcs.insert(func.name.clone(), ptr);
             }
         }
+        if let Some(&func_id) = self.backend.func_ids.get("__module_init") {
+            let ptr = self.backend.module.get_finalized_function(func_id);
+            if std::env::var("SIMPLE_JIT_TRACE_ADDR").is_ok() {
+                eprintln!("[jit-addr] __module_init {:p}", ptr);
+            }
+            self.compiled_funcs.insert("__module_init".to_string(), ptr);
+            self.module_init_ran.store(false, Ordering::SeqCst);
+        }
 
         Ok(())
     }
@@ -110,11 +122,33 @@ impl JitCompiler {
         self.compiled_funcs.get(name).copied()
     }
 
+    unsafe fn run_module_init_once(&self) -> JitResult<()> {
+        if self.module_init_ran.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let Some(ptr) = self.get_function_ptr("__module_init") else {
+            self.module_init_ran.store(true, Ordering::SeqCst);
+            return Ok(());
+        };
+        if self
+            .module_init_ran
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            let init: fn() = std::mem::transmute(ptr);
+            init();
+        }
+        Ok(())
+    }
+
     /// Call a compiled function that takes no arguments and returns i64.
     ///
     /// # Safety
     /// The function must have been compiled with the correct signature.
     pub unsafe fn call_i64_void(&self, name: &str) -> JitResult<i64> {
+        if name != "__module_init" {
+            self.run_module_init_once()?;
+        }
         let ptr = self
             .get_function_ptr(name)
             .ok_or_else(|| BackendError::UnknownFunction(name.to_string()))?;
@@ -128,6 +162,7 @@ impl JitCompiler {
     /// # Safety
     /// The function must have been compiled with the correct signature.
     pub unsafe fn call_i64_i64(&self, name: &str, arg: i64) -> JitResult<i64> {
+        self.run_module_init_once()?;
         let ptr = self
             .get_function_ptr(name)
             .ok_or_else(|| BackendError::UnknownFunction(name.to_string()))?;
@@ -141,6 +176,7 @@ impl JitCompiler {
     /// # Safety
     /// The function must have been compiled with the correct signature.
     pub unsafe fn call_i64_i64_i64(&self, name: &str, arg1: i64, arg2: i64) -> JitResult<i64> {
+        self.run_module_init_once()?;
         let ptr = self
             .get_function_ptr(name)
             .ok_or_else(|| BackendError::UnknownFunction(name.to_string()))?;
