@@ -73,7 +73,8 @@ SimpleOS scheduler work distinct and verifiable.
   `test/05_perf/stress/multicore_green_fanout_spec.spl`,
   `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`,
   `test/05_perf/stress/multicore_green_large_profile_gate_spec.spl`,
-  `doc/09_report/cross_language_perf_parallel_smoke.md`, and
+  `doc/09_report/cross_language_perf_2026-06-08_docker_contract.md`, and
+  historical companion report
   `doc/09_report/cross_language_perf_parallel_large_2026-06-07.md`.
 - Hosted parallelism control: `src/runtime/runtime_thread.c`,
   `src/runtime/runtime_thread.h`, and

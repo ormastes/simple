@@ -15,10 +15,11 @@ Stability And Misuse Diagnostics, and SimpleOS Hardware Proof Gate.
 - NFR-MCG-003: Cross-language performance reports must include OS-thread,
   cooperative-green, multicore-green, C pthread, Go goroutine, large-fanout,
   Simple-vs-Go-vs-C stress, hosted `parallelism=requested/actual`,
-  Go runtime/scheduler metadata, artifact-size, and RSS evidence.
+  Go runtime/scheduler metadata, Go `GOMAXPROCS` pinned to `CPU_WORKERS` unless
+  explicitly overridden, artifact-size, and RSS evidence.
 - NFR-MCG-004: Simple native OS-thread and multicore-green rows must stay within
   the documented ratios in `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`
-  for the checked-in smoke profile.
+  for the checked-in Docker contract profile.
 - NFR-MCG-005: The large-fanout stress section must prove Go goroutine fanout
   beats one-pthread-per-task C fanout so the benchmark distinguishes M:N
   scheduling from OS-thread creation.
@@ -42,8 +43,8 @@ Stability And Misuse Diagnostics, and SimpleOS Hardware Proof Gate.
 
 ## Verification Gates
 
-- `sh test/05_perf/profile_scripts/profile_report_contract_test.shs cross_language scripts/check/check-cross-language-perf.shs doc/09_report/cross_language_perf_parallel_smoke.md`
-- `sh test/05_perf/profile_scripts/profile_report_contract_test.shs cross_language scripts/check/check-cross-language-perf.shs doc/09_report/cross_language_perf_parallel_large_2026-06-07.md`
+- `sh test/05_perf/profile_scripts/profile_report_contract_test.shs cross_language scripts/check/check-cross-language-perf.shs doc/09_report/cross_language_perf_2026-06-08_docker_contract.md`
+- `sh test/05_perf/profile_scripts/profile_report_contract_negative_test.shs`
 - `bin/simple test test/05_perf/stress/multicore_green_cross_language_gate_spec.spl --mode=interpreter`
 - `bin/simple test test/05_perf/stress/multicore_green_large_profile_gate_spec.spl --mode=interpreter`
 - `bin/simple test test/05_perf/stress/multicore_green_fanout_spec.spl --mode=interpreter`
