@@ -7,8 +7,8 @@
 - **Total Features:** 13
 - **Complete Documentation:** 13 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 1109
-- **Warnings:** 9
+- **Total Lines:** 1170
+- **Warnings:** 8
 
 ---
 
@@ -44,7 +44,7 @@
 |---------|--------|------------|-------|----------|----------|
 | [SimpleOS Cooperative Green System Contract](test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.md) | Implemented | N/A | 3 | 60% | 105 lines |
 | [SimpleOS Multicore Green System Contract](test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.md) | In Progress | N/A | 6 | 60% | 113 lines |
-| [SimpleOS Green Channel Wake System Contract](test/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.md) | In Progress | N/A | 4 | 20% | 47 lines |
+| [SimpleOS Green Channel Wake System Contract](test/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.md) | In Progress | N/A | 4 | 60% | 108 lines |
 | [SimpleOS Green Hardware Handoff Blocker Contract](test/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.md) | Blocked | N/A | 3 | 60% | 134 lines |
 
 ## Hardware & OS (1 features)
