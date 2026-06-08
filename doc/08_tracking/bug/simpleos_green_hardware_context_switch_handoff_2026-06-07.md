@@ -49,7 +49,8 @@ Use separate final markers:
 `[green-carrier-qemu] HW_HANDOFF_PASS=true`,
 `[green-carrier-qemu] USER_ENTRY_PASS=true`, and
 `[green-carrier-qemu] USER_SYSCALL_PASS=true`; do not overload
-`[green-carrier-qemu] SCHED_HANDOFF_PASS=true`.
+`[green-carrier-qemu] SCHED_HANDOFF_PASS=true` or the non-final
+`[green-carrier-qemu] USER_HANDOFF_READY=true` prerequisite marker.
 
 The executable live gate is
 `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1`. It should fail until the
@@ -197,3 +198,20 @@ This closes the hosted real-spawn prerequisite, but not the final marker
 triplet. The next step is to wire equivalent payload/address-space construction
 into the live green-carrier guest before claiming `HW_HANDOFF_PASS=true`,
 `USER_ENTRY_PASS=true`, or `USER_SYSCALL_PASS=true`.
+
+## 2026-06-08 Guest User Handoff Readiness Prerequisite
+
+The live green-carrier guest probe now has a non-final
+`USER_HANDOFF_READY=true` marker. The marker is emitted only after the guest
+constructs an in-memory x86_64 user payload image, creates a scheduler user
+task through `create_user_task_pid`, dispatches that pid through
+`run_green_carrier_once` on CPU1, and validates syscall-14 handoff readiness through
+`validate_enter_user_blocking_handoff`.
+
+This is still prerequisite evidence only. It proves guest-side payload,
+scheduler task, green-lane dispatch, and non-entering user handoff validation
+can compose in the live AP probe. It does not execute `rt_x86_enter_user_first`,
+does not enter user mode, and does not observe a user-mode syscall return.
+The final live gate still requires `HW_HANDOFF_PASS=true`,
+`USER_ENTRY_PASS=true`, and `USER_SYSCALL_PASS=true` from the real AP ring/user
+path.
