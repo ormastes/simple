@@ -154,7 +154,7 @@ This is hosted model evidence; live QEMU/AP execution remains covered by
 ```text
 Simple Test Runner v1.0.0-beta
 Running: test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl
-[1/1] test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl PASSED
+SimpleOS multicore green contract PASSED
 Files: 1
 Passed: 6
 Failed: 0

@@ -135,7 +135,7 @@ function not found: spawn_worker
 ```text
 Simple Test Runner v1.0.0-beta
 Running: test/03_system/feature/usage/smf_runtime_pool_closure_regression_spec.spl
-[1/1] test/03_system/feature/usage/smf_runtime_pool_closure_regression_spec.spl PASSED
+SMF runtime-pool closure regression PASSED
 Files: 1
 Passed: 1
 Failed: 0

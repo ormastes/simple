@@ -27,7 +27,7 @@ multicore_green_tracking_spec
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -104,7 +104,7 @@ same commit as the tracking row.
 ```text
 Simple Test Runner v1.0.0-beta
 Running: test/03_system/feature/usage/multicore_green_tracking_spec.spl
-[1/1] test/03_system/feature/usage/multicore_green_tracking_spec.spl PASSED
+Multicore green tracking contract PASSED
 Files: 1
 Passed: 6
 Failed: 0
@@ -363,6 +363,40 @@ expect(row).to_contain("doc/07_guide/lib/misc/stdlib.md")
 
 </details>
 
+#### keeps concurrency TUI captures free of runner ordinal labels
+
+- Read source manuals that describe multicore-green evidence
+- Verify captures use meaningful labels rather than [current/total] runner ordinals
+   - Expected: absent_in_text(combined, "[1/1]") equals `1`
+   - Expected: absent_in_text(combined, "[1/2]") equals `1`
+   - Expected: absent_in_text(combined, "[2/2]") equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Read source manuals that describe multicore-green evidence")
+val tracking_spec = rt_file_read_text("test/03_system/feature/usage/multicore_green_tracking_spec.spl") ?? ""
+val agent_plan_spec = rt_file_read_text("test/03_system/feature/usage/multicore_green_agent_plan_spec.spl") ?? ""
+val smf_regression_spec = rt_file_read_text("test/03_system/feature/usage/smf_runtime_pool_closure_regression_spec.spl") ?? ""
+val simpleos_coop_spec = rt_file_read_text("test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl") ?? ""
+val simpleos_multicore_spec = rt_file_read_text("test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl") ?? ""
+val profile_gate_spec = rt_file_read_text("test/05_perf/stress/multicore_green_cross_language_gate_spec.spl") ?? ""
+val combined = tracking_spec + agent_plan_spec + smf_regression_spec + simpleos_coop_spec + simpleos_multicore_spec + profile_gate_spec
+step("Verify captures use meaningful labels rather than [current/total] runner ordinals")
+expect(absent_in_text(combined, "[1/1]")).to_equal(1)
+expect(absent_in_text(combined, "[1/2]")).to_equal(1)
+expect(absent_in_text(combined, "[2/2]")).to_equal(1)
+expect(combined).to_contain("Multicore green tracking contract PASSED")
+expect(combined).to_contain("Multicore green cross-language profile gate PASSED")
+```
+
+</details>
+
 #### links active runtime blockers for unresolved M:N work
 
 - Read the canonical multicore-green tracking row
@@ -390,8 +424,8 @@ expect(row).to_contain("doc/08_tracking/bug/simpleos_green_hardware_context_swit
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
