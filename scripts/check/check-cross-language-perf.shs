@@ -26,10 +26,16 @@ PROFILE_DOCKER_INSIDE="${PROFILE_DOCKER_INSIDE:-0}"
 PROFILE_DOCKER_IMAGE="${PROFILE_DOCKER_IMAGE:-simple-cross-language-perf:latest}"
 PROFILE_DOCKER_MEMORY="${PROFILE_DOCKER_MEMORY:-2g}"
 PROFILE_DOCKER_CPUS="${PROFILE_DOCKER_CPUS:-2.0}"
+PROFILE_DOCKER_SIMPLE_BINARY_EXPLICIT=0
+if [ -n "${PROFILE_DOCKER_SIMPLE_BINARY+x}" ]; then
+    PROFILE_DOCKER_SIMPLE_BINARY_EXPLICIT=1
+fi
 PROFILE_DOCKER_SIMPLE_BINARY="${PROFILE_DOCKER_SIMPLE_BINARY:-}"
 
 if [ -z "${SIMPLE_BINARY:-}" ]; then
-    if [ -x "bin/simple" ]; then
+    if [ "$PROFILE_DOCKER_INSIDE" = "1" ] && [ -x "src/compiler_rust/target/debug/simple" ]; then
+        SIMPLE_BINARY="src/compiler_rust/target/debug/simple"
+    elif [ -x "bin/simple" ]; then
         SIMPLE_BINARY="bin/simple"
     elif [ -x "bin/release/simple" ]; then
         SIMPLE_BINARY="bin/release/simple"
@@ -40,7 +46,7 @@ if [ -z "${SIMPLE_BINARY:-}" ]; then
     fi
 fi
 if [ -z "$PROFILE_DOCKER_SIMPLE_BINARY" ]; then
-    PROFILE_DOCKER_SIMPLE_BINARY="$SIMPLE_BINARY"
+    PROFILE_DOCKER_SIMPLE_BINARY="__auto__"
 fi
 BUILD_DIR="${BUILD_DIR:-build/cross_lang_perf}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/cross_language_perf_$(date +%Y-%m-%d).md}"
@@ -102,7 +108,8 @@ if [ "$PROFILE_DOCKER_ISOLATION" = "1" ] && [ "$PROFILE_DOCKER_INSIDE" != "1" ];
         -e PROFILE_DOCKER_INSIDE=1 \
         -e PROFILE_DOCKER_IMAGE="$PROFILE_DOCKER_IMAGE" \
         -e SKIP_PROFILE_REPORT_CONTRACT="${SKIP_PROFILE_REPORT_CONTRACT:-0}" \
-        -e SIMPLE_BINARY="$PROFILE_DOCKER_SIMPLE_BINARY" \
+        -e PROFILE_DOCKER_SIMPLE_BINARY="$PROFILE_DOCKER_SIMPLE_BINARY" \
+        -e PROFILE_DOCKER_SIMPLE_BINARY_EXPLICIT="$PROFILE_DOCKER_SIMPLE_BINARY_EXPLICIT" \
         -e BUILD_DIR="$BUILD_DIR" \
         -e REPORT_PATH="$REPORT_PATH" \
         -e PROFILE_REPORT_CONTRACT_TEST="$PROFILE_REPORT_CONTRACT_TEST" \
@@ -1280,7 +1287,7 @@ cat >"$REPORT_PATH" <<EOF
 - Generates equivalent hello, recursive fib, in-process warm fib, worker, and fanout workloads for each supported runtime.
 - Measures binary/script size, cold process startup, warm throughput, parallel worker latency, fanout latency, parallel binary size, and peak RSS where the runtime and compiler are available.
 - Uses bounded commands so failed, missing, timed-out, or unavailable lanes are classified instead of silently treated as passing data.
-- Supports \`PROFILE_DOCKER_ISOLATION=1\` to re-exec the same profile script in a Docker container with \`--network=none\`, a memory limit, a CPU limit, and the current UID/GID. Use this mode for crash-prone native and SMF profile runs. Build \`simple-cross-language-perf:latest\` with \`docker build -t simple-cross-language-perf:latest -f tools/docker/Dockerfile.cross-language-perf tools/docker\` for contract-gated C/Go comparison evidence. The fixed linker-order blocker for Simple native rows is recorded in \`doc/08_tracking/bug/docker_cross_language_profile_native_link_2026-06-08.md\`.
+- Supports \`PROFILE_DOCKER_ISOLATION=1\` to re-exec the same profile script in a Docker container with \`--network=none\`, a memory limit, a CPU limit, and the current UID/GID. Use this mode for crash-prone native and SMF profile runs. Build \`simple-cross-language-perf:latest\` with \`docker build -t simple-cross-language-perf:latest -f tools/docker/Dockerfile.cross-language-perf tools/docker\` for contract-gated C/Go comparison evidence. Unless \`PROFILE_DOCKER_SIMPLE_BINARY\` is explicitly set, the container run auto-selects \`src/compiler_rust/target/debug/simple\` when present so the fixed native linker path is used. The fixed linker-order blocker for Simple native rows is recorded in \`doc/08_tracking/bug/docker_cross_language_profile_native_link_2026-06-08.md\`.
 - Generated Simple concurrency workloads compute an expected checksum and exit nonzero on mismatch, so runtime-pool closure failures cannot be timed as valid M:N evidence.
 - Warm throughput is measured in-process where the runtime can print \`warm_ms\`; interpreter and SMF rows use outer-process timing and are labeled that way.
 

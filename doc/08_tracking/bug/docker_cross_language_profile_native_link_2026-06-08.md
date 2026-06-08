@@ -83,3 +83,36 @@ The generated report included positive `Simple (native)` `thread_spawn`
 evidence, positive `Simple multicore green (native)` evidence with
 `pool_used=N/N`, `parallelism=N/N`, and `queue_model=work_stealing`, plus C
 pthread and Go goroutine rows.
+
+## 2026-06-08 Docker Auto-Selection Refresh
+
+The profile wrapper now avoids forwarding a stale host `SIMPLE_BINARY` into the
+isolated container when `PROFILE_DOCKER_SIMPLE_BINARY` was not explicitly set.
+Inside Docker it auto-selects `src/compiler_rust/target/debug/simple` when that
+fixed compiler is present, then falls back to the usual release wrappers.
+
+Contract-gated Docker evidence:
+
+```sh
+PROFILE_DOCKER_ISOLATION=1 PROFILE_DOCKER_IMAGE=simple-cross-language-perf:latest \
+PROFILE_DOCKER_MEMORY=2g PROFILE_DOCKER_CPUS=2.0 RUNS=1 CPU_WORKERS=2 \
+OS_THREAD_WORKERS=2 MULTICORE_GREEN_WORKERS=8 COOPERATIVE_GREEN_WORKERS=2 \
+FANOUT_WORKERS=1000 FANOUT_MULTICORE_GREEN_WORKERS=1000 \
+FANOUT_COOPERATIVE_GREEN_WORKERS=20 FANOUT_ITERS=1 \
+FANOUT_STRESS_WORKERS=1000 FANOUT_STRESS_ITERS=1 RUN_TIMEOUT=90 \
+REPORT_PATH=doc/09_report/cross_language_perf_2026-06-08_docker_contract.md \
+sh scripts/check/check-cross-language-perf.shs
+```
+
+Result:
+
+```text
+profile_report_contract=true
+```
+
+The report records `Simple binary: src/compiler_rust/target/debug/simple`,
+positive `thread_spawn` OS-thread evidence, and positive
+`multicore_green_spawn` M:N candidate evidence. The large fanout stress rows
+showed Go `5.353ms`, Simple multicore green native `9.567ms` with
+`pool_used=1000/1000`, `parallelism=2/2`, and
+`queue_model=work_stealing`, and C pthreads `60.806ms`.
