@@ -233,11 +233,11 @@ insertion/poll-placement before claiming tight-loop fairness comparable to Go.
 - `thread_spawn_with_args` native explicit-argument ABI has focused smoke
   coverage. Profile OS-thread rows still use `thread_spawn` because they are
   scheduler-baseline rows, not explicit-argument ABI rows.
-- Native multicore-green fanout participates in the pool-evidence gate. SMF
-  multicore-green rows currently remain blocked by
-  `doc/08_tracking/bug/smf_runtime_pool_closure_lookup_2026-06-07.md` and are
-  not valid M:N evidence until they report full pool, parallelism, and
-  work-stealing queue evidence.
+- Native and SMF multicore-green fanout participate in the pool-evidence gate.
+  The historical SMF runtime-pool closure lookup blocker is closed by
+  `test/03_system/feature/usage/smf_runtime_pool_closure_regression_spec.spl`;
+  current M:N evidence still requires full pool, parallelism, and
+  `queue_model=work_stealing` report markers.
 - SimpleOS QEMU final hardware context-switch handoff is now proven by the live
   guest marker triplet `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, and
   `USER_SYSCALL_PASS=true`; keep
