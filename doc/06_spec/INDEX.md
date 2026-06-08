@@ -7,7 +7,7 @@
 - **Total Features:** 1
 - **Complete Documentation:** 1 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 129
+- **Total Lines:** 134
 
 ---
 
@@ -15,4 +15,4 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [SimpleOS Green Hardware Handoff Blocker Contract](test/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.md) | Blocked | N/A | 3 | 60% | 129 lines |
+| [SimpleOS Green Hardware Handoff Blocker Contract](test/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.md) | Blocked | N/A | 3 | 60% | 134 lines |

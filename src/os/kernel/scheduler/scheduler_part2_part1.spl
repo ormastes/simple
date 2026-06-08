@@ -185,6 +185,38 @@ impl Scheduler:
             return nil
         tcb.user_context
 
+    me set_user_task_address_space_for_probe(pid: u64, cr3_phys: u64) -> bool:
+        """Diagnostic hook: replace a user handoff task's CR3 for live QEMU probes.
+
+        This does not allocate or map memory. It exists so freestanding probe
+        entries can provide their own minimal page-table root without changing
+        the production `create_user_task_pid` API. The probe context gets IOPL
+        so a ring-3 diagnostic payload can write COM1 if syscall entry fails.
+        """
+        if pid == 0 or cr3_phys == 0 or cr3_phys == 1:
+            return false
+        val slot = self._find_slot(TaskId(id: pid))
+        if slot < 0:
+            return false
+        val tcb = self.tasks[slot]
+        if tcb == nil:
+            return false
+        var task = tcb
+        if not task.is_user or task.user_context == nil:
+            return false
+        task.address_space = cr3_phys
+        var ctx = task.context
+        ctx.rflags = ctx.rflags | 0x3000
+        task.context = ctx
+        var uctx = task.user_context.unwrap()
+        uctx.rflags = uctx.rflags | 0x3000
+        task.user_context = Some(uctx)
+        var isolation = task.isolation
+        isolation.address_space_id = cr3_phys
+        task.isolation = isolation
+        self.tasks[slot] = task
+        true
+
     me exit_task(code: i32):
         self.exit_task_by_id(self.current, code)
 

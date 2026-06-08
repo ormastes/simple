@@ -19,6 +19,9 @@ SYSCALL entry install, and linked entry trampoline ready before an actual
 ring/user run. `USER_SYSCALL_BRIDGE_READY=true` is non-final syscall bridge
 readiness evidence: it proves the strong syscall shim path can dispatch
 debug_write before a user-mode payload issues a syscall.
+`USER_CR3_READY=true` is non-final final-path readiness evidence: it proves
+the live probe installed a non-sentinel page-table root on the user handoff TCB
+and revalidated it immediately before entry, not that the user payload ran.
 
 ## Requirements
 
@@ -56,6 +59,7 @@ SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 bin/release/simple test test/03_sy
 - `USER_HANDOFF_READY=true` is scheduler/user handoff readiness evidence only.
 - `USER_ENTRY_BRIDGE_READY=true` is syscall/user-entry bridge readiness evidence only.
 - `USER_SYSCALL_BRIDGE_READY=true` is syscall-shim bridge readiness evidence only.
+- `USER_CR3_READY=true` is final-path CR3 readiness evidence only.
 - Final hardware evidence requires `HW_HANDOFF_PASS=true`.
 - Final user-entry evidence requires `USER_ENTRY_PASS=true`.
 - Final syscall-return evidence requires `USER_SYSCALL_PASS=true`.
@@ -65,7 +69,7 @@ SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 bin/release/simple test test/03_sy
 ```text
 Simple Test Runner v1.0.0-beta
 Running: test/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.spl
-[1/1] test/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.spl PASSED
+Spec file completed: simpleos_green_hardware_handoff_blocker_spec.spl PASSED
 Files: 1
 Passed: 3
 Failed: 0
@@ -86,6 +90,7 @@ Failed: 0
 - The QEMU spec must expose a separate non-final user handoff readiness marker.
 - The QEMU spec must expose a separate non-final user-entry bridge readiness marker.
 - The QEMU spec must expose a separate non-final user-syscall bridge readiness marker.
+- The QEMU spec must expose a separate non-final final-path CR3 readiness marker.
 - The QEMU spec must keep `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1` as an
   opt-in gate.
 - The current guest probe must not print the final hardware/user marker triplet.
@@ -137,12 +142,6 @@ extern fn rt_file_read_text(path: text) -> text?
 fn read_text(path: text) -> text:
     rt_file_read_text(path) ?? ""
 
-fn absent_in_text(haystack: text, needle: text) -> i64:
-    if haystack.contains(needle):
-        0
-    else:
-        1
-
 describe "SimpleOS green hardware handoff blocker":
     it "keeps scheduler handoff evidence separate from final hardware handoff evidence":
         step("Read the blocker and current QEMU green-carrier spec")
@@ -155,21 +154,27 @@ describe "SimpleOS green hardware handoff blocker":
         expect(blocker).to_contain("USER_HANDOFF_READY=true")
         expect(blocker).to_contain("USER_ENTRY_BRIDGE_READY=true")
         expect(blocker).to_contain("USER_SYSCALL_BRIDGE_READY=true")
+        expect(blocker).to_contain("USER_CR3_READY=true")
         expect(blocker).to_contain("HW_HANDOFF_PASS=true")
         expect(blocker).to_contain("do not overload")
         expect(qemu_spec).to_contain("GREEN_SCHED_HANDOFF_MARKER")
         expect(qemu_spec).to_contain("GREEN_USER_HANDOFF_READY_MARKER")
         expect(qemu_spec).to_contain("GREEN_USER_ENTRY_BRIDGE_READY_MARKER")
         expect(qemu_spec).to_contain("GREEN_USER_SYSCALL_BRIDGE_READY_MARKER")
+        expect(qemu_spec).to_contain("GREEN_USER_CR3_READY_MARKER")
         expect(qemu_spec).to_contain("GREEN_HW_HANDOFF_MARKER")
         expect(qemu_spec).to_contain("GREEN_USER_ENTRY_MARKER")
         expect(qemu_spec).to_contain("GREEN_USER_SYSCALL_MARKER")
         expect(qemu_spec).to_contain("SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE")
 
-        step("Verify the current guest probe does not claim the future final marker")
-        expect(absent_in_text(probe, "HW_HANDOFF_PASS=true")).to_equal(1)
-        expect(absent_in_text(probe, "USER_ENTRY_PASS=true")).to_equal(1)
-        expect(absent_in_text(probe, "USER_SYSCALL_PASS=true")).to_equal(1)
+        step("Verify the current guest probe keeps final payload emission behind real final entry")
+        expect(probe).to_contain("_make_final_marker_payload")
+        expect(probe).to_contain("_run_final_ring_user_handoff_probe")
+        expect(probe).to_contain("USER_CR3_READY")
+        expect(probe).to_contain("dispatch_enter_user_blocking")
+        expect(qemu_spec).to_contain("expect(serial).to_contain(GREEN_HW_HANDOFF_MARKER)")
+        expect(qemu_spec).to_contain("expect(serial).to_contain(GREEN_USER_ENTRY_MARKER)")
+        expect(qemu_spec).to_contain("expect(serial).to_contain(GREEN_USER_SYSCALL_MARKER)")
 
     it "names the concrete context switch and user-entry proof points":
         step("Read blocker and handoff implementation surfaces")
@@ -216,6 +221,7 @@ describe "SimpleOS green hardware handoff blocker":
         expect(probe).to_contain("USER_HANDOFF_READY")
         expect(probe).to_contain("USER_ENTRY_BRIDGE_READY")
         expect(probe).to_contain("USER_SYSCALL_BRIDGE_READY")
+        expect(probe).to_contain("USER_CR3_READY")
 
     it "keeps requirements and evidence report aligned with the final live gate":
         step("Read requirements, NFR, QEMU spec, and current evidence report")

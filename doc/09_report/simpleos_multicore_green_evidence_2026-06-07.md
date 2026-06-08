@@ -283,6 +283,29 @@ The default live probe was left readiness-only: it must continue to pass the
 current AP, scheduler, user-handoff-readiness, user-entry-bridge, and
 user-syscall-bridge markers without printing the final marker triplet.
 
+## 2026-06-08 Final-Path CR3 Readiness
+
+The live green-carrier probe now emits non-final `USER_CR3_READY=true` after it
+builds a probe-local 2MB identity-mapped page-table root, installs that
+non-sentinel CR3 on the scheduler-created user handoff TCB, dispatches the pid
+through CPU1's green-carrier lane, and revalidates the handoff immediately
+before the enter bridge.
+
+This advances the blocker past the legacy `cr3=1` final-path prerequisite. It
+still does not prove final ring/user entry or user syscall return: the live
+serial trace does not yet contain `HW_HANDOFF_PASS=true`,
+`USER_ENTRY_PASS=true`, or `USER_SYSCALL_PASS=true`.
+
+Verification refresh:
+
+- Docker-isolated blocker contract: PASS, 3 scenarios.
+- Docker-isolated QEMU default lane: PASS, 2 scenarios.
+- `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1` live QEMU lane: PASS, 2 scenarios in
+  44536ms, including `USER_CR3_READY=true`.
+- `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1` final-handoff lane: FAIL as
+  expected, 1 passed scenario and 1 failed scenario in 44631ms because the
+  final marker triplet is still absent.
+
 Host verification from `/tmp/simple-pherallel-sync`:
 
 - `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 src/compiler_rust/target/debug/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean`:

@@ -52,7 +52,8 @@ Use separate final markers:
 `[green-carrier-qemu] SCHED_HANDOFF_PASS=true` or the non-final
 `[green-carrier-qemu] USER_HANDOFF_READY=true` /
 `[green-carrier-qemu] USER_ENTRY_BRIDGE_READY=true` /
-`[green-carrier-qemu] USER_SYSCALL_BRIDGE_READY=true` prerequisite markers.
+`[green-carrier-qemu] USER_SYSCALL_BRIDGE_READY=true` /
+`[green-carrier-qemu] USER_CR3_READY=true` prerequisite markers.
 
 The executable live gate is
 `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1`. It should fail until the
@@ -261,6 +262,22 @@ reserved-end guess was invalid for this entry. The failure mode is now sharper:
 the final path needs a safe direct-boot memory bootstrap or a dedicated minimal
 user page-table allocator before it can replace the legacy `cr3=1` sentinel.
 
-Do not merge a final-marker payload into the default live probe until this
-memory-bootstrap gap is closed. The readiness probe must remain able to pass
-without printing or attempting the final marker triplet.
+Do not claim the final marker triplet from the default live probe until the
+payload actually emits those markers after the enter bridge. The readiness
+probe must remain able to pass without treating attempted final entry as final
+ring/user proof.
+
+## 2026-06-08 Final-Path CR3 Readiness
+
+The live green-carrier probe now constructs a probe-local page-table root with
+2MB identity mappings, creates a scheduler user TCB, installs that non-sentinel
+CR3 through the diagnostic scheduler hook, dispatches the pid through the CPU1
+green-carrier lane, and revalidates the handoff immediately before calling
+`dispatch_enter_user_blocking`. The probe emits non-final
+`USER_CR3_READY=true` when that state is present.
+
+This closes the legacy `cr3=1` final-path prerequisite from the direct-entry
+experiment, but it does not close this blocker. The user payload still has not
+emitted `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, or
+`USER_SYSCALL_PASS=true`; the remaining gap is the actual ring/user transition
+and syscall-return observation after the enter bridge.

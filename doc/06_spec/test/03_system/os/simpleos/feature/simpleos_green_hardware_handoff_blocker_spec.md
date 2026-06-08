@@ -1,6 +1,6 @@
 # SimpleOS Green Hardware Handoff Blocker Contract
 
-> This SSpec keeps the final SimpleOS green-thread hardware handoff boundary executable. Current QEMU evidence proves AP startup, fixed-slot dispatch, preemption, and scheduler-owned handoff through `SCHED_HANDOFF_PASS=true`, but it must not be treated as final ring/user hardware context-switch proof. `USER_HANDOFF_READY=true` is also non-final evidence: it proves real scheduler user-task construction and non-entering syscall-14 validation in the guest, not the AP ring/user transition. `USER_ENTRY_BRIDGE_READY=true` is non-final bridge readiness evidence: it proves the live guest has the x86_64 trap runtime, SYSCALL entry install, and linked entry trampoline ready before an actual ring/user run. `USER_SYSCALL_BRIDGE_READY=true` is non-final syscall bridge readiness evidence: it proves the strong syscall shim path can dispatch debug_write before a user-mode payload issues a syscall.
+> This SSpec keeps the final SimpleOS green-thread hardware handoff boundary executable. Current QEMU evidence proves AP startup, fixed-slot dispatch, preemption, and scheduler-owned handoff through `SCHED_HANDOFF_PASS=true`, but it must not be treated as final ring/user hardware context-switch proof. `USER_HANDOFF_READY=true` is also non-final evidence: it proves real scheduler user-task construction and non-entering syscall-14 validation in the guest, not the AP ring/user transition. `USER_ENTRY_BRIDGE_READY=true` is non-final bridge readiness evidence: it proves the live guest has the x86_64 trap runtime, SYSCALL entry install, and linked entry trampoline ready before an actual ring/user run. `USER_SYSCALL_BRIDGE_READY=true` is non-final syscall bridge readiness evidence: it proves the strong syscall shim path can dispatch debug_write before a user-mode payload issues a syscall. `USER_CR3_READY=true` is non-final final-path readiness evidence: it proves the live probe installed a non-sentinel page-table root on the user handoff TCB and revalidated it immediately before entry, not that the user payload ran.
 
 <!-- sdn-diagram:id=simpleos_green_hardware_handoff_blocker_spec.arch -->
 <details class="sdn-source">
@@ -34,7 +34,7 @@ simpleos_green_hardware_handoff_blocker_spec -> std
 
 # SimpleOS Green Hardware Handoff Blocker Contract
 
-This SSpec keeps the final SimpleOS green-thread hardware handoff boundary executable. Current QEMU evidence proves AP startup, fixed-slot dispatch, preemption, and scheduler-owned handoff through `SCHED_HANDOFF_PASS=true`, but it must not be treated as final ring/user hardware context-switch proof. `USER_HANDOFF_READY=true` is also non-final evidence: it proves real scheduler user-task construction and non-entering syscall-14 validation in the guest, not the AP ring/user transition. `USER_ENTRY_BRIDGE_READY=true` is non-final bridge readiness evidence: it proves the live guest has the x86_64 trap runtime, SYSCALL entry install, and linked entry trampoline ready before an actual ring/user run. `USER_SYSCALL_BRIDGE_READY=true` is non-final syscall bridge readiness evidence: it proves the strong syscall shim path can dispatch debug_write before a user-mode payload issues a syscall.
+This SSpec keeps the final SimpleOS green-thread hardware handoff boundary executable. Current QEMU evidence proves AP startup, fixed-slot dispatch, preemption, and scheduler-owned handoff through `SCHED_HANDOFF_PASS=true`, but it must not be treated as final ring/user hardware context-switch proof. `USER_HANDOFF_READY=true` is also non-final evidence: it proves real scheduler user-task construction and non-entering syscall-14 validation in the guest, not the AP ring/user transition. `USER_ENTRY_BRIDGE_READY=true` is non-final bridge readiness evidence: it proves the live guest has the x86_64 trap runtime, SYSCALL entry install, and linked entry trampoline ready before an actual ring/user run. `USER_SYSCALL_BRIDGE_READY=true` is non-final syscall bridge readiness evidence: it proves the strong syscall shim path can dispatch debug_write before a user-mode payload issues a syscall. `USER_CR3_READY=true` is non-final final-path readiness evidence: it proves the live probe installed a non-sentinel page-table root on the user handoff TCB and revalidated it immediately before entry, not that the user payload ran.
 
 ## At a Glance
 
@@ -65,6 +65,9 @@ SYSCALL entry install, and linked entry trampoline ready before an actual
 ring/user run. `USER_SYSCALL_BRIDGE_READY=true` is non-final syscall bridge
 readiness evidence: it proves the strong syscall shim path can dispatch
 debug_write before a user-mode payload issues a syscall.
+`USER_CR3_READY=true` is non-final final-path readiness evidence: it proves
+the live probe installed a non-sentinel page-table root on the user handoff TCB
+and revalidated it immediately before entry, not that the user payload ran.
 
 ## Requirements
 
@@ -102,6 +105,7 @@ SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 bin/release/simple test test/03_sy
 - `USER_HANDOFF_READY=true` is scheduler/user handoff readiness evidence only.
 - `USER_ENTRY_BRIDGE_READY=true` is syscall/user-entry bridge readiness evidence only.
 - `USER_SYSCALL_BRIDGE_READY=true` is syscall-shim bridge readiness evidence only.
+- `USER_CR3_READY=true` is final-path CR3 readiness evidence only.
 - Final hardware evidence requires `HW_HANDOFF_PASS=true`.
 - Final user-entry evidence requires `USER_ENTRY_PASS=true`.
 - Final syscall-return evidence requires `USER_SYSCALL_PASS=true`.
@@ -111,7 +115,7 @@ SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 bin/release/simple test test/03_sy
 ```text
 Simple Test Runner v1.0.0-beta
 Running: test/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.spl
-[1/1] test/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.spl PASSED
+Spec file completed: simpleos_green_hardware_handoff_blocker_spec.spl PASSED
 Files: 1
 Passed: 3
 Failed: 0
@@ -132,6 +136,7 @@ Failed: 0
 - The QEMU spec must expose a separate non-final user handoff readiness marker.
 - The QEMU spec must expose a separate non-final user-entry bridge readiness marker.
 - The QEMU spec must expose a separate non-final user-syscall bridge readiness marker.
+- The QEMU spec must expose a separate non-final final-path CR3 readiness marker.
 - The QEMU spec must keep `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1` as an
   opt-in gate.
 - The current guest probe must not print the final hardware/user marker triplet.
@@ -183,16 +188,13 @@ Failed: 0
 
 - Read the blocker and current QEMU green-carrier spec
 - Verify the existing scheduler markers remain documented as non-final evidence
-- Verify the current guest probe does not claim the future final marker
-   - Expected: absent_in_text(probe, "HW_HANDOFF_PASS=true") equals `1`
-   - Expected: absent_in_text(probe, "USER_ENTRY_PASS=true") equals `1`
-   - Expected: absent_in_text(probe, "USER_SYSCALL_PASS=true") equals `1`
+- Verify the current guest probe keeps final payload emission behind real final entry
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -206,21 +208,27 @@ expect(blocker).to_contain("SCHED_HANDOFF_PASS=true")
 expect(blocker).to_contain("USER_HANDOFF_READY=true")
 expect(blocker).to_contain("USER_ENTRY_BRIDGE_READY=true")
 expect(blocker).to_contain("USER_SYSCALL_BRIDGE_READY=true")
+expect(blocker).to_contain("USER_CR3_READY=true")
 expect(blocker).to_contain("HW_HANDOFF_PASS=true")
 expect(blocker).to_contain("do not overload")
 expect(qemu_spec).to_contain("GREEN_SCHED_HANDOFF_MARKER")
 expect(qemu_spec).to_contain("GREEN_USER_HANDOFF_READY_MARKER")
 expect(qemu_spec).to_contain("GREEN_USER_ENTRY_BRIDGE_READY_MARKER")
 expect(qemu_spec).to_contain("GREEN_USER_SYSCALL_BRIDGE_READY_MARKER")
+expect(qemu_spec).to_contain("GREEN_USER_CR3_READY_MARKER")
 expect(qemu_spec).to_contain("GREEN_HW_HANDOFF_MARKER")
 expect(qemu_spec).to_contain("GREEN_USER_ENTRY_MARKER")
 expect(qemu_spec).to_contain("GREEN_USER_SYSCALL_MARKER")
 expect(qemu_spec).to_contain("SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE")
 
-step("Verify the current guest probe does not claim the future final marker")
-expect(absent_in_text(probe, "HW_HANDOFF_PASS=true")).to_equal(1)
-expect(absent_in_text(probe, "USER_ENTRY_PASS=true")).to_equal(1)
-expect(absent_in_text(probe, "USER_SYSCALL_PASS=true")).to_equal(1)
+step("Verify the current guest probe keeps final payload emission behind real final entry")
+expect(probe).to_contain("_make_final_marker_payload")
+expect(probe).to_contain("_run_final_ring_user_handoff_probe")
+expect(probe).to_contain("USER_CR3_READY")
+expect(probe).to_contain("dispatch_enter_user_blocking")
+expect(qemu_spec).to_contain("expect(serial).to_contain(GREEN_HW_HANDOFF_MARKER)")
+expect(qemu_spec).to_contain("expect(serial).to_contain(GREEN_USER_ENTRY_MARKER)")
+expect(qemu_spec).to_contain("expect(serial).to_contain(GREEN_USER_SYSCALL_MARKER)")
 ```
 
 </details>
@@ -235,7 +243,7 @@ expect(absent_in_text(probe, "USER_SYSCALL_PASS=true")).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 44 lines folded for reproduction.
+Runnable source: 45 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -283,6 +291,7 @@ expect(probe).to_contain("SCHED_HANDOFF_PASS")
 expect(probe).to_contain("USER_HANDOFF_READY")
 expect(probe).to_contain("USER_ENTRY_BRIDGE_READY")
 expect(probe).to_contain("USER_SYSCALL_BRIDGE_READY")
+expect(probe).to_contain("USER_CR3_READY")
 ```
 
 </details>
