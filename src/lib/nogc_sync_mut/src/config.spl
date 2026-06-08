@@ -3,8 +3,6 @@
 # Loads configuration from SDN files and provides typed access.
 # Supports log configuration, DI profiles, and application modes.
 
-use common.text.{parse_i64}
-
 # SFFI declarations
 extern fn rt_file_read(path_ptr: i64, path_len: i64) -> text
 extern fn rt_file_exists(path_ptr: i64, path_len: i64) -> bool
@@ -321,12 +319,44 @@ pub fn load_config(path: text) -> Result<AppConfig, text>:
 fn parse_app_config(data: SdnValue) -> Result<AppConfig, text>:
     """Parse AppConfig from SDN data."""
     Ok(AppConfig(
-        log: parse_log_config(data["log"]),
-        di: parse_di_config(data["di"]),
-        parser: parse_parser_config(data["parser"]),
-        aop: parse_aop_config(data["aop"]),
-        execution: parse_execution_config(data["execution"])
+        log: parse_log_config(sdn_field(data, "log")),
+        di: parse_di_config(sdn_field(data, "di")),
+        parser: parse_parser_config(sdn_field(data, "parser")),
+        aop: parse_aop_config(sdn_field(data, "aop")),
+        execution: parse_execution_config(sdn_field(data, "execution"))
     ))
+
+fn sdn_field(data: SdnValue, key: text) -> SdnValue?:
+    match data:
+        case Dict(fields):
+            if fields.has(key):
+                return fields[key]
+            None
+        case _: None
+
+fn sdn_text_field(data: SdnValue, key: text, default_value: text) -> text:
+    val value = sdn_field(data, key)
+    if value.is_none():
+        return default_value
+    match value.unwrap():
+        case String(s): s
+        case _: default_value
+
+fn sdn_i64_field(data: SdnValue, key: text, default_value: i64) -> i64:
+    val value = sdn_field(data, key)
+    if value.is_none():
+        return default_value
+    match value.unwrap():
+        case Int(n): n
+        case _: default_value
+
+fn sdn_bool_field(data: SdnValue, key: text, default_value: bool) -> bool:
+    val value = sdn_field(data, key)
+    if value.is_none():
+        return default_value
+    match value.unwrap():
+        case Bool(b): b
+        case _: default_value
 
 fn parse_log_config(data: SdnValue?) -> LogConfig:
     """Parse LogConfig from SDN data."""
@@ -335,10 +365,10 @@ fn parse_log_config(data: SdnValue?) -> LogConfig:
 
     val d = data.unwrap()
     LogConfig(
-        global_level: d["global_level"] as i64 ?? 4,
-        scopes: parse_scopes(d["scopes"]),
-        timestamps: d["timestamps"] as bool ?? true,
-        format: d["format"] as text ?? "text"
+        global_level: sdn_i64_field(d, "global_level", 4),
+        scopes: parse_scopes(sdn_field(d, "scopes")),
+        timestamps: sdn_bool_field(d, "timestamps", true),
+        format: sdn_text_field(d, "format", "text")
     )
 
 fn parse_scopes(data: SdnValue?) -> Dict<text, i64>:
@@ -347,9 +377,11 @@ fn parse_scopes(data: SdnValue?) -> Dict<text, i64>:
     if data.is_none():
         return result
 
-    val d = data.unwrap()
-    for key in d.keys():
-        result[key] = d[key] as i64 ?? 4
+    match data.unwrap():
+        case Dict(fields):
+            for key in fields.keys():
+                result[key] = sdn_i64_field(data.unwrap(), key, 4)
+        case _: pass
     result
 
 fn parse_di_config(data: SdnValue?) -> DiConfig:
@@ -359,8 +391,8 @@ fn parse_di_config(data: SdnValue?) -> DiConfig:
 
     val d = data.unwrap()
     DiConfig(
-        profile: d["profile"] as text ?? "dev",
-        bindings: parse_bindings(d["bindings"])
+        profile: sdn_text_field(d, "profile", "dev"),
+        bindings: parse_bindings(sdn_field(d, "bindings"))
     )
 
 fn parse_bindings(data: SdnValue?) -> Dict<text, text>:
@@ -369,9 +401,11 @@ fn parse_bindings(data: SdnValue?) -> Dict<text, text>:
     if data.is_none():
         return result
 
-    val d = data.unwrap()
-    for key in d.keys():
-        result[key] = d[key] as text ?? ""
+    match data.unwrap():
+        case Dict(fields):
+            for key in fields.keys():
+                result[key] = sdn_text_field(data.unwrap(), key, "")
+        case _: pass
     result
 
 fn parse_parser_config(data: SdnValue?) -> ParserConfig:
@@ -381,9 +415,9 @@ fn parse_parser_config(data: SdnValue?) -> ParserConfig:
 
     val d = data.unwrap()
     ParserConfig(
-        mode: d["mode"] as text ?? "full",
-        error_recovery: d["error_recovery"] as bool ?? true,
-        max_errors: d["max_errors"] as i64 ?? 100
+        mode: sdn_text_field(d, "mode", "full"),
+        error_recovery: sdn_bool_field(d, "error_recovery", true),
+        max_errors: sdn_i64_field(d, "max_errors", 100)
     )
 
 fn parse_aop_config(data: SdnValue?) -> AopConfig:
@@ -393,10 +427,10 @@ fn parse_aop_config(data: SdnValue?) -> AopConfig:
 
     val d = data.unwrap()
     AopConfig(
-        enabled: d["enabled"] as bool ?? true,
-        log_calls: d["log_calls"] as bool ?? false,
-        log_errors: d["log_errors"] as bool ?? true,
-        log_level: d["log_level"] as i64 ?? 5
+        enabled: sdn_bool_field(d, "enabled", true),
+        log_calls: sdn_bool_field(d, "log_calls", false),
+        log_errors: sdn_bool_field(d, "log_errors", true),
+        log_level: sdn_i64_field(d, "log_level", 5)
     )
 
 fn parse_execution_config(data: SdnValue?) -> ExecutionConfig:
@@ -406,10 +440,10 @@ fn parse_execution_config(data: SdnValue?) -> ExecutionConfig:
 
     val d = data.unwrap()
     ExecutionConfig(
-        mode: d["mode"] as text ?? "interpret",
-        debug: d["debug"] as bool ?? false,
-        optimize: d["optimize"] as i64 ?? 1,
-        gc_threshold: d["gc_threshold"] as i64 ?? 1000000
+        mode: sdn_text_field(d, "mode", "interpret"),
+        debug: sdn_bool_field(d, "debug", false),
+        optimize: sdn_i64_field(d, "optimize", 1),
+        gc_threshold: sdn_i64_field(d, "gc_threshold", 1000000)
     )
 
 # ============================================================================
@@ -566,7 +600,43 @@ fn parse_log_level(level: text) -> i64:
 
 fn parse_int(s: text) -> i64:
     """Parse integer from string."""
-    parse_i64(s)
+    val trimmed = s.trim()
+    if trimmed.len() == 0:
+        return 0
+    var sign: i64 = 1
+    var idx: i64 = 0
+    if trimmed[0:1] == "-":
+        sign = -1
+        idx = 1
+    var result: i64 = 0
+    while idx < trimmed.len():
+        val ch = trimmed[idx:idx + 1]
+        var digit: i64 = -1
+        if ch == "0":
+            digit = 0
+        elif ch == "1":
+            digit = 1
+        elif ch == "2":
+            digit = 2
+        elif ch == "3":
+            digit = 3
+        elif ch == "4":
+            digit = 4
+        elif ch == "5":
+            digit = 5
+        elif ch == "6":
+            digit = 6
+        elif ch == "7":
+            digit = 7
+        elif ch == "8":
+            digit = 8
+        elif ch == "9":
+            digit = 9
+        else:
+            return result * sign
+        result = result * 10 + digit
+        idx = idx + 1
+    result * sign
 
 # ============================================================================
 # Full Configuration Loading Pipeline

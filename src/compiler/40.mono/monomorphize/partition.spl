@@ -111,7 +111,7 @@ fn partition_generic_constructs(module: Module) -> (GenericTemplates, Specialize
     """
     var templates = generictemplates_new()
     var specialized = specializedinstances_new()
-    var metadata = monomorphizationmetadata_new()
+    var metadata = MonomorphizationMetadata.new()
 
     for item in module.items:
         match item:
@@ -157,30 +157,31 @@ fn partition_function(
     """
     if f.is_generic_template:
         # Generic template
-        templates.functions_push(functions, f.clone())
+        templates.functions.push(f.clone())
 
         # Create metadata entry if not exists
-        if not metadata.functions_contains_key(functions, f.name):
+        if not metadata.functions.has(f.name):
             metadata.functions[f.name] = GenericFunctionMeta.new(
-                f.name_clone(name),
-                f.generic_params_clone(generic_params)
+                f.name,
+                f.generic_params
             )
 
-    elif val base_name = f.specialization_of:
+    elif f.has_specialization_of:
+        val base_name = f.specialization_of
         # Specialized instance
-        specialized.functions_push(functions, f.clone())
+        specialized.functions.push(f.clone())
 
         # Add to metadata (create entry if needed)
-        if not metadata.functions_contains_key(functions, base_name):
-            metadata.functions[base_name] = genericfunctionmeta_new(base_name.clone(), [])
+        if not metadata.functions.has(base_name):
+            metadata.functions[base_name] = GenericFunctionMeta.new(base_name, [])
 
         val meta: GenericFunctionMeta = metadata.functions[base_name]
 
         # Extract type args from bindings using type name conversion
         var type_args: [ConcreteType] = []
-        for _item_0 in f.type_bindings_items(type_bindings):
-            val ast_type = _item_0[1]
-            val type_str = ast_type_to_string(ast_type)
+        for param in f.type_bindings.keys():
+            val ast_type = f.type_bindings[param]
+            val type_str = ast_type.to_string()
             val concrete = match type_str:
                 case "i32": ConcreteType.Int
                 case "i64": ConcreteType.Int
@@ -191,15 +192,14 @@ fn partition_function(
                 case "bool": ConcreteType.Bool
                 case "text": ConcreteType.String
                 case "str": ConcreteType.String
-                case _: concretetype_Named(type_str)
-            type_args_push(type_args, concrete)
+                case _: ConcreteType.Named(type_str)
+            type_args = type_args.push(concrete)
 
         # Convert type bindings
         var concrete_bindings: {text: ConcreteType} = {}
-        for _item_1 in f.type_bindings_items(type_bindings):
-            val param = _item_1[0]
-            val ast_type = _item_1[1]
-            val type_str = ast_type_to_string(ast_type)
+        for param in f.type_bindings.keys():
+            val ast_type = f.type_bindings[param]
+            val type_str = ast_type.to_string()
             val concrete = match type_str:
                 case "i32": ConcreteType.Int
                 case "i64": ConcreteType.Int
@@ -210,19 +210,19 @@ fn partition_function(
                 case "bool": ConcreteType.Bool
                 case "text": ConcreteType.String
                 case "str": ConcreteType.String
-                case _: concretetype_Named(type_str)
+                case _: ConcreteType.Named(type_str)
             concrete_bindings[param] = concrete
 
         # Add specialization entry
         meta.specializations.push(SpecializationEntry.new(
             type_args,
-            f.name_clone(name),
+            f.name,
             concrete_bindings
         ))
 
     else:
         # Non-generic function
-        specialized.functions_push(functions, f.clone())
+        specialized.functions.push(f.clone())
 
 fn partition_struct(
     s: StructDef,
@@ -232,43 +232,43 @@ fn partition_struct(
 ):
     """Partition a struct into template or specialized instance."""
     if s.is_generic_template:
-        templates.structs_push(structs, s.clone())
+        templates.structs.push(s.clone())
 
-        if not metadata.structs_contains_key(structs, s.name):
+        if not metadata.structs.has(s.name):
             metadata.structs[s.name] = GenericStructMeta.new(
-                s.name_clone(name),
-                s.generic_params_clone(generic_params)
+                s.name,
+                s.generic_params
             )
 
-    elif val base_name = s.specialization_of:
-        specialized.structs_push(structs, s.clone())
+    elif s.has_specialization_of:
+        val base_name = s.specialization_of
+        specialized.structs.push(s.clone())
 
-        if not metadata.structs_contains_key(structs, base_name):
-            metadata.structs[base_name] = genericstructmeta_new(base_name.clone(), [])
+        if not metadata.structs.has(base_name):
+            metadata.structs[base_name] = GenericStructMeta.new(base_name, [])
 
         val meta: GenericStructMeta = metadata.structs[base_name]
 
         # Extract type args
         var type_args: [ConcreteType] = []
-        for _item_2 in s.type_bindings_items(type_bindings):
-            val ast_type = _item_2[1]
-            type_args_push(type_args, ConcreteType.Named(ast_type.to_string()))
+        for param in s.type_bindings.keys():
+            val ast_type = s.type_bindings[param]
+            type_args = type_args.push(ConcreteType.Named(ast_type.to_string()))
 
         # Convert bindings
         var concrete_bindings: {text: ConcreteType} = {}
-        for _item_3 in s.type_bindings_items(type_bindings):
-            val param = _item_3[0]
-            val ast_type = _item_3[1]
-            concrete_bindings[param] = concretetype_Named(ast_type.to_string())
+        for param in s.type_bindings.keys():
+            val ast_type = s.type_bindings[param]
+            concrete_bindings[param] = ConcreteType.Named(ast_type.to_string())
 
         meta.specializations.push(SpecializationEntry.new(
             type_args,
-            s.name_clone(name),
+            s.name,
             concrete_bindings
         ))
 
     else:
-        specialized.structs_push(structs, s.clone())
+        specialized.structs.push(s.clone())
 
 fn partition_class(
     c: ClassDef,
@@ -278,43 +278,43 @@ fn partition_class(
 ):
     """Partition a class into template or specialized instance."""
     if c.is_generic_template:
-        templates.classes_push(classes, c.clone())
+        templates.classes.push(c.clone())
 
-        if not metadata.classes_contains_key(classes, c.name):
+        if not metadata.classes.has(c.name):
             metadata.classes[c.name] = GenericClassMeta.new(
-                c.name_clone(name),
-                c.generic_params_clone(generic_params)
+                c.name,
+                c.generic_params
             )
 
-    elif val base_name = c.specialization_of:
-        specialized.classes_push(classes, c.clone())
+    elif c.has_specialization_of:
+        val base_name = c.specialization_of
+        specialized.classes.push(c.clone())
 
-        if not metadata.classes_contains_key(classes, base_name):
-            metadata.classes[base_name] = genericclassmeta_new(base_name.clone(), [])
+        if not metadata.classes.has(base_name):
+            metadata.classes[base_name] = GenericClassMeta.new(base_name, [])
 
         val meta: GenericClassMeta = metadata.classes[base_name]
 
         # Extract type args
         var type_args: [ConcreteType] = []
-        for _item_4 in c.type_bindings_items(type_bindings):
-            val ast_type = _item_4[1]
-            type_args_push(type_args, ConcreteType.Named(ast_type.to_string()))
+        for param in c.type_bindings.keys():
+            val ast_type = c.type_bindings[param]
+            type_args = type_args.push(ConcreteType.Named(ast_type.to_string()))
 
         # Convert bindings
         var concrete_bindings: {text: ConcreteType} = {}
-        for _item_5 in c.type_bindings_items(type_bindings):
-            val param = _item_5[0]
-            val ast_type = _item_5[1]
-            concrete_bindings[param] = concretetype_Named(ast_type.to_string())
+        for param in c.type_bindings.keys():
+            val ast_type = c.type_bindings[param]
+            concrete_bindings[param] = ConcreteType.Named(ast_type.to_string())
 
         meta.specializations.push(SpecializationEntry.new(
             type_args,
-            c.name_clone(name),
+            c.name,
             concrete_bindings
         ))
 
     else:
-        specialized.classes_push(classes, c.clone())
+        specialized.classes.push(c.clone())
 
 fn partition_enum(
     e: EnumDef,
@@ -324,43 +324,43 @@ fn partition_enum(
 ):
     """Partition an enum into template or specialized instance."""
     if e.is_generic_template:
-        templates.enums_push(enums, e.clone())
+        templates.enums.push(e.clone())
 
-        if not metadata.enums_contains_key(enums, e.name):
+        if not metadata.enums.has(e.name):
             metadata.enums[e.name] = GenericEnumMeta.new(
-                e.name_clone(name),
-                e.generic_params_clone(generic_params)
+                e.name,
+                e.generic_params
             )
 
-    elif val base_name = e.specialization_of:
-        specialized.enums_push(enums, e.clone())
+    elif e.has_specialization_of:
+        val base_name = e.specialization_of
+        specialized.enums.push(e.clone())
 
-        if not metadata.enums_contains_key(enums, base_name):
-            metadata.enums[base_name] = genericenummeta_new(base_name.clone(), [])
+        if not metadata.enums.has(base_name):
+            metadata.enums[base_name] = GenericEnumMeta.new(base_name, [])
 
         val meta: GenericEnumMeta = metadata.enums[base_name]
 
         # Extract type args
         var type_args: [ConcreteType] = []
-        for _item_6 in e.type_bindings_items(type_bindings):
-            val ast_type = _item_6[1]
-            type_args_push(type_args, ConcreteType.Named(ast_type.to_string()))
+        for param in e.type_bindings.keys():
+            val ast_type = e.type_bindings[param]
+            type_args = type_args.push(ConcreteType.Named(ast_type.to_string()))
 
         # Convert bindings
         var concrete_bindings: {text: ConcreteType} = {}
-        for _item_7 in e.type_bindings_items(type_bindings):
-            val param = _item_7[0]
-            val ast_type = _item_7[1]
-            concrete_bindings[param] = concretetype_Named(ast_type.to_string())
+        for param in e.type_bindings.keys():
+            val ast_type = e.type_bindings[param]
+            concrete_bindings[param] = ConcreteType.Named(ast_type.to_string())
 
         meta.specializations.push(SpecializationEntry.new(
             type_args,
-            e.name_clone(name),
+            e.name,
             concrete_bindings
         ))
 
     else:
-        specialized.enums_push(enums, e.clone())
+        specialized.enums.push(e.clone())
 
 fn partition_trait(
     t: TraitDef,
@@ -371,13 +371,13 @@ fn partition_trait(
 
     Note: Traits are not specialized - implementations are specialized.
     """
-    if t.is_generic_template or not t.generic_params_is_empty(generic_params):
-        templates.traits_push(traits, t.clone())
+    if t.is_generic_template or not t.generic_params.is_empty():
+        templates.traits.push(t.clone())
 
-        if not metadata.traits_contains_key(traits, t.name):
+        if not metadata.traits.has(t.name):
             metadata.traits[t.name] = GenericTraitMeta.new(
-                t.name_clone(name),
-                t.generic_params_clone(generic_params)
+                t.name,
+                t.generic_params
             )
 
 # ============================================================================
@@ -417,142 +417,142 @@ fn build_monomorphization_metadata_from_constructs(
 
     ROBUSTNESS: Processes all constructs and builds complete metadata.
     """
-    var metadata = monomorphizationmetadata_new()
+    var metadata = MonomorphizationMetadata.new()
 
     # Process templates
     for func in templates.functions:
-        if not metadata.functions_contains_key(functions, func.name):
+        if not metadata.functions.has(func.name):
             metadata.functions[func.name] = GenericFunctionMeta.new(
-                func.name_clone(name),
-                func.generic_params_clone(generic_params)
+                func.name,
+                func.generic_params
             )
 
     for struct_def in templates.structs:
-        if not metadata.structs_contains_key(structs, struct_def.name):
+        if not metadata.structs.has(struct_def.name):
             metadata.structs[struct_def.name] = GenericStructMeta.new(
-                struct_def.name_clone(name),
-                struct_def.generic_params_clone(generic_params)
+                struct_def.name,
+                struct_def.generic_params
             )
 
     for class_def in templates.classes:
-        if not metadata.classes_contains_key(classes, class_def.name):
+        if not metadata.classes.has(class_def.name):
             metadata.classes[class_def.name] = GenericClassMeta.new(
-                class_def.name_clone(name),
-                class_def.generic_params_clone(generic_params)
+                class_def.name,
+                class_def.generic_params
             )
 
     for enum_def in templates.enums:
-        if not metadata.enums_contains_key(enums, enum_def.name):
+        if not metadata.enums.has(enum_def.name):
             metadata.enums[enum_def.name] = GenericEnumMeta.new(
-                enum_def.name_clone(name),
-                enum_def.generic_params_clone(generic_params)
+                enum_def.name,
+                enum_def.generic_params
             )
 
     for trait_def in templates.traits:
-        if not metadata.traits_contains_key(traits, trait_def.name):
+        if not metadata.traits.has(trait_def.name):
             metadata.traits[trait_def.name] = GenericTraitMeta.new(
-                trait_def.name_clone(name),
-                trait_def.generic_params_clone(generic_params)
+                trait_def.name,
+                trait_def.generic_params
             )
 
     # Process specializations
     for func in specialized.functions:
-        if val base_name = func.specialization_of:
+        if func.has_specialization_of:
+            val base_name = func.specialization_of
             # Ensure base template exists in metadata
-            if not metadata.functions_contains_key(functions, base_name):
-                metadata.functions[base_name] = genericfunctionmeta_new(base_name.clone(), [])
+            if not metadata.functions.has(base_name):
+                metadata.functions[base_name] = GenericFunctionMeta.new(base_name, [])
 
             val meta: GenericFunctionMeta = metadata.functions[base_name]
 
             # Extract type args from bindings
             var type_args: [ConcreteType] = []
-            for _item_9 in func.type_bindings_items(type_bindings):
-                val ast_type = _item_9[1]
-                type_args_push(type_args, ConcreteType.Named(ast_type.to_string()))
+            for param in func.type_bindings.keys():
+                val ast_type = func.type_bindings[param]
+                type_args = type_args.push(ConcreteType.Named(ast_type.to_string()))
 
             # Convert type bindings
             var concrete_bindings: {text: ConcreteType} = {}
-            for _item_10 in func.type_bindings_items(type_bindings):
-                val param = _item_10[0]
-                val ast_type = _item_10[1]
-                concrete_bindings[param] = concretetype_Named(ast_type.to_string())
+            for param in func.type_bindings.keys():
+                val ast_type = func.type_bindings[param]
+                concrete_bindings[param] = ConcreteType.Named(ast_type.to_string())
 
             # Add specialization entry
             meta.specializations.push(SpecializationEntry.new(
                 type_args,
-                func.name_clone(name),
+                func.name,
                 concrete_bindings
             ))
 
     for struct_def in specialized.structs:
-        if val base_name = struct_def.specialization_of:
-            if not metadata.structs_contains_key(structs, base_name):
-                metadata.structs[base_name] = genericstructmeta_new(base_name.clone(), [])
+        if struct_def.has_specialization_of:
+            val base_name = struct_def.specialization_of
+            if not metadata.structs.has(base_name):
+                metadata.structs[base_name] = GenericStructMeta.new(base_name, [])
 
             val meta: GenericStructMeta = metadata.structs[base_name]
 
             var type_args: [ConcreteType] = []
-            for _item_11 in struct_def.type_bindings_items(type_bindings):
-                val ast_type = _item_11[1]
-                type_args_push(type_args, ConcreteType.Named(ast_type.to_string()))
+            for param in struct_def.type_bindings.keys():
+                val ast_type = struct_def.type_bindings[param]
+                type_args = type_args.push(ConcreteType.Named(ast_type.to_string()))
 
             var concrete_bindings: {text: ConcreteType} = {}
-            for _item_12 in struct_def.type_bindings_items(type_bindings):
-                val param = _item_12[0]
-                val ast_type = _item_12[1]
-                concrete_bindings[param] = concretetype_Named(ast_type.to_string())
+            for param in struct_def.type_bindings.keys():
+                val ast_type = struct_def.type_bindings[param]
+                concrete_bindings[param] = ConcreteType.Named(ast_type.to_string())
 
             meta.specializations.push(SpecializationEntry.new(
                 type_args,
-                struct_def.name_clone(name),
+                struct_def.name,
                 concrete_bindings
             ))
 
     for class_def in specialized.classes:
-        if val base_name = class_def.specialization_of:
-            if not metadata.classes_contains_key(classes, base_name):
-                metadata.classes[base_name] = genericclassmeta_new(base_name.clone(), [])
+        if class_def.has_specialization_of:
+            val base_name = class_def.specialization_of
+            if not metadata.classes.has(base_name):
+                metadata.classes[base_name] = GenericClassMeta.new(base_name, [])
 
             val meta: GenericClassMeta = metadata.classes[base_name]
 
             var type_args: [ConcreteType] = []
-            for _item_13 in class_def.type_bindings_items(type_bindings):
-                val ast_type = _item_13[1]
-                type_args_push(type_args, ConcreteType.Named(ast_type.to_string()))
+            for param in class_def.type_bindings.keys():
+                val ast_type = class_def.type_bindings[param]
+                type_args = type_args.push(ConcreteType.Named(ast_type.to_string()))
 
             var concrete_bindings: {text: ConcreteType} = {}
-            for _item_14 in class_def.type_bindings_items(type_bindings):
-                val param = _item_14[0]
-                val ast_type = _item_14[1]
-                concrete_bindings[param] = concretetype_Named(ast_type.to_string())
+            for param in class_def.type_bindings.keys():
+                val ast_type = class_def.type_bindings[param]
+                concrete_bindings[param] = ConcreteType.Named(ast_type.to_string())
 
             meta.specializations.push(SpecializationEntry.new(
                 type_args,
-                class_def.name_clone(name),
+                class_def.name,
                 concrete_bindings
             ))
 
     for enum_def in specialized.enums:
-        if val base_name = enum_def.specialization_of:
-            if not metadata.enums_contains_key(enums, base_name):
-                metadata.enums[base_name] = genericenummeta_new(base_name.clone(), [])
+        if enum_def.has_specialization_of:
+            val base_name = enum_def.specialization_of
+            if not metadata.enums.has(base_name):
+                metadata.enums[base_name] = GenericEnumMeta.new(base_name, [])
 
             val meta: GenericEnumMeta = metadata.enums[base_name]
 
             var type_args: [ConcreteType] = []
-            for _item_15 in enum_def.type_bindings_items(type_bindings):
-                val ast_type = _item_15[1]
-                type_args_push(type_args, ConcreteType.Named(ast_type.to_string()))
+            for param in enum_def.type_bindings.keys():
+                val ast_type = enum_def.type_bindings[param]
+                type_args = type_args.push(ConcreteType.Named(ast_type.to_string()))
 
             var concrete_bindings: {text: ConcreteType} = {}
-            for _item_16 in enum_def.type_bindings_items(type_bindings):
-                val param = _item_16[0]
-                val ast_type = _item_16[1]
-                concrete_bindings[param] = concretetype_Named(ast_type.to_string())
+            for param in enum_def.type_bindings.keys():
+                val ast_type = enum_def.type_bindings[param]
+                concrete_bindings[param] = ConcreteType.Named(ast_type.to_string())
 
             meta.specializations.push(SpecializationEntry.new(
                 type_args,
-                enum_def.name_clone(name),
+                enum_def.name,
                 concrete_bindings
             ))
 

@@ -9,9 +9,7 @@
 #
 # ABI contract: "simple.opt.mir.v1"
 
-use lib.json.parser.{json_parse}
-use lib.json.types.{json_to_string, json_to_number, json_to_array}
-use lib.json.object_ops.{json_object_get}
+use std.json.parser.{json_parse}
 use compiler.mir.mir_instructions.{MirModule}
 use compiler.mir_opt.mir_opt.mod.{
     PassScope, mir_pass_descriptor_registry
@@ -432,8 +430,44 @@ fn parse_scope(scope_text: text) -> PassScope:
     else:
         PassScope.Function
 
+fn manifest_json_type(value: any) -> text:
+    if value == nil:
+        return "null"
+    val type_part = value.0
+    if type_part == nil:
+        return "null"
+    type_part
+
+fn manifest_json_to_string(value: any) -> any:
+    if manifest_json_type(value) == "string":
+        return value.1
+    nil
+
+fn manifest_json_to_number(value: any) -> any:
+    if manifest_json_type(value) == "number":
+        return value.1
+    nil
+
+fn manifest_json_to_array(value: any) -> any:
+    if manifest_json_type(value) == "array":
+        return value.1
+    nil
+
+fn manifest_json_to_object(value: any) -> any:
+    if manifest_json_type(value) == "object":
+        return value.1
+    nil
+
+fn manifest_json_object_get(obj: any, key: text) -> any:
+    val map = manifest_json_to_object(obj)
+    if map == nil:
+        return nil
+    if map.has(key):
+        return map[key]
+    nil
+
 fn manifest_json_required(root: any, field: text) -> Result<any, ManifestError>:
-    val value = json_object_get(root, field)
+    val value = manifest_json_object_get(root, field)
     if value == nil:
         return Err(ManifestError.MissingField(field))
     Ok(value)
@@ -444,25 +478,25 @@ fn manifest_json_required_text(root: any, field: text) -> Result<text, ManifestE
         case Err(err):
             Err(err)
         case Ok(value):
-            val text_value = json_to_string(value)
+            val text_value = manifest_json_to_string(value)
             if text_value == nil:
                 return Err(ManifestError.MissingField(field))
             Ok(text_value)
 
 fn manifest_json_optional_text(root: any, field: text, default_value: text) -> text:
-    val value = json_object_get(root, field)
+    val value = manifest_json_object_get(root, field)
     if value == nil:
         return default_value
-    val text_value = json_to_string(value)
+    val text_value = manifest_json_to_string(value)
     if text_value == nil:
         return default_value
     text_value
 
 fn manifest_json_optional_text_opt(root: any, field: text) -> text?:
-    val value = json_object_get(root, field)
+    val value = manifest_json_object_get(root, field)
     if value == nil:
         return nil
-    val text_value = json_to_string(value)
+    val text_value = manifest_json_to_string(value)
     if text_value == nil:
         return nil
     Some(text_value)
@@ -473,7 +507,7 @@ fn manifest_json_required_i64(root: any, field: text) -> Result<i64, ManifestErr
         case Err(err):
             Err(err)
         case Ok(value):
-            val number_value = json_to_number(value)
+            val number_value = manifest_json_to_number(value)
             if number_value == nil:
                 return Err(ManifestError.MissingField(field))
             Ok(number_value as i64)
@@ -484,57 +518,57 @@ fn manifest_json_required_array(root: any, field: text) -> Result<[any], Manifes
         case Err(err):
             Err(err)
         case Ok(value):
-            val array_value = json_to_array(value)
+            val array_value = manifest_json_to_array(value)
             if array_value == nil:
                 return Err(ManifestError.MissingField(field))
             Ok(array_value)
 
 fn manifest_json_optional_text_array(root: any, field: text) -> [text]:
-    val value = json_object_get(root, field)
+    val value = manifest_json_object_get(root, field)
     if value == nil:
         return []
-    val array_value = json_to_array(value)
+    val array_value = manifest_json_to_array(value)
     if array_value == nil:
         return []
     var items: [text] = []
     for item in array_value:
-        val text_value = json_to_string(item)
+        val text_value = manifest_json_to_string(item)
         if text_value != nil:
             items = items.push(text_value)
     items
 
 fn manifest_backend_kinds_from_json_array(value: any) -> [OptimizerBackendKind]:
-    val array_value = json_to_array(value)
+    val array_value = manifest_json_to_array(value)
     if array_value == nil:
         return []
     var kinds: [OptimizerBackendKind] = []
     for item in array_value:
-        val name = json_to_string(item)
+        val name = manifest_json_to_string(item)
         if name != nil:
             kinds = kinds.push(optimization_backend_kind_from_text(name))
     kinds
 
 fn manifest_backend_policy_from_json(pass_json: any) -> OptimizationBackendPolicy:
-    val policy = json_object_get(pass_json, "backend_policy")
+    val policy = manifest_json_object_get(pass_json, "backend_policy")
     if policy == nil:
         return optimization_backend_policy_all()
     val reason = manifest_json_optional_text(policy, "reason", "manifest_backend_policy")
-    val only_value = json_object_get(policy, "only")
+    val only_value = manifest_json_object_get(policy, "only")
     if only_value != nil:
         return optimization_backend_policy_only(manifest_backend_kinds_from_json_array(only_value), reason)
-    val allowed_value = json_object_get(policy, "allowed_backends")
+    val allowed_value = manifest_json_object_get(policy, "allowed_backends")
     if allowed_value != nil:
         return optimization_backend_policy_only(manifest_backend_kinds_from_json_array(allowed_value), reason)
-    val skip_value = json_object_get(policy, "skip")
+    val skip_value = manifest_json_object_get(policy, "skip")
     if skip_value != nil:
         return optimization_backend_policy_skip(manifest_backend_kinds_from_json_array(skip_value), reason)
-    val skipped_value = json_object_get(policy, "skipped_backends")
+    val skipped_value = manifest_json_object_get(policy, "skipped_backends")
     if skipped_value != nil:
         return optimization_backend_policy_skip(manifest_backend_kinds_from_json_array(skipped_value), reason)
     optimization_backend_policy_all()
 
 fn manifest_contract_from_json(pass_json: any) -> ManifestPassContract:
-    val contract = json_object_get(pass_json, "contract")
+    val contract = manifest_json_object_get(pass_json, "contract")
     if contract == nil:
         return manifest_pass_contract_default()
     ManifestPassContract(
@@ -681,10 +715,10 @@ fn manifest_pattern_rules_from_json(rule_values: [any]) -> Result<[PatternRule],
     Ok(rules)
 
 fn manifest_optional_pattern_rules_from_json(root: any) -> Result<[PatternRule], ManifestError>:
-    val rule_value = json_object_get(root, "rules")
+    val rule_value = manifest_json_object_get(root, "rules")
     if rule_value == nil:
         return Ok([])
-    val rule_values = json_to_array(rule_value)
+    val rule_values = manifest_json_to_array(rule_value)
     if rule_values == nil:
         return Err(ManifestError.MissingField("rules"))
     manifest_pattern_rules_from_json(rule_values)

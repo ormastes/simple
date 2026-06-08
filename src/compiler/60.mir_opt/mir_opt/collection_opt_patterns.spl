@@ -12,7 +12,7 @@ use compiler.mir.mir_data.*
 use compiler.mir.mir.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
 use compiler.mir_opt.mir_opt.loop_detect.{LoopInfo, LoopDetector}
-use compiler.mir_opt.mir_opt.collection_opt_core.{CollectionOptimization, PURE_METHODS}
+use compiler.mir_opt.mir_opt.collection_opt_core.{CollectionOptimization}
 
 # ============================================================================
 # Non-loop concat sweep (applies same patterns to all blocks)
@@ -57,7 +57,7 @@ fn colopt_optimize_concat_in_loop(self: CollectionOptimization, blocks: [MirBloc
 
     new_blocks
 
-fn colopt_optimize_concat_block(self: CollectionOptimization, block: MirBlock, func: MirFunction) -> MirBlock:
+me colopt_optimize_concat_block(self: CollectionOptimization, block: MirBlock, func: MirFunction) -> MirBlock:
     val insts = block.instructions
     val count = insts.len()
 
@@ -98,27 +98,30 @@ fn colopt_optimize_concat_block(self: CollectionOptimization, block: MirBlock, f
 
 fn colopt_match_concat_pattern(self: CollectionOptimization, inst1: MirInst, inst2: MirInst, inst3: MirInst) -> MirInst?:
     # inst1: Aggregate(tmp, Array(T), [x])
-    val agg = colopt_match_single_element_aggregate(inst1)
+    val agg: LocalId? = colopt_match_single_element_aggregate(inst1)
     if not agg.?:
         return nil
-    val agg_dest = agg.unwrap()
+    val agg_dest: LocalId = agg.unwrap()
 
     # inst2: Call(result, "+", [arr, tmp])
-    val call_info = colopt_match_add_call(self, inst2, agg_dest)
+    val call_info: bool? = colopt_match_add_call(self, inst2, agg_dest)
     if not call_info.?:
         return nil
 
     # inst3: Copy(arr, result) where arr is the array from the call
-    val copy_info = colopt_match_copy_back(self, inst3, inst2)
+    val copy_info: bool? = colopt_match_copy_back(self, inst3, inst2)
     if not copy_info.?:
         return nil
 
     # Extract the single element and array operand for push
-    val element = colopt_get_aggregate_element(inst1)
-    val arr_operand = colopt_get_call_first_arg(inst2)
+    val element: MirOperand? = colopt_get_aggregate_element(inst1)
+    val arr_operand: MirOperand? = colopt_get_call_first_arg(inst2)
 
     if not element.? or not arr_operand.?:
         return nil
+
+    val push_arr: MirOperand = arr_operand.unwrap()
+    val push_element: MirOperand = element.unwrap()
 
     # Create push call: Call(_, "push", [arr, element])
     val push_func = MirOperand(kind: MirOperandKind.Const(
@@ -126,7 +129,7 @@ fn colopt_match_concat_pattern(self: CollectionOptimization, inst1: MirInst, ins
         MirType.unit()
     ))
     MirInst(
-        kind: MirInstKind.Call(nil, push_func, [arr_operand.unwrap(), element.unwrap()]),
+        kind: MirInstKind.Call(nil, push_func, [push_arr, push_element]),
         span: inst2.span
     )
 
@@ -245,7 +248,7 @@ fn colopt_local_is_text(local_id: LocalId, func: MirFunction) -> bool:
 # Pattern 4: Loop-invariant pure call hoisting
 # ============================================================================
 
-fn colopt_hoist_pure_calls(self: CollectionOptimization, blocks: [MirBlock], loop_info: LoopInfo) -> [MirBlock]:
+me colopt_hoist_pure_calls(self: CollectionOptimization, blocks: [MirBlock], loop_info: LoopInfo) -> [MirBlock]:
     # Build loop membership set
     var loop_set = {}
     loop_set[loop_info.header.id] = true
@@ -321,7 +324,7 @@ fn colopt_loop_has_collection_state_mutation(self: CollectionOptimization, block
                     return true
     false
 
-fn colopt_is_hoistable_loop_invariant_inst(self: CollectionOptimization, inst: MirInst, loop_defs: Dict<i64, bool>, hoisted: Dict<i64, bool>, loop_has_collection_mutation: bool) -> bool:
+me colopt_is_hoistable_loop_invariant_inst(self: CollectionOptimization, inst: MirInst, loop_defs: Dict<i64, bool>, hoisted: Dict<i64, bool>, loop_has_collection_mutation: bool) -> bool:
     if colopt_is_hoistable_pure_call(self, inst, loop_defs, hoisted, loop_has_collection_mutation):
         return true
     if colopt_is_hoistable_scalar_inst(inst, loop_defs, hoisted):

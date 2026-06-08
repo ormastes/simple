@@ -452,3 +452,56 @@ HIR lowering error: Cannot infer type: Cast { expr: Binary { op: BitAnd, left: I
 Current next blocker: make SMF header little-endian byte helpers lowerable in
 stage2 without relying on unsupported `u8` casts/method conversion, or teach
 HIR lowering to infer these `u8` conversions.
+
+## 2026-06-08 Stage2 Lowering Follow-Up
+
+Status: still blocked for the pure-Simple stage2 payload.
+
+This pass continued from a clean worktree on top of the 2026-06-07
+linker/instantiation fixes. The direct stage2 probe remains:
+
+```bash
+cd src/compiler_rust
+target/bootstrap/simple native-build --clean --no-incremental \
+  --backend llvm-lib \
+  --source ../compiler \
+  --source ../app \
+  --source ../lib \
+  --entry ../app/cli/bootstrap_main.spl \
+  -o /tmp/simple_stage2_probe_default
+```
+
+The probe now clears the subsequent lowering blockers for:
+
+- MIR optimizer pass statistics mutability and stale helper calls.
+- optimizer manifest JSON parsing without the old `lib.json.*` helper surface.
+- common JSON parser constructors that depended on non-imported wrapper helpers.
+- build-driver flag parsing for target optimization options.
+- SMF getter mutability in reader/index lookups.
+- linker-wrapper and SMF binary little-endian byte helpers using typed byte
+  locals instead of unsupported conversion helpers.
+- live `bitwise_and`, `bit_shl`, and `bit_shr` helper calls in backend/native
+  encoding paths.
+- platform config enum drift from `TargetOS.Any` to `TargetOS.Unknown`.
+- platform wire text decoding without missing `from_char_code`.
+- monomorphization metadata/partition stale generated constructors, cache
+  helpers, `type_bindings_items`, and specialization optional handling.
+- CUDA output lowering using a non-keyword local name instead of `asm`.
+- nogc sync config SDN parsing through typed enum-aware helpers instead of
+  indexing an unrefined `SdnValue`.
+- nogc sync config integer parsing without the unavailable `common.text.parse_i64`
+  import.
+- placeholder compiler-driver execution engines no longer reference missing
+  `parse_source`, `lower_to_mir`, `codegen`, or `execute_compiled` helpers.
+- async suspension analysis stale generated visitor/list helper calls.
+
+Latest probe still exits `1`, emits no stage2 artifact, and now stops at:
+
+```text
+HIR lowering error: Unknown variable: suspension_points while lowering generate_enum_doc
+```
+
+Current next blocker: clean up the remaining generated accessor/helper artifacts
+in the async desugar documentation path around `generate_enum_doc`, then
+continue the same stage2 probe loop until the native-build path reaches real
+Simple lowering/codegen artifact emission.

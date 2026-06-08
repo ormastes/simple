@@ -53,6 +53,17 @@ class CopyChain:
 fn copychain_new() -> CopyChain:
         CopyChain(copy_map: {})
 
+fn copychain_get_root(chain: CopyChain, local: LocalId) -> LocalId:
+        var current = local
+        var guard = 0
+        while chain.copy_map.has(current.id) and guard < 1024:
+            val next = chain.copy_map[current.id]
+            if next.id == current.id:
+                return current
+            current = next
+            guard = guard + 1
+        current
+
 
 # ============================================================================
 # Copy Propagation Pass
@@ -100,7 +111,7 @@ fn copypropagation_propagate_block(self: CopyPropagation, block: MirBlock) -> Mi
 
         for inst in block.instructions:
             val propagated = self.propagate_instruction(inst)
-            propagated_instructions_push(propagated_instructions, propagated)
+            propagated_instructions = propagated_instructions.push(propagated)
 
         # Propagate in terminator
         val propagated_term = self.propagate_terminator(block.terminator)
@@ -113,7 +124,7 @@ fn copypropagation_propagate_block(self: CopyPropagation, block: MirBlock) -> Mi
         )
 
 
-fn copypropagation_propagate_instruction(self: CopyPropagation, inst: MirInst) -> MirInst:
+me copypropagation_propagate_instruction(self: CopyPropagation, inst: MirInst) -> MirInst:
         """
         Propagate copies in an instruction.
 
@@ -124,21 +135,21 @@ fn copypropagation_propagate_instruction(self: CopyPropagation, inst: MirInst) -
                 val new_left = self.propagate_operand(left)
                 val new_right = self.propagate_operand(right)
                 MirInst(
-                    kind: mirinstkind_BinOp(dest, op, new_left, new_right),
+                    kind: MirInstKind.BinOp(dest, op, new_left, new_right),
                     span: inst.span
                 )
 
             case UnaryOp(dest, op, operand):
                 val new_operand = self.propagate_operand(operand)
                 MirInst(
-                    kind: mirinstkind_UnaryOp(dest, op, new_operand),
+                    kind: MirInstKind.UnaryOp(dest, op, new_operand),
                     span: inst.span
                 )
 
             case Load(dest, ptr):
                 val new_ptr = self.propagate_operand(ptr)
                 MirInst(
-                    kind: mirinstkind_Load(dest, new_ptr),
+                    kind: MirInstKind.Load(dest, new_ptr),
                     span: inst.span
                 )
 
@@ -146,7 +157,7 @@ fn copypropagation_propagate_instruction(self: CopyPropagation, inst: MirInst) -
                 val new_ptr = self.propagate_operand(ptr)
                 val new_value = self.propagate_operand(value)
                 MirInst(
-                    kind: mirinstkind_Store(new_ptr, new_value),
+                    kind: MirInstKind.Store(new_ptr, new_value),
                     span: inst.span
                 )
 
@@ -154,20 +165,20 @@ fn copypropagation_propagate_instruction(self: CopyPropagation, inst: MirInst) -
                 val new_func = self.propagate_operand(func)
                 var new_args: [MirOperand] = []
                 for arg in args:
-                    new_args_push(new_args, self.propagate_operand(arg))
+                    new_args = new_args.push(self.propagate_operand(arg))
                 MirInst(
-                    kind: mirinstkind_Call(dest, new_func, new_args),
+                    kind: MirInstKind.Call(dest, new_func, new_args),
                     span: inst.span
                 )
 
             case Copy(dest, src):
                 # Keep copy instruction (DCE will remove if unused)
-                val root = self.copy_chain_get_root(copy_chain, src)
+                val root = copychain_get_root(self.copy_chain, src)
                 if root.id != src.id:
                     # Source is itself a copy - propagate
                     self.eliminated_copies = self.eliminated_copies + 1
                     MirInst(
-                        kind: mirinstkind_Copy(dest, root),
+                        kind: MirInstKind.Copy(dest, root),
                         span: inst.span
                     )
                 else:
@@ -175,11 +186,11 @@ fn copypropagation_propagate_instruction(self: CopyPropagation, inst: MirInst) -
 
             case Move(dest, src):
                 # Propagate move source
-                val root = self.copy_chain_get_root(copy_chain, src)
+                val root = copychain_get_root(self.copy_chain, src)
                 if root.id != src.id:
                     self.eliminated_copies = self.eliminated_copies + 1
                     MirInst(
-                        kind: mirinstkind_Move(dest, root),
+                        kind: MirInstKind.Move(dest, root),
                         span: inst.span
                     )
                 else:
@@ -190,7 +201,7 @@ fn copypropagation_propagate_instruction(self: CopyPropagation, inst: MirInst) -
                 inst
 
 
-fn copypropagation_propagate_operand(self: CopyPropagation, operand: MirOperand) -> MirOperand:
+me copypropagation_propagate_operand(self: CopyPropagation, operand: MirOperand) -> MirOperand:
         """
         Propagate copy in an operand.
 
@@ -198,19 +209,19 @@ fn copypropagation_propagate_operand(self: CopyPropagation, operand: MirOperand)
         """
         match operand.kind:
             case Copy(local):
-                val root = self.copy_chain_get_root(copy_chain, local)
+                val root = copychain_get_root(self.copy_chain, local)
                 if root.id != local.id:
                     # Propagate to root
                     self.propagated_uses = self.propagated_uses + 1
-                    MirOperand(kind: miroperandkind_Copy(root))
+                    MirOperand(kind: MirOperandKind.Copy(root))
                 else:
                     operand
 
             case Move(local):
-                val root = self.copy_chain_get_root(copy_chain, local)
+                val root = copychain_get_root(self.copy_chain, local)
                 if root.id != local.id:
                     self.propagated_uses = self.propagated_uses + 1
-                    MirOperand(kind: miroperandkind_Move(root))
+                    MirOperand(kind: MirOperandKind.Move(root))
                 else:
                     operand
 
@@ -224,22 +235,22 @@ fn copypropagation_propagate_terminator(self: CopyPropagation, term: MirTerminat
         match term:
             case Ret(value):
                 val new_value = self.propagate_operand(value)
-                mirterminator_Return(new_value)
+                MirTerminator.Ret(new_value)
 
             case If(cond, then_, else_):
                 val new_cond = self.propagate_operand(cond)
-                mirterminator_If(new_cond, then_, else_)
+                MirTerminator.If(new_cond, then_, else_)
 
             case Switch(value, targets, default):
                 val new_value = self.propagate_operand(value)
-                mirterminator_Switch(new_value, targets, default)
+                MirTerminator.Switch(new_value, targets, default)
 
             case CallTerminator(dest, func, args, normal, unwind):
                 val new_func = self.propagate_operand(func)
                 var new_args: [MirOperand] = []
                 for arg in args:
-                    new_args_push(new_args, self.propagate_operand(arg))
-                mirterminator_CallTerminator(dest, new_func, new_args, normal, unwind)
+                    new_args = new_args.push(self.propagate_operand(arg))
+                MirTerminator.CallTerminator(dest, new_func, new_args, normal, unwind)
 
             case _:
                 # Other terminators don't use operands
@@ -257,4 +268,3 @@ fn create_copy_prop_pass() -> CopyPropagation:
 # ============================================================================
 # Exports
 # ============================================================================
-
