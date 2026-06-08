@@ -640,3 +640,24 @@ HIR lowering error: Unknown variable: ReadFileErr while lowering read_file
 Current next blocker: inspect the file-reading result/error type around
 `read_file` for stale enum constructor or import naming, then continue the same
 stage2 probe loop.
+
+## 2026-06-08 Lint Read-File Constructor Follow-Up
+
+Status: still blocked for the pure-Simple stage2 payload.
+
+The same direct stage2 probe now clears the next blockers for:
+
+- `LintReadFileResult` constructors in `read_file` and `Linter.lint_file` are
+  now qualified with the current enum type.
+- `LintFileResult` constructors in the lint file/reporting path are now
+  qualified with the current enum type.
+
+Latest probe still exits `1`, emits no stage2 artifact, and now stops at:
+
+```text
+HIR lowering error: Memory safety error [W1006]: mutation without mut capability (field_4): mutation requires `mut` capability on the receiver while lowering compileoptions_normalize_mir_optimization at 209:19
+```
+
+Current next blocker: inspect `compileoptions_normalize_mir_optimization` for a
+receiver/parameter that mutates fields without `me`/`var`/mut capability, then
+continue the same stage2 probe loop.
