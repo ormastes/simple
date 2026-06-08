@@ -63,18 +63,26 @@ markers emitted from the real AP ring/user path.
 
 #### dispatches a real user handoff pid through the green lane
 
-- var sched = seed user handoff task
-   - Expected: step.ran is true
-   - Expected: step.dispatch.task_id equals `pid as i64`
-   - Expected: sched.green_current_task_on_cpu(1u32) equals `pid`
+- build a real x86_64 user process image from executable bytes
+- seed a hosted scheduler user task from that image
+- var sched = seed user handoff task from image
+   - Expected: created_present equals `1`
+   - Expected: created_task.entry_point equals `expected_entry`
+   - Expected: created_task.user_stack equals `expected_stack_top`
+   - Expected: created_task.address_space equals `1`
+   - Expected: created_ctx_present equals `1`
+- dispatch that real user task through the green-carrier lane
+   - Expected: step.dispatch.task_id equals `task_id.id as i64`
+   - Expected: sched.green_current_task_on_cpu(1u32) equals `task_id.id`
    - Expected: sched.green_context_switches_on_cpu(1u32) equals `1`
    - Expected: sched.get_current_on_cpu(0u32).id equals `0`
-   - Expected: handoff == nil is false
-   - Expected: task.id.id equals `pid`
-   - Expected: task.is_user is true
-   - Expected: task.user_context == nil is false
-   - Expected: user_ctx.rip equals `0x400000`
-   - Expected: user_ctx.rsp equals `0x3fffffff80`
+- expose the scheduler user handoff record without synthetic task data
+   - Expected: handoff_present equals `1`
+   - Expected: task.id.id equals `task_id.id`
+   - Expected: task.address_space equals `1`
+   - Expected: user_context_present equals `1`
+   - Expected: user_ctx.rip equals `expected_entry`
+   - Expected: user_ctx.rsp equals `expected_user_sp`
    - Expected: user_ctx.cs equals `0x2B`
    - Expected: user_ctx.ss equals `0x23`
 
@@ -82,35 +90,60 @@ markers emitted from the real AP ring/user path.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 52 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val pid = 701u64
-var sched = seed_user_handoff_task(Scheduler.new_with_cpu_count(2u32), pid, 0x400000, 0x3fffffff80)
+step("build a real x86_64 user process image from executable bytes")
+val image_result = build_user_process_image("/sys/apps/green_ring3_probe", make_x86_64_exec(), Architecture.X86_64, [], [])
+expect(image_result.is_ok()).to_be(true)
+val image = image_result.unwrap()
+val expected_entry = image.entry
+val expected_user_sp = image.initial_sp & 0xFFFFFFFFFFFFFFF0
+val expected_stack_top = image.stack_top
 
+step("seed a hosted scheduler user task from that image")
+val task_id = TaskId(id: 701u64)
+var sched = seed_user_handoff_task_from_image(Scheduler.new_with_cpu_count(2u32), task_id.id, image)
+val created = sched.get_task(task_id)
+val created_present = if created == nil: 0 else: 1
+expect(created_present).to_equal(1)
+if created != nil:
+    val created_task = created
+    expect(created_task.is_user).to_be(true)
+    expect(created_task.entry_point).to_equal(expected_entry)
+    expect(created_task.user_stack).to_equal(expected_stack_top)
+    expect(created_task.address_space).to_equal(1)
+    val created_ctx_present = if created_task.user_context == nil: 0 else: 1
+    expect(created_ctx_present).to_equal(1)
+
+step("dispatch that real user task through the green-carrier lane")
 val queues = green_carrier_run_queues_new(2, 4)
-val decision = green_carrier_spawn_task(pid as i64, 2, 2, 0, 1, 0, 0, 0)
+val decision = green_carrier_spawn_task(task_id.id as i64, 2, 2, 0, 1, 0, 0, 0)
 val queued = green_carrier_apply_enqueue(queues, decision)
 val step = sched.run_green_carrier_once(queued.queues, 1)
 
-expect(step.ran).to_equal(true)
-expect(step.dispatch.task_id).to_equal(pid as i64)
-expect(sched.green_current_task_on_cpu(1u32)).to_equal(pid)
+expect(step.ran).to_be(true)
+expect(step.dispatch.task_id).to_equal(task_id.id as i64)
+expect(sched.green_current_task_on_cpu(1u32)).to_equal(task_id.id)
 expect(sched.green_context_switches_on_cpu(1u32)).to_equal(1)
 expect(sched.get_current_on_cpu(0u32).id).to_equal(0)
 
-val handoff = sched.get_user_handoff_task(pid)
-expect(handoff == nil).to_equal(false)
+step("expose the scheduler user handoff record without synthetic task data")
+val handoff = sched.get_user_handoff_task(task_id.id)
+val handoff_present = if handoff == nil: 0 else: 1
+expect(handoff_present).to_equal(1)
 if handoff != nil:
     val task = handoff
-    expect(task.id.id).to_equal(pid)
-    expect(task.is_user).to_equal(true)
-    expect(task.user_context == nil).to_equal(false)
+    expect(task.id.id).to_equal(task_id.id)
+    expect(task.is_user).to_be(true)
+    expect(task.address_space).to_equal(1)
+    val user_context_present = if task.user_context == nil: 0 else: 1
+    expect(user_context_present).to_equal(1)
     if task.user_context != nil:
         val user_ctx = task.user_context.unwrap()
-        expect(user_ctx.rip).to_equal(0x400000)
-        expect(user_ctx.rsp).to_equal(0x3fffffff80)
+        expect(user_ctx.rip).to_equal(expected_entry)
+        expect(user_ctx.rsp).to_equal(expected_user_sp)
         expect(user_ctx.cs).to_equal(0x2B)
         expect(user_ctx.ss).to_equal(0x23)
 ```

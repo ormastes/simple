@@ -109,7 +109,7 @@ expect(built.file_bytes[0]).to_equal(0x7F.to_u8())
 
 #### builds an x86_64 user image from multi-PT_LOAD app bytes and owns the copies
 
-1. var bytes = make multi pt load x86 64 exec
+- var bytes = make multi pt load x86 64 exec
    - Expected: image.is_ok() is true
    - Expected: built.entry equals `0x400000`
    - Expected: built.stack_top equals `X86_64_USER_STACK_TOP`
@@ -122,9 +122,9 @@ expect(built.file_bytes[0]).to_equal(0x7F.to_u8())
    - Expected: built.segments[1].mem_size equals `0x1000`
    - Expected: built.segments[1].data.len() equals `0`
    - Expected: built.file_bytes[0] equals `0x7F.to_u8()`
-   - Expected: built.file_bytes[0x1000] equals `0xC3.to_u8()`
-2. bytes[0] = 0x00 to u8
-3. bytes[0x1000] = 0x00 to u8
+   - Expected: built.file_bytes[0xC0] equals `0xC3.to_u8()`
+- bytes[0] = 0x00 to u8
+- bytes[0xC0] = 0x00 to u8
    - Expected: built.file_bytes[0] equals `0x7F.to_u8()`
    - Expected: built.segments[0].data[0] equals `0xC3.to_u8()`
 
@@ -152,10 +152,10 @@ expect(built.segments[1].file_size).to_equal(0)
 expect(built.segments[1].mem_size).to_equal(0x1000)
 expect(built.segments[1].data.len()).to_equal(0)
 expect(built.file_bytes[0]).to_equal(0x7F.to_u8())
-expect(built.file_bytes[0x1000]).to_equal(0xC3.to_u8())
+expect(built.file_bytes[0xC0]).to_equal(0xC3.to_u8())
 
 bytes[0] = 0x00.to_u8()
-bytes[0x1000] = 0x00.to_u8()
+bytes[0xC0] = 0x00.to_u8()
 
 expect(built.file_bytes[0]).to_equal(0x7F.to_u8())
 expect(built.segments[0].data[0]).to_equal(0xC3.to_u8())

@@ -94,7 +94,7 @@ _Cleanup path accepts freshly-created handles._
 
 #### leaves the caller's phys_root field value unchanged
 
-1. destroy user address space
+- destroy user address space
    - Expected: space.phys_root equals `before`
 
 
@@ -115,7 +115,7 @@ expect(space.phys_root).to_equal(before)
 
 #### leaves the caller's id field unchanged
 
-1. destroy user address space
+- destroy user address space
    - Expected: space.id equals `before_id`
 
 
@@ -136,7 +136,7 @@ expect(space.id).to_equal(before_id)
 
 #### is a no-op on the legacy sentinel
 
-1. destroy user address space
+- destroy user address space
    - Expected: sentinel.phys_root equals `1`
 
 

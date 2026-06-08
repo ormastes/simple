@@ -13,10 +13,11 @@ markers emitted from the real AP ring/user path.
 **Research:** doc/01_research/local/multicore_green.md
 """
 
-use std.spec.{describe, it, expect}
+use std.spec.{describe, it, expect, step}
 use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.loader.process_image.{build_user_process_image}
 use os.kernel.types.task_types.{
-    TaskId, TaskPriority, TaskState,
+    TaskId, TaskPriority, TaskState, UserProcessImage,
     default_task_isolation, default_task_schedule
 }
 use os.kernel.types.capability_types.{CapabilitySet}
@@ -24,21 +25,84 @@ use os.kernel.scheduler.scheduler.{Scheduler, scheduler_user_context_for_arch}
 use os.kernel.scheduler.scheduler_types.{TaskControlBlock}
 use os.kernel.scheduler.green_carrier.{green_carrier_apply_enqueue, green_carrier_run_queues_new, green_carrier_spawn_task}
 
-fn seed_user_handoff_task(sched: Scheduler, pid: u64, entry: u64, user_sp: u64) -> Scheduler:
+fn push_u16_le(buf: [u8], value: i64) -> [u8]:
+    var out: [u8] = buf
+    out.push((value & 0xFF).to_u8())
+    out.push(((value >> 8) & 0xFF).to_u8())
+    out
+
+fn push_u32_le(buf: [u8], value: i64) -> [u8]:
+    var out: [u8] = buf
+    out.push((value & 0xFF).to_u8())
+    out.push(((value >> 8) & 0xFF).to_u8())
+    out.push(((value >> 16) & 0xFF).to_u8())
+    out.push(((value >> 24) & 0xFF).to_u8())
+    out
+
+fn push_u64_le(buf: [u8], value: i64) -> [u8]:
+    var out: [u8] = buf
+    out = push_u32_le(out, value & 0xFFFFFFFF)
+    out = push_u32_le(out, (value >> 32) & 0xFFFFFFFF)
+    out
+
+fn make_x86_64_exec() -> [u8]:
+    var bytes: [u8] = []
+    bytes.push(0x7F.to_u8())
+    bytes.push(0x45.to_u8())
+    bytes.push(0x4C.to_u8())
+    bytes.push(0x46.to_u8())
+    bytes.push(2.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    while bytes.len() < 16:
+        bytes.push(0.to_u8())
+    bytes = push_u16_le(bytes, 2)
+    bytes = push_u16_le(bytes, 62)
+    bytes = push_u32_le(bytes, 1)
+    bytes = push_u64_le(bytes, 0x400000)
+    bytes = push_u64_le(bytes, 64)
+    bytes = push_u64_le(bytes, 0)
+    bytes = push_u32_le(bytes, 0)
+    bytes = push_u16_le(bytes, 64)
+    bytes = push_u16_le(bytes, 56)
+    bytes = push_u16_le(bytes, 1)
+    bytes = push_u16_le(bytes, 0)
+    bytes = push_u16_le(bytes, 0)
+    bytes = push_u16_le(bytes, 0)
+    bytes = push_u32_le(bytes, 1)
+    bytes = push_u32_le(bytes, 5)
+    bytes = push_u64_le(bytes, 0x80)
+    bytes = push_u64_le(bytes, 0x400000)
+    bytes = push_u64_le(bytes, 0x400000)
+    bytes = push_u64_le(bytes, 4)
+    bytes = push_u64_le(bytes, 4)
+    bytes = push_u64_le(bytes, 0x1000)
+    while bytes.len() < 0x80:
+        bytes.push(0.to_u8())
+    bytes.push(0xC3.to_u8())
+    bytes.push(0x90.to_u8())
+    bytes.push(0x90.to_u8())
+    bytes.push(0x90.to_u8())
+    bytes
+
+fn seed_user_handoff_task_from_image(sched: Scheduler, pid: u64, image: UserProcessImage) -> Scheduler:
     var next = sched
-    val user_ctx = scheduler_user_context_for_arch(Architecture.X86_64, entry, user_sp)
+    val user_sp = image.initial_sp & 0xFFFFFFFFFFFFFFF0
+    val user_ctx = scheduler_user_context_for_arch(Architecture.X86_64, image.entry, user_sp)
     next.tasks[0] = TaskControlBlock(
         id: TaskId(id: pid),
         name: "green-user",
         state: TaskState.Ready,
         priority: TaskPriority.Normal,
         is_user: true,
-        entry_point: entry,
+        entry_point: image.entry,
         context: user_ctx,
         user_context: Some(user_ctx),
         address_space: 1,
         kernel_stack: 0,
-        user_stack: 0x4000000000,
+        user_stack: image.stack_top,
         capabilities: CapabilitySet.full(),
         parent: Some(TaskId(id: 0)),
         schedule: default_task_schedule(TaskPriority.Normal),
@@ -51,30 +115,55 @@ fn seed_user_handoff_task(sched: Scheduler, pid: u64, entry: u64, user_sp: u64) 
 
 describe "Scheduler green user handoff":
     it "dispatches a real user handoff pid through the green lane":
-        val pid = 701u64
-        var sched = seed_user_handoff_task(Scheduler.new_with_cpu_count(2u32), pid, 0x400000, 0x3fffffff80)
+        step("build a real x86_64 user process image from executable bytes")
+        val image_result = build_user_process_image("/sys/apps/green_ring3_probe", make_x86_64_exec(), Architecture.X86_64, [], [])
+        expect(image_result.is_ok()).to_be(true)
+        val image = image_result.unwrap()
+        val expected_entry = image.entry
+        val expected_user_sp = image.initial_sp & 0xFFFFFFFFFFFFFFF0
+        val expected_stack_top = image.stack_top
 
+        step("seed a hosted scheduler user task from that image")
+        val task_id = TaskId(id: 701u64)
+        var sched = seed_user_handoff_task_from_image(Scheduler.new_with_cpu_count(2u32), task_id.id, image)
+        val created = sched.get_task(task_id)
+        val created_present = if created == nil: 0 else: 1
+        expect(created_present).to_equal(1)
+        if created != nil:
+            val created_task = created
+            expect(created_task.is_user).to_be(true)
+            expect(created_task.entry_point).to_equal(expected_entry)
+            expect(created_task.user_stack).to_equal(expected_stack_top)
+            expect(created_task.address_space).to_equal(1)
+            val created_ctx_present = if created_task.user_context == nil: 0 else: 1
+            expect(created_ctx_present).to_equal(1)
+
+        step("dispatch that real user task through the green-carrier lane")
         val queues = green_carrier_run_queues_new(2, 4)
-        val decision = green_carrier_spawn_task(pid as i64, 2, 2, 0, 1, 0, 0, 0)
+        val decision = green_carrier_spawn_task(task_id.id as i64, 2, 2, 0, 1, 0, 0, 0)
         val queued = green_carrier_apply_enqueue(queues, decision)
         val step = sched.run_green_carrier_once(queued.queues, 1)
 
-        expect(step.ran).to_equal(true)
-        expect(step.dispatch.task_id).to_equal(pid as i64)
-        expect(sched.green_current_task_on_cpu(1u32)).to_equal(pid)
+        expect(step.ran).to_be(true)
+        expect(step.dispatch.task_id).to_equal(task_id.id as i64)
+        expect(sched.green_current_task_on_cpu(1u32)).to_equal(task_id.id)
         expect(sched.green_context_switches_on_cpu(1u32)).to_equal(1)
         expect(sched.get_current_on_cpu(0u32).id).to_equal(0)
 
-        val handoff = sched.get_user_handoff_task(pid)
-        expect(handoff == nil).to_equal(false)
+        step("expose the scheduler user handoff record without synthetic task data")
+        val handoff = sched.get_user_handoff_task(task_id.id)
+        val handoff_present = if handoff == nil: 0 else: 1
+        expect(handoff_present).to_equal(1)
         if handoff != nil:
             val task = handoff
-            expect(task.id.id).to_equal(pid)
-            expect(task.is_user).to_equal(true)
-            expect(task.user_context == nil).to_equal(false)
+            expect(task.id.id).to_equal(task_id.id)
+            expect(task.is_user).to_be(true)
+            expect(task.address_space).to_equal(1)
+            val user_context_present = if task.user_context == nil: 0 else: 1
+            expect(user_context_present).to_equal(1)
             if task.user_context != nil:
                 val user_ctx = task.user_context.unwrap()
-                expect(user_ctx.rip).to_equal(0x400000)
-                expect(user_ctx.rsp).to_equal(0x3fffffff80)
+                expect(user_ctx.rip).to_equal(expected_entry)
+                expect(user_ctx.rsp).to_equal(expected_user_sp)
                 expect(user_ctx.cs).to_equal(0x2B)
                 expect(user_ctx.ss).to_equal(0x23)
