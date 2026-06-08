@@ -210,10 +210,12 @@ execution model:
 
 Use `cooperative_green_spawn` for lightweight cooperative scheduling tests, and
 `cooperative_green_spawn_value` when a direct-run benchmark needs to exercise
-the queue without function-value calls. Do not use either for Go-style M:N
-CPU-parallel benchmarks. Use `multicore_green_spawn` for current cross-language
-Go-like benchmark work, use `task_spawn` only for direct task API checks, or use
-a future scheduler-aware green runtime when that lands. When a test or profile
+the queue without delayed function-valued storage. Function-valued parameters
+are native-covered, but function arrays/globals remain separate delayed-storage
+blockers. Do not use either cooperative API for Go-style M:N CPU-parallel
+benchmarks. Use `multicore_green_spawn` for current cross-language Go-like
+benchmark work, use `task_spawn` only for direct task API checks, or use a
+future scheduler-aware green runtime when that lands. When a test or profile
 claims M:N CPU parallelism, assert `used_runtime_pool()` so interpreter or
 platform fallback does not masquerade as a parallel result.
 Call `multicore_green_set_parallelism(workers)` before the first

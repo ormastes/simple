@@ -67,8 +67,10 @@ Responsibilities:
 - Return a positive handle only when the runtime pool owns the work.
 - Allow `MulticoreGreenHandle.used_runtime_pool()` to be the trust boundary for
   profile and M:N evidence.
-- Report the current shared FIFO queue model in meaningful Simple-facing terms
-  through `multicore_green_uses_global_fifo_queue()`.
+- Report the hosted queue model in meaningful Simple-facing terms through
+  `multicore_green_uses_global_fifo_queue()` and
+  `multicore_green_uses_work_stealing()`. Profile evidence treats shared FIFO
+  as invalid for M:N claims and requires work-stealing evidence.
 
 ### Profile And Evidence Layer
 
