@@ -661,3 +661,34 @@ HIR lowering error: Memory safety error [W1006]: mutation without mut capability
 Current next blocker: inspect `compileoptions_normalize_mir_optimization` for a
 receiver/parameter that mutates fields without `me`/`var`/mut capability, then
 continue the same stage2 probe loop.
+
+## 2026-06-08 Bootstrap Mutability Lowering Follow-Up
+
+Status: still blocked for the pure-Simple stage2 payload.
+
+The same direct stage2 probe now clears the next mutability blockers for:
+
+- `compileoptions_normalize_mir_optimization` now returns a copied
+  `CompileOptions` value instead of mutating fields on its input options.
+- `platform_select_variant_for_arch` now tracks best/fallback variants by index
+  instead of rebinding optional `PlatformVariant` values.
+- `platform_validate_variants` now tracks the previous default variant by index
+  instead of rebinding an optional `Span`.
+- `parse_volatile_attrs` now tracks optional address state with a boolean and
+  scalar value, then constructs `Some(...)` once at return.
+- `parse_function_attrs` now tracks optional section state with a boolean and
+  scalar value, then constructs `Some(...)` once at return.
+- `parse_task_attr` now tracks optional task metadata with boolean/scalar
+  values instead of rebinding optional `text`/`i64` fields.
+- `parse_layout_attrs` now tracks explicit alignment with a boolean and scalar
+  value instead of rebinding an optional `i64`.
+
+Latest probe still exits `1`, emits no stage2 artifact, and now stops at:
+
+```text
+HIR lowering error: Memory safety error [W1003]: mutable binding with shared type (hir_target): shared pointers cannot be reassigned; use `val` instead of `var` at 38:13
+```
+
+Current next blocker: locate the `hir_target` mutable shared binding in the
+next lowered file, convert it to value/index tracking if it is another optional
+or shared accumulator, then continue the same stage2 probe loop.

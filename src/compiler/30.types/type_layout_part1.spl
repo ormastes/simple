@@ -434,32 +434,38 @@ fn platform_predicate_specificity(pred: PlatformPredicate) -> i64:
     score
 
 fn platform_select_variant_for_arch(variants: [PlatformVariant], arch: TargetArch) -> PlatformVariant?:
-    var best: PlatformVariant? = nil
+    var best_index: i64 = -1
     var best_score: i64 = -1
-    var fallback: PlatformVariant? = nil
+    var fallback_index: i64 = -1
 
-    for variant in variants:
+    var variant_index = 0
+    while variant_index < variants.len():
+        val variant = variants[variant_index]
         if variant.predicate.has_default:
-            if not fallback.?:
-                fallback = Some(variant)
+            if fallback_index < 0:
+                fallback_index = variant_index
+            variant_index = variant_index + 1
             continue
 
         if platform_predicate_matches_arch(variant.predicate, arch):
             val score = platform_predicate_specificity(variant.predicate)
             if score > best_score:
-                best = Some(variant)
+                best_index = variant_index
                 best_score = score
+        variant_index = variant_index + 1
 
-    if best.?:
-        return best
-    fallback
+    if best_index >= 0:
+        return Some(variants[best_index])
+    if fallback_index >= 0:
+        return Some(variants[fallback_index])
+    nil
 
 fn platform_validate_variants(variants: [PlatformVariant]) -> [PlatformLayoutDiagnostic]:
     var diagnostics: [PlatformLayoutDiagnostic] = []
     var seen_keys: [text] = []
     var seen_spans: [Span] = []
     var seen_default = false
-    var seen_default_span: Span? = nil
+    var seen_default_index: i64 = -1
 
     var vi = 0
     while vi < variants.len():
@@ -471,12 +477,12 @@ fn platform_validate_variants(variants: [PlatformVariant]) -> [PlatformLayoutDia
             if seen_default:
                 diagnostics.push(PlatformLayoutDiagnostic.DuplicateDefault(
                     span: variant.span,
-                    previous_span: seen_default_span ?? variant.span
+                    previous_span: if seen_default_index >= 0: variants[seen_default_index].span else: variant.span
                 ))
                 is_duplicate_default = true
             else:
                 seen_default = true
-                seen_default_span = variant.span
+                seen_default_index = vi
 
         if not is_duplicate_default:
             var si = 0
