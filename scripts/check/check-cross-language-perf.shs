@@ -56,6 +56,10 @@ FIB_N="${FIB_N:-35}"
 CPU_WORKERS="${CPU_WORKERS:-${WORKERS:-100}}"
 OS_THREAD_WORKERS="${OS_THREAD_WORKERS:-$CPU_WORKERS}"
 MULTICORE_GREEN_WORKERS="${MULTICORE_GREEN_WORKERS:-$CPU_WORKERS}"
+if [ -z "${GOMAXPROCS:-}" ]; then
+    GOMAXPROCS="$CPU_WORKERS"
+fi
+export GOMAXPROCS
 WORKERS="$OS_THREAD_WORKERS"
 FANOUT_WORKERS="${FANOUT_WORKERS:-1000}"
 FANOUT_OS_THREAD_WORKERS="${FANOUT_OS_THREAD_WORKERS:-$FANOUT_WORKERS}"
@@ -116,6 +120,7 @@ if [ "$PROFILE_DOCKER_ISOLATION" = "1" ] && [ "$PROFILE_DOCKER_INSIDE" != "1" ];
         -e RUNS="$RUNS" \
         -e FIB_N="$FIB_N" \
         -e CPU_WORKERS="$CPU_WORKERS" \
+        -e GOMAXPROCS="$GOMAXPROCS" \
         -e OS_THREAD_WORKERS="$OS_THREAD_WORKERS" \
         -e MULTICORE_GREEN_WORKERS="$MULTICORE_GREEN_WORKERS" \
         -e COOPERATIVE_GREEN_WORKERS="$COOPERATIVE_GREEN_WORKERS" \
@@ -1276,7 +1281,7 @@ cat >"$REPORT_PATH" <<EOF
 **Date:** $(date +%Y-%m-%d)
 **Machine:** $(uname -m) / $(uname -s) $(uname -r)
 **CPU:** $(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs || sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "unknown")
-**Runs per measurement:** $RUNS | **Warmup (in-process):** $WARM_IN_PROCESS | **fib(N):** $FIB_N | **CPU workers:** $CPU_WORKERS | **OS thread workers:** $OS_THREAD_WORKERS | **Cooperative green workers:** $COOPERATIVE_GREEN_WORKERS | **Multicore green workers:** $MULTICORE_GREEN_WORKERS | **Fanout workers:** $FANOUT_WORKERS | **Fanout cooperative green workers:** $FANOUT_COOPERATIVE_GREEN_WORKERS | **Fanout multicore green workers:** $FANOUT_MULTICORE_GREEN_WORKERS | **Fanout iters:** $FANOUT_ITERS | **Fanout stress workers:** $FANOUT_STRESS_WORKERS | **Fanout stress iters:** $FANOUT_STRESS_ITERS | **Per-run timeout:** ${RUN_TIMEOUT}s
+**Runs per measurement:** $RUNS | **Warmup (in-process):** $WARM_IN_PROCESS | **fib(N):** $FIB_N | **CPU workers:** $CPU_WORKERS | **Go GOMAXPROCS:** $GOMAXPROCS | **OS thread workers:** $OS_THREAD_WORKERS | **Cooperative green workers:** $COOPERATIVE_GREEN_WORKERS | **Multicore green workers:** $MULTICORE_GREEN_WORKERS | **Fanout workers:** $FANOUT_WORKERS | **Fanout cooperative green workers:** $FANOUT_COOPERATIVE_GREEN_WORKERS | **Fanout multicore green workers:** $FANOUT_MULTICORE_GREEN_WORKERS | **Fanout iters:** $FANOUT_ITERS | **Fanout stress workers:** $FANOUT_STRESS_WORKERS | **Fanout stress iters:** $FANOUT_STRESS_ITERS | **Per-run timeout:** ${RUN_TIMEOUT}s
 **Profile script:** \`scripts/check/check-cross-language-perf.shs\`
 **Report path:** \`$REPORT_PATH\`
 **Profile contract:** $PROFILE_CONTRACT_STATUS
@@ -1289,6 +1294,7 @@ cat >"$REPORT_PATH" <<EOF
 - Uses bounded commands so failed, missing, timed-out, or unavailable lanes are classified instead of silently treated as passing data.
 - Supports \`PROFILE_DOCKER_ISOLATION=1\` to re-exec the same profile script in a Docker container with \`--network=none\`, a memory limit, a CPU limit, and the current UID/GID. Use this mode for crash-prone native and SMF profile runs. Build \`simple-cross-language-perf:latest\` with \`docker build -t simple-cross-language-perf:latest -f tools/docker/Dockerfile.cross-language-perf tools/docker\` for contract-gated C/Go comparison evidence. Unless \`PROFILE_DOCKER_SIMPLE_BINARY\` is explicitly set, the container run auto-selects \`src/compiler_rust/target/debug/simple\` when present so the fixed native linker path is used. The fixed linker-order blocker for Simple native rows is recorded in \`doc/08_tracking/bug/docker_cross_language_profile_native_link_2026-06-08.md\`.
 - Generated Simple concurrency workloads compute an expected checksum and exit nonzero on mismatch, so runtime-pool closure failures cannot be timed as valid M:N evidence.
+- Go commands inherit \`GOMAXPROCS=$GOMAXPROCS\`, defaulting to \`CPU_WORKERS\`, so Go goroutine rows and Simple multicore-green rows use the same scheduler-width limit unless the caller explicitly overrides it.
 - Warm throughput is measured in-process where the runtime can print \`warm_ms\`; interpreter and SMF rows use outer-process timing and are labeled that way.
 
 ## Environment
@@ -1931,7 +1937,7 @@ For crash isolation, run the same entrypoint through Docker:
 PROFILE_DOCKER_ISOLATION=1 sh scripts/check/check-cross-language-perf.shs
 ```
 
-Useful knobs: `RUNS`, `FIB_N`, `CPU_WORKERS`, `OS_THREAD_WORKERS`,
+Useful knobs: `RUNS`, `FIB_N`, `CPU_WORKERS`, `GOMAXPROCS`, `OS_THREAD_WORKERS`,
 `COOPERATIVE_GREEN_WORKERS`, `MULTICORE_GREEN_WORKERS`, `GREEN_WORKERS`
 (compatibility alias), `FANOUT_WORKERS`, `FANOUT_COOPERATIVE_GREEN_WORKERS`,
 `FANOUT_MULTICORE_GREEN_WORKERS`, `FANOUT_ITERS`, `FANOUT_STRESS_WORKERS`,

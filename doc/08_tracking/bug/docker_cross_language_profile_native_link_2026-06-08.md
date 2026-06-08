@@ -89,7 +89,10 @@ pthread and Go goroutine rows.
 The profile wrapper now avoids forwarding a stale host `SIMPLE_BINARY` into the
 isolated container when `PROFILE_DOCKER_SIMPLE_BINARY` was not explicitly set.
 Inside Docker it auto-selects `src/compiler_rust/target/debug/simple` when that
-fixed compiler is present, then falls back to the usual release wrappers.
+fixed compiler is present, then falls back to the usual release wrappers. It
+also exports `GOMAXPROCS=CPU_WORKERS` unless the caller explicitly overrides
+`GOMAXPROCS`, so Go goroutine rows and Simple multicore-green rows use the same
+scheduler-width limit.
 
 Contract-gated Docker evidence:
 
@@ -112,7 +115,10 @@ profile_report_contract=true
 
 The report records `Simple binary: src/compiler_rust/target/debug/simple`,
 positive `thread_spawn` OS-thread evidence, and positive
-`multicore_green_spawn` M:N candidate evidence. The large fanout stress rows
-showed Go `5.353ms`, Simple multicore green native `9.567ms` with
+`multicore_green_spawn` M:N candidate evidence. The report header records
+`CPU workers: 2`, `Go GOMAXPROCS: 2`, and
+`Go scheduler: GOMAXPROCS=2 NumCPU=32`; the profile contract now fails if the
+reported Go scheduler width does not match `CPU_WORKERS`. The large fanout
+stress rows showed Go `9.260ms`, Simple multicore green native `11.353ms` with
 `pool_used=1000/1000`, `parallelism=2/2`, and
-`queue_model=work_stealing`, and C pthreads `60.806ms`.
+`queue_model=work_stealing`, and C pthreads `63.408ms`.
