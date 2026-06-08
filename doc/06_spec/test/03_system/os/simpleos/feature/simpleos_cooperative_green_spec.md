@@ -160,12 +160,12 @@ Failed: 0
 - Record the current SimpleOS cooperative carrier queue depth
 - Queue a logical green task on the current carrier
 - Verify the task is pending until the carrier runs
-   - Expected: bool_evidence(handle.is_done()) equals `0`
+   - Expected: handle.is_done() is false
    - Expected: cooperative_green_ready_count() equals `before + 1`
 - Run one cooperative carrier turn
-   - Expected: bool_evidence(cooperative_green_run_one()) equals `1`
+   - Expected: cooperative_green_run_one() is true
 - Verify the queued task completed with its expected value
-   - Expected: bool_evidence(handle.is_done()) equals `1`
+   - Expected: handle.is_done() is true
    - Expected: handle.join() equals `3`
 
 
@@ -182,12 +182,12 @@ step("Queue a logical green task on the current carrier")
 val handle = cooperative_green_spawn(simpleos_cooperative_green_value_3)
 
 step("Verify the task is pending until the carrier runs")
-expect(bool_evidence(handle.is_done())).to_equal(0)
+expect(handle.is_done()).to_equal(false)
 expect(cooperative_green_ready_count()).to_equal(before + 1)
 step("Run one cooperative carrier turn")
-expect(bool_evidence(cooperative_green_run_one())).to_equal(1)
+expect(cooperative_green_run_one()).to_equal(true)
 step("Verify the queued task completed with its expected value")
-expect(bool_evidence(handle.is_done())).to_equal(1)
+expect(handle.is_done()).to_equal(true)
 expect(handle.join()).to_equal(3)
 ```
 
@@ -236,10 +236,10 @@ expect(h2.join()).to_equal(8)
 - Record the current SimpleOS cooperative carrier queue depth
 - Queue a direct value task on the current carrier
 - Verify value work is pending until the carrier runs
-   - Expected: bool_evidence(handle.is_done()) equals `0`
+   - Expected: handle.is_done() is false
    - Expected: cooperative_green_ready_count() equals `before + 1`
 - Run one cooperative carrier turn
-   - Expected: bool_evidence(cooperative_green_run_one()) equals `1`
+   - Expected: cooperative_green_run_one() is true
 - Verify the direct value result is returned
    - Expected: handle.join() equals `21`
 
@@ -257,10 +257,10 @@ step("Queue a direct value task on the current carrier")
 val handle = cooperative_green_spawn_value(21)
 
 step("Verify value work is pending until the carrier runs")
-expect(bool_evidence(handle.is_done())).to_equal(0)
+expect(handle.is_done()).to_equal(false)
 expect(cooperative_green_ready_count()).to_equal(before + 1)
 step("Run one cooperative carrier turn")
-expect(bool_evidence(cooperative_green_run_one())).to_equal(1)
+expect(cooperative_green_run_one()).to_equal(true)
 step("Verify the direct value result is returned")
 expect(handle.join()).to_equal(21)
 ```

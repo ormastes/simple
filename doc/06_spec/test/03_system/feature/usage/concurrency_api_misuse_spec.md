@@ -103,7 +103,7 @@ Run the misuse gate:
 #### covers every checked-in misuse fixture
 
 - Count the checked-in concurrency misuse fixtures
-   - Expected: fixture_count() equals `14`
+   - Expected: fixture_count() equals `15`
 
 
 <details>
@@ -114,7 +114,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Count the checked-in concurrency misuse fixtures")
-expect(fixture_count()).to_equal(14)
+expect(fixture_count()).to_equal(15)
 ```
 
 </details>
@@ -139,7 +139,7 @@ expect(code).to_equal(0)
 step("Verify approved public-name fixtures were checked before misuse fixtures")
 expect(output).to_contain("concurrency_api_contract=true")
 expect(output).to_contain("positive_fixtures=5")
-expect(output).to_contain("fixtures=4")
+expect(output).to_contain("fixtures=5")
 ```
 
 </details>
@@ -226,12 +226,14 @@ expect_compile_error("green_spawn_bad_arg.spl", "E-PAR-004", "pass a closure")
 - expect compile error
 - Reject multicore_green_set_parallelism called with text
 - expect compile error
+- Reject direct access to internal runtime-pool symbols
+- expect compile error
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -241,6 +243,8 @@ step("Reject multicore_green_spawn called with a non-closure argument")
 expect_compile_error("multicore_green_bad_arg.spl", "E-PAR-004", "pass a closure")
 step("Reject multicore_green_set_parallelism called with text")
 expect_compile_error("multicore_green_parallelism_bad_arg.spl", "E-PAR-004", "single integer worker count")
+step("Reject direct access to internal runtime-pool symbols")
+expect_compile_error("multicore_green_direct_rt_pool_access.spl", "E-PAR-005", "internal runtime-pool symbol")
 ```
 
 </details>

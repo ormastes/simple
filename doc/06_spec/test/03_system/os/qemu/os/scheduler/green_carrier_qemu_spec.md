@@ -139,8 +139,11 @@ _Live green-carrier validation, disabled unless SIMPLEOS_GREEN_CARRIER_QEMU_LIVE
 - Build the SimpleOS green carrier guest probe
    - Expected: built is true
 - Boot the two-CPU guest probe under QEMU
+   - TUI capture: after_step
 -  print probe debug
 - Verify AP startup and all green carrier proof markers
+   - TUI capture: after_step
+   - Evidence: TUI state verified by 4 expected checks
    - Expected: serial contains `AP_ONLINE_MARKER`
    - Expected: serial contains `GREEN_PASS_MARKER`
    - Expected: serial contains `GREEN_PREEMPT_MARKER`
@@ -182,14 +185,16 @@ else:
 #### keeps final hardware handoff proof behind separate opt-in markers
 
 - Skip the final hardware handoff lane unless its explicit live gate is enabled
-   - Expected: bool_evidence(_hw_handoff_enabled()) equals `0`
+   - Expected: _hw_handoff_enabled() is false
 - Skip final hardware handoff execution on hosts without qemu-system-x86_64
-   - Expected: bool_evidence(_qemu_available()) equals `0`
+   - Expected: _qemu_available() is false
 - Build the SimpleOS green carrier guest probe for final handoff evidence
-   - Expected: bool_evidence(built) equals `1`
+   - Expected: built is true
 - Boot the two-CPU guest probe under QEMU
+   - TUI capture: after_step
 -  print probe debug
 - Verify AP startup, scheduler handoff, final hardware handoff, user entry, and syscall markers
+   - TUI capture: after_step
 
 
 <details>
@@ -201,15 +206,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 if not _hw_handoff_enabled():
     step("Skip the final hardware handoff lane unless its explicit live gate is enabled")
-    expect(bool_evidence(_hw_handoff_enabled())).to_equal(0)
+    expect(_hw_handoff_enabled()).to_equal(false)
 elif not _qemu_available():
     step("Skip final hardware handoff execution on hosts without qemu-system-x86_64")
-    expect(bool_evidence(_qemu_available())).to_equal(0)
+    expect(_qemu_available()).to_equal(false)
 else:
     step("Build the SimpleOS green carrier guest probe for final handoff evidence")
     val output_path = "build/os/simpleos_green_carrier_probe.elf"
     val built = _build_probe(output_path, "cranelift") or _build_probe(output_path, "llvm")
-    expect(bool_evidence(built)).to_equal(1)
+    expect(built).to_equal(true)
     step("Boot the two-CPU guest probe under QEMU")
     val result = _run_probe(output_path)
     val serial = result[0]

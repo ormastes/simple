@@ -10,6 +10,7 @@
 @layout dag
 @direction LR
 
+simpleos_multicore_green_spec -> std
 simpleos_multicore_green_spec -> os
 ```
 
@@ -173,8 +174,8 @@ Failed: 0
 - Plan a green task for a remote carrier CPU
 - Apply the enqueue decision through the SimpleOS carrier queues
 - Verify remote enqueue sends the SimpleOS reschedule IPI
-   - Expected: bool_evidence(result.enqueued) equals `1`
-   - Expected: bool_evidence(result.ipi_sent) equals `1`
+   - Expected: result.enqueued is true
+   - Expected: result.ipi_sent is true
    - Expected: result.ipi_reason_mask equals `smp_ipi_resched()`
    - Expected: smp_take_ipi(1u32) equals `smp_ipi_resched()`
 
@@ -198,8 +199,8 @@ step("Apply the enqueue decision through the SimpleOS carrier queues")
 val result = green_carrier_apply_enqueue(queues, decision)
 
 step("Verify remote enqueue sends the SimpleOS reschedule IPI")
-expect(bool_evidence(result.enqueued)).to_equal(1)
-expect(bool_evidence(result.ipi_sent)).to_equal(1)
+expect(result.enqueued).to_equal(true)
+expect(result.ipi_sent).to_equal(true)
 expect(result.ipi_reason_mask).to_equal(smp_ipi_resched())
 expect(smp_take_ipi(1u32)).to_equal(smp_ipi_resched())
 ```
@@ -218,7 +219,7 @@ expect(smp_take_ipi(1u32)).to_equal(smp_ipi_resched())
 - Dispatch the next green task from CPU one carrier queue
 - Apply the dispatched green scheduler intent
 - Verify green execution state is separate from the normal task slot
-   - Expected: bool_evidence(applied.applied) equals `1`
+   - Expected: applied.applied is true
    - Expected: scheduler.green_current_task_on_cpu(1u32) equals `202`
    - Expected: scheduler.green_context_switches_on_cpu(1u32) equals `1`
    - Expected: scheduler.green_rejected_intents() equals `0`
@@ -248,7 +249,7 @@ step("Apply the dispatched green scheduler intent")
 val applied = scheduler.apply_green_scheduler_intent(green_carrier_scheduler_intent(dispatched))
 
 step("Verify green execution state is separate from the normal task slot")
-expect(bool_evidence(applied.applied)).to_equal(1)
+expect(applied.applied).to_equal(true)
 expect(scheduler.green_current_task_on_cpu(1u32)).to_equal(202)
 expect(scheduler.green_context_switches_on_cpu(1u32)).to_equal(1)
 expect(scheduler.green_rejected_intents()).to_equal(0)
@@ -267,7 +268,7 @@ expect(scheduler.get_current_on_cpu(1u32).id).to_equal(0)
 - Create carrier queues and enqueue green work for CPU three
 - Dispatch and apply the CPU three green scheduler intent
 - Verify the grown scheduler records CPU three green execution
-   - Expected: bool_evidence(applied.applied) equals `1`
+   - Expected: applied.applied is true
    - Expected: scheduler.green_current_task_on_cpu(3u32) equals `303`
    - Expected: scheduler.green_context_switches_on_cpu(3u32) equals `1`
 
@@ -293,7 +294,7 @@ val dispatched = green_carrier_dispatch_next(queued.queues, 3)
 val applied = scheduler.apply_green_scheduler_intent(green_carrier_scheduler_intent(dispatched))
 
 step("Verify the grown scheduler records CPU three green execution")
-expect(bool_evidence(applied.applied)).to_equal(1)
+expect(applied.applied).to_equal(true)
 expect(scheduler.green_current_task_on_cpu(3u32)).to_equal(303)
 expect(scheduler.green_context_switches_on_cpu(3u32)).to_equal(1)
 ```
@@ -313,16 +314,16 @@ expect(scheduler.green_context_switches_on_cpu(3u32)).to_equal(1)
 - Poll the named timer interrupt adapter through active green carriers
 - Verify runtime safepoint ticks without requesting preemption
    - Expected: pass_result.ran_workers equals `1`
-   - Expected: bool_evidence(runtime_poll.accepted) equals `1`
+   - Expected: runtime_poll.accepted is true
    - Expected: runtime_poll.source equals `runtime_safepoint`
-   - Expected: bool_evidence(runtime_poll.preemption_requested) equals `0`
+   - Expected: runtime_poll.preemption_requested is false
    - Expected: runtime_poll.ticked_carriers equals `1`
    - Expected: scheduler.green_current_task_on_cpu(0u32) equals `404`
 - Verify timer safepoint yields the active green worker
-   - Expected: bool_evidence(timer_interrupt.accepted) equals `1`
+   - Expected: timer_interrupt.accepted is true
    - Expected: timer_interrupt.source equals `timer_interrupt`
-   - Expected: bool_evidence(timer_interrupt.preemption.preemption_requested) equals `1`
-   - Expected: bool_evidence(timer_interrupt.eoi_required) equals `1`
+   - Expected: timer_interrupt.preemption.preemption_requested is true
+   - Expected: timer_interrupt.eoi_required is true
    - Expected: timer_interrupt.yielded_workers equals `1`
    - Expected: timer_interrupt.reason equals `green_time_slice_expired`
    - Expected: green_carrier_queue_depth(timer_interrupt.queues, 0) equals `1`
@@ -354,16 +355,16 @@ val timer_interrupt = scheduler.green_timer_interrupt_active_carriers(runtime_po
 
 step("Verify runtime safepoint ticks without requesting preemption")
 expect(pass_result.ran_workers).to_equal(1)
-expect(bool_evidence(runtime_poll.accepted)).to_equal(1)
+expect(runtime_poll.accepted).to_equal(true)
 expect(runtime_poll.source).to_equal("runtime_safepoint")
-expect(bool_evidence(runtime_poll.preemption_requested)).to_equal(0)
+expect(runtime_poll.preemption_requested).to_equal(false)
 expect(runtime_poll.ticked_carriers).to_equal(1)
 expect(scheduler.green_current_task_on_cpu(0u32)).to_equal(404)
 step("Verify timer safepoint yields the active green worker")
-expect(bool_evidence(timer_interrupt.accepted)).to_equal(1)
+expect(timer_interrupt.accepted).to_equal(true)
 expect(timer_interrupt.source).to_equal("timer_interrupt")
-expect(bool_evidence(timer_interrupt.preemption.preemption_requested)).to_equal(1)
-expect(bool_evidence(timer_interrupt.eoi_required)).to_equal(1)
+expect(timer_interrupt.preemption.preemption_requested).to_equal(true)
+expect(timer_interrupt.eoi_required).to_equal(true)
 expect(timer_interrupt.yielded_workers).to_equal(1)
 expect(timer_interrupt.reason).to_equal("green_time_slice_expired")
 expect(green_carrier_queue_depth(timer_interrupt.queues, 0)).to_equal(1)
@@ -385,16 +386,16 @@ expect(scheduler.green_current_task_on_cpu(0u32)).to_equal(0)
 - Poll the compiler safepoint at time-slice expiry
 - Verify the compiler safepoint adapter preserves the running worker before expiry
    - Expected: pass_result.ran_workers equals `1`
-   - Expected: bool_evidence(compiler_running_poll.accepted) equals `1`
+   - Expected: compiler_running_poll.accepted is true
    - Expected: compiler_running_poll.source equals `compiler_safepoint`
-   - Expected: bool_evidence(compiler_running_poll.preemption_requested) equals `0`
+   - Expected: compiler_running_poll.preemption_requested is false
    - Expected: compiler_running_poll.ticked_carriers equals `1`
    - Expected: compiler_running_poll.yielded_workers equals `0`
    - Expected: scheduler.green_current_task_on_cpu(0u32) equals `406`
 - Verify the compiler safepoint adapter yields at time-slice expiry
-   - Expected: bool_evidence(compiler_expiring_poll.accepted) equals `1`
+   - Expected: compiler_expiring_poll.accepted is true
    - Expected: compiler_expiring_poll.source equals `compiler_safepoint`
-   - Expected: bool_evidence(compiler_expiring_poll.preemption_requested) equals `1`
+   - Expected: compiler_expiring_poll.preemption_requested is true
    - Expected: compiler_expiring_poll.yielded_workers equals `1`
    - Expected: compiler_expiring_poll.reason equals `green_time_slice_expired`
    - Expected: green_carrier_queue_depth(compiler_expiring_poll.queues, 0) equals `1`
@@ -426,16 +427,16 @@ val compiler_expiring_poll = scheduler.green_compiler_safepoint_active_carriers(
 
 step("Verify the compiler safepoint adapter preserves the running worker before expiry")
 expect(pass_result.ran_workers).to_equal(1)
-expect(bool_evidence(compiler_running_poll.accepted)).to_equal(1)
+expect(compiler_running_poll.accepted).to_equal(true)
 expect(compiler_running_poll.source).to_equal("compiler_safepoint")
-expect(bool_evidence(compiler_running_poll.preemption_requested)).to_equal(0)
+expect(compiler_running_poll.preemption_requested).to_equal(false)
 expect(compiler_running_poll.ticked_carriers).to_equal(1)
 expect(compiler_running_poll.yielded_workers).to_equal(0)
 expect(scheduler.green_current_task_on_cpu(0u32)).to_equal(406)
 step("Verify the compiler safepoint adapter yields at time-slice expiry")
-expect(bool_evidence(compiler_expiring_poll.accepted)).to_equal(1)
+expect(compiler_expiring_poll.accepted).to_equal(true)
 expect(compiler_expiring_poll.source).to_equal("compiler_safepoint")
-expect(bool_evidence(compiler_expiring_poll.preemption_requested)).to_equal(1)
+expect(compiler_expiring_poll.preemption_requested).to_equal(true)
 expect(compiler_expiring_poll.yielded_workers).to_equal(1)
 expect(compiler_expiring_poll.reason).to_equal("green_time_slice_expired")
 expect(green_carrier_queue_depth(compiler_expiring_poll.queues, 0)).to_equal(1)
@@ -455,7 +456,7 @@ expect(scheduler.green_current_task_on_cpu(0u32)).to_equal(0)
 - Run an active carrier pass
 - Poll an invalid SimpleOS preemption source
 - Verify the invalid safepoint does not tick or yield carriers
-   - Expected: bool_evidence(rejected.accepted) equals `0`
+   - Expected: rejected.accepted is false
    - Expected: rejected.reason equals `invalid_preemption_source`
    - Expected: rejected.ticked_carriers equals `0`
    - Expected: rejected.yielded_workers equals `0`
@@ -486,7 +487,7 @@ step("Poll an invalid SimpleOS preemption source")
 val rejected = scheduler.green_preemption_safepoint_active_carriers(pass_result.queues, "bad_simpleos_source")
 
 step("Verify the invalid safepoint does not tick or yield carriers")
-expect(bool_evidence(rejected.accepted)).to_equal(0)
+expect(rejected.accepted).to_equal(false)
 expect(rejected.reason).to_equal("invalid_preemption_source")
 expect(rejected.ticked_carriers).to_equal(0)
 expect(rejected.yielded_workers).to_equal(0)

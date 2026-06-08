@@ -257,6 +257,10 @@ fn check_file(path: &Path, source_roots: &[PathBuf], deny_gc_boundary_crossings:
 }
 
 fn validate_numbered_concurrency_source(file_path: &Path, source: &str, errors: &mut Vec<CheckError>) {
+    let allow_runtime_pool_externs = file_path.ends_with("src/lib/nogc_async_mut/concurrent/multicore_green.spl")
+        || file_path.ends_with("src/lib/gc_async_mut/concurrent/multicore_green.spl")
+        || file_path.ends_with("src/lib/nogc_sync_mut/concurrent/multicore_green.spl")
+        || file_path.ends_with("src/lib/gc_sync_mut/concurrent/multicore_green.spl");
     for (line_index, line) in source.lines().enumerate() {
         let trimmed = line.trim_start();
         if !trimmed.starts_with("extern fn ") {
@@ -277,6 +281,24 @@ fn validate_numbered_concurrency_source(file_path: &Path, source: &str, errors: 
                     name,
                     replacement,
                 ));
+            }
+        }
+        if !allow_runtime_pool_externs {
+            for name in [
+                "rt_pool_submit",
+                "rt_pool_join",
+                "rt_pool_is_done",
+                "rt_pool_set_parallelism",
+                "rt_pool_get_parallelism",
+            ] {
+                if let Some(offset) = line.find(name) {
+                    errors.push(internal_concurrency_runtime_error(
+                        file_path,
+                        line_index + 1,
+                        offset + 1,
+                        name,
+                    ));
+                }
             }
         }
     }
@@ -1771,6 +1793,27 @@ fn numbered_concurrency_error(
                 .to_string(),
         ],
         help: vec![format!("use {replacement} for explicit-argument spawning")],
+    }
+}
+
+fn internal_concurrency_runtime_error(file_path: &Path, line: usize, column: usize, name: &str) -> CheckError {
+    CheckError {
+        file: file_path.display().to_string(),
+        line,
+        column,
+        severity: ErrorSeverity::Error,
+        code: Some("E-PAR-005".to_string()),
+        message: format!("{name} is an internal runtime-pool symbol and is not a public API"),
+        expected: Some("public multicore-green API symbol".to_string()),
+        found: Some(name.to_string()),
+        notes: vec![
+            "direct rt_pool_* access bypasses the Pure Simple multicore_green facade and cannot provide API-level misuse checks"
+                .to_string(),
+        ],
+        help: vec![
+            "use std.concurrent.multicore_green.{multicore_green_spawn, multicore_green_set_parallelism}"
+                .to_string(),
+        ],
     }
 }
 
