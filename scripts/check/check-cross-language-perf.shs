@@ -16,9 +16,17 @@ set -eu
 #   RUNS=50 WORKERS=100 sh scripts/check/check-cross-language-perf.shs
 #   RUNS=3 FANOUT_WORKERS=1000 FANOUT_ITERS=32 sh scripts/check/check-cross-language-perf.shs
 #   RUNS=3 FANOUT_STRESS_WORKERS=2000 sh scripts/check/check-cross-language-perf.shs
+#   PROFILE_DOCKER_ISOLATION=1 sh scripts/check/check-cross-language-perf.shs
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
+
+PROFILE_DOCKER_ISOLATION="${PROFILE_DOCKER_ISOLATION:-0}"
+PROFILE_DOCKER_INSIDE="${PROFILE_DOCKER_INSIDE:-0}"
+PROFILE_DOCKER_IMAGE="${PROFILE_DOCKER_IMAGE:-simple-test-isolation:latest}"
+PROFILE_DOCKER_MEMORY="${PROFILE_DOCKER_MEMORY:-2g}"
+PROFILE_DOCKER_CPUS="${PROFILE_DOCKER_CPUS:-2.0}"
+PROFILE_DOCKER_SIMPLE_BINARY="${PROFILE_DOCKER_SIMPLE_BINARY:-bin/release/simple}"
 
 if [ -z "${SIMPLE_BINARY:-}" ]; then
     if [ -x "bin/simple" ]; then
@@ -66,6 +74,55 @@ fi
 WARM_ITERS="${WARM_ITERS:-5}"
 WARM_IN_PROCESS="${WARM_IN_PROCESS:-10}"
 RUN_TIMEOUT="${RUN_TIMEOUT:-30}"
+
+if [ "$PROFILE_DOCKER_ISOLATION" = "1" ] && [ "$PROFILE_DOCKER_INSIDE" != "1" ]; then
+    if ! command -v docker >/dev/null 2>&1; then
+        echo "docker_isolation=false"
+        echo "error=docker command not found"
+        exit 1
+    fi
+    if ! docker image inspect "$PROFILE_DOCKER_IMAGE" >/dev/null 2>&1; then
+        echo "docker_isolation=false"
+        echo "error=missing docker image: $PROFILE_DOCKER_IMAGE"
+        echo "hint=docker build -t $PROFILE_DOCKER_IMAGE -f tools/docker/Dockerfile.test-isolation ."
+        exit 1
+    fi
+    exec docker run --rm \
+        --entrypoint /bin/sh \
+        --user "$(id -u):$(id -g)" \
+        -v "$ROOT_DIR:/workspace:rw" \
+        -w /workspace \
+        --network=none \
+        --memory="$PROFILE_DOCKER_MEMORY" \
+        --cpus="$PROFILE_DOCKER_CPUS" \
+        -e PROFILE_DOCKER_ISOLATION=0 \
+        -e PROFILE_DOCKER_INSIDE=1 \
+        -e PROFILE_DOCKER_IMAGE="$PROFILE_DOCKER_IMAGE" \
+        -e SKIP_PROFILE_REPORT_CONTRACT="${SKIP_PROFILE_REPORT_CONTRACT:-0}" \
+        -e SIMPLE_BINARY="$PROFILE_DOCKER_SIMPLE_BINARY" \
+        -e BUILD_DIR="$BUILD_DIR" \
+        -e REPORT_PATH="$REPORT_PATH" \
+        -e PROFILE_REPORT_CONTRACT_TEST="$PROFILE_REPORT_CONTRACT_TEST" \
+        -e RUNS="$RUNS" \
+        -e FIB_N="$FIB_N" \
+        -e CPU_WORKERS="$CPU_WORKERS" \
+        -e OS_THREAD_WORKERS="$OS_THREAD_WORKERS" \
+        -e MULTICORE_GREEN_WORKERS="$MULTICORE_GREEN_WORKERS" \
+        -e COOPERATIVE_GREEN_WORKERS="$COOPERATIVE_GREEN_WORKERS" \
+        -e GREEN_WORKERS="$GREEN_WORKERS" \
+        -e FANOUT_WORKERS="$FANOUT_WORKERS" \
+        -e FANOUT_OS_THREAD_WORKERS="$FANOUT_OS_THREAD_WORKERS" \
+        -e FANOUT_MULTICORE_GREEN_WORKERS="$FANOUT_MULTICORE_GREEN_WORKERS" \
+        -e FANOUT_COOPERATIVE_GREEN_WORKERS="$FANOUT_COOPERATIVE_GREEN_WORKERS" \
+        -e FANOUT_ITERS="$FANOUT_ITERS" \
+        -e FANOUT_STRESS_WORKERS="$FANOUT_STRESS_WORKERS" \
+        -e FANOUT_STRESS_ITERS="$FANOUT_STRESS_ITERS" \
+        -e WARM_ITERS="$WARM_ITERS" \
+        -e WARM_IN_PROCESS="$WARM_IN_PROCESS" \
+        -e RUN_TIMEOUT="$RUN_TIMEOUT" \
+        "$PROFILE_DOCKER_IMAGE" \
+        -lc 'sh scripts/check/check-cross-language-perf.shs'
+fi
 
 mkdir -p "$BUILD_DIR" "$(dirname "$REPORT_PATH")"
 
@@ -1213,12 +1270,14 @@ cat >"$REPORT_PATH" <<EOF
 **Profile script:** \`scripts/check/check-cross-language-perf.shs\`
 **Report path:** \`$REPORT_PATH\`
 **Profile contract:** $PROFILE_CONTRACT_STATUS
+**Docker isolation:** inside_container=$PROFILE_DOCKER_INSIDE | image=\`$PROFILE_DOCKER_IMAGE\` | memory=$PROFILE_DOCKER_MEMORY | cpus=$PROFILE_DOCKER_CPUS
 
 ## Methodology
 
 - Generates equivalent hello, recursive fib, in-process warm fib, worker, and fanout workloads for each supported runtime.
 - Measures binary/script size, cold process startup, warm throughput, parallel worker latency, fanout latency, parallel binary size, and peak RSS where the runtime and compiler are available.
 - Uses bounded commands so failed, missing, timed-out, or unavailable lanes are classified instead of silently treated as passing data.
+- Supports \`PROFILE_DOCKER_ISOLATION=1\` to re-exec the same profile script in a Docker container with \`--network=none\`, a memory limit, a CPU limit, and the current UID/GID. Use this mode for crash-prone native and SMF profile runs; full contract-gated C/Go comparison reports require a Docker image with the cross-language toolchains installed.
 - Generated Simple concurrency workloads compute an expected checksum and exit nonzero on mismatch, so runtime-pool closure failures cannot be timed as valid M:N evidence.
 - Warm throughput is measured in-process where the runtime can print \`warm_ms\`; interpreter and SMF rows use outer-process timing and are labeled that way.
 
@@ -1856,12 +1915,20 @@ Run the script from the repository root:
 sh scripts/check/check-cross-language-perf.shs
 ```
 
+For crash isolation, run the same entrypoint through Docker:
+
+```sh
+PROFILE_DOCKER_ISOLATION=1 sh scripts/check/check-cross-language-perf.shs
+```
+
 Useful knobs: `RUNS`, `FIB_N`, `CPU_WORKERS`, `OS_THREAD_WORKERS`,
 `COOPERATIVE_GREEN_WORKERS`, `MULTICORE_GREEN_WORKERS`, `GREEN_WORKERS`
 (compatibility alias), `FANOUT_WORKERS`, `FANOUT_COOPERATIVE_GREEN_WORKERS`,
 `FANOUT_MULTICORE_GREEN_WORKERS`, `FANOUT_ITERS`, `FANOUT_STRESS_WORKERS`,
 `FANOUT_STRESS_ITERS`, `WARM_IN_PROCESS`, `RUN_TIMEOUT`, `SIMPLE_BINARY`,
-`BUILD_DIR`, and `REPORT_PATH`.
+`BUILD_DIR`, `REPORT_PATH`, `PROFILE_DOCKER_ISOLATION`,
+`PROFILE_DOCKER_IMAGE`, `PROFILE_DOCKER_MEMORY`, `PROFILE_DOCKER_CPUS`, and
+`PROFILE_DOCKER_SIMPLE_BINARY`.
 
 ## Limitations
 

@@ -101,6 +101,11 @@ sh scripts/check/check-cross-language-perf.shs
 | `SIMPLE_BINARY` | `bin/simple` | Path to Simple compiler |
 | `BUILD_DIR` | `build/cross_lang_perf` | Workload compile output |
 | `REPORT_PATH` | `doc/09_report/cross_language_perf_<date>.md` | Output report |
+| `PROFILE_DOCKER_ISOLATION` | 0 | Re-exec the existing profile script inside Docker when set to `1` |
+| `PROFILE_DOCKER_IMAGE` | `simple-test-isolation:latest` | Docker image for isolated crash-prone profile/test runs; full contract-gated cross-language evidence requires an image with the C/Go toolchains installed |
+| `PROFILE_DOCKER_MEMORY` | `2g` | Container memory limit for isolated profile runs |
+| `PROFILE_DOCKER_CPUS` | `2.0` | Container CPU limit for isolated profile runs |
+| `PROFILE_DOCKER_SIMPLE_BINARY` | `bin/release/simple` | Simple binary path used inside the mounted container workspace |
 
 The harness deletes a Simple output before recording a failed compile, so a
 failed native or SMF compile cannot leave a stale binary/bytecode file that is
@@ -110,6 +115,15 @@ for full reports on slow hosts, or lower it for smoke evidence. The 1000-worker
 Simple OS-thread fanout source is intentionally reported separately from Simple
 green fanout and uses loop-based `thread_spawn` fork-join so the harness does not need
 large unrolled source generation.
+For crash-prone native, SMF, or many-thread profile runs, use the same profile
+entrypoint with `PROFILE_DOCKER_ISOLATION=1`. The script re-execs itself in
+Docker with `--network=none`, UID/GID matching, memory/CPU limits, and the same
+mounted workspace, so a native crash cannot take down the host-side agent
+process. This is a containment mode for the existing profile script, not a
+separate profile harness. `simple-test-isolation:latest` is enough for
+separate-process smoke checks; full contract-gated C/Go comparison reports need
+`PROFILE_DOCKER_IMAGE` to point at an image that includes the cross-language
+toolchains.
 The report records the Go toolchain and the generated Go probe's
 `runtime.GOMAXPROCS(0)` / `runtime.NumCPU()` values so Go-like M:N comparisons
 name the scheduler limit used by the goroutine rows.

@@ -7,12 +7,14 @@
 **Profile script:** `scripts/check/check-cross-language-perf.shs`
 **Report path:** `doc/09_report/cross_language_perf_parallel_smoke.md`
 **Profile contract:** enforced by test/05_perf/profile_scripts/profile_report_contract_test.shs
+**Docker isolation:** inside_container=0 | image=`simple-test-isolation:latest` | memory=2g | cpus=2.0
 
 ## Methodology
 
 - Generates equivalent hello, recursive fib, in-process warm fib, worker, and fanout workloads for each supported runtime.
 - Measures binary/script size, cold process startup, warm throughput, parallel worker latency, fanout latency, parallel binary size, and peak RSS where the runtime and compiler are available.
 - Uses bounded commands so failed, missing, timed-out, or unavailable lanes are classified instead of silently treated as passing data.
+- Supports `PROFILE_DOCKER_ISOLATION=1` to re-exec the same profile script in a Docker container with `--network=none`, a memory limit, a CPU limit, and the current UID/GID. Use this mode for crash-prone native and SMF profile runs; full contract-gated C/Go comparison reports require a Docker image with the cross-language toolchains installed.
 - Generated Simple concurrency workloads compute an expected checksum and exit nonzero on mismatch, so runtime-pool closure failures cannot be timed as valid M:N evidence.
 - Warm throughput is measured in-process where the runtime can print `warm_ms`; interpreter and SMF rows use outer-process timing and are labeled that way.
 
@@ -212,12 +214,20 @@ Run the script from the repository root:
 sh scripts/check/check-cross-language-perf.shs
 ```
 
+For crash isolation, run the same entrypoint through Docker:
+
+```sh
+PROFILE_DOCKER_ISOLATION=1 sh scripts/check/check-cross-language-perf.shs
+```
+
 Useful knobs: `RUNS`, `FIB_N`, `CPU_WORKERS`, `OS_THREAD_WORKERS`,
 `COOPERATIVE_GREEN_WORKERS`, `MULTICORE_GREEN_WORKERS`, `GREEN_WORKERS`
 (compatibility alias), `FANOUT_WORKERS`, `FANOUT_COOPERATIVE_GREEN_WORKERS`,
 `FANOUT_MULTICORE_GREEN_WORKERS`, `FANOUT_ITERS`, `FANOUT_STRESS_WORKERS`,
 `FANOUT_STRESS_ITERS`, `WARM_IN_PROCESS`, `RUN_TIMEOUT`, `SIMPLE_BINARY`,
-`BUILD_DIR`, and `REPORT_PATH`.
+`BUILD_DIR`, `REPORT_PATH`, `PROFILE_DOCKER_ISOLATION`,
+`PROFILE_DOCKER_IMAGE`, `PROFILE_DOCKER_MEMORY`, `PROFILE_DOCKER_CPUS`, and
+`PROFILE_DOCKER_SIMPLE_BINARY`.
 
 ## Limitations
 
