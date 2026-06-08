@@ -163,6 +163,28 @@ pub(crate) fn mangle_mir(
         }
     }
 
+    let old_init_functions = std::mem::take(&mut mir.global_init_functions);
+    for (name, func_name) in old_init_functions {
+        let global_name = local_global_mangled.get(&name).cloned().unwrap_or(name);
+        let resolved_func = local_mangled
+            .get(&func_name)
+            .cloned()
+            .or_else(|| use_map.get(&func_name).cloned())
+            .or_else(|| import_map.get(&func_name).cloned())
+            .or_else(|| {
+                resolve_name(
+                    &func_name,
+                    &local_mangled,
+                    use_map,
+                    import_map,
+                    &local_suffix_index,
+                    suffix_index,
+                )
+            })
+            .unwrap_or(func_name);
+        mir.global_init_functions.insert(global_name, resolved_func);
+    }
+
     let old_local = std::mem::take(&mut mir.local_globals);
     for name in old_local {
         if let Some(mangled) = local_global_mangled.get(&name) {

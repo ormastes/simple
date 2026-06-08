@@ -47,6 +47,35 @@ fn main():
     print("function_array_pass=true")
 SIMPLE
 
+cat >"$tmp_dir/function_global.spl" <<'SIMPLE'
+extern fn rt_exit(code: i32)
+
+fn worker() -> i64:
+    return 23
+
+var TASK: fn() -> i64 = worker
+
+fn main():
+    if TASK() != 23:
+        rt_exit(75)
+    print("function_global_pass=true")
+SIMPLE
+
+cat >"$tmp_dir/global_function_array.spl" <<'SIMPLE'
+extern fn rt_exit(code: i32)
+
+fn worker() -> i64:
+    return 29
+
+var FUNCS: [fn() -> i64] = []
+
+fn main():
+    FUNCS.push(worker)
+    if FUNCS[0]() != 29:
+        rt_exit(75)
+    print("global_function_array_pass=true")
+SIMPLE
+
 cat >"$tmp_dir/cooperative_green_native.spl" <<'SIMPLE'
 use std.nogc_async_mut.concurrent.cooperative_green.{
     cooperative_green_spawn,
@@ -89,6 +118,24 @@ run_bounded "$tmp_dir/function_array.bin" >>"$array_out" 2>&1 ||
     fail "function array native run failed"
 grep -q 'function_array_pass=true' "$array_out" ||
     fail "function array callback evidence missing"
+
+global_out="$tmp_dir/function_global.out"
+run_bounded "$BIN" native-build --source "$tmp_dir" --entry "$tmp_dir/function_global.spl" \
+    --entry-closure -o "$tmp_dir/function_global.bin" --clean >"$global_out" 2>&1 ||
+    fail "function global native build failed"
+run_bounded "$tmp_dir/function_global.bin" >>"$global_out" 2>&1 ||
+    fail "function global native run failed"
+grep -q 'function_global_pass=true' "$global_out" ||
+    fail "function global callback evidence missing"
+
+global_array_out="$tmp_dir/global_function_array.out"
+run_bounded "$BIN" native-build --source "$tmp_dir" --entry "$tmp_dir/global_function_array.spl" \
+    --entry-closure -o "$tmp_dir/global_function_array.bin" --clean >"$global_array_out" 2>&1 ||
+    fail "global function array native build failed"
+run_bounded "$tmp_dir/global_function_array.bin" >>"$global_array_out" 2>&1 ||
+    fail "global function array native run failed"
+grep -q 'global_function_array_pass=true' "$global_array_out" ||
+    fail "global function array callback evidence missing"
 
 green_out="$tmp_dir/cooperative_green_native.out"
 run_bounded "$BIN" native-build --source src/lib --source "$tmp_dir" \

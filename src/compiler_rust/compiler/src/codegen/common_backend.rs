@@ -863,6 +863,7 @@ impl<M: Module> CodegenBackend<M> {
             && mir.global_init_values.is_empty()
             && mir.global_init_strings.is_empty()
             && mir.global_init_arrays.is_empty()
+            && mir.global_init_functions.is_empty()
             && mir.vtable_impls.is_empty()
             && functions
                 .iter()
@@ -1547,8 +1548,15 @@ impl<M: Module> CodegenBackend<M> {
 
         // Generate module initialization function for heap-backed global constants.
         // This allocates runtime strings/arrays and stores their handles in globals.
-        if !mir.global_init_strings.is_empty() || !mir.global_init_arrays.is_empty() {
-            self.generate_module_init(&mir.global_init_strings, &mir.global_init_arrays)?;
+        if !mir.global_init_strings.is_empty()
+            || !mir.global_init_arrays.is_empty()
+            || !mir.global_init_functions.is_empty()
+        {
+            self.generate_module_init(
+                &mir.global_init_strings,
+                &mir.global_init_arrays,
+                &mir.global_init_functions,
+            )?;
         }
 
         Ok(functions)
@@ -1566,6 +1574,7 @@ impl<M: Module> CodegenBackend<M> {
         &mut self,
         init_strings: &std::collections::HashMap<String, String>,
         init_arrays: &std::collections::HashMap<String, crate::hir::HirGlobalArrayInit>,
+        init_functions: &std::collections::HashMap<String, String>,
     ) -> BackendResult<()> {
         use cranelift_codegen::ir::{types, MemFlags, UserFuncName};
 
@@ -1639,6 +1648,16 @@ impl<M: Module> CodegenBackend<M> {
             )
         } else {
             None
+        };
+        let alloc_id = if init_functions.is_empty() {
+            None
+        } else {
+            Some(
+                *self
+                    .runtime_funcs
+                    .get("rt_alloc")
+                    .ok_or_else(|| BackendError::ModuleError("rt_alloc not declared".into()))?,
+            )
         };
 
         // Build the function body
@@ -1754,6 +1773,52 @@ impl<M: Module> CodegenBackend<M> {
                     let global_ref = self.module.declare_data_in_func(gid, builder.func);
                     let global_addr = builder.ins().global_value(types::I64, global_ref);
                     builder.ins().store(MemFlags::new(), array_rv, global_addr, 0);
+                }
+            }
+        }
+
+        let mut sorted_functions: Vec<_> = init_functions.iter().collect();
+        sorted_functions.sort_by_key(|(name, _)| (*name).clone());
+        for (global_name, func_name) in &sorted_functions {
+            let func_id = self
+                .func_ids
+                .get(func_name.as_str())
+                .copied()
+                .or_else(|| {
+                    let sanitized = if func_name.contains('.') {
+                        func_name.replace('.', "_dot_")
+                    } else {
+                        func_name.to_string()
+                    };
+                    self.func_ids.get(sanitized.as_str()).copied()
+                })
+                .ok_or_else(|| {
+                    BackendError::ModuleError(format!(
+                        "function global initializer '{}' references unknown function '{}'",
+                        global_name, func_name
+                    ))
+                })?;
+            let alloc_ref = self.module.declare_func_in_func(alloc_id.unwrap(), builder.func);
+            let closure_size = builder.ins().iconst(types::I64, 8);
+            let call_inst = builder.ins().call(alloc_ref, &[closure_size]);
+            let closure_ptr = builder.inst_results(call_inst)[0];
+            let func_ref = self.module.declare_func_in_func(func_id, builder.func);
+            let fn_addr = builder.ins().func_addr(types::I64, func_ref);
+            builder.ins().store(MemFlags::new(), fn_addr, closure_ptr, 0);
+
+            if let Some(&gid) = self.global_ids.get(global_name.as_str()) {
+                let global_ref = self.module.declare_data_in_func(gid, builder.func);
+                let global_addr = builder.ins().global_value(types::I64, global_ref);
+                builder.ins().store(MemFlags::new(), closure_ptr, global_addr, 0);
+            } else {
+                let mangled = match &self.module_prefix {
+                    Some(prefix) => format!("{}__{}", prefix, global_name),
+                    None => global_name.to_string(),
+                };
+                if let Some(&gid) = self.global_ids.get(mangled.as_str()) {
+                    let global_ref = self.module.declare_data_in_func(gid, builder.func);
+                    let global_addr = builder.ins().global_value(types::I64, global_ref);
+                    builder.ins().store(MemFlags::new(), closure_ptr, global_addr, 0);
                 }
             }
         }

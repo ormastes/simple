@@ -1,7 +1,7 @@
 //! Direct and indirect function call expression lowering.
 
 use super::lowering_core::{MirLowerResult, MirLowerer};
-use crate::hir::{HirExpr, HirExprKind, HirType, TypeId};
+use crate::hir::{DispatchMode, HirExpr, HirExprKind, HirType, TypeId};
 use crate::mir::effects::CallTarget;
 use crate::mir::instructions::{MirInst, VReg};
 
@@ -146,6 +146,31 @@ impl<'a> MirLowerer<'a> {
     }
 
     pub(super) fn lower_call_expr(&mut self, callee: &HirExpr, args: &[HirExpr]) -> MirLowerResult<VReg> {
+        if let HirExprKind::Global(name) = &callee.kind {
+            if let Some((receiver_name, method_name)) = name.rsplit_once('.') {
+                if matches!(method_name, "push" | "append" | "len") {
+                    if let Some(receiver_ty) = self.global_types.get(receiver_name).copied() {
+                        if self
+                            .type_registry
+                            .and_then(|registry| registry.get(receiver_ty))
+                            .is_some_and(|ty| matches!(ty, HirType::Array { .. }))
+                        {
+                            let receiver_expr = HirExpr {
+                                kind: HirExprKind::Global(receiver_name.to_string()),
+                                ty: receiver_ty,
+                            };
+                            return self.lower_method_call_expr(
+                                &receiver_expr,
+                                method_name,
+                                args,
+                                &DispatchMode::Dynamic,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         let mut arg_regs = Vec::new();
         for arg in args {
             arg_regs.push(self.lower_expr(arg)?);
@@ -187,6 +212,25 @@ impl<'a> MirLowerer<'a> {
                     });
                 }
                 _ => {}
+            }
+
+            if self.function_value_globals.contains(name) {
+                self.box_args_for_any_params(callee, args, &mut arg_regs)?;
+                let callee_reg = self.lower_global_expr(name.clone(), callee.ty)?;
+                let (param_types, return_type) = self.function_signature_for_callee(callee, arg_regs.len());
+                return self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::IndirectCall {
+                        dest: Some(dest),
+                        callee: callee_reg,
+                        param_types,
+                        return_type,
+                        args: arg_regs,
+                        effect: crate::mir::effects::Effect::Io,
+                    });
+                    dest
+                });
             }
 
             // Check if this is an enum variant constructor (e.g., "Color::Blue" or "Color.Blue")

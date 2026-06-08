@@ -103,6 +103,27 @@ fn record_const_array_init(
     }
 }
 
+fn record_function_init(
+    map: &mut HashMap<String, String>,
+    name: &str,
+    ty: TypeId,
+    types: &crate::hir::types::TypeRegistry,
+    expr: Option<&Expr>,
+) {
+    if !matches!(types.get(ty), Some(HirType::Function { .. })) {
+        return;
+    }
+    let Some(expr) = expr else {
+        return;
+    };
+    let func_name = match expr {
+        Expr::Identifier(name) => name.clone(),
+        Expr::Path(parts) => parts.join("."),
+        _ => return,
+    };
+    map.insert(name.to_string(), func_name);
+}
+
 fn is_domain_block_kind(kind: &str) -> bool {
     matches!(
         kind,
@@ -323,6 +344,13 @@ impl Lowerer {
                     &self.module.types,
                     Some(&s.value),
                 );
+                record_function_init(
+                    &mut self.global_init_functions,
+                    &s.name,
+                    ty,
+                    &self.module.types,
+                    Some(&s.value),
+                );
             }
             Node::Const(c) => {
                 // Register constant
@@ -353,6 +381,13 @@ impl Lowerer {
                 }
                 record_const_array_init(
                     &mut self.global_init_arrays,
+                    &c.name,
+                    ty,
+                    &self.module.types,
+                    Some(&c.value),
+                );
+                record_function_init(
+                    &mut self.global_init_functions,
                     &c.name,
                     ty,
                     &self.module.types,
@@ -398,6 +433,13 @@ impl Lowerer {
                     }
                     record_const_array_init(
                         &mut self.global_init_arrays,
+                        &n,
+                        ty,
+                        &self.module.types,
+                        l.value.as_ref(),
+                    );
+                    record_function_init(
+                        &mut self.global_init_functions,
                         &n,
                         ty,
                         &self.module.types,
@@ -1048,6 +1090,7 @@ impl Lowerer {
         self.module.global_init_values = self.global_init_values.clone();
         self.module.global_init_strings = self.global_init_strings.clone();
         self.module.global_init_arrays = self.global_init_arrays.clone();
+        self.module.global_init_functions = self.global_init_functions.clone();
 
         // Copy local globals set to HirModule for codegen linkage decisions
         self.module.local_globals = self.local_globals.clone();
@@ -1330,6 +1373,7 @@ impl Lowerer {
         self.module.global_init_values = self.global_init_values.clone();
         self.module.global_init_strings = self.global_init_strings.clone();
         self.module.global_init_arrays = self.global_init_arrays.clone();
+        self.module.global_init_functions = self.global_init_functions.clone();
 
         // Copy local globals set to HirModule for codegen linkage decisions
         self.module.local_globals = self.local_globals.clone();

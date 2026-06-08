@@ -11,7 +11,8 @@ separate from the cooperative queue semantics:
   `fn call(cb: fn() -> i64) -> i64: cb()`. Fixed on 2026-06-08 by
   materializing top-level function values as closure objects before parameter
   passing.
-- Direct interpreter global array append/index can segfault after mutation.
+- Direct interpreter global function calls and global array append/index can
+  segfault after mutation.
 - SMF mutable globals can segfault even for a minimal counter:
   `var COUNT: usize = 0; COUNT = COUNT + 1`.
 
@@ -33,10 +34,10 @@ checks and SPipe examples passed, but native entry-closure evidence failed:
   `CODEGEN-WARN ... IncompatibleDeclaration` for `GREEN_TASK_FUNC_*`, and the
   native smoke again segfaulted with `exit=139`.
 
-Until native codegen can safely store and call function-valued globals and
-global array entries, `green_spawn(fn)` must keep the native-safe eager-result
-behavior. `green_spawn_value(result)` remains the stable profile harness input
-for direct queue/fanout timing.
+Until interpreter and SMF paths can safely store and call function-valued globals
+and global array entries, `green_spawn(fn)` must keep the stable eager-result
+behavior for broad profile rows. `green_spawn_value(result)` remains the stable
+profile harness input for direct queue/fanout timing.
 
 Green threads also cannot be used as proof of C/Go parity for CPU-parallel
 workloads because they run on the current OS thread. On 2026-06-06, the existing
@@ -61,19 +62,19 @@ evidence:
 - `cooperative_green_spawn(worker)` builds and runs natively without the prior
   segfault.
 
-Local function-valued arrays are now native-covered by the callback regression
-script. Function-valued globals and global function-valued arrays remain open
-storage/codegen blockers and are not required for the current eager-result
-cooperative queue.
+Local function-valued arrays, function-valued globals, and global
+function-valued arrays are now native-covered by the callback regression script.
+Interpreter and SMF function-valued global/global-array storage remain open and
+are not required for the current eager-result cooperative queue.
 
 The cross-language harness now reports Simple OS-thread and Simple cooperative
 green rows separately. A 20-worker OS-thread fanout smoke compiles and runs
 through unrolled `thread_spawn` fork-join handles. `thread_spawn_with_args`
 native probes now pass the focused explicit-argument ABI smoke, so it is no
 longer part of this blocker list. The remaining direct-run blockers are the
-cooperative green SMF mutable-global failure and native/SMF function-valued
-global and global-array storage/codegen failures; those are runtime/compiler
-issues, not public API change requests.
+cooperative green SMF mutable-global failure and interpreter/SMF
+function-valued global and global-array storage/codegen failures; those are
+runtime/compiler issues, not public API change requests.
 
 ## Multicore Green SMF Status
 
@@ -102,8 +103,8 @@ Temporary local repro files were created under `build/tmp/` while investigating:
 
 ## Required Fix
 
-Fix native and SMF handling for function-valued globals, global function-valued
-arrays, and mutable global state, then switch or add a perf harness green row
-for delayed `green_spawn(fn)` closure execution timing. Keep
+Fix interpreter and SMF handling for function-valued globals, global
+function-valued arrays, and mutable global state, then switch or add a perf
+harness green row for delayed `green_spawn(fn)` closure execution timing. Keep
 `test/05_perf/profile_scripts/native_function_value_callback_regression_test.shs`
 passing so the fixed function-parameter callback path does not regress.

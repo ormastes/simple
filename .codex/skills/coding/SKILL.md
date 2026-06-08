@@ -211,9 +211,10 @@ execution model:
 Use `cooperative_green_spawn` for lightweight cooperative scheduling tests, and
 `cooperative_green_spawn_value` when a direct-run benchmark needs to exercise
 the queue without delayed function-valued storage. Function-valued parameters
-and local function arrays are native-covered, but function-valued globals and
-global function arrays remain separate delayed-storage blockers. Do not use
-either cooperative API for Go-style M:N CPU-parallel benchmarks. Use
+and local/global function arrays and globals are native-covered, but interpreter
+and SMF function-valued global/global-array storage remains a separate
+delayed-storage blocker. Do not use either cooperative API for Go-style M:N
+CPU-parallel benchmarks. Use
 `multicore_green_spawn` for current cross-language Go-like benchmark work, use
 `task_spawn` only for direct task API checks, or use a future scheduler-aware
 green runtime when that lands. When a test or profile claims M:N CPU

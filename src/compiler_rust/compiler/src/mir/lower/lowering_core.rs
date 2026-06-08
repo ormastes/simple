@@ -275,6 +275,10 @@ pub struct MirLowerer<'a> {
     pub(super) available_functions: HashSet<String>,
     /// Parameter types for direct function calls whose global expression only carries return type.
     pub(super) function_param_types: HashMap<String, Vec<TypeId>>,
+    /// Types of HIR globals, used to recover method calls parsed as `GLOBAL.method`.
+    pub(super) global_types: HashMap<String, TypeId>,
+    /// Function-typed globals whose calls must load the stored closure value.
+    pub(super) function_value_globals: HashSet<String>,
     /// Singleton instance cache for DI (impl_type -> VReg)
     pub(super) singleton_cache: HashMap<String, super::super::instructions::VReg>,
     /// Dependency graph for cycle detection (#1009)
@@ -327,6 +331,8 @@ impl<'a> MirLowerer<'a> {
             inject_functions: HashMap::new(),
             available_functions: HashSet::new(),
             function_param_types: HashMap::new(),
+            global_types: HashMap::new(),
+            function_value_globals: HashSet::new(),
             singleton_cache: HashMap::new(),
             dependency_graph: crate::di::DependencyGraph::default(),
             di_resolution_stack: Vec::new(),
@@ -361,6 +367,8 @@ impl<'a> MirLowerer<'a> {
             inject_functions: HashMap::new(),
             available_functions: HashSet::new(),
             function_param_types: HashMap::new(),
+            global_types: HashMap::new(),
+            function_value_globals: HashSet::new(),
             singleton_cache: HashMap::new(),
             dependency_graph: crate::di::DependencyGraph::default(),
             di_resolution_stack: Vec::new(),
@@ -1067,6 +1075,8 @@ impl<'a> MirLowerer<'a> {
         self.inject_functions.clear();
         self.available_functions.clear();
         self.function_param_types.clear();
+        self.global_types = hir.globals.iter().map(|(name, ty)| (name.clone(), *ty)).collect();
+        self.function_value_globals = hir.global_init_functions.keys().cloned().collect();
         self.singleton_cache.clear(); // Clear singleton cache for each module
         self.dependency_graph = crate::di::DependencyGraph::default(); // Reset dependency graph per module (#1009)
         self.di_resolution_stack.clear(); // Clear DI resolution stack per module
@@ -1111,6 +1121,7 @@ impl<'a> MirLowerer<'a> {
         module.global_init_values = hir.global_init_values.clone();
         module.global_init_strings = hir.global_init_strings.clone();
         module.global_init_arrays = hir.global_init_arrays.clone();
+        module.global_init_functions = hir.global_init_functions.clone();
 
         // Copy local globals set from HIR to MIR for codegen linkage decisions
         module.local_globals = hir.local_globals.clone();
