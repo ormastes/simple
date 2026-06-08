@@ -320,3 +320,36 @@ Host verification from `/tmp/simple-pherallel-sync`:
   not complete because `simple-test-isolation:latest` lacks `gcc`, while
   `simple-cross-language-perf:latest` has GCC without `--target` support and no
   `clang`.
+
+## 2026-06-08 Final Ring/User Handoff PASS
+
+The final live green-carrier QEMU lane now proves the real AP ring/user path.
+The guest loads a minimal x86_64 TSS before entering user mode, creates the
+final probe page-table root, dispatches the scheduler-created user handoff task
+through the green-carrier lane, enters CPL3 with `CS=0x2B` and `SS=0x23`, runs
+user code, performs one user-mode `syscall 60`, returns to user mode, and then
+emits the final marker triplet:
+
+- `[green-carrier-qemu] HW_HANDOFF_PASS=true`
+- `[green-carrier-qemu] USER_ENTRY_PASS=true`
+- `[green-carrier-qemu] USER_SYSCALL_PASS=true`
+
+Fixes made in this refresh:
+
+- The x86_64 boot path now loads a TSS descriptor (`ltr 0x30`) so CPL3
+  faults/interrupts have a ring-0 stack.
+- The first-dispatch trampoline now documents that TSS prerequisite.
+- The scheduler architecture selector is ordered x86-first, matching
+  `os.kernel.arch.mod`, so the freestanding x86_64 probe builds user contexts
+  with the intended `CS=0x2B`, `SS=0x23`, and user RFLAGS.
+- The final probe writes compact raw machine-code payload chunks with
+  `mmio_write64`, avoiding the freestanding u8-array boxing path that corrupted
+  bytewise MMIO payload installation.
+
+Host verification from `/tmp/simple-pherallel-sync`:
+
+- Direct QEMU probe: PASS, serial output included all three final markers.
+- `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 src/compiler_rust/target/debug/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean`:
+  PASS in 59786ms.
+- `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 src/compiler_rust/target/debug/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean`:
+  PASS in 62324ms.

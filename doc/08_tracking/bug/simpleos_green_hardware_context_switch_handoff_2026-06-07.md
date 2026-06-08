@@ -1,10 +1,16 @@
 # SimpleOS Green Hardware Context-Switch Handoff Blocker - 2026-06-07
 
+Status: CLOSED on 2026-06-08. The live
+`SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1` gate now emits
+`HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, and
+`USER_SYSCALL_PASS=true` from the real AP ring/user path. See
+`doc/09_report/simpleos_multicore_green_evidence_2026-06-07.md`.
+
 ## Summary
 
-The multicore-green SimpleOS lane has hosted scheduler evidence and live QEMU AP
-evidence, but it does not yet prove the final ring/user hardware context-switch
-handoff across application processors.
+The multicore-green SimpleOS lane has hosted scheduler evidence, live QEMU AP
+evidence, and final ring/user hardware context-switch handoff evidence across
+the green-carrier path.
 
 Current live QEMU evidence proves:
 
@@ -15,8 +21,8 @@ Current live QEMU evidence proves:
   `Scheduler.run_green_carrier_once`, records one CPU1 green context switch, and
   leaves the normal OS CPU1 task slot unchanged.
 
-That is scheduler-owned green handoff evidence, not final hardware context
-handoff evidence.
+That scheduler-owned green handoff evidence is now supplemented by the final
+ring/user marker triplet listed above.
 
 ## Missing Proof
 
@@ -56,10 +62,10 @@ Use separate final markers:
 `[green-carrier-qemu] USER_CR3_READY=true` prerequisite markers.
 
 The executable live gate is
-`SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1`. It should fail until the
-guest probe prints all final hardware/user markers from a real AP ring/user
-handoff path whose user payload reaches the syscall entry and returns through
-the kernel syscall dispatcher.
+`SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1`. It must continue to print all
+final hardware/user markers from a real AP ring/user handoff path whose user
+payload reaches the syscall entry and returns through the kernel syscall
+dispatcher.
 
 Current proof-point candidates:
 
@@ -94,11 +100,9 @@ Current proof-point candidates:
 
 ## Current Boundary
 
-Do not mark `FR-RUNTIME-MULTICORE-GREEN-2026-06-06` done while this blocker is
-open. The feature can claim hosted runtime-pool M:N evidence, cooperative-green
-semantics, SimpleOS hosted scheduler evidence, and live QEMU AP scheduler-owned
-handoff evidence, but not final SimpleOS ring/user hardware context-switch
-handoff.
+This blocker no longer prevents `FR-RUNTIME-MULTICORE-GREEN-2026-06-06` from
+claiming final SimpleOS ring/user hardware context-switch handoff, provided the
+live gate remains passing and the evidence report stays current.
 
 The Pure Simple scheduler handoff compatibility contract is now covered by
 `test/01_unit/os/kernel/scheduler/scheduler_green_user_handoff_spec.spl` and
@@ -106,8 +110,8 @@ The Pure Simple scheduler handoff compatibility contract is now covered by
 dispatch a seeded user-task pid through the green lane, verify the same pid
 still resolves to a `user_context`, and validate syscall-14 handoff readiness
 without executing the ring transition. This is necessary setup evidence only;
-the final blocker remains open until live QEMU observes the x86_64 user entry
-and syscall-return path.
+the final blocker remained open until live QEMU observed the x86_64 user entry
+and syscall-return path on 2026-06-08.
 
 ## 2026-06-07 Link Blocker Refresh
 

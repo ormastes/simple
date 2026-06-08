@@ -238,8 +238,8 @@ insertion/poll-placement before claiming tight-loop fairness comparable to Go.
   `doc/08_tracking/bug/smf_runtime_pool_closure_lookup_2026-06-07.md` and are
   not valid M:N evidence until they report full pool, parallelism, and
   work-stealing queue evidence.
-- SimpleOS QEMU proof does not yet prove final hardware context-switch handoff;
-  keep `doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md`
-  linked until a live guest proves `HW_HANDOFF_PASS=true`,
-  `USER_ENTRY_PASS=true`, and `USER_SYSCALL_PASS=true` from the real AP
-  ring/user path.
+- SimpleOS QEMU final hardware context-switch handoff is now proven by the live
+  guest marker triplet `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, and
+  `USER_SYSCALL_PASS=true`; keep
+  `doc/09_report/simpleos_multicore_green_evidence_2026-06-07.md` current when
+  this AP ring/user path changes.
