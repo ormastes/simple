@@ -211,7 +211,7 @@ expect(absent_in_text(probe, "USER_SYSCALL_PASS=true")).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 36 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -235,6 +235,10 @@ expect(blocker).to_contain("src/os/kernel/ipc/syscall.spl")
 expect(blocker).to_contain("green_carrier_probe_entry.spl")
 expect(blocker).to_contain("USER_ENTRY_PASS=true")
 expect(blocker).to_contain("USER_SYSCALL_PASS=true")
+expect(blocker).to_contain("Hosted Real-Spawn Handoff Prerequisite")
+expect(blocker).to_contain("create_user_task_pid")
+expect(blocker).to_contain("create_bootstrap_user_task_pid")
+expect(blocker).to_contain("validation-ready TCB")
 
 step("Verify current implementation files expose the named proof points")
 expect(context_switch).to_contain("context_restore")

@@ -173,3 +173,24 @@ Docker evidence still keeps the current boundary honest:
 
 This is prerequisite evidence only. It does not print or satisfy the final live
 QEMU markers.
+
+## 2026-06-08 Hosted Real-Spawn Handoff Prerequisite
+
+A follow-up Docker-isolated attempt replaced the manual hosted TCB seeding in
+`test/01_unit/os/kernel/arch/x86_64_user_entry_validation_spec.spl` and
+`test/01_unit/os/kernel/scheduler/scheduler_green_user_handoff_spec.spl` with
+the scheduler's real user-task creation path:
+
+- `Scheduler.create_user_task_pid(image, TaskPriority.Normal, CapabilitySet.full())`
+- `Scheduler.create_bootstrap_user_task_pid(image, TaskPriority.Normal, CapabilitySet.full())`
+
+Both variants failed the positive hosted validation scenario when run in
+`simple-test-isolation`, while the manual handoff-record validation remains
+green. That means the next prerequisite is not another scheduler-only marker:
+the hosted x86_64 user-image spawn path must create a validation-ready TCB from
+the real `build_user_process_image` output before the green-carrier QEMU probe
+can honestly claim an in-memory payload/address-space lane.
+
+Keep this separate from the final marker triplet. A future fix should first add
+passing Docker evidence for the real hosted spawn path, then wire equivalent
+payload/address-space construction into the live green-carrier guest.
