@@ -145,3 +145,23 @@ waiter-consumption handoff no longer blocks the final AP/user proof.
 This does not close the live SimpleOS hardware handoff blocker. The final QEMU
 gate still must emit `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, and
 `USER_SYSCALL_PASS=true` from a real AP ring/user payload path.
+
+## 2026-06-08 EnterUserBlocking Validation Boundary
+
+`src/os/kernel/arch/x86_64/user_entry.spl` now exposes
+`validate_enter_user_blocking_handoff(pid_hint, scheduler)` as a non-entering
+validation boundary for syscall `14`. The real `dispatch_enter_user_blocking`
+path uses the same validation before calling `arch_x86_64_enter_user_task`, but
+tests can check handoff readiness without executing the unsafe ring transition
+inside a hosted or Docker test process.
+
+Docker evidence still keeps the current boundary honest:
+
+- `simple check src/os/kernel/arch/x86_64/user_entry.spl
+  test/01_unit/os/kernel/scheduler/scheduler_green_user_handoff_spec.spl`
+  passes in `simple-test-isolation`.
+- `simple test test/01_unit/os/kernel/scheduler/scheduler_green_user_handoff_spec.spl
+  --mode=interpreter --clean` passes in `simple-test-isolation`.
+
+This is prerequisite evidence only. It does not print or satisfy the final live
+QEMU markers.
