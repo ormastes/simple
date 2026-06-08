@@ -83,23 +83,23 @@ class ControlFlowGraph:
 
     me add_exit(block_id: i64):
         """Add an exit block."""
-        self.exit_blocks = self.exit_blocks_push(exit_blocks, block_id)
+        self.exit_blocks = self.exit_blocks.push(block_id)
 
     me compute_predecessors():
         """Compute predecessor edges from successor edges."""
-        for id in self.blocks_keys(blocks):
+        for id in self.blocks.keys():
             val block = self.blocks[id]
             for succ_id in block.successors:
-                match self.blocks_get(blocks, succ_id):
-                    case succ_block:
-                        succ_block.predecessors = succ_block.predecessors_push(predecessors, id)
-                        self.blocks[succ_id] = succ_block
-                    case nil:
-                        pass
+                if self.blocks.has(succ_id):
+                    var succ_block = self.blocks[succ_id]
+                    succ_block.predecessors = succ_block.predecessors.push(id)
+                    self.blocks[succ_id] = succ_block
 
-    fn get_block(id: i64) -> has_BasicBlock:
+    fn get_block(id: i64) -> BasicBlock?:
         """Get a block by ID."""
-        self.blocks_get(blocks, id)
+        if self.blocks.has(id):
+            return self.blocks[id]
+        nil
 
     fn reverse_postorder() -> [i64]:
         """Get blocks in reverse postorder (for dataflow)."""
@@ -110,27 +110,25 @@ class ControlFlowGraph:
 
         # Reverse the order
         var result: [i64] = []
-        var i = order_len(order) - 1
+        var i = order.len() - 1
         while i >= 0:
-            result = result_push(result, order[i])
+            result = result.push(order[i])
             i = i - 1
         result
 
     me dfs_postorder(block_id: i64, visited: [i64], order: [i64]):
         """DFS for postorder traversal."""
-        if visited_contains(visited, block_id):
+        if visited.contains(block_id):
             return
 
-        visited = visited_push(visited, block_id)
+        visited = visited.push(block_id)
 
-        match self.blocks_get(blocks, block_id):
-            case block:
-                for succ_id in block.successors:
-                    self.dfs_postorder(succ_id, visited, order)
-            case nil:
-                pass
+        if self.blocks.has(block_id):
+            val block = self.blocks[block_id]
+            for succ_id in block.successors:
+                self.dfs_postorder(succ_id, visited, order)
 
-        order = order_push(order, block_id)
+        order = order.push(block_id)
 
 # ============================================================================
 # Liveness Analysis
@@ -163,16 +161,16 @@ class LivenessAnalysis:
 
     me record_use(block_id: i64, var_id: i64):
         """Record a variable use."""
-        var block_uses = self.uses_get(uses, block_id) ?? []
-        if not block_uses_contains(block_uses, var_id):
-            block_uses = block_uses_push(block_uses, var_id)
+        var block_uses = self.uses[block_id] ?? []
+        if not block_uses.contains(var_id):
+            block_uses = block_uses.push(var_id)
         self.uses[block_id] = block_uses
 
     me record_def(block_id: i64, var_id: i64):
         """Record a variable definition."""
-        var block_defs = self.defs_get(defs, block_id) ?? []
-        if not block_defs_contains(block_defs, var_id):
-            block_defs = block_defs_push(block_defs, var_id)
+        var block_defs = self.defs[block_id] ?? []
+        if not block_defs.contains(var_id):
+            block_defs = block_defs.push(var_id)
         self.defs[block_id] = block_defs
 
     fn compute() -> LivenessResult:
@@ -186,7 +184,7 @@ class LivenessAnalysis:
         var live_out: Dict<i64, [i64]> = {}
 
         # Initialize
-        for id in self.cfg.blocks_keys(blocks):
+        for id in self.cfg.blocks.keys():
             live_in[id] = []
             live_out[id] = []
 
@@ -199,31 +197,31 @@ class LivenessAnalysis:
             changed = false
             iterations = iterations + 1
 
-            for id in self.cfg.blocks_keys(blocks):
+            for id in self.cfg.blocks.keys():
                 val block = self.cfg.blocks[id]
                 # Compute live_out from successors
                 var new_out: [i64] = []
                 for succ_id in block.successors:
-                    val succ_in = live_in_get(live_in, succ_id) ?? []
+                    val succ_in = live_in[succ_id] ?? []
                     for var_id in succ_in:
-                        if not new_out_contains(new_out, var_id):
-                            new_out = new_out_push(new_out, var_id)
+                        if not new_out.contains(var_id):
+                            new_out = new_out.push(var_id)
 
                 # Compute live_in
-                val block_uses = self.uses_get(uses, id) ?? []
-                val block_defs = self.defs_get(defs, id) ?? []
+                val block_uses = self.uses[id] ?? []
+                val block_defs = self.defs[id] ?? []
 
                 var new_in = block_uses
                 for var_id in new_out:
-                    if not block_defs_contains(block_defs, var_id):
-                        if not new_in_contains(new_in, var_id):
-                            new_in = new_in_push(new_in, var_id)
+                    if not block_defs.contains(var_id):
+                        if not new_in.contains(var_id):
+                            new_in = new_in.push(var_id)
 
                 # Check for changes
-                val old_in = live_in_get(live_in, id) ?? []
-                val old_out = live_out_get(live_out, id) ?? []
+                val old_in = live_in[id] ?? []
+                val old_out = live_out[id] ?? []
 
-                if new_in_len(new_in) != old_in_len(old_in) or new_out_len(new_out) != old_out_len(old_out):
+                if new_in.len() != old_in.len() or new_out.len() != old_out.len():
                     changed = true
 
                 live_in[id] = new_in
@@ -312,9 +310,9 @@ class NLLChecker:
     static fn create(cfg: ControlFlowGraph) -> NLLChecker:
         NLLChecker(
             cfg: cfg,
-            borrow_graph: borrowgraph_create(),
-            liveness: livenessanalysis_create(cfg),
-            lifetime_inference: lifetimeinference_create(),
+            borrow_graph: BorrowGraph.create(),
+            liveness: LivenessAnalysis.create(cfg),
+            lifetime_inference: LifetimeInference.create(),
             errors: []
         )
 
@@ -324,15 +322,15 @@ class NLLChecker:
         Returns true if no errors.
         """
         # Step 1: Compute liveness
-        val liveness_result = self.liveness_compute(liveness)
+        val liveness_result = self.liveness.compute()
 
         # Step 2: Process each block
-        for block_id in self.cfg_reverse_postorder(cfg):
+        for block_id in self.cfg.reverse_postorder():
             self.check_block(block_id, liveness_result)
 
         # Step 3: Run lifetime inference
-        if not self.lifetime_inference_infer(lifetime_inference):
-            for err in self.lifetime_inference_get_errors(lifetime_inference):
+        if not self.lifetime_inference.infer():
+            for err in self.lifetime_inference.get_errors():
                 self.errors = self.errors.push(NLLError(
                     message: err.message,
                     has_primary_span: true,
@@ -343,7 +341,7 @@ class NLLChecker:
                 ))
 
         # Step 4: Check borrow graph for conflicts
-        for err in self.borrow_graph_get_errors(borrow_graph):
+        for err in self.borrow_graph.get_errors():
             self.errors = self.errors.push(NLLError(
                 message: err.message,
                 has_primary_span: true,
@@ -353,27 +351,26 @@ class NLLChecker:
                 help: ""
             ))
 
-        self.errors_is_empty(errors)
+        self.errors.is_empty()
 
     me check_block(block_id: i64, liveness: LivenessResult):
         """Check a single basic block."""
-        match self.cfg_get_block(cfg, block_id):
-            case block:
-                # Propagate borrows from predecessors
-                for pred_id in block.predecessors:
-                    self.borrow_graph_propagate_borrows(borrow_graph, pred_id, block_id)
+        val maybe_block = self.cfg.get_block(block_id)
+        if maybe_block.is_none():
+            return
+        val block = maybe_block.unwrap()
+        # Propagate borrows from predecessors
+        for pred_id in block.predecessors:
+            self.borrow_graph.propagate_borrows(pred_id, block_id)
 
-                # Check each statement
-                var point = block_id * 1000  # Simple point numbering
-                for stmt_id in block.statements:
-                    self.check_statement(stmt_id, point)
-                    point = point + 1
+        # Check each statement
+        var point = block_id * 1000  # Simple point numbering
+        for stmt_id in block.statements:
+            self.check_statement(stmt_id, point)
+            point = point + 1
 
-                # Check terminator
-                self.check_terminator(block.terminator, point, liveness)
-
-            case nil:
-                pass
+        # Check terminator
+        self.check_terminator(block.terminator, point, liveness)
 
     me check_statement(stmt_id: i64, point: i64):
         """Check a statement for borrow violations.
@@ -384,25 +381,23 @@ class NLLChecker:
         """
         # Propagate borrows from previous point to current
         if point > 0:
-            self.borrow_graph_propagate_borrows(borrow_graph, point - 1, point)
+            self.borrow_graph.propagate_borrows(point - 1, point)
 
         # Check for borrow conflicts at this point
-        val borrow_set = self.borrow_graph_get_or_create_borrows(borrow_graph, point)
-        val active = borrow_set_active_borrows(borrow_set)
+        val borrow_set = self.borrow_graph.get_or_create_borrows(point)
+        val active = borrow_set.active_borrows()
         for borrow in active:
-            match borrow_set_has_conflicting_borrow(borrow_set, borrow.place, borrow.kind):
-                case conflict:
-                    self.errors = self.errors.push(nllerror_borrow_conflict(borrow, conflict))
-                case nil:
-                    pass
+            val conflict = borrow_set.has_conflicting_borrow(borrow.place, borrow.kind)
+            if conflict.?:
+                self.errors = self.errors.push(nllerror_borrow_conflict(borrow, conflict.unwrap()))
 
     me check_terminator(term: Terminator, point: i64, liveness: LivenessResult):
         """Check terminator for borrow violations."""
         match term:
             case Return:
                 # On return, all borrows must have ended
-                val borrow_set = self.borrow_graph_get_or_create_borrows(borrow_graph, point)
-                val active = borrow_set_active_borrows(borrow_set)
+                val borrow_set = self.borrow_graph.get_or_create_borrows(point)
+                val active = borrow_set.active_borrows()
                 for borrow in active:
                     self.errors = self.errors.push(NLLError(
                         message: "borrow of `{borrow.place.to_text()}` may still be active at return",
@@ -414,40 +409,39 @@ class NLLChecker:
                     ))
             case Call(target, unwind):
                 # Propagate borrows through call; check for conflicts
-                self.borrow_graph_propagate_borrows(borrow_graph, point, target)
+                self.borrow_graph.propagate_borrows(point, target)
             case Drop(target, unwind):
                 # Propagate borrows through drop; check for conflicts
-                self.borrow_graph_propagate_borrows(borrow_graph, point, target)
+                self.borrow_graph.propagate_borrows(point, target)
             case Goto(target):
-                self.borrow_graph_propagate_borrows(borrow_graph, point, target)
+                self.borrow_graph.propagate_borrows(point, target)
             case SwitchInt(targets, otherwise):
                 for t in targets:
-                    self.borrow_graph_propagate_borrows(borrow_graph, point, t)
-                self.borrow_graph_propagate_borrows(borrow_graph, point, otherwise)
+                    self.borrow_graph.propagate_borrows(point, t)
+                self.borrow_graph.propagate_borrows(point, otherwise)
             case Unreachable:
                 pass
 
     me record_borrow(point: i64, place: Place, kind: BorrowKind) -> bool:
         """Record a borrow and check for conflicts."""
-        match self.borrow_graph_record_borrow(borrow_graph, point, place, kind):
-            case borrow:
-                # Add lifetime constraint
-                self.lifetime_inference.env.add_outlives(
-                    borrow.lifetime,
-                    Lifetime.Anonymous(point),
-                    "borrow must be valid at use"
-                )
-                true
-            case nil:
-                false
+        val borrow = self.borrow_graph.record_borrow(point, place, kind)
+        if borrow.is_none():
+            return false
+        # Add lifetime constraint
+        self.lifetime_inference.env.add_outlives(
+            borrow.unwrap().lifetime,
+            Lifetime.Anonymous(point),
+            "borrow must be valid at use"
+        )
+        true
 
     me record_use(point: i64, place: Place):
         """Record use of a place."""
-        self.borrow_graph_record_use(borrow_graph, point, place)
+        self.borrow_graph.record_use(point, place)
 
     me record_move(point: i64, place: Place):
         """Record move of a place."""
-        self.borrow_graph_record_move(borrow_graph, point, place)
+        self.borrow_graph.record_move(point, place)
 
     fn get_errors() -> [NLLError]:
         """Get all NLL errors."""
@@ -460,7 +454,7 @@ class NLLChecker:
             var msg = "error: {err.message}"
             if err.has_help:
                 msg = "{msg}\n  help: {err.help}"
-            result = result_push(result, msg)
+            result = result.push(msg)
         result
 
 # ============================================================================

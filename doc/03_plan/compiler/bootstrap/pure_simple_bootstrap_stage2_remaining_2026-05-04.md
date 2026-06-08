@@ -589,3 +589,34 @@ HIR lowering error: Unknown variable: exit_blocks while lowering ControlFlowGrap
 Current next blocker: inspect the NLL control-flow graph helpers for stale
 generated list/dict accessor names around `exit_blocks`, then continue the same
 stage2 probe loop.
+
+## 2026-06-08 NLL / BorrowChecker Follow-Up
+
+Status: still blocked for the pure-Simple stage2 payload.
+
+The same direct stage2 probe now clears the next blockers for:
+
+- NLL control-flow graph exit block tracking and predecessor computation no
+  longer depend on stale generated list/dict helpers such as `exit_blocks`,
+  `blocks_keys`, and `blocks_get`.
+- NLL reverse-postorder and DFS traversal use direct list/dict operations
+  instead of generated helper names for `len`, `push`, and `contains`.
+- NLL liveness analysis now uses direct dict/list operations for uses, defs,
+  live-in, live-out, and fixed-point set construction.
+- NLL checker creation and checking now call the current constructors and
+  methods for `BorrowGraph`, `LivenessAnalysis`, and `LifetimeInference`.
+- Borrow checker integration now calls `NLLChecker.create`, `nll.check`,
+  `nll.get_errors`, direct CFG/basic-block operations, and current `Terminator`
+  constructors instead of stale generated wrapper helpers.
+- Borrow checker MIR module convenience checking now uses
+  `MirBody.from_function`.
+
+Latest probe still exits `1`, emits no stage2 artifact, and now stops at:
+
+```text
+HIR lowering error: Unknown variable: resolve_methods while lowering CompilerDriver.lower_and_check_impl
+```
+
+Current next blocker: inspect the compiler driver implementation lowering path
+for stale `resolve_methods` helper references, then continue the same stage2
+probe loop.
