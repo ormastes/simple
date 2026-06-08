@@ -365,8 +365,10 @@ impl MirLowering:
         # is present, emit a Phase 2 diagnostic naming the offending kind
         # and bail out with a unit temp.
         var int_cases: [(i64, HirBlock)] = []
-        var default_body: HirBlock? = nil
-        var default_binding: SymbolId? = nil
+        var has_default_body = false
+        var default_body_value = HirBlock(stmts: [], value: nil, span: scrutinee.span)
+        var has_default_binding = false
+        var default_binding_value = SymbolId.new(-1)
         var idx = 0
         while idx < arms.len():
             val arm = arms[idx]
@@ -381,7 +383,7 @@ impl MirLowering:
                 return err_temp
             match arm.pattern.kind:
                 case Wildcard:
-                    if default_body.?:
+                    if has_default_body:
                         self.error(
                             "B5b: match has multiple wildcard arms",
                             Some(arm.span)
@@ -390,7 +392,8 @@ impl MirLowering:
                         val err_temp2 = b_err2.new_temp(MirType.unit())
                         self.builder = b_err2
                         return err_temp2
-                    default_body = Some(arm.body)
+                    has_default_body = true
+                    default_body_value = arm.body
                 case Literal(lit_expr):
                     match lit_expr.kind:
                         case IntLit(n, _):
@@ -409,7 +412,7 @@ impl MirLowering:
                     # wildcard default but also binds the scrutinee to a
                     # local symbol. Mutability flag is ignored at MIR
                     # level (it only matters for borrow-check).
-                    if default_body.?:
+                    if has_default_body:
                         self.error(
                             "B5b: match has multiple wildcard/binding default arms",
                             Some(arm.span)
@@ -418,8 +421,10 @@ impl MirLowering:
                         val t_dup = b_dup.new_temp(MirType.unit())
                         self.builder = b_dup
                         return t_dup
-                    default_body = Some(arm.body)
-                    default_binding = Some(symbol)
+                    has_default_body = true
+                    default_body_value = arm.body
+                    has_default_binding = true
+                    default_binding_value = symbol
                 case Or(sub_patterns):
                     # Phase 2a: Or-of-IntLit alternatives expand into one
                     # int_cases entry per alternative, all pointing at the
@@ -506,7 +511,7 @@ impl MirLowering:
 
         # Phase 1 also requires a wildcard default arm; without one we'd
         # need exhaustiveness analysis (Phase 2). Reject cleanly.
-        if not default_body.?:
+        if not has_default_body:
             self.error(
                 "B5b Phase 2 not yet implemented: match without wildcard default arm",
                 nil
@@ -523,8 +528,9 @@ impl MirLowering:
         #   arms >= 4 and (max - min) <= 1024  =>  Switch
         #   otherwise                          =>  If chain
         val use_switch = self.should_emit_switch(int_cases)
+        val default_binding = if has_default_binding: Some(default_binding_value) else: nil
 
         if use_switch:
-            self.emit_switch_dispatch(scrut_local, int_cases, default_body.unwrap(), default_binding)
+            self.emit_switch_dispatch(scrut_local, int_cases, default_body_value, default_binding)
         else:
-            self.emit_if_chain_dispatch(scrut_local, int_cases, default_body.unwrap(), default_binding)
+            self.emit_if_chain_dispatch(scrut_local, int_cases, default_body_value, default_binding)

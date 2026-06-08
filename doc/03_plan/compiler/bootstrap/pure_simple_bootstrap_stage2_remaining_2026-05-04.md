@@ -774,3 +774,24 @@ HIR lowering error: Memory safety error [W1006]: mutation without mut capability
 Current next blocker: inspect `make_register_static_driver_call` around line
 70 for direct mutation without mut capability, then continue the same stage2
 probe loop.
+
+## 2026-06-08 MIR Builder / Match Optional Follow-Up
+
+Status: still blocked for the pure-Simple stage2 payload.
+
+The same direct stage2 probe now clears the next mutability blockers for:
+
+- `make_register_static_driver_call` now uses a mutable manifest-field dict
+  while building the synthetic `register_static_driver` call operand.
+- `lower_match_case` now tracks the optional default body and binding with
+  scalar presence/value state instead of rebinding `HirBlock?` and
+  `SymbolId?` locals.
+
+Latest probe still exits `1`, emits no stage2 artifact, and now stops at:
+
+```text
+HIR lowering error: Memory safety error [W1006]: mutation without mut capability: mutation requires `mut` capability while lowering Environment.define at 67:23
+```
+
+Current next blocker: inspect `Environment.define` around line 67 for mutation
+without mut capability, then continue the same stage2 probe loop.
