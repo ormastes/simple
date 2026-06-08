@@ -296,7 +296,7 @@ impl Linker:
         for reader in self.readers:
             val symbols = reader.symbols.values()
             for symbol in symbols:
-                if symbol.binding == SymbolBinding.Undefined:
+                if symbol.section_index < 0:
                     # Check if this symbol is defined in our merged table
                     if not self.symbols.has(symbol.name):
                         self.unresolved.push(symbol.name)
@@ -468,7 +468,10 @@ impl Linker:
 
         # Collect all objects to link
         var objects: [ResolvedObject] = []
-        for (_, (reader_idx, symbol)) in self.symbols:
+        for symbol_name in self.symbols.keys():
+            val symbol_entry = self.symbols[symbol_name]
+            val reader_idx = symbol_entry[0]
+            val symbol = symbol_entry[1]
             if reader_idx >= 0:
                 val reader = self.readers[reader_idx as i32]
                 val code_result = reader.read_code(symbol)
@@ -526,7 +529,7 @@ fn get_file_size(path: text) -> i64:
 # Linker Auto-Detection
 # ============================================================================
 
-enum SystemLinker:
+enum BackendSystemLinker:
     """Supported system linkers across all platforms."""
     Mold        # mold (Linux - fastest)
     Lld         # lld (LLVM linker - cross-platform)
@@ -535,26 +538,26 @@ enum SystemLinker:
     Ld          # GNU ld (Linux/Unix)
     Ld64        # Apple ld64 (macOS)
 
-impl SystemLinker:
+impl BackendSystemLinker:
     fn name() -> text:
         match self:
-            case SystemLinker.Mold: "mold"
-            case SystemLinker.Lld: "lld"
-            case SystemLinker.LldLink: "lld-link"
-            case SystemLinker.Msvc: "MSVC link.exe"
-            case SystemLinker.Ld: "ld"
-            case SystemLinker.Ld64: "ld64"
+            case BackendSystemLinker.Mold: "mold"
+            case BackendSystemLinker.Lld: "lld"
+            case BackendSystemLinker.LldLink: "lld-link"
+            case BackendSystemLinker.Msvc: "MSVC link.exe"
+            case BackendSystemLinker.Ld: "ld"
+            case BackendSystemLinker.Ld64: "ld64"
 
     fn command() -> text:
         match self:
-            case SystemLinker.Mold: "mold"
-            case SystemLinker.Lld: "lld"
-            case SystemLinker.LldLink: "lld-link"
-            case SystemLinker.Msvc: "link"
-            case SystemLinker.Ld: "ld"
-            case SystemLinker.Ld64: "ld"
+            case BackendSystemLinker.Mold: "mold"
+            case BackendSystemLinker.Lld: "lld"
+            case BackendSystemLinker.LldLink: "lld-link"
+            case BackendSystemLinker.Msvc: "link"
+            case BackendSystemLinker.Ld: "ld"
+            case BackendSystemLinker.Ld64: "ld"
 
-fn auto_detect_linker() -> SystemLinker:
+fn auto_detect_linker() -> BackendSystemLinker:
     """Auto-detect best available linker for current platform."""
     use std.platform.{is_windows, is_unix}
     use std.common.target.TargetOS
@@ -565,36 +568,36 @@ fn auto_detect_linker() -> SystemLinker:
         case TargetOS.Linux:
             # Prefer mold > lld > ld
             if command_exists("mold"):
-                SystemLinker.Mold
+                BackendSystemLinker.Mold
             elif command_exists("lld"):
-                SystemLinker.Lld
+                BackendSystemLinker.Lld
             else:
-                SystemLinker.Ld
+                BackendSystemLinker.Ld
 
         case TargetOS.Windows:
             # Prefer lld-link > MSVC link.exe
             use compiler.backend.linker.msvc.{is_lld_link_available, is_msvc_available}
             if is_lld_link_available():
-                SystemLinker.LldLink
+                BackendSystemLinker.LldLink
             elif is_msvc_available():
-                SystemLinker.Msvc
+                BackendSystemLinker.Msvc
             else:
-                SystemLinker.Lld  # Fallback (may not work)
+                BackendSystemLinker.Lld  # Fallback (may not work)
 
         case TargetOS.MacOS:
             # macOS uses ld64
-            SystemLinker.Ld64
+            BackendSystemLinker.Ld64
 
         case TargetOS.FreeBSD:
             # FreeBSD prefers lld
             if command_exists("lld"):
-                SystemLinker.Lld
+                BackendSystemLinker.Lld
             else:
-                SystemLinker.Ld
+                BackendSystemLinker.Ld
 
         case _:
             # Default to LLD for other platforms
-            SystemLinker.Lld
+            BackendSystemLinker.Lld
 
 fn command_exists(cmd: text) -> bool:
     """Check if command exists in PATH."""

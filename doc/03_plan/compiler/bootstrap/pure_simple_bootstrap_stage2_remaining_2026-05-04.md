@@ -418,3 +418,37 @@ HIR lowering error: Unsupported feature: cannot infer field type while lowering 
 Current next blocker: type the `ThemeRegistry.resolve_surface` field-access path
 or teach HIR lowering the `ResolvedThemeColors` field type in that path, then
 continue the same stage2 probe loop.
+
+## 2026-06-07 Stage2 Linker/Instantiation Follow-Up
+
+The next focused pass continued from `origin/main` commit `30e5b3a9fd` in a
+clean worktree because the shared checkout had unrelated dirty files and
+submodule state.
+
+The stage2 probe now clears the subsequent linker and instantiation blockers
+for:
+
+- missing explicit parameter types in `TemplateInstantiator.mangle`,
+  `instantiate`, and `is_cached`
+- stale generated helper calls around instantiation caches, result unwrapping,
+  linker object-template caches, and recorded-instantiation appends
+- immutable `SmfReaderImpl.read_note_sdn` even though the method closes over
+  mutable reader state
+- stale `notesdnmetadata_new`, `lazyinstantiationresult_*`,
+  `linkercompilationcontext_from_objects`, and `instantiator_instantiate`
+  helper names in lazy link-time instantiation
+- impossible `SymbolBinding.Undefined` checks in linker unresolved-symbol
+  detection
+- dict destructuring in `Linker.write_native_output`
+- backend/platform `SystemLinker` enum name collision during HIR lowering
+- unsupported `range(0, code_len)` use in `write_elf_object`
+
+Latest probe still exits `1`, emits no stage2 artifact, and now stops at:
+
+```text
+HIR lowering error: Cannot infer type: Cast { expr: Binary { op: BitAnd, left: Identifier("value"), right: Integer(255) }, target_type: Simple("u8") } while lowering u16_to_bytes
+```
+
+Current next blocker: make SMF header little-endian byte helpers lowerable in
+stage2 without relying on unsupported `u8` casts/method conversion, or teach
+HIR lowering to infer these `u8` conversions.

@@ -7,7 +7,12 @@
 
 use compiler.mono.monomorphize.note_sdn.*
 use compiler.common.compilation_context (GenericTemplate, ConcreteType)
+use compiler.common.compilation_context.{TypeRegistry}
+use compiler.common.di.{DiContainer}
+use compiler.common.driver_core_types.{BootLogger}
 use compiler.mono.instantiation (TemplateInstantiator, mangle)
+use compiler.tools.aop.{AopWeaver}
+use compiler.frontend.core.aop.{WeavingConfig}
 use compiler.backend.linker.linker_context (LinkerCompilationContext)
 use compiler.backend.linker.smf_reader (SmfReaderImpl)
 use compiler.backend.linker.obj_taker (SmfSymbol, parse_template)
@@ -85,14 +90,14 @@ struct LazyInstantiator:
 impl LazyInstantiator:
     static fn new(config: LazyInstantiatorConfig) -> LazyInstantiator:
         """Create a new lazy instantiator."""
-        LazyInstantiator(config, {}, notesdnmetadata_new(), {}, 0, {})
+        LazyInstantiator(config, {}, NoteSdnMetadata.new(), {}, 0, {})
 
 fn lazyinstantiator_new(config: LazyInstantiatorConfig) -> LazyInstantiator:
         """Create a new lazy instantiator."""
         LazyInstantiator.new(config)
 
 
-fn lazyinstantiator_try_instantiate(self: LazyInstantiator, symbol: text) -> LazyInstantiationResult:
+me lazyinstantiator_try_instantiate(self: LazyInstantiator, symbol: text) -> LazyInstantiationResult:
         """Try to instantiate a missing symbol."""
         # Check depth limit
         if self.depth >= self.config.max_depth:
@@ -101,7 +106,7 @@ fn lazyinstantiator_try_instantiate(self: LazyInstantiator, symbol: text) -> Laz
             )
 
         # Check if already instantiated
-        if self.instantiated_contains_key(instantiated, symbol):
+        if self.instantiated.has(symbol):
             return LazyInstantiationResult.Success(
                 self.instantiated[symbol],
                 symbol,
@@ -109,26 +114,29 @@ fn lazyinstantiator_try_instantiate(self: LazyInstantiator, symbol: text) -> Laz
             )
 
         # Check for cycle
-        if self.in_progress_contains(in_progress, symbol):
-            val cycle = self.in_progress_to_list(in_progress)
-            return lazyinstantiationresult_CircularDependency(cycle)
+        if self.in_progress.contains(symbol):
+            var cycle: [text] = []
+            for sym in self.in_progress:
+                cycle = cycle.push(sym)
+            cycle = cycle.push(symbol)
+            return LazyInstantiationResult.CircularDependency(cycle)
 
         # Find possible entry
         val found: (text, PossibleInstantiationEntry)? = self.find_possible(symbol)
-        if not has_found:
-            return lazyinstantiationresult_NotFound(symbol)
+        if not found.?:
+            return LazyInstantiationResult.NotFound(symbol)
 
-        val _destruct_0: (text, PossibleInstantiationEntry) = found_value
+        val _destruct_0: (text, PossibleInstantiationEntry) = found.unwrap()
         val source_path = _destruct_0[0]
         val entry: PossibleInstantiationEntry = _destruct_0[1]
 
         # Check if can defer
         if entry.can_defer:
             if self.config.allow_defer:
-                return lazyinstantiationresult_Deferred(symbol)
+                return LazyInstantiationResult.Deferred(symbol)
 
         # Start instantiation
-        self.in_progress = self.in_progress_insert(in_progress, symbol)
+        self.in_progress = self.in_progress.insert(symbol)
         self.depth = self.depth + 1
 
         if self.config.verbose:
@@ -138,13 +146,13 @@ fn lazyinstantiator_try_instantiate(self: LazyInstantiator, symbol: text) -> Laz
         val result = self.do_instantiate(entry, source_path)
 
         # Cleanup
-        self.in_progress = self.in_progress_remove(in_progress, symbol)
+        self.in_progress = self.in_progress.remove(symbol)
         self.depth = self.depth - 1
 
         result
 
 
-fn lazyinstantiator_do_instantiate(self: LazyInstantiator, entry: PossibleInstantiationEntry, source_path: text) -> LazyInstantiationResult:
+me lazyinstantiator_do_instantiate(self: LazyInstantiator, entry: PossibleInstantiationEntry, source_path: text) -> LazyInstantiationResult:
         """Perform the actual instantiation through unified CompilationContext pipeline."""
         # Create instantiation entry for metadata tracking
         val inst_entry = InstantiationEntry(
@@ -158,11 +166,11 @@ fn lazyinstantiator_do_instantiate(self: LazyInstantiator, entry: PossibleInstan
         )
 
         # Add to output metadata
-        self.output_metadata = self.output_metadata_add_instantiation(output_metadata, inst_entry)
+        self.output_metadata.add_instantiation(inst_entry)
 
         # Add dependency edge
         val dep = DependencyEdge(entry.required_by, entry.mangled_name, DependencyKind.TypeParam)
-        self.output_metadata = self.output_metadata_add_dependency(output_metadata, dep)
+        self.output_metadata.add_dependency(dep)
 
         # Build linker compilation context from input metadata.
         # Load templates from input SMF TemplateCode sections:
@@ -198,14 +206,20 @@ fn lazyinstantiator_do_instantiate(self: LazyInstantiator, entry: PossibleInstan
             # Cannot open SMF file -- fall back to placeholder
             object_templates[entry.template_name] = GenericTemplate(entry.template_name, _lazy_split_type_params(entry.type_args), nil)
 
-        val linker_ctx = linkercompilationcontext_from_objects(object_templates, nil, nil)
+        val linker_ctx = LinkerCompilationContext(
+            object_templates: object_templates,
+            project_di: DiContainer(bindings: {}, singletons: {}, profile: "link", all_bindings: [], locked: false),
+            project_aop: AopWeaver(advices: [], config: WeavingConfig.disabled(), logger: BootLogger(level: 0), runtime_enabled: false, runtime_allowlist: []),
+            type_reg: TypeRegistry.empty(),
+            recorded: []
+        )
         var instantiator = TemplateInstantiator(linker_ctx, {}, {})
 
         # Parse type args from the entry
         val type_args = _lazy_concrete_type_args(entry.type_args)
 
         # Compile through unified pipeline
-        match instantiator_instantiate(instantiator, entry.template_name, type_args):
+        match instantiator.instantiate(entry.template_name, type_args):
             case Ok(compiled_unit):
                 val compiled_code = compiled_unit.code
                 self.instantiated[entry.mangled_name] = compiled_code
@@ -217,7 +231,7 @@ fn lazyinstantiator_do_instantiate(self: LazyInstantiator, entry: PossibleInstan
                 )
 
             case Err(msg):
-                lazyinstantiationresult_Error(msg)
+                LazyInstantiationResult.Error(msg)
 
 
 # ============================================================================
