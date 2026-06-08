@@ -147,7 +147,7 @@ _Live green-carrier validation, disabled unless SIMPLEOS_GREEN_CARRIER_QEMU_LIVE
 - Boot the two-CPU guest probe under QEMU
    - TUI capture: after_step
 -  print probe debug
-- Verify AP startup and all green carrier proof markers
+- Verify AP startup and current green carrier readiness markers
    - TUI capture: after_step
    - Evidence: TUI state verified by 5 expected checks
    - Expected: serial contains `AP_ONLINE_MARKER`
@@ -180,7 +180,7 @@ else:
     val serial = result[0]
     if not _has_required_markers(serial):
         _print_probe_debug(serial, result[1])
-    step("Verify AP startup and all green carrier proof markers")
+    step("Verify AP startup and current green carrier readiness markers")
     expect(serial.contains(AP_ONLINE_MARKER)).to_equal(true)
     expect(serial.contains(GREEN_PASS_MARKER)).to_equal(true)
     expect(serial.contains(GREEN_PREEMPT_MARKER)).to_equal(true)

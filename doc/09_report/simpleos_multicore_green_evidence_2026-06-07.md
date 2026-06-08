@@ -6,7 +6,8 @@ This report records the SimpleOS evidence for the multicore-green SPipe lane,
 including the opt-in live QEMU green-carrier proof. It does not claim final
 ring/user context-switch handoff across APs; the live proof covers AP startup,
 fixed-slot CPU1 green dispatch/IPI evidence, fixed timer-preemption yield
-evidence, and scheduler-owned CPU1 green handoff through the real `Scheduler`.
+evidence, scheduler-owned CPU1 green handoff through the real `Scheduler`, and
+non-final scheduler/user handoff readiness through `USER_HANDOFF_READY=true`.
 The final hardware handoff gap is tracked in
 `doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md`.
 
@@ -121,6 +122,37 @@ of the compat selector. Rerun evidence:
   still shows AP startup plus `SCHED_HANDOFF_PASS=true`, but no final
   hardware/user markers
 
+After syncing `/tmp/simple-pherallel-sync` to `origin/main` at `faea65ef00`,
+the green-carrier guest probe and QEMU spec were refreshed to include the
+non-final `USER_HANDOFF_READY=true` readiness marker. Docker-isolated
+verification on the default/non-live lane passed:
+
+- `simple check examples/09_embedded/simple_os/arch/x86_64/green_carrier_probe_entry.spl
+  test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl
+  test/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.spl`:
+  PASS, 3 files
+- final hardware handoff blocker contract: PASS, 3 scenarios
+- QEMU default gate lane: PASS, 2 scenarios
+- generated-spec layout guard: `doc/06_spec/**/*_spec.spl` count `0`
+
+The live QEMU readiness lane now requires serial output containing all current
+readiness markers:
+
+```text
+[smp] AP reached 64-bit entry
+[green-carrier-qemu] PASS=true
+[green-carrier-qemu] PREEMPT_PASS=true
+[green-carrier-qemu] SCHED_HANDOFF_PASS=true
+[green-carrier-qemu] USER_HANDOFF_READY=true
+```
+
+`USER_HANDOFF_READY=true` is emitted only after the guest constructs an
+in-memory x86_64 user payload image, creates a scheduler user task through
+`create_user_task_pid`, dispatches that pid through the CPU1 green lane, and
+validates the non-entering syscall-14 handoff record. It remains prerequisite
+evidence only; it does not execute `rt_x86_enter_user_first`, enter user mode,
+or observe a user-mode syscall return.
+
 ## Notes
 
 - The default QEMU spec lane proves the opt-in gate is wired and disabled unless
@@ -130,7 +162,9 @@ of the compat selector. Rerun evidence:
   `[smp] AP reached 64-bit entry`,
   `[green-carrier-qemu] PASS=true`, and
   `[green-carrier-qemu] PREEMPT_PASS=true`, and
-  `[green-carrier-qemu] SCHED_HANDOFF_PASS=true` in serial output.
+  `[green-carrier-qemu] SCHED_HANDOFF_PASS=true` in serial output. Current
+  live readiness evidence additionally requires
+  `[green-carrier-qemu] USER_HANDOFF_READY=true`.
 - The final AP ring/user hardware handoff markers are deliberately separate:
   `[green-carrier-qemu] HW_HANDOFF_PASS=true`,
   `[green-carrier-qemu] USER_ENTRY_PASS=true`, and
