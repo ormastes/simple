@@ -50,6 +50,23 @@ impl<'a> MirLowerer<'a> {
         }
     }
 
+    fn function_signature_for_callee(&self, callee: &HirExpr, arg_count: usize) -> (Vec<TypeId>, TypeId) {
+        let Some(registry) = self.type_registry else {
+            return (vec![TypeId::ANY; arg_count], TypeId::ANY);
+        };
+        if let Some(HirType::Function { params, ret }) = registry.get(callee.ty) {
+            return (params.clone(), *ret);
+        }
+        if let HirExprKind::Index { receiver, .. } = &callee.kind {
+            if let Some(HirType::Array { element, .. }) = registry.get(receiver.ty) {
+                if let Some(HirType::Function { params, ret }) = registry.get(*element) {
+                    return (params.clone(), *ret);
+                }
+            }
+        }
+        (vec![TypeId::ANY; arg_count], TypeId::ANY)
+    }
+
     fn call_returns_array_of(&self, callee: &HirExpr, element_type: TypeId) -> bool {
         let Some(registry) = self.type_registry else {
             return false;
@@ -385,17 +402,8 @@ impl<'a> MirLowerer<'a> {
         } else {
             // Indirect call through closure/function pointer
             let callee_reg = self.lower_expr(callee)?;
-            let callee_ty = callee.ty;
 
-            let (param_types, return_type) = if let Some(reg) = self.type_registry {
-                if let Some(HirType::Function { params, ret }) = reg.get(callee_ty) {
-                    (params.clone(), *ret)
-                } else {
-                    (vec![TypeId::ANY; arg_regs.len()], TypeId::ANY)
-                }
-            } else {
-                (vec![TypeId::ANY; arg_regs.len()], TypeId::ANY)
-            };
+            let (param_types, return_type) = self.function_signature_for_callee(callee, arg_regs.len());
 
             self.with_func(|func, current_block| {
                 let dest = func.new_vreg();

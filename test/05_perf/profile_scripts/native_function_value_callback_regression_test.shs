@@ -33,6 +33,20 @@ fn main():
     print(call(worker))
 SIMPLE
 
+cat >"$tmp_dir/function_array.spl" <<'SIMPLE'
+extern fn rt_exit(code: i32)
+
+fn worker() -> i64:
+    return 19
+
+fn main():
+    var funcs: [fn() -> i64] = []
+    funcs.push(worker)
+    if funcs[0]() != 19:
+        rt_exit(75)
+    print("function_array_pass=true")
+SIMPLE
+
 cat >"$tmp_dir/cooperative_green_native.spl" <<'SIMPLE'
 use std.nogc_async_mut.concurrent.cooperative_green.{
     cooperative_green_spawn,
@@ -66,6 +80,15 @@ run_bounded "$BIN" native-build --source "$tmp_dir" --entry "$tmp_dir/function_p
 run_bounded "$tmp_dir/function_param.bin" >>"$param_out" 2>&1 ||
     fail "function parameter native run failed"
 grep -q '^7$' "$param_out" || fail "function parameter callback did not return 7"
+
+array_out="$tmp_dir/function_array.out"
+run_bounded "$BIN" native-build --source "$tmp_dir" --entry "$tmp_dir/function_array.spl" \
+    --entry-closure -o "$tmp_dir/function_array.bin" --clean >"$array_out" 2>&1 ||
+    fail "function array native build failed"
+run_bounded "$tmp_dir/function_array.bin" >>"$array_out" 2>&1 ||
+    fail "function array native run failed"
+grep -q 'function_array_pass=true' "$array_out" ||
+    fail "function array callback evidence missing"
 
 green_out="$tmp_dir/cooperative_green_native.out"
 run_bounded "$BIN" native-build --source src/lib --source "$tmp_dir" \

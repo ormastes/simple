@@ -254,6 +254,16 @@ impl<'a> MirLowerer<'a> {
         // but IndexGet + MIR UnboxInt expects tagged (val << 3) values.
         if is_array_append_method && !args.is_empty() {
             let push_arg_ty = args[0].ty;
+            let receiver_element_is_function =
+                self.type_registry.and_then(|tr| tr.get(receiver.ty)).is_some_and(|ty| {
+                    if let crate::hir::HirType::Array { element, .. } = ty {
+                        self.type_registry
+                            .and_then(|tr| tr.get(*element))
+                            .is_some_and(|element_ty| matches!(element_ty, crate::hir::HirType::Function { .. }))
+                    } else {
+                        false
+                    }
+                });
             let needs_push_boxing = matches!(
                 push_arg_ty,
                 TypeId::I8
@@ -265,7 +275,7 @@ impl<'a> MirLowerer<'a> {
                     | TypeId::U32
                     | TypeId::U64
                     | TypeId::BOOL
-            );
+            ) && !receiver_element_is_function;
             if needs_push_boxing {
                 let raw_arg = arg_regs[0];
                 let boxed_arg = self.with_func(|func, current_block| {
