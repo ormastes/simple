@@ -1,0 +1,174 @@
+"""
+# x86_64 User Entry Validation Specification
+
+Verifies the non-entering validation boundary for syscall `14`
+(`EnterUserBlocking`). The spec must not call the ring transition; it only
+checks the scheduler/user-context record that the real syscall path consumes.
+
+## Overview
+
+SimpleOS needs a final live QEMU proof for AP green-carrier ring/user handoff,
+but hosted tests must not execute the x86_64 `iretq` user-entry bridge. This
+spec covers the safe prerequisite: the scheduler can expose a user handoff TCB
+with a valid user context and CR3 value, and the syscall-14 validation layer can
+accept or reject that record before the architecture bridge runs.
+
+## Syntax
+
+The validation API is:
+
+```simple
+validate_enter_user_blocking_handoff(pid_hint, scheduler)
+```
+
+It returns `ok=false` with an error string for missing or malformed handoff
+state, and `ok=true` with the selected pid, context, and CR3 when the syscall
+path is ready to call the architecture enter function.
+
+## Evidence Boundary
+
+Passing this spec does not satisfy `HW_HANDOFF_PASS=true`,
+`USER_ENTRY_PASS=true`, or `USER_SYSCALL_PASS=true`. Those markers remain
+reserved for the opt-in live QEMU hardware/user gate.
+
+**Requirements:** doc/02_requirements/feature/multicore_green.md
+**Plan:** doc/03_plan/sys_test/multicore_green.md
+**Design:** doc/05_design/multicore_green.md
+**Research:** doc/01_research/local/multicore_green.md
+"""
+
+use std.spec.{describe, it, expect, step}
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.arch.x86_64.user_entry_validation.{validate_enter_user_blocking_handoff}
+use os.kernel.loader.process_image.{build_user_process_image}
+use os.kernel.scheduler.scheduler.{Scheduler, scheduler_user_context_for_arch}
+use os.kernel.scheduler.scheduler_types.{TaskControlBlock}
+use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.types.task_types.{
+    TaskId, TaskPriority, TaskState, UserProcessImage,
+    default_task_isolation, default_task_schedule
+}
+
+fn push_u16_le(buf: [u8], value: i64) -> [u8]:
+    var out: [u8] = buf
+    out.push((value & 0xFF).to_u8())
+    out.push(((value >> 8) & 0xFF).to_u8())
+    out
+
+fn push_u32_le(buf: [u8], value: i64) -> [u8]:
+    var out: [u8] = buf
+    out.push((value & 0xFF).to_u8())
+    out.push(((value >> 8) & 0xFF).to_u8())
+    out.push(((value >> 16) & 0xFF).to_u8())
+    out.push(((value >> 24) & 0xFF).to_u8())
+    out
+
+fn push_u64_le(buf: [u8], value: i64) -> [u8]:
+    var out: [u8] = buf
+    out = push_u32_le(out, value & 0xFFFFFFFF)
+    out = push_u32_le(out, (value >> 32) & 0xFFFFFFFF)
+    out
+
+fn make_x86_64_exec() -> [u8]:
+    var bytes: [u8] = []
+    bytes.push(0x7F.to_u8())
+    bytes.push(0x45.to_u8())
+    bytes.push(0x4C.to_u8())
+    bytes.push(0x46.to_u8())
+    bytes.push(2.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    while bytes.len() < 16:
+        bytes.push(0.to_u8())
+    bytes = push_u16_le(bytes, 2)
+    bytes = push_u16_le(bytes, 62)
+    bytes = push_u32_le(bytes, 1)
+    bytes = push_u64_le(bytes, 0x400000)
+    bytes = push_u64_le(bytes, 64)
+    bytes = push_u64_le(bytes, 0)
+    bytes = push_u32_le(bytes, 0)
+    bytes = push_u16_le(bytes, 64)
+    bytes = push_u16_le(bytes, 56)
+    bytes = push_u16_le(bytes, 1)
+    bytes = push_u16_le(bytes, 0)
+    bytes = push_u16_le(bytes, 0)
+    bytes = push_u16_le(bytes, 0)
+    bytes = push_u32_le(bytes, 1)
+    bytes = push_u32_le(bytes, 5)
+    bytes = push_u64_le(bytes, 0x80)
+    bytes = push_u64_le(bytes, 0x400000)
+    bytes = push_u64_le(bytes, 0x400000)
+    bytes = push_u64_le(bytes, 4)
+    bytes = push_u64_le(bytes, 4)
+    bytes = push_u64_le(bytes, 0x1000)
+    while bytes.len() < 0x80:
+        bytes.push(0.to_u8())
+    bytes.push(0xC3.to_u8())
+    bytes.push(0x90.to_u8())
+    bytes.push(0x90.to_u8())
+    bytes.push(0x90.to_u8())
+    bytes
+
+fn seed_user_handoff_task_from_image(sched: Scheduler, pid: u64, image: UserProcessImage) -> Scheduler:
+    var next = sched
+    val user_sp = image.initial_sp & 0xFFFFFFFFFFFFFFF0
+    val user_ctx = scheduler_user_context_for_arch(Architecture.X86_64, image.entry, user_sp)
+    next.tasks[0] = TaskControlBlock(
+        id: TaskId(id: pid),
+        name: "green-user",
+        state: TaskState.Ready,
+        priority: TaskPriority.Normal,
+        is_user: true,
+        entry_point: image.entry,
+        context: user_ctx,
+        user_context: Some(user_ctx),
+        address_space: 1,
+        kernel_stack: 0,
+        user_stack: image.stack_top,
+        capabilities: CapabilitySet.full(),
+        parent: Some(TaskId(id: 0)),
+        schedule: default_task_schedule(TaskPriority.Normal),
+        isolation: default_task_isolation(0),
+        assigned_cpu: 1u32,
+        exit_code: 0,
+        ticks_remaining: 5u64
+    )
+    next
+
+describe "x86_64 user entry validation":
+    it "rejects a missing user handoff task without entering ring-3":
+        step("validate an empty scheduler")
+        val validation = validate_enter_user_blocking_handoff(701u64, Scheduler.new_with_cpu_count(2u32))
+        expect(validation.ok).to_be(false)
+        expect(validation.error).to_equal("handoff task not found")
+        expect(validation.pid).to_equal(701u64)
+        expect(validation.cr3).to_equal(0u64)
+        val context_present = if validation.context == nil: 0 else: 1
+        expect(context_present).to_equal(0)
+
+    it "accepts a real x86_64 user image handoff record without entering ring-3":
+        step("build a real x86_64 user process image")
+        val image_result = build_user_process_image("/sys/apps/green_ring3_probe", make_x86_64_exec(), Architecture.X86_64, [], [])
+        expect(image_result.is_ok()).to_be(true)
+        val image = image_result.unwrap()
+        val expected_sp = image.initial_sp & 0xFFFFFFFFFFFFFFF0
+
+        step("seed a scheduler user task from that image")
+        val sched = seed_user_handoff_task_from_image(Scheduler.new_with_cpu_count(2u32), 701u64, image)
+
+        step("validate syscall-14 handoff readiness without executing the arch bridge")
+        val validation = validate_enter_user_blocking_handoff(701u64, sched)
+        expect(validation.ok).to_be(true)
+        expect(validation.error).to_equal("")
+        expect(validation.pid).to_equal(701u64)
+        expect(validation.cr3).to_equal(1u64)
+        val context_present = if validation.context == nil: 0 else: 1
+        expect(context_present).to_equal(1)
+        if validation.context != nil:
+            val ctx = validation.context.unwrap()
+            expect(ctx.rip).to_equal(image.entry)
+            expect(ctx.rsp).to_equal(expected_sp)
+            expect(ctx.cs).to_equal(0x2B)
+            expect(ctx.ss).to_equal(0x23)

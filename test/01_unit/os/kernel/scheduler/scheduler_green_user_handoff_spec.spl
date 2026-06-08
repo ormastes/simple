@@ -7,6 +7,31 @@ x86_64 hardware handoff proof: final live QEMU evidence remains reserved for
 `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, and `USER_SYSCALL_PASS=true`
 markers emitted from the real AP ring/user path.
 
+## Overview
+
+The green-carrier scheduler lane and the normal OS task lane must remain
+separate. This spec builds a real x86_64 user process image, seeds a hosted
+scheduler task from that image, dispatches the pid through the green-carrier
+queue, and verifies that the user handoff record still exposes the same user
+context expected by syscall `14`.
+
+## Syntax
+
+The executable scenario uses the same Pure Simple surfaces that the kernel path
+uses before the hardware bridge:
+
+```simple
+scheduler.run_green_carrier_once(queues, cpu)
+scheduler.get_user_handoff_task(pid)
+validate_enter_user_blocking_handoff(pid, scheduler)
+```
+
+## Evidence Boundary
+
+The spec proves scheduler/user-context compatibility and non-entering
+EnterUserBlocking validation only. It does not execute `arch_x86_64_enter_user_task`
+and cannot replace the final live QEMU AP ring/user marker triplet.
+
 **Requirements:** doc/02_requirements/feature/multicore_green.md
 **Plan:** doc/03_plan/sys_test/multicore_green.md
 **Design:** doc/05_design/multicore_green.md
@@ -24,6 +49,7 @@ use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.scheduler.scheduler.{Scheduler, scheduler_user_context_for_arch}
 use os.kernel.scheduler.scheduler_types.{TaskControlBlock}
 use os.kernel.scheduler.green_carrier.{green_carrier_apply_enqueue, green_carrier_run_queues_new, green_carrier_spawn_task}
+use os.kernel.arch.x86_64.user_entry_validation.{validate_enter_user_blocking_handoff}
 
 fn push_u16_le(buf: [u8], value: i64) -> [u8]:
     var out: [u8] = buf
@@ -167,3 +193,18 @@ describe "Scheduler green user handoff":
                 expect(user_ctx.rsp).to_equal(expected_user_sp)
                 expect(user_ctx.cs).to_equal(0x2B)
                 expect(user_ctx.ss).to_equal(0x23)
+
+        step("validate the x86_64 EnterUserBlocking handoff without entering ring-3")
+        val validation = validate_enter_user_blocking_handoff(task_id.id, sched)
+        expect(validation.ok).to_be(true)
+        expect(validation.error).to_equal("")
+        expect(validation.pid).to_equal(task_id.id)
+        expect(validation.cr3).to_equal(1)
+        val validation_context_present = if validation.context == nil: 0 else: 1
+        expect(validation_context_present).to_equal(1)
+        if validation.context != nil:
+            val validation_ctx = validation.context.unwrap()
+            expect(validation_ctx.rip).to_equal(expected_entry)
+            expect(validation_ctx.rsp).to_equal(expected_user_sp)
+            expect(validation_ctx.cs).to_equal(0x2B)
+            expect(validation_ctx.ss).to_equal(0x23)

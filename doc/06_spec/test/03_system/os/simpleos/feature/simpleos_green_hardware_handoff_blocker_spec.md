@@ -211,7 +211,7 @@ expect(absent_in_text(probe, "USER_SYSCALL_PASS=true")).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -220,6 +220,7 @@ val blocker = read_text("doc/08_tracking/bug/simpleos_green_hardware_context_swi
 val context_switch = read_text("src/os/kernel/scheduler/context_switch.spl")
 val x86_context = read_text("src/os/kernel/arch/x86_64/context.spl")
 val user_entry = read_text("src/os/kernel/arch/x86_64/user_entry.spl")
+val user_entry_validation = read_text("src/os/kernel/arch/x86_64/user_entry_validation.spl")
 val syscall_entry = read_text("src/os/kernel/arch/x86_64/cpu.spl")
 val syscall_dispatch = read_text("src/os/kernel/ipc/syscall.spl")
 val probe = read_text("examples/09_embedded/simple_os/arch/x86_64/green_carrier_probe_entry.spl")
@@ -228,6 +229,7 @@ step("Verify the blocker links the live probe and current context-switch symbols
 expect(blocker).to_contain("src/os/kernel/scheduler/context_switch.spl")
 expect(blocker).to_contain("src/os/kernel/arch/x86_64/context.spl")
 expect(blocker).to_contain("src/os/kernel/arch/x86_64/user_entry.spl")
+expect(blocker).to_contain("src/os/kernel/arch/x86_64/user_entry_validation.spl")
 expect(blocker).to_contain("src/os/kernel/arch/x86_64/cpu.spl")
 expect(blocker).to_contain("src/os/kernel/ipc/syscall.spl")
 expect(blocker).to_contain("green_carrier_probe_entry.spl")
@@ -240,6 +242,7 @@ expect(context_switch).to_contain("switch_context_with_as")
 expect(x86_context).to_contain("arch_x86_64_enter_user_task")
 expect(x86_context).to_contain("rt_x86_enter_user_first")
 expect(user_entry).to_contain("dispatch_enter_user_blocking")
+expect(user_entry_validation).to_contain("validate_enter_user_blocking_handoff")
 expect(syscall_entry).to_contain("kernel_syscall_entry_asm")
 expect(syscall_entry).to_contain("rt_syscall_dispatch")
 expect(syscall_dispatch).to_contain("syscall_handler")

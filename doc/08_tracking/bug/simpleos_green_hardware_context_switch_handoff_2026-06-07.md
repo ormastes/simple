@@ -67,6 +67,8 @@ Current proof-point candidates:
   - `rt_x86_enter_user_first`
 - `src/os/kernel/arch/x86_64/user_entry.spl`
   - `dispatch_enter_user_blocking`
+- `src/os/kernel/arch/x86_64/user_entry_validation.spl`
+  - `validate_enter_user_blocking_handoff`
 - `src/os/kernel/arch/x86_64/cpu.spl`
   - `kernel_syscall_entry_asm`
   - `rt_syscall_dispatch`
@@ -80,6 +82,9 @@ Current proof-point candidates:
 - `test/01_unit/os/kernel/scheduler/scheduler_green_user_handoff_spec.spl`
   - current Pure Simple scheduler/user-context compatibility proof before the
     architecture handoff bridge.
+- `test/01_unit/os/kernel/arch/x86_64_user_entry_validation_spec.spl`
+  - current non-entering syscall-14 validation proof for missing and valid
+    x86_64 user handoff records.
 - `examples/09_embedded/simple_os/arch/x86_64/green_carrier_probe_entry.spl`
   - current live guest probe entry.
 
@@ -92,9 +97,11 @@ handoff evidence, but not final SimpleOS ring/user hardware context-switch
 handoff.
 
 The Pure Simple scheduler handoff compatibility contract is now covered by
-`test/01_unit/os/kernel/scheduler/scheduler_green_user_handoff_spec.spl`: it
-dispatches a seeded user-task pid through the green lane and verifies the same
-pid still resolves to a `user_context`. This is necessary setup evidence only;
+`test/01_unit/os/kernel/scheduler/scheduler_green_user_handoff_spec.spl` and
+`test/01_unit/os/kernel/arch/x86_64_user_entry_validation_spec.spl`: they
+dispatch a seeded user-task pid through the green lane, verify the same pid
+still resolves to a `user_context`, and validate syscall-14 handoff readiness
+without executing the ring transition. This is necessary setup evidence only;
 the final blocker remains open until live QEMU observes the x86_64 user entry
 and syscall-return path.
 
@@ -148,16 +155,17 @@ gate still must emit `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, and
 
 ## 2026-06-08 EnterUserBlocking Validation Boundary
 
-`src/os/kernel/arch/x86_64/user_entry.spl` now exposes
+`src/os/kernel/arch/x86_64/user_entry_validation.spl` now exposes
 `validate_enter_user_blocking_handoff(pid_hint, scheduler)` as a non-entering
 validation boundary for syscall `14`. The real `dispatch_enter_user_blocking`
-path uses the same validation before calling `arch_x86_64_enter_user_task`, but
-tests can check handoff readiness without executing the unsafe ring transition
-inside a hosted or Docker test process.
+path uses the same validation before calling `arch_x86_64_enter_user_task`.
+Hosted and Docker specs can import the validation module without importing the
+unsafe architecture enter bridge.
 
 Docker evidence still keeps the current boundary honest:
 
-- `simple check src/os/kernel/arch/x86_64/user_entry.spl
+- `simple check src/os/kernel/arch/x86_64/user_entry_validation.spl
+  src/os/kernel/arch/x86_64/user_entry.spl
   test/01_unit/os/kernel/scheduler/scheduler_green_user_handoff_spec.spl`
   passes in `simple-test-isolation`.
 - `simple test test/01_unit/os/kernel/scheduler/scheduler_green_user_handoff_spec.spl
