@@ -263,6 +263,26 @@ mode, and does not observe a user-mode syscall return. The final live gate
 still requires `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, and
 `USER_SYSCALL_PASS=true` from the real AP ring/user path.
 
+## 2026-06-08 Final-Entry Probe Investigation
+
+A direct final-entry probe was tested against the live green-carrier guest. The
+guest could construct the in-memory user payload and reach non-entering
+handoff validation, but validation still used the legacy `cr3=1` address-space
+sentinel when VMM was not bootstrapped. Attempting to enter that path did not
+emit `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, or
+`USER_SYSCALL_PASS=true`.
+
+An attempted PMM/VMM bootstrap inside the minimal `green_carrier_probe_entry`
+stopped before PMM returned. The built ELF showed `_kernel_end` near
+`0x0ecef000`, so the earlier small reserved-end guess was invalid for this
+entry. The remaining blocker is now specifically a safe direct-boot
+memory-bootstrap or minimal user page-table allocator for the probe, not the
+scheduler green dispatch or syscall-shim bridge readiness.
+
+The default live probe was left readiness-only: it must continue to pass the
+current AP, scheduler, user-handoff-readiness, user-entry-bridge, and
+user-syscall-bridge markers without printing the final marker triplet.
+
 Host verification from `/tmp/simple-pherallel-sync`:
 
 - `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 src/compiler_rust/target/debug/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean`:

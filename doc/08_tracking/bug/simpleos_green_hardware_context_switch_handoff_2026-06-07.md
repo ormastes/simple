@@ -242,3 +242,25 @@ This closes the live kernel-side syscall shim prerequisite, but not the final
 marker triplet. The probe still must enter ring 3 and observe a user-mode
 payload issue and return from a syscall before it may print
 `USER_SYSCALL_PASS=true`.
+
+## 2026-06-08 Direct Final-Entry Probe Finding
+
+A direct final-entry experiment created an in-memory ring-3 payload that would
+issue syscall 60 `debug_write` for the final marker triplet, then attempted to
+enter it through `dispatch_enter_user_blocking` after the CPU1 green-carrier
+dispatch. Without a real VMM bootstrap, the non-entering validation still
+reported a legacy `cr3=1` address-space sentinel. Entering that path did not
+reach the user payload and did not emit `HW_HANDOFF_PASS=true`,
+`USER_ENTRY_PASS=true`, or `USER_SYSCALL_PASS=true`.
+
+A follow-up attempt to initialize PMM/VMM inside
+`green_carrier_probe_entry.spl` stopped before PMM returned, even after moving
+the scalar PMM bitmap away from stale guessed kernel bounds. The built probe's
+ELF showed `_kernel_end` near `0x0ecef000`, proving the old `0x01400000`
+reserved-end guess was invalid for this entry. The failure mode is now sharper:
+the final path needs a safe direct-boot memory bootstrap or a dedicated minimal
+user page-table allocator before it can replace the legacy `cr3=1` sentinel.
+
+Do not merge a final-marker payload into the default live probe until this
+memory-bootstrap gap is closed. The readiness probe must remain able to pass
+without printing or attempting the final marker triplet.

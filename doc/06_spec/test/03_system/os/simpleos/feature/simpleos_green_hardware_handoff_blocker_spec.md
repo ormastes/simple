@@ -155,6 +155,10 @@ Failed: 0
   completion of the boundary.
 - The final live gate can close only when the guest emits all final markers from
   the real AP ring/user path.
+- The blocker must record the direct final-entry probe finding: legacy `cr3=1`
+  is insufficient, and the current minimal probe still needs a safe
+  PMM/VMM bootstrap or minimal user page-table allocator before final markers
+  can be claimed.
 
 ## Verification Expectations
 
@@ -231,7 +235,7 @@ expect(absent_in_text(probe, "USER_SYSCALL_PASS=true")).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 44 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -260,6 +264,10 @@ expect(blocker).to_contain("create_user_task_pid")
 expect(blocker).to_contain("validation-ready TCB")
 expect(blocker).to_contain("This closes the hosted real-spawn prerequisite")
 expect(blocker).to_contain("Guest User Handoff Readiness Prerequisite")
+expect(blocker).to_contain("Direct Final-Entry Probe Finding")
+expect(blocker).to_contain("legacy `cr3=1`")
+expect(blocker).to_contain("safe direct-boot memory bootstrap")
+expect(blocker).to_contain("minimal user page-table allocator")
 
 step("Verify current implementation files expose the named proof points")
 expect(context_switch).to_contain("context_restore")
