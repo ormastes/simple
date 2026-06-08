@@ -536,3 +536,27 @@ HIR lowering error: Unknown variable: has__rule_registry while lowering rule_reg
 Current next blocker: inspect the rule registry static/global initialization path
 for stale generated optional/field helper naming around `has__rule_registry`,
 then continue the same stage2 probe loop.
+
+## 2026-06-08 Sugar Registry / Const Eval Follow-Up
+
+Status: still blocked for the pure-Simple stage2 payload.
+
+The same direct stage2 probe now clears the next blockers for:
+
+- sugar rule registry singleton initialization no longer depends on generated
+  optional-global helpers (`has__rule_registry`, `_rule_registry_value`).
+- text-form sugar rewrite WFFI path no longer depends on unsupported text
+  handle/pointer method calls during bootstrap lowering.
+- const evaluator recursive evaluation methods are mutable (`me`) where they
+  mutate `locals` or `call_depth`, including const function calls and block
+  evaluation.
+
+Latest probe still exits `1`, emits no stage2 artifact, and now stops at:
+
+```text
+HIR lowering error: Unknown variable: llvm_ir_builder_build while lowering bootstrap_emit_real_llvm_object
+```
+
+Current next blocker: inspect the bootstrap LLVM object emission path for stale
+generated LLVM IR builder helper calls around `llvm_ir_builder_build`, then
+continue the same stage2 probe loop.
