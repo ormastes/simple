@@ -10,7 +10,7 @@ cd "$ROOT_DIR"
 
 contract="test/05_perf/profile_scripts/profile_report_contract_test.shs"
 script_path="scripts/check/check-cross-language-perf.shs"
-source_report="doc/09_report/cross_language_perf_parallel_smoke.md"
+source_report="doc/09_report/cross_language_perf_2026-06-08_docker_contract.md"
 tmp_report="doc/09_report/.profile_contract_negative_$$.md"
 tmp_edit="${tmp_report}.tmp"
 
@@ -178,6 +178,28 @@ fi
 printf '%s\n' "$output" | grep -Fq "invalid Simple multicore green evidence row" ||
     fail "missing expected parallelism evidence failure message"
 
+cp "$source_report" "$tmp_report"
+
+awk '
+    /Go scheduler: `GOMAXPROCS=/ {
+        sub(/GOMAXPROCS=[0-9]+/, "GOMAXPROCS=32")
+    }
+    { print }
+' "$tmp_report" >"$tmp_edit"
+mv "$tmp_edit" "$tmp_report"
+
+set +e
+output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
+code=$?
+set -e
+
+if [ "$code" -eq 0 ]; then
+    fail "mutated Go scheduler width unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq "Go scheduler GOMAXPROCS must match CPU workers" ||
+    fail "missing expected Go scheduler width failure message"
+
 echo "profile_report_contract_negative=true"
 echo "case=large_simple_multicore_fanout_slower_than_c"
 echo "case=simple_multicore_stress_slower_than_c"
@@ -185,3 +207,4 @@ echo "case=go_stress_slower_than_c"
 echo "case=simple_multicore_queue_model_global_fifo"
 echo "case=simple_multicore_pool_used_partial"
 echo "case=simple_multicore_parallelism_missing"
+echo "case=go_scheduler_width_mismatch"

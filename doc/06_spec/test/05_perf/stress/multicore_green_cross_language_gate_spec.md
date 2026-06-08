@@ -1,6 +1,6 @@
 # Multicore Green Cross-Language Profile Gate
 
-> This spec parses the checked-in cross-language performance smoke report and keeps the numeric concurrency rows honest. It gates the current Simple OS-thread and multicore-green native rows against both Go goroutines and C pthreads while keeping cooperative green classified as a current-carrier queue, not as Go-style M:N CPU parallelism.
+> This spec parses the checked-in Docker-isolated cross-language performance report and keeps the numeric concurrency rows honest. It gates the current Simple OS-thread and multicore-green native rows against both Go goroutines and C pthreads while keeping cooperative green classified as a current-carrier queue, not as Go-style M:N CPU parallelism.
 
 <!-- sdn-diagram:id=multicore_green_cross_language_gate_spec.arch -->
 <details class="sdn-source">
@@ -34,7 +34,7 @@ multicore_green_cross_language_gate_spec -> std
 
 # Multicore Green Cross-Language Profile Gate
 
-This spec parses the checked-in cross-language performance smoke report and keeps the numeric concurrency rows honest. It gates the current Simple OS-thread and multicore-green native rows against both Go goroutines and C pthreads while keeping cooperative green classified as a current-carrier queue, not as Go-style M:N CPU parallelism.
+This spec parses the checked-in Docker-isolated cross-language performance report and keeps the numeric concurrency rows honest. It gates the current Simple OS-thread and multicore-green native rows against both Go goroutines and C pthreads while keeping cooperative green classified as a current-carrier queue, not as Go-style M:N CPU parallelism.
 
 ## At a Glance
 
@@ -53,7 +53,7 @@ This spec parses the checked-in cross-language performance smoke report and keep
 
 ## Overview
 
-This spec parses the checked-in cross-language performance smoke report and
+This spec parses the checked-in Docker-isolated cross-language performance report and
 keeps the numeric concurrency rows honest. It gates the current Simple
 OS-thread and multicore-green native rows against both Go goroutines and C
 pthreads while keeping cooperative green classified as a current-carrier
@@ -103,10 +103,13 @@ Failed: 0
 
 ## Traceability Expectations
 
-- The checked-in smoke report must come from
+- The checked-in Docker contract report must come from
   `scripts/check/check-cross-language-perf.shs`.
 - The profile report must keep OS-thread, cooperative-green, multicore-green,
   C pthread, and Go goroutine rows separate.
+- The profile report must pin Go `GOMAXPROCS` to `CPU_WORKERS` unless a caller
+  explicitly overrides it, so Go and Simple multicore-green rows use the same
+  scheduler-width limit.
 - `Simple (native)` in the OS-thread worker section must remain a
   `thread_spawn` fork-join row.
 - `thread_spawn_with_args` must remain covered by the focused native smoke, not
@@ -155,7 +158,7 @@ Failed: 0
 
 #### gates OS-thread and multicore-green native rows against Go and C
 
-- Load the checked-in cross-language smoke report
+- Load the checked-in Docker contract report
 - Select the OS-thread parallel worker section
 - Read Simple, Go, and C worker timings
 - Verify all worker rows have positive timing evidence
@@ -166,12 +169,12 @@ Failed: 0
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Load the checked-in cross-language smoke report")
-val report = rt_file_read_text("doc/09_report/cross_language_perf_parallel_smoke.md") ?? ""
+step("Load the checked-in Docker contract report")
+val report = rt_file_read_text("doc/09_report/cross_language_perf_2026-06-08_docker_contract.md") ?? ""
 step("Select the OS-thread parallel worker section")
 val parallel = section_named(report, "OS Thread Parallel Workers")
 
@@ -193,6 +196,8 @@ expect(multicore).to_be_less_than(native_baseline * 3 + 1)
 step("Verify concurrency model labels preserve semantic distinctions")
 expect(model_text(row_for_label(parallel, "Simple cooperative green (native)"))).to_contain("cooperative")
 expect(model_text(row_for_label(parallel, "Simple multicore green (native)"))).to_contain("parallelism=")
+expect(report).to_contain("Go GOMAXPROCS:** 2")
+expect(report).to_contain("Go scheduler: `GOMAXPROCS=2")
 expect(report).to_contain("not a Go M:N goroutine equivalent")
 expect(report).to_contain("used_runtime_pool()")
 ```
@@ -201,7 +206,7 @@ expect(report).to_contain("used_runtime_pool()")
 
 #### gates large fanout rows against Go goroutine and C pthread fanout
 
-- Load the checked-in cross-language smoke report
+- Load the checked-in Docker contract report
 - Select the large fanout scheduling section
 - Read Simple, Go, and C fanout timings
 - Verify all fanout rows have positive timing evidence
@@ -216,8 +221,8 @@ Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Load the checked-in cross-language smoke report")
-val report = rt_file_read_text("doc/09_report/cross_language_perf_parallel_smoke.md") ?? ""
+step("Load the checked-in Docker contract report")
+val report = rt_file_read_text("doc/09_report/cross_language_perf_2026-06-08_docker_contract.md") ?? ""
 step("Select the large fanout scheduling section")
 val fanout = section_named(report, "Large Fanout Scheduling")
 
@@ -250,7 +255,7 @@ expect(model_text(row_for_label(fanout, "Simple multicore green (native)"))).to_
 
 #### proves large-fanout multicore-green evidence and goroutine stress behavior
 
-- Load the checked-in cross-language smoke report
+- Load the checked-in Docker contract report
 - Select the Simple versus Go versus C stress section
 - Read stress fanout timings
 - Verify stress rows have positive timing evidence
@@ -266,8 +271,8 @@ Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Load the checked-in cross-language smoke report")
-val report = rt_file_read_text("doc/09_report/cross_language_perf_parallel_smoke.md") ?? ""
+step("Load the checked-in Docker contract report")
+val report = rt_file_read_text("doc/09_report/cross_language_perf_2026-06-08_docker_contract.md") ?? ""
 step("Select the Simple versus Go versus C stress section")
 val stress = section_named(report, "Simple vs Go vs C Large Fanout Stress")
 
