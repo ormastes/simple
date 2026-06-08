@@ -749,3 +749,28 @@ HIR lowering error: Memory safety error [W1006]: mutation without mut capability
 Current next blocker: inspect `treesitter_parse_class_outline` around line 278
 for direct mutation of a field on a value without mut capability, then continue
 the same stage2 probe loop.
+
+## 2026-06-08 TreeSitter FunctionOutline Copy Follow-Up
+
+Status: still blocked for the pure-Simple stage2 payload.
+
+The same direct stage2 probe now clears the next mutability blockers for:
+
+- TreeSitter outline parsing now uses `FunctionOutline` copy helpers to set
+  method/static/async/const/kernel flags instead of mutating parsed function
+  outline fields in place.
+- Class, actor, impl, and top-level outline parsing no longer assign directly
+  to `FunctionOutline.is_method`, `is_static`, `is_async`, `is_const`, or
+  `is_kernel`.
+- `MirBuilder.emit_call` and `emit_call_indirect` now build optional
+  destination locals with value expressions instead of rebinding `dest`.
+
+Latest probe still exits `1`, emits no stage2 artifact, and now stops at:
+
+```text
+HIR lowering error: Memory safety error [W1006]: mutation without mut capability: mutation requires `mut` capability while lowering make_register_static_driver_call at 70:37
+```
+
+Current next blocker: inspect `make_register_static_driver_call` around line
+70 for direct mutation without mut capability, then continue the same stage2
+probe loop.
