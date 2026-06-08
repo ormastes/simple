@@ -134,3 +134,14 @@ The x86_64 user-context selector setup is no longer a blocker: the scheduler
 and `X86ContextSwitch.create(..., user_mode=true)` now use `CS=0x2B` and
 `SS=0x23`, matching the boot GDT's 64-bit user code/data descriptors. The
 remaining blocker is payload/CR3/user-entry wiring, not the selector frame.
+
+## 2026-06-08 IPC Handoff Side-Blocker Fix
+
+`test/01_unit/os/kernel/ipc/ipc_syscall_handoff_spec.spl` now passes in a
+separate Docker process. The IPC send syscall consumes the first waiting
+receiver and calls the explicit CPU-aware scheduler unblock path, so the
+waiter-consumption handoff no longer blocks the final AP/user proof.
+
+This does not close the live SimpleOS hardware handoff blocker. The final QEMU
+gate still must emit `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, and
+`USER_SYSCALL_PASS=true` from a real AP ring/user payload path.
