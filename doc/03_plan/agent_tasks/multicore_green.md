@@ -166,15 +166,16 @@ Deliverables:
 
 - hosted SimpleOS cooperative/multicore/channel-wake contracts;
 - live QEMU proof for AP startup plus scheduler-visible CPU1 green dispatch;
-- future hardware context-switch handoff work kept explicit, not claimed by the
-  current fixed-slot carrier proof.
+- final hardware context-switch handoff kept separate from scheduler-state
+  proof and backed by the `HW_HANDOFF_PASS`, `USER_ENTRY_PASS`, and
+  `USER_SYSCALL_PASS` marker triplet.
 
 Acceptance evidence:
 
 - hosted SimpleOS green specs pass in interpreter mode;
 - `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 bin/release/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean`
-- `doc/03_plan/sys_test/multicore_green.md` keeps the hardware context-switch
-  handoff item in blocking evidence until implemented.
+- `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 bin/release/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean`
+  proves the final AP ring/user handoff marker triplet.
 
 ## Merge Sequencing
 

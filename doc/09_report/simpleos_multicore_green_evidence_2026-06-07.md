@@ -107,7 +107,7 @@ link blocker is closed:
   failed scenario in 37998ms
 - the final-handoff serial output includes AP startup, `PASS=true`,
   `PREEMPT_PASS=true`, and `SCHED_HANDOFF_PASS=true`
-- the final-handoff serial output still lacks `HW_HANDOFF_PASS=true`,
+- at that stage, the final-handoff serial output lacked `HW_HANDOFF_PASS=true`,
   `USER_ENTRY_PASS=true`, and `USER_SYSCALL_PASS=true`
 
 After the x86_64 user selector refresh, the scheduler/user handoff setup now
