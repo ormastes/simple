@@ -720,3 +720,32 @@ Current next blocker: inspect `lower_asm` in
 usable yet because Stage2 HIR lowering reports `Unsupported feature:
 ListComprehension`, so the fix needs a Stage2-supported immutable/shared-list
 construction or a compiler-side lowering improvement for this case.
+
+## 2026-06-08 Flat HIR / Heuristic Optional Follow-Up
+
+Status: still blocked for the pure-Simple stage2 payload.
+
+Correction to the previous blocker note: the line-only diagnostic for
+`value` matched `src/compiler/20.hir/hir_lowering/items_part2_part1.spl`,
+not `lower_asm`. The `lower_asm` edits were not retained.
+
+The same direct stage2 probe now clears the next mutability blockers for:
+
+- `lower_bootstrap_flat_block` now tracks the optional final block value with
+  `has_value` plus `value_expr`, then constructs `Some(...)` once at return.
+- `lower_bootstrap_flat_function` now builds optional `FunctionAttr` with a
+  value expression instead of rebinding `func_attr_opt`.
+- `TreeSitter.parse_outline_heuristic` now tracks the current impl target with
+  scalar state instead of rebinding `text?`.
+- `TreeSitter.heuristic_parse_declaration` now tracks returned impl context
+  with scalar state instead of rebinding `result_impl`.
+
+Latest probe still exits `1`, emits no stage2 artifact, and now stops at:
+
+```text
+HIR lowering error: Memory safety error [W1006]: mutation without mut capability (field_11): mutation requires `mut` capability on the receiver while lowering treesitter_parse_class_outline at 278:33
+```
+
+Current next blocker: inspect `treesitter_parse_class_outline` around line 278
+for direct mutation of a field on a value without mut capability, then continue
+the same stage2 probe loop.
