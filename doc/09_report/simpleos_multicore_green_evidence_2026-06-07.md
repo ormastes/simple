@@ -6,8 +6,10 @@ This report records the SimpleOS evidence for the multicore-green SPipe lane,
 including the opt-in live QEMU green-carrier proof. It does not claim final
 ring/user context-switch handoff across APs; the live proof covers AP startup,
 fixed-slot CPU1 green dispatch/IPI evidence, fixed timer-preemption yield
-evidence, scheduler-owned CPU1 green handoff through the real `Scheduler`, and
-non-final scheduler/user handoff readiness through `USER_HANDOFF_READY=true`.
+evidence, scheduler-owned CPU1 green handoff through the real `Scheduler`,
+non-final scheduler/user handoff readiness through `USER_HANDOFF_READY=true`,
+and non-final user-entry bridge readiness through
+`USER_ENTRY_BRIDGE_READY=true`.
 The final hardware handoff gap is tracked in
 `doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md`.
 
@@ -144,6 +146,7 @@ readiness markers:
 [green-carrier-qemu] PREEMPT_PASS=true
 [green-carrier-qemu] SCHED_HANDOFF_PASS=true
 [green-carrier-qemu] USER_HANDOFF_READY=true
+[green-carrier-qemu] USER_ENTRY_BRIDGE_READY=true
 ```
 
 `USER_HANDOFF_READY=true` is emitted only after the guest constructs an
@@ -152,6 +155,10 @@ in-memory x86_64 user payload image, creates a scheduler user task through
 validates the non-entering syscall-14 handoff record. It remains prerequisite
 evidence only; it does not execute `rt_x86_enter_user_first`, enter user mode,
 or observe a user-mode syscall return.
+`USER_ENTRY_BRIDGE_READY=true` is emitted only after the same live guest has a
+trap runtime installed, calls `install_syscall_entry()`, and resolves a nonzero
+`kernel_syscall_entry_asm` address. It proves the entry bridge is armed, not
+that ring-3 code has run.
 
 ## Notes
 
@@ -164,7 +171,8 @@ or observe a user-mode syscall return.
   `[green-carrier-qemu] PREEMPT_PASS=true`, and
   `[green-carrier-qemu] SCHED_HANDOFF_PASS=true` in serial output. Current
   live readiness evidence additionally requires
-  `[green-carrier-qemu] USER_HANDOFF_READY=true`.
+  `[green-carrier-qemu] USER_HANDOFF_READY=true` and
+  `[green-carrier-qemu] USER_ENTRY_BRIDGE_READY=true`.
 - The final AP ring/user hardware handoff markers are deliberately separate:
   `[green-carrier-qemu] HW_HANDOFF_PASS=true`,
   `[green-carrier-qemu] USER_ENTRY_PASS=true`, and
@@ -218,3 +226,28 @@ or observe a user-mode syscall return.
   dispatches task `701` through `Scheduler.run_green_carrier_once`, records one
   CPU1 green context switch, and verifies the normal OS CPU1 task slot remains
   `0`.
+
+## 2026-06-08 Guest User Entry Bridge Readiness Prerequisite
+
+The live green-carrier guest probe now has a non-final
+`USER_ENTRY_BRIDGE_READY=true` marker. The marker is emitted only after the
+guest ensures the x86_64 trap runtime is installed, calls
+`install_syscall_entry()`, observes `syscall_entry_installed()`, and resolves a
+nonzero `kernel_syscall_entry_asm` address through `kernel_syscall_entry_addr()`.
+
+This is prerequisite evidence only. It proves the live AP probe can arm the
+trap/syscall entry bridge needed before a real syscall-14 handoff. It does not
+execute `rt_x86_enter_user_first`, does not enter user mode, and does not
+observe a user-mode syscall return. The final live gate still requires
+`HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, and `USER_SYSCALL_PASS=true`
+from the real AP ring/user path.
+
+Host verification from `/tmp/simple-pherallel-sync`:
+
+- `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 src/compiler_rust/target/debug/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean`:
+  PASS, 2 scenarios in 39699ms.
+- Docker-isolated non-live checks passed, including `simple check`, the
+  blocker SSpec, and the default QEMU gate. A Docker native link check could
+  not complete because `simple-test-isolation:latest` lacks `gcc`, while
+  `simple-cross-language-perf:latest` has GCC without `--target` support and no
+  `clang`.
