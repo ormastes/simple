@@ -20,7 +20,9 @@ explicitly asks for runtime/compiler C/Rust changes.
   use the cross-language profile rows as evidence instead of replacing Simple
   code with Rust/C. For `multicore_green_spawn`, require
   `MulticoreGreenHandle.used_runtime_pool()` evidence before treating a row as
-  Go-like M:N CPU parallelism.
+  Go-like M:N CPU parallelism, and require the report to show Go `GOMAXPROCS`
+  pinned to the same `CPU_WORKERS` value used by
+  `multicore_green_set_parallelism`.
 - Remove unused logic/data only when it is proven unused by tests, references, or
   optimizer/lint evidence.
 - Do not change user-visible inputs, outputs, ordering, errors, or persistence

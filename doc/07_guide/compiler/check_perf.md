@@ -98,6 +98,7 @@ sh scripts/check/check-cross-language-perf.shs
 | `FANOUT_STRESS_WORKERS` | 512 | Simple-vs-Go-vs-C tiny-task stress count for multicore green, goroutines, and pthreads |
 | `FANOUT_STRESS_ITERS` | 1 | Tiny per-task LCG iterations for the stress benchmark |
 | `RUN_TIMEOUT` | 30 | Per-command timeout in seconds for measured commands and RSS probes |
+| `GOMAXPROCS` | `CPU_WORKERS` | Go scheduler width for goroutine rows; defaults to the same limit used by Simple multicore-green parallelism |
 | `SIMPLE_BINARY` | `bin/simple` | Path to Simple compiler |
 | `BUILD_DIR` | `build/cross_lang_perf` | Workload compile output |
 | `REPORT_PATH` | `doc/09_report/cross_language_perf_<date>.md` | Output report |
@@ -105,7 +106,7 @@ sh scripts/check/check-cross-language-perf.shs
 | `PROFILE_DOCKER_IMAGE` | `simple-cross-language-perf:latest` | Docker image for isolated crash-prone profile/test runs with the C/Go toolchains installed |
 | `PROFILE_DOCKER_MEMORY` | `2g` | Container memory limit for isolated profile runs |
 | `PROFILE_DOCKER_CPUS` | `2.0` | Container CPU limit for isolated profile runs |
-| `PROFILE_DOCKER_SIMPLE_BINARY` | resolved `SIMPLE_BINARY` | Optional override for the Simple binary path used inside the mounted container workspace |
+| `PROFILE_DOCKER_SIMPLE_BINARY` | auto | Optional override for the Simple binary path used inside the mounted container workspace; without an override Docker runs prefer `src/compiler_rust/target/debug/simple` when present |
 
 The harness deletes a Simple output before recording a failed compile, so a
 failed native or SMF compile cannot leave a stale binary/bytecode file that is
@@ -129,7 +130,10 @@ records the fixed linker-order blocker that previously prevented Simple native
 rows from linking inside the container.
 The report records the Go toolchain and the generated Go probe's
 `runtime.GOMAXPROCS(0)` / `runtime.NumCPU()` values so Go-like M:N comparisons
-name the scheduler limit used by the goroutine rows.
+name the scheduler limit used by the goroutine rows. The harness exports
+`GOMAXPROCS=$CPU_WORKERS` unless the caller explicitly overrides it, so the Go
+goroutine rows and Simple `multicore_green_set_parallelism(CPU_WORKERS)` rows
+use the same scheduler-width limit in current contract reports.
 Generated Simple concurrency workloads compute an expected checksum and exit
 nonzero on mismatch, so runtime-pool closure lookup failures, lambda capture
 bugs, or wrong joins are classified as failed rows instead of performance wins.
@@ -154,8 +158,8 @@ profile-script comments.
 | **Size** | hello + fib source/binary | Deployment footprint |
 | **Cold startup** | `hello world` (20 runs avg) | Time-to-first-output |
 | **Warm throughput** | `fib(35)` recursive, in-process loop (10 warmup + 20 measured) | Steady-state single-thread perf (JIT reaches hotspot) |
-| **Parallel** | 100 workers × LCG 100K iters. Simple native uses Pure Simple `thread_spawn` fork-join for the OS-thread baseline. Simple multicore green sets `multicore_green_set_parallelism(CPU_WORKERS)`, uses `multicore_green_spawn`, and fails the row unless every handle reports `used_runtime_pool()` and the runtime reports work-stealing queues. | CPU-heavy worker throughput plus concurrency overhead |
-| **Large fanout** | 1000 tiny workers × LCG 32 iters, plus the Simple-vs-Go-vs-C stress row. Simple native uses loop-based `thread_spawn` fork-join; Simple cooperative green uses cooperative queue fanout; C uses one pthread per tiny task; Go uses one goroutine per tiny task; Erlang uses one BEAM process per tiny task. | Scheduling overhead where Go must beat C pthread creation in the checked stress report; Simple native measures OS-thread fanout; Simple cooperative green measures queue fanout, not CPU parallelism |
+| **Parallel** | 100 workers × LCG 100K iters. Simple native uses Pure Simple `thread_spawn` fork-join for the OS-thread baseline. Simple multicore green sets `multicore_green_set_parallelism(CPU_WORKERS)`, uses `multicore_green_spawn`, and fails the row unless every handle reports `used_runtime_pool()` and the runtime reports work-stealing queues. Go runs with `GOMAXPROCS=CPU_WORKERS` by default. | CPU-heavy worker throughput plus concurrency overhead |
+| **Large fanout** | 1000 tiny workers × LCG 32 iters, plus the Simple-vs-Go-vs-C stress row. Simple native uses loop-based `thread_spawn` fork-join; Simple cooperative green uses cooperative queue fanout; C uses one pthread per tiny task; Go uses one goroutine per tiny task with the pinned scheduler width; Erlang uses one BEAM process per tiny task. | Scheduling overhead where Go must beat C pthread creation in the checked stress report; Simple native measures OS-thread fanout; Simple cooperative green measures queue fanout, not CPU parallelism |
 | **Parallel binary size** | Binary/script sizes for parallel workloads across languages | Deployment footprint for concurrent programs |
 | **Parallel peak RSS** | `/usr/bin/time -v` peak RSS with 100 workers, baseline subtracted, per-worker delta | Memory cost per concurrent task (baseline = hello world RSS for each language) |
 

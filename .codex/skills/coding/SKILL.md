@@ -218,8 +218,9 @@ claims M:N CPU parallelism, assert `used_runtime_pool()` so interpreter or
 platform fallback does not masquerade as a parallel result.
 Call `multicore_green_set_parallelism(workers)` before the first
 `multicore_green_spawn` when a profile needs an explicit hosted pool limit, and
-record `multicore_green_parallelism()` in evidence. Live pools can grow but do
-not claim shrink/preemption behavior yet.
+record `multicore_green_parallelism()` in evidence. Cross-language profile
+evidence must also show Go `GOMAXPROCS` pinned to the same `CPU_WORKERS` value.
+Live pools can grow but do not claim shrink/preemption behavior yet.
 
 Do not use numeric-suffix concurrency aliases. They are rejected by
 `simple check` with `E-PAR-002`; use `thread_spawn_with_args`,

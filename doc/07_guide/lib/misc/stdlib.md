@@ -186,14 +186,21 @@ green-thread work when that lands.
 ### Multicore Green Example
 
 ```simple
-use std.concurrent.multicore_green.{multicore_green_spawn}
+use std.concurrent.multicore_green.{
+    multicore_green_parallelism,
+    multicore_green_set_parallelism,
+    multicore_green_spawn,
+}
 
 fn value_9() -> i64:
     9
 
 fn main():
+    multicore_green_set_parallelism(2)
     val handle = multicore_green_spawn(\: value_9())
     print handle.join()
+    print handle.used_runtime_pool()
+    print multicore_green_parallelism()
 ```
 
 `multicore_green_spawn` is the current Pure Simple API used by the
@@ -202,7 +209,9 @@ surface distinct from `cooperative_green_spawn` so cooperative scheduling tests 
 pretend to be Go-style M:N scheduling. Use `handle.used_runtime_pool()` when a
 test or benchmark must prove that work was accepted by the bounded runtime pool;
 use `handle.ran_inline_fallback()` only for interpreter or platform fallback
-coverage.
+coverage. Profile evidence should call `multicore_green_set_parallelism(workers)`
+before the first spawn, record `multicore_green_parallelism()`, and compare
+against Go rows whose `GOMAXPROCS` is pinned to the same `CPU_WORKERS` value.
 
 ---
 
