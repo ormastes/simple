@@ -102,7 +102,7 @@ sh scripts/check/check-cross-language-perf.shs
 | `BUILD_DIR` | `build/cross_lang_perf` | Workload compile output |
 | `REPORT_PATH` | `doc/09_report/cross_language_perf_<date>.md` | Output report |
 | `PROFILE_DOCKER_ISOLATION` | 0 | Re-exec the existing profile script inside Docker when set to `1` |
-| `PROFILE_DOCKER_IMAGE` | `simple-test-isolation:latest` | Docker image for isolated crash-prone profile/test runs; full contract-gated cross-language evidence requires an image with the C/Go toolchains installed |
+| `PROFILE_DOCKER_IMAGE` | `simple-cross-language-perf:latest` | Docker image for isolated crash-prone profile/test runs with the C/Go toolchains installed |
 | `PROFILE_DOCKER_MEMORY` | `2g` | Container memory limit for isolated profile runs |
 | `PROFILE_DOCKER_CPUS` | `2.0` | Container CPU limit for isolated profile runs |
 | `PROFILE_DOCKER_SIMPLE_BINARY` | `bin/release/simple` | Simple binary path used inside the mounted container workspace |
@@ -120,10 +120,13 @@ entrypoint with `PROFILE_DOCKER_ISOLATION=1`. The script re-execs itself in
 Docker with `--network=none`, UID/GID matching, memory/CPU limits, and the same
 mounted workspace, so a native crash cannot take down the host-side agent
 process. This is a containment mode for the existing profile script, not a
-separate profile harness. `simple-test-isolation:latest` is enough for
-separate-process smoke checks; full contract-gated C/Go comparison reports need
-`PROFILE_DOCKER_IMAGE` to point at an image that includes the cross-language
-toolchains.
+separate profile harness. Build the canonical image with
+`docker build -t simple-cross-language-perf:latest -f tools/docker/Dockerfile.cross-language-perf tools/docker`.
+`simple-test-isolation:latest` remains enough for separate-process Simple-only
+smoke checks. The cross-language perf image proves C/Go toolchain availability,
+but full contract-gated C/Go comparison reports also require Simple native
+linking to pass in the container; the current container-native linker blocker is
+tracked in `doc/08_tracking/bug/docker_cross_language_profile_native_link_2026-06-08.md`.
 The report records the Go toolchain and the generated Go probe's
 `runtime.GOMAXPROCS(0)` / `runtime.NumCPU()` values so Go-like M:N comparisons
 name the scheduler limit used by the goroutine rows.
