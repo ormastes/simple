@@ -560,3 +560,32 @@ HIR lowering error: Unknown variable: llvm_ir_builder_build while lowering boots
 Current next blocker: inspect the bootstrap LLVM object emission path for stale
 generated LLVM IR builder helper calls around `llvm_ir_builder_build`, then
 continue the same stage2 probe loop.
+
+## 2026-06-08 LLVM Builder / Borrow Follow-Up
+
+Status: still blocked for the pure-Simple stage2 payload.
+
+The same direct stage2 probe now clears the next blockers for:
+
+- bootstrap LLVM object emission no longer depends on the unresolved
+  `llvm_ir_builder_build` import; the driver now uses the builder method
+  directly.
+- the LLVM IR builder helper is public and included in the backend facade for
+  other users of the free-function path.
+- borrow lifetime sentinels no longer use the stale `i64_max(i64)` helper.
+- borrow lifetime constructors and environment creation no longer use stale
+  `lifetime_Anonymous` / `lifetimeenv_create` generated names.
+- lifetime inference uses direct dict/list operations and explicit
+  `Lifetime` equality/text helpers instead of generated accessor/method names.
+- borrow graph place constructors and borrow-set/borrow-graph helpers now use
+  current enum constructors and direct dict/list/method operations.
+
+Latest probe still exits `1`, emits no stage2 artifact, and now stops at:
+
+```text
+HIR lowering error: Unknown variable: exit_blocks while lowering ControlFlowGraph.add_exit
+```
+
+Current next blocker: inspect the NLL control-flow graph helpers for stale
+generated list/dict accessor names around `exit_blocks`, then continue the same
+stage2 probe loop.
