@@ -620,3 +620,23 @@ HIR lowering error: Unknown variable: resolve_methods while lowering CompilerDri
 Current next blocker: inspect the compiler driver implementation lowering path
 for stale `resolve_methods` helper references, then continue the same stage2
 probe loop.
+
+## 2026-06-08 Driver Resolve Import Follow-Up
+
+Status: still blocked for the pure-Simple stage2 payload.
+
+The same direct stage2 probe now clears the next blocker for:
+
+- `CompilerDriver.lower_and_check_impl` / `resolve_methods_impl` now import the
+  current `compiler.semantics.resolve.resolve_methods` entry point directly
+  instead of depending on an unimported helper binding.
+
+Latest probe still exits `1`, emits no stage2 artifact, and now stops at:
+
+```text
+HIR lowering error: Unknown variable: ReadFileErr while lowering read_file
+```
+
+Current next blocker: inspect the file-reading result/error type around
+`read_file` for stale enum constructor or import naming, then continue the same
+stage2 probe loop.
