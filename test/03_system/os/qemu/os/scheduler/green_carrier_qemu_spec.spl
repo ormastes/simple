@@ -17,8 +17,8 @@ This opt-in live spec validates the SimpleOS green-carrier AP lane in QEMU.
 When `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1` is set, the spec builds the
 x86_64 guest probe, boots a two-CPU guest, and checks serial output for the
 real AP 64-bit entry marker plus fixed green-carrier dispatch, preemption,
-scheduler-owned handoff, scheduler/user handoff readiness, and user-entry
-bridge readiness PASS markers.
+scheduler-owned handoff, scheduler/user handoff readiness, user-entry bridge
+readiness, and user-syscall bridge readiness PASS markers.
 
 The PASS marker means the freestanding fixed-slot carrier helper selected CPU1,
 sent the remote green-carrier IPI intent, dispatched task `701`, and recorded
@@ -33,6 +33,9 @@ in-memory x86_64 user payload image, created a scheduler task through
 the non-entering syscall-14 handoff record. The USER_ENTRY_BRIDGE_READY marker
 means the same live guest installed the x86_64 trap runtime, programmed the
 SYSCALL entry path, and resolved a nonzero `kernel_syscall_entry_asm` address.
+The USER_SYSCALL_BRIDGE_READY marker means the live guest initialized the strong
+syscall shim keepalive path and dispatched syscall 60 `debug_write` through the
+kernel-side shim, without claiming a user-mode syscall return.
 Together these current readiness markers prove AP startup plus live guest
 evidence for both the freestanding helper path and the scheduler-owned green
 handoff path without claiming the final ring/user transition.
@@ -85,6 +88,7 @@ The live serial output must include:
 [green-carrier-qemu] SCHED_HANDOFF_PASS=true
 [green-carrier-qemu] USER_HANDOFF_READY=true
 [green-carrier-qemu] USER_ENTRY_BRIDGE_READY=true
+[green-carrier-qemu] USER_SYSCALL_BRIDGE_READY=true
 ```
 
 The future final hardware handoff lane must additionally include all of:
@@ -116,6 +120,7 @@ val GREEN_PREEMPT_MARKER: text = "[green-carrier-qemu] PREEMPT_PASS=true"
 val GREEN_SCHED_HANDOFF_MARKER: text = "[green-carrier-qemu] SCHED_HANDOFF_PASS=true"
 val GREEN_USER_HANDOFF_READY_MARKER: text = "[green-carrier-qemu] USER_HANDOFF_READY=true"
 val GREEN_USER_ENTRY_BRIDGE_READY_MARKER: text = "[green-carrier-qemu] USER_ENTRY_BRIDGE_READY=true"
+val GREEN_USER_SYSCALL_BRIDGE_READY_MARKER: text = "[green-carrier-qemu] USER_SYSCALL_BRIDGE_READY=true"
 val GREEN_HW_HANDOFF_MARKER: text = "[green-carrier-qemu] HW_HANDOFF_PASS=true"
 val GREEN_USER_ENTRY_MARKER: text = "[green-carrier-qemu] USER_ENTRY_PASS=true"
 val GREEN_USER_SYSCALL_MARKER: text = "[green-carrier-qemu] USER_SYSCALL_PASS=true"
@@ -160,7 +165,7 @@ fn _run_probe(kernel: text) -> (text, i64):
     (result[0] + result[1], result[2])
 
 fn _has_required_markers(serial: text) -> bool:
-    serial.contains(AP_ONLINE_MARKER) and serial.contains(GREEN_PASS_MARKER) and serial.contains(GREEN_PREEMPT_MARKER) and serial.contains(GREEN_SCHED_HANDOFF_MARKER) and serial.contains(GREEN_USER_HANDOFF_READY_MARKER) and serial.contains(GREEN_USER_ENTRY_BRIDGE_READY_MARKER)
+    serial.contains(AP_ONLINE_MARKER) and serial.contains(GREEN_PASS_MARKER) and serial.contains(GREEN_PREEMPT_MARKER) and serial.contains(GREEN_SCHED_HANDOFF_MARKER) and serial.contains(GREEN_USER_HANDOFF_READY_MARKER) and serial.contains(GREEN_USER_ENTRY_BRIDGE_READY_MARKER) and serial.contains(GREEN_USER_SYSCALL_BRIDGE_READY_MARKER)
 
 fn _print_probe_debug(serial: text, qemu_exit: i64):
     val saw_boot = serial.contains("[green-carrier-qemu] boot")
@@ -170,6 +175,7 @@ fn _print_probe_debug(serial: text, qemu_exit: i64):
     val saw_scheduler_handoff = serial.contains(GREEN_SCHED_HANDOFF_MARKER)
     val saw_user_handoff_ready = serial.contains(GREEN_USER_HANDOFF_READY_MARKER)
     val saw_user_entry_bridge_ready = serial.contains(GREEN_USER_ENTRY_BRIDGE_READY_MARKER)
+    val saw_user_syscall_bridge_ready = serial.contains(GREEN_USER_SYSCALL_BRIDGE_READY_MARKER)
     val saw_hardware_handoff = serial.contains(GREEN_HW_HANDOFF_MARKER)
     val saw_user_entry = serial.contains(GREEN_USER_ENTRY_MARKER)
     val saw_user_syscall = serial.contains(GREEN_USER_SYSCALL_MARKER)
@@ -181,6 +187,7 @@ fn _print_probe_debug(serial: text, qemu_exit: i64):
     print "[green_carrier_qemu_spec] saw scheduler-handoff={saw_scheduler_handoff}"
     print "[green_carrier_qemu_spec] saw user-handoff-ready={saw_user_handoff_ready}"
     print "[green_carrier_qemu_spec] saw user-entry-bridge-ready={saw_user_entry_bridge_ready}"
+    print "[green_carrier_qemu_spec] saw user-syscall-bridge-ready={saw_user_syscall_bridge_ready}"
     print "[green_carrier_qemu_spec] saw hardware-handoff={saw_hardware_handoff}"
     print "[green_carrier_qemu_spec] saw user-entry={saw_user_entry}"
     print "[green_carrier_qemu_spec] saw user-syscall={saw_user_syscall}"
@@ -190,7 +197,7 @@ describe "SimpleOS green carrier live QEMU proof":
     """Live green-carrier validation, disabled unless SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1."""
 
     it "boots two CPUs and dispatches green work through the scheduler-owned AP carrier":
-        """When enabled, QEMU serial output must show AP startup plus fixed dispatch, preemption, scheduler handoff, user handoff readiness, and user-entry bridge readiness PASS markers."""
+        """When enabled, QEMU serial output must show AP startup plus fixed dispatch, preemption, scheduler handoff, user handoff readiness, user-entry bridge readiness, and user-syscall bridge readiness PASS markers."""
         if not _enabled():
             step("Skip the live QEMU lane unless SIMPLEOS_GREEN_CARRIER_QEMU_LIVE is enabled")
             expect(_enabled()).to_equal(false)
@@ -216,6 +223,7 @@ describe "SimpleOS green carrier live QEMU proof":
             expect(serial.contains(GREEN_SCHED_HANDOFF_MARKER)).to_equal(true)
             expect(serial.contains(GREEN_USER_HANDOFF_READY_MARKER)).to_equal(true)
             expect(serial.contains(GREEN_USER_ENTRY_BRIDGE_READY_MARKER)).to_equal(true)
+            expect(serial.contains(GREEN_USER_SYSCALL_BRIDGE_READY_MARKER)).to_equal(true)
 
     it "keeps final hardware handoff proof behind separate opt-in markers":
         """The final AP ring/user handoff markers are intentionally separate from SCHED_HANDOFF_PASS."""

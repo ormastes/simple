@@ -9,7 +9,8 @@ fixed-slot CPU1 green dispatch/IPI evidence, fixed timer-preemption yield
 evidence, scheduler-owned CPU1 green handoff through the real `Scheduler`,
 non-final scheduler/user handoff readiness through `USER_HANDOFF_READY=true`,
 and non-final user-entry bridge readiness through
-`USER_ENTRY_BRIDGE_READY=true`.
+`USER_ENTRY_BRIDGE_READY=true`, and non-final user-syscall bridge readiness
+through `USER_SYSCALL_BRIDGE_READY=true`.
 The final hardware handoff gap is tracked in
 `doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md`.
 
@@ -147,6 +148,7 @@ readiness markers:
 [green-carrier-qemu] SCHED_HANDOFF_PASS=true
 [green-carrier-qemu] USER_HANDOFF_READY=true
 [green-carrier-qemu] USER_ENTRY_BRIDGE_READY=true
+[green-carrier-qemu] USER_SYSCALL_BRIDGE_READY=true
 ```
 
 `USER_HANDOFF_READY=true` is emitted only after the guest constructs an
@@ -159,6 +161,10 @@ or observe a user-mode syscall return.
 trap runtime installed, calls `install_syscall_entry()`, and resolves a nonzero
 `kernel_syscall_entry_asm` address. It proves the entry bridge is armed, not
 that ring-3 code has run.
+`USER_SYSCALL_BRIDGE_READY=true` is emitted only after the guest initializes
+the strong syscall shim keepalive path and dispatches syscall 60 `debug_write`
+through the kernel-side shim. It proves the syscall bridge is armed, not that a
+user-mode payload has issued or returned from a syscall.
 
 ## Notes
 
@@ -172,7 +178,8 @@ that ring-3 code has run.
   `[green-carrier-qemu] SCHED_HANDOFF_PASS=true` in serial output. Current
   live readiness evidence additionally requires
   `[green-carrier-qemu] USER_HANDOFF_READY=true` and
-  `[green-carrier-qemu] USER_ENTRY_BRIDGE_READY=true`.
+  `[green-carrier-qemu] USER_ENTRY_BRIDGE_READY=true` and
+  `[green-carrier-qemu] USER_SYSCALL_BRIDGE_READY=true`.
 - The final AP ring/user hardware handoff markers are deliberately separate:
   `[green-carrier-qemu] HW_HANDOFF_PASS=true`,
   `[green-carrier-qemu] USER_ENTRY_PASS=true`, and
@@ -241,6 +248,25 @@ execute `rt_x86_enter_user_first`, does not enter user mode, and does not
 observe a user-mode syscall return. The final live gate still requires
 `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, and `USER_SYSCALL_PASS=true`
 from the real AP ring/user path.
+
+## 2026-06-08 Guest User Syscall Bridge Readiness Prerequisite
+
+The live green-carrier guest probe now has a non-final
+`USER_SYSCALL_BRIDGE_READY=true` marker. The marker is emitted only after the
+guest initializes the `os.kernel.abi.syscall_shim` keepalive path and calls the
+strong `spl_handle_debug_write` override for syscall 60.
+
+This is prerequisite evidence only. It proves the live AP probe links and can
+dispatch the kernel-side syscall shim needed by a future user-mode debug-write
+payload. It does not execute `rt_x86_enter_user_first`, does not enter user
+mode, and does not observe a user-mode syscall return. The final live gate
+still requires `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, and
+`USER_SYSCALL_PASS=true` from the real AP ring/user path.
+
+Host verification from `/tmp/simple-pherallel-sync`:
+
+- `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 src/compiler_rust/target/debug/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean`:
+  PASS, 2 scenarios in 47035ms.
 
 Host verification from `/tmp/simple-pherallel-sync`:
 

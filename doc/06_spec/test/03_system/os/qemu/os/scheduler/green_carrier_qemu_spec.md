@@ -1,6 +1,6 @@
 # SimpleOS Green Carrier QEMU Live Specification
 
-> This opt-in live spec validates the SimpleOS green-carrier AP lane in QEMU. When `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1` is set, the spec builds the x86_64 guest probe, boots a two-CPU guest, and checks serial output for the real AP 64-bit entry marker plus fixed green-carrier dispatch, preemption, scheduler-owned handoff, scheduler/user handoff readiness, and user-entry bridge readiness PASS markers.
+> This opt-in live spec validates the SimpleOS green-carrier AP lane in QEMU. When `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1` is set, the spec builds the x86_64 guest probe, boots a two-CPU guest, and checks serial output for the real AP 64-bit entry marker plus fixed green-carrier dispatch, preemption, scheduler-owned handoff, scheduler/user handoff readiness, user-entry bridge readiness, and user-syscall bridge readiness PASS markers.
 
 <!-- sdn-diagram:id=green_carrier_qemu_spec.arch -->
 <details class="sdn-source">
@@ -34,7 +34,7 @@ green_carrier_qemu_spec -> std
 
 # SimpleOS Green Carrier QEMU Live Specification
 
-This opt-in live spec validates the SimpleOS green-carrier AP lane in QEMU. When `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1` is set, the spec builds the x86_64 guest probe, boots a two-CPU guest, and checks serial output for the real AP 64-bit entry marker plus fixed green-carrier dispatch, preemption, scheduler-owned handoff, scheduler/user handoff readiness, and user-entry bridge readiness PASS markers.
+This opt-in live spec validates the SimpleOS green-carrier AP lane in QEMU. When `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1` is set, the spec builds the x86_64 guest probe, boots a two-CPU guest, and checks serial output for the real AP 64-bit entry marker plus fixed green-carrier dispatch, preemption, scheduler-owned handoff, scheduler/user handoff readiness, user-entry bridge readiness, and user-syscall bridge readiness PASS markers.
 
 ## At a Glance
 
@@ -57,8 +57,8 @@ This opt-in live spec validates the SimpleOS green-carrier AP lane in QEMU.
 When `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1` is set, the spec builds the
 x86_64 guest probe, boots a two-CPU guest, and checks serial output for the
 real AP 64-bit entry marker plus fixed green-carrier dispatch, preemption,
-scheduler-owned handoff, scheduler/user handoff readiness, and user-entry
-bridge readiness PASS markers.
+scheduler-owned handoff, scheduler/user handoff readiness, user-entry bridge
+readiness, and user-syscall bridge readiness PASS markers.
 
 The PASS marker means the freestanding fixed-slot carrier helper selected CPU1,
 sent the remote green-carrier IPI intent, dispatched task `701`, and recorded
@@ -73,6 +73,9 @@ in-memory x86_64 user payload image, created a scheduler task through
 the non-entering syscall-14 handoff record. The USER_ENTRY_BRIDGE_READY marker
 means the same live guest installed the x86_64 trap runtime, programmed the
 SYSCALL entry path, and resolved a nonzero `kernel_syscall_entry_asm` address.
+The USER_SYSCALL_BRIDGE_READY marker means the live guest initialized the strong
+syscall shim keepalive path and dispatched syscall 60 `debug_write` through the
+kernel-side shim, without claiming a user-mode syscall return.
 Together these current readiness markers prove AP startup plus live guest
 evidence for both the freestanding helper path and the scheduler-owned green
 handoff path without claiming the final ring/user transition.
@@ -125,6 +128,7 @@ The live serial output must include:
 [green-carrier-qemu] SCHED_HANDOFF_PASS=true
 [green-carrier-qemu] USER_HANDOFF_READY=true
 [green-carrier-qemu] USER_ENTRY_BRIDGE_READY=true
+[green-carrier-qemu] USER_SYSCALL_BRIDGE_READY=true
 ```
 
 The future final hardware handoff lane must additionally include all of:
@@ -153,19 +157,20 @@ _Live green-carrier validation, disabled unless SIMPLEOS_GREEN_CARRIER_QEMU_LIVE
 -  print probe debug
 - Verify AP startup and current green carrier readiness markers
    - TUI capture: after_step
-   - Evidence: TUI state verified by 6 expected checks
+   - Evidence: TUI state verified by 7 expected checks
    - Expected: serial contains `AP_ONLINE_MARKER`
    - Expected: serial contains `GREEN_PASS_MARKER`
    - Expected: serial contains `GREEN_PREEMPT_MARKER`
    - Expected: serial contains `GREEN_SCHED_HANDOFF_MARKER`
    - Expected: serial contains `GREEN_USER_HANDOFF_READY_MARKER`
    - Expected: serial contains `GREEN_USER_ENTRY_BRIDGE_READY_MARKER`
+   - Expected: serial contains `GREEN_USER_SYSCALL_BRIDGE_READY_MARKER`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -192,6 +197,7 @@ else:
     expect(serial.contains(GREEN_SCHED_HANDOFF_MARKER)).to_equal(true)
     expect(serial.contains(GREEN_USER_HANDOFF_READY_MARKER)).to_equal(true)
     expect(serial.contains(GREEN_USER_ENTRY_BRIDGE_READY_MARKER)).to_equal(true)
+    expect(serial.contains(GREEN_USER_SYSCALL_BRIDGE_READY_MARKER)).to_equal(true)
 ```
 
 </details>

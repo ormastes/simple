@@ -51,7 +51,8 @@ Use separate final markers:
 `[green-carrier-qemu] USER_SYSCALL_PASS=true`; do not overload
 `[green-carrier-qemu] SCHED_HANDOFF_PASS=true` or the non-final
 `[green-carrier-qemu] USER_HANDOFF_READY=true` /
-`[green-carrier-qemu] USER_ENTRY_BRIDGE_READY=true` prerequisite markers.
+`[green-carrier-qemu] USER_ENTRY_BRIDGE_READY=true` /
+`[green-carrier-qemu] USER_SYSCALL_BRIDGE_READY=true` prerequisite markers.
 
 The executable live gate is
 `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1`. It should fail until the
@@ -229,3 +230,15 @@ This closes the live entry-bridge arming prerequisite, but not the final marker
 triplet. The probe still must drive the real AP ring/user path and observe
 `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, and `USER_SYSCALL_PASS=true`
 before this bug can close.
+
+## 2026-06-08 Guest User Syscall Bridge Readiness Prerequisite
+
+The live green-carrier guest probe now emits non-final
+`USER_SYSCALL_BRIDGE_READY=true` only after initializing the
+`os.kernel.abi.syscall_shim` keepalive path and dispatching syscall 60
+`debug_write` through the strong `spl_handle_debug_write` override.
+
+This closes the live kernel-side syscall shim prerequisite, but not the final
+marker triplet. The probe still must enter ring 3 and observe a user-mode
+payload issue and return from a syscall before it may print
+`USER_SYSCALL_PASS=true`.
