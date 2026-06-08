@@ -350,11 +350,15 @@ pub fn compile_instruction<M: Module>(
                 }
             } else if let Some(&func_id) = ctx.func_ids.get(global_name) {
                 // Function reference used as a value (e.g., from MIR GlobalLoad of an
-                // imported function). Load the function's address as a pointer value
-                // so that subsequent IndirectCall resolves correctly.
+                // imported function). Materialize it as the same heap closure shape
+                // used by ClosureCreate so values survive parameter passing and array
+                // storage before a later IndirectCall.
                 let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
-                let val = builder.ins().func_addr(types::I64, func_ref);
-                ctx.vreg_values.insert(*dest, val);
+                let closure_size = builder.ins().iconst(types::I64, 8);
+                let closure_ptr = helpers::call_runtime_1(ctx, builder, "rt_alloc", closure_size);
+                let fn_addr = builder.ins().func_addr(types::I64, func_ref);
+                builder.ins().store(MemFlags::new(), fn_addr, closure_ptr, 0);
+                ctx.vreg_values.insert(*dest, closure_ptr);
             } else if let Some(resolved) = ctx
                 .use_map
                 .get(global_name.as_str())
@@ -394,8 +398,11 @@ pub fn compile_instruction<M: Module>(
                     {
                         ctx.func_ids.entry(global_name.clone()).or_insert(fid);
                         let func_ref = ctx.module.declare_func_in_func(fid, builder.func);
-                        let val = builder.ins().func_addr(types::I64, func_ref);
-                        ctx.vreg_values.insert(*dest, val);
+                        let closure_size = builder.ins().iconst(types::I64, 8);
+                        let closure_ptr = helpers::call_runtime_1(ctx, builder, "rt_alloc", closure_size);
+                        let fn_addr = builder.ins().func_addr(types::I64, func_ref);
+                        builder.ins().store(MemFlags::new(), fn_addr, closure_ptr, 0);
+                        ctx.vreg_values.insert(*dest, closure_ptr);
                     } else {
                         match ctx
                             .module

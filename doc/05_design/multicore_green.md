@@ -31,16 +31,18 @@ single-carrier `green_thread` queue.
 
 Data structures:
 
-- `GREEN_READY`, `GREEN_READY_HEAD`, `GREEN_READY_COUNT` for queued task ids.
-- `GREEN_TASK_IDS` and `GREEN_TASK_RESULTS` for scheduled results.
-- `GREEN_DONE_IDS`, `GREEN_RESULT_IDS`, and `GREEN_RESULTS` for join state.
-- `GREEN_VALUE_READY_COUNT` and `GREEN_VALUE_DONE_COUNT` for direct value
-  scheduling used by profile fanout rows.
+- `GREEN_VALUE_READY_COUNT` and `GREEN_VALUE_DONE_COUNT` for queued eager
+  results.
+- `GreenThreadHandle.value_order` and `GreenThreadHandle.value_result` for
+  completion checks and joins without storing delayed function values.
 
 Behavior:
 
-- `cooperative_green_run_one` advances one ready value or task result on the
-  current OS thread.
+- `cooperative_green_spawn(task)` evaluates the function when scheduled, then
+  queues the result through the same value path as
+  `cooperative_green_spawn_value(result)`.
+- `cooperative_green_run_one` advances one ready value on the current OS
+  thread.
 - `cooperative_green_run_all` drains currently ready work.
 - Join returns a completed result or zero for not-yet-done work.
 

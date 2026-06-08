@@ -7,18 +7,21 @@ Date: 2026-06-06
 Direct green-thread perf checks exposed runtime/compiler blockers that are
 separate from the cooperative queue semantics:
 
-- Direct interpreter/SMF function-value calls can segfault:
-  `fn call(cb: fn() -> i64) -> i64: cb()`.
+- Direct/native function-parameter callbacks previously segfaulted for
+  `fn call(cb: fn() -> i64) -> i64: cb()`. Fixed on 2026-06-08 by
+  materializing top-level function values as closure objects before parameter
+  passing.
 - Direct interpreter global array append/index can segfault after mutation.
 - SMF mutable globals can segfault even for a minimal counter:
   `var COUNT: usize = 0; COUNT = COUNT + 1`.
 
 ## Impact
 
-`green_spawn(fn)` remains covered by the SPipe unit runner, but direct perf
-scripts cannot use the closure path as a reliable benchmark input yet.
-`green_spawn_value(result)` is used for direct perf checks to exercise the
-cooperative queue without function-value calls or global array mutation.
+`green_spawn(fn)` is covered by the SPipe unit runner and now has focused native
+callback smoke coverage through
+`test/05_perf/profile_scripts/native_function_value_callback_regression_test.shs`.
+Direct perf scripts still use `green_spawn_value(result)` where they need to
+avoid delayed function storage and isolate cooperative queue overhead.
 
 2026-06-06 follow-up: a Pure Simple delayed-closure queue was prototyped by
 storing `fn() -> i64` values and running them from `green_run_one()`. Interpreter
@@ -31,8 +34,9 @@ checks and SPipe examples passed, but native entry-closure evidence failed:
   native smoke again segfaulted with `exit=139`.
 
 Until native codegen can safely store and call function-valued globals or array
-entries, `green_spawn(fn)` must keep the native-safe eager-result behavior and
-`green_spawn_value(result)` remains the stable profile harness input.
+entries, `green_spawn(fn)` must keep the native-safe eager-result behavior.
+`green_spawn_value(result)` remains the stable profile harness input for direct
+queue/fanout timing.
 
 Green threads also cannot be used as proof of C/Go parity for CPU-parallel
 workloads because they run on the current OS thread. On 2026-06-06, the existing
@@ -49,14 +53,25 @@ This is a model mismatch, not just a local queue optimization issue. Use
 using `thread_spawn` so the OS-thread scheduler baseline is not mixed with
 explicit-argument ABI smoke coverage.
 
+2026-06-08 follow-up: native top-level function values passed as parameters now
+run through a uniform closure-object representation. Minimal direct/native
+evidence:
+
+- `fn call(cb: fn() -> i64) -> i64: cb()` returns `7`.
+- `cooperative_green_spawn(worker)` builds and runs natively without the prior
+  segfault.
+
+Function-valued arrays and function-valued globals remain open storage/codegen
+blockers and are not required for the current eager-result cooperative queue.
+
 The cross-language harness now reports Simple OS-thread and Simple cooperative
 green rows separately. A 20-worker OS-thread fanout smoke compiles and runs
 through unrolled `thread_spawn` fork-join handles. `thread_spawn_with_args`
 native probes now pass the focused explicit-argument ABI smoke, so it is no
 longer part of this blocker list. The remaining direct-run blockers are the
 cooperative green SMF mutable-global failure and native/SMF function-valued
-storage/codegen failures; those are runtime/compiler issues, not public API
-change requests.
+array/global storage/codegen failures; those are runtime/compiler issues, not
+public API change requests.
 
 ## Multicore Green SMF Status
 
@@ -80,7 +95,6 @@ classified separately from native and SMF `multicore_green_spawn` evidence.
 
 Temporary local repro files were created under `build/tmp/` while investigating:
 
-- `fn_param_min.spl`
 - `global_array_append_smoke.spl`
 - `global_usize_smoke.spl`
 
@@ -88,4 +102,6 @@ Temporary local repro files were created under `build/tmp/` while investigating:
 
 Fix native and SMF handling for function-valued globals/arrays and mutable
 global state, then switch or add a perf harness green row for delayed
-`green_spawn(fn)` closure execution timing.
+`green_spawn(fn)` closure execution timing. Keep
+`test/05_perf/profile_scripts/native_function_value_callback_regression_test.shs`
+passing so the fixed function-parameter callback path does not regress.

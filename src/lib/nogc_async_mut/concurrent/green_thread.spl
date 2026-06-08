@@ -7,17 +7,6 @@
 # long-running closure.
 
 var GREEN_NEXT_ID: usize = 1
-var GREEN_READY: [usize] = []
-var GREEN_READY_HEAD: usize = 0
-var GREEN_READY_COUNT: usize = 0
-var GREEN_TASK_IDS: [usize] = []
-var GREEN_TASK_RESULTS: [i64] = []
-var GREEN_TASK_COUNT: usize = 0
-var GREEN_DONE_IDS: [usize] = []
-var GREEN_DONE_COUNT: usize = 0
-var GREEN_RESULT_IDS: [usize] = []
-var GREEN_RESULTS: [i64] = []
-var GREEN_RESULT_COUNT: usize = 0
 var GREEN_VALUE_READY_COUNT: usize = 0
 var GREEN_VALUE_DONE_COUNT: usize = 0
 
@@ -34,32 +23,21 @@ class GreenThreadHandle:
     fn is_done() -> bool:
         if self.value_mode == 1:
             return self.value_order <= GREEN_VALUE_DONE_COUNT
-        green_is_done(self.task_id)
+        false
 
     fn join() -> i64:
         if not self.is_done():
             return 0
         if self.value_mode == 1:
             return self.value_result
-        green_result(self.task_id)
-
-fn green_enqueue_result(result: i64) -> GreenThreadHandle:
-    val task_id = GREEN_NEXT_ID
-    GREEN_NEXT_ID = GREEN_NEXT_ID + 1
-
-    GREEN_TASK_IDS = GREEN_TASK_IDS + [task_id]
-    GREEN_TASK_RESULTS = GREEN_TASK_RESULTS + [result]
-    GREEN_TASK_COUNT = GREEN_TASK_COUNT + 1
-    GREEN_READY = GREEN_READY + [task_id]
-    GREEN_READY_COUNT = GREEN_READY_COUNT + 1
-    GreenThreadHandle(task_id: task_id, value_mode: 0, value_order: 0, value_result: 0)
+        0
 
 fn green_spawn(task: fn() -> i64) -> GreenThreadHandle:
     """Schedule a closure on the cooperative green-thread queue."""
     # The current direct interpreter/SMF path cannot safely persist function
     # values in scheduler storage. Evaluate now and enqueue the result so the
     # cooperative queue itself remains usable and measurable.
-    green_enqueue_result(task())
+    green_spawn_value(task())
 
 fn green_spawn_value(result: i64) -> GreenThreadHandle:
     """Schedule an already computed result on the cooperative queue."""
@@ -70,47 +48,13 @@ fn green_spawn_value(result: i64) -> GreenThreadHandle:
     GreenThreadHandle(task_id: task_id, value_mode: 1, value_order: value_order, value_result: result)
 
 fn green_ready_count() -> usize:
-    (GREEN_READY_COUNT - GREEN_READY_HEAD) + (GREEN_VALUE_READY_COUNT - GREEN_VALUE_DONE_COUNT)
-
-fn green_is_done(task_id: usize) -> bool:
-    var i: usize = 0
-    while i < GREEN_DONE_COUNT:
-        if GREEN_DONE_IDS[i] == task_id:
-            return true
-        i = i + 1
-    false
-
-fn green_result(task_id: usize) -> i64:
-    var i: usize = 0
-    while i < GREEN_RESULT_COUNT:
-        if GREEN_RESULT_IDS[i] == task_id:
-            return GREEN_RESULTS[i]
-        i = i + 1
-    0
+    GREEN_VALUE_READY_COUNT - GREEN_VALUE_DONE_COUNT
 
 fn green_run_one() -> bool:
     """Run one ready green thread to completion."""
     if GREEN_VALUE_DONE_COUNT < GREEN_VALUE_READY_COUNT:
         GREEN_VALUE_DONE_COUNT = GREEN_VALUE_DONE_COUNT + 1
         return true
-
-    if GREEN_READY_HEAD >= GREEN_READY_COUNT:
-        return false
-
-    val task_id = GREEN_READY[GREEN_READY_HEAD]
-    GREEN_READY_HEAD = GREEN_READY_HEAD + 1
-
-    var i: usize = 0
-    while i < GREEN_TASK_COUNT:
-        if GREEN_TASK_IDS[i] == task_id:
-            val result = GREEN_TASK_RESULTS[i]
-            GREEN_DONE_IDS = GREEN_DONE_IDS + [task_id]
-            GREEN_DONE_COUNT = GREEN_DONE_COUNT + 1
-            GREEN_RESULT_IDS = GREEN_RESULT_IDS + [task_id]
-            GREEN_RESULTS = GREEN_RESULTS + [result]
-            GREEN_RESULT_COUNT = GREEN_RESULT_COUNT + 1
-            return true
-        i = i + 1
     false
 
 fn green_run_all() -> usize:

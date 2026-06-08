@@ -41,7 +41,7 @@ cooperative_green_spec -> std
 #### keeps queued work on the cooperative scheduler
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -61,7 +61,7 @@ expect(handle.join()).to_equal(5)
 #### runs multiple cooperative values
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -80,7 +80,7 @@ expect(h2.join()).to_equal(13)
 #### supports direct value scheduling for profile smoke workloads
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

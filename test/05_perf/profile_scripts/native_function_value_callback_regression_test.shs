@@ -1,0 +1,81 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)"
+cd "$ROOT_DIR"
+
+BIN="${SIMPLE_BIN:-src/compiler_rust/target/debug/simple}"
+TIMEOUT_SECS="${SIMPLE_NATIVE_CALLBACK_TIMEOUT_SECS:-30}"
+
+fail() {
+    echo "native_function_value_callback_regression=false"
+    echo "error=$1"
+    exit 1
+}
+
+[ -x "$BIN" ] || fail "missing simple binary: $BIN"
+
+tmp_dir="$(mktemp -d)"
+trap 'rm -rf "$tmp_dir"' EXIT
+
+run_bounded() {
+    timeout "$TIMEOUT_SECS" "$@"
+}
+
+cat >"$tmp_dir/function_param.spl" <<'SIMPLE'
+fn worker() -> i64:
+    return 7
+
+fn call(cb: fn() -> i64) -> i64:
+    return cb()
+
+fn main():
+    print(call(worker))
+SIMPLE
+
+cat >"$tmp_dir/cooperative_green_native.spl" <<'SIMPLE'
+use std.nogc_async_mut.concurrent.cooperative_green.{
+    cooperative_green_spawn,
+    cooperative_green_ready_count,
+    cooperative_green_run_one
+}
+
+extern fn rt_exit(code: i32)
+
+fn worker() -> i64:
+    return 17
+
+fn main():
+    val before = cooperative_green_ready_count()
+    val handle = cooperative_green_spawn(worker)
+    if cooperative_green_ready_count() - before != 1:
+        rt_exit(75)
+    if not cooperative_green_run_one():
+        rt_exit(76)
+    if not handle.is_done():
+        rt_exit(77)
+    if handle.join() != 17:
+        rt_exit(78)
+    print("native_callback_pass=true")
+SIMPLE
+
+param_out="$tmp_dir/function_param.out"
+run_bounded "$BIN" native-build --source "$tmp_dir" --entry "$tmp_dir/function_param.spl" \
+    --entry-closure -o "$tmp_dir/function_param.bin" --clean >"$param_out" 2>&1 ||
+    fail "function parameter native build failed"
+run_bounded "$tmp_dir/function_param.bin" >>"$param_out" 2>&1 ||
+    fail "function parameter native run failed"
+grep -q '^7$' "$param_out" || fail "function parameter callback did not return 7"
+
+green_out="$tmp_dir/cooperative_green_native.out"
+run_bounded "$BIN" native-build --source src/lib --source "$tmp_dir" \
+    --entry "$tmp_dir/cooperative_green_native.spl" --entry-closure \
+    -o "$tmp_dir/cooperative_green_native.bin" --clean >"$green_out" 2>&1 ||
+    fail "cooperative green native build failed"
+run_bounded "$tmp_dir/cooperative_green_native.bin" >>"$green_out" 2>&1 ||
+    fail "cooperative green native run failed"
+grep -q 'native_callback_pass=true' "$green_out" ||
+    fail "cooperative green native callback evidence missing"
+
+echo "native_function_value_callback_regression=true"
+echo "simple_binary=$BIN"
