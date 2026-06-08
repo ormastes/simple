@@ -85,19 +85,19 @@ fn generate_poll_function(
 
     # State0: Initial state - execute until first await
     val state0_arm = generate_state0_arm(func_body, analysis, state_enum)
-    match_arms = match_arms_push(match_arms, state0_arm)
+    match_arms = match_arms.push(state0_arm)
 
     # State1..N: Resume after each await
-    for i in 0..analysis.suspension_points_len(suspension_points):
+    for i in 0..analysis.suspension_points.len():
         val sp = analysis.suspension_points[i]
         val variant = state_enum.variants[i + 1]  # +1 because State0 is at index 0
         val arm = generate_resume_arm(sp, variant, func_body, analysis, state_enum, waker_param)
-        match_arms = match_arms_push(match_arms, arm)
+        match_arms = match_arms.push(arm)
 
     # Create match expression on state
     val match_expr = Expr(
-        kind: ExprKind.Match(
-            Expr(kind: exprkind_Ident(state_param), span: dummy_span()),
+        kind: ExprKind.MatchCase(
+            Expr(kind: ExprKind.Ident(state_param), span: dummy_span()),
             match_arms
         ),
         span: dummy_span()
@@ -106,7 +106,7 @@ fn generate_poll_function(
     # Wrap in block
     val body = Block(
         stmts: [Stmt(
-            kind: stmtkind_Expr(match_expr),
+            kind: StmtKind.Expr(match_expr),
             span: dummy_span()
         )],
         span: dummy_span()
@@ -145,14 +145,14 @@ fn generate_state0_arm(
     """
     # Pattern: State0
     val pattern = Pattern(
-        kind: PatternKind.EnumVariant("State0", []),
+        kind: PatternKind.Enum("", "State0", EnumPatternPayload.Tuple([])),
         span: dummy_span()
     )
 
     # Body: execute until first await, then create future and transition
     var body_stmts = []
 
-    if analysis.suspension_points_len(suspension_points) > 0:
+    if analysis.suspension_points.len() > 0:
         val first_sp = analysis.suspension_points[0]
 
         # Extract code before first await from func_body
@@ -160,7 +160,7 @@ fn generate_state0_arm(
         var pre_await_stmts: [Stmt] = []
         for stmt in func_body.stmts:
             if stmt.span.start < first_sp.span.start:
-                pre_await_stmts_push(pre_await_stmts, stmt)
+                pre_await_stmts = pre_await_stmts.push(stmt)
         body_stmts = body_stmts + pre_await_stmts
 
         val future_binding = Stmt(
@@ -171,7 +171,7 @@ fn generate_state0_arm(
             ),
             span: dummy_span()
         )
-        body_stmts = body_stmts_push(body_stmts, future_binding)
+        body_stmts = body_stmts.push(future_binding)
 
         # Return (State1(future: future), Poll.Pending)
         val next_state = make_state_constructor("State1", ["future"])
@@ -180,14 +180,14 @@ fn generate_state0_arm(
     else:
         # No awaits - immediately return ready
         # Extract return value from function body's last expression
-        val return_val = if func_body.stmts_len(stmts) > 0:
-            val last_stmt = func_body.stmts[func_body.stmts_len(stmts) - 1]
+        val return_val = if func_body.stmts.len() > 0:
+            val last_stmt = func_body.stmts[func_body.stmts.len() - 1]
             match last_stmt.kind:
                 case Expr(e): e
                 case Return(e): e
-                case _: Expr(kind: ExprKind.UnitLiteral, span: dummy_span())
+                case _: Expr(kind: ExprKind.TupleLit([]), span: dummy_span())
         else:
-            Expr(kind: ExprKind.UnitLiteral, span: dummy_span())
+            Expr(kind: ExprKind.TupleLit([]), span: dummy_span())
         val return_expr = make_poll_tuple(
             make_state_constructor("State0", []),
             make_ready(return_val)
@@ -223,10 +223,16 @@ fn generate_resume_arm(
     # Pattern: State{N}(field1, field2, ..., future)
     var pattern_bindings = []
     for field in variant.fields:
-        pattern_bindings = pattern_bindings_push(pattern_bindings, field.name)
+        pattern_bindings = pattern_bindings.push(field.name)
+    var pattern_payload_items = []
+    for name in pattern_bindings:
+        pattern_payload_items = pattern_payload_items.push(Pattern(
+            kind: PatternKind.Binding(name, false),
+            span: dummy_span()
+        ))
 
     val pattern = Pattern(
-        kind: patternkind_EnumVariant(variant.name, pattern_bindings),
+        kind: PatternKind.Enum("", variant.name, EnumPatternPayload.Tuple(pattern_payload_items)),
         span: dummy_span()
     )
 
@@ -239,7 +245,7 @@ fn generate_resume_arm(
         kind: StmtKind.Val("poll_result", nil, poll_call),
         span: dummy_span()
     )
-    body_stmts = body_stmts_push(body_stmts, poll_binding)
+    body_stmts = body_stmts.push(poll_binding)
 
     # match poll_result:
     #     case Ready(value): ...
@@ -248,7 +254,7 @@ fn generate_resume_arm(
     val pending_arm = generate_pending_arm(variant)
 
     val poll_match = Expr(
-        kind: ExprKind.Match(
+        kind: ExprKind.MatchCase(
             Expr(kind: ExprKind.Ident("poll_result"), span: dummy_span()),
             [ready_arm, pending_arm]
         ),
@@ -256,7 +262,7 @@ fn generate_resume_arm(
     )
 
     body_stmts = body_stmts.push(Stmt(
-        kind: stmtkind_Expr(poll_match),
+        kind: StmtKind.Expr(poll_match),
         span: dummy_span()
     ))
 
@@ -276,14 +282,14 @@ fn generate_ready_arm(
     - Return final value (if this was the last await)
     """
     val pattern = Pattern(
-        kind: PatternKind.EnumVariant("Ready", ["value"]),
+        kind: PatternKind.Enum("", "Ready", EnumPatternPayload.Tuple([Pattern(kind: PatternKind.Binding("value", false), span: dummy_span())])),
         span: dummy_span()
     )
 
     var body_stmts = []
 
     val next_sp_index = sp.id + 1
-    if next_sp_index < analysis.suspension_points_len(suspension_points):
+    if next_sp_index < analysis.suspension_points.len():
         # More awaits to go - transition to next state
         val next_sp = analysis.suspension_points[next_sp_index]
 
@@ -292,13 +298,13 @@ fn generate_ready_arm(
             kind: StmtKind.Val("next_future", nil, next_sp.awaited_future),
             span: dummy_span()
         )
-        body_stmts = body_stmts_push(body_stmts, future_binding)
+        body_stmts = body_stmts.push(future_binding)
 
         # Construct next state with live vars + next_future
         var field_names = []
         for field in variant.fields:
             if field.name != "future":
-                field_names = field_names_push(field_names, field.name)
+                field_names = field_names.push(field.name)
         field_names = field_names.push("value")  # Add the newly resolved value
         field_names = field_names.push("next_future")
 
@@ -313,13 +319,13 @@ fn generate_ready_arm(
         var post_await_stmts: [Stmt] = []
         for stmt in func_body.stmts:
             if stmt.span.start > sp.span.start:
-                post_await_stmts = post_await_stmts_push(post_await_stmts, stmt)
+                post_await_stmts = post_await_stmts.push(stmt)
         body_stmts = body_stmts + post_await_stmts
 
         # Determine final return value: use the last expression from post-await
         # statements if any, otherwise use the resolved await value directly
-        val final_value = if post_await_stmts_len(post_await_stmts) > 0:
-            val last_stmt = post_await_stmts[post_await_stmts_len(post_await_stmts) - 1]
+        val final_value = if post_await_stmts.len() > 0:
+            val last_stmt = post_await_stmts[post_await_stmts.len() - 1]
             match last_stmt.kind:
                 case Expr(e): e
                 case Return(e): e
@@ -346,14 +352,14 @@ fn generate_pending_arm(variant: StateVariant) -> MatchArm:
             [State{N}(field1: field1, ...), Poll.Pending]
     """
     val pattern = Pattern(
-        kind: PatternKind.EnumVariant("Pending", []),
+        kind: PatternKind.Enum("", "Pending", EnumPatternPayload.Tuple([])),
         span: dummy_span()
     )
 
     # Reconstruct the same state with all fields
     var field_names = []
     for field in variant.fields:
-        field_names = field_names_push(field_names, field.name)
+        field_names = field_names.push(field.name)
 
     val same_state = make_state_constructor(variant.name, field_names)
     val return_expr = make_poll_tuple(same_state, make_pending())
@@ -380,10 +386,10 @@ fn make_poll_return_type(state_enum_name: text) -> Type:
     """
     Type(
         kind: TypeKind.Tuple([
-            Type(kind: typekind_Named(state_enum_name), span: dummy_span()),
+            Type(kind: TypeKind.Named(state_enum_name, []), span: dummy_span()),
             Type(
-                kind: TypeKind.Generic("Poll", [
-                    Type(kind: TypeKind.Inferred, span: dummy_span())
+                kind: TypeKind.Named("Poll", [
+                    Type(kind: TypeKind.Infer, span: dummy_span())
                 ]),
                 span: dummy_span()
             )
@@ -404,13 +410,13 @@ fn make_state_constructor(state_name: text, field_names: [text]) -> Expr:
     var args = []
     for name in field_names:
         args = args.push(CallArg(
-            value: Expr(kind: exprkind_Ident(name), span: dummy_span()),
+            value: Expr(kind: ExprKind.Ident(name), span: dummy_span()),
             name: name
         ))
 
     Expr(
         kind: ExprKind.Call(
-            Expr(kind: exprkind_Ident(state_name), span: dummy_span()),
+            Expr(kind: ExprKind.Ident(state_name), span: dummy_span()),
             args
         ),
         span: dummy_span()
@@ -430,13 +436,13 @@ fn make_poll_call(future_name: text, waker_name: text) -> Expr:
         kind: ExprKind.Call(
             Expr(
                 kind: ExprKind.Field(
-                    Expr(kind: exprkind_Ident(future_name), span: dummy_span()),
+                    Expr(kind: ExprKind.Ident(future_name), span: dummy_span()),
                     "poll"
                 ),
                 span: dummy_span()
             ),
             [CallArg(
-                value: Expr(kind: exprkind_Ident(waker_name), span: dummy_span()),
+                value: Expr(kind: ExprKind.Ident(waker_name), span: dummy_span()),
                 name: nil
             )]
         ),
@@ -454,7 +460,7 @@ fn make_poll_tuple(state: Expr, poll_result: Expr) -> Expr:
         Tuple expression
     """
     Expr(
-        kind: exprkind_Tuple([state, poll_result]),
+        kind: ExprKind.TupleLit([state, poll_result]),
         span: dummy_span()
     )
 
@@ -522,7 +528,7 @@ fn make_expr_stmt(expr: Expr) -> Stmt:
         Statement containing the expression
     """
     Stmt(
-        kind: stmtkind_Expr(expr),
+        kind: StmtKind.Expr(expr),
         span: dummy_span()
     )
 

@@ -155,7 +155,7 @@ fn generate_state_fields(sp: SuspensionPoint) -> [Field]:
             #  # DESUGARED: fixed_address: nil
             span: sp.span
         )
-        fields = fields_push(fields, field)
+        fields = fields.push(field)
 
     # Add field for the future being awaited
     val future_field = Field(
@@ -168,7 +168,7 @@ fn generate_state_fields(sp: SuspensionPoint) -> [Field]:
         fixed_address: nil,
         span: sp.span
     )
-    fields = fields_push(fields, future_field)
+    fields = fields.push(future_field)
 
     fields
 
@@ -198,7 +198,7 @@ fn generate_enum_doc(func_name: text, analysis: SuspensionAnalysis) -> text:
         Documentation string
     """
     val num_states = analysis.total_states
-    val num_awaits = analysis.suspension_points_len(suspension_points)
+    val num_awaits = analysis.suspension_points.len()
 
     "State machine for async function '{func_name}'. Contains {num_states} states for {num_awaits} suspension points."
 
@@ -216,7 +216,7 @@ fn make_inferred_type(span: Span) -> Type:
         Inferred type placeholder
     """
     Type(
-        kind: TypeKind.Inferred,
+        kind: TypeKind.Infer,
         span: span
     )
 
@@ -230,7 +230,7 @@ fn make_future_type(span: Span) -> Type:
         Future<Inferred> type
     """
     Type(
-        kind: TypeKind.Generic(
+        kind: TypeKind.Named(
             "Future",
             [make_inferred_type(span)]
         ),
@@ -254,14 +254,16 @@ fn state_enum_to_ast(state_enum: StateEnum, span: Span) -> Enum:
     var ast_variants = []
 
     for variant in state_enum.variants:
-        val ast_variant = EnumVariant(
+        val variant_kind = if variant.fields.len() == 0:
+            VariantKind.Unit
+        else:
+            VariantKind.Struct(variant.fields)
+        val ast_variant = Variant(
             name: variant.name,
-            fields: variant.fields,
-            discriminant: nil,
-            doc_comment: variant.doc_comment,
+            kind: variant_kind,
             span: span
         )
-        ast_variants = ast_variants_push(ast_variants, ast_variant)
+        ast_variants = ast_variants.push(ast_variant)
 
     Enum(
         name: state_enum.name,
@@ -269,8 +271,8 @@ fn state_enum_to_ast(state_enum: StateEnum, span: Span) -> Enum:
         variants: ast_variants,
         visibility: Visibility.Private,
         is_public: Visibility.Private.is_public(),  # State enum is implementation detail
+        has_doc_comment: true,
         doc_comment: state_enum.doc_comment,
-        attributes: [],
         span: span
     )
 
@@ -297,7 +299,7 @@ fn format_state_enum(state_enum: StateEnum) -> text:
     lines = lines.push("enum {state_enum.name}:")
 
     for variant in state_enum.variants:
-        if variant.fields_len(fields) == 0:
+        if variant.fields.len() == 0:
             lines = lines.push("    {variant.name}  // {variant.doc_comment}")
         else:
             var field_strs: [text] = []

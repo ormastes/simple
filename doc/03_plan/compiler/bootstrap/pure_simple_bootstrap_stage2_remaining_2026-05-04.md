@@ -505,3 +505,34 @@ Current next blocker: clean up the remaining generated accessor/helper artifacts
 in the async desugar documentation path around `generate_enum_doc`, then
 continue the same stage2 probe loop until the native-build path reaches real
 Simple lowering/codegen artifact emission.
+
+## 2026-06-08 Async Desugar Follow-Up
+
+Status: still blocked for the pure-Simple stage2 payload.
+
+The same direct stage2 probe now clears the async desugar blockers for:
+
+- `generate_enum_doc` stale `analysis.suspension_points_len(suspension_points)`
+  helper usage.
+- state enum field/variant list helper calls such as `fields_push`,
+  `ast_variants_push`, and `variant.fields_len(fields)`.
+- stale `TypeKind.Inferred`; the current AST uses `TypeKind.Infer`.
+- state enum AST conversion now constructs the current `Variant` /
+  `VariantKind` shape instead of the old `EnumVariant` shape.
+- async poll generation stale list helper calls in match arms, statement lists,
+  pattern bindings, and post-await/pre-await statement collection.
+- async poll generation stale AST constructor names such as `exprkind_Ident`,
+  `stmtkind_Expr`, `typekind_Named`, `ExprKind.Match`, `ExprKind.UnitLiteral`,
+  and `TypeKind.Generic`.
+- async return-type wrapping now uses explicit `has_return_type` handling instead
+  of relying on a match binding that did not lower to `ret_type`.
+
+Latest probe still exits `1`, emits no stage2 artifact, and now stops at:
+
+```text
+HIR lowering error: Unknown variable: has__rule_registry while lowering rule_registry
+```
+
+Current next blocker: inspect the rule registry static/global initialization path
+for stale generated optional/field helper naming around `has__rule_registry`,
+then continue the same stage2 probe loop.

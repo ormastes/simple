@@ -60,19 +60,14 @@ fn desugar_async_function(func: Function) -> (Function, [Enum], [Function]):
         return [func, [], []]
 
     # Wrap return type in Future<T>
-    val wrapped_return = match func.return_type:
-        case ret_type:
-            # Future<T> where T is original return type
-            Type(
-                kind: TypeKind.Generic("Future", [ret_type]),
-                span: ret_type.span
-            )
-        case nil:
-            # Future<()>
-            Type(
-                kind: TypeKind.Generic("Future", [unit_type()]),
-                span: func.span
-            )
+    val source_return = if func.has_return_type:
+        func.return_type
+    else:
+        unit_type()
+    val wrapped_return = Type(
+        kind: TypeKind.Named("Future", [source_return]),
+        span: source_return.span
+    )
 
     # Transform body using state machine generation
     val _destruct_0 = desugar_async_body(func.body, func)
@@ -84,6 +79,7 @@ fn desugar_async_function(func: Function) -> (Function, [Enum], [Function]):
         name: func.name,
         type_params: func.type_params,
         params: func.params,
+        has_return_type: true,
         return_type: wrapped_return,
         body: desugared_body,
         visibility: func.visibility,
@@ -94,6 +90,9 @@ fn desugar_async_function(func: Function) -> (Function, [Enum], [Function]):
         is_mutable: func.is_mutable,
         is_const: func.is_const,
         is_kernel: func.is_kernel,
+        is_extern: func.is_extern,
+        attributes: func.attributes,
+        has_doc_comment: func.has_doc_comment,
         doc_comment: func.doc_comment,
         span: func.span
     )
@@ -120,7 +119,7 @@ fn desugar_async_body(body: Block, func: Function) -> (Block, [Enum], [Function]
     # Analyze for suspension points
     val analysis = analyze_suspensions(func)
 
-    if analysis.suspension_points_len(suspension_points) == 0:
+    if analysis.suspension_points.len() == 0:
         # No await expressions - use simple Future.ready() wrapper
         val simple_body = desugar_async_body_simple(body)
         return [simple_body, [], []]
@@ -149,13 +148,13 @@ fn desugar_async_body_simple(body: Block) -> Block:
                 Expr(kind: ExprKind.Ident("Future"), span: body.span),
                 "ready"
             ), span: body.span),
-            [CallArg(value: Expr(kind: exprkind_Block(body), span: body.span), name: nil)]
+            [CallArg(value: Expr(kind: ExprKind.Block(body), span: body.span), name: nil)]
         ),
         span: body.span
     )
 
     Block(
-        stmts: [Stmt(kind: stmtkind_Expr(wrapper_call), span: body.span)],
+        stmts: [Stmt(kind: StmtKind.Expr(wrapper_call), span: body.span)],
         span: body.span
     )
 
@@ -169,7 +168,7 @@ fn make_generator_call(func_name: text, span: Span) -> Block:
 
     val lambda_body = Expr(
         kind: ExprKind.Call(
-            Expr(kind: exprkind_Ident(poll_name), span: span),
+            Expr(kind: ExprKind.Ident(poll_name), span: span),
             [
                 CallArg(value: Expr(kind: ExprKind.Ident("state"), span: span), name: nil),
                 CallArg(value: Expr(kind: ExprKind.Ident("waker"), span: span), name: nil)
@@ -185,7 +184,7 @@ fn make_generator_call(func_name: text, span: Span) -> Block:
                 LambdaParam(name: "waker", type_: nil, span: span)
             ],
             Expr(kind: ExprKind.Block(Block(
-                stmts: [Stmt(kind: stmtkind_Expr(lambda_body), span: span)],
+                stmts: [Stmt(kind: StmtKind.Expr(lambda_body), span: span)],
                 span: span
             )), span: span)
         ),
@@ -204,7 +203,7 @@ fn make_generator_call(func_name: text, span: Span) -> Block:
     )
 
     Block(
-        stmts: [Stmt(kind: stmtkind_Expr(generator_call), span: span)],
+        stmts: [Stmt(kind: StmtKind.Expr(generator_call), span: span)],
         span: span
     )
 
@@ -387,7 +386,7 @@ fn desugar_block(block: Block) -> Block:
 
     for stmt in block.stmts:
         val desugared = desugar_stmt(stmt)
-        desugared_stmts_push(desugared_stmts, desugared)
+        desugared_stmts = desugared_stmts.push(desugared)
 
     Block(
         stmts: desugared_stmts,
@@ -399,7 +398,7 @@ fn desugar_stmt(stmt: Stmt) -> Stmt:
     match stmt_kind(stmt):
         case stmtkind_Expr(expr):
             val desugared_expr = desugar_expr(expr)
-            Stmt(kind: stmtkind_Expr(desugared_expr), span: stmt.span)
+            Stmt(kind: StmtKind.Expr(desugared_expr), span: stmt.span)
         case _:
             stmt  # Other statements unchanged for now
 
@@ -425,7 +424,7 @@ fn desugar_expr(expr: Expr) -> Expr:
 fn unit_type() -> Type:
     """Create unit type ()."""
     Type(
-        kind: typekind_Tuple([]),
+        kind: TypeKind.Tuple([]),
         span: span_new(0, 0, 1, 1)
     )
 
