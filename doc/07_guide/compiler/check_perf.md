@@ -146,10 +146,8 @@ Reports include a `Profile contract:` header. Current evidence must say the
 contract was enforced; reports generated with `SKIP_PROFILE_REPORT_CONTRACT=1`
 are explicitly labeled as skipped and must not be cited as gated M:N evidence.
 The profile-report contract and `simple check` reject numbered concurrency
-aliases such as `thread_spawn2`, `spawn_isolated2`, `spawn_limited2`,
-`rt_thread_spawn_isolated2`, and `rt_thread_spawn_limited2`; use the semantic
-API names in reports, generated workloads, runtime extern declarations, and
-profile-script comments.
+aliases; use semantic API names in reports, generated workloads, runtime extern
+declarations, and profile-script comments.
 
 ### What it measures
 
