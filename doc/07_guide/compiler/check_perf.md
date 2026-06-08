@@ -105,7 +105,7 @@ sh scripts/check/check-cross-language-perf.shs
 | `PROFILE_DOCKER_IMAGE` | `simple-cross-language-perf:latest` | Docker image for isolated crash-prone profile/test runs with the C/Go toolchains installed |
 | `PROFILE_DOCKER_MEMORY` | `2g` | Container memory limit for isolated profile runs |
 | `PROFILE_DOCKER_CPUS` | `2.0` | Container CPU limit for isolated profile runs |
-| `PROFILE_DOCKER_SIMPLE_BINARY` | `bin/release/simple` | Simple binary path used inside the mounted container workspace |
+| `PROFILE_DOCKER_SIMPLE_BINARY` | resolved `SIMPLE_BINARY` | Optional override for the Simple binary path used inside the mounted container workspace |
 
 The harness deletes a Simple output before recording a failed compile, so a
 failed native or SMF compile cannot leave a stale binary/bytecode file that is
@@ -123,10 +123,10 @@ process. This is a containment mode for the existing profile script, not a
 separate profile harness. Build the canonical image with
 `docker build -t simple-cross-language-perf:latest -f tools/docker/Dockerfile.cross-language-perf tools/docker`.
 `simple-test-isolation:latest` remains enough for separate-process Simple-only
-smoke checks. The cross-language perf image proves C/Go toolchain availability,
-but full contract-gated C/Go comparison reports also require Simple native
-linking to pass in the container; the current container-native linker blocker is
-tracked in `doc/08_tracking/bug/docker_cross_language_profile_native_link_2026-06-08.md`.
+smoke checks. The cross-language perf image is the canonical isolated path for
+full contract-gated C/Go comparison reports; `doc/08_tracking/bug/docker_cross_language_profile_native_link_2026-06-08.md`
+records the fixed linker-order blocker that previously prevented Simple native
+rows from linking inside the container.
 The report records the Go toolchain and the generated Go probe's
 `runtime.GOMAXPROCS(0)` / `runtime.NumCPU()` values so Go-like M:N comparisons
 name the scheduler limit used by the goroutine rows.

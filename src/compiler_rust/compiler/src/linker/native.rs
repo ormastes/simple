@@ -327,11 +327,16 @@ impl NativeLinker {
             cmd.arg("-L").arg(path);
         }
 
-        // Add libraries, forcing simple_runtime to link statically.
+        // Add libraries, forcing simple_runtime to link statically. GNU-style
+        // linkers resolve archives left-to-right, so Simple static runtime
+        // archives must appear before libc/pthread/dl/m. Otherwise symbols
+        // introduced by the Rust runtime archive, such as `__tls_get_addr`, can
+        // fail with "DSO missing from command line" on minimal container
+        // toolchains.
         // The runtime dir may contain both libsimple_runtime.a and .so;
         // the .so has weak __libc_start_main stubs that break the binary.
         let has_static_runtime_lib = options.libraries.iter().any(|l| l.starts_with("simple_"));
-        for lib in &options.libraries {
+        for lib in ordered_libraries_for_static_runtime(&options.libraries) {
             if lib.starts_with("simple_") {
                 // Force static linking for Simple runtime libraries
                 if !matches!(self, Self::Ld) || !cfg!(target_os = "macos") {
@@ -671,6 +676,14 @@ impl NativeLinker {
     }
 }
 
+fn ordered_libraries_for_static_runtime(libraries: &[String]) -> Vec<&String> {
+    libraries
+        .iter()
+        .filter(|lib| lib.starts_with("simple_"))
+        .chain(libraries.iter().filter(|lib| !lib.starts_with("simple_")))
+        .collect()
+}
+
 impl std::fmt::Display for NativeLinker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.name())
@@ -851,6 +864,25 @@ mod tests {
         assert_eq!(opts.threads, Some(4));
         assert!(opts.verbose);
         assert_eq!(opts.extra_flags, vec!["--gc-sections"]);
+    }
+
+    #[test]
+    fn test_static_simple_runtime_precedes_system_libraries() {
+        let libs = vec![
+            "c".to_string(),
+            "pthread".to_string(),
+            "dl".to_string(),
+            "m".to_string(),
+            "gcc_s".to_string(),
+            "simple_runtime".to_string(),
+        ];
+
+        let ordered = super::ordered_libraries_for_static_runtime(&libs)
+            .into_iter()
+            .map(|lib| lib.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(ordered, vec!["simple_runtime", "c", "pthread", "dl", "m", "gcc_s"]);
     }
 
     #[test]
