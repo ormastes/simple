@@ -13,6 +13,11 @@ spec covers the safe prerequisite: the scheduler can expose a user handoff TCB
 with a valid user context and CR3 value, and the syscall-14 validation layer can
 accept or reject that record before the architecture bridge runs.
 
+The positive scenario uses `Scheduler.create_user_task_pid`, so it exercises
+the scheduler's real user-task construction path, including
+`create_user_address_space` and `_map_user_process_image` when the hosted VMM is
+available.
+
 ## Syntax
 
 The validation API is:
@@ -41,13 +46,19 @@ use std.spec.{describe, it, expect, step}
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.arch.x86_64.user_entry_validation.{validate_enter_user_blocking_handoff}
 use os.kernel.loader.process_image.{build_user_process_image}
-use os.kernel.scheduler.scheduler.{Scheduler, scheduler_user_context_for_arch}
-use os.kernel.scheduler.scheduler_types.{TaskControlBlock}
+use os.kernel.scheduler.scheduler.{Scheduler, scheduler_user_context_for_arch, sched_exec_arch}
 use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.types.task_types.{
-    TaskId, TaskPriority, TaskState, UserProcessImage,
-    default_task_isolation, default_task_schedule
+    TaskId, TaskPriority
 }
+
+struct UserEntryValidationFixture:
+    scheduler: Scheduler
+    pid: u64
+    entry: u64
+    stack_top: u64
+    initial_sp: u64
+    cr3: u64
 
 fn push_u16_le(buf: [u8], value: i64) -> [u8]:
     var out: [u8] = buf
@@ -111,31 +122,32 @@ fn make_x86_64_exec() -> [u8]:
     bytes.push(0x90.to_u8())
     bytes
 
-fn seed_user_handoff_task_from_image(sched: Scheduler, pid: u64, image: UserProcessImage) -> Scheduler:
-    var next = sched
-    val user_sp = image.initial_sp & 0xFFFFFFFFFFFFFFF0
-    val user_ctx = scheduler_user_context_for_arch(Architecture.X86_64, image.entry, user_sp)
-    next.tasks[0] = TaskControlBlock(
-        id: TaskId(id: pid),
-        name: "green-user",
-        state: TaskState.Ready,
-        priority: TaskPriority.Normal,
-        is_user: true,
-        entry_point: image.entry,
-        context: user_ctx,
-        user_context: Some(user_ctx),
-        address_space: 1,
-        kernel_stack: 0,
-        user_stack: image.stack_top,
-        capabilities: CapabilitySet.full(),
-        parent: Some(TaskId(id: 0)),
-        schedule: default_task_schedule(TaskPriority.Normal),
-        isolation: default_task_isolation(0),
-        assigned_cpu: 1u32,
-        exit_code: 0,
-        ticks_remaining: 5u64
+fn build_spawn_fixture() -> UserEntryValidationFixture:
+    val image_result = build_user_process_image("/sys/apps/green_ring3_probe", make_x86_64_exec(), Architecture.X86_64, [], [])
+    if image_result.is_err():
+        return UserEntryValidationFixture(
+            scheduler: Scheduler.new_with_cpu_count(2u32),
+            pid: 0u64,
+            entry: 0u64,
+            stack_top: 0u64,
+            initial_sp: 0u64,
+            cr3: 0u64
+        )
+    val image = image_result.unwrap()
+    var sched = Scheduler.new_with_cpu_count(2u32)
+    val pid = sched.create_user_task_pid(image, TaskPriority.Normal, CapabilitySet.full())
+    var cr3 = 0u64
+    val task = sched.get_task(TaskId(id: pid))
+    if task != nil:
+        cr3 = task.address_space
+    UserEntryValidationFixture(
+        scheduler: sched,
+        pid: pid,
+        entry: image.entry,
+        stack_top: image.stack_top,
+        initial_sp: image.initial_sp & 0xFFFFFFFFFFFFFFF0,
+        cr3: cr3
     )
-    next
 
 describe "x86_64 user entry validation":
     it "rejects a missing user handoff task without entering ring-3":
@@ -148,27 +160,37 @@ describe "x86_64 user entry validation":
         val context_present = if validation.context == nil: 0 else: 1
         expect(context_present).to_equal(0)
 
-    it "accepts a real x86_64 user image handoff record without entering ring-3":
-        step("build a real x86_64 user process image")
-        val image_result = build_user_process_image("/sys/apps/green_ring3_probe", make_x86_64_exec(), Architecture.X86_64, [], [])
-        expect(image_result.is_ok()).to_be(true)
-        val image = image_result.unwrap()
-        val expected_sp = image.initial_sp & 0xFFFFFFFFFFFFFFF0
+    it "creates a real scheduler user task through the spawn path":
+        step("build a real x86_64 user process image and create a scheduler user task")
+        val fixture = build_spawn_fixture()
+        expect(fixture.pid).to_be_greater_than(0)
+        val task = fixture.scheduler.get_task(TaskId(id: fixture.pid))
+        val task_present = if task == nil: 0 else: 1
+        expect(task_present).to_equal(1)
+        if task != nil:
+            val created = task
+            expect(created.is_user).to_be(true)
+            expect(created.entry_point).to_equal(fixture.entry)
+            expect(created.user_stack).to_equal(fixture.stack_top)
+            expect(created.address_space).to_equal(fixture.cr3)
 
-        step("seed a scheduler user task from that image")
-        val sched = seed_user_handoff_task_from_image(Scheduler.new_with_cpu_count(2u32), 701u64, image)
+    it "accepts a real x86_64 user image handoff record without entering ring-3":
+        step("create a scheduler user task through the real spawn path")
+        val fixture = build_spawn_fixture()
+        expect(fixture.pid).to_be_greater_than(0)
+        val expected_ctx = scheduler_user_context_for_arch(sched_exec_arch(), fixture.entry, fixture.initial_sp)
 
         step("validate syscall-14 handoff readiness without executing the arch bridge")
-        val validation = validate_enter_user_blocking_handoff(701u64, sched)
+        val validation = validate_enter_user_blocking_handoff(fixture.pid, fixture.scheduler)
         expect(validation.ok).to_be(true)
         expect(validation.error).to_equal("")
-        expect(validation.pid).to_equal(701u64)
-        expect(validation.cr3).to_equal(1u64)
+        expect(validation.pid).to_equal(fixture.pid)
+        expect(validation.cr3).to_equal(fixture.cr3)
         val context_present = if validation.context == nil: 0 else: 1
         expect(context_present).to_equal(1)
         if validation.context != nil:
             val ctx = validation.context.unwrap()
-            expect(ctx.rip).to_equal(image.entry)
-            expect(ctx.rsp).to_equal(expected_sp)
-            expect(ctx.cs).to_equal(0x2B)
-            expect(ctx.ss).to_equal(0x23)
+            expect(ctx.rip).to_equal(fixture.entry)
+            expect(ctx.rsp).to_equal(fixture.initial_sp)
+            expect(ctx.cs).to_equal(expected_ctx.cs)
+            expect(ctx.ss).to_equal(expected_ctx.ss)

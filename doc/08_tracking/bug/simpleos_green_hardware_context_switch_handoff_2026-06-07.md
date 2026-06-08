@@ -174,23 +174,26 @@ Docker evidence still keeps the current boundary honest:
 This is prerequisite evidence only. It does not print or satisfy the final live
 QEMU markers.
 
-## 2026-06-08 Hosted Real-Spawn Handoff Prerequisite
+## 2026-06-08 Hosted Real-Spawn Handoff Prerequisite Fix
 
-A follow-up Docker-isolated attempt replaced the manual hosted TCB seeding in
-`test/01_unit/os/kernel/arch/x86_64_user_entry_validation_spec.spl` and
-`test/01_unit/os/kernel/scheduler/scheduler_green_user_handoff_spec.spl` with
-the scheduler's real user-task creation path:
+The hosted real-spawn prerequisite now has Docker-isolated evidence. ARM64
+hosted/interpreter user-address-space and direct-load runtime symbols now have
+non-baremetal stubs, so `Scheduler.create_user_task_pid(image,
+TaskPriority.Normal, CapabilitySet.full())` can create a validation-ready TCB
+from real `build_user_process_image` output instead of requiring manual TCB
+seeding.
 
-- `Scheduler.create_user_task_pid(image, TaskPriority.Normal, CapabilitySet.full())`
-- `Scheduler.create_bootstrap_user_task_pid(image, TaskPriority.Normal, CapabilitySet.full())`
+Passing evidence in `simple-test-isolation`:
 
-Both variants failed the positive hosted validation scenario when run in
-`simple-test-isolation`, while the manual handoff-record validation remains
-green. That means the next prerequisite is not another scheduler-only marker:
-the hosted x86_64 user-image spawn path must create a validation-ready TCB from
-the real `build_user_process_image` output before the green-carrier QEMU probe
-can honestly claim an in-memory payload/address-space lane.
+- `test/01_unit/os/kernel/arch/x86_64_user_entry_validation_spec.spl`
+  now has three scenarios: missing handoff rejection, real scheduler user-task
+  creation through `create_user_task_pid`, and non-entering syscall-14
+  validation of that real spawned handoff record.
+- `test/01_unit/os/kernel/scheduler/scheduler_green_user_handoff_spec.spl`
+  now dispatches the real spawned pid through `run_green_carrier_once` and then
+  validates syscall-14 handoff readiness.
 
-Keep this separate from the final marker triplet. A future fix should first add
-passing Docker evidence for the real hosted spawn path, then wire equivalent
-payload/address-space construction into the live green-carrier guest.
+This closes the hosted real-spawn prerequisite, but not the final marker
+triplet. The next step is to wire equivalent payload/address-space construction
+into the live green-carrier guest before claiming `HW_HANDOFF_PASS=true`,
+`USER_ENTRY_PASS=true`, or `USER_SYSCALL_PASS=true`.

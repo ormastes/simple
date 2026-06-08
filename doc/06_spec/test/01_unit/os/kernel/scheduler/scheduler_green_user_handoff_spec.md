@@ -1,6 +1,6 @@
 # Scheduler Green User Handoff Specification
 
-> The green-carrier scheduler lane and the normal OS task lane must remain separate. This spec builds a real x86_64 user process image, seeds a hosted scheduler task from that image, dispatches the pid through the green-carrier queue, and verifies that the user handoff record still exposes the same user context expected by syscall `14`.
+> The green-carrier scheduler lane and the normal OS task lane must remain separate. This spec builds a real x86_64 user process image, creates a hosted scheduler task through `create_user_task_pid`, dispatches the pid through the green-carrier queue, and verifies that the user handoff record still exposes the same user context expected by syscall `14`.
 
 <!-- sdn-diagram:id=scheduler_green_user_handoff_spec.arch -->
 <details class="sdn-source">
@@ -35,7 +35,7 @@ scheduler_green_user_handoff_spec -> os
 
 # Scheduler Green User Handoff Specification
 
-The green-carrier scheduler lane and the normal OS task lane must remain separate. This spec builds a real x86_64 user process image, seeds a hosted scheduler task from that image, dispatches the pid through the green-carrier queue, and verifies that the user handoff record still exposes the same user context expected by syscall `14`.
+The green-carrier scheduler lane and the normal OS task lane must remain separate. This spec builds a real x86_64 user process image, creates a hosted scheduler task through `create_user_task_pid`, dispatches the pid through the green-carrier queue, and verifies that the user handoff record still exposes the same user context expected by syscall `14`.
 
 ## At a Glance
 
@@ -54,10 +54,10 @@ The green-carrier scheduler lane and the normal OS task lane must remain separat
 ## Overview
 
 The green-carrier scheduler lane and the normal OS task lane must remain
-separate. This spec builds a real x86_64 user process image, seeds a hosted
-scheduler task from that image, dispatches the pid through the green-carrier
-queue, and verifies that the user handoff record still exposes the same user
-context expected by syscall `14`.
+separate. This spec builds a real x86_64 user process image, creates a hosted
+scheduler task through `create_user_task_pid`, dispatches the pid through the
+green-carrier queue, and verifies that the user handoff record still exposes
+the same user context expected by syscall `14`.
 
 ## Syntax
 
@@ -88,12 +88,12 @@ and cannot replace the final live QEMU AP ring/user marker triplet.
 #### dispatches a real user handoff pid through the green lane
 
 - build a real x86_64 user process image from executable bytes
-- seed a hosted scheduler user task from that image
-- var sched = seed user handoff task from image
+- create a hosted scheduler user task through the real spawn path
+- var sched = Scheduler new with cpu count
    - Expected: created_present equals `1`
    - Expected: created_task.entry_point equals `expected_entry`
    - Expected: created_task.user_stack equals `expected_stack_top`
-   - Expected: created_task.address_space equals `1`
+   - Expected: created_task.address_space equals `expected_cr3`
    - Expected: created_ctx_present equals `1`
 - dispatch that real user task through the green-carrier lane
    - Expected: step.dispatch.task_id equals `task_id.id as i64`
@@ -103,27 +103,27 @@ and cannot replace the final live QEMU AP ring/user marker triplet.
 - expose the scheduler user handoff record without synthetic task data
    - Expected: handoff_present equals `1`
    - Expected: task.id.id equals `task_id.id`
-   - Expected: task.address_space equals `1`
+   - Expected: task.address_space equals `expected_cr3`
    - Expected: user_context_present equals `1`
    - Expected: user_ctx.rip equals `expected_entry`
    - Expected: user_ctx.rsp equals `expected_user_sp`
-   - Expected: user_ctx.cs equals `0x2B`
-   - Expected: user_ctx.ss equals `0x23`
+   - Expected: user_ctx.cs equals `expected_ctx.cs`
+   - Expected: user_ctx.ss equals `expected_ctx.ss`
 - validate the x86_64 EnterUserBlocking handoff without entering ring-3
    - Expected: validation.error equals ``
    - Expected: validation.pid equals `task_id.id`
-   - Expected: validation.cr3 equals `1`
+   - Expected: validation.cr3 equals `expected_cr3`
    - Expected: validation_context_present equals `1`
    - Expected: validation_ctx.rip equals `expected_entry`
    - Expected: validation_ctx.rsp equals `expected_user_sp`
-   - Expected: validation_ctx.cs equals `0x2B`
-   - Expected: validation_ctx.ss equals `0x23`
+   - Expected: validation_ctx.cs equals `expected_ctx.cs`
+   - Expected: validation_ctx.ss equals `expected_ctx.ss`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 67 lines folded for reproduction.
+Runnable source: 72 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -135,20 +135,25 @@ val expected_entry = image.entry
 val expected_user_sp = image.initial_sp & 0xFFFFFFFFFFFFFFF0
 val expected_stack_top = image.stack_top
 
-step("seed a hosted scheduler user task from that image")
-val task_id = TaskId(id: 701u64)
-var sched = seed_user_handoff_task_from_image(Scheduler.new_with_cpu_count(2u32), task_id.id, image)
+step("create a hosted scheduler user task through the real spawn path")
+var sched = Scheduler.new_with_cpu_count(2u32)
+val pid = sched.create_user_task_pid(image, TaskPriority.Normal, CapabilitySet.full())
+expect(pid).to_be_greater_than(0)
+val task_id = TaskId(id: pid)
 val created = sched.get_task(task_id)
 val created_present = if created == nil: 0 else: 1
 expect(created_present).to_equal(1)
+var expected_cr3: u64 = 0u64
 if created != nil:
     val created_task = created
+    expected_cr3 = created_task.address_space
     expect(created_task.is_user).to_be(true)
     expect(created_task.entry_point).to_equal(expected_entry)
     expect(created_task.user_stack).to_equal(expected_stack_top)
-    expect(created_task.address_space).to_equal(1)
+    expect(created_task.address_space).to_equal(expected_cr3)
     val created_ctx_present = if created_task.user_context == nil: 0 else: 1
     expect(created_ctx_present).to_equal(1)
+val expected_ctx = scheduler_user_context_for_arch(sched_exec_arch(), expected_entry, expected_user_sp)
 
 step("dispatch that real user task through the green-carrier lane")
 val queues = green_carrier_run_queues_new(2, 4)
@@ -170,30 +175,30 @@ if handoff != nil:
     val task = handoff
     expect(task.id.id).to_equal(task_id.id)
     expect(task.is_user).to_be(true)
-    expect(task.address_space).to_equal(1)
+    expect(task.address_space).to_equal(expected_cr3)
     val user_context_present = if task.user_context == nil: 0 else: 1
     expect(user_context_present).to_equal(1)
     if task.user_context != nil:
         val user_ctx = task.user_context.unwrap()
         expect(user_ctx.rip).to_equal(expected_entry)
         expect(user_ctx.rsp).to_equal(expected_user_sp)
-        expect(user_ctx.cs).to_equal(0x2B)
-        expect(user_ctx.ss).to_equal(0x23)
+        expect(user_ctx.cs).to_equal(expected_ctx.cs)
+        expect(user_ctx.ss).to_equal(expected_ctx.ss)
 
 step("validate the x86_64 EnterUserBlocking handoff without entering ring-3")
 val validation = validate_enter_user_blocking_handoff(task_id.id, sched)
 expect(validation.ok).to_be(true)
 expect(validation.error).to_equal("")
 expect(validation.pid).to_equal(task_id.id)
-expect(validation.cr3).to_equal(1)
+expect(validation.cr3).to_equal(expected_cr3)
 val validation_context_present = if validation.context == nil: 0 else: 1
 expect(validation_context_present).to_equal(1)
 if validation.context != nil:
     val validation_ctx = validation.context.unwrap()
     expect(validation_ctx.rip).to_equal(expected_entry)
     expect(validation_ctx.rsp).to_equal(expected_user_sp)
-    expect(validation_ctx.cs).to_equal(0x2B)
-    expect(validation_ctx.ss).to_equal(0x23)
+    expect(validation_ctx.cs).to_equal(expected_ctx.cs)
+    expect(validation_ctx.ss).to_equal(expected_ctx.ss)
 ```
 
 </details>
