@@ -135,6 +135,9 @@ Scan for stub patterns — any match is a **FAIL**:
   - Expect wrapper evidence bundles under:
     - `build/evidence/native_shader_backend_readback_matrix_linux`
     - `build/evidence/native_shader_backend_readback_matrix_macos`
+  - Expect manifest metadata to pin the environment used for the run; at
+    minimum Linux now records OS/kernel/arch/git/bin path, and macOS adds
+    Xcode CLT and Swift identity.
   - Treat Linux success plus an unrun macOS wrapper as incomplete evidence for
     any claim that Metal native execution is complete.
 

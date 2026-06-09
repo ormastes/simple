@@ -63,6 +63,8 @@ That host-dispatch runner selects:
   - `test/02_integration/rendering/engine2d_cpu_vulkan_parity_spec.spl`
   - evidence written to:
     - `build/evidence/native_shader_backend_readback_matrix_linux`
+  - manifest includes:
+    - OS name, kernel, architecture, git revision, and `bin/simple` path
 - macOS:
   - `test/02_integration/rendering/native_shader_backend_readback_matrix_spec.spl`
   - `test/02_integration/rendering/metal_msl_pipeline_spec.spl`
@@ -71,3 +73,6 @@ That host-dispatch runner selects:
   - `test/02_integration/rendering/metal_engine2d_readback_spec.spl`
   - evidence written to:
     - `build/evidence/native_shader_backend_readback_matrix_macos`
+  - manifest includes:
+    - OS name, kernel, architecture, git revision, `bin/simple` path,
+      Xcode CLT path, and Swift version

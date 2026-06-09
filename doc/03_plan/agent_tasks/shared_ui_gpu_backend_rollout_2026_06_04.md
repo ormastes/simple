@@ -282,6 +282,8 @@ Current verified additions in this lane:
         - `engine2d_cpu_vulkan_parity_spec`
       - now writes reproducible evidence under:
         - `build/evidence/native_shader_backend_readback_matrix_linux`
+      - manifest now records host identity:
+        - OS name, kernel, architecture, git revision, and `bin/simple` path
     - macOS/native Metal runner:
       `scripts/check/check-native-shader-backend-readback-matrix-macos.shs`
       - now runs the shared matrix plus:
@@ -304,6 +306,9 @@ Current verified additions in this lane:
         - `doc/06_spec/test/02_integration/rendering/metal_engine2d_readback_spec.md`
       - now writes reproducible evidence under:
         - `build/evidence/native_shader_backend_readback_matrix_macos`
+      - manifest now records host identity and toolchain hints:
+        - OS name, kernel, architecture, git revision, `bin/simple` path,
+          Xcode CLT path, and Swift version
 - checked-in Vulkan raster SPIR-V blobs regenerated from canonical GLSL for:
   rect-outline, circle filled/outline, line, rounded rect, triangle-filled,
   gradient rect, and blit
