@@ -13,6 +13,8 @@ METALLIB_PATH="${METALLIB_PATH:-$TOOLCHAIN_BUILD_DIR/simple_2d_optimization.meta
 METAL_TOOL="${METAL_TOOL:-metal}"
 METALLIB_TOOL="${METALLIB_TOOL:-metallib}"
 METAL_RUNTIME_PROBE="${METAL_RUNTIME_PROBE:-system_profiler}"
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+HARNESS_SPL="${HARNESS_SPL:-scripts/check/metal_generated_2d_readback_harness.spl}"
 
 resolve_darwin_tool() {
     tool="$1"
@@ -60,6 +62,60 @@ emit_env() {
     } >"$BUILD_DIR/evidence.env"
 }
 
+emit_env_harness() {
+    # Emit evidence.env from harness output file $1
+    harness_out="$1"
+    bytes="$(generated_2d_bytes_of "$METALLIB_PATH")"
+    h_status="$(grep '^status=' "$harness_out" 2>/dev/null | head -1 | cut -d= -f2)"
+    h_fill_ck="$(grep '^fill_checksum=' "$harness_out" 2>/dev/null | head -1 | cut -d= -f2)"
+    h_copy_ck="$(grep '^copy_checksum=' "$harness_out" 2>/dev/null | head -1 | cut -d= -f2)"
+    h_alpha_ck="$(grep '^alpha_checksum=' "$harness_out" 2>/dev/null | head -1 | cut -d= -f2)"
+    h_scroll_ck="$(grep '^scroll_checksum=' "$harness_out" 2>/dev/null | head -1 | cut -d= -f2)"
+    h_fill_ex="$(grep '^fill_expected=' "$harness_out" 2>/dev/null | head -1 | cut -d= -f2)"
+    h_copy_ex="$(grep '^copy_expected=' "$harness_out" 2>/dev/null | head -1 | cut -d= -f2)"
+    h_alpha_ex="$(grep '^alpha_expected=' "$harness_out" 2>/dev/null | head -1 | cut -d= -f2)"
+    h_scroll_ex="$(grep '^scroll_expected=' "$harness_out" 2>/dev/null | head -1 | cut -d= -f2)"
+    h_readback="$(grep '^readback_available=' "$harness_out" 2>/dev/null | head -1 | cut -d= -f2)"
+    h_submit="$(grep '^submit_attempted=' "$harness_out" 2>/dev/null | head -1 | cut -d= -f2)"
+    # Default unknowns
+    h_status="${h_status:-fail}"
+    h_readback="${h_readback:-false}"
+    h_submit="${h_submit:-false}"
+    h_fill_ck="${h_fill_ck:-0}"
+    h_copy_ck="${h_copy_ck:-0}"
+    h_alpha_ck="${h_alpha_ck:-0}"
+    h_scroll_ck="${h_scroll_ck:-0}"
+    h_fill_ex="${h_fill_ex:-0}"
+    h_copy_ex="${h_copy_ex:-0}"
+    h_alpha_ex="${h_alpha_ex:-0}"
+    h_scroll_ex="${h_scroll_ex:-0}"
+    reason="harness-executed"
+    if [ "$h_status" = "pass" ]; then
+        reason="gpu-readback-verified"
+    fi
+    {
+        echo "metal_generated_2d_readback_status=$h_status"
+        echo "metal_generated_2d_readback_reason=$reason"
+        echo "metal_generated_2d_readback_metallib=$METALLIB_PATH"
+        echo "metal_generated_2d_readback_metallib_bytes=$bytes"
+        echo "metal_generated_2d_readback_runtime_present=$runtime_present"
+        echo "metal_generated_2d_readback_metal_tool_present=$metal_tool_present"
+        echo "metal_generated_2d_readback_metallib_tool_present=$metallib_tool_present"
+        echo "metal_generated_2d_readback_module_verified=$module_verified"
+        echo "metal_generated_2d_readback_submit_attempted=$h_submit"
+        echo "metal_generated_2d_readback_readback_available=$h_readback"
+        echo "metal_generated_2d_readback_fill_checksum=$h_fill_ck"
+        echo "metal_generated_2d_readback_fill_expected=$h_fill_ex"
+        echo "metal_generated_2d_readback_copy_checksum=$h_copy_ck"
+        echo "metal_generated_2d_readback_copy_expected=$h_copy_ex"
+        echo "metal_generated_2d_readback_alpha_checksum=$h_alpha_ck"
+        echo "metal_generated_2d_readback_alpha_expected=$h_alpha_ex"
+        echo "metal_generated_2d_readback_scroll_checksum=$h_scroll_ck"
+        echo "metal_generated_2d_readback_scroll_expected=$h_scroll_ex"
+        echo "metal_generated_2d_readback_ops=fill,copy,alpha,scroll"
+    } >"$BUILD_DIR/evidence.env"
+}
+
 runtime_present=false
 if has_metal_runtime; then
     runtime_present=true
@@ -95,10 +151,19 @@ if [ "$module_verified" != "true" ]; then
 elif [ "$runtime_present" != "true" ]; then
     emit_env "unavailable" "missing-metal-runtime" "false" "false"
 else
-    if "$METAL_RUNTIME_PROBE" SPDisplaysDataType >"$BUILD_DIR/metal_probe.out" 2>"$BUILD_DIR/metal_probe.err"; then
-        emit_env "unavailable" "missing-metal-submit-readback-harness" "false" "false"
-    else
+    if ! "$METAL_RUNTIME_PROBE" SPDisplaysDataType >"$BUILD_DIR/metal_probe.out" 2>"$BUILD_DIR/metal_probe.err"; then
         emit_env "unavailable" "metal-runtime-probe-failed" "false" "false"
+    elif [ ! -f "$HARNESS_SPL" ]; then
+        emit_env "unavailable" "missing-metal-submit-readback-harness" "false" "false"
+    elif [ ! -x "$SIMPLE_BIN" ] && [ ! -f "$SIMPLE_BIN" ]; then
+        emit_env "unavailable" "missing-simple-binary" "false" "false"
+    else
+        harness_out="$BUILD_DIR/harness.out"
+        harness_err="$BUILD_DIR/harness.err"
+        SIMPLE_EXECUTION_MODE=interpret SIMPLE_LIB="${SIMPLE_LIB:-src}" \
+            "$SIMPLE_BIN" run "$HARNESS_SPL" --mode=interpreter \
+            >"$harness_out" 2>"$harness_err" || true
+        emit_env_harness "$harness_out"
     fi
 fi
 

@@ -1,6 +1,6 @@
 # Metal Engine2d Readback Specification
 
-> 1. var b = MetalBackend create
+> <details>
 
 <!-- sdn-diagram:id=metal_engine2d_readback_spec.arch -->
 <details class="sdn-source">
@@ -42,23 +42,20 @@ metal_engine2d_readback_spec -> std
 
 #### downloads clear and rect_filled pixels from the Metal framebuffer
 
-1. var b = MetalBackend create
+- var b = MetalBackend create
    - Expected: b.init(16, 16) is true
-
-2. b clear
-
-3. b draw rect filled
+- b clear
+- b draw rect filled
    - Expected: b.gpu_frame_complete is true
    - Expected: pixels.len() equals `256`
    - Expected: pixels[0] equals `0x10203040 as u32`
    - Expected: pixels[4 + (4 * 16)] equals `0x01020304 as u32`
-
-4. b shutdown
+- b shutdown
    - Expected: is_macos() is false
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -83,21 +80,18 @@ else:
 
 #### falls back after CPU-only text rendering invalidates GPU completeness
 
-1. var b = MetalBackend create
+- var b = MetalBackend create
    - Expected: b.init(16, 16) is true
-
-2. b clear
-
-3. b draw text
+- b clear
+- b draw text
    - Expected: b.gpu_frame_complete is false
    - Expected: pixels.len() equals `256`
-
-4. b shutdown
+- b shutdown
    - Expected: is_macos() is false
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

@@ -152,9 +152,9 @@ else:
 
 #### always returns a Result (never panics)
 
-1. var engine = result unwrap
+- var engine = result unwrap
    - Expected: engine.width() equals `16`
-2. engine shutdown
+- engine shutdown
    - Expected: diag.requested_name equals `metal`
 
 
@@ -237,10 +237,10 @@ else:
 
 #### on macOS: returns Ok or typed failed diagnostic
 
-1. var engine = result unwrap
+- var engine = result unwrap
    - Expected: engine.width() equals `16`
    - Expected: engine.height() equals `16`
-2. engine shutdown
+- engine shutdown
    - Expected: diag.status == BackendStatus.Failed is true
    - Expected: os_is_macos() is false
 
@@ -272,10 +272,10 @@ else:
 
 #### on macOS: clear sets all pixels to given color
 
-1. var engine = result unwrap
-2. engine clear
-3. engine present
-4. engine shutdown
+- var engine = result unwrap
+- engine clear
+- engine present
+- engine shutdown
    - Expected: all_red is true
    - Expected: diag.status == BackendStatus.Failed is true
    - Expected: os_is_macos() is false
@@ -315,11 +315,11 @@ else:
 
 #### on macOS: draw_rect_filled produces non-zero pixels in region
 
-1. var engine = result unwrap
-2. engine clear
-3. engine draw rect filled
-4. engine present
-5. engine shutdown
+- var engine = result unwrap
+- engine clear
+- engine draw rect filled
+- engine present
+- engine shutdown
    - Expected: top_left equals `blue`
    - Expected: diag.status == BackendStatus.Failed is true
    - Expected: os_is_macos() is false
@@ -356,14 +356,14 @@ else:
 
 #### on macOS: CPU backend and Metal produce same clear result
 
-1. var cpu engine = Engine2D create with backend
-2. cpu engine clear
-3. cpu engine present
-4. cpu engine shutdown
-5. var metal engine = metal result unwrap
-6. metal engine clear
-7. metal engine present
-8. metal engine shutdown
+- var cpu engine = Engine2D create with backend
+- cpu engine clear
+- cpu engine present
+- cpu engine shutdown
+- var metal engine = metal result unwrap
+- metal engine clear
+- metal engine present
+- metal engine shutdown
    - Expected: parity is true
    - Expected: diag.status == BackendStatus.Failed is true
    - Expected: os_is_macos() is false

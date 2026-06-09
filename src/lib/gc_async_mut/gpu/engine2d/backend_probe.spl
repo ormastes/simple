@@ -1,6 +1,7 @@
 # Engine2D backend probe result and strict selection helpers.
 
 use std.gpu.engine2d.helpers_availability.{backend_canonical_name}
+use std.gpu.engine2d.simd_kernels.{detect_simd_level, SimdLevel}
 
 val BACKEND_CPU: text = "cpu"
 val BACKEND_SOFTWARE: text = "software"
@@ -105,6 +106,37 @@ fn _strict_probe_backend(name: text) -> BackendProbeResult:
         cpu.has_graphics = true
         cpu.has_present = true
         return cpu
+    # Arch-specific SIMD probes: check runtime SIMD level for a real evidence match.
+    # cpu_simd_arm  → Initialized only when runtime NEON is confirmed (aarch64 host)
+    # cpu_simd_x86  → Initialized only when runtime SSE4.2 or AVX2 is confirmed
+    # cpu_simd_riscv → Initialized only when runtime RVV is confirmed
+    if canonical == "cpu_simd_arm":
+        val lvl = detect_simd_level()
+        if lvl == SimdLevel.Neon:
+            var r = BackendProbeResult.success(canonical, "aarch64 NEON runtime kernels confirmed")
+            r.has_compute = true
+            r.has_graphics = true
+            r.has_present = true
+            return r
+        return BackendProbeResult.unavailable(canonical, "cpu_simd_arm not available: runtime NEON not detected on this host")
+    if canonical == "cpu_simd_x86":
+        val lvl = detect_simd_level()
+        if lvl == SimdLevel.Avx2 or lvl == SimdLevel.Sse42:
+            var r = BackendProbeResult.success(canonical, "x86_64 SSE/AVX runtime kernels confirmed")
+            r.has_compute = true
+            r.has_graphics = true
+            r.has_present = true
+            return r
+        return BackendProbeResult.unavailable(canonical, "cpu_simd_x86 not available: runtime SSE4.2/AVX2 not detected on this host")
+    if canonical == "cpu_simd_riscv":
+        val lvl = detect_simd_level()
+        if lvl == SimdLevel.Rvv:
+            var r = BackendProbeResult.success(canonical, "riscv64 RVV runtime kernels confirmed")
+            r.has_compute = true
+            r.has_graphics = true
+            r.has_present = true
+            return r
+        return BackendProbeResult.unavailable(canonical, "cpu_simd_riscv not available: runtime RVV not detected on this host")
     if canonical == BACKEND_ROCM:
         return BackendProbeResult.unavailable(canonical, "ROCm/HIP probe unavailable in interpreter")
     BackendProbeResult.unavailable(canonical, canonical + " runtime evidence not available")
