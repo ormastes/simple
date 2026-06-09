@@ -1,0 +1,110 @@
+"""
+# Cooperative Green SMF Mutable Global Blocker
+
+**Feature IDs:** #green-cooperative-smf-mutable-global
+**Category:** Runtime / SMF / Concurrency
+**Status:** Active Blocker
+
+## Overview
+
+This SSpec pins the root blocker behind the cooperative-green SMF profile rows:
+SMF execution currently crashes on a minimal module-level mutable counter. The
+implemented cooperative-green queue stores ready/done counters as Pure Simple
+mutable globals, so the SMF profile row must remain classified as a runtime
+blocker until this fixture exits successfully.
+
+## Requirements
+
+**Requirements:** doc/02_requirements/feature/multicore_green.md
+
+## Plan
+
+**Plan:** doc/03_plan/sys_test/multicore_green.md
+
+## Design
+
+**Design:** doc/05_design/multicore_green.md
+
+## Research
+
+**Research:** doc/01_research/local/multicore_green.md
+
+## Syntax
+
+Run the blocker contract:
+
+```sh
+./src/compiler_rust/target/debug/simple test test/03_system/feature/usage/cooperative_green_smf_mutable_global_blocker_spec.spl --mode=interpreter --clean
+```
+
+## Examples
+
+- The minimal source uses a module-level mutable `COUNT`.
+- Source checking and SMF compilation must succeed.
+- Running the SMF artifact currently exits nonzero, proving the runtime blocker
+  is still real.
+- When the SMF artifact exits `0`, this spec must be inverted and the
+  cooperative-green SMF profile rows can stop reporting the mutable-global
+  blocker.
+
+## TUI Capture
+
+```text
+Simple Test Runner v1.0.0-beta
+Running: test/03_system/feature/usage/cooperative_green_smf_mutable_global_blocker_spec.spl
+Cooperative green SMF mutable global blocker PASSED
+Files: 1
+Passed: 1
+Failed: 0
+```
+"""
+
+use std.spec.{describe, it, expect, step}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+val BUILD_DIR: text = "build/test/cooperative_green_smf_mutable_global"
+val SOURCE_PATH: text = "build/test/cooperative_green_smf_mutable_global/mutable_global_counter.spl"
+val SMF_PATH: text = "build/test/cooperative_green_smf_mutable_global/mutable_global_counter.smf"
+val SIMPLE_BIN: text = "./src/compiler_rust/target/debug/simple"
+
+fn mutable_global_fixture_source() -> text:
+    [
+        "var COUNT: usize = 0\n",
+        "\n",
+        "fn bump() -> usize:\n",
+        "    COUNT = COUNT + 1\n",
+        "    COUNT\n",
+        "\n",
+        "fn main() -> i64:\n",
+        "    val a = bump()\n",
+        "    val b = bump()\n",
+        "    if a != 1 or b != 2:\n",
+        "        return 42\n",
+        "    0\n"
+    ].join("")
+
+fn process_output(stdout: text, stderr: text) -> text:
+    stdout + stderr
+
+describe "Cooperative green SMF mutable-global blocker":
+    it "keeps the minimal mutable-global SMF crash visible":
+        step("Create the minimal mutable-global fixture")
+        val (mkdir_stdout, mkdir_stderr, mkdir_code) = rt_process_run("/bin/sh", ["-c", "mkdir -p " + BUILD_DIR])
+        expect(process_output(mkdir_stdout, mkdir_stderr).len()).to_be_greater_than(-1)
+        expect(mkdir_code).to_equal(0)
+        expect(rt_file_write_text(SOURCE_PATH, mutable_global_fixture_source())).to_equal(true)
+
+        step("Check and compile the fixture to SMF")
+        val (check_stdout, check_stderr, check_code) = rt_process_run(SIMPLE_BIN, ["check", SOURCE_PATH])
+        expect(process_output(check_stdout, check_stderr)).to_contain("OK")
+        expect(check_code).to_equal(0)
+        val (compile_stdout, compile_stderr, compile_code) = rt_process_run(SIMPLE_BIN, ["compile", SOURCE_PATH, "-o", SMF_PATH])
+        expect(process_output(compile_stdout, compile_stderr)).to_contain("Compiled")
+        expect(compile_code).to_equal(0)
+
+        step("Run the SMF artifact and keep the blocker classified")
+        val (run_stdout, run_stderr, run_code) = rt_process_run(SIMPLE_BIN, [SMF_PATH])
+        expect(process_output(run_stdout, run_stderr).len()).to_be_greater_than(-1)
+        expect(run_code).to_be_less_than(0)
