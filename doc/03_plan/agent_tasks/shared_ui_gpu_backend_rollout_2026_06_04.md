@@ -280,6 +280,8 @@ Current verified additions in this lane:
         - `vulkan_strict_spec`
         - `backend_matrix_spec`
         - `engine2d_cpu_vulkan_parity_spec`
+      - now writes reproducible evidence under:
+        - `build/evidence/native_shader_backend_readback_matrix_linux`
     - macOS/native Metal runner:
       `scripts/check/check-native-shader-backend-readback-matrix-macos.shs`
       - now runs the shared matrix plus:
@@ -300,6 +302,8 @@ Current verified additions in this lane:
         - masked `draw_image`
       - mirrored manual refreshed to match the expanded suite:
         - `doc/06_spec/test/02_integration/rendering/metal_engine2d_readback_spec.md`
+      - now writes reproducible evidence under:
+        - `build/evidence/native_shader_backend_readback_matrix_macos`
 - checked-in Vulkan raster SPIR-V blobs regenerated from canonical GLSL for:
   rect-outline, circle filled/outline, line, rounded rect, triangle-filled,
   gradient rect, and blit

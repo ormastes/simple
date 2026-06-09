@@ -61,9 +61,13 @@ That host-dispatch runner selects:
   - `test/02_integration/rendering/vulkan_strict_spec.spl`
   - `test/02_integration/rendering/backend_matrix_spec.spl`
   - `test/02_integration/rendering/engine2d_cpu_vulkan_parity_spec.spl`
+  - evidence written to:
+    - `build/evidence/native_shader_backend_readback_matrix_linux`
 - macOS:
   - `test/02_integration/rendering/native_shader_backend_readback_matrix_spec.spl`
   - `test/02_integration/rendering/metal_msl_pipeline_spec.spl`
   - `test/02_integration/rendering/metal_generated_compute_readback_spec.spl`
   - `test/02_integration/rendering/metal_strict_spec.spl`
   - `test/02_integration/rendering/metal_engine2d_readback_spec.spl`
+  - evidence written to:
+    - `build/evidence/native_shader_backend_readback_matrix_macos`

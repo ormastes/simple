@@ -132,6 +132,9 @@ Scan for stub patterns — any match is a **FAIL**:
     Vulkan strict/backend/parity trio, and the expanded Metal readback suite
     coverage for direct image/text lanes plus the narrow masked
     `draw_rect_filled` / `draw_image` replay subset.
+  - Expect wrapper evidence bundles under:
+    - `build/evidence/native_shader_backend_readback_matrix_linux`
+    - `build/evidence/native_shader_backend_readback_matrix_macos`
   - Treat Linux success plus an unrun macOS wrapper as incomplete evidence for
     any claim that Metal native execution is complete.
 
