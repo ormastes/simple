@@ -287,6 +287,16 @@ Current verified additions in this lane:
         - `metal_generated_compute_readback_spec`
         - `metal_strict_spec`
         - `metal_engine2d_readback_spec`
+      - the direct Metal readback suite now also carries dedicated strict-GPU
+        parity cases for shared-surface operations that were previously only
+        bundled or indirect:
+        - `draw_rect_filled`
+        - `draw_image`
+        - `draw_image_scaled`
+        - `draw_text`
+        - `draw_text_bg`
+        - masked `draw_rect_filled`
+        - masked `draw_image`
 - checked-in Vulkan raster SPIR-V blobs regenerated from canonical GLSL for:
   rect-outline, circle filled/outline, line, rounded rect, triangle-filled,
   gradient rect, and blit

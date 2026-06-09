@@ -128,6 +128,10 @@ Scan for stub patterns — any match is a **FAIL**:
   - `scripts/check/check-native-shader-backend-readback-matrix-host.shs`
   - On a real macOS host for Metal-native claims:
     - `scripts/check/check-native-shader-backend-readback-matrix-macos.shs`
+  - Expect the current Linux-side evidence to include the shared matrix, the
+    Vulkan strict/backend/parity trio, and the expanded Metal readback suite
+    coverage for direct image/text lanes plus the narrow masked
+    `draw_rect_filled` / `draw_image` replay subset.
   - Treat Linux success plus an unrun macOS wrapper as incomplete evidence for
     any claim that Metal native execution is complete.
 

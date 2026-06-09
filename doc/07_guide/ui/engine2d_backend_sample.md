@@ -42,8 +42,9 @@ than silently accepted as a CPU fallback.
   selection, SIMD hit evidence, and strict Metal probe behavior.
 - `test/02_integration/rendering/metal_engine2d_readback_spec.spl` covers Metal
   framebuffer readback for the current direct and replay-backed strict-GPU
-  subset, including primitives, image paths, blend/gradient paths, and strict
-  stateful replay coverage.
+  subset, including primitives, image paths, blend/gradient paths, dedicated
+  text and image parity cases, and the narrow stateful replay mask subset for
+  `draw_rect_filled` and `draw_image`.
 - `test/05_perf/graphics_2d/metal_readback_proof_spec.spl` covers raw Metal
   compute-buffer download without tolerance.
 
