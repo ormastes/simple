@@ -1,12 +1,6 @@
 # mcpgdb MCP production wrapper — cold frontend with repo-local heavy runners
 
-extern fn rt_env_cwd() -> text
-extern fn rt_env_get(name: text) -> text
-extern fn rt_dir_create(path: text, recursive: bool) -> bool
-extern fn rt_file_delete(path: text) -> bool
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+use std.io_runtime.{cwd, dir_create, file_delete, file_exists, file_write, env_get, process_run}
 
 use std.cli.cli_util (get_cli_args)
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
@@ -165,13 +159,13 @@ fn detect_method(msg: text) -> text:
     extract_field(msg, "method")
 
 fn simple_binary() -> text:
-    val env_value = rt_env_get("SIMPLE_BINARY") ?? ""
+    val env_value = env_get("SIMPLE_BINARY") ?? ""
     if env_value != "":
         return env_value
     "bin/simple"
 
 fn temp_request_path() -> text:
-    val (stdout, _stderr, code) = rt_process_run(shell_bin(), ["-c", "mktemp /tmp/mcpgdb_request.XXXXXX"])
+    val (stdout, _stderr, code) = process_run(shell_bin(), ["-c", "mktemp /tmp/mcpgdb_request.XXXXXX"])
     if code != 0:
         return ""
     stdout.trim()
@@ -207,7 +201,7 @@ fn sanitize_segment(value: text) -> text:
     out
 
 fn runner_cache_dir() -> text:
-    "/tmp/mcpgdb_compiled_" + sanitize_segment(rt_env_cwd())
+    "/tmp/mcpgdb_compiled_" + sanitize_segment(cwd())
 
 fn runner_artifact_path(source: text) -> text:
     var base = source.replace("/", "_")
@@ -216,28 +210,28 @@ fn runner_artifact_path(source: text) -> text:
 
 fn ensure_runner_artifact(source: text) -> text:
     val artifact = runner_artifact_path(source)
-    if rt_file_exists(artifact):
+    if file_exists(artifact):
         return artifact
-    rt_dir_create(runner_cache_dir(), true)
-    val (_stdout, _stderr, code) = rt_process_run(simple_binary(), ["compile", source, "-o", artifact])
+    dir_create(runner_cache_dir(), true)
+    val (_stdout, _stderr, code) = process_run(simple_binary(), ["compile", source, "-o", artifact])
     if code != 0:
         return ""
     artifact
 
 fn run_compiled_runner(artifact: text, request_path: text) -> (text, text, i64):
     val cmd = "MCPGDB_REQUEST_PATH=" + shell_quote(request_path) + " " + shell_quote(simple_binary()) + " " + shell_quote(artifact)
-    rt_process_run(shell_bin(), ["-c", cmd])
+    process_run(shell_bin(), ["-c", cmd])
 
 fn run_source_runner(source: text, request_path: text) -> (text, text, i64):
     val cmd = "MCPGDB_REQUEST_PATH=" + shell_quote(request_path) + " " + shell_quote(simple_binary()) + " " + shell_quote(source)
-    rt_process_run(shell_bin(), ["-c", cmd])
+    process_run(shell_bin(), ["-c", cmd])
 
 fn run_tool_runner(id: text, body: text) -> text:
     val request_path = temp_request_path()
     if request_path == "":
         return jsonrpc_error(id, -32603, "failed to allocate temp request file")
-    if not rt_file_write_text(request_path, body):
-        rt_file_delete(request_path)
+    if not file_write(request_path, body):
+        file_delete(request_path)
         return jsonrpc_error(id, -32603, "failed to write temp request file")
     val source = runner_source_for_body(body)
     var stdout = ""
@@ -248,7 +242,7 @@ fn run_tool_runner(id: text, body: text) -> text:
         (stdout, stderr, code) = run_compiled_runner(artifact, request_path)
     if artifact == "" or code != 0 or stdout.trim() == "":
         (stdout, stderr, code) = run_source_runner(source, request_path)
-    rt_file_delete(request_path)
+    file_delete(request_path)
     if code != 0:
         var message = stderr.trim()
         if message == "":

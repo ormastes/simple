@@ -1,20 +1,15 @@
 # mcpgdb MCP — debugger-only backend helpers
 
-extern fn rt_dir_create(path: text, recursive: bool) -> bool
-extern fn rt_dir_remove_all(path: text) -> bool
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_size(path: text) -> i64
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_env_cwd() -> text
+use std.io_runtime.{cwd, dir_create, file_exists, file_read, file_size, process_run}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
 
 use app.mcpgdb.json_helpers.{shell_bin, shell_quote, shell_sleep, find_binary, LB, RB, jp, js}
 use app.mcpgdb.state.{DebugSession, MCPGDB_SESSIONS}
 
 fn cwd_path() -> text:
-    val cwd = rt_env_cwd()
-    if cwd != "":
-        return cwd
+    val cwd_val = cwd()
+    if cwd_val != "":
+        return cwd_val
     "."
 
 fn choose_workspace_root(root: text) -> text:
@@ -31,7 +26,7 @@ fn lldb_binary() -> text:
 fn ps_is_alive(pid: text) -> bool:
     if pid == "":
         return false
-    val (_stdout, _stderr, code) = rt_process_run(shell_bin(), ["-c", "ps -p " + shell_quote(pid) + " >/dev/null 2>&1"])
+    val (_stdout, _stderr, code) = process_run(shell_bin(), ["-c", "ps -p " + shell_quote(pid) + " >/dev/null 2>&1"])
     code == 0
 
 fn session_prompt(session_id: text) -> text:
@@ -70,7 +65,7 @@ fn init_debugger_session(session: DebugSession) -> DebugSession:
 
 fn create_debugger_process(session: DebugSession) -> (DebugSession, text):
     var updated = session
-    rt_dir_create(updated.session_dir, true)
+    dir_create(updated.session_dir, true)
     val launch = debugger_launch_command(updated)
     if launch == "":
         return (updated, "required debugger binary not found for backend " + updated.backend)
@@ -83,7 +78,7 @@ fn create_debugger_process(session: DebugSession) -> (DebugSession, text):
         + " < /dev/null > " + shell_quote(updated.output_path)
         + " 2> " + shell_quote(updated.error_path)
         + " & echo $!"
-    val (stdout, stderr, code) = rt_process_run(shell_bin(), ["-c", cmd])
+    val (stdout, stderr, code) = process_run(shell_bin(), ["-c", cmd])
     if code != 0:
         return (updated, "failed to launch debugger: " + stderr.trim())
     updated.process_pid = stdout.trim()
@@ -98,7 +93,7 @@ fn create_debugger_process(session: DebugSession) -> (DebugSession, text):
 
 fn send_fifo_line(fifo_path: text, line: text) -> text:
     val (stdout, stderr, code) =
-        rt_process_run(shell_bin(), ["-c", "printf '%s\\n' " + shell_quote(line) + " > " + shell_quote(fifo_path)])
+        process_run(shell_bin(), ["-c", "printf '%s\\n' " + shell_quote(line) + " > " + shell_quote(fifo_path)])
     if code != 0:
         if stderr.trim() != "":
             return stderr.trim()
@@ -106,7 +101,7 @@ fn send_fifo_line(fifo_path: text, line: text) -> text:
     ""
 
 fn read_output_delta(path: text, offset: i64) -> text:
-    val all = rt_file_read_text(path) ?? ""
+    val all = file_read(path)
     if all.len() <= offset:
         return ""
     all.substring(offset, all.len())
@@ -124,7 +119,7 @@ fn strip_prompt(output: text, prompt: text) -> text:
 fn run_session_command(session: DebugSession, command: text, allow_timeout: bool) -> text:
     if session.process_pid == "" or not ps_is_alive(session.process_pid):
         return LB() + jp("status", js("error")) + "," + jp("message", js("session process is not alive")) + RB()
-    val before = rt_file_size(session.output_path)
+    val before = file_size(session.output_path)
     val err_text = send_fifo_line(session.input_path, command)
     if err_text != "":
         return LB() + jp("status", js("error")) + "," + jp("message", js(err_text)) + RB()
@@ -137,7 +132,7 @@ fn run_session_command(session: DebugSession, command: text, allow_timeout: bool
             break
         attempt = attempt + 1
     if chunk == "" and not allow_timeout:
-        val stderr_text = rt_file_read_text(session.error_path) ?? ""
+        val stderr_text = file_read(session.error_path)
         return LB() + jp("status", js("error")) + "," + jp("message", js("no backend response")) + "," + jp("stderr", js(stderr_text.trim())) + RB()
     val clean = strip_prompt(chunk, session.prompt)
     var result = LB()
@@ -177,18 +172,18 @@ fn graceful_quit_debugger(session: DebugSession):
     shell_sleep("0.20")
 
 fn kill_process_children(pid: text):
-    val (_s, _e, _c) = rt_process_run(shell_bin(), ["-c",
+    val (_s, _e, _c) = process_run(shell_bin(), ["-c",
         "pkill -TERM -P " + shell_quote(pid) + " >/dev/null 2>&1 || true"])
     shell_sleep("0.10")
-    val (_s2, _e2, _c2) = rt_process_run(shell_bin(), ["-c",
+    val (_s2, _e2, _c2) = process_run(shell_bin(), ["-c",
         "pkill -9 -P " + shell_quote(pid) + " >/dev/null 2>&1 || true"])
 
 fn kill_pid_escalating(pid: text):
-    val (_s1, _e1, _c1) = rt_process_run(shell_bin(), ["-c",
+    val (_s1, _e1, _c1) = process_run(shell_bin(), ["-c",
         "kill " + shell_quote(pid) + " >/dev/null 2>&1 || true"])
     shell_sleep("0.30")
     if ps_is_alive(pid):
-        val (_s2, _e2, _c2) = rt_process_run(shell_bin(), ["-c",
+        val (_s2, _e2, _c2) = process_run(shell_bin(), ["-c",
             "kill -9 " + shell_quote(pid) + " >/dev/null 2>&1 || true"])
         shell_sleep("0.10")
 
@@ -197,13 +192,13 @@ fn stop_session_process(session: DebugSession):
         graceful_quit_debugger(session)
         kill_process_children(session.process_pid)
         kill_pid_escalating(session.process_pid)
-    rt_dir_remove_all(session.session_dir)
+    dir_remove_all(session.session_dir)
 
 fn cleanup_stale_sessions():
     var kept: [DebugSession] = []
     for session in MCPGDB_SESSIONS:
         if session.process_pid != "" and not ps_is_alive(session.process_pid):
-            rt_dir_remove_all(session.session_dir)
+            dir_remove_all(session.session_dir)
         else:
             kept.push(session)
     MCPGDB_SESSIONS = kept

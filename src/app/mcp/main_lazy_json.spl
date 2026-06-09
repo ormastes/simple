@@ -1,9 +1,9 @@
 # MCP Lazy Server - JSON helpers
 # Extracted from main_lazy.spl
 
-# --- Safe string helpers (workaround for 2-arg substring bug) ---
+use std.io_runtime.{env_get, process_run, file_read, file_write}
 
-extern fn rt_string_len(value: text) -> i64
+# --- Safe string helpers (workaround for 2-arg substring bug) ---
 
 fn _slice_text(s: text, start: i64, end: i64) -> text:
     var out = ""
@@ -379,19 +379,19 @@ fn make_tool_error(id: text, code: i64, msg: text) -> text:
     make_json_result(id: id, result: err_result)
 
 # --- Shell helper ---
-# Uses rt_process_run (returns tuple). Note: val (a,b) = expr is broken
+# Uses process_run (returns tuple). Note: val (a,b) = expr is broken
 # in interpreter, so we use var + assignment destructuring instead.
 
 fn _mcp_detect_shell() -> text:
     # On Windows, /bin/sh doesn't resolve for native PE binaries.
     # Use "sh" (found on PATH via Git Bash/MSYS2) or fall back to "cmd".
-    val os_env = rt_env_get("OS") ?? ""
+    val os_env = env_get("OS") ?? ""
     if os_env.contains("Windows"):
         # Check for sh on PATH (Git Bash / MSYS2)
         var sh_out = ""
         var sh_err = ""
         var sh_rc: i64 = 0
-        (sh_out, sh_err, sh_rc) = rt_process_run("sh", ["-c", "echo ok"])
+        (sh_out, sh_err, sh_rc) = process_run("sh", ["-c", "echo ok"])
         if sh_rc == 0 and sh_out.trim() == "ok":
             return "sh"
         return "cmd"
@@ -408,7 +408,7 @@ fn strip_ansi(s: text) -> text:
     var e_out = ""
     var e_err = ""
     var e_rc: i64 = 0
-    (e_out, e_err, e_rc) = rt_process_run(shell, ["-c", r"printf '\033'"])
+    (e_out, e_err, e_rc) = process_run(shell, ["-c", r"printf '\033'"])
     if e_out == "" or not s.contains(e_out):
         return s
     s.replace(e_out, "")
@@ -440,21 +440,15 @@ fn shell_cmd(command: text) -> (text, i64):
     if shell == "cmd":
         # Strip Unix timeout prefix — cmd.exe doesn't have coreutils timeout
         val cmd = _strip_timeout_prefix(command)
-        (stdout, stderr, code) = rt_process_run("cmd", ["/C", cmd])
+        (stdout, stderr, code) = process_run("cmd", ["/C", cmd])
     elif shell == "sh":
         # Windows Git Bash: < /dev/null breaks piped commands, so omit it
-        (stdout, stderr, code) = rt_process_run(shell, ["-c", "export NO_COLOR=1 TERM=dumb; " + command])
+        (stdout, stderr, code) = process_run(shell, ["-c", "export NO_COLOR=1 TERM=dumb; " + command])
     else:
-        (stdout, stderr, code) = rt_process_run(shell, ["-c", "export NO_COLOR=1 TERM=dumb; " + command + " < /dev/null"])
+        (stdout, stderr, code) = process_run(shell, ["-c", "export NO_COLOR=1 TERM=dumb; " + command + " < /dev/null"])
     if stdout != "":
         stdout = strip_ansi(stdout)
     (stdout, code)
 
 fn text_byte_len(s: text) -> i64:
-    rt_string_len(s)
-
-fn file_read(path: text) -> text:
-    rt_file_read_text(path) ?? ""
-
-fn file_write(path: text, content: text) -> bool:
-    rt_file_write_text(path, content) ?? false
+    s.len()
