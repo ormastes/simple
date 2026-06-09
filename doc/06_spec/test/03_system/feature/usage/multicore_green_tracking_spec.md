@@ -402,12 +402,14 @@ expect(combined).to_contain("Multicore green cross-language profile gate PASSED"
 
 - Read the canonical multicore-green tracking row
 - Verify unresolved runtime blockers remain visible
+- Verify the row does not claim the final SimpleOS handoff gate is closed
+   - Expected: absent_in_text(row, "SimpleOS final handoff are closed") equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -417,6 +419,10 @@ step("Verify unresolved runtime blockers remain visible")
 expect(row).to_contain("doc/08_tracking/bug/green_thread_direct_runtime_blockers_2026-06-06.md")
 expect(row).to_contain("doc/08_tracking/bug/smf_runtime_pool_closure_lookup_2026-06-07.md")
 expect(row).to_contain("doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md")
+step("Verify the row does not claim the final SimpleOS handoff gate is closed")
+expect(row).to_contain("final SimpleOS AP ring/user handoff gate")
+expect(row).to_contain("SMF runtime-pool lookup has focused regression evidence")
+expect(absent_in_text(row, "SimpleOS final handoff are closed")).to_equal(1)
 ```
 
 </details>
