@@ -84,6 +84,18 @@ struct RoundedRectParams {
     int fb_h;
 };
 
+struct RoundedRectOutlineParams {
+    int x;
+    int y;
+    int w;
+    int h;
+    int radius;
+    uint color;
+    int thickness;
+    int fb_w;
+    int fb_h;
+};
+
 struct TriangleParams {
     int x1;
     int y1;
@@ -369,6 +381,99 @@ kernel void kernel_draw_rounded_rect(
         plot(fb, trx + px, bry + py, p.fb_w, p.fb_h, p.color);
         plot(fb, trx + py, bry + px, p.fb_w, p.fb_h, p.color);
     }
+}
+
+// ---- kernel_draw_rounded_rect_outline ----
+
+// Thick rounded-rect OUTLINE (matches CPU emu_draw_rounded_rect_outline:
+// four straight edge rects of `thickness` width plus four thick corner arcs).
+// 2D dispatch over the [0,w) x [0,h) bounding box; each pixel is set if it is
+// covered by the union of those primitives. Since every primitive writes the
+// same opaque color, the per-pixel union test is bit-exact with the CPU loop
+// (which overwrites covered pixels). Integer arithmetic only — no float/sqrt.
+kernel void kernel_draw_rounded_rect_outline(
+    device uint* fb                         [[buffer(0)]],
+    constant RoundedRectOutlineParams& p    [[buffer(1)]],
+    uint2 tid                               [[thread_position_in_grid]]
+) {
+    int lx = (int)tid.x;
+    int ly = (int)tid.y;
+    if (lx >= p.w || ly >= p.h) return;
+
+    int r = p.radius;
+    if (r > p.w / 2) r = p.w / 2;
+    if (r > p.h / 2) r = p.h / 2;
+    int t = p.thickness;
+
+    bool covered = false;
+
+    // Straight edges (draw_rect_filled regions; width/height must be > 0).
+    int span_w = p.w - 2 * r;   // top/bottom edge run length
+    int span_h = p.h - 2 * r;   // left/right edge run length
+    // Top edge: rect(x+r, y, span_w, t) -> local cols [r, r+span_w), rows [0, t)
+    if (span_w > 0 && lx >= r && lx < r + span_w && ly >= 0 && ly < t) covered = true;
+    // Bottom edge: rect(x+r, y+h-t, span_w, t) -> rows [h-t, h)
+    if (span_w > 0 && lx >= r && lx < r + span_w && ly >= p.h - t && ly < p.h) covered = true;
+    // Left edge: rect(x, y+r, t, span_h) -> cols [0, t), rows [r, r+span_h)
+    if (span_h > 0 && lx >= 0 && lx < t && ly >= r && ly < r + span_h) covered = true;
+    // Right edge: rect(x+w-t, y+r, t, span_h) -> cols [w-t, w)
+    if (span_h > 0 && lx >= p.w - t && lx < p.w && ly >= r && ly < r + span_h) covered = true;
+
+    // Corner arcs: each fills pixel (cx + dx*ax, cy + dy*ay) for ax,ay in [0, r]
+    // where ri_sq <= ax*ax + ay*ay <= ro_sq.  Corner centers (local coords):
+    //   TL = (r, r)            TR = (w-1-r, r)
+    //   BL = (r, h-1-r)        BR = (w-1-r, h-1-r)
+    if (!covered) {
+        int r_inner = r - t;
+        if (r_inner < 0) r_inner = 0;
+        int ro_sq = r * r;
+        int ri_sq = r_inner * r_inner;
+        int tlx = r;
+        int tly = r;
+        int trx = p.w - 1 - r;
+        int bry = p.h - 1 - r;
+        // For a corner with center (ccx, ccy) and signs (dx, dy), pixel (lx,ly)
+        // maps to ax = dx*(lx-ccx), ay = dy*(ly-ccy); valid when ax,ay in [0,r].
+        // top-left (dx=-1, dy=-1): ax = ccx-lx, ay = ccy-ly
+        {
+            int ax = tlx - lx; int ay = tly - ly;
+            if (ax >= 0 && ax <= r && ay >= 0 && ay <= r) {
+                int d = ax * ax + ay * ay;
+                if (d <= ro_sq && d >= ri_sq) covered = true;
+            }
+        }
+        // top-right (dx=+1, dy=-1): ax = lx-ccx, ay = ccy-ly
+        {
+            int ax = lx - trx; int ay = tly - ly;
+            if (ax >= 0 && ax <= r && ay >= 0 && ay <= r) {
+                int d = ax * ax + ay * ay;
+                if (d <= ro_sq && d >= ri_sq) covered = true;
+            }
+        }
+        // bottom-left (dx=-1, dy=+1): ax = ccx-lx, ay = ly-ccy
+        {
+            int ax = tlx - lx; int ay = ly - bry;
+            if (ax >= 0 && ax <= r && ay >= 0 && ay <= r) {
+                int d = ax * ax + ay * ay;
+                if (d <= ro_sq && d >= ri_sq) covered = true;
+            }
+        }
+        // bottom-right (dx=+1, dy=+1): ax = lx-ccx, ay = ly-ccy
+        {
+            int ax = lx - trx; int ay = ly - bry;
+            if (ax >= 0 && ax <= r && ay >= 0 && ay <= r) {
+                int d = ax * ax + ay * ay;
+                if (d <= ro_sq && d >= ri_sq) covered = true;
+            }
+        }
+    }
+
+    if (!covered) return;
+
+    int px = p.x + lx;
+    int py = p.y + ly;
+    if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
+    fb[py * p.fb_w + px] = p.color;
 }
 
 // ---- kernel_draw_triangle_filled ----
