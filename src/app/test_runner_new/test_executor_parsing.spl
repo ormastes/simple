@@ -249,13 +249,20 @@ fn build_child_args(file_path: text, options: TestOptions) -> [text]:
         args.push("--gc=off")
     args
 
-fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_code: i32, duration_ms: i64, timeout_secs: i64) -> TestFileResult:
-    # Check for timeout
-    if exit_code == -1:
-        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "TIMEOUT after {timeout_secs}s", timed_out: true, cached: false)
+fn should_report_exit_code_error(exit_code: i32, failed: i64, passed: i64) -> bool:
+    if exit_code == 0 or failed > 0:
+        return false
+    passed == 0
 
+fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_code: i32, duration_ms: i64, timeout_secs: i64) -> TestFileResult:
     val combined = stdout + "\n" + stderr
     val (passed, failed, skipped, pending) = parse_test_output(combined)
+
+    # Honor parsed success summaries before treating -1 as timeout. Real child
+    # timeouts are reported by the executor's timeout path, not as a green run
+    # with a synthetic exit code.
+    if exit_code == -1 and passed == 0 and failed == 0:
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: "TIMEOUT after {timeout_secs}s", timed_out: true, cached: false)
 
     if passed == 0 and failed == 0:
         if exit_code == 0:
@@ -280,7 +287,7 @@ fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_cod
     var error = ""
     if failed > 0:
         error = extract_error_message(combined)
-    elif exit_code != 0:
+    elif should_report_exit_code_error(exit_code, failed, passed):
         error = "Process exited with code {exit_code}"
 
     TestFileResult(path: file_path, passed: passed, failed: failed, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: error, timed_out: false, cached: false)
@@ -310,13 +317,12 @@ fn build_coverage_wrapper(file_path: text, options: TestOptions) -> (text, text)
     lines.push(content)
     lines.push("")
     lines.push("# === Coverage Dump (auto-generated) ===")
-    lines.push("extern fn rt_coverage_enabled() -> bool")
-    lines.push("extern fn rt_coverage_dump_sdn() -> text")
+    lines.push("use lib.nogc_sync_mut.test_runner_runtime.coverage_facade.{test_coverage_enabled, test_coverage_dump_sdn}")
     lines.push("")
     lines.push("fn __simple_cov_dump():")
-    lines.push("    if not rt_coverage_enabled():")
+    lines.push("    if not test_coverage_enabled():")
     lines.push("        return")
-    lines.push("    val sdn = rt_coverage_dump_sdn()")
+    lines.push("    val sdn = test_coverage_dump_sdn()")
     lines.push("    print \"" + COVERAGE_BEGIN + "\"")
     lines.push("    print sdn")
     lines.push("    print \"" + COVERAGE_END + "\"")

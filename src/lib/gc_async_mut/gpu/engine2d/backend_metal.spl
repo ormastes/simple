@@ -21,6 +21,7 @@ use std.nogc_sync_mut.io.metal_sffi.{
 
 extern fn rt_alloc(size: i64) -> i64
 extern fn rt_free(ptr: i64) -> i64
+extern fn rt_ptr_write_i64(ptr: i64, offset: i64, value: i64) -> i64
 extern fn rt_ptr_write_i32(ptr: i64, offset: i64, value: i64) -> i64
 extern fn rt_ptr_read_i64(ptr: i64, offset: i64) -> i64
 extern fn rt_metal_buffer_download(data_ptr: i64, buffer: i64, size: i64) -> i64
@@ -45,6 +46,23 @@ fn _metal_status_message(code: i64) -> text:
 
 fn _metal_i64(v: i32) -> i64:
     v as i64
+
+fn _metal_draw_thick_corner_arc(mut core: MetalBackend, cx: i32, cy: i32, r: i32, thickness: i32, color: u32, dx_sign: i32, dy_sign: i32) -> bool:
+    val r_outer = r
+    val r_inner = if r - thickness > 0: r - thickness else: 0
+    val ro_sq = r_outer * r_outer
+    val ri_sq = r_inner * r_inner
+    var ok = true
+    var py: i32 = 0
+    while py <= r_outer:
+        var px: i32 = 0
+        while px <= r_outer:
+            val d = px * px + py * py
+            if d <= ro_sq and d >= ri_sq:
+                ok = ok and core._dispatch_metal_rect_filled(cx + dx_sign * px, cy + dy_sign * py, 1, 1, color)
+            px = px + 1
+        py = py + 1
+    ok
 
 fn _metal_i32_to_u8(v: i32) -> u8:
     v as u8
@@ -79,6 +97,34 @@ fn _metal_pack_rect_params(x: i32, y: i32, w: i32, h: i32, color: u32, fb_w: i32
     off = _metal_pack_i32_le(buf, off, fb_h)
     buf
 
+fn _metal_pixels_to_le_bytes(pixels: [u32], count: i32) -> [u8]:
+    if count <= 0 or pixels.len() < count:
+        return []
+    var bytes: [u8] = [0u8; count * 4]
+    var i = 0
+    var off = 0
+    while i < count:
+        off = _metal_pack_u32_le(bytes, off, pixels[i])
+        i = i + 1
+    bytes
+
+fn _metal_scale_image_pixels(dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]) -> [u32]:
+    if dst_w <= 0 or dst_h <= 0 or src_w <= 0 or src_h <= 0:
+        return []
+    if pixels.len() < src_w * src_h:
+        return []
+    var result: [u32] = [0u32; dst_w * dst_h]
+    var dy = 0
+    while dy < dst_h:
+        val sy = dy * src_h / dst_h
+        var dx = 0
+        while dx < dst_w:
+            val sx = dx * src_w / dst_w
+            result[dy * dst_w + dx] = pixels[sy * src_w + sx]
+            dx = dx + 1
+        dy = dy + 1
+    result
+
 fn probe_metal() -> BackendProbeResult:
     if not is_macos():
         var r = BackendProbeResult.unavailable("metal", "Metal requires macOS")
@@ -111,12 +157,16 @@ class MetalBackend:
     dirty: bool
     initialized: bool
     gpu_frame_complete: bool
+    strict_gpu_only: bool
     last_probe: BackendProbeResult
 
     static fn create() -> MetalBackend:
-        make_metal_backend()
+        make_metal_backend(false)
 
-fn make_metal_backend():
+    static fn create_strict_gpu_only() -> MetalBackend:
+        make_metal_backend(true)
+
+fn make_metal_backend(strict_gpu_only: bool):
     MetalBackend(
         mirror: SoftwareBackend.create(),
         session: MetalSession.create("legacy_no_session"),
@@ -127,6 +177,7 @@ fn make_metal_backend():
         dirty: false,
         initialized: false,
         gpu_frame_complete: false,
+        strict_gpu_only: strict_gpu_only,
         last_probe: BackendProbeResult.unavailable("metal", "not probed")
     )
 
@@ -198,97 +249,207 @@ impl RenderBackend for MetalBackend:
         self.gpu_frame_complete = false
 
     me clear(color: u32):
-        self.mirror.clear(color)
+        if not self.strict_gpu_only:
+            self.mirror.clear(color)
         if self.initialized and self.d_framebuffer != 0 and self.session.pipe_clear != 0:
             self.gpu_frame_complete = self._dispatch_metal_clear(color)
             self.dirty = true
         else:
             self.gpu_frame_complete = false
     me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
-        self.mirror.draw_rect(x, y, w, h, color)
+        if not self.strict_gpu_only:
+            self.mirror.draw_rect(x, y, w, h, color)
+        if self._strict_replay_required():
+            var temp = self._prepare_software_replay()
+            temp.draw_rect(x, y, w, h, color)
+            if not self._finish_software_replay(temp):
+                self.gpu_frame_complete = false
+            self.dirty = true
+            return
         if self.initialized and self.d_framebuffer != 0 and self.session.pipe_rect_outline != 0:
-            self.gpu_frame_complete = self.gpu_frame_complete and self._dispatch_metal_rect_outline(x, y, w, h, color)
+            self._record_gpu_dispatch(self._dispatch_metal_rect_outline(x, y, w, h, color))
             self.dirty = true
         else:
             self.gpu_frame_complete = false
     me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
-        self.mirror.draw_rect_filled(x, y, w, h, color)
+        if not self.strict_gpu_only:
+            self.mirror.draw_rect_filled(x, y, w, h, color)
+        if self._strict_replay_required():
+            var temp = self._prepare_software_replay()
+            temp.draw_rect_filled(x, y, w, h, color)
+            if not self._finish_software_replay(temp):
+                self.gpu_frame_complete = false
+            self.dirty = true
+            return
         if self.initialized and self.d_framebuffer != 0 and self.session.pipe_rect_filled != 0:
-            self.gpu_frame_complete = self.gpu_frame_complete and self._dispatch_metal_rect_filled(x, y, w, h, color)
+            self._record_gpu_dispatch(self._dispatch_metal_rect_filled(x, y, w, h, color))
             self.dirty = true
         else:
             self.gpu_frame_complete = false
     me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
-        self.mirror.draw_line(x1, y1, x2, y2, color, thickness)
+        if not self.strict_gpu_only:
+            self.mirror.draw_line(x1, y1, x2, y2, color, thickness)
+        if self._strict_replay_required():
+            var temp = self._prepare_software_replay()
+            temp.draw_line(x1, y1, x2, y2, color, thickness)
+            if not self._finish_software_replay(temp):
+                self.gpu_frame_complete = false
+            self.dirty = true
+            return
         if self.initialized and self.d_framebuffer != 0 and self.session.pipe_line != 0:
-            self.gpu_frame_complete = self.gpu_frame_complete and self._dispatch_metal_line(x1, y1, x2, y2, color, thickness)
+            self._record_gpu_dispatch(self._dispatch_metal_line(x1, y1, x2, y2, color, thickness))
             self.dirty = true
         else:
             self.gpu_frame_complete = false
     me draw_circle(cx: i32, cy: i32, r: i32, color: u32):
-        self.mirror.draw_circle(cx, cy, r, color)
+        if not self.strict_gpu_only:
+            self.mirror.draw_circle(cx, cy, r, color)
+        if self._strict_replay_required():
+            var temp = self._prepare_software_replay()
+            temp.draw_circle(cx, cy, r, color)
+            if not self._finish_software_replay(temp):
+                self.gpu_frame_complete = false
+            self.dirty = true
+            return
         if self.initialized and self.d_framebuffer != 0 and self.session.pipe_circle != 0:
-            self.gpu_frame_complete = self.gpu_frame_complete and self._dispatch_metal_circle(cx, cy, r, color, false)
+            self._record_gpu_dispatch(self._dispatch_metal_circle(cx, cy, r, color, false))
             self.dirty = true
         else:
             self.gpu_frame_complete = false
     me draw_circle_filled(cx: i32, cy: i32, r: i32, color: u32):
-        self.mirror.draw_circle_filled(cx, cy, r, color)
+        if not self.strict_gpu_only:
+            self.mirror.draw_circle_filled(cx, cy, r, color)
+        if self._strict_replay_required():
+            var temp = self._prepare_software_replay()
+            temp.draw_circle_filled(cx, cy, r, color)
+            if not self._finish_software_replay(temp):
+                self.gpu_frame_complete = false
+            self.dirty = true
+            return
         if self.initialized and self.d_framebuffer != 0 and self.session.pipe_circle_filled != 0:
-            self.gpu_frame_complete = self.gpu_frame_complete and self._dispatch_metal_circle(cx, cy, r, color, true)
+            self._record_gpu_dispatch(self._dispatch_metal_circle(cx, cy, r, color, true))
             self.dirty = true
         else:
             self.gpu_frame_complete = false
     me draw_rounded_rect(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32):
-        self.mirror.draw_rounded_rect(x, y, w, h, radius, color)
+        if not self.strict_gpu_only:
+            self.mirror.draw_rounded_rect(x, y, w, h, radius, color)
+        if self._strict_replay_required():
+            var temp = self._prepare_software_replay()
+            temp.draw_rounded_rect(x, y, w, h, radius, color)
+            if not self._finish_software_replay(temp):
+                self.gpu_frame_complete = false
+            self.dirty = true
+            return
         if self.initialized and self.d_framebuffer != 0 and self.session.pipe_rounded_rect != 0:
-            self.gpu_frame_complete = self.gpu_frame_complete and self._dispatch_metal_rounded_rect(x, y, w, h, radius, color)
+            self._record_gpu_dispatch(self._dispatch_metal_rounded_rect(x, y, w, h, radius, color))
             self.dirty = true
         else:
             self.gpu_frame_complete = false
     me draw_triangle_filled(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32):
-        self.mirror.draw_triangle_filled(x1, y1, x2, y2, x3, y3, color)
+        if not self.strict_gpu_only:
+            self.mirror.draw_triangle_filled(x1, y1, x2, y2, x3, y3, color)
+        if self._strict_replay_required():
+            var temp = self._prepare_software_replay()
+            temp.draw_triangle_filled(x1, y1, x2, y2, x3, y3, color)
+            if not self._finish_software_replay(temp):
+                self.gpu_frame_complete = false
+            self.dirty = true
+            return
         if self.initialized and self.d_framebuffer != 0 and self.session.pipe_triangle != 0:
-            self.gpu_frame_complete = self.gpu_frame_complete and self._dispatch_metal_triangle(x1, y1, x2, y2, x3, y3, color)
+            self._record_gpu_dispatch(self._dispatch_metal_triangle(x1, y1, x2, y2, x3, y3, color))
             self.dirty = true
         else:
             self.gpu_frame_complete = false
     me draw_gradient_rect(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32):
-        self.mirror.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
+        if not self.strict_gpu_only:
+            self.mirror.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
+        if self._strict_replay_required():
+            var temp = self._prepare_software_replay()
+            temp.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
+            if not self._finish_software_replay(temp):
+                self.gpu_frame_complete = false
+            self.dirty = true
+            return
         if self.initialized and self.d_framebuffer != 0 and self.session.pipe_gradient != 0:
-            self.gpu_frame_complete = self.gpu_frame_complete and self._dispatch_metal_gradient_rect(x, y, w, h, top_color, bottom_color)
+            self._record_gpu_dispatch(self._dispatch_metal_gradient_rect(x, y, w, h, top_color, bottom_color))
             self.dirty = true
         else:
             self.gpu_frame_complete = false
     me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
-        self.mirror.draw_text(x, y, text_val, color, font_size)
+        if not self.strict_gpu_only:
+            self.mirror.draw_text(x, y, text_val, color, font_size)
+        if self._strict_replay_required():
+            var temp = self._prepare_software_replay()
+            temp.draw_text(x, y, text_val, color, font_size)
+            if not self._finish_software_replay(temp):
+                self.gpu_frame_complete = false
+            self.dirty = true
+            return
         if self.initialized and self.d_framebuffer != 0 and self.session.pipe_rect_filled != 0:
-            self.gpu_frame_complete = self.gpu_frame_complete and self._dispatch_metal_text(x, y, text_val, color, font_size)
+            val ok = self._dispatch_metal_text(x, y, text_val, color, font_size)
+            self._record_gpu_dispatch(ok)
+            if self.strict_gpu_only and not ok:
+                var temp = self._prepare_software_replay()
+                temp.draw_text(x, y, text_val, color, font_size)
+                if self._finish_software_replay(temp):
+                    self.gpu_frame_complete = true
             self.dirty = true
         else:
             self.gpu_frame_complete = false
     me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
-        self.mirror.draw_image(x, y, w, h, pixels)
-        self.gpu_frame_complete = false
+        if not self.strict_gpu_only:
+            self.mirror.draw_image(x, y, w, h, pixels)
+        if w <= 0 or h <= 0 or pixels.len() < w * h:
+            return
+        if self._strict_replay_required():
+            var temp = self._prepare_software_replay()
+            temp.draw_image(x, y, w, h, pixels)
+            if not self._finish_software_replay(temp):
+                self.gpu_frame_complete = false
+            self.dirty = true
+            return
+        if self.initialized and self.d_framebuffer != 0 and self.session.pipe_blit != 0:
+            val pixel_count = w * h
+            val byte_size = _metal_i64(pixel_count) * 4
+            val d_src = self.session.alloc(byte_size)
+            if d_src == 0:
+                self.gpu_frame_complete = false
+                return
+            val src_bytes = _metal_pixels_to_le_bytes(pixels, pixel_count)
+            if src_bytes.len() != pixel_count * 4:
+                self.session.free(d_src)
+                self.gpu_frame_complete = false
+                return
+            if not self.session.upload_buffer_bytes(d_src, src_bytes):
+                self.session.free(d_src)
+                self.gpu_frame_complete = false
+                return
+            val ok = self._dispatch_metal_blit(x, y, w, h, d_src)
+            self.session.free(d_src)
+            self._record_gpu_dispatch(ok)
+            self.dirty = true
+        else:
+            self.gpu_frame_complete = false
     me set_clip(x: i32, y: i32, w: i32, h: i32):
         self.mirror.set_clip(x, y, w, h)
-        self.gpu_frame_complete = false
     me clear_clip():
         self.mirror.clear_clip()
-        self.gpu_frame_complete = false
     me set_mask(mask_pixels: [u8], w: i32, h: i32):
         self.mirror.set_mask(mask_pixels, w, h)
-        self.gpu_frame_complete = false
     me clear_mask():
         self.mirror.clear_mask()
-        self.gpu_frame_complete = false
     me present():
-        self.mirror.present()
+        if not self.strict_gpu_only:
+            self.mirror.present()
+        self.dirty = false
     fn read_pixels() -> [u32]:
         if self.gpu_frame_complete:
             val gpu_pixels = self.read_pixels_gpu_only()
             if gpu_pixels.len() == (self.w * self.h):
                 return gpu_pixels
+        if self.strict_gpu_only:
+            return []
         self.mirror.read_pixels()
     fn width() -> i32:
         if self.w > 0:
@@ -300,6 +461,15 @@ impl RenderBackend for MetalBackend:
         self.mirror.height()
 
 impl MetalBackend:
+    fn _strict_replay_required() -> bool:
+        self.strict_gpu_only and (self.mirror.clip_enabled or self.mirror.mask_buf.len() > 0)
+
+    me _record_gpu_dispatch(success: bool):
+        if self.strict_gpu_only:
+            self.gpu_frame_complete = success
+            return
+        self.gpu_frame_complete = self.gpu_frame_complete and success
+
     me read_pixels_gpu_only() -> [u32]:
         if not self.initialized or self.d_framebuffer == 0:
             return []
@@ -324,6 +494,48 @@ impl MetalBackend:
                 i = i + 1
         rt_free(host)
         pixels
+
+    me _snapshot_pixels_for_replay() -> [u32]:
+        if self.w <= 0 or self.h <= 0:
+            return []
+        val total = self.w * self.h
+        if self.gpu_frame_complete:
+            val gpu_pixels = self.read_pixels_gpu_only()
+            if gpu_pixels.len() == total:
+                return gpu_pixels
+        if self.strict_gpu_only:
+            return []
+        val mirror_pixels = self.mirror.read_pixels()
+        if mirror_pixels.len() == total:
+            return mirror_pixels
+        []
+
+    me _prepare_software_replay() -> SoftwareBackend:
+        var temp = SoftwareBackend.create()
+        val pixels = self._snapshot_pixels_for_replay()
+        if pixels.len() != self.w * self.h:
+            return temp
+        if not temp.init(self.w, self.h):
+            return temp
+        temp.draw_image(0, 0, self.w, self.h, pixels)
+        if self.mirror.clip_enabled:
+            temp.set_clip(self.mirror.clip_x, self.mirror.clip_y, self.mirror.clip_w, self.mirror.clip_h)
+        if self.mirror.mask_buf.len() > 0:
+            temp.set_mask(self.mirror.mask_buf, self.mirror.mask_w, self.mirror.mask_h)
+        temp
+
+    me _finish_software_replay(temp: SoftwareBackend) -> bool:
+        val ok_dims = temp.width() == self.w and temp.height() == self.h
+        if not ok_dims:
+            if temp.width() > 0 or temp.height() > 0:
+                temp.shutdown()
+            return false
+        val pixels = temp.read_pixels()
+        temp.shutdown()
+        if pixels.len() != self.w * self.h:
+            return false
+        self.draw_image(0, 0, self.w, self.h, pixels)
+        self.gpu_frame_complete
 
     me _dispatch_metal_clear(color: u32) -> bool:
         val params = rt_alloc(12)
@@ -516,6 +728,100 @@ impl MetalBackend:
         rt_free(params)
         ok
 
+    me _dispatch_metal_gradient_rect_h(x: i32, y: i32, w: i32, h: i32, left_color: u32, right_color: u32) -> bool:
+        if w <= 0 or h <= 0:
+            return true
+        val params = rt_alloc(32)
+        if params == 0:
+            return false
+        rt_ptr_write_i32(params, 0, x as i64)
+        rt_ptr_write_i32(params, 4, y as i64)
+        rt_ptr_write_i32(params, 8, w as i64)
+        rt_ptr_write_i32(params, 12, h as i64)
+        rt_ptr_write_i32(params, 16, left_color as i64)
+        rt_ptr_write_i32(params, 20, right_color as i64)
+        rt_ptr_write_i32(params, 24, self.w as i64)
+        rt_ptr_write_i32(params, 28, self.h as i64)
+        val pipeline = self.session.pipe_gradient_h
+        val ok = self._dispatch_metal_2d(pipeline, w, h, params, 32)
+        rt_free(params)
+        ok
+
+    me _dispatch_metal_radial_gradient(cx: i32, cy: i32, r: i32, center_color: u32, edge_color: u32) -> bool:
+        if r <= 0:
+            return self._dispatch_metal_rect_filled(cx, cy, 1, 1, center_color)
+        val params = rt_alloc(28)
+        if params == 0:
+            return false
+        rt_ptr_write_i32(params, 0, cx as i64)
+        rt_ptr_write_i32(params, 4, cy as i64)
+        rt_ptr_write_i32(params, 8, r as i64)
+        rt_ptr_write_i32(params, 12, center_color as i64)
+        rt_ptr_write_i32(params, 16, edge_color as i64)
+        rt_ptr_write_i32(params, 20, self.w as i64)
+        rt_ptr_write_i32(params, 24, self.h as i64)
+        val span = r * 2 + 1
+        val pipeline = self.session.pipe_radial_gradient
+        val ok = self._dispatch_metal_2d(pipeline, span, span, params, 28)
+        rt_free(params)
+        ok
+
+    me _dispatch_metal_ellipse_filled(cx: i32, cy: i32, rx: i32, ry: i32, color: u32) -> bool:
+        if rx <= 0 or ry <= 0:
+            return self._dispatch_metal_rect_filled(cx, cy, 1, 1, color)
+        val params = rt_alloc(28)
+        if params == 0:
+            return false
+        rt_ptr_write_i32(params, 0, cx as i64)
+        rt_ptr_write_i32(params, 4, cy as i64)
+        rt_ptr_write_i32(params, 8, rx as i64)
+        rt_ptr_write_i32(params, 12, ry as i64)
+        rt_ptr_write_i32(params, 16, color as i64)
+        rt_ptr_write_i32(params, 20, self.w as i64)
+        rt_ptr_write_i32(params, 24, self.h as i64)
+        val threads = (2 * (rx + ry) + 2) as i64
+        val pipeline = self.session.pipe_ellipse_filled
+        val ok = self._dispatch_metal_1d(pipeline, threads, 256, params, 28)
+        rt_free(params)
+        ok
+
+    me _dispatch_metal_rect_blend(x: i32, y: i32, w: i32, h: i32, color: u32) -> bool:
+        if w <= 0 or h <= 0:
+            return true
+        val params = rt_alloc(28)
+        if params == 0:
+            return false
+        rt_ptr_write_i32(params, 0, x as i64)
+        rt_ptr_write_i32(params, 4, y as i64)
+        rt_ptr_write_i32(params, 8, w as i64)
+        rt_ptr_write_i32(params, 12, h as i64)
+        rt_ptr_write_i32(params, 16, color as i64)
+        rt_ptr_write_i32(params, 20, self.w as i64)
+        rt_ptr_write_i32(params, 24, self.h as i64)
+        val pipeline = self.session.pipe_rect_blend
+        val ok = self._dispatch_metal_2d(pipeline, w, h, params, 28)
+        rt_free(params)
+        ok
+
+    me _dispatch_metal_rect_blend_mode(x: i32, y: i32, w: i32, h: i32, color: u32, mode: i32) -> bool:
+        if w <= 0 or h <= 0:
+            return true
+        val params = rt_alloc(32)
+        if params == 0:
+            return false
+        rt_ptr_write_i32(params, 0, x as i64)
+        rt_ptr_write_i32(params, 4, y as i64)
+        rt_ptr_write_i32(params, 8, w as i64)
+        rt_ptr_write_i32(params, 12, h as i64)
+        rt_ptr_write_i32(params, 16, color as i64)
+        rt_ptr_write_i32(params, 20, self.w as i64)
+        rt_ptr_write_i32(params, 24, self.h as i64)
+        rt_ptr_write_i32(params, 28, mode as i64)
+        val pipeline = self.session.pipe_rect_blend_mode
+        val ok = self._dispatch_metal_2d(pipeline, w, h, params, 32)
+        rt_free(params)
+        ok
+
     me _dispatch_metal_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32) -> bool:
         val gh = glyph_height()
         var scale = font_size / gh
@@ -583,83 +889,498 @@ impl MetalBackend:
         metal_sffi_commit_command_buffer(cmd)
         metal_sffi_wait_completed(cmd)
 
+    me _dispatch_metal_blit(x: i32, y: i32, w: i32, h: i32, d_src: i64) -> bool:
+        if w <= 0 or h <= 0 or d_src == 0:
+            return true
+        val params = rt_alloc(24)
+        if params == 0:
+            return false
+        rt_ptr_write_i32(params, 0, x as i64)
+        rt_ptr_write_i32(params, 4, y as i64)
+        rt_ptr_write_i32(params, 8, w as i64)
+        rt_ptr_write_i32(params, 12, h as i64)
+        rt_ptr_write_i32(params, 16, self.w as i64)
+        rt_ptr_write_i32(params, 20, self.h as i64)
+        val cmd = metal_sffi_create_command_buffer(self.command_queue)
+        if cmd == 0:
+            rt_free(params)
+            return false
+        val encoder = metal_sffi_create_compute_encoder(cmd)
+        if encoder == 0:
+            rt_free(params)
+            return false
+        if not metal_sffi_set_buffer(encoder, self.d_framebuffer, 0, 0):
+            rt_free(params)
+            return false
+        if rt_metal_set_bytes(encoder, params, 24, 1) == 0:
+            rt_free(params)
+            return false
+        if not metal_sffi_set_buffer(encoder, d_src, 0, 2):
+            rt_free(params)
+            return false
+        val block_x = 16
+        val block_y = 16
+        val grid_x = ((_metal_i64(w) + block_x - 1) / block_x) * block_x
+        val grid_y = ((_metal_i64(h) + block_y - 1) / block_y) * block_y
+        if not metal_sffi_dispatch_compute(encoder, self.session.pipe_blit, grid_x, grid_y, 1, block_x, block_y, 1):
+            rt_free(params)
+            return false
+        metal_sffi_end_compute_encoder(encoder)
+        metal_sffi_commit_command_buffer(cmd)
+        val ok = metal_sffi_wait_completed(cmd)
+        rt_free(params)
+        ok
+
+    me _dispatch_metal_image_blend(x: i32, y: i32, w: i32, h: i32, d_src: i64) -> bool:
+        if w <= 0 or h <= 0 or d_src == 0:
+            return true
+        val params = rt_alloc(24)
+        if params == 0:
+            return false
+        rt_ptr_write_i32(params, 0, x as i64)
+        rt_ptr_write_i32(params, 4, y as i64)
+        rt_ptr_write_i32(params, 8, w as i64)
+        rt_ptr_write_i32(params, 12, h as i64)
+        rt_ptr_write_i32(params, 16, self.w as i64)
+        rt_ptr_write_i32(params, 20, self.h as i64)
+
+        val cmd = metal_sffi_create_command_buffer(self.command_queue)
+        if cmd == 0:
+            rt_free(params)
+            return false
+        val encoder = metal_sffi_create_compute_encoder(cmd)
+        if encoder == 0:
+            rt_free(params)
+            return false
+        metal_sffi_set_buffer(encoder, self.d_framebuffer, 0, 0)
+        metal_sffi_set_bytes(encoder, params, 24, 1)
+        metal_sffi_set_buffer(encoder, d_src, 0, 2)
+        val block_x = 16
+        val block_y = 16
+        val grid_x = ((_metal_i64(w) + block_x - 1) / block_x) * block_x
+        val grid_y = ((_metal_i64(h) + block_y - 1) / block_y) * block_y
+        if not metal_sffi_dispatch_compute(encoder, self.session.pipe_image_blend, grid_x, grid_y, 1, block_x, block_y, 1):
+            rt_free(params)
+            return false
+        metal_sffi_end_compute_encoder(encoder)
+        metal_sffi_commit_command_buffer(cmd)
+        val ok = metal_sffi_wait_completed(cmd)
+        rt_free(params)
+        ok
+
 impl Engine2DExtended for MetalBackend:
     me draw_text_bg(x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32):
-        self.mirror.draw_text_bg(x, y, text_val, fg, bg, font_size)
-        self.gpu_frame_complete = false
+        if not self.strict_gpu_only:
+            self.mirror.draw_text_bg(x, y, text_val, fg, bg, font_size)
+        if text_val.len() == 0:
+            return
+        if self._strict_replay_required():
+            var temp = self._prepare_software_replay()
+            temp.draw_text_bg(x, y, text_val, fg, bg, font_size)
+            if not self._finish_software_replay(temp):
+                self.gpu_frame_complete = false
+            self.dirty = true
+            return
+        val gh = glyph_height()
+        var scale = font_size / gh
+        if scale < 1:
+            scale = 1
+        val advance = glyph_advance(scale)
+        val text_w = (text_val.len() as i32) * advance
+        val text_h = gh * scale
+        if self.initialized and self.d_framebuffer != 0 and self.session.pipe_rect_filled != 0:
+            var ok = self._dispatch_metal_rect_filled(x, y, text_w, text_h, bg)
+            ok = ok and self._dispatch_metal_text(x, y, text_val, fg, font_size)
+            self._record_gpu_dispatch(ok)
+            if self.strict_gpu_only and not ok:
+                var temp = self._prepare_software_replay()
+                temp.draw_text_bg(x, y, text_val, fg, bg, font_size)
+                if self._finish_software_replay(temp):
+                    self.gpu_frame_complete = true
+            self.dirty = true
+        else:
+            self.gpu_frame_complete = false
 
     me draw_ellipse(cx: i32, cy: i32, rx: i32, ry: i32, color: u32):
-        self.mirror.draw_ellipse(cx, cy, rx, ry, color)
-        self.gpu_frame_complete = false
+        if not self.strict_gpu_only:
+            self.mirror.draw_ellipse(cx, cy, rx, ry, color)
+        if self._strict_replay_required():
+            var temp = self._prepare_software_replay()
+            temp.draw_ellipse(cx, cy, rx, ry, color)
+            if not self._finish_software_replay(temp):
+                self.gpu_frame_complete = false
+            return
+        if self.initialized and self.d_framebuffer != 0 and self.session.pipe_rect_filled != 0:
+            if rx <= 0 or ry <= 0:
+                self._record_gpu_dispatch(self._dispatch_metal_rect_filled(cx, cy, 1, 1, color))
+                self.dirty = true
+                return
+            var ok = true
+            var x: i32 = 0
+            var y: i32 = ry
+            val rx2 = rx * rx
+            val ry2 = ry * ry
+            var px = 0
+            var py = 2 * rx2 * y
+            var d1 = ry2 - rx2 * ry + rx2 / 4
+            while px < py:
+                ok = ok and self._dispatch_metal_rect_filled(cx + x, cy + y, 1, 1, color)
+                ok = ok and self._dispatch_metal_rect_filled(cx - x, cy + y, 1, 1, color)
+                ok = ok and self._dispatch_metal_rect_filled(cx + x, cy - y, 1, 1, color)
+                ok = ok and self._dispatch_metal_rect_filled(cx - x, cy - y, 1, 1, color)
+                x = x + 1
+                px = px + 2 * ry2
+                if d1 < 0:
+                    d1 = d1 + ry2 + px
+                else:
+                    y = y - 1
+                    py = py - 2 * rx2
+                    d1 = d1 + ry2 + px - py
+            var d2 = ry2 * (2 * x + 1) * (2 * x + 1) / 4 + rx2 * (y - 1) * (y - 1) - rx2 * ry2
+            while y >= 0:
+                ok = ok and self._dispatch_metal_rect_filled(cx + x, cy + y, 1, 1, color)
+                ok = ok and self._dispatch_metal_rect_filled(cx - x, cy + y, 1, 1, color)
+                ok = ok and self._dispatch_metal_rect_filled(cx + x, cy - y, 1, 1, color)
+                ok = ok and self._dispatch_metal_rect_filled(cx - x, cy - y, 1, 1, color)
+                y = y - 1
+                py = py - 2 * rx2
+                if d2 > 0:
+                    d2 = d2 + rx2 - py
+                else:
+                    x = x + 1
+                    px = px + 2 * ry2
+                    d2 = d2 + ry2 - py + px + rx2
+            self._record_gpu_dispatch(ok)
+            self.dirty = true
+        else:
+            var temp = self._prepare_software_replay()
+            temp.draw_ellipse(cx, cy, rx, ry, color)
+            if not self._finish_software_replay(temp):
+                self.gpu_frame_complete = false
 
     me draw_ellipse_filled(cx: i32, cy: i32, rx: i32, ry: i32, color: u32):
-        self.mirror.draw_ellipse_filled(cx, cy, rx, ry, color)
-        self.gpu_frame_complete = false
+        if not self.strict_gpu_only:
+            self.mirror.draw_ellipse_filled(cx, cy, rx, ry, color)
+        if self._strict_replay_required():
+            var temp = self._prepare_software_replay()
+            temp.draw_ellipse_filled(cx, cy, rx, ry, color)
+            if not self._finish_software_replay(temp):
+                self.gpu_frame_complete = false
+            return
+        if self.initialized and self.d_framebuffer != 0 and self.session.pipe_ellipse_filled != 0:
+            self._record_gpu_dispatch(self._dispatch_metal_ellipse_filled(cx, cy, rx, ry, color))
+            self.dirty = true
+        else:
+            var temp = self._prepare_software_replay()
+            temp.draw_ellipse_filled(cx, cy, rx, ry, color)
+            if not self._finish_software_replay(temp):
+                self.gpu_frame_complete = false
 
     me draw_arc(cx: i32, cy: i32, r: i32, start_deg: i32, end_deg: i32, color: u32, thickness: i32):
-        self.mirror.draw_arc(cx, cy, r, start_deg, end_deg, color, thickness)
-        self.gpu_frame_complete = false
+        if not self.strict_gpu_only:
+            self.mirror.draw_arc(cx, cy, r, start_deg, end_deg, color, thickness)
+        var temp = self._prepare_software_replay()
+        temp.draw_arc(cx, cy, r, start_deg, end_deg, color, thickness)
+        if not self._finish_software_replay(temp):
+            self.gpu_frame_complete = false
 
     me draw_bezier(x1: i32, y1: i32, cx1: i32, cy1: i32, cx2: i32, cy2: i32, x2: i32, y2: i32, color: u32, thickness: i32):
-        self.mirror.draw_bezier(x1, y1, cx1, cy1, cx2, cy2, x2, y2, color, thickness)
-        self.gpu_frame_complete = false
+        if not self.strict_gpu_only:
+            self.mirror.draw_bezier(x1, y1, cx1, cy1, cx2, cy2, x2, y2, color, thickness)
+        var temp = self._prepare_software_replay()
+        temp.draw_bezier(x1, y1, cx1, cy1, cx2, cy2, x2, y2, color, thickness)
+        if not self._finish_software_replay(temp):
+            self.gpu_frame_complete = false
 
     me draw_polygon_filled(xs: [i32], ys: [i32], count: i32, color: u32):
-        self.mirror.draw_polygon_filled(xs, ys, count, color)
-        self.gpu_frame_complete = false
+        if not self.strict_gpu_only:
+            self.mirror.draw_polygon_filled(xs, ys, count, color)
+        var temp = self._prepare_software_replay()
+        temp.draw_polygon_filled(xs, ys, count, color)
+        if not self._finish_software_replay(temp):
+            self.gpu_frame_complete = false
 
     me draw_polyline(xs: [i32], ys: [i32], count: i32, color: u32, thickness: i32):
-        self.mirror.draw_polyline(xs, ys, count, color, thickness)
-        self.gpu_frame_complete = false
+        if not self.strict_gpu_only:
+            self.mirror.draw_polyline(xs, ys, count, color, thickness)
+        if count < 2:
+            return
+        if self._strict_replay_required():
+            var temp = self._prepare_software_replay()
+            temp.draw_polyline(xs, ys, count, color, thickness)
+            if not self._finish_software_replay(temp):
+                self.gpu_frame_complete = false
+            self.dirty = true
+            return
+        if self.initialized and self.d_framebuffer != 0 and self.session.pipe_line != 0:
+            var ok = true
+            var i = 0
+            while i < count - 1:
+                ok = ok and self._dispatch_metal_line(xs[i], ys[i], xs[i + 1], ys[i + 1], color, thickness)
+                i = i + 1
+            self._record_gpu_dispatch(ok)
+            self.dirty = true
+        else:
+            self.gpu_frame_complete = false
 
     me draw_rect_thick(x: i32, y: i32, w: i32, h: i32, color: u32, thickness: i32):
-        self.mirror.draw_rect_thick(x, y, w, h, color, thickness)
-        self.gpu_frame_complete = false
+        if not self.strict_gpu_only:
+            self.mirror.draw_rect_thick(x, y, w, h, color, thickness)
+        if w <= 0 or h <= 0 or thickness <= 0:
+            return
+        if self._strict_replay_required():
+            var temp = self._prepare_software_replay()
+            temp.draw_rect_thick(x, y, w, h, color, thickness)
+            if not self._finish_software_replay(temp):
+                self.gpu_frame_complete = false
+            self.dirty = true
+            return
+        var t = thickness
+        val max_t_w = w / 2
+        val max_t_h = h / 2
+        if t > max_t_w:
+            t = max_t_w
+        if t > max_t_h:
+            t = max_t_h
+        if t <= 0:
+            return
+        if self.initialized and self.d_framebuffer != 0 and self.session.pipe_rect_filled != 0:
+            var ok = true
+            ok = ok and self._dispatch_metal_rect_filled(x, y, w, t, color)
+            if h > t:
+                ok = ok and self._dispatch_metal_rect_filled(x, y + h - t, w, t, color)
+            val inner_h = h - 2 * t
+            if inner_h > 0:
+                ok = ok and self._dispatch_metal_rect_filled(x, y + t, t, inner_h, color)
+                if w > t:
+                    ok = ok and self._dispatch_metal_rect_filled(x + w - t, y + t, t, inner_h, color)
+            self._record_gpu_dispatch(ok)
+            self.dirty = true
+        else:
+            self.gpu_frame_complete = false
 
     me draw_circle_thick(cx: i32, cy: i32, r: i32, color: u32, thickness: i32):
-        self.mirror.draw_circle_thick(cx, cy, r, color, thickness)
-        self.gpu_frame_complete = false
+        if not self.strict_gpu_only:
+            self.mirror.draw_circle_thick(cx, cy, r, color, thickness)
+        if self._strict_replay_required():
+            var temp = self._prepare_software_replay()
+            temp.draw_circle_thick(cx, cy, r, color, thickness)
+            if not self._finish_software_replay(temp):
+                self.gpu_frame_complete = false
+            return
+        if self.initialized and self.d_framebuffer != 0 and self.session.pipe_rect_filled != 0:
+            if r <= 0:
+                self._record_gpu_dispatch(self._dispatch_metal_rect_filled(cx, cy, 1, 1, color))
+                self.dirty = true
+                return
+            val r_outer = r
+            val r_inner = if r - thickness > 0: r - thickness else: 0
+            val r_outer_sq = r_outer * r_outer
+            val r_inner_sq = r_inner * r_inner
+            var ok = true
+            var py: i32 = -r_outer
+            while py <= r_outer:
+                var px: i32 = -r_outer
+                while px <= r_outer:
+                    val dist_sq = px * px + py * py
+                    if dist_sq <= r_outer_sq and dist_sq >= r_inner_sq:
+                        ok = ok and self._dispatch_metal_rect_filled(cx + px, cy + py, 1, 1, color)
+                    px = px + 1
+                py = py + 1
+            self._record_gpu_dispatch(ok)
+            self.dirty = true
+        else:
+            var temp = self._prepare_software_replay()
+            temp.draw_circle_thick(cx, cy, r, color, thickness)
+            if not self._finish_software_replay(temp):
+                self.gpu_frame_complete = false
 
     me draw_rounded_rect_outline(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32, thickness: i32):
-        self.mirror.draw_rounded_rect_outline(x, y, w, h, radius, color, thickness)
-        self.gpu_frame_complete = false
+        if not self.strict_gpu_only:
+            self.mirror.draw_rounded_rect_outline(x, y, w, h, radius, color, thickness)
+        if self._strict_replay_required():
+            var temp = self._prepare_software_replay()
+            temp.draw_rounded_rect_outline(x, y, w, h, radius, color, thickness)
+            if not self._finish_software_replay(temp):
+                self.gpu_frame_complete = false
+            return
+        if self.initialized and self.d_framebuffer != 0 and self.session.pipe_rect_filled != 0:
+            if w <= 0 or h <= 0:
+                return
+            var r = radius
+            if r > w / 2:
+                r = w / 2
+            if r > h / 2:
+                r = h / 2
+            val t = thickness
+            var ok = true
+            ok = ok and self._dispatch_metal_rect_filled(x + r, y, w - 2 * r, t, color)
+            ok = ok and self._dispatch_metal_rect_filled(x + r, y + h - t, w - 2 * r, t, color)
+            ok = ok and self._dispatch_metal_rect_filled(x, y + r, t, h - 2 * r, color)
+            ok = ok and self._dispatch_metal_rect_filled(x + w - t, y + r, t, h - 2 * r, color)
+            ok = ok and _metal_draw_thick_corner_arc(self, x + r, y + r, r, t, color, -1, -1)
+            ok = ok and _metal_draw_thick_corner_arc(self, x + w - r - 1, y + r, r, t, color, 1, -1)
+            ok = ok and _metal_draw_thick_corner_arc(self, x + r, y + h - r - 1, r, t, color, -1, 1)
+            ok = ok and _metal_draw_thick_corner_arc(self, x + w - r - 1, y + h - r - 1, r, t, color, 1, 1)
+            self._record_gpu_dispatch(ok)
+            self.dirty = true
+        else:
+            var temp = self._prepare_software_replay()
+            temp.draw_rounded_rect_outline(x, y, w, h, radius, color, thickness)
+            if not self._finish_software_replay(temp):
+                self.gpu_frame_complete = false
 
     me draw_gradient_rect_h(x: i32, y: i32, w: i32, h: i32, left_color: u32, right_color: u32):
-        self.mirror.draw_gradient_rect_h(x, y, w, h, left_color, right_color)
-        self.gpu_frame_complete = false
+        if not self.strict_gpu_only:
+            self.mirror.draw_gradient_rect_h(x, y, w, h, left_color, right_color)
+        if self._strict_replay_required():
+            var temp = self._prepare_software_replay()
+            temp.draw_gradient_rect_h(x, y, w, h, left_color, right_color)
+            if not self._finish_software_replay(temp):
+                self.gpu_frame_complete = false
+            self.dirty = true
+            return
+        if self.initialized and self.d_framebuffer != 0 and self.session.pipe_gradient_h != 0:
+            self._record_gpu_dispatch(self._dispatch_metal_gradient_rect_h(x, y, w, h, left_color, right_color))
+            self.dirty = true
+        else:
+            self.gpu_frame_complete = false
 
     me draw_radial_gradient(cx: i32, cy: i32, r: i32, center_color: u32, edge_color: u32):
-        self.mirror.draw_radial_gradient(cx, cy, r, center_color, edge_color)
-        self.gpu_frame_complete = false
+        if not self.strict_gpu_only:
+            self.mirror.draw_radial_gradient(cx, cy, r, center_color, edge_color)
+        if self._strict_replay_required():
+            var temp = self._prepare_software_replay()
+            temp.draw_radial_gradient(cx, cy, r, center_color, edge_color)
+            if not self._finish_software_replay(temp):
+                self.gpu_frame_complete = false
+            self.dirty = true
+            return
+        if self.initialized and self.d_framebuffer != 0 and self.session.pipe_radial_gradient != 0:
+            self._record_gpu_dispatch(self._dispatch_metal_radial_gradient(cx, cy, r, center_color, edge_color))
+            self.dirty = true
+        else:
+            self.gpu_frame_complete = false
 
     me draw_rect_blend(x: i32, y: i32, w: i32, h: i32, color: u32):
-        self.mirror.draw_rect_blend(x, y, w, h, color)
-        self.gpu_frame_complete = false
+        if not self.strict_gpu_only:
+            self.mirror.draw_rect_blend(x, y, w, h, color)
+        if self._strict_replay_required():
+            var temp = self._prepare_software_replay()
+            temp.draw_rect_blend(x, y, w, h, color)
+            if not self._finish_software_replay(temp):
+                self.gpu_frame_complete = false
+            self.dirty = true
+            return
+        if self.initialized and self.d_framebuffer != 0 and self.session.pipe_rect_blend != 0:
+            self._record_gpu_dispatch(self._dispatch_metal_rect_blend(x, y, w, h, color))
+            self.dirty = true
+        else:
+            self.gpu_frame_complete = false
 
     me draw_image_blend(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
-        self.mirror.draw_image_blend(x, y, w, h, pixels)
-        self.gpu_frame_complete = false
+        if not self.strict_gpu_only:
+            self.mirror.draw_image_blend(x, y, w, h, pixels)
+        if w <= 0 or h <= 0 or pixels.len() < w * h:
+            return
+        if self._strict_replay_required():
+            var temp = self._prepare_software_replay()
+            temp.draw_image_blend(x, y, w, h, pixels)
+            if not self._finish_software_replay(temp):
+                self.gpu_frame_complete = false
+            self.dirty = true
+            return
+        if self.initialized and self.d_framebuffer != 0 and self.session.pipe_image_blend != 0:
+            val pixel_count = w * h
+            val byte_size = _metal_i64(pixel_count) * 4
+            val d_src = self.session.alloc(byte_size)
+            if d_src == 0:
+                self.gpu_frame_complete = false
+                return
+            val src_bytes = _metal_pixels_to_le_bytes(pixels, pixel_count)
+            if src_bytes.len() != pixel_count * 4:
+                self.session.free(d_src)
+                self.gpu_frame_complete = false
+                return
+            if not self.session.upload_buffer_bytes(d_src, src_bytes):
+                self.session.free(d_src)
+                self.gpu_frame_complete = false
+                return
+            val ok = self._dispatch_metal_image_blend(x, y, w, h, d_src)
+            self.session.free(d_src)
+            self._record_gpu_dispatch(ok)
+            self.dirty = true
+        else:
+            self.gpu_frame_complete = false
 
     me draw_image_scaled(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
-        self.mirror.draw_image_scaled(dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
-        self.gpu_frame_complete = false
+        if not self.strict_gpu_only:
+            self.mirror.draw_image_scaled(dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
+        val scaled = _metal_scale_image_pixels(dst_w, dst_h, src_w, src_h, pixels)
+        if scaled.len() != dst_w * dst_h:
+            self.gpu_frame_complete = false
+            return
+        self.draw_image(dst_x, dst_y, dst_w, dst_h, scaled)
 
     me draw_triangle_outline(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32, thickness: i32):
-        self.mirror.draw_triangle_outline(x1, y1, x2, y2, x3, y3, color, thickness)
-        self.gpu_frame_complete = false
+        if not self.strict_gpu_only:
+            self.mirror.draw_triangle_outline(x1, y1, x2, y2, x3, y3, color, thickness)
+        if self._strict_replay_required():
+            var temp = self._prepare_software_replay()
+            temp.draw_triangle_outline(x1, y1, x2, y2, x3, y3, color, thickness)
+            if not self._finish_software_replay(temp):
+                self.gpu_frame_complete = false
+            self.dirty = true
+            return
+        if self.initialized and self.d_framebuffer != 0 and self.session.pipe_line != 0:
+            var ok = true
+            ok = ok and self._dispatch_metal_line(x1, y1, x2, y2, color, thickness)
+            ok = ok and self._dispatch_metal_line(x2, y2, x3, y3, color, thickness)
+            ok = ok and self._dispatch_metal_line(x3, y3, x1, y1, color, thickness)
+            self._record_gpu_dispatch(ok)
+            self.dirty = true
+        else:
+            self.gpu_frame_complete = false
 
     me draw_blur_rect(x: i32, y: i32, w: i32, h: i32, radius: i32):
-        self.mirror.draw_blur_rect(x, y, w, h, radius)
-        self.gpu_frame_complete = false
+        if not self.strict_gpu_only:
+            self.mirror.draw_blur_rect(x, y, w, h, radius)
+        var temp = self._prepare_software_replay()
+        temp.draw_blur_rect(x, y, w, h, radius)
+        if not self._finish_software_replay(temp):
+            self.gpu_frame_complete = false
 
     me draw_shadow_rect(x: i32, y: i32, w: i32, h: i32, offset_x: i32, offset_y: i32, blur_r: i32, color: u32):
-        self.mirror.draw_shadow_rect(x, y, w, h, offset_x, offset_y, blur_r, color)
-        self.gpu_frame_complete = false
+        if not self.strict_gpu_only:
+            self.mirror.draw_shadow_rect(x, y, w, h, offset_x, offset_y, blur_r, color)
+        var temp = self._prepare_software_replay()
+        temp.draw_shadow_rect(x, y, w, h, offset_x, offset_y, blur_r, color)
+        if not self._finish_software_replay(temp):
+            self.gpu_frame_complete = false
 
     me draw_image_transform(dst_x: i32, dst_y: i32, src_w: i32, src_h: i32, a: i32, b: i32, c: i32, d: i32, tx: i32, ty: i32, pixels: [u32]):
-        self.mirror.draw_image_transform(dst_x, dst_y, src_w, src_h, a, b, c, d, tx, ty, pixels)
-        self.gpu_frame_complete = false
+        if not self.strict_gpu_only:
+            self.mirror.draw_image_transform(dst_x, dst_y, src_w, src_h, a, b, c, d, tx, ty, pixels)
+        var temp = self._prepare_software_replay()
+        temp.draw_image_transform(dst_x, dst_y, src_w, src_h, a, b, c, d, tx, ty, pixels)
+        if not self._finish_software_replay(temp):
+            self.gpu_frame_complete = false
 
     me draw_rect_blend_mode(x: i32, y: i32, w: i32, h: i32, color: u32, mode: i32):
-        self.mirror.draw_rect_blend(x, y, w, h, color)
-        self.gpu_frame_complete = false
+        if not self.strict_gpu_only:
+            self.mirror.draw_rect_blend(x, y, w, h, color)
+        if self._strict_replay_required():
+            var temp = self._prepare_software_replay()
+            temp.draw_rect_blend_mode(x, y, w, h, color, mode)
+            if not self._finish_software_replay(temp):
+                self.gpu_frame_complete = false
+            self.dirty = true
+            return
+        if mode == 0:
+            self.draw_rect_blend(x, y, w, h, color)
+            return
+        if self.initialized and self.d_framebuffer != 0 and self.session.pipe_rect_blend_mode != 0 and mode >= 1 and mode <= 3:
+            self._record_gpu_dispatch(self._dispatch_metal_rect_blend_mode(x, y, w, h, color, mode))
+            self.dirty = true
+        else:
+            self.gpu_frame_complete = false

@@ -1,6 +1,6 @@
 # Backend Matrix Specification
 
-> 1. print probe
+> <details>
 
 <!-- sdn-diagram:id=backend_matrix_spec.arch -->
 <details class="sdn-source">
@@ -42,7 +42,7 @@ backend_matrix_spec -> std
 
 #### cuda probe — HARDWARE_PASS, UNAVAILABLE, or FAILED
 
-1. print probe
+- print probe
    - Expected: ok is true
 
 
@@ -64,7 +64,7 @@ expect(ok).to_equal(true)
 
 #### vulkan probe — HARDWARE_PASS, UNAVAILABLE, or FAILED
 
-1. print probe
+- print probe
    - Expected: ok is true
 
 
@@ -86,7 +86,7 @@ expect(ok).to_equal(true)
 
 #### metal probe — HARDWARE_PASS, UNAVAILABLE, or FAILED
 
-1. print probe
+- print probe
    - Expected: ok is true
 
 
@@ -108,7 +108,7 @@ expect(ok).to_equal(true)
 
 #### rocm probe — HARDWARE_PASS, UNAVAILABLE, or FAILED
 
-1. print probe
+- print probe
    - Expected: ok is true
 
 
@@ -130,7 +130,7 @@ expect(ok).to_equal(true)
 
 #### intel probe — HARDWARE_PASS, UNAVAILABLE, or FAILED
 
-1. print probe
+- print probe
    - Expected: ok is true
 
 
@@ -152,7 +152,7 @@ expect(ok).to_equal(true)
 
 #### qualcomm probe — HARDWARE_PASS, UNAVAILABLE, or FAILED
 
-1. print probe
+- print probe
    - Expected: ok is true
 
 
@@ -174,7 +174,7 @@ expect(ok).to_equal(true)
 
 #### webgpu probe — HARDWARE_PASS, UNAVAILABLE, or FAILED
 
-1. print probe
+- print probe
    - Expected: ok is true
 
 
@@ -196,7 +196,7 @@ expect(ok).to_equal(true)
 
 #### opengl probe — HARDWARE_PASS, UNAVAILABLE, or FAILED
 
-1. print probe
+- print probe
    - Expected: ok is true
 
 
@@ -220,7 +220,7 @@ expect(ok).to_equal(true)
 
 #### software probe — SOFTWARE_PASS or FAILED
 
-1. print probe
+- print probe
    - Expected: ok is true
 
 
@@ -244,7 +244,7 @@ expect(ok).to_equal(true)
 
 #### cpu probe always passes
 
-1. print probe
+- print probe
    - Expected: label equals `SOFTWARE_PASS`
 
 
@@ -265,8 +265,8 @@ expect(label).to_equal("SOFTWARE_PASS")
 
 #### cpu strict result is not Err
 
-1. var eng = r unwrap
-2. eng shutdown
+- var eng = r unwrap
+- eng shutdown
 
 
 <details>
@@ -361,7 +361,7 @@ if not r.is_ok():
 
 #### unknown backend returns Err not cpu
 
-1. print probe
+- print probe
    - Expected: probe.requested_name equals `does-not-exist`
 
 
@@ -402,7 +402,7 @@ if not r.is_ok():
 
 #### failed probe includes fallback_reason when unavailable
 
-1. var reason present = probe fallback reason len
+- var reason present = probe fallback reason len
    - Expected: reason_present is true
 
 
@@ -425,8 +425,8 @@ if not r.is_ok():
 
 #### diagnostic_text contains requested and selected fields
 
-1. var has requested = diag contains
-2. var has selected = diag contains
+- var has requested = diag contains
+- var has selected = diag contains
    - Expected: has_requested is true
    - Expected: has_selected is true
 

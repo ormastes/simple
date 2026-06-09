@@ -327,17 +327,28 @@ layout(push_constant) uniform PushConstants {
 void main() {
     int step = int(gl_GlobalInvocationID.x);
 
-    int dx = pc.x2 - pc.x1;
-    int dy = pc.y2 - pc.y1;
-    int adx = abs(dx);
-    int ady = abs(dy);
-    int steps = max(adx, ady);
+    int dx = abs(pc.x2 - pc.x1);
+    int sx = pc.x1 < pc.x2 ? 1 : -1;
+    int dy = -abs(pc.y2 - pc.y1);
+    int sy = pc.y1 < pc.y2 ? 1 : -1;
+    int steps = max(dx, -dy);
     if (steps == 0) steps = 1;
-    if (step >= steps) return;
+    if (step > steps) return;
 
-    # Interpolate position along line
-    int px = pc.x1 + (dx * step) / steps;
-    int py = pc.y1 + (dy * step) / steps;
+    int px = pc.x1;
+    int py = pc.y1;
+    int err = dx + dy;
+    for (int i = 0; i < step; i++) {
+        int e2 = 2 * err;
+        if (e2 >= dy) {
+            err += dy;
+            px += sx;
+        }
+        if (e2 <= dx) {
+            err += dx;
+            py += sy;
+        }
+    }
 
     # Draw thickness by expanding around center pixel
     int half_t = pc.thickness / 2;
@@ -548,8 +559,8 @@ void main() {
             py < pc.clip_y || py >= pc.clip_y + pc.clip_h) return;
     }
 
-    # Interpolate between top and bottom color based on row position
-    float t = (pc.rh > 1) ? float(ly) / float(pc.rh - 1) : 0.0;
+    int max_t = pc.rh - 1;
+    if (max_t < 1) max_t = 1;
 
     # Unpack top color (ARGB)
     uint ta = (pc.top_color >> 24) & 0xFFu;
@@ -563,11 +574,11 @@ void main() {
     uint bg = (pc.bottom_color >> 8) & 0xFFu;
     uint bb = pc.bottom_color & 0xFFu;
 
-    # Lerp each channel
-    uint oa = uint(mix(float(ta), float(ba), t));
-    uint or_ = uint(mix(float(tr), float(br), t));
-    uint og = uint(mix(float(tg), float(bg), t));
-    uint ob = uint(mix(float(tb), float(bb), t));
+    # Integer lerp to match software/Metal parity exactly.
+    uint oa = ta + uint((int(ba) - int(ta)) * ly / max_t);
+    uint or_ = tr + uint((int(br) - int(tr)) * ly / max_t);
+    uint og = tg + uint((int(bg) - int(tg)) * ly / max_t);
+    uint ob = tb + uint((int(bb) - int(tb)) * ly / max_t);
 
     uint result = (oa << 24) | (or_ << 16) | (og << 8) | ob;
     uint idx = uint(py) * uint(pc.fb_w) + uint(px);

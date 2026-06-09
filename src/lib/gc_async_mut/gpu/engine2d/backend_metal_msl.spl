@@ -28,6 +28,12 @@ fn _engine2d_msl() -> text:
     - kernel_draw_rounded_rect: Rounded-rect outline (edges + corner arcs)
     - kernel_draw_triangle_filled: Barycentric triangle fill
     - kernel_draw_gradient_rect: Vertical gradient fill
+    - kernel_draw_gradient_rect_h: Horizontal gradient fill
+    - kernel_draw_radial_gradient: Radial gradient fill
+    - kernel_draw_ellipse_filled: Filled ellipse
+    - kernel_draw_rect_blend: Alpha-blended rect fill
+    - kernel_draw_rect_blend_mode: Blend-mode rect fill
+    - kernel_blend_image: Alpha-blended source image copy
     - kernel_blit_image: Copy source pixels to framebuffer region
     """
     r"""
@@ -118,6 +124,37 @@ struct BlitParams {
     int fb_h;
 };
 
+struct RadialGradientParams {
+    int cx;
+    int cy;
+    int r;
+    uint center_color;
+    uint edge_color;
+    int fb_w;
+    int fb_h;
+};
+
+struct EllipseParams {
+    int cx;
+    int cy;
+    int rx;
+    int ry;
+    uint color;
+    int fb_w;
+    int fb_h;
+};
+
+struct BlendModeRectParams {
+    int x;
+    int y;
+    int w;
+    int h;
+    uint color;
+    int fb_w;
+    int fb_h;
+    int mode;
+};
+
 // ---- Helper: extract ARGB channels ----
 
 static inline uint4 unpack_argb(uint c) {
@@ -136,6 +173,39 @@ static inline uint pack_argb(uint r, uint g, uint b, uint a) {
 static inline uint lerp_channel(uint a, uint b, int t, int max_t) {
     if (max_t <= 0) return a;
     return (uint)((int)a + ((int)b - (int)a) * t / max_t);
+}
+
+static inline uint blend_over_color(uint src, uint dst) {
+    uint sa = (src >> 24) & 0xFF;
+    if (sa == 255) return src;
+    if (sa == 0) return dst;
+    uint inv = 255 - sa;
+    uint sr = (src >> 16) & 0xFF;
+    uint sg = (src >> 8) & 0xFF;
+    uint sb = src & 0xFF;
+    uint dr = (dst >> 16) & 0xFF;
+    uint dg = (dst >> 8) & 0xFF;
+    uint db = dst & 0xFF;
+    uint r = (sr * sa + dr * inv) / 255;
+    uint g = (sg * sa + dg * inv) / 255;
+    uint b = (sb * sa + db * inv) / 255;
+    return (0xFFu << 24) | (r << 16) | (g << 8) | b;
+}
+
+static inline uint overlay_channel(uint s, uint d) {
+    if (d < 128u) return (2u * s * d) / 255u;
+    return 255u - (2u * (255u - s) * (255u - d)) / 255u;
+}
+
+static inline int isqrt_i32(int n) {
+    if (n <= 0) return 0;
+    int x = n;
+    int y = (x + 1) / 2;
+    while (y < x) {
+        x = y;
+        y = (x + n / x) / 2;
+    }
+    return x;
 }
 
 // Bounds-checked single-pixel write (mirrors CPU sw_set_pixel framebuffer clip).
@@ -449,6 +519,240 @@ kernel void kernel_draw_gradient_rect(
 
     int idx = py * p.fb_w + px;
     fb[idx] = c;
+}
+
+// ---- kernel_draw_gradient_rect_h ----
+
+kernel void kernel_draw_gradient_rect_h(
+    device uint* fb               [[buffer(0)]],
+    constant GradientParams& p    [[buffer(1)]],
+    uint2 tid                     [[thread_position_in_grid]]
+) {
+    int lx = (int)tid.x;
+    int ly = (int)tid.y;
+    if (lx >= p.w || ly >= p.h) return;
+
+    uint4 lc = unpack_argb(p.top_color);
+    uint4 rc = unpack_argb(p.bottom_color);
+    int max_t = p.w - 1;
+    if (max_t < 1) max_t = 1;
+
+    uint r = lerp_channel(lc.x, rc.x, lx, max_t);
+    uint g = lerp_channel(lc.y, rc.y, lx, max_t);
+    uint b = lerp_channel(lc.z, rc.z, lx, max_t);
+    uint a = lerp_channel(lc.w, rc.w, lx, max_t);
+    uint c = pack_argb(r, g, b, a);
+
+    int px = p.x + lx;
+    int py = p.y + ly;
+    if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
+
+    int idx = py * p.fb_w + px;
+    fb[idx] = c;
+}
+
+// ---- kernel_draw_radial_gradient ----
+
+kernel void kernel_draw_radial_gradient(
+    device uint* fb                     [[buffer(0)]],
+    constant RadialGradientParams& p    [[buffer(1)]],
+    uint2 tid                           [[thread_position_in_grid]]
+) {
+    int lx = (int)tid.x;
+    int ly = (int)tid.y;
+    int span = p.r * 2 + 1;
+    if (lx >= span || ly >= span) return;
+
+    int px_rel = lx - p.r;
+    int py_rel = ly - p.r;
+    int dist_sq = px_rel * px_rel + py_rel * py_rel;
+    int r_sq = p.r * p.r;
+    if (dist_sq > r_sq) return;
+
+    uint4 cc = unpack_argb(p.center_color);
+    uint4 ec = unpack_argb(p.edge_color);
+    int dist = isqrt_i32(dist_sq);
+    int max_t = p.r;
+    if (max_t < 1) max_t = 1;
+
+    uint r = lerp_channel(cc.x, ec.x, dist, max_t);
+    uint g = lerp_channel(cc.y, ec.y, dist, max_t);
+    uint b = lerp_channel(cc.z, ec.z, dist, max_t);
+    uint a = lerp_channel(cc.w, ec.w, dist, max_t);
+    uint c = pack_argb(r, g, b, a);
+
+    int px = p.cx + px_rel;
+    int py = p.cy + py_rel;
+    if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
+
+    int idx = py * p.fb_w + px;
+    fb[idx] = c;
+}
+
+// ---- kernel_draw_ellipse_filled ----
+
+kernel void kernel_draw_ellipse_filled(
+    device uint* fb              [[buffer(0)]],
+    constant EllipseParams& p    [[buffer(1)]],
+    uint tid                     [[thread_position_in_grid]]
+) {
+    if (p.rx <= 0 || p.ry <= 0) {
+        if (tid == 0 && p.cx >= 0 && p.cx < p.fb_w && p.cy >= 0 && p.cy < p.fb_h) {
+            fb[p.cy * p.fb_w + p.cx] = p.color;
+        }
+        return;
+    }
+
+    int target = (int)tid;
+    int x = 0;
+    int y = p.ry;
+    int rx2 = p.rx * p.rx;
+    int ry2 = p.ry * p.ry;
+    int px = 0;
+    int py = 2 * rx2 * y;
+    int d1 = ry2 - rx2 * p.ry + rx2 / 4;
+    int step = 0;
+
+    while (px < py) {
+        if (step == target) {
+            for (int dx = -x; dx <= x; dx++) {
+                int px1 = p.cx + dx;
+                int py1 = p.cy + y;
+                int py2 = p.cy - y;
+                if (px1 >= 0 && px1 < p.fb_w) {
+                    if (py1 >= 0 && py1 < p.fb_h) fb[py1 * p.fb_w + px1] = p.color;
+                    if (py2 >= 0 && py2 < p.fb_h) fb[py2 * p.fb_w + px1] = p.color;
+                }
+            }
+            return;
+        }
+        x += 1;
+        px += 2 * ry2;
+        if (d1 < 0) {
+            d1 = d1 + ry2 + px;
+        } else {
+            y -= 1;
+            py -= 2 * rx2;
+            d1 = d1 + ry2 + px - py;
+        }
+        step += 1;
+    }
+
+    int d2 = ry2 * (2 * x + 1) * (2 * x + 1) / 4 + rx2 * (y - 1) * (y - 1) - rx2 * ry2;
+    while (y >= 0) {
+        if (step == target) {
+            for (int dx = -x; dx <= x; dx++) {
+                int px1 = p.cx + dx;
+                int py1 = p.cy + y;
+                int py2 = p.cy - y;
+                if (px1 >= 0 && px1 < p.fb_w) {
+                    if (py1 >= 0 && py1 < p.fb_h) fb[py1 * p.fb_w + px1] = p.color;
+                    if (py2 >= 0 && py2 < p.fb_h) fb[py2 * p.fb_w + px1] = p.color;
+                }
+            }
+            return;
+        }
+        y -= 1;
+        py -= 2 * rx2;
+        if (d2 > 0) {
+            d2 = d2 + rx2 - py;
+        } else {
+            x += 1;
+            px += 2 * ry2;
+            d2 = d2 + ry2 - py + px + rx2;
+        }
+        step += 1;
+    }
+}
+
+// ---- kernel_draw_rect_blend ----
+
+kernel void kernel_draw_rect_blend(
+    device uint* fb            [[buffer(0)]],
+    constant RectParams& p     [[buffer(1)]],
+    uint2 tid                  [[thread_position_in_grid]]
+) {
+    int lx = (int)tid.x;
+    int ly = (int)tid.y;
+    if (lx >= p.w || ly >= p.h) return;
+
+    int px = p.x + lx;
+    int py = p.y + ly;
+    if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
+
+    int idx = py * p.fb_w + px;
+    fb[idx] = blend_over_color(p.color, fb[idx]);
+}
+
+// ---- kernel_draw_rect_blend_mode ----
+
+kernel void kernel_draw_rect_blend_mode(
+    device uint* fb                     [[buffer(0)]],
+    constant BlendModeRectParams& p     [[buffer(1)]],
+    uint2 tid                           [[thread_position_in_grid]]
+) {
+    int lx = (int)tid.x;
+    int ly = (int)tid.y;
+    if (lx >= p.w || ly >= p.h) return;
+
+    int px = p.x + lx;
+    int py = p.y + ly;
+    if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
+
+    int idx = py * p.fb_w + px;
+    uint dst = fb[idx];
+    uint sa = (p.color >> 24) & 0xFFu;
+    uint sr = (p.color >> 16) & 0xFFu;
+    uint sg = (p.color >> 8) & 0xFFu;
+    uint sb = p.color & 0xFFu;
+    uint dr = (dst >> 16) & 0xFFu;
+    uint dg = (dst >> 8) & 0xFFu;
+    uint db = dst & 0xFFu;
+    uint da = (dst >> 24) & 0xFFu;
+
+    uint rr = sr;
+    uint rg = sg;
+    uint rb = sb;
+    if (p.mode == 1) {
+        rr = (sr * dr) / 255u;
+        rg = (sg * dg) / 255u;
+        rb = (sb * db) / 255u;
+    } else if (p.mode == 2) {
+        rr = 255u - ((255u - sr) * (255u - dr)) / 255u;
+        rg = 255u - ((255u - sg) * (255u - dg)) / 255u;
+        rb = 255u - ((255u - sb) * (255u - db)) / 255u;
+    } else if (p.mode == 3) {
+        rr = overlay_channel(sr, dr);
+        rg = overlay_channel(sg, dg);
+        rb = overlay_channel(sb, db);
+    }
+
+    uint out_r = dr + ((int(rr) - int(dr)) * int(sa)) / 255;
+    uint out_g = dg + ((int(rg) - int(dg)) * int(sa)) / 255;
+    uint out_b = db + ((int(rb) - int(db)) * int(sa)) / 255;
+    uint out_a = sa > da ? sa : da;
+    fb[idx] = pack_argb(out_r, out_g, out_b, out_a);
+}
+
+// ---- kernel_blend_image ----
+
+kernel void kernel_blend_image(
+    device uint* fb             [[buffer(0)]],
+    constant BlitParams& p      [[buffer(1)]],
+    device const uint* src      [[buffer(2)]],
+    uint2 tid                   [[thread_position_in_grid]]
+) {
+    int lx = (int)tid.x;
+    int ly = (int)tid.y;
+    if (lx >= p.w || ly >= p.h) return;
+
+    int px = p.x + lx;
+    int py = p.y + ly;
+    if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
+
+    int src_idx = ly * p.w + lx;
+    int dst_idx = py * p.fb_w + px;
+    fb[dst_idx] = blend_over_color(src[src_idx], fb[dst_idx]);
 }
 
 // ---- kernel_blit_image ----

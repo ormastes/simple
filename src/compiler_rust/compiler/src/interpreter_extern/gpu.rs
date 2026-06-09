@@ -1206,8 +1206,9 @@ pub fn rt_cuda_module_get_function_fn(args: &[Value]) -> Result<Value, CompileEr
         if let Some(fns) = get_cuda_dl() {
             let c_name = c_string_or_error(func_name, "rt_cuda_module_get_function")?;
             let mut func: *mut std::os::raw::c_void = std::ptr::null_mut();
-            let r =
-                unsafe { (fns.module_get_function)(&mut func, module as *mut std::os::raw::c_void, c_name.as_ptr().cast()) };
+            let r = unsafe {
+                (fns.module_get_function)(&mut func, module as *mut std::os::raw::c_void, c_name.as_ptr().cast())
+            };
             if r == 0 {
                 return Ok(Value::Int(func as i64));
             }
@@ -1247,8 +1248,9 @@ pub fn rt_cuda_launch_kernel_fn(args: &[Value]) -> Result<Value, CompileError> {
         if let Some(fns) = get_cuda_dl() {
             let c_name = c_string_or_error(func_name, "rt_cuda_launch_kernel")?;
             let mut func: *mut std::os::raw::c_void = std::ptr::null_mut();
-            let r =
-                unsafe { (fns.module_get_function)(&mut func, module as *mut std::os::raw::c_void, c_name.as_ptr().cast()) };
+            let r = unsafe {
+                (fns.module_get_function)(&mut func, module as *mut std::os::raw::c_void, c_name.as_ptr().cast())
+            };
             if r != 0 {
                 return Ok(Value::Int(-(r as i64)));
             }
@@ -2557,6 +2559,7 @@ mod vulkan_dlopen {
         pub pipeline: VkPipeline,
         pub layout: VkPipelineLayout,
         pub dsl: VkDescriptorSetLayout,
+        pub descriptor_binding_count: u32,
         pub push_constant_size: u32,
     }
 
@@ -2581,6 +2584,7 @@ mod vulkan_dlopen {
         pub mem_props: VkPhysicalDeviceMemoryProperties,
         pub buffers: Vec<Option<BufferEntry>>,
         pub shaders: Vec<Option<VkShaderModule>>,
+        pub shader_binding_counts: Vec<u32>,
         pub pipelines: Vec<Option<PipelineEntry>>,
         pub descriptor_sets: Vec<Option<DescriptorSetEntry>>,
         pub command_buffers: Vec<Option<CommandBufferEntry>>,
@@ -2604,6 +2608,31 @@ fn check_vulkan_available() -> bool {
 
 fn get_shaderc() -> Option<&'static vulkan_dlopen::ShadercFns> {
     SHADERC_DL.get_or_init(vulkan_dlopen::load_shaderc).as_ref()
+}
+
+fn spirv_storage_buffer_binding_count(words: &[u32]) -> u32 {
+    let mut max_binding: Option<u32> = None;
+    let mut i: usize = 5;
+    while i < words.len() {
+        let val = words[i];
+        let word_count = (val >> 16) as usize;
+        let opcode = (val & 0xFFFF) as u16;
+        if word_count == 0 {
+            break;
+        }
+        if opcode == 71 && word_count >= 4 {
+            let decoration = words[i + 2];
+            if decoration == 33 {
+                let binding = words[i + 3];
+                max_binding = Some(match max_binding {
+                    Some(current) if current > binding => current,
+                    _ => binding,
+                });
+            }
+        }
+        i += word_count;
+    }
+    max_binding.map(|b| b + 1).unwrap_or(1).max(1)
 }
 
 /// `rt_vulkan_is_available() -> bool`
@@ -2745,6 +2774,7 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
             mem_props,
             buffers: Vec::new(),
             shaders: Vec::new(),
+            shader_binding_counts: Vec::new(),
             pipelines: Vec::new(),
             descriptor_sets: Vec::new(),
             command_buffers: Vec::new(),
@@ -3061,6 +3091,8 @@ pub fn rt_vulkan_compile_glsl_fn(args: &[Value]) -> Result<Value, CompileError> 
         let spv_ptr = (shaderc.result_get_bytes)(result) as *const u32;
         let spv_len = (shaderc.result_get_length)(result); // bytes
         let spv_words = spv_len / 4;
+        let spv_slice = std::slice::from_raw_parts(spv_ptr, spv_words);
+        let descriptor_binding_count = spirv_storage_buffer_binding_count(spv_slice);
 
         let shader_ci = VkShaderModuleCreateInfo {
             s_type: 16,
@@ -3080,6 +3112,7 @@ pub fn rt_vulkan_compile_glsl_fn(args: &[Value]) -> Result<Value, CompileError> 
             return Ok(Value::Int(0));
         }
         s.shaders.push(Some(shader));
+        s.shader_binding_counts.push(descriptor_binding_count);
         Ok(Value::Int(s.shaders.len() as i64))
     }
 }
@@ -3102,6 +3135,7 @@ pub fn rt_vulkan_compile_spirv_fn(args: &[Value]) -> Result<Value, CompileError>
         .chunks_exact(4)
         .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
         .collect();
+    let descriptor_binding_count = spirv_storage_buffer_binding_count(&words);
 
     let mut guard = VK_STATE.lock().unwrap();
     let s = match guard.as_mut() {
@@ -3123,6 +3157,7 @@ pub fn rt_vulkan_compile_spirv_fn(args: &[Value]) -> Result<Value, CompileError>
             return Ok(Value::Int(0));
         }
         s.shaders.push(Some(shader));
+        s.shader_binding_counts.push(descriptor_binding_count);
         Ok(Value::Int(s.shaders.len() as i64))
     }
 }
@@ -3213,22 +3248,31 @@ pub fn rt_vulkan_create_compute_pipeline_fn(args: &[Value]) -> Result<Value, Com
         Some(sm) => sm,
         None => return Ok(Value::Int(0)),
     };
+    let descriptor_binding_count = s
+        .shader_binding_counts
+        .get(sh - 1)
+        .copied()
+        .unwrap_or(1)
+        .max(1);
 
     unsafe {
-        // Descriptor set layout: one storage buffer binding
-        let binding = VkDescriptorSetLayoutBinding {
-            binding: 0,
-            descriptor_type: 7, // STORAGE_BUFFER
-            descriptor_count: 1,
-            stage_flags: 0x20, // COMPUTE_BIT
-            p_immutable_samplers: ptr::null(),
-        };
+        let mut bindings: Vec<VkDescriptorSetLayoutBinding> =
+            Vec::with_capacity(descriptor_binding_count as usize);
+        for binding in 0..descriptor_binding_count {
+            bindings.push(VkDescriptorSetLayoutBinding {
+                binding,
+                descriptor_type: 7, // STORAGE_BUFFER
+                descriptor_count: 1,
+                stage_flags: 0x20, // COMPUTE_BIT
+                p_immutable_samplers: ptr::null(),
+            });
+        }
         let dsl_ci = VkDescriptorSetLayoutCreateInfo {
             s_type: 32,
             p_next: ptr::null(),
             flags: 0,
-            binding_count: 1,
-            p_bindings: &binding,
+            binding_count: bindings.len() as u32,
+            p_bindings: bindings.as_ptr(),
         };
         let mut dsl: VkDescriptorSetLayout = 0;
         if (s.fns.create_descriptor_set_layout)(s.device, &dsl_ci, ptr::null(), &mut dsl) != VK_SUCCESS {
@@ -3295,6 +3339,7 @@ pub fn rt_vulkan_create_compute_pipeline_fn(args: &[Value]) -> Result<Value, Com
             pipeline,
             layout,
             dsl,
+            descriptor_binding_count,
             push_constant_size: pc_size,
         }));
         Ok(Value::Int(s.pipelines.len() as i64))
@@ -3342,11 +3387,11 @@ pub fn rt_vulkan_create_descriptor_set_fn(args: &[Value]) -> Result<Value, Compi
     };
 
     unsafe {
-        // Create a pool large enough for multiple descriptor types/bindings
+        // Create a pool large enough for multiple storage-buffer bindings.
         let pool_sizes = [
             VkDescriptorPoolSize {
                 descriptor_type: 7,
-                descriptor_count: 16,
+                descriptor_count: 32,
             }, // STORAGE_BUFFER
         ];
         let pool_ci = VkDescriptorPoolCreateInfo {
@@ -3614,9 +3659,27 @@ pub fn rt_vulkan_dispatch_fn(args: &[Value]) -> Result<Value, CompileError> {
         None => return Ok(Value::Int(0)),
     };
     unsafe {
+        let pre_dispatch_barrier = vulkan_dlopen::VkMemoryBarrier {
+            s_type: 46, // VK_STRUCTURE_TYPE_MEMORY_BARRIER
+            p_next: ptr::null(),
+            src_access_mask: 0x4000, // VK_ACCESS_HOST_WRITE_BIT
+            dst_access_mask: 0x20 | 0x40, // VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT
+        };
+        (s.fns.cmd_pipeline_barrier)(
+            cmd,
+            0x4000, // VK_PIPELINE_STAGE_HOST_BIT
+            0x800,  // VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
+            0,
+            1,
+            &pre_dispatch_barrier,
+            0,
+            ptr::null(),
+            0,
+            ptr::null(),
+        );
         (s.fns.cmd_dispatch)(cmd, x, y, z);
         let memory_barrier = vulkan_dlopen::VkMemoryBarrier {
-            s_type: 6,
+            s_type: 46, // VK_STRUCTURE_TYPE_MEMORY_BARRIER
             p_next: ptr::null(),
             src_access_mask: 0x40,   // VK_ACCESS_SHADER_WRITE_BIT
             dst_access_mask: 0x2000, // VK_ACCESS_HOST_READ_BIT

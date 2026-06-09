@@ -41,6 +41,28 @@ than silently accepted as a CPU fallback.
 - `test/02_integration/rendering/engine2d_backend_spec.spl` covers backend
   selection, SIMD hit evidence, and strict Metal probe behavior.
 - `test/02_integration/rendering/metal_engine2d_readback_spec.spl` covers Metal
-  framebuffer readback for GPU-backed clear and filled-rectangle kernels.
+  framebuffer readback for the current direct and replay-backed strict-GPU
+  subset, including primitives, image paths, blend/gradient paths, and strict
+  stateful replay coverage.
 - `test/05_perf/graphics_2d/metal_readback_proof_spec.spl` covers raw Metal
   compute-buffer download without tolerance.
+
+For the current cross-host native proof gate, use the canonical wrapper:
+
+```bash
+scripts/check/check-native-shader-backend-readback-matrix-host.shs
+```
+
+That host-dispatch runner selects:
+
+- Linux:
+  - `test/02_integration/rendering/native_shader_backend_readback_matrix_spec.spl`
+  - `test/02_integration/rendering/vulkan_strict_spec.spl`
+  - `test/02_integration/rendering/backend_matrix_spec.spl`
+  - `test/02_integration/rendering/engine2d_cpu_vulkan_parity_spec.spl`
+- macOS:
+  - `test/02_integration/rendering/native_shader_backend_readback_matrix_spec.spl`
+  - `test/02_integration/rendering/metal_msl_pipeline_spec.spl`
+  - `test/02_integration/rendering/metal_generated_compute_readback_spec.spl`
+  - `test/02_integration/rendering/metal_strict_spec.spl`
+  - `test/02_integration/rendering/metal_engine2d_readback_spec.spl`

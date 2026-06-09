@@ -12,14 +12,29 @@
 #   use std.gpu.engine2d.metal_session.{MetalSession}
 
 use std.gpu.engine2d.backend_metal_msl.{_engine2d_msl}
+use std.gpu.engine2d.backend_session.{BackendSessionKind}
+use std.gpu.engine2d.backend_metal_kernels.{metal_2d_generated_source}
+use std.gpu.engine2d.generated_kernel_dispatch.{
+    Generated2DSessionRuntimeProvenance,
+    generated_2d_session_launch_gate,
+    generated_2d_session_runtime_provenance
+}
 use std.nogc_sync_mut.io.metal_sffi.{
     metal_sffi_init, metal_sffi_is_available, metal_sffi_device_count,
     metal_sffi_create_device, metal_sffi_destroy_device,
+    metal_sffi_alloc_buffer, metal_sffi_free_buffer,
+    metal_sffi_buffer_download, metal_sffi_buffer_upload,
     metal_sffi_create_command_queue, metal_sffi_destroy_command_queue,
     metal_sffi_compile_shader, metal_sffi_destroy_shader,
     metal_sffi_create_compute_pipeline, metal_sffi_destroy_pipeline,
+    metal_sffi_create_command_buffer, metal_sffi_create_compute_encoder,
+    metal_sffi_set_buffer, metal_sffi_dispatch_compute,
+    metal_sffi_end_compute_encoder, metal_sffi_commit_command_buffer,
+    metal_sffi_wait_completed,
     metal_last_error
 }
+extern fn rt_metal_set_bytes(encoder: i64, data_ptr: i64, length: i64, index: i64) -> i64
+extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
 # ============================================================================
 # MetalSession
 # ============================================================================
@@ -51,10 +66,21 @@ class MetalSession:
     pipe_line: i64            # Compute pipeline: line
     pipe_circle: i64          # Compute pipeline: circle outline
     pipe_circle_filled: i64   # Compute pipeline: filled circle
+    pipe_ellipse_filled: i64  # Compute pipeline: filled ellipse
     pipe_rounded_rect: i64    # Compute pipeline: rounded rect
     pipe_triangle: i64        # Compute pipeline: filled triangle
     pipe_gradient: i64        # Compute pipeline: gradient rect
+    pipe_gradient_h: i64      # Compute pipeline: horizontal gradient rect
+    pipe_radial_gradient: i64 # Compute pipeline: radial gradient
+    pipe_rect_blend: i64      # Compute pipeline: alpha-blended rect fill
+    pipe_rect_blend_mode: i64 # Compute pipeline: blend-mode rect fill
+    pipe_image_blend: i64     # Compute pipeline: alpha-blended image copy
     pipe_blit: i64            # Compute pipeline: image blit
+    generated_shader_lib: i64 # Generated simple_2d_optimization.metallib library
+    generated_pipe_fill: i64  # Generated pipeline: simple_2d_fill_u32
+    generated_pipe_copy: i64  # Generated pipeline: simple_2d_copy_u32
+    generated_pipe_alpha: i64 # Generated pipeline: simple_2d_alpha_u32
+    generated_pipe_scroll: i64 # Generated pipeline: simple_2d_scroll_u32
     ref_count: i64            # Live reference count (i64 matches CUDA/Vulkan/CPU)
     is_initialized: bool      # True after a successful init() (matches CUDA/Vulkan/CPU naming)
     generation: i64           # Stale-resource detection; incremented on init and cleanup
@@ -72,10 +98,21 @@ class MetalSession:
             pipe_line: 0,
             pipe_circle: 0,
             pipe_circle_filled: 0,
+            pipe_ellipse_filled: 0,
             pipe_rounded_rect: 0,
             pipe_triangle: 0,
             pipe_gradient: 0,
+            pipe_gradient_h: 0,
+            pipe_radial_gradient: 0,
+            pipe_rect_blend: 0,
+            pipe_rect_blend_mode: 0,
+            pipe_image_blend: 0,
             pipe_blit: 0,
+            generated_shader_lib: 0,
+            generated_pipe_fill: 0,
+            generated_pipe_copy: 0,
+            generated_pipe_alpha: 0,
+            generated_pipe_scroll: 0,
             ref_count: 0,
             is_initialized: false,
             generation: 0,
@@ -114,11 +151,17 @@ class MetalSession:
         self.pipe_line = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_line")
         self.pipe_circle = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_circle")
         self.pipe_circle_filled = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_circle_filled")
+        self.pipe_ellipse_filled = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_ellipse_filled")
         self.pipe_rounded_rect = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_rounded_rect")
         self.pipe_triangle = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_triangle_filled")
         self.pipe_gradient = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_gradient_rect")
+        self.pipe_gradient_h = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_gradient_rect_h")
+        self.pipe_radial_gradient = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_radial_gradient")
+        self.pipe_rect_blend = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_rect_blend")
+        self.pipe_rect_blend_mode = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_rect_blend_mode")
+        self.pipe_image_blend = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_blend_image")
         self.pipe_blit = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_blit_image")
-        if self.pipe_clear == 0 or self.pipe_rect_filled == 0 or self.pipe_rect_outline == 0 or self.pipe_line == 0 or self.pipe_circle == 0 or self.pipe_circle_filled == 0 or self.pipe_rounded_rect == 0 or self.pipe_triangle == 0 or self.pipe_gradient == 0 or self.pipe_blit == 0:
+        if self.pipe_clear == 0 or self.pipe_rect_filled == 0 or self.pipe_rect_outline == 0 or self.pipe_line == 0 or self.pipe_circle == 0 or self.pipe_circle_filled == 0 or self.pipe_ellipse_filled == 0 or self.pipe_rounded_rect == 0 or self.pipe_triangle == 0 or self.pipe_gradient == 0 or self.pipe_gradient_h == 0 or self.pipe_radial_gradient == 0 or self.pipe_rect_blend == 0 or self.pipe_rect_blend_mode == 0 or self.pipe_image_blend == 0 or self.pipe_blit == 0:
             self.last_error = 7
             self._cleanup()
             return false
@@ -127,6 +170,9 @@ class MetalSession:
         self.last_error = 0
         self.generation = self.generation + 1
         true
+
+    fn kind() -> BackendSessionKind:
+        BackendSessionKind.Metal
 
     me retain() -> MetalSession:
         """Increment the reference count and return self for convenient assignment."""
@@ -147,8 +193,136 @@ class MetalSession:
     me error_code() -> i64:
         self.last_error
 
+    me alloc(size: i64) -> i64:
+        if self.device == 0 or size <= 0:
+            return 0
+        metal_sffi_alloc_buffer(self.device, size)
+
+    me free(buffer: i64):
+        if buffer == 0:
+            return
+        metal_sffi_free_buffer(buffer)
+
+    me read_buffer_bytes(buffer: i64, size: i64) -> [u8]:
+        if buffer == 0 or size <= 0:
+            return []
+        var data: [u8] = [0u8; size]
+        if not metal_sffi_buffer_download(data, buffer, size):
+            return []
+        data
+
+    me upload_buffer_bytes(buffer: i64, data: [u8]) -> bool:
+        if buffer == 0 or data.len() <= 0:
+            return false
+        metal_sffi_buffer_upload(buffer, data, data.len())
+
+    me load_generated_2d_default() -> bool:
+        self.load_generated_2d_source(metal_2d_generated_source())
+
+    me load_generated_2d_source(source: text) -> bool:
+        if not self.is_valid() or source == "":
+            return false
+        self._cleanup_generated_2d()
+        self.generated_shader_lib = metal_sffi_compile_shader(self.device, source)
+        if self.generated_shader_lib == 0:
+            return false
+        self.generated_pipe_fill = metal_sffi_create_compute_pipeline(self.device, self.generated_shader_lib, "simple_2d_fill_u32")
+        self.generated_pipe_copy = metal_sffi_create_compute_pipeline(self.device, self.generated_shader_lib, "simple_2d_copy_u32")
+        self.generated_pipe_alpha = metal_sffi_create_compute_pipeline(self.device, self.generated_shader_lib, "simple_2d_alpha_u32")
+        self.generated_pipe_scroll = metal_sffi_create_compute_pipeline(self.device, self.generated_shader_lib, "simple_2d_scroll_u32")
+        if self.generated_pipe_fill == 0 or self.generated_pipe_copy == 0 or self.generated_pipe_alpha == 0 or self.generated_pipe_scroll == 0:
+            self._cleanup_generated_2d()
+            return false
+        true
+
+    me launch_generated_2d(op: text, width: i64, height: i64, args_ptr: i64) -> i64:
+        val gate = generated_2d_session_launch_gate("metal", op, width, height, self.is_valid(), self._generated_2d_module_ready(op), args_ptr)
+        if not gate.ready:
+            return 1
+        if op == "fill":
+            return self._launch_generated_fill_u32(width, height, args_ptr, gate.plan.grid_x, gate.plan.block_x)
+        if op == "copy":
+            return self._launch_generated_two_buffer_u32(self.generated_pipe_copy, width, height, args_ptr, 16, gate.plan.grid_x, gate.plan.block_x)
+        if op == "alpha_blend":
+            return self._launch_generated_two_buffer_u32(self.generated_pipe_alpha, width, height, args_ptr, 16, gate.plan.grid_x, gate.plan.block_x)
+        if op == "scroll":
+            return self._launch_generated_two_buffer_u32(self.generated_pipe_scroll, width, height, args_ptr, 16, gate.plan.grid_x, gate.plan.block_x)
+        1
+
+    me fill_kernel(width: i64, height: i64, args_ptr: i64) -> i64:
+        self.launch_generated_2d("fill", width, height, args_ptr)
+
+    me copy_kernel(width: i64, height: i64, args_ptr: i64) -> i64:
+        self.launch_generated_2d("copy", width, height, args_ptr)
+
+    me alpha_blend_kernel(width: i64, height: i64, args_ptr: i64) -> i64:
+        self.launch_generated_2d("alpha_blend", width, height, args_ptr)
+
+    me scroll_kernel(width: i64, height: i64, args_ptr: i64) -> i64:
+        self.launch_generated_2d("scroll", width, height, args_ptr)
+
+    me launch_generated_2d_runtime_provenance(op: text, width: i64, height: i64, args_ptr: i64) -> Generated2DSessionRuntimeProvenance:
+        generated_2d_session_runtime_provenance("metal", op, width, height, self.is_valid(), self._generated_2d_module_ready(op), args_ptr)
+
+    me _generated_2d_module_ready(op: text) -> bool:
+        if self.generated_shader_lib == 0:
+            return false
+        if op == "fill":
+            return self.generated_pipe_fill != 0
+        if op == "copy":
+            return self.generated_pipe_copy != 0
+        if op == "alpha_blend":
+            return self.generated_pipe_alpha != 0
+        if op == "scroll":
+            return self.generated_pipe_scroll != 0
+        false
+
+    me _launch_generated_fill_u32(width: i64, height: i64, args_ptr: i64, grid_x: i64, block_x: i64) -> i64:
+        if self.command_queue == 0 or self.generated_pipe_fill == 0 or args_ptr == 0:
+            return 1
+        val dst = rt_ptr_read_i64(args_ptr, 0)
+        val arg_width = rt_ptr_read_i64(args_ptr, 8)
+        val arg_height = rt_ptr_read_i64(args_ptr, 16)
+        if dst == 0 or arg_width != width or arg_height != height:
+            return 1
+        self._dispatch_generated_2d(self.generated_pipe_fill, dst, 0, args_ptr + 8, 24, 1, grid_x, block_x)
+
+    me _launch_generated_two_buffer_u32(pipeline: i64, width: i64, height: i64, args_ptr: i64, params_offset: i64, grid_x: i64, block_x: i64) -> i64:
+        if self.command_queue == 0 or pipeline == 0 or args_ptr == 0:
+            return 1
+        val src = rt_ptr_read_i64(args_ptr, 0)
+        val dst = rt_ptr_read_i64(args_ptr, 8)
+        val arg_width = rt_ptr_read_i64(args_ptr, 16)
+        val arg_height = rt_ptr_read_i64(args_ptr, 24)
+        if src == 0 or dst == 0 or arg_width != width or arg_height != height:
+            return 1
+        self._dispatch_generated_2d(pipeline, src, dst, args_ptr + params_offset, 24, 2, grid_x, block_x)
+
+    me _dispatch_generated_2d(pipeline: i64, first_buffer: i64, second_buffer: i64, params_ptr: i64, params_len: i64, params_index: i64, grid_x: i64, block_x: i64) -> i64:
+        val cmd = metal_sffi_create_command_buffer(self.command_queue)
+        if cmd == 0:
+            return 1
+        val encoder = metal_sffi_create_compute_encoder(cmd)
+        if encoder == 0:
+            return 1
+        if not metal_sffi_set_buffer(encoder, first_buffer, 0, 0):
+            return 1
+        if second_buffer != 0:
+            if not metal_sffi_set_buffer(encoder, second_buffer, 0, 1):
+                return 1
+        if rt_metal_set_bytes(encoder, params_ptr, params_len, params_index) == 0:
+            return 1
+        if not metal_sffi_dispatch_compute(encoder, pipeline, grid_x * block_x, 1, 1, block_x, 1, 1):
+            return 1
+        metal_sffi_end_compute_encoder(encoder)
+        metal_sffi_commit_command_buffer(cmd)
+        if metal_sffi_wait_completed(cmd):
+            return 0
+        1
+
     me _cleanup():
         """Destroy and reset all tracked GPU handles."""
+        self._cleanup_generated_2d()
         if self.pipe_clear != 0:
             metal_sffi_destroy_pipeline(self.pipe_clear)
         if self.pipe_rect_filled != 0:
@@ -161,12 +335,24 @@ class MetalSession:
             metal_sffi_destroy_pipeline(self.pipe_circle)
         if self.pipe_circle_filled != 0:
             metal_sffi_destroy_pipeline(self.pipe_circle_filled)
+        if self.pipe_ellipse_filled != 0:
+            metal_sffi_destroy_pipeline(self.pipe_ellipse_filled)
         if self.pipe_rounded_rect != 0:
             metal_sffi_destroy_pipeline(self.pipe_rounded_rect)
         if self.pipe_triangle != 0:
             metal_sffi_destroy_pipeline(self.pipe_triangle)
         if self.pipe_gradient != 0:
             metal_sffi_destroy_pipeline(self.pipe_gradient)
+        if self.pipe_gradient_h != 0:
+            metal_sffi_destroy_pipeline(self.pipe_gradient_h)
+        if self.pipe_radial_gradient != 0:
+            metal_sffi_destroy_pipeline(self.pipe_radial_gradient)
+        if self.pipe_rect_blend != 0:
+            metal_sffi_destroy_pipeline(self.pipe_rect_blend)
+        if self.pipe_rect_blend_mode != 0:
+            metal_sffi_destroy_pipeline(self.pipe_rect_blend_mode)
+        if self.pipe_image_blend != 0:
+            metal_sffi_destroy_pipeline(self.pipe_image_blend)
         if self.pipe_blit != 0:
             metal_sffi_destroy_pipeline(self.pipe_blit)
         if self.shader_lib != 0:
@@ -181,13 +367,41 @@ class MetalSession:
         self.pipe_line = 0
         self.pipe_circle = 0
         self.pipe_circle_filled = 0
+        self.pipe_ellipse_filled = 0
         self.pipe_rounded_rect = 0
         self.pipe_triangle = 0
         self.pipe_gradient = 0
+        self.pipe_gradient_h = 0
+        self.pipe_radial_gradient = 0
+        self.pipe_rect_blend = 0
+        self.pipe_rect_blend_mode = 0
+        self.pipe_image_blend = 0
         self.pipe_blit = 0
+        self.generated_pipe_fill = 0
+        self.generated_pipe_copy = 0
+        self.generated_pipe_alpha = 0
+        self.generated_pipe_scroll = 0
+        self.generated_shader_lib = 0
         self.shader_lib = 0
         self.command_queue = 0
         self.device = 0
         self.ref_count = 0
         self.is_initialized = false
         self.generation = self.generation + 1
+
+    me _cleanup_generated_2d():
+        if self.generated_pipe_fill != 0:
+            metal_sffi_destroy_pipeline(self.generated_pipe_fill)
+        if self.generated_pipe_copy != 0:
+            metal_sffi_destroy_pipeline(self.generated_pipe_copy)
+        if self.generated_pipe_alpha != 0:
+            metal_sffi_destroy_pipeline(self.generated_pipe_alpha)
+        if self.generated_pipe_scroll != 0:
+            metal_sffi_destroy_pipeline(self.generated_pipe_scroll)
+        if self.generated_shader_lib != 0:
+            metal_sffi_destroy_shader(self.generated_shader_lib)
+        self.generated_pipe_fill = 0
+        self.generated_pipe_copy = 0
+        self.generated_pipe_alpha = 0
+        self.generated_pipe_scroll = 0
+        self.generated_shader_lib = 0

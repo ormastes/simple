@@ -1912,12 +1912,6 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         }) as ExternHandler,
     );
     m.insert(
-        "rt_thread_spawn_isolated_with_args",
-        (|evaluated, env, functions, classes, enums, impl_methods| {
-            concurrency::rt_thread_spawn_isolated_with_args_context(evaluated, env, functions, classes, enums, impl_methods)
-        }) as ExternHandler,
-    );
-    m.insert(
         "rt_i18n_context_new",
         (|_evaluated, env, _functions, _classes, _enums, _impl_methods| i18n::rt_i18n_context_new(env))
             as ExternHandler,

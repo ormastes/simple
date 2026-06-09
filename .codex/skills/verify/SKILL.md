@@ -122,6 +122,14 @@ Scan for stub patterns — any match is a **FAIL**:
   - If npm packaging/release flow changed:
   - `<runtime> native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_mcp_server`
   - `<runtime> native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/simple_lsp_mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_lsp_mcp_server`
+- **Native shader/render backend gate:** when Engine2D Vulkan/Metal backend
+  behavior, shared native-shader matrix specs, or backend proof wrappers
+  change, require:
+  - `scripts/check/check-native-shader-backend-readback-matrix-host.shs`
+  - On a real macOS host for Metal-native claims:
+    - `scripts/check/check-native-shader-backend-readback-matrix-macos.shs`
+  - Treat Linux success plus an unrun macOS wrapper as incomplete evidence for
+    any claim that Metal native execution is complete.
 
 ### Phase 6: Documentation Freshness
 

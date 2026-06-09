@@ -12,13 +12,14 @@ diagnostics via BackendProbeResult.
 
 On non-Vulkan hosts, asserts the BackendProbeResult carries a typed
 Failed status rather than silently succeeding.
-On Vulkan hosts where initialization succeeds, runs the full clear ->
-draw_rect_filled -> present -> readback pipeline against a CPU reference for a
-16x16 framebuffer. This spec must not be read as proof that current SPIR-V
-placeholder blobs provide Vulkan parity.
+On Vulkan hosts where initialization succeeds, runs the clear, filled-rect,
+rect-outline, line, circle, rounded-rect, triangle, gradient, and image-blit
+draw/readback pipeline against CPU or software references for a 16x16
+framebuffer. It is still not proof of parity for advanced/emulated families
+such as text, ellipse, polygon, blur, or shadow.
 """
 
-use std.spec.{describe, context, it, expect}
+use std.spec.*
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.color.{rgb}
 use std.gc_async_mut.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
@@ -51,6 +52,370 @@ fn build_cpu_reference(w: i32, h: i32, bg: u32, fg: u32, rx: i32, ry: i32, rw: i
             px = px + 1
         py = py + 1
     buf
+
+fn build_cpu_rect_outline_reference(w: i32, h: i32, bg: u32, fg: u32, rx: i32, ry: i32, rw: i32, rh: i32) -> [u32]:
+    """Build a CPU framebuffer for a 1px rectangle outline."""
+    var buf = [bg; w * h]
+    var py = ry
+    while py < ry + rh:
+        var px = rx
+        while px < rx + rw:
+            if px >= 0 and px < w and py >= 0 and py < h:
+                val on_border = px == rx or px == rx + rw - 1 or py == ry or py == ry + rh - 1
+                if on_border:
+                    buf[py * w + px] = fg
+            px = px + 1
+        py = py + 1
+    buf
+
+fn _abs_i32(v: i32) -> i32:
+    if v < 0:
+        return -v
+    v
+
+fn build_cpu_line_reference(w: i32, h: i32, bg: u32, fg: u32, x0_in: i32, y0_in: i32, x1: i32, y1: i32) -> [u32]:
+    """Build a CPU framebuffer for a 1px Bresenham line."""
+    var buf = [bg; w * h]
+    draw_line_into(buf, w, h, fg, x0_in, y0_in, x1, y1)
+    buf
+
+fn draw_line_into(mut buf: [u32], w: i32, h: i32, fg: u32, x0_in: i32, y0_in: i32, x1: i32, y1: i32):
+    """Overlay a 1px Bresenham line into an existing framebuffer."""
+    var x0 = x0_in
+    var y0 = y0_in
+    val dx = _abs_i32(x1 - x0)
+    val sx = if x0 < x1: 1 else: -1
+    val dy = -_abs_i32(y1 - y0)
+    val sy = if y0 < y1: 1 else: -1
+    var err = dx + dy
+    while true:
+        if x0 >= 0 and x0 < w and y0 >= 0 and y0 < h:
+            buf[y0 * w + x0] = fg
+        if x0 == x1 and y0 == y1:
+            break
+        val e2 = 2 * err
+        if e2 >= dy:
+            err = err + dy
+            x0 = x0 + sx
+        if e2 <= dx:
+            err = err + dx
+            y0 = y0 + sy
+
+fn count_pixel_mismatches(a: [u32], b: [u32]) -> i32:
+    if a.len() != b.len():
+        return -1
+    var mismatches = 0
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            mismatches = mismatches + 1
+        i = i + 1
+    mismatches
+
+fn build_cpu_circle_outline_reference(w: i32, h: i32, bg: u32, fg: u32, cx: i32, cy: i32, r: i32) -> [u32]:
+    var buf = [bg; w * h]
+    val r_sq = r * r
+    val r_inner = (r - 1) * (r - 1)
+    var py = 0
+    while py < h:
+        var px = 0
+        while px < w:
+            val dx = px - cx
+            val dy = py - cy
+            val dist_sq = dx * dx + dy * dy
+            if dist_sq <= r_sq and dist_sq >= r_inner:
+                buf[py * w + px] = fg
+            px = px + 1
+        py = py + 1
+    buf
+
+fn render_software_circle_reference(bg: u32, fg: u32, cx: i32, cy: i32, r: i32) -> [u32]:
+    var engine = Engine2D.create_with_backend(16, 16, "software")
+    engine.clear(bg)
+    engine.draw_circle_filled(cx, cy, r, fg)
+    engine.present()
+    val pixels = engine.read_pixels()
+    engine.shutdown()
+    pixels
+
+fn build_cpu_rounded_rect_reference(wb: i32, hb: i32, bg: u32, fg: u32, x: i32, y: i32, w: i32, h: i32, radius: i32) -> [u32]:
+    var buf = [bg; wb * hb]
+    var py = 0
+    while py < hb:
+        var px = 0
+        while px < wb:
+            if px >= x and px < x + w and py >= y and py < y + h:
+                val lx = px - x
+                val ly = py - y
+                var inside = true
+                val r_sq = radius * radius
+                if lx < radius and ly < radius:
+                    val dx = radius - lx - 1
+                    val dy = radius - ly - 1
+                    if dx * dx + dy * dy > r_sq:
+                        inside = false
+                if lx >= w - radius and ly < radius:
+                    val dx = lx - (w - radius)
+                    val dy = radius - ly - 1
+                    if dx * dx + dy * dy > r_sq:
+                        inside = false
+                if lx < radius and ly >= h - radius:
+                    val dx = radius - lx - 1
+                    val dy = ly - (h - radius)
+                    if dx * dx + dy * dy > r_sq:
+                        inside = false
+                if lx >= w - radius and ly >= h - radius:
+                    val dx = lx - (w - radius)
+                    val dy = ly - (h - radius)
+                    if dx * dx + dy * dy > r_sq:
+                        inside = false
+                if inside:
+                    buf[py * wb + px] = fg
+            px = px + 1
+        py = py + 1
+    buf
+
+fn render_software_triangle_reference(bg: u32, fg: u32, x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32) -> [u32]:
+    var engine = Engine2D.create_with_backend(16, 16, "software")
+    engine.clear(bg)
+    engine.draw_triangle_filled(x1, y1, x2, y2, x3, y3, fg)
+    engine.present()
+    val pixels = engine.read_pixels()
+    engine.shutdown()
+    pixels
+
+fn render_software_gradient_reference(bg: u32, x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32) -> [u32]:
+    var engine = Engine2D.create_with_backend(16, 16, "software")
+    engine.clear(bg)
+    engine.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
+    engine.present()
+    val pixels = engine.read_pixels()
+    engine.shutdown()
+    pixels
+
+fn render_software_gradient_h_reference(bg: u32, x: i32, y: i32, w: i32, h: i32, left_color: u32, right_color: u32) -> [u32]:
+    var engine = Engine2D.create_with_backend(16, 16, "software")
+    engine.clear(bg)
+    engine.draw_gradient_rect_h(x, y, w, h, left_color, right_color)
+    engine.present()
+    val pixels = engine.read_pixels()
+    engine.shutdown()
+    pixels
+
+fn render_software_radial_gradient_reference(bg: u32, cx: i32, cy: i32, r: i32, center_color: u32, edge_color: u32) -> [u32]:
+    var engine = Engine2D.create_with_backend(16, 16, "software")
+    engine.clear(bg)
+    engine.draw_radial_gradient(cx, cy, r, center_color, edge_color)
+    engine.present()
+    val pixels = engine.read_pixels()
+    engine.shutdown()
+    pixels
+
+fn render_software_clip_rect_reference(bg: u32, fg: u32, clip_x: i32, clip_y: i32, clip_w: i32, clip_h: i32, rect_x: i32, rect_y: i32, rect_w: i32, rect_h: i32) -> [u32]:
+    var engine = Engine2D.create_with_backend(24, 24, "software")
+    engine.clear(bg)
+    engine.set_clip(clip_x, clip_y, clip_w, clip_h)
+    engine.draw_rect_filled(rect_x, rect_y, rect_w, rect_h, fg)
+    engine.clear_clip()
+    engine.present()
+    val pixels = engine.read_pixels()
+    engine.shutdown()
+    pixels
+
+fn render_software_mask_rect_reference(bg: u32, fg: u32, mask: [u8], mask_w: i32, mask_h: i32, rect_x: i32, rect_y: i32, rect_w: i32, rect_h: i32) -> [u32]:
+    var engine = Engine2D.create_with_backend(24, 24, "software")
+    engine.clear(bg)
+    engine.set_mask(mask, mask_w, mask_h)
+    engine.draw_rect_filled(rect_x, rect_y, rect_w, rect_h, fg)
+    engine.clear_mask()
+    engine.present()
+    val pixels = engine.read_pixels()
+    engine.shutdown()
+    pixels
+
+fn render_software_mask_image_reference(bg: u32, mask: [u8], mask_w: i32, mask_h: i32, x: i32, y: i32, w: i32, h: i32, src: [u32]) -> [u32]:
+    var engine = Engine2D.create_with_backend(24, 24, "software")
+    engine.clear(bg)
+    engine.set_mask(mask, mask_w, mask_h)
+    engine.draw_image(x, y, w, h, src)
+    engine.clear_mask()
+    engine.present()
+    val pixels = engine.read_pixels()
+    engine.shutdown()
+    pixels
+
+fn render_software_rect_blend_reference(bg: u32, x: i32, y: i32, w: i32, h: i32, color: u32) -> [u32]:
+    var engine = Engine2D.create_with_backend(16, 16, "software")
+    engine.clear(bg)
+    engine.draw_rect_blend(x, y, w, h, color)
+    engine.present()
+    val pixels = engine.read_pixels()
+    engine.shutdown()
+    pixels
+
+fn render_software_image_blend_reference(bg: u32, x: i32, y: i32, w: i32, h: i32, pixels_in: [u32]) -> [u32]:
+    var engine = Engine2D.create_with_backend(16, 16, "software")
+    engine.clear(bg)
+    engine.draw_image_blend(x, y, w, h, pixels_in)
+    engine.present()
+    val pixels = engine.read_pixels()
+    engine.shutdown()
+    pixels
+
+fn render_software_rect_blend_mode_reference(bg: u32, x: i32, y: i32, w: i32, h: i32, color: u32, mode: i32) -> [u32]:
+    var engine = Engine2D.create_with_backend(16, 16, "software")
+    engine.clear(bg)
+    engine.draw_rect_blend_mode(x, y, w, h, color, mode)
+    engine.present()
+    val pixels = engine.read_pixels()
+    engine.shutdown()
+    pixels
+
+fn build_cpu_polyline_reference(w: i32, h: i32, bg: u32, fg: u32, xs: [i32], ys: [i32], count: i32) -> [u32]:
+    var buf = [bg; w * h]
+    if count < 2:
+        return buf
+    var i = 0
+    while i < count - 1:
+        draw_line_into(buf, w, h, fg, xs[i], ys[i], xs[i + 1], ys[i + 1])
+        i = i + 1
+    buf
+
+fn render_software_rect_thick_reference(bg: u32, fg: u32, x: i32, y: i32, w: i32, h: i32, thickness: i32) -> [u32]:
+    var engine = Engine2D.create_with_backend(16, 16, "software")
+    engine.clear(bg)
+    engine.draw_rect_thick(x, y, w, h, fg, thickness)
+    engine.present()
+    val pixels = engine.read_pixels()
+    engine.shutdown()
+    pixels
+
+fn render_software_circle_thick_reference(bg: u32, fg: u32, cx: i32, cy: i32, r: i32, thickness: i32) -> [u32]:
+    var engine = Engine2D.create_with_backend(24, 24, "software")
+    engine.clear(bg)
+    engine.draw_circle_thick(cx, cy, r, fg, thickness)
+    engine.present()
+    val pixels = engine.read_pixels()
+    engine.shutdown()
+    pixels
+
+fn render_software_rounded_rect_outline_reference(bg: u32, fg: u32, x: i32, y: i32, w: i32, h: i32, radius: i32, thickness: i32) -> [u32]:
+    var engine = Engine2D.create_with_backend(24, 24, "software")
+    engine.clear(bg)
+    engine.draw_rounded_rect_outline(x, y, w, h, radius, fg, thickness)
+    engine.present()
+    val pixels = engine.read_pixels()
+    engine.shutdown()
+    pixels
+
+fn render_software_ellipse_reference(bg: u32, fg: u32, cx: i32, cy: i32, rx: i32, ry: i32) -> [u32]:
+    var engine = Engine2D.create_with_backend(24, 24, "software")
+    engine.clear(bg)
+    engine.draw_ellipse(cx, cy, rx, ry, fg)
+    engine.present()
+    val pixels = engine.read_pixels()
+    engine.shutdown()
+    pixels
+
+fn render_software_ellipse_filled_reference(bg: u32, fg: u32, cx: i32, cy: i32, rx: i32, ry: i32) -> [u32]:
+    var engine = Engine2D.create_with_backend(24, 24, "software")
+    engine.clear(bg)
+    engine.draw_ellipse_filled(cx, cy, rx, ry, fg)
+    engine.present()
+    val pixels = engine.read_pixels()
+    engine.shutdown()
+    pixels
+
+fn render_software_arc_reference(bg: u32, fg: u32, cx: i32, cy: i32, r: i32, start_deg: i32, end_deg: i32, thickness: i32) -> [u32]:
+    var engine = Engine2D.create_with_backend(24, 24, "software")
+    engine.clear(bg)
+    engine.draw_arc(cx, cy, r, start_deg, end_deg, fg, thickness)
+    engine.present()
+    val pixels = engine.read_pixels()
+    engine.shutdown()
+    pixels
+
+fn render_software_bezier_reference(bg: u32, fg: u32, x1: i32, y1: i32, cx1: i32, cy1: i32, cx2: i32, cy2: i32, x2: i32, y2: i32, thickness: i32) -> [u32]:
+    var engine = Engine2D.create_with_backend(24, 24, "software")
+    engine.clear(bg)
+    engine.draw_bezier(x1, y1, cx1, cy1, cx2, cy2, x2, y2, fg, thickness)
+    engine.present()
+    val pixels = engine.read_pixels()
+    engine.shutdown()
+    pixels
+
+fn render_software_polygon_filled_reference(bg: u32, fg: u32, xs: [i32], ys: [i32], count: i32) -> [u32]:
+    var engine = Engine2D.create_with_backend(24, 24, "software")
+    engine.clear(bg)
+    engine.draw_polygon_filled(xs, ys, count, fg)
+    engine.present()
+    val pixels = engine.read_pixels()
+    engine.shutdown()
+    pixels
+
+fn render_software_image_transform_reference(bg: u32, dst_x: i32, dst_y: i32, src_w: i32, src_h: i32, a: i32, b: i32, c: i32, d: i32, tx: i32, ty: i32, pixels_in: [u32]) -> [u32]:
+    var engine = Engine2D.create_with_backend(32, 32, "software")
+    engine.clear(bg)
+    engine.draw_image_transform(dst_x, dst_y, src_w, src_h, a, b, c, d, tx, ty, pixels_in)
+    engine.present()
+    val pixels = engine.read_pixels()
+    engine.shutdown()
+    pixels
+
+fn render_software_blur_rect_reference(bg: u32, x: i32, y: i32, w: i32, h: i32, radius: i32) -> [u32]:
+    var engine = Engine2D.create_with_backend(24, 24, "software")
+    engine.clear(bg)
+    engine.draw_rect_filled(x, y, w, h, 0xFFFF0000u32)
+    engine.draw_blur_rect(x, y, w, h, radius)
+    engine.present()
+    val pixels = engine.read_pixels()
+    engine.shutdown()
+    pixels
+
+fn render_software_shadow_rect_reference(bg: u32, x: i32, y: i32, w: i32, h: i32, offset_x: i32, offset_y: i32, blur_r: i32, color: u32) -> [u32]:
+    var engine = Engine2D.create_with_backend(32, 32, "software")
+    engine.clear(bg)
+    engine.draw_shadow_rect(x, y, w, h, offset_x, offset_y, blur_r, color)
+    engine.present()
+    val pixels = engine.read_pixels()
+    engine.shutdown()
+    pixels
+
+fn render_software_text_reference(bg: u32, x: i32, y: i32, text_val: text, color: u32, font_size: i32) -> [u32]:
+    var engine = Engine2D.create_with_backend(32, 32, "software")
+    engine.clear(bg)
+    engine.draw_text(x, y, text_val, color, font_size)
+    engine.present()
+    val pixels = engine.read_pixels()
+    engine.shutdown()
+    pixels
+
+fn render_software_text_bg_reference(bg: u32, x: i32, y: i32, text_val: text, fg: u32, fill: u32, font_size: i32) -> [u32]:
+    var engine = Engine2D.create_with_backend(32, 32, "software")
+    engine.clear(bg)
+    engine.draw_text_bg(x, y, text_val, fg, fill, font_size)
+    engine.present()
+    val pixels = engine.read_pixels()
+    engine.shutdown()
+    pixels
+
+fn render_software_triangle_outline_reference(bg: u32, fg: u32, x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, thickness: i32) -> [u32]:
+    var engine = Engine2D.create_with_backend(16, 16, "software")
+    engine.clear(bg)
+    engine.draw_triangle_outline(x1, y1, x2, y2, x3, y3, fg, thickness)
+    engine.present()
+    val pixels = engine.read_pixels()
+    engine.shutdown()
+    pixels
+
+fn render_software_image_reference(bg: u32, x: i32, y: i32, w: i32, h: i32, pixels_in: [u32]) -> [u32]:
+    var engine = Engine2D.create_with_backend(16, 16, "software")
+    engine.clear(bg)
+    engine.draw_image(x, y, w, h, pixels_in)
+    engine.present()
+    val pixels = engine.read_pixels()
+    engine.shutdown()
+    pixels
 
 fn probe_vulkan() -> BackendProbeResult:
     """Probe the Vulkan backend availability without allocating a full engine."""
@@ -243,6 +608,598 @@ describe "Vulkan strict smoke tests":
                     val pixels = engine.read_pixels()
                     # Pixel at (0,0) must still be blue
                     expect(pixels[0]).to_equal(bg)
+                    engine.shutdown()
+
+    context "draw_rect outline pixel parity with CPU reference":
+
+        it "draw_rect writes only the rectangle border":
+            val probe = probe_vulkan()
+            if probe.is_ok():
+                val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = color_blue_u32()
+                    val fg = color_red_u32()
+                    engine.clear(bg)
+                    engine.draw_rect(4, 4, 6, 6, fg)
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    expect(pixels[4 * 16 + 4]).to_equal(fg)
+                    expect(pixels[6 * 16 + 6]).to_equal(bg)
+                    engine.shutdown()
+
+        it "clear then draw_rect matches CPU outline reference pixel-for-pixel":
+            val probe = probe_vulkan()
+            if probe.is_ok():
+                val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = color_blue_u32()
+                    val fg = color_red_u32()
+                    engine.clear(bg)
+                    engine.draw_rect(3, 2, 7, 5, fg)
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    val cpu_ref = build_cpu_rect_outline_reference(16, 16, bg, fg, 3, 2, 7, 5)
+                    var mismatch_count = 0
+                    var ci = 0
+                    while ci < 256:
+                        if pixels[ci] != cpu_ref[ci]:
+                            mismatch_count = mismatch_count + 1
+                        ci = ci + 1
+                    expect(mismatch_count).to_equal(0)
+                    engine.shutdown()
+
+    context "draw_line pixel parity with CPU reference":
+
+        it "draw_line writes expected diagonal endpoints and center":
+            val probe = probe_vulkan()
+            if probe.is_ok():
+                val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = color_blue_u32()
+                    val fg = color_red_u32()
+                    engine.clear(bg)
+                    engine.draw_line(2, 2, 10, 10, fg, 1)
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    expect(pixels[2 * 16 + 2]).to_equal(fg)
+                    expect(pixels[6 * 16 + 6]).to_equal(fg)
+                    expect(pixels[10 * 16 + 10]).to_equal(fg)
+                    engine.shutdown()
+
+        it "clear then draw_line matches CPU reference pixel-for-pixel":
+            val probe = probe_vulkan()
+            if probe.is_ok():
+                val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = color_blue_u32()
+                    val fg = color_red_u32()
+                    engine.clear(bg)
+                    engine.draw_line(1, 13, 12, 4, fg, 1)
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    val cpu_ref = build_cpu_line_reference(16, 16, bg, fg, 1, 13, 12, 4)
+                    var mismatch_count = 0
+                    var ci = 0
+                    while ci < 256:
+                        if pixels[ci] != cpu_ref[ci]:
+                            mismatch_count = mismatch_count + 1
+                        ci = ci + 1
+                    expect(mismatch_count).to_equal(0)
+                    engine.shutdown()
+
+    context "additional GPU raster parity":
+
+        it "draw_circle outline matches the Vulkan kernel reference pixel-for-pixel":
+            val probe = probe_vulkan()
+            if probe.is_ok():
+                val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = color_blue_u32()
+                    val fg = color_red_u32()
+                    engine.clear(bg)
+                    engine.draw_circle(8, 8, 4, fg)
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    val ref = build_cpu_circle_outline_reference(16, 16, bg, fg, 8, 8, 4)
+                    expect(count_pixel_mismatches(pixels, ref)).to_equal(0)
+                    engine.shutdown()
+
+        it "draw_circle_filled matches software reference pixel-for-pixel":
+            val probe = probe_vulkan()
+            if probe.is_ok():
+                val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = color_blue_u32()
+                    val fg = color_red_u32()
+                    engine.clear(bg)
+                    engine.draw_circle_filled(7, 8, 3, fg)
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    val ref = render_software_circle_reference(bg, fg, 7, 8, 3)
+                    expect(count_pixel_mismatches(pixels, ref)).to_equal(0)
+                    engine.shutdown()
+
+        it "draw_rounded_rect matches the Vulkan kernel reference pixel-for-pixel":
+            val probe = probe_vulkan()
+            if probe.is_ok():
+                val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = color_blue_u32()
+                    val fg = color_red_u32()
+                    engine.clear(bg)
+                    engine.draw_rounded_rect(2, 3, 10, 8, 2, fg)
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    val ref = build_cpu_rounded_rect_reference(16, 16, bg, fg, 2, 3, 10, 8, 2)
+                    expect(count_pixel_mismatches(pixels, ref)).to_equal(0)
+                    engine.shutdown()
+
+        it "draw_triangle_filled matches software reference pixel-for-pixel":
+            val probe = probe_vulkan()
+            if probe.is_ok():
+                val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = color_blue_u32()
+                    val fg = color_red_u32()
+                    engine.clear(bg)
+                    engine.draw_triangle_filled(8, 2, 3, 11, 12, 13, fg)
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    val ref = render_software_triangle_reference(bg, fg, 8, 2, 3, 11, 12, 13)
+                    expect(count_pixel_mismatches(pixels, ref)).to_equal(0)
+                    engine.shutdown()
+
+        it "draw_gradient_rect matches software reference pixel-for-pixel":
+            val probe = probe_vulkan()
+            if probe.is_ok():
+                val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = color_blue_u32()
+                    val top = color_red_u32()
+                    val bottom = 0xFF00FF00u32
+                    engine.clear(bg)
+                    engine.draw_gradient_rect(4, 2, 7, 10, top, bottom)
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    val ref = render_software_gradient_reference(bg, 4, 2, 7, 10, top, bottom)
+                    expect(count_pixel_mismatches(pixels, ref)).to_equal(0)
+                    engine.shutdown()
+
+        it "draw_gradient_rect_h matches software reference pixel-for-pixel":
+            val probe = probe_vulkan()
+            if probe.is_ok():
+                val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = color_blue_u32()
+                    val left = color_red_u32()
+                    val right = 0xFF00FF00u32
+                    engine.clear(bg)
+                    engine.draw_gradient_rect_h(2, 5, 8, 4, left, right)
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    val ref = render_software_gradient_h_reference(bg, 2, 5, 8, 4, left, right)
+                    expect(count_pixel_mismatches(pixels, ref)).to_equal(0)
+                    engine.shutdown()
+
+        it "draw_radial_gradient matches software reference pixel-for-pixel":
+            val probe = probe_vulkan()
+            if probe.is_ok():
+                val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = color_blue_u32()
+                    val center = 0xFFFFFFFFu32
+                    val edge = 0xFF0000FFu32
+                    engine.clear(bg)
+                    engine.draw_radial_gradient(8, 8, 4, center, edge)
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    val ref = render_software_radial_gradient_reference(bg, 8, 8, 4, center, edge)
+                    expect(count_pixel_mismatches(pixels, ref)).to_equal(0)
+                    engine.shutdown()
+
+        it "draw_rect_blend matches software reference pixel-for-pixel":
+            val probe = probe_vulkan()
+            if probe.is_ok():
+                val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = 0xff204060u32
+                    val fg = 0x80ff0000u32
+                    engine.clear(bg)
+                    engine.draw_rect_blend(3, 4, 5, 3, fg)
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    val ref = render_software_rect_blend_reference(bg, 3, 4, 5, 3, fg)
+                    expect(count_pixel_mismatches(pixels, ref)).to_equal(0)
+                    engine.shutdown()
+
+        it "draw_image_blend matches software reference pixel-for-pixel":
+            val probe = probe_vulkan()
+            if probe.is_ok():
+                val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = 0xff204060u32
+                    val src = [
+                        0x80ff0000u32, 0x8000ff00u32,
+                        0x800000ffu32, 0x80ffffffu32
+                    ]
+                    engine.clear(bg)
+                    engine.draw_image_blend(4, 5, 2, 2, src)
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    val ref = render_software_image_blend_reference(bg, 4, 5, 2, 2, src)
+                    expect(count_pixel_mismatches(pixels, ref)).to_equal(0)
+                    engine.shutdown()
+
+        it "draw_rect_blend_mode matches software reference pixel-for-pixel":
+            val probe = probe_vulkan()
+            if probe.is_ok():
+                val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = 0xff204060u32
+                    val fg = 0x80ff0000u32
+                    engine.clear(bg)
+                    engine.draw_rect_blend_mode(3, 4, 5, 3, fg, 1)
+                    engine.present()
+                    var pixels = engine.read_pixels()
+                    var ref = render_software_rect_blend_mode_reference(bg, 3, 4, 5, 3, fg, 1)
+                    expect(count_pixel_mismatches(pixels, ref)).to_equal(0)
+
+                    engine.clear(bg)
+                    engine.draw_rect_blend_mode(3, 4, 5, 3, fg, 3)
+                    engine.present()
+                    pixels = engine.read_pixels()
+                    ref = render_software_rect_blend_mode_reference(bg, 3, 4, 5, 3, fg, 3)
+                    expect(count_pixel_mismatches(pixels, ref)).to_equal(0)
+                    engine.shutdown()
+
+        it "draw_polyline matches software reference pixel-for-pixel":
+            val probe = probe_vulkan()
+            if probe.is_ok():
+                val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = color_blue_u32()
+                    val fg = color_red_u32()
+                    val xs = [1, 5, 9, 13]
+                    val ys = [12, 4, 10, 3]
+                    engine.clear(bg)
+                    engine.draw_polyline(xs, ys, 4, fg, 1)
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    val ref = build_cpu_polyline_reference(16, 16, bg, fg, xs, ys, 4)
+                    expect(count_pixel_mismatches(pixels, ref)).to_equal(0)
+                    engine.shutdown()
+
+        it "draw_rect_thick matches software reference pixel-for-pixel":
+            val probe = probe_vulkan()
+            if probe.is_ok():
+                val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = color_blue_u32()
+                    val fg = color_red_u32()
+                    engine.clear(bg)
+                    engine.draw_rect_thick(2, 3, 10, 8, fg, 2)
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    val ref = render_software_rect_thick_reference(bg, fg, 2, 3, 10, 8, 2)
+                    expect(count_pixel_mismatches(pixels, ref)).to_equal(0)
+                    engine.shutdown()
+
+        it "draw_triangle_outline matches software reference pixel-for-pixel":
+            val probe = probe_vulkan()
+            if probe.is_ok():
+                val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = color_blue_u32()
+                    val fg = color_red_u32()
+                    engine.clear(bg)
+                    engine.draw_triangle_outline(8, 2, 3, 11, 12, 13, fg, 1)
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    val ref = render_software_triangle_outline_reference(bg, fg, 8, 2, 3, 11, 12, 13, 1)
+                    expect(count_pixel_mismatches(pixels, ref)).to_equal(0)
+                    engine.shutdown()
+
+        it "draw_image matches software reference pixel-for-pixel":
+            val probe = probe_vulkan()
+            if probe.is_ok():
+                val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = color_blue_u32()
+                    val src = [
+                        0xFFFF0000u32, 0xFF00FF00u32, 0xFF0000FFu32,
+                        0xFFFFFF00u32, 0xFFFF00FFu32, 0xFF00FFFFu32
+                    ]
+                    engine.clear(bg)
+                    engine.draw_image(5, 4, 3, 2, src)
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    val ref = render_software_image_reference(bg, 5, 4, 3, 2, src)
+                    expect(count_pixel_mismatches(pixels, ref)).to_equal(0)
+                    engine.shutdown()
+
+        it "draw_circle_thick matches software reference pixel-for-pixel":
+            val probe = probe_vulkan()
+            if probe.is_ok():
+                val result = Engine2D.create_with_backend_strict(24, 24, "vulkan")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = color_blue_u32()
+                    val fg = color_red_u32()
+                    engine.clear(bg)
+                    engine.draw_circle_thick(12, 12, 5, fg, 2)
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    val ref = render_software_circle_thick_reference(bg, fg, 12, 12, 5, 2)
+                    expect(count_pixel_mismatches(pixels, ref)).to_equal(0)
+                    engine.shutdown()
+
+        it "draw_rounded_rect_outline matches software reference pixel-for-pixel":
+            val probe = probe_vulkan()
+            if probe.is_ok():
+                val result = Engine2D.create_with_backend_strict(24, 24, "vulkan")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = color_blue_u32()
+                    val fg = color_red_u32()
+                    engine.clear(bg)
+                    engine.draw_rounded_rect_outline(4, 5, 12, 10, 3, fg, 2)
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    val ref = render_software_rounded_rect_outline_reference(bg, fg, 4, 5, 12, 10, 3, 2)
+                    expect(count_pixel_mismatches(pixels, ref)).to_equal(0)
+                    engine.shutdown()
+
+        it "draw_ellipse matches software reference pixel-for-pixel":
+            val probe = probe_vulkan()
+            if probe.is_ok():
+                val result = Engine2D.create_with_backend_strict(24, 24, "vulkan")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = color_blue_u32()
+                    val fg = color_red_u32()
+                    engine.clear(bg)
+                    engine.draw_ellipse(12, 12, 5, 3, fg)
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    val ref = render_software_ellipse_reference(bg, fg, 12, 12, 5, 3)
+                    expect(count_pixel_mismatches(pixels, ref)).to_equal(0)
+                    engine.shutdown()
+
+        it "draw_ellipse_filled matches software reference pixel-for-pixel":
+            val probe = probe_vulkan()
+            if probe.is_ok():
+                val result = Engine2D.create_with_backend_strict(24, 24, "vulkan")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = color_blue_u32()
+                    val fg = color_red_u32()
+                    engine.clear(bg)
+                    engine.draw_ellipse_filled(12, 12, 5, 3, fg)
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    val ref = render_software_ellipse_filled_reference(bg, fg, 12, 12, 5, 3)
+                    expect(count_pixel_mismatches(pixels, ref)).to_equal(0)
+                    engine.shutdown()
+
+        it "draw_arc matches software reference pixel-for-pixel":
+            val probe = probe_vulkan()
+            if probe.is_ok():
+                val result = Engine2D.create_with_backend_strict(24, 24, "vulkan")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = color_blue_u32()
+                    val fg = color_red_u32()
+                    engine.clear(bg)
+                    engine.draw_arc(12, 12, 6, 30, 160, fg, 2)
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    val ref = render_software_arc_reference(bg, fg, 12, 12, 6, 30, 160, 2)
+                    expect(count_pixel_mismatches(pixels, ref)).to_equal(0)
+                    engine.shutdown()
+
+        it "draw_bezier matches software reference pixel-for-pixel":
+            val probe = probe_vulkan()
+            if probe.is_ok():
+                val result = Engine2D.create_with_backend_strict(24, 24, "vulkan")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = color_blue_u32()
+                    val fg = color_red_u32()
+                    engine.clear(bg)
+                    engine.draw_bezier(2, 18, 6, 2, 18, 4, 21, 18, fg, 1)
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    val ref = render_software_bezier_reference(bg, fg, 2, 18, 6, 2, 18, 4, 21, 18, 1)
+                    expect(count_pixel_mismatches(pixels, ref)).to_equal(0)
+                    engine.shutdown()
+
+        it "draw_polygon_filled matches software reference pixel-for-pixel":
+            val probe = probe_vulkan()
+            if probe.is_ok():
+                val result = Engine2D.create_with_backend_strict(24, 24, "vulkan")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = color_blue_u32()
+                    val fg = color_red_u32()
+                    val xs = [4, 12, 19, 15, 7]
+                    val ys = [18, 4, 8, 19, 16]
+                    engine.clear(bg)
+                    engine.draw_polygon_filled(xs, ys, 5, fg)
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    val ref = render_software_polygon_filled_reference(bg, fg, xs, ys, 5)
+                    expect(count_pixel_mismatches(pixels, ref)).to_equal(0)
+                    engine.shutdown()
+
+        it "draw_image_transform matches software reference pixel-for-pixel":
+            val probe = probe_vulkan()
+            if probe.is_ok():
+                val result = Engine2D.create_with_backend_strict(32, 32, "vulkan")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = color_blue_u32()
+                    val src = [
+                        0xFFFF0000u32, 0xFF00FF00u32, 0xFF0000FFu32,
+                        0xFFFFFF00u32, 0xFFFF00FFu32, 0xFF00FFFFu32
+                    ]
+                    engine.clear(bg)
+                    engine.draw_image_transform(10, 10, 3, 2, 256, 64, 0, 256, 0, 0, src)
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    val ref = render_software_image_transform_reference(bg, 10, 10, 3, 2, 256, 64, 0, 256, 0, 0, src)
+                    expect(count_pixel_mismatches(pixels, ref)).to_equal(0)
+                    engine.shutdown()
+
+        it "draw_blur_rect matches software reference pixel-for-pixel":
+            val probe = probe_vulkan()
+            if probe.is_ok():
+                val result = Engine2D.create_with_backend_strict(24, 24, "vulkan")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = color_blue_u32()
+                    engine.clear(bg)
+                    engine.draw_rect_filled(6, 6, 8, 6, 0xFFFF0000u32)
+                    engine.draw_blur_rect(6, 6, 8, 6, 2)
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    val ref = render_software_blur_rect_reference(bg, 6, 6, 8, 6, 2)
+                    expect(count_pixel_mismatches(pixels, ref)).to_equal(0)
+                    engine.shutdown()
+
+        it "draw_shadow_rect matches software reference pixel-for-pixel":
+            val probe = probe_vulkan()
+            if probe.is_ok():
+                val result = Engine2D.create_with_backend_strict(32, 32, "vulkan")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = color_blue_u32()
+                    val shadow = 0x80202020u32
+                    engine.clear(bg)
+                    engine.draw_shadow_rect(8, 8, 6, 5, 2, 2, 2, shadow)
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    val ref = render_software_shadow_rect_reference(bg, 8, 8, 6, 5, 2, 2, 2, shadow)
+                    expect(count_pixel_mismatches(pixels, ref)).to_equal(0)
+                    engine.shutdown()
+
+        it "clipped draw_rect_filled matches software reference pixel-for-pixel":
+            val probe = probe_vulkan()
+            if probe.is_ok():
+                val result = Engine2D.create_with_backend_strict(24, 24, "vulkan")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = 0xff000000u32
+                    val fg = 0xffff0000u32
+                    engine.clear(bg)
+                    engine.set_clip(4, 4, 6, 4)
+                    engine.draw_rect_filled(2, 4, 10, 3, fg)
+                    engine.clear_clip()
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    val ref = render_software_clip_rect_reference(bg, fg, 4, 4, 6, 4, 2, 4, 10, 3)
+                    expect(count_pixel_mismatches(pixels, ref)).to_equal(0)
+                    engine.shutdown()
+
+        it "masked draw_rect_filled matches software reference pixel-for-pixel":
+            val probe = probe_vulkan()
+            if probe.is_ok():
+                val result = Engine2D.create_with_backend_strict(24, 24, "vulkan")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = 0xff000000u32
+                    val fg = 0xff3366ccu32
+                    val mask = [
+                        0u8, 0u8, 0u8, 0u8,
+                        0u8, 1u8, 1u8, 0u8,
+                        0u8, 1u8, 1u8, 0u8,
+                        0u8, 0u8, 0u8, 0u8
+                    ]
+                    engine.clear(bg)
+                    engine.set_mask(mask, 4, 4)
+                    engine.draw_rect_filled(1, 1, 4, 4, fg)
+                    engine.clear_mask()
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    val ref = render_software_mask_rect_reference(bg, fg, mask, 4, 4, 1, 1, 4, 4)
+                    expect(count_pixel_mismatches(pixels, ref)).to_equal(0)
+                    engine.shutdown()
+
+        it "masked draw_image matches software reference pixel-for-pixel":
+            val probe = probe_vulkan()
+            if probe.is_ok():
+                val result = Engine2D.create_with_backend_strict(24, 24, "vulkan")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = 0xff000000u32
+                    val mask = [
+                        0u8, 0u8, 0u8, 0u8,
+                        0u8, 1u8, 1u8, 0u8,
+                        0u8, 1u8, 1u8, 0u8,
+                        0u8, 0u8, 0u8, 0u8
+                    ]
+                    val src = [
+                        0xff0000ffu32, 0xff00ff00u32,
+                        0xffff0000u32, 0xffffffffu32
+                    ]
+                    engine.clear(bg)
+                    engine.set_mask(mask, 4, 4)
+                    engine.draw_image(1, 1, 2, 2, src)
+                    engine.clear_mask()
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    val ref = render_software_mask_image_reference(bg, mask, 4, 4, 1, 1, 2, 2, src)
+                    expect(count_pixel_mismatches(pixels, ref)).to_equal(0)
+                    engine.shutdown()
+
+        it "draw_text matches software reference pixel-for-pixel":
+            val probe = probe_vulkan()
+            if probe.is_ok():
+                val result = Engine2D.create_with_backend_strict(32, 32, "vulkan")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = color_blue_u32()
+                    val fg = color_red_u32()
+                    engine.clear(bg)
+                    engine.draw_text(3, 4, "Hi", fg, 8)
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    val ref = render_software_text_reference(bg, 3, 4, "Hi", fg, 8)
+                    expect(count_pixel_mismatches(pixels, ref)).to_equal(0)
+                    engine.shutdown()
+
+        it "draw_text_bg matches software reference pixel-for-pixel":
+            val probe = probe_vulkan()
+            if probe.is_ok():
+                val result = Engine2D.create_with_backend_strict(32, 32, "vulkan")
+                if result.is_ok():
+                    var engine = result.unwrap()
+                    val bg = color_blue_u32()
+                    val fg = color_red_u32()
+                    val fill = 0xFF202020u32
+                    engine.clear(bg)
+                    engine.draw_text_bg(3, 4, "Hi", fg, fill, 8)
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    val ref = render_software_text_bg_reference(bg, 3, 4, "Hi", fg, fill, 8)
+                    expect(count_pixel_mismatches(pixels, ref)).to_equal(0)
                     engine.shutdown()
 
     context "sync and readback correctness":

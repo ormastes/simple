@@ -7,7 +7,7 @@
 # Requires Vulkan runtime with compute shader support.
 #
 # Architecture:
-#   - Framebuffer is a Vulkan storage buffer (usage 0x80)
+#   - Framebuffer is a Vulkan storage buffer with transfer flags (usage 0x83)
 #   - SPIR-V compute shaders for validated kernels; descriptor-compatible
 #     no-op SPIR-V placeholders for unsupported kernels.
 #   - Push constants carry per-primitive parameters
@@ -18,8 +18,10 @@
 #   use std.gpu.engine2d.backend_vulkan.{VulkanBackend}
 
 use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended}
+use std.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.gpu.engine2d.color.{rgba, rgb, color_r, color_g, color_b, color_a}
 use std.gpu.engine2d.glyph.{glyph_height, glyph_advance, render_text_to_buffer}
+use std.gpu.engine2d.helpers_text.{text_blit_buffer, text_transparent_blit_buffer}
 use std.gpu.engine2d.backend_vulkan_helpers.{
     _pack_clear_pc, _pack_rect_pc, _pack_line_pc, _pack_circle_pc,
     _pack_rounded_rect_pc, _pack_triangle_pc, _pack_gradient_pc, _pack_blit_pc,
@@ -28,7 +30,10 @@ use std.gpu.engine2d.backend_vulkan_helpers.{
     vulkan_dispatch_blit_compute
 }
 use std.gpu.engine2d.backend_vulkan_spirv.{
-    spirv_clear, spirv_rect_filled, spirv_noop_storage
+    spirv_clear, spirv_rect_filled,
+    spirv_rect_outline, spirv_circle_filled, spirv_circle_outline,
+    spirv_line, spirv_rounded_rect, spirv_triangle_filled,
+    spirv_gradient_rect, spirv_blit
 }
 use std.gpu.engine2d.backend_emu.{
     emu_draw_ellipse, emu_draw_ellipse_filled,
@@ -43,6 +48,7 @@ use std.gpu.engine2d.backend_emu.{
     emu_draw_image_transform,
     emu_draw_rect_blend_mode
 }
+use std.gpu.engine2d.backend_emu_math.{_emu_blend_over, _emu_overlay_ch, _emu_sin_approx, _emu_cos_approx, _emu_abs, _emu_sort_i32, _emu_min, _emu_max}
 use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_init, vulkan_sffi_shutdown, vulkan_sffi_is_available,
     vulkan_sffi_device_count, vulkan_sffi_select_device,
@@ -71,6 +77,61 @@ fn vulkan_available() -> bool:
 # ============================================================================
 
 val VK_PUSH_CONSTANT_SIZE: i64 = 64
+val VK_STORAGE_TRANSFER_BUFFER_USAGE: i64 = 0x83
+
+fn _vk_isqrt(n: i32) -> i32:
+    if n <= 0:
+        return 0
+    var x = n
+    var y = (x + 1) / 2
+    while y < x:
+        x = y
+        y = (x + n / x) / 2
+    x
+
+fn _vk_draw_thick_corner_arc(mut core: RenderBackend, cx: i32, cy: i32, r: i32, thickness: i32, color: u32, dx_sign: i32, dy_sign: i32):
+    val r_outer = r
+    val r_inner = if r - thickness > 0: r - thickness else: 0
+    val ro_sq = r_outer * r_outer
+    val ri_sq = r_inner * r_inner
+    var py: i32 = 0
+    while py <= r_outer:
+        var px: i32 = 0
+        while px <= r_outer:
+            val d = px * px + py * py
+            if d <= ro_sq and d >= ri_sq:
+                core.draw_rect_filled(cx + dx_sign * px, cy + dy_sign * py, 1, 1, color)
+            px = px + 1
+        py = py + 1
+
+fn _vk_draw_bezier_recursive(mut core: RenderBackend, x1: i32, y1: i32, cx1: i32, cy1: i32, cx2: i32, cy2: i32, x2: i32, y2: i32, color: u32, thickness: i32, depth: i32):
+    if depth > 8:
+        core.draw_line(x1, y1, x2, y2, color, thickness)
+        return
+    val dx = x2 - x1
+    val dy = y2 - y1
+    val d1 = if (cx1 - x2) * dy - (cy1 - y2) * dx < 0: -((cx1 - x2) * dy - (cy1 - y2) * dx) else: (cx1 - x2) * dy - (cy1 - y2) * dx
+    val d2 = if (cx2 - x2) * dy - (cy2 - y2) * dx < 0: -((cx2 - x2) * dy - (cy2 - y2) * dx) else: (cx2 - x2) * dy - (cy2 - y2) * dx
+    val flatness = (d1 + d2) * (d1 + d2)
+    val len_sq = dx * dx + dy * dy
+    val flat_limit = if len_sq / 16 > 4: len_sq / 16 else: 4
+    if flatness <= flat_limit:
+        core.draw_line(x1, y1, x2, y2, color, thickness)
+        return
+    val m12x = (x1 + cx1) / 2
+    val m12y = (y1 + cy1) / 2
+    val m23x = (cx1 + cx2) / 2
+    val m23y = (cy1 + cy2) / 2
+    val m34x = (cx2 + x2) / 2
+    val m34y = (cy2 + y2) / 2
+    val m123x = (m12x + m23x) / 2
+    val m123y = (m12y + m23y) / 2
+    val m234x = (m23x + m34x) / 2
+    val m234y = (m23y + m34y) / 2
+    val mx = (m123x + m234x) / 2
+    val my = (m123y + m234y) / 2
+    _vk_draw_bezier_recursive(core, x1, y1, m12x, m12y, m123x, m123y, mx, my, color, thickness, depth + 1)
+    _vk_draw_bezier_recursive(core, mx, my, m234x, m234y, m34x, m34y, x2, y2, color, thickness, depth + 1)
 
 # ============================================================================
 # Vulkan Backend
@@ -174,6 +235,67 @@ class VulkanBackend:
             last_error: ""
         )
 
+impl VulkanBackend:
+
+    me _mask_active() -> bool:
+        self.mask_buf.len() > 0 and self.mask_w > 0 and self.mask_h > 0
+
+    me _prepare_software_replay() -> SoftwareBackend:
+        var temp = SoftwareBackend.create()
+        val fb_w = self.w
+        val fb_h = self.h
+        if not temp.init(fb_w, fb_h):
+            return temp
+        val pixels = self.read_pixels()
+        temp.draw_image(0, 0, fb_w, fb_h, pixels)
+        if self.clip_enabled:
+            val clip_x = self.clip_x
+            val clip_y = self.clip_y
+            val clip_w = self.clip_w
+            val clip_h = self.clip_h
+            temp.set_clip(clip_x, clip_y, clip_w, clip_h)
+        if self._mask_active():
+            val mask_buf = self.mask_buf
+            val mask_w = self.mask_w
+            val mask_h = self.mask_h
+            temp.set_mask(mask_buf, mask_w, mask_h)
+        temp
+
+    me _commit_software_replay(temp: SoftwareBackend) -> bool:
+        temp.present()
+        val pixels = temp.read_pixels()
+        temp.shutdown()
+        if pixels.len() != self.w * self.h:
+            return false
+        val saved_clip_x = self.clip_x
+        val saved_clip_y = self.clip_y
+        val saved_clip_w = self.clip_w
+        val saved_clip_h = self.clip_h
+        val saved_clip_enabled = self.clip_enabled
+        val saved_mask = self.mask_buf
+        val saved_mask_w = self.mask_w
+        val saved_mask_h = self.mask_h
+        self.clip_enabled = false
+        self.clip_x = 0
+        self.clip_y = 0
+        self.clip_w = self.w
+        self.clip_h = self.h
+        self.mask_buf = []
+        self.mask_w = 0
+        self.mask_h = 0
+        val fb_w = self.w
+        val fb_h = self.h
+        self.draw_image(0, 0, fb_w, fb_h, pixels)
+        self.clip_x = saved_clip_x
+        self.clip_y = saved_clip_y
+        self.clip_w = saved_clip_w
+        self.clip_h = saved_clip_h
+        self.clip_enabled = saved_clip_enabled
+        self.mask_buf = saved_mask
+        self.mask_w = saved_mask_w
+        self.mask_h = saved_mask_h
+        true
+
 impl RenderBackend for VulkanBackend:
 
     fn name() -> text:
@@ -203,10 +325,11 @@ impl RenderBackend for VulkanBackend:
         self.w = width
         self.h = height
 
-        # Allocate device framebuffer storage buffer (4 bytes per pixel = u32)
-        # Usage 0x80 = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+        # Allocate device framebuffer storage buffer (4 bytes per pixel = u32).
+        # Usage 0x83 = STORAGE_BUFFER | TRANSFER_SRC | TRANSFER_DST so runtime
+        # staging uploads/downloads used by strict readback and blit stay valid.
         val fb_size = _i64(width) * _i64(height) * 4
-        self.d_framebuffer = vulkan_sffi_alloc_buffer(fb_size, 0x80)
+        self.d_framebuffer = vulkan_sffi_alloc_buffer(fb_size, VK_STORAGE_TRANSFER_BUFFER_USAGE)
         if self.d_framebuffer == 0:
             self.last_error = "rt_vulkan_alloc_buffer failed: " + vulkan_sffi_last_error()
             return false
@@ -215,20 +338,17 @@ impl RenderBackend for VulkanBackend:
         val total = width * height
         self.host_buf = [0u32; total]
 
-        # Compile validated SPIR-V kernels. Unsupported kernels use a
-        # descriptor-compatible no-op SPIR-V module so init does not depend on
-        # the unsupported GLSL compiler path.
-        val noop_spirv = spirv_noop_storage()
+        # Compile the current SPIR-V raster kernel set for every declared draw path.
         self.shader_clear = vulkan_sffi_compile_spirv(spirv_clear())
         self.shader_rect_filled = vulkan_sffi_compile_spirv(spirv_rect_filled())
-        self.shader_rect_outline = vulkan_sffi_compile_spirv(noop_spirv)
-        self.shader_circle_filled = vulkan_sffi_compile_spirv(noop_spirv)
-        self.shader_circle_outline = vulkan_sffi_compile_spirv(noop_spirv)
-        self.shader_line = vulkan_sffi_compile_spirv(noop_spirv)
-        self.shader_rounded_rect = vulkan_sffi_compile_spirv(noop_spirv)
-        self.shader_triangle = vulkan_sffi_compile_spirv(noop_spirv)
-        self.shader_gradient = vulkan_sffi_compile_spirv(noop_spirv)
-        self.shader_blit = vulkan_sffi_compile_spirv(noop_spirv)
+        self.shader_rect_outline = vulkan_sffi_compile_spirv(spirv_rect_outline())
+        self.shader_circle_filled = vulkan_sffi_compile_spirv(spirv_circle_filled())
+        self.shader_circle_outline = vulkan_sffi_compile_spirv(spirv_circle_outline())
+        self.shader_line = vulkan_sffi_compile_spirv(spirv_line())
+        self.shader_rounded_rect = vulkan_sffi_compile_spirv(spirv_rounded_rect())
+        self.shader_triangle = vulkan_sffi_compile_spirv(spirv_triangle_filled())
+        self.shader_gradient = vulkan_sffi_compile_spirv(spirv_gradient_rect())
+        self.shader_blit = vulkan_sffi_compile_spirv(spirv_blit())
 
         if (self.shader_clear == 0 or self.shader_rect_filled == 0 or
             self.shader_rect_outline == 0 or self.shader_circle_filled == 0 or
@@ -317,9 +437,9 @@ impl RenderBackend for VulkanBackend:
         self.h = height
 
         # Allocate per-surface device framebuffer storage buffer
-        # Usage 0x80 = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+        # Usage 0x83 = STORAGE_BUFFER | TRANSFER_SRC | TRANSFER_DST
         val fb_size = _i64(width) * _i64(height) * 4
-        self.d_framebuffer = vulkan_sffi_alloc_buffer(fb_size, 0x80)
+        self.d_framebuffer = vulkan_sffi_alloc_buffer(fb_size, VK_STORAGE_TRANSFER_BUFFER_USAGE)
         if self.d_framebuffer == 0:
             self.last_error = "rt_vulkan_alloc_buffer failed: " + vulkan_sffi_last_error()
             self.session.release()
@@ -406,6 +526,12 @@ impl RenderBackend for VulkanBackend:
         self.dirty = true
 
     me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
+        if self._mask_active():
+            var temp = self._prepare_software_replay()
+            temp.draw_rect_filled(x, y, w, h, color)
+            if self._commit_software_replay(temp):
+                self.dirty = true
+                return
         val pc = _pack_rect_pc(x, y, w, h, color, self.w, self.h, self.clip_x, self.clip_y, self.clip_w, self.clip_h, self.clip_enabled)
         val gx = (_i64(w) + 15) / 16
         val gy = (_i64(h) + 15) / 16
@@ -485,18 +611,24 @@ impl RenderBackend for VulkanBackend:
         self.dirty = true
 
     me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
-        # Text rendering on GPU is complex; fall back to CPU-side rendering
-        # then upload the affected region. For production, a glyph atlas
-        # texture would be uploaded and sampled by a kernel.
-        self._gpu_draw_text_fallback(x, y, text_val, color, font_size)
+        val text_buf = text_transparent_blit_buffer(text_val, color, font_size)
+        if text_buf.is_empty():
+            return
+        self.draw_image(x, y, text_buf.width, text_buf.height, text_buf.pixels)
         self.dirty = true
 
     me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        if self._mask_active():
+            var temp = self._prepare_software_replay()
+            temp.draw_image(x, y, w, h, pixels)
+            if self._commit_software_replay(temp):
+                self.dirty = true
+                return
         # Upload pixel data to a temporary Vulkan storage buffer, then
         # dispatch a blit compute shader to copy it into the framebuffer
         val pixel_count = _i64(w) * _i64(h)
         val byte_size = pixel_count * 4
-        val d_src = vulkan_sffi_alloc_buffer(byte_size, 0x80)
+        val d_src = vulkan_sffi_alloc_buffer(byte_size, VK_STORAGE_TRANSFER_BUFFER_USAGE)
         if d_src != 0:
             # Upload source pixels to device buffer
             val src_bytes = _pixels_to_bytes(pixels, pixel_count)
@@ -543,16 +675,18 @@ impl RenderBackend for VulkanBackend:
             self.dirty = false
 
     fn read_pixels() -> [u32]:
-        # Ensure host buffer is up to date
+        # Immutable read path: if a frame is still dirty, download into a
+        # temporary buffer instead of mutating self.host_buf from a `fn`.
+        var current_buf = self.host_buf
         if self.dirty:
             val fb_size = _i64(self.w) * _i64(self.h) * 4
             val fb_bytes = vulkan_sffi_read_buffer_bytes(self.d_framebuffer, fb_size, 0)
             vulkan_sffi_wait_idle()
-            self.host_buf = _bytes_to_pixel_array(fb_bytes, self.w * self.h)
+            current_buf = _bytes_to_pixel_array(fb_bytes, self.w * self.h)
         var copy: [u32] = [0u32; self.w * self.h]
         var i = 0
         while i < self.w * self.h:
-            copy[i] = self.host_buf[i]
+            copy[i] = current_buf[i]
             i = i + 1
         copy
 
@@ -563,79 +697,436 @@ impl RenderBackend for VulkanBackend:
         self.h
 
     me draw_ellipse(cx: i32, cy: i32, rx: i32, ry: i32, color: u32):
-        emu_draw_ellipse(self, cx, cy, rx, ry, color)
+        if rx <= 0 or ry <= 0:
+            self.draw_rect_filled(cx, cy, 1, 1, color)
+            return
+        var x: i32 = 0
+        var y: i32 = ry
+        val rx2 = rx * rx
+        val ry2 = ry * ry
+        var px = 0
+        var py = 2 * rx2 * y
+        var d1 = ry2 - rx2 * ry + rx2 / 4
+        while px < py:
+            self.draw_rect_filled(cx + x, cy + y, 1, 1, color)
+            self.draw_rect_filled(cx - x, cy + y, 1, 1, color)
+            self.draw_rect_filled(cx + x, cy - y, 1, 1, color)
+            self.draw_rect_filled(cx - x, cy - y, 1, 1, color)
+            x = x + 1
+            px = px + 2 * ry2
+            if d1 < 0:
+                d1 = d1 + ry2 + px
+            else:
+                y = y - 1
+                py = py - 2 * rx2
+                d1 = d1 + ry2 + px - py
+        var d2 = ry2 * (2 * x + 1) * (2 * x + 1) / 4 + rx2 * (y - 1) * (y - 1) - rx2 * ry2
+        while y >= 0:
+            self.draw_rect_filled(cx + x, cy + y, 1, 1, color)
+            self.draw_rect_filled(cx - x, cy + y, 1, 1, color)
+            self.draw_rect_filled(cx + x, cy - y, 1, 1, color)
+            self.draw_rect_filled(cx - x, cy - y, 1, 1, color)
+            y = y - 1
+            py = py - 2 * rx2
+            if d2 > 0:
+                d2 = d2 + rx2 - py
+            else:
+                x = x + 1
+                px = px + 2 * ry2
+                d2 = d2 + ry2 - py + px + rx2
 
     me draw_ellipse_filled(cx: i32, cy: i32, rx: i32, ry: i32, color: u32):
-        emu_draw_ellipse_filled(self, cx, cy, rx, ry, color)
+        if rx <= 0 or ry <= 0:
+            self.draw_rect_filled(cx, cy, 1, 1, color)
+            return
+        var x: i32 = 0
+        var y: i32 = ry
+        val rx2 = rx * rx
+        val ry2 = ry * ry
+        var px = 0
+        var py = 2 * rx2 * y
+        var d1 = ry2 - rx2 * ry + rx2 / 4
+        while px < py:
+            self.draw_rect_filled(cx - x, cy + y, 2 * x + 1, 1, color)
+            self.draw_rect_filled(cx - x, cy - y, 2 * x + 1, 1, color)
+            x = x + 1
+            px = px + 2 * ry2
+            if d1 < 0:
+                d1 = d1 + ry2 + px
+            else:
+                y = y - 1
+                py = py - 2 * rx2
+                d1 = d1 + ry2 + px - py
+        var d2 = ry2 * (2 * x + 1) * (2 * x + 1) / 4 + rx2 * (y - 1) * (y - 1) - rx2 * ry2
+        while y >= 0:
+            self.draw_rect_filled(cx - x, cy + y, 2 * x + 1, 1, color)
+            self.draw_rect_filled(cx - x, cy - y, 2 * x + 1, 1, color)
+            y = y - 1
+            py = py - 2 * rx2
+            if d2 > 0:
+                d2 = d2 + rx2 - py
+            else:
+                x = x + 1
+                px = px + 2 * ry2
+                d2 = d2 + ry2 - py + px + rx2
 
     me draw_arc(cx: i32, cy: i32, r: i32, start_deg: i32, end_deg: i32, color: u32, thickness: i32):
-        emu_draw_arc(self, cx, cy, r, start_deg, end_deg, color, thickness)
+        if r <= 0:
+            return
+        var ang = start_deg
+        while ang <= end_deg:
+            val px = cx + r * _emu_cos_approx(ang) / 1000
+            val py = cy - r * _emu_sin_approx(ang) / 1000
+            val half = thickness / 2
+            if thickness <= 1:
+                self.draw_rect_filled(px, py, 1, 1, color)
+            else:
+                self.draw_rect_filled(px - half, py - half, thickness, thickness, color)
+            ang = ang + 1
 
     me draw_bezier(x1: i32, y1: i32, cx1: i32, cy1: i32, cx2: i32, cy2: i32, x2: i32, y2: i32, color: u32, thickness: i32):
-        emu_draw_bezier(self, x1, y1, cx1, cy1, cx2, cy2, x2, y2, color, thickness)
+        _vk_draw_bezier_recursive(self, x1, y1, cx1, cy1, cx2, cy2, x2, y2, color, thickness, 0)
 
     me draw_polygon_filled(xs: [i32], ys: [i32], count: i32, color: u32):
-        emu_draw_polygon_filled(self, xs, ys, count, color)
+        if count < 3:
+            return
+        var min_y = ys[0]
+        var max_y = ys[0]
+        var i: i32 = 1
+        while i < count:
+            if ys[i] < min_y:
+                min_y = ys[i]
+            if ys[i] > max_y:
+                max_y = ys[i]
+            i = i + 1
+        var row = min_y
+        while row <= max_y:
+            var node_x: [i32] = []
+            var j: i32 = 0
+            while j < count:
+                val k = (j + 1) % count
+                val yj = ys[j]
+                val yk = ys[k]
+                if (yj < row and yk >= row) or (yk < row and yj >= row):
+                    val denom = if _emu_abs(yk - yj) > 1: _emu_abs(yk - yj) else: 1
+                    val ix = xs[j] + (row - yj) * (xs[k] - xs[j]) / denom
+                    node_x = node_x.push(ix)
+                j = j + 1
+            _emu_sort_i32(node_x)
+            var n: i32 = 0
+            while n + 1 < node_x.len():
+                self.draw_rect_filled(node_x[n], row, node_x[n + 1] - node_x[n] + 1, 1, color)
+                n = n + 2
+            row = row + 1
 
     me draw_polyline(xs: [i32], ys: [i32], count: i32, color: u32, thickness: i32):
-        emu_draw_polyline(self, xs, ys, count, color, thickness)
+        if count < 2:
+            return
+        var i = 0
+        while i < count - 1:
+            self.draw_line(xs[i], ys[i], xs[i + 1], ys[i + 1], color, thickness)
+            i = i + 1
 
     me draw_rect_thick(x: i32, y: i32, w: i32, h: i32, color: u32, thickness: i32):
-        emu_draw_rect_thick(self, x, y, w, h, color, thickness)
+        if w <= 0 or h <= 0 or thickness <= 0:
+            return
+        var t = thickness
+        val max_t_w = w / 2
+        val max_t_h = h / 2
+        if t > max_t_w:
+            t = max_t_w
+        if t > max_t_h:
+            t = max_t_h
+        if t <= 0:
+            return
+        self.draw_rect_filled(x, y, w, t, color)
+        if h > t:
+            self.draw_rect_filled(x, y + h - t, w, t, color)
+        val inner_h = h - 2 * t
+        if inner_h > 0:
+            self.draw_rect_filled(x, y + t, t, inner_h, color)
+            if w > t:
+                self.draw_rect_filled(x + w - t, y + t, t, inner_h, color)
 
     me draw_circle_thick(cx: i32, cy: i32, r: i32, color: u32, thickness: i32):
-        emu_draw_circle_thick(self, cx, cy, r, color, thickness)
+        if r <= 0:
+            self.draw_rect_filled(cx, cy, 1, 1, color)
+            return
+        val r_outer = r
+        val r_inner = if r - thickness > 0: r - thickness else: 0
+        val r_outer_sq = r_outer * r_outer
+        val r_inner_sq = r_inner * r_inner
+        var py: i32 = -r_outer
+        while py <= r_outer:
+            var px: i32 = -r_outer
+            while px <= r_outer:
+                val dist_sq = px * px + py * py
+                if dist_sq <= r_outer_sq and dist_sq >= r_inner_sq:
+                    self.draw_rect_filled(cx + px, cy + py, 1, 1, color)
+                px = px + 1
+            py = py + 1
 
     me draw_rounded_rect_outline(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32, thickness: i32):
-        emu_draw_rounded_rect_outline(self, x, y, w, h, radius, color, thickness)
+        if w <= 0 or h <= 0:
+            return
+        var r = radius
+        if r > w / 2:
+            r = w / 2
+        if r > h / 2:
+            r = h / 2
+        val t = thickness
+        self.draw_rect_filled(x + r, y, w - 2 * r, t, color)
+        self.draw_rect_filled(x + r, y + h - t, w - 2 * r, t, color)
+        self.draw_rect_filled(x, y + r, t, h - 2 * r, color)
+        self.draw_rect_filled(x + w - t, y + r, t, h - 2 * r, color)
+        _vk_draw_thick_corner_arc(self, x + r, y + r, r, t, color, -1, -1)
+        _vk_draw_thick_corner_arc(self, x + w - r - 1, y + r, r, t, color, 1, -1)
+        _vk_draw_thick_corner_arc(self, x + r, y + h - r - 1, r, t, color, -1, 1)
+        _vk_draw_thick_corner_arc(self, x + w - r - 1, y + h - r - 1, r, t, color, 1, 1)
 
     me draw_gradient_rect_h(x: i32, y: i32, w: i32, h: i32, left_color: u32, right_color: u32):
-        emu_draw_gradient_rect_h(self, x, y, w, h, left_color, right_color)
+        if w <= 0 or h <= 0:
+            return
+        val lr = color_r(left_color)
+        val lg = color_g(left_color)
+        val lb = color_b(left_color)
+        val la = color_a(left_color)
+        val rr = color_r(right_color)
+        val rg = color_g(right_color)
+        val rb = color_b(right_color)
+        val ra = color_a(right_color)
+        val denom = if w > 1: w - 1 else: 1
+        var col = 0
+        while col < w:
+            val r = lr + (rr - lr) * col / denom
+            val g = lg + (rg - lg) * col / denom
+            val b = lb + (rb - lb) * col / denom
+            val a = la + (ra - la) * col / denom
+            self.draw_rect_filled(x + col, y, 1, h, rgba(r, g, b, a))
+            col = col + 1
 
     me draw_radial_gradient(cx: i32, cy: i32, r: i32, center_color: u32, edge_color: u32):
-        emu_draw_radial_gradient(self, cx, cy, r, center_color, edge_color)
+        if r <= 0:
+            self.draw_rect_filled(cx, cy, 1, 1, center_color)
+            return
+        val cr = color_r(center_color)
+        val cg = color_g(center_color)
+        val cb = color_b(center_color)
+        val ca = color_a(center_color)
+        val er = color_r(edge_color)
+        val eg = color_g(edge_color)
+        val eb = color_b(edge_color)
+        val ea = color_a(edge_color)
+        val r_sq = r * r
+        var py = -r
+        while py <= r:
+            var px = -r
+            while px <= r:
+                val dist_sq = px * px + py * py
+                if dist_sq <= r_sq:
+                    val dist = _vk_isqrt(dist_sq)
+                    val rr = cr + (er - cr) * dist / r
+                    val gg = cg + (eg - cg) * dist / r
+                    val bb = cb + (eb - cb) * dist / r
+                    val aa = ca + (ea - ca) * dist / r
+                    self.draw_rect_filled(cx + px, cy + py, 1, 1, rgba(rr, gg, bb, aa))
+                px = px + 1
+            py = py + 1
 
     me draw_rect_blend(x: i32, y: i32, w: i32, h: i32, color: u32):
-        emu_draw_rect_blend(self, x, y, w, h, color)
+        if w <= 0 or h <= 0:
+            return
+        val sa = color_a(color)
+        if sa == 255:
+            self.draw_rect_filled(x, y, w, h, color)
+            return
+        if sa == 0:
+            return
+        val fb = self.read_pixels()
+        val fb_w = self.width()
+        val fb_h = self.height()
+        val sr = color_r(color)
+        val sg = color_g(color)
+        val sb = color_b(color)
+        var result: [u32] = [0u32; w * h]
+        var py = 0
+        while py < h:
+            var px = 0
+            while px < w:
+                val fx = x + px
+                val fy = y + py
+                if fx >= 0 and fx < fb_w and fy >= 0 and fy < fb_h:
+                    val dst = fb[fy * fb_w + fx]
+                    result[py * w + px] = _emu_blend_over(sr, sg, sb, sa, dst)
+                px = px + 1
+            py = py + 1
+        self.draw_image(x, y, w, h, result)
 
     me draw_image_blend(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
-        emu_draw_image_blend(self, x, y, w, h, pixels)
+        if w <= 0 or h <= 0:
+            return
+        val fb = self.read_pixels()
+        val fb_w = self.width()
+        val fb_h = self.height()
+        var result: [u32] = [0u32; w * h]
+        var py = 0
+        while py < h:
+            var px = 0
+            while px < w:
+                val src = pixels[py * w + px]
+                val sa = color_a(src)
+                val fx = x + px
+                val fy = y + py
+                if fx >= 0 and fx < fb_w and fy >= 0 and fy < fb_h:
+                    if sa == 255:
+                        result[py * w + px] = src
+                    elif sa == 0:
+                        result[py * w + px] = fb[fy * fb_w + fx]
+                    else:
+                        val dst = fb[fy * fb_w + fx]
+                        result[py * w + px] = _emu_blend_over(color_r(src), color_g(src), color_b(src), sa, dst)
+                px = px + 1
+            py = py + 1
+        self.draw_image(x, y, w, h, result)
 
     me draw_image_scaled(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
         emu_draw_image_scaled(self, dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
 
     me draw_triangle_outline(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32, thickness: i32):
-        emu_draw_triangle_outline(self, x1, y1, x2, y2, x3, y3, color, thickness)
+        self.draw_line(x1, y1, x2, y2, color, thickness)
+        self.draw_line(x2, y2, x3, y3, color, thickness)
+        self.draw_line(x3, y3, x1, y1, color, thickness)
 
     me draw_blur_rect(x: i32, y: i32, w: i32, h: i32, radius: i32):
-        emu_draw_blur_rect(self, x, y, w, h, radius)
+        if w <= 0 or h <= 0 or radius <= 0:
+            return
+        val fb = self.read_pixels()
+        val fb_w = self.width()
+        val fb_h = self.height()
+        var temp: [u32] = [0u32; w * h]
+        var py: i32 = 0
+        while py < h:
+            var px: i32 = 0
+            while px < w:
+                var sr: i32 = 0
+                var sg: i32 = 0
+                var sb: i32 = 0
+                var sa: i32 = 0
+                var cnt: i32 = 0
+                var ky = -radius
+                while ky <= radius:
+                    var kx = -radius
+                    while kx <= radius:
+                        val fx = x + px + kx
+                        val fy = y + py + ky
+                        if fx >= 0 and fx < fb_w and fy >= 0 and fy < fb_h:
+                            val p = fb[fy * fb_w + fx]
+                            sr = sr + color_r(p)
+                            sg = sg + color_g(p)
+                            sb = sb + color_b(p)
+                            sa = sa + color_a(p)
+                            cnt = cnt + 1
+                        kx = kx + 1
+                    ky = ky + 1
+                if cnt > 0:
+                    temp[py * w + px] = rgba(sr / cnt, sg / cnt, sb / cnt, sa / cnt)
+                px = px + 1
+            py = py + 1
+        self.draw_image(x, y, w, h, temp)
 
     me draw_shadow_rect(x: i32, y: i32, w: i32, h: i32, offset_x: i32, offset_y: i32, blur_r: i32, color: u32):
-        emu_draw_shadow_rect(self, x, y, w, h, offset_x, offset_y, blur_r, color)
+        if w <= 0 or h <= 0:
+            return
+        val sx = x + offset_x
+        val sy = y + offset_y
+        val sw = w + 2 * blur_r
+        val sh = h + 2 * blur_r
+        self.draw_rect_filled(sx - blur_r, sy - blur_r, sw, sh, color)
+        if blur_r > 0:
+            self.draw_blur_rect(sx - blur_r, sy - blur_r, sw, sh, blur_r)
 
     me draw_image_transform(dst_x: i32, dst_y: i32, src_w: i32, src_h: i32, a: i32, b: i32, c: i32, d: i32, tx: i32, ty: i32, pixels: [u32]):
-        emu_draw_image_transform(self, dst_x, dst_y, src_w, src_h, a, b, c, d, tx, ty, pixels)
+        if src_w <= 0 or src_h <= 0:
+            return
+        val det = a * d - b * c
+        if det == 0:
+            return
+        val bx1 = _emu_min(_emu_min(0, a * src_w), _emu_min(b * src_h, a * src_w + b * src_h)) / 256
+        val by1 = _emu_min(_emu_min(0, c * src_w), _emu_min(d * src_h, c * src_w + d * src_h)) / 256
+        val bx2 = _emu_max(_emu_max(0, a * src_w), _emu_max(b * src_h, a * src_w + b * src_h)) / 256
+        val by2 = _emu_max(_emu_max(0, c * src_w), _emu_max(d * src_h, c * src_w + d * src_h)) / 256
+        val out_w = bx2 - bx1 + 1
+        val out_h = by2 - by1 + 1
+        if out_w <= 0 or out_h <= 0:
+            return
+        var result: [u32] = [0u32; out_w * out_h]
+        var py: i32 = 0
+        while py < out_h:
+            var px: i32 = 0
+            while px < out_w:
+                val ox = (bx1 + px) * 256 - tx
+                val oy = (by1 + py) * 256 - ty
+                val sx = (d * ox - b * oy) / det
+                val sy = (-c * ox + a * oy) / det
+                if sx >= 0 and sx < src_w and sy >= 0 and sy < src_h:
+                    result[py * out_w + px] = pixels[sy * src_w + sx]
+                px = px + 1
+            py = py + 1
+        self.draw_image(dst_x + bx1, dst_y + by1, out_w, out_h, result)
 
     me draw_rect_blend_mode(x: i32, y: i32, w: i32, h: i32, color: u32, mode: i32):
-        emu_draw_rect_blend_mode(self, x, y, w, h, color, mode)
+        if w <= 0 or h <= 0:
+            return
+        val fb = self.read_pixels()
+        val fb_w = self.width()
+        val fb_h = self.height()
+        val sr = color_r(color)
+        val sg = color_g(color)
+        val sb = color_b(color)
+        val sa = color_a(color)
+        var result: [u32] = [0u32; w * h]
+        var py = 0
+        while py < h:
+            var px = 0
+            while px < w:
+                val fx = x + px
+                val fy = y + py
+                if fx >= 0 and fx < fb_w and fy >= 0 and fy < fb_h:
+                    val dst = fb[fy * fb_w + fx]
+                    val dr = color_r(dst)
+                    val dg = color_g(dst)
+                    val db = color_b(dst)
+                    val da = color_a(dst)
+                    var rr = sr
+                    var rg = sg
+                    var rb = sb
+                    if mode == 1:
+                        rr = sr * dr / 255
+                        rg = sg * dg / 255
+                        rb = sb * db / 255
+                    elif mode == 2:
+                        rr = 255 - (255 - sr) * (255 - dr) / 255
+                        rg = 255 - (255 - sg) * (255 - dg) / 255
+                        rb = 255 - (255 - sb) * (255 - db) / 255
+                    elif mode == 3:
+                        rr = _emu_overlay_ch(sr, dr)
+                        rg = _emu_overlay_ch(sg, dg)
+                        rb = _emu_overlay_ch(sb, db)
+                    val out_r = dr + (rr - dr) * sa / 255
+                    val out_g = dg + (rg - dg) * sa / 255
+                    val out_b = db + (rb - db) * sa / 255
+                    var out_a = sa
+                    if da > out_a:
+                        out_a = da
+                    result[py * w + px] = rgba(out_r, out_g, out_b, out_a)
+                px = px + 1
+            py = py + 1
+        self.draw_image(x, y, w, h, result)
 
 impl Engine2DExtended for VulkanBackend:
     # Phase 1 fallback: pre-fill a cell via the compute `rect_filled`
     me draw_text_bg(x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32):
-        val gh = glyph_height()
-        var scale = font_size / gh
-        if scale < 1:
-            scale = 1
-        val advance = glyph_advance(scale)
-        val text_w = text_val.len().to_i32() * advance
-        val text_h = gh * scale
-        if text_w <= 0 or text_h <= 0:
+        val text_buf = text_blit_buffer(text_val, fg, bg, font_size)
+        if text_buf.is_empty():
             return
-        var buf: [u32] = []
-        var _i = 0
-        val buf_size = text_w * text_h
-        while _i < buf_size:
-            buf.push(bg)
-            _i = _i + 1
-        render_text_to_buffer(buf, text_w, text_h, 0, 0, text_val, fg, font_size)
-        self.draw_image(x, y, text_w, text_h, buf)
+        self.draw_image(x, y, text_buf.width, text_buf.height, text_buf.pixels)

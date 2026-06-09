@@ -757,7 +757,7 @@ pub fn run_test_file_safe_mode(path: &Path, options: &super::types::TestOptions)
                 skipped,
                 ignored: 0,
                 duration_ms,
-                error: if exit_code != 0 && failed == 0 {
+                error: if should_report_exit_code_error(exit_code, failed, passed) {
                     Some(format!("Process exited with code {}", exit_code))
                 } else {
                     None
@@ -840,6 +840,13 @@ fn build_safe_mode_child_args(path: &Path, options: &super::types::TestOptions) 
     }
 
     args
+}
+
+fn should_report_exit_code_error(exit_code: i32, failed: usize, passed: usize) -> bool {
+    if exit_code == 0 || failed > 0 {
+        return false;
+    }
+    passed == 0
 }
 
 fn emit_test_artifacts(path: &Path, result: &TestFileResult, artifacts: ExecutionArtifacts<'_>) {
@@ -1791,7 +1798,7 @@ pub fn run_test_file_smf_mode(path: &Path, cache: &BuildCache, options: &super::
                 skipped,
                 ignored: 0,
                 duration_ms,
-                error: if exit_code != 0 && failed == 0 {
+                error: if should_report_exit_code_error(exit_code, failed, passed) {
                     Some(format!("Process exited with code {}", exit_code))
                 } else {
                     None
@@ -1922,7 +1929,7 @@ pub fn run_test_file_native_mode(
                 skipped,
                 ignored: 0,
                 duration_ms,
-                error: if exit_code != 0 && failed == 0 {
+                error: if should_report_exit_code_error(exit_code, failed, passed) {
                     Some(format!("Process exited with code {}", exit_code))
                 } else {
                     None
@@ -2124,6 +2131,15 @@ mod tests {
         assert_eq!(args.first().map(String::as_str), Some("run"));
         assert_eq!(args.get(1).map(String::as_str), Some("test/example_spec.spl"));
         assert!(!args.iter().any(|arg| arg == "test"));
+    }
+
+    #[test]
+    fn test_should_report_exit_code_error_ignores_green_nonzero_exit() {
+        assert!(!should_report_exit_code_error(-1, 0, 49));
+        assert!(!should_report_exit_code_error(2, 0, 1));
+        assert!(should_report_exit_code_error(-1, 0, 0));
+        assert!(should_report_exit_code_error(2, 0, 0));
+        assert!(!should_report_exit_code_error(2, 1, 49));
     }
 
     #[test]
