@@ -110,6 +110,13 @@ fn main():
     val x = 1
 SIMPLE
 
+write_fixture multicore_wrong_surface_import <<'SIMPLE'
+use std.concurrent.thread.{multicore_green_spawn}
+
+fn main():
+    val handle = multicore_green_spawn(\: 1)
+SIMPLE
+
 write_fixture numbered_runtime_extern <<'SIMPLE'
 extern fn rt_thread_spawn_isolated2(closure: Any, data1: Any, data2: Any) -> i64
 
@@ -147,6 +154,7 @@ positive_fixtures=$((positive_fixtures + 1))
 for name in \
     thread_spawn2_import \
     wrong_surface_import \
+    multicore_wrong_surface_import \
     numbered_runtime_extern \
     numbered_limited_runtime_extern \
     direct_runtime_pool_extern
@@ -155,16 +163,21 @@ do
     fixtures=$((fixtures + 1))
 done
 
-if rg -n "(rt_thread_spawn_isolated|rt_thread_spawn_limited|thread_spawn|spawn_isolated|spawn_limited)[0-9]+" \
-    src/lib src/runtime src/compiler_rust/common/src/runtime_symbols.rs \
-    src/compiler_rust/compiler/src/codegen/runtime_sffi.rs \
-    src/compiler_rust/compiler/src/interpreter_extern scripts/check/check-cross-language-perf.shs \
-    >"$WORK_DIR/forbidden_names.out"
-then
+forbidden_pattern="(rt_thread_spawn_isolated|rt_thread_spawn_limited|thread_spawn|spawn_isolated|spawn_limited)[0-9]+"
+forbidden_paths="src/lib src/runtime src/compiler_rust/common/src/runtime_symbols.rs src/compiler_rust/compiler/src/codegen/runtime_sffi.rs src/compiler_rust/compiler/src/interpreter_extern scripts/check/check-cross-language-perf.shs"
+
+if command -v rg >/dev/null 2>&1; then
+    forbidden_scan_cmd="rg -n \"$forbidden_pattern\" $forbidden_paths"
+else
+    forbidden_scan_cmd="grep -R -n -E \"$forbidden_pattern\" $forbidden_paths"
+fi
+
+if sh -c "$forbidden_scan_cmd" >"$WORK_DIR/forbidden_names.out"; then
     cat "$WORK_DIR/forbidden_names.out"
     fail "forbidden numbered concurrency name in active source/profile surface"
 fi
 
 echo "concurrency_api_contract=true"
 echo "fixtures=$fixtures"
+echo "misuse_fixtures=$fixtures"
 echo "positive_fixtures=$positive_fixtures"

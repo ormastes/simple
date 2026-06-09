@@ -233,6 +233,7 @@ Do not use numeric-suffix concurrency aliases. They are rejected by
 explicit-argument spawning.
 Keep concurrency surfaces separate. Importing `thread_spawn` from
 `std.concurrent.cooperative_green`, importing `cooperative_green_spawn` from
+`std.concurrent.thread`, importing `multicore_green_spawn` from
 `std.concurrent.thread`, or similar wrong-surface imports is rejected with
 `E-PAR-003`. Passing non-closures to `thread_spawn`, `green_spawn`,
 `cooperative_green_spawn`, or `multicore_green_spawn`, or passing text to

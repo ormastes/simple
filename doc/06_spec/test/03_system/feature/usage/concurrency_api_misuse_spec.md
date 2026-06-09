@@ -89,6 +89,7 @@ Run the misuse gate:
 - `thread_spawn_with_args` must stay available as the explicit-argument
   OS-thread API.
 - `cooperative_green_spawn` must stay on the cooperative-green surface.
+- `multicore_green_spawn` must stay on the multicore-green surface.
 - `multicore_green_spawn` must accept a single zero-argument closure.
 - `multicore_green_set_parallelism` must accept an integer worker count.
 - `task_spawn` must stay available as the pool-backed native task API.
@@ -103,7 +104,7 @@ Run the misuse gate:
 #### covers every checked-in misuse fixture
 
 - Count the checked-in concurrency misuse fixtures
-   - Expected: fixture_count() equals `15`
+   - Expected: fixture_count() equals `16`
 
 
 <details>
@@ -114,7 +115,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Count the checked-in concurrency misuse fixtures")
-expect(fixture_count()).to_equal(15)
+expect(fixture_count()).to_equal(16)
 ```
 
 </details>
@@ -129,7 +130,7 @@ expect(fixture_count()).to_equal(15)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -139,7 +140,8 @@ expect(code).to_equal(0)
 step("Verify approved public-name fixtures were checked before misuse fixtures")
 expect(output).to_contain("concurrency_api_contract=true")
 expect(output).to_contain("positive_fixtures=5")
-expect(output).to_contain("fixtures=5")
+expect(output).to_contain("fixtures=6")
+expect(output).to_contain("misuse_fixtures=6")
 ```
 
 </details>
@@ -220,6 +222,8 @@ expect_compile_error("green_spawn_bad_arg.spl", "E-PAR-004", "pass a closure")
 
 #### rejects multicore-green runtime-pool facade misuse
 
+- Reject multicore_green_spawn imported from the OS-thread surface
+- expect compile error
 - Reject multicore_green_spawn called with too many arguments
 - expect compile error
 - Reject multicore_green_spawn called with a non-closure argument
@@ -233,10 +237,12 @@ expect_compile_error("green_spawn_bad_arg.spl", "E-PAR-004", "pass a closure")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+step("Reject multicore_green_spawn imported from the OS-thread surface")
+expect_compile_error("multicore_green_wrong_surface_import.spl", "E-PAR-003", "multicore_green_spawn belongs to std.concurrent.multicore_green")
 step("Reject multicore_green_spawn called with too many arguments")
 expect_compile_error("multicore_green_wrong_arity.spl", "E-PAR-004", "single zero-argument value closure")
 step("Reject multicore_green_spawn called with a non-closure argument")
