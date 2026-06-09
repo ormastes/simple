@@ -295,8 +295,11 @@ Current verified additions in this lane:
         - `draw_image_scaled`
         - `draw_text`
         - `draw_text_bg`
+        - `draw_radial_gradient`
         - masked `draw_rect_filled`
         - masked `draw_image`
+      - mirrored manual refreshed to match the expanded suite:
+        - `doc/06_spec/test/02_integration/rendering/metal_engine2d_readback_spec.md`
 - checked-in Vulkan raster SPIR-V blobs regenerated from canonical GLSL for:
   rect-outline, circle filled/outline, line, rounded rect, triangle-filled,
   gradient rect, and blit
