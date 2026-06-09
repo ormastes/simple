@@ -325,7 +325,19 @@ impl ModuleLoader {
         debug!(count = relocs.len(), "Applying relocations");
         let code_slice = unsafe { std::slice::from_raw_parts_mut(code_mem.as_mut_ptr(), code_size) };
 
-        apply_relocations(code_slice, &relocs, &symbols, code_mem.as_ptr() as usize, &resolver).map_err(|e| {
+        let mut got_slot_resolver = |_symbol_index: u32, _sym_addr: usize| -> Result<usize, String> {
+            Err("GOT relocations are not supported by the legacy loader".to_string())
+        };
+
+        apply_relocations(
+            code_slice,
+            &relocs,
+            &symbols,
+            code_mem.as_ptr() as usize,
+            &resolver,
+            &mut got_slot_resolver,
+        )
+        .map_err(|e| {
             error!(error = %e, "Failed to apply relocations");
             LoadError::RelocationFailed(e)
         })?;

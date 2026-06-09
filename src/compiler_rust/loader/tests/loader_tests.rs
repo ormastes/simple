@@ -295,12 +295,16 @@ fn relocations_patch_local_symbol() {
     }];
 
     let base = code.as_ptr() as usize;
+    let mut got_slot_resolver = |_symbol_index: u32, _sym_addr: usize| -> Result<usize, String> {
+        Err("unexpected GOT relocation".to_string())
+    };
     apply_relocations(
         &mut code,
         &relocs,
         &table,
         base,
         &|_| Some(0usize), // unused for local
+        &mut got_slot_resolver,
     )
     .unwrap();
 

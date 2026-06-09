@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use thiserror::Error;
 use tracing::{debug, error, instrument, trace, warn};
 
+use simple_common::smf::apply_relocations_with_symbol_resolver;
 use simple_common::DynLoader;
 
 use super::memory::*;
@@ -160,6 +161,7 @@ impl ModuleLoader {
         // Load sections with bounds checking
         let mut code_offset = 0usize;
         let mut data_offset = 0usize;
+        let mut section_bases = vec![0usize; sections.len() + 1];
 
         for (idx, section) in sections.iter().enumerate() {
             trace!(
@@ -193,6 +195,7 @@ impl ModuleLoader {
                             idx, code_offset, virtual_size, code_size
                         )));
                     }
+                    section_bases[idx + 1] = code_mem.as_ptr() as usize + code_offset;
 
                     // ⭐ v1.1: Adjust section offset by base_offset (for stub support)
                     let actual_offset = base_offset + section.offset;
@@ -242,6 +245,7 @@ impl ModuleLoader {
                                 idx, data_offset, virtual_size, data_size
                             )));
                         }
+                        section_bases[idx + 1] = data_mem.as_ptr() as usize + data_offset;
 
                         // ⭐ v1.1: Adjust section offset by base_offset (for stub support)
                         let actual_offset = base_offset + section.offset;
@@ -294,6 +298,7 @@ impl ModuleLoader {
                                 idx, data_offset, virtual_size, data_size
                             )));
                         }
+                        section_bases[idx + 1] = data_mem.as_ptr() as usize + data_offset;
 
                         trace!(size = virtual_size, "Zeroing BSS section");
                         let slice = unsafe {
@@ -383,13 +388,24 @@ impl ModuleLoader {
             Ok(addr)
         };
 
-        apply_relocations(
+        let local_symbol_resolver = |sym: &SmfSymbol| -> Option<usize> {
+            let section_index = sym.section_index() as usize;
+            let section_base = section_bases.get(section_index).copied().unwrap_or(0);
+            if section_base == 0 {
+                None
+            } else {
+                Some(section_base.wrapping_add(sym.value as usize))
+            }
+        };
+
+        apply_relocations_with_symbol_resolver(
             code_slice,
             &relocs,
             &symbols,
             code_mem.as_ptr() as usize,
             &combined_resolver,
             &mut got_slot_resolver,
+            &local_symbol_resolver,
         )
         .map_err(|e| {
             error!(error = %e, "Failed to apply relocations");

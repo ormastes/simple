@@ -37,7 +37,7 @@
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
 | [SMF Runtime-Pool Closure Lookup Regression](test/03_system/feature/usage/smf_runtime_pool_closure_regression_spec.md) | Fixed | N/A | 1 | 60% | 103 lines |
-| [Cooperative Green SMF Mutable Global Blocker](test/03_system/feature/usage/cooperative_green_smf_mutable_global_blocker_spec.md) | Active Blocker | N/A | 1 | 40% | 58 lines |
+| [Cooperative Green SMF Mutable Global Regression](test/03_system/feature/usage/cooperative_green_smf_mutable_global_regression_spec.md) | Fixed Regression | N/A | 1 | 40% | 56 lines |
 
 ## Runtime Concurrency (1 features)
 

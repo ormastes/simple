@@ -1,6 +1,6 @@
 use tracing::{debug, error, trace};
 
-use super::symbol::{SymbolBinding, SymbolTable};
+use super::symbol::{SmfSymbol, SymbolBinding, SymbolTable};
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -34,6 +34,26 @@ pub fn apply_relocations(
     imports: &dyn Fn(&str) -> Option<usize>,
     got_slot_resolver: &mut dyn FnMut(u32, usize) -> Result<usize, String>,
 ) -> Result<(), String> {
+    apply_relocations_with_symbol_resolver(
+        code,
+        relocs,
+        symbols,
+        base_address,
+        imports,
+        got_slot_resolver,
+        &|_| None,
+    )
+}
+
+pub fn apply_relocations_with_symbol_resolver(
+    code: &mut [u8],
+    relocs: &[SmfRelocation],
+    symbols: &SymbolTable,
+    base_address: usize,
+    imports: &dyn Fn(&str) -> Option<usize>,
+    got_slot_resolver: &mut dyn FnMut(u32, usize) -> Result<usize, String>,
+    local_symbol_resolver: &dyn Fn(&SmfSymbol) -> Option<usize>,
+) -> Result<(), String> {
     let code_len = code.len();
     debug!(
         code_len,
@@ -65,7 +85,7 @@ pub fn apply_relocations(
 
         let sym_addr = if sym.visibility != 0 || sym.binding == SymbolBinding::Local || sym.value != 0 || sym.size != 0
         {
-            base_address.wrapping_add(sym.value as usize)
+            local_symbol_resolver(sym).unwrap_or_else(|| base_address.wrapping_add(sym.value as usize))
         } else {
             match imports(sym_name) {
                 Some(addr) => {

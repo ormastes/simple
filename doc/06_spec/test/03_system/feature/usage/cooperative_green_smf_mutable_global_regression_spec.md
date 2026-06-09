@@ -1,16 +1,16 @@
-# Cooperative Green SMF Mutable Global Blocker
+# Cooperative Green SMF Mutable Global Regression
 
-> This SSpec pins the root blocker behind the cooperative-green SMF profile rows: SMF execution currently crashes on a minimal module-level mutable counter. The implemented cooperative-green queue stores ready/done counters as Pure Simple mutable globals, so the SMF profile row must remain classified as a runtime blocker until this fixture exits successfully.
+> This SSpec pins the SMF mutable-global runtime fix that unblocks cooperative-green SMF profile rows. SMF execution must preserve module-level mutable storage and relocate local data symbols against the loaded data/BSS section base, not the code base.
 
-<!-- sdn-diagram:id=cooperative_green_smf_mutable_global_blocker_spec.arch -->
+<!-- sdn-diagram:id=cooperative_green_smf_mutable_global_regression_spec.arch -->
 <details class="sdn-source">
 <summary>SDN source</summary>
 
-```sdn id=cooperative_green_smf_mutable_global_blocker_spec.arch hash=sha256:auto render=ascii
+```sdn id=cooperative_green_smf_mutable_global_regression_spec.arch hash=sha256:auto render=ascii
 @layout dag
 @direction LR
 
-cooperative_green_smf_mutable_global_blocker_spec -> std
+cooperative_green_smf_mutable_global_regression_spec -> std
 ```
 
 </details>
@@ -18,7 +18,7 @@ cooperative_green_smf_mutable_global_blocker_spec -> std
 <details class="sdn-ascii" open>
 <summary>Diagram</summary>
 
-```ascii generated-from=cooperative_green_smf_mutable_global_blocker_spec.arch hash=sha256:auto
+```ascii generated-from=cooperative_green_smf_mutable_global_regression_spec.arch hash=sha256:auto
 # run: simple md-diagram-update
 ```
 
@@ -32,9 +32,9 @@ cooperative_green_smf_mutable_global_blocker_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Cooperative Green SMF Mutable Global Blocker
+# Cooperative Green SMF Mutable Global Regression
 
-This SSpec pins the root blocker behind the cooperative-green SMF profile rows: SMF execution currently crashes on a minimal module-level mutable counter. The implemented cooperative-green queue stores ready/done counters as Pure Simple mutable globals, so the SMF profile row must remain classified as a runtime blocker until this fixture exits successfully.
+This SSpec pins the SMF mutable-global runtime fix that unblocks cooperative-green SMF profile rows. SMF execution must preserve module-level mutable storage and relocate local data symbols against the loaded data/BSS section base, not the code base.
 
 ## At a Glance
 
@@ -42,22 +42,21 @@ This SSpec pins the root blocker behind the cooperative-green SMF profile rows: 
 |-------|-------|
 | Feature IDs | #green-cooperative-smf-mutable-global |
 | Category | Runtime / SMF / Concurrency |
-| Status | Active Blocker |
+| Status | Fixed Regression |
 | Requirements | doc/02_requirements/feature/multicore_green.md |
 | Plan | doc/03_plan/sys_test/multicore_green.md |
 | Design | doc/05_design/multicore_green.md |
 | Research | doc/01_research/local/multicore_green.md |
-| Source | `test/03_system/feature/usage/cooperative_green_smf_mutable_global_blocker_spec.spl` |
+| Source | `test/03_system/feature/usage/cooperative_green_smf_mutable_global_regression_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-This SSpec pins the root blocker behind the cooperative-green SMF profile rows:
-SMF execution currently crashes on a minimal module-level mutable counter. The
-implemented cooperative-green queue stores ready/done counters as Pure Simple
-mutable globals, so the SMF profile row must remain classified as a runtime
-blocker until this fixture exits successfully.
+This SSpec pins the SMF mutable-global runtime fix that unblocks
+cooperative-green SMF profile rows. SMF execution must preserve module-level
+mutable storage and relocate local data symbols against the loaded data/BSS
+section base, not the code base.
 
 ## Requirements
 
@@ -77,28 +76,27 @@ blocker until this fixture exits successfully.
 
 ## Syntax
 
-Run the blocker contract:
+Run the regression contract:
 
 ```sh
-./src/compiler_rust/target/debug/simple test test/03_system/feature/usage/cooperative_green_smf_mutable_global_blocker_spec.spl --mode=interpreter --clean
+./src/compiler_rust/target/debug/simple test test/03_system/feature/usage/cooperative_green_smf_mutable_global_regression_spec.spl --mode=interpreter --clean
 ```
 
 ## Examples
 
 - The minimal source uses a module-level mutable `COUNT`.
 - Source checking and SMF compilation must succeed.
-- Running the SMF artifact currently exits nonzero, proving the runtime blocker
-  is still real.
-- When the SMF artifact exits `0`, this spec must be inverted and the
-  cooperative-green SMF profile rows can stop reporting the mutable-global
-  blocker.
+- Running the SMF artifact exits `0`.
+- Exit `42` means mutable global state did not persist across calls.
+- Negative or signal-like process status means the loader regressed to the old
+  crash path.
 
 ## TUI Capture
 
 ```text
 Simple Test Runner v1.0.0-beta
-Running: test/03_system/feature/usage/cooperative_green_smf_mutable_global_blocker_spec.spl
-Cooperative green SMF mutable global blocker PASSED
+Running: test/03_system/feature/usage/cooperative_green_smf_mutable_global_regression_spec.spl
+Cooperative green SMF mutable global regression PASSED
 Files: 1
 Passed: 1
 Failed: 0
@@ -106,9 +104,9 @@ Failed: 0
 
 ## Scenarios
 
-### Cooperative green SMF mutable-global blocker
+### Cooperative green SMF mutable-global regression
 
-#### keeps the minimal mutable-global SMF crash visible
+#### runs a minimal mutable-global SMF without crashing
 
 - Create the minimal mutable-global fixture
    - Expected: mkdir_code equals `0`
@@ -116,7 +114,8 @@ Failed: 0
 - Check and compile the fixture to SMF
    - Expected: check_code equals `0`
    - Expected: compile_code equals `0`
-- Run the SMF artifact and keep the blocker classified
+- Run the SMF artifact as a regression guard
+   - Expected: run_code equals `0`
 
 
 <details>
@@ -140,10 +139,10 @@ val (compile_stdout, compile_stderr, compile_code) = rt_process_run(SIMPLE_BIN, 
 expect(process_output(compile_stdout, compile_stderr)).to_contain("Compiled")
 expect(compile_code).to_equal(0)
 
-step("Run the SMF artifact and keep the blocker classified")
+step("Run the SMF artifact as a regression guard")
 val (run_stdout, run_stderr, run_code) = rt_process_run(SIMPLE_BIN, [SMF_PATH])
 expect(process_output(run_stdout, run_stderr).len()).to_be_greater_than(-1)
-expect(run_code).to_be_less_than(0)
+expect(run_code).to_equal(0)
 ```
 
 </details>

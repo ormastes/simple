@@ -15,8 +15,9 @@ separate from the cooperative queue semantics:
   append/index previously segfaulted after mutation. Fixed on 2026-06-08 by
   running JIT module init before entry calls and registering the init function
   for finalization lookup.
-- SMF mutable globals can segfault even for a minimal counter:
-  `var COUNT: usize = 0; COUNT = COUNT + 1`.
+- SMF mutable globals previously segfaulted even for a minimal counter.
+  Fixed on 2026-06-09 by preserving BSS sections in linked SMF output and
+  resolving local data symbols against their loaded section base.
 
 ## Impact
 
@@ -75,10 +76,9 @@ The cross-language harness now reports Simple OS-thread and Simple cooperative
 green rows separately. A 20-worker OS-thread fanout smoke compiles and runs
 through unrolled `thread_spawn` fork-join handles. `thread_spawn_with_args`
 native probes now pass the focused explicit-argument ABI smoke, so it is no
-longer part of this blocker list. The remaining direct-run blockers are the
-cooperative green SMF mutable-global failure and SMF function-valued global and
-global-array storage/codegen failures; those are runtime/compiler issues, not
-public API change requests.
+longer part of this blocker list. The remaining direct-run blocker is SMF
+function-valued global and global-array storage/codegen; that is a
+runtime/compiler issue, not a public API change request.
 
 ## Multicore Green SMF Status
 
@@ -94,8 +94,9 @@ runtime-pool wrapper lookup blocker is closed by
 which requires `wrapper_smf_pool_pass=true`; the historical blocker remains in
 `doc/08_tracking/bug/smf_runtime_pool_closure_lookup_2026-06-07.md`.
 
-Remaining SMF failures are cooperative-green queue rows, which still depend on
-mutable global queue state and are not M:N CPU-parallel evidence. Keep those
+SMF mutable-global regression evidence is now covered by
+`test/03_system/feature/usage/cooperative_green_smf_mutable_global_regression_spec.spl`.
+Cooperative-green queue rows are still not M:N CPU-parallel evidence; keep them
 classified separately from native and SMF `multicore_green_spawn` evidence.
 
 ## Reproduction
@@ -107,9 +108,9 @@ Temporary local repro files were created under `build/tmp/` while investigating:
 
 ## Required Fix
 
-Fix SMF handling for function-valued globals, global function-valued arrays, and
-mutable global state, then switch or add a perf harness green row for delayed
-`green_spawn(fn)` closure execution timing. Keep
+Fix SMF handling for function-valued globals and global function-valued arrays,
+then switch or add a perf harness green row for delayed `green_spawn(fn)`
+closure execution timing. Keep
 `test/05_perf/profile_scripts/native_function_value_callback_regression_test.shs`
 passing so the fixed callback and direct-run function-global paths do not
 regress.

@@ -63,7 +63,7 @@ impl ParsedObject {
             }
 
             let name = section.name().unwrap_or("<unnamed>").to_string();
-            let section_data = section.data().unwrap_or(&[]).to_vec();
+            let mut section_data = section.data().unwrap_or(&[]).to_vec();
 
             let (section_type, flags, data_kind) = match section.kind() {
                 SectionKind::Text => (SectionType::Code, SECTION_FLAG_READ | SECTION_FLAG_EXEC, None),
@@ -76,8 +76,12 @@ impl ParsedObject {
                     (SectionType::RoData, SECTION_FLAG_READ, Some(DataSectionKind::ReadOnly))
                 }
                 SectionKind::UninitializedData => {
-                    // BSS - skip for now
-                    continue;
+                    section_data.resize(section.size() as usize, 0);
+                    (
+                        SectionType::Bss,
+                        SECTION_FLAG_READ | SECTION_FLAG_WRITE,
+                        Some(DataSectionKind::Mutable),
+                    )
                 }
                 _ => continue, // Skip other section types
             };

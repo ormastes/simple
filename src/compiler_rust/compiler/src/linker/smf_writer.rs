@@ -376,7 +376,11 @@ impl SmfWriter {
                 type_id: 0,
                 version: 0,
                 template_param_count: 0,
-                reserved: [0; 3],
+                reserved: [
+                    (symbol.section_index & 0xff) as u8,
+                    ((symbol.section_index >> 8) & 0xff) as u8,
+                    0,
+                ],
                 template_offset: 0,
             };
             let symbol_bytes = unsafe {

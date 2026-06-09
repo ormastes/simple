@@ -53,6 +53,10 @@ pub struct SmfSymbol {
 }
 
 impl SmfSymbol {
+    pub fn section_index(&self) -> u16 {
+        u16::from_le_bytes([self.reserved[0], self.reserved[1]])
+    }
+
     pub fn layout_phase(&self) -> LayoutPhaseFlag {
         LayoutPhaseFlag::from_flags(self.flags)
     }
