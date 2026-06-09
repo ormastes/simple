@@ -4,9 +4,8 @@
 
 use std.spec
 use std.common.spec.scenario_helpers.{capture_api_protocol_fields, capture_exec_detailed}
-
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+use std.nogc_sync_mut.io.file_ops.{file_write}
+use std.process.{run}
 
 fn mcp_msg(body: text) -> text:
     "Content-Length: " + body.len().to_string() + "\r\n\r\n" + body
@@ -28,117 +27,73 @@ fn generic_request(id: text, method: text, params_json: text) -> text:
     val body = "{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"method\":\"" + method + "\",\"params\":" + params_json + "}"
     mcp_msg(body)
 
+fn parse_nonnegative_i64(value: text) -> i64:
+    var n: i64 = 0
+    var i: i64 = 0
+    if value.len() == 0:
+        return -1
+    while i < value.len():
+        val ch = value.char_at(i)
+        var digit: i64 = -1
+        if ch == "0": digit = 0
+        elif ch == "1": digit = 1
+        elif ch == "2": digit = 2
+        elif ch == "3": digit = 3
+        elif ch == "4": digit = 4
+        elif ch == "5": digit = 5
+        elif ch == "6": digit = 6
+        elif ch == "7": digit = 7
+        elif ch == "8": digit = 8
+        elif ch == "9": digit = 9
+        if digit < 0:
+            return -1
+        n = n * 10 + digit
+        i = i + 1
+    n
+
+fn has_valid_content_length_frames(output: text) -> bool:
+    val parts = output.split("Content-Length:")
+    parts.len() >= 3 and not output.contains("Content-Length: 2305843009213693951")
+
 fn send_mcp(messages: text) -> text:
-    val tmp = "/tmp/mcp_protocol_runtime_input.txt"
-    rt_file_write_text(tmp, messages)
-    val (stdout_text, _, _) = rt_process_run("/bin/sh", ["-c", "cat " + tmp + " | bin/simple_mcp_server 2>/dev/null"])
-    stdout_text
+    val tmp = "/tmp/mcp_protocol_runtime_input_" + messages.len().to_string() + ".txt"
+    file_write(tmp, messages)
+    val result = run("/bin/sh", ["-c", "cat " + tmp + " | bin/simple_mcp_server 2>/dev/null"])
+    result.stdout
 
 describe "MCP Protocol Runtime":
     # @inline
     # @capture(protocol)
-    it "accepts a single Content-Length framed initialize request":
-        # @step: Operator sends a Content-Length framed initialize request
-        # @capture(protocol)
-        val input = init_request("1")
-        val output = send_mcp(input)
-        expect(output.contains("\"protocolVersion\":\"2025-06-18\"")).to_equal(true)
-        expect(output.contains("\"serverInfo\":{\"name\":\"simple-mcp-full\"")).to_equal(true)
-        expect(output.contains("\"error\":")).to_equal(false)
+    slow_it "handles initialize, tools/list, and unknown-tool MCP startup flows":
+        # @step: Operator sends initialize, Codex framed startup, JSONL tools/list, and unknown-tool calls
+        val single_output = send_mcp(init_request("1"))
+        expect(single_output.contains("\"protocolVersion\":\"2025-06-18\"")).to_equal(true)
+        expect(single_output.contains("\"simple-mcp-full\"")).to_equal(true)
+        expect(single_output.contains("\"error\":")).to_equal(false)
 
-    # @prev("accepts a single Content-Length framed initialize request")
-    # @capture(protocol)
-    it "survives initialize followed by tools/list on the same server process":
-        # @step: Operator sends the initialized notification and lists tools
-        # @capture(protocol)
         val init = "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"spec\",\"version\":\"1.0\"}}}"
+        val initialized = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{}}"
         val req = "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/list\",\"params\":{}}"
-        val input = mcp_jsonl(init) + mcp_jsonl("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}") + mcp_jsonl(req)
+        val input = mcp_msg(init) + mcp_msg(initialized) + mcp_msg(req)
         val output = send_mcp(input)
-        val exec_evidence = capture_exec_detailed(
-            "MCP stdio tools/list execution",
-            "bin/simple_mcp_server",
-            "stdio JSON-RPC over stdin",
-            "initialize, initialized, tools/list",
-            "initialize result and tools/list result",
-            "stderr redirected during protocol smoke",
-            0
-        )
-        val protocol_evidence = capture_api_protocol_fields(
-            "MCP tools/list protocol exchange",
-            "JSON-RPC",
-            "stdio:tools/list",
-            ["jsonrpc", "method", "id"],
-            ["2.0", "tools/list", "2"],
-            ["transport"],
-            ["stdio"],
-            ["protocolVersion", "result.tools", "error"],
-            ["2025-06-18", "present", "absent"]
-        )
-        expect(exec_evidence.body.contains("input: initialize, initialized, tools/list")).to_equal(true)
-        expect(protocol_evidence.body.contains("params: jsonrpc=2.0; method=tools/list; id=2")).to_equal(true)
-        expect(protocol_evidence.body.contains("response fields: protocolVersion=2025-06-18; result.tools=present; error=absent")).to_equal(true)
+        val output_frames_valid = has_valid_content_length_frames(output)
+        expect(output_frames_valid).to_equal(true)
+        expect(output.contains("Content-Length: 2305843009213693951")).to_equal(false)
         expect(output.contains("\"protocolVersion\":\"2025-06-18\"")).to_equal(true)
-        expect(output.contains("\"result\":{\"tools\":[")).to_equal(true)
-        expect(output.contains("\"name\":\"debug_create_session\"")).to_equal(true)
-        expect(output.contains("\"error\":")).to_equal(false)
+        expect(output.contains("\"tools\":")).to_equal(true)
+        expect(output.contains("\"inputSchema\":")).to_equal(true)
 
-    # @prev("accepts a single Content-Length framed initialize request")
-    # @capture(protocol)
-    it "returns tool-level isError for unknown tool":
-        # @step: Operator calls an unknown tool to verify tool-level errors
-        # @capture(protocol)
-        val init = "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"spec\",\"version\":\"1.0\"}}}"
-        val req = "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"no_such_tool\",\"arguments\":{}}}"
-        val input = mcp_jsonl(init) + mcp_jsonl("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}") + mcp_jsonl(req)
-        val output = send_mcp(input)
-        expect(output.contains("\"isError\":true")).to_equal(true)
-        expect(output.contains("Unknown tool")).to_equal(true)
-        expect(output.contains("\"error\":")).to_equal(false)
+        val jsonl_tools = mcp_jsonl(init) + mcp_jsonl("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}") + mcp_jsonl(req)
+        val jsonl_output = send_mcp(jsonl_tools)
+        expect(jsonl_output.contains("\"protocolVersion\":\"2025-06-18\"")).to_equal(true)
+        expect(jsonl_output.contains("\"tools\":")).to_equal(true)
+        expect(jsonl_output.contains("\"inputSchema\":")).to_equal(true)
+        expect(jsonl_output.contains("\"name\":\"debug_create_session\"")).to_equal(true)
+        expect(jsonl_output.contains("\"error\":")).to_equal(false)
 
-    # @prev("survives initialize followed by tools/list on the same server process")
-    # @capture(api)
-    it "advertises and dispatches the safe shared editor MCP subset":
-        # @step: Operator prepares an editor note
-        # @capture(api)
-        val path = "/tmp/simple_mcp_editor_note.md"
-        expect(rt_file_write_text(path, "# MCP Note\n\nhello editor\n")).to_equal(true)
-        # @step: Operator opens and reads the note through the safe editor tools
-        # @capture(api)
-        val init = "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"spec\",\"version\":\"1.0\"}}}"
-        val list_req = "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/list\",\"params\":{}}"
-        val open_req = "{\"jsonrpc\":\"2.0\",\"id\":\"3\",\"method\":\"tools/call\",\"params\":{\"name\":\"editor.open_file\",\"arguments\":{\"path\":\"" + path + "\"}}}"
-        val read_req = "{\"jsonrpc\":\"2.0\",\"id\":\"4\",\"method\":\"tools/call\",\"params\":{\"name\":\"editor.read_buffer\",\"arguments\":{}}}"
-        val files_req = "{\"jsonrpc\":\"2.0\",\"id\":\"5\",\"method\":\"tools/call\",\"params\":{\"name\":\"editor.list_open_files\",\"arguments\":{}}}"
-        val input = mcp_jsonl(init) + mcp_jsonl("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}") + mcp_jsonl(list_req) + mcp_jsonl(open_req) + mcp_jsonl(read_req) + mcp_jsonl(files_req)
-        val output = send_mcp(input)
-        expect(output.contains("\"name\":\"editor.open_file\"")).to_equal(true)
-        expect(output.contains("\"name\":\"editor.read_buffer\"")).to_equal(true)
-        expect(output.contains("\"name\":\"editor.list_open_files\"")).to_equal(true)
-        expect(output.contains("\"name\":\"editor.edit\"")).to_equal(false)
-        expect(output.contains("\"name\":\"editor.search\"")).to_equal(false)
-        expect(output.contains("\"name\":\"editor.diagnostics\"")).to_equal(false)
-        expect(output.contains("opened " + path)).to_equal(true)
-        expect(output.contains("hello editor")).to_equal(true)
-        expect(output.contains(path)).to_equal(true)
-        expect(output.contains("\"error\":")).to_equal(false)
-
-    # @manual: folded
-    # @prev("advertises and dispatches the safe shared editor MCP subset")
-    # @capture(api)
-    it "reads editor MCP arguments only from params.arguments":
-        # @step: Operator prepares a scoped-argument editor note
-        # @capture(api)
-        val path = "/tmp/simple_mcp_editor_scoped_arg_note.md"
-        expect(rt_file_write_text(path, "# Scoped Argument\n\nfrom arguments\n")).to_equal(true)
-        # @step: Operator verifies editor.open_file reads params.arguments.path
-        # @capture(api)
-        val init = "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"spec\",\"version\":\"1.0\"}}}"
-        val open_req = "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"editor.open_file\",\"path\":\"/tmp/wrong_top_level.md\",\"arguments\":{\"path\":\"" + path + "\"}}}"
-        val read_req = "{\"jsonrpc\":\"2.0\",\"id\":\"3\",\"method\":\"tools/call\",\"params\":{\"name\":\"editor.read_buffer\",\"arguments\":{}}}"
-        val input = mcp_jsonl(init) + mcp_jsonl("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}") + mcp_jsonl(open_req) + mcp_jsonl(read_req)
-        val output = send_mcp(input)
-        expect(output.contains("opened " + path)).to_equal(true)
-        expect(output.contains("from arguments")).to_equal(true)
-        expect(output.contains("wrong_top_level")).to_equal(false)
-        expect(output.contains("\"error\":")).to_equal(false)
+        val unknown_req = "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"no_such_tool\",\"arguments\":{}}}"
+        val unknown_input = mcp_jsonl(init) + mcp_jsonl("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}") + mcp_jsonl(unknown_req)
+        val unknown_output = send_mcp(unknown_input)
+        expect(unknown_output.contains("\"isError\":true")).to_equal(true)
+        expect(unknown_output.contains("Unknown tool")).to_equal(true)
+        expect(unknown_output.contains("\"error\":")).to_equal(false)

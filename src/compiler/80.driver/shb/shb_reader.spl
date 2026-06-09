@@ -19,7 +19,6 @@ use compiler.shb.shb_types.{
 }
 use compiler.shb.shb_string_table.{ShbStringReader}
 
-val LE = ByteOrder.LittleEndian
 
 # --- Lazy section cursor (returned by ShbReader._open_section) ---
 # valid=false means: skip this section and return [] (either reader is invalid,
@@ -35,14 +34,15 @@ class _SectionCursor:
 class ShbReader:
     data: [u8]
     header: ShbHeader
+    source_mtime_value: i64
     section_offsets: [i64]
     strtab: ShbStringReader
     valid: bool
 
     # Open a .shb file. Reads only header + section table.
     static fn open(path: text) -> ShbReader:
-        val bytes = rt_file_read_bytes(path)
-        if bytes == nil:
+        val bytes = rt_file_read_bytes(path) ?? []
+        if bytes.len() == 0:
             return shb_reader_invalid()
         ShbReader.from_bytes(bytes)
 
@@ -54,7 +54,8 @@ class ShbReader:
         var r = BinaryReader.new(bytes)
 
         # Read header
-        val header = shb_read_header(r)
+        val header_info = shb_read_header(r)
+        val header = header_info.header
         if shb_header_valid(header) == false:
             return shb_reader_invalid()
 
@@ -62,7 +63,7 @@ class ShbReader:
         var offsets: [i64] = []
         var si = 0
         while si < SHB_SECTION_COUNT:
-            val off = r.read_i64(LE) ?? 0
+            val off = r.read_i64(ByteOrder.LittleEndian) ?? 0
             offsets.push(off)
             si = si + 1
 
@@ -83,6 +84,7 @@ class ShbReader:
         ShbReader(
             data: bytes,
             header: header,
+            source_mtime_value: header_info.source_mtime,
             section_offsets: offsets,
             strtab: strtab,
             valid: true
@@ -100,6 +102,9 @@ class ShbReader:
     fn interface_hash() -> i64:
         self.header.interface_hash
 
+    fn source_mtime() -> i64:
+        self.source_mtime_value
+
     # --- Lazy section readers ---
 
     # Open a section for reading: validate, look up offset, position the reader,
@@ -114,7 +119,7 @@ class ShbReader:
             return _SectionCursor(reader: BinaryReader.new(self.data), count: 0, valid: false)
         var r = BinaryReader.new(self.data)
         r.seek(offset)
-        val count = r.read_u32(LE) ?? 0
+        val count = r.read_u32(ByteOrder.LittleEndian) ?? 0
         _SectionCursor(reader: r, count: count, valid: true)
 
     fn read_functions() -> [ShbFnEntry]:
@@ -126,15 +131,15 @@ class ShbReader:
         var fns: [ShbFnEntry] = []
         var i = 0
         while i < count:
-            val name_off = r.read_u32(LE) ?? 0
-            val param_count = r.read_u16(LE) ?? 0
-            val ret_off = r.read_u32(LE) ?? 0
-            val flags = r.read_u16(LE) ?? 0
+            val name_off = r.read_u32(ByteOrder.LittleEndian) ?? 0
+            val param_count = r.read_u16(ByteOrder.LittleEndian) ?? 0
+            val ret_off = r.read_u32(ByteOrder.LittleEndian) ?? 0
+            val flags = r.read_u16(ByteOrder.LittleEndian) ?? 0
             var params: [ShbParam] = []
             var pi = 0
             while pi < param_count:
-                val pn_off = r.read_u32(LE) ?? 0
-                val pt_off = r.read_u32(LE) ?? 0
+                val pn_off = r.read_u32(ByteOrder.LittleEndian) ?? 0
+                val pt_off = r.read_u32(ByteOrder.LittleEndian) ?? 0
                 params.push(ShbParam(
                     name: self.strtab.read_at(pn_off),
                     type_name: self.strtab.read_at(pt_off)
@@ -158,15 +163,15 @@ class ShbReader:
         var structs: [ShbStructEntry] = []
         var i = 0
         while i < count:
-            val name_off = r.read_u32(LE) ?? 0
-            val field_count = r.read_u16(LE) ?? 0
-            val flags = r.read_u16(LE) ?? 0
+            val name_off = r.read_u32(ByteOrder.LittleEndian) ?? 0
+            val field_count = r.read_u16(ByteOrder.LittleEndian) ?? 0
+            val flags = r.read_u16(ByteOrder.LittleEndian) ?? 0
             var fields: [ShbFieldEntry] = []
             var fi = 0
             while fi < field_count:
-                val fn_off = r.read_u32(LE) ?? 0
-                val ft_off = r.read_u32(LE) ?? 0
-                val ff = r.read_u32(LE) ?? 0
+                val fn_off = r.read_u32(ByteOrder.LittleEndian) ?? 0
+                val ft_off = r.read_u32(ByteOrder.LittleEndian) ?? 0
+                val ff = r.read_u32(ByteOrder.LittleEndian) ?? 0
                 fields.push(ShbFieldEntry(
                     name: self.strtab.read_at(fn_off),
                     type_name: self.strtab.read_at(ft_off),
@@ -190,26 +195,26 @@ class ShbReader:
         var classes: [ShbClassEntry] = []
         var i = 0
         while i < count:
-            val name_off = r.read_u32(LE) ?? 0
-            val field_count = r.read_u16(LE) ?? 0
-            val flags = r.read_u16(LE) ?? 0
+            val name_off = r.read_u32(ByteOrder.LittleEndian) ?? 0
+            val field_count = r.read_u16(ByteOrder.LittleEndian) ?? 0
+            val flags = r.read_u16(ByteOrder.LittleEndian) ?? 0
             var fields: [ShbFieldEntry] = []
             var fi = 0
             while fi < field_count:
-                val fn_off = r.read_u32(LE) ?? 0
-                val ft_off = r.read_u32(LE) ?? 0
-                val ff = r.read_u32(LE) ?? 0
+                val fn_off = r.read_u32(ByteOrder.LittleEndian) ?? 0
+                val ft_off = r.read_u32(ByteOrder.LittleEndian) ?? 0
+                val ff = r.read_u32(ByteOrder.LittleEndian) ?? 0
                 fields.push(ShbFieldEntry(
                     name: self.strtab.read_at(fn_off),
                     type_name: self.strtab.read_at(ft_off),
                     flags: ff
                 ))
                 fi = fi + 1
-            val method_count = r.read_u16(LE) ?? 0
+            val method_count = r.read_u16(ByteOrder.LittleEndian) ?? 0
             var methods: [ShbMethodRef] = []
             var mi = 0
             while mi < method_count:
-                val mn_off = r.read_u32(LE) ?? 0
+                val mn_off = r.read_u32(ByteOrder.LittleEndian) ?? 0
                 methods.push(ShbMethodRef(name: self.strtab.read_at(mn_off)))
                 mi = mi + 1
             classes.push(ShbClassEntry(
@@ -230,13 +235,13 @@ class ShbReader:
         var enums: [ShbEnumEntry] = []
         var i = 0
         while i < count:
-            val name_off = r.read_u32(LE) ?? 0
-            val variant_count = r.read_u16(LE) ?? 0
-            val flags = r.read_u16(LE) ?? 0
+            val name_off = r.read_u32(ByteOrder.LittleEndian) ?? 0
+            val variant_count = r.read_u16(ByteOrder.LittleEndian) ?? 0
+            val flags = r.read_u16(ByteOrder.LittleEndian) ?? 0
             var variants: [text] = []
             var vi = 0
             while vi < variant_count:
-                val v_off = r.read_u32(LE) ?? 0
+                val v_off = r.read_u32(ByteOrder.LittleEndian) ?? 0
                 variants.push(self.strtab.read_at(v_off))
                 vi = vi + 1
             enums.push(ShbEnumEntry(
@@ -256,13 +261,13 @@ class ShbReader:
         var traits: [ShbTraitEntry] = []
         var i = 0
         while i < count:
-            val name_off = r.read_u32(LE) ?? 0
-            val method_count = r.read_u16(LE) ?? 0
-            val flags = r.read_u16(LE) ?? 0
+            val name_off = r.read_u32(ByteOrder.LittleEndian) ?? 0
+            val method_count = r.read_u16(ByteOrder.LittleEndian) ?? 0
+            val flags = r.read_u16(ByteOrder.LittleEndian) ?? 0
             var methods: [text] = []
             var mi = 0
             while mi < method_count:
-                val m_off = r.read_u32(LE) ?? 0
+                val m_off = r.read_u32(ByteOrder.LittleEndian) ?? 0
                 methods.push(self.strtab.read_at(m_off))
                 mi = mi + 1
             traits.push(ShbTraitEntry(
@@ -282,8 +287,8 @@ class ShbReader:
         var reexports: [ShbReexportEntry] = []
         var i = 0
         while i < count:
-            val sym_off = r.read_u32(LE) ?? 0
-            val mod_off = r.read_u32(LE) ?? 0
+            val sym_off = r.read_u32(ByteOrder.LittleEndian) ?? 0
+            val mod_off = r.read_u32(ByteOrder.LittleEndian) ?? 0
             reexports.push(ShbReexportEntry(
                 symbol_name: self.strtab.read_at(sym_off),
                 source_module: self.strtab.read_at(mod_off)
@@ -300,10 +305,10 @@ class ShbReader:
         var layouts: [ShbTypeLayoutEntry] = []
         var i = 0
         while i < count:
-            val tn_off = r.read_u32(LE) ?? 0
-            val sz = r.read_u32(LE) ?? 0
-            val al = r.read_u32(LE) ?? 0
-            val fl = r.read_u32(LE) ?? 0
+            val tn_off = r.read_u32(ByteOrder.LittleEndian) ?? 0
+            val sz = r.read_u32(ByteOrder.LittleEndian) ?? 0
+            val al = r.read_u32(ByteOrder.LittleEndian) ?? 0
+            val fl = r.read_u32(ByteOrder.LittleEndian) ?? 0
             layouts.push(ShbTypeLayoutEntry(
                 type_name: self.strtab.read_at(tn_off),
                 size: sz,
@@ -322,8 +327,8 @@ class ShbReader:
         var deps: [ShbDependencyEntry] = []
         var i = 0
         while i < count:
-            val mp_off = r.read_u32(LE) ?? 0
-            val ihash = r.read_i64(LE) ?? 0
+            val mp_off = r.read_u32(ByteOrder.LittleEndian) ?? 0
+            val ihash = r.read_i64(ByteOrder.LittleEndian) ?? 0
             deps.push(ShbDependencyEntry(
                 module_path: self.strtab.read_at(mp_off),
                 interface_hash: ihash
@@ -356,6 +361,7 @@ fn shb_reader_invalid() -> ShbReader:
             write_timestamp: 0, section_count: 0, string_table_offset: 0,
             string_table_size: 0, flags: 0, module_name_offset: 0
         ),
+        source_mtime_value: 0,
         section_offsets: [],
         strtab: ShbStringReader.from_bytes([], 0),
         valid: false
@@ -363,7 +369,11 @@ fn shb_reader_invalid() -> ShbReader:
 
 # --- Helper: read header from BinaryReader positioned at 0 ---
 
-fn shb_read_header(r: BinaryReader) -> ShbHeader:
+struct ShbHeaderRead:
+    header: ShbHeader
+    source_mtime: i64
+
+fn shb_read_header(r: BinaryReader) -> ShbHeaderRead:
     val m0 = r.read_u8() ?? 0
     val m1 = r.read_u8() ?? 0
     val m2 = r.read_u8() ?? 0
@@ -372,29 +382,32 @@ fn shb_read_header(r: BinaryReader) -> ShbHeader:
     val vmin = r.read_u8() ?? 0
     val plat = r.read_u8() ?? 0
     val arch_val = r.read_u8() ?? 0
-    val src_hash = r.read_i64(LE) ?? 0
-    val iface_hash = r.read_i64(LE) ?? 0
-    val ts = r.read_i64(LE) ?? 0
-    val sec_count = r.read_u32(LE) ?? 0
-    val strtab_off = r.read_u32(LE) ?? 0
-    val strtab_sz = r.read_u32(LE) ?? 0
-    val flags = r.read_u32(LE) ?? 0
-    val mod_name_off = r.read_i64(LE) ?? 0
-    val reserved = r.read_i64(LE) ?? 0
-    ShbHeader(
-        magic: [m0, m1, m2, m3],
-        version_major: vmaj,
-        version_minor: vmin,
-        platform: plat,
-        arch: arch_val,
-        source_hash: src_hash,
-        interface_hash: iface_hash,
-        write_timestamp: ts,
-        section_count: sec_count,
-        string_table_offset: strtab_off,
-        string_table_size: strtab_sz,
-        flags: flags,
-        module_name_offset: mod_name_off
+    val src_hash = r.read_i64(ByteOrder.LittleEndian) ?? 0
+    val iface_hash = r.read_i64(ByteOrder.LittleEndian) ?? 0
+    val ts = r.read_i64(ByteOrder.LittleEndian) ?? 0
+    val sec_count = r.read_u32(ByteOrder.LittleEndian) ?? 0
+    val strtab_off = r.read_u32(ByteOrder.LittleEndian) ?? 0
+    val strtab_sz = r.read_u32(ByteOrder.LittleEndian) ?? 0
+    val flags = r.read_u32(ByteOrder.LittleEndian) ?? 0
+    val mod_name_off = r.read_i64(ByteOrder.LittleEndian) ?? 0
+    val source_mtime = r.read_i64(ByteOrder.LittleEndian) ?? 0
+    ShbHeaderRead(
+        header: ShbHeader(
+            magic: [m0, m1, m2, m3],
+            version_major: vmaj,
+            version_minor: vmin,
+            platform: plat,
+            arch: arch_val,
+            source_hash: src_hash,
+            interface_hash: iface_hash,
+            write_timestamp: ts,
+            section_count: sec_count,
+            string_table_offset: strtab_off,
+            string_table_size: strtab_sz,
+            flags: flags,
+            module_name_offset: mod_name_off
+        ),
+        source_mtime: source_mtime
     )
 
 # --- SFFI ---

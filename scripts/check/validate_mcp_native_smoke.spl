@@ -1,13 +1,94 @@
 # Validate MCP native smoke outputs without Python.
 
-extern fn rt_env_get(key: text) -> text
-extern fn rt_file_read_text(path: text) -> text
+use std.nogc_sync_mut.io_runtime.{env_get, file_read, get_args}
 
 struct SmokeResult:
     json_valid: bool
+    framing_valid: bool
     schema_valid: bool
     tool_count: i64
     wm_text_valid: bool
+
+fn parse_nonnegative_i64(value: text) -> i64:
+    var n: i64 = 0
+    var i: i64 = 0
+    if value.len() == 0:
+        return -1
+    while i < value.len():
+        val ch = value.char_at(i)
+        var digit: i64 = -1
+        if ch == "0": digit = 0
+        elif ch == "1": digit = 1
+        elif ch == "2": digit = 2
+        elif ch == "3": digit = 3
+        elif ch == "4": digit = 4
+        elif ch == "5": digit = 5
+        elif ch == "6": digit = 6
+        elif ch == "7": digit = 7
+        elif ch == "8": digit = 8
+        elif ch == "9": digit = 9
+        if digit < 0:
+            return -1
+        n = n * 10 + digit
+        i = i + 1
+    n
+
+fn validate_content_length_frames(raw: text) -> bool:
+    val prefix = "Content-Length: "
+    var pos: i64 = 0
+    var count: i64 = 0
+    while pos < raw.len():
+        if raw.substring(pos, pos + prefix.len()) != prefix:
+            return false
+        val tail = raw.substring(pos, raw.len())
+        var sep = "\r\n\r\n"
+        var sep_rel = tail.find(sep)
+        if sep_rel < 0:
+            sep = "\n\n"
+            sep_rel = tail.find(sep)
+        if sep_rel < 0:
+            return false
+        val len_start = pos + prefix.len()
+        val len_end = pos + sep_rel
+        val declared = parse_nonnegative_i64(raw.substring(len_start, len_end))
+        if declared <= 0 or declared > raw.len():
+            return false
+        val body_start = pos + sep_rel + sep.len()
+        val body_end = body_start + declared
+        if body_end > raw.len():
+            return false
+        val body = raw.substring(body_start, body_end)
+        if body.len() != declared or not body.starts_with("{"):
+            return false
+        pos = body_end
+        count = count + 1
+    count > 0
+
+fn count_content_length_frames(raw: text) -> i64:
+    val prefix = "Content-Length: "
+    var pos: i64 = 0
+    var count: i64 = 0
+    while pos < raw.len():
+        if raw.substring(pos, pos + prefix.len()) != prefix:
+            return count
+        val tail = raw.substring(pos, raw.len())
+        var sep = "\r\n\r\n"
+        var sep_rel = tail.find(sep)
+        if sep_rel < 0:
+            sep = "\n\n"
+            sep_rel = tail.find(sep)
+        if sep_rel < 0:
+            return count
+        val declared = parse_nonnegative_i64(raw.substring(pos + prefix.len(), pos + sep_rel))
+        if declared <= 0:
+            return count
+        val body_start = pos + sep_rel + sep.len()
+        val body_end = body_start + declared
+        if body_end > raw.len():
+            return count
+        pos = body_end
+        count = count + 1
+    count
 
 fn extract_json_payloads(text_value: text) -> [text]:
     var payloads: [text] = []
@@ -157,9 +238,12 @@ fn validate_tool_schema(tool: text) -> bool:
     true
 
 fn validate_payload_file(path: text, prefix: text) -> SmokeResult:
-    val raw = rt_file_read_text(path)
+    val raw = file_read(path)
+    val expected_frames: i64 = if prefix == "mcp": 2 else: 1
+    val frame_count = count_occurrences(raw, "Content-Length:")
+    val framing_valid = frame_count >= expected_frames and not raw.contains("Content-Length: 2305843009213693951")
     val payloads = extract_json_payloads(raw)
-    var json_valid = payloads.len() > 0
+    var json_valid = payloads.len() >= expected_frames and frame_count >= expected_frames
     var schema_valid = json_valid
     var tool_count: i64 = 0
     if payloads.len() == 0:
@@ -177,10 +261,11 @@ fn validate_payload_file(path: text, prefix: text) -> SmokeResult:
     if prefix == "mcp":
         val last = if payloads.len() > 0: payloads[payloads.len() - 1] else: ""
         wm_text_valid = last.contains("\"name\":\"play_wm_text_status\"") and last.contains("\"name\":\"play_wm_text_snapshot\"") and last.contains("\"name\":\"play_wm_text_find\"") and last.contains("\"name\":\"play_wm_text_act\"")
-    SmokeResult(json_valid: json_valid, schema_valid: schema_valid, tool_count: tool_count, wm_text_valid: wm_text_valid)
+    SmokeResult(json_valid: json_valid, framing_valid: framing_valid, schema_valid: schema_valid, tool_count: tool_count, wm_text_valid: wm_text_valid)
 
 fn print_result(prefix: text, result: SmokeResult):
     print prefix + "_tools_json_valid=" + result.json_valid.to_string()
+    print prefix + "_framing_valid=" + result.framing_valid.to_string()
     print prefix + "_tools_schema_valid=" + result.schema_valid.to_string()
     print prefix + "_tools_count=" + result.tool_count.to_string()
     if prefix == "mcp":
@@ -188,23 +273,49 @@ fn print_result(prefix: text, result: SmokeResult):
 
 fn print_missing_args():
     print "mcp_tools_json_valid=false"
+    print "mcp_framing_valid=false"
     print "mcp_tools_schema_valid=false"
     print "mcp_tools_count=0"
     print "mcp_wm_text_tools_present=false"
     print "lsp_tools_json_valid=false"
+    print "lsp_framing_valid=false"
     print "lsp_tools_schema_valid=false"
     print "lsp_tools_count=0"
 
+fn validate_rt_forward_cache(path: text) -> bool:
+    if path == "":
+        return false
+    val raw = file_read(path)
+    raw.contains("std.mcp_sdk.transport.stdio.mcp_stdio_read_line") and raw.contains("rt_stdin_read_line_text") and raw.contains("std.mcp_sdk.transport.stdio.mcp_stdio_read_bytes") and raw.contains("rt_stdin_read_chars_text") and raw.contains("std.mcp_sdk.transport.stdio.mcp_stdio_read_message") and raw.contains("rt_stdin_read_mcp_message_text") and raw.contains("std.mcp_sdk.transport.stdio.mcp_stdio_is_json_lines") and raw.contains("cached_transport_mode")
+
+fn arg_value(args: [text], key: text) -> text:
+    var i: i64 = 0
+    while i + 1 < args.len():
+        if args[i] == key:
+            return args[i + 1]
+        i = i + 1
+    ""
+
+fn env_or_arg(args: [text], env_key: text, arg_key: text) -> text:
+    val from_arg = arg_value(args, arg_key)
+    if from_arg != "":
+        return from_arg
+    env_get(env_key) ?? ""
+
 fn main() -> i32:
-    val mcp_path = rt_env_get("MCP_NATIVE_SMOKE_MCP_OUT") ?? ""
-    val lsp_path = rt_env_get("MCP_NATIVE_SMOKE_LSP_OUT") ?? ""
+    val args = get_args()
+    val mcp_path = env_or_arg(args, "MCP_NATIVE_SMOKE_MCP_OUT", "--mcp-out")
+    val lsp_path = env_or_arg(args, "MCP_NATIVE_SMOKE_LSP_OUT", "--lsp-out")
+    val rt_forward_cache_path = env_or_arg(args, "MCP_NATIVE_SMOKE_RT_FORWARD_CACHE", "--rt-forward-cache")
     if mcp_path == "" or lsp_path == "":
         print_missing_args()
         return 1
     val mcp = validate_payload_file(mcp_path, "mcp")
     val lsp = validate_payload_file(lsp_path, "lsp")
+    val rt_forward_cache_valid = validate_rt_forward_cache(rt_forward_cache_path)
     print_result("mcp", mcp)
     print_result("lsp", lsp)
-    if mcp.json_valid and mcp.schema_valid and mcp.wm_text_valid and lsp.json_valid and lsp.schema_valid:
+    print "rt_forward_cache_valid=" + rt_forward_cache_valid.to_string()
+    if mcp.json_valid and mcp.framing_valid and mcp.schema_valid and mcp.wm_text_valid and lsp.json_valid and lsp.framing_valid and lsp.schema_valid and rt_forward_cache_valid:
         return 0
     1

@@ -5,6 +5,11 @@ SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
 MCP_SERVER="${MCP_SERVER:-bin/simple_mcp_server}"
 LSP_MCP_SERVER="${LSP_MCP_SERVER:-bin/simple_lsp_mcp_server}"
 MCP_NATIVE_SMOKE_TIMEOUT="${MCP_NATIVE_SMOKE_TIMEOUT:-15}"
+MCP_NATIVE_STARTUP_MAX_MS="${MCP_NATIVE_STARTUP_MAX_MS:-5000}"
+
+now_ms() {
+    date +%s%3N
+}
 
 if [ ! -x "$SIMPLE_BINARY" ]; then
     echo "simple_binary_exists=false"
@@ -24,26 +29,77 @@ if [ ! -x "$LSP_MCP_SERVER" ]; then
     exit 1
 fi
 
+SIMPLE_LIB="${SIMPLE_LIB:-src}" sh scripts/check/check-interface-cache-contract.shs
+
+APP_DIRECT_RT_VALID=true
+LSP_APP_DIRECT_RT_VALID=true
+MCPGDB_APP_DIRECT_RT_VALID=true
+UI_MCP_APP_DIRECT_RT_VALID=true
+SERIAL_MCP_APP_DIRECT_RT_VALID=true
+SPEC_DIRECT_RT_VALID=true
+if rg -n '\brt_[A-Za-z0-9_]+|extern fn rt_' src/app/mcp >/dev/null 2>&1; then
+    APP_DIRECT_RT_VALID=false
+fi
+if rg -n '\brt_[A-Za-z0-9_]+|extern fn rt_' src/app/simple_lsp_mcp >/dev/null 2>&1; then
+    LSP_APP_DIRECT_RT_VALID=false
+fi
+if rg -n '\brt_[A-Za-z0-9_]+|extern fn rt_' src/app/mcpgdb >/dev/null 2>&1; then
+    MCPGDB_APP_DIRECT_RT_VALID=false
+fi
+if rg -n '\brt_[A-Za-z0-9_]+|extern fn rt_' src/app/ui.mcp >/dev/null 2>&1; then
+    UI_MCP_APP_DIRECT_RT_VALID=false
+fi
+if rg -n '\brt_[A-Za-z0-9_]+|extern fn rt_' src/app/serial_mcp >/dev/null 2>&1; then
+    SERIAL_MCP_APP_DIRECT_RT_VALID=false
+fi
+if rg -n '\brt_[A-Za-z0-9_]+|extern fn rt_' test/02_integration/app/mcp_stdio_integration_spec.spl >/dev/null 2>&1; then
+    SPEC_DIRECT_RT_VALID=false
+fi
+
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT INT TERM
 
-cat > "$TMPDIR/mcp.in" <<'EOF'
-{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}
-{"jsonrpc":"2.0","id":"2","method":"tools/list","params":{}}
-EOF
+RT_FORWARD_CACHE_FILE=""
+if [ -x "scripts/setup/refresh-rt-forward-cache.shs" ]; then
+    refresh_out="$(sh scripts/setup/refresh-rt-forward-cache.shs)"
+    RT_FORWARD_CACHE_FILE="$(printf '%s\n' "$refresh_out" | sed -n 's/^rt_forward_cache=//p' | tail -1)"
+    sh scripts/setup/refresh-rt-forward-cache.shs --check
+fi
+
+mcp_init='{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}'
+mcp_initialized='{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}'
+mcp_tools_list='{"jsonrpc":"2.0","id":"2","method":"tools/list","params":{}}'
+{
+    printf 'Content-Length: %s\r\n\r\n%s' "${#mcp_init}" "$mcp_init"
+    printf 'Content-Length: %s\r\n\r\n%s' "${#mcp_initialized}" "$mcp_initialized"
+    printf 'Content-Length: %s\r\n\r\n%s' "${#mcp_tools_list}" "$mcp_tools_list"
+} > "$TMPDIR/mcp.in"
 
 set +e
-timeout "$MCP_NATIVE_SMOKE_TIMEOUT" "$MCP_SERVER" < "$TMPDIR/mcp.in" > "$TMPDIR/mcp.jsonl" 2> "$TMPDIR/mcp.err"
+MCP_START_MS="$(now_ms)"
+SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=0 timeout "$MCP_NATIVE_SMOKE_TIMEOUT" "$MCP_SERVER" < "$TMPDIR/mcp.in" > "$TMPDIR/mcp.jsonl" 2> "$TMPDIR/mcp.err"
 MCP_RC=$?
+MCP_END_MS="$(now_ms)"
 set -e
 
+lsp_init='{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}'
+lsp_initialized='{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}'
 lsp_tools_list='{"jsonrpc":"2.0","id":"2","method":"tools/list","params":{}}'
-printf 'Content-Length: %s\r\n\r\n%s' "${#lsp_tools_list}" "$lsp_tools_list" > "$TMPDIR/lsp.in"
+{
+    printf 'Content-Length: %s\r\n\r\n%s' "${#lsp_init}" "$lsp_init"
+    printf 'Content-Length: %s\r\n\r\n%s' "${#lsp_initialized}" "$lsp_initialized"
+    printf 'Content-Length: %s\r\n\r\n%s' "${#lsp_tools_list}" "$lsp_tools_list"
+} > "$TMPDIR/lsp.in"
 
 set +e
+LSP_START_MS="$(now_ms)"
 timeout "$MCP_NATIVE_SMOKE_TIMEOUT" "$LSP_MCP_SERVER" < "$TMPDIR/lsp.in" > "$TMPDIR/lsp.out" 2> "$TMPDIR/lsp.err"
 LSP_RC=$?
+LSP_END_MS="$(now_ms)"
 set -e
+
+MCP_STARTUP_MS=$((MCP_END_MS - MCP_START_MS))
+LSP_STARTUP_MS=$((LSP_END_MS - LSP_START_MS))
 
 if [ "$MCP_RC" -ne 0 ]; then
     echo "mcp_server_exit_code=$MCP_RC"
@@ -63,13 +119,33 @@ if [ "$LSP_RC" -ne 0 ]; then
     fi
 fi
 
+echo "mcp_app_direct_rt_valid=$APP_DIRECT_RT_VALID"
+echo "lsp_mcp_app_direct_rt_valid=$LSP_APP_DIRECT_RT_VALID"
+echo "mcpgdb_app_direct_rt_valid=$MCPGDB_APP_DIRECT_RT_VALID"
+echo "ui_mcp_app_direct_rt_valid=$UI_MCP_APP_DIRECT_RT_VALID"
+echo "serial_mcp_app_direct_rt_valid=$SERIAL_MCP_APP_DIRECT_RT_VALID"
+echo "mcp_stdio_spec_direct_rt_valid=$SPEC_DIRECT_RT_VALID"
+echo "mcp_startup_ms=$MCP_STARTUP_MS"
+echo "lsp_mcp_startup_ms=$LSP_STARTUP_MS"
+echo "mcp_startup_under_${MCP_NATIVE_STARTUP_MAX_MS}ms=$([ "$MCP_STARTUP_MS" -le "$MCP_NATIVE_STARTUP_MAX_MS" ] && printf true || printf false)"
+echo "lsp_mcp_startup_under_${MCP_NATIVE_STARTUP_MAX_MS}ms=$([ "$LSP_STARTUP_MS" -le "$MCP_NATIVE_STARTUP_MAX_MS" ] && printf true || printf false)"
+
 set +e
-MCP_NATIVE_SMOKE_MCP_OUT="$TMPDIR/mcp.jsonl" MCP_NATIVE_SMOKE_LSP_OUT="$TMPDIR/lsp.out" \
-    "$SIMPLE_BINARY" run scripts/check/validate_mcp_native_smoke.spl --mode=interpreter
+"$SIMPLE_BINARY" run scripts/check/validate_mcp_native_smoke.spl --mode=interpreter \
+    --mcp-out "$TMPDIR/mcp.jsonl" \
+    --lsp-out "$TMPDIR/lsp.out" \
+    --rt-forward-cache "$RT_FORWARD_CACHE_FILE"
 VALIDATE_RC=$?
 set -e
 
+if [ "$APP_DIRECT_RT_VALID" != "true" ] || [ "$LSP_APP_DIRECT_RT_VALID" != "true" ] || [ "$MCPGDB_APP_DIRECT_RT_VALID" != "true" ] || [ "$UI_MCP_APP_DIRECT_RT_VALID" != "true" ] || [ "$SERIAL_MCP_APP_DIRECT_RT_VALID" != "true" ] || [ "$SPEC_DIRECT_RT_VALID" != "true" ]; then
+    exit 1
+fi
+
 if [ "$MCP_RC" -ne 0 ] || [ "$LSP_RC" -ne 0 ]; then
+    exit 1
+fi
+if [ "$MCP_STARTUP_MS" -gt "$MCP_NATIVE_STARTUP_MAX_MS" ] || [ "$LSP_STARTUP_MS" -gt "$MCP_NATIVE_STARTUP_MAX_MS" ]; then
     exit 1
 fi
 exit "$VALIDATE_RC"
