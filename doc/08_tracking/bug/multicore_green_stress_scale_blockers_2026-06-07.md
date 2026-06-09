@@ -2,9 +2,9 @@
 
 ## Summary
 
-Resolved. The cross-language stress profile now includes a compact Simple
-multicore-green native row at 512 tiny workers with `pool_used=512/512`
-evidence.
+Resolved. The current Docker-isolated cross-language stress profile includes a
+compact Simple multicore-green native row at 1000 tiny workers with
+`pool_used=1000/1000` evidence.
 
 ## Evidence
 
@@ -17,12 +17,12 @@ evidence.
 - The compiler now maps captured parent locals into outlined lambda-local slots
   and Cranelift hydrates them from closure offsets before executing the body.
 - The checked-in profile script generates compact handle-array fanout for
-  `multicore_green_spawn`. The regenerated report records
-  `pool_used=512/512` for Simple multicore green native stress.
+  `multicore_green_spawn`. The current Docker contract report records
+  `pool_used=1000/1000` for Simple multicore green native stress.
 
 ## Impact
 
-- The checked-in smoke profile uses `FANOUT_STRESS_WORKERS=512` again.
+- The checked-in Docker contract profile uses `FANOUT_STRESS_WORKERS=1000`.
 - The unrolled many-spawn compile timeout remains a generator-size problem, but
   it no longer blocks the profile because the harness uses compact Simple code.
 
