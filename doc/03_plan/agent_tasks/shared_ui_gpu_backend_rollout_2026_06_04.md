@@ -300,6 +300,8 @@ Current verified additions in this lane:
         - `draw_text`
         - `draw_text_bg`
         - `draw_radial_gradient`
+        - clipped `draw_rect_filled`
+        - clipped `draw_image`
         - masked `draw_rect_filled`
         - masked `draw_image`
       - mirrored manual refreshed to match the expanded suite:
