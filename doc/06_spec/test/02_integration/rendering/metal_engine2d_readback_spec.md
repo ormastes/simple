@@ -27,7 +27,7 @@ metal_engine2d_readback_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 38 | 38 | 0 | 0 |
+| 39 | 39 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1861,6 +1861,56 @@ else:
 
 </details>
 
+#### strict draw_rect_filled honors clip via replay when stateful
+
+- var strict = MetalBackend create strict gpu only
+   - Expected: strict.init(16, 16) is true
+- strict clear
+- strict set clip
+- strict draw rect filled
+   - Expected: strict.gpu_frame_complete is true
+- var ref = Engine2D create with backend
+- ref clear
+- ref set clip
+- ref draw rect filled
+- ref present
+- ref shutdown
+   - Expected: count_pixel_mismatches(strict_pixels, ref_pixels) equals `0`
+- strict shutdown
+   - Expected: is_macos() is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+if is_macos():
+    var strict = MetalBackend.create_strict_gpu_only()
+    expect(strict.init(16, 16)).to_equal(true)
+    strict.clear(0xff000000u32)
+    strict.set_clip(4, 4, 4, 4)
+    strict.draw_rect_filled(2, 4, 8, 2, 0xffff0000u32)
+    expect(strict.gpu_frame_complete).to_equal(true)
+    val strict_pixels = strict.read_pixels()
+
+    var ref = Engine2D.create_with_backend(16, 16, "software")
+    ref.clear(0xff000000u32)
+    ref.set_clip(4, 4, 4, 4)
+    ref.draw_rect_filled(2, 4, 8, 2, 0xffff0000u32)
+    ref.present()
+    val ref_pixels = ref.read_pixels()
+    ref.shutdown()
+    expect(count_pixel_mismatches(strict_pixels, ref_pixels)).to_equal(0)
+    strict.shutdown()
+else:
+    expect(is_macos()).to_equal(false)
+```
+
+</details>
+
 #### strict direct primitives honor clip and mask via replay when stateful
 
 - var strict = MetalBackend create strict gpu only
@@ -2070,8 +2120,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 38 |
-| Active scenarios | 38 |
+| Total scenarios | 39 |
+| Active scenarios | 39 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
