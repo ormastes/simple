@@ -1800,12 +1800,14 @@ impl<M: Module> CodegenBackend<M> {
                     ))
                 })?;
             let alloc_ref = self.module.declare_func_in_func(alloc_id.unwrap(), builder.func);
-            let closure_size = builder.ins().iconst(types::I64, 8);
+            let closure_size = builder.ins().iconst(types::I64, 16);
             let call_inst = builder.ins().call(alloc_ref, &[closure_size]);
             let closure_ptr = builder.inst_results(call_inst)[0];
             let func_ref = self.module.declare_func_in_func(func_id, builder.func);
             let fn_addr = builder.ins().func_addr(types::I64, func_ref);
+            let direct_marker = builder.ins().iconst(types::I64, 0x5344_4952_4543_5446);
             builder.ins().store(MemFlags::new(), fn_addr, closure_ptr, 0);
+            builder.ins().store(MemFlags::new(), direct_marker, closure_ptr, 8);
 
             if let Some(&gid) = self.global_ids.get(global_name.as_str()) {
                 let global_ref = self.module.declare_data_in_func(gid, builder.func);

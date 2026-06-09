@@ -43,6 +43,15 @@ record ABI remains supported. The C runtime mirror now normalizes tagged closure
 record pointers for the same explicit-argument entry shape:
 `entry(closure_ptr, data1, data2)`.
 
+On 2026-06-09, the focused smoke regressed again for direct function values:
+compiled function-value records reached the runtime as heap records, so the
+runtime called them with the closure-record ABI and shifted worker arguments.
+The native codegen now marks direct function-value records with a second-word
+sentinel, and the Rust/C runtime dispatch uses that marker to choose
+`entry(data1, data2)` versus `entry(closure_ptr, data1, data2)`. No-capture
+closure records allocate and zero the second word so the marker check is
+defined without changing captured closure layout.
+
 The focused native gate is:
 
 ```sh

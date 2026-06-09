@@ -59,7 +59,8 @@ pub(crate) fn compile_closure_create<M: Module>(
     capture_offsets: &[u32],
     captures: &[VReg],
 ) {
-    let size_val = builder.ins().iconst(types::I64, closure_size as i64);
+    let allocation_size = closure_size.max(16);
+    let size_val = builder.ins().iconst(types::I64, allocation_size as i64);
     let closure_ptr = call_runtime_1(ctx, builder, "rt_alloc", size_val);
 
     if let Some(&func_id) = ctx.func_ids.get(func_name) {
@@ -130,6 +131,11 @@ pub(crate) fn compile_closure_create<M: Module>(
             let null = builder.ins().iconst(types::I64, 0);
             builder.ins().store(MemFlags::new(), null, closure_ptr, 0);
         }
+    }
+
+    if closure_size < 16 {
+        let null_marker = builder.ins().iconst(types::I64, 0);
+        builder.ins().store(MemFlags::new(), null_marker, closure_ptr, 8);
     }
 
     for (i, offset) in capture_offsets.iter().enumerate() {

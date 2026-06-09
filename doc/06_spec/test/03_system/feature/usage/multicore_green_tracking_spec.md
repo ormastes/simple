@@ -131,6 +131,9 @@ Failed: 0
   part of the OS lane as well as the host runtime lane.
 - The tracking row must carry profile evidence links because performance claims
   need executable profile scripts.
+- The tracking row must carry focused native smoke links for the OS-thread
+  explicit-argument ABI and multicore-green runtime-pool path so agent handoff
+  commands stay release-visible.
 - The tracking row must carry the large-profile gate and profile-report
   contract so Go scheduler metadata, Go-vs-C stress fanout, and runtime-pool
   evidence stay release-visible.
@@ -295,7 +298,7 @@ expect(row).to_contain("doc/05_design/multicore_green.md")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 37 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -315,6 +318,8 @@ expect(row).to_contain("test/05_perf/stress/multicore_green_large_profile_gate_s
 expect(row).to_contain("test/05_perf/profile_scripts/profile_report_contract_test.shs")
 expect(row).to_contain("test/05_perf/profile_scripts/profile_report_contract_negative_test.shs")
 expect(row).to_contain("test/05_perf/profile_scripts/concurrency_api_contract_test.shs")
+expect(row).to_contain("scripts/check/check-thread-spawn-with-args-native.shs")
+expect(row).to_contain("test/01_unit/lib/nogc_async_mut/multicore_green_native.spl")
 expect(row).to_contain("test/03_system/feature/usage/concurrency_api_misuse_spec.spl")
 expect(row).to_contain("test/03_system/feature/usage/smf_runtime_pool_closure_regression_spec.spl")
 expect(row).to_contain("test/03_system/feature/usage/multicore_green_agent_plan_spec.spl")
@@ -350,7 +355,7 @@ expect(row).to_contain("numbered_concurrency_alias")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -360,6 +365,8 @@ step("Verify Pure Simple implementation surfaces are linked")
 expect(row).to_contain("src/lib/nogc_async_mut/concurrent/cooperative_green.spl")
 expect(row).to_contain("src/lib/nogc_async_mut/concurrent/multicore_green.spl")
 expect(row).to_contain("src/os/kernel/scheduler/green_carrier.spl")
+expect(row).to_contain("test/01_unit/os/kernel/scheduler/scheduler_green_parallelism_spec.spl")
+expect(row).to_contain("test/01_unit/os/kernel/arch/x86_64_user_entry_validation_spec.spl")
 step("Verify profile and guide surfaces are linked")
 expect(row).to_contain("scripts/check/check-cross-language-perf.shs")
 expect(row).to_contain("doc/07_guide/compiler/check_perf.md")
@@ -415,7 +422,7 @@ expect(combined).to_contain("Multicore green cross-language profile gate PASSED"
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -425,6 +432,9 @@ step("Verify unresolved runtime blockers remain visible")
 expect(row).to_contain("doc/08_tracking/bug/green_thread_direct_runtime_blockers_2026-06-06.md")
 expect(row).to_contain("doc/08_tracking/bug/smf_runtime_pool_closure_lookup_2026-06-07.md")
 expect(row).to_contain("SMF runtime-pool lookup has focused regression evidence")
+expect(row).to_contain("doc/08_tracking/bug/native_thread_spawn_with_args_abi_2026-06-06.md")
+expect(row).to_contain("doc/08_tracking/bug/docker_cross_language_profile_native_link_2026-06-08.md")
+expect(row).to_contain("doc/08_tracking/bug/multicore_green_stress_scale_blockers_2026-06-07.md")
 step("Verify the SimpleOS final handoff closure remains visible")
 expect(row).to_contain("doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md")
 expect(row).to_contain("SimpleOS final ring/user handoff is closed")

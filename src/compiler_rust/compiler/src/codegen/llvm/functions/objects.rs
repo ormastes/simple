@@ -208,7 +208,8 @@ impl LlvmBackend {
         let alloc_fn = module
             .get_function("rt_alloc")
             .unwrap_or_else(|| module.add_function("rt_alloc", alloc_fn_type, None));
-        let size_val = i64_type.const_int(closure_size as u64, false);
+        let allocation_size = closure_size.max(16);
+        let size_val = i64_type.const_int(allocation_size as u64, false);
         let alloc_call = builder
             .build_call(alloc_fn, &[size_val.into()], "closure_alloc")
             .map_err(|e| crate::error::factory::llvm_build_failed("rt_alloc call", &e))?;
@@ -216,20 +217,21 @@ impl LlvmBackend {
             .try_as_basic_value()
             .left()
             .ok_or_else(|| crate::error::factory::llvm_build_failed("rt_alloc result", &"missing return value"))?;
-        let closure_ptr = match alloc_value {
-            inkwell::values::BasicValueEnum::PointerValue(ptr) => builder
-                .build_pointer_cast(ptr, i8_ptr_type, "closure_ptr")
-                .map_err(|e| crate::error::factory::llvm_cast_failed("cast closure ptr", &e))?,
-            inkwell::values::BasicValueEnum::IntValue(iv) => builder
-                .build_int_to_ptr(iv, i8_ptr_type, "closure_ptr")
-                .map_err(|e| crate::error::factory::llvm_build_failed("int_to_ptr", &e))?,
-            _ => {
-                return Err(crate::error::factory::llvm_build_failed(
-                    "rt_alloc result",
-                    &"unsupported return value kind",
-                ))
-            }
-        };
+        let closure_ptr =
+            match alloc_value {
+                inkwell::values::BasicValueEnum::PointerValue(ptr) => builder
+                    .build_pointer_cast(ptr, i8_ptr_type, "closure_ptr")
+                    .map_err(|e| crate::error::factory::llvm_cast_failed("cast closure ptr", &e))?,
+                inkwell::values::BasicValueEnum::IntValue(iv) => builder
+                    .build_int_to_ptr(iv, i8_ptr_type, "closure_ptr")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("int_to_ptr", &e))?,
+                _ => {
+                    return Err(crate::error::factory::llvm_build_failed(
+                        "rt_alloc result",
+                        &"unsupported return value kind",
+                    ))
+                }
+            };
 
         let func_ptr = module
             .get_function(func_name)
@@ -245,6 +247,22 @@ impl LlvmBackend {
         builder
             .build_store(fn_slot, func_ptr_cast)
             .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
+
+        if closure_size < 16 {
+            let offset_val = self.context_ref().i32_type().const_int(8, false);
+            let marker_ptr = unsafe { builder.build_gep(i8_type, closure_ptr, &[offset_val], "closure_marker_ptr") }
+                .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
+            let marker_slot = builder
+                .build_pointer_cast(
+                    marker_ptr,
+                    self.context_ref().ptr_type(inkwell::AddressSpace::default()),
+                    "closure_marker_slot",
+                )
+                .map_err(|e| crate::error::factory::llvm_cast_failed("cast marker ptr", &e))?;
+            builder
+                .build_store(marker_slot, i64_type.const_zero())
+                .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
+        }
 
         for ((offset, field_type), value) in capture_offsets.iter().zip(capture_types.iter()).zip(captures.iter()) {
             let capture_val = self.get_vreg(value, vreg_map)?;

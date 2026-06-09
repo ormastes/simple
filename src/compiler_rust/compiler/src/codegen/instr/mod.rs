@@ -354,10 +354,12 @@ pub fn compile_instruction<M: Module>(
                 // used by ClosureCreate so values survive parameter passing and array
                 // storage before a later IndirectCall.
                 let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
-                let closure_size = builder.ins().iconst(types::I64, 8);
+                let closure_size = builder.ins().iconst(types::I64, 16);
                 let closure_ptr = helpers::call_runtime_1(ctx, builder, "rt_alloc", closure_size);
                 let fn_addr = builder.ins().func_addr(types::I64, func_ref);
+                let direct_marker = builder.ins().iconst(types::I64, 0x5344_4952_4543_5446);
                 builder.ins().store(MemFlags::new(), fn_addr, closure_ptr, 0);
+                builder.ins().store(MemFlags::new(), direct_marker, closure_ptr, 8);
                 ctx.vreg_values.insert(*dest, closure_ptr);
             } else if let Some(resolved) = ctx
                 .use_map
@@ -398,10 +400,12 @@ pub fn compile_instruction<M: Module>(
                     {
                         ctx.func_ids.entry(global_name.clone()).or_insert(fid);
                         let func_ref = ctx.module.declare_func_in_func(fid, builder.func);
-                        let closure_size = builder.ins().iconst(types::I64, 8);
+                        let closure_size = builder.ins().iconst(types::I64, 16);
                         let closure_ptr = helpers::call_runtime_1(ctx, builder, "rt_alloc", closure_size);
                         let fn_addr = builder.ins().func_addr(types::I64, func_ref);
+                        let direct_marker = builder.ins().iconst(types::I64, 0x5344_4952_4543_5446);
                         builder.ins().store(MemFlags::new(), fn_addr, closure_ptr, 0);
+                        builder.ins().store(MemFlags::new(), direct_marker, closure_ptr, 8);
                         ctx.vreg_values.insert(*dest, closure_ptr);
                     } else {
                         match ctx

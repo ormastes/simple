@@ -1191,7 +1191,8 @@ impl CodegenEmitter for LlvmEmitter<'_> {
             .module
             .get_function("rt_alloc")
             .unwrap_or_else(|| self.module.add_function("rt_alloc", alloc_fn_type, None));
-        let size_val = i64_type.const_int(closure_size as u64, false);
+        let allocation_size = closure_size.max(16);
+        let size_val = i64_type.const_int(allocation_size as u64, false);
         let alloc_call = self
             .builder
             .build_call(alloc_fn, &[size_val.into()], "closure_alloc")
@@ -1233,6 +1234,26 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         self.builder
             .build_store(fn_slot, func_ptr_cast)
             .map_err(|e| format!("store failed: {}", e))?;
+
+        if closure_size < 16 {
+            let offset_val = self.backend.context_ref().i32_type().const_int(8, false);
+            let marker_ptr = unsafe {
+                self.builder
+                    .build_gep(i8_type, closure_ptr, &[offset_val], "closure_marker_ptr")
+                    .map_err(|e| format!("gep failed: {}", e))?
+            };
+            let marker_slot = self
+                .builder
+                .build_pointer_cast(
+                    marker_ptr,
+                    self.backend.context_ref().ptr_type(inkwell::AddressSpace::default()),
+                    "closure_marker_slot",
+                )
+                .map_err(|e| format!("cast failed: {}", e))?;
+            self.builder
+                .build_store(marker_slot, i64_type.const_zero())
+                .map_err(|e| format!("store failed: {}", e))?;
+        }
 
         // Store captured values at their offsets
         for (offset, value) in capture_offsets.iter().zip(captures.iter()) {

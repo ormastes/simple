@@ -7,10 +7,14 @@
 
 #include "runtime_thread.h"
 #include "runtime_memtrack.h"
+#include "runtime_value.h"
 
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#if !defined(_WIN32) && !defined(_WIN64)
+    #include <dlfcn.h>
+#endif
 
 /* ================================================================
  * Platform Detection
@@ -217,13 +221,19 @@ bool spl_thread_join(spl_thread_handle handle) {
 
 typedef int64_t (*rt_closure_fn_t)(int64_t);
 typedef int64_t (*rt_closure2_fn_t)(int64_t, int64_t);
+typedef int64_t (*rt_closure_record2_fn_t)(int64_t, int64_t, int64_t);
+
+#define RT_X86_64_MAX_CANONICAL_USER_PTR 0x00007fffffffffffULL
+#define RT_NATIVE_DIRECT_FUNCTION_RECORD_MARKER 0x5344495245435446LL
 
 typedef struct {
     rt_closure_fn_t  entry;
     rt_closure2_fn_t entry2;
+    rt_closure_record2_fn_t entry_record2;
     int64_t          closure_ptr;
     int64_t          data1;
     int64_t          data2;
+    int              raw_worker_args;
     int              arity;
     int64_t          result;
     int              done;
@@ -234,10 +244,42 @@ typedef struct {
 #endif
 } RtThreadData;
 
+static int64_t rt_native_closure_payload(int64_t raw) {
+    uint64_t value = (uint64_t)raw;
+    if (value < 4096ULL) return 0;
+    if (value > RT_X86_64_MAX_CANONICAL_USER_PTR) return (int64_t)(value >> 3);
+    if ((value & TAG_MASK) == TAG_HEAP) return (int64_t)(value & ~TAG_MASK);
+    return raw;
+}
+
+static int rt_native_address_is_code(int64_t raw_addr) {
+#if defined(_WIN32) || defined(_WIN64)
+    (void)raw_addr;
+    return 0;
+#else
+    Dl_info info;
+    memset(&info, 0, sizeof(info));
+    return dladdr((void *)(intptr_t)raw_addr, &info) != 0 && info.dli_fname != NULL;
+#endif
+}
+
+static int64_t rt_native_worker_arg(int64_t value, int raw_worker_args) {
+    if (raw_worker_args && (((uint64_t)value & TAG_MASK) == TAG_INT)) {
+        return value >> 3;
+    }
+    return value;
+}
+
 static void* rt_isolated_wrapper(void* raw) {
     RtThreadData* td = (RtThreadData*)raw;
     if (td->arity == 2) {
-        td->result = td->entry2(td->data1, td->data2);
+        int64_t arg1 = rt_native_worker_arg(td->data1, td->raw_worker_args);
+        int64_t arg2 = rt_native_worker_arg(td->data2, td->raw_worker_args);
+        if (td->entry_record2) {
+            td->result = td->entry_record2(td->closure_ptr, arg1, arg2);
+        } else {
+            td->result = td->entry2(arg1, arg2);
+        }
     } else {
         td->result = td->entry(td->closure_ptr);
     }
@@ -249,7 +291,13 @@ static void* rt_isolated_wrapper(void* raw) {
 static DWORD WINAPI rt_isolated_wrapper_win(LPVOID raw) {
     RtThreadData* td = (RtThreadData*)raw;
     if (td->arity == 2) {
-        td->result = td->entry2(td->data1, td->data2);
+        int64_t arg1 = rt_native_worker_arg(td->data1, td->raw_worker_args);
+        int64_t arg2 = rt_native_worker_arg(td->data2, td->raw_worker_args);
+        if (td->entry_record2) {
+            td->result = td->entry_record2(td->closure_ptr, arg1, arg2);
+        } else {
+            td->result = td->entry2(arg1, arg2);
+        }
     } else {
         td->result = td->entry(td->closure_ptr);
     }
@@ -265,9 +313,11 @@ int64_t rt_thread_spawn_isolated(int64_t arg0, int64_t arg1) {
     if (!td) return 0;
     td->entry       = fn_ptr;
     td->entry2      = NULL;
+    td->entry_record2 = NULL;
     td->closure_ptr = closure_ptr;
     td->data1       = 0;
     td->data2       = 0;
+    td->raw_worker_args = 0;
     td->arity       = 1;
     td->result      = 0;
     td->done        = 0;
@@ -288,14 +338,36 @@ int64_t rt_thread_spawn_isolated(int64_t arg0, int64_t arg1) {
 }
 
 int64_t rt_thread_spawn_isolated_with_args(int64_t fn_ptr, int64_t data1, int64_t data2) {
-    rt_closure2_fn_t entry = (rt_closure2_fn_t)(intptr_t)(fn_ptr >> 3);
+    int64_t payload = rt_native_closure_payload(fn_ptr);
+    if (!payload) return 0;
+
+    rt_closure2_fn_t entry = NULL;
+    rt_closure_record2_fn_t entry_record = NULL;
+    int64_t closure_ptr = 0;
+
+    if (rt_native_address_is_code(payload) || ((uint64_t)payload & TAG_MASK) != 0) {
+        entry = (rt_closure2_fn_t)(intptr_t)payload;
+    } else {
+        int64_t record_entry = *(int64_t *)(intptr_t)payload;
+        if (record_entry < 4096) return 0;
+        int64_t marker = *(((int64_t *)(intptr_t)payload) + 1);
+        if (marker == RT_NATIVE_DIRECT_FUNCTION_RECORD_MARKER) {
+            entry = (rt_closure2_fn_t)(intptr_t)record_entry;
+        } else {
+            entry_record = (rt_closure_record2_fn_t)(intptr_t)record_entry;
+            closure_ptr = payload;
+        }
+    }
+
     RtThreadData* td = (RtThreadData*)SPL_MALLOC(sizeof(RtThreadData), "rt_thread2");
     if (!td) return 0;
     td->entry       = NULL;
     td->entry2      = entry;
-    td->closure_ptr = 0;
+    td->entry_record2 = entry_record;
+    td->closure_ptr = closure_ptr;
     td->data1       = data1;
     td->data2       = data2;
+    td->raw_worker_args = 1;
     td->arity       = 2;
     td->result      = 0;
     td->done        = 0;

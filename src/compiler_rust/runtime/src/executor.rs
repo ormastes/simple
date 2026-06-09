@@ -556,6 +556,7 @@ pub struct IsolatedThreadHandle {
 static NEXT_THREAD_ID: AtomicU64 = AtomicU64::new(1);
 
 const X86_64_MAX_CANONICAL_USER_PTR: u64 = 0x0000_7fff_ffff_ffff;
+const NATIVE_DIRECT_FUNCTION_RECORD_MARKER: usize = 0x5344_4952_4543_5446;
 
 enum NativeCallable {
     ClosureRecord {
@@ -625,6 +626,9 @@ unsafe fn native_callable(closure_arg: u64) -> Option<NativeCallable> {
     let entry = *(payload as *const usize);
     if entry < 4096 {
         return None;
+    }
+    if *((payload as *const usize).add(1)) == NATIVE_DIRECT_FUNCTION_RECORD_MARKER {
+        return Some(NativeCallable::DirectFunction { entry, raw_worker_args });
     }
 
     Some(NativeCallable::ClosureRecord {
@@ -710,22 +714,25 @@ pub extern "C" fn rt_thread_spawn_isolated_with_args(
             NativeCallable::ClosureRecord {
                 entry,
                 closure_ptr,
-                raw_worker_args,
+                raw_worker_args: _,
             } => {
                 let func: extern "C" fn(u64, RuntimeValue, RuntimeValue) -> RuntimeValue =
                     unsafe { std::mem::transmute(entry) };
                 func(
                     closure_ptr,
-                    native_worker_arg(copied_data1, raw_worker_args),
-                    native_worker_arg(copied_data2, raw_worker_args),
+                    native_worker_arg(copied_data1, true),
+                    native_worker_arg(copied_data2, true),
                 )
             }
-            NativeCallable::DirectFunction { entry, raw_worker_args } => {
+            NativeCallable::DirectFunction {
+                entry,
+                raw_worker_args: _,
+            } => {
                 let func: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue =
                     unsafe { std::mem::transmute(entry) };
                 func(
-                    native_worker_arg(copied_data1, raw_worker_args),
-                    native_worker_arg(copied_data2, raw_worker_args),
+                    native_worker_arg(copied_data1, true),
+                    native_worker_arg(copied_data2, true),
                 )
             }
         })
@@ -1061,22 +1068,25 @@ pub extern "C" fn rt_thread_spawn_limited_with_args(
                 NativeCallable::ClosureRecord {
                     entry,
                     closure_ptr,
-                    raw_worker_args,
+                    raw_worker_args: _,
                 } => {
                     let func: extern "C" fn(u64, RuntimeValue, RuntimeValue) -> RuntimeValue =
                         unsafe { std::mem::transmute(entry) };
                     func(
                         closure_ptr,
-                        native_worker_arg(copied_data1, raw_worker_args),
-                        native_worker_arg(copied_data2, raw_worker_args),
+                        native_worker_arg(copied_data1, true),
+                        native_worker_arg(copied_data2, true),
                     )
                 }
-                NativeCallable::DirectFunction { entry, raw_worker_args } => {
+                NativeCallable::DirectFunction {
+                    entry,
+                    raw_worker_args: _,
+                } => {
                     let func: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue =
                         unsafe { std::mem::transmute(entry) };
                     func(
-                        native_worker_arg(copied_data1, raw_worker_args),
-                        native_worker_arg(copied_data2, raw_worker_args),
+                        native_worker_arg(copied_data1, true),
+                        native_worker_arg(copied_data2, true),
                     )
                 }
             }
