@@ -2350,7 +2350,11 @@ fn present_layout_pixels_with_engine2d(pixels: [u32], width: i32, height: i32, b
         return pixels
     var engine = Engine2D.create_with_backend(width, height, backend_name)
     engine.clear(base)
-    if normalized_backend == "vulkan":
+    # draw_image is mirror-only (poisons gpu_frame_complete on Metal/Vulkan).
+    # Use draw_layout_pixel_runs (clear + draw_rect_filled = GPU-dispatched) for
+    # Metal and Vulkan so gpu_frame_complete stays true.
+    # Other backends (opencl, cuda, etc.) use draw_image for pixel-exact passthrough.
+    if normalized_backend == "vulkan" or normalized_backend == "metal":
         draw_layout_pixel_runs(engine, pixels, width, height)
     else:
         engine.draw_image(0, 0, width, height, pixels)
@@ -2491,3 +2495,45 @@ pub fn simple_web_layout_render_html_pixels(html: text, width: i32, height: i32,
     var fb: [u32] = [base; width * height]
     val painted = paint(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, fb, width, height, widget_mode)
     present_layout_pixels_with_engine2d(painted, width, height, backend_name, base)
+
+# Render at a scroll offset: lay out into a virtual canvas of height (height + scroll_y),
+# paint, then crop the viewport window [scroll_y .. scroll_y+height].
+# This re-render approach keeps each call stateless.
+pub fn simple_web_layout_render_html_pixels_at_scroll(html: text, width: i32, height: i32, backend_name: text, scroll_y: i32) -> [u32]:
+    if width <= 0 or height <= 0:
+        return []
+    val clamp_scroll = if scroll_y < 0: 0 else: scroll_y
+    val virtual_h = height + clamp_scroll
+    val nodes = parse_html(html)
+    val rules = extract_css(html)
+    val styles = compute_styles(nodes, rules, html)
+    val boxes = layout(
+        nodes,
+        styles,
+        0,
+        0,
+        0,
+        width,
+        virtual_h,
+        [0; nodes.len()],
+        [0; nodes.len()],
+        [0; nodes.len()],
+        [0; nodes.len()]
+    )
+    val white = argb(255, 255, 255)
+    val widget_mode = html.contains("widget-panel")
+    val base = if widget_mode: argb(245, 245, 245) else: white
+    var fb: [u32] = [base; width * virtual_h]
+    val painted = paint(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, fb, width, virtual_h, widget_mode)
+    # Crop the viewport row-by-row
+    var cropped: [u32] = [base; width * height]
+    var row = 0
+    while row < height:
+        val src_row = row + clamp_scroll
+        if src_row < virtual_h:
+            var col = 0
+            while col < width:
+                cropped[row * width + col] = painted[src_row * width + col]
+                col = col + 1
+        row = row + 1
+    present_layout_pixels_with_engine2d(cropped, width, height, backend_name, base)

@@ -1,0 +1,169 @@
+# widget_interact_model.spl — pure interaction state + reducers for the
+# Engine2D Metal GPU interactive widget app (widget_interact_metal_gui.spl).
+#
+# This module is render-free and runtime-free: it holds no GPU/winit handles and
+# performs no I/O. Every reducer is a pure function `(state, event) -> state` so
+# the interaction logic can be driven by synthetic event sequences in a headless
+# spec (test/02_integration/ui/widget_interact_model_spec.spl) AND by the real
+# winit event pump in the GUI app.
+#
+# Coordinates here are FRAMEBUFFER coordinates (origin top-left, pixels). The GUI
+# app is responsible for mapping window pixel coords -> framebuffer coords before
+# calling the reducers; because the window is created at the framebuffer size the
+# mapping is identity (see widget_interact_metal_gui.spl).
+
+# ---------------------------------------------------------------------------
+# Layout constants (framebuffer pixel rectangles for the hit-testable widgets).
+# Kept here so reducers and the renderer agree on geometry by construction.
+# Framebuffer is W=256 x H=192.
+# ---------------------------------------------------------------------------
+
+# Button: increments counter when clicked.
+val BTN_X: i32 = 12
+val BTN_Y: i32 = 28
+val BTN_W: i32 = 70
+val BTN_H: i32 = 22
+
+# Text input box: typing appends, backspace deletes.
+val INPUT_X: i32 = 12
+val INPUT_Y: i32 = 70
+val INPUT_W: i32 = 150
+val INPUT_H: i32 = 18
+val INPUT_MAX: i32 = 18
+
+# Scrollable list + vertical scrollbar.
+val LIST_ITEMS: i32 = 12
+val LIST_VISIBLE: i32 = 4
+
+# Animation bounds (bouncing square left edge), in framebuffer x.
+val ANIM_MIN: i32 = 12
+val ANIM_MAX: i32 = 232
+
+# ---------------------------------------------------------------------------
+# Keycodes (winit -> Simple mapping produced by the runtime; see
+# src/compiler_rust/.../winit_sffi/winit_sffi_input.rs). Letters are ASCII
+# uppercase, digits are ASCII, space=32, backspace=8, arrows up=38/down=40.
+# ---------------------------------------------------------------------------
+val KEY_BACKSPACE: i64 = 8
+val KEY_SPACE: i64 = 32
+val KEY_ARROW_UP: i64 = 38
+val KEY_ARROW_DOWN: i64 = 40
+
+# ---------------------------------------------------------------------------
+# Interaction state
+# ---------------------------------------------------------------------------
+struct InteractState:
+    counter: i32        # button click count
+    text: text          # text-input contents
+    caret: i32          # caret index (== text length; append-only editing)
+    scroll_offset: i32  # index of first visible list item [0 .. LIST_ITEMS-LIST_VISIBLE]
+    anim_x: i32         # bouncing square left edge
+    anim_dx: i32        # animation velocity (+/- pixels per tick)
+
+fn interact_state_new() -> InteractState:
+    InteractState(counter: 0, text: "", caret: 0, scroll_offset: 0, anim_x: ANIM_MIN, anim_dx: 3)
+
+# ---------------------------------------------------------------------------
+# Pure helpers
+# ---------------------------------------------------------------------------
+
+# True when framebuffer point (px,py) falls inside the button rect.
+fn point_in_button(px: i32, py: i32) -> bool:
+    px >= BTN_X and px < BTN_X + BTN_W and py >= BTN_Y and py < BTN_Y + BTN_H
+
+# Maximum legal scroll offset (clamped so the last LIST_VISIBLE items show).
+fn scroll_max() -> i32:
+    val m = LIST_ITEMS - LIST_VISIBLE
+    if m < 0:
+        0
+    else:
+        m
+
+# Minimal keycode -> lowercase ascii char for a-z, 0-9 and space.
+# Returns "" for keys with no printable mapping.
+fn keycode_to_char(code: i64) -> text:
+    if code >= 65 and code <= 90:
+        # 'A'..'Z' (65..90) -> 'a'..'z' (97..122)
+        val lower = code + 32
+        char_from_code(lower)
+    elif code >= 48 and code <= 57:
+        char_from_code(code)
+    elif code == KEY_SPACE:
+        " "
+    else:
+        ""
+
+# Build a 1-char string from an ascii code (table lookup; no char-as-string FFI).
+fn char_from_code(code: i64) -> text:
+    val letters = "abcdefghijklmnopqrstuvwxyz"
+    val digits = "0123456789"
+    if code >= 97 and code <= 122:
+        letters.substring((code - 97).to_i32(), (code - 96).to_i32())
+    elif code >= 48 and code <= 57:
+        digits.substring((code - 48).to_i32(), (code - 47).to_i32())
+    elif code == 32:
+        " "
+    else:
+        ""
+
+# ---------------------------------------------------------------------------
+# Reducers: pure (state, event) -> state
+# ---------------------------------------------------------------------------
+
+# Mouse click at framebuffer coords (x,y). Increments the counter if the click
+# landed inside the button; otherwise returns state unchanged.
+fn on_click(state: InteractState, x: i32, y: i32) -> InteractState:
+    if point_in_button(x, y):
+        InteractState(counter: state.counter + 1, text: state.text, caret: state.caret,
+                      scroll_offset: state.scroll_offset, anim_x: state.anim_x, anim_dx: state.anim_dx)
+    else:
+        state
+
+# Keyboard key. Backspace deletes the last char; arrow up/down scroll the list;
+# printable keys append to the text input.
+fn on_key(state: InteractState, code: i64) -> InteractState:
+    if code == KEY_BACKSPACE:
+        if state.text.length() > 0:
+            val cut = state.text.substring(0, (state.text.length() - 1).to_i32())
+            InteractState(counter: state.counter, text: cut, caret: cut.length().to_i32(),
+                          scroll_offset: state.scroll_offset, anim_x: state.anim_x, anim_dx: state.anim_dx)
+        else:
+            state
+    elif code == KEY_ARROW_UP:
+        on_wheel(state, 1)
+    elif code == KEY_ARROW_DOWN:
+        on_wheel(state, -1)
+    else:
+        val ch = keycode_to_char(code)
+        if ch != "" and state.text.length() < INPUT_MAX.to_i64():
+            val joined = state.text + ch
+            InteractState(counter: state.counter, text: joined, caret: joined.length().to_i32(),
+                          scroll_offset: state.scroll_offset, anim_x: state.anim_x, anim_dx: state.anim_dx)
+        else:
+            state
+
+# Mouse wheel / arrow scroll. Positive dy scrolls toward the top of the list
+# (offset decreases), negative dy scrolls down (offset increases). Clamped to
+# [0, scroll_max()].
+fn on_wheel(state: InteractState, dy: i32) -> InteractState:
+    var off = state.scroll_offset - dy
+    if off < 0:
+        off = 0
+    val mx = scroll_max()
+    if off > mx:
+        off = mx
+    InteractState(counter: state.counter, text: state.text, caret: state.caret,
+                  scroll_offset: off, anim_x: state.anim_x, anim_dx: state.anim_dx)
+
+# Animation tick: advance the bouncing square, reflecting off both walls.
+fn on_tick(state: InteractState) -> InteractState:
+    var nx = state.anim_x + state.anim_dx
+    var ndx = state.anim_dx
+    if nx <= ANIM_MIN:
+        nx = ANIM_MIN
+        ndx = -state.anim_dx
+    elif nx >= ANIM_MAX:
+        nx = ANIM_MAX
+        ndx = -state.anim_dx
+    InteractState(counter: state.counter, text: state.text, caret: state.caret,
+                  scroll_offset: state.scroll_offset, anim_x: nx, anim_dx: ndx)

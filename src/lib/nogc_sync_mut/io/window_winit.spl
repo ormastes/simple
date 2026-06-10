@@ -21,6 +21,8 @@ extern fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64
 extern fn rt_winit_event_get_type(ev: i64) -> i64
 extern fn rt_winit_event_keyboard_input(ev: i64) -> (i64, i64, bool)
 extern fn rt_winit_event_mouse_wheel(ev: i64) -> (f64, f64)
+extern fn rt_winit_event_mouse_button(ev: i64) -> (i64, bool)
+extern fn rt_winit_event_mouse_moved(ev: i64) -> (f64, f64)
 extern fn rt_winit_event_free(ev: i64)
 extern fn rt_winit_window_free(win: i64)
 extern fn rt_winit_event_loop_free(el: i64)
@@ -28,6 +30,8 @@ extern fn rt_winit_event_loop_free(el: i64)
 # Event types returned by rt_winit_event_get_type.
 val EVT_CLOSE: i64 = 3
 val EVT_KEYBOARD: i64 = 10
+val EVT_MOUSE_BUTTON: i64 = 20
+val EVT_MOUSE_MOVED: i64 = 21
 val EVT_MOUSE_WHEEL: i64 = 22
 
 # ============================================================================
@@ -92,13 +96,40 @@ struct WinitInput:
     close: bool
     keys: [i64]
     scroll_y: f64
+    # Mouse: last cursor position seen this poll (window pixel coords), plus the
+    # button events this poll as parallel arrays. The runtime's mouse-button
+    # extern carries no coordinates, so each click is tagged with the most recent
+    # cursor position tracked during this same poll batch.
+    mouse_x: f64
+    mouse_y: f64
+    click_buttons: [i64]
+    click_pressed: [bool]
+    click_x: [f64]
+    click_y: [f64]
+
+# Construct an empty/idle input snapshot (no events this poll).
+fn winit_input_empty() -> WinitInput:
+    var keys: [i64] = []
+    var cb: [i64] = []
+    var cp: [bool] = []
+    var cx: [f64] = []
+    var cy: [f64] = []
+    WinitInput(close: false, keys: keys, scroll_y: 0.0,
+               mouse_x: 0.0, mouse_y: 0.0,
+               click_buttons: cb, click_pressed: cp, click_x: cx, click_y: cy)
 
 fn winit_poll_input(lp: WinitLoop) -> WinitInput:
     var close_requested = false
     var keys: [i64] = []
     var scroll_y = 0.0
+    var mouse_x = 0.0
+    var mouse_y = 0.0
+    var click_buttons: [i64] = []
+    var click_pressed: [bool] = []
+    var click_x: [f64] = []
+    var click_y: [f64] = []
     if not lp.is_valid:
-        return WinitInput(close: false, keys: keys, scroll_y: 0.0)
+        return winit_input_empty()
     var ev = rt_winit_event_loop_poll_events(lp.handle, 1)
     while ev != 0:
         val kind = rt_winit_event_get_type(ev)
@@ -108,9 +139,22 @@ fn winit_poll_input(lp: WinitLoop) -> WinitInput:
             val (_scancode, keycode, pressed) = rt_winit_event_keyboard_input(ev)
             if pressed:
                 keys = keys.push(keycode)
+        elif kind == EVT_MOUSE_MOVED:
+            val (mx, my) = rt_winit_event_mouse_moved(ev)
+            mouse_x = mx
+            mouse_y = my
+        elif kind == EVT_MOUSE_BUTTON:
+            val (button, pressed) = rt_winit_event_mouse_button(ev)
+            click_buttons = click_buttons.push(button)
+            click_pressed = click_pressed.push(pressed)
+            click_x = click_x.push(mouse_x)
+            click_y = click_y.push(mouse_y)
         elif kind == EVT_MOUSE_WHEEL:
             val (_wx, wy) = rt_winit_event_mouse_wheel(ev)
             scroll_y = scroll_y + wy
         rt_winit_event_free(ev)
         ev = rt_winit_event_loop_poll_events(lp.handle, 1)
-    WinitInput(close: close_requested, keys: keys, scroll_y: scroll_y)
+    WinitInput(close: close_requested, keys: keys, scroll_y: scroll_y,
+               mouse_x: mouse_x, mouse_y: mouse_y,
+               click_buttons: click_buttons, click_pressed: click_pressed,
+               click_x: click_x, click_y: click_y)
