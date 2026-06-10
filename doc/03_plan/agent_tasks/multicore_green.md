@@ -2,6 +2,24 @@
 
 Date: 2026-06-06
 
+## Current State Snapshot
+
+- Current cross-language Docker evidence is
+  `doc/09_report/cross_language_perf_2026-06-08_docker_contract.md`.
+- Large fanout stress currently shows Go ahead of Simple multicore green, while
+  both stay ahead of the C pthread-per-task baseline:
+  Go `6.533 ms`, Simple multicore green native `9.638 ms`, C pthreads
+  `63.791 ms`.
+- Cooperative-green SMF mutable-global crash evidence is now closed by
+  `test/03_system/feature/usage/cooperative_green_smf_mutable_global_regression_spec.spl`
+  and the mirrored manual under `doc/06_spec`.
+- The remaining direct SMF blocker in this lane is function-valued global and
+  global-array storage/codegen, tracked in
+  `doc/08_tracking/bug/green_thread_direct_runtime_blockers_2026-06-06.md`.
+- SimpleOS green-carrier live and final handoff evidence remains tracked
+  separately through the hosted specs and
+  `doc/09_report/simpleos_multicore_green_evidence_2026-06-07.md`.
+
 ## Coordination Contract
 
 - Owned lane: multicore green / pherallel runtime evidence, Go-thread research,
@@ -66,6 +84,9 @@ Acceptance evidence:
 - `bin/release/simple test test/05_perf/stress/multicore_green_cross_language_gate_spec.spl --mode=interpreter --clean`
 - report row proving Go beats C pthreads in isolated large fanout stress with
   Go `GOMAXPROCS` pinned to `CPU_WORKERS`.
+- report row showing Simple multicore green native still beats the C pthread
+  large fanout stress baseline while remaining slower than Go until further
+  scheduler/runtime work lands.
 
 ## Simple OS-Thread Baseline Agent
 
@@ -116,8 +137,8 @@ Acceptance evidence:
 
 - cooperative green unit/system specs pass;
 - cross-language report keeps cooperative rows separate from M:N rows;
-- blocker doc remains current for SMF mutable globals and native function-valued
-  storage issues.
+- blocker doc records the SMF mutable-global fix and keeps the remaining
+  function-valued SMF storage/codegen blocker current.
 
 ## Multicore Green Runtime-Pool Agent
 
