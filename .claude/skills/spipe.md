@@ -149,6 +149,14 @@ Do not move executable startup specs into `doc/06_spec`, and do not route
 script startup through compile/JIT as a workaround for a failing fast path. Fix
 the fast path or record a concrete bug.
 
+For MCP/LSP/tool-server startup work, follow the startup-reduction ladder in
+`doc/07_guide/app/mcp/startup_performance.md` (tldr alongside): measure direct
+vs through-the-wrapper first (a ~2× gap means the wrapper duplicates work,
+e.g. a probe handshake), then remove work in order — no double start, exec
+compiled artifacts, lazy tool registry, SHB interface-only loading, thin
+host-wrapper imports — before moving work (background compile, keep-warm).
+Startup gates bound startup only; MCP stdio reads must never gain timeouts.
+
 ### dynSMF Background Compile Startup
 
 If a task mentions compiling SMF while the interpreter reads/runs scripts,

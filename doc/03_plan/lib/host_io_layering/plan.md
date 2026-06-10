@@ -82,6 +82,15 @@ Wave 2 — consumers + audit (after Wave 1 lands):
   remove/avoid any read timeout in server loop; keep smoke-check startup gate
   green; extend `check-mcp-native-smoke.shs` with a no-timeout assertion
   (server idle > gate without exiting).
+- T4a Wrapper probe cache (measured 2026-06-10: wrapper handshake 2722 ms =
+  native 1361 ms ×2 because `mcp_probe_native` runs a full initialize +
+  tools/list against the candidate before exec'ing it again). Cache probe
+  success keyed by binary path+mtime+size under `.simple/cache/`, re-probe
+  only on change; update the wrapper *generator* (scripts/setup) not just
+  bin/ copies. Expected ~50% startup win — the largest single lever; see
+  `doc/07_guide/app/mcp/startup_performance.md`.
+- T4b Lazy tool registry: `initialize` response must not require building
+  151 tool schemas; build on first `tools/list` or serve a build-time table.
 - T5 Core-purity audit: rg gate that `src/lib/common/**` has no `rt_` and no
   imports from nogc_* layers; fix violations (move to host/full layer).
 - T6 Docs: `doc/04_architecture/lib/host_io_layering/` + tldr; update
