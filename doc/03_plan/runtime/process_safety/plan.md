@@ -54,15 +54,26 @@ Background: `doc/07_guide/runtime/process_kill_safety.md` (session-killing
          `HirGlobalArrayInit.string_values` + `generate_module_init`
          emission (module inits 43 → 49); `_ast_slots_ensure()` guards in
          `ast_part2.spl`.
-      3. [ ] Remaining: crash moved 3 stages deeper — parser now runs
-         (emits real warnings); SIGSEGV in
-         `frontend.flat_ast_bridge_part2.flat_ast_to_module` (+6721):
-         after an `rt_string_eq` against a 14-byte literal, code untags
-         RuntimeValue `1` (non-pointer) as a heap pointer and loads +8.
-         Different miscompile class (value tagging / branch result mixup).
-         Repro: docker, stage-4 binary bind-mounted as bin/simple,
-         `bin/simple /tmp/t.spl`. Until fixed, self-hosted deploys stay
-         blocked and `bin/simple` remains the Rust seed.
+      3. [x] flat_ast_to_module +6721 root-caused (2026-06-10, commit
+         `0bf222e322`): `x = x.push(item)` in expression position stored
+         rt_array_push's bool result (raw 1) into the array variable —
+         plus three more found in the same pass: first-touch Variable-ID
+         collisions for temp locals; module-level struct-literal globals
+         silently dropped (now emitted via HirGlobalStructInit in
+         module_init); qualified-path `.has` mis-binding via use_map
+         suffix fallback + fn-valued struct fields now IndirectCall.
+         Stage-4 binary now runs parse → typecheck → monomorphize →
+         mode_dispatch.
+      4. [ ] Remaining (5th distinct site, precisely diagnosed): SIGSEGV
+         in `CompileContext.create_outlined_4` — outlined lambda from
+         `driver_types.spl:56` (`run_fn: fn(m): interp_impl.process_module(m)`):
+         capture hydration correct, but lambda param `m` HIR-lowered as
+         `GlobalLoad "m"` → codegen emits `xor rsi,rsi` →
+         `process_module(self, m=0)`. Suspect: struct-literal named-arg
+         field context or nested-def hoist path skips param scope in
+         `lower_lambda` (hir/lower/expr/control.rs:79). Diagnostics +
+         full patch backup: /tmp/stage4diag/. Until fixed, self-hosted
+         deploys stay blocked and `bin/simple` remains the Rust seed.
 - [ ] After next multi-day parallel-agent session: confirm no recurrence of
       the journal signature (`Activating special unit exit.target` on the
       user manager outside reboots).
