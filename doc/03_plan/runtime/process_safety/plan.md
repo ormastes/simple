@@ -41,15 +41,28 @@ Background: `doc/07_guide/runtime/process_kill_safety.md` (session-killing
       `""`) with in-process fallbacks (`interpret_file`, temp-file interpret
       for `-c`, direct `rt_native_build`). Verified in docker
       (`--pids-limit`): no respawns (proc count stays at 3).
-- [ ] BUG (follow-up, exposed by the fix): the stage-4 cranelift binary's
-      in-process `interpret_file` path SIGSEGVs (exit 139) on a trivial
-      `.spl` — the subprocess delegation was masking a real
-      cranelift-codegen defect in the embedded compiler pipeline
-      (`--version`/`--help` fine). Same LIM-010 family as the stage-3
-      self-host failure. Until fixed, self-hosted deploys stay blocked and
-      `bin/simple` remains the Rust seed. Artifact:
-      `build/bootstrap/full/x86_64-unknown-linux-gnu/simple` (16.1 MB,
-      rebuilt with the guard).
+- [~] BUG (follow-up, exposed by the fix): stage-4 cranelift
+      `interpret_file` SIGSEGV — two of three root causes fixed 2026-06-10:
+      1. [x] Bare `.has()` bound by name-suffix to the only linked
+         `*_dot_has` (os.kernel `CapabilitySet.has`) instead of the Dict
+         builtin — every dict lookup miscalled. Fixed in
+         `codegen/instr/{methods,closures_structs}.rs` (bare `has` →
+         tag-dispatched `rt_contains`).
+      2. [x] Module-level `var x: [text] = ["lit"]` initializers silently
+         dropped (`try_const_array_eval` numeric-only) → nil arrays at
+         runtime (`module_path_slot` crash). Fixed:
+         `HirGlobalArrayInit.string_values` + `generate_module_init`
+         emission (module inits 43 → 49); `_ast_slots_ensure()` guards in
+         `ast_part2.spl`.
+      3. [ ] Remaining: crash moved 3 stages deeper — parser now runs
+         (emits real warnings); SIGSEGV in
+         `frontend.flat_ast_bridge_part2.flat_ast_to_module` (+6721):
+         after an `rt_string_eq` against a 14-byte literal, code untags
+         RuntimeValue `1` (non-pointer) as a heap pointer and loads +8.
+         Different miscompile class (value tagging / branch result mixup).
+         Repro: docker, stage-4 binary bind-mounted as bin/simple,
+         `bin/simple /tmp/t.spl`. Until fixed, self-hosted deploys stay
+         blocked and `bin/simple` remains the Rust seed.
 - [ ] After next multi-day parallel-agent session: confirm no recurrence of
       the journal signature (`Activating special unit exit.target` on the
       user manager outside reboots).
