@@ -100,6 +100,12 @@ pub extern "C" fn native_process_spawn_with_pty(
 /// Send SIGTERM to a process
 #[no_mangle]
 pub extern "C" fn native_process_terminate(pid: i64) -> RuntimeValue {
+    // pid <= 0 has special kill() semantics (-1 = every process the user
+    // owns); a failed spawn returns -1, so reject instead of broadcasting.
+    if pid <= 0 {
+        return RuntimeValue::from_bool(false);
+    }
+
     #[cfg(unix)]
     {
         use nix::unistd::Pid;

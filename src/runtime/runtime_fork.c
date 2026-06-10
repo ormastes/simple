@@ -140,6 +140,12 @@ int64_t rt_fork_child_setup(void) {
 }
 
 int64_t rt_fork_parent_wait(int64_t child_pid, int64_t timeout_ms) {
+    /* Reject invalid pids: kill(-1)/waitpid(-1) would signal/reap every
+     * process the user owns (e.g. when a failed fork's -1 is passed in). */
+    if (child_pid <= 0) {
+        return -1;
+    }
+
     /* Free any previous results */
     free_results();
 

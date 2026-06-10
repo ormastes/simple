@@ -133,6 +133,12 @@ pub extern "C" fn native_process_is_alive(pid: i64) -> RuntimeValue {
 /// NIL on success or error (both return NIL for simplicity)
 #[no_mangle]
 pub extern "C" fn native_process_kill(pid: i64) -> RuntimeValue {
+    // pid <= 0 has special kill() semantics (-1 = every process the user
+    // owns); a failed spawn returns -1, so reject instead of broadcasting.
+    if pid <= 0 {
+        return RuntimeValue::NIL;
+    }
+
     #[cfg(target_family = "unix")]
     {
         use libc::{kill, pid_t, SIGTERM};
