@@ -110,6 +110,18 @@ Wave 3 — convergence (sequential):
   new idle/no-timeout assertion.
 - A4 Core purity gate green for `src/lib/common/**`.
 
+## 4a. Follow-on plan
+
+Network-server lib + MCP framework + app migration continues in
+`doc/03_plan/app/mcp_framework/plan.md` (Waves A–D, parallel Sonnet tasks).
+
+Known limitation found in Wave 1 (T2): `rt_io_udp_bind` is not registered in
+interpreter mode when reached via the `nogc_async_mut → nogc_sync_mut/io/udp`
+module chain (plain `UdpSocket.bind` fails the same way in that context).
+Live UDP assertions are skipped with a concrete reason in
+`test/01_unit/lib/host_io/net_async_spec.spl`; needs an interpreter
+extern-registration fix in the udp lane.
+
 ## 5. Risks
 
 - Interpreter-mode extern hangs in std modules (known stdin issue) — keep the
