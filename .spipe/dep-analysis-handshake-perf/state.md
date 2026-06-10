@@ -64,7 +64,7 @@ dependency reduction in the std lib modules on the MCP handshake path.
 - No semantic changes to import resolution order or module init semantics.
 
 ## Phase
-implement
+verify
 
 ## Log
 - dev (2026-06-10): Created state file with 7 acceptance criteria (type: feature).
@@ -109,3 +109,10 @@ implement
   tools. Final closure 38 files (deps deep). Guide updated
   (startup_performance.md Wave-2 section). Remaining for feature: AC-4
   lazy parsing (W2-A2 bridge in flight + W2-A3 wiring).
+- implement (2026-06-10): W2-A3 DONE — lazy wiring landed in
+  module_loader_core.spl (SIMPLE_LAZY_PARSE=1 gate at top of load_module,
+  default path untouched). Verified: loader scope 0 errors; lazy smoke
+  spec green in default AND lazy modes; equivalence spec green. AC-4
+  satisfied (compiled-mode end-to-end equivalence remains a noted
+  limitation — interpreter specs can't import treesitter directly).
+  Phase → verify: all of AC-1..AC-7 now have landed implementations.

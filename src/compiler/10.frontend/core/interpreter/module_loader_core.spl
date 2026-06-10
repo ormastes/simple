@@ -33,6 +33,7 @@ use compiler.core.interpreter.interp_resource_tracker.{
     irt_unload_module
 }
 use compiler.core.interpreter.module_loader_resolve.{resolve_module_path, module_resolve_cache_reset}
+use compiler.core.interpreter.module_loader_lazy.{lazy_parse_enabled, lazy_in_fallback, load_module_lazy}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_path_join(base: text, rel: text) -> text
@@ -340,6 +341,12 @@ fn load_module(module_name: text, current_file: text) -> i64:
     # Check if already loaded
     if module_is_loaded(module_name) == 1:
         return 1
+
+    # Lazy parsing mode (SIMPLE_LAZY_PARSE=1): outline-first deferred load.
+    # load_module_lazy re-enters here with its fallback flag set when it
+    # needs the real whole-file parse (materialization or scan failure).
+    if lazy_parse_enabled() == 1 and lazy_in_fallback() == 0:
+        return load_module_lazy(module_name, current_file)
 
     # Depth guard: prevent runaway transitive loading
     if _module_load_depth >= _MODULE_LOAD_MAX_DEPTH:

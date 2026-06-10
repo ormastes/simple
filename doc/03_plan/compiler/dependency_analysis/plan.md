@@ -105,10 +105,14 @@ Phase 2 (integration, after E0410 sweeps land):
       test/01_unit/app/mcp_unit/mcp_protocol_spec.spl imports
       std.common.mcp_helpers which does not exist anywhere in src — track
       and fix separately (restore module or repoint spec).
-- [ ] W2-A3 (orchestrator) — apply lazy-mode wiring to
-      `module_loader_core.spl`; run equivalence spec + benchmark (AC-4).
-- [ ] W2-D (orchestrator) — re-measure handshake-complete budget (AC-5);
-      advance `.spipe/dep-analysis-handshake-perf` phase.
+- [x] W2-A3 (orchestrator) — lazy-mode wiring applied to
+      `module_loader_core.spl` (import + SIMPLE_LAZY_PARSE=1 gate at top
+      of `load_module`); verified: loader scope 0 errors, lazy smoke spec
+      green in BOTH default and SIMPLE_LAZY_PARSE=1 modes, equivalence
+      spec green (AC-4).
+- [x] W2-D (orchestrator) — AC-5 re-measured post-reductions:
+      mcp_startup_ms 2707 → 1309–1314 via check-mcp-native-smoke.shs
+      (exit 0, all direct-rt gates true).
 - W2-C docs/guides/spipe-skill updates + tldrs (Sonnet) — DONE.
 
 Continuous: jj commit per agent batch (explicit paths), pull/rebase, push with
