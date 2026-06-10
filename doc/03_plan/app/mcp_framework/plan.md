@@ -107,13 +107,25 @@ move every in-repo MCP server onto it.
   satisfying the trait while the real logic sat in a separate `me` method
   compiled clean but never executed — trait conformance does not flag
   unreachable split impls. Caught only by the spec's absolute oracle.
-- BUG-4 native codegen: `bin/simple compile src/app/simple_lsp_mcp/main.spl`
-  fails with `codegen: undefined symbol: range` — pre-existing on HEAD
-  (confirmed before the C2 migration). Blocks rebuilding the native MCP
-  artifacts; deployed binaries stay at their last good build until fixed.
-  Wave C execution oracle until then: piped interpreter-mode handshake
+- BUG-4 FIXED (2026-06-10): `range(a,b)` is an interpreter builtin with no
+  native lowering (`codegen: undefined symbol: range`). Fixed by replacing
+  the three lib callsites (mcp_sdk router/pagination, io/regex_simple)
+  with while loops; native compile of simple_lsp_mcp now succeeds.
+- BUG-5/6/7 (2026-06-10, minimal repros in the native-codegen bug lane):
+  the cranelift native backend miscompiles (5) module-level `var` mutation
+  — i64 prints as `0.0`, array global garbage; (6) fn values stored in
+  arrays then called — segfault; (7) trait-object dispatch — segfault.
+  Plus for-range loop-var interpolation prints `0.0,nil,<value>`, and
+  fn `round` fails cranelift verification (`fcvt_to_sint` on i64). Shared
+  signature: i64/f64 tag confusion in the boxed value representation.
+  CONSEQUENCE: migrated MCP servers (framework uses module-level registry
+  state + closure arrays + trait transports) compile natively but segfault;
+  deployed binaries stay at the last pre-migration build (still green in
+  smoke). Deployment of migrated servers is BLOCKED on these codegen bugs
+  — Codex root-cause investigation dispatched 2026-06-10.
+  Wave C execution oracle: piped interpreter-mode handshake
   (`printf <initialize+tools/list> | bin/simple run <app>/main.spl`),
-  which works (verified 2026-06-10: 11/11 tools, framed output, exit 0).
+  verified for all four migrated servers.
 
 ## Status & C1 deviations (2026-06-10)
 

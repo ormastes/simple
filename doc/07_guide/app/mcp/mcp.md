@@ -4,6 +4,11 @@ The Simple MCP (Model Context Protocol) server currently provides 108 tools, 3
 resources, and 2 prompts for code intelligence, debugging, build, VCS,
 analysis, and UI access -- accessible from Claude Code and Claude Desktop.
 
+Writing or migrating a server: use the McpServer facade — see
+`mcp_framework.md` (+tldr) and the ~30-line example in
+`examples/10_tooling/minimal_mcp/`. Startup work: follow the
+startup-reduction ladder in `startup_performance.md` (+tldr).
+
 MCP scenarios are the exemplar for scenario-based generated manuals. New or
 changed MCP SPipe tests should generate `doc/06_spec/...` pages that read like
 operator manuals: initialize server, list tools, call a tool, inspect response,
