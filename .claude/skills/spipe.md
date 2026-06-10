@@ -292,7 +292,36 @@ before `it` bodies execute. For native runtime hooks, pair interpreter SPipe
 coverage with a direct native entrypoint that uses hard `rt_exit` checks.
 
 Optimization must stay **pure Simple** (`.spl`) — do not modify Rust seed or C runtime.
+Exception: safety-critical guards in process/signal paths (e.g. `pid <= 0` checks
+before `kill()`/`waitpid()`) belong in the seed runtime too — a failed spawn's
+`-1` reaching `kill(-1)` SIGTERMs every user process (tmux + all SSH sessions +
+`systemd --user`). Such seed changes only take effect after a seed rebuild
+(`cargo build`) + `scripts/bootstrap/bootstrap-from-scratch.sh --deploy`.
+See `doc/07_guide/runtime/process_kill_safety.md`.
 Mode escalation: interpreter (dev) → SMF (staging) → native (production).
+
+## Dependency hygiene during refactoring
+
+When refactoring imports or adding new `use` statements, run:
+
+```bash
+bin/simple deps fast   <entry.spl>   # cycle check + closure size
+bin/simple deps normal <entry.spl>   # exclusive vs shared cost per import
+```
+
+Gates before merging:
+- No new cycles (`fast` CYCLES section must be empty or pre-existing only).
+- Closure growth is justified (a large exclusive count for a single-symbol
+  import is a smell — import the submodule directly instead).
+
+Avoid hub imports (`export use x.*` re-export hubs) for single symbols: one
+such import can drag in hundreds of files (see `deps_tool.md` case study).
+This is the same rule that caused `app.io` hub to break `deep_report.spl` at
+startup — the `deps normal` exclusive column is the detector.
+
+References:
+- Full guide: `doc/07_guide/compiler/deps_tool.md`
+- Lazy parsing prior art: `doc/01_research/compiler/parser/lazy_parsing_prior_art.md`
 
 ## Run
 
