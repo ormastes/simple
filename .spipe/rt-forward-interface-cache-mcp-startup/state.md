@@ -23,7 +23,7 @@ Make MCP and script startup use the existing std/lib runtime forwarding and inte
 - No release tag or public npm publish.
 
 ## Phase
-dev-in-progress
+verify-done
 
 ## Log
 - dev: Created state file with 6 acceptance criteria (type: bug).
@@ -33,3 +33,6 @@ dev-in-progress
 - verify: Local native deploy is current. `bin/simple_mcp_server` and `bin/simple_lsp_mcp_server` were rebuilt from local native artifacts and `scripts/check/check-mcp-native-smoke.shs` passes with framed MCP/LSP handshakes, `rt_forward_cache_valid=true`, interface-cache stale/body rejection, and startup timings under the 5000ms gate.
 - verify: Focused tests pass: `test/01_unit/compiler/cache/shb_mtime_spec.spl`, `test/01_unit/lib/io/binary_io_spec.spl`, `test/02_integration/app/mcp_stdio_integration_spec.spl`, and `test/02_integration/watcher/watcher_shb_integration_spec.spl`.
 - verify: Required broad compiler verification is still not green for the repository as a whole. `SIMPLE_LIB=src bin/simple check src/compiler --mode=interpreter` was driven much deeper by export-surface fixes, but the latest 600s run still fails with unrelated HIR/AST/type-system export errors outside this MCP/cache lane. Completion is therefore not yet proven against the repo-wide compiler gate.
+- verify (2026-06-10): Repo-wide compiler gate now green: `SIMPLE_LIB=src bin/simple check src/compiler --mode=interpreter` → "All checks passed (2659 file(s))", exit 0.
+- impl (2026-06-10): AC-1 regression closed: purged ~340 direct `rt_*` externs/calls from src/app/mcp (14 files), src/app/mcpgdb (12), src/app/simple_lsp_mcp (4), src/app/ui.mcp (1), src/app/serial_mcp (1); routed through `std.io_runtime` + `std.nogc_sync_mut.io.{file_ops,process_ops,dir_ops}` facades; added thin io_runtime wrappers (file_append_text, dir_list, process_spawn_async/is_running/kill).
+- verify (2026-06-10): `scripts/check/check-mcp-native-smoke.shs` exit 0 — all six *_direct_rt_valid=true, interface_cache_valid=true (stale + body rejection), rt_forward_cache_valid=true, framed MCP/LSP handshakes valid (151/11 tools), mcp_startup_ms=2707, lsp_mcp_startup_ms=51 (< 5000 gate). Focused specs pass: shb_mtime_spec, binary_io_spec, mcp_stdio_integration_spec, watcher_shb_integration_spec. AC-1..AC-6 all verified.
