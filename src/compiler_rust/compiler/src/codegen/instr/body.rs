@@ -286,10 +286,16 @@ fn coerce_to_i64(builder: &mut FunctionBuilder, val: cranelift_codegen::ir::Valu
         builder.ins().uextend(types::I64, val)
     } else if ty.is_int() && ty.bits() > 64 {
         builder.ins().ireduce(types::I64, val)
-    } else if ty.is_float() {
+    } else if ty == types::F64 {
         builder
             .ins()
             .bitcast(types::I64, cranelift_codegen::ir::MemFlags::new(), val)
+    } else if ty == types::F32 {
+        // F32 is 32-bit; bitcast requires equal-width types, so promote to F64 first
+        let promoted = builder.ins().fpromote(types::F64, val);
+        builder
+            .ins()
+            .bitcast(types::I64, cranelift_codegen::ir::MemFlags::new(), promoted)
     } else {
         // For vector types etc., just use as-is (will be i64 in most cases)
         val
