@@ -101,6 +101,28 @@ set -e
 MCP_STARTUP_MS=$((MCP_END_MS - MCP_START_MS))
 LSP_STARTUP_MS=$((LSP_END_MS - LSP_START_MS))
 
+# Detect whether the first MCP run was a cache hit or miss via startup log
+MCP_STARTUP_LOG="${MCP_SERVER%/*}/../.simple/logs/simple_mcp_startup.log"
+MCP_PROBE_CACHE_HIT_FIRST=false
+if [ -f "$MCP_STARTUP_LOG" ] && grep -q 'probe_cache_hit wrapper=simple_mcp_server' "$MCP_STARTUP_LOG"; then
+    MCP_PROBE_CACHE_HIT_FIRST=true
+fi
+
+# Second wrapper run: should be a cache hit; measure timing
+set +e
+MCP_START2_MS="$(now_ms)"
+SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=0 timeout "$MCP_NATIVE_SMOKE_TIMEOUT" "$MCP_SERVER" < "$TMPDIR/mcp.in" > "$TMPDIR/mcp2.jsonl" 2>> "$TMPDIR/mcp.err"
+MCP_RC2=$?
+MCP_END2_MS="$(now_ms)"
+set -e
+MCP_SECOND_START_MS=$((MCP_END2_MS - MCP_START2_MS))
+
+# Detect cache hit on second run
+MCP_PROBE_CACHE_HIT=false
+if [ -f "$MCP_STARTUP_LOG" ] && grep -q 'probe_cache_hit wrapper=simple_mcp_server' "$MCP_STARTUP_LOG"; then
+    MCP_PROBE_CACHE_HIT=true
+fi
+
 if [ "$MCP_RC" -ne 0 ]; then
     echo "mcp_server_exit_code=$MCP_RC"
     if [ -s "$TMPDIR/mcp.err" ]; then
@@ -129,6 +151,59 @@ echo "mcp_startup_ms=$MCP_STARTUP_MS"
 echo "lsp_mcp_startup_ms=$LSP_STARTUP_MS"
 echo "mcp_startup_under_${MCP_NATIVE_STARTUP_MAX_MS}ms=$([ "$MCP_STARTUP_MS" -le "$MCP_NATIVE_STARTUP_MAX_MS" ] && printf true || printf false)"
 echo "lsp_mcp_startup_under_${MCP_NATIVE_STARTUP_MAX_MS}ms=$([ "$LSP_STARTUP_MS" -le "$MCP_NATIVE_STARTUP_MAX_MS" ] && printf true || printf false)"
+echo "mcp_second_start_ms=$MCP_SECOND_START_MS"
+echo "mcp_probe_cache_hit=$MCP_PROBE_CACHE_HIT"
+
+# Gate: second start must meet timing budget relative to first start.
+# If first start was a cache miss (probe ran): second must be <= 60% of first.
+# If first start was already a cache hit: second must be <= first * 1.2 (both cached).
+MCP_SECOND_START_OK=true
+if [ "$MCP_PROBE_CACHE_HIT_FIRST" = "false" ] && [ "$MCP_STARTUP_MS" -gt 0 ]; then
+    # First was a miss: second must be <= 60% of first
+    _threshold=$(( MCP_STARTUP_MS * 60 / 100 ))
+    if [ "$MCP_SECOND_START_MS" -gt "$_threshold" ]; then
+        MCP_SECOND_START_OK=false
+        echo "mcp_second_start_note=second_start_${MCP_SECOND_START_MS}ms_exceeds_60pct_of_first_${MCP_STARTUP_MS}ms"
+    fi
+else
+    # First was already cached: second must be <= first * 1.2
+    if [ "$MCP_STARTUP_MS" -gt 0 ]; then
+        _threshold=$(( MCP_STARTUP_MS * 120 / 100 ))
+        if [ "$MCP_SECOND_START_MS" -gt "$_threshold" ]; then
+            MCP_SECOND_START_OK=false
+            echo "mcp_second_start_note=second_start_${MCP_SECOND_START_MS}ms_exceeds_120pct_of_first_${MCP_STARTUP_MS}ms_both_cached"
+        else
+            echo "mcp_second_start_note=both_cached_first_run_already_hit_cache"
+        fi
+    fi
+fi
+echo "mcp_second_start_ok=$MCP_SECOND_START_OK"
+
+# Stale-stamp test: corrupt the stamp for the chosen native candidate, re-run wrapper,
+# verify it still answers correctly (re-probe path).
+MCP_STALE_STAMP_OK=false
+_mcp_probe_cache_dir="${MCP_SERVER%/*}/../.simple/cache/mcp-probe"
+if [ -d "${_mcp_probe_cache_dir}" ]; then
+    _stale_stamp="$(ls "${_mcp_probe_cache_dir}"/*.stamp 2>/dev/null | head -1)"
+    if [ -n "${_stale_stamp}" ]; then
+        printf 'corrupted_stamp_for_test\n' > "${_stale_stamp}"
+        set +e
+        SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=0 timeout "$MCP_NATIVE_SMOKE_TIMEOUT" "$MCP_SERVER" < "$TMPDIR/mcp.in" > "$TMPDIR/mcp_stale.jsonl" 2>> "$TMPDIR/mcp.err"
+        _stale_rc=$?
+        set -e
+        if [ "$_stale_rc" -eq 0 ] && grep -q '"play_wm_text_status"' "$TMPDIR/mcp_stale.jsonl" 2>/dev/null; then
+            MCP_STALE_STAMP_OK=true
+        fi
+    else
+        # No stamp exists (e.g. SKIP_NATIVE_PROBE was set); mark as n/a but not a failure
+        MCP_STALE_STAMP_OK=true
+        echo "mcp_stale_stamp_note=no_stamp_found_skipping_stale_test"
+    fi
+else
+    MCP_STALE_STAMP_OK=true
+    echo "mcp_stale_stamp_note=cache_dir_absent_skipping_stale_test"
+fi
+echo "mcp_stale_stamp_reprobe_ok=$MCP_STALE_STAMP_OK"
 
 set +e
 "$SIMPLE_BINARY" run scripts/check/validate_mcp_native_smoke.spl --mode=interpreter \
@@ -146,6 +221,12 @@ if [ "$MCP_RC" -ne 0 ] || [ "$LSP_RC" -ne 0 ]; then
     exit 1
 fi
 if [ "$MCP_STARTUP_MS" -gt "$MCP_NATIVE_STARTUP_MAX_MS" ] || [ "$LSP_STARTUP_MS" -gt "$MCP_NATIVE_STARTUP_MAX_MS" ]; then
+    exit 1
+fi
+if [ "$MCP_SECOND_START_OK" != "true" ]; then
+    exit 1
+fi
+if [ "$MCP_STALE_STAMP_OK" != "true" ]; then
     exit 1
 fi
 exit "$VALIDATE_RC"
