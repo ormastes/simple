@@ -78,7 +78,7 @@ E0410 export-sweep agents that own existing src/compiler, src/app, src/lib
 files; shared-file wiring edits land in the orchestrator integration pass):
 
 Phase 1 (parallel now):
-- [ ] W2-A1 (Sonnet, new test files only) — lazy-parse groundwork specs:
+- [x] W2-A1 (Sonnet, new test files only) — lazy-parse groundwork specs:
       (a) equivalence spec: treesitter outline (`fast_mode`/`body_span`)
       signature extraction vs full parse over a fixed sample of real
       modules — same fn/class/export surface; (b) parse-time benchmark
@@ -89,14 +89,22 @@ Phase 1 (parallel now):
       materialization via the existing deferred-module system, gated by
       `SIMPLE_LAZY_PARSE=1`; whole-file path untouched. Returns exact
       wiring diff for `module_loader_core.spl` (applied in integration).
-- [ ] W2-B1 (Sonnet, read-only) — run `bin/simple deps normal|deep` over
-      the handshake closure (`src/app/mcp/main.spl`); rank reduction
-      candidates by files/bytes removed; verify top candidates by actual
-      symbol-usage grep; return top 3 with exact refactor steps.
+- [x] W2-B1 (Sonnet, read-only) — deps normal|deep over the handshake
+      closure: baseline 39 files / 9,031 code lines / ~309 KB est. native;
+      top candidates verified by symbol-usage grep. Found that the W1-D
+      dap_bridge→debug.remote removal had been planned but never landed.
 
 Phase 2 (integration, after E0410 sweeps land):
-- [ ] W2-B2 (Sonnet) — land ≥1 verified reduction refactor from W2-B1
-      (AC-6); re-run deps to show the delta.
+- [x] W2-B2 (Sonnet) — AC-6 SATISFIED: three reductions landed —
+      (1) std.log removed from mcp/main.spl (local _mcp_error via
+      rt_stderr_write externs), (2) std.cli.log_modes → local
+      mcp_log_options.spl, (3) dap_bridge debug.remote.session_model →
+      local dap_types.spl. Deps delta: 39→37 files, 9,031→8,339 code
+      lines, ~309→~276 KB. check src/app/mcp = 0 errors;
+      mcp_debug_state_spec 42/42. NOTE pre-existing breakage (unrelated):
+      test/01_unit/app/mcp_unit/mcp_protocol_spec.spl imports
+      std.common.mcp_helpers which does not exist anywhere in src — track
+      and fix separately (restore module or repoint spec).
 - [ ] W2-A3 (orchestrator) — apply lazy-mode wiring to
       `module_loader_core.spl`; run equivalence spec + benchmark (AC-4).
 - [ ] W2-D (orchestrator) — re-measure handshake-complete budget (AC-5);

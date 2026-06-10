@@ -91,3 +91,13 @@ implement
   AC-6 candidates (Sonnet). Phase 2 (after E0410 export sweeps land):
   W2-B2 reduction refactor (AC-6), W2-A3 loader wiring + equivalence run
   (AC-4), W2-D handshake re-measure (AC-5).
+- implement (2026-06-10): W2-A1 DONE — outline-vs-full equivalence spec
+  (16 tests green, 5 real modules) + lazy_parse_perf_spec.spl; caveat:
+  text-scanner proxy (treesitter not importable from interpreter specs).
+  W2-B1 DONE — handshake closure baseline 39 files / 9,031 lines /
+  ~309 KB; found W1-D dap_bridge removal never actually landed.
+  W2-B2 DONE, AC-6 SATISFIED — std.log removed, log_modes → local
+  mcp_log_options.spl, dap_bridge → local dap_types.spl; delta 39→37
+  files, 9,031→8,339 lines, ~309→~276 KB; mcp_debug_state 42/42.
+  Pre-existing unrelated breakage noted: mcp_protocol_spec imports
+  nonexistent std.common.mcp_helpers.
