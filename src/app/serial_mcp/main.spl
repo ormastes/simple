@@ -1,21 +1,24 @@
 # Serial MCP Server
 #
-# Dedicated MCP server for SSH-over-serial and raw serial port access.
-# Follows the simple_lsp_mcp pattern (standalone, 5 tools).
+# Migrated to McpServer facade (Wave C3).
+# Apps own only tool handlers + wiring (design rule D5).
 
-use app.simple_lsp_mcp.json_helpers.{read_stdin_message, write_stdout_message, LB, RB, extract_field, extract_id, jsonrpc_result, jsonrpc_error, has_method}
-use app.serial_mcp.protocol.{make_init_response, make_tools_list}
-use app.serial_mcp.tools.{handle_tool_call}
-use app.simple_lsp_mcp.startup_log.{mcp_startup_log}
+use app.simple_lsp_mcp.json_helpers.{LB, RB, SB_L, SB_R, jp, js, jo2}
+use app.serial_mcp.tools.{
+    handle_ssh_serial_connect,
+    handle_ssh_serial_exec,
+    handle_serial_open,
+    handle_serial_write,
+    handle_serial_read
+}
+use std.mcp_sdk.server.app.{mcp_server_init, mcp_server_tool, mcp_serve}
+use std.mcp_sdk.transport.transport.{StdioTransport}
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use std.log.{error}
 use std.io_runtime.{get_args}
 
 val SERVER_NAME = "serial-mcp"
 val SERVER_VERSION = "0.1.0"
-
-var TOOLS_CACHE = ""
-var INIT_CACHE = ""
 
 fn print_usage():
     print "Serial MCP Server"
@@ -78,6 +81,49 @@ fn serial_mcp_get_args() -> [text]:
         i = i + 1
     args
 
+fn prop_str(name: text, desc: text) -> text:
+    jp(name, jo2(jp("type", js("string")), jp("description", js(desc))))
+
+fn prop_int(name: text, desc: text) -> text:
+    jp(name, jo2(jp("type", js("integer")), jp("description", js(desc))))
+
+fn make_schema(props_body: text, required_list: text) -> text:
+    LB()
+        + jp("type", js("object"))
+        + "," + jp("properties", LB() + props_body + RB())
+        + "," + jp("required", SB_L() + required_list + SB_R())
+        + RB()
+
+fn schema_ssh_serial_connect() -> text:
+    val props = prop_str("device", "Serial device path, e.g. /dev/ttyUSB0")
+        + "," + prop_int("baud", "Baud rate (9600 / 19200 / 115200 / 230400)")
+        + "," + prop_str("user", "SSH username on remote target")
+        + "," + prop_str("path", "Transport path: socat (default) or native")
+    make_schema(props, js("device") + "," + js("baud") + "," + js("user"))
+
+fn schema_ssh_serial_exec() -> text:
+    val props = prop_str("device", "Serial device path")
+        + "," + prop_int("baud", "Baud rate")
+        + "," + prop_str("user", "SSH username")
+        + "," + prop_str("cmd", "Shell command to run on the remote target")
+        + "," + prop_str("path", "Transport path: socat (default) or native")
+    make_schema(props, js("device") + "," + js("baud") + "," + js("user") + "," + js("cmd"))
+
+fn schema_serial_open() -> text:
+    val props = prop_str("device", "Serial device path")
+        + "," + prop_int("baud", "Baud rate")
+    make_schema(props, js("device") + "," + js("baud"))
+
+fn schema_serial_write() -> text:
+    val props = prop_int("handle", "Serial handle from serial_open")
+        + "," + prop_str("data", "Data string to send to the serial port")
+    make_schema(props, js("handle") + "," + js("data"))
+
+fn schema_serial_read() -> text:
+    val props = prop_int("handle", "Serial handle from serial_open")
+        + "," + prop_int("max_bytes", "Maximum bytes to read (default 1024)")
+    make_schema(props, js("handle"))
+
 fn main() -> i64:
     val raw_args = serial_mcp_get_args()
     val log_opts = parse_log_options(raw_args)
@@ -104,50 +150,39 @@ fn main() -> i64:
         print_usage()
         return 1
 
-    mcp_startup_log(SERVER_NAME, SERVER_VERSION)
-    while true:
-        val msg = read_stdin_message()
-        if msg == "":
-            return 0
+    mcp_server_init(SERVER_NAME, SERVER_VERSION)
 
-        val method = detect_mcp_method(msg)
-        val id = extract_id(msg)
-        var response = ""
+    mcp_server_tool(
+        "ssh_serial_connect",
+        "Validate SSH-over-serial connection parameters. Returns session info for ssh_serial_exec.",
+        fn() -> text: schema_ssh_serial_connect(),
+        fn(a: text) -> text: handle_ssh_serial_connect(a)
+    )
+    mcp_server_tool(
+        "ssh_serial_exec",
+        "Run a shell command on a remote device over a serial SSH connection. Returns stdout, stderr, and exit_code.",
+        fn() -> text: schema_ssh_serial_exec(),
+        fn(a: text) -> text: handle_ssh_serial_exec(a)
+    )
+    mcp_server_tool(
+        "serial_open",
+        "Open a serial port in raw mode. Returns a handle (integer) for serial_read/write.",
+        fn() -> text: schema_serial_open(),
+        fn(a: text) -> text: handle_serial_open(a)
+    )
+    mcp_server_tool(
+        "serial_write",
+        "Write data to an open serial port. Returns number of bytes written.",
+        fn() -> text: schema_serial_write(),
+        fn(a: text) -> text: handle_serial_write(a)
+    )
+    mcp_server_tool(
+        "serial_read",
+        "Read data from an open serial port. Blocks until data arrives (5s timeout).",
+        fn() -> text: schema_serial_read(),
+        fn(a: text) -> text: handle_serial_read(a)
+    )
 
-        if method == "initialize":
-            response = make_init_response(id)
-        elif method == "initialized" or method == "notifications/initialized" or method == "notifications/cancelled":
-            response = ""
-        elif method == "shutdown":
-            response = jsonrpc_result(id, "null")
-        elif method == "ping":
-            response = jsonrpc_result(id, LB() + RB())
-        elif method == "tools/list":
-            response = make_tools_list(id)
-        elif method == "tools/call":
-            response = handle_tool_call(id, msg)
-        else:
-            if id != "" and id != "null":
-                response = jsonrpc_error(id, -32601, "Method not found: " + method)
-
-        if response != "":
-            write_stdout_message(response)
+    val t = StdioTransport.json_lines()
+    mcp_serve(t)
     0
-fn detect_mcp_method(msg: text) -> text:
-    if has_method(msg, "initialize"):
-        return "initialize"
-    if has_method(msg, "initialized"):
-        return "initialized"
-    if has_method(msg, "notifications/initialized"):
-        return "notifications/initialized"
-    if has_method(msg, "notifications/cancelled"):
-        return "notifications/cancelled"
-    if has_method(msg, "shutdown"):
-        return "shutdown"
-    if has_method(msg, "ping"):
-        return "ping"
-    if has_method(msg, "tools/list"):
-        return "tools/list"
-    if has_method(msg, "tools/call"):
-        return "tools/call"
-    extract_field(msg, "method")

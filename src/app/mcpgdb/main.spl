@@ -1,13 +1,18 @@
 # mcpgdb MCP production wrapper — cold frontend with repo-local heavy runners
+#
+# Migrated to McpServer facade (Wave C3).
+# Apps own only tool handlers + wiring (design rule D5).
 
 use std.io_runtime.{cwd, dir_create, file_delete, file_exists, file_write, env_get, process_run}
+use std.mcp_sdk.core.{unescape_json_string}
+use std.mcp_sdk.server.app.{mcp_server_init, mcp_server_tool, mcp_serve}
+use std.mcp_sdk.transport.transport.{StdioTransport}
 
 use std.cli.cli_util (get_cli_args)
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use std.log.{error}
-use app.mcpgdb.json_helpers.{read_stdin_message, write_stdout_message, extract_field, has_method, jsonrpc_result, jsonrpc_error, LB, RB, shell_bin, shell_quote}
-use app.mcpgdb.protocol.{make_init_response, make_tools_list}
-use app.mcpgdb.state.{DebugSession, MCPGDB_SESSIONS, MCPGDB_WORKSPACE}
+use app.mcpgdb.json_helpers.{LB, RB, jp, js, jo2, shell_bin, shell_quote}
+use app.mcpgdb.state.{MCPGDB_SESSIONS, MCPGDB_WORKSPACE}
 use app.mcpgdb.state_loader.{load_persisted_state_safe}
 use app.mcpgdb.debug_backend_common.{stop_session_process}
 use app.mcpgdb.backend_common.{stop_clangd_workspace}
@@ -27,136 +32,152 @@ fn cleanup_all_sessions():
     if MCPGDB_WORKSPACE.clangd_pid != "":
         stop_clangd_workspace()
 
-fn main() -> i64:
-    val raw_args = get_cli_args()
-    val log_opts = parse_log_options(raw_args)
-    if not log_opts.valid:
-        error("mcpgdb", log_opts.error)
-        return 1
+# ---- Schema helpers ----
 
-    val args = mcpgdb_clean_log_args(raw_args)
-    if args.len() > 0 and (args[0] == "--help" or args[0] == "-h" or args[0] == "help"):
-        print_help_with_progress(log_opts.progress)
-        return 0
-    if args.len() > 0 and (args[0] == "--version" or args[0] == "-v"):
-        if log_opts.log_mode == "json":
-            print "{\"command\":\"mcpgdb\",\"status\":\"ok\",\"version\":\"{TOOL_VERSION}\"}"
-        else:
-            print "{TOOL_NAME} v{TOOL_VERSION}"
-        return 0
-    if args.len() > 0:
-        val message = "Unknown mcpgdb option: {args[0]}"
-        if log_opts.log_mode == "json":
-            print "{\"command\":\"mcpgdb\",\"status\":\"error\",\"message\":\"{message}\"}"
-        else:
-            error("mcpgdb", message)
-        return 1
-    if raw_args.len() > 0 and log_opts.log_mode == "json":
-        print "{\"command\":\"mcpgdb\",\"status\":\"ready\",\"tool\":\"{TOOL_NAME}\",\"version\":\"{TOOL_VERSION}\"}"
-        return 0
-    if raw_args.len() > 0 and log_opts.progress != "none":
-        val progress = render_progress(log_opts.progress, 1, 1, "mcpgdb")
-        if progress != "":
-            print progress
-        return 0
+fn sp(name: text, description: text) -> text:
+    jp(name, jo2(jp("type", js("string")), jp("description", js(description))))
 
-    while true:
-        val msg = read_stdin_message()
-        if msg == "":
-            cleanup_all_sessions()
-            return 0
-        val id = local_extract_id(msg)
-        val method = detect_method(msg)
-        var response = ""
-        if method == "initialize":
-            response = make_init_response(id)
-        elif method == "initialized" or method == "notifications/initialized" or method == "notifications/cancelled" or method == "notifications/roots/list_changed":
-            response = ""
-        elif method == "shutdown":
-            response = jsonrpc_result(id, "null")
-        elif method == "ping":
-            response = jsonrpc_result(id, LB() + RB())
-        elif method == "tools/list":
-            response = make_tools_list(id)
-        elif method == "tools/call":
-            response = run_tool_runner(id, msg)
-        else:
-            if id != "" and id != "null":
-                response = jsonrpc_error(id, -32601, "Method not found: " + method)
-        if response != "":
-            write_stdout_message(response)
+fn ip(name: text, description: text) -> text:
+    jp(name, jo2(jp("type", js("integer")), jp("description", js(description))))
 
-fn print_help():
-    print "{TOOL_NAME}"
-    print ""
-    print "Usage: simple mcpgdb [options]"
-    print ""
-    print "Runs the mcpgdb MCP JSON-RPC server on stdin/stdout."
-    print ""
-    print "Options:"
-    print "  -h, --help          Show this help message"
-    print "  -v, --version       Show version information"
-    print ""
-    print "Shared log options:"
-    for line in log_options_help():
-        print "  {line}"
+fn bp(name: text, description: text) -> text:
+    jp(name, jo2(jp("type", js("boolean")), jp("description", js(description))))
 
-fn print_help_with_progress(progress_mode: text):
-    val progress = render_progress(progress_mode, 0, 1, "usage")
-    if progress != "":
-        print progress
-    print_help()
+fn make_schema(props: text, required: text) -> text:
+    LB()
+        + jp("type", js("object"))
+        + "," + jp("properties", LB() + props + RB())
+        + "," + jp("required", required)
+        + RB()
 
-fn mcpgdb_is_log_option(arg: text) -> bool:
-    arg == "--human" or arg == "--llm" or arg == "--json" or
-        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
-        arg == "--verbose" or arg == "--dots" or arg == "--count" or
-        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
-        arg == "--progress" or arg.starts_with("--log-mode=") or
-        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+fn sid() -> text:
+    sp("session_id", "Debug session ID; defaults to current session when omitted")
 
-fn mcpgdb_clean_log_args(args: [text]) -> [text]:
-    var cleaned: [text] = []
-    var i = 0
-    while i < args.len():
-        val arg = args[i]
-        if mcpgdb_is_log_option(arg):
-            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
-                i = i + 1
-        else:
-            cleaned.push(arg)
-        i = i + 1
-    cleaned
+fn pos_props() -> text:
+    sp("file", "Source file path")
+        + "," + ip("line", "0-indexed line")
+        + "," + ip("character", "0-indexed character offset")
 
-fn local_extract_id(json: text) -> text:
-    val parts1 = json.split("\"id\":\"")
-    if parts1.len() >= 2:
-        return "\"" + parts1[1].split("\"")[0] + "\""
-    val parts2 = json.split("\"id\": \"")
-    if parts2.len() >= 2:
-        return "\"" + parts2[1].split("\"")[0] + "\""
-    "null"
+# ---- Named schema builders (one per tool) ----
 
-fn detect_method(msg: text) -> text:
-    if has_method(msg, "initialize"):
-        return "initialize"
-    if has_method(msg, "initialized"):
-        return "initialized"
-    if has_method(msg, "notifications/initialized"):
-        return "notifications/initialized"
-    if has_method(msg, "shutdown"):
-        return "shutdown"
-    if has_method(msg, "ping"):
-        return "ping"
-    if has_method(msg, "tools/list"):
-        return "tools/list"
-    if has_method(msg, "tools/call"):
-        return "tools/call"
-    if has_method(msg, "notifications/cancelled"):
-        return "notifications/cancelled"
-    if has_method(msg, "notifications/roots/list_changed"):
-        return "notifications/roots/list_changed"
-    extract_field(msg, "method")
+fn schema_workspace_open() -> text:
+    make_schema(sp("root", "Workspace root; defaults to current working directory")
+        + "," + sp("compile_commands_dir", "Directory containing compile_commands.json"), "[]")
+
+fn schema_workspace_status() -> text:
+    make_schema("", "[]")
+
+fn schema_clangd_open() -> text:
+    make_schema(sp("root", "Workspace root; defaults to current working directory")
+        + "," + sp("compile_commands_dir", "Directory containing compile_commands.json"), "[]")
+
+fn schema_debug_session_create() -> text:
+    make_schema(sp("backend", "Backend kind: gdb, lldb, openocd_gdb, t32_gdb")
+        + "," + sp("workspace_root", "Workspace root; defaults to current working directory"),
+        "[\"backend\"]")
+
+fn schema_debug_session_list() -> text:
+    make_schema("", "[]")
+
+fn schema_debug_session_select() -> text:
+    make_schema(sid(), "[\"session_id\"]")
+
+fn schema_debug_session_close() -> text:
+    make_schema(sid(), "[\"session_id\"]")
+
+fn schema_debug_launch() -> text:
+    make_schema(sid()
+        + "," + sp("program", "Path to executable")
+        + "," + sp("args", "Optional command-line arguments"), "[\"program\"]")
+
+fn schema_debug_attach() -> text:
+    make_schema(sid() + "," + sp("pid", "PID to attach"), "[\"pid\"]")
+
+fn schema_debug_connect_remote() -> text:
+    make_schema(sid()
+        + "," + sp("host", "Remote host")
+        + "," + sp("port", "Remote port"), "[\"host\",\"port\"]")
+
+fn schema_debug_disconnect() -> text:
+    make_schema(sid(), "[]")
+
+fn schema_debug_restart() -> text:
+    make_schema(sid(), "[]")
+
+fn schema_debug_continue() -> text:
+    make_schema(sid(), "[]")
+
+fn schema_debug_pause() -> text:
+    make_schema(sid(), "[]")
+
+fn schema_debug_step_in() -> text:
+    make_schema(sid(), "[]")
+
+fn schema_debug_step_over() -> text:
+    make_schema(sid(), "[]")
+
+fn schema_debug_step_out() -> text:
+    make_schema(sid(), "[]")
+
+fn schema_breakpoint_set() -> text:
+    make_schema(sid()
+        + "," + sp("file", "Source file")
+        + "," + sp("line", "1-based source line")
+        + "," + sp("symbol", "Function or symbol name"), "[]")
+
+fn schema_breakpoint_remove() -> text:
+    make_schema(sid() + "," + sp("breakpoint_id", "Debugger breakpoint id"),
+        "[\"breakpoint_id\"]")
+
+fn schema_breakpoint_list() -> text:
+    make_schema(sid(), "[]")
+
+fn schema_thread_list() -> text:
+    make_schema(sid(), "[]")
+
+fn schema_frame_list() -> text:
+    make_schema(sid(), "[]")
+
+fn schema_frame_select() -> text:
+    make_schema(sid() + "," + sp("frame_id", "Frame id/index"), "[\"frame_id\"]")
+
+fn schema_variable_list() -> text:
+    make_schema(sid(), "[]")
+
+fn schema_evaluate() -> text:
+    make_schema(sid() + "," + sp("expression", "Expression to evaluate"), "[\"expression\"]")
+
+fn schema_register_read() -> text:
+    make_schema(sid() + "," + sp("name", "Register name; omit for all"), "[]")
+
+fn schema_register_write() -> text:
+    make_schema(sid()
+        + "," + sp("name", "Register name")
+        + "," + sp("value", "New value"), "[\"name\",\"value\"]")
+
+fn schema_memory_read() -> text:
+    make_schema(sid()
+        + "," + sp("address", "Address expression")
+        + "," + sp("count", "Element count; default 16")
+        + "," + sp("format", "Display format; default x"), "[\"address\"]")
+
+fn schema_memory_write() -> text:
+    make_schema(sid()
+        + "," + sp("address", "Address expression")
+        + "," + sp("value", "New value"), "[\"address\",\"value\"]")
+
+fn schema_debug_command_run() -> text:
+    make_schema(sid()
+        + "," + sp("command", "Debugger command text")
+        + "," + bp("dangerous", "Set true to allow target mutation commands"), "[\"command\"]")
+
+fn schema_pos() -> text:
+    make_schema(pos_props(), "[\"file\",\"line\",\"character\"]")
+
+fn schema_file_only() -> text:
+    make_schema(sp("file", "Source file path"), "[\"file\"]")
+
+# ---- Runner dispatch helpers ----
 
 fn simple_binary() -> text:
     val env_value = env_get("SIMPLE_BINARY") ?? ""
@@ -169,20 +190,6 @@ fn temp_request_path() -> text:
     if code != 0:
         return ""
     stdout.trim()
-
-fn body_has_tool(body: text, name: text) -> bool:
-    body.contains("\"name\":\"" + name + "\"") or body.contains("\"name\": \"" + name + "\"")
-
-fn runner_source_for_body(body: text) -> text:
-    if body_has_tool(body, "debug_session_create") or body_has_tool(body, "debug_session_close"):
-        return DEBUG_SESSION_RUNNER_SOURCE
-    if body_has_tool(body, "debug_command_run"):
-        return DEBUG_EXEC_RUNNER_SOURCE
-    if body_has_tool(body, "workspace_open") or body_has_tool(body, "workspace_status") or body_has_tool(body, "debug_session_list") or body_has_tool(body, "debug_session_select"):
-        return DEBUG_STATE_RUNNER_SOURCE
-    if body_has_tool(body, "clangd_open") or body_has_tool(body, "clangd_definition") or body_has_tool(body, "clangd_references") or body_has_tool(body, "clangd_hover") or body_has_tool(body, "clangd_completion") or body_has_tool(body, "clangd_type_definition") or body_has_tool(body, "clangd_symbols") or body_has_tool(body, "clangd_diagnostics"):
-        return CLANGD_RUNNER_SOURCE
-    DEBUG_RUNNER_SOURCE
 
 fn sanitize_segment(value: text) -> text:
     if value == "":
@@ -226,14 +233,91 @@ fn run_source_runner(source: text, request_path: text) -> (text, text, i64):
     val cmd = "MCPGDB_REQUEST_PATH=" + shell_quote(request_path) + " " + shell_quote(simple_binary()) + " " + shell_quote(source)
     process_run(shell_bin(), ["-c", cmd])
 
-fn run_tool_runner(id: text, body: text) -> text:
+fn runner_source_for_name(name: text) -> text:
+    if name == "debug_session_create" or name == "debug_session_close":
+        return DEBUG_SESSION_RUNNER_SOURCE
+    if name == "debug_command_run":
+        return DEBUG_EXEC_RUNNER_SOURCE
+    if name == "workspace_open" or name == "workspace_status" or name == "debug_session_list" or name == "debug_session_select":
+        return DEBUG_STATE_RUNNER_SOURCE
+    if name == "clangd_open" or name == "clangd_definition" or name == "clangd_references" or name == "clangd_hover" or name == "clangd_completion" or name == "clangd_type_definition" or name == "clangd_symbols" or name == "clangd_diagnostics":
+        return CLANGD_RUNNER_SOURCE
+    DEBUG_RUNNER_SOURCE
+
+# Read a JSON quoted string starting at `start` (index of the opening ").
+# Returns the unescaped string value, or "" on failure.
+fn _read_json_str(s: text, start: i64) -> text:
+    if start >= s.len():
+        return ""
+    if s.substring(start, start + 1) != "\"":
+        return ""
+    var pos = start + 1
+    var raw = ""
+    var esc = false
+    while pos < s.len():
+        val ch = s.substring(pos, pos + 1)
+        if esc:
+            raw = raw + ch
+            esc = false
+        elif ch == "\\":
+            raw = raw + ch
+            esc = true
+        elif ch == "\"":
+            return unescape_json_string(raw)
+        else:
+            raw = raw + ch
+        pos = pos + 1
+    ""
+
+# Find byte position of first occurrence of marker in s; returns -1 if absent.
+fn _marker_pos(s: text, marker: text) -> i64:
+    if not s.contains(marker):
+        return -1
+    val parts = s.split(marker)
+    parts[0].len()
+
+# Extract plain content text from a runner envelope.
+# Runners produce make_tool_result: {"content":[{"type":"text","text":"<escaped>"}]}
+# or jsonrpc_error: {"error":{"code":...,"message":"<msg>"}}
+fn extract_runner_content(envelope: text) -> text:
+    # ,"text":"<content>" — the comma skips the earlier "type":"text" value
+    val text_marker = ",\"text\":\""
+    if envelope.contains(text_marker):
+        val plen = _marker_pos(envelope, text_marker)
+        if plen >= 0:
+            val vstart = plen + text_marker.len() - 1
+            val result = _read_json_str(envelope, vstart)
+            if result != "":
+                return result
+    # error envelope: "message":"<msg>"
+    val msg_marker = "\"message\":\""
+    if envelope.contains(msg_marker):
+        val plen2 = _marker_pos(envelope, msg_marker)
+        if plen2 >= 0:
+            val vstart2 = plen2 + msg_marker.len() - 1
+            val msg = _read_json_str(envelope, vstart2)
+            if msg != "":
+                return "error: " + msg
+    envelope
+
+# Run a tool via its sub-runner. Returns plain content text for the facade.
+fn run_runner_content(name: text, args: text) -> text:
     val request_path = temp_request_path()
     if request_path == "":
-        return jsonrpc_error(id, -32603, "failed to allocate temp request file")
-    if not file_write(request_path, body):
+        return "error: failed to allocate temp request file"
+    val full_body = LB()
+        + jp("jsonrpc", js("2.0"))
+        + "," + jp("id", js("1"))
+        + "," + jp("method", js("tools/call"))
+        + "," + jp("params", LB()
+            + jp("name", js(name))
+            + "," + jp("arguments", args)
+            + RB())
+        + RB()
+    if not file_write(request_path, full_body):
         file_delete(request_path)
-        return jsonrpc_error(id, -32603, "failed to write temp request file")
-    val source = runner_source_for_body(body)
+        return "error: failed to write temp request file"
+    val source = runner_source_for_name(name)
     var stdout = ""
     var stderr = ""
     var code = 0
@@ -249,8 +333,164 @@ fn run_tool_runner(id: text, body: text) -> text:
             message = stdout.trim()
         if message == "":
             message = "tool runner failed"
-        return jsonrpc_error(id, -32603, message)
-    val response = stdout.trim()
-    if response == "":
-        return jsonrpc_error(id, -32603, "tool runner returned empty response")
-    response
+        return "error: " + message
+    val envelope = stdout.trim()
+    if envelope == "":
+        return "error: tool runner returned empty response"
+    extract_runner_content(envelope)
+
+fn main() -> i64:
+    val raw_args = get_cli_args()
+    val log_opts = parse_log_options(raw_args)
+    if not log_opts.valid:
+        error("mcpgdb", log_opts.error)
+        return 1
+
+    val args = mcpgdb_clean_log_args(raw_args)
+    if args.len() > 0 and (args[0] == "--help" or args[0] == "-h" or args[0] == "help"):
+        print_help_with_progress(log_opts.progress)
+        return 0
+    if args.len() > 0 and (args[0] == "--version" or args[0] == "-v"):
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"mcpgdb\",\"status\":\"ok\",\"version\":\"{TOOL_VERSION}\"}"
+        else:
+            print "{TOOL_NAME} v{TOOL_VERSION}"
+        return 0
+    if args.len() > 0:
+        val message = "Unknown mcpgdb option: {args[0]}"
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"mcpgdb\",\"status\":\"error\",\"message\":\"{message}\"}"
+        else:
+            error("mcpgdb", message)
+        return 1
+    if raw_args.len() > 0 and log_opts.log_mode == "json":
+        print "{\"command\":\"mcpgdb\",\"status\":\"ready\",\"tool\":\"{TOOL_NAME}\",\"version\":\"{TOOL_VERSION}\"}"
+        return 0
+    if raw_args.len() > 0 and log_opts.progress != "none":
+        val progress = render_progress(log_opts.progress, 1, 1, "mcpgdb")
+        if progress != "":
+            print progress
+        return 0
+
+    mcp_server_init("mcpgdb", TOOL_VERSION)
+
+    mcp_server_tool("workspace_open", "Set the workspace root used by debug and clangd tools.",
+        fn() -> text: schema_workspace_open(), fn(a: text) -> text: run_runner_content("workspace_open", a))
+    mcp_server_tool("workspace_status", "Show current workspace and session status.",
+        fn() -> text: schema_workspace_status(), fn(a: text) -> text: run_runner_content("workspace_status", a))
+    mcp_server_tool("clangd_open", "Launch clangd for the current workspace.",
+        fn() -> text: schema_clangd_open(), fn(a: text) -> text: run_runner_content("clangd_open", a))
+    mcp_server_tool("debug_session_create", "Create a new debugger session using gdb, lldb, openocd_gdb, or t32_gdb backend.",
+        fn() -> text: schema_debug_session_create(), fn(a: text) -> text: run_runner_content("debug_session_create", a))
+    mcp_server_tool("debug_session_list", "List active debugger sessions.",
+        fn() -> text: schema_debug_session_list(), fn(a: text) -> text: run_runner_content("debug_session_list", a))
+    mcp_server_tool("debug_session_select", "Select the current debugger session.",
+        fn() -> text: schema_debug_session_select(), fn(a: text) -> text: run_runner_content("debug_session_select", a))
+    mcp_server_tool("debug_session_close", "Close a debugger session and terminate its backend process.",
+        fn() -> text: schema_debug_session_close(), fn(a: text) -> text: run_runner_content("debug_session_close", a))
+    mcp_server_tool("debug_launch", "Load a program into the current debugger session and run it.",
+        fn() -> text: schema_debug_launch(), fn(a: text) -> text: run_runner_content("debug_launch", a))
+    mcp_server_tool("debug_attach", "Attach to a running process.",
+        fn() -> text: schema_debug_attach(), fn(a: text) -> text: run_runner_content("debug_attach", a))
+    mcp_server_tool("debug_connect_remote", "Connect the current debugger session to a remote GDB target.",
+        fn() -> text: schema_debug_connect_remote(), fn(a: text) -> text: run_runner_content("debug_connect_remote", a))
+    mcp_server_tool("debug_disconnect", "Disconnect from the current target.",
+        fn() -> text: schema_debug_disconnect(), fn(a: text) -> text: run_runner_content("debug_disconnect", a))
+    mcp_server_tool("debug_restart", "Restart program execution in the current session.",
+        fn() -> text: schema_debug_restart(), fn(a: text) -> text: run_runner_content("debug_restart", a))
+    mcp_server_tool("debug_continue", "Continue execution.",
+        fn() -> text: schema_debug_continue(), fn(a: text) -> text: run_runner_content("debug_continue", a))
+    mcp_server_tool("debug_pause", "Interrupt execution.",
+        fn() -> text: schema_debug_pause(), fn(a: text) -> text: run_runner_content("debug_pause", a))
+    mcp_server_tool("debug_step_in", "Step into the next statement.",
+        fn() -> text: schema_debug_step_in(), fn(a: text) -> text: run_runner_content("debug_step_in", a))
+    mcp_server_tool("debug_step_over", "Step over the next statement.",
+        fn() -> text: schema_debug_step_over(), fn(a: text) -> text: run_runner_content("debug_step_over", a))
+    mcp_server_tool("debug_step_out", "Step out of the current frame.",
+        fn() -> text: schema_debug_step_out(), fn(a: text) -> text: run_runner_content("debug_step_out", a))
+    mcp_server_tool("breakpoint_set", "Set a breakpoint by file/line or symbol.",
+        fn() -> text: schema_breakpoint_set(), fn(a: text) -> text: run_runner_content("breakpoint_set", a))
+    mcp_server_tool("breakpoint_remove", "Remove a breakpoint by debugger breakpoint id.",
+        fn() -> text: schema_breakpoint_remove(), fn(a: text) -> text: run_runner_content("breakpoint_remove", a))
+    mcp_server_tool("breakpoint_list", "List breakpoints.",
+        fn() -> text: schema_breakpoint_list(), fn(a: text) -> text: run_runner_content("breakpoint_list", a))
+    mcp_server_tool("thread_list", "List threads.",
+        fn() -> text: schema_thread_list(), fn(a: text) -> text: run_runner_content("thread_list", a))
+    mcp_server_tool("frame_list", "List frames.",
+        fn() -> text: schema_frame_list(), fn(a: text) -> text: run_runner_content("frame_list", a))
+    mcp_server_tool("frame_select", "Select a frame by frame id.",
+        fn() -> text: schema_frame_select(), fn(a: text) -> text: run_runner_content("frame_select", a))
+    mcp_server_tool("variable_list", "List variables in the current frame.",
+        fn() -> text: schema_variable_list(), fn(a: text) -> text: run_runner_content("variable_list", a))
+    mcp_server_tool("evaluate", "Evaluate an expression in the current frame.",
+        fn() -> text: schema_evaluate(), fn(a: text) -> text: run_runner_content("evaluate", a))
+    mcp_server_tool("register_read", "Read one register or all registers.",
+        fn() -> text: schema_register_read(), fn(a: text) -> text: run_runner_content("register_read", a))
+    mcp_server_tool("register_write", "Write a register value.",
+        fn() -> text: schema_register_write(), fn(a: text) -> text: run_runner_content("register_write", a))
+    mcp_server_tool("memory_read", "Read target memory.",
+        fn() -> text: schema_memory_read(), fn(a: text) -> text: run_runner_content("memory_read", a))
+    mcp_server_tool("memory_write", "Write target memory.",
+        fn() -> text: schema_memory_write(), fn(a: text) -> text: run_runner_content("memory_write", a))
+    mcp_server_tool("debug_command_run", "Run a gated raw backend command.",
+        fn() -> text: schema_debug_command_run(), fn(a: text) -> text: run_runner_content("debug_command_run", a))
+    mcp_server_tool("clangd_definition", "Resolve definition location via clangd.",
+        fn() -> text: schema_pos(), fn(a: text) -> text: run_runner_content("clangd_definition", a))
+    mcp_server_tool("clangd_references", "Resolve references via clangd.",
+        fn() -> text: schema_pos(), fn(a: text) -> text: run_runner_content("clangd_references", a))
+    mcp_server_tool("clangd_hover", "Get hover details via clangd.",
+        fn() -> text: schema_pos(), fn(a: text) -> text: run_runner_content("clangd_hover", a))
+    mcp_server_tool("clangd_completion", "Get code completions via clangd.",
+        fn() -> text: schema_pos(), fn(a: text) -> text: run_runner_content("clangd_completion", a))
+    mcp_server_tool("clangd_type_definition", "Resolve type definition via clangd.",
+        fn() -> text: schema_pos(), fn(a: text) -> text: run_runner_content("clangd_type_definition", a))
+    mcp_server_tool("clangd_symbols", "List symbols in a source file via clangd.",
+        fn() -> text: schema_file_only(), fn(a: text) -> text: run_runner_content("clangd_symbols", a))
+    mcp_server_tool("clangd_diagnostics", "Run clangd --check diagnostics for a source file.",
+        fn() -> text: schema_file_only(), fn(a: text) -> text: run_runner_content("clangd_diagnostics", a))
+
+    val t = StdioTransport.json_lines()
+    mcp_serve(t)
+    0
+
+fn print_help():
+    print "{TOOL_NAME}"
+    print ""
+    print "Usage: simple mcpgdb [options]"
+    print ""
+    print "Runs the mcpgdb MCP JSON-RPC server on stdin/stdout."
+    print ""
+    print "Options:"
+    print "  -h, --help          Show this help message"
+    print "  -v, --version       Show version information"
+    print ""
+    print "Shared log options:"
+    for line in log_options_help():
+        print "  {line}"
+
+fn print_help_with_progress(progress_mode: text):
+    val progress = render_progress(progress_mode, 0, 1, "usage")
+    if progress != "":
+        print progress
+    print_help()
+
+fn mcpgdb_is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--progress=")
+
+fn mcpgdb_clean_log_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if mcpgdb_is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
+        i = i + 1
+    cleaned
