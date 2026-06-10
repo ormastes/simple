@@ -48,8 +48,9 @@ pub fn compile_load<M: Module>(
         } else {
             // Variable not pre-allocated (temp local created during MIR lowering).
             // Declare it on-the-fly so subsequent Store/Load work correctly.
-            let next_idx = (ctx.variables.len() + ctx.extra_variables.len()) as u32 + 1000;
-            let var = cranelift_frontend::Variable::from_u32(next_idx + local_index as u32);
+            // ID must be injective per local_index and independent of first-touch
+            // order: extra_var_base clears all pre-declared Variables.
+            let var = cranelift_frontend::Variable::from_u32(ctx.extra_var_base + local_index as u32);
             builder.declare_var(var, types::I64);
             let zero = builder.ins().iconst(types::I64, 0);
             builder.def_var(var, zero);
@@ -79,9 +80,10 @@ pub fn compile_store<M: Module>(
         } else if let Some(&var) = ctx.extra_variables.get(&local_index) {
             var
         } else {
-            // Variable not pre-allocated — declare on-the-fly (same as Load fix)
-            let next_idx = (ctx.variables.len() + ctx.extra_variables.len()) as u32 + 1000;
-            let var = cranelift_frontend::Variable::from_u32(next_idx + local_index as u32);
+            // Variable not pre-allocated — declare on-the-fly (same as Load fix).
+            // ID must be injective per local_index and independent of first-touch
+            // order: extra_var_base clears all pre-declared Variables.
+            let var = cranelift_frontend::Variable::from_u32(ctx.extra_var_base + local_index as u32);
             builder.declare_var(var, types::I64);
             let zero = builder.ins().iconst(types::I64, 0);
             builder.def_var(var, zero);

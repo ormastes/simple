@@ -6,7 +6,7 @@ use crate::hir::lower::error::{LowerError, LowerResult};
 use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::{
     HirAopAdvice, HirArchRule, HirCapabilityItem, HirCapabilityPolicy, HirDiBinding, HirDomainBlock,
-    HirGlobalArrayInit, HirImpl, HirInjectGraph, HirInjectItem, HirLeanBlock, HirMockDecl, HirModule, HirSandboxItem,
+    HirGlobalArrayInit, HirGlobalFieldInit, HirGlobalStructInit, HirImpl, HirInjectGraph, HirInjectItem, HirLeanBlock, HirMockDecl, HirModule, HirSandboxItem,
     HirSandboxPolicy, HirSecurityGate, HirSecurityItem, HirSecurityPolicy, HirType, HirUiPolicy, HirUiPolicyItem,
     TypeId,
 };
@@ -136,6 +136,73 @@ fn record_const_array_init(
             HirGlobalArrayInit { element_type, values: Vec::new(), string_values: Some(strings) },
         );
     }
+}
+
+fn record_struct_literal_init(
+    map: &mut HashMap<String, HirGlobalStructInit>,
+    name: &str,
+    ty: TypeId,
+    types: &crate::hir::types::TypeRegistry,
+    expr: &Expr,
+) {
+    // Module-level `var g: S = S(field: <simple>, ...)`. Without this the
+    // initializer is silently dropped and the global stays 0 in BSS — any
+    // field access through it segfaults in native binaries (stage4
+    // sugar_registry::rule_registry crash, 2026-06-10).
+    // Struct literals reach module_pass in two AST shapes:
+    //   `S { field: v }`  -> Expr::StructInit
+    //   `S(field: v)`     -> Expr::Call with named Arguments (paren form)
+    let (lit_name, literal_fields): (&str, Vec<(&str, &Expr)>) = match expr {
+        Expr::StructInit { name, fields, spread } => {
+            if spread.is_some() {
+                return;
+            }
+            (name.as_str(), fields.iter().map(|(n, e)| (n.as_str(), e)).collect())
+        }
+        Expr::Call { callee, args } => {
+            let Expr::Identifier(callee_name) = callee.as_ref() else {
+                return;
+            };
+            let mut pairs = Vec::with_capacity(args.len());
+            for arg in args {
+                let Some(arg_name) = &arg.name else {
+                    return; // positional args: not a recognizable struct literal
+                };
+                pairs.push((arg_name.as_str(), &arg.value));
+            }
+            (callee_name.as_str(), pairs)
+        }
+        _ => return,
+    };
+    // Field order/offsets come from the declared struct type so named-arg
+    // reordering in the literal cannot scramble the layout.
+    let Some(crate::hir::types::HirType::Struct { name: ty_name, fields: ty_fields, .. }) = types.get(ty) else {
+        return;
+    };
+    if ty_name != lit_name {
+        return;
+    }
+    let mut inits = Vec::with_capacity(ty_fields.len());
+    for (field_name, _) in ty_fields {
+        let Some((_, fexpr)) = literal_fields.iter().find(|(n, _)| *n == field_name.as_str()) else {
+            // Missing field — zero-fill, matching compile_struct_init's default.
+            inits.push(HirGlobalFieldInit::Value(0));
+            continue;
+        };
+        let init = match fexpr {
+            Expr::Integer(v) => HirGlobalFieldInit::Value(*v),
+            Expr::Bool(b) => HirGlobalFieldInit::Value(if *b { 1 } else { 0 }),
+            Expr::Nil => HirGlobalFieldInit::Value(3), // tagged nil
+            Expr::Float(f) => HirGlobalFieldInit::Value(f.to_bits() as i64),
+            Expr::String(v) => HirGlobalFieldInit::Str(v.clone()),
+            Expr::Array(elems) if elems.is_empty() => HirGlobalFieldInit::EmptyArray,
+            // Any non-simple field value: leave the whole struct unrecorded
+            // (pre-existing zero-in-BSS limitation, now scoped + documented).
+            _ => return,
+        };
+        inits.push(init);
+    }
+    map.insert(name.to_string(), HirGlobalStructInit { fields: inits });
 }
 
 fn record_function_init(
@@ -386,6 +453,13 @@ impl Lowerer {
                     &self.module.types,
                     Some(&s.value),
                 );
+                record_struct_literal_init(
+                    &mut self.global_init_structs,
+                    &s.name,
+                    ty,
+                    &self.module.types,
+                    &s.value,
+                );
             }
             Node::Const(c) => {
                 // Register constant
@@ -427,6 +501,13 @@ impl Lowerer {
                     ty,
                     &self.module.types,
                     Some(&c.value),
+                );
+                record_struct_literal_init(
+                    &mut self.global_init_structs,
+                    &c.name,
+                    ty,
+                    &self.module.types,
+                    &c.value,
                 );
             }
             Node::Let(l) => {
@@ -480,6 +561,15 @@ impl Lowerer {
                         &self.module.types,
                         l.value.as_ref(),
                     );
+                    if let Some(value) = l.value.as_ref() {
+                        record_struct_literal_init(
+                            &mut self.global_init_structs,
+                            &n,
+                            ty,
+                            &self.module.types,
+                            value,
+                        );
+                    }
                 }
             }
             _ => {}
@@ -1126,6 +1216,7 @@ impl Lowerer {
         self.module.global_init_strings = self.global_init_strings.clone();
         self.module.global_init_arrays = self.global_init_arrays.clone();
         self.module.global_init_functions = self.global_init_functions.clone();
+        self.module.global_init_structs = self.global_init_structs.clone();
 
         // Copy local globals set to HirModule for codegen linkage decisions
         self.module.local_globals = self.local_globals.clone();
@@ -1409,6 +1500,7 @@ impl Lowerer {
         self.module.global_init_strings = self.global_init_strings.clone();
         self.module.global_init_arrays = self.global_init_arrays.clone();
         self.module.global_init_functions = self.global_init_functions.clone();
+        self.module.global_init_structs = self.global_init_structs.clone();
 
         // Copy local globals set to HirModule for codegen linkage decisions
         self.module.local_globals = self.local_globals.clone();

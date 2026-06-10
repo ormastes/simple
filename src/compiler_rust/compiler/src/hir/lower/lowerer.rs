@@ -25,6 +25,7 @@ pub struct Lowerer {
     pub(super) global_init_strings: HashMap<String, String>,
     /// Integer array literal initial values for module-level `val`/`var`.
     pub(super) global_init_arrays: HashMap<String, super::super::types::HirGlobalArrayInit>,
+    pub(super) global_init_structs: HashMap<String, super::super::types::HirGlobalStructInit>,
     /// Function-valued global initializers for module-level `val`/`var`.
     pub(super) global_init_functions: HashMap<String, String>,
     /// Set of globals that are defined locally in this module (not imported).
@@ -117,6 +118,7 @@ impl Lowerer {
             global_init_values: HashMap::new(),
             global_init_strings: HashMap::new(),
             global_init_arrays: HashMap::new(),
+            global_init_structs: HashMap::new(),
             global_init_functions: HashMap::new(),
             local_globals: HashSet::new(),
             immutable_globals: HashSet::new(),
@@ -158,6 +160,7 @@ impl Lowerer {
             global_init_values: HashMap::new(),
             global_init_strings: HashMap::new(),
             global_init_arrays: HashMap::new(),
+            global_init_structs: HashMap::new(),
             global_init_functions: HashMap::new(),
             local_globals: HashSet::new(),
             immutable_globals: HashSet::new(),
@@ -222,6 +225,7 @@ impl Lowerer {
             global_init_values: HashMap::new(),
             global_init_strings: HashMap::new(),
             global_init_arrays: HashMap::new(),
+            global_init_structs: HashMap::new(),
             global_init_functions: HashMap::new(),
             local_globals: HashSet::new(),
             immutable_globals: HashSet::new(),

@@ -1551,11 +1551,13 @@ impl<M: Module> CodegenBackend<M> {
         if !mir.global_init_strings.is_empty()
             || !mir.global_init_arrays.is_empty()
             || !mir.global_init_functions.is_empty()
+            || !mir.global_init_structs.is_empty()
         {
             self.generate_module_init(
                 &mir.global_init_strings,
                 &mir.global_init_arrays,
                 &mir.global_init_functions,
+                &mir.global_init_structs,
             )?;
         }
 
@@ -1575,6 +1577,7 @@ impl<M: Module> CodegenBackend<M> {
         init_strings: &std::collections::HashMap<String, String>,
         init_arrays: &std::collections::HashMap<String, crate::hir::HirGlobalArrayInit>,
         init_functions: &std::collections::HashMap<String, String>,
+        init_structs: &std::collections::HashMap<String, crate::hir::HirGlobalStructInit>,
     ) -> BackendResult<()> {
         use cranelift_codegen::ir::{types, MemFlags, UserFuncName};
 
@@ -1600,8 +1603,13 @@ impl<M: Module> CodegenBackend<M> {
             .map_err(|e| BackendError::ModuleError(format!("declare __module_init: {e}")))?;
         self.func_ids.insert(init_name.clone(), func_id);
 
-        let needs_string_new =
-            !init_strings.is_empty() || init_arrays.values().any(|init| init.string_values.is_some());
+        let needs_string_new = !init_strings.is_empty()
+            || init_arrays.values().any(|init| init.string_values.is_some())
+            || init_structs.values().any(|init| {
+                init.fields
+                    .iter()
+                    .any(|f| matches!(f, crate::hir::HirGlobalFieldInit::Str(_)))
+            });
         let string_new_id = if !needs_string_new {
             None
         } else {
@@ -1612,7 +1620,12 @@ impl<M: Module> CodegenBackend<M> {
                     .ok_or_else(|| BackendError::ModuleError("rt_string_new not declared".into()))?,
             )
         };
-        let array_new_id = if init_arrays.is_empty() {
+        let structs_need_array = init_structs.values().any(|init| {
+            init.fields
+                .iter()
+                .any(|f| matches!(f, crate::hir::HirGlobalFieldInit::EmptyArray))
+        });
+        let array_new_id = if init_arrays.is_empty() && !structs_need_array {
             None
         } else {
             Some(
@@ -1652,7 +1665,7 @@ impl<M: Module> CodegenBackend<M> {
         } else {
             None
         };
-        let alloc_id = if init_functions.is_empty() {
+        let alloc_id = if init_functions.is_empty() && init_structs.is_empty() {
             None
         } else {
             Some(
@@ -1872,6 +1885,87 @@ impl<M: Module> CodegenBackend<M> {
                     let global_ref = self.module.declare_data_in_func(gid, builder.func);
                     let global_addr = builder.ins().global_value(types::I64, global_ref);
                     builder.ins().store(MemFlags::new(), closure_ptr, global_addr, 0);
+                }
+            }
+        }
+
+        // Struct-literal globals: rt_alloc(n*8) + sequential field stores.
+        // Field representation matches compile_struct_init: ints/bools raw,
+        // nil tagged 3, strings rt_string_new handles, arrays rt_array_new
+        // handles; the struct value itself is the raw rt_alloc pointer.
+        let mut sorted_structs: Vec<_> = init_structs.iter().collect();
+        sorted_structs.sort_by_key(|(name, _)| (*name).clone());
+        for (global_name, init) in &sorted_structs {
+            let alloc_ref = self.module.declare_func_in_func(alloc_id.unwrap(), builder.func);
+            let size = (init.fields.len().max(1) * 8) as i64;
+            let size_val = builder.ins().iconst(types::I64, size);
+            let call_inst = builder.ins().call(alloc_ref, &[size_val]);
+            let struct_ptr = builder.inst_results(call_inst)[0];
+
+            for (idx, field) in init.fields.iter().enumerate() {
+                let field_val = match field {
+                    crate::hir::HirGlobalFieldInit::Value(v) => builder.ins().iconst(types::I64, *v),
+                    crate::hir::HirGlobalFieldInit::Str(string_val) => {
+                        let bytes = string_val.as_bytes();
+                        let data_name = format!(".Linit_struct_str_{:016x}", {
+                            let mut h: u64 = 0xcbf29ce484222325;
+                            for &b in global_name.as_bytes() {
+                                h ^= b as u64;
+                                h = h.wrapping_mul(0x100000001b3);
+                            }
+                            h ^= idx as u64;
+                            h = h.wrapping_mul(0x100000001b3);
+                            for &b in bytes {
+                                h ^= b as u64;
+                                h = h.wrapping_mul(0x100000001b3);
+                            }
+                            h
+                        });
+                        let data_id = self
+                            .module
+                            .declare_data(&data_name, cranelift_module::Linkage::Local, false, false)
+                            .map_err(|e| {
+                                BackendError::ModuleError(format!("declare struct string data: {e}"))
+                            })?;
+                        {
+                            let mut data_desc = cranelift_module::DataDescription::new();
+                            data_desc.define(bytes.to_vec().into_boxed_slice());
+                            let _ = self.module.define_data(data_id, &data_desc);
+                        }
+                        let data_ref = self.module.declare_data_in_func(data_id, builder.func);
+                        let str_ptr = builder.ins().global_value(types::I64, data_ref);
+                        let str_len = builder.ins().iconst(types::I64, bytes.len() as i64);
+                        let string_new_ref =
+                            self.module.declare_func_in_func(string_new_id.unwrap(), builder.func);
+                        let call_inst = builder.ins().call(string_new_ref, &[str_ptr, str_len]);
+                        builder.inst_results(call_inst)[0]
+                    }
+                    crate::hir::HirGlobalFieldInit::EmptyArray => {
+                        let new_ref =
+                            self.module.declare_func_in_func(array_new_id.unwrap(), builder.func);
+                        let zero_cap = builder.ins().iconst(types::I64, 0);
+                        let call_inst = builder.ins().call(new_ref, &[zero_cap]);
+                        builder.inst_results(call_inst)[0]
+                    }
+                };
+                builder
+                    .ins()
+                    .store(MemFlags::new(), field_val, struct_ptr, (idx * 8) as i32);
+            }
+
+            if let Some(&gid) = self.global_ids.get(global_name.as_str()) {
+                let global_ref = self.module.declare_data_in_func(gid, builder.func);
+                let global_addr = builder.ins().global_value(types::I64, global_ref);
+                builder.ins().store(MemFlags::new(), struct_ptr, global_addr, 0);
+            } else {
+                let mangled = match &self.module_prefix {
+                    Some(prefix) => format!("{}__{}", prefix, global_name),
+                    None => global_name.to_string(),
+                };
+                if let Some(&gid) = self.global_ids.get(mangled.as_str()) {
+                    let global_ref = self.module.declare_data_in_func(gid, builder.func);
+                    let global_addr = builder.ins().global_value(types::I64, global_ref);
+                    builder.ins().store(MemFlags::new(), struct_ptr, global_addr, 0);
                 }
             }
         }

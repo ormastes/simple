@@ -136,6 +136,29 @@ pub struct HirGlobalArrayInit {
     pub string_values: Option<Vec<String>>,
 }
 
+/// One field initializer for a module-level struct-literal global.
+#[derive(Debug, Clone)]
+pub enum HirGlobalFieldInit {
+    /// Raw 64-bit word stored as-is (ints raw, bools 0/1, nil 3, f64 bits).
+    Value(i64),
+    /// String literal — allocated via rt_string_new at module init.
+    Str(String),
+    /// Empty array literal `[]` — allocated via rt_array_new(0) at module init.
+    EmptyArray,
+}
+
+/// Module-level `var g: S = S(field: <simple>, ...)` initializer.
+///
+/// Field i is stored at byte offset i*8 — the same simplified sequential
+/// layout MIR StructInit lowering uses. Globals whose struct-literal
+/// initializer contains any non-simple field value are NOT recorded (they
+/// stay zero in BSS — pre-existing limitation, see stage4 sugar_registry
+/// crash 2026-06-10).
+#[derive(Debug, Clone)]
+pub struct HirGlobalStructInit {
+    pub fields: Vec<HirGlobalFieldInit>,
+}
+
 /// HIR module
 #[derive(Debug)]
 pub struct HirModule {
@@ -156,6 +179,9 @@ pub struct HirModule {
     /// Function-valued global initializers for module-level `val`/`var`.
     /// These require runtime allocation of the closure object before `main`.
     pub global_init_functions: HashMap<String, String>,
+    /// Struct-literal global initializers (e.g. `var g: S = S(rules: [])`).
+    /// Heap-allocated at module init; fields stored at sequential i*8 offsets.
+    pub global_init_structs: HashMap<String, HirGlobalStructInit>,
     /// Set of globals that are defined locally in this module (not imported).
     pub local_globals: HashSet<String>,
     /// Set of globals that are immutable (val/const, not var).
@@ -220,6 +246,7 @@ impl HirModule {
             global_init_strings: HashMap::new(),
             global_init_arrays: HashMap::new(),
             global_init_functions: HashMap::new(),
+            global_init_structs: HashMap::new(),
             local_globals: HashSet::new(),
             immutable_globals: HashSet::new(),
             type_invariants: HashMap::new(),

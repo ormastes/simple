@@ -161,6 +161,54 @@ impl<'a> MirLowerer<'a> {
             arg_regs.push(self.lower_expr(arg)?);
         }
 
+        // Function-valued struct field invoked with method syntax:
+        // `port.run_fn(args)` where `struct BackendPort { run_fn: any }` holds a
+        // lambda. Name-based method resolution cannot find a function called
+        // "BackendPort.run_fn" and codegen would emit rt_function_not_found at
+        // runtime (stage4 phase5:mode_dispatch failure, 2026-06-10). Lower it
+        // as FieldGet (sequential i*8 layout, same as lowering_expr_struct) +
+        // IndirectCall through the closure value instead.
+        if let Some(registry) = self.type_registry {
+            let field_hit = [Some(receiver.ty), receiver_local_ty]
+                .into_iter()
+                .flatten()
+                .find_map(|t| match registry.get(t) {
+                    Some(HirType::Struct { fields, .. }) => fields
+                        .iter()
+                        .enumerate()
+                        .find(|(_, (n, _))| n == method)
+                        .map(|(i, (_, fty))| (i, *fty)),
+                    _ => None,
+                });
+            if let Some((field_index, field_ty)) = field_hit {
+                let is_callable_field = field_ty == TypeId::ANY
+                    || matches!(registry.get(field_ty), Some(HirType::Function { .. }));
+                if is_callable_field {
+                    let arg_count = args.len();
+                    return self.with_func(|func, current_block| {
+                        let fval = func.new_vreg();
+                        let dest = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::FieldGet {
+                            dest: fval,
+                            object: receiver_reg,
+                            byte_offset: (field_index as u32) * 8,
+                            field_type: field_ty,
+                        });
+                        block.instructions.push(MirInst::IndirectCall {
+                            dest: Some(dest),
+                            callee: fval,
+                            param_types: vec![TypeId::ANY; arg_count],
+                            return_type: TypeId::ANY,
+                            args: arg_regs.clone(),
+                            effect: crate::mir::effects::Effect::Io,
+                        });
+                        dest
+                    });
+                }
+            }
+        }
+
         if method == "char_code_at"
             && args.len() == 1
             && (receiver.ty == TypeId::STRING || receiver_local_ty == Some(TypeId::STRING))
@@ -199,15 +247,18 @@ impl<'a> MirLowerer<'a> {
                 .and_then(|tr| tr.get(receiver.ty))
                 .is_some_and(|ty| matches!(ty, crate::hir::HirType::Array { element, .. } if *element == TypeId::U8))
         {
+            // The push helper returns bool (success), NOT the array. The value of
+            // the `arr.push(x)` expression must be the (in-place mutated) array
+            // itself, so `arr = arr.push(x)` keeps a valid array pointer instead
+            // of overwriting it with `true` (raw 1 == heap-tagged null).
             return self.with_func(|func, current_block| {
-                let dest = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();
                 block.instructions.push(MirInst::Call {
-                    dest: Some(dest),
+                    dest: None,
                     target: crate::mir::effects::CallTarget::from_name("rt_typed_bytes_u8_push"),
                     args: vec![receiver_reg, arg_regs[0]],
                 });
-                dest
+                receiver_reg
             });
         }
         if is_array_append_method
@@ -218,15 +269,15 @@ impl<'a> MirLowerer<'a> {
                 .and_then(|tr| tr.get(receiver.ty))
                 .is_some_and(|ty| matches!(ty, crate::hir::HirType::Array { element, .. } if *element == TypeId::U32))
         {
+            // Push returns bool — yield the array as the expression value (see above).
             return self.with_func(|func, current_block| {
-                let dest = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();
                 block.instructions.push(MirInst::Call {
-                    dest: Some(dest),
+                    dest: None,
                     target: crate::mir::effects::CallTarget::from_name("rt_typed_words_u32_push"),
                     args: vec![receiver_reg, arg_regs[0]],
                 });
-                dest
+                receiver_reg
             });
         }
         if is_array_append_method
@@ -237,15 +288,15 @@ impl<'a> MirLowerer<'a> {
                 .and_then(|tr| tr.get(receiver.ty))
                 .is_some_and(|ty| matches!(ty, crate::hir::HirType::Array { element, .. } if *element == TypeId::U64))
         {
+            // Push returns bool — yield the array as the expression value (see above).
             return self.with_func(|func, current_block| {
-                let dest = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();
                 block.instructions.push(MirInst::Call {
-                    dest: Some(dest),
+                    dest: None,
                     target: crate::mir::effects::CallTarget::from_name("rt_typed_words_u64_push"),
                     args: vec![receiver_reg, arg_regs[0]],
                 });
-                dest
+                receiver_reg
             });
         }
 
@@ -292,15 +343,21 @@ impl<'a> MirLowerer<'a> {
         }
 
         if is_array_append_method && args.len() == 1 && self.receiver_is_array(receiver, receiver_local_ty) {
+            // rt_array_push returns bool (success), NOT the array. The value of
+            // the `arr.push(x)` expression must be the (in-place mutated) array
+            // itself, so `arr = arr.push(x)` keeps a valid array pointer instead
+            // of overwriting it with `true` (raw 1 == heap-tagged null pointer).
+            // That exact overwrite corrupted ExprKind.Call payloads built by
+            // `args = args.push(CallArg(...))` in flat_ast_bridge_part1 and
+            // crashed the stage4 binary in flat_ast_to_module (2026-06-10).
             return self.with_func(|func, current_block| {
-                let dest = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();
                 block.instructions.push(MirInst::Call {
-                    dest: Some(dest),
+                    dest: None,
                     target: crate::mir::effects::CallTarget::from_name("rt_array_push"),
                     args: vec![receiver_reg, arg_regs[0]],
                 });
-                dest
+                receiver_reg
             });
         }
 

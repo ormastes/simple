@@ -258,6 +258,24 @@ pub(crate) fn compile_method_call_static<M: Module>(
             return Ok(());
         }
     }
+    // Bare `.has(...)` is the Dict/Set/Array membership builtin idiom (same
+    // policy as the suffix-search guard below, which already refuses
+    // name-suffix binding for it). Route it to tag-dispatched rt_contains
+    // BEFORE any name-based resolution: the cross-module use_map/import_map
+    // fallback (`raw.ends_with(".has")`) would otherwise bind a Dict-field
+    // receiver to whatever imported `Type.has` method exists — e.g.
+    // `manifest.entries.has(path)` in smf_manifest_find dispatched to
+    // SuffixRegistry.has and segfaulted the stage4 binary (2026-06-10).
+    // Receivers with a known static type emit a qualified "Type.has"
+    // func_name and never take this path.
+    if lookup_name == "has" {
+        if let Some(result) = try_compile_builtin_method_call(ctx, builder, receiver, "has", args)? {
+            if let Some(d) = dest {
+                ctx.vreg_values.insert(*d, result);
+            }
+            return Ok(());
+        }
+    }
     let receiver_ty = ctx.vreg_types.get(&receiver).copied();
     let allow_qualified_builtin = matches!(
         receiver_ty,

@@ -103,6 +103,16 @@ pub struct InstrContext<'a, M: Module> {
     /// Dynamically-created variables for local indices not pre-allocated in `variables`.
     /// MIR lowering can create temp locals beyond the pre-allocated count.
     pub extra_variables: &'a mut HashMap<usize, cranelift_frontend::Variable>,
+    /// Base Cranelift Variable index for dynamically-created locals.
+    /// Computed once per function as (params + locals + cross-block vregs) + margin,
+    /// so `extra_var_base + local_index` is injective per local and can never
+    /// collide with pre-declared Variables. (The previous formula
+    /// `variables.len() + extra_variables.len() + 1000 + local_index` depended on
+    /// first-touch order: locals A and B collided whenever
+    /// A + extras_at_first_touch(A) == B + extras_at_first_touch(B), silently
+    /// aliasing two distinct locals onto one Variable — see flat_ast_to_module
+    /// stage4 SIGSEGV, 2026-06-10.)
+    pub extra_var_base: u32,
     /// Reverse map: VReg → local_index, for VRegs produced by Load from a local.
     /// Used by push codegen to store the new array pointer back to the local Variable.
     pub vreg_from_local: &'a mut HashMap<VReg, usize>,
@@ -225,6 +235,7 @@ impl<'a, M: Module> InstrContext<'a, M> {
             local_addr_map,
             variables,
             extra_variables,
+            extra_var_base: 1000,
             vreg_from_local,
             func,
             entry_block,

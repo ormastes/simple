@@ -406,6 +406,12 @@ pub fn compile_function_body<M: Module>(
         }
     }
 
+    // Base Cranelift Variable index for dynamically-created locals (temp locals
+    // emitted by MIR lowering that are not in func.locals). `extra_var_base +
+    // local_index` is injective per local and clears every pre-declared Variable
+    // (params, locals, cross-block vregs). See InstrContext::extra_var_base.
+    let extra_var_base: u32 = var_idx + 1024;
+
     // Create blocks
     let mut blocks = HashMap::new();
     for mir_block in &func.blocks {
@@ -460,8 +466,7 @@ pub fn compile_function_body<M: Module>(
                 } else if let Some(&var) = extra_variables.get(local_index) {
                     var
                 } else {
-                    let next_idx = (variables.len() + extra_variables.len()) as u32 + 1000;
-                    let var = Variable::from_u32(next_idx + *local_index as u32);
+                    let var = Variable::from_u32(extra_var_base + *local_index as u32);
                     builder.declare_var(var, types::I64);
                     extra_variables.insert(*local_index, var);
                     var
@@ -725,6 +730,7 @@ pub fn compile_function_body<M: Module>(
                     local_addr_map: &mut local_addr_map,
                     variables: &variables,
                     extra_variables: &mut extra_variables,
+                    extra_var_base,
                     vreg_from_local: &mut vreg_from_local,
                     func,
                     entry_block,
@@ -756,6 +762,7 @@ pub fn compile_function_body<M: Module>(
                     local_addr_map: &mut local_addr_map,
                     variables: &variables,
                     extra_variables: &mut extra_variables,
+                    extra_var_base,
                     vreg_from_local: &mut vreg_from_local,
                     func,
                     entry_block,
