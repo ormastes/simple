@@ -39,3 +39,10 @@
 - SimpleOS final ring/user context-switch handoff across the green-carrier path is now proven by the `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1` lane and recorded in `doc/09_report/simpleos_multicore_green_evidence_2026-06-07.md`. The default live QEMU green-carrier readiness evidence still covers AP startup, fixed-slot CPU1 green dispatch/IPI evidence, fixed timer-preemption yield evidence, scheduler-owned CPU1 green handoff through `Scheduler.run_green_carrier_once`, user-task handoff readiness through `create_user_task_pid` plus non-entering syscall-14 validation, user-entry bridge readiness through trap runtime plus SYSCALL entry installation, and syscall bridge readiness through the strong debug-write shim. The final live gate must continue to observe `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, and `USER_SYSCALL_PASS=true` from the real AP ring/user path before docs or reports claim final hardware handoff.
 - The interpreter unit spec can pass its example and then hang in `spipe-docgen`; this is a test-runner/docgen issue, not a failed multicore-green assertion.
 - The value-index warning currently recommends angle-bracket indexing that fails to parse in expression contexts; tracked in `doc/08_tracking/bug/angle_bracket_index_lint_parse_mismatch_2026-06-06.md`.
+
+## Current Sync Status (2026-06-10)
+
+- `main` currently points at `c0a8966f47da` (`docs: refresh multicore green plan state`).
+- The default `jj` workspace working copy is `30f047c4db8b` with additional uncommitted local changes layered on top.
+- The repository is still dirty outside this plan file, so sync work must stay scoped to the plan-status refresh and preserve unrelated edits.
+- This update records the current multicore-green plan state before the requested `jj commit`, `jj git fetch`, `jj rebase -d main@origin`, and push sequence.
