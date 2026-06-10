@@ -1,31 +1,27 @@
-# MCP Server Entry Point
+# MCP Server Entry Point — migrated to McpServer facade (Wave C1).
 #
-# Table-driven tool dispatch with ~100 tools (68 original + ~33 new CLI wrappers).
-# Uses only extern fn calls for I/O — no subprocess dispatch, no hangs.
-#
-# Architecture:
-#   - Zero stdlib imports: all JSON helpers and tool logic inlined
-#   - Table-driven dispatch: tool_table.spl defines all tool metadata
-#   - CLI passthrough: most tools delegate to bin/simple via cli_passthrough.spl
-#   - Fast startup (~200ms), fast tool calls (<1s)
+# Apps own only tool handlers + wiring (design rule D5).
+# 151 tools registered via mcp_server_tool; serve loop uses StdioTransport.
 #
 # Module files:
 #   - tool_registry.spl        — McpToolEntry struct
 #   - tool_table.spl           — All tool definitions (name, schema, annotations, handler_kind)
 #   - cli_passthrough.spl      — Generic CLI passthrough handler for handler_kind="cli"
 #   - main_lazy_json.spl       — JSON helpers, tool result helpers, shell helpers
-#   - main_lazy_protocol.spl   — Protocol I/O, initialize, tools list, schemas, resources, prompts
+#   - main_lazy_protocol.spl   — Resources, prompts, completion handlers
 #   - main_lazy_diag_tools.spl — In-process diagnostic handlers (read, edit, multi_edit, status, api)
 #   - main_lazy_vcs_tools.spl  — VCS tool handlers (diff, log, squash, new, commit, push, rebase, pull)
 #   - main_lazy_debug_tools.spl — Debug session/breakpoint/variable handlers
-#   - main_lazy_debug_log_tools.spl — Debug log tool handlers
-#   - main_lazy_tasks.spl         — Background task manager
 #   - main_lazy_query_tools.spl   — Query + Analysis tool handlers (deps, context, api_diff, search)
-#   - main_lazy_test_daemon_tools.spl — Test daemon IPC handlers
+#   - main_dispatch.spl        — dispatch_tool / dispatch_tool_content
+#   - main_static_tools.spl    — _mcp_static_tools_result (tools/list cache)
 
 use std.io_runtime.{env_get, file_exists, exit, get_args}
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use std.log.{error}
+use std.mcp_sdk.server.app.{mcp_server_init, mcp_server_tool, mcp_server_handle, app_unwrap_text, app_extract_id, app_extract_str, app_extract_obj}
+use std.mcp_sdk.server.method_detect.{has_method}
+use std.mcp_sdk.transport.transport.{StdioTransport}
 
 fn _mcp_find_simple_binary() -> text:
     val env_bin = env_get("SIMPLE_BINARY") ?? ""
@@ -83,17 +79,11 @@ val SERVER_NAME = "simple-mcp-full"
 val SERVER_VERSION = "4.0.0"
 val NL = "\n"
 
-# Protocol auto-detection
-var USE_JSON_LINES = false
-
-# Caches
-var TOOLS_CACHE = ""
-var INIT_CACHE = ""
-
-# Debug session state managed by dap_bridge.spl (DapSession class)
-
 # MCP log level (protocol-level, not debug log)
 var MCP_LOG_LEVEL = "info"
+
+# Tools/list response cache (built on first request, reused thereafter)
+var _MCP_TOOLS_LIST_CACHE = ""
 
 # --- Server loop ---
 
@@ -170,56 +160,44 @@ fn mcp_get_cli_args() -> [text]:
         i = i + 1
     args
 
-fn mcp_has_method(msg: text, name: text) -> bool:
-    msg.contains(Q() + "method" + Q() + ":" + Q() + name + Q()) or msg.contains(Q() + "method" + Q() + ": " + Q() + name + Q())
+# --- Tool registration helpers ---
 
-fn mcp_detect_method(msg: text) -> text:
-    if mcp_has_method(msg, "initialize"):
-        return "initialize"
-    if mcp_has_method(msg, "initialized"):
-        return "initialized"
-    if mcp_has_method(msg, "notifications/initialized"):
-        return "notifications/initialized"
-    if mcp_has_method(msg, "shutdown"):
-        return "shutdown"
-    if mcp_has_method(msg, "tools/list"):
-        return "tools/list"
-    if mcp_has_method(msg, "tools/call"):
-        return "tools/call"
-    if mcp_has_method(msg, "resources/list"):
-        return "resources/list"
-    if mcp_has_method(msg, "resources/templates/list"):
-        return "resources/templates/list"
-    if mcp_has_method(msg, "resources/read"):
-        return "resources/read"
-    if mcp_has_method(msg, "prompts/list"):
-        return "prompts/list"
-    if mcp_has_method(msg, "prompts/get"):
-        return "prompts/get"
-    if mcp_has_method(msg, "completion/complete"):
-        return "completion/complete"
-    if mcp_has_method(msg, "completions/complete"):
-        return "completions/complete"
-    if mcp_has_method(msg, "logging/setLevel"):
-        return "logging/setLevel"
-    if mcp_has_method(msg, "roots/list"):
-        return "roots/list"
-    if mcp_has_method(msg, "ping"):
-        return "ping"
-    if mcp_has_method(msg, "notifications/cancelled"):
-        return "notifications/cancelled"
-    if mcp_has_method(msg, "notifications/roots/list_changed"):
-        return "notifications/roots/list_changed"
-    extract_field(msg, "method")
+# Build an inputSchema JSON object from pre-built properties and required arrays.
+fn _mcp_input_schema(props: text, req: text) -> text:
+    "{\"type\":\"object\",\"properties\":" + props + ",\"required\":" + req + "}"
 
-fn mcp_extract_id_or_default(msg: text, method: text) -> text:
-    val parsed = extract_id(msg)
+# Register one tool with closures that capture name/props/req by value.
+# Using a function wrapper so each call gets its own stack frame — this ensures
+# the closures capture distinct values rather than a shared loop variable.
+fn _register_mcp_tool(n: text, d: text, props: text, req: text):
+    mcp_server_tool(
+        n,
+        d,
+        fn() -> text: _mcp_input_schema(props, req),
+        fn(a: text) -> text: dispatch_tool_content(n, a)
+    )
+
+# Register all tools from the table.
+fn _register_all_tools():
+    for entry in get_tool_table():
+        _register_mcp_tool(entry.name, entry.description, entry.props_json, entry.required_json)
+
+# Lazily build and cache the tools/list result JSON.
+fn _mcp_tools_list_result() -> text:
+    if _MCP_TOOLS_LIST_CACHE != "":
+        return _MCP_TOOLS_LIST_CACHE
+    _MCP_TOOLS_LIST_CACHE = _mcp_static_tools_result()
+    _MCP_TOOLS_LIST_CACHE
+
+# Extract JSON-RPC id from message, with sensible fallbacks.
+fn _mcp_extract_id(msg: text, method: text) -> text:
+    val parsed = app_extract_id(msg)
     if parsed != "" and parsed != "null":
         return parsed
     if method == "initialize":
-        return Q() + "1" + Q()
+        return "\"1\""
     if method == "tools/list":
-        return Q() + "2" + Q()
+        return "\"2\""
     parsed
 
 fn main() -> i64:
@@ -255,58 +233,80 @@ fn main() -> i64:
             print progress
         return 0
 
+    # Register all 151 tools with the McpServer facade.
+    mcp_server_init(SERVER_NAME, SERVER_VERSION)
+    _register_all_tools()
+
+    # Serve loop — uses Content-Length framing (StdioTransport.new()).
+    val t = StdioTransport.new()
     while true:
-        var line = read_stdin_message()
-        if line == "":
+        val msg_opt = t.read_message()
+        if msg_opt == nil:
             exit(0)
             return 0
-        var method = mcp_detect_method(line)
-        var id = mcp_extract_id_or_default(line, method)
+        val msg = app_unwrap_text(msg_opt)
+
+        # Core methods: delegate to the McpServer facade.
+        # tools/list is handled locally so we return the full 151-tool list
+        # without registry pagination (smoke check requires all tools in one response).
         var response = ""
-        if method == "initialize":
-            response = make_init_response(id)
-        elif method == "initialized" or method == "notifications/initialized":
+        if has_method(msg, "initialize") or (
+            has_method(msg, "tools/call")):
+            val resp_opt = mcp_server_handle(msg)
+            if resp_opt != nil:
+                response = app_unwrap_text(resp_opt)
+        elif has_method(msg, "tools/list"):
+            val id = _mcp_extract_id(msg, "tools/list")
+            response = make_json_result(id, _mcp_tools_list_result())
+        elif has_method(msg, "notifications/initialized") or (
+            has_method(msg, "notifications/cancelled")) or (
+            has_method(msg, "notifications/roots/list_changed")) or (
+            has_method(msg, "initialized")):
             response = ""
-        elif method == "shutdown":
+        elif has_method(msg, "shutdown"):
+            val id = _mcp_extract_id(msg, "shutdown")
             response = make_json_result(id, "null")
-        elif method == "tools/list":
-            response = make_json_result(id, _mcp_static_tools_result())
-        elif method == "tools/call":
-            var tool_name = extract_nested(line, "name")
-            response = dispatch_tool(id, tool_name, line)
-        elif method == "resources/list":
+        elif has_method(msg, "resources/list"):
+            val id = _mcp_extract_id(msg, "resources/list")
             response = handle_resources_list(id)
-        elif method == "resources/templates/list":
+        elif has_method(msg, "resources/templates/list"):
+            val id = _mcp_extract_id(msg, "resources/templates/list")
             response = handle_resource_templates_list(id)
-        elif method == "resources/read":
-            val uri = extract_nested(line, "uri")
+        elif has_method(msg, "resources/read"):
+            val id = _mcp_extract_id(msg, "resources/read")
+            val uri = extract_nested(msg, "uri")
             response = handle_resources_read(id, uri)
-        elif method == "prompts/list":
+        elif has_method(msg, "prompts/list"):
+            val id = _mcp_extract_id(msg, "prompts/list")
             response = handle_prompts_list(id)
-        elif method == "prompts/get":
-            val prompt_name = extract_nested(line, "name")
-            response = handle_prompts_get(id, prompt_name, line)
-        elif method == "completion/complete" or method == "completions/complete":
-            response = handle_completion_req(id, line)
-        elif method == "logging/setLevel":
-            val level = extract_nested(line, "level")
+        elif has_method(msg, "prompts/get"):
+            val id = _mcp_extract_id(msg, "prompts/get")
+            val prompt_name = extract_nested(msg, "name")
+            response = handle_prompts_get(id, prompt_name, msg)
+        elif has_method(msg, "completion/complete") or has_method(msg, "completions/complete"):
+            val id = _mcp_extract_id(msg, "completion/complete")
+            response = handle_completion_req(id, msg)
+        elif has_method(msg, "logging/setLevel"):
+            val id = _mcp_extract_id(msg, "logging/setLevel")
+            val level = extract_nested(msg, "level")
             if level != "":
                 MCP_LOG_LEVEL = level
             response = make_json_result(id, jo1(jp("level", js(MCP_LOG_LEVEL))))
-        elif method == "roots/list":
+        elif has_method(msg, "roots/list"):
+            val id = _mcp_extract_id(msg, "roots/list")
             val cwd = get_cwd()
             var root = LB()
             root = root + jp("uri", js("file://" + cwd))
             root = root + "," + jp("name", js("workspace"))
             root = root + RB()
             response = make_json_result(id, jo1(jp("roots", "[" + root + "]")))
-        elif method == "ping":
+        elif has_method(msg, "ping"):
+            val id = _mcp_extract_id(msg, "ping")
             response = make_json_result(id, LB() + RB())
-        elif method == "notifications/cancelled" or method == "notifications/roots/list_changed":
-            response = ""
         else:
+            val id = _mcp_extract_id(msg, "")
             if id != "" and id != "null":
-                response = make_error(id, -32601, "Method not found: " + method)
+                response = make_error(id, -32601, "Method not found")
         if response != "":
-            write_stdout_message(response)
+            t.write_message(response)
     0

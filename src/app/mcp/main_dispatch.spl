@@ -510,3 +510,71 @@ fn _dispatch_in_process(id: text, name: text, body: text) -> text:
     if name == "assistant_get_notifications":
         return handle_assistant_get_notifications(id, body)
     make_tool_error(id, -32601, "Unknown in-process tool: " + name)
+
+# --- McpServer facade adapter ---
+#
+# Linear forward-scan for needle in haystack starting at from_pos.
+# Uses slice syntax (works in interpreter mode unlike index_of with offset).
+fn _mcp_disp_find(haystack: text, needle: text, from_pos: i64) -> i64:
+    val nlen = needle.len()
+    val hlen = haystack.len()
+    if nlen == 0:
+        return from_pos
+    if not haystack.contains(needle):
+        return -1
+    var i = from_pos
+    while i <= hlen - nlen:
+        if haystack[i:i + nlen] == needle:
+            return i
+        i = i + 1
+    -1
+
+# Unescape a raw JSON string payload (backslash sequences → actual chars).
+fn _dispatch_unescape_text(s: text) -> text:
+    var r = s.replace("\\\\", "__MCP_DISP_BS__")
+    r = r.replace("\\\"", "\"")
+    r = r.replace("\\n", "\n")
+    r = r.replace("\\r", "\r")
+    r = r.replace("\\t", "\t")
+    r = r.replace("__MCP_DISP_BS__", "\\")
+    r
+
+# Extract the raw text content from a make_tool_result() JSON-RPC response.
+# Finds the first {"type":"text","text":"..."} block and returns its text value.
+# Returns "" if the response does not contain a text content block.
+fn _extract_result_text(resp: text) -> text:
+    # Locate content array marker: "type":"text"
+    val type_marker = "\"type\":\"text\""
+    val type_pos = _mcp_disp_find(resp, type_marker, 0)
+    if type_pos < 0:
+        return ""
+    # After the marker, find the "text":" key+opening-quote
+    val text_key = "\"text\":\""
+    val text_pos = _mcp_disp_find(resp, text_key, type_pos + type_marker.len())
+    if text_pos < 0:
+        return ""
+    val val_start = text_pos + text_key.len()
+    # Scan forward to find the end of the JSON string (closing unescaped ")
+    var i = val_start
+    var esc = false
+    while i < resp.len():
+        val ch = resp[i:i + 1]
+        if esc:
+            esc = false
+        elif ch == "\\":
+            esc = true
+        elif ch == "\"":
+            return _dispatch_unescape_text(resp.substring(val_start, i))
+        i = i + 1
+    ""
+
+# Call the existing dispatch logic and return only the raw result text
+# (without the JSON-RPC envelope) for use as a registry handler closure.
+fn dispatch_tool_content(name: text, args: text) -> text:
+    val full_resp = dispatch_tool("__registry__", name, args)
+    val txt = _extract_result_text(full_resp)
+    if txt == "":
+        return full_resp
+    txt
+
+export dispatch_tool_content

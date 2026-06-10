@@ -115,6 +115,19 @@ move every in-repo MCP server onto it.
   (`printf <initialize+tools/list> | bin/simple run <app>/main.spl`),
   which works (verified 2026-06-10: 11/11 tools, framed output, exit 0).
 
+## Status & C1 deviations (2026-06-10)
+
+Waves A, B, C, D1/D2 landed. C1 (`src/app/mcp`, 151 tools, zero-diff name
+set vs deployed binary) adopted the facade with two recorded deviations:
+- tools/list serves the pre-built static table (`_mcp_static_tools_result`)
+  instead of registry list_json, because registry pagination caps pages at
+  50 and the deployed server emits all 151 in one page. Follow-up: make the
+  registry page size configurable, then route app/mcp through it.
+- main() keeps a thin custom serve loop over StdioTransport (Content-Length
+  framing) rather than mcp_serve, to preserve the app's extra protocol
+  surfaces (resources/prompts/completion). Follow-up: extend the facade
+  with optional method hooks so the loop can collapse into mcp_serve.
+
 ## Ordering & risks
 
 - A and B are independent; C depends on A; D last. C1 is the riskiest
