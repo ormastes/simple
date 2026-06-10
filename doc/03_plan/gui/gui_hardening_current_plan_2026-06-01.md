@@ -636,12 +636,53 @@
  generated manual includes the structured exact-pixel policy assertion, and the
  doc layout guard returned `0`.
  
- Pure GUI release/perf continuation check:
- 
- - `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/gui/pure_core.spl src/lib/gui/pure_smf_dynlib_perf.spl src/app/gui_perf/smf_dynlib_probe_core.spl src/app/gui_perf/smf_dynlib_probe.spl test/01_unit/lib/gui/pure_core_spec.spl test/01_unit/lib/gui/pure_smf_dynlib_perf_spec.spl test/01_unit/lib/gui/pure_gui_release_lane_spec.spl test/01_unit/app/gui_perf/smf_dynlib_probe_spec.spl`
- - `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/01_unit/lib/gui/pure_core_spec.spl --mode=interpreter --clean --format json`
- - `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/01_unit/lib/gui/pure_smf_dynlib_perf_spec.spl --mode=interpreter --clean --format json`
- - `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/01_unit/lib/gui/pure_gui_release_lane_spec.spl --mode=interpreter --clean --format json`
+Pure GUI release/perf continuation check:
+
+- June 2026 GUI perf/current-state refresh:
+  the current worktree already implements the requested shared Engine2D backend
+  preference order through the app-facing browser auto path:
+  `metal`, `cuda`, `rocm`/HIP aliases, `vulkan`, `webgpu`, `opencl`,
+  `opengl`, `intel`, `qualcomm`, `software`, `cpu_simd`, `cpu`. The current
+  implementation resolves `BrowserBackend.create(..., "auto")` through
+  `Engine2D.detect_best_backend()`, and the canonical wrapper/report pair
+  remains `scripts/check/check-pure-simple-gui-engine2d-auto-backend-evidence.shs`
+  plus `doc/09_report/pure_simple_gui_engine2d_auto_backend_evidence_2026-06-08.md`.
+  Current evidence is contract-pass and deterministic, but native accelerated
+  proof is still host-boundary dependent: Metal needs macOS, and CUDA/ROCm/
+  Vulkan/WebGPU/OpenCL lanes still need real host or guest capture evidence.
+  This closes the selection-order logic lane, not the hardware-native evidence
+  lane.
+
+- The active pure-Simple GUI startup/render perf lane remains centered on
+  `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
+  and `doc/08_tracking/bug/simple_web_framebuffer_return_copy_perf_gap_2026-06-08.md`.
+  The accepted current-state renderer improvements include selector structural
+  caches, declaration lookup caches, cached class-token matching with substring
+  fallback for legacy widget/icon/focused checks, and the retained framebuffer
+  checksum guard. Current Docker-isolated evidence on that lane is:
+  `simple_web_html_layout_renderer.spl` check OK,
+  `simple_web_renderer_spec` 68/0,
+  `browser_renderer_spec` 100/0,
+  `html_compat_spec` 72/0,
+  optimizer `General patterns: 0`.
+  The deeper framebuffer-return/threading simplification remains open because
+  ignored-return primitive rewrites still require checksum-preserving proof.
+
+- Current safe font/rendering continuation:
+  keep the AA-preserving software text path and do not replace
+  `draw_text_bg` with the binary bitmap helper. The next bounded optimization
+  target is internal duplicate metric work inside
+  `src/lib/gc_async_mut/gpu/engine2d/helpers_text.spl` and
+  `text_aa_blit_buffer()`/`text_render_to_buf()`: pass already-known
+  `text_w`, `text_h`, `scale`, `advance`, and glyph height through an internal
+  helper instead of recomputing them. Existing `helpers_text_spec`,
+  `vector_font_offload_spec`, and `draw_text_bg_spec` remain the correctness
+  gates for this font lane.
+
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/lib/gui/pure_core.spl src/lib/gui/pure_smf_dynlib_perf.spl src/app/gui_perf/smf_dynlib_probe_core.spl src/app/gui_perf/smf_dynlib_probe.spl test/01_unit/lib/gui/pure_core_spec.spl test/01_unit/lib/gui/pure_smf_dynlib_perf_spec.spl test/01_unit/lib/gui/pure_gui_release_lane_spec.spl test/01_unit/app/gui_perf/smf_dynlib_probe_spec.spl`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/01_unit/lib/gui/pure_core_spec.spl --mode=interpreter --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/01_unit/lib/gui/pure_smf_dynlib_perf_spec.spl --mode=interpreter --clean --format json`
+- `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/01_unit/lib/gui/pure_gui_release_lane_spec.spl --mode=interpreter --clean --format json`
  - `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple test test/01_unit/app/gui_perf/smf_dynlib_probe_spec.spl --mode=interpreter --clean --format json`
  - `SIMPLE_LIB=src src/compiler_rust/target/release/simple run src/app/gui_perf/smf_dynlib_probe.spl`
  - `SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple src/compiler_rust/target/release/simple spipe-docgen test/01_unit/lib/gui/pure_core_spec.spl test/01_unit/lib/gui/pure_smf_dynlib_perf_spec.spl test/01_unit/lib/gui/pure_gui_release_lane_spec.spl test/01_unit/app/gui_perf/smf_dynlib_probe_spec.spl --output doc/06_spec`
