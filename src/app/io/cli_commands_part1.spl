@@ -18,13 +18,14 @@ use app.watch.runner.{WatchConfig, watch_config_default, watch_loop}
 use app.test_daemon.types.{TestResult}
 use compiler.driver.watcher.watcher_types.{watcher_config_default, WatcherConfig}
 use app.startup.launch_metadata.{startup_normalize_program_args}
-use std.nogc_sync_mut.io.file_ops.{file_exists}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_write}
 
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_platform_name() -> text
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_getpid() -> i64
 
 fn _find_simple_binary() -> text:
     val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
@@ -60,12 +61,28 @@ fn _find_simple_binary() -> text:
 
 fn cli_run_code(code: text, gc_log: bool, gc_off: bool) -> i64:
     val driver = _cli_driver_binary()
-    val result = _cli_process_run(driver, ["-c", code])
-    if result.0 != "":
-        print_raw(result.0)
-    if result.1 != "":
-        _cli_eprint(result.1.trim())
-    result.2
+    if driver != "":
+        val result = _cli_process_run(driver, ["-c", code])
+        if result.0 != "":
+            print_raw(result.0)
+        if result.1 != "":
+            _cli_eprint(result.1.trim())
+        return result.2
+
+    # Self-exec guard fallback (driver IS this binary): interpret in-process
+    # via a staged temp file instead of spawning ourselves recursively.
+    val pid = rt_getpid()
+    val tmp_path = "/tmp/simple_run_code_{pid}.spl"
+    if not file_write(tmp_path, code):
+        _cli_eprint("error: failed to stage -c snippet at {tmp_path}")
+        return 1
+    val result = interpret_file(tmp_path)
+    _cli_shell("rm -f '{tmp_path}'")
+    match result:
+        case CompileResult.Success(_): 0
+        case _:
+            _cli_eprint("error: failed to run -c snippet")
+            1
 
 fn cli_run_file(path: text, args: [text], gc_log: bool, gc_off: bool) -> i64:
     val driver = _cli_driver_binary()
