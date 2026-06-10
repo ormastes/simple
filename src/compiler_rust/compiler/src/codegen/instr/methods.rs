@@ -310,6 +310,10 @@ pub(crate) fn compile_builtin_method<M: Module>(
         | ("array", "contains")
         | ("Dict", "contains")
         | ("dict", "contains")
+        | ("Dict", "has")
+        | ("dict", "has")
+        | ("Dict", "contains_key")
+        | ("dict", "contains_key")
         | ("String", "contains")
         | ("string", "contains") => {
             let arg_val = ctx.get_vreg(&args[0])?;

@@ -357,6 +357,19 @@ pub(crate) fn compile_method_call_static<M: Module>(
             // Search for a function ending with ".func_name" or "_dot_func_name"
             // If func_name is already qualified (contains '.'), extract the method part only
             let method_part = lookup_name.rsplit('.').next().unwrap_or(lookup_name);
+
+            // Bare `.has(...)` is overwhelmingly the builtin Dict/Set/Array
+            // membership idiom (583 uses in src/compiler alone). Binding it
+            // by name-suffix to whatever unique `Type_dot_has` method happens
+            // to be linked in (e.g. os.kernel CapabilitySet.has in the stage4
+            // CLI closure) miscompiles every dict lookup and segfaulted
+            // interpret_file in the self-hosted binary (2026-06-10). Skip
+            // name-based binding for bare `has`; the builtin fallback lowers
+            // it to rt_contains, which tag-dispatches safely at runtime.
+            if !lookup_name.contains('.') && method_part == "has" {
+                return None;
+            }
+
             let dot_suffix = format!(".{}", method_part);
             let underscore_suffix = format!("_dot_{}", method_part);
 
@@ -1012,7 +1025,10 @@ fn try_compile_builtin_method_call<M: Module>(
         }
         "keys" => "rt_dict_keys",
         "values" => "rt_dict_values",
-        "contains_key" | "has_key" => "rt_contains",
+        // `has` is the canonical Dict/Set membership idiom in Simple source;
+        // rt_contains tag-dispatches on the receiver at runtime (Array/Dict/
+        // String; anything else yields 0), so it is safe for untyped receivers.
+        "contains_key" | "has_key" | "has" => "rt_contains",
         _ => return Ok(None),
     };
 
