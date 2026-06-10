@@ -65,11 +65,57 @@ if [ "${1:-}" = "--json" ]; then
   exit 0
 fi
 
+_MCP_PROBE_WRAPPER_VERSION="simple_mcp_server:4.0.0"
+
+_mcp_probe_stat() {
+  # Returns "mtime size" for a file; portable Linux/macOS
+  stat -c '%Y %s' "$1" 2>/dev/null || stat -f '%m %z' "$1" 2>/dev/null || printf ''
+}
+
+_mcp_probe_stamp_path() {
+  # Sanitize candidate path to a safe filename: replace non-alnum with _
+  _key="$(printf '%s' "$1" | tr -c 'A-Za-z0-9.' '_')"
+  printf '%s' "${repo_root}/.simple/cache/mcp-probe/${_key}.stamp"
+}
+
+_mcp_probe_stamp_valid() {
+  # $1 = candidate binary path
+  _stamp="$(_mcp_probe_stamp_path "$1")"
+  [ -f "${_stamp}" ] || return 1
+  _current="$(_mcp_probe_stat "$1")"
+  [ -n "${_current}" ] || return 1
+  _stored_stat="$(sed -n '1p' "${_stamp}" 2>/dev/null || printf '')"
+  _stored_ver="$(sed -n '2p' "${_stamp}" 2>/dev/null || printf '')"
+  [ "${_stored_stat}" = "${_current}" ] && [ "${_stored_ver}" = "${_MCP_PROBE_WRAPPER_VERSION}" ]
+}
+
+_mcp_probe_stamp_write() {
+  # $1 = candidate binary path
+  _stamp="$(_mcp_probe_stamp_path "$1")"
+  _stamp_dir="$(dirname "${_stamp}")"
+  mkdir -p "${_stamp_dir}" 2>/dev/null || return 1
+  _current="$(_mcp_probe_stat "$1")"
+  [ -n "${_current}" ] || return 1
+  printf '%s\n%s\n' "${_current}" "${_MCP_PROBE_WRAPPER_VERSION}" >"${_stamp}"
+}
+
+_mcp_probe_stamp_delete() {
+  # $1 = candidate binary path
+  rm -f "$(_mcp_probe_stamp_path "$1")" 2>/dev/null || true
+}
+
 mcp_probe_native() {
   probe_native="$1"
   if [ "${SIMPLE_MCP_SKIP_NATIVE_PROBE:-0}" = "1" ]; then
     return 0
   fi
+  # Cache hit: skip probe if stamp matches binary mtime+size+wrapper version
+  if _mcp_probe_stamp_valid "${probe_native}"; then
+    printf 'probe_cache_hit wrapper=simple_mcp_server native=%s\n' "${probe_native}" >>"${log_dir}/simple_mcp_startup.log"
+    return 0
+  fi
+  # Stale or missing stamp: delete it before probing so a probe failure leaves no stamp
+  _mcp_probe_stamp_delete "${probe_native}"
   probe_tmp="$(mktemp "${TMPDIR:-/tmp}/simple_mcp_probe.XXXXXX")" || probe_tmp=""
   if [ -z "${probe_tmp}" ]; then
     return 1
@@ -78,6 +124,8 @@ mcp_probe_native() {
     | timeout "${SIMPLE_MCP_NATIVE_PROBE_TIMEOUT:-5}" "${probe_native}" >"${probe_tmp}" 2>>"${log_dir}/simple_mcp_stderr.log" || true
   if grep -q '"play_wm_text_status"' "${probe_tmp}"; then
     rm -f "${probe_tmp}"
+    _mcp_probe_stamp_write "${probe_native}" || true
+    printf 'probe_cache_miss wrapper=simple_mcp_server native=%s stamp=written\n' "${probe_native}" >>"${log_dir}/simple_mcp_startup.log"
     return 0
   fi
   printf 'native_probe_failed wrapper=simple_mcp_server native=%s reason=missing_wm_text_tools fallback=next_candidate\n' "${probe_native}" >>"${log_dir}/simple_mcp_startup.log"
@@ -191,11 +239,50 @@ if [ "${1:-}" = "--json" ]; then
   exit 0
 fi
 
+_LSP_MCP_PROBE_WRAPPER_VERSION="simple_lsp_mcp_server:0.9.8"
+
+_lsp_mcp_probe_stat() {
+  stat -c '%Y %s' "$1" 2>/dev/null || stat -f '%m %z' "$1" 2>/dev/null || printf ''
+}
+
+_lsp_mcp_probe_stamp_path() {
+  _key="$(printf '%s' "$1" | tr -c 'A-Za-z0-9.' '_')"
+  printf '%s' "${repo_root}/.simple/cache/mcp-probe/${_key}.stamp"
+}
+
+_lsp_mcp_probe_stamp_valid() {
+  _stamp="$(_lsp_mcp_probe_stamp_path "$1")"
+  [ -f "${_stamp}" ] || return 1
+  _current="$(_lsp_mcp_probe_stat "$1")"
+  [ -n "${_current}" ] || return 1
+  _stored_stat="$(sed -n '1p' "${_stamp}" 2>/dev/null || printf '')"
+  _stored_ver="$(sed -n '2p' "${_stamp}" 2>/dev/null || printf '')"
+  [ "${_stored_stat}" = "${_current}" ] && [ "${_stored_ver}" = "${_LSP_MCP_PROBE_WRAPPER_VERSION}" ]
+}
+
+_lsp_mcp_probe_stamp_write() {
+  _stamp="$(_lsp_mcp_probe_stamp_path "$1")"
+  _stamp_dir="$(dirname "${_stamp}")"
+  mkdir -p "${_stamp_dir}" 2>/dev/null || return 1
+  _current="$(_lsp_mcp_probe_stat "$1")"
+  [ -n "${_current}" ] || return 1
+  printf '%s\n%s\n' "${_current}" "${_LSP_MCP_PROBE_WRAPPER_VERSION}" >"${_stamp}"
+}
+
+_lsp_mcp_probe_stamp_delete() {
+  rm -f "$(_lsp_mcp_probe_stamp_path "$1")" 2>/dev/null || true
+}
+
 mcp_probe_lsp_native() {
   probe_native="$1"
   if [ "${SIMPLE_LSP_MCP_SKIP_NATIVE_PROBE:-0}" = "1" ]; then
     return 0
   fi
+  if _lsp_mcp_probe_stamp_valid "${probe_native}"; then
+    printf 'probe_cache_hit wrapper=simple_lsp_mcp_server native=%s\n' "${probe_native}" >>"${log_dir}/simple_lsp_mcp_startup.log"
+    return 0
+  fi
+  _lsp_mcp_probe_stamp_delete "${probe_native}"
   probe_tmp="$(mktemp "${TMPDIR:-/tmp}/simple_lsp_mcp_probe.XXXXXX")" || probe_tmp=""
   if [ -z "${probe_tmp}" ]; then
     return 1
@@ -204,6 +291,8 @@ mcp_probe_lsp_native() {
     | timeout "${SIMPLE_LSP_MCP_NATIVE_PROBE_TIMEOUT:-3}" "${probe_native}" >"${probe_tmp}" 2>>"${log_dir}/simple_lsp_mcp_stderr.log" || true
   if grep -q '"lsp_definition"' "${probe_tmp}"; then
     rm -f "${probe_tmp}"
+    _lsp_mcp_probe_stamp_write "${probe_native}" || true
+    printf 'probe_cache_miss wrapper=simple_lsp_mcp_server native=%s stamp=written\n' "${probe_native}" >>"${log_dir}/simple_lsp_mcp_startup.log"
     return 0
   fi
   printf 'native_probe_failed wrapper=simple_lsp_mcp_server native=%s reason=missing_lsp_definition fallback=next_candidate\n' "${probe_native}" >>"${log_dir}/simple_lsp_mcp_startup.log"
