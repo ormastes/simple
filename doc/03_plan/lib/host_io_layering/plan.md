@@ -91,10 +91,11 @@ Wave 2 — consumers + audit (after Wave 1 lands):
   `doc/07_guide/app/mcp/startup_performance.md`.
 - T4b Lazy tool registry: `initialize` response must not require building
   151 tool schemas; build on first `tools/list` or serve a build-time table.
-- T5 Core-purity audit: rg gate that `src/lib/common/**` has no `rt_` and no
-  imports from nogc_* layers; fix violations (move to host/full layer).
-- T6 Docs: `doc/04_architecture/lib/host_io_layering/` + tldr; update
-  `lib_architecture.md` with the three-tier mapping table.
+- T5 DONE (2026-06-10): `scripts/check/check-core-lib-purity.shs` — ratchet
+  gate (impure externs + cross-tier imports in `common/`); 14-file baseline
+  in `core_purity_baseline.txt` (shrink-only); pure value intrinsics allowed.
+- T6 DONE (2026-06-10):
+  `doc/04_architecture/lib/host_io_layering/three_tier_lib.md` + tldr.
 
 Wave 3 — convergence (sequential):
 - T7 Migrate remaining app-level direct rt_* users (beyond MCP, e.g. other
