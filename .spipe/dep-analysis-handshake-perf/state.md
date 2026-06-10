@@ -1,0 +1,81 @@
+# Feature: dep-analysis-handshake-perf
+
+## Raw Request
+spipe dev: improve handshake speed (primitive lib + MCP lib) without hurting
+startup arch and features; research how and bootstrap if needed. Make a
+dependency tracking tool reusing compiler circular-dependency infra, with:
+1. fast analysis — per import: how many files linked + file list;
+2. normal analysis — per import: linked files + how much shared with other imports;
+3. deep analysis — native exe: binary bytes per code reference; SMF: which SMF
+   files each code reference loads; script: which interfaces are loaded and
+   script line counts;
+4. lazy parsing — parse only needed fn/class/fields; 2 modes (whole-file,
+   lazy); measure speedup; research existing lazy-parsing implementations.
+Then analyze lib dependencies and refactor to reduce them. Update doc, guide,
+spipe skill. jj commit + pull/rebase + push often. Divide tasks per model tier
+and run agents in parallel after deep research and plan.
+
+## Task Type
+feature
+
+## Refined Goal
+Cut MCP handshake-complete time (process start → initialize + tools/list
+answered) by attacking interpreter-side primitive-lib and import-load costs,
+preserving the existing startup architecture (interface cache, probe cache,
+lazy registry, dynSMF). Ship `bin/simple deps` (or equivalent) with fast /
+normal / deep analysis modes reusing the compiler's import-graph + cycle
+detection, plus a lazy-parsing mode in the parser with a measured comparison
+against whole-file parsing. Use the tool's output to drive a measurable
+dependency reduction in the std lib modules on the MCP handshake path.
+
+## Acceptance Criteria
+- AC-1: `bin/simple deps fast <file>` reports, per import in the file, the
+  transitive file count and file list; runs over src/app/mcp/main.spl without
+  error; circular dependencies are reported reusing existing compiler cycle
+  detection (no new graph algorithm duplicated).
+- AC-2: `bin/simple deps normal <file>` additionally reports, per import,
+  overlap with the file's other imports (shared transitive files count +
+  exclusive count), so "what does this import uniquely cost" is answerable.
+- AC-3: `bin/simple deps deep <file>` reports at least: script perspective —
+  interfaces loaded + total script lines pulled per import; SMF perspective —
+  which SMF artifacts a reference would load; native perspective — estimated
+  binary bytes attributable per module (symbol-size based, documented method).
+- AC-4: Parser supports two modes — whole-file (default, unchanged) and lazy
+  (interface/signature-first, bodies on demand) — behind an explicit flag/API;
+  an executable spec proves identical observable results on a representative
+  module set, and a benchmark records the speed difference in the doc.
+- AC-5: MCP handshake-complete (interpreter oracle: piped initialize +
+  tools/list via `bin/simple run src/app/mcp/main.spl`) improves measurably
+  vs the recorded 2026-06-10 baseline (init 476 ms / full 553 ms), via
+  dependency reduction and/or lazy parsing; `check-mcp-native-smoke.shs`
+  stays green; no startup-arch regressions (interface cache, probe cache,
+  rt-forward gates all still pass).
+- AC-6: Dependency analysis of std lib handshake-path modules is recorded and
+  at least one concrete dependency-reduction refactor lands, verified by the
+  new tool (before/after file counts in the doc).
+- AC-7: Docs updated: plan + guide for the deps tool, lazy parsing notes
+  (incl. web prior-art summary), startup_performance.md updated, spipe skill
+  updated with dependency-check guidance; tldrs for new docs.
+
+## Scope Exclusions
+- No fix for native codegen BUG-5/6/7 in this lane (separate Codex lane);
+  native deploy of migrated MCP servers stays blocked on it.
+- No new parallel SDK/framework; reuse mcp_sdk, loader, and compiler infra.
+- No semantic changes to import resolution order or module init semantics.
+
+## Phase
+implement
+
+## Log
+- dev (2026-06-10): Created state file with 7 acceptance criteria (type: feature).
+- research (2026-06-10): 5 parallel agents mapped (a) compiler import-graph
+  infra (graph.spl structs with algorithms deferred — our home; call_graph.spl
+  DFS pattern; resolve_module_path; CLI dispatch pattern), (b) parser/lazy
+  infra (treesitter outline + body_span + BlockSkipPolicy already exist;
+  deferred-module system; Rust seed dominates `bin/simple run` parse cost),
+  (c) handshake cost drivers (dap_bridge→debug.remote ~162 files; cli.log_modes
+  ~55; json.spl per-char substring hot loops), (d) deep-mode building blocks
+  (smf_reader_memory + elf_inspect + symbol_analysis + line_counter), (e) web
+  prior art doc written: doc/01_research/compiler/parser/lazy_parsing_prior_art.md.
+- plan (2026-06-10): doc/03_plan/compiler/dependency_analysis/plan.md — waves
+  W1-A..D (parallel Sonnet, disjoint scopes) + W2-A..C; design rules D1–D5.
