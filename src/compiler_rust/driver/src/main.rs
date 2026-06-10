@@ -567,6 +567,17 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         env_override: "SIMPLE_TODO_GEN_RUST",
         needs_rust_flags: &[],
     },
+    // Dependency analysis
+    CommandEntry {
+        name: "deps",
+        app_path: "src/app/deps/main.spl",
+        rust_handler: Handler::Custom(|_| {
+            eprintln!("error: deps app not found (install Simple or run from project root)");
+            1
+        }),
+        env_override: "",
+        needs_rust_flags: &[],
+    },
     CommandEntry {
         name: "check-dbs",
         app_path: "src/app/cli/check_dbs.spl",
@@ -1076,6 +1087,7 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
         && app_relative_path != "src/app/llm_process_gen/main.spl"
         && app_relative_path != "src/app/spipe_docgen/main.spl"
         && app_relative_path != "src/app/md_diagram_update/main.spl"
+        && app_relative_path != "src/app/deps/main.spl"
     {
         return None;
     }

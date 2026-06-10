@@ -1,0 +1,187 @@
+# Dependency Analysis Tool Specification
+#
+# Tests for bin/simple deps fast/normal <file>
+# Covers: direct-import parsing, transitive scanning, cycle detection, shared/exclusive counts.
+
+use std.spec.*
+use app.deps.scanner.{
+    _direct_imports,
+    _scan_file_recursive,
+    _parse_use_line,
+    find_cycles_in_file
+}
+
+val FIXTURE_DIR = "test/fixtures/deps"
+val ENTRY_FILE  = "test/fixtures/deps/entry.spl"
+val MCP_ENTRY   = "src/app/mcp/main.spl"
+
+describe "deps tool":
+
+    describe "_parse_use_line":
+
+        it "parses plain use statement":
+            val line1 = "use std.string." + "{" + "split" + "}"
+            val mods = _parse_use_line(line1)
+            expect(mods.len()).to_equal(1)
+            expect(mods[0]).to_equal("std.string")
+
+        it "parses export use statement":
+            val line2 = "export use std.io." + "{" + "print" + "}"
+            val mods = _parse_use_line(line2)
+            expect(mods.len()).to_equal(1)
+            expect(mods[0]).to_equal("std.io")
+
+        it "parses wildcard use statement":
+            val mods = _parse_use_line("use std.spec.*")
+            expect(mods.len()).to_equal(1)
+            expect(mods[0]).to_equal("std.spec")
+
+        it "parses relative use statement":
+            val line3 = "use .cycle_b." + "{" + "cycle_b_fn" + "}"
+            val mods = _parse_use_line(line3)
+            expect(mods.len()).to_equal(1)
+            expect(mods[0]).to_equal(".cycle_b")
+
+        it "returns empty list for non-use line":
+            val mods = _parse_use_line("fn foo() -> text:")
+            expect(mods.len()).to_equal(0)
+
+    describe "direct imports from entry fixture":
+
+        it "entry.spl has exactly 2 direct imports":
+            val directs = _direct_imports(ENTRY_FILE)
+            expect(directs.len()).to_equal(2)
+
+        it "entry.spl imports module_a.spl":
+            val directs = _direct_imports(ENTRY_FILE)
+            var found = false
+            for d in directs:
+                if d.contains("module_a"):
+                    found = true
+            expect(found).to_equal(true)
+
+        it "entry.spl imports module_b.spl":
+            val directs = _direct_imports(ENTRY_FILE)
+            var found = false
+            for d in directs:
+                if d.contains("module_b"):
+                    found = true
+            expect(found).to_equal(true)
+
+    describe "transitive scanning":
+
+        it "module_a transitive set includes common.spl":
+            val module_a = FIXTURE_DIR + "/module_a.spl"
+            var visited: {text: bool} = {}
+            visited = _scan_file_recursive(module_a, visited)
+            var found = false
+            for f in visited.keys():
+                if f.contains("common"):
+                    found = true
+            expect(found).to_equal(true)
+
+        it "module_a transitive set includes cycle files":
+            val module_a = FIXTURE_DIR + "/module_a.spl"
+            var visited: {text: bool} = {}
+            visited = _scan_file_recursive(module_a, visited)
+            var found_a = false
+            var found_b = false
+            var found_c = false
+            for f in visited.keys():
+                if f.contains("cycle_a"):
+                    found_a = true
+                if f.contains("cycle_b"):
+                    found_b = true
+                if f.contains("cycle_c"):
+                    found_c = true
+            expect(found_a).to_equal(true)
+            expect(found_b).to_equal(true)
+            expect(found_c).to_equal(true)
+
+        it "module_b transitive set includes common.spl":
+            val module_b = FIXTURE_DIR + "/module_b.spl"
+            var visited: {text: bool} = {}
+            visited = _scan_file_recursive(module_b, visited)
+            var found = false
+            for f in visited.keys():
+                if f.contains("common"):
+                    found = true
+            expect(found).to_equal(true)
+
+        it "module_b transitive set does NOT include cycle files":
+            val module_b = FIXTURE_DIR + "/module_b.spl"
+            var visited: {text: bool} = {}
+            visited = _scan_file_recursive(module_b, visited)
+            var found_cycle = false
+            for f in visited.keys():
+                if f.contains("cycle_"):
+                    found_cycle = true
+            expect(found_cycle).to_equal(false)
+
+    describe "cycle detection":
+
+        it "finds at least one cycle in entry fixture graph":
+            val cycles = find_cycles_in_file(ENTRY_FILE)
+            expect(cycles.len() > 0).to_equal(true)
+
+        it "cycle involves cycle_a, cycle_b, and cycle_c":
+            val cycles = find_cycles_in_file(ENTRY_FILE)
+            var found_cycle = false
+            for cyc_path in cycles:
+                var has_a = false
+                var has_b = false
+                var has_c = false
+                for node in cyc_path:
+                    if node.contains("cycle_a"):
+                        has_a = true
+                    if node.contains("cycle_b"):
+                        has_b = true
+                    if node.contains("cycle_c"):
+                        has_c = true
+                if has_a and has_b and has_c:
+                    found_cycle = true
+            expect(found_cycle).to_equal(true)
+
+    describe "shared module detection (normal mode)":
+
+        it "common.spl is reachable from both module_a and module_b":
+            val module_a = FIXTURE_DIR + "/module_a.spl"
+            val module_b = FIXTURE_DIR + "/module_b.spl"
+            var visited_a: {text: bool} = {}
+            visited_a = _scan_file_recursive(module_a, visited_a)
+            var visited_b: {text: bool} = {}
+            visited_b = _scan_file_recursive(module_b, visited_b)
+            # Count files shared between a and b
+            var shared_count = 0
+            for f in visited_a.keys():
+                if visited_b.has(f):
+                    shared_count = shared_count + 1
+            # common.spl is at minimum shared
+            expect(shared_count >= 1).to_equal(true)
+
+        it "common.spl specifically is in both sets":
+            val module_a = FIXTURE_DIR + "/module_a.spl"
+            val module_b = FIXTURE_DIR + "/module_b.spl"
+            var visited_a: {text: bool} = {}
+            visited_a = _scan_file_recursive(module_a, visited_a)
+            var visited_b: {text: bool} = {}
+            visited_b = _scan_file_recursive(module_b, visited_b)
+            var common_in_a = false
+            var common_in_b = false
+            for f in visited_a.keys():
+                if f.contains("common"):
+                    common_in_a = true
+            for f in visited_b.keys():
+                if f.contains("common"):
+                    common_in_b = true
+            expect(common_in_a).to_equal(true)
+            expect(common_in_b).to_equal(true)
+
+    describe "smoke: mcp main.spl has large dependency set":
+
+        it "mcp/main.spl transitive file count > 30":
+            var visited: {text: bool} = {}
+            visited = _scan_file_recursive(MCP_ENTRY, visited)
+            val all_keys = visited.keys()
+            val count = all_keys.len()
+            expect(count > 30).to_equal(true)
