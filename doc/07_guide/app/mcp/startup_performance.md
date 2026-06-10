@@ -66,6 +66,36 @@ deferred-body fast path (step 5) effective, because interfaces of thin
 wrappers are tiny and stable. The immediate cures for the current 2.7 s are
 step 2 (probe cache) and step 4 (lazy tool registry).
 
+## Wave-1 results (2026-06-10)
+
+Completed W1-C (primitive json perf) and W1-D (mcp import reduction).
+
+**W1-C — json hot-loop fix.**
+`mcp_sdk/core/json.spl` `find_text` delegated to native `index_of` (was
+O(n·m) per-char substring slices). Benchmark:
+`test/05_perf/mcp_json_perf_spec.spl` — 85× on 2 KB payload.
+
+**W1-D — mcp import narrowing.**
+`src/app/mcp/` narrowed `common.ui.access` hub → direct submodule imports;
+dead `dap_bridge` re-import removed.
+Result: loaded modules 61 → 49, module-load time 130 ms → 72 ms.
+Interpreter handshake: ~0.52 s (was ~0.55 s).
+
+Remaining handshake cost is Rust-seed process startup. Next attacks:
+- native deploy (blocked on BUG-5/6/7)
+- lazy parsing (W2-A, in progress)
+
+**Diagnosis knobs:**
+
+```bash
+SIMPLE_LOADER_TRACE=1 bin/simple run src/app/mcp/main.spl   # module load trace
+SIMPLE_PROFILE=1      bin/simple run src/app/mcp/main.spl   # interpreter profile
+bin/simple deps normal src/app/mcp/main.spl                 # exclusive/shared per import
+```
+
+`bin/simple deps` (`doc/07_guide/compiler/deps_tool.md`) is now the primary
+tool for diagnosing import graph costs before and after narrowing refactors.
+
 ## No-timeout policy
 
 Startup gates (5000 ms in `check-mcp-native-smoke.shs`) bound *startup*, never

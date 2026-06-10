@@ -32,12 +32,24 @@ Background: `doc/07_guide/runtime/process_kill_safety.md` (session-killing
       compiled fresh from `src/runtime/runtime_fork.c` by
       `compile_runtime_objects` whenever a native binary is linked, so every
       future native build picks up the guard from source automatically.
-- [ ] BUG: stage-4 (`seed native-build --backend cranelift --entry
-      src/app/cli/main.spl`) produces a 15.8 MB binary that exec-loops on
-      `simple <file.spl>` / `simple run` (thousands of self-respawns;
-      `--version`/`--help` work). Artifact kept at
-      `build/bootstrap/full/x86_64-unknown-linux-gnu/simple`. Fix the
-      full-CLI self-exec/wrapper dispatch before the next self-hosted deploy.
+- [x] BUG (fixed 2026-06-10): stage-4 full-CLI binary exec-looped on
+      `simple <file.spl>` / `simple run` / `-c`. Root cause:
+      `_cli_driver_binary()` returns `bin/simple` and
+      `cli_run_file`/`cli_run_code`/`run_native_build_bootstrap` spawn it —
+      when the compiled CLI IS `bin/simple`, that recurses without bound.
+      Fix: self-exec guard (`test /proc/<pid>/exe -ef bin/simple` → return
+      `""`) with in-process fallbacks (`interpret_file`, temp-file interpret
+      for `-c`, direct `rt_native_build`). Verified in docker
+      (`--pids-limit`): no respawns (proc count stays at 3).
+- [ ] BUG (follow-up, exposed by the fix): the stage-4 cranelift binary's
+      in-process `interpret_file` path SIGSEGVs (exit 139) on a trivial
+      `.spl` — the subprocess delegation was masking a real
+      cranelift-codegen defect in the embedded compiler pipeline
+      (`--version`/`--help` fine). Same LIM-010 family as the stage-3
+      self-host failure. Until fixed, self-hosted deploys stay blocked and
+      `bin/simple` remains the Rust seed. Artifact:
+      `build/bootstrap/full/x86_64-unknown-linux-gnu/simple` (16.1 MB,
+      rebuilt with the guard).
 - [ ] After next multi-day parallel-agent session: confirm no recurrence of
       the journal signature (`Activating special unit exit.target` on the
       user manager outside reboots).

@@ -21,5 +21,9 @@ startup_ladder {
   the wrapper.
 - Startup gates bound startup, never idle: no read timeouts on MCP stdio.
 
+Wave-1 wins (2026-06-10): json `find_text` → native `index_of` (85×, 2 KB);
+import narrowing 61→49 modules, 130→72 ms load; handshake ~0.52 s (was ~0.55 s).
+Diagnosis: `bin/simple deps normal <entry>` — see `deps_tool.md`.
+
 Full guide: `startup_performance.md`. Layering plan:
 `doc/03_plan/lib/host_io_layering/plan.md`.

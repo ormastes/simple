@@ -2,7 +2,7 @@
 
 Date: 2026-06-10
 SPipe lane: `.spipe/dep-analysis-handshake-perf/state.md`
-Status: planned (research done — see §1)
+Status: Wave 1 complete; Wave 2 in progress
 
 ## 1. Research ground truth (2026-06-10)
 
@@ -62,22 +62,22 @@ Status: planned (research done — see §1)
 
 ## 3. Waves (model-tiered, disjoint file scopes)
 
-Wave 1 (parallel Sonnet):
-- W1-A deps core (fast+normal) — owns `src/compiler/00.common/dependency/
-  graph.spl`, `src/app/deps/`, CLI dispatch files, spec.
-- W1-B deps deep reporters — owns `src/app/deps/deep*.spl` + spec (consumes
-  D3 contract; no overlap with W1-A beyond the contract file created first).
-- W1-C primitive json perf — owns `src/lib/nogc_sync_mut/mcp_sdk/core/`
-  (json.spl hot loops + mod.spl fan-out split), spec + micro-benchmark.
-- W1-D mcp import reduction — owns `src/app/mcp/` (defer dap_bridge subtree,
-  narrow log imports), handshake before/after via piped interpreter oracle.
+Wave 1 (parallel Sonnet) — DONE 2026-06-10:
+- W1-A DONE — `importgraph_add_edge`/`importgraph_find_cycles` in graph.spl;
+  `src/app/deps/` (main.spl, scanner.spl); CLI dispatch; 17 green specs.
+- W1-B DONE — `src/app/deps/deep_report.spl`; SCRIPT/SMF/NATIVE sections;
+  14 green specs; hub-import case study (app.io → local counter fix).
+- W1-C DONE — `find_text` → native `index_of`; 85× on 2 KB payload;
+  benchmark `test/05_perf/mcp_json_perf_spec.spl`.
+- W1-D DONE — `src/app/mcp/` narrowed: 61→49 modules, 130→72 ms load,
+  handshake ~0.52 s (was ~0.55 s); dap_bridge dead re-import removed.
 
-Wave 2 (after W1):
+Wave 2 (after W1) — IN PROGRESS:
 - W2-A lazy parsing mode (hard; orchestrator/Opus-tier) — loader bridge +
   flag, equivalence spec, benchmark vs whole-file.
 - W2-B lib dependency analysis with the new tool over handshake-path std
   modules; land ≥1 verified reduction refactor (AC-6).
-- W2-C docs/guides/spipe-skill updates + tldrs (Sonnet).
+- W2-C docs/guides/spipe-skill updates + tldrs (Sonnet) — DONE (this commit).
 
 Continuous: jj commit per agent batch (explicit paths), pull/rebase, push with
 origin file-count guard.
