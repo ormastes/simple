@@ -95,6 +95,19 @@ move every in-repo MCP server onto it.
 - AC-5 No duplicated framing/json/registry code left in src/app/* (semantic
   dup scan over migrated apps).
 
+## Known interpreter issues hit during Wave A (concrete bugs, not folklore)
+
+- BUG-1 `match Some(i): idx = i` silently fails to bind/assign to an outer
+  var in interpreter mode (no error, stale value). Hit in A4; worked around
+  with `== nil` guards + direct-return unwrap helpers and `has_method`
+  string dispatch. Needs an interpreter-lane fix + regression spec.
+- BUG-2 `rt_io_udp_bind` not registered in interpreter mode via the
+  `nogc_async_mut → nogc_sync_mut/io/udp` chain (see host_io plan §4a).
+- BUG-3 `BufferTransport.read_message` trait-impl shape: a `fn` stub
+  satisfying the trait while the real logic sat in a separate `me` method
+  compiled clean but never executed — trait conformance does not flag
+  unreachable split impls. Caught only by the spec's absolute oracle.
+
 ## Ordering & risks
 
 - A and B are independent; C depends on A; D last. C1 is the riskiest
