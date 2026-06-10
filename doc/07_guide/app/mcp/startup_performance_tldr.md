@@ -23,6 +23,9 @@ startup_ladder {
 
 Wave-1 wins (2026-06-10): json `find_text` → native `index_of` (85×, 2 KB);
 import narrowing 61→49 modules, 130→72 ms load; handshake ~0.52 s (was ~0.55 s).
+Wave-2 wins (2026-06-10): closure reductions via `deps deep` — std.log,
+cli.log_modes, dap_bridge→debug.remote all localized; `mcp_startup_ms`
+2707 → ~1310. Apps use `std.nogc_sync_mut.io.stderr_ops`, never raw `rt_*`.
 Diagnosis: `bin/simple deps normal <entry>` — see `deps_tool.md`.
 
 Full guide: `startup_performance.md`. Layering plan:

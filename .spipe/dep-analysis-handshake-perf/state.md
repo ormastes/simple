@@ -101,3 +101,11 @@ implement
   files, 9,031→8,339 lines, ~309→~276 KB; mcp_debug_state 42/42.
   Pre-existing unrelated breakage noted: mcp_protocol_spec imports
   nonexistent std.common.mcp_helpers.
+- implement (2026-06-10): AC-5 VERIFIED post-W2-B2 — W2-B2's raw rt_stderr
+  externs initially tripped mcp_app_direct_rt_valid=false; replaced with
+  new 12-line std facade src/lib/nogc_sync_mut/io/stderr_ops.spl. Re-ran
+  check-mcp-native-smoke.shs: exit 0, all six direct-rt gates true,
+  mcp_startup_ms 2707 → 1309–1314 (< 5000 gate), framing valid, 151
+  tools. Final closure 38 files (deps deep). Guide updated
+  (startup_performance.md Wave-2 section). Remaining for feature: AC-4
+  lazy parsing (W2-A2 bridge in flight + W2-A3 wiring).

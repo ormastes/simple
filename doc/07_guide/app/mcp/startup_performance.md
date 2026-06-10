@@ -96,6 +96,25 @@ bin/simple deps normal src/app/mcp/main.spl                 # exclusive/shared p
 `bin/simple deps` (`doc/07_guide/compiler/deps_tool.md`) is now the primary
 tool for diagnosing import graph costs before and after narrowing refactors.
 
+## Wave-2 results (2026-06-10, W2-B2 closure reductions)
+
+Three import reductions landed on the `src/app/mcp/main.spl` handshake
+closure, found and verified with `bin/simple deps deep`:
+
+1. `std.log` (659 code lines for 3 `error()` calls) → local `_mcp_error`
+   over the new `std.nogc_sync_mut.io.stderr_ops` facade (12 lines; keeps
+   the direct-rt gate clean — apps must not declare `rt_*` externs).
+2. `std.cli.log_modes` (174 lines) → local `src/app/mcp/mcp_log_options.spl`.
+3. `dap_bridge → std.nogc_sync_mut.debug.remote.session_model` (561 lines,
+   planned in Wave 1 but never landed) → local `src/app/mcp/dap_types.spl`.
+
+Closure: 39 → 38 files, 9,031 → ~8,350 code lines, ~309 → ~276 KB est.
+native. Measured via `scripts/check/check-mcp-native-smoke.shs`:
+`mcp_startup_ms` 2707 → **1309–1314** (warm, exit 0, all six direct-rt
+gates true, framing valid, 151 tools). The pattern generalizes: run
+`bin/simple deps deep <entry>` on any tool-server entry and inline or
+localize single-consumer subtrees before reaching for caching.
+
 ## No-timeout policy
 
 Startup gates (5000 ms in `check-mcp-native-smoke.shs`) bound *startup*, never
