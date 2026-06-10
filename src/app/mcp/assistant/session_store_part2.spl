@@ -1,12 +1,28 @@
 # Part 2 of src/app/mcp/assistant/session_store.spl
-use app.mcp.assistant.session_store.*
 # Assistant Core File-Backed Store
 #
 # Persists assistant sessions, timeline events, notifications, and child-task
 # metadata under .build/llm_dashboard/assistant so the dashboard collector can
 # consume the same files without a live MCP bridge.
 
-use ..main_lazy_json.{extract_field, js, jp, LB, RB}
+use .session_store_helpers.{
+    ASSISTANT_STORE_ROOT,
+    _assistant_text_list_append_unique,
+    _assistant_child_tasks_append,
+    _assistant_sort_sessions_by_updated_at,
+    assistant_store_write_json, assistant_store_append_jsonl,
+    assistant_store_session_path, assistant_store_timeline_path,
+    assistant_store_notifications_path, assistant_store_sessions_dir,
+    assistant_store_ensure_dirs,
+    assistant_store_session_record_from_json_text,
+    assistant_store_session_record_to_json_text,
+    assistant_store_timeline_record_to_json_text
+}
+use .session_store_part1.{
+    _assistant_session_merge_timeline,
+    _assistant_session_merge_notifications,
+    _assistant_session_finalize
+}
 use .types.{
     AssistantSessionRecord, AssistantTimelineRecord, AssistantChildTaskRecord,
     assistant_first_non_empty, assistant_now_ms, assistant_generate_session_id,
@@ -14,69 +30,7 @@ use .types.{
     assistant_timeline_title, assistant_timeline_detail, assistant_session_summary
 }
 
-use std.io_runtime.{mkdir_p, file_exists, file_read, file_write, list_dir}
-
-fn _assistant_text_list_append_unique(items: [text], value: text) -> [text]:
-    if value.trim() == "":
-        return items
-    if _assistant_text_list_contains(items, value):
-        return items
-    var out: [text] = []
-    for item in items:
-        out.push(item)
-    out.push(value)
-    out
-
-fn _assistant_child_tasks_append(items: [AssistantChildTaskRecord], value: AssistantChildTaskRecord) -> [AssistantChildTaskRecord]:
-    var out: [AssistantChildTaskRecord] = []
-    var found = false
-    for item in items:
-        if value.task_id != "" and item.task_id == value.task_id:
-            out.push(value)
-            found = true
-        else:
-            out.push(item)
-    if not found:
-        out.push(value)
-    out
-
-fn _assistant_text_list_contains(items: [text], value: text) -> bool:
-    for item in items:
-        if item == value:
-            return true
-    false
-
-fn _assistant_sort_sessions_by_updated_at(sessions: [AssistantSessionRecord]) -> [AssistantSessionRecord]:
-    var sorted: [AssistantSessionRecord] = []
-    for session in sessions:
-        sorted = _assistant_insert_session_sorted(sorted, session)
-    sorted
-
-fn _assistant_insert_session_sorted(sorted: [AssistantSessionRecord], session: AssistantSessionRecord) -> [AssistantSessionRecord]:
-    if sorted.len() == 0:
-        return [session]
-    var out: [AssistantSessionRecord] = []
-    var inserted = false
-    for item in sorted:
-        if not inserted and session.updated_at_ms > item.updated_at_ms:
-            out.push(session)
-            inserted = true
-        out.push(item)
-    if not inserted:
-        out.push(session)
-    out
-
-fn assistant_store_write_json(path: text, value: text) -> bool:
-    file_write(path, value)
-
-fn assistant_store_append_jsonl(path: text, line: text) -> bool:
-    var content = ""
-    if file_exists(path):
-        content = file_read(path)
-    if content != "" and not content.ends_with("\n"):
-        content = content + "\n"
-    content = content + line + "\n"
-    file_write(path, content)
+use std.io_runtime.{file_exists, file_read, list_dir}
 
 # =========================================================================
 # Public Root-Based API
@@ -88,30 +42,8 @@ fn assistant_store_resolve_root(root: text) -> text:
     else:
         root
 
-fn assistant_store_sessions_dir(root: text) -> text:
-    "{assistant_store_resolve_root(root: root)}/sessions"
-
-fn assistant_store_timelines_dir(root: text) -> text:
-    "{assistant_store_resolve_root(root: root)}/timelines"
-
-fn assistant_store_notifications_dir(root: text) -> text:
-    "{assistant_store_resolve_root(root: root)}/notifications"
-
-fn assistant_store_session_path(root: text, session_id: text) -> text:
-    "{assistant_store_sessions_dir(root: root)}/{session_id}.json"
-
-fn assistant_store_timeline_path(root: text, session_id: text) -> text:
-    "{assistant_store_timelines_dir(root: root)}/{session_id}.jsonl"
-
-fn assistant_store_notifications_path(root: text, session_id: text) -> text:
-    "{assistant_store_notifications_dir(root: root)}/{session_id}.jsonl"
-
-fn assistant_store_ensure_dirs(root: text) -> bool:
-    mkdir_p(assistant_store_sessions_dir(root: root)) and mkdir_p(assistant_store_timelines_dir(root: root)) and mkdir_p(assistant_store_notifications_dir(root: root))
-
 fn assistant_store_create_session(root: text, session: AssistantSessionRecord) -> AssistantSessionRecord?:
     var normalized = session
-    val session_id = normalized.session_id
     if normalized.created_at_ms <= 0:
         normalized.created_at_ms = assistant_now_ms()
     if normalized.updated_at_ms <= 0:
