@@ -107,6 +107,13 @@ move every in-repo MCP server onto it.
   satisfying the trait while the real logic sat in a separate `me` method
   compiled clean but never executed — trait conformance does not flag
   unreachable split impls. Caught only by the spec's absolute oracle.
+- BUG-4 native codegen: `bin/simple compile src/app/simple_lsp_mcp/main.spl`
+  fails with `codegen: undefined symbol: range` — pre-existing on HEAD
+  (confirmed before the C2 migration). Blocks rebuilding the native MCP
+  artifacts; deployed binaries stay at their last good build until fixed.
+  Wave C execution oracle until then: piped interpreter-mode handshake
+  (`printf <initialize+tools/list> | bin/simple run <app>/main.spl`),
+  which works (verified 2026-06-10: 11/11 tools, framed output, exit 0).
 
 ## Ordering & risks
 
