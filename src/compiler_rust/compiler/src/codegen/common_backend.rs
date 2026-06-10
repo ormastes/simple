@@ -1600,7 +1600,9 @@ impl<M: Module> CodegenBackend<M> {
             .map_err(|e| BackendError::ModuleError(format!("declare __module_init: {e}")))?;
         self.func_ids.insert(init_name.clone(), func_id);
 
-        let string_new_id = if init_strings.is_empty() {
+        let needs_string_new =
+            !init_strings.is_empty() || init_arrays.values().any(|init| init.string_values.is_some());
+        let string_new_id = if !needs_string_new {
             None
         } else {
             Some(
@@ -1734,8 +1736,56 @@ impl<M: Module> CodegenBackend<M> {
         let mut sorted_arrays: Vec<_> = init_arrays.iter().collect();
         sorted_arrays.sort_by_key(|(name, _)| (*name).clone());
         for (global_name, init) in &sorted_arrays {
-            let capacity = builder.ins().iconst(types::I64, init.values.len() as i64);
-            let array_rv = if init.element_type == TypeId::U8 {
+            let element_count = init
+                .string_values
+                .as_ref()
+                .map(|s| s.len())
+                .unwrap_or(init.values.len());
+            let capacity = builder.ins().iconst(types::I64, element_count as i64);
+            let array_rv = if let Some(strings) = &init.string_values {
+                // String-literal elements: allocate each via rt_string_new and push.
+                let new_ref = self.module.declare_func_in_func(array_new_id.unwrap(), builder.func);
+                let call_inst = builder.ins().call(new_ref, &[capacity]);
+                let array = builder.inst_results(call_inst)[0];
+                let push_ref = self.module.declare_func_in_func(array_push_id.unwrap(), builder.func);
+                let string_new_ref =
+                    self.module.declare_func_in_func(string_new_id.unwrap(), builder.func);
+                for (idx, string_val) in strings.iter().enumerate() {
+                    let bytes = string_val.as_bytes();
+                    let data_name = format!(".Linit_arr_str_{:016x}", {
+                        let mut h: u64 = 0xcbf29ce484222325;
+                        for &b in global_name.as_bytes() {
+                            h ^= b as u64;
+                            h = h.wrapping_mul(0x100000001b3);
+                        }
+                        h ^= idx as u64;
+                        h = h.wrapping_mul(0x100000001b3);
+                        for &b in bytes {
+                            h ^= b as u64;
+                            h = h.wrapping_mul(0x100000001b3);
+                        }
+                        h
+                    });
+                    let data_id = self
+                        .module
+                        .declare_data(&data_name, cranelift_module::Linkage::Local, false, false)
+                        .map_err(|e| {
+                            BackendError::ModuleError(format!("declare array string data: {e}"))
+                        })?;
+                    {
+                        let mut data_desc = cranelift_module::DataDescription::new();
+                        data_desc.define(bytes.to_vec().into_boxed_slice());
+                        let _ = self.module.define_data(data_id, &data_desc);
+                    }
+                    let data_ref = self.module.declare_data_in_func(data_id, builder.func);
+                    let str_ptr = builder.ins().global_value(types::I64, data_ref);
+                    let str_len = builder.ins().iconst(types::I64, bytes.len() as i64);
+                    let call_inst = builder.ins().call(string_new_ref, &[str_ptr, str_len]);
+                    let string_rv = builder.inst_results(call_inst)[0];
+                    builder.ins().call(push_ref, &[array, string_rv]);
+                }
+                array
+            } else if init.element_type == TypeId::U8 {
                 let new_ref = self
                     .module
                     .declare_func_in_func(byte_array_new_id.unwrap(), builder.func);

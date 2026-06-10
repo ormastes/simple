@@ -131,6 +131,9 @@ impl HirDomainBlock {
 pub struct HirGlobalArrayInit {
     pub element_type: TypeId,
     pub values: Vec<i64>,
+    /// String-literal elements (e.g. `var slot: [text] = [""]`). When set,
+    /// `values` is empty and module init pushes rt_string_new results instead.
+    pub string_values: Option<Vec<String>>,
 }
 
 /// HIR module

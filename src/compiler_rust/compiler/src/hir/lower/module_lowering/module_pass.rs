@@ -87,6 +87,31 @@ fn try_const_array_eval(expr: &Expr) -> Option<Vec<i64>> {
     }
 }
 
+fn const_string_of(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::String(s) => Some(s.clone()),
+        Expr::FString { parts, .. } => {
+            if parts.is_empty() {
+                return Some(String::new());
+            }
+            if parts.len() == 1 {
+                if let ast::FStringPart::Literal(val) = &parts[0] {
+                    return Some(val.clone());
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn try_const_string_array_eval(expr: &Expr) -> Option<Vec<String>> {
+    match expr {
+        Expr::Array(elements) if !elements.is_empty() => elements.iter().map(const_string_of).collect(),
+        _ => None,
+    }
+}
+
 fn record_const_array_init(
     map: &mut HashMap<String, HirGlobalArrayInit>,
     name: &str,
@@ -94,12 +119,22 @@ fn record_const_array_init(
     types: &crate::hir::types::TypeRegistry,
     expr: Option<&Expr>,
 ) {
+    let element_type = match types.get(ty) {
+        Some(HirType::Array { element, .. }) => *element,
+        _ => ty,
+    };
     if let Some(values) = expr.and_then(try_const_array_eval) {
-        let element_type = match types.get(ty) {
-            Some(HirType::Array { element, .. }) => *element,
-            _ => ty,
-        };
-        map.insert(name.to_string(), HirGlobalArrayInit { element_type, values });
+        map.insert(
+            name.to_string(),
+            HirGlobalArrayInit { element_type, values, string_values: None },
+        );
+    } else if let Some(strings) = expr.and_then(try_const_string_array_eval) {
+        // `var slot: [text] = ["..."]` — string-literal elements need runtime
+        // rt_string_new allocation; module init pushes them via string_values.
+        map.insert(
+            name.to_string(),
+            HirGlobalArrayInit { element_type, values: Vec::new(), string_values: Some(strings) },
+        );
     }
 }
 
