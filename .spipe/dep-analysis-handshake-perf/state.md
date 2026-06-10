@@ -79,3 +79,15 @@ implement
   prior art doc written: doc/01_research/compiler/parser/lazy_parsing_prior_art.md.
 - plan (2026-06-10): doc/03_plan/compiler/dependency_analysis/plan.md — waves
   W1-A..D (parallel Sonnet, disjoint scopes) + W2-A..C; design rules D1–D5.
+- implement (2026-06-10): Wave 1 complete — W1-A deps fast/normal + graph
+  algorithms (17 specs), W1-B deep reporters (14 specs), W1-C find_text 85×,
+  W1-D mcp closure 61→49 modules / 130→72 ms / handshake ~0.52 s. AC-1, AC-2,
+  AC-3 satisfied; AC-7 docs landed (deps_tool guide + tldr).
+- implement (2026-06-10): Wave 2 replanned into small parallel tasks
+  (plan.md §3): phase 1 NEW-FILES-ONLY agents running now — W2-A1 outline
+  equivalence + perf specs (Sonnet), W2-A2 lazy loader bridge module
+  `module_loader_lazy.spl` behind SIMPLE_LAZY_PARSE=1 (full-strength, wiring
+  diff deferred), W2-B1 read-only deps analysis of handshake closure for
+  AC-6 candidates (Sonnet). Phase 2 (after E0410 export sweeps land):
+  W2-B2 reduction refactor (AC-6), W2-A3 loader wiring + equivalence run
+  (AC-4), W2-D handshake re-measure (AC-5).

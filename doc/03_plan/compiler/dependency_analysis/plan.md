@@ -72,12 +72,36 @@ Wave 1 (parallel Sonnet) — DONE 2026-06-10:
 - W1-D DONE — `src/app/mcp/` narrowed: 61→49 modules, 130→72 ms load,
   handshake ~0.52 s (was ~0.55 s); dap_bridge dead re-import removed.
 
-Wave 2 (after W1) — IN PROGRESS:
-- W2-A lazy parsing mode (hard; orchestrator/Opus-tier) — loader bridge +
-  flag, equivalence spec, benchmark vs whole-file.
-- W2-B lib dependency analysis with the new tool over handshake-path std
-  modules; land ≥1 verified reduction refactor (AC-6).
-- W2-C docs/guides/spipe-skill updates + tldrs (Sonnet) — DONE (this commit).
+Wave 2 (after W1) — IN PROGRESS (replanned 2026-06-10 into small parallel
+tasks; phase 1 tasks touch NEW files only so they can run alongside the
+E0410 export-sweep agents that own existing src/compiler, src/app, src/lib
+files; shared-file wiring edits land in the orchestrator integration pass):
+
+Phase 1 (parallel now):
+- [ ] W2-A1 (Sonnet, new test files only) — lazy-parse groundwork specs:
+      (a) equivalence spec: treesitter outline (`fast_mode`/`body_span`)
+      signature extraction vs full parse over a fixed sample of real
+      modules — same fn/class/export surface; (b) parse-time benchmark
+      outline-vs-full (pattern: `test/05_perf/mcp_json_perf_spec.spl`).
+- [ ] W2-A2 (full-strength, new module only) — lazy loader bridge in NEW
+      `src/compiler/10.frontend/core/interpreter/module_loader_lazy.spl`:
+      outline-parse module, register body spans for on-first-call
+      materialization via the existing deferred-module system, gated by
+      `SIMPLE_LAZY_PARSE=1`; whole-file path untouched. Returns exact
+      wiring diff for `module_loader_core.spl` (applied in integration).
+- [ ] W2-B1 (Sonnet, read-only) — run `bin/simple deps normal|deep` over
+      the handshake closure (`src/app/mcp/main.spl`); rank reduction
+      candidates by files/bytes removed; verify top candidates by actual
+      symbol-usage grep; return top 3 with exact refactor steps.
+
+Phase 2 (integration, after E0410 sweeps land):
+- [ ] W2-B2 (Sonnet) — land ≥1 verified reduction refactor from W2-B1
+      (AC-6); re-run deps to show the delta.
+- [ ] W2-A3 (orchestrator) — apply lazy-mode wiring to
+      `module_loader_core.spl`; run equivalence spec + benchmark (AC-4).
+- [ ] W2-D (orchestrator) — re-measure handshake-complete budget (AC-5);
+      advance `.spipe/dep-analysis-handshake-perf` phase.
+- W2-C docs/guides/spipe-skill updates + tldrs (Sonnet) — DONE.
 
 Continuous: jj commit per agent batch (explicit paths), pull/rebase, push with
 origin file-count guard.
