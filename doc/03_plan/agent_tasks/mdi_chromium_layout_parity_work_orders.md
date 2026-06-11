@@ -88,6 +88,14 @@ Prove and harden the requested GUI stack:
   `[host-input] no-host-mouse-packets` for `q35` + HMP mouse events, `pc` + HMP
   mouse events, and `q35` + QMP `input-send-event`, so host-QMP mouse input is
   still not reaching the guest input path.
+  Timing review update (2026-06-11): the guest PS/2 polling window was extended
+  from `1500000` to `20000000` loop iterations and now emits
+  `[host-input] poll-window-start` / `[host-input] poll-window-end` markers. The
+  strict wrapper captured the after-frame while the log showed
+  `[host-input] poll-window-start` and no poll-window end, yet still measured
+  `changed_bytes=0` with identical before/after hashes. This makes a missed
+  guest polling window unlikely; the remaining failure is that injected host
+  pointer events are not delivered to the guest-visible input device path.
   Bugs:
   `doc/08_tracking/bug/simpleos_wm_qmp_source_target_missing_2026-06-11.md` and
   `doc/08_tracking/bug/simpleos_wm_host_qmp_mouse_input_no_framebuffer_delta_2026-06-11.md`.

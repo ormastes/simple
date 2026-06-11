@@ -74,10 +74,19 @@ Additional matrix:
 q35 + HMP mouse_move/mouse_button       -> [host-input] no-host-mouse-packets
 pc  + HMP mouse_move/mouse_button       -> [host-input] no-host-mouse-packets
 q35 + QMP input-send-event rel/button   -> [host-input] no-host-mouse-packets
+q35 + HMP with extended poll window     -> [host-input] poll-window-start, changed_bytes=0
 ```
 
 This narrows the remaining work away from the current framebuffer wrapper and
 toward a guest-visible QEMU pointer device path.
+
+Timing follow-up: the extended-poll run increased `_input_wait_iters()` from
+`1500000` to `20000000` in `gui_entry_engine2d.spl` and added explicit
+`poll-window-start` / `poll-window-end` serial markers. The wrapper captured
+the after-frame before `poll-window-end` appeared, so host injection occurred
+while the guest was still polling. The before/after framebuffer hashes remained
+identical. This does not prove drag handling; it only reduces the likelihood
+that the previous failure was caused by a too-short guest polling window.
 
 ## Required Fix
 
